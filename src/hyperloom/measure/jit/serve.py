@@ -33,6 +33,7 @@ import os
 import re
 import stat
 import tarfile
+import tempfile
 import time
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
@@ -91,9 +92,10 @@ WAIT_PHASE = "jit_wait"
 #: few hundred MB takes under a minute per kind.
 WAIT_SEC = 300.0
 #: The bounds of what crosses: a want is a few hundred bytes; one tar is one ``write_file`` request, which the platform
-#: bounds in time, so a kind whose snapshot is larger is not served (it builds cold); the most files one tar holds.
+#: bounds in time, so a kind whose snapshot is larger is not served (it builds cold); the most files one tar holds. A
+#: DeepSeek aiter JIT cache passes 256 MiB, so a kind may send up to 1 GiB.
 MAX_WANT_BYTES = 16 * 1024
-MAX_TAR_BYTES = 256 * 1024**2
+MAX_TAR_BYTES = 1024**3
 MAX_TAR_FILES = 20_000
 _BLOB_NAME = re.compile(r"blobs/(?P<prefix>[0-9a-f]{2})/(?P=prefix)[0-9a-f]{62}")
 _TAR_MODE = 0o400
@@ -293,19 +295,22 @@ def pack(store: DirJitStore, kind: CacheKind, key: str) -> Packed | None:
 
 
 def _pack_snapshot(store: DirJitStore, snapshot: Snapshot) -> Packed | None:
-    buffer = io.BytesIO()
+    """The tar is built in an unnamed file in the system temp dir (gone once closed, on every path), and read back once:
+    ``write_file`` takes bytes, so the upload holds one copy of it in memory, not a growing buffer and its copy."""
     name = snapshot.sha256()
     root = fsafe.open_root(store.root)
     try:
-        with tarfile.open(fileobj=buffer, mode="w:", format=tarfile.PAX_FORMAT) as archive:
-            _add(archive, f"{SNAPSHOTS_DIR}/{snapshot.kind}/{snapshot.key}/{name}.json", snapshot.to_bytes())
-            for sha256, size in sorted({(f.sha256, f.size) for f in snapshot.files.values()}):
-                _add(archive, f"{BLOBS_DIR}/{sha256[:2]}/{sha256}", _proved_blob(root, sha256, size))
+        with tempfile.TemporaryFile() as spool:
+            with tarfile.open(fileobj=spool, mode="w:", format=tarfile.PAX_FORMAT) as archive:
+                _add(archive, f"{SNAPSHOTS_DIR}/{snapshot.kind}/{snapshot.key}/{name}.json", snapshot.to_bytes())
+                for sha256, size in sorted({(f.sha256, f.size) for f in snapshot.files.values()}):
+                    _add(archive, f"{BLOBS_DIR}/{sha256[:2]}/{sha256}", _proved_blob(root, sha256, size))
+            if spool.tell() > MAX_TAR_BYTES:
+                return None
+            spool.seek(0)
+            data = spool.read()
     finally:
         os.close(root)
-    data = buffer.getvalue()
-    if len(data) > MAX_TAR_BYTES:
-        return None
     return Packed(data, name, len(snapshot.files))
 
 
