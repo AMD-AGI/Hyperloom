@@ -227,6 +227,8 @@ _NO_SOURCE_CHANGES_CONTRACT: tuple[str, ...] = (
     "server arguments and environment variables. `integrate_patch` skips any",
     "round that carries a patch, an upstream PR, a tuned artifact, a rewrite",
     "switch, setup commands or another runtime (`skipped_reason=no_source_changes`).",
+    "A setting whose value names a file under the session directory is such a",
+    "change: that round is skipped, and an `explore` with such a variant is denied.",
     "Dispatch specialists for configuration proposals and research, never with",
     "`mode='patch'` to author a source change. This overrides the **Config vs",
     "source patch** guidance below: after config-only rounds, search the",

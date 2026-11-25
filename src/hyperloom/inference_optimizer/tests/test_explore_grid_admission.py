@@ -12,7 +12,11 @@ import pytest
 from hyperloom.inference_optimizer.protocol.intent import Intent, IntentType
 from hyperloom.orchestrator.actions.executors.explore_prefilter.grid_payload import runnable_grid_variants
 from hyperloom.orchestrator.loop.coordinator import Coordinator
-from hyperloom.orchestrator.loop._explore_grid import EXPLORE_GRID_MISSING, explore_grid_denial
+from hyperloom.orchestrator.loop._explore_grid import (
+    EXPLORE_GRID_MISSING,
+    EXPLORE_NAMES_SESSION_FILE,
+    explore_grid_denial,
+)
 from hyperloom.orchestrator.state.pending_proposal import PendingProposal
 from hyperloom.orchestrator.roles import Backend
 from hyperloom.orchestrator.tests.mock_backend import MockBackend, ScriptedPlan
@@ -206,3 +210,34 @@ def test_the_gate_answers_only_for_explore():
     assert explore_grid_denial("profile", {}, None) is None
     assert explore_grid_denial("explore", {"grid": list(_GRID)}, None) is None
     assert explore_grid_denial("explore", {}, None) is not None
+
+
+class TestAVariantNamingASessionFile:
+    """``--no-source-changes``: a grid is the other way a setting reaches a kept step, so the file rule holds there."""
+
+    @staticmethod
+    def _grid(session_dir) -> list[dict[str, Any]]:
+        table = session_dir / "runs" / "specialist" / "spec-1" / "worktree" / "scratch" / "tuned.csv"
+        return [
+            {"name": "plain", "extra_server_args": "--level 2", "extra_envs": {}},
+            {"name": "tuned", "extra_server_args": "", "extra_envs": {"AITER_CONFIG_GEMM_BF16": str(table)}},
+            {"name": "templated", "extra_server_args": f"--chat-template {table}", "extra_envs": {}},
+        ]
+
+    async def test_the_flag_refuses_the_explore_and_names_the_variants(self, coord: Coordinator, session_dir):
+        coord.shared_state.no_source_changes = True
+
+        denied = _admission(coord, {"grid": self._grid(session_dir)})
+
+        assert denied is not None and denied.rule == EXPLORE_NAMES_SESSION_FILE
+        assert "tuned: AITER_CONFIG_GEMM_BF16" in str(denied)
+        assert "templated: server arguments" in str(denied)
+        assert "plain" not in str(denied)
+
+    async def test_the_flag_admits_a_grid_that_names_no_session_file(self, coord: Coordinator, session_dir):
+        coord.shared_state.no_source_changes = True
+
+        assert _admission(coord, {"grid": self._grid(session_dir)[:1]}) is None
+
+    async def test_without_the_flag_the_grid_is_admitted(self, coord: Coordinator, session_dir):
+        assert _admission(coord, {"grid": self._grid(session_dir)}) is None

@@ -571,6 +571,23 @@ def _is_file(path: str) -> bool:
         return False
 
 
+def launch_settings_naming_path_under(
+    root: Path | str, server_args: str, envs: Mapping[str, object] | None
+) -> list[str]:
+    """The launch settings whose value names a path under ``root``: env names, and ``server arguments`` for the string.
+
+    A setting that points the server at a file is a file change carried in by name, whatever the setting is called,
+    so the question is asked of every value rather than of the config-file envs alone.
+    """
+    spellings = {str(root).rstrip("/"), str(Path(root).resolve()).rstrip("/")} - {""}
+
+    def names_root(value: object) -> bool:
+        return any(spelling in str(value or "") for spelling in spellings)
+
+    naming = ["server arguments"] if names_root(server_args) else []
+    return naming + sorted(str(key) for key, value in (envs or {}).items() if names_root(value))
+
+
 def ungrounded_env_file_reason(envs: Mapping[str, object] | None) -> str | None:
     """Return why ``envs`` names a config file that is not on disk, else ``None`` -- the one grounding rule.
 
@@ -929,6 +946,7 @@ __all__ = [
     "is_launch_provided_env_name",
     "is_python_package_root",
     "is_secret_shaped_env_name",
+    "launch_settings_naming_path_under",
     "operator_extra_env",
     "redact_file_in_place",
     "redact_secret_env_values",

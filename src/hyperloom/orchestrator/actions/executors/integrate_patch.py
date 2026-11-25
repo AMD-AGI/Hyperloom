@@ -77,7 +77,7 @@ class IntegratePatchExecutor(
         early = await self._stage_resolve(attempt, params, extra)
         if early is not None:
             return early
-        skipped = source_change_skip(attempt, params)
+        skipped = source_change_skip(attempt, params, self.session_dir)
         if skipped is not None:
             return skipped
 

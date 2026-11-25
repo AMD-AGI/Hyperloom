@@ -234,6 +234,36 @@ async def test_an_ordinary_round_carrying_a_runtime_override_is_skipped(tmp_path
     _assert_skipped(result, state, framework_tree, "pre-built runtime")
 
 
+@pytest.mark.parametrize(
+    "setting",
+    [
+        lambda table: {"extra_envs": {"AITER_CONFIG_GEMM_BF16": str(table)}},
+        lambda table: {"extra_server_args": f"--chat-template {table}"},
+    ],
+    ids=["environment variable", "server argument"],
+)
+async def test_a_setting_that_names_a_file_of_the_session_is_skipped(tmp_path, framework_tree, setting):
+    """The file is what would be kept, whatever the setting that names it: a tuned table, a template."""
+    session = tmp_path / "session"
+    table = _specialist(session) / "worktree" / "scratch" / "tuned.csv"
+    table.parent.mkdir(parents=True)
+    table.write_text("M,N,K\n", encoding="utf-8")
+    state = _state()
+    result = await _integrate(session, state, {"specialist_task_id": _SPEC, "apply_only": True, **setting(table)})
+    _assert_skipped(result, state, framework_tree, "a session file named by")
+
+
+async def test_a_setting_that_names_a_file_outside_the_session_passes_the_gate(tmp_path, framework_tree):
+    session = tmp_path / "session"
+    _specialist(session)
+    shipped = tmp_path / "image" / "default.csv"
+    shipped.parent.mkdir()
+    shipped.write_text("M,N,K\n", encoding="utf-8")
+    params = {"specialist_task_id": _SPEC, "apply_only": True, "extra_envs": {"AITER_CONFIG_GEMM_BF16": str(shipped)}}
+    result = await _integrate(session, _state(), params)
+    assert result["status"] == "applied_no_bench"
+
+
 async def test_launch_configuration_passes_the_gate(tmp_path, framework_tree):
     session = tmp_path / "session"
     _specialist(session)
@@ -257,7 +287,7 @@ def test_an_enablement_round_with_only_flags_passes_the_gate(tmp_path):
     attempt.specialist_workspace = _specialist(tmp_path)
     attempt.done_payload = {"patches_written": []}
     params = {"enablement": True, "extra_server_args": "--enforce-eager", "extra_envs": {"VLLM_USE_V1": "1"}}
-    assert source_change_skip(attempt, params) is None
+    assert source_change_skip(attempt, params, tmp_path) is None
 
 
 async def test_without_the_flag_a_patch_is_applied(tmp_path, framework_tree, monkeypatch):

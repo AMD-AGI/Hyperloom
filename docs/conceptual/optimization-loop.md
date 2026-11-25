@@ -560,7 +560,11 @@ round `apply_failed`.
 `--no-source-changes` keeps the second lever to launch configuration: every
 route that can change a source tree or the installed environment lands through
 `integrate_patch`, which skips such a round (`skipped_reason=no_source_changes`)
-before anything is applied. Specialists still run and their configuration
+before anything is applied. A server argument or environment variable whose
+value names a file under the session directory is such a change, since the file
+is what would be kept: `integrate_patch` skips that round, and an `explore`
+whose grid holds such a variant is denied at admission
+(`explore_names_session_file`). Specialists still run and their configuration
 proposals are still benched, but work only that gate would refuse is not
 started: a specialist that would author a patch without a bench loop runs as
 read-only research, no targeted build is started, and an upstream pull request's

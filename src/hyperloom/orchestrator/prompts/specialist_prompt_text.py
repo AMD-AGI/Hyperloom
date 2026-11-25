@@ -24,7 +24,8 @@ IDENTITY_MANDATE_LINES: tuple[str, ...] = (
 #: Section 0 row for a patch-mode dispatch in a ``--no-source-changes`` session.
 KEPT_LAUNCH_CONFIG_ONLY_ROW = (
     "- kept: only server arguments and environment variables. This session skips any patch, tuned file, "
-    "install or other runtime you deliver (`--no-source-changes`); deliver configuration proposals."
+    "install or other runtime you deliver (`--no-source-changes`), and any setting whose value names a file you "
+    "wrote; deliver configuration proposals."
 )
 
 #: Closing block of the enablement playbook in a ``--no-source-changes`` session: which rung is kept, and what the

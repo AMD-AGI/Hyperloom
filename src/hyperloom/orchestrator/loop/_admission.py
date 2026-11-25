@@ -12,7 +12,7 @@ from ..phases import machine_state as _phase_state
 from ..kernel.request_handlers import KERNEL_REQUEST_HANDLERS
 from ..policy.denial import PolicyDenied
 from ..policy.specialist_in_flight import specialist_in_flight_denial
-from ._explore_grid import explore_grid_denial
+from ._explore_grid import explore_grid_denial, explore_session_file_denial
 from ._untested_backlog import untested_backlog_denial
 from ..state.task_registry import IllegalTransition, Task, TaskNotFound
 from .time_budget import (
@@ -157,6 +157,7 @@ class AdmissionMixin:
             or untested_backlog_denial(action_name, params, self.shared_state, self.tasks)
             # Last: a session out of time is told so before an explore is told its grid is missing.
             or explore_grid_denial(action_name, params, self.shared_state)
+            or explore_session_file_denial(action_name, params, self.shared_state, self.session_dir)
         )
 
     async def _cancel_queued_task_over_budget(self, task: Task) -> bool:

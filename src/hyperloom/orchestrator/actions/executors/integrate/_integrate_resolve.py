@@ -14,6 +14,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from hyperloom_common.coerce import to_float
+from hyperloom.common.env_safety import launch_settings_naming_path_under
 from hyperloom.inference_optimizer.session.session_paths import enablement_stacks_dir, runs_dir
 
 from ....state.shared_state import inject_stack_base_params
@@ -411,7 +412,7 @@ def _keeps_launch_config_only(attempt: IntegrateAttempt) -> bool:
     return bool(getattr(attempt.shared_state, "no_source_changes", False))
 
 
-def source_change_skip(attempt: IntegrateAttempt, params: dict[str, Any]) -> dict[str, Any] | None:
+def source_change_skip(attempt: IntegrateAttempt, params: dict[str, Any], session_dir: Path) -> dict[str, Any] | None:
     """The ``skipped`` result for a round that carries a source, file or runtime change; ``None`` otherwise.
 
     Read once the round is resolved and before anything is provisioned, stashed or applied, so a skip
@@ -420,7 +421,7 @@ def source_change_skip(attempt: IntegrateAttempt, params: dict[str, Any]) -> dic
     """
     if not _keeps_launch_config_only(attempt):
         return None
-    carried = _source_changes_carried(attempt, params)
+    carried = _source_changes_carried(attempt, params, session_dir)
     if not carried:
         return None
     result: dict[str, Any] = {
@@ -440,8 +441,11 @@ def source_change_skip(attempt: IntegrateAttempt, params: dict[str, Any]) -> dic
     return result
 
 
-def _source_changes_carried(attempt: IntegrateAttempt, params: dict[str, Any]) -> list[str]:
-    """What the round would land beyond server arguments, environment variables and launch controls."""
+def _source_changes_carried(attempt: IntegrateAttempt, params: dict[str, Any], session_dir: Path) -> list[str]:
+    """What the round would land beyond server arguments, environment variables and launch controls.
+
+    A setting whose value names a file under ``session_dir`` counts: it lands a file this session wrote, by name.
+    """
     # The bench applies a runtime_override on any round, not only on a launch-only one.
     carried = ["a pre-built runtime"] if params.get("runtime_override") else []
     if params.get("enablement_launch_only"):
@@ -453,6 +457,9 @@ def _source_changes_carried(attempt: IntegrateAttempt, params: dict[str, Any]) -
         carried.append(f"{len(deliverable.artifact_specs)} tuned artifact(s)")
     if deliverable.switch_manifest:
         carried.append(f"{len(deliverable.switch_manifest)} rewrite switch(es)")
+    naming = launch_settings_naming_path_under(session_dir, deliverable.extra_server_args, deliverable.extra_envs)
+    if naming:
+        carried.append(f"a session file named by {', '.join(naming)}")
     if params.get("enablement") and resolve_setup_commands(params=params, done_payload=attempt.done_payload):
         carried.append("setup commands")
     if _acquiring_round(params) and _attempt_stack_action(attempt) is not None:
