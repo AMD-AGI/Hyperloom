@@ -12,9 +12,8 @@ are harvested by glob.
 
 The llama.cpp recipe builds no Python extension and needs no torch: its preflight is
 :func:`~hyperloom.measure.runner.native.preflight.native_preflight`, and it makes static executables from a checkout
-the operator pinned (:attr:`CommitSource.PINNED_CHECKOUT`), whose commit the build key names: the server, and the two
-benchmarks a change of its kernels is timed with before a test (``llama-bench`` end to end, ``test-backend-ops`` one
-operation at a time).
+the operator pinned (:attr:`CommitSource.PINNED_CHECKOUT`), whose commit the build key names: the server, and
+``test-backend-ops``, which times a change of its kernels one operation at a time before a test.
 
 :data:`RECIPE_FACTORIES` names every recipe's factory as the build runner's child imports it; :func:`native_recipes`
 makes them all.
@@ -78,7 +77,7 @@ _DEFAULT_ROCM_ROOT = "/opt/rocm"
 _LLAMACPP = "llamacpp"
 _LLAMACPP_RECIPE_VERSION = "llamacpp/3"
 _LLAMACPP_BUILD = "build"
-_LLAMACPP_TARGETS = ("llama-server", "llama-bench", "test-backend-ops")
+_LLAMACPP_TARGETS = ("llama-server", "test-backend-ops")
 _LLAMACPP_MAX_JOBS = 32
 _LLAMACPP_DISK_GB = 10.0
 #: Static, so no shared library has to sit beside the executables (the harvest takes no symlink). Nothing is fetched
@@ -233,8 +232,8 @@ def vllm_recipe() -> NativeRecipe:
 
 
 def llamacpp_recipe() -> NativeRecipe:
-    """llama.cpp's ``llama-server``, ``llama-bench`` and ``test-backend-ops``, configured and built with CMake at the
-    top of the pinned checkout, which no image installs: its commit is part of the build's key."""
+    """llama.cpp's ``llama-server`` and ``test-backend-ops``, configured and built with CMake at the top of the pinned
+    checkout, which no image installs: its commit is part of the build's key."""
     return NativeRecipe(
         component=_LLAMACPP,
         import_name=_LLAMACPP,
