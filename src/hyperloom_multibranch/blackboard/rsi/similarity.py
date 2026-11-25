@@ -8,7 +8,10 @@ still counts two thirds. A condition either side lacks is left out rather than c
 workload's kind (the ``workload`` label): an AgentX trace replay is graded on interactivity, a fixed-length InferenceX
 workload on throughput, so the two share nothing whatever else matches. Conditions without the label are InferenceX, as
 every session was before AgentX sessions ran. An AgentX session's conditions name its objective (the ``objective``
-label); without it, it was graded on P50 interactivity, as every AgentX session was before objectives.
+label); without it, it was graded on P50 interactivity, as every AgentX session was before objectives. A session whose
+rounds send a prompt dataset names it (the ``dataset`` label); conditions without it sent random prompts, so the two
+are compared whichever side lacks it: sessions on different prompts are less alike, and the dataset is among what
+differs.
 """
 
 from __future__ import annotations
@@ -21,7 +24,7 @@ from hyperloom.common.agentx_objective import AgentXObjective
 from hyperloom.inference_optimizer.recipe_snapshot_constants import RecipeIdentity, recipe_canonical_id
 from hyperloom_multibranch.contracts.blackboard.records import SessionProfile
 from hyperloom_multibranch.contracts.toolbox import WorkloadKind
-from hyperloom_multibranch.blackboard.knowledge.experience import experience_identity
+from hyperloom_multibranch.blackboard.knowledge.experience import DATASET_KEY, experience_identity
 from hyperloom_multibranch.blackboard.knowledge.warm_start import MODEL_LABEL, labels_of
 
 #: The weight of a condition that changes little on its own: a framework release, expert parallelism.
@@ -36,6 +39,8 @@ LABEL_WEIGHTS = {
     "framework_version": MINOR_WEIGHT,
 }
 SIZE_WEIGHTS = {"tp": 1.0, "conc": 1.0, "isl": 1.0, "osl": 1.0, "ep": MINOR_WEIGHT}
+#: What sending other prompts takes from a match, as much as a sequence length that shares nothing.
+DATASET_WEIGHT = 1.0
 WORKLOAD = "workload"
 OBJECTIVE = "objective"
 AGENTX = WorkloadKind.AGENTX.value
@@ -62,7 +67,7 @@ def task_conditions(profile: SessionProfile) -> TaskConditions:
     objective = {OBJECTIVE: profile.agentx_objective.value} if kind == AGENTX else {}
     return TaskConditions(
         labels={
-            **{key: str(value) for key, value in identity.items() if key in LABEL_WEIGHTS},
+            **{key: str(value) for key, value in identity.items() if key in LABEL_WEIGHTS or key == DATASET_KEY},
             WORKLOAD: kind,
             **objective,
         },
@@ -103,6 +108,12 @@ def agentx_objective(task: TaskConditions) -> AgentXObjective:
     return AgentXObjective(task.labels.get(OBJECTIVE, AgentXObjective.P50_INTERACTIVITY.value))
 
 
+def prompt_dataset_of(task: TaskConditions) -> str:
+    """The prompt dataset a session with ``task`` sent, as its profile recorded it; empty for random prompts."""
+
+    return task.labels.get(DATASET_KEY, "")
+
+
 def task_similarity(first: TaskConditions, second: TaskConditions) -> float:
     """Similarity in [0, 1]; 0 when the two share no condition, or are workloads of different kinds."""
 
@@ -117,11 +128,14 @@ def task_similarity(first: TaskConditions, second: TaskConditions) -> float:
         if key in first.sizes and key in second.sizes:
             total += weight
             matched += weight * _closeness(first.sizes[key], second.sizes[key])
+    if prompt_dataset_of(first) != prompt_dataset_of(second):
+        total += DATASET_WEIGHT
     return matched / total if total else 0.0
 
 
 def differing_conditions(first: TaskConditions, second: TaskConditions) -> tuple[str, ...]:
-    """The labels and the sizes both hold and do not share, labels first, as the similarity weighs them."""
+    """The labels and the sizes both hold and do not share, labels first, as the similarity weighs them; the prompt
+    dataset is among the labels whenever the two sent different prompts."""
 
     labels = [
         key
@@ -135,11 +149,13 @@ def differing_conditions(first: TaskConditions, second: TaskConditions) -> tuple
         for key in SIZE_WEIGHTS
         if key in first.sizes and key in second.sizes and first.sizes[key] != second.sizes[key]
     ]
-    return (*labels, *sizes)
+    dataset = [DATASET_KEY] if prompt_dataset_of(first) != prompt_dataset_of(second) else []
+    return (*labels, *dataset, *sizes)
 
 
 __all__ = [
     "AGENTX",
+    "DATASET_WEIGHT",
     "INFERENCEX",
     "LABEL_WEIGHTS",
     "MIN_SIMILARITY",
@@ -150,6 +166,7 @@ __all__ = [
     "agentx_objective",
     "differing_conditions",
     "model_name",
+    "prompt_dataset_of",
     "task_conditions",
     "task_similarity",
     "workload_kind",

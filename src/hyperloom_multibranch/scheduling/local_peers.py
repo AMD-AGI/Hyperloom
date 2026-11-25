@@ -7,8 +7,10 @@ service, the specialist runtime on them and the MCP service that serves the spec
 :func:`local_peers` builds them inside the session directory: the repository at ``MB-repo``, the toolbox's
 sandboxes, archive, submit log and measurement points under ``MB-toolbox``, and the patch and kernel files its
 environment compiler reads, like the repository, from the session's blob store at ``MB-blobs``. The MCP service listens on loopback for the whole session and hands every toolbox call to the loop the peers were built
-on; its learnings tool recalls this session's learnings and past sessions' lessons from the RSI lesson pool, and none
-from the Experience KB, as the multibranch optimizer uses none (:func:`specialist_recall`). Every test is measured on a
+on; its learnings tool recalls this session's learnings, past sessions' learnings from the Experience KB
+``HYPERLOOM_KB_URL`` names and past sessions' lessons from the RSI lesson pool (:func:`specialist_recall`), and the
+briefs recall past sessions' tests from that Experience KB too
+(:func:`~hyperloom_multibranch.scheduling.experience_kb.experience_readers`). Every test is measured on a
 :class:`MeasurementHost`: the :class:`ToolboxBackend` its tests run on -- this machine's cards
 (:class:`LocalCards`), or the host's sandbox service for a hosted session
 (:class:`~hyperloom_multibranch.scheduling.hosted_peers.HostedSandboxes`) --, the image the launcher names in
@@ -56,6 +58,7 @@ from hyperloom_common.llm.llm_config import (
     resolve_forge_llm_model,
 )
 from hyperloom.common.model_paths import resolve_serving_model_path
+from hyperloom.common.perf_metric import DATASET_PATH_ENV
 from hyperloom_multibranch.contracts.llm_prices import price_of
 from hyperloom_multibranch.contracts.blackboard import Role, Writer
 from hyperloom_multibranch.contracts.blackboard.interfaces import BranchLogStore, CommitQuery
@@ -69,11 +72,13 @@ from hyperloom_multibranch.blackboard.rsi.cases import CasePool, session_cases
 from hyperloom_multibranch.blackboard.rsi.lesson_recall import LessonRecall
 from hyperloom_multibranch.blackboard.rsi.lessons import LessonPool
 from hyperloom_multibranch.blackboard.rsi.session import session_menus
+from hyperloom_multibranch.blackboard.knowledge.recall import ExperienceReader
 from hyperloom_multibranch.repo.git_repo import GitExperimentRepo
 from hyperloom_multibranch.rulegate.gate import RuleGate
 from hyperloom_multibranch.rulegate.regression import RegressionSet, ReproRunner
 from hyperloom_multibranch.rulegate.rules import AgentXRule, InferenceXRule, Rule
 from hyperloom_multibranch.rulegate.service import GateService
+from hyperloom_multibranch.scheduling.experience_kb import experience_readers
 from hyperloom_multibranch.scheduling.launch_isolation import announce_launch_isolation, launch_isolation
 from hyperloom_multibranch.scheduling.peers import PeerFactory, Peers, PeerSetup, PeersUnavailable
 from hyperloom_multibranch.scheduling.session_base import freeze_session_base, served_launch
@@ -236,7 +241,7 @@ class LocalCards:
         # The tests read private copies of the tables of the aiter this machine's servers import (a vLLM image's
         # site-packages, not an SGLang image's workspace), or a keep that adds rows to a default table is refused.
         options = LocalOptions(
-            timeout_sec=attempt_timeout_sec(setup.workload),
+            timeout_sec=attempt_timeout_sec(setup.workload) * setup.test_points,
             boot_budget_sec=setup.workload.boot_budget_sec,
             framework_configs=str(image_configs()),
             tests_end_by=self.tests_end_by,
@@ -259,11 +264,15 @@ def workload_environment(workload: Workload) -> Mapping[str, str]:
     renders the canonical measurement and every test's points with, and to the kernel tuning the toolbox runs, which
     takes its backend from ``KERNEL_OPT_BACKEND_ORDER``; ``hyperloom optimize`` exports the same, the model resolved to
     the directory a server loads it from. ``GPU_TYPE`` and ``TARGET_GPU_TYPE`` are both the board, as ``hyperloom optimize``
-    sets them. An InferenceX workload carries its sequence lengths; an AgentX one carries
-    :data:`AGENTX_ENV` instead."""
+    sets them. An InferenceX workload carries its sequence lengths and the prompt dataset it
+    names; an AgentX one carries :data:`AGENTX_ENV` instead."""
 
     shape = workload.inferencex
-    workload_specific = {AGENTX_ENV: "1"} if shape is None else {"ISL": str(shape.isl), "OSL": str(shape.osl)}
+    if shape is None:
+        workload_specific = {AGENTX_ENV: "1"}
+    else:
+        dataset = {DATASET_PATH_ENV: shape.dataset} if shape.dataset else {}
+        workload_specific = {"ISL": str(shape.isl), "OSL": str(shape.osl), **dataset}
     return {
         "FRAMEWORK": workload.framework,
         "MODEL_PATH": resolve_serving_model_path(workload.model),
@@ -294,13 +303,17 @@ def attempt_timeout_sec(workload: Workload) -> int:
 
 
 def _export_workload(workload: Workload, toolbox_dir: Path, image_ref: str) -> None:
-    """Export :func:`workload_environment` into this process. For an AgentX workload, also write the AgentX benchmark
+    """Export :func:`workload_environment` into this process, and remove a ``DATASET_PATH`` the workload does not name:
+    a leg resumed in another shell sends what the first leg sent. For an AgentX workload, also write the AgentX benchmark
     ``hyperloom optimize`` generates for it to :data:`BENCHMARK_FILE` in ``toolbox_dir`` and name it in
     ``HYPERLOOM_BENCHMARK_CONFIG``: the canonical measurement is rendered from it. The benchmark serves at the
     workload's EP and names ``image_ref``, the image the session runs on, as its image. It pins the model's directory
     when the model is one, which the command line names by its resolved path."""
 
-    os.environ.update(workload_environment(workload))
+    exported = workload_environment(workload)
+    os.environ.update(exported)
+    if DATASET_PATH_ENV not in exported:
+        os.environ.pop(DATASET_PATH_ENV, None)
     if workload.inferencex is not None:
         return
     from hyperloom.inference_optimizer.cli.benchmark_config import AgentXWorkload, write_agentx_benchmark
@@ -351,12 +364,12 @@ def _canonical(out_dir: Path, workload: Workload, host: MeasurementHost, base: S
         raise PeersUnavailable(f"the canonical measurement cannot be taken: {exc}") from exc
 
 
-def specialist_recall(reports: Path) -> LessonRecall:
-    """The specialists' learnings recall: this session's learnings, then past sessions' lessons from the RSI lesson
-    pool beside the environment's archive, each retrieval logged in ``reports``; no Experience KB, as the multibranch
-    optimizer uses none."""
+def specialist_recall(reports: Path, learnings: ExperienceReader | None = None) -> LessonRecall:
+    """The specialists' learnings recall: this session's learnings, then past sessions' learnings ``learnings`` reads
+    from the Experience KB and past sessions' lessons from the RSI lesson pool beside the environment's archive, each
+    retrieval logged in ``reports``."""
 
-    return LessonRecall(pool=LessonPool.from_env(), log=RetrievalLog(reports / LEARNINGS_LOG))
+    return LessonRecall(learnings, pool=LessonPool.from_env(), log=RetrievalLog(reports / LEARNINGS_LOG))
 
 
 def local_peers(host: MeasurementHost, sessions: SpecialistSessions, setup: PeerSetup) -> Peers:
@@ -475,11 +488,13 @@ def _toolbox(
 
 def _specialist_briefs(setup: PeerSetup, repo: GitExperimentRepo) -> SessionBriefs:
     """The briefs the session's specialists are given, read as an observer of the blackboard, with their learnings
-    recall (:func:`specialist_recall`)."""
+    recall (:func:`specialist_recall`) and past sessions' tests from the environment's Experience KB."""
 
-    learnings = specialist_recall(setup.layout.reports)
+    readers = experience_readers(setup.workload.kind)
+    learnings = specialist_recall(setup.layout.reports, readers.learnings)
     return SessionBriefs(
         LocalBlackboard(setup.layout.blackboard, Writer(Role.OBSERVER, BRIEFS_READER)),
+        experiences=readers.tests,
         metric=setup.workload.metric,
         learnings=learnings,
         repo=repo,

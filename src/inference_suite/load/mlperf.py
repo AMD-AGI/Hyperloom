@@ -26,7 +26,7 @@ from inference_suite.load import exit_stop, inherited_env
 from inference_suite.load.fixed import OutputActivity
 from inference_suite.load.mlperf_report import MlperfReportError, map_mlperf
 from inference_suite.runtime.phases import Phase, PhaseClock
-from inference_suite.runtime.process import spawn
+from inference_suite.runtime.process import ChildPlace, spawn
 from inference_suite.runtime.server import Server
 from inference_suite.runtime.watch import RoundGate, Stop, wait_child
 
@@ -140,7 +140,11 @@ def run_mlperf(mlperf_round: MlperfRound) -> MlperfOutcome:
     activity = OutputActivity(mlperf_round.server, layout.client_stdout)
     mlperf_round.clock.mark(Phase.MEASURED)
     child = spawn(
-        harness_argv(workload), env, layout.client_stdout, layout.client_stderr, cwd=Path(workload.endpoints_dir)
+        harness_argv(workload),
+        env,
+        layout.client_stdout,
+        layout.client_stderr,
+        ChildPlace(Path(workload.endpoints_dir)),
     )
     ended = wait_child(child, mlperf_round.gate, activity.check)
     mlperf_round.clock.mark(Phase.FINISHED)

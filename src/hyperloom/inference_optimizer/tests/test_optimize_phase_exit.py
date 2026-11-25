@@ -98,7 +98,7 @@ def test_with_kernel_disabled_it_winds_down_to_sweep_carrying_its_reason():
     target, reason, evidence = phase_transitions.compute_next_phase(
         state, flags=phase_predicates.PhaseFlags(kernel_enabled=False)
     )
-    assert target == ps.PHASE_SWEEP
+    assert target == ps.PHASE_CYCLE_END
     assert reason == "optimize_no_more_leverage"
     assert evidence["kernel_skipped"] is True
 

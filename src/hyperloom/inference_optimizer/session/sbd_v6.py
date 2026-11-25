@@ -52,7 +52,6 @@ _EVENT_TYPES = (
     "roofline",
     "kernel",
     "baseline",
-    "conc_sweep",
     "enablement",
     "phase",
     "stack",

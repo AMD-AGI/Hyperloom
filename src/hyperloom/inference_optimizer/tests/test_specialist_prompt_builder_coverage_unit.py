@@ -134,26 +134,6 @@ def test_build_rich_user_prompt_sections():
     assert "NOTES FROM ORCHESTRATION" in user_p
 
 
-def test_cold_start_directive():
-    inp = SpecialistPromptInputs(
-        domain=get_domain("serving_specialist"),
-    )
-    _, user_p = build_specialist_prompts(inp)
-    assert "COLD-START MODE" in user_p
-
-
-def test_cold_start_does_not_ask_for_a_field_the_safety_gate_forbids():
-    """It used to direct the fallback proposals to carry ``confidence: low`` -- a field in FORBIDDEN_PROPOSAL_FIELDS -- so a compliant specialist tripped the guard on exactly the round where it was the only source of ideas."""
-    inp = SpecialistPromptInputs(
-        domain=get_domain("serving_specialist"),
-    )
-    _, user_p = build_specialist_prompts(inp)
-
-    cold_start = user_p[user_p.index("COLD-START MODE") :]
-    assert "confidence: low" not in cold_start
-    assert "provenance: domain_focus_default" in cold_start
-
-
 def test_pr_monitor_unavailable():
     inp = SpecialistPromptInputs(
         domain=get_domain("serving_specialist"),
@@ -166,10 +146,10 @@ def test_pr_monitor_unavailable():
 def test_scope_domains_with_extra_tags():
     inp = _rich_inputs(
         scope="domains",
-        extra_focus_tags=("comm_specialist", "compiler_specialist"),
+        extra_focus_tags=("static_recon_specialist", "compiler_specialist"),
     )
     sys_p, _ = build_specialist_prompts(inp)
-    assert "Domain focus — comm_specialist" in sys_p
+    assert "Domain focus — static_recon_specialist" in sys_p
 
 
 def test_scope_freeform():

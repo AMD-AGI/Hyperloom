@@ -140,7 +140,7 @@ def aiter_module_recipe() -> NativeRecipe:
         source_dir="",
         package_dir=_JIT_DIR,
         outputs=(f"*{_SO}",),
-        command=(PYTHON_PLACEHOLDER, "-I", "-B", "-c", _DRIVER, MODULES_FILE),
+        steps=((PYTHON_PLACEHOLDER, "-I", "-B", "-c", _DRIVER, MODULES_FILE),),
         budget_sec=default_budget_sec(AITER_COMPONENT),
         max_jobs=AiterBuild.default_max_jobs,
         max_output_bytes=2 * 1024**3,

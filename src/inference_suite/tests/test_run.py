@@ -42,6 +42,7 @@ from inference_suite.contracts import (
     Lifecycle,
     LifecycleMode,
     ProfileConfig,
+    PromptDataset,
     Redacted,
     RunDirError,
     RunLayout,
@@ -725,6 +726,23 @@ def test_a_round_anchors_a_relative_model_directory_and_keeps_a_hub_id_or_an_abs
     recorded = yaml.safe_load(run.run_round(config).layout.config.read_text())
 
     assert recorded["server"]["model_path"] == served.format(tmp=rig.tmp)
+
+
+@pytest.mark.parametrize(
+    ("lines", "match"),
+    [(None, "prompts.jsonl"), ('{"text": "no prompt"}\n', "prompts.jsonl:1"), ("not json\n", "prompts.jsonl")],
+    ids=["not-there", "a-line-without-a-prompt", "a-line-that-is-not-json"],
+)
+def test_a_prompt_dataset_the_client_cannot_send_is_refused_before_the_server_starts(rig, lines, match):
+    path = rig.tmp / "prompts.jsonl"
+    if lines is not None:
+        path.write_text(lines, encoding="utf-8")
+    config = rig.config("r1", fixed=replace(_FIXED, dataset=PromptDataset(str(path))))
+
+    result = run.run_round(config)
+
+    assert result.report.failed_step is FailedStep.CONFIG_INVALID and match in result.report.failure_detail
+    assert not result.layout.launch.exists() and not rig.calls.exists()
 
 
 def test_a_failing_mlperf_harness_fails_the_round_as_its_client(rig, monkeypatch):

@@ -57,7 +57,7 @@ from hyperloom_multibranch.toolbox.native_builds import (
 )
 from hyperloom_multibranch.toolbox.pending_builds import BuildEnd, BuildHooks, PendingBuilds
 from hyperloom_multibranch.toolbox.planner import HostedPlanner
-from hyperloom_multibranch.toolbox.store_builds import BuildSite, StoreBuildDriver
+from hyperloom_multibranch.toolbox.store_builds import StoreBuildDriver
 from hyperloom_multibranch.toolbox.tests import native_support as fake
 from hyperloom_multibranch.toolbox.tests.helpers import FakeRepo, build, req
 from hyperloom_multibranch.toolbox.tests import test_short_prompts_option as options_tests
@@ -113,8 +113,7 @@ class Rig:
         site = NativeSite(machine, {kit.COMPONENT: recipe}, self.tmp / "sources", self.image.site)
         self.planner = NativePlanner(site, self.blobs, {kit.COMPONENT: kit.LAYOUT})
         runner = IsolatedBuilds(self.planner, self.blobs, self._isolation, {kit.COMPONENT: kit.FACTORY})
-        build_site = BuildSite(IMAGE, BUILDER, "gfx942", {kit.COMPONENT: recipe})
-        self.driver = StoreBuildDriver(self.store, Signer(self._key), build_site, compiled_needs, runner)
+        self.driver = StoreBuildDriver(self.store, Signer(self._key), {kit.COMPONENT: recipe}, compiled_needs, runner)
         self.compiler = EnvironmentCompiler(
             self.blobs, IMAGE, lambda layout: self.image.package(), {kit.COMPONENT: kit.LAYOUT}, self.planner
         )
@@ -422,7 +421,7 @@ def test_what_the_child_staged_is_read_as_untrusted_data(tmp_path: Path) -> None
 def ready_host(monkeypatch: pytest.MonkeyPatch) -> list[PreflightSite]:
     """The host checks pass here (test_build_preflight has them); what they were asked about is recorded."""
     asked: list[PreflightSite] = []
-    monkeypatch.setattr(native_builds_module, "build_preflight", asked.append)
+    monkeypatch.setattr(native_builds_module, "build_preflight", lambda site: asked.append(site) or [])
     return asked
 
 
@@ -461,11 +460,13 @@ def test_a_configured_store_gives_the_driver_the_plan_and_the_runners_the_store(
         BUILD_STORE_ENV: environ[BUILD_STORE_ENV],
         BUILD_TRUST_ENV: environ[BUILD_TRUST_ENV],
     }
-    assert native.plan.site.machine.image_digest == IMAGE and native.plan.site.machine.builder_image_digest == IMAGE
-    assert set(native.plan.site.recipes) == {"sgl_kernel", "vllm"}, "every recipe, vLLM's included"
+    site = native.session.planner.site
+    assert site.machine.image_digest == IMAGE and site.machine.builder_image_digest == IMAGE
+    assert set(site.recipes) == {"sgl_kernel", "vllm", "llamacpp"}, "every recipe"
     planner = HostedPlanner(EnvironmentCompiler(LocalBlobStore(tmp_path / "blobs"), IMAGE), None, tmp_path)  # type: ignore[arg-type]
-    compiler = planner.with_native(native.plan, native.modules)._compiler.compiler
-    assert compiler.native is native.plan and isinstance(compiler.modules, AiterModules), "aiter's modules build on CPU"
+    compiler = planner.with_native(native.session.planner, native.session.modules)._compiler.compiler
+    assert compiler.native is native.session.planner, "acceptance plans with the session's planner"
+    assert isinstance(compiler.modules, AiterModules), "aiter's modules build on CPU"
 
 
 def test_a_configured_store_checks_the_host_with_what_it_was_given_and_refuses_with_its_answer(

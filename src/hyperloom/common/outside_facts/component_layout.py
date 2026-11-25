@@ -15,6 +15,10 @@ one is configured, compiles them. A patch is refused naming the pattern. A patte
 they lie; one with a slash names them only below a directory, for a source that is native only where the component's
 build compiles it (vLLM's ``csrc/*.cu``), not inside the package, whose runtime may compile a source of its own.
 
+A component no image installs as a package lies over the pinned checkout of its upstream (the ``checkout`` base) in
+every section: its sections are the directories a patch may change, and a ``native`` pattern ``<prefix>/*`` names every
+file of each, since only a build of the checkout measures any of them. Everything outside the sections is refused.
+
 The pack carries the layouts (``component_layout`` entries); this module reads and applies them, and the loader pins each
 entry to its own examples with :func:`check_examples`.
 """
@@ -29,6 +33,7 @@ from typing import Any
 
 __all__ = [
     "BASES",
+    "CHECKOUT_BASE",
     "META_BASE",
     "PACKAGE_BASE",
     "ComponentLayoutSpec",
@@ -42,7 +47,12 @@ __all__ = [
 PACKAGE_BASE = "package"
 #: The directory aiter reads ``csrc`` and ``hsa`` from (``AITER_META_DIR``).
 META_BASE = "meta"
-BASES = (PACKAGE_BASE, META_BASE)
+#: The pinned checkout of the component's upstream, for a component no image installs as a package.
+CHECKOUT_BASE = "checkout"
+BASES = (PACKAGE_BASE, META_BASE, CHECKOUT_BASE)
+#: The bases a layout's first section may lie over: what the component is found by.
+_SOURCE_BASES = (PACKAGE_BASE, CHECKOUT_BASE)
+_EVERY_FILE = "*"
 _REFUSE, _NATIVE, _GENERATED, _INTO, _PLACE = "refuse", "native", "generated", "into", "place"
 _FIELDS = frozenset({"import_name", "sections", _REFUSE, _NATIVE, _GENERATED})
 _SECTION_FIELDS = frozenset({"prefix", "base", _INTO})
@@ -74,6 +84,11 @@ class ComponentLayoutSpec:
     refuse: tuple[str, ...] = ()
     generated: tuple[str, ...] = ()
     native: tuple[str, ...] = ()
+
+    @property
+    def source_base(self) -> str:
+        """What the component is found by: its installed package, or the pinned checkout of its upstream."""
+        return self.sections[0].base
 
     def place(self, path: str) -> tuple[LayoutSection, str] | None:
         """The section of the upstream path ``path`` and its path inside the section's base; ``None`` outside all."""
@@ -143,6 +158,20 @@ def _section(where: str, index: int, raw: Any) -> LayoutSection:
     return LayoutSection(_relative(at, "prefix", prefix), base, _relative(at, "into", into))
 
 
+def _check_checkout(where: str, sections: tuple[LayoutSection, ...], native: tuple[str, ...]) -> None:
+    """A checkout is the base of every section or of none, and every file of a checkout's section is native: a patch
+    the native build does not take must find no other way in."""
+    if all(section.base != CHECKOUT_BASE for section in sections):
+        return
+    if any(section.base != CHECKOUT_BASE for section in sections):
+        raise LayoutSpecError(f"{where}: a layout lies over the checkout in every section or in none")
+    uncovered = [s.prefix for s in sections if f"{s.prefix}{_SLASH}{_EVERY_FILE}" not in native]
+    if uncovered:
+        raise LayoutSpecError(
+            f"{where}: a checkout's sections must be native throughout; add '<prefix>/*' for {uncovered}"
+        )
+
+
 def parse_layout(where: str, body: Mapping[str, Any]) -> ComponentLayoutSpec:
     """The layout a ``component_layout`` entry's fields state; :class:`LayoutSpecError` when they cannot be used."""
     if set(body) != _FIELDS:
@@ -154,8 +183,8 @@ def parse_layout(where: str, body: Mapping[str, Any]) -> ComponentLayoutSpec:
     if not isinstance(raw, list) or not raw:
         raise LayoutSpecError(f"{where}: sections must be a list with at least one section")
     sections = tuple(_section(where, index, item) for index, item in enumerate(raw))
-    if sections[0].base != PACKAGE_BASE:
-        raise LayoutSpecError(f"{where}: the first section must lie over the installed package")
+    if sections[0].base not in _SOURCE_BASES:
+        raise LayoutSpecError(f"{where}: the first section must lie over the installed package or the checkout")
     prefixes = [section.prefix for section in sections]
     if len(set(prefixes)) != len(prefixes):
         raise LayoutSpecError(f"{where}: two sections have the same prefix")
@@ -163,29 +192,36 @@ def parse_layout(where: str, body: Mapping[str, Any]) -> ComponentLayoutSpec:
         _relative(where, _GENERATED, path) for path in _strings(where, _GENERATED, body[_GENERATED], allow_empty=True)
     )
     refuse, native = _patterns(where, _REFUSE, body[_REFUSE]), _patterns(where, _NATIVE, body[_NATIVE])
+    _check_checkout(where, sections, native)
     return ComponentLayoutSpec(name, sections, refuse, generated, native)
 
 
-def _example_list(where: str, examples: Any, key: str) -> tuple[str, ...]:
-    if not isinstance(examples, dict) or set(examples) != {_PLACE, _REFUSE}:
-        raise LayoutSpecError(f"{where}: examples must hold the lists 'place' and 'refuse'")
-    return _strings(where, f"examples.{key}", examples[key], allow_empty=False)
+def _example_list(where: str, examples: Any, key: str, *, allow_empty: bool = False) -> tuple[str, ...]:
+    if not isinstance(examples, dict) or not {_PLACE, _REFUSE} <= set(examples) <= {_PLACE, _REFUSE, _NATIVE}:
+        raise LayoutSpecError(f"{where}: examples must hold the lists 'place' and 'refuse', and may add 'native'")
+    return _strings(where, f"examples.{key}", examples.get(key, []), allow_empty=allow_empty)
 
 
 def check_examples(where: str, spec: ComponentLayoutSpec, examples: Any) -> None:
     """Run the layout against its own examples: every ``place`` example ``<upstream path> -> <base>:<path in base>``
-    must be placed so, every ``refuse`` example (a path outside the sections, or one a pattern of ``refuse`` or
-    ``native`` names) must be refused."""
-    for line in _example_list(where, examples, _PLACE):
+    must be placed so, every ``native`` example (in the same form) placed so and named by a ``native`` pattern, every
+    ``refuse`` example (a path outside the sections, or one a pattern of ``refuse`` or ``native`` names) refused. A
+    layout whose every placed file is native, as a checkout's is, gives ``native`` examples and an empty ``place``."""
+    native = _example_list(where, examples, _NATIVE, allow_empty=True)
+    for line in native:
         path, arrow, expected = line.partition(_ARROW)
         placed = spec.place(path) if arrow else None
-        if (
-            placed is None
-            or spec.refused_by(path)
-            or spec.native_by(path)
-            or f"{placed[0].base}:{placed[1]}" != expected
-        ):
+        if placed is None or spec.refused_by(path) or not spec.native_by(path) or _at(placed) != expected:
+            raise LayoutSpecError(f"{where}: the example {line!r} is not placed as it says as a native file")
+    for line in _example_list(where, examples, _PLACE, allow_empty=bool(native)):
+        path, arrow, expected = line.partition(_ARROW)
+        placed = spec.place(path) if arrow else None
+        if placed is None or spec.refused_by(path) or spec.native_by(path) or _at(placed) != expected:
             raise LayoutSpecError(f"{where}: the example {line!r} is not placed as it says by the sections")
     for path in _example_list(where, examples, _REFUSE):
         if spec.place(path) is not None and (spec.refused_by(path) or spec.native_by(path)) is None:
             raise LayoutSpecError(f"{where}: the example {path!r} must be refused, but the layout takes it")
+
+
+def _at(placed: tuple[LayoutSection, str]) -> str:
+    return f"{placed[0].base}:{placed[1]}"

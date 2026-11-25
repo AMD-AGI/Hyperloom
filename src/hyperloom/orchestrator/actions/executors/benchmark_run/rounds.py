@@ -23,7 +23,6 @@ from hyperloom.inference_optimizer.breakdown.recorder.baseline_event import (
     ROUND_WARMUP,
     BaselineRound,
 )
-from hyperloom.inference_optimizer.grid_server_args import remove_moe_runner_backend_arg
 from hyperloom.inference_optimizer.trace.task_progress import report_progress
 from ....measurement.integrate_performance import assess_integrate_performance
 from ...stop_attribution import SESSION_TIME_EXHAUSTED_CLASS, STOPPED_BY_THE_RUN
@@ -164,13 +163,7 @@ class _BenchmarkRoundsMixin:
         self._record_measured_against_warmup(measured_result, warmup_result)
         return measured_result
 
-    def _settle_attempt_server_args(
-        self,
-        params: dict[str, Any],
-        shared_state: Any,
-        *,
-        drop_moe_runner_backend: bool,
-    ) -> tuple[str, str]:
+    def _settle_attempt_server_args(self, params: dict[str, Any], shared_state: Any) -> tuple[str, str]:
         # One-shot cuda-graph eager fallback: a prior baseline armed state.baseline_eager_fallback.
         server_args = str(params.get("extra_server_args") or "")
         fw = _requested_framework(params) or ""
@@ -187,8 +180,6 @@ class _BenchmarkRoundsMixin:
                 _disable_cuda_graph_flag(fw),
                 fw,
             )
-        if drop_moe_runner_backend:
-            server_args = remove_moe_runner_backend_arg(server_args)
         if server_args or "extra_server_args" in params:
             # Keep the task envelope aligned with the materialized runtime so Roofline fingerprints record one-shot
             # eager fallback accurately.
@@ -636,7 +627,6 @@ class _BenchmarkRoundsMixin:
             if recorder is None:
                 return
             recorder.record_round(
-                run_index=attempt.run_index,
                 round_=BaselineRound(
                     label=label,
                     started_at=started_at,

@@ -623,14 +623,16 @@ def test_build_variant_yaml_refuses_to_unset_pinned_envs(tmp_path):
     base = tmp_path / "base.yaml"
     _write_baseline_yaml_overrides(base)
     cfg = yaml.safe_load(base.read_text())
-    cfg["benchmark"]["envs"].update({"TP": 8, "CONC": 64, "SGLANG_ENABLE_FOO": "1"})
+    cfg["benchmark"]["envs"].update(
+        {"TP": 8, "CONC": 64, "DATASET_PATH": "/data/prompts.jsonl", "SGLANG_ENABLE_FOO": "1"}
+    )
     base.write_text(yaml.safe_dump(cfg), encoding="utf-8")
 
     out = _build_variant_yaml(
         GridRecipe(base_yaml_path=base),
         GridVariant(
             "unset_the_world",
-            unset_envs=["TP", "CONC", "ROCR_VISIBLE_DEVICES", "SGLANG_ENABLE_FOO"],
+            unset_envs=["TP", "CONC", "DATASET_PATH", "ROCR_VISIBLE_DEVICES", "SGLANG_ENABLE_FOO"],
         ),
         output_subdir=tmp_path / "unset_the_world",
     )
@@ -638,6 +640,7 @@ def test_build_variant_yaml_refuses_to_unset_pinned_envs(tmp_path):
     envs = yaml.safe_load(out.read_text())["benchmark"]["envs"]
     assert envs["TP"] == 8
     assert envs["CONC"] == 64
+    assert envs["DATASET_PATH"] == "/data/prompts.jsonl", "a variant on random prompts is not the baseline's workload"
     # A plain tuning knob is still removable; only the pins are protected.
     assert "SGLANG_ENABLE_FOO" not in envs
 

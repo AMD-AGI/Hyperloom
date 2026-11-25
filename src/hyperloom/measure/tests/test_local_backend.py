@@ -71,6 +71,7 @@ class _Grid:
         self.env_seen: list[dict[str, str | None]] = []
         self.configs: list[dict[str, Any]] = []  # what each call's point held while it ran: a copy is gone after
         self.shapes: list[dict[str, str]] = []  # the round's shape run_grid would read from the environment
+        self.datasets: list[str | None] = []  # the prompt dataset it would read there
 
     def result(self, name: str, **kwargs: Any) -> VariantResult:
         workspace = self.tmp_path / "ws" / name
@@ -89,6 +90,7 @@ class _Grid:
         self.calls.append(kwargs)
         self.configs.append(yaml.safe_load(Path(kwargs["recipe"].base_yaml_path).read_text()))
         self.shapes.append({key: os.environ[key] for key in AMBIENT_SHAPE_ENVS if key in os.environ})
+        self.datasets.append(os.environ.get("DATASET_PATH"))
         self.env_seen.append(
             {
                 key: os.environ.get(key)
@@ -1124,6 +1126,30 @@ def test_the_boot_of_a_sweep_arm_does_not_evaluate_and_asks_one_request_and_no_b
     ]
     assert outcome.returncode == 0
     assert os.environ.get("CONC") == ambient_conc, "the process environment is put back after the test"
+
+
+@pytest.mark.parametrize(
+    ("point", "left", "read"),
+    [
+        ("/data/prompts.jsonl", None, "/data/prompts.jsonl"),
+        ("/data/prompts.jsonl", "/data/other.jsonl", "/data/prompts.jsonl"),
+        (None, "/data/other.jsonl", None),
+    ],
+    ids=["none_in_the_process", "another_in_the_process", "random_prompts_with_one_in_the_process"],
+)
+def test_a_test_reads_the_prompt_dataset_of_its_point_whatever_the_process_holds(
+    grid, server, tmp_path, monkeypatch, point, left, read
+):
+    if left is None:
+        monkeypatch.delenv("DATASET_PATH", raising=False)
+    else:
+        monkeypatch.setenv("DATASET_PATH", left)
+    counts = {} if point is None else {"DATASET_PATH": point}
+
+    _run(_call(tmp_path, _point(tmp_path, "p", **counts)))
+
+    assert grid.datasets and set(grid.datasets) == {read}
+    assert os.environ.get("DATASET_PATH") == left, "the process environment is put back after the test"
 
 
 def _graded_sweep_answers(grid: _Grid, *levels: int, score: float = 0.64) -> VariantResult:

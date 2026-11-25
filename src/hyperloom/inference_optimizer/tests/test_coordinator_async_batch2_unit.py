@@ -2531,7 +2531,7 @@ async def test_advance_phase_escalation_transition(coord: Coordinator, monkeypat
 async def test_advance_phase_terminal_sets_stop_reason(coord: Coordinator, monkeypatch) -> None:
     import hyperloom.orchestrator.phases.machine_state as ps
 
-    coord.shared_state.phase = "SWEEP"
+    coord.shared_state.phase = "CYCLE_END"
     coord.shared_state.stop_reason = ""
     monkeypatch.setattr(
         phase_transitions, "compute_next_phase", lambda *a, **k: (ps.PHASE_CLOSE, "target_reached", {"terminal": True})
@@ -2552,7 +2552,7 @@ async def test_advance_phase_terminal_sets_stop_reason(coord: Coordinator, monke
         # Entering the phase whose exit reads the hint is no exception: the hint was emitted for the phase it was
         # emitted in, and carrying it across would end FRAMEWORK_AGENT on arrival.
         ("PRELUDE", "FRAMEWORK_AGENT", "prelude_done"),
-        ("FRAMEWORK_AGENT", "SWEEP", "some_other_reason"),
+        ("FRAMEWORK_AGENT", "CYCLE_END", "some_other_reason"),
     ],
 )
 async def test_advance_phase_hint_discarded_on_a_transition_it_did_not_drive(
@@ -2969,7 +2969,7 @@ async def test_on_enter_close_runs_full_sequence(coord: Coordinator, monkeypatch
 
     coord.shared_state.set_stop_reason("target_reached")
     await coord.phase_close.on_enter_close(
-        Transition(from_phase="SWEEP", to_phase="CLOSE", reason="SWEEP", evidence={})
+        Transition(from_phase="CYCLE_END", to_phase="CLOSE", reason="CYCLE_END", evidence={})
     )
     assert coord.shared_state.close_sequence_done is True
     assert coord.shared_state.stop_reason

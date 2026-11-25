@@ -15,58 +15,15 @@
 #                 are configured), each a pattern of a file's name, or with a slash of its upstream path, where *
 #                 also matches a slash, and the package directories its runtime writes builds into (generated); every
 #                 examples.place line "<upstream path> -> <base>:<path in base>" must be placed so, every
-#                 examples.refuse path refused
+#                 examples.native line placed so and named native, every examples.refuse path refused. A component
+#                 no image installs lies over the pinned checkout of its upstream (base: checkout) in every section,
+#                 each section native throughout ("<prefix>/*")
 #   arg_value     reserved: no rule reads one yet, so a pack that holds one is refused
 #   kernel_table  reserved: no rule reads one yet, so a pack that holds one is refused
-# An entry may also declare image_check: checks the environment a session runs in can answer about the fact
-# (path_exists, csv_has_columns, cli_accepts_flag, source_contains, module_attr; hyperloom.common.outside_facts.
-# image_check_spec). Each carries examples.pass and examples.fail that the loader runs it against, and {ref: entry.role}
-# reads a name another entry holds. A fact with no check is reported unverifiable by the image check.
 # Every entry names its project, says why the fact exists and carries examples. A pack that fails its own examples, or
 # lacks an entry the code reads, is refused when it is loaded; nothing falls back to a default.
-version: "25"
+version: "26"
 facts:
-  aiter_merged_view:
-    kind: names
-    project: aiter
-    reason: >-
-      AITER_CONFIG.update_config_files writes the merged view of a variable that lists several tuned tables to this
-      directory, a literal in aiter's function body that no variable and no TMPDIR moves; two local tests that share
-      /tmp overwrite each other's merged file there.
-    names:
-      dir: /tmp/aiter_configs
-    examples:
-      - "hyperloom.measure.aiter_merge_hook: the sandbox start-up hook redirects this directory (a standalone copy of the literal, pinned to this entry by a test)"
-    image_check:
-      - check: source_contains
-        module: aiter.jit.core
-        text: {ref: aiter_merged_view.dir}
-        examples:
-          pass:
-            - source: |-
-                config_path = Path("/tmp/aiter_configs/")
-                if not config_path.exists():
-                    config_path.mkdir(parents=True, exist_ok=True)
-          fail:
-            - source: |-
-                config_path = Path(tempfile.gettempdir()) / "aiter_configs"
-                if not config_path.exists():
-                    config_path.mkdir(parents=True, exist_ok=True)
-      - check: module_attr
-        module: aiter.jit.core
-        attr: AITER_CONFIG.update_config_files
-        examples:
-          pass:
-            - source: |-
-                class AITER_CONFIG:
-                    def update_config_files(self, file_path: str, merge_name: str, env_name: str | None = None):
-                        return file_path
-          fail:
-            - source: |-
-                class AITER_CONFIG:
-                    def merge_config_files(self, file_path: str, merge_name: str):
-                        return file_path
-
   aiter_meta_dir:
     kind: names
     project: aiter
@@ -88,42 +45,6 @@ facts:
     examples:
       - "hyperloom.measure.farm: a farm that lays a patched aiter sets the variable to the image's own meta directory, resolved as aiter resolves it, unless the server already inherits one"
       - "hyperloom_multibranch.toolbox.tools.kernel_tune: the tuner is pinned to the directory around the aiter package or its aiter_meta, whichever holds csrc"
-    image_check:
-      - check: source_contains
-        module: aiter.jit.core
-        text:
-          - {ref: aiter_meta_dir.variable}
-          - {ref: aiter_meta_dir.wheel_dir}
-          - {ref: aiter_meta_dir.marker_dir}
-          - {ref: aiter_meta_dir.install_mode_file}
-          - {ref: aiter_meta_dir.develop_mode}
-        match: word
-        examples:
-          pass:
-            - source: |-
-                try:
-                    with open(f"{this_dir}/../install_mode", "r") as f:
-                        isDevelopMode = f.read().strip() == "develop"
-                except FileNotFoundError:
-                    isDevelopMode = True
-                AITER_META_DIR = AITER_ROOT_DIR if isDevelopMode else os.path.abspath(f"{AITER_ROOT_DIR}/aiter_meta/")
-                env_meta = os.environ.get("AITER_META_DIR")
-                if env_meta:
-                    AITER_META_DIR = os.path.abspath(env_meta)
-                if not os.path.exists(os.path.join(AITER_META_DIR, "csrc")):
-                    AITER_META_DIR = AITER_ROOT_DIR
-          fail:
-            - source: |-
-                AITER_META_DIR = os.path.abspath(f"{AITER_ROOT_DIR}/aiter_meta/")
-                env_meta = os.environ.get("AITER_META_DIR")
-                if env_meta:
-                    AITER_META_DIR = os.path.abspath(env_meta)
-                if not os.path.exists(os.path.join(AITER_META_DIR, "csrc")):
-                    AITER_META_DIR = AITER_ROOT_DIR
-            - source: |-
-                AITER_SOURCE_DIR = os.environ.get("AITER_SOURCE_DIR") or AITER_ROOT_DIR
-                if not os.path.exists(os.path.join(AITER_SOURCE_DIR, "csrc")):
-                    AITER_SOURCE_DIR = os.path.join(AITER_ROOT_DIR, "aiter_src")
 
   sglang_image_layout:
     kind: names
@@ -137,16 +58,6 @@ facts:
     examples:
       - "hyperloom.measure.compile: IMAGE_SOURCE_ROOTS lists the workspace as a place sources are read from"
       - "hyperloom.measure.framework.base: DEFAULT_CONFIGS is the aiter tables directory, the workspace joined with aiter_configs"
-    image_check:
-      - check: path_exists
-        installed: sglang
-        path: [{ref: sglang_image_layout.workspace}, {ref: sglang_image_layout.aiter_configs}]
-        type: dir
-        examples:
-          pass:
-            - tree: ["/sgl-workspace/aiter/aiter/configs/"]
-          fail:
-            - tree: ["/sgl-workspace/aiter/aiter/", "/sgl-workspace/aiter/aiter/jit/"]
 
   context_length_flags:
     kind: names
@@ -159,51 +70,6 @@ facts:
       vllm: --max-model-len
     examples:
       - "hyperloom.measure.eval_context: a launch's served context is read from whichever of the two flags it carries"
-    image_check:
-      - check: cli_accepts_flag
-        module: sglang.launch_server
-        flag: {ref: context_length_flags.sglang}
-        examples:
-          pass:
-            - help: |-
-                usage: launch_server.py [-h] --model-path MODEL_PATH
-                options:
-                  -h, --help            show this help message and exit
-                  --model-path MODEL_PATH, --model MODEL_PATH
-                                        The path of the model weights.
-                  --tokenizer-path TOKENIZER_PATH
-                                        The path of the tokenizer.
-                  --context-length CONTEXT_LENGTH
-                                        The model's maximum context length.
-          fail:
-            - help: |-
-                usage: launch_server.py [-h] --model-path MODEL_PATH
-                options:
-                  -h, --help            show this help message and exit
-                  --model-path MODEL_PATH, --model MODEL_PATH
-                                        The path of the model weights.
-                  --tokenizer-path TOKENIZER_PATH
-                                        The path of the tokenizer.
-                  --max-context-length MAX_CONTEXT_LENGTH
-                                        The model's maximum context length.
-      - check: cli_accepts_flag
-        module: vllm.entrypoints.openai.api_server
-        flag: {ref: context_length_flags.vllm}
-        examples:
-          pass:
-            - help: |-
-                usage: api_server.py [-h] [--host HOST] [--port PORT]
-                ModelConfig:
-                  --model MODEL         Name or path of the Hugging Face model to use.
-                  --max-model-len MAX_MODEL_LEN
-                                        Model context length (prompt and output).
-          fail:
-            - help: |-
-                usage: api_server.py [-h] [--host HOST] [--port PORT]
-                ModelConfig:
-                  --model MODEL         Name or path of the Hugging Face model to use.
-                  --max-model-length MAX_MODEL_LENGTH
-                                        Model context length (prompt and output).
 
   python_import_errors:
     kind: names
@@ -302,24 +168,6 @@ facts:
     examples:
       - "hyperloom_multibranch.toolbox.acceptance: a launch with ENABLED=1 and TUNING not 0 is refused as online tuning"
       - "hyperloom.measure.compile: PER_DEVICE_TABLE_ENVS lists FILENAME, the table that is placed once per device ordinal"
-    image_check:
-      - check: source_contains
-        module: torch.cuda.tunable
-        text:
-          - {ref: pytorch_tunableop_env.enabled}
-          - {ref: pytorch_tunableop_env.tuning}
-          - {ref: pytorch_tunableop_env.table}
-        examples:
-          pass:
-            - source: |-
-                export PYTORCH_TUNABLEOP_ENABLED=1
-                export PYTORCH_TUNABLEOP_TUNING=0
-                results_filename_env = os.getenv("PYTORCH_TUNABLEOP_FILENAME")
-          fail:
-            - source: |-
-                export PYTORCH_TUNABLEOP_ENABLED=1
-                export PYTORCH_TUNABLEOP_TUNING=0
-                results_filename_env = os.getenv("PYTORCH_TUNABLEOP_RESULTS")
 
   inferencex_benchmark_envs:
     kind: names
@@ -464,15 +312,6 @@ facts:
         - "launch_server.py: error: unrecognized argument: --enable-profile-cuda-graph"
       no_match:
         - "launch_server.py: error: the following arguments are required: --model-path"
-    image_check:
-      - check: source_contains
-        module: argparse
-        text: "unrecognized arguments"
-        examples:
-          pass:
-            - source: "msg = _('unrecognized arguments: %s')"
-          fail:
-            - source: "msg = _('unexpected arguments: %s')"
 
   argparse_invalid_choice:
     kind: log_regex
@@ -484,15 +323,6 @@ facts:
         - "launch_server.py: error: argument --attention-backend: invalid choice: 'fa9' (choose from 'triton', 'aiter')"
       no_match:
         - "launch_server.py: error: argument --tp-size: invalid int value: 'many'"
-    image_check:
-      - check: source_contains
-        module: argparse
-        text: "invalid choice"
-        examples:
-          pass:
-            - source: "msg = _('invalid choice: %(value)r (choose from %(choices)s)')"
-          fail:
-            - source: "msg = _('unknown choice: %(value)r (choose from %(choices)s)')"
 
   transformers_unknown_architecture:
     kind: log_regex
@@ -506,15 +336,6 @@ facts:
         - "but Transformers does not recognize this architecture. This could be because of an issue with the checkpoint"
       no_match:
         - "Transformers loaded the architecture from the checkpoint's config"
-    image_check:
-      - check: source_contains
-        module: transformers.models.auto.configuration_auto
-        text: does not recognize this architecture
-        examples:
-          pass:
-            - source: '"but Transformers does not recognize this architecture. This could be because of an "'
-          fail:
-            - source: '"but this model type is not supported by Transformers. This could be because of an "'
 
   transformers_does_not_recognize:
     kind: log_regex
@@ -528,15 +349,6 @@ facts:
         - "The checkpoint you are trying to load has model type `qwen3_5` but Transformers does not recognize this architecture."
       no_match:
         - "The checkpoint you are trying to load has model type `qwen3` and Transformers loads it"
-    image_check:
-      - check: source_contains
-        module: transformers.models.auto.configuration_auto
-        text: Transformers does not recognize
-        examples:
-          pass:
-            - source: '"but Transformers does not recognize this architecture. This could be because of an "'
-          fail:
-            - source: '"but this model type is not supported by Transformers. This could be because of an "'
 
   aiter_log_tuned_config:
     kind: names
@@ -550,15 +362,6 @@ facts:
     examples:
       - "hyperloom_multibranch.toolbox.table_hits: a table is called not exercised only when a server with this variable set logged no hit in its rows"
       - "hyperloom_multibranch.toolbox.planner: every point it plans launches its server with this variable at 1, a baseline's and a candidate's alike"
-    image_check:
-      - check: source_contains
-        module: aiter.jit.core
-        text: {ref: aiter_log_tuned_config.env}
-        examples:
-          pass:
-            - source: 'AITER_LOG_TUNED_CONFIG = int(os.getenv("AITER_LOG_TUNED_CONFIG", "0"))'
-          fail:
-            - source: 'AITER_LOG_TUNED = int(os.getenv("AITER_LOG_TUNED", "0"))'
 
   aiter_tuned_hit:
     kind: log_regex
@@ -591,29 +394,6 @@ facts:
       no_match:
         - "[aiter] shape is M:512, N:6144, K:4096 dtype='torch.bfloat16' otype='torch.bfloat16' bias=False, scaleAB=False, bpreshuffle=False, not found tuned config in /work/hl-framework-x/merged/bf16_tuned_gemm.csv, will use default config! using torch solution:0"
         - "[aiter] shape is M:8192, N:7168, K:5120, not found tuned config in /work/hl-framework-x/merged/a8w8_bpreshuffle_tuned_gemm.csv, will use default config!"
-    image_check:
-      - check: source_contains
-        module: aiter.tuned_gemm
-        text: ["found padded_M:", "is tuned on cu_num", "libtype is", "kernel name is"]
-        examples:
-          pass:
-            - source: |-
-                f"shape is M:{M}, N:{N}, K:{K} {dtype=} {otype=} {bias=}, {scaleAB=}, {bpreshuffle=} found padded_M: {padded_M}, N:{N}, K:{K} is tuned on cu_num = {cu_num} in {table}, libtype is {libtype}, kernel name is {kernelName}"
-          fail:
-            - source: |-
-                f"shape is M:{M}, N:{N}, K:{K} {dtype=} {otype=} {bias=}, {scaleAB=}, {bpreshuffle=} hit a tuned row for cu_num = {cu_num} in {table}, libtype is {libtype}, kernel name is {kernelName}"
-      - check: csv_has_columns
-        installed: sglang
-        path:
-          - {ref: sglang_image_layout.workspace}
-          - {ref: sglang_image_layout.aiter_configs}
-          - bf16_tuned_gemm.csv
-        columns: [M, N, K, bias, dtype, outdtype, scaleAB, bpreshuffle, cu_num, libtype, kernelName]
-        examples:
-          pass:
-            - header: "gfx,cu_num,M,N,K,bias,dtype,outdtype,scaleAB,bpreshuffle,libtype,solidx,splitK,us,kernelName,err_ratio,tflops,bw"
-          fail:
-            - header: "gfx,cu_num,M,N,K,bias,dtype,outdtype,scaleAB,bpreshuffle,libtype,solidx,splitK,us,kernel_name,err_ratio,tflops,bw"
 
   aiter_tuned_hit_marker:
     kind: log_regex
@@ -1324,3 +1104,56 @@ facts:
       refuse:
         - "python/flydsl/_mlir/_mlir_libs/_mlir.cpython-310-x86_64-linux-gnu.so"
         - "lib/Conversion/pass.cpp"
+
+  component_layout_llamacpp:
+    kind: component_layout
+    project: llama.cpp
+    reason: >-
+      llama.cpp installs no Python package: the server a session measures is llama-server, built with CMake from the
+      pinned checkout of its repository, so the layout lies over that checkout. A patch may change the sources
+      llama-server is compiled from: ggml (the tensor library; its HIP backend compiles ggml/src/ggml-cuda), src
+      (libllama), include (its public headers), common (argument parsing, sampling, speculative decoding) and
+      tools/server. Every file there is native: only a build of the checkout measures it, and that build refuses a change
+      to its definition (CMakeLists.txt, *.cmake, cmake/). Everything else is refused: the other tools, llama-bench among
+      them (a measuring tool, not the server), vendor (third-party copies), the top-level build definition, the
+      conversion scripts and the docs. A compiled file is refused wherever it lies.
+    import_name: llamacpp
+    sections:
+      - {prefix: ggml, base: checkout, into: ggml}
+      - {prefix: src, base: checkout, into: src}
+      - {prefix: include, base: checkout, into: include}
+      - {prefix: common, base: checkout, into: common}
+      - {prefix: tools/server, base: checkout, into: tools/server}
+    refuse:
+      - "*.so"
+      - "*.so.*"
+      - "*.a"
+      - "*.o"
+      - "*.bc"
+      - "*.co"
+      - "*.hsaco"
+      - "*.cubin"
+    native:
+      - "ggml/*"
+      - "src/*"
+      - "include/*"
+      - "common/*"
+      - "tools/server/*"
+    generated: []
+    examples:
+      place: []
+      native:
+        - "ggml/src/ggml-cuda/mmq.cuh -> checkout:ggml/src/ggml-cuda/mmq.cuh"
+        - "src/llama-graph.cpp -> checkout:src/llama-graph.cpp"
+        - "include/llama.h -> checkout:include/llama.h"
+        - "common/speculative.cpp -> checkout:common/speculative.cpp"
+        - "tools/server/server.cpp -> checkout:tools/server/server.cpp"
+      refuse:
+        - "CMakeLists.txt"
+        - "cmake/build-info.cmake"
+        - "tools/llama-bench/llama-bench.cpp"
+        - "tools/mtmd/mtmd.cpp"
+        - "vendor/cpp-httplib/httplib.h"
+        - "convert_hf_to_gguf.py"
+        - "docs/build.md"
+        - "ggml/src/libggml-hip.a"

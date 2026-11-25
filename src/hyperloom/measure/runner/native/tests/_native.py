@@ -11,14 +11,15 @@ a marker in the source to misbehave in each way the harvest must refuse.
 from __future__ import annotations
 
 import hashlib
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 
 from hyperloom.contracts.recipe import ComponentPatches, PatchRef
 from hyperloom.measure import signing
 from hyperloom.measure.compile import LocalBlobStore
 from hyperloom.measure.runner.native.builder import BuildMachine, BuildRequest, compile_tree, plan
-from hyperloom.measure.runner.native.recipes import NativeRecipe, Preflight
+from hyperloom.measure.runner.native.preflight import Preflight
+from hyperloom.measure.runner.native.recipes import NativeRecipe
 from hyperloom.measure.runner.native.service import Ensured, ensure_build
 from hyperloom.measure.jit.native.store import BuildStore
 from hyperloom.measure.jit.native.trust import Signer, Trust, TrustedKey
@@ -100,12 +101,42 @@ def fake_recipe(preflight: CountingPreflight, budget_sec: int = 120) -> NativeRe
         source_dir="native",
         package_dir="python",
         outputs=(f"{COMPONENT}/*.so",),
-        command=("{python}", "build.py"),
+        steps=(("{python}", "build.py"),),
         budget_sec=budget_sec,
         max_jobs=1,
         max_output_bytes=MAX_OUTPUT_BYTES,
         preflight=preflight,
     )
+
+
+#: A step that prints its arguments, placeholders filled, before the compile.
+ECHO_STEP = ("{python}", "-c", "import sys; print('step', *sys.argv[1:])", "-DT={gfx}", "-j", "{jobs}", "-DC={commit}")
+
+
+def stepped_recipe() -> NativeRecipe:
+    """The stand-in recipe with :data:`ECHO_STEP` before its compile: what a build runner's child imports by name."""
+    return replace(fake_recipe(CountingPreflight()), steps=(ECHO_STEP, ("{python}", "build.py")))
+
+
+def executable_recipe() -> NativeRecipe:
+    """The stand-in recipe as a build that makes an executable and no package: its output made executable, kept whole
+    (what a build runner's child imports by name)."""
+    return replace(
+        fake_recipe(CountingPreflight()),
+        outputs=(),
+        steps=(("{python}", "build.py"), ("chmod", "+x", f"python/{OUTPUT}")),
+        against_image=False,
+        executables=(OUTPUT,),
+    )
+
+
+#: A step that prints the CPUs the compile may run on and its priority.
+AFFINITY_STEP = ("{python}", "-c", "import os; print('cpus', sorted(os.sched_getaffinity(0)), 'nice', os.nice(0))")
+
+
+def affinity_recipe() -> NativeRecipe:
+    """The stand-in recipe with :data:`AFFINITY_STEP` before its compile: what a build runner's child imports by name."""
+    return replace(fake_recipe(CountingPreflight()), steps=(AFFINITY_STEP, ("{python}", "build.py")))
 
 
 def upstream_tree(root: Path, source: str = BASE_SOURCE) -> Path:

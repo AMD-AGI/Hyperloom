@@ -313,12 +313,13 @@ def _prepare(ctx: _Context, spec: MeasurementSpec) -> tuple[list[Path], Path, Fa
     try:
         placed = place_attachments(spec.attachments, ctx.work / "attach", ctx.read_blob)
         python = server_python(yaml.safe_load(spec.config[0].yaml) or {}, default="python3")
+        inherited = inherited_environment(ctx.environ, spec.process_env, spec.unset_envs)
         farm = build_farm(
             built_roots(spec.environment.roots, _sheet_builds(spec, ctx.environ)),
             ctx.work / "farm",
             python=python,
             read_blob=ctx.read_blob,
-            inherited=inherited_environment(ctx.environ, spec.process_env, spec.unset_envs),
+            inherited=inherited,
         )
         unpatched = (
             lay_profile_patch(farm, yaml.safe_load(spec.config[0].yaml) or {}) if spec.kind == _PROFILE else None
@@ -334,6 +335,7 @@ def _prepare(ctx: _Context, spec: MeasurementSpec) -> tuple[list[Path], Path, Fa
             visible_devices=ctx.environ.get(ROCR_VISIBLE_DEVICES_ENV),
             farm=farm,
             path=ctx.environ.get("PATH"),
+            inherited=inherited,
         )
         points = [
             rewrite_config(point.yaml, ctx.work / f"point_{index}.yaml", placement)

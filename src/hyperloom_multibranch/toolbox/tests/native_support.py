@@ -21,7 +21,8 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from hyperloom.measure.compile import ComponentLayout, PackageBase
-from hyperloom.measure.runner.native.recipes import NativeRecipe, Preflight
+from hyperloom.measure.runner.native.preflight import Preflight
+from hyperloom.measure.runner.native.recipes import NativeRecipe
 from hyperloom.measure.tests._recipes import write_tree
 
 COMPONENT = "fakepkg"
@@ -87,7 +88,7 @@ def stand_in_recipe() -> NativeRecipe:
         source_dir="native",
         package_dir="python",
         outputs=(f"{COMPONENT}/*.so",),
-        command=("{python}", "build.py", str(extension())),
+        steps=(("{python}", "build.py", str(extension())),),
         budget_sec=120,
         max_jobs=1,
         max_output_bytes=64 * 1024 * 1024,

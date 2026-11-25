@@ -66,6 +66,7 @@ _BYTES_PER_MIB = 1024 * 1024
 _BYTES_PER_GB = 1_000_000_000
 _RANDOM_RANGE_RATIO = "0.8"
 _THINKING_MODE = "thinking_on"
+_FALSE = "false"
 #: InferenceX's value for a spec-decoding or KV-offloading setting the point leaves off.
 _UNSET = "none"
 
@@ -133,7 +134,8 @@ class InferencexPoint:
     kv_offloading: str | None
     kv_offload_backend: Mapping[str, Any] | None
     router: Mapping[str, Any] | None
-    total_cpu_dram_gb: int
+    #: ``None`` where InferenceX sizes the offload DRAM at launch instead.
+    total_cpu_dram_gb: int | None
     require_power: bool
 
     @property
@@ -164,13 +166,14 @@ class InferencexPoint:
             "OSL": str(self.osl or 0),
             "RANDOM_RANGE_RATIO": _RANDOM_RANGE_RATIO,
             "THINKING_MODE": _THINKING_MODE,
-            "RUN_EVAL": "false",
-            "EVAL_ONLY": "false",
+            "RUN_EVAL": _FALSE,
+            "EVAL_ONLY": _FALSE,
             "REQUIRE_POWER": "1" if self.require_power else "0",
             "ROUTER_METADATA": json.dumps(self.router) if self.router else "",
             "KV_OFFLOAD_BACKEND_METADATA": json.dumps(self.kv_offload_backend) if self.kv_offload_backend else "",
-            "TOTAL_CPU_DRAM_GB": str(self.total_cpu_dram_gb),
         }
+        if self.total_cpu_dram_gb is not None:
+            environment["TOTAL_CPU_DRAM_GB"] = str(self.total_cpu_dram_gb)
         if agentic:
             environment["KV_OFFLOADING"] = str(self.kv_offloading)
         return {
@@ -183,6 +186,7 @@ class InferencexPoint:
             "PCP_SIZE": str(self.pcp),
             "DP_ATTENTION": str(self.dp_attention).lower(),
             "GPU_COUNT": str(self.gpu_count),
+            "IS_MULTINODE": _FALSE,
         }
 
 
@@ -225,8 +229,9 @@ def _concurrencies(benchmark: Mapping[str, Any]) -> list[int]:
 
 def _cpu_dram_gb(
     runner: str, block: Mapping[str, Any], benchmark: Mapping[str, Any], runners: Mapping[str, Any]
-) -> int:
-    """The CPU DRAM in GB an AgentX point offloads KV cache to: its GPUs' share of the node's DRAM, 0 without."""
+) -> int | None:
+    """The CPU DRAM in GB an AgentX point offloads KV cache to: its GPUs' share of the node's DRAM, 0 without, and
+    ``None`` when the block names no ``dram-utilization``: InferenceX then sizes it at launch."""
     if benchmark["kv-offloading"] != "dram":
         return 0
     cluster = (
@@ -234,11 +239,13 @@ def _cpu_dram_gb(
     )
     if cluster is None:
         raise RecipeSourceError(f"runner {runner} offloads to CPU DRAM but is no cluster with hardware facts")
-    available = min(cluster["available-cpu-dram-mib"], _MAX_AGENTIC_CPU_DRAM_MIB)
     per_node = cluster["gpus-per-node"]
     gpus = benchmark["tp"] * benchmark.get("pp", 1) * benchmark.get("pcp-size", 1)
     if gpus > per_node:
         raise RecipeSourceError(f"a {gpus}-GPU point of runner {runner} exceeds its {per_node} GPUs per node")
+    if "dram-utilization" not in block:
+        return None
+    available = min(cluster["available-cpu-dram-mib"], _MAX_AGENTIC_CPU_DRAM_MIB)
     share = Decimal(available) * _BYTES_PER_MIB * Decimal(str(block["dram-utilization"])) * gpus / per_node
     return int(share / _BYTES_PER_GB)
 
@@ -521,9 +528,10 @@ def _warnings(point: InferencexPoint, query: LaunchQuery, target: int) -> tuple[
 
 
 def _launch(
-    point: InferencexPoint, query: LaunchQuery, snapshot: InferencexSnapshot, target: int
+    point: InferencexPoint, query: LaunchQuery, snapshot: InferencexSnapshot, target: int, arm_concs: tuple[int, ...]
 ) -> SourceLaunch | str:
-    """The launch ``point`` binds, or why this source cannot reproduce it."""
+    """The launch ``point`` binds, carrying ``arm_concs``, the concurrencies of its arm, or why this source cannot
+    reproduce it."""
     if point.key in snapshot.rejections:
         return f"InferenceX refused it: {snapshot.rejections[point.key]}"
     selection = snapshot.selections.get(point.key)
@@ -567,6 +575,7 @@ def _launch(
         kv_offloading=point.kv_offloading or _UNSET,
         stripped=command.stripped,
         warnings=_warnings(point, query, target),
+        source_concs=arm_concs,
     )
 
 
@@ -664,7 +673,7 @@ def inferencex_launches(query: LaunchQuery, snapshot: InferencexSnapshot) -> tup
         launch = (
             f"it has no point at concurrency {target} or above"
             if point is None
-            else _launch(point, query, snapshot, target)
+            else _launch(point, query, snapshot, target, tuple(sorted({each.conc for each in points})))
         )
         if isinstance(launch, str):
             reasons[arm_key] = launch

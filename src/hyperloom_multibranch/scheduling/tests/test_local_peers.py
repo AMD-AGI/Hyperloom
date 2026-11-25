@@ -43,18 +43,34 @@ from hyperloom.measure.compile import ComponentLayout, LocalBlobStore, PackageBa
 from hyperloom.measure.hosted_spec import SpecContext
 from hyperloom.measure.pins import ActiveImage
 from hyperloom.orchestrator.actions.executors import TOOL_CACHE_ENV
-from hyperloom_kb import ReadStatus
 from hyperloom_multibranch.contracts.gate import RegressionOutcome
 from hyperloom_multibranch.contracts.blackboard import INTEGRATION_BRANCH, Role, Writer
-from hyperloom_multibranch.contracts.blackboard.records import JudgementWrite, LineageEvent
+from hyperloom_multibranch.contracts.blackboard.records import BlackboardSnapshot, JudgementWrite, LineageEvent
 from hyperloom_multibranch.contracts.blackboard.vocab import Conclusion, InboxKind, LearningKind, LeaseKind, LineageKind
 from hyperloom_multibranch.blackboard import STALL_TESTS, LocalBlackboard
+from hyperloom_multibranch.blackboard.knowledge.experience import experience_identity
+from hyperloom_multibranch.blackboard.knowledge.recall import SchemaReaders
+from hyperloom_multibranch.blackboard.knowledge.tests.fakes import (
+    FakeExperienceReader,
+    completed_read,
+    experience_summary,
+)
 from hyperloom_multibranch.blackboard.rsi.archive import ARCHIVE_ENV, TreeArchive
 from hyperloom_multibranch.blackboard.rsi.lesson_recall import LessonRecall
 from hyperloom_multibranch.blackboard.rsi.lessons import LessonPool, LessonRevision, lesson_id_for, revision_id_for
 from hyperloom_multibranch.blackboard.rsi.similarity import task_conditions
-from hyperloom_multibranch.blackboard.tests.factories import START, delta, intent, judgement, profile, request, result
-from hyperloom_multibranch.contracts.toolbox import SCOPE_SPECIALIST, SpecialistGrant
+from hyperloom_multibranch.blackboard.tests.factories import (
+    START,
+    FakeClock,
+    delta,
+    intent,
+    judgement,
+    profile,
+    request,
+    result,
+)
+from hyperloom_multibranch.blackboard.tests.sessions import scripted_session
+from hyperloom_multibranch.contracts.toolbox import SCOPE_SPECIALIST, SpecialistGrant, WorkloadKind
 from hyperloom_multibranch.repo.git_repo import GitExperimentRepo
 from hyperloom_multibranch.rulegate.fix_case import FIX_CASE_ID, FixCase, read_case
 from hyperloom_multibranch.rulegate.gate import RuleGate
@@ -66,6 +82,7 @@ from hyperloom_multibranch.rulegate.service import GateService
 from hyperloom_multibranch.scheduling.clock import Clock
 from hyperloom_multibranch.scheduling.decisions import DecisionLog
 from hyperloom_multibranch.scheduling.forks import ForkDesk
+from hyperloom_multibranch.scheduling.experience_kb import ExperienceReaders
 from hyperloom_multibranch.scheduling.hosted_peers import HostedSandboxes
 from hyperloom_multibranch.scheduling.layout import SESSION_PREFIX, SessionLayout, create_session
 from hyperloom_multibranch.scheduling import launch_isolation as launch_isolation_module
@@ -97,6 +114,7 @@ from hyperloom_multibranch.scheduling.local_peers import (
     workload_environment,
     workload_rule,
     _agent_spec,
+    _export_workload,
     _lease_area,
     _specialist_role,
     specialist_readable,
@@ -152,6 +170,8 @@ WORKLOAD = Workload(
     "/models/Llama-3-8B", "sglang", 2, 16, "bf16", "mi355x", KernelOptimizer.FORGE, InferenceXShape(1024, 512)
 )
 AGENTX = replace(WORKLOAD, inferencex=None)
+DATASET = "/data/prompts.jsonl"
+ON_A_DATASET = replace(WORKLOAD, inferencex=InferenceXShape(1024, 512, DATASET))
 TOTAL_AGENTX = replace(AGENTX, agentx_objective=AgentXObjective.TOTAL_TOKEN_THROUGHPUT)
 BASE = ServerBase(args="--tp-size 2 --enable-hierarchical-cache --hicache-size 180", env={"SGLANG_X": "true"})
 IMAGE = ActiveImage("registry.example/sglang:v1", "sha256:" + "2" * 64)
@@ -211,6 +231,38 @@ def test_the_workload_reaches_the_renderer_as_hyperloom_optimize_exports_it(monk
         "TARGET_GPU_TYPE": "mi355x",
         "KERNEL_OPT_BACKEND_ORDER": "forge",
     }
+
+
+def test_a_workload_on_a_prompt_dataset_reaches_the_renderer_with_it(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("HL_MODEL_BASE", raising=False)
+
+    assert workload_environment(ON_A_DATASET)["DATASET_PATH"] == DATASET
+    assert "DATASET_PATH" not in workload_environment(WORKLOAD)
+
+
+@pytest.mark.parametrize(
+    ("workload", "exported", "sent"),
+    [
+        (ON_A_DATASET, None, DATASET),
+        (ON_A_DATASET, "/data/other.jsonl", DATASET),
+        (WORKLOAD, "/data/other.jsonl", None),
+    ],
+    ids=["resumed_without_it", "resumed_on_another", "random_prompts_resumed_with_one"],
+)
+def test_a_leg_sends_the_prompts_its_workload_records_whatever_its_shell_exports(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, workload: Workload, exported: str | None, sent: str | None
+) -> None:
+    monkeypatch.delenv("HL_MODEL_BASE", raising=False)
+    for name in workload_environment(ON_A_DATASET):
+        monkeypatch.setenv(name, "")
+    if exported is None:
+        monkeypatch.delenv("DATASET_PATH")
+    else:
+        monkeypatch.setenv("DATASET_PATH", exported)
+
+    _export_workload(workload, tmp_path, IMAGE.ref)
+
+    assert os.environ.get("DATASET_PATH") == sent
 
 
 def test_an_inferencex_workload_at_an_ep_reaches_the_renderer_at_that_ep(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -533,16 +585,22 @@ async def _peers(
     reference_script: str = "",
     base: BaseLaunch | None = None,
     agent_launch: str = "/launches/agent.json",
+    kb_url: str = "",
 ) -> AsyncIterator[_Built]:
     """The real peers of a session of ``workload`` on ``host`` in ``tmp_path`` lending ``dev_leases`` dev sandboxes,
     with the wiring their specialist sessions were built on; a branch's worktree, holding no component, is served
     only when the session lends dev sandboxes. The session froze ``base`` (a fixed one by default) unless ``freeze``
-    is false, from the operator's ``reference_script`` when one is given. Every variable the build exports is restored afterwards."""
+    is false, from the operator's ``reference_script`` when one is given. The Experience KB is ``kb_url``'s, none
+    by default. Every variable the build exports is restored afterwards."""
 
     for name in (*workload_environment(workload), BENCHMARK_CONFIG_ENV):
         monkeypatch.setenv(name, "")
     monkeypatch.delenv("GPU_TYPE", raising=False)
-    monkeypatch.delenv("HYPERLOOM_KB_URL", raising=False)
+    if kb_url:
+        monkeypatch.setenv("HYPERLOOM_KB_URL", kb_url)
+        monkeypatch.setenv("HYPERLOOM_KB_TOKEN", "workspace-token")
+    else:
+        monkeypatch.delenv("HYPERLOOM_KB_URL", raising=False)
     clock = Clock()
     layout = create_session(tmp_path, workload.model_basename, clock)
     if freeze:
@@ -773,15 +831,65 @@ async def test_an_agentx_test_may_outlast_its_trace_window_and_an_inferencex_tes
     assert inferencex.timeout_sec == DEFAULT_TEST_TIMEOUT_SEC
 
 
-def test_the_specialists_recall_no_past_learnings_whatever_experience_kb_the_environment_names(
+async def _snapshot(root: Path) -> BlackboardSnapshot:
+    return await (await scripted_session(root, FakeClock())).snapshot()
+
+
+def _kb_learning() -> FakeExperienceReader:
+    return FakeExperienceReader(completed_read(experience_summary("exp-kb", experience_identity(profile()))))
+
+
+async def test_the_specialists_recall_no_past_learnings_without_an_experience_kb(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.setenv("HYPERLOOM_KB_URL", "http://127.0.0.1:9/kb")
     monkeypatch.delenv(ARCHIVE_ENV, raising=False)
+    snapshot = await _snapshot(tmp_path / "blackboard")
 
-    past = specialist_recall(tmp_path).past(profile(), "kv cache", limit=5)
+    found = specialist_recall(tmp_path / "reports").notes(snapshot, "kv cache", limit=5)
 
-    assert (past.status, past.items) == (ReadStatus.DISABLED.value, ())
+    assert found.past == ()
+
+
+async def test_the_specialists_recall_past_learnings_from_the_experience_kb_they_are_given(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.delenv(ARCHIVE_ENV, raising=False)
+    snapshot = await _snapshot(tmp_path / "blackboard")
+    reader = _kb_learning()
+
+    found = specialist_recall(tmp_path / "reports", reader).notes(snapshot, "kv cache", limit=5)
+
+    assert [item.experience_id for item in found.past] == ["exp-kb"] and len(reader.calls) == 1
+
+
+async def test_the_briefs_of_an_inferencex_session_recall_tests_under_both_schemas_from_the_environments_kb(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    async with _peers(tmp_path / "run", monkeypatch, WORKLOAD, kb_url="http://127.0.0.1:9") as built:
+        briefs = built.peers.briefs
+
+    assert isinstance(briefs.experiences, SchemaReaders) and len(briefs.experiences.readers) == 2
+
+
+async def test_the_briefs_and_the_learnings_tool_read_the_readers_of_the_sessions_kind(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    tests, learnings = FakeExperienceReader(completed_read()), _kb_learning()
+    snapshot = await _snapshot(tmp_path / "blackboard")
+    kinds: list[WorkloadKind] = []
+
+    def readers(kind: WorkloadKind) -> ExperienceReaders:
+        kinds.append(kind)
+        return ExperienceReaders(tests, learnings)
+
+    monkeypatch.setattr(local_peers_module, "experience_readers", readers)
+
+    async with _peers(tmp_path / "run", monkeypatch, WORKLOAD) as built:
+        briefs = built.peers.briefs
+
+    assert kinds == [WorkloadKind.INFERENCEX] and briefs.experiences is tests and briefs.learnings is not None
+    assert any(line.endswith("[exp-kb]") for line in await briefs.learnings.lines(snapshot, "kv cache", limit=5))
+    assert len(learnings.calls) == 1 and tests.calls == []
 
 
 def test_the_specialists_recall_past_sessions_lessons_from_the_pool_beside_the_archive(
@@ -846,7 +954,7 @@ def test_the_local_cards_hand_their_toolbox_the_time_every_test_must_end_by(
     built: list[object] = []
     monkeypatch.setattr(local_hosted, "build_local_toolbox", lambda *args, options: built.append(options) or options)
     layout = SimpleNamespace(toolbox=tmp_path / "MB-toolbox", session_id="MB-1")
-    setup = SimpleNamespace(layout=layout, workload=WORKLOAD)
+    setup = SimpleNamespace(layout=layout, workload=WORKLOAD, test_points=1)
 
     LocalCards((0, 1), tests_end_by).toolbox(setup, None, None, None)  # type: ignore[arg-type]
 
