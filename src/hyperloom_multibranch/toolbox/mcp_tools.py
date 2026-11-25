@@ -90,7 +90,7 @@ from hyperloom_multibranch.toolbox.option_reviews import (
     ReviewRefused,
 )
 from hyperloom_multibranch.toolbox.tools.kernel_tune import KERNEL_TUNE_TOOL
-from hyperloom_multibranch.toolbox.tools.knob_tune import KNOB_TUNE_TOOL, MAX_ROWS as KNOB_TUNE_MAX_ROWS
+from hyperloom_multibranch.toolbox.tools.knob_tune import KNOB_TUNE_TOOL
 from hyperloom_multibranch.toolbox.tools.roofline import ROOFLINE_TOOL, TRACELENS_TOOL
 from hyperloom_multibranch.toolbox.tools.upstream_pr import DEFAULT_LIMIT, MAX_LIMIT, UPSTREAM_PR_TOOL
 
@@ -292,8 +292,7 @@ _KNOB_TUNE_GUIDE = (
     "or one the pack does not declare, is refused with the knobs it takes, each with its axes, their values and the "
     "values it may be given. A key is one value of each axis. params.axes maps an axis of the knob to the values of it "
     "to sweep (an axis left out takes all its values), params.values the values to force (all of the knob's when "
-    f"omitted): a request of more than {KNOB_TUNE_MAX_ROWS} keys times values is refused, so name the values of an "
-    "axis or fewer values. params.shapes is the "
+    "omitted). params.shapes is the "
     "weight shapes [m, k] of your model each key is timed at (required), params.copies the weights of each shape "
     "multiplied in one launch so they exceed the GPU's cache as a model's do (default 4), params.rounds the timed "
     "rounds (default 5). A case must be larger than the GPU's cache (copies times the weight's bytes): otherwise its "
