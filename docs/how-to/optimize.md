@@ -222,7 +222,9 @@ an AgentX concurrency counts agent sessions, not requests in flight.
 A multi-branch session runs a concurrency's baseline and optimized point side by
 side, within `--max-parallel-tests`; `--conc-sweep-parallel N` runs up to N of
 the sweep's tests at once, 1 one at a time. A single-lineage session runs one
-point at a time.
+point at a time: arm by arm on held servers, and a concurrency's two arms one
+after the other where each point boots its own server, so a deadline leaves
+pairs measured.
 
 The sweep logs its estimated length before it starts, rewrites
 `reports/conc_sweep_summary.json` and `reports/conc_sweep_raw.csv` after every
