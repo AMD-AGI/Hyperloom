@@ -324,6 +324,59 @@ async def _place(failures: dict[str, list[str]]) -> tuple[TestResult, _PlacingEx
     return await runner.run(_job()), executor, reported
 
 
+class _UnclearOnExecutor(_PlacingExecutor):
+    """A :class:`_PlacingExecutor` whose ``unclear`` node fails every attempt it carries as an unclear failure."""
+
+    def __init__(self, nodes: tuple[str, ...], failures: dict[str, list[str]], unclear: str) -> None:
+        super().__init__(nodes, failures)
+        self.unclear = unclear
+
+    async def run(self, job: TestJob) -> TestResult:
+        node = next(node for node in self.nodes if node not in job.avoid_nodes)
+        if node != self.unclear:
+            return await super().run(job)
+        self.jobs.append(job)
+        self.started.append(self.clock())
+        return TestResult(
+            request_id="r1",
+            validity=Validity.CANDIDATE_FAILED,
+            failure_class=FailureClass.UNCLEAR,
+            failure_reason="server_stalled",
+            sandbox=SandboxFacts(sandbox_id=f"s{job.attempt}", node_name=node),
+        )
+
+
+async def test_an_infrastructure_failure_of_an_unclear_rerun_does_not_send_the_retry_back_to_the_first_node() -> None:
+    """n1 fails every test unclear, the rerun on n2 fails once for a reason held against n2, n3 is healthy: the attempt
+    after the rerun still avoids n1 (and n2, the node just before it), so it runs on n3 and the test succeeds."""
+    executor = _UnclearOnExecutor(("n1", "n2", "n3"), {"n2": [PORT_REASON]}, unclear="n1")
+    reported: list[tuple[str, bool]] = []
+
+    async def on_node_failure(node: str, _reason: str, reproduced: bool) -> None:
+        reported.append((node, reproduced))
+
+    runner = AttemptRunner(executor, avoid=frozenset, on_node_failure=on_node_failure, backoff=_backoff(executor.clock))
+    result = await runner.run(_job())
+    assert [job.avoid_nodes for job in executor.jobs] == [(), ("n1",), ("n1", "n2")]
+    assert result.validity is Validity.SUCCEEDED and result.sandbox.node_name == "n3"
+    assert reported == [("n2", True), ("n1", False)]
+    assert result.attempts[0].failure_class is FailureClass.INFRA, "the unclear failure did not reproduce"
+
+
+async def test_the_node_of_an_unclear_failure_stays_avoided_but_the_list_does_not_grow() -> None:
+    """After the unclear failure on n1, each later attempt avoids n1 and only the node just before it: the fourth avoids
+    n1 and n3, not n2, and runs on n2 again, whose one failure is spent."""
+    executor = _UnclearOnExecutor(("n1", "n2", "n3", "n4"), {"n2": [PORT_REASON], "n3": [PORT_REASON]}, unclear="n1")
+
+    async def on_node_failure(_node: str, _reason: str, _reproduced: bool) -> None:
+        return None
+
+    runner = AttemptRunner(executor, avoid=frozenset, on_node_failure=on_node_failure, backoff=_backoff(executor.clock))
+    result = await runner.run(_job())
+    assert [job.avoid_nodes for job in executor.jobs] == [(), ("n1",), ("n1", "n2"), ("n1", "n3")]
+    assert result.validity is Validity.SUCCEEDED and result.sandbox.node_name == "n2"
+
+
 @pytest.mark.parametrize(
     "reason",
     [f"{RUNNER_LOST}: the sandbox is gone", f"{RUNNER_START_FAILED}: exec format error"],
