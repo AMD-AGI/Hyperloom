@@ -15,6 +15,7 @@ from hyperloom.inference_optimizer.session.geak_rebench_verdict import (
     REBENCH_FAILED,
     REBENCH_FALLBACK_FAILED,
     REBENCH_NO_PROMOTE,
+    REBENCH_UNMEASURED_GIVEN_UP,
     REBENCH_VALIDATED,
 )
 
@@ -24,8 +25,9 @@ from hyperloom.common.overlay import overlay_is_loadable
 from hyperloom.common.perf_metric import agentx_replay_session
 from hyperloom.orchestrator.actions.executors.integrate._integrate_vocabulary import RESULT_GRADED
 from hyperloom.orchestrator.kernel.geak_config import geak_spec_is_env
+from hyperloom.orchestrator.state.kernel_decision_settings import _MAX_INTEGRATE_FAULT_ATTEMPTS
 from hyperloom.orchestrator.state.task_registry import Task
-from .geak_rebench import source_digest, overlay_source_files, verify_source_artifacts
+from .geak_rebench import REVALIDATION_UNMEASURED, source_digest, overlay_source_files, verify_source_artifacts
 
 _INTEGRATE_PATCH = "integrate_patch"
 
@@ -157,13 +159,27 @@ def _revalidation_record(coord: Any, params: dict[str, Any]) -> dict[str, Any]:
 
 
 def _finish(coord: Any, record: dict[str, Any], *, status: str, error: str = "", measurement: Any = None) -> None:
-    coord.shared_state.geak_result = {
+    """Settle the candidate. A measurement that ended with no verdict is counted on the candidate, whatever ended
+    it, a stop by the run included. At ``_MAX_INTEGRATE_FAULT_ATTEMPTS`` of them, the kernel lane's budget of attempts
+    for an integration that ends in a fault, the candidate is given up unmeasured: that is final, it is recorded on
+    the kernel timeline, and the next KERNEL entry runs GEAK afresh."""
+    settled = {
         **coord.shared_state.geak_result,
         "revalidation_status": status,
         "revalidation_error": error,
         "native_source_revalidation": dict(record, status=status),
         "canonical_revalidation": measurement,
     }
+    if status == REBENCH_FAILED:
+        settled[REVALIDATION_UNMEASURED] = int(settled.get(REVALIDATION_UNMEASURED) or 0) + 1
+        if settled[REVALIDATION_UNMEASURED] >= _MAX_INTEGRATE_FAULT_ATTEMPTS:
+            settled["revalidation_error_class"] = REBENCH_UNMEASURED_GIVEN_UP
+            recorder = coord.phase_kernel.timeline()
+            if recorder is not None:
+                recorder.record_geak_rebench_conclusion(
+                    final_status=status, final_error_class=REBENCH_UNMEASURED_GIVEN_UP, final_error=error
+                )
+    coord.shared_state.geak_result = settled
     coord.shared_state.geak_pending = {}
     coord.shared_state.save(coord.session_dir)
 
@@ -197,7 +213,7 @@ async def revalidate_source(coord: Any, params: dict[str, Any]) -> None:
 
     The measurement is the gate: a product the executor graded settles as validated or not promoted. One it did not
     grade settles as failed, which is no verdict: the next KERNEL entry measures it again if GEAK reported it as a
-    win, and runs GEAK afresh otherwise.
+    win, and runs GEAK afresh otherwise, until :func:`_finish` gives the product up.
     """
     try:
         verify_source_artifacts(params)
