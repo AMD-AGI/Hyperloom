@@ -259,9 +259,12 @@ def _pinned_num_prompts_mismatch(state: Any) -> str:
     from hyperloom.common.env_safety import operator_extra_env
     from hyperloom.common.outside_facts import ENV_NUM_PROMPTS
 
-    pinned = str(operator_extra_env().get(ENV_NUM_PROMPTS) or "").strip()
+    try:
+        pinned = exported_num_prompts(operator_extra_env())
+    except ValueError as refused:
+        return f"this run's --extra-env cannot be used: {refused}"
     had = recorded_num_prompts(state)
-    if not pinned or pinned == str(had):
+    if not pinned or pinned == had:
         return ""
     return (
         f"session was measured sending {had or 'the per-concurrency default number of'} prompts a round but this "

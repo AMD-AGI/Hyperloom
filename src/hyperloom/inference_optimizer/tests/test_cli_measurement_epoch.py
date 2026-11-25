@@ -144,6 +144,27 @@ def test_a_resume_that_pins_the_recorded_request_count_sends_it(tmp_path, monkey
     assert _rendered_count_after_resume(state, tmp_path, monkeypatch, "7", {"NUM_PROMPTS": "39"}) == 39
 
 
+@pytest.mark.parametrize("pinned", ["039", "+39"])
+def test_a_session_whose_pin_spells_the_count_another_way_resumes_on_it(tmp_path, monkeypatch, pinned):
+    _export_operator_launch_shape(server_args="", extra_env={"NUM_PROMPTS": pinned})
+    state = _seed_and_reload(tmp_path)
+    assert state.num_prompts == 39
+
+    assert _rendered_count_after_resume(state, tmp_path, monkeypatch, "7", {"NUM_PROMPTS": pinned}) == 39
+    _export_operator_launch_shape(server_args="", extra_env={"NUM_PROMPTS": "040"})
+    assert "NUM_PROMPTS=40" in cb.measurement_state_is_stale(state)
+
+
+@pytest.mark.parametrize("pinned", ["all", "0", "-3"])
+def test_a_resume_whose_pin_is_no_positive_integer_is_refused_naming_it(tmp_path, monkeypatch, pinned):
+    monkeypatch.setenv("NUM_PROMPTS", "39")
+    state = _seed_and_reload(tmp_path)
+
+    _export_operator_launch_shape(server_args="", extra_env={"NUM_PROMPTS": pinned})
+
+    assert f"NUM_PROMPTS={pinned!r} must be a positive integer" in cb.measurement_state_is_stale(state)
+
+
 def test_a_session_pinned_before_the_count_was_recorded_resumes_on_its_pin(tmp_path, monkeypatch):
     state = _seed_and_reload(tmp_path)
     state.operator_extra_env = {"NUM_PROMPTS": "39"}
