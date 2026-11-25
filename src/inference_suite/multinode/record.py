@@ -44,8 +44,6 @@ class PdSourceKind(str, Enum):
     REPLAY = "replay"
     #: An ``amd-master.yaml`` multi-node disaggregated entry of InferenceX main.
     INFERENCEX_MASTER = "inferencex-master"
-    #: A recipe of InferenceX main's multi-node recipe tree that no master entry names.
-    INFERENCEX_LOOKUP = "inferencex-lookup"
     #: A row of the PD default table.
     PD_TABLE = "pd-table"
     #: The single-node base launch the suite resolves, run by every aggregated worker.
