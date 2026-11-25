@@ -89,6 +89,7 @@ class InSessionGate:
         *,
         baseline_case_times: dict | None = None,
         best_mean_case_speedup: float | None = None,
+        starts_on_measured_candidate: bool = False,
     ):
         driver_script, kernel_file = measurement.driver_script, scope.kernel_file
         self.driver_script = driver_script
@@ -135,8 +136,9 @@ class InSessionGate:
         # outer loop force-REVERTs it. "validation_timeout" — full-suite correctness timed out; the outer loop
         # performs the one authoritative retry. "jit_rebuild_unavailable" — the workspace could not assert a rebuild
         # of the edited sources, so nothing was measured in-session; the candidate is untouched and the outer loop
-        # measures it itself. "no_changes" — the stop left no tracked implementation change from HEAD, so there was no
-        # candidate to measure. "gate_error" — the gate itself raised; fail OPEN.
+        # measures it itself. "no_changes" — the stop left no tracked implementation change from HEAD, or left exactly
+        # the measured candidate the session started on, so there was no candidate of its own to measure.
+        # "gate_error" — the gate itself raised; fail OPEN.
         self.end_reason = ""
         # Real failure signals seen this session (block reasons: compile errors, "correct but not faster", …).
         self.findings: list[str] = []
@@ -151,6 +153,10 @@ class InSessionGate:
             if p:
                 self.protected_abs.add(os.path.normpath(os.path.abspath(p)))
         self.workspace_root = self._infer_workspace_root(scope.workspace, driver_script, kernel_file)
+        # A session that merges a round starts on a lane's result rather than on HEAD, and a stop that leaves that as
+        # it was has no candidate of its own to measure. Any other session's uncommitted start is its own to answer
+        # for -- a retried PORT attempt starts on the attempt before it -- so nothing is remembered for it.
+        self._found_fingerprint = self._workspace_fingerprint() if starts_on_measured_candidate else None
 
         globs = list(_DEFAULT_PROTECTED_GLOBS)
         # Repository tasks ship the reference/test implementation INSIDE the repo tree (e.g. AITER's
@@ -270,6 +276,30 @@ class InSessionGate:
             raise RuntimeError("candidate diff fingerprint requires a workspace")
         diff = git("diff", "HEAD", "--", ".", cwd=self.workspace_root).stdout
         return hashlib.sha256(diff.encode()).hexdigest()
+
+    def _workspace_fingerprint(self) -> str | None:
+        """Fingerprint what a candidate is made of: the tracked diff from HEAD and the new files git does not ignore.
+
+        A new file is told apart by its size and modification time, not its bytes, so a workspace that carries large
+        untracked build output costs no more to fingerprint. None where the workspace cannot be read; a fingerprint
+        that is missing or differs only ever sends a stop on to be measured.
+        """
+        root = self.workspace_root
+        if root is None:
+            return None
+        try:
+            digest = hashlib.sha256(self._candidate_diff_sha256().encode())
+            names = git_bytes("ls-files", "--others", "--exclude-standard", "-z", "--", ".", cwd=root).stdout
+            for name in sorted(filter(None, names.split(b"\0"))):
+                found = os.lstat(os.path.join(os.fsencode(root), name))
+                digest.update(b"\0%b\0%d\0%d" % (name, found.st_size, found.st_mtime_ns))
+        except (GitError, OSError):
+            return None
+        return digest.hexdigest()
+
+    def _workspace_is_as_found(self) -> bool:
+        """Whether the workspace holds exactly what this session started on."""
+        return self._found_fingerprint is not None and self._workspace_fingerprint() == self._found_fingerprint
 
     def _protected_key(self, path: Path) -> str:
         root = self.workspace_root
@@ -703,12 +733,15 @@ class InSessionGate:
         return self._allow()
 
     def _stop_without_candidate(self) -> dict:
-        """Allow a stop that leaves nothing changed from HEAD: there is no candidate to validate or bench."""
+        """Allow a stop that leaves the workspace as the session found it: it has no candidate of its own to bench."""
         self.end_reason = "no_changes"
         self.last_wall_ms = None
         self.last_mean_case_speedup = None
         self.last_bench_result = None
-        self._log("ALLOW (no tracked changes from HEAD; nothing to measure) edit=0")
+        if self.edit_count:
+            self._log(f"ALLOW (the workspace is as this session found it; nothing to measure) edit={self.edit_count}")
+        else:
+            self._log("ALLOW (no tracked changes from HEAD; nothing to measure) edit=0")
         return self._allow()
 
     def _record_insession_bench(
@@ -902,12 +935,14 @@ class InSessionGate:
             if protected_delta:
                 return self._stop_for_protected_harness(protected_delta)
 
-            # An unchanged tree is the incumbent: benching it again could only block on noise.
+            # An unchanged tree is the incumbent, and the lane a merge started on has its own measurement: benching
+            # either again could only block on noise. Whether what the workspace holds is kept is the outer loop's
+            # canonical measurement to decide.
             try:
                 self.edit_count = len(self._changed_implementation_paths())
             except (GitError, OSError) as error:
                 return self._allow_unmeasured(f"{type(error).__name__}: {error}")
-            if not self.edit_count:
+            if not self.edit_count or self._workspace_is_as_found():
                 return self._stop_without_candidate()
 
             # Budget (bounded so the gate never hangs the session). Checked before the (GPU-costly) canonical

@@ -132,7 +132,8 @@ round has the same shape whatever its width:
 5. One changed lane is the round's candidate. Several are merged by an
    Implementer session on the canonical tree, which starts from the lane whose
    stop check scored highest above the current best, or from the base when none
-   did, and has to beat the score it started from.
+   did. Its stop is judged against the current best; a merge that takes nothing
+   stops on the lane it started from, which is then the candidate.
 6. The canonical validation and benchmark judge the candidate; nothing a lane
    measured decides a KEEP. A measurement a lane took while it was its round's
    only lane may be reused as the canonical one when it still describes the

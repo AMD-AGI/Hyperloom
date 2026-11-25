@@ -238,9 +238,7 @@ def test_two_changed_lanes_are_merged_by_a_session_that_starts_from_the_better_o
 
     async def agent(kernel_path, history, session_sink, gate_scoring):
         if MERGE_HEADING in history:
-            merges.append(
-                {"history": history, "tree": Path(kernel_path).read_text(), "bar": gate_scoring.best_mean_case_speedup}
-            )
+            merges.append({"history": history, "tree": Path(kernel_path).read_text(), "scoring": gate_scoring})
             Path(kernel_path).write_text("def kernel():\n    return 30\n")
             session_sink["plan"] = "dispatch between the two lanes"
             return "lane 2 is in; lane 1 is in for the small cases"
@@ -262,10 +260,15 @@ def test_two_changed_lanes_are_merged_by_a_session_that_starts_from_the_better_o
     assert "## This lane's focus" in lane_histories[1] and "the small cases" in lane_histories[1]
     assert "- lane 2: the large cases" in lane_histories[1]
     (merge,) = merges
-    # The canonical tree already held the round's best lane, and that lane's score is what the merge has to beat.
+    # The canonical tree already held the round's best lane. The merge's stop is judged against the current best, as
+    # the candidate will be; the lane's own score is one measurement the merge is told about, not its bar.
     assert merge["tree"] == "def kernel():\n    return 20\n"
-    assert merge["bar"] == 2.0
+    assert merge["scoring"].best_mean_case_speedup == 1.0
+    assert merge["scoring"].starts_on_measured_candidate is True
     assert "This workspace already holds lane 2's result" in merge["history"]
+    assert "score 2.0" in merge["history"]
+    assert "leave the workspace exactly as you found it" in merge["history"]
+    assert "judged against the campaign's current best (score 1.0)" in " ".join(merge["history"].split())
     brief = merge["history"]
     assert "- lane 1: stop check passed, score 1.5" in brief
     assert str(ExperimentsLayout.of(workspace.resolve()).round(1) / "lane_1" / "change.diff") in brief
@@ -283,9 +286,7 @@ def test_lanes_that_did_not_beat_the_base_are_merged_onto_the_base(tmp_path, mon
 
     async def agent(kernel_path, history, session_sink, gate_scoring):
         if MERGE_HEADING in history:
-            merges.append(
-                {"history": history, "tree": Path(kernel_path).read_text(), "bar": gate_scoring.best_mean_case_speedup}
-            )
+            merges.append({"history": history, "tree": Path(kernel_path).read_text(), "scoring": gate_scoring})
             Path(kernel_path).write_text("def kernel():\n    return 30\n")
             return "took each lane for the cases it won"
         lane = 2 if "Yours is lane 2" in history else 1
@@ -298,11 +299,36 @@ def test_lanes_that_did_not_beat_the_base_are_merged_onto_the_base(tmp_path, mon
 
     (merge,) = merges
     assert merge["tree"] == "def kernel():\n    return 1\n"
-    assert merge["bar"] == 1.0
+    # The workspace holds no lane's result, so whatever the merge leaves is its own candidate.
+    assert merge["scoring"].best_mean_case_speedup == 1.0
+    assert merge["scoring"].starts_on_measured_candidate is False
     assert "This workspace holds the round's starting point" in merge["history"]
     assert "- lane 1: stop check passed, score 0.9" in merge["history"]
     assert "- lane 2: unverified." in merge["history"]
     assert _decisions(workspace) == ["KEEP"]
+
+
+def test_a_merge_that_takes_nothing_leaves_the_lane_it_started_from_as_the_candidate(tmp_path, monkeypatch):
+    """The other lane's change was measured as not worth taking: the round still has its best lane to measure."""
+    loop, workspace = _two_lane_loop(tmp_path, monkeypatch)
+    _stub_measurement(monkeypatch, walls=[0.5])
+    merged: list[str] = []
+
+    async def agent(kernel_path, history, session_sink):
+        if MERGE_HEADING in history:
+            merged.append(Path(kernel_path).read_text())
+            session_sink["plan"] = "lane 1 measured slower on every case; nothing taken"
+            return "lane 1 is not in: slower on every case"
+        lane = 2 if "Yours is lane 2" in history else 1
+        Path(kernel_path).write_text(f"def kernel():\n    return {10 * lane}\n")
+        _verified(session_sink, score=1.0 + 0.5 * lane, case_ms=1.0 / lane)
+        return f"lane {lane}"
+
+    asyncio.run(loop.run(lane_agents(agent, supervisor_fn=_unused_supervisor)))
+
+    assert merged == ["def kernel():\n    return 20\n"]
+    assert _decisions(workspace) == ["KEEP"]
+    assert (workspace / "kernel.py").read_text() == "def kernel():\n    return 20\n"
 
 
 def test_a_round_whose_only_changed_lane_needs_no_merge_is_measured_as_it_stands(tmp_path, monkeypatch):

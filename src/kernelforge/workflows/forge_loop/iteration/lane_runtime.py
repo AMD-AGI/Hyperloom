@@ -309,22 +309,27 @@ class LaneRuntimeMixin:
         else:
             standing = (
                 f"This workspace already holds lane {start.lane_id}'s result, the round's best by its own stop check "
-                f"(score {start.score}; per-case ms {_case_times(start)}). That score is what this session has to beat."
+                f"(score {start.score}; per-case ms {_case_times(start)}). That is one measurement, taken while the "
+                "other lanes worked: measure what the workspace holds yourself before you change it."
             )
         lanes = "\n".join(self._lane_brief(iteration, lane) for lane in rest)
         return (
             "## Direction: merge this round's lanes\n"
             f"This round ran {len(rest) + (start is not None)} session(s) side by side from one starting point, each "
             f"in its own copy of the workspace. {standing}\n\n"
-            "Bring the changes of the lanes below into this workspace so that the result scores higher than what it "
-            f"holds now:\n{lanes}\n\n"
+            "Bring the changes of the lanes below into this workspace wherever they make what it holds now "
+            f"faster:\n{lanes}\n\n"
             "How to merge is yours to decide: apply a patch as it is, rewrite the places where two lanes changed the "
             "same code, dispatch per case between two lanes' implementations where each wins on different cases, "
             "re-tune a constant where they meet. A lane whose overall score did not rise may still be faster on some "
             "cases: take those. A lane marked unverified ended before its own stop check passed, so check its "
-            "correctness before relying on it. This session opens no optimization direction of its own: it ends when "
-            "each lane's change is either in the kernel or measured as not worth taking. In your final message, say "
-            "for each lane whether its change is in, and for one that is not, what you measured and why."
+            "correctness before relying on it. Keep a lane's change only when your own measurement shows the result "
+            "faster than the workspace was without it: a merge that ends slower than it started is worse than none. "
+            "This session opens no optimization direction of its own: it ends when each lane's change is either in the "
+            "kernel or measured as not worth taking. When none is worth taking, leave the workspace exactly as you "
+            f"found it and stop; what it holds is then the round's candidate. Your stop is judged against the "
+            f"campaign's current best (score {best}), not against the score a lane reported. In your final message, "
+            "say for each lane whether its change is in, and for one that is not, what you measured and why."
         )
 
     def _lane_brief(self, iteration: int, lane: LaneResult) -> str:

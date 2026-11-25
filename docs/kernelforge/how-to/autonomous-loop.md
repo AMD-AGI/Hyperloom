@@ -113,7 +113,11 @@ one shape whatever its width:
    -- and is given the other lanes' patches, their workspaces and their
    per-case times. How to merge is its own decision: apply a patch, rewrite
    where two lanes changed the same code, dispatch per case between two lanes'
-   implementations. Its stop has to beat the score it started from. Each
+   implementations. It keeps a lane's change only when its own measurement
+   shows the result faster, and when nothing is worth taking it leaves the
+   workspace as it found it: the lane it started from is then the candidate.
+   Its stop is judged against the current best, the bar a KEEP has to clear,
+   not against the score its starting lane reported. Each
    lane's patch and stop-check result are kept under
    `forge_experiments/rounds/iter_NNN/lane_K/`.
 8. The outer loop runs the driver-owned full correctness suite and canonical

@@ -893,6 +893,7 @@ def make_agent_fn(
                     replace(gate_scope, kernel_file=kernel_path, workspace=configured_workspace),
                     baseline_case_times=gate_scoring.baseline_case_times,
                     best_mean_case_speedup=gate_scoring.best_mean_case_speedup,
+                    starts_on_measured_candidate=gate_scoring.starts_on_measured_candidate,
                 )
                 system_prompt = gate_system_prompt + _gate_scoring_context(
                     gate_scoring, measurement.case_aggregate, gain_required=measurement.gain_required

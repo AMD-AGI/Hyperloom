@@ -119,7 +119,7 @@ class IterationPhasesMixin:
         """Run the round's lanes, merge what they left on the canonical tree, and collect the candidate.
 
         One changed lane is the candidate as it stands. Several are merged by a session in the canonical workspace,
-        which starts from the best of them and is judged against it.
+        which starts from the best of them and is judged, as every candidate is, against the current best.
         """
         iteration, session_sink = frame.iteration, frame.session_sink
         # The last point before the round buys its sessions, which the loop cannot interrupt.
@@ -166,13 +166,18 @@ class IterationPhasesMixin:
     async def _merge_session(
         self, frame: _IterationFrame, start, rest, *, agent_fn, digest
     ) -> tuple[Exception | None, str]:
-        """Run the session that merges the round's remaining lanes into the canonical workspace."""
+        """Run the session that merges the round's remaining lanes into the canonical workspace.
+
+        Its stop is judged against the current best, the bar a KEEP has to clear. The lane it starts from scored
+        higher than that, but by one measurement taken while other lanes worked: held to that score, a merge whose
+        gain is real and smaller than the measurement's noise could not stop, and neither could one that found
+        nothing worth taking. Not ending below its start is the session's to see to, by its own measurements.
+        """
         best = self.best_mean_case_speedup
-        bar = start.score if start is not None and start.score is not None else best
-        print(
-            f"  [merge] merging {len(rest)} lane(s) onto "
-            f"{'lane ' + start.lane_id if start is not None else 'the round base'} (bar {bar})"
+        standing = (
+            f"lane {start.lane_id} (its stop check scored {start.score})" if start is not None else "the round base"
         )
+        print(f"  [merge] merging {len(rest)} lane(s) onto {standing}; current best {best}")
         history = self._implementer_history(
             digest=digest, direction=self._merge_direction(frame.iteration, start, rest)
         )
@@ -181,7 +186,9 @@ class IterationPhasesMixin:
             self.ic.kernel_file,
             history,
             sink=frame.session_sink,
-            gate_scoring=GateScoring(dict(self._baseline_case_times), bar),
+            gate_scoring=GateScoring(
+                dict(self._baseline_case_times), best, starts_on_measured_candidate=start is not None
+            ),
         )
 
     async def _run_session(
