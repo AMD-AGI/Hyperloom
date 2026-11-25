@@ -58,17 +58,13 @@ def _specialist_authors_source(params: dict[str, Any], candidate_id: str) -> boo
     )
 
 
-def _ruling(verdict: dict[str, Any], effective: dict[str, Any]) -> dict[str, Any]:
-    """The critic's ruling on one proposal, beside what the emitted envelope made effective."""
+def _ruling(verdict: dict[str, Any], emitted: dict[str, Any]) -> dict[str, Any]:
+    """The critic's ruling on one proposal, with the advice and follow-ups its emitted envelope carries."""
     return {
         "source": "critic" if str(verdict.get("source") or "critic") == "critic" else "critic_unavailable",
         "verdict": str(verdict.get("verdict") or ""),
-        "effective_verdict": str(
-            _first(effective.get("verdict"), verdict.get("effective_verdict"), verdict.get("verdict")) or ""
-        ),
         "reasoning": str(verdict.get("reasoning") or ""),
         "confidence": _first(verdict.get("confidence")),
-        "failure_reason_code": _first(verdict.get("failure_reason_code")),
         "required_evidence": _string_list(verdict.get("required_evidence")),
         "risks": [
             {
@@ -77,9 +73,9 @@ def _ruling(verdict: dict[str, Any], effective: dict[str, Any]) -> dict[str, Any
             }
             for risk in dict_rows(verdict.get("risks"))
         ],
-        "advice_text": _first(verdict.get("advice_text"), effective.get("advice_text")),
+        "advice_text": _first(verdict.get("advice_text"), emitted.get("advice_text")),
         "alternative_action": _first(verdict.get("alternative_action")),
-        "followup_task_ids": _string_list(_first(effective.get("followup_task_ids"), verdict.get("followup_task_ids"))),
+        "followup_task_ids": _string_list(_first(emitted.get("followup_task_ids"), verdict.get("followup_task_ids"))),
     }
 
 
@@ -100,14 +96,14 @@ def normalize_framework_reviews(
         return []
 
     proposals = {str(row["msg_id"]): row for row in dict_rows(judge.get("proposals")) if row.get("msg_id")}
-    effective: dict[str, dict[str, Any]] = {}
+    emitted: dict[str, dict[str, Any]] = {}
     for intent in dict_rows(_nested(emit, "intent_envelope", "intents")):
         if intent.get("intent_type") != "review_verdict":
             continue
         payload = to_mapping(intent.get("payload"))
         target = str(payload.get("target_proposal_msg_id") or "")
         if target:
-            effective[target] = payload
+            emitted[target] = payload
 
     rows: list[dict[str, Any]] = []
     for verdict_row in dict_rows(review.get("review_verdicts")):
@@ -132,7 +128,7 @@ def normalize_framework_reviews(
                 "variant_name": _first(payload.get("variant_name"), params.get("variant_name")),
                 "arm": arm,
                 "target_action": target_action,
-                **_ruling(verdict_row, effective.get(proposal_id, {})),
+                **_ruling(verdict_row, emitted.get(proposal_id, {})),
                 "ts": str(_first(verdict_row.get("ts"), emit.get("ts"), review.get("ts")) or ""),
                 "review_path": normalized_review_path,
                 "phase": review_phase,

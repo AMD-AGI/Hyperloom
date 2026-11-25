@@ -112,6 +112,15 @@ The value `bypass` is no longer written either: `route` is `agent` or
 entry, a trace certificate's `usable_by` names only `tracelens`, and the
 warning code `bypass_graph_under_recorded` is now `graph_under_recorded`.
 
+The loop no longer holds a Critic verdict to an advisory rule, so the keys that
+recorded the hold are removed with the disposition
+`removed in 6.1, producer removed`: `critic_review.held_to_rule`,
+`critic_review.effective_verdict` and `critic_review.failure_reason_code` on
+phase and framework proposals and on each of their `critic_review.variants[]`
+rows, and `effective_verdict` and `failure_reason_code` on
+`critic.iterations[].framework_reviews[]`. Read `verdict`: it is the verdict
+the loop acted on.
+
 Two figures are null instead of a fabricated default when they were not
 measured or not provided. `outcome.validation.attributed_gain_pct` and
 `unattributed_gain_pct` are null when no adoption could be measured, rather than
@@ -460,9 +469,7 @@ asked forty times and ruled on nothing reads very differently from one where
 it was never asked.
 
 `framework_reviews` holds the framework-phase rulings of that pass, each with
-both the authored `verdict` and the `effective_verdict` the loop held it to.
-Both are kept: a reject the loop downgraded to advice still ran, and
-reporting either alone misreads the round.
+the `verdict` the Critic wrote.
 
 ---
 
@@ -675,7 +682,6 @@ The following example shows a complete `session_breakdown.json` for a finished G
             "proposal_msg_id": "msg-4f21",
             "arm": "config",
             "verdict": "reject",
-            "effective_verdict": "advise",
             "reasoning": "no measurement backs the projected gain"
           }
         ]
