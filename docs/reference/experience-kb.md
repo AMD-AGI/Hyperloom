@@ -30,7 +30,7 @@ Experiences from other logs in [Experience collection](experience-kb-collect.md)
 | `HYPERLOOM_KB_AUTO_PUSH` | the user | `1` pushes each run's Experiences to the global KB after they are written locally. Default off. |
 | `USER_DATA_PATH` | `hyperloom-setup` | The local service keeps its data under `$USER_DATA_PATH/experience-kb` unless `HYPERLOOM_KB_HOME` is set. |
 | `HYPERLOOM_KB_HOME` | the user | The local service's data home instead of `$USER_DATA_PATH/experience-kb`. One home serves one service at a time, so runs on different hosts that share a `USER_DATA_PATH` each set their own. Optional. |
-| `ANTHROPIC_BASE_URL`, `ANTHROPIC_API_KEY` or `ANTHROPIC_AUTH_TOKEN`, `CLAUDE_MODEL` | `hyperloom-setup` | The gateway and model the service plans reads with; `LOCAL_KB_PLANNER_MODEL` overrides the model. Without a gateway the service still accepts writes and reads report `unavailable`. |
+| `ANTHROPIC_BASE_URL`, `ANTHROPIC_API_KEY` or `ANTHROPIC_AUTH_TOKEN`, `ANTHROPIC_CUSTOM_HEADERS`, `CLAUDE_MODEL`; else `OPENAI_BASE_URL`, `OPENAI_API_KEY`, `OPENAI_CUSTOM_HEADERS`, `CODEX_MODEL` | `hyperloom-setup` | The gateway and model the service plans reads with, through the clients the rest of Hyperloom calls its gateway with: the Anthropic side when it has a key, else the OpenAI side, each with its custom headers (an AMD gateway's `Ocp-Apim-Subscription-Key`). `LOCAL_KB_PLANNER_MODEL` overrides the model. Without a key the service still accepts writes and reads report `unavailable`; a Claude subscription token alone does not plan reads. |
 
 All of these live in the workspace `.env`. The service reads them when it
 starts; see [the local service](#the-local-service) for how a change reaches a

@@ -51,6 +51,7 @@ from hyperloom_multibranch.blackboard.rsi.lessons import (
     LessonStanding,
     SessionStandings,
     lesson_id_for,
+    normal_content,
     revision_id_for,
     specialist_author,
 )
@@ -87,10 +88,6 @@ def _profile(snapshot: BlackboardSnapshot) -> SessionProfile:
     return snapshot.profile
 
 
-def _normal(text: str) -> str:
-    return " ".join(text.lower().split())
-
-
 def _revised_lesson(record: LearningRecord, by_id: Mapping[str, LearningRecord]) -> str | None:
     """The past session's lesson ``record`` revises: the one it supersedes, or the one an earlier learning of its
     branch that it supersedes revised."""
@@ -117,7 +114,7 @@ class _Publication:
         self._records = {test.request_id: test for test in snapshot.records}
         self._by_id = {record.entry_id: record for record in snapshot.learnings}
         self._lessons = pool.lessons()
-        self._said = {_normal(head.content) for head in self._live_heads()}
+        self._said = {normal_content(head.content) for head in self._live_heads()}
         self._worded = [words(head.content) for head in self._live_heads()]
         started = {lesson_id_for(self._session, record.entry_id) for record in snapshot.learnings}
         self._started = len(started & self._lessons.keys())
@@ -126,7 +123,7 @@ class _Publication:
 
     def _says_again(self, text: str) -> bool:
         mine = words(text)
-        return _normal(text) in self._said or any(
+        return normal_content(text) in self._said or any(
             word_overlap(mine, theirs) >= NEAR_DUPLICATE for theirs in self._worded
         )
 
@@ -189,7 +186,7 @@ class _Publication:
             evidence=self._evidence(learning),
         )
         self._write(REVISED if lesson is not None else NEW, lambda: self._pool.write(revision))
-        self._said.add(_normal(learning.content))
+        self._said.add(normal_content(learning.content))
         self._worded.append(words(learning.content))
 
 
