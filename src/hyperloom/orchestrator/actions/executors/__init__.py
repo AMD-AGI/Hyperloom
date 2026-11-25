@@ -36,7 +36,13 @@ from .workload._agentx_prefix_cache import PREFIX_CACHE_OFF_ERROR_CLASS, refuse_
 from ._failed_step import failed_step_error_class
 from ._round_folder import RoundFolder, is_round_folder, read_round_launch
 from ._suite.config import CHECK_SERVER_ENVS, fixed_workload
-from ._suite.rounds import TOOL_CACHE_ENV, SuiteRoundRefused, external_agentx_config, staged_tool_cache
+from ._suite.rounds import (
+    SERVER_CPUS_ENV,
+    TOOL_CACHE_ENV,
+    SuiteRoundRefused,
+    external_agentx_config,
+    staged_tool_cache,
+)
 from .framework_change._spec_decode_context_copy import CONTEXT_COPY_REFUSAL, context_copy_refusal
 from .framework_change._spec_decode_pin import (
     SpeculativeDecodingPinnedError,
@@ -75,6 +81,7 @@ __all__ = [
     "RoundWatch",
     "SESSION_TIME_EXHAUSTED_RETURNCODE",
     "SpeculativeDecodingPinnedError",
+    "SERVER_CPUS_ENV",
     "SuiteRoundRefused",
     "TOOL_CACHE_ENV",
     "TargetAnalysisExecutor",

@@ -78,8 +78,9 @@ when unset and publishes the staging into once the session directory exists; the
 ``HYPERLOOM_ACTIVE_IMAGE_REF`` and ``HYPERLOOM_ACTIVE_IMAGE_DIGEST``; the application's inference_suite tool cache
 must hold a staging of the InferenceX client that verifies; the framework's package must be installed in the image;
 and the agent CLI the specialists run must be installed. A canonical measurement that cannot be taken fails the command
-the same way once the session directory exists. A session uses no Experience KB, whatever ``HYPERLOOM_KB_URL`` names (see
-:data:`~hyperloom_multibranch.scheduling.mb_fakes.MB_FAKE_EXPERIENCE_KB`).
+the same way once the session directory exists. The Experience KB ``HYPERLOOM_KB_URL`` names (none when unset) gives
+the briefs past sessions' tests and learnings and takes this session's at CLOSE;
+:mod:`~hyperloom_multibranch.scheduling.experience_kb` starts its loopback service.
 ``run --measurement hosted`` measures every test in the sandboxes of a grant handed to the session in the environment
 (:data:`HANDED_GRANT`, read by :mod:`hyperloom.hosted.host_info`) instead of this machine's cards: as many tests run at
 once as the grant has cards and sandboxes for, and the session stops before the grant ends as ``hosted run`` does. Its
@@ -186,6 +187,7 @@ from hyperloom_multibranch.scheduling.llm import (
     anthropic_completion,
     default_model,
 )
+from hyperloom_multibranch.scheduling.experience_kb import start_experience_kb
 from hyperloom_multibranch.scheduling.manifest import read_manifest
 from hyperloom_multibranch.scheduling.local_peers import (
     load_peers,
@@ -454,10 +456,12 @@ def hosted_ready_session(host: HostInfo, workload: Workload, *, local: bool = Fa
 
 def ready_session(workload: Workload, load: Callable[[Workload], PeerFactory], **storage: Path) -> ReadySession:
     """The peers ``load`` has for ``workload`` and the services, the Recipe KB, the RSI archive and the directories of
-    ``storage`` checked first; raises :class:`EnvironmentIncomplete` or :class:`PeersUnavailable` naming the problem."""
+    ``storage`` checked and the Experience KB service started first; raises :class:`EnvironmentIncomplete` or
+    :class:`PeersUnavailable` naming the problem."""
 
     recipe_kb = recipe_kb_from_env()
     require_writable_storage(os.environ, storage)
+    start_experience_kb()
     return ReadySession(load(workload), session_services(recipe_kb))
 
 

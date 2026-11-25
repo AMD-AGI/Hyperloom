@@ -437,7 +437,7 @@ def _rebuilt_call(call: TestCall, environment: CompiledEnvironment, work: Path, 
             if unpatched:
                 record_unpatched(target)
             if farm is not None:
-                verify_farm(farm, place_farm(target, farm), python=python, cwd=work)
+                verify_farm(farm, place_farm(target, farm, inherited), python=python, cwd=work)
             points.append(target)
     except (AttachmentError, FarmError, NativeLayError, OSError, ValueError) as exc:
         raise TestCallRefused(f"the compiled environment cannot be rebuilt here: {exc}") from exc

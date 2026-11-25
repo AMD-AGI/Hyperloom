@@ -20,7 +20,7 @@ from pathlib import Path, PurePosixPath
 
 from hyperloom.measure import fsafe
 from hyperloom.measure.docs import DocumentError
-from hyperloom.measure.jit.native.record import READY, RECORD_FILES, BuildRecord
+from hyperloom.measure.jit.native.record import EXECUTABLE, READY, RECORD_FILES, BuildRecord
 from hyperloom.measure.jit.native.store import BuildStore
 from hyperloom.measure.jit.native.trust import BuildRefused
 from hyperloom.measure.jit.store import SnapshotInvalid, read_bounded
@@ -62,6 +62,20 @@ class SheetBuilds:
             NativeLayError: The sheet names none, or the store's entry is missing or is not the named build.
         """
         return self._proven(root_id, lambda outputs: [path for path in outputs if path.parts[:1] != (import_name,)])
+
+    def executable_record(self, root_id: str) -> BuildRecord:
+        """The proven ready record the sheet names for the executable root ``root_id``: it made at least one output and
+        every output is an executable file, which the farm puts on the server's ``PATH``.
+
+        Raises:
+            NativeLayError: As :meth:`record`.
+        """
+        record = self._proven(root_id, lambda outputs: [])
+        plain = [output.path for output in record.outputs if output.mode != EXECUTABLE]
+        if not record.outputs or plain:
+            what = f"outputs that are not executables: {plain[:3]}" if plain else "no output"
+            raise NativeLayError(f"{root_id}: the stored build {record.key} has {what}")
+        return record
 
     def module_record(self, root_id: str) -> BuildRecord:
         """The proven ready record of the JIT modules the sheet names for the package root ``root_id``: each output is a
