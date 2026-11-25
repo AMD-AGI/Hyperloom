@@ -30,6 +30,7 @@ from pathlib import Path
 
 from hyperloom.common.env_safety import is_secret_shaped_env_name
 from hyperloom.common.outside_facts.kernel_knob import KnobSpecError
+from hyperloom.common.visible_devices import HIP_LEVEL_VARS
 from hyperloom.inference_optimizer.session.paths import session_dir
 from hyperloom.measure.runner.native.backend_ops import check_cases, time_cases
 from hyperloom.measure.runner.native.knob_sweep import (
@@ -94,7 +95,11 @@ def _held(lock: Path | None, env: Mapping[str, str]) -> Iterator[Mapping[str, st
 
 
 def _bench_env() -> dict[str, str]:
-    return {name: value for name, value in os.environ.items() if not is_secret_shaped_env_name(name)}
+    return {
+        name: value
+        for name, value in os.environ.items()
+        if name not in HIP_LEVEL_VARS and not is_secret_shaped_env_name(name)
+    }
 
 
 def _refuse_arch(plan: SweepPlan, builds: SessionNativeBuilds) -> None:

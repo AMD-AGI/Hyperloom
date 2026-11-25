@@ -12,6 +12,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from hyperloom.common.visible_devices import ROCR_LEVEL_VARS, VISIBLE_DEVICE_VARS
 from hyperloom.measure.runner.native import knob_tune
 from hyperloom.orchestrator.actions.executors.candidate_builds import TreeBuild, TreeBuildStatus
 
@@ -105,3 +106,22 @@ def test_a_session_that_builds_nothing_from_source_exits_2_with_the_refusal(
 ) -> None:
     assert knob_tune.main(_argv(tmp_path)) == 2
     assert "builds no framework server from source" in json.loads(capsys.readouterr().out)["error"]
+
+
+def test_a_round_names_its_card_by_the_rocr_mask_alone_whatever_hip_mask_the_process_was_launched_with(
+    builds: _Builds, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A HIP-level mask indexes into what ROCr exposed: beside a ROCr mask of card 3 it names a fourth device of one."""
+    seen: list[dict[str, str]] = []
+
+    def timed(executable: Path, cases: Path, names, env, timeout: float) -> dict[str, float]:
+        seen.append({name: env[name] for name in VISIBLE_DEVICE_VARS if name in env})
+        return _timed(executable, cases, names, env, timeout)
+
+    monkeypatch.setattr(knob_tune, "time_cases", timed)
+    for name in VISIBLE_DEVICE_VARS:
+        monkeypatch.setenv(name, "3")
+
+    assert knob_tune.main(_argv(tmp_path)) == 0
+
+    assert seen and all(masks == dict.fromkeys(ROCR_LEVEL_VARS, "3") for masks in seen)
