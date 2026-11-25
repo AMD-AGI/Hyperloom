@@ -94,12 +94,12 @@ _PIECE = _GIB
 _SAMPLES = 32
 _SAMPLE_PAGES = 16
 #: Bytes one ``preadv`` asks for; a stop is seen between two of them.
-_CHUNK = 16 << 20
+_CHUNK = _GIB // 64  # 16 MiB
 #: Headroom kept free for the server: a tenth of the limit, and never less than this.
 _MARGIN_FLOOR = 16 * _GIB
 _MARGIN_SHARE = 10
 #: Below this much headroom the reads would not cover enough of a checkpoint to matter.
-_MIN_BUDGET = 8 * _GIB
+_MIN_BUDGET = _MARGIN_FLOOR // 2  # 8 GiB
 #: A refill pass runs only when at least this much of the chosen files left the cache.
 _MIN_REFILL = _GIB
 #: How much of a file one ``mincore`` call maps, so its page vector stays small.
