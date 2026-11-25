@@ -1,25 +1,20 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""The option inventory a session lays in its toolbox directory, and the reviews its branches record against it."""
+"""The reviews a session's branches record against its option inventory."""
 
 from __future__ import annotations
 
 import json
-from dataclasses import replace
 from pathlib import Path
 
 import pytest
 
 from hyperloom.contracts.recipe import ConfigDelta, RecipeDelta
 from hyperloom.inference_optimizer.native_builds import OptionVerdict
-from hyperloom.measure.farm import BASE_BINS_ENV
 from hyperloom.measure.runner.native.server_options import (
-    SERVER_OPTIONS_FILE,
     build_inventory,
-    read_inventory,
 )
-from hyperloom.measure.tests.bundle_factory import base_launch
 from hyperloom_multibranch.contracts.toolbox import RequestRejected
 from hyperloom_multibranch.toolbox.option_reviews import (
     OPTION_BY_ENV_CODE,
@@ -27,10 +22,8 @@ from hyperloom_multibranch.toolbox.option_reviews import (
     ReviewEntry,
     ReviewRefused,
     ReviewStanding,
-    lay_option_inventory,
 )
 from hyperloom_multibranch.toolbox.tests.helpers import req
-from inference_suite.contracts import BaseLaunch
 
 HELP = """\
 ----- common params -----
@@ -44,49 +37,6 @@ HELP = """\
 --keep N                                number of tokens to keep from the initial prompt
 --old-size N                            the argument has been removed. use --ctx-size
 """
-
-
-def base_build(root: Path, *, code: int = 0) -> dict[str, str]:
-    """The runner variable naming a base build whose ``llama-server`` prints ``HELP`` and names the card it ran on
-    and the ``SERVER_LIBS`` it ran with."""
-    bin_dir = root / "base-builds" / "bin"
-    bin_dir.mkdir(parents=True)
-    (root / "help.txt").write_text(HELP, encoding="utf-8")
-    program = bin_dir / "llama-server"
-    ran = 'echo "$ROCR_VISIBLE_DEVICES|$SERVER_LIBS"'
-    program.write_text(
-        f'#!/bin/sh\n/bin/cat "{root / "help.txt"}"\n{ran} > "{root / "ran"}"\nexit {code}\n', encoding="utf-8"
-    )
-    program.chmod(0o755)
-    return {BASE_BINS_ENV: str(bin_dir)}
-
-
-def llamacpp_base(*args: str, env: dict[str, str] | None = None) -> BaseLaunch:
-    """A frozen base of a llama.cpp session whose launch spells ``args``; the runner sets ``--keep`` itself."""
-    owned = replace(base_launch().runner_owned, args=("--keep",))
-    return replace(base_launch(), framework="llamacpp", args=args, env=env or {}, golden_al=None, runner_owned=owned)
-
-
-def test_the_inventory_of_the_base_build_is_laid_with_what_the_launch_and_the_runner_set(tmp_path: Path) -> None:
-    probe_env = {**base_build(tmp_path), "ROCR_VISIBLE_DEVICES": "5"}
-
-    laid = lay_option_inventory(llamacpp_base("-c", "4096"), probe_env, tmp_path)
-
-    assert laid is not None and laid == read_inventory(tmp_path / SERVER_OPTIONS_FILE)
-    assert len(laid.options) == 4 and laid.base_args == "-c 4096"
-    assert [option.name for option in laid.unset] == ["--threads", "--no-jinja"]
-    assert (tmp_path / "ran").read_text().strip() == "5|"
-
-
-def test_the_launchs_own_environment_reaches_the_program(tmp_path: Path) -> None:
-    lay_option_inventory(llamacpp_base(env={"SERVER_LIBS": "/opt/libs"}), base_build(tmp_path), tmp_path)
-
-    assert (tmp_path / "ran").read_text().strip().endswith("|/opt/libs")
-
-
-def test_a_toolbox_that_lays_no_base_build_lays_no_inventory(tmp_path: Path) -> None:
-    assert lay_option_inventory(llamacpp_base("-c", "4096"), {}, tmp_path) is None
-    assert not (tmp_path / SERVER_OPTIONS_FILE).exists()
 
 
 def reviewed_toolbox(root: Path, base_args: str = "-c 4096") -> OptionReviews:

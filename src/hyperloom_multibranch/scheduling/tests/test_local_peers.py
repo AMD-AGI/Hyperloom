@@ -131,6 +131,7 @@ from hyperloom_multibranch.tests.fakes import RefusingCritic
 from hyperloom_multibranch.tests.staging_rig import verified_tool_cache
 from hyperloom.inference_optimizer.cli import base_launch as cli_base_launch
 from hyperloom.inference_optimizer.session.paths import ENV_CURRENT_SESSION_DIR, ENV_USER_DATA_PATH
+from hyperloom.measure.farm import BASE_BINS_ENV
 from hyperloom.measure.runner import suite_publish
 from hyperloom.measure.runner.native.server_options import SERVER_OPTIONS_FILE, read_inventory
 from hyperloom.measure.runner.native.server_options import OptionInventory, ServerOption, write_inventory
@@ -161,7 +162,7 @@ from hyperloom_multibranch.toolbox.branch_leases import BranchLeases
 from hyperloom_multibranch.toolbox.local_hosted import LocalHostedToolbox
 from hyperloom_multibranch.toolbox.mcp_tools import McpSpecialistTokens
 from hyperloom_multibranch.toolbox.queue import QueuePolicy
-from hyperloom_multibranch.toolbox.tests.test_option_reviews import base_build, llamacpp_base
+from hyperloom_multibranch.toolbox.tests.test_option_reviews import HELP
 
 WORKLOAD = Workload(
     "/models/Llama-3-8B", "sglang", 2, 16, "bf16", "mi355x", KernelOptimizer.FORGE, InferenceXShape(1024, 512)
@@ -1855,6 +1856,27 @@ def test_a_session_on_a_host_that_builds_native_code_lays_out_the_native_tree_an
     assert without == role_prompt(RoleWorkload(_specialist_role(WORKLOAD)), references={}, server=RoleServer(BASE))
 
 
+def base_build(root: Path, *, code: int = 0) -> dict[str, str]:
+    """The runner variable naming a base build whose ``llama-server`` prints ``HELP`` and names the card it ran on
+    and the ``SERVER_LIBS`` it ran with."""
+    bin_dir = root / "base-builds" / "bin"
+    bin_dir.mkdir(parents=True)
+    (root / "help.txt").write_text(HELP, encoding="utf-8")
+    program = bin_dir / "llama-server"
+    ran = 'echo "$ROCR_VISIBLE_DEVICES|$SERVER_LIBS"'
+    program.write_text(
+        f'#!/bin/sh\n/bin/cat "{root / "help.txt"}"\n{ran} > "{root / "ran"}"\nexit {code}\n', encoding="utf-8"
+    )
+    program.chmod(0o755)
+    return {BASE_BINS_ENV: str(bin_dir)}
+
+
+def llamacpp_base(*args: str, env: dict[str, str] | None = None) -> BaseLaunch:
+    """A frozen base of a llama.cpp session whose launch spells ``args``; the runner sets ``--keep`` itself."""
+    owned = replace(base_launch().runner_owned, args=("--keep",))
+    return replace(base_launch(), framework="llamacpp", args=args, env=env or {}, golden_al=None, runner_owned=owned)
+
+
 async def test_the_options_of_the_base_server_build_are_laid_in_the_toolbox_directory(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
@@ -1876,6 +1898,28 @@ async def test_the_options_of_the_base_server_build_are_laid_in_the_toolbox_dire
 
     assert inventory.base_args == built.wiring.base.args == "-c 4096"
     assert [option.name for option in inventory.unset] == ["--threads", "--no-jinja"]
+
+
+def test_a_resumed_leg_keeps_the_inventory_the_session_laid_and_does_not_ask_the_build_again(tmp_path: Path) -> None:
+    toolbox = SimpleNamespace(base_probe_env={**base_build(tmp_path), "ROCR_VISIBLE_DEVICES": "5"})
+    frozen = freeze_base(tmp_path, llamacpp_base("-c", "4096")).launch
+    first = local_peers_module._option_reviews(frozen, toolbox, tmp_path)
+    laid, asked = (tmp_path / SERVER_OPTIONS_FILE).read_bytes(), tmp_path / "ran"
+    assert asked.read_text().strip() == "5|"
+    asked.unlink()
+    os.utime(tmp_path / "base-builds" / "bin" / "llama-server", ns=(1, 1))
+
+    resumed = local_peers_module._option_reviews(frozen, toolbox, tmp_path)
+
+    assert first is not None and resumed is not None
+    assert not asked.exists() and (tmp_path / SERVER_OPTIONS_FILE).read_bytes() == laid
+
+
+def test_a_toolbox_that_lays_no_base_build_lays_no_inventory(tmp_path: Path) -> None:
+    toolbox = SimpleNamespace(base_probe_env={})
+
+    assert local_peers_module._option_reviews(llamacpp_base("-c", "4096"), toolbox, tmp_path) is None
+    assert not (tmp_path / SERVER_OPTIONS_FILE).exists()
 
 
 def test_a_base_server_build_that_cannot_list_its_options_refuses_the_peers(tmp_path: Path) -> None:
