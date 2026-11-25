@@ -36,9 +36,10 @@ it.
   **Breaking:** the dispatch, specialist, synthesis and Plan Critic sessions,
   the per-iteration lane queue and the stacking of archived candidates are
   removed, with `--merge-stacking`, `--specialist-probe` and
-  `--specialist-probe-{max,budget-sec,scratch-root}` and the
-  `FORGE_SPECIALIST_PROBE*` variables; passing one is an error. A campaign
-  created before this change is not resumed: its `run_state.json` carries
+  `--specialist-probe-{max,budget-sec,scratch-root}`; passing one of these
+  options is an error. The `FORGE_SPECIALIST_PROBE*` variables are no longer
+  read: one that is still set is ignored, and the run starts normally. A
+  campaign created before this change is not resumed: its `run_state.json` carries
   fields the loader rejects. `kernelforge export-runs` no longer emits
   `plan_file`, `plan` from a plan file or `analysis_report`, and the decision
   label `ORCHESTRATION_ERROR` is gone from the loop and from the
