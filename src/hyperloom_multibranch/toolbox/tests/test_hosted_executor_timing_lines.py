@@ -12,7 +12,6 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
-from types import SimpleNamespace
 
 import pytest
 
@@ -20,7 +19,7 @@ from hyperloom.contracts.measurement import Validity
 from hyperloom.contracts.recipe import Recipe
 from hyperloom.measure.compile import CompiledEnvironment
 from hyperloom.measure.tests.hosted_fixtures import point_yaml
-from hyperloom_multibranch.toolbox.mcp_tools import _result_document, jsonable
+from hyperloom_multibranch.toolbox.mcp_tools import jsonable
 from hyperloom_multibranch.toolbox.tests.helpers import IMAGE
 from hyperloom_multibranch.toolbox.tests.test_hosted_executor import (  # noqa: F401  (rig is a fixture)
     OK,
@@ -118,9 +117,7 @@ def test_a_point_that_cannot_be_read_gives_no_lines(tmp_path: Path, point: str) 
     assert read_test_timing_lines((path,), tmp_path) == ()
 
 
-async def test_a_test_of_an_installed_framework_carries_no_timing_lines_and_answers_without_the_key(
-    tmp_path: Path, rig
-) -> None:
+async def test_a_test_of_an_installed_framework_carries_no_timing_lines(tmp_path: Path, rig) -> None:
     point = _point(tmp_path, "vllm")
     scripted = FrameworkBackend(rig().backend, point, [OK], stamps={ROUND_LOG: LOG}, framework="vllm")
     planner = PointPlanner(point, CompiledEnvironment(Recipe(IMAGE), IMAGE, (), (), {}, tmp_path / "blobs"))
@@ -128,6 +125,3 @@ async def test_a_test_of_an_installed_framework_carries_no_timing_lines_and_answ
     stored, outcome = await stored_and_logged(tmp_path, scripted, planner)
 
     assert outcome.validity is Validity.SUCCEEDED and (stored.timing_lines, outcome.timing_lines) == ((), ())
-    assert "timing_lines" not in stored.to_document()
-    record = SimpleNamespace(result=stored, withdrawn_at=None, withdrawal_reason=None, judgement=None, conclusion=None)
-    assert "timing_lines" not in _result_document(stored.request_id, record)["result"]

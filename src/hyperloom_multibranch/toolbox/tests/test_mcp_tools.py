@@ -403,11 +403,6 @@ def test_only_a_checkout_built_session_s_tools_say_a_baseline_is_shared_and_what
     assert "for any branch's profile test or for a baseline test of the session: returns" in described["wait_test"]
 
 
-def test_a_result_with_no_timing_lines_is_answered_without_the_key(rig: Rig) -> None:
-    for tool in ("test_result", "wait_test"):
-        assert "timing_lines" not in json.loads(rig.ok(rig.token("s1"), tool, request_id="r1"))["result"]
-
-
 def test_any_branch_finds_the_session_s_baseline_tests_and_reads_their_results(baselined_rig: Rig) -> None:
     for branch in ("s1", "s2"):
         token = baselined_rig.token(branch)

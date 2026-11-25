@@ -556,8 +556,6 @@ def _result_document(request_id: str, record: Any) -> dict[str, Any]:
     else:
         state = "in_flight" if record.result is None else "measured"
     result = jsonable(record.result)
-    if result is not None and not result["timing_lines"]:
-        del result["timing_lines"]  # as the stored document: only a server that logs such lines has the key
     return {
         "request_id": request_id,
         "state": state,
