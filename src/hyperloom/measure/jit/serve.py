@@ -50,7 +50,6 @@ from hyperloom.measure.jit.store import (
     SnapshotInvalid,
 )
 from hyperloom.measure.jit_kinds import KINDS, CacheKind, kind_named
-from hyperloom.measure.runner.service import wait_for_file
 from hyperloom.sandbox.socket import Sandbox, SandboxError
 
 __all__ = [
@@ -134,7 +133,7 @@ def ask(
     _write_atomic(out_dir / _WANT_NAME, want_document(wanted))
     phase(WAIT_PHASE)
     started = time.monotonic()
-    if not wait_for_file(served / _DONE, wait_sec):
+    if not _wait_for(served / _DONE, wait_sec):
         notes.append(f"jit cache: the host did not serve the cache within {wait_sec:.0f}s; the test builds cold")
         return notes
     given = []
@@ -216,6 +215,16 @@ def _write_member(dest: Path, name: str, source: IO[bytes], size: int) -> None:
             os.close(out)
     finally:
         os.close(directory)
+
+
+def _wait_for(path: Path, timeout_sec: float, poll_sec: float = 0.5) -> bool:
+    """Wait until ``path`` exists; False when ``timeout_sec`` passes first."""
+    deadline = time.monotonic() + timeout_sec
+    while not path.exists():
+        if time.monotonic() >= deadline:
+            return False
+        time.sleep(poll_sec)
+    return True
 
 
 def _write_atomic(path: Path, data: bytes) -> None:
