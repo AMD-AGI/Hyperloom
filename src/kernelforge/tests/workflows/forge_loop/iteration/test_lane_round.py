@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import shutil
 import subprocess
 from dataclasses import replace
 from pathlib import Path
@@ -126,6 +127,75 @@ async def test_a_lane_diff_carries_the_new_files_it_is_given_and_leaves_the_lane
     assert "configs/small.json" not in tracked_only
     assert "return 2" in with_new_file and "configs/small.json" in with_new_file
     assert staged.stdout == ""
+
+
+def _worktree_workspace(tmp_path: Path) -> Path:
+    """A workspace that is a git worktree: its ``.git`` is a file pointing into another repository."""
+    main = tmp_path / "main"
+    main.mkdir()
+    (main / "kernel.py").write_text("VALUE = 0\n")
+    (main / "forge_driver.py").write_text("pass\n")
+    for command in (
+        ["git", "init"],
+        ["git", "config", "user.email", "tests@example.com"],
+        ["git", "config", "user.name", "KernelForge Tests"],
+        ["git", "add", "kernel.py", "forge_driver.py"],
+        ["git", "commit", "-m", "initial"],
+    ):
+        subprocess.run(command, cwd=main, check=True, capture_output=True)
+    workspace = tmp_path / "workspace"
+    subprocess.run(
+        ["git", "worktree", "add", "-b", "campaign", str(workspace)], cwd=main, check=True, capture_output=True
+    )
+    (workspace / "build").mkdir()
+    (workspace / "build" / "cached.o").write_text("untracked build output\n")
+    return workspace
+
+
+def _git_output(workspace: Path, *args: str) -> str:
+    return subprocess.run(["git", *args], cwd=workspace, check=True, capture_output=True, text=True).stdout
+
+
+async def test_a_lane_of_a_worktree_workspace_gets_its_own_index(tmp_path):
+    """`cp -a` copies the .git pointer file, so a lane would share the workspace's index."""
+    workspace = _worktree_workspace(tmp_path)
+    lanes = LaneRound(
+        workspace_dir=str(workspace), parent_dir=str(tmp_path), lanes=[LaneAssignment("1")], hold_limit_sec=90
+    )
+
+    (seat,) = await lanes.open()
+    try:
+        (seat.lane_dir / "kernel.py").write_text("VALUE = 1\n")
+        subprocess.run(["git", "add", "kernel.py"], cwd=seat.lane_dir, check=True, capture_output=True)
+        diff = lane_diff(seat.lane_dir)
+    finally:
+        lanes.close()
+
+    assert "VALUE = 1" in diff
+    assert _git_output(workspace, "status", "--porcelain") == "?? build/\n"
+    assert _git_output(workspace, "diff", "HEAD", "--", ".") == ""
+    assert (workspace / "kernel.py").read_text() == "VALUE = 0\n"
+
+
+async def test_lanes_refuse_to_copy_a_workspace_that_will_not_fit(tmp_path, monkeypatch):
+    """A full filesystem must be a refusal with numbers, not a half-copied lane."""
+    workspace, _kernel, _driver = _initialize_workspace(tmp_path, monkeypatch)
+    before = set(tmp_path.iterdir())
+    room = shutil.disk_usage(tmp_path)
+    monkeypatch.setattr(shutil, "disk_usage", lambda _directory: room._replace(free=4096))
+    lanes = LaneRound(
+        workspace_dir=str(workspace),
+        parent_dir=str(tmp_path),
+        lanes=[LaneAssignment("1", "a"), LaneAssignment("2", "b")],
+        hold_limit_sec=90,
+    )
+
+    with pytest.raises(RuntimeError) as error:
+        await lanes.open()
+
+    assert lanes.seats == []
+    assert "4096" in str(error.value)
+    assert set(tmp_path.iterdir()) == before
 
 
 # ── a round of one lane ───────────────────────────────────────────────────────
