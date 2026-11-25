@@ -75,11 +75,10 @@ def test_a_run_that_selects_nothing_writes_and_prints_nothing(tmp_path: Path, ca
     assert list(tmp_path.iterdir()) == []
     captured = capsys.readouterr()
     assert (captured.out, captured.err) == ("", "")
-    selected = {k: v["impl"] for k, v in host.describe()["sockets"].items()}
-    assert selected == {"events": "local", "native_builds": "session"}
+    assert {k: v["impl"] for k, v in host.describe()["sockets"].items()} == {"events": "local"}
 
 
-def test_a_run_that_selects_nothing_starts_the_local_profile_plugs_and_closes_them(tmp_path: Path) -> None:
+def test_a_run_that_selects_nothing_starts_only_the_local_events_plug(tmp_path: Path) -> None:
     host = prepare_plug_host(_args(), tmp_path)
     with running_plug_host(host):
         assert active() is host

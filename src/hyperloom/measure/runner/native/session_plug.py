@@ -4,8 +4,8 @@
 """The implementation of the ``native_builds`` socket (:mod:`hyperloom.plugs.native_builds`): a single-branch
 session's native builds (:mod:`~hyperloom.measure.runner.native.session_builds`).
 
-Every run starts this plug, so the engine is imported by the call that needs it: a session whose server is the image's
-never loads it.
+Only a session whose framework builds its server starts this plug
+(:func:`~hyperloom.inference_optimizer.native_builds.start_candidate_builds`).
 """
 
 from __future__ import annotations

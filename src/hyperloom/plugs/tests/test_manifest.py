@@ -43,10 +43,7 @@ def test_builtin_profiles_are_local_hosted_gpu_and_hosted_cpu() -> None:
 def test_the_builtin_local_profile_is_always_the_base() -> None:
     manifest = resolve_manifest(builtin_registry())
     assert manifest.profile == "local"
-    assert {k: (s.impl, s.layer) for k, s in manifest.sockets.items()} == {
-        "events": ("local", "builtin"),
-        "native_builds": ("session", "builtin"),
-    }
+    assert {k: (s.impl, s.layer) for k, s in manifest.sockets.items()} == {"events": ("local", "builtin")}
     assert manifest.is_builtin_default
 
 

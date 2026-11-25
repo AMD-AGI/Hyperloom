@@ -2,7 +2,6 @@
   "schema": "hyperloom.plugs/v1",
   "profile": "local",
   "sockets": {
-    "events": {"impl": "local"},
-    "native_builds": {"impl": "session"}
+    "events": {"impl": "local"}
   }
 }
