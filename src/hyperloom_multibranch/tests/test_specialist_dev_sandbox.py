@@ -758,7 +758,7 @@ def _worktree(tmp_path, monkeypatch):
     package.mkdir(parents=True)
     (package / "__init__.py").write_bytes(b"")
     installed = PackageBase("vllm", package, None, None)
-    monkeypatch.setattr(worktree_module, "locate_installed_package", lambda _layout: installed)
+    monkeypatch.setattr(worktree_module, "locate_source", lambda _layout: installed)
     base = SourceBase(tmp_path / "source")
     base.build(["vllm"])
     worktree = base.worktree(B1, tmp_path / "worktrees" / B1)

@@ -27,7 +27,6 @@ _NON_SEARCH_DECISIONS = frozenset(
     {
         "AGENT_ERROR",
         "API_ERROR",
-        "ORCHESTRATION_ERROR",
         "REVERT_CONTENDED",
         "REVERT_INTEGRITY",
     }
@@ -237,7 +236,7 @@ def apply_relay_search_outcome(
 ) -> AgentRelayState:
     """Advance the active profile's streak by one non-KEEP outcome it produced and that counts as search.
 
-    An outcome no profile produced, such as a stacked merge of two archived candidates, is not the active profile's.
+    An outcome another profile's session produced is not the active profile's.
     """
     if producer_profile_id != state.active_profile_id:
         return state

@@ -20,7 +20,8 @@ limited number of times where it ended as an infrastructure
 failure, and one whose regression set did not run clean: the set says a
 case did not come back clean, not whether it reproduced or never ran, so it settles nothing about the candidate. A
 merge the experiment repository cannot combine, or whose test the toolbox refuses, is skipped and recorded
-like an unresolved conflict. One that leaves the head's recipe as it is is skipped untested as already on the head:
+like an unresolved conflict. One that leaves the head's recipe as it is, or in a session that keeps an option
+inventory only spells an option of the head's launch another way, is skipped untested as already on the head:
 another branch's commit already brought the same change, and the head keeps it, so it is not tried again, as a merged
 commit is not.
 
@@ -82,10 +83,11 @@ from collections.abc import Awaitable, Callable, Sequence, Set
 from dataclasses import dataclass, field, replace
 from enum import Enum
 from functools import partial
+from typing import TYPE_CHECKING
 
 from hyperloom_common.jsonio import extract_last_json_with_key
 from hyperloom.contracts.measurement import Purpose, TestKind
-from hyperloom.contracts.recipe import ComponentPatches, RecipeDelta, RecipeError, ValueChange, apply
+from hyperloom.contracts.recipe import ComponentPatches, Recipe, RecipeDelta, RecipeError, ValueChange, apply
 from hyperloom.measure.compile import BlobError
 from hyperloom_multibranch.contracts.gate import NotMeasured
 from hyperloom_multibranch.contracts.judgement import AccuracyVerdict, Judgement, Verdict
@@ -111,6 +113,9 @@ from hyperloom_multibranch.scheduling.clock import Clock
 from hyperloom_multibranch.scheduling.decisions import Decision, DecisionKind, DecisionLog
 from hyperloom_multibranch.contracts.llm import STOPPED_AT_MAX_TOKENS, Completion, CompletionFailed, CompletionReply
 from hyperloom_multibranch.scheduling.requests import SessionChecks, integration_test_request
+
+if TYPE_CHECKING:
+    from hyperloom.measure.runner.native.server_options import OptionInventory
 
 logger = logging.getLogger(__name__)
 
@@ -554,6 +559,10 @@ class Integrator:
     confirm at the end of EXPLORE awaits :meth:`finish_round` before that.
     """
 
+    #: The options the session's server takes, by which a merge is compared with the head's launch; ``None`` in a
+    #: session that keeps no option inventory.
+    options: OptionInventory | None = None
+
     def __init__(
         self,
         records: MergeRecords,
@@ -815,7 +824,7 @@ class Integrator:
         try:
             merge = await start.merging()
             onto = await self._repo.read_recipe(pending.onto)
-            if apply(onto, merge.delta).digest() == onto.digest():
+            if apply(onto, self._spelled_as(onto, merge.delta)).digest() == onto.digest():
                 return await self._skip(pending, ALREADY_ON_HEAD, MergeOutcome.ALREADY_ON_HEAD, merge)
             request = integration_test_request(TestKind.TEST, Purpose.INTEGRATION, pending.onto, merge.delta)
             if pending.adopts:
@@ -830,6 +839,15 @@ class Integrator:
         except _Skipped as exc:
             skipped = await self._skip(pending, exc.reason, MergeOutcome.CONFLICT_SKIPPED, exc.merge)
             return replace(skipped, lost_to=exc.lost_to)
+
+    def _spelled_as(self, onto: Recipe, delta: RecipeDelta) -> RecipeDelta:
+        """``delta`` with its arguments spelled as ``onto``'s launch spells the same options, by the session's option
+        inventory; ``delta`` itself in a session that keeps none."""
+
+        if self.options is None:
+            return delta
+        args = self.options.spelled_as(delta.config.server_args, onto.launch.server_args)
+        return replace(delta, config=replace(delta.config, server_args=args))
 
     async def _merged_commits(self) -> frozenset[str]:
         """The committed commits a merge onto the integration branch carried."""

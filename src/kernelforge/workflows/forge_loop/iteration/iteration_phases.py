@@ -7,7 +7,6 @@ from __future__ import annotations
 
 import logging
 import subprocess
-from pathlib import Path
 
 from kernelforge.agent_backends.session_resume import EXHAUSTED_END_REASON
 from kernelforge.evaluation.scoring import GateScoring
@@ -17,34 +16,26 @@ from kernelforge.workflows.forge_loop.iteration.iteration_types import (
     IterationResult,
     LoopAgents,
     LoopCallbacks,
+    RoundSession,
     _Attempt,
     _IterationFrame,
-    _IterationSupply,
-    _RoundPlan,
     _append_finding,
 )
-from kernelforge.workflows.forge_loop.iteration.merge_candidates import merge_plan
 from kernelforge.workflows.forge_loop.campaign.loop_log import iteration_header
-from kernelforge.workflows.forge_loop.campaign.run_state import (
-    ITERATION_STARTED,
-    complete_orchestration_probe,
-    make_event,
-)
-from kernelforge.workflows.forge_loop.iteration.fanout import lane_rationale
-from kernelforge.workflows.forge_loop.roles.orchestration_agent import OrchestrationInfrastructureError
+from kernelforge.workflows.forge_loop.campaign.run_state import ITERATION_STARTED, make_event
 from kernelforge.utils.process_reaping import processes_under
 
 log = logging.getLogger(__name__)
 
 
 class IterationPhasesMixin:
-    """Open an iteration, source the attempt it measures from a session, a lane or a merge, and abandon it when nothing can be."""
+    """Open an iteration, source the attempt it measures from the round's lanes and their merge, and abandon it when nothing can be."""
 
     async def _open_iteration(self, *, iteration, digest, supervisor_fn, analysis_service) -> None:
         """Resolve evidence, review the trajectory and re-scope what this iteration owns.
 
-        Analysis resolves before any Supervisor or planning call, so both read
-        the same evidence. A stall triggers the reviewer and the loop ALWAYS
+        Analysis resolves before any Supervisor call, so the Supervisor and
+        the round's sessions read the same evidence. A stall triggers the reviewer and the loop ALWAYS
         CONTINUES -- it never self-terminates on one. Untracked files already
         on the tree belong to the operator or to an earlier round, so the
         boundary is re-taken here and this iteration's REVERT cannot delete them.
@@ -54,7 +45,7 @@ class IterationPhasesMixin:
         if self.monitor is not None and supervisor_fn is not None:
             supervisor_due, supervisor_reason = self._supervisor_due(iteration)
 
-        # Resolve Analysis before any Supervisor or planning call.
+        # Resolve Analysis before any Supervisor call.
         if analysis_service is not None:
             await self._resolve_analysis_context(
                 analysis_service,
@@ -100,7 +91,7 @@ class IterationPhasesMixin:
     async def _source_attempt(
         self,
         frame: _IterationFrame,
-        supply: _IterationSupply,
+        hazard,
         *,
         agents: LoopAgents,
         digest,
@@ -108,223 +99,149 @@ class IterationPhasesMixin:
     ) -> _Attempt | None:
         """Decide what this iteration measures, and produce it.
 
-        A held device, a queued lane candidate and a staged merge each cost
-        nothing to source, so they are answered before an Implementer
-        session is bought. Returns None when the iteration has nothing to
-        measure: either it was closed out here, or the round was refused for
-        budget and ``_refused_round`` now says the campaign is over.
+        A held device costs nothing to answer, so it is answered before a round is bought. Returns None when the
+        iteration has nothing to measure: either it was closed out here, or the round was refused for budget and
+        ``_refused_round`` now says the campaign is over.
         """
         iteration, session_sink = frame.iteration, frame.session_sink
-        merge_pair, merge_diff = frame.merge
-        hazard, queued_lane = supply.hazard, supply.queued_lane
-        lane_record = None
         if hazard is not None:
-            unmeasured_result = self._unmeasurable_on_a_held_device(
-                iteration=iteration,
-                detail=hazard.describe(),
-                session_sink=session_sink,
+            unmeasured = self._unmeasurable_on_a_held_device(
+                iteration=iteration, detail=hazard.describe(), session_sink=session_sink
             )
-            commit_hash = ""
-            rationale = "device held; nothing was planned, run or measured"
-            attempt_source = ""
-            attempt_diff = ""
-            reusable_benchmark = None
-        elif queued_lane is not None:
-            unmeasured_result = None
-            commit_hash = ""
-            rationale = lane_rationale(queued_lane.lane_id)
-            attempt_source = self._read_kernel_source()
-            attempt_diff = self._working_tree_diff()
-            reusable_benchmark = None
-            session_sink["plan"] = queued_lane.plan
-            self._bind_session_producer(session_sink, queued_lane.agent_profile_id)
-            session_sink["session_started"] = True
-            lane_record = queued_lane.lesson
-            print(f"  [lane {queued_lane.lane_id}] measuring queued candidate")
-        elif merge_diff and merge_pair is not None:
-            return self._merge_attempt(frame)
-        elif agents.agent_fn is not None:
-            return await self._implementer_attempt(
-                frame,
-                supply.fan_out_plan,
-                agents=agents,
-                digest=digest,
-                on_iteration=callbacks.on_iteration,
-            )
-        else:
-            unmeasured_result = None
-            commit_hash = ""
-            rationale = "no-agent (baseline measurement)"
-            attempt_source = ""
-            attempt_diff = ""
-            reusable_benchmark = None
-        return _Attempt(
-            unmeasured_result=unmeasured_result,
-            commit_hash=commit_hash,
-            rationale=rationale,
-            attempt_source=attempt_source,
-            attempt_diff=attempt_diff,
-            reusable_benchmark=reusable_benchmark,
-            # Only an orchestrated round synthesizes a plan; every other way of
-            # sourcing an attempt leaves the iteration without one.
-            optimization_plan_path="",
-            optimization_plan_executable=False,
-            lane_record=lane_record,
-        )
+            return _Attempt(unmeasured, "", "device held; nothing was run or measured", "", "", None)
+        if agents.agent_fn is None or agents.agent_factory is None:
+            return _Attempt(None, "", "no-agent (baseline measurement)", "", "", None)
+        return await self._round_attempt(frame, agents=agents, digest=digest, on_iteration=callbacks.on_iteration)
 
-    def _merge_attempt(self, frame: _IterationFrame) -> _Attempt:
-        """Stage the two queued winners' stacked diff as this iteration's candidate, with no Implementer session."""
-        iteration, session_sink = frame.iteration, frame.session_sink
-        merge_pair, merge_diff = frame.merge
-        unmeasured_result = None
-        commit_hash = ""
-        rationale = (
-            f"stacked iterations {merge_pair[0].iteration} and {merge_pair[1].iteration}; no Implementer session"
-        )
-        attempt_source = self._read_kernel_source()
-        attempt_diff = merge_diff
-        reusable_benchmark = None
-        session_sink["plan"] = merge_plan(*merge_pair)
-        print(f"  [merge] {session_sink['plan']}")
-        # How often the mechanism engaged.
-        self.state_store.append_event(
-            make_event(
-                "merge_attempt_staged",
-                iteration,
-                first_iteration=merge_pair[0].iteration,
-                second_iteration=merge_pair[1].iteration,
-                cases=sorted(merge_pair[0].winning_cases | merge_pair[1].winning_cases),
-                unresolved_stall_iters=(self.run_state.stall.unresolved_stall_iters),
-            )
-        )
-        return _Attempt(
-            unmeasured_result=unmeasured_result,
-            commit_hash=commit_hash,
-            rationale=rationale,
-            attempt_source=attempt_source,
-            attempt_diff=attempt_diff,
-            reusable_benchmark=reusable_benchmark,
-            optimization_plan_path="",
-            optimization_plan_executable=False,
-        )
-
-    async def _implementer_attempt(
-        self,
-        frame: _IterationFrame,
-        fan_out_plan,
-        *,
-        agents: LoopAgents,
-        digest,
-        on_iteration,
+    async def _round_attempt(
+        self, frame: _IterationFrame, *, agents: LoopAgents, digest, on_iteration
     ) -> _Attempt | None:
-        """Plan an orchestrated round, buy the Implementer session, and collect the candidate it leaves."""
+        """Run the round's lanes, merge what they left on the canonical tree, and collect the candidate.
+
+        A round's only lane works in the canonical workspace itself, and what it leaves is the candidate. Lanes that
+        run side by side each work in a copy: one changed lane is the candidate as it stands, and several are merged
+        by a session in the canonical workspace, which starts from the best of them and is judged, as every candidate
+        is, against the current best.
+        """
         iteration, session_sink = frame.iteration, frame.session_sink
-        print("  [agent] Querying agent for kernel modification...")
-        self._bind_session_producer(session_sink, self.run_state.agent_relay.active_profile_id)
-        # Without a planning service the session chooses its own direction, so the round's plan is the session.
-        plan = _RoundPlan(executable=True)
-        if agents.orchestration_service is not None:
-            plan = await self._orchestrated_plan(
-                frame,
-                fan_out_plan,
-                orchestration_service=agents.orchestration_service,
-                on_iteration=on_iteration,
-            )
-            if plan is None:
-                return None
-        # The last point before the round buys its session, and the first at which what planning cost is a
-        # measurement rather than an estimate.
+        # The last point before the round buys its sessions, which the loop cannot interrupt.
         if not self._admit_dispatch(iteration):
             return None
-        session_sink["session_started"] = True
-        history = self._implementer_history(
-            digest=digest,
-            optimization_plan_path=plan.path,
+        self._bind_session_producer(session_sink, self.run_state.agent_relay.active_profile_id)
+        assignments = self._round_assignments()
+        print(f"  [lanes] round of {len(assignments)} lane(s)")
+        if len(assignments) == 1:
+            return await self._only_lane_attempt(
+                frame, agent_fn=agents.agent_fn, digest=digest, on_iteration=on_iteration
+            )
+        results = await self._run_lanes(frame, assignments, agent_factory=agents.agent_factory, digest=digest)
+        sessions = self._lane_sessions(results)
+        hazard = self.device_hazard.live
+        if hazard is not None:
+            session_sink["session_started"] = bool(sessions)
+            unmeasured = self._unmeasurable_on_a_held_device(
+                iteration=iteration, detail=hazard.describe(), session_sink=session_sink
+            )
+            return _Attempt(unmeasured, "", "a lane left the device held", "", "", None, tuple(sessions))
+        changed = [lane for lane in results if lane.changed]
+        start = self._merge_start(changed)
+        # A lane whose patch does not apply drops out of the round, and the start is chosen again without it.
+        while start is not None and not self._apply_lane(start):
+            changed = [lane for lane in changed if lane.changed]
+            start = self._merge_start(changed)
+        rest = [lane for lane in changed if lane is not start]
+        agent_error, rationale = None, ""
+        if rest:
+            session_sink["session_started"] = True
+            agent_error, rationale = await self._merge_session(
+                frame, start, rest, agent_fn=agents.agent_fn, digest=digest
+            )
+            sessions.append(RoundSession("merge", session_sink))
+        else:
+            # The round's only lane to leave a change, or none did: what that session handed back is the iteration's.
+            lead = start if start is not None else results[0]
+            session_sink.update(lead.sink)
+            rationale = lead.rationale
+            agent_error = lead.sink.get("agent_error") or lead.error or None
+            # A measurement taken while other lanes compiled is not reused as the canonical one.
+            session_sink.pop("benchmark_measurement", None)
+        return await self._collect_session_candidate(
+            frame, agent_error=agent_error, rationale=rationale, sessions=tuple(sessions), on_iteration=on_iteration
         )
-        agent_error, rationale = await self._run_implementer_session(agents.agent_fn, history, frame)
 
+    async def _only_lane_attempt(self, frame: _IterationFrame, *, agent_fn, digest, on_iteration) -> _Attempt | None:
+        """Run a round's only lane in the canonical workspace, and collect what it left as the candidate.
+
+        A copy separates lanes that run side by side. One lane has nothing to be separated from, and some workspaces
+        cannot be copied at all: a framework tree that is measured where it is installed, with its repository kept
+        elsewhere, is edited in place or not at all. The session owns the device for the round, so it reaches it
+        directly, and its stop has to beat the current best: there is no merge to use anything less.
+        """
+        session_sink = frame.session_sink
+        session_sink["session_started"] = True
+        history = self._implementer_history(digest=digest, direction=self._session_direction())
+        agent_error, rationale = await self._run_session(
+            agent_fn,
+            self.ic.kernel_file,
+            history,
+            sink=session_sink,
+            gate_scoring=GateScoring(dict(self._baseline_case_times), self.best_mean_case_speedup),
+        )
         return await self._collect_session_candidate(
             frame,
             agent_error=agent_error,
             rationale=rationale,
-            plan=plan,
+            sessions=(RoundSession("", session_sink),),
             on_iteration=on_iteration,
         )
 
-    async def _orchestrated_plan(
-        self,
-        frame: _IterationFrame,
-        fan_out_plan,
-        *,
-        orchestration_service,
-        on_iteration,
-    ) -> _RoundPlan | None:
-        """The round's synthesized plan, or None when the budget refused the round or failed planning abandoned it."""
-        iteration = frame.iteration
-        if fan_out_plan is not None:
-            plan_path, orchestration_error = fan_out_plan
-        else:
-            if self._round_started_at is None and not self._admit_replanned_round(iteration):
-                return None
-            print("  [orchestration] analyzing and dispatching specialists...")
-            self._last_orchestration_plan_executable = None
-            plan_path, orchestration_error = await self._plan_round(
-                iteration=iteration,
-                orchestration_service=orchestration_service,
-            )
-        if plan_path is None:
-            await self._abandon_iteration(
-                IterationResult(
-                    iteration=iteration,
-                    duration_sec=0.0,
-                    validation_passed=False,
-                    validation_summary=(f"ORCHESTRATION ERROR: {orchestration_error}"),
-                    session_end_reason="orchestration_error",
-                ),
-                frame,
-                decision_label=DecisionLabel.ORCHESTRATION_ERROR.value,
-                on_iteration=on_iteration,
-            )
-            return None
-        optimization_plan_path = str(plan_path)
-        optimization_plan_executable = (
-            self._last_orchestration_plan_executable if self._last_orchestration_plan_executable is not None else True
-        )
-        complete_orchestration_probe(self.run_state)
-        self.state_store.save(self.run_state)
-        return _RoundPlan(optimization_plan_path, optimization_plan_executable)
-
-    async def _run_implementer_session(
-        self, agent_fn, history: str, frame: _IterationFrame
+    async def _merge_session(
+        self, frame: _IterationFrame, start, rest, *, agent_fn, digest
     ) -> tuple[Exception | None, str]:
-        """Run the Implementer session on the kernel; return its error, if any, and its rationale."""
-        iteration, session_sink = frame.iteration, frame.session_sink
-        # Pass extras only to agent_fns that declare them: the in-session gate uses the current best mean case
-        # speedup and immutable pristine per-case timings; session_sink hands back findings and the
-        # resumed-session factual-record callback. The lesson turn, not this session, writes the record.
-        extras = {
-            "gate_scoring": GateScoring(dict(self._baseline_case_times), self.best_mean_case_speedup),
-            "session_sink": session_sink,
-        }
-        extra_kwargs = declared_extras(agent_fn, extras)
+        """Run the session that merges the round's remaining lanes into the canonical workspace.
+
+        Its stop is judged against the current best, the bar a KEEP has to clear. The lane it starts from scored
+        higher than that, but by one measurement taken while other lanes worked: held to that score, a merge whose
+        gain is real and smaller than the measurement's noise could not stop, and neither could one that found
+        nothing worth taking. Not ending below its start is the session's to see to, by its own measurements.
+        """
+        best = self.best_mean_case_speedup
+        standing = (
+            f"lane {start.lane_id} (its stop check scored {start.score})" if start is not None else "the round base"
+        )
+        print(f"  [merge] merging {len(rest)} lane(s) onto {standing}; current best {best}")
+        history = self._implementer_history(
+            digest=digest, direction=self._merge_direction(frame.iteration, start, rest)
+        )
+        return await self._run_session(
+            agent_fn,
+            self.ic.kernel_file,
+            history,
+            sink=frame.session_sink,
+            gate_scoring=GateScoring(
+                dict(self._baseline_case_times), best, starts_on_measured_candidate=start is not None
+            ),
+        )
+
+    async def _run_session(
+        self, agent_fn, kernel_path: str, history: str, *, sink: dict, gate_scoring: GateScoring
+    ) -> tuple[Exception | None, str]:
+        """Run one Implementer session on ``kernel_path``; return its error, if any, and its rationale."""
+        # Pass extras only to agent_fns that declare them: the in-session gate uses the score to beat and the
+        # immutable pristine per-case timings; the sink hands back findings and the resumed-session factual-record
+        # callback. The lesson turn, not this session, writes the record.
+        extras = declared_extras(agent_fn, {"gate_scoring": gate_scoring, "session_sink": sink})
         agent_error = None
         try:
-            rationale = await agent_fn(
-                self.ic.kernel_file,
-                history,
-                **extra_kwargs,
-            )
+            rationale = await agent_fn(kernel_path, history, **extras)
             print(f"  [agent] Rationale: {rationale[:200]}")
         except Exception as e:  # isolation boundary: one implementer agent session
-            log.warning("implementer agent session failed at iteration %s", iteration, exc_info=True)
+            log.warning("implementer agent session failed", exc_info=True)
             agent_error = e
             print(f"  [agent] ERROR: {e}")
             rationale = f"agent session ended with error after edits: {e}"
-            session_sink.setdefault("end_reason", "sdk_error")
-            session_sink.setdefault(
-                "findings",
-                f"Agent session error before outer validation: {e}",
-            )
+            sink.setdefault("end_reason", "sdk_error")
+            sink.setdefault("findings", f"Agent session error before outer validation: {e}")
         finally:
             # The SDK result stream has completed (or unwound).
             self._checkpoint_llm_usage()
@@ -336,18 +253,17 @@ class IterationPhasesMixin:
         *,
         agent_error,
         rationale,
-        plan: _RoundPlan,
+        sessions: tuple[RoundSession, ...],
         on_iteration,
     ) -> _Attempt | None:
-        """Collect what the Implementer session left behind, or None if nothing can be.
+        """Collect what the round left on the canonical tree, or None if nothing can be.
 
-        A session that tainted protected state or left the workspace
+        A merge session that tainted protected state or left the workspace
         contended produced a candidate that exists but must not be measured,
-        so it comes back already judged. A session that changed nothing
+        so it comes back already judged. A round that changed nothing
         tracked is closed out here and the iteration is abandoned.
         """
         iteration, session_sink = frame.iteration, frame.session_sink
-        optimization_plan_path, optimization_plan_executable = plan.path, plan.executable
         # Either kind of "this candidate exists but must not be measured": protected state was tainted, or the
         # workspace is still busy.
         unmeasured_result: IterationResult | None = None
@@ -385,7 +301,7 @@ class IterationPhasesMixin:
                     frame,
                     agent_error=agent_error,
                     rationale=rationale,
-                    plan=plan,
+                    sessions=sessions,
                     on_iteration=on_iteration,
                 )
                 return None
@@ -405,8 +321,7 @@ class IterationPhasesMixin:
             attempt_source=attempt_source,
             attempt_diff=attempt_diff,
             reusable_benchmark=reusable_benchmark,
-            optimization_plan_path=optimization_plan_path,
-            optimization_plan_executable=optimization_plan_executable,
+            sessions=sessions,
         )
 
     def _refuse_integrity_violation(self, frame: _IterationFrame) -> IterationResult:
@@ -478,10 +393,10 @@ class IterationPhasesMixin:
         *,
         agent_error,
         rationale,
-        plan: _RoundPlan,
+        sessions: tuple[RoundSession, ...],
         on_iteration,
     ) -> None:
-        """Close out a session that left no tracked change, saying why there was none."""
+        """Close out a round that left no tracked change, saying why there was none."""
         iteration, session_sink = frame.iteration, frame.session_sink
         # An outage leaves the same empty diff as a deliberate no-op.
         api_failed = session_sink.get("end_reason") == EXHAUSTED_END_REASON
@@ -526,7 +441,7 @@ class IterationPhasesMixin:
             frame,
             decision_label=decision_label,
             on_iteration=on_iteration,
-            round_plan=plan,
+            sessions=sessions,
         )
 
     async def _abandon_iteration(
@@ -536,20 +451,16 @@ class IterationPhasesMixin:
         *,
         decision_label: str,
         on_iteration,
-        round_plan: _RoundPlan = _RoundPlan(),
+        sessions: tuple[RoundSession, ...] = (),
     ) -> None:
         """Close out an iteration that ended before anything could be measured.
 
         Nothing reached the measurement surface, but the iteration still owes
         the campaign its outcome, its lesson and its handoff: without them a
-        resume would re-plan the round this one already spent.
+        resume would run again the round this one already spent.
         """
         iteration, session_sink = frame.iteration, frame.session_sink
-        optimization_plan_path, optimization_plan_created = round_plan.path, round_plan.published
         self.results.append(result)
-        self._apply_iteration_planning_state(
-            optimization_plan_created=optimization_plan_created,
-        )
         self._record_iteration_outcome(
             result,
             plan=session_sink.get("plan", ""),
@@ -559,66 +470,9 @@ class IterationPhasesMixin:
             result=result,
             decision=decision_label,
             session_sink=session_sink,
+            sessions=sessions,
         )
-        self._record_iteration_handoff(
-            iteration=iteration,
-            decision=decision_label,
-            optimization_plan_path=optimization_plan_path,
-            session_sink=session_sink,
-        )
+        self._record_iteration_handoff(iteration=iteration, decision=decision_label, session_sink=session_sink)
         self._publish_optimization_history()
         if on_iteration:
             on_iteration(result)
-
-    async def _run_orchestration(
-        self,
-        *,
-        iteration: int,
-        orchestration_service,
-        lanes: int = 1,
-    ) -> tuple[Path | None, str]:
-        """Run planning and durably publish every lane's plan for the round."""
-        context = self._with_loop_state(
-            self._with_ceiling_standing(
-                self._with_case_config_coverage(
-                    self._active_analysis_context
-                    if self._active_analysis_context is not None
-                    else self._build_orchestration_context()
-                )
-            )
-        )
-        if orchestration_service.has_plan_critic:
-            context = self._with_plan_review(iteration, context)
-        try:
-            result = await orchestration_service.run(
-                context,
-                usage=self._usage,
-                lanes=lanes,
-            )
-        except OrchestrationInfrastructureError as error:
-            detail = f"{type(error).__name__}: {error}"
-            print(f"  [orchestration] failed ({detail})")
-            return None, detail
-        finally:
-            self._checkpoint_llm_usage()
-
-        self._record_probe_hazard(iteration, result)
-        self._charge_plan_review(result)
-        self._last_lane_plans = [plan for plan in result.optimization_plans if str(plan).strip()]
-        self._persist_orchestration_result(iteration, context, result)
-        plan_path = self._persist_lane_plans(
-            iteration,
-            self._last_lane_plans,
-            analysis_commit=context.analysis_commit,
-        )
-        self._record_orchestration_final_plan(iteration, plan_path)
-        self._last_orchestration_plan_executable = bool(getattr(result, "optimization_plan_executable", True))
-        critic = result.plan_critic
-        self._last_critic_verdict = critic.verdict if critic is not None else ""
-        self._last_critic_review = critic.review if critic is not None else ""
-        self._record_critic_ruling(iteration, critic)
-        self._latest_optimization_plan_path = str(plan_path)
-        print(f"  [orchestration] optimization plan: {plan_path}")
-        if len(self._last_lane_plans) > 1:
-            print(f"  [orchestration] {len(self._last_lane_plans)} lane plans published under {plan_path.parent}")
-        return plan_path, ""

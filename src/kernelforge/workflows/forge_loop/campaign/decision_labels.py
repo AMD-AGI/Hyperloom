@@ -27,7 +27,6 @@ class DecisionLabel(str, Enum):
     NO_CHANGES = "NO_CHANGES"
     API_ERROR = "API_ERROR"
     AGENT_ERROR = "AGENT_ERROR"
-    ORCHESTRATION_ERROR = "ORCHESTRATION_ERROR"
 
 
 DECISION_LABELS = frozenset(label.value for label in DecisionLabel)

@@ -6,8 +6,10 @@
 from __future__ import annotations
 
 import asyncio
+import os
 import re
 import sys
+from collections.abc import Mapping
 
 from kernelforge.utils.process_group import kill_process_group
 from kernelforge.evaluation.scoring import DEFAULT_SNR_THRESHOLD_DB
@@ -18,8 +20,13 @@ async def test_correctness(
     driver_args: list[str] | None = None,
     snr_threshold: float = DEFAULT_SNR_THRESHOLD_DB,
     timeout_sec: int = 120,
+    env: Mapping[str, str] | None = None,
 ) -> dict:
-    """Run a kernel test driver and extract its SNR pre-filter verdict."""
+    """Run a kernel test driver and extract its SNR pre-filter verdict.
+
+    ``env`` is laid over this process's environment for the driver, for a caller measuring a workspace that keeps
+    its own build caches.
+    """
     cmd = [sys.executable, driver_script] + (driver_args or [])
 
     proc = await asyncio.create_subprocess_exec(
@@ -27,6 +34,7 @@ async def test_correctness(
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
         start_new_session=True,
+        env=None if env is None else {**os.environ, **env},
     )
     try:
         stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=timeout_sec)

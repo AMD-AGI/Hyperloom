@@ -162,9 +162,8 @@ class ResumeRecoveryMixin:
                 best_wall_ms=event.get("best_after_ms"),
                 best_mean_case_speedup=event.get("best_after_mean_case_speedup"),
             ),
-            self._stall_policy(),
+            stall_threshold=self.ic.supervise_after,
         )
-        state.diversification_cycle_completed = event.get("diversification_cycle_completed") is True
         apply_relay_search_outcome(
             state.agent_relay,
             decision=decision,
@@ -269,11 +268,8 @@ class ResumeRecoveryMixin:
                     best_wall_ms=result.wall_ms,
                     best_mean_case_speedup=result.mean_case_speedup,
                 ),
-                self._stall_policy(),
+                stall_threshold=self.ic.supervise_after,
             )
-            control = pending.get("search_control")
-            if isinstance(control, dict):
-                planned.diversification_cycle_completed = control.get("diversification_cycle_completed") is True
             apply_relay_keep(planned.agent_relay)
         else:
             _require_best_is_keep(planned.best, result)

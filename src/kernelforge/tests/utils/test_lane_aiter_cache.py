@@ -25,7 +25,8 @@ from kernelforge.workflows.forge_loop.bootstrap import lanes as cli_lanes
 from kernelforge.config import Config
 from kernelforge.workflows.forge_loop.roles.agent import ImplementerSetup, ImplementerTask
 from kernelforge.utils import aiter_cache
-from kernelforge.workflows.forge_loop.iteration.fanout import SERIALIZED_DRIVER_NAME
+from kernelforge.utils.device_queue import DEVICE_VISIBILITY_VARIABLES, RUNNER_NAME
+from kernelforge.workflows.forge_loop.iteration.fanout import LaneAssignment, LaneSeat
 from kernelforge.utils.git import git
 from kernelforge.utils.process_reaping import SessionMark
 from kernelforge.config.edit_policy import FORGE_PROTECTED_PATHS
@@ -155,12 +156,24 @@ def _lane_dir(tmp_path: Path, lane_id: str) -> Path:
     return lane_dir
 
 
+def _seat(tmp_path: Path, lane_dir: Path, lane_id: str) -> LaneSeat:
+    """Where a round seats one lane: its copy, and the runner and queue it reaches the device through."""
+    return LaneSeat(
+        assignment=LaneAssignment(lane_id),
+        lane_dir=lane_dir,
+        device_runner=lane_dir / RUNNER_NAME,
+        queue_root=tmp_path / "device-queue",
+        usage_log=tmp_path / "device_usage.jsonl",
+        hold_limit_sec=600,
+    )
+
+
 async def _run_lanes(tmp_path: Path, factory, lane_ids: tuple[str, ...]) -> None:
     """Run one session per lane concurrently, as the round's fan-out does."""
 
     async def lane(lane_id: str) -> None:
         lane_dir = _lane_dir(tmp_path, lane_id)
-        session = factory(str(lane_dir), str(lane_dir / SERIALIZED_DRIVER_NAME))
+        session = factory(_seat(tmp_path, lane_dir, lane_id))
         # Hand control back so both lanes are inside their session before either spawns: a routing that writes the
         # process environment would give the first lane whatever the second lane wrote last.
         await asyncio.sleep(0)
@@ -189,6 +202,9 @@ async def test_two_concurrent_lanes_are_spawned_with_different_aiter_caches(
     assert str(campaign.aiter_root_dir) not in {env["AITER_ROOT_DIR"] for env in spawned}
     assert str(campaign.aiter_jit_dir) not in {env["AITER_JIT_DIR"] for env in spawned}
     assert str(campaign.cache_root) not in {env["FORGE_AITER_CACHE_ROOT"] for env in spawned}
+    # A lane's session sees no device of its own: what needs one goes through the lane's runner and waits its turn.
+    for env in spawned:
+        assert [env[name] for name in DEVICE_VISIBILITY_VARIABLES] == ["", ""]
 
 
 async def test_a_lane_cache_is_created_beside_the_lane_copy(tmp_path):
@@ -237,7 +253,7 @@ async def test_a_lane_denied_its_own_cache_is_refused_rather_than_shared(tmp_pat
     factory = _lane_factory(config, workspace, _implementer_through(_recording_claude_backend([])))
 
     with pytest.raises(OSError):
-        factory(str(lane_dir), str(lane_dir / SERIALIZED_DRIVER_NAME))
+        factory(_seat(tmp_path, lane_dir, "1"))
 
 
 def _overlay(options) -> dict[str, str]:

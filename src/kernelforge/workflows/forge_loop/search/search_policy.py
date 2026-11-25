@@ -1,4 +1,4 @@
-"""Deterministic search-mode policy for forge-loop planning."""
+"""Deterministic search-mode policy for the forge-loop."""
 
 from __future__ import annotations
 
@@ -30,25 +30,11 @@ MARGINAL_GAIN_WINDOW = 6
 MARGINAL_GAIN_SCAN_WINDOW = 16
 
 
-@dataclass(frozen=True)
-class StallThresholds:
-    """Iterations without a new best before the search changes direction, and before the Supervisor reviews it."""
-
-    diversify_after: int
-    supervise_after: int
-
-
-# A planned round spreads one plan over the iterations that measure its lanes, so several of them pass before the
-# plan itself has been judged.
-PLANNED_ROUND_STALL = StallThresholds(diversify_after=3, supervise_after=3)
-# A session that chose its own direction is a whole round: one that ends without a new best is a direction that did
-# not pay, and a second in a row is a search that needs another view.
-SELF_DIRECTED_STALL = StallThresholds(diversify_after=1, supervise_after=2)
-
-
-def stall_thresholds(*, planned_rounds: bool) -> StallThresholds:
-    """The thresholds for a loop that plans its rounds, or for one whose sessions choose their own direction."""
-    return PLANNED_ROUND_STALL if planned_rounds else SELF_DIRECTED_STALL
+# Rounds without a new best before the search changes direction, and before the Supervisor reviews it. A round is a
+# whole direction, or several side by side: one that ends without a new best did not pay, and a second in a row is a
+# search that needs another view.
+DIVERSIFY_AFTER_ROUNDS = 1
+SUPERVISE_AFTER_ROUNDS = 2
 
 
 @dataclass(frozen=True)
@@ -58,7 +44,6 @@ class SearchPolicyDecision:
     mode: str
     reason_codes: tuple[str, ...]
     objective_kind: str
-    residence_iterations_remaining: int = 0
 
     def __post_init__(self) -> None:
         if self.mode not in SEARCH_MODES:
@@ -69,13 +54,10 @@ class SearchPolicyDecision:
 
 @dataclass(frozen=True)
 class SearchState:
-    """Where the search stands: the best's source, the stall streak, the current mode, its residence and cycle."""
+    """Where the search stands: the best's source and the stall streak."""
 
     best_source: str
     no_improvement_iters: int
-    current_mode: str = SEARCH_MODE_EXPLOIT
-    residence_iterations_remaining: int = 0
-    diversification_cycle_completed: bool = False
 
 
 @dataclass(frozen=True)
@@ -93,36 +75,26 @@ class SearchPolicyEngine:
         self,
         state: SearchState,
         *,
-        stall_threshold: int,
-        diversify_after: int | None = None,
+        diversify_after: int,
         recent: RecentProgress = RecentProgress(),
     ) -> SearchPolicyDecision:
         """Return a deterministic mode with stable reason codes.
 
-        ``stall_threshold`` sizes the residence a published diversified plan is given; ``diversify_after`` is how
-        many iterations without a new best turn the search away from the current line, and defaults to it.
+        ``diversify_after`` is how many rounds without a new best turn the search away from the current line.
         """
-        threshold = max(1, int(stall_threshold))
-        diversify_at = threshold if diversify_after is None else max(1, int(diversify_after))
-        residence = max(0, int(state.residence_iterations_remaining))
+        diversify_at = max(1, int(diversify_after))
         empty_diffs = max(0, int(recent.consecutive_no_changes))
         window_gain_ratio = recent.window_gain_ratio
         window_gain = None if window_gain_ratio is None else float(window_gain_ratio)
         if window_gain is not None and not math.isfinite(window_gain):
             raise ValueError(f"window_gain_ratio must be finite: {window_gain_ratio!r}")
 
-        # Outranks every other signal, mode residence included: those weigh how promising the current direction is,
-        # while repeated empty diffs are evidence it cannot be turned into a candidate at all, so staying in EXPLOIT
-        # spends another session on a direction that produces no edit.
+        # Outranks every other signal: those weigh how promising the current direction is, while repeated empty
+        # diffs are evidence it cannot be turned into a candidate at all, so staying in EXPLOIT spends another
+        # session on a direction that produces no edit.
         if empty_diffs >= NO_CHANGES_ESCALATION_THRESHOLD:
             mode = SEARCH_MODE_DIVERSIFY
             reason = "REPEATED_NO_CHANGES"
-        elif state.current_mode == SEARCH_MODE_EXPLOIT and residence > 0:
-            mode = SEARCH_MODE_EXPLOIT
-            reason = "MODE_RESIDENCE"
-        elif state.diversification_cycle_completed:
-            mode = SEARCH_MODE_EXPLOIT
-            reason = "DIVERSIFY_PLAN_CREATED"
         elif state.no_improvement_iters >= diversify_at:
             mode = SEARCH_MODE_DIVERSIFY
             reason = "NO_IMPROVEMENT_STALL"
@@ -135,24 +107,5 @@ class SearchPolicyEngine:
         else:
             mode = SEARCH_MODE_EXPLOIT
             reason = "CANONICAL_GAIN_AVAILABLE"
-
-        if mode == SEARCH_MODE_DIVERSIFY:
-            return SearchPolicyDecision(
-                mode=mode,
-                reason_codes=(reason,),
-                objective_kind=OBJECTIVE_DISCOVER_NEW_MECHANISM,
-                residence_iterations_remaining=0,
-            )
-
-        if reason == "DIVERSIFY_PLAN_CREATED":
-            next_residence = max(0, threshold - 1)
-        elif reason == "MODE_RESIDENCE":
-            next_residence = residence - 1
-        else:
-            next_residence = 0
-        return SearchPolicyDecision(
-            mode=mode,
-            reason_codes=(reason,),
-            objective_kind=OBJECTIVE_CANONICAL_GAIN,
-            residence_iterations_remaining=next_residence,
-        )
+        objective = OBJECTIVE_DISCOVER_NEW_MECHANISM if mode == SEARCH_MODE_DIVERSIFY else OBJECTIVE_CANONICAL_GAIN
+        return SearchPolicyDecision(mode=mode, reason_codes=(reason,), objective_kind=objective)
