@@ -59,7 +59,6 @@ from hyperloom_multibranch.toolbox.analysis import (
     CODE_TOOL_UNAVAILABLE,
     AnalysisAsk,
     analysis_request,
-    startable,
 )
 from hyperloom_multibranch.toolbox.acceptance import Acceptance, AcceptanceSetup, check_kind
 from hyperloom_multibranch.toolbox.attachments import store_attachment
@@ -511,7 +510,7 @@ class RealToolbox:
     def _analysis_jobs(self, tool: str) -> ToolJobs:
         if self._tools is None:
             raise RequestRejected("this toolbox serves no asynchronous tools", CODE_NO_EXECUTOR)
-        if tool in startable(self.analysis_tools) and tool not in self.analysis_tools:
+        if tool in ANALYSIS_TOOLS and tool not in self.analysis_tools:
             raise RequestRejected(f"{tool!r} is not run by this toolbox's backend", CODE_TOOL_UNAVAILABLE)
         return self._tools
 
@@ -535,11 +534,7 @@ class RealToolbox:
 
         jobs = self._analysis_jobs(tool)
         request = await analysis_request(
-            self._repo,
-            self._records,
-            AnalysisAsk(branch, tool, params, profile_request_id),
-            self.trace_root,
-            self.analysis_tools,
+            self._repo, self._records, AnalysisAsk(branch, tool, params, profile_request_id), self.trace_root
         )
         profile = request.params.get(PROFILE_REQUEST_PARAM)
         if not profile:

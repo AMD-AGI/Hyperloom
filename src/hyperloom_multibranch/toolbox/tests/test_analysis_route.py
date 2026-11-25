@@ -275,26 +275,16 @@ async def test_a_toolbox_without_a_tool_executor_advertises_no_analysis_tool(sta
     assert "enum" not in entry["inputSchema"]["properties"]["tool"] and "no analysis tool" in entry["description"]
 
 
-@pytest.mark.parametrize("tool", ["profile", "build", "nonesuch", "knob_tune"])
+@pytest.mark.parametrize("tool", ["profile", "build", "nonesuch"])
 async def test_any_other_tool_is_refused_with_its_reason(stack: Stack, tool: str) -> None:
     assert "must be one of ['tracelens', 'roofline']" in await stack.refused(tool=tool)
     with pytest.raises(RequestRejected) as raised:  # the toolbox's own refusal, for a caller outside the MCP schema
         await stack.rig.toolbox.submit_analysis("b1", tool, {})
     assert (
         raised.value.code == "tool_not_allowed"
-        and "tracelens, roofline, kernel_tune and upstream_pr_search" in raised.value.reason
+        and "tracelens, roofline, kernel_tune, knob_tune and upstream_pr_search" in raised.value.reason
     )
     assert stack.tools["profile"].requests == []
-
-
-async def test_a_toolbox_that_serves_knob_tune_names_it_in_its_refusal(tmp_path: Path) -> None:
-    async for served in _stack(tmp_path, names=("roofline", "knob_tune", "profile")):
-        with pytest.raises(RequestRejected) as raised:
-            await served.rig.toolbox.submit_analysis("b1", "nonesuch", {})
-        assert (
-            raised.value.code == "tool_not_allowed"
-            and "tracelens, roofline, kernel_tune, knob_tune and upstream_pr_search" in raised.value.reason
-        )
 
 
 async def test_a_profile_request_id_is_kept_only_for_a_profile_test_of_this_commit(stack: Stack) -> None:
