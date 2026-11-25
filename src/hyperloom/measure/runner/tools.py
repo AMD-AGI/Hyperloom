@@ -5,11 +5,13 @@
 inference_suite staging of this runner's own pins.
 
 The runner never uses the session's checkouts: they are on storage the candidate's author can write. Each test
-checks the commit out into a directory of its own, fetched by hash and checked out detached. The commits a test of the
-host fetched are kept in a git object store below the runner cache (:data:`INFERENCEX_STORE`), which every later test
-fetches from instead of the network. The server under test can write that store, so a test never runs from it: git
-hashes every object it receives, and an object that is not the one the commit names fails the fetch, which then goes to
-the network with a warning. The inference_suite staging is never built here: ``cache_build`` publishes it
+checks the commit out into a directory of its own below its scratch, fetched by hash and checked out detached. The
+runner cache may be mounted read-only, and a test never writes it: when the git object store below it
+(:data:`INFERENCEX_STORE`, filled by an earlier release of the runner or by the host) holds the commit, the test fetches
+it from there, reading only; otherwise it fetches from ``INFERENCEX_REPO`` (the host's mirror) or upstream into its own
+scratch. A test never runs from the store: git hashes every object it receives, and an object that is not the one the
+commit names fails the fetch, which then goes to ``INFERENCEX_REPO`` with a warning. No alternates are set up either,
+since git does not hash an object it reads through them. The inference_suite staging is never built here: ``cache_build`` publishes it
 as ``<runner cache>/inference-suite/<staging key>/`` (:func:`inference_suite.staging_key`) on a host with network, and
 the runner only verifies it and compares its normalised manifest with the one the sheet carries.
 """
@@ -58,7 +60,8 @@ _TRUST_CONFIG = "fetch-trust.gitconfig"
 INFERENCE_SUITE_DIR = "inference-suite"
 #: Where the tool object stores live below the runner cache.
 TOOL_CHECKOUTS_DIR = "tools"
-#: The bare repository below :data:`TOOL_CHECKOUTS_DIR` that keeps every InferenceX commit a test of the host fetched.
+#: The bare repository below :data:`TOOL_CHECKOUTS_DIR` a test fetches InferenceX from, read-only, when it holds the
+#: commit; a test never adds to it.
 INFERENCEX_STORE = "InferenceX.git"
 #: What marks an InferenceX tree: its benchmark library, at the root or below ``inferencex-e2e/``, or the client
 #: inference_suite stages a sheet's rounds from (the pinned commit has no library).
@@ -127,8 +130,6 @@ def _checkout(tool: _Tool, repo: str, commit: str, cache_dir: Path, store: Path)
         if _head(scratch) != commit or not _has_marker(scratch, tool.markers):
             expected = " or ".join(str(marker) for marker in tool.markers)
             raise ToolError(f"{tool.name} at {commit} is not the expected tree (no {expected})")
-        if not from_store:
-            _keep(store, scratch, commit)
         if destination.exists():
             _remove(destination)
         scratch.rename(destination)
@@ -185,42 +186,21 @@ def _trusting(directory: str, config: Path, cwd: Path) -> dict[str, str]:
 def _fetch_from_store(scratch: Path, store: Path, commit: str) -> bool:
     """Whether ``commit`` came from ``store`` into a fresh repository at ``scratch``.
 
-    The file:// transport makes git hash every object it receives instead of linking the store's files, so an object
-    the server under test rewrote in the store fails the fetch rather than reaching the checkout. A store that fails
+    A fetch (unlike a local clone) receives a pack and makes git hash every object in it instead of linking the store's
+    files, so an object rewritten in the store fails the fetch rather than reaching the checkout. A store that fails
     the fetch is warned about with git's reason, which tells one that lacks the commit from one that was changed.
+    The fetch runs in ``scratch`` and only reads ``store`` (``git-upload-pack`` writes nothing), so a store on a
+    read-only mount, or one another account owns (trusted for this fetch alone, :func:`_fetch`), serves as well.
     """
     if not _is_repository(store):
         return False
     _new_repository(scratch)
     try:
-        _git(*_SHALLOW_FETCH, store.resolve().as_uri(), commit, cwd=scratch)
+        _fetch(store.resolve().as_uri(), commit, scratch)
     except ToolError as exc:
-        log.warning("%s was not fetched from %s, so it is fetched from the network: %s", commit, store, exc)
+        log.warning("%s was not fetched from %s, so it is fetched from INFERENCEX_REPO: %s", commit, store, exc)
         return False
     return True
-
-
-def _keep(store: Path, scratch: Path, commit: str) -> None:
-    """Add ``commit`` from the checked ``scratch`` to ``store`` for later tests of the host.
-
-    A store this runner cannot write (a read-only runner cache) or another test updating it at once only means a later
-    test fetches the commit from the network again, which the log says. Hooks are off: the server under test can
-    write the store's config.
-    """
-    try:
-        if not _is_repository(store):
-            store.mkdir(parents=True, exist_ok=True)
-            _git("init", "-q", "--bare", str(store))
-        _git(
-            "-c",
-            "core.hooksPath=/dev/null",
-            f"--git-dir={store}",
-            *_SHALLOW_FETCH,
-            scratch.resolve().as_uri(),
-            f"{commit}:refs/tools/{commit}",
-        )
-    except (OSError, ToolError) as exc:
-        log.warning("%s was not kept in %s, so a later test fetches it from the network again: %s", commit, store, exc)
 
 
 def _is_repository(store: Path) -> bool:
@@ -233,7 +213,8 @@ def _remove(path: Path) -> None:
 
 def ensure_inferencex(commit: str, cache_dir: Path, store: Path) -> Path:
     """A clean InferenceX checkout at ``commit`` below ``cache_dir``, this test's own; fetched from ``store`` (the
-    host's :data:`INFERENCEX_STORE`) when it holds the commit intact, else from ``INFERENCEX_REPO`` or upstream."""
+    host's :data:`INFERENCEX_STORE`, read only) when it holds the commit intact, else from ``INFERENCEX_REPO`` or
+    upstream. Nothing is written outside ``cache_dir``."""
     return _checkout(_INFERENCEX, os.environ.get("INFERENCEX_REPO") or INFERENCEX_REPO, commit, cache_dir, store)
 
 

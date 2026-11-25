@@ -259,34 +259,118 @@ def test_a_published_staging_is_refused_when_this_interpreters_lm_eval_is_not_at
         _ensure(tmp_path)
 
 
+def _filled_store(tmp_path, repo, commit):
+    """The runner cache's InferenceX store holding ``commit``, as the host (or an earlier runner) left it."""
+    store = tmp_path / "runner-cache" / tools.TOOL_CHECKOUTS_DIR / tools.INFERENCEX_STORE
+    store.mkdir(parents=True)
+    _git(store, "init", "-q", "--bare")
+    _git(store, "fetch", "-q", "--depth", "1", str(repo), f"{commit}:refs/tools/{commit}")
+    return store
+
+
+def _snapshot(root):
+    """Every path below ``root`` with its mode, mtime and bytes: what a write would change."""
+    seen = {}
+    for path in sorted(root.rglob("*")):
+        st = path.lstat()
+        seen[str(path.relative_to(root))] = (st.st_mode, st.st_mtime_ns, path.read_bytes() if path.is_file() else None)
+    return seen
+
+
+def _read_only(root):
+    for path in [root, *root.rglob("*")]:
+        if not path.is_symlink():
+            path.chmod(path.stat().st_mode & ~0o222)
+
+
+def _writable(root):
+    for path in [root, *root.rglob("*")]:
+        if not path.is_symlink():
+            path.chmod(path.stat().st_mode | 0o200)
+
+
 def test_a_tree_an_earlier_test_changed_is_not_what_a_later_test_runs(upstream, tmp_path, monkeypatch):
     repo, commit = upstream
-    monkeypatch.setenv("INFERENCEX_REPO", str(repo))
-    store = tmp_path / "runner-cache" / tools.TOOL_CHECKOUTS_DIR / tools.INFERENCEX_STORE
+    store = _filled_store(tmp_path, repo, commit)
+    monkeypatch.setenv("INFERENCEX_REPO", str(tmp_path / "offline"))
 
     first = ensure_inferencex(commit, tmp_path / "scratch-1", store)
     (first / "benchmarks" / "benchmark_lib.sh").write_text("tampered\n")
-    monkeypatch.setenv("INFERENCEX_REPO", str(tmp_path / "offline"))
     second = ensure_inferencex(commit, tmp_path / "scratch-2", store)
 
     assert second.is_relative_to(tmp_path / "scratch-2"), "each test runs its own tree"
     assert (second / "benchmarks" / "benchmark_lib.sh").read_text() == "# lib\n"
 
 
-def test_a_store_that_cannot_be_written_costs_a_warning_and_the_test_still_gets_its_tree(
+def test_a_read_only_store_holding_the_commit_serves_it_and_is_never_written(upstream, tmp_path, monkeypatch, caplog):
+    repo, commit = upstream
+    store = _filled_store(tmp_path, repo, commit)
+    cache = tmp_path / "runner-cache"
+    _read_only(cache)
+    before = _snapshot(cache)
+    monkeypatch.setenv("INFERENCEX_REPO", str(tmp_path / "offline"))
+
+    try:
+        with caplog.at_level(logging.WARNING, logger=tools.__name__):
+            tree = ensure_inferencex(commit, tmp_path / "scratch", store)
+        after = _snapshot(cache)
+    finally:
+        _writable(cache)
+
+    assert _git(tree, "rev-parse", "HEAD") == commit, "fetched from the store: INFERENCEX_REPO does not exist"
+    assert tree.is_relative_to(tmp_path / "scratch")
+    assert after == before, "the runner cache is read, never written"
+    assert not (tree / ".git" / "objects" / "info" / "alternates").exists(), "the tree does not borrow the store"
+    assert caplog.records == []
+
+
+def test_a_store_without_the_commit_falls_back_to_inferencex_repo_and_stays_unchanged(
+    upstream, tmp_path, monkeypatch, caplog
+):
+    repo, old = upstream
+    store = _filled_store(tmp_path, repo, old)
+    (repo / "benchmarks" / "benchmark_lib.sh").write_text("# lib 2\n")
+    _git(repo, "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qam", "two")
+    commit = _git(repo, "rev-parse", "HEAD")
+    cache = tmp_path / "runner-cache"
+    _read_only(cache)
+    before = _snapshot(cache)
+    monkeypatch.setenv("INFERENCEX_REPO", str(repo))
+
+    try:
+        with caplog.at_level(logging.WARNING, logger=tools.__name__):
+            tree = ensure_inferencex(commit, tmp_path / "scratch", store)
+        after = _snapshot(cache)
+    finally:
+        _writable(cache)
+
+    assert _git(tree, "rev-parse", "HEAD") == commit
+    assert (tree / "benchmarks" / "benchmark_lib.sh").read_text() == "# lib 2\n"
+    assert after == before, "the commit is not added to the store"
+    (record,) = caplog.records
+    assert commit in record.getMessage() and str(store) in record.getMessage()
+
+
+def test_without_a_store_the_commit_is_fetched_into_scratch_and_nothing_is_made_in_the_cache(
     upstream, tmp_path, monkeypatch, caplog
 ):
     repo, commit = upstream
     monkeypatch.setenv("INFERENCEX_REPO", str(repo))
-    (tmp_path / "runner-cache").write_text("a file where the runner cache belongs\n")
-    store = tmp_path / "runner-cache" / tools.TOOL_CHECKOUTS_DIR / tools.INFERENCEX_STORE
+    cache = tmp_path / "runner-cache"
+    cache.mkdir()
+    _read_only(cache)
+    store = cache / tools.TOOL_CHECKOUTS_DIR / tools.INFERENCEX_STORE
 
-    with caplog.at_level(logging.WARNING, logger=tools.__name__):
-        tree = ensure_inferencex(commit, tmp_path / "scratch-1", store)
+    try:
+        with caplog.at_level(logging.WARNING, logger=tools.__name__):
+            tree = ensure_inferencex(commit, tmp_path / "scratch", store)
+        made = list(cache.iterdir())
+    finally:
+        _writable(cache)
 
     assert _git(tree, "rev-parse", "HEAD") == commit
-    (record,) = caplog.records
-    assert commit in record.getMessage() and str(store) in record.getMessage()
+    assert made == []
+    assert caplog.records == [], "no store is the normal case, not a warning"
 
 
 def test_an_object_changed_in_the_store_is_refused_with_a_warning_and_the_commit_fetched_again(
@@ -294,8 +378,7 @@ def test_an_object_changed_in_the_store_is_refused_with_a_warning_and_the_commit
 ):
     repo, commit = upstream
     monkeypatch.setenv("INFERENCEX_REPO", str(repo))
-    store = tmp_path / "runner-cache" / tools.TOOL_CHECKOUTS_DIR / tools.INFERENCEX_STORE
-    ensure_inferencex(commit, tmp_path / "scratch-1", store)
+    store = _filled_store(tmp_path, repo, commit)
     blob = _git(repo, "rev-parse", "HEAD:benchmarks/benchmark_lib.sh")
     loose = store / "objects" / blob[:2] / blob[2:]
     loose.chmod(0o644)
