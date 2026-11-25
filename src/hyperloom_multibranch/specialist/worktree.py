@@ -358,8 +358,45 @@ def _write_owner_file(path: Path, text: str, umask: int) -> None:
 
 def _commit_all(cwd: Path, message: str) -> None:
     """Commit the whole tree at ``cwd``: the source base as it builds it, before any agent writes there."""
-    _git(cwd, *_STAGE, base=True)
-    _git(cwd, "commit", _QUIET, "--allow-empty", "-m", message, base=True)
+    _whole_tree_git(cwd, *_STAGE)
+    _whole_tree_git(cwd, "commit", _QUIET, "--allow-empty", "-m", message)
+
+
+#: Runs of a git step over the whole source base: on network storage a slow spell, or another session building its own
+#: base there at the same time, can hold one past :data:`GIT_TIMEOUT_S` while the next goes through.
+WHOLE_TREE_ATTEMPTS = 3
+#: What a git step killed at its timeout leaves locked in the base's git directory, which a later step refuses to take.
+_STEP_LOCKS = ("index.lock", "HEAD.lock", f"refs/heads/{BASE_BRANCH}.lock")
+
+
+def _whole_tree_git(cwd: Path, *args: str) -> str:
+    """``git <args>`` over the whole source base ``cwd`` as it is built, run again when it times out: staging and
+    committing the same tree again commits the same tree, and the objects the killed run wrote are kept. Only the
+    build runs git in the base until it is committed, so the locks the killed run left are dropped before the next.
+
+    Raises:
+        WorktreeError: Every one of :data:`WHOLE_TREE_ATTEMPTS` runs timed out, or one failed.
+    """
+    for attempt in range(1, WHOLE_TREE_ATTEMPTS):
+        try:
+            return _git(cwd, *args, base=True)
+        except subprocess.TimeoutExpired:
+            logger.warning(
+                "git %s in %s did not finish in %.0f s (attempt %d of %d); running it again",
+                args[0],
+                cwd,
+                GIT_TIMEOUT_S,
+                attempt,
+                WHOLE_TREE_ATTEMPTS,
+            )
+        for lock in _STEP_LOCKS:
+            (cwd / _GIT_DIR / lock).unlink(missing_ok=True)
+    try:
+        return _git(cwd, *args, base=True)
+    except subprocess.TimeoutExpired as error:
+        raise WorktreeError(
+            f"git {args[0]} in {cwd} did not finish in {GIT_TIMEOUT_S:.0f} s, {WHOLE_TREE_ATTEMPTS} times"
+        ) from error
 
 
 class SourceBase:
