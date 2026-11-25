@@ -30,6 +30,7 @@ from hyperloom.measure.compile import LocalBlobStore
 from hyperloom.measure.jit.native.store import BuildInfraError
 from hyperloom.measure.points import AcceptedMeasurement
 from hyperloom.measure.runner.native import isolated
+from hyperloom.measure.runner.native import session as session_module
 from hyperloom.measure.runner.native.isolated import (
     ISOLATION_BWRAP_NETNS,
     ISOLATION_KEY,
@@ -53,7 +54,7 @@ from hyperloom_multibranch.toolbox.tests.test_native_builds import EDITED_CU, Ho
 @pytest.fixture(autouse=True)
 def ready_host(monkeypatch: pytest.MonkeyPatch) -> None:
     """The host checks pass here (test_build_preflight has them)."""
-    monkeypatch.setattr(native_builds_module, "build_preflight", lambda site: None)
+    monkeypatch.setattr(native_builds_module, "build_preflight", lambda site: [])
 
 
 SETPRIV = "/usr/bin/setpriv"
@@ -179,10 +180,10 @@ def test_the_session_logs_its_isolation_once(
         probes.append(1)
         return isolation
 
-    with caplog.at_level(logging.INFO, logger=native_builds_module.logger.name):
+    with caplog.at_level(logging.INFO, logger=session_module.logger.name):
         native_builds(_configured(tmp_path), LocalBlobStore(tmp_path / "blobs"), IMAGE, isolation=probe)
 
-    (record,) = [r for r in caplog.records if r.name == native_builds_module.logger.name]
+    (record,) = [r for r in caplog.records if r.name == session_module.logger.name]
     assert (record.levelno, says in record.getMessage()) == (level, True)
     if isinstance(isolation, Unisolated):
         assert record.getMessage().endswith(": no tier (a stand-in)"), "the reasons the choice found, not asked again"
@@ -344,7 +345,9 @@ def test_a_build_under_bubblewrap_runs_its_child_in_the_compile_sandbox_and_give
     assert {"--unshare-net", "--die-with-parent", "--unshare-pid", "--new-session"} <= set(flags)
     assert ["--bind", work, work] == flags[flags.index(work) - 1 : flags.index(work) + 2]
     assert ["--chdir", work] == flags[flags.index("--chdir") : flags.index("--chdir") + 2]
-    assert argv[argv.index("--") + 1 :][1:3] == ["-I", "-c"], "the child's own command line follows"
+    child = argv[argv.index("--") + 1 :]
+    assert (Path(child[0]).name, child[1:3]) == ("nice", ["-n", "19"]), "the compile runs at the lowest priority"
+    assert child[4:6] == ["-I", "-c"], "the child's own command line follows"
     assert stat.S_IMODE(staged.staging.parent.stat().st_mode) == 0o700, "nobody else is let through the scratch"
 
 
@@ -498,7 +501,7 @@ def test_a_session_that_finds_no_isolation_at_its_start_asks_again_at_each_build
 ) -> None:
     given: list[object] = []
     monkeypatch.setattr(
-        native_builds_module, "IsolatedBuilds", lambda planner, blobs, isolation, factories: given.append(isolation)
+        session_module, "IsolatedBuilds", lambda planner, blobs, isolation, factories, child: given.append(isolation)
     )
 
     def choose() -> Isolation | Unisolated:

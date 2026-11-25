@@ -376,7 +376,8 @@
               "kind": {
                 "enum": [
                   "package",
-                  "runtime"
+                  "runtime",
+                  "executable"
                 ]
               },
               "import_name": {
@@ -488,7 +489,7 @@
         },
         "builds": {
           "type": "array",
-          "description": "The ready native build of each runtime root, one each; absent from a sheet with no runtime root.",
+          "description": "The ready native build of each runtime and executable root, one each; absent from a sheet with neither.",
           "minItems": 1,
           "items": {
             "type": "object",
