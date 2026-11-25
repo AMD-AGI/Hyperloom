@@ -32,8 +32,8 @@ on under :data:`GPU_MASK_ENV`; :func:`runner_owned` names the flags and environm
 layer a host hands it may set. The AgentX client staging installs is patched to export the output token count of a
 reply it found nothing in under :data:`ERROR_OSL_METRIC` on that request's export line, and to log the error of a
 warmup request that aborts the replay after :data:`WARMUP_ERROR_PREFIX` on the line of its warmup abort. That client's
-site-packages lie at :data:`CLIENT_SITE_PACKAGES` below a staged root, the corpus an AgentX replay loads is named by
-:data:`AGENTX_TRACE_ENV`, and the evaluation's task is :data:`GSM8K_TASK` below the staged InferenceX.
+site-packages lie at :data:`CLIENT_SITE_PACKAGES` below a staged root, and the evaluation's task is :data:`GSM8K_TASK`
+below the staged InferenceX.
 
 A caller measuring a server outside a round as a fixed round does builds each pass with :func:`client_argv` under
 :func:`fixed_client_env`, the discarded :func:`warmup_pass` before the measured one.
@@ -54,7 +54,6 @@ from inference_suite.contracts.layout import RunDirError
 from inference_suite.framework_probe import FrameworkProbeError, native_executable, native_help
 from inference_suite.parser_check import HelpOption, help_options
 from inference_suite.load.fixed import ClientPass, ClientTarget, ClientTool, client_argv, fixed_client_env, warmup_pass
-from inference_suite.recipe.inferencex import AGENTX_TRACE_ENV
 from inference_suite.recipe.resolve import Miss, SourceSnapshot, resolve_base
 from inference_suite.recipe.sources import (
     InferencexCommitRefused,
@@ -84,7 +83,6 @@ from inference_suite.staging import (
 )
 
 __all__ = [
-    "AGENTX_TRACE_ENV",
     "CLIENT_FILE",
     "CLIENT_ROOT_ENV",
     "CLIENT_SCRIPT",

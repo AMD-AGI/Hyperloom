@@ -1,27 +1,37 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""A copy of the test's datasets in a cache of its own, when the ``HF_DATASETS_CACHE`` the runner is given is not
-writable.
+"""A link tree of the test's datasets in a cache of its own, when the cache ``datasets`` would use is not writable.
 
-``datasets`` opens a lock file for writing on every load, a cached one too: below the cache directory
+``datasets`` opens a lock file for writing on every load, a cached one too: in the cache directory
 (``<cache>/_<cache with _>_openai___gsm8k_main_0.0.0_<hash>.lock``) and beside the prepared dataset. A cache on storage
 mounted read-only (``EROFS``) or owned by another account (``EACCES``, ``EPERM``) therefore fails every load with a
 ``PermissionError``, though the prepared Arrow files are only read. The AgentX client loads its trace corpus that way
 and the evaluation its task's dataset, so such a cache would fail every AgentX test and every evaluation.
 
-When the cache is not writable, the datasets the test loads are copied into a directory below the test's own scratch
-and ``HF_DATASETS_CACHE`` names that copy while the test runs; the server, the client and the evaluation inherit it
-from the runner's environment. A prepared dataset is its directory below the cache (``<namespace>___<name>``), which an
-offline load finds by itself; the locks are not copied, since ``datasets`` takes new ones in the copy. A writable cache
-is left as it is. With no ``HF_DATASETS_CACHE`` the cache is ``datasets``' default below ``HF_HOME``, which a host may
-mount read-only too; the copy is then named by setting the variable, which is removed again when the test ends.
+The cache is the one ``datasets`` resolves (:func:`_effective_cache`): ``HF_DATASETS_CACHE``, else ``$HF_HOME/datasets``,
+else ``$XDG_CACHE_HOME/huggingface/datasets``, else ``~/.cache/huggingface/datasets``. It is probed by making and removing
+one file in it; a writable cache is left as it is, and so is the cache when the sheet's ``process_env`` names one of its
+own (its ``HF_DATASETS_CACHE``, or with none in the runner's environment its ``HF_HOME`` or ``XDG_CACHE_HOME``).
 
-Which datasets a test loads is read from its sheet: the trace corpus of each AgentX point (its
-``WEKA_LOADER_OVERRIDE``, else its base's client env), resolved to its Hub repository through the client's own loader
-registry in the staged client environment, and the evaluation's dataset (the staged GSM8K task's ``dataset_path``) when
-the test runs accuracy. When a corpus cannot be resolved, the whole cache is copied if it is small, else nothing is
-and the test runs on the cache as it was given.
+When the cache is not writable, the runner makes below the test's scratch a tree of real directories mirroring each
+dataset directory the test loads (``<namespace>___<name>``), with one symbolic link per file into the cache, and
+``HF_DATASETS_CACHE`` names that tree while the test runs; the server, the client and the evaluation inherit it from the
+runner's environment, and the variable is put back (removed when it was not set) when the test ends. ``datasets`` takes
+its locks in the tree's directories and reads the files through the links; one link per dataset directory is not
+enough, since an online load writes inside that directory. Locks are not linked. A dataset directory that is itself a
+link is the directory it names; below it a link is followed only to a file inside that directory, and a linked
+directory is not followed.
+
+Which datasets a test loads is read from its sheet: the trace corpus of each AgentX point (the suite's own rule,
+:func:`~hyperloom.orchestrator.actions.executors._suite.config.agentx_trace`), resolved to its Hub repository through the
+client's loader registry in the staged client environment, and the dataset the staged GSM8K task names
+(``dataset_path``) when the test runs accuracy. When no dataset is named or the cache holds none of them, the variable is
+left as given, and the test meets the cache as it would have.
+
+The tree is made before the test's timeout is fixed, so its time is the test's. A file system error while making it
+ends the test as infrastructure: ``disk_full`` for a full disk or quota, else ``hf_cache_permission`` (a directory that
+cannot be listed, a file that cannot be read, ``ESTALE``, ``EIO``).
 """
 
 from __future__ import annotations
@@ -30,41 +40,30 @@ import contextlib
 import errno
 import logging
 import os
+import pwd
 import re
 import shutil
 import tempfile
 import time
-from collections.abc import Callable, Iterable, Iterator, Mapping, MutableMapping, Sequence
-from dataclasses import dataclass
+from collections.abc import Callable, Iterable, Iterator, Mapping, MutableMapping
+from dataclasses import dataclass, field
 from pathlib import Path
 
 import yaml
 
 from hyperloom.common.benchmark_config import is_agentx
-from inference_suite import AGENTX_TRACE_ENV, CLIENT_SITE_PACKAGES, GSM8K_TASK
+from hyperloom.measure.failures import DISK_FULL, HF_CACHE_PERMISSION, is_disk_full
+from hyperloom.measure.runner.service import RunnerFailure
+from hyperloom.orchestrator.actions.executors._suite.config import agentx_trace
+from inference_suite import CLIENT_SITE_PACKAGES, GSM8K_TASK
 
-__all__ = [
-    "DATASETS_CACHE_ENV",
-    "LOCAL_DATASETS_DIR",
-    "WHOLE_CACHE_MAX_BYTES",
-    "CopyReport",
-    "DatasetsNeeded",
-    "cache_dir_name",
-    "copy_datasets",
-    "datasets_needed",
-    "is_writable",
-    "local_datasets_cache",
-]
+__all__ = ["DatasetsNeeded", "datasets_needed", "local_datasets_cache"]
 
 log = logging.getLogger(__name__)
 
 DATASETS_CACHE_ENV = "HF_DATASETS_CACHE"
-#: The test's copy, below its work directory.
+#: The test's link tree, below its work directory.
 LOCAL_DATASETS_DIR = "hf_datasets"
-#: The largest cache copied whole when the test's datasets cannot all be named.
-WHOLE_CACHE_MAX_BYTES = 4 << 30
-#: The evaluation's dataset when the staged task does not say (InferenceX's ``infx/evals/gsm8k.yaml``).
-DEFAULT_EVAL_DATASET = "openai/gsm8k"
 #: Where the client's loader registry names each public dataset's Hub repository, below its site-packages.
 _LOADER_REGISTRY = "aiperf/plugin/plugins.yaml"
 _PUBLIC_LOADERS = "public_dataset_loader"
@@ -72,14 +71,12 @@ _HUB_NAME = "hf_dataset_name"
 _REFUSED = frozenset({errno.EROFS, errno.EACCES, errno.EPERM})
 _LOCK_SUFFIX = ".lock"
 _PROBE_PREFIX = ".hl-write-probe-"
-_DATASET_PATH = re.compile(r"^dataset_path:\s*['\"]?([^'\"\s#]+)", re.MULTILINE)
+_HF_HOME_ENV = "HF_HOME"
+_XDG_CACHE_ENV = "XDG_CACHE_HOME"
+_REPO_PART = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*")
 # datasets.naming.camelcase_to_snakecase, which names a prepared dataset's directory.
 _UPPER_UPPER = re.compile(r"([A-Z]+)([A-Z][a-z])")
 _LOWER_UPPER = re.compile(r"([a-z\d])([A-Z])")
-_MIB = 1 << 20
-_REPO_PART = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*")
-_HF_HOME_ENV = "HF_HOME"
-_XDG_CACHE_ENV = "XDG_CACHE_HOME"
 
 
 @dataclass(frozen=True)
@@ -90,31 +87,30 @@ class DatasetsNeeded:
     unresolved: tuple[str, ...] = ()
 
 
-@dataclass(frozen=True)
-class CopyReport:
-    """What a copy took: its bytes and files, its seconds, and the repositories the cache holds no directory of."""
+@dataclass
+class _LinkReport:
+    """What a link tree holds: its links, the repositories linked, those the cache holds no directory of, the links in
+    the cache left out, and the seconds it took."""
 
-    bytes: int
-    files: int
-    seconds: float
-    copied: tuple[str, ...]
-    missing: tuple[str, ...] = ()
+    files: int = 0
+    linked: list[str] = field(default_factory=list)
+    missing: list[str] = field(default_factory=list)
     skipped_links: int = 0
+    seconds: float = 0.0
 
-    def summary(self, source: str, target: Path) -> str:
-        what = ", ".join(self.copied) or "nothing"
+    def summary(self, source: Path, target: Path) -> str:
         text = (
-            f"{DATASETS_CACHE_ENV} {source} is not writable (datasets takes a lock on every load); copied {what} "
-            f"({self.bytes / _MIB:.1f} MiB, {self.files} files) to {target} in {self.seconds:.1f} s"
+            f"{DATASETS_CACHE_ENV} {source} is not writable (datasets takes a lock on every load); linked "
+            f"{', '.join(self.linked)} ({self.files} files) below {target} in {self.seconds:.1f} s"
         )
         if self.missing:
             text += f"; the cache holds no {', '.join(self.missing)}"
         if self.skipped_links:
-            text += f"; {self.skipped_links} links leaving the cache were not copied"
+            text += f"; {self.skipped_links} links in the cache leaving their dataset were left out"
         return text
 
 
-def is_writable(directory: Path) -> bool:
+def _is_writable(directory: Path) -> bool:
     """Whether a file can be made and removed in ``directory``: the open ``datasets`` makes of its locks.
 
     ``EROFS``, ``EACCES`` and ``EPERM`` say no alike; any other error is the cache's own and says nothing of this, so
@@ -133,23 +129,18 @@ def is_writable(directory: Path) -> bool:
     return True
 
 
-def cache_dir_name(repo: str) -> str:
-    """The directory below the cache ``datasets`` prepares ``repo`` in: ``openai/gsm8k`` is ``openai___gsm8k``.
-
-    Raises:
-        ValueError: ``repo`` is no Hub repository id, so it names no directory below the cache (``..``, say).
-    """
+def _cache_dir_name(repo: str) -> str | None:
+    """The directory below the cache ``datasets`` prepares ``repo`` in (``openai/gsm8k`` is ``openai___gsm8k``,
+    ``datasets.naming.camelcase_to_snakecase`` on the name), or ``None`` when ``repo`` is no Hub repository id."""
     parts = repo.strip().strip("/").split("/")
-    if not all(_REPO_PART.fullmatch(part) for part in parts) or any(part in {".", ".."} for part in parts):
-        raise ValueError(f"{repo!r} is not a Hugging Face repository id")
+    if not all(_REPO_PART.fullmatch(part) and part not in {".", ".."} for part in parts):
+        return None
     last = _LOWER_UPPER.sub(r"\1_\2", _UPPER_UPPER.sub(r"\1_\2", parts[-1]))
     return "___".join([*parts[:-1], last.lower()])
 
 
-def _loader_registry(staged_root: Path | None) -> Mapping[str, str]:
+def _loader_registry(staged_root: Path) -> Mapping[str, str]:
     """Each public dataset the staged AgentX client knows, by the Hub repository it loads; empty when unreadable."""
-    if staged_root is None:
-        return {}
     path = staged_root / CLIENT_SITE_PACKAGES / _LOADER_REGISTRY
     try:
         document = yaml.safe_load(path.read_text(encoding="utf-8"))
@@ -168,16 +159,16 @@ def _loader_registry(staged_root: Path | None) -> Mapping[str, str]:
     return registry
 
 
-def _eval_dataset(staged_root: Path | None) -> str:
-    """The Hub repository the staged GSM8K task loads (its ``dataset_path``), else :data:`DEFAULT_EVAL_DATASET`."""
-    if staged_root is not None:
-        try:
-            found = _DATASET_PATH.search((staged_root / GSM8K_TASK).read_text(encoding="utf-8"))
-        except OSError:
-            found = None
-        if found:
-            return found.group(1)
-    return DEFAULT_EVAL_DATASET
+def _eval_dataset(staged_root: Path) -> str | None:
+    """The Hub repository the staged GSM8K task loads (its ``dataset_path``); ``None`` when it names none."""
+    path = staged_root / GSM8K_TASK
+    try:
+        document = yaml.safe_load(path.read_text(encoding="utf-8"))
+    except (OSError, yaml.YAMLError) as exc:
+        log.warning("the staged GSM8K task %s is unreadable: %s", path, exc)
+        return None
+    named = document.get("dataset_path") if isinstance(document, Mapping) else None
+    return (named.strip() or None) if isinstance(named, str) else None
 
 
 def _benchmark(point_yaml: str) -> Mapping[str, object]:
@@ -189,19 +180,19 @@ def _benchmark(point_yaml: str) -> Mapping[str, object]:
     return bench if isinstance(bench, Mapping) else {}
 
 
-def _trace(bench: Mapping[str, object], base_client_env: Mapping[str, str]) -> str | None:
+def _point_envs(bench: Mapping[str, object]) -> dict[str, str]:
     envs = bench.get("envs")
-    named = envs.get(AGENTX_TRACE_ENV) if isinstance(envs, Mapping) else None
-    trace = str(named).strip() if named is not None else ""
-    return trace or (base_client_env.get(AGENTX_TRACE_ENV) or "").strip() or None
+    if not isinstance(envs, Mapping):
+        return {}
+    return {str(name): str(value) for name, value in envs.items() if value is not None}
 
 
 def datasets_needed(
     points: Iterable[str], *, base_client_env: Mapping[str, str], accuracy: bool, staged_root: Path | None
 ) -> DatasetsNeeded:
-    """The datasets a test of the point YAMLs ``points`` loads: each AgentX point's trace corpus, and the evaluation's
-    dataset when the test runs accuracy. A corpus the registry does not name and that is no ``<namespace>/<name>``
-    repository itself is unresolved."""
+    """The datasets a test of the point YAMLs ``points`` loads: each AgentX point's trace corpus as the staged client's
+    loader registry names its repository, and the staged GSM8K task's dataset when the test runs accuracy. A corpus the
+    registry does not name, or any corpus with no staging, is unresolved."""
     registry: Mapping[str, str] | None = None
     repos: list[str] = []
     unresolved: list[str] = []
@@ -209,132 +200,84 @@ def datasets_needed(
         bench = _benchmark(point)
         if not is_agentx(bench):
             continue
-        trace = _trace(bench, base_client_env)
-        if trace is None:
+        trace = (agentx_trace(_point_envs(bench), base_client_env) or "").strip()
+        if not trace:
             continue
         if registry is None:
-            registry = _loader_registry(staged_root)
-        repo = registry.get(trace) or (trace if "/" in trace else None)
+            registry = _loader_registry(staged_root) if staged_root is not None else {}
+        repo = registry.get(trace)
         (repos if repo else unresolved).append(repo or trace)
-    if accuracy:
-        repos.append(_eval_dataset(staged_root))
+    if accuracy and staged_root is not None:
+        evaluated = _eval_dataset(staged_root)
+        if evaluated:
+            repos.append(evaluated)
     return DatasetsNeeded(tuple(dict.fromkeys(repos)), tuple(dict.fromkeys(unresolved)))
 
 
-@dataclass
-class _Tally:
-    bytes: int = 0
-    files: int = 0
-    skipped_links: int = 0
-
-
-def _copy_tree(source: Path, target: Path, tally: _Tally) -> None:
-    """Copy ``source`` to ``target`` without its locks; a link is copied as what it names when that lies inside
-    ``source``, else left out, so nothing outside the cache is read."""
-    inside = source.resolve()
-    for directory, dirnames, filenames in os.walk(source, followlinks=False):
-        here = Path(directory)
-        made = target / here.relative_to(source)
-        made.mkdir(parents=True, exist_ok=True)
-        for name in list(dirnames):
-            if (here / name).is_symlink():
-                dirnames.remove(name)
-                tally.skipped_links += 1
-        for name in filenames:
-            if name.endswith(_LOCK_SUFFIX):
+def _link_tree(source: Path, target: Path, inside: Path, report: _LinkReport) -> None:
+    """Mirror the directory ``source`` as real directories below ``target``, one link per file into ``source``; locks
+    left out, a link followed only to a file below ``inside``. Every error raises: a directory that cannot be listed is
+    not reported linked."""
+    target.mkdir()
+    with os.scandir(source) as entries:
+        for entry in entries:
+            if entry.name.endswith(_LOCK_SUFFIX):
                 continue
-            path = here / name
-            if path.is_symlink():
-                resolved = path.resolve()
-                if not resolved.is_relative_to(inside) or not resolved.is_file():
-                    tally.skipped_links += 1
+            path = Path(entry.path)
+            if entry.is_symlink():
+                named = path.resolve()
+                if not named.is_relative_to(inside) or not named.is_file():
+                    report.skipped_links += 1
                     continue
-            shutil.copy2(path, made / name)
-            tally.bytes += (made / name).stat().st_size
-            tally.files += 1
+            elif entry.is_dir(follow_symlinks=False):
+                _link_tree(path, target / entry.name, inside, report)
+                continue
+            elif entry.is_file(follow_symlinks=False):
+                named = path
+            else:
+                continue
+            if not os.access(named, os.R_OK):
+                raise PermissionError(errno.EACCES, os.strerror(errno.EACCES), str(named))
+            os.symlink(named, target / entry.name)
+            report.files += 1
 
 
-def copy_datasets(source: Path, target: Path, repos: Sequence[str]) -> CopyReport:
-    """Copy each of ``repos`` prepared below the cache ``source`` into the cache ``target``, locks left out."""
+def _link_datasets(source: Path, target: Path, repos: Iterable[str]) -> _LinkReport:
+    """The link tree below ``target`` of each of ``repos`` prepared below the cache ``source``."""
     started = time.monotonic()
-    tally = _Tally()
-    copied, missing = [], []
-    target.mkdir(parents=True, exist_ok=True)
+    report = _LinkReport()
+    target.mkdir(parents=True)
     for repo in repos:
-        try:
-            name = cache_dir_name(repo)
-        except ValueError:
-            missing.append(repo)
+        name = _cache_dir_name(repo)
+        if name is None or not (source / name).is_dir():
+            report.missing.append(repo)
             continue
-        if not (source / name).is_dir():
-            missing.append(repo)
-            continue
-        _copy_tree(source / name, target / name, tally)
-        copied.append(repo)
-    return CopyReport(
-        tally.bytes, tally.files, time.monotonic() - started, tuple(copied), tuple(missing), tally.skipped_links
-    )
-
-
-def _tree_bytes(root: Path, limit: int) -> int | None:
-    """The bytes of the regular files below ``root``, links not followed; ``None`` once past ``limit``."""
-    total = 0
-    for directory, _, filenames in os.walk(root, followlinks=False):
-        for name in filenames:
-            path = Path(directory) / name
-            with contextlib.suppress(OSError):
-                if not path.is_symlink():
-                    total += path.stat().st_size
-            if total > limit:
-                return None
-    return total
-
-
-def _copy_whole(source: Path, target: Path) -> CopyReport | None:
-    """The whole cache copied, locks left out, when it is at most :data:`WHOLE_CACHE_MAX_BYTES`; else ``None``."""
-    if _tree_bytes(source, WHOLE_CACHE_MAX_BYTES) is None:
-        return None
-    started = time.monotonic()
-    tally = _Tally()
-    _copy_tree(source, target, tally)
-    return CopyReport(
-        tally.bytes, tally.files, time.monotonic() - started, ("the whole cache",), (), tally.skipped_links
-    )
-
-
-def _copy(source: Path, target: Path, wanted: DatasetsNeeded, named: str, notes: list[str]) -> CopyReport:
-    """Copy what the test loads from ``source`` to ``target``: the whole cache when a corpus could not be named and the
-    cache is small, else the named datasets."""
-    report = _copy_whole(source, target) if wanted.unresolved else None
-    if report is None:
-        if wanted.unresolved:
-            # The corpora that could not be named stay unloadable, as on the cache given; the rest load from the copy.
-            unnamed = (
-                f"{DATASETS_CACHE_ENV} {named} is not writable and {', '.join(wanted.unresolved)} names no dataset "
-                f"repository; the cache is over {WHOLE_CACHE_MAX_BYTES >> 30} GiB, so only the named ones are copied"
-            )
-            log.warning("%s", unnamed)
-            notes.append(unnamed)
-        report = copy_datasets(source, target, wanted.repos)
+        inside = (source / name).resolve()
+        _link_tree(inside, target / name, inside, report)
+        report.linked.append(repo)
+    report.seconds = time.monotonic() - started
     return report
 
 
+def _expand_user(path: str, environ: Mapping[str, str]) -> str:
+    """``os.path.expanduser`` of ``path`` with ``environ``'s ``HOME`` for ``~``, as ``datasets`` expands ``HF_HOME``."""
+    if path != "~" and not path.startswith("~/"):
+        return os.path.expanduser(path)  # no ``~``, or ``~user``, which reads no variable
+    home = environ["HOME"] if "HOME" in environ else pwd.getpwuid(os.getuid()).pw_dir
+    return (home.rstrip("/") + path[1:]) or "/"
+
+
 def _effective_cache(environ: Mapping[str, str]) -> Path | None:
-    """The cache ``datasets`` uses under ``environ``: ``HF_DATASETS_CACHE``, else ``$HF_HOME/datasets``, else
-    ``$XDG_CACHE_HOME/huggingface/datasets``, else ``~/.cache/huggingface/datasets`` (``datasets.config``)."""
-    named = (environ.get(DATASETS_CACHE_ENV) or "").strip()
-    if named:
-        return Path(named)
-    home = (environ.get(_HF_HOME_ENV) or "").strip()
-    if not home:
-        xdg = (environ.get(_XDG_CACHE_ENV) or "").strip() or "~/.cache"
-        home = os.path.join(xdg, "huggingface")
-    if home.startswith("~"):
-        user = (environ.get("HOME") or "").strip()
-        if not user:
-            return None
-        home = user + home[1:]
-    return Path(home) / "datasets"
+    """The cache ``datasets`` uses under ``environ`` (``datasets.config``): ``HF_DATASETS_CACHE`` as given, else
+    ``HF_HOME`` with ``~`` expanded, else ``$XDG_CACHE_HOME/huggingface`` (``XDG_CACHE_HOME`` defaulting to ``~/.cache``),
+    followed by ``datasets``. A variable set empty counts as set, as there. ``None`` when that path is relative: the
+    test's processes resolve it against their own working directories."""
+    if DATASETS_CACHE_ENV in environ:
+        cache = environ[DATASETS_CACHE_ENV]
+    else:
+        home = environ.get(_HF_HOME_ENV, os.path.join(environ.get(_XDG_CACHE_ENV, "~/.cache"), "huggingface"))
+        cache = os.path.join(_expand_user(home, environ), "datasets")
+    return Path(cache) if os.path.isabs(cache) else None
 
 
 @contextlib.contextmanager
@@ -346,40 +289,57 @@ def local_datasets_cache(
     *,
     sheet_env: Mapping[str, str] | None = None,
 ) -> Iterator[Path | None]:
-    """While the test runs, point ``environ``'s ``HF_DATASETS_CACHE`` at a copy of the datasets ``needed()`` names below
-    ``work`` when the cache ``datasets`` would use is not writable; yield the copy, or ``None`` when the cache is left as
-    it is. That cache is the one ``HF_DATASETS_CACHE`` names, else the default below ``HF_HOME`` (:func:`_effective_cache`).
+    """While the block runs, point ``environ``'s ``HF_DATASETS_CACHE`` at a link tree below ``work`` of the datasets
+    ``needed()`` names when the cache ``datasets`` would use (:func:`_effective_cache`) is not writable; yield the tree,
+    or ``None`` when the cache is left as it is.
 
     Nothing changes when that cache is no directory, the sheet names a cache of its own (``sheet_env``: its
-    ``HF_DATASETS_CACHE``, or with none in ``environ`` its ``HF_HOME`` or ``XDG_CACHE_HOME``), the test loads no dataset,
-    or the cache is writable. ``environ`` is put back (the variable removed when it was not set) and the copy removed
-    when the test ends. What was copied, its size and its time are logged and added to ``notes``.
+    ``HF_DATASETS_CACHE``, or with none in ``environ`` its ``HF_HOME`` or ``XDG_CACHE_HOME``), the cache is writable, or
+    the cache holds none of the datasets named. ``environ`` is put back (the variable removed when it was not set) and
+    the tree removed when the block ends. What was linked and its time are logged and added to ``notes``.
+
+    Raises:
+        RunnerFailure: the tree could not be made: ``disk_full`` for a full disk or quota, else ``hf_cache_permission``.
     """
     given = environ.get(DATASETS_CACHE_ENV)
     own = sheet_env or {}
-    overridden = (DATASETS_CACHE_ENV,) if (given or "").strip() else (DATASETS_CACHE_ENV, _HF_HOME_ENV, _XDG_CACHE_ENV)
+    overridden = (DATASETS_CACHE_ENV,) if given is not None else (DATASETS_CACHE_ENV, _HF_HOME_ENV, _XDG_CACHE_ENV)
     source = _effective_cache(environ)
-    if (
-        source is None
-        or any((own.get(name) or "").strip() for name in overridden)
-        or not source.is_dir()
-        or is_writable(source)
-    ):
+    if source is None or any(name in own for name in overridden) or not source.is_dir() or _is_writable(source):
         yield None
         return
-    named = str(source)
     wanted = needed()
-    if not (wanted.repos or wanted.unresolved):
+    if wanted.unresolved:
+        unnamed = (
+            f"{DATASETS_CACHE_ENV} {source} is not writable and {', '.join(wanted.unresolved)} names no dataset "
+            "repository the staged client knows, so it is not linked"
+        )
+        log.warning("%s", unnamed)
+        notes.append(unnamed)
+    if not wanted.repos:
         yield None
         return
     target = work / LOCAL_DATASETS_DIR
     shutil.rmtree(target, ignore_errors=True)
     try:
-        report = _copy(source, target, wanted, named, notes)
+        report = _link_datasets(source, target, wanted.repos)
+    except OSError as exc:
+        shutil.rmtree(target, ignore_errors=True)
+        error_class = DISK_FULL if is_disk_full(exc) else HF_CACHE_PERMISSION
+        raise RunnerFailure(
+            error_class, f"{DATASETS_CACHE_ENV} {source} is not writable and its datasets could not be linked: {exc}"
+        ) from exc
     except BaseException:
         shutil.rmtree(target, ignore_errors=True)
         raise
-    message = report.summary(named, target)
+    if not report.linked:
+        shutil.rmtree(target, ignore_errors=True)
+        absent = f"{DATASETS_CACHE_ENV} {source} is not writable and holds none of {', '.join(report.missing)}"
+        log.warning("%s", absent)
+        notes.append(absent)
+        yield None
+        return
+    message = report.summary(source, target)
     log.info("%s", message)
     notes.append(message)
     environ[DATASETS_CACHE_ENV] = str(target)

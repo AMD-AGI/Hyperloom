@@ -520,8 +520,14 @@ def _lane_warmup(client_env: Mapping[str, str]) -> int:
         raise ConfigError(f"the AgentX client's {_WARMUP_PER_LANE_ENV} is not an integer: {value!r}") from None
 
 
+def agentx_trace(point_envs: Mapping[str, str], base_client_env: Mapping[str, str]) -> str | None:
+    """The trace corpus an AgentX point replays: the point's own ``WEKA_LOADER_OVERRIDE``, else its base's client env's;
+    ``None`` when neither names one."""
+    return point_envs.get(_TRACE_ENV, "").strip() or base_client_env.get(_TRACE_ENV)
+
+
 def _agentx_trace(point: _Point, base: BaseLaunch) -> str:
-    trace = point.text(_TRACE_ENV) or base.client.env.get(_TRACE_ENV)
+    trace = agentx_trace(point.envs, base.client.env)
     if trace is None:
         raise ConfigError(f"neither the AgentX point nor its base's client env names the trace corpus ({_TRACE_ENV})")
     return trace
@@ -919,6 +925,7 @@ __all__ = [
     "WARMUP_SEED",
     "accuracy_config",
     "agentx_client_config",
+    "agentx_trace",
     "check_server_config",
     "RoundSettings",
     "fixed_workload",

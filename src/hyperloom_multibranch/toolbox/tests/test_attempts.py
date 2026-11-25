@@ -483,7 +483,7 @@ def test_the_blameless_names_are_the_ones_the_runner_and_the_backend_report() ->
         "framework_version_mismatch",
         "result_download_incomplete",
     }
-    assert NODE_BLAMELESS_INFRA_REASONS - {HUB_RATE_LIMITED, HF_CACHE_PERMISSION} <= INFRA_ERROR_CLASSES, (
+    assert NODE_BLAMELESS_INFRA_REASONS - {HUB_RATE_LIMITED} <= INFRA_ERROR_CLASSES, (
         "the ones a log, not a status, names"
     )
     assert RUNNER_LOST == hosted.RUNNER_LOST

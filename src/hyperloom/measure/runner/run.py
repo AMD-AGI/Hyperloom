@@ -378,7 +378,11 @@ def _case_attachments(spec: MeasurementSpec) -> tuple[AttachmentRef, ...]:
     return tuple(AttachmentRef(a.id, a.kind, a.blob.removeprefix("sha256:")) for a in spec.attachments)  # type: ignore[arg-type]
 
 
-def _call(ctx: _Context, spec: MeasurementSpec, points: list[Path], inferencex: Path, progress: Progress) -> TestCall:
+def _call(
+    ctx: _Context, spec: MeasurementSpec, points: list[Path], inferencex: Path, progress: Progress, spent: float
+) -> TestCall:
+    """The test's call; ``spent`` is the seconds the test's own preparation took (its datasets' link tree,
+    ``datasets_cache``), which its timeout already counts."""
     p = spec.procedure
     remaining = p.deadline_unix - time.time() if p.deadline_unix else p.timeout_sec
     try:
@@ -389,7 +393,7 @@ def _call(ctx: _Context, spec: MeasurementSpec, points: list[Path], inferencex: 
     return TestCall(
         points=tuple(points),
         output_dir=ctx.files,
-        timeout_sec=int(max(1, min(p.timeout_sec, remaining))),
+        timeout_sec=int(max(1, min(p.timeout_sec - spent, remaining))),
         cwd=str(ctx.work),
         task_id=spec.request_id,
         kind=spec.kind,  # type: ignore[arg-type]
@@ -650,15 +654,17 @@ def _run_sheet(ctx: _Context, spec_path: Path, key, progress: Progress) -> None:
     _build_image_own_once()
     session = _jit_session(ctx, spec, points, farm, facts)
     arch = card_arch(spec, facts[0] if facts else None)
-    call = _own_directories(ctx, _call(ctx, spec, points, inferencex, progress), session, farm, arch)
-    clear_import_notes(farm)
-    ctx.cards.check(BEFORE_TEST)
-    ctx.cards.enforce_guard()
-    progress.phase("running")
-    started = time.time()
+    linking = time.monotonic()
     with local_datasets_cache(
         ctx.environ, ctx.work, lambda: _datasets_needed(ctx, spec), ctx.notes, sheet_env=spec.process_env
     ):
+        spent = time.monotonic() - linking
+        call = _own_directories(ctx, _call(ctx, spec, points, inferencex, progress, spent), session, farm, arch)
+        clear_import_notes(farm)
+        ctx.cards.check(BEFORE_TEST)
+        ctx.cards.enforce_guard()
+        progress.phase("running")
+        started = time.time()
         outcome, timed_out = _execute_watched(ctx, call)
     if outcome is not None:
         ctx.notes.extend(outcome.notes)

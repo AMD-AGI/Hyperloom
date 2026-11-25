@@ -13,6 +13,7 @@ import os
 import shutil
 import subprocess
 import sys
+import time
 from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
@@ -40,6 +41,7 @@ from hyperloom.measure.runner import tools as runner_tools
 from hyperloom.measure.runner.cache_layout import CACHE_ENV
 from hyperloom.measure.tests.bundle_factory import (
     REQUEST_ID,
+    STAGED_TRACE_LOADER,
     STAGING,
     base_launch,
     spec_document,
@@ -1163,36 +1165,95 @@ def test_the_runner_tells_the_rounds_verdict_whether_its_farm_changed_the_framew
     assert runner._own_directories(context, call, None, farm, None).framework_changed is laid
 
 
-def test_a_test_whose_datasets_cache_is_read_only_runs_on_a_copy_of_the_datasets_it_loads(tmp_path, env, monkeypatch):
+_LINKED = ("semianalysisai___cc-traces-weka-062126", "openai___gsm8k")
+
+
+def _read_only_cache(tmp_path, env, monkeypatch) -> Path:
+    """A datasets cache the runner cannot write, holding the trace corpus and the GSM8K dataset the staging's client
+    registry and GSM8K task name (``bundle_factory``), and one nobody loads."""
     cache = tmp_path / "shared" / "hf-datasets"
-    for name in ("acme___traces", "acme___unused"):
+    for name in (*_LINKED, "acme___unused"):
         (cache / name / "default" / "0.0.0" / "h").mkdir(parents=True)
         (cache / name / "default" / "0.0.0" / "h" / "data-train.arrow").write_bytes(b"rows")
-    (cache / "_shared_acme___traces_default_0.0.0_h.lock").touch()
+        (cache / f"_shared_{name}_default_0.0.0_h.lock").touch()
     env[datasets_cache.DATASETS_CACHE_ENV] = str(cache)
 
     def refuse(**_):
         raise OSError(errno.EROFS, os.strerror(errno.EROFS))
 
     monkeypatch.setattr(datasets_cache, "tempfile", SimpleNamespace(mkstemp=refuse))
+    return cache
+
+
+def _agentx_accuracy_sheet() -> dict:
+    """An AgentX test with accuracy whose trace corpus is named by its base's client env, as a recipe's base names it."""
+    point = {"benchmark": {**POINT["benchmark"], "agentx": {"enabled": True}}}
+    text = yaml.safe_dump(point)
+    base = replace(
+        base_launch(), client=replace(base_launch().client, env={"WEKA_LOADER_OVERRIDE": STAGED_TRACE_LOADER})
+    )
+    sheet = _sheet(config=[{"yaml": text, "sha256": hashlib.sha256(text.encode()).hexdigest()}])
+    sheet["procedure"].update({"accuracy": True, "base_launch": base.to_document()})
+    return sheet
+
+
+def test_a_test_whose_datasets_cache_is_read_only_runs_on_a_link_tree_of_the_datasets_it_loads(
+    tmp_path, env, monkeypatch
+):
+    cache = _read_only_cache(tmp_path, env, monkeypatch)
     seen = {}
 
     def loads(call: TestCall) -> TestOutcome:
-        named = env[datasets_cache.DATASETS_CACHE_ENV]
-        seen["cache"] = named
-        seen["copied"] = sorted(str(path.relative_to(named)) for path in Path(named).rglob("*") if path.is_file())
+        tree = Path(env[datasets_cache.DATASETS_CACHE_ENV])
+        seen["tree"] = tree
+        seen["linked"] = {
+            str(path.relative_to(tree)): os.readlink(path) for path in tree.rglob("*") if path.is_symlink()
+        }
         return _ok(call)
 
     monkeypatch.setattr(runner, "LocalMeasurementBackend", _Backend(loads))
-    point = {"benchmark": {**POINT["benchmark"], "agentx": {"enabled": True}}}
-    point["benchmark"]["envs"] = {**POINT["benchmark"]["envs"], "WEKA_LOADER_OVERRIDE": "acme/traces"}
-    text = yaml.safe_dump(point)
 
-    assert _go(tmp_path, env, _sheet(config=[{"yaml": text, "sha256": hashlib.sha256(text.encode()).hexdigest()}])) == 0
+    assert _go(tmp_path, env, _agentx_accuracy_sheet()) == 0
 
-    assert seen == {
-        "cache": str(tmp_path / "scratch" / "test" / datasets_cache.LOCAL_DATASETS_DIR),
-        "copied": ["acme___traces/default/0.0.0/h/data-train.arrow"],
+    assert seen["tree"] == tmp_path / "scratch" / "test" / datasets_cache.LOCAL_DATASETS_DIR
+    assert seen["linked"] == {
+        f"{name}/default/0.0.0/h/data-train.arrow": str(cache / name / "default/0.0.0/h/data-train.arrow")
+        for name in _LINKED
     }
-    assert env[datasets_cache.DATASETS_CACHE_ENV] == str(cache) and not Path(seen["cache"]).exists()
-    assert "copied acme/traces (0.0 MiB, 1 files)" in _status(tmp_path)["message"]
+    assert env[datasets_cache.DATASETS_CACHE_ENV] == str(cache) and not seen["tree"].exists()
+    assert "semianalysisai/cc-traces-weka-062126, openai/gsm8k (2 files)" in _status(tmp_path)["message"]
+
+
+def test_the_link_tree_is_made_before_the_tests_timeout_is_fixed(tmp_path, env, monkeypatch):
+    _read_only_cache(tmp_path, env, monkeypatch)
+    made = datasets_cache._link_datasets
+
+    def slow(*args):
+        time.sleep(1.5)
+        return made(*args)
+
+    monkeypatch.setattr(datasets_cache, "_link_datasets", slow)
+    backend = _Backend(_ok)
+    monkeypatch.setattr(runner, "LocalMeasurementBackend", backend)
+    sheet = _agentx_accuracy_sheet()
+    sheet["procedure"]["deadline_unix"] = 0
+
+    assert _go(tmp_path, env, sheet) == 0
+    (call,) = backend.calls
+    assert call.timeout_sec <= sheet["procedure"]["timeout_sec"] - 1
+
+
+@pytest.mark.parametrize(("code", "error_class"), [(errno.ESTALE, "hf_cache_permission"), (errno.ENOSPC, "disk_full")])
+def test_a_link_tree_that_cannot_be_made_ends_the_test_as_infrastructure(tmp_path, env, monkeypatch, code, error_class):
+    cache = _read_only_cache(tmp_path, env, monkeypatch)
+
+    def fails(*_):
+        raise OSError(code, os.strerror(code))
+
+    monkeypatch.setattr(datasets_cache, "_link_tree", fails)
+    backend = _Backend(_ok)
+    monkeypatch.setattr(runner, "LocalMeasurementBackend", backend)
+
+    assert _go(tmp_path, env, _agentx_accuracy_sheet()) == 1
+    assert _status(tmp_path)["error_class"] == error_class and backend.calls == []
+    assert env[datasets_cache.DATASETS_CACHE_ENV] == str(cache)
