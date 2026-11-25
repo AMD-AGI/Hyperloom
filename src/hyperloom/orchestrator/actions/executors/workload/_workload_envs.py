@@ -62,7 +62,7 @@ from hyperloom.inference_optimizer.grid_server_args import merge_server_args
 from hyperloom.inference_optimizer.grid_server_args import remove_moe_runner_backend_arg
 from hyperloom.inference_optimizer.grid_server_args import validate_server_args_shell_safe
 from inference_suite.argv import compact_json_server_args, remove_server_args
-from inference_suite.load.dataset_client import read_prompts
+from inference_suite import read_prompts
 from hyperloom.inference_optimizer import framework_registry
 from hyperloom.inference_optimizer.framework_registry import server_args_env_name
 from hyperloom.orchestrator.state.base_launch import ServerBase, session_cards, session_server_base
