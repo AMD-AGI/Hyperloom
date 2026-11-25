@@ -127,6 +127,51 @@ or `failure_reason_code`. Consumers that read `effective_verdict` read
 `verdict` instead: the loop no longer downgrades a ruling, so `verdict` is the
 one it acted on.
 
+### Required: `SWEEP` is renamed `CYCLE_END` and runs no concurrency sweep
+
+The phase between `KERNEL_AGENT` and `CLOSE` is now `CYCLE_END`. It integrates
+pending KEEPs and validates the stack, then loops back or closes; it no longer
+dispatches a `conc_sweep` task. Update anything that matches on the old names:
+
+* The phase is `CYCLE_END` in `state.json`, `phase_history` and
+  `session_breakdown.json`.
+* It has no phase budget and no budget flag: the session budget alone gates it.
+  The SWEEP budget flag is rejected with `unrecognized arguments`, and so is
+  `--conc-sweep-total-budget-sec`. The share SWEEP held moves to the
+  optimisation phases: `FRAMEWORK_AGENT` defaults to 0.40 and `KERNEL_AGENT` to
+  0.50, what a session with the sweep off already ran with.
+* Its exit is `cycle_end_done` (also the stop reason when no further cycle
+  runs); the SWEEP stop reasons no longer occur.
+* Its predicate input is `cycle_end_result` (`settled`, `reloop`) instead of
+  `sweep_result`.
+* A session that reached it reports `outcome.stage_reached` `cycle_end` where it
+  reported `conc_sweep`.
+* The workflow-evaluation contract is `hyperloom.workflow_evaluation.v4`
+  (`workflow_contract.v4.json`); a consumer that matches the version string or
+  the SWEEP vocabulary moves to it.
+
+The concurrency sweep runs after CLOSE instead of inside the session.
+`--enable-conc-sweep` is on by default (`--no-enable-conc-sweep` turns it off),
+and `hyperloom conc-sweep SESSION_DIR` runs it by hand. It writes the same files:
+`reports/conc_sweep_summary.json`, `reports/conc_sweep_raw.csv`,
+`reports/conc_sweep_curve.png` and the `conc_sweep_summary` /
+`conc_sweep_curve_png` keys of `final.json`, and packages the session again so
+the package carries them. The `conc_sweep` timeline event of
+`session_breakdown.json` and the sweep's result in `state.json` are gone. A
+session recorded in `SWEEP` does not resume: finish it under the build that
+started it.
+
+The sweep also adds its report to `session_breakdown.json` as the top-level
+`conc_sweep_summary`, rewritten after every point. A consumer that read the
+sweep from the `conc_sweep` timeline event reads it there instead, and has to
+read the breakdown again after CLOSE to see it. The key is the one breakdowns
+carried the sweep under before #1455, but the section is the schema `2.0`
+report: its point rows, `comparison` and `summary` keep their fields, while its
+header names the ladder `concs`, drops the budget keys, `was_skipped` and the
+report paths, and adds `partial`, `in_progress` and `cancelled` to `status`.
+Both lineages' shapes are in
+[`session_breakdown.json` integration in Hyperloom](session-breakdown.md).
+
 ---
 
 ## Upgrading from 1.1.x
@@ -333,51 +378,6 @@ removed from `.env` and launchers: `INFERENCE_OPTIMIZER_RAY_EXEC`,
 -916 no longer occur, and `session_breakdown.json` no longer reports the
 conc-sweep arm strategy `serving_lease_held` or the `ensure_ray` install step.
 Multi-node runs (RayJob through the Ray Dashboard) are unchanged.
-
-### Required: `SWEEP` is renamed `CYCLE_END` and runs no concurrency sweep
-
-The phase between `KERNEL_AGENT` and `CLOSE` is now `CYCLE_END`. It integrates
-pending KEEPs and validates the stack, then loops back or closes; it no longer
-dispatches a `conc_sweep` task. Update anything that matches on the old names:
-
-* The phase is `CYCLE_END` in `state.json`, `phase_history` and
-  `session_breakdown.json`.
-* It has no phase budget and no budget flag: the session budget alone gates it.
-  The SWEEP budget flag is rejected with `unrecognized arguments`, and so is
-  `--conc-sweep-total-budget-sec`. The share SWEEP held moves to the
-  optimisation phases: `FRAMEWORK_AGENT` defaults to 0.40 and `KERNEL_AGENT` to
-  0.50, what a session with the sweep off already ran with.
-* Its exit is `cycle_end_done` (also the stop reason when no further cycle
-  runs); the SWEEP stop reasons no longer occur.
-* Its predicate input is `cycle_end_result` (`settled`, `reloop`) instead of
-  `sweep_result`.
-* A session that reached it reports `outcome.stage_reached` `cycle_end` where it
-  reported `conc_sweep`.
-* The workflow-evaluation contract is `hyperloom.workflow_evaluation.v4`
-  (`workflow_contract.v4.json`); a consumer that matches the version string or
-  the SWEEP vocabulary moves to it.
-
-The concurrency sweep runs after CLOSE instead of inside the session.
-`--enable-conc-sweep` is on by default (`--no-enable-conc-sweep` turns it off),
-and `hyperloom conc-sweep SESSION_DIR` runs it by hand. It writes the same files:
-`reports/conc_sweep_summary.json`, `reports/conc_sweep_raw.csv`,
-`reports/conc_sweep_curve.png` and the `conc_sweep_summary` /
-`conc_sweep_curve_png` keys of `final.json`, and packages the session again so
-the package carries them. The `conc_sweep` timeline event of
-`session_breakdown.json` and the sweep's result in `state.json` are gone. A
-session recorded in `SWEEP` does not resume: finish it under the build that
-started it.
-
-The sweep also adds its report to `session_breakdown.json` as the top-level
-`conc_sweep_summary`, rewritten after every point. A consumer that read the sweep from the
-`conc_sweep` timeline event reads it there instead, and has to read the
-breakdown again after CLOSE to see it. The key is the one breakdowns carried
-the sweep under before #1455, but the section is the schema `2.0` report: its
-point rows, `comparison` and `summary` keep their fields, while its header
-names the ladder `concs`, drops the budget keys, `was_skipped` and the report
-paths, and adds `partial`, `in_progress` and `cancelled` to `status`. Both
-lineages' shapes are in
-[`session_breakdown.json` integration in Hyperloom](session-breakdown.md).
 
 ### Recommended: commands that stay outside `hyperloom.cli`
 

@@ -375,55 +375,22 @@ async def test_the_breakdown_spend_includes_the_close_llm_calls(
     assert spend["llm_usd"] == pytest.approx(before + 0.11)
 
 
-async def test_a_later_close_keeps_the_sweep_an_earlier_close_was_followed_by(
+async def test_a_later_close_rebuilds_the_breakdown_without_a_skipped_sweep(
     layout: SessionLayout,
     blackboard: LocalBlackboard,
     final: FinalRecipe,
 ) -> None:
-    """A resumed or ``final-only`` CLOSE rebuilds the breakdown after the sweep of the commit it chose again ran; the
-    sweep's report survives it."""
+    """A first FINAL that chose nothing leaves a ``skipped`` sweep in the report and the breakdown; a later CLOSE (a
+    resume, a ``final-only``) rebuilds the breakdown without it, and the sweep that follows writes it again."""
 
-    sweep = {
-        "status": "succeeded",
-        "concs": [4, 16],
-        "baseline": {"commit": "root", "points": []},
-        "optimized": {"commit": CHOSEN, "points": []},
+    skipped = {
+        "status": "skipped",
+        "skip_reason": "no_optimization",
+        "baseline": {"points": []},
+        "optimized": {"points": []},
     }
-    (layout.reports / "conc_sweep_summary.json").write_text(json.dumps(sweep))
-
-    report = await _closer(layout, blackboard, _clean(), final, None).close(
-        SessionStopReason.TIME_EXHAUSTED, CHOICE, "", HARD_STOP
-    )
-
-    assert report.exports is not None
-    assert json.loads(report.exports.breakdown.read_text())["conc_sweep_summary"] == sweep
-
-
-@pytest.mark.parametrize(
-    "report",
-    [
-        {"status": "succeeded", "baseline": {"commit": "root", "points": []}, "optimized": {"commit": "older"}},
-        {
-            "status": "skipped",
-            "skip_reason": "no_optimization",
-            "baseline": {"points": []},
-            "optimized": {"points": []},
-        },
-        "{not json",
-    ],
-    ids=["another_commit", "skipped", "unreadable"],
-)
-async def test_a_later_close_drops_a_sweep_that_did_not_measure_its_choice(
-    layout: SessionLayout,
-    blackboard: LocalBlackboard,
-    final: FinalRecipe,
-    report: object,
-) -> None:
-    """A sweep of another commit, or a skip, describes a choice this CLOSE did not make; a report that cannot be read
-    costs the section, not the breakdown."""
-
-    text = report if isinstance(report, str) else json.dumps(report)
-    (layout.reports / "conc_sweep_summary.json").write_text(text)
+    (layout.reports / "conc_sweep_summary.json").write_text(json.dumps(skipped))
+    (layout.reports / "session_breakdown.json").write_text(json.dumps({"conc_sweep_summary": skipped}))
 
     closed = await _closer(layout, blackboard, _clean(), final, None).close(
         SessionStopReason.TIME_EXHAUSTED, CHOICE, "", HARD_STOP
@@ -431,19 +398,6 @@ async def test_a_later_close_drops_a_sweep_that_did_not_measure_its_choice(
 
     assert closed.exports is not None
     assert "conc_sweep_summary" not in json.loads(closed.exports.breakdown.read_text())
-
-
-async def test_a_close_with_no_sweep_writes_no_sweep_section(
-    layout: SessionLayout,
-    blackboard: LocalBlackboard,
-    final: FinalRecipe,
-) -> None:
-    report = await _closer(layout, blackboard, _clean(), final, None).close(
-        SessionStopReason.TIME_EXHAUSTED, CHOICE, "", HARD_STOP
-    )
-
-    assert report.exports is not None
-    assert "conc_sweep_summary" not in json.loads(report.exports.breakdown.read_text())
 
 
 async def test_a_session_stopped_before_its_baseline_asks_no_llm_and_leaves_the_archive_empty(

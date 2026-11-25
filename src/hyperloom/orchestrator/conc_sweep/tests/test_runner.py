@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -314,13 +315,21 @@ def test_a_breakdown_that_cannot_be_replaced_does_not_stop_the_sweep(
     assert _breakdown(session_dir) == {"schema_version": "v6.1"}
 
 
-def test_a_session_without_a_breakdown_still_gets_its_report(session_dir: Path, grid: SimpleNamespace):
+_REPORT_LOGGER = "hyperloom.orchestrator.conc_sweep.report"
+
+
+def test_a_session_without_a_breakdown_still_gets_its_report(
+    session_dir: Path, grid: SimpleNamespace, caplog: pytest.LogCaptureFixture
+):
     _state(session_dir)
 
-    asyncio.run(runner.run_conc_sweep(session_dir))
+    with caplog.at_level(logging.WARNING, logger=_REPORT_LOGGER):
+        asyncio.run(runner.run_conc_sweep(session_dir))
 
     assert _summary(session_dir)["status"] == "succeeded"
     assert not (session_dir / "session_breakdown.json").exists()
+    missing = [r for r in caplog.records if r.name == _REPORT_LOGGER]
+    assert missing and all("no breakdown at" in r.getMessage() and r.exc_info is None for r in missing)
 
 
 def test_the_session_report_points_at_the_sweep(session_dir: Path, grid: SimpleNamespace):

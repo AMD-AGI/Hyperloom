@@ -166,10 +166,13 @@ A multi-branch breakdown carries it the same way, from
 `MB-reports/conc_sweep_summary.json`, and its arms differ in shape: a
 single-lineage arm holds the launch settings it ran (`extra_server_args`,
 `extra_envs`, `overlay`) and fixed point fields, a multi-branch arm holds the
-`commit` it measured and one point per test, with that test's `request_id`.
-The breakdown's own `schema_version` (`hyperloom.session_breakdown.v6.1` or
-`multibranch-2`) tells them apart. A later multi-branch CLOSE keeps the section
-only when it measured the commit that CLOSE chose.
+`commit` it measured and points that name the test they came from in
+`request_id`: an AgentX arm runs one test per point, an InferenceX arm one test
+over all its points, which then share one `request_id`. The breakdown's own
+`schema_version` (`hyperloom.session_breakdown.v6.1` or `multibranch-2`) tells
+them apart. A later multi-branch CLOSE (a resume, a `final-only`) rebuilds the
+breakdown without the section; the sweep that runs after that CLOSE writes it
+again.
 
 V6 was the preceding cutover, for the timeline: each action records its own event
 while it runs, so an event's `start_time` is when the work began rather than
