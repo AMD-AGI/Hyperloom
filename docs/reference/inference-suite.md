@@ -196,8 +196,10 @@ naming the file. `NUM_PROMPTS` is not read from the environment; a point's own
 `envs.NUM_PROMPTS` and `hyperloom optimize --extra-env NUM_PROMPTS=<n>` override the
 count in the baseline round and the candidate rounds, which are rendered from the
 session's baseline config. A concurrency sweep sets its own count per rung, for a
-dataset session the file's prompt count whatever is pinned, and a boot round and a
-profile round keep their own. Pass a shorter file to send fewer. A round whose concurrency is above the file's prompt count never has
+dataset session the file's prompt count whatever is pinned. A boot round sends one
+request. A profile round keeps its own count over a point's `envs.NUM_PROMPTS`, but
+an `--extra-env NUM_PROMPTS=<n>` reaches it too. Pass a shorter file to send fewer.
+A round whose concurrency is above the file's prompt count never has
 that many requests in flight, and the client's stderr says so; at concurrency 1 the
 whole file is sent one request at a time, inside the same
 `INFERENCE_OPTIMIZER_BENCHMARK_TIMEOUT_SEC` as any round. A session
