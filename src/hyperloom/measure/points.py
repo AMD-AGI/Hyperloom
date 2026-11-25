@@ -62,7 +62,7 @@ from hyperloom.orchestrator.actions.executors import (
     materialize_benchmark_config,
 )
 from hyperloom.orchestrator.actions.executors.agentx_point import enable_profile, native_config
-from hyperloom.orchestrator.state.base_launch import server_base_at
+from hyperloom.orchestrator.state.base_launch import server_base, server_base_at
 from inference_suite.argv import argv_flag_occurrences, canonical_flag_name, flag_occurrences
 from inference_suite.contracts import BaseLaunch
 
@@ -179,6 +179,8 @@ def default_canonical(
     """
 
     base = config_path or default_baseline_config()
+    if frozen_base is not None:
+        materialize = {"server_base": server_base(frozen_base), **materialize}
     canonical = CanonicalMeasurement(base, MeasurementSurface({}), primary_concurrency, materialize, frozen_base)
     evaluation = {} if canonical.agentx else {ENV_RUN_EVAL: "true"}
     config = _render(canonical, out_dir, CANONICAL_FILE, extra_envs={ENV_CONC: str(primary_concurrency), **evaluation})

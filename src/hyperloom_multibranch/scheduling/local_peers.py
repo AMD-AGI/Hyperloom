@@ -354,7 +354,6 @@ def _canonical(out_dir: Path, workload: Workload, host: MeasurementHost, frozen:
     seeded with no base it would find. Raises :class:`PeersUnavailable` when it cannot be rendered."""
 
     from hyperloom.measure.points import PointError, default_canonical
-    from hyperloom.orchestrator.state.base_launch import server_base
 
     try:
         return default_canonical(
@@ -363,7 +362,6 @@ def _canonical(out_dir: Path, workload: Workload, host: MeasurementHost, frozen:
             model_path=resolve_serving_model_path(workload.model),
             gpu_type=workload.gpu_type,
             inferencex_path=host.inferencex.path,
-            server_base=server_base(frozen),
             frozen_base=frozen,
         )
     except PointError as exc:

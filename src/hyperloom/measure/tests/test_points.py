@@ -446,7 +446,6 @@ def test_each_point_is_seeded_with_the_source_launch_at_its_own_concurrency(tmp_
         primary_concurrency=32,
         config_path=default_baseline_config(),
         model_path=str(model),
-        server_base=server_base(base),
         frozen_base=base,
     )
     delta = RecipeDelta(config=ConfigDelta(server_args="--enable-torch-compile"))
