@@ -55,6 +55,7 @@ SESSION_GPU_TYPES = ("mi300x", "mi325x", "mi350x", "mi355x", "r9700", "w7900d")
 NATIVE_SERVER_GPU_TYPES = ("r9700", "w7900d")
 #: The argparse name of ``--gpu-type``.
 GPU_TYPE_DEST = "gpu_type"
+_GPU_TYPE_HELP = "GPU type, in any case; r9700 and w7900d only with --framework llamacpp."
 #: The options ``run`` requires unless it is given ``--resume``, by their argparse names.
 RUN_REQUIRED = ("model", "framework", GPU_TYPE_DEST, "workload", "tp", "conc", "precision")
 #: The options an inferencex workload requires and an agentx one refuses.
@@ -166,12 +167,7 @@ def _add_workload_options(run: argparse.ArgumentParser) -> None:
 
     run.add_argument("--model", help="Model path, or an id found under HL_MODEL_BASE or in the Hugging Face cache.")
     run.add_argument("--framework", help="Inference framework, e.g. vllm or sglang.")
-    run.add_argument(
-        "--gpu-type",
-        type=str.lower,
-        choices=SESSION_GPU_TYPES,
-        help="GPU type, in any case; r9700 and w7900d only with --framework llamacpp.",
-    )
+    run.add_argument("--gpu-type", type=str.lower, choices=SESSION_GPU_TYPES, help=_GPU_TYPE_HELP)
     run.add_argument("--workload", choices=[kind.value for kind in WorkloadKind], help="Workload kind.")
     run.add_argument("--tp", type=int, help="Tensor-parallel size; must fit the machine's cards.")
     run.add_argument(
