@@ -549,8 +549,7 @@ def _acceptance_with_prompts(
 
 
 def _session_jit_store(options: HostedOptions, session_dir: Path) -> DirJitStore | None:
-    """The compiled-code cache this host publishes to (:attr:`HostedOptions.jit_store`), checked and pruned; ``None``
-    when neither the options nor ``HYPERLOOM_JIT_STORE`` name one, or the check refuses it."""
+    """The compiled-code cache this host publishes to, checked and pruned; ``None`` when none is named or it is refused."""
     root = named_jit_store(options.jit_store, os.environ)
     return session_jit_store(root, session_dir, REFUSED_HOSTED) if root is not None else None
 
@@ -598,7 +597,6 @@ def build_hosted_toolbox(
     """
 
     directory = Path(inputs.session_dir)
-    jit_store = _session_jit_store(options, directory)
     acceptance = _acceptance_with_prompts(acceptance, options, os.environ, spec.model_dir)
     native = native_builds(os.environ, spec.blobs, acceptance.active_image_digest or spec.image_digest)
     acceptance = with_native_plan(acceptance, native)
@@ -609,7 +607,6 @@ def build_hosted_toolbox(
     leases = _leases(provider, inputs, options.lease_tuning) if options.dev_leases else None
     handover = handover_for(grant, inputs.tp, leases) if options.make_before_break else None
     parallel = parallel_tests_for(grant, inputs.tp, handover)
-    base_bins = base_bins_env(native, directory / _BASE_BUILDS)  # built once the inputs are known to run a test
     config = HostedConfig(
         session_dir=directory,
         run_id=inputs.run_id,
@@ -620,12 +617,12 @@ def build_hosted_toolbox(
             **inputs.create_envs(),
             **framework_envs(directory / SESSION_SNAPSHOT_DIR, options.framework_configs),
             **(native.runner_envs if native else {}),
-            **base_bins,
+            **base_bins_env(native, directory / _BASE_BUILDS),  # built once the inputs are known to run a test
         },
         archive=session_archive(options.archive, directory),
         max_parallel_tests=parallel,
         poll_interval_sec=options.poll_interval_sec,
-        jit_store=jit_store,
+        jit_store=_session_jit_store(options, directory),
         handover=handover,
     )
     backend = started_backend(provider, config)
