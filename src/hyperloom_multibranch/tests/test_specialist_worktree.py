@@ -1152,7 +1152,7 @@ def _timing_out(step: str, times: int, monkeypatch) -> list[list[str]]:
 
 @pytest.mark.parametrize("step", ["add", "commit"])
 def test_a_whole_tree_step_of_the_build_that_times_out_is_run_again(tmp_path, installed, monkeypatch, caplog, step):
-    monkeypatch.setattr(worktree_module, "locate_installed_package", lambda _layout: installed)
+    monkeypatch.setattr(worktree_module, "locate_source", lambda _layout: installed)
     timed_out = _timing_out(step, worktree_module.WHOLE_TREE_ATTEMPTS - 1, monkeypatch)
     base = SourceBase(tmp_path / "source")
     with caplog.at_level(logging.WARNING, logger=worktree_module.__name__):
@@ -1167,7 +1167,7 @@ def test_a_whole_tree_step_of_the_build_that_times_out_is_run_again(tmp_path, in
 
 
 def test_a_whole_tree_step_that_times_out_every_time_fails_naming_the_step(tmp_path, installed, monkeypatch):
-    monkeypatch.setattr(worktree_module, "locate_installed_package", lambda _layout: installed)
+    monkeypatch.setattr(worktree_module, "locate_source", lambda _layout: installed)
     timed_out = _timing_out("add", worktree_module.WHOLE_TREE_ATTEMPTS + 1, monkeypatch)
     with pytest.raises(worktree_module.WorktreeError, match=r"git add in .* did not finish in 300 s, 3 times"):
         SourceBase(tmp_path / "source").build(["vllm"])

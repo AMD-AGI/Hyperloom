@@ -71,7 +71,6 @@ class ReviewVerdict:
     alternative_action: str | None = None
     advice_text: str = ""
     notes: Iterable[str] | None = None
-    failure_reason_code: str = ""
 
 
 # Builders — convenience constructors used by decision_reviewer.
@@ -92,7 +91,6 @@ def build_review_verdict_intent(review: ReviewVerdict) -> Intent:
         "alternative_action": review.alternative_action,
         "advice_text": review.advice_text,
         "notes": list(review.notes or []),
-        "failure_reason_code": review.failure_reason_code,
     }
     if review.confidence is not None:
         payload["confidence"] = review.confidence
