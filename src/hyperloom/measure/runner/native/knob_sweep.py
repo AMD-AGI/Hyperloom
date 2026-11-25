@@ -53,8 +53,6 @@ __all__ = [
     "SweepPlan",
     "SweepResult",
     "SweepTiming",
-    "Verdict",
-    "knob_patch",
     "plan_sweep",
     "run_sweep",
 ]
@@ -124,8 +122,10 @@ class SweepTiming:
 @dataclass(frozen=True)
 class SweepHooks:
     """What a sweep runs through: ``build`` builds a git patch over the pinned commit (``b""`` for the commit as it is)
-    and lays its executables; ``hold`` holds the GPU for one round and gives the environment its processes run in;
-    ``time`` and ``check`` are :func:`~hyperloom.measure.runner.native.backend_ops.time_cases` and
+    and lays its executables
+    (:meth:`~hyperloom.measure.runner.native.session_builds.SessionNativeBuilds.build_patch`); ``hold`` holds the GPU
+    for one round and gives the environment its processes run in; ``time`` and ``check`` are
+    :func:`~hyperloom.measure.runner.native.backend_ops.time_cases` and
     :func:`~hyperloom.measure.runner.native.backend_ops.check_cases` with their timeout bound."""
 
     build: Callable[[bytes], TreeBuild]
