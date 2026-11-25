@@ -183,3 +183,31 @@ def test_a_layout_entry_that_cannot_be_used_is_refused_with_what_is_wrong(change
 
     with pytest.raises(LayoutSpecError, match=message):
         parse_layout("entry x", {**body, **change})
+
+
+def _checkout_body(**change):
+    body = {
+        "import_name": "llamacpp",
+        "sections": [{"prefix": "ggml", "base": "checkout", "into": "ggml"}],
+        "refuse": [],
+        "native": ["ggml/*"],
+        "generated": [],
+    }
+    return {**body, **change}
+
+
+@pytest.mark.parametrize(
+    ("change", "message"),
+    [
+        ({"native": ["ggml/*.cu"]}, "native throughout"),
+        (
+            {"sections": [{"prefix": "ggml", "base": "checkout"}, {"prefix": "lib", "base": "package"}]},
+            "every section or in none",
+        ),
+    ],
+)
+def test_a_checkout_layout_that_lets_a_file_in_by_another_way_is_refused(change, message):
+    """Every file of a checkout's section is native: a patch to any of them is measured by a build of the checkout or
+    refused, never laid as a package file would be."""
+    with pytest.raises(LayoutSpecError, match=message):
+        parse_layout("entry x", _checkout_body(**change))

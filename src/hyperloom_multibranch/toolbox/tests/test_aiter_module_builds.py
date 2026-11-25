@@ -41,7 +41,7 @@ from hyperloom_multibranch.toolbox.acceptance import AITER_SOURCES_REASON
 from hyperloom_multibranch.toolbox.local_hosted import aiter_builds_missing
 from hyperloom_multibranch.toolbox.native_builds import compiled_needs, native_builds, with_native_plan
 from hyperloom_multibranch.toolbox.pending_builds import PendingBuilds
-from hyperloom_multibranch.toolbox.store_builds import BuildSite, StoreBuildDriver
+from hyperloom_multibranch.toolbox.store_builds import StoreBuildDriver
 from hyperloom_multibranch.toolbox.tests.helpers import FakeRepo, build, req
 from hyperloom_multibranch.toolbox.tests.test_native_builds import REQUEST, Hooks
 
@@ -68,8 +68,8 @@ class AiterRig:
         history = partial(self.store.ready_records, AITER_COMPONENT, IMAGE)
         self.modules = AiterModules(planner, history=history, environ={})
         runner = IsolatedBuilds(planner, self.blobs, isolation, {AITER_COMPONENT: standin.FACTORY})
-        site = BuildSite(IMAGE, BUILDER, "gfx942", {AITER_COMPONENT: standin.recipe()})
-        self.driver = StoreBuildDriver(self.store, Signer(key), site, compiled_needs, runner)
+        recipes = {AITER_COMPONENT: standin.recipe()}
+        self.driver = StoreBuildDriver(self.store, Signer(key), recipes, compiled_needs, runner)
         self.compiler = EnvironmentCompiler(
             self.blobs, IMAGE, lambda layout: standin.package_base(self.package), modules=self.modules
         )

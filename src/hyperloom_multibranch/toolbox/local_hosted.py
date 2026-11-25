@@ -80,6 +80,7 @@ from hyperloom.measure.rule_pack_stage import rule_pack_envs
 from hyperloom.measure.runner.jit import JIT_CACHE_ENV
 from hyperloom.measure.short_prompts.staging import CACHE_ENV as RUNNER_CACHE_ENV
 from hyperloom.measure.short_prompts.staging import cache_root
+from hyperloom.orchestrator.actions.executors import SERVER_CPUS_ENV
 from hyperloom.sandbox.card_occupancy import (
     CARD_GUARD_ENV,
     CardGuard,
@@ -118,7 +119,7 @@ from hyperloom_multibranch.toolbox.leased_toolbox import (
 )
 from hyperloom_multibranch.toolbox.queue import QueuePolicy
 from hyperloom_multibranch.toolbox.long_context import LongContextSetup, staged_long_context
-from hyperloom_multibranch.toolbox.native_builds import native_builds, with_native_plan
+from hyperloom_multibranch.toolbox.native_builds import base_bins_env, native_builds, with_native_plan
 from hyperloom_multibranch.toolbox.short_prompts import ShortPromptSetup, staged_short_prompts
 from hyperloom_multibranch.toolbox.tools import (
     AsyncTool,
@@ -173,6 +174,8 @@ _HUB_REPOS = ("models--", "datasets--", "spaces--")
 _BLOBS = "blobs"
 _SANDBOXES = "sandboxes"
 _BRANCH_SANDBOXES = "branch-sandboxes"
+#: Where the base builds of the frameworks built from a pinned checkout are laid for the tests to run.
+_BASE_BUILDS = "base-builds"
 _RULE_PACK = "rule-pack"
 _POLL_INTERVAL_SEC = 2.0
 LEAKED_CARDS_REASON = "sandbox processes not provably gone"
@@ -644,13 +647,22 @@ def _shared_dirs(jit_store: Path | None, environ: Mapping[str, str]) -> dict[str
 
 
 def _measured_template(
-    session: LocalSession, template: LocalTemplate, options: LocalOptions, shared_dirs: Mapping[str, str]
+    session: LocalSession,
+    template: LocalTemplate,
+    options: LocalOptions,
+    shared_dirs: Mapping[str, str],
+    base_bins: Mapping[str, str] | None = None,
 ) -> LocalTemplate:
-    """The runner template that also carries the session's framework tables, the card guard and the directories of the
-    shared stores that are on: none is part of the environment the branches' own sandboxes get."""
+    """The runner template that also carries the session's framework tables, the card guard, the directories of the
+    shared stores that are on, the CPUs this host pins a measured server to (``HYPERLOOM_SERVER_CPUS``, when it names
+    them) and the directories of the base builds' executables the runner puts ahead of its ``PATH`` (``base_bins``,
+    :func:`~hyperloom_multibranch.toolbox.native_builds.base_bins_env`): none is part of the environment the branches'
+    own sandboxes get."""
     framework = framework_envs(Path(session.session_dir) / SESSION_SNAPSHOT_DIR, options.framework_configs)
     guard = {CARD_GUARD_ENV: card_guard_of(options).value}
-    return replace(template, envs={**template.envs, **framework, **shared_dirs, **guard})
+    named = os.environ.get(SERVER_CPUS_ENV, "").strip()
+    cpus = {SERVER_CPUS_ENV: named} if named else {}
+    return replace(template, envs={**template.envs, **framework, **shared_dirs, **guard, **cpus, **(base_bins or {})})
 
 
 def _provider(
@@ -775,7 +787,8 @@ def build_local_toolbox(
         template = replace(template, envs={name: v for name, v in template.envs.items() if name != JIT_CACHE_ENV})
     shared_dirs = {**_shared_dirs(jit_root, os.environ), **(native.runner_envs if native else {})}
     acceptance = replace(acceptance, aiter_builds_missing=aiter_builds_missing({**template.envs, **shared_dirs}))
-    measured = _measured_template(session, template, options, shared_dirs)
+    base_bins = base_bins_env(native, directory / _BASE_BUILDS)
+    measured = _measured_template(session, template, options, shared_dirs, base_bins)
     provider = _provider(session, cards, measured, options, spec.model_dir)
     backend = started_backend(provider, config)
     leases = BranchLeases(provider, directory / _BRANCH_SANDBOXES, tp, template.envs, CardDrain(options.card_memory))
