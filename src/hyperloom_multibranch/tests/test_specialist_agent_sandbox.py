@@ -19,6 +19,7 @@ import pytest
 from hyperloom.common import agent_isolation
 from hyperloom.common.agent_isolation import BwrapIsolation, IsolationRefused, NoIsolation
 from hyperloom_common.bwrap import BwrapProbe
+from hyperloom.sandbox.local_sandbox import SGLANG_JIT_CACHE_ENV
 from hyperloom_multibranch.specialist import agent_sandbox
 from hyperloom_multibranch.specialist.agent_sandbox import (
     TIMED_OUT,
@@ -103,6 +104,18 @@ async def _until(predicate: Callable[[], object], seconds: float = 10.0) -> None
     while not predicate():
         assert time.monotonic() < until, "timed out waiting"
         await asyncio.sleep(0.02)
+
+
+def test_sglangs_jit_cache_is_on_the_hosts_temporary_disk_unless_the_command_names_its_own(tmp_path: Path) -> None:
+    """The home lies in the branch's directory, which may be NFS, where SGLang's rename of a staging directory that
+    holds an open file is refused."""
+    sandbox = _sandbox(tmp_path)
+
+    cache = Path(sandbox.env({})[SGLANG_JIT_CACHE_ENV])
+
+    assert cache == sandbox.cache_root / agent_sandbox.SGLANG_JIT_DIR
+    assert Path(tempfile.gettempdir()) in cache.parents
+    assert sandbox.env({SGLANG_JIT_CACHE_ENV: "/own"})[SGLANG_JIT_CACHE_ENV] == "/own"
 
 
 def test_env_drops_masks_and_pins_cards_paths_and_tmpdir(tmp_path: Path) -> None:

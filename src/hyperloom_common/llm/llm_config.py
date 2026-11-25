@@ -12,7 +12,7 @@ import sys
 import time
 from contextlib import AbstractContextManager, AsyncExitStack, ExitStack
 from dataclasses import dataclass
-from typing import Iterable, Mapping, MutableMapping, Sequence
+from typing import Iterable, Mapping, Sequence
 from urllib.parse import urlsplit, urlunsplit
 
 from hyperloom_common.env import is_truthy
@@ -131,23 +131,22 @@ def with_synthesized_anthropic_keys(env: Mapping[str, str]) -> dict[str, str]:
 HEADER_REF_ALLOWLIST = frozenset({"ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "OPENAI_API_KEY"})
 
 
-def expand_custom_header_env_refs(environ: MutableMapping[str, str] | None = None) -> None:
-    """Resolve the credential ``${VAR}`` references in the ``*_CUSTOM_HEADERS`` settings of ``environ`` in place.
+def expand_custom_header_env_refs() -> None:
+    """Resolve the credential ``${VAR}`` references in the ``*_CUSTOM_HEADERS`` settings in place.
 
     Child processes (specialists, the Critic, GEAK) forward these verbatim, and an agent CLI sends them
     verbatim, so an unexpanded ``${ANTHROPIC_API_KEY}`` reaches the gateway as literal text and is rejected.
     References resolve against the same view ``claude_sdk_env_options`` uses, so a key it would fill in from the
     other Anthropic credential is not erased here. A reference outside :data:`HEADER_REF_ALLOWLIST` is left as
-    written, which is what children received before this expansion existed. ``environ`` defaults to ``os.environ``.
+    written, which is what children received before this expansion existed.
     """
-    environ = os.environ if environ is None else environ
-    source = with_synthesized_anthropic_keys(environ)
+    source = with_synthesized_anthropic_keys(os.environ)
     for key in ("ANTHROPIC_CUSTOM_HEADERS", "OPENAI_CUSTOM_HEADERS"):
-        raw = environ.get(key)
+        raw = os.environ.get(key)
         if not raw or "${" not in raw:
             continue
-        environ[key] = expand_env_refs(raw, source, only=HEADER_REF_ALLOWLIST)
-        if "${" in environ[key]:
+        os.environ[key] = expand_env_refs(raw, source, only=HEADER_REF_ALLOWLIST)
+        if "${" in os.environ[key]:
             log.warning(
                 "%s references a variable outside %s; child processes receive that reference unexpanded",
                 key,

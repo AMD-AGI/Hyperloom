@@ -556,7 +556,7 @@ def test_the_brief_lists_every_op_of_at_least_one_percent_with_its_ceiling_befor
 
 def test_a_long_brief_line_is_cut_before_the_id_it_ends_with_and_keeps_the_id() -> None:
     """The id is what the specialist revises or retires a lesson by and cites an Experience by."""
-    learning = "[MB-20261123T054105Z-2d1719e0, same conditions, unmeasured] Why profiles fail " + "in this image " * 9
+    learning = "[MB-20260101T000000Z-0a1b2c3d, same conditions, unmeasured] Why profiles fail " + "in this image " * 9
     prior = (
         "prior: HL_SELF_PROFILE_START=8000 HL_SELF_PROFILE_STEPS=30 patch/sglang/" + "3face767" * 8 + ": revert -0.3%"
     )
@@ -568,7 +568,7 @@ def test_a_long_brief_line_is_cut_before_the_id_it_ends_with_and_keeps_the_id() 
 
     assert [line[-len(found) :] for line, found in zip(shown[2:4], ids[::-1])] == list(ids[::-1])
     assert all(len(line) == LINE_CHARS and f"... {found}" in line for line, found in zip(shown[2:4], ids[::-1]))
-    assert shown[2].startswith("- learnt before: [MB-20261123T054105Z-2d1719e0, same conditions, unmeasured] Why")
+    assert shown[2].startswith("- learnt before: [MB-20260101T000000Z-0a1b2c3d, same conditions, unmeasured] Why")
 
 
 def test_a_long_brief_line_without_an_id_at_its_end_is_cut_at_the_end() -> None:

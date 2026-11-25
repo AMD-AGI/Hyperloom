@@ -64,9 +64,8 @@ WORK_DIR = "work"
 _INHERITED_ENV = ("PATH", "LANG", "LC_ALL", "PYTHONPATH", "VIRTUAL_ENV")
 #: Where SGLang's JIT kernel cache goes instead of below ``HOME`` (``fs/work``), which lies in the session directory:
 #: SGLang publishes a build by renaming its staging directory, and an NFS server refuses to rename a directory that
-#: holds an open file, so a session directory on NFS failed every test's server at its first JIT build. ``/tmp`` is a
-#: confined sandbox's private scratch, deleted with it, and the host's otherwise, where :meth:`LocalSandbox.kill`
-#: deletes it; either is local, and the cache was the sandbox's own before.
+#: holds an open file. ``/tmp`` is a confined sandbox's private scratch, deleted with it, and the host's otherwise,
+#: where :meth:`LocalSandbox.kill` deletes it.
 SGLANG_JIT_CACHE_ENV = "SGLANG_JIT_CACHE_DIR"
 SGLANG_JIT_CACHE_PREFIX = "/tmp/hl-sglang-jit-"
 _READER_JOIN_SEC = 2.0
