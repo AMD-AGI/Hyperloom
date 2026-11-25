@@ -273,8 +273,6 @@ class BaselineFailureMixin:
                 result.
         """
         result_payload = dict(result or {})
-        if task.kind == "conc_sweep" and not result_payload.get("status"):
-            result_payload["status"] = "failed"
         if task.kind == "explore" and bool((task.params or {}).get("geak_fallback")):
             self._close_failed_geak_revalidation(result_payload)
         # Per-action audit (failed attempt) for the in-scope kinds.
@@ -299,11 +297,6 @@ class BaselineFailureMixin:
             task_id=task.task_id,
             result=result_payload,
         )
-        if task.kind == "conc_sweep":
-            # No audit attempt here: ``record_action_attempt`` returns early for
-            # any kind outside ``_AUDIT_ACTIONS``, which conc_sweep is not in.
-            # The conc_sweep event carries these facts instead.
-            self.shared_state.record_conc_sweep(result_payload)
         # An upstream-PR candidate task that settles failed/empty never reaches
         # the promote branch that writes the terminal progress row; stamp
         # no_result_failed so the pump does not re-select it every tick.

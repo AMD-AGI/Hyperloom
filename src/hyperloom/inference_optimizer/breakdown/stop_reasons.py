@@ -54,7 +54,7 @@ SUCCESS_STOP_REASONS: frozenset[str] = frozenset(
         "global_converged",
         "time_exhausted",
         "max_ticks",
-        "sweep_done",
+        "cycle_end_done",
     }
 )
 
@@ -116,8 +116,7 @@ STOP_REASON_VOCAB: frozenset[str] = frozenset(
         "time_exhausted_during_prelude",
         "warm_replay_rollback_failed",
         INFERENCEX_CHECKOUT_MISSING_STOP_REASON,
-        "sweep_done",
-        "sweep_failed",
+        "cycle_end_done",
         "framework_agent_phase_done",
         # R7: cyclic phase machine exhausted leverage across macro-cycles.
         "global_converged",

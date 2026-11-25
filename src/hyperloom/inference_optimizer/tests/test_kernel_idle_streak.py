@@ -85,7 +85,7 @@ async def test_idle_kernel_winds_down_even_while_work_pending(kernel_coordinator
     _backdate_streak(st, phase_predicates._kernel_idle_min_seconds() + 1.0)
     await c.phase_machine.advance_phase_if_needed()
 
-    assert st.phase == ps.PHASE_SWEEP
+    assert st.phase == ps.PHASE_CYCLE_END
     row = st.phase_history[-1]
     assert row["reason"] == "kernel_no_more_leverage"
     assert row["evidence"]["evidence"] == "kernel_idle_no_progress"
@@ -156,7 +156,7 @@ async def test_orphaned_inline_step_stamp_still_winds_down(kernel_coordinator):
     _backdate_streak(st, phase_predicates._kernel_idle_min_seconds() + 1.0)
     await c.phase_machine.advance_phase_if_needed()
 
-    assert st.phase == ps.PHASE_SWEEP
+    assert st.phase == ps.PHASE_CYCLE_END
 
 
 @pytest.mark.asyncio

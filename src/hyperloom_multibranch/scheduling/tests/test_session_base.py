@@ -76,7 +76,7 @@ def test_a_fresh_session_freezes_the_base_resolved_for_its_workload_in_the_toolb
         "mi355x",
         LaunchWorkload.FIXED,
     )
-    assert (query.tp, query.ep, query.isl, query.osl, query.concurrencies) == (2, 1, 1024, 512, (8, 16, 32))
+    assert (query.tp, query.ep, query.isl, query.osl, query.concurrencies) == (2, 1, 1024, 512, (16,))
     frozen = frozen_base(tmp_path)
     assert frozen is not None and frozen.launch.query == query
     assert frozen.launch.model.path == WORKLOAD.model and frozen.launch.topology.tp == WORKLOAD.tp

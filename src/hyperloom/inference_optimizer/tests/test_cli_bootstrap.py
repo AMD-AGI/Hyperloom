@@ -48,8 +48,7 @@ def _args(**overrides):
         target_advisory=False,
         recipe_sediment=False,
         enable_conc_sweep=True,
-        conc_sweep_concs="1, bad, 4,,8",
-        conc_sweep_total_budget_sec=120,
+        conc_sweep_concs=(1, 4, 8),
         reference_script="",
     )
     base.update(overrides)
@@ -136,14 +135,13 @@ def test_seed_shared_state_populates_geak_and_cli_overrides(
     # One switch for the one phase.
     assert state.framework_agent_phase_enabled is False
     assert state.conc_sweep_concs == [1, 4, 8]
-    assert state.conc_sweep_total_budget_sec == 120
     assert state.base_launch_digest == "d" * 64
-    # The base is resolved for the graded concurrency and every rung of the enabled sweep.
+    # The base is resolved for the graded concurrency alone: the sweep's points never pick the recipe.
     assert resolved == {
         "session_dir": tmp_path,
         "framework": "vllm",
         "benchmark_mode": "synthetic",
-        "concurrencies": (64, 1, 4, 8),
+        "concurrencies": (64,),
     }
     assert json.loads((tmp_path / "state.json").read_text())["session_id"] == "session-1"
 
@@ -350,30 +348,6 @@ def test_manifest_preserves_quantized_model_identity(tmp_path: Path) -> None:
     assert built["model_path"].endswith("/quantized")
 
 
-def test_conc_sweep_parser(caplog) -> None:
-    assert cb._parse_conc_sweep_concs(_args(conc_sweep_concs=""), "synthetic") == [
-        256,
-        128,
-        64,
-        32,
-        16,
-        8,
-        4,
-        2,
-    ]
-    assert cb._parse_conc_sweep_concs(_args(conc_sweep_concs="bad,"), "synthetic") == [
-        256,
-        128,
-        64,
-        32,
-        16,
-        8,
-        4,
-        2,
-    ]
-    assert "ignoring non-integer CONC token" in caplog.text
-
-
 def test_read_failure_summary_and_final_summary_output(tmp_path: Path, capsys) -> None:
     assert cb._read_failure_summary(tmp_path) is None
     reports = tmp_path / "reports"
@@ -467,13 +441,13 @@ def test_a_resume_clears_the_previous_leg_terminal_without_touching_the_budget()
 
 def test_a_resume_lets_the_new_leg_run_its_own_close_sequence() -> None:
     """A leg closed by a signal keeps its non-CLOSE phase; the next leg must still close for itself."""
-    state = SharedState(session_id="s", start_ts="2026-08-01T00:00:00+00:00", phase="SWEEP")
+    state = SharedState(session_id="s", start_ts="2026-08-01T00:00:00+00:00", phase="CYCLE_END")
     state.set_stop_reason("signal")
     state.close_sequence_done = True
 
     cb._begin_resume_leg(state)
 
-    assert state.phase == "SWEEP"
+    assert state.phase == "CYCLE_END"
     assert state.close_sequence_done is False
 
 

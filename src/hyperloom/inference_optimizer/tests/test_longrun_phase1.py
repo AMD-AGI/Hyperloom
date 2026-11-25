@@ -28,7 +28,7 @@ def test_cycle_reloop_floor_uses_configured_benchmark_cap(monkeypatch):
     assert ps.cycle_reloop_min_remaining_sec(state) == 2100.0
 
 
-def _sweep_state(
+def _cycle_end_state(
     *,
     macro_cycle: int = 0,
     validated_gain: float = 5.0,
@@ -40,7 +40,7 @@ def _sweep_state(
     now = datetime.now(timezone.utc)
     st = SharedState(
         session_id="t",
-        phase=ps.PHASE_SWEEP,
+        phase=ps.PHASE_CYCLE_END,
         start_ts=(now - timedelta(hours=started_hours_ago)).isoformat(),
         max_minutes=max_minutes,
         macro_cycle=macro_cycle,
@@ -49,14 +49,13 @@ def _sweep_state(
         no_gain_cycle_streak=no_gain_streak,
         baseline_tput=1000.0,
     )
-    # sweep_done trigger: the concurrency ladder is the phase's sweep.
-    st.last_conc_sweep = {"status": "succeeded"}
+    st.cycle_end_settled_cycle = macro_cycle
     return st
 
 
-# compute_next_phase SWEEP back-edge
-def test_sweep_reloops_to_framework_agent_when_budget_and_leverage():
-    st = _sweep_state(macro_cycle=0, validated_gain=5.0, gain_at_cycle_start=0.0)
+# compute_next_phase CYCLE_END back-edge
+def test_cycle_end_reloops_to_framework_agent_when_budget_and_leverage():
+    st = _cycle_end_state(macro_cycle=0, validated_gain=5.0, gain_at_cycle_start=0.0)
     nxt = phase_transitions.compute_next_phase(st)
     assert nxt is not None
     target, reason, evidence = nxt
@@ -67,20 +66,15 @@ def test_sweep_reloops_to_framework_agent_when_budget_and_leverage():
     assert phase_transitions.replay_next_phase(evidence["predicate_inputs"]) == nxt
 
 
-def test_sweep_closes_on_failed_conc_sweep_even_when_reloop_available():
-    st = _sweep_state(macro_cycle=0, validated_gain=5.0, gain_at_cycle_start=0.0)
-    st.last_conc_sweep = {}
-    st.last_conc_sweep = {"status": "failed"}
-    target, reason, evidence = phase_transitions.compute_next_phase(st)
-    assert target == ps.PHASE_CLOSE
-    assert reason == "sweep_failed"
-    assert evidence.get("sweep_status") == "failed"
-    assert "loopback" not in evidence
+def test_an_unsettled_cycle_end_waits_even_when_reloop_available():
+    st = _cycle_end_state(macro_cycle=1, validated_gain=5.0, gain_at_cycle_start=0.0)
+    st.cycle_end_settled_cycle = 0
+    assert phase_transitions.compute_next_phase(st) is None
 
 
-def test_sweep_closes_when_globally_converged():
+def test_cycle_end_closes_when_globally_converged():
     # No gain this cycle + streak at 2 → effective 3 ≥ threshold.
-    st = _sweep_state(
+    st = _cycle_end_state(
         macro_cycle=2,
         validated_gain=5.0,
         gain_at_cycle_start=5.0,
@@ -93,9 +87,9 @@ def test_sweep_closes_when_globally_converged():
     assert evidence["reloop_blocked"] == "global_converged"
 
 
-def test_sweep_closes_when_insufficient_remaining():
+def test_cycle_end_closes_when_insufficient_remaining():
     # Long run (48h) but only ~10min remain → below the reloop floor.
-    st = _sweep_state(max_minutes=48 * 60, started_hours_ago=48 - 10 / 60.0)
+    st = _cycle_end_state(max_minutes=48 * 60, started_hours_ago=48 - 10 / 60.0)
     target, reason, evidence = phase_transitions.compute_next_phase(st)
     assert target == ps.PHASE_CLOSE
     assert reason == "time_exhausted"
@@ -103,13 +97,13 @@ def test_sweep_closes_when_insufficient_remaining():
     assert evidence["reloop_blocked"] == "insufficient_remaining"
 
 
-def test_a_run_without_framework_agent_closes_on_the_ladder_whatever_time_is_left():
+def test_a_run_without_framework_agent_closes_on_cycle_end_whatever_time_is_left():
     """No further cycle was possible, so the clock is not why the run ended."""
-    st = _sweep_state(max_minutes=48 * 60, started_hours_ago=48 - 10 / 60.0)
+    st = _cycle_end_state(max_minutes=48 * 60, started_hours_ago=48 - 10 / 60.0)
     target, reason, evidence = phase_transitions.compute_next_phase(
         st, flags=phase_predicates.PhaseFlags(optimize_enabled=False)
     )
-    assert (target, reason) == (ps.PHASE_CLOSE, "sweep_done")
+    assert (target, reason) == (ps.PHASE_CLOSE, "cycle_end_done")
     assert "terminal" not in evidence
 
 
@@ -145,26 +139,9 @@ def test_cycle_reloop_floor_covers_one_variant_grant():
     assert ps.cycle_reloop_min_remaining_sec(st) == 5400.0
 
 
-def test_sweep_reloops_when_conc_sweep_was_skipped_and_budget_remains():
-    """A skipped conc_sweep with budget left does not end the run."""
-    st = _sweep_state(macro_cycle=0, validated_gain=5.0, gain_at_cycle_start=0.0)
-    st.last_conc_sweep = {}
-    st.last_conc_sweep = {
-        "status": "skipped",
-        "was_skipped": True,
-        "skip_reason": "session_time_budget",
-    }
-    nxt = phase_transitions.compute_next_phase(st)
-    assert nxt is not None
-    target, reason, evidence = nxt
-    assert target == ps.PHASE_FRAMEWORK_AGENT
-    assert reason == "cycle_reloop"
-    assert evidence["loopback"] is True
-
-
 def test_short_bounded_run_reloops_when_budget_and_leverage_remain():
     # 12h bounded run: macro-loop is available even though budget accounting stays in short-run charge-back mode.
-    st = _sweep_state(
+    st = _cycle_end_state(
         max_minutes=12 * 60,
         started_hours_ago=1.0,
         validated_gain=5.0,
@@ -184,7 +161,7 @@ def test_short_bounded_run_reloops_when_budget_and_leverage_remain():
 
 def test_short_bounded_run_closes_when_insufficient_remaining():
     # 12h bounded run with ~10min left: below the 7800s reloop floor.
-    st = _sweep_state(max_minutes=12 * 60, started_hours_ago=12 - 10 / 60.0)
+    st = _cycle_end_state(max_minutes=12 * 60, started_hours_ago=12 - 10 / 60.0)
     reloop, ev = phase_transitions._reloop_decision(phase_predicates.workflow_predicate_inputs(st))
     assert reloop is False
     assert ev["reloop_blocked"] == "insufficient_remaining"
@@ -198,7 +175,7 @@ def test_short_bounded_run_closes_when_insufficient_remaining():
 
 def test_reloop_blocked_when_insufficient_budget_remains():
     # A 12h session prices a new cycle at the uniform 7800s benchmark grant.
-    st = _sweep_state(max_minutes=12 * 60, started_hours_ago=0.0)
+    st = _cycle_end_state(max_minutes=12 * 60, started_hours_ago=0.0)
     start_unix = datetime.fromisoformat(st.start_ts).timestamp()
 
     # Well inside budget (3h remaining for a 12h session).
@@ -219,7 +196,7 @@ def test_reloop_blocked_when_insufficient_budget_remains():
 
 
 def test_exactly_24h_is_long_run():
-    st = _sweep_state(max_minutes=24 * 60, started_hours_ago=1.0)
+    st = _cycle_end_state(max_minutes=24 * 60, started_hours_ago=1.0)
     assert ps.is_long_run(st) is True
     reloop, ev = phase_transitions._reloop_decision(phase_predicates.workflow_predicate_inputs(st))
     assert reloop is True
@@ -229,10 +206,10 @@ def test_exactly_24h_is_long_run():
 
 def test_long_and_unbounded_runs_are_long():
     # >= 24h bounded → long.
-    st_long = _sweep_state(max_minutes=24 * 60, started_hours_ago=1.0)
+    st_long = _cycle_end_state(max_minutes=24 * 60, started_hours_ago=1.0)
     assert ps.is_long_run(st_long) is True
     # Unbounded (max_minutes == 0) → long.
-    st_unbounded = _sweep_state(max_minutes=0, started_hours_ago=1.0)
+    st_unbounded = _cycle_end_state(max_minutes=0, started_hours_ago=1.0)
     assert ps.is_long_run(st_unbounded) is True
 
 
@@ -253,7 +230,7 @@ def test_per_cycle_budget_shrinks_phase_window():
 
     # Long bounded runs charge back (base * pct / denom); the per-cycle window caps the base, so a 6h cycle plans a
     # smaller EXPLORE than the 96h run.
-    denom = sum(budget[p] for p in ps.PHASE_NAMES[ps.phase_index(ps.PHASE_FRAMEWORK_AGENT) :] if budget[p] > 0)
+    denom = sum(budget.get(p, 0.0) for p in ps.PHASE_NAMES[ps.phase_index(ps.PHASE_FRAMEWORK_AGENT) :])
     rem_run = ps.phase_budget_remaining_seconds(whole_run, now_unix=now)
     rem_cycle = ps.phase_budget_remaining_seconds(per_cycle, now_unix=now)
     # whole-run base = full 96h session; per-cycle base = capped to the 6h window.
@@ -266,9 +243,7 @@ def test_long_run_chargeback_cap_and_tail():
     now = 1_000_000.0
     pct = ps.DEFAULT_PHASE_BUDGET_PCT[ps.PHASE_FRAMEWORK_AGENT]
     denom = sum(
-        ps.DEFAULT_PHASE_BUDGET_PCT[p]
-        for p in ps.PHASE_NAMES[ps.phase_index(ps.PHASE_FRAMEWORK_AGENT) :]
-        if ps.DEFAULT_PHASE_BUDGET_PCT[p] > 0
+        ps.DEFAULT_PHASE_BUDGET_PCT.get(p, 0.0) for p in ps.PHASE_NAMES[ps.phase_index(ps.PHASE_FRAMEWORK_AGENT) :]
     )
     # A 48h long bounded run with a 24h cycle window: early on, remaining session (>24h) exceeds the window, so the
     # window caps the charge-back base.
@@ -354,23 +329,21 @@ async def test_coordinator_applies_loopback(cyclic_coordinator):
     c = cyclic_coordinator
     st = c.shared_state
     now = datetime.now(timezone.utc)
-    st.phase = ps.PHASE_SWEEP
+    st.phase = ps.PHASE_CYCLE_END
     st.start_ts = (now - timedelta(hours=1)).isoformat()
     st.max_minutes = 96 * 60
     st.macro_cycle = 0
     st.cumulative_gain_validated = 7.0
     st.gain_at_cycle_start = 0.0
-    st.last_conc_sweep = {"status": "succeeded"}
-    st.last_conc_sweep = {"status": "succeeded"}
+    st.cycle_end_settled_cycle = 0
 
     await c.phase_machine.advance_phase_if_needed()
 
     # Reloop targets the highest-leverage layer (FRAMEWORK enabled by default).
     assert st.phase == ps.PHASE_FRAMEWORK_AGENT
     assert st.macro_cycle == 1
-    # Per-cycle sweep markers cleared so the new cycle's SWEEP runs fresh.
-    assert st.last_conc_sweep == {}
-    assert st.last_conc_sweep == {}
+    # The new cycle's CYCLE_END has not settled yet.
+    assert st.cycle_end_settled_cycle == 0
     # Gain anchored for the new cycle; gained this cycle → streak reset.
     assert st.gain_at_cycle_start == pytest.approx(7.0)
     assert st.no_gain_cycle_streak == 0
@@ -385,14 +358,14 @@ async def test_coordinator_converged_close_sets_stop_reason(cyclic_coordinator):
     c = cyclic_coordinator
     st = c.shared_state
     now = datetime.now(timezone.utc)
-    st.phase = ps.PHASE_SWEEP
+    st.phase = ps.PHASE_CYCLE_END
     st.start_ts = (now - timedelta(hours=1)).isoformat()
     st.max_minutes = 96 * 60
     st.macro_cycle = 3
     st.cumulative_gain_validated = 5.0
     st.gain_at_cycle_start = 5.0  # no gain this cycle
     st.no_gain_cycle_streak = 2  # effective 3 ≥ threshold
-    st.last_conc_sweep = {"status": "succeeded"}
+    st.cycle_end_settled_cycle = 3
 
     await c.phase_machine.advance_phase_if_needed()
 
@@ -405,8 +378,8 @@ async def test_coordinator_converged_close_sets_stop_reason(cyclic_coordinator):
 
 
 # Regression — short-run path now uses macro-loop while budget remains.
-def test_regression_short_run_sweep_evidence_carries_loopback():
-    st = _sweep_state(max_minutes=12 * 60)
+def test_regression_short_run_cycle_end_evidence_carries_loopback():
+    st = _cycle_end_state(max_minutes=12 * 60)
     target, reason, evidence = phase_transitions.compute_next_phase(st)
     assert (target, reason) == (ps.PHASE_FRAMEWORK_AGENT, "cycle_reloop")
     assert evidence["loopback"] is True
@@ -417,7 +390,7 @@ def test_regression_short_run_sweep_evidence_carries_loopback():
 
 
 def test_unbounded_run_uses_absolute_floor():
-    st = _sweep_state(max_minutes=0, started_hours_ago=0.0)
+    st = _cycle_end_state(max_minutes=0, started_hours_ago=0.0)
     _, ev = phase_transitions._reloop_decision(phase_predicates.workflow_predicate_inputs(st))
     # Unbounded run (max_minutes=0): effective floor == absolute floor (10800).
     assert ev["min_remaining_sec_effective"] == pytest.approx(10800.0, abs=1.0)
@@ -425,7 +398,7 @@ def test_unbounded_run_uses_absolute_floor():
 
 def test_short_bounded_run_scales_floor():
     # A 2h session caps the 7800s benchmark grant at half its budget (3600s).
-    st = _sweep_state(max_minutes=2 * 60, started_hours_ago=0.0)
+    st = _cycle_end_state(max_minutes=2 * 60, started_hours_ago=0.0)
     _, ev = phase_transitions._reloop_decision(phase_predicates.workflow_predicate_inputs(st))
     assert ev["min_remaining_sec_effective"] == pytest.approx(3600.0, abs=1.0)
 
@@ -433,14 +406,14 @@ def test_short_bounded_run_scales_floor():
 def test_very_short_run_caps_the_floor_at_half_the_budget():
     """A run too short to fund a variant round must not read as exhausted at tick one."""
     # A 30min session caps the benchmark grant at half its budget (900s).
-    st = _sweep_state(max_minutes=30, started_hours_ago=0.0)
+    st = _cycle_end_state(max_minutes=30, started_hours_ago=0.0)
     _, ev = phase_transitions._reloop_decision(phase_predicates.workflow_predicate_inputs(st))
     assert ev["min_remaining_sec_effective"] == pytest.approx(900.0, abs=1.0)
 
 
 def test_long_bounded_run_caps_at_absolute_floor():
     # 48h session: effective = min(10800, 48*3600*0.15) = min(10800, 25920) = 10800s.
-    st = _sweep_state(max_minutes=48 * 60, started_hours_ago=0.0)
+    st = _cycle_end_state(max_minutes=48 * 60, started_hours_ago=0.0)
     _, ev = phase_transitions._reloop_decision(phase_predicates.workflow_predicate_inputs(st))
     assert ev["min_remaining_sec_effective"] == pytest.approx(10800.0, abs=1.0)
 
@@ -459,7 +432,7 @@ def test_malformed_env_override_raises(monkeypatch):
 
 
 def test_evidence_keys_present():
-    st = _sweep_state(max_minutes=12 * 60, started_hours_ago=0.0)
+    st = _cycle_end_state(max_minutes=12 * 60, started_hours_ago=0.0)
     _, ev = phase_transitions._reloop_decision(phase_predicates.workflow_predicate_inputs(st))
     for key in (
         "macro_cycle",

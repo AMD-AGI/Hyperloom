@@ -12,7 +12,13 @@ from hyperloom_common.coerce import optional_positive_float, to_float, to_unix
 from hyperloom_common.env import env_float as _env_float, env_int as _env_int
 from ..state.shared_state import is_valid_escalate_hint
 from . import machine_state as _phase_state
-from .phase_chain import PHASE_ENABLEMENT, PHASE_FRAMEWORK_AGENT, PHASE_KERNEL_AGENT, PHASE_PRELUDE, PHASE_SWEEP
+from .phase_chain import (
+    PHASE_CYCLE_END,
+    PHASE_ENABLEMENT,
+    PHASE_FRAMEWORK_AGENT,
+    PHASE_KERNEL_AGENT,
+    PHASE_PRELUDE,
+)
 
 
 def _cumulative_gain_validated(state: Any) -> float:
@@ -24,7 +30,7 @@ def _cumulative_gain_validated(state: Any) -> float:
 
 
 def _kernel_idle_max_ticks() -> int:
-    """Consecutive no-work KERNEL_AGENT ticks before winding down to SWEEP."""
+    """Consecutive no-work KERNEL_AGENT ticks before winding down to CYCLE_END."""
     val = _env_int("INFERENCE_OPTIMIZER_KERNEL_IDLE_MAX_TICKS", default=3)
     return val if val >= 1 else 3
 
@@ -111,7 +117,7 @@ def _base_workflow_predicate_inputs(
         "budget": None,
         "plateau": None,
         "hint": hint,
-        "sweep_result": None,
+        "cycle_end_result": None,
         "macro_cycle": state.macro_cycle,
         "run_flags": {
             "kernel_enabled": bool(flags.kernel_enabled),
@@ -205,15 +211,11 @@ def _kernel_predicate_inputs(
     return pending, plateau, _budget_predicate_inputs(state, now_unix=now_unix)
 
 
-def sweep_predicate_inputs(
+def cycle_end_predicate_inputs(
     state: Any,
     *,
     now_unix: float,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
-    last_conc = state.last_conc_sweep or {}
-    if not isinstance(last_conc, dict):
-        last_conc = {}
-    summary = last_conc.get("summary") if isinstance(last_conc.get("summary"), dict) else {}
     cycle = int(state.macro_cycle or 0)
     saturated = state.saturated_directions or {}
     saturated_facts = (
@@ -222,12 +224,7 @@ def sweep_predicate_inputs(
         else {}
     )
     result = {
-        "status": str(last_conc.get("status") or "").lower(),
-        "was_skipped": bool(last_conc.get("was_skipped")),
-        "budget_exhausted": bool(last_conc.get("budget_exhausted")),
-        "skip_reason": str(last_conc.get("skip_reason") or ""),
-        "successful_pairs": int(summary.get("successful_pairs") or 0),
-        "summary_present": bool(summary),
+        "settled": int(state.cycle_end_settled_cycle) == cycle,
         "reloop": {
             "current_gain_pct": _cumulative_gain_validated(state),
             "gain_at_cycle_start_pct": to_float(state.gain_at_cycle_start) or 0.0,
@@ -239,27 +236,7 @@ def sweep_predicate_inputs(
             "min_remaining_sec": _phase_state.cycle_reloop_min_remaining_sec(state),
         },
     }
-    budget = _budget_predicate_inputs(state, now_unix=now_unix)
-    if not result["status"]:
-        _extend_budget_to_sweep_grant(budget, state, now_unix=now_unix)
-    return result, budget
-
-
-def _extend_budget_to_sweep_grant(budget: dict[str, Any], state: Any, *, now_unix: float) -> None:
-    """Widen SWEEP's budget to cover the conc_sweep it granted and is still waiting on.
-
-    SWEEP's only work is the sweep it enqueued on entry, whose budget is already clamped to the session clock. The
-    per-entry budget is a share of the remaining session (5% of three hours is nine minutes) and would otherwise cancel
-    that sweep mid-ladder. The widened numbers are what the predicate compares, so a replay of the frozen inputs reaches
-    the same decision.
-    """
-    grant_left = (to_float(state.conc_sweep_granted_until_unix) or 0.0) - float(now_unix)
-    if grant_left <= 0.0:
-        return
-    remaining = to_float(budget.get("remaining_sec"))
-    if remaining is not None and remaining < grant_left:
-        budget["remaining_sec"] = grant_left
-        budget["current_balance"] = grant_left
+    return result, _budget_predicate_inputs(state, now_unix=now_unix)
 
 
 def workflow_predicate_inputs(
@@ -299,8 +276,8 @@ def workflow_predicate_inputs(
             now_unix=frozen_now,
             kernel_work_in_flight=in_flight.kernel,
         )
-    elif current == PHASE_SWEEP:
-        inputs["sweep_result"], inputs["budget"] = sweep_predicate_inputs(state, now_unix=frozen_now)
+    elif current == PHASE_CYCLE_END:
+        inputs["cycle_end_result"], inputs["budget"] = cycle_end_predicate_inputs(state, now_unix=frozen_now)
     return inputs
 
 
