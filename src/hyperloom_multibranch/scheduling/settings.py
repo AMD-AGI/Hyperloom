@@ -34,6 +34,8 @@ SHARE_MINUTES = 63.0
 AGENT_PORT = 31100
 #: The axis an AgentX session is graded on unless the run names another.
 DEFAULT_AGENTX_OBJECTIVE = AgentXObjective.P50_INTERACTIVITY
+#: The K an AgentX specialist branch opens at when the judge names none, within ``max_k_per_branch``.
+AGENTX_OPEN_K = 2
 #: The longest boot budget a run may give its tests' servers: six hours, past any checkpoint load a test would wait for.
 #: The round raises the serving framework's own ready timeout above the budget (``inference_suite.compose``), so the
 #: whole range buys the boot time it promises.
@@ -134,6 +136,14 @@ class Workload:
         return 1 if self.inferencex is None else 2
 
     @property
+    def open_k(self) -> int:
+        """The K a specialist branch the judge opens runs at when the judge names none: :data:`AGENTX_OPEN_K` for
+        AgentX, whose long tests leave a branch's one slot idle while its specialist thinks, so its branches together
+        may hold more K than tests run at once and the queue holds the excess; 1 for InferenceX."""
+
+        return AGENTX_OPEN_K if self.inferencex is None else 1
+
+    @property
     def bundles_merges(self) -> bool:
         """Whether a merge round tests the commits it is offered together, in one merge test, before it tests them one
         by one. An AgentX merge test holds one of a few large slots for its whole trace window, so one test per commit
@@ -224,6 +234,7 @@ def session_early_stop(environ: Mapping[str, str]) -> EarlyStopMode:
 
 
 __all__ = [
+    "AGENTX_OPEN_K",
     "AGENT_PORT",
     "DEFAULT_AGENTX_OBJECTIVE",
     "DOSSIER_MINUTES",
