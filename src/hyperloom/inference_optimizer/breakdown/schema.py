@@ -204,8 +204,8 @@ class V6WorkflowMetadata(TypedDict, total=False):
 class V6Metadata(TypedDict, total=False):
     """V6 task identity, configuration, versions, and trace entrypoint.
 
-    ``base_launch`` is the ``source``, ``image`` and ``topology`` of the session's frozen ``base_launch.json``, as
-    written; absent for a session that froze none.
+    ``base_launch`` is the ``source``, ``image`` and ``topology`` of the session's frozen ``base_launch.json``, with
+    the locations in ``source`` stripped of credentials; absent for a session that froze none.
     """
 
     exported_at_utc: str

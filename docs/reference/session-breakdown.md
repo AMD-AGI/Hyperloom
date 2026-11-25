@@ -357,17 +357,24 @@ per external tool.
 local trace jsonl is always written regardless.
 
 `metadata.base_launch` — the `source`, `image` and `topology` of the session's
-frozen `base_launch.json`, as written; the base's args and env stay in the file.
-`source` says where the base was resolved from: for an InferenceX recipe, `kind`
+frozen `base_launch.json`; the base's args and env stay in the file. `source`
+says where the base was resolved from, by `kind`: for an InferenceX recipe,
 `inferencex`, the `repo` and `commit` it was read at, the recipe `path`, the
 `locator` of the variant it bound (`<recipe>:override_tp4_c32`) and the sha256 of
-every file read (`files`). `image.recipe` is the image reference the recipe
-named, with its digest, and `topology` the TP and EP every round runs at. A
-consumer can match the session against InferenceX's own runs of the same recipe
-on these. A multi-branch breakdown carries the same block, from
-`MB-toolbox/base_launch.json`. The key is absent for a session that froze no
-base, and for one whose file cannot be read or no longer matches its digest
-(single-lineage: named on `metadata.warnings`).
+every file read (`files`); a cookbook, a recipe API, the default table, a shipped
+script or an operator's `--reference-script` fills the fields it has and leaves
+the rest null. Every location in `source` (`repo`, `path`, `entry`, `locator` and
+the keys of `files`) is reported without a URL's userinfo or a recognizable
+credential value, since an operator's file is recorded as given. `image.recipe`
+is the image reference the base named, with its digest, and `topology` the TP
+and EP every round runs at. A consumer can match the session against
+InferenceX's own runs of the same recipe on these. A multi-branch breakdown
+carries the same block, from `MB-toolbox/base_launch.json`. The key is absent
+for a session that froze no base, and for one whose file cannot be read, is no
+base launch or fails its digest check (single-lineage: named on
+`metadata.warnings`). That check covers what the base launches (framework,
+entrypoint, model, topology, args, env, golden acceptance and client), not
+`source` or `image`.
 
 ---
 

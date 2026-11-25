@@ -61,7 +61,7 @@ from hyperloom_multibranch.blackboard.codec import encode
 from hyperloom_multibranch.blackboard.knowledge.recipe_writeback import FinalRecipe
 from hyperloom_multibranch.blackboard.knowledge.stranded_spans import stranded_spans
 
-logger = logging.getLogger(__name__)
+log = logging.getLogger(__name__)
 
 SCHEMA_VERSION = "multibranch-2"
 EXPORTER_VERSION = "hyperloom-multibranch-breakdown-2"
@@ -232,17 +232,17 @@ def agent_resources(runner_dir: Path | None) -> dict[str, object]:
     return found
 
 
-def frozen_base(path: Path | None) -> dict[str, object]:
-    """The session's frozen base at ``path`` as ``base_launch``: where it was resolved from, its image and its
-    topology. No file gives no key; neither does one that is no base launch or no longer matches its digest, which is
-    logged."""
+def base_launch_record(toolbox_dir: Path | None) -> dict[str, object]:
+    """The base the session froze in ``toolbox_dir`` as ``base_launch``: where it was resolved from, its image and its
+    topology. No file gives no key; neither does one that cannot be read, is no base launch or fails its digest check,
+    which is logged."""
 
-    if path is None:
+    if toolbox_dir is None:
         return {}
     try:
-        found = base_launch_metadata(path)
+        found = base_launch_metadata(toolbox_dir)
     except (OSError, ValueError):
-        logger.warning("breakdown: the base launch at %s cannot be read; no base_launch", path, exc_info=True)
+        log.warning("breakdown: the base launch in %s cannot be read; no base_launch", toolbox_dir, exc_info=True)
         return {}
     return {} if found is None else {"base_launch": found}
 
@@ -280,14 +280,14 @@ class SessionPlace:
     directory; ``code_revision`` is the source revision the session's manifest recorded at start, which a process that
     exports another run's session, such as ``final-only``, does not have in its environment, and ``claw_session_id``
     the Claw session the manifest records, which the breakdown names when the exporting process is given none.
-    ``base_launch`` is the session's frozen base launch file.
+    ``toolbox_dir`` is the directory the session froze its base launch in.
     """
 
     session_dir: Path | None = None
     runner_dir: Path | None = None
     code_revision: str | None = None
     claw_session_id: str | None = None
-    base_launch: Path | None = None
+    toolbox_dir: Path | None = None
 
 
 def build_breakdown(
@@ -318,7 +318,7 @@ def build_breakdown(
             "session": session_metadata(snapshot, os.environ, place.code_revision, place.claw_session_id),
             **hosted_records(place.session_dir),
             **agent_resources(place.runner_dir),
-            **frozen_base(place.base_launch),
+            **base_launch_record(place.toolbox_dir),
         },
         "baseline": encode(snapshot.baseline),
         "lineage": encode(snapshot.lineage),

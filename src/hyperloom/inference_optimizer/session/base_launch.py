@@ -13,7 +13,9 @@ import json
 from pathlib import Path
 from typing import Any
 
+from hyperloom.common.env_safety import redact_secret_values
 from hyperloom.common.session_files import shared_options
+from hyperloom.common.url_userinfo import strip_url_userinfo
 from hyperloom_common.io import atomic_write_json
 from inference_suite.contracts import BaseLaunch
 
@@ -45,19 +47,42 @@ def read_base_launch(session_dir: Path) -> BaseLaunch | None:
     return BaseLaunch.from_document(json.loads(text))
 
 
-def base_launch_metadata(path: Path) -> dict[str, Any] | None:
-    """The :data:`BASE_LAUNCH_METADATA_KEYS` of the frozen base at ``path``, or ``None`` when none was frozen there.
+def base_launch_metadata(session_dir: Path) -> dict[str, Any] | None:
+    """The :data:`BASE_LAUNCH_METADATA_KEYS` of the base frozen in ``session_dir``, or ``None`` when it froze none.
+
+    Every location in ``source`` is reported without a URL's userinfo or a recognizable credential value: an
+    operator's ``--reference-script`` is recorded as given, and may be a URL that embeds one.
 
     Raises:
         OSError: The file exists and cannot be read.
-        ValueError: It is no base launch, or its content no longer matches its digest.
+        ValueError: It is no base launch, or fails its digest check (which covers what the base launches, not
+            ``source`` or ``image``).
     """
-    try:
-        text = Path(path).read_text(encoding="utf-8")
-    except FileNotFoundError:
+    base = read_base_launch(session_dir)
+    if base is None:
         return None
-    document = BaseLaunch.from_document(json.loads(text)).to_document()
-    return {key: document[key] for key in BASE_LAUNCH_METADATA_KEYS}
+    document = base.to_document()
+    found = {key: document[key] for key in BASE_LAUNCH_METADATA_KEYS}
+    found["source"] = _redacted_source(found["source"])
+    return found
+
+
+#: The ``source`` fields that name a location: a repository, a file, a variant or an API response.
+_SOURCE_LOCATIONS = ("repo", "path", "entry", "locator")
+
+
+def _redacted_location(location: Any) -> Any:
+    return redact_secret_values(strip_url_userinfo(location)) if isinstance(location, str) else location
+
+
+def _redacted_source(source: Any) -> Any:
+    if not isinstance(source, dict):
+        return source
+    redacted = {key: _redacted_location(value) if key in _SOURCE_LOCATIONS else value for key, value in source.items()}
+    files = source.get("files")
+    if isinstance(files, dict):
+        redacted["files"] = {_redacted_location(path): sha256 for path, sha256 in files.items()}
+    return redacted
 
 
 def shared_state_fields(base: BaseLaunch | None) -> dict[str, Any]:

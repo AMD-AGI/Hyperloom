@@ -363,6 +363,65 @@ def test_a_base_launch_that_no_longer_matches_its_digest_is_a_warning_not_a_bloc
     assert any(w.startswith("base_launch: ") for w in out["metadata"]["warnings"])
 
 
+_IX_RECIPE = "inferencex-e2e/benchmarks/single_node/srt-slurm-recipes/dsv41flash/vllm/mi300x-fp4-mtp/agentic.yaml"
+_IX_SOURCE = {
+    "kind": "inferencex",
+    "repo": "https://github.com/SemiAnalysisAI/InferenceX",
+    "commit": "c22b4b25a04932dca1b69bfc2cad70e1d098c5aa",
+    "api": None,
+    "path": _IX_RECIPE,
+    "entry": "dsv41flash-fp4-mi300x-vllm-agentic-dspark",
+    "locator": "benchmarks/single_node/srt-slurm-recipes/dsv41flash/vllm/mi300x-fp4-mtp/agentic.yaml:override_tp4_c32",
+    "strategy": None,
+    "files": {_IX_RECIPE: "6b" * 32},
+    "tools": {"srt-slurm": "acfb4dcc3bd48fd6a1e7b615e849e7954c0c3852"},
+}
+_IX_IMAGE = {
+    "assumed_release": None,
+    "framework_version": "0.5.6",
+    "recipe": "lmsysorg/sglang:v0.5.6@sha256:" + "14" * 32,
+    "run": None,
+    "version_basis": "tag",
+}
+
+
+def _frozen_with(session_dir, **parts) -> None:
+    """Freeze a base whose ``source`` and ``image`` read as ``parts`` say; neither is under the base's digest."""
+    path = write_base_launch(session_dir, _frozen_base())
+    document = json.loads(path.read_text(encoding="utf-8"))
+    path.write_text(json.dumps({**document, **parts}), encoding="utf-8")
+
+
+def test_an_inferencex_base_reports_its_recipe_commit_variant_files_and_image(tmp_path):
+    _frozen_with(tmp_path, source=_IX_SOURCE, image=_IX_IMAGE)
+
+    reported = ex.build(tmp_path)["metadata"]["base_launch"]
+
+    assert (reported["source"], reported["image"]) == (_IX_SOURCE, _IX_IMAGE)
+
+
+def test_a_reference_script_url_is_reported_without_its_credentials(tmp_path):
+    url = "https://bob:hunter2@example.com/launch.sh?token=abc123def456"
+    source = {**_frozen_base().to_document()["source"], "kind": "user_file", "path": url, "files": {url: "ab" * 32}}
+    _frozen_with(tmp_path, source=source)
+
+    reported = ex.build(tmp_path)["metadata"]["base_launch"]["source"]
+
+    text = json.dumps(reported)
+    assert not any(word in text for word in ("bob", "hunter2", "abc123def456"))
+    assert reported["path"].startswith("https://example.com/launch.sh?token=")
+    assert list(reported["files"]) == [reported["path"]]
+
+
+def test_a_base_launch_that_cannot_be_read_is_a_warning_not_a_block(tmp_path):
+    (tmp_path / "base_launch.json").mkdir()
+
+    out = ex.build(tmp_path)
+
+    assert "base_launch" not in out["metadata"]
+    assert any(w.startswith("base_launch: ") for w in out["metadata"]["warnings"])
+
+
 def test_a_breakdown_of_a_session_no_sweep_ran_for_has_no_sweep_section(tmp_path):
     assert ex.CONC_SWEEP_SECTION not in ex.build(tmp_path)
 

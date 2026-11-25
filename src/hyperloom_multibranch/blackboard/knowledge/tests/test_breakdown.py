@@ -177,21 +177,20 @@ def test_the_metadata_reports_where_the_frozen_base_came_from_its_image_and_topo
     snapshot: BlackboardSnapshot, tmp_path: Path
 ) -> None:
     base = frozen_base_launch()
-    path = write_base_launch(tmp_path, base)
+    write_base_launch(tmp_path, base)
     document = base.to_document()
 
-    metadata = build_breakdown(snapshot, place=SessionPlace(base_launch=path))["metadata"]
+    metadata = build_breakdown(snapshot, place=SessionPlace(toolbox_dir=tmp_path))["metadata"]
 
     assert metadata["base_launch"] == {key: document[key] for key in ("source", "image", "topology")}
 
 
 def test_no_frozen_base_gives_no_base_launch(snapshot: BlackboardSnapshot, tmp_path: Path) -> None:
     assert "base_launch" not in build_breakdown(snapshot)["metadata"]
-    missing = SessionPlace(base_launch=tmp_path / "base_launch.json")
-    assert "base_launch" not in build_breakdown(snapshot, place=missing)["metadata"]
+    assert "base_launch" not in build_breakdown(snapshot, place=SessionPlace(toolbox_dir=tmp_path))["metadata"]
 
 
-def test_a_base_that_no_longer_matches_its_digest_is_logged_and_left_out(
+def test_a_base_that_fails_its_digest_check_is_logged_and_left_out(
     snapshot: BlackboardSnapshot, tmp_path: Path, caplog: pytest.LogCaptureFixture
 ) -> None:
     path = write_base_launch(tmp_path, frozen_base_launch())
@@ -199,7 +198,18 @@ def test_a_base_that_no_longer_matches_its_digest_is_logged_and_left_out(
     tampered["digest"] = tampered["digest"][:-8] + "00000000"
     path.write_text(json.dumps(tampered), encoding="utf-8")
 
-    metadata = build_breakdown(snapshot, place=SessionPlace(base_launch=path))["metadata"]
+    metadata = build_breakdown(snapshot, place=SessionPlace(toolbox_dir=tmp_path))["metadata"]
+
+    assert "base_launch" not in metadata
+    assert any("cannot be read" in r.getMessage() for r in caplog.records)
+
+
+def test_a_base_that_cannot_be_read_is_logged_and_left_out(
+    snapshot: BlackboardSnapshot, tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    (tmp_path / "base_launch.json").mkdir()
+
+    metadata = build_breakdown(snapshot, place=SessionPlace(toolbox_dir=tmp_path))["metadata"]
 
     assert "base_launch" not in metadata
     assert any("cannot be read" in r.getMessage() for r in caplog.records)
