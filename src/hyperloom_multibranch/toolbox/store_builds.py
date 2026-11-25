@@ -20,7 +20,6 @@ import asyncio
 import logging
 import statistics
 from collections.abc import Callable, Iterator, Mapping
-from dataclasses import dataclass
 
 from hyperloom.contracts.measurement import TestRequest
 from hyperloom.measure.jit.native.key import BuildInputs
@@ -36,23 +35,22 @@ logger = logging.getLogger(__name__)
 Plan = Callable[[TestRequest, object], tuple[BuildInputs, ...]]
 
 
-@dataclass(frozen=True)
-class BuildSite:
-    """The recipe of each component a session can build."""
-
-    recipes: Mapping[str, NativeRecipe]
-
-
 class StoreBuildDriver:
     """:class:`~hyperloom_multibranch.toolbox.pending_builds.BuildDriver` over a :class:`BuildStore`.
 
-    ``runner`` gives the build of one key; it must compile out of this process.
+    ``recipes`` is the recipe of each component a session can build. ``runner`` gives the build of one key; it must
+    compile out of this process.
     """
 
     def __init__(
-        self, store: BuildStore, signer: Signer, site: BuildSite, plan: Plan, runner: Callable[[BuildInputs], Build]
+        self,
+        store: BuildStore,
+        signer: Signer,
+        recipes: Mapping[str, NativeRecipe],
+        plan: Plan,
+        runner: Callable[[BuildInputs], Build],
     ) -> None:
-        self._store, self._signer, self._site, self._plan, self._runner = store, signer, site, plan, runner
+        self._store, self._signer, self._recipes, self._plan, self._runner = store, signer, recipes, plan, runner
 
     def needs(self, request: TestRequest, environment: object) -> tuple[BuildInputs, ...]:
         """The inputs of each build the stack needs, as planned."""
@@ -73,7 +71,7 @@ class StoreBuildDriver:
         """The median wall time of the ready builds of ``inputs``' component on its image, else the recipe budget."""
 
         walls = [record.wall_seconds for record in self._prior(inputs)]
-        return float(statistics.median(walls)) if walls else float(self._site.recipes[inputs.component].budget_sec)
+        return float(statistics.median(walls)) if walls else float(self._recipes[inputs.component].budget_sec)
 
     async def ensure(self, inputs: BuildInputs) -> Ensured:
         build = self._runner(inputs)
@@ -85,4 +83,4 @@ class StoreBuildDriver:
         return self._store.ready_records(inputs.component, inputs.image_digest)
 
 
-__all__ = ["BuildSite", "Plan", "StoreBuildDriver"]
+__all__ = ["Plan", "StoreBuildDriver"]
