@@ -217,6 +217,117 @@ def test_probe_torch_abi_failure():
     assert info["is_rocm"] is False
 
 
+def _torch_211_rocm10(hip="10.0.0"):
+    import json
+
+    from hyperloom.orchestrator.enablement.runtime.build_utils import ABI_PROBE_MARKER
+
+    facts = {"torch_version": "2.11.0+rocm10.0.0", "hip_version": hip, "python_version": "3.12.3"}
+    return ABI_PROBE_MARKER + json.dumps(facts)
+
+
+def test_probe_torch_abi_reads_the_marked_line_among_stray_stdout():
+    stdout = "\n".join(
+        [
+            "WARNING: ROCm 10 preview build, some features are experimental",
+            '{"not": "the facts"}',
+            _torch_211_rocm10(),
+            "[aiter] import hook loaded",
+        ]
+    )
+
+    def _run(argv, **kw):
+        return _completed(stdout=stdout + "\n", stderr="UserWarning: something\n")
+
+    info = probe_torch_abi("/opt/venv/bin/python3", run=_run)
+    assert info == {
+        "torch_version": "2.11.0+rocm10.0.0",
+        "hip_version": "10.0.0",
+        "python_version": "3.12.3",
+        "is_rocm": True,
+    }
+
+
+def test_probe_torch_abi_takes_a_rocm_version_label_without_torch_version_hip():
+    def _run(argv, **kw):
+        return _completed(stdout=_torch_211_rocm10(hip="") + "\n")
+
+    info = probe_torch_abi("python3", run=_run)
+    assert info["is_rocm"] is True
+    assert info["torch_version"] == "2.11.0+rocm10.0.0"
+
+
+def test_probe_torch_abi_cuda_torch_is_not_rocm():
+    import json
+
+    from hyperloom.orchestrator.enablement.runtime.build_utils import ABI_PROBE_MARKER
+
+    line = ABI_PROBE_MARKER + json.dumps(
+        {"torch_version": "2.11.0+cu130", "hip_version": "", "python_version": "3.12.3"}
+    )
+
+    def _run(argv, **kw):
+        return _completed(stdout=line + "\n")
+
+    info = probe_torch_abi("python3", run=_run)
+    assert info["is_rocm"] is False
+    assert info["torch_version"] == "2.11.0+cu130"
+    assert "error" not in info
+
+
+def test_probe_torch_abi_failure_carries_the_stderr_tail():
+    stderr = (
+        "Traceback (most recent call last):\n"
+        + "x\n" * 2000
+        + ("ImportError: libamdhip64.so.10: cannot open shared object file: No such file or directory\n")
+    )
+
+    def _run(argv, **kw):
+        return _completed(returncode=1, stdout="", stderr=stderr)
+
+    info = probe_torch_abi("/scratch/hl-venv/bin/python", run=_run)
+    assert info["is_rocm"] is False
+    assert info["torch_version"] == ""
+    assert "rc=1" in info["error"]
+    assert "/scratch/hl-venv/bin/python" in info["error"]
+    assert "libamdhip64.so.10: cannot open shared object file" in info["error"]
+    assert len(info["error"]) < 1000
+
+
+def test_probe_torch_abi_unmarked_garbage_is_a_failure_with_its_output():
+    def _run(argv, **kw):
+        return _completed(stdout="torch banner\n", stderr="")
+
+    info = probe_torch_abi("python3", run=_run)
+    assert info["is_rocm"] is False
+    assert "torch banner" in info["error"]
+
+
+def test_probe_torch_abi_timeout_and_missing_interpreter_are_reported():
+    def _timeout(argv, **kw):
+        raise subprocess.TimeoutExpired(cmd=argv, timeout=kw["timeout"])
+
+    def _missing(argv, **kw):
+        raise FileNotFoundError(2, "No such file or directory", argv[0])
+
+    assert "timed out" in probe_torch_abi("python3", run=_timeout)["error"]
+    assert "could not start" in probe_torch_abi("/nope/python", run=_missing)["error"]
+
+
+def test_probe_torch_abi_passes_env_and_marks_its_output():
+    seen = {}
+
+    def _run(argv, **kw):
+        seen.update(kw, argv=argv)
+        return _completed(stdout=_torch_211_rocm10() + "\n")
+
+    probe_torch_abi("python3", run=_run, env={"LD_LIBRARY_PATH": "/opt/rocm/lib"})
+    assert seen["env"] == {"LD_LIBRARY_PATH": "/opt/rocm/lib"}
+    from hyperloom.orchestrator.enablement.runtime.build_utils import ABI_PROBE_MARKER
+
+    assert ABI_PROBE_MARKER in seen["argv"][2]
+
+
 # sort_tags_desc
 
 
@@ -294,3 +405,27 @@ def test_the_vllm_rocm_probe_fails_when_the_platform_check_raises(tmp_path):
     assert probe.returncode == 1
     assert probe.stdout == ""
     assert probe.stderr.splitlines()[-1] == "RuntimeError: platform check broke"
+
+
+def test_probe_torch_abi_runs_against_a_torch_that_prints_on_import(tmp_path):
+    torch_pkg = tmp_path / "torch"
+    torch_pkg.mkdir()
+    (torch_pkg / "__init__.py").write_text(
+        "print('torch: ROCm 10 runtime loaded')\nfrom . import version\n__version__ = '2.11.0+rocm10.0.0'\n",
+        encoding="utf-8",
+    )
+    (torch_pkg / "version.py").write_text("__version__ = '2.11.0+rocm10.0.0'\nhip = '10.0.25301'\n", encoding="utf-8")
+
+    info = probe_torch_abi(sys.executable, env={"PYTHONPATH": str(tmp_path), "PATH": "/usr/bin:/bin"})
+    assert info["torch_version"] == "2.11.0+rocm10.0.0"
+    assert info["hip_version"] == "10.0.25301"
+    assert info["is_rocm"] is True
+
+
+def test_probe_torch_abi_runs_against_a_missing_torch_and_names_why(tmp_path):
+    info = probe_torch_abi(
+        sys.executable, env={"PYTHONPATH": str(tmp_path), "PYTHONNOUSERSITE": "1", "PATH": "/usr/bin:/bin"}
+    )
+    if info["is_rocm"] or info["torch_version"]:
+        pytest.skip("this interpreter has a torch of its own")
+    assert "torch" in info["error"]

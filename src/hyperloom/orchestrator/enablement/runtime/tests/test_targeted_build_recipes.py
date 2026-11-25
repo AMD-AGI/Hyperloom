@@ -775,6 +775,28 @@ def test_vllm_source_build_abi_mismatch_refuses_silently(monkeypatch, tmp_path):
     assert result.failure_class in ("abi_mismatch", "preflight_toolchain")
 
 
+def test_a_failed_torch_probe_names_its_stderr_in_the_preflight(monkeypatch, tmp_path):
+    """A probe that cannot import torch says why, instead of reporting an empty torch version."""
+    wt = tmp_path / "wt"
+    wt.mkdir()
+    venv = tmp_path / "venv"
+    (venv / "bin").mkdir(parents=True)
+    _patch_isolation(monkeypatch, wt, venv)
+    ok_run = _make_rocm_run()
+
+    def run(argv, *args, **kwargs):
+        if "is_rocm" in " ".join(str(a) for a in argv):
+            return _completed(returncode=1, stderr="ImportError: libamdhip64.so.10: cannot open shared object file\n")
+        return ok_run(argv, *args, **kwargs)
+
+    result = run_vllm_source_build(_vllm_action(), str(tmp_path / "attempt"), run=run, disk_preflight_fn=_noop_disk)
+    assert result.ok is False
+    assert result.failure_class == "preflight_toolchain"
+    assert "rc=1" in result.failure_summary
+    assert "libamdhip64.so.10: cannot open shared object file" in result.failure_summary
+    assert "torch=)" not in result.failure_summary
+
+
 def test_vllm_source_python_version_abi_guard(monkeypatch, tmp_path):
     """ABI mismatch on wrong Python version is advisory: build succeeds with runtime_python_exe set."""
     wt = tmp_path / "wt"
