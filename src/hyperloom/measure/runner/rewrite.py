@@ -6,7 +6,7 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -54,8 +54,8 @@ class Placement:
     inferencex_path: Path
     visible_devices: str | None
     farm: Farm | None
+    inherited: Mapping[str, str]
     path: str | None = None
-    inherited: Mapping[str, str] = field(default_factory=dict)
 
 
 def rewrite_config(yaml_text: str, out_path: Path, placement: Placement) -> Path:

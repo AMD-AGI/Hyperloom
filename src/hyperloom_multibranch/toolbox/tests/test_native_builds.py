@@ -57,7 +57,7 @@ from hyperloom_multibranch.toolbox.native_builds import (
 )
 from hyperloom_multibranch.toolbox.pending_builds import BuildEnd, BuildHooks, PendingBuilds
 from hyperloom_multibranch.toolbox.planner import HostedPlanner
-from hyperloom_multibranch.toolbox.store_builds import BuildSite, StoreBuildDriver
+from hyperloom_multibranch.toolbox.store_builds import StoreBuildDriver
 from hyperloom_multibranch.toolbox.tests import native_support as fake
 from hyperloom_multibranch.toolbox.tests.helpers import FakeRepo, build, req
 from hyperloom_multibranch.toolbox.tests import test_short_prompts_option as options_tests
@@ -113,8 +113,7 @@ class Rig:
         site = NativeSite(machine, {kit.COMPONENT: recipe}, self.tmp / "sources", self.image.site)
         self.planner = NativePlanner(site, self.blobs, {kit.COMPONENT: kit.LAYOUT})
         runner = IsolatedBuilds(self.planner, self.blobs, self._isolation, {kit.COMPONENT: kit.FACTORY})
-        build_site = BuildSite({kit.COMPONENT: recipe})
-        self.driver = StoreBuildDriver(self.store, Signer(self._key), build_site, compiled_needs, runner)
+        self.driver = StoreBuildDriver(self.store, Signer(self._key), {kit.COMPONENT: recipe}, compiled_needs, runner)
         self.compiler = EnvironmentCompiler(
             self.blobs, IMAGE, lambda layout: self.image.package(), {kit.COMPONENT: kit.LAYOUT}, self.planner
         )
