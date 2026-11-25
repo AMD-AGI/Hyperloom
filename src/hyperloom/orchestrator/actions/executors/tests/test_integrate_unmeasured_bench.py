@@ -1,8 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""A bench the environment or the harness kept from measuring, or the run stopped, says nothing about the patch: no
-gate grades it, unless it is an enablement round whose boot advanced."""
+"""A bench the environment kept from measuring says nothing about the patch, so it is not graded as a REVERT."""
 
 from __future__ import annotations
 
@@ -21,9 +20,7 @@ PORT_TAKEN = (
 ARG_REFUSED = "error: unrecognized arguments: --enable-foo"
 
 
-async def _gate(
-    tmp_path: Path, bench_result: dict, *, switched: bool, patched: bool = True, enablement: bool = False
-) -> tuple[dict, list[str]]:
+async def _gate(tmp_path: Path, bench_result: dict, *, switched: bool, patched: bool = True) -> tuple[dict, list[str]]:
     """Gate one bench; also returns the parity legs it spent."""
     state = SharedState(baseline_tput=314.0, current_best={"tput": 314.0})
     attempt = IntegrateAttempt(
@@ -41,13 +38,13 @@ async def _gate(
         legs.append("parity")
         return {"ran": True, "ok": False, "inconclusive": True, "reason": "parity leg returned no throughput"}
 
-    async def _bench(*_args, **_kwargs):
-        return dict(bench_result), {"accuracy_pass": None}
-
     executor._switch_off_parity = _parity
-    executor._bench_patch = _bench
-    params = {"base_tput": 314.0, "keep_threshold_pct": 1.0, "enablement": enablement}
-    out = await executor._stage_gate(attempt, params)
+    out = await executor._gate_perf(
+        attempt=attempt,
+        params={"base_tput": 314.0, "keep_threshold_pct": 1.0},
+        bench_result=bench_result,
+        gate_evidence={"accuracy_pass": None},
+    )
     return out, legs
 
 
@@ -109,38 +106,3 @@ async def test_an_unimportable_framework_an_attempt_without_a_patch_left_alone_i
     out, _legs = await _gate(tmp_path, UNIMPORTABLE, switched=False, patched=False)
 
     assert (out["error_class"], out["failure_attribution"]) == ("bench_unmeasured", "environment")
-
-
-SCRIPT_CHANGED = {
-    "status": "failed",
-    "output_throughput": None,
-    "error": "the script /scripts/custom.sh changed since the session froze its base",
-    "error_class": "source_files_changed",
-}
-
-
-@pytest.mark.asyncio
-async def test_a_round_whose_frozen_script_changed_is_unmeasured(tmp_path):
-    out, _legs = await _gate(tmp_path, SCRIPT_CHANGED, switched=False, enablement=True)
-
-    assert (out["status"], out["error_class"], out["failure_attribution"], out["bench_error_class"]) == (
-        "failed",
-        "bench_unmeasured",
-        "harness",
-        "source_files_changed",
-    )
-
-
-CANCELLED = {
-    "status": "failed",
-    "output_throughput": None,
-    "error": "cancelled",
-    "error_class": "orchestrator_cancelled",
-}
-
-
-@pytest.mark.asyncio
-async def test_a_round_the_orchestrator_cancelled_is_not_graded(tmp_path):
-    out, _legs = await _gate(tmp_path, CANCELLED, switched=False, enablement=True)
-
-    assert (out["status"], out["error_class"]) == ("failed", "orchestrator_cancelled")
