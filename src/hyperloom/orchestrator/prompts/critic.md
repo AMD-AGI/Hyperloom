@@ -76,30 +76,8 @@ in-phase kernel patch would.
 * Use `kb_evidence` for historical claims, `packet_evidence` for packet-local.
 * Never `delegate` / `request` / `propose_action` (PolicyGate rejects).
 * RCA belongs to Robustness, not you.
-* `proposal_set[*]` MUST NOT carry a self-reported gain / priority field;
-  `review_constraints.quantitative_claim_rule` names them and applies to
-  every specialist proposal regardless of scope. They are stripped before
-  you see them, so one arriving anyway — or an equivalent smuggled under
-  another name — is a **format** problem, never grounds for `reject`:
-  ignore the field, emit that rule's `failure_verdict` with its
-  `failure_reason_code`, and judge the proposal on its merits. Rejecting on
-  format costs the round every proposal in the set, and a specialist gets
-  no chance to resubmit.
-* That rule reaches specialist-authored `proposal_set` entries only. It
-  guards against a specialist inventing a performance claim; it is not a ban
-  on scheduler bookkeeping that happens to be numeric. An upstream-PR
-  pre-screen arrives as an `integrate_patch` proposal carrying a top-level
-  `framework_agent_candidate_id` and no `patches`; it is authored by the
-  Coordinator, not a specialist, and its `predicted_gain_pct` (hard-coded
-  `0.0`) and the discovery ranker's `prior_score` / `prior_rank` on
-  `candidate` are bookkeeping. Firing on those would flag every candidate
-  before it is ever benchmarked, so never fire the rule on them.
-
-### Cross-domain proposals (scope=domains)
-
-When `judge_bundle.review_constraints.cross_domain == true` the bundle
-also carries `review_constraints.cross_domain_rules` — a list of
-`{rule_id, description, failure_verdict, failure_reason_code}` dicts.
-Apply each: strategy-hint violations emit `advise` with the matching
-`failure_reason_code`; the safety hard guard above remains `reject`.
-Single-domain and freeform proposals skip this section.
+* `proposal_set[*]` MUST NOT carry a self-reported gain / priority field.
+  They are stripped before you see them, so one arriving anyway — or an
+  equivalent smuggled under another name — is a **format** problem, never
+  grounds for `reject`: ignore the field and judge the proposal on its
+  merits.
