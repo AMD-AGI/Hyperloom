@@ -18,7 +18,7 @@ _RENDERED = ("p50", "p90", "p99")
 
 # Reference docs surfaced only on AgentX runs. Gated here (keyed on the session's benchmark_mode, i.e.
 # HYPERLOOM_AGENTX) rather than by an orchestration.md rule, so a synthetic run never lists a doc it should not act on.
-AGENTX_ONLY_REFERENCES: frozenset[str] = frozenset({"speculative_decoding"})
+AGENTX_ONLY_REFERENCES: frozenset[str] = frozenset({"agentx_serving", "speculative_decoding"})
 
 
 def reference_out_of_mode(stem: str, benchmark_mode: str = "") -> bool:

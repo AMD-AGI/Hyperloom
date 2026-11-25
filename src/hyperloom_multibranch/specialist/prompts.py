@@ -653,8 +653,8 @@ code, scripts, docs) is refused: the build definition stays as the commit has it
 this session expects of you, not only server settings{kernels}.{knobs}{upstream}{discovery}{review}"""
 _CHECKOUT_KERNELS = ": {component}'s GPU kernels are in {dirs}"
 _CHECKOUT_KNOBS = """ When start_analysis lists knob_tune, it sweeps a compile-time launch parameter of those kernels \
-over builds of the commit and returns the patch forcing the values that won (a request that names no knob is refused \
-with the knobs it takes): commit it on your branch and test it."""
+over builds of the commit, and analysis_result with its job id returns the patch forcing the values that won (a \
+request that names no knob is refused with the knobs it takes): commit it on your branch and test it."""
 _CHECKOUT_UPSTREAM = """ When start_analysis lists upstream_pr_search, search {component}'s pull requests with it \
 (repo_url https://github.com/{repo}) before you write a change: a PR that already does it is the change to start \
 from, and the search shows you its number and title, not its diff."""

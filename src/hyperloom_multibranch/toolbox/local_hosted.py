@@ -113,12 +113,18 @@ from hyperloom_multibranch.toolbox.leased_toolbox import (
 )
 from hyperloom_multibranch.toolbox.queue import QueuePolicy
 from hyperloom_multibranch.toolbox.long_context import LongContextSetup, staged_long_context
-from hyperloom_multibranch.toolbox.native_builds import base_bins_env, native_builds, with_native_plan
+from hyperloom_multibranch.toolbox.native_builds import (
+    NativeBuilds,
+    base_bins_env,
+    native_builds,
+    with_native_plan,
+)
 from hyperloom_multibranch.toolbox.short_prompts import ShortPromptSetup, staged_short_prompts
 from hyperloom_multibranch.toolbox.tools import (
     AsyncTool,
     UpstreamPrSearch,
     kernel_tune_tool,
+    knob_tune_tool,
     roofline_tool,
     tracelens_tool,
 )
@@ -174,6 +180,7 @@ _SANDBOXES = "sandboxes"
 _BRANCH_SANDBOXES = "branch-sandboxes"
 #: Where the base builds of the frameworks built from a pinned checkout are laid for the tests to run.
 _BASE_BUILDS = "base-builds"
+_KNOB_TUNE = "knob-tune"
 _RULE_PACK = "rule-pack"
 _POLL_INTERVAL_SEC = 2.0
 LEAKED_CARDS_REASON = "sandbox processes not provably gone"
@@ -366,7 +373,9 @@ class LocalOptions:
     only to measure a board TraceLens has no arch spec for), the
     upstream PR search (GitHub is asked from this process, never from a sandbox) and ``kernel_tune`` when the pool can spare a
     card for it without leaving fewer than one test needs (it leases the card from the pool the branches' sandboxes lease
-    from). The orchestrator's own roofline profiles on a host card outside the card leases, so it is not offered.
+    from), as is ``knob_tune`` where the native builds pin a component with a kernel knob compiled for the session's GPU
+    architecture. The orchestrator's own
+    roofline profiles on a host card outside the card leases, so it is not offered.
     ``framework_configs`` is the directory of aiter's tuned tables that every test reads private
     copies of, snapshotted below ``session_dir/framework`` as the toolbox is built: the image's when omitted, ``""`` for
     none (the tests then share the tables). ``jit_store`` is the directory of the shared compiled-code cache: the
@@ -722,15 +731,22 @@ def _provider(
     return provider
 
 
-def _local_tools(leases: BranchLeases, options: LocalOptions) -> Sequence[AsyncTool]:
-    """What ``options`` serves: its own tools, or TraceLens, the roofline, the upstream PR search and the tuner, which is
-    served only where a card can be spared for it. The first three read a trace that is already there, or ask GitHub from
-    this process; TraceLens and the roofline lease a card from ``leases`` only to measure a board's arch spec."""
+def _local_tools(
+    leases: BranchLeases, options: LocalOptions, native: NativeBuilds | None, directory: Path
+) -> Sequence[AsyncTool]:
+    """What ``options`` serves: its own tools, or TraceLens, the roofline, the upstream PR search, the tuner and, where
+    the native builds pin a component with a kernel knob compiled for their GPU architecture, the knob sweep (its builds
+    laid below ``directory``); the last
+    two are served only where a card can be spared for them. The first three read a trace that is already there, or
+    ask GitHub from this process; TraceLens and the roofline lease a card from ``leases`` only to measure a board's
+    arch spec."""
     if options.tools is not None:
         return options.tools
-    tuner = (
-        (kernel_tune_tool(leases, Path(options.framework_configs or image_configs())),) if leases.can_lease(1) else ()
-    )
+    tuners: list[AsyncTool] = []
+    if leases.can_lease(1):
+        tuners.append(kernel_tune_tool(leases, Path(options.framework_configs or image_configs())))
+        sweep = knob_tune_tool(leases, native.session, directory / _KNOB_TUNE) if native is not None else None
+        tuners.extend([sweep] if sweep is not None else [])
     if token_configured():
         logger.info("upstream PR search asks GitHub with this host's token")
     else:
@@ -739,7 +755,7 @@ def _local_tools(leases: BranchLeases, options: LocalOptions) -> Sequence[AsyncT
             "environment, so it asks GitHub anonymously, which allows this address few requests "
             '(docs/how-to/run-multibranch.md, "Upstream pull-request search")'
         )
-    return (tracelens_tool(leases), roofline_tool(leases), UpstreamPrSearch(), *tuner)
+    return (tracelens_tool(leases), roofline_tool(leases), UpstreamPrSearch(), *tuners)
 
 
 def _accepting_local_kinds(acceptance: AcceptanceSetup) -> AcceptanceSetup:
@@ -833,7 +849,7 @@ def build_local_toolbox(
         session_stores(blackboard, directory, session.run_id, native.driver if native else None),
         executor,
         _accepting_local_kinds(acceptance),
-        tools=session_tools(_local_tools(leases, options), blackboard, directory),
+        tools=session_tools(_local_tools(leases, options, native, directory), blackboard, directory),
         tuning=ToolboxTuning(
             policy=capped_policy(options.policy, parallel),
             max_infra_retries=options.max_infra_retries,
