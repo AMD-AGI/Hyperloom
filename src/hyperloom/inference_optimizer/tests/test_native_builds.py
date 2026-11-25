@@ -1,11 +1,13 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""The entry point opens the builds of a framework whose server is built from source and hands them to integration."""
+"""The entry point opens the builds of a framework whose server is built from source and hands them to integration,
+and keeps the options that server prints."""
 
 from __future__ import annotations
 
 import argparse
+import os
 import sys
 from collections.abc import Iterator
 from contextlib import contextmanager
@@ -15,10 +17,18 @@ from types import SimpleNamespace
 import pytest
 
 from hyperloom.inference_optimizer import native_builds
+from hyperloom.inference_optimizer.cli import bootstrap
 from hyperloom.inference_optimizer.cli.bootstrap import _install_executors
+from hyperloom.inference_optimizer.native_builds import OptionCoverage
+from hyperloom.orchestrator.state.tests._session_base import freeze_session_base
 from hyperloom.plugs import Implementation, PlugHost, PlugRegistry, ResolvedManifest, Socket, activated
 from hyperloom.plugs.manifest import SocketSetting
 from hyperloom.plugs.native_builds import NATIVE_BUILDS_SOCKET
+
+_HELP = """\
+-c,    --ctx-size N                     size of the prompt context (default: 0)
+--keep N                                number of tokens to keep from the initial prompt
+"""
 
 
 @contextmanager
@@ -61,24 +71,65 @@ def test_a_session_whose_framework_server_cannot_be_built_from_source_stops_befo
     assert "builds its server from its source: pass --framework-path" in capsys.readouterr().err
 
 
-def test_an_image_served_framework_builds_nothing_and_imports_no_engine(
+def test_an_image_served_framework_builds_nothing_keeps_no_options_and_imports_no_engine_for_either(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    engine = "hyperloom.measure.runner.native.session_builds"
-    monkeypatch.delitem(sys.modules, engine, raising=False)
+    engines = {f"hyperloom.measure.runner.native.{module}" for module in ("session_builds", "session_options")}
+    for module in engines:
+        monkeypatch.delitem(sys.modules, module, raising=False)
 
     coordinator = _install("sglang", tmp_path)
 
     assert coordinator.sub.executor_registry["integrate_patch"].native is None
-    assert not (tmp_path / "native").exists()
-    assert engine not in sys.modules
+    assert not (tmp_path / "native").exists() and list(tmp_path.glob("*options*")) == []
+    assert native_builds.server_options(tmp_path, "sglang") is None
+    assert native_builds.server_options(None, "llamacpp") is None
+    assert not engines & set(sys.modules)
 
 
-def test_the_builds_are_the_ones_the_current_plug_host_opens(tmp_path: Path) -> None:
-    builds = SimpleNamespace(checkout=tmp_path)
+def test_the_builds_and_the_options_are_the_ones_the_current_plug_host_gives(tmp_path: Path) -> None:
+    builds, kept = SimpleNamespace(checkout=tmp_path), SimpleNamespace(file=tmp_path / "options.json")
     opened = {(tmp_path, "llamacpp"): builds}
-    engine = SimpleNamespace(open_builds=lambda session_dir, framework: opened[session_dir, framework])
+    engine = SimpleNamespace(
+        open_builds=lambda session_dir, framework: opened[session_dir, framework],
+        record_options=lambda session_dir, framework: opened[session_dir, framework] and kept.file,
+        options={tmp_path: kept}.get,
+    )
 
     with _hosting(engine):
         assert native_builds.start_candidate_builds(tmp_path, "llamacpp") is builds
         assert native_builds.start_candidate_builds(tmp_path, "sglang") is None
+        assert native_builds.record_server_options(tmp_path, "llamacpp") == kept.file
+        assert native_builds.record_server_options(tmp_path, "sglang") is None
+        assert native_builds.server_options(tmp_path, "llamacpp") is kept
+
+
+def _built_server(root: Path, monkeypatch: pytest.MonkeyPatch) -> SimpleNamespace:
+    """The builds of a session whose stand-in server, first on ``PATH`` as an accepted build is, prints ``_HELP``."""
+    bin_dir = root / "bin"
+    bin_dir.mkdir()
+    (root / "help.txt").write_text(_HELP, encoding="utf-8")
+    program = bin_dir / "llama-server"
+    program.write_text(f'#!/bin/sh\n/bin/cat "{root / "help.txt"}"\n', encoding="utf-8")
+    program.chmod(0o755)
+    monkeypatch.setenv("PATH", f"{bin_dir}{os.pathsep}{os.environ['PATH']}")
+    builds = SimpleNamespace(checkout=root)
+    monkeypatch.setattr(bootstrap, "start_candidate_builds", lambda session_dir, framework: builds)
+    return builds
+
+
+def test_a_session_that_builds_its_server_keeps_the_options_that_server_prints(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    builds = _built_server(tmp_path, monkeypatch)
+    session = tmp_path / "session"
+    session.mkdir()
+    freeze_session_base(session, ("-c", "4096"))
+
+    coordinator = _install("llamacpp", session)
+
+    assert coordinator.sub.executor_registry["integrate_patch"].native is builds
+    kept = native_builds.server_options(session, "llamacpp")
+    assert kept is not None and kept.file.parent == session
+    assert kept.coverage(()) == OptionCoverage(unset=1, missing=("--keep",), unknown=())
+    assert kept.coverage(("--keep", "-c", "--nope")) == OptionCoverage(unset=1, missing=(), unknown=("--nope",))
