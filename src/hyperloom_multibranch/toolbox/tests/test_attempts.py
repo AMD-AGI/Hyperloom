@@ -52,7 +52,7 @@ from hyperloom_multibranch.toolbox.attempts import (
     AttemptRunner,
     InfraBackoff,
     TestJob,
-    node_blameless,
+    node_unquarantined,
 )
 
 INERT_REASON = f"{INERT_PATCH}: process 1 imported aiter from /sgl-workspace/aiter/aiter/__init__.py, not from the farm"
@@ -466,7 +466,7 @@ async def test_a_result_download_that_came_back_short_is_retried_after_waits_and
     assert result.validity is Validity.MEASUREMENT_FAILED and result.failure_class is FailureClass.INFRA
     assert result.failure_reason == f"4 attempts failed for infrastructure reasons: {DOWNLOAD_REASON}"
     assert reported == [], "the platform's file API, not the node, cut the download short"
-    assert node_blameless(DOWNLOAD_REASON), "and it never quarantines the node"
+    assert node_unquarantined(DOWNLOAD_REASON), "and it never quarantines the node"
     assert (
         classify_test_failure(returncode=0, error_class=RESULT_DOWNLOAD_INCOMPLETE).failure_class is FailureClass.INFRA
     )
