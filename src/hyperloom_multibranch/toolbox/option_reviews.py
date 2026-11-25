@@ -1,11 +1,12 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""The options of the session's server, laid in the toolbox directory, and each branch's review of them.
+"""Each branch's review of the options of the session's server.
 
-:func:`lay_option_inventory` asks the base build the tests run for its options and writes them, with which of them the
-base launch sets, as ``server_options.json`` (:mod:`hyperloom.measure.runner.native.server_options`) in the toolbox
-directory. A session whose server is not a program built from its checkout has no such file.
+The session keeps the options of the base build its tests run, with which of them the base launch sets, as
+``server_options.json`` in the toolbox directory
+(:func:`~hyperloom.measure.runner.native.session_options.record_session_options`). A session whose server is not a
+program built from its checkout has no such file.
 
 :class:`OptionReviews` keeps, by branch, the verdict a specialist records on each option the launch leaves unset
 (``option-reviews/<branch>.json`` in the same directory) and says what a branch's review still leaves out
@@ -23,26 +24,18 @@ where they submit, since a branch another agent drives has no review to record.
 from __future__ import annotations
 
 import json
-import os
 import threading
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, replace
 from pathlib import Path
-from typing import TYPE_CHECKING
 
 from hyperloom.contracts.measurement import TestKind, TestRequest
 from hyperloom.contracts.recipe import ConfigDelta, RecipeDelta
 from hyperloom.inference_optimizer.native_builds import OptionVerdict
 from hyperloom.inference_optimizer.session.session_paths import fs_safe_id
-from hyperloom.measure.farm import prepend_base_bins
-from hyperloom.measure.runner.native.server_options import OptionInventory, server_inventory, write_inventory
-from hyperloom.orchestrator.state.base_launch import server_base
+from hyperloom.measure.runner.native.server_options import OptionInventory
 from hyperloom_common.io import atomic_write_json
 from hyperloom_multibranch.contracts.toolbox import RequestRejected
-from inference_suite import runner_owned
-
-if TYPE_CHECKING:
-    from inference_suite.contracts import BaseLaunch
 
 __all__ = [
     "NOTE_CHARS",
@@ -52,7 +45,6 @@ __all__ = [
     "ReviewEntry",
     "ReviewRefused",
     "ReviewStanding",
-    "lay_option_inventory",
 ]
 
 _REVIEWS_DIR = "option-reviews"
@@ -62,31 +54,6 @@ OPTION_BY_ENV_CODE = "option_set_by_env"
 _SCHEMA = 1
 #: How many of the options still without a verdict a refusal names; its count says how many there are.
 _FIRST_NAMED = 5
-
-
-def lay_option_inventory(base: BaseLaunch, probe_env: Mapping[str, str], directory: Path) -> OptionInventory | None:
-    """Write the options of the base server build ``probe_env`` names, read against the session's frozen ``base``
-    (its arguments, and the flags the runner sets on every launch of it), into ``directory`` and return them;
-    ``None``, and no file, without a base build or for a framework whose server is no native program.
-
-    The program is asked in this process's environment under the launch's own and ``probe_env``, the runner variable
-    naming the base builds' executables (which go first on ``PATH``, as in a runner) and whatever else a process of
-    this machine needs to run one.
-
-    Raises:
-        FrameworkProbeError: The base build's server cannot print its ``--help``.
-        FarmError: A base build ``probe_env`` names is not there.
-    """
-    if not probe_env:
-        return None
-    launch = server_base(base)
-    env = {**os.environ, **launch.env, **probe_env}
-    prepend_base_bins(env)
-    owned = runner_owned(base).args
-    inventory = server_inventory(base.framework, env, launch.args, cwd=directory, runner_owned=owned)
-    if inventory is not None:
-        write_inventory(inventory, directory)
-    return inventory
 
 
 @dataclass(frozen=True)

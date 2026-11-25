@@ -471,20 +471,30 @@ def _specialist_runtime(
 
 
 def _option_reviews(base: BaseLaunch, toolbox: RealToolbox, directory: Path) -> OptionReviews | None:
-    """The branches' reviews of the options of the base server build ``toolbox``'s tests run, laid in ``directory``
-    as read against the session's frozen ``base``
-    (:func:`~hyperloom_multibranch.toolbox.option_reviews.lay_option_inventory`); ``None``, and nothing laid, for a
-    toolbox that lays no base build. Raises :class:`PeersUnavailable` when that build cannot list its options."""
+    """The branches' reviews of the options of the base server build ``toolbox``'s tests run, which ``directory``,
+    where the session froze ``base``, keeps from its first leg on
+    (:func:`~hyperloom.measure.runner.native.session_options.record_session_options`); ``None``, and nothing kept, for
+    a toolbox that lays no base build. The build is asked in this process's environment under what ``toolbox`` runs it
+    with, its executables first on ``PATH`` as in a runner. Raises :class:`PeersUnavailable` when it cannot list its
+    options."""
 
-    from hyperloom_multibranch.toolbox.option_reviews import OptionReviews, lay_option_inventory
+    from hyperloom.measure.farm import prepend_base_bins
+    from hyperloom.measure.runner.native.session_options import record_session_options, session_options
+    from hyperloom_multibranch.toolbox.option_reviews import OptionReviews
     from inference_suite import FrameworkProbeError
 
+    if not toolbox.base_probe_env:
+        return None
+    env = {**os.environ, **toolbox.base_probe_env}
+    prepend_base_bins(env)
     try:
-        inventory = lay_option_inventory(base, toolbox.base_probe_env, directory)
+        record_session_options(directory, base.framework, env)
     except FrameworkProbeError as exc:
         raise PeersUnavailable(f"the session's server cannot list its options: {exc}") from exc
-    if inventory is None:
+    kept = session_options(directory)
+    if kept is None:
         return None
+    inventory = kept.inventory
     logger.info(
         "%s lists %d options, %d of them not set by the base launch",
         inventory.program,

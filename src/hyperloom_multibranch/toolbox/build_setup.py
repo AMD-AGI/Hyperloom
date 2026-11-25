@@ -92,8 +92,8 @@ _QUIET = "--quiet"
 
 
 class SetupError(Exception):
-    """What stops the setup: the image's sglang commit cannot be read, a checkout cannot be made, or an existing key or
-    trust file cannot be used (it is never replaced)."""
+    """What stops the setup: the image's sglang commit cannot be read, the framework checkout has no clean commit to pin,
+    a checkout cannot be made, or an existing key or trust file cannot be used (it is never replaced)."""
 
 
 @dataclass(frozen=True)
@@ -222,7 +222,11 @@ def _clones(setup: BuildSetup) -> list[_Clone]:
     ref = _full_commit(setup.sglang_ref, repo) if setup.sglang_ref else (found.ref if found else None)
     if ref is not None:
         clones[SGL_KERNEL] = _Clone(SGL_KERNEL, ref, repo)
-    for pinned in pinned_checkouts(native_recipes(), _framework(setup)):
+    try:
+        pinned_clones = pinned_checkouts(native_recipes(), _framework(setup))
+    except BuildStoreConfigError as exc:
+        raise SetupError(str(exc)) from None
+    for pinned in pinned_clones:
         clones[pinned.component] = _Clone(pinned.component, pinned.commit, str(pinned.checkout), worktree=True)
     if not any(clone.repo for clone in clones.values()):
         raise SetupError(

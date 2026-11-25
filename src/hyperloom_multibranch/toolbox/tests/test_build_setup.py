@@ -9,8 +9,10 @@ from __future__ import annotations
 import json
 import os
 import re
+import shutil
 import stat
 import subprocess
+from collections.abc import Callable
 from pathlib import Path
 
 import pytest
@@ -364,3 +366,34 @@ def test_a_pinned_checkout_is_set_up_as_a_worktree_at_its_head_the_toolbox_build
     assert main(argv) == 0
     assert f"llamacpp checkout of {head}: kept" in capsys.readouterr().out
     assert os.listdir(root / "sources" / "llamacpp") == [head]
+
+
+def _edit_a_tracked_file(checkout: Path) -> None:
+    (checkout / "src" / "llama.cpp").write_text("int changed;\n")
+
+
+def _drop_git(checkout: Path) -> None:
+    shutil.rmtree(checkout / ".git")
+
+
+@pytest.mark.parametrize(
+    ("spoil", "reason"),
+    [
+        (_edit_a_tracked_file, "the framework checkout {checkout} has changes to tracked files"),
+        (_drop_git, "git cannot read the framework checkout {checkout}"),
+    ],
+    ids=["tracked-change", "no-git"],
+)
+def test_a_framework_checkout_that_cannot_be_pinned_is_refused_by_name_before_anything_is_made(
+    tmp_path: Path, bare_image: Path, spoil: Callable[[Path], None], reason: str, capsys: pytest.CaptureFixture[str]
+) -> None:
+    checkout = tmp_path / "llama.cpp"
+    git_repo(checkout, _LLAMA)
+    spoil(checkout)
+    argv = [str(tmp_path / "root"), "--image-root", str(bare_image), "--gfx", "gfx1100", "--python", "python3"]
+
+    code = main([*argv, "--framework-repo", str(checkout)])
+
+    assert code == 1
+    assert f"build_setup: {reason.format(checkout=checkout)}" in capsys.readouterr().err
+    assert not (tmp_path / "root").exists()
