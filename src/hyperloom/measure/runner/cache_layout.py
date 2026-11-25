@@ -28,9 +28,9 @@ of the cache that changes after that check never reaches the runner or pip, whoe
 manifest records no ``source.tar`` (an older builder made it) is refused.
 
 A sandbox writes nothing in the cache, which it may mount read-only. Beside the entries, ``<cache>/tools/InferenceX.git``
-is a bare repository :mod:`hyperloom.measure.runner.tools` fetches a test's InferenceX commit from when it holds it,
-reading only; otherwise the test fetches the commit from ``INFERENCEX_REPO`` (the host's mirror) or upstream into its
-own scratch. Earlier runners filled that repository from the sandbox; none does now.
+is a bare repository the builder fills with the InferenceX commit of the staging it publishes
+(:func:`hyperloom.measure.runner.tools.fill_inferencex_store`); :mod:`hyperloom.measure.runner.tools` fetches a test's
+InferenceX commit from it, reading only, and otherwise from ``INFERENCEX_REPO`` or upstream into the test's own scratch.
 
 The sandbox installs exactly the wheels the manifest lists, each pinned to the hash the manifest records
 (:func:`requirements_text`). The check the builder and the sandbox share (:func:`_wheels_problems`) passes a manifest

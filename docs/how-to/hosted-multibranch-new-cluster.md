@@ -67,7 +67,7 @@ template's values to the paths inside the sandbox.
 
 | Variable | Required | What it points at |
 | --- | --- | --- |
-| `HYPERLOOM_RUNNER_CACHE` | no | Where the template mounts the runner cache. Default `/runner-cache`. For a v2 sheet the runner uses the inference_suite staging `cache_build` published in `inference-suite/<staging key>/` (see [The inference_suite staging](#the-inference_suite-staging)) offline and builds none, so the whole cache can be read-only. The sandbox never writes the cache: each test fetches its InferenceX commit into its own scratch, from `tools/InferenceX.git` when that repository already holds it (read only) and otherwise from `INFERENCEX_REPO` (or upstream), so point `INFERENCEX_REPO` at a mirror the host keeps current. It must hold the same directory the app host's `HYPERLOOM_RUNNER_CACHE` names. How the sandbox starts from it is described below the table. |
+| `HYPERLOOM_RUNNER_CACHE` | no | Where the template mounts the runner cache. Default `/runner-cache`. For a v2 sheet the runner uses the inference_suite staging `cache_build` published in `inference-suite/<staging key>/` (see [The inference_suite staging](#the-inference_suite-staging)) offline and builds none, so the whole cache can be read-only. The sandbox never writes the cache: each test fetches its InferenceX commit into its own scratch from `tools/InferenceX.git`, reading only. The app host fills that repository: where it builds the runner cache (`cache_build`, which the hosted multi-branch entry runs for each run's commit) it fetches the InferenceX commit of the staging it publishes, from `INFERENCEX_REPO` or upstream, so no mirror is needed for the sandbox. A test whose commit the repository lacks fetches it from `INFERENCEX_REPO` (or upstream) instead, with a warning. It must hold the same directory the app host's `HYPERLOOM_RUNNER_CACHE` names. How the sandbox starts from it is described below the table. |
 | `HYPERLOOM_SOURCE_SHA`, `HYPERLOOM_RUNNER_CACHE_MANIFEST_SHA256` | set by the hosted multi-branch entry | The hosted multi-branch entry passes both on every create; the template must list them in its accepted create environment. |
 | `HYPERLOOM_FRAMEWORK_SNAPSHOT`, `HYPERLOOM_FRAMEWORK_SESSION_SHA256` | set by the hosted multi-branch entry | When the app host has the image's aiter tables, the hosted multi-branch entry snapshots them below `<session_dir>/framework` and passes both on every create; the template must list them in its accepted create environment, and the sandbox must see the session directory at the same path. Without the snapshot, a test that adds tuned rows to a default table is refused as `spec_rejected`. |
 | `HYPERLOOM_BASE_BINS` | set by the hosted multi-branch entry | Only for a session whose framework's server is built from its pinned checkout (`--framework llamacpp`): the entry lays that base build below `<session_dir>` and passes the directories of its executables on every create, and the runner puts them first on its `PATH`, so a test that does not rebuild the framework runs that build. The template must list it in its accepted create environment, and the sandbox must see the session directory at the same path. |
@@ -234,7 +234,6 @@ HYPERLOOM_RSI_ARCHIVE=/mnt/shared/hyperloom/rsi-archive/
 
 # Measurement template
 HYPERLOOM_RUNNER_CACHE=/mnt/shared/hyperloom/runner-cache
-INFERENCEX_REPO=/mnt/shared/hyperloom/mirrors/InferenceX.git
 ```
 
 For a measurement image on CPython 3.14 (the current `rocm/vllm` tags), set
@@ -281,6 +280,10 @@ change to any of them publishes a new directory beside the old one. Builders sha
 and uses the winner once the winner's normalised manifest (each package's name, version and wheel sha256, the
 interpreter and the InferenceX pin) is the one it built; one that differs is refused, naming the packages. A
 `.staging-*` directory left by a builder that died can be removed once no build is running.
+
+Then `cache_build` fetches the staging's InferenceX commit into `<HYPERLOOM_RUNNER_CACHE>/tools/InferenceX.git`, a bare
+repository it creates when it is missing, from `INFERENCEX_REPO` or upstream; a repository that already holds the commit
+is left as it is. The sandbox reads it, never writes it, so it may be mounted read-only.
 
 Every account that runs `cache_build` must be in the cache's group, and the cache root must be setgid in it
 (`chgrp <group> <cache> && chmod 2775 <cache>`); `inference-suite/` is then created `2775` in that group, so builders

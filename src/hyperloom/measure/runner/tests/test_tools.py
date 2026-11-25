@@ -390,3 +390,128 @@ def test_an_object_changed_in_the_store_is_refused_with_a_warning_and_the_commit
     assert (second / "benchmarks" / "benchmark_lib.sh").read_text() == "# lib\n"
     (record,) = caplog.records
     assert commit in record.getMessage() and str(store) in record.getMessage()
+
+
+def test_the_host_fills_the_store_with_the_commit_and_a_test_then_reads_it_read_only_with_no_network(
+    upstream, tmp_path, monkeypatch, caplog
+):
+    repo, commit = upstream
+    cache = tmp_path / "runner-cache"
+    monkeypatch.setenv("INFERENCEX_REPO", str(repo))
+
+    store = tools.fill_inferencex_store(cache, commit)
+
+    assert store == cache / tools.TOOL_CHECKOUTS_DIR / tools.INFERENCEX_STORE
+    assert _git(store, "rev-parse", "--is-bare-repository") == "true"
+    assert _git(store, "rev-parse", f"refs/tools/{commit}") == commit
+    assert store.stat().st_mode & 0o005 == 0o005, "the sandbox's account reads it"
+    assert [path.name for path in store.parent.iterdir()] == [tools.INFERENCEX_STORE], "no work directory is left"
+    filled = _snapshot(cache)
+    monkeypatch.setenv("INFERENCEX_REPO", str(tmp_path / "offline"))
+    assert tools.fill_inferencex_store(cache, commit) == store, "a store that holds the commit fetches nothing"
+    assert _snapshot(cache) == filled
+
+    _read_only(cache)
+    before = _snapshot(cache)
+    try:
+        with caplog.at_level(logging.WARNING, logger=tools.__name__):
+            tree = ensure_inferencex(commit, tmp_path / "scratch", store)
+        after = _snapshot(cache)
+    finally:
+        _writable(cache)
+
+    assert _git(tree, "rev-parse", "HEAD") == commit, "served by the store: INFERENCEX_REPO does not exist"
+    assert after == before
+    assert caplog.records == []
+
+
+def test_the_host_adds_a_new_pin_to_a_store_that_holds_an_older_one(upstream, tmp_path, monkeypatch):
+    repo, old = upstream
+    cache = tmp_path / "runner-cache"
+    monkeypatch.setenv("INFERENCEX_REPO", str(repo))
+    store = tools.fill_inferencex_store(cache, old)
+    (repo / "benchmarks" / "benchmark_lib.sh").write_text("# lib 2\n")
+    _git(repo, "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qam", "two")
+    new = _git(repo, "rev-parse", "HEAD")
+
+    assert tools.fill_inferencex_store(cache, new) == store
+
+    assert _git(store, "rev-parse", f"refs/tools/{old}", f"refs/tools/{new}").split() == [old, new]
+
+
+def test_a_commit_the_host_cannot_fetch_is_a_tool_error_and_a_bad_hash_is_refused(tmp_path, monkeypatch):
+    monkeypatch.setenv("INFERENCEX_REPO", str(tmp_path / "offline"))
+
+    with pytest.raises(ToolError, match="was not fetched into"):
+        tools.fill_inferencex_store(tmp_path / "runner-cache", "a" * 40)
+    with pytest.raises(ToolError, match="not a full commit hash"):
+        tools.fill_inferencex_store(tmp_path / "runner-cache", "main")
+
+
+@pytest.mark.usefixtures("ownership_checking_git")
+def test_a_store_below_a_path_with_a_space_is_trusted_and_served(upstream, tmp_path, monkeypatch, caplog):
+    repo, commit = upstream
+    store = tmp_path / "runner cache" / tools.TOOL_CHECKOUTS_DIR / tools.INFERENCEX_STORE
+    store.mkdir(parents=True)
+    subprocess.run(["git", "init", "-q", "--bare", str(store)], check=True)
+    _git(
+        tmp_path, f"--git-dir={store}", "fetch", "-q", "--depth", "1", f"file://{repo}", f"{commit}:refs/tools/{commit}"
+    )
+    monkeypatch.setenv("INFERENCEX_REPO", str(tmp_path / "offline"))
+
+    with caplog.at_level(logging.WARNING, logger=tools.__name__):
+        tree = ensure_inferencex(commit, tmp_path / "scratch", store)
+
+    assert _git(tree, "rev-parse", "HEAD") == commit
+    assert caplog.records == []
+
+
+@pytest.mark.usefixtures("ownership_checking_git")
+def test_a_store_fetch_without_its_trust_entry_falls_back_with_a_warning_naming_the_source(
+    upstream, tmp_path, monkeypatch, caplog
+):
+    repo, commit = upstream
+    store = _filled_store(tmp_path, repo, commit)
+    real = tools._trusting
+    untrusted = os.path.realpath(store)
+
+    def trusting_all_but_the_store(directories, config, cwd):
+        return real([directory for directory in directories if directory != untrusted], config, cwd)
+
+    monkeypatch.setattr(tools, "_trusting", trusting_all_but_the_store)
+    monkeypatch.setenv("INFERENCEX_REPO", str(repo))
+
+    with caplog.at_level(logging.WARNING, logger=tools.__name__):
+        tree = ensure_inferencex(commit, tmp_path / "scratch", store)
+
+    assert _git(tree, "rev-parse", "HEAD") == commit
+    (record,) = caplog.records
+    assert "dubious ownership" in record.getMessage()
+    assert f"so it is fetched from {repo}" in record.getMessage()
+
+
+def test_without_inferencex_repo_the_warning_names_upstream(upstream, tmp_path, monkeypatch, caplog):
+    repo, old = upstream
+    store = _filled_store(tmp_path, repo, old)
+    monkeypatch.delenv("INFERENCEX_REPO", raising=False)
+    monkeypatch.setattr(tools, "INFERENCEX_REPO", str(repo))  # stands in for upstream
+
+    with caplog.at_level(logging.WARNING, logger=tools.__name__):
+        tools.ensure_inferencex(old, tmp_path / "scratch", tmp_path / "no-store")
+        assert caplog.records == []
+        with pytest.raises(ToolError):
+            tools.ensure_inferencex("b" * 40, tmp_path / "scratch-2", store)
+
+    assert f"so it is fetched from {repo}" in caplog.records[0].getMessage()
+    assert "INFERENCEX_REPO" not in caplog.records[0].getMessage()
+
+
+@pytest.mark.usefixtures("ownership_checking_git")
+def test_the_host_fetches_from_a_local_mirror_trusted_for_the_fill_alone(upstream, tmp_path, monkeypatch):
+    repo, commit = upstream
+    monkeypatch.setenv("INFERENCEX_REPO", f"file://{repo}")
+
+    store = tools.fill_inferencex_store(tmp_path / "runner-cache", commit)
+
+    assert _git(store, "rev-parse", f"refs/tools/{commit}") == commit
+    assert not (tmp_path / "home").exists(), "nothing is trusted beyond the fill"
