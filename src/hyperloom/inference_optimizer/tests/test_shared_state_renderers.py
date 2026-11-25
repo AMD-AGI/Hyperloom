@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+from hyperloom.orchestrator.state._shared_state.variant_line import role_trace_text
 from hyperloom.orchestrator.state.shared_state import SharedState
 
 
@@ -229,3 +230,19 @@ def test_format_last_action_failures_suffix_when_over_window():
         )
     out = st._format_last_action_failures()
     assert "[+2 earlier failures]" in out
+
+
+def test_role_trace_text_summarises_each_pd_role():
+    text = role_trace_text(
+        {
+            "prefill": {
+                "status": "ok",
+                "top": [{"name": "gemm", "gpu_pct": 41.25, "category": "gemm", "bound": "compute"}, {"name": "copy"}],
+                "warnings": ["clock_lag"],
+            },
+            "decode": {"status": "failed", "error": "no trace"},
+        }
+    )
+    assert text == "prefill: gemm/gemm/compute 41.2%; copy warn=clock_lag | decode: analysis_failed(no trace)"
+    assert role_trace_text({"prefill": {"status": "ok"}}) == "prefill: (no hot kernels)"
+    assert role_trace_text({}) == "" and role_trace_text(None) == ""

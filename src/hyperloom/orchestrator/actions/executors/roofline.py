@@ -21,6 +21,8 @@ from ...loop.sub_agent_runner import RunnerContext
 from ...state.analysis_failures import remember_roofline_failure, remember_trace_failure
 from hyperloom.inference_optimizer.trace.task_progress import report_progress
 from ._multi_node_env import is_multi_node
+from ._pd_combined_report import report_pd_profile
+from ._pd_role_trace import ROLE_STEADY_STATE_MODE, analyze_role_traces
 from .profile import profile_trace_path
 from .serving._profile_evidence import (
     drain_instrumentation,
@@ -614,6 +616,25 @@ def _analysis_payload(task_params: dict[str, Any], *, trace_path: str, framework
     return payload
 
 
+def _pd_main_role(profiled: _ProfileOutcome) -> str:
+    """The PD role whose trace the profile adopted as its main trace, or '' outside a PD cluster."""
+    role_traces = profiled.result.get("role_traces") if isinstance(profiled.result, dict) else None
+    if not isinstance(role_traces, dict):
+        return ""
+    return next((role for role, path in role_traces.items() if path and path == profiled.trace_path), "")
+
+
+def _record_pd_compute_bound_skip(recorder: Any) -> None:
+    """Record that a node-list PD session skips the compute-bound re-profile, which cannot drop its frozen DP flags."""
+    log.info("roofline: node-list PD session; the compute-bound re-profile is skipped (frozen DP attention stays)")
+    if recorder is not None:
+        recorder.record_compute_bound_reprofile(
+            attempted=False,
+            adopted=False,
+            reason="node-list PD session: the frozen launch keeps its DP attention",
+        )
+
+
 def _hot_kernels(ta_result: dict[str, Any]) -> list[Any]:
     """The hot kernels an analysis surfaced."""
     return ta_result.get("hot_kernels_top15") or ta_result.get("hot_kernels") or []
@@ -737,16 +758,47 @@ class RooflineExecutor:
             return profiled
         self._record_profile_findings(profiled)
         payload = _analysis_payload(ctx.task.params or {}, trace_path=profiled.trace_path, framework=arm.framework)
+        main_role = _pd_main_role(profiled)
+        if main_role:
+            payload.setdefault("steady_state_mode", ROLE_STEADY_STATE_MODE[main_role])
 
         analysis = await self._analyze(ctx, recorder, payload)
         if not isinstance(analysis, _AnalysisOutcome):
             remember_trace_failure(self.shared_state, payload, analysis)
             return analysis
+        if main_role:
+            await self._record_role_analyses(ctx, profiled, main_role, analysis, framework=arm.framework)
         attribution_degraded = _flag_attribution_degraded(analysis.result, profiled.result)
         analysed = _AnalysedProfile(profiled, analysis)
         if _wants_compute_bound_reprofile(analysis.result):
-            analysed = await self._compute_bound_reprofile(ctx, recorder, arm, analysis) or analysed
+            if main_role:
+                _record_pd_compute_bound_skip(recorder)
+            else:
+                analysed = await self._compute_bound_reprofile(ctx, recorder, arm, analysis) or analysed
         return self._conclude(ctx, recorder, analysed, attribution_degraded=attribution_degraded, started=started)
+
+    async def _record_role_analyses(
+        self,
+        ctx: RunnerContext,
+        profiled: _ProfileOutcome,
+        main_role: str,
+        analysis: _AnalysisOutcome,
+        *,
+        framework: str,
+    ) -> None:
+        """Analyse the PD roles other than ``main_role``, record every role's summary on ``last_trace_analyze_by_role``,
+        then run the combined per-node TraceLens report."""
+        role_traces = dict(profiled.result.get("role_traces") or {})
+        self.shared_state.last_trace_analyze_by_role = await analyze_role_traces(
+            role_traces,
+            session_dir=Path(ctx.extra["session_dir"]),
+            framework=framework,
+            known={main_role: analysis.result},
+        )
+        try:
+            await report_pd_profile(profiled.result, framework=framework, platform=self.shared_state.gpu_type)
+        except (OSError, RuntimeError, ValueError) as exc:
+            log.warning("roofline: pd combined report raised: %r", exc)
 
     async def _profile_until_usable(
         self, ctx: RunnerContext, recorder: Any, arm: _ProfileArm

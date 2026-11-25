@@ -5,10 +5,30 @@
 
 from __future__ import annotations
 
-from ._trace_inputs import count_gpu_kernel_events, discover_trace_inputs
 from ._capture_shapes import is_capture_fragment
+from ._stream_overlap_repair import clamp_stream_overlaps
+from ._trace_inputs import count_gpu_kernel_events, discover_trace_inputs
+from ._trace_split import (
+    DECODE_ONLY_OR_GENERIC_MODE,
+    UNSPLIT_MODE,
+    TraceSplitJob,
+    copy_unsplit_trace,
+    run_trace_split,
+)
+from ._tracelens_checkout import run_command
 
-__all__ = ["count_gpu_kernel_events", "discover_trace_inputs", "is_capture_fragment"]
+__all__ = [
+    "DECODE_ONLY_OR_GENERIC_MODE",
+    "UNSPLIT_MODE",
+    "TraceSplitJob",
+    "clamp_stream_overlaps",
+    "copy_unsplit_trace",
+    "count_gpu_kernel_events",
+    "discover_trace_inputs",
+    "is_capture_fragment",
+    "run_command",
+    "run_trace_split",
+]
 
 # The TraceLens commit this repository is pinned to (what a toolbox's preflight compares the importable one with).
 from ._tracelens_checkout import _TRACELENS_REF_DEFAULT as TRACELENS_REF

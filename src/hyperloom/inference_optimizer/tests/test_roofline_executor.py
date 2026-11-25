@@ -1539,6 +1539,26 @@ async def test_the_compute_bound_reprofile_reports_both_of_its_steps(tmp_path, m
 
 
 @pytest.mark.asyncio
+async def test_a_pd_session_skips_the_compute_bound_reprofile_it_cannot_apply(tmp_path, monkeypatch):
+    """A node-list PD session keeps its frozen DP attention, so a host-bound trace is not re-profiled there."""
+    md = tmp_path / "analysis.md"
+    md.write_text("# Executive Summary\n", encoding="utf-8")
+    host_bound = _ta_ok(report_md=md)
+    host_bound["trace_health_warnings"] = [{"code": "high_gpu_idle_pct", "severity": "warning"}]
+    profile = _profile_ok("/tmp/decode.gz")
+    profile["role_traces"] = {"decode": "/tmp/decode.gz"}
+    p1, p2, calls = _n26_patch_subs(profile, [host_bound])
+    monkeypatch.setattr(roofline_mod, "is_multi_node", lambda: True)
+
+    executor = RooflineExecutor(shared_state=_state())
+    with p1, p2, progress_scope(_progress_sink([])):
+        result = await executor(_n26_ctx(tmp_path))
+
+    assert result["status"] == "succeeded"
+    assert len(calls["payloads"]) == 1
+
+
+@pytest.mark.asyncio
 async def test_a_raising_compute_bound_reprofile_crashes_with_the_attempt_rowed(tmp_path, monkeypatch):
     """An attempt that raises crashes the action, and must still appear in the event's ``runs``."""
     from hyperloom.inference_optimizer.session.sbd_v6 import read_timeline_events
