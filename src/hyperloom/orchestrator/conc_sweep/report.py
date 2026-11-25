@@ -58,6 +58,7 @@ def run_facts(base: BaseLaunch | None) -> dict[str, Any]:
             "locator": source.locator,
         }
     return {
+        **({} if base is None else {"gpu_count": base.cards}),
         "image": None if base is None else base.image.run or base.image.recipe,
         "recipe": recipe,
         "host": socket.gethostname(),
@@ -112,7 +113,6 @@ def _write_csv(csv_path: Path, points: list[dict[str, Any]]) -> None:
         "request_throughput",
         "total_token_throughput",
         "input_throughput",
-        "e2e_norm_intvty_p50",
         "e2e_norm_intvty_p90",
         "tpot_p90_ms",
         "ttft_mean_ms",
@@ -121,6 +121,7 @@ def _write_csv(csv_path: Path, points: list[dict[str, Any]]) -> None:
         "completed_requests",
         "error_class",
         "error",
+        "e2e_norm_intvty_p50",
     ]
     csv_path.parent.mkdir(parents=True, exist_ok=True)
     with csv_path.open("w", newline="", encoding=_ENCODING) as fp:

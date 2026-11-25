@@ -29,6 +29,7 @@ from hyperloom.inference_optimizer.grid_server_args import (
     server_args_delta,
 )
 from hyperloom.inference_optimizer.grading import resolved_grading
+from hyperloom.inference_optimizer.session.base_launch import read_base_launch
 from hyperloom.inference_optimizer.session.session_paths import reports_dir, runs_root
 from hyperloom.orchestrator.actions.cancel_channel import current_cancel_scope
 from hyperloom.orchestrator.actions.executors._proposal_identity import controls_of, is_executable, normalize_proposal
@@ -328,7 +329,7 @@ class _Sweep:
 
 
 def _header(state: SharedState, session_dir: Path) -> dict[str, Any]:
-    frozen = frozen_base(session_dir)
+    base = read_base_launch(session_dir)
     return {
         "schema_version": SCHEMA_VERSION,
         "session_id": state.session_id or session_dir.name,
@@ -341,7 +342,7 @@ def _header(state: SharedState, session_dir: Path) -> dict[str, Any]:
         "osl": state.osl,
         "tp": state.tp,
         "ep": state.ep,
-        **run_facts(None if frozen is None else frozen.launch),
+        **run_facts(base),
     }
 
 
@@ -365,7 +366,11 @@ def _resume(sweep: _Sweep) -> None:
     """Keep the points an earlier run of the same sweep measured on the same launch of each arm, so only the rest
     are run."""
     earlier = read_summary(reports_dir(sweep.session_dir))
-    if not earlier or earlier.get("concs") != list(sweep.points.concs):
+    if (
+        not earlier
+        or earlier.get("schema_version") != SCHEMA_VERSION
+        or earlier.get("concs") != list(sweep.points.concs)
+    ):
         return
     for arm in sweep.arms:
         section = earlier[arm.name]

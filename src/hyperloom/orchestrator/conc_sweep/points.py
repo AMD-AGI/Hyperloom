@@ -11,7 +11,7 @@ from dataclasses import dataclass
 
 from inference_suite.contracts.base_launch import BaseLaunch, SourceKind
 
-SCHEMA_VERSION = "2.0"
+SCHEMA_VERSION = "2.1"
 SOURCE_INFERENCEX = "inferencex"
 SOURCE_OPERATOR = "operator"
 

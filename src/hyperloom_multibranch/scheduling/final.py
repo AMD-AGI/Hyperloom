@@ -522,10 +522,9 @@ def sweep_unfinished(layout: SessionLayout, settings: RunSettings) -> bool:
 
 
 def _header(layout: SessionLayout, workload: Workload) -> dict[str, Any]:
-    from hyperloom.orchestrator.state.base_launch import frozen_base
+    from hyperloom.inference_optimizer.session.base_launch import read_base_launch
 
     shape = workload.inferencex
-    frozen = frozen_base(layout.toolbox)
     return {
         "schema_version": SCHEMA_VERSION,
         "session_id": layout.session_id,
@@ -538,7 +537,7 @@ def _header(layout: SessionLayout, workload: Workload) -> dict[str, Any]:
         "osl": None if shape is None else shape.osl,
         "tp": workload.tp,
         "ep": workload.ep,
-        **run_facts(None if frozen is None else frozen.launch),
+        **run_facts(read_base_launch(layout.toolbox)),
     }
 
 
@@ -673,7 +672,9 @@ class ConcSweep:
         """Keep the points an earlier run of the same sweep measured on the same commit of each arm, so only the rest
         are run."""
         earlier = read_summary(self.layout.reports)
-        if not earlier or earlier.get("concs") != list(self.plan.points.concs):
+        if not earlier or earlier.get("schema_version") != SCHEMA_VERSION:
+            return
+        if earlier.get("concs") != list(self.plan.points.concs):
             return
         for arm, commit in ((BASELINE, self.root), (OPTIMIZED, self.plan.chosen)):
             if earlier[arm].get("commit") != commit:

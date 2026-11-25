@@ -42,7 +42,9 @@ def _base(
     source = SimpleNamespace(kind=kind, repo="InferenceX", commit="c22b4b2", entry="entry", locator="recipe.yaml:c16")
     image = SimpleNamespace(run="vllm/vllm-openai-rocm:v0.32.0", recipe=None)
     point = SimpleNamespace(source_concs=concs, source_launches=launches)
-    return SimpleNamespace(source=source, point=point, image=image, args=tuple(args.split()), env={}, golden_al=None)
+    return SimpleNamespace(
+        source=source, point=point, image=image, args=tuple(args.split()), env={}, golden_al=None, cards=2
+    )
 
 
 def _result(variant: GridVariant, *, status: str = "succeeded") -> VariantResult:
@@ -98,6 +100,7 @@ def grid(monkeypatch: pytest.MonkeyPatch) -> SimpleNamespace:
     monkeypatch.setattr(runner, "teardown_variant_server", lambda _: [])
     frozen = SimpleNamespace(launch=_base(SourceKind.INFERENCEX, (4, 8, 32)))
     monkeypatch.setattr(runner, "frozen_base", lambda _: frozen)
+    monkeypatch.setattr(runner, "read_base_launch", lambda _: frozen.launch)
     return SimpleNamespace(calls=calls, failing=failing)
 
 
@@ -319,7 +322,7 @@ def test_the_report_names_the_hardware_the_image_and_the_recipe_and_who_wrote_it
         "framework": "sglang",
         "precision": "fp8",
         "gpu_type": "mi355x",
-        "gpu_count": 8,
+        "gpu_count": 2,
         "tp": 8,
         "ep": 1,
     }
@@ -335,6 +338,7 @@ def _per_conc_base(monkeypatch: pytest.MonkeyPatch, base_args: str, by_conc: dic
     launches = tuple(SourcePointLaunch(conc, tuple(args.split()), {}) for conc, args in by_conc.items())
     frozen = SimpleNamespace(launch=_base(SourceKind.INFERENCEX, tuple(by_conc), launches, base_args))
     monkeypatch.setattr(runner, "frozen_base", lambda _: frozen)
+    monkeypatch.setattr(runner, "read_base_launch", lambda _: frozen.launch)
 
 
 _SLOTS = {4: "--max-running-requests 8", 16: "--max-running-requests 32", 32: "--max-running-requests 64"}
@@ -401,3 +405,16 @@ def test_a_replacing_argv_keeps_its_changes_and_takes_the_recipes_values_at_each
         "replace",
     )
     assert (calls["baseline_conc32"]["args"], calls["baseline_conc32"]["mode"]) == ("--max-num-seqs 256", "append")
+
+
+def test_a_later_run_measures_again_a_report_an_earlier_schema_wrote(session_dir: Path, grid: SimpleNamespace):
+    """A report before per-concurrency launches measured every point on the session's own launch."""
+    _state(session_dir)
+    asyncio.run(runner.run_conc_sweep(session_dir))
+    summary = session_dir / "reports" / "conc_sweep_summary.json"
+    summary.write_text(json.dumps({**json.loads(summary.read_text()), "schema_version": "2.0"}))
+    grid.calls.clear()
+
+    asyncio.run(runner.run_conc_sweep(session_dir))
+
+    assert len(grid.calls) == 8
