@@ -28,7 +28,9 @@ def test_the_capped_phases_spend_the_session_on_the_work_phases():
     budget = _phase_state.DEFAULT_PHASE_BUDGET_PCT
     # ENABLEMENT is uncapped by design: a combo that cannot run has nothing to
     # optimise, so a share of the optimisation budget is the wrong unit for it.
-    assert set(budget) == set(_phase_state.PHASE_NAMES) - {_phase_state.PHASE_ENABLEMENT}
+    # CYCLE_END only drains and validates on entry, which the session budget alone gates.
+    uncapped = {_phase_state.PHASE_ENABLEMENT, _phase_state.PHASE_CYCLE_END}
+    assert set(budget) == set(_phase_state.PHASE_NAMES) - uncapped
     assert sum(budget.values()) <= 1.0
     # How the two work phases divide their share is a tuning call; that the session is spent on them rather than on
     # setup and wind-down is not.

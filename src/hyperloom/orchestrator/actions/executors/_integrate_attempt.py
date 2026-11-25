@@ -26,6 +26,8 @@ class IntegrateAttempt:
 
     task_id: str
     phase_deadline: Deadline | None = None
+    #: Run inside the caller's task, so no registry row of its own ever records how this attempt ended.
+    covered_step: bool = False
     specialist_task_id: str = ""
     specialist_workspace: Path | None = None
     shared_state: SharedState | None = None

@@ -170,8 +170,6 @@ def test_manifest_records_included_and_missing(tmp_path: Path) -> None:
     assert "reports/kernel_roofline.json" not in incl_paths
     # the removed file's glob is reported as unmatched
     assert "reports/kernel_roofline.json" in manifest["unmatched_globs"]
-    # conc_sweep_summary was never created → also unmatched (audit signal)
-    assert "reports/conc_sweep_summary.json" in manifest["unmatched_globs"]
 
 
 def test_empty_session_returns_none(tmp_path: Path) -> None:

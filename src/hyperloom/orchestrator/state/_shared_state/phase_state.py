@@ -309,8 +309,6 @@ class _PhaseStateMixin:
         self.framework_agent_empty_discoveries = 0
         self.rounds_since_last_specialist = {}
         self.rounds_since_last_keep = {}
-        self.last_conc_sweep = {}
-        self.conc_sweep_granted_until_unix = 0.0
 
     def open_macro_cycle(self, *, no_gain_cycle_streak: int) -> None:
         """Start the next macro-cycle and reset its per-cycle state."""

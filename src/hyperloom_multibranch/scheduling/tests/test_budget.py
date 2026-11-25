@@ -58,8 +58,7 @@ def test_constants_match_the_main_flow_sources() -> None:
     assert re.search(r"^DEFAULT_LONGRUN_MAX_MINUTES: int = 14 \* 24 \* 60$", machine, re.M)
     assert MB_UNLIMITED_HOURS == 14 * 24
     shares = {name: int(round(float(pct) * 100)) for name, pct in re.findall(r"PHASE_(\w+): (0\.\d+),", machine)}
-    assert shares["FRAMEWORK_AGENT"] + shares["KERNEL_AGENT"] == MB_EXPLORE_SHARE
-    assert shares["SWEEP"] == MB_FINAL_SHARE
+    assert shares["FRAMEWORK_AGENT"] + shares["KERNEL_AGENT"] == MB_EXPLORE_SHARE + MB_FINAL_SHARE
     assert f"min({MB_CLOSE_GRACE_CAP_SECONDS}, (max_minutes or 0.0) * 60.0 * {MB_CLOSE_GRACE_FRACTION})" in shared
 
 

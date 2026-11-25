@@ -25,7 +25,6 @@ from hyperloom.orchestrator.actions.executors._subprocess_kill import (
     sync_agentx_phase_wait,
 )
 from hyperloom.orchestrator.actions.executors.workload._workload_envs import LaunchLayer
-from hyperloom.orchestrator.kernel._rung_outcomes import _SWEEP_BUDGET_STOP, _deadline_skip_result
 
 
 @pytest.mark.parametrize("declared", [1800, 2400, 36000])
@@ -196,17 +195,6 @@ def test_a_rung_that_clears_the_operators_cap_falls_back_to_its_workloads_size(g
     monkeypatch.setenv("INFERENCE_OPTIMIZER_BENCHMARK_TIMEOUT_SEC", "1234")
     variant = GridVariant("uncapped", unset_envs=["INFERENCE_OPTIMIZER_BENCHMARK_TIMEOUT_SEC"])
     assert granted_cap({"CONC": "28"}, variant) == resolve_benchmark_timeouts(_canonical_env(CONC="28"))[1]
-
-
-def test_a_rung_that_never_ran_publishes_no_grant(monkeypatch):
-    """No config was composed for it and no round of it started, so it was granted no time at all.
-
-    A number here would be the cap of a run nobody made, and the reader cannot tell that
-    apart from the cap a rung was really held to.
-    """
-    monkeypatch.setenv("HYPERLOOM_AGENTX", "1")
-    variant = GridVariant("optimized_conc20", extra_envs={"CONC": "20", "NUM_PROMPTS": "100"})
-    assert _deadline_skip_result(variant, _SWEEP_BUDGET_STOP).granted_cap_sec is None
 
 
 def test_the_client_phase_wait_is_exported_at_the_rungs_own_cap():

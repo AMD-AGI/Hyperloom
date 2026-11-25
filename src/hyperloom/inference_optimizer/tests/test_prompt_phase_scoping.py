@@ -233,10 +233,10 @@ async def test_the_reseeded_override_is_what_the_orchestration_turn_loads(tmp_pa
     ids=["open", "all_directions_saturated", "target_reached", "blank_target_reached"],
 )
 def test_reloop_line_and_transition_agree_at_the_cycle_limits(saturated, target_reached_at):
-    s = _render_state(_ps.PHASE_SWEEP)
+    s = _render_state(_ps.PHASE_CYCLE_END)
     s.saturated_directions = {"kv_cache": {"saturated": saturated}}
     s.target_reached_at = target_reached_at
-    s.last_conc_sweep = {"status": "succeeded", "summary": {"successful_pairs": 1}}
+    s.cycle_end_settled_cycle = s.macro_cycle
     transition = phase_transitions.compute_next_phase(s)
     loops_back = bool(transition) and transition[0] == _ps.PHASE_FRAMEWORK_AGENT
 
@@ -264,8 +264,8 @@ def test_phase_seam_survives_an_unwritable_session_dir(tmp_path):
     blocker.write_text("not a directory", encoding="utf-8")
     handler, coord, _calls = _machine_with_stub_coordinator(tmp_path)
 
-    assert handler._reseed_orch_prompt_for_phase("SWEEP") is True
-    assert coord.orch_prompt.overrides["orchestration"] == "PROMPT[phase=SWEEP]"
+    assert handler._reseed_orch_prompt_for_phase("CYCLE_END") is True
+    assert coord.orch_prompt.overrides["orchestration"] == "PROMPT[phase=CYCLE_END]"
 
 
 # Snapshot paths: one artefact per scope the model ran under
@@ -366,7 +366,7 @@ def _reloop_line(phase: str) -> str | None:
 
 
 def test_reloop_line_reaches_every_mid_chain_phase():
-    for phase in (_ps.PHASE_FRAMEWORK_AGENT, _ps.PHASE_FRAMEWORK_AGENT, _ps.PHASE_KERNEL_AGENT, _ps.PHASE_SWEEP):
+    for phase in (_ps.PHASE_FRAMEWORK_AGENT, _ps.PHASE_FRAMEWORK_AGENT, _ps.PHASE_KERNEL_AGENT, _ps.PHASE_CYCLE_END):
         line = _reloop_line(phase)
         assert line is not None, f"reloop line missing for {phase}"
         # The field name is the prompt/doc contract; models grep for it verbatim.
@@ -380,20 +380,20 @@ def test_reloop_line_absent_in_wind_down_phases():
         assert _reloop_line(phase) is None, f"reloop line leaked into {phase}"
 
 
-def test_reloop_is_a_projection_before_sweep():
+def test_reloop_is_a_projection_before_cycle_end():
     assert "(projected)" in (_reloop_line(_ps.PHASE_FRAMEWORK_AGENT) or "")
-    assert "(projected)" not in (_reloop_line(_ps.PHASE_SWEEP) or "")
+    assert "(projected)" not in (_reloop_line(_ps.PHASE_CYCLE_END) or "")
 
 
 def test_reloop_feasibility_matches_the_transition_decision():
-    s = _render_state(_ps.PHASE_SWEEP)
+    s = _render_state(_ps.PHASE_CYCLE_END)
     reloop, _ = phase_transitions._reloop_decision(phase_predicates.workflow_predicate_inputs(s))
     expected = "true" if reloop else "false"
-    assert f"cycle_reloop_feasible={expected}" in (_reloop_line(_ps.PHASE_SWEEP) or "")
+    assert f"cycle_reloop_feasible={expected}" in (_reloop_line(_ps.PHASE_CYCLE_END) or "")
 
 
 def test_reloop_infeasible_when_the_target_phase_is_disabled():
-    s = _render_state(_ps.PHASE_SWEEP)
+    s = _render_state(_ps.PHASE_CYCLE_END)
     s.framework_agent_phase_enabled = False
     line = next(line for line in phase_transitions.phase_status_summary(s).splitlines() if line.startswith("reloop"))
     assert "cycle_reloop_feasible=false" in line
