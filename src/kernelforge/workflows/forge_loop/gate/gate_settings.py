@@ -22,11 +22,13 @@ class DeviceAccess:
 
     The session sees no device of its own: its commands go through ``runner``, which queues at ``queue_root``. The
     gate's stop check queues there too, and runs the driver under ``environment`` -- the lane's own build caches --
-    because the check runs in the loop's process rather than the session's.
+    because the check runs in the loop's process rather than the session's. A command that still holds the device
+    after ``hold_limit_sec`` is stopped by the runner as hung.
     """
 
     runner: str
     queue_root: str
+    hold_limit_sec: int
     usage_log: str = ""
     lane: str = ""
     environment: Mapping[str, str] = field(default_factory=dict)

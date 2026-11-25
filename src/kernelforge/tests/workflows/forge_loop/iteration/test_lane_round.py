@@ -73,7 +73,10 @@ async def test_a_lane_copy_leaves_the_analysis_evidence_behind_and_carries_its_d
     (layout.lessons / "iter_001.md").write_text("a record\n")
     (workspace / "build.cache").write_text("untracked build state\n")
     lanes = LaneRound(
-        workspace_dir=str(workspace), parent_dir=str(tmp_path), lanes=[LaneAssignment("1"), LaneAssignment("2", "b")]
+        workspace_dir=str(workspace),
+        parent_dir=str(tmp_path),
+        lanes=[LaneAssignment("1"), LaneAssignment("2", "b")],
+        hold_limit_sec=90,
     )
 
     seats = await lanes.open()
@@ -89,6 +92,7 @@ async def test_a_lane_copy_leaves_the_analysis_evidence_behind_and_carries_its_d
             assert seat.device_runner == seat.lane_dir / RUNNER_NAME and seat.device_runner.is_file()
             assert config["queue_root"] == str(campaign_device_queue_path(workspace))
             assert config["lane"] == seat.assignment.lane_id
+            assert config["hold_limit_sec"] == 90
             status = subprocess.run(
                 ["git", "status", "--porcelain"], cwd=seat.lane_dir, capture_output=True, text=True, check=True
             )
@@ -102,7 +106,9 @@ async def test_a_lane_copy_leaves_the_analysis_evidence_behind_and_carries_its_d
 
 async def test_a_lane_diff_carries_the_new_files_it_is_given_and_leaves_the_lanes_index_alone(tmp_path, monkeypatch):
     workspace, _kernel, _driver = _initialize_workspace(tmp_path, monkeypatch)
-    lanes = LaneRound(workspace_dir=str(workspace), parent_dir=str(tmp_path), lanes=[LaneAssignment("1")])
+    lanes = LaneRound(
+        workspace_dir=str(workspace), parent_dir=str(tmp_path), lanes=[LaneAssignment("1")], hold_limit_sec=90
+    )
     (seat,) = await lanes.open()
     try:
         (seat.lane_dir / "kernel.py").write_text("def kernel():\n    return 2\n")
@@ -130,6 +136,7 @@ def test_a_round_of_one_lane_works_in_a_copy_and_its_change_is_measured_on_the_c
     _stub_measurement(monkeypatch, walls=[0.5])
     worked_in: list[Path] = []
     gains: list[bool] = []
+    hold_limits: list[int] = []
 
     async def agent(kernel_path, history, session_sink):
         worked_in.append(Path(kernel_path))
@@ -140,6 +147,7 @@ def test_a_round_of_one_lane_works_in_a_copy_and_its_change_is_measured_on_the_c
 
     def factory(seat, *, gain_required):
         gains.append(gain_required)
+        hold_limits.append(seat.hold_limit_sec)
         return agent
 
     asyncio.run(loop.run(replace(lane_agents(agent, supervisor_fn=_unused_supervisor), agent_factory=factory)))
@@ -149,6 +157,8 @@ def test_a_round_of_one_lane_works_in_a_copy_and_its_change_is_measured_on_the_c
     assert any(part.startswith(LANE_ROOT_PREFIX) for part in worked_in[0].parts)
     # Alone in its round, the lane's stop has to beat the current best: there is no merge to use anything less.
     assert gains == [True]
+    # A command is stopped as hung only after twice what the engine allows one of its own benchmark runs.
+    assert hold_limits == [2 * loop.ic.bench_timeout_sec]
     assert _decisions(workspace) == ["KEEP"]
     assert (workspace / "kernel.py").read_text() == "def kernel():\n    return 2\n"
     assert _lane_copies(workspace) == []

@@ -21,6 +21,7 @@ from kernelforge.workflows.forge_loop.iteration.fanout import (
     LaneResult,
     LaneRound,
     LaneSeat,
+    device_hold_limit_sec,
     lane_diff,
 )
 from kernelforge.workflows.forge_loop.iteration.iteration_types import (
@@ -96,6 +97,7 @@ class LaneRuntimeMixin:
             workspace_dir=self.ic.workspace_dir,
             parent_dir=str(Path(self.ic.workspace_dir).resolve().parent),
             lanes=assignments,
+            hold_limit_sec=device_hold_limit_sec(self.ic.bench_timeout_sec),
         )
         await self._lane_round.open()
         kernel_relative = self._workspace_path(self.ic.kernel_file)

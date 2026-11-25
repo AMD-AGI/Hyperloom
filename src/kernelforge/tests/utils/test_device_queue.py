@@ -197,7 +197,7 @@ def test_a_command_that_outlasts_the_hold_limit_is_stopped_with_everything_it_st
     result = _run(runner, sys.executable, "-c", spawns_a_child)
 
     assert result.returncode == HOLD_LIMIT_EXIT_STATUS
-    assert "one command may hold the device no longer" in result.stderr
+    assert "taken for hung" in result.stderr
     assert _usage(lane)[0]["hold_limit_reached"] is True
     grandchild = int(child_pid.read_text())
     deadline = time.monotonic() + 10

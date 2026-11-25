@@ -169,6 +169,7 @@ def _make_lane_agent_factory(
         device = DeviceAccess(
             runner=str(seat.device_runner),
             queue_root=str(seat.queue_root),
+            hold_limit_sec=seat.hold_limit_sec,
             usage_log=str(seat.usage_log),
             lane=seat.assignment.lane_id,
             environment=measurement_env,

@@ -113,6 +113,7 @@ def test_a_lanes_stop_check_holds_the_shared_device_and_measures_in_the_lanes_en
     device = DeviceAccess(
         runner=str(tmp_path / "forge_device.py"),
         queue_root=str(tmp_path / "queue"),
+        hold_limit_sec=600,
         usage_log=str(tmp_path / "usage.jsonl"),
         lane="2",
         environment={"AITER_JIT_DIR": "/lane-2/jit"},

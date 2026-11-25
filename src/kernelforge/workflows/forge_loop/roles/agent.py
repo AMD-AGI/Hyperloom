@@ -134,8 +134,11 @@ unchanged with the same input and output, and returns its exit status. Use it
 for the driver, for a benchmark script of your own and for a profiler alike.
 - It may sit silent before your command starts. That wait is another session's
   measurement, not a hang: wait for it.
-- One command may hold the GPU for at most {max_command_minutes} minutes and is
-  stopped after that, so split a long sweep into several commands.
+- The other sessions wait while your command holds the GPU. Keep each command
+  under {max_command_minutes} minutes, as for every measurement, and split a
+  long sweep into several commands.
+- A command that still holds the GPU after {hold_limit_minutes} minutes is
+  taken for hung and stopped, with everything it started.
 - Do not set `HIP_VISIBLE_DEVICES` or `CUDA_VISIBLE_DEVICES` yourself: timing
   two kernels on one device at once corrupts both numbers, including the ones
   this session is judged on.
@@ -338,7 +341,11 @@ def _shared_device_section(device: DeviceAccess | None) -> str:
     """How a session whose device is shared reaches it; nothing for a session with a device of its own."""
     if device is None:
         return ""
-    return _SHARED_DEVICE_SECTION.format(device_runner=device.runner, max_command_minutes=MAX_COMMAND_MINUTES)
+    return _SHARED_DEVICE_SECTION.format(
+        device_runner=device.runner,
+        max_command_minutes=MAX_COMMAND_MINUTES,
+        hold_limit_minutes=f"{device.hold_limit_sec / 60:g}",
+    )
 
 
 def _pr_kb_child_env() -> dict[str, str]:

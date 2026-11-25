@@ -164,6 +164,7 @@ def _seat(tmp_path: Path, lane_dir: Path, lane_id: str) -> LaneSeat:
         device_runner=lane_dir / RUNNER_NAME,
         queue_root=tmp_path / "device-queue",
         usage_log=tmp_path / "device_usage.jsonl",
+        hold_limit_sec=600,
     )
 
 

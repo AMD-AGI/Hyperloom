@@ -98,9 +98,10 @@ one shape whatever its width:
    benchmark script of the session's own, a profiler -- goes through the
    lane's device runner, `python3 <lane>/forge_device.py <command>`, which
    waits its turn, makes the device visible to that command and runs it
-   unchanged. Commands are served in the order they arrived, one command may
-   hold the device for at most 4 minutes, and a lane's stop check waits in the
-   same queue. Waiting counts toward the session's budget, so a round never
+   unchanged. Commands are served in the order they arrived, and a lane's stop
+   check waits in the same queue. A session is asked to keep each command
+   under 4 minutes; a command that still holds the device after twice the
+   engine's benchmark timeout (10 minutes) is stopped as hung. Waiting counts toward the session's budget, so a round never
    outlasts one session budget however wide it is. Every hold is recorded in
    `forge_experiments/device_usage.jsonl` with the lane, how long it waited and
    how long it held.

@@ -123,6 +123,7 @@ def _seat(tmp_path: Path, lane_dir: Path) -> LaneSeat:
         device_runner=lane_dir / RUNNER_NAME,
         queue_root=tmp_path / "device-queue",
         usage_log=tmp_path / "device_usage.jsonl",
+        hold_limit_sec=600,
     )
 
 
@@ -286,6 +287,10 @@ def test_a_lane_is_told_to_reach_the_gpu_through_its_runner(tmp_path, monkeypatc
     assert f"python3 {runner} <command> [args...]" in spec.system_prompt
     # The driver commands the session is shown already go through it.
     assert f"python3 {runner} python3 forge_driver.py --warmup 3 --iters 20 --bench-mode" in spec.system_prompt
+    # The length it is asked to keep a command to is its own to follow; the runner only stops a command as hung.
+    prompt = " ".join(spec.system_prompt.split())
+    assert "Keep each command under 4 minutes" in prompt
+    assert "still holds the GPU after 10 minutes is taken for hung and stopped" in prompt
 
 
 def test_a_lane_hook_denies_a_command_that_selects_a_device_around_the_queue(tmp_path, monkeypatch):

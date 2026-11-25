@@ -246,8 +246,8 @@ def main(argv: list) -> int:
         held = time.monotonic() - started
     if limited:
         sys.stderr.write(
-            f"[device] stopped after {config['hold_limit_sec']}s: one command may hold the device no longer. "
-            "Split the work into shorter commands.\n"
+            f"[device] stopped after {config['hold_limit_sec']}s: a command that holds the device this long is "
+            "taken for hung. If it was still working, split it into shorter commands.\n"
         )
     record = usage_record(lane=config["lane"], command=" ".join(argv), wait_sec=waited, hold_sec=held)
     record.update(status=status, hold_limit_reached=limited)

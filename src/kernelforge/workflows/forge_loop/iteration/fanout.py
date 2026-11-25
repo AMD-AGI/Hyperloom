@@ -22,13 +22,25 @@ from kernelforge.utils.process_reaping import (
     reap_processes_under,
 )
 from kernelforge.workflows.forge_loop.campaign.experiments_layout import ExperimentsLayout
-from kernelforge.workflows.forge_loop.roles.implementer_method import MAX_COMMAND_MINUTES
 
 log = logging.getLogger(__name__)
 
 DEVICE_QUEUE_SUFFIX = ".forge-device-queue"
 LANE_ROOT_PREFIX = "forge-lanes-"
 _GIT_PATH = "--git-path"
+# How many of the campaign's benchmark timeouts one lane command may hold the shared device for.
+_HOLD_LIMIT_BENCH_TIMEOUTS = 2
+
+
+def device_hold_limit_sec(bench_timeout_sec: int) -> int:
+    """How long one lane command may hold the shared device before it is stopped as hung.
+
+    A backstop, not the length sessions are asked to keep a command to: that is shorter and is theirs to follow.
+    This one only keeps a command that never returns from holding the other lanes for the rest of their sessions.
+    It follows the time the engine allows one of its own benchmark runs, so it is long enough for a correctness run
+    and a benchmark in one command on any kernel the engine can measure at all.
+    """
+    return _HOLD_LIMIT_BENCH_TIMEOUTS * int(bench_timeout_sec)
 
 
 def campaign_device_queue_path(workspace: str | Path) -> Path:
@@ -54,6 +66,8 @@ class LaneSeat:
     device_runner: Path
     queue_root: Path
     usage_log: Path
+    # Seconds one command may hold the device before the runner stops it as hung.
+    hold_limit_sec: int
 
 
 @dataclass
@@ -196,7 +210,7 @@ async def _install_device_runner(seat: LaneSeat) -> None:
             queue_root=seat.queue_root,
             usage_log=seat.usage_log,
             lane=seat.assignment.lane_id,
-            hold_limit_sec=MAX_COMMAND_MINUTES * 60,
+            hold_limit_sec=seat.hold_limit_sec,
             environment=device_queue.visible_device_environment(),
         ),
     )
@@ -229,10 +243,13 @@ def lane_diff(lane_dir: Path, new_paths: Sequence[str] = ()) -> str:
 class LaneRound:
     """The workspace copies of one round, kept until the round's sessions have written their records."""
 
-    def __init__(self, *, workspace_dir: str, parent_dir: str, lanes: Sequence[LaneAssignment]) -> None:
+    def __init__(
+        self, *, workspace_dir: str, parent_dir: str, lanes: Sequence[LaneAssignment], hold_limit_sec: int
+    ) -> None:
         self.source = Path(workspace_dir).resolve()
         self.parent = Path(parent_dir).resolve()
         self.lanes = list(lanes)
+        self.hold_limit_sec = hold_limit_sec
         self.root: Path | None = None
         self.seats: list[LaneSeat] = []
 
@@ -255,6 +272,7 @@ class LaneRound:
                 device_runner=lane_dir / device_queue.RUNNER_NAME,
                 queue_root=queue_root,
                 usage_log=layout.device_usage,
+                hold_limit_sec=self.hold_limit_sec,
             )
             for lane in self.lanes
         ]
