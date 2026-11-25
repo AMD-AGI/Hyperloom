@@ -102,8 +102,8 @@ def _authors_patches(inp: SpecialistPromptInputs) -> bool:
     return inp.mode == MODE_PATCH
 
 
-#: Throughput domains whose focus block offers flags first, so the coda has
-#: something to raise the sights from. ``enablement_specialist`` is absent
+#: Throughput domains that can answer a gap with a flag or with source, so the
+#: coda raises the sights from the former. ``enablement_specialist`` is absent
 #: because its ladder book says climb only as far as runnability needs;
 #: ``framework_rewrite_specialist`` because it authors source rewrites and
 #: nothing else, and already carries its own "Where the wins are" taxonomy;
@@ -127,7 +127,7 @@ def _source_patch_altitude_block(inp: SpecialistPromptInputs) -> list[str]:
         "",
         "### Altitude — where the durable wins are",
         "",
-        "The flags above are cheap to validate and their ceiling is fixed by",
+        "Flags and env vars are cheap to validate and their ceiling is fixed by",
         "whoever wired them up; a source change moves that ceiling and keeps",
         "paying in later rounds. When the cheap levers do not close the gap, stop",
         "permuting them and read the source for:",
