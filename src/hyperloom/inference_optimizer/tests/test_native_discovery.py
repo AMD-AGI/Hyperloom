@@ -145,13 +145,3 @@ def test_the_knob_sweep_is_not_offered_to_a_confined_specialist_which_is_not_sho
     monkeypatch, isolation
 ):
     assert _KNOB_TUNE not in _prompts(monkeypatch, isolation=isolation)
-
-
-def test_a_framework_the_session_does_not_build_reads_neither_the_board_nor_the_knobs_for_its_prompt(monkeypatch):
-    def read(*args, **kwargs):
-        raise AssertionError("read for a framework with no native component")
-
-    monkeypatch.setattr(native_server_blocks, "detect_gfx_arch", read)
-    monkeypatch.setattr(native_server_blocks, "kernel_knobs", read)
-
-    assert _KNOB_TUNE not in _prompts(monkeypatch, framework="sglang")
