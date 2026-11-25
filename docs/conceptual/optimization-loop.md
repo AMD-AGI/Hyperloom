@@ -572,7 +572,10 @@ skipped by that gate, a configuration proposal is benched.
 local-exploration arm's budget. The kernel phase and the PRELUDE warm replay
 never reach that gate, so the flag turns both off as well, as `--no-kernel` and
 `--no-warm-replay` do: the one flag gives a result that holds only server
-arguments and environment variables.
+arguments and environment variables. Passed on a resume, the flag holds from
+that leg on and removes nothing the session kept before it: a source patch stays
+on the stack, and a session that kept an install or a runtime in enablement has
+its next enablement round refused.
 
 `specialist` serves both levers — investigation, patch authoring, and
 candidate discovery are all dispatches of the one specialist action. An
