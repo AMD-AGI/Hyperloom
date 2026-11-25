@@ -353,6 +353,8 @@ forbidden_modules =
     inference_suite.framework_probe
     inference_suite.framework_version
     inference_suite.load
+    inference_suite.multinode.inferencex
+    inference_suite.multinode.query
     inference_suite.multinode.record
     inference_suite.multinode.render
     inference_suite.multinode.table
