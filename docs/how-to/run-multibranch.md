@@ -187,8 +187,8 @@ host has no token. The session logs one WARNING when its toolbox is built. Every
   `--[no-]make-before-break` (hosted only, default on: where the grant fits at least three tests at TP, a finished
   test's sandbox is kept until the next test's runs, so that the cluster does not give its node to another job, and one
   test fewer runs at once; off runs every test the grant fits).
-- **Concurrency sweep:** `--[no-]enable-conc-sweep` (on by default) and `--conc-sweep-concs C1,C2,...` (see
-  [Concurrency sweep after CLOSE](#concurrency-sweep-after-close)).
+- **Concurrency sweep:** `--[no-]enable-conc-sweep` (on by default), `--conc-sweep-concs C1,C2,...` and
+  `--conc-sweep-parallel N` (see [Concurrency sweep after CLOSE](#concurrency-sweep-after-close)).
 - **Directions:** `--specialist-prompt FILE` and `--reference NAME=DIR`, each repeatable.
 - **Third-party agents:** `--autonomous-agent SOURCE` (repeatable; a URL carrying credentials is refused),
   `--agent-directions`, `--agent-dossier-minutes`, `--agent-share-minutes`, `--agent-pack`, `--agent-launch`,
@@ -247,19 +247,27 @@ A session that cannot be resumed but stopped before FINAL can still be finished 
 
 `run` (on by default; `--no-enable-conc-sweep`, hosted `multibranch.conc_sweep: false`, turns it off) sweeps the closed session's root and the commit
 FINAL chose once CLOSE has run, apart from `--max-hours` and `--max-gpu-hours`; `conc-sweep SESSION_DIR` runs the same
-sweep by hand, measured on this machine. It runs only when FINAL chose a commit other than the root whose reproduction
-gained over the baseline. The points are every concurrency the InferenceX recipe of the frozen base publishes for the
-workload, with `--conc` among them; a `--reference-script` base takes them from `--conc-sweep-concs C1,C2,...`
-(hosted: `multibranch.conc_sweep_concs`). Both arms are submitted at once and run side by side where the session runs
-two tests at once (`--max-parallel-tests`), else one after the other. An AgentX point is a test of its own; an
-InferenceX arm is one sweep test over all its points, whose timeout scales with them. The tests are session
-measurements of the commits as they are: no accuracy and no checks.
+sweep by hand, measured on this machine, and takes `--conc-sweep-concs` and `--conc-sweep-parallel` in place of the
+session's own. It runs only when FINAL chose a commit other than the root whose reproduction gained over the baseline.
+The points are `--conc-sweep-concs C1,C2,...` when given (hosted: `multibranch.conc_sweep_concs`), else every
+concurrency the InferenceX recipe of the frozen base publishes for the workload, with `--conc` among them; a
+`--reference-script` base needs them given. Each point is seeded with the recipe's own launch at its concurrency
+(the nearest higher one the recipe publishes, else its highest), under the commit's own changes; a point whose launch
+caps the requests the server runs at once (`--max-num-seqs`, `--max-running-requests`, `-np`) below its concurrency
+is dropped. The tests run a concurrency's baseline and commit point together, `--conc-sweep-parallel N` of them at
+once (hosted: `multibranch.conc_sweep_parallel`; 2 by default, 1 for one at a time), within `--max-parallel-tests`.
+An AgentX point is a test of its own; an InferenceX arm is one sweep test over the points that launch alike, whose
+timeout scales with them. The tests are session measurements of the commits as they are: no accuracy and no checks.
 
-The sweep logs its estimated length (each point priced as the session's longest root test) and, hosted, what is
-left of the grant. It writes `MB-reports/conc_sweep_summary.json`, `conc_sweep_raw.csv` and `conc_sweep_curve.png`,
-the summary after every test, with `status` `succeeded`, `partial`, `failed`, `skipped` or `cancelled` (a stop
-signal; the measured points stay). A later run measures only the points not yet measured, and a hosted restart of a
-session that closed before its sweep finished sweeps it again before it writes `exit.json`.
+The sweep logs its estimated length (each point priced as the session's longest root test) and, hosted, how long it
+has: a point that would end past the grant's tests' end is not started and reads `skipped_budget`. It writes
+`MB-reports/conc_sweep_summary.json`, `conc_sweep_raw.csv` and `conc_sweep_curve.png`, the summary after every test,
+with `status` `succeeded`, `partial`, `failed`, `skipped` or `cancelled` (a stop signal; the measured points stay). A
+later run measures only the points not yet measured, and a hosted restart of a session that closed before its sweep
+finished sweeps it again before it writes `exit.json`. A hosted run with `flow: "conc_sweep"` sweeps the closed
+session `conc_sweep.session_dir` names and optimizes nothing (see the single-lineage
+[optimize guide](optimize.md)); the runner source is cloned per commit (`MB-runner-source/<sha>`), so a run of newer
+code than the session's measures with its own.
 
 ## Exit codes
 

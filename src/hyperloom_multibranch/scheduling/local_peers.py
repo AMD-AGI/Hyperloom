@@ -98,6 +98,7 @@ if TYPE_CHECKING:
     from hyperloom.measure.pins import ActiveImage
     from hyperloom.measure.points import CanonicalMeasurement
     from hyperloom.orchestrator.state.base_launch import ServerBase
+    from inference_suite.contracts import BaseLaunch
     from hyperloom_multibranch.specialist.agent_session import AgentCommand
     from hyperloom_multibranch.specialist.agent_sessions import AgentSandboxes
     from hyperloom_multibranch.specialist.dev_sandbox import DevLeases, SandboxFor
@@ -343,13 +344,14 @@ def workload_rule(workload: Workload, blackboard: CommitQuery) -> Rule:
     return InferenceXRule(blackboard, workload.conc)
 
 
-def _canonical(out_dir: Path, workload: Workload, host: MeasurementHost, base: ServerBase) -> CanonicalMeasurement:
+def _canonical(out_dir: Path, workload: Workload, host: MeasurementHost, frozen: BaseLaunch) -> CanonicalMeasurement:
     """The canonical measurement every point of the session is rendered from. The renderer takes the model and the
     runner type only as arguments, so a point never falls back to the shipped YAML's model, and the server half of the
-    session's frozen ``base`` too: this process is no Hyperloom session, so an AgentX point is seeded with no base it
-    would find. Raises :class:`PeersUnavailable` when it cannot be rendered."""
+    session's ``frozen`` base too, at each point's level: this process is no Hyperloom session, so an AgentX point is
+    seeded with no base it would find. Raises :class:`PeersUnavailable` when it cannot be rendered."""
 
     from hyperloom.measure.points import PointError, default_canonical
+    from hyperloom.orchestrator.state.base_launch import server_base
 
     try:
         return default_canonical(
@@ -358,7 +360,8 @@ def _canonical(out_dir: Path, workload: Workload, host: MeasurementHost, base: S
             model_path=resolve_serving_model_path(workload.model),
             gpu_type=workload.gpu_type,
             inferencex_path=host.inferencex.path,
-            server_base=base,
+            server_base=server_base(frozen),
+            frozen_base=frozen,
         )
     except PointError as exc:
         raise PeersUnavailable(f"the canonical measurement cannot be taken: {exc}") from exc
@@ -399,7 +402,7 @@ def local_peers(host: MeasurementHost, sessions: SpecialistSessions, setup: Peer
     native = native_trees(os.environ)
     repo = GitExperimentRepo(layout.repo, setup.blobs, native=native)
     canonical_dir = layout.toolbox / CANONICAL_DIR
-    toolbox = _toolbox(host, setup, repo, _canonical(canonical_dir, workload, host, base))
+    toolbox = _toolbox(host, setup, repo, _canonical(canonical_dir, workload, host, frozen.launch))
     gate_blackboard = LocalBlackboard(layout.blackboard, Writer(Role.GATE, GATE_WRITER))
     rule = workload_rule(workload, gate_blackboard)
 

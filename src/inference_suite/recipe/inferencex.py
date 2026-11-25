@@ -14,7 +14,7 @@ from __future__ import annotations
 import copy
 import json
 from collections.abc import Iterator, Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from decimal import Decimal
 from enum import Enum
 from typing import Any
@@ -579,6 +579,15 @@ def _launch(
     )
 
 
+def _arm_launches(
+    points: Sequence[InferencexPoint], query: LaunchQuery, snapshot: InferencexSnapshot, concs: tuple[int, ...]
+) -> tuple[SourceLaunch, ...]:
+    """The launch every point of an arm binds at its own concurrency, ascending; a point InferenceX refused or this
+    source cannot reproduce is left out."""
+    launches = (_launch(each, query, snapshot, each.conc, concs) for each in sorted(points, key=lambda p: p.conc))
+    return tuple(launch for launch in launches if not isinstance(launch, str))
+
+
 def _misfit(point: InferencexPoint, query: LaunchQuery) -> str | None:
     """Why ``point`` cannot serve ``query``, which it already matches on model, framework and board."""
     if point.scenario is not _SCENARIO_OF[query.workload]:
@@ -670,15 +679,16 @@ def inferencex_launches(query: LaunchQuery, snapshot: InferencexSnapshot) -> tup
     launches = []
     for arm_key, points in arms.items():
         point = _arm_point(points, target)
+        concs = tuple(sorted({each.conc for each in points}))
         launch = (
             f"it has no point at concurrency {target} or above"
             if point is None
-            else _launch(point, query, snapshot, target, tuple(sorted({each.conc for each in points})))
+            else _launch(point, query, snapshot, target, concs)
         )
         if isinstance(launch, str):
             reasons[arm_key] = launch
         else:
-            launches.append(launch)
+            launches.append(replace(launch, source_launches=_arm_launches(points, query, snapshot, concs)))
     if launches:
         return tuple(launches)
     return SourceMiss(SourceKind.INFERENCEX, "; ".join(f"{arm}: {reason}" for arm, reason in sorted(reasons.items())))

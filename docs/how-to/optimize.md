@@ -200,26 +200,58 @@ pipeline, or downstream integration on top of this file — see
 A concurrency sweep runs once the session closes, apart from its time budget
 (on by default; `--no-enable-conc-sweep` turns it off); `hyperloom conc-sweep SESSION_DIR` runs the same sweep by
 hand on a finished session. It runs only when the session kept a validated
-gain, and measures the baseline and the optimized launch, one after the other,
-at every concurrency the session's InferenceX recipe publishes for its workload
-(its TP and EP, and its ISL/OSL or agentic scenario), with the session's own
-`--conc` among them. A base from `--reference-script` has no recipe points:
-give them with `--conc-sweep-concs C1,C2,...`. An AgentX point boots a server
-of its own; a fixed-length workload keeps one server per arm. When either arm's
-server args cap its request slots (llama.cpp's `-np` / `--parallel`), the points
-above the larger cap are dropped, since the server only queues the rest; with
-none left the sweep is skipped (`concs_exceed_server_slots`).
+gain, and measures the baseline and the optimized launch at every concurrency
+the session's InferenceX recipe publishes for its workload (its TP and EP, and
+its ISL/OSL or agentic scenario), with the session's own `--conc` among them.
+`--conc-sweep-concs C1,C2,...`, on `optimize` or on `conc-sweep`, sweeps those
+concurrencies instead; a base from `--reference-script` has no recipe points and
+needs them.
+
+Each point launches as the recipe launches its own concurrency: the base the
+session froze holds the recipe's launch at every concurrency of its arm
+(`point.source_launches` in `base_launch.json`), and a point runs that launch's
+args and environment in place of the session's own, with the optimization
+stacked on top (what it sets wins; what it removes stays removed). A concurrency
+the recipe does not publish runs the launch of the nearest higher one, else its
+highest. An AgentX point boots a server of its own; a fixed-length workload
+keeps one server across consecutive points that launch alike. A point whose
+launch caps the requests the server runs at once below its concurrency
+(llama.cpp's `-np` / `--parallel`, vLLM's `--max-num-seqs`, SGLang's
+`--max-running-requests`) on both arms is dropped, since the server only queues
+the rest; with none left the sweep is skipped (`concs_exceed_server_slots`).
+
+A multi-branch session runs a concurrency's baseline and optimized point side by
+side, within `--max-parallel-tests`; `--conc-sweep-parallel N` runs up to N of
+the sweep's tests at once, 1 one at a time. A single-lineage session runs one
+point at a time.
 
 The sweep logs its estimated length before it starts, rewrites
 `reports/conc_sweep_summary.json` and `reports/conc_sweep_raw.csv` after every
 point, and draws `reports/conc_sweep_curve.png` (interactivity against
-throughput per GPU) at the end. Its `status` is `succeeded`, `partial`,
-`failed`, `skipped` (with `skip_reason`) or `cancelled` (SIGINT or SIGTERM;
-the measured points stay). A later run measures only the points not yet
-measured on the same launch of each arm. Multi-node and MLPerf sessions are
-skipped, and so is a session whose retained overlay cannot load
-(`optimized_overlay_unavailable`). The session package is rebuilt after the
-sweep so it carries the report.
+throughput per GPU) at the end. The summary's header names the framework,
+precision, GPU type and count, TP and EP, the image and the recipe the base came
+from, and the host and process writing it with `updated_at`, so a summary still
+`in_progress` whose process is gone reads as cut short. Its `status` is
+`succeeded`, `partial`, `failed`, `skipped` (with `skip_reason`) or `cancelled`
+(SIGINT or SIGTERM; the measured points stay). Given a deadline (a hosted run's
+grant), a point that would end past it is not started and reads
+`skipped_budget`. A later run measures only the points not yet measured on the
+same launch of each arm. Multi-node and MLPerf sessions are skipped, and so is a
+session whose retained overlay cannot load (`optimized_overlay_unavailable`).
+The session package is rebuilt after the sweep so it carries the report.
+
+The latency columns follow InferenceX's own reports: for an AgentX workload its
+client computes `itl` and `tpot` from the same per-request inter-token latency
+(`infx/results/agentic/request_metrics.py`), so `tpot_p90_ms` is the ITL p90.
+
+A hosted run sweeps a closed session with a campaign spec of `flow:
+"conc_sweep"`: `conc_sweep.session_dir` names the session (an absolute path the
+run can read and write; the report is written back into it), `conc_sweep.concs`
+its points and `conc_sweep.parallel` the tests at once of a multi-branch
+session. The run optimizes nothing and ends `final: true` however the sweep
+ends; to finish a `partial` or `cancelled` sweep, start another such run on the
+same session, which measures only the points not yet measured. A single-lineage
+session is measured on the run's own cards.
 
 ## Troubleshooting
 

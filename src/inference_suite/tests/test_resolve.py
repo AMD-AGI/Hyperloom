@@ -365,6 +365,15 @@ def test_an_inferencex_base_records_every_concurrency_of_its_arm():
     assert _base(_fixed(concurrencies=(min(concs),))).point.source_concs == concs
 
 
+def test_an_inferencex_base_records_the_launch_of_every_concurrency_of_its_arm_its_own_as_it_launches():
+    base = _base(_fixed())
+    launches = {launch.conc: launch for launch in base.point.source_launches}
+
+    assert tuple(launches) == base.point.source_concs
+    own = launches[base.point.conc]
+    assert own.args == base.args and dict(own.env) == {k: v for k, v in base.env.items() if isinstance(v, str)}
+
+
 def test_tp_ambiguity_takes_the_largest_tp_the_gpus_fit_and_records_the_rest():
     eight = _base(_fixed(), gpus=8)
     assert eight.topology == Topology(8)

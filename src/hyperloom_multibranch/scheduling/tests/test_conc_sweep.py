@@ -66,10 +66,10 @@ def _layout(tmp_path: Path, chosen: FinalCandidate | None = CHOSEN, gain_pct: fl
 
 @pytest.fixture
 def inferencex_base(monkeypatch: pytest.MonkeyPatch) -> None:
-    point = SimpleNamespace(source_concs=(4, 32))
+    point = SimpleNamespace(source_concs=(4, 32), source_launches=())
     source = SimpleNamespace(kind=SourceKind.INFERENCEX, repo="InferenceX", commit="c22b4b2", entry="e", locator="l")
     image = SimpleNamespace(run="sglang:v0.5", recipe=None)
-    launch = SimpleNamespace(source=source, point=point, image=image)
+    launch = SimpleNamespace(source=source, point=point, image=image, args=(), env={}, golden_al=None)
     monkeypatch.setattr(base_launch, "frozen_base", lambda _toolbox: SimpleNamespace(launch=launch))
 
 
@@ -323,3 +323,41 @@ def test_a_point_that_would_end_past_the_deadline_is_skipped_and_not_started(
         ("optimized", 4),
         ("optimized", 32),
     ]
+
+
+def _per_conc_base(monkeypatch: pytest.MonkeyPatch, by_conc: dict[int, str]) -> None:
+    from inference_suite.contracts import SourcePointLaunch
+
+    launches = tuple(SourcePointLaunch(conc, tuple(args.split()), {}) for conc, args in by_conc.items())
+    point = SimpleNamespace(source_concs=tuple(by_conc), source_launches=launches)
+    source = SimpleNamespace(kind=SourceKind.INFERENCEX, repo="InferenceX", commit="c22b4b2", entry="e", locator="l")
+    image = SimpleNamespace(run="sglang:v0.5", recipe=None)
+    args = tuple(by_conc[WORKLOAD.conc].split())
+    launch = SimpleNamespace(source=source, point=point, image=image, args=args, env={}, golden_al=None)
+    monkeypatch.setattr(base_launch, "frozen_base", lambda _toolbox: SimpleNamespace(launch=launch))
+
+
+def test_an_inferencex_sweep_tests_each_launch_apart_and_drops_points_past_its_slots(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    by_conc = {4: "--max-running-requests 8", 16: "--max-running-requests 32", 32: "--max-running-requests 16"}
+    _per_conc_base(monkeypatch, by_conc)
+    layout, tests = _layout(tmp_path), _Tests()
+
+    plan = final.sweep_plan(layout, _settings())
+    payload = asyncio.run(_sweep(layout, _settings(), tests).run(_never()))
+
+    assert plan == final.SweepPlan("c0ffee", SweepPoints((4, 16), "inferencex"), ((4,), (16,)))
+    assert sorted((r.parent_commit, r.concurrency) for r in tests.requests) == [
+        ("c0ffee", (4,)),
+        ("c0ffee", (16,)),
+        ("root", (4,)),
+        ("root", (16,)),
+    ]
+    assert payload["status"] == "succeeded"
+
+
+def test_a_sweep_whose_every_point_is_past_its_slots_is_skipped(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    _per_conc_base(monkeypatch, {4: "--max-running-requests 2", 16: "--max-running-requests 8"})
+
+    assert final.sweep_plan(_layout(tmp_path), _settings()) == final.CONCS_EXCEED_SERVER_SLOTS

@@ -16,7 +16,7 @@ from hyperloom.orchestrator.conc_sweep import points, runner
 from hyperloom.orchestrator.actions.cancel_channel import CancelScope, use_cancel_scope
 from hyperloom.orchestrator.actions.executors.grid._grid_runner import GridVariant, VariantResult
 from hyperloom.orchestrator.state.shared_state import SharedState
-from inference_suite.contracts.base_launch import SourceKind
+from inference_suite.contracts.base_launch import SourceKind, SourcePointLaunch
 
 
 def _state(session_dir: Path, **fields: Any) -> SharedState:
@@ -36,10 +36,13 @@ def _state(session_dir: Path, **fields: Any) -> SharedState:
     return state
 
 
-def _base(kind: SourceKind, concs: tuple[int, ...]) -> SimpleNamespace:
+def _base(
+    kind: SourceKind, concs: tuple[int, ...], launches: tuple[SourcePointLaunch, ...] = (), args: str = ""
+) -> SimpleNamespace:
     source = SimpleNamespace(kind=kind, repo="InferenceX", commit="c22b4b2", entry="entry", locator="recipe.yaml:c16")
     image = SimpleNamespace(run="vllm/vllm-openai-rocm:v0.32.0", recipe=None)
-    return SimpleNamespace(source=source, point=SimpleNamespace(source_concs=concs), image=image)
+    point = SimpleNamespace(source_concs=concs, source_launches=launches)
+    return SimpleNamespace(source=source, point=point, image=image, args=tuple(args.split()), env={}, golden_al=None)
 
 
 def _result(variant: GridVariant, *, status: str = "succeeded") -> VariantResult:
@@ -71,7 +74,15 @@ def grid(monkeypatch: pytest.MonkeyPatch) -> SimpleNamespace:
 
     async def run_grid(*, grid: SimpleNamespace[GridVariant], launch: Any, **_: Any) -> list[VariantResult]:
         (variant,) = grid
-        calls.append({"name": variant.name, "lifecycle": launch.server_lifecycle, "ready": launch.server_already_ready})
+        calls.append(
+            {
+                "name": variant.name,
+                "lifecycle": launch.server_lifecycle,
+                "ready": launch.server_already_ready,
+                "args": variant.extra_server_args,
+                "remove": variant.remove_args,
+            }
+        )
         return [_result(variant, status="failed" if variant.name in failing else "succeeded")]
 
     def materialize(src: Path, out_dir: Path, **_: Any) -> Path:
@@ -346,3 +357,65 @@ def test_the_report_names_the_hardware_the_image_and_the_recipe_and_who_wrote_it
     assert payload["pid"] == os.getpid() and payload["host"] and payload["updated_at"]
     header = (session_dir / "reports" / "conc_sweep_raw.csv").read_text().splitlines()[0].split(",")
     assert "e2e_norm_intvty_p50" in header
+
+
+def _per_conc_base(monkeypatch: pytest.MonkeyPatch, base_args: str, by_conc: dict[int, str]) -> None:
+    """A base whose arm launches each concurrency with its own args, the session's CONC (16) with ``base_args``."""
+    launches = tuple(SourcePointLaunch(conc, tuple(args.split()), {}) for conc, args in by_conc.items())
+    frozen = SimpleNamespace(launch=_base(SourceKind.INFERENCEX, tuple(by_conc), launches, base_args))
+    monkeypatch.setattr(runner, "frozen_base", lambda _: frozen)
+
+
+_SLOTS = {4: "--max-running-requests 8", 16: "--max-running-requests 32", 32: "--max-running-requests 64"}
+
+
+def test_each_point_launches_the_recipes_own_args_at_its_concurrency_under_the_optimization(
+    session_dir: Path, grid: SimpleNamespace, monkeypatch: pytest.MonkeyPatch
+):
+    _state(session_dir)
+    _per_conc_base(monkeypatch, _SLOTS[16], _SLOTS)
+
+    asyncio.run(runner.run_conc_sweep(session_dir))
+
+    args = {call["name"]: call["args"] for call in grid.calls}
+    assert args["baseline_conc16"] == "" and args["optimized_conc16"] == "--enable-torch-compile"
+    assert args["baseline_conc4"] == "--max-running-requests 8"
+    assert args["optimized_conc32"] == "--max-running-requests 64 --enable-torch-compile"
+
+
+def test_what_the_optimization_removes_stays_removed_at_every_concurrency(
+    session_dir: Path, grid: SimpleNamespace, monkeypatch: pytest.MonkeyPatch
+):
+    best = {"extra_server_args": "--enable-torch-compile", "extra_envs": {}, "remove_args": ["--max-running-requests"]}
+    _state(session_dir, current_best=best)
+    _per_conc_base(monkeypatch, _SLOTS[16], _SLOTS)
+
+    asyncio.run(runner.run_conc_sweep(session_dir))
+
+    optimized = {call["name"]: call for call in grid.calls if call["name"].startswith("optimized")}
+    assert optimized["optimized_conc32"]["args"] == "--enable-torch-compile"
+    assert "--max-running-requests" in optimized["optimized_conc32"]["remove"]
+
+
+def test_a_point_past_both_arms_request_slots_there_is_dropped(
+    session_dir: Path, grid: SimpleNamespace, monkeypatch: pytest.MonkeyPatch
+):
+    _state(session_dir)
+    _per_conc_base(monkeypatch, _SLOTS[16], {**_SLOTS, 32: "--max-running-requests 16"})
+
+    payload = asyncio.run(runner.run_conc_sweep(session_dir))
+
+    assert payload["concs"] == [4, 16]
+
+
+def test_a_held_server_is_booted_again_where_the_next_point_launches_otherwise(
+    session_dir: Path, grid: SimpleNamespace, monkeypatch: pytest.MonkeyPatch
+):
+    _state(session_dir)
+    _per_conc_base(monkeypatch, _SLOTS[16], {4: "--a 1", 8: "--a 1", 16: _SLOTS[16], 32: "--a 2"})
+
+    asyncio.run(runner.run_conc_sweep(session_dir))
+
+    baseline = [call for call in grid.calls if call["name"].startswith("baseline")]
+    assert [call["name"] for call in baseline] == [f"baseline_conc{c}" for c in (16, 4, 8, 32)]
+    assert [call["ready"] for call in baseline] == [False, False, True, False]

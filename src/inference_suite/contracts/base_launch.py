@@ -20,6 +20,7 @@ import shlex
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from enum import Enum
+from types import MappingProxyType
 
 from hyperloom_common.contract_fields import ContractFields, field_names
 from inference_suite.argv import argv_flag_occurrences, canonical_flag_name, normalize_argv
@@ -345,17 +346,46 @@ class PointAlternative:
 
 
 @dataclass(frozen=True)
+class SourcePointLaunch:
+    """The server argv and environment the source launches one concurrency of the arm with, laid out as the base's own
+    ``args`` and ``env`` are: no runner-owned key and no golden layer."""
+
+    conc: int
+    args: tuple[str, ...]
+    env: Mapping[str, str]
+
+    def __post_init__(self) -> None:
+        _FIELDS.integer(self.conc, "a source launch's concurrency", minimum=1)
+        object.__setattr__(self, "args", _FIELDS.string_tuple(self.args, "a source launch's args"))
+        object.__setattr__(self, "env", MappingProxyType(dict(self.env)))
+
+    def to_document(self) -> dict[str, object]:
+        return {"conc": self.conc, "args": list(self.args), "env": dict(sorted(self.env.items()))}
+
+    @classmethod
+    def from_document(cls, document: object) -> SourcePointLaunch:
+        fields = _FIELDS.known(document, field_names(cls), "a source launch")
+        env = fields.get("env") or {}
+        if not isinstance(env, Mapping) or not all(isinstance(v, str) for v in env.values()):
+            raise BaseLaunchError("a source launch's env maps names to strings")
+        return cls(fields.get("conc"), _FIELDS.strings(fields.get("args", ()), "a source launch's args"), dict(env))
+
+
+@dataclass(frozen=True)
 class LaunchPoint:
     """The source point the launch was taken from: its concurrency, and whether it is the one the query asked for.
 
     ``source_concs`` are the concurrencies, ascending, the source publishes for the arm the launch was taken from;
-    empty for a source that publishes none.
+    empty for a source that publishes none. ``source_launches`` are the launches it publishes at those concurrencies,
+    one per concurrency it could be read at; the base's own ``args`` and ``env`` are the one at ``conc``. Neither enters
+    the digest: they describe the arm, not the launch the session measures.
     """
 
     conc: int
     exact: bool
     alternatives: tuple[PointAlternative, ...] = ()
     source_concs: tuple[int, ...] = ()
+    source_launches: tuple[SourcePointLaunch, ...] = ()
 
     def __post_init__(self) -> None:
         _FIELDS.integer(self.conc, "the point's concurrency", minimum=1)
@@ -369,6 +399,7 @@ class LaunchPoint:
             "exact": self.exact,
             "alternatives": [alternative.to_document() for alternative in self.alternatives],
             "source_concs": list(self.source_concs),
+            "source_launches": [launch.to_document() for launch in self.source_launches],
         }
 
     @classmethod
@@ -376,11 +407,13 @@ class LaunchPoint:
         fields = _FIELDS.known(document, field_names(cls), "a launch point")
         alternatives = _FIELDS.items(fields.get("alternatives", ()), "the point's alternatives")
         source_concs = _FIELDS.items(fields.get("source_concs", ()), "the point's source concurrencies")
+        launches = _FIELDS.items(fields.get("source_launches", ()), "the point's source launches")
         return cls(
             fields.get("conc"),
             fields.get("exact"),
             tuple(map(PointAlternative.from_document, alternatives)),
             tuple(source_concs),
+            tuple(map(SourcePointLaunch.from_document, launches)),
         )
 
 
@@ -844,8 +877,8 @@ __all__ = [
     "GoldenAcceptance",
     "GoldenCurve",
     "ImageFacts",
-    "LaunchPoint",
     "LaunchModel",
+    "LaunchPoint",
     "LaunchQuery",
     "LaunchSource",
     "PointAlternative",
@@ -853,6 +886,7 @@ __all__ = [
     "RunnerOwned",
     "SourceApi",
     "SourceKind",
+    "SourcePointLaunch",
     "Topology",
     "UpstreamRevision",
     "UpstreamSource",

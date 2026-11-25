@@ -206,7 +206,7 @@ def test_a_hand_written_base_with_a_model_path_and_a_client_command_reads_and_ro
             "osl": None,
         },
         "source": {**written["source"], "api": None, "path": None, "locator": None, "strategy": None, "tools": {}},
-        "point": {"conc": 12, "exact": True, "alternatives": [], "source_concs": []},
+        "point": {"conc": 12, "exact": True, "alternatives": [], "source_concs": [], "source_launches": []},
         "image": {
             **written["image"],
             "framework_version": "0.5.23",

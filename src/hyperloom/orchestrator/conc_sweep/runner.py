@@ -17,14 +17,18 @@ import logging
 import time
 from dataclasses import dataclass, field, replace
 from pathlib import Path
-from typing import Any, Mapping, Sequence
+from typing import Any, Callable, Mapping, Sequence
 
 from hyperloom.common.gain_math import conc_pair_comparison
 from hyperloom.common.model_paths import resolve_session_model_path
 from hyperloom.common.overlay import is_safe_path_entry, overlay_is_loadable
 from hyperloom.common.perf_metric import GRADED_INTVTY, GRADED_OUTPUT, agentx_replay_session, is_agentx_mode
 from hyperloom.inference_optimizer.framework_registry import is_scriptable, request_slots
-from hyperloom.inference_optimizer.grid_server_args import compose_server_args
+from hyperloom.inference_optimizer.grid_server_args import (
+    compose_server_args,
+    merge_server_args,
+    server_args_delta,
+)
 from hyperloom.inference_optimizer.grading import resolved_grading
 from hyperloom.inference_optimizer.roofline_ceiling import read_baseline_server_args
 from hyperloom.inference_optimizer.session.session_paths import reports_dir, runs_root
@@ -48,9 +52,12 @@ from hyperloom.orchestrator.actions.executors.workload._workload_envs import (
     prepare_grid_benchmark_config,
 )
 from hyperloom.orchestrator.actions.stop_attribution import ORCHESTRATOR_CANCELLED_CLASS
-from hyperloom.orchestrator.state.base_launch import frozen_base
+from hyperloom.orchestrator.state.base_launch import frozen_base, server_base, server_base_at
 from hyperloom.orchestrator.state.shared_state import SharedState
+from hyperloom_common.coerce import to_str_list
 from hyperloom_common.timeutil import utc_now_compact
+from inference_suite.argv import remove_server_args
+from inference_suite.contracts import BaseLaunch
 
 from .plot import ConcCurveOptions
 from .points import SCHEMA_VERSION, SweepPoints, ladder, sweep_points
@@ -105,30 +112,55 @@ def decline_reason(state: SharedState) -> str | None:
     return None
 
 
-def _server_slots(state: SharedState, optimized: Arm) -> int | None:
-    """The most requests either arm's server runs at once, ``None`` when either sets no cap."""
-    base_args = read_baseline_server_args(state)
-    optimized_args = compose_server_args(
-        inherited_args=base_args,
-        variant_extra_args=optimized.args,
-        remove_args=optimized.controls.get("remove_args"),
-        args_mode=str(optimized.controls.get("args_mode") or "append"),
+@dataclass(frozen=True)
+class _Layer:
+    """A change to the session's composed baseline launch: args set, envs set, args removed and envs unset."""
+
+    args: str = ""
+    envs: Mapping[str, str] = field(default_factory=dict)
+    remove_args: tuple[str, ...] = ()
+    unset_envs: tuple[str, ...] = ()
+
+
+def _arm_layer(arm: Arm, base_args: str) -> _Layer:
+    """``arm``'s change to the baseline whose args are ``base_args``; a replacing argv is taken as what it changes, so
+    it stacks on another concurrency's launch as an appended one does."""
+    removed = tuple(to_str_list(arm.controls.get("remove_args")))
+    unset = tuple(to_str_list(arm.controls.get("unset_envs")))
+    if arm.controls.get("args_mode") != "replace":
+        return _Layer(arm.args, dict(arm.envs), removed, unset)
+    delta = server_args_delta(base_args, remove_server_args(arm.args, list(removed)))
+    return _Layer(delta.add, dict(arm.envs), delta.remove, unset)
+
+
+def _conc_layer(frozen: BaseLaunch | None, conc: int) -> _Layer:
+    """What the source's own launch at ``conc`` changes of the base, which is its launch at the session's CONC."""
+    if frozen is None:
+        return _Layer()
+    primary, seed = server_base(frozen), server_base_at(frozen, conc)
+    delta = server_args_delta(primary.args, seed.args)
+    envs = {name: value for name, value in seed.env.items() if primary.env.get(name) != value}
+    return _Layer(delta.add, envs, delta.remove, tuple(name for name in primary.env if name not in seed.env))
+
+
+def _stacked(lower: _Layer, upper: _Layer) -> _Layer:
+    """``upper`` over ``lower``: what ``upper`` removes or unsets goes even where ``lower`` sets it."""
+    args = merge_server_args(remove_server_args(lower.args, list(upper.remove_args)), upper.args)
+    envs = {name: value for name, value in lower.envs.items() if name not in upper.unset_envs} | dict(upper.envs)
+    unset = [name for name in lower.unset_envs if name not in upper.envs] + list(upper.unset_envs)
+    return _Layer(
+        args, envs, tuple(dict.fromkeys((*lower.remove_args, *upper.remove_args))), tuple(dict.fromkeys(unset))
     )
-    slots = [request_slots(state.framework, args) for args in (base_args, optimized_args)]
-    return None if None in slots else max(slot for slot in slots if slot is not None)
 
 
-def _within_slots(points: SweepPoints, slots: int | None) -> SweepPoints:
-    """``points`` up to the servers' request ``slots``: a server queues the requests past its slots, so a point above
-    them measures the same batch behind a longer queue."""
-    if slots is None or all(conc <= slots for conc in points.concs):
+def _servable(points: SweepPoints, slots_at: Callable[[int], int | None]) -> SweepPoints:
+    """``points`` less those past the request slots both arms' servers run there: a server queues the requests past its
+    slots, so such a point measures the same batch behind a longer queue."""
+    dropped = [conc for conc in points.concs if (slots := slots_at(conc)) is not None and conc > slots]
+    if not dropped:
         return points
-    log.info(
-        "conc_sweep: the servers run at most %d request slots; dropping concs %s",
-        slots,
-        [conc for conc in points.concs if conc > slots],
-    )
-    return replace(points, concs=tuple(conc for conc in points.concs if conc <= slots))
+    log.info("conc_sweep: dropping concs %s, past the request slots both arms' servers run there", dropped)
+    return replace(points, concs=tuple(conc for conc in points.concs if conc not in dropped))
 
 
 @dataclass(frozen=True)
@@ -181,6 +213,8 @@ class _Sweep:
     optimized: Arm
     per_point_sec: float
     deadline_unix: float | None
+    frozen: BaseLaunch | None = None
+    base_args: str = ""
     estimated_sec: float = 0.0
     started_at: float = field(default_factory=time.time)
     measured: dict[str, dict[int, dict[str, Any]]] = field(default_factory=lambda: {"baseline": {}, "optimized": {}})
@@ -214,10 +248,26 @@ class _Sweep:
             self.cancel_reason = ORCHESTRATOR_CANCELLED_CLASS
         return bool(self.cancel_reason)
 
+    def layer(self, arm: Arm, conc: int) -> _Layer:
+        """What ``arm``'s point at ``conc`` runs over the baseline: the source's launch there, then ``arm``'s change."""
+        return _stacked(_conc_layer(self.frozen, conc), _arm_layer(arm, self.base_args))
+
+    def slots_at(self, conc: int) -> int | None:
+        """The most requests either arm's server runs at once at ``conc``, ``None`` when either sets no cap."""
+        slots = []
+        for arm in self.arms:
+            layer = self.layer(arm, conc)
+            args = compose_server_args(
+                inherited_args=self.base_args, variant_extra_args=layer.args, remove_args=list(layer.remove_args)
+            )
+            slots.append(request_slots(self.state.framework, args))
+        return None if None in slots else max(slot for slot in slots if slot is not None)
+
     def variant(self, arm: Arm, conc: int) -> GridVariant:
         state = self.state
+        layer = self.layer(arm, conc)
         envs = {
-            **arm.envs,
+            **layer.envs,
             "CONC": str(conc),
             "ISL": str(state.isl),
             "OSL": str(state.osl),
@@ -226,10 +276,11 @@ class _Sweep:
         }
         variant = GridVariant(
             name=f"{arm.name}_conc{conc}",
-            extra_server_args=arm.args,
+            extra_server_args=layer.args,
             extra_envs=envs,
             note=f"arm={arm.name} conc={conc}",
-            **arm.controls,
+            remove_args=list(layer.remove_args) or None,
+            unset_envs=list(layer.unset_envs) or None,
         )
         variant.overlay_pythonpath = arm.overlay
         return variant
@@ -378,7 +429,8 @@ async def _run_rung(sweep: _Sweep, arm: Arm, conc: int, launch: GridLaunch) -> V
 
 
 async def _run_arm(sweep: _Sweep, arm: Arm) -> None:
-    """Run ``arm``'s pending points, on one held server unless each point needs a cold one."""
+    """Run ``arm``'s pending points, a run of points that launch alike on one held server unless each point needs a
+    cold one."""
     concs = sweep.pending(arm)
     lifecycle = resolve_lifecycle_params(sweep.setup.base_yaml_path)
     held = bool(lifecycle.get("eligible")) and not agentx_replay_session(sweep.state)
@@ -386,6 +438,7 @@ async def _run_arm(sweep: _Sweep, arm: Arm) -> None:
     pid_dir.mkdir(parents=True, exist_ok=True)
     port = int(lifecycle.get("port") or 8888)
     booted = False
+    layers = [sweep.layer(arm, conc) for conc in concs]
     try:
         for idx, conc in enumerate(concs):
             if sweep.observe_cancel():
@@ -393,10 +446,13 @@ async def _run_arm(sweep: _Sweep, arm: Arm) -> None:
             if sweep.out_of_time():
                 sweep.skip_for_budget(arm, concs[idx:])
                 return
+            if held and booted and layers[idx] != layers[idx - 1]:
+                teardown_variant_server(pid_dir)
+                booted = False
             if not held:
                 launch = GridLaunch()
             else:
-                last = idx == len(concs) - 1
+                last = idx == len(concs) - 1 or layers[idx + 1] != layers[idx]
                 lifecycle_settings = {"cleanup": booted and last, "pid_dir": str(pid_dir), "port": port}
                 launch = GridLaunch(
                     server_lifecycle=lifecycle_settings, server_already_ready=booted, warmup_before_measure=False
@@ -432,14 +488,17 @@ async def run_conc_sweep(
     points = sweep_points(None if frozen is None else frozen.launch, state.conc, concs or state.conc_sweep_concs)
     if points is None:
         return _skipped(state, session_dir, "no_sweep_points")
-    slots = _server_slots(state, optimized)
-    points = _within_slots(points, slots)
-    if not points.concs:
-        return _skipped(state, session_dir, "concs_exceed_server_slots", server_slots=slots)
     setup = _prepare(state, session_dir)
     if isinstance(setup, str):
         return _skipped(state, session_dir, setup)
-    sweep = _Sweep(state, session_dir, setup, points, optimized, state.baseline_runtime_sec, deadline_unix)
+    launch = None if frozen is None else frozen.launch
+    base_args = read_baseline_server_args(state)
+    sweep = _Sweep(
+        state, session_dir, setup, points, optimized, state.baseline_runtime_sec, deadline_unix, launch, base_args
+    )
+    sweep.points = _servable(points, sweep.slots_at)
+    if not sweep.points.concs:
+        return _skipped(state, session_dir, "concs_exceed_server_slots", server_slots=sweep.slots_at(state.conc))
     _resume(sweep)
     sweep.estimated_sec = sweep.per_point_sec * sum(len(sweep.pending(arm)) for arm in sweep.arms)
     _log_plan(sweep)

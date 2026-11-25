@@ -49,11 +49,27 @@ def server_argv(base: BaseLaunch) -> tuple[str, ...]:
 
 def server_base(base: BaseLaunch) -> ServerBase:
     """The server half of ``base`` as a launch is seeded with: its argv and its environment but the redacted values."""
+    return _seeded(base, base.args, base.env)
+
+
+def server_base_at(base: BaseLaunch, conc: int) -> ServerBase:
+    """The server half a point of ``base``'s arm at ``conc`` is seeded with: the source's own launch at ``conc``, else
+    at the nearest higher concurrency it publishes (a launch tuned for more concurrency serves less), else at its
+    highest, under ``base``'s golden layer; ``base``'s own for a base whose source publishes no launch per concurrency.
+    """
+    launches = sorted(base.point.source_launches, key=lambda launch: launch.conc)
+    if not launches:
+        return server_base(base)
+    launch = next((each for each in launches if each.conc >= conc), launches[-1])
+    return _seeded(base, launch.args, launch.env)
+
+
+def _seeded(base: BaseLaunch, args: tuple[str, ...], env: Mapping[str, object]) -> ServerBase:
     golden = base.golden_al
-    args = server_argv(base)
-    layers = {**base.env, **golden.env} if golden is not None else base.env
-    env = {name: value for name, value in layers.items() if isinstance(value, str)}
-    return ServerBase(args=" ".join(args), env=MappingProxyType(env))
+    argv = (*args, *golden.args) if golden is not None else args
+    layers = {**env, **golden.env} if golden is not None else env
+    kept = {name: value for name, value in layers.items() if isinstance(value, str)}
+    return ServerBase(args=" ".join(argv), env=MappingProxyType(kept))
 
 
 @dataclass(frozen=True)
@@ -143,6 +159,7 @@ __all__ = [
     "frozen_session_base",
     "server_argv",
     "server_base",
+    "server_base_at",
     "session_cards",
     "session_runner_owned",
     "session_server_base",

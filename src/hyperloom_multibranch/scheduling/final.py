@@ -46,7 +46,7 @@ from collections import defaultdict
 from collections.abc import Awaitable, Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from functools import partial
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from hyperloom.common.gain_math import conc_pair_comparison, gain_pct
 from hyperloom.contracts.measurement import Purpose, TestKind, TestResult, Validity
@@ -67,6 +67,9 @@ from hyperloom_multibranch.scheduling.integrator import defects_beyond_gain
 from hyperloom_multibranch.scheduling.layout import SessionLayout
 from hyperloom_multibranch.scheduling.requests import SessionChecks, SessionTests, integration_test_request, together
 from hyperloom_multibranch.scheduling.settings import RunSettings, Workload
+
+if TYPE_CHECKING:
+    from inference_suite.contracts import BaseLaunch
 
 logger = logging.getLogger(__name__)
 
@@ -451,20 +454,27 @@ class FinalSelector:
 BASELINE, OPTIMIZED = "baseline", "optimized"
 NO_OPTIMIZATION = "no_optimization"
 NO_SWEEP_POINTS = "no_sweep_points"
+CONCS_EXCEED_SERVER_SLOTS = "concs_exceed_server_slots"
 SKIPPED_BUDGET = "skipped_budget"
 _SUCCEEDED = "succeeded"
 
 
 @dataclass(frozen=True)
 class SweepPlan:
-    """The commit FINAL chose and the points both arms run."""
+    """The commit FINAL chose and the points both arms run. ``groups`` partitions the points by the source launch they
+    are seeded with, ascending; empty when every point launches alike."""
 
     chosen: str
     points: SweepPoints
+    groups: tuple[tuple[int, ...], ...] = ()
+
+    def launch_groups(self) -> tuple[tuple[int, ...], ...]:
+        return self.groups or (self.points.concs,)
 
     def test_points(self, workload: Workload) -> int:
-        """How many points one test of the sweep measures: one in an AgentX test, every point in an InferenceX one."""
-        return 1 if workload.inferencex is None else len(self.points.concs)
+        """How many points one test of the sweep measures: one in an AgentX test, a launch group's in an InferenceX one,
+        whose points share a server."""
+        return 1 if workload.inferencex is None else max(map(len, self.launch_groups()))
 
 
 def sweep_plan(layout: SessionLayout, settings: RunSettings) -> SweepPlan | str:
@@ -482,7 +492,30 @@ def sweep_plan(layout: SessionLayout, settings: RunSettings) -> SweepPlan | str:
     frozen = frozen_base(layout.toolbox)
     workload = settings.workload
     points = sweep_points(None if frozen is None else frozen.launch, workload.conc, settings.conc_sweep_concs)
-    return NO_SWEEP_POINTS if points is None else SweepPlan(chosen.commit, points)
+    if points is None:
+        return NO_SWEEP_POINTS
+    if frozen is None:
+        return SweepPlan(chosen.commit, points)
+    return _seeded_plan(chosen.commit, points, frozen.launch, workload.framework)
+
+
+def _seeded_plan(chosen: str, points: SweepPoints, base: BaseLaunch, framework: str) -> SweepPlan | str:
+    """``points`` less those past the request slots the source's launch there runs, grouped by that launch."""
+    from hyperloom.inference_optimizer.framework_registry import request_slots
+    from hyperloom.orchestrator.state.base_launch import server_base_at
+
+    seeds = {conc: server_base_at(base, conc) for conc in points.concs}
+    dropped = [conc for conc, seed in seeds.items() if (slots := request_slots(framework, seed.args)) and conc > slots]
+    if dropped:
+        logger.info("conc_sweep: dropping concs %s, past the request slots the recipe's launch there runs", dropped)
+    kept = tuple(conc for conc in points.concs if conc not in dropped)
+    if not kept:
+        return CONCS_EXCEED_SERVER_SLOTS
+    by_launch: dict[tuple[str, tuple[tuple[str, str], ...]], list[int]] = {}
+    for conc in kept:
+        by_launch.setdefault((seeds[conc].args, tuple(sorted(seeds[conc].env.items()))), []).append(conc)
+    groups = tuple(tuple(group) for group in by_launch.values()) if len(by_launch) > 1 else ()
+    return SweepPlan(chosen, replace(points, concs=kept), groups)
 
 
 def sweep_unfinished(layout: SessionLayout, settings: RunSettings) -> bool:
@@ -612,7 +645,12 @@ class ConcSweep:
         on one server."""
         arms = ((BASELINE, self.root), (OPTIMIZED, self.plan.chosen))
         if self.workload.inferencex is not None:
-            return [(arm, commit, tuple(sorted(self.pending(arm)))) for arm, commit in arms if self.pending(arm)]
+            return [
+                (arm, commit, concs)
+                for group in self.plan.launch_groups()
+                for arm, commit in arms
+                if (concs := tuple(conc for conc in group if conc in self.pending(arm)))
+            ]
         order = ladder(self.plan.points.concs, self.workload.conc)
         return [(arm, commit, (conc,)) for conc in order for arm, commit in arms if conc in self.pending(arm)]
 
@@ -714,6 +752,7 @@ __all__ = [
     "SKIPPED_BUDGET",
     "PRIMARY_POINT_ONLY",
     "REPRODUCTION_POINT_ONLY",
+    "CONCS_EXCEED_SERVER_SLOTS",
     "CandidateCheck",
     "ConcSweep",
     "FinalCandidate",
