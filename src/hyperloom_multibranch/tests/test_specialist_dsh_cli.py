@@ -329,15 +329,16 @@ def test_a_fresh_conversation_runs_each_message_as_a_turn_until_its_stdin_ends(
     assert [patch[row]["disabled"] for row in UNATTENDED_OFF] == [True] * len(UNATTENDED_OFF)
 
 
-@pytest.mark.parametrize(("others", "kept"), [(["/opt/tools"], "/opt/tools"), ([], None)])
+@pytest.mark.parametrize(("others", "kept"), [(["/opt/tools"], "/opt/tools"), ([], "")])
 def test_the_runtime_and_its_tools_do_not_import_from_where_the_bridge_was_pointed_at_the_app(
-    home: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture, others: list[str], kept: str | None
+    home: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture, others: list[str], kept: str
 ) -> None:
     monkeypatch.setenv("PYTHONPATH", os.pathsep.join([str(PACKAGES), *others]))
 
     _run(monkeypatch, capsys, ["--model", MODEL, "--session-id", SID], _message("a"))
 
-    assert _Harness.made[0].kwargs["env"].get("PYTHONPATH") == kept
+    # The SDK lays this over the bridge's own environment, so only a value set here replaces the bridge's.
+    assert _Harness.made[0].kwargs["env"]["PYTHONPATH"] == kept
 
 
 def test_the_rows_of_a_launch_read_as_a_claude_cli_s_turns_and_spend(

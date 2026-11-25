@@ -459,6 +459,40 @@ def test_the_deepseek_harness_goes_on_with_the_conversation_of_a_process_that_wa
     assert '"init"' not in unknown.stdout and "cannot resume conversation" in unknown.stderr
 
 
+@needs_harness
+def test_the_commands_the_deepseek_harness_s_tools_run_are_not_pointed_at_the_app_s_packages(tmp_path):
+    worktree = tmp_path / "worktree"
+    worktree.mkdir()
+
+    def step(body: dict) -> tuple[str, dict] | str:
+        results = [block for message in body["messages"] for block in _blocks(message) if "tool_use_id" in block]
+        if not results:
+            return "bash", {"command": 'echo "imports=[$PYTHONPATH]"', "description": "Print the import path"}
+        return _result_text(results[-1])
+
+    model = _ScriptedModel(step)
+    env = {**HARNESS.env(model.env(tmp_path / "home")), "DSH_HOME": str(tmp_path / "session" / ".dsh")}
+    try:
+        ran = subprocess.run(
+            [sys.executable, "-m", DSH_CLI, "--model", HARNESS.model, "--print"],
+            input="Print what your shell imports from.",
+            env=env,
+            cwd=worktree,
+            capture_output=True,
+            text=True,
+            timeout=120,
+        )
+    finally:
+        model.stop()
+
+    assert ran.returncode == 0, ran.stderr
+    # The bridge itself was: it is this app's module, and it ran.
+    assert env["PYTHONPATH"].split(os.pathsep)[0] == str(APP_PACKAGES)
+    result = json.loads(next(line for line in ran.stdout.splitlines() if '"result"' in line))["result"]
+    imports = re.search(r"imports=\[(.*?)\]", result).group(1).split(os.pathsep)
+    assert imports == (env["PYTHONPATH"].split(os.pathsep)[1:] or [""])
+
+
 class _Spend:
     def __init__(self) -> None:
         self.recorded = []

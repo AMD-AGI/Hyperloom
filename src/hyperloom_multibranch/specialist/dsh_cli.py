@@ -365,10 +365,10 @@ def bridge_env(env: Mapping[str, str]) -> dict[str, str]:
 
 
 def _runtime_env(env: Mapping[str, str]) -> dict[str, str]:
-    """``env`` for the runtime and the commands its tools run, which import as they did before :func:`bridge_env`."""
-    others = _other_imports(env)
-    kept = {name: value for name, value in env.items() if name != IMPORT_PATH_ENV}
-    return {**kept, IMPORT_PATH_ENV: os.pathsep.join(others)} if others else kept
+    """``env`` for the runtime and the commands its tools run, which import as they did before :func:`bridge_env`. The
+    SDK lays it over this process's environment, so the variable is set anew, to nothing when nothing else was named,
+    and not left out."""
+    return {**env, IMPORT_PATH_ENV: os.pathsep.join(_other_imports(env))}
 
 
 def _home() -> Path:
