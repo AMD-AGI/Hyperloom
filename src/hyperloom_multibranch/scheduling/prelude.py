@@ -394,6 +394,7 @@ def _session_profile(
         osl=None if shape is None else shape.osl,
         kernel_optimizer=workload.kernel_optimizer.value,
         agentx_objective=workload.agentx_objective,
+        dataset="" if shape is None else shape.dataset,
     )
 
 

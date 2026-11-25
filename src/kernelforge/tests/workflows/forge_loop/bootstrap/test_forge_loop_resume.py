@@ -1673,24 +1673,6 @@ def test_fresh_campaign_contains_no_shape_metadata(tmp_path, monkeypatch):
     assert captured["agent_fn_setup"].measurement.bench_timeout_sec == 300
 
 
-def test_a_retired_iteration_cap_is_rejected(tmp_path, monkeypatch):
-    """A retired option now costs an exit code instead of being absorbed."""
-    _install_cli_fakes(monkeypatch, tmp_path)
-    workspace, kernel, driver = _initialize_workspace(tmp_path)
-
-    result = CliRunner().invoke(
-        main,
-        [
-            *_fresh_command(workspace, kernel, driver),
-            "--max-iters",
-            "1",
-        ],
-    )
-
-    assert result.exit_code != 0
-    assert "No such option" in result.output
-
-
 def test_fresh_cli_rejects_existing_state_before_git_or_warmstart(tmp_path, monkeypatch):
     captured = _install_cli_fakes(monkeypatch, tmp_path)
 

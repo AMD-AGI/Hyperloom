@@ -546,7 +546,7 @@ class _GeakDispatchMixin:
     def _refuse_geak_for_budget(self, handoff: dict[str, Any], *, runner_timeout: int, min_run: int) -> None:
         log.warning(
             "GEAK: only %ds budget remains (< min %ds); skipping e2e "
-            "and winding down to SWEEP so the closing report runs in time.",
+            "and winding down to CYCLE_END so the closing report runs in time.",
             runner_timeout,
             min_run,
         )

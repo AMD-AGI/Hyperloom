@@ -1184,12 +1184,8 @@ from typing import Any
 import pytest
 
 from hyperloom.inference_optimizer.cli.credentials import _resolve_agent_root
-from hyperloom.orchestrator.roles import (
-    CriticAgentBackend,
-    MockBackend,
-    MockTurn,
-    ScriptedPlan,
-)
+from hyperloom.orchestrator.roles import CriticAgentBackend
+from hyperloom.orchestrator.tests.mock_backend import MockBackend, MockTurn, ScriptedPlan
 from hyperloom.orchestrator.loop.coordinator import Coordinator
 from hyperloom.inference_optimizer.protocol.intent import Intent, IntentType
 

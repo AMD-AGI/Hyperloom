@@ -14,9 +14,9 @@ from hyperloom.orchestrator.bus.storage.connection import SqliteConnection
 from hyperloom.orchestrator.loop.coordinator import Coordinator, RunOptions
 from hyperloom.orchestrator.loop.coordinator_state import close_undecided_proposals
 from hyperloom.orchestrator.phases import machine_state
-from hyperloom.orchestrator.roles import MockBackend, MockTurn, ScriptedPlan
 from hyperloom.orchestrator.state.shared_state import SharedState
 from hyperloom.orchestrator.state.task_registry import TaskRegistry, TaskSpec
+from hyperloom.orchestrator.tests.mock_backend import MockBackend, MockTurn, ScriptedPlan
 from hyperloom.inference_optimizer.trace import trajectory_projection as trajmap
 from hyperloom.inference_optimizer.trace import trajectory_trace as tt
 

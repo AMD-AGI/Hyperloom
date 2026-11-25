@@ -37,7 +37,7 @@ from hyperloom_common.coerce import to_str_list
 from hyperloom_common.io import atomic_write_text
 from hyperloom.inference_optimizer.runtime_environment import prepend_launch_path
 from hyperloom_common.gpu_identity import AMD_GPU_BOARDS
-from hyperloom.common.perf_metric import agentx_enabled
+from hyperloom.common.perf_metric import DATASET_PATH_ENV, agentx_enabled
 from hyperloom.common.env_safety import (
     BENCHMARK_SECRET_ENV_NAMES,
     BLOCKED_EXTERNAL_ENV_NAMES,
@@ -357,6 +357,9 @@ def _pin_workload_shape_envs(envs: dict[str, Any], *, in_session: bool) -> None:
     r_env = os.environ.get("RANDOM_RANGE_RATIO", "").strip()
     if r_env:
         envs["RANDOM_RANGE_RATIO"] = float(r_env)
+    dataset = os.environ.get(DATASET_PATH_ENV, "").strip()
+    if dataset:
+        envs[DATASET_PATH_ENV] = dataset
     tp_from_yaml = envs.get("TP")
     if tp_from_yaml:
         resolved_tp = int(tp_from_yaml)

@@ -17,8 +17,8 @@ _SERVING_LANES = ["server_lifecycle", "benchmark_lane"]
 def _build_coord(tmp_path: Path, phase: str):
     from hyperloom.orchestrator.loop.coordinator import AdvisoryServices, Coordinator
     from hyperloom.orchestrator.roles.agent_role import default_role_registry
-    from hyperloom.orchestrator.roles.mock_backend import MockBackend, MockTurn, ScriptedPlan
     from hyperloom.orchestrator.state.shared_state import SharedState
+    from hyperloom.orchestrator.tests.mock_backend import MockBackend, MockTurn, ScriptedPlan
 
     state = SharedState(session_id="lane-priority")
     state.phase = phase

@@ -121,7 +121,7 @@ Collect these required values:
   `MAX_MODEL_LEN` / `PROFILE_OSL`.
 - Objective and budget: `MAX_HOURS` plus `TARGET_GAIN`.
 - Optional phase budget percentages for `PRELUDE`, `FRAMEWORK_AGENT`,
-  `KERNEL_AGENT`, `SWEEP`, and `CLOSE`.
+  `KERNEL_AGENT`, and `CLOSE`.
 
 ## Default Values
 
@@ -148,9 +148,8 @@ resolved values in the launch plan before starting the optimizer.
 - `SKIP_VARIANTS`: empty.
 - `SERVER_ARGS`: empty.
 - `REFERENCE_SCRIPT`: unset.
-- `CONC_SWEEP_CONCS`: unset, so Hyperloom uses its default sweep ladder.
-- `CONC_SWEEP_TOTAL_BUDGET_SEC`: unset, so Hyperloom uses its default total
-  sweep budget. This bounds the whole sweep, not a single benchmark spawn.
+- `CONC_SWEEP_CONCS`: unset; the post-session concurrency sweep takes its points from the InferenceX recipe, and
+  reads this only for an operator `REFERENCE_SCRIPT`.
 - Phase budget percentages default to:
   - `PHASE_BUDGET_PRELUDE_PCT=0.03`: startup, preflight, baseline setup, and
     initial orchestration.
@@ -158,12 +157,10 @@ resolved values in the launch plan before starting the optimizer.
     search and source/upstream landing, with benchmark validation.
   - `PHASE_BUDGET_KERNEL_PCT=0.50`: kernel-agent TraceLens/GEAK/native-kernel
     optimization work.
-  - `PHASE_BUDGET_SWEEP_PCT=0.05`: concurrency sweep and final throughput
-    validation around the best candidate.
   - `PHASE_BUDGET_CLOSE_PCT=0.02`: final report, state closeout, and summary
     generation.
 - Phase toggles default to enabled: kernel, framework agent, framework local
-  exploration, roofline, and concurrency sweep.
+  exploration, roofline, and the post-session concurrency sweep.
 
 Collect these optional advanced values:
 
@@ -172,15 +169,13 @@ Collect these optional advanced values:
   `--no-enable-roofline`.
 - Phase budget percentages:
   `PHASE_BUDGET_PRELUDE_PCT`, `PHASE_BUDGET_FRAMEWORK_PCT`,
-  `PHASE_BUDGET_KERNEL_PCT`,
-  `PHASE_BUDGET_SWEEP_PCT`, and `PHASE_BUDGET_CLOSE_PCT`.
+  `PHASE_BUDGET_KERNEL_PCT`, and `PHASE_BUDGET_CLOSE_PCT`.
   Explain what each phase does before asking. Accept only values where
   `0 < pct <= 1`; leave a value unset to use the optimizer default.
 - Routing and baseline options: `--skip-variants`, `--server-args`,
   `--reference-script`, `--model-class`, `--gpu-type`, `--framework-version`,
   `--compare-against-gpu`.
-- Concurrency sweep: `--conc-sweep-concs` and `--conc-sweep-total-budget-sec`
-  (the total budget across the sweep).
+- Concurrency sweep: `--conc-sweep-concs`.
 - Benchmark limits: `INFERENCE_OPTIMIZER_BENCHMARK_TIMEOUT_SEC` (default `7800`
   seconds per actual spawn, including boot and accuracy) and
   `INFERENCE_OPTIMIZER_BENCHMARK_SILENCE_TIMEOUT_SEC` (default `600` seconds,
@@ -308,7 +303,6 @@ export TARGET_GAIN="${TARGET_GAIN:-30}"
 export PHASE_BUDGET_PRELUDE_PCT="${PHASE_BUDGET_PRELUDE_PCT:-}"
 export PHASE_BUDGET_FRAMEWORK_PCT="${PHASE_BUDGET_FRAMEWORK_PCT:-}"
 export PHASE_BUDGET_KERNEL_PCT="${PHASE_BUDGET_KERNEL_PCT:-}"
-export PHASE_BUDGET_SWEEP_PCT="${PHASE_BUDGET_SWEEP_PCT:-}"
 export PHASE_BUDGET_CLOSE_PCT="${PHASE_BUDGET_CLOSE_PCT:-}"
 
 OPT_FLAGS=(
@@ -336,11 +330,9 @@ OPT_FLAGS=(
 [ -n "${SERVER_ARGS:-}" ] && OPT_FLAGS+=(--server-args "$SERVER_ARGS")
 [ -n "${REFERENCE_SCRIPT:-}" ] && OPT_FLAGS+=(--reference-script "$REFERENCE_SCRIPT")
 [ -n "${CONC_SWEEP_CONCS:-}" ] && OPT_FLAGS+=(--conc-sweep-concs "$CONC_SWEEP_CONCS")
-[ -n "${CONC_SWEEP_TOTAL_BUDGET_SEC:-}" ] && OPT_FLAGS+=(--conc-sweep-total-budget-sec "$CONC_SWEEP_TOTAL_BUDGET_SEC")
 [ -n "${PHASE_BUDGET_PRELUDE_PCT:-}" ] && OPT_FLAGS+=(--phase-budget-prelude-pct "$PHASE_BUDGET_PRELUDE_PCT")
 [ -n "${PHASE_BUDGET_FRAMEWORK_PCT:-}" ] && OPT_FLAGS+=(--phase-budget-framework-pct "$PHASE_BUDGET_FRAMEWORK_PCT")
 [ -n "${PHASE_BUDGET_KERNEL_PCT:-}" ] && OPT_FLAGS+=(--phase-budget-kernel-pct "$PHASE_BUDGET_KERNEL_PCT")
-[ -n "${PHASE_BUDGET_SWEEP_PCT:-}" ] && OPT_FLAGS+=(--phase-budget-sweep-pct "$PHASE_BUDGET_SWEEP_PCT")
 [ -n "${PHASE_BUDGET_CLOSE_PCT:-}" ] && OPT_FLAGS+=(--phase-budget-close-pct "$PHASE_BUDGET_CLOSE_PCT")
 [ "${NO_KERNEL:-0}" = "1" ] && OPT_FLAGS+=(--no-kernel)
 [ "${NO_FRAMEWORK_AGENT:-0}" = "1" ] && OPT_FLAGS+=(--no-framework-agent)

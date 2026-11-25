@@ -269,11 +269,8 @@ async def test_coordinator_maintenance_reaps_leases_and_prunes(tmp_path, monkeyp
     monkeypatch.setenv("USER_DATA_PATH", str(tmp_path))
     from hyperloom.inference_optimizer.session.paths import make_session_dir
     from hyperloom.orchestrator.loop.coordinator import MAINTENANCE_INTERVAL_SEC, Coordinator
-    from hyperloom.orchestrator.roles import (
-        MockBackend,
-        MockCriticBackend,
-        ScriptedPlan,
-    )
+    from hyperloom.orchestrator.roles import MockCriticBackend
+    from hyperloom.orchestrator.tests.mock_backend import MockBackend, ScriptedPlan
     from .conftest import seed_target_analysis_marker
 
     sd = make_session_dir()

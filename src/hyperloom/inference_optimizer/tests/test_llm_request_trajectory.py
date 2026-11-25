@@ -14,7 +14,6 @@ import pytest
 from hyperloom_common.llm.token_usage import openai_usage_counts, uncached_input_tokens
 from hyperloom.inference_optimizer.protocol.intent import Intent, IntentType
 from hyperloom.orchestrator.loop.coordinator import Coordinator, RunOptions
-from hyperloom.orchestrator.roles import MockBackend, ScriptedPlan
 from hyperloom.orchestrator.roles import claude as cl
 from hyperloom.orchestrator.roles.claude_requests import (
     TIMING_ASSISTANT_MESSAGE,
@@ -22,6 +21,7 @@ from hyperloom.orchestrator.roles.claude_requests import (
     ClaudeRequestTracker,
 )
 from hyperloom.orchestrator.roles.critic_agent import _accumulate_usage
+from hyperloom.orchestrator.tests.mock_backend import MockBackend, ScriptedPlan
 from hyperloom.inference_optimizer.trace import parse_usage as pu
 from hyperloom.inference_optimizer.trace import trajectory_trace as tt
 from .conftest import seed_pending_critic_proposal

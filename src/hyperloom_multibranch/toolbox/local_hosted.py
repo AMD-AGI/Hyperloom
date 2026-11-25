@@ -52,6 +52,7 @@ from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Final
 
+from hyperloom.agents.framework.sources.github import token_configured
 from hyperloom.common.confinement import credential_paths
 from hyperloom.common.outside_facts.rule_pack import PACK_ENV, rule_pack_identity
 from hyperloom.measure.archive import ResultArchive
@@ -717,6 +718,14 @@ def _local_tools(leases: BranchLeases, options: LocalOptions) -> Sequence[AsyncT
     tuner = (
         (kernel_tune_tool(leases, Path(options.framework_configs or image_configs())),) if leases.can_lease(1) else ()
     )
+    if token_configured():
+        logger.info("upstream PR search asks GitHub with this host's token")
+    else:
+        logger.warning(
+            "upstream PR search has no GitHub token: neither GITHUB_TOKEN nor GH_TOKEN is set in this process's "
+            "environment, so it asks GitHub anonymously, which allows this address few requests "
+            '(docs/how-to/run-multibranch.md, "Upstream pull-request search")'
+        )
     return (tracelens_tool(leases), roofline_tool(leases), UpstreamPrSearch(), *tuner)
 
 

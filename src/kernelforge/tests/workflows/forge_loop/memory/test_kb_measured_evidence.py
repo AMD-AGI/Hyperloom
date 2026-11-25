@@ -267,21 +267,19 @@ def _index_status(workspace: Path, rank: int) -> str:
 
 
 class MergingKBStore(InMemoryKBStore):
-    """In-memory KB Store that honors the SDK's documented merge mode."""
+    """In-memory KB Store that records every knowledge write and the mode it used."""
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         self.knowledge_writes: list[tuple[str, str, dict, str]] = []
 
-    def put_knowledge(self, canonical_id, knowledge, *, session_id="", mode="merge"):
-        self.knowledge_writes.append((canonical_id, session_id, dict(knowledge), mode))
-        key = (canonical_id, session_id)
-        if mode == "merge" and key in self.knowledge:
-            merged = dict(self.knowledge[key])
-            merged.update(knowledge)
-            self.knowledge[key] = merged
-            return {"session_id": session_id, "mode": mode}
-        return super().put_knowledge(canonical_id, knowledge, session_id=session_id, mode=mode)
+    def replace_knowledge(self, canonical_id, session_id, knowledge, **kwargs):
+        self.knowledge_writes.append((canonical_id, session_id, dict(knowledge), "replace"))
+        return super().replace_knowledge(canonical_id, session_id, knowledge, **kwargs)
+
+    def merge_knowledge(self, canonical_id, session_id, knowledge):
+        self.knowledge_writes.append((canonical_id, session_id, dict(knowledge), "merge"))
+        return super().merge_knowledge(canonical_id, session_id, knowledge)
 
 
 @pytest.fixture(autouse=True)
@@ -368,11 +366,10 @@ def test_remote_measured_write_back_merges_into_the_candidate_session(
     store = MergingKBStore()
     monkeypatch.setattr(record_store, "KBStoreClient", lambda *a, **k: store)
     kb = KernelRecipeKB.open_canonical_id(CANONICAL_ID, _remote_config(tmp_path))
-    store.put_knowledge(
+    store.replace_knowledge(
         CANONICAL_ID,
+        "kda-attn-session",
         {"producer": "forge-loop", "speedup": 6.7608, "value": {"tag": "inflated"}},
-        session_id="kda-attn-session",
-        mode="replace",
     )
 
     outcome = kb.record_measured_speedup("kda-attn-session", 5.106)
@@ -407,7 +404,7 @@ def test_a_refused_measured_write_back_redacts_and_bounds_the_store_error(
             f"(sent Bearer {token}); the store said {token} expired" + " and returned an unbounded body" * 20
         )
 
-    monkeypatch.setattr(store, "put_knowledge", refuse)
+    monkeypatch.setattr(store, "merge_knowledge", refuse)
     writeback = warmstart._record_measured_speedup(
         _remote_config_with_token(tmp_path, token),
         {
@@ -434,7 +431,7 @@ def _refusing_write_back_store(monkeypatch, failure: Exception) -> None:
     def refuse(*_args, **_kwargs):
         raise failure
 
-    monkeypatch.setattr(store, "put_knowledge", refuse)
+    monkeypatch.setattr(store, "merge_knowledge", refuse)
 
 
 def test_a_refused_measured_write_back_raises_the_store_error_from_the_facade(tmp_path, monkeypatch):
@@ -446,10 +443,10 @@ def test_a_refused_measured_write_back_raises_the_store_error_from_the_facade(tm
 
 
 def test_an_unexpected_write_back_error_propagates(tmp_path, monkeypatch):
-    _refusing_write_back_store(monkeypatch, TypeError("put_knowledge signature drifted"))
+    _refusing_write_back_store(monkeypatch, TypeError("merge_knowledge signature drifted"))
     sol = {"solution_slug": f"{CANONICAL_ID}/s", "kernel_slug": CANONICAL_ID, "session_id": "s"}
 
-    with pytest.raises(TypeError, match="^put_knowledge signature drifted$"):
+    with pytest.raises(TypeError, match="^merge_knowledge signature drifted$"):
         warmstart._record_measured_speedup(_remote_config(tmp_path), sol, 5.106, rank=1)
 
 

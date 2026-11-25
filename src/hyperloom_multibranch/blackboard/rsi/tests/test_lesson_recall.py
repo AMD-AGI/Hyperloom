@@ -100,6 +100,17 @@ def test_a_lesson_bears_on_a_query_by_its_words_from_a_session_alike_enough_to_t
     assert recall.notes(dataclasses.replace(snapshot, profile=None), "cuda graph", limit=5).past == ()
 
 
+def test_a_lesson_measured_on_a_prompt_dataset_reaches_a_session_on_random_prompts_naming_the_dataset(
+    snapshot: BlackboardSnapshot, pool: LessonPool
+) -> None:
+    on_a_dataset = task_conditions(profile(dataset="/data/prompts.jsonl"))
+    graph = lesson(pool, "graph", CORRECTION, on_a_dataset, evidence=MEASURED)
+
+    found = LessonRecall(pool=pool).notes(snapshot, "cuda graph padding", limit=5)
+
+    assert [item.render() for item in found.past] == [f"- [past-1, dataset differ, measured] {CORRECTION} [{graph}]"]
+
+
 def test_a_lesson_this_session_revised_or_retired_is_shown_no_more_and_the_standing_weighs_the_rest(
     snapshot: BlackboardSnapshot, pool: LessonPool
 ) -> None:

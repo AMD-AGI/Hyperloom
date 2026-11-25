@@ -270,7 +270,6 @@ _ADVISORY_BLOCKS: tuple[_AdvisoryRow, ...] = (
     ("=== Current gaps ===", lambda c: c.shared_state.to_gaps_summary()),
     (None, lambda c: c._specialist_findings_block()),
     ("=== External target gap (advisory) ===", lambda c: c.target_gap_advisory_block()),
-    ("=== Specialist proposal scores (advisory) ===", lambda c: c.shared_state.to_proposal_scores_summary()),
     ("=== Priors-match (advisory ordering) ===", lambda c: c._priors_match_advisory_block()),
     ("=== Intervention mix (telemetry) ===", lambda c: c.shared_state.to_intervention_mix_summary()),
     ("=== Bottleneck redirect (advisory) ===", lambda c: c._bottleneck_redirect_advisory_block()),

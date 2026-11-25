@@ -2,7 +2,7 @@
 myst:
     html_meta:
         "description": "Understand the Hyperloom optimization loop: runtime contracts, phase order (PRELUDE through CLOSE), orchestration model, feedback loops, and session artifacts."
-        "keywords": "Hyperloom, optimization loop, PRELUDE, ENABLEMENT, FRAMEWORK_AGENT, KERNEL_AGENT, SWEEP, CLOSE, orchestration, session artifacts, AMD GPU, ROCm, LLM inference, PolicyGate, enablement, targeted build, escalation ladder, runnable gate"
+        "keywords": "Hyperloom, optimization loop, PRELUDE, ENABLEMENT, FRAMEWORK_AGENT, KERNEL_AGENT, CYCLE_END, CLOSE, orchestration, session artifacts, AMD GPU, ROCm, LLM inference, PolicyGate, enablement, targeted build, escalation ladder, runnable gate"
 ---
 # Hyperloom optimization loop
 
@@ -68,10 +68,10 @@ observable session artifacts and subprocess JSON bridges are.
 The Coordinator advances through the live phase chain:
 
 ```text
-PRELUDE -> ENABLEMENT -> FRAMEWORK_AGENT -> KERNEL_AGENT -> SWEEP -> CLOSE
+PRELUDE -> ENABLEMENT -> FRAMEWORK_AGENT -> KERNEL_AGENT -> CYCLE_END -> CLOSE
 ```
 
-Cyclic macro-cycling is always enabled. After SWEEP, the Coordinator can
+Cyclic macro-cycling is always enabled. After CYCLE_END, the Coordinator can
 `cycle_reloop` back to `FRAMEWORK_AGENT` for another pass while
 budget and leverage remain. The effective minimum remaining budget to justify
 opening a new cycle scales with session length (capped at the 3-hour absolute
@@ -663,52 +663,23 @@ attempts. A KEEP must be integrated before the run can proceed to final
 reporting, and hot reusable kernels above the configured threshold must
 be attempted or explicitly rejected before report can close the run.
 
-## SWEEP
+## CYCLE_END
 
-SWEEP measures the optimized stack against the baseline across a
-concurrency ladder, one arm each, and produces the throughput-vs-
-interactivity curve. The ladder is sized for the workload: powers of two
-down from 256 for a synthetic run, `1,4,8,10,14,20,28` for an agentic one,
-where a request carries orders of magnitude more prompt and the same card
-saturates far lower. Override either with `--conc-sweep-concs`. When
-either arm's server args set a request-slot count (llama.cpp's `-np` /
-`--parallel`), the ladder drops every concurrency above it, since the server
-only queues the rest; with none left, SWEEP declines with
-`concs_exceed_server_slots`. Under
-native AgentX, concurrency is fixed for the session and
-`--enable-conc-sweep` is rejected at startup. Start a separate session for each
-CONC. The independent MLPerf backend keeps its optional sweep, disabled by
-default. See the [AgentX workflow](../how-to/optimize.md#optimize-an-agentx-workload)
-for supported workload controls.
+CYCLE_END closes each macro-cycle. On entry it settles any stack attempt an
+earlier leg left behind, integrates pending kernel KEEPs, and validates the
+stack for positive `NEEDS_REVIEW` kernels, then records the cycle as settled
+(`cycle_end_settled_cycle`). A settled CYCLE_END exits on the next phase
+decision (`cycle_end_done`), either looping back or closing on the reason
+below. CYCLE_END has no phase budget of its own: the session budget alone
+gates its entry work. A resumed session that stopped inside the entry work
+re-runs it once, on the resumed process's first phase decision.
 
-Each arm runs the session's own CONC first, then the rest of the ladder
-cheapest first: low to high for a synthetic workload, whose rungs send requests
-in proportion to CONC, and high to low for an agentic one, whose rungs replay a
-fixed set of trajectories on more lanes the higher CONC goes.
-A pair needs both arms, so the baseline arm runs first: its first rung may use
-the whole budget, and each later rung must fit in half of what was left when
-the arm started. The optimized arm then runs only the concurrencies the
-baseline reached. A budget that runs out therefore drops whole pairs, and the
-anchor pair is the last one it drops. A rung is not started once the time left
-is shorter than the last benchmark measured after the anchor, since none past
-it runs faster. SWEEP dispatches the sweep only when the time it can grant holds
-one pair: two of the session's measured baseline rounds.
-
-Results update `last_conc_sweep` and feed the final report and breakdown.
-A ladder that fails closes the phase as `sweep_failed`; one that finishes
-(`sweep_done`) loops back or closes on the reason below. While the sweep it
-enqueued is still running, SWEEP's own budget and cap wait for the budget the
-sweep was granted (plus its lease grace); the session deadline does not. A
-sweep the orchestrator cancels stops its ladder at once and records
-`cancelled`, so the phase closes on whatever ordered the cancel rather than on
-`sweep_failed`.
-
-When SWEEP does not loop back, the close names what refused the next
+When CYCLE_END does not loop back, the close names what refused the next
 macro-cycle: `target_reached`, `global_converged` (consecutive cycles without
 gain, or every direction saturated) or `time_exhausted` (less session time
 left than the reloop floor). The refusing rule is kept in the transition
 evidence as `reloop_blocked`. A run without `FRAMEWORK_AGENT` has no next
-cycle to refuse, so it closes on the ladder's own reason unless the target was
+cycle to refuse, so it closes as `cycle_end_done` unless the target was
 reached.
 
 ## CLOSE
@@ -728,11 +699,11 @@ a resumed run.
 
 Every Orchestration turn is stateless: the Coordinator composes one
 unconditional full state projection (mission, `SharedState`, gaps,
-warm-start, scores, the tasks in flight with each explore round's grid,
+warm-start, the tasks in flight with each explore round's grid,
 and the inbox events since the last turn), so the turn never depends on
 what an earlier turn happened to remember.
 
-- **Cycle directive**: While SWEEP is open and another macro-cycle is
+- **Cycle directive**: While CYCLE_END is open and another macro-cycle is
   still feasible, the Coordinator appends one handoff request to an ordinary
   Orchestration turn. The reply, plain text and no intent required, is stored
   as `orchestration_memory` (`next_cycle_directive`, `for_cycle`,

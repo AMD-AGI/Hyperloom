@@ -16,6 +16,9 @@ producer:
 skip:
   - reason: agentx_experience_identity_not_supported
     when: {eq: [{lower: $doc.metadata.grading.benchmark_mode}, agentx]}
+  # The identity below keys on isl and osl, which a prompt dataset's requests do not have.
+  - reason: dataset_experience_identity_not_supported
+    when: {eq: [$doc.metadata.grading.prompt_dataset, true]}
   # Every Experience records e2e_throughput@v1, so a session graded on any other axis (or on none it recorded)
   # publishes nothing: its KEEP/REVERT decisions answer another objective.
   - reason: session_not_graded_on_throughput

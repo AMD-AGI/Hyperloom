@@ -24,9 +24,6 @@ LAUNCHERS = (
     (PACKAGE_ROOT / "assets" / "slurm" / "run_hyperloom.sbatch", 0),
 )
 
-# Retired with the kernel LLM role.
-RETIRED = ("--kernel-codex", "--kernel-claude", "--kernel-prompt", "HL_KERNEL_BACKEND")
-
 _CLI_MODULE = "-m hyperloom optimize"
 _FLAG_RE = re.compile(r"--[a-z][a-z0-9-]*")
 # Tokens that may follow a flag without being its value.
@@ -107,17 +104,3 @@ def test_launcher_flag_values_match_the_cli_arity(launcher: Path, expected: int)
                 f"{'with' if given else 'without'} a value, but the CLI takes "
                 f"{'one' if wants else 'none'} — argparse exits 2 at launch"
             )
-
-
-def test_retired_kernel_backend_flags_are_gone_from_every_launcher() -> None:
-    for launcher, _expected in LAUNCHERS:
-        text = launcher.read_text(encoding="utf-8")
-        for retired in RETIRED:
-            assert retired not in text, f"{launcher.name} still references retired {retired}"
-
-
-@pytest.mark.parametrize("retired", [["--kernel-codex"], ["--kernel-claude"], ["--kernel-prompt", "/tmp/p.md"]])
-def test_retired_kernel_flags_are_rejected(retired: list[str]) -> None:
-    with pytest.raises(SystemExit) as exc:
-        _build_parser().parse_args(["optimize", "--model", "/models/m", *retired])
-    assert exc.value.code == 2
