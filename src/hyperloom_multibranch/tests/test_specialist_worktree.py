@@ -1133,3 +1133,42 @@ def test_a_directory_the_agent_made_a_symlink_makes_no_link_outside_the_worktree
         base.worktree("s1", tmp_path / "s1")
 
     assert list(outside.iterdir()) == []
+
+
+def _timing_out(step: str, times: int, monkeypatch) -> list[list[str]]:
+    """Make the first ``times`` runs of ``git <step>`` time out as a killed one does, leaving the index locked."""
+    real, timed_out = subprocess.run, []
+
+    def run(argv, *args, **kwargs):
+        if step in argv and len(timed_out) < times:
+            timed_out.append(list(argv))
+            (Path(kwargs["cwd"]) / ".git" / "index.lock").write_bytes(b"")
+            raise subprocess.TimeoutExpired(argv, kwargs["timeout"])
+        return real(argv, *args, **kwargs)
+
+    monkeypatch.setattr(subprocess, "run", run)
+    return timed_out
+
+
+@pytest.mark.parametrize("step", ["add", "commit"])
+def test_a_whole_tree_step_of_the_build_that_times_out_is_run_again(tmp_path, installed, monkeypatch, caplog, step):
+    monkeypatch.setattr(worktree_module, "locate_installed_package", lambda _layout: installed)
+    timed_out = _timing_out(step, worktree_module.WHOLE_TREE_ATTEMPTS - 1, monkeypatch)
+    base = SourceBase(tmp_path / "source")
+    with caplog.at_level(logging.WARNING, logger=worktree_module.__name__):
+        base.build(["vllm"])
+    assert len(timed_out) == worktree_module.WHOLE_TREE_ATTEMPTS - 1
+    assert "running it again" in caplog.text
+    assert not (base.path / ".git" / "index.lock").exists()
+    listed = subprocess.run(
+        ["git", "-C", str(base.path), "ls-tree", "-r", "--name-only", "installed"], capture_output=True, check=True
+    )
+    assert listed.stdout.decode().split() == ["vllm/config.py", "vllm/scheduler.py"]
+
+
+def test_a_whole_tree_step_that_times_out_every_time_fails_naming_the_step(tmp_path, installed, monkeypatch):
+    monkeypatch.setattr(worktree_module, "locate_installed_package", lambda _layout: installed)
+    timed_out = _timing_out("add", worktree_module.WHOLE_TREE_ATTEMPTS + 1, monkeypatch)
+    with pytest.raises(worktree_module.WorktreeError, match=r"git add in .* did not finish in 300 s, 3 times"):
+        SourceBase(tmp_path / "source").build(["vllm"])
+    assert len(timed_out) == worktree_module.WHOLE_TREE_ATTEMPTS
