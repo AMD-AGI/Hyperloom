@@ -215,6 +215,9 @@ class GateScoring:
 
     baseline_case_times: dict[str, float] = field(default_factory=dict)
     best_mean_case_speedup: float | None = None
+    # Whether the session starts on a candidate that was measured before it began and is not its own: the lane a
+    # merge session starts from. A stop that leaves that candidate as it was has nothing of the session's to score.
+    starts_on_measured_candidate: bool = False
 
 
 def required_keep_speedup(

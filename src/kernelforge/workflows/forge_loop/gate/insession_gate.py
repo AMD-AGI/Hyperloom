@@ -10,13 +10,16 @@ from dataclasses import dataclass
 import hashlib
 import os
 from pathlib import Path
+import re
 import stat
 import sys
+import time
 import traceback
 from typing import Any
 
 from kernelforge.agent_backends.workspace_guard import remove_filesystem_path
 from kernelforge.config.edit_policy import FORGE_PROTECTED_PATHS, PROTECTED_GLOBS
+from kernelforge.utils.device_queue import DEVICE_VISIBILITY_VARIABLES, DeviceQueue, append_usage, usage_record
 from kernelforge.utils.git import GitError, git, git_bytes
 from kernelforge.utils.session_kill import pattern_kill_denial
 from kernelforge.workflows.forge_loop.gate.gate_settings import GateMeasurement, GateScope
@@ -24,13 +27,10 @@ from kernelforge.workflows.forge_loop.gate.insession_scope import (
     _BASH_REDIRECT_TARGET,
     _BASH_WRITE_VERBS,
     _INLINE_WRITE_INTENT,
-    _PYTHON_VERB,
-    _SHELL_VERBS,
     _is_disposable_redirect_target,
     _python_write_targets,
     host_wide_kill_reason,
     inline_programs,
-    _short_option_value,
     _simple_commands,
     _unquote,
 )
@@ -56,6 +56,12 @@ _DEFAULT_PROTECTED_GLOBS = list(PROTECTED_GLOBS)
 # Tools that modify files on disk (subject to the protected-file deny).
 _EDIT_TOOLS = ("Edit", "Write", "MultiEdit", "NotebookEdit")
 _EDIT_TOOL_MATCHER = "|".join(_EDIT_TOOLS)
+
+# A command that names a device-visibility variable, which is how a process would reach the device around the queue.
+_DEVICE_VISIBILITY_MENTION = re.compile(r"\b(?:" + "|".join(DEVICE_VISIBILITY_VARIABLES) + r")\b")
+
+# Why the gate allowed a stop on a candidate it measured and accepted.
+_END_CONVERGED = "converged"
 
 # Byte <-> str error handler for git paths and symlink targets: lossless for any bytes.
 _FS_ERRORS = "surrogateescape"
@@ -83,11 +89,13 @@ class InSessionGate:
         *,
         baseline_case_times: dict | None = None,
         best_mean_case_speedup: float | None = None,
+        starts_on_measured_candidate: bool = False,
     ):
         driver_script, kernel_file = measurement.driver_script, scope.kernel_file
         self.driver_script = driver_script
-        # The wrapper script this session must reach the driver through, when a caller interposed one.
-        self.interposed_driver_path = measurement.interposed_driver_path or ""
+        # How this session reaches a device it shares with other lanes; None when the device is its own.
+        self.device = measurement.device
+        self.gain_required = measurement.gain_required
         self.snr_threshold = measurement.snr_threshold
         self.bench_repeat = measurement.bench_repeat
         self.case_aggregate = measurement.case_aggregate
@@ -128,8 +136,9 @@ class InSessionGate:
         # outer loop force-REVERTs it. "validation_timeout" — full-suite correctness timed out; the outer loop
         # performs the one authoritative retry. "jit_rebuild_unavailable" — the workspace could not assert a rebuild
         # of the edited sources, so nothing was measured in-session; the candidate is untouched and the outer loop
-        # measures it itself. "no_changes" — the stop left no tracked implementation change from HEAD, so there was no
-        # candidate to measure. "gate_error" — the gate itself raised; fail OPEN.
+        # measures it itself. "no_changes" — the stop left no tracked implementation change from HEAD, or left exactly
+        # the measured candidate the session started on, so there was no candidate of its own to measure.
+        # "gate_error" — the gate itself raised; fail OPEN.
         self.end_reason = ""
         # Real failure signals seen this session (block reasons: compile errors, "correct but not faster", …).
         self.findings: list[str] = []
@@ -144,6 +153,10 @@ class InSessionGate:
             if p:
                 self.protected_abs.add(os.path.normpath(os.path.abspath(p)))
         self.workspace_root = self._infer_workspace_root(scope.workspace, driver_script, kernel_file)
+        # A session that merges a round starts on a lane's result rather than on HEAD, and a stop that leaves that as
+        # it was has no candidate of its own to measure. Any other session's uncommitted start is its own to answer
+        # for -- a retried PORT attempt starts on the attempt before it -- so nothing is remembered for it.
+        self._found_fingerprint = self._workspace_fingerprint() if starts_on_measured_candidate else None
 
         globs = list(_DEFAULT_PROTECTED_GLOBS)
         # Repository tasks ship the reference/test implementation INSIDE the repo tree (e.g. AITER's
@@ -175,7 +188,7 @@ class InSessionGate:
         return self.stage_timeout_sec + benchmark_budget + 120
 
     # ── hook wiring ──────────────────────────────────────────────────────────
-    def make_agent_hooks(self, *, stop_check: bool = True):
+    def make_agent_hooks(self):
         """Build provider-neutral lifecycle hooks for capable backends."""
         from kernelforge.agent_backends.base import AgentHook, AgentHooks
 
@@ -191,17 +204,7 @@ class InSessionGate:
                 ),
             ],
             # Stop: harness protection, then canonical correctness+bench self-check.
-            stop=(
-                [
-                    AgentHook(
-                        matcher="",
-                        callback=self._on_stop,
-                        timeout_sec=self.hook_timeout_sec,
-                    )
-                ]
-                if stop_check
-                else []
-            ),
+            stop=[AgentHook(matcher="", callback=self._on_stop, timeout_sec=self.hook_timeout_sec)],
         )
 
     # ── path helpers ─────────────────────────────────────────────────────────
@@ -273,6 +276,30 @@ class InSessionGate:
             raise RuntimeError("candidate diff fingerprint requires a workspace")
         diff = git("diff", "HEAD", "--", ".", cwd=self.workspace_root).stdout
         return hashlib.sha256(diff.encode()).hexdigest()
+
+    def _workspace_fingerprint(self) -> str | None:
+        """Fingerprint what a candidate is made of: the tracked diff from HEAD and the new files git does not ignore.
+
+        A new file is told apart by its size and modification time, not its bytes, so a workspace that carries large
+        untracked build output costs no more to fingerprint. None where the workspace cannot be read; a fingerprint
+        that is missing or differs only ever sends a stop on to be measured.
+        """
+        root = self.workspace_root
+        if root is None:
+            return None
+        try:
+            digest = hashlib.sha256(self._candidate_diff_sha256().encode())
+            names = git_bytes("ls-files", "--others", "--exclude-standard", "-z", "--", ".", cwd=root).stdout
+            for name in sorted(filter(None, names.split(b"\0"))):
+                found = os.lstat(os.path.join(os.fsencode(root), name))
+                digest.update(b"\0%b\0%d\0%d" % (name, found.st_size, found.st_mtime_ns))
+        except (GitError, OSError):
+            return None
+        return digest.hexdigest()
+
+    def _workspace_is_as_found(self) -> bool:
+        """Whether the workspace holds exactly what this session started on."""
+        return self._found_fingerprint is not None and self._workspace_fingerprint() == self._found_fingerprint
 
     def _protected_key(self, path: Path) -> str:
         root = self.workspace_root
@@ -581,35 +608,12 @@ class InSessionGate:
             or self._inline_write_deny_reason(remainder)
         )
 
-    def _bash_bypass_reason(self, command: str) -> str:
-        """WHY a Bash command reaches the driver around its wrapper, or \"\"."""
-        driver_base = os.path.basename(self.driver_script)
-        if not self.interposed_driver_path or not command or not driver_base:
+    def _device_bypass_reason(self, command: str) -> str:
+        """WHY a Bash command would reach the shared device around its queue, or \"\"."""
+        if self.device is None:
             return ""
-        driver_stem = os.path.splitext(driver_base)[0]
-        run_base = os.path.basename(_unquote(self.interposed_driver_path))
-        for verb, args in _simple_commands(command):
-            if verb == run_base:
-                continue
-            if verb == driver_base:
-                return f"`{verb}` runs the driver outside `{run_base}`"
-            if verb in _SHELL_VERBS:
-                # A nested shell carries its command line inside one word, so the split above cannot see into it.
-                nested = self._bash_bypass_reason(_short_option_value(args, "c"))
-                if nested:
-                    return nested
-                continue
-            if not _PYTHON_VERB.match(verb):
-                continue
-            # An interpreter reaches the driver by module as readily as by path, and `-m` names it without the suffix
-            # the path carries, so the scan below cannot see it.
-            module = _short_option_value(args, "m")
-            if module and module.rsplit(".", 1)[-1] == driver_stem:
-                return f"`{verb} -m {module}` runs the driver outside `{run_base}`"
-            # Every non-option word, not just the first.
-            if any(os.path.basename(_unquote(arg)) == driver_base for arg in args if not arg.startswith("-")):
-                return f"`{verb} {driver_base}` runs the driver outside `{run_base}`"
-        return ""
+        match = _DEVICE_VISIBILITY_MENTION.search(command or "")
+        return f"`{match.group(0)}` selects a device outside the queue" if match else ""
 
     # ── hooks ────────────────────────────────────────────────────────────────
     async def _on_pre_edit(self, input_data: dict, tool_use_id: str | None, context: Any) -> dict:
@@ -648,7 +652,7 @@ class InSessionGate:
         }
 
     async def _on_pre_bash(self, input_data: dict, tool_use_id: str | None, context: Any) -> dict:
-        """Deny shell writes to protected harness files, and driver runs that would go around the command this session must measure through."""
+        """Deny shell writes to protected harness files, device selection around the queue, and host-wide kills."""
         if input_data.get("tool_name", "") != "Bash":
             return {}
         command = self._bash_command(input_data)
@@ -664,23 +668,18 @@ class InSessionGate:
                     "do not edit it; modify only kernel implementation files."
                 ),
             )
-        reason = self._bash_bypass_reason(command)
+        reason = self._device_bypass_reason(command)
         if reason:
-            driver_base = os.path.basename(self.driver_script)
             return self._deny_bash(
                 command,
                 reason=reason,
-                finding="DENIED driver run outside the interposed command",
+                finding="DENIED device selection outside the device queue",
                 told=(
-                    f"Run the driver as `python3 {self.interposed_driver_path}` "
-                    f"instead. It passes every argument through to "
-                    f"{driver_base} unchanged, writes nothing of its own and "
-                    "returns its exit status — but it first takes a lock on the "
-                    "GPU this session shares with others running right now. "
-                    "Timing two kernels on one device at once corrupts both "
-                    "numbers, including the ones this session is judged on. It "
-                    "may sit silent before it starts; that wait is another "
-                    "session's benchmark, not a hang."
+                    "This session shares its GPU with other sessions, so no device is visible to a command it starts "
+                    f"directly. Run every command that needs the GPU as `python3 {self.device.runner} <command>`: it "
+                    "waits its turn, makes the device visible to that command and runs it unchanged. Timing two "
+                    "kernels on one device at once corrupts both numbers, including the ones this session is judged "
+                    "on."
                 ),
             )
         reason = host_wide_kill_reason(command)
@@ -734,12 +733,15 @@ class InSessionGate:
         return self._allow()
 
     def _stop_without_candidate(self) -> dict:
-        """Allow a stop that leaves nothing changed from HEAD: there is no candidate to validate or bench."""
+        """Allow a stop that leaves the workspace as the session found it: it has no candidate of its own to bench."""
         self.end_reason = "no_changes"
         self.last_wall_ms = None
         self.last_mean_case_speedup = None
         self.last_bench_result = None
-        self._log("ALLOW (no tracked changes from HEAD; nothing to measure) edit=0")
+        if self.edit_count:
+            self._log(f"ALLOW (the workspace is as this session found it; nothing to measure) edit={self.edit_count}")
+        else:
+            self._log("ALLOW (no tracked changes from HEAD; nothing to measure) edit=0")
         return self._allow()
 
     def _record_insession_bench(
@@ -775,13 +777,23 @@ class InSessionGate:
             "Keep the kernel correct and try a DIFFERENT optimization to reduce wall time, then continue."
         )
 
+    def _allow_for_the_merge(self, mean_case_speedup: float) -> dict:
+        """Allow a correct candidate whose round has other lanes: its measurement is the merge's to use."""
+        self.passed = True
+        self.end_reason = _END_CONVERGED
+        self._log(
+            f"ALLOW (correct; mean case speedup {mean_case_speedup:.6f}x recorded for the round's merge) "
+            f"edit={self.edit_count}"
+        )
+        return self._allow()
+
     async def _stop_performance_verdict(self) -> dict:
         """Bench the correct candidate and allow only when it clears the KEEP bar."""
         self.last_wall_ms = None
         self.last_mean_case_speedup = None
         self.last_bench_result = None
         bench = await measure_wallclock(
-            BenchRun(self.driver_script, driver_args=[], repeat=self.bench_repeat),
+            BenchRun(self.driver_script, driver_args=[], repeat=self.bench_repeat, env=self._measurement_env()),
             measurements=KEEP_MEASUREMENT_COUNT,
             timeout_sec=self.bench_timeout_sec,
         )
@@ -817,13 +829,16 @@ class InSessionGate:
             )
         self._record_insession_bench(bench, wall, mean_case_speedup, measurement_scores)
 
+        if not self.gain_required:
+            return self._allow_for_the_merge(mean_case_speedup)
+
         required = required_keep_speedup(self.best_mean_case_speedup, measurement_scores)
         if passes_keep_threshold(
             measurement_scores,
             best_mean_case_speedup=self.best_mean_case_speedup,
         ):
             self.passed = True
-            self.end_reason = "converged"
+            self.end_reason = _END_CONVERGED
             self._log(
                 f"ALLOW (correct + faster: mean case speedup mean score={mean_case_speedup:.6f}x >= {required:.6f}x "
                 f"from scores={[round(score, 6) for score in measurement_scores]}; raw mean {wall} ms) "
@@ -833,8 +848,31 @@ class InSessionGate:
 
         return self._block_not_faster(mean_case_speedup, wall, required)
 
+    def _measurement_env(self):
+        """The environment overlay this gate's driver runs take: a lane's own, none for a session with its own device."""
+        return dict(self.device.environment) if self.device is not None else None
+
     async def _stop_candidate_verdict(self) -> dict:
-        """Run in-session correctness (and performance) and allow or block the stop."""
+        """Run in-session correctness (and performance) and allow or block the stop, holding a shared device for both."""
+        if self.device is None:
+            return await self._measure_candidate()
+        async with DeviceQueue(self.device.queue_root).held_async() as waited:
+            started = time.monotonic()
+            try:
+                return await self._measure_candidate()
+            finally:
+                append_usage(
+                    self.device.usage_log,
+                    usage_record(
+                        lane=self.device.lane,
+                        command="stop check",
+                        wait_sec=waited,
+                        hold_sec=time.monotonic() - started,
+                    ),
+                )
+
+    async def _measure_candidate(self) -> dict:
+        """Correctness, then performance unless the phase is correctness-only; allow or block the stop on them."""
         # Ensure the canonical check compiles the kernel the agent has on disk RIGHT NOW: the SDK hook may run in a
         # subprocess that did not inherit the loop's AITER_REBUILD, so (re)assert it here. Its measurement is the one
         # the outer loop reuses, so a shard chosen from a stale source list would decide keep/revert on the previous
@@ -856,6 +894,7 @@ class InSessionGate:
             driver_args=[],
             snr_threshold=self.snr_threshold,
             timeout_sec=self.stage_timeout_sec,
+            env=self._measurement_env(),
         )
         if not corr.get("passed"):
             outcome = str(corr.get("outcome") or "correctness_failure")
@@ -880,7 +919,7 @@ class InSessionGate:
         # Correctness-only phase (e.g. PORT): there is no performance requirement, so a CORRECT kernel is done.
         if self.correctness_only:
             self.passed = True
-            self.end_reason = "converged"
+            self.end_reason = _END_CONVERGED
             self._log(f"ALLOW (correct; correctness-only phase) edit={self.edit_count}")
             return self._allow()
         return await self._stop_performance_verdict()
@@ -896,12 +935,14 @@ class InSessionGate:
             if protected_delta:
                 return self._stop_for_protected_harness(protected_delta)
 
-            # An unchanged tree is the incumbent: benching it again could only block on noise.
+            # An unchanged tree is the incumbent, and the lane a merge started on has its own measurement: benching
+            # either again could only block on noise. Whether what the workspace holds is kept is the outer loop's
+            # canonical measurement to decide.
             try:
                 self.edit_count = len(self._changed_implementation_paths())
             except (GitError, OSError) as error:
                 return self._allow_unmeasured(f"{type(error).__name__}: {error}")
-            if not self.edit_count:
+            if not self.edit_count or self._workspace_is_as_found():
                 return self._stop_without_candidate()
 
             # Budget (bounded so the gate never hangs the session). Checked before the (GPU-costly) canonical

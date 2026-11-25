@@ -5,6 +5,8 @@
 
 from __future__ import annotations
 
+from kernelforge.tests.workflows.forge_loop.iteration._iteration_loop import lane_agents
+
 import asyncio
 import subprocess
 import sys
@@ -14,7 +16,6 @@ import pytest
 import yaml
 
 from kernelforge.evaluation.scoring import CaseAggregate
-from kernelforge.workflows.forge_loop.iteration import runner as runner_module
 from kernelforge.workflows.forge_loop.campaign.run_state import LoopStateStore
 from kernelforge.workflows.forge_loop.iteration.runner import IterationResult
 from kernelforge.tests.workflows.forge_loop.iteration._iteration_loop import (
@@ -297,7 +298,7 @@ def test_agent_error_is_reduced_and_persisted(tmp_path, monkeypatch):
     async def failing_agent(*_args, **_kwargs):
         raise RuntimeError("agent exploded")
 
-    asyncio.run(loop.run(runner_module.LoopAgents(agent_fn=failing_agent, supervisor_fn=_unused_supervisor)))
+    asyncio.run(loop.run(lane_agents(failing_agent, supervisor_fn=_unused_supervisor)))
 
     store = LoopStateStore(str(workspace))
     state = store.load()
@@ -331,9 +332,7 @@ def test_agent_error_with_diff_is_handed_to_outer_validation(tmp_path, monkeypat
         )
 
     monkeypatch.setattr(loop, "run_one_iteration", reject_candidate)
-    asyncio.run(
-        loop.run(runner_module.LoopAgents(agent_fn=editing_then_failing_agent, supervisor_fn=_unused_supervisor))
-    )
+    asyncio.run(loop.run(lane_agents(editing_then_failing_agent, supervisor_fn=_unused_supervisor)))
 
     decisions = [
         event.get("decision")
@@ -379,7 +378,7 @@ def test_integrity_violation_restores_and_skips_canonical_validation(
 
     monkeypatch.setattr(loop, "run_one_iteration", unexpected_validation)
 
-    asyncio.run(loop.run(runner_module.LoopAgents(agent_fn=unsafe_agent, supervisor_fn=_unused_supervisor)))
+    asyncio.run(loop.run(lane_agents(unsafe_agent, supervisor_fn=_unused_supervisor)))
 
     assert validation_calls == []
     assert kernel.read_text() == "def kernel():\n    return 1\n"
@@ -405,7 +404,7 @@ def test_an_api_outage_is_not_recorded_as_an_agent_decision(tmp_path, monkeypatc
         session_sink["end_reason"] = "api_error"
         return "agent session ended with an API error"
 
-    asyncio.run(loop.run(runner_module.LoopAgents(agent_fn=api_failed_agent, supervisor_fn=_unused_supervisor)))
+    asyncio.run(loop.run(lane_agents(api_failed_agent, supervisor_fn=_unused_supervisor)))
 
     store = LoopStateStore(str(workspace))
     decisions = [event.get("decision") for event in store.read_events() if event.get("type") == "iteration_result"]
@@ -416,7 +415,7 @@ def test_an_api_outage_is_not_recorded_as_an_agent_decision(tmp_path, monkeypatc
 
 def test_no_change_attempt_is_reduced_and_persisted(tmp_path, monkeypatch):
     loop, workspace = _make_loop(tmp_path, monkeypatch)
-    asyncio.run(loop.run(runner_module.LoopAgents(agent_fn=_no_change_agent, supervisor_fn=_unused_supervisor)))
+    asyncio.run(loop.run(lane_agents(_no_change_agent, supervisor_fn=_unused_supervisor)))
 
     store = LoopStateStore(str(workspace))
     state = store.load()

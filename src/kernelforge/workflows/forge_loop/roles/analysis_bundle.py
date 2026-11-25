@@ -17,8 +17,9 @@ from hyperloom_common.io import DURABLE, JsonFormat, atomic_write_json
 from kernelforge.workflows.forge_loop.roles.contracts import (
     CaseEvidence,
     EvidenceRef,
-    OrchestrationContext,
+    EvidenceContext,
 )
+from kernelforge.workflows.forge_loop.roles.analysis_prompts import LANE_PARTITION_FILE
 from kernelforge.workflows.forge_loop.roles.analysis_session import _sha256
 
 
@@ -61,8 +62,8 @@ class AnalysisBundle:
     cases: tuple[CaseEvidence, ...]
     outcome: AnalysisOutcome | None = None
 
-    def apply(self, context: OrchestrationContext) -> OrchestrationContext:
-        """Return an orchestration context backed by this bundle."""
+    def apply(self, context: EvidenceContext) -> EvidenceContext:
+        """Return an evidence context backed by this bundle."""
         source_map = self.root / "source_map.md"
         report = self.root / "report.md"
         catalog = self.root / "artifact_catalog.json"
@@ -90,7 +91,7 @@ class AnalysisBundle:
                     f"{', '.join(artifact['available_information'])}."
                 ),
             )
-        return OrchestrationContext(
+        return EvidenceContext(
             analysis_commit=context.analysis_commit,
             workspace=context.workspace,
             gpu_target=context.gpu_target,
@@ -112,13 +113,38 @@ class AnalysisBundle:
         )
 
 
+_LANE_HEADING = re.compile(r"^#{1,6}\s*lane\s+\d+\b(?P<title>.*)$", re.IGNORECASE | re.MULTILINE)
+# What separates a lane's number from a title written on the same heading line.
+_LANE_TITLE_SEPARATORS = " \t:-\u2013\u2014"
+
+
+def read_lane_focuses(bundle_root: Path) -> list[str]:
+    """The focuses a published Analysis divided its evidence into, in lane order; empty when it divided nothing.
+
+    A focus is what one ``## Lane N`` section of the bundle's partition file says: the title on its heading line,
+    where the Analysis names the lane and often the cases it scores, and the text under it. The loop reads nothing
+    else of it: what a focus says is between the Analysis Agent and the session that works on it.
+    """
+    try:
+        text = (bundle_root / LANE_PARTITION_FILE).read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return []
+    headings = list(_LANE_HEADING.finditer(text))
+    focuses = []
+    for heading, following in zip(headings, [*headings[1:], None]):
+        title = heading.group("title").lstrip(_LANE_TITLE_SEPARATORS).rstrip()
+        body = text[heading.end() : following.start() if following is not None else len(text)].strip()
+        focuses.append("\n".join(part for part in (title, body) if part))
+    return [focus for focus in focuses if focus]
+
+
 class AnalysisBundleError(RuntimeError):
     """Report an invalid or unsafe Analysis Agent result."""
 
 
 @dataclass(frozen=True)
 class AnalysisOutcome:
-    """Structured Analysis attempt result for campaign events and orchestration."""
+    """Structured Analysis attempt result for campaign events and the loop's refresh decisions."""
 
     analysis_commit: str
     requested_tier: str
@@ -204,7 +230,7 @@ def _case_directory(case_id: str) -> str:
     return f"{readable}-{digest}"
 
 
-def _analysis_cases(context: OrchestrationContext) -> tuple[AnalysisCase, ...]:
+def _analysis_cases(context: EvidenceContext) -> tuple[AnalysisCase, ...]:
     return tuple(
         AnalysisCase(case_id=case.case_id, directory=_case_directory(case.case_id), latency_ms=case.latency_ms)
         for case in context.cases
@@ -223,9 +249,9 @@ def _source_digest(paths: tuple[Path, ...]) -> str:
 
 @dataclass(frozen=True)
 class _BundleIdentity:
-    """What a bundle must answer for: the orchestration context, its cases, and the driver and source digests."""
+    """What a bundle must answer for: the evidence context, its cases, and the driver and source digests."""
 
-    context: OrchestrationContext
+    context: EvidenceContext
     cases: tuple[AnalysisCase, ...]
     driver_digest: str
     source_digest: str
@@ -364,7 +390,7 @@ def _validated_manifest(root: Path, identity: _BundleIdentity) -> tuple[dict, di
 
 def _validated_session_metadata(
     root: Path,
-    context: OrchestrationContext,
+    context: EvidenceContext,
     manifest: dict,
     *,
     completed: list,
