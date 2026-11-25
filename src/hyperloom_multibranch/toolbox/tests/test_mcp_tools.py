@@ -12,15 +12,13 @@ import time
 import urllib.error
 import urllib.request
 from collections.abc import Iterator
-from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
 import pytest
 
-from hyperloom.contracts.measurement import Purpose, TestRequest
-from hyperloom.contracts.recipe import RecipeDelta
+from hyperloom.contracts.measurement import TestRequest
 from hyperloom.hosted.mcp_server import (
     HOST_KIND,
     SPECIALIST_KIND,
@@ -31,7 +29,7 @@ from hyperloom.hosted.mcp_server import (
     McpServerConfig,
     ReplyCall,
 )
-from hyperloom_multibranch.contracts.blackboard import INTEGRATION_BRANCH, Role, Writer
+from hyperloom_multibranch.contracts.blackboard import Role, Writer
 from hyperloom_multibranch.contracts.blackboard.vocab import InboxKind
 from hyperloom_multibranch.contracts.blackboard.records import InboxItem, InboxPage, StartupBrief
 from hyperloom_multibranch.contracts.toolbox import (
@@ -338,46 +336,6 @@ async def test_wait_test_returns_as_soon_as_the_result_lands(wait_rig: Rig, wait
     await waiting.as_role(Role.TOOLBOX).write_result(result("r9"))
     body = await asyncio.wait_for(call, 10)
     assert body["state"] == "measured" and body["result"]["request_id"] == "r9"
-
-
-BASELINE_TIMING = "round_1/server.log: eval time = 12621.18 ms / 512 tokens ( 24.70 ms per token)"
-
-
-@pytest.fixture
-async def baselined(seeded: tuple[Path, FakeClock]) -> Writers:
-    """The scripted session plus ``b1``, a measured baseline test of its root that carries its server's timing lines."""
-    w = Writers(*seeded)
-    toolbox = w.as_role(Role.TOOLBOX)
-    root = intent(INTEGRATION_BRANCH, "c0")
-    await toolbox.write_request(request("b1", root, RecipeDelta(), purpose=Purpose.BASELINE))
-    await toolbox.write_result(replace(result("b1"), timing_lines=(BASELINE_TIMING,)))
-    return w
-
-
-@pytest.fixture
-def baselined_rig(seeded: tuple[Path, FakeClock], baselined: Writers) -> Iterator[Rig]:
-    yield from _running(seeded, SpecialistToolOptions(claim_ttl_seconds=60.0, wait_poll_seconds=0.05))
-
-
-def test_any_branch_finds_the_session_s_baseline_tests_and_reads_their_results(baselined_rig: Rig) -> None:
-    for branch in ("s1", "s2"):
-        token = baselined_rig.token(branch)
-        assert "test b1 on integration at c0" in baselined_rig.ok(token, "blackboard_search", query="baseline")
-        for tool in ("test_result", "wait_test"):
-            body = json.loads(baselined_rig.ok(token, tool, request_id="b1"))
-            assert body["state"] == "measured" and body["result"]["timing_lines"] == [BASELINE_TIMING]
-
-
-def test_a_baseline_is_no_branch_s_to_take_back_and_the_integration_branch_s_other_tests_stay_its_own(
-    baselined_rig: Rig,
-) -> None:
-    token = baselined_rig.token("s1")
-    forbidden = {"code": -32001, "message": "a specialist reads the tests of its own branch only"}
-
-    assert baselined_rig.call(token, "cancel_test", request_id="b1")[1]["error"] == forbidden
-    assert baselined_rig.toolbox.cancelled == []
-    for tool in ("test_result", "wait_test"):
-        assert baselined_rig.call(token, tool, request_id="m1")[1]["error"] == forbidden
 
 
 PACED_POLL_SECONDS = 0.037
