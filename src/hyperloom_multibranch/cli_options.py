@@ -166,7 +166,12 @@ def _add_workload_options(run: argparse.ArgumentParser) -> None:
 
     run.add_argument("--model", help="Model path, or an id found under HL_MODEL_BASE or in the Hugging Face cache.")
     run.add_argument("--framework", help="Inference framework, e.g. vllm or sglang.")
-    run.add_argument("--gpu-type", type=str.lower, choices=SESSION_GPU_TYPES, help="GPU type, in any case.")
+    run.add_argument(
+        "--gpu-type",
+        type=str.lower,
+        choices=SESSION_GPU_TYPES,
+        help="GPU type, in any case; r9700 and w7900d only with --framework llamacpp.",
+    )
     run.add_argument("--workload", choices=[kind.value for kind in WorkloadKind], help="Workload kind.")
     run.add_argument("--tp", type=int, help="Tensor-parallel size; must fit the machine's cards.")
     run.add_argument(
