@@ -24,7 +24,7 @@ _BODY = {
     "axes": {"type": ["Q8_0", "Q4_0"], "ncols": ["1", "2"]},
     "values": ["1", "2", "4"],
     "archs": ["gfx1100"],
-    "bench": {"op": "MUL_MAT", "type_a": "${type}", "n": "${ncols}"},
+    "bench": {"type_a": "${type}", "n": "${ncols}"},
 }
 
 
@@ -42,7 +42,7 @@ def test_apply_refuses_a_source_without_the_anchor_exactly_once(source: str) -> 
     ("changes", "message"),
     [
         ({"insert": "if (type == ${type}) { return ${value}; }"}, "insert must name each axis"),
-        ({"bench": {"op": "MUL_MAT", "type_a": "${type}", "n": "1"}}, "does not tell the keys apart"),
+        ({"bench": {"type_a": "${type}", "n": "1"}}, "does not tell the keys apart"),
         ({"file": "../outside.cu"}, "path in the upstream tree"),
     ],
 )

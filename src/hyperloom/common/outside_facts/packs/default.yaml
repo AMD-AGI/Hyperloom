@@ -1204,7 +1204,7 @@ facts:
       ncols: ["1", "2", "3", "4", "5", "6", "7", "8"]
     values: ["1", "2", "4", "8"]
     archs: [gfx1100, gfx1101, gfx1102]
-    bench: {op: MUL_MAT, type_a: "${type}", n: "${ncols}"}
+    bench: {type_a: "${type}", n: "${ncols}"}
     examples:
       - source: |
           static constexpr __host__ __device__ int calc_nwarps(ggml_type type, int ncols_dst, mmvq_parameter_table_id table_id) {
@@ -1254,7 +1254,7 @@ facts:
       ncols: ["1", "2", "3", "4", "5", "6", "7", "8"]
     values: ["1", "2", "4"]
     archs: [gfx1100, gfx1101, gfx1102]
-    bench: {op: MUL_MAT, type_a: "${type}", n: "${ncols}"}
+    bench: {type_a: "${type}", n: "${ncols}"}
     examples:
       - source: |
           static constexpr __host__ __device__ int calc_rows_per_block(ggml_type type, int ncols_dst, int table_id, bool small_k = false, int nwarps = 1) {
