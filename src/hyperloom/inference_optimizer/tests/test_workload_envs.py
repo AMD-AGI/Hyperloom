@@ -174,6 +174,49 @@ def test_num_prompts_factor(monkeypatch, tmp_path, isl, osl, conc, factor):
     assert bench["envs"]["NUM_PROMPTS"] == conc * factor
 
 
+def test_an_exported_num_prompts_is_the_rounds_request_count(monkeypatch, tmp_path):
+    clear_env(monkeypatch)
+    monkeypatch.setenv("CONC", "4")
+    monkeypatch.setenv("NUM_PROMPTS", "39")
+    bench = materialize(write_config(tmp_path / "cfg.yaml"), tmp_path / "out")
+    assert bench["envs"]["NUM_PROMPTS"] == 39
+
+
+def test_a_value_the_caller_names_wins_over_an_exported_num_prompts(monkeypatch, tmp_path):
+    """The layer a boot round, a sweep rung and ``--extra-env`` name their own count in."""
+    clear_env(monkeypatch)
+    monkeypatch.setenv("NUM_PROMPTS", "39")
+    layer = we.LaunchLayer(extra_envs={"NUM_PROMPTS": "1"})
+    bench = materialize(write_config(tmp_path / "cfg.yaml"), tmp_path / "out", launch=layer)
+    assert bench["envs"]["NUM_PROMPTS"] == "1"
+
+
+def test_a_profile_round_keeps_its_capture_count_with_num_prompts_exported(monkeypatch, tmp_path):
+    clear_env(monkeypatch)
+    monkeypatch.setenv("CONC", "32")
+    src = write_config(tmp_path / "cfg.yaml", envs={"PROFILE": "1"})
+    sized = materialize(src, tmp_path / "sized")["envs"]["NUM_PROMPTS"]
+    monkeypatch.setenv("NUM_PROMPTS", "7")
+    assert materialize(src, tmp_path / "exported")["envs"]["NUM_PROMPTS"] == sized != 7
+
+
+def test_a_grid_round_keeps_the_points_num_prompts_with_another_exported(monkeypatch, tmp_path):
+    from hyperloom.orchestrator.actions.executors.workload._benchmark_runtime import apply_runtime_benchmark_overrides
+
+    clear_env(monkeypatch)
+    monkeypatch.setenv("NUM_PROMPTS", "39")
+    bench = {"framework": "sglang", "model": "/m", "envs": {"NUM_PROMPTS": 20, "TP": 1}}
+    assert apply_runtime_benchmark_overrides(bench)["NUM_PROMPTS"] == 20
+
+
+@pytest.mark.parametrize("value", ["all", "0", "-3"])
+def test_an_exported_num_prompts_that_is_no_positive_count_is_refused(monkeypatch, tmp_path, value):
+    clear_env(monkeypatch)
+    monkeypatch.setenv("NUM_PROMPTS", value)
+    with pytest.raises(ValueError):
+        materialize(write_config(tmp_path / "cfg.yaml"), tmp_path / "out")
+
+
 def test_server_args_merge_existing(monkeypatch, tmp_path):
     clear_env(monkeypatch)
     src = write_config(tmp_path / "cfg.yaml", envs={"EXTRA_SGLANG_ARGS": "--mem-fraction-static 0.9"})
