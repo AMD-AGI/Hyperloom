@@ -1,0 +1,131 @@
+# SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
+# SPDX-License-Identifier: MIT
+
+"""A role's args and env as the PD launcher runs them: the keys the launcher owns taken out and named.
+
+The launcher sets the model path, bind address, ports, tensor-parallel size, disaggregation mode and bootstrap,
+multi-node rendezvous, served name, context length, metrics switch and (for ATOM) the KV transfer config itself, so a
+source's value for any of them is dropped and recorded. ``--disaggregation-transfer-backend`` is dropped too and its
+value becomes the launch's transfer backend. Env values that name the fabric (``@fabric.*``) or host paths are the
+hosts' own and are dropped the same way.
+"""
+
+from __future__ import annotations
+
+from collections.abc import Mapping, Sequence
+from dataclasses import dataclass
+from typing import Any
+
+from inference_suite.argv import canonical_flag_name, is_flag
+from inference_suite.frameworks import Framework, framework_facts
+from inference_suite.recipe.model import (
+    ATOM_RUNNER_OWNED,
+    ATOM_TOPOLOGY,
+    SGLANG_RUNNER_OWNED,
+    SGLANG_TOPOLOGY,
+    TopologySpelling,
+)
+
+TRANSFER_BACKEND_FLAG = "disaggregation-transfer-backend"
+TRUST_REMOTE_CODE = "--trust-remote-code"
+_FABRIC_PLACEHOLDER = "@fabric."
+_HOST_PATH_ENV = frozenset({"HF_HOME", "HF_HUB_CACHE", "HUGGINGFACE_HUB_CACHE"})
+
+
+def _tp_flags(topology: TopologySpelling) -> frozenset[str]:
+    """The canonical spellings of the tensor-parallel size flag."""
+    return frozenset(canonical_flag_name(flag) for flag in topology.tp)
+
+
+def _context_flags(framework: Framework) -> frozenset[str]:
+    """The canonical spellings of the flag that sets the context length, empty when the framework has none."""
+    flags = framework_facts(framework).server_flags
+    if flags is None:
+        return frozenset()
+    return frozenset(canonical_flag_name(alias) for alias in flags.context_length.aliases)
+
+
+#: The flags the PD launcher owns, by framework, in canonical spelling.
+PD_RUNNER_OWNED = {
+    Framework.SGLANG: SGLANG_RUNNER_OWNED
+    | _tp_flags(SGLANG_TOPOLOGY)
+    | {"disaggregation-mode", "disaggregation-bootstrap-port"}
+    | {"disaggregation-ib-device", "dist-init-addr", "nnodes", "node-rank", TRANSFER_BACKEND_FLAG}
+    | _context_flags(Framework.SGLANG),
+    Framework.ATOM: ATOM_RUNNER_OWNED
+    | _tp_flags(ATOM_TOPOLOGY)
+    | {"kv-transfer-config"}
+    | _context_flags(Framework.ATOM),
+}
+
+
+@dataclass(frozen=True)
+class RenderedRole:
+    """A role's args and env with the launcher's keys taken out, what was taken out, and the transfer backend the
+    args named (empty when they named none)."""
+
+    args: tuple[str, ...]
+    env: Mapping[str, str]
+    stripped: tuple[str, ...]
+    transfer_backend: str
+
+
+def _flag_end(args: Sequence[str], index: int) -> int:
+    """The index past ``args[index]``'s values: an ``=`` value, else every following token that is no flag."""
+    end = index + 1
+    if "=" in args[index]:
+        return end
+    while end < len(args) and not is_flag(args[end]):
+        end += 1
+    return end
+
+
+def flag_groups(args: Sequence[str]) -> list[tuple[str, ...]]:
+    """``args`` split into a flag with its values, or a token that follows no flag, each."""
+    groups: list[tuple[str, ...]] = []
+    index = 0
+    while index < len(args):
+        end = _flag_end(args, index) if is_flag(args[index]) else index + 1
+        groups.append(tuple(args[index:end]))
+        index = end
+    return groups
+
+
+def group_flag(group: Sequence[str]) -> str:
+    """The canonical flag a group sets; empty for a token that follows no flag."""
+    return canonical_flag_name(group[0].partition("=")[0]) if is_flag(group[0]) else ""
+
+
+def render_role(framework: Framework, args: Sequence[str], env: Mapping[str, Any]) -> RenderedRole:
+    """``args`` and ``env`` with the launcher's keys taken out."""
+    owned = PD_RUNNER_OWNED[framework]
+    kept: list[str] = []
+    stripped: list[str] = []
+    backend = ""
+    for group in flag_groups(args):
+        if group_flag(group) not in owned:
+            kept.extend(group)
+            continue
+        name, _, assigned = group[0].partition("=")
+        stripped.append(name)
+        if group_flag(group) == TRANSFER_BACKEND_FLAG:
+            backend = assigned or (group[1] if len(group) > 1 else "")
+    kept_env: dict[str, str] = {}
+    for key, value in env.items():
+        text = str(value)
+        if key in _HOST_PATH_ENV or text.startswith(_FABRIC_PLACEHOLDER):
+            stripped.append(f"env {key}")
+        else:
+            kept_env[key] = text
+    return RenderedRole(tuple(kept), kept_env, tuple(stripped), backend)
+
+
+__all__ = [
+    "PD_RUNNER_OWNED",
+    "TRANSFER_BACKEND_FLAG",
+    "TRUST_REMOTE_CODE",
+    "RenderedRole",
+    "flag_groups",
+    "group_flag",
+    "render_role",
+]
