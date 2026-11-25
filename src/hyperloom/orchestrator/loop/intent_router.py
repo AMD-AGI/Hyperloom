@@ -24,10 +24,7 @@ from hyperloom_common.timeutil import format_exc_brief
 from .verdicts import (
     CriticRuling,
     collapse_verdict_map,
-    collapse_verdicts,
     serialize_verdict_advisory,
-    verdict_held_to_its_rule,
-    verdict_map_entry_held_to_its_rule,
 )
 from hyperloom_common.coerce import to_int, to_unix
 from ..bus.message_bus import Message
@@ -429,65 +426,35 @@ class IntentRouter(CoordinatorCollaborator):
                 },
             )
             return
-        verdict = await self._record_verdict_hold(
-            verdict_held_to_its_rule(intent.payload, action_name=pending.action_name),
-            target=target,
-        )
-        authored = str(single_verdict or "").strip()
+        verdict = str(single_verdict or "").strip()
         approved_variant_names: set[str] | None = None
-        held_by_name: dict[str, str] = {}
         if not verdict and isinstance(verdict_map, dict) and verdict_map:
-            held_by_name = await self._held_verdict_map(
-                verdict_map,
-                target=target,
-                action_name=pending.action_name,
-                payload=intent.payload,
-            )
-            verdict, approved_variant_names = collapse_verdict_map(held_by_name)
-            authored = collapse_verdicts(
-                str((entry or {}).get("verdict") or "").strip() for entry in verdict_map.values()
-            )
-            self._log_mixed_verdict_map_collapse(target, verdict, held_by_name)
+            verdict_by_name = {
+                str(name): str((entry or {}).get("verdict") or "").strip() for name, entry in verdict_map.items()
+            }
+            verdict, approved_variant_names = collapse_verdict_map(verdict_by_name)
+            self._log_mixed_verdict_map_collapse(target, verdict, verdict_by_name)
         await self._handle_single_verdict(
             source=source,
             pending=pending,
             ruling=CriticRuling(
                 verdict=verdict,
-                authored_verdict=authored,
                 reasoning=str(intent.payload.get("reasoning") or ""),
                 advisory=serialize_verdict_advisory(intent.payload),
                 approved_variant_names=approved_variant_names,
                 payload=intent.payload,
-                variant_verdicts=variant_review_rows(intent.payload, held_by_name),
+                variant_verdicts=variant_review_rows(intent.payload),
             ),
         )
-
-    async def _held_verdict_map(
-        self,
-        verdict_map: dict[str, Any],
-        *,
-        target: str,
-        action_name: str,
-        payload: dict[str, Any],
-    ) -> dict[str, str]:
-        """Hold each ``verdict_map`` entry to its cited rule."""
-        held_by_name: dict[str, str] = {}
-        for name, entry in verdict_map.items():
-            held_by_name[str(name)] = await self._record_verdict_hold(
-                verdict_map_entry_held_to_its_rule(entry, payload, action_name=action_name),
-                target=target,
-                variant=str(name),
-            )
-        return held_by_name
 
     def _log_mixed_verdict_map_collapse(
         self,
         target: str,
         verdict: str,
-        held_by_name: dict[str, str],
+        verdict_by_name: dict[str, str],
     ) -> None:
         """Log when a mixed map still proceeds, for traceability."""
-        sub_verdicts = list(held_by_name.values())
+        sub_verdicts = list(verdict_by_name.values())
         if verdict in ("approve", "advise") and any(sv in ("reject", "needs_review") for sv in sub_verdicts):
             log.warning(
                 "review_verdict collapse: target=%s collapsed to %r (sub_verdicts=%r)",
@@ -495,38 +462,6 @@ class IntentRouter(CoordinatorCollaborator):
                 verdict,
                 sub_verdicts,
             )
-
-    async def _record_verdict_hold(
-        self,
-        held: tuple[str, str],
-        *,
-        target: str,
-        variant: str = "",
-    ) -> str:
-        """Return the verdict to act on, recording any hold to a cited rule."""
-        verdict, downgraded_from_code = held
-        if not downgraded_from_code:
-            return verdict
-        log.warning(
-            "review_verdict held to its rule: target=%s variant=%s reject -> %s (reason_code=%s)",
-            target,
-            variant or "-",
-            verdict,
-            downgraded_from_code,
-        )
-        await self.bus.record_observation(
-            "coordinator",
-            "observation",
-            {
-                "kind": "verdict_downgraded_to_rule_verdict",
-                "target": target,
-                "variant": variant,
-                "from_verdict": "reject",
-                "to_verdict": verdict,
-                "failure_reason_code": downgraded_from_code,
-            },
-        )
-        return verdict
 
     async def _handle_single_verdict(
         self,
@@ -538,10 +473,8 @@ class IntentRouter(CoordinatorCollaborator):
         """Apply one collapsed verdict: approve/advise materialise, reject may rearm.
 
         ``ruling.verdict`` is one of approve / advise / reject / needs_review.
-        ``ruling.authored`` is what the Critic itself wrote before any hold to
-        a cited rule; it is mirrored onto ``specialist_patch_verdicts`` in place
-        of ``verdict``. ``ruling.approved_variant_names`` restricts an explore
-        grid to the named variants; ``None`` keeps the full proposal.
+        ``ruling.approved_variant_names`` restricts an explore grid to the named
+        variants; ``None`` keeps the full proposal.
         """
         verdict = ruling.verdict
         self.state.pending_proposals.pop(pending.proposal_msg_id, None)
@@ -559,17 +492,16 @@ class IntentRouter(CoordinatorCollaborator):
         await self._rebroadcast_verdict(source, pending, ruling)
         # Mirror specialist / integrate_patch verdicts onto SharedState so PolicyGate's integrate_patch gate can
         # consult them on the next tick.
-        patch_verdict = ruling.authored
         try:
             pa_params = pending.payload.get("params") or {}
         except AttributeError:
             pa_params = {}
         sid_candidate = patch_verdict_subject(pending, pa_params)
-        if sid_candidate and patch_verdict:
+        if sid_candidate and verdict:
             try:
                 self.shared_state.record_specialist_patch_verdict(
                     sid_candidate,
-                    patch_verdict,
+                    verdict,
                 )
                 self.shared_state.save(self.session_dir)
             except OSError:
@@ -584,7 +516,7 @@ class IntentRouter(CoordinatorCollaborator):
             materialized=verdict in ("approve", "advise"),
             denied=verdict == "reject",
             reauthored=verdict == "needs_review",
-            patch_verdict_key=sid_candidate if patch_verdict else "",
+            patch_verdict_key=sid_candidate if verdict else "",
         )
         with trajectory_span(
             EVENT_PROPOSAL,
