@@ -13,6 +13,7 @@ from .workload._workload_envs import (
     BenchmarkTarget,
     LaunchLayer,
     MaterializeOptions,
+    PromptDatasetError,
     default_baseline_config,
     materialize_benchmark_config,
 )
@@ -77,6 +78,7 @@ __all__ = [
     "LaunchLayer",
     "MaterializeOptions",
     "ORCHESTRATOR_CANCELLED_RETURNCODE",
+    "PromptDatasetError",
     "RoundFolder",
     "RoundWatch",
     "SESSION_TIME_EXHAUSTED_RETURNCODE",

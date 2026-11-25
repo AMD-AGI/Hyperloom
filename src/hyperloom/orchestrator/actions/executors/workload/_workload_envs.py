@@ -30,7 +30,7 @@ import yaml
 
 from hyperloom.common.benchmark_config import BenchmarkPoint, read_benchmark_point
 from hyperloom.common.outside_facts import ENV_EVAL_LIMIT, ENV_EVAL_TASKS, ENV_EVAL_TOKENIZED_REQUESTS
-from hyperloom.common.agentx_workload import is_agentx_client_key
+from hyperloom.common.agentx_workload import is_agentx_client_key, is_agentx_client_script
 from hyperloom.common.visible_devices import mask_tokens
 from hyperloom.common.session_files import shared_options
 from hyperloom_common.coerce import to_str_list
@@ -62,9 +62,11 @@ from hyperloom.inference_optimizer.grid_server_args import merge_server_args
 from hyperloom.inference_optimizer.grid_server_args import remove_moe_runner_backend_arg
 from hyperloom.inference_optimizer.grid_server_args import validate_server_args_shell_safe
 from inference_suite.argv import compact_json_server_args, remove_server_args
+from inference_suite.load.dataset_client import read_prompts
 from hyperloom.inference_optimizer import framework_registry
 from hyperloom.inference_optimizer.framework_registry import server_args_env_name
 from hyperloom.orchestrator.state.base_launch import ServerBase, session_cards, session_server_base
+from hyperloom.orchestrator.state.failure_evidence import YAML_BUILD_ERROR
 from ..gpu._gpu_pin import pin_rocr_visible_devices
 from ..serving._server_argv import add_server_arg_unless_pinned, seal_server_argv
 from .._profile_setup import _AtomTracelensCaps, _profiler_bound_holds, _profiler_flag_value, apply_atom_profile_caps
@@ -200,6 +202,12 @@ class FrameworkScriptMismatchError(ValueError):
     Subclasses ValueError so callers can catch it specifically and turn it
     into a structured action failure instead of an uncaught exception.
     """
+
+
+class PromptDatasetError(ValueError):
+    """Raised when the prompts of a point's ``DATASET_PATH`` cannot be counted where the point is rendered."""
+
+    error_class = YAML_BUILD_ERROR
 
 
 def _coerce_workload_int_env(env_key: str, raw: str) -> int:
@@ -388,6 +396,32 @@ def num_prompts_per_conc(isl: int, osl: int) -> int:
     return 3 if seq_cost <= 16384 else 2
 
 
+def round_num_prompts(conc: int, isl: int, osl: int, dataset: str = "") -> int:
+    """Requests a measured round sends: every prompt of the ``dataset`` file once, whatever its concurrency, else
+    ``conc`` times :func:`num_prompts_per_conc`. The file is read here, on the host that renders the point, as the
+    round's client reads it.
+
+    Raises:
+        PromptDatasetError: If the file cannot be read or a line of it holds no prompt.
+    """
+    if not dataset:
+        return conc * num_prompts_per_conc(isl, osl)
+    try:
+        return len(read_prompts(Path(dataset)))
+    except (OSError, ValueError) as exc:
+        raise PromptDatasetError(
+            f"the prompts of {DATASET_PATH_ENV} {dataset} cannot be counted on this host, which renders the round's "
+            f"request count from the file: {exc}"
+        ) from exc
+
+
+def _sent_dataset(bench: Mapping[str, Any]) -> str:
+    """The prompt dataset the round of ``bench`` sends; empty for AgentX, which replays traces whatever is set."""
+    if is_agentx_client_script(str(bench.get("benchmark_script") or "")):
+        return ""
+    return str(bench["envs"].get(DATASET_PATH_ENV) or "").strip()
+
+
 def _shape_request_window(bench: dict[str, Any]) -> _RequestWindow:
     from hyperloom.inference_optimizer import framework_registry
 
@@ -440,7 +474,7 @@ def _shape_request_window(bench: dict[str, Any]) -> _RequestWindow:
             # window.
             envs["NUM_PROMPTS"] = profile_num_prompts
         elif "NUM_PROMPTS" not in envs:
-            envs["NUM_PROMPTS"] = conc_val * num_prompts_per_conc(isl_val, osl_val)
+            envs["NUM_PROMPTS"] = round_num_prompts(conc_val, isl_val, osl_val, _sent_dataset(bench))
         if "NUM_WARMUPS" not in envs:
             envs["NUM_WARMUPS"] = min(conc_val, 8)
     return _RequestWindow(
@@ -485,8 +519,6 @@ def _merge_caller_overrides(
     # Only ``benchmark.envs`` reaches the round, so ``--extra-env`` lands there for
     # every framework: vLLM Ray workers see MTP pins only this way.
     combined_extra: dict[str, Any] = dict(_operator_extra_env())
-    from hyperloom.common.agentx_workload import is_agentx_client_script
-
     if is_agentx_client_script(str(bench.get("benchmark_script") or "")):
         # The AgentX switch already settled these from the same pins; the raw
         # pin would undo its CONC scaling of the warmup grace.

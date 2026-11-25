@@ -76,7 +76,9 @@ def test_materialize_refuses_to_unset_pinned_workload_envs(tmp_path, monkeypatch
     """Unsetting TP/CONC would retarget the benchmark, not toggle a knob."""
     clear_env(monkeypatch)
     src = tmp_path / "base.yaml"
-    write_config(src, envs={"TP": 1, "CONC": 64, "DATASET_PATH": "/data/prompts.jsonl", "SGLANG_TUNING_KNOB": "1"})
+    dataset = tmp_path / "prompts.jsonl"
+    dataset.write_text('{"prompt": "a"}\n', encoding="utf-8")
+    write_config(src, envs={"TP": 1, "CONC": 64, "DATASET_PATH": str(dataset), "SGLANG_TUNING_KNOB": "1"})
     bench = materialize(
         src,
         tmp_path / "out",
@@ -173,6 +175,92 @@ def test_num_prompts_factor(monkeypatch, tmp_path, isl, osl, conc, factor):
     src = write_config(tmp_path / "cfg.yaml")
     bench = materialize(src, tmp_path / "out")
     assert bench["envs"]["NUM_PROMPTS"] == conc * factor
+
+
+def _export_dataset(monkeypatch, path, prompts=39):
+    """Export a dataset of ``prompts`` prompts at ``path``, a blank line among them, as a session's shell does."""
+    lines = [json.dumps({"prompt": f"question {index}"}) for index in range(prompts)]
+    path.write_text("\n".join([lines[0], "", *lines[1:]]) + "\n", encoding="utf-8")
+    clear_env(monkeypatch)
+    monkeypatch.delenv("HYPERLOOM_AGENTX", raising=False)
+    monkeypatch.setenv(DATASET_PATH_ENV, str(path))
+    return path
+
+
+@pytest.mark.parametrize("conc", [1, 4, 32, 64])
+@pytest.mark.parametrize(("isl", "osl"), [(512, 512), (1024, 1024), (8192, 1024), (16384, 16384)])
+def test_a_dataset_round_sends_every_prompt_of_the_file_once_at_any_concurrency(monkeypatch, tmp_path, conc, isl, osl):
+    _export_dataset(monkeypatch, tmp_path / "prompts.jsonl")
+    for name, value in (("ISL", isl), ("OSL", osl), ("CONC", conc)):
+        monkeypatch.setenv(name, str(value))
+
+    envs = materialize(write_config(tmp_path / "cfg.yaml"), tmp_path / "out")["envs"]
+
+    assert envs["NUM_PROMPTS"] == 39
+    assert envs["NUM_WARMUPS"] == min(conc, 8)
+
+
+def test_a_count_the_point_or_the_caller_names_overrides_the_datasets(monkeypatch, tmp_path):
+    _export_dataset(monkeypatch, tmp_path / "prompts.jsonl")
+
+    own = materialize(write_config(tmp_path / "own.yaml", envs={"NUM_PROMPTS": 12}), tmp_path / "own")
+    # ``--extra-env NUM_PROMPTS=7`` serializes the pin and also exports it under its own name.
+    monkeypatch.setenv(OPERATOR_EXTRA_ENV_VAR, json.dumps({"NUM_PROMPTS": "7"}))
+    monkeypatch.setenv("NUM_PROMPTS", "7")
+    pinned = materialize(write_config(tmp_path / "pinned.yaml"), tmp_path / "pinned")
+
+    assert (own["envs"]["NUM_PROMPTS"], pinned["envs"]["NUM_PROMPTS"]) == (12, "7")
+
+
+def test_a_request_count_the_shell_exports_is_not_read(monkeypatch, tmp_path):
+    _export_dataset(monkeypatch, tmp_path / "prompts.jsonl")
+    monkeypatch.setenv("NUM_PROMPTS", "7")
+    with_dataset = materialize(write_config(tmp_path / "cfg.yaml"), tmp_path / "dataset")["envs"]["NUM_PROMPTS"]
+    monkeypatch.delenv(DATASET_PATH_ENV)
+    monkeypatch.setenv("CONC", "4")
+    without = materialize(write_config(tmp_path / "cfg.yaml"), tmp_path / "random")["envs"]["NUM_PROMPTS"]
+
+    assert (with_dataset, without) == (39, 4 * 5)
+
+
+@pytest.mark.parametrize("content", [None, '{"prompt": "a"}\n{"text": "no prompt"}\n', "not json\n", "\n"])
+def test_a_dataset_whose_prompts_cannot_be_counted_fails_the_render_naming_the_file(monkeypatch, tmp_path, content):
+    dataset = _export_dataset(monkeypatch, tmp_path / "prompts.jsonl")
+    if content is None:
+        dataset.unlink()
+    else:
+        dataset.write_text(content, encoding="utf-8")
+
+    with pytest.raises(we.PromptDatasetError, match=str(dataset)):
+        materialize(write_config(tmp_path / "cfg.yaml"), tmp_path / "out")
+    assert not (tmp_path / "out").exists()
+
+
+def test_a_profile_round_keeps_its_capture_count_with_a_dataset(monkeypatch, tmp_path):
+    src = write_config(tmp_path / "cfg.yaml", envs={"PROFILE": "1"})
+    clear_env(monkeypatch)
+    monkeypatch.setenv("CONC", "32")
+    sized = materialize(src, tmp_path / "sized")["envs"]["NUM_PROMPTS"]
+    _export_dataset(monkeypatch, tmp_path / "prompts.jsonl")
+    monkeypatch.setenv("CONC", "32")
+
+    assert materialize(src, tmp_path / "dataset")["envs"]["NUM_PROMPTS"] == sized != 39
+
+
+def test_an_agentx_round_reads_no_dataset(monkeypatch, tmp_path):
+    """Its rounds replay traces whatever ``DATASET_PATH`` is set to, so a file that is not there fails nothing."""
+    _export_dataset(monkeypatch, tmp_path / "prompts.jsonl").unlink()
+    monkeypatch.setenv("HYPERLOOM_AGENTIC_BACKEND", "mlperf")
+    src = write_config(tmp_path / "cfg.yaml", framework="vllm")
+
+    bench = materialize(
+        src,
+        tmp_path / "out",
+        target=we.BenchmarkTarget(gpu_type="mi300x", model_path="/m"),
+        options=we.MaterializeOptions(agentx_mode=True),
+    )
+
+    assert bench["benchmark_script"] == "mlperf_agentic_client.sh"
 
 
 def _load_dataset_dotenv(monkeypatch, checkout, exported=""):
