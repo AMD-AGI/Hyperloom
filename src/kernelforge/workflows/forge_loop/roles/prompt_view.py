@@ -12,9 +12,9 @@ from kernelforge.workflows.forge_loop.campaign.run_state import RunState
 # Canonical on-disk locations, shown to the agent so it can Read detail on demand.
 _ARCHIVE_REL = "forge_experiments/candidates"
 _HANDOFFS_REL = "forge_experiments/handoffs"
+_ROUNDS_REL = "forge_experiments/rounds"
 _STATE_REL = "forge_experiments/run_state.json"
 _EVENTS_REL = "forge_experiments/events.jsonl"
-_UNMEASURED_REL = "forge_experiments/unmeasured_lanes"
 
 # How many pins the retrieval map names.
 _MAX_RENDERED_PINS = 6
@@ -93,7 +93,7 @@ class OptionalRecords:
     """Records a run may not have yet, each named in the retrieval map only once it exists on disk."""
 
     handoffs: bool = False
-    unmeasured_lanes: bool = False
+    rounds: bool = False
 
 
 def render_long_horizon_header(
@@ -155,12 +155,12 @@ def render_long_horizon_header(
     ]
     if records.handoffs:
         retrieval.append(f"- {_HANDOFFS_REL}/iter_NNN.json — structured iteration handoffs")
-    if records.unmeasured_lanes:
+    if records.rounds:
         retrieval.append(
-            f"- {_UNMEASURED_REL}/round_NNN_lane_K/"
-            + "{change.diff,plan.md,lesson.md,meta.json}"
-            + " — lane candidates never measured because the tree moved first; the diff applies to the"
-            + " meta.json base_commit"
+            f"- {_ROUNDS_REL}/iter_NNN/lane_K/"
+            + "{change.diff,lane.json}"
+            + " — what each lane of a round left: its patch against the round's base, and its own stop check's"
+            + " verdict and per-case times"
         )
 
     # Recent factual attempts — summaries only, never full logs.

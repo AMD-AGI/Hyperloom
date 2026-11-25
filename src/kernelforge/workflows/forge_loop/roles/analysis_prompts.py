@@ -184,6 +184,36 @@ of the change, not the size of the kernel:
   required.
 """
 
+# How the round's lanes divide the work, when the campaign runs more than one. The Analysis Agent holds the evidence
+# the division rests on, so it makes the division; the loop only reads how many focuses there are.
+LANE_PARTITION_FILE = "lanes.md"
+LANE_PARTITION_PROMPT = """
+
+Lane partition:
+The campaign runs up to {lanes} Implementer sessions side by side from this
+commit, each in its own copy of the workspace, and a merge session then
+combines what they leave into one candidate. Besides report.md, write
+{partition_file}: how you would divide the work among those sessions so that
+their results add up instead of repeating each other.
+- One section per lane, headed `## Lane 1`, `## Lane 2`, and so on. A section
+  is that lane's focus: what it works on, the evidence in report.md behind it,
+  and the scored cases you expect it to move.
+- Two ways of dividing usually work. By optimization direction: each lane takes
+  a different mechanism from your ranked directions. By scored case: each lane
+  specializes the kernel for a different group of cases -- sizes or shapes that
+  take different paths or have different bottlenecks -- and the merge
+  dispatches between them per case. Choose whichever the evidence supports, or
+  mix them.
+- A focus is where a lane starts, not a fence. Each session still chooses its
+  own direction inside it, and two lanes may touch the same code: the merge
+  session resolves that.
+- Use all {lanes} lanes when there are that many focuses worth a session, and
+  write fewer sections when there are not. With fewer than two, a round runs
+  one session that chooses for itself.
+The division stays in force until the next Analysis, so describe focuses a
+session can keep working in over several rounds.
+"""
+
 ANALYSIS_SESSION_BRIEF = {
     "agent_outputs": [
         "report.md",
