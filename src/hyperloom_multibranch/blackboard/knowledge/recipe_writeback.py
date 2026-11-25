@@ -124,8 +124,11 @@ def serving_identity(profile: SessionProfile) -> RecipeIdentity:
 
 
 def recipe_identity(profile: SessionProfile) -> tuple[str, RecipeScope]:
-    """The canonical id and scope a session's record is filed under; raises on a scope the KB cannot partition on."""
+    """The canonical id and scope a session's record is filed under; raises on a scope the KB cannot partition on,
+    which a prompt dataset's is: the scope keys on ISL and OSL."""
 
+    if profile.dataset:
+        raise RemoteRecipeValidationError("the Recipe scope keys on isl/osl and files no prompt-dataset session")
     scope = RecipeScope(profile.kernel_optimizer, profile.tp, profile.conc, profile.isl, profile.osl)
     scope.validate()
     return recipe_canonical_id(serving_identity(profile), scheme=scope.identity_scheme), scope

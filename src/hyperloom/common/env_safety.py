@@ -314,6 +314,7 @@ BLOCKED_EXTERNAL_ENV_NAMES: frozenset[str] = (
             ENV_ISL,
             ENV_OSL,
             ENV_MAX_MODEL_LEN,
+            "DATASET_PATH",
             "PRECISION",
             "PORT",
             ENV_NUM_PROMPTS,

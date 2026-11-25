@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import os
 import sys
 from pathlib import Path
 from types import SimpleNamespace
@@ -267,6 +268,27 @@ def test_a_variants_unset_envs_are_not_inherited_by_its_round(monkeypatch, suite
 
     (config,) = (call.config for call in calls)
     assert _SCRUBBED_ENV not in config.server.env_inherit
+
+
+def test_the_servers_a_round_starts_are_pinned_to_the_cpus_the_host_names(monkeypatch, suite):
+    cpus = tuple(sorted(os.sched_getaffinity(0))[:2])
+    monkeypatch.setenv("HYPERLOOM_SERVER_CPUS", ",".join(str(cpu) for cpu in cpus))
+    _, calls, _ = _play(
+        monkeypatch, suite, LaunchAttempt(outcome=READY, metrics=_HOT), launch=GridLaunch(warmup_before_measure=False)
+    )
+
+    assert {call.config.server.cpus for call in calls} == {cpus}
+
+
+def test_server_cpus_that_name_no_cpu_list_refuse_the_round_as_an_invalid_config(monkeypatch, suite):
+    monkeypatch.setenv("HYPERLOOM_SERVER_CPUS", "all")
+    row, calls, _ = _play(
+        monkeypatch, suite, LaunchAttempt(outcome=READY), launch=GridLaunch(warmup_before_measure=False)
+    )
+
+    assert row.status == "failed" and row.error_class == failed_step_error_class(FailedStep.CONFIG_INVALID), row
+    assert "HYPERLOOM_SERVER_CPUS" in row.error
+    assert not calls
 
 
 def test_a_point_without_a_frozen_base_is_refused_as_an_invalid_config_and_runs_nothing(monkeypatch, suite, tmp_path):

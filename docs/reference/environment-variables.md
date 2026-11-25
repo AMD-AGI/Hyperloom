@@ -166,6 +166,13 @@ when `--gpu-type` is omitted.
 
 Run `hyperloom optimize --help` for the exhaustive flag list.
 
+The prompts of a fixed workload have no flag; they are read from the environment of `hyperloom optimize` or
+`hyperloom-multibranch run` into every rendered point:
+
+| Variable | Default | Description |
+|---|---|---|
+| `DATASET_PATH` | Unset (InferenceX's random prompts of `ISL` tokens) | Absolute path of a JSONL file of real prompts every fixed round sends instead, each line a `prompt` string or a `turns` list whose first turn is sent. A path that is not absolute refuses the round as `config_invalid`, and so does a file the round cannot read or a line that holds no prompt: the round reads the file before it starts its server. A prompt the server answers with a 4xx status fails the round, naming the prompt's line. A session records the path: a `hyperloom optimize --resume-from` with another value, or none, is refused, and a session with a dataset is kept out of the Recipe KB and the Experience KB's random-prompt identity. A `hyperloom-multibranch run` session records the value exported when it starts, and every leg, a `--resume` too, sends that file or none. A `hyperloom-multibranch run` test whose runner bubblewrap confines reads it only in a tree its sandbox shows, such as the model directory or the Hugging Face hub cache. See [InferenceSuite benchmark rounds](inference-suite.md#launch-layers). |
+
 ---
 
 ## Accuracy gates
@@ -681,6 +688,14 @@ upstream subprocess capture. Active logs do not prove useful progress.
 
 Profile, KernelForge, GEAK, LLM-call, and SGLang's own watchdog budgets are separate
 from these benchmark limits and retain their existing contracts.
+
+---
+
+## CPU placement on a shared host
+
+| Variable | Default | Description |
+|---|---|---|
+| `HYPERLOOM_SERVER_CPUS` | Unset (the round's own CPUs) | CPUs every server a benchmark round starts is pinned to. Only the server is pinned: a build or another job stays off these CPUs only when `hyperloom optimize` itself is confined to the others (`taskset`, a cpuset). A list as `taskset -c` takes it: CPU numbers and ascending `first-last` ranges separated by commas, digits only (`32-63`, `0-15,64-79`, `3`). Any other value (`all`, a space inside the list, a range that runs backwards) fails every round as an invalid configuration before its server starts, with the variable named in the round's error. A list that names a CPU a server cannot run on here, one the host does not have or one outside the cpuset the process is confined to, fails every round the same way, with the lowest such CPU in the error; so does `server.cpus` of a `config.yaml` run with `python -m inference_suite run`. A round that measures a server it does not start (`BENCHMARK_BASE_URL`, multi-node) pins nothing. The process that runs the round reads it from its own environment: `hyperloom optimize` does; a test of `hyperloom-multibranch run` runs in a runner whose environment does not carry it, so its server is not pinned. |
 
 ---
 
