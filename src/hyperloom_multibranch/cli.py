@@ -78,12 +78,9 @@ when unset and publishes the staging into once the session directory exists; the
 ``HYPERLOOM_ACTIVE_IMAGE_REF`` and ``HYPERLOOM_ACTIVE_IMAGE_DIGEST``; the application's inference_suite tool cache
 must hold a staging of the InferenceX client that verifies; the framework's package must be installed in the image;
 and the agent CLI the specialists run must be installed. A canonical measurement that cannot be taken fails the command
-the same way once the session directory exists. Before PRELUDE the session checks the rule pack's facts about outside
-projects against this environment as ``HYPERLOOM_IMAGE_CHECK`` says: ``warn`` (the default) logs a failing fact,
-``strict`` fails the command the same way before any phase runs, ``off`` checks nothing, and any other value is a usage
-error. The manifest records the check's summary and CLOSE writes the whole report to ``MB-reports/image_check.json``.
-The Experience KB ``HYPERLOOM_KB_URL`` names (none when unset) gives the briefs past sessions' tests and learnings and
-takes this session's at CLOSE; :mod:`~hyperloom_multibranch.scheduling.experience_kb` starts its loopback service.
+the same way once the session directory exists. The Experience KB ``HYPERLOOM_KB_URL`` names (none when unset) gives
+the briefs past sessions' tests and learnings and takes this session's at CLOSE;
+:mod:`~hyperloom_multibranch.scheduling.experience_kb` starts its loopback service.
 ``run --measurement hosted`` measures every test in the sandboxes of a grant handed to the session in the environment
 (:data:`HANDED_GRANT`, read by :mod:`hyperloom.hosted.host_info`) instead of this machine's cards: as many tests run at
 once as the grant has cards and sandboxes for, and the session stops before the grant ends as ``hosted run`` does. Its
@@ -126,14 +123,14 @@ import io
 import logging
 import os
 import sys
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Iterator
 from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from functools import partial
 from pathlib import Path
+from typing import Any
 
 from hyperloom_common.shared_storage import open_shared_append
-from hyperloom.common.outside_facts.image_check import ImageCheckFailed
 from hyperloom.hosted.campaign import MEASUREMENT_LOCAL, CampaignSpec
 from hyperloom.hosted.host_info import HostGroup, HostInfo, take_host_info
 from hyperloom.hosted.toolbox_inputs import ToolboxInputsError
@@ -141,6 +138,7 @@ from hyperloom.inference_optimizer.session.paths import workspace_root
 from hyperloom.measure.runner.cache_build import CacheBuildError
 from hyperloom.orchestrator.knowledge.remote_recipe.client import RemoteRecipeClient
 from hyperloom_multibranch.cli_options import (
+    CONC_SWEEP_COMMAND,
     ENCODING,
     FINAL_ONLY_COMMAND,
     HOSTED_COMMAND,
@@ -151,16 +149,19 @@ from hyperloom_multibranch.cli_options import (
     settings_from,
 )
 from hyperloom_multibranch.rulegate.critic import LlmCritic, anthropic_critic
-from hyperloom_multibranch.scheduling.budget import ExploreCap
 from hyperloom_multibranch.scheduling.clock import Clock
+from hyperloom.orchestrator.conc_sweep.report import SETTLED
+from hyperloom_multibranch.scheduling.final import sweep_plan, write_skipped
 from hyperloom_multibranch.scheduling.hosted_peers import PinnedToolboxInputs, load_hosted_peers, local_grant_peers
 from hyperloom_multibranch.scheduling.hosted_run import (
     GrantDeadline,
+    GrantEnd,
     HostedExit,
     campaign_spec,
     close_then_start,
     grant_deadline,
-    grant_explore_cap,
+    grant_end,
+    grant_tests_end_by,
     grant_tests_that_fit,
     hosted_restart_leg,
     hosted_storage,
@@ -178,7 +179,7 @@ from hyperloom_multibranch.scheduling.hosted_run import (
     write_final_exit,
 )
 from hyperloom_multibranch.scheduling import review
-from hyperloom_multibranch.scheduling.layout import create_session
+from hyperloom_multibranch.scheduling.layout import SessionLayout, create_session
 from hyperloom_multibranch.scheduling.lifecycle import Session
 from hyperloom_multibranch.scheduling.llm import (
     MB_RESOLVER_MAX_TOKENS,
@@ -187,7 +188,11 @@ from hyperloom_multibranch.scheduling.llm import (
     default_model,
 )
 from hyperloom_multibranch.scheduling.experience_kb import start_experience_kb
-from hyperloom_multibranch.scheduling.local_peers import load_peers, machine_parallel_tests
+from hyperloom_multibranch.scheduling.manifest import read_manifest
+from hyperloom_multibranch.scheduling.local_peers import (
+    load_peers,
+    machine_parallel_tests,
+)
 from hyperloom_multibranch.scheduling.peers import PeerFactory, PeersUnavailable
 from hyperloom_multibranch.scheduling.processes import ProcessRegistry, adopting_orphans
 from hyperloom_multibranch.scheduling.resumption import (
@@ -247,10 +252,12 @@ def run_session(
     peer_factory: PeerFactory,
     services: SessionServices,
     report_root: Callable[[Path], None] = _print_root,
-    explore_cap: ExploreCap | None = None,
+    grant: GrantEnd | None = None,
 ) -> int:
     """Create the session directory, hand it to ``report_root`` -- by default printed on one stdout line -- before
-    anything else is built in it, run the session (:meth:`Session.run`, given ``explore_cap``) and return its exit code.
+    anything else is built in it, run the session (:meth:`Session.run`, given ``grant``'s explore cap) and, when the
+    settings ask for one and no signal stopped the session, its conc sweep under the session's lock file
+    (:func:`sweep_closed`, warned at ``grant``'s tests end), and return the session's exit code.
     A session whose specialists run as an account that cannot reach its directory is refused before it runs
     (:func:`~hyperloom_multibranch.scheduling.specialist_reach.require_specialist_reach`, raising
     :class:`EnvironmentIncomplete`), unless it stops once its map is made: that session starts no specialist.
@@ -260,7 +267,7 @@ def run_session(
     stop kills it and reports it while it runs."""
 
     with adopting_orphans():
-        return asyncio.run(_run_session(settings, peer_factory, services, report_root, explore_cap))
+        return asyncio.run(_run_session(settings, peer_factory, services, report_root, grant))
 
 
 async def _run_session(
@@ -268,7 +275,7 @@ async def _run_session(
     peer_factory: PeerFactory,
     services: SessionServices,
     report_root: Callable[[Path], None],
-    explore_cap: ExploreCap | None = None,
+    grant: GrantEnd | None = None,
 ) -> int:
     clock = Clock()
     layout = create_session(workspace_root(), settings.workload.model_basename, clock)
@@ -278,25 +285,84 @@ async def _run_session(
         require_specialist_reach(layout.branches)
     host = SessionHost(layout, ProcessRegistry(layout.pids, clock), clock)
     session = Session(settings, peer_factory, host, services)
-    return (await session.run(explore_cap)).exit_code
+    outcome = await session.run(None if grant is None else grant.explore_cap)
+    if _sweeps_after(settings, outcome):
+        with _session_lock(layout) as held:
+            if held:
+                end = None if grant is None else grant.tests_end_by
+                await sweep_closed(layout, settings, peer_factory, services, end)
+    return outcome.exit_code
+
+
+def _sweeps_after(settings: RunSettings, outcome: SessionOutcome) -> bool:
+    """Whether the session's conc sweep runs once it closed: asked for, and the session was not stopped by a signal."""
+
+    return settings.conc_sweep and outcome.stop_reason is not SessionStopReason.SIGNAL
+
+
+async def sweep_closed(
+    layout: SessionLayout,
+    settings: RunSettings,
+    peer_factory: PeerFactory,
+    services: SessionServices,
+    grant_end_unix: float | None = None,
+) -> dict[str, Any]:
+    """The concurrency sweep of the closed session in ``layout``, on a session built over it whose tests may run as
+    long as its plan's points need; returns the report it wrote."""
+
+    plan = await asyncio.to_thread(sweep_plan, layout, settings)
+    if isinstance(plan, str):
+        return write_skipped(layout, settings.workload, plan)
+    clock = Clock()
+    host = SessionHost(layout, ProcessRegistry(layout.pids, clock), clock)
+    session = Session(settings, peer_factory, host, services, test_points=plan.test_points(settings.workload))
+    return await session.conc_sweep(plan, grant_end_unix)
+
+
+def conc_sweep(
+    layout: SessionLayout,
+    settings: RunSettings,
+    peer_factory: PeerFactory,
+    services: SessionServices,
+    grant_end_unix: float | None = None,
+) -> int:
+    """``conc-sweep SESSION_DIR``: :func:`sweep_closed` under the session's lock file; 0 once the sweep settled."""
+
+    with _session_lock(layout) as held:
+        if not held:
+            return EXIT_USAGE
+        with adopting_orphans():
+            payload = asyncio.run(sweep_closed(layout, settings, peer_factory, services, grant_end_unix))
+    print(f"{PROG}: conc sweep {payload['status']} {payload.get('skip_reason', '')}".rstrip(), flush=True)
+    return 0 if payload["status"] in SETTLED else EXIT_FAILED
 
 
 def final_only(
-    persisted: PersistedRun, peer_factory: PeerFactory, services: SessionServices, *, restart: bool = False
+    persisted: PersistedRun,
+    peer_factory: PeerFactory,
+    services: SessionServices,
+    *,
+    restart: bool = False,
+    grant: GrantEnd | None = None,
 ) -> int:
     """Run FINAL and CLOSE over the session directory ``persisted`` was read from, print it on one stdout line and
     return the session's exit code. No session directory is created, which is why this cannot start one. For
-    ``restart``, a hosted run's, see :meth:`Session.finish`."""
+    ``restart``, a hosted run's, see :meth:`Session.finish`; its conc sweep is warned at ``grant``'s tests end."""
 
-    return _over_session(persisted, peer_factory, services, partial(Session.finish, restart=restart))
+    end = None if grant is None else grant.tests_end_by
+    return _over_session(persisted, peer_factory, services, partial(Session.finish, restart=restart), end)
 
 
 def resume(
-    persisted: PersistedRun, peer_factory: PeerFactory, services: SessionServices, until: float, cap: ExploreCap | None
+    persisted: PersistedRun, peer_factory: PeerFactory, services: SessionServices, until: float, grant: GrantEnd | None
 ) -> int:
-    """:func:`final_only` running :meth:`Session.resume` up to the deadline ``until`` with EXPLORE capped by ``cap``."""
+    """:func:`final_only` running :meth:`Session.resume` up to the deadline ``until`` with EXPLORE capped by ``grant``'s
+    explore cap, and its conc sweep warned at ``grant``'s tests end."""
 
-    return _over_session(persisted, peer_factory, services, lambda session, ended: session.resume(ended, until, cap))
+    cap, end = (None, None) if grant is None else (grant.explore_cap, grant.tests_end_by)
+    return _over_session(
+        persisted, peer_factory, services, lambda session, ended: session.resume(ended, until, cap), end
+    )
 
 
 #: What a run over a session directory runs on the session it builds there, given how that session ended.
@@ -304,28 +370,47 @@ SessionLeg = Callable[[Session, SessionStopReason], Awaitable[SessionOutcome]]
 
 
 def _over_session(
-    persisted: PersistedRun, peer_factory: PeerFactory, services: SessionServices, leg: SessionLeg
+    persisted: PersistedRun,
+    peer_factory: PeerFactory,
+    services: SessionServices,
+    leg: SessionLeg,
+    grant_end_unix: float | None = None,
 ) -> int:
     """Run ``leg`` over the session directory ``persisted`` was read from, holding the session's lock file while it
     works; a second run over the same directory is refused rather than left to write over the first one's report."""
 
-    lock = persisted.layout.final_only_lock
+    with _session_lock(persisted.layout) as held:
+        if not held:
+            return EXIT_USAGE
+        with adopting_orphans():
+            return asyncio.run(_run_leg(persisted, peer_factory, services, leg, grant_end_unix))
+
+
+@contextlib.contextmanager
+def _session_lock(layout: SessionLayout) -> Iterator[bool]:
+    """Hold the session's lock file for the block, yielding whether it was free; a held one is named on stderr."""
+
+    lock = layout.final_only_lock
     try:
         holder = os.open(lock, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
     except FileExistsError:
         print(f"{PROG}: {lock} is held, by the pid it names; delete it if that run is gone", file=sys.stderr)
-        return EXIT_USAGE
+        yield False
+        return
     os.write(holder, f"{os.getpid()}\n".encode())
     os.close(holder)
     try:
-        with adopting_orphans():
-            return asyncio.run(_run_leg(persisted, peer_factory, services, leg))
+        yield True
     finally:
         lock.unlink()
 
 
 async def _run_leg(
-    persisted: PersistedRun, peer_factory: PeerFactory, services: SessionServices, leg: SessionLeg
+    persisted: PersistedRun,
+    peer_factory: PeerFactory,
+    services: SessionServices,
+    leg: SessionLeg,
+    grant_end_unix: float | None = None,
 ) -> int:
     clock = Clock()
     layout = persisted.layout
@@ -335,7 +420,10 @@ async def _run_leg(
     try:  # a hosted run that closes this session goes on to start another, which logs to its own directory
         host = SessionHost(layout, ProcessRegistry(layout.pids, clock), clock)
         session = Session(persisted.settings, peer_factory, host, services)
-        return (await leg(session, persisted.ended)).exit_code
+        outcome = await leg(session, persisted.ended)
+        if _sweeps_after(persisted.settings, outcome):
+            await sweep_closed(layout, persisted.settings, peer_factory, services, grant_end_unix)
+        return outcome.exit_code
     finally:
         logging.getLogger().removeHandler(handler)
         handler.close()
@@ -402,14 +490,7 @@ def hosted_run() -> int:
     _stop_before_grant_ends(host)
     try:
         returncode = start.run()
-    except (
-        EnvironmentIncomplete,
-        PeersUnavailable,
-        ImageCheckFailed,
-        CacheBuildError,
-        ToolboxInputsError,
-        PermissionError,
-    ) as exc:
+    except (EnvironmentIncomplete, PeersUnavailable, CacheBuildError, ToolboxInputsError, PermissionError) as exc:
         return _not_run(host.state_dir, EXIT_FAILED, exc)
     root = recorded_session(host.state_dir)
     stop_reason = None if root is None else reported_stop_reason(root)
@@ -430,6 +511,11 @@ def _hosted_start(host: HostInfo) -> HostedStart:
     earlier = take_over_earlier_session(host.state_dir)
     if earlier.closed is not None:  # it closed with no baseline, which ended the run, and was killed before exit.json
         return HostedStart(lambda: EXIT_FAILED)
+    if earlier.sweep is not None:  # it closed and was killed during its conc sweep: the exit code is the sweep's
+        settings = read_manifest(earlier.sweep.manifest).settings
+        ready = hosted_ready_session(host, settings.workload, local=spec.measurement == MEASUREMENT_LOCAL)
+        sweep = partial(conc_sweep, earlier.sweep, settings, ready.peer_factory, ready.services)
+        return HostedStart(partial(sweep, grant_end_unix=grant_tests_end_by(host)))
     persisted = earlier.finish
     if (taken := persisted or earlier.left) is not None:
         share_with_the_group(taken.layout.root)
@@ -437,11 +523,12 @@ def _hosted_start(host: HostInfo) -> HostedStart:
     require_session_environment(settings, os.environ)
     ready = hosted_ready_session(host, settings.workload, local=spec.measurement == MEASUREMENT_LOCAL)
     if persisted is not None:
-        leg = hosted_restart_leg(persisted, partial(final_only, restart=True), resume, grant_explore_cap(host))
+        grant = grant_end(host)
+        leg = hosted_restart_leg(persisted, partial(final_only, restart=True, grant=grant), resume, grant)
         return HostedStart(partial(leg, persisted, ready.peer_factory, ready.services))
     close = partial(final_only, peer_factory=ready.peer_factory, services=ready.services)
     record = partial(started_session, host.state_dir)
-    start = partial(run_session, settings, ready.peer_factory, ready.services, record, grant_explore_cap(host))
+    start = partial(run_session, settings, ready.peer_factory, ready.services, record, grant_end(host))
     return HostedStart(partial(close_then_start, earlier.left, close, start))
 
 
@@ -517,8 +604,8 @@ def _start(settings: RunSettings, grant: HandedGrant | None) -> int:
     else:
         ready = hosted_ready_session(grant.host, settings.workload)
         _stop_before_grant_ends(grant.host)
-    cap = None if grant is None else grant_explore_cap(grant.host)
-    return run_session(settings, ready.peer_factory, ready.services, explore_cap=cap)
+    end = None if grant is None else grant_end(grant.host)
+    return run_session(settings, ready.peer_factory, ready.services, grant=end)
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -528,9 +615,12 @@ def main(argv: list[str] | None = None) -> int:
         return hosted_run()
     if args.command == "review":
         return review.main(args)
-    persisted = grant = None
+    persisted = grant = swept = None
     try:
-        if args.command == FINAL_ONLY_COMMAND:
+        if args.command == CONC_SWEEP_COMMAND:
+            swept = SessionLayout(args.session_dir)
+            settings = read_manifest(swept.manifest).settings
+        elif args.command == FINAL_ONLY_COMMAND:
             persisted = persisted_run(args.session_dir)
             settings = persisted.settings
         elif args.resume is not None:
@@ -547,6 +637,9 @@ def main(argv: list[str] | None = None) -> int:
         raise SystemExit(EXIT_USAGE) from exc
     logging.basicConfig(level=logging.DEBUG if args.verbose else logging.INFO, format=LOG_FORMAT)
     try:
+        if swept is not None:
+            ready = ready_session(settings.workload, load_peers)
+            return conc_sweep(swept, settings, ready.peer_factory, ready.services)
         if persisted is not None:
             ready = ready_session(settings.workload, load_peers)
             if args.command == FINAL_ONLY_COMMAND:
@@ -555,7 +648,7 @@ def main(argv: list[str] | None = None) -> int:
             require_specialist_reach(persisted.layout.branches)
             return resume(persisted, ready.peer_factory, ready.services, deadline, None)
         return _start(settings, grant)
-    except (EnvironmentIncomplete, PeersUnavailable, ImageCheckFailed, CacheBuildError, ToolboxInputsError) as exc:
+    except (EnvironmentIncomplete, PeersUnavailable, CacheBuildError, ToolboxInputsError) as exc:
         print(f"{PROG}: cannot run a session, {exc}", file=sys.stderr)
         return EXIT_FAILED
 

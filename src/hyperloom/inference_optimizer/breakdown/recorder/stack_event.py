@@ -103,7 +103,6 @@ SOURCES: tuple[str, ...] = (
 _SOURCE_BY_ACTION: dict[str, str] = {
     "replay_warm_recipe": SOURCE_WARM_REPLAY,
     "explore": SOURCE_EXPLORE,
-    "conc_sweep": SOURCE_EXPLORE,
     "integrate": SOURCE_KERNEL,
     "gemm_tuning": SOURCE_KERNEL,
     "collective": SOURCE_KERNEL,

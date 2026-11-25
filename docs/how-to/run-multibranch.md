@@ -2,7 +2,7 @@
 myst:
     html_meta:
         "description": "Run a multi-branch Hyperloom session with hyperloom-multibranch run: the environment it needs, its options grouped by what they control, and its exit codes."
-        "keywords": "Hyperloom, multi-branch, MB, hyperloom-multibranch, run, RSI archive, runner cache, image check, Recipe KB"
+        "keywords": "Hyperloom, multi-branch, MB, hyperloom-multibranch, run, RSI archive, runner cache, Recipe KB"
 ---
 # Running a multi-branch session
 
@@ -25,15 +25,14 @@ The session directory is created under `USER_DATA_PATH` and its path is printed 
 ## Environment
 
 Every variable below is checked before anything is created: a missing or malformed one fails the command with no
-session directory left behind. Two steps run later, in the new session before PRELUDE: the image check, and on a local
-session the publish of the inference_suite staging into the runner cache, which fails the command (exit 1) with the
-session directory left behind when that directory cannot be written.
+session directory left behind. One step runs later, in the new session before PRELUDE: on a local session the publish
+of the inference_suite staging into the runner cache, which fails the command (exit 1) with the session directory left
+behind when that directory cannot be written.
 
 | Variable | Required | Meaning |
 | --- | --- | --- |
 | `HYPERLOOM_RSI_ARCHIVE` | yes | Writable shared directory the session reads its predecessors from and archives its search tree in. No default. |
 | `HYPERLOOM_RUNNER_CACHE` | with `--measurement hosted` | This host's runner cache directory, which holds the inference_suite staging every test runs. Hosted: an absolute path on storage the measurement sandboxes mount, no default. Local: `/runner-cache` when unset, and it must be writable. |
-| `HYPERLOOM_IMAGE_CHECK` | no | `warn` (default) logs a failing fact of the rule pack about the image, `strict` fails the command before PRELUDE (exit 1), `off` checks nothing. Any other value is a usage error. |
 | `INFERENCE_SUITE_TOOL_CACHE` | no | The tool cache `install.sh` staged the pinned InferenceX client in, which every test runs. Default `inference-suite-tools` under the dependency cache. Without a staging there that verifies, the command fails, naming `python -m inference_suite stage --tool-cache <dir>`. |
 | `KB_STORE_URL`, `KB_STORE_TOKEN` | no | Both set: PRELUDE reads warm-start leads from the Recipe KB and CLOSE writes the final recipe back. Neither set: no Recipe KB. Only one set is refused. |
 | `HYPERLOOM_KB_URL`, `HYPERLOOM_KB_TOKEN` | no | The Experience KB: the workspace's loopback service, whose URL and token `hyperloom-setup` writes into the workspace `.env`. Export them as the other variables here: `hyperloom-multibranch` reads no `.env`. Set: the briefs and the learnings tool recall past sessions' tests and learnings from it, and CLOSE writes this session's there; what the service does not take waits in the spool beside its data. A loopback service that is not serving is started before the session and left serving after it; one serving with other settings is not restarted. A service that cannot start, or a URL without its token, logs a warning and the session runs without it. Unset: no Experience KB. |
@@ -188,6 +187,8 @@ host has no token. The session logs one WARNING when its toolbox is built. Every
   `--[no-]make-before-break` (hosted only, default on: where the grant fits at least three tests at TP, a finished
   test's sandbox is kept until the next test's runs, so that the cluster does not give its node to another job, and one
   test fewer runs at once; off runs every test the grant fits).
+- **Concurrency sweep:** `--[no-]enable-conc-sweep` (on by default) and `--conc-sweep-concs C1,C2,...` (see
+  [Concurrency sweep after CLOSE](#concurrency-sweep-after-close)).
 - **Directions:** `--specialist-prompt FILE` and `--reference NAME=DIR`, each repeatable.
 - **Third-party agents:** `--autonomous-agent SOURCE` (repeatable; a URL carrying credentials is refused),
   `--agent-directions`, `--agent-dossier-minutes`, `--agent-share-minutes`, `--agent-pack`, `--agent-launch`,
@@ -241,6 +242,24 @@ the profile and the root commit are the ones the first PRELUDE recorded.
   any other `run` option is given beside `--resume`.
 
 A session that cannot be resumed but stopped before FINAL can still be finished with `final-only SESSION_DIR`.
+
+## Concurrency sweep after CLOSE
+
+`run` (on by default; `--no-enable-conc-sweep`, hosted `multibranch.conc_sweep: false`, turns it off) sweeps the closed session's root and the commit
+FINAL chose once CLOSE has run, apart from `--max-hours` and `--max-gpu-hours`; `conc-sweep SESSION_DIR` runs the same
+sweep by hand, measured on this machine. It runs only when FINAL chose a commit other than the root whose reproduction
+gained over the baseline. The points are every concurrency the InferenceX recipe of the frozen base publishes for the
+workload, with `--conc` among them; a `--reference-script` base takes them from `--conc-sweep-concs C1,C2,...`
+(hosted: `multibranch.conc_sweep_concs`). Both arms are submitted at once and run side by side where the session runs
+two tests at once (`--max-parallel-tests`), else one after the other. An AgentX point is a test of its own; an
+InferenceX arm is one sweep test over all its points, whose timeout scales with them. The tests are session
+measurements of the commits as they are: no accuracy and no checks.
+
+The sweep logs its estimated length (each point priced as the session's longest root test) and, hosted, what is
+left of the grant. It writes `MB-reports/conc_sweep_summary.json`, `conc_sweep_raw.csv` and `conc_sweep_curve.png`,
+the summary after every test, with `status` `succeeded`, `partial`, `failed`, `skipped` or `cancelled` (a stop
+signal; the measured points stay). A later run measures only the points not yet measured, and a hosted restart of a
+session that closed before its sweep finished sweeps it again before it writes `exit.json`.
 
 ## Exit codes
 

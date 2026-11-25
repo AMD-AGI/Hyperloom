@@ -312,7 +312,7 @@ def test_config_plateau_recon_silent_while_the_config_arm_still_pays(monkeypatch
 
 
 def test_config_plateau_recon_is_scoped_to_the_optimisation_phase(monkeypatch):
-    stub, calls = _recon_recorder(phase="SWEEP", plateaued=True, monkeypatch=monkeypatch)
+    stub, calls = _recon_recorder(phase="CYCLE_END", plateaued=True, monkeypatch=monkeypatch)
     asyncio.run(InternalTasksPhase.maybe_enqueue_config_plateau_static_recon(stub))
     assert calls == []
 

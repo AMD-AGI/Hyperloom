@@ -495,6 +495,17 @@ def test_agentx_sessions_on_different_objectives_are_different_tasks_and_an_olde
     assert session_task(dataclasses.replace(SESSION, task=older)) == p50
 
 
+def test_sessions_on_different_prompts_are_different_tasks_and_an_older_one_sent_random_prompts() -> None:
+    def task_of(**overrides: object) -> str:
+        return session_task(dataclasses.replace(SESSION, task=task_conditions(profile(**overrides))))
+
+    random_prompts, on_a_dataset = task_of(), task_of(dataset="/data/prompts.jsonl")
+
+    assert on_a_dataset == f"{random_prompts} dataset=/data/prompts.jsonl"
+    assert task_of(dataset="/data/other.jsonl") not in (random_prompts, on_a_dataset)
+    assert "dataset" not in random_prompts
+
+
 def test_the_replay_standing_reads_every_playbook_against_the_champion_and_keeps_once(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

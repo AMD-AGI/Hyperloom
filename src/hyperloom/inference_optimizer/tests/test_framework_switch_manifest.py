@@ -812,7 +812,7 @@ async def _run_rewrite_integrate(
             )
         benched_envs.update(kwargs.get("extra_envs_applied") or {})
         return (
-            {"output_throughput": base_tput * (1.0 + delta_pct / 100.0)},
+            {"status": "succeeded", "output_throughput": base_tput * (1.0 + delta_pct / 100.0)},
             {"accuracy_pass": accuracy_pass, "timed_out": False},
         )
 
@@ -1102,6 +1102,7 @@ async def test_a_patch_that_is_not_inert_when_disabled_is_reverted(tmp_path, mon
     )
     assert result["status"] == "reverted"
     assert result["error_class"] == "switch_off_parity_failed"
+    assert result["graded"] is True, "a measured parity violation is a verdict on the patch"
     assert "not a default-off rewrite" in result["reason"]
     assert (repo / "src.py").read_text().endswith("return 1\n")
 
@@ -1133,6 +1134,7 @@ async def test_a_parity_leg_that_produced_no_measurement_is_not_called_a_parity_
     )
     assert result["status"] == "reverted"
     assert result["error_class"] == "switch_off_parity_inconclusive"
+    assert result["graded"] is False, "an unmeasured parity leg is no verdict on the patch"
     assert "not actually inert" not in result["reason"]
     assert "could not be measured" in result["reason"]
     assert (repo / "src.py").read_text().endswith("return 1\n")

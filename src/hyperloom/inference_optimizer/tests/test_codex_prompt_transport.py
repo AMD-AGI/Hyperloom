@@ -77,7 +77,7 @@ def _prompt(transport: str, *, phase: str = "") -> str:
 
 
 @pytest.mark.parametrize(
-    "phase", ["", "PRELUDE", "ENABLEMENT", "EXPLORE", "KERNEL_AGENT", "FRAMEWORK_AGENT", "SWEEP", "CLOSE"]
+    "phase", ["", "PRELUDE", "ENABLEMENT", "EXPLORE", "KERNEL_AGENT", "FRAMEWORK_AGENT", "CYCLE_END", "CLOSE"]
 )
 def test_structured_output_prompt_names_no_claude_tool(phase: str) -> None:
     """The Codex Coordinator has no MCP tools; naming them wastes every turn."""

@@ -58,6 +58,7 @@ from hyperloom_common.llm.llm_config import (
     resolve_forge_llm_model,
 )
 from hyperloom.common.model_paths import resolve_serving_model_path
+from hyperloom.common.perf_metric import DATASET_PATH_ENV
 from hyperloom_multibranch.contracts.llm_prices import price_of
 from hyperloom_multibranch.contracts.blackboard import Role, Writer
 from hyperloom_multibranch.contracts.blackboard.interfaces import BranchLogStore, CommitQuery
@@ -240,7 +241,7 @@ class LocalCards:
         # The tests read private copies of the tables of the aiter this machine's servers import (a vLLM image's
         # site-packages, not an SGLang image's workspace), or a keep that adds rows to a default table is refused.
         options = LocalOptions(
-            timeout_sec=attempt_timeout_sec(setup.workload),
+            timeout_sec=attempt_timeout_sec(setup.workload) * setup.test_points,
             boot_budget_sec=setup.workload.boot_budget_sec,
             framework_configs=str(image_configs()),
             tests_end_by=self.tests_end_by,
@@ -263,11 +264,15 @@ def workload_environment(workload: Workload) -> Mapping[str, str]:
     renders the canonical measurement and every test's points with, and to the kernel tuning the toolbox runs, which
     takes its backend from ``KERNEL_OPT_BACKEND_ORDER``; ``hyperloom optimize`` exports the same, the model resolved to
     the directory a server loads it from. ``GPU_TYPE`` and ``TARGET_GPU_TYPE`` are both the board, as ``hyperloom optimize``
-    sets them. An InferenceX workload carries its sequence lengths; an AgentX one carries
-    :data:`AGENTX_ENV` instead."""
+    sets them. An InferenceX workload carries its sequence lengths and the prompt dataset it
+    names; an AgentX one carries :data:`AGENTX_ENV` instead."""
 
     shape = workload.inferencex
-    workload_specific = {AGENTX_ENV: "1"} if shape is None else {"ISL": str(shape.isl), "OSL": str(shape.osl)}
+    if shape is None:
+        workload_specific = {AGENTX_ENV: "1"}
+    else:
+        dataset = {DATASET_PATH_ENV: shape.dataset} if shape.dataset else {}
+        workload_specific = {"ISL": str(shape.isl), "OSL": str(shape.osl), **dataset}
     return {
         "FRAMEWORK": workload.framework,
         "MODEL_PATH": resolve_serving_model_path(workload.model),
@@ -298,13 +303,17 @@ def attempt_timeout_sec(workload: Workload) -> int:
 
 
 def _export_workload(workload: Workload, toolbox_dir: Path, image_ref: str) -> None:
-    """Export :func:`workload_environment` into this process. For an AgentX workload, also write the AgentX benchmark
+    """Export :func:`workload_environment` into this process, and remove a ``DATASET_PATH`` the workload does not name:
+    a leg resumed in another shell sends what the first leg sent. For an AgentX workload, also write the AgentX benchmark
     ``hyperloom optimize`` generates for it to :data:`BENCHMARK_FILE` in ``toolbox_dir`` and name it in
     ``HYPERLOOM_BENCHMARK_CONFIG``: the canonical measurement is rendered from it. The benchmark serves at the
     workload's EP and names ``image_ref``, the image the session runs on, as its image. It pins the model's directory
     when the model is one, which the command line names by its resolved path."""
 
-    os.environ.update(workload_environment(workload))
+    exported = workload_environment(workload)
+    os.environ.update(exported)
+    if DATASET_PATH_ENV not in exported:
+        os.environ.pop(DATASET_PATH_ENV, None)
     if workload.inferencex is not None:
         return
     from hyperloom.inference_optimizer.cli.benchmark_config import AgentXWorkload, write_agentx_benchmark

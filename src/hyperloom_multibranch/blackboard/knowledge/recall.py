@@ -5,9 +5,10 @@
 
 One read per branch, with the context the single-lineage Framework phase sends (identity, workload, objective,
 baseline, observations), so one planner serves both flows. A recalled Experience measured under every condition this
-session queried with (model, GPU, framework, TP, concurrency, bottleneck, sequence lengths) is a prior; one measured
-under another condition is only a lead to re-verify, and the briefing names the conditions that differ. The mapping
-refuses Experiences without evidence, so nothing recalled lacks one.
+session queried with (model, GPU, framework, TP, concurrency, bottleneck, sequence lengths, prompt dataset) is a prior;
+one measured under another condition is only a lead to re-verify, and the briefing names the conditions that differ.
+Sending no dataset is a condition too: an Experience measured on one is a lead to a session on random prompts. The
+mapping refuses Experiences without evidence, so nothing recalled lacks one.
 
 Sorting reads each summary's ``identity``. The service's read summaries carry none yet, so an :class:`IdentityIndex`
 looks the identity up by id in the service's export. An Experience whose identity is found nowhere matches no
@@ -39,12 +40,13 @@ from hyperloom_kb import ReadStatus, RemoteClientError, RemoteReadResult
 from hyperloom_multibranch.contracts.blackboard.peers import IntentLayer
 from hyperloom_multibranch.contracts.blackboard.records import SessionProfile
 from hyperloom_multibranch.blackboard.knowledge.experience import (
+    DATASET_KEY,
     experience_identity,
 )
 
 log = logging.getLogger(__name__)
 
-CONDITION_KEYS = ("model", "gpu", "framework", "tp", "conc", "bottleneck", "isl", "osl")
+CONDITION_KEYS = ("model", "gpu", "framework", "tp", "conc", "bottleneck", "isl", "osl", DATASET_KEY)
 #: The layer each recorded change family changes; ``inference-recipe-v1`` declares the first two.
 LAYER_OF_FAMILY = {
     "config_variant": IntentLayer.CONFIG,
@@ -55,7 +57,9 @@ THROUGHPUT_OBJECTIVE = "e2e_throughput@v1"
 INTERACTIVITY_OBJECTIVE = "e2e_interactivity@v1"
 TOTAL_THROUGHPUT_OBJECTIVE = "e2e_total_throughput@v1"
 EXPORT_PAGE = 100
-WORKLOAD_KEYS = frozenset({"tp", "ep", "conc", "isl", "osl", "max_model_len", "compute_partition_mode", "partitions"})
+WORKLOAD_KEYS = frozenset(
+    {"tp", "ep", "conc", "isl", "osl", "max_model_len", "compute_partition_mode", "partitions", DATASET_KEY}
+)
 DECISION = "Choose the next actions for one branch of a multi-branch inference optimization session."
 RECALL_LIMIT = 10
 
@@ -318,12 +322,15 @@ def classify(
     item: Mapping[str, Any], query: Mapping[str, Any], identities: IdentityIndex | None = None
 ) -> RecalledExperience:
     """Sort one read summary by whether its identity, or the one ``identities`` holds for it, matches every queried
-    condition; its change family comes from the summary, else from ``identities``."""
+    condition, and names no prompt dataset the query does not; its change family comes from the summary, else from
+    ``identities``."""
 
     experience_id = str(item["experience_id"])
     identity = item.get("identity") or (identities.identity(experience_id) if identities else {})
     family = item.get("change_family") or (identities.change_family(experience_id) if identities else "")
     differing = tuple(key for key, value in query.items() if key not in identity or not _same(identity[key], value))
+    if identity.get(DATASET_KEY) and DATASET_KEY not in query:
+        differing += (DATASET_KEY,)
     return RecalledExperience(
         experience_id=experience_id,
         tier=RecallTier.REVERIFY if differing else RecallTier.PRIOR,

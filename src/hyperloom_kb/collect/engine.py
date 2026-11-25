@@ -3,8 +3,6 @@
 from __future__ import annotations
 
 import json
-import os
-import tempfile
 from collections.abc import Iterator, Mapping
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -36,7 +34,7 @@ from hyperloom_kb.schema import (
     RenderedRef,
     SchemaValidationError,
 )
-from hyperloom_kb.transitions import ExperienceConflictError
+from hyperloom_kb.storage import _atomic_write
 
 REPORT_FORMAT = "hyperloom-kb.collect-report.v1"
 
@@ -393,21 +391,13 @@ def _publish(target: CollectionTarget, projected: _Projected) -> str:
             created_at=experience.created_at,
         )
     )
-    record = session.record
-    if not isinstance(record, Experience):
+    if not isinstance(session.record, Experience):
         raise RuntimeError("collection target did not open an Experience session")
-    if record.status is ExperienceStatus.COMPLETE:
-        if record != experience:
-            raise ExperienceConflictError("a different complete Experience already has this id")
-        return "unchanged"
-    if not record.change:
-        session.decide(
-            change=_with_paths(experience.change, files),
-            rationale=_with_paths(experience.rationale, files),
-            rendered_refs=experience.rendered_refs,
-        )
-    elif record.change != experience.change or record.rationale != experience.rationale:
-        raise ExperienceConflictError("an in-progress Experience holds a different decision")
+    session.decide(
+        change=_with_paths(experience.change, files),
+        rationale=_with_paths(experience.rationale, files),
+        rendered_refs=experience.rendered_refs,
+    )
     session.complete(
         outcome=_with_paths(experience.outcome, files),
         reflection=_with_paths(experience.reflection, files),
@@ -426,19 +416,7 @@ def _publish(target: CollectionTarget, projected: _Projected) -> str:
 def write_report(path: str | Path, report: CollectReport) -> None:
     """Atomically write a collection report as JSON."""
 
-    target = Path(path)
-    target.parent.mkdir(parents=True, exist_ok=True)
-    payload = (json.dumps(report.to_dict(), indent=2, sort_keys=True) + "\n").encode()
-    descriptor, temporary_name = tempfile.mkstemp(prefix=f".{target.name}.", suffix=".tmp", dir=target.parent)
-    temporary = Path(temporary_name)
-    try:
-        with os.fdopen(descriptor, "wb") as stream:
-            stream.write(payload)
-            stream.flush()
-            os.fsync(stream.fileno())
-        os.replace(temporary, target)
-    finally:
-        temporary.unlink(missing_ok=True)
+    _atomic_write(Path(path), (json.dumps(report.to_dict(), indent=2, sort_keys=True) + "\n").encode())
 
 
 def collect(
