@@ -90,6 +90,7 @@ REJECTION_CODES = (
     "speculative_decoding_pinned",  # a candidate simulates the acceptance of a draft its parent verifies, or an AgentX one changes the draft or simulated acceptance its parent pins
     "unsupported_kind",  # the toolbox's backend does not run this kind of test (a local backend: profile, repro), or has no cards to lease
     "profile_exists",  # a PROFILE of this commit and recipe is already queued, running or measured: ``existing_request_id``
+    "profile_failing",  # a PROFILE after one of the session failed in a way every later profile repeats
     "empty_delta",  # an explore test whose delta changes nothing
     "no_effective_change",  # an explore test whose candidate recipe equals its parent's: the delta restates the parent
     "upstream_label_unsupported",  # a delta moves the upstream_ref or upstream_repo of a component the parent has

@@ -30,6 +30,7 @@ from hyperloom.contracts.measurement import (
     Validity,
 )
 from hyperloom.contracts.recipe import KernelArtifact, KernelKind
+from hyperloom.measure.failures import PROFILER_DIED, PROFILER_HUNG, PROFILER_SNAPSHOT_FAILED
 from hyperloom_multibranch.contracts.blackboard.interfaces import (
     ClaimLost,
     ClaimService,
@@ -60,15 +61,17 @@ from hyperloom_multibranch.toolbox.analysis import (
     AnalysisAsk,
     analysis_request,
 )
-from hyperloom_multibranch.toolbox.acceptance import Acceptance, AcceptanceSetup, check_kind
+from hyperloom_multibranch.toolbox.acceptance import Acceptance, AcceptanceSetup, FailedProfile, check_kind
 from hyperloom_multibranch.toolbox.attachments import store_attachment
 from hyperloom_multibranch.toolbox.attempts import (
     DEFAULT_MAX_INFRA_RETRIES,
     INFRA_BACKOFF_SECONDS,
+    WAITED_INFRA_REASONS,
     AttemptRunner,
     Executor,
     InfraBackoff,
     TestJob,
+    ending_cause,
 )
 from hyperloom_multibranch.toolbox.kernel_artifacts import KernelVariables
 from hyperloom_multibranch.toolbox.pending_builds import (
@@ -96,6 +99,9 @@ TICK_SECONDS = 200.0
 WRITE_RETRIES = 3
 #: How long a native build that failed for the machine waits before it is tried again.
 BUILD_RETRY_SECONDS = 30.0
+#: Failures of a profile that every sandbox of the image repeats, its profiler's and not the candidate's
+#: (``hyperloom.measure.failures``); a profile ends ``profiler_died`` only once its retry died the same way.
+PROFILER_FAILURES: frozenset[str] = frozenset({PROFILER_HUNG, PROFILER_SNAPSHOT_FAILED, PROFILER_DIED})
 
 
 def _same_commit_and_delta(entry: LogEntry, request: TestRequest) -> bool:
@@ -104,6 +110,17 @@ def _same_commit_and_delta(entry: LogEntry, request: TestRequest) -> bool:
     if entry.request.get("parent_commit") != request.parent_commit:
         return False
     return TestRequest.from_document(entry.request).delta.fingerprint() == request.delta.fingerprint()
+
+
+def _profile_failure(entry: LogEntry) -> str:
+    """The name of the failure a logged PROFILE ended with that may be the profiler's, ``""`` for any other entry."""
+    if entry.aborted or entry.outcome is None or entry.request.get("kind") != TestKind.PROFILE.value:
+        return ""
+    result = entry.outcome.get("result")
+    if not isinstance(result, Mapping) or result.get("failure_class") in (None, FailureClass.CANDIDATE.value):
+        return ""
+    cause = ending_cause(str(result.get("failure_reason") or ""))
+    return "" if cause in WAITED_INFRA_REASONS else cause
 
 
 @dataclass(frozen=True)
@@ -184,6 +201,7 @@ class RealToolbox:
             acceptance,
             is_accepted=self._is_accepted,
             live_profile=self._live_profile,
+            failed_profile=self._failed_profile,
         )
         self._runner = AttemptRunner(
             executor,
@@ -623,6 +641,28 @@ class RealToolbox:
                 not entry.recipe_digest and _same_commit_and_delta(entry, request)
             ):
                 return entry.request_id
+        return None
+
+    def _failed_profile(self) -> FailedProfile | None:
+        """The first PROFILE in the submit log whose failure every later profile would repeat, ``None`` while there is
+        none: one that ended for a failure of the profiler (:data:`PROFILER_FAILURES`), or one that ended for the same
+        failure as a profile of another recipe did. A failure the candidate caused (class ``candidate``) or a retry
+        waits out (:data:`~.attempts.WAITED_INFRA_REASONS`), and running out of infrastructure retries, say nothing of
+        the profiler. Read from the log, never from a set of its own, so a restarted toolbox answers as the one before
+        it did.
+        """
+
+        recipes: dict[str, str] = {}
+        for entry in self._log.entries():
+            cause = _profile_failure(entry)
+            if not cause:
+                continue
+            if cause in PROFILER_FAILURES:
+                return FailedProfile(entry.request_id, cause)
+            # An entry logged before the log recorded digests stands for its commit's recipe, whatever its delta.
+            recipe = entry.recipe_digest or str(entry.request.get("parent_commit"))
+            if recipes.setdefault(cause, recipe) != recipe:
+                return FailedProfile(entry.request_id, cause)
         return None
 
     @staticmethod

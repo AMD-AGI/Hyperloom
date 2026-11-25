@@ -77,6 +77,10 @@ from hyperloom_multibranch.toolbox.merge_smoke import SMOKE_NOT_RUN
 log = logging.getLogger(__name__)
 
 DEFAULT_MAX_INFRA_RETRIES = 3
+#: What the reason of a test whose executor raised :class:`MeasurementRefused` starts with, before the refusal.
+MEASUREMENT_REFUSED = "measurement refused"
+#: What the reason of a test whose infrastructure retries ran out says after the count of its attempts.
+RETRIES_EXHAUSTED = "attempts failed for infrastructure reasons"
 #: How long the attempts wait before each infrastructure retry that waits (:data:`WAITED_INFRA_REASONS`), the first, the
 #: second and every later one. Back to back, the four attempts of a test spent about forty seconds, so cards a process
 #: outside the test held for a minute ended it ``measurement_failed``; these spread them over seven minutes. The wait
@@ -260,6 +264,16 @@ def _reason_name(reason: str | None) -> str:
     return (reason or "").partition(":")[0].strip()
 
 
+def ending_cause(reason: str | None) -> str:
+    """The name of the failure that ended a test, from the ``reason`` of its result: a refused measurement's own reason
+    under its :data:`MEASUREMENT_REFUSED` prefix, and empty when the infrastructure retries ran out
+    (:data:`RETRIES_EXHAUSTED`), whose attempts may each have failed another way."""
+    name, _, detail = (reason or "").partition(":")
+    if name.strip() == MEASUREMENT_REFUSED:
+        return _reason_name(detail)
+    return "" if name.endswith(RETRIES_EXHAUSTED) else name.strip()
+
+
 def node_unquarantined(reason: str | None) -> bool:
     """Whether a failure's ``reason`` names one that never quarantines its node (:data:`_UNQUARANTINED_INFRA_REASONS`):
     one never held against it, or cards a process outside the test held."""
@@ -383,7 +397,7 @@ class AttemptRunner:
             try:
                 result = await self._executor.run(attempt_job)
             except MeasurementRefused as error:
-                ending = _Ending(Validity.MEASUREMENT_FAILED, FailureClass.INFRA, f"measurement refused: {error}")
+                ending = _Ending(Validity.MEASUREMENT_FAILED, FailureClass.INFRA, f"{MEASUREMENT_REFUSED}: {error}")
                 return self._final(job, last, attempts, ending)
             result = _mark_same_node(result, avoided)
             attempts.append(_attempt_of(result))
@@ -411,7 +425,7 @@ class AttemptRunner:
             if _reason_name(result.failure_reason) not in _UNREPORTED_INFRA_REASONS:
                 await self._report(attempts[-1], result.failure_reason, reproduced=True)
             if infra_retries >= self._max_infra_retries:
-                reason = f"{infra_retries + 1} attempts failed for infrastructure reasons: {result.failure_reason}"
+                reason = f"{infra_retries + 1} {RETRIES_EXHAUSTED}: {result.failure_reason}"
                 return self._final(
                     job, result, attempts, _Ending(Validity.MEASUREMENT_FAILED, FailureClass.INFRA, reason)
                 )

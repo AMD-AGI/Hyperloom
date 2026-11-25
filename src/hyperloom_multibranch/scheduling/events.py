@@ -394,6 +394,7 @@ def _facts(head: str, rejected: RequestRejected) -> dict[str, object]:
 def _refused(head: str, rejected: RequestRejected) -> ProfileOutcome:
     """The outcome of a profile or an analysis of ``head`` the toolbox refused; a refusal no profile expects raises."""
 
+    from hyperloom_multibranch.toolbox.acceptance import PROFILE_FAILING_CODE
     from hyperloom_multibranch.toolbox.analysis import (
         CODE_NO_EXECUTOR,
         CODE_PROFILE_UNVERIFIED,
@@ -403,7 +404,13 @@ def _refused(head: str, rejected: RequestRejected) -> ProfileOutcome:
 
     if rejected.code == CODE_PROFILE_UNVERIFIED:
         return ProfileOutcome(HEAD_MOVED_DURING_PROFILE, _facts(head, rejected))
-    if rejected.code in (UNSUPPORTED_KIND, CODE_PROFILE_WITHOUT_TRACE, CODE_NO_EXECUTOR, CODE_TOOL_UNAVAILABLE):
+    if rejected.code in (
+        UNSUPPORTED_KIND,
+        PROFILE_FAILING_CODE,
+        CODE_PROFILE_WITHOUT_TRACE,
+        CODE_NO_EXECUTOR,
+        CODE_TOOL_UNAVAILABLE,
+    ):
         return ProfileOutcome(PROFILE_UNAVAILABLE, _facts(head, rejected), available=False)
     raise rejected
 
