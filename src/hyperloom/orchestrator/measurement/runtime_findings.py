@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Deterministic runtime findings read from a measured server log."""
+"""Deterministic runtime findings read from a measured server log, and the last lines the log times its requests with."""
 
 from __future__ import annotations
 
@@ -15,6 +15,8 @@ from typing import Any, Pattern
 from hyperloom.common.failure_signature import CAPABILITY_DISABLED_PATTERNS
 from hyperloom.common.launch_log_evidence import LAUNCH_RECORD_FRAMEWORKS, engine_adjusted_settings_from_log
 from hyperloom.common.prompt_safety import flatten_for_prompt
+from hyperloom.common.server_timing import read_timing_lines
+from hyperloom.inference_optimizer.framework_registry import native_component
 from hyperloom.orchestrator.kernel.gemm_shape_coverage import parse_aiter_shape_lookups
 
 CORRECTNESS = "correctness"
@@ -225,7 +227,8 @@ def _scan_lines(path: str, framework: str, declared_env: Collection[str], hits: 
 
 
 def scan_server_log(path: str | None, framework: str, *, declared_env: Collection[str] = ()) -> dict[str, Any]:
-    """Scan one measured server log; every applicable rule gets one status.
+    """Scan one measured server log; every applicable rule gets one status, and ``timing_lines``, in the report only
+    when there are any, are the last lines the server of a framework built from its checkout timed its requests with.
 
     ``declared_env`` names the server env the measurement requested; only those can be unknown env findings.
     """
@@ -242,10 +245,13 @@ def scan_server_log(path: str | None, framework: str, *, declared_env: Collectio
     hits = _Hits()
     try:
         _scan_lines(path, framework, declared_env, hits)
+        timing_lines = read_timing_lines(Path(path), native_component(framework))
     except OSError as exc:
         reason = f"unreadable: {type(exc).__name__}"
         report["findings"] = [_status_finding(rule_id, UNKNOWN, reason) for rule_id in rules]
         return report
+    if timing_lines:
+        report["timing_lines"] = list(timing_lines)
     for name, change in engine_adjusted_settings_from_log(path, framework).items():
         hits.add(_ENGINE_ADJUSTED, name, f"{name}: {change['requested']} -> {change['resolved']}")
     report["findings"] = hits.findings(rules)
@@ -312,4 +318,7 @@ def render_runtime_findings(measurement: Mapping[str, Any]) -> str:
     if clear:
         lines.append(f"- not_detected: {', '.join(clear)}")
     lines.extend(f"- unknown: {f['rule_id']} ({f['reason']})" for f in findings if f["status"] == UNKNOWN)
+    if timing_lines := report.get("timing_lines"):
+        lines.append("- timing lines, the last of each kind the log holds, oldest first:")
+        lines.extend(f"    {line}" for line in timing_lines)
     return "\n".join(lines)
