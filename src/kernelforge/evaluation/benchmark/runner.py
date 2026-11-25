@@ -706,7 +706,7 @@ def _sweep_cli(argv: list[str] | None = None) -> int:
             "Exploratory only: the acceptance gate refuses these measurements."
         ),
     )
-    parser.add_argument("--driver", required=True, help="the same driver (or lock wrapper) the gate runs")
+    parser.add_argument("--driver", required=True, help="path of the driver script the gate runs")
     parser.add_argument("--case", required=True, help="one CASE_ID from the task's scored cases")
     parser.add_argument(
         "--set",
