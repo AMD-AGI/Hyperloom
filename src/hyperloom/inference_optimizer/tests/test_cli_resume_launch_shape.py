@@ -466,6 +466,61 @@ def test_the_resume_exports_its_pins_again_after_the_topology_step_rewrote_them(
     assert os.environ["SKIP_VARIANTS"] == "pinned"
 
 
+def test_a_resumed_pd_session_refuses_server_args_before_it_persists(tmp_path, monkeypatch, request):
+    """A node-list PD session freezes no ``--server-args``, so a resume that passes one exits 2 before any state write."""
+    import asyncio
+
+    from inference_suite.multinode import RECORD_NAME
+
+    from hyperloom.inference_optimizer.cli import _build_parser, _run_optimize
+    from hyperloom.inference_optimizer.cli.bootstrap import MEASUREMENT_EPOCH
+
+    cli_mod = "hyperloom.inference_optimizer.cli"
+    saved_environ = dict(os.environ)
+    request.addfinalizer(lambda: (os.environ.clear(), os.environ.update(saved_environ)))
+
+    workspace = tmp_path / "sessions"
+    resume_dir = workspace / "Qwen-Test" / "pd-resume"
+    model = tmp_path / "Qwen-Test"
+    (resume_dir / "reports").mkdir(parents=True, exist_ok=True)
+    SharedState(
+        session_id="resume-pd",
+        model_name=model.name,
+        model_path=str(model),
+        measurement_epoch=MEASUREMENT_EPOCH,
+    ).save(resume_dir)
+    (resume_dir / "manifest.json").write_text(
+        json.dumps({"schema_version": 4, "session_id": "resume-pd"}), encoding="utf-8"
+    )
+    (resume_dir / RECORD_NAME).write_text("{}", encoding="utf-8")
+
+    monkeypatch.setenv("INFERENCE_OPTIMIZER_CURRENT_SESSION_DIR", str(resume_dir))
+    monkeypatch.setenv("USER_DATA_PATH", str(workspace))
+    monkeypatch.setenv("INFERENCE_OPTIMIZER_EXTRA_ENV", "")
+    monkeypatch.delenv("SKIP_VARIANTS", raising=False)
+    monkeypatch.delenv("MODEL_PATH", raising=False)
+    monkeypatch.setattr(
+        f"{cli_mod}.clean_stale_aiter_locks",
+        lambda: {"dir": "", "deleted": 0, "skipped_fresh": 0, "errors": 0},
+    )
+    monkeypatch.setattr(f"{cli_mod}._preflight", lambda args: ("", ""))
+    monkeypatch.setattr(f"{cli_mod}._check_codex_sandbox", lambda backend: None)
+
+    def past_the_refusal(*a, **kw):
+        raise RuntimeError("resume passed the server-args refusal")
+
+    # The first call after the refusal point in ``_resume_session``.
+    monkeypatch.setattr(f"{cli_mod}.latency_budget_scope_error", past_the_refusal)
+    args = _build_parser().parse_args(
+        ["optimize", "--resume-from", str(resume_dir), "--critic-mock", "--server-args=--mem-fraction-static 0.8"]
+    )
+
+    with pytest.raises(SystemExit) as exc:
+        asyncio.run(_run_optimize(args))
+
+    assert exc.value.code == 2
+
+
 def test_parse_operator_extra_env_keeps_pairs_and_drops_junk():
     """``NAME=VALUE`` pins survive; entries without ``=`` or with a blank name do not."""
     args = _ns(extra_env=["SGLANG_USE_AITER=0", "EMPTY=", "novalue", "=blank"])

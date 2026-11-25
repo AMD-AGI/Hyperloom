@@ -177,7 +177,7 @@ The following flags are used in multi-node workload skill blocks.
 | `--pd-decode-nodes`, `--pd-decode-tp` | Decode topology |
 | `--pd-prefill-ep`, `--pd-prefill-extra-args`, `--pd-decode-ep`, `--pd-decode-extra-args` | Per-role EP and server args (infera only; rayjob rejects them) |
 | `--pd-transfer-backend` | KV transfer plane for PD. Use `mooncake`; `nixl` can produce 0 output tokens |
-| `--server-args "..."` | Extra sglang args applied on every server restart |
+| `--server-args "..."` | Extra sglang args applied on every server restart. A node-list PD session refuses it, at adoption and on resume; pass `--pd-prefill-extra-args` / `--pd-decode-extra-args` |
 | `--no-framework-agent` | Skip the framework-tuning agent phase |
 
 ### Environment variables

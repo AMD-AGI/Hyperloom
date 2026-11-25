@@ -303,7 +303,7 @@ class _BenchmarkLaunchMixin:
 
             server_base = session_server_base()
             # Fold in the operator ``--server-args`` (``INFERENCE_OPTIMIZER_SERVER_ARGS``).
-            # A node-list PD session refuses ``--server-args`` at adoption, so its rounds carry only their own args.
+            # A node-list PD session refuses ``--server-args`` at adoption and on resume, so its rounds carry only their own args.
             operator_args = "" if is_pd_session() else os.environ.get("INFERENCE_OPTIMIZER_SERVER_ARGS", "").strip()
             base = server_base.args
             if operator_args:

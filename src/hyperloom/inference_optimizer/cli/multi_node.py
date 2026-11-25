@@ -115,7 +115,7 @@ def freeze_pd_session_launch(
             f"the handed-over cluster is {nodes.mode.value}, the session {pd_mode}; pass --pd-mode {nodes.mode.value}"
         )
     if str(getattr(args, "server_args", "") or "").strip():
-        _exit_refused("--server-args is not supported in a node-list PD session; pass --prefill-args / --decode-args")
+        _exit_refused(PD_SERVER_ARGS_REFUSAL)
     try:
         launch = freeze_launch(session_dir, session, nodes, inferencex_commit)
     except PdSessionError as exc:
@@ -132,6 +132,19 @@ def _exit_refused(problem: str) -> None:
     """Print ``problem`` and exit 2."""
     print(f"ERROR: {problem}", file=sys.stderr)
     sys.exit(2)
+
+
+PD_SERVER_ARGS_REFUSAL = (
+    "--server-args is not supported in a node-list PD session; pass --pd-prefill-extra-args / --pd-decode-extra-args"
+)
+
+
+def refuse_pd_resume_server_args(session_dir: Path, server_args: str) -> None:
+    """Exit 2 when a resumed node-list PD session would be given ``--server-args``, which its frozen launch lacks."""
+    from inference_suite.multinode import RECORD_NAME
+
+    if str(server_args or "").strip() and (session_dir / RECORD_NAME).exists():
+        _exit_refused(PD_SERVER_ARGS_REFUSAL)
 
 
 def _bind_pd_launch(ext_state: dict[str, Any], session_dir: Path | None) -> None:
