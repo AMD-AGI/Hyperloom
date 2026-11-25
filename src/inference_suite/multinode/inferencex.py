@@ -52,7 +52,6 @@ NVIDIA_MASTER = f"{PROJECT}/configs/nvidia-master.yaml"
 CHECKOUT_DIRECTORIES = (f"{PROJECT}/configs", MULTI_NODE_RECIPES)
 _AGENTX_SHAPE = "agentx"
 _ZIP_SELECTOR = re.compile(r"(zip_override_[\w-]+)\[(\d+)\]")
-_SPEC_KEYS = ("speculative-algorithm", "speculative-config", "method")
 #: The topology spellings of the frameworks a PD session runs.
 _TOPOLOGY_SPELLING: dict[Framework, TopologySpelling] = {
     Framework.SGLANG: SGLANG_TOPOLOGY,
@@ -275,10 +274,6 @@ def recipe_fit(role: Mapping[str, Any], framework: Framework) -> RoleFit:
     return RoleFit(int(role.get("workers") or 1), tp, ep, bool(_arg(args, ("enable-dp-attention",))), gpus or tp)
 
 
-def _speculative(recipe: Mapping[str, Any]) -> bool:
-    return any(_arg(role.get("args") or {}, _SPEC_KEYS) for role in (recipe.get("roles") or {}).values())
-
-
 def _row_fits(row: Mapping[str, Any]) -> dict[Role, RoleFit]:
     fits = {}
     for role in PD_ROLES:
@@ -400,118 +395,6 @@ def _with_warning(candidate: Candidate, warning: str) -> Candidate:
     return dataclasses.replace(candidate, warnings=(*candidate.warnings, warning))
 
 
-def _search_rows(entry: Mapping[str, Any]) -> Iterator[Mapping[str, Any]]:
-    """Every search-space row of every scenario block of a master entry."""
-    for blocks in (entry.get("scenarios") or {}).values():
-        for block in blocks or ():
-            yield from block.get("search-space") or ()
-
-
-def _named_recipes(master: Mapping[str, Any]) -> set[str]:
-    """``<path>:<selector>`` of every recipe variant a master entry names."""
-    named = set()
-    for entry in master.values():
-        if "srt-recipe-dir" not in entry:
-            continue
-        for row in _search_rows(entry):
-            if "srt-recipe" in row:
-                file, _, selector = str(row["srt-recipe"]).partition(":")
-                named.add(f"{MULTI_NODE_RECIPES}/{entry['srt-recipe-dir']}/{file}:{selector}")
-    return named
-
-
-def _lookup_dirs(
-    query: PdQuery, checkout: Checkout, masters: Sequence[Mapping[str, Any]]
-) -> tuple[list[str], list[str]]:
-    """The workload directories of the query's model, framework and board: ``<board>-<precision>`` and its suffixed
-    siblings (``-mtp``) for every model prefix and precision the master configs give the model; then the query
-    board's ``<board>-<precision>`` directories of the prefixes and precisions no board has."""
-    model, _ = _master_model(query.model_id, masters)
-    labels = sorted(
-        {
-            (str(entry["model-prefix"]), str(entry["precision"]))
-            for master in masters
-            for entry in master.values()
-            if entry.get("model") == model and "model-prefix" in entry and "precision" in entry
-        }
-    )
-    if query.workload is Workload.FIXED and query.isl is not None and query.osl is not None:
-        shape = f"{query.isl // 1024}k{query.osl // 1024}k"
-    else:
-        shape = _AGENTX_SHAPE
-    boards = (query.board.lower(),)
-    found: list[str] = []
-    absent: list[str] = []
-    for prefix, precision in labels:
-        engine = checkout.root / MULTI_NODE_RECIPES / prefix / query.framework.value
-        matched = [
-            label.name
-            for board in boards
-            for label in sorted(engine.glob(f"{board}-{precision}*"))
-            if label.name == f"{board}-{precision}" or label.name.startswith(f"{board}-{precision}-")
-        ]
-        found.extend(f"{MULTI_NODE_RECIPES}/{prefix}/{query.framework.value}/{name}/{shape}" for name in matched)
-        if not matched:
-            absent.append(f"{MULTI_NODE_RECIPES}/{prefix}/{query.framework.value}/{boards[0]}-{precision}")
-    return found, absent
-
-
-def _lookup_candidate(query: PdQuery, path: str, selector: str, recipe: Mapping[str, Any]) -> Candidate | str:
-    gpu_type = str((recipe.get("resources") or {}).get("gpu_type") or "")
-    if gpu_type.lower() != query.board.lower():
-        return f"it is for {gpu_type}, not {query.board}"
-    unported = _unported(recipe, query)
-    if unported is not None:
-        return unported
-    if query.workload is Workload.FIXED and _speculative(recipe):
-        return "it drafts speculatively, and a fixed workload runs no speculative decoding"
-    roles = recipe["roles"]
-    fits = {role: recipe_fit(roles[role.value], query.framework) for role in PD_ROLES}
-    misfit = _roles_misfit(query, fits)
-    if misfit is not None:
-        return misfit
-    warnings = [f"{path}:{selector} is not a recipe InferenceX's master configuration benchmarks"]
-    if gpu_type.lower() != query.board.lower():
-        warnings.append(f"InferenceX tuned {path}:{selector} on {gpu_type}, not {query.board}")
-    return Candidate(
-        kind=PdSourceKind.INFERENCEX_LOOKUP,
-        entry="",
-        path=path,
-        locator=selector,
-        recipe=recipe,
-        fits=fits,
-        warnings=tuple(warnings),
-    )
-
-
-def lookup_candidates(query: PdQuery, checkout: Checkout) -> Candidates:
-    """The recipes of the query's model, framework, board and workload directory no master entry names, in path then
-    variant order."""
-    masters = [_yaml(checkout, MASTER)]
-    if (checkout.root / NVIDIA_MASTER).is_file():
-        masters.append(_yaml(checkout, NVIDIA_MASTER))
-    named = set().union(*(_named_recipes(master) for master in masters))
-    _, note = _master_model(query.model_id, masters)
-    found: list[Candidate] = []
-    misses: list[str] = [note] if note else []
-    directories, absent = _lookup_dirs(query, checkout, masters)
-    what = f"no recipe directory of {query.model_id} for {query.framework.value} on {query.board}"
-    if not directories and not absent:
-        misses.append(f"{what}: the master configurations give the model no recipe prefix")
-    misses.extend(f"{what}: {directory}" for directory in absent)
-    for directory in directories:
-        for path in checkout.paths(directory, ".yaml", nested=False):
-            for selector, recipe in expand_variants(_yaml(checkout, path)):
-                if f"{path}:{selector}" in named:
-                    continue
-                candidate = _lookup_candidate(query, path, selector, recipe)
-                if isinstance(candidate, str):
-                    misses.append(f"{path}:{selector}: {candidate}")
-                else:
-                    found.append(_with_warning(candidate, note) if note else candidate)
-    return Candidates(tuple(found), tuple(misses))
-
-
 __all__ = [
     "CHECKOUT_DIRECTORIES",
     "MULTI_NODE_RECIPES",
@@ -521,7 +404,6 @@ __all__ = [
     "RoleFit",
     "deep_merge",
     "expand_variants",
-    "lookup_candidates",
     "master_candidates",
     "recipe_fit",
 ]

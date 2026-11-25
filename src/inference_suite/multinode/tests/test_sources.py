@@ -13,12 +13,11 @@ from inference_suite.multinode.inferencex import (
     RoleFit,
     deep_merge,
     expand_variants,
-    lookup_candidates,
     master_candidates,
     recipe_fit,
 )
 from inference_suite.multinode.query import PdQuery, RoleAsk
-from inference_suite.multinode.record import PdSourceKind, Role
+from inference_suite.multinode.record import Role
 from inference_suite.recipe.inferencex import MASTER, RUNNERS
 from inference_suite.recipe.sources import Checkout
 
@@ -139,19 +138,10 @@ def test_master_row_refuses_other_host_counts(checkout):
     assert master_candidates(_query(decode=2), checkout).found == ()
 
 
-def test_lookup_finds_variants_no_master_entry_names(checkout):
-    found = lookup_candidates(_query(decode=2), checkout)
-    assert [c.locator for c in found.found] == ["zip_override_1p2d[0]", "zip_override_1p2d[1]"]
-    assert all(c.kind is PdSourceKind.INFERENCEX_LOOKUP and c.warnings for c in found.found)
-
-
 @pytest.mark.parametrize(
     ("candidates", "decode", "model_id", "locators"),
-    [
-        (master_candidates, 1, "M", ["override_1p1d"]),
-        (lookup_candidates, 2, "m", ["zip_override_1p2d[0]", "zip_override_1p2d[1]"]),
-    ],
-    ids=["master", "lookup"],
+    [(master_candidates, 1, "M", ["override_1p1d"])],
+    ids=["master"],
 )
 def test_a_bare_repo_name_finds_what_inferencex_names_it_by(checkout, candidates, decode, model_id, locators):
     found = candidates(_query(decode=decode, model_id=model_id), checkout).found
