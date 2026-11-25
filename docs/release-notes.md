@@ -34,7 +34,9 @@ it.
   `hosted/control/stop.json` stop request the Coordinator read.
   `HYPERLOOM_EVENTS_DIR` and `HYPERLOOM_MCP_HOST` / `_PORT` / `_TOKEN` are no
   longer read or checked, and are still removed from the environment of every
-  child. `optimize --session-dir` stays.
+  child. `optimize --session-dir` stays. `options.conc_sweep` is no longer
+  part of the spec (it is ignored like any unknown field); a multi-branch run
+  takes its sweep switch from `multibranch.conc_sweep`.
 - **A hosted multi-branch run sets the AgentX window and the server boot
   budget.** The campaign spec's `multibranch` block takes
   `agentx_duration_sec` and `agentx_objective` (for `workload: agentx` only),

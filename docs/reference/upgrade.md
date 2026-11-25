@@ -316,6 +316,13 @@ ran the single-session flow; that default is gone.
   every child). The single flow's MCP host tools and progress events are gone,
   and the Coordinator no longer reads `hosted/control/stop.json`; stop a run
   with a signal.
+* `options.conc_sweep` is no longer part of the spec: it switched the single
+  flow's sweep, and like any unknown field it is now accepted and ignored.
+  Turn a multi-branch run's sweep off with `"multibranch": {"conc_sweep": false}`.
+  The single flow's two other sweep behaviours go with it: restarted, the
+  hosted entry no longer runs the unfinished sweep of a closed single-flow
+  session, and that sweep no longer warns when its estimate outlasts the
+  hosted grant.
 
 ### Required: `SWEEP` is renamed `CYCLE_END` and runs no concurrency sweep
 
