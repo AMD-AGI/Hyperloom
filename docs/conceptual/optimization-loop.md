@@ -220,7 +220,7 @@ authoring specialist's prompt. The rungs, in increasing complexity:
    the same ROCm pins as Rung 3, minus the component it builds. Auto-escalation into
    Rung 5 can be disabled with the `HYPERLOOM_ENABLEMENT_DISABLE_TARGETED_BUILD`
    environment variable (see
-   [Targeted builds (Rung 5)](../reference/environment-variables.md#targeted-builds-rung-5)).
+   [Targeted builds (Rung 5)](../reference/environment-variables/env-vars-targeted-builds.md)).
 
 ### Latency budget (constraint on KEEP)
 

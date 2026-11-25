@@ -27,7 +27,7 @@ report = collect(
 
 ```bash
 hyperloom-kb-collect --mapping hyperloom-sbd-v6 --document session_breakdown.json --dry-run
-# Hyperloom experience collection
+# from a pip --target workspace: python -m hyperloom_kb.collect.cli ...
 ```
 
 Without `kb=`, the target is the Experience service named by `HYPERLOOM_KB_URL`

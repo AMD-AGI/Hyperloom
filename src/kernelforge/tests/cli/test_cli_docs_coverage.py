@@ -10,7 +10,7 @@ import click
 
 from kernelforge.cli import main
 
-DOC_RELPATH = "docs/kernelforge/reference/cli.md"
+DOC_RELPATH = "docs/components/kernelforge/reference/cli.md"
 ROOT_NAME = "kernelforge"
 
 

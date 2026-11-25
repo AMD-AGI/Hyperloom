@@ -1,3 +1,4 @@
 # Sphinx build output and autosummary-generated stub pages.
 _build/
 reference/generated/
+sphinx/_toc.yml

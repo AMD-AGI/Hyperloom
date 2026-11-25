@@ -78,7 +78,7 @@ Logs are useful evidence, but activity alone does not prove useful progress.
 Under the hood the optimizer walks the phase chain
 `PRELUDE → ENABLEMENT → FRAMEWORK_AGENT → KERNEL_AGENT → SWEEP → CLOSE`; see
 [Hyperloom optimization loop](../conceptual/optimization-loop.md) for each phase
-and [benchmark deadlines](../reference/environment-variables.md#benchmark-deadlines-and-lifecycle)
+and [benchmark deadlines](../reference/environment-variables/env-vars-benchmark-deadlines.md)
 for the independent benchmark and session limits.
 
 ## Resume an interrupted session
@@ -112,7 +112,7 @@ session and prints nothing about plugs. To choose other implementations of a plu
 | `--plug-config SOCKET.KEY=VALUE` | Set one configuration key (repeatable; a JSON value is read as JSON). |
 
 Later layers win: profile, manifest, `$HYPERLOOM_MANIFEST_OVERRIDES`, then `--plug` and `--plug-config`. See
-[Plug selection](../reference/environment-variables.md#plug-selection) for the two variables.
+[Plug selection](../reference/environment-variables/env-vars-plug-selection.md) for the two variables.
 
 A run that selects anything prints one `Plugs : profile=... fingerprint=...` line and records the outcome in
 `$SESSION_DIR/plugs.resolved.json`. `--resume-from` reads that file back before applying flags, so the resumed run keeps

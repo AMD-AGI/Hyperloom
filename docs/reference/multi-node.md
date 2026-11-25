@@ -327,10 +327,10 @@ failed before writing `manifest.json`.
 **Fix**:
 
 ```bash
-# Hyperloom multi-node inference optimization
+# Locate the session directory
 find "$USER_DATA_PATH" -name manifest.json
 
-# Hyperloom multi-node inference optimization
+# Resume with the exact session directory
 python3 -m hyperloom optimize \
   --resume-from /path/to/session
 ```

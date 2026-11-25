@@ -7,7 +7,7 @@ myst:
 # Hyperloom Credentials
 
 These variables configure LLM gateway access and optional backend credentials.
-See [Authentication and credentials](authentication.md) for the accepted
+See [Authentication and credentials](../authentication.md) for the accepted
 provider-side combinations and what each one enables.
 
 | Variable               | Required | Default | Description                                                                                                                                                                                            |

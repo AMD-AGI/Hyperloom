@@ -172,7 +172,7 @@ claude = [
 # (HYPERLOOM_EXPLORE_PROJECTION=1), lazy-imported by
 # ``orchestrator.actions.executors.explore_prefilter.inferasim_bridge``. Pinned: the
 # bridge imports Infera's internal module paths. A projection also needs Origami,
-# which is not on PyPI (see docs/reference/environment-variables.md).
+# which is not on PyPI (see docs/reference/environment-variables/env-vars-explore-prefilters.md).
 # HYPERLOOM_INFERASIM_ROOT, pointing at an Infera checkout, takes precedence.
 inferasim = [
     "amd-infera[projection]==0.3.3",

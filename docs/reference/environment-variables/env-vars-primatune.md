@@ -7,7 +7,7 @@ myst:
 # Hyperloom PrimaTune variables
 
 Set by `--primatune-endpoint` and `--primatune-mode`, or directly in the shell. See
-[PrimaTune predictor](primatune-predictor.md).
+[PrimaTune predictor](../primatune-predictor.md).
 
 | Variable | Default | Description |
 |---|---|---|

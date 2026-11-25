@@ -8,7 +8,7 @@ myst:
 
 Every workspace runs a local Experience KB service. The global KB settings are
 optional: unset, the workspace uses only its local KB. See
-[Experience KB service](experience-kb.md).
+[Experience KB service](../experience-kb.md).
 
 | Variable | Default | Description |
 |---|---|---|
