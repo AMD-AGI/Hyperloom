@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import argparse
+import copy
 import json
 import math
 import os
@@ -15,6 +16,7 @@ from pathlib import Path
 from hyperloom.common.perf_metric import DATASET_PATH_ENV
 from hyperloom.common.url_userinfo import CREDENTIALED_URL_RE
 from hyperloom.common.workload_defaults import DEFAULT_EP
+from hyperloom.inference_optimizer.framework_registry import native_component
 from hyperloom_multibranch.blackboard.knowledge.reference_leads import INFERENCEX_REFERENCE
 from hyperloom_multibranch.contracts.toolbox import WorkloadKind
 from hyperloom_multibranch.rulegate.agentx import AgentXObjective
@@ -49,6 +51,8 @@ ENCODING = "utf-8"
 FILE_METAVAR = "FILE"
 #: The GPU types a session runs on; the toolbox's environment exports the board itself as ``GPU_TYPE``.
 SESSION_GPU_TYPES = ("mi300x", "mi325x", "mi350x", "mi355x", "r9700", "w7900d")
+#: Those of them a session runs on only when its framework builds its server from a checkout.
+NATIVE_SERVER_GPU_TYPES = ("r9700", "w7900d")
 #: The options ``run`` requires unless it is given ``--resume``, by their argparse names.
 RUN_REQUIRED = ("model", "framework", "gpu_type", "workload", "tp", "conc", "precision")
 #: The options an inferencex workload requires and an agentx one refuses.
@@ -65,9 +69,26 @@ FINAL_ONLY_COMMAND = "final-only"
 HOSTED_COMMAND = "hosted"
 
 
+class _CommandParser(argparse.ArgumentParser):
+    """A command's parser, which refuses a board of :data:`NATIVE_SERVER_GPU_TYPES` for a framework that builds no
+    server, in the words argparse refuses a ``--gpu-type`` that is no choice."""
+
+    def parse_known_args(self, args=None, namespace=None):  # type: ignore[no-untyped-def]
+        parsed, rest = super().parse_known_args(args, namespace)
+        board, framework = getattr(parsed, "gpu_type", None), getattr(parsed, "framework", None)
+        if board in NATIVE_SERVER_GPU_TYPES and native_component(framework or "") is None:
+            action = copy.copy(next(action for action in self._actions if action.dest == "gpu_type"))
+            action.choices = [choice for choice in SESSION_GPU_TYPES if choice not in NATIVE_SERVER_GPU_TYPES]
+            try:
+                self._check_value(action, board)
+            except argparse.ArgumentError as exc:
+                self.error(str(exc))
+        return parsed, rest
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog=PROG, description="Run a multi-branch optimization session.")
-    commands = parser.add_subparsers(dest="command", required=True)
+    commands = parser.add_subparsers(dest="command", required=True, parser_class=_CommandParser)
     _add_run_options(commands.add_parser("run", help="Run one session: PRELUDE, EXPLORE, FINAL and CLOSE."))
     review.add_parser(commands)
     final_only = commands.add_parser(

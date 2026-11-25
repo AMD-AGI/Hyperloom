@@ -244,6 +244,20 @@ def test_an_unknown_gpu_type_is_refused_naming_the_types_a_session_runs_on(capsy
     assert "(choose from mi300x, mi325x, mi350x, mi355x, r9700, w7900d)" in err.replace("'", "")
 
 
+@pytest.mark.parametrize("board", ["r9700", "W7900D"])
+@pytest.mark.parametrize("framework", ["vllm", "sglang"])
+def test_a_board_of_llamacpp_alone_is_refused_for_another_framework_as_a_type_no_session_runs_on(
+    board: str, framework: str, capsys: pytest.CaptureFixture[str]
+) -> None:
+    with pytest.raises(SystemExit) as exc:
+        cli.main(["run", *WORKLOAD_ARGS, "--gpu-type", board, "--framework", framework])
+
+    assert exc.value.code == 2
+    err = capsys.readouterr().err
+    assert f"run: error: argument --gpu-type: invalid choice: '{board.lower()}'" in err
+    assert err.replace("'", "").rstrip().endswith("(choose from mi300x, mi325x, mi350x, mi355x)")
+
+
 def test_an_agentx_run_has_no_sequence_lengths_and_is_graded_on_p50_interactivity_at_its_conc_alone() -> None:
     workload = _settings(workload=AGENTX_ARGS).workload
 
