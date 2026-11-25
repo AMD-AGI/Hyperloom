@@ -54,7 +54,15 @@ from hyperloom_common.timeutil import utc_now_compact
 
 from .plot import ConcCurveOptions
 from .points import SCHEMA_VERSION, SweepPoints, ladder, sweep_points
-from .report import ArmCurves, build_roofline_ceiling, point_from_variant, publish_curve, read_summary, write_report
+from .report import (
+    ArmCurves,
+    build_roofline_ceiling,
+    point_from_variant,
+    publish_curve,
+    read_summary,
+    run_facts,
+    write_report,
+)
 
 log = logging.getLogger(__name__)
 
@@ -274,13 +282,20 @@ class _Sweep:
 
 
 def _header(state: SharedState, session_dir: Path) -> dict[str, Any]:
+    frozen = frozen_base(session_dir)
     return {
         "schema_version": SCHEMA_VERSION,
         "session_id": state.session_id or session_dir.name,
         "benchmark_mode": state.benchmark_mode,
+        "framework": state.framework,
+        "precision": state.precision,
+        "gpu_type": state.gpu_type,
+        "gpu_count": state.tp,
         "isl": state.isl,
         "osl": state.osl,
         "tp": state.tp,
+        "ep": state.ep,
+        **run_facts(None if frozen is None else frozen.launch),
     }
 
 

@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -36,7 +37,9 @@ def _state(session_dir: Path, **fields: Any) -> SharedState:
 
 
 def _base(kind: SourceKind, concs: tuple[int, ...]) -> SimpleNamespace:
-    return SimpleNamespace(source=SimpleNamespace(kind=kind), point=SimpleNamespace(source_concs=concs))
+    source = SimpleNamespace(kind=kind, repo="InferenceX", commit="c22b4b2", entry="entry", locator="recipe.yaml:c16")
+    image = SimpleNamespace(run="vllm/vllm-openai-rocm:v0.32.0", recipe=None)
+    return SimpleNamespace(source=source, point=SimpleNamespace(source_concs=concs), image=image)
 
 
 def _result(variant: GridVariant, *, status: str = "succeeded") -> VariantResult:
@@ -321,3 +324,25 @@ def test_the_operators_points_are_swept_in_place_of_the_recipes(session_dir: Pat
 
     assert (payload["concs"], payload["concs_source"]) == ([2, 16], points.SOURCE_OPERATOR)
     assert [call["name"] for call in grid.calls][:2] == ["baseline_conc16", "baseline_conc2"]
+
+
+def test_the_report_names_the_hardware_the_image_and_the_recipe_and_who_wrote_it(
+    session_dir: Path, grid: SimpleNamespace
+):
+    _state(session_dir, precision="fp8", gpu_type="mi355x", ep=1)
+
+    payload = asyncio.run(runner.run_conc_sweep(session_dir))
+
+    assert {k: payload[k] for k in ("framework", "precision", "gpu_type", "gpu_count", "tp", "ep")} == {
+        "framework": "sglang",
+        "precision": "fp8",
+        "gpu_type": "mi355x",
+        "gpu_count": 8,
+        "tp": 8,
+        "ep": 1,
+    }
+    assert payload["image"] == "vllm/vllm-openai-rocm:v0.32.0"
+    assert payload["recipe"]["commit"] == "c22b4b2" and payload["recipe"]["locator"] == "recipe.yaml:c16"
+    assert payload["pid"] == os.getpid() and payload["host"] and payload["updated_at"]
+    header = (session_dir / "reports" / "conc_sweep_raw.csv").read_text().splitlines()[0].split(",")
+    assert "e2e_norm_intvty_p50" in header

@@ -8,7 +8,10 @@ from __future__ import annotations
 import csv
 import json
 import logging
+import os
+import socket
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -28,6 +31,7 @@ from .plot import ConcCurveOptions, render_conc_sweep_curve
 if TYPE_CHECKING:
     from hyperloom.orchestrator.actions.executors.grid._grid_runner import VariantResult
     from hyperloom.orchestrator.state.shared_state import SharedState
+    from inference_suite.contracts.base_launch import BaseLaunch
 
 log = logging.getLogger(__name__)
 
@@ -38,6 +42,28 @@ FINAL_FILE = "final.json"
 _ENCODING = "utf-8"
 #: The statuses of a sweep that ran its course, whatever it measured.
 SETTLED = frozenset({"succeeded", "partial", "skipped"})
+
+
+def run_facts(base: BaseLaunch | None) -> dict[str, Any]:
+    """The report header's provenance: the image and the recipe of the session's frozen ``base``, and the host and
+    process writing the report, with when -- a report still ``in_progress`` whose process is gone was cut short."""
+    source = None if base is None else base.source
+    recipe = None
+    if source is not None:
+        recipe = {
+            "kind": source.kind.value,
+            "repo": source.repo,
+            "commit": source.commit,
+            "entry": source.entry,
+            "locator": source.locator,
+        }
+    return {
+        "image": None if base is None else base.image.run or base.image.recipe,
+        "recipe": recipe,
+        "host": socket.gethostname(),
+        "pid": os.getpid(),
+        "updated_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+    }
 
 
 def point_from_variant(v: VariantResult, *, arm: str) -> dict[str, Any]:
@@ -60,6 +86,7 @@ def point_from_variant(v: VariantResult, *, arm: str) -> dict[str, Any]:
         "request_throughput": v.request_throughput,
         "total_token_throughput": total,
         "input_throughput": v.input_throughput,
+        "e2e_norm_intvty_p50": v.intvty_p50,
         "e2e_norm_intvty_p90": v.intvty_p90,
         "tpot_p90_ms": v.tpot_p90_ms,
         "ttft_mean_ms": v.ttft_mean_ms,
@@ -85,6 +112,7 @@ def _write_csv(csv_path: Path, points: list[dict[str, Any]]) -> None:
         "request_throughput",
         "total_token_throughput",
         "input_throughput",
+        "e2e_norm_intvty_p50",
         "e2e_norm_intvty_p90",
         "tpot_p90_ms",
         "ttft_mean_ms",

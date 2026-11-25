@@ -52,7 +52,7 @@ from hyperloom.common.gain_math import conc_pair_comparison, gain_pct
 from hyperloom.contracts.measurement import Purpose, TestKind, TestResult, Validity
 from hyperloom.orchestrator.conc_sweep.plot import ConcCurveOptions
 from hyperloom.orchestrator.conc_sweep.points import SCHEMA_VERSION, SweepPoints, ladder, sweep_points
-from hyperloom.orchestrator.conc_sweep.report import SETTLED, read_summary, write_curve, write_report
+from hyperloom.orchestrator.conc_sweep.report import SETTLED, read_summary, run_facts, write_curve, write_report
 from hyperloom_common.jsonio import read_json_strict
 from hyperloom_multibranch.contracts.gate import NotMeasured
 from hyperloom_multibranch.contracts.blackboard import INTEGRATION_BRANCH, Blackboard
@@ -497,14 +497,23 @@ def sweep_unfinished(layout: SessionLayout, settings: RunSettings) -> bool:
 
 
 def _header(layout: SessionLayout, workload: Workload) -> dict[str, Any]:
+    from hyperloom.orchestrator.state.base_launch import frozen_base
+
     shape = workload.inferencex
+    frozen = frozen_base(layout.toolbox)
     return {
         "schema_version": SCHEMA_VERSION,
         "session_id": layout.session_id,
         "benchmark_mode": "agentx" if shape is None else "synthetic",
+        "framework": workload.framework,
+        "precision": workload.precision,
+        "gpu_type": workload.gpu_type,
+        "gpu_count": workload.tp,
         "isl": None if shape is None else shape.isl,
         "osl": None if shape is None else shape.osl,
         "tp": workload.tp,
+        "ep": workload.ep,
+        **run_facts(None if frozen is None else frozen.launch),
     }
 
 

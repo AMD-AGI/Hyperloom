@@ -67,7 +67,9 @@ def _layout(tmp_path: Path, chosen: FinalCandidate | None = CHOSEN, gain_pct: fl
 @pytest.fixture
 def inferencex_base(monkeypatch: pytest.MonkeyPatch) -> None:
     point = SimpleNamespace(source_concs=(4, 32))
-    launch = SimpleNamespace(source=SimpleNamespace(kind=SourceKind.INFERENCEX), point=point)
+    source = SimpleNamespace(kind=SourceKind.INFERENCEX, repo="InferenceX", commit="c22b4b2", entry="e", locator="l")
+    image = SimpleNamespace(run="sglang:v0.5", recipe=None)
+    launch = SimpleNamespace(source=source, point=point, image=image)
     monkeypatch.setattr(base_launch, "frozen_base", lambda _toolbox: SimpleNamespace(launch=launch))
 
 
