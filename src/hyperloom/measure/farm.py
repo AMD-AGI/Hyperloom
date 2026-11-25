@@ -362,9 +362,8 @@ def built_roots(roots: Iterable[EnvRoot], builds: SheetBuilds | None) -> list[En
             found.append(root)
             continue
         if builds is None:
-            raise FarmError(
-                f"{root.id}: its {root.kind} build needs the native build store, which this runner is not given"
-            )
+            needs = "a runtime root" if root.kind == RUNTIME_ROOT else "its executable build"
+            raise FarmError(f"{root.id}: {needs} needs the native build store, which this runner is not given")
         try:
             if root.kind == EXECUTABLE_ROOT:
                 record = builds.executable_record(root.id)
