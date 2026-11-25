@@ -289,7 +289,7 @@ class _Bench:
 
 
 def _built(arms: list[_Arm], build: Callable[[bytes], TreeBuild], parallel: int) -> dict[str, _Timed]:
-    with ThreadPoolExecutor(max_workers=max(1, parallel)) as pool:
+    with ThreadPoolExecutor(max_workers=parallel) as pool:
         builds = list(pool.map(build, [arm.patch for arm in arms]))
     if builds[0].bin is None:
         raise SweepError(f"the build of the pinned commit failed ({builds[0].status.value}): {builds[0].detail}")
@@ -341,7 +341,7 @@ def _checked(
     for value in sorted({row.value for row in winners.values()}):
         keys = [key for key, row in winners.items() if row.value == value]
         names = [case.name for key in keys for case in cases[key]]
-        built = timed[f"value={value}"].build.bin or Path()
+        built = timed[f"value={value}"].build.bin
         with hooks.hold() as env:
             try:
                 verdicts = hooks.check(built / executable, cases_file, names, env)
@@ -386,7 +386,7 @@ def run_sweep(
         errors = "; ".join(f"{arm['arm']} {arm['status']}: {arm['detail']}" for arm in untimed)
         raise SweepError(f"no value was timed: {errors}")
     winners = _winners(rows)
-    refused = _checked(winners, timed, cases, cases_file, hooks) if winners else {}
+    refused = _checked(winners, timed, cases, cases_file, hooks)
     rows = [
         _Row(row.key, row.value, row.median_us, row.gain, row.noise, Verdict.CHECK_FAILED)
         if row.key in refused and winners[row.key] is row
