@@ -14,6 +14,8 @@ import shutil
 import subprocess
 import sys
 from dataclasses import replace
+from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 import yaml
@@ -26,6 +28,7 @@ from hyperloom.measure.hosted_spec import dir_manifest_sha256
 from hyperloom.measure.manifest import ResultManifest
 from hyperloom.measure.pins import IMAGE_DIGEST_VAR
 from hyperloom.measure.points import default_canonical, generate_points
+from hyperloom.measure.runner import datasets_cache
 from hyperloom.measure.runner import run as runner
 from hyperloom.measure.returncodes import SERVER_BOOT_TIMEOUT_RC
 from hyperloom.measure.runner.hardware import EccCounts, GpuFacts
@@ -1158,3 +1161,38 @@ def test_the_runner_tells_the_rounds_verdict_whether_its_farm_changed_the_framew
     call = TestCall(points=(), output_dir=tmp_path, timeout_sec=1, cwd=str(tmp_path), task_id="t")
 
     assert runner._own_directories(context, call, None, farm, None).framework_changed is laid
+
+
+def test_a_test_whose_datasets_cache_is_read_only_runs_on_a_copy_of_the_datasets_it_loads(tmp_path, env, monkeypatch):
+    cache = tmp_path / "shared" / "hf-datasets"
+    for name in ("acme___traces", "acme___unused"):
+        (cache / name / "default" / "0.0.0" / "h").mkdir(parents=True)
+        (cache / name / "default" / "0.0.0" / "h" / "data-train.arrow").write_bytes(b"rows")
+    (cache / "_shared_acme___traces_default_0.0.0_h.lock").touch()
+    env[datasets_cache.DATASETS_CACHE_ENV] = str(cache)
+
+    def refuse(**_):
+        raise OSError(errno.EROFS, os.strerror(errno.EROFS))
+
+    monkeypatch.setattr(datasets_cache, "tempfile", SimpleNamespace(mkstemp=refuse))
+    seen = {}
+
+    def loads(call: TestCall) -> TestOutcome:
+        named = env[datasets_cache.DATASETS_CACHE_ENV]
+        seen["cache"] = named
+        seen["copied"] = sorted(str(path.relative_to(named)) for path in Path(named).rglob("*") if path.is_file())
+        return _ok(call)
+
+    monkeypatch.setattr(runner, "LocalMeasurementBackend", _Backend(loads))
+    point = {"benchmark": {**POINT["benchmark"], "agentx": {"enabled": True}}}
+    point["benchmark"]["envs"] = {**POINT["benchmark"]["envs"], "WEKA_LOADER_OVERRIDE": "acme/traces"}
+    text = yaml.safe_dump(point)
+
+    assert _go(tmp_path, env, _sheet(config=[{"yaml": text, "sha256": hashlib.sha256(text.encode()).hexdigest()}])) == 0
+
+    assert seen == {
+        "cache": str(tmp_path / "scratch" / "test" / datasets_cache.LOCAL_DATASETS_DIR),
+        "copied": ["acme___traces/default/0.0.0/h/data-train.arrow"],
+    }
+    assert env[datasets_cache.DATASETS_CACHE_ENV] == str(cache) and not Path(seen["cache"]).exists()
+    assert "copied acme/traces (0.0 MiB, 1 files)" in _status(tmp_path)["message"]

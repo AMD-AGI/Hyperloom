@@ -74,6 +74,7 @@ from hyperloom.measure.farm import (
     verify_farm,
 )
 from hyperloom.measure.runner.jit import STAGING_DIR, ColdStart, Surroundings, build_session, card_arch, cold_start
+from hyperloom.measure.runner.datasets_cache import DatasetsNeeded, datasets_needed, local_datasets_cache
 from hyperloom.measure.runner.import_outcome import clear_import_notes, install_import_watch, refine_imports
 from hyperloom.measure.runner.jit_outcome import refine_outcome
 from hyperloom.measure.runner.native.prewarm import preflight_build
@@ -105,6 +106,7 @@ from hyperloom.orchestrator.actions.executors._aiter_serving_once import build_i
 from hyperloom.sandbox.card_occupancy import card_guard, own_sandbox_processes
 from inference_suite.contracts import NormalisedManifest
 from inference_suite.frameworks import Framework, FrameworkKind, framework_facts
+from inference_suite.staging import inferencex_root
 
 __all__ = ["run"]
 
@@ -409,6 +411,18 @@ def _call(ctx: _Context, spec: MeasurementSpec, points: list[Path], inferencex: 
     )
 
 
+def _datasets_needed(ctx: _Context, spec: MeasurementSpec) -> DatasetsNeeded:
+    """The datasets the test loads through ``datasets`` (``datasets_cache``), named through this runner's staging."""
+    tool_cache = ctx.environ.get(TOOL_CACHE_ENV) if ctx.staging is not None else None
+    base = spec.procedure.base_launch
+    return datasets_needed(
+        (point.yaml for point in spec.config),
+        base_client_env=dict(base.client.env) if base is not None and base.client is not None else {},
+        accuracy=spec.procedure.accuracy,
+        staged_root=inferencex_root(Path(tool_cache)) if tool_cache else None,
+    )
+
+
 def _execute(call: TestCall):
     """Run the test; a timeout is an outcome, not an exception, from here on."""
     try:
@@ -642,7 +656,10 @@ def _run_sheet(ctx: _Context, spec_path: Path, key, progress: Progress) -> None:
     ctx.cards.enforce_guard()
     progress.phase("running")
     started = time.time()
-    outcome, timed_out = _execute_watched(ctx, call)
+    with local_datasets_cache(
+        ctx.environ, ctx.work, lambda: _datasets_needed(ctx, spec), ctx.notes, sheet_env=spec.process_env
+    ):
+        outcome, timed_out = _execute_watched(ctx, call)
     if outcome is not None:
         ctx.notes.extend(outcome.notes)
     ctx.cards.enforce_guard()
