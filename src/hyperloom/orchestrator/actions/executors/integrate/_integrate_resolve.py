@@ -174,7 +174,9 @@ class ResolveStageMixin:
         # integrate_patch always has its verdict persisted before the queued task
         # is created (see intent_router._handle_single_verdict), so a genuine
         # task is unaffected. No-op when SharedState is absent.
-        critic_reject = _enforce_critic_gate(shared_state, specialist_task_id)
+        # A covered step is run by Coordinator code and is never a registry row, so the forged row this gate
+        # refuses cannot be one; the bench it runs decides its KEEP.
+        critic_reject = None if attempt.covered_step else _enforce_critic_gate(shared_state, specialist_task_id)
         if critic_reject is not None:
             return critic_reject
 
