@@ -247,6 +247,51 @@ def test_no_copy_without_a_cache_with_the_sheets_own_or_without_a_dataset(
     assert not (tmp_path / "work").exists()
 
 
+def test_without_the_variable_the_default_below_hf_home_is_copied_and_the_variable_removed_after(
+    tmp_path: Path, read_only: None
+) -> None:
+    home = tmp_path / "hf"
+    _prepared(home / "datasets", GSM8K)
+    environ = {"HF_HOME": str(home)}
+    notes: list[str] = []
+
+    with local_datasets_cache(environ, tmp_path / "work", lambda: DatasetsNeeded((GSM8K,)), notes) as copy:
+        assert copy == tmp_path / "work" / LOCAL_DATASETS_DIR
+        assert environ == {"HF_HOME": str(home), DATASETS_CACHE_ENV: str(copy)}
+        assert (copy / "openai___gsm8k").is_dir()
+    assert environ == {"HF_HOME": str(home)} and not (tmp_path / "work" / LOCAL_DATASETS_DIR).exists()
+    assert f"{home / 'datasets'} is not writable" in notes[0]
+
+
+@pytest.mark.parametrize("name", ["HF_HOME", "XDG_CACHE_HOME", DATASETS_CACHE_ENV])
+def test_without_the_variable_a_sheet_naming_its_own_home_keeps_its_cache(
+    tmp_path: Path, read_only: None, name: str
+) -> None:
+    _prepared(tmp_path / "hf" / "datasets", GSM8K)
+    environ = {"HF_HOME": str(tmp_path / "hf")}
+    with local_datasets_cache(
+        environ, tmp_path / "work", lambda: DatasetsNeeded((GSM8K,)), [], sheet_env={name: "/sheet/own"}
+    ) as copy:
+        assert copy is None and environ == {"HF_HOME": str(tmp_path / "hf")}
+
+
+@pytest.mark.parametrize("repo", ["/..", "a/..", "../x", "a/b/../c", "a b/c"])
+def test_a_name_that_is_no_repository_id_copies_nothing_from_outside_the_cache(
+    tmp_path: Path, read_only: None, repo: str
+) -> None:
+    cache = tmp_path / "cache"
+    _prepared(cache, GSM8K)
+    environ = {DATASETS_CACHE_ENV: str(cache)}
+    notes: list[str] = []
+
+    with local_datasets_cache(environ, tmp_path / "work", lambda: DatasetsNeeded((repo,)), notes) as copy:
+        assert copy is not None and _files(copy) == set()
+    assert f"the cache holds no {repo}" in notes[0]
+    assert not (tmp_path / "work").exists() or not list((tmp_path / "work").iterdir())
+    with pytest.raises(ValueError, match="not a Hugging Face repository id"):
+        cache_dir_name(repo)
+
+
 def test_a_corpus_that_cannot_be_named_copies_a_small_cache_whole(tmp_path: Path, read_only: None) -> None:
     cache = tmp_path / "cache"
     cache.mkdir()

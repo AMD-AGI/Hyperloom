@@ -14,7 +14,8 @@ When the cache is not writable, the datasets the test loads are copied into a di
 and ``HF_DATASETS_CACHE`` names that copy while the test runs; the server, the client and the evaluation inherit it
 from the runner's environment. A prepared dataset is its directory below the cache (``<namespace>___<name>``), which an
 offline load finds by itself; the locks are not copied, since ``datasets`` takes new ones in the copy. A writable cache
-is left as it is.
+is left as it is. With no ``HF_DATASETS_CACHE`` the cache is ``datasets``' default below ``HF_HOME``, which a host may
+mount read-only too; the copy is then named by setting the variable, which is removed again when the test ends.
 
 Which datasets a test loads is read from its sheet: the trace corpus of each AgentX point (its
 ``WEKA_LOADER_OVERRIDE``, else its base's client env), resolved to its Hub repository through the client's own loader
@@ -78,6 +79,9 @@ _DATASET_PATH = re.compile(r"^dataset_path:\s*['\"]?([^'\"\s#]+)", re.MULTILINE)
 _UPPER_UPPER = re.compile(r"([A-Z]+)([A-Z][a-z])")
 _LOWER_UPPER = re.compile(r"([a-z\d])([A-Z])")
 _MIB = 1 << 20
+_REPO_PART = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*")
+_HF_HOME_ENV = "HF_HOME"
+_XDG_CACHE_ENV = "XDG_CACHE_HOME"
 
 
 @dataclass(frozen=True)
@@ -132,8 +136,14 @@ def is_writable(directory: Path) -> bool:
 
 
 def cache_dir_name(repo: str) -> str:
-    """The directory below the cache ``datasets`` prepares ``repo`` in: ``openai/gsm8k`` is ``openai___gsm8k``."""
+    """The directory below the cache ``datasets`` prepares ``repo`` in: ``openai/gsm8k`` is ``openai___gsm8k``.
+
+    Raises:
+        ValueError: ``repo`` is no Hub repository id, so it names no directory below the cache (``..``, say).
+    """
     parts = repo.strip().strip("/").split("/")
+    if not all(_REPO_PART.fullmatch(part) for part in parts) or any(part in {".", ".."} for part in parts):
+        raise ValueError(f"{repo!r} is not a Hugging Face repository id")
     last = _LOWER_UPPER.sub(r"\1_\2", _UPPER_UPPER.sub(r"\1_\2", parts[-1]))
     return "___".join([*parts[:-1], last.lower()])
 
@@ -253,7 +263,11 @@ def copy_datasets(source: Path, target: Path, repos: Sequence[str]) -> CopyRepor
     copied, missing = [], []
     target.mkdir(parents=True, exist_ok=True)
     for repo in repos:
-        name = cache_dir_name(repo)
+        try:
+            name = cache_dir_name(repo)
+        except ValueError:
+            missing.append(repo)
+            continue
         if not (source / name).is_dir():
             missing.append(repo)
             continue
@@ -307,6 +321,24 @@ def _copy(source: Path, target: Path, wanted: DatasetsNeeded, named: str, notes:
     return report
 
 
+def _effective_cache(environ: Mapping[str, str]) -> Path | None:
+    """The cache ``datasets`` uses under ``environ``: ``HF_DATASETS_CACHE``, else ``$HF_HOME/datasets``, else
+    ``$XDG_CACHE_HOME/huggingface/datasets``, else ``~/.cache/huggingface/datasets`` (``datasets.config``)."""
+    named = (environ.get(DATASETS_CACHE_ENV) or "").strip()
+    if named:
+        return Path(named)
+    home = (environ.get(_HF_HOME_ENV) or "").strip()
+    if not home:
+        xdg = (environ.get(_XDG_CACHE_ENV) or "").strip() or "~/.cache"
+        home = os.path.join(xdg, "huggingface")
+    if home.startswith("~"):
+        user = (environ.get("HOME") or "").strip()
+        if not user:
+            return None
+        home = user + home[1:]
+    return Path(home) / "datasets"
+
+
 @contextlib.contextmanager
 def local_datasets_cache(
     environ: MutableMapping[str, str],
@@ -317,26 +349,32 @@ def local_datasets_cache(
     sheet_env: Mapping[str, str] | None = None,
 ) -> Iterator[Path | None]:
     """While the test runs, point ``environ``'s ``HF_DATASETS_CACHE`` at a copy of the datasets ``needed()`` names below
-    ``work`` when the one it names is not writable; yield the copy, or ``None`` when the cache is left as it is.
+    ``work`` when the cache ``datasets`` would use is not writable; yield the copy, or ``None`` when the cache is left as
+    it is. That cache is the one ``HF_DATASETS_CACHE`` names, else the default below ``HF_HOME`` (:func:`_effective_cache`).
 
-    Nothing changes when ``environ`` names no cache, the sheet names one of its own (``sheet_env``), the test loads no
-    dataset, or the cache is writable. ``environ`` is put back and the copy removed when the test ends. What was copied,
-    its size and its time are logged and added to ``notes``.
+    Nothing changes when that cache is no directory, the sheet names a cache of its own (``sheet_env``: its
+    ``HF_DATASETS_CACHE``, or with none in ``environ`` its ``HF_HOME`` or ``XDG_CACHE_HOME``), the test loads no dataset,
+    or the cache is writable. ``environ`` is put back (the variable removed when it was not set) and the copy removed
+    when the test ends. What was copied, its size and its time are logged and added to ``notes``.
     """
-    named = (environ.get(DATASETS_CACHE_ENV) or "").strip()
+    given = environ.get(DATASETS_CACHE_ENV)
+    own = sheet_env or {}
+    overridden = (DATASETS_CACHE_ENV,) if (given or "").strip() else (DATASETS_CACHE_ENV, _HF_HOME_ENV, _XDG_CACHE_ENV)
+    source = _effective_cache(environ)
     if (
-        not named
-        or (sheet_env or {}).get(DATASETS_CACHE_ENV, "").strip()
-        or not Path(named).is_dir()
-        or is_writable(Path(named))
+        source is None
+        or any((own.get(name) or "").strip() for name in overridden)
+        or not source.is_dir()
+        or is_writable(source)
     ):
         yield None
         return
+    named = str(source)
     wanted = needed()
     if not (wanted.repos or wanted.unresolved):
         yield None
         return
-    source, target = Path(named), work / LOCAL_DATASETS_DIR
+    target = work / LOCAL_DATASETS_DIR
     shutil.rmtree(target, ignore_errors=True)
     try:
         report = _copy(source, target, wanted, named, notes)
@@ -350,5 +388,8 @@ def local_datasets_cache(
     try:
         yield target
     finally:
-        environ[DATASETS_CACHE_ENV] = named
+        if given is None:
+            environ.pop(DATASETS_CACHE_ENV, None)
+        else:
+            environ[DATASETS_CACHE_ENV] = given
         shutil.rmtree(target, ignore_errors=True)
