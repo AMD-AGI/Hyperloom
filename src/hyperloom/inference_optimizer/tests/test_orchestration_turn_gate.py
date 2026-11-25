@@ -17,7 +17,7 @@ from hyperloom.orchestrator.roles.base import BackendError
 from hyperloom.orchestrator.state.task_registry import TaskSpec
 from .conftest import seed_pending_critic_proposal, silent_backends
 
-_HOLD_PHASES = (ps.PHASE_PRELUDE, ps.PHASE_FRAMEWORK_AGENT, ps.PHASE_KERNEL_AGENT, ps.PHASE_SWEEP)
+_HOLD_PHASES = (ps.PHASE_PRELUDE, ps.PHASE_FRAMEWORK_AGENT, ps.PHASE_KERNEL_AGENT, ps.PHASE_CYCLE_END)
 _ONE_TURN_THEN_HOLD = ["orchestration"]
 
 
@@ -71,7 +71,7 @@ async def test_critic_admission_requires_pending_proposals(ticking, custom_only)
 
 
 async def _enter_sweep(c: Coordinator) -> None:
-    c.shared_state.phase = ps.PHASE_SWEEP
+    c.shared_state.phase = ps.PHASE_CYCLE_END
 
 
 async def _queue_a_task(c: Coordinator) -> None:

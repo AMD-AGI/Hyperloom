@@ -58,7 +58,7 @@ def test_yaml_binds_workload_and_is_snapshotted(source, tmp_path):
     args = _build_parser().parse_args(["optimize", "--benchmark-config", str(source)])
     configure_benchmark(args)
     assert (args.framework, str(args.model), args.tp, args.ep, args.conc) == ("sglang", "Qwen/Qwen3-0.6B", 1, 1, 8)
-    assert args.enable_conc_sweep is False
+    assert args.enable_conc_sweep is True
     session = tmp_path / "session"
     session.mkdir()
     bind_benchmark(session, args)

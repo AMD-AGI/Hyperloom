@@ -314,6 +314,7 @@ class SourceLaunch:
     ``conc`` is the source point's concurrency and ``exact`` whether that is the one the query asked for. ``args``
     and ``env`` carry no runner-owned keys; ``stripped`` names what was taken out for that reason. ``client_env`` is
     the load generator's environment the source pairs with the launch, the point's own workload settings left out.
+    ``source_concs`` are the concurrencies, ascending, the source publishes for the launch's arm; empty for none.
     """
 
     source: LaunchSource
@@ -330,6 +331,7 @@ class SourceLaunch:
     kv_offloading: str = "none"
     stripped: tuple[str, ...] = ()
     warnings: tuple[str, ...] = ()
+    source_concs: tuple[int, ...] = ()
 
     @property
     def cards(self) -> int:

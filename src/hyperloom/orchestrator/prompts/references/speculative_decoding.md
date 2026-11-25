@@ -1,5 +1,5 @@
 <!-- when: proposing or accepting an explore/sweep variant that touches a speculative-decoding knob (draft length / gamma / block-size / num-draft-tokens / method, or a synthetic-acceptance value) -->
-<!-- phase: FRAMEWORK_AGENT, SWEEP -->
+<!-- phase: FRAMEWORK_AGENT -->
 # Speculative decoding — validate against golden Acceptance Length (AL)
 
 ## What golden AL is

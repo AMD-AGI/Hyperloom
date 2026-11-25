@@ -15,19 +15,19 @@ from .controller_settlement import CONTROLLER_TERMINAL_STATUSES
 from .exit_predicates import budget_exit, framework_exit
 from .phase_chain import (
     PHASE_CLOSE,
+    PHASE_CYCLE_END,
     PHASE_ENABLEMENT,
     PHASE_FRAMEWORK_AGENT,
     PHASE_KERNEL_AGENT,
     PHASE_PRELUDE,
-    PHASE_SWEEP,
     allowed_actions_for,
     phase_index,
 )
 from .phase_predicates import (
     PhaseFlags,
     WorkInFlight,
+    cycle_end_predicate_inputs,
     initial_analysis_inputs,
-    sweep_predicate_inputs,
     workflow_predicate_inputs,
 )
 from .prelude_exits import _baseline_is_anchored, _cold_anchor_shortfall, _prelude_budget_line, _prelude_viability
@@ -66,7 +66,7 @@ def phase_status_summary(
         allowed_line,
     ]
     # Whether deferring work to a later cycle is still a real option.
-    if phase in (PHASE_ENABLEMENT, PHASE_FRAMEWORK_AGENT, PHASE_KERNEL_AGENT, PHASE_SWEEP):
+    if phase in (PHASE_ENABLEMENT, PHASE_FRAMEWORK_AGENT, PHASE_KERNEL_AGENT, PHASE_CYCLE_END):
         feasible, evidence = cycle_reloop_decision(state, now_unix=now_unix)
         reloop_line = f"reloop    : cycle_reloop_feasible={'true' if feasible else 'false'}"
         threshold = evidence.get("min_remaining_sec_effective")
@@ -78,7 +78,7 @@ def phase_status_summary(
         blocked = evidence.get("reloop_blocked")
         if blocked:
             reloop_line += f" blocked={blocked}"
-        if phase != PHASE_SWEEP:
+        if phase != PHASE_CYCLE_END:
             reloop_line += " (projected)"
         lines.append(reloop_line)
     if hold_line := _initial_analysis_hold_line(state, phase):
@@ -89,7 +89,7 @@ def phase_status_summary(
 _STOP_TIME_EXHAUSTED = "time_exhausted"
 
 
-#: SWEEP's close reason per ``reloop_blocked`` value.
+#: CYCLE_END's close reason per ``reloop_blocked`` value.
 _RELOOP_BLOCK_TERMINALS: dict[str, str] = {
     "global_converged": "global_converged",
     "all_directions_saturated": "global_converged",
@@ -99,12 +99,12 @@ _RELOOP_BLOCK_TERMINALS: dict[str, str] = {
 
 
 def _post_prelude_target(*, optimize_enabled: bool, kernel_enabled: bool) -> str:
-    """First active work phase after PRELUDE or ENABLEMENT: FRAMEWORK_AGENT, else KERNEL_AGENT, else SWEEP."""
+    """First active work phase after PRELUDE or ENABLEMENT: FRAMEWORK_AGENT, else KERNEL_AGENT, else CYCLE_END."""
     if optimize_enabled:
         return PHASE_FRAMEWORK_AGENT
     if kernel_enabled:
         return PHASE_KERNEL_AGENT
-    return PHASE_SWEEP
+    return PHASE_CYCLE_END
 
 
 def _transition_result(
@@ -176,33 +176,11 @@ def _kernel_exit(inputs: dict[str, Any]) -> tuple[str, dict[str, Any]] | None:
     )
 
 
-def _sweep_exit(inputs: dict[str, Any]) -> tuple[str, dict[str, Any]] | None:
-    sweep = dict(inputs.get("sweep_result") or {})
-    status = str(sweep.get("status") or "")
-    if status == "failed":
-        return "sweep_failed", {"sweep_status": status}
-    if status in {"succeeded", "partial", "completed", "skipped"}:
-        evidence: dict[str, Any] = {"sweep_status": status}
-        if bool(sweep.get("was_skipped")):
-            evidence.update(
-                sweep_was_skipped=True,
-                sweep_skip_budget_exhausted=bool(sweep.get("budget_exhausted")),
-                sweep_skip_reason=str(sweep.get("skip_reason") or ""),
-            )
-            spent_without_pair = bool(sweep.get("budget_exhausted")) or (
-                str(sweep.get("skip_reason") or "") == "budget_exhausted_no_successful_pairs"
-            )
-            no_pair = bool(sweep.get("summary_present")) and int(sweep.get("successful_pairs") or 0) <= 0
-            if spent_without_pair or (no_pair and not evidence["sweep_skip_reason"]):
-                return "sweep_failed", evidence
-        return "sweep_done", evidence
-    # Anything else -- nothing landed yet, or a sweep the orchestrator cancelled -- leaves the phase to its budget:
-    # a cancelled sweep was stopped by a session-wide stop that already decided the run is over.
-    return budget_exit(
-        dict(inputs.get("budget") or {}),
-        exhausted_reason="sweep_budget_exhausted",
-        evidence={"sweep_status": status} if status else {},
-    )
+def _cycle_end_exit(inputs: dict[str, Any]) -> tuple[str, dict[str, Any]] | None:
+    """CYCLE_END is left once its entry work settled the cycle; it has no budget of its own to run out."""
+    if bool(dict(inputs.get("cycle_end_result") or {}).get("settled")):
+        return "cycle_end_done", {}
+    return None
 
 
 def _reloop_block_evidence(
@@ -222,7 +200,7 @@ def _reloop_block_evidence(
 
 
 def _reloop_decision(inputs: dict[str, Any]) -> tuple[bool, dict[str, Any]]:
-    facts = dict(dict(inputs.get("sweep_result") or {}).get("reloop") or {})
+    facts = dict(dict(inputs.get("cycle_end_result") or {}).get("reloop") or {})
     cycle = int(inputs.get("macro_cycle") or 0)
     current_gain = to_float(facts.get("current_gain_pct")) or 0.0
     start_gain = to_float(facts.get("gain_at_cycle_start_pct")) or 0.0
@@ -254,12 +232,12 @@ def _reloop_decision(inputs: dict[str, Any]) -> tuple[bool, dict[str, Any]]:
 def cycle_reloop_decision(state: Any, *, now_unix: float | None = None) -> tuple[bool, dict[str, Any]]:
     """Whether another macro-cycle can open from here, with the evidence the decision rests on."""
     frozen_now = float(now_unix if now_unix is not None else _phase_state.state_now_unix(state))
-    sweep_result, _ = sweep_predicate_inputs(state, now_unix=frozen_now)
+    cycle_end_result, _ = cycle_end_predicate_inputs(state, now_unix=frozen_now)
     reloop, evidence = _reloop_decision(
         {
             "macro_cycle": state.macro_cycle,
             "global": {"target_reached_at": str(state.target_reached_at or "")},
-            "sweep_result": sweep_result,
+            "cycle_end_result": cycle_end_result,
         }
     )
     return reloop and state.framework_agent_phase_enabled, evidence
@@ -424,7 +402,7 @@ def _framework_transition(
         return None
     if bool(flags.get("kernel_enabled")):
         return _transition_result(PHASE_KERNEL_AGENT, normal[0], normal[1], inputs)
-    return _transition_result(PHASE_SWEEP, normal[0], {**normal[1], "kernel_skipped": True}, inputs)
+    return _transition_result(PHASE_CYCLE_END, normal[0], {**normal[1], "kernel_skipped": True}, inputs)
 
 
 def _kernel_transition(inputs: dict[str, Any]) -> tuple[str, str, dict[str, Any]] | None:
@@ -432,20 +410,18 @@ def _kernel_transition(inputs: dict[str, Any]) -> tuple[str, str, dict[str, Any]
     normal = _kernel_exit(inputs)
     if normal is None:
         return None
-    return _transition_result(PHASE_SWEEP, normal[0], normal[1], inputs)
+    return _transition_result(PHASE_CYCLE_END, normal[0], normal[1], inputs)
 
 
-def _sweep_transition(
+def _cycle_end_transition(
     inputs: dict[str, Any],
     flags: dict[str, Any],
 ) -> tuple[str, str, dict[str, Any]] | None:
-    """The transition SWEEP takes: another macro-cycle, or the close its result earns."""
-    normal = _sweep_exit(inputs)
+    """The transition CYCLE_END takes: another macro-cycle, or the close the run has earned."""
+    normal = _cycle_end_exit(inputs)
     if normal is None:
         return None
     exit_reason, exit_evidence = normal
-    if exit_reason == "sweep_failed":
-        return _transition_result(PHASE_CLOSE, exit_reason, exit_evidence, inputs)
     reloop, reloop_evidence = _reloop_decision(inputs)
     cycles_enabled = bool(flags.get("framework_agent_enabled"))
     if reloop and cycles_enabled:
@@ -456,7 +432,7 @@ def _sweep_transition(
             inputs,
         )
     blocked = str(reloop_evidence.get("reloop_blocked") or "")
-    # Without FRAMEWORK_AGENT no further cycle was possible, so only a reached target outranks the ladder's reason.
+    # Without FRAMEWORK_AGENT no further cycle was possible, so only a reached target outranks the exit's own reason.
     terminal_reason = _RELOOP_BLOCK_TERMINALS.get(blocked) if cycles_enabled or blocked == "target_reached" else None
     if terminal_reason is not None:
         return _transition_result(
@@ -475,8 +451,8 @@ def replay_next_phase(inputs: dict[str, Any]) -> tuple[str, str, dict[str, Any]]
         return forced
     current = str(inputs["current_phase"])
     target_at = str(dict(inputs.get("global") or {}).get("target_reached_at") or "")
-    if target_at and phase_index(PHASE_ENABLEMENT) <= phase_index(current) < phase_index(PHASE_SWEEP):
-        return _transition_result(PHASE_SWEEP, "target_reached", {"target_reached_at": target_at}, inputs)
+    if target_at and phase_index(PHASE_ENABLEMENT) <= phase_index(current) < phase_index(PHASE_CYCLE_END):
+        return _transition_result(PHASE_CYCLE_END, "target_reached", {"target_reached_at": target_at}, inputs)
     flags = dict(inputs.get("run_flags") or {})
     if current == PHASE_PRELUDE:
         return _prelude_transition(inputs, flags)
@@ -486,6 +462,6 @@ def replay_next_phase(inputs: dict[str, Any]) -> tuple[str, str, dict[str, Any]]
         return _framework_transition(inputs, flags)
     if current == PHASE_KERNEL_AGENT:
         return _kernel_transition(inputs)
-    if current == PHASE_SWEEP:
-        return _sweep_transition(inputs, flags)
+    if current == PHASE_CYCLE_END:
+        return _cycle_end_transition(inputs, flags)
     return None

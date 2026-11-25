@@ -206,7 +206,7 @@ def test_a_real_account_that_cannot_search_the_users_directory_is_refused_by_the
 
 def _settings(*, stop_after_map: bool) -> object:
     workload = type("Workload", (), {"model_basename": "model"})()
-    return type("Settings", (), {"workload": workload, "stop_after_map": stop_after_map})()
+    return type("Settings", (), {"workload": workload, "stop_after_map": stop_after_map, "conc_sweep": False})()
 
 
 def _run_session(settings: object) -> list[Path]:

@@ -13,8 +13,8 @@ from importlib.resources import files
 from typing import Any, Mapping
 
 _CONTRACT_PACKAGE = "hyperloom.inference_optimizer.breakdown"
-_CONTRACT_PATH = "contracts/workflow_contract.v3.json"
-_SCHEMA_PATH = "contracts/session_breakdown.v6.workflow-evaluation.v3.schema.json"
+_CONTRACT_PATH = "contracts/workflow_contract.v4.json"
+_SCHEMA_PATH = "contracts/session_breakdown.v6.workflow-evaluation.v4.schema.json"
 
 
 @lru_cache(maxsize=1)

@@ -17,9 +17,9 @@ it is, the empty stack, at the commit the site pins for it.
 Refused here, at submission, naming the path: a change to the build definition (``CMakeLists.txt``, ``setup.py`` and the
 other files of :data:`~hyperloom.measure.runner.native.recipes.NATIVE_BUILD_REFUSE`, and anything below a ``cmake/``
 directory), which would run arbitrary code at build time; a change to a build product (a compiled file, which the
-layout's ``refuse`` patterns name), naming the pattern; a file the layout neither places nor names native, which
-no measurement takes (a checkout's layout names every file it lets in native); and a stack whose upstream commit has no
-checkout here.
+layout's ``refuse`` patterns name), naming the pattern; where the component is built from a checkout, a file its
+layout neither places nor names native, which no measurement takes (a checkout's layout names every file it lets in
+native); and a stack whose upstream commit has no checkout here.
 """
 
 from __future__ import annotations
@@ -30,6 +30,7 @@ from fnmatch import fnmatchcase
 from pathlib import Path, PurePosixPath
 from typing import Protocol
 
+from hyperloom.common.outside_facts.component_layout import CHECKOUT_BASE
 from hyperloom.contracts.recipe import ComponentPatches
 from hyperloom.measure.compile import (
     COMPONENT_LAYOUTS,
@@ -162,7 +163,7 @@ class NativePlanner:
 
     def _changes_native(self, component: ComponentPatches, recipe: NativeRecipe, layout: ComponentLayout) -> bool:
         """Whether the stack changes a native file of the package layout; a change to the build definition, to a
-        build product, or to a file the layout neither places nor names native is refused."""
+        build product, or to a file a checkout's layout neither places nor names native is refused."""
         native = False
         for ref in component.patches:
             text = self._blobs.get(ref.sha256).decode("utf-8", errors="replace")
@@ -175,10 +176,10 @@ class NativePlanner:
                         "source a native build takes from a patch"
                     )
                 named = layout.spec.native_by(path) is not None
-                if not named and layout.spec.place(path) is None:
+                if not named and layout.spec.source_base == CHECKOUT_BASE and layout.spec.place(path) is None:
                     prefixes = ", ".join(f"{section.prefix}/" for section in layout.spec.sections)
                     raise PatchApplyError(
-                        f"{ref.path}: {path!r} is outside the installed package ({prefixes}) and no native source of "
+                        f"{ref.path}: {path!r} is outside the checkout's sections ({prefixes}) and no native source of "
                         f"{component.component}'s build; no measurement takes a change to it"
                     )
                 native = native or named
