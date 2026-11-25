@@ -125,9 +125,11 @@ class WorkspaceGitMixin:
             git("add", "--", *admitted, cwd=self.ic.workspace_dir, env=env)
             return read_changes(env)
 
-    def _list_untracked(self) -> list[str]:
-        """Every untracked, non-ignored path in the workspace, as git reports it."""
-        listed = git_bytes("ls-files", "--others", "--exclude-standard", "-z", cwd=self.ic.workspace_dir, check=False)
+    def _list_untracked(self, workspace: str | None = None) -> list[str]:
+        """Every untracked, non-ignored path in the workspace -- or in a lane's copy of it -- as git reports it."""
+        listed = git_bytes(
+            "ls-files", "--others", "--exclude-standard", "-z", cwd=workspace or self.ic.workspace_dir, check=False
+        )
         if listed.returncode != 0:
             detail = (listed.stderr or listed.stdout).decode(
                 errors="surrogateescape"
@@ -143,8 +145,8 @@ class WorkspaceGitMixin:
             log.warning("could not snapshot untracked files: %s", error)
             return None
 
-    def _new_paths(self) -> tuple[list[str], list[str]]:
-        """Split the workspace's new files into the shippable ones and the rest."""
+    def _new_paths(self, workspace: str | None = None) -> tuple[list[str], list[str]]:
+        """Split the new files of the workspace, or of a lane's copy of it, into the shippable ones and the rest."""
         patterns = list(self.ic.commit_new_paths)
         own_roots = [LOOP_ARTIFACT_ROOT]
         if self.ic.build_dir:
@@ -153,7 +155,7 @@ class WorkspaceGitMixin:
                 own_roots.append(build_dir)
         admitted: list[str] = []
         refused: list[str] = []
-        for path in sorted(self._list_untracked()):
+        for path in sorted(self._list_untracked(workspace)):
             if any(path == root or path.startswith(f"{root}/") for root in own_roots):
                 continue
             allowed = matches_commit_new_paths(path, patterns) and not FORGE_PROTECTED_PATHS.is_protected(

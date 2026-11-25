@@ -26,7 +26,7 @@ from kernelforge.config import Config
 from kernelforge.config.edit_policy import FORGE_PROTECTED_PATHS
 from kernelforge.workflows.forge_loop.roles.contracts import (
     EvidenceRef,
-    OrchestrationContext,
+    EvidenceContext,
 )
 from kernelforge.workflows.forge_loop.roles.analysis_bundle import (
     AnalysisBundle,
@@ -53,6 +53,8 @@ from kernelforge.workflows.forge_loop.roles.analysis_prompts import (
     ANALYSIS_SESSION_BRIEF,
     FRAMEWORK_OWNED_FILES,
     INCREMENTAL_REANALYSIS_PROMPT,
+    LANE_PARTITION_FILE,
+    LANE_PARTITION_PROMPT,
     MARKDOWN_CONTRACT,
     PROFILED_SYSTEM_PROMPT,
     PUBLICATION_POLICY,
@@ -108,7 +110,7 @@ class AnalysisConfigurationError(AnalysisBundleError):
 class _AnalysisSession:
     """One session: the context, its staging root and request, the resolved inputs, profiling reference and budget."""
 
-    context: OrchestrationContext
+    context: EvidenceContext
     work_root: Path
     request_path: Path
     kernel_file: Path
@@ -116,6 +118,15 @@ class _AnalysisSession:
     source_files: tuple[Path, ...]
     reference_script: Path
     timeout_sec: float
+
+
+@dataclass(frozen=True)
+class AnalysisScope:
+    """What an Analysis session is asked to cover: whether it profiles, and how many lanes it divides the work among."""
+
+    profiling_enabled: bool = True
+    # The most lanes a round of this campaign runs. Above one, the session also divides the work among them.
+    lanes: int = 1
 
 
 class AnalysisAgentService:
@@ -128,7 +139,7 @@ class AnalysisAgentService:
         config: Config,
         timeout_sec: int,
         max_turns: int,
-        profiling_enabled: bool = True,
+        scope: AnalysisScope = AnalysisScope(),
     ) -> None:
         if timeout_sec <= 0:
             raise ValueError("timeout_sec must be greater than zero")
@@ -138,7 +149,8 @@ class AnalysisAgentService:
         self.config = config
         self.timeout_sec = timeout_sec
         self.max_turns = max_turns
-        self.profiling_enabled = bool(profiling_enabled)
+        self.profiling_enabled = bool(scope.profiling_enabled)
+        self.lanes = max(1, int(scope.lanes))
 
     def _stage_reference_profiling_script(self, work_root: Path) -> Path:
         profiling_source = Path(self.config.local_knowledge_dir).resolve() / "common_methodology" / "profiling"
@@ -172,7 +184,7 @@ class AnalysisAgentService:
     @staticmethod
     def _initialize_framework_artifacts(
         work_root: Path,
-        context: OrchestrationContext,
+        context: EvidenceContext,
         cases: tuple[AnalysisCase, ...],
     ) -> None:
         for case in cases:
@@ -387,7 +399,7 @@ class AnalysisAgentService:
 
     async def ensure_bundle(
         self,
-        context: OrchestrationContext,
+        context: EvidenceContext,
         *,
         sources: AnalysisSources,
         usage=None,
@@ -607,7 +619,7 @@ class AnalysisAgentService:
             outputs.append(incremental_diff)
         return tuple(outputs)
 
-    def apply_checkpoint(self, context: OrchestrationContext) -> OrchestrationContext:
+    def apply_checkpoint(self, context: EvidenceContext) -> EvidenceContext:
         """Expose validated partial Analysis outputs to downstream agents."""
         work_root = (
             Path(context.workspace).resolve() / "forge_experiments" / "analysis" / "work" / context.analysis_commit
@@ -639,7 +651,7 @@ class AnalysisAgentService:
             for original in context.cases
         )
         source_map = work_root / "source_map.md"
-        return OrchestrationContext(
+        return EvidenceContext(
             analysis_commit=context.analysis_commit,
             workspace=context.workspace,
             gpu_target=context.gpu_target,
@@ -660,8 +672,8 @@ class AnalysisAgentService:
             cumulative_diff_error=context.cumulative_diff_error,
         )
 
-    def apply_published_evidence(self, context: OrchestrationContext, *, evidence_commit: str) -> OrchestrationContext:
-        """Restore one published bundle as stale-safe planning evidence."""
+    def apply_published_evidence(self, context: EvidenceContext, *, evidence_commit: str) -> EvidenceContext:
+        """Restore one published bundle as stale-safe evidence."""
         commit_root = Path(context.workspace).resolve() / "forge_experiments" / "analysis" / evidence_commit
         root = _published_generation_root(commit_root)
         if root is None:
@@ -862,6 +874,8 @@ class AnalysisAgentService:
                 incremental_diff_path=request["incremental_diff_path"],
                 previous_analysis_bundle=request["previous_analysis_bundle"],
             )
+        if self.lanes > 1:
+            system_prompt += LANE_PARTITION_PROMPT.format(lanes=self.lanes, partition_file=LANE_PARTITION_FILE)
         system_prompt += (
             "\nThe exact profiling reference for this session is:\n"
             f"    {reference_script}\n"
@@ -956,6 +970,7 @@ def make_analysis_agent_service(
     usage=None,
     timeout_sec: int | None = None,
     profiling_enabled: bool = True,
+    lanes: int = 1,
 ) -> AnalysisAgentService:
     """Build the Analysis Agent through the configured provider."""
     runtime = agent_runtime(config)
@@ -969,5 +984,5 @@ def make_analysis_agent_service(
         config=config,
         timeout_sec=(timeout_sec if timeout_sec is not None else backend.runtime.timeout_sec),
         max_turns=config.max_turns,
-        profiling_enabled=profiling_enabled,
+        scope=AnalysisScope(profiling_enabled=profiling_enabled, lanes=lanes),
     )

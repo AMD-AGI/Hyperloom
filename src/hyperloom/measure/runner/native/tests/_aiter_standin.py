@@ -25,7 +25,8 @@ from pathlib import Path
 
 from hyperloom.measure.compile import PackageBase
 from hyperloom.measure.runner.native.aiter_modules import aiter_module_recipe
-from hyperloom.measure.runner.native.recipes import NativeRecipe, Preflight
+from hyperloom.measure.runner.native.preflight import Preflight
+from hyperloom.measure.runner.native.recipes import NativeRecipe
 
 MODULE = "module_gemm"
 OTHER = "module_other"

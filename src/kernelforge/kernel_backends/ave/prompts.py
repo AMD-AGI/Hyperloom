@@ -14,7 +14,7 @@ def build_system_prompt(config_gpu_target: str, knowledge_content: str, canonica
 Read the supplied source, driver and relevant knowledge documents before editing.
 Use the installed AveLang source and examples to confirm syntax and compiler support.
 Use task guidance, current evidence and knowledge to optimize the kernel in
-AveLang. Follow the current optimization plan and preserve earlier accepted changes.
+AveLang. Preserve earlier accepted changes.
 Keep the canonical driver and its workload cases unchanged. Compile, run the
 correctness tests and benchmark; repair compiler diagnostics and test failures
 within the current iteration. Preserve synchronization, memory ordering, layout and

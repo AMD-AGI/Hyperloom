@@ -22,7 +22,6 @@ from kernelforge.utils.process_reaping import (
     install_child_subreaper,
     processes_under,
 )
-from kernelforge.workflows.forge_loop.iteration.fanout import _reap_lane_processes
 
 pytestmark = pytest.mark.skipif(
     not os.path.isdir("/proc"),
@@ -268,21 +267,6 @@ async def test_a_child_that_ignores_sigterm_is_killed_within_the_grace_window(tm
     # SIGTERM gets a 2s grace window and the SIGKILL that follows needs only scheduling: the caller is blocked for
     # that, and must not be held past it.
     assert elapsed < 5.0
-
-
-async def test_the_lane_teardown_reaps_the_same_way(tmp_path, spawn):
-    """Both callers share one implementation, so neither can regress alone."""
-    lane_dir = tmp_path / "lane-1"
-    lane_dir.mkdir()
-    stubborn = spawn(lane_dir, _IGNORES_SIGTERM)
-    bystander = spawn(tmp_path)
-
-    report = await _reap_lane_processes(lane_dir)
-
-    assert processes_under(lane_dir) == set()
-    assert stubborn.wait(timeout=10) != 0
-    assert bystander.poll() is None
-    assert report.contended is False
 
 
 async def test_an_orphaned_grandchild_is_still_this_campaign_s_to_reap(tmp_path, spawn):

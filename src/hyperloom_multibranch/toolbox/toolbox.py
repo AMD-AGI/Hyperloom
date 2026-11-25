@@ -17,6 +17,7 @@ import time
 from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass, replace
 from pathlib import Path
+from types import MappingProxyType
 from typing import Any, Literal
 
 from hyperloom.contracts.measurement import (
@@ -159,6 +160,10 @@ class RealToolbox:
     #: Where the tests run, recorded when the first baseline test is accepted so a resume can tell whether the baseline
     #: still holds (:mod:`~hyperloom_multibranch.toolbox.resume_guard`); ``None``: nothing is recorded.
     measured_on: MeasuredOn | None = None
+    #: What a process of this machine runs the base build of the tests' server with, over its own environment: the
+    #: runner variable naming the base builds' executables and the mask of one of the session's cards. Empty for a
+    #: toolbox that lays no base build.
+    base_probe_env: Mapping[str, str] = MappingProxyType({})
 
     def __init__(
         self,

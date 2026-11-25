@@ -22,6 +22,7 @@ from collections.abc import Callable, Iterator, Mapping
 from contextlib import ExitStack
 from dataclasses import dataclass, field
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any, NoReturn
 
 import e2b
@@ -33,6 +34,7 @@ from hyperloom.contracts.measurement import TestResult, Validity
 from hyperloom.hosted.host_info import read_host_info
 from hyperloom.hosted.toolbox_inputs import hosted_toolbox_inputs
 from hyperloom.measure import signing
+from hyperloom.measure.farm import BASE_BINS_ENV
 from hyperloom.measure.framework.base import SESSION_SHA_ENV, SNAPSHOT_ENV
 from hyperloom.measure.hosted_log import STATE_SENT
 from hyperloom.measure.runner.cache_layout import MANIFEST_PIN_ENV
@@ -62,7 +64,7 @@ from hyperloom_multibranch.contracts.blackboard import Role as BlackboardRole, W
 from hyperloom_multibranch.contracts.blackboard.vocab import LeaseEndReason, LeaseKind
 from hyperloom_multibranch.blackboard import LocalBlackboard
 from hyperloom_multibranch.contracts.toolbox import MeasurementCapacity, RequestRejected, TestProgress, WorkloadKind
-from hyperloom_multibranch.toolbox import hosted_toolbox
+from hyperloom_multibranch.toolbox import hosted_toolbox, native_builds as native_builds_module
 from hyperloom_multibranch.toolbox.hosted_leases import (
     LEASE_PURPOSE,
     LIFETIME_MARGIN_SEC,
@@ -431,6 +433,28 @@ def test_two_sessions_of_one_run_hand_out_request_ids_of_their_own(tmp_path: Pat
 
     assert first_id("MB-a") != first_id("MB-b"), "the run id they share is the first part of every sandbox's key"
     assert first_id("MB-a") == first_id("MB-a"), "a restart of one session hands out the ids it would have"
+
+
+async def test_a_runner_runs_the_base_builds_executables_where_the_native_builds_lay_them(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    native = SimpleNamespace(runner_envs={}, driver=None, session=object())
+    base = tmp_path / "session" / "base-builds" / "k" / "llamacpp" / "bin"
+    laid: list[Path] = []
+    monkeypatch.setattr(hosted_toolbox, "native_builds", lambda *_args, **_kw: native)
+    monkeypatch.setattr(hosted_toolbox, "with_native_plan", lambda acceptance, _native: acceptance)
+
+    def lay(session: object, farms: Path) -> tuple[Path, ...]:
+        assert session is native.session
+        laid.append(farms)
+        return (base,)
+
+    monkeypatch.setattr(native_builds_module, "base_executables", lay)
+
+    envs = _toolbox(None, tmp_path).backend._config.create_envs
+
+    assert envs[BASE_BINS_ENV] == str(base)
+    assert laid == [tmp_path / "session" / "base-builds"], "laid below the session directory the runners read"
 
 
 async def test_the_toolbox_is_built_from_the_inputs(tmp_path: Path) -> None:

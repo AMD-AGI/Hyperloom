@@ -15,6 +15,7 @@ from pathlib import Path
 from hyperloom.common.perf_metric import DATASET_PATH_ENV
 from hyperloom.common.url_userinfo import CREDENTIALED_URL_RE
 from hyperloom.common.workload_defaults import DEFAULT_EP
+from hyperloom.inference_optimizer.framework_registry import native_component
 from hyperloom_multibranch.blackboard.knowledge.reference_leads import INFERENCEX_REFERENCE
 from hyperloom_multibranch.contracts.toolbox import WorkloadKind
 from hyperloom_multibranch.rulegate.agentx import AgentXObjective
@@ -48,7 +49,10 @@ DEFAULT_JUDGE_INTERVAL_SECONDS = 600.0
 ENCODING = "utf-8"
 FILE_METAVAR = "FILE"
 #: The GPU types a session runs on; the toolbox's environment exports the board itself as ``GPU_TYPE``.
-SESSION_GPU_TYPES = ("mi300x", "mi325x", "mi350x", "mi355x")
+SESSION_GPU_TYPES = ("mi300x", "mi325x", "mi350x", "mi355x", "r9700", "w7900d")
+#: Those of them a session runs on only when its framework builds its server from a checkout.
+NATIVE_SERVER_GPU_TYPES = ("r9700", "w7900d")
+_GPU_TYPE_HELP = "GPU type, in any case; r9700 and w7900d only with --framework llamacpp."
 #: The options ``run`` requires unless it is given ``--resume``, by their argparse names.
 RUN_REQUIRED = ("model", "framework", "gpu_type", "workload", "tp", "conc", "precision")
 #: The options an inferencex workload requires and an agentx one refuses.
@@ -143,7 +147,7 @@ def _add_workload_options(run: argparse.ArgumentParser) -> None:
 
     run.add_argument("--model", help="Model path, or an id found under HL_MODEL_BASE or in the Hugging Face cache.")
     run.add_argument("--framework", help="Inference framework, e.g. vllm or sglang.")
-    run.add_argument("--gpu-type", type=str.lower, choices=SESSION_GPU_TYPES, help="GPU type, in any case.")
+    run.add_argument("--gpu-type", type=str.lower, choices=SESSION_GPU_TYPES, help=_GPU_TYPE_HELP)
     run.add_argument("--workload", choices=[kind.value for kind in WorkloadKind], help="Workload kind.")
     run.add_argument("--tp", type=int, help="Tensor-parallel size; must fit the machine's cards.")
     run.add_argument(
@@ -657,7 +661,7 @@ def settings_from(
         raise ValueError(f"the following arguments are required: {', '.join(missing)}")
     sizes = tuple(name for name in ("tp", "ep", "conc") if getattr(args, name) is not None)
     errors = _shape_errors(args) + _agentx_only_errors(args) + _positive(args, sizes)
-    errors += _limit_errors(args)
+    errors += _limit_errors(args) + _board_errors(args)
     if errors:
         raise ValueError("; ".join(errors))
     parallel = _parallel_tests(args, tests_that_fit)
@@ -731,6 +735,14 @@ def _limit_errors(args: argparse.Namespace) -> list[str]:
         *_limit_error("--dev-leases", args.dev_leases, args.dev_leases >= 0, "0 (none) or a positive number"),
         *_boot_budget_errors(args.boot_budget_sec),
     ]
+
+
+def _board_errors(args: argparse.Namespace) -> list[str]:
+    """What is wrong with the session's board: one of :data:`NATIVE_SERVER_GPU_TYPES` under a framework that builds no
+    server from a checkout."""
+    if args.gpu_type not in NATIVE_SERVER_GPU_TYPES or native_component(args.framework) is not None:
+        return []
+    return [f"--gpu-type {args.gpu_type} is taken only with --framework llamacpp"]
 
 
 def _boot_budget_errors(budget: int | None) -> list[str]:

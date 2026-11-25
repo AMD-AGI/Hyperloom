@@ -61,7 +61,7 @@ def test_the_implementer_prompt_carries_the_targets_architecture_note(gpu_target
     ("gpu_target", "note", "hardware"),
     [("gfx1100", _RDNA3_NOTE, "hardware/rdna3"), ("gfx1201", _RDNA4_NOTE, "hardware/rdna4"), ("gfx950", "", "")],
 )
-def test_the_orchestration_knowledge_index_carries_the_targets_architecture_note(gpu_target, note, hardware):
+def test_the_evidence_knowledge_index_carries_the_targets_architecture_note(gpu_target, note, hardware):
     owner = SimpleNamespace(
         config=SimpleNamespace(
             gpu_target=gpu_target, local_knowledge_dir=str(resource_path("local_knowledge")), defer_knowledge_maps=True
@@ -70,7 +70,7 @@ def test_the_orchestration_knowledge_index_carries_the_targets_architecture_note
         _target_source_files=lambda: ["kernel.py"],
     )
 
-    index = AnalysisEvidenceMixin._orchestration_knowledge_index(owner)
+    index = AnalysisEvidenceMixin._knowledge_index(owner)
 
     if note:
         assert note in index

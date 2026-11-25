@@ -4,10 +4,10 @@
 """Kernel Forge's run logs as one document, ``{"runs": [...], "raw_logs": [...]}``, for the ``kernelforge-v1`` mapping.
 
 A log root may hold any number of plain ``kernelforge forge-loop`` runs (``forge_loop``). Each run yields one unit
-per candidate it archived, in iteration order: seq N for the candidate iteration N measured, so each lane of a fan-out
-round is a unit of its own. A run, or a candidate, whose logs cannot be read yields one unit holding ``read_error``,
-which the mapping skips with that reason. ``raw_logs`` names the raw logs every Experience links, by paths relative
-to the document's directory: only ``NO_RAW_LOGS``.
+per candidate it archived, in iteration order: seq N for the candidate iteration N measured, which is the one
+candidate of that round whatever the round's width. A run, or a candidate, whose logs cannot be read yields one unit
+holding ``read_error``, which the mapping skips with that reason. ``raw_logs`` names the raw logs every Experience
+links, by paths relative to the document's directory: only ``NO_RAW_LOGS``.
 """
 
 from __future__ import annotations
