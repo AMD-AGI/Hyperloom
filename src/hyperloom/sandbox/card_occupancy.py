@@ -27,12 +27,14 @@ memory on it, the test's on that card, and on the card where a launcher of the t
 and started processes that hold their own) holds memory, a second one with no more than a launcher's memory
 (:data:`LAUNCHER_VRAM`); every holder beyond that is foreign, unless every holder of the card pairs one to one, by its
 memory, with an open DRM file of the test that holds memory on that card's render node alone (a server and the processes it
-spawned, each with memory of its own on its one card). The pairing is by memory alone, and a file of the test that no
-holder pairs with does not count against it: where one of the test's files has no resident holder of its own in the
-kernel's list (a process of the test that has ended or not yet been listed), a holder that is not the test's and holds
-within :data:`UNACCOUNTED_VRAM_TOLERANCE` of that file's memory pairs with it and is read as the test's. That needs a
-file of the test without its holder and a foreign process of nearly the same memory on the same card; where every file's
-own holder is listed, a foreign holder beside them is counted at any size. What the test's processes report on a card's
+spawned, each with memory of its own on its one card). Memory is the only evidence on this path, and a file of the test
+that no holder pairs with does not count against it. So where one of the test's files has no resident holder of its own
+in the kernel's list (a process of the test not yet listed), a holder that is not the test's passes when it is within
+:data:`UNACCOUNTED_VRAM_TOLERANCE` of any qualifying file of the test on the card and the test's listed holders can be
+paired with the remaining files: a foreign holder of nearly the same memory as one of the test's files cannot be told
+from the test's own. Where every file's own holder is listed, a foreign holder beside them is counted at any size.
+Pairing by identity (the amdgpu pasid in a DRM file's fdinfo against the kernel's list) is a possible follow-up that
+has not been verified. What the test's processes report on a card's
 render node does not count as holders of that card: a rank of a server with several reports its whole memory on every render node of the
 server, while the kernel lists it on its own card only. A holder with almost no memory (:data:`NEGLIGIBLE_VRAM`) and no queue, such as a launcher that only initialised the
 GPU, is not counted. Memory on a card that no process the container sees

@@ -474,3 +474,45 @@ def test_a_file_pairs_only_when_all_its_processes_are_the_tests_it_is_on_this_ca
     assert [i.key for i in reading.intrusions(own, before_test=False) if i.key[0] == "crowded"] == [
         ("crowded", _SPAWN_CARD)
     ]
+
+
+def _gib(value: float) -> int:
+    return int(value * (1 << 30))
+
+
+@pytest.mark.parametrize(
+    ("files", "listed", "clean"),
+    [
+        ((_gib(2.7), _gib(2.2)), (_gib(2.2), _gib(1.7)), True),
+        ((_gib(1.7), _gib(1.3)), (_gib(1.3), _gib(2.1)), True),
+        ((_gib(1.7), _gib(1.2)), (_gib(1.7), _gib(2.8)), False),
+    ],
+    ids=["within-bound-of-the-unlisted-file", "within-bound-of-a-listed-file", "beyond-bound-of-every-file"],
+)
+def test_accepted_limitation_a_foreign_holder_near_a_file_of_the_test_reads_as_the_tests_while_one_is_not_listed(
+    tmp_path: Path, files: tuple[int, int], listed: tuple[int, int], clean: bool
+) -> None:
+    """The accepted limitation, at the bound the pairing has: with one of the test's processes not yet listed by the
+    kernel, a foreign holder passes when it is within :data:`UNACCOUNTED_VRAM_TOLERANCE` of any file of the test on the
+    card and the listed holder pairs with the remaining file. Files of 2.7 and 2.2 GiB, the 2.2 GiB child listed and a
+    foreign 1.7 GiB holder (1.0 GiB from the unlisted file): clean. Files of 1.7 and 1.3 GiB, the server listed at
+    1.3 GiB and a foreign 2.1 GiB holder: clean. A foreign 2.8 GiB holder beside files of 1.7 and 1.2 GiB is within the
+    tolerance of none of them and crowds the card."""
+    tree = _pod(tmp_path)
+    tree.process(1100, command=("python3", "-m", "hyperloom.measure.runner"))
+    tree.process(1153, parent=1100, command=("python3", "-m", "server"))
+    tree.process(1336, parent=1153, command=("python3", "-c", "from multiprocessing.spawn import spawn_main"))
+    tree.renders(1153, _SPAWN_CARD, kib=files[0] >> 10)
+    tree.renders(1336, _SPAWN_CARD, kib=files[1] >> 10)
+    tree.holds(_SERVER_HOST, _SPAWN_CARD, vram=listed[0], queues=4)
+    tree.holds(_OTHER_HOST, _SPAWN_CARD, vram=listed[1], queues=2)
+    own = OwnProcesses(frozenset({1100}), procfs=tree.procfs)
+
+    reading = read_holders([_SPAWN_CARD], kfd=tree.kfd, procfs=tree.procfs)
+
+    assert reading.method == METHOD_CENSUS_FDINFO
+    crowded = [i.key for i in reading.intrusions(own, before_test=False) if i.key[0] == "crowded"]
+    if clean:
+        assert _keys(reading, own) == []
+    else:
+        assert crowded == [("crowded", _SPAWN_CARD)]

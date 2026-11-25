@@ -32,7 +32,10 @@ own the probe counts instead of naming (before the test nothing may hold a card;
 each, and beside it, on the one card where a launcher of the test's server holds memory, one with no more than a
 launcher's memory, not counting one with a few MiB and no queue; more than that only when every holder of the card pairs
 one to one, by memory within 512 MiB, with an open DRM file of the test's own processes held on that card's render node
-alone, such as a server and the processes it spawned; and no memory may be held that no process of this container
+alone, such as a server and the processes it spawned, memory being the only evidence: while a process of the test is not
+yet listed, a holder that is not the test's passes when it is within 512 MiB of any such file of the test on the card and
+the test's listed holders can be paired with the remaining files, so a foreign holder of nearly the memory of a file of
+the test cannot be told from the test's own; and no memory may be held that no process of this container
 accounts for): the result says so in its ``method``.
 """
 
