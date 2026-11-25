@@ -9,6 +9,8 @@ import argparse
 import json
 from pathlib import Path
 
+import pytest
+
 from hyperloom.inference_optimizer.cli.launch_shape import _resolve_run_max_model_len
 from hyperloom.inference_optimizer.grid_server_args import (
     WorkloadTokenWindow,
@@ -67,7 +69,33 @@ def test_max_model_len_agentx_uses_native_context(native_benchmark, tmp_path, mo
     _clear(monkeypatch)
     monkeypatch.setenv("HYPERLOOM_BENCHMARK_CONFIG", str(native_benchmark))
     val, src = _resolve_run_max_model_len(_args(_model_dir(tmp_path)))
-    assert (val, src) == (_NATIVE, "agentx-native-context")
+    assert (val, src) == (_NATIVE, "native-context")
+
+
+def _dataset_session(tmp_path, monkeypatch, bound: bool) -> None:
+    """Name a prompt dataset the way an operator does: exported, or in the envs of the bound benchmark YAML."""
+    _clear(monkeypatch)
+    if not bound:
+        monkeypatch.setenv("DATASET_PATH", "/data/prompts.jsonl")
+        return
+    monkeypatch.delenv("DATASET_PATH", raising=False)
+    config = tmp_path / "benchmark.yaml"
+    config.write_text(json.dumps({"benchmark": {"envs": {"DATASET_PATH": "/data/prompts.jsonl"}}}), encoding="utf-8")
+    monkeypatch.setenv("HYPERLOOM_BENCHMARK_CONFIG", str(config))
+
+
+@pytest.mark.parametrize("bound", [False, True], ids=["exported", "bound-yaml"])
+def test_max_model_len_dataset_uses_native_context(tmp_path, monkeypatch, bound):
+    """A dataset's prompts carry their own lengths: one longer than ISL+OSL+headroom still fits the server."""
+    _dataset_session(tmp_path, monkeypatch, bound)
+    assert _resolve_run_max_model_len(_args(_model_dir(tmp_path))) == (_NATIVE, "native-context")
+
+
+def test_max_model_len_dataset_without_a_local_model_says_long_prompts_fail(tmp_path, monkeypatch, capsys):
+    _dataset_session(tmp_path, monkeypatch, bound=False)
+    val, src = _resolve_run_max_model_len(_args(_model_dir(tmp_path, max_pos=None)))
+    assert (val, src) == (1024 + 1024 + 4096, "auto")
+    assert "DATASET_PATH" in capsys.readouterr().err
 
 
 def test_max_model_len_operator_override_still_wins(native_benchmark, tmp_path, monkeypatch):
@@ -109,6 +137,12 @@ def test_sglang_context_agentx_skips_isl_osl_cap(native_benchmark, tmp_path, mon
     out = inject_sglang_context_length(
         "", "sglang", _model_dir(tmp_path), WorkloadTokenWindow(1024, 1024, max_model_len=_NATIVE)
     )
+    assert out.strip() == f"--context-length {_NATIVE}"
+
+
+def test_sglang_context_dataset_skips_isl_osl_cap(tmp_path, monkeypatch):
+    _dataset_session(tmp_path, monkeypatch, bound=False)
+    out = inject_sglang_context_length("", "sglang", _model_dir(tmp_path), WorkloadTokenWindow(1024, 1024))
     assert out.strip() == f"--context-length {_NATIVE}"
 
 

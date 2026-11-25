@@ -56,7 +56,7 @@ async def _attempt(
     freeze_base_at(tmp_path / "session", commit)
     executor = HostedExecutor(r.backend, tmp_path / "session", timeout_sec=120)
     request = req(kind=TestKind.TEST, **fields).accepted("req-1")
-    return await executor.run(TestJob(request, 1, (), 2, 1, AcceptedMeasurement(None, (point,))))  # type: ignore[arg-type]
+    return await executor.run(TestJob(request, 1, (), 2, AcceptedMeasurement(None, (point,))))  # type: ignore[arg-type]
 
 
 def _in_order(expected: list[str], names: list[str]) -> bool:

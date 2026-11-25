@@ -18,7 +18,7 @@ from packaging.version import InvalidVersion, Version
 
 from hyperloom_common.coerce import to_float
 from hyperloom_common.gpu_identity import AMD_GPU_BOARDS
-from hyperloom.common.perf_metric import agentx_active
+from hyperloom.common.perf_metric import agentx_active, prompt_dataset_session
 from hyperloom.orchestrator.knowledge.recipe_kb import (
     LocalRecipeStoreError,
     RecipeKB,
@@ -902,6 +902,18 @@ def _warm_start_lookup(
     )
 
 
+def _unserved_session(kb: RecipeKB, shared_state: Any) -> str:
+    """Why the Recipe KB neither anchors nor warm-starts this session, or ``""``."""
+    # The local JSON store remains inference-only.
+    if getattr(kb, "mode", "") != "remote" and agentx_active(
+        benchmark_mode=getattr(shared_state, "benchmark_mode", "")
+    ):
+        return "local Recipe KB does not serve agentx identities"
+    if prompt_dataset_session(shared_state):
+        return "the Recipe KB keys on ISL/OSL, which do not describe a prompt-dataset session"
+    return ""
+
+
 @dataclass(frozen=True)
 class T0AnchorRequest:
     """The workload a T0 anchor stamps and warm-starts, and whether the session resumes."""
@@ -923,11 +935,8 @@ def run_t0_anchor(
     session_dir: Path,
 ) -> None:
     """Run the T0 recipe-snapshot anchor and seven-tuple warm-start search."""
-    # The local JSON store remains inference-only.
-    if getattr(kb, "mode", "") != "remote" and agentx_active(
-        benchmark_mode=getattr(shared_state, "benchmark_mode", "")
-    ):
-        log.info("run_t0_anchor: local Recipe KB does not serve agentx identities")
+    if unserved := _unserved_session(kb, shared_state):
+        log.info("run_t0_anchor: %s", unserved)
         return
 
     sd = Path(session_dir)

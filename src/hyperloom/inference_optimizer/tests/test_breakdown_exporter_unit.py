@@ -622,7 +622,7 @@ def test_the_newest_close_of_the_leg_supplies_the_end(tmp_path):
         "session_id": "sess-1178",
         "start_ts": (now - timedelta(hours=4)).isoformat(),
         "phase_history": [
-            {"to_phase": "CLOSE", "reason": "sweep_done", "ts": (now - timedelta(hours=3)).isoformat()},
+            {"to_phase": "CLOSE", "reason": "cycle_end_done", "ts": (now - timedelta(hours=3)).isoformat()},
             {"to_phase": "EXPLORE", "reason": "cycle_reloop", "ts": (now - timedelta(hours=2)).isoformat()},
             {"to_phase": "CLOSE", "reason": "target_reached", "ts": (now - timedelta(minutes=10)).isoformat()},
         ],

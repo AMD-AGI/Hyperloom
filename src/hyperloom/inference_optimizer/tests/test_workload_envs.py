@@ -75,15 +75,16 @@ def test_materialize_refuses_to_unset_pinned_workload_envs(tmp_path, monkeypatch
     """Unsetting TP/CONC would retarget the benchmark, not toggle a knob."""
     clear_env(monkeypatch)
     src = tmp_path / "base.yaml"
-    write_config(src, envs={"TP": 1, "CONC": 64, "SGLANG_TUNING_KNOB": "1"})
+    write_config(src, envs={"TP": 1, "CONC": 64, "DATASET_PATH": "/data/prompts.jsonl", "SGLANG_TUNING_KNOB": "1"})
     bench = materialize(
         src,
         tmp_path / "out",
-        launch=we.LaunchLayer(unset_envs=["TP", "CONC", "RUN_EVAL", "SGLANG_TUNING_KNOB"]),
+        launch=we.LaunchLayer(unset_envs=["TP", "CONC", "RUN_EVAL", "DATASET_PATH", "SGLANG_TUNING_KNOB"]),
     )
     envs = bench["envs"]
 
     assert "TP" in envs
+    assert "DATASET_PATH" in envs
     assert "CONC" in envs
     assert "RUN_EVAL" in envs
     # A plain tuning knob is still removable; only the pins are protected.

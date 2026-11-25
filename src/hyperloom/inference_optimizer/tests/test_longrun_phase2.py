@@ -136,29 +136,10 @@ def test_redirect_advisory_renders_for_saturation_without_plateau(cyclic_coordin
     assert "Advisory only" in block
 
 
-def test_cycle_strategy_planner_avoids_saturated_focus(cyclic_coordinator):
-    c = cyclic_coordinator
-    st = c.shared_state
-    st.macro_cycle = 2
-    st.gain_at_cycle_start = 10.0
-    st.bottleneck_shift = {"to": "compute", "to_domain": "kernel_switch_specialist"}
-    st.saturated_directions = {
-        "kernel_switch_specialist": {"saturated": True, "within_pct": 98.0},
-        "comm_specialist": {"saturated": False},
-    }
-    c.phase_macro_cycle.record_cycle_strategy_for_current_cycle()
-    row = st.cycle_strategy_log[-1]
-    assert row["cycle"] == 2
-    assert row["focus"] != "kernel_switch_specialist"
-    strategy = c.phase_macro_cycle.plan_cycle_focus()
-    assert strategy["focus"] != "kernel_switch_specialist"
-    assert "focus" in strategy
-
-
 def test_redirect_advisory_empty_outside_explore(cyclic_coordinator):
     c = cyclic_coordinator
     st = c.shared_state
-    st.phase = ps.PHASE_SWEEP
+    st.phase = ps.PHASE_CYCLE_END
     st.mark_bottleneck_switch(prev_bottleneck="MoE_fused")
     assert c.conversation._bottleneck_redirect_advisory_block() == ""
 

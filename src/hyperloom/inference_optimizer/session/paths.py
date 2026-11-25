@@ -55,7 +55,8 @@ _SESSION_SKELETON: tuple[str, ...] = (
 #: Files whose presence means a directory holds a session that was started: a fresh session is never created there.
 SESSION_FILES: tuple[str, ...] = ("manifest.json", "state.json")
 
-#: The application-private result archive, created by a hosted run beside the skeleton above (not part of it).
+#: The application-private result archive beside the skeleton above (not part of it): the session package goes here
+#: unless ``HYPERLOOM_SESSION_PACKAGE_DEST`` names another place.
 ARCHIVE_DIRNAME = "archive"
 #: The archive's mode: the run's accounts (one group) share it, no one else may even read it.
 ARCHIVE_MODE = 0o2770
@@ -161,7 +162,7 @@ def hosted_session_dir(model_path: str | os.PathLike[str], run_created_at: datet
 
 
 def archive_root(session_dir: Path) -> Path:
-    """Where a hosted run archives its results: ``<session_dir>/archive``."""
+    """Where a session's results are archived: ``<session_dir>/archive``."""
     return Path(session_dir) / ARCHIVE_DIRNAME
 
 

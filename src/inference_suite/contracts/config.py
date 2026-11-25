@@ -14,6 +14,7 @@ import re
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from enum import Enum
+from pathlib import PurePosixPath
 
 from hyperloom_common.contract_fields import ContractFields, field_names
 from hyperloom_common.gpu_telemetry import fast_interval
@@ -235,6 +236,7 @@ _SERVER_KEYS = (
     "absent_source_files",
     "import_packages",
     "env",
+    "cpus",
 )
 
 
@@ -246,7 +248,8 @@ class ServerConfig:
     candidate's failure, a user's or base's stops the line. ``source_files`` are re-hashed before launch;
     ``env_inherit`` names the host environment the server may see. ``framework_python`` is the one interpreter the
     server runs in and the version probe and parser check read. ``import_packages`` are packages beside the
-    framework's own whose import roots the probe records.
+    framework's own whose import roots the probe records. ``cpus`` are the CPUs the server is pinned to; empty, it runs
+    on the round's own. Nothing else is kept off them.
     """
 
     base: BaseRef
@@ -264,6 +267,7 @@ class ServerConfig:
     absent_source_files: tuple[str, ...] = ()
     import_packages: tuple[str, ...] = ()
     env_inherit: tuple[str, ...] = ()
+    cpus: tuple[int, ...] = ()
 
     def __post_init__(self) -> None:
         for name in ("model_path", "served_model_name", "host", "framework_python"):
@@ -285,9 +289,15 @@ class ServerConfig:
             raise ConfigError(f"source files both present and absent: {', '.join(both)}")
         _FIELDS.string_tuple(self.import_packages, "the import packages")
         _env_names(self.env_inherit, "the inherited env")
+        if not isinstance(self.cpus, tuple):
+            raise ConfigError(f"the server's cpus must be a tuple, got {self.cpus!r}")
+        for cpu in self.cpus:
+            _FIELDS.integer(cpu, "a server cpu", minimum=0)
+        _FIELDS.unique(self.cpus, "server cpus")
 
     def to_document(self) -> dict[str, object]:
-        return {
+        """The server's document; an unpinned server's has no ``cpus`` key, as configs written before it had."""
+        document = {
             "base": self.base.to_document(),
             "user": self.user.to_document(),
             "candidate": self.candidate.to_document(),
@@ -304,6 +314,9 @@ class ServerConfig:
             "import_packages": list(self.import_packages),
             "env": {"inherit": list(self.env_inherit)},
         }
+        if self.cpus:
+            document["cpus"] = list(self.cpus)
+        return document
 
     @classmethod
     def from_document(cls, document: object) -> ServerConfig:
@@ -325,12 +338,37 @@ class ServerConfig:
             absent_source_files=_FIELDS.strings(fields.get("absent_source_files", ()), "the absent source files"),
             import_packages=_FIELDS.strings(fields.get("import_packages", ()), "the import packages"),
             env_inherit=_FIELDS.strings(env.get("inherit", ()), "the inherited env"),
+            cpus=_FIELDS.items(fields.get("cpus", ()), "the server's cpus"),
         )
 
 
 @dataclass(frozen=True)
+class PromptDataset:
+    """A JSONL file of real prompts a fixed load sends in place of InferenceX's random tokens, one per line as its
+    ``prompt`` string or the first of its ``turns``."""
+
+    path: str
+
+    def __post_init__(self) -> None:
+        _FIELDS.text(self.path, "the prompt dataset path")
+        if not PurePosixPath(self.path).is_absolute():
+            raise ConfigError(f"the prompt dataset path must be absolute, got {self.path!r}")
+
+    def to_document(self) -> dict[str, object]:
+        return {"path": self.path}
+
+    @classmethod
+    def from_document(cls, document: object) -> PromptDataset:
+        return cls(_FIELDS.known(document, ("path",), "the prompt dataset").get("path"))
+
+
+@dataclass(frozen=True)
 class FixedWorkload:
-    """A fixed-shape load; every client knob is explicit so two arms run the same requests."""
+    """A fixed-shape load; every client knob is explicit so two arms run the same requests.
+
+    ``dataset`` names the real prompts the load sends, each answered up to ``osl`` tokens; ``None`` sends InferenceX's
+    random ``isl``-token prompts, each answered to exactly ``osl`` tokens, whose shape ``random_range_ratio`` varies.
+    """
 
     concurrency: int
     isl: int
@@ -342,6 +380,7 @@ class FixedWorkload:
     warmup_seed: int
     tokenizer_mode: str
     trust_remote_code: bool
+    dataset: PromptDataset | None = None
 
     def __post_init__(self) -> None:
         for name in ("concurrency", "isl", "osl", "num_prompts"):
@@ -351,14 +390,22 @@ class FixedWorkload:
         _fraction(self.random_range_ratio, "the fixed random_range_ratio")
         _FIELDS.text(self.tokenizer_mode, "the fixed tokenizer_mode")
         _FIELDS.boolean(self.trust_remote_code, "the fixed trust_remote_code")
+        if self.dataset is not None and not isinstance(self.dataset, PromptDataset):
+            raise ConfigError(f"the fixed dataset must be a PromptDataset, got {self.dataset!r}")
 
     def to_document(self) -> dict[str, object]:
-        return {key: getattr(self, key) for key in _FIXED_KEYS}
+        """The workload's document; a random workload's has no ``dataset`` key, as configs written before it had."""
+        document = {key: getattr(self, key) for key in _FIXED_KEYS if key != "dataset"}
+        if self.dataset is not None:
+            document["dataset"] = self.dataset.to_document()
+        return document
 
     @classmethod
     def from_document(cls, document: object) -> FixedWorkload:
         fields = _FIELDS.known(document, _FIXED_KEYS, "the fixed workload")
-        return cls(**{key: fields.get(key) for key in _FIXED_KEYS})
+        dataset = fields.get("dataset")
+        values = {key: fields.get(key) for key in _FIXED_KEYS if key != "dataset"}
+        return cls(**values, dataset=None if dataset is None else PromptDataset.from_document(dataset))
 
 
 _FIXED_KEYS = field_names(FixedWorkload)
@@ -889,6 +936,7 @@ __all__ = [
     "LifecycleMode",
     "MlperfWorkload",
     "ProfileConfig",
+    "PromptDataset",
     "RunPaths",
     "RunnerLayer",
     "ScriptableRunEnv",

@@ -7,8 +7,8 @@ PRELUDE roots the session and measures its baseline (:mod:`.prelude`); EXPLORE t
 test and one CLOSE grace are left before the deadline. EXPLORE and CLOSE score the branches with the frontier's
 defaults for the session's budget. Once the baseline is established, a session with an RSI archive plays the
 scheduling playbook ``--playbook`` asks for, the champion of the pool beside it or a playbook on trial, as the session's id draws under
-``auto``, recorded under ``playbook`` in ``policy_versions``. The FINAL candidates are fixed while every branch still stands,
-then exploration ends and FINAL validates them. With the review on, a session whose component agents are given a map pauses before their branches open until a person approves it (:mod:`.review`); the pause moves the
+``auto``, recorded under ``playbook`` in ``policy_versions``. EXPLORE ends exploration itself, the specialist branches first
+(:meth:`Explorer.run <hyperloom_multibranch.scheduling.explore.Explorer.run>`); the FINAL candidates are read after that and FINAL validates them. With the review on, a session whose component agents are given a map pauses before their branches open until a person approves it (:mod:`.review`); the pause moves the
 deadline, and EXPLORE's end, by its length. A map a mapping branch makes is reviewed in EXPLORE, while the clock runs,
 and its shares open only with ``--agent-share-minutes`` left before their cutoff. A failed PRELUDE, a run asked to stop once its component agents' directions are mapped,
 a map a person rejected, an EXPLORE that ran out of cards to measure on, a stop signal, the session deadline
@@ -42,7 +42,6 @@ from functools import partial
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, NamedTuple
 
-from hyperloom.common.outside_facts.image_check import ImageCheckReport, run_image_check
 from hyperloom.common.outside_facts.rule_pack import rule_pack_identity
 from hyperloom.measure.compile import LocalBlobStore
 from hyperloom.measure.versions import socket_versions
@@ -68,6 +67,7 @@ from hyperloom_multibranch.blackboard.rsi.playbook import (
     drawn_challenger,
     session_playbook,
 )
+from hyperloom_multibranch.blackboard.rsi.archive import longest_root_test_seconds
 from hyperloom_multibranch.blackboard.rsi.session import FRONTIER_LOG, archived_history
 from hyperloom_multibranch.scheduling.agent_map import SharedMap
 from hyperloom_multibranch.scheduling.agent_plans import (
@@ -99,7 +99,13 @@ from hyperloom_multibranch.scheduling.events import IntegrationProfiler, Session
 from hyperloom_multibranch.scheduling.explore import Explorer, ExploreWindow, Steering
 from hyperloom_multibranch.blackboard.knowledge.breakdown import claw_session_id, leg_claw_session_id
 from hyperloom_multibranch.scheduling.exports import CloseAuthoring, ExportServices, ExportSources, SessionExports
-from hyperloom_multibranch.scheduling.final import FinalCandidates, FinalSelector, session_candidates
+from hyperloom_multibranch.scheduling.final import (
+    ConcSweep,
+    FinalCandidates,
+    FinalSelector,
+    SweepPlan,
+    session_candidates,
+)
 from hyperloom_multibranch.scheduling.forks import ForkDesk
 from hyperloom_multibranch.scheduling.integrator import BundlingIntegrator, Integrator, LlmPatchResolver, MergeRecords
 from hyperloom_multibranch.scheduling.judge import GRACE_KEY, Judge, session_grace
@@ -108,7 +114,6 @@ from hyperloom_multibranch.scheduling.launch_isolation import LaunchIsolation
 from hyperloom_multibranch.scheduling.llm import recorded
 from hyperloom_multibranch.scheduling.manifest import (
     CodeVersion,
-    ImageCheckSummary,
     SessionManifest,
     code_version,
     read_manifest,
@@ -192,6 +197,7 @@ LESSONS_KEY = "lessons"
 #: Seconds in a minute, the unit of the agents' time options.
 MINUTE = 60.0
 CUT_SHORT = "CLOSE was cut short after a stop signal"
+CONC_SWEEP = "conc_sweep"
 NO_CARDS_LEFT = "the toolbox has fewer usable cards than one test needs, so FINAL could not run"
 #: Why FINAL over a session that ended before its baseline was recorded chose nothing.
 NO_BASELINE = "no candidate: the session ended before PRELUDE recorded its baseline, so FINAL had nothing to validate"
@@ -204,9 +210,16 @@ class Session:
     """Wires one session's scheduler, integrator and blackboard handles onto the peers ``peer_factory`` builds."""
 
     def __init__(
-        self, settings: RunSettings, peer_factory: PeerFactory, host: SessionHost, services: SessionServices
+        self,
+        settings: RunSettings,
+        peer_factory: PeerFactory,
+        host: SessionHost,
+        services: SessionServices,
+        *,
+        test_points: int = 1,
     ) -> None:
         self._settings = settings
+        self._test_points = test_points
         self._layout, self._processes, self._clock = host.layout, host.processes, host.clock
         self._open_records()
         desk = ForkDesk(self._roster, self._decisions, self._clock)
@@ -231,6 +244,7 @@ class Session:
         self._briefs = peers.briefs
         self._base_image_digest = peers.base_image_digest
         tests = SessionTests(peers.toolbox, self._clock)
+        self._tests = tests
         checks = SessionChecks(tests, peers.gate, peers.regression)
         self._metric = settings.workload.metric
         self._budget_seconds = budget_seconds(settings.max_hours)
@@ -250,7 +264,6 @@ class Session:
         self._selector = FinalSelector(checks, settings.workload, final_quota(settings.caps).global_concurrency)
         self._signals = StopSignals()
         self._in_final = False
-        self._image_check: ImageCheckReport | None = None
         self._agent_isolation: LaunchIsolation | None = peers.isolation
         # The budget and hard stop the session's deadline is read from, which a person's review moves by its length
         # (_extend); while the review is pending the deadline does not pass.
@@ -292,6 +305,7 @@ class Session:
             settings.inferencex_commit,
             settings.agentx_early_stop,
             make_before_break=settings.make_before_break,
+            test_points=self._test_points,
         )
 
     def _map_calls(self) -> MapCalls:
@@ -360,10 +374,7 @@ class Session:
         ``explore_cap`` (a :data:`~.budget.ExploreCap`, a hosted run's grant's) says, when it is given.
 
         The scheduler records itself before the first phase, so the directory says the session is running from the
-        start and a recovery over it is refused while it is. The image check then compares the rule pack's outside
-        facts with this environment, off the event loop; its summary goes into the manifest and CLOSE attaches the
-        whole report. Under ``HYPERLOOM_IMAGE_CHECK=strict`` a failing fact raises :class:`ImageCheckFailed` here,
-        before the manifest is written and before any phase or CLOSE runs. How the peers isolate the agents and tests
+        start and a recovery over it is refused while it is. How the peers isolate the agents and tests
         they launch goes into the manifest and the report. The reference material the run was given is copied in before
         the manifest, so the manifest the session writes describes a directory that already holds it.
         """
@@ -371,10 +382,8 @@ class Session:
         budget = SessionBudget.from_hours(self._settings.max_hours, self._clock.now())
         self._explore_cap = explore_cap
         self._processes.record_scheduler()
-        image_check = await asyncio.to_thread(run_image_check)
-        self._image_check = image_check
         await asyncio.to_thread(copy_references, self._settings.references, self._layout.reference)
-        self._write_manifest(budget, await asyncio.to_thread(code_version), image_check)
+        self._write_manifest(budget, await asyncio.to_thread(code_version))
         hard_stop = HardStop(budget, self._clock)
         aborted = SessionOutcome(SessionStopReason.ABORTED, None, None, "")
         return await self._run_and_close(self._phases(budget), aborted, budget, hard_stop)
@@ -409,6 +418,32 @@ class Session:
         work = self._no_final(ended) if candidates is None else self._final_phases(candidates, ended, restart)
         return await self._run_and_close(work, ending, budget, hard_stop)
 
+    async def conc_sweep(self, plan: SweepPlan, grant_end_unix: float | None = None) -> dict[str, Any]:
+        """Sweep the closed session's root and the commit FINAL chose over ``plan``'s points on this session's toolbox,
+        which takes up and withdraws what an earlier run left in its log first; a stop signal ends the sweep, and the
+        toolbox is released however it ends."""
+
+        baseline = await self._blackboard.baseline()
+        longest = longest_root_test_seconds(await self._blackboard.snapshot()) or 0.0
+        sweep = ConcSweep(
+            plan,
+            baseline.root_commit,
+            self._layout,
+            self._settings.workload,
+            self._tests,
+            self._settings.caps.max_parallel_tests,
+            longest,
+        )
+        self._signals.install()
+        try:
+            await self._toolbox.start()
+            await self._toolbox.withdraw_all(CONC_SWEEP)
+            await self._toolbox.set_policy(final_quota(self._settings.caps))
+            return await sweep.run(self._signals.wait(), grant_end_unix)
+        finally:
+            self._signals.uninstall()
+            await self._stopper.release(TOOLBOX_CLOSE_SECONDS)
+
     async def resume(
         self, ended: SessionStopReason, deadline: float, explore_cap: ExploreCap | None = None
     ) -> SessionOutcome:
@@ -423,7 +458,6 @@ class Session:
         budget = self._resumed_budget(ended, deadline)
         self._explore_cap = explore_cap
         self._processes.record_scheduler()
-        self._image_check = await asyncio.to_thread(run_image_check)
         hard_stop = HardStop(budget, self._clock)
         aborted = SessionOutcome(SessionStopReason.ABORTED, None, None, "")
         return await self._run_and_close(self._resumed_phases(budget, ended), aborted, budget, hard_stop)
@@ -585,6 +619,7 @@ class Session:
             prelude.start_commit,
             explore_end,
             budget.deadline,
+            prelude.longest_root_test,
             explore_gpu_seconds(self._settings.max_gpu_hours),
             self._settings.max_llm_usd or math.inf,
             self._settings.user_directions,
@@ -595,11 +630,8 @@ class Session:
         )
         reason = await self._explorer().run(window)
         if reason is SessionStopReason.NO_MEASUREMENT_CARDS:
-            await self._stopper.end_exploration(reason)
             return SessionOutcome(reason, None, None, NO_CARDS_LEFT)
-        candidates = await self._final_candidates()
-        await self._stopper.end_exploration(reason)
-        return await self._final(candidates, reason)
+        return await self._final(await self._final_candidates(), reason)
 
     async def _record_versions(self) -> None:
         """The policy versions the session runs, once PRELUDE settled its playbook: in the manifest, and with the
@@ -946,7 +978,7 @@ class Session:
             self._play,
             self._layout.manifest,
         )
-        return Explorer(self._context, self._branches, self._integrator, steering)
+        return Explorer(self._context, self._branches, self._integrator, steering, self._stopper)
 
     def _closer(self) -> Closer:
         dashboard = self._dashboard(self._scoring())
@@ -955,7 +987,6 @@ class Session:
             self._repo,
             self._blobs,
             dashboard,
-            self._image_check,
             self._briefs.warm,
             _checkpoint_scope(self._settings),
         )
@@ -1059,7 +1090,7 @@ class Session:
     def _phase(self, name: str, **detail: object) -> None:
         self._decisions.record(Decision(DecisionKind.PHASE, name, detail=detail))
 
-    def _write_manifest(self, budget: SessionBudget, version: CodeVersion, image_check: ImageCheckReport) -> None:
+    def _write_manifest(self, budget: SessionBudget, version: CodeVersion) -> None:
         SessionManifest(
             code_version=version,
             rule_pack=dict(rule_pack_identity()),
@@ -1069,7 +1100,6 @@ class Session:
             settings=self._settings,
             metric=self._settings.workload.metric,
             policy_versions=self._policy_versions(),
-            image_check=ImageCheckSummary(image_check.summary()),
             agent_isolation=self._agent_isolation,
             claw_session_id=claw_session_id(os.environ),
         ).write(self._layout.manifest)

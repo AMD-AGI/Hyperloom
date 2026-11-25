@@ -290,7 +290,7 @@ def test_a_restart_closes_the_sandbox_an_earlier_process_kept_and_not_one_an_unf
 
 
 def test_without_make_before_break_the_outcome_does_not_wait_for_the_runner_to_exit(tmp_path) -> None:
-    """Local hosted and the consistency tool run without a grant to keep a sandbox in: a test whose result landed
+    """Local hosted runs without a grant to keep a sandbox in: a test whose result landed
     returns at once, with no wait of up to ``_RUNNER_EXIT_WAIT_SEC`` for a runner exit nobody needs."""
     rig = make_rig(tmp_path, gpus=2)
     asked: list[str] = []

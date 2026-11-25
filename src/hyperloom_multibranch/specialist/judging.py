@@ -5,7 +5,8 @@
 
 The specialist proposes and the toolbox measures; this code compares each measurement through the rule gate, retests a
 gain on another node, checks a declared correctness fix (``fix_check``) and lands it or asks for its fork, and tells the
-specialist in its branch log what landed and what the gate could not land. A retest that fails as a candidate settles
+specialist in its branch log what landed and as which commit, and what the gate could not land, naming the branch head
+where the gain was measured on another commit. A retest that fails as a candidate settles
 the candidate as regressed; one whose measurement failed leaves it unjudged, and a notice that leaves a candidate
 unjudged closes it for good. Every step is read back from the blackboard, so a restarted runtime takes each step once
 and announces what landed from the recorded judgement; a fix check interrupted by a restart runs its repro tests again.
@@ -30,6 +31,7 @@ from hyperloom_multibranch.contracts.blackboard.interfaces import (
     CommitQuery,
     Inbox,
     NotRecorded,
+    RecordSearch,
     SnapshotQuery,
 )
 from hyperloom_multibranch.contracts.blackboard.records import RecordedValue, RetractionRef, TestRecord
@@ -57,9 +59,11 @@ NOTICE = "rule gate:"
 _NOTHING_JUDGED = "nothing was judged"
 _CANNOT_BE_JUDGED = "cannot be judged:"
 _NOT_COMMITTED = "was not committed:"
+#: What the gate does next with a gain, which lands only while its branch is at the commit it was measured on.
+_LANDS_ON_ITS_PARENT = frozenset({Action.RETEST, Action.COMMIT})
 
 
-class JudgeBlackboard(Inbox, SnapshotQuery, BranchLogStore, CommitQuery, Protocol):
+class JudgeBlackboard(Inbox, SnapshotQuery, BranchLogStore, CommitQuery, RecordSearch, Protocol):
     """What judging a branch reads, and the branch log it writes as the branch's runtime."""
 
 
@@ -125,9 +129,7 @@ class BranchJudge:
                 await self._judge(record, retests.get(record.request_id, []), logged)
             elif record.judgement is not None:
                 # A stop or a failure between the gate's step and its notice must not leave a landing untold.
-                announced = _announced(record, record.judgement, record.commit_id in guarded)
-                if announced:
-                    await self._notice(logged, announced, *record.judgement.request_ids)
+                await self._announce(logged, record, record.judgement, record.commit_id in guarded)
         if finishing and not self._submitted and not any(record.in_flight for record in records):
             self._finished = True
 
@@ -200,7 +202,9 @@ class BranchJudge:
             await self._unverified(logged, first, judgement, error)
             return
         if action is Action.COMMIT:
-            await self._notice(logged, _landed(first.request, judgement, fix is not None), *judgement.request_ids)
+            commit = (await self._blackboard.record(first.request_id)).commit_id
+            landed = _landed(first.request, judgement, fix is not None, commit)
+            await self._notice(logged, landed, *judgement.request_ids)
         elif action is Action.RETEST:
             try:
                 await self._toolbox.submit_test(retest_request(first, self._rule))
@@ -209,8 +213,27 @@ class BranchJudge:
                 await self._notice(logged, content, first.request_id)
                 return
             self._submitted = True
-        elif action is Action.RECORD_ONLY and decide(judgement) is Action.COMMIT:
-            await self._notice(logged, _moved_on(first.request), *judgement.request_ids)
+        elif action is Action.RECORD_ONLY and decide(judgement) in _LANDS_ON_ITS_PARENT:
+            await self._tell_off_the_head(logged, first.request, judgement)
+
+    async def _announce(
+        self, logged: set[BranchLogEntry], record: TestRecord, judgement: Judgement, guarded: bool
+    ) -> None:
+        if record.conclusion is Conclusion.RECORDED_ONLY and decide(judgement) in _LANDS_ON_ITS_PARENT:
+            await self._tell_off_the_head(logged, record.request, judgement)
+        elif announced := _announced(record, judgement, guarded):
+            await self._notice(logged, announced, *judgement.request_ids)
+
+    async def _tell_off_the_head(self, logged: set[BranchLogEntry], request: TestRequest, judgement: Judgement) -> None:
+        """Tell the specialist of a gain the gate recorded only because the branch head is not its parent, with the
+        head as it stands now; once, however far the head moves afterwards."""
+        off_the_head = _off_the_head(request, judgement)
+        if any(entry.content.startswith(f"{NOTICE} {off_the_head}") for entry in logged):
+            return
+        branches = (await self._blackboard.snapshot()).lineage.branches
+        head = next(node.head_commit for node in branches if node.branch == self._branch)
+        content = f"{off_the_head}; submit it again on the head {head} as a new test"
+        await self._notice(logged, content, *judgement.request_ids)
 
     async def _retract(self, first: TestRecord, judgement: Judgement, logged: set[BranchLogEntry]) -> None:
         try:
@@ -306,15 +329,13 @@ def _failed_retest(first: Judgement, retest: TestRecord) -> Judgement:
 
 
 def _announced(record: TestRecord, judgement: Judgement, guarded: bool) -> str:
-    """The notice of a commit, a landed retraction, a fork or a gain the moved-on branch kept from landing that the gate
-    recorded for a judged candidate, "" for any other conclusion; the same text :meth:`BranchJudge._settle` writes
-    after the step, so the one written there is not written twice."""
+    """The notice of a commit, a landed retraction or a fork that the gate recorded for a judged candidate, "" for any
+    other conclusion; the same text :meth:`BranchJudge._settle` writes after the step, so the one written there is not
+    written twice."""
     if record.landed_retraction:
         return _retracted(record.request, judgement)
     if record.conclusion in (Conclusion.COMMITTED, Conclusion.COMMITTED_WITH_REPRO):
-        return _landed(record.request, judgement, guarded)
-    if record.conclusion is Conclusion.RECORDED_ONLY and decide(judgement) is Action.COMMIT:
-        return _moved_on(record.request)
+        return _landed(record.request, judgement, guarded, record.commit_id)
     if record.conclusion in (Conclusion.SPLIT_REQUESTED, Conclusion.SPLIT_COMMITTED):
         return _forked_to(record.request, pending=False)
     if record.conclusion is Conclusion.SPLIT_PENDING:
@@ -322,11 +343,11 @@ def _announced(record: TestRecord, judgement: Judgement, guarded: bool) -> str:
     return ""
 
 
-def _landed(request: TestRequest, judgement: Judgement, guarded: bool) -> str:
+def _landed(request: TestRequest, judgement: Judgement, guarded: bool, commit: str | None) -> str:
     landed = f"{request.request_id} landed on your branch at {judgement.gain_pct:+.2f}% over {request.parent_commit}"
     if guarded:
         landed = f"{landed} with its repro case, which now guards every later commit"
-    return f"{landed}; your next candidates go on the new head"
+    return f"{landed}; your next candidates go on the new head {commit}"
 
 
 def _retracted(request: TestRequest, judgement: Judgement) -> str:
@@ -337,9 +358,13 @@ def _retracted(request: TestRequest, judgement: Judgement) -> str:
     )
 
 
-def _moved_on(request: TestRequest) -> str:
-    moved = f"{request.request_id} improved on {request.parent_commit}, but the branch has moved on"
-    return f"{moved}; submit it again on the head as a new test"
+def _off_the_head(request: TestRequest, judgement: Judgement) -> str:
+    """How the notice of a gain recorded only because the branch head is not its parent opens, whatever that head is:
+    a first reading the gate did not retest, or a gain its retest confirmed."""
+    if decide(judgement) is Action.RETEST:
+        read = f"read {judgement.gain_pct:+.2f}% over {request.parent_commit}, which is not your branch head"
+        return f"{request.request_id} {read}, and was not retested"
+    return f"{request.request_id} improved on {request.parent_commit}, but the branch has moved on"
 
 
 def _fixes(request: TestRequest) -> str:

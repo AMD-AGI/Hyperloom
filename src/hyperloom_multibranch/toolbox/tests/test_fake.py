@@ -328,7 +328,6 @@ async def test_a_second_unclear_failure_that_did_not_reproduce_on_one_node_quara
     assert await _reran_clear(box, _request("b2", avoid_nodes=(other,))) == node
     assert box.quarantined == {node}
     assert [e.node for e in book.of("quarantine")] == [node]
-    assert box.node_failures == {node: 2}
 
 
 async def test_two_non_reproducing_failures_on_the_only_node_are_counted_and_do_not_quarantine_it(
@@ -341,20 +340,21 @@ async def test_two_non_reproducing_failures_on_the_only_node_are_counted_and_do_
         assert await _reran_clear(box) == "a"
         assert await _reran_clear(box, _request("b2")) == "a"
     assert box.quarantined == set() and book.of("quarantine") == []
-    assert box.node_failures == {"a": 2}
-    assert [r.getMessage().split(" (")[0] for r in caplog.records] == ["node a not quarantined: single node"] * 2
+    assert [r.getMessage().split(";")[0] for r in caplog.records] == [
+        "node a not quarantined: single node (1 failures counted",
+        "node a not quarantined: single node (2 failures counted",
+    ]
     result = await _run_one(box, _request("b3"))
     assert result.validity is Validity.SUCCEEDED and result.attempts[0].sandbox.same_node is False
 
 
-async def test_an_infra_failure_on_the_only_node_is_counted_and_does_not_quarantine_it() -> None:
+async def test_an_infra_failure_on_the_only_node_does_not_quarantine_it() -> None:
     book = Blackboard()
     box = _toolbox(blackboard=book, nodes=("a",))
     box.script(lambda r: True, [Fate.INFRA, Fate.OK])
     result = await _run_one(box)
     assert result.validity is Validity.SUCCEEDED and result.attempts[0].failure_class is FailureClass.INFRA
     assert box.quarantined == set() and book.of("quarantine") == []
-    assert box.node_failures == {"a": 1}
 
 
 def test_a_fleet_of_several_nodes_is_not_a_single_node() -> None:

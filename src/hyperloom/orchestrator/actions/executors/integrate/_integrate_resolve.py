@@ -98,7 +98,7 @@ class ResolveStageMixin:
                     "specialist integrate_patch is not supported in "
                     "multi-node mode (no git-diff pod fan-out); skipped "
                     "without applying any patch. Other actions "
-                    "(baseline/profile/explore/conc_sweep/roofline) continue "
+                    "(baseline/profile/explore/roofline) continue "
                     "normally. Use the kernel-agent integrate path (which "
                     "fans out via `multi_node apply-patch`) or run single-node."
                 ),
@@ -174,7 +174,9 @@ class ResolveStageMixin:
         # integrate_patch always has its verdict persisted before the queued task
         # is created (see intent_router._handle_single_verdict), so a genuine
         # task is unaffected. No-op when SharedState is absent.
-        critic_reject = _enforce_critic_gate(shared_state, specialist_task_id)
+        # A covered step is run by Coordinator code and is never a registry row, so the forged row this gate
+        # refuses cannot be one; the bench it runs decides its KEEP.
+        critic_reject = None if attempt.covered_step else _enforce_critic_gate(shared_state, specialist_task_id)
         if critic_reject is not None:
             return critic_reject
 

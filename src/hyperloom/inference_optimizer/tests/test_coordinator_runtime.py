@@ -17,12 +17,8 @@ import pytest
 
 from hyperloom.orchestrator.actions.executors.serving import _multi_node_restart_settings
 from hyperloom.orchestrator.actions.executors import report_executor
-from hyperloom.orchestrator.roles import (
-    Backend,
-    MockBackend,
-    MockTurn,
-    ScriptedPlan,
-)
+from hyperloom.orchestrator.roles import Backend
+from hyperloom.orchestrator.tests.mock_backend import MockBackend, MockTurn, ScriptedPlan
 from hyperloom.orchestrator.loop.coordinator import Coordinator, RunOptions
 from hyperloom.orchestrator.loop._baseline_promotion import _BASELINE_FINGERPRINT_KEYS
 from hyperloom.orchestrator.loop.writeback import WritebackCollaborator
@@ -1117,22 +1113,6 @@ async def test_execution_order_does_not_deny_backends_when_trace_analyze_stale(
             assert "trace_analyze must run first" not in str(m.payload.get("hint") or m.payload.get("reason") or ""), (
                 f"trace_analyze action-layer gate fired for params despite removal: {m.payload!r}"
             )
-    finally:
-        await c.stop()
-
-
-@pytest.mark.asyncio
-async def test_orchestration_prompt_has_no_execution_checklist(session_dir):
-    """The Coordinator no longer injects an enforced next-step checklist."""
-    c = Coordinator(session_dir, backends=_build_backends({}))
-    try:
-        c.shared_state.baseline_tput = 100.0
-        c.shared_state.last_profile_trace = ""
-        c.shared_state.save(session_dir)
-
-        prompt = (await c.conversation.compose_prompt("orchestration")).text
-
-        assert "Execution checklist" not in prompt
     finally:
         await c.stop()
 
@@ -2634,12 +2614,12 @@ async def test_a_registered_run_labels_its_llm_calls_with_the_action(tmp_path):
         seen.append(current_action())
         return {}
 
-    sub.register_executor("conc_sweep", runner)
-    task, _ = await tr.create_or_return_existing(TaskSpec(kind="conc_sweep", params={}, idempotency_key="k-labelled"))
+    sub.register_executor("explore", runner)
+    task, _ = await tr.create_or_return_existing(TaskSpec(kind="explore", params={}, idempotency_key="k-labelled"))
 
     await disp.run_task_registered(task)
 
-    assert seen == ["conc_sweep"]
+    assert seen == ["explore"]
     assert current_action() == "", "the label must not outlive the action"
     db.close()
 
@@ -2795,78 +2775,20 @@ async def test_dispatch_audit_logs_task_without_executor(session_dir, caplog):
 
 
 @pytest.mark.asyncio
-async def test_a_failed_sweep_is_not_renamed_by_a_met_target(session_dir):
-    """A met target does not relabel a sweep that failed."""
-    _write_marker_target_baseline(session_dir)
-    c = Coordinator(session_dir, backends=_silent_backends())
-    c.sub.register_executor("report", report_executor)
-    c.shared_state.baseline_tput = 100.0
-    c.shared_state.cumulative_gain_validated = 50.0
-    c.shared_state.last_conc_sweep = {"status": "failed"}
-    c.shared_state.save(session_dir)
-
-    async def _ladder_already_settled(**_kwargs):
-        return None
-
-    c.phase_sweep._enqueue_internal_conc_sweep_task = _ladder_already_settled  # type: ignore[method-assign]
-    try:
-        reason = await c.run(objective=TargetGainObjective(target_gain_pct=10.0), options=RunOptions(max_ticks=6))
-        assert reason == "sweep_failed"
-        assert c.shared_state.target_reached_at
-        hops = [(r.get("to_phase"), r.get("reason")) for r in c.shared_state.phase_history]
-        assert ("SWEEP", "target_reached") in hops
-        assert ("CLOSE", "sweep_failed") in hops
-        assert ("CLOSE", "target_reached") not in hops
-    finally:
-        await c.stop()
-
-
-@pytest.mark.asyncio
-async def test_a_met_target_waits_for_the_ladder_it_routed_to(session_dir):
-    """The run must not stop on the hop into SWEEP."""
+async def test_target_reached_routes_through_cycle_end_then_close(session_dir):
+    """A met objective goes to CYCLE_END first, then closes on the target."""
     _write_marker_target_baseline(session_dir)
     c = Coordinator(session_dir, backends=_silent_backends())
     c.sub.register_executor("report", report_executor)
     c.shared_state.baseline_tput = 100.0
     c.shared_state.cumulative_gain_validated = 50.0
     c.shared_state.save(session_dir)
-
-    async def _ladder_stays_queued(**_kwargs):
-        return None
-
-    c.phase_sweep._enqueue_internal_conc_sweep_task = _ladder_stays_queued  # type: ignore[method-assign]
-    try:
-        reason = await c.run(objective=TargetGainObjective(target_gain_pct=10.0), options=RunOptions(max_ticks=6))
-        assert reason == "max_ticks"
-        assert c.shared_state.target_reached_at
-        assert c.shared_state.last_conc_sweep == {}
-        terminal = c.shared_state.phase_history[-1]
-        assert (terminal["from_phase"], terminal["to_phase"], terminal["reason"]) == ("SWEEP", "CLOSE", "max_ticks")
-    finally:
-        await c.stop()
-
-
-@pytest.mark.asyncio
-async def test_target_reached_routes_through_sweep_then_close(session_dir):
-    """A met objective goes to SWEEP first, then closes on the target."""
-    _write_marker_target_baseline(session_dir)
-    c = Coordinator(session_dir, backends=_silent_backends())
-    c.sub.register_executor("report", report_executor)
-    c.shared_state.baseline_tput = 100.0
-    c.shared_state.cumulative_gain_validated = 50.0
-    c.shared_state.last_conc_sweep = {"status": "succeeded"}
-    c.shared_state.save(session_dir)
-
-    async def _ladder_already_settled(**_kwargs):
-        return None
-
-    c.phase_sweep._enqueue_internal_conc_sweep_task = _ladder_already_settled  # type: ignore[method-assign]
     try:
         reason = await c.run(objective=TargetGainObjective(target_gain_pct=10.0), options=RunOptions(max_ticks=6))
         assert reason == "target_reached"
         assert c.shared_state.target_reached_at
         hops = [(r.get("to_phase"), r.get("reason")) for r in c.shared_state.phase_history]
-        assert ("SWEEP", "target_reached") in hops
+        assert ("CYCLE_END", "target_reached") in hops
         assert ("CLOSE", "target_reached") in hops
         assert c.shared_state.close_sequence_done is True
     finally:
@@ -2881,8 +2803,7 @@ async def test_target_reached_close_still_runs_the_post_opt_roofline(session_dir
     c.sub.register_executor("report", report_executor)
     c.shared_state.baseline_tput = 100.0
     c.shared_state.cumulative_gain_validated = 50.0
-    c.shared_state.last_conc_sweep = {"status": "succeeded"}
-    c.shared_state.optimization_stack = [{"action": "integrate", "tput": 150.0}]
+    c.shared_state.optimization_stack = [{"action": "integrate", "kernel_id": "k1", "tput": 150.0}]
     c.shared_state.save(session_dir)
 
     ran: list[str] = []
@@ -2890,10 +2811,6 @@ async def test_target_reached_close_still_runs_the_post_opt_roofline(session_dir
     async def _record_roofline() -> None:
         ran.append(str(c.shared_state.closing_phase))
 
-    async def _ladder_already_settled(**_kwargs):
-        return None
-
-    c.phase_sweep._enqueue_internal_conc_sweep_task = _ladder_already_settled  # type: ignore[method-assign]
     c.phase_close._maybe_run_close_post_opt_roofline = _record_roofline  # type: ignore[method-assign]
     try:
         reason = await c.run(objective=TargetGainObjective(target_gain_pct=10.0), options=RunOptions(max_ticks=6))

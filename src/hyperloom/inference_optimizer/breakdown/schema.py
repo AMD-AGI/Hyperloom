@@ -178,12 +178,14 @@ class V6Grading(TypedDict, total=False):
 
     ``objective`` is a start-time mode marker (``e2e_norm_intvty_p90`` on an interactivity session), not the
     promotion axis: that is ``outcome.validation.graded_on`` / ``outcome.final.graded_on``, absent when nothing
-    was adopted and the adoption axis when nothing was validated.
+    was adopted and the adoption axis when nothing was validated. ``prompt_dataset`` is present, and true, on a
+    session whose fixed rounds sent a prompt dataset: ``task_config.isl`` and ``osl`` do not describe its requests.
     """
 
     benchmark_mode: str
     objective: str
     tput_guard: V6GradingTputGuard
+    prompt_dataset: bool
 
 
 class V6WorkflowMetadata(TypedDict, total=False):

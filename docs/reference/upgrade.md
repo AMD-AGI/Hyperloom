@@ -43,6 +43,42 @@ host the CLI defaults to `session/` under the current directory instead. Prefer
 
 ---
 
+## Upgrading from 1.2.x
+
+### Required: removed flags
+
+These flags are rejected with `unrecognized arguments`:
+
+* `--proposal-scoring`, `--no-proposal-scoring` and `--proposal-scorer-models`
+  (the advisory proposal scorer is removed; while it was off they changed
+  nothing): drop them.
+
+`INFERENCE_OPTIMIZER_PROPOSAL_SCORER_TIMEOUT_SEC` is no longer read and is
+silently ignored, so drop it.
+
+### Required: `session_breakdown.json` drops `ensemble_scores`
+
+The schema stays `v6.1`, but neither a specialist round's action row nor a
+Framework run row carries `ensemble_scores` any more. Only a run launched with
+`--proposal-scoring` wrote it. The action row is closed to other properties, so
+a breakdown whose action row holds the key no longer validates against the
+packaged schema. Consumers that read it should stop.
+
+### Required: the integrate re-baseline starts with the session's memory budget
+
+`HL_INTEGRATE_VRAM_GUARD` and `HL_INTEGRATE_VRAM_UTIL_CAP` are no longer read
+and are silently ignored, so drop them. On vLLM, an integrate re-baseline now
+starts its server with the session's own `--gpu-memory-utilization`, where it
+appended `--gpu-memory-utilization 0.9` unless the integrate request set the
+flag itself. To keep a 0.9 budget, pass `--gpu-memory-utilization 0.9` in
+`--server-args`.
+
+A launch that pins `--moe-runner-backend` on a checkpoint that has no runner
+for that backend now fails its round with the server's error, where the round
+was relaunched without the flag. Fix the pin where it was set.
+
+---
+
 ## Upgrading from 1.1.x
 
 ### Required: launch through `hyperloom <command>`
@@ -92,6 +128,10 @@ These flags are rejected with `unrecognized arguments`:
   `--precision` fed the removed diffusion latency roofline: drop them.
 * `python -m hyperloom.orchestrator.trace_analysis.bypass_trace_analysis` is
   removed and fails with `No module named`; use `tracelens_analysis --route non-llm`.
+* `python -m hyperloom.measure.consistency` and
+  `python -m hyperloom.measure.consistency_resume`, the local-versus-hosted
+  consistency check, are removed and fail with `No module named`; nothing in
+  Hyperloom runs them, so drop any script that does.
 
 ### Required: the `bypass` trace-analysis route is replaced by `non-llm`
 
@@ -190,6 +230,25 @@ Pass `context` explicitly.
 
 `hyperloom optimize` no longer sets `WORKSPACE_PATH`, which nothing read.
 
+### Required: the multi-branch image check is removed
+
+A multi-branch session no longer checks the rule pack's facts against its
+environment before PRELUDE.
+
+`HYPERLOOM_IMAGE_CHECK` is no longer read and is silently ignored, so drop it:
+`strict` no longer stops a session before PRELUDE, and a value that is no mode
+is no longer refused as a usage error.
+
+`python -m hyperloom.common.outside_facts.image_check` is removed. A session no
+longer writes the `image_check` field of `MB-manifest.json` or
+`MB-reports/image_check.json`; consumers that read them should stop. A manifest
+an earlier session wrote with the field still reads.
+
+A rule pack named by `HYPERLOOM_RULE_PACK` must drop the `image_check` block of
+every entry: a pack that keeps one fails every import of
+`hyperloom.common.outside_facts` with `RulePackError`. The shipped pack is
+version 25 and no longer holds `aiter_merged_view`.
+
 ### Required: quantization failure exits 4
 
 A failed `--quantize` prelude now exits 4 instead of 3; exit 3 means only
@@ -224,6 +283,40 @@ removed from `.env` and launchers: `INFERENCE_OPTIMIZER_RAY_EXEC`,
 -916 no longer occur, and `session_breakdown.json` no longer reports the
 conc-sweep arm strategy `serving_lease_held` or the `ensure_ray` install step.
 Multi-node runs (RayJob through the Ray Dashboard) are unchanged.
+
+### Required: `SWEEP` is renamed `CYCLE_END` and runs no concurrency sweep
+
+The phase between `KERNEL_AGENT` and `CLOSE` is now `CYCLE_END`. It integrates
+pending KEEPs and validates the stack, then loops back or closes; it no longer
+dispatches a `conc_sweep` task. Update anything that matches on the old names:
+
+* The phase is `CYCLE_END` in `state.json`, `phase_history` and
+  `session_breakdown.json`.
+* It has no phase budget and no budget flag: the session budget alone gates it.
+  The SWEEP budget flag is rejected with `unrecognized arguments`, and so is
+  `--conc-sweep-total-budget-sec`. The share SWEEP held moves to the
+  optimisation phases: `FRAMEWORK_AGENT` defaults to 0.40 and `KERNEL_AGENT` to
+  0.50, what a session with the sweep off already ran with.
+* Its exit is `cycle_end_done` (also the stop reason when no further cycle
+  runs); the SWEEP stop reasons no longer occur.
+* Its predicate input is `cycle_end_result` (`settled`, `reloop`) instead of
+  `sweep_result`.
+* A session that reached it reports `outcome.stage_reached` `cycle_end` where it
+  reported `conc_sweep`.
+* The workflow-evaluation contract is `hyperloom.workflow_evaluation.v4`
+  (`workflow_contract.v4.json`); a consumer that matches the version string or
+  the SWEEP vocabulary moves to it.
+
+The concurrency sweep runs after CLOSE instead of inside the session.
+`--enable-conc-sweep` is on by default (`--no-enable-conc-sweep` turns it off),
+and `hyperloom conc-sweep SESSION_DIR` runs it by hand. It writes the same files:
+`reports/conc_sweep_summary.json`, `reports/conc_sweep_raw.csv`,
+`reports/conc_sweep_curve.png` and the `conc_sweep_summary` /
+`conc_sweep_curve_png` keys of `final.json`, and packages the session again so
+the package carries them. The `conc_sweep` timeline event of
+`session_breakdown.json` and the sweep's result in `state.json` are gone. A
+session recorded in `SWEEP` does not resume: finish it under the build that
+started it.
 
 ### Recommended: commands that stay outside `hyperloom.cli`
 

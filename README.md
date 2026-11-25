@@ -59,10 +59,10 @@ is allowed to change.
 A session is a closed loop: **input → optimize → validate → learn**.
 
 ```text
-PRELUDE → ENABLEMENT → FRAMEWORK_AGENT → KERNEL_AGENT → SWEEP → CLOSE
+PRELUDE → ENABLEMENT → FRAMEWORK_AGENT → KERNEL_AGENT → CYCLE_END → CLOSE
 ```
 
-After Sweep, the coordinator either closes or starts another cycle when budget
+After CYCLE_END, the coordinator either closes or starts another cycle when budget
 remains, the run has not converged, and roofline analysis still shows headroom.
 A hard cycle ceiling prevents unbounded looping. A new cycle resumes at the
 framework layer from the established baseline, rather than starting over.
@@ -73,7 +73,7 @@ framework layer from the established baseline, rather than starting over.
 | **Enablement** | Makes the model run at all (serving flags through targeted rebuilds), graded on runnability and accuracy. Only entered when a baseline fails; skipped on healthy runs. |
 | **Framework optimization** | Searches serving flags, precision, attention, batching, and ranked upstream diffs. |
 | **Kernel optimization** | Delegates hot kernels to one AMD backend — [GEAK](https://github.com/AMD-AGI/GEAK) or [KernelForge](https://github.com/AMD-AGI/Hyperloom/blob/main/docs/kernelforge/what-is-kernelforge.md) — then re-measures every accepted change end to end. Only one backend runs per phase. |
-| **Sweep** | Re-measures the accumulated stack across concurrency and sequence-length operating points. Skips itself when the validated gain has not moved. |
+| **Cycle end** | Integrates pending kernel KEEPs and validates the accumulated stack, then decides whether another cycle opens. |
 | **Close** | Records why the run stopped, writes the recipe knowledge base, final report, and machine-readable session artifacts. |
 
 Benchmarks are run by the coordinator, not by the model. A gain an agent predicts

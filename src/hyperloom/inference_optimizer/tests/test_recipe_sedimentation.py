@@ -10,11 +10,7 @@ from pathlib import Path
 import pytest
 
 from hyperloom.orchestrator.roles.agent_role import default_role_registry
-from hyperloom.orchestrator.roles.mock_backend import (
-    MockBackend,
-    MockTurn,
-    ScriptedPlan,
-)
+from hyperloom.orchestrator.tests.mock_backend import MockBackend, MockTurn, ScriptedPlan
 from hyperloom.orchestrator.loop.coordinator import AdvisoryServices, Coordinator
 from hyperloom.orchestrator.knowledge.recipe_kb import LocalRecipeStore, RecipeKB, RecipeUpsert
 from hyperloom.orchestrator.knowledge.recipe_journal import (
@@ -400,17 +396,6 @@ def test_gap_provenance_round_trips_through_serialization(tmp_path):
     assert restored.gaps[0]["provenance"] == "https://pr/9"
 
 
-def test_research_hints_suppress_cold_start():
-    from hyperloom.orchestrator.specialists.prompt_inputs import SpecialistPromptInputs
-    from hyperloom.orchestrator.prompts.specialist_context_sections import _is_cold_start
-
-    inp = SpecialistPromptInputs(
-        domain="serving_specialist",
-        research_hints="- enable MTP (source=https://pr/1)",
-    )
-    assert _is_cold_start(inp) is False
-
-
 def test_kb_section_renders_research_hints_when_kb_empty():
     from hyperloom.orchestrator.specialists.prompt_inputs import SpecialistPromptInputs
     from hyperloom.orchestrator.prompts.specialist_context_sections import _section_kb_context
@@ -422,7 +407,6 @@ def test_kb_section_renders_research_hints_when_kb_empty():
     text = "\n".join(_section_kb_context(inp))
     assert "research scout collected source-backed priors" in text
     assert "enable MTP" in text
-    assert "COLD-START MODE" not in text
 
 
 def test_scout_focus_lists_already_proven():

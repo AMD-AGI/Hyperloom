@@ -256,11 +256,8 @@ def _silent_intent() -> Intent:
 
 @pytest.fixture
 def coordinator_with_mocks(session_dir):
-    from hyperloom.orchestrator.roles import (
-        MockBackend,
-        MockCriticBackend,
-        ScriptedPlan,
-    )
+    from hyperloom.orchestrator.roles import MockCriticBackend
+    from hyperloom.orchestrator.tests.mock_backend import MockBackend, ScriptedPlan
     from hyperloom.orchestrator.loop.coordinator import Coordinator
 
     silent = ScriptedPlan(turns=[], default_intent=_silent_intent())
@@ -617,7 +614,7 @@ async def test_running_tasks_reader_reports_in_flight_task(coordinator_with_mock
     [
         ("FRAMEWORK_AGENT", ("explore", "integrate_patch"), "integrate_patch dispatches before any queued explore"),
         ("FRAMEWORK_AGENT", ("explore",), None),
-        ("SWEEP", ("explore", "integrate_patch"), None),
+        ("CYCLE_END", ("explore", "integrate_patch"), None),
     ],
 )
 async def test_running_tasks_reader_states_the_backlog_dispatch_order(coordinator_with_mocks, phase, kinds, order_note):

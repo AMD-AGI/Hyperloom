@@ -114,7 +114,7 @@ WORKLOAD_ARGS = [
 ]  # fmt: skip
 #: The settings :data:`~hyperloom_multibranch.tests.test_skeleton.SETTINGS` holds, as the command line spells them.
 SESSION_ARGS = [
-    "--max-hours", "0.5", "--max-branches", "3", "--max-k-per-branch", "2", "--max-parallel-tests", "8",
+    "--max-hours", "0.5", "--max-branches", "3", "--max-k-per-branch", "2", "--max-parallel-tests", "2",
     "--judge-interval-sec", "600",
 ]  # fmt: skip
 STALLED = "stalled past the bar"
@@ -500,14 +500,39 @@ async def test_with_too_little_of_explore_left_for_a_first_commit_every_refill_t
     assert "b03" not in await _stops(stage)
 
 
+async def test_a_slot_freed_once_too_little_of_explore_is_left_for_a_first_commit_opens_for_no_unheld_direction(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    archive = _archive(tmp_path, monkeypatch)
+    numbers = replaced(H0, last_open_minutes=240.0, grace_tests=1, probation_share=0.0).numbers
+    _crowned(archive, Playbook("open-early", numbers, parent=H0.label))
+    stage = _stage(tmp_path)
+    stage.settings = replace(SETTINGS, max_hours=2.0)
+    stage.judge = PlaybookJudge(insist=frozenset({"b02"}))
+    stage.scripts = {"b01": (tagged("c1"),), "b02": FLAT[:2]}
+
+    outcome = await stage.run()
+
+    assert outcome.exit_code == 0
+    opening, *steering = [_judge_state(prompt) for prompt in _judge_prompts(stage)]
+    assert opening["undealt_directions"] and "b03" in await _stops(stage)
+    assert (await _stops(stage))["b02"] == f"judge: {INSISTED}"
+    in_time = [state for state in steering if state["explore_remaining_seconds"] >= state["min_useful_seconds"]]
+    assert any(state["free_branch_slots"] == 1 for state in in_time)
+    assert all(state["undealt_directions"] == [] for state in steering)
+    assert "b04" not in await _stops(stage)
+    assert not [row for row in _decisions(stage) if row["reason"] == PLAYBOOK_OPEN_CUT_REASON]
+
+
 def _focused_stage(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, judge: PlaybookJudge) -> Stage:
-    """A session on the root's profile of ``moe_gemm`` and ``attention`` with room for four branches, whose branches
-    test on without a commit, under a champion whose stall bar no branch reaches."""
+    """A session on the root's profile of ``moe_gemm`` and ``attention`` with room for four branches and one test at a
+    time, so its judge may open one branch alone, whose branches test on without a commit, under a champion whose
+    stall bar no branch reaches."""
 
     archive = _archive(tmp_path, monkeypatch)
     _crowned(archive, Playbook("no-stall", replaced(H0, stall_tests=20).numbers, parent=H0.label))
     stage = _stage(tmp_path)
-    stage.settings = replace(SETTINGS, caps=RosterCaps(4, 2, 8), judge_interval_seconds=200.0)
+    stage.settings = replace(SETTINGS, caps=RosterCaps(4, 2, 1), judge_interval_seconds=200.0)
     stage.toolbox_type = ProfilingToolbox
     stage.judge = judge
     stage.scripts = dict.fromkeys(("b01", "b02", "b03", "b04"), FLAT)

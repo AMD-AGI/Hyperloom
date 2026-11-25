@@ -64,11 +64,6 @@ class ScenarioExhausted(ScenarioError):
     """The round asked for more launches than the scenario described."""
 
 
-def _label(attempt: LaunchAttempt) -> str:
-    """Return the attempt's name, falling back to its outcome when unnamed."""
-    return attempt.name or attempt.outcome
-
-
 def _returncode(attempt: LaunchAttempt) -> int:
     """Return the attempt's declared returncode, or the one it implies."""
     if attempt.returncode is not None:
@@ -192,7 +187,7 @@ def _failed_course(attempt: LaunchAttempt, config: SuiteConfig) -> _Course:
     stage = attempt.failed_stage
     returncode = _returncode(attempt)
     if not _serves(config) or (stage is not None and stage > LadderStage.GENERATES):
-        raise ScenarioError(f"attempt {_label(attempt)!r} fails at a stage a {config.workload.value} round never plays")
+        raise ScenarioError(f"attempt {attempt.outcome!r} fails at a stage a {config.workload.value} round never plays")
     if stage is LadderStage.ARGV_PARSE:
         refusal = _Stop(FailedStep.FLAG_UNKNOWN, attempt.rendered_stderr())
         return _Course(end_sec=attempt.duration_sec, stop=refusal, prelaunch=True)
@@ -206,7 +201,7 @@ def _failed_course(attempt: LaunchAttempt, config: SuiteConfig) -> _Course:
         )
     if not _boots(config):
         raise ScenarioError(
-            f"attempt {_label(attempt)!r} fails a boot, but a {config.lifecycle.mode.value} round boots none"
+            f"attempt {attempt.outcome!r} fails a boot, but a {config.lifecycle.mode.value} round boots none"
         )
     return _Course(end_sec=attempt.duration_sec, stop=_exited_before_ready(returncode), log=attempt.rendered_log())
 
@@ -294,7 +289,7 @@ class ScriptedRounds:
         budget_left = self._budget_left(config.deadlines.deadline_unix)
         if self.exhausted:
             raise ScenarioExhausted(
-                f"scenario {self.scenario.name or '<unnamed>'} described {len(self.scenario.attempts)} attempts; "
+                f"the scenario described {len(self.scenario.attempts)} attempts; "
                 f"round {len(self.calls) + 1} was requested"
             )
         attempt = self.scenario.attempts[len(self.calls)]

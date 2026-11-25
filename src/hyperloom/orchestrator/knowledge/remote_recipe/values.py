@@ -35,7 +35,7 @@ from hyperloom.orchestrator.lever import (
     patch_lever_kind,
     patch_owner_phase,
 )
-from ._vendor.kb_store_client import KBStoreError
+from hyperloom_common.kb_store import KBStoreError
 from .models import (
     CONFIG_SECTION,
     KERNEL_SECTION,
@@ -87,7 +87,7 @@ _SOURCE_METADATA_KEYS = (
     "target_file",
     "target_files",
 )
-_IGNORED_ACTIONS = {"replay_warm_recipe", "profile", "roofline", "conc_sweep", "sweep"}
+_IGNORED_ACTIONS = {"replay_warm_recipe", "profile", "roofline", "sweep"}
 _OVERLAY_REF_RE = re.compile(r"^patch/overlays/(\d{6})/(\d+)-([^/]+)\.patch$")
 _OVERLAY_NAME_RE = re.compile(r"[^A-Za-z0-9._-]+")
 

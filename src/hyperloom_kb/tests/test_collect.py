@@ -343,6 +343,12 @@ def test_document_skip_rule_blocks_every_unit() -> None:
     assert report["counts"]["units"] == 2
 
 
+def test_a_session_that_sent_a_prompt_dataset_publishes_nothing_under_the_random_prompt_identity() -> None:
+    document = _sbd(_attempt("a"))
+    document["metadata"]["grading"]["prompt_dataset"] = True
+    assert _dry(document)["blocked_reason"] == "dataset_experience_identity_not_supported"
+
+
 @pytest.mark.parametrize("objective", ["e2e_norm_intvty_p90", ""])
 def test_a_session_not_graded_on_throughput_publishes_nothing(objective: str) -> None:
     report = _dry(_sbd(_attempt("a"), objective=objective))

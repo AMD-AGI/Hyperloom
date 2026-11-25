@@ -62,6 +62,9 @@ from inference_suite.recipe.model import (
     ATOM_ENTRYPOINT,
     ATOM_RUNNER_OWNED,
     ATOM_TOPOLOGY,
+    LLAMACPP_ENTRYPOINT,
+    LLAMACPP_RUNNER_OWNED,
+    LLAMACPP_TOPOLOGY,
     SGLANG_ENTRYPOINT,
     SGLANG_RUNNER_OWNED,
     SGLANG_TOPOLOGY,
@@ -83,11 +86,26 @@ from inference_suite.recipe.vllm_recipes import VllmRecipesSnapshot, vllm_recipe
 _FIELDS = ContractFields(RecipeSourceError)
 _T = TypeVar("_T")
 
-_ENTRYPOINTS = {"sglang": SGLANG_ENTRYPOINT, "vllm": VLLM_ENTRYPOINT, "atom": ATOM_ENTRYPOINT}
-_RUNNER_OWNED = {"sglang": SGLANG_RUNNER_OWNED, "vllm": VLLM_RUNNER_OWNED, "atom": ATOM_RUNNER_OWNED}
+_ENTRYPOINTS = {
+    "sglang": SGLANG_ENTRYPOINT,
+    "vllm": VLLM_ENTRYPOINT,
+    "atom": ATOM_ENTRYPOINT,
+    "llamacpp": LLAMACPP_ENTRYPOINT,
+}
+_RUNNER_OWNED = {
+    "sglang": SGLANG_RUNNER_OWNED,
+    "vllm": VLLM_RUNNER_OWNED,
+    "atom": ATOM_RUNNER_OWNED,
+    "llamacpp": LLAMACPP_RUNNER_OWNED,
+}
 #: The GPU masks the runner sets for each server it starts; a source's own are stripped.
 _RUNNER_OWNED_ENV = frozenset({"CUDA_VISIBLE_DEVICES", "HIP_VISIBLE_DEVICES", "ROCR_VISIBLE_DEVICES"})
-_TOPOLOGY = {"sglang": SGLANG_TOPOLOGY, "vllm": VLLM_TOPOLOGY, "atom": ATOM_TOPOLOGY}
+_TOPOLOGY = {
+    "sglang": SGLANG_TOPOLOGY,
+    "vllm": VLLM_TOPOLOGY,
+    "atom": ATOM_TOPOLOGY,
+    "llamacpp": LLAMACPP_TOPOLOGY,
+}
 _NO_KV_OFFLOADING = "none"
 
 
@@ -376,7 +394,7 @@ def _recipe_base(
     return BaseLaunch(
         query=query,
         source=launch.source,
-        point=LaunchPoint(launch.conc, launch.exact, alternatives),
+        point=LaunchPoint(launch.conc, launch.exact, alternatives, launch.source_concs),
         image=recipe_image_facts(launch.image, snapshot.latest_releases.get(launch.framework)),
         framework=launch.framework,
         entrypoint=launch.entrypoint,

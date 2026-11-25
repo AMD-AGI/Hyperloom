@@ -99,14 +99,6 @@ def test_the_anthropic_endpoint_and_credential_are_never_borrowed(clean_env):
     )
 
 
-def test_retired_keys_are_not_credentials(clean_env):
-    """SAFE_API_KEY and FORGE_API_KEY no longer authenticate anything."""
-    clean_env.setenv("OPENAI_BASE_URL", "https://gw.example/v1")
-    clean_env.setenv("SAFE_API_KEY", "safe")
-    clean_env.setenv("FORGE_API_KEY", "forge")
-    assert not resolve_openai_gateway().is_complete()
-
-
 # ── headers ──────────────────────────────────────────────────────────────────
 def test_expand_env_refs(monkeypatch):
     """Shared by both lines: one parses headers here, the other hands them off."""

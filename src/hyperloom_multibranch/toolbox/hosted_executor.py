@@ -64,7 +64,6 @@ from hyperloom.measure.phases import RESULT_READ, account
 from hyperloom.measure.points import AcceptedMeasurement
 from hyperloom.measure.profile_traces import PROFILE_DIR, has_step_traces, has_traces, is_trace_file
 from hyperloom.measure.repro import REPRO_DIR, VERDICT_FILE, ReproError, read_verdict
-from hyperloom.measure.consistency import SessionNotMeasurable, session_facts
 from hyperloom.measure.socket import (
     MeasurementTimeout,
     RoundOutcome,
@@ -74,9 +73,9 @@ from hyperloom.measure.socket import (
     TestMeta,
     TestOutcome,
 )
-from hyperloom.orchestrator.actions.executors import is_round_folder
+from hyperloom.orchestrator.actions.executors import is_round_folder, staged_tool_cache
 from hyperloom.orchestrator.actions.executors.benchmark_result import extract_benchmark_measurement
-from hyperloom.orchestrator.state.base_launch import BaseLaunchMismatch
+from hyperloom.orchestrator.state.base_launch import BaseLaunchMismatch, frozen_base
 from hyperloom_multibranch.contracts.gate import ResultUnverified
 from hyperloom_multibranch.contracts.toolbox import WorkloadKind
 from hyperloom_multibranch.toolbox.acceptance import backend_kind
@@ -97,12 +96,15 @@ from hyperloom_multibranch.toolbox import long_context
 from hyperloom_multibranch.toolbox.merge_smoke import MERGE_SMOKE, SMOKE_NOT_RUN, MergeSmoke, SmokeNotRun
 from hyperloom_multibranch.toolbox.short_prompts import consistency_of, rederive
 from hyperloom_multibranch.toolbox.table_hits import read_table_hits, runtime_findings
+from inference_suite import StagingError, normalised_manifest
 
 __all__ = [
     "DEFAULT_TEST_TIMEOUT_SEC",
     "HostedExecutor",
     "OUTPUTS_DIR",
+    "SessionNotMeasurable",
     "TEST_SILENCE_TIMEOUT_SEC",
+    "session_facts",
 ]
 
 log = logging.getLogger(__name__)
@@ -134,6 +136,32 @@ PROFILE_WITHOUT_STEPS = (
     "step (the server log says whether 'Profiling starts' followed /start_profile)"
 )
 _CONTROL_CHARS = re.compile(r"[\x00-\x1f\x7f]+")
+
+
+class SessionNotMeasurable(ValueError):
+    """The session froze no base launch, or the application's tool cache holds no staging this interpreter can identify."""
+
+
+def session_facts(session: Path) -> SessionFacts:
+    """What every test of the session at ``session`` carries: its frozen base launch, and the normalised manifest of the
+    inference_suite staging the application's tool cache holds. A v2 sheet needs both, so a session missing either is
+    refused before any test.
+
+    Raises:
+        SessionNotMeasurable: The session froze no base, or the tool cache holds no staging this interpreter can
+            identify: none, one that is not what its lock pins, or this interpreter's lm-eval is off the pin.
+        BaseLaunchMismatch: The session's ``base_launch.json`` is not the base it recorded, or its client is off the
+            InferenceX pin.
+    """
+    frozen = frozen_base(session)
+    if frozen is None:
+        raise SessionNotMeasurable(f"the session {session} froze no base launch")
+    tool_cache = staged_tool_cache()
+    try:
+        staging = normalised_manifest(tool_cache)
+    except StagingError as exc:
+        raise SessionNotMeasurable(f"the inference_suite staging in {tool_cache} cannot be identified: {exc}") from exc
+    return SessionFacts(staging=staging, base_launch=frozen.launch)
 
 
 class _Span(NamedTuple):

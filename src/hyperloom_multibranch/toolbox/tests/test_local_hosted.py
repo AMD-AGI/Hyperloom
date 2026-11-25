@@ -576,7 +576,7 @@ def _require_tool_checkout(repo: Path, commit: str, home: Path, monkeypatch: pyt
     stage_runner_cache(home.parent, monkeypatch)
     pin_inferencex_at(commit, monkeypatch)
     try:
-        ensure_inferencex(commit, home / "cache")
+        ensure_inferencex(commit, home / "cache", home / "store")
     except ToolError as error:
         pytest.fail(
             f"this machine cannot check the stand-in InferenceX repository out, so no runner can start: {error}"

@@ -232,6 +232,14 @@ def test_the_minimal_spec_leaves_everything_else_to_optimize():
     ]
 
 
+def test_the_conc_sweep_is_turned_off_only_when_the_spec_says_false():
+    unset = optimize_args(parse_campaign(MINIMAL))
+    on = optimize_args(parse_campaign(_with(MINIMAL, "options", {"conc_sweep": True})))
+    off = optimize_args(parse_campaign(_with(MINIMAL, "options", {"conc_sweep": False})))
+    assert "--no-enable-conc-sweep" not in unset and "--no-enable-conc-sweep" not in on
+    assert "--no-enable-conc-sweep" in off
+
+
 def test_the_plug_profile_and_session_dir_are_appended_when_given():
     argv = optimize_args(parse_campaign(MINIMAL), plug_profile="hosted-gpu", session_dir="/w/m/s")
     assert argv[-2:] == ["--plug-profile=hosted-gpu", "--session-dir=/w/m/s"]

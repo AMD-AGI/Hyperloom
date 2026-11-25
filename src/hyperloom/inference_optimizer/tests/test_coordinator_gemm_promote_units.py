@@ -26,7 +26,7 @@ from hyperloom.orchestrator.loop.coordinator import Coordinator
 from hyperloom.orchestrator.phases.kernel import KernelPhase
 import hyperloom.orchestrator.phases.machine_state as machine_state_mod
 from hyperloom.orchestrator.phases.machine_state import LifecycleMark, record_lifecycle_event
-from hyperloom.orchestrator.roles import MockBackend, ScriptedPlan
+from hyperloom.orchestrator.tests.mock_backend import MockBackend, ScriptedPlan
 from hyperloom.orchestrator.state.shared_state import SharedState
 from hyperloom.orchestrator.kernel import integrate_accuracy as integrate_accuracy
 from hyperloom.orchestrator.kernel import _integrate_payload as integrate_payload

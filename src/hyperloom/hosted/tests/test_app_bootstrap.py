@@ -127,6 +127,60 @@ def test_a_user_data_path_this_account_cannot_write_ends_the_run_for_good_naming
     )
 
 
+# -- a data root the deployment names in place of the host's USER_DATA_PATH ----------------------------------------
+@pytest.mark.skipif(Path("/opt/venv/bin/python").exists(), reason="the image's framework Python takes precedence")
+def test_a_data_root_the_deployment_names_is_the_entrys_user_data_path(tmp_path, source):
+    root = tmp_path / "shared-root"
+    seen = tmp_path / "entry-user-data-path"
+    code, stderr, _, calls = _framework_run(
+        tmp_path, source, HYPERLOOM_USER_DATA_PATH=str(root), FAKE_ENV_LOG=str(seen)
+    )
+    assert code == 0, stderr
+    assert calls[-1] == "-m hyperloom hosted run"
+    assert seen.read_text().strip() == str(root)
+    assert root.is_dir() and list(root.iterdir()) == [], "made and checked, nothing left in it"
+    assert not (tmp_path / "data").exists(), "the host's USER_DATA_PATH is not touched"
+    assert f"USER_DATA_PATH is {root} (HYPERLOOM_USER_DATA_PATH; was {tmp_path / 'data'})" in stderr
+
+
+@pytest.mark.parametrize("named", ["", None])
+@pytest.mark.skipif(Path("/opt/venv/bin/python").exists(), reason="the image's framework Python takes precedence")
+def test_without_a_named_data_root_the_hosts_user_data_path_stands(tmp_path, source, named):
+    seen = tmp_path / "entry-user-data-path"
+    env = {"FAKE_ENV_LOG": str(seen)}
+    if named is not None:
+        env["HYPERLOOM_USER_DATA_PATH"] = named
+    code, stderr, _, _ = _framework_run(tmp_path, source, **env)
+    assert code == 0, stderr
+    assert seen.read_text().strip() == str(tmp_path / "data")
+    assert "HYPERLOOM_USER_DATA_PATH" not in stderr
+
+
+def test_a_named_data_root_this_account_cannot_write_ends_the_run_for_good_naming_it(tmp_path):
+    root = tmp_path / "shared-root"
+    root.write_text("")  # no account can create a file in it
+    code, exit_file, stderr = _bootstrap(
+        tmp_path,
+        HYPERLOOM_SOURCE_REPO="o/r",
+        HYPERLOOM_SOURCE_SHA=_SHA,
+        HYPERLOOM_USER_DATA_PATH=str(root),
+        PYTHON=sys.executable,
+    )
+    _expect_final(
+        code, exit_file, stderr, f"USER_DATA_PATH {root} cannot be written by this account (uid {os.geteuid()})"
+    )
+    assert not (tmp_path / "data").exists()
+
+
+def test_a_relative_named_data_root_ends_the_run_for_good(tmp_path):
+    _expect_final(
+        *_bootstrap(
+            tmp_path, HYPERLOOM_SOURCE_REPO="o/r", HYPERLOOM_SOURCE_SHA=_SHA, HYPERLOOM_USER_DATA_PATH="relative"
+        ),
+        "USER_DATA_PATH is not an absolute path",
+    )
+
+
 def test_a_state_dir_this_account_cannot_write_is_said_on_stderr_only(tmp_path):
     state = tmp_path / "state-file"
     state.write_text("")
@@ -169,13 +223,15 @@ def test_a_directory_put_where_exit_json_goes_is_never_written_into(tmp_path):
 
 _STUB = """#!/bin/bash
 # A stand-in for the framework Python: answers the probes and records every other call; FAKE_PROBE_FAILS makes the
-# writability probe fail as a Python that does not run would, FAKE_VENV_FAILS makes `-m venv` fail after its record.
+# writability probe fail as a Python that does not run would, FAKE_VENV_FAILS makes `-m venv` fail after its record;
+# FAKE_ENV_LOG, when set, receives the USER_DATA_PATH the entry is started with.
 if [[ "$1" == "-c" ]]; then
   [[ "$2" != *W_OK* || -z "${FAKE_PROBE_FAILS:-}" ]] || exit 1
   case "$2" in *W_OK*) echo "${FAKE_WRITABLE:-1}" ;; *base_prefix*) echo 1 ;; *) echo "$FAKE_PREFIX" ;; esac
   exit 0
 fi
 echo "$*" >>"$FAKE_LOG"
+[[ "$*" != "-m hyperloom hosted run" || -z "${FAKE_ENV_LOG:-}" ]] || echo "$USER_DATA_PATH" >"$FAKE_ENV_LOG"
 [[ "$1 $2" != "-m venv" || -z "${FAKE_VENV_FAILS:-}" ]] || exit 1
 if [[ " $* " == *" wheel "* ]]; then
   while [[ "$1" != "-w" ]]; do shift; done

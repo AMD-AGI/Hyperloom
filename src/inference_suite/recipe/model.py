@@ -118,6 +118,11 @@ ATOM_ENTRYPOINT = _entrypoint(Framework.ATOM)
 ATOM_RUNNER_OWNED = _runner_owned(Framework.ATOM)
 ATOM_TOPOLOGY = TopologySpelling(tp=("-tp", _TENSOR_PARALLEL_SIZE), ep_switch=("--enable-expert-parallel",))
 
+LLAMACPP_ENTRYPOINT = _entrypoint(Framework.LLAMACPP)
+LLAMACPP_RUNNER_OWNED = _runner_owned(Framework.LLAMACPP)
+#: llama-server spreads one replica's layers over every card it sees and has no TP size, so every launch reads tp 1.
+LLAMACPP_TOPOLOGY = TopologySpelling(tp=())
+
 
 def boards_interchangeable(board: str, other: str) -> bool:
     """Whether a launch tuned on ``other`` runs as tuned on ``board``: the same architecture and HBM capacity."""
@@ -309,6 +314,7 @@ class SourceLaunch:
     ``conc`` is the source point's concurrency and ``exact`` whether that is the one the query asked for. ``args``
     and ``env`` carry no runner-owned keys; ``stripped`` names what was taken out for that reason. ``client_env`` is
     the load generator's environment the source pairs with the launch, the point's own workload settings left out.
+    ``source_concs`` are the concurrencies, ascending, the source publishes for the launch's arm; empty for none.
     """
 
     source: LaunchSource
@@ -325,6 +331,7 @@ class SourceLaunch:
     kv_offloading: str = "none"
     stripped: tuple[str, ...] = ()
     warnings: tuple[str, ...] = ()
+    source_concs: tuple[int, ...] = ()
 
     @property
     def cards(self) -> int:
@@ -357,6 +364,9 @@ __all__ = [
     "ApiResponse",
     "InferencexSelection",
     "InferencexSnapshot",
+    "LLAMACPP_ENTRYPOINT",
+    "LLAMACPP_RUNNER_OWNED",
+    "LLAMACPP_TOPOLOGY",
     "RecipeSourceError",
     "RepoBundle",
     "SGLANG_ENTRYPOINT",

@@ -10,10 +10,7 @@ from pathlib import Path
 
 import pytest
 
-from hyperloom.orchestrator.roles import (
-    MockBackend,
-    ScriptedPlan,
-)
+from hyperloom.orchestrator.tests.mock_backend import MockBackend, ScriptedPlan
 from hyperloom.orchestrator.actions.executors import report_executor
 from hyperloom.orchestrator.loop import coordinator as coordinator_mod
 from hyperloom.orchestrator.loop.coordinator import Coordinator, RunOptions
@@ -237,8 +234,8 @@ async def test_run_stops_on_max_ticks(session_dir):
 
 
 @pytest.mark.asyncio
-async def test_run_routes_a_met_objective_through_sweep(session_dir):
-    """A met target marks the session and leaves through SWEEP, not straight to CLOSE."""
+async def test_run_routes_a_met_objective_through_cycle_end(session_dir):
+    """A met target marks the session and leaves through CYCLE_END, not straight to CLOSE."""
     c = Coordinator(session_dir, backends=_backends_silent())
     try:
         c.shared_state.baseline_tput = 1000.0
@@ -246,10 +243,8 @@ async def test_run_routes_a_met_objective_through_sweep(session_dir):
         c.shared_state.save(session_dir)
         reason = await c.run(objective=TargetGainObjective(target_gain_pct=10.0), options=RunOptions(max_ticks=10))
         assert c.shared_state.target_reached_at
-        assert [row.get("to_phase") for row in c.shared_state.phase_history].count("SWEEP") == 1
-        # The ladder never ran in this harness, so SWEEP names its own failure rather than borrowing the target's
-        # success.
-        assert reason == "sweep_failed"
+        assert [row.get("to_phase") for row in c.shared_state.phase_history].count("CYCLE_END") == 1
+        assert reason == "target_reached"
     finally:
         await c.stop()
 

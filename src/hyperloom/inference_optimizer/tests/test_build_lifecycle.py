@@ -529,7 +529,7 @@ async def test_spawn_failure_marks_row_failed(build_coord, tmp_path, monkeypatch
 
 def _silent_plan():
     from hyperloom.inference_optimizer.protocol.intent import Intent, IntentType
-    from hyperloom.orchestrator.roles import ScriptedPlan
+    from hyperloom.orchestrator.tests.mock_backend import ScriptedPlan
 
     return ScriptedPlan(
         turns=[],
@@ -538,7 +538,7 @@ def _silent_plan():
 
 
 def _build_backends():
-    from hyperloom.orchestrator.roles import MockBackend
+    from hyperloom.orchestrator.tests.mock_backend import MockBackend
 
     return {name: MockBackend(_silent_plan(), name=name) for name in ("orchestration", "critic")}
 

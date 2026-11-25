@@ -5,9 +5,9 @@
 
 Whether a branch may be opened at all is the roster's answer (its free slots, a closed roster, a stopping session).
 The signals here are what the judge weighs, never a cap the scheduler enforces: whether a branch opened now has the
-time and the test capacity to show progress, as the least EXPLORE time a new branch needs to show a trend and how many
-more tests the toolbox would run at once. A branch opened after the opening batch is briefed on a focus: the op the
-judge names for it, or else one of the ops the session ranks for a new branch.
+time to show progress and how long its tests would wait, as the least EXPLORE time a new branch needs to show a trend
+and how many more tests the toolbox would run at once. A branch opened after the opening batch is briefed on a focus:
+the op the judge names for it, or else one of the ops the session ranks for a new branch.
 """
 
 from __future__ import annotations

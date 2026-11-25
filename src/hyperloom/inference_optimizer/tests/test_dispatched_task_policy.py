@@ -20,10 +20,10 @@ from hyperloom.orchestrator.loop.sub_agent_runner import SubAgentRunner
 from hyperloom.orchestrator.policy.denial import PolicyDenied
 from hyperloom.orchestrator.policy.gate import PolicyGate
 from hyperloom.orchestrator.policy.projection import ResourceFacts
-from hyperloom.orchestrator.roles import MockBackend, ScriptedPlan
 from hyperloom.orchestrator.roles.agent_role import default_role_registry
 from hyperloom.orchestrator.state.shared_state import SharedState
 from hyperloom.orchestrator.state.task_registry import TaskRegistry, TaskSpec
+from hyperloom.orchestrator.tests.mock_backend import MockBackend, ScriptedPlan
 
 
 def _warm_replay_dispatch_params(
@@ -184,21 +184,6 @@ async def test_dispatch_denied_baseline_is_not_charged_to_baseline_failures(sess
     ("kind", "params", "state_fields"),
     [
         pytest.param("roofline", {"reason": "prelude_bootstrap"}, {}, id="internal_roofline"),
-        pytest.param(
-            "conc_sweep",
-            {"reason": "phase_entry"},
-            # The phase-entry conc_sweep is already on record, so re-running the LLM singleton check would deny this row.
-            {
-                "phase": "SWEEP",
-                "phase_history": [
-                    {
-                        "to_phase": "SWEEP",
-                        "evidence": {"auto_conc_sweep_task_id": "internal-conc_sweep-phase_entry"},
-                    }
-                ],
-            },
-            id="auto_enqueued_conc_sweep_singleton",
-        ),
         pytest.param(
             "recover",
             {"reason": "gpu_memory_leaked", "evidence": {"per_gpu": [{"gpu_id": 0, "free_mb": 0.0}]}},

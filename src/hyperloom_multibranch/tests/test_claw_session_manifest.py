@@ -49,8 +49,7 @@ async def _resume(stage: Stage) -> Stage:
 
     persisted = await asyncio.to_thread(resumable_run, stage.layout.root)
     resumed = _resumed(stage, persisted.settings)
-    with resumed._polls_on_virtual_time() as patch:
-        patch.setattr(lifecycle, "run_image_check", resumed.image_check)
+    with resumed._polls_on_virtual_time():
         deadline = deadline_after_downtime(resumed.layout, resumed.time.now())
         await resumed._session().resume(persisted.ended, deadline)
     return resumed

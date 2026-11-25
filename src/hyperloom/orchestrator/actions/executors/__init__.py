@@ -6,7 +6,6 @@
 from ._proposal_identity import content_fingerprint, controls_of, is_executable, normalize_proposal
 from .baseline import baseline_executor
 from .explore import explore_executor
-from .conc_sweep import conc_sweep_executor
 from .report import report_executor
 from .session_breakdown import session_breakdown_executor
 from .target_analysis import TargetAnalysisExecutor
@@ -41,6 +40,7 @@ from ._suite.rounds import TOOL_CACHE_ENV, SuiteRoundRefused, external_agentx_co
 from .framework_change._spec_decode_context_copy import CONTEXT_COPY_REFUSAL, context_copy_refusal
 from .framework_change._spec_decode_pin import (
     SpeculativeDecodingPinnedError,
+    declared_acceptance_reason,
     refuse_unpinned_speculative_change,
     speculative_pin_reason,
 )
@@ -80,7 +80,6 @@ __all__ = [
     "TargetAnalysisExecutor",
     "VariantResult",
     "baseline_executor",
-    "conc_sweep_executor",
     "content_fingerprint",
     "controls_of",
     "context_copy_refusal",
@@ -96,6 +95,7 @@ __all__ = [
     "materialize_benchmark_config",
     "normalize_proposal",
     "read_round_launch",
+    "declared_acceptance_reason",
     "refuse_cacheless_agentx_baseline",
     "refuse_unpinned_speculative_change",
     "report_executor",
