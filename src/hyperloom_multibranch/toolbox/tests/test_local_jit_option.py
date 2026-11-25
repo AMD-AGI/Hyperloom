@@ -22,12 +22,13 @@ from typing import Any
 import pytest
 
 from hyperloom.measure.runner.jit import JIT_CACHE_ENV
-from hyperloom_multibranch.toolbox.jit_store import JIT_STORE_NOTE
+from hyperloom_multibranch.toolbox.jit_store import JIT_STORE_NOTE, REFUSED_LOCAL
 from hyperloom_multibranch.toolbox.local_hosted import (
     DEFAULT_JIT_STORE,
     JIT_STORE_ENV,
     LocalHostedToolbox,
     LocalOptions,
+    aiter_builds_missing,
     jit_store_root,
 )
 from hyperloom_multibranch.toolbox.tests.helpers import lineage_blackboard
@@ -171,7 +172,27 @@ async def _refused_build(tmp_path: Path, **extra: Any) -> str:
     assert JIT_CACHE_ENV not in _runner_env(toolbox) and JIT_CACHE_ENV not in branch_env, "nor read"
     note = json.loads((tmp_path / "session" / JIT_STORE_NOTE).read_text())
     assert note["published"] is False
+    assert (
+        note["without"] == REFUSED_LOCAL and "candidates that patch aiter's csrc or hsa are refused" in note["without"]
+    )
     return str(note["reason"])
+
+
+async def test_a_store_that_cannot_be_made_is_refused_and_the_session_refuses_candidates_that_patch_aiters_sources(
+    tmp_path: Path,
+) -> None:
+    """A name below a file raises NotADirectoryError as the store is made: the session runs on without the store, and
+    without it no test has an aiter JIT directory, so acceptance refuses a ``csrc`` or ``hsa`` patch for the session."""
+    blocker = tmp_path / "a-file"
+    blocker.write_text("not a directory")
+
+    toolbox, _ = await _closing_build(tmp_path, jit_store=blocker / "store")
+
+    assert toolbox.backend._config.jit_store is None, "nothing is published"
+    note = json.loads((tmp_path / "session" / JIT_STORE_NOTE).read_text())
+    assert f"{blocker / 'store'} cannot be made or checked (NotADirectoryError" in note["reason"]
+    assert note["without"] == REFUSED_LOCAL
+    assert toolbox._acceptance._aiter_builds_missing == aiter_builds_missing({})
 
 
 async def test_a_store_another_account_owns_is_refused(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

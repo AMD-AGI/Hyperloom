@@ -60,7 +60,7 @@ def with_cache_states(
     differ = cache_states_differ(candidates, parents)
     if not differ:
         return judgement
-    logger.warning(
+    logger.info(
         "%s met the compiled-code cache otherwise than its parent's tests (%s): its boot, and any kernel first built "
         "after warm-up, differ",
         judgement.request_ids[0] if judgement.request_ids else "the candidate",

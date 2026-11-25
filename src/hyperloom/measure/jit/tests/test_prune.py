@@ -11,6 +11,7 @@ which the tests set as the host's stamp of its last use would.
 from __future__ import annotations
 
 import hashlib
+import itertools
 import os
 import time
 from pathlib import Path
@@ -193,7 +194,11 @@ def test_a_prune_out_of_time_stops_and_says_where_and_removes_no_blob(store, cap
     assert done is not None and done.stopped_at == "reading the live keys" and done.blobs == 0
     assert done.retired == 1, "the idle key it read before the budget ran out is retired; the other waits"
     assert all(_blob(store, data).is_file() for data in (OLD, FRESH, SHARED))
-    assert "stopped reading the live keys after its 0 s budget, the rest waits for the next start" in caplog.text
+    assert "stopped reading the live keys after its 0 s budget, the next start goes on from there" in caplog.text
+    assert any(
+        record.levelname == "WARNING" and "was not brought under its size bound" in record.getMessage()
+        for record in caplog.records
+    ), "a store whose keys outlast the budget is not bounded by size, and says so"
 
 
 def test_a_prune_that_removes_nothing_still_says_so_in_one_line(tmp_path, caplog) -> None:
@@ -288,7 +293,99 @@ def test_a_store_that_cannot_be_pruned_is_logged_and_the_session_goes_on(tmp_pat
     def unreadable(*_args, **_kwargs):
         raise PermissionError(13, "Permission denied")
 
-    monkeypatch.setattr("hyperloom.measure.jit.prune._stored_blobs", unreadable)
+    monkeypatch.setattr("hyperloom.measure.jit.prune._live_names", unreadable)
 
     assert prune_logged(store, LIMITS) is None
     assert "was not pruned (PermissionError)" in caplog.text
+
+
+@pytest.fixture
+def ticks(monkeypatch) -> None:
+    """The budget's clock moves one second each time it is read: a prune with a budget of ``n`` seconds stops at its
+    ``n``-th look at the clock after the start."""
+    clock = itertools.count()
+    monkeypatch.setattr("hyperloom.measure.jit.prune._clock", lambda: float(next(clock)))
+
+
+def _stored(store: DirJitStore) -> int:
+    return sum(1 for path in (store.root / "blobs").rglob("*") if path.is_file())
+
+
+@pytest.mark.usefixtures("ticks")
+def test_starts_after_a_stopped_one_remove_the_retired_keys_past_the_grace_and_then_the_blobs(tmp_path) -> None:
+    """Every start does part of the work: the retired keys first, which stay removed, then the blobs from where the last
+    start stopped, so the store empties of what nothing lists over a few starts however slow it is."""
+    store = _six_idle_keys(tmp_path)
+    limits = PruneLimits(max_idle_sec=3 * DAY, max_bytes=10**9, grace_sec=2 * DAY, budget_sec=100)
+    assert prune(store, limits, now=NOW).retired == 6, "the six keys, unused five days or more, are retired"
+    limits = PruneLimits(max_idle_sec=3 * DAY, max_bytes=10**9, grace_sec=2 * DAY, budget_sec=4)
+
+    later = [prune(store, limits, now=NOW + 3 * DAY + start * 3600) for start in range(4)]
+
+    assert [(run.removed, run.blobs) for run in later] == [(3, 0), (3, 0), (0, 3), (0, 3)]
+    assert [run.stopped_at for run in later] == ["removing retired keys", "removing blobs", "removing blobs", None]
+    assert not any((store.root / RETIRED_DIR).iterdir()) and _stored(store) == 0
+    assert prune(store, limits, now=NOW + 4 * DAY).stopped_at is None
+
+
+@pytest.mark.usefixtures("ticks")
+def test_a_start_after_one_stopped_removing_retired_keys_goes_on_to_the_size_bound(tmp_path) -> None:
+    store = _six_idle_keys(tmp_path)
+    for index in range(3):  # three keys retired long ago: removing them takes the first start's whole budget
+        key = str(index + 7) * 64
+        _publish(store, tmp_path / key[:1], key, {f"module_{index + 6}.so": bytes([index + 6]) * 1000})
+        os.makedirs(store.root / RETIRED_DIR, exist_ok=True)
+        os.rename(_key_dir(store, key), store.root / RETIRED_DIR / f"{int(NOW - 5 * DAY)}-aiter_jit-{key}-{index:012d}")
+    limits = PruneLimits(max_idle_sec=30 * DAY, max_bytes=4500, grace_sec=2 * DAY, budget_sec=3)
+
+    first = prune(store, limits, now=NOW)
+    assert (first.removed, first.retired, first.stopped_at) == (2, 0, "removing retired keys")
+
+    limits = PruneLimits(max_idle_sec=30 * DAY, max_bytes=4500, grace_sec=2 * DAY, budget_sec=12)
+    second = prune(store, limits, now=NOW + 3600)
+    assert (second.removed, second.retired) == (1, 2), "the last retired key goes, then the size bound applies"
+    assert _live(store) == ["3", "4", "5", "6"]
+
+
+@pytest.mark.usefixtures("ticks")
+def test_the_blob_sweep_goes_on_where_the_last_start_stopped_so_blobs_behind_kept_ones_are_reached(tmp_path) -> None:
+    """Eight blobs a live key lists sort before four nothing lists; a start looks at three blobs: without going on from
+    where the last stopped, no start would ever reach the four."""
+    store = DirJitStore(tmp_path / "store")
+    kept = {f"module_{index}.so": b"kept %d" % index for index in range(40)}
+    kept = dict(sorted(kept.items(), key=lambda item: hashlib.sha256(item[1]).hexdigest())[:8])
+    _publish(store, tmp_path / "k", FRESH_KEY, kept)
+    _age(_key_dir(store, FRESH_KEY), NOW)
+    last_kept = max(hashlib.sha256(data).hexdigest() for data in kept.values())
+    unlisted = [b"orphan %d" % index for index in range(400)]
+    unlisted = [data for data in unlisted if hashlib.sha256(data).hexdigest() > last_kept][:4]
+    for data in unlisted:
+        path = _blob(store, data)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(data)
+    for path in (store.root / "blobs").rglob("*"):
+        if path.is_file():
+            _age(path, NOW - 20 * DAY)
+    # one look at the live key and one at the retired ones, then three blobs
+    limits = PruneLimits(max_idle_sec=14 * DAY, max_bytes=10**9, grace_sec=2 * DAY, budget_sec=5)
+
+    removed = [prune(store, limits, now=NOW + start).blobs for start in range(5)]
+
+    assert sum(removed) == 4 and _stored(store) == 8, "every blob nothing lists goes, the kept ones stay"
+    assert removed[:2] == [0, 0], "the first two starts look only at kept blobs"
+
+
+@pytest.mark.usefixtures("ticks")
+def test_reading_the_live_keys_goes_on_where_the_last_start_stopped_so_idle_keys_behind_used_ones_are_retired(
+    tmp_path,
+) -> None:
+    """Keys 1 to 3 are in use and sort first, 4 to 6 are idle; a start reads two keys: without going on from where the
+    last stopped, every start would read keys 1 and 2 only."""
+    store = _six_idle_keys(tmp_path)
+    for key in ("1" * 64, "2" * 64, "3" * 64):
+        _age(_key_dir(store, key), NOW)
+    limits = PruneLimits(max_idle_sec=4 * DAY, max_bytes=10**9, grace_sec=2 * DAY, budget_sec=2)
+
+    retired = [prune(store, limits, now=NOW + start).retired for start in range(3)]
+
+    assert retired == [0, 1, 2] and _live(store) == ["1", "2", "3"]

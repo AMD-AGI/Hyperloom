@@ -31,7 +31,7 @@ from hyperloom.measure.tests.hosted_fixtures import make_rig, point_yaml
 from hyperloom_multibranch.contracts.toolbox import WorkloadKind
 from hyperloom_multibranch.toolbox.hosted_executor import HostedExecutor
 from hyperloom_multibranch.toolbox.hosted_toolbox import HostedOptions
-from hyperloom_multibranch.toolbox.jit_store import JIT_STORE_ENV, JIT_STORE_NOTE
+from hyperloom_multibranch.toolbox.jit_store import JIT_STORE_ENV, JIT_STORE_NOTE, REFUSED_HOSTED
 from hyperloom_multibranch.toolbox.queue import QueuePolicy
 from hyperloom_multibranch.toolbox.tests.helpers import build, req
 from hyperloom_multibranch.toolbox.tests.test_hosted_executor import PointPlanner
@@ -91,8 +91,37 @@ def test_a_store_its_group_or_others_can_write_is_not_published_to_and_the_sessi
     assert stat.S_IMODE(store.stat().st_mode) == mode and not any(store.iterdir()), "and it is left as it is"
     (warning,) = [record.getMessage() for record in caplog.records if "jit cache" in record.getMessage()]
     assert f"runs without the compiled-code cache {store}" in warning and "only it can write" in warning
+    assert "the template must not mount a refused store" in warning, "the host cannot stop the runners reading it"
     note = json.loads((tmp_path / "session" / JIT_STORE_NOTE).read_text())
     assert note["store"] == str(store) and note["published"] is False and "only it can write" in note["reason"]
+    assert note["without"] == REFUSED_HOSTED
+
+
+@pytest.mark.parametrize("error", [NotADirectoryError, PermissionError])
+def test_a_store_that_cannot_be_made_is_refused_like_one_the_check_refuses_and_the_session_starts_without_it(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture, error: type[OSError]
+) -> None:
+    """A name below a file, or below a directory this account cannot write: raising would only start the hosted run
+    again into the same failure."""
+    blocker = tmp_path / "a-file"
+    blocker.write_text("not a directory")
+    store = blocker / "jit-store"
+    if error is PermissionError:
+        store = tmp_path / "unwritable" / "jit-store"
+
+        def unwritable(_root: Path) -> Path:
+            raise PermissionError(13, "Permission denied", str(_root))
+
+        monkeypatch.setattr("hyperloom_multibranch.toolbox.jit_store.private_jit_store", unwritable)
+    monkeypatch.setenv(JIT_STORE_ENV, str(store))
+
+    toolbox = _toolbox(None, tmp_path)
+
+    assert toolbox.backend._config.jit_store is None, "nothing is published"
+    (warning,) = [record.getMessage() for record in caplog.records if "jit cache" in record.getMessage()]
+    assert f"cannot be made or checked ({error.__name__}" in warning and REFUSED_HOSTED in warning
+    note = json.loads((tmp_path / "session" / JIT_STORE_NOTE).read_text())
+    assert note["published"] is False and error.__name__ in note["reason"] and note["without"] == REFUSED_HOSTED
 
 
 def test_building_the_toolbox_prunes_a_key_no_test_has_used_for_long(

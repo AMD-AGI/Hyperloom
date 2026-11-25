@@ -45,7 +45,7 @@ from hyperloom_multibranch.contracts.blackboard.vocab import LeaseKind
 from hyperloom_multibranch.contracts.toolbox import BranchLease, LeaseCharge
 from hyperloom_multibranch.toolbox.attempts import DEFAULT_MAX_INFRA_RETRIES, INFRA_BACKOFF_SECONDS
 from hyperloom_multibranch.toolbox.hosted_executor import DEFAULT_TEST_TIMEOUT_SEC, HostedExecutor
-from hyperloom_multibranch.toolbox.jit_store import named_jit_store, session_jit_store
+from hyperloom_multibranch.toolbox.jit_store import REFUSED_HOSTED, named_jit_store, session_jit_store
 from hyperloom_multibranch.toolbox.merge_smoke import merge_smoke_from
 from hyperloom_multibranch.toolbox.hosted_leases import (
     HANDOVER_MIN_TESTS,
@@ -260,9 +260,11 @@ class HostedOptions:
     the same directory, read-only, and names it ``HYPERLOOM_JIT_CACHE``: this host cannot see that mount, so the template
     and this option must name one directory. The directory must be this account's own, which only it can write (made
     0700 when missing), as the runners load what it holds as compiled code; a runner reads it as this account or root.
-    A directory that is not (another account's, or below one another account can change) is not refused: the session
-    runs without publishing, logs one warning naming it and why, and records it in ``jit_store.json`` of the session
-    directory (:func:`~.jit_store.session_jit_store`).
+    A directory that is not (another account's, or below one another account can change), or one that cannot be made or
+    checked, is not refused: the session runs without publishing, logs one warning naming it and why, and records it in
+    ``jit_store.json`` of the session directory (:func:`~.jit_store.session_jit_store`). This host cannot stop the
+    runners reading what the template mounts, so the template must not mount a store this check refuses
+    (:data:`~.jit_store.REFUSED_HOSTED`).
     """
 
     policy: QueuePolicy | None = None
@@ -551,7 +553,7 @@ def _session_jit_store(options: HostedOptions, session_dir: Path) -> DirJitStore
     """The compiled-code cache this host publishes to (:attr:`HostedOptions.jit_store`), checked and pruned; ``None``
     when neither the options nor ``HYPERLOOM_JIT_STORE`` name one, or the check refuses it."""
     root = named_jit_store(options.jit_store, os.environ)
-    return session_jit_store(root, session_dir) if root is not None else None
+    return session_jit_store(root, session_dir, REFUSED_HOSTED) if root is not None else None
 
 
 def build_hosted_toolbox(

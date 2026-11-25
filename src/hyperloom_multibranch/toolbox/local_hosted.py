@@ -13,10 +13,12 @@ account's uid below this host's temporary directory (``TMPDIR`` honoured), not b
 session's shared storage, where a CK module build crawls. Tests read the directory's verified snapshots before their
 server starts, and what an accepted test compiled is published to it by this host. The runners load what it holds as
 compiled code, so a link there, and a directory that is not this account's own or that its group or others can write,
-are not used: another account could otherwise put snapshots of its own there. The session then runs without the cache
-(the runners are not told it, nothing is published) and says so in its log and in ``jit_store.json`` of the session
-directory, as the hosted toolbox does: a ``hosted run`` measured on this container's cards builds this toolbox inside the
-session, where a refusal raised would start the run again into the same refusal.
+are not used: another account could otherwise put snapshots of its own there; nor is one that cannot be made or
+checked. The session then runs without the cache: the runners are not told it and nothing is published, so no test has
+an aiter JIT directory to build touched modules in, and every candidate that patches aiter's ``csrc`` or ``hsa`` is
+refused for the whole session (:data:`~.jit_store.REFUSED_LOCAL`). It says so in its log and in ``jit_store.json`` of
+the session directory, as the hosted toolbox does: a ``hosted run`` measured on this container's cards builds this
+toolbox inside the session, where a refusal raised would start the run again into the same refusal.
 
 The short-prompt consistency check is on by default: ``LocalOptions.short_prompts``, or the key named by
 ``HYPERLOOM_SHORT_PROMPTS`` in the host environment when the option is not given (``off`` turns it off), else the set
@@ -99,7 +101,7 @@ from hyperloom_multibranch.toolbox.branch_leases import BranchLeases, CardDrain
 from hyperloom_multibranch.toolbox.hosted_executor import DEFAULT_TEST_TIMEOUT_SEC, HostedExecutor
 from hyperloom_multibranch.toolbox.jit_store import (
     JIT_STORE_ENV,
-    JitStoreNotPrivate,
+    REFUSED_LOCAL,
     named_jit_store,
     session_jit_store,
 )
@@ -131,7 +133,6 @@ __all__ = [
     "DEFAULT_JIT_STORE",
     "HOST_TOOL_REPO_ENVS",
     "JIT_STORE_ENV",
-    "JitStoreNotPrivate",
     "LocalHostedToolbox",
     "LocalOptions",
     "LocalSession",
@@ -371,8 +372,9 @@ class LocalOptions:
     runners read it (``HYPERLOOM_JIT_CACHE`` in their template, which therefore wins over the same name in
     ``runner_envs``) and this host publishes into it; ``None`` takes ``HYPERLOOM_JIT_STORE`` of the host environment,
     and without either :data:`DEFAULT_JIT_STORE` and this account's uid below this host's temporary directory; a link
-    there, or one that is not this account's own or that its group or others can write, is not used: the session runs
-    without the cache (:func:`~.jit_store.session_jit_store`).
+    there, one that is not this account's own or that its group or others can write, or one that cannot be made or
+    checked, is not used: the session runs without the cache and refuses candidates that patch aiter's ``csrc`` or
+    ``hsa`` (:func:`~.jit_store.session_jit_store`).
     ``card_guard`` is what is done about a process that holds a card of a test or of a lease: observed
     (kept and recorded) or enforced (the test refused and retried, the card not handed out); ``None`` takes
     ``HYPERLOOM_CARD_GUARD`` of the host environment, and without it the guard enforces. The runners get the same
@@ -744,7 +746,7 @@ def build_local_toolbox(
 
     directory, cards, tp = Path(session.session_dir), tuple(session.cards), session.tp
     parallel = max_parallel_tests(len(cards), tp)
-    jit_store = session_jit_store(jit_store_root(options), directory)
+    jit_store = session_jit_store(jit_store_root(options), directory, REFUSED_LOCAL)
     jit_root = None if jit_store is None else jit_store.root
     acceptance = _acceptance_with_prompts(acceptance, options, os.environ, spec.model_dir)
     native = native_builds(os.environ, spec.blobs, acceptance.active_image_digest or spec.image_digest)
