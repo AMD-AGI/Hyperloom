@@ -3292,9 +3292,10 @@ def test_a_local_run_ignores_a_grant_in_the_environment_and_measures_on_this_mac
     assert os.environ["HYPERLOOM_SANDBOX_KEY_MEASUREMENT"] == HANDED["HYPERLOOM_SANDBOX_KEY_MEASUREMENT"]
 
 
-def _sweep_spec(session_dir: Path) -> CampaignSpec:
+def _sweep_spec(session_dir: Path, tp: int = 2) -> CampaignSpec:
     sweep = {"session_dir": str(session_dir), "concs": [8, 2], "parallel": 4}
-    return parse_campaign({**MINIMAL, "flow": "conc_sweep", "conc_sweep": sweep})
+    hardware = {**MINIMAL["hardware"], "tp": tp}
+    return parse_campaign({**MINIMAL, "flow": "conc_sweep", "conc_sweep": sweep, "hardware": hardware})
 
 
 def test_a_sweep_spec_sweeps_the_closed_session_it_names_on_its_points_and_tests_at_once(
@@ -3327,3 +3328,10 @@ def test_a_sweep_spec_sweeps_the_closed_session_it_names_on_its_points_and_tests
 def test_a_sweep_spec_naming_no_closed_multibranch_session_is_refused(tmp_path: Path) -> None:
     with pytest.raises(ValueError, match="holds no closed multi-branch session"):
         cli._hosted_sweep(SimpleNamespace(grant_limits=None), _sweep_spec(tmp_path / "nothing"))  # type: ignore[arg-type]
+
+
+def test_a_sweep_spec_whose_tp_is_not_the_sessions_is_refused(tmp_path: Path) -> None:
+    layout = _ended_before_final(tmp_path / "session")
+
+    with pytest.raises(ValueError, match="is not the swept session's TP 2"):
+        cli._hosted_sweep(SimpleNamespace(grant_limits=None), _sweep_spec(layout.root, tp=8))  # type: ignore[arg-type]

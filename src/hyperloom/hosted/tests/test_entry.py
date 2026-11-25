@@ -1280,7 +1280,8 @@ def _closed_session(run, monkeypatch, *, closed=True):
     FakeOptimize(monkeypatch, returncode=0, effect=lambda argv: None)
     entry.main(["run"])
     session = Path(_session_json(run))
-    (session / "state.json").write_text(json.dumps({"stop_reason": "cycle_end_done", "close_sequence_done": closed}))
+    closing = {"stop_reason": "cycle_end_done", "close_sequence_done": closed, "tp": FULL["hardware"]["tp"]}
+    (session / "state.json").write_text(json.dumps(closing))
     return session
 
 
@@ -1305,7 +1306,9 @@ def test_the_sweep_flow_sweeps_the_closed_session_it_names_with_its_points_and_e
     assert entry.main(["run"]) == 0
 
     assert swept == [(session, {"concs": (2, 8), "deadline_unix": None})] and fake.calls == []
-    assert _exit(run) == {"final": True, "returncode": 0, "stop_reason": "cycle_end_done"}
+    assert _exit(run) == {"final": True, "returncode": 0, "stop_reason": None}, (
+        "the closed run's reason is not this run's"
+    )
     assert isolation.asked[1:] == [], "a sweep launches no agent, so none is isolated"
 
 
@@ -1347,6 +1350,17 @@ def test_the_sweep_flow_sweeps_a_session_whose_own_run_was_asked_to_stop(run, mo
     assert entry.main(["run"]) == 0
 
     assert swept == [session]
+
+
+def test_the_sweep_flow_refuses_a_spec_whose_tp_is_not_the_sessions(run, monkeypatch):
+    session = _closed_session(run, monkeypatch)
+    _sweep_spec(run, session)
+    run.spec.write_text(json.dumps({**json.loads(run.spec.read_text()), "hardware": {**FULL["hardware"], "tp": 8}}))
+    run.restart()
+
+    assert entry.main(["run"]) == entry.RETURNCODE_REFUSED
+
+    assert "is not the swept session's TP" in _exit(run)["error"]
 
 
 def test_the_sweep_flow_refuses_a_session_dir_that_is_no_directory(run, monkeypatch, tmp_path):

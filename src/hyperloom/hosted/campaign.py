@@ -26,7 +26,8 @@ FLOW_CONC_SWEEP = "conc_sweep"
 _SWEEP_OPTION = "conc_sweep"
 MEASUREMENT_LOCAL = "local"
 MEASUREMENT_HOSTED = "hosted"
-#: The profile whose application container has cards of its own, the only one a multibranch run measures locally on.
+#: The profile whose application container has cards of its own, the only one a multibranch or sweep run measures
+#: locally on.
 PROFILE_WITH_CARDS = "hosted-gpu"
 DEFAULT_MAX_PARALLEL_TESTS = 8
 
@@ -275,9 +276,9 @@ def _check_rules(values: Mapping[str, Any], problems: list[str]) -> None:
     if flow == FLOW_SINGLE and measurement != MEASUREMENT_LOCAL:
         problems.append(f"placement.measurement must be 'local' for flow 'single', got {measurement!r}")
     profile = values.get("profile")
-    if flow == FLOW_MULTIBRANCH and measurement == MEASUREMENT_LOCAL and profile not in (None, PROFILE_WITH_CARDS):
+    if flow != FLOW_SINGLE and measurement == MEASUREMENT_LOCAL and profile not in (None, PROFILE_WITH_CARDS):
         problems.append(
-            f"placement.measurement 'local' measures on the application container's own cards for flow 'multibranch':"
+            f"placement.measurement 'local' measures on the application container's own cards for flow {flow!r}:"
             f" placement.profile must be {PROFILE_WITH_CARDS!r}, got {profile!r}"
         )
     for key in values.get("extra_env") or {}:

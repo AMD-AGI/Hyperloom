@@ -544,12 +544,14 @@ def _hosted_start(host: HostInfo) -> HostedStart:
 def _hosted_sweep(host: HostInfo, spec: CampaignSpec) -> HostedStart:
     """The conc sweep of the closed session ``conc_sweep.session_dir`` names, over the spec's points and as many tests
     at once as it asks, measured where it says and written back into the session; raises ValueError when the directory
-    holds no closed multi-branch session."""
+    holds no closed multi-branch session or the spec's TP is not the session's."""
 
     layout = SessionLayout(Path(str(spec.sweep_session_dir)))
     if not (layout.manifest.is_file() and layout.report.is_file()):
         raise ValueError(f"conc_sweep.session_dir {layout.root} holds no closed multi-branch session")
     settings = _with_sweep_options(read_manifest(layout.manifest).settings, spec.sweep_concs, spec.sweep_parallel)
+    if settings.workload.tp != spec.tp:
+        raise ValueError(f"hardware.tp {spec.tp} is not the swept session's TP {settings.workload.tp}")
     local = spec.measurement == MEASUREMENT_LOCAL
     fit = machine_parallel_tests if local else grant_tests_that_fit(host, spec_make_before_break(spec))
     tests = min(spec.max_parallel_tests, fit(settings.workload.tp))

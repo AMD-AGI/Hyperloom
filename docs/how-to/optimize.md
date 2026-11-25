@@ -250,7 +250,9 @@ A hosted run sweeps a closed session with a campaign spec of `flow:
 "conc_sweep"`: `conc_sweep.session_dir` names the session (an absolute path the
 run can read and write; the report is written back into it), `conc_sweep.concs`
 its points and `conc_sweep.parallel` the tests at once of a multi-branch
-session. The run optimizes nothing and ends `final: true` however the sweep
+session. `hardware.tp` must be the session's TP, and a sweep measured on the
+run's own cards needs profile `hosted-gpu`. The run optimizes nothing and ends
+`final: true`, with no `stop_reason` of the closed session, however the sweep
 ends; to finish a `partial` or `cancelled` sweep, start another such run on the
 same session, which measures only the points not yet measured. A single-lineage
 session is measured on the run's own cards.

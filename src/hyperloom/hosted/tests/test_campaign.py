@@ -69,6 +69,10 @@ _SWEEP_REFUSALS = [
     ({**MINIMAL, "flow": "conc_sweep", "conc_sweep": {"session_dir": "s"}}, "must be an absolute path"),
     ({**MINIMAL, "conc_sweep": {"session_dir": "/nfs/s"}}, "conc_sweep is read only for flow 'conc_sweep'"),
     ({**MINIMAL, "flow": "conc_sweep", "conc_sweep": {"session_dir": "/s", "concs": [0]}}, "conc_sweep.concs must be"),
+    (
+        {**MINIMAL, "flow": "conc_sweep", "conc_sweep": {"session_dir": "/s"}, "placement": {"profile": "hosted-cpu"}},
+        "for flow 'conc_sweep': placement.profile must be 'hosted-gpu', got 'hosted-cpu'",
+    ),
 ]
 
 REFUSALS = [
@@ -328,7 +332,7 @@ def test_the_schema_and_the_validator_agree_on_accepting_and_refusing(doc):
     # The cross-field rules (flow against measurement and profile) are not expressed in the schema; the one allowed gap.
     cross_field = (
         isinstance(doc, dict)
-        and doc.get("flow") in ("single", "multibranch", None)
+        and doc.get("flow") in ("single", "multibranch", "conc_sweep", None)
         and not validator_says
         and schema_says
     )

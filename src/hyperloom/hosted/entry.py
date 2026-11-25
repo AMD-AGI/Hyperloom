@@ -205,9 +205,9 @@ def _run() -> int:
         _require_resume_safe(session_dir)
     with _plug_inputs(lock, info), _mcp_service(info, session_dir):
         if sweeping:
-            return _sweep(info.state_dir, session_dir, _grant_end_unix(info), spec.sweep_concs or ())
+            return _sweep(info.state_dir, session_dir, _grant_end_unix(info), None, spec.sweep_concs or ())
         if is_resumable(session_dir) and sweep_unfinished(session_dir):
-            return _sweep(info.state_dir, session_dir, _grant_end_unix(info))
+            return _sweep(info.state_dir, session_dir, _grant_end_unix(info), _stop_reason(session_dir))
         return _optimize(optimize_command(spec, session_dir), info.state_dir, session_dir)
 
 
@@ -511,6 +511,9 @@ def _sweep_target(spec: CampaignSpec) -> Path:
         raise Refused(f"a single-lineage session is swept only on this container's cards, not {spec.measurement!r}")
     if not session_closed(session_dir):
         raise Refused(f"conc_sweep.session_dir {session_dir} has not run its CLOSE sequence")
+    session_tp = json.loads((session_dir / "state.json").read_text(encoding=ENCODING)).get("tp")
+    if session_tp != spec.tp:
+        raise Refused(f"hardware.tp {spec.tp} is not the swept session's TP {session_tp}")
     problems = writable_problems({"the swept session directory": session_dir})
     if problems:
         raise Refused(f"this account (uid {os.geteuid()}) cannot write {problems[0]}")
@@ -569,15 +572,18 @@ def _optimize(argv: list[str], state_dir: Path, session_dir: Path) -> int:
     return returncode
 
 
-def _sweep(state_dir: Path, session_dir: Path, deadline_unix: float | None, concs: Sequence[int] = ()) -> int:
-    """Run the conc sweep of a closed session, over ``concs`` when given, and end the run: the session a conc_sweep
-    flow names, or this run's own, stopped before its sweep ran its course -- resuming a closed session would open
-    another macro-cycle instead. The return code is the sweep's."""
+def _sweep(
+    state_dir: Path, session_dir: Path, deadline_unix: float | None, stop_reason: str | None, concs: Sequence[int] = ()
+) -> int:
+    """Run the conc sweep of a closed session, over ``concs`` when given, and end the run with ``stop_reason``: the
+    session a conc_sweep flow names, which stops for no reason of this run's, or this run's own, stopped before its
+    sweep ran its course -- resuming a closed session would open another macro-cycle instead. The return code is the
+    sweep's."""
     from hyperloom.orchestrator.conc_sweep.cli import sweep_and_report
 
     print(f"[hosted] sweeping the closed session {session_dir}", flush=True)
     returncode = sweep_and_report(session_dir, concs=concs, deadline_unix=deadline_unix)
-    write_exit(state_dir, final=True, returncode=returncode, stop_reason=_stop_reason(session_dir))
+    write_exit(state_dir, final=True, returncode=returncode, stop_reason=stop_reason)
     return returncode
 
 

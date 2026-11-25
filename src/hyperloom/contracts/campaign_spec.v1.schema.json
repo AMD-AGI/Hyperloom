@@ -77,7 +77,7 @@
       "required": ["profile"],
       "properties": {
         "profile": {"enum": ["hosted-gpu", "hosted-cpu"]},
-        "measurement": {"enum": ["local", "hosted"], "description": "Default: local for flows single and conc_sweep, hosted for flow multibranch. Flow single accepts only local; flow multibranch accepts local (measured on the application container's own cards) only with profile hosted-gpu. Flow conc_sweep measures a single-lineage session only locally."},
+        "measurement": {"enum": ["local", "hosted"], "description": "Default: local for flows single and conc_sweep, hosted for flow multibranch. Flow single accepts only local; flow multibranch accepts local (measured on the application container's own cards) only with profile hosted-gpu. Flow conc_sweep measures a single-lineage session only locally; it accepts local only with profile hosted-gpu, as flow multibranch does."},
         "max_parallel_tests": {"type": "integer", "minimum": 1, "default": 8},
         "specialist_capacity": {"type": "integer", "minimum": 0}
       }
