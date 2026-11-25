@@ -683,7 +683,7 @@ class RunnerOwned:
         )
 
 
-_DIGEST_KEYS = ("schema", "framework", "entrypoint", "model", "topology", "args", "env", "golden_al", "client")
+_DIGEST_KEYS = ("schema", "framework", "entrypoint", "model", "topology", _ARGS, _ENV, "golden_al", "client")
 
 
 @dataclass(frozen=True)
