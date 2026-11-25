@@ -317,6 +317,26 @@ def test_a_manifest_written_before_the_objective_was_recorded_reads_back_on_p50_
     assert read_manifest(tmp_path / "MB-manifest.json").settings.workload.metric == GRADED_INTVTY_P50
 
 
+def test_a_run_records_the_prompt_dataset_exported_when_it_starts_and_an_agentx_one_none(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("DATASET_PATH", " /data/prompts.jsonl ")
+
+    assert _settings().workload.inferencex == InferenceXShape(1024, 512, "/data/prompts.jsonl")
+    assert _settings(workload=AGENTX_ARGS).workload.inferencex is None
+
+
+def test_a_manifest_written_before_the_prompt_dataset_was_recorded_reads_back_on_random_prompts(tmp_path: Path) -> None:
+    settings = _settings()
+    document = encode(
+        SessionManifest(code_version(), dict(rule_pack_identity()), "MB-x", 0.0, 3600.0, settings, "", {})
+    )
+    del document["settings"]["workload"]["inferencex"]["dataset"]
+    _write(tmp_path / "MB-manifest.json", document)
+
+    assert read_manifest(tmp_path / "MB-manifest.json").settings.workload.inferencex == InferenceXShape(1024, 512)
+
+
 def test_run_help_names_the_ep_option(capsys: pytest.CaptureFixture[str]) -> None:
     with pytest.raises(SystemExit):
         cli.main(["run", "--help"])
@@ -843,6 +863,7 @@ def eight_cards(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("ROCR_VISIBLE_DEVICES", "0,1,2,3,4,5,6,7")
     monkeypatch.delenv(AGENTX_ENV, raising=False)
     monkeypatch.delenv(BENCHMARK_CONFIG_ENV, raising=False)
+    monkeypatch.delenv("DATASET_PATH", raising=False)
 
 
 @pytest.mark.parametrize(

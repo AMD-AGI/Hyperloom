@@ -20,7 +20,12 @@ from typing import TYPE_CHECKING, Any, Iterator, Mapping
 from hyperloom_common.coerce import to_unix
 from hyperloom_common.env import forge_explicitly_enabled
 from hyperloom.common.gpu_power_settings import SCLK_MAX_MHZ, DeclaredPowerSettings
-from hyperloom.common.perf_metric import agentx_enabled as _agentx_enabled, is_agentx_mode
+from hyperloom.common.perf_metric import (
+    agentx_enabled as _agentx_enabled,
+    is_agentx_mode,
+    prompt_dataset,
+    recorded_prompt_dataset,
+)
 from hyperloom_common.timeutil import now_iso
 from hyperloom.plugs import (
     ManifestSources,
@@ -232,6 +237,7 @@ def fresh_measurement_fields(state: Any) -> dict[str, Any]:
         "measurement_epoch": MEASUREMENT_EPOCH,
         "benchmark_mode": str(getattr(state, "benchmark_mode", "") or ""),
         "agentx_backend": str(getattr(state, "agentx_backend", "") or ""),
+        "prompt_dataset": recorded_prompt_dataset(state),
     }
 
 
@@ -251,6 +257,13 @@ def measurement_state_is_stale(state: Any) -> str:
             f"session was measured in benchmark_mode={had_mode!r} but this run is "
             f"{want_mode!r}; the KEEP ledger keys on server args only, so the two "
             "sets of measurements would overwrite each other"
+        )
+    had_dataset, want_dataset = recorded_prompt_dataset(state), prompt_dataset()
+    if had_dataset != want_dataset:
+        return (
+            f"session was measured on prompt dataset {had_dataset!r} but this run sends "
+            f"{want_dataset!r}; the recorded results describe a different workload and "
+            "cannot anchor or be compared against"
         )
     if is_agentx_mode(want_mode):
         from hyperloom.common.agentx_workload import agentic_backend
@@ -785,6 +798,7 @@ def _workload_fields(args: argparse.Namespace) -> dict[str, Any]:
         "osl": _int_arg("osl", DEFAULT_OSL),
         "profile_osl": _int_arg("profile_osl", 0),
         "max_model_len": _int_arg("max_model_len", 0),
+        "prompt_dataset": prompt_dataset(),
     }
 
 

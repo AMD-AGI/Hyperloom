@@ -12,6 +12,7 @@ import os
 from collections.abc import Callable
 from pathlib import Path
 
+from hyperloom.common.perf_metric import DATASET_PATH_ENV
 from hyperloom.common.url_userinfo import CREDENTIALED_URL_RE
 from hyperloom.common.workload_defaults import DEFAULT_EP
 from hyperloom_multibranch.blackboard.knowledge.reference_leads import INFERENCEX_REFERENCE
@@ -456,7 +457,7 @@ def _agentx_only_errors(args: argparse.Namespace) -> list[str]:
 def _workload_shape(args: argparse.Namespace) -> InferenceXShape | None:
     if WorkloadKind(args.workload) is WorkloadKind.AGENTX:
         return None
-    return InferenceXShape(args.isl, args.osl)
+    return InferenceXShape(args.isl, args.osl, os.environ.get(DATASET_PATH_ENV, "").strip())
 
 
 def _workload_model(args: argparse.Namespace) -> str:

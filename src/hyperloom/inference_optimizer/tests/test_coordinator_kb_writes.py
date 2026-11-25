@@ -771,6 +771,24 @@ def test_finalize_recipe_is_skipped_under_agentx(native_benchmark, tmp_path, mon
     assert out["reason"] == "agentx_local_store_unsupported"
 
 
+def test_a_prompt_dataset_session_is_kept_out_of_the_recipe_kb(tmp_path: Path, monkeypatch) -> None:
+    from hyperloom.orchestrator.knowledge.recipe_kb_t0 import T0AnchorRequest, run_t0_anchor
+
+    monkeypatch.delenv("HYPERLOOM_BENCHMARK_CONFIG", raising=False)
+    coord = _make_coordinator(tmp_path)
+    state = coord.shared_state
+    state.prompt_dataset = "/data/prompts.jsonl"
+    # The coordinator anchored when it was built, and an anchored session is not anchored again.
+    state.warm_start_ts = ""
+
+    run_t0_anchor(coord.recipe_kb, state, T0AnchorRequest(workload=_MODEL, hw=_HW), session_dir=coord.session_dir)
+    coord.recipe_journal.kb_amend_recipe(append_lesson={"statement": "learnt on real prompts"})
+    out = coord.recipe_journal.finalize_recipe_and_journal(source="close")
+
+    assert (out["status"], out["reason"]) == ("skipped", "prompt_dataset_identity_unsupported")
+    assert coord.recipe_kb.get_recipe(canonical_id=_expected_cid()) is None
+
+
 def test_finalize_recipe_reaches_agentx_remote_kb(native_benchmark, tmp_path, monkeypatch) -> None:
     """AgentX is isolated by its scheme and may now use the remote KB."""
     from types import SimpleNamespace

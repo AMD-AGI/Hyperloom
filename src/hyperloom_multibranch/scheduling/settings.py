@@ -65,10 +65,13 @@ class PlaybookMode(str, Enum):
 
 @dataclass(frozen=True)
 class InferenceXShape:
-    """The synthetic requests an InferenceX workload sends: input and output sequence lengths."""
+    """The requests an InferenceX workload sends: random prompts of ``isl`` tokens answered to ``osl``, or, when
+    ``dataset`` names one, the prompts of that ``DATASET_PATH`` file, as given when the session started, answered to at
+    most ``osl``."""
 
     isl: int
     osl: int
+    dataset: str = ""
 
 
 @dataclass(frozen=True)
