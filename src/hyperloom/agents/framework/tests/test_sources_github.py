@@ -24,12 +24,12 @@ def _install_urlopen(monkeypatch, handler) -> None:
     monkeypatch.setattr(gh.urllib.request, "urlopen", fake)
 
 
-# _build_query -----------------------------------------------------------
+# build_query -----------------------------------------------------------
 
 
 def test_build_query_scopes_repo_and_ors_the_terms() -> None:
     """The query is scoped to the repo's PRs and ORs exactly the given terms."""
-    q = gh._build_query("ROCm/vllm", terms=("deepseekv4", "causallm"))
+    q = gh.build_query("ROCm/vllm", terms=("deepseekv4", "causallm"))
     assert "repo:ROCm/vllm" in q
     assert "is:pr" in q
     assert "(deepseekv4 OR causallm)" in q
@@ -38,14 +38,14 @@ def test_build_query_scopes_repo_and_ors_the_terms() -> None:
 def test_build_query_stays_within_the_search_operator_limit() -> None:
     """GitHub answers 422 past five OR operators, so only the leading terms are sent."""
     terms = ("glm5", "next", "glm", "flash", "model", "architecture", "support", "add")
-    q = gh._build_query("vllm-project/vllm", terms=terms)
+    q = gh.build_query("vllm-project/vllm", terms=terms)
     assert q.count(" OR ") == 5
     assert "(glm5 OR next OR glm OR flash OR model OR architecture)" in q
 
 
 def test_build_query_searches_every_pr_state() -> None:
     """The search carries no is:open qualifier, so merged and closed PRs are found too."""
-    q = gh._build_query("sgl-project/sglang", terms=gh.PERF_TERMS)
+    q = gh.build_query("sgl-project/sglang", terms=gh.PERF_TERMS)
     assert "is:open" not in q
     assert "is:pr" in q
 

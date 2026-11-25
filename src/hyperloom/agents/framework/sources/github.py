@@ -45,7 +45,7 @@ PERF_TERMS = (
 MAX_OR_TERMS = 6
 
 
-def _build_query(repo: str, *, terms: tuple[str, ...]) -> str:
+def build_query(repo: str, *, terms: tuple[str, ...]) -> str:
     """Compose a GitHub Search query scoped to ``repo`` that ORs the first ``MAX_OR_TERMS`` of ``terms``."""
     return f"repo:{repo} is:pr (" + " OR ".join(terms[:MAX_OR_TERMS]) + ")"
 
@@ -166,9 +166,6 @@ def search_issues(query: str, *, per_page: int, timeout_sec: float = 10.0) -> Se
         raise GitHubUnavailable("GitHub answered the search with something that is not a search result")
     return SearchAnswer(answer["items"], answer["total_count"])
 
-
-#: The public name of ``_build_query``, the search query of a repository, for a caller of :func:`search_issues`.
-build_query = _build_query
 
 __all__ = [
     "MAX_OR_TERMS",

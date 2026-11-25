@@ -449,7 +449,7 @@ class XditAdapter(BaseAdapter):
 
 
 class LlamacppAdapter(BaseAdapter):
-    """llama.cpp adapter: a native server, built rather than pip-installed, with no Python package to localize into."""
+    """llama.cpp adapter: a native server, built rather than pip-installed."""
 
     framework = "llamacpp"
 
