@@ -172,6 +172,7 @@ WORKLOAD = Workload(
 AGENTX = replace(WORKLOAD, inferencex=None)
 DATASET = "/data/prompts.jsonl"
 ON_A_DATASET = replace(WORKLOAD, inferencex=InferenceXShape(1024, 512, DATASET))
+COUNTED = replace(WORKLOAD, inferencex=InferenceXShape(1024, 512, num_prompts=39))
 TOTAL_AGENTX = replace(AGENTX, agentx_objective=AgentXObjective.TOTAL_TOKEN_THROUGHPUT)
 BASE = ServerBase(args="--tp-size 2 --enable-hierarchical-cache --hicache-size 180", env={"SGLANG_X": "true"})
 IMAGE = ActiveImage("registry.example/sglang:v1", "sha256:" + "2" * 64)
@@ -263,6 +264,34 @@ def test_a_leg_sends_the_prompts_its_workload_records_whatever_its_shell_exports
     _export_workload(workload, tmp_path, IMAGE.ref)
 
     assert os.environ.get("DATASET_PATH") == sent
+
+
+def test_a_workload_with_a_request_count_reaches_the_renderer_with_it(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("HL_MODEL_BASE", raising=False)
+
+    assert workload_environment(COUNTED)["NUM_PROMPTS"] == "39"
+    assert "NUM_PROMPTS" not in workload_environment(WORKLOAD)
+
+
+@pytest.mark.parametrize(
+    ("workload", "exported", "sent"),
+    [(COUNTED, None, "39"), (COUNTED, "7", "39"), (WORKLOAD, "39", None)],
+    ids=["resumed_without_it", "resumed_on_another", "default_count_resumed_with_one"],
+)
+def test_a_leg_sends_the_request_count_its_workload_records_whatever_its_shell_exports(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, workload: Workload, exported: str | None, sent: str | None
+) -> None:
+    monkeypatch.delenv("HL_MODEL_BASE", raising=False)
+    for name in (*workload_environment(COUNTED), "DATASET_PATH"):
+        monkeypatch.setenv(name, "")
+    if exported is None:
+        monkeypatch.delenv("NUM_PROMPTS")
+    else:
+        monkeypatch.setenv("NUM_PROMPTS", exported)
+
+    _export_workload(workload, tmp_path, IMAGE.ref)
+
+    assert os.environ.get("NUM_PROMPTS") == sent
 
 
 def test_an_inferencex_workload_at_an_ep_reaches_the_renderer_at_that_ep(monkeypatch: pytest.MonkeyPatch) -> None:
