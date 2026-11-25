@@ -18,7 +18,8 @@ attempts into the request's single result:
   sandbox that failed before it ran, a merge smoke that could not run, a profile's server that died in its window) is
   retried once, and its node is not reported either. One that says nothing about
   the node (:data:`NODE_BLAMELESS_INFRA_REASONS`: a runner that could not start, a runner lost, a Hub download refused
-  for its rate limit) is retried like any other, and its node is not reported.
+  for its rate limit, a result file whose download came back short) is retried like any other, and its node is not
+  reported.
 * ``candidate`` failure (a known failure signature): ``candidate_failed`` at once.
 * ``unclear`` failure: one rerun away from the first node. A second failure is ``candidate_failed``; a success is the
   result, and the first attempt is re-labelled an infrastructure failure of its node and reported as a failure that
@@ -50,6 +51,7 @@ from hyperloom.measure.failures import (
     PROFILER_DIED,
     PROFILER_HUNG,
     PROFILER_SNAPSHOT_FAILED,
+    RESULT_DOWNLOAD_INCOMPLETE,
     RUNNER_START_TIMEOUT,
     SANDBOX_ACQUIRE_TIMEOUT,
     TEST_TIMEOUT_REASON,
@@ -127,6 +129,8 @@ RUNNER_LOST = "runner_lost"
 #: A download the Hugging Face Hub refused for its rate limit is refused for the egress address every node shares, and a
 #: Hugging Face cache that refused the test is the shared volume's permissions, not the node's. A framework of another
 #: version than the candidate's files were compiled against is the image's, which every node runs alike.
+#: A result file whose download came back short after the re-copies (:data:`RESULT_DOWNLOAD_INCOMPLETE`) is the
+#: platform's file API, not the node.
 NODE_BLAMELESS_INFRA_REASONS: frozenset[str] = frozenset(
     {
         FRAMEWORK_VERSION_MISMATCH,
@@ -136,6 +140,7 @@ NODE_BLAMELESS_INFRA_REASONS: frozenset[str] = frozenset(
         HUB_RATE_LIMITED,
         SANDBOX_ACQUIRE_TIMEOUT,
         HF_CACHE_PERMISSION,
+        RESULT_DOWNLOAD_INCOMPLETE,
     }
 )
 #: Infrastructure failures whose node is not reported.

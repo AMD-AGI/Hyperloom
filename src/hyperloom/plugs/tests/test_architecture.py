@@ -22,6 +22,7 @@ _HOSTED = (
     "hyperloom.hosted",
     "hyperloom.sandbox",
     "hyperloom.measure.hosted",
+    "hyperloom.measure.hosted_copy",
     "hyperloom.measure.hosted_log",
     "hyperloom.measure.hosted_logs",
     "hyperloom.measure.jit.publish",
