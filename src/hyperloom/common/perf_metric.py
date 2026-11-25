@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 from hyperloom.common.benchmark_config import configured_benchmark, is_agentx
+from hyperloom.common.outside_facts import ENV_NUM_PROMPTS
 from hyperloom_common.coerce import optional_positive_float
 
 import os
@@ -21,6 +22,7 @@ _AGENTX_ENV = "HYPERLOOM_AGENTX"
 #: The JSONL file of real prompts a fixed round sends in place of InferenceX's random ones.
 DATASET_PATH_ENV = "DATASET_PATH"
 _PROMPT_DATASET_FIELD = "prompt_dataset"
+_NUM_PROMPTS_FIELD = "num_prompts"
 
 # The value ``SharedState.benchmark_mode`` carries for an AgentX session, stamped at seed so it outlives the shell
 # that started the run.
@@ -133,6 +135,35 @@ def recorded_prompt_dataset(state: Any) -> str:
         state.get(_PROMPT_DATASET_FIELD) if isinstance(state, Mapping) else getattr(state, _PROMPT_DATASET_FIELD, "")
     )
     return str(recorded or "").strip()
+
+
+def exported_num_prompts(env: Mapping[str, str] | None = None) -> int:
+    """The request count ``NUM_PROMPTS`` sets for every measured round. 0 when it is unset, so each round derives its
+    count from its concurrency, and for AgentX, whose rounds replay traces whatever it is set to. Raises ValueError
+    for a value that is not a positive integer."""
+    raw = str((os.environ if env is None else env).get(ENV_NUM_PROMPTS) or "").strip()
+    if not raw or agentx_enabled(env):
+        return 0
+    count = _count(raw)
+    if count <= 0:
+        raise ValueError(f"{ENV_NUM_PROMPTS}={raw!r} must be a positive integer")
+    return count
+
+
+def recorded_num_prompts(state: Any) -> int:
+    """The request count *state* (a ``SharedState``) records every measured round sends; 0 when each round derives
+    its own. A session seeded before the count was recorded could only set it as a launch pin, which is read then."""
+    recorded = getattr(state, _NUM_PROMPTS_FIELD, 0)
+    if recorded:
+        return int(recorded)
+    return max(0, _count((getattr(state, "operator_extra_env", None) or {}).get(ENV_NUM_PROMPTS)))
+
+
+def _count(raw: Any) -> int:
+    try:
+        return int(str(raw or "").strip())
+    except ValueError:
+        return 0
 
 
 def prompt_dataset_session(state: Any) -> bool:
@@ -633,11 +664,13 @@ __all__ = [
     "intvty_serving_grading_enabled",
     "is_agentx_mode",
     "constraint_fields",
+    "exported_num_prompts",
     "constraint_veto_reason",
     "latency_veto_reason",
     "power_veto_reason",
     "prompt_dataset",
     "prompt_dataset_session",
+    "recorded_num_prompts",
     "recorded_prompt_dataset",
     "request_lengths_from_data",
     "output_tput_of",

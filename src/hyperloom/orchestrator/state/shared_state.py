@@ -307,6 +307,9 @@ class SharedState(
     # The path and not a digest of the file: the file is read where a round runs, which need not be this host.
     # Compared on resume, and no store keyed on ISL/OSL files a session that records one.
     prompt_dataset: str = ""
+    # The NUM_PROMPTS every measured round sends; 0 when each round derives its count from its concurrency. Put back
+    # in the environment on resume, over whatever the shell exports.
+    num_prompts: int = 0
     # Generation of the measurement path this session was measured on; resume refuses one below the build's epoch.
     measurement_epoch: int = 0
     # Which AgentX client measured this session: "inferencex" or "mlperf"; empty outside AgentX. Compared on resume so
