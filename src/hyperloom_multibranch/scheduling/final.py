@@ -522,7 +522,7 @@ def sweep_unfinished(layout: SessionLayout, settings: RunSettings) -> bool:
 
 
 def _header(layout: SessionLayout, workload: Workload) -> dict[str, Any]:
-    from hyperloom.inference_optimizer.session.base_launch import read_base_launch
+    from hyperloom.orchestrator.state.base_launch import written_base
 
     shape = workload.inferencex
     return {
@@ -537,7 +537,7 @@ def _header(layout: SessionLayout, workload: Workload) -> dict[str, Any]:
         "osl": None if shape is None else shape.osl,
         "tp": workload.tp,
         "ep": workload.ep,
-        **run_facts(read_base_launch(layout.toolbox)),
+        **run_facts(written_base(layout.toolbox)),
     }
 
 

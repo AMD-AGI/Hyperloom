@@ -100,7 +100,7 @@ def grid(monkeypatch: pytest.MonkeyPatch) -> SimpleNamespace:
     monkeypatch.setattr(runner, "teardown_variant_server", lambda _: [])
     frozen = SimpleNamespace(launch=_base(SourceKind.INFERENCEX, (4, 8, 32)))
     monkeypatch.setattr(runner, "frozen_base", lambda _: frozen)
-    monkeypatch.setattr(runner, "read_base_launch", lambda _: frozen.launch)
+    monkeypatch.setattr(runner, "written_base", lambda _: frozen.launch)
     return SimpleNamespace(calls=calls, failing=failing)
 
 
@@ -338,7 +338,7 @@ def _per_conc_base(monkeypatch: pytest.MonkeyPatch, base_args: str, by_conc: dic
     launches = tuple(SourcePointLaunch(conc, tuple(args.split()), {}) for conc, args in by_conc.items())
     frozen = SimpleNamespace(launch=_base(SourceKind.INFERENCEX, tuple(by_conc), launches, base_args))
     monkeypatch.setattr(runner, "frozen_base", lambda _: frozen)
-    monkeypatch.setattr(runner, "read_base_launch", lambda _: frozen.launch)
+    monkeypatch.setattr(runner, "written_base", lambda _: frozen.launch)
 
 
 _SLOTS = {4: "--max-running-requests 8", 16: "--max-running-requests 32", 32: "--max-running-requests 64"}

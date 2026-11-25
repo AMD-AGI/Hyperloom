@@ -29,7 +29,6 @@ from hyperloom.inference_optimizer.grid_server_args import (
     server_args_delta,
 )
 from hyperloom.inference_optimizer.grading import resolved_grading
-from hyperloom.inference_optimizer.session.base_launch import read_base_launch
 from hyperloom.inference_optimizer.session.session_paths import reports_dir, runs_root
 from hyperloom.orchestrator.actions.cancel_channel import current_cancel_scope
 from hyperloom.orchestrator.actions.executors._proposal_identity import controls_of, is_executable, normalize_proposal
@@ -51,7 +50,7 @@ from hyperloom.orchestrator.actions.executors.workload._workload_envs import (
     prepare_grid_benchmark_config,
 )
 from hyperloom.orchestrator.actions.stop_attribution import ORCHESTRATOR_CANCELLED_CLASS
-from hyperloom.orchestrator.state.base_launch import frozen_base, server_base, server_base_at
+from hyperloom.orchestrator.state.base_launch import frozen_base, server_base, server_base_at, written_base
 from hyperloom.orchestrator.state.shared_state import SharedState
 from hyperloom_common.coerce import to_str_list
 from hyperloom_common.timeutil import utc_now_compact
@@ -329,7 +328,7 @@ class _Sweep:
 
 
 def _header(state: SharedState, session_dir: Path) -> dict[str, Any]:
-    base = read_base_launch(session_dir)
+    base = written_base(session_dir)
     return {
         "schema_version": SCHEMA_VERSION,
         "session_id": state.session_id or session_dir.name,
