@@ -172,9 +172,9 @@ def prune_logged(store: DirJitStore, limits: PruneLimits = PruneLimits()) -> Pru
     )
     if done.stopped_at in _BEFORE_THE_BOUND:
         log.warning(
-            "jit cache: %s was not brought under its size bound: the prune stopped %s, and the bound and the removal "
-            "of blobs need every key read within one start's %.0f s; a store whose keys take longer than that to read "
-            "is never bounded by size",
+            "jit cache: %s: the prune stopped %s, before the size bound or the removal of blobs was done; both need "
+            "every key read within one start's %.0f s, and a store whose keys take longer than that to read is never "
+            "bounded by size",
             store.root,
             done.stopped_at,
             limits.budget_sec,
