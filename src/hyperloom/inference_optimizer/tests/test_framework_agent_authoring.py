@@ -268,6 +268,34 @@ def test_the_route_the_discovery_specialist_returns_picks_the_track(
     assert sorted(c["kind"] for c in stub.tasks.created) == sorted(kinds)
 
 
+@pytest.mark.parametrize(
+    ("route", "kinds", "statuses"),
+    [
+        ("direct_framework", [], ["skipped"]),
+        ("author_via_specialist", ["specialist"], []),
+        ("unrecognised", ["specialist"], []),
+    ],
+)
+def test_no_source_changes_never_queues_the_pull_requests_own_diff(
+    tmp_path: Path, route: str, kinds: list[str], statuses: list[str]
+):
+    """That diff is a source change the gate could only skip: the author track still runs, and a candidate with no
+    author track ends ``skipped`` without an ``integrate_patch`` round and is not selected again."""
+    stub = _stub(tmp_path)
+    stub.shared_state.no_source_changes = True
+    _seed_batch(stub, dict(_CANDIDATE, route=route))
+
+    _pump_then_materialize(stub)
+
+    assert sorted(c["kind"] for c in stub.tasks.created) == sorted(kinds)
+    rows = stub.shared_state.framework_agent_phase_progress
+    assert [(row["candidate_id"], row["status"], row["kept"]) for row in rows] == [
+        (_CANDIDATE["pr_url"], status, False) for status in statuses
+    ]
+    if statuses:
+        assert stub.phase_framework._unprocessed_framework_agent_candidates() == []
+
+
 def test_authoring_inflight_detects_specialist_and_proposals(tmp_path: Path):
     stub = _stub(tmp_path)
     # One unprocessed candidate so the signal has a valid target.
