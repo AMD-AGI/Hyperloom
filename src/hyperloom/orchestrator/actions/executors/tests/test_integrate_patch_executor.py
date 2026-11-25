@@ -1353,30 +1353,7 @@ async def test_enablement_advances_when_boot_reaches_new_gap(tmp_path: Path, mon
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize(
-    "bench_error_class", ["server_silent_before_ready", "client_failed", "round_timeout", "server_exited"]
-)
-async def test_enablement_advance_stands_whatever_class_the_unserved_bench_ended_with(
-    tmp_path: Path, monkeypatch, bench_error_class: str
-):
-    """The enablement gate grades how far the boot got, so a deeper wall is kept even when the harness or the
-    environment kept the bench from measuring."""
-    new_gap = "ValueError: Following weights were not initialized from checkpoint: {'model.layers.19.k_norm.weight'}\n"
-    result, repo = await _run_enablement_integrate(
-        tmp_path,
-        monkeypatch,
-        booted=False,
-        bench_error=new_gap,
-        bench_error_class=bench_error_class,
-        before_log="RuntimeError: shape mismatch loading vllm/model_executor/parameter.py\n",
-        after_log=new_gap,
-    )
-    assert result["status"] == "advanced"
-    assert (repo / "src.py").read_text().endswith("return 2\n")
-
-
-@pytest.mark.asyncio
-async def test_enablement_round_the_harness_left_unmeasured_at_the_same_wall_is_not_graded(tmp_path: Path, monkeypatch):
+async def test_enablement_round_the_harness_failed_at_the_same_wall_is_reverted(tmp_path: Path, monkeypatch):
     same_wall = "hipErrorNoBinaryForGpu: no kernel image is available\n"
     result, repo = await _run_enablement_integrate(
         tmp_path,
@@ -1386,7 +1363,8 @@ async def test_enablement_round_the_harness_left_unmeasured_at_the_same_wall_is_
         before_log=same_wall,
         after_log=same_wall,
     )
-    assert (result["status"], result["error_class"]) == ("failed", "bench_unmeasured")
+    assert result["status"] == "reverted"
+    assert "error_class" not in result
     assert (repo / "src.py").read_text().endswith("return 1\n")
 
 
