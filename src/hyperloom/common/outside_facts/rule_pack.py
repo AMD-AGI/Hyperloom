@@ -30,8 +30,9 @@ from typing import Any, NamedTuple, TypedDict
 
 import yaml
 
-from hyperloom.common.outside_facts import component_layout
+from hyperloom.common.outside_facts import component_layout, kernel_knob
 from hyperloom.common.outside_facts.component_layout import ComponentLayoutSpec, LayoutSpecError
+from hyperloom.common.outside_facts.kernel_knob import KernelKnobSpec, KnobSpecError
 
 __all__ = [
     "DEFAULT_PACK_PATH",
@@ -64,13 +65,14 @@ class RulePackIdentity(TypedDict):
 
 
 class Kind(Enum):
-    """The closed list of entry kinds. The last two are reserved: no rule reads one yet, so a pack that holds one is
-    refused until the rule that does arrives with its evaluator."""
+    """The closed list of entry kinds. ``arg_value`` and ``kernel_table`` are reserved: no rule reads one yet, so a pack
+    that holds one is refused until the rule that does arrives with its evaluator."""
 
     NAMES = "names"
     LOG_REGEX = "log_regex"
     ENV_DEFAULT = "env_default"
     COMPONENT_LAYOUT = "component_layout"
+    KERNEL_KNOB = "kernel_knob"
     ARG_VALUE = "arg_value"
     KERNEL_TABLE = "kernel_table"
 
@@ -92,6 +94,7 @@ class Entry:
 
 _COMMON_FIELDS = frozenset({"kind", "project", "reason", "examples"})
 _LAYOUT_FIELDS = ("import_name", "sections", "refuse", "native", "generated")
+_KNOB_FIELDS = ("component", "file", "anchor", "insert", "axes", "values", "archs", "bench")
 _NAMES_FIELD = "names"
 _PATTERN_FIELD = "pattern"
 _ENV_FIELD = "env"
@@ -133,6 +136,20 @@ class RulePack:
         where = self._where(entry_id)
         body = self._entry(entry_id, Kind.COMPONENT_LAYOUT).body
         return component_layout.parse_layout(where, {name: body[name] for name in _LAYOUT_FIELDS})
+
+    def kernel_knobs(self) -> dict[str, KernelKnobSpec]:
+        """The knob every ``kernel_knob`` entry states, in the pack's order, by the name a sweep is asked for it by: the
+        entry's id without its ``kernel_knob_<component>_`` prefix. Two entries of one name are refused."""
+        knobs: dict[str, KernelKnobSpec] = {}
+        for entry_id, entry in self.entries.items():
+            if entry.kind is not Kind.KERNEL_KNOB:
+                continue
+            knob = kernel_knob.parse_knob(self._where(entry_id), entry.body)
+            name = entry_id.removeprefix(f"kernel_knob_{knob.component}_")
+            if name in knobs:
+                raise RulePackError(f"{self._where(entry_id)}: a second kernel knob named {name!r}")
+            knobs[name] = knob
+        return knobs
 
     def _where(self, entry_id: str) -> str:
         return f"rule pack {self.path}: entry {entry_id!r}"
@@ -200,12 +217,20 @@ def _check_component_layout(where: str, body: Mapping[str, Any], examples: objec
         raise RulePackError(str(exc)) from exc
 
 
+def _check_kernel_knob(where: str, body: Mapping[str, Any], examples: object) -> None:
+    try:
+        kernel_knob.check_examples(where, kernel_knob.parse_knob(where, body), examples)
+    except KnobSpecError as exc:
+        raise RulePackError(str(exc)) from exc
+
+
 #: The fields each readable kind holds beside the common ones, and the check of its fields and examples.
 _READABLE: dict[Kind, tuple[frozenset[str], Callable[[str, Mapping[str, Any], object], None]]] = {
     Kind.NAMES: (frozenset({_NAMES_FIELD}), _check_names),
     Kind.LOG_REGEX: (frozenset({_PATTERN_FIELD}), _check_log_regex),
     Kind.ENV_DEFAULT: (frozenset({_ENV_FIELD, _VALUE_FIELD}), _check_env_default),
     Kind.COMPONENT_LAYOUT: (frozenset(_LAYOUT_FIELDS), _check_component_layout),
+    Kind.KERNEL_KNOB: (frozenset(_KNOB_FIELDS), _check_kernel_knob),
 }
 
 

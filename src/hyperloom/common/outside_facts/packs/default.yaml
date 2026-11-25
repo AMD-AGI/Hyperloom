@@ -18,11 +18,16 @@
 #                 examples.native line placed so and named native, every examples.refuse path refused. A component
 #                 no image installs lies over the pinned checkout of its upstream (base: checkout) in every section,
 #                 each section native throughout ("<prefix>/*")
+#   kernel_knob   a compile-time launch parameter of a native kernel a sweep may force per kernel instance: the
+#                 upstream file, the anchor line (exactly once in it) a rendered insert line follows, the axes whose
+#                 values make one instance (a key), the values a key may be given, the GPU architectures the anchored
+#                 branch is compiled for, and the microbenchmark case of a key (bench); the settings of every example
+#                 applied to its source must give its expected text (hyperloom.common.outside_facts.kernel_knob)
 #   arg_value     reserved: no rule reads one yet, so a pack that holds one is refused
 #   kernel_table  reserved: no rule reads one yet, so a pack that holds one is refused
 # Every entry names its project, says why the fact exists and carries examples. A pack that fails its own examples, or
 # lacks an entry the code reads, is refused when it is loaded; nothing falls back to a default.
-version: "26"
+version: "27"
 facts:
   aiter_meta_dir:
     kind: names
@@ -1157,3 +1162,116 @@ facts:
         - "convert_hf_to_gguf.py"
         - "docs/build.md"
         - "ggml/src/libggml-hip.a"
+
+  llamacpp_backend_ops_bench:
+    kind: names
+    project: llama.cpp
+    reason: >-
+      tests/test-backend-ops times one ggml operation per case on a backend (its perf mode) and reads the cases from a
+      file (--test-file) of lines "<op> <type> <ne0..ne3> <n op params> <op params> <n sources> (<type> <ne0..ne3>
+      <nb0..nb3>)* <name>", the op and the types as the numbers of ggml's enums in ggml/include/ggml.h; a source whose
+      nb0 is 0 is laid out contiguously. The HIP backend names its first visible device ROCm0, and a perf line of a case
+      is "<op>(<params>): <runs> runs - <time> us/run - ...", its params naming the case's name first.
+    names:
+      executable: test-backend-ops
+      mode: perf
+      backend: ROCm0
+      enum_header: ggml/include/ggml.h
+      op_enum: ggml_op
+      type_enum: ggml_type
+      op_prefix: GGML_OP_
+      type_prefix: GGML_TYPE_
+      activation_type: F32
+    examples:
+      - "hyperloom.measure.runner.native.backend_ops: the microbenchmark of a kernel knob's keys writes the case file and reads the times"
+
+  kernel_knob_llamacpp_mmvq_nwarps_rdna3:
+    kind: kernel_knob
+    project: llama.cpp
+    reason: >-
+      ggml's HIP backend compiles its quantized matrix-vector kernel (ggml/src/ggml-cuda/mmvq.cu, used for 1 to 8
+      columns of activations, which speculative-decoding verification and small batches run) once per weight type and
+      number of columns (ncols_dst), with the warps of a block chosen by calc_nwarps from a per-architecture table; on
+      RDNA3 (gfx1100, gfx1101, gfx1102: MMVQ_PARAMETERS_RDNA3_0) it gives 8 warps to a few types at one column and 1
+      warp everywhere else. The host launch and the device instance both read calc_nwarps, so a line returning a value
+      at the top of the RDNA3 branch changes the warps of exactly that instance; the rows per block stay 1 on RDNA3.
+    component: llamacpp
+    file: ggml/src/ggml-cuda/mmvq.cu
+    anchor: "    if (table_id == MMVQ_PARAMETERS_RDNA3_0) {"
+    insert: "        if (type == GGML_TYPE_${type} && ncols_dst == ${ncols}) { return ${value}; }"
+    axes:
+      type: [Q4_0, Q4_1, Q5_0, Q5_1, Q8_0, Q2_K, Q3_K, Q4_K, Q5_K, Q6_K, IQ4_NL, IQ4_XS]
+      ncols: ["1", "2", "3", "4", "5", "6", "7", "8"]
+    values: ["1", "2", "4", "8"]
+    archs: [gfx1100, gfx1101, gfx1102]
+    bench: {type_a: "${type}", n: "${ncols}"}
+    examples:
+      - source: |
+          static constexpr __host__ __device__ int calc_nwarps(ggml_type type, int ncols_dst, mmvq_parameter_table_id table_id) {
+              if (table_id == MMVQ_PARAMETERS_RDNA3_0) {
+                  if (ncols_dst == 1) {
+                      return 8;
+                  }
+                  return 1;
+              }
+              return 1;
+          }
+        settings:
+          - {type: Q8_0, ncols: "3", value: "4"}
+          - {type: Q8_0, ncols: "1", value: "2"}
+        expected: |
+          static constexpr __host__ __device__ int calc_nwarps(ggml_type type, int ncols_dst, mmvq_parameter_table_id table_id) {
+              if (table_id == MMVQ_PARAMETERS_RDNA3_0) {
+                  if (type == GGML_TYPE_Q8_0 && ncols_dst == 1) { return 2; }
+                  if (type == GGML_TYPE_Q8_0 && ncols_dst == 3) { return 4; }
+                  if (ncols_dst == 1) {
+                      return 8;
+                  }
+                  return 1;
+              }
+              return 1;
+          }
+
+  kernel_knob_llamacpp_mmvq_rows_rdna3:
+    kind: kernel_knob
+    project: llama.cpp
+    reason: >-
+      Each block of ggml's quantized matrix-vector kernel (ggml/src/ggml-cuda/mmvq.cu, the kernel of the warps knob
+      above, one instance per weight type and number of columns, ncols_dst) computes the rows of the weight that
+      calc_rows_per_block returns for the instance; the rows of a block share each load of the quantized activations,
+      and every thread keeps one partial sum per row and column. What more rows cost and save depends on the registers
+      a thread has for those sums and on the weight loads a card keeps in flight, which differ between architectures,
+      so the function decides per architecture table: it gives some tables two rows at 2 to 8 columns and RDNA3
+      (gfx1100, gfx1101, gfx1102: MMVQ_PARAMETERS_RDNA3_0) one row at every type and column count. The host launch and
+      the device instance both read calc_rows_per_block, so a line returning a value for the RDNA3 table at the top of
+      the function changes the rows of exactly that instance, and of no other table's.
+    component: llamacpp
+    file: ggml/src/ggml-cuda/mmvq.cu
+    anchor: "static constexpr __host__ __device__ int calc_rows_per_block(ggml_type type, int ncols_dst, int table_id, bool small_k = false, int nwarps = 1) {"
+    insert: "    if (table_id == MMVQ_PARAMETERS_RDNA3_0 && type == GGML_TYPE_${type} && ncols_dst == ${ncols}) { return ${value}; }"
+    axes:
+      type: [Q4_0, Q4_1, Q5_0, Q5_1, Q8_0, Q2_K, Q3_K, Q4_K, Q5_K, Q6_K, IQ4_NL, IQ4_XS]
+      ncols: ["1", "2", "3", "4", "5", "6", "7", "8"]
+    values: ["1", "2", "4"]
+    archs: [gfx1100, gfx1101, gfx1102]
+    bench: {type_a: "${type}", n: "${ncols}"}
+    examples:
+      - source: |
+          static constexpr __host__ __device__ int calc_rows_per_block(ggml_type type, int ncols_dst, int table_id, bool small_k = false, int nwarps = 1) {
+              if (table_id == MMVQ_PARAMETERS_GENERIC) {
+                  return ncols_dst == 1 ? 1 : 2;
+              }
+              return 1;
+          }
+        settings:
+          - {type: Q5_1, ncols: "7", value: "2"}
+          - {type: Q5_1, ncols: "6", value: "4"}
+        expected: |
+          static constexpr __host__ __device__ int calc_rows_per_block(ggml_type type, int ncols_dst, int table_id, bool small_k = false, int nwarps = 1) {
+              if (table_id == MMVQ_PARAMETERS_RDNA3_0 && type == GGML_TYPE_Q5_1 && ncols_dst == 6) { return 4; }
+              if (table_id == MMVQ_PARAMETERS_RDNA3_0 && type == GGML_TYPE_Q5_1 && ncols_dst == 7) { return 2; }
+              if (table_id == MMVQ_PARAMETERS_GENERIC) {
+                  return ncols_dst == 1 ? 1 : 2;
+              }
+              return 1;
+          }
