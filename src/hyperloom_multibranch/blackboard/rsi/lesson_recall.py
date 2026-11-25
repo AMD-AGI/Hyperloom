@@ -58,6 +58,7 @@ from hyperloom_multibranch.blackboard.rsi.lessons import (
     Lesson,
     LessonPool,
     LessonRevision,
+    normal_content,
     standing_factor,
     standing_of,
 )
@@ -83,6 +84,8 @@ class _Loaded:
     factors: dict[str, float]
     confirmations: dict[str, int]
     revision: str = ""
+    #: What every revision of every lesson says, a retired one's too (:func:`normal_content`).
+    said: frozenset[str] = frozenset()
 
 
 def edited_lessons(snapshot: BlackboardSnapshot) -> frozenset[str]:
@@ -162,7 +165,8 @@ class LessonRecall(LearningRecall):
                 factors = {key: standing_factor(standing) for key, standing in found.items()}
                 confirmations = {key: standing.confirmations for key, standing in found.items()}
                 revision = self._pool.digest() if self._pool is not None else ""
-                self._loaded = _Loaded(lessons, heads, factors, confirmations, revision)
+                said = frozenset(normal_content(rev.content) for lesson in lessons.values() for rev in lesson.revisions)
+                self._loaded = _Loaded(lessons, heads, factors, confirmations, revision, said)
             return self._loaded
 
     def past_revision(self) -> str:
@@ -209,12 +213,16 @@ class LessonRecall(LearningRecall):
 
     def notes(self, snapshot: BlackboardSnapshot, query: str, *, limit: int, family: Family | None = None) -> Notes:
         """This session's learnings and the pool's lessons that bear on ``query``, then the Experience KB's past
-        learnings in the slots left, in one list of ``limit``. It reads the KB, so call it off the event loop."""
+        learnings in the slots left, in one list of ``limit``. It reads the KB, so call it off the event loop. CLOSE
+        writes a session's learnings to the pool and the KB alike, so a KB learning that says what a lesson of the pool
+        says, or once said, is the pool's to show or to have retired, and is left out."""
 
         found = self._pooled(snapshot, query, limit, family)
         left = limit - len(found.lines)
         read = self.past_for(snapshot, query, limit=limit) if left > 0 else None
-        kb = read.items[:left] if read is not None and read.available else ()
+        said = self._load().said
+        fresh = [item for item in read.items if normal_content(item.content) not in said] if read is not None else []
+        kb = tuple(fresh[:left]) if read is not None and read.available else ()
         return found + Notes(tuple(item.render() for item in kb), (), kb, (False,) * len(kb))
 
     def family_note(self, snapshot: BlackboardSnapshot, family: Family) -> Notes:
