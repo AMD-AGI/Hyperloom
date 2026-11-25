@@ -56,7 +56,7 @@ async def sweep_session(session_dir: Path) -> dict[str, Any]:
     os.environ[ENV_CURRENT_SESSION_DIR] = str(session_dir)
     scope = CancelScope()
     with SessionLock(session_dir), use_cancel_scope(scope), _cancelled_by_signals(scope):
-        payload = await run_conc_sweep(session_dir, grant_end_unix=None)
+        payload = await run_conc_sweep(session_dir)
     _package(session_dir)
     return payload
 
