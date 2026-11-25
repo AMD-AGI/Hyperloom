@@ -25,12 +25,14 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import os
 from collections.abc import Callable, Iterator, Mapping, Sequence
 from functools import partial
 from pathlib import Path
 from typing import Any, TypeVar
 
-from hyperloom.common.outside_facts import kernel_knobs
+from hyperloom.common.env_safety import GPU_MASK_ENV_NAMES, is_secret_shaped_env_name, scrub_benchmark_process_env
+from hyperloom.common.outside_facts import ROCR_VISIBLE_DEVICES_ENV, kernel_knobs
 from hyperloom.common.outside_facts.kernel_knob import KnobSpecError
 from hyperloom.measure.runner.native.backend_ops import check_cases, time_cases
 from hyperloom.measure.runner.native.knob_sweep import (
@@ -50,7 +52,7 @@ from hyperloom_multibranch.contracts.blackboard.vocab import LeaseKind
 from hyperloom_multibranch.contracts.toolbox import LeaseCharge, RequestRejected
 from hyperloom_multibranch.toolbox.branch_leases import BranchLeases
 from hyperloom_multibranch.toolbox.tools.base import InvalidRequest, ToolFailure, ToolOutput, ToolRequest
-from hyperloom_multibranch.toolbox.tools.kernel_tune import HOLDER_PREFIX, card_env
+from hyperloom_multibranch.toolbox.tools.kernel_tune import HOLDER_PREFIX
 
 __all__ = [
     "KNOB_TUNE_TOOL",
@@ -122,6 +124,17 @@ def _unless_cancelled(scope: CancelScope | None, step: Callable[..., _T], *args:
     return step(*args)
 
 
+def _card_env(cards: Sequence[int]) -> dict[str, str]:
+    """This process's environment without credentials, hooks or a mask of the visible cards, masked to ``cards``."""
+    env = {
+        name: value
+        for name, value in os.environ.items()
+        if name not in GPU_MASK_ENV_NAMES and not is_secret_shaped_env_name(name)
+    }
+    env[ROCR_VISIBLE_DEVICES_ENV] = ",".join(map(str, cards))
+    return scrub_benchmark_process_env(env)
+
+
 class KnobTuneTool:
     """``knob_tune`` over the native builds of each component the toolbox pins (``builds``, by component), timed on a
     card leased from ``leases`` for each round."""
@@ -186,7 +199,7 @@ class KnobTuneTool:
         except (RequestRejected, SandboxUnavailable) as exc:
             raise SweepError(f"no card for a round of the sweep: {exc}") from None
         try:
-            yield card_env(lease.gpu_ids)
+            yield _card_env(lease.gpu_ids)
         finally:
             self._leases.release(lease.lease_id)
 

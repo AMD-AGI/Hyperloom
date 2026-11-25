@@ -94,8 +94,10 @@ def envs(monkeypatch: pytest.MonkeyPatch) -> list[dict[str, str]]:
 
 
 async def test_a_sweep_leases_a_card_for_each_round_and_gives_it_back(
-    tmp_path: Path, envs: list[dict[str, str]]
+    tmp_path: Path, envs: list[dict[str, str]], monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    monkeypatch.setenv("HF_TOKEN", "secret")
+    monkeypatch.setenv("HIP_VISIBLE_DEVICES", "0")
     leases = _Leases()
     tool = knob_tune.KnobTuneTool(leases, {"llamacpp": _Builds(tmp_path / "builds")})
     request = ToolRequest(knob_tune.KNOB_TUNE_TOOL, "b1", _PARAMS)
@@ -108,6 +110,7 @@ async def test_a_sweep_leases_a_card_for_each_round_and_gives_it_back(
     assert leases.leased == [("tool:job-7", "b1")] * (1 + 3 + 1)
     assert leases.released == [f"lease-{index}" for index in range(1, 6)]
     assert {env["ROCR_VISIBLE_DEVICES"] for env in envs} == {"5"}
+    assert not any({"HF_TOKEN", "HIP_VISIBLE_DEVICES"} & set(env) for env in envs)
 
 
 @pytest.mark.parametrize(
