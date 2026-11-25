@@ -11,7 +11,8 @@ export has its own schema version and its own sections:
   node a hosted run is given). In a hosted run it also holds, as written, what the run leaves in the session directory:
   ``plugs`` and ``hosted_measurement``, and the records ``measurement_sandboxes`` (one per test, keyed by
   ``request_id`` as ``tests`` are). From the agent runner's samples it holds ``specialist_resources``, one record per
-  specialist, and ``container_resources``, the container's last reading.
+  specialist, and ``container_resources``, the container's last reading. ``base_launch`` is where the session's frozen
+  base was resolved from, its image and its topology, as ``MB-toolbox/base_launch.json`` records them.
 * ``baseline``: the root's recorded values, dispersion and thresholds.
 * ``lineage``: every commit and branch, with when each was made, opened or stopped, and a commit's recipe digest when
   its writer named it.
@@ -37,6 +38,7 @@ export has its own schema version and its own sections:
 
 from __future__ import annotations
 
+import logging
 import os
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
@@ -47,6 +49,7 @@ from hyperloom_common.jsonio import read_json, read_jsonl
 from hyperloom_common.timeutil import epoch_iso
 from hyperloom.contracts.measurement import BuildPayment
 from hyperloom.orchestrator.knowledge.remote_recipe.models import RemoteWriteResult
+from hyperloom.inference_optimizer.session.base_launch import base_launch_metadata
 from hyperloom.inference_optimizer.session.session_paths import (
     CONTAINER_RECORD_KIND,
     RESOURCES_RELATIVE_PATH,
@@ -57,6 +60,8 @@ from hyperloom_multibranch.contracts.blackboard.records import SECONDS_PER_HOUR,
 from hyperloom_multibranch.blackboard.codec import encode
 from hyperloom_multibranch.blackboard.knowledge.recipe_writeback import FinalRecipe
 from hyperloom_multibranch.blackboard.knowledge.stranded_spans import stranded_spans
+
+logger = logging.getLogger(__name__)
 
 SCHEMA_VERSION = "multibranch-2"
 EXPORTER_VERSION = "hyperloom-multibranch-breakdown-2"
@@ -227,6 +232,21 @@ def agent_resources(runner_dir: Path | None) -> dict[str, object]:
     return found
 
 
+def frozen_base(path: Path | None) -> dict[str, object]:
+    """The session's frozen base at ``path`` as ``base_launch``: where it was resolved from, its image and its
+    topology. No file gives no key; neither does one that is no base launch or no longer matches its digest, which is
+    logged."""
+
+    if path is None:
+        return {}
+    try:
+        found = base_launch_metadata(path)
+    except (OSError, ValueError):
+        logger.warning("breakdown: the base launch at %s cannot be read; no base_launch", path, exc_info=True)
+        return {}
+    return {} if found is None else {"base_launch": found}
+
+
 def _final(final: FinalRecipe | None) -> dict[str, object] | None:
     if final is None:
         return None
@@ -260,12 +280,14 @@ class SessionPlace:
     directory; ``code_revision`` is the source revision the session's manifest recorded at start, which a process that
     exports another run's session, such as ``final-only``, does not have in its environment, and ``claw_session_id``
     the Claw session the manifest records, which the breakdown names when the exporting process is given none.
+    ``base_launch`` is the session's frozen base launch file.
     """
 
     session_dir: Path | None = None
     runner_dir: Path | None = None
     code_revision: str | None = None
     claw_session_id: str | None = None
+    base_launch: Path | None = None
 
 
 def build_breakdown(
@@ -296,6 +318,7 @@ def build_breakdown(
             "session": session_metadata(snapshot, os.environ, place.code_revision, place.claw_session_id),
             **hosted_records(place.session_dir),
             **agent_resources(place.runner_dir),
+            **frozen_base(place.base_launch),
         },
         "baseline": encode(snapshot.baseline),
         "lineage": encode(snapshot.lineage),

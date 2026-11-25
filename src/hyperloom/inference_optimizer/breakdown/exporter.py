@@ -19,6 +19,7 @@ from hyperloom_common.jsonio import read_json, read_json_strict
 from . import collectors
 from .recorder.event_finalize import finalize_events
 from .recorder.recorder_warnings import RECORDING_ERRORS
+from ..session.base_launch import base_launch_metadata, base_launch_path
 from ..session.sbd_v6 import SCHEMA_VERSION_V6
 from ..session.session_paths import (
     BREAKDOWN_FILENAME,
@@ -215,10 +216,13 @@ def build(session_dir: Path | str) -> dict[str, Any]:
         warnings,
     )
     v6_critic = collectors.collect_v6_critic(assembled.get("critic"))
+    base_launch = _base_launch(sd, warnings)
     # Snapshot last: every collector above feeds this one list, and this is the
     # single place a collection failure surfaces.
     conc_sweep = _conc_sweep_report(sd, warnings)
     if isinstance(metadata, dict):
+        if base_launch is not None:
+            metadata["base_launch"] = base_launch
         metadata["warnings"] = list(warnings)
 
     breakdown = {
@@ -234,6 +238,15 @@ def build(session_dir: Path | str) -> dict[str, Any]:
     if conc_sweep is not None:
         breakdown[CONC_SWEEP_SECTION] = conc_sweep
     return breakdown
+
+
+def _base_launch(session_dir: Path, warnings: list[str]) -> dict[str, Any] | None:
+    """Where the session's frozen base was resolved from, its image and its topology; ``None`` when it froze none."""
+    try:
+        return base_launch_metadata(base_launch_path(session_dir))
+    except (OSError, ValueError) as exc:
+        warnings.append(f"base_launch: {exc}")
+        return None
 
 
 def _conc_sweep_report(session_dir: Path, warnings: list[str]) -> dict[str, Any] | None:

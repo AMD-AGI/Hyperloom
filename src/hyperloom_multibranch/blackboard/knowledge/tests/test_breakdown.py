@@ -13,7 +13,11 @@ import pytest
 
 from hyperloom.contracts.measurement import BuildCharge, BuildPayment
 from hyperloom.contracts.recipe import LaunchConfig, Recipe
+from hyperloom.inference_optimizer.session.base_launch import write_base_launch
 from hyperloom.orchestrator.knowledge.remote_recipe.models import RemoteWriteResult
+from inference_suite import LaunchQuery, SourceSnapshot, resolve_base
+from inference_suite.contracts import BaseLaunch, Workload
+from inference_suite.recipe.resolve import UnreadSource
 from hyperloom_multibranch.contracts.llm_prices import TokenCounts
 from hyperloom_multibranch.contracts.blackboard import INTEGRATION_BRANCH
 from hyperloom_multibranch.contracts.blackboard.records import (
@@ -156,6 +160,49 @@ def test_the_agent_runners_samples_give_each_specialists_record_and_the_containe
 
     assert (metadata["specialist_resources"], metadata["container_resources"]) == ([first, second], late)
     assert not {"specialist_resources", "container_resources"} & set(unsampled)
+
+
+def frozen_base_launch() -> BaseLaunch:
+    """A base resolved offline from the default table, as a session without InferenceX access freezes one."""
+    snapshot = SourceSnapshot(None, 1_793_000_000, unread=UnreadSource("InferenceX", "offline"))
+    query = LaunchQuery(
+        "meta-llama/Llama-3.1-8B-Instruct", "sglang", "mi355x", Workload.FIXED, (64,), isl=1024, osl=1024, tp=1
+    )
+    base = resolve_base(query, snapshot, gpus=8)
+    assert isinstance(base, BaseLaunch), base
+    return base
+
+
+def test_the_metadata_reports_where_the_frozen_base_came_from_its_image_and_topology(
+    snapshot: BlackboardSnapshot, tmp_path: Path
+) -> None:
+    base = frozen_base_launch()
+    path = write_base_launch(tmp_path, base)
+    document = base.to_document()
+
+    metadata = build_breakdown(snapshot, place=SessionPlace(base_launch=path))["metadata"]
+
+    assert metadata["base_launch"] == {key: document[key] for key in ("source", "image", "topology")}
+
+
+def test_no_frozen_base_gives_no_base_launch(snapshot: BlackboardSnapshot, tmp_path: Path) -> None:
+    assert "base_launch" not in build_breakdown(snapshot)["metadata"]
+    missing = SessionPlace(base_launch=tmp_path / "base_launch.json")
+    assert "base_launch" not in build_breakdown(snapshot, place=missing)["metadata"]
+
+
+def test_a_base_that_no_longer_matches_its_digest_is_logged_and_left_out(
+    snapshot: BlackboardSnapshot, tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    path = write_base_launch(tmp_path, frozen_base_launch())
+    tampered = json.loads(path.read_text(encoding="utf-8"))
+    tampered["digest"] = tampered["digest"][:-8] + "00000000"
+    path.write_text(json.dumps(tampered), encoding="utf-8")
+
+    metadata = build_breakdown(snapshot, place=SessionPlace(base_launch=path))["metadata"]
+
+    assert "base_launch" not in metadata
+    assert any("cannot be read" in r.getMessage() for r in caplog.records)
 
 
 def test_the_spend_counts_the_tokens_of_unpriced_llm_calls_beside_the_dollars(snapshot: BlackboardSnapshot) -> None:

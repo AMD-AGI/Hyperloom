@@ -14,7 +14,11 @@ import pytest
 from hyperloom_common.timeutil import iso_z
 from hyperloom.inference_optimizer.breakdown import exporter as ex
 from hyperloom.inference_optimizer.breakdown.collectors import sessions
+from hyperloom.inference_optimizer.session.base_launch import write_base_launch
 from hyperloom.inference_optimizer.trace import decision_trace
+from inference_suite import LaunchQuery, SourceSnapshot, resolve_base
+from inference_suite.contracts import BaseLaunch, Workload
+from inference_suite.recipe.resolve import UnreadSource
 
 # ---- _load_session_json ----
 
@@ -317,6 +321,46 @@ def _write_sweep_report(session_dir: Path) -> None:
     reports = session_dir / "reports"
     reports.mkdir(parents=True, exist_ok=True)
     (reports / "conc_sweep_summary.json").write_text(json.dumps(_SWEEP), encoding="utf-8")
+
+
+def _frozen_base() -> BaseLaunch:
+    """A base resolved offline from the default table, as a session without InferenceX access freezes one."""
+    snapshot = SourceSnapshot(None, 1_793_000_000, unread=UnreadSource("InferenceX", "offline"))
+    query = LaunchQuery(
+        "meta-llama/Llama-3.1-8B-Instruct", "sglang", "mi355x", Workload.FIXED, (64,), isl=1024, osl=1024, tp=1
+    )
+    base = resolve_base(query, snapshot, gpus=8)
+    assert isinstance(base, BaseLaunch), base
+    return base
+
+
+def test_a_breakdown_reports_where_the_frozen_base_came_from_its_image_and_topology(tmp_path):
+    base = _frozen_base()
+    write_base_launch(tmp_path, base)
+    document = base.to_document()
+
+    reported = ex.build(tmp_path)["metadata"]["base_launch"]
+
+    assert reported == {key: document[key] for key in ("source", "image", "topology")}
+    assert not {"args", "env", "client"} & set(reported)
+
+
+def test_a_session_that_froze_no_base_has_no_base_launch(tmp_path):
+    out = ex.build(tmp_path)
+    assert "base_launch" not in out["metadata"]
+    assert not any("base_launch" in w for w in out["metadata"]["warnings"])
+
+
+def test_a_base_launch_that_no_longer_matches_its_digest_is_a_warning_not_a_block(tmp_path):
+    path = write_base_launch(tmp_path, _frozen_base())
+    tampered = json.loads(path.read_text(encoding="utf-8"))
+    tampered["digest"] = tampered["digest"][:-8] + "00000000"
+    path.write_text(json.dumps(tampered), encoding="utf-8")
+
+    out = ex.build(tmp_path)
+
+    assert "base_launch" not in out["metadata"]
+    assert any(w.startswith("base_launch: ") for w in out["metadata"]["warnings"])
 
 
 def test_a_breakdown_of_a_session_no_sweep_ran_for_has_no_sweep_section(tmp_path):

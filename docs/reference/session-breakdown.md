@@ -279,7 +279,8 @@ started, …).
 
 Task identity, recorded as each fact is decided rather than re-derived at
 export. Five blocks: `session`, `task_config`, `grading`, `versions` and
-`langfuse`, plus the export's own `exported_at_utc` and `warnings`.
+`langfuse`, plus the export's own `exported_at_utc` and `warnings`, and
+`base_launch` when the session froze a base.
 
 `metadata.session` — identity and lifecycle:
 
@@ -354,6 +355,19 @@ per external tool.
 `metadata.langfuse` — the live-Langfuse entrypoint: `enabled`,
 `disabled_reason`, `trace_id`, `session_id`, `trace_url` and push `counts`. The
 local trace jsonl is always written regardless.
+
+`metadata.base_launch` — the `source`, `image` and `topology` of the session's
+frozen `base_launch.json`, as written; the base's args and env stay in the file.
+`source` says where the base was resolved from: for an InferenceX recipe, `kind`
+`inferencex`, the `repo` and `commit` it was read at, the recipe `path`, the
+`locator` of the variant it bound (`<recipe>:override_tp4_c32`) and the sha256 of
+every file read (`files`). `image.recipe` is the image reference the recipe
+named, with its digest, and `topology` the TP and EP every round runs at. A
+consumer can match the session against InferenceX's own runs of the same recipe
+on these. A multi-branch breakdown carries the same block, from
+`MB-toolbox/base_launch.json`. The key is absent for a session that froze no
+base, and for one whose file cannot be read or no longer matches its digest
+(single-lineage: named on `metadata.warnings`).
 
 ---
 
