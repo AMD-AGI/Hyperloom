@@ -77,6 +77,10 @@ class AnalysisStarter(Protocol):
     ) -> str:
         """Start ``tool`` for ``branch`` on the branch's head commit and return the job id; raises RequestRejected."""
 
+    async def analysis_result(self, branch: str, job_id: str) -> Mapping[str, Any]:
+        """The result record of the job ``job_id``, its tool's whole result once it ended; raises LookupError for an
+        id no job has and PermissionError for a job whose result does not go to ``branch``."""
+
 
 async def _head(repo: ExperimentRepo, branch: str) -> str:
     try:

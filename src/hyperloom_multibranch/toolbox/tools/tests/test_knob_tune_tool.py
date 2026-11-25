@@ -7,6 +7,9 @@ built."""
 
 from __future__ import annotations
 
+import asyncio
+import contextlib
+import json
 import re
 from functools import partial
 from pathlib import Path
@@ -26,6 +29,7 @@ from hyperloom_multibranch.contracts.toolbox import BranchLease, LeaseCharge
 from hyperloom_multibranch.toolbox.analysis import AnalysisAsk, analysis_request
 from hyperloom_multibranch.contracts.toolbox import RequestRejected
 from hyperloom_multibranch.toolbox import local_hosted
+from hyperloom_multibranch.toolbox.tests.test_analysis_route import _stack, _text
 from hyperloom_multibranch.toolbox.tools import knob_tune
 from hyperloom_multibranch.toolbox.tools.base import InvalidRequest, ToolFailure, ToolRequest
 from hyperloom.orchestrator.actions.executors.candidate_builds import TreeBuild, TreeBuildStatus
@@ -220,6 +224,30 @@ async def test_the_mcp_route_checks_a_sweep_when_it_is_asked_for() -> None:
         await analysis_request(None, None, AnalysisAsk("b1", knob_tune.KNOB_TUNE_TOOL, {**_PARAMS, "knob": "x"}))
     with pytest.raises(RequestRejected, match="reads no profile test"):
         await analysis_request(None, None, AnalysisAsk("b1", knob_tune.KNOB_TUNE_TOOL, _PARAMS, "p1"))
+
+
+async def test_a_specialist_reads_the_sweep_s_document_from_the_toolbox_and_another_branch_does_not(
+    tmp_path: Path, envs
+) -> None:
+    tool = knob_tune.KnobTuneTool(_Leases(), {"llamacpp": _Builds(tmp_path / "builds")})
+    async with contextlib.asynccontextmanager(_stack)(tmp_path, analyses={tool.name: tool}) as stack:
+        job = json.loads(_text(await stack.start(tool=tool.name, params=_PARAMS)))["job_id"]
+        await stack.jobs.wait(job)
+        inbox = json.loads(_text(await asyncio.to_thread(stack.call, "b1", "poll_inbox")))
+        own = await asyncio.to_thread(stack.call, "b1", "analysis_result", job_id=job)
+        other = await asyncio.to_thread(stack.call, "b2", "analysis_result", job_id=job)
+
+    (item,) = inbox["items"]
+    assert item["pointer"] == job and item["summary"].endswith(
+        "succeeded: mmvq_nwarps_rdna3: 1 of 2 keys beat the default beyond the noise; "
+        "microbenchmark times are advice only"
+    )
+    document = json.loads(_text(own))
+    assert (document["job_id"], document["status"]) == (job, "succeeded")
+    assert document["result"]["winners"] == {"type=Q8_0,ncols=1": "2"}
+    assert "+        if (type == GGML_TYPE_Q8_0 && ncols_dst == 1) { return 2; }" in document["result"]["patch"]
+    assert len(document["result"]["table"]) == 4 and document["result"]["noise"]
+    assert other["error"]["message"] == "a specialist reads the jobs of its own branch only"
 
 
 @pytest.mark.parametrize(

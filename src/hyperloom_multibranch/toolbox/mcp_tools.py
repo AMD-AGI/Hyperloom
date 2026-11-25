@@ -17,6 +17,8 @@ them:
   its :attr:`~.analysis.AnalysisStarter.analysis_tools`, which the tool's schema and description list, no more) on the
   branch's head commit, or on the landed output of the test ``kernel_tune`` names (an
   :class:`~.analysis.AnalysisStarter`, the real toolbox);
+* ``analysis_result``, served with an analysis tool, reads the result record of a job of the branch from the toolbox:
+  the inbox carries a job's summary, and a specialist's sandbox does not show the toolbox's files;
 * ``poll_inbox`` reads the branch's inbox, one page at a time (:data:`POLL_INBOX_MAX_ITEMS` items at most);
 * ``option_review``, served where the session laid an option inventory, records the branch's verdicts on the options
   the launch leaves unset (:class:`~.option_reviews.OptionReviews`) and answers what its review still leaves out;
@@ -111,6 +113,12 @@ _REQUEST_ID: dict[str, Any] = {
     "required": ["request_id"],
     "additionalProperties": False,
 }
+_JOB_ID: dict[str, Any] = {
+    "type": _OBJECT,
+    "properties": {"job_id": {"type": _STRING, "minLength": 1}},
+    "required": ["job_id"],
+    "additionalProperties": False,
+}
 #: The longest one ``wait_test`` call blocks; a specialist waits longer by calling it again. Claude Code aborts an
 #: HTTP MCP request after 60 s, so a longer block answers nothing.
 WAIT_TEST_MAX_SECONDS = 45
@@ -128,6 +136,9 @@ _POLL_INBOX_TOOL = "poll_inbox"
 #: showing it; 16,000 characters stay near 5,000 tokens.
 POLL_INBOX_MAX_ITEMS = 20
 POLL_INBOX_MAX_BYTES = 16_000
+#: The longest result record ``analysis_result`` returns, under the 50,000 characters Claude Code shows.
+ANALYSIS_RESULT_MAX_CHARS = 45_000
+_ANALYSIS_RESULT_TOOL = "analysis_result"
 #: What a page's document needs besides its items and its cursor: the keys, the counts and the marker.
 _POLL_PAGE_OVERHEAD = 200
 _PAGE_CURSOR = "page:"
@@ -256,7 +267,7 @@ _KERNEL_TUNE_GUIDE = (
     "with params.shapes, which are tuned as named. The decode "
     "CUDA-graph batch sizes the test's servers captured are added to the shapes as M. It runs Forge's tuner on one "
     "card leased for the job, so it is refused (lease_leaves_no_measurement) when no card can be spared from "
-    "measurement, and its result arrives in poll_inbox: per table, the tuned rows as a rows-only CSV for "
+    "measurement, and analysis_result returns its result: per table, the tuned rows as a rows-only CSV for "
     "put_kernel_artifact(rows_only=true), each row checked against the reference GEMM (a row that failed or could "
     "not be checked is listed with verified=false and is not in the CSV). By default a row is handed over only with "
     "a mismatch ratio of at most 0.01 (an asm kernel at a splitK above 1 may instead have a relative-norm error of at "
@@ -281,9 +292,10 @@ _KNOB_TUNE_GUIDE = (
     "It builds the pinned commit once per value, no card held, then times every key with the component's own operator "
     "benchmark on a card "
     "leased per round, the default build twice per round for the noise (refused with lease_leaves_no_measurement when "
-    "no card can be spared). Its result arrives in poll_inbox: the ranked table, the noise, each key's winning value "
-    "where it beat the default beyond the noise and matched the CPU backend, and the patch forcing the winners (a git "
-    "patch over the pinned commit). Commit it on your branch and submit a test: the microbenchmark is advice only."
+    "no card can be spared). poll_inbox shows the job's summary, how many keys beat the default; analysis_result "
+    "returns its result: the ranked table, the noise, each key's winning value where it beat the default beyond the "
+    "noise and matched the CPU backend, and the patch forcing the winners (a git patch over the pinned commit). Commit "
+    "it on your branch and submit a test: the microbenchmark is advice only."
 )
 
 
@@ -298,8 +310,9 @@ _UPSTREAM_PR_GUIDE = (
     "or all search pull requests of every state) are optional. The tool runs in the toolbox's host process and asks "
     "GitHub. poll_inbox shows you the job's summary: how many candidates the search kept, of how many pull requests "
     'matched when the limit left some out ("10 of 266"), and the ref and title of the first candidate, the best '
-    "match. The other candidates are in the job's result record, which you are not shown: to see another pull "
-    "request, search again with fewer, more specific words. A GitHub that cannot be asked fails the job and says "
+    "match. The other candidates are in the job's result record, which analysis_result returns when it is at most "
+    f"{ANALYSIS_RESULT_MAX_CHARS} characters: when it is longer, or to see another pull request, search again with "
+    "fewer, more specific words. A GitHub that cannot be asked fails the job and says "
     "why, which is not an empty answer: a failure that names a wait is a spent rate limit, so ask again after it; "
     "after a token GitHub refuses or a GitHub that cannot be reached, go on without this tool."
 )
@@ -341,7 +354,8 @@ def _start_analysis_description(served: Sequence[str]) -> str:
         return "This toolbox serves no analysis tool: every call is refused by name."
     named = " or ".join(f"{name} ({_ANALYSIS_BLURBS[name]})" if name in _ANALYSIS_BLURBS else name for name in served)
     return (
-        f"Start {named} for this branch; returns the job id at once and the result arrives in poll_inbox. The commit "
+        f"Start {named} for this branch; returns the job id at once. When the job ends its summary arrives in "
+        f"poll_inbox, and {_ANALYSIS_RESULT_TOOL} with the job id returns its result. The commit "
         "analysed is this branch's head, set by the server; with a profile_request_id of any branch's profile test of "
         "its recipe the pointer carries its op shares."
         + (_KERNEL_TUNE_GUIDE if KERNEL_TUNE_TOOL in served else "")
@@ -566,6 +580,28 @@ def _start_analysis(
             return {"job_id": await on_home_loop(home, call)}
         except RequestRejected as exc:
             raise ToolError(f"rejected ({exc.code}): {exc.reason}") from exc
+
+    return handle
+
+
+def _analysis_result(
+    analysis: AnalysisStarter, home: asyncio.AbstractEventLoop | None
+) -> Callable[[dict[str, Any], CallContext], Any]:
+    async def handle(arguments: dict[str, Any], ctx: CallContext) -> dict[str, Any]:
+        job_id = arguments["job_id"]
+        try:
+            record = await on_home_loop(home, analysis.analysis_result(ctx.principal.branch, job_id))
+        except PermissionError:
+            raise ToolForbidden("a specialist reads the jobs of its own branch only") from None
+        except LookupError:
+            raise ToolError(f"this toolbox ran no job {job_id!r}") from None
+        size = len(json.dumps(record))
+        if size > ANALYSIS_RESULT_MAX_CHARS:
+            raise ToolError(
+                f"the result record of {job_id} is {size} characters, over the {ANALYSIS_RESULT_MAX_CHARS} one reply "
+                "holds: start the tool again with a narrower request"
+            )
+        return dict(record)
 
     return handle
 
@@ -952,6 +988,20 @@ def _register_start_analysis(
         description=_start_analysis_description(served),
         schema=_start_analysis_schema(served),
         handler=_start_analysis(analysis, home),
+        scopes=_SPECIALIST_SCOPES,
+    )
+    if analysis is None or not served:
+        return
+    server.register(
+        _ANALYSIS_RESULT_TOOL,
+        description=(
+            "The result record of a job start_analysis started for this branch: its status and summary and, once it "
+            "ended, the tool's whole result, of which poll_inbox shows the summary only, or the error it failed with. "
+            "A job that still runs answers its status alone. A record over "
+            f"{ANALYSIS_RESULT_MAX_CHARS} characters is refused."
+        ),
+        schema=_JOB_ID,
+        handler=_analysis_result(analysis, home),
         scopes=_SPECIALIST_SCOPES,
     )
 

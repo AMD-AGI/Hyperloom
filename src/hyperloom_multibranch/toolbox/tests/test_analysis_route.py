@@ -28,6 +28,7 @@ from hyperloom_multibranch.contracts.blackboard.vocab import INTEGRATION_BRANCH
 from hyperloom_multibranch.contracts.blackboard.records import BaselineRecord, ToolResultPointer
 from hyperloom_multibranch.contracts.toolbox import RequestRejected
 from hyperloom_multibranch.blackboard import LocalBlackboard
+from hyperloom_multibranch.toolbox import mcp_tools
 from hyperloom_multibranch.toolbox.mcp_tools import (
     McpSpecialistTokens,
     SpecialistToolOptions,
@@ -273,6 +274,24 @@ async def test_a_toolbox_without_a_tool_executor_advertises_no_analysis_tool(sta
     entry = stack_without_tools.advertised()
     assert stack_without_tools.rig.toolbox.analysis_tools == ()
     assert "enum" not in entry["inputSchema"]["properties"]["tool"] and "no analysis tool" in entry["description"]
+
+
+async def test_analysis_result_is_served_with_an_analysis_tool_and_refuses_an_unknown_job_and_a_long_record(
+    stack: Stack, stack_without_tools: Stack, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    profile = await _profile_test(stack, commit=HEAD)
+    job = json.loads(_text(await stack.start(tool="roofline", profile_request_id=profile)))["job_id"]
+    await stack.jobs.wait(job)
+    monkeypatch.setattr(mcp_tools, "ANALYSIS_RESULT_MAX_CHARS", 20)
+
+    long = await asyncio.to_thread(stack.call, "b1", "analysis_result", job_id=job)
+    unknown = await asyncio.to_thread(stack.call, "b1", "analysis_result", job_id="roofline-none")
+    unserved = await asyncio.to_thread(stack_without_tools.call, "b1", "analysis_result", job_id=job)
+
+    assert long["result"]["isError"] and "over the 20 one reply holds" in long["result"]["content"][0]["text"]
+    assert unknown["result"]["isError"] and "no job 'roofline-none'" in unknown["result"]["content"][0]["text"]
+    assert unserved["error"]["message"] == "unknown tool"
+    assert "analysis_result with the job id returns its result" in stack.advertised()["description"]
 
 
 @pytest.mark.parametrize("tool", ["profile", "build", "nonesuch"])
