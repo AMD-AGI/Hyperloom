@@ -15,7 +15,7 @@ from __future__ import annotations
 
 import logging
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any, Mapping, Sequence
 
@@ -29,7 +29,6 @@ from hyperloom.inference_optimizer.grid_server_args import (
     server_args_delta,
 )
 from hyperloom.inference_optimizer.grading import resolved_grading
-from hyperloom.inference_optimizer.roofline_ceiling import read_baseline_server_args
 from hyperloom.inference_optimizer.session.session_paths import reports_dir, runs_root
 from hyperloom.orchestrator.actions.cancel_channel import current_cancel_scope
 from hyperloom.orchestrator.actions.executors._proposal_identity import controls_of, is_executable, normalize_proposal
@@ -116,23 +115,35 @@ def decline_reason(state: SharedState) -> str | None:
 
 @dataclass(frozen=True)
 class _Layer:
-    """A change to the session's composed baseline launch: args set, envs set, args removed and envs unset."""
+    """A change to the session's composed baseline launch: args set, envs set, args removed and envs unset; ``replace``
+    when ``args`` is the server's whole argv rather than an addition to the baseline's."""
 
     args: str = ""
     envs: Mapping[str, str] = field(default_factory=dict)
     remove_args: tuple[str, ...] = ()
     unset_envs: tuple[str, ...] = ()
+    replace: bool = False
 
 
-def _arm_layer(arm: Arm, base_args: str) -> _Layer:
-    """``arm``'s change to the baseline whose args are ``base_args``; a replacing argv is taken as what it changes, so
-    it stacks on another concurrency's launch as an appended one does."""
-    removed = tuple(to_str_list(arm.controls.get("remove_args")))
-    unset = tuple(to_str_list(arm.controls.get("unset_envs")))
-    if arm.controls.get("args_mode") != "replace":
-        return _Layer(arm.args, dict(arm.envs), removed, unset)
-    delta = server_args_delta(base_args, remove_server_args(arm.args, list(removed)))
-    return _Layer(delta.add, dict(arm.envs), delta.remove, unset)
+def _arm_layer(arm: Arm) -> _Layer:
+    return _Layer(
+        arm.args,
+        dict(arm.envs),
+        tuple(to_str_list(arm.controls.get("remove_args"))),
+        tuple(to_str_list(arm.controls.get("unset_envs"))),
+    )
+
+
+def _replacing(arm: Arm, frozen: BaseLaunch | None, conc: int, official: _Layer) -> _Layer:
+    """``arm``'s replacing argv moved to ``conc``: what it changes of the base's own launch, applied to the source's
+    launch at ``conc``, so a flag it leaves as the base had it takes the value the recipe gives ``conc``."""
+    layer = _arm_layer(arm)
+    argv = remove_server_args(arm.args, list(layer.remove_args))
+    if frozen is not None:
+        delta = server_args_delta(server_base(frozen).args, argv)
+        argv = merge_server_args(remove_server_args(server_base_at(frozen, conc).args, list(delta.remove)), delta.add)
+    envs = _stacked(official, replace(layer, args="", remove_args=()))
+    return _Layer(argv, envs.envs, layer.remove_args, envs.unset_envs, replace=True)
 
 
 def _conc_layer(frozen: BaseLaunch | None, conc: int) -> _Layer:
@@ -206,7 +217,6 @@ class _Sweep:
     per_point_sec: float
     deadline_unix: float | None
     frozen: BaseLaunch | None = None
-    base_args: str = ""
     estimated_sec: float = 0.0
     started_at: float = field(default_factory=time.time)
     measured: dict[str, dict[int, dict[str, Any]]] = field(default_factory=lambda: {"baseline": {}, "optimized": {}})
@@ -242,7 +252,10 @@ class _Sweep:
 
     def layer(self, arm: Arm, conc: int) -> _Layer:
         """What ``arm``'s point at ``conc`` runs over the baseline: the source's launch there, then ``arm``'s change."""
-        return _stacked(_conc_layer(self.frozen, conc), _arm_layer(arm, self.base_args))
+        official = _conc_layer(self.frozen, conc)
+        if arm.controls.get("args_mode") == "replace":
+            return _replacing(arm, self.frozen, conc, official)
+        return _stacked(official, _arm_layer(arm))
 
     def variant(self, arm: Arm, conc: int) -> GridVariant:
         state = self.state
@@ -262,6 +275,7 @@ class _Sweep:
             note=f"arm={arm.name} conc={conc}",
             remove_args=list(layer.remove_args) or None,
             unset_envs=list(layer.unset_envs) or None,
+            args_mode="replace" if layer.replace else "append",
         )
         variant.overlay_pythonpath = arm.overlay
         return variant
@@ -473,10 +487,7 @@ async def run_conc_sweep(
     if isinstance(setup, str):
         return _skipped(state, session_dir, setup)
     launch = None if frozen is None else frozen.launch
-    base_args = read_baseline_server_args(state)
-    sweep = _Sweep(
-        state, session_dir, setup, points, optimized, state.baseline_runtime_sec, deadline_unix, launch, base_args
-    )
+    sweep = _Sweep(state, session_dir, setup, points, optimized, state.baseline_runtime_sec, deadline_unix, launch)
     _resume(sweep)
     sweep.estimated_sec = sweep.per_point_sec * sum(len(sweep.pending(arm)) for arm in sweep.arms)
     _log_plan(sweep)

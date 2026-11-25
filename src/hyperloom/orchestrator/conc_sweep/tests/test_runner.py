@@ -81,6 +81,7 @@ def grid(monkeypatch: pytest.MonkeyPatch) -> SimpleNamespace:
                 "ready": launch.server_already_ready,
                 "args": variant.extra_server_args,
                 "remove": variant.remove_args,
+                "mode": variant.args_mode,
             }
         )
         return [_result(variant, status="failed" if variant.name in failing else "succeeded")]
@@ -378,3 +379,25 @@ def test_a_held_server_is_booted_again_where_the_next_point_launches_otherwise(
     baseline = [call for call in grid.calls if call["name"].startswith("baseline")]
     assert [call["name"] for call in baseline] == [f"baseline_conc{c}" for c in (16, 4, 8, 32)]
     assert [call["ready"] for call in baseline] == [False, False, True, False]
+
+
+def test_a_replacing_argv_keeps_its_changes_and_takes_the_recipes_values_at_each_concurrency(
+    session_dir: Path, grid: SimpleNamespace, monkeypatch: pytest.MonkeyPatch
+):
+    """The optimization replaced the argv: it dropped ``--a`` and added ``--enable-x``, and left the cap as it was."""
+    _state(session_dir, current_best={"extra_server_args": "--max-num-seqs 64 --enable-x", "args_mode": "replace"})
+    by_conc = {16: "--max-num-seqs 64 --a 1", 32: "--max-num-seqs 256 --a 1"}
+    _per_conc_base(monkeypatch, by_conc[16], by_conc)
+
+    asyncio.run(runner.run_conc_sweep(session_dir))
+
+    calls = {call["name"]: call for call in grid.calls}
+    assert (calls["optimized_conc16"]["args"], calls["optimized_conc16"]["mode"]) == (
+        "--max-num-seqs 64 --enable-x",
+        "replace",
+    )
+    assert (calls["optimized_conc32"]["args"], calls["optimized_conc32"]["mode"]) == (
+        "--max-num-seqs 256 --enable-x",
+        "replace",
+    )
+    assert (calls["baseline_conc32"]["args"], calls["baseline_conc32"]["mode"]) == ("--max-num-seqs 256", "append")
