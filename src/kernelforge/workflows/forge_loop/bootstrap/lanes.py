@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Bind each Implementer lane to its own workspace copy, and refuse providers that cannot isolate concurrent ones."""
+"""Bind each lane that runs beside others to its own workspace copy, and refuse what cannot run lanes side by side."""
 
 from __future__ import annotations
 
@@ -13,6 +13,7 @@ from typing import TYPE_CHECKING, Iterable
 from kernelforge.config import Config
 from kernelforge.evaluation.scoring import GateScoring
 from kernelforge.utils.device_queue import RUNNER_CONFIG_NAME, hidden_device_environment
+from kernelforge.utils.git import repository_selected_by_environment
 from kernelforge.utils.import_root import import_name_of, import_path_first
 from kernelforge.workflows.forge_loop.bootstrap.errors import ForgeLoopError
 from kernelforge.workflows.forge_loop.gate.gate_settings import DeviceAccess
@@ -126,6 +127,22 @@ def _require_lane_provider_capabilities(provider: str, lanes: int) -> None:
     )
 
 
+def _require_copyable_workspace(lanes: int) -> None:
+    """Refuse side-by-side lanes on a workspace that cannot be copied, before the campaign spends anything.
+
+    Lanes that run side by side each work in a copy of the workspace. A workspace whose repository is selected
+    through the environment -- a framework tree edited where it is installed, its history kept elsewhere -- has no
+    repository a copy could carry. One lane works in the workspace itself and needs none.
+    """
+    selected = repository_selected_by_environment()
+    if lanes < 2 or not selected:
+        return
+    raise ForgeLoopError(
+        f"--lanes {lanes} runs lanes in copies of the workspace, and this workspace's repository is selected "
+        f"through {' and '.join(selected)}, which a copy cannot carry. Re-run with --lanes 1."
+    )
+
+
 @dataclass(frozen=True)
 class LaneBinding:
     """The canonical workspace paths a lane rebinds onto its own copy."""
@@ -147,7 +164,7 @@ def _make_lane_agent_factory(
     from kernelforge.agent_backends.base import session_environment
     from kernelforge.utils.aiter_cache import child_cache_environment
 
-    def factory(seat: LaneSeat, *, gain_required: bool):
+    def factory(seat: LaneSeat):
         # Each lane gets its own Config: a provider that requires the workspace as its cwd would otherwise start every
         # lane's session in the shared canonical workspace.
         lane_dir = str(seat.lane_dir)
@@ -186,7 +203,8 @@ def _make_lane_agent_factory(
                 setup.measurement,
                 driver_script=rebound(binding.driver, "driver"),
                 device=device,
-                gain_required=gain_required,
+                # A lane runs beside others: a correct candidate may stop, and what it gained is the merge's to use.
+                gain_required=False,
             ),
             session=replace(setup.session, insession_gate=True),
         )

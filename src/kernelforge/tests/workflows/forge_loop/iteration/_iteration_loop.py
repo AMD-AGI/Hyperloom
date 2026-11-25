@@ -99,7 +99,7 @@ def lane_agents(agent_fn, **services) -> LoopAgents:
     The same callable serves as a lane's session, where it is handed the kernel of the lane's own copy, and as the
     canonical session that merges a round's lanes.
     """
-    return LoopAgents(agent_fn=agent_fn, agent_factory=lambda _seat, *, gain_required: agent_fn, **services)
+    return LoopAgents(agent_fn=agent_fn, agent_factory=lambda _seat: agent_fn, **services)
 
 
 async def _unused_supervisor(**_kwargs):

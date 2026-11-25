@@ -51,9 +51,14 @@ one shape whatever its width:
    the Analysis Agent and the session that works on it. The division stays in
    force until the next Analysis.
 2. **Lanes.** The round runs one lane per focus, and one lane with no focus when
-   the Analysis divided nothing or `--lanes` is 1. Each lane is an Implementer
-   session in its own copy of the workspace. The copy leaves out the Analysis
-   evidence, which a session reads by the absolute path its prompt names.
+   the Analysis divided nothing or `--lanes` is 1. A round's only lane is an
+   Implementer session in the workspace itself. Lanes that run side by side
+   each work in their own copy of it; the copy leaves out the Analysis
+   evidence, which a session reads by the absolute path its prompt names. A
+   workspace whose repository is selected through `GIT_DIR` or
+   `GIT_WORK_TREE`, as a framework tree edited where it is installed is, has
+   no repository a copy could carry: `--lanes` above 1 is refused on it at
+   startup, and it runs at `--lanes 1`.
 3. **Direction.** A lane's session chooses its own direction from the Analysis
    report and the lesson records, inside its focus when it has one. The focus
    says where to start, not where to stop: a session whose own measurements
@@ -73,7 +78,7 @@ one shape whatever its width:
    (`min(210, max(90, 0.15 * campaign_minutes))` minutes, overridable with
    `--session-timeout-sec`); the session is told this deadline, and the backend
    cuts the session at the deadline, after which the loop takes whatever
-   tracked changes the lane's copy holds. A high fixed turn ceiling remains only
+   tracked changes the lane's tree holds. A high fixed turn ceiling remains only
    as a runaway backstop -- it does not bound a session's time. The session is
    meant to use its budget rather than hand off its first improvement: it
    states the score it expects before editing, measures the kernel it starts
@@ -93,20 +98,24 @@ one shape whatever its width:
    lane has to beat the current best to stop, and hands off no candidate when
    nothing did. A lane that runs beside others has to be correct: what it
    gained on some cases is for the merge to use, whatever its overall score.
-6. **Device.** The lanes of a round share the campaign's GPU. A lane's session
-   sees no device of its own; every command that needs one -- the driver, a
-   benchmark script of the session's own, a profiler -- goes through the
-   lane's device runner, `python3 <lane>/forge_device.py <command>`, which
+6. **Device.** A round's only lane has the campaign's GPU to itself and
+   reaches it directly. Lanes that run side by side share it. There a lane's
+   session sees no device of its own; every command that needs one -- the
+   driver, a benchmark script of the session's own, a profiler -- goes through
+   the lane's device runner, `python3 <lane>/forge_device.py <command>`, which
    waits its turn, makes the device visible to that command and runs it
    unchanged. Commands are served in the order they arrived, and a lane's stop
    check waits in the same queue. A session is asked to keep each command
    under 4 minutes; a command that still holds the device after twice the
-   engine's benchmark timeout (10 minutes) is stopped as hung. Waiting counts toward the session's budget, so a round never
-   outlasts one session budget however wide it is. Every hold is recorded in
+   engine's benchmark timeout (10 minutes) is stopped as hung. Waiting counts
+   toward the session's budget, so a round never outlasts one session budget
+   however wide it is. Every hold is recorded in
    `forge_experiments/device_usage.jsonl` with the lane, how long it waited and
    how long it held.
-7. **Merge.** What each lane changed is read as a patch against the round's
-   starting point; a patch that touches the driver or the harness is refused.
+7. **Merge.** What a round's only lane left in the workspace is the round's
+   candidate. In a round of several lanes, what each lane changed is read as a
+   patch against the round's starting point; a patch that touches the driver
+   or the harness is refused.
    When one lane changed the kernel, its change is the round's candidate as it
    stands. When several did, an Implementer session on the canonical tree
    merges them. It starts from the lane whose own stop check scored highest

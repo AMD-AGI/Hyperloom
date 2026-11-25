@@ -118,15 +118,23 @@ class IterationPhasesMixin:
     ) -> _Attempt | None:
         """Run the round's lanes, merge what they left on the canonical tree, and collect the candidate.
 
-        One changed lane is the candidate as it stands. Several are merged by a session in the canonical workspace,
-        which starts from the best of them and is judged, as every candidate is, against the current best.
+        A round's only lane works in the canonical workspace itself, and what it leaves is the candidate. Lanes that
+        run side by side each work in a copy: one changed lane is the candidate as it stands, and several are merged
+        by a session in the canonical workspace, which starts from the best of them and is judged, as every candidate
+        is, against the current best.
         """
         iteration, session_sink = frame.iteration, frame.session_sink
         # The last point before the round buys its sessions, which the loop cannot interrupt.
         if not self._admit_dispatch(iteration):
             return None
         self._bind_session_producer(session_sink, self.run_state.agent_relay.active_profile_id)
-        results = await self._run_lanes(frame, agent_factory=agents.agent_factory, digest=digest)
+        assignments = self._round_assignments()
+        print(f"  [lanes] round of {len(assignments)} lane(s)")
+        if len(assignments) == 1:
+            return await self._only_lane_attempt(
+                frame, agent_fn=agents.agent_fn, digest=digest, on_iteration=on_iteration
+            )
+        results = await self._run_lanes(frame, assignments, agent_factory=agents.agent_factory, digest=digest)
         sessions = self._lane_sessions(results)
         hazard = self.device_hazard.live
         if hazard is not None:
@@ -150,17 +158,41 @@ class IterationPhasesMixin:
             )
             sessions.append(RoundSession("merge", session_sink))
         else:
-            # The round's only lane to leave a change, or its only lane: what that session handed back is the
-            # iteration's.
+            # The round's only lane to leave a change, or none did: what that session handed back is the iteration's.
             lead = start if start is not None else results[0]
             session_sink.update(lead.sink)
             rationale = lead.rationale
             agent_error = lead.sink.get("agent_error") or lead.error or None
             # A measurement taken while other lanes compiled is not reused as the canonical one.
-            if len(results) > 1:
-                session_sink.pop("benchmark_measurement", None)
+            session_sink.pop("benchmark_measurement", None)
         return await self._collect_session_candidate(
             frame, agent_error=agent_error, rationale=rationale, sessions=tuple(sessions), on_iteration=on_iteration
+        )
+
+    async def _only_lane_attempt(self, frame: _IterationFrame, *, agent_fn, digest, on_iteration) -> _Attempt | None:
+        """Run a round's only lane in the canonical workspace, and collect what it left as the candidate.
+
+        A copy separates lanes that run side by side. One lane has nothing to be separated from, and some workspaces
+        cannot be copied at all: a framework tree that is measured where it is installed, with its repository kept
+        elsewhere, is edited in place or not at all. The session owns the device for the round, so it reaches it
+        directly, and its stop has to beat the current best: there is no merge to use anything less.
+        """
+        session_sink = frame.session_sink
+        session_sink["session_started"] = True
+        history = self._implementer_history(digest=digest, direction=self._session_direction())
+        agent_error, rationale = await self._run_session(
+            agent_fn,
+            self.ic.kernel_file,
+            history,
+            sink=session_sink,
+            gate_scoring=GateScoring(dict(self._baseline_case_times), self.best_mean_case_speedup),
+        )
+        return await self._collect_session_candidate(
+            frame,
+            agent_error=agent_error,
+            rationale=rationale,
+            sessions=(RoundSession("", session_sink),),
+            on_iteration=on_iteration,
         )
 
     async def _merge_session(

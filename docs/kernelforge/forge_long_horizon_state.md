@@ -112,10 +112,15 @@ round has the same shape whatever its width:
    nothing. The division is the Analysis Agent's: `analysis/<commit>/lanes.md`
    holds one `## Lane N` section per focus, and the loop reads only the
    sections. It stays in force until the next Analysis.
-2. Each lane is an Implementer session in its own copy of the workspace. The
-   copy leaves out `forge_experiments/analysis/`, which a session reads by
-   absolute path. The copies live beside the workspace under
-   `forge-lanes-*/` and are removed when the iteration ends.
+2. A round's only lane is an Implementer session in the workspace itself: it
+   reaches the device directly, and what it leaves on the tree is the
+   candidate. Steps 3 to 5 apply to a round of several lanes. There each lane
+   is an Implementer session in its own copy of the workspace. The copy leaves
+   out `forge_experiments/analysis/`, which a session reads by absolute path.
+   The copies live beside the workspace under `forge-lanes-*/` and are removed
+   when the iteration ends. A workspace whose repository is selected through
+   `GIT_DIR` or `GIT_WORK_TREE` cannot be copied, and `--lanes` above 1 is
+   refused on it at startup.
 3. Every lane reaches the device through its copy's `forge_device.py`, which
    queues at `<workspace>.forge-device-queue/` beside the workspace. The queue
    is a directory of numbered tickets: a ticket is created with a number above
@@ -135,9 +140,10 @@ round has the same shape whatever its width:
    did. Its stop is judged against the current best; a merge that takes nothing
    stops on the lane it started from, which is then the candidate.
 6. The canonical validation and benchmark judge the candidate; nothing a lane
-   measured decides a KEEP. A measurement a lane took while it was its round's
-   only lane may be reused as the canonical one when it still describes the
-   tree.
+   measured beside other lanes decides a KEEP. The three benchmark runs of a
+   stop check taken on the canonical tree with no other lane running, a
+   round's only lane's or a merge session's, are reused as the canonical ones
+   when they still describe the tree.
 
 Nothing of a round outlives its iteration except these artifacts and the
 iteration's lesson, so there is no queue to restore on resume: an iteration

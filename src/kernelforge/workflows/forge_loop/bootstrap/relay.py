@@ -57,6 +57,7 @@ class SearchActorBuildContext:
         """Build and probe the profile-bound services: the canonical session, the lane factory and the Supervisor."""
         from kernelforge.workflows.forge_loop.bootstrap.lanes import (
             _make_lane_agent_factory,
+            _require_copyable_workspace,
             _require_lane_provider_capabilities,
         )
         from kernelforge.workflows.forge_loop.roles.agent import make_agent_fn
@@ -66,6 +67,7 @@ class SearchActorBuildContext:
         setup = replace(self.setup, session=replace(self.setup.session, agent_backend=profile.provider))
         actor_fn = make_agent_fn(actor_config, setup, usage=self.usage)
         effective_profile = self._resolved_profile(profile, actor_fn)
+        _require_copyable_workspace(self.lanes)
         _require_lane_provider_capabilities(effective_profile.provider, self.lanes)
         lane_factory = _make_lane_agent_factory(
             make_agent=make_agent_fn,

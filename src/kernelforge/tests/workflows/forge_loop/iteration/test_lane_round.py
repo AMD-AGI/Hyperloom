@@ -29,6 +29,7 @@ from kernelforge.workflows.forge_loop.iteration.fanout import (
     lane_diff,
 )
 from kernelforge.workflows.forge_loop.roles.agent import ImplementerSetup, ImplementerTask
+from kernelforge.workflows.forge_loop.iteration.iteration_types import LoopAgents
 from kernelforge.tests.workflows.forge_loop.iteration._iteration_loop import (
     _initialize_workspace,
     _make_loop,
@@ -201,40 +202,90 @@ async def test_lanes_refuse_to_copy_a_workspace_that_will_not_fit(tmp_path, monk
 # ── a round of one lane ───────────────────────────────────────────────────────
 
 
-def test_a_round_of_one_lane_works_in_a_copy_and_its_change_is_measured_on_the_canonical_tree(tmp_path, monkeypatch):
+def _no_lane_copies(_seat):
+    raise AssertionError("a round of one lane works in the workspace itself and builds no lane session")
+
+
+def test_a_round_of_one_lane_works_in_the_workspace_itself(tmp_path, monkeypatch):
+    """A copy separates lanes that run side by side; one lane has nothing to be separated from."""
     loop, workspace = _make_loop(tmp_path, monkeypatch)
     _stub_measurement(monkeypatch, walls=[0.5])
     worked_in: list[Path] = []
-    gains: list[bool] = []
-    hold_limits: list[int] = []
+    copies_while_working: list[list[Path]] = []
+    scorings: list[GateScoring] = []
 
-    async def agent(kernel_path, history, session_sink):
+    async def agent(kernel_path, history, session_sink, gate_scoring):
         worked_in.append(Path(kernel_path))
-        assert MERGE_HEADING not in history
+        copies_while_working.append(_lane_copies(workspace))
+        scorings.append(gate_scoring)
+        assert MERGE_HEADING not in history and "## This lane's focus" not in history
         Path(kernel_path).write_text("def kernel():\n    return 2\n")
         session_sink["plan"] = "return the faster constant"
         return "changed the constant"
 
-    def factory(seat, *, gain_required):
-        gains.append(gain_required)
-        hold_limits.append(seat.hold_limit_sec)
-        return agent
+    asyncio.run(loop.run(LoopAgents(agent_fn=agent, agent_factory=_no_lane_copies, supervisor_fn=_unused_supervisor)))
 
-    asyncio.run(loop.run(replace(lane_agents(agent, supervisor_fn=_unused_supervisor), agent_factory=factory)))
-
-    assert len(worked_in) == 1
-    assert workspace.resolve() not in worked_in[0].resolve().parents
-    assert any(part.startswith(LANE_ROOT_PREFIX) for part in worked_in[0].parts)
-    # Alone in its round, the lane's stop has to beat the current best: there is no merge to use anything less.
-    assert gains == [True]
-    # A command is stopped as hung only after twice what the engine allows one of its own benchmark runs.
-    assert hold_limits == [2 * loop.ic.bench_timeout_sec]
+    assert [path.resolve() for path in worked_in] == [(workspace / "kernel.py").resolve()]
+    assert copies_while_working == [[]]
+    # With no merge to use anything less, the session's stop is judged against the current best.
+    assert [scoring.best_mean_case_speedup for scoring in scorings] == [1.0]
     assert _decisions(workspace) == ["KEEP"]
     assert (workspace / "kernel.py").read_text() == "def kernel():\n    return 2\n"
+    # Lane artifacts are what a merge reads; a round with nothing to merge files none.
+    assert not ExperimentsLayout.of(workspace).round(1).exists()
+
+
+def _move_the_repository_out(workspace: Path, monkeypatch) -> Path:
+    """Keep the workspace's repository elsewhere and select it through the environment, as forge-fuse does."""
+    repository = workspace.parent / "shadow.git"
+    (workspace / ".git").rename(repository)
+    monkeypatch.setenv("GIT_DIR", str(repository))
+    monkeypatch.setenv("GIT_WORK_TREE", str(workspace))
+    return repository
+
+
+def test_a_round_of_one_lane_keeps_its_change_on_a_workspace_whose_repository_is_kept_elsewhere(tmp_path, monkeypatch):
+    """A framework tree edited where it is installed cannot be copied: git in a copy would still read the tree.
+
+    In a lane copy the session's edit came back as an empty diff and the round had no candidate.
+    """
+    loop, workspace = _make_loop(tmp_path, monkeypatch)
+    _stub_measurement(monkeypatch, walls=[0.5])
+    repository = _move_the_repository_out(workspace, monkeypatch)
+
+    async def agent(kernel_path, _history, session_sink):
+        Path(kernel_path).write_text("def kernel():\n    return 2\n")
+        return "changed the constant"
+
+    asyncio.run(loop.run(LoopAgents(agent_fn=agent, agent_factory=_no_lane_copies, supervisor_fn=_unused_supervisor)))
+
+    assert _decisions(workspace) == ["KEEP"]
+    assert (workspace / "kernel.py").read_text() == "def kernel():\n    return 2\n"
+    kept = subprocess.run(
+        ["git", "show", "--name-only", "--format=", "HEAD"], capture_output=True, text=True, check=True
+    )
+    assert kept.stdout.split() == ["kernel.py"]
+    assert repository.is_dir() and not (workspace / ".git").exists()
     assert _lane_copies(workspace) == []
-    lane = ExperimentsLayout.of(workspace).round(1) / "lane_1"
-    assert "return 2" in (lane / "change.diff").read_text()
-    assert json.loads((lane / "lane.json").read_text())["plan"] == "return the faster constant"
+
+
+async def test_lanes_side_by_side_are_refused_on_a_workspace_whose_repository_is_kept_elsewhere(tmp_path, monkeypatch):
+    """Refused with the reason rather than run: every lane's diff would be read from the workspace, and be empty."""
+    workspace, _kernel, _driver = _initialize_workspace(tmp_path, monkeypatch)
+    _move_the_repository_out(workspace, monkeypatch)
+    before = set(tmp_path.iterdir())
+    lanes = LaneRound(
+        workspace_dir=str(workspace),
+        parent_dir=str(tmp_path),
+        lanes=[LaneAssignment("1", "a"), LaneAssignment("2", "b")],
+        hold_limit_sec=90,
+    )
+
+    with pytest.raises(RuntimeError, match="GIT_DIR and GIT_WORK_TREE"):
+        await lanes.open()
+
+    assert lanes.seats == []
+    assert set(tmp_path.iterdir()) == before
 
 
 def test_the_campaigns_lane_factory_carries_the_scoring_state_in_and_the_lanes_result_out(tmp_path, monkeypatch):
@@ -244,22 +295,26 @@ def test_the_campaigns_lane_factory_carries_the_scoring_state_in_and_the_lanes_r
     measures against, and the sink the round reads the lane's verdict and score from.
     """
     loop, workspace = _make_loop(tmp_path, monkeypatch, baseline_case_times={"case": 4.0})
+    loop.ic.lanes = 2
+    monkeypatch.setattr(loop, "_lane_focuses", lambda: ["the small cases", "the large cases"])
     _stub_measurement(monkeypatch, walls=[0.5])
     handed: list[GateScoring] = []
+    hold_limits: list[int] = []
 
     class LaneAgent:
         """Stand in for the Implementer session the factory builds for one lane."""
 
         async def __call__(self, kernel_path, history, session_sink, gate_scoring):
             handed.append(gate_scoring)
-            Path(kernel_path).write_text("def kernel():\n    return 2\n")
-            _verified(session_sink, score=2.0, case_ms=2.0)
-            return "changed the constant"
+            lane = 2 if "Yours is lane 2" in history else 1
+            Path(kernel_path).write_text(f"def kernel():\n    return {10 * lane}\n")
+            _verified(session_sink, score=1.0 + lane, case_ms=4.0 / (1.0 + lane))
+            return f"lane {lane} changed the constant"
 
         def close(self):
             """Nothing is held between sessions."""
 
-    factory = _make_lane_agent_factory(
+    build = _make_lane_agent_factory(
         make_agent=lambda _config, _setup, usage=None: LaneAgent(),
         config=Config(workspace=str(workspace), agent_backend="claude"),
         binding=LaneBinding(
@@ -268,16 +323,27 @@ def test_the_campaigns_lane_factory_carries_the_scoring_state_in_and_the_lanes_r
         setup=ImplementerSetup(ImplementerTask(program_md="Optimize the kernel.")),
     )
 
+    def factory(seat):
+        hold_limits.append(seat.hold_limit_sec)
+        return build(seat)
+
     asyncio.run(
         loop.run(replace(lane_agents(_no_change_agent, supervisor_fn=_unused_supervisor), agent_factory=factory))
     )
 
-    [scoring] = handed
-    assert scoring.baseline_case_times == {"case": 4.0}
-    assert scoring.best_mean_case_speedup == 1.0
-    lane = json.loads((ExperimentsLayout.of(workspace).round(1) / "lane_1" / "lane.json").read_text())
-    assert (lane["verified"], lane["mean_case_speedup"], lane["case_times"]) == (True, 2.0, {"case": 2.0})
+    assert len(handed) == 2
+    for scoring in handed:
+        assert scoring.baseline_case_times == {"case": 4.0}
+        assert scoring.best_mean_case_speedup == 1.0
+    # A command is stopped as hung only after twice what the engine allows one of its own benchmark runs.
+    assert hold_limits == [2 * loop.ic.bench_timeout_sec] * 2
+    lanes = ExperimentsLayout.of(workspace).round(1)
+    filed = {name: json.loads((lanes / name / "lane.json").read_text()) for name in ("lane_1", "lane_2")}
+    assert [(lane["verified"], lane["mean_case_speedup"]) for lane in filed.values()] == [(True, 2.0), (True, 3.0)]
+    assert filed["lane_2"]["case_times"] == {"case": 4.0 / 3.0}
+    # The merge session took nothing, so the better lane stands as the candidate.
     assert _decisions(workspace) == ["KEEP"]
+    assert (workspace / "kernel.py").read_text() == "def kernel():\n    return 20\n"
 
 
 @pytest.mark.parametrize(
@@ -314,7 +380,6 @@ def test_two_changed_lanes_are_merged_by_a_session_that_starts_from_the_better_o
     _stub_measurement(monkeypatch, walls=[0.4])
     merges: list[dict] = []
     lane_histories: dict[int, str] = {}
-    gains: list[bool] = []
 
     async def agent(kernel_path, history, session_sink, gate_scoring):
         if MERGE_HEADING in history:
@@ -329,14 +394,8 @@ def test_two_changed_lanes_are_merged_by_a_session_that_starts_from_the_better_o
         _verified(session_sink, score=1.0 + 0.5 * lane, case_ms=1.0 / lane)
         return f"lane {lane} specialised its cases"
 
-    def factory(seat, *, gain_required):
-        gains.append(gain_required)
-        return agent
+    asyncio.run(loop.run(lane_agents(agent, supervisor_fn=_unused_supervisor)))
 
-    asyncio.run(loop.run(replace(lane_agents(agent, supervisor_fn=_unused_supervisor), agent_factory=factory)))
-
-    # Beside another lane, a correct candidate may stop: what it gained is the merge's to use.
-    assert gains == [False, False]
     assert "## This lane's focus" in lane_histories[1] and "the small cases" in lane_histories[1]
     assert "- lane 2: the large cases" in lane_histories[1]
     (merge,) = merges
@@ -440,28 +499,38 @@ def test_a_round_whose_only_changed_lane_needs_no_merge_is_measured_as_it_stands
 
 
 def test_a_lane_that_changes_the_driver_does_not_reach_the_canonical_tree(tmp_path, monkeypatch):
-    loop, workspace = _make_loop(tmp_path, monkeypatch)
+    loop, workspace = _two_lane_loop(tmp_path, monkeypatch)
+    _stub_measurement(monkeypatch, walls=[0.5])
 
-    async def agent(kernel_path, _history, session_sink):
-        Path(kernel_path).write_text("def kernel():\n    return 2\n")
-        Path(kernel_path).with_name("driver.py").write_text("print('always passes')\n")
-        return "changed what measures it"
+    async def agent(kernel_path, history, session_sink):
+        assert MERGE_HEADING not in history
+        if "Yours is lane 1" in history:
+            Path(kernel_path).write_text("def kernel():\n    return 10\n")
+            Path(kernel_path).with_name("driver.py").write_text("print('always passes')\n")
+            return "changed what measures it"
+        Path(kernel_path).write_text("def kernel():\n    return 20\n")
+        _verified(session_sink, score=2.0, case_ms=0.5)
+        return "changed the kernel"
 
     asyncio.run(loop.run(lane_agents(agent, supervisor_fn=_unused_supervisor)))
 
-    assert _decisions(workspace) == ["AGENT_ERROR"]
-    assert (workspace / "kernel.py").read_text() == "def kernel():\n    return 1\n"
+    # The lane that touched the driver is out of the round; the other lane's change is the candidate.
+    assert _decisions(workspace) == ["KEEP"]
+    assert (workspace / "kernel.py").read_text() == "def kernel():\n    return 20\n"
     assert (workspace / "driver.py").read_text() == "pass\n"
     lane = json.loads((ExperimentsLayout.of(workspace).round(1) / "lane_1" / "lane.json").read_text())
     assert lane["error"] == "it changes the measurement surface: driver.py"
 
 
 def test_a_new_file_the_campaign_may_commit_travels_with_the_lanes_change(tmp_path, monkeypatch):
-    loop, workspace = _make_loop(tmp_path, monkeypatch)
+    loop, workspace = _two_lane_loop(tmp_path, monkeypatch)
     loop.ic = replace(loop.ic, commit_new_paths=["configs/*.json"])
     _stub_measurement(monkeypatch, walls=[0.5])
 
-    async def agent(kernel_path, _history, session_sink):
+    async def agent(kernel_path, history, session_sink):
+        assert MERGE_HEADING not in history
+        if "Yours is lane 1" in history:
+            return "lane 1 found nothing to change"
         root = Path(kernel_path).parent
         Path(kernel_path).write_text("def kernel():\n    return 2\n")
         (root / "configs").mkdir()

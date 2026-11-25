@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""A round's lanes: running their sessions in workspace copies, and merging what they left into one candidate."""
+"""Lanes that run side by side: their sessions in workspace copies, and the merge of what they left into one candidate."""
 
 from __future__ import annotations
 
@@ -64,9 +64,9 @@ def _patch_paths(patch: str, *, cwd: str) -> list[str]:
     return sorted({path for path in paths if path})
 
 
-def _lane_label(lane: LaneResult, width: int) -> str:
-    """How a lane is named in the round's record: nothing for a round's only lane."""
-    return f"lane {lane.lane_id}" if width > 1 else ""
+def _lane_label(lane: LaneResult) -> str:
+    """How a lane is named in the round's record."""
+    return f"lane {lane.lane_id}"
 
 
 def _case_times(lane: LaneResult) -> dict:
@@ -79,18 +79,20 @@ class LaneRuntimeMixin:
     """Run a round's lanes, choose where the merge starts, and tell the merge session what the lanes left."""
 
     def _round_assignments(self) -> list[LaneAssignment]:
-        """This round's lanes: one per focus the Analysis gave, up to the campaign's width; one lane without them."""
+        """This round's lanes: one per focus the Analysis gave, up to the campaign's width; one lane without them.
+
+        One lane works in the canonical workspace; two or more each work in a copy of it.
+        """
         focuses = self._lane_focuses()[: max(1, int(self.ic.lanes))]
         if len(focuses) < 2:
             return [LaneAssignment("1")]
         return [LaneAssignment(str(index), focus) for index, focus in enumerate(focuses, start=1)]
 
-    async def _run_lanes(self, frame: _IterationFrame, *, agent_factory, digest) -> list[LaneResult]:
+    async def _run_lanes(
+        self, frame: _IterationFrame, assignments: list[LaneAssignment], *, agent_factory, digest
+    ) -> list[LaneResult]:
         """Run the round's lane sessions side by side, each in its own copy, and read what each one changed."""
         iteration = frame.iteration
-        assignments = self._round_assignments()
-        width = len(assignments)
-        print(f"  [lanes] round of {width} lane(s)")
         # Beside the workspace, not in /tmp: a lane copy carries the build outputs, and /tmp is typically a smaller
         # local filesystem than the one sized for the campaign.
         self._lane_round = LaneRound(
@@ -106,7 +108,7 @@ class LaneRuntimeMixin:
         async def session(seat: LaneSeat) -> tuple[str, dict]:
             sink: dict = {"session_started": True}
             self._bind_session_producer(sink, self.run_state.agent_relay.active_profile_id)
-            call = agent_factory(seat, gain_required=width == 1)
+            call = agent_factory(seat)
             history = self._implementer_history(digest=digest, direction=self._lane_direction(seat, assignments))
             error, rationale = await self._run_session(
                 call, str(seat.lane_dir / kernel_relative), history, sink=sink, gate_scoring=scoring
@@ -275,14 +277,12 @@ class LaneRuntimeMixin:
         """
         ran = [lane for lane in results if lane.sink.get("session_started") is True]
         ran.sort(key=lambda lane: lane.score if lane.score is not None else float("-inf"))
-        return [RoundSession(_lane_label(lane, len(results)), lane.sink) for lane in ran]
+        return [RoundSession(_lane_label(lane), lane.sink) for lane in ran]
 
     def _lane_direction(self, seat: LaneSeat, assignments: list[LaneAssignment]) -> str:
-        """What a lane's session works on: a direction of its own choosing, inside its focus when it has one."""
+        """What a lane's session works on: a direction of its own choosing, inside the focus the Analysis gave it."""
         direction = self._session_direction()
         focus = seat.assignment.focus
-        if not focus:
-            return direction
         others = "\n".join(
             f"- lane {other.lane_id}: {other.focus}"
             for other in assignments

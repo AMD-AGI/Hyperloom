@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""A round's lanes: one workspace copy each, sessions run side by side on one queued device."""
+"""Lanes that run side by side: one workspace copy each, their sessions sharing one queued device."""
 
 from __future__ import annotations
 
@@ -14,7 +14,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from kernelforge.utils import device_queue
-from kernelforge.utils.git import git, git_async
+from kernelforge.utils.git import git, git_async, repository_selected_by_environment
 from kernelforge.utils.import_root import import_name_of, link_beside, linked_beside
 from kernelforge.utils.process_reaping import (
     ReapReport,
@@ -51,7 +51,7 @@ def campaign_device_queue_path(workspace: str | Path) -> Path:
 
 @dataclass(frozen=True)
 class LaneAssignment:
-    """One lane of a round: its number, and the focus the round's Analysis gave it ("" when it gave none)."""
+    """One lane of a round: its number, and the focus the Analysis gave it ("" for a round's only lane)."""
 
     lane_id: str
     focus: str = ""
@@ -241,7 +241,10 @@ def lane_diff(lane_dir: Path, new_paths: Sequence[str] = ()) -> str:
 
 
 class LaneRound:
-    """The workspace copies of one round, kept until the round's sessions have written their records."""
+    """The workspace copies of a round whose lanes run side by side, kept until its sessions have written their records.
+
+    A round's only lane needs no copy and does not come here: it works in the workspace itself.
+    """
 
     def __init__(
         self, *, workspace_dir: str, parent_dir: str, lanes: Sequence[LaneAssignment], hold_limit_sec: int
@@ -255,6 +258,14 @@ class LaneRound:
 
     async def open(self) -> list[LaneSeat]:
         """Copy the workspace once per lane and give each copy its device runner."""
+        selected = repository_selected_by_environment()
+        if selected:
+            # Silent otherwise: git in a copy would read the workspace, and every lane's edits would be an empty diff.
+            raise RuntimeError(
+                f"lanes cannot work in copies of {self.source}: its repository is selected through "
+                f"{' and '.join(selected)}, which git follows from any directory, so a copy has no repository of "
+                "its own. A round of one lane works in the workspace itself."
+            )
         # Before the first lane process exists: it is what makes a lane's orphaned benchmark still identifiable as
         # this campaign's when its shell is gone.
         install_child_subreaper()

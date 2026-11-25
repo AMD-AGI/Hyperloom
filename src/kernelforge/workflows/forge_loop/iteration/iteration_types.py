@@ -115,8 +115,9 @@ class IterationConfig:
     # How one measurement's per-case speedups combine into the score every KEEP, gate and report is judged on.
     case_aggregate: CaseAggregate = CaseAggregate.ARITHMETIC
     # The most Implementer lanes a round runs side by side, each in its own copy of the workspace. A round runs as
-    # many as the Analysis divided its evidence into, and one when it divided nothing; their results are merged into
-    # one candidate, which is the only thing the round measures on the canonical tree.
+    # many as the Analysis divided its evidence into, and their results are merged into one candidate, which is the
+    # only thing the round measures on the canonical tree. When the Analysis divided nothing the round is one lane,
+    # which works in the workspace itself.
     lanes: int = 1
     # Ranks the driver self-launches (via torchrun) for a collective task. >1 switches profiling to the per-rank
     # backend, because wrapping the outer process would only profile the launcher, which runs no kernel.
@@ -141,8 +142,8 @@ class IterationConfig:
 class LoopAgents:
     """The sessions and services the loop drives: merge session, lane factory, analysis, supervisor.
 
-    ``agent_factory`` builds a lane's session in that lane's workspace copy; ``agent_fn`` is the session bound to the
-    canonical workspace, which merges a round's lanes.
+    ``agent_factory`` builds the session of a lane that runs beside others, in that lane's workspace copy;
+    ``agent_fn`` is the session bound to the canonical workspace, which is a round's only lane or merges its lanes.
     """
 
     agent_fn: Any = None

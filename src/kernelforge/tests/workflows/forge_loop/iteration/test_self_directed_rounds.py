@@ -101,7 +101,7 @@ def _relay_with_one_runnable_profile(agent, supervisor) -> SearchActorPool:
             primary.profile_id: SearchActorBundle(
                 profile=primary,
                 agent_fn=agent,
-                agent_factory=lambda _seat, *, gain_required: agent,
+                agent_factory=lambda _seat: agent,
                 supervisor_fn=supervisor,
             )
         },

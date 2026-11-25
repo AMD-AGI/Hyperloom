@@ -131,7 +131,6 @@ def _run_lane_session(
     tmp_path: Path,
     monkeypatch,
     *,
-    gain_required: bool = False,
     stop_hooks: bool = True,
 ) -> tuple[AgentRunSpec, Path]:
     """Run one lane session the way a round runs it."""
@@ -139,7 +138,7 @@ def _run_lane_session(
     factory = _lane_factory(tmp_path)
     lane_dir = _tree(tmp_path / "lanes" / "1")
 
-    session = factory(_seat(tmp_path, lane_dir), gain_required=gain_required)
+    session = factory(_seat(tmp_path, lane_dir))
     asyncio.run(session(str(lane_dir / "src" / "kernel.py"), "plan 1"))
 
     assert len(specs) == 1
@@ -182,7 +181,7 @@ def test_every_lane_round_releases_the_backend_it_built(tmp_path, monkeypatch, f
 
     for round_number in (1, 2):
         lane_dir = _tree(tmp_path / f"round{round_number}" / "1")
-        session = factory(_seat(tmp_path, lane_dir), gain_required=True)
+        session = factory(_seat(tmp_path, lane_dir))
         if fails:
             with pytest.raises(RuntimeError):
                 asyncio.run(session(str(lane_dir / "src" / "kernel.py"), "plan"))
@@ -205,7 +204,7 @@ def test_a_lane_session_sink_reaches_an_agent_that_declares_it(tmp_path, monkeyp
     """The lesson turn resumes the lane session, so the sink has to reach the agent that names it."""
     _record_backend_specs(monkeypatch)
     lane_dir = _tree(tmp_path / "lanes" / "1")
-    session = _lane_factory(tmp_path)(_seat(tmp_path, lane_dir), gain_required=True)
+    session = _lane_factory(tmp_path)(_seat(tmp_path, lane_dir))
     sink: dict = {}
 
     asyncio.run(session(str(lane_dir / "src" / "kernel.py"), "plan 2", session_sink=sink))
@@ -223,7 +222,7 @@ def test_a_lane_session_names_what_the_loop_hands_a_session(tmp_path, monkeypatc
     """
     specs = _record_backend_specs(monkeypatch)
     lane_dir = _tree(tmp_path / "lanes" / "1")
-    session = _lane_factory(tmp_path)(_seat(tmp_path, lane_dir), gain_required=True)
+    session = _lane_factory(tmp_path)(_seat(tmp_path, lane_dir))
     sink: dict = {}
     scoring = GateScoring({"case": 2.0}, 1.5)
 
@@ -324,23 +323,15 @@ def test_a_lane_hook_denies_an_edit_to_the_device_runner(tmp_path, monkeypatch, 
     assert denied["hookSpecificOutput"]["permissionDecision"] == "deny"
 
 
-@pytest.mark.parametrize(
-    ("gain_required", "told", "not_told"),
-    [
-        (True, "correct but not faster", "Other sessions are working from"),
-        (False, "Other sessions are working from", "correct but not faster"),
-    ],
-    ids=["a round's only lane", "one lane of several"],
-)
-def test_a_lane_is_told_how_its_stop_is_judged(tmp_path, monkeypatch, gain_required, told, not_told):
-    """Alone, a lane has to beat the current best; beside others it has to be correct, and the merge uses the rest."""
-    spec, _lane_dir = _run_lane_session(tmp_path, monkeypatch, gain_required=gain_required)
+def test_a_lane_is_told_how_its_stop_is_judged(tmp_path, monkeypatch):
+    """A lane runs beside others: it has to be correct, and what it gained is the merge's to use."""
+    spec, _lane_dir = _run_lane_session(tmp_path, monkeypatch)
     gate = spec.hooks.stop[0].callback.__self__
     prompt = " ".join(spec.system_prompt.split())
 
-    assert gate.gain_required is gain_required
-    assert told in prompt
-    assert not_told not in prompt
+    assert gate.gain_required is False
+    assert "Other sessions are working from" in prompt
+    assert "correct but not faster" not in prompt
 
 
 def test_a_lane_hook_denies_an_edit_to_the_lane_driver(tmp_path, monkeypatch):
@@ -424,7 +415,7 @@ def _bash_decision(spec: AgentRunSpec, command: str) -> dict:
 
 
 def test_the_canonical_session_keeps_its_benchmarking_stop_hook(tmp_path, monkeypatch):
-    """Pin the single-session path: it self-corrects against the scoring it was handed, and that has not changed."""
+    """The session of a round's only lane, and of a merge: it self-corrects against the scoring it was handed."""
     specs = _record_backend_specs(monkeypatch)
     workspace = _tree(tmp_path / "workspace")
 
@@ -453,6 +444,9 @@ def test_the_canonical_session_keeps_its_benchmarking_stop_hook(tmp_path, monkey
     # It has the device to itself, so it is told nothing about a runner.
     assert RUNNER_NAME not in spec.system_prompt
     assert gate.device is None
+    # With no merge to use anything less, its stop has to beat the current best.
+    assert gate.gain_required is True
+    assert "correct but not faster" in " ".join(spec.system_prompt.split())
 
 
 def _register_provider(name: str, **capabilities: bool) -> None:
@@ -537,6 +531,24 @@ def test_a_lane_refusal_names_every_missing_guarantee(capsys):
 
     warning = capsys.readouterr().out
     assert "stop_hooks" in warning
+
+
+@pytest.mark.parametrize("variables", [("GIT_DIR", "GIT_WORK_TREE"), ("GIT_DIR",)], ids=["both", "the repository"])
+def test_lanes_side_by_side_are_refused_at_startup_on_a_workspace_that_cannot_be_copied(monkeypatch, variables):
+    """Before the baseline and the Analysis are paid for, not at the first round that would copy the workspace."""
+    for name in ("GIT_DIR", "GIT_WORK_TREE"):
+        monkeypatch.delenv(name, raising=False)
+    cli_lanes._require_copyable_workspace(3)
+    for name in variables:
+        monkeypatch.setenv(name, "/elsewhere")
+
+    with pytest.raises(ForgeLoopError) as refusal:
+        cli_lanes._require_copyable_workspace(2)
+
+    assert " and ".join(variables) in str(refusal.value)
+    assert "Re-run with --lanes 1" in str(refusal.value)
+    # One lane works in the workspace itself, which is how such a workspace is run.
+    cli_lanes._require_copyable_workspace(1)
 
 
 def test_lanes_are_refused_rather_than_quietly_reduced():

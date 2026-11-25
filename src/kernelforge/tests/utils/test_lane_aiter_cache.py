@@ -173,7 +173,7 @@ async def _run_lanes(tmp_path: Path, factory, lane_ids: tuple[str, ...]) -> None
 
     async def lane(lane_id: str) -> None:
         lane_dir = _lane_dir(tmp_path, lane_id)
-        session = factory(_seat(tmp_path, lane_dir, lane_id), gain_required=False)
+        session = factory(_seat(tmp_path, lane_dir, lane_id))
         # Hand control back so both lanes are inside their session before either spawns: a routing that writes the
         # process environment would give the first lane whatever the second lane wrote last.
         await asyncio.sleep(0)
@@ -253,7 +253,7 @@ async def test_a_lane_denied_its_own_cache_is_refused_rather_than_shared(tmp_pat
     factory = _lane_factory(config, workspace, _implementer_through(_recording_claude_backend([])))
 
     with pytest.raises(OSError):
-        factory(_seat(tmp_path, lane_dir, "1"), gain_required=False)
+        factory(_seat(tmp_path, lane_dir, "1"))
 
 
 def _overlay(options) -> dict[str, str]:

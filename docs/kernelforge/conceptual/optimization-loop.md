@@ -59,8 +59,9 @@ knowledge base and tooling:
 
 The autonomous loop wraps this cycle for overnight, unattended optimization:
 Analysis profiles the current best and divides the work among the round's
-lanes, each lane's Implementer session edits its own copy of the workspace, a
-merge session combines what the lanes left, the driver-owned complete
+lanes, each lane's Implementer session edits the kernel (in its own copy of
+the workspace when lanes run side by side), a merge session combines what
+several lanes left, the driver-owned complete
 correctness suite validates the result, and three independent benchmarks decide
 whether to commit or restore the candidate.
 See {doc}`Autonomous overnight loop </kernelforge/how-to/autonomous-loop>`.

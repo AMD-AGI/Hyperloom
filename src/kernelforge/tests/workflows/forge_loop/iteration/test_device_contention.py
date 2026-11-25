@@ -17,7 +17,7 @@ from kernelforge.workflows.forge_loop.iteration import fanout
 from kernelforge.workflows.forge_loop.iteration import runner as runner_module
 from kernelforge.workflows.forge_loop.iteration.device_hazard import MAX_BLOCKED_ITERATIONS
 from kernelforge.workflows.forge_loop.campaign.run_state import LoopStateStore
-from kernelforge.workflows.forge_loop.iteration import lane_runtime
+from kernelforge.workflows.forge_loop.iteration import iteration_phases
 from kernelforge.tests.workflows.forge_loop.iteration._iteration_loop import (
     _make_loop,
     _unused_supervisor,
@@ -161,7 +161,7 @@ def test_a_hazard_outlives_the_iteration_that_found_it(tmp_path, monkeypatch):
     """
     loop, workspace = _make_loop(tmp_path, monkeypatch, session_count=3)
     holders = _fake_device(monkeypatch, {4321: 99})
-    monkeypatch.setattr(lane_runtime, "processes_under", lambda _dir: {4321})
+    monkeypatch.setattr(iteration_phases, "processes_under", lambda _dir: {4321})
     sessions: list[int] = []
 
     async def agent(kernel_path, history, session_sink):
@@ -208,7 +208,7 @@ def test_a_hazard_nothing_clears_stops_the_run_rather_than_spinning(
     """
     loop, workspace = _make_loop(tmp_path, monkeypatch, session_count=20)
     _fake_device(monkeypatch, {4321: 99})
-    monkeypatch.setattr(lane_runtime, "processes_under", lambda _dir: {4321})
+    monkeypatch.setattr(iteration_phases, "processes_under", lambda _dir: {4321})
 
     asyncio.run(loop.run(lane_agents(_contended_agent, supervisor_fn=_unused_supervisor)))
 

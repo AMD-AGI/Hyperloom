@@ -63,7 +63,7 @@ async def test_a_lane_session_imports_the_lane_by_the_name_its_workspace_is_impo
 
     for lane_id in ("1", "2"):
         lane_dir = _lane_copy(tmp_path, lane_id, workspace.name)
-        session = factory(_seat(tmp_path, lane_dir, lane_id), gain_required=False)
+        session = factory(_seat(tmp_path, lane_dir, lane_id))
         await session(str(lane_dir / "src" / "kernel.py"), f"plan {lane_id}")
 
     assert [_value_imported_by(env) for env in spawned] == ["1", "2"]
@@ -77,7 +77,7 @@ async def test_a_lane_of_a_workspace_not_imported_by_name_inherits_the_import_pa
     factory = _lane_factory(config, workspace, _implementer_through(_recording_claude_backend(spawned)))
     lane_dir = _lane_copy(tmp_path, "1", "")
 
-    session = factory(_seat(tmp_path, lane_dir, "1"), gain_required=True)
+    session = factory(_seat(tmp_path, lane_dir, "1"))
     await session(str(lane_dir / "src" / "kernel.py"), "plan")
 
     assert [env["PYTHONPATH"] for env in spawned] == [str(tmp_path / "elsewhere")]
