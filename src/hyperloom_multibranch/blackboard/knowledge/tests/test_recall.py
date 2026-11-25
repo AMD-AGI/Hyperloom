@@ -13,8 +13,8 @@ from hyperloom_kb import RemoteReadResult
 
 from hyperloom.common.perf_metric import TOTAL_TOKEN_THROUGHPUT
 from hyperloom_multibranch.contracts.blackboard.peers import IntentLayer
+from hyperloom_multibranch.contracts.blackboard.records import SessionProfile
 from hyperloom_multibranch.blackboard.knowledge.recall import (
-    CONDITION_KEYS,
     DECISION,
     INTERACTIVITY_OBJECTIVE,
     RECALL_LIMIT,
@@ -77,7 +77,7 @@ def test_a_summary_without_an_identity_is_one_to_reverify_never_a_prior() -> Non
 
     (item,) = recall_experiences(reader, profile(), 1000.0, ATTENTION).experiences
 
-    assert (item.tier, item.differing) == (RecallTier.REVERIFY, CONDITION_KEYS)
+    assert (item.tier, item.differing) == (RecallTier.REVERIFY, tuple(SAME))
 
 
 def test_another_model_tp_or_concurrency_makes_an_experience_one_to_reverify() -> None:
@@ -99,6 +99,23 @@ def test_another_model_tp_or_concurrency_makes_an_experience_one_to_reverify() -
         "exp-other-tp-conc": (RecallTier.REVERIFY, ("tp", "conc")),
         "exp-same-conc-as-float": (RecallTier.PRIOR, ()),
     }
+
+
+def test_a_prompt_dataset_is_a_condition_and_so_is_sending_none() -> None:
+    dataset = "/data/prompts.jsonl"
+    reader = FakeExperienceReader(
+        completed_read(
+            experience_summary("exp-random", SAME),
+            experience_summary("exp-dataset", {**SAME, "dataset": dataset}),
+        )
+    )
+
+    def differing(session: SessionProfile) -> dict[str, tuple[str, ...]]:
+        recall = recall_experiences(reader, session, 1000.0, ATTENTION)
+        return {item.experience_id: item.differing for item in recall.experiences}
+
+    assert differing(profile(dataset=dataset)) == {"exp-random": ("dataset",), "exp-dataset": ()}
+    assert differing(profile()) == {"exp-random": (), "exp-dataset": ("dataset",)}
 
 
 def _bare(experience_id: str) -> dict[str, object]:
@@ -168,7 +185,7 @@ def test_an_export_that_fails_leaves_the_experience_one_to_reverify(caplog: pyte
     with caplog.at_level(logging.WARNING, logger="hyperloom_multibranch.blackboard.knowledge.recall"):
         (item,) = recall_experiences(reader, profile(), 1000.0, ATTENTION, identities=index).experiences
 
-    assert (item.tier, item.differing) == (RecallTier.REVERIFY, (*CONDITION_KEYS, "objective"))
+    assert (item.tier, item.differing) == (RecallTier.REVERIFY, (*SAME, "objective"))
     assert "unreachable" in caplog.text
 
 

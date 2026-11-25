@@ -29,6 +29,7 @@ from inference_suite.contracts import (
     LifecycleMode,
     MlperfWorkload,
     ProfileConfig,
+    PromptDataset,
     RunnerLayer,
     RunPaths,
     ScriptableWorkload,
@@ -121,7 +122,11 @@ def _accuracy_round(**changes) -> SuiteConfig:
     )
 
 
-@pytest.mark.parametrize("config", [_config(), _accuracy_round()], ids=["agentx-profile", "accuracy-round"])
+@pytest.mark.parametrize(
+    "config",
+    [_config(), _accuracy_round(), _config(server=replace(_config().server, cpus=(32, 33)))],
+    ids=["agentx-profile", "accuracy-round", "pinned-server"],
+)
 def test_round_trip_through_json(config):
     document = json.loads(json.dumps(config.to_document()))
 
@@ -132,7 +137,19 @@ def test_round_trip_through_json(config):
     assert SuiteConfig.from_document(document).to_document() == document
 
 
+def test_an_unpinned_server_writes_no_cpus_key_so_a_build_without_it_reads_the_config():
+    assert "cpus" not in _config().to_document()["server"]
+
+
 _SCRIPT = ScriptableWorkload(params={"XDIT_NUM_STEPS": 28, "XDIT_GUIDANCE_SCALE": 4.0})
+
+
+def test_a_fixed_workload_round_trips_its_prompt_dataset_and_a_random_one_writes_none():
+    dataset = replace(_FIXED, dataset=PromptDataset("/data/prompts.jsonl"))
+    document = json.loads(json.dumps(dataset.to_document()))
+    assert document["dataset"] == {"path": "/data/prompts.jsonl"}
+    assert FixedWorkload.from_document(document) == dataset
+    assert "dataset" not in _FIXED.to_document()
 
 
 def test_round_trip_fixed_and_scriptable():

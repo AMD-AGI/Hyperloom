@@ -31,6 +31,7 @@ from hyperloom.measure.failures import (
     PROFILER_DIED,
     PROFILER_HUNG,
     PROFILER_SNAPSHOT_FAILED,
+    RESULT_DOWNLOAD_INCOMPLETE,
     TEST_TIMEOUT_REASON,
     FailureEvidence,
     StepFailure,
@@ -51,6 +52,7 @@ from hyperloom_multibranch.toolbox.attempts import (
     AttemptRunner,
     InfraBackoff,
     TestJob,
+    node_unquarantined,
 )
 
 INERT_REASON = f"{INERT_PATCH}: process 1 imported aiter from /sgl-workspace/aiter/aiter/__init__.py, not from the farm"
@@ -497,6 +499,23 @@ async def test_a_sandbox_that_failed_before_it_ran_is_retried_once_with_a_new_ke
     assert reported == [], "the template or the platform, not a node, failed the sandbox"
 
 
+#: What the hosted backend reports when a result file's every copy out of the sandbox came back short.
+DOWNLOAD_REASON = f"{RESULT_DOWNLOAD_INCOMPLETE}: report.json: 4194301 bytes received, the manifest lists 4194304"
+
+
+async def test_a_result_download_that_came_back_short_is_retried_after_waits_and_not_held_against_the_node() -> None:
+    result, executor, reported = await _run(DOWNLOAD_REASON)
+    assert len(executor.jobs) == 4, "a new attempt downloads the result again, up to the infrastructure retries"
+    assert executor.clock.waits == [60.0, 120.0, 240.0]
+    assert result.validity is Validity.MEASUREMENT_FAILED and result.failure_class is FailureClass.INFRA
+    assert result.failure_reason == f"4 attempts failed for infrastructure reasons: {DOWNLOAD_REASON}"
+    assert reported == [], "the platform's file API, not the node, cut the download short"
+    assert node_unquarantined(DOWNLOAD_REASON), "and it never quarantines the node"
+    assert (
+        classify_test_failure(returncode=0, error_class=RESULT_DOWNLOAD_INCOMPLETE).failure_class is FailureClass.INFRA
+    )
+
+
 def test_the_blameless_names_are_the_ones_the_runner_and_the_backend_report() -> None:
     assert NODE_BLAMELESS_INFRA_REASONS == {
         "runner_start_failed",
@@ -506,6 +525,7 @@ def test_the_blameless_names_are_the_ones_the_runner_and_the_backend_report() ->
         "sandbox_acquire_timeout",
         "hf_cache_permission",
         "framework_version_mismatch",
+        "result_download_incomplete",
     }
     assert NODE_BLAMELESS_INFRA_REASONS - {HUB_RATE_LIMITED, HF_CACHE_PERMISSION} <= INFRA_ERROR_CLASSES, (
         "the ones a log, not a status, names"

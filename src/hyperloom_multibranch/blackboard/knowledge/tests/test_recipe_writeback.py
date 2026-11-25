@@ -235,6 +235,7 @@ def test_the_final_commit_needs_a_recorded_value(snapshot: BlackboardSnapshot, f
     [
         (None, "no_session_profile"),
         (profile(kernel_optimizer=""), "invalid_recipe_scope"),
+        (profile(dataset="/data/prompts.jsonl"), "invalid_recipe_scope"),
     ],
 )
 def test_a_session_the_kb_cannot_file_is_skipped_with_the_reason(

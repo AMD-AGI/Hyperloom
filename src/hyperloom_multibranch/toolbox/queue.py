@@ -5,14 +5,16 @@
 
 The queue is plain in-memory state with no I/O, so the fake executor and the real one share it. Confirm-retests,
 reproduction checks and session measurements do not count against their branch's K (otherwise K exploration tests
-would starve the retest that decides them), but they do count against the global limit.
+would starve the retest that decides them), but they do count against the global limit. Inside a priority the branches
+take turns at starting a test, K turns each, so a branch that holds a backlog does not keep the cards from the others.
 """
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from enum import Enum
+from fractions import Fraction
 
 from hyperloom.contracts.measurement import (
     PRIORITY_HIGHEST,
@@ -48,7 +50,8 @@ BRANCH_STOPPED = "branch_stopped"
 class QueuePolicy:
     """What the scheduler sets: tests a branch runs at once, tests in flight overall, a priority per purpose.
 
-    ``per_branch_k`` is the default K; ``branch_k`` overrides it per branch.
+    ``per_branch_k`` is the default K; ``branch_k`` overrides it per branch. A branch's K is also its share of the
+    starts inside a priority: a branch of twice the K takes twice the turns.
 
     priority_override maps a purpose's value to a priority and applies to requests that name none.
     max_queued_per_branch is the backpressure limit; None means DEFAULT_QUEUE_FACTOR times K.
@@ -132,7 +135,8 @@ WAITING_STATES = frozenset({State.PENDING_BUILD, State.QUEUED})
 
 @dataclass
 class QueuedTest:
-    """One accepted test; ``seq`` is the queue's arrival order and breaks ties inside a priority.
+    """One accepted test; ``seq`` is the queue's arrival order, which decides inside a priority between branches that
+    have taken as many turns (:class:`_Turns`).
 
     ``started_at`` is when the toolbox took it from the queue to run, ``None`` while it waits.
     """
@@ -154,13 +158,48 @@ class QueuedTest:
         return self.request.branch_id
 
 
+@dataclass
+class _Turns:
+    """Whose turn it is inside a priority: the branch that has started the fewest of the tests that count against K
+    starts the next, a test counting ``1/K`` of the K it started under, so a branch of twice the K takes twice the
+    starts; arrival decides between branches that are level.
+
+    ``taken`` is that count by priority and branch. ``level`` is, by priority, where the last branch to start stood,
+    and no branch stands lower: one that joins, or that had nothing to start when its turn came, takes its turn from
+    there and is owed none it missed. An exempt test takes no turn and keeps its arrival order against the test whose
+    turn it is.
+    """
+
+    taken: dict[tuple[int, str], Fraction] = field(default_factory=dict)
+    level: dict[int, Fraction] = field(default_factory=dict)
+
+    def start_next(self, waiting: Sequence[QueuedTest], k_for: Callable[[str], int]) -> QueuedTest:
+        """Count the turn of the test of ``waiting``, not empty, that starts first, and return it."""
+
+        counted = [item for item in waiting if not exempt_from_k(item.request)]
+        heads = [item for item in waiting if exempt_from_k(item.request)]
+        if counted:
+            heads.append(min(counted, key=lambda item: (item.priority, self._stands(item), item.seq)))
+        first = min(heads, key=lambda item: (item.priority, item.seq))
+        if not exempt_from_k(first.request):
+            self.level[first.priority] = stood = self._stands(first)
+            self.taken[first.priority, first.branch] = stood + Fraction(1, k_for(first.branch))
+        return first
+
+    def _stands(self, item: QueuedTest) -> Fraction:
+        taken = self.taken.get((item.priority, item.branch), Fraction(0))
+        return max(taken, self.level.get(item.priority, Fraction(0)))
+
+
 class WorkQueue:
-    """Priority queue with K accounting; ``take`` hands out the best test the limits allow."""
+    """Priority queue with K accounting; ``take`` hands out the best test the limits allow, the branches taking turns
+    inside a priority."""
 
     def __init__(self, policy: QueuePolicy) -> None:
         self.policy = policy
         self._items: dict[str, QueuedTest] = {}
         self._arrivals = 0
+        self._turns = _Turns()
         self.cold_start_seconds: float | None = None
 
     def set_policy(self, policy: QueuePolicy) -> None:
@@ -243,19 +282,22 @@ class WorkQueue:
         ]
         if not ready:
             return None
-        best = min(ready, key=lambda item: (item.priority, item.seq))
+        best = self._turns.start_next(ready, self.policy.k_for)
         best.state = State.RUNNING
         return best
 
     def queued_ahead(self, request_id: str) -> int:
-        """How many waiting tests ``take`` prefers to ``request_id`` by priority and arrival, whatever their K."""
+        """How many waiting tests start before the queued test ``request_id`` when each starts as its turn comes,
+        whatever their K."""
 
         item = self._items[request_id]
-        return sum(
-            1
-            for other in self._items.values()
-            if other.state is State.QUEUED and (other.priority, other.seq) < (item.priority, item.seq)
-        )
+        turns = _Turns(dict(self._turns.taken), dict(self._turns.level))
+        waiting = [other for other in self._items.values() if other.state is State.QUEUED]
+        ahead = 0
+        while (first := turns.start_next(waiting, self.policy.k_for)) is not item:
+            waiting.remove(first)
+            ahead += 1
+        return ahead
 
     def remove(self, request_id: str) -> QueuedTest | None:
         return self._items.pop(request_id, None)

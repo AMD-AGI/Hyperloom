@@ -415,7 +415,6 @@ def test_specialist_dispatch_injects_its_experience_block_and_records_it(tmp_pat
     )
     assert "## 4b. EXPERIENCE KB" in user
     assert evidence.prompt_block in user
-    assert "COLD-START MODE" not in user
 
 
 def test_specialist_dispatch_reads_only_in_framework_agent_and_fails_open(tmp_path) -> None:
@@ -507,6 +506,16 @@ def test_only_a_run_graded_on_throughput_reads_throughput_experiences(tmp_path, 
 
     assert isinstance(integration_for(state("output_throughput")), ExperienceKBIntegration)
     assert integration_for(state("e2e_norm_intvty_p90")) is None
+
+
+def test_a_run_sending_a_prompt_dataset_reads_no_random_prompt_experience(monkeypatch) -> None:
+    monkeypatch.setenv("HYPERLOOM_KB_URL", "https://kb.example")
+    monkeypatch.setenv("HYPERLOOM_KB_TOKEN", "service-token")
+    state = SharedState(
+        phase="FRAMEWORK_AGENT", grading={"objective": "output_throughput"}, prompt_dataset="/data/prompts.jsonl"
+    )
+
+    assert integration_for(state) is None
 
 
 def test_proposal_exposure_only_uses_current_orchestration_tick() -> None:

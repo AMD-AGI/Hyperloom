@@ -20,6 +20,9 @@ from hyperloom.measure.jit.key import (
     build_surface,
     entry_env_names,
     env_names_in,
+    flydsl_covers,
+    flydsl_environment,
+    flydsl_key,
     scan_env_names,
     touches_build_surface,
     tree_identity,
@@ -375,3 +378,103 @@ def test_the_environment_given_is_not_changed():
 
     assert without_card_arch(environment, "gfx950") == {"ENABLE_CK": "1"}
     assert environment == {"GPU_ARCHS": "native", "ENABLE_CK": "1"}
+
+
+FLYDSL_ENV = {"SGLANG_AMD_MONO_K31_WIDE": "1", "FLYDSL_COMPILE_OPT_LEVEL": "3", "HOME": "/root"}
+
+
+@pytest.mark.parametrize(
+    ("package", "path"),
+    [
+        ("flydsl", "compiler/jit_function.py"),
+        ("aiter", "ops/flydsl/gemm.py"),
+        ("aiter", "ops/flydsl/kernels/moe_mxfp4.py"),
+        ("sglang", "kernels/plugin_kernels/amd/__init__.py"),
+        ("sglang", "srt/kernel_plugins/amd/binding.py"),
+        ("sglang", "srt/monokernels/kimi.py"),
+        ("sglang", "srt/models/kimi_k3.py"),
+        ("sglang", "srt/models/deepseek_common/amd/fused.py"),
+    ],
+)
+def test_a_patch_to_any_source_a_flydsl_launch_is_built_from_is_covered_and_changes_the_key(package, path) -> None:
+    assert flydsl_covers(package, path)
+    base = flydsl_key(MACHINE, TREE, [FLYDSL_ENV])
+    one = flydsl_key(MACHINE, tree_identity([(package, path, "upsert", "sha256:1", "0644")], None, ()), [FLYDSL_ENV])
+    two = flydsl_key(MACHINE, tree_identity([(package, path, "upsert", "sha256:2", "0644")], None, ()), [FLYDSL_ENV])
+    gone = flydsl_key(MACHINE, tree_identity([(package, path, "delete", "", "")], None, ()), [FLYDSL_ENV])
+
+    assert len({base, one, two, gone}) == 4, "every change of a covered file is a key of its own"
+
+
+@pytest.mark.parametrize(
+    ("package", "path"),
+    [
+        ("aiter", "jit/core.py"),
+        ("aiter", "ops/mha.py"),
+        ("sglang", "srt/layers/linear.py"),
+        ("vllm", "srt/models/x.py"),
+        ("sgl_amd_mono", "kimi_k31/gfx950/chain.py"),
+    ],
+)
+def test_a_patch_elsewhere_is_not_a_flydsl_source(package, path) -> None:
+    assert not flydsl_covers(package, path)
+
+
+@pytest.mark.parametrize(
+    ("name", "value"),
+    [
+        ("SGLANG_AMD_MONO_K31_WIDE", "0"),
+        ("SGLANG_AMD_MONO_ROCM_LLVM_OPT", "-O2"),
+        ("SGLANG_AMD_MONO_FAULT_INJECT", "1"),
+        ("FLYDSL_COMPILE_OPT_LEVEL", "2"),
+        ("FLYDSL_EXTRA_SOURCE_DIRS", "/opt/flydsl"),
+        ("ARCH", "gfx942"),
+        ("COMPILE_ONLY", "1"),
+        ("AITER_FLYDSL_MOE_EXPERT_SCHEDULING_MODE", "1"),
+        ("AITER_FLYDSL_KERNARG_PRELOAD", "0"),
+        ("AITER_FLYDSL_AOT_CACHE", "0"),
+        ("MXFP4_G2_BHOIST", "1"),
+        ("MXFP4_G2_PREFETCH_IDS", "0"),
+        ("HSA_OVERRIDE_GFX_VERSION", "9.5.0"),
+        ("COMPILE_OPT_LEVEL", "2"),
+    ],
+)
+def test_a_variable_of_flydsl_the_plugin_or_aiters_flydsl_kernels_changes_the_flydsl_key(name, value) -> None:
+    assert flydsl_key(MACHINE, TREE, [FLYDSL_ENV]) != flydsl_key(MACHINE, TREE, [{**FLYDSL_ENV, name: value}])
+
+
+@pytest.mark.parametrize(
+    ("name", "value"),
+    [
+        ("FLYDSL_RUNTIME_CACHE_DIR", "/tmp/hl-jit-x/jit/flydsl"),
+        ("SGLANG_AMD_MONO_CACHE_DIR", "/root/.cache/other"),
+        ("HOME", "/home/other"),
+        ("SGLANG_ENABLE_X", "1"),
+        ("AITER_JIT_DIR", "/elsewhere"),
+        ("AITER_TUNE_GEMM", "1"),
+        ("XMXFP4_G2_BHOIST", "1"),
+    ],
+)
+def test_a_location_or_a_variable_flydsl_never_reads_leaves_the_flydsl_key(name, value) -> None:
+    assert flydsl_key(MACHINE, TREE, [FLYDSL_ENV]) == flydsl_key(MACHINE, TREE, [{**FLYDSL_ENV, name: value}])
+    assert name not in flydsl_environment({name: value})
+
+
+def test_the_flydsl_key_holds_every_servers_variables_and_the_machine() -> None:
+    base = flydsl_key(MACHINE, TREE, [FLYDSL_ENV])
+    other_point = {**FLYDSL_ENV, "SGLANG_AMD_MONO_K31_WIDE": "0"}
+    aiter_point = {**FLYDSL_ENV, "AITER_FLYDSL_STAGE2_FP8": "1"}
+
+    assert flydsl_key(MACHINE, TREE, [FLYDSL_ENV, other_point]) not in {base, flydsl_key(MACHINE, TREE, [other_point])}
+    assert flydsl_key(MACHINE, TREE, [FLYDSL_ENV, aiter_point]) not in {
+        base,
+        flydsl_key(MACHINE, TREE, [FLYDSL_ENV, other_point]),
+    }, "a second point's aiter FlyDSL variable splits the key"
+    assert flydsl_key(MACHINE, TREE, [FLYDSL_ENV, FLYDSL_ENV]) == base, "two points alike are one environment"
+    assert flydsl_key(Machine(MACHINE.image_digest, "gfx942", "MI300X", None), TREE, [FLYDSL_ENV]) != base
+    assert base not in {aiter_key(MACHINE, TREE, BuildSurface()), triton_key(MACHINE)}, "the kinds never share a key"
+
+
+@pytest.mark.parametrize("name", ["FLYDSL_RUNTIME_CACHE_DIR", "SGLANG_AMD_MONO_CACHE_DIR"])
+def test_flydsls_cache_directories_are_locations_for_the_aiter_key_too(name) -> None:
+    assert build_surface({name}, {name: "/somewhere"}, {}) == BuildSurface()

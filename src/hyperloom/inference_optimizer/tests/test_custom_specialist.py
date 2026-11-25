@@ -564,7 +564,7 @@ def _task(task_id: str, kind: str, **params: Any) -> SimpleNamespace:
     ("phase", "expected"),
     [
         ("FRAMEWORK_AGENT", ["custom", "operator-explore", "patch", "serving", "tag-only", "explore"]),
-        ("SWEEP", ["custom", "operator-explore", "serving", "tag-only", "explore", "patch"]),
+        ("CYCLE_END", ["custom", "operator-explore", "serving", "tag-only", "explore", "patch"]),
     ],
 )
 def test_operator_work_dispatches_first_in_every_phase(phase, expected):
@@ -720,9 +720,9 @@ async def test_operator_work_pending(rounds, queued, expected):
 @pytest.mark.parametrize(
     ("next_phase", "held"),
     [
-        (("SWEEP", "optimize_no_more_leverage", {"kernel_skipped": True}), True),
+        (("CYCLE_END", "optimize_no_more_leverage", {"kernel_skipped": True}), True),
         (("KERNEL_AGENT", "optimize_no_more_leverage", {}), True),
-        (("SWEEP", "optimize_phase_budget_exhausted", {"kernel_skipped": True}), False),
+        (("CYCLE_END", "optimize_phase_budget_exhausted", {"kernel_skipped": True}), False),
         (("CLOSE", "time_exhausted", {"terminal": True}), False),
     ],
 )
@@ -884,7 +884,7 @@ def test_only_mode_gate_denies_every_framework_search_orchestration_emits(intent
     assert exc.value.rule == "custom_specialist_only"
 
 
-@pytest.mark.parametrize(("phase", "only"), [("FRAMEWORK_AGENT", False), ("SWEEP", True)])
+@pytest.mark.parametrize(("phase", "only"), [("FRAMEWORK_AGENT", False), ("CYCLE_END", True)])
 @pytest.mark.parametrize("intent", _FRAMEWORK_SEARCH_INTENTS)
 def test_the_framework_search_denial_is_scoped_to_only_mode_in_framework(intent, phase, only):
     try:
@@ -1030,13 +1030,14 @@ async def test_only_mode_leaves_framework_once_the_custom_cycle_is_done(kw, hint
     [
         ("FRAMEWORK_AGENT", True, []),
         ("FRAMEWORK_AGENT", False, ["orchestration"]),
-        ("SWEEP", True, ["orchestration"]),
+        ("CYCLE_END", True, ["orchestration"]),
     ],
 )
 async def test_only_mode_framework_ticks_without_an_orchestration_turn(tmp_path, monkeypatch, phase, only, expected):
     import time
 
-    coord = _coordinator(tmp_path, SharedState(custom_specialist_prompt=_PROMPT, custom_specialist_only=only))
+    state = SharedState(custom_specialist_prompt=_PROMPT, custom_specialist_only=only, cycle_end_settled_cycle=0)
+    coord = _coordinator(tmp_path, state)
     coord.shared_state.phase = phase
     turns: list[str] = []
 

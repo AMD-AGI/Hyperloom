@@ -119,11 +119,23 @@ def test_other_script_name_is_a_surface_change(config):
         check_surface(other, extract_surface(config))
 
 
+def test_the_prompt_dataset_is_part_of_the_surface_only_when_a_point_sends_one(config):
+    random_prompts = extract_surface(config)
+    on_a_dataset = changed(config, DATASET_PATH="/data/prompts.jsonl")
+
+    assert "envs.DATASET_PATH" not in random_prompts.fields
+    assert extract_surface(on_a_dataset).sha256 != random_prompts.sha256
+    for point, canonical in ((config, extract_surface(on_a_dataset)), (on_a_dataset, random_prompts)):
+        with pytest.raises(SurfaceViolation, match=r"envs\.DATASET_PATH"):
+            check_surface(point, canonical)
+    check_surface(on_a_dataset, extract_surface(on_a_dataset))
+
+
 def test_model_hashes_cover_configuration_and_tokenizer_but_not_weights(model_dir):
     assert set(hash_model_files(model_dir)) == {"config.json", "tokenizer.json"}
 
 
-@pytest.mark.parametrize("name", [*SURFACE_ENV_KEYS, *POINT_ENV_KEYS, *REQUEST_ENV_KEYS])
+@pytest.mark.parametrize("name", [*SURFACE_ENV_KEYS, *POINT_ENV_KEYS, *REQUEST_ENV_KEYS, "DATASET_PATH"])
 def test_launch_environment_may_not_set_guarded_variables(name):
     with pytest.raises(SurfaceViolation, match=name.lower()):
         check_launch_envs(["HSA_X", name.lower()])  # the check is case-insensitive and reports the name as given

@@ -123,7 +123,7 @@ def leg_env(tmp_path: Path) -> dict[str, str]:
         "ANTHROPIC_API_KEY": FAKE_KEY,
         "ANTHROPIC_BASE_URL": "https://llm.example.test",
         "CLAUDE_MODEL": "test-model",
-        "STUB_STOP_REASON": "sweep_done",
+        "STUB_STOP_REASON": "cycle_end_done",
         "LEG_TURN_GAP_S": "0",
         "LEG_WAIT_INTERVAL_S": "1",
     }
@@ -174,7 +174,7 @@ def test_a_model_dir_without_config_json_is_refused(leg_env: dict[str, str], tmp
 def test_clean_stop_reason_passes_and_the_key_does_not_outlive_the_leg(leg_env: dict[str, str]) -> None:
     result = _run(["docker-vllm-3h"], leg_env)
     assert result.returncode == 0, result.stdout + result.stderr
-    assert "PASS: stop_reason=sweep_done" in result.stdout
+    assert "PASS: stop_reason=cycle_end_done" in result.stdout
     workspace = Path(leg_env["LEG_WORK_DIR"]) / "attempt-1/docker-vllm-3h"
     dotenv = workspace / ".env"
     assert stat.S_IMODE(dotenv.stat().st_mode) == 0o600
@@ -284,7 +284,9 @@ def test_legs_sharing_a_session_root_keep_separate_experience_kb_homes(leg_env: 
     assert len(set(homes)) == 2
 
 
-@pytest.mark.parametrize(("own", "foreign", "verdict"), [("signal", "sweep_done", 1), ("sweep_done", "signal", 0)])
+@pytest.mark.parametrize(
+    ("own", "foreign", "verdict"), [("signal", "cycle_end_done", 1), ("cycle_end_done", "signal", 0)]
+)
 def test_a_shared_session_root_judges_only_this_runs_session(
     leg_env: dict[str, str], own: str, foreign: str, verdict: int
 ) -> None:
@@ -305,7 +307,7 @@ def test_another_runs_progress_does_not_hold_off_the_relaunch(leg_env: dict[str,
         **leg_env,
         "CLAW_SESSION_ID": "claw-own",
         "STUB_OWN": "none",
-        "STUB_FOREIGN": "sweep_done",
+        "STUB_FOREIGN": "cycle_end_done",
         "LEG_STALL_GRACE_S": "1",
         "LEG_DEMO_REDRIVES": "1",
         "LEG_DEADLINE_S": "20",

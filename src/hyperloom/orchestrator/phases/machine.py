@@ -20,17 +20,12 @@ from hyperloom.plugs import progress as _progress
 
 log = _logging.getLogger(__name__)
 
-# SWEEP budget exits end the run for lack of time; every other CLOSE transition reason is itself a stop reason.
-_BUDGET_EXIT_STOP_REASONS = {
-    "sweep_budget_exhausted": "time_exhausted",
-}
-
 # The FRAMEWORK_AGENT exit reason for a plateau or an LLM hint; budget and terminal exits never wait.
 _LEVERAGE_EXIT_REASON = "optimize_no_more_leverage"
 
-# SWEEP's pump dispatches nothing: it writes the directive the next macro-cycle opens on, so it runs while SWEEP's
-# exit is held.
-_PUMPS_RUN_WHILE_LEAVING = frozenset({_phase_state.PHASE_SWEEP})
+# CYCLE_END's pump dispatches nothing: it writes the directive the next macro-cycle opens on, so it runs while
+# CYCLE_END's exit is held.
+_PUMPS_RUN_WHILE_LEAVING = frozenset({_phase_state.PHASE_CYCLE_END})
 
 
 def is_leverage_exit(next_phase: tuple[str, str, dict[str, Any]]) -> bool:
@@ -66,12 +61,12 @@ class MachinePhase(CoordinatorCollaborator):
         self._on_enter = {
             _phase_state.PHASE_FRAMEWORK_AGENT: c.phase_framework.on_enter_framework,
             _phase_state.PHASE_KERNEL_AGENT: c.phase_kernel.on_enter_kernel,
-            _phase_state.PHASE_SWEEP: c.phase_sweep.on_enter_sweep,
+            _phase_state.PHASE_CYCLE_END: c.phase_cycle_end.on_enter_cycle_end,
             _phase_state.PHASE_CLOSE: c.phase_close.on_enter_close,
         }
         self.pump_table = {
             _phase_state.PHASE_FRAMEWORK_AGENT: c.phase_framework.pump,
-            _phase_state.PHASE_SWEEP: c.phase_sweep.pump,
+            _phase_state.PHASE_CYCLE_END: c.phase_cycle_end.pump,
         }
 
     def ensure_phase_initialised(self, budget_pct: dict[str, float] | None) -> None:
@@ -87,7 +82,6 @@ class MachinePhase(CoordinatorCollaborator):
                 _phase_state.normalize_budget_pct(budget_pct),
                 optimize_enabled=state.framework_agent_phase_enabled,
                 kernel_enabled=state.kernel_enabled,
-                sweep_enabled=state.conc_sweep_enabled,
             )
         current = (state.phase or "").strip().upper()
         # Only an unset phase means fresh; an unknown one would otherwise re-run PRELUDE over the earlier build's
@@ -190,13 +184,13 @@ class MachinePhase(CoordinatorCollaborator):
         )
 
     def set_terminal_stop_reason(self, reason: str) -> None:
-        """Derive the stop reason for a CLOSE transition. The first reason recorded wins.
+        """Record the CLOSE transition's reason as the stop reason. The first reason recorded wins.
 
         Must run before CLOSE writes the session breakdown: the collector derives the stop reason from ``state.json``.
         """
         state = self.shared_state
         if not state.stop_reason:
-            state.set_stop_reason(_BUDGET_EXIT_STOP_REASONS.get(reason, reason), strict=True)
+            state.set_stop_reason(reason, strict=True)
 
     async def _framework_round_fits(self) -> bool:
         """Whether FRAMEWORK_AGENT has a round left: work queued or running, or an action its time gate still admits."""
@@ -300,11 +294,10 @@ class MachinePhase(CoordinatorCollaborator):
             state.no_gain_cycle_streak = int(move.evidence.get("no_gain_cycle_streak_effective", 0) or 0)
 
     def _open_next_macro_cycle(self, no_gain_cycle_streak: int, *, trigger: str) -> None:
-        """Open the next macro-cycle and record the strategy it starts on."""
+        """Open the next macro-cycle."""
         state = self.shared_state
         prior_cycle = state.macro_cycle
         state.open_macro_cycle(no_gain_cycle_streak=no_gain_cycle_streak)
-        self._coord.phase_macro_cycle.record_cycle_strategy_for_current_cycle()
         log.info(
             "Coordinator: macro-cycle %s %d -> %d (no_gain_streak=%d, gain_anchor=%.4f)",
             trigger,
@@ -470,8 +463,8 @@ class MachinePhase(CoordinatorCollaborator):
         if phase in (_phase_state.PHASE_PRELUDE, _phase_state.PHASE_ENABLEMENT):
             # Both phases hold their exit for this marker.
             await self._coord.phase_kernel.release_finished_roofline_gate()
-        # SWEEP waits for its conc_sweep's outcome; checked on a resumed process's first decision only.
-        await self._coord.phase_sweep.resume_unsettled_sweep()
+        # CYCLE_END waits for its entry work; checked on a resumed process's first decision only.
+        await self._coord.phase_cycle_end.resume_unsettled_cycle_end()
 
     async def _ask_again_for_a_cancelled_initial_analysis(self) -> None:
         """Request PRELUDE's initial analysis again when the task its hold names was cancelled before it analyzed."""
@@ -585,15 +578,9 @@ class MachinePhase(CoordinatorCollaborator):
         if rebuild is None:
             return False
         state = self.shared_state
-        cycle = int(state.macro_cycle or 0)
-        log_rows = list(state.cycle_strategy_log or [])
-        prior_cycles = [r for r in log_rows if isinstance(r, dict) and int(r.get("cycle", -1) or -1) != cycle]
-        focus_plan = self._coord.phase_macro_cycle.plan_cycle_focus()
-        focus_plan["prior_cycles"] = prior_cycles[-5:]
         scoped = rebuild(
             macro_cycle=state.macro_cycle,
             cycle_directive=self._cycle_directive(),
-            cycle_strategy=focus_plan,
             phase=phase,
         )
         orch_prompt.set("orchestration", scoped)

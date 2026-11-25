@@ -11,7 +11,7 @@ import os
 import sys
 from typing import Any
 
-from hyperloom.common.perf_metric import agentx_enabled as _agentx_enabled
+from hyperloom.common.perf_metric import DATASET_PATH_ENV, agentx_enabled as _agentx_enabled, request_lengths_from_data
 from hyperloom.common.workload_defaults import (
     DEFAULT_ISL,
     DEFAULT_OSL,
@@ -30,6 +30,12 @@ from .parser import _positive_int_arg
 from .preflight import _resumed_session_state
 
 
+_DATASET_ESTIMATE_NOTE = (
+    f"The server is given it, and a {DATASET_PATH_ENV} prompt longer than it fails its request: set MAX_MODEL_LEN to "
+    "the model's context."
+)
+
+
 def _resolve_run_max_model_len(args: argparse.Namespace) -> tuple[int, str]:
     """Resolve planning context; native AgentX serving context remains in its YAML."""
     if getattr(args, "max_model_len", None):
@@ -46,15 +52,16 @@ def _resolve_run_max_model_len(args: argparse.Namespace) -> tuple[int, str]:
             raise SystemExit(2)
     # AgentX replays real agentic traces whose lengths come from the corpus, so ISL/OSL are meaningless placeholders
     # here (they default to 1024/1024) and ``ISL+OSL+headroom`` would pin the server at ~6k against traces reaching
-    # ~1M tokens -- the corpus would then be silently reduced to whatever fits.
-    if _agentx_enabled():
+    # ~1M tokens -- the corpus would then be silently reduced to whatever fits. A prompt dataset is the same case.
+    if request_lengths_from_data():
         native = _load_model_max_position_embeddings(str(args.model or ""))
         if native:
-            return int(native), "agentx-native-context"
+            return int(native), "native-context"
         # Model not on disk yet (uncached HF id).
+        resolved_later = "The AgentX serving context is resolved from its workload configuration."
         print(
             "NOTE: Model context is unavailable locally; using a planning estimate. "
-            "The AgentX serving context is resolved from its workload configuration.",
+            + (resolved_later if _agentx_enabled() else _DATASET_ESTIMATE_NOTE),
             file=sys.stderr,
         )
     return (
