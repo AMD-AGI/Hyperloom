@@ -683,15 +683,14 @@ def _measured_template(
     base_bins: Mapping[str, str] | None = None,
 ) -> LocalTemplate:
     """The runner template that also carries the session's framework tables, the card guard, the directories of the
-    shared stores that are on and, for a framework built from its pinned checkout, the directories of the base builds'
-    executables the runner puts ahead of its ``PATH`` (``base_bins``,
-    :func:`~hyperloom_multibranch.toolbox.native_builds.base_bins_env`) with the CPUs this host pins a measured server
-    to (``HYPERLOOM_SERVER_CPUS``, when it names them): none is part of the environment the branches' own sandboxes
-    get."""
+    shared stores that are on, the CPUs this host pins a measured server to (``HYPERLOOM_SERVER_CPUS``, when it names
+    them) and the directories of the base builds' executables the runner puts ahead of its ``PATH`` (``base_bins``,
+    :func:`~hyperloom_multibranch.toolbox.native_builds.base_bins_env`): none is part of the environment the branches'
+    own sandboxes get."""
     framework = framework_envs(Path(session.session_dir) / SESSION_SNAPSHOT_DIR, options.framework_configs)
     guard = {CARD_GUARD_ENV: card_guard_of(options).value}
     named = os.environ.get(SERVER_CPUS_ENV, "").strip()
-    cpus = {SERVER_CPUS_ENV: named} if named and base_bins else {}
+    cpus = {SERVER_CPUS_ENV: named} if named else {}
     return replace(template, envs={**template.envs, **framework, **shared_dirs, **guard, **cpus, **(base_bins or {})})
 
 
