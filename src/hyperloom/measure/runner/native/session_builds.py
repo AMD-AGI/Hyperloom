@@ -29,6 +29,7 @@ import functools
 import json
 import logging
 import os
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -190,7 +191,13 @@ def lay_executables(
     farm = build_farm(built_roots(roots, builds), staged, python=sys.executable, read_blob=_no_blob)
     if farm is None or farm.bin != (staged / component / "bin",):
         raise FarmError(f"the {component} build {key} laid no executables of its own")
-    staged.rename(farm_dir)
+    try:
+        staged.rename(farm_dir)
+    except OSError:
+        # Another caller laid the same key since the check above: its copy is this build's.
+        if not laid.is_dir():
+            raise
+        shutil.rmtree(staged)
     return laid
 
 
