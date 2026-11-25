@@ -132,7 +132,14 @@ def test_a_patch_specialist_with_cards_is_offered_the_knob_sweep_of_its_session_
 
 
 @pytest.mark.parametrize(
-    "dispatch", [{"mode": "research"}, {"allocated_gpu_ids": []}, {"framework": "sglang"}, {"gpu_type": "r9700"}]
+    "dispatch",
+    [
+        {"mode": "research"},
+        {"allocated_gpu_ids": []},
+        {"framework": "sglang"},
+        {"gpu_type": "r9700"},
+        {"no_source_changes": True},
+    ],
 )
 def test_the_knob_sweep_is_not_offered_where_it_cannot_be_timed_or_applied_or_the_board_has_no_knob(
     monkeypatch, dispatch
