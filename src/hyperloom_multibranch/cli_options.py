@@ -53,8 +53,10 @@ FILE_METAVAR = "FILE"
 SESSION_GPU_TYPES = ("mi300x", "mi325x", "mi350x", "mi355x", "r9700", "w7900d")
 #: Those of them a session runs on only when its framework builds its server from a checkout.
 NATIVE_SERVER_GPU_TYPES = ("r9700", "w7900d")
+#: The argparse name of ``--gpu-type``.
+GPU_TYPE_DEST = "gpu_type"
 #: The options ``run`` requires unless it is given ``--resume``, by their argparse names.
-RUN_REQUIRED = ("model", "framework", "gpu_type", "workload", "tp", "conc", "precision")
+RUN_REQUIRED = ("model", "framework", GPU_TYPE_DEST, "workload", "tp", "conc", "precision")
 #: The options an inferencex workload requires and an agentx one refuses.
 SEQUENCE_LENGTHS = ("isl", "osl")
 #: The argparse action of an option the user may give more than once, each giving one more value.
@@ -77,9 +79,9 @@ class _CommandParser(argparse.ArgumentParser):
 
     def parse_known_args(self, args=None, namespace=None):  # type: ignore[no-untyped-def]
         parsed, rest = super().parse_known_args(args, namespace)
-        board, framework = getattr(parsed, "gpu_type", None), getattr(parsed, "framework", None)
+        board, framework = getattr(parsed, GPU_TYPE_DEST, None), getattr(parsed, "framework", None)
         if board in NATIVE_SERVER_GPU_TYPES and native_component(framework or "") is None:
-            action = copy.copy(next(action for action in self._actions if action.dest == "gpu_type"))
+            action = copy.copy(next(action for action in self._actions if action.dest == GPU_TYPE_DEST))
             action.choices = [choice for choice in SESSION_GPU_TYPES if choice not in NATIVE_SERVER_GPU_TYPES]
             try:
                 self._check_value(action, board)
