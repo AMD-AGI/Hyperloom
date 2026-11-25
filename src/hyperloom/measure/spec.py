@@ -424,10 +424,9 @@ class Environment:
         built_ids = sorted(root_id for root_id, kind in kinds.items() if kind in BUILT_ROOT_KINDS)
         built = [ref.root_id for ref in environment.builds]
         if len(set(built)) != len(built) or not set(built_ids) <= set(built) <= set(kinds):
-            roots = ("runtime or executable", "built") if EXECUTABLE_ROOT in kinds.values() else ("runtime", "runtime")
             raise DocumentError(
-                f"{path}.builds: each {roots[0]} root needs exactly one build, a package root may have one (of the "
-                f"modules its JIT builds), and each build names a root ({roots[1]} roots {built_ids}, builds {built})"
+                f"{path}.builds: each runtime or executable root needs exactly one build, a package root may have one "
+                f"(of the modules its JIT builds), and each build names a root (built roots {built_ids}, builds {built})"
             )
         return environment
 

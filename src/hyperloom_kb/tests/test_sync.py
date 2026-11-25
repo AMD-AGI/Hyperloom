@@ -477,11 +477,13 @@ def test_export_pages_complete_records_in_write_order(tmp_path: Path) -> None:
 
 def test_settings_digest_changes_with_what_the_service_does_not_with_spelling() -> None:
     gateway = {"ANTHROPIC_BASE_URL": "https://gateway.example", "ANTHROPIC_API_KEY": "key", "CLAUDE_MODEL": "m"}
-    aliased = {**gateway, "ANTHROPIC_AUTH_TOKEN": "key", "ANTHROPIC_MODEL": "m"}
+    aliased = {**gateway, "ANTHROPIC_AUTH_TOKEN": "key"}
+    headed = {**gateway, "ANTHROPIC_CUSTOM_HEADERS": "Ocp-Apim-Subscription-Key: key"}
     shared = {**gateway, "HYPERLOOM_GLOBAL_KB_URL": "https://global.example", "HYPERLOOM_GLOBAL_KB_TOKEN": "t"}
     half = {**gateway, "HYPERLOOM_GLOBAL_KB_URL": "https://global.example"}
 
     assert ServiceSettings.from_env(aliased).digest() == ServiceSettings.from_env(gateway).digest()
     assert ServiceSettings.from_env(shared).digest() != ServiceSettings.from_env(gateway).digest()
+    assert ServiceSettings.from_env(headed).digest() != ServiceSettings.from_env(gateway).digest()
     assert ServiceSettings.from_env(half).global_kb is None
     assert "HYPERLOOM_GLOBAL_KB_TOKEN must be set" in ServiceSettings.from_env(half).global_problem

@@ -176,7 +176,7 @@ class NativePlanner:
                         "source a native build takes from a patch"
                     )
                 named = layout.spec.native_by(path) is not None
-                if not named and layout.spec.source_base == CHECKOUT_BASE and layout.spec.place(path) is None:
+                if not named and layout.spec.source_base == CHECKOUT_BASE:
                     prefixes = ", ".join(f"{section.prefix}/" for section in layout.spec.sections)
                     raise PatchApplyError(
                         f"{ref.path}: {path!r} is outside the checkout's sections ({prefixes}) and no native source of "

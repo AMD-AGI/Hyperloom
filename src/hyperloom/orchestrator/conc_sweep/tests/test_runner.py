@@ -108,6 +108,7 @@ def test_a_base_no_inferencex_arm_gave_sweeps_the_operators_points_or_none():
     [
         ({"nodes": 2}, "multi_node"),
         ({"framework": "xdit"}, "non_serving_workload"),
+        ({"framework": "llamacpp"}, "checkout_built_server"),
         ({"benchmark_mode": "agentx", "agentx_backend": "mlperf"}, "mlperf_backend"),
     ],
 )
@@ -254,6 +255,12 @@ def test_the_session_report_points_at_the_sweep(session_dir: Path, grid: SimpleN
     assert pointer["report_path"] == "reports/conc_sweep_summary.json" and pointer["status"] == "succeeded"
 
 
+@pytest.fixture
+def image_served(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The only framework whose args cap its request slots builds its server from the checkout, which is declined."""
+    monkeypatch.setattr(runner, "native_component", lambda _framework: None)
+
+
 def _llamacpp_state(session_dir: Path, *, base_args: str, optimized_args: str) -> SharedState:
     state = _state(session_dir, framework="llamacpp", conc=2)
     state.current_best = {"extra_server_args": optimized_args, "extra_envs": {}}
@@ -265,6 +272,7 @@ def _llamacpp_state(session_dir: Path, *, base_args: str, optimized_args: str) -
     return state
 
 
+@pytest.mark.usefixtures("image_served")
 def test_points_past_every_arm_s_request_slots_skip_the_sweep(session_dir: Path, grid: SimpleNamespace):
     """A server that runs one request at a time queues every other one, so points above its slots measure nothing
     the session's own point did not."""
@@ -276,6 +284,7 @@ def test_points_past_every_arm_s_request_slots_skip_the_sweep(session_dir: Path,
     assert payload["server_slots"] == 1 and grid.calls == []
 
 
+@pytest.mark.usefixtures("image_served")
 def test_the_sweep_keeps_the_points_the_widest_arm_serves(session_dir: Path, grid: SimpleNamespace):
     _llamacpp_state(session_dir, base_args="-ngl 99 -np 1", optimized_args="--parallel 4")
 

@@ -227,12 +227,19 @@ def test_one_flipped_byte_in_a_listed_file_is_a_hash_mismatch(bundle) -> None:
     assert _reason(bundle.staging, bundle) is RejectReason.FILE_HASH_MISMATCH
 
 
-def test_a_truncated_or_extended_file_is_a_size_mismatch(bundle) -> None:
+def test_a_truncated_or_extended_file_is_a_size_mismatch_that_names_both_sizes(bundle) -> None:
     path = bundle.staging / "server.log"
+    listed = len(path.read_bytes())
     path.write_bytes(path.read_bytes()[:-1])
-    assert _reason(bundle.staging, bundle) is RejectReason.FILE_SIZE_MISMATCH
+    with pytest.raises(ResultRejected) as raised:
+        verify_bundle(bundle.staging, verify_args(bundle))
+    assert raised.value.reason is RejectReason.FILE_SIZE_MISMATCH
+    assert raised.value.detail == f"server.log: {listed - 1} bytes read, the manifest lists {listed}"
     path.write_bytes(path.read_bytes() + b"xx")
-    assert _reason(bundle.staging, bundle) is RejectReason.FILE_SIZE_MISMATCH
+    with pytest.raises(ResultRejected) as raised:
+        verify_bundle(bundle.staging, verify_args(bundle))
+    assert raised.value.reason is RejectReason.FILE_SIZE_MISMATCH
+    assert raised.value.detail == f"server.log: more than {listed} bytes read, the manifest lists {listed}"
 
 
 def test_a_listed_file_that_was_not_read_is_missing(bundle) -> None:

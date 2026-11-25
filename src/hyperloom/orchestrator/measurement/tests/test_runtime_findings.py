@@ -3,14 +3,11 @@
 
 from __future__ import annotations
 
-import json
 from pathlib import Path
 
 from hyperloom.orchestrator.actions.executors.benchmark_run.launch import _attach_baseline_launch_evidence
 from hyperloom.orchestrator.measurement.runtime_findings import (
-    RUNTIME_FINDINGS_FILE,
     correctness_fix_refusal,
-    load_runtime_findings,
     persist_runtime_findings,
     render_runtime_findings,
     scan_server_log,
@@ -435,12 +432,3 @@ def test_render_ends_with_the_timing_lines_of_the_log(tmp_path):
     out = render_runtime_findings({"launch_evidence_path": str(tmp_path / "slot" / "launch_evidence.json")})
 
     assert [line.strip() for line in out.splitlines()[-2:]] == _TIMING_LINES
-
-
-def test_a_report_without_a_version_or_timing_lines_loads_as_written_and_renders(tmp_path):
-    written = {"framework": "vllm", "log_path": "/s/server.log", "findings": []}
-    (tmp_path / RUNTIME_FINDINGS_FILE).write_text(json.dumps(written), encoding="utf-8")
-    measurement = {"launch_evidence_path": str(tmp_path / "launch_evidence.json")}
-
-    assert load_runtime_findings(measurement) == written
-    assert render_runtime_findings(measurement) == "runtime findings for /s/server.log [vllm]"

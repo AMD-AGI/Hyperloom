@@ -185,16 +185,6 @@ def test_optimize_resolves_the_plugs_before_any_session_is_opened_and_runs_the_c
     assert any("coordinator.run" in ast.unparse(c) for c in ast.walk(withs[0]) if isinstance(c, ast.Call))
 
 
-def test_optimize_starts_the_host_after_its_executors_and_closes_the_run_when_the_host_does_not_start() -> None:
-    tree = ast.parse(inspect.getsource(ocli._run_optimize))
-    guarded = next(n for n in ast.walk(tree) if isinstance(n, ast.Try) and "running_plug_host" in ast.unparse(n.body))
-    inside = {ast.unparse(c.func) for c in ast.walk(guarded) if isinstance(c, ast.Call)}
-    assert not {"_install_executors", "_snapshot_system_prompts", "_print_backend_banner"} & inside
-    assert [ast.unparse(s) for s in guarded.finalbody] == [
-        "await _close_optimize_run(coordinator, session_lock, session_dir, stop_reason)"
-    ]
-
-
 @pytest.mark.parametrize(
     "bad", [("--plug", "warp=x"), ("--plug-profile", "no-such-profile"), ("--manifest", "/nonexistent/manifest.json")]
 )

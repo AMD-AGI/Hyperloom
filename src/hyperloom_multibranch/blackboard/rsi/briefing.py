@@ -12,8 +12,8 @@ Its brief has three parts:
   Experiences recalled from other sessions, labelled ``prior`` when measured under this session's conditions and ``to
   re-verify`` otherwise, then the pitfalls and failures the warm-start records list;
 * leads: the Recipe KB champions the warm start read, and recalled priors with a positive gain, taking turns by the
-  layer they change (configuration, source), so that one kind of change does not fill them all. The Experience KB's
-  schema has no kernel family, so no recalled lead is a kernel change;
+  layer they change (configuration, source, kernel), so that one kind of change does not fill them all. A kernel
+  change is recalled from ``multibranch-recipe-v1`` only, the schema the shared one leaves kernel artifacts to;
 * the menu: the direction families ranked for the branch on its start commit (:mod:`rsi.menu`), each with its best note
   under it, none for a branch of the menu's control. A claim's reply says the same of the claimed direction's family
   (:meth:`direction_note`);
