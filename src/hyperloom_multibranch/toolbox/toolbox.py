@@ -31,7 +31,7 @@ from hyperloom.contracts.measurement import (
 )
 from hyperloom.contracts.recipe import KernelArtifact, KernelKind
 from hyperloom.measure.failures import PROFILER_DIED, PROFILER_HUNG, PROFILER_SNAPSHOT_FAILED
-from hyperloom.measure.phases import ACCURACY_EVAL, CLIENT_START, MEASURED, WARMUP
+from hyperloom.measure.round_marks import SERVED_PHASES
 from hyperloom_multibranch.contracts.blackboard.interfaces import (
     ClaimLost,
     ClaimService,
@@ -104,9 +104,6 @@ BUILD_RETRY_SECONDS = 30.0
 #: Failures of a profile that every sandbox of the image repeats, its profiler's and not the candidate's
 #: (``hyperloom.measure.failures``); a profile ends ``profiler_died`` only once its retry died the same way.
 PROFILER_FAILURES: frozenset[str] = frozenset({PROFILER_HUNG, PROFILER_SNAPSHOT_FAILED, PROFILER_DIED})
-#: The phases a round's client work begins with, at the instant its server stamped ready (``measure.round_marks``): a
-#: test whose phases hold none of them never had a server ready.
-_SERVED_PHASES = frozenset({CLIENT_START, WARMUP, MEASURED, ACCURACY_EVAL})
 
 
 def _same_commit_and_delta(entry: LogEntry, request: TestRequest) -> bool:
@@ -139,7 +136,7 @@ def _profile_failure(entry: LogEntry) -> str:
 def _served(result: Mapping[str, Any]) -> bool:
     """Whether the logged ``result``'s phases say its server was ready; a result with no phases says it was not."""
     phases = result.get("phases") or ()
-    return any(isinstance(phase, Mapping) and phase.get("name") in _SERVED_PHASES for phase in phases)
+    return any(isinstance(phase, Mapping) and phase.get("name") in SERVED_PHASES for phase in phases)
 
 
 @dataclass(frozen=True)
