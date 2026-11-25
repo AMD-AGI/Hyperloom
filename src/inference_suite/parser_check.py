@@ -185,7 +185,7 @@ class NativeFlags:
 
 
 @dataclass(frozen=True)
-class _HelpOption:
+class HelpOption:
     """One entry of a native server's ``--help``: every spelling it lists for the option, and what it says about it
     on one line (the value placeholder first, when the option takes one). ``removed`` entries are listed only to say
     the option is gone."""
@@ -195,7 +195,7 @@ class _HelpOption:
     removed: bool
 
 
-def _help_options(text: str) -> tuple[_HelpOption, ...]:
+def help_options(text: str) -> tuple[HelpOption, ...]:
     """The entries of the ``--help`` ``text`` of a native server, in the order it prints them."""
     entries: list[tuple[list[str], list[str]]] = []
     for line in text.splitlines():
@@ -211,10 +211,10 @@ def _help_options(text: str) -> tuple[_HelpOption, ...]:
                 break
         if spellings:
             entries.append((spellings, [rest]))
-    options: list[_HelpOption] = []
+    options: list[HelpOption] = []
     for spellings, lines in entries:
         described = " ".join(" ".join(lines).split())
-        options.append(_HelpOption(tuple(spellings), described, removed=_REMOVED in described))
+        options.append(HelpOption(tuple(spellings), described, removed=_REMOVED in described))
     return tuple(options)
 
 
@@ -222,7 +222,7 @@ def _read_native_help(text: str) -> NativeFlags:
     """The flags the ``--help`` ``text`` of a native server lists."""
     accepted: set[str] = set()
     removed: dict[str, str] = {}
-    for option in _help_options(text):
+    for option in help_options(text):
         if option.removed:
             note = option.help[option.help.index(_REMOVED) :]
             removed.update((spelling, note) for spelling in option.spellings)
@@ -269,6 +269,7 @@ def check(launch: Launch, python: str, env: Mapping[str, str], *, cwd: Path) -> 
 
 __all__ = [
     "FlagRefusal",
+    "HelpOption",
     "NativeFlags",
     "ParseStatus",
     "ParserAnswer",
@@ -276,6 +277,7 @@ __all__ = [
     "ParserProbe",
     "RefusedFlag",
     "check",
+    "help_options",
     "parser_probe",
     "read_answer",
 ]

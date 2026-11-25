@@ -937,7 +937,12 @@ child's `HF_HOME`, read-only and without its login files, so a model downloaded 
 moved (where that directory is a link, `HF_HOME` names the directory it leads to, which is what the sandbox shows). They read their toolchain, the git metadata of the worktree's repository (the one whose admin directory the
 repository records for the worktree, never the one the worktree's `.git` file names: the agent can rewrite that file,
 and runs as the app's own uid, so no ownership check tells a directory it made from the app's), the framework source
-roots, the task's model when it is a local path, the programs of the stdio MCP servers they start (each named in one
+roots, the task's model when it is a local path, for a framework whose server the session builds from its checkout
+the model directories its base launch names (the directory the served model file links to, and the directory of
+each file a flag the rule pack lists as naming an auxiliary model names, with the one that file links to; a
+directory that holds the session, or is itself a credential location such as a home, is not shown for the file in
+it, which is then shown alone and named in a WARNING) and the `server_options.json` the session keeps of that server, the
+programs of the stdio MCP servers they start (each named in one
 WARNING: nothing else such a server reads is bound unless the confinement shows it), and, for an agent runner launch,
 `AgentLaunchSpec.readable` (a multi-branch specialist's: the session's `MB-reference/<name>` directories, the
 directory its workload's model is served from, the files its worktree links and its branch's own dev lease area,

@@ -58,8 +58,9 @@ LOG_TAIL_CHARS = 128 * 1024
 #: could stall a runner or the tool layer for minutes.
 LOG_LINE_CHARS = 2000
 
-#: A process outside the test held one of the test's cards, so nothing the test showed is the candidate's: retried on
-#: other cards like any infrastructure failure (``hyperloom.measure.runner.card_watch``).
+#: A process outside the test held one of the test's cards, so nothing the test showed is the candidate's: an
+#: infrastructure failure whose retry waits for the cards to free and may run on the same node, which is neither
+#: reported nor quarantined (``hyperloom.measure.runner.card_watch``).
 FOREIGN_PROCESS_ON_CARD = "foreign_process_on_card"
 
 #: The runner's view of the machine refused it the kernel's list for its cards (a container shown only some GPUs), so the
