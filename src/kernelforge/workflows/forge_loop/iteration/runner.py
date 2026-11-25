@@ -85,8 +85,6 @@ class IterationLoop(
         self._ceiling_report_path = ""
         # Declared here so persistence works before the methods that populate them have run.
         self._best_case_times: dict[str, float] = {}
-        # Pairs this process selected and could not stage.
-        self._declined_merge_pairs: set[frozenset[int]] = set()
         # Last reported per-case bandwidth.
         self.last_case_bandwidth: dict[str, dict[str, float | int]] = {}
         self._scoring_state_restored = False
@@ -141,37 +139,18 @@ class IterationLoop(
         # its post-KEEP profile/archive.
         self._recovered_pending_keep: tuple[dict, IterationResult] | None = None
         # Why the loop stopped: "gate_met" (target reached), "budget_exhausted" (not enough time to admit another
-        # session), or "round_budget_exhausted" (time is left, but not enough to finish even the narrowest round).
+        # session), or "round_budget_exhausted" (time is left, but not enough to finish a round).
         self.termination_reason: str = ""
-        # The round currently being timed, opened when an iteration is admitted and closed once the next one starts.
-        self._round_started_at: float | None = None
-        self._round_iteration = 0
-        self._round_lanes = 1
-        self._round_planning_sec = 0.0
-        # What the round spent in the canonical validation and benchmark, which is what prices the next round's
-        # dispatch.
-        self._round_measurement_sec = 0.0
-        # The part of the round's planning its plan critic and the revision it asked for took.
-        self._round_review_sec = 0.0
         # The instant the CAMPAIGN began, which on a resumed session is before this process did: ``start_time`` less
         # the wall-clock earlier sessions already banked.
         self._campaign_started_at: float = 0.0
         # The refusal that ended the campaign, as the line the operator sees, kept so the run summary and the
         # published report can say a round was priced out rather than let it read as a round that found nothing.
         self._refused_round: str = ""
-        # Supervisor self-supervision (AVO): the latest free-form ruling to pass verbatim through planning, and the
-        # factual progress monitor that decides when to request a new review.
+        # Supervisor self-supervision (AVO): the latest free-form ruling, passed verbatim to the sessions that follow
+        # it, and the factual progress monitor that decides when to request a new review.
         self._supervisor_ruling: str = ""
-        self._latest_optimization_plan_path = ""
-        self._last_orchestration_plan_executable: bool | None = None
-        # The previous round's Plan Critic ruling, kept for the next round's partition.
-        self._last_critic_verdict = ""
-        self._last_critic_review = ""
         self.monitor = None
-
-    # The one obstacle a later iteration clears on its own, and so the one the caller must not hold against the pair:
-    # a tree carrying work is this iteration's accident, not a fact about two archived diffs.
-    TREE_ALREADY_DIRTY_OBSTACLE = "the working tree already carried uncommitted work"
 
     async def run(
         self,

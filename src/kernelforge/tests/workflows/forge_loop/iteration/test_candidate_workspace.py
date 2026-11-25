@@ -5,6 +5,8 @@
 
 from __future__ import annotations
 
+from kernelforge.tests.workflows.forge_loop.iteration._iteration_loop import lane_agents
+
 import asyncio
 import hashlib
 import os
@@ -14,7 +16,6 @@ from dataclasses import replace
 import pytest
 
 from kernelforge.utils.git import GitError
-from kernelforge.workflows.forge_loop.iteration import runner as runner_module
 from kernelforge.tests.conftest import patch_iteration_name
 from kernelforge.tests.workflows.forge_loop.iteration._iteration_loop import (
     _make_loop,
@@ -109,7 +110,7 @@ def test_the_loop_hides_its_output_folder_from_git(tmp_path, monkeypatch):
     """The workspace ignores nothing of its own, yet git lists nothing the loop wrote under forge_experiments."""
     loop, workspace = _make_loop(tmp_path, monkeypatch)
 
-    asyncio.run(loop.run(runner_module.LoopAgents(agent_fn=_no_change_agent, supervisor_fn=_unused_supervisor)))
+    asyncio.run(loop.run(lane_agents(_no_change_agent, supervisor_fn=_unused_supervisor)))
 
     assert (workspace / "forge_experiments" / ".gitignore").read_text() == "*\n"
     assert any(path.name != ".gitignore" for path in (workspace / "forge_experiments").rglob("*") if path.is_file())

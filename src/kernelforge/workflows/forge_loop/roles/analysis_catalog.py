@@ -11,6 +11,7 @@ from pathlib import Path
 
 from hyperloom_common.io import DURABLE, JsonFormat, atomic_write_json
 from kernelforge.workflows.forge_loop.roles.analysis_bundle import AnalysisCase
+from kernelforge.workflows.forge_loop.roles.analysis_prompts import LANE_PARTITION_FILE
 from kernelforge.workflows.forge_loop.roles.analysis_session import AnalysisSessionJournal
 
 
@@ -44,6 +45,11 @@ _GLOBAL_ARTIFACTS = {
         "analysis_summary",
         "Primary Markdown Analysis report for downstream agents.",
         ["case findings", "evidence interpretation", "optimization directions"],
+    ),
+    LANE_PARTITION_FILE: (
+        "lane_partition",
+        "How the Analysis divides the work among the lanes a round runs side by side.",
+        ["each lane's focus", "the cases each focus is expected to move"],
     ),
     "case_inventory.json": (
         "case_inventory",

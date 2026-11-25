@@ -60,6 +60,12 @@ def _gate(tmp_path: Path, **overrides) -> tuple[InSessionGate, Path]:
         cwd=workspace,
         check=True,
     )
+    return _gate_on(workspace, **overrides), workspace
+
+
+def _gate_on(workspace: Path, **overrides) -> InSessionGate:
+    """The gate of a session that starts on ``workspace`` as it stands now."""
+    kernel = workspace / "aiter" / "csrc" / "kernel.cu"
     kwargs = dict(
         driver_script=str(workspace / "forge_driver.py"),
         snr_threshold=30.0,
@@ -71,7 +77,7 @@ def _gate(tmp_path: Path, **overrides) -> tuple[InSessionGate, Path]:
     kwargs.update(overrides)
     measurement = {name: kwargs.pop(name) for name in _MEASUREMENT_FIELDS if name in kwargs}
     scope = {name: kwargs.pop(name) for name in _SCOPE_FIELDS if name in kwargs}
-    return InSessionGate(GateMeasurement(**measurement), GateScope(**scope), **kwargs), workspace
+    return InSessionGate(GateMeasurement(**measurement), GateScope(**scope), **kwargs)
 
 
 # ── constructor bookkeeping ────────────────────────────────────────────────────
@@ -329,6 +335,73 @@ def test_stop_after_edit_then_revert_allows_without_validation_or_bench(tmp_path
     assert gate.findings == []
     # No measurement of this stop exists, so none may be reported for it.
     assert (gate.last_bench_result, gate.last_mean_case_speedup, gate.last_wall_ms) == (None, None, None)
+
+
+# ── a session that starts on a measured candidate: the merge of a round's lanes ──
+
+_LANE_RESULT = "__global__ void kernel() { /* the lane's result */ }\n"
+
+
+def _merge_gate(tmp_path: Path, **overrides) -> tuple[InSessionGate, Path]:
+    """The gate of a merge session: the workspace already holds the lane the merge starts from."""
+    _, workspace = _gate(tmp_path)
+    _edit_kernel(workspace, _LANE_RESULT)
+    return _gate_on(workspace, starts_on_measured_candidate=True, **overrides), workspace
+
+
+def test_a_merge_that_takes_nothing_stops_on_the_lane_it_started_from(tmp_path, monkeypatch):
+    """The lane's result is not this session's candidate, and re-measuring it could only block on noise.
+
+    Whether it is kept is the canonical measurement's to decide.
+    """
+    gate, workspace = _merge_gate(tmp_path)
+    calls = _count_canonical_calls(monkeypatch, wall_ms=1.0)
+
+    assert _run(gate._on_stop({}, None, None)) == {}
+    assert calls == {"correctness": 0, "bench": 0}
+    assert gate.end_reason == "no_changes"
+    assert (gate.block_count, gate.edit_count, gate.passed) == (0, 1, False)
+    assert (gate.last_bench_result, gate.last_mean_case_speedup) == (None, None)
+
+
+def test_a_merge_that_restores_what_it_tried_stops_on_the_lane_it_started_from(tmp_path, monkeypatch):
+    gate, workspace = _merge_gate(tmp_path)
+    calls = _count_canonical_calls(monkeypatch, wall_ms=1.0)
+    _edit_kernel(workspace, "__global__ void kernel() { /* both lanes, measured slower */ }\n")
+    _edit_kernel(workspace, _LANE_RESULT)
+
+    assert _run(gate._on_stop({}, None, None)) == {}
+    assert calls == {"correctness": 0, "bench": 0}
+    assert gate.end_reason == "no_changes"
+
+
+@pytest.mark.parametrize("change", ["a tracked file", "a new file"])
+def test_a_merge_that_changed_the_workspace_is_measured(tmp_path, monkeypatch, change):
+    """Anything the session left that it did not find is its candidate, a new module beside the kernel included."""
+    gate, workspace = _merge_gate(tmp_path)
+    calls = _count_canonical_calls(monkeypatch)
+    if change == "a tracked file":
+        _edit_kernel(workspace, "__global__ void kernel() { /* both lanes */ }\n")
+    else:
+        (workspace / "aiter" / "csrc" / "dispatch.cu").write_text("__global__ void dispatch() {}\n")
+
+    assert _run(gate._on_stop({}, None, None)) == {}
+    assert calls == {"correctness": 1, "bench": 1}
+    assert gate.end_reason == "converged"
+
+
+def test_a_session_that_starts_on_its_own_unfinished_work_is_measured(tmp_path, monkeypatch):
+    """Only a candidate measured elsewhere is exempt: a retried attempt starts on the attempt before it.
+
+    A stop that changes nothing there still leaves a candidate nobody has checked.
+    """
+    _, workspace = _gate(tmp_path)
+    _edit_kernel(workspace, "__global__ void kernel() { /* the attempt before */ }\n")
+    gate = _gate_on(workspace)
+    calls = _count_canonical_calls(monkeypatch)
+
+    assert _run(gate._on_stop({}, None, None)) == {}
+    assert calls == {"correctness": 1, "bench": 1}
 
 
 def test_stop_with_only_untracked_files_allows_without_validation_or_bench(tmp_path, monkeypatch):

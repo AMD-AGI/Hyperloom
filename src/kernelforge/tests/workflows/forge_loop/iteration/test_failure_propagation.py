@@ -5,6 +5,8 @@
 
 from __future__ import annotations
 
+from kernelforge.tests.workflows.forge_loop.iteration._iteration_loop import lane_agents
+
 import asyncio
 import subprocess
 from dataclasses import replace
@@ -47,7 +49,7 @@ def test_a_snapshot_write_failure_records_degradation_and_continues(
         fail_snapshot,
     )
 
-    asyncio.run(loop.run(runner_module.LoopAgents(agent_fn=_no_change_agent, supervisor_fn=_unused_supervisor)))
+    asyncio.run(loop.run(lane_agents(_no_change_agent, supervisor_fn=_unused_supervisor)))
 
     events = [event for event in LoopStateStore(str(workspace)).read_events() if event["type"] == "pr_refs_refreshed"]
     assert len(events) == 1
@@ -73,7 +75,7 @@ def test_a_pr_event_write_failure_cannot_abort_the_campaign(
 
     monkeypatch.setattr(LoopStateStore, "append_event", fail_pr_event)
 
-    asyncio.run(loop.run(runner_module.LoopAgents(agent_fn=_no_change_agent, supervisor_fn=_unused_supervisor)))
+    asyncio.run(loop.run(lane_agents(_no_change_agent, supervisor_fn=_unused_supervisor)))
 
     assert "warning: event not recorded" in capsys.readouterr().out
 
@@ -83,21 +85,6 @@ def _raise_os_error(message):
         raise OSError(message)
 
     return _raise
-
-
-def test_close_round_failure_propagates(tmp_path, monkeypatch):
-    loop, workspace = _make_loop(tmp_path, monkeypatch)
-    loop.state_store = LoopStateStore(str(workspace))
-    loop.run_state = RunState()
-    loop._open_round(1, lanes=1)
-    loop._round_planning_sec = 10.0
-    monkeypatch.setattr(loop.state_store, "append_event", _raise_os_error("round event unavailable"))
-
-    with pytest.raises(OSError, match="^round event unavailable$"):
-        loop._close_round()
-
-    assert loop._round_started_at is None
-    assert loop._round_planning_sec == 0.0
 
 
 def test_baseline_case_times_save_failure_propagates(tmp_path, monkeypatch):
@@ -302,7 +289,7 @@ def _run_verdict(tmp_path, monkeypatch, failure, **sink_fields):
         session_sink.update(plan="candidate", end_reason="candidate_submitted", **sink_fields)
         return "candidate"
 
-    asyncio.run(loop.run(runner_module.LoopAgents(agent_fn=agent, supervisor_fn=_unused_supervisor)))
+    asyncio.run(loop.run(lane_agents(agent, supervisor_fn=_unused_supervisor)))
     return loop
 
 
@@ -318,7 +305,23 @@ def _site_integrity_verdict(tmp_path, monkeypatch, failure):
 
 
 def _site_contention_verdict(tmp_path, monkeypatch, failure):
-    return _run_verdict(tmp_path, monkeypatch, failure, workspace_contention="pid(s) [4321] hold a device node")
+    """The session that merges a round's two lanes on the canonical tree leaves that workspace busy."""
+    loop, _workspace = _make_loop(tmp_path, monkeypatch)
+    loop.ic.lanes = 2
+    monkeypatch.setattr(loop, "_lane_focuses", lambda: ["small cases", "large cases"])
+    _fail_first_discard(loop, monkeypatch, failure)
+
+    async def agent(kernel_path, history, session_sink):
+        merging = "## Direction: merge this round's lanes" in history
+        lane = 2 if "Yours is lane 2" in history else 1
+        Path(kernel_path).write_text(f"def kernel():\n    return {99 if merging else 10 + lane}\n")
+        session_sink.update(plan="candidate", end_reason="candidate_submitted")
+        if merging:
+            session_sink["workspace_contention"] = "pid(s) [4321] hold a device node"
+        return "candidate"
+
+    asyncio.run(loop.run(lane_agents(agent, supervisor_fn=_unused_supervisor)))
+    return loop
 
 
 def _site_keep_commit(tmp_path, monkeypatch, failure):
@@ -334,7 +337,7 @@ def _site_keep_commit(tmp_path, monkeypatch, failure):
 
     monkeypatch.setattr(loop, "run_one_iteration", successful_iteration)
     monkeypatch.setattr(loop, "_git_commit", _raiser(failure))
-    asyncio.run(loop.run(runner_module.LoopAgents(agent_fn=editing_agent, supervisor_fn=_unused_supervisor)))
+    asyncio.run(loop.run(lane_agents(editing_agent, supervisor_fn=_unused_supervisor)))
     return loop, workspace
 
 
