@@ -259,11 +259,11 @@ class HostedOptions:
     session that lends none builds no branch leases (``HostedToolbox.leases`` is ``None``) and reads no ``dev`` template,
     whatever ``dev`` key the host gave. A hosted session sets it from its ``dev_leases`` and ``agents``
     (:class:`~hyperloom_multibranch.scheduling.hosted_peers.HostedSandboxes`).
-    ``jit_store`` (else ``HYPERLOOM_JIT_STORE``) is the shared compiled-code cache this host publishes accepted tests'
-    compiles to and prunes as the session starts (:func:`~.jit_store.session_jit_store`, which says what happens to one
-    it refuses). No hosted runner reads it yet: it belongs on this host's own disk, where no sandbox can write it (a
-    sandbox's code could put snapshots there that later tests load), and the ``measurement`` template must neither mount
-    it nor set ``HYPERLOOM_JIT_CACHE``.
+    ``jit_store`` (else ``HYPERLOOM_JIT_STORE``) is the shared compiled-code cache this host checks and prunes as the
+    session starts (:func:`~.jit_store.session_jit_store`, which says what happens to one it refuses). Nothing arrives
+    in it yet: no sandbox runner reads it or stages a contribution, so nothing is published. It belongs on this host's
+    own disk, where no sandbox can write it (a sandbox's code could put snapshots there that later tests load), and the
+    ``measurement`` template must neither mount it nor set ``HYPERLOOM_JIT_CACHE``.
     """
 
     policy: QueuePolicy | None = None
