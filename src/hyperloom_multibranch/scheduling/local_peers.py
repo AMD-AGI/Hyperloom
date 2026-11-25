@@ -306,8 +306,9 @@ def attempt_timeout_sec(workload: Workload) -> int:
 
 def _export_workload(workload: Workload, toolbox_dir: Path, image_ref: str) -> None:
     """Export :func:`workload_environment` into this process, and remove a ``DATASET_PATH`` the workload does not name
-    and a ``NUM_PROMPTS`` it does not record: a leg resumed in another shell sends what the first leg sent. For an AgentX workload, also write the AgentX benchmark
-    ``hyperloom optimize`` generates for it to :data:`BENCHMARK_FILE` in ``toolbox_dir`` and name it in
+    and a ``NUM_PROMPTS`` it does not record: a leg resumed in another shell sends what the first leg sent. For an
+    AgentX workload, also write the AgentX benchmark ``hyperloom optimize`` generates for it to
+    :data:`BENCHMARK_FILE` in ``toolbox_dir`` and name it in
     ``HYPERLOOM_BENCHMARK_CONFIG``: the canonical measurement is rendered from it. The benchmark serves at the
     workload's EP and names ``image_ref``, the image the session runs on, as its image. It pins the model's directory
     when the model is one, which the command line names by its resolved path."""
