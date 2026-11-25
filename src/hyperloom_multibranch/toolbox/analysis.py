@@ -23,7 +23,7 @@ look for.
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Protocol
@@ -211,8 +211,18 @@ class AnalysisAsk:
     profile_request_id: str = ""
 
 
+def startable(served: Sequence[str]) -> tuple[str, ...]:
+    """:data:`ANALYSIS_TOOLS` as a toolbox that serves ``served`` refuses by it: ``knob_tune`` is of it only where it is
+    served, so a toolbox without it names and refuses the tools it did before ``knob_tune`` existed."""
+    return tuple(tool for tool in ANALYSIS_TOOLS if tool != KNOB_TUNE_TOOL or tool in served)
+
+
 async def analysis_request(
-    repo: ExperimentRepo, records: RecordSearch | None, ask: AnalysisAsk, trace_root: Path | None = None
+    repo: ExperimentRepo,
+    records: RecordSearch | None,
+    ask: AnalysisAsk,
+    trace_root: Path | None = None,
+    served: Sequence[str] = ANALYSIS_TOOLS,
 ) -> ToolRequest:
     """The tool request for ``ask.branch``, its ``commit_id`` read from the repository; raises RequestRejected.
 
@@ -222,8 +232,9 @@ async def analysis_request(
     (see :func:`_split_hints`), and for the lengths measured on the baseline that weight a point naming none
     (see :func:`_workload_hints`).
     """
-    if ask.tool not in ANALYSIS_TOOLS:
-        allowed = f"{', '.join(ANALYSIS_TOOLS[:-1])} and {ANALYSIS_TOOLS[-1]}"
+    tools = startable(served)
+    if ask.tool not in tools:
+        allowed = f"{', '.join(tools[:-1])} and {tools[-1]}"
         raise RequestRejected(f"a specialist starts only {allowed} here, not {ask.tool!r}", CODE_TOOL_NOT_ALLOWED)
     owned = sorted(_SERVER_OWNED_PARAMS & set(ask.params))
     if owned:
@@ -307,4 +318,5 @@ __all__ = [
     "AnalysisAsk",
     "AnalysisStarter",
     "analysis_request",
+    "startable",
 ]
