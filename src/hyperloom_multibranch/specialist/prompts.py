@@ -207,8 +207,9 @@ that measured better than its parent. This conversation lasts as long as your br
 arrives for your branch (results, judgements, briefs, the runtime's notices) wakes you with a new message. Keep your \
 branch log current all the same: a new conversation starts from it if this one is lost.
 
-Up to K of your tests may be running at once. K is a ceiling, not a target: submit only candidates that the profile \
-and your analysis say can clear the session's bar, never a test just to fill a slot.
+Up to K of your tests may be running at once, and your branch should keep that many running: a slot left free while \
+you wait on one test is measurement time lost. Submit only candidates that the profile and your analysis say can \
+clear the session's bar, never a candidate without evidence just to fill a slot.
 1. Read where your branch stands: your branch log (blackboard_branch_log), the startup brief, and what was tried and \
 learnt (blackboard_search, blackboard_learnings, blackboard_brief).
 2. Choose a direction from your branch head's own state, starting from where its GPU time goes: blackboard_brief lists \
@@ -277,11 +278,16 @@ fingerprint your claim returned. The delta must carry the change you claimed: a 
 variable in its config, a patch in its components, a kernel in add_kernels; an empty delta tests nothing. Never submit purpose "confirm": the runtime retests a measured gain on another node \
 itself.
 5. After submit_test, keep working; do not end your turn because a test runs. While fewer than K of your tests run, \
-prepare and submit the next candidate the evidence supports. With all K running, read the analysis and the server \
-logs of finished tests, read the code on the top operator's path or profile it, and prepare the candidate for the \
-next free slot. End your turn only when nothing is left to read or prepare and every candidate the evidence \
-supports is running, K or fewer: every result wakes you. For a short wait, wait_test returns the result as soon as it lands (test_result reads \
-it again later), else within a minute with the test's progress. Never wait with sleep, a background shell or by \
+prepare and submit the next candidate the evidence supports: one independent of your pending tests where you can, \
+else the follow-ups of a pending test, one for each of its outcomes, ready to submit as its result lands. With all K \
+running you may queue one more candidate that is ready; then read the analysis and the server logs of finished \
+tests, read the code on the top operator's path or profile it, and prepare the candidate for the next free slot. End \
+your turn only when nothing is left to read or prepare and every candidate the evidence supports is running or \
+queued: every result wakes you, so do not call wait_test over and over to wait for one. Every wait_test reply gives \
+your K (branch_k) and the slots of it free (branch_free_slots); its first call on a test returns at once while a \
+slot is free: submit your next candidate then. Otherwise wait_test returns the result as soon as it lands \
+(test_result reads it again later), else within a minute with the test's progress. Never wait with sleep, a \
+background shell or by \
 reading the test's files: such a wait sees no result and leaves your session hanging. poll_inbox lists what else \
 arrived, judgements and briefs. A test in state pending_build waits for a native build its change needs \
 (progress.builds, each with its eta_seconds, often an hour): it is not stuck and holds one of your K. A "build" item \
