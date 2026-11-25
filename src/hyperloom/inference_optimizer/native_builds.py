@@ -6,8 +6,8 @@ to integration.
 
 The builds are the hosted native-build engine's (:mod:`hyperloom.measure.runner.native.session_builds`), which builds on
 this layer and which only its owners may import (the plug architecture guard), so this layer asks the ``native_builds``
-socket (:mod:`hyperloom.plugs.native_builds`) for them. No profile selects that socket: a session whose framework
-builds its server starts a plug host of its own for it, and the host of any other session is as it was.
+socket of the process's plug host for them (:mod:`hyperloom.plugs.native_builds`); a framework whose server is the
+image's never asks it.
 """
 
 from __future__ import annotations
@@ -16,8 +16,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, cast
 
 from hyperloom.inference_optimizer import framework_registry
-from hyperloom.plugs import PlugHost, ResolvedManifest, builtin_registry
-from hyperloom.plugs.manifest import BASE_PROFILE, LAYER_BUILTIN, SocketSetting
+from hyperloom.plugs import active
 from hyperloom.plugs.native_builds import NATIVE_BUILDS_SOCKET, NativeBuilds
 
 if TYPE_CHECKING:
@@ -31,12 +30,8 @@ class NativeBuildsRefused(RuntimeError):
 
 
 def _engine() -> NativeBuilds:
-    """What fills the ``native_builds`` socket, started in a plug host that holds nothing else."""
-    registry = builtin_registry()
-    setting = SocketSetting(registry.socket(NATIVE_BUILDS_SOCKET).default, {}, LAYER_BUILTIN)
-    host = PlugHost(ResolvedManifest(BASE_PROFILE, {NATIVE_BUILDS_SOCKET: setting}), registry, session_dir=None)
-    host.start()
-    return cast(NativeBuilds, host.get(NATIVE_BUILDS_SOCKET))
+    """What fills the ``native_builds`` socket of the process's current plug host."""
+    return cast(NativeBuilds, active().get(NATIVE_BUILDS_SOCKET))
 
 
 def start_candidate_builds(session_dir: Path, framework: str) -> CandidateBuilds | None:

@@ -1424,7 +1424,8 @@ See [Optimize an AgentX workload](../how-to/optimize.md#optimize-an-agentx-workl
 
 ## Plug selection
 
-Which implementation serves each plug socket (today only `events`, progress reporting) is chosen by layering, lowest
+Which implementation serves each plug socket (today `events`, progress reporting, and `native_builds`, the builds of a
+framework server that is built from its checkout) is chosen by layering, lowest
 first: the built-in `local` profile, the `plugs.resolved.json` of the session being resumed, `--plug-profile`,
 the manifest (`--manifest` or `HYPERLOOM_MANIFEST`), `HYPERLOOM_MANIFEST_OVERRIDES`, then `--plug` and `--plug-config`.
 With none of these set, a run uses the `local` profile, writes nothing to the session and prints nothing. See

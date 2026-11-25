@@ -7,6 +7,8 @@ from __future__ import annotations
 
 import argparse
 import sys
+from collections.abc import Iterator
+from contextlib import contextmanager
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -14,24 +16,22 @@ import pytest
 
 from hyperloom.inference_optimizer import native_builds
 from hyperloom.inference_optimizer.cli.bootstrap import _install_executors
-from hyperloom.plugs import (
-    Implementation,
-    PlugHost,
-    PlugRegistry,
-    Socket,
-    activated,
-    builtin_registry,
-    resolve_manifest,
-)
+from hyperloom.plugs import Implementation, PlugHost, PlugRegistry, ResolvedManifest, Socket, activated
+from hyperloom.plugs.manifest import SocketSetting
 from hyperloom.plugs.native_builds import NATIVE_BUILDS_SOCKET
 
 
-def _registry_of(engine: object) -> PlugRegistry:
-    """A registry whose ``native_builds`` socket ``engine`` fills."""
+@contextmanager
+def _hosting(engine: object) -> Iterator[None]:
+    """A plug host whose ``native_builds`` socket ``engine`` fills, as the process's current one."""
     registry = PlugRegistry()
-    registry.define(Socket(NATIVE_BUILDS_SOCKET, object, default="stand-in"))
+    registry.define(Socket(NATIVE_BUILDS_SOCKET, object))
     registry.register(Implementation(NATIVE_BUILDS_SOCKET, "stand-in", lambda context: engine))
-    return registry
+    manifest = ResolvedManifest("test", {NATIVE_BUILDS_SOCKET: SocketSetting("stand-in", {}, "cli")})
+    host = PlugHost(manifest, registry, session_dir=None)
+    host.start()
+    with activated(host):
+        yield
 
 
 class _Sub:
@@ -74,22 +74,11 @@ def test_an_image_served_framework_builds_nothing_and_imports_no_engine(
     assert engine not in sys.modules
 
 
-def test_the_builds_are_opened_by_a_host_of_their_own_that_no_other_framework_starts(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_the_builds_are_the_ones_the_current_plug_host_opens(tmp_path: Path) -> None:
     builds = SimpleNamespace(checkout=tmp_path)
     opened = {(tmp_path, "llamacpp"): builds}
     engine = SimpleNamespace(open_builds=lambda session_dir, framework: opened[session_dir, framework])
-    registries: list[PlugRegistry] = []
-    monkeypatch.setattr(
-        native_builds, "builtin_registry", lambda: registries.append(_registry_of(engine)) or registries[-1]
-    )
-    session = builtin_registry()
-    host = PlugHost(resolve_manifest(session), session, session_dir=None)
-    host.start()
 
-    with activated(host):
-        assert native_builds.start_candidate_builds(tmp_path, "sglang") is None
-        assert registries == []
+    with _hosting(engine):
         assert native_builds.start_candidate_builds(tmp_path, "llamacpp") is builds
-    assert not host.has(NATIVE_BUILDS_SOCKET)
+        assert native_builds.start_candidate_builds(tmp_path, "sglang") is None
