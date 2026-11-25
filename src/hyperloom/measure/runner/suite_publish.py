@@ -18,7 +18,6 @@ only, with no network. A session whose runners start from this installation publ
 
 from __future__ import annotations
 
-import json
 import os
 import subprocess
 import sys
@@ -26,8 +25,6 @@ from pathlib import Path
 
 import inference_suite
 from hyperloom.measure.runner.tools import INFERENCE_SUITE_DIR, ToolError, fill_inferencex_store
-from inference_suite.pins import INFERENCEX_TOOL
-from inference_suite.staging import MANIFEST_FILE, StagingError, StagingManifest
 
 __all__ = ["SuitePublishError", "publish_inference_suite", "publish_own_inference_suite"]
 
@@ -73,23 +70,13 @@ def _publish(packages: Path, cache_root: Path) -> Path:
             f"publishing the inference_suite staging exited {done.returncode}: {done.stderr.strip()[-_TAIL:]}"
         )
     published = Path(done.stdout.strip())
-    commit = _staged_inferencex(published)
+    try:
+        commit = inference_suite.staged_inferencex_commit(published)
+    except inference_suite.StagingError as exc:
+        raise SuitePublishError(f"the staging published at {published} cannot be read: {exc}") from exc
     if commit is not None:
         try:
             fill_inferencex_store(cache_root, commit)
         except ToolError as exc:
             raise SuitePublishError(f"the runner cache's InferenceX store was not filled: {exc}") from exc
     return published
-
-
-def _staged_inferencex(published: Path) -> str | None:
-    """The InferenceX commit the staging published at ``published`` records; ``None`` for a staging without a manifest
-    or without InferenceX, which no runner runs (it verifies the manifest first)."""
-    try:
-        manifest = StagingManifest.from_document(json.loads((published / MANIFEST_FILE).read_bytes()))
-    except FileNotFoundError:
-        return None
-    except (OSError, ValueError, StagingError) as exc:
-        raise SuitePublishError(f"the staging published at {published} cannot be read: {exc}") from exc
-    tool = manifest.tools.get(INFERENCEX_TOOL)
-    return tool.commit if tool is not None else None
