@@ -92,7 +92,8 @@ _SERVING, _DONE, _TAR = "SERVING", "DONE", ".tar"
 #: The index written after a kind's parts: ``<kind>.tar.json``; a part is ``<kind>.tar.<index, three digits>``.
 _INDEX = f"{_TAR}.json"
 _INDEX_SCHEMA = "hyperloom.jit-cache-parts/v1"
-_MAX_INDEX_BYTES = 1024
+_KIB = 1024
+_MAX_INDEX_BYTES = _KIB
 SERVING_PATH, DONE_PATH = f"{SERVE_DIR}/{_SERVING}", f"{SERVE_DIR}/{_DONE}"
 #: The runner's list of the kinds and keys it wants, below its output directory.
 _WANT_NAME = "jit-want.json"
@@ -109,12 +110,12 @@ MAX_WAIT_SEC = 1800.0
 #: The bounds of what crosses: a want is a few hundred bytes; one tar is one ``write_file`` request, which the platform
 #: bounds in time, so a kind whose snapshot is larger is not served (it builds cold); the most files one tar holds. A
 #: DeepSeek aiter JIT cache passes 256 MiB, so a kind may send up to 1 GiB.
-MAX_WANT_BYTES = 16 * 1024
-MAX_TAR_BYTES = 1024**3
+MAX_WANT_BYTES = 16 * _KIB
+MAX_TAR_BYTES = _KIB**3
 MAX_TAR_FILES = 20_000
 #: The largest part of a kind's tar the host writes. The sandbox's file API refuses a single write over 32 MB (HTTP 413,
 #: "file exceeds 32MB"), so a tar is written as parts of at most 30 MiB, safely under that limit.
-PART_BYTES = 30 * 1024**2
+PART_BYTES = 30 * _KIB**2
 _BLOB_NAME = re.compile(r"blobs/(?P<prefix>[0-9a-f]{2})/(?P=prefix)[0-9a-f]{62}")
 _TAR_MODE = 0o400
 #: The only member types a served tar may hold: plain regular files (no link, device, directory, fifo or sparse file).
