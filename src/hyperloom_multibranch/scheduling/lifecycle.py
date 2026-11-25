@@ -68,6 +68,7 @@ from hyperloom_multibranch.blackboard.rsi.playbook import (
     drawn_challenger,
     session_playbook,
 )
+from hyperloom_multibranch.blackboard.rsi.archive import longest_root_test_seconds
 from hyperloom_multibranch.blackboard.rsi.session import FRONTIER_LOG, archived_history
 from hyperloom_multibranch.scheduling.agent_map import SharedMap
 from hyperloom_multibranch.scheduling.agent_plans import (
@@ -99,7 +100,13 @@ from hyperloom_multibranch.scheduling.events import IntegrationProfiler, Session
 from hyperloom_multibranch.scheduling.explore import Explorer, ExploreWindow, Steering
 from hyperloom_multibranch.blackboard.knowledge.breakdown import claw_session_id, leg_claw_session_id
 from hyperloom_multibranch.scheduling.exports import CloseAuthoring, ExportServices, ExportSources, SessionExports
-from hyperloom_multibranch.scheduling.final import FinalCandidates, FinalSelector, session_candidates
+from hyperloom_multibranch.scheduling.final import (
+    ConcSweep,
+    FinalCandidates,
+    FinalSelector,
+    SweepPlan,
+    session_candidates,
+)
 from hyperloom_multibranch.scheduling.forks import ForkDesk
 from hyperloom_multibranch.scheduling.integrator import BundlingIntegrator, Integrator, LlmPatchResolver, MergeRecords
 from hyperloom_multibranch.scheduling.judge import GRACE_KEY, Judge, session_grace
@@ -191,6 +198,7 @@ LESSONS_KEY = "lessons"
 #: Seconds in a minute, the unit of the agents' time options.
 MINUTE = 60.0
 CUT_SHORT = "CLOSE was cut short after a stop signal"
+CONC_SWEEP = "conc_sweep"
 NO_CARDS_LEFT = "the toolbox has fewer usable cards than one test needs, so FINAL could not run"
 #: Why FINAL over a session that ended before its baseline was recorded chose nothing.
 NO_BASELINE = "no candidate: the session ended before PRELUDE recorded its baseline, so FINAL had nothing to validate"
@@ -203,9 +211,16 @@ class Session:
     """Wires one session's scheduler, integrator and blackboard handles onto the peers ``peer_factory`` builds."""
 
     def __init__(
-        self, settings: RunSettings, peer_factory: PeerFactory, host: SessionHost, services: SessionServices
+        self,
+        settings: RunSettings,
+        peer_factory: PeerFactory,
+        host: SessionHost,
+        services: SessionServices,
+        *,
+        test_points: int = 1,
     ) -> None:
         self._settings = settings
+        self._test_points = test_points
         self._layout, self._processes, self._clock = host.layout, host.processes, host.clock
         self._open_records()
         desk = ForkDesk(self._roster, self._decisions, self._clock)
@@ -230,6 +245,7 @@ class Session:
         self._briefs = peers.briefs
         self._base_image_digest = peers.base_image_digest
         tests = SessionTests(peers.toolbox, self._clock)
+        self._tests = tests
         checks = SessionChecks(tests, peers.gate, peers.regression)
         self._metric = settings.workload.metric
         self._budget_seconds = budget_seconds(settings.max_hours)
@@ -290,6 +306,7 @@ class Session:
             settings.inferencex_commit,
             settings.agentx_early_stop,
             make_before_break=settings.make_before_break,
+            test_points=self._test_points,
         )
 
     def _map_calls(self) -> MapCalls:
@@ -406,6 +423,32 @@ class Session:
         ending = SessionOutcome(ended, None, None, "")
         work = self._no_final(ended) if candidates is None else self._final_phases(candidates, ended, restart)
         return await self._run_and_close(work, ending, budget, hard_stop)
+
+    async def conc_sweep(self, plan: SweepPlan, grant_end_unix: float | None = None) -> dict[str, Any]:
+        """Sweep the closed session's root and the commit FINAL chose over ``plan``'s points on this session's toolbox,
+        which takes up and withdraws what an earlier run left in its log first; a stop signal ends the sweep, and the
+        toolbox is released however it ends."""
+
+        baseline = await self._blackboard.baseline()
+        longest = longest_root_test_seconds(await self._blackboard.snapshot()) or 0.0
+        sweep = ConcSweep(
+            plan,
+            baseline.root_commit,
+            self._layout,
+            self._settings.workload,
+            self._tests,
+            self._settings.caps.max_parallel_tests,
+            longest,
+        )
+        self._signals.install()
+        try:
+            await self._toolbox.start()
+            await self._toolbox.withdraw_all(CONC_SWEEP)
+            await self._toolbox.set_policy(final_quota(self._settings.caps))
+            return await sweep.run(self._signals.wait(), grant_end_unix)
+        finally:
+            self._signals.uninstall()
+            await self._stopper.release(TOOLBOX_CLOSE_SECONDS)
 
     async def resume(
         self, ended: SessionStopReason, deadline: float, explore_cap: ExploreCap | None = None

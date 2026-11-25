@@ -157,7 +157,7 @@ def _fixture_breakdown(**overrides: Any) -> dict[str, Any]:
                     "verdict": "",
                     "verdict_counts": {},
                     "summary": "ok (critic)",
-                    "phase": "SWEEP",
+                    "phase": "CYCLE_END",
                 },
             ]
         },

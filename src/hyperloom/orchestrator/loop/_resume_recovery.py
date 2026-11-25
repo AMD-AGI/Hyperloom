@@ -29,6 +29,23 @@ from ._integrate_promotion import _IntegrateMarker, _KeptResultScan, _integrate_
 log = logging.getLogger(__name__)
 
 
+def _covered_step_task(pending: dict[str, Any]) -> Task | None:
+    """The task a covered integration ran as, rebuilt from the journal it wrote.
+
+    A covered step never has a registry row, so a missing row says nothing about how it ended. Its journal is
+    the record that it started, which for a queued integration is a row still in flight.
+    """
+    if not pending.get("covered_step"):
+        return None
+    return Task(
+        task_id=str(pending["task_id"]),
+        kind="integrate_patch",
+        state="running",
+        params={},
+        idempotency_key="",
+    )
+
+
 class ResumeRecoveryMixin:
     """Recovering the work in flight when the coordinator died."""
 
@@ -136,7 +153,8 @@ class ResumeRecoveryMixin:
 
         Args:
             pending: The ``pending_integrate`` sentinel dict.
-            task: The sentinel's ``integrate_patch`` task row, if it still exists.
+            task: The sentinel's ``integrate_patch`` task row if it still exists, or the in-flight task
+                rebuilt for a journal a covered step wrote.
             report: The resume report dict to append fixes/warnings to.
 
         Returns:
@@ -224,7 +242,7 @@ class ResumeRecoveryMixin:
             )
             self._clear_pending_integrate(pending, gc_runtime=False)
             return
-        task = await self.tasks.find(task_id, kind="integrate_patch")
+        task = await self.tasks.find(task_id, kind="integrate_patch") or _covered_step_task(pending)
         if await self._recover_pending_integrate_from_task(pending, task, report):
             return
         gone_scope = confirmed_stopped_scope(task.history if task is not None else None)

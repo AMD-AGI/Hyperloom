@@ -357,7 +357,7 @@ async def test_the_farm_refuses_a_build_the_sheet_does_not_name_exactly(rig: Rig
         lay(NamedBuild(ref.root_id, ref.key, ref.manifest_sha256), "sha256:" + "e" * 64)
     with pytest.raises(FarmError, match="is not in the store"):
         lay(NamedBuild(ref.root_id, "f" * 64, ref.manifest_sha256))
-    with pytest.raises(FarmError, match="needs the native build store"):
+    with pytest.raises(FarmError, match="a runtime root needs the native build store, which this runner is not given"):
         built_roots(environment.roots, None)
     with pytest.raises(FarmError, match="needs its build"):
         build_farm(environment.roots, rig.tmp / "none", python=rig.image.python, read_blob=lambda a: b"")
@@ -445,13 +445,6 @@ def _configured(tmp_path: Path, **overrides: str) -> dict[str, str]:
         BUILD_GFX_ENV: "gfx942",
     }
     return {name: value for name, value in {**environ, **overrides}.items() if value}
-
-
-def test_a_store_set_up_for_another_architecture_than_the_session_s_board_is_refused(tmp_path: Path) -> None:
-    environ = _configured(tmp_path)
-
-    with pytest.raises(BuildStoreConfigError, match="gfx942 and the session's r9700 is gfx1201"):
-        native_builds(environ, LocalBlobStore(tmp_path / "blobs"), IMAGE, "r9700")
 
 
 def test_nothing_configured_means_no_native_builds(tmp_path: Path) -> None:

@@ -19,6 +19,7 @@ from hyperloom.orchestrator.tests._helpers import patch_integrate_patch_roots
 
 from hyperloom.orchestrator.actions.executors import _accuracy_gate
 from hyperloom.orchestrator.actions.executors.integrate import _integrate_apply as integrate_apply
+from hyperloom.orchestrator.actions.executors.integrate import _integrate_resolve as integrate_resolve
 from hyperloom.orchestrator.actions.executors.patching import _patch_sources as patch_sources
 from hyperloom.orchestrator.actions.executors import _setup_replay
 from hyperloom.orchestrator.actions.executors import integrate_patch as ip
@@ -180,6 +181,81 @@ async def test_forged_task_without_critic_verdict_is_rejected(tmp_path):
     assert res["status"] == "rejected_by_critic"
     # patch not applied: the source file is untouched.
     assert (repo / "src.py").read_text().endswith("return 1\n")
+
+
+@pytest.mark.asyncio
+async def test_covered_step_integrates_without_a_critic_verdict(tmp_path, monkeypatch):
+    """A step the Coordinator runs itself is never a registry row, so its bench decides, not a recorded verdict."""
+    session = tmp_path / "s"
+    session.mkdir()
+    repo = tmp_path / "fw"
+    _init_git_repo(repo)
+    _write_workspace(session, "spec")
+
+    class _SS:
+        phase = "KERNEL_AGENT"
+        enablement = EnablementRound()
+
+        def get_specialist_patch_verdict(self, tid):
+            return ""  # no verdict on record
+
+        def grid_session_deadline_sec(self, **_kwargs):
+            return None
+
+        def save(self, _path):
+            pass
+
+    monkeypatch.setattr(
+        IntegratePatchExecutor,
+        "_bench_patch",
+        _stub_bench({"output_throughput": 200.0, "status": "succeeded"}, {"accuracy_pass": None}),
+    )
+    res = await IntegratePatchExecutor(session_dir=session)(
+        _make_ctx(
+            "t",
+            {"specialist_task_id": "spec", "framework_source_root": str(repo), "base_tput": 100.0},
+            extra={"shared_state": _SS(), "covered_step": True},
+        )
+    )
+
+    assert res["status"] == "kept"
+    assert (repo / "src.py").read_text().endswith("return 2\n")
+
+
+@pytest.mark.asyncio
+async def test_covered_step_on_the_upstream_pr_lane_still_needs_a_critic_verdict(tmp_path, monkeypatch):
+    """The upstream-PR lane fetches a remote diff into the live tree, so running as a covered step does not admit it."""
+    session = tmp_path / "s"
+    session.mkdir()
+    repo = tmp_path / "fw"
+    _init_git_repo(repo)
+
+    class _SS:
+        phase = "FRAMEWORK_AGENT"
+        enablement = EnablementRound()
+
+        def get_specialist_patch_verdict(self, tid):
+            return ""  # no verdict on record
+
+    def fetch(**_kwargs):
+        raise AssertionError("an unreviewed candidate must not be fetched")
+
+    monkeypatch.setattr(integrate_resolve, "materialize_candidate_patches", fetch)
+    res = await IntegratePatchExecutor(session_dir=session)(
+        _make_ctx(
+            "t",
+            {
+                "patch_source": "upstream_pr",
+                "candidate": {"repo": "vllm-project/vllm", "pr_number": 1015},
+                "framework_agent_candidate_id": "vllm-project/vllm#1015",
+                "framework_source_root": str(repo),
+            },
+            extra={"shared_state": _SS(), "covered_step": True},
+        )
+    )
+
+    assert res["status"] == "rejected_by_critic"
+    assert "no Critic verdict on record" in res["reason"]
 
 
 @pytest.mark.asyncio

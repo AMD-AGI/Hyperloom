@@ -240,7 +240,7 @@ class LocalCards:
         # The tests read private copies of the tables of the aiter this machine's servers import (a vLLM image's
         # site-packages, not an SGLang image's workspace), or a keep that adds rows to a default table is refused.
         options = LocalOptions(
-            timeout_sec=attempt_timeout_sec(setup.workload),
+            timeout_sec=attempt_timeout_sec(setup.workload) * setup.test_points,
             boot_budget_sec=setup.workload.boot_budget_sec,
             framework_configs=str(image_configs()),
             tests_end_by=self.tests_end_by,
@@ -413,7 +413,7 @@ def local_peers(host: MeasurementHost, sessions: SpecialistSessions, setup: Peer
 
     mcp = McpServer(McpServerConfig(host_token=secrets.token_hex(32)), campaign=layout.session_id)
     briefs = _specialist_briefs(setup, repo)
-    _serve_specialist_tools(mcp, toolbox, runtime_blackboard, briefs, reviews)
+    _serve_specialist_tools(mcp, toolbox, runtime_blackboard, briefs, reviews, workload.framework)
     sandboxes = branch_sandboxes(host.backend, setup, lambda branch: built.worktrees(branch))
     isolation = launch_isolation(local=host.backend.on_this_machine)
     announce_launch_isolation(isolation)
@@ -544,10 +544,13 @@ def _serve_specialist_tools(
     blackboards: Callable[[str], LocalBlackboard],
     briefs: SessionBriefs,
     reviews: OptionReviews | None,
+    framework: str,
 ) -> None:
     """Register the specialists' toolbox and blackboard tools on ``mcp``, calling the toolbox on the session's loop and
-    briefing each branch from ``briefs``; with ``reviews``, the option review too."""
+    briefing each branch from ``briefs``; with ``reviews``, the option review too, and for a ``framework`` whose server
+    the session builds, the baseline tests every branch then reads."""
 
+    from hyperloom.inference_optimizer.framework_registry import native_component
     from hyperloom_multibranch.toolbox.mcp_tools import SpecialistToolOptions, register_specialist_tools
 
     options = SpecialistToolOptions(
@@ -557,6 +560,7 @@ def _serve_specialist_tools(
         briefing_for=briefs.for_branch,
         analysis=toolbox,
         option_reviews=reviews,
+        native_server=native_component(framework) is not None,
     )
     register_specialist_tools(mcp, toolbox=toolbox, blackboards=blackboards, options=options)
 

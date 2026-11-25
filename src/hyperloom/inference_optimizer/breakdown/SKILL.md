@@ -24,7 +24,7 @@ A single JSON file: **`<session_dir>/session_breakdown.json`**.
 
 Beyond the envelope (`schema_version` / `exported_at_utc` / `exporter_version`), the JSON
 carries the sections below. This is the subset most consumers use, not the full set —
-`breakdown/exporter.py` (the `breakdown = {...}` literal) and `breakdown/schema.py` (with `schema_framework.py`, `schema_kernel.py`, `schema_conc_sweep.py` and `schema_phase.py`) are
+`breakdown/exporter.py` (the `breakdown = {...}` literal) and `breakdown/schema.py` (with `schema_framework.py`, `schema_kernel.py` and `schema_phase.py`) are
 authoritative.
 
 | Section             | What it carries                                                                                          |
@@ -57,8 +57,7 @@ watching this session live:
 1. **Always** at end-of-session (handled by `cli.py finally` — you do not need to dispatch this).
 2. After every KEEP'd explore, specialist, framework, or kernel result
    whose benchmark changed the final stack.
-3. After a successful sweep or conc_sweep when a live dashboard is
-   observing this session.
+3. After a successful sweep when a live dashboard is observing this session.
 4. **Never** mid-action — collectors expect a coherent state snapshot.
 
 Dispatch action `session_breakdown` — a single 1-minute action, no inputs

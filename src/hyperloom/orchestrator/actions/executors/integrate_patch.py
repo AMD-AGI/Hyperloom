@@ -19,7 +19,7 @@ from .integrate._integrate_build import BuildStageMixin
 from .integrate._integrate_enablement_gate import EnablementGateMixin
 from .integrate._integrate_perf_gate import PerfGateMixin
 from .integrate._integrate_resolve import ResolveStageMixin
-from .integrate._integrate_vocabulary import KEEP_STATUSES, RESULT_BENCHED, RESULT_FRAMEWORK_CHANGED
+from .integrate._integrate_vocabulary import KEEP_STATUSES, RESULT_BENCHED, RESULT_FRAMEWORK_CHANGED, RESULT_GRADED
 from .patching._patch_git import restore_pending_integrate
 from .candidate_builds import CandidateBuilds
 
@@ -68,7 +68,11 @@ class IntegratePatchExecutor(
         """Apply a specialist's patches/config changes and benchmark them."""
         params = dict(ctx.task.params or {})
         extra = getattr(ctx, "extra", None) or {}
-        attempt = IntegrateAttempt(task_id=ctx.task.task_id, phase_deadline=extra.get("phase_deadline"))
+        attempt = IntegrateAttempt(
+            task_id=ctx.task.task_id,
+            phase_deadline=extra.get("phase_deadline"),
+            covered_step=bool(extra.get("covered_step")),
+        )
 
         early = await self._stage_resolve(attempt, params, extra)
         if early is not None:
@@ -138,6 +142,7 @@ class IntegratePatchExecutor(
                 "status": "failed",
                 "error_class": "integrate_restore_incomplete",
                 "recovery_errors": summary["failed"],
+                RESULT_GRADED: False,
             }
         if kept:
             self._accept_build(attempt)

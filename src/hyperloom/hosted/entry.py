@@ -69,6 +69,7 @@ from hyperloom_common.shared_storage import (
 from hyperloom.common import confinement
 from hyperloom.common.agent_isolation import IsolationRefused, layer_bwrap, require_agent_isolation
 from hyperloom.common.owner_scope import local_owner_scope
+from hyperloom.orchestrator.conc_sweep.report import sweep_unfinished
 from hyperloom.hosted.campaign import FLOW_MULTIBRANCH, CampaignError, CampaignSpec, optimize_args, parse_campaign
 from hyperloom.hosted.host_info import HOST_ONLY_VARS, HostInfo, HostInfoError, Var, read_host_info, take_host_info
 from hyperloom.hosted.mcp_host_tools import register_host_tools
@@ -190,6 +191,8 @@ def _run() -> int:
     _confirm_previous_containers_gone(session_dir)
     _require_resume_safe(session_dir)
     with _plug_inputs(lock, info), _mcp_service(info, session_dir):
+        if is_resumable(session_dir) and sweep_unfinished(session_dir):
+            return _sweep(info.state_dir, session_dir)
         return _optimize(optimize_command(spec, session_dir), info.state_dir, session_dir)
 
 
@@ -398,7 +401,10 @@ def _plug_inputs(lock: Mapping[str, Mapping[str, str]], info: HostInfo) -> Itera
     """
     from hyperloom.inference_optimizer.cli.bootstrap import HostedPlugInputs, set_hosted_plug_inputs
 
-    set_hosted_plug_inputs(HostedPlugInputs(lock=lock, host_info=info))
+    limits = info.grant_limits
+    runtime = None if limits is None else limits.max_runtime_sec
+    end = None if runtime is None else info.run_created_at.timestamp() + runtime
+    set_hosted_plug_inputs(HostedPlugInputs(lock=lock, host_info=info, grant_end_unix=end))
     try:
         yield
     finally:
@@ -518,6 +524,17 @@ def _optimize(argv: list[str], state_dir: Path, session_dir: Path) -> int:
     final = reason != SUPERVISOR_RESTART_REASON  # a watchdog restart ends a leg, not the run
     write_exit(state_dir, final=final, returncode=returncode, stop_reason=reason)
     _announce("hyperloom.campaign_finished" if final else "hyperloom.campaign_leg_ended", {"returncode": returncode})
+    return returncode
+
+
+def _sweep(state_dir: Path, session_dir: Path) -> int:
+    """Run the conc sweep of a session that closed and was stopped before its sweep ran its course, and end the run:
+    resuming a closed session would open another macro-cycle instead. The return code is the sweep's."""
+    from hyperloom.orchestrator.conc_sweep.cli import main as sweep_main
+
+    print(f"[hosted] sweeping session {session_dir}, which closed before its conc sweep finished", flush=True)
+    returncode = sweep_main([str(session_dir)])
+    write_exit(state_dir, final=True, returncode=returncode, stop_reason=_stop_reason(session_dir))
     return returncode
 
 

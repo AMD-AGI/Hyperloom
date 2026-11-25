@@ -11,6 +11,7 @@ from pathlib import Path
 import pytest
 
 from hyperloom.measure.compile import PatchApplyError
+from hyperloom.measure.runner.native import builder as builder_module
 from hyperloom.measure.runner.native.builder import BuildRequest, compile_tree, plan, tree_dir
 from hyperloom.measure.jit.native.record import FAILED, LOG_NAME, READY, RECORD_FILES
 from hyperloom.measure.jit.native.store import BuildInfraError
@@ -223,6 +224,26 @@ def test_a_step_that_fails_ends_the_compile_as_the_candidates_error(bench: Bench
 
     assert (staged.status, staged.failure) == (FAILED, "compile_error: the compile exited 3")
     assert not (tree_dir(tmp_path / "scratch") / "python" / OUTPUT).exists(), "the later step never ran"
+
+
+def test_a_recipes_only_step_gets_the_whole_budget_and_a_later_one_what_is_left(
+    bench: Bench, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    given: list[int] = []
+    run = builder_module.run_argv
+    monkeypatch.setattr(
+        builder_module, "run_argv", lambda argv, **kwargs: given.append(kwargs["timeout_sec"]) or run(argv, **kwargs)
+    )
+    one = bench.request(bench.patch({KERNEL: PATCHED}))
+    two = _with_steps(one, ("{python}", "-c", "import time; time.sleep(1.1)"), *one.recipe.steps)
+
+    for number, request in enumerate((one, two)):
+        staged = compile_tree(request, plan(request, bench.blobs)[1], bench.blobs, tmp_path / f"scratch-{number}")
+        assert staged.status == READY, staged.failure
+
+    budget = one.recipe.budget_sec
+    assert given[:2] == [budget, budget], "a one-step recipe's timeout is its budget, as before steps"
+    assert given[2] < budget, "the second step has what the first left"
 
 
 @pytest.mark.parametrize(

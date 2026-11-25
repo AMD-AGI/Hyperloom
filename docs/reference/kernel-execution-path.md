@@ -77,7 +77,7 @@ lanes. Which calls it makes depends on the backend:
 
 ```python
 # 1. GEAK branch — the SGLang/vLLM default. One whole-pipeline e2e run, then
-#    the phase winds down to SWEEP. Nothing below this line executes.
+#    the phase winds down to CYCLE_END. Nothing below this line executes.
 if geak_enabled:                      # KernelPhase.geak_enabled(): kernel_optimizer == "geak"
     await self._run_geak_kernel_phase(from_phase=from_phase)
     return

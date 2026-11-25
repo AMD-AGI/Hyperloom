@@ -143,6 +143,18 @@ def test_a_stack_that_changes_no_native_file_asks_for_no_build(bench: Bench) -> 
         session.build(stack)
 
 
+def test_a_stack_may_change_a_file_outside_the_package_beside_a_native_source(bench: Bench) -> None:
+    """As before a checkout could be built: the file outside the package is in the build's tree and in no root."""
+    session = _session(bench)
+    readme = "native/README.md"
+    stack = _stack(bench.patch({KERNEL: "int kernel(void) { return 5; }\n", readme: "notes\n"}))
+
+    planned = session.planner(stack)
+
+    assert planned is not None and readme not in {entry.path for entry in planned.entries}
+    assert session.build(stack).status is BuildStatus.BUILT
+
+
 @pytest.fixture()
 def executables(bench: Bench, monkeypatch: pytest.MonkeyPatch) -> NativeBuildSession:
     """A session of the stand-in component as a build that makes an executable and no package."""
@@ -229,8 +241,8 @@ def _unisolated() -> Unisolated:
     return Unisolated("no tier (a stand-in)")
 
 
-def _llamacpp_stack(session: NativeBuildSession, tmp_path: Path, path: str) -> ComponentPatches:
-    data = git_patch(tmp_path / "patch", {path: "a\n"}, {path: "b\n"})
+def _llamacpp_stack(session: NativeBuildSession, tmp_path: Path, *paths: str) -> ComponentPatches:
+    data = git_patch(tmp_path / "patch", dict.fromkeys(paths, "a\n"), dict.fromkeys(paths, "b\n"))
     patch = put_patch(session.compiler.blobs, "p.patch", data)
     return ComponentPatches("llamacpp", "https://github.com/ggml-org/llama.cpp", LLAMACPP_COMMIT, (patch,))
 
@@ -249,14 +261,17 @@ def test_llamacpps_pinned_commit_is_part_of_the_key_of_its_build_as_it_is_and_of
     assert session.planner.base("llamacpp").kind == "executable", "llama.cpp's build makes a server, no package"
 
 
-def test_a_llamacpp_stack_that_changes_what_no_build_of_it_takes_is_refused_naming_the_path(tmp_path: Path) -> None:
+@pytest.mark.parametrize("native", [(), ("ggml/src/ggml.c",)], ids=["alone", "beside-a-native-source"])
+def test_a_llamacpp_stack_that_changes_what_no_build_of_it_takes_is_refused_naming_the_path(
+    tmp_path: Path, native: tuple[str, ...]
+) -> None:
     session = _llamacpp(tmp_path)
     path = "tools/llama-bench/llama-bench.cpp"
 
     with pytest.raises(PatchApplyError) as refused:
-        session.build(_llamacpp_stack(session, tmp_path, path))
+        session.build(_llamacpp_stack(session, tmp_path, *native, path))
 
-    assert f"{path!r} is outside the installed package (ggml/, src/, include/, common/" in str(refused.value)
+    assert f"{path!r} is outside the checkout's sections (ggml/, src/, include/, common/" in str(refused.value)
 
 
 # --- the pinned checkout --------------------------------------------------------------------------------------------

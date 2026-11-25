@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import argparse
+import copy
 import json
 import math
 import os
@@ -15,6 +16,7 @@ from pathlib import Path
 from hyperloom.common.perf_metric import DATASET_PATH_ENV
 from hyperloom.common.url_userinfo import CREDENTIALED_URL_RE
 from hyperloom.common.workload_defaults import DEFAULT_EP
+from hyperloom.inference_optimizer.framework_registry import native_component
 from hyperloom_multibranch.blackboard.knowledge.reference_leads import INFERENCEX_REFERENCE
 from hyperloom_multibranch.contracts.toolbox import WorkloadKind
 from hyperloom_multibranch.rulegate.agentx import AgentXObjective
@@ -49,6 +51,8 @@ ENCODING = "utf-8"
 FILE_METAVAR = "FILE"
 #: The GPU types a session runs on; the toolbox's environment exports the board itself as ``GPU_TYPE``.
 SESSION_GPU_TYPES = ("mi300x", "mi325x", "mi350x", "mi355x", "r9700", "w7900d")
+#: Those of them a session runs on only when its framework builds its server from a checkout.
+NATIVE_SERVER_GPU_TYPES = ("r9700", "w7900d")
 #: The options ``run`` requires unless it is given ``--resume``, by their argparse names.
 RUN_REQUIRED = ("model", "framework", "gpu_type", "workload", "tp", "conc", "precision")
 #: The options an inferencex workload requires and an agentx one refuses.
@@ -61,13 +65,32 @@ SWITCH = "store_true"
 LOCAL_MEASUREMENT, HOSTED_MEASUREMENT = "local", "hosted"
 #: The command that runs FINAL and CLOSE alone over a session directory.
 FINAL_ONLY_COMMAND = "final-only"
+#: The command that runs the concurrency sweep of a closed session.
+CONC_SWEEP_COMMAND = "conc-sweep"
 #: The command a host runs a session under, with the campaign spec it injects.
 HOSTED_COMMAND = "hosted"
 
 
+class _CommandParser(argparse.ArgumentParser):
+    """A command's parser, which refuses a board of :data:`NATIVE_SERVER_GPU_TYPES` for a framework that builds no
+    server, in the words argparse refuses a ``--gpu-type`` that is no choice."""
+
+    def parse_known_args(self, args=None, namespace=None):  # type: ignore[no-untyped-def]
+        parsed, rest = super().parse_known_args(args, namespace)
+        board, framework = getattr(parsed, "gpu_type", None), getattr(parsed, "framework", None)
+        if board in NATIVE_SERVER_GPU_TYPES and native_component(framework or "") is None:
+            action = copy.copy(next(action for action in self._actions if action.dest == "gpu_type"))
+            action.choices = [choice for choice in SESSION_GPU_TYPES if choice not in NATIVE_SERVER_GPU_TYPES]
+            try:
+                self._check_value(action, board)
+            except argparse.ArgumentError as exc:
+                self.error(str(exc))
+        return parsed, rest
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog=PROG, description="Run a multi-branch optimization session.")
-    commands = parser.add_subparsers(dest="command", required=True)
+    commands = parser.add_subparsers(dest="command", required=True, parser_class=_CommandParser)
     _add_run_options(commands.add_parser("run", help="Run one session: PRELUDE, EXPLORE, FINAL and CLOSE."))
     review.add_parser(commands)
     final_only = commands.add_parser(
@@ -80,7 +103,16 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     final_only.add_argument("session_dir", type=Path, help="The session directory of the run to finish.")
-    final_only.add_argument("-v", "--verbose", action=SWITCH, help="Log at debug level.")
+    _add_verbose_option(final_only)
+    conc_sweep = commands.add_parser(
+        CONC_SWEEP_COMMAND,
+        help=(
+            "Sweep a closed session's root and the commit FINAL chose over the concurrencies of the base's InferenceX"
+            " recipe, measured on this machine; the points already measured are kept."
+        ),
+    )
+    conc_sweep.add_argument("session_dir", type=Path, help="The session directory of a closed run.")
+    _add_verbose_option(conc_sweep)
     hosted = commands.add_parser(HOSTED_COMMAND, help="Run under a host that injects the campaign spec and its inputs.")
     hosted_commands = hosted.add_subparsers(dest="hosted_command", required=True)
     hosted_commands.add_parser(
@@ -98,7 +130,11 @@ def _add_run_options(run: argparse.ArgumentParser) -> None:
     _add_specialist_input_options(run)
     _add_concurrency_options(run)
     _add_playbook_option(run)
-    run.add_argument("-v", "--verbose", action=SWITCH, help="Log at debug level.")
+    _add_verbose_option(run)
+
+
+def _add_verbose_option(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument("-v", "--verbose", action=SWITCH, help="Log at debug level.")
 
 
 def _add_agentx_options(run: argparse.ArgumentParser) -> None:
@@ -237,6 +273,19 @@ def _add_concurrency_options(run: argparse.ArgumentParser) -> None:
         action=argparse.BooleanOptionalAction,
         default=True,
         help="Hosted: keep a finished test's sandbox until the next one runs, where 3+ tests fit (one fewer runs).",
+    )
+    run.add_argument(
+        "--enable-conc-sweep",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="After CLOSE, sweep the root and the commit FINAL chose over the base's InferenceX recipe concurrencies.",
+    )
+    run.add_argument(
+        "--conc-sweep-concs",
+        type=_concurrencies,
+        default=(),
+        metavar="C1,C2,...",
+        help="The conc sweep's concurrencies for a base no InferenceX recipe gave; ignored for one that did.",
     )
     run.add_argument(
         "--measurement",
@@ -674,7 +723,17 @@ def settings_from(
         review_gate=args.review_gate,
         inferencex_commit=parse_inferencex_commit(args.inferencex_commit) if args.inferencex_commit else "",
         agentx_early_stop=session_early_stop(os.environ),
+        conc_sweep=args.enable_conc_sweep,
+        conc_sweep_concs=args.conc_sweep_concs,
     )
+
+
+def _concurrencies(value: str) -> tuple[int, ...]:
+    """``C1,C2,...`` as the distinct concurrencies it names, ascending; each must be positive."""
+    concs = tuple(sorted({int(item) for item in value.split(",")}))
+    if concs[0] < 1:
+        raise argparse.ArgumentTypeError(f"concurrencies must be positive, got {value}")
+    return concs
 
 
 def _limit_errors(args: argparse.Namespace) -> list[str]:

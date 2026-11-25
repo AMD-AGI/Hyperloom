@@ -17,8 +17,7 @@ reads. So it also needs:
   is the SGLang repository, ``<dir>/vllm/<ref>`` vLLM's, ``<dir>/llamacpp/<ref>`` a worktree of the framework checkout
   ``FRAMEWORK_REPO_PATH`` at its ``HEAD``, for a component built from the checkout the operator pinned);
 - ``HYPERLOOM_BUILD_IMAGE_ROOT``: the image's directory of installed packages (``site-packages``);
-- ``HYPERLOOM_BUILD_GFX``: the GPU architecture the outputs are built for, which is the session board's: another
-  one is refused;
+- ``HYPERLOOM_BUILD_GFX``: the GPU architecture the outputs are built for;
 - ``HYPERLOOM_BUILD_PYTHON`` (``python3`` when unset): the image's interpreter, which runs the compile;
 - ``HYPERLOOM_BUILDER_IMAGE`` (the active image when unset): the digest of the image the build runs in;
 - ``HYPERLOOM_BUILD_SGLANG_REF`` (unset when the image names its own): the image's sglang commit, a full commit id, for
@@ -64,7 +63,6 @@ from hyperloom.measure.runner.native.planning import NativeSite
 from hyperloom.measure.runner.native.recipes import CommitSource, native_recipes
 from hyperloom.measure.runner.native.session import BuildStatus, NativeBuildSession, open_session, pinned_checkouts
 from hyperloom.measure.runner.native.session_builds import lay_executables
-from hyperloom_common.gpu_identity import gfx_arch_for_gpu_type
 from hyperloom_multibranch.toolbox.build_preflight import (
     FULL_COMMIT,
     SGL_KERNEL,
@@ -159,7 +157,6 @@ def native_builds(
     environ: Mapping[str, str],
     blobs: BlobStore,
     image_digest: str,
-    gpu_type: str | None = None,
     *,
     isolation: Callable[[], Isolation | Unisolated] = local_isolation,
 ) -> NativeBuilds | None:
@@ -167,8 +164,8 @@ def native_builds(
 
     Raises:
         BuildStoreConfigError: The store is half configured, its trust or signing key cannot be read, a variable the
-            service needs is not set, the sglang commit it names is not a full commit id, the build CPUs it names are
-            not a CPU list, or the architecture it builds for is not the one the board ``gpu_type`` dispatches to.
+            service needs is not set, the sglang commit it names is not a full commit id, or the build CPUs it names are
+            not a CPU list.
     """
     store = store_from_environment(environ)
     if store is None:
@@ -177,15 +174,10 @@ def native_builds(
     signer = _signer(key)
     confinement.PRIVATE_PATHS.add(key, "the native build service's signing key")
     image = image_digest.rsplit("@", 1)[-1]
-    gfx, board_gfx = _required(environ, BUILD_GFX_ENV), gfx_arch_for_gpu_type(gpu_type)
-    if board_gfx is not None and gfx != board_gfx:
-        raise BuildStoreConfigError(
-            f"{BUILD_GFX_ENV} is {gfx} and the session's {gpu_type} is {board_gfx}: set the store up with --gfx {board_gfx}"
-        )
     machine = BuildMachine(
         image,
         environ.get(BUILDER_IMAGE_ENV, "").strip() or image,
-        gfx,
+        _required(environ, BUILD_GFX_ENV),
         environ.get(BUILD_PYTHON_ENV, "").strip() or _DEFAULT_PYTHON,
     )
     sources, image_root = Path(_required(environ, BUILD_SOURCES_ENV)), Path(_required(environ, BUILD_IMAGE_ROOT_ENV))

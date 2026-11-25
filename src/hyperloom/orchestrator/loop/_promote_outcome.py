@@ -13,8 +13,7 @@ from hyperloom.inference_optimizer.session.optimization_journal import Verdict
 
 @dataclass
 class _PromoteOutcome:
-    """Mutable carrier threaded through the per-kind promote handlers;
-    ``early_return`` skips the shared audit/save tail (conc_sweep).
+    """Mutable carrier threaded through the per-kind promote handlers.
 
     ``verdict`` is the settlement's single answer to "was this adopted";
     ``adopted_variants`` names, by fingerprint, the explore winners whose lift
@@ -25,7 +24,6 @@ class _PromoteOutcome:
     changed: bool = False
     audit_decision: str | None = None
     audit_extras: dict[str, Any] = field(default_factory=dict)
-    early_return: bool = False
 
 
 class IntegrateRecoveryIncomplete(RuntimeError):
