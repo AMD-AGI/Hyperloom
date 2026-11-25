@@ -22,7 +22,7 @@ from hyperloom.common.gain_math import conc_pair_comparison
 from hyperloom.common.model_paths import resolve_session_model_path
 from hyperloom.common.overlay import is_safe_path_entry, overlay_is_loadable
 from hyperloom.common.perf_metric import GRADED_INTVTY, GRADED_OUTPUT, agentx_replay_session, is_agentx_mode
-from hyperloom.inference_optimizer.framework_registry import is_scriptable, request_slots
+from hyperloom.inference_optimizer.framework_registry import is_scriptable, native_component, request_slots
 from hyperloom.inference_optimizer.grid_server_args import compose_server_args
 from hyperloom.inference_optimizer.grading import resolved_grading
 from hyperloom.inference_optimizer.roofline_ceiling import read_baseline_server_args
@@ -90,6 +90,9 @@ def decline_reason(state: SharedState) -> str | None:
         return "multi_node"
     if is_scriptable(state.framework):
         return "non_serving_workload"
+    if native_component(state.framework) is not None:
+        # An arm names no build, so both arms would run the build the session kept last.
+        return "checkout_built_server"
     if is_agentx_mode(state.benchmark_mode) and not agentx_replay_session(state):
         return "mlperf_backend"
     return None
