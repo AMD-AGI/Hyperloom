@@ -93,22 +93,6 @@ _MN_WARMUP = "mn_warmup"
 _PROGRESS_UNIT = "baseline_round"
 
 
-# Markers identifying a MoE quant scheme with no implementation for the ``--moe-runner-backend`` in use:
-# ``create_moe_runner`` falls through without building a runner and the first forward pass dies (e.g. Quark MXFP4 on
-# triton).
-_MOE_RUNNER_MISSING_MARKERS = (
-    "has no attribute 'runner'",
-    'has no attribute "runner"',
-)
-_MOE_SCHEME_CONTEXT_MARKERS = (
-    "create_moe_runner",
-    "moe_runner",
-    "_moe.py",
-    "fused_moe",
-    "/moe/",
-)
-
-
 def _unaffordable_mn_round_result(round_: _BenchmarkRound, evidence: dict[str, Any]) -> dict[str, Any]:
     """The stopped result of a multi-node round whose two passes the session budget cannot afford."""
     log.warning(
@@ -130,7 +114,7 @@ def _unaffordable_mn_round_result(round_: _BenchmarkRound, evidence: dict[str, A
 
 
 class BenchmarkRunExecutor(_BaselineAccuracyMixin, _BenchmarkLaunchMixin, _BenchmarkRoundsMixin):
-    """One benchmark action: materialize the config, launch the backend, retry, parse the report."""
+    """One benchmark action: materialize the config, launch the backend, parse the report."""
 
     benchmark_watchdog = False
     runs_accuracy_eval = True
@@ -192,15 +176,6 @@ class BenchmarkRunExecutor(_BaselineAccuracyMixin, _BenchmarkLaunchMixin, _Bench
             return True
         return BenchmarkRunExecutor._failure_carries_markers(result, _EVAL_FAILURE_MARKERS)
 
-    @staticmethod
-    def _is_moe_runner_rooted_failure(result: dict[str, Any]) -> bool:
-        """Whether a failed baseline died on the MoE runner backend in use."""
-        return BenchmarkRunExecutor._failure_carries_markers(
-            result,
-            _MOE_RUNNER_MISSING_MARKERS,
-            _MOE_SCHEME_CONTEXT_MARKERS,
-        )
-
     async def __call__(self, ctx: RunnerContext) -> dict[str, Any]:
         """Run the action inside the session the context names."""
         from hyperloom.inference_optimizer.session.session_binding import named_session_scope
@@ -211,29 +186,19 @@ class BenchmarkRunExecutor(_BaselineAccuracyMixin, _BenchmarkLaunchMixin, _Bench
 
     async def _run(self, ctx: RunnerContext) -> dict[str, Any]:
         """Run the action inside the bound session."""
-        return await self._run_retrying(ctx)
+        return await self._run_with_accuracy(ctx)
 
-    async def _run_pass(
-        self,
-        ctx: RunnerContext,
-        *,
-        recorder: Any,
-        attempt_reason: str,
-        **kwargs: Any,
-    ) -> dict[str, Any]:
-        """Run one pass through :meth:`_run_once`, recorded as its own row."""
-        index = recorder.begin_run(attempt_reason=attempt_reason) if recorder is not None else 0
+    async def _run_pass(self, ctx: RunnerContext, *, recorder: Any) -> dict[str, Any]:
+        """Run :meth:`_run_once`, recorded as the action's run row."""
+        if recorder is None:
+            return await self._run_once(ctx)
+        recorder.begin_run()
         try:
-            result = await self._run_once(ctx, recorder=recorder, run_index=index, **kwargs)
+            result = await self._run_once(ctx, recorder=recorder)
         except BaseException as exc:
-            if recorder is not None:
-                recorder.end_run(
-                    run_index=index,
-                    result={"status": "failed", "error_class": type(exc).__name__, "error": repr(exc)},
-                )
+            recorder.end_run(result={"status": "failed", "error_class": type(exc).__name__, "error": repr(exc)})
             raise
-        if recorder is not None:
-            recorder.end_run(run_index=index, result=result)
+        recorder.end_run(result=result)
         return result
 
     async def _attempt_refusal(self, attempt: BenchmarkAttempt, output_dir: Path, shared_state: Any) -> dict | None:
@@ -537,7 +502,7 @@ class BaselineExecutor(BenchmarkRunExecutor):
             owns_event=not str(params.get(INLINE_EVENT_PARAM) or ""),
         )
         try:
-            result = await self._run_retrying(ctx, recorder=recorder)
+            result = await self._run_with_accuracy(ctx, recorder=recorder)
             shared_state = (getattr(ctx, "extra", None) or {}).get("shared_state")
             is_agentx = agentx_active(benchmark_mode=getattr(shared_state, _BENCHMARK_MODE_ATTR, ""))
             if _should_establish_quality_ref(getattr(ctx.task, "kind", ""), params) and is_agentx:
