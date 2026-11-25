@@ -106,7 +106,11 @@ def _free_port() -> int:
 def test_service_processes_sharing_a_database_and_a_home_serve_one_kb(tmp_path: Path, database_url: str) -> None:
     home = tmp_path / "home"
     env = {
-        **{key: value for key, value in os.environ.items() if not key.startswith(("ANTHROPIC_", "HYPERLOOM_"))},
+        **{
+            key: value
+            for key, value in os.environ.items()
+            if not key.startswith(("ANTHROPIC_", "OPENAI_", "HYPERLOOM_"))
+        },
         DATABASE_URL_ENV: database_url,
         "HYPERLOOM_KB_TOKEN": TOKEN,
         "PYTHONPATH": str(Path(__file__).resolve().parents[2]),
