@@ -20,7 +20,7 @@ from hyperloom_kb.identity import (
 from hyperloom_kb.knowledge_read import (
     PLANNER_PROMPT_HASH,
     PLANNER_SYSTEM_PROMPT,
-    AnthropicPlannerBackend,
+    GatewayPlannerBackend,
     KnowledgeReadError,
     KnowledgeReadService,
     LLMQueryPlanner,
@@ -153,7 +153,6 @@ from hyperloom_kb.sync import (
 )
 
 __all__ = [
-    "AnthropicPlannerBackend",
     "CATEGORIES",
     "CURRENT_SCHEMA_VERSION",
     "KNOWLEDGE_FIELDS",
@@ -187,6 +186,7 @@ __all__ = [
     "FileStore",
     "GLOBAL_TOKEN_ENV",
     "GLOBAL_URL_ENV",
+    "GatewayPlannerBackend",
     "GroupCandidate",
     "HTTPServiceConfig",
     "HTTPServiceError",

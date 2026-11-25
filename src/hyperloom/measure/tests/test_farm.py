@@ -180,7 +180,7 @@ def test_a_farm_that_rebuilds_no_aiter_carries_no_meta_directory_and_adds_no_var
     point = tmp_path / "point.yaml"
     point.write_text(yaml.safe_dump({"benchmark": {"envs": {"TP": 1}}}), encoding="utf-8")
 
-    envs = place_farm(point, farm)
+    envs = place_farm(point, farm, {})
 
     assert farm.aiter_meta is None
     assert dict(envs) == {"TP": 1, "PYTHONPATH": str(farm.site)}

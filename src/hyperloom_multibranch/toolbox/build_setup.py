@@ -12,7 +12,9 @@ Under ``ROOT`` (on storage the runners share) it makes the build store ``store/`
 ``signing.pem`` (Ed25519, mode 0600, this user's; an existing one is kept, never replaced), the trust file
 ``trust.json`` with its public key, the checkout of each upstream the image installs at its commit,
 ``sources/<component>/<commit>`` (``sgl_kernel`` from the image's ``sglang`` or its checkout ``/sgl-workspace/sglang``,
-or ``--sglang-ref``; ``vllm`` from the checkout the image's ``vllm`` was installed from, where it keeps one) and
+or ``--sglang-ref``; ``vllm`` from the checkout the image's ``vllm`` was installed from, where it keeps one; a component
+built from the checkout the operator pinned, such as ``llamacpp``, as a detached worktree of ``--framework-repo`` at its
+``HEAD``, which the toolbox reads from ``FRAMEWORK_REPO_PATH`` again at start) and
 ``build.env``, the ``HYPERLOOM_BUILD_*`` variables. ``--sglang-ref`` may be a full commit id, or a tag, branch or short
 id the local checkout ``--sglang-repo`` (or the image's) resolves; anything else is refused before anything is made. The
 commit of an override is recorded in ``build.env`` (``HYPERLOOM_BUILD_SGLANG_REF``), where the toolbox's check reads it
@@ -46,8 +48,12 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from types import MappingProxyType
 
+from hyperloom.inference_optimizer.framework_paths import GENERIC_FRAMEWORK_ROOT_ENV
 from hyperloom.measure import signing
 from hyperloom.measure.jit.native.config import BUILD_STORE_ENV, BUILD_TRUST_ENV, BuildStoreConfigError, trust_from_file
+from hyperloom.measure.runner.native.builder import BUILD_PYTHON_ENV
+from hyperloom.measure.runner.native.recipes import native_recipes
+from hyperloom.measure.runner.native.session import pinned_checkouts
 from hyperloom_multibranch.toolbox.build_preflight import (
     FULL_COMMIT,
     IMAGE_CHECKOUTS,
@@ -65,7 +71,6 @@ from hyperloom_multibranch.toolbox.build_preflight import (
 from hyperloom_multibranch.toolbox.native_builds import (
     BUILD_GFX_ENV,
     BUILD_IMAGE_ROOT_ENV,
-    BUILD_PYTHON_ENV,
     BUILD_SGLANG_REF_ENV,
     BUILD_SIGNING_KEY_ENV,
     BUILD_SOURCES_ENV,
@@ -87,8 +92,8 @@ _QUIET = "--quiet"
 
 
 class SetupError(Exception):
-    """What stops the setup: the image's sglang commit cannot be read, a checkout cannot be made, or an existing key or
-    trust file cannot be used (it is never replaced)."""
+    """What stops the setup: the image's sglang commit cannot be read, the framework checkout has no clean commit to pin,
+    a checkout cannot be made, or an existing key or trust file cannot be used (it is never replaced)."""
 
 
 @dataclass(frozen=True)
@@ -107,6 +112,8 @@ class BuildSetup:
     sglang_repo: str | None = None
     #: The image's own checkout of each component's upstream, read when its install names no commit.
     image_checkouts: Mapping[str, Path] = field(default_factory=lambda: MappingProxyType(IMAGE_CHECKOUTS))
+    #: The framework checkout the sessions name (``FRAMEWORK_REPO_PATH``), whose ``HEAD`` a pinned component builds.
+    framework_repo: Path | None = None
 
 
 def _directory(path: Path) -> Path:
@@ -187,11 +194,18 @@ def _full_commit(ref: str, repo: str | None) -> str:
 
 @dataclass(frozen=True)
 class _Clone:
-    """A checkout to make: ``component``'s upstream at ``ref``, cloned from ``repo`` (``None``: nowhere to clone from)."""
+    """A checkout to make: ``component``'s upstream at ``ref``, cloned from ``repo`` (``None``: nowhere to clone from),
+    or added as a detached worktree of it (``worktree``: the checkout the operator pinned)."""
 
     component: str
     ref: str
     repo: str | None
+    worktree: bool = False
+
+
+def _framework(setup: BuildSetup) -> dict[str, str]:
+    """The variable that names the framework checkout to the pinned components, as the sessions set it."""
+    return {GENERIC_FRAMEWORK_ROOT_ENV: str(setup.framework_repo)} if setup.framework_repo else {}
 
 
 def _clones(setup: BuildSetup) -> list[_Clone]:
@@ -208,6 +222,12 @@ def _clones(setup: BuildSetup) -> list[_Clone]:
     ref = _full_commit(setup.sglang_ref, repo) if setup.sglang_ref else (found.ref if found else None)
     if ref is not None:
         clones[SGL_KERNEL] = _Clone(SGL_KERNEL, ref, repo)
+    try:
+        pinned_clones = pinned_checkouts(native_recipes(), _framework(setup))
+    except BuildStoreConfigError as exc:
+        raise SetupError(str(exc)) from None
+    for pinned in pinned_clones:
+        clones[pinned.component] = _Clone(pinned.component, pinned.commit, str(pinned.checkout), worktree=True)
     if not any(clone.repo for clone in clones.values()):
         raise SetupError(
             f"no upstream commit with a checkout to clone it from can be read from {setup.image_root} or "
@@ -221,6 +241,10 @@ def _ensure_checkout(sources: Path, clone: _Clone) -> str:
     ref, checkout = clone.ref, sources / clone.component / clone.ref
     if not checkout.exists() and clone.repo is None:
         return "not made: the image keeps no checkout to clone it from"
+    if not checkout.exists() and clone.worktree:
+        _directory(checkout.parent)
+        _git("-C", clone.repo, "worktree", "add", _QUIET, "--detach", str(checkout), ref)
+        return _CREATED
     if not checkout.exists():
         _directory(checkout.parent)
         staged = checkout.with_name(f".{ref}.tmp")
@@ -304,7 +328,7 @@ def host_problems(setup: BuildSetup) -> list[str]:
         variables[BUILD_SOURCES_ENV],
         setup.image_root,
         setup.python,
-        named_commits(environment),
+        named_commits({**environment, **_framework(setup)}),
     )
     checkouts = [site.sources / clone.component / clone.ref for clone in clones]
     checkouts = [checkout for checkout in checkouts if checkout.is_dir()]
@@ -330,6 +354,12 @@ def _parser() -> argparse.ArgumentParser:
         help="the image's sglang commit: a full id, or a name the local checkout resolves (default: read from the image)",
     )
     parser.add_argument("--sglang-repo", help=f"where to clone sglang from (default: {IMAGE_SGLANG_CHECKOUT})")
+    parser.add_argument(
+        "--framework-repo",
+        type=Path,
+        default=os.environ.get(GENERIC_FRAMEWORK_ROOT_ENV) or None,
+        help=f"the framework checkout the sessions name (default: ${GENERIC_FRAMEWORK_ROOT_ENV})",
+    )
     return parser
 
 
@@ -343,6 +373,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         builder_image=args.builder_image,
         sglang_ref=args.sglang_ref,
         sglang_repo=args.sglang_repo,
+        framework_repo=args.framework_repo,
     )
     try:
         for line in set_up(setup):
