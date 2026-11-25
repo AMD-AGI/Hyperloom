@@ -21,14 +21,14 @@ from hyperloom.measure.jit.native.trust import BuildRefused, Refusal, Signer, Tr
 from hyperloom.measure.runner.native.recipes import llamacpp_recipe, sgl_kernel_recipe
 from hyperloom.measure.runner.native.service import Staged, ensure_build
 from hyperloom_multibranch.toolbox.native_builds import compiled_needs
-from hyperloom_multibranch.toolbox.store_builds import BuildSite, StoreBuildDriver
+from hyperloom_multibranch.toolbox.store_builds import StoreBuildDriver
 
 IMAGE = "sha256:" + "a" * 64
 OTHER_IMAGE = "sha256:" + "d" * 64
 BUILDER = "sha256:" + "c" * 64
 RECIPE = sgl_kernel_recipe()
 COMPONENT = RECIPE.component
-SITE = BuildSite({COMPONENT: RECIPE})
+RECIPES = {COMPONENT: RECIPE}
 
 
 def _inputs(source: str, image: str = IMAGE) -> BuildInputs:
@@ -63,7 +63,7 @@ def store(tmp_path: Path, key) -> BuildStore:
 
 
 def _driver(store: BuildStore, key, runner: Runner) -> StoreBuildDriver:
-    return StoreBuildDriver(store, Signer(key), SITE, lambda request, env: (), runner)
+    return StoreBuildDriver(store, Signer(key), RECIPES, lambda request, env: (), runner)
 
 
 def _publish(store: BuildStore, key, inputs: BuildInputs, wall: float, status: str = READY) -> None:
@@ -129,11 +129,11 @@ def test_needs_are_the_keys_acceptance_planned_with_a_pinned_checkouts_commit_in
     """A pinned checkout's commit is part of its build's key (``llamacpp/3+<commit>``): the driver waits on the key the
     planner planned and the runner builds, never one it keys again from the recipe alone."""
     recipe = llamacpp_recipe()
-    site = BuildSite({recipe.component: recipe})
+    recipes = {recipe.component: recipe}
     planned = BuildInputs(IMAGE, BUILDER, recipe.component, "gfx942", "1" * 64, recipe.build_version("e" * 40))
     accepted = SimpleNamespace(environment=SimpleNamespace(builds=(BuildNeed(recipe.component, planned),)))
     request = TestRequest(kind=TestKind.TEST, purpose=Purpose.EXPLORE, branch_id="b1", parent_commit="c0")
 
-    driver = StoreBuildDriver(store, Signer(key), site, compiled_needs, Runner())
+    driver = StoreBuildDriver(store, Signer(key), recipes, compiled_needs, Runner())
 
     assert driver.needs(request, accepted) == (planned,)

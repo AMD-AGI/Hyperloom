@@ -70,7 +70,7 @@ from hyperloom_multibranch.toolbox.build_preflight import (
     build_preflight,
     signing_key_problem,
 )
-from hyperloom_multibranch.toolbox.store_builds import BuildSite, StoreBuildDriver
+from hyperloom_multibranch.toolbox.store_builds import StoreBuildDriver
 from hyperloom_multibranch.toolbox.toolbox import AcceptanceSetup
 
 __all__ = [
@@ -190,8 +190,7 @@ def native_builds(
     site = NativeSite(machine, recipes, sources, image_root, commits, build_cpus(environ))
     session = open_session(store, signer, site, blobs, isolation)
     built = {**recipes, AITER_COMPONENT: aiter_module_recipe()}
-    build_site = BuildSite(built)
-    driver = StoreBuildDriver(store, signer, build_site, compiled_needs, session.runner)
+    driver = StoreBuildDriver(store, signer, built, compiled_needs, session.runner)
     return NativeBuilds(driver, session, runner_envs)
 
 
