@@ -99,8 +99,7 @@ Reply with EXACTLY ONE JSON object that matches this review schema:
       "packet_evidence": ["<dotted.path.in.packet>", ...],
       "risks": [{"severity": "blocker|major|minor", "summary": "..."}],
       "required_evidence": ["<key>", ...],
-      "notes": ["..."],
-      "failure_reason_code": "<failure_reason_code of the review_constraints rule this verdict rests on, else \"\">"
+      "notes": ["..."]
     }
   ],
   "advice": [
@@ -120,12 +119,6 @@ Rules (mirror SKILL.md Hard Rules + Approve Standard):
 - If there are no proposals, return `{"review_verdicts": []}` — the
   runtime falls back to a heartbeat.
 - Omit `alternative_action`.
-- When a verdict rests on a rule from `review_constraints`, copy that
-  rule's `failure_reason_code` verbatim into the verdict's own
-  `failure_reason_code`; leave it `""` when the verdict rests on your
-  own judgement. Some of those rules declare `advise` as their
-  `failure_verdict`, and naming the rule is how the Coordinator tells
-  a verdict resting on one apart from a substantive refusal.
 ==== END OUTPUT FORMAT ====
 """.strip()
 

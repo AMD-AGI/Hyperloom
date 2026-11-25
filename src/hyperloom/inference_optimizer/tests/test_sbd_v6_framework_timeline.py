@@ -536,12 +536,9 @@ def test_a_proposal_review_carries_exactly_the_recorded_keys(_bound_session):
     review = _ext(_bound_session)["proposals"][0]["critic_review"]
     assert set(review) == {
         "verdict",
-        "effective_verdict",
-        "held_to_rule",
         "reviewer",
         "reason",
         "confidence",
-        "failure_reason_code",
         "concerns",
         "reviewed_at",
     }
