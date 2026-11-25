@@ -31,9 +31,11 @@ class _Server:
 
     def __init__(self) -> None:
         self.handlers = {}
+        self.descriptions = {}
 
     def register(self, name, *, description, schema, handler, scopes):
         self.handlers[name] = handler
+        self.descriptions[name] = description
 
     async def call(self, name: str, **arguments):
         return await self.handlers[name](arguments, SimpleNamespace(principal=SimpleNamespace(branch=BRANCH)))
@@ -182,7 +184,17 @@ async def test_a_new_component_whose_install_names_no_commit_is_said_so_with_the
 
     change = RecipeDelta.from_document(taken["delta"]).components[0]
     assert change.upstream_ref is None and change.add_patches
-    assert "set upstream_repo and upstream_ref" in taken["note"]
+    assert taken["note"] == (
+        "vllm is new on your head and its installed package names no commit it was built from: "
+        "set upstream_repo and upstream_ref in the delta to the repository and full commit it came from"
+    )
+
+
+async def test_worktree_patch_is_described_by_the_installed_package_a_new_component_was_built_from(rig):
+    assert rig.server.descriptions["worktree_patch"] == (
+        "Store your worktree's change to one component, committed or not, as a patch; returns the delta and parent "
+        "to test. A component new on your head gets the upstream commit its installed package was built from."
+    )
 
 
 async def test_a_patch_to_a_component_with_a_native_tree_names_the_commit_that_tree_was_laid_out_from(

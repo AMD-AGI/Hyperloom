@@ -102,7 +102,7 @@ def register_worktree_tools(
         "worktree_patch",
         description=(
             "Store your worktree's change to one component, committed or not, as a patch; returns the delta and parent "
-            "to test. A component new on your head gets the upstream commit its source came from."
+            "to test. A component new on your head gets the upstream commit its installed package was built from."
         ),
         schema=_PATCH,
         handler=_patch(repo, worktrees),
@@ -165,7 +165,7 @@ def _patch(repo: ExperimentRepo, worktrees: WorktreeFor) -> Callable[[dict[str, 
             upstream = worktree.native_upstream(component) or await asyncio.to_thread(component_upstream, component)
             if upstream is None:
                 taken["note"] = (
-                    f"{component} is new on your head and its source names no upstream commit it came from: "
+                    f"{component} is new on your head and its installed package names no commit it was built from: "
                     "set upstream_repo and upstream_ref in the delta to the repository and full commit it came from"
                 )
             else:
