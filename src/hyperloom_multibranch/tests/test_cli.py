@@ -3304,6 +3304,7 @@ def test_a_sweep_spec_sweeps_the_closed_session_it_names_on_its_points_and_tests
     swept: list[tuple[Path, RunSettings, float | None]] = []
     ready = SimpleNamespace(peer_factory="peers", services="services")
     monkeypatch.setattr(cli, "hosted_ready_session", lambda host, workload, *, local: ready)
+    monkeypatch.setattr(cli, "machine_parallel_tests", lambda tp: 2)
     monkeypatch.setattr(
         cli,
         "conc_sweep",
@@ -3318,7 +3319,9 @@ def test_a_sweep_spec_sweeps_the_closed_session_it_names_on_its_points_and_tests
     [(root, settings, deadline)] = swept
     assert root == layout.root and deadline is None
     assert (settings.conc_sweep_concs, settings.conc_sweep_parallel) == ((2, 8), 4)
-    assert replace(settings, conc_sweep_concs=(), conc_sweep_parallel=2) == _settings()
+    assert settings.caps.max_parallel_tests == 2, "what fits on this run's cards, not what the session ran with"
+    expected = replace(_settings(), conc_sweep_concs=(2, 8), conc_sweep_parallel=4)
+    assert settings == replace(expected, caps=replace(expected.caps, max_parallel_tests=2))
 
 
 def test_a_sweep_spec_naming_no_closed_multibranch_session_is_refused(tmp_path: Path) -> None:

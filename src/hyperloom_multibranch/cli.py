@@ -550,7 +550,11 @@ def _hosted_sweep(host: HostInfo, spec: CampaignSpec) -> HostedStart:
     if not (layout.manifest.is_file() and layout.report.is_file()):
         raise ValueError(f"conc_sweep.session_dir {layout.root} holds no closed multi-branch session")
     settings = _with_sweep_options(read_manifest(layout.manifest).settings, spec.sweep_concs, spec.sweep_parallel)
-    ready = hosted_ready_session(host, settings.workload, local=spec.measurement == MEASUREMENT_LOCAL)
+    local = spec.measurement == MEASUREMENT_LOCAL
+    fit = machine_parallel_tests if local else grant_tests_that_fit(host, spec_make_before_break(spec))
+    tests = min(spec.max_parallel_tests, fit(settings.workload.tp))
+    settings = replace(settings, caps=replace(settings.caps, max_parallel_tests=tests))
+    ready = hosted_ready_session(host, settings.workload, local=local)
     sweep = partial(conc_sweep, layout, settings, ready.peer_factory, ready.services)
     return HostedStart(partial(sweep, deadline_unix=grant_tests_end_by(host)))
 
