@@ -592,6 +592,47 @@ async def test_control_only_integrate_measures_without_resolving_historical_patc
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("requested", ["", "--max-num-seqs 128"], ids=["no-args", "own-args"])
+async def test_a_vllm_integrate_rebaseline_launches_and_reports_the_requested_server_args(
+    session_dir, monkeypatch, requested
+):
+    from hyperloom.orchestrator.actions.executors import baseline as baseline_mod
+
+    monkeypatch.setenv("FRAMEWORK", "vllm")
+    state = _seed_state(session_dir, baseline_tput=1000.0, baseline_config_path="/tmp/base.yaml")
+    seed_kernel_keep(state, "gemm_args_only", source_file="/tmp/unrelated.py", artifact="/tmp/unrelated.patch")
+    state.save(session_dir)
+    launched = {}
+
+    class FakeBaselineExecutor:
+        default_timeout_sec = 7800
+
+        def __init__(self, *, session_dir, shared_state):
+            self.session_dir = session_dir
+
+        async def __call__(self, ctx):
+            launched.update(ctx.task.params)
+            return {"output_throughput": 1100.0, "completed_requests": 10}
+
+    monkeypatch.setattr(baseline_mod, "BaselineExecutor", FakeBaselineExecutor)
+
+    result = await krh.integrate_handler(
+        {
+            "kernel_id": "gemm_args_only",
+            "source": "forge_gemm_tuning",
+            "mode": "env_only",
+            "extra_server_args": requested,
+            "remove_args": ["--disable-cuda-graph"],
+        },
+        session_dir=session_dir,
+    )
+
+    assert result["status"] == "ok", result
+    assert launched["extra_server_args"] == requested
+    assert result["extra_server_args"] == requested
+
+
+@pytest.mark.asyncio
 async def test_bare_kernel_id_with_inherited_controls_still_resolves_and_applies_patch(
     session_dir, tmp_path, monkeypatch
 ):

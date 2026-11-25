@@ -19,7 +19,6 @@ from typing import TYPE_CHECKING, Any
 
 from hyperloom.common.agentx_workload import is_mlperf_backend
 from hyperloom.common.perf_metric import agentx_active
-from hyperloom.inference_optimizer.breakdown.recorder.baseline_event import RUN_AFTER_MOE_RUNNER_FAILURE, RUN_INITIAL
 from hyperloom.inference_optimizer.trace.task_progress import heartbeat_while_output_flows
 from inference_suite.contracts import FailedStep
 from inference_suite.server_log import death_excerpt
@@ -134,17 +133,11 @@ class _BaselineAccuracyMixin:
     """Eval-failure routing and the accuracy stop of a benchmark run."""
 
     @staticmethod
-    def _failure_carries_markers(
-        result: dict[str, Any],
-        markers: tuple[str, ...],
-        context_markers: tuple[str, ...] | None = None,
-    ) -> bool:
+    def _failure_carries_markers(result: dict[str, Any], markers: tuple[str, ...]) -> bool:
         """Whether a failed result's error tail, warnings or logs hit a marker."""
 
         def _hit(text: str) -> bool:
-            if not any(m in text for m in markers):
-                return False
-            return not context_markers or any(m in text for m in context_markers)
+            return any(m in text for m in markers)
 
         if _hit(str(result.get("error") or "")):
             return True
@@ -227,9 +220,9 @@ class _BaselineAccuracyMixin:
             for marker in _EVAL_SERVER_UNREACHABLE_MARKERS
         )
 
-    async def _run_retrying(self, ctx: RunnerContext, *, recorder: Any = None) -> dict[str, Any]:
-        """Run the baseline; an eval-rooted failure fails the round, a MoE-runner failure retries once."""
-        result = await self._run_pass(ctx, recorder=recorder, attempt_reason=RUN_INITIAL)
+    async def _run_with_accuracy(self, ctx: RunnerContext, *, recorder: Any = None) -> dict[str, Any]:
+        """Run the baseline and its accuracy round; an eval-rooted failure fails the round."""
+        result = await self._run_pass(ctx, recorder=recorder)
         # An eval that never reached a verdict because the server was gone is a broken measurement, not a statement
         # about accuracy or about a missing framework capability. Leaving it in the eval-rooted branch stamps it as an
         # eval-failure contract and hands it to the enablement lane, which then spends rounds looking for a capability
@@ -273,21 +266,6 @@ class _BaselineAccuracyMixin:
                         "the round fails with no throughput-only retry."
                     )
                 return result
-        if result.get("status") != "succeeded" and self._is_moe_runner_rooted_failure(result):
-            log.warning(
-                "baseline_executor: the server died on a MoE runner backend "
-                "that has no implementation for this checkpoint's quant "
-                "scheme; retrying once without --moe-runner-backend so the "
-                "framework picks the backend itself."
-            )
-            retry = await self._run_pass(
-                ctx,
-                recorder=recorder,
-                attempt_reason=RUN_AFTER_MOE_RUNNER_FAILURE,
-                force_drop_moe_runner_backend=True,
-            )
-            retry.setdefault("nonfatal_warnings", []).append("moe_runner_backend_fallback_dropped_flag")
-            result = retry
         await self._run_baseline_accuracy_round(ctx, result)
         self._maybe_stop_on_missing_baseline_accuracy(ctx, result)
         return result
