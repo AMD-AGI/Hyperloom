@@ -41,9 +41,7 @@ from pathlib import Path
 import yaml
 
 from hyperloom.common.benchmark_config import is_agentx
-from inference_suite.client_env import CLIENT_SITE_PACKAGES
-from inference_suite.recipe.inferencex import AGENTX_TRACE_ENV
-from inference_suite.staging import GSM8K_TASK
+from inference_suite import AGENTX_TRACE_ENV, CLIENT_SITE_PACKAGES, GSM8K_TASK
 
 __all__ = [
     "DATASETS_CACHE_ENV",

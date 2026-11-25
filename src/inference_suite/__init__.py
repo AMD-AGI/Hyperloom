@@ -31,7 +31,9 @@ the config before the round starts. :func:`inferencex_root` is the staged Infere
 on under :data:`GPU_MASK_ENV`; :func:`runner_owned` names the flags and environment a round sets itself, which no
 layer a host hands it may set. The AgentX client staging installs is patched to export the output token count of a
 reply it found nothing in under :data:`ERROR_OSL_METRIC` on that request's export line, and to log the error of a
-warmup request that aborts the replay after :data:`WARMUP_ERROR_PREFIX` on the line of its warmup abort.
+warmup request that aborts the replay after :data:`WARMUP_ERROR_PREFIX` on the line of its warmup abort. That client's
+site-packages lie at :data:`CLIENT_SITE_PACKAGES` below a staged root, the corpus an AgentX replay loads is named by
+:data:`AGENTX_TRACE_ENV`, and the evaluation's task is :data:`GSM8K_TASK` below the staged InferenceX.
 
 A caller measuring a server outside a round as a fixed round does builds each pass with :func:`client_argv` under
 :func:`fixed_client_env`, the discarded :func:`warmup_pass` before the measured one.
@@ -41,10 +43,12 @@ from __future__ import annotations
 
 from inference_suite.aiperf_patch import ERROR_OSL_METRIC, WARMUP_ERROR_PREFIX
 from inference_suite.cli import EXIT_REFUSED
+from inference_suite.client_env import CLIENT_SITE_PACKAGES
 from inference_suite.compose import GPU_MASK_ENV, runner_owned
 from inference_suite.contracts.base_launch import LaunchQuery
 from inference_suite.contracts.layout import RunDirError
 from inference_suite.load.fixed import ClientPass, ClientTarget, ClientTool, client_argv, fixed_client_env, warmup_pass
+from inference_suite.recipe.inferencex import AGENTX_TRACE_ENV
 from inference_suite.recipe.resolve import Miss, SourceSnapshot, resolve_base
 from inference_suite.recipe.sources import (
     InferencexCommitRefused,
@@ -64,6 +68,7 @@ from inference_suite.staging import (
     CLIENT_FILE,
     CLIENT_ROOT_ENV,
     CLIENT_SCRIPT,
+    GSM8K_TASK,
     StagingError,
     inferencex_root,
     manifest_sha256,
@@ -73,15 +78,18 @@ from inference_suite.staging import (
 )
 
 __all__ = [
+    "AGENTX_TRACE_ENV",
     "CLIENT_FILE",
     "CLIENT_ROOT_ENV",
     "CLIENT_SCRIPT",
+    "CLIENT_SITE_PACKAGES",
     "ClientPass",
     "ClientTarget",
     "ClientTool",
     "ERROR_OSL_METRIC",
     "EXIT_REFUSED",
     "GPU_MASK_ENV",
+    "GSM8K_TASK",
     "INFERENCEX_CLIENT_COMMIT",
     "InferencexCommitRefused",
     "LaunchQuery",

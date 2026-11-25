@@ -106,7 +106,7 @@ from hyperloom.orchestrator.actions.executors._aiter_serving_once import build_i
 from hyperloom.sandbox.card_occupancy import card_guard, own_sandbox_processes
 from inference_suite.contracts import NormalisedManifest
 from inference_suite.frameworks import Framework, FrameworkKind, framework_facts
-from inference_suite.staging import inferencex_root
+from inference_suite import inferencex_root
 
 __all__ = ["run"]
 
