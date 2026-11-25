@@ -66,6 +66,7 @@ _BYTES_PER_MIB = 1024 * 1024
 _BYTES_PER_GB = 1_000_000_000
 _RANDOM_RANGE_RATIO = "0.8"
 _THINKING_MODE = "thinking_on"
+_FALSE = "false"
 #: InferenceX's value for a spec-decoding or KV-offloading setting the point leaves off.
 _UNSET = "none"
 
@@ -133,7 +134,7 @@ class InferencexPoint:
     kv_offloading: str | None
     kv_offload_backend: Mapping[str, Any] | None
     router: Mapping[str, Any] | None
-    #: ``None`` where InferenceX sizes the offload DRAM at launch instead (from #4766 on).
+    #: ``None`` where InferenceX sizes the offload DRAM at launch instead.
     total_cpu_dram_gb: int | None
     require_power: bool
 
@@ -165,8 +166,8 @@ class InferencexPoint:
             "OSL": str(self.osl or 0),
             "RANDOM_RANGE_RATIO": _RANDOM_RANGE_RATIO,
             "THINKING_MODE": _THINKING_MODE,
-            "RUN_EVAL": "false",
-            "EVAL_ONLY": "false",
+            "RUN_EVAL": _FALSE,
+            "EVAL_ONLY": _FALSE,
             "REQUIRE_POWER": "1" if self.require_power else "0",
             "ROUTER_METADATA": json.dumps(self.router) if self.router else "",
             "KV_OFFLOAD_BACKEND_METADATA": json.dumps(self.kv_offload_backend) if self.kv_offload_backend else "",
@@ -185,7 +186,7 @@ class InferencexPoint:
             "PCP_SIZE": str(self.pcp),
             "DP_ATTENTION": str(self.dp_attention).lower(),
             "GPU_COUNT": str(self.gpu_count),
-            "IS_MULTINODE": "false",
+            "IS_MULTINODE": _FALSE,
         }
 
 
@@ -230,7 +231,7 @@ def _cpu_dram_gb(
     runner: str, block: Mapping[str, Any], benchmark: Mapping[str, Any], runners: Mapping[str, Any]
 ) -> int | None:
     """The CPU DRAM in GB an AgentX point offloads KV cache to: its GPUs' share of the node's DRAM, 0 without, and
-    ``None`` when the block names no ``dram-utilization``: InferenceX then sizes it at launch (#4766)."""
+    ``None`` when the block names no ``dram-utilization``: InferenceX then sizes it at launch."""
     if benchmark["kv-offloading"] != "dram":
         return 0
     cluster = (

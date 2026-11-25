@@ -107,7 +107,7 @@ def test_points_and_their_launcher_environment_match_inferencex_own_matrix():
     points = every_point(_main().bundle)
 
     assert len(points) == 321
-    # IS_MULTINODE is what the launcher adds from InferenceX #4754 on; ce35bc935 predates it and ignores it.
+    # The launcher adds IS_MULTINODE only after ce35bc935, which predates it and ignores it.
     environments = [
         {key: value for key, value in point.environment().items() if key != "IS_MULTINODE"} for point in points
     ]
