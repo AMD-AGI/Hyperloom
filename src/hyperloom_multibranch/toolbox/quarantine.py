@@ -11,7 +11,7 @@ marked same-node, so a toolbox with one node counts the failures of its node (:m
 never quarantines it.
 
 A failure that says nothing about its node (``attempts.NODE_BLAMELESS_INFRA_REASONS``) or cards a process outside the
-test held (``foreign_process_on_card``, which the card guard refuses on every attempt and the retry waits out) never
+test held (``foreign_process_on_card``, whose retry waits for the cards to free) never
 quarantines it, and a node quarantine the blackboard holds from such a failure (one recorded before that rule) is not
 read back: :meth:`load` leaves it out, so the node is in service again without an operator.
 """
