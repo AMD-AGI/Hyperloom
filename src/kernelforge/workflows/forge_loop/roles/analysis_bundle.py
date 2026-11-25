@@ -63,7 +63,7 @@ class AnalysisBundle:
     outcome: AnalysisOutcome | None = None
 
     def apply(self, context: EvidenceContext) -> EvidenceContext:
-        """Return an orchestration context backed by this bundle."""
+        """Return an evidence context backed by this bundle."""
         source_map = self.root / "source_map.md"
         report = self.root / "report.md"
         catalog = self.root / "artifact_catalog.json"
@@ -144,7 +144,7 @@ class AnalysisBundleError(RuntimeError):
 
 @dataclass(frozen=True)
 class AnalysisOutcome:
-    """Structured Analysis attempt result for campaign events and orchestration."""
+    """Structured Analysis attempt result for campaign events and the loop's refresh decisions."""
 
     analysis_commit: str
     requested_tier: str
@@ -249,7 +249,7 @@ def _source_digest(paths: tuple[Path, ...]) -> str:
 
 @dataclass(frozen=True)
 class _BundleIdentity:
-    """What a bundle must answer for: the orchestration context, its cases, and the driver and source digests."""
+    """What a bundle must answer for: the evidence context, its cases, and the driver and source digests."""
 
     context: EvidenceContext
     cases: tuple[AnalysisCase, ...]

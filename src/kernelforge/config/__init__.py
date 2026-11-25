@@ -282,8 +282,7 @@ class Config:
 
     # On by default: render every knowledge pillar as a one-line pointer instead
     # of inlining its whole INDEX.md map. The maps are re-read on every turn of
-    # every session, and the index is carried into each specialist and synthesis
-    # payload as well, so the cost is far larger than one copy: measured on the
+    # every session, so the cost is far larger than one copy: measured on the
     # analysis role, the first-turn prefix falls from 51,275 tokens to 8,415
     # (-83.6%), and on the implementer lanes from a mean 62,022 (n=18) to 17,704
     # (n=4, -71.5%, ranges disjoint).

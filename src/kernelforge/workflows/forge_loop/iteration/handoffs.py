@@ -1,4 +1,4 @@
-"""Immutable per-iteration handoffs for planning and recovery consumers."""
+"""Immutable per-iteration handoffs for the next round's sessions and for recovery."""
 
 from __future__ import annotations
 

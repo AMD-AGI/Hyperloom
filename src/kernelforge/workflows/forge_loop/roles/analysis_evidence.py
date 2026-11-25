@@ -154,8 +154,8 @@ class AnalysisEvidenceMixin:
                 ),
                 program_context=(self.ic.program_md or f"Optimize the kernel at {self.ic.kernel_file}."),
                 source_map_path=str(source_map_path),
-                # The declared source set, verbatim and in campaign order, so the planner is told what it may edit
-                # instead of inferring it from the one path in program_context.
+                # The declared source set, verbatim and in campaign order, so a reader of the context is told what
+                # the campaign may edit instead of inferring it from the one path in program_context.
                 editable_sources=tuple(self._target_source_files()),
                 cases=cases,
                 knowledge_index=knowledge_index,
@@ -181,13 +181,13 @@ class AnalysisEvidenceMixin:
                     gpu_target=self.config.gpu_target,
                     language=resolve_language_dirs(backend, root),
                     frameworks=("aiter",) if include_aiter else (),
-                    # The orchestration context is inlined into every specialist
-                    # and analysis prompt, so the ablation has to reach it too or
-                    # it only measures half the knowledge block's cost.
+                    # The evidence context is inlined into the Analysis and Supervisor
+                    # prompts, so the ablation has to reach it too or it only measures
+                    # half the knowledge block's cost.
                     defer_all=bool(getattr(self.config, "defer_knowledge_maps", False)),
                 )
             except OSError:
-                log.debug("failed to build orchestration knowledge index", exc_info=True)
+                log.debug("failed to build the evidence knowledge index", exc_info=True)
         return knowledge_index
 
     def _with_evidence_standing(self, context):

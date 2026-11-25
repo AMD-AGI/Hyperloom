@@ -93,7 +93,7 @@ class RoundAdmissionMixin:
         return self.best_wall_ms <= self.ic.target_wall_ms
 
     def _update_search_policy(self, iteration: int) -> SearchPolicyDecision:
-        """Derive and persist the search mode before planning an iteration."""
+        """Derive and persist the search mode before an iteration's round."""
         window_gain = self._exploit_window_gain(
             self.state_store.recent_results(MARGINAL_GAIN_SCAN_WINDOW),
             window=MARGINAL_GAIN_WINDOW,

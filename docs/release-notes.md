@@ -41,9 +41,12 @@ it.
   read: one that is still set is ignored, and the run starts normally. A
   campaign created before this change is not resumed: its `run_state.json` carries
   fields the loader rejects. `kernelforge export-runs` no longer emits
-  `plan_file`, `plan` from a plan file or `analysis_report`, and the decision
-  label `ORCHESTRATION_ERROR` is gone from the loop and from the
-  `kernelforge-run-v1` declaration.
+  `plan_file`, `plan` from a plan file or `analysis_report`, and writes one
+  unit per round at every `--lanes`. The `kernelforge-run-v1` declaration and
+  the `kernelforge-v1` mapping drop `rationale.plan`, `rationale.plan_file`,
+  `reflection.analysis_report` and the decision label `ORCHESTRATION_ERROR`,
+  so Experiences collected from here on carry a new `schema_ref`; those
+  already in a KB keep theirs.
 - **A hosted multi-branch run sets the AgentX window and the server boot
   budget.** The campaign spec's `multibranch` block takes
   `agentx_duration_sec` and `agentx_objective` (for `workload: agentx` only),

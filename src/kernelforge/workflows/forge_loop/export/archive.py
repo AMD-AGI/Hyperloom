@@ -24,14 +24,11 @@ from kernelforge.workflows.forge_loop.campaign.experiments_layout import (
 )
 from kernelforge.workflows.forge_loop.export.files import read_json, read_text
 
-#: How many sentences of a plan without a Summary line, or of a single session's rationale when it wrote no lesson,
-#: an Experience keeps.
+#: How many sentences of a candidate's rationale an Experience keeps when its iteration wrote no lesson.
 _EXCERPT_SENTENCES = 3
 _HEADING = re.compile(r"^#{1,6} (\S.*)$")
 _SENTENCE_END = re.compile(r"(?<=[.!?])\s+(?=[A-Z`*\"'(\[])")
 _LIST_MARKER = re.compile(r"^(?:[-*+]|\d+[.)])\s+")
-#: A published Analysis generation's directory; an Analysis still at work writes under ``analysis/work/`` instead.
-_GENERATION = re.compile(r"^generation-\d{3,}$")
 
 
 def first_sentences(text: str, count: int = _EXCERPT_SENTENCES) -> str | None:

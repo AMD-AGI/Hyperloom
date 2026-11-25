@@ -15,7 +15,7 @@ measured that iteration, and a kept candidate takes the record that session prin
 experiment no exported run recorded, and two logs that disagree on one session's record, leave ``kb_record`` unset.
 Nothing about a log stops the export, and no path is compared, so two runs on one kernel file each keep their own
 record, as does a run whose ``forge_experiments`` was moved out of the workspace it was made in. A unit does not
-name the log: the only files a unit names are its plan, its kernel, and the diff of every file the commit touched.
+name the log: the only files a unit names are its kernel and the diff of every file the commit touched.
 
 Kernel Forge writes naive local times, and the units carry them as it wrote them; collection reads a naive time as
 UTC. That is right for a run made in a container, which normally runs in UTC, and shifts the times of a run made on a

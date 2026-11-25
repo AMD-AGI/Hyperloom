@@ -112,7 +112,7 @@ class CaseRoofline:
         }
 
 
-#: How a planning or reviewing agent is to read the roofline figures. Carried in
+#: How a reviewing agent is to read the roofline figures. Carried in
 #: the payload beside them, so it reaches every agent that sees them and no
 #: campaign without a ceiling has its prompt changed.
 ROOFLINE_HOW_TO_READ = (
@@ -161,7 +161,7 @@ class CampaignRoofline:
 
 @dataclass(frozen=True)
 class CaseEvidence:
-    """Normalized case evidence exposed to read-only planning agents."""
+    """Normalized case evidence exposed to read-only reviewing agents."""
 
     case_id: str
     shape: str = ""

@@ -19,7 +19,7 @@ blocked by the system, so no change is ever accepted without measured evidence.
 3. **Benchmark** — measure wall-clock and kernel time (median over iterations).
 4. **Register check** — read the candidate's VGPR usage from the build and record
    it with the measurements. Hardware counters are not read per candidate: the
-   Analysis Agent profiles the current best, and planning reads that evidence.
+   Analysis Agent profiles the current best, and the round's sessions read that evidence.
 5. **Accept** (assembly only) — run the task's own `compile_command`, then its
    `correctness_command`, stopping at the first failure, and judge the
    `numerical_validation` evidence the assembly backend's contract requires.

@@ -163,7 +163,7 @@ class LoopCallbacks:
 
 
 def _with_search_actor(agents: LoopAgents, bundle) -> LoopAgents:
-    """The loop's agents with the planning and implementation actor taken from one relay profile, if any."""
+    """The loop's agents with the implementation actor taken from one relay profile, if any."""
     if bundle is None:
         return agents
     return replace(

@@ -1,30 +1,29 @@
 # KernelForge forge-loop runs: one Experience per candidate kernel a run archived (candidates/iter_NNN), the kernel
-# one iteration measured and KernelForge's decision to keep or revert it. A run yields one or more: each lane of a
-# fan-out round is measured as its own candidate, built from its own plan, so each lane is its own Experience.
-# rationale.reasoning is the whole lesson KernelForge writes for the iteration, lessons/iter_NNN.md: the implementer's
-# record of what it explored, including HELD-FIXED, NEGATIVES, and DISPROOF, with the loop's scope and outcome lines
-# after the verdict. When that file is absent, a single session's reasoning is the first three sentences of the
-# rationale its meta.json records. A lane or a merge with neither has none. A lesson longer than the 32 KB a text
-# field holds makes collect skip the candidate. Reasoning is required: a candidate whose logs hold none, such as a
-# merge of two earlier candidates, which no agent made, becomes no Experience.
+# one iteration measured and KernelForge's decision to keep or revert it. An iteration is one round, and a round has
+# one candidate whatever its width: what the round's lanes left on the canonical tree, merged by a session when more
+# than one lane changed the kernel. A run yields one Experience per round that produced a candidate.
+# rationale.reasoning is the whole lesson KernelForge writes for the iteration, lessons/iter_NNN.md: what the round's
+# sessions recorded, including HELD-FIXED, NEGATIVES, and DISPROOF, with the loop's scope and outcome lines after the
+# verdict. A round of several lanes has each session's record under its own heading: every lane, then the merge. When that file is absent, the reasoning is the
+# first three sentences of the rationale the candidate's meta.json records. A lesson longer than the 32 KB a text
+# field holds makes collect skip the candidate. Reasoning is required: a candidate whose logs hold neither becomes
+# no Experience.
 # provenance.extra holds the candidate's metadata, which never reaches a prompt: meta, the scalar measurement and
 # decision fields of the candidate's meta.json (commit_hash, decision, kept, validation_passed, wall_ms,
 # mean_case_speedup, snr_db, vgpr, baseline_wall_ms, best_wall_ms_before, best_mean_case_speedup_before,
 # delta_vs_best_pct, session_end_reason, turns, agent_profile_id, agent_provider, agent_model, blockage_epoch), not
 # its plan, rationale, bench, profile, pmc_diagnosis, or shape; kb_record, the record KernelForge's own experience KB
-# filed a kept candidate under; candidate_origin, session or lane; analysis_generation, the Analysis generation
-# reflection.analysis_report comes from, as analysis/<commit>/generation-NNN under forge_experiments; and
-# analysis_report_omitted, why a report too long for a text field is not held.
+# filed a kept candidate under; and candidate_origin, which is always session.
 # Every Experience has a raw_logs field, and it is intentionally empty for now: it links one 0-byte file,
 # raw-logs-not-collected.log, which kernelforge export-runs writes beside its document. The global KB refuses a
 # complete Experience without raw logs, and KernelForge's run logs are not collected yet. raw_logs is a top-level
 # Experience field, not a field of a category, so it is not declared here and takes no part in the schema_ref. Beyond
-# it an Experience carries none of the profiler's output: the only run files it links are the plan, the measured
-# kernel, and the archived diff of every file the commit touched (candidates/iter_NNN/change.diff). The diff and the
-# kernel file are different records: the diff has every file the commit touched and not the kernel's unchanged lines,
-# and the kernel file has none of the other files. The kernelforge-v1 mapping names both as code, so collection
-# screens them with the token formats only. The only Analysis output an Experience holds is the report its plan
-# was built on, as text. The lesson is rationale.reasoning, not a second copy under reflection.
+# it an Experience carries none of the profiler's output and none of the Analysis Agent's: the only run files it
+# links are the measured kernel and the archived diff of every file the commit touched
+# (candidates/iter_NNN/change.diff). The diff and the kernel file are different records: the diff has every file the
+# commit touched and not the kernel's unchanged lines, and the kernel file has none of the other files. The
+# kernelforge-v1 mapping names both as code, so collection screens them with the token formats only. The lesson is
+# rationale.reasoning, not a second copy under reflection.
 # The objective and every identity field always form the repeat group, with the schema: Hyperloom groups Experiences
 # that way by itself (hyperloom_kb/query_view.py repeat_group_key) and accepts group: true only on baseline and change
 # fields, so none is declared here.
@@ -81,25 +80,9 @@ baseline:
       the candidate's meta.json archives (baseline_wall_ms).
     kind: number
 
-# Hyperloom adds reasoning, alternatives, and preconditions to every declaration. Writing them here fails with
-# `declaration.rationale redeclares a default field`. For this declaration rationale.reasoning is the whole lesson.
-rationale:
-  - name: plan
-    description: >-
-      What the plan the candidate was built from sets out to do: the whole Summary line the plan opens with, the
-      planner's statement of the problem it addresses and of its goal. For a lane, the plan is the lane's own; for a
-      single session, the round's optimization plan, read from its original draft when KernelForge could not revise
-      the draft and put the critic's review in front of it (kernelforge/workflows/forge_loop/roles/orchestration.py:1711 at
-      1c14e79e1); for a merge, the stacked plans as KernelForge records them. A plan without a Summary line, as every
-      plan written before KernelForge asked for one is, gives its first three sentences instead: lines a planner wrote
-      before the plan's first heading are skipped, as are headings, code blocks, and tables.
-    kind: text
-  - name: plan_file
-    description: >-
-      The whole plan the candidate was built from, as KernelForge archived it in the planning round's
-      orchestration/iter_NNN/: optimization_plan.md for a single session or a round's first lane, lane_NNN.md for
-      the round's other lanes. The Experience links to the file by its name, size, and SHA-256.
-    kind: file
+# Hyperloom adds reasoning, alternatives, and preconditions to every declaration, and this one declares no rationale
+# field of its own. Writing a default here fails with `declaration.rationale redeclares a default field`. For this
+# declaration rationale.reasoning is the whole lesson.
 
 change:
   - name: source_code
@@ -146,21 +129,3 @@ outcome:
       can be slower than best_wall_ms_before.
     kind: number
     role: measurement
-
-reflection:
-  - name: analysis_report
-    description: >-
-      The whole report.md of the Analysis generation the candidate's plan was built on: KernelForge's cross-case
-      summary of one kernel, which its Analysis agent publishes for the commit it analyzed as one immutable
-      generation, forge_experiments/analysis/<commit>/generation-NNN/. Analysis runs on the baseline, and again after
-      a KEEP once the canonical mean case speedup has improved 5% on the analyzed kernel's, or just before a
-      Supervisor intervention; on a campaign longer than two hours it profiles the kernel with rocprof-compute,
-      through rocpc_profile.py, and a shorter campaign's report is written from the source alone. The generation is
-      the one the planning round's orchestration/iter_NNN/context.json names as its analysis_bundle evidence: until a
-      refresh is published, rounds plan on the last report that was, so candidates on both sides of a KEEP can carry
-      the same report. Optional: absent when the round named no published generation, as for a merge, which no round
-      planned, and when report.md is over the 32 KB a text field holds, which provenance.extra.analysis_report_omitted
-      then says. The profiler's raw output, such as pmc_perf.csv, the rocprofv3 counter CSVs, and the profile/ and
-      .rocprofv3/ directories, is never stored: it is large and tied to one binary.
-    kind: text
-    required: false

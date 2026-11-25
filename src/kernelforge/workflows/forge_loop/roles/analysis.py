@@ -673,7 +673,7 @@ class AnalysisAgentService:
         )
 
     def apply_published_evidence(self, context: EvidenceContext, *, evidence_commit: str) -> EvidenceContext:
-        """Restore one published bundle as stale-safe planning evidence."""
+        """Restore one published bundle as stale-safe evidence."""
         commit_root = Path(context.workspace).resolve() / "forge_experiments" / "analysis" / evidence_commit
         root = _published_generation_root(commit_root)
         if root is None:
