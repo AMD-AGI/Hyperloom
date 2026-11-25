@@ -44,6 +44,7 @@ def _laid(job: dict) -> LaidTree:
         image_root=Path(job["image_root"]),
         laid=frozenset(job["laid"]),
         environment=dict(job.get("environment", {})),
+        upstream_ref=job["upstream_ref"],
     )
 
 

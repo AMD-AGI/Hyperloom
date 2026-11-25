@@ -233,7 +233,7 @@ def test_the_reference_pack_loads_and_passes_its_own_examples() -> None:
         Kind.NAMES: 17,
         Kind.LOG_REGEX: 17,
         Kind.ENV_DEFAULT: 2,
-        Kind.COMPONENT_LAYOUT: 9,
+        Kind.COMPONENT_LAYOUT: 10,
     }
 
 
