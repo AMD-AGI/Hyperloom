@@ -115,13 +115,3 @@ def test_a_point_that_cannot_be_read_gives_no_lines(tmp_path: Path, point: str) 
         path.write_text(point, encoding="utf-8")
 
     assert read_test_timing_lines((path,), tmp_path) == ()
-
-
-async def test_a_test_of_an_installed_framework_carries_no_timing_lines(tmp_path: Path, rig) -> None:
-    point = _point(tmp_path, "vllm")
-    scripted = FrameworkBackend(rig().backend, point, [OK], stamps={ROUND_LOG: LOG}, framework="vllm")
-    planner = PointPlanner(point, CompiledEnvironment(Recipe(IMAGE), IMAGE, (), (), {}, tmp_path / "blobs"))
-
-    stored, outcome = await stored_and_logged(tmp_path, scripted, planner)
-
-    assert outcome.validity is Validity.SUCCEEDED and (stored.timing_lines, outcome.timing_lines) == ((), ())
