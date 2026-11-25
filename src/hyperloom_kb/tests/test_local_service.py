@@ -274,7 +274,7 @@ def test_the_same_settings_spelled_differently_reuse_the_running_service(tmp_pat
     config = _config(_free_port(), tmp_path)
     gateway = {"ANTHROPIC_BASE_URL": "https://gateway.example", "ANTHROPIC_API_KEY": "key", "CLAUDE_MODEL": "m"}
     launched = {**_env_without_planner_gateway(tmp_path), **gateway}
-    aliased = {**launched, "ANTHROPIC_AUTH_TOKEN": "key", "ANTHROPIC_MODEL": "m"}
+    aliased = {**launched, "ANTHROPIC_AUTH_TOKEN": "key"}
     first = ensure_local_service(config, tmp_path / "home", env=launched)
     try:
         assert ensure_local_service(config, tmp_path / "home", env=aliased).process is None
@@ -313,11 +313,12 @@ def test_a_service_started_from_other_code_is_restarted_by_a_launch_and_kept_by_
     tmp_path: Path,
 ) -> None:
     older_code = tmp_path / "older"
-    shutil.copytree(
-        Path(__file__).resolve().parents[1],
-        older_code / "hyperloom_kb",
-        ignore=shutil.ignore_patterns("tests", "__pycache__"),
-    )
+    for package in ("hyperloom_kb", "hyperloom_common"):
+        shutil.copytree(
+            Path(__file__).resolve().parents[2] / package,
+            older_code / package,
+            ignore=shutil.ignore_patterns("tests", "__pycache__"),
+        )
     with (older_code / "hyperloom_kb" / "remote.py").open("a", encoding="utf-8") as source:
         source.write("\n# as released before an upgrade\n")
     port = _free_port()

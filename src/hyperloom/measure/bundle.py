@@ -290,7 +290,11 @@ def _read_checked(root_fd: int, entry: ManifestFile) -> bytes:
 
 def _compare(relative: str, actual_size: int, actual_sha: str, size: int, sha256: str) -> None:
     if actual_size != size:
-        raise ResultRejected(RejectReason.FILE_SIZE_MISMATCH, relative)
+        # The file is read to one byte past its listed size at most, so a longer one says only that it is longer.
+        read = f"more than {size}" if actual_size > size else str(actual_size)
+        raise ResultRejected(
+            RejectReason.FILE_SIZE_MISMATCH, f"{relative}: {read} bytes read, the manifest lists {size}"
+        )
     if actual_sha != sha256:
         raise ResultRejected(RejectReason.FILE_HASH_MISMATCH, relative)
 

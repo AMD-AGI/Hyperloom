@@ -15,6 +15,7 @@ from pathlib import Path
 import pytest
 
 from hyperloom.common.outside_facts.rule_pack import DEFAULT_PACK_PATH, PACK_ENV
+from hyperloom.measure.hosted_logs import PREFIX
 from hyperloom.measure.returncodes import HOSTED_RESULT_REJECTED_RC
 from hyperloom.measure.tests.hosted_fixtures import Rig
 from hyperloom.measure.tests.rule_pack_fixtures import identity_of, other_pack
@@ -70,7 +71,10 @@ def test_a_runner_that_did_not_get_the_sessions_pack_is_refused_not_measured_wit
     record = rig.backend.journal.latest("req-1")
     assert record.extra["verdict"] == "result_rejected" and record.extra["reject"] == "rule_pack_mismatch"
     assert "verified" not in record.extra
-    assert not call.output_dir.exists() or not any(call.output_dir.iterdir()), "nothing landed"
+    landed = (
+        [x.name for x in call.output_dir.iterdir() if not x.name.startswith(PREFIX)] if call.output_dir.exists() else []
+    )
+    assert landed == [], "nothing landed; only the runner logs a refused attempt keeps"
     assert not (tmp_path / "archive").exists() or not any((tmp_path / "archive").iterdir()), "nothing was archived"
 
 

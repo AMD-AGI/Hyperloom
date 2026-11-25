@@ -56,7 +56,7 @@ from hyperloom_kb.observability import (
 )
 from hyperloom_kb.local_state import UnknownStateItem
 from hyperloom_kb.knowledge_read import (
-    AnthropicPlannerBackend,
+    GatewayPlannerBackend,
     LLMQueryPlanner,
     PlannerConfiguration,
     PlannerGatewayConfig,
@@ -127,7 +127,15 @@ class ServiceSettings:
         values = {
             "planner": None
             if planner is None
-            else [planner.base_url, planner.api_key, planner.model, planner.timeout_seconds, planner.max_output_tokens],
+            else [
+                planner.protocol,
+                planner.base_url,
+                planner.api_key,
+                planner.model,
+                [list(header) for header in planner.headers],
+                planner.timeout_seconds,
+                planner.max_output_tokens,
+            ],
             "global": None if self.global_kb is None else [self.global_kb.base_url, self.global_kb.token],
             "problems": [self.planner_problem, self.global_problem],
             "database": self.database_url,
@@ -546,7 +554,7 @@ def main(argv: list[str] | None = None) -> int:
         )
     else:
         planner = LLMQueryPlanner(
-            AnthropicPlannerBackend(settings.planner), PlannerConfiguration.create(settings.planner.model)
+            GatewayPlannerBackend(settings.planner), PlannerConfiguration.create(settings.planner.model)
         )
     if settings.global_problem:
         log.warning("Push and pull are unavailable: %s", settings.global_problem)
