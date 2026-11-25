@@ -373,10 +373,10 @@ class Coordinator:
         return self._collaborator("_phase_prelude", PreludePhase)
 
     @property
-    def phase_sweep(self):
-        from ..phases.sweep import SweepPhase
+    def phase_cycle_end(self):
+        from ..phases.cycle_end import CycleEndPhase
 
-        return self._collaborator("_phase_sweep", SweepPhase)
+        return self._collaborator("_phase_cycle_end", CycleEndPhase)
 
     @property
     def phase_close(self):
@@ -801,7 +801,7 @@ class Coordinator:
 
     # Long-run interface
     async def run(self, *, objective: Objective | None = None, options: RunOptions = RunOptions()) -> str:
-        """Run reactor + dispatcher until a stop condition fires (priority order): signal, a stop_reason the phase machine recorded (a met target closes through SWEEP as one), time_exhausted (via closing phase), emergency, max_ticks. Sets + saves + returns shared_state.stop_reason.
+        """Run reactor + dispatcher until a stop condition fires (priority order): signal, a stop_reason the phase machine recorded (a met target closes through CYCLE_END as one), time_exhausted (via closing phase), emergency, max_ticks. Sets + saves + returns shared_state.stop_reason.
 
         The whole run is one ``session`` trajectory span, and every trajectory event recorded beneath it inherits this
         session dir and the live phase / tick.

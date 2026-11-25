@@ -103,7 +103,10 @@ Recipe writes and champion updates. Hyperloom derives it from the current
 session state. If the optimizer is unsupported, `tp`/`conc` are non-positive,
 or an InferenceX `isl`/`osl` is absent or non-positive, warm start is disabled
 with `recipe_scope_invalid` and CLOSE publication records
-`invalid_recipe_scope` instead of failing the optimization run.
+`invalid_recipe_scope` instead of failing the optimization run. A session whose
+fixed rounds send a `DATASET_PATH` file has no scope, in either store mode: its
+requests are not described by `isl`/`osl`, so it is not warm-started and CLOSE
+records `prompt_dataset_identity_unsupported`.
 
 Remote mode uses `/v1/kb/search` for bounded seven-tuple fallback. It downloads
 the selected session's exact file manifest and replays one combined Recipe:

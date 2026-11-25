@@ -5,7 +5,6 @@
 
 from __future__ import annotations
 
-import time
 from datetime import datetime, timedelta, timezone
 
 import pytest
@@ -20,7 +19,7 @@ from hyperloom.orchestrator.phases.machine_state import record_phase_transition
 from hyperloom.orchestrator.state.shared_state import SharedState
 
 
-@pytest.mark.parametrize("phase", ["FRAMEWORK_AGENT", "KERNEL_AGENT", "SWEEP"])
+@pytest.mark.parametrize("phase", ["FRAMEWORK_AGENT", "KERNEL_AGENT", "CYCLE_END"])
 def test_phase_exit_budget_exports_under_contract(tmp_path, phase: str):
     write_manifest(tmp_path, session_id="session-budget")
     state = SharedState(session_id="session-budget", phase=phase, baseline_tput=100.0)
@@ -46,28 +45,24 @@ def test_phase_exit_budget_exports_under_contract(tmp_path, phase: str):
     validate(instance=exported, schema=workflow_schema())
 
 
-def test_sweep_exit_with_live_grant_exports_under_contract(tmp_path):
-    """A session-wide exit while SWEEP still waits on its grant freezes a widened budget the schema accepts."""
+def test_a_settled_cycle_end_exit_exports_under_contract(tmp_path):
+    """A settled CYCLE_END freezes ``cycle_end_result`` inputs the schema accepts."""
     write_manifest(tmp_path, session_id="session-budget")
     state = SharedState(
         session_id="session-budget",
-        phase="SWEEP",
+        phase="CYCLE_END",
         baseline_tput=100.0,
         start_ts=(datetime.now(timezone.utc) - timedelta(minutes=175)).isoformat(),
         max_minutes=180,
-        phase_budget_pct={"SWEEP": 0.05, "CLOSE": 0.02},
+        phase_budget_pct={"CYCLE_END": 0.05, "CLOSE": 0.02},
+        cycle_end_settled_cycle=0,
     )
-    # Five minutes of session left, less the CLOSE reserve; the sweep's grant runs past the session deadline.
-    grant_sec = 900.0
     with session_scope(tmp_path):
-        record_phase_transition(state, to_phase="SWEEP", reason="phase_entered")
-        state.conc_sweep_granted_until_unix = time.time() + grant_sec
-        state.set_stop_reason("target_reached")
+        record_phase_transition(state, to_phase="CYCLE_END", reason="phase_entered")
         target, reason, evidence = compute_next_phase(state)
-        assert (target, reason) == ("CLOSE", "target_reached")
-        budget = evidence["predicate_inputs"]["budget"]
-        assert budget["remaining_sec"] > grant_sec - 60.0, "the grant did not widen the budget"
-        assert budget["current_balance"] == budget["remaining_sec"]
+        assert (target, reason) == ("CLOSE", "time_exhausted")
+        assert evidence["predicate_inputs"]["cycle_end_result"]["settled"] is True
+        assert evidence["reloop_blocked"] == "insufficient_remaining"
         record_phase_transition(state, to_phase=target, reason=reason, evidence=evidence)
     state.save(tmp_path)
 

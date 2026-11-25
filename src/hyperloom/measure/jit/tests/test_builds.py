@@ -216,3 +216,29 @@ def test_a_kernel_missing_from_the_compiled_registry_names_the_module_it_was_ask
 
 def test_a_log_without_the_registry_error_names_no_missing_kernel(tmp_path) -> None:
     assert scan_builds([_log(tmp_path, CPP + MODULE)]).missing_kernels == {}
+
+
+MONOKERNEL_COLD = (
+    "[2026-11-24 07:05:28 TP0] monokernel kimi_k31_hip on gfx950: widths [1, 2, 4, 8] built in 1071.2 s\n"
+    "[2026-11-24 07:05:28 TP3] monokernel kimi_k31_hip on gfx950: widths [1, 2, 4, 8] built in 1069.0 s\n"
+)
+MONOKERNEL_WARM = "[2026-11-24 09:00:01 TP0] monokernel kimi_k31_hip on gfx950: widths [1, 2, 4, 8] built in 1.4 s\n"
+
+
+def test_the_seconds_the_monokernel_build_took_join_the_compile_time_and_not_the_count(tmp_path) -> None:
+    cold = scan_builds([_log(tmp_path / "cold", MODULE + MONOKERNEL_COLD)])
+    warm = scan_builds([_log(tmp_path / "warm", MONOKERNEL_WARM)])
+
+    assert cold.monokernels == {"kimi_k31_hip": 1071.2}, "the ranks build together: the longest is the build's"
+    assert cold.builds_seen == 1 and round(cold.compile_seconds, 3) == 1104.7
+    assert warm.builds_seen == 0 and warm.compile_seconds == 1.4, "a warm FlyDSL cache shows as seconds, not as builds"
+
+
+def test_a_line_that_only_looks_like_a_monokernel_build_is_not_one(tmp_path) -> None:
+    text = (
+        "[k31 wide] warmup: 96 launches compiled and run in 945 s\n"
+        "monokernel kimi_k31_hip on gfx950: runs target_verify steps (4 of 4 captured decode graphs)\n"
+        "--enable-amd-monokernel: kimi_k31_hip on gfx950\n"
+    )
+
+    assert scan_builds([_log(tmp_path, text)]).monokernels == {}

@@ -1,22 +1,29 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Tests pinning ``orchestrator.kernel.conc_sweep_report.build_roofline_ceiling`` (MoE/dense ceiling + MBU + safe-degrade)."""
+"""Tests pinning ``conc_sweep.report``: the curve row of a rung and the roofline ceiling beside the curves."""
 
 from __future__ import annotations
 
+import csv
+from pathlib import Path
 from typing import Any
 from unittest.mock import patch
 
 import pytest
 
-# kernel.conc_sweep and actions.executors.conc_sweep import each other; this resolves only once executors is already
-# in sys.modules.
-from hyperloom.orchestrator.kernel.conc_sweep_report import ArmCurves, build_roofline_ceiling
+from hyperloom.orchestrator.actions.executors.grid._grid_runner import VariantResult
+from hyperloom.orchestrator.conc_sweep.report import (
+    RAW_FILE,
+    ArmCurves,
+    build_roofline_ceiling,
+    point_from_variant,
+    write_report,
+)
 from hyperloom.inference_optimizer.roofline_model_meta import ModelMeta
 from hyperloom.orchestrator.state.shared_state import SharedState
 
-_LOAD_META_PATH = "hyperloom.orchestrator.kernel.conc_sweep_report.load_model_meta"
+_LOAD_META_PATH = "hyperloom.orchestrator.conc_sweep.report.load_model_meta"
 
 
 def _make_state(
@@ -210,3 +217,66 @@ def test_returns_none_when_an_input_is_unavailable(meta: ModelMeta | None, state
     with patch(_LOAD_META_PATH, return_value=meta):
         block = build_roofline_ceiling(state, ArmCurves(baseline=[], optimized=[]), concs=[1, 8], isl=1024, osl=1024)
     assert block is None
+
+
+def _variant(**kw: Any) -> VariantResult:
+    return VariantResult(
+        name="optimized_conc8", extra_server_args="", extra_envs={"CONC": "8"}, status="succeeded", **kw
+    )
+
+
+class TestAnUnreportedTotalComesFromItsHalves:
+    """A row graded on the total axis must not read as unmeasured."""
+
+    def test_the_halves_sum_when_the_parser_named_no_total(self):
+        point = point_from_variant(_variant(input_throughput=24000.0, output_throughput=180.0), arm="baseline")
+        assert point["total_token_throughput"] == 24180.0
+
+    def test_a_reported_total_is_not_recomputed(self):
+        point = point_from_variant(
+            _variant(input_throughput=1.0, output_throughput=1.0, total_token_throughput=25984.8), arm="baseline"
+        )
+        assert point["total_token_throughput"] == 25984.8
+
+    @pytest.mark.parametrize("half", [{"output_throughput": 180.0}, {"input_throughput": 24000.0}])
+    def test_a_missing_half_leaves_the_total_unmeasured(self, half: dict[str, float]):
+        point = point_from_variant(_variant(**half), arm="baseline")
+        assert point["total_token_throughput"] is None
+
+
+class TestTheCurveCarriesBothAxisPairs:
+    """A point has to carry whichever pair its mode is plotted on."""
+
+    def test_the_agentic_pair_reaches_the_point(self):
+        point = point_from_variant(
+            _variant(
+                output_throughput=183.44,
+                total_token_throughput=25984.8,
+                input_throughput=25801.36,
+                intvty_p90=447.2,
+                tpot_p90_ms=2.4,
+            ),
+            arm="optimized",
+        )
+        assert (point["arm"], point["conc"]) == ("optimized", 8)
+        assert point["total_token_throughput"] == 25984.8
+        assert point["e2e_norm_intvty_p90"] == 447.2
+        assert point["input_throughput"] == 25801.36
+        assert point["tpot_p90_ms"] == 2.4
+
+    def test_the_synthetic_pair_is_unaffected(self):
+        point = point_from_variant(_variant(output_throughput=1200.0, e2el_mean_ms=850.0), arm="baseline")
+        assert point["output_throughput"] == 1200.0
+        assert point["e2el_mean_ms"] == 850.0
+        assert point["e2e_norm_intvty_p90"] is None
+
+    def test_the_csv_carries_the_agentic_axes_too(self, tmp_path: Path):
+        """The CSV is the download button; it has to draw the same chart."""
+        point = point_from_variant(_variant(total_token_throughput=25984.8, intvty_p90=447.2), arm="optimized")
+        write_report({"baseline": {"points": []}, "optimized": {"points": [point]}}, tmp_path)
+
+        with (tmp_path / RAW_FILE).open(newline="") as fp:
+            rows = list(csv.DictReader(fp))
+        assert [(row["arm"], row["conc"]) for row in rows] == [("optimized", "8")]
+        assert rows[0]["e2e_norm_intvty_p90"] == "447.2"
+        assert rows[0]["total_token_throughput"] == "25984.8"

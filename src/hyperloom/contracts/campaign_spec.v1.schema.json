@@ -68,6 +68,7 @@
       "properties": {
         "kernel": {"type": "boolean"},
         "framework_agent": {"type": "boolean"},
+        "conc_sweep": {"type": "boolean", "description": "Sweep the session over its recipe's concurrencies after it closes; on when not given."},
         "eval": {"const": true, "description": "The accuracy eval cannot be turned off; false is refused."},
         "enablement": {"enum": ["all", "launch", "eval", "off"]}
       }

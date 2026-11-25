@@ -18,7 +18,7 @@ PHASE_PRELUDE = "PRELUDE"
 PHASE_ENABLEMENT = "ENABLEMENT"
 PHASE_FRAMEWORK_AGENT = "FRAMEWORK_AGENT"
 PHASE_KERNEL_AGENT = "KERNEL_AGENT"
-PHASE_SWEEP = "SWEEP"
+PHASE_CYCLE_END = "CYCLE_END"
 PHASE_CLOSE = "CLOSE"
 
 PHASE_NAMES: tuple[str, ...] = (
@@ -26,7 +26,7 @@ PHASE_NAMES: tuple[str, ...] = (
     PHASE_ENABLEMENT,
     PHASE_FRAMEWORK_AGENT,
     PHASE_KERNEL_AGENT,
-    PHASE_SWEEP,
+    PHASE_CYCLE_END,
     PHASE_CLOSE,
 )
 PHASE_INDEX: dict[str, int] = {name: i for i, name in enumerate(PHASE_NAMES)}
@@ -79,13 +79,8 @@ PHASE_ALLOWED_ACTIONS: dict[str, frozenset[str]] = {
             "kernel_agent",
         }
     ),
-    # No specialist below: SWEEP is the validation window and CLOSE only reports.
-    PHASE_SWEEP: frozenset(
-        {
-            # conc_sweep: Coordinator-internal CONC-ladder benchmark.
-            "conc_sweep",
-        }
-    ),
+    # CYCLE_END only settles the stack on entry, and CLOSE only reports.
+    PHASE_CYCLE_END: frozenset(),
     PHASE_CLOSE: frozenset(
         {
             "report",
@@ -167,7 +162,7 @@ PHASE_HUMAN_LABELS: dict[str, str] = {
     PHASE_ENABLEMENT: "Enablement (make the combo runnable)",
     PHASE_FRAMEWORK_AGENT: "Optimize (config / source / upstream)",
     PHASE_KERNEL_AGENT: "Kernel optimization",
-    PHASE_SWEEP: "Concurrency sweep",
+    PHASE_CYCLE_END: "Cycle end",
     PHASE_CLOSE: "Close (report)",
 }
 

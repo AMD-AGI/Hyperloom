@@ -23,7 +23,6 @@ def _budget_args(**over) -> argparse.Namespace:
         # What the parser produces when ``--max-hours`` is absent: the flag
         # carries no argparse default, so the budget is unsettled, not 2.0.
         max_hours=None,
-        conc_sweep_total_budget_sec=9000,
     )
     base.update(over)
     return argparse.Namespace(**base)
@@ -54,7 +53,6 @@ def test_agentx_does_not_expand_benchmark_caps(native_benchmark, monkeypatch):
     _on(monkeypatch, native_benchmark)
     args = _budget_args()
     _apply_default_budget(args)
-    assert args.conc_sweep_total_budget_sec == 9000
     from hyperloom.orchestrator.actions.executors._subprocess_kill import resolve_benchmark_timeouts
 
     monkeypatch.delenv("INFERENCE_OPTIMIZER_BENCHMARK_TIMEOUT_SEC", raising=False)

@@ -357,6 +357,14 @@ def test_one_point_serves_the_whole_sweep():
     assert any("no point at concurrency 48" in warning for warning in base.warnings)
 
 
+def test_an_inferencex_base_records_every_concurrency_of_its_arm():
+    concs = _base(_fixed()).point.source_concs
+
+    assert 64 in concs and len(concs) > 1
+    assert list(concs) == sorted(set(concs))
+    assert _base(_fixed(concurrencies=(min(concs),))).point.source_concs == concs
+
+
 def test_tp_ambiguity_takes_the_largest_tp_the_gpus_fit_and_records_the_rest():
     eight = _base(_fixed(), gpus=8)
     assert eight.topology == Topology(8)

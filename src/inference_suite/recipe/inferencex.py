@@ -521,9 +521,10 @@ def _warnings(point: InferencexPoint, query: LaunchQuery, target: int) -> tuple[
 
 
 def _launch(
-    point: InferencexPoint, query: LaunchQuery, snapshot: InferencexSnapshot, target: int
+    point: InferencexPoint, query: LaunchQuery, snapshot: InferencexSnapshot, target: int, arm_concs: tuple[int, ...]
 ) -> SourceLaunch | str:
-    """The launch ``point`` binds, or why this source cannot reproduce it."""
+    """The launch ``point`` binds, carrying ``arm_concs``, the concurrencies of its arm, or why this source cannot
+    reproduce it."""
     if point.key in snapshot.rejections:
         return f"InferenceX refused it: {snapshot.rejections[point.key]}"
     selection = snapshot.selections.get(point.key)
@@ -567,6 +568,7 @@ def _launch(
         kv_offloading=point.kv_offloading or _UNSET,
         stripped=command.stripped,
         warnings=_warnings(point, query, target),
+        source_concs=arm_concs,
     )
 
 
@@ -664,7 +666,7 @@ def inferencex_launches(query: LaunchQuery, snapshot: InferencexSnapshot) -> tup
         launch = (
             f"it has no point at concurrency {target} or above"
             if point is None
-            else _launch(point, query, snapshot, target)
+            else _launch(point, query, snapshot, target, tuple(sorted({each.conc for each in points})))
         )
         if isinstance(launch, str):
             reasons[arm_key] = launch
