@@ -27,7 +27,6 @@ import logging
 import os
 import subprocess  # nosec B404 - runs this interpreter on a module of the installed package.
 import sys
-from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -60,18 +59,16 @@ class ExperienceReaders:
     learnings: RemoteExperienceKB | None = None
 
 
-def start_experience_kb(env: Mapping[str, str] | None = None) -> None:
-    """Bring the loopback service ``env`` names to serving outside this process's tree; nothing for no URL or one
-    that names a service elsewhere. Never raises: a service that does not start is logged."""
+def start_experience_kb() -> None:
+    """Bring the loopback service the environment names to serving outside this process's tree; nothing for no URL
+    or one that names a service elsewhere. Never raises: a service that does not start is logged."""
 
-    values = os.environ if env is None else env
-    url = (values.get(KB_URL_ENV) or "").strip()
+    url = (os.environ.get(KB_URL_ENV) or "").strip()
     if not url or not is_loopback(url):
         return
     try:
         done = subprocess.run(  # nosec B603 - a fixed argv of this interpreter.
             [sys.executable, *ENSURE_COMMAND],
-            env=dict(values),
             capture_output=True,
             text=True,
             timeout=ENSURE_TIMEOUT_SECONDS,
@@ -89,14 +86,14 @@ def start_experience_kb(env: Mapping[str, str] | None = None) -> None:
         log.warning("%s", done.stderr.strip())
 
 
-def experience_readers(kind: WorkloadKind, env: Mapping[str, str] | None = None) -> ExperienceReaders:
-    """The readers of the Experience KB ``env`` names for a session of ``kind``; none when it names none, or names one
-    without its token, which is logged."""
+def experience_readers(kind: WorkloadKind) -> ExperienceReaders:
+    """The readers of the Experience KB the environment names for a session of ``kind``; none when it names none, or
+    names one without its token, which is logged."""
 
     from hyperloom.inference_optimizer.experience_kb_service import REQUEST_TIMEOUT_SECONDS
 
     try:
-        config = RemoteConfig.from_env(env, timeout_seconds=REQUEST_TIMEOUT_SECONDS)
+        config = RemoteConfig.from_env(timeout_seconds=REQUEST_TIMEOUT_SECONDS)
     except RemoteClientError as exc:
         log.warning("the session reads no Experience KB: %s", exc)
         return ExperienceReaders()

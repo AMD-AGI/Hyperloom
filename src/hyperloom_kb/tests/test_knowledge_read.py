@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import functools
+import os
 import json
 import types
 from datetime import datetime, timezone
@@ -254,8 +255,15 @@ def _gateway(monkeypatch: pytest.MonkeyPatch, reply: bytes, status: int = 200) -
     return seen
 
 
-def _complete(env: dict[str, str]) -> str:
-    backend = GatewayPlannerBackend(PlannerGatewayConfig.from_env(env), env)
+def _complete(monkeypatch: pytest.MonkeyPatch, env: dict[str, str]) -> str:
+    """One plan through the gateway ``env`` names, as the service's own environment."""
+
+    for name in list(os.environ):
+        if name.startswith(("ANTHROPIC_", "OPENAI_", "CLAUDE_", "CODEX_", "LOCAL_KB_PLANNER_")):
+            monkeypatch.delenv(name)
+    for name, value in env.items():
+        monkeypatch.setenv(name, value)
+    backend = GatewayPlannerBackend(PlannerGatewayConfig.from_env())
     return backend.complete(system_prompt="system", user_payload="payload", temperature=0)
 
 
@@ -264,7 +272,7 @@ def test_the_planner_reads_through_the_anthropic_gateway_with_its_custom_headers
 ) -> None:
     seen = _gateway(monkeypatch, _messages_reply(_planner_response(), "end_turn"))
 
-    text = _complete(GATEWAY)
+    text = _complete(monkeypatch, GATEWAY)
 
     [request] = seen
     body = json.loads(request.content)
@@ -277,7 +285,7 @@ def test_the_planner_reads_through_the_anthropic_gateway_with_its_custom_headers
 def test_an_openai_only_environment_plans_through_chat_completions(monkeypatch: pytest.MonkeyPatch) -> None:
     seen = _gateway(monkeypatch, _chat_reply(_planner_response(), "stop"))
 
-    text = _complete(OPENAI_GATEWAY)
+    text = _complete(monkeypatch, OPENAI_GATEWAY)
 
     [request] = seen
     body = json.loads(request.content)
@@ -298,14 +306,14 @@ def test_a_reply_cut_at_the_token_limit_fails_the_plan(
     _gateway(monkeypatch, reply)
 
     with pytest.raises(PlannerExecutionError, match="truncated output at max_tokens"):
-        _complete(env)
+        _complete(monkeypatch, env)
 
 
 def test_a_gateway_that_refuses_the_call_fails_the_plan_not_the_service(monkeypatch: pytest.MonkeyPatch) -> None:
     _gateway(monkeypatch, b'{"error": "missing subscription key"}', status=401)
 
     with pytest.raises(PlannerExecutionError, match="planner gateway failed with RuntimeError.*status=401"):
-        _complete(GATEWAY)
+        _complete(monkeypatch, GATEWAY)
 
 
 def test_the_planner_gateway_is_the_anthropic_side_with_a_key_else_the_openai_side() -> None:

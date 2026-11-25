@@ -62,12 +62,22 @@ def _ran(returncode: int, stdout: str = "", stderr: str = "") -> subprocess.Comp
     return subprocess.CompletedProcess([], returncode, stdout, stderr)
 
 
+def _kb_env(monkeypatch: pytest.MonkeyPatch, env: dict[str, str]) -> None:
+    """The environment names the Experience KB of ``env`` and no other."""
+
+    for name in ("HYPERLOOM_KB_URL", "HYPERLOOM_KB_TOKEN"):
+        monkeypatch.delenv(name, raising=False)
+    for name, value in env.items():
+        monkeypatch.setenv(name, value)
+
+
 @pytest.mark.parametrize("env", [{}, {"HYPERLOOM_KB_URL": "https://kb.example.com"}])
 def test_no_service_is_started_without_a_loopback_url(env: dict[str, str], monkeypatch: pytest.MonkeyPatch) -> None:
     runs = _Runs(_ran(0))
     monkeypatch.setattr(experience_kb.subprocess, "run", runs)
+    _kb_env(monkeypatch, env)
 
-    start_experience_kb(env)
+    start_experience_kb()
 
     assert runs.calls == []
 
@@ -78,12 +88,13 @@ def test_a_loopback_service_is_started_by_a_process_of_its_own_that_restarts_not
     runs = _Runs(_ran(0, "Experience KB service started at http://127.0.0.1:24680: 3 Experiences"))
     monkeypatch.setattr(experience_kb.subprocess, "run", runs)
 
+    _kb_env(monkeypatch, LOOPBACK)
     with caplog.at_level(logging.INFO, logger=LOGGER):
-        start_experience_kb(LOOPBACK)
+        start_experience_kb()
 
     ((argv, kwargs),) = runs.calls
     assert argv == [sys.executable, *ENSURE_COMMAND] and argv[-1] == "--no-restart"
-    assert kwargs["env"] == LOOPBACK and kwargs["check"] is False
+    assert "env" not in kwargs and kwargs["check"] is False
     assert "3 Experiences" in caplog.text
 
 
@@ -100,8 +111,9 @@ def test_a_service_that_does_not_start_is_logged_and_the_session_goes_on(
 ) -> None:
     monkeypatch.setattr(experience_kb.subprocess, "run", _Runs(answer))
 
+    _kb_env(monkeypatch, LOOPBACK)
     with caplog.at_level(logging.WARNING, logger=LOGGER):
-        start_experience_kb(LOOPBACK)
+        start_experience_kb()
 
     assert "the session runs without it" in caplog.text
 
@@ -112,8 +124,9 @@ def test_a_service_left_serving_with_other_settings_is_logged(
     stale = "Experience KB service left serving with other settings: it was started with other settings"
     monkeypatch.setattr(experience_kb.subprocess, "run", _Runs(_ran(0, "already running", stale)))
 
+    _kb_env(monkeypatch, LOOPBACK)
     with caplog.at_level(logging.WARNING, logger=LOGGER):
-        start_experience_kb(LOOPBACK)
+        start_experience_kb()
 
     assert stale in caplog.text
 
@@ -133,8 +146,9 @@ async def test_a_started_service_is_no_process_the_session_stop_would_kill(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
     monkeypatch.setattr(experience_kb, "ENSURE_COMMAND", _SPAWNS_A_SERVICE)
+    _kb_env(monkeypatch, LOOPBACK)
     with caplog.at_level(logging.INFO, logger=LOGGER):
-        start_experience_kb(LOOPBACK)
+        start_experience_kb()
     match = re.search(r"service pid (\d+)", caplog.text)
     assert match is not None
     service = int(match.group(1))
@@ -202,25 +216,33 @@ def test_close_with_a_url_but_no_token_is_logged_and_leaves_the_steps_to_fail(
     assert "HYPERLOOM_KB_TOKEN" in caplog.text
 
 
-def test_without_an_experience_kb_there_are_no_readers(caplog: pytest.LogCaptureFixture) -> None:
+def test_without_an_experience_kb_there_are_no_readers(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
     with caplog.at_level(logging.WARNING, logger=LOGGER):
-        unset = experience_readers(WorkloadKind.INFERENCEX, {})
-        tokenless = experience_readers(WorkloadKind.AGENTX, {"HYPERLOOM_KB_URL": LOOPBACK["HYPERLOOM_KB_URL"]})
+        _kb_env(monkeypatch, {})
+        unset = experience_readers(WorkloadKind.INFERENCEX)
+        _kb_env(monkeypatch, {"HYPERLOOM_KB_URL": LOOPBACK["HYPERLOOM_KB_URL"]})
+        tokenless = experience_readers(WorkloadKind.AGENTX)
 
     assert unset == tokenless == ExperienceReaders()
     assert "HYPERLOOM_KB_TOKEN" in caplog.text
 
 
-def test_an_agentx_session_reads_its_tests_under_its_own_schema() -> None:
-    readers = experience_readers(WorkloadKind.AGENTX, LOOPBACK)
+def test_an_agentx_session_reads_its_tests_under_its_own_schema(monkeypatch: pytest.MonkeyPatch) -> None:
+    _kb_env(monkeypatch, LOOPBACK)
+    readers = experience_readers(WorkloadKind.AGENTX)
 
     assert isinstance(readers.tests, RemoteExperienceKB)
     assert readers.tests.schema_ref == _schema(experience.MULTIBRANCH_MAPPING_PATH)
     assert readers.learnings is not None and readers.learnings.schema_ref == _schema(learnings.MAPPING_PATH)
 
 
-def test_an_inferencex_session_reads_its_tests_under_both_schemas_kernel_changes_included() -> None:
-    readers = experience_readers(WorkloadKind.INFERENCEX, LOOPBACK)
+def test_an_inferencex_session_reads_its_tests_under_both_schemas_kernel_changes_included(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _kb_env(monkeypatch, LOOPBACK)
+    readers = experience_readers(WorkloadKind.INFERENCEX)
 
     assert isinstance(readers.tests, SchemaReaders)
     assert [reader.schema_ref for reader in readers.tests.readers] == [

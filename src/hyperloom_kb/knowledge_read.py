@@ -184,18 +184,17 @@ class PlannerGatewayConfig:
 
 
 class GatewayPlannerBackend:
-    """Plans through the main flow's gateway clients, with their headers, connect retries and usage ledger;
-    ``env`` is the environment ``config`` was resolved from."""
+    """Plans through the main flow's gateway clients, with their headers, connect retries and usage ledger, in the
+    environment ``config`` was resolved from."""
 
-    def __init__(self, config: PlannerGatewayConfig, env: Mapping[str, str] | None = None) -> None:
+    def __init__(self, config: PlannerGatewayConfig) -> None:
         self.config = config
         self.model = config.model
-        self._env = dict(os.environ if env is None else env)
 
     def _reply(self, system_prompt: str, user_payload: str, temperature: float) -> tuple[str, str]:
         config = self.config
         if config.protocol == PLANNER_OPENAI:
-            client = llm_config.get_openai_client(env=self._env, timeout=config.timeout_seconds)
+            client = llm_config.get_openai_client(timeout=config.timeout_seconds)
             chat = llm_config.chat_completion(
                 client,
                 component=PLANNER_COMPONENT,
@@ -206,7 +205,7 @@ class GatewayPlannerBackend:
                 temperature=temperature,
             )
             return chat.text, chat.finish_reason or ""
-        with llm_config.get_anthropic_client(env=self._env, timeout=config.timeout_seconds) as client:  # type: ignore[attr-defined]
+        with llm_config.get_anthropic_client(timeout=config.timeout_seconds) as client:  # type: ignore[attr-defined]
             message = llm_config.anthropic_messages(
                 client,
                 component=PLANNER_COMPONENT,
