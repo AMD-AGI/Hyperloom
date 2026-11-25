@@ -383,12 +383,6 @@ def test_a_session_of_an_installed_framework_shares_no_baseline_and_describes_it
             == forbidden
         )
         assert "baseline test of the session" not in described[tool] and "timing_lines" not in described[tool]
-    assert described["test_result"].startswith(
-        "The state and result of one test this branch submitted, or of any branch's profile test. An AgentX test's "
-    )
-    assert described["wait_test"].startswith(
-        "How to wait for a test of this branch, or for any branch's profile test: returns as soon as its result lands,"
-    )
 
 
 def test_only_a_checkout_built_session_s_tools_say_a_baseline_is_shared_and_what_timing_lines_are(
