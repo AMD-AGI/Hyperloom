@@ -7,17 +7,21 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from hyperloom.sandbox.socket import DirEntry, SandboxGone
+from hyperloom.sandbox.socket import DirEntry, SandboxDenied, SandboxGone
+
+#: The largest single write the hosted platform's sandbox file API accepts.
+PLATFORM_WRITE_LIMIT = 32 * 1000**2
 
 
 class DirSandbox:
     """A sandbox whose files are a directory: the file API reads through links, the listing does not. With
-    ``fail_writes`` every write but the one of a ``DONE`` marker fails as if the sandbox were gone."""
+    ``fail_writes`` every write but the one of a ``DONE`` marker fails as if the sandbox were gone; a write larger than
+    ``write_limit`` is refused as the platform refuses it (413)."""
 
     sandbox_id = "sbx"
 
-    def __init__(self, root: Path, *, fail_writes: bool = False) -> None:
-        self.root, self.fail_writes, self.writes = root, fail_writes, []
+    def __init__(self, root: Path, *, fail_writes: bool = False, write_limit: int | None = None) -> None:
+        self.root, self.fail_writes, self.write_limit, self.writes = root, fail_writes, write_limit, []
 
     def _at(self, path: str) -> Path:
         return self.root / path.lstrip("/")
@@ -26,6 +30,8 @@ class DirSandbox:
         self.writes.append(path)
         if self.fail_writes and not path.endswith("DONE"):
             raise SandboxGone("gone")
+        if self.write_limit is not None and len(data) > self.write_limit:
+            raise SandboxDenied("413: file exceeds 32MB")
         self._at(path).parent.mkdir(parents=True, exist_ok=True)
         self._at(path).write_bytes(data)
 

@@ -11,6 +11,8 @@ import io
 import json
 import tarfile
 import tempfile
+import threading
+import time
 from pathlib import Path
 
 import pytest
@@ -18,8 +20,8 @@ import pytest
 from hyperloom.measure.jit import serve
 from hyperloom.measure.jit.serve import WantRefused
 from hyperloom.measure.jit.store import DirJitStore, Snapshot, StoredFile
-from hyperloom.measure.jit_kinds import AITER_JIT, TRITON
-from hyperloom.measure.jit.tests.dir_sandbox import DirSandbox
+from hyperloom.measure.jit_kinds import AITER_JIT, FLYDSL, TRITON
+from hyperloom.measure.jit.tests.dir_sandbox import PLATFORM_WRITE_LIMIT, DirSandbox
 
 KEY = "b" * 64
 MODULE = b"\x7fELF a module"
@@ -266,11 +268,15 @@ def test_the_host_serves_what_the_runner_asked_for_and_the_runner_reads_it(tmp_p
     (tmp_path / "out" / "jit-want.json").write_bytes(serve.want_document([(AITER_JIT, KEY), (TRITON, "c" * 64)]))
 
     assert serve.serve(store, sandbox, "req") == 1
-    assert sandbox.writes == ["/in/jit-cache/aiter_jit.tar", "/in/jit-cache/DONE"], "triton has nothing stored"
+    assert sandbox.writes == [
+        "/in/jit-cache/aiter_jit.tar.000",
+        "/in/jit-cache/aiter_jit.tar.json",
+        "/in/jit-cache/DONE",
+    ], "triton has nothing stored"
 
     phases, notes = _asked(tmp_path, [(AITER_JIT, KEY), (TRITON, "c" * 64)])
     assert phases == [serve.WAIT_PHASE] and "aiter_jit 2 files" in notes[-1]
-    assert not (tmp_path / "in" / "jit-cache" / "aiter_jit.tar").exists(), "the served tar is removed once unpacked"
+    assert sorted(path.name for path in (tmp_path / "in" / "jit-cache").iterdir()) == ["DONE"], "removed once unpacked"
     served = DirJitStore(tmp_path / "served")
     assert served.fetch(AITER_JIT, KEY, tmp_path / "private").snapshot == snapshot
     assert served.fetch(TRITON, "c" * 64, tmp_path / "private-triton").snapshot is None, "missing: it builds cold"
@@ -295,7 +301,7 @@ def test_a_served_tar_the_runner_cannot_remove_from_its_input_directory_does_not
 
     _, notes = _asked(tmp_path, [(AITER_JIT, KEY)])
 
-    assert "aiter_jit 2 files" in notes[-1] and (tmp_path / "in" / "jit-cache" / "aiter_jit.tar").exists()
+    assert "aiter_jit 2 files" in notes[-1] and (tmp_path / "in" / "jit-cache" / "aiter_jit.tar.json").exists()
     assert DirJitStore(tmp_path / "served").fetch(AITER_JIT, KEY, tmp_path / "private").snapshot == snapshot
 
 
@@ -347,13 +353,183 @@ def test_a_served_snapshot_missing_a_blob_falls_back_to_cold(tmp_path) -> None:
     buffer = io.BytesIO()
     with tarfile.open(fileobj=buffer, mode="w:") as archive:
         archive.addfile(_member(name, size=len(raw)), io.BytesIO(raw))
-    (tmp_path / "in" / "jit-cache" / "aiter_jit.tar").write_bytes(buffer.getvalue())
+    _serve_raw(tmp_path / "in" / "jit-cache", AITER_JIT, buffer.getvalue())
     (tmp_path / "in" / "jit-cache" / "DONE").write_bytes(b"")
 
     _asked(tmp_path, [(AITER_JIT, KEY)])
 
     fetched = DirJitStore(tmp_path / "served").fetch(AITER_JIT, KEY, tmp_path / "private")
     assert fetched.snapshot is None and any("missing" in problem for problem in fetched.problems)
+
+
+def _serve_raw(inbox: Path, kind, data: bytes) -> list[str]:
+    """Write ``data`` as the host writes a kind's tar (its parts, then its index); returns the names written."""
+    names = []
+    for name, chunk in serve.served_files(kind, serve.Packed(data, "", 0)):
+        (inbox / name).write_bytes(chunk)
+        names.append(name)
+    return names
+
+
+def _two_kinds(tmp_path: Path) -> tuple[DirJitStore, Snapshot, Snapshot]:
+    """A store with an aiter snapshot of two modules and a Triton one of one kernel, under :data:`KEY` both."""
+    host = tmp_path / "host"
+    store, aiter = _store(host, {"module_a.so": MODULE, "module_b.so": b"m" * 3000})
+    _, triton = _store(host, {"a" * 32 + "/kernel.hsaco": b"k" * 9000}, kind=TRITON)
+    return store, aiter, triton
+
+
+def _want(tmp_path: Path, *kinds) -> list:
+    wanted = [(kind, KEY) for kind in kinds]
+    (tmp_path / "out" / "jit-want.json").write_bytes(serve.want_document(wanted))
+    return wanted
+
+
+def test_a_tar_larger_than_a_part_is_written_in_numbered_parts_and_joined_by_the_runner(tmp_path, monkeypatch) -> None:
+    store, aiter, _ = _two_kinds(tmp_path)
+    sandbox = _sandbox(tmp_path)
+    wanted = _want(tmp_path, AITER_JIT)
+    monkeypatch.setattr(serve, "PART_BYTES", 2048)
+
+    assert serve.serve(store, sandbox, "req") == 1
+
+    names = [path.rsplit("/", 1)[1] for path in sandbox.writes]
+    parts = [name for name in names if name.startswith("aiter_jit.tar.0")]
+    assert len(parts) > 2 and parts == [f"aiter_jit.tar.{index:03d}" for index in range(len(parts))]
+    assert names == [*parts, "aiter_jit.tar.json", "DONE"], "the index after every part, DONE last"
+    assert all((tmp_path / "in" / "jit-cache" / part).stat().st_size <= 2048 for part in parts)
+    _, notes = _asked(tmp_path, wanted)
+    assert "aiter_jit 3 files" in notes[-1]
+    assert DirJitStore(tmp_path / "served").fetch(AITER_JIT, KEY, tmp_path / "private").snapshot == aiter
+    assert sorted(path.name for path in (tmp_path / "in" / "jit-cache").iterdir()) == ["DONE"]
+
+
+@pytest.mark.parametrize("damage", ["missing", "short", "swapped", "link", "extra-bytes", "index-lies"])
+def test_a_kind_whose_parts_do_not_add_up_to_its_index_builds_cold(tmp_path, monkeypatch, damage) -> None:
+    store, _, triton = _two_kinds(tmp_path)
+    sandbox = _sandbox(tmp_path)
+    wanted = _want(tmp_path, AITER_JIT, TRITON)
+    monkeypatch.setattr(serve, "PART_BYTES", 2048)
+    assert serve.serve(store, sandbox, "req") == 2
+    inbox = tmp_path / "in" / "jit-cache"
+    second = inbox / "aiter_jit.tar.001"
+    if damage == "missing":
+        second.unlink()
+    elif damage == "short":
+        second.write_bytes(second.read_bytes()[:-1])
+    elif damage == "swapped":
+        first = (inbox / "aiter_jit.tar.000").read_bytes()
+        (inbox / "aiter_jit.tar.000").write_bytes(second.read_bytes())
+        second.write_bytes(first)
+    elif damage == "link":
+        (tmp_path / "elsewhere").write_bytes(second.read_bytes())
+        second.unlink()
+        second.symlink_to(tmp_path / "elsewhere")
+    elif damage == "extra-bytes":
+        second.write_bytes(second.read_bytes() + b"x")
+    else:
+        index = json.loads((inbox / "aiter_jit.tar.json").read_bytes())
+        (inbox / "aiter_jit.tar.json").write_text(json.dumps({**index, "parts": 100}))
+
+    _, notes = _asked(tmp_path, wanted)
+
+    assert any(note.startswith("jit cache: aiter_jit: what the host served was not used") for note in notes)
+    assert "triton 2 files" in notes[-1] and "aiter_jit" not in notes[-1]
+    served = DirJitStore(tmp_path / "served")
+    assert served.fetch(AITER_JIT, KEY, tmp_path / "private").snapshot is None, "it builds cold"
+    assert served.fetch(TRITON, KEY, tmp_path / "private-triton").snapshot == triton
+    assert not any(path.name.startswith(".") for path in tmp_path.iterdir()), "no joined tar is left"
+
+
+@pytest.mark.parametrize(
+    "index",
+    [
+        {"schema": "other", "parts": 1, "size": 1, "sha256": KEY},
+        {"schema": "hyperloom.jit-cache-parts/v1", "parts": 1, "size": 0, "sha256": KEY},
+        {"schema": "hyperloom.jit-cache-parts/v1", "parts": 1, "size": 1024**3 + 1, "sha256": KEY},
+        {"schema": "hyperloom.jit-cache-parts/v1", "parts": 2, "size": 1, "sha256": KEY},
+        {"schema": "hyperloom.jit-cache-parts/v1", "parts": 1, "size": 1, "sha256": "../x"},
+        {"schema": "hyperloom.jit-cache-parts/v1", "parts": 1, "size": 1, "sha256": KEY, "path": "/"},
+    ],
+)
+def test_an_index_that_is_not_the_one_the_host_writes_is_refused(tmp_path, index) -> None:
+    (tmp_path / "aiter_jit.tar.json").write_text(json.dumps(index))
+
+    with pytest.raises(WantRefused):
+        serve._read_index(tmp_path / "aiter_jit.tar.json")
+
+
+def test_a_kind_the_platform_refuses_to_take_builds_cold_and_the_next_kind_is_still_served(
+    tmp_path, monkeypatch, caplog
+) -> None:
+    """A part over the platform's limit of one write is refused (413): that kind is logged and builds cold, the next kind
+    is served all the same, and the runner is told DONE."""
+    store, aiter, _ = _two_kinds(tmp_path)
+    sandbox = _sandbox(tmp_path, write_limit=16384)
+    wanted = _want(tmp_path, TRITON, AITER_JIT)
+    monkeypatch.setattr(serve, "PART_BYTES", 32768)  # one part each: Triton's 20 KiB, aiter's 10 KiB
+    caplog.set_level("INFO", logger=serve.__name__)
+
+    assert serve.serve(store, sandbox, "req") == 1
+
+    assert sandbox.writes[-1] == "/in/jit-cache/DONE" and "/in/jit-cache/aiter_jit.tar.json" in sandbox.writes
+    assert "/in/jit-cache/triton.tar.json" not in sandbox.writes
+    (refused,) = [record for record in caplog.records if "triton not served" in record.getMessage()]
+    assert refused.levelname == "WARNING" and "SandboxDenied: 413" in refused.getMessage()
+    assert any("aiter_jit served: 2 files, 10240 bytes in 1 parts" in record.getMessage() for record in caplog.records)
+    _, notes = _asked(tmp_path, wanted)
+    assert "aiter_jit 3 files" in notes[-1] and "triton" not in notes[-1]
+    assert DirJitStore(tmp_path / "served").fetch(AITER_JIT, KEY, tmp_path / "private").snapshot == aiter
+
+
+def test_a_kind_larger_than_the_platforms_limit_of_one_write_is_served_in_parts_under_it(tmp_path) -> None:
+    """The case the platform refused when a kind went as one tar: a snapshot past 32 MB, and a small kind beside it."""
+    big = bytes(range(256)) * (36 * 1024**2 // 256)
+    host = tmp_path / "host"
+    store, triton = _store(host, {"a" * 32 + "/kernel.hsaco": big}, kind=TRITON)
+    _, flydsl = _store(host, {"add_" + "0" * 32 + "/" + "1" * 16 + ".pkl": MODULE}, kind=FLYDSL)
+    sandbox = _sandbox(tmp_path, write_limit=PLATFORM_WRITE_LIMIT)
+    wanted = _want(tmp_path, TRITON, FLYDSL)
+
+    assert serve.PART_BYTES < PLATFORM_WRITE_LIMIT
+    assert serve.serve(store, sandbox, "req") == 2
+
+    assert sum(path.startswith("/in/jit-cache/triton.tar.0") for path in sandbox.writes) == 2
+    _, notes = _asked(tmp_path, wanted)
+    assert "triton 2 files" in notes[-1] and "flydsl 2 files" in notes[-1]
+    served = DirJitStore(tmp_path / "served")
+    assert served.fetch(TRITON, KEY, tmp_path / "private").snapshot == triton
+    assert served.fetch(FLYDSL, KEY, tmp_path / "private-flydsl").snapshot == flydsl
+
+
+def test_a_runner_keeps_waiting_while_parts_keep_coming(tmp_path, monkeypatch) -> None:
+    inbox = tmp_path / "in" / "jit-cache"
+    inbox.mkdir(parents=True)
+    (tmp_path / "out").mkdir()
+    monkeypatch.setattr(serve, "WAIT_SEC", 0.6)
+
+    def host() -> None:
+        for index in range(5):
+            time.sleep(0.3)
+            (inbox / f"aiter_jit.tar.{index:03d}").write_bytes(b"")
+        (inbox / "DONE").write_bytes(b"")
+
+    writer = threading.Thread(target=host)
+    writer.start()
+    _, notes = _asked(tmp_path, [(AITER_JIT, KEY)])
+    writer.join()
+
+    assert "served by the host" in notes[-1], "1.5s in all, never 0.6s without a new part"
+
+
+def test_a_runner_stops_waiting_at_the_bound_of_the_whole_wait(tmp_path, monkeypatch) -> None:
+    (tmp_path / "in").mkdir()
+    (tmp_path / "out").mkdir()
+    monkeypatch.setattr(serve, "MAX_WAIT_SEC", 0.2)
+
+    _, notes = _asked(tmp_path, [(AITER_JIT, KEY)])
+
+    assert "did not serve" in notes[-1]
 
 
 def test_a_runner_is_offered_the_cache_only_when_the_host_said_so(tmp_path) -> None:

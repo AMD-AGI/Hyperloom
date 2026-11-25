@@ -319,7 +319,8 @@ def test_a_runner_the_host_serves_asks_for_its_keys_and_hits_what_it_was_served_
         (inbox / "SERVING").write_bytes(b"")
         for kind in KINDS:
             packed = jit_serve.pack(rig.store, kind, _keys(first)[kind.name])
-            (inbox / f"{kind.name}.tar").write_bytes(packed.data)
+            for name, data in jit_serve.served_files(kind, packed):
+                (inbox / name).write_bytes(data)
         (inbox / "DONE").write_bytes(b"")
         return arm(run)
 
@@ -328,7 +329,7 @@ def test_a_runner_the_host_serves_asks_for_its_keys_and_hits_what_it_was_served_
     wanted = jit_serve.parse_want((second_run / "out" / "jit-want.json").read_bytes())
     assert {kind.name: key for kind, key in wanted} == _keys(first), "it asked for the keys it computed"
     assert _states(second) == dict.fromkeys(STATES, "hit") and second.jit_cache.builds_seen == 0
-    assert not list((second_run / "in" / "jit-cache").glob("*.tar")), "the served tars are removed once unpacked"
+    assert not list((second_run / "in" / "jit-cache").glob("*.tar*")), "the served parts are removed once unpacked"
 
 
 def test_a_sandbox_with_a_home_and_a_scratch_directory_of_its_own_finds_the_cache_another_one_filled(rig) -> None:

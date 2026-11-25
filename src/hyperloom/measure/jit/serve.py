@@ -12,14 +12,19 @@ handshake through the files the two already exchange:
    wants), sets its progress phase to :data:`WAIT_PHASE` and waits for ``/in/jit-cache/DONE`` (:data:`WAIT_SEC`).
 3. The host sees that phase at a poll, reads the want strictly (:func:`parse_want`), picks for each kind the snapshot a
    reader would pick, proves every blob it lists (a plain file of the store, the listed size and hash) while it packs the
-   snapshot list and its blobs, in the store's own layout, into one tar per kind, writes ``/in/jit-cache/<kind>.tar`` with
-   the sandbox's ``write_file`` and then ``DONE``, also when it served nothing.
-4. The runner unpacks each tar into a directory of its own (:func:`unpack`) that the test's session then reads as its
-   store: :meth:`~hyperloom.measure.jit.store.DirJitStore.fetch` proves every byte again before anything is used.
+   snapshot list and its blobs, in the store's own layout, into one tar per kind, and writes it with the sandbox's
+   ``write_file`` as numbered parts of at most :data:`PART_BYTES` (``/in/jit-cache/<kind>.tar.000``, ``.001``, ...)
+   followed by ``<kind>.tar.json``, the index that gives the number of parts and the size and sha256 of the whole tar.
+   Each kind is served on its own: one that fails is logged and the next is still served. ``DONE`` comes last, also
+   when nothing was served.
+4. The runner joins each kind's parts in order, checks the size and sha256 the index names, and unpacks the tar into a
+   directory of its own (:func:`unpack`) that the test's session then reads as its store:
+   :meth:`~hyperloom.measure.jit.store.DirJitStore.fetch` proves every byte again before anything is used.
 
 Whatever the sandbox writes is untrusted on the host: the want is bounded in size, its kinds and keys must be known
-kinds and sha256 keys, and nothing it names is a path. What the host sends is untrusted on the runner the same way: a
-tar member must be a regular file under a name of the store's layout for the kind and key asked for (no link, no device,
+kinds and sha256 keys, and nothing it names is a path. What the host sends is untrusted on the runner the same way:
+the runner reads only the file names it expects for the kinds it asked for, an index within its bounds, and parts that
+are regular files adding up to the size and hash the index names; a tar member must be a regular file under a name of the store's layout for the kind and key asked for (no link, no device,
 no directory, no path of its own), within the size and count bounds. Anything that does not hold is dropped and the test
 builds what it lacks itself: the cache costs time when it fails, never a result.
 """
@@ -28,6 +33,7 @@ from __future__ import annotations
 
 import hashlib
 import io
+import itertools
 import logging
 import os
 import re
@@ -35,7 +41,7 @@ import stat
 import tarfile
 import tempfile
 import time
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Iterator, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import IO
@@ -57,7 +63,9 @@ __all__ = [
     "DONE_PATH",
     "MAX_TAR_BYTES",
     "MAX_TAR_FILES",
+    "MAX_WAIT_SEC",
     "MAX_WANT_BYTES",
+    "PART_BYTES",
     "Packed",
     "SERVE_DIR",
     "SERVING_PATH",
@@ -70,6 +78,7 @@ __all__ = [
     "pack",
     "parse_want",
     "serve",
+    "served_files",
     "unpack",
     "want_document",
 ]
@@ -80,6 +89,10 @@ log = logging.getLogger(__name__)
 SERVE_DIR = "/in/jit-cache"
 _SERVE_NAME = "jit-cache"
 _SERVING, _DONE, _TAR = "SERVING", "DONE", ".tar"
+#: The index written after a kind's parts: ``<kind>.tar.json``; a part is ``<kind>.tar.<index, three digits>``.
+_INDEX = f"{_TAR}.json"
+_INDEX_SCHEMA = "hyperloom.jit-cache-parts/v1"
+_MAX_INDEX_BYTES = 1024
 SERVING_PATH, DONE_PATH = f"{SERVE_DIR}/{_SERVING}", f"{SERVE_DIR}/{_DONE}"
 #: The runner's list of the kinds and keys it wants, below its output directory.
 _WANT_NAME = "jit-want.json"
@@ -88,15 +101,20 @@ _WANT_SCHEMA = "hyperloom.jit-cache-want/v1"
 _WANT = "want"
 #: The runner's progress phase while it waits to be served: the host serves when it reads it.
 WAIT_PHASE = "jit_wait"
-#: How long a runner waits to be served before its test builds cold: a host polls every few seconds, and an upload of a
-#: few hundred MB takes under a minute per kind.
+#: How long a runner waits for the host without seeing a new file served before its test builds cold: a host polls every
+#: few seconds and writes one part at a time, so the wait starts again with every part that comes, up to
+#: :data:`MAX_WAIT_SEC` in all.
 WAIT_SEC = 300.0
+MAX_WAIT_SEC = 1800.0
 #: The bounds of what crosses: a want is a few hundred bytes; one tar is one ``write_file`` request, which the platform
 #: bounds in time, so a kind whose snapshot is larger is not served (it builds cold); the most files one tar holds. A
 #: DeepSeek aiter JIT cache passes 256 MiB, so a kind may send up to 1 GiB.
 MAX_WANT_BYTES = 16 * 1024
 MAX_TAR_BYTES = 1024**3
 MAX_TAR_FILES = 20_000
+#: The largest part of a kind's tar the host writes. The sandbox's file API refuses a single write over 32 MB (HTTP 413,
+#: "file exceeds 32MB"), so a tar is written as parts of at most 30 MiB, safely under that limit.
+PART_BYTES = 30 * 1024**2
 _BLOB_NAME = re.compile(r"blobs/(?P<prefix>[0-9a-f]{2})/(?P=prefix)[0-9a-f]{62}")
 _TAR_MODE = 0o400
 #: The only member types a served tar may hold: plain regular files (no link, device, directory, fifo or sparse file).
@@ -128,40 +146,123 @@ def ask(
     """Ask the host for ``wanted`` and unpack what it serves into ``dest``, the directory the session reads as its store;
     returns the notes for the result.
 
-    Nothing here fails the test: a host that does not answer in :data:`WAIT_SEC`, or a tar that does not unpack, leaves
-    the kinds it would have given empty (a note says why), and their tests build cold.
+    Nothing here fails the test: a host that does not answer in time (:func:`_wait_for_done`), or a kind whose parts do
+    not join into the tar its index names or do not unpack, leaves the kinds it would have given empty (a note says
+    why), and their tests build cold.
     """
-    served, notes, wait_sec = in_dir / _SERVE_NAME, list[str](), WAIT_SEC
+    served, notes = in_dir / _SERVE_NAME, list[str]()
     _write_atomic(out_dir / _WANT_NAME, want_document(wanted))
     phase(WAIT_PHASE)
     started = time.monotonic()
-    if not _wait_for(served / _DONE, wait_sec):
-        notes.append(f"jit cache: the host did not serve the cache within {wait_sec:.0f}s; the test builds cold")
+    if not _wait_for_done(served):
+        notes.append(
+            f"jit cache: the host did not serve the cache within {time.monotonic() - started:.0f}s; the test builds cold"
+        )
         return notes
     given = []
     for kind, key in wanted:
-        tar = served / f"{kind.name}{_TAR}"
-        if not os.path.lexists(tar):
+        if not os.path.lexists(served / f"{kind.name}{_INDEX}"):
             continue
         try:
-            files = unpack(tar, dest, kind, key)
+            files = _receive(served, dest, kind, key)
         except (WantRefused, tarfile.TarError, ValueError, OSError, fsafe.UnsafeEntry, fsafe.MissingEntry) as exc:
             notes.append(f"jit cache: {kind.name}: what the host served was not used ({exc}); it builds cold")
             files = None
-        _remove(tar)
+        _remove_served(served, kind)
         if files is not None:
             given.append(f"{kind.name} {files} files")
     notes.append(f"jit cache: served by the host in {time.monotonic() - started:.1f}s: {', '.join(given) or 'nothing'}")
     return notes
 
 
-def _remove(tar: Path) -> None:
-    """Remove a served tar, which is read from its unpacked copy from here on; an input directory this runner cannot
-    write keeps it, which costs only its space."""
+def _max_parts() -> int:
+    return max(1, -(-MAX_TAR_BYTES // PART_BYTES))
+
+
+def _part_name(kind: CacheKind, index: int) -> str:
+    return f"{kind.name}{_TAR}.{index:03d}"
+
+
+def _receive(served: Path, dest: Path, kind: CacheKind, key: str) -> int:
+    """Join the parts the host served for ``kind`` into one tar beside ``dest``, proved against its index, and unpack it;
+    returns the files it held. The joined tar is gone afterwards on every path."""
+    index = _read_index(served / f"{kind.name}{_INDEX}")
+    dest.parent.mkdir(parents=True, exist_ok=True, mode=fsafe.DIR_MODE)
+    with tempfile.NamedTemporaryFile(dir=dest.parent, prefix=f".{kind.name}-", suffix=_TAR) as joined:
+        digest, total = hashlib.sha256(), 0
+        for number in range(index.parts):
+            for chunk in _read_part(served / _part_name(kind, number)):
+                total += len(chunk)
+                if total > index.size:
+                    raise WantRefused(f"the parts hold more than the {index.size} bytes the index names")
+                digest.update(chunk)
+                joined.write(chunk)
+        joined.flush()
+        if total != index.size or digest.hexdigest() != index.sha256:
+            raise WantRefused(f"the parts are {total} bytes, not the {index.size} bytes and hash the index names")
+        return unpack(Path(joined.name), dest, kind, key)
+
+
+@dataclass(frozen=True)
+class _Index:
+    """What the host's index says of a kind's tar: the parts it is written as, and its size and sha256."""
+
+    parts: int
+    size: int
+    sha256: str
+
+
+def _read_index(path: Path) -> _Index:
+    """The number of parts, the size and the sha256 of a kind's tar, read strictly from the index the host wrote."""
+    raw = b"".join(_read_part(path, _MAX_INDEX_BYTES))
     try:
-        tar.unlink(missing_ok=True)
-    except OSError as exc:
-        log.info("jit cache: the served %s was not removed (%s)", tar.name, type(exc).__name__)
+        r = Reader(parse_json_object(raw, what="index"), "index")
+        if r.text("schema") != _INDEX_SCHEMA:
+            raise DocumentError(f"index.schema: expected {_INDEX_SCHEMA}")
+        parts, size = r.integer("parts", minimum=1) or 0, r.integer("size", minimum=1) or 0
+        sha256 = r.text("sha256", pattern=SHA256_RE) or ""
+        r.done()
+    except DocumentError as exc:
+        raise WantRefused(str(exc)) from None
+    if size > MAX_TAR_BYTES:
+        raise WantRefused(f"index.size: expected a size of at most {MAX_TAR_BYTES} bytes")
+    if parts != -(-size // PART_BYTES) or parts > _max_parts():
+        raise WantRefused(f"index.parts: expected the {-(-size // PART_BYTES)} parts of {size} bytes")
+    return _Index(parts, size, sha256)
+
+
+def _read_part(path: Path, bound: int | None = None) -> Iterator[bytes]:
+    """The bytes of a served file, opened without following a link and only when it is a regular file within ``bound``
+    (by default a part's)."""
+    bound = PART_BYTES if bound is None else bound
+    fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC)
+    try:
+        facts = os.fstat(fd)
+        if not stat.S_ISREG(facts.st_mode):
+            raise WantRefused(f"{path.name} is not a regular file")
+        if facts.st_size > bound:
+            raise WantRefused(f"{path.name} is larger than {bound} bytes")
+        left = facts.st_size
+        while left > 0 and (chunk := os.read(fd, min(fsafe.CHUNK, left))):
+            left -= len(chunk)
+            yield chunk
+    finally:
+        os.close(fd)
+
+
+def _remove_served(served: Path, kind: CacheKind) -> None:
+    """Remove what the host served for ``kind``, which is read from its unpacked copy from here on; an input directory
+    this runner cannot write keeps it, which costs only its space."""
+    names = itertools.chain([f"{kind.name}{_INDEX}"], (_part_name(kind, index) for index in range(_max_parts())))
+    for name in names:
+        try:
+            (served / name).unlink()
+        except FileNotFoundError:
+            if name != f"{kind.name}{_INDEX}":
+                return  # the parts are numbered from 000 on: the first missing one is past the last
+        except OSError as exc:
+            log.info("jit cache: the served %s was not removed (%s)", name, type(exc).__name__)
+            return
 
 
 def unpack(tar: Path, dest: Path, kind: CacheKind, key: str) -> int:
@@ -228,11 +329,20 @@ def _write_member(dest: Path, name: str, source: IO[bytes], size: int) -> None:
         os.close(directory)
 
 
-def _wait_for(path: Path, timeout_sec: float, poll_sec: float = 0.5) -> bool:
-    """Wait until ``path`` exists; False when ``timeout_sec`` passes first."""
-    deadline = time.monotonic() + timeout_sec
-    while not path.exists():
-        if time.monotonic() >= deadline:
+def _wait_for_done(served: Path, poll_sec: float = 0.5) -> bool:
+    """Wait until the host writes ``DONE``; False when :data:`WAIT_SEC` passes with no new file served, or
+    :data:`MAX_WAIT_SEC` in all."""
+    started = time.monotonic()
+    deadline, seen = started + WAIT_SEC, -1
+    while not (served / _DONE).exists():
+        now = time.monotonic()
+        try:
+            count = len(os.listdir(served))
+        except OSError:
+            count = 0
+        if count != seen:
+            seen, deadline = count, min(now + WAIT_SEC, started + MAX_WAIT_SEC)
+        if now >= deadline:
             return False
         time.sleep(poll_sec)
     return True
@@ -254,6 +364,27 @@ class Packed:
     data: bytes
     snapshot: str
     files: int
+
+    @property
+    def parts(self) -> int:
+        """The number of parts of at most :data:`PART_BYTES` the tar is written as."""
+        return max(1, -(-len(self.data) // PART_BYTES))
+
+
+def served_files(kind: CacheKind, packed: Packed) -> Iterator[tuple[str, bytes]]:
+    """The names below ``/in/jit-cache`` and the bytes the host writes for ``kind``, in the order it writes them: the
+    tar's parts of at most :data:`PART_BYTES` each, then the index that names their number and the tar's size and hash,
+    so that a runner never finds an index whose parts are not all written."""
+    view = memoryview(packed.data)
+    for index in range(packed.parts):
+        yield _part_name(kind, index), bytes(view[index * PART_BYTES : (index + 1) * PART_BYTES])
+    index_doc = {
+        "schema": _INDEX_SCHEMA,
+        "parts": packed.parts,
+        "size": len(packed.data),
+        "sha256": hashlib.sha256(packed.data).hexdigest(),
+    }
+    yield f"{kind.name}{_INDEX}", canonical_json(index_doc).encode("utf-8")
 
 
 def parse_want(raw: bytes) -> list[tuple[CacheKind, str]]:
@@ -361,11 +492,11 @@ def serve(store: DirJitStore | None, handle: Sandbox, shown: str) -> int:
     started, served = time.monotonic(), list[str]()
     try:
         if store is not None:
-            _serve_wanted(store, handle, served)
+            _serve_wanted(store, handle, served, shown)
     except WantRefused as exc:
         log.warning("jit cache: test %s: its want is refused (%s); nothing is served", shown, exc)
     except (SandboxError, OSError) as exc:
-        log.warning("jit cache: test %s: serving stopped (%s: %s)", shown, type(exc).__name__, exc)
+        log.warning("jit cache: test %s: its want could not be read (%s: %s)", shown, type(exc).__name__, exc)
     try:
         handle.write_file(DONE_PATH, b"")
     except (SandboxError, OSError) as exc:
@@ -376,13 +507,32 @@ def serve(store: DirJitStore | None, handle: Sandbox, shown: str) -> int:
     return len(served)
 
 
-def _serve_wanted(store: DirJitStore, handle: Sandbox, served: list[str]) -> None:
-    """Write a tar of every kind the want names that the store holds a snapshot of; each is named in ``served``."""
+def _serve_wanted(store: DirJitStore, handle: Sandbox, served: list[str], shown: str) -> None:
+    """Write the parts of a tar of every kind the want names that the store holds a snapshot of, each kind on its own: one
+    that fails (the platform refuses a write, say) is logged and builds cold, the next is still served. Each kind served
+    is named in ``served``."""
     for kind, key in parse_want(_read_want(handle)):
-        packed = pack(store, kind, key)
-        if packed is None:
+        started = time.monotonic()
+        try:
+            packed = pack(store, kind, key)
+            if packed is None:
+                continue
+            for name, data in served_files(kind, packed):
+                handle.write_file(f"{SERVE_DIR}/{name}", data)
+        except (SandboxError, OSError) as exc:
+            log.warning(
+                "jit cache: test %s: %s not served (%s: %s); it builds cold", shown, kind.name, type(exc).__name__, exc
+            )
             continue
-        handle.write_file(f"{SERVE_DIR}/{kind.name}{_TAR}", packed.data)
+        log.info(
+            "jit cache: test %s: %s served: %d files, %d bytes in %d parts, %.1fs",
+            shown,
+            kind.name,
+            packed.files,
+            len(packed.data),
+            packed.parts,
+            time.monotonic() - started,
+        )
         served.append(f"{kind.name} {packed.files} files {len(packed.data)} bytes")
 
 
