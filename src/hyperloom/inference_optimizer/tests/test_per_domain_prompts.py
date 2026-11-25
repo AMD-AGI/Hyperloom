@@ -407,20 +407,21 @@ def test_R2_unknown_domain_allowed(gate):
     )
 
 
-def test_R2_missing_gap_denied(gate):
+def test_R2_missing_gap_denied_and_params_left_untouched():
+    state = SharedState()
+    state.upsert_gap(
+        {"canonical_id": "gap.framework.scheduler", "domain_hint": "serving_specialist", "severity": "high"}
+    )
+    gate = PolicyGate(role_registry=default_role_registry(), shared_state=state)
+    params = {"domain": "serving_specialist"}
     with pytest.raises(PolicyDenied) as exc:
         gate.validate_intent(
             "orchestration",
-            Intent(
-                type=IntentType.DELEGATE,
-                payload={
-                    "action_name": "specialist",
-                    "params": {"domain": "serving_specialist"},
-                },
-            ),
+            Intent(type=IntentType.DELEGATE, payload={"action_name": "specialist", "params": params}),
         )
     assert exc.value.rule == "specialist_dispatch_source"
     assert "gap" in str(exc.value)
+    assert params == {"domain": "serving_specialist"}
 
 
 def test_R2_max_turns_excess_denied(gate):
