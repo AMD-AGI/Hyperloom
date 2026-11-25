@@ -314,16 +314,6 @@ def test_the_directions_of_a_checkout_built_server_name_no_answer():
     assert [_handed_over(text) for text in CHECKOUT_DIRECTIONS] == [set()] * len(CHECKOUT_DIRECTIONS)
 
 
-def test_only_a_role_with_a_checkout_narrows_the_checkpoint_rule_to_the_served_model():
-    installed = " ".join(role_prompt(WORKLOAD).split())
-    checkout = " ".join(
-        role_prompt(WORKLOAD, server=RoleServer(checkouts=("llamacpp",), test_outputs=_TEST_OUTPUTS)).split()
-    )
-
-    assert "no --dtype, no other checkpoint, and no patch that quantizes" in installed
-    assert "no --dtype, no other checkpoint of the served model, and no patch that quantizes" in checkout
-
-
 def test_each_prompt_is_versioned_by_its_own_text(monkeypatch):
     versions = prompt_versions()
 
@@ -351,7 +341,6 @@ def test_each_prompt_is_versioned_by_its_own_text(monkeypatch):
         ("_UNPROFILED", lambda text: text + " One more rule.", "specialist_role"),
         ("_CHECKOUT_REVIEW", lambda text: text + " One more rule.", "specialist_role"),
         ("_FIRST_IDEA_CHECKOUT", lambda text: text + " One more rule.", "specialist_role"),
-        ("_CHECKPOINT_CHECKOUT", lambda text: text + " One more rule.", "specialist_role"),
         ("_WAIT_WAKE", lambda text: text + " One more rule.", "specialist_launch"),
     ],
 )
