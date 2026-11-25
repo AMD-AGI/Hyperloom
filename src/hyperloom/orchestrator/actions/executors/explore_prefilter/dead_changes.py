@@ -35,7 +35,7 @@ _ENGINE_INIT = "engine_core_init"
 
 # Exceptions a framework raises when it rejects the configuration it was given. A host fault raised as another type
 # (OSError, MemoryError, a RuntimeError with no device, a hub HTTP error) never retires a change; one raised under these
-# names does, unless its log names the host or a card short of free memory.
+# names does, unless its log names the host, a capacity or out-of-memory limit, or a card short of free memory.
 _CONFIG_REFUSALS: frozenset[str] = frozenset(
     {"ValueError", "NotImplementedError", "AssertionError", "TypeError", "ValidationError"}
 )
