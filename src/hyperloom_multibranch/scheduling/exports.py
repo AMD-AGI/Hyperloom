@@ -5,10 +5,10 @@
 and the dashboard.
 
 They read a blackboard that no longer changes. The write-back goes first, reading the patch and kernel files of the
-chosen commit's recipe from the session's blob store, then the blackboard's knowledge steps (the search tree to the
-archive, marking the replays of the champions PRELUDE prepared from another image; the Experiences and the specialists'
-learnings go nowhere while the session runs on no Experience KB, see
-:func:`~hyperloom_multibranch.scheduling.mb_fakes.mb_fake_close_knowledge`), because the breakdown records both
+chosen commit's recipe from the session's blob store, then the blackboard's knowledge steps (the Experiences and the
+specialists' learnings to the Experience KB ``HYPERLOOM_KB_URL`` names, none without it
+(:func:`~hyperloom_multibranch.scheduling.experience_kb.close_targets`), and the search tree to the
+archive, marking the replays of the champions PRELUDE prepared from another image), because the breakdown records both
 outcomes next to the chosen commit's recipe and how FINAL chose it; once the search tree is archived, the scheduler's
 LLM proposes one change to the scheduling playbook into the pool beside the archive (:func:`author_playbook`) and
 curates the RSI lesson pool the knowledge steps published the session's learnings to (:func:`curate_lessons`), steps
@@ -52,15 +52,15 @@ from hyperloom_multibranch.blackboard.rsi.authoring import author_playbook
 from hyperloom_multibranch.blackboard.rsi.lesson_curation import curate_lessons
 from hyperloom_multibranch.blackboard.rsi.archive import ARCHIVED, TreeArchive
 from hyperloom_multibranch.blackboard.rsi.archive import SKIPPED as STEP_SKIPPED
-from hyperloom_multibranch.blackboard.rsi.session import CloseStep, KnowledgeClose
+from hyperloom_multibranch.blackboard.rsi.session import CloseStep, KnowledgeClose, close_knowledge
 from hyperloom_multibranch.scheduling.dashboard import SessionDashboard
+from hyperloom_multibranch.scheduling.experience_kb import close_targets
 from hyperloom_multibranch.scheduling.final import FinalChoice
 from hyperloom_multibranch.scheduling.integrator import ConflictLoss
 from hyperloom_multibranch.scheduling.layout import SessionLayout
 from hyperloom_multibranch.contracts.llm import Completion
 from hyperloom_multibranch.scheduling.checkpoint_tally import CheckpointScope, CheckpointTally, checkpoint_tally
 from hyperloom_multibranch.scheduling.manifest import read_manifest
-from hyperloom_multibranch.scheduling.mb_fakes import mb_fake_close_knowledge
 
 #: The single-lineage CLOSE's status when no Recipe KB is configured.
 KB_DISABLED = "disabled"
@@ -205,8 +205,8 @@ class ExportServices:
 class SessionExports:
     """Exports one stopped session into ``layout``, through ``services``.
 
-    ``metric`` is the recorded-value metric and ``budget_seconds`` the session's budget. The archive is the
-    environment's; the Experience KB is :data:`~hyperloom_multibranch.scheduling.mb_fakes.MB_FAKE_EXPERIENCE_KB`.
+    ``metric`` is the recorded-value metric and ``budget_seconds`` the session's budget. The archive and the
+    Experience KB are the environment's.
     """
 
     def __init__(
@@ -241,14 +241,7 @@ class SessionExports:
             knowledge = KnowledgeClose(**{step.name: skipped for step in fields(KnowledgeClose)})
             playbook = curation = skipped
         else:
-            knowledge = await asyncio.to_thread(
-                mb_fake_close_knowledge,
-                snapshot,
-                self._metric,
-                budget_seconds=self._budget_seconds,
-                layout=self._layout,
-                cross_image=_cross_image(self._warm_leads),
-            )
+            knowledge = await asyncio.to_thread(self._close_knowledge, snapshot)
             if knowledge.archive.status == ARCHIVED:
                 playbook = await author_playbook(snapshot, self._ask_author, model=self._author.model)
                 curation = await self._curate(snapshot)
@@ -315,6 +308,15 @@ class SessionExports:
             return await asyncio.to_thread(publish_final_recipe, self._kb_client, snapshot, final_recipe, rule_pack)
         except (RecipeError, RemoteRecipeValidationError, KBStoreError, BlobError, OSError) as exc:
             return RemoteWriteResult(KB_FAILED, f"{type(exc).__name__}: {exc}")
+
+    def _close_knowledge(self, snapshot: BlackboardSnapshot) -> KnowledgeClose:
+        return close_knowledge(
+            snapshot,
+            self._metric,
+            budget_seconds=self._budget_seconds,
+            targets=close_targets(self._layout),
+            cross_image=_cross_image(self._warm_leads),
+        )
 
 
 __all__ = [

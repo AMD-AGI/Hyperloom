@@ -16,7 +16,6 @@ import sys
 from pathlib import Path
 
 from hyperloom_common.env import EnvValueError, env_bool
-from hyperloom_common.llm.llm_config import DEFAULT_CLAUDE_MODEL
 from hyperloom.inference_optimizer.session.paths import workspace_root
 from hyperloom_kb import (
     GLOBAL_URL_ENV,
@@ -51,7 +50,6 @@ HOME_ENV = "HYPERLOOM_KB_HOME"
 MAPPING = "hyperloom-sbd-v6"
 AUTO_PUSH_ENV = "HYPERLOOM_KB_AUTO_PUSH"
 _PLACEHOLDER = "<PLEASE_FILL_IN>"
-_PLANNER_MODEL_KEYS = ("LOCAL_KB_PLANNER_MODEL", "CLAUDE_MODEL", "ANTHROPIC_MODEL")
 
 
 def mapping_schema_ref() -> str:
@@ -131,10 +129,7 @@ def ensure_service(*, restart: bool = True) -> LocalService | None:
     config = RemoteConfig.from_env(timeout_seconds=REQUEST_TIMEOUT_SECONDS)
     if config is None or not is_loopback(config.base_url):
         return None
-    env = dict(os.environ)
-    if not any(env.get(key) for key in _PLANNER_MODEL_KEYS):
-        env["LOCAL_KB_PLANNER_MODEL"] = DEFAULT_CLAUDE_MODEL
-    return ensure_local_service(config, service_home(), env=env, restart=restart)
+    return ensure_local_service(config, service_home(), env=dict(os.environ), restart=restart)
 
 
 def _workspace_client(command: str) -> RemoteClient:
@@ -212,7 +207,14 @@ def main(argv: list[str] | None = None) -> int:
     commands = parser.add_subparsers(dest="command", required=True)
     init = commands.add_parser("init-env", help="Write the local service URL and a generated token into .env.")
     init.add_argument("--env-file", type=Path, default=Path(".env"))
-    commands.add_parser("ensure", help="Start the local service unless it already serves, then check its health.")
+    ensure = commands.add_parser(
+        "ensure", help="Start the local service unless it already serves, then check its health."
+    )
+    ensure.add_argument(
+        "--no-restart",
+        action="store_true",
+        help="Leave a service started with other settings serving instead of restarting it.",
+    )
     commands.add_parser("push", help="Send the Experiences written here and not yet pushed to the global KB.")
     commands.add_parser(
         "pull",
@@ -245,7 +247,7 @@ def main(argv: list[str] | None = None) -> int:
             print(f"  rejected: {item}", file=sys.stderr)
         return 0 if report["status"] == "completed" and not rejected else 1
     try:
-        service = ensure_service()
+        service = ensure_service(restart=not args.no_restart)
     except (LocalServiceError, RemoteClientError) as exc:
         print(f"Experience KB service failed: {exc}", file=sys.stderr)
         return 1
@@ -257,6 +259,8 @@ def main(argv: list[str] | None = None) -> int:
         f"Experience KB service {state} at {os.environ['HYPERLOOM_KB_URL']}: "
         f"{service.health.get('experience_count', 0)} Experiences under {service_home()}"
     )
+    if service.stale:
+        print(f"Experience KB service left serving with other settings: {service.stale}", file=sys.stderr)
     return 0
 
 
