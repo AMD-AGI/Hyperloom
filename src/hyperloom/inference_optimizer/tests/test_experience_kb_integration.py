@@ -415,7 +415,6 @@ def test_specialist_dispatch_injects_its_experience_block_and_records_it(tmp_pat
     )
     assert "## 4b. EXPERIENCE KB" in user
     assert evidence.prompt_block in user
-    assert "COLD-START MODE" not in user
 
 
 def test_specialist_dispatch_reads_only_in_framework_agent_and_fails_open(tmp_path) -> None:

@@ -40,6 +40,7 @@ from hyperloom.measure.bundle import (
     VerifiedBundle,
 )
 from hyperloom.measure.failures import (
+    RESULT_DOWNLOAD_INCOMPLETE,
     RUNNER_EXITED,
     RUNNER_START_TIMEOUT,
     SANDBOX_ACQUIRE_TIMEOUT,
@@ -48,6 +49,7 @@ from hyperloom.measure.failures import (
     FailureEvidence,
     classify_test_failure,
 )
+from hyperloom.measure.hosted_copy import DownloadIncomplete, copy_listed
 from hyperloom.measure.hosted_live import LiveOutputs, finite_number
 from hyperloom.measure.hosted_logs import SeenProgress, save_runner_files, write_progress
 from hyperloom.measure.hosted_log import (
@@ -749,9 +751,19 @@ class HostedMeasurementBackend:
             self._publish_jit(attempt, verified, staging)
             step(_JIT_PUBLISHED)
         except ResultRejected as exc:
+            # The sandbox is still up: keep the runner's logs, so a refused result can be diagnosed (best effort,
+            # every failure of the save is caught and logged inside it, so the refusal stays the outcome).
+            self._save_logs(_handle(attempt.runner), call)
             outcome = _refusal(call, HOSTED_RESULT_REJECTED_RC, "result_rejected", str(exc))
-            self._finish_record(attempt, outcome, {"verdict": "result_rejected", "reject": exc.reason.value})
+            extra = {"verdict": "result_rejected", "reject": exc.reason.value, "detail": bounded(exc.detail)}
+            self._finish_record(attempt, outcome, extra)
             self._emit("hyperloom.measurement_finished", attempt, {"accepted": False})
+            return outcome
+        except DownloadIncomplete as exc:
+            # The platform's file API, not the result: a new attempt downloads it again (logs kept, nothing landed).
+            self._save_logs(_handle(attempt.runner), call)
+            outcome = _infra(call, HOSTED_INFRA_FAILURE_RC, RESULT_DOWNLOAD_INCOMPLETE, str(exc))
+            self._finish_record(attempt, outcome, {"verdict": RESULT_DOWNLOAD_INCOMPLETE, "detail": str(exc)})
             return outcome
         except (ArchiveError, MaterializeError, SandboxError, OSError, ValueError) as exc:
             error_class = "archive_failed" if isinstance(exc, ArchiveError) else "result_read_failed"
@@ -790,7 +802,7 @@ class HostedMeasurementBackend:
         for entry in listed.files:
             target = staging / entry.path
             target.parent.mkdir(parents=True, exist_ok=True)
-            handle.copy_out(f"{FILES_ROOT}/{entry.path}", target)
+            copy_listed(handle, FILES_ROOT, entry, target)
         return bundle_mod.verify_bundle(
             staging,
             bundle_mod.BundleExpectation(

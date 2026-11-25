@@ -356,7 +356,7 @@ async def test_the_farm_refuses_a_build_the_sheet_does_not_name_exactly(rig: Rig
         lay(NamedBuild(ref.root_id, ref.key, ref.manifest_sha256), "sha256:" + "e" * 64)
     with pytest.raises(FarmError, match="is not in the store"):
         lay(NamedBuild(ref.root_id, "f" * 64, ref.manifest_sha256))
-    with pytest.raises(FarmError, match="a runtime root needs the native build store, which this runner is not given"):
+    with pytest.raises(FarmError, match="needs the native build store"):
         built_roots(environment.roots, None)
     with pytest.raises(FarmError, match="needs its build"):
         build_farm(environment.roots, rig.tmp / "none", python=rig.image.python, read_blob=lambda a: b"")

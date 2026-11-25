@@ -12,14 +12,9 @@ the first log that holds it and not again.
 
 from __future__ import annotations
 
-from collections.abc import Sequence
 from pathlib import Path
 
-import yaml
-
-from hyperloom.common.benchmark_config import BenchmarkPointError, read_benchmark_point
 from hyperloom.common.server_timing import read_timing_lines
-from hyperloom.inference_optimizer.framework_registry import native_component
 from hyperloom_multibranch.toolbox.table_hits import server_logs
 
 __all__ = ["read_test_timing_lines"]
@@ -27,17 +22,10 @@ __all__ = ["read_test_timing_lines"]
 _NOT_READ = "not read ({why})"
 
 
-def read_test_timing_lines(points: Sequence[Path], output_dir: Path) -> tuple[str, ...]:
-    """The timing lines of every server log below ``output_dir``, in the order of the logs' paths, for a test whose
-    ``points`` are served by a framework built from its checkout; none for any other test, nor for one whose point
-    cannot be read. A log that cannot be read is named with why, so that it is not taken for a server that timed
-    nothing."""
-    try:
-        component = native_component(read_benchmark_point(points[0]).framework) if points else None
-    except (OSError, yaml.YAMLError, BenchmarkPointError):
-        return ()
-    if component is None:
-        return ()
+def read_test_timing_lines(component: str | None, output_dir: Path) -> tuple[str, ...]:
+    """The timing lines of every server log below ``output_dir``, in the order of the logs' paths, for a test of a
+    server built from ``component``'s checkout; none for a framework that builds none (``None``). A log that cannot be
+    read is named with why, so that it is not taken for a server that timed nothing."""
     shown: list[str] = []
     seen: set[str] = set()
     for log in server_logs(output_dir):

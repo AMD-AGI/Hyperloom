@@ -57,6 +57,7 @@ from hyperloom.measure.boot_watch import boot_seconds
 from hyperloom.measure.checkpoint import read_ruling
 from hyperloom.measure.bundle import RecordedBundle, ResultRejected
 from hyperloom.measure.hosted import HostedMeasurementBackend, Reverified
+from hyperloom.inference_optimizer.framework_registry import native_component
 from hyperloom.measure.hosted_log import FAILURE_DETAIL_CHARS, STATE_FINISHED, STATE_SENT, STATE_SUBMITTED, Record
 from hyperloom.measure.manifest import ResultManifest
 from hyperloom.measure.phases import RESULT_READ, account
@@ -229,7 +230,7 @@ class HostedExecutor:
             return self._timed_out(request_id, started, expired)
         result = self._result(request, accepted, call, outcome, _Span(started, self._clock()))
         result = await self._with_table_hits(result, accepted, call)
-        result = await self._with_timing_lines(result, accepted, call)
+        result = await self._with_timing_lines(result, call)
         result = await self._with_short_prompts(result, accepted, call)
         result = await self._with_long_context(result, accepted, call)
         return await self._with_request_classes(result, request, outcome, call)
@@ -425,12 +426,13 @@ class HostedExecutor:
         hits = await asyncio.to_thread(read_table_hits, accepted.environment, accepted.points, Path(call.output_dir))
         return replace(result, table_hits=hits, runtime_findings=runtime_findings(hits))
 
-    async def _with_timing_lines(self, result: TestResult, accepted: AcceptedMeasurement, call: TestCall) -> TestResult:
+    async def _with_timing_lines(self, result: TestResult, call: TestCall) -> TestResult:
         """``result`` with the last lines the test's server logs time its requests with, which its specialist cannot
         open the logs for; a failed test has none. Read in a worker thread, as the table hits are."""
         if result.validity is not Validity.SUCCEEDED:
             return result
-        lines = await asyncio.to_thread(read_test_timing_lines, accepted.points, Path(call.output_dir))
+        component = native_component(self._session_facts.base_launch.framework)
+        lines = await asyncio.to_thread(read_test_timing_lines, component, Path(call.output_dir))
         return replace(result, timing_lines=lines)
 
     async def _with_short_prompts(

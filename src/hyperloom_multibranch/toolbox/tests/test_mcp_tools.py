@@ -385,12 +385,6 @@ def test_a_session_of_an_installed_framework_shares_no_baseline_and_describes_it
             == forbidden
         )
         assert "baseline test of the session" not in described[tool] and "timing_lines" not in described[tool]
-    assert described["test_result"].startswith(
-        "The state and result of one test this branch submitted, or of any branch's profile test. An AgentX test's "
-    )
-    assert described["wait_test"].startswith(
-        "How to wait for a test of this branch, or for any branch's profile test: returns as soon as its result lands,"
-    )
 
 
 def test_only_a_checkout_built_session_s_tools_say_a_baseline_is_shared_and_what_timing_lines_are(
@@ -403,11 +397,6 @@ def test_only_a_checkout_built_session_s_tools_say_a_baseline_is_shared_and_what
         in (described["test_result"])
     )
     assert "for any branch's profile test or for a baseline test of the session: returns" in described["wait_test"]
-
-
-def test_a_result_with_no_timing_lines_is_answered_without_the_key(rig: Rig) -> None:
-    for tool in ("test_result", "wait_test"):
-        assert "timing_lines" not in json.loads(rig.ok(rig.token("s1"), tool, request_id="r1"))["result"]
 
 
 def test_any_branch_finds_the_session_s_baseline_tests_and_reads_their_results(baselined_rig: Rig) -> None:

@@ -92,7 +92,7 @@ def test_a_build_whose_outputs_are_not_executables_is_refused_for_an_executable_
 
 
 def test_an_executable_root_without_its_build_is_refused(tmp_path: Path) -> None:
-    with pytest.raises(FarmError, match="its executable build needs the native build store"):
+    with pytest.raises(FarmError, match="its build needs the native build store"):
         built_roots([_root()], None)
     with pytest.raises(FarmError, match="an executable root needs its build"):
         build_farm([_root()], tmp_path / "farm", python=sys.executable, read_blob=_no_blob, inherited={})

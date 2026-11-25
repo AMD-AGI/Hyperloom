@@ -249,16 +249,14 @@ def test_an_unknown_gpu_type_is_refused_naming_the_types_a_session_runs_on(capsy
 
 @pytest.mark.parametrize("board", ["r9700", "W7900D"])
 @pytest.mark.parametrize("framework", ["vllm", "sglang"])
-def test_a_board_of_llamacpp_alone_is_refused_for_another_framework_as_a_type_no_session_runs_on(
+def test_a_board_of_llamacpp_alone_is_refused_for_another_framework(
     board: str, framework: str, capsys: pytest.CaptureFixture[str]
 ) -> None:
     with pytest.raises(SystemExit) as exc:
         cli.main(["run", *WORKLOAD_ARGS, "--gpu-type", board, "--framework", framework])
 
-    assert exc.value.code == 2
-    err = capsys.readouterr().err
-    assert f"run: error: argument --gpu-type: invalid choice: '{board.lower()}'" in err
-    assert err.replace("'", "").rstrip().endswith("(choose from mi300x, mi325x, mi350x, mi355x)")
+    assert exc.value.code == cli.EXIT_USAGE
+    assert f"error: --gpu-type {board.lower()} is taken only with --framework llamacpp" in capsys.readouterr().err
 
 
 def test_an_agentx_run_has_no_sequence_lengths_and_is_graded_on_p50_interactivity_at_its_conc_alone() -> None:
@@ -1028,6 +1026,22 @@ def test_a_ready_environment_without_an_experience_kb_runs_the_session_on_the_mo
     assert cli.main(["run", *WORKLOAD_ARGS]) == 0
 
     assert agent_cli == [_settings()]
+
+
+@pytest.mark.usefixtures("ready_environment")
+def test_a_ready_environment_with_an_experience_kb_starts_its_service_before_the_session_runs(
+    agent_cli: list[RunSettings], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("USER_DATA_PATH", str(tmp_path))
+    monkeypatch.setenv("HYPERLOOM_KB_URL", "http://127.0.0.1:24680")
+    monkeypatch.setenv("HYPERLOOM_KB_TOKEN", "workspace-token")
+    started: list[int] = []
+    monkeypatch.setattr(cli, "start_experience_kb", lambda: started.append(len(agent_cli)))
+
+    assert cli.main(["run", *WORKLOAD_ARGS]) == 0
+
+    # Started once, while no session had run yet.
+    assert started == [0] and agent_cli == [_settings()]
 
 
 @pytest.mark.parametrize(("workload", "switch"), [(AGENTX_ARGS, None), (AGENTX_ARGS, "1"), (WORKLOAD_ARGS, "0")])

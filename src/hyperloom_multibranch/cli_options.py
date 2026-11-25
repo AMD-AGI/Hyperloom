@@ -6,7 +6,6 @@
 from __future__ import annotations
 
 import argparse
-import copy
 import json
 import math
 import os
@@ -53,11 +52,9 @@ FILE_METAVAR = "FILE"
 SESSION_GPU_TYPES = ("mi300x", "mi325x", "mi350x", "mi355x", "r9700", "w7900d")
 #: Those of them a session runs on only when its framework builds its server from a checkout.
 NATIVE_SERVER_GPU_TYPES = ("r9700", "w7900d")
-#: The argparse name of ``--gpu-type``.
-GPU_TYPE_DEST = "gpu_type"
 _GPU_TYPE_HELP = "GPU type, in any case; r9700 and w7900d only with --framework llamacpp."
 #: The options ``run`` requires unless it is given ``--resume``, by their argparse names.
-RUN_REQUIRED = ("model", "framework", GPU_TYPE_DEST, "workload", "tp", "conc", "precision")
+RUN_REQUIRED = ("model", "framework", "gpu_type", "workload", "tp", "conc", "precision")
 #: The options an inferencex workload requires and an agentx one refuses.
 SEQUENCE_LENGTHS = ("isl", "osl")
 #: The argparse action of an option the user may give more than once, each giving one more value.
@@ -74,26 +71,9 @@ CONC_SWEEP_COMMAND = "conc-sweep"
 HOSTED_COMMAND = "hosted"
 
 
-class _CommandParser(argparse.ArgumentParser):
-    """A command's parser, which refuses a board of :data:`NATIVE_SERVER_GPU_TYPES` for a framework that builds no
-    server, in the words argparse refuses a ``--gpu-type`` that is no choice."""
-
-    def parse_known_args(self, args=None, namespace=None):  # type: ignore[no-untyped-def]
-        parsed, rest = super().parse_known_args(args, namespace)
-        board, framework = getattr(parsed, GPU_TYPE_DEST, None), getattr(parsed, "framework", None)
-        if board in NATIVE_SERVER_GPU_TYPES and native_component(framework or "") is None:
-            action = copy.copy(next(action for action in self._actions if action.dest == GPU_TYPE_DEST))
-            action.choices = [choice for choice in SESSION_GPU_TYPES if choice not in NATIVE_SERVER_GPU_TYPES]
-            try:
-                self._check_value(action, board)
-            except argparse.ArgumentError as exc:
-                self.error(str(exc))
-        return parsed, rest
-
-
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog=PROG, description="Run a multi-branch optimization session.")
-    commands = parser.add_subparsers(dest="command", required=True, parser_class=_CommandParser)
+    commands = parser.add_subparsers(dest="command", required=True)
     _add_run_options(commands.add_parser("run", help="Run one session: PRELUDE, EXPLORE, FINAL and CLOSE."))
     review.add_parser(commands)
     final_only = commands.add_parser(
@@ -681,7 +661,7 @@ def settings_from(
         raise ValueError(f"the following arguments are required: {', '.join(missing)}")
     sizes = tuple(name for name in ("tp", "ep", "conc") if getattr(args, name) is not None)
     errors = _shape_errors(args) + _agentx_only_errors(args) + _positive(args, sizes)
-    errors += _limit_errors(args)
+    errors += _limit_errors(args) + _board_errors(args)
     if errors:
         raise ValueError("; ".join(errors))
     parallel = _parallel_tests(args, tests_that_fit)
@@ -755,6 +735,14 @@ def _limit_errors(args: argparse.Namespace) -> list[str]:
         *_limit_error("--dev-leases", args.dev_leases, args.dev_leases >= 0, "0 (none) or a positive number"),
         *_boot_budget_errors(args.boot_budget_sec),
     ]
+
+
+def _board_errors(args: argparse.Namespace) -> list[str]:
+    """What is wrong with the session's board: one of :data:`NATIVE_SERVER_GPU_TYPES` under a framework that builds no
+    server from a checkout."""
+    if args.gpu_type not in NATIVE_SERVER_GPU_TYPES or native_component(args.framework) is not None:
+        return []
+    return [f"--gpu-type {args.gpu_type} is taken only with --framework llamacpp"]
 
 
 def _boot_budget_errors(budget: int | None) -> list[str]:
