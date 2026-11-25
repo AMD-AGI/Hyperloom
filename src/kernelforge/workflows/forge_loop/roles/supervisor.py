@@ -156,9 +156,9 @@ def persist_supervisor_ruling(
 def _build_task_prompt(program_md: str, digest: str, reason: str, gpu_target: str, evidence_context: str = "") -> str:
     """Build the bounded evidence prompt shown to the supervisor."""
     source_note = (
-        "You MAY read the exact analysis, profile, orchestration, lesson, and "
+        "You MAY read the exact analysis, profile, round, lesson, and "
         "candidate artifact paths supplied below. Read only what you need: "
-        "prefer the current analysis bundle, latest optimization plan, and last "
+        "prefer the current analysis bundle and the last "
         "1-2 attempts, AT MOST ~8 files, then STOP reading and answer. Do NOT "
         "list or search unrelated paths, and do NOT edit anything."
     )
@@ -176,21 +176,21 @@ trajectory below.
 ## Evolution trajectory so far
 {digest if digest else "(no archived trajectory yet)"}
 
-## Current profiling, orchestration, and exploration evidence
+## Current profiling and exploration evidence
 {evidence_context if evidence_context else "(no additional structured evidence)"}
 
 ## Your task
 1. Use the current commit-bound profiling and potential evidence to assess
    remaining headroom for EVERY scored case. Do not infer "no headroom" merely
    from repeated REVERTs.
-2. Compare the latest optimization plan with the complete explored history,
-   specialist analyses, and prior orchestration plans.
+2. Compare what the recent sessions chose to work on with the complete
+   explored history and the Analysis evidence.
 3. Treat historical lesson documents as session-authored records, not
    authoritative conclusions. When a lesson makes an unsupported claim such as
    "hard floor", "local optimum", or "this direction is exhausted", explicitly
-   state whether Orchestration should disregard that conclusion. Preserve the
+   state whether later sessions should disregard that conclusion. Preserve the
    measurements and concrete errors recorded beside it.
-4. Decide whether the current planning cycle should continue the same mechanism,
+4. Decide whether the search should continue the same mechanism,
    switch mechanisms, or reanalyze stale evidence, and explain why.
 5. Recommend at most {SUPERVISOR_DIRECTIONS} concrete directions. Each should name the source
    region, exact mechanism, target cases, and why the profiling evidence supports

@@ -206,7 +206,7 @@ Imports between packages point one way, and CI enforces it: the `import-linter (
 | `kf-no-hyperloom` | `kernelforge` imports nothing from `hyperloom`; what the two packages share lives in `hyperloom_common` |
 | `kf-evaluation-foundation` | `kernelforge.evaluation` imports no kernelforge product or entry package |
 | `kf-tools-foundation` | `kernelforge.utils` imports no other kernelforge package |
-| `kf-mcp-servers-light` | the stdio MCP server modules (`knowledge.pr_knowledge.mcp_server`, `workflows.forge_loop.roles.specialist_probe_server`) do not reach `agent_backends`, `cli` or the forge-loop beyond its roles, so a server starts without the agent runtime or the iteration loop |
+| `kf-mcp-servers-light` | the stdio MCP server module (`knowledge.pr_knowledge.mcp_server`) does not reach `agent_backends`, `cli` or the forge-loop beyond its roles, so a server starts without the agent runtime or the iteration loop |
 | `common-is-leaf` | `hyperloom_common` imports nothing else from the project: it is the floor both shipped packages stand on |
 | `hl-common-is-leaf` | `hyperloom.common` imports nothing from the project but `hyperloom_common`, `kernelforge` included |
 | `agents-independent` | `hyperloom.agents.*` packages do not import each other |

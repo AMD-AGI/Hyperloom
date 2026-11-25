@@ -1,4 +1,4 @@
-"""Immutable per-iteration handoffs for planning and recovery consumers."""
+"""Immutable per-iteration handoffs for the next round's sessions and for recovery."""
 
 from __future__ import annotations
 
@@ -13,7 +13,7 @@ from hyperloom_common.io import DURABLE, atomic_write_text
 
 @dataclass(frozen=True)
 class IterationHandoff:
-    """Compact machine-readable outcome passed to the next planning cycle."""
+    """Compact machine-readable outcome of one iteration, for the iterations after it."""
 
     iteration: int
     analysis_commit: str
@@ -21,13 +21,9 @@ class IterationHandoff:
     search_mode: str = "EXPLOIT"
     search_reason_codes: tuple[str, ...] = ()
     search_objective: str = "CANONICAL_GAIN"
-    search_mode_residence_remaining: int = 0
-    diversification_cycle_complete: bool = False
-    optimization_plan_path: str = ""
     supervisor_ruling_path: str = ""
     plan: str = ""
     lesson_path: str = ""
-    orchestration_artifacts: str = ""
     candidate_archive: str = ""
     agent_profile_id: str = ""
     agent_provider: str = ""
@@ -44,8 +40,6 @@ class IterationHandoff:
             raise ValueError("handoff canonical_verdict is required")
         if self.search_mode not in {"EXPLOIT", "DIVERSIFY"}:
             raise ValueError("handoff search_mode is unsupported")
-        if self.search_mode_residence_remaining < 0:
-            raise ValueError("handoff search_mode_residence_remaining must be non-negative")
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -57,14 +51,10 @@ class IterationHandoff:
                 "mode": self.search_mode,
                 "reason_codes": list(self.search_reason_codes),
                 "objective_kind": self.search_objective,
-                "residence_iterations_remaining": (self.search_mode_residence_remaining),
-                "diversification_cycle_complete": (self.diversification_cycle_complete),
             },
-            "optimization_plan_path": self.optimization_plan_path,
             "supervisor_ruling_path": self.supervisor_ruling_path,
             "plan": self.plan,
             "lesson_path": self.lesson_path,
-            "orchestration_artifacts": self.orchestration_artifacts,
             "candidate_archive": self.candidate_archive,
             "agent_profile_id": self.agent_profile_id,
             "agent_provider": self.agent_provider,
@@ -123,34 +113,15 @@ class HandoffStore:
             raise ValueError(f"handoff must be an object: {path}")
         if payload.get("complete") is not True:
             raise ValueError(f"incomplete handoff: {path}")
-        relay_fields = {
-            "agent_profile_id",
-            "agent_provider",
-            "agent_model",
-            "blockage_epoch",
-            "intervention_kind",
-        }
-        if not relay_fields & set(payload):
-            payload.update(
-                {
-                    "agent_profile_id": "",
-                    "agent_provider": "",
-                    "agent_model": "",
-                    "blockage_epoch": 0,
-                    "intervention_kind": "",
-                }
-            )
         expected = {
             "complete",
             "iteration",
             "analysis_commit",
             "canonical_verdict",
             "search_policy",
-            "optimization_plan_path",
             "supervisor_ruling_path",
             "plan",
             "lesson_path",
-            "orchestration_artifacts",
             "candidate_archive",
             "agent_profile_id",
             "agent_provider",

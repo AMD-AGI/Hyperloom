@@ -22,8 +22,6 @@ from kernelforge.agent_backends.structured_output import (
     structured_answer,
 )
 from kernelforge.knowledge.kb_store.run_summary import RunSummary
-from kernelforge.workflows.forge_loop.roles.plan_critic import PlanCriticAnswer
-from kernelforge.workflows.forge_loop.roles.plan_requests import PartitionAnswer, dispatch_answer_model
 
 
 class _Verdict(AgentAnswer):
@@ -100,12 +98,7 @@ def _strict_mode_violations(node: Any, where: str = "$") -> list[str]:
 
 @pytest.mark.parametrize(
     "model",
-    [
-        PlanCriticAnswer,
-        PartitionAnswer,
-        dispatch_answer_model(("compute", "memory"), ("case-a",)),
-        RunSummary,
-    ],
+    [RunSummary],
     ids=lambda model: model.__name__,
 )
 def test_every_answer_shape_is_one_a_strict_schema_mode_accepts(model) -> None:

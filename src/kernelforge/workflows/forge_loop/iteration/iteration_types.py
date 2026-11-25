@@ -6,15 +6,14 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field, replace
-from pathlib import Path
 from typing import Any, NamedTuple
 
 from kernelforge.evaluation.scoring import DEFAULT_SNR_THRESHOLD_DB, CaseAggregate
 from kernelforge.workflows.forge_loop.campaign.decision_labels import DecisionLabel
-from kernelforge.workflows.forge_loop.memory.lessons import SummaryOutcome
 from kernelforge.utils.new_path_allowlist import normalize_commit_new_paths
 from kernelforge.workflows.forge_loop.campaign.run_state import IterationVerdict
 from kernelforge.workflows.forge_loop.search.search_actors import SearchActorPool
+from kernelforge.workflows.forge_loop.search.search_policy import DIVERSIFY_AFTER_ROUNDS, SUPERVISE_AFTER_ROUNDS
 
 
 # How far a KEEP has to improve a case's measured time before that case counts as one the KEEP's configuration was
@@ -88,13 +87,11 @@ class IterationConfig:
     # Supervisor self-supervision (AVO): when the search stalls, a supervisor LLM (a different model family than the
     # implementer — see workflows/forge_loop/roles/supervisor.py) reviews the trajectory and injects fresh directions INSTEAD of the
     # loop stopping at the first plateau.
-    supervise_after: int = 3  # consecutive no-improvement iters that trigger
+    supervise_after: int = SUPERVISE_AFTER_ROUNDS  # consecutive rounds without a new best that trigger
     supervise_cooldown: int = 3  # min iterations between interventions
-    # Consecutive iterations without a new best before the search leaves its current line for a different mechanism;
-    # None waits for the same count that brings the Supervisor.
-    diversify_after: int | None = None
-    max_consecutive_orchestration_errors: int = 3
-    # Task context handed to the Analysis Agent and planning chain.
+    # Consecutive rounds without a new best before the search leaves its current line for a different mechanism.
+    diversify_after: int = DIVERSIFY_AFTER_ROUNDS
+    # Task context handed to the Analysis Agent.
     program_md: str = ""
     # References injected into this run's prompt.
     pr_reference_labels: tuple[str, ...] = ()
@@ -117,13 +114,11 @@ class IterationConfig:
     bench_repeat: int = 1
     # How one measurement's per-case speedups combine into the score every KEEP, gate and report is judged on.
     case_aggregate: CaseAggregate = CaseAggregate.ARITHMETIC
-    # Implementer lanes run concurrently from one round's analysis, each in its own workspace copy, and each candidate
-    # is measured on its own. 1 runs one session a round with no plan: the campaign builds no planning service and the
-    # session chooses its direction. Fan-out also needs an ``agent_factory``, because a session is bound to its
-    # workspace.
+    # The most Implementer lanes a round runs side by side, each in its own copy of the workspace. A round runs as
+    # many as the Analysis divided its evidence into, and their results are merged into one candidate, which is the
+    # only thing the round measures on the canonical tree. When the Analysis divided nothing the round is one lane,
+    # which works in the workspace itself.
     lanes: int = 1
-    # Whether a stalled search may spend an iteration measuring two archived rejected gains applied together.
-    merge_stacking: bool = True
     # Ranks the driver self-launches (via torchrun) for a collective task. >1 switches profiling to the per-rank
     # backend, because wrapping the outer process would only profile the launcher, which runs no kernel.
     nproc_per_node: int = 1
@@ -145,14 +140,17 @@ class IterationConfig:
 
 @dataclass(frozen=True)
 class LoopAgents:
-    """The sessions and services the loop drives: implementer, lane factory, analysis, orchestration, supervisor."""
+    """The sessions and services the loop drives: merge session, lane factory, analysis, supervisor.
+
+    ``agent_factory`` builds the session of a lane that runs beside others, in that lane's workspace copy;
+    ``agent_fn`` is the session bound to the canonical workspace, which is a round's only lane or merges its lanes.
+    """
 
     agent_fn: Any = None
     agent_factory: Any = None
     analysis_service: Any = None
-    orchestration_service: Any = None
     supervisor_fn: Any = None
-    # Every relay profile's search actor; when set, the loop selects among them and the four above are its start actor.
+    # Every relay profile's search actor; when set, the loop selects among them and the three above are its start actor.
     search_actors: SearchActorPool | None = None
 
 
@@ -166,47 +164,36 @@ class LoopCallbacks:
 
 
 def _with_search_actor(agents: LoopAgents, bundle) -> LoopAgents:
-    """The loop's agents with the planning and implementation actor taken from one relay profile, if any."""
+    """The loop's agents with the implementation actor taken from one relay profile, if any."""
     if bundle is None:
         return agents
     return replace(
         agents,
         agent_fn=bundle.agent_fn,
         agent_factory=bundle.agent_factory,
-        orchestration_service=bundle.orchestration_service,
         supervisor_fn=bundle.supervisor_fn,
     )
 
 
 @dataclass(frozen=True)
-class _RoundPlan:
-    """The plan file an orchestrated round synthesized, if any, and whether the round has a direction to execute."""
+class RoundSession:
+    """One session of a round, for the record it owes the campaign: which one it was, and what it handed back."""
 
-    path: str = ""
-    executable: bool = False
-
-    @property
-    def published(self) -> bool:
-        """Whether a plan document exists for the round to execute, as opposed to a session choosing for itself."""
-        return self.executable and bool(self.path)
-
-
-@dataclass(frozen=True)
-class _IterationSupply:
-    """What an iteration already holds before it buys a session: a device hazard, a queued lane, a fan-out plan."""
-
-    hazard: Any
-    queued_lane: Any
-    fan_out_plan: HeldRound | None
+    # "" for a round's only session; otherwise the lane ("lane 2") or "merge".
+    label: str
+    sink: dict
 
 
 @dataclass(frozen=True)
 class _IterationFrame:
-    """One iteration's number, its session hand-back, its staged merge and the best it is measured against."""
+    """One iteration's number, its session hand-back and the best it is measured against.
+
+    ``session_sink`` is the hand-back of the session whose candidate the iteration measures: the round's only lane,
+    or its merge session.
+    """
 
     iteration: int
     session_sink: dict
-    merge: _StagedMerge
     best_before: float | None = None
     best_mean_case_speedup_before: float | None = None
 
@@ -220,9 +207,8 @@ class _Attempt(NamedTuple):
     attempt_source: str
     attempt_diff: str
     reusable_benchmark: object | None
-    optimization_plan_path: str
-    optimization_plan_executable: bool
-    lane_record: SummaryOutcome | None = None
+    # Every session the round ran, in the order their records are taken.
+    sessions: tuple[RoundSession, ...] = ()
 
 
 class _Ruling(NamedTuple):
@@ -231,20 +217,6 @@ class _Ruling(NamedTuple):
     pending_keep: dict | None
     keep_checkpoint_finalized: bool
     commit_hash: str
-
-
-class HeldRound(NamedTuple):
-    """What a fan-out round hands the iteration that has to finish without it."""
-
-    plan_path: Path | None
-    error: str
-
-
-class _StagedMerge(NamedTuple):
-    """A stacked pair staged for measurement, and the diff that stacks it."""
-
-    pair: tuple | None
-    diff: str
 
 
 class CaseConfigCoverage(NamedTuple):

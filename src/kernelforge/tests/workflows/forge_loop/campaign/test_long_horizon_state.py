@@ -16,10 +16,6 @@ from kernelforge.workflows.forge_loop.roles.prompt_view import OptionalRecords, 
 from kernelforge.workflows.forge_loop.campaign.run_state import (
     IterationVerdict,
     LoopStanding,
-    StallPolicy,
-    ORCHESTRATION_CIRCUIT_CLOSED,
-    ORCHESTRATION_CIRCUIT_HALF_OPEN,
-    ORCHESTRATION_CIRCUIT_OPEN,
     PHASE_EXPLOIT,
     PHASE_EXPLORE,
     PHASE_STALLED,
@@ -34,8 +30,6 @@ from kernelforge.workflows.forge_loop.campaign.run_state import (
     apply_iteration,
     apply_supervisor_attempt,
     apply_supervisor_intervention,
-    begin_orchestration_probe,
-    complete_orchestration_probe,
     finish_session,
     make_event,
     pin_iteration,
@@ -44,7 +38,6 @@ from kernelforge.workflows.forge_loop.campaign.run_state import (
     start_session,
 )
 from kernelforge.workflows.forge_loop.iteration.campaign_report import LONG_HORIZON_OUTCOME_WINDOW, _long_horizon_header
-from kernelforge.workflows.forge_loop.campaign.unmeasured_lanes import UnmeasuredLane, UnmeasuredLaneArchive
 
 # The header's own rendering budgets, read from the definition that owns them so the expectations below cannot drift
 # from the defaults the loop relies on.
@@ -119,9 +112,9 @@ def _write_run_state(tmp_path, payload: dict) -> LoopStateStore:
 
 def test_load_checkpoint_missing_a_field_fails_closed(tmp_path):
     payload = RunState().to_dict()
-    payload.pop("last_critic")
+    payload.pop("campaign_sec")
 
-    with pytest.raises(ValueError, match="run state missing fields: last_critic"):
+    with pytest.raises(ValueError, match="run state missing fields: campaign_sec"):
         _write_run_state(tmp_path, payload).load()
 
 
@@ -133,11 +126,24 @@ def test_load_checkpoint_with_an_unknown_field_fails_closed(tmp_path):
         _write_run_state(tmp_path, payload).load()
 
 
+def test_a_checkpoint_written_before_the_round_had_one_shape_is_refused(tmp_path):
+    """A campaign from before every round ran as lanes carries state this loop has no use for; it is not resumed."""
+    payload = RunState().to_dict()
+    payload.update(
+        round_costs={"rounds": 2}, last_critic={"verdict": "", "review_path": ""}, orchestration_error_streak=0
+    )
+
+    with pytest.raises(
+        ValueError, match="run state has unknown fields: last_critic, orchestration_error_streak, round_costs"
+    ):
+        _write_run_state(tmp_path, payload).load()
+
+
 def test_load_checkpoint_missing_a_nested_field_fails_closed(tmp_path):
     payload = RunState().to_dict()
-    payload["round_costs"].pop("campaign_sec")
+    payload["stall"].pop("unresolved_stall_iters")
 
-    with pytest.raises(ValueError, match="run state round_costs missing fields: campaign_sec"):
+    with pytest.raises(ValueError, match="run state stall missing fields: unresolved_stall_iters"):
         _write_run_state(tmp_path, payload).load()
 
 
@@ -402,7 +408,7 @@ def test_apply_iteration_non_keep_increments_stall_then_stalled_phase():
             state,
             IterationVerdict(iteration=i, decision="REVERT_PERF", kept=False, wall_ms=1.2, commit_hash="", plan=""),
             LoopStanding(baseline_wall_ms=1.0, best_wall_ms=1.0),
-            StallPolicy(stall_threshold=5),
+            stall_threshold=5,
         )
     assert state.stall.no_improvement_iters == 5
     assert state.phase == PHASE_STALLED
@@ -417,14 +423,14 @@ def test_an_api_error_is_not_counted_as_a_revert_and_leaves_the_stall_alone():
             iteration=1, decision="REVERT_PERF", kept=False, wall_ms=1.2, commit_hash="", plan="bigger tile"
         ),
         LoopStanding(baseline_wall_ms=1.0, best_wall_ms=1.0),
-        StallPolicy(stall_threshold=3),
+        stall_threshold=3,
     )
     for i in (2, 3, 4):
         apply_iteration(
             state,
             IterationVerdict(iteration=i, decision="API_ERROR", kept=False, wall_ms=None, commit_hash="", plan=""),
             LoopStanding(baseline_wall_ms=1.0, best_wall_ms=1.0),
-            StallPolicy(stall_threshold=3),
+            stall_threshold=3,
         )
 
     assert state.cumulative.reverted == 1, "an outage is not a rejected candidate"
@@ -433,49 +439,6 @@ def test_an_api_error_is_not_counted_as_a_revert_and_leaves_the_stall_alone():
     assert state.cumulative.iterations == 4
     assert state.stall.no_improvement_iters == 1, "only the real attempt counts"
     assert state.phase != PHASE_STALLED
-
-
-def test_orchestration_circuit_opens_and_half_open_probe_is_single_shot():
-    state = RunState()
-    for iteration in (1, 2, 3):
-        apply_iteration(
-            state,
-            IterationVerdict(
-                iteration=iteration, decision="ORCHESTRATION_ERROR", kept=False, wall_ms=None, commit_hash="", plan=""
-            ),
-            LoopStanding(baseline_wall_ms=1.0, best_wall_ms=1.0),
-            StallPolicy(orchestration_error_threshold=3),
-        )
-
-    assert state.orchestration_error_streak == 3
-    assert state.orchestration_circuit_state == ORCHESTRATION_CIRCUIT_OPEN
-
-    begin_orchestration_probe(state)
-    assert state.orchestration_circuit_state == ORCHESTRATION_CIRCUIT_HALF_OPEN
-    apply_iteration(
-        state,
-        IterationVerdict(
-            iteration=4, decision="ORCHESTRATION_ERROR", kept=False, wall_ms=None, commit_hash="", plan=""
-        ),
-        LoopStanding(baseline_wall_ms=1.0, best_wall_ms=1.0),
-        StallPolicy(orchestration_error_threshold=3),
-    )
-
-    assert state.orchestration_error_streak == 4
-    assert state.orchestration_circuit_state == ORCHESTRATION_CIRCUIT_OPEN
-
-
-def test_successful_half_open_probe_closes_and_clears_streak():
-    state = RunState(
-        orchestration_error_streak=3,
-        orchestration_circuit_state=ORCHESTRATION_CIRCUIT_OPEN,
-    )
-
-    begin_orchestration_probe(state)
-    complete_orchestration_probe(state)
-
-    assert state.orchestration_error_streak == 0
-    assert state.orchestration_circuit_state == ORCHESTRATION_CIRCUIT_CLOSED
 
 
 def test_apply_iteration_caps_pinned_iterations():
@@ -577,34 +540,6 @@ def test_header_can_expose_iteration_handoffs():
     )
 
     assert "forge_experiments/handoffs/iter_NNN.json" in header
-
-
-def test_header_names_unmeasured_lane_candidates_only_once_there_are_some(tmp_path):
-    """A plan may tell the Implementer to port one, which it can only do if it knows where they are."""
-    state = RunState(baseline_wall_ms=1.0)
-    apply_iteration(
-        state,
-        IterationVerdict(iteration=1, decision="REVERT_PERF", kept=False, wall_ms=1.1, commit_hash="", plan="retile"),
-        LoopStanding(baseline_wall_ms=1.0, best_wall_ms=1.0),
-    )
-    store = LoopStateStore(str(tmp_path))
-
-    assert "unmeasured_lanes" not in _long_horizon_header(state, store)
-
-    UnmeasuredLaneArchive(tmp_path).record(
-        UnmeasuredLane(
-            round_iteration=1,
-            lane_id="2",
-            base_commit="abc123",
-            dropped_iteration=2,
-            canonical_commit="def456",
-            plan="# Lane 2 plan",
-            summary="",
-            diff="--- a/kernel.py\n+++ b/kernel.py\n",
-        )
-    )
-
-    assert "forge_experiments/unmeasured_lanes/round_NNN_lane_K/" in _long_horizon_header(state, store)
 
 
 def test_header_preserves_retrieval_map_when_budget_is_below_essential_content():
@@ -904,8 +839,8 @@ def test_from_dict_rejects_control_values_outside_their_domains():
     with pytest.raises(ValueError, match="unsupported search mode"):
         RunState.from_dict(dict(valid, search_mode="TURBO"))
 
-    with pytest.raises(ValueError, match="unsupported orchestration circuit state"):
-        RunState.from_dict(dict(valid, orchestration_circuit_state="tripped"))
+    with pytest.raises(ValueError, match="campaign_sec must be a non-negative finite duration"):
+        RunState.from_dict(dict(valid, campaign_sec=-1.0))
 
     # next_iteration is the cursor apply_iteration refuses to go behind; a zero would let iteration 0 be replayed as
     # fresh work.
@@ -945,23 +880,6 @@ def test_finish_session_requires_a_running_session_and_a_terminal_status():
     # The rejected transition leaves the session running, not half-finished.
     assert state.session_status == SESSION_RUNNING
     assert state.termination_reason == ""
-
-
-def test_orchestration_probe_transitions_are_guarded_in_both_directions():
-    """A probe is a single deliberate step out of an open circuit."""
-    closed = RunState()
-    with pytest.raises(ValueError, match="only an open orchestration circuit"):
-        begin_orchestration_probe(closed)
-    assert closed.orchestration_circuit_state == ORCHESTRATION_CIRCUIT_CLOSED
-
-    opened = RunState(
-        orchestration_error_streak=3,
-        orchestration_circuit_state=ORCHESTRATION_CIRCUIT_OPEN,
-    )
-    with pytest.raises(ValueError, match="cannot complete a probe"):
-        complete_orchestration_probe(opened)
-    assert opened.orchestration_circuit_state == ORCHESTRATION_CIRCUIT_OPEN
-    assert opened.orchestration_error_streak == 3
 
 
 def test_pin_iteration_dedupes_without_refreshing_recency():

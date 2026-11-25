@@ -17,8 +17,7 @@ from pathlib import Path
 from kernelforge.config.edit_policy import FORGE_LOOP_OUTPUT_DIRNAME
 
 CAMPAIGN_CONFIG, RUN_STATE, EVENTS = "campaign_config.json", "run_state.json", "events.jsonl"
-CANDIDATE_META, ROUND_CONTEXT = "meta.json", "context.json"
-LANE_PLAN_GLOB = "lane_[0-9][0-9][0-9].md"
+CANDIDATE_META = "meta.json"
 #: How the archive stamps its records: naive local time, to the second.
 ARCHIVE_TIME_FORMAT = "%Y-%m-%d %H:%M:%S"
 
@@ -35,11 +34,6 @@ def tagged_iteration(name: str) -> int | None:
     """The iteration a name ``iteration_tag`` gave stands for, or None for any other name."""
     match = _TAGGED.fullmatch(name)
     return int(match.group(1)) if match else None
-
-
-def lane_plan_name(lane: int) -> str:
-    """The file a round writes one lane's plan to: ``optimization_plan.md`` for its first lane, ``lane_NNN.md`` after."""
-    return "optimization_plan.md" if lane <= 1 else f"lane_{lane:03d}.md"
 
 
 @dataclass(frozen=True)
@@ -83,26 +77,19 @@ class ExperimentsLayout:
         return self.root / "insights.md"
 
     @property
-    def orchestration(self) -> Path:
-        return self.root / "orchestration"
+    def analysis(self) -> Path:
+        """The Analysis evidence, one directory per analyzed commit. It is the bulk of a long campaign's records."""
+        return self.root / "analysis"
 
     @property
-    def lane_queue(self) -> Path:
-        """Where a fan-out round's unmeasured candidates wait for the iterations that measure them."""
-        return self.orchestration / "lane_queue.json"
+    def rounds(self) -> Path:
+        """What each round's lanes left, one directory per iteration."""
+        return self.root / "rounds"
 
     @property
-    def unmeasured_lanes(self) -> Path:
-        """Where lane candidates the canonical tree moved past before any iteration measured them are kept."""
-        return self.root / "unmeasured_lanes"
-
-    @property
-    def unmeasured_lane_index(self) -> Path:
-        return self.unmeasured_lanes / "index.jsonl"
-
-    def unmeasured_lane(self, round_iteration: int, lane_id: str) -> Path:
-        """The directory one such candidate is kept in, named for the round that planned it and its lane."""
-        return self.unmeasured_lanes / f"round_{round_iteration:03d}_lane_{lane_id}"
+    def device_usage(self) -> Path:
+        """One line per hold of the device a round's lanes share: who waited, and how long it was held."""
+        return self.root / "device_usage.jsonl"
 
     def candidate(self, iteration: int) -> Path:
         """The directory an iteration's candidate is archived in, its ``CANDIDATE_META`` among the files."""
@@ -115,5 +102,5 @@ class ExperimentsLayout:
         return self.lessons / f"{iteration_tag(iteration)}.md"
 
     def round(self, iteration: int) -> Path:
-        """The planning directory of the round ``iteration`` opened: its lanes' plans and its ``ROUND_CONTEXT``."""
-        return self.orchestration / iteration_tag(iteration)
+        """The directory of the round ``iteration`` ran: one ``lane_K`` directory per lane."""
+        return self.rounds / iteration_tag(iteration)

@@ -36,7 +36,7 @@ from hyperloom.measure.compile import (
     PackageLocator,
     PatchApplyError,
     UnsupportedComponentError,
-    locate_installed_package,
+    locate_source,
 )
 from hyperloom_multibranch.contracts.blackboard.vocab import INTEGRATION_BRANCH
 from hyperloom_multibranch.contracts.repo import BranchMoved, BundleMerge, RepoMerge
@@ -94,7 +94,7 @@ class GitExperimentRepo:
         self,
         path: Path,
         blobs: BlobStore,
-        locator: PackageLocator = locate_installed_package,
+        locator: PackageLocator = locate_source,
         aiter_configs: Path | None = None,
         native: Mapping[str, NativeTree] | None = None,
     ) -> None:
@@ -318,8 +318,8 @@ class GitExperimentRepo:
         return stack_files(component, self._roots(component), self._blobs, paths)
 
     def _roots(self, component: ComponentPatches) -> tuple[SourceRoot, ...]:
-        """The trees ``component``'s patches apply to: its installed package, the meta trees the specialist's source
-        base lays out beside it, and its native tree."""
+        """The trees ``component``'s patches apply to: its installed package and the meta trees the specialist's source
+        base lays out beside it, or the trees of the checkout it is built from, and its native tree."""
         layout = self._layout(component)
         return source_roots(layout, self._locator(layout).path, self._native.get(component.component))
 

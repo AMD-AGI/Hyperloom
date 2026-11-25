@@ -45,9 +45,10 @@ them with the `Read` tool; what follows is the part you must not have to look up
   than with `bool(value)` (`bool("0")` is `True`, so the OFF point would time the
   ON kernel and the echo would still confirm it), and take one data point per
   command:
-  `python3 -m kernelforge.evaluation.benchmark.runner --driver <driver command> --case <CASE_ID> --set <NAME>=<value>`
-  Pass `--driver` exactly the command you were told to run the driver with (name
-  the WRAPPER when your session names one). Sweep coupled constants JOINTLY, and
+  `python3 -m kernelforge.evaluation.benchmark.runner --driver <driver script> --case <CASE_ID> --set <NAME>=<value>`
+  `--driver` is the driver script itself. When your session reaches the GPU
+  through a device runner, run this whole command through that runner, as you
+  run the driver. Sweep coupled constants JOINTLY, and
   sweep every inherited literal in BOTH directions. Sweep numbers are
   exploratory; the canonical gate still decides what survives.
   **The knobs last one turn.** Instrument the kernel in place — the driver loads
