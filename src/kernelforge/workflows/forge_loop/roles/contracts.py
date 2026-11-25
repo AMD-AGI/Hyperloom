@@ -1,24 +1,14 @@
-"""Typed contracts for forge-loop orchestration and specialist analysis."""
+"""The typed evidence the Analysis Agent publishes about a canonical commit, and its standing against the tree."""
 
 from __future__ import annotations
 
 import math
 import re
-from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any
 
 
 _IDENTIFIER_RE = re.compile(r"^[a-z][a-z0-9_-]*$")
-_FAILURE_KINDS = frozenset(
-    {
-        "unknown_role",
-        "timeout",
-        "backend_failure",
-        "backend_error",
-        "empty_output",
-    }
-)
 
 
 def _text(value: Any, label: str, *, allow_empty: bool = False) -> str:
@@ -122,7 +112,7 @@ class CaseRoofline:
         }
 
 
-#: How a planning or reviewing agent is to read the roofline figures. Carried in
+#: How a reviewing agent is to read the roofline figures. Carried in
 #: the payload beside them, so it reaches every agent that sees them and no
 #: campaign without a ceiling has its prompt changed.
 ROOFLINE_HOW_TO_READ = (
@@ -171,7 +161,7 @@ class CampaignRoofline:
 
 @dataclass(frozen=True)
 class CaseEvidence:
-    """Normalized case evidence exposed to read-only planning agents."""
+    """Normalized case evidence exposed to read-only reviewing agents."""
 
     case_id: str
     shape: str = ""
@@ -216,8 +206,8 @@ class CaseEvidence:
 
 
 @dataclass(frozen=True)
-class OrchestrationContext:
-    """Immutable evidence bundle shared by orchestration and specialists."""
+class EvidenceContext:
+    """The evidence about one canonical commit that the Analysis Agent gathers and the round's sessions read."""
 
     analysis_commit: str
     workspace: str
@@ -233,7 +223,6 @@ class OrchestrationContext:
     search_mode: str = "EXPLOIT"
     search_reason_codes: tuple[str, ...] = ()
     search_objective: str = "CANONICAL_GAIN"
-    search_mode_residence_remaining: int = 0
     evidence_refs: tuple[EvidenceRef, ...] = ()
     # ``analysis_commit`` remains the canonical commit for compatibility.
     canonical_commit: str = ""
@@ -244,14 +233,8 @@ class OrchestrationContext:
     current_mean_case_speedup: float | None = None
     cumulative_diff_path: str = ""
     cumulative_diff_error: str = ""
-    # The previous iteration's Plan Critic ruling.
-    last_critic_verdict: str = ""
-    last_critic_review: str = ""
     # Present only when the campaign has a roofline ceiling; each case's own figure rides on ``CaseEvidence.roofline``.
     roofline: CampaignRoofline | None = None
-    # Whether this round's plans go to the campaign's plan critic, when it has one. The loop decides it per round; it
-    # is not part of any prompt.
-    review_plan: bool = True
 
     def __post_init__(self) -> None:
         _text(self.analysis_commit, "context.analysis_commit")
@@ -270,24 +253,10 @@ class OrchestrationContext:
             "context.supervisor_guidance",
             allow_empty=True,
         )
-        if self.last_critic_verdict and self.last_critic_verdict not in {
-            "ACCEPT",
-            "REVISE",
-            "REPLACE",
-            "NOT_REVIEWED",
-        }:
-            raise ValueError("context.last_critic_verdict is unsupported")
-        _text(
-            self.last_critic_review,
-            "context.last_critic_review",
-            allow_empty=True,
-        )
         if self.search_mode not in {"EXPLOIT", "DIVERSIFY"}:
             raise ValueError("context.search_mode is unsupported")
         _text(self.search_objective, "context.search_objective")
         self._validate_evidence_standing()
-        if self.search_mode_residence_remaining < 0:
-            raise ValueError("context.search_mode_residence_remaining must be non-negative")
         case_ids = [case.case_id for case in self.cases]
         if not case_ids:
             raise ValueError("context.cases must not be empty")
@@ -373,15 +342,10 @@ class OrchestrationContext:
             "editable_sources": list(self.editable_sources),
             "knowledge_index": self.knowledge_index,
             "supervisor_guidance": self.supervisor_guidance,
-            "last_plan_critic": {
-                "verdict": self.last_critic_verdict,
-                "review": self.last_critic_review,
-            },
             "search_policy": {
                 "mode": self.search_mode,
                 "reason_codes": list(self.search_reason_codes),
                 "objective_kind": self.search_objective,
-                "residence_iterations_remaining": (self.search_mode_residence_remaining),
             },
             "cases": [case.to_dict() for case in self.cases if case.case_id in selected],
             "evidence_refs": [
@@ -392,305 +356,3 @@ class OrchestrationContext:
         if self.roofline is not None:
             payload["roofline"] = self.roofline.to_dict()
         return payload
-
-
-@dataclass(frozen=True)
-class SpecialistDefinition:
-    """Describe one registered read-only specialist role."""
-
-    role_id: str
-    description: str
-    instructions: str
-    capabilities: tuple[str, ...] = ()
-
-    def __post_init__(self) -> None:
-        _identifier(self.role_id, "specialist.role_id")
-        _text(self.description, "specialist.description")
-        _text(self.instructions, "specialist.instructions")
-        if len(set(self.capabilities)) != len(self.capabilities):
-            raise ValueError("specialist.capabilities must not contain duplicates")
-
-    def to_dict(self) -> dict[str, Any]:
-        return {
-            "role_id": self.role_id,
-            "description": self.description,
-            "capabilities": list(self.capabilities),
-        }
-
-
-@dataclass(frozen=True)
-class SpecialistAssignment:
-    """Assign one specialist to an evidence-scoped analysis task."""
-
-    assignment_id: str
-    role_id: str
-    target_case_ids: tuple[str, ...]
-    evidence_refs: tuple[EvidenceRef, ...]
-    reason: str
-
-    def __post_init__(self) -> None:
-        _identifier(self.assignment_id, "assignment.assignment_id")
-        _identifier(self.role_id, "assignment.role_id")
-        if not self.target_case_ids:
-            raise ValueError("assignment.target_case_ids must not be empty")
-        if len(set(self.target_case_ids)) != len(self.target_case_ids):
-            raise ValueError("assignment.target_case_ids must not contain duplicates")
-        _text(self.reason, "assignment.reason")
-
-    def to_dict(self) -> dict[str, Any]:
-        return {
-            "assignment_id": self.assignment_id,
-            "role_id": self.role_id,
-            "target_case_ids": list(self.target_case_ids),
-            "evidence_refs": [ref.to_dict() for ref in self.evidence_refs],
-            "reason": self.reason,
-        }
-
-
-@dataclass(frozen=True)
-class DispatchPlan:
-    """Framework-bound specialist assignments and normalization notes."""
-
-    analysis_commit: str
-    assignments: tuple[SpecialistAssignment, ...]
-    normalization_notes: tuple[str, ...] = ()
-
-    def to_dict(self) -> dict[str, Any]:
-        return {
-            "analysis_commit": self.analysis_commit,
-            "assignments": [assignment.to_dict() for assignment in self.assignments],
-            "normalization_notes": list(self.normalization_notes),
-        }
-
-
-@dataclass(frozen=True)
-class SpecialistFailure:
-    """Normalize one isolated specialist failure."""
-
-    kind: str
-    message: str
-
-    def __post_init__(self) -> None:
-        if self.kind not in _FAILURE_KINDS:
-            raise ValueError(f"unsupported specialist failure kind: {self.kind}")
-        _text(self.message, "specialist failure.message")
-
-
-@dataclass(frozen=True)
-class SpecialistOutcome:
-    """Hold one free-form specialist analysis or an isolated failure."""
-
-    assignment_id: str
-    role_id: str
-    duration_sec: float
-    content: str | None = None
-    failure: SpecialistFailure | None = None
-
-    def __post_init__(self) -> None:
-        _identifier(self.assignment_id, "specialist outcome.assignment_id")
-        _identifier(self.role_id, "specialist outcome.role_id")
-        _optional_number(
-            self.duration_sec,
-            "specialist outcome.duration_sec",
-        )
-        if self.duration_sec < 0:
-            raise ValueError("specialist outcome.duration_sec must not be negative")
-        if (self.content is None) == (self.failure is None):
-            raise ValueError("specialist outcome must contain exactly one analysis or failure")
-        if self.content is not None:
-            _text(self.content, "specialist outcome.content")
-
-    @property
-    def succeeded(self) -> bool:
-        return self.content is not None
-
-    def to_dict(self) -> dict[str, Any]:
-        return {
-            "assignment_id": self.assignment_id,
-            "role_id": self.role_id,
-            "duration_sec": self.duration_sec,
-            "content": self.content,
-            "failure": (
-                {
-                    "kind": self.failure.kind,
-                    "message": self.failure.message,
-                }
-                if self.failure
-                else None
-            ),
-        }
-
-
-@dataclass(frozen=True)
-class SpecialistRound:
-    """What one round's specialists produced: the dispatch they ran under, the cases covered and every outcome."""
-
-    dispatch_plan: DispatchPlan
-    outcomes: Sequence[SpecialistOutcome]
-    coverage: Mapping[str, object]
-
-    @property
-    def analyses(self) -> list[SpecialistOutcome]:
-        """The outcomes that carry an analysis."""
-        return [outcome for outcome in self.outcomes if outcome.content is not None]
-
-
-@dataclass(frozen=True)
-class LaneDrop:
-    """One lane the review judged not worth its Implementer session."""
-
-    lane_id: int
-    reason: str
-
-    def __post_init__(self) -> None:
-        if not isinstance(self.lane_id, int) or isinstance(self.lane_id, bool):
-            raise ValueError("lane drop.lane_id must be an integer")
-        if self.lane_id < 1:
-            raise ValueError("lane drop.lane_id must be positive")
-        _text(self.reason, "lane drop.reason")
-
-    def to_dict(self) -> dict[str, Any]:
-        return {"lane_id": self.lane_id, "reason": self.reason}
-
-
-@dataclass(frozen=True)
-class PlanCriticOutcome:
-    """One free-form plan review, its routing verdict, and its width ruling."""
-
-    verdict: str
-    review: str = ""
-    error: str = ""
-    duration_sec: float = 0.0
-    lane_drops: tuple[LaneDrop, ...] = ()
-
-    def __post_init__(self) -> None:
-        if self.verdict not in {"ACCEPT", "REVISE", "REPLACE", "NOT_REVIEWED"}:
-            raise ValueError("plan critic verdict is unsupported")
-        # The outage detail is the whole of what ``NOT_REVIEWED`` means, so neither can be recorded without the
-        # other: every reader below decides from the verdict alone that this round carries no judgement.
-        if (self.verdict == "NOT_REVIEWED") != bool(self.error):
-            raise ValueError("plan critic NOT_REVIEWED and error must be recorded together")
-        _text(self.review, "plan critic review", allow_empty=True)
-        _text(self.error, "plan critic error", allow_empty=True)
-        if self.duration_sec < 0:
-            raise ValueError("plan critic duration_sec must be non-negative")
-        lane_ids = [drop.lane_id for drop in self.lane_drops]
-        if len(set(lane_ids)) != len(lane_ids):
-            raise ValueError("plan critic lane_drops must name each lane once")
-
-    @property
-    def fail_open(self) -> bool:
-        """Whether the draft bypassed enforcement because review failed."""
-        return self.verdict == "NOT_REVIEWED"
-
-    @property
-    def requires_revision(self) -> bool:
-        return self.verdict in {
-            "REVISE",
-            "REPLACE",
-        }
-
-    def to_dict(self) -> dict[str, Any]:
-        return {
-            "status": "CRITIC_ERROR" if self.fail_open else "reviewed",
-            "verdict": self.verdict,
-            "error": self.error,
-            "fail_open": self.fail_open,
-            "duration_sec": self.duration_sec,
-            "lane_drops": [drop.to_dict() for drop in self.lane_drops],
-        }
-
-    def render_artifact(self) -> str:
-        if self.fail_open:
-            return (
-                f"STATUS: CRITIC_ERROR\n\nVERDICT: {self.verdict}\n\nERROR: {self.error}\n\n"
-                "The draft plan was used without critic enforcement."
-            )
-        return f"VERDICT: {self.verdict}\n\n{self.review.strip()}"
-
-
-@dataclass(frozen=True)
-class LaneGround:
-    """The ground one lane of a round owns, in the terms an edit lands in."""
-
-    lane_id: int
-    ground: str
-    reason: str = ""
-    joint: bool = False
-    fallback: str = ""
-
-    def __post_init__(self) -> None:
-        if not isinstance(self.lane_id, int) or isinstance(self.lane_id, bool):
-            raise ValueError("lane ground.lane_id must be an integer")
-        if self.lane_id < 1:
-            raise ValueError("lane ground.lane_id must be positive")
-        _text(self.ground, "lane ground.ground")
-        _text(self.reason, "lane ground.reason", allow_empty=True)
-        if not isinstance(self.joint, bool):
-            raise ValueError("lane ground.joint must be a boolean")
-        _text(self.fallback, "lane ground.fallback", allow_empty=True)
-
-    def to_dict(self) -> dict[str, Any]:
-        return {
-            "lane_id": self.lane_id,
-            "ground": self.ground,
-            "reason": self.reason,
-            "joint": self.joint,
-            "fallback": self.fallback,
-        }
-
-
-@dataclass(frozen=True)
-class SynthesizedPlan:
-    """One generated plan, the ground it was planned on, and its session with the system prompt it ran under."""
-
-    text: str
-    session_id: str = ""
-    # Resuming the session under any other system prompt rewrites the whole cached conversation instead of reading it.
-    system_prompt: str = ""
-    ground: str = ""
-    joint: bool = False
-    fallback: str = ""
-
-    def __post_init__(self) -> None:
-        _text(self.text, "synthesized plan")
-        _text(
-            self.session_id,
-            "synthesized plan session_id",
-            allow_empty=True,
-        )
-        _text(self.system_prompt, "synthesized plan system_prompt", allow_empty=True)
-        if self.session_id and not self.system_prompt:
-            raise ValueError("a synthesized plan that keeps its session must name the system prompt it ran under")
-        _text(self.ground, "synthesized plan ground", allow_empty=True)
-        if not isinstance(self.joint, bool):
-            raise ValueError("synthesized plan joint must be a boolean")
-        _text(self.fallback, "synthesized plan fallback", allow_empty=True)
-
-
-@dataclass(frozen=True)
-class OrchestrationRunResult:
-    """Aggregate one best-effort planning cycle."""
-
-    dispatch_plan: DispatchPlan
-    specialist_outcomes: tuple[SpecialistOutcome, ...] = ()
-    # Every lane's plan for this round, in lane order.
-    optimization_plans: tuple[str, ...] = ()
-    structured_output_diagnostics: dict[str, Any] | None = None
-    optimization_plan_executable: bool = True
-    optimization_plan_draft: str = ""
-    plan_critic: PlanCriticOutcome | None = None
-    plan_revised: bool = False
-
-    def __post_init__(self) -> None:
-        for plan in self.optimization_plans or ("",):
-            _text(plan, "orchestration optimization_plan")
-        _text(
-            self.optimization_plan_draft,
-            "orchestration optimization_plan_draft",
-            allow_empty=True,
-        )
-        if not isinstance(self.optimization_plan_executable, bool):
-            raise ValueError("orchestration optimization_plan_executable must be a boolean")
-        if not isinstance(self.plan_revised, bool):
-            raise ValueError("orchestration plan_revised must be a boolean")

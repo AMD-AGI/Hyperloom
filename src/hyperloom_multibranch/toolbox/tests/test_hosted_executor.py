@@ -122,6 +122,19 @@ async def _run(tb: ToolboxRig) -> tuple[str, TestResult]:
     return request_id, TestResult.from_document(outcome["result"])
 
 
+async def stored_and_logged(
+    tmp_path: Path, scripted: ScriptedBackend, planner: PointPlanner
+) -> tuple[TestResult, TestResult]:
+    """One AgentX test of ``scripted`` that ``planner`` plans: the result the blackboard stored and the one the
+    toolbox logged."""
+    executor = HostedExecutor(scripted, tmp_path / "session")  # type: ignore[arg-type]
+    tb = build(tmp_path, executor=executor, planner=planner, policy=POLICY, workload_kind=WorkloadKind.AGENTX)
+    request_id, logged = await _run(tb)
+    record = await tb.blackboard.record(request_id)
+    assert record.result is not None
+    return record.result, logged
+
+
 def _journal_attempts(r: Rig, request_id: str) -> dict[int, str]:
     """attempt number -> sandbox id, from the journal."""
     return {rec.attempt: str(rec.sandbox_id) for rec in r.backend.journal.records() if rec.request_id == request_id}

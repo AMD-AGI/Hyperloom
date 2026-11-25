@@ -72,11 +72,10 @@ The flags that decide what a campaign is:
   `hipblaslt`, or `ave`, written as the bare `<backend>` key.
 - `--snr-threshold` — the correctness gate in dB, fixed for the campaign.
 - `--max-hours` — the wall-clock budget (minimum 1.0). The campaign is
-  time-driven; it does not stop at a fixed iteration count. It stops when what
-  remains can no longer finish a round — measured once its planning has
-  returned, see {doc}`the autonomous loop </kernelforge/how-to/autonomous-loop>` — so the
-  last hour of a budget buys a narrower round rather than one that is killed
-  halfway.
+  time-driven; it does not stop at a fixed iteration count. It stops opening
+  rounds when what remains no longer covers one session and the validation
+  that judges its candidate; see round admission in
+  {doc}`the autonomous loop </kernelforge/how-to/autonomous-loop>`.
 - `--git-branch` — the development branch the kept commits land on.
 
 Each iteration, the agent works through the Bash tool inside the workspace: it

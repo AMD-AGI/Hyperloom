@@ -44,6 +44,7 @@ from hyperloom.contracts.recipe import (
     apply,
 )
 from hyperloom.measure.compile import LocalBlobStore, PackageBase
+from hyperloom.measure.runner.native.server_options import OptionInventory, ServerOption
 from hyperloom_multibranch.contracts.judgement import AccuracyVerdict, Judgement, Verdict
 from hyperloom_multibranch.contracts.blackboard import INTEGRATION_BRANCH, Role, Writer
 from hyperloom_multibranch.contracts.blackboard.records import CommittedCommit, JudgementWrite, LineageEvent
@@ -294,6 +295,7 @@ async def _bench(
     repo_type: type[GitExperimentRepo] = GitExperimentRepo,
     completion_type: type[ScriptedCompletion] = ScriptedCompletion,
     bundles: bool = False,
+    options: OptionInventory | None = None,
 ) -> Bench:
     clock = FakeClock()
     blackboard = tmp_path / "blackboard"
@@ -317,6 +319,7 @@ async def _bench(
     regression = FakeRegressionCheck()
     checks = SessionChecks(tests, gate, regression)
     integrator = (BundlingIntegrator if bundles else Integrator)(records, repo, checks, resolver, Clock(clock, _poll))
+    integrator.options = options
     texts = (CANDIDATE_TEXT, CONFLICTING_TEXT) if conflicting else (CANDIDATE_TEXT,)
     patches = tuple([await repo.store_patch(COMPONENT, text) for text in texts])
     deltas = {"c1": _change("c1", patches), "c2": _change("c2")}
@@ -1159,6 +1162,25 @@ async def test_a_merge_that_leaves_the_head_s_recipe_unchanged_is_skipped_untest
     assert recorded.last_merge is not None and recorded.last_merge.outcome is MergeOutcome.ALREADY_ON_HEAD
     [logged] = [entry for entry in bench.logged() if entry["detail"]["candidate"] == again]
     assert (logged["reason"], logged["detail"]["outcome"]) == (ALREADY_ON_HEAD, MergeOutcome.ALREADY_ON_HEAD.value)
+
+
+#: Another spelling of the option ``c1``'s commit sets, as ``-bs`` is of ``--backend-sampling``.
+C1_ALIAS = "-c1"
+OPTIONS = OptionInventory("llama-server", "0" * 64, "", (ServerOption((C1_ALIAS, f"{TAG_FLAG}c1"), "", False),))
+
+
+async def test_a_merge_that_only_respells_an_option_of_the_head_is_skipped_untested(tmp_path: Path) -> None:
+    bench = await _bench(tmp_path, options=OPTIONS)
+    await _one(bench)
+    head = await bench.repo.head(INTEGRATION_BRANCH)
+    respelled = ConfigDelta(server_args=f"{ARGS['c1']} {C1_ALIAS}")
+    again = await _committed_elsewhere(bench, RecipeDelta(config=respelled), 5.0)
+
+    reports = await bench.integrator.integrate_next(2, TICK_SECONDS, ())
+
+    [skipped] = [report for report in reports if report.candidate == again]
+    assert (skipped.onto, skipped.outcome, skipped.request_id) == (head, MergeOutcome.ALREADY_ON_HEAD, None)
+    assert [test.parent_commit for test in bench.merge_tests().values()] == [bench.root, head]
 
 
 async def test_a_commit_already_on_the_head_is_not_tried_again_when_the_head_moves(bench: Bench) -> None:

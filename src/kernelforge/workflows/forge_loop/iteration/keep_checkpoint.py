@@ -64,7 +64,6 @@ PENDING_KEEP_FIELDS = frozenset(
         "agent_provider",
         "agent_model",
         "blockage_epoch",
-        "search_control",
         "commit_message",
         "commit_subject",
         "task_fingerprint",
@@ -160,22 +159,6 @@ class KeepCheckpointMixin:
         except FileNotFoundError:
             return
 
-    def _search_control_snapshot(self) -> dict:
-        """Capture decision-critical planning state for pending KEEP recovery."""
-        return {
-            "diversification_cycle_completed": (self.run_state.diversification_cycle_completed),
-        }
-
-    def _apply_iteration_planning_state(
-        self,
-        *,
-        optimization_plan_created: bool,
-    ) -> None:
-        """Reduce one completed iteration's planning outcome into run_state."""
-        self.run_state.diversification_cycle_completed = (
-            self.run_state.search_mode == "DIVERSIFY" and optimization_plan_created
-        )
-
     def _build_pending_keep(
         self,
         result: IterationResult,
@@ -236,7 +219,6 @@ class KeepCheckpointMixin:
             "agent_provider": result.agent_provider,
             "agent_model": result.agent_model,
             "blockage_epoch": result.blockage_epoch,
-            "search_control": self._search_control_snapshot(),
             "commit_message": commit_message,
             "commit_subject": commit_message.splitlines()[0],
             "task_fingerprint": self._task_fingerprint(),

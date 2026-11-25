@@ -230,6 +230,12 @@ def test_a_session_runs_on_mi325x() -> None:
     assert _settings("--gpu-type", "MI325X").workload.gpu_type == "mi325x"
 
 
+def test_a_llamacpp_session_runs_on_w7900d() -> None:
+    workload = _settings("--gpu-type", "W7900D", "--framework", "llamacpp").workload
+
+    assert (workload.gpu_type, workload.framework) == ("w7900d", "llamacpp")
+
+
 def test_an_unknown_gpu_type_is_refused_naming_the_types_a_session_runs_on(capsys: pytest.CaptureFixture[str]) -> None:
     with pytest.raises(SystemExit) as exc:
         cli.main(["run", *WORKLOAD_ARGS, "--gpu-type", "MI308X"])
@@ -238,7 +244,19 @@ def test_an_unknown_gpu_type_is_refused_naming_the_types_a_session_runs_on(capsy
     err = capsys.readouterr().err
     assert "invalid choice: 'mi308x'" in err
     # argparse quotes the choices before Python 3.12.8 and lists them bare from it on.
-    assert "(choose from mi300x, mi325x, mi350x, mi355x)" in err.replace("'", "")
+    assert "(choose from mi300x, mi325x, mi350x, mi355x, r9700, w7900d)" in err.replace("'", "")
+
+
+@pytest.mark.parametrize("board", ["r9700", "W7900D"])
+@pytest.mark.parametrize("framework", ["vllm", "sglang"])
+def test_a_board_of_llamacpp_alone_is_refused_for_another_framework(
+    board: str, framework: str, capsys: pytest.CaptureFixture[str]
+) -> None:
+    with pytest.raises(SystemExit) as exc:
+        cli.main(["run", *WORKLOAD_ARGS, "--gpu-type", board, "--framework", framework])
+
+    assert exc.value.code == cli.EXIT_USAGE
+    assert f"error: --gpu-type {board.lower()} is taken only with --framework llamacpp" in capsys.readouterr().err
 
 
 def test_an_agentx_run_has_no_sequence_lengths_and_is_graded_on_p50_interactivity_at_its_conc_alone() -> None:

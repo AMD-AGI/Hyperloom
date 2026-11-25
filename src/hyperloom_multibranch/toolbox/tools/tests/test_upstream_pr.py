@@ -9,6 +9,7 @@ from pathlib import Path
 import pytest
 
 from hyperloom.agents.framework.models import Candidate
+from hyperloom.inference_optimizer import framework_registry
 from hyperloom_multibranch.toolbox.tools import InvalidRequest, JobStatus, ToolJobs, ToolRequest, UpstreamPrSearch
 from hyperloom_multibranch.toolbox.tools.tests.sinks import RecordingSink
 from hyperloom_multibranch.toolbox.tools.upstream_pr import Found, UpstreamSearch, build_search, search_github
@@ -137,3 +138,9 @@ async def test_a_bad_repo_is_refused_at_submit(tmp_path: Path) -> None:
     runner = ToolJobs([UpstreamPrSearch(lambda s: Found([], 0))], RecordingSink(), tmp_path)
     with pytest.raises(InvalidRequest, match="not a GitHub repository URL"):
         runner.submit(ToolRequest("upstream_pr_search", "s1", {"repo_url": "nope"}))
+
+
+def test_the_llamacpp_repository_the_framework_registry_names_is_searched() -> None:
+    url = framework_registry.repo_url("llamacpp")
+    search = build_search({"repo_url": url})
+    assert (search.request.repo_url, search.state_qualifier()) == (url, "is:open")

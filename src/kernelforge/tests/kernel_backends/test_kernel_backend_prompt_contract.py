@@ -116,20 +116,27 @@ def forge_loop_prompts(monkeypatch):
 # the remaining steps are the same text renumbered 6-8.
 # The emitted-check gate correction moves only the shared driver paragraph in
 # all nine non-assembly prompts (including AVE); assembly stays byte-identical.
+# The device runner moved the same nine and left assembly byte-identical: the
+# sweep bullet in the shared prompt_utils.py preamble now says to run the whole
+# sweep command through the session's device runner and to pass `--driver` the
+# driver script, where it named a lock wrapper that no longer exists. Diffed
+# line by line: one identical block in all nine (same md5 over the diff
+# bodies). AVE alone lost one more line, the instruction to follow an
+# optimization plan no round produces any more.
 _SHA256_FORGE_LOOP: dict[str, str] = {
-    "ave": "3969bcd708d0dd6a46a7ed4401dbb9984cc0faa70bd13fe50509ea4e36fda434",
-    "aiter": "fe0cfc662b64fac7fa1c4a48758366549d10b710f6aacec3a609e98277c16dfd",
+    "ave": "dc1fbf2fcec7161aed4cf1f993237e9bc72b6b8028e9b328221bd6b753644e44",
+    "aiter": "1fe96686b17a506d11e814de068bcf5343dfa2ac760965efa1f470a8ade23953",
     "assembly": "67ce0c680f6b603d7c656feb1f1cc1f5eaf1bf4f6afc5d9f368b0361dd4b1492",
-    "ck": "f6e5a979f4f96cf200d0f9bd2e161e68a3f0698b8cf771359eac0980b142613f",
-    "flydsl": "a50aa0b1c2c4ae04b5d918149096569d16b03f7343f9a2ad88bd751b11b1c6b3",
+    "ck": "c33be3a386732797743dd95f9d74bbb4f22b40676b62f27a0d5084f14a2d7374",
+    "flydsl": "d36663e5bc5e070766793ccab851cc841a2ae1dffff65b658b317b1efb5121c3",
     # The group-axis rule moved fusion alone: harness contract step 4 now forbids
     # substituting gqa_groups / num_attention_heads for n_local_groups on DSv4 wo_a
     # paths, and reminds authors that H and G are often unequal.
-    "fusion": "d16981d3f47519fdf7eada6899d0edf3460c3b3a166d689e6870faabb462fb8f",
-    "gluon": "0c6b20832cd9f49349b5f5974137a7a35f958820530e4237a20a3fe56899956b",
-    "hip": "662524299466f87fea4ad630c7fbf414a699a373f7635d5167c50cf1099eb48d",
-    "hipblaslt": "4dc01cdd379c6c55a9847dd6f0532853b199128a5039eb09e51227657736d4da",
-    "triton": "e32193395d0dc3ea323c29f6cfb3d82f2a96c66cb447057486a7e83fef538e89",
+    "fusion": "718af3db56f214c0b248d1d975de0936b4545997f5643f924c73788841f66530",
+    "gluon": "3d3521e35e5359aa23a322b1edb3b8eecc3490a130e470b84b7bd2494cbf93a5",
+    "hip": "998d12ef2bf9cb6233cb5f20139fd908c2380c5c1420579704912d724c85e55e",
+    "hipblaslt": "0a19a35498b87b4ad238ed2ffad835fee33b478d1455ba17560109824e351ad0",
+    "triton": "1b36a13d6e707539af54303f4f48032e22b27f67cbc90cccba979a561358eec9",
 }
 
 
