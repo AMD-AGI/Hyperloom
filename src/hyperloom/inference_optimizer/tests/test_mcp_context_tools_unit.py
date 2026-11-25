@@ -67,8 +67,7 @@ def test_runtime_findings_reads_current_best_slot(tmp_path):
     slot = tmp_path / "variant_00_v"
     slot.mkdir()
     (slot / "runtime_findings.json").write_text(
-        json.dumps({"schema_version": 1, "framework": "vllm", "log_path": "/s/server.log", "findings": []}),
-        encoding="utf-8",
+        json.dumps({"framework": "vllm", "log_path": "/s/server.log", "findings": []}), encoding="utf-8"
     )
     state = SimpleNamespace(current_best_measurement={"launch_evidence_path": str(slot / "launch_evidence.json")})
     p = _provider(shared_state=state)

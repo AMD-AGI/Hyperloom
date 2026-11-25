@@ -27,8 +27,6 @@ NOT_DETECTED = "not_detected"
 UNKNOWN = "unknown"
 
 RUNTIME_FINDINGS_FILE = "runtime_findings.json"
-#: Version 2 added ``timing_lines``; a version 1 report is read as one that holds none.
-SCHEMA_VERSION = 2
 #: Largest throughput drop a verified correctness fix may cost and still KEEP.
 CORRECTNESS_FIX_MAX_DROP_PCT = 3.0
 KEEP_REASON_CORRECTNESS_FIX = "correctness_fix"
@@ -229,18 +227,17 @@ def _scan_lines(path: str, framework: str, declared_env: Collection[str], hits: 
 
 
 def scan_server_log(path: str | None, framework: str, *, declared_env: Collection[str] = ()) -> dict[str, Any]:
-    """Scan one measured server log; every applicable rule gets one status, and ``timing_lines`` are the last lines
-    the server of a framework built from its checkout timed its requests with (none for any other, or without a log).
+    """Scan one measured server log; every applicable rule gets one status, and ``timing_lines``, in the report only
+    when there are any, are the last lines the server of a framework built from its checkout timed its requests with.
 
     ``declared_env`` names the server env the measurement requested; only those can be unknown env findings.
     """
     framework = str(framework or "").strip().lower()
     rules = _applicable_rules(framework)
     report: dict[str, Any] = {
-        "schema_version": SCHEMA_VERSION,
+        "schema_version": 1,
         "framework": framework,
         "log_path": path or "",
-        "timing_lines": [],
     }
     if not path:
         report["findings"] = [_status_finding(rule_id, UNKNOWN, "no_server_log") for rule_id in rules]
@@ -248,11 +245,13 @@ def scan_server_log(path: str | None, framework: str, *, declared_env: Collectio
     hits = _Hits()
     try:
         _scan_lines(path, framework, declared_env, hits)
-        report["timing_lines"] = list(read_timing_lines(Path(path), native_component(framework)))
+        timing_lines = read_timing_lines(Path(path), native_component(framework))
     except OSError as exc:
         reason = f"unreadable: {type(exc).__name__}"
         report["findings"] = [_status_finding(rule_id, UNKNOWN, reason) for rule_id in rules]
         return report
+    if timing_lines:
+        report["timing_lines"] = list(timing_lines)
     for name, change in engine_adjusted_settings_from_log(path, framework).items():
         hits.add(_ENGINE_ADJUSTED, name, f"{name}: {change['requested']} -> {change['resolved']}")
     report["findings"] = hits.findings(rules)
@@ -276,10 +275,7 @@ def load_runtime_findings(measurement: Mapping[str, Any]) -> dict[str, Any] | No
     path = _findings_path(measurement)
     if path is None or not path.is_file():
         return None
-    report = json.loads(path.read_text(encoding="utf-8"))
-    if report["schema_version"] == 1:
-        report = {**report, "schema_version": SCHEMA_VERSION, "timing_lines": []}
-    return report
+    return json.loads(path.read_text(encoding="utf-8"))
 
 
 def correctness_fix_refusal(before: dict[str, Any] | None, after: dict[str, Any] | None, finding_id: str) -> str:
@@ -322,7 +318,7 @@ def render_runtime_findings(measurement: Mapping[str, Any]) -> str:
     if clear:
         lines.append(f"- not_detected: {', '.join(clear)}")
     lines.extend(f"- unknown: {f['rule_id']} ({f['reason']})" for f in findings if f["status"] == UNKNOWN)
-    if report["timing_lines"]:
+    if timing_lines := report.get("timing_lines"):
         lines.append("- timing lines, the last of each kind the log holds, oldest first:")
-        lines.extend(f"    {line}" for line in report["timing_lines"])
+        lines.extend(f"    {line}" for line in timing_lines)
     return "\n".join(lines)
