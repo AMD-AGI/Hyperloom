@@ -10,7 +10,7 @@ from dataclasses import dataclass
 
 from inference_suite.contracts.base_launch import Workload
 from inference_suite.frameworks import Framework
-from inference_suite.multinode.record import MODE_ROLES, FrontendType, PdMode, Role
+from inference_suite.multinode.record import FrontendType, PdMode, Role
 
 #: The router each framework serves through when the session names none.
 DEFAULT_FRONTEND = {Framework.SGLANG: FrontendType.SGLANG_ROUTER, Framework.ATOM: FrontendType.ATOMESH}
@@ -28,20 +28,12 @@ class PdQueryError(ValueError):
 @dataclass(frozen=True)
 class RoleAsk:
     """One role's hosts, one worker per ``nodes_per_worker`` of them, and the topology the operator fixed (``None``
-    where the operator left it to the source)."""
+    where the operator left it to the source). The node list boundary validates them."""
 
     hosts: tuple[str, ...]
     tp: int | None = None
     ep: int | None = None
     dp_attention: bool | None = None
-
-    def __post_init__(self) -> None:
-        if not self.hosts or not all(isinstance(host, str) and host for host in self.hosts):
-            raise PdQueryError(f"a role needs at least one host, got {self.hosts!r}")
-        for name in ("tp", "ep"):
-            value = getattr(self, name)
-            if value is not None and (not isinstance(value, int) or value < 1):
-                raise PdQueryError(f"a role's {name} must be a positive integer, got {value!r}")
 
 
 @dataclass(frozen=True)
@@ -67,24 +59,8 @@ class PdQuery:
     mode: PdMode = PdMode.DISAGGREGATED
 
     def __post_init__(self) -> None:
-        if self.framework not in (Framework.SGLANG, Framework.ATOM):
-            raise PdQueryError(f"a PD session runs sglang or atom, not {self.framework.value}")
         if self.workload not in (Workload.FIXED, Workload.AGENTX):
             raise PdQueryError(f"a PD session runs a fixed or AgentX workload, not {self.workload.value}")
-        if not self.model_id or not self.model_path or not self.board:
-            raise PdQueryError("a PD session names its model id, model path and board")
-        if not isinstance(self.gpus_per_node, int) or self.gpus_per_node < 1:
-            raise PdQueryError(f"gpus_per_node must be a positive integer, got {self.gpus_per_node!r}")
-        if not self.concurrencies or not all(isinstance(c, int) and c >= 1 for c in self.concurrencies):
-            raise PdQueryError(f"a PD session needs positive concurrencies, got {self.concurrencies!r}")
-        if self.frontend not in (None, *SERVED_FRONTENDS[self.framework]):
-            served = ", ".join(frontend.value for frontend in SERVED_FRONTENDS[self.framework])
-            raise PdQueryError(f"a {self.framework.value} session serves through {served}, not {self.frontend.value}")
-        if set(self.roles) != set(MODE_ROLES[self.mode]):
-            raise PdQueryError(f"a {self.mode.value} session asks for {[role.value for role in MODE_ROLES[self.mode]]}")
-        fixed = self.workload is Workload.FIXED
-        if (self.isl is not None and self.osl is not None) != fixed:
-            raise PdQueryError("a fixed workload names its isl and osl, and an AgentX one neither")
 
     @property
     def model_name(self) -> str:

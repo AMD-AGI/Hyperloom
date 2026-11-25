@@ -22,6 +22,7 @@ from typing import Any
 import yaml
 
 from inference_suite.contracts.base_launch import Workload
+from inference_suite.argv import canonical_flag_name
 from inference_suite.frameworks import Framework
 from inference_suite.multinode.query import PdQuery, RoleAsk
 from inference_suite.multinode.record import PD_ROLES, PdSourceKind, Role
@@ -36,20 +37,27 @@ from inference_suite.recipe.inferencex import (
     org_models_named,
     runner_board,
 )
-from inference_suite.recipe.model import RecipeSourceError, boards_interchangeable
+from inference_suite.recipe.model import (
+    ATOM_TOPOLOGY,
+    SGLANG_TOPOLOGY,
+    RecipeSourceError,
+    TopologySpelling,
+    boards_interchangeable,
+)
 from inference_suite.recipe.sources import Checkout
 
 MULTI_NODE_RECIPES = f"{PROJECT}/benchmarks/multi_node/srt-slurm-recipes"
 NVIDIA_MASTER = f"{PROJECT}/configs/nvidia-master.yaml"
 #: What a PD resolution checks out of InferenceX.
 CHECKOUT_DIRECTORIES = (f"{PROJECT}/configs", MULTI_NODE_RECIPES)
-#: Boards a PD session takes each other's launches for, beyond :func:`boards_interchangeable`.
-_PD_INTERCHANGEABLE_BOARDS = (frozenset({"mi300x", "mi325x"}),)
 _AGENTX_SHAPE = "agentx"
 _ZIP_SELECTOR = re.compile(r"(zip_override_[\w-]+)\[(\d+)\]")
-_TP_KEYS = ("tp-size", "tensor-parallel-size", "tp")
-_EP_KEYS = ("ep-size", "expert-parallel-size", "ep")
 _SPEC_KEYS = ("speculative-algorithm", "speculative-config", "method")
+#: The topology spellings of the frameworks a PD session runs.
+_TOPOLOGY_SPELLING: dict[Framework, TopologySpelling] = {
+    Framework.SGLANG: SGLANG_TOPOLOGY,
+    Framework.ATOM: ATOM_TOPOLOGY,
+}
 
 
 @dataclass(frozen=True)
@@ -245,6 +253,11 @@ def _unported(recipe: Mapping[str, Any], query: PdQuery) -> str | None:
     return None
 
 
+def _spellings(flags: Sequence[str]) -> tuple[str, ...]:
+    """The canonical names of ``flags``, the form :func:`_arg` matches."""
+    return tuple(canonical_flag_name(flag) for flag in flags)
+
+
 def _arg(args: Mapping[str, Any], keys: Sequence[str]) -> Any:
     return next((args[key] for key in args if key.replace("_", "-") in keys), None)
 
@@ -253,11 +266,12 @@ def recipe_fit(role: Mapping[str, Any], framework: Framework) -> RoleFit:
     """The topology a recipe role states: its workers and GPUs, and TP, EP and DP attention from its args."""
     args = role.get("args") or {}
     gpus = int(role.get("gpus") or 0)
-    tp = int(_arg(args, _TP_KEYS) or gpus)
-    if framework is Framework.ATOM:
-        ep = tp if _arg(args, ("enable-expert-parallel",)) else 1
+    spelling = _TOPOLOGY_SPELLING[framework]
+    tp = int(_arg(args, _spellings(spelling.tp)) or gpus)
+    if spelling.ep_switch:
+        ep = tp if _arg(args, _spellings(spelling.ep_switch)) else 1
     else:
-        ep = int(_arg(args, _EP_KEYS) or 1)
+        ep = int(_arg(args, _spellings(spelling.ep)) or 1)
     return RoleFit(int(role.get("workers") or 1), tp, ep, bool(_arg(args, ("enable-dp-attention",))), gpus or tp)
 
 
@@ -291,18 +305,6 @@ class _MasterRow:
     entry: Mapping[str, Any]
     block: Mapping[str, Any]
     row: Mapping[str, Any]
-
-
-def _pd_boards(board: str) -> tuple[str, ...]:
-    """``board`` then the boards a PD session takes launches from in its place."""
-    board = board.lower()
-    others = sorted({other for group in _PD_INTERCHANGEABLE_BOARDS if board in group for other in group} - {board})
-    return (board, *others)
-
-
-def _pd_boards_interchangeable(board: str, other: str) -> bool:
-    """Whether a PD session on ``board`` takes a launch tuned on ``other``."""
-    return boards_interchangeable(board, other) or other.lower() in _pd_boards(board)
 
 
 def _master_rows(query: PdQuery, master: Mapping[str, Any]) -> Iterator[_MasterRow]:
@@ -375,7 +377,7 @@ def master_candidates(query: PdQuery, checkout: Checkout) -> Candidates:
         except RecipeSourceError as error:
             misses.append(f"{arm}: {error}")
             continue
-        if not _pd_boards_interchangeable(query.board, board):
+        if not boards_interchangeable(query.board, board):
             misses.append(f"{arm}: it runs on {board}, not {query.board}")
             continue
         try:
@@ -421,10 +423,9 @@ def _named_recipes(master: Mapping[str, Any]) -> set[str]:
 def _lookup_dirs(
     query: PdQuery, checkout: Checkout, masters: Sequence[Mapping[str, Any]]
 ) -> tuple[list[str], list[str]]:
-    """The workload directories of the query's model, framework and boards (its own, then those :func:`_pd_boards`
-    takes in its place): ``<board>-<precision>`` and its suffixed siblings (``-mtp``) for every model prefix and
-    precision the master configs give the model; then the query board's ``<board>-<precision>`` directories of the
-    prefixes and precisions no board has."""
+    """The workload directories of the query's model, framework and board: ``<board>-<precision>`` and its suffixed
+    siblings (``-mtp``) for every model prefix and precision the master configs give the model; then the query
+    board's ``<board>-<precision>`` directories of the prefixes and precisions no board has."""
     model, _ = _master_model(query.model_id, masters)
     labels = sorted(
         {
@@ -438,7 +439,7 @@ def _lookup_dirs(
         shape = f"{query.isl // 1024}k{query.osl // 1024}k"
     else:
         shape = _AGENTX_SHAPE
-    boards = _pd_boards(query.board)
+    boards = (query.board.lower(),)
     found: list[str] = []
     absent: list[str] = []
     for prefix, precision in labels:
@@ -457,7 +458,7 @@ def _lookup_dirs(
 
 def _lookup_candidate(query: PdQuery, path: str, selector: str, recipe: Mapping[str, Any]) -> Candidate | str:
     gpu_type = str((recipe.get("resources") or {}).get("gpu_type") or "")
-    if gpu_type.lower() not in _pd_boards(query.board):
+    if gpu_type.lower() != query.board.lower():
         return f"it is for {gpu_type}, not {query.board}"
     unported = _unported(recipe, query)
     if unported is not None:

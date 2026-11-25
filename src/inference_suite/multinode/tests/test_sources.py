@@ -10,10 +10,12 @@ from inference_suite.contracts.base_launch import Workload
 from inference_suite.frameworks import Framework
 from inference_suite.multinode.inferencex import (
     MULTI_NODE_RECIPES,
+    RoleFit,
     deep_merge,
     expand_variants,
     lookup_candidates,
     master_candidates,
+    recipe_fit,
 )
 from inference_suite.multinode.query import PdQuery, RoleAsk
 from inference_suite.multinode.record import PdSourceKind, Role
@@ -164,3 +166,20 @@ def test_a_bare_repo_name_several_orgs_name_is_not_taken():
 
     assert model == "M"
     assert note is not None and "x/M" in note and "y/m" in note
+
+
+def test_a_pd_session_refuses_a_launch_tuned_on_another_board(tmp_path):
+    runners = "labels:\n  mi325x: [n1, n2]\n  cluster:mi325x-amds: [n1]\n"
+    master = _MASTER.replace("cluster:mi355x-amds", "cluster:mi325x-amds")
+    recipe = f"{MULTI_NODE_RECIPES}/m/sglang/mi355x-fp8/1k1k/disagg.yaml"
+    checkout = _write_checkout(tmp_path, {MASTER: master, RUNNERS: runners, recipe: _RECIPE})
+    found = master_candidates(_query(board="mi300x"), checkout)
+    assert found.found == ()
+    assert any("it runs on mi325x, not mi300x" in miss for miss in found.misses)
+
+
+def test_recipe_fit_reads_each_frameworks_topology_spelling():
+    sglang = {"workers": 2, "gpus": 8, "args": {"tp-size": 8, "ep-size": 4}}
+    assert recipe_fit(sglang, Framework.SGLANG) == RoleFit(2, 8, 4, False, 8)
+    atom = {"workers": 1, "gpus": 8, "args": {"tp": 4, "enable-expert-parallel": True}}
+    assert recipe_fit(atom, Framework.ATOM) == RoleFit(1, 4, 4, False, 8)
