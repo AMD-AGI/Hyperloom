@@ -280,10 +280,11 @@ def test_the_session_report_points_at_the_sweep(session_dir: Path, grid: SimpleN
     assert pointer["report_path"] == "reports/conc_sweep_summary.json" and pointer["status"] == "succeeded"
 
 
-def test_a_point_that_would_end_past_the_deadline_is_skipped_and_not_started(
+def test_under_a_deadline_points_run_in_pairs_and_one_that_would_end_past_it_is_not_started(
     session_dir: Path, grid: SimpleNamespace, monkeypatch: pytest.MonkeyPatch
 ):
-    """Each point is priced at the session's baseline round (600 s); a deadline 1500 s out fits two points."""
+    """Each point is priced at the session's baseline round (600 s); a deadline 1500 s out fits two points, which run
+    as a pair though the workload could hold a server per arm."""
     _state(session_dir)
     clock = [1000.0]
     monkeypatch.setattr(runner.time, "time", lambda: clock[0])
@@ -297,10 +298,11 @@ def test_a_point_that_would_end_past_the_deadline_is_skipped_and_not_started(
 
     payload = asyncio.run(runner.run_conc_sweep(session_dir, deadline_unix=2500.0))
 
-    assert [call["name"] for call in grid.calls] == ["baseline_conc16", "baseline_conc4"]
+    assert [call["name"] for call in grid.calls] == ["baseline_conc16", "optimized_conc16"]
+    assert all(call["lifecycle"] is None for call in grid.calls)
     statuses = {arm: {p["conc"]: p["status"] for p in payload[arm]["points"]} for arm in ("baseline", "optimized")}
-    assert statuses["baseline"] == {4: "succeeded", 8: "skipped_budget", 16: "succeeded", 32: "skipped_budget"}
-    assert set(statuses["optimized"].values()) == {"skipped_budget"}
+    expected = {4: "skipped_budget", 8: "skipped_budget", 16: "succeeded", 32: "skipped_budget"}
+    assert statuses == {"baseline": expected, "optimized": expected}
 
 
 def test_the_operators_points_are_swept_in_place_of_the_recipes(session_dir: Path, grid: SimpleNamespace):
@@ -449,3 +451,14 @@ def test_cold_points_run_in_pairs_so_a_deadline_leaves_pairs_measured(
         for arm in ("baseline", "optimized")
     }
     assert skipped == {"baseline": [4, 8, 32], "optimized": [4, 8, 32]}
+
+
+def test_a_later_run_over_other_points_keeps_the_points_both_runs_name(session_dir: Path, grid: SimpleNamespace):
+    _state(session_dir)
+    asyncio.run(runner.run_conc_sweep(session_dir, concs=(2,)))
+    grid.calls.clear()
+
+    asyncio.run(runner.run_conc_sweep(session_dir))
+
+    assert not any(call["name"].endswith("_conc16") for call in grid.calls)
+    assert {call["name"].rsplit("conc", 1)[1] for call in grid.calls} == {"4", "8", "32"}

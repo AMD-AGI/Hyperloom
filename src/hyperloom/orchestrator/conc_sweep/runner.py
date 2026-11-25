@@ -364,11 +364,7 @@ def _resume(sweep: _Sweep) -> None:
     """Keep the points an earlier run of the same sweep measured on the same launch of each arm, so only the rest
     are run."""
     earlier = read_summary(reports_dir(sweep.session_dir))
-    if (
-        not earlier
-        or earlier.get("schema_version") != SCHEMA_VERSION
-        or earlier.get("concs") != list(sweep.points.concs)
-    ):
+    if not earlier or earlier.get("schema_version") != SCHEMA_VERSION:
         return
     for arm in sweep.arms:
         section = earlier[arm.name]
@@ -381,7 +377,7 @@ def _resume(sweep: _Sweep) -> None:
         if launch != (arm.args, arm.envs, arm.overlay, dict(arm.controls)):
             continue
         for point in section["points"]:
-            if point["status"] == _SUCCEEDED:
+            if point["status"] == _SUCCEEDED and point["conc"] in sweep.points.concs:
                 sweep.measured[arm.name][point["conc"]] = point
 
 
@@ -428,9 +424,10 @@ async def _run_rung(sweep: _Sweep, arm: Arm, conc: int, launch: GridLaunch) -> V
 
 async def _run_points(sweep: _Sweep) -> None:
     """Run both arms' pending points: arm by arm on held servers, else each point on its own server, a concurrency's
-    two arms one after the other, so a deadline leaves pairs measured rather than an arm."""
+    two arms one after the other, so a deadline leaves pairs measured rather than an arm; under a deadline no server is
+    held for that reason."""
     lifecycle = resolve_lifecycle_params(sweep.setup.base_yaml_path)
-    if not lifecycle.get("eligible") or agentx_replay_session(sweep.state):
+    if not lifecycle.get("eligible") or agentx_replay_session(sweep.state) or sweep.deadline_unix is not None:
         await _run_cold(sweep)
         return
     for arm in sweep.arms:

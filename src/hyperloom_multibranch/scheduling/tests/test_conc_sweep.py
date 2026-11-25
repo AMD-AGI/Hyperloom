@@ -353,3 +353,14 @@ def test_an_inferencex_sweep_runs_one_test_per_launch_its_recipe_caps_requests_w
         (commit, (conc,)) for commit in ("root", "c0ffee") for conc in (4, 16, 32)
     )
     assert payload["status"] == "succeeded"
+
+
+def test_an_inferencex_sweep_tests_the_launch_group_of_the_sessions_conc_first(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    _per_conc_base(monkeypatch, {4: "--a 4", 16: "--a 16", 32: "--a 32"})
+    tests = _Tests()
+
+    asyncio.run(_sweep(_layout(tmp_path), _settings(parallel=1, sweep_parallel=1), tests).run(_never()))
+
+    assert [r.concurrency for r in tests.requests][:2] == [(16,), (16,)]

@@ -630,17 +630,18 @@ class ConcSweep:
 
     def _tests(self) -> list[tuple[str, str, tuple[int, ...]]]:
         """The tests left to run as ``(arm, commit, concs)``: one per AgentX point, the two arms' interleaved in ladder
-        order so a concurrency's pair runs together; one per arm for an InferenceX workload, which sweeps every point
-        on one server."""
+        order so a concurrency's pair runs together; for an InferenceX workload one per arm and launch group, whose
+        points share a server, the group holding the session's CONC first."""
         arms = ((BASELINE, self.root), (OPTIMIZED, self.plan.chosen))
+        order = ladder(self.plan.points.concs, self.workload.conc)
         if self.workload.inferencex is not None:
+            groups = sorted(self.plan.launch_groups(), key=lambda group: min(map(order.index, group)))
             return [
                 (arm, commit, concs)
-                for group in self.plan.launch_groups()
+                for group in groups
                 for arm, commit in arms
                 if (concs := tuple(conc for conc in group if conc in self.pending(arm)))
             ]
-        order = ladder(self.plan.points.concs, self.workload.conc)
         return [(arm, commit, (conc,)) for conc in order for arm, commit in arms if conc in self.pending(arm)]
 
     async def _test(self, arm: str, commit: str, concs: tuple[int, ...], slots: asyncio.Semaphore) -> None:
@@ -672,13 +673,11 @@ class ConcSweep:
         earlier = read_summary(self.layout.reports)
         if not earlier or earlier.get("schema_version") != SCHEMA_VERSION:
             return
-        if earlier.get("concs") != list(self.plan.points.concs):
-            return
         for arm, commit in ((BASELINE, self.root), (OPTIMIZED, self.plan.chosen)):
             if earlier[arm].get("commit") != commit:
                 continue
             for point in earlier[arm]["points"]:
-                if point["status"] == _SUCCEEDED:
+                if point["status"] == _SUCCEEDED and point["conc"] in self.plan.points.concs:
                     self.measured[arm][point["conc"]] = point
 
     def _log_plan(self) -> None:
