@@ -201,8 +201,7 @@ class CandidateCheck:
     ``gain_pct`` is its reproduction's gain over the root's PRELUDE baseline and ``reproduction_pct`` how far that
     reproduction measured from the commit's record, each ``None`` when none was judged; ``refused_by`` is what kept the
     reproduction from holding, and ``waived`` the speed refusals a root's reproduction was not held to.
-    ``cache_states_differ`` is its reproduction judgement's flag of the compiled-code cache kinds it met in another state
-    than the tests behind the commit's record (:attr:`~..contracts.judgement.Judgement.cache_states_differ`).
+    ``cache_states_differ`` is its reproduction judgement's (:attr:`~..contracts.judgement.Judgement.cache_states_differ`).
     """
 
     candidate: FinalCandidate

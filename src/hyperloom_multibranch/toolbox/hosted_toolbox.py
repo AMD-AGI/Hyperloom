@@ -259,16 +259,11 @@ class HostedOptions:
     session that lends none builds no branch leases (``HostedToolbox.leases`` is ``None``) and reads no ``dev`` template,
     whatever ``dev`` key the host gave. A hosted session sets it from its ``dev_leases`` and ``agents``
     (:class:`~hyperloom_multibranch.scheduling.hosted_peers.HostedSandboxes`).
-    ``jit_store`` is this host's path of the shared compiled-code cache, else ``HYPERLOOM_JIT_STORE`` of the host
-    environment names it; with neither, nothing is published. Named, this host publishes what each accepted test compiled
-    into it, as the local toolbox does, and prunes it as the session starts (:func:`~.jit_store.session_jit_store`). No
-    hosted runner reads it yet, so every hosted test builds cold: the directory belongs on this host's own disk, where no
-    sandbox can write it (a directory a sandbox can write lets that sandbox's code put snapshots there that later tests
-    load, whatever its mode says), and the ``measurement`` template must neither mount it nor set
-    ``HYPERLOOM_JIT_CACHE``. The directory must be this account's own, which only it can write (made 0700 when missing).
-    A directory that is not (another account's, or below one another account can change), or one that cannot be made or
-    checked, is not refused: the session runs without publishing, logs one warning naming it and why, and records it in
-    ``jit_store.json`` of the session directory (:data:`~.jit_store.REFUSED_HOSTED`).
+    ``jit_store`` (else ``HYPERLOOM_JIT_STORE``) is the shared compiled-code cache this host publishes accepted tests'
+    compiles to and prunes as the session starts (:func:`~.jit_store.session_jit_store`, which says what happens to one
+    it refuses). No hosted runner reads it yet: it belongs on this host's own disk, where no sandbox can write it (a
+    sandbox's code could put snapshots there that later tests load), and the ``measurement`` template must neither mount
+    it nor set ``HYPERLOOM_JIT_CACHE``.
     """
 
     policy: QueuePolicy | None = None

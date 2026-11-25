@@ -827,10 +827,8 @@ class BuildPayment(str, Enum):
 
 @dataclass(frozen=True)
 class JitCacheState:
-    """How the shared compiled-code cache of one ``kind`` stood when the test began: ``hit``, ``miss``,
-    ``verify_failed`` or ``disabled``, as its signed result states it. A warm cache moves the compile out of the server's
-    boot, and a kernel first built after warm-up out of the measured window, so two tests whose states differ are
-    compared with that difference flagged."""
+    """How the shared compiled-code cache of one ``kind`` stood when the test began (``hit``, ``miss``, ``verify_failed``
+    or ``disabled``), as its signed result states it."""
 
     kind: str
     state: str

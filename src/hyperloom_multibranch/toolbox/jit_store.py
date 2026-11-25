@@ -8,17 +8,10 @@ host's account may write it: :func:`private_jit_store` refuses a directory anoth
 link there. The local toolbox and the hosted one both build their store with :func:`session_jit_store`, which also
 prunes it (:mod:`hyperloom.measure.jit.prune`) as the session starts.
 
-A store the check refuses, or one that cannot be made or checked (a name below a file, a directory this account cannot
-enter or write), does not stop the session: both toolboxes are built inside it, where a hosted run that raises is
-started again into the same refusal. The session runs without publishing instead, logs one warning naming the store,
-why, and what that session does without it, and records the same in :data:`JIT_STORE_NOTE` of the session directory.
-What it does without it depends on the path (the ``without`` text each toolbox passes):
-
-* hosted (:data:`REFUSED_HOSTED`): the host publishes nothing to it. Hosted runners never read the store (every hosted
-  test builds cold, and one that patches aiter's ``csrc`` or ``hsa`` is refused by its runner), so it should lie on the
-  host's own disk, where no sandbox can reach it;
-* local (:data:`REFUSED_LOCAL`): the runners are not told the store, so no test has an aiter JIT directory to build
-  touched modules in, and candidates that patch aiter's ``csrc`` or ``hsa`` are refused for the whole session.
+A store the check refuses, or one that cannot be made or checked, does not stop the session (both toolboxes are built
+inside it, where a hosted run that raises is started again into the same refusal): it runs without publishing, logs one
+warning naming the store, why, and what it does without it (:data:`REFUSED_HOSTED`, :data:`REFUSED_LOCAL`), and records
+the same in :data:`JIT_STORE_NOTE` of the session directory.
 """
 
 from __future__ import annotations

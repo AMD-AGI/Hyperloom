@@ -4,41 +4,32 @@
 """Bounded clean-up of the shared compiled-code cache, run by the host that publishes to it.
 
 The store only adds (:mod:`hyperloom.measure.jit.store`), so without this it grows with every image, card and patched
-aiter tree a deployment ever measured. A key's directory (``snapshots/<kind>/<key>``) is its unit: the host stamps its
-time each time an accepted result names the key (:func:`note_used`), and a publication stamps it too, so that time is
-when the key was last used.
-
-:func:`prune` works in two steps, so a test that is reading an entry never loses it:
+aiter tree a deployment ever measured. A key's directory (``snapshots/<kind>/<key>``) is its unit, and its time is when
+the key was last used: a publication stamps it, and so does the host each time an accepted result names it
+(:func:`note_used`). :func:`prune` works in two steps, so a test that is reading an entry never loses it:
 
 1. A key unused for :data:`MAX_IDLE_SEC`, or, while the blobs the live keys list come to more than
-   :data:`MAX_STORE_BYTES`, the least recently used keys unused for at least :data:`RETIRE_GRACE_SEC`, are *retired*:
-   the key's directory is moved below ``retired/`` in one rename. No new test finds it from then on; a test that
-   already read its list keeps finding the files it names, since no blob is removed in this step.
-2. A retired key is removed only :data:`RETIRE_GRACE_SEC` after it was retired, longer than any test runs, and a blob
-   only when no snapshot of a live or a still-retired key lists it and it was stored more than that long ago (so a
-   publisher that stored it and has not yet renamed its list into place keeps it). A publisher's leftover
-   (``.incoming-*``) of that age is removed too.
+   :data:`MAX_STORE_BYTES`, the least recently used keys unused for at least :data:`RETIRE_GRACE_SEC`, are *retired*
+   (moved below ``retired/`` in one rename): no new test finds them, and no blob is removed in this step.
+2. :data:`RETIRE_GRACE_SEC` later, longer than any test runs, the retired key is removed, then each blob no live or
+   still-retired snapshot lists and stored more than that long ago, and publishers' leftovers (``.incoming-*``).
 
-The size bound is on what the live keys list, each blob counted once at the size its list gives, not on every stored
-blob: a retired key's blobs, and blobs nothing lists, stay stored uncounted for the grace, and counting them would make
-every later start inside it retire another batch of live keys. The directory can therefore hold more than the bound for
-up to two days.
+The size bound counts each blob the live keys list once, at the size its list gives; a retired key's blobs and blobs
+nothing lists wait out the grace uncounted (counting them would make every later start retire more live keys), so the
+directory can hold more than the bound for up to two days.
 
-A prune runs as a session starts, so it stops once it has taken :data:`PRUNE_BUDGET_SEC`, and every start does part of
-the work whatever the store's size. It first removes the retired keys past their grace and the stale leftovers, which
-stay removed. It then reads the live keys, retires the idle ones among those it read, and, once it has read them all,
-applies the size bound and removes the blobs nothing lists, shard by shard. Where a prune stopped while reading the keys
-or the blobs is kept in :data:`PRUNE_CURSOR` (written by one rename), and the next start goes on from there, so
-successive starts cover the whole store. The size bound and the removal of blobs need every key read within one start:
-a store whose keys take longer than the budget to read is never bounded by size, and each such start says so at
-WARNING. It always logs one line saying what it did (:func:`prune_logged`).
+A prune runs as a session starts and stops after :data:`PRUNE_BUDGET_SEC`, but every start does part of the work: it
+first removes the retired keys past their grace and the stale leftovers, then reads the live keys and retires the idle
+ones it read, and, once it has read them all, applies the size bound and removes unlisted blobs, shard by shard. Where it
+stopped reading keys or blobs is kept in :data:`PRUNE_CURSOR` (written by one rename) for the next start. A store whose
+keys cannot all be read within one start's budget is never bounded by size; each such start says so at WARNING, and
+every prune logs one line saying what it did (:func:`prune_logged`).
 
-A test that read a key just before it was retired and publishes after it extends it under the same key again: the files
-it took from the cache are still stored, as the retired list names them. Two hosts may prune one store at once: every
-step is a rename or a removal that the other's finding the name gone leaves correct. A directory that cannot be listed
-(for any reason but its not being there) stops the prune: it is never taken as empty, which would remove the blobs of
-the keys it did not see. Nothing here fails a session; the
-host logs what it could not do and the store is pruned at the next start.
+A test that read a key just before it was retired and extends it publishes under the same key again from the files still
+stored. Two hosts may prune one store at once: each step is a rename or a removal that tolerates the other's having done
+it first. A directory that cannot be listed (for any reason but its not being there) stops the prune: it is never taken
+as empty, which would remove the blobs of the keys it did not see. Nothing here fails a session; the host logs what it
+could not do and the store is pruned at the next start.
 """
 
 from __future__ import annotations
@@ -156,9 +147,8 @@ def prune(store: DirJitStore, limits: PruneLimits = PruneLimits(), now: float | 
 
 
 def prune_logged(store: DirJitStore, limits: PruneLimits = PruneLimits()) -> Pruned | None:
-    """:func:`prune`, said in one line of the log even when it removed nothing; ``None`` when the store could not be
-    read at all, which is logged too. A prune that stopped before it read every key is said at WARNING: the size bound
-    and the removal of blobs wait until a start reads them all within its budget."""
+    """:func:`prune`, said in one line of the log even when it removed nothing (at WARNING when it stopped before it read
+    every key); ``None`` when the store could not be read, which is logged too."""
     started = time.monotonic()
     try:
         done = prune(store, limits)
@@ -287,10 +277,8 @@ class _Run:
         return [key for key in live if self.at - key.used <= self.limits.max_idle_sec or not self._retired(key)]
 
     def _retire_for_size(self, kept: list[_Key]) -> list[_Key]:
-        """Retire the least recently used keys past the grace while the blobs the live keys list come to more than the
-        size bound, each counted once at the size its list gives; the keys left live. A retired key's blobs stay stored
-        for the grace, so the bound counts only the live keys' blobs: a later start inside the grace finds the rest
-        within it and retires nothing more."""
+        """Retire the least recently used keys past the grace while the blobs the live keys list (each once, at its
+        listed size) come to more than the size bound; the keys left live."""
         kept = list(kept)
         sizes: dict[str, int] = {}
         for key in kept:

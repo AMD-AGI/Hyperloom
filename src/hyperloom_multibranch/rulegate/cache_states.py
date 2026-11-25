@@ -2,16 +2,9 @@
 # SPDX-License-Identifier: MIT
 
 """Whether a candidate and the tests its parent's value comes from met the shared compiled-code cache in different
-states.
-
-A warm cache moves aiter's and Triton's compiles out of the server's boot, which is before anything is measured; a
-kernel the server first builds after warm-up, for a shape only the measured window asks for, is the one compile a warm
-cache moves out of the measured window. A candidate whose patch gives it a key of its own meets a cold cache once while
-its parent was measured warm, so its judgement says so (:attr:`~..contracts.judgement.Judgement.cache_states_differ`)
-and a reader can weigh a small gain with that in mind. The verdict is not changed by it.
-
-Every judgement is flagged through :func:`with_cache_states`: the gate's ``compare`` (integration, champion and final
-comparisons) and a specialist's branch judge both call it before they settle the judgement.
+states. A warm cache moves compiles out of the boot, and a kernel first built after warm-up out of the measured window,
+so such a judgement is flagged (:attr:`~..contracts.judgement.Judgement.cache_states_differ`); its verdict is unchanged.
+The gate's ``compare`` and a specialist's branch judge both call :func:`with_cache_states` before they settle one.
 """
 
 from __future__ import annotations

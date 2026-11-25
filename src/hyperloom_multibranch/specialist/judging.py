@@ -161,9 +161,8 @@ class BranchJudge:
         await self._settle(first, self._flagged(judgement, recorded), logged)
 
     def _flagged(self, judgement: Judgement, recorded: RecordedValue) -> Judgement:
-        """``judgement`` with the kinds of compiled-code cache its tests met in another state than the tests behind the
-        parent's value, as the gate's ``compare`` flags it (:func:`~..rulegate.cache_states.with_cache_states`); the
-        results are the snapshot's this step read, and a test it does not hold is left out."""
+        """``judgement`` flagged as the gate's ``compare`` flags it (:func:`~..rulegate.cache_states.with_cache_states`),
+        from the results of the snapshot this step read."""
         results = self._results
         candidates = [results[request_id] for request_id in judgement.request_ids if request_id in results]
         parents = [results[request_id] for request_id in recorded.request_ids if request_id in results]

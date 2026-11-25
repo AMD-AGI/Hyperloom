@@ -12,13 +12,9 @@ The shared compiled-code cache is in ``LocalOptions.jit_store``, else in the dir
 account's uid below this host's temporary directory (``TMPDIR`` honoured), not beside the session root: that lies on the
 session's shared storage, where a CK module build crawls. Tests read the directory's verified snapshots before their
 server starts, and what an accepted test compiled is published to it by this host. The runners load what it holds as
-compiled code, so a link there, and a directory that is not this account's own or that its group or others can write,
-are not used: another account could otherwise put snapshots of its own there; nor is one that cannot be made or
-checked. The session then runs without the cache: the runners are not told it and nothing is published, so no test has
-an aiter JIT directory to build touched modules in, and every candidate that patches aiter's ``csrc`` or ``hsa`` is
-refused for the whole session (:data:`~.jit_store.REFUSED_LOCAL`). It says so in its log and in ``jit_store.json`` of
-the session directory, as the hosted toolbox does: a ``hosted run`` measured on this container's cards builds this
-toolbox inside the session, where a refusal raised would start the run again into the same refusal.
+compiled code, so a link there, a directory that is not this account's own or that its group or others can write, and
+one that cannot be made or checked are not used: the session then runs without the cache, as
+:func:`~.jit_store.session_jit_store` says (:data:`~.jit_store.REFUSED_LOCAL`).
 
 The short-prompt consistency check is on by default: ``LocalOptions.short_prompts``, or the key named by
 ``HYPERLOOM_SHORT_PROMPTS`` in the host environment when the option is not given (``off`` turns it off), else the set

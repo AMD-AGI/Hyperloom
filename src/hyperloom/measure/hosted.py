@@ -385,8 +385,7 @@ class HostedMeasurementBackend:
         }
 
     def close(self) -> None:
-        """Stop accepting tests and close every authoritative sandbox still running; a session that published to the
-        compiled-code cache and never found it warm says so (:class:`~hyperloom.measure.jit.publish.PublishTally`)."""
+        """Stop accepting tests and close every authoritative sandbox still running."""
         self._stops.close()
         self._pool.close()
         if self._config.jit_store is not None:
