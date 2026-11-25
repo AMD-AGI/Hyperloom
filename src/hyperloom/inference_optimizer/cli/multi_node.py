@@ -157,23 +157,6 @@ def _bind_pd_launch(ext_state: dict[str, Any], session_dir: Path | None) -> None
         _exit_refused(str(exc))
 
 
-def _record_trace_share(ext_state: dict[str, Any]) -> None:
-    """Record whether the engine hosts share the multi-node profile trace root; warn when they do not."""
-    from ..multi_node.pd_session import record_trace_share
-    from ..session.paths import mn_profile_trace_root
-
-    root = os.path.expandvars(os.environ.get("HYPERLOOM_MN_PROFILE_TRACE_DIR", "").strip()) or str(
-        mn_profile_trace_root()
-    )
-    reason = record_trace_share(ext_state, Path(root))
-    if reason:
-        print(
-            f"WARNING: profile trace dir {root} is not shared with the engine hosts ({reason}); "
-            "profiling will be skipped for this session.",
-            file=sys.stderr,
-        )
-
-
 def _prepare_multi_node_state(args: argparse.Namespace, session_dir: Path | None = None) -> None:
     """Adopt the platform-provisioned cluster for a ``--nodes >= 2`` run."""
     nodes = max(1, int(args.nodes))
@@ -204,7 +187,6 @@ def _prepare_multi_node_state(args: argparse.Namespace, session_dir: Path | None
     _reject_unusable_backend(ext_state)
     if is_pd_state(ext_state):
         _bind_pd_launch(ext_state, session_dir)
-        _record_trace_share(ext_state)
     try:
         _save_state(ext_state)
     except OSError as exc:

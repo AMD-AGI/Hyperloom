@@ -66,7 +66,6 @@ def session(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Path:
     monkeypatch.setenv(pd_session.NODE_LIST_ENV, json.dumps(_NODES))
     monkeypatch.setenv("INFERENCE_OPTIMIZER_NODES", "2")
     monkeypatch.setenv("PD_MODE", "disaggregated")
-    monkeypatch.setenv("HYPERLOOM_MN_PROFILE_TRACE_DIR", str(tmp_path / "traces"))
     _ssh_through(monkeypatch, _run_here)
     directory = tmp_path / "session"
     directory.mkdir()
@@ -276,32 +275,6 @@ def test_kill_inference_stops_the_infera_workers(infera_session: Path, monkeypat
     monkeypatch.setattr(pd_session, "stop", lambda launch, cluster, options: stopped.append(launch.mode.value))
     assert mn_cli.cmd_kill_inference(argparse.Namespace(pid_file=None)) == 0
     assert stopped == ["aggregated"]
-
-
-def test_adoption_records_that_the_engine_hosts_share_the_trace_root(session: Path, tmp_path: Path) -> None:
-    state = _adopt(session)
-    assert state[pd_session.TRACE_SHARED_KEY] is True
-    assert pd_session.TRACE_SHARE_ERROR_KEY not in state
-    assert list((tmp_path / "traces").iterdir()) == []
-
-
-@pytest.mark.parametrize(
-    "reply",
-    [
-        lambda _argv, _stdin, _timeout: SshResult(1, "", "cat: No such file or directory"),
-        lambda _argv, _stdin, _timeout: SshResult(0, "other-token\n", ""),
-        lambda _argv, _stdin, timeout: SshResult(124, "", f"timed out after {timeout}s"),
-    ],
-    ids=["missing", "different-file", "ssh-timeout"],
-)
-def test_adoption_records_why_the_trace_root_is_not_shared(
-    session: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, reply
-) -> None:
-    _ssh_through(monkeypatch, reply)
-    state = _adopt(session)
-    assert state[pd_session.TRACE_SHARED_KEY] is False
-    assert state[pd_session.TRACE_SHARE_ERROR_KEY].startswith("engine host p0:")
-    assert list((tmp_path / "traces").iterdir()) == []
 
 
 def test_a_profiling_round_gives_each_engine_role_its_own_profiler_dir() -> None:

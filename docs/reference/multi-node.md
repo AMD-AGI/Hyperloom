@@ -190,13 +190,6 @@ The following variables are exported on the sandbox side before calling `optimiz
 | `INFERENCE_SUITE_TOOL_CACHE` | InferenceSuite tool cache under `${NFS_SHARED_ROOT}`, staged by `install.sh` |
 | `TRACELENS_ROOT` | TraceLens checkout path under `${NFS_SHARED_ROOT}` |
 | `SGLANG_DISAGGREGATION_*_TIMEOUT` | PD bootstrap and wait timeouts (Workload A only) |
-| `HYPERLOOM_MN_PROFILE_WITH_STACK` | A true value (`1`, `true`, `yes`, `on`) records Python stacks in node-list engine traces (default off) |
-
-A node-list profiling round turns the client-side profiler off and starts and stops
-torch profiling on each engine, launches the engines with graph-capture profiling
-(`--enable-profile-cuda-graph` and the profile config's graph-capture env), and its
-trace analysis truncates same-stream overlapping GPU events before TraceLens reads
-the trace. Other multi-node sessions profile as before.
 
 Forge is not in that list and does not need to be: it ships inside the Hyperloom
 wheel, so there is no checkout to export. `FORGE_PATH` is removed. Set
