@@ -394,7 +394,7 @@ def _recipe_base(
     return BaseLaunch(
         query=query,
         source=launch.source,
-        point=LaunchPoint(launch.conc, launch.exact, alternatives),
+        point=LaunchPoint(launch.conc, launch.exact, alternatives, launch.source_concs),
         image=recipe_image_facts(launch.image, snapshot.latest_releases.get(launch.framework)),
         framework=launch.framework,
         entrypoint=launch.entrypoint,

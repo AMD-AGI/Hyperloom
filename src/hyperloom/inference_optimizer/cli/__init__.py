@@ -117,7 +117,7 @@ from hyperloom.orchestrator.prompts.prompt_builder import (
     PromptCycle,
     SessionContext,
 )
-from hyperloom.inference_optimizer.breakdown.stop_reasons import SUPERVISOR_RESTART_REASON
+from hyperloom.inference_optimizer.breakdown.stop_reasons import ABORTED_STOP_REASONS, SUPERVISOR_RESTART_REASON
 
 from ..session.lock import SessionAlreadyRunning, SessionLock, SessionLockPathError
 from ..session.paths import ENV_USER_DATA_PATH, asset_system_prompts_dir, make_session_dir
@@ -265,14 +265,13 @@ def _reset_state_file(session_dir: Path, state: SharedState) -> None:
 def _build_phase_budget_pct(args: argparse.Namespace) -> dict[str, float]:
     """Map ``--*-pct`` CLI flags to a ``phase -> pct`` override dict.
 
-    ENABLEMENT has no flag: nothing enforces a per-phase cap for it.
+    ENABLEMENT and CYCLE_END have no flag: nothing enforces a per-phase cap for either.
     """
     from hyperloom.orchestrator.phases.machine_state import (
         PHASE_CLOSE,
         PHASE_FRAMEWORK_AGENT,
         PHASE_KERNEL_AGENT,
         PHASE_PRELUDE,
-        PHASE_SWEEP,
     )
 
     phase_budget_pct: dict[str, float] = {}
@@ -280,7 +279,6 @@ def _build_phase_budget_pct(args: argparse.Namespace) -> dict[str, float]:
         ("phase_budget_prelude_pct", PHASE_PRELUDE),
         ("phase_budget_framework_pct", PHASE_FRAMEWORK_AGENT),
         ("phase_budget_kernel_pct", PHASE_KERNEL_AGENT),
-        ("phase_budget_sweep_pct", PHASE_SWEEP),
         ("phase_budget_close_pct", PHASE_CLOSE),
     ):
         val = getattr(args, cli_field)
@@ -1032,37 +1030,43 @@ async def _run_optimize(args: argparse.Namespace) -> int:
     coordinator = _build_coordinator(args, state, backends, session_dir=session_dir, knowledge_plane=knowledge_plane)
     _initial_macro_cycle = int(getattr(coordinator.shared_state, "macro_cycle", 0) or 0)
     prompts = _install_system_prompts(coordinator, args, objective, lineup, macro_cycle=_initial_macro_cycle)
+    _install_executors(coordinator, args, session_dir=session_dir, knowledge_plane=knowledge_plane)
+    # Persist effective system prompts for resume / drift inspection.
+    _snapshot_system_prompts(
+        session_dir,
+        prompts=prompts,
+        orchestration_phase=coordinator.shared_state.phase,
+        macro_cycle=_initial_macro_cycle,
+    )
+    _print_backend_banner(args, backends, lineup)
+
+    warn_without_target_gpu(args)
 
     stop_reason: str | None = None
-    installed = False
     try:
         with running_plug_host(plug_host):
-            # The session's native builds come from the started host.
-            _install_executors(coordinator, args, session_dir=session_dir, knowledge_plane=knowledge_plane)
-            # Persist effective system prompts for resume / drift inspection.
-            _snapshot_system_prompts(
-                session_dir,
-                prompts=prompts,
-                orchestration_phase=coordinator.shared_state.phase,
-                macro_cycle=_initial_macro_cycle,
-            )
-            _print_backend_banner(args, backends, lineup)
-            warn_without_target_gpu(args)
-            installed = True
             stop_reason = await coordinator.run(
                 objective=objective,
                 options=_run_options(args),
             )
     finally:
-        # A run refused while its executors are installed never ran: nothing of it is stopped or written.
-        if installed:
-            await _close_optimize_run(coordinator, session_lock, session_dir, stop_reason)
+        await _close_optimize_run(coordinator, session_lock, session_dir, stop_reason)
 
     _reconcile_crash_count(coordinator.shared_state, session_dir)
-    # NOTE: conc_sweep is now a SWEEP-phase action auto-enqueued by the Coordinator, not a post-hook here.
+    if sweeps_after_close(coordinator.shared_state, stop_reason):
+        from hyperloom.orchestrator.conc_sweep.cli import sweep_session
+
+        await sweep_session(session_dir)
 
     _print_final_summary(coordinator.shared_state, stop_reason, session_dir)
     return _exit_code_for_stop_reason(stop_reason, coordinator.shared_state.baseline_tput)
+
+
+def sweeps_after_close(state: Any, stop_reason: str | None) -> bool:
+    """Whether the session's conc sweep runs once it closed: asked for, CLOSE ran, and neither a signal nor a
+    supervisor restart, which ends a leg and not the session, stopped it."""
+    ended = stop_reason not in ABORTED_STOP_REASONS and stop_reason != SUPERVISOR_RESTART_REASON
+    return state.conc_sweep_enabled and state.close_sequence_done and ended
 
 
 async def _close_optimize_run(coordinator: Any, session_lock: Any, session_dir: Path, stop_reason: str | None) -> None:

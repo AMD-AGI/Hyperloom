@@ -413,10 +413,19 @@ def test_the_report_of_a_checkout_built_server_keeps_the_last_timing_lines_of_it
 
     report = scan_server_log(log, "llamacpp")
 
-    assert (report["schema_version"], report["timing_lines"]) == (2, _TIMING_LINES)
-    assert scan_server_log(log, "sglang")["timing_lines"] == []
-    assert scan_server_log(None, "llamacpp")["timing_lines"] == []
-    assert scan_server_log(str(tmp_path / "absent.log"), "llamacpp")["timing_lines"] == []
+    assert (report["schema_version"], report["timing_lines"]) == (1, _TIMING_LINES)
+    assert "timing_lines" not in scan_server_log(None, "llamacpp")
+    assert "timing_lines" not in scan_server_log(str(tmp_path / "absent.log"), "llamacpp")
+
+
+def test_the_report_of_any_other_server_has_the_keys_and_the_version_it_had(tmp_path):
+    log = _write(tmp_path, LLAMA_SERVER_LOG)
+
+    for framework in ("sglang", "vllm", "custom"):
+        for path in (log, None, str(tmp_path / "absent.log")):
+            report = scan_server_log(path, framework)
+            assert sorted(report) == ["findings", "framework", "log_path", "schema_version"]
+            assert report["schema_version"] == 1
 
 
 def test_render_ends_with_the_timing_lines_of_the_log(tmp_path):
@@ -428,12 +437,10 @@ def test_render_ends_with_the_timing_lines_of_the_log(tmp_path):
     assert [line.strip() for line in out.splitlines()[-2:]] == _TIMING_LINES
 
 
-def test_a_report_written_before_timing_lines_existed_loads_as_one_that_holds_none(tmp_path):
-    before = {key: value for key, value in scan_server_log(None, "custom").items() if key != "timing_lines"}
-    (tmp_path / RUNTIME_FINDINGS_FILE).write_text(json.dumps({**before, "schema_version": 1}), encoding="utf-8")
+def test_a_report_without_a_version_or_timing_lines_loads_as_written_and_renders(tmp_path):
+    written = {"framework": "vllm", "log_path": "/s/server.log", "findings": []}
+    (tmp_path / RUNTIME_FINDINGS_FILE).write_text(json.dumps(written), encoding="utf-8")
     measurement = {"launch_evidence_path": str(tmp_path / "launch_evidence.json")}
 
-    loaded = load_runtime_findings(measurement)
-
-    assert loaded == scan_server_log(None, "custom")
-    assert render_runtime_findings(measurement).splitlines()[0] == "runtime findings for (no server log) [custom]"
+    assert load_runtime_findings(measurement) == written
+    assert render_runtime_findings(measurement) == "runtime findings for /s/server.log [vllm]"

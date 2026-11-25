@@ -13,6 +13,7 @@ import pytest
 
 from hyperloom.measure.tests.bundle_factory import base_launch
 from hyperloom.orchestrator.specialists.launch_env import LaunchPlace, specialist_confinement
+from hyperloom.orchestrator.specialists import model_dirs
 from hyperloom.orchestrator.specialists.model_dirs import launch_model_reads, session_reads
 from hyperloom.orchestrator.state.base_launch import freeze_base
 from hyperloom_common.bwrap import BwrapPolicy
@@ -97,6 +98,21 @@ def test_a_session_s_specialist_reads_its_model_and_what_its_frozen_base_launch_
         assert session_reads(no_base, task) == (models.served, models.store)
     assert session_reads(session, {**task, "framework": "sglang"}) == (models.served,)
     assert session_reads(None, None) == (Path(""),), "a task that names no model"
+
+
+def test_only_a_checkout_built_server_s_specialist_has_the_frozen_base_launch_read(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    models = Models(tmp_path)
+    session = _session(tmp_path, ("-ngl", "99", "-md", str(models.draft)))
+    read: list[Path] = []
+    monkeypatch.setattr(model_dirs, "frozen_base", lambda at: read.append(at))
+
+    for framework in ("sglang", "vllm", "custom", ""):
+        assert session_reads(session, {"framework": framework, "model_path": str(models.served)}) == (models.served,)
+    assert read == []
+    session_reads(session, {"framework": "llamacpp", "model_path": str(models.served)})
+    assert read == [session]
 
 
 def shown(policy: BwrapPolicy, path: Path) -> bool:

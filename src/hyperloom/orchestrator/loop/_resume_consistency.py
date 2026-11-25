@@ -49,7 +49,7 @@ class ResumeConsistencyMixin:
             stack_phase.halt_stack_recovery(exc)
         # (0) Interrupted stack attempt: its members may still be applied to the
         # framework tree, and everything this pass or the leg benchmarks before
-        # SWEEP entry would measure them. SWEEP entry settles through the same
+        # CYCLE_END entry would measure them. CYCLE_END entry settles through the same
         # recovery.
         await self._resume_recover_interrupted_stack(report)
         # (1) Half-applied integrate window: replay the

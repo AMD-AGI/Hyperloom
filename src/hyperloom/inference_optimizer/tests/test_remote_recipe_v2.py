@@ -1104,7 +1104,6 @@ def test_warm_replay_and_non_keep_actions_do_not_enable_write(tmp_path: Path) ->
         {"action": "replay_warm_recipe"},
         {"action": "profile"},
         {"action": "roofline"},
-        {"action": "conc_sweep"},
     ]
     assert has_new_keep(state) is False
 

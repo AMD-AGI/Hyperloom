@@ -38,11 +38,11 @@ def test_decaying_keep_threshold_multi_node_scales_by_two():
 
 
 # Decaying-gain convergence: a cycle only "gains" when it clears its own bar
-def _sweep_state(*, macro_cycle, cycle_delta, no_gain_streak):
+def _cycle_end_state(*, macro_cycle, cycle_delta, no_gain_streak):
     now = datetime.now(timezone.utc)
     return SharedState(
         session_id="t",
-        phase=ps.PHASE_SWEEP,
+        phase=ps.PHASE_CYCLE_END,
         start_ts=(now - timedelta(hours=1)).isoformat(),
         max_minutes=96 * 60,
         macro_cycle=macro_cycle,
@@ -53,7 +53,7 @@ def _sweep_state(*, macro_cycle, cycle_delta, no_gain_streak):
 
 
 def test_subthreshold_gain_does_not_reset_streak():
-    st = _sweep_state(macro_cycle=2, cycle_delta=0.2, no_gain_streak=1)
+    st = _cycle_end_state(macro_cycle=2, cycle_delta=0.2, no_gain_streak=1)
     reloop, ev = phase_transitions._reloop_decision(phase_predicates.workflow_predicate_inputs(st))
     assert ev["min_gain_pct"] == pytest.approx(0.40)
     assert ev["cycle_gained"] is False
@@ -62,14 +62,14 @@ def test_subthreshold_gain_does_not_reset_streak():
 
 
 def test_three_subthreshold_cycles_converge():
-    st = _sweep_state(macro_cycle=2, cycle_delta=0.1, no_gain_streak=2)
+    st = _cycle_end_state(macro_cycle=2, cycle_delta=0.1, no_gain_streak=2)
     reloop, ev = phase_transitions._reloop_decision(phase_predicates.workflow_predicate_inputs(st))
     assert reloop is False
     assert ev["reloop_blocked"] == "global_converged"
 
 
 def test_suprathreshold_gain_resets_streak():
-    st = _sweep_state(macro_cycle=2, cycle_delta=0.5, no_gain_streak=2)
+    st = _cycle_end_state(macro_cycle=2, cycle_delta=0.5, no_gain_streak=2)
     reloop, ev = phase_transitions._reloop_decision(phase_predicates.workflow_predicate_inputs(st))
     assert ev["cycle_gained"] is True
     assert ev["no_gain_cycle_streak_effective"] == 0
@@ -77,7 +77,7 @@ def test_suprathreshold_gain_resets_streak():
 
 
 def test_all_saturated_directions_stop_reloop():
-    st = _sweep_state(macro_cycle=2, cycle_delta=1.0, no_gain_streak=0)
+    st = _cycle_end_state(macro_cycle=2, cycle_delta=1.0, no_gain_streak=0)
     st.saturated_directions = {
         "kernel_switch_specialist": {"saturated": True},
         "comm_specialist": {"saturated": True},
@@ -86,7 +86,7 @@ def test_all_saturated_directions_stop_reloop():
     assert reloop is False
     assert ev["reloop_blocked"] == "all_directions_saturated"
 
-    st.last_conc_sweep = {"status": "succeeded", "summary": {"successful_pairs": 1}}
+    st.cycle_end_settled_cycle = st.macro_cycle
     target, reason, evidence = phase_transitions.compute_next_phase(st)
     assert (target, reason) == (ps.PHASE_CLOSE, "global_converged")
     assert evidence["terminal"] is True
@@ -94,7 +94,7 @@ def test_all_saturated_directions_stop_reloop():
 
 
 def test_saturation_convergence_is_always_enabled():
-    st = _sweep_state(macro_cycle=2, cycle_delta=1.0, no_gain_streak=0)
+    st = _cycle_end_state(macro_cycle=2, cycle_delta=1.0, no_gain_streak=0)
     st.saturated_directions = {"kernel_switch_specialist": {"saturated": True}}
     reloop, ev = phase_transitions._reloop_decision(phase_predicates.workflow_predicate_inputs(st))
     assert reloop is False

@@ -97,7 +97,6 @@ FRAMEWORK_STACK_ACTION = "framework"
 #: lever buckets contradict ``_geak_contribution`` for the very same row.
 _LEVER_BY_TASK_KIND = {
     "explore": LEVER_CONFIG,
-    "conc_sweep": LEVER_CONFIG,
     "gemm_tuning": LEVER_KERNEL,
     "fusion": LEVER_KERNEL,
     "integrate": LEVER_KERNEL,

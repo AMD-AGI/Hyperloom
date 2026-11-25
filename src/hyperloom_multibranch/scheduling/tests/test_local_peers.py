@@ -946,7 +946,7 @@ def test_the_local_cards_hand_their_toolbox_the_time_every_test_must_end_by(
     built: list[object] = []
     monkeypatch.setattr(local_hosted, "build_local_toolbox", lambda *args, options: built.append(options) or options)
     layout = SimpleNamespace(toolbox=tmp_path / "MB-toolbox", session_id="MB-1")
-    setup = SimpleNamespace(layout=layout, workload=WORKLOAD)
+    setup = SimpleNamespace(layout=layout, workload=WORKLOAD, test_points=1)
 
     LocalCards((0, 1), tests_end_by).toolbox(setup, None, None, None)  # type: ignore[arg-type]
 

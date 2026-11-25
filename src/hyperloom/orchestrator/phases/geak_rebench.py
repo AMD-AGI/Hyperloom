@@ -131,7 +131,7 @@ __all__ = [
 
 
 def source_digest(path: Path) -> str:
-    """Hash the exact source bytes bound to a review."""
+    """Hash the exact source bytes a revalidation is bound to."""
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
@@ -147,18 +147,18 @@ def overlay_source_files(overlay: str) -> dict[str, str]:
 
 
 def verify_source_artifacts(params: dict[str, Any]) -> None:
-    """Reject changes to a reviewed patch or deployable overlay."""
+    """Reject changes to a staged patch or deployable overlay."""
     for filename, expected in params["native_geak_files"].items():
         path = Path(filename)
         if not path.is_file() or source_digest(path) != expected:
-            raise ValueError(f"reviewed GEAK source patch changed or disappeared: {path}")
+            raise ValueError(f"staged GEAK source patch changed or disappeared: {path}")
     overlay = str(params.get("overlay_pythonpath") or "")
     if overlay and overlay_source_files(overlay) != params.get("native_geak_overlay_files"):
-        raise ValueError("reviewed GEAK overlay changed or disappeared")
+        raise ValueError("staged GEAK overlay changed or disappeared")
 
 
 def source_verdict_matches(result: dict[str, Any]) -> bool:
-    """A canonical verdict settles only the source bytes that were reviewed."""
+    """A canonical verdict settles only the source bytes that were measured."""
     settled = result["native_source_revalidation"]
     if settled.get("status") not in {REBENCH_VALIDATED, REBENCH_NO_PROMOTE}:
         return False

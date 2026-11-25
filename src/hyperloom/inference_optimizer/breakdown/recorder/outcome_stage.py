@@ -15,7 +15,7 @@ PHASE_STAGES = {
     "ENABLEMENT": "enablement",
     "FRAMEWORK_AGENT": "framework_agent",
     "KERNEL_AGENT": "kernel_agent",
-    "SWEEP": "conc_sweep",
+    "CYCLE_END": "cycle_end",
     "CLOSE": "close",
 }
 _STAGE_ORDER = (
@@ -31,11 +31,11 @@ _STAGE_ORDER = (
     "framework_agent",
     "kernel_agent",
     "kernel",
-    "conc_sweep",
+    "cycle_end",
     "close",
 )
 EVENT_STAGES = frozenset(
-    {"warm_start", "baseline", "warm_replay", "roofline", "enablement", "framework_agent", "kernel", "conc_sweep"}
+    {"warm_start", "baseline", "warm_replay", "roofline", "enablement", "framework_agent", "kernel"}
 )
 
 

@@ -86,6 +86,7 @@ FIELDS: tuple[Field, ...] = (
     Field("launch.extra_env", "extra_env", Kind.STR_MAP),
     Field("options.kernel", "kernel", Kind.BOOL),
     Field("options.framework_agent", "framework_agent", Kind.BOOL),
+    Field("options.conc_sweep", "conc_sweep", Kind.BOOL),
     Field("options.eval", "eval", Kind.ENUM, choices=(True,)),
     Field("options.enablement", "enablement", Kind.ENUM, choices=("all", "launch", "eval", "off")),
     Field("placement.profile", "profile", Kind.ENUM, required=True, choices=(PROFILE_WITH_CARDS, "hosted-cpu")),
@@ -130,6 +131,7 @@ class CampaignSpec:
     extra_env: Mapping[str, str] | None = None
     kernel: bool | None = None
     framework_agent: bool | None = None
+    conc_sweep: bool | None = None
     eval: bool | None = None
     enablement: str | None = None
     specialist_capacity: int | None = None
@@ -292,6 +294,7 @@ _VALUE_FLAGS: tuple[tuple[str, str], ...] = (
 _OFF_FLAGS: tuple[tuple[str, str], ...] = (
     ("kernel", "--no-kernel"),
     ("framework_agent", "--no-framework-agent"),
+    ("conc_sweep", "--no-enable-conc-sweep"),
 )
 
 

@@ -169,12 +169,12 @@ def test_a_sheet_with_no_build_leaves_the_key_out_so_its_bytes_and_fingerprint_a
     [
         (
             lambda d: (_built(d), d["environment"].pop("builds")),
-            "each runtime or executable root needs exactly one build",
+            r"each runtime root needs exactly one build, .* \(runtime roots \['sglang'\], builds \[\]\)",
         ),
         (lambda d: (_built(d), d["environment"]["builds"][0].update(root_id="nowhere")), "each build names a root"),
         (
             lambda d: (_built(d), d["environment"]["builds"].append(dict(d["environment"]["builds"][0]))),
-            "each runtime or executable root needs exactly one build",
+            "each runtime root needs exactly one build",
         ),
         (lambda d: (_built(d), d["environment"]["builds"][0].update(key="k")), "builds"),
         (lambda d: d["environment"].update(builds=[]), "an empty list"),
@@ -206,7 +206,10 @@ def test_an_executable_root_names_its_ready_build_and_lays_no_file() -> None:
 @pytest.mark.parametrize(
     ("change", "reason"),
     [
-        (lambda d: (_executable(d), d["environment"].pop("builds")), "each runtime or executable root needs"),
+        (
+            lambda d: (_executable(d), d["environment"].pop("builds")),
+            r"each runtime or executable root needs exactly one build, .* \(built roots \['sglang'\], builds \[\]\)",
+        ),
         (
             lambda d: (
                 _executable(d),

@@ -53,14 +53,17 @@ def launch_model_reads(framework: str, model_path: str, launch_args: str, sessio
 
 def session_reads(session: Path | None, params: Mapping[str, Any] | None) -> tuple[Path, ...]:
     """What a specialist whose task has ``params`` reads besides its workspace in the session at ``session``: the
-    model the task names, what the session's frozen base launch names for its framework (:func:`launch_model_reads`;
-    nothing without a session or a frozen base), and the option list the session keeps of the server it built.
+    model the task names and, for a framework built from its checkout, what the session's frozen base launch names
+    (:func:`launch_model_reads`; nothing without a session or a frozen base) and the option list the session keeps of
+    the server it built. For any other framework the base launch is not read.
 
     Raises:
         BaseLaunchMismatch: As :func:`~hyperloom.orchestrator.state.base_launch.frozen_base`.
     """
     task = params or {}
     framework, model_path = str(task.get("framework") or ""), str(task.get("model_path") or "")
+    if native_component(framework) is None:
+        return (Path(model_path),)
     kept = server_options(session, framework)
     frozen = None if session is None else frozen_base(session)
     args = "" if frozen is None else server_base(frozen.launch).args

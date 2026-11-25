@@ -4,7 +4,7 @@ You are running the Hyperloom pre-release E2E test non-interactively. Run the
 12-hour demo to completion, then stop. Setup already ran successfully in this
 workspace.
 
-Invoke the `hyperloom-qwen3-14b-fp8-12h` demo skill with **one** override and
+Invoke the `hyperloom-qwen3-14b-fp8-12h` demo skill with **two** overrides and
 otherwise its exact default flags, and follow its **ATOM** section for the
 execution shell, run mode and launch. This is the ATOM counterpart of the plain
 12h legs: the same workload and budget, on ATOM, with KERNEL_AGENT on GEAK.
@@ -37,11 +37,14 @@ They must be `atom` and `geak`. If either differs, stop and report it.
   own target, so the full phase sequence gets exercised. This shapes optimize
   prompts only; the poll gate judges PASS/FAIL from `stop_reason`, not gain,
   so 100 is not a performance goal to chase.
+- **OVERRIDE:** add `--no-enable-conc-sweep`. A release leg runs no post-session concurrency
+  sweep: the poll gate passes once CLOSE is recorded, before a sweep would end.
 - Keep every other required flag exactly as the skill defines them:
 
   ```
   --tp 1 --conc 64 --isl 1024 --osl 1024 --precision fp8 --max-hours 12
   --phase-budget-framework-pct 0.43 --phase-budget-kernel-pct 0.42
+  --no-enable-conc-sweep
   ```
 
   Do **not** pass `--no-framework-agent` or `--no-kernel` — the 12h demo runs
