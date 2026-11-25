@@ -17,8 +17,9 @@ them:
   its :attr:`~.analysis.AnalysisStarter.analysis_tools`, which the tool's schema and description list, no more) on the
   branch's head commit, or on the landed output of the test ``kernel_tune`` names (an
   :class:`~.analysis.AnalysisStarter`, the real toolbox);
-* ``analysis_result``, served with an analysis tool, reads the result record of a job of the branch from the toolbox:
-  the inbox carries a job's summary, and a specialist's sandbox does not show the toolbox's files;
+* ``analysis_result``, served with an analysis tool, reads the result record of a job of the branch from the toolbox,
+  in pages when it is over :data:`ANALYSIS_RESULT_MAX_CHARS`: the inbox carries a job's summary, and a specialist's
+  sandbox does not show the toolbox's files;
 * ``poll_inbox`` reads the branch's inbox, one page at a time (:data:`POLL_INBOX_MAX_ITEMS` items at most);
 * ``option_review``, served where the session laid an option inventory, records the branch's verdicts on the options
   the launch leaves unset (:class:`~.option_reviews.OptionReviews`) and answers what its review still leaves out;
@@ -113,12 +114,6 @@ _REQUEST_ID: dict[str, Any] = {
     "required": ["request_id"],
     "additionalProperties": False,
 }
-_JOB_ID: dict[str, Any] = {
-    "type": _OBJECT,
-    "properties": {"job_id": {"type": _STRING, "minLength": 1}},
-    "required": ["job_id"],
-    "additionalProperties": False,
-}
 #: The longest one ``wait_test`` call blocks; a specialist waits longer by calling it again. Claude Code aborts an
 #: HTTP MCP request after 60 s, so a longer block answers nothing.
 WAIT_TEST_MAX_SECONDS = 45
@@ -136,9 +131,22 @@ _POLL_INBOX_TOOL = "poll_inbox"
 #: showing it; 16,000 characters stay near 5,000 tokens.
 POLL_INBOX_MAX_ITEMS = 20
 POLL_INBOX_MAX_BYTES = 16_000
-#: The longest result record ``analysis_result`` returns, under the 50,000 characters Claude Code shows.
+#: The longest ``analysis_result`` reply, under the 50,000 characters Claude Code shows; a longer record is paged.
 ANALYSIS_RESULT_MAX_CHARS = 45_000
 _ANALYSIS_RESULT_TOOL = "analysis_result"
+_ANALYSIS_RESULT: dict[str, Any] = {
+    "type": _OBJECT,
+    "properties": {
+        "job_id": {"type": _STRING, "minLength": 1},
+        "offset": {
+            "type": _INTEGER,
+            "minimum": 0,
+            "description": "Where a page of a long record starts: the next_offset of the page before; 0 when left out.",
+        },
+    },
+    "required": ["job_id"],
+    "additionalProperties": False,
+}
 #: What a page's document needs besides its items and its cursor: the keys, the counts and the marker.
 _POLL_PAGE_OVERHEAD = 200
 _PAGE_CURSOR = "page:"
@@ -311,9 +319,9 @@ _UPSTREAM_PR_GUIDE = (
     "or all search pull requests of every state) are optional. The tool runs in the toolbox's host process and asks "
     "GitHub. poll_inbox shows you the job's summary: how many candidates the search kept, of how many pull requests "
     'matched when the limit left some out ("10 of 266"), and the ref and title of the first candidate, the best '
-    "match. The other candidates are in the job's result record, which analysis_result returns when it is at most "
-    f"{ANALYSIS_RESULT_MAX_CHARS} characters: when it is longer, or to see another pull request, search again with "
-    "fewer, more specific words. A GitHub that cannot be asked fails the job and says "
+    "match. The other candidates are in the job's result record, which analysis_result returns, in pages when it is "
+    f"over {ANALYSIS_RESULT_MAX_CHARS} characters: to see another pull request, search again with fewer, more "
+    "specific words. A GitHub that cannot be asked fails the job and says "
     "why, which is not an empty answer: a failure that names a wait is a spent rate limit, so ask again after it; "
     "after a token GitHub refuses or a GitHub that cannot be reached, go on without this tool."
 )
@@ -596,15 +604,36 @@ def _analysis_result(
             raise ToolForbidden("a specialist reads the jobs of its own branch only") from None
         except LookupError:
             raise ToolError(f"this toolbox ran no job {job_id!r}") from None
-        size = len(json.dumps(record))
-        if size > ANALYSIS_RESULT_MAX_CHARS:
+        text, offset = json.dumps(record, default=str), int(arguments.get("offset") or 0)
+        if not offset and len(text) <= ANALYSIS_RESULT_MAX_CHARS:
+            return dict(record)
+        if offset >= len(text):
             raise ToolError(
-                f"the result record of {job_id} is {size} characters, over the {ANALYSIS_RESULT_MAX_CHARS} one reply "
-                "holds: start the tool again with a narrower request"
+                f"offset {offset} is past the end of the {len(text)} characters of the result record of {job_id}"
             )
-        return dict(record)
+        return _record_page(job_id, text, offset)
 
     return handle
+
+
+def _record_page(job_id: str, text: str, offset: int) -> dict[str, Any]:
+    """The page of ``text``, the JSON of the result record of ``job_id``, that starts at ``offset``: as much of it as
+    one reply of :data:`ANALYSIS_RESULT_MAX_CHARS` holds beside the page's other fields, but always one character so
+    that every page moves on. The reply is JSON too, so a quote or a backslash of the page is sent as two characters.
+    The pages joined in order are the record's JSON."""
+
+    def upto(end: int) -> dict[str, Any]:
+        page = {"job_id": job_id, "chars": len(text), "offset": offset, "page": text[offset:end], "next_offset": None}
+        if end < len(text):
+            page |= {"next_offset": end, "more": f"call {_ANALYSIS_RESULT_TOOL} with offset {end} for the next page"}
+        return page
+
+    # An empty page names its own offset twice as the next; the real next has at most the digits of the length.
+    room = ANALYSIS_RESULT_MAX_CHARS - len(json.dumps(upto(offset))) - 2 * (len(str(len(text))) - len(str(offset)))
+    end = offset
+    while end < len(text) and (room := room - (2 if text[end] in '"\\' else 1)) >= 0:
+        end += 1
+    return upto(max(end, offset + 1))
 
 
 def _result_document(request_id: str, record: Any) -> dict[str, Any]:
@@ -998,10 +1027,12 @@ def _register_start_analysis(
         description=(
             "The result record of a job start_analysis started for this branch: its status and summary and, once it "
             "ended, the tool's whole result, of which poll_inbox shows the summary only, or the error it failed with. "
-            "A job that still runs answers its status alone. A record over "
-            f"{ANALYSIS_RESULT_MAX_CHARS} characters is refused."
+            f"A job that still runs answers its status alone. A record over {ANALYSIS_RESULT_MAX_CHARS} characters "
+            "is returned in pages: page is a part of the record's JSON text, chars the length of the whole text and "
+            "next_offset where the next page starts. Call again with it as offset until next_offset is null, and "
+            "join the pages in order to have the record."
         ),
-        schema=_JOB_ID,
+        schema=_ANALYSIS_RESULT,
         handler=_analysis_result(analysis, home),
         scopes=_SPECIALIST_SCOPES,
     )

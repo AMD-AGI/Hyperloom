@@ -29,7 +29,8 @@ from hyperloom_multibranch.contracts.toolbox import BranchLease, LeaseCharge
 from hyperloom_multibranch.toolbox.analysis import AnalysisAsk, analysis_request
 from hyperloom_multibranch.contracts.toolbox import RequestRejected
 from hyperloom_multibranch.toolbox import local_hosted
-from hyperloom_multibranch.toolbox.tests.test_analysis_route import _stack, _text
+from hyperloom_multibranch.toolbox import mcp_tools
+from hyperloom_multibranch.toolbox.tests.test_analysis_route import _stack, _text, read_pages
 from hyperloom_multibranch.toolbox.tools import knob_tune
 from hyperloom_multibranch.toolbox.tools.base import InvalidRequest, ToolFailure, ToolRequest
 from hyperloom.orchestrator.actions.executors.candidate_builds import TreeBuild, TreeBuildStatus
@@ -277,6 +278,37 @@ async def test_the_largest_sweep_a_toolbox_takes_is_read_whole_and_a_larger_one_
 
     assert len(document["result"]["table"]) == knob_tune.MAX_ROWS == 5 * 8 * 4
     assert len(document["result"]["winners"]) == 5 * 8
+
+
+async def test_a_sweep_whose_checks_all_fail_with_long_output_is_read_whole_in_pages(
+    tmp_path: Path, envs, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    bound = mcp_tools.ANALYSIS_RESULT_MAX_CHARS
+    types = ["Q4_K", "Q5_K", "Q6_K", "IQ4_NL", "IQ4_XS"]
+    sweep = {"knob": _PARAMS["knob"], "axes": {"type": types}, "values": ["2", "8"], "shapes": [[5120, 17408]] * 16}
+    monkeypatch.setattr(
+        knob_tune,
+        "time_cases",
+        lambda exe, cases, names, env, timeout: dict.fromkeys(
+            names, 54321.67 if exe.parent.name == "bin-2" else 98765.43
+        ),
+    )
+    failed = 'FAIL "MUL_MAT" \u2192 nmse = 0.123456 \u00b1 \u4e0d\u5408\\ ' * 2
+    monkeypatch.setattr(knob_tune, "check_cases", lambda exe, cases, names, env, timeout: dict.fromkeys(names, failed))
+    tool = knob_tune.KnobTuneTool(_Leases(), {"llamacpp": _Builds(tmp_path / "builds")})
+
+    async with contextlib.asynccontextmanager(_stack)(tmp_path, analyses={tool.name: tool}) as stack:
+        job = json.loads(_text(await stack.start(tool=tool.name, params=sweep)))["job_id"]
+        await stack.jobs.wait(job)
+        stored = await stack.rig.toolbox.analysis_result("b1", job)
+        text = await read_pages(stack, job, bound)
+        other = await asyncio.to_thread(stack.call, "b2", "analysis_result", job_id=job, offset=bound)
+
+    document = json.loads(text)
+    assert len(text) > 2 * bound and document == json.loads(json.dumps(stored, default=str))
+    assert len(document["result"]["table"]) == 80 < knob_tune.MAX_ROWS and document["result"]["winners"] == {}
+    assert all(failed in reason for reason in document["result"]["refused"].values())
+    assert other["error"]["message"] == "a specialist reads the jobs of its own branch only"
 
 
 @pytest.mark.parametrize(

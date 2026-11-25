@@ -276,19 +276,48 @@ async def test_a_toolbox_without_a_tool_executor_advertises_no_analysis_tool(sta
     assert "enum" not in entry["inputSchema"]["properties"]["tool"] and "no analysis tool" in entry["description"]
 
 
-async def test_analysis_result_is_served_with_an_analysis_tool_and_refuses_an_unknown_job_and_a_long_record(
+async def read_pages(stack: Stack, job: str, bound: int, branch: str = "b1") -> str:
+    """The text of the result record of ``job``, read page by page as a specialist does; no reply is over ``bound``."""
+    text, offset = "", 0
+    while offset is not None:
+        sent = _text(await asyncio.to_thread(stack.call, branch, "analysis_result", job_id=job, offset=offset))
+        page = json.loads(sent)
+        assert len(sent) <= bound and page["offset"] == offset and page["page"]
+        text += page["page"]
+        assert ("more" in page) == (page["next_offset"] is not None) and page["chars"] >= len(text)
+        offset = page["next_offset"]
+    assert page["chars"] == len(text)
+    return text
+
+
+async def test_analysis_result_is_served_with_an_analysis_tool_pages_a_long_record_and_refuses_an_unknown_job(
     stack: Stack, stack_without_tools: Stack, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    async def long(request: ToolRequest, workdir: Path) -> ToolOutput:
+        return ToolOutput(result={"rows": ['\u00e9 "quoted" \\'] * 60}, summary="analysed")
+
+    monkeypatch.setattr(stack.tools["roofline"], "run", long)
     profile = await _profile_test(stack, commit=HEAD)
     job = json.loads(_text(await stack.start(tool="roofline", profile_request_id=profile)))["job_id"]
     await stack.jobs.wait(job)
-    monkeypatch.setattr(mcp_tools, "ANALYSIS_RESULT_MAX_CHARS", 20)
+    whole = json.loads(_text(await asyncio.to_thread(stack.call, "b1", "analysis_result", job_id=job)))
+    monkeypatch.setattr(mcp_tools, "ANALYSIS_RESULT_MAX_CHARS", 300)
 
-    long = await asyncio.to_thread(stack.call, "b1", "analysis_result", job_id=job)
+    first = json.loads(_text(await asyncio.to_thread(stack.call, "b1", "analysis_result", job_id=job)))
+    paged = await read_pages(stack, job, 300)
+    past = await asyncio.to_thread(stack.call, "b1", "analysis_result", job_id=job, offset=first["chars"])
+    negative = await asyncio.to_thread(stack.call, "b1", "analysis_result", job_id=job, offset=-1)
     unknown = await asyncio.to_thread(stack.call, "b1", "analysis_result", job_id="roofline-none")
     unserved = await asyncio.to_thread(stack_without_tools.call, "b1", "analysis_result", job_id=job)
 
-    assert long["result"]["isError"] and "over the 20 one reply holds" in long["result"]["content"][0]["text"]
+    assert whole["job_id"] == job and "page" not in whole and json.loads(paged) == whole
+    assert (first["job_id"], first["offset"]) == (job, 0) and first["chars"] > 300
+    assert first["more"] == f"call analysis_result with offset {first['next_offset']} for the next page"
+    assert past["result"]["isError"] and (
+        f"offset {first['chars']} is past the end of the {first['chars']} characters of the result record of {job}"
+        in past["result"]["content"][0]["text"]
+    )
+    assert "arguments.offset is below 0" in negative["error"]["message"]
     assert unknown["result"]["isError"] and "no job 'roofline-none'" in unknown["result"]["content"][0]["text"]
     assert unserved["error"]["message"] == "unknown tool"
     assert "analysis_result with the job id returns its result" in stack.advertised()["description"]

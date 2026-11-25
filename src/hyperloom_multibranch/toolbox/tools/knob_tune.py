@@ -6,7 +6,8 @@ checkout (:mod:`hyperloom.measure.runner.native.knob_sweep`), timed on a card le
 
 A specialist names the knob (``knob``, one the rule pack states), the keys to sweep (``axes``: the values of each axis;
 an axis it does not name takes all of its values), the values to force (``values``; all of the knob's when omitted;
-a sweep of more than 160 keys times values is refused, its result being more than ``analysis_result`` returns),
+a sweep of more than 160 keys times values is refused, so that the result of one whose checks pass fits one
+``analysis_result`` reply),
 the weight shapes each key is timed at (``shapes``: ``[m, k]`` pairs, the model's), the copies of each weight in
 one launch (``copies``, so the weights read are past the GPU's cache as a model's are) and the rounds. The builds are the
 toolbox's native builds (:class:`~hyperloom.measure.runner.native.session.NativeBuildSession`), keyed by their patch and
@@ -72,8 +73,8 @@ _ROUNDS_PARAM = "rounds"
 _COPIES_PARAM = "copies"
 _PARAMS = frozenset({_KNOB_PARAM, _AXES_PARAM, _VALUES_PARAM, _SHAPES_PARAM, _ROUNDS_PARAM, _COPIES_PARAM})
 _DEFAULT_ROUNDS = 5
-# One table row per key and value, up to some 230 characters of the record with its winner and its patch line: 192
-# rows leave no margin under the 45,000 ``analysis_result`` returns.
+# One table row per key and value: the record of a sweep of this many whose checks pass fits one ``analysis_result``
+# reply; a longer record is read in pages.
 MAX_ROWS = 160
 _CARDS = 1
 _PARALLEL_BUILDS = 2
@@ -124,8 +125,8 @@ def check_params(params: Mapping[str, Any]) -> SweepPlan:
     if (rows := len(plan.keys) * len(plan.values)) > MAX_ROWS:
         narrowed = ", ".join(f"{_AXES_PARAM}.{axis}" for axis, _ in plan.knob.axes)
         raise InvalidRequest(
-            f"{len(plan.keys)} keys by {len(plan.values)} values are {rows} table rows, over the {MAX_ROWS} a job's "
-            f"result holds: name fewer of {narrowed} or {_VALUES_PARAM}"
+            f"{len(plan.keys)} keys by {len(plan.values)} values are {rows} table rows, over the {MAX_ROWS} one sweep "
+            f"takes: name fewer of {narrowed} or {_VALUES_PARAM}"
         )
     return plan
 
