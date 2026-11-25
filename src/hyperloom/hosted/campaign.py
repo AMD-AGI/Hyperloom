@@ -20,14 +20,20 @@ from typing import Any
 SCHEMA = "hyperloom.campaign-spec/v1"
 FLOW_SINGLE = "single"
 FLOW_MULTIBRANCH = "multibranch"
+#: Sweep a closed session, of either flow, over its concurrencies; ``conc_sweep.session_dir`` names it.
+FLOW_CONC_SWEEP = "conc_sweep"
 MEASUREMENT_LOCAL = "local"
 MEASUREMENT_HOSTED = "hosted"
 #: The profile whose application container has cards of its own, the only one a multibranch run measures locally on.
 PROFILE_WITH_CARDS = "hosted-gpu"
 DEFAULT_MAX_PARALLEL_TESTS = 8
 
-_FLOWS = (FLOW_SINGLE, FLOW_MULTIBRANCH)
-_DEFAULT_MEASUREMENT = {FLOW_SINGLE: MEASUREMENT_LOCAL, FLOW_MULTIBRANCH: MEASUREMENT_HOSTED}
+_FLOWS = (FLOW_SINGLE, FLOW_MULTIBRANCH, FLOW_CONC_SWEEP)
+_DEFAULT_MEASUREMENT = {
+    FLOW_SINGLE: MEASUREMENT_LOCAL,
+    FLOW_MULTIBRANCH: MEASUREMENT_HOSTED,
+    FLOW_CONC_SWEEP: MEASUREMENT_LOCAL,
+}
 
 
 class CampaignError(ValueError):
@@ -48,6 +54,7 @@ class Kind(str, Enum):
     BOOL = "boolean"
     STR_MAP = "object of strings"
     ENUM = "one of a fixed set"
+    INT_LIST = "non-empty list of positive integers"
 
 
 @dataclass(frozen=True)
@@ -97,6 +104,9 @@ FIELDS: tuple[Field, ...] = (
     Field("source.sha", "source_sha", Kind.STR),
     Field("source.kind", "source_kind", Kind.ENUM, choices=("user", "ci")),
     Field("source.task_id", "source_task_id", Kind.TEXT),
+    Field("conc_sweep.session_dir", "sweep_session_dir", Kind.STR),
+    Field("conc_sweep.concs", "sweep_concs", Kind.INT_LIST),
+    Field("conc_sweep.parallel", "sweep_parallel", Kind.INT, minimum=1),
 )
 
 #: Sections that must be present because one of their fields is required.
@@ -139,6 +149,9 @@ class CampaignSpec:
     source_sha: str | None = None
     source_kind: str | None = None
     source_task_id: str | None = None
+    sweep_session_dir: str | None = None
+    sweep_concs: tuple[int, ...] | None = None
+    sweep_parallel: int | None = None
 
 
 def _is_num(value: object) -> bool:
@@ -159,6 +172,7 @@ _DESCRIPTIONS = {
     Kind.TEXT: "a string",
     Kind.BOOL: "true or false",
     Kind.STR_MAP: "an object of string values",
+    Kind.INT_LIST: "a non-empty list of positive integers",
 }
 
 
@@ -185,6 +199,8 @@ def _well_typed(field: Field, value: object) -> bool:
         return any(value == c and type(value) is type(c) for c in field.choices)
     if kind == Kind.STR_MAP:
         return isinstance(value, dict) and all(isinstance(k, str) and isinstance(v, str) for k, v in value.items())
+    if kind == Kind.INT_LIST:
+        return isinstance(value, list) and bool(value) and all(_is_int(v) and v >= 1 for v in value)
     if not (_is_int(value) if kind == Kind.INT else _is_num(value)):
         return False
     if field.minimum is not None and value < field.minimum:
@@ -228,12 +244,27 @@ def _read_fields(doc: Mapping[str, Any], problems: list[str]) -> dict[str, Any]:
         elif not _well_typed(field, value):
             problems.append(f"{field.path} must be {_describe(field)}{_got(field, value)}")
         else:
-            values[field.attr] = int(value) if field.kind == Kind.INT else value
+            values[field.attr] = _read_value(field, value)
     return values
+
+
+def _read_value(field: Field, value: Any) -> Any:
+    if field.kind == Kind.INT:
+        return int(value)
+    if field.kind == Kind.INT_LIST:
+        return tuple(sorted({int(v) for v in value}))
+    return value
 
 
 def _check_rules(values: Mapping[str, Any], problems: list[str]) -> None:
     flow = values.get("flow", FLOW_SINGLE)
+    session_dir = values.get("sweep_session_dir")
+    if flow == FLOW_CONC_SWEEP and session_dir is None:
+        problems.append("conc_sweep.session_dir is required for flow 'conc_sweep'")
+    if session_dir is not None and not session_dir.startswith("/"):
+        problems.append("conc_sweep.session_dir must be an absolute path")
+    if flow != FLOW_CONC_SWEEP and any(key.startswith("sweep_") for key in values):
+        problems.append(f"conc_sweep is read only for flow 'conc_sweep', got flow {flow!r}")
     measurement = values.get("measurement", _DEFAULT_MEASUREMENT[flow])
     if flow == FLOW_SINGLE and measurement != MEASUREMENT_LOCAL:
         problems.append(f"placement.measurement must be 'local' for flow 'single', got {measurement!r}")

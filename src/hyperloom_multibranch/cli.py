@@ -131,7 +131,7 @@ from pathlib import Path
 from typing import Any
 
 from hyperloom_common.shared_storage import open_shared_append
-from hyperloom.hosted.campaign import MEASUREMENT_LOCAL, CampaignSpec
+from hyperloom.hosted.campaign import FLOW_CONC_SWEEP, MEASUREMENT_LOCAL, CampaignSpec
 from hyperloom.hosted.host_info import HostGroup, HostInfo, take_host_info
 from hyperloom.hosted.toolbox_inputs import ToolboxInputsError
 from hyperloom.inference_optimizer.session.paths import workspace_root
@@ -294,10 +294,10 @@ async def _run_session(
     return outcome.exit_code
 
 
-def _with_sweep_options(settings: RunSettings, args: argparse.Namespace) -> RunSettings:
-    """The closed session's settings with the conc-sweep options ``conc-sweep`` was given in place of its own."""
+def _with_sweep_options(settings: RunSettings, concs: tuple[int, ...] | None, parallel: int | None) -> RunSettings:
+    """The closed session's settings with the sweep's points and tests at once, where given, in place of its own."""
 
-    given = {"conc_sweep_concs": args.conc_sweep_concs, "conc_sweep_parallel": args.conc_sweep_parallel}
+    given = {"conc_sweep_concs": concs, "conc_sweep_parallel": parallel}
     return replace(settings, **{name: value for name, value in given.items() if value is not None})
 
 
@@ -515,6 +515,8 @@ def _hosted_start(host: HostInfo) -> HostedStart:
     spec = campaign_spec(host)
     require_hosted_isolation(spec, os.environ)
     require_local_image(spec, os.environ)
+    if spec.flow == FLOW_CONC_SWEEP:
+        return _hosted_sweep(host, spec)
     earlier = take_over_earlier_session(host.state_dir)
     if earlier.closed is not None:  # it closed with no baseline, which ended the run, and was killed before exit.json
         return HostedStart(lambda: EXIT_FAILED)
@@ -537,6 +539,20 @@ def _hosted_start(host: HostInfo) -> HostedStart:
     record = partial(started_session, host.state_dir)
     start = partial(run_session, settings, ready.peer_factory, ready.services, record, grant_end(host))
     return HostedStart(partial(close_then_start, earlier.left, close, start))
+
+
+def _hosted_sweep(host: HostInfo, spec: CampaignSpec) -> HostedStart:
+    """The conc sweep of the closed session ``conc_sweep.session_dir`` names, over the spec's points and as many tests
+    at once as it asks, measured where it says and written back into the session; raises ValueError when the directory
+    holds no closed multi-branch session."""
+
+    layout = SessionLayout(Path(str(spec.sweep_session_dir)))
+    if not (layout.manifest.is_file() and layout.report.is_file()):
+        raise ValueError(f"conc_sweep.session_dir {layout.root} holds no closed multi-branch session")
+    settings = _with_sweep_options(read_manifest(layout.manifest).settings, spec.sweep_concs, spec.sweep_parallel)
+    ready = hosted_ready_session(host, settings.workload, local=spec.measurement == MEASUREMENT_LOCAL)
+    sweep = partial(conc_sweep, layout, settings, ready.peer_factory, ready.services)
+    return HostedStart(partial(sweep, deadline_unix=grant_tests_end_by(host)))
 
 
 def _stop_before_grant_ends(host: HostInfo) -> None:
@@ -626,7 +642,9 @@ def main(argv: list[str] | None = None) -> int:
     try:
         if args.command == CONC_SWEEP_COMMAND:
             swept = SessionLayout(args.session_dir)
-            settings = _with_sweep_options(read_manifest(swept.manifest).settings, args)
+            settings = _with_sweep_options(
+                read_manifest(swept.manifest).settings, args.conc_sweep_concs, args.conc_sweep_parallel
+            )
         elif args.command == FINAL_ONLY_COMMAND:
             persisted = persisted_run(args.session_dir)
             settings = persisted.settings

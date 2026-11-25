@@ -237,11 +237,19 @@ def read_summary(reports: Path) -> dict[str, Any] | None:
     return json.loads(path.read_text(encoding=_ENCODING)) if path.is_file() else None
 
 
+def _state(session_dir: Path) -> dict[str, Any]:
+    return json.loads((session_dir / "state.json").read_text(encoding=_ENCODING))
+
+
+def session_closed(session_dir: Path) -> bool:
+    """Whether the optimize session in ``session_dir`` ran its CLOSE sequence; read off ``state.json`` alone."""
+    return bool(_state(session_dir).get("close_sequence_done"))
+
+
 def sweep_unfinished(session_dir: Path) -> bool:
     """Whether the optimize session in ``session_dir`` closed, asked for a conc sweep, and that sweep has not run its
     course; read off ``state.json`` and the summary alone."""
-    state = json.loads((session_dir / "state.json").read_text(encoding=_ENCODING))
-    if not (state.get("conc_sweep_enabled") and state.get("close_sequence_done")):
+    if not (_state(session_dir).get("conc_sweep_enabled") and session_closed(session_dir)):
         return False
     summary = read_summary(reports_dir(session_dir))
     return summary is None or summary["status"] not in SETTLED

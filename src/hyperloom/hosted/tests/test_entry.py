@@ -216,7 +216,9 @@ def test_a_restart_over_a_closed_session_whose_sweep_did_not_finish_sweeps_it_an
     session = Path(_session_json(run))
     (session / "state.json").write_text(json.dumps(closed))
     swept: list[tuple[Path, float | None]] = []
-    monkeypatch.setattr(sweep_cli, "sweep_and_report", lambda path, **kw: swept.append((path, kw["deadline_unix"])) or 0)
+    monkeypatch.setattr(
+        sweep_cli, "sweep_and_report", lambda path, **kw: swept.append((path, kw["deadline_unix"])) or 0
+    )
     run.restart()
     monkeypatch.setenv(Var.GRANT_LIMITS, json.dumps({"max_gpus": 8, "max_runtime_sec": 7200}))
 
@@ -1270,3 +1272,58 @@ def test_a_resume_the_guard_of_optimize_would_refuse_is_final_too(run, monkeypat
     written = _exit(run)
     assert (written["final"], written["returncode"]) == (True, 2) and "worker exit is unproven" in written["error"]
     assert fake.calls == []
+
+
+# -- the conc_sweep flow ------------------------------------------------------------------------------------------
+def _closed_session(run, monkeypatch, *, closed=True):
+    """A single-lineage session an earlier run left behind, closed or not."""
+    FakeOptimize(monkeypatch, returncode=0, effect=lambda argv: None)
+    entry.main(["run"])
+    session = Path(_session_json(run))
+    (session / "state.json").write_text(json.dumps({"stop_reason": "cycle_end_done", "close_sequence_done": closed}))
+    return session
+
+
+def _sweep_spec(run, session_dir: Path, **placement):
+    sweep = {"session_dir": str(session_dir), "concs": [8, 2], "parallel": 4}
+    doc = {**FULL, "flow": "conc_sweep", "conc_sweep": sweep, "placement": {**FULL["placement"], **placement}}
+    run.spec.write_text(json.dumps(doc))
+
+
+def test_the_sweep_flow_sweeps_the_closed_session_it_names_with_its_points_and_ends_the_run(run, monkeypatch):
+    from hyperloom.orchestrator.conc_sweep import cli as sweep_cli
+
+    session = _closed_session(run, monkeypatch)
+    _sweep_spec(run, session)
+    fake = FakeOptimize(monkeypatch)
+    swept: list[tuple[Path, dict]] = []
+    monkeypatch.setattr(sweep_cli, "sweep_and_report", lambda path, **kw: swept.append((path, kw)) or 0)
+    run.restart()
+
+    assert entry.main(["run"]) == 0
+
+    assert swept == [(session, {"concs": (2, 8), "deadline_unix": None})] and fake.calls == []
+    assert _exit(run) == {"final": True, "returncode": 0, "stop_reason": "cycle_end_done"}
+
+
+def test_the_sweep_flow_refuses_a_session_that_has_not_closed(run, monkeypatch):
+    session = _closed_session(run, monkeypatch, closed=False)
+    _sweep_spec(run, session)
+    run.restart()
+
+    assert entry.main(["run"]) == entry.RETURNCODE_REFUSED
+
+    assert "has not run its CLOSE sequence" in _exit(run)["error"]
+
+
+def test_the_sweep_flow_hands_a_directory_that_is_no_single_lineage_session_to_the_multibranch_entry(
+    run, monkeypatch, tmp_path
+):
+    _sweep_spec(run, tmp_path / "MB-session", measurement="hosted", profile="hosted-gpu")
+    calls = []
+    monkeypatch.setattr(entry.shutil, "which", lambda name: "/usr/bin/" + name)
+    monkeypatch.setattr(entry.os, "execvp", lambda file, argv: calls.append(argv))
+
+    entry.main(["run"])
+
+    assert calls == [["hyperloom-multibranch", "hosted", "run"]]

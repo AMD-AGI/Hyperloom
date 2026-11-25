@@ -54,7 +54,7 @@ import subprocess
 import sys
 import tempfile
 import threading
-from collections.abc import Iterator, Mapping
+from collections.abc import Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
@@ -69,8 +69,16 @@ from hyperloom_common.shared_storage import (
 from hyperloom.common import confinement
 from hyperloom.common.agent_isolation import IsolationRefused, layer_bwrap, require_agent_isolation
 from hyperloom.common.owner_scope import local_owner_scope
-from hyperloom.orchestrator.conc_sweep.report import sweep_unfinished
-from hyperloom.hosted.campaign import FLOW_MULTIBRANCH, CampaignError, CampaignSpec, optimize_args, parse_campaign
+from hyperloom.orchestrator.conc_sweep.report import session_closed, sweep_unfinished
+from hyperloom.hosted.campaign import (
+    FLOW_CONC_SWEEP,
+    FLOW_MULTIBRANCH,
+    MEASUREMENT_LOCAL,
+    CampaignError,
+    CampaignSpec,
+    optimize_args,
+    parse_campaign,
+)
 from hyperloom.hosted.host_info import HOST_ONLY_VARS, HostInfo, HostInfoError, Var, read_host_info, take_host_info
 from hyperloom.hosted.mcp_host_tools import register_host_tools
 from hyperloom.hosted.mcp_server import McpServer, McpServerConfig
@@ -161,7 +169,9 @@ def _run() -> int:
         raise Refused(str(exc)) from None
     _check_shared_storage(info.state_dir, user_data)
     _default_runtime_dir()
-    if spec.flow == FLOW_MULTIBRANCH:
+    if spec.flow == FLOW_MULTIBRANCH or (
+        spec.flow == FLOW_CONC_SWEEP and not is_resumable(Path(str(spec.sweep_session_dir)))
+    ):
         # install.sh's ``ensure_hosted_extra`` step installs the wheel's ``hosted`` extra into this interpreter before the command starts.
         _put_interpreter_first_on_path()
         _run_installer(info.state_dir)
@@ -171,7 +181,7 @@ def _run() -> int:
     # From here on the host-only inputs live in ``info`` only: no child process may inherit them.
     info = take_host_info(os.environ, require=())
     _require_isolation(info)
-    session_dir = _prepare_session_dir(spec, info)
+    session_dir = _sweep_target(spec) if spec.flow == FLOW_CONC_SWEEP else _prepare_session_dir(spec, info)
     try:
         archive = ensure_archive_root(session_dir)
     except OSError as exc:
@@ -191,6 +201,8 @@ def _run() -> int:
     _confirm_previous_containers_gone(session_dir)
     _require_resume_safe(session_dir)
     with _plug_inputs(lock, info), _mcp_service(info, session_dir):
+        if spec.flow == FLOW_CONC_SWEEP:
+            return _sweep(info.state_dir, session_dir, _grant_end_unix(info), spec.sweep_concs or ())
         if is_resumable(session_dir) and sweep_unfinished(session_dir):
             return _sweep(info.state_dir, session_dir, _grant_end_unix(info))
         return _optimize(optimize_command(spec, session_dir), info.state_dir, session_dir)
@@ -479,6 +491,19 @@ def _prepare_session_dir(spec: CampaignSpec, info: HostInfo) -> Path:
     return session_dir
 
 
+def _sweep_target(spec: CampaignSpec) -> Path:
+    """The closed single-lineage session ``conc_sweep.session_dir`` names, which the sweep writes its report into."""
+    session_dir = Path(str(spec.sweep_session_dir))
+    if spec.measurement != MEASUREMENT_LOCAL:
+        raise Refused(f"a single-lineage session is swept only on this container's cards, not {spec.measurement!r}")
+    if not session_closed(session_dir):
+        raise Refused(f"conc_sweep.session_dir {session_dir} has not run its CLOSE sequence")
+    problems = writable_problems({"the swept session directory": session_dir})
+    if problems:
+        raise Refused(f"this account (uid {os.geteuid()}) cannot write {problems[0]}")
+    return session_dir
+
+
 def is_resumable(session_dir: Path) -> bool:
     """Whether the directory holds a session that ``optimize --resume-from`` can pick up."""
     return all((session_dir / name).is_file() for name in SESSION_FILES)
@@ -531,13 +556,14 @@ def _optimize(argv: list[str], state_dir: Path, session_dir: Path) -> int:
     return returncode
 
 
-def _sweep(state_dir: Path, session_dir: Path, deadline_unix: float | None) -> int:
-    """Run the conc sweep of a session that closed and was stopped before its sweep ran its course, and end the run:
-    resuming a closed session would open another macro-cycle instead. The return code is the sweep's."""
+def _sweep(state_dir: Path, session_dir: Path, deadline_unix: float | None, concs: Sequence[int] = ()) -> int:
+    """Run the conc sweep of a closed session, over ``concs`` when given, and end the run: the session a conc_sweep
+    flow names, or this run's own, stopped before its sweep ran its course -- resuming a closed session would open
+    another macro-cycle instead. The return code is the sweep's."""
     from hyperloom.orchestrator.conc_sweep.cli import sweep_and_report
 
-    print(f"[hosted] sweeping session {session_dir}, which closed before its conc sweep finished", flush=True)
-    returncode = sweep_and_report(session_dir, deadline_unix=deadline_unix)
+    print(f"[hosted] sweeping the closed session {session_dir}", flush=True)
+    returncode = sweep_and_report(session_dir, concs=concs, deadline_unix=deadline_unix)
     write_exit(state_dir, final=True, returncode=returncode, stop_reason=_stop_reason(session_dir))
     return returncode
 

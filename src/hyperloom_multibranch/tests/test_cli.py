@@ -36,6 +36,7 @@ from collections.abc import Callable
 from dataclasses import asdict, dataclass, replace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from types import SimpleNamespace
 from typing import NoReturn
 
 import pytest
@@ -55,6 +56,8 @@ from hyperloom_common.llm.llm_config import (
 )
 from hyperloom.common.owner_scope import local_owner_scope
 from hyperloom.common.perf_metric import GRADED_INTVTY_P50, TOTAL_TOKEN_THROUGHPUT
+from hyperloom.hosted.campaign import CampaignSpec, parse_campaign
+from hyperloom.hosted.tests.test_campaign import MINIMAL
 from hyperloom.common.outside_facts.rule_pack import rule_pack_identity
 from hyperloom.measure import compile as compile_module
 from hyperloom.measure import points
@@ -3269,3 +3272,37 @@ def test_a_local_run_ignores_a_grant_in_the_environment_and_measures_on_this_mac
     assert peer_factory.args[0].backend == local_peers.LocalCards((0, 1))
     assert settings == _settings() and handed.stops == []
     assert os.environ["HYPERLOOM_SANDBOX_KEY_MEASUREMENT"] == HANDED["HYPERLOOM_SANDBOX_KEY_MEASUREMENT"]
+
+
+def _sweep_spec(session_dir: Path) -> CampaignSpec:
+    sweep = {"session_dir": str(session_dir), "concs": [8, 2], "parallel": 4}
+    return parse_campaign({**MINIMAL, "flow": "conc_sweep", "conc_sweep": sweep})
+
+
+def test_a_sweep_spec_sweeps_the_closed_session_it_names_on_its_points_and_tests_at_once(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    layout = _ended_before_final(tmp_path / "session")
+    swept: list[tuple[Path, RunSettings, float | None]] = []
+    ready = SimpleNamespace(peer_factory="peers", services="services")
+    monkeypatch.setattr(cli, "hosted_ready_session", lambda host, workload, *, local: ready)
+    monkeypatch.setattr(
+        cli,
+        "conc_sweep",
+        lambda swept_layout, settings, peers, services, deadline_unix: (
+            swept.append((swept_layout.root, settings, deadline_unix)) or 0
+        ),
+    )
+
+    start = cli._hosted_sweep(SimpleNamespace(grant_limits=None), _sweep_spec(layout.root))  # type: ignore[arg-type]
+
+    assert start.run() == 0
+    [(root, settings, deadline)] = swept
+    assert root == layout.root and deadline is None
+    assert (settings.conc_sweep_concs, settings.conc_sweep_parallel) == ((2, 8), 4)
+    assert replace(settings, conc_sweep_concs=(), conc_sweep_parallel=2) == _settings()
+
+
+def test_a_sweep_spec_naming_no_closed_multibranch_session_is_refused(tmp_path: Path) -> None:
+    with pytest.raises(ValueError, match="holds no closed multi-branch session"):
+        cli._hosted_sweep(SimpleNamespace(grant_limits=None), _sweep_spec(tmp_path / "nothing"))  # type: ignore[arg-type]

@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import copy
 import json
+import re
 from importlib import resources
 
 import jsonschema
@@ -63,6 +64,13 @@ _DELETE = object()
 LOCAL_MULTIBRANCH = _with(_with(MINIMAL, "flow", "multibranch"), "placement.measurement", "local")
 
 # (document, the message the refusal must carry)
+_SWEEP_REFUSALS = [
+    ({**MINIMAL, "flow": "conc_sweep"}, "conc_sweep.session_dir is required for flow 'conc_sweep'"),
+    ({**MINIMAL, "flow": "conc_sweep", "conc_sweep": {"session_dir": "s"}}, "must be an absolute path"),
+    ({**MINIMAL, "conc_sweep": {"session_dir": "/nfs/s"}}, "conc_sweep is read only for flow 'conc_sweep'"),
+    ({**MINIMAL, "flow": "conc_sweep", "conc_sweep": {"session_dir": "/s", "concs": [0]}}, "conc_sweep.concs must be"),
+]
+
 REFUSALS = [
     ("not an object", "the spec must be a JSON object"),
     (_with(MINIMAL, "schema", "hyperloom.campaign-spec/v2"), "schema must be 'hyperloom.campaign-spec/v1'"),
@@ -254,6 +262,7 @@ _JSON_TYPE = {
     Kind.BOOL: "boolean",
     Kind.STR_MAP: "object",
     Kind.ENUM: "enum",  # the schema spells these with enum or const and no type
+    Kind.INT_LIST: "array",
 }
 
 
@@ -305,6 +314,8 @@ def test_the_table_and_the_schema_name_the_same_fields_with_the_same_bounds():
         {**MINIMAL, "flow": "multibranch", "placement": {"profile": "hosted-gpu", "measurement": "hosted"}},
         {**MINIMAL, "flow": "multibranch", "placement": {"profile": "hosted-gpu", "measurement": "local"}},
         {**MINIMAL, "flow": "multibranch", "placement": {"profile": "hosted-cpu", "measurement": "local"}},
+        *(doc for doc, _ in _SWEEP_REFUSALS),
+        {**MINIMAL, "flow": "conc_sweep", "conc_sweep": {"session_dir": "/nfs/s", "concs": [8, 2], "parallel": 4}},
     ],
 )
 def test_the_schema_and_the_validator_agree_on_accepting_and_refusing(doc):
@@ -322,3 +333,18 @@ def test_the_schema_and_the_validator_agree_on_accepting_and_refusing(doc):
         and schema_says
     )
     assert schema_says == validator_says or cross_field
+
+
+def test_a_sweep_spec_names_the_closed_session_its_points_and_how_many_tests_run_at_once():
+    doc = {**MINIMAL, "flow": "conc_sweep", "conc_sweep": {"session_dir": "/nfs/s", "concs": [8, 2, 8], "parallel": 4}}
+
+    spec = parse_campaign(doc)
+
+    assert (spec.flow, spec.measurement) == ("conc_sweep", "local")
+    assert (spec.sweep_session_dir, spec.sweep_concs, spec.sweep_parallel) == ("/nfs/s", (2, 8), 4)
+
+
+@pytest.mark.parametrize(("doc", "problem"), _SWEEP_REFUSALS)
+def test_a_sweep_spec_is_refused_for(doc, problem):
+    with pytest.raises(CampaignError, match=re.escape(problem)):
+        parse_campaign(doc)
