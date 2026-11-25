@@ -101,6 +101,7 @@ if TYPE_CHECKING:
     from hyperloom_multibranch.specialist.dev_sandbox import DevLeases, SandboxFor
     from hyperloom_multibranch.specialist.model_sessions import ModelSessions
     from hyperloom_multibranch.specialist.tools import WorktreeFor
+    from hyperloom_multibranch.toolbox.mcp_tools import SpecialistToolOptions
     from hyperloom_multibranch.toolbox.option_reviews import OptionReviews
     from hyperloom_multibranch.toolbox.toolbox import AcceptanceSetup, RealToolbox
 
@@ -385,8 +386,9 @@ def local_peers(host: MeasurementHost, sessions: SpecialistSessions, setup: Peer
     """
 
     from hyperloom.hosted.mcp_server import McpServer, McpServerConfig
+    from hyperloom.inference_optimizer.framework_registry import native_component
     from hyperloom.orchestrator.state.base_launch import server_base
-    from hyperloom_multibranch.toolbox.mcp_tools import McpSpecialistTokens
+    from hyperloom_multibranch.toolbox.mcp_tools import McpSpecialistTokens, SpecialistToolOptions
     from hyperloom_multibranch.specialist.blocked import BlockedCandidates, register_blocked_tools
     from hyperloom_multibranch.specialist.tools import register_worktree_tools
 
@@ -400,6 +402,9 @@ def local_peers(host: MeasurementHost, sessions: SpecialistSessions, setup: Peer
     canonical_dir = layout.toolbox / CANONICAL_DIR
     toolbox = _toolbox(host, setup, repo, _canonical(canonical_dir, workload, host, base))
     reviews = _option_reviews(frozen.launch, toolbox, layout.toolbox)
+    served = SpecialistToolOptions(
+        option_reviews=reviews, native_server=native_component(workload.framework) is not None
+    )
     gate_blackboard = LocalBlackboard(layout.blackboard, Writer(Role.GATE, GATE_WRITER))
     rule = workload_rule(workload, gate_blackboard)
 
@@ -413,7 +418,7 @@ def local_peers(host: MeasurementHost, sessions: SpecialistSessions, setup: Peer
 
     mcp = McpServer(McpServerConfig(host_token=secrets.token_hex(32)), campaign=layout.session_id)
     briefs = _specialist_briefs(setup, repo)
-    _serve_specialist_tools(mcp, toolbox, runtime_blackboard, briefs, reviews, workload.framework)
+    _serve_specialist_tools(mcp, toolbox, runtime_blackboard, briefs, served)
     sandboxes = branch_sandboxes(host.backend, setup, lambda branch: built.worktrees(branch))
     isolation = launch_isolation(local=host.backend.on_this_machine)
     announce_launch_isolation(isolation)
@@ -543,24 +548,21 @@ def _serve_specialist_tools(
     toolbox: RealToolbox,
     blackboards: Callable[[str], LocalBlackboard],
     briefs: SessionBriefs,
-    reviews: OptionReviews | None,
-    framework: str,
+    served: SpecialistToolOptions,
 ) -> None:
     """Register the specialists' toolbox and blackboard tools on ``mcp``, calling the toolbox on the session's loop and
-    briefing each branch from ``briefs``; with ``reviews``, the option review too, and for a ``framework`` whose server
-    the session builds, the baseline tests every branch then reads."""
+    briefing each branch from ``briefs``; ``served`` holds the session's option reviews, when it laid any, and whether
+    it builds its server, whose baseline tests every branch then reads."""
 
-    from hyperloom.inference_optimizer.framework_registry import native_component
-    from hyperloom_multibranch.toolbox.mcp_tools import SpecialistToolOptions, register_specialist_tools
+    from hyperloom_multibranch.toolbox.mcp_tools import register_specialist_tools
 
-    options = SpecialistToolOptions(
+    options = replace(
+        served,
         claim_ttl_seconds=CLAIM_TTL_SECONDS,
         toolbox_loop=asyncio.get_running_loop(),
         learnings=briefs.learnings,
         briefing_for=briefs.for_branch,
         analysis=toolbox,
-        option_reviews=reviews,
-        native_server=native_component(framework) is not None,
     )
     register_specialist_tools(mcp, toolbox=toolbox, blackboards=blackboards, options=options)
 
