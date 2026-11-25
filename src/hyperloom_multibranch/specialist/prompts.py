@@ -411,7 +411,7 @@ from another model or TP size): check it against the shapes the profile shows, a
 shadows a compiled kernel.
 - The model's weight precision is the session's, never yours to change, down or up: no quantization flag \
 (--quantization, --quantization-config, --quantization-param-path, --online-quant-config), no --dtype, no other \
-checkpoint of the served model, and no patch that quantizes or de-quantizes weights, lm_head's included; the toolbox refuses those flags. Intermediates may change while the weights stay as they are and accuracy passes: the KV \
+{{checkpoint}}, and no patch that quantizes or de-quantizes weights, lm_head's included; the toolbox refuses those flags. Intermediates may change while the weights stay as they are and accuracy passes: the KV \
 cache dtype, attention's compute precision, a quantized all-reduce, and activation quantization or fusions on \
 weights already FP8 in the checkpoint.
 - A fusion that reorders a floating-point sum changes outputs and must pass the accuracy gate; one that keeps the \
@@ -489,6 +489,10 @@ _FIRST_IDEA_CHECKOUT = (
     "direction. On this server an option the launch does not set and a choice among the model files already there "
     "are code paths, not a settings sweep left to another branch: any branch tests one its evidence points at."
 )
+#: The other weights a recipe may not serve: any, and on a server built from its checkout those of the served model,
+#: where a branch may choose among the auxiliary model files already there.
+_CHECKPOINT_INSTALLED = "checkpoint"
+_CHECKPOINT_CHECKOUT = "checkpoint of the served model"
 _UNPROFILED = """
 This server runs under no profiler here: a profile test is refused, so submit none; wherever the steps above say \
 profile or name the operators a profile ranks, use the step budget from the timing lines and the source instead."""
@@ -613,6 +617,7 @@ def role_prompt(
         fake_gains=_fake_gains(),
         directions=_direction_names(session_directions(server.checkouts)),
         first_idea=_FIRST_IDEA_CHECKOUT if server.checkouts else _FIRST_IDEA_INSTALLED,
+        checkpoint=_CHECKPOINT_CHECKOUT if server.checkouts else _CHECKPOINT_INSTALLED,
         gpu_rule=gpu_rule,
         **asdict(workload.grading),
     )
@@ -882,12 +887,13 @@ def prompt_versions() -> dict[str, str]:
         fake_gains=_fake_gains(),
         directions=_direction_names(DIRECTIONS),
         first_idea=_FIRST_IDEA_INSTALLED,
+        checkpoint=_CHECKPOINT_INSTALLED,
         gpu_rule=_NO_GPU,
         **asdict(_INFERENCEX_GRADING),
     )
     agentx = (text for objective in AgentXObjective for text in astuple(_agentx_grading(objective)))
     checkout = (_CHECKOUT, _CHECKOUT_KERNELS, _CHECKOUT_KNOBS, _CHECKOUT_UPSTREAM, _CHECKOUT_REVIEW)
-    checkout = (*checkout, _FIRST_IDEA_CHECKOUT, _UNPROFILED)
+    checkout = (*checkout, _FIRST_IDEA_CHECKOUT, _CHECKPOINT_CHECKOUT, _UNPROFILED)
     discovery = (_CHECKOUT_CARRIED, _CHECKOUT_LOGS, *DISCOVERY_TEXTS, _direction_names(CHECKOUT_DIRECTIONS))
     settings = (_DEV_SANDBOX, _NATIVE, *checkout, *discovery, _REFERENCES, _BASE, *_HOLDS.values(), *agentx)
     texts = {
