@@ -55,6 +55,7 @@ from typing import Final
 
 from hyperloom.agents.framework.sources.github import token_configured
 from hyperloom.common.confinement import credential_paths
+from hyperloom.common.outside_facts import ROCR_VISIBLE_DEVICES_ENV
 from hyperloom.common.outside_facts.rule_pack import PACK_ENV, rule_pack_identity
 from hyperloom.measure.archive import ResultArchive
 from hyperloom.measure.hosted import FILES_ROOT, HostedConfig, HostedMeasurementBackend
@@ -812,4 +813,6 @@ def build_local_toolbox(
     toolbox.attach_leases(leases)
     toolbox.sandboxes = directory / _SANDBOXES
     toolbox.blobs = spec.blobs
+    if base_bins:
+        toolbox.base_probe_env = {**base_bins, ROCR_VISIBLE_DEVICES_ENV: ",".join(map(str, cards[:1]))}
     return toolbox

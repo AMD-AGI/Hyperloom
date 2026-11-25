@@ -4,6 +4,8 @@
 
 from __future__ import annotations
 
+from kernelforge.tests.workflows.forge_loop.iteration._iteration_loop import lane_agents
+
 import asyncio
 import importlib
 import inspect
@@ -27,8 +29,7 @@ from kernelforge.roofline_ceiling.contract import load_report
 from kernelforge.roofline_ceiling.estimate import estimate_ceiling as real_estimate_ceiling
 from kernelforge.roofline_ceiling.report import REPORT_FILENAME, WORKSPACE_SUBDIR
 from kernelforge.workflows.forge_loop.campaign.run_state import RunState
-from kernelforge.workflows.forge_loop.iteration.runner import IterationConfig, IterationLoop, LoopAgents
-from kernelforge.workflows.forge_loop.roles.orchestration import OrchestrationInfrastructureError
+from kernelforge.workflows.forge_loop.iteration.runner import IterationConfig, IterationLoop
 from kernelforge.tests.workflows.forge_loop.iteration._iteration_loop import (
     _make_loop,
     _no_change_agent,
@@ -158,9 +159,9 @@ def test_one_reader_loads_the_ceiling_for_the_whole_loop():
 
 
 def _planning_context(*case_ids):
-    from kernelforge.workflows.forge_loop.roles.contracts import CaseEvidence, OrchestrationContext
+    from kernelforge.workflows.forge_loop.roles.contracts import CaseEvidence, EvidenceContext
 
-    return OrchestrationContext(
+    return EvidenceContext(
         analysis_commit="abc123",
         workspace="/w",
         gpu_target="gfx950",
@@ -215,7 +216,7 @@ def test_a_ceiling_that_failed_to_estimate_injects_nothing_anywhere():
     context = _planning_context("decode-t1")
 
     assert loop._with_ceiling_standing(context) is context
-    assert "roofline" not in _supervisor_payload(loop, context)["orchestration_context"]
+    assert "roofline" not in _supervisor_payload(loop, context)["evidence_context"]
 
 
 def test_the_planner_sees_the_campaign_mean_the_target_and_how_to_read_them(tmp_path):
@@ -241,7 +242,7 @@ def test_the_campaign_standing_says_when_it_covers_only_part_of_the_suite(tmp_pa
     assert roofline["target"] is None
 
 
-def test_a_specialist_scoped_to_one_case_still_sees_the_campaign_standing(tmp_path):
+def test_a_context_scoped_to_one_case_still_sees_the_campaign_standing(tmp_path):
     path = _publish(_report((("a", 9.0), ("b", 4.0))), tmp_path)
     loop = _loop(str(path), case_times={"a": 10.0, "b": 8.0})
 
@@ -252,10 +253,9 @@ def test_a_specialist_scoped_to_one_case_still_sees_the_campaign_standing(tmp_pa
 
 
 def _supervisor_payload(loop, context):
-    loop._build_orchestration_context = lambda: context
+    loop._build_evidence_context = lambda: context
     loop._analysis_bundle = None
     loop._active_analysis_context = None
-    loop._latest_optimization_plan_path = ""
     loop.lessons = None
     return json.loads(loop._build_supervisor_evidence_context(3))
 
@@ -264,7 +264,7 @@ def test_the_supervisor_reviews_a_stall_with_the_same_standing_as_the_planner(tm
     path = _publish(_report((("a", 9.0), ("b", 4.0))), tmp_path)
     loop = _loop(str(path), target=0.86, case_times={"a": 10.0, "b": 8.0})
 
-    payload = _supervisor_payload(loop, _planning_context("a", "b"))["orchestration_context"]
+    payload = _supervisor_payload(loop, _planning_context("a", "b"))["evidence_context"]
 
     assert payload["roofline"]["mean_attainment"] == pytest.approx(0.7)
     assert {case["case_id"]: case["roofline"]["attainment"] for case in payload["cases"]} == {
@@ -274,33 +274,10 @@ def test_the_supervisor_reviews_a_stall_with_the_same_standing_as_the_planner(tm
 
 
 def test_without_a_ceiling_the_supervisor_sees_no_roofline():
-    payload = _supervisor_payload(_loop(), _planning_context("decode-t1"))["orchestration_context"]
+    payload = _supervisor_payload(_loop(), _planning_context("decode-t1"))["evidence_context"]
 
     assert "roofline" not in payload
     assert all("roofline" not in case for case in payload["cases"])
-
-
-def test_the_standing_is_attached_where_the_round_is_planned(tmp_path):
-    """Attached anywhere after planning, the standing would reach only the implementer."""
-    path = _publish(_report((("a", 9.0), ("b", 4.0))), tmp_path)
-    loop = _loop(str(path), case_times={"a": 10.0, "b": 8.0})
-    loop._active_analysis_context = _planning_context("a", "b")
-    planned = []
-
-    class Planner:
-        has_plan_critic = False
-
-        async def run(self, context, **_kwargs):
-            planned.append(context)
-            raise OrchestrationInfrastructureError("planning stops here")
-
-    asyncio.run(loop._run_orchestration(iteration=1, orchestration_service=Planner()))
-
-    (context,) = planned
-    assert {case.case_id: case.roofline.attainment for case in context.cases} == {
-        "a": pytest.approx(0.9),
-        "b": pytest.approx(0.5),
-    }
 
 
 def test_the_ceiling_is_off_unless_an_operator_turns_it_on():
@@ -496,7 +473,7 @@ def test_the_progress_is_logged_with_each_iteration_header(tmp_path, monkeypatch
     loop, _ = _make_loop(tmp_path, monkeypatch, baseline_case_times={"case": 1.0})
     loop._ceiling_report_path = str(_publish(_report((("case", 0.5),)), tmp_path / "ceiling"))
 
-    asyncio.run(loop.run(LoopAgents(agent_fn=_no_change_agent, supervisor_fn=_unused_supervisor)))
+    asyncio.run(loop.run(lane_agents(_no_change_agent, supervisor_fn=_unused_supervisor)))
 
     lines = capsys.readouterr().out.splitlines()
     header = next(i for i, line in enumerate(lines) if line.startswith("--- Iteration 1 "))

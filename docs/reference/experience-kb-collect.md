@@ -170,11 +170,10 @@ A mapping cannot turn these off:
   tokens, JWTs, presigned URLs, and -- outside prose fields -- credential
   assignments, credential CLI flags, and credential-shaped keys (a name containing
   `TOKEN`, `SECRET`, `PASSWORD`, `API_KEY`, or `CREDENTIAL`, with `TOKENIZER`
-  exempt). The prose fields, `rationale.plan`, `rationale.plan_file`,
-  `rationale.reasoning`, `rationale.alternatives`, every `reflection` field,
-  `notes`, `raw_logs`, and the change field with the `summary` role, get only
-  the token formats, so prose, plan files, and raw logs are not mistaken for an
-  assignment. A file field the mapping lists in `code_fields` is screened the
+  exempt). The prose fields, `rationale.reasoning`, `rationale.alternatives`,
+  every `reflection` field, `notes`, `raw_logs`, and the change field with the
+  `summary` role, get only the token formats, so prose and raw logs are not
+  mistaken for an assignment. A file field the mapping lists in `code_fields` is screened the
   same way, which is how a kernel and its diff keep a name such as `offs_token`
   and still reject an `sk-` key. The list only narrows a file to that screen.
   `rationale.preconditions` is checked in full, since it may restate the
@@ -228,9 +227,12 @@ skipped because every Experience records `e2e_throughput@v1`.
 Maps the document `kernelforge export-runs` writes from KernelForge's
 `forge-loop` runs to the packaged `kernelforge-run-v1` declaration: one
 Experience per candidate kernel a run archived, the kernel one iteration
-measured and KernelForge's decision to keep or revert it. Each lane of a
-fan-out round is measured as its own candidate, built from its own plan, so a
-run yields one or more Experiences. Collecting a run takes two steps:
+measured and KernelForge's decision to keep or revert it. An iteration is one
+round, and a round has one candidate whatever its width: what its lanes left
+on the canonical tree, merged by a session when more than one lane changed
+the kernel. A run therefore yields one Experience per round that produced a
+candidate, at `--lanes 1` and at `--lanes 3` alike. Collecting a run takes
+two steps:
 
 ```bash
 kernelforge export-runs <LOG_ROOT>... -o runs.json
@@ -270,31 +272,22 @@ It reads:
   records, which for a run given `--baseline-json` is that file's time rather
   than that of the kernel its search started from. It is the same statistic,
   and it is not a measurement role;
-- `rationale.plan` from the whole `Summary:` line the candidate's plan opens
-  with, or from the plan's first three sentences when it has none;
 - `rationale.reasoning` from the whole lesson KernelForge writes for the
   iteration, `lessons/iter_NNN.md` (see the
   [autonomous loop](../kernelforge/how-to/autonomous-loop.md)). That file is the
-  only reasoning record: it includes `HELD-FIXED`, `NEGATIVES`, and `DISPROOF`,
-  and the loop appends the scope and outcome lines after the verdict. A single
-  session that wrote no lesson gives the first three sentences of the rationale
-  its `meta.json` records. A lane or a merge with neither gives no reasoning.
+  only reasoning record. It holds what the round's sessions recorded,
+  including `HELD-FIXED`, `NEGATIVES`, and `DISPROOF`; a round of several
+  lanes has each session's record under its own heading, every lane and then
+  the merge. The loop appends the scope and outcome lines after the verdict. A round whose sessions wrote no lesson
+  gives the first three sentences of the rationale its `meta.json` records.
   A lesson longer than the 32 KB a text field holds makes collection skip the
-  candidate. Reflection does not also carry the lesson;
-- `reflection.analysis_report` from the whole `report.md` of the Analysis
-  generation the candidate's plan was built on: the
-  `forge_experiments/analysis/<commit>/generation-NNN/` its planning round's
-  `orchestration/iter_NNN/context.json` names as its `analysis_bundle`. That is
-  the baseline's report until Analysis refreshes after a KEEP; on campaigns
-  longer than two hours Analysis profiles the kernel with rocprof-compute. A
-  merge has no report, and a report longer than the 32 KB a text field holds
-  is left out, with `provenance.extra.analysis_report_omitted` saying so. None
-  of the profiler's raw output is collected;
-- the plan, the measured kernel, and the archived diff as files
-  (`rationale.plan_file`, `change.source_code`, `change.change_diff_file`).
-  `change.diff` is the unified diff of every file the commit touched, which is
-  where a wrapper or config edit shows up. `source_code` is only the anchor
-  kernel file. The diff is linked when the candidate archived one;
+  candidate. Reflection does not also carry the lesson, and the declaration
+  has no reflection field;
+- the measured kernel and the archived diff as files (`change.source_code`,
+  `change.change_diff_file`). `change.diff` is the unified diff of every file
+  the commit touched, which is where a config edit or a new module shows up.
+  `source_code` is only the anchor kernel file. The diff is linked when the
+  candidate archived one;
 - `provenance.extra` from the logs, which never reaches a prompt: `meta`, the
   scalar measurement and decision fields of the candidate's `meta.json`
   (`commit_hash`, `decision`, `kept`, `validation_passed`, `wall_ms`,
@@ -303,9 +296,12 @@ It reads:
   `session_end_reason`, `turns`, `agent_profile_id`, `agent_provider`,
   `agent_model`, `blockage_epoch`), and not its plan, rationale, bench,
   profile, pmc diagnosis, or shape; `kb_record`, the record KernelForge's own
-  experience KB filed a kept candidate under;
-  `candidate_origin`, `session` or `lane`; and `analysis_generation`, the
-  `analysis/<commit>/generation-NNN` the Analysis report comes from.
+  experience KB filed a kept candidate under; and `candidate_origin`, which
+  is always `session`.
+
+A round has no plan, so an Experience carries none, and the Analysis Agent's
+report is not collected. A document an earlier `export-runs` wrote may still
+name `plan`, `plan_file` or `analysis_report`; the mapping reads none of them.
 
 Every Experience has a `raw_logs` field, from the document's top-level
 `raw_logs`, and it is intentionally empty for now: it links exactly one 0-byte
@@ -319,12 +315,11 @@ candidate is skipped. A document without a top-level `raw_logs`, such as one an
 earlier `export-runs` wrote, gives Experiences without raw logs, which the
 global KB refuses: export its runs again before collecting them.
 
-Of the run's own files, an Experience links only the plan, the measured
-kernel, and the archived diff above, so they are the only ones that go with it
-to a KB. No `forge-loop.log`, `events.jsonl`, or other archive file does;
+Of the run's own files, an Experience links only the measured kernel and the
+archived diff above, so they are the only ones that go with it to a KB. No `forge-loop.log`, `events.jsonl`, or other archive file does;
 the scalar fields of `meta.json` go as `provenance.extra.meta`, and its plan,
-rationale, per-case times, and other benchmark measurements do not, and of the
-Analysis directory only the report's text goes. A `forge-loop.log` is only
+rationale, per-case times, and other benchmark measurements do not, and
+nothing of the Analysis directory goes. A `forge-loop.log` is only
 read, for the experiment id each session prints and the record that session
 wrote. A kept candidate takes the record of the session its `events.jsonl`
 `iteration_result` names, including after `forge_experiments` was moved out of
@@ -337,8 +332,7 @@ A record that exists but is not readable JSON, and a candidate whose
 `meta.json` is missing or malformed, is one entry saying why.
 
 A unit is skipped when its logs could not be read as a run, or when it has no
-reasoning, which is always the case for a merge of two archived candidates
-because no agent made it, and for a lane whose iteration recorded no lesson.
+reasoning: no lesson for its iteration and no rationale in its `meta.json`.
 KernelForge writes naive local times, which collection
 reads as UTC; that is right for a run made in a container, which normally runs
 in UTC.

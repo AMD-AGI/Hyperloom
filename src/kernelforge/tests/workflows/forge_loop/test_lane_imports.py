@@ -1,7 +1,12 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""A lane of a workspace that is imported by its directory's name is laid out, and imported, the same way."""
+"""A lane of a workspace that is imported by its directory's name is laid out, and imported, the same way.
+
+Every round works in lane copies, a round of one lane included, so a campaign on such a workspace -- an aiter
+checkout whose parent is first on the import path -- measures its own edits only when each lane's copy is what that
+name imports.
+"""
 
 from __future__ import annotations
 
@@ -15,9 +20,10 @@ from kernelforge.tests.utils.test_lane_aiter_cache import (
     _implementer_through,
     _lane_factory,
     _recording_claude_backend,
+    _seat,
 )
 from kernelforge.utils.git import git
-from kernelforge.workflows.forge_loop.iteration.fanout import SERIALIZED_DRIVER_NAME, LanePlan, run_lanes
+from kernelforge.workflows.forge_loop.iteration.fanout import LaneAssignment, LaneRound
 
 _PRINT_VALUE = "from workspace.src import kernel; print(kernel.VALUE)"
 
@@ -38,7 +44,7 @@ def _commit(repository: Path) -> None:
 
 
 def _lane_copy(tmp_path: Path, lane_id: str, name: str) -> Path:
-    """A lane copy as the fan-out leaves it for a workspace imported as ``name``: its own repository, under that name."""
+    """A lane copy as a round leaves it for a workspace imported as ``name``: its own repository, under that name."""
     lane_dir = tmp_path / "lanes" / lane_id / name
     (lane_dir / "src").mkdir(parents=True)
     (lane_dir / "src" / "kernel.py").write_text(f"VALUE = {lane_id}\n")
@@ -57,7 +63,7 @@ async def test_a_lane_session_imports_the_lane_by_the_name_its_workspace_is_impo
 
     for lane_id in ("1", "2"):
         lane_dir = _lane_copy(tmp_path, lane_id, workspace.name)
-        session = factory(str(lane_dir), str(lane_dir / SERIALIZED_DRIVER_NAME))
+        session = factory(_seat(tmp_path, lane_dir, lane_id))
         await session(str(lane_dir / "src" / "kernel.py"), f"plan {lane_id}")
 
     assert [_value_imported_by(env) for env in spawned] == ["1", "2"]
@@ -71,7 +77,8 @@ async def test_a_lane_of_a_workspace_not_imported_by_name_inherits_the_import_pa
     factory = _lane_factory(config, workspace, _implementer_through(_recording_claude_backend(spawned)))
     lane_dir = _lane_copy(tmp_path, "1", "")
 
-    await factory(str(lane_dir), str(lane_dir / SERIALIZED_DRIVER_NAME))(str(lane_dir / "src" / "kernel.py"), "plan")
+    session = factory(_seat(tmp_path, lane_dir, "1"))
+    await session(str(lane_dir / "src" / "kernel.py"), "plan")
 
     assert [env["PYTHONPATH"] for env in spawned] == [str(tmp_path / "elsewhere")]
 
@@ -90,18 +97,18 @@ async def test_a_round_copies_such_a_workspace_under_its_name_with_what_is_linke
     installed_beside.mkdir(parents=True)
     (import_root / "served_meta").symlink_to(installed_beside, target_is_directory=True)
     monkeypatch.setenv("PYTHONPATH", str(import_root))
-    seen: list[tuple[Path, Path]] = []
-
-    async def session(_lane: LanePlan, lane_dir: Path, _driver: Path) -> None:
-        seen.append((lane_dir, (lane_dir.parent / "served_meta").resolve()))
-
-    await run_lanes(
+    lanes = LaneRound(
         workspace_dir=str(workspace),
-        lanes=[LanePlan("1", "first"), LanePlan("2", "second")],
-        session=session,
         parent_dir=str(import_root),
-        driver="forge_driver.py",
+        lanes=[LaneAssignment("1", "first"), LaneAssignment("2", "second")],
+        hold_limit_sec=90,
     )
+
+    seats = await lanes.open()
+    try:
+        seen = [(seat.lane_dir, (seat.lane_dir.parent / "served_meta").resolve()) for seat in seats]
+    finally:
+        lanes.close()
 
     assert [lane_dir.name for lane_dir, _beside in seen] == ["served", "served"]
     assert len({lane_dir.parent for lane_dir, _beside in seen}) == 2

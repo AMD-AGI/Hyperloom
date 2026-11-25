@@ -201,7 +201,7 @@ async def test_a_pass_on_a_framework_whose_source_changes_cannot_land_has_its_ad
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     wheel = PackageBase("vllm", tmp_path / "site-packages" / "vllm", "vllm", "0.33.0rc1.dev711+gdd4e40142.rocm100")
-    monkeypatch.setattr(worktree_module, "locate_installed_package", lambda _layout: wheel)
+    monkeypatch.setattr(worktree_module, "locate_source", lambda _layout: wheel)
     monkeypatch.setattr(worktree_module, "installed_upstream", lambda _package: None)
 
     outcome, _toolbox, checkout, _setup = await _pass(

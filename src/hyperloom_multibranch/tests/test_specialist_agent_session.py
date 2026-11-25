@@ -406,6 +406,23 @@ async def test_idle_turns_in_a_row_with_nothing_running_end_the_session_idle_wit
     assert (rig.runner.cancelled, rig.runner.collected) == ([1], [1])
 
 
+async def test_the_nudge_of_a_session_whose_server_runs_under_no_profiler_asks_for_no_profile(rig):
+    await rig.toolbox_blackboard.write_request(request("r0", intent(BRANCH, rig.root)))
+    await rig.toolbox_blackboard.write_result(result("r0"))
+    rig.clock.now = time.time()
+    session = rig.session(nudge_waits_s=NO_WAITS, profiled=False)
+    running = asyncio.create_task(session.run())
+    await _until(lambda: len(rig.runner.specs) == 1, "the launch")
+
+    _end_turn(rig)
+    await _until(lambda: len(rig.runner.sent) == 1, "the nudge")
+    await session.stop()
+    await asyncio.gather(running, return_exceptions=True)
+
+    (nudge,) = rig.runner.sent
+    assert "the largest line of your step budget" in nudge and "profile" not in nudge
+
+
 _WORKED = {"type": "assistant", "message": {"content": [{"type": "tool_use", "name": "blackboard_brief", "input": {}}]}}
 
 

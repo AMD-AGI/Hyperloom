@@ -6,7 +6,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Callable, Mapping
+from typing import Callable, Mapping
 
 from kernelforge.workflows.forge_loop.search.agent_relay import (
     AgentAvailabilitySnapshot,
@@ -18,11 +18,10 @@ from kernelforge.workflows.forge_loop.search.agent_relay import (
 
 @dataclass(frozen=True)
 class SearchActorBundle:
-    """All profile-bound services used to plan and implement an iteration."""
+    """All profile-bound services an iteration runs: the canonical session, the lane factory and the Supervisor."""
 
     profile: AgentProfile
     agent_fn: Callable | None
-    orchestration_service: Any = None
     agent_factory: Callable | None = None
     supervisor_fn: Callable | None = None
 

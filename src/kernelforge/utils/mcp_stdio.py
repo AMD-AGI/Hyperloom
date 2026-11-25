@@ -1,14 +1,12 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Newline-delimited JSON-RPC transport shared by the stdio MCP servers.
+"""Newline-delimited JSON-RPC transport for the stdio MCP servers.
 
-``knowledge.pr_knowledge.mcp_server`` and ``workflows.forge_loop.roles.specialist_probe_server``
-speak the same wire protocol to the same clients; only the tool set behind
-``tools/call`` differs. Keeping the
-envelope here means a protocol fix -- an error code, a method the client starts
-sending -- lands once instead of drifting between two copies, and the read loop
-gets one set of tests rather than one tested copy and one untested one.
+``knowledge.pr_knowledge.mcp_server`` speaks this wire protocol; only the tool set
+behind ``tools/call`` is its own. Keeping the envelope here means a protocol
+fix -- an error code, a method the client starts sending -- lands in one place,
+and the read loop has one set of tests.
 """
 
 from __future__ import annotations

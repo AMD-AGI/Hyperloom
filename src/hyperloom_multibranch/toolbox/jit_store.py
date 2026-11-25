@@ -51,8 +51,8 @@ REFUSED_HOSTED = (
 )
 #: What a local session does without a refused store, said in its warning and note.
 REFUSED_LOCAL = (
-    "the runners are not told it and nothing is published, so no test can build aiter's modules: candidates that patch "
-    "aiter's csrc or hsa are refused for the whole session"
+    "the runners are not told it and nothing is published, so no patched aiter source can be built: candidates that "
+    "patch aiter's csrc or hsa are refused for the whole session"
 )
 
 log = logging.getLogger(__name__)

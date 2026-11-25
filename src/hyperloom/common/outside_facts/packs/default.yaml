@@ -27,7 +27,7 @@
 #   kernel_table  reserved: no rule reads one yet, so a pack that holds one is refused
 # Every entry names its project, says why the fact exists and carries examples. A pack that fails its own examples, or
 # lacks an entry the code reads, is refused when it is loaded; nothing falls back to a default.
-version: "27"
+version: "28"
 facts:
   aiter_meta_dir:
     kind: names
@@ -1275,3 +1275,64 @@ facts:
               }
               return 1;
           }
+
+  native_serving_llamacpp:
+    kind: names
+    project: llama.cpp
+    reason: >-
+      What a specialist of a session that builds llama-server from its checkout reads before it proposes a change.
+      Every option of the server is one add_opt(common_arg(...)) entry of common/arg.cpp: its spellings, its help text
+      (which says when the option is experimental) and the parameter it sets; llama-server --help prints the same
+      table. --spec-draft-model (-md, --model-draft) names the file of the draft model or speculative head;
+      aux_model_flags lists every spelling of it, the one the help leads with first, blank-separated. When a
+      request ends, the server logs for its slot (print_timings in tools/server/server-context.cpp) the decode time
+      and tokens ("eval time = <ms> ms / <n> tokens (<ms> ms per token, <n> tokens per second)") and, when it
+      drafted, the draft tokens the target accepted ("draft acceptance = <ratio> (<n> accepted / <n> generated), mean
+      len = <tokens a verify step yields>"). The host side of a decode step is the slot loop of
+      tools/server/server-context.cpp, sampling in common/sampling.cpp and drafting in common/speculative.cpp.
+    names:
+      option_table: common/arg.cpp
+      option_entry: "add_opt(common_arg("
+      help_command: llama-server --help
+      aux_model_flags: "--spec-draft-model -md --model-draft"
+      request_timing: "eval time ="
+      speculative_stats: "draft acceptance ="
+      host_loop: "tools/server/server-context.cpp, common/sampling.cpp, common/speculative.cpp"
+    examples:
+      - "hyperloom.orchestrator.prompts.native_discovery: the section that tells a specialist of a checkout-built server where to read its options, its auxiliary model flag and a round's timing lines"
+      - "hyperloom.orchestrator.specialists.model_dirs: a launch that spells one of aux_model_flags names an auxiliary model file, whose directory the specialist lists"
+      - "slot print_timing: id  0 | task 6888 |        eval time =   15449.58 ms /   512 tokens (   30.23 ms per token,    33.08 tokens per second)"
+      - "slot print_timing: id  0 | task 6888 | draft acceptance = 0.30000 (  306 accepted /  1020 generated), mean len =  2.49"
+
+  native_request_timing_llamacpp:
+    kind: log_regex
+    project: llama.cpp
+    reason: >-
+      The line of native_serving_llamacpp's request_timing, as the pattern a reader takes it from a server log by:
+      print_timings logs "prompt eval time = ..." for the prompt on the line before it, which holds the same words, so
+      the words alone would take the prompt's line for the decode's.
+    pattern: >-
+      (?<!prompt )eval time =
+    examples:
+      match:
+        - "6.23.810.779 I slot print_timing: id  0 | task 4161 |        eval time =   12621.18 ms /   512 tokens (   24.70 ms per token,    40.49 tokens per second)"
+        - "       eval time =   15449.58 ms /   512 tokens (   30.23 ms per token,    33.08 tokens per second)"
+      no_match:
+        - "6.23.810.769 I slot print_timing: id  0 | task 4161 | prompt eval time =     562.90 ms /   220 tokens (    2.56 ms per token,   390.83 tokens per second)"
+        - "6.23.810.780 I slot print_timing: id  0 | task 4161 |       total time =   13184.08 ms /   732 tokens"
+        - "6.23.396.468 I slot print_timing: id  0 | task 4161 | n_gen =    496, tg =  40.55 t/s, tg_3s =  36.19 t/s"
+
+  native_speculative_stats_llamacpp:
+    kind: log_regex
+    project: llama.cpp
+    reason: >-
+      The line of native_serving_llamacpp's speculative_stats, as the pattern a reader takes it from a server log by: a
+      server that drafted logs it once for each request that ended, after the request's timing lines.
+    pattern: >-
+      draft acceptance =
+    examples:
+      match:
+        - "6.23.810.790 I slot print_timing: id  0 | task 4161 | draft acceptance = 0.47872 (  360 accepted /   752 generated), mean len =  3.38"
+      no_match:
+        - "6.23.810.779 I slot print_timing: id  0 | task 4161 |        eval time =   12621.18 ms /   512 tokens (   24.70 ms per token,    40.49 tokens per second)"
+        - "6.23.810.782 I slot print_timing: id  0 | task 4161 |    graphs reused =       4076"

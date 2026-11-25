@@ -46,7 +46,7 @@ async def rig(tmp_path, monkeypatch):
     (package / "__init__.py").write_bytes(b"")
     (package / "config.py").write_bytes(b"max_num_seqs = 128\n")
     installed = PackageBase("vllm", package, None, None)
-    monkeypatch.setattr(worktree_module, "locate_installed_package", lambda _layout: installed)
+    monkeypatch.setattr(worktree_module, "locate_source", lambda _layout: installed)
     base = SourceBase(tmp_path / "source")
     base.build(["vllm"])
     blobs = LocalBlobStore(tmp_path / "blobs")
@@ -58,7 +58,7 @@ async def rig(tmp_path, monkeypatch):
     def worktrees(branch):
         return base.worktree(branch, tmp_path / "worktrees" / branch)
 
-    monkeypatch.setattr(tools_module, "locate_installed_package", lambda _layout: installed)
+    monkeypatch.setattr(tools_module, "locate_source", lambda _layout: installed)
     register_worktree_tools(server, repo=repo, worktrees=worktrees)
     return SimpleNamespace(
         server=server,
@@ -139,7 +139,7 @@ def _installed_checkout(tmp_path, version_suffix: str = "") -> PackageBase:
 
 async def _new_component_rig(tmp_path, installed: PackageBase, monkeypatch):
     bare = Recipe(ROOT.base_image_digest, ROOT.launch)
-    monkeypatch.setattr(worktree_module, "locate_installed_package", lambda _layout: installed)
+    monkeypatch.setattr(worktree_module, "locate_source", lambda _layout: installed)
     base = SourceBase(tmp_path / "source")
     base.build(["vllm"])
     blobs = LocalBlobStore(tmp_path / "blobs")
@@ -151,7 +151,7 @@ async def _new_component_rig(tmp_path, installed: PackageBase, monkeypatch):
     def worktrees(branch):
         return base.worktree(branch, tmp_path / "worktrees" / branch)
 
-    monkeypatch.setattr(tools_module, "locate_installed_package", lambda _layout: installed)
+    monkeypatch.setattr(tools_module, "locate_source", lambda _layout: installed)
     register_worktree_tools(server, repo=repo, worktrees=worktrees)
     await server.call("worktree_sync")
     (worktrees(BRANCH).path / "vllm/config.py").write_bytes(b"max_num_seqs = 256\n")
@@ -194,7 +194,7 @@ async def test_a_patch_to_a_component_with_a_native_tree_names_the_commit_that_t
     (checkout / "csrc" / "cache.cu").write_bytes(b"int block = 16;\n")
     tree = NativeTree(SourceRoot("csrc", checkout / "csrc"), "https://github.com/vllm-project/vllm.git", "2" * 40)
     bare = Recipe(ROOT.base_image_digest, ROOT.launch)
-    monkeypatch.setattr(worktree_module, "locate_installed_package", lambda _layout: installed)
+    monkeypatch.setattr(worktree_module, "locate_source", lambda _layout: installed)
     base = SourceBase(tmp_path / "source", native={"vllm": tree})
     base.build(["vllm"])
     repo = GitExperimentRepo(
@@ -209,7 +209,7 @@ async def test_a_patch_to_a_component_with_a_native_tree_names_the_commit_that_t
     def worktrees(branch):
         return base.worktree(branch, tmp_path / "worktrees" / branch)
 
-    monkeypatch.setattr(tools_module, "locate_installed_package", lambda _layout: installed)
+    monkeypatch.setattr(tools_module, "locate_source", lambda _layout: installed)
     register_worktree_tools(server, repo=repo, worktrees=worktrees)
     await server.call("worktree_sync")
     (worktrees(BRANCH).path / "csrc" / "cache.cu").write_bytes(b"int block = 32;\n")

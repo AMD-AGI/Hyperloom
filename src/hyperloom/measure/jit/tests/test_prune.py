@@ -197,7 +197,8 @@ def test_a_prune_out_of_time_stops_and_says_where_and_removes_no_blob(store, cap
     assert all(_blob(store, data).is_file() for data in (OLD, FRESH, SHARED))
     assert "stopped reading the live keys after its 0 s budget, the next start goes on from there" in caplog.text
     assert any(
-        record.levelname == "WARNING" and "was not brought under its size bound" in record.getMessage()
+        record.levelname == "WARNING"
+        and "before the size bound or the removal of blobs was done" in record.getMessage()
         for record in caplog.records
     ), "a store whose keys outlast the budget is not bounded by size, and says so"
 
