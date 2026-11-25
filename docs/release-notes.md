@@ -203,9 +203,8 @@ it.
   the label is the model designation in the card's market name (`AMD Instinct
   MI355X` is `mi355x`; `MI300XL` and `R9700S` are labels of their own), or the
   card's arch when the driver gives it no model name. A session with neither a
-  card nor a name exits 2 asking for `--gpu-type`. `sglang`, `atom` and `xdit`
-  no longer exit 2 on an R9700, R9600D, W7900 or W7900D with `currently
-  validated only for vllm`.
+  card nor a name exits 2 asking for `--gpu-type`. No framework is refused at
+  launch as not validated on a Radeon board (R9700, R9600D, W7900, W7900D).
 - **A recipe serves only the board it names.** InferenceX points, SGLang
   cookbook cells and headings, and ATOM catalog runners and headings match the
   session's GPU type by name. Boards sharing an arch and memory size no longer

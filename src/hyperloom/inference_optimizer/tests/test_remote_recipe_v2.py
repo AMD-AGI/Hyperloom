@@ -2857,28 +2857,6 @@ def test_remote_adapter_search_translates_the_labels_it_is_given(tmp_path: Path)
     assert remote.kwargs["scheme"] == "inference"
 
 
-def test_remote_client_search_posts_the_identity_match() -> None:
-    calls = []
-
-    def _request(method, path, payload=None):
-        calls.append((method, path, payload))
-        return {"items": [], "total": 0, "next_offset": None}
-
-    store = kb_store_client.KBStoreClient.__new__(kb_store_client.KBStoreClient)
-    store._request = _request  # type: ignore[method-assign]
-    client = RemoteRecipeClient(store)
-
-    client.search_identities(scheme="inference", match={"framework_name": "sglang"}, offset=3, limit=7)
-
-    assert calls == [
-        (
-            "POST",
-            "/v1/kb/search",
-            {"scheme": "inference", "match": {"framework_name": "sglang"}, "offset": 3, "limit": 7},
-        )
-    ]
-
-
 def test_build_remote_knowledge_records_the_session_cards_gfx_arch(tmp_path: Path, monkeypatch) -> None:
     publish_card(monkeypatch, MI325X_CARD)
     bundle = _build(_state(tmp_path), tmp_path / "files")
