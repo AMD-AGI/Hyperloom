@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: MIT
 
 """Unit tests for the universal patch-safety contract (diff structural checks, git grounding, missing-target detection,
-and quantitative-claim guards).
+and the forbidden-field strip).
 """
 
 from __future__ import annotations
@@ -82,14 +82,6 @@ def test_patch_targets_missing_dev_null_exempt(tmp_path):
 
 
 # ---- regex helpers --------------------------------------------------------
-def test_numeric_claims():
-    text = "this gives 12% and 3.5x speedup of 4, 100ms latency"
-    hits = ps.numeric_claims(text)
-    assert any("%" in h for h in hits)
-    assert any("x" in h.lower() for h in hits)
-    assert ps.numeric_claims("") == []
-
-
 def test_is_unified_diff():
     assert ps.is_unified_diff(_DIFF) is True
     assert ps.is_unified_diff("just text") is False
@@ -169,7 +161,6 @@ def test_patch_safety_report_notes():
             {"path": "p2", "verdict": ps.GROUND_MISSING_TARGET, "detail": "miss"},
         ],
         grounding={"p3": ps.GROUND_STALE},
-        numeric_warnings=["12%"],
         forbidden_fields=["confidence"],
     )
     notes = rep.notes()
@@ -177,7 +168,6 @@ def test_patch_safety_report_notes():
     assert "patch_safety_ungrounded" in joined
     assert "patch_safety_missing_target" in joined
     assert "patch_safety_stale" in joined
-    assert "patch_safety_numeric" in joined
     assert "patch_safety_forbidden_fields" in joined
 
 
@@ -243,31 +233,6 @@ def test_admit_payload_books_the_gate_and_reports_the_env_drops(tmp_path):
     assert any(n.startswith("proposal_env_file_missing:") for n in report.notes())
 
 
-# ---- scan_numeric_claims ---------------------------------------------------
-def test_scan_numeric_claims():
-    payload = {
-        "summary": "gives 20% boost",
-        "proposal_set": [
-            {"expected_qualitative_argument": "3x faster"},
-            "not-a-dict",
-        ],
-    }
-    warnings = ps.scan_numeric_claims(payload)
-    assert any("%" in w for w in warnings)
-    assert any("x" in w.lower() for w in warnings)
-
-
-def test_the_numeric_scan_answers_only_the_question_no_one_else_answers():
-    """It used to return the same ``keys & FORBIDDEN_*`` intersection ``strip_forbidden_proposal_fields`` computes, for a caller that discarded it: one question with two implementations, free to drift apart."""
-    payload = {
-        "expected_gain": 12.0,
-        "summary": "gives 20% boost",
-        "proposal_set": [{"score": 1, "confidence": 0.9}],
-    }
-
-    assert ps.scan_numeric_claims(payload) == ["20%"]
-
-
 # ---- strip_forbidden_proposal_fields --------------------------------------
 def test_round_level_confidence_is_not_a_per_proposal_gain_claim():
     """The output schema asks for a round-level self-assessment and the round audit records it, so stripping it at the top level only made our own template a violation."""
@@ -319,53 +284,6 @@ def test_stripping_a_clean_payload_changes_nothing():
 @pytest.mark.parametrize("payload", [None, [], "", 0])
 def test_stripping_tolerates_a_payload_that_is_not_a_dict(payload):
     assert ps.strip_forbidden_proposal_fields(payload) == []
-
-
-# ---- quantitative_claim_rule_descriptor ------------------------------------
-def test_a_format_slip_is_advisory_not_a_reject():
-    rule = ps.quantitative_claim_rule_descriptor()
-
-    assert rule["failure_verdict"] == "advise"
-    assert rule["failure_reason_code"] == ps.QUANTITATIVE_CLAIM_REASON_CODE
-
-
-# ---- advisory_only_reason_codes --------------------------------------------
-def test_every_rule_that_asked_for_advice_is_enforceable():
-    codes = ps.advisory_only_reason_codes()
-
-    assert ps.QUANTITATIVE_CLAIM_REASON_CODE in codes
-    for rule in ps.cross_domain_rule_descriptors():
-        if rule["failure_verdict"] == ps.ADVISE_VERDICT:
-            assert rule["failure_reason_code"] in codes
-
-
-def test_a_rule_asking_for_a_reject_is_left_alone(monkeypatch):
-    """The set is derived from the descriptors, so a rule keeping ``reject`` stays out of it."""
-    hard = ps.CrossDomainRule(
-        rule_id="hard_guard",
-        description="a violation here is grounds for refusal",
-        failure_verdict="reject",
-        failure_reason_code="cross_domain_hard_guard",
-    )
-    monkeypatch.setattr(ps, "CROSS_DOMAIN_RULES", ps.CROSS_DOMAIN_RULES + (hard,))
-
-    codes = ps.advisory_only_reason_codes()
-
-    assert "cross_domain_hard_guard" not in codes
-    assert ps.QUANTITATIVE_CLAIM_REASON_CODE in codes
-
-
-# ---- advisory_rules_govern -------------------------------------------------
-@pytest.mark.parametrize("action_name", ["specialist", "explore"])
-def test_the_rules_govern_the_proposal_kinds_they_are_written_about(action_name):
-    """``proposal_set[*]`` reaches review as a specialist proposal or the explore grid it is materialised into; the framework candidate is the one the quantitative-claim rule names by exception."""
-    assert ps.advisory_rules_govern(action_name) is True
-
-
-@pytest.mark.parametrize("action_name", ["integrate_patch", "kernel_opt", "sweep", "baseline", "", None])
-def test_integrate_patch_is_never_governed_by_an_advisory_rule(action_name):
-    """None of these carries a specialist ``proposal_set``, and holding an ``integrate_patch`` reject to ``advise`` would land the refused patch."""
-    assert ps.advisory_rules_govern(action_name) is False
 
 
 # ---- vet_patches ----------------------------------------------------------
