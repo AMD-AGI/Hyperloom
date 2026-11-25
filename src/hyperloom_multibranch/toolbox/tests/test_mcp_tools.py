@@ -356,7 +356,56 @@ async def baselined(seeded: tuple[Path, FakeClock]) -> Writers:
 
 @pytest.fixture
 def baselined_rig(seeded: tuple[Path, FakeClock], baselined: Writers) -> Iterator[Rig]:
+    """A session whose server is built from its checkout."""
+    options = SpecialistToolOptions(claim_ttl_seconds=60.0, wait_poll_seconds=0.05, native_server=True)
+    yield from _running(seeded, options)
+
+
+@pytest.fixture
+def installed_baselined_rig(seeded: tuple[Path, FakeClock], baselined: Writers) -> Iterator[Rig]:
     yield from _running(seeded, SpecialistToolOptions(claim_ttl_seconds=60.0, wait_poll_seconds=0.05))
+
+
+def _descriptions(rig: Rig) -> dict[str, str]:
+    _status, reply = rig.post(rig.token("s1"), {"jsonrpc": "2.0", "id": 1, "method": "tools/list"})
+    return {tool["name"]: tool["description"] for tool in reply["result"]["tools"]}
+
+
+def test_a_session_of_an_installed_framework_shares_no_baseline_and_describes_its_tests_as_before(
+    installed_baselined_rig: Rig,
+) -> None:
+    forbidden = {"code": -32001, "message": "a specialist reads the tests of its own branch only"}
+    described = _descriptions(installed_baselined_rig)
+
+    for tool in ("test_result", "wait_test"):
+        assert (
+            installed_baselined_rig.call(installed_baselined_rig.token("s1"), tool, request_id="b1")[1]["error"]
+            == forbidden
+        )
+        assert "baseline test of the session" not in described[tool] and "timing_lines" not in described[tool]
+    assert described["test_result"].startswith(
+        "The state and result of one test this branch submitted, or of any branch's profile test. An AgentX test's "
+    )
+    assert described["wait_test"].startswith(
+        "How to wait for a test of this branch, or for any branch's profile test: returns as soon as its result lands,"
+    )
+
+
+def test_only_a_checkout_built_session_s_tools_say_a_baseline_is_shared_and_what_timing_lines_are(
+    baselined_rig: Rig,
+) -> None:
+    described = _descriptions(baselined_rig)
+
+    assert (
+        "or of a baseline test of the session (blackboard_search for baseline names them). timing_lines are"
+        in (described["test_result"])
+    )
+    assert "for any branch's profile test or for a baseline test of the session: returns" in described["wait_test"]
+
+
+def test_a_result_with_no_timing_lines_is_answered_without_the_key(rig: Rig) -> None:
+    for tool in ("test_result", "wait_test"):
+        assert "timing_lines" not in json.loads(rig.ok(rig.token("s1"), tool, request_id="r1"))["result"]
 
 
 def test_any_branch_finds_the_session_s_baseline_tests_and_reads_their_results(baselined_rig: Rig) -> None:

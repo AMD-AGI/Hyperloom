@@ -6,8 +6,9 @@
 :func:`register_specialist_tools` puts the specialist-scoped tools on a :class:`~hyperloom.hosted.mcp_server.McpServer`
 and :class:`McpSpecialistTokens` issues and revokes the token each specialist gets. Every handler takes the branch from the token and never
 from the arguments, so a specialist submits, cancels, claims, logs and reads its test results for its own branch
-only, but for the tests every branch reads (a profile, a baseline of the session: :func:`_session_wide`); the
-blackboard's search and record reads are shared across branches, as the blackboard contract has them:
+only, but for a profile test, which every branch reads, as it does a baseline test of a session whose server is built
+from its checkout; the blackboard's search and record reads are shared across branches, as the blackboard contract has
+them:
 
 * ``submit_test``, ``test_result``, ``cancel_test`` and ``queue_state`` go through the toolbox interface;
 * ``wait_test`` blocks on one test of the branch until its record says it is over or the wait runs out, and then
@@ -195,11 +196,21 @@ _ANALYSIS_BLURBS = {
     KERNEL_TUNE_TOOL: "tune GEMM shapes on one card",
     UPSTREAM_PR_TOOL: "search upstream pull requests",
 }
-_TEST_RESULT_GUIDE = (
+#: Whose tests ``test_result`` reads, and ``wait_test`` waits for: as a session of an installed framework is told,
+#: and as one whose server is built from its checkout is, which shares its baseline tests and their timing lines.
+_TEST_RESULT_READS = "The state and result of one test this branch submitted, or of any branch's profile test."
+_TEST_RESULT_READS_NATIVE = (
     "The state and result of one test this branch submitted, of any branch's profile test, or of a baseline test "
     "of the session (blackboard_search for baseline names them). timing_lines are the last lines each server log of "
     "the test timed its requests with, each led by the log's path below output_dir; a server that logs none has "
-    "none. An AgentX test's "
+    "none."
+)
+_WAIT_TEST_READS = "How to wait for a test of this branch, or for any branch's profile test"
+_WAIT_TEST_READS_NATIVE = (
+    "How to wait for a test of this branch, for any branch's profile test or for a baseline test of the session"
+)
+_TEST_RESULT_GUIDE = (
+    " An AgentX test's "
     "request_classes has an entry for each measured round: how many requests the client marked failed, as "
     "failed_transport (the server did not serve it) and failed_no_content (it answered and the client found nothing in "
     "the answer; failed_empty and failed_short split these by output tokens when the export says, else null with the "
@@ -422,24 +433,29 @@ async def on_home_loop(home: asyncio.AbstractEventLoop | None, call: Awaitable[T
     return await asyncio.wrap_future(asyncio.run_coroutine_threadsafe(call, home))  # type: ignore[arg-type]
 
 
-def _session_wide(request: MeasuredRequest) -> bool:
-    """Whether every branch reads the test ``request`` asks for. A PROFILE test: ``submit_test`` refuses a second
-    profile of a commit with the id of the first (``profile_exists``), which may be another branch's, and the caller
-    waits on it. A BASELINE test, which only the session submits: it measured the root every branch starts from, so
-    its result is what a branch with no test of its own yet has of the server's timing."""
-    return request.kind is TestKind.PROFILE or request.purpose is Purpose.BASELINE
-
-
 async def _own_record(
-    blackboards: BlackboardFor, ctx: CallContext, request_id: str, *, session_wide: bool = False
+    blackboards: BlackboardFor,
+    ctx: CallContext,
+    request_id: str,
+    *,
+    profiles_shared: bool = False,
+    baselines_shared: bool = False,
 ) -> Any:
-    """The blackboard's record of ``request_id``, when the caller's branch asked for it, or, with ``session_wide``,
-    when every branch reads it (:func:`_session_wide`). Taking a test back stays with its own branch."""
+    """The blackboard's record of ``request_id``, when the caller's branch asked for it.
+
+    With ``profiles_shared`` a PROFILE test of any branch is also readable: ``submit_test`` refuses a second profile
+    of a commit with the id of the first (``profile_exists``), which may be another branch's, and the caller waits on
+    it. With ``baselines_shared`` so is a BASELINE test, which only the session submits: it measured the root every
+    branch starts from, so its result is what a branch with no test of its own yet has of the server's timing. Taking
+    a test back stays with its own branch.
+    """
     try:
         record = await blackboards(ctx.principal.branch).record(request_id)
     except BlackboardError as exc:
         raise ToolError(f"{type(exc).__name__}: {exc}") from exc
-    shared = session_wide and _session_wide(record.request)
+    shared = (profiles_shared and record.request.kind is TestKind.PROFILE) or (
+        baselines_shared and record.request.purpose is Purpose.BASELINE
+    )
     if record.request.branch != ctx.principal.branch and not shared:
         raise ToolForbidden("a specialist reads the tests of its own branch only")
     return record
@@ -539,20 +555,24 @@ def _result_document(request_id: str, record: Any) -> dict[str, Any]:
         state = "withdrawn"
     else:
         state = "in_flight" if record.result is None else "measured"
+    result = jsonable(record.result)
+    if result is not None and not result["timing_lines"]:
+        del result["timing_lines"]  # as the stored document: only a server that logs such lines has the key
     return {
         "request_id": request_id,
         "state": state,
         "withdrawal_reason": record.withdrawal_reason,
-        "result": jsonable(record.result),
+        "result": result,
         "judgement": jsonable(record.judgement),
         "conclusion": jsonable(record.conclusion),
     }
 
 
-def _test_result(blackboards: BlackboardFor) -> Callable[[dict[str, Any], CallContext], Any]:
+def _test_result(blackboards: BlackboardFor, baselines: bool) -> Callable[[dict[str, Any], CallContext], Any]:
     async def handle(arguments: dict[str, Any], ctx: CallContext) -> dict[str, Any]:
         request_id = arguments["request_id"]
-        return _result_document(request_id, await _own_record(blackboards, ctx, request_id, session_wide=True))
+        record = await _own_record(blackboards, ctx, request_id, profiles_shared=True, baselines_shared=baselines)
+        return _result_document(request_id, record)
 
     return handle
 
@@ -594,15 +614,17 @@ def _waiting_document(request_id: str, waited: float, progress: TestProgress | N
 
 
 def _wait_test(
-    toolbox: Toolbox, blackboards: BlackboardFor, home: asyncio.AbstractEventLoop | None, poll_seconds: float
+    toolbox: Toolbox, blackboards: BlackboardFor, home: asyncio.AbstractEventLoop | None, options: SpecialistToolOptions
 ) -> Callable[[dict[str, Any], CallContext], Any]:
+    poll_seconds, baselines = options.wait_poll_seconds, options.native_server
+
     async def handle(arguments: dict[str, Any], ctx: CallContext) -> dict[str, Any]:
         request_id = arguments["request_id"]
         budget, started = wait_budget(arguments.get("wait_seconds")), time.monotonic()
-        record = await _own_record(blackboards, ctx, request_id, session_wide=True)
+        record = await _own_record(blackboards, ctx, request_id, profiles_shared=True, baselines_shared=baselines)
         while not _is_over(record) and (left := budget - (time.monotonic() - started)) > 0:
             await asyncio.sleep(min(poll_seconds, left))
-            record = await _own_record(blackboards, ctx, request_id, session_wide=True)
+            record = await _own_record(blackboards, ctx, request_id, profiles_shared=True, baselines_shared=baselines)
         if _is_over(record):
             return _result_document(request_id, record)
         progress = await on_home_loop(home, toolbox.progress(request_id))
@@ -799,6 +821,9 @@ class SpecialistToolOptions:
     ``wait_poll_seconds`` is how often ``wait_test`` reads the record of the test it waits for.
     ``option_reviews`` keeps each branch's review of the options the session's server takes and its launch leaves
     unset; with it ``option_review`` is served, and without it (a session that laid no option inventory) it is not.
+    ``native_server`` says the session's server is built from its framework's checkout: every branch then reads the
+    session's baseline tests, whose results carry the server's timing lines, and ``test_result`` and ``wait_test``
+    say so.
     """
 
     claim_ttl_seconds: float = 600.0
@@ -808,6 +833,7 @@ class SpecialistToolOptions:
     analysis: AnalysisStarter | None = None
     wait_poll_seconds: float = WAIT_POLL_SECONDS
     option_reviews: OptionReviews | None = None
+    native_server: bool = False
 
 
 def register_specialist_tools(
@@ -865,22 +891,21 @@ def _register_test_queries(
     """Register the tools that read, wait for, cancel or size up the tests: ``test_result`` to ``queue_state``."""
     server.register(
         "test_result",
-        description=_TEST_RESULT_GUIDE,
+        description=(_TEST_RESULT_READS_NATIVE if options.native_server else _TEST_RESULT_READS) + _TEST_RESULT_GUIDE,
         schema=_REQUEST_ID,
-        handler=_test_result(blackboards),
+        handler=_test_result(blackboards, options.native_server),
         scopes=_SPECIALIST_SCOPES,
     )
     server.register(
         "wait_test",
         description=(
-            "How to wait for a test of this branch, for any branch's profile test or for a baseline test of the "
-            "session: returns as soon as its result "
+            f"{_WAIT_TEST_READS_NATIVE if options.native_server else _WAIT_TEST_READS}: returns as soon as its result "
             "lands, else after wait_seconds with the test's progress; call it again to keep waiting. A test in state "
             "pending_build is waiting for the native builds its change needs (progress.builds, each with its "
             "eta_seconds), not stuck."
         ),
         schema=_WAIT_TEST,
-        handler=_wait_test(toolbox, blackboards, home, options.wait_poll_seconds),
+        handler=_wait_test(toolbox, blackboards, home, options),
         scopes=_SPECIALIST_SCOPES,
     )
     server.register(
