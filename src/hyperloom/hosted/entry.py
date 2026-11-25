@@ -169,11 +169,7 @@ def _run() -> int:
         raise Refused(str(exc)) from None
     _check_shared_storage(info.state_dir, user_data)
     _default_runtime_dir()
-    if spec.flow == FLOW_CONC_SWEEP and not Path(str(spec.sweep_session_dir)).is_dir():
-        raise Refused(f"conc_sweep.session_dir {spec.sweep_session_dir} is not a directory")
-    if spec.flow == FLOW_MULTIBRANCH or (
-        spec.flow == FLOW_CONC_SWEEP and not is_resumable(Path(str(spec.sweep_session_dir)))
-    ):
+    if _runs_multibranch(spec):
         # install.sh's ``ensure_hosted_extra`` step installs the wheel's ``hosted`` extra into this interpreter before the command starts.
         _put_interpreter_first_on_path()
         _run_installer(info.state_dir)
@@ -213,6 +209,16 @@ def _run() -> int:
         if is_resumable(session_dir) and sweep_unfinished(session_dir):
             return _sweep(info.state_dir, session_dir, _grant_end_unix(info))
         return _optimize(optimize_command(spec, session_dir), info.state_dir, session_dir)
+
+
+def _runs_multibranch(spec: CampaignSpec) -> bool:
+    """Whether the multi-branch entry runs this spec: its flow, or a sweep of a session no single lineage resumes."""
+    if spec.flow != FLOW_CONC_SWEEP:
+        return spec.flow == FLOW_MULTIBRANCH
+    session_dir = Path(str(spec.sweep_session_dir))
+    if not session_dir.is_dir():
+        raise Refused(f"conc_sweep.session_dir {session_dir} is not a directory")
+    return not is_resumable(session_dir)
 
 
 def _check_shared_storage(state_dir: Path, user_data: Path) -> None:
