@@ -376,7 +376,7 @@ def _no_isolation(monkeypatch: pytest.MonkeyPatch) -> None:
         (lambda m: m.setattr(preflight, "tracelens_problem", lambda: "TraceLens at /x is commit 647cbf2"), "647cbf2"),
         (
             lambda m: m.setattr(preflight, "image_upstreams", lambda root: []),
-            "the image's upstream commits cannot be read",
+            "is not a git checkout and HYPERLOOM_BUILD_SGLANG_REF is not set",
         ),
     ],
     ids=["no-isolation", "tracelens", "no-image-commit"],

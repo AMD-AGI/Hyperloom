@@ -55,7 +55,7 @@ def test_a_baseline_proposed_in_the_optimisation_phase_is_refused():
         ("FRAMEWORK_AGENT", "report"),
         ("KERNEL_AGENT", "explore"),
         ("KERNEL_AGENT", "specialist"),
-        ("SWEEP", "explore"),
+        ("CYCLE_END", "explore"),
         ("CLOSE", "integrate_patch"),
     ],
 )
@@ -66,9 +66,9 @@ def test_an_action_outside_the_phase_contract_is_refused(phase: str, action: str
 
 
 def test_a_phase_that_proposes_nothing_says_so():
-    denied = _dispatcher("SWEEP").admission_denial_for_action("explore")
+    denied = _dispatcher("CYCLE_END").admission_denial_for_action("explore")
 
-    assert denied is not None and denied.hint == "SWEEP proposes: (none)"
+    assert denied is not None and denied.hint == "CYCLE_END proposes: (none)"
 
 
 @pytest.mark.parametrize(

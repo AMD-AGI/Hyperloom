@@ -90,7 +90,7 @@ _PHASE_ORIENTATION: dict[str, str] = {
         "REQUEST) plus auto-managed `profile` / `roofline`. Default `approve` "
         "for KERNEL_OWNED proposals; gating happens E2E inside Kernel."
     ),
-    "SWEEP": ("Typical proposal is `sweep`. Mismatches → `advise` with the phase hint."),
+    "CYCLE_END": ("The phase admits no proposal. Anything that reaches review → `advise` with the phase hint."),
     "CLOSE": (
         "Typical proposals are `report` and `session_breakdown`. Both are "
         "archival: they transcribe existing state and introduce no new "

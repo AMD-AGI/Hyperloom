@@ -171,7 +171,7 @@ def test_a_resumed_file_naming_a_missing_implementation_stops_the_resume(tmp_pat
     assert "socket 'events' has no implementation 'ghost'" in capsys.readouterr().err
 
 
-def test_optimize_resolves_the_plugs_before_any_session_is_opened_and_installs_and_runs_inside_the_host() -> None:
+def test_optimize_resolves_the_plugs_before_any_session_is_opened_and_runs_the_coordinator_inside_the_host() -> None:
     tree = ast.parse(inspect.getsource(ocli._run_optimize))
     first_line = {}
     for node in ast.walk(tree):
@@ -182,8 +182,17 @@ def test_optimize_resolves_the_plugs_before_any_session_is_opened_and_installs_a
     assert first_line["open_plug_host"] < first_line["_bootstrap_recipe_kb"]
     withs = [n for n in ast.walk(tree) if isinstance(n, ast.With) and "running_plug_host" in ast.unparse(n.items[0])]
     assert len(withs) == 1
-    inside = {ast.unparse(c.func) for c in ast.walk(withs[0]) if isinstance(c, ast.Call)}
-    assert {"_install_executors", "coordinator.run"} <= inside
+    assert any("coordinator.run" in ast.unparse(c) for c in ast.walk(withs[0]) if isinstance(c, ast.Call))
+
+
+def test_optimize_starts_the_host_after_its_executors_and_closes_the_run_when_the_host_does_not_start() -> None:
+    tree = ast.parse(inspect.getsource(ocli._run_optimize))
+    guarded = next(n for n in ast.walk(tree) if isinstance(n, ast.Try) and "running_plug_host" in ast.unparse(n.body))
+    inside = {ast.unparse(c.func) for c in ast.walk(guarded) if isinstance(c, ast.Call)}
+    assert not {"_install_executors", "_snapshot_system_prompts", "_print_backend_banner"} & inside
+    assert [ast.unparse(s) for s in guarded.finalbody] == [
+        "await _close_optimize_run(coordinator, session_lock, session_dir, stop_reason)"
+    ]
 
 
 @pytest.mark.parametrize(

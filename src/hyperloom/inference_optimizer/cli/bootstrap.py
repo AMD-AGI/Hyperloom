@@ -69,10 +69,12 @@ _RESEARCH_SCOUT_INTERVAL = 3
 
 @dataclass(frozen=True)
 class HostedPlugInputs:
-    """What a hosted run gives the plug host: the lock layer and the host inputs."""
+    """What a hosted run gives the plug host: the lock layer and the host inputs, and when its grant ends (Unix
+    seconds, ``None`` for a grant with no runtime)."""
 
     lock: Mapping[str, Mapping[str, str]]
     host_info: object
+    grant_end_unix: float | None = None
 
 
 _hosted_inputs: HostedPlugInputs | None = None
@@ -82,6 +84,11 @@ def set_hosted_plug_inputs(inputs: HostedPlugInputs | None) -> None:
     """Called by the hosted entry before ``optimize`` starts; ``None`` clears it.  Unset, plug resolution is unchanged."""
     global _hosted_inputs
     _hosted_inputs = inputs
+
+
+def hosted_grant_end_unix() -> float | None:
+    """When the hosted run's grant ends, Unix seconds; ``None`` outside a hosted run or for a grant with no runtime."""
+    return None if _hosted_inputs is None else _hosted_inputs.grant_end_unix
 
 
 def resolve_plug_manifest(args: argparse.Namespace) -> ResolvedManifest:
@@ -849,25 +856,19 @@ def _phase_toggle_fields(args: argparse.Namespace) -> dict[str, Any]:
     }
 
 
-def _conc_sweep_enabled(args: argparse.Namespace, benchmark_mode: str) -> bool:
-    # Off under AgentX by default: each rung is a 3600s window and the session grades at a fixed CONC.
-    return not is_agentx_mode(benchmark_mode) if args.enable_conc_sweep is None else args.enable_conc_sweep
-
-
 def _benchmark_mode() -> str:
     return _AGENTX_MODE if _agentx_enabled() else _SYNTHETIC_MODE
 
 
 def resolve_session_base(session_dir: Path, args: argparse.Namespace, *, framework: str) -> BaseLaunch:
-    """Resolve a fresh session's base launch; it settles the TP and EP the manifest and the seeded state record."""
-    benchmark_mode = _benchmark_mode()
-    sweep = _parse_conc_sweep_concs(args, benchmark_mode) if _conc_sweep_enabled(args, benchmark_mode) else []
+    """Resolve a fresh session's base launch at its CONC; it settles the TP and EP the manifest and the seeded state
+    record."""
     return resolve_base_launch(
         args,
         session_dir,
         framework=framework,
-        benchmark_mode=benchmark_mode,
-        concurrencies=(int(args.conc), *sweep),
+        benchmark_mode=_benchmark_mode(),
+        concurrencies=(int(args.conc),),
     )
 
 
@@ -897,8 +898,6 @@ def _seed_shared_state(
 
         agentx_backend = agentic_backend()
     workload = _workload_fields(args)
-    conc_sweep_enabled = _conc_sweep_enabled(args, benchmark_mode)
-    conc_sweep_concs = _parse_conc_sweep_concs(args, benchmark_mode)
     state = SharedState(
         session_id=session_id,
         claw_session_id=os.environ.get("CLAW_SESSION_ID", "").strip(),
@@ -934,14 +933,13 @@ def _seed_shared_state(
         gpu_specialist_capacity=max(0, int(args.gpu_specialist_capacity)),
         plateau_overrides=plateau_overrides,
         **_phase_toggle_fields(args),
-        conc_sweep_enabled=conc_sweep_enabled,
+        conc_sweep_enabled=args.enable_conc_sweep,
         benchmark_mode=benchmark_mode,
         measurement_epoch=MEASUREMENT_EPOCH,
         agentx_backend=agentx_backend,
         agentx_accuracy=not getattr(args, "no_agentx_accuracy", False),
         grading=seed_grading(framework, benchmark_mode),
-        conc_sweep_concs=conc_sweep_concs,
-        conc_sweep_total_budget_sec=int(getattr(args, "conc_sweep_total_budget_sec", 9000)),
+        conc_sweep_concs=list(args.conc_sweep_concs),
     )
     state.save(session_dir)
     return state
@@ -1072,7 +1070,7 @@ def _begin_resume_leg(state: SharedState) -> None:
     Clears the previous leg's terminal bookkeeping: a stale ``stop_reason``
     makes Orchestration heartbeats think the work is done, a stale closing
     flag resumes straight into a wind-down already finished, and a stale
-    ``target_reached_at`` sends the leg to SWEEP against an objective the
+    ``target_reached_at`` sends the leg to CYCLE_END against an objective the
     resume may have raised. The Coordinator stamps it again on the first tick
     the restored objective holds.
 
@@ -1143,26 +1141,6 @@ def _reconcile_crash_count(state: SharedState, session_dir: Path) -> None:
         reconcile_final_crash_count(session_dir, live)
     except (OSError, ValueError, TypeError, AttributeError):
         log.exception("crash_count reconcile (final.json) failed (non-fatal)")
-
-
-def _parse_conc_sweep_concs(args: argparse.Namespace, benchmark_mode: str) -> list[int]:
-    """Parse ``--conc-sweep-concs`` into a list[int]; non-integers warned+dropped."""
-    from hyperloom.orchestrator.kernel.conc_sweep import default_concs_for_mode
-
-    fallback = default_concs_for_mode(benchmark_mode)
-    raw = str(getattr(args, "conc_sweep_concs", "") or "").strip()
-    if not raw:
-        return fallback
-    out: list[int] = []
-    for tok in raw.split(","):
-        t = tok.strip()
-        if not t:
-            continue
-        try:
-            out.append(int(t))
-        except ValueError:
-            log.warning("conc_sweep: ignoring non-integer CONC token %r", t)
-    return out or fallback
 
 
 def _read_failure_summary(session_dir: Path) -> dict | None:

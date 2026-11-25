@@ -13,6 +13,7 @@ import stat
 import subprocess
 import sys
 import tempfile
+from datetime import datetime, timezone
 from pathlib import Path
 
 import pytest
@@ -204,6 +205,24 @@ def test_a_second_start_of_the_same_run_resumes_the_same_directory(run, monkeypa
     assert [a for a in fake.calls[1] if a.startswith("--session-dir")] == []
     assert fake.calls[1] == ["optimize", f"--resume-from={first}", "--plug-profile=hosted-gpu"]
     assert _session_json(run) == first
+
+
+def test_a_restart_over_a_closed_session_whose_sweep_did_not_finish_sweeps_it_and_ends_the_run(run, monkeypatch):
+    from hyperloom.orchestrator.conc_sweep import cli as sweep_cli
+
+    closed = {"stop_reason": "cycle_end_done", "conc_sweep_enabled": True, "close_sequence_done": True}
+    fake = FakeOptimize(monkeypatch, returncode=1, effect=lambda argv: None)
+    entry.main(["run"])
+    session = Path(_session_json(run))
+    (session / "state.json").write_text(json.dumps(closed))
+    swept: list[list[str]] = []
+    monkeypatch.setattr(sweep_cli, "main", lambda argv: swept.append(argv) or 0)
+    run.restart()
+
+    assert entry.main(["run"]) == 0
+
+    assert swept == [[str(session)]] and len(fake.calls) == 1
+    assert _exit(run) == {"final": True, "returncode": 0, "stop_reason": "cycle_end_done"}
 
 
 def test_a_different_run_never_reuses_another_runs_directory(run, monkeypatch):
@@ -530,6 +549,16 @@ def test_the_host_values_travel_in_code_to_the_plug_host(run, monkeypatch):
         "gpu_hours": 12,
         "max_runtime_sec": None,
     }
+    assert hosted.grant_end_unix is None
+
+
+def test_a_grant_with_a_runtime_tells_the_run_when_it_ends(run, monkeypatch):
+    monkeypatch.setenv(Var.GRANT_LIMITS, json.dumps({"max_gpus": 8, "gpu_hours": 12, "max_runtime_sec": 7200}))
+    fake = FakeOptimize(monkeypatch)
+    entry.main(["run"])
+    (hosted,) = fake.runs
+    created = datetime(2026, 10, 23, 8, 30, 5, tzinfo=timezone.utc).timestamp()
+    assert hosted.grant_end_unix == created + 7200
 
 
 def dataclass_dict(value):

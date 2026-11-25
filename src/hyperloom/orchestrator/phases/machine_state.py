@@ -29,12 +29,12 @@ from .phase_chain import (
     PHASE_ALLOWED_ACTIONS,
     PHASE_CLOSE,
     PHASE_COORDINATOR_RESERVED,
+    PHASE_CYCLE_END,
     PHASE_ENABLEMENT,
     PHASE_FRAMEWORK_AGENT,
     PHASE_KERNEL_AGENT,
     PHASE_NAMES,
     PHASE_PRELUDE,
-    PHASE_SWEEP,
     HistoryEntry,
     LifecycleMark,
     _PHASE_HISTORY_CAP,
@@ -60,13 +60,13 @@ ENABLEMENT_MAX_ATTEMPTS: int = 8
 
 # Default phase budgets (% of wall-clock). ENABLEMENT is absent on purpose: a
 # budget apportions optimisation effort, and a combo that cannot run has nothing
-# to optimise. It carries no cap at all, and so has no override flag either.
+# to optimise. CYCLE_END is absent too: it only drains and validates on entry,
+# which the session budget alone gates. Neither carries a cap or an override flag.
 DEFAULT_PHASE_BUDGET_PCT: dict[str, float] = {
     PHASE_PRELUDE: 0.03,
     # The optimisation phase carries both levers' share.
-    PHASE_FRAMEWORK_AGENT: 0.38,
-    PHASE_KERNEL_AGENT: 0.47,
-    PHASE_SWEEP: 0.05,
+    PHASE_FRAMEWORK_AGENT: 0.40,
+    PHASE_KERNEL_AGENT: 0.50,
     PHASE_CLOSE: 0.02,
 }
 
@@ -90,7 +90,7 @@ DEFAULT_PLATEAU_EXPLORE_LOOKBACK: int = 5
 DEFAULT_FRAMEWORK_PLATEAU_NO_KEEP_STREAK: int = 5
 
 
-# R1 macro-cycle reloop: SWEEP loops back to FRAMEWORK_AGENT for a new macro-cycle while budget remains and the run
+# R1 macro-cycle reloop: CYCLE_END loops back to FRAMEWORK_AGENT for a new macro-cycle while budget remains and the run
 # hasn't globally converged.
 
 # Share of a bounded session's total budget that must remain to open a cycle.
@@ -231,31 +231,25 @@ def redistribute_budget_pct(
     *,
     optimize_enabled: bool = True,
     kernel_enabled: bool = True,
-    sweep_enabled: bool = True,
 ) -> dict[str, float]:
-    """Move disabled work-phase shares to enabled work phases.
+    """Move disabled work-phase shares to the enabled work phase.
 
-    FRAMEWORK_AGENT, KERNEL_AGENT, and SWEEP absorb proportionally, capped at
-    1.0; PRELUDE, ENABLEMENT, and CLOSE never absorb. A SWEEP whose concurrency
-    sweep is off only drains and validates on entry, which the session budget
-    alone gates, so a share there would just shrink the phases before it.
+    FRAMEWORK_AGENT and KERNEL_AGENT absorb proportionally, capped at 1.0; PRELUDE, ENABLEMENT, CYCLE_END, and CLOSE
+    never absorb.
     """
     out = dict(base)
-    toggles = {PHASE_FRAMEWORK_AGENT: optimize_enabled, PHASE_KERNEL_AGENT: kernel_enabled, PHASE_SWEEP: sweep_enabled}
+    toggles = {PHASE_FRAMEWORK_AGENT: optimize_enabled, PHASE_KERNEL_AGENT: kernel_enabled}
     disabled = [phase for phase, enabled in toggles.items() if not enabled]
     freed = sum(float(out.get(p, 0.0)) for p in disabled)
     for p in disabled:
         out[p] = 0.0
     if freed <= 0.0:
         return out
-    absorbers = [p for p in (PHASE_FRAMEWORK_AGENT, PHASE_KERNEL_AGENT, PHASE_SWEEP) if p not in disabled]
+    absorbers = [p for p in (PHASE_FRAMEWORK_AGENT, PHASE_KERNEL_AGENT) if p not in disabled]
     weight = sum(float(out.get(p, 0.0)) for p in absorbers)
     if weight > 0.0:
         for p in absorbers:
             out[p] = float(out.get(p, 0.0)) + freed * float(out.get(p, 0.0)) / weight
-    elif sweep_enabled:
-        # No weighted absorber left → park the freed share on SWEEP.
-        out[PHASE_SWEEP] = float(out.get(PHASE_SWEEP, 0.0)) + freed
     # Own our output: a share above a full wall clock is unspendable, and
     # leaving it in place makes the downstream re-normalize drop it back to the
     # phase default (i.e. *less* budget than asked for). Discard the excess.
@@ -990,12 +984,12 @@ __all__ = [
     "PHASE_ALLOWED_ACTIONS",
     "PHASE_CLOSE",
     "PHASE_COORDINATOR_RESERVED",
+    "PHASE_CYCLE_END",
     "PHASE_ENABLEMENT",
     "PHASE_FRAMEWORK_AGENT",
     "PHASE_KERNEL_AGENT",
     "PHASE_NAMES",
     "PHASE_PRELUDE",
-    "PHASE_SWEEP",
     "HistoryEntry",
     "LifecycleMark",
     "PhaseClock",

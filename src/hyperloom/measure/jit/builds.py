@@ -8,6 +8,11 @@ and nothing for one it finds already built, so a test that found its modules in 
 one server build the same module at the same time (one compiles, the others wait for its lock), so the compile time is
 the longest cost seen for each module, summed over modules; the count is of distinct modules.
 
+SGLang's monokernel plugin builds its FlyDSL launches before the server is ready and says how long that took, warm or cold
+(``monokernel <name> on <arch>: widths <widths> built in <seconds> s``): those seconds join the compile time, the longest
+for each monokernel, so a test that found its launches in FlyDSL's cache shows it. They are no module aiter built and
+leave the count alone.
+
 The compile time is not a phase of the test: aiter builds while the server captures its graphs, so a phase would count
 those seconds twice.
 """
@@ -35,6 +40,7 @@ _FINISH = re.compile(rf"finish build {_NAME},? cost:? (\d+(?:\.\d+)?)s")
 #: run of down arrows, the traceback with the compiler's output, then the tag again with up arrows.
 _FAILED_OPEN = re.compile(r"failed jit build \[([A-Za-z0-9_.-]+)\]\u2193")
 _FAILED_CLOSE = re.compile(r"failed jit build \[([A-Za-z0-9_.-]+)\]\u2191")
+_MONOKERNEL = re.compile(r"monokernel (\S+) on \S+: widths .* built in (\d+(?:\.\d+)?) s\b")
 _ANSI = re.compile(r"\x1b\[[0-9;]*m")
 _UNPRINTABLE = re.compile(r"[^\x20-\x7e]")
 #: A clang diagnostic (``file:line:column: error: message``) and, for a failed code generator, the exception it ends with.
@@ -60,6 +66,8 @@ class BuildLog:
     failed: Mapping[str, str] = field(default_factory=dict)
     #: The modules a tuned table asked for a kernel they lack, each with the first such kernel the log names.
     missing_kernels: Mapping[str, str] = field(default_factory=dict)
+    #: The seconds the monokernel plugin took to build each monokernel's FlyDSL launches, as the longest the log says.
+    monokernels: Mapping[str, float] = field(default_factory=dict)
 
     @property
     def builds_seen(self) -> int:
@@ -67,7 +75,7 @@ class BuildLog:
 
     @property
     def compile_seconds(self) -> float:
-        return sum(self.seconds.values())
+        return sum(self.seconds.values()) + sum(self.monokernels.values())
 
 
 def server_logs(root: Path) -> list[Path]:
@@ -78,34 +86,44 @@ def server_logs(root: Path) -> list[Path]:
 
 def scan_builds(logs: Iterable[Path]) -> BuildLog:
     """Read the build lines of ``logs``, line by line, each log up to 256 MiB."""
-    seconds: dict[str, float] = {}
-    started: set[str] = set()
-    failed: dict[str, str] = {}
-    missing: dict[str, str] = {}
+    found = _Found()
     for log in logs:
         try:
             with open(log, "rb") as handle:
-                _scan(handle, seconds, started, failed, missing)
+                _scan(handle, found)
         except OSError:
             continue
-    return BuildLog(seconds, frozenset(started), failed, missing)
+    return BuildLog(found.seconds, frozenset(found.started), found.failed, found.missing, found.monokernels)
 
 
-def _scan(
-    handle: BinaryIO, seconds: dict[str, float], started: set[str], failed: dict[str, str], missing: dict[str, str]
-) -> None:
+@dataclass
+class _Found:
+    """What the logs read so far said, by the fields of :class:`BuildLog`."""
+
+    seconds: dict[str, float] = field(default_factory=dict)
+    started: set[str] = field(default_factory=set)
+    failed: dict[str, str] = field(default_factory=dict)
+    missing: dict[str, str] = field(default_factory=dict)
+    monokernels: dict[str, float] = field(default_factory=dict)
+
+
+def _scan(handle: BinaryIO, found: _Found) -> None:
     """Read the lines of ``handle``. A failed-build record still open where the reading stops (the log was cut inside
     it) names its module with what it said so far: its opening tag already says the build failed."""
     record: _FailedBuild | None = None
     for line in _lines(handle):
         if record is not None:
             if record.take(line):
-                failed.setdefault(record.module, record.excerpt())
+                found.failed.setdefault(record.module, record.excerpt())
                 record = None
             continue
         if COMPILED_REGISTRY_MARKER in line:
             for op, kernel in _REGISTRY_MISS.findall(line):
-                missing.setdefault(f"{_MODULE_PREFIX}{op}", kernel)
+                found.missing.setdefault(f"{_MODULE_PREFIX}{op}", kernel)
+        built = _MONOKERNEL.search(line) if "monokernel" in line else None
+        if built:
+            name = built.group(1)
+            found.monokernels[name] = max(found.monokernels.get(name, 0.0), float(built.group(2)))
         if "build" not in line:
             continue
         opened = _FAILED_OPEN.search(_ANSI.sub("", line))
@@ -114,13 +132,13 @@ def _scan(
             continue
         begun = _START.search(line)
         if begun:
-            started.add(_module(begun))
+            found.started.add(_module(begun))
         done = _FINISH.search(line)
         if done:
             name = _module(done)
-            seconds[name] = max(seconds.get(name, 0.0), float(done.group(3)))
+            found.seconds[name] = max(found.seconds.get(name, 0.0), float(done.group(3)))
     if record is not None:
-        failed.setdefault(record.module, record.excerpt())
+        found.failed.setdefault(record.module, record.excerpt())
 
 
 def _lines(handle: BinaryIO) -> Iterator[str]:

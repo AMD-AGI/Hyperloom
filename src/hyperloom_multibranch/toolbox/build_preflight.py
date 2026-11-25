@@ -401,8 +401,8 @@ def sources_problems(site: PreflightSite, upstreams: Sequence[ImageUpstream]) ->
         names = " or ".join(_DISTRIBUTIONS.values())
         yield (
             f"the image's upstream commits cannot be read: HYPERLOOM_BUILD_IMAGE_ROOT {site.image_root} installs no "
-            f"{names} that names one, {IMAGE_SGLANG_CHECKOUT} is not a git checkout, HYPERLOOM_BUILD_SGLANG_REF "
-            "is not set and FRAMEWORK_REPO_PATH names no checkout a native component is built from"
+            f"{names} that names one, {IMAGE_SGLANG_CHECKOUT} is not a git checkout and HYPERLOOM_BUILD_SGLANG_REF "
+            "is not set"
         )
         return
     for up in upstreams:

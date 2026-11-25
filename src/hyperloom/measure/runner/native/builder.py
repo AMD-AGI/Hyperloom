@@ -210,13 +210,14 @@ class _Steps:
 def _run_steps(
     laid: LaidTree, scratch: Path, started: float, run: Callable[..., subprocess.CompletedProcess[str]]
 ) -> _Steps:
-    """Run the recipe's steps in the tree until one exits non-zero. They share the recipe's budget: a step with none of
-    it left is not started, and the compile ends as timed out (``-1``)."""
+    """Run the recipe's steps in the tree until one exits non-zero. They share the recipe's budget: the first has all
+    of it (a one-step recipe's timeout is the budget itself), a later one what is left in whole seconds, and one with
+    none left is not started: the compile ends as timed out (``-1``)."""
     recipe, machine = laid.recipe, laid.machine
     env = {**laid.environment, **recipe.environment(machine.gfx_arch, scratch)}
     tails: list[str] = []
-    for argv in recipe.commands(machine.python, machine.gfx_arch, laid.upstream_ref):
-        left = int(recipe.budget_sec - (time.monotonic() - started))
+    for step, argv in enumerate(recipe.commands(machine.python, machine.gfx_arch, laid.upstream_ref)):
+        left = int(recipe.budget_sec - (time.monotonic() - started)) if step else recipe.budget_sec
         if left <= 0:
             return _Steps(-1, tuple(tails))
         result = run_argv(argv, cwd=tree_dir(scratch), env=env, timeout_sec=left, run=run)
