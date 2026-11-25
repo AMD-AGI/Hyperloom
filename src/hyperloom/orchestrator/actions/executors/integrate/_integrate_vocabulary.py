@@ -24,8 +24,8 @@ RESULT_BENCHED = "benched"
 
 #: True on a result whose verdict the performance gate reached on a round the session could grade against its base:
 #: the candidate was judged, on that comparison or on the accuracy or switch-off parity it then owed. Absent or
-#: false on every other result, a parity leg that could not be measured included, which is no verdict on the
-#: candidate.
+#: false on every other result, which is no verdict on the candidate: among them a parity leg that returned no
+#: throughput or had no base to compare with.
 RESULT_GRADED = "graded"
 
 #: Set on every result of an attempt that reached the apply stage: whether it put changed framework code where its
