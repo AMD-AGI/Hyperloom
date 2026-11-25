@@ -3306,3 +3306,19 @@ def test_a_sweep_spec_sweeps_the_closed_session_it_names_on_its_points_and_tests
 def test_a_sweep_spec_naming_no_closed_multibranch_session_is_refused(tmp_path: Path) -> None:
     with pytest.raises(ValueError, match="holds no closed multi-branch session"):
         cli._hosted_sweep(SimpleNamespace(grant_limits=None), _sweep_spec(tmp_path / "nothing"))  # type: ignore[arg-type]
+
+
+def test_a_sweep_spec_launches_no_agent_so_the_host_need_not_isolate_one(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    spec = _sweep_spec(tmp_path / "session")
+    monkeypatch.setattr(cli, "campaign_spec", lambda host: spec)
+    monkeypatch.setattr(cli, "require_local_image", lambda spec, environ: None)
+
+    def unisolated(spec: CampaignSpec, environ: object) -> None:
+        raise AssertionError("asked to isolate agents")
+
+    monkeypatch.setattr(cli, "require_hosted_isolation", unisolated)
+    monkeypatch.setattr(cli, "_hosted_sweep", lambda host, spec: "the sweep")
+
+    assert cli._hosted_start(SimpleNamespace(grant_limits=None)) == "the sweep"  # type: ignore[arg-type]

@@ -12,7 +12,7 @@ as given for the multibranch entry.
 from __future__ import annotations
 
 import math
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from enum import Enum
 from typing import Any
@@ -22,6 +22,8 @@ FLOW_SINGLE = "single"
 FLOW_MULTIBRANCH = "multibranch"
 #: Sweep a closed session, of either flow, over its concurrencies; ``conc_sweep.session_dir`` names it.
 FLOW_CONC_SWEEP = "conc_sweep"
+#: The attribute ``options.conc_sweep`` lands on: whether a session sweeps once it closes.
+_SWEEP_OPTION = "conc_sweep"
 MEASUREMENT_LOCAL = "local"
 MEASUREMENT_HOSTED = "hosted"
 #: The profile whose application container has cards of its own, the only one a multibranch run measures locally on.
@@ -93,7 +95,7 @@ FIELDS: tuple[Field, ...] = (
     Field("launch.extra_env", "extra_env", Kind.STR_MAP),
     Field("options.kernel", "kernel", Kind.BOOL),
     Field("options.framework_agent", "framework_agent", Kind.BOOL),
-    Field("options.conc_sweep", "conc_sweep", Kind.BOOL),
+    Field("options.conc_sweep", _SWEEP_OPTION, Kind.BOOL),
     Field("options.eval", "eval", Kind.ENUM, choices=(True,)),
     Field("options.enablement", "enablement", Kind.ENUM, choices=("all", "launch", "eval", "off")),
     Field("placement.profile", "profile", Kind.ENUM, required=True, choices=(PROFILE_WITH_CARDS, "hosted-cpu")),
@@ -187,20 +189,24 @@ def _describe(field: Field) -> str:
     return _DESCRIPTIONS[field.kind]
 
 
+#: The kinds whose check reads the value alone, not the field's choices or bounds.
+_VALUE_CHECKS: dict[Kind, Callable[[object], bool]] = {
+    Kind.STR: lambda value: isinstance(value, str) and bool(value.strip()),
+    Kind.TEXT: lambda value: isinstance(value, str),
+    Kind.BOOL: lambda value: isinstance(value, bool),
+    Kind.STR_MAP: lambda value: (
+        isinstance(value, dict) and all(isinstance(k, str) and isinstance(v, str) for k, v in value.items())
+    ),
+    Kind.INT_LIST: lambda value: isinstance(value, list) and bool(value) and all(_is_int(v) and v >= 1 for v in value),
+}
+
+
 def _well_typed(field: Field, value: object) -> bool:
     kind = field.kind
-    if kind == Kind.STR:
-        return isinstance(value, str) and bool(value.strip())
-    if kind == Kind.TEXT:
-        return isinstance(value, str)
-    if kind == Kind.BOOL:
-        return isinstance(value, bool)
+    if kind in _VALUE_CHECKS:
+        return _VALUE_CHECKS[kind](value)
     if kind == Kind.ENUM:
         return any(value == c and type(value) is type(c) for c in field.choices)
-    if kind == Kind.STR_MAP:
-        return isinstance(value, dict) and all(isinstance(k, str) and isinstance(v, str) for k, v in value.items())
-    if kind == Kind.INT_LIST:
-        return isinstance(value, list) and bool(value) and all(_is_int(v) and v >= 1 for v in value)
     if not (_is_int(value) if kind == Kind.INT else _is_num(value)):
         return False
     if field.minimum is not None and value < field.minimum:
@@ -325,7 +331,7 @@ _VALUE_FLAGS: tuple[tuple[str, str], ...] = (
 _OFF_FLAGS: tuple[tuple[str, str], ...] = (
     ("kernel", "--no-kernel"),
     ("framework_agent", "--no-framework-agent"),
-    ("conc_sweep", "--no-enable-conc-sweep"),
+    (_SWEEP_OPTION, "--no-enable-conc-sweep"),
 )
 
 

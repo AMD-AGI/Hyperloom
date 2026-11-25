@@ -180,7 +180,8 @@ def _run() -> int:
     lock = _plug_lock(spec)
     # From here on the host-only inputs live in ``info`` only: no child process may inherit them.
     info = take_host_info(os.environ, require=())
-    _require_isolation(info)
+    if spec.flow != FLOW_CONC_SWEEP:  # a sweep launches no agent, so there is none to isolate
+        _require_isolation(info)
     session_dir = _sweep_target(spec) if spec.flow == FLOW_CONC_SWEEP else _prepare_session_dir(spec, info)
     try:
         archive = ensure_archive_root(session_dir)

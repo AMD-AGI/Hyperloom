@@ -1290,7 +1290,9 @@ def _sweep_spec(run, session_dir: Path, **placement):
     run.spec.write_text(json.dumps(doc))
 
 
-def test_the_sweep_flow_sweeps_the_closed_session_it_names_with_its_points_and_ends_the_run(run, monkeypatch):
+def test_the_sweep_flow_sweeps_the_closed_session_it_names_with_its_points_and_ends_the_run(
+    run, monkeypatch, isolation
+):
     from hyperloom.orchestrator.conc_sweep import cli as sweep_cli
 
     session = _closed_session(run, monkeypatch)
@@ -1304,6 +1306,7 @@ def test_the_sweep_flow_sweeps_the_closed_session_it_names_with_its_points_and_e
 
     assert swept == [(session, {"concs": (2, 8), "deadline_unix": None})] and fake.calls == []
     assert _exit(run) == {"final": True, "returncode": 0, "stop_reason": "cycle_end_done"}
+    assert isolation.asked[1:] == [], "a sweep launches no agent, so none is isolated"
 
 
 def test_the_sweep_flow_refuses_a_session_that_has_not_closed(run, monkeypatch):

@@ -35,6 +35,7 @@ AGENTX_FRAMEWORKS = frozenset({"sglang", "vllm", "atom"})
 
 #: The field every launch layer keeps its argv in.
 _ARGS = "args"
+_ENV = "env"
 _RUNNER_OWNED_ENV = "the runner-owned env"
 _COMMIT = re.compile(r"[0-9a-f]{40}")
 _ENV_NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
@@ -356,19 +357,19 @@ class SourcePointLaunch:
 
     def __post_init__(self) -> None:
         _FIELDS.integer(self.conc, "a source launch's concurrency", minimum=1)
-        object.__setattr__(self, "args", _FIELDS.string_tuple(self.args, "a source launch's args"))
-        object.__setattr__(self, "env", MappingProxyType(dict(self.env)))
+        object.__setattr__(self, _ARGS, _FIELDS.string_tuple(self.args, "a source launch's args"))
+        object.__setattr__(self, _ENV, MappingProxyType(dict(self.env)))
 
     def to_document(self) -> dict[str, object]:
-        return {"conc": self.conc, "args": list(self.args), "env": dict(sorted(self.env.items()))}
+        return {"conc": self.conc, _ARGS: list(self.args), _ENV: dict(sorted(self.env.items()))}
 
     @classmethod
     def from_document(cls, document: object) -> SourcePointLaunch:
         fields = _FIELDS.known(document, field_names(cls), "a source launch")
-        env = fields.get("env") or {}
+        env = fields.get(_ENV) or {}
         if not isinstance(env, Mapping) or not all(isinstance(v, str) for v in env.values()):
             raise BaseLaunchError("a source launch's env maps names to strings")
-        return cls(fields.get("conc"), _FIELDS.strings(fields.get("args", ()), "a source launch's args"), dict(env))
+        return cls(fields.get("conc"), _FIELDS.strings(fields.get(_ARGS, ()), "a source launch's args"), dict(env))
 
 
 @dataclass(frozen=True)
