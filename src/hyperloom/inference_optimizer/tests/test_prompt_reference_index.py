@@ -182,3 +182,12 @@ def test_read_reference_unknown_name_returns_available_list(file_reader):
     result = file_reader.read_reference("nonexistent_reference_xyz")
     assert "not found" in result
     assert "available" in result
+
+
+def test_agentx_serving_is_indexed_only_in_the_framework_phase_of_an_agentx_session(refs_dir):
+    """The serving models are an AgentX reference the FRAMEWORK_AGENT reads on demand, never injected text."""
+    for phase in _ps.PHASE_NAMES:
+        index = "\n".join(_section_reference_index(references_dir=refs_dir, phase=phase, benchmark_mode="agentx"))
+        assert ("agentx_serving" in index) == (phase == "FRAMEWORK_AGENT"), phase
+    synthetic = _section_reference_index(references_dir=refs_dir, phase="FRAMEWORK_AGENT", benchmark_mode="synthetic")
+    assert "agentx_serving" not in "\n".join(synthetic)
