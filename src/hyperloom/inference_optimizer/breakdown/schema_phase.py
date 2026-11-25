@@ -232,12 +232,9 @@ class V6PhaseProposalReview(TypedDict, total=False):
     """The Critic's ruling on one proposal, filed on the proposal."""
 
     verdict: str
-    effective_verdict: str
-    held_to_rule: bool
     source: str
     reasoning: str
     confidence: float | None
-    failure_reason_code: str | None
     required_evidence: list[str]
     risks: list[dict[str, Any]]
     advice_text: str | None
