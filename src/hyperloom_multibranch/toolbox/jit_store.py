@@ -46,8 +46,8 @@ JIT_STORE_NOTE = "jit_store.json"
 
 #: What a hosted session does without a refused store, said in its warning and note.
 REFUSED_HOSTED = (
-    "this host publishes nothing to it; hosted runners do not read it in any case: every test builds cold, and a "
-    "candidate that patches aiter's csrc or hsa is refused by its runner"
+    "this host neither serves it to the runners nor publishes to it: every test builds cold, and a candidate that "
+    "patches aiter's csrc or hsa is refused by its runner"
 )
 #: What a local session does without a refused store, said in its warning and note.
 REFUSED_LOCAL = (

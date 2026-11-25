@@ -247,6 +247,13 @@ class DirJitStore:
             return Fetched(snapshot, len(snapshot.files), size, tuple(problems))
         return Fetched(None, 0, 0, tuple(problems))
 
+    def generations(self, kind: CacheKind, key: str) -> list[Snapshot]:
+        """The snapshots of ``kind`` under ``key`` a reader tries, in the order it tries them; lists that do not verify
+        are left out. A host that serves a sandbox the cache packs from these (:mod:`hyperloom.measure.jit.serve`)."""
+        if kind not in KINDS or not SHA256_RE.fullmatch(key):
+            return []
+        return self._generations(kind, key)[0][:_GENERATIONS_TRIED]
+
     def _generations(self, kind: CacheKind, key: str) -> tuple[list[Snapshot], list[str]]:
         directory = self._root / SNAPSHOTS_DIR / kind.name / key
         try:

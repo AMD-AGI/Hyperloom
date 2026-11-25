@@ -8,8 +8,10 @@ and the environment of the server. This module reads those facts, asks :mod:`hyp
 each kind and hands the backend a :class:`~hyperloom.measure.jit.session.JitCacheSession`. Nothing here is a reason
 for a test to fail: a fact that cannot be read switches the kind that needs it off, with a note, and the test builds cold.
 
-``HYPERLOOM_JIT_CACHE`` names the cache's directory, for a runner on the store's own machine (the local toolbox sets it);
-a hosted ``measurement`` template must not set it. Without it there is no cache.
+A hosted runner never sees the store: its host serves the snapshots it asks for into the sandbox
+(:mod:`hyperloom.measure.jit.serve`), and the session reads the directory they were unpacked in (``Surroundings.served``).
+``HYPERLOOM_JIT_CACHE`` names a store the runner reads directly instead, for a runner on the store's own machine (the
+local toolbox); a hosted ``measurement`` template must not set it. Without either there is no cache.
 """
 
 from __future__ import annotations
@@ -64,7 +66,6 @@ from hyperloom.measure.jit.modules import (
 )
 from hyperloom.measure.jit.native.config import BuildStoreConfigError, store_from_environment
 from hyperloom.measure.jit.native.laying import NamedBuild, NativeLayError, SheetBuilds, sheet_builds
-from hyperloom.measure.jit.native.needs import PACKAGE_ROOT
 from hyperloom.measure.jit.native.record import COMPILE_ENV_PREFIX, BuildRecord
 from hyperloom.measure.jit.prewarmed import unlike_prewarmed
 from hyperloom.measure.jit.session import GivenModules, JitCacheSession, KindPlan, files_below
@@ -97,6 +98,7 @@ _DIRECTORY = "dir"
 _UTF8 = "utf-8"
 _PREFLIGHT_MISMATCH = "preflight_mismatch"
 _SPEC_REJECTED = "spec_rejected"
+_RUNTIME_KIND = "runtime"
 _MODULE_SUFFIX = ".so"
 #: Where below aiter's package the image keeps FlyDSL's compiled launches of aiter's own kernels: aiter points FlyDSL there
 #: when nothing else names a directory (``aiter/__init__.py``).
@@ -118,6 +120,8 @@ class Surroundings:
     staging: Path
     read_blob: Callable[[str], bytes]
     notes: list[str]
+    #: The directory the snapshots the host serves are unpacked in, when the host offered to serve the cache.
+    served: Path | None = None
 
 
 @dataclass(frozen=True)
@@ -159,10 +163,14 @@ def build_session(
     be what runs. It is refused (``preflight_mismatch``) when this runner cannot give the test its own JIT directory.
     """
     needs_jit_dir = patches_aiter_sources(spec.environment.roots)
-    root = around.environ.get(JIT_CACHE_ENV, "").strip()
+    root = around.environ.get(JIT_CACHE_ENV, "").strip() or (str(around.served) if around.served else "")
     arch = card_arch(spec, gpu)
     if not root or arch is None:
-        why = f"{JIT_CACHE_ENV} is not set" if not root else "the GPU architecture is not known"
+        why = (
+            f"{JIT_CACHE_ENV} is not set and the host serves no cache"
+            if not root
+            else "the GPU architecture is not known"
+        )
         if needs_jit_dir:
             raise RunnerFailure(_PREFLIGHT_MISMATCH, _NEEDS_JIT_DIR.format(why=why))
         if root:
@@ -193,7 +201,7 @@ def _module_build(spec: MeasurementSpec, around: Surroundings) -> _ModuleBuild |
         RunnerFailure: ``spec_rejected`` when it names one for another package, or one this runner cannot prove.
     """
     roots = {root.id: root for root in spec.environment.roots}
-    named = [ref for ref in spec.environment.builds if roots[ref.root_id].kind == PACKAGE_ROOT]
+    named = [ref for ref in spec.environment.builds if roots[ref.root_id].kind != _RUNTIME_KIND]
     if not named:
         return None
     foreign = [ref.root_id for ref in named if roots[ref.root_id].import_name != AITER_PACKAGE]

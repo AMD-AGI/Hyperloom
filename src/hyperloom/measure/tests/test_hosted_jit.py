@@ -19,7 +19,7 @@ from hyperloom.measure import hosted
 from hyperloom.measure.jit_kinds import AITER_JIT
 from hyperloom.measure.jit.store import DirJitStore
 from hyperloom.measure.returncodes import HOSTED_RESULT_REJECTED_RC
-from hyperloom.measure.tests.fake_runner import JIT_KEY, JIT_MODULE
+from hyperloom.measure.tests.fake_runner import JIT_KEY, JIT_MODULE, JIT_RECEIVED
 from hyperloom.measure.tests.test_hosted_backend import _run, rig  # noqa: F401 - the hosted suite's fixture and runner
 
 
@@ -124,3 +124,43 @@ def test_a_read_only_test_on_an_empty_store_leaves_it_empty(rig, tmp_path) -> No
 
     assert outcome.returncode == 0
     assert _fetch(store, tmp_path / "private").snapshot is None and not (tmp_path / "jit-store" / "blobs").exists()
+
+
+# -- serving the cache to the runner (``jit.serve``) ---------------------------------------------------------------
+
+
+def _received(call) -> dict:
+    return json.loads((Path(call.output_dir) / JIT_RECEIVED).read_bytes())
+
+
+def test_a_runner_is_served_what_an_earlier_test_published_without_ever_seeing_the_store(rig, tmp_path) -> None:
+    """The store is the host's: the runner asks for its key, the host proves and packs the snapshot into the sandbox's
+    ``/in``, and the runner's own read of what came finds the module an earlier accepted test compiled."""
+    store = DirJitStore(tmp_path / "jit-store")
+    hosted = rig(jit_store=store)
+    _run(hosted, tmp_path, "req-1", fake_jit="true")
+
+    call, outcome = _run(hosted, tmp_path, "req-2", fake_jit_want="true")
+
+    assert outcome.returncode == 0
+    received = _received(call)
+    assert received["offered"] is True and received["hit"] is True
+    assert received["module"] == JIT_MODULE.decode("latin-1")
+    assert any("served by the host" in note and "aiter_jit 2 files" in note for note in received["notes"])
+
+
+def test_a_runner_on_an_empty_store_is_served_nothing_and_goes_on_cold(rig, tmp_path) -> None:
+    hosted = rig(jit_store=DirJitStore(tmp_path / "jit-store"))
+
+    call, outcome = _run(hosted, tmp_path, fake_jit_want="true")
+
+    received = _received(call)
+    assert outcome.returncode == 0
+    assert received["offered"] is True and received["hit"] is False and received["module"] is None
+    assert any("served by the host" in note and "nothing" in note for note in received["notes"])
+
+
+def test_a_host_with_no_cache_does_not_offer_it_so_the_runner_never_waits(rig, tmp_path) -> None:
+    call, outcome = _run(rig(), tmp_path, fake_jit_want="true")
+
+    assert outcome.returncode == 0 and _received(call) == {"offered": False}

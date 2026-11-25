@@ -45,7 +45,7 @@ _HIT = "hit"
 
 class PublishTally:
     """How many contributions a session published and how many of its tests found the cache warm, so that a session that
-    only ever published says, as it closes, that its runners may not read what it publishes."""
+    only ever published says, as it closes, that its runners may not have been served what it publishes."""
 
     def __init__(self) -> None:
         self._lock = threading.Lock()
@@ -65,8 +65,8 @@ class PublishTally:
         if published and not hits:
             log.warning(
                 "jit cache: this session published %d contribution(s) to %s and none of its tests found the cache warm; "
-                "its runners may read another directory (hosted runners do not read this store, and a measurement template "
-                "must not set HYPERLOOM_JIT_CACHE)",
+                "check the host's log for what each test was served (a measurement template must not set "
+                "HYPERLOOM_JIT_CACHE: its runners then read that directory instead of asking this host)",
                 published,
                 store.root,
             )
