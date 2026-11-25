@@ -1930,13 +1930,12 @@ def test_a_session_on_a_host_that_builds_native_code_lays_out_the_native_tree_an
 
 
 def base_build(root: Path, *, code: int = 0) -> dict[str, str]:
-    """The runner variable naming a base build whose ``llama-server`` prints ``HELP`` and names the card it ran on
-    and the ``SERVER_LIBS`` it ran with."""
+    """The runner variable naming a base build whose ``llama-server`` prints ``HELP`` and names the card it ran on."""
     bin_dir = root / "base-builds" / "bin"
     bin_dir.mkdir(parents=True)
     (root / "help.txt").write_text(HELP, encoding="utf-8")
     program = bin_dir / "llama-server"
-    ran = 'echo "$ROCR_VISIBLE_DEVICES|$SERVER_LIBS"'
+    ran = 'echo "$ROCR_VISIBLE_DEVICES"'
     program.write_text(
         f'#!/bin/sh\n/bin/cat "{root / "help.txt"}"\n{ran} > "{root / "ran"}"\nexit {code}\n', encoding="utf-8"
     )
@@ -1944,10 +1943,10 @@ def base_build(root: Path, *, code: int = 0) -> dict[str, str]:
     return {BASE_BINS_ENV: str(bin_dir)}
 
 
-def llamacpp_base(*args: str, env: dict[str, str] | None = None) -> BaseLaunch:
+def llamacpp_base(*args: str) -> BaseLaunch:
     """A frozen base of a llama.cpp session whose launch spells ``args``; the runner sets ``--keep`` itself."""
     owned = replace(base_launch().runner_owned, args=("--keep",))
-    return replace(base_launch(), framework="llamacpp", args=args, env=env or {}, golden_al=None, runner_owned=owned)
+    return replace(base_launch(), framework="llamacpp", args=args, env={}, golden_al=None, runner_owned=owned)
 
 
 async def test_the_options_of_the_base_server_build_are_laid_in_the_toolbox_directory(
@@ -1978,9 +1977,8 @@ def test_a_resumed_leg_keeps_the_inventory_the_session_laid_and_does_not_ask_the
     frozen = freeze_base(tmp_path, llamacpp_base("-c", "4096")).launch
     first = local_peers_module._option_reviews(frozen, toolbox, tmp_path)
     laid, asked = (tmp_path / SERVER_OPTIONS_FILE).read_bytes(), tmp_path / "ran"
-    assert asked.read_text().strip() == "5|"
+    assert asked.read_text().strip() == "5"
     asked.unlink()
-    os.utime(tmp_path / "base-builds" / "bin" / "llama-server", ns=(1, 1))
 
     resumed = local_peers_module._option_reviews(frozen, toolbox, tmp_path)
 
