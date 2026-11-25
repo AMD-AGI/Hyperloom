@@ -35,7 +35,9 @@ from typing import Any
 
 from hyperloom_common.env import is_truthy
 from hyperloom.common.agentx_workload import (
+    AGENTX_TRACE_ENV,
     CANON_WARMUP_PER_LANE,
+    agentx_trace,
     is_agentx_client_key,
     is_agentx_client_script,
 )
@@ -466,7 +468,7 @@ _AGENTX_LAUNCH_KEYS = frozenset(
 )
 _AGENTX_CANONICAL = "canonical"
 _AGENTX_THRESHOLD = AGENTX_ERROR_RATE_THRESHOLD_PCT / 100
-_TRACE_ENV = "WEKA_LOADER_OVERRIDE"
+_TRACE_ENV = AGENTX_TRACE_ENV
 _DURATION_ENV = "DURATION"
 _EP_SIZE_ENV = "EP_SIZE"
 _WARMUP_PER_LANE_ENV = "AIPERF_WARMUP_REQUESTS_PER_LANE"
@@ -518,12 +520,6 @@ def _lane_warmup(client_env: Mapping[str, str]) -> int:
         return int(value) if value else CANON_WARMUP_PER_LANE
     except ValueError:
         raise ConfigError(f"the AgentX client's {_WARMUP_PER_LANE_ENV} is not an integer: {value!r}") from None
-
-
-def agentx_trace(point_envs: Mapping[str, str], base_client_env: Mapping[str, str]) -> str | None:
-    """The trace corpus an AgentX point replays: the point's own ``WEKA_LOADER_OVERRIDE``, else its base's client env's;
-    ``None`` when neither names one."""
-    return point_envs.get(_TRACE_ENV, "").strip() or base_client_env.get(_TRACE_ENV)
 
 
 def _agentx_trace(point: _Point, base: BaseLaunch) -> str:
@@ -925,7 +921,6 @@ __all__ = [
     "WARMUP_SEED",
     "accuracy_config",
     "agentx_client_config",
-    "agentx_trace",
     "check_server_config",
     "RoundSettings",
     "fixed_workload",

@@ -23,8 +23,8 @@ enough, since an online load writes inside that directory. Locks are not linked.
 link is the directory it names; below it a link is followed only to a file inside that directory, and a linked
 directory is not followed.
 
-Which datasets a test loads is read from its sheet: the trace corpus of each AgentX point (the suite's own rule,
-:func:`~hyperloom.orchestrator.actions.executors._suite.config.agentx_trace`), resolved to its Hub repository through the
+Which datasets a test loads is read from its sheet: the trace corpus of each AgentX point (the rule the suite's config
+uses, :func:`~hyperloom.common.agentx_workload.agentx_trace`), resolved to its Hub repository through the
 client's loader registry in the staged client environment, and the dataset the staged GSM8K task names
 (``dataset_path``) when the test runs accuracy. When no dataset is named or the cache holds none of them, the variable is
 left as given, and the test meets the cache as it would have.
@@ -51,10 +51,10 @@ from pathlib import Path
 
 import yaml
 
+from hyperloom.common.agentx_workload import agentx_trace
 from hyperloom.common.benchmark_config import is_agentx
 from hyperloom.measure.failures import DISK_FULL, HF_CACHE_PERMISSION, is_disk_full
 from hyperloom.measure.runner.service import RunnerFailure
-from hyperloom.orchestrator.actions.executors._suite.config import agentx_trace
 from inference_suite import CLIENT_SITE_PACKAGES, GSM8K_TASK
 
 __all__ = ["DatasetsNeeded", "datasets_needed", "local_datasets_cache"]

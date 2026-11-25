@@ -378,11 +378,7 @@ def _case_attachments(spec: MeasurementSpec) -> tuple[AttachmentRef, ...]:
     return tuple(AttachmentRef(a.id, a.kind, a.blob.removeprefix("sha256:")) for a in spec.attachments)  # type: ignore[arg-type]
 
 
-def _call(
-    ctx: _Context, spec: MeasurementSpec, points: list[Path], inferencex: Path, progress: Progress, spent: float
-) -> TestCall:
-    """The test's call; ``spent`` is the seconds the test's own preparation took (its datasets' link tree,
-    ``datasets_cache``), which its timeout already counts."""
+def _call(ctx: _Context, spec: MeasurementSpec, points: list[Path], inferencex: Path, progress: Progress) -> TestCall:
     p = spec.procedure
     remaining = p.deadline_unix - time.time() if p.deadline_unix else p.timeout_sec
     try:
@@ -393,7 +389,7 @@ def _call(
     return TestCall(
         points=tuple(points),
         output_dir=ctx.files,
-        timeout_sec=int(max(1, min(p.timeout_sec - spent, remaining))),
+        timeout_sec=int(max(1, min(p.timeout_sec, remaining))),
         cwd=str(ctx.work),
         task_id=spec.request_id,
         kind=spec.kind,  # type: ignore[arg-type]
@@ -413,6 +409,12 @@ def _call(
         long_context=p.long_context,
         checkpoint=p.checkpoint,
     )
+
+
+def _less_spent(call: TestCall, spec: MeasurementSpec, spent: float) -> TestCall:
+    """``call`` with the seconds the test's own preparation took (its datasets' link tree, ``datasets_cache``) taken off
+    its timeout; a sheet's deadline counted them already."""
+    return dataclasses.replace(call, timeout_sec=int(max(1, min(call.timeout_sec, spec.procedure.timeout_sec - spent))))
 
 
 def _datasets_needed(ctx: _Context, spec: MeasurementSpec) -> DatasetsNeeded:
@@ -659,7 +661,8 @@ def _run_sheet(ctx: _Context, spec_path: Path, key, progress: Progress) -> None:
         ctx.environ, ctx.work, lambda: _datasets_needed(ctx, spec), ctx.notes, sheet_env=spec.process_env
     ):
         spent = time.monotonic() - linking
-        call = _own_directories(ctx, _call(ctx, spec, points, inferencex, progress, spent), session, farm, arch)
+        call = _less_spent(_call(ctx, spec, points, inferencex, progress), spec, spent)
+        call = _own_directories(ctx, call, session, farm, arch)
         clear_import_notes(farm)
         ctx.cards.check(BEFORE_TEST)
         ctx.cards.enforce_guard()
