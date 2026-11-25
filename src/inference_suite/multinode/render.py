@@ -18,7 +18,13 @@ from typing import Any
 
 from inference_suite.argv import canonical_flag_name, is_flag
 from inference_suite.frameworks import Framework, framework_facts
-from inference_suite.recipe.model import ATOM_RUNNER_OWNED, SGLANG_RUNNER_OWNED
+from inference_suite.recipe.model import (
+    ATOM_RUNNER_OWNED,
+    ATOM_TOPOLOGY,
+    SGLANG_RUNNER_OWNED,
+    SGLANG_TOPOLOGY,
+    TopologySpelling,
+)
 
 TRANSFER_BACKEND_FLAG = "disaggregation-transfer-backend"
 TRUST_REMOTE_CODE = "--trust-remote-code"
@@ -26,19 +32,30 @@ _FABRIC_PLACEHOLDER = "@fabric."
 _HOST_PATH_ENV = frozenset({"HF_HOME", "HF_HUB_CACHE", "HUGGINGFACE_HUB_CACHE"})
 
 
-def _context_flag(framework: Framework) -> str:
+def _tp_flags(topology: TopologySpelling) -> frozenset[str]:
+    """The canonical spellings of the tensor-parallel size flag."""
+    return frozenset(canonical_flag_name(flag) for flag in topology.tp)
+
+
+def _context_flags(framework: Framework) -> frozenset[str]:
+    """The canonical spellings of the flag that sets the context length, empty when the framework has none."""
     flags = framework_facts(framework).server_flags
-    return canonical_flag_name(flags.context_length) if flags is not None else ""
+    if flags is None:
+        return frozenset()
+    return frozenset(canonical_flag_name(alias) for alias in flags.context_length.aliases)
 
 
 #: The flags the PD launcher owns, by framework, in canonical spelling.
 PD_RUNNER_OWNED = {
     Framework.SGLANG: SGLANG_RUNNER_OWNED
-    | {"tp-size", "tensor-parallel-size", "tp", "disaggregation-mode", "disaggregation-bootstrap-port"}
+    | _tp_flags(SGLANG_TOPOLOGY)
+    | {"disaggregation-mode", "disaggregation-bootstrap-port"}
     | {"disaggregation-ib-device", "dist-init-addr", "nnodes", "node-rank", TRANSFER_BACKEND_FLAG}
-    | {_context_flag(Framework.SGLANG)},
+    | _context_flags(Framework.SGLANG),
     Framework.ATOM: ATOM_RUNNER_OWNED
-    | {"tp", "tensor-parallel-size", "kv-transfer-config", _context_flag(Framework.ATOM)},
+    | _tp_flags(ATOM_TOPOLOGY)
+    | {"kv-transfer-config"}
+    | _context_flags(Framework.ATOM),
 }
 
 

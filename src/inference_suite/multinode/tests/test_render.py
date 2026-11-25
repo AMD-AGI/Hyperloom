@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: MIT
 
 from inference_suite.frameworks import Framework
-from inference_suite.multinode.render import render_role
+from inference_suite.multinode.render import PD_RUNNER_OWNED, render_role
 from inference_suite.recipe.inferencex import srtctl_cli_args
 
 
@@ -44,3 +44,10 @@ def test_recipe_role_args_follow_srtctl():
         "--mem-fraction-static",
         "0.8",
     )
+
+
+def test_runner_owned_flags_cover_each_frameworks_context_length_flag():
+    assert "context-length" in PD_RUNNER_OWNED[Framework.SGLANG]
+    assert "max-model-len" in PD_RUNNER_OWNED[Framework.ATOM]
+    assert {"tp-size", "tensor-parallel-size", "tp"} <= PD_RUNNER_OWNED[Framework.SGLANG]
+    assert {"tp", "tensor-parallel-size"} <= PD_RUNNER_OWNED[Framework.ATOM]
