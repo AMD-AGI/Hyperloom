@@ -22,7 +22,6 @@ from hyperloom.orchestrator.actions.executors.integrate_patch import IntegratePa
 from hyperloom.orchestrator.enablement.recipe import keep_probe
 from hyperloom.orchestrator.loop._promote_outcome import IntegrateRecoveryIncomplete
 from hyperloom.orchestrator.phases.geak_rebench import REVALIDATION_UNMEASURED
-from hyperloom.orchestrator.state.kernel_decision_settings import _MAX_INTEGRATE_FAULT_ATTEMPTS
 from hyperloom.orchestrator.state.shared_state import SharedState
 from hyperloom.orchestrator.tests._helpers import init_git_repo, patch_integrate_patch_roots, variant_result
 
@@ -238,10 +237,9 @@ async def test_unmeasured_count_of_a_source_candidate_survives_a_resume(coordina
     state = resumed.coord.shared_state
     assert state.geak_result[REVALIDATION_UNMEASURED] == 1
     _register_executor(resumed.coord)
-    for _ in range(1, _MAX_INTEGRATE_FAULT_ATTEMPTS):
-        assert state.geak_result.get("revalidation_error_class") != REBENCH_UNMEASURED_GIVEN_UP
-        await _measure(resumed.coord)
-    assert state.geak_result[REVALIDATION_UNMEASURED] == _MAX_INTEGRATE_FAULT_ATTEMPTS
+    assert state.geak_result.get("revalidation_error_class") != REBENCH_UNMEASURED_GIVEN_UP
+    await _measure(resumed.coord)
+    assert state.geak_result[REVALIDATION_UNMEASURED] == 2
     assert state.geak_result["revalidation_error_class"] == REBENCH_UNMEASURED_GIVEN_UP
     assert SharedState.load_or_init(session).geak_result["revalidation_error_class"] == REBENCH_UNMEASURED_GIVEN_UP
 

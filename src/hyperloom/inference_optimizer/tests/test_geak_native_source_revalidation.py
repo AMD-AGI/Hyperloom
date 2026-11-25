@@ -25,7 +25,6 @@ from hyperloom.orchestrator.actions.stop_attribution import SESSION_TIME_EXHAUST
 from hyperloom.orchestrator.phases.geak_native_revalidation import ORIGIN, source_rebench_params
 from hyperloom.orchestrator.phases.geak_rebench import REVALIDATION_UNMEASURED, geak_candidate_is_adjudicated
 from hyperloom.orchestrator.phases.kernel_geak_promotion import GeakRunnerFacts
-from hyperloom.orchestrator.state.kernel_decision_settings import _MAX_INTEGRATE_FAULT_ATTEMPTS
 from hyperloom.orchestrator.tests._helpers import init_git_repo, patch_integrate_patch_roots
 from .test_geak_revalidation_dispatch import coordinator as coordinator
 
@@ -328,14 +327,12 @@ async def test_candidate_that_keeps_ending_unmeasured_is_given_up_and_not_measur
     monkeypatch.setattr(coordinator.phase_kernel, "timeline", lambda: timeline)
     reported = await _measure_with_bench(coordinator, tmp_path, monkeypatch, bench)
     state = coordinator.shared_state
-    for measurements in range(2, _MAX_INTEGRATE_FAULT_ATTEMPTS + 1):
-        assert not _given_up(state)
-        assert timeline.conclusions == []
-        assert "dropped unvalidated (rebench_failed)" in state.to_mission_summary()
-        assert await _next_kernel_entry(coordinator, reported), "an open candidate is measured again"
-        assert len(benches) == measurements
+    assert not _given_up(state)
+    assert timeline.conclusions == []
+    assert "dropped unvalidated (rebench_failed)" in state.to_mission_summary()
+    assert await _next_kernel_entry(coordinator, reported), "an open candidate is measured again"
     assert state.geak_result["revalidation_status"] == "failed"
-    assert state.geak_result[REVALIDATION_UNMEASURED] == _MAX_INTEGRATE_FAULT_ATTEMPTS
+    assert state.geak_result[REVALIDATION_UNMEASURED] == 2
     assert _given_up(state)
     assert "dropped unvalidated (rebench_failed, given up unmeasured)" in state.to_mission_summary()
     assert [(c["final_status"], c["final_error_class"]) for c in timeline.conclusions] == [
@@ -344,7 +341,7 @@ async def test_candidate_that_keeps_ending_unmeasured_is_given_up_and_not_measur
     assert "No space left on device" in timeline.conclusions[0]["final_error"]
     assert geak_candidate_is_adjudicated(state.geak_result, reported, harness_can_replay=False)
     assert not await _next_kernel_entry(coordinator, reported), "a candidate given up is left alone"
-    assert len(benches) == _MAX_INTEGRATE_FAULT_ATTEMPTS
+    assert len(benches) == 2
     assert state.current_best["tput"] == _INCUMBENT["tput"]
 
 

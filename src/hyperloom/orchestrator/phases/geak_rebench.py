@@ -21,6 +21,10 @@ from hyperloom.inference_optimizer.session.geak_rebench_verdict import (
 INCOMPARABLE_REVALIDATION = "incomparable"
 #: Beside a candidate's settled status: how many of its measurements ended with no verdict.
 REVALIDATION_UNMEASURED = "revalidation_unmeasured"
+#: How many measurements of one candidate may end with no verdict before it is given up. Two: one repeat
+#: separates a passing disturbance from a product that cannot be measured, and each further one costs a
+#: server boot or a full round and holds back a fresh GEAK run.
+MAX_UNMEASURED_REVALIDATIONS = 2
 
 # Verdict annotations are not candidate identity.
 _REVALIDATION_ANNOTATION_KEYS: frozenset[str] = frozenset(
@@ -123,9 +127,9 @@ def geak_candidate_matches(persisted: Any, recovered: Any) -> bool:
     return _geak_candidate_identity(prev, stamped) == _geak_candidate_identity(raw, stamped)
 
 
-def keep_unmeasured_count(persisted: Any, recovered: dict[str, Any]) -> None:
+def keep_unmeasured_count(persisted: dict[str, Any], recovered: dict[str, Any]) -> None:
     """Carry onto a raw GEAK result the unmeasured count the session holds for the same product."""
-    count = persisted.get(REVALIDATION_UNMEASURED) if isinstance(persisted, dict) else None
+    count = persisted.get(REVALIDATION_UNMEASURED)
     if count and geak_candidate_matches(persisted, recovered):
         recovered[REVALIDATION_UNMEASURED] = count
 
@@ -138,6 +142,7 @@ def _geak_candidate_identity(result: Any, stamped: frozenset[str]) -> dict[str, 
 
 __all__ = [
     "INCOMPARABLE_REVALIDATION",
+    "MAX_UNMEASURED_REVALIDATIONS",
     "REVALIDATION_UNMEASURED",
     "geak_candidate_is_adjudicated",
     "geak_candidate_matches",

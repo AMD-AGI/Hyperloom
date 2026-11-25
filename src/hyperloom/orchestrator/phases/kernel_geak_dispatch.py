@@ -642,7 +642,7 @@ class _GeakDispatchMixin:
                 handoff=handoff,
             )
             return None
-        _geak_rebench.keep_unmeasured_count(self.shared_state.geak_result, result)
+        _geak_rebench.keep_unmeasured_count(self.shared_state.geak_result or {}, result)
         # Carry the actual exit code so the breakdown can audit a nonzero rc. Nothing else of the runner's is added:
         # the persisted record stays the product GEAK wrote, so the next KERNEL entry recognizes its own candidate.
         result.setdefault("returncode", proc.returncode)
