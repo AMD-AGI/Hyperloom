@@ -19,7 +19,7 @@ import subprocess
 import sys
 import textwrap
 from collections import Counter
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from fnmatch import fnmatchcase
 from pathlib import Path
 from typing import Any
@@ -145,6 +145,29 @@ _LITERALS: dict[str, str | list[str] | dict[str, str]] = {
     "KFD_RENDER_MINOR_KEY": "drm_render_minor",
     "KFD_ROOT": "/sys/class/kfd/kfd",
     "KFD_VRAM_PREFIX": "vram_",
+    "LLAMACPP_BACKEND_OPS": {
+        "executable": "test-backend-ops",
+        "mode": "perf",
+        "backend": "ROCm0",
+        "enum_header": "ggml/include/ggml.h",
+        "op_enum": "ggml_op",
+        "type_enum": "ggml_type",
+        "op_prefix": "GGML_OP_",
+        "type_prefix": "GGML_TYPE_",
+        "activation_type": "F32",
+    },
+    "NATIVE_AUX_MODEL_FLAGS": {"llamacpp": ["--spec-draft-model", "-md", "--model-draft"]},
+    "NATIVE_SERVING": {
+        "llamacpp": {
+            "option_table": "common/arg.cpp",
+            "option_entry": "add_opt(common_arg(",
+            "help_command": "llama-server --help",
+            "request_timing": "eval time =",
+            "speculative_stats": "draft acceptance =",
+            "host_loop": "tools/server/server-context.cpp, common/sampling.cpp, common/speculative.cpp",
+        },
+    },
+    "NATIVE_TIMING_LINES": {"llamacpp": [r"(?<!prompt )eval time =", "draft acceptance ="]},
     "PID_NAMESPACE_LINK": "self/ns/pid",
     "PY_IMPORT_ERROR": "ImportError",
     "PY_MODULE_NOT_FOUND_ERROR": "ModuleNotFoundError",
@@ -176,6 +199,13 @@ _LITERALS: dict[str, str | list[str] | dict[str, str]] = {
         "pytorch/pytorch",
         "ggml-org/llama.cpp",
     ],
+    "UPSTREAM_PR_REPO_OF": {
+        "sglang": "sgl-project/sglang",
+        "vllm": "vllm-project/vllm",
+        "aiter": "ROCm/aiter",
+        "pytorch": "pytorch/pytorch",
+        "llamacpp": "ggml-org/llama.cpp",
+    },
 }
 
 Facts = dict[str, Any]
@@ -226,14 +256,22 @@ def _fresh(code: str, pack: str | None) -> subprocess.CompletedProcess[str]:
     )
 
 
+def _plain(value: object) -> object:
+    """``value`` with every tuple as a list and every mapping as a dict, as ``_LITERALS`` writes them."""
+    if isinstance(value, Mapping):
+        return {key: _plain(item) for key, item in value.items()}
+    return [_plain(item) for item in value] if isinstance(value, tuple) else value
+
+
 def test_the_reference_pack_loads_and_passes_its_own_examples() -> None:
     pack = load_pack(DEFAULT_PACK_PATH)
     assert pack.version == str(yaml.safe_load(DEFAULT_PACK_PATH.read_text(encoding="utf-8"))["version"])
     assert Counter(entry.kind for entry in pack.entries.values()) == {
-        Kind.NAMES: 17,
-        Kind.LOG_REGEX: 17,
+        Kind.NAMES: 19,
+        Kind.LOG_REGEX: 19,
         Kind.ENV_DEFAULT: 2,
-        Kind.COMPONENT_LAYOUT: 9,
+        Kind.COMPONENT_LAYOUT: 10,
+        Kind.KERNEL_KNOB: 2,
     }
 
 
@@ -242,7 +280,7 @@ def test_every_outside_fact_is_the_literal_it_was_before_the_pack() -> None:
     assert sorted(held) == sorted(_LITERALS)
     for name, literal in _LITERALS.items():
         value = getattr(outside_facts, name)
-        assert (list(value) if isinstance(value, tuple) else value) == literal, name
+        assert _plain(value) == literal, name
 
 
 def test_every_entry_of_the_reference_pack_is_read_by_outside_facts() -> None:
@@ -254,8 +292,12 @@ def test_every_entry_of_the_reference_pack_is_read_by_outside_facts() -> None:
         and isinstance(call.func, ast.Attribute)
         and isinstance(call.func.value, ast.Name)
         and call.func.value.id == "_PACK"
+        and call.args
     }
-    assert read == set(load_pack(DEFAULT_PACK_PATH).entries)
+    entries = load_pack(DEFAULT_PACK_PATH).entries
+    # The knobs are read as a kind (kernel_knobs), not by their ids.
+    read |= {entry_id for entry_id, entry in entries.items() if entry.kind is Kind.KERNEL_KNOB}
+    assert read == set(entries)
 
 
 @pytest.mark.parametrize(

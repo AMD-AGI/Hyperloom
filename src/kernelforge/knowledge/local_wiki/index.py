@@ -198,8 +198,8 @@ def _strip_frontmatter(text: str) -> str:
     The block carries title/kind/scope/updated -- metadata describing the file
     to whoever maintains the KB. It is not navigation: nothing downstream
     reads it, and an agent handed it learns nothing it cannot see from the H1
-    on the next line. It is inlined into every implementer, specialist,
-    orchestration and analysis prompt, so it is paid for once per map per
+    on the next line. It is inlined into every implementer and analysis
+    prompt, so it is paid for once per map per
     session and then again on every turn that re-reads the prefix.
     """
     if not text.startswith("---"):

@@ -20,6 +20,9 @@ output throughput, and a read may return any of a schema's Experiences. What one
 another, a crash, a failed accuracy gate or a faster kernel, but its gain is on another objective. So an Experience the
 index finds recorded on another objective is one to re-verify, never a prior, after those on the session's own, and
 it names its objective; one whose objective is found nowhere is one to re-verify as well.
+
+A session whose tests are published under more than one schema reads them through :class:`SchemaReaders`, one read
+per schema, their Experiences in one list, and its index pages every schema's export.
 """
 
 from __future__ import annotations
@@ -29,10 +32,11 @@ import threading
 from collections.abc import Mapping
 from dataclasses import dataclass, replace
 from enum import Enum
+from itertools import zip_longest
 from typing import Any, Protocol, cast
 
 from hyperloom.common.perf_metric import TOTAL_TOKEN_THROUGHPUT
-from hyperloom_kb import ReadStatus, RemoteClientError
+from hyperloom_kb import ReadStatus, RemoteClientError, RemoteReadResult
 from hyperloom_multibranch.contracts.blackboard.peers import IntentLayer
 from hyperloom_multibranch.contracts.blackboard.records import SessionProfile
 from hyperloom_multibranch.blackboard.knowledge.experience import (
@@ -80,6 +84,35 @@ class ExperienceExport(Protocol):
         """One page of complete records in write order; the page has ``items``, ``next_cursor`` and ``has_more``."""
 
 
+@dataclass(frozen=True)
+class SchemaReaders:
+    """One read over several schemas of a service: each reader is asked in turn and the completed reads answer
+    together, so one schema the service does not know yet leaves the others' Experiences; with none completed, the
+    first read's status answers. Their Experiences take turns by schema, at most ``limit`` in all, so no schema's are
+    always the ones cut. Every read's warnings are kept."""
+
+    readers: tuple[ExperienceReader, ...]
+
+    def read(self, decision: str, context: Mapping[str, Any], *, limit: int | None = None) -> RemoteReadResult:
+        results = [reader.read(decision, context, limit=limit) for reader in self.readers]
+        answering = [result for result in results if _status(result) == ReadStatus.COMPLETED.value] or results[:1]
+        turns = zip_longest(*(result.experiences for result in answering))
+        experiences = tuple(item for turn in turns for item in turn if item is not None)[:limit]
+        kept = {item.get("experience_id") for item in experiences}
+        return RemoteReadResult(
+            read_id=", ".join(str(result.read_id) for result in answering if result.read_id),
+            status=_status(answering[0]),
+            prompt_block="\n".join(str(result.prompt_block) for result in answering if result.prompt_block),
+            rendered_refs=tuple(ref for result in answering for ref in result.rendered_refs if ref.id in kept),
+            warnings=tuple(str(warning) for result in results for warning in result.warnings),
+            experiences=experiences,
+        )
+
+
+def _status(result: Any) -> str:
+    return str(getattr(result.status, "value", result.status))
+
+
 @dataclass
 class _ExportCursor:
     export: ExperienceExport
@@ -105,12 +138,19 @@ class IdentityIndex:
 
     @classmethod
     def of(cls, reader: object) -> IdentityIndex | None:
-        """The index of ``reader``'s schema when its service exports, as a ``RemoteExperienceKB``'s does."""
+        """The index of ``reader``'s schema when its service exports, as a ``RemoteExperienceKB``'s does, and of each
+        schema a :class:`SchemaReaders` reads."""
 
-        client = getattr(reader, "client", None)
-        if not callable(getattr(client, "export_page", None)):
+        cursors: list[_ExportCursor] = []
+        for part in reader.readers if isinstance(reader, SchemaReaders) else (reader,):
+            client = getattr(part, "client", None)
+            if callable(getattr(client, "export_page", None)):
+                cursors.append(_ExportCursor(cast(ExperienceExport, client), getattr(part, "schema_ref", None)))
+        if not cursors:
             return None
-        return cls(cast(ExperienceExport, client), getattr(reader, "schema_ref", None))
+        index = cls(cursors[0].export, cursors[0].schema_ref)
+        index._exports.extend(cursors[1:])
+        return index
 
     def identity(self, experience_id: str) -> Mapping[str, Any]:
         with self._lock:
@@ -368,6 +408,7 @@ __all__ = [
     "RecallQuery",
     "RecallTier",
     "RecalledExperience",
+    "SchemaReaders",
     "classify",
     "recall_conditions",
     "recall_context",

@@ -156,10 +156,9 @@ def validate_review_verdict(role: "AgentRole", payload: dict[str, Any]) -> None:
             rule="payload",
             hint=(
                 "single-proposal review: emit {target_proposal_msg_id, "
-                "verdict, reasoning, failure_reason_code?}. Explore batch "
+                "verdict, reasoning}. Explore batch "
                 "review: emit {target_proposal_msg_id, verdict_map: "
-                "{variant_name: {verdict, rationale?, "
-                "failure_reason_code?}}}"
+                "{variant_name: {verdict, rationale?}}}"
             ),
         )
     if has_single:

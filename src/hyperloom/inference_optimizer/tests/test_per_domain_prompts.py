@@ -12,7 +12,6 @@ from hyperloom.orchestrator.specialists.domains import (
     SPECIALIST_DOMAINS,
     get_domain,
 )
-from hyperloom.orchestrator.prompts.specialist_focus import _DOMAIN_FOCUS_TEMPLATES
 from hyperloom.orchestrator.specialists.prompt_inputs import SpecialistPromptInputs
 from hyperloom.orchestrator.prompts.specialist_prompt_builder import build_specialist_prompts
 
@@ -37,12 +36,6 @@ def _build(domain_key: str) -> str:
     )
     system, user = build_specialist_prompts(inp)
     return system + "\n" + user
-
-
-# 1. Coverage — every catalogue domain has a focus template
-def test_every_domain_has_focus_template():
-    for domain in SPECIALIST_DOMAINS:
-        assert domain.key in _DOMAIN_FOCUS_TEMPLATES, f"missing per-domain template for {domain.key!r}"
 
 
 # 2. Per-domain output contracts — the keys each consumer parses back

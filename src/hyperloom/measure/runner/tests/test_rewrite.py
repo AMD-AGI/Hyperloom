@@ -42,6 +42,7 @@ def _rewrite(tmp_path, farm=None, visible="0,1", sheet=SHEET, path=None):
             inferencex_path=tmp_path / "ix",
             visible_devices=visible,
             farm=farm,
+            inherited={},
             path=path,
         ),
     )

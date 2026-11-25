@@ -15,6 +15,7 @@ import sqlite3
 import subprocess
 import sys
 import time
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
@@ -26,10 +27,13 @@ from hyperloom.common.env_safety import resolve_run_as
 
 from .conftest import init_git_repo, make_fake_claude
 from hyperloom.orchestrator.specialists.tests._agent_fixtures import FORGES_ITS_GIT
+from hyperloom.orchestrator.specialists.tests.test_model_dirs import Models
 
 from hyperloom.common.visible_devices import GPU_MASK_ENV_NAMES
 
+from hyperloom.measure.tests.bundle_factory import base_launch
 from hyperloom.orchestrator.specialists.runner import SpecialistRunner
+from hyperloom.orchestrator.state.base_launch import freeze_base
 from hyperloom.orchestrator.specialists import subprocess_, wall_budget
 from hyperloom.orchestrator.specialists import launch_env
 from hyperloom.common import agent_isolation
@@ -179,6 +183,28 @@ async def test_the_runner_hands_the_dispatcher_the_tasks_model_to_read(tmp_path,
     [spawn] = spawns
     assert (model in spawn.readable) is local
     assert all(not path.is_absolute() for path in spawn.readable) is not local
+
+
+async def test_the_runner_hands_the_dispatcher_the_model_directories_the_session_s_base_launch_names(tmp_path):
+    models = Models(tmp_path)
+    session_dir = tmp_path / "session"
+    session_dir.mkdir()
+    freeze_base(session_dir, replace(base_launch(), args=("-ngl", "99", "-md", str(models.draft))))
+    runner = SpecialistRunner(subprocess_config=SpecialistSubprocessConfig(), session_dir=session_dir)
+    spawns: list[SpecialistSpawn] = []
+
+    async def run(spawn: SpecialistSpawn) -> subprocess_.SpecialistSubprocessResult:
+        spawns.append(spawn)
+        return subprocess_.SpecialistSubprocessResult(exit_code=0)
+
+    runner.subprocess_dispatcher.run = run
+    ctx = _make_runner_ctx("t-aux-model")
+    ctx.task.params.update(model_path=str(models.served), framework="llamacpp")
+
+    await runner.run(ctx)
+
+    [spawn] = spawns
+    assert spawn.readable == (models.served, models.store, models.drafts)
 
 
 async def test_the_runner_hands_the_dispatcher_the_admin_dir_the_repository_records_for_the_worktree(tmp_path):

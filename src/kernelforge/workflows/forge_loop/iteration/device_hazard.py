@@ -33,7 +33,7 @@ class DeviceHazard:
     # How many iterations this hazard has refused, the one that found it included.
     blocked_iterations: int = 0
     # The last iteration it refused, so a re-check within one iteration is idempotent: the loop consults the hazard
-    # both before and after its fan-out round, and the second look must not count as a second refusal.
+    # both before and after the round's lanes run, and the second look must not count as a second refusal.
     last_blocked_iteration: int = 0
     # Which holders the most recent re-check still found on the device.
     still_held_by: tuple[int, ...] = ()

@@ -183,8 +183,7 @@ def _format_delegated_result(head: str, payload: dict[str, Any], max_variant_row
     error = payload.get("error") or result.get("error")
     if error:
         parts.append(f"error={str(error)[:200]!r}")
-    # patch_safety_numeric is the Critic's artifact, not a lever here.
-    notes = [str(n) for n in result.get("notes") or () if n and not str(n).startswith("patch_safety_numeric:")]
+    notes = [str(n) for n in result.get("notes") or () if n]
     if notes:
         shown = "; ".join(notes[:_OUTCOME_NOTES_MAX])
         parts.append(f"notes={shown[:300]!r}")

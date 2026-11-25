@@ -1,8 +1,8 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""The sgl-kernel and vLLM recipes: placed by the rule pack, budgeted and preflighted by the single-lineage runner's
-recipes."""
+"""The native recipes: sgl-kernel and vLLM placed by the rule pack, budgeted and preflighted by the single-lineage
+runner's recipes; llama.cpp built from its pinned checkout with a torch-free preflight."""
 
 from __future__ import annotations
 
@@ -14,6 +14,7 @@ from hyperloom.measure.runner.native import recipes
 from hyperloom.measure.runner.native.recipes import (
     NATIVE_BUILD_REFUSE,
     RECIPE_FACTORIES,
+    llamacpp_recipe,
     native_recipes,
     rocm_variables,
     sgl_kernel_recipe,
@@ -32,7 +33,7 @@ def test_the_sgl_kernel_recipe_builds_where_the_rule_pack_places_the_package() -
         ("sgl_kernel/*.so",),
     )
     assert (recipe.budget_sec, recipe.max_jobs) == (60 * 60, 8)
-    assert recipe.argv("/py") == ["/py", "setup_rocm.py", "build_ext", "--inplace"]
+    assert recipe.commands("/py", "gfx942", "") == [["/py", "setup_rocm.py", "build_ext", "--inplace"]]
     assert recipe.layout().spec.refused_by("python/sglang/kernels/aot/setup_rocm.py") == "setup_rocm.py"
     assert set(NATIVE_BUILD_REFUSE) == set(recipe.layout().refuse)
 
@@ -69,7 +70,7 @@ def test_the_vllm_recipe_builds_at_the_top_of_the_repository_where_the_rule_pack
         ("vllm/*.so",),
     )
     assert (recipe.budget_sec, recipe.max_jobs) == (5400, VllmBuild.default_max_jobs)
-    assert recipe.argv("/py") == ["/py", "setup.py", "build_ext", "--inplace"]
+    assert recipe.commands("/py", "gfx942", "") == [["/py", "setup.py", "build_ext", "--inplace"]]
     for definition in ("setup.py", "CMakeLists.txt", "cmake/utils.cmake"):
         assert recipe.layout().spec.refused_by(definition) is not None, definition
 
@@ -143,5 +144,24 @@ def test_a_vllm_builder_without_cmake_or_ninja_fails_as_the_machine(
 def test_every_factory_makes_its_components_recipe() -> None:
     made = native_recipes()
 
-    assert set(made) == set(RECIPE_FACTORIES) == {"sgl_kernel", "vllm"}
+    assert set(made) == set(RECIPE_FACTORIES) == {"sgl_kernel", "vllm", "llamacpp"}
     assert {component: recipe.component for component, recipe in made.items()} == {c: c for c in made}
+
+
+def test_the_llamacpp_build_is_position_independent() -> None:
+    configure = llamacpp_recipe().commands("python3", "gfx1201", "c" * 40)[0]
+
+    assert "-DCMAKE_POSITION_INDEPENDENT_CODE=ON" in configure
+
+
+def test_the_llamacpp_compile_is_given_the_rocm_root_and_its_clang(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    for name in ("ROCM_HOME", "CUDA_HOME", "HIP_PATH"):
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setenv("ROCM_PATH", "/r/rocm")
+
+    environment = llamacpp_recipe().environment("gfx1100", tmp_path)
+
+    assert (environment["ROCM_PATH"], environment["HIPCXX"]) == ("/r/rocm", "/r/rocm/llvm/bin/clang++")
+    assert environment["MAX_JOBS"] == "32"

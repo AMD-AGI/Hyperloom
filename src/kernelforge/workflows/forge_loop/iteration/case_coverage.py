@@ -159,7 +159,7 @@ class CaseCoverageMixin:
         )
 
     def _case_config_coverage_flags(self) -> dict[str, tuple[str, ...]]:
-        """Per-case coverage flags for the planning context's case evidence."""
+        """Per-case coverage flags for the evidence context's case evidence."""
         coverage = self._case_config_coverage()
         flags: dict[str, list[str]] = {}
         for case_id, iteration in coverage.covered.items():
@@ -175,14 +175,14 @@ class CaseCoverageMixin:
             for case_id in group:
                 flags.setdefault(case_id, []).append("config_coverage_undifferentiated")
         if coverage.unreadable:
-            # Every other flag on this ledger was read off a partial record, so the planner is told which cases were
+            # Every other flag on this ledger was read off a partial record, so its reader is told which cases were
             # classified without it rather than being handed the classification alone.
             for case_id in self._scored_case_ids():
                 flags.setdefault(case_id, []).append("config_coverage_partial_record")
         return {case_id: tuple(dict.fromkeys(values)) for case_id, values in flags.items()}
 
     def _with_case_config_coverage(self, context):
-        """Attach measured configuration coverage to a planning context."""
+        """Attach measured configuration coverage to an evidence context."""
         flags = self._case_config_coverage_flags()
         if not flags:
             return context

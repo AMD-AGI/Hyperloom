@@ -86,6 +86,12 @@ def revision_id_for(*parts: str) -> str:
     return "rev-" + uuid.uuid5(_NAMESPACE, "/".join(("revision", *parts))).hex[:16]
 
 
+def normal_content(text: str) -> str:
+    """``text`` as the pool compares what lessons say: lower case, its whitespace runs one space."""
+
+    return " ".join(text.lower().split())
+
+
 def specialist_author(session_id: str, branch: str) -> str:
     return f"specialist:{session_id}/{branch}"
 
@@ -588,6 +594,7 @@ __all__ = [
     "human_author",
     "lesson_id_for",
     "main",
+    "normal_content",
     "published_records",
     "retirement_proposals",
     "revision_id_for",

@@ -413,29 +413,12 @@ def test_a_kernel_phase_ruling_is_filed_on_the_thing_it_ruled_on(tmp_path):
             verdict="reject",
             reasoning="the kernel is already fused",
             confidence=0.8,
-            failure_reason_code="no_headroom",
         ),
     )
 
     review = _ext("KERNEL_AGENT")["proposals"]["rows"][0]["critic_review"]
     assert review["verdict"] == "reject"
-    assert review["effective_verdict"] == "reject"
-    assert review["held_to_rule"] is False
     assert review["confidence"] == 0.8
-    assert review["failure_reason_code"] == "no_headroom"
-
-
-def test_a_ruling_the_envelope_overrode_says_it_was_held_to_a_rule(tmp_path):
-    _enter("KERNEL_AGENT", sequence=1, at=10.0)
-    _propose("m-1")
-    phase_event.record_proposal_review(
-        ProposalReview(proposal_msg_id="m-1", verdict="approve", effective_verdict="needs_review")
-    )
-
-    review = _ext("KERNEL_AGENT")["proposals"]["rows"][0]["critic_review"]
-    assert review["verdict"] == "approve"
-    assert review["effective_verdict"] == "needs_review"
-    assert review["held_to_rule"] is True
 
 
 def test_a_ruling_reaching_a_proposal_after_its_phase_exited_still_lands_on_it(tmp_path):

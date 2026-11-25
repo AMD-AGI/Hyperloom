@@ -20,6 +20,36 @@ Merged to `main` and not yet carried by a tagged release. Each entry moves
 into the [release](https://github.com/AMD-AGI/Hyperloom/releases) that ships
 it.
 
+- **forge-loop runs every round as lanes and has no planning stage.** Every
+  iteration is one round: one lane per focus the Analysis Agent divides its
+  evidence into (at most `--lanes`, and one lane with no focus when it divides
+  nothing or `--lanes` is 1), each lane a self-directed Implementer session,
+  then one candidate measured on the canonical tree. A round's only lane works
+  in the workspace itself; lanes that run side by side each work in their own
+  copy of it. When several lanes changed the kernel, an Implementer session on
+  the canonical tree merges them, starting from the lane that scored best. The
+  lanes of such a round share the campaign's GPU through a queue: a lane's
+  commands reach the device through `forge_device.py` in its copy and wait
+  their turn, and its stop check waits in the same queue. `--lanes` above 1 is
+  refused on a workspace whose repository is selected through `GIT_DIR` or
+  `GIT_WORK_TREE`, which a copy cannot carry. A lane that runs beside others
+  may stop on a correct candidate that is no faster overall; a round's only
+  lane still has to beat the current best. The search turns to a different mechanism after
+  one round without a new best and is reviewed after two, at every `--lanes`.
+  **Breaking:** the dispatch, specialist, synthesis and Plan Critic sessions,
+  the per-iteration lane queue and the stacking of archived candidates are
+  removed, with `--merge-stacking`, `--specialist-probe` and
+  `--specialist-probe-{max,budget-sec,scratch-root}`; passing one of these
+  options is an error. The `FORGE_SPECIALIST_PROBE*` variables are no longer
+  read: one that is still set is ignored, and the run starts normally. A
+  campaign created before this change is not resumed: its `run_state.json` carries
+  fields the loader rejects. `kernelforge export-runs` no longer emits
+  `plan_file`, `plan` from a plan file or `analysis_report`, and writes one
+  unit per round at every `--lanes`. The `kernelforge-run-v1` declaration and
+  the `kernelforge-v1` mapping drop `rationale.plan`, `rationale.plan_file`,
+  `reflection.analysis_report` and the decision label `ORCHESTRATION_ERROR`,
+  so Experiences collected from here on carry a new `schema_ref`; those
+  already in a KB keep theirs.
 - **A hosted multi-branch run sets the AgentX window and the server boot
   budget.** The campaign spec's `multibranch` block takes
   `agentx_duration_sec` and `agentx_objective` (for `workload: agentx` only),
@@ -91,6 +121,28 @@ it.
   created. **Upgrade note:** move from `vllm/vllm-openai-rocm:v0.33.0-rocm100` to
   `v0.34.0-rocm100`; on a ROCm 7.2.x bare-metal host use Docker, a ROCm 10 host, or
   `VLLM_VERSION=0.33.0 VLLM_ROCM_VARIANT=rocm72`.
+- **A multi-branch session reads and writes the workspace's Experience KB.**
+  With `HYPERLOOM_KB_URL` and `HYPERLOOM_KB_TOKEN` exported (the values
+  `hyperloom-setup` writes into `.env`), a session's briefs recall past
+  sessions' tests and learnings and its learnings tool their learnings, after
+  this session's and the RSI lesson pool's; a claim reads none. CLOSE writes the
+  session's tests and learnings there, spooling beside the service's data what
+  it does not take. An InferenceX session reads both schemas its tests are
+  written under, so a kernel change is recalled too. A loopback service is
+  started before the session, outside the session's process tree, and left
+  serving; one serving with other settings is not restarted
+  (`experience_kb_service ensure --no-restart`). Before, a session read and
+  wrote no Experience KB, whatever the environment named.
+- **The Experience KB service plans reads through Hyperloom's gateway
+  clients.** Its planner calls the Anthropic gateway when it has a key, else
+  the OpenAI one, with the clients the rest of Hyperloom uses: their custom
+  headers (`ANTHROPIC_CUSTOM_HEADERS`, `OPENAI_CUSTOM_HEADERS`), connect
+  retries and usage ledger, and it asks for the plan as JSON text instead of
+  forcing a tool call. The model is `LOCAL_KB_PLANNER_MODEL`, else
+  `CLAUDE_MODEL` (or `CODEX_MODEL`), else the backend's default;
+  `ANTHROPIC_MODEL` no longer names it. Before, every read failed on an AMD
+  gateway, which refuses a call without its subscription header and a forced
+  tool choice, and an OpenAI-only workspace planned no reads.
 - **The EXPLORE screen pre-filter is removed.** The opt-in reduced-GPU probe
   that 1.2.0 added behind `HYPERLOOM_EXPLORE_SCREEN=1` is gone: on the one grid
   it was measured against, the order of variants did not transfer to fewer

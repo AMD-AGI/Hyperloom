@@ -35,19 +35,15 @@ GPU_TARGET="${GPU_TARGET:-$(detect_arch)}"
 GPU_TARGET="${GPU_TARGET:-gfx950}"
 # 2.0, not the 1.0 minimum. The loop holds a 30-minute finalize reserve back, so
 # a 1.0h budget leaves a 30-minute iteration window -- and a round is admitted
-# only when what remains also covers planning plus one session plus the
-# measurement. Measured on this task at the default width: planning alone took
-# 28.6 min and the round was then refused with 21 min left against 22 needed, so
-# the campaign ended having run zero iterations. 2.0 leaves a 90-minute window
-# and still keeps Analysis static-only and the Plan Critic off, both of which
-# switch on above 2.0.
+# only when what remains also covers one session plus the measurement, about
+# 22 minutes, after the Analysis that precedes the first round. 2.0 leaves a
+# 90-minute window and still keeps Analysis static-only, which switches to
+# profiling above 2.0.
 MAX_HOURS="${MAX_HOURS:-2.0}"
-# One lane, not the default 3. A round's planning cost scales with its width --
-# partitioning plus one synthesis per lane -- and this task has a single obvious
-# axis, so the extra lanes buy width the evidence does not support while
-# spending most of a short budget on plans. Production campaigns on a real
-# kernel want the default; raise it here with LANES if you want to watch the
-# fan-out instead.
+# One lane, not the default 3. This task has a single obvious axis, so there is
+# little for the Analysis to divide among lanes, and lanes share the one GPU:
+# each extra session waits for the others' measurements. Raise it here with
+# LANES if you want to watch a round of several lanes and its merge instead.
 LANES="${LANES:-1}"
 
 if ! command -v kernelforge >/dev/null 2>&1; then

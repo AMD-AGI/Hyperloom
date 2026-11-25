@@ -4,7 +4,8 @@
 """What the model behind a branch's specialist is told: its role once, and at every launch where its branch stands.
 
 The role says how a long-running specialist works through the session's tools, the base launch every recipe changes,
-what has found gains on ROCm before, how its candidates are judged, how it
+what has found gains on ROCm before, how its candidates are judged, what its profile and settings steps mean on a
+server built from its checkout or run under no profiler, how it
 declares a correctness fix with its repro case, and which gains the toolbox refuses as fake (main's ``FAKE_GAINS``
 catalog, so a new row reaches the role). The
 launch prompt opens, on a branch log longer than it shows, with a summary of what was tried, its results and the
@@ -12,7 +13,8 @@ latest plan; then the repair a repair branch was opened for, the branch's direct
 session's) and the startup brief; then the branch, its head, K and the branch's latest memory, so a new session goes
 on where the last one stopped, and what the integration head holds against the branch head. A
 session whose turn ended is woken by :func:`wake_message`, with what its inbox and the runtime's notices brought, or
-by :func:`nudge_message` when nothing came and it has nothing running. A CLI restarted on its crashed conversation
+by :func:`nudge_message` when nothing came and it has nothing running, in the words of the evidence its server
+gives: a profile, or the step budget of a server that runs under none. A CLI restarted on its crashed conversation
 is told by :func:`resume_message` why it stopped, where its worktree stands and what arrived while it was down; one
 that goes on with an idle session's conversation is told by :func:`idle_resume_message` what changed since its last
 turn, the integration head included.
@@ -28,7 +30,16 @@ from dataclasses import asdict, astuple, dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+from hyperloom.common.outside_facts import UPSTREAM_PR_REPO_OF, kernel_knobs
+from hyperloom.measure.compile import COMPONENT_LAYOUTS
 from hyperloom.measure.runner.native.recipes import NATIVE_BUILD_REFUSE
+from hyperloom.measure.runner.native.server_options import inventory_path, read_inventory
+from hyperloom.orchestrator.prompts.native_discovery import (
+    DISCOVERY_TEXTS,
+    OptionList,
+    gpu_kernel_dirs,
+    native_discovery,
+)
 from hyperloom.orchestrator.prompts.specialist_prompt_builder import BASH_KILL_SAFETY_PREAMBLE
 from hyperloom_multibranch.contracts.branch_log import BranchLogType
 from hyperloom_multibranch.contracts.fork import RepairRequest
@@ -36,7 +47,12 @@ from hyperloom_multibranch.contracts.blackboard.records import BranchLogRecord, 
 from hyperloom_multibranch.contracts.sources import NativeTree
 from hyperloom_multibranch.rulegate.agentx import AgentXObjective
 from hyperloom_multibranch.rulegate.fix_case import CASE_SCRIPT
-from hyperloom_multibranch.specialist.directions import DIRECTIONS, direction_name
+from hyperloom_multibranch.specialist.directions import (
+    CHECKOUT_DIRECTIONS,
+    DIRECTIONS,
+    direction_name,
+    session_directions,
+)
 from hyperloom_multibranch.specialist.following import REROOT
 from hyperloom_multibranch.specialist.judging import NOTICE
 from hyperloom_multibranch.specialist.runtime import SessionStart, restart_notice
@@ -95,12 +111,33 @@ you have something to do, or end your turn again to keep waiting."""
 _NUDGE = """\
 Your turn ended with no test of yours running and nothing new for your branch. Nothing arrives on its own: a brief \
 comes only when the integration head moves, and no one hands your branch a new direction, so read blackboard_brief for \
-your head and act now. Settings run out; source work does not: take the operator the profile ranks highest in your \
-direction and write a patch, a fused or tuned kernel, or a port of a PR the image lacks, and test it. If your \
+your head and act now. {act} If your \
 direction is done on this head, take another of the session's directions. If no candidate clears the bar, buy the \
-number first: profile, log the dispatch path, or break down a flat result. Once a profile analysis failed, profile \
-no later head on the same execution path: read the code on the top operator's path, log its dispatch path or break \
-down a flat result instead. Turns that end with nothing to test stop your branch."""
+number first: {measure} Turns that end with nothing to test stop your branch."""
+
+
+@dataclass(frozen=True)
+class _NudgeEvidence:
+    """What a nudge sends an idle specialist to: the work to take up (``act``), and the number to buy when no
+    candidate clears the bar (``measure``)."""
+
+    act: str
+    measure: str
+
+
+_NUDGE_PROFILED = _NudgeEvidence(
+    act="Settings run out; source work does not: take the operator the profile ranks highest in your direction and "
+    "write a patch, a fused or tuned kernel, or a port of a PR the image lacks, and test it.",
+    measure="profile, log the dispatch path, or break down a flat result. Once a profile analysis failed, profile no "
+    "later head on the same execution path: read the code on the top operator's path, log its dispatch path or break "
+    "down a flat result instead.",
+)
+_NUDGE_UNPROFILED = _NudgeEvidence(
+    act="A sweep of values runs out; a code path no test of this session ran does not: take the largest line of your "
+    "step budget in your direction and test an option the launch leaves unset, a source patch, a tuned or merged "
+    "kernel, or a port of a pull request your worktree lacks.",
+    measure="a one-time timing log line on the path, or break down a flat result.",
+)
 _RESUMED = """\
 Your CLI stopped ({reason}) and was restarted on the same conversation: go on from where you stopped.
 {worktree}
@@ -141,6 +178,8 @@ _LAUNCH = (
     _WAKE_ITEM,
     _MOVED,
     _NUDGE,
+    *astuple(_NUDGE_PROFILED),
+    *astuple(_NUDGE_UNPROFILED),
     _RESUMED,
     _KEPT,
     _RESET,
@@ -156,6 +195,7 @@ _LAUNCH = (
     str(SUMMARY_ENTRIES),
     str(SUMMARY_ENTRY_CHARS),
     *DIRECTIONS,
+    *CHECKOUT_DIRECTIONS,
 )
 
 _ROLE = f"""\
@@ -275,11 +315,8 @@ commit of yours not merged yet, or while your head's recorded value is above the
 
 Your launch prompt names your branch's direction, if it has one: work on it first. When the brief names a "Focus", \
 start from that operator, within your direction if you have one: the scheduler opened your branch on it. When the brief \
-lists earlier branches on it, start from where they ended rather than verify what they found again. When the first idea \
-fails, profile and dig \
-deeper in it rather than switching to settings. Settings are a small space the settings branch sweeps; the larger \
-ceilings are in source: a patch, a fused or tuned kernel, or a port of an aiter or framework PR, on the operators the \
-profile ranks highest. That every setting near your direction was tried never means your direction is done. Never \
+lists earlier branches on it, start from where they ended rather than verify what they found again. \
+{{first_idea}} That every setting near your direction was tried never means your direction is done. Never \
 end a turn to wait for a brief: one comes only when the session moves, and a branch that keeps finding nothing to \
 test is stopped. That no candidate clears the bar is a missing measurement, not a stop: profile your head unless a \
 profile analysis already failed on its execution path, add a \
@@ -374,7 +411,7 @@ from another model or TP size): check it against the shapes the profile shows, a
 shadows a compiled kernel.
 - The model's weight precision is the session's, never yours to change, down or up: no quantization flag \
 (--quantization, --quantization-config, --quantization-param-path, --online-quant-config), no --dtype, no other \
-checkpoint, and no patch that quantizes or de-quantizes weights, lm_head's included; the toolbox refuses those flags. Intermediates may change while the weights stay as they are and accuracy passes: the KV \
+checkpoint of the served model, and no patch that quantizes or de-quantizes weights, lm_head's included; the toolbox refuses those flags. Intermediates may change while the weights stay as they are and accuracy passes: the KV \
 cache dtype, attention's compute precision, a quantized all-reduce, and activation quantization or fusions on \
 weights already FP8 in the checkpoint.
 - A fusion that reorders a floating-point sum changes outputs and must pass the accuracy gate; one that keeps the \
@@ -440,6 +477,21 @@ name every change in its mechanism and give as target_share_pct the summed share
 """
 
 
+#: What a first idea that failed asks for: on a framework run as its image installs it, and on a server built from
+#: its checkout, where an unset option and a model file are code paths every branch may test.
+_FIRST_IDEA_INSTALLED = (
+    "When the first idea fails, profile and dig deeper in it rather than switching to settings. Settings are a small "
+    "space the settings branch sweeps; the larger ceilings are in source: a patch, a fused or tuned kernel, or a port "
+    "of an aiter or framework PR, on the operators the profile ranks highest."
+)
+_FIRST_IDEA_CHECKOUT = (
+    "When the first idea fails, break its result down from the timing lines and the source rather than leave the "
+    "direction. On this server an option the launch does not set and a choice among the model files already there "
+    "are code paths, not a settings sweep left to another branch: any branch tests one its evidence points at."
+)
+_UNPROFILED = """
+This server runs under no profiler here: a profile test is refused, so submit none; wherever the steps above say \
+profile or name the operators a profile ranks, use the step budget from the timing lines and the source instead."""
 _NO_GPU = (
     "Do not start servers or benchmarks yourself: the toolbox measures every test in a fresh sandbox. You have no GPU "
     "of your own: submit_test is how you measure."
@@ -520,19 +572,38 @@ class RoleWorkload:
         return _INFERENCEX_GRADING if self.agentx is None else _agentx_grading(self.agentx)
 
 
+@dataclass(frozen=True)
+class RoleServer:
+    """What a role is told of the server a session's tests run: ``base`` the server half of the session's frozen base
+    launch, which every recipe changes (none: not shown), ``checkouts`` the components its worktrees hold as the
+    checkout each is built from, whose session deals the directions of such a server, ``test_outputs`` the directory a
+    test result's ``output_dir`` is relative to, which a role with ``checkouts`` names, ``profiled`` whether the
+    server runs under a profiler: one that does not is told that its profile steps read the step budget instead."""
+
+    base: ServerBase | None = None
+    checkouts: Sequence[str] = ()
+    test_outputs: Path | None = None
+    profiled: bool = True
+
+
 def role_prompt(
     workload: RoleWorkload,
     references: Mapping[str, Path] | None = None,
     *,
-    base: ServerBase | None = None,
+    server: RoleServer = RoleServer(),
     dev_leases: int = 0,
     native: Mapping[str, NativeTree] | None = None,
 ) -> str:
     """The system prompt of every session of every specialist; ``workload`` is what the session optimizes,
     ``references`` the reference material the session was given, each source's name and the directory it was copied
-    to, ``base`` the server half of the session's frozen base launch, which every recipe changes (none: not shown),
-    ``dev_leases`` how many dev sandboxes the session lends at once (none: the specialist has no GPU), and ``native``
-    the native trees its worktrees hold, by component (none: native code is not built)."""
+    to, ``server`` what it is told of the server its tests run, ``dev_leases`` how many dev sandboxes the session
+    lends at once (none: the specialist has no GPU), and ``native`` the native trees its worktrees hold, by component
+    (none: native code is not built); a role with ``checkouts`` hands over the file the session wrote the options of
+    its server to in ``test_outputs``, when it wrote one, with the review it asks for.
+
+    Raises:
+        ValueError: ``workload`` names nothing, or ``checkouts`` come without ``test_outputs``.
+    """
     named = " ".join(workload.named.split())
     if not named:
         raise ValueError("a specialist's role names the workload its session optimizes")
@@ -540,11 +611,19 @@ def role_prompt(
     role = _ROLE.format(
         workload=named,
         fake_gains=_fake_gains(),
-        directions=_direction_names(),
+        directions=_direction_names(session_directions(server.checkouts)),
+        first_idea=_FIRST_IDEA_CHECKOUT if server.checkouts else _FIRST_IDEA_INSTALLED,
         gpu_rule=gpu_rule,
         **asdict(workload.grading),
     )
-    return role + _native(native or {}) + _references(references or {}) + _base(base)
+    sections = (
+        _native(native or {}),
+        _checkouts(server.checkouts, server.test_outputs),
+        "" if server.profiled else _UNPROFILED,
+        _references(references or {}),
+        _base(server.base),
+    )
+    return role + "".join(sections)
 
 
 _NATIVE = """
@@ -561,6 +640,67 @@ def _native(trees: Mapping[str, NativeTree]) -> str:
         f"{component}'s C++/HIP sources under {tree.root.prefix}" for component, tree in sorted(trees.items())
     )
     return _NATIVE.format(trees=named, refused=", ".join(NATIVE_BUILD_REFUSE))
+
+
+_CHECKOUT = """
+{component}'s source: your worktree holds the {component} repository at the commit the session builds it from, laid out \
+as the repository lays it out: {trees}. Only these trees are yours to change, and every file in them is compiled into \
+the server each test runs: worktree_patch returns a delta that names that commit, and the toolbox builds the change \
+before the test, which waits as pending_build. A build your change breaks ends compile_error with the compiler's \
+lines; worktree_check does not apply, and there is no build_check here: the build of a test you submit is the compile \
+check. A change to {refused}, to a cmake/ directory or to any file outside those trees (the other tools, vendored \
+code, scripts, docs) is refused: the build definition stays as the commit has it. A change to these sources is what \
+this session expects of you, not only server settings{kernels}.{knobs}{upstream}{discovery}{review}"""
+_CHECKOUT_KERNELS = ": {component}'s GPU kernels are in {dirs}"
+_CHECKOUT_KNOBS = """ When start_analysis lists knob_tune, it sweeps a compile-time launch parameter of those kernels \
+over builds of the commit and returns the patch forcing the values that won (a request that names no knob is refused \
+with the knobs it takes): commit it on your branch and test it."""
+_CHECKOUT_UPSTREAM = """ When start_analysis lists upstream_pr_search, search {component}'s pull requests with it \
+(repo_url https://github.com/{repo}) before you write a change: a PR that already does it is the change to start \
+from, and the search shows you its number and title, not its diff."""
+_CHECKOUT_CARRIED = """the result of every finished test of your branch carries them as timing_lines (test_result, \
+wait_test), each led by its log's path, and so does the result of every baseline test of the session, which measured \
+the session's root and which any branch reads (blackboard_search for baseline lists each as "test <request id> on \
+integration"): a branch with no finished test of its own takes its first budget from those."""
+_CHECKOUT_LOGS = """in directories below the one a test of your branch lands in (find them by name), which its \
+result names as output_dir, relative to {test_outputs}"""
+_CHECKOUT_REVIEW = """ Record your verdict on each unset option with option_review; a test that changes server \
+arguments is refused as options_unreviewed until your branch's review covers them all."""
+
+
+def _checkouts(components: Sequence[str], test_outputs: Path | None) -> str:
+    if not components:
+        return ""
+    if test_outputs is None:
+        raise ValueError("a role with a checkout says where its tests land")
+    options = None
+    if (inventory := inventory_path(test_outputs)) is not None:
+        written = read_inventory(inventory)
+        options = OptionList(inventory, len(written.options), len(written.unset))
+    return "".join(_checkout(component, test_outputs, options) for component in sorted(components))
+
+
+def _checkout(component: str, test_outputs: Path, options: OptionList | None) -> str:
+    """The section of a component built from its checkout: its trees, and, as the rule pack states them, where its GPU
+    kernels are, that it has knobs, its upstream repository and how the gains of its server are found, from the timing
+    lines its tests' results carry, read from the logs of the tests that land under ``test_outputs``, and from the
+    ``options`` the session wrote of its server, which the branch then reviews."""
+    knobs = any(knob.component == component for knob in kernel_knobs().values())
+    dirs = gpu_kernel_dirs(component)
+    repo = UPSTREAM_PR_REPO_OF.get(component)
+    discovery = native_discovery(
+        component, carried=_CHECKOUT_CARRIED, logs=_CHECKOUT_LOGS.format(test_outputs=test_outputs), options=options
+    )
+    return _CHECKOUT.format(
+        component=component,
+        trees=", ".join(f"{section.prefix}/" for section in COMPONENT_LAYOUTS[component].spec.sections),
+        refused=", ".join(NATIVE_BUILD_REFUSE),
+        kernels=_CHECKOUT_KERNELS.format(component=component, dirs=", ".join(dirs)) if dirs else "",
+        knobs=_CHECKOUT_KNOBS if knobs else "",
+        upstream=_CHECKOUT_UPSTREAM.format(component=component, repo=repo) if repo else "",
+        discovery=f"\n{discovery}" if discovery else "",
+        review=_CHECKOUT_REVIEW if options is not None else "",
+    )
 
 
 #: What a well-known reference source holds, by the name a session gives it.
@@ -729,9 +869,10 @@ def wait_wake_message(tests: Sequence[str], profiles: Sequence[str]) -> str:
     return _WAIT_WAKE.format(running="; ".join(running))
 
 
-def nudge_message() -> str:
-    """The message to a specialist whose turn ended with nothing of its own running and nothing new arrived."""
-    return _NUDGE
+def nudge_message(*, profiled: bool) -> str:
+    """The message to a specialist whose turn ended with nothing of its own running and nothing new arrived;
+    ``profiled`` says whether its server runs under a profiler, whose ranking the message then sends it to."""
+    return _NUDGE.format(**asdict(_NUDGE_PROFILED if profiled else _NUDGE_UNPROFILED))
 
 
 def prompt_versions() -> dict[str, str]:
@@ -739,12 +880,16 @@ def prompt_versions() -> dict[str, str]:
     role = _ROLE.format(
         workload="{workload}",
         fake_gains=_fake_gains(),
-        directions=_direction_names(),
+        directions=_direction_names(DIRECTIONS),
+        first_idea=_FIRST_IDEA_INSTALLED,
         gpu_rule=_NO_GPU,
         **asdict(_INFERENCEX_GRADING),
     )
     agentx = (text for objective in AgentXObjective for text in astuple(_agentx_grading(objective)))
-    settings = (_DEV_SANDBOX, _NATIVE, _REFERENCES, _BASE, *_HOLDS.values(), *agentx)
+    checkout = (_CHECKOUT, _CHECKOUT_KERNELS, _CHECKOUT_KNOBS, _CHECKOUT_UPSTREAM, _CHECKOUT_REVIEW)
+    checkout = (*checkout, _FIRST_IDEA_CHECKOUT, _UNPROFILED)
+    discovery = (_CHECKOUT_CARRIED, _CHECKOUT_LOGS, *DISCOVERY_TEXTS, _direction_names(CHECKOUT_DIRECTIONS))
+    settings = (_DEV_SANDBOX, _NATIVE, *checkout, *discovery, _REFERENCES, _BASE, *_HOLDS.values(), *agentx)
     texts = {
         "specialist_role": "\n".join((role, *settings)),
         "specialist_launch": "\n".join((*_LAUNCH, _LEASE_WAKE, _WAIT_WAKE)),
@@ -752,8 +897,8 @@ def prompt_versions() -> dict[str, str]:
     return {name: hashlib.sha256(text.encode()).hexdigest()[:VERSION_HEX] for name, text in texts.items()}
 
 
-def _direction_names() -> str:
-    return "; ".join(direction_name(direction) for direction in DIRECTIONS)
+def _direction_names(directions: Sequence[str]) -> str:
+    return "; ".join(direction_name(direction) for direction in directions)
 
 
 def _fake_gains() -> str:
@@ -796,6 +941,7 @@ __all__ = [
     "VERSION_HEX",
     "IntegrationHeads",
     "Resume",
+    "RoleServer",
     "idle_resume_message",
     "integration_section",
     "launch_prompt",

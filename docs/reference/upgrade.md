@@ -64,6 +64,29 @@ Framework run row carries `ensemble_scores` any more. Only a run launched with
 a breakdown whose action row holds the key no longer validates against the
 packaged schema. Consumers that read it should stop.
 
+### Required: the integrate re-baseline starts with the session's memory budget
+
+`HL_INTEGRATE_VRAM_GUARD` and `HL_INTEGRATE_VRAM_UTIL_CAP` are no longer read
+and are silently ignored, so drop them. On vLLM, an integrate re-baseline now
+starts its server with the session's own `--gpu-memory-utilization`, where it
+appended `--gpu-memory-utilization 0.9` unless the integrate request set the
+flag itself. To keep a 0.9 budget, pass `--gpu-memory-utilization 0.9` in
+`--server-args`.
+
+A launch that pins `--moe-runner-backend` on a checkpoint that has no runner
+for that backend now fails its round with the server's error, where the round
+was relaunched without the flag. Fix the pin where it was set.
+
+### Required: `session_breakdown.json` drops the held Critic verdict
+
+The schema stays `v6.1`, but a Critic ruling no longer carries `held_to_rule`,
+`effective_verdict` or `failure_reason_code`: not in `critic_review` on a phase
+or framework proposal, not on its `critic_review.variants[]` rows, and
+`critic.iterations[].framework_reviews[]` no longer carries `effective_verdict`
+or `failure_reason_code`. Consumers that read `effective_verdict` read
+`verdict` instead: the loop no longer downgrades a ruling, so `verdict` is the
+one it acted on.
+
 ---
 
 ## Upgrading from 1.1.x

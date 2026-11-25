@@ -8,7 +8,6 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import textwrap
-import time
 from dataclasses import dataclass, replace
 
 from kernelforge.evaluation.benchmark.baseline import (
@@ -477,13 +476,11 @@ class ScoringMixin:
         rounds = 0
         stopped = ""
         while rounds < SIGMA_REMEASURE_MAX_ROUNDS and current.dominant_case is not None:
-            remeasure_started = time.time()
             extra = await measure_wallclock(
                 BenchRun(self.ic.driver_script, driver_args=[], repeat=self.ic.bench_repeat),
                 measurements=SIGMA_REMEASURE_BATCH,
                 timeout_sec=self.ic.bench_timeout_sec,
             )
-            self._observe_measurement(remeasure_started)
             rounds += 1
             extra_series = _measurement_case_times(extra)
             if not extra.get("success"):

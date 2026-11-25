@@ -15,6 +15,17 @@ from pathlib import Path
 # No local plumbing command on a large worktree comes close to this; anything that does is stuck rather than slow.
 DEFAULT_TIMEOUT_SEC = 300.0
 
+# The variables that point every git command of this process at one repository and one tree, wherever it runs.
+_REPOSITORY_VARIABLES = ("GIT_DIR", "GIT_WORK_TREE")
+
+
+def repository_selected_by_environment() -> tuple[str, ...]:
+    """The variables through which this process's environment selects the repository git works on, if any.
+
+    Commands run under them ignore the directory they run in: git in a copy of the tree still reads the original.
+    """
+    return tuple(name for name in _REPOSITORY_VARIABLES if os.environ.get(name))
+
 
 class GitError(subprocess.CalledProcessError):
     """A git command that exited non-zero, quoting git's own words."""

@@ -31,6 +31,7 @@ from hyperloom.measure.failures import (
     PROFILER_DIED,
     PROFILER_HUNG,
     PROFILER_SNAPSHOT_FAILED,
+    RESULT_DOWNLOAD_INCOMPLETE,
     TEST_TIMEOUT_REASON,
     FailureEvidence,
     StepFailure,
@@ -43,6 +44,7 @@ from hyperloom_multibranch.toolbox.attempts import (
     NODE_BLAMELESS_INFRA_REASONS,
     RUNNER_START_TIMEOUT,
     WAITED_INFRA_REASONS,
+    UNAVOIDED_INFRA_REASONS,
     RUNNER_LOST,
     RUNNER_START_FAILED,
     SANDBOX_CREATE_FAILED,
@@ -50,6 +52,7 @@ from hyperloom_multibranch.toolbox.attempts import (
     AttemptRunner,
     InfraBackoff,
     TestJob,
+    node_unquarantined,
 )
 
 INERT_REASON = f"{INERT_PATCH}: process 1 imported aiter from /sgl-workspace/aiter/aiter/__init__.py, not from the farm"
@@ -167,7 +170,168 @@ async def test_in_a_mixed_run_only_the_retries_after_a_failure_that_is_not_the_n
     assert len(executor.jobs) == 4 and result.validity is Validity.MEASUREMENT_FAILED
     assert executor.clock.waits == [60.0, 120.0], "the waits count the waiting retries only"
     assert executor.started == [1000.0, 1060.0, 1060.0, 1180.0]
-    assert "n2" in reported and "n4" in reported
+    assert "n1" not in reported and "n2" in reported and "n4" in reported
+    assert [job.avoid_nodes for job in executor.jobs] == [(), (), ("n2",), ("n2", "n3")], "busy cards do not avoid"
+
+
+async def test_cards_a_process_outside_the_test_held_neither_avoid_nor_report_their_node() -> None:
+    result, executor, reported = await _run(FOREIGN_REASON)
+    assert len(executor.jobs) == 4 and result.validity is Validity.MEASUREMENT_FAILED
+    assert result.failure_reason == f"4 attempts failed for infrastructure reasons: {FOREIGN_REASON}"
+    assert [job.avoid_nodes for job in executor.jobs] == [()] * 4, "the retry waits and may land on the same node"
+    assert reported == [], "the card guard refuses the foreign holder; its node is not quarantined"
+    assert executor.clock.waits == [60.0, 120.0, 240.0]
+
+
+class _SucceedsAfter(_ScriptedExecutor):
+    """Fails the first attempts with the scripted reasons, each on its own node, then succeeds on the next node."""
+
+    async def run(self, job: TestJob) -> TestResult:
+        if job.attempt <= len(self.reasons):
+            return await super().run(job)
+        self.jobs.append(job)
+        return TestResult(
+            request_id="r1",
+            validity=Validity.SUCCEEDED,
+            sandbox=SandboxFacts(sandbox_id=f"s{job.attempt}", node_name=f"n{job.attempt}"),
+        )
+
+
+async def test_a_retry_after_cards_a_process_outside_the_test_held_waits_and_carries_no_avoid_for_that_node() -> None:
+    executor = _SucceedsAfter((FOREIGN_REASON,))
+    reported: list[str] = []
+
+    async def on_node_failure(node: str, _reason: str, _reproduced: bool) -> None:
+        reported.append(node)
+
+    runner = AttemptRunner(executor, avoid=frozenset, on_node_failure=on_node_failure, backoff=_backoff(executor.clock))
+    result = await runner.run(_job())
+    assert result.validity is Validity.SUCCEEDED
+    assert [job.avoid_nodes for job in executor.jobs] == [(), ()]
+    assert reported == [] and executor.clock.waits == [60.0]
+
+
+async def test_a_waited_failure_does_not_lift_the_avoid_a_node_held_failure_put_on_its_node() -> None:
+    result, executor, reported = await _run((PORT_REASON, FOREIGN_REASON, PORT_REASON, CAPACITY_REASON))
+    assert [job.avoid_nodes for job in executor.jobs] == [(), ("n1",), ("n1",), ("n1", "n3")]
+    assert reported == ["n1", "n3", "n4"], "the busy cards of n2 do not report their node"
+
+
+@pytest.mark.parametrize(
+    "reason",
+    [FOREIGN_REASON, f"{HUB_RATE_LIMITED}: 429 Too Many Requests"],
+    ids=["busy_cards_on_other_nodes", "hub_rate_limited"],
+)
+async def test_a_failure_that_says_nothing_about_the_node_puts_no_node_in_the_avoid_set(reason) -> None:
+    _, executor, _ = await _run(reason)
+    assert [job.avoid_nodes for job in executor.jobs] == [()] * 4, "the retry may land on the same node"
+
+
+@pytest.mark.parametrize(
+    "reason",
+    [CAPACITY_REASON, f"{RUNNER_LOST}: the sandbox is gone", f"{RUNNER_START_FAILED}: exec format error"],
+    ids=["no_capacity", "runner_lost", "runner_start_failed"],
+)
+async def test_a_lost_or_unstarted_runner_and_no_capacity_still_avoid_their_node(reason) -> None:
+    _, executor, _ = await _run(reason)
+    assert [job.avoid_nodes for job in executor.jobs][1:] == [("n1",), ("n1", "n2"), ("n1", "n2", "n3")]
+
+
+class _PlacingExecutor(_ScriptedExecutor):
+    """Places each attempt on the first of ``nodes`` its avoid set leaves and fails it with the next reason scripted for
+    that node; a node with no reason left succeeds."""
+
+    def __init__(self, nodes: tuple[str, ...], failures: dict[str, list[str]]) -> None:
+        super().__init__(PORT_REASON)
+        self.nodes = nodes
+        self.failures = failures
+
+    async def run(self, job: TestJob) -> TestResult:
+        self.jobs.append(job)
+        self.started.append(self.clock())
+        node = next(node for node in self.nodes if node not in job.avoid_nodes)
+        sandbox = SandboxFacts(sandbox_id=f"s{job.attempt}", node_name=node)
+        left = self.failures.get(node, [])
+        if not left:
+            return TestResult(request_id="r1", validity=Validity.SUCCEEDED, sandbox=sandbox)
+        return TestResult(
+            request_id="r1",
+            validity=Validity.MEASUREMENT_FAILED,
+            failure_class=FailureClass.INFRA,
+            failure_reason=left.pop(0),
+            sandbox=sandbox,
+        )
+
+
+async def _place(failures: dict[str, list[str]]) -> tuple[TestResult, _PlacingExecutor, list[str]]:
+    executor = _PlacingExecutor(("n1", "n2"), failures)
+    reported: list[str] = []
+
+    async def on_node_failure(node: str, _reason: str, _reproduced: bool) -> None:
+        reported.append(node)
+
+    runner = AttemptRunner(
+        executor,
+        avoid=frozenset,
+        on_node_failure=on_node_failure,
+        max_infra_retries=3,
+        backoff=_backoff(executor.clock),
+    )
+    return await runner.run(_job()), executor, reported
+
+
+@pytest.mark.parametrize(
+    "reason",
+    [f"{RUNNER_LOST}: the sandbox is gone", f"{RUNNER_START_FAILED}: exec format error"],
+    ids=["runner_lost", "runner_start_failed"],
+)
+async def test_a_node_that_loses_every_runner_sends_the_retry_to_the_free_node(reason) -> None:
+    result, executor, reported = await _place({"n1": [reason] * 10})
+    assert result.validity is Validity.SUCCEEDED
+    assert [job.avoid_nodes for job in executor.jobs] == [(), ("n1",)]
+    assert reported == [], "a lost runner is still not held against its node"
+
+
+async def test_a_process_that_stays_on_the_cards_of_a_node_is_avoided_after_two_refusals_there() -> None:
+    result, executor, reported = await _place({"n1": [FOREIGN_REASON] * 10})
+    assert result.validity is Validity.SUCCEEDED and result.sandbox.node_name == "n2"
+    assert [job.avoid_nodes for job in executor.jobs] == [(), (), ("n1",)]
+    assert reported == [] and executor.clock.waits == [60.0, 120.0], "still no report and no quarantine"
+
+
+async def test_a_single_refusal_for_busy_cards_puts_no_node_in_the_avoid_set() -> None:
+    result, executor, reported = await _place({"n1": [FOREIGN_REASON]})
+    assert result.validity is Validity.SUCCEEDED and result.sandbox.node_name == "n1"
+    assert [job.avoid_nodes for job in executor.jobs] == [(), ()]
+    assert reported == []
+
+
+async def test_the_avoid_after_two_refusals_for_busy_cards_lasts_one_attempt() -> None:
+    result, executor, reported = await _place({"n1": [FOREIGN_REASON] * 10, "n2": [FOREIGN_REASON] * 10})
+    assert result.validity is Validity.MEASUREMENT_FAILED
+    assert [attempt.node for attempt in result.attempts] == ["n1", "n1", "n2", "n1"]
+    assert [job.avoid_nodes for job in executor.jobs] == [(), (), ("n1",), ()]
+    assert reported == []
+
+
+async def test_a_runner_start_timeout_waits_and_still_puts_its_node_in_the_next_attempt_s_avoid_set() -> None:
+    _, executor, _ = await _run(START_TIMEOUT_REASON)
+    assert executor.clock.waits == [60.0, 120.0, 240.0]
+    assert [job.avoid_nodes for job in executor.jobs][1:] == [("n1",), ("n1", "n2"), ("n1", "n2", "n3")], (
+        "a slow or faulty node (an image pull, a GPU that does not come up) is one way a runner does not start in time"
+    )
+
+
+def test_the_unavoided_names_are_the_busy_cards_and_the_blameless_ones_less_a_lost_or_unstarted_runner() -> None:
+    assert UNAVOIDED_INFRA_REASONS == (NODE_BLAMELESS_INFRA_REASONS - {"runner_lost", "runner_start_failed"}) | {
+        "foreign_process_on_card"
+    }
+    assert WAITED_INFRA_REASONS - UNAVOIDED_INFRA_REASONS == {
+        "runner_start_timeout",
+        "capacity_unavailable",
+        "runner_lost",
+        "runner_start_failed",
+    }
 
 
 async def test_an_infrastructure_retry_never_waits_past_the_latest_start_and_goes_at_once_after_it() -> None:
@@ -291,6 +455,23 @@ async def test_a_sandbox_that_failed_before_it_ran_is_retried_once_with_a_new_ke
     assert reported == [], "the template or the platform, not a node, failed the sandbox"
 
 
+#: What the hosted backend reports when a result file's every copy out of the sandbox came back short.
+DOWNLOAD_REASON = f"{RESULT_DOWNLOAD_INCOMPLETE}: report.json: 4194301 bytes received, the manifest lists 4194304"
+
+
+async def test_a_result_download_that_came_back_short_is_retried_after_waits_and_not_held_against_the_node() -> None:
+    result, executor, reported = await _run(DOWNLOAD_REASON)
+    assert len(executor.jobs) == 4, "a new attempt downloads the result again, up to the infrastructure retries"
+    assert executor.clock.waits == [60.0, 120.0, 240.0]
+    assert result.validity is Validity.MEASUREMENT_FAILED and result.failure_class is FailureClass.INFRA
+    assert result.failure_reason == f"4 attempts failed for infrastructure reasons: {DOWNLOAD_REASON}"
+    assert reported == [], "the platform's file API, not the node, cut the download short"
+    assert node_unquarantined(DOWNLOAD_REASON), "and it never quarantines the node"
+    assert (
+        classify_test_failure(returncode=0, error_class=RESULT_DOWNLOAD_INCOMPLETE).failure_class is FailureClass.INFRA
+    )
+
+
 def test_the_blameless_names_are_the_ones_the_runner_and_the_backend_report() -> None:
     assert NODE_BLAMELESS_INFRA_REASONS == {
         "runner_start_failed",
@@ -300,6 +481,7 @@ def test_the_blameless_names_are_the_ones_the_runner_and_the_backend_report() ->
         "sandbox_acquire_timeout",
         "hf_cache_permission",
         "framework_version_mismatch",
+        "result_download_incomplete",
     }
     assert NODE_BLAMELESS_INFRA_REASONS - {HUB_RATE_LIMITED, HF_CACHE_PERMISSION} <= INFRA_ERROR_CLASSES, (
         "the ones a log, not a status, names"

@@ -406,3 +406,19 @@ def test_an_import_a_native_stack_s_package_may_answer_is_not_judged(tmp_path: P
     assert MergeSmoke(default_python=framework.python).check(with_native, (point,)) is None
     # Without the native stack the same import failure is the candidate's.
     assert MergeSmoke(default_python=framework.python).check(environment, (point,)) == REMOVED_Y_ERROR
+
+
+def test_a_stack_with_an_executable_root_is_smoked_without_it_and_its_import_failure_is_not_judged(
+    tmp_path: Path,
+) -> None:
+    """An executable root (a server the build makes, laid once its build is ready) has nothing to import: the smoke runs
+    on the other roots, and an import failure is not judged while the build is not laid."""
+    framework = _framework(tmp_path / "framework", IMAGE_FILES)
+    server = EnvRoot("llamacpp", "llamacpp", "llamacpp", "e" * 40, (), kind="executable")
+    good = _environment(tmp_path / "good", framework, MERGE_OWN)
+    broken = _environment(tmp_path / "broken", framework, REMOVES_Y, IMPORTS_Y)
+    point = point_yaml(tmp_path, "smoke-point.yaml")
+    smoke = MergeSmoke(default_python=framework.python)
+
+    assert smoke.check(replace(good, roots=(*good.roots, server)), (point,)) is None
+    assert smoke.check(replace(broken, roots=(*broken.roots, server)), (point,)) is None
