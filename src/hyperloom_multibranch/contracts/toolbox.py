@@ -157,6 +157,9 @@ class QueueState:
     ``pending_build_by_branch`` counts each branch's tests that wait for native builds; they hold no card and are in
     neither ``queued`` nor ``running``, but they count against the branch's K for backpressure. ``builds`` is the
     session's ledger of the builds this toolbox ran: queued, building and done, each with its ``build_seconds``.
+    ``k_by_branch`` is the K of every branch the queue's policy names or holds a test of, and ``counted_by_branch``
+    each branch's tests that take a slot of its K, running, queued or pending their builds (a purpose exempt from K
+    takes none); a branch with no entry has no K, or no such test.
     """
 
     queued_by_priority: Mapping[int, int] = field(default_factory=lambda: dict.fromkeys(_PRIORITIES, 0))
@@ -165,6 +168,13 @@ class QueueState:
     cold_start_seconds: float | None = None
     pending_build_by_branch: Mapping[str, int] = field(default_factory=dict)
     builds: tuple[BuildStatus, ...] = ()
+    k_by_branch: Mapping[str, int] = field(default_factory=dict)
+    counted_by_branch: Mapping[str, int] = field(default_factory=dict)
+
+    def free_slots(self, branch: str) -> int:
+        """Slots of ``branch``'s K none of its counted tests takes; none for a branch with no K."""
+
+        return max(0, self.k_by_branch.get(branch, 0) - self.counted_by_branch.get(branch, 0))
 
     @property
     def queued(self) -> int:

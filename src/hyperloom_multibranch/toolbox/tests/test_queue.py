@@ -243,6 +243,20 @@ def test_the_queue_state_counts_by_priority_branch_and_running() -> None:
     assert dict(state.running_by_branch) == {"b1": 1} and dict(state.queued_by_branch) == {"b1": 1}
 
 
+def test_the_queue_state_gives_each_branch_its_k_and_the_tests_that_take_a_slot_of_it() -> None:
+    queue = _queue(per_branch_k=1, branch_k={"b1": 3, "idle": 2}, global_concurrency=9)
+    queue.push(_item("explore"))
+    queue.push(_item("profile", purpose=Purpose.PROFILE))
+    queue.push(_pending("built"))
+    queue.push(_item("confirm", purpose=Purpose.CONFIRM, retest_of="explore"))
+    queue.push(_item("baseline", "integration", purpose=Purpose.BASELINE))
+    queue.take()
+    state = queue.state()
+    assert dict(state.k_by_branch) == {"b1": 3, "idle": 2, "integration": 1}
+    assert dict(state.counted_by_branch) == {"b1": 3}, "the confirm-retest and the baseline take no slot"
+    assert [state.free_slots(b) for b in ("b1", "idle", "integration", "unknown")] == [0, 2, 1, 0]
+
+
 def test_a_new_policy_reprioritises_only_queued_tests_without_an_explicit_priority() -> None:
     queue = _queue()
     queue.push(_item("default"))
