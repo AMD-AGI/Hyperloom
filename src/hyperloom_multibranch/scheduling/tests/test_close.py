@@ -45,8 +45,16 @@ from hyperloom_multibranch.blackboard.rsi.authoring import PLAYBOOK_SYSTEM_PROMP
 from hyperloom_multibranch.blackboard.rsi.lesson_curation import NO_LESSONS
 from hyperloom_multibranch.blackboard.rsi.frontier import FrontierPolicy, FrontierScoring
 from hyperloom_multibranch.blackboard.knowledge.warm_start import PreparedReplay, WarmLead
-from hyperloom_multibranch.blackboard.rsi.session import DISABLED, WRITTEN, CloseStep, KnowledgeClose, close_knowledge
-from hyperloom_multibranch.scheduling import mb_fakes
+from hyperloom_multibranch.blackboard.rsi.session import (
+    DISABLED,
+    NO_KB,
+    WRITTEN,
+    CloseStep,
+    CloseTargets,
+    KnowledgeClose,
+    close_knowledge,
+)
+from hyperloom_multibranch.scheduling import exports
 from hyperloom_multibranch.blackboard.tests.factories import FakeClock
 from hyperloom_multibranch.blackboard.tests.sessions import METRIC, scripted_session
 from hyperloom_multibranch.scheduling.close import (
@@ -81,7 +89,6 @@ from hyperloom_multibranch.scheduling.layout import SessionLayout, create_sessio
 from hyperloom_multibranch.scheduling.manifest import CodeVersion, SessionManifest
 from hyperloom_multibranch.scheduling.roster import RosterCaps
 from hyperloom_multibranch.scheduling.settings import InferenceXShape, KernelOptimizer, RunSettings, Workload
-from hyperloom_multibranch.scheduling.mb_fakes import MB_FAKE_EXPERIENCE_KB
 from hyperloom_multibranch.scheduling.processes import SCHEDULER_BRANCH, ProcessRecord
 from hyperloom_multibranch.scheduling.stops import SessionStopReason, StopReport
 
@@ -270,7 +277,6 @@ async def test_close_publishes_the_final_recipe_exports_and_stops_everything(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setenv(ARCHIVE_ENV, str(tmp_path / "archive"))
-    monkeypatch.setenv(KB_URL, "http://127.0.0.1:9/kb")
     store = FakeRecipeStore(champion={"metric": "optimized_throughput", "session_id": "older", "value": 1000.0})
     stopper = _clean()
     author, curator = ScriptedCompletion(), ScriptedCompletion()
@@ -293,7 +299,7 @@ async def test_close_publishes_the_final_recipe_exports_and_stops_everything(
     assert breakdown["close"]["kb_write_back"]["status"] == "written"
     knowledge = breakdown["close"]["knowledge"]
     for step in ("experiences", "learnings"):
-        assert (knowledge[step]["status"], knowledge[step]["reason"]) == (DISABLED, MB_FAKE_EXPERIENCE_KB)
+        assert (knowledge[step]["status"], knowledge[step]["reason"]) == (DISABLED, NO_KB)
     assert knowledge["archive"]["status"] == ARCHIVED and any((tmp_path / "archive").iterdir())
     assert [system for system, _user in author.calls] == [PLAYBOOK_SYSTEM_PROMPT]
     assert knowledge["playbook"]["status"] in (WRITTEN, SKIPPED)
@@ -331,7 +337,7 @@ async def test_close_publishes_the_final_recipe_exports_and_stops_everything(
         "| waived for the root | regression cases | degraded concs | error |"
     )
     assert header in markdown
-    assert f"Experiences: {DISABLED} {MB_FAKE_EXPERIENCE_KB}" in markdown
+    assert f"Experiences: {DISABLED} {NO_KB}" in markdown
     assert f"Playbook: {knowledge['playbook']['status']}" in markdown
     assert f"Lesson curation: {SKIPPED} {NO_LESSONS}" in markdown
     assert f"Lesson standings: {knowledge['lesson_standings']['status']}" in markdown
@@ -514,17 +520,21 @@ async def test_close_marks_the_replays_of_the_champions_prelude_prepared_from_an
     layout: SessionLayout, blackboard: LocalBlackboard, final: FinalRecipe, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     closed: list[Collection[str]] = []
+    targeted: list[CloseTargets] = []
 
-    def spied(*args: Any, cross_image: Collection[str], **kwargs: Any) -> KnowledgeClose:
+    def spied(*args: Any, cross_image: Collection[str], targets: CloseTargets, **kwargs: Any) -> KnowledgeClose:
         closed.append(cross_image)
-        return close_knowledge(*args, cross_image=cross_image, **kwargs)
+        targeted.append(targets)
+        return close_knowledge(*args, cross_image=cross_image, targets=targets, **kwargs)
 
-    monkeypatch.setattr(mb_fakes, "close_knowledge", spied)
+    monkeypatch.setattr(exports, "close_knowledge", spied)
     leads = (_lead("inference:other", "sha256:" + "b" * 64), _lead("inference:same", ""), _lead("inference:none", None))
 
     await _closer(layout, blackboard, _clean(), final, None, warm_leads=leads).close(REASON, CHOICE, "", HARD_STOP)
 
     assert closed == [frozenset({"inference:other"})]
+    # The Experiences and the learnings go to the Experience KB the environment names.
+    assert targeted == [CloseTargets(receipts=layout.reports, judge_transcript=layout.judge, blobs=layout.blobs)]
 
 
 async def test_an_unreachable_kb_is_recorded_and_close_carries_on(

@@ -143,7 +143,7 @@ def _run_baseline(
     async def _measured_round(ctx, *, recorder=None):
         return result
 
-    executor._run_retrying = _measured_round
+    executor._run_with_accuracy = _measured_round
     task = SimpleNamespace(task_id="t-bl", kind=kind, params={"framework": "sglang", **(params or {})})
     ctx = SimpleNamespace(task=task, extra={"shared_state": state})
     return asyncio.run(executor._run(ctx)), state

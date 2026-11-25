@@ -368,7 +368,8 @@ def _replayed(snapshot: BlackboardSnapshot, archive: TreeArchive | None, path: P
 @dataclass(frozen=True)
 class CloseTargets:
     """Where CLOSE's knowledge goes besides the archive the environment names: ``experience_kb`` takes the
-    Experiences and ``learning_kb`` the learnings, each the environment's when ``None``; ``receipts`` is the folder
+    Experiences and ``learning_kb`` the learnings, each the environment's when ``None``, and ``multibranch_kb`` the
+    Experiences under the blackboard's own declaration (:meth:`multibranch`); ``receipts`` is the folder
     for the collection receipts, none without it, where the session's retrieval log lies too. ``judge_transcript`` is
     the judge's transcript of the session, whose exchanges go beside the archive (:mod:`rsi.decisions`), none without
     it. ``blobs`` is the session's blob store, which holds the cases of its regression set, none without it."""
@@ -378,15 +379,18 @@ class CloseTargets:
     receipts: Path | None = None
     judge_transcript: Path | None = None
     blobs: Path | None = None
+    multibranch_kb: CollectionTarget | None = None
 
     def receipt(self, name: str) -> Path | None:
         return self.receipts / name if self.receipts is not None else None
 
     def multibranch(self) -> CollectionTarget | None:
-        """Where the Experiences under the blackboard's own declaration go: the environment's KB beside the
-        environment's ``experience_kb``, and nowhere beside an ``experience_kb`` the caller chose, so a caller who
-        chose where Experiences go is never written behind."""
+        """Where the Experiences under the blackboard's own declaration go: ``multibranch_kb`` when given, else the
+        environment's KB beside the environment's ``experience_kb``, and nowhere beside an ``experience_kb`` the
+        caller chose, so a caller who chose where Experiences go is never written behind."""
 
+        if self.multibranch_kb is not None:
+            return self.multibranch_kb
         return None if self.experience_kb is None else NoOpExperienceKB(NO_KB)
 
 

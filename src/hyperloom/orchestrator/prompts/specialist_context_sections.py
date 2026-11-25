@@ -144,60 +144,10 @@ def _section_gap(inp: SpecialistPromptInputs) -> list[str]:
 
 
 # Section 4 — optional KB context
-def _is_cold_start(inp: SpecialistPromptInputs) -> bool:
-    """Return True when every prior KB/PR/research source is empty, so the
-    cold-start directive is injected in place of the KB block.
-
-    Args:
-        inp: The specialist prompt inputs.
-
-    Returns:
-        True when every prior KB/PR/research source is empty.
-    """
-    return (
-        not inp.experience_kb_block
-        and not inp.warm_start_recipe
-        and not inp.warm_start_lessons
-        and not inp.warm_start_pitfalls
-        and not inp.research_hints
-    )
-
-
-# Cold-start directive: fall back to the Section 1 defaults, or exit empty with a rationale.
-_COLD_START_DIRECTIVE = (
-    "**COLD-START MODE — no priors available.**",
-    "",
-    "All prior sources for this gap are empty:",
-    "",
-    "- KB context: ``(none)`` — no RecipeKB warm-start facts or "
-    + "research hints were available for this "
-    + "(model, hardware, domain) tuple.",
-    "- Warm-start recipe: ``(none)`` (Section 5).",
-    "- Use ``mcp__pr_monitor__*`` tools (Section 6) to query PRs on demand.",
-    "",
-    "**Directive — a coin-flip proposal is worse than none.** "
-    + "Treat the *Winning techniques* + *Pitfalls* bullets in "
-    + "Section 1 as your fallback prior and take the **1–2 "
-    + "most conservative, well-attested defaults** that fit "
-    + "the hardware (Section 2) and the gap symptom "
-    + "(Section 3); flag each ``provenance: "
-    + "domain_focus_default`` and call it an unvalidated "
-    + "fallback in the proposal's ``reason``. If none clears "
-    + "that bar, emit ``proposal_set=[]`` and cite in ``summary`` "
-    + "which you considered and why each was rejected — a "
-    + "bare empty exit with no rationale reads as a tool "
-    + "failure. Do NOT add a ``confidence`` field: "
-    + "self-reported confidence / gain fields are stripped "
-    + "before review. Record in ``residual_questions`` what "
-    + "RecipeKB, research, or ``mcp__pr_monitor__*`` query a "
-    + "future round should pursue.",
-)
-
-
 def _section_kb_context(inp: SpecialistPromptInputs) -> list[str]:
     """Build the advisory KB-context section of the specialist prompt.
 
-    Renders the research hints, the cold-start directive, or the none placeholder.
+    Renders the research hints, or the none placeholder.
 
     Args:
         inp: Assembled prompt inputs for the current dispatch.
@@ -220,19 +170,17 @@ def _section_kb_context(inp: SpecialistPromptInputs) -> list[str]:
             ]
         )
         return rows
-    if _is_cold_start(inp):
-        rows.extend(_COLD_START_DIRECTIVE)
-    else:
-        rows.extend(
-            [
-                _NONE_PLACEHOLDER,
-                "",
-                "(No structured KB context supplied. Use Sections 1, 3, 5, "
-                + "and 6 plus source inspection; record missing RecipeKB / "
-                + "research / PR questions in ``residual_questions`` so a "
-                + "future round can warm richer advisory context.)",
-            ]
-        )
+    rows.extend(
+        [
+            _NONE_PLACEHOLDER,
+            "",
+            "(No structured KB context supplied. Work from the gap evidence "
+            + "(Section 3), the recipe (Section 5), the PR tools (Section 6) "
+            + "and source inspection; record missing RecipeKB / "
+            + "research / PR questions in ``residual_questions`` so a "
+            + "future round can warm richer advisory context.)",
+        ]
+    )
     return rows
 
 
