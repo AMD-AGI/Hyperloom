@@ -63,8 +63,8 @@ starts and puts that build first on its `PATH`; a tree that does not build refus
 
 ## Run a multi-branch session
 
-A multi-branch session builds through a build store. Set it up once per host, as root (the compile runs as user
-65534), then source the file it writes before every session:
+A multi-branch session builds through a build store. Set it up once per host, and again whenever the checkout's
+`HEAD` moves, as root (the compile runs as user 65534), then source the file it writes before every session:
 
 ```bash
 export FRAMEWORK_REPO_PATH=/src/llama.cpp
@@ -77,12 +77,12 @@ hyperloom-multibranch run --model /models/my-model-gguf --framework llamacpp --g
   --reference-script ref.sh --max-hours 8
 ```
 
-`--image-root` is the image's `site-packages`, and `--gfx` the architecture of the board `--gpu-type` names: a session
-on a board of another architecture refuses the store. `build_setup` adds the checkout's `HEAD` to the store's sources
-as a detached worktree of the clone, reports what the session's check at start would refuse, and exits 1 if there is
-anything. Keep `FRAMEWORK_REPO_PATH` exported for the session, which reads it again; without the sourced `build.env`
-the session is refused, naming `HYPERLOOM_BUILD_STORE`. The rest of the environment and the options of `run` are in
-[Running a multi-branch session](run-multibranch.md).
+`--image-root` is the image's `site-packages`, and `--gfx` the architecture of the board `--gpu-type` names: the builds
+are compiled for it, and the session does not check it against the board. `build_setup` adds the checkout's `HEAD` to
+the store's sources as a detached worktree of the clone, reports what the session's check at start would refuse, and
+exits 1 if there is anything. Keep `FRAMEWORK_REPO_PATH` exported for the session, which reads it again; without the
+sourced `build.env` the session is refused, naming `HYPERLOOM_BUILD_STORE`. The rest of the environment and the options
+of `run` are in [Running a multi-branch session](run-multibranch.md).
 
 Each specialist works in a worktree of the checkout. Before its first test that changes server arguments, a
 specialist records a verdict on every option the base launch leaves unset; such a test is refused until its branch
