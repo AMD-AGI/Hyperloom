@@ -358,6 +358,28 @@ def test_patch_breakdown_conc_sweep_carries_the_report_and_keeps_the_rest(tmp_pa
     assert ex.patch_breakdown_conc_sweep(target, _SWEEP) is False
 
 
+def test_the_carried_section_holds_what_the_report_file_holds(tmp_path):
+    """The report is written with ``default=str``; the section is serialised the same way, so a Path or a set in the
+    report lands in both as the same string."""
+    target = tmp_path / ex.BREAKDOWN_FILENAME
+    target.write_text("{}", encoding="utf-8")
+    report = {**_SWEEP, "workspace": tmp_path / "runs", "tags": {"a"}}
+
+    assert ex.patch_breakdown_conc_sweep(target, report) is True
+
+    on_file = json.loads(json.dumps(report, default=str))
+    assert json.loads(target.read_text())[ex.CONC_SWEEP_SECTION] == on_file
+
+
+def test_a_breakdown_that_is_not_an_object_is_left_alone_and_said_so(tmp_path, caplog):
+    target = tmp_path / ex.BREAKDOWN_FILENAME
+    target.write_text("[]", encoding="utf-8")
+
+    assert ex.patch_breakdown_conc_sweep(target, _SWEEP) is False
+    assert target.read_text(encoding="utf-8") == "[]"
+    assert "is not a JSON object" in caplog.text
+
+
 def test_patch_breakdown_conc_sweep_writes_a_breakdown_kept_elsewhere(tmp_path):
     target = tmp_path / "MB-reports" / ex.BREAKDOWN_FILENAME
     target.parent.mkdir()

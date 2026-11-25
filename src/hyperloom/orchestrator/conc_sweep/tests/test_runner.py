@@ -281,6 +281,39 @@ def test_a_skipped_sweep_is_carried_in_the_breakdown_too(session_dir: Path, grid
     assert (carried["status"], carried["skip_reason"]) == ("skipped", "no_optimization")
 
 
+@pytest.mark.parametrize("content", ["{truncated", "[]"], ids=["unparseable", "not_an_object"])
+def test_a_breakdown_the_sweep_cannot_carry_its_report_in_does_not_stop_the_sweep(
+    session_dir: Path, grid: SimpleNamespace, content: str
+):
+    _state(session_dir)
+    (session_dir / "session_breakdown.json").write_text(content)
+
+    payload = asyncio.run(runner.run_conc_sweep(session_dir))
+
+    assert payload["status"] == "succeeded" and len(grid.calls) == 8
+    assert _summary(session_dir)["status"] == "succeeded"
+    assert (session_dir / "session_breakdown.json").read_text() == content
+
+
+def test_a_breakdown_that_cannot_be_replaced_does_not_stop_the_sweep(
+    session_dir: Path, grid: SimpleNamespace, monkeypatch: pytest.MonkeyPatch
+):
+    from hyperloom.inference_optimizer.breakdown import exporter
+
+    _state(session_dir)
+    (session_dir / "session_breakdown.json").write_text(json.dumps({"schema_version": "v6.1"}))
+
+    def refuse(path: Path, _text: str) -> None:
+        raise PermissionError(13, "Permission denied", str(path))
+
+    monkeypatch.setattr(exporter, "atomic_write_text", refuse)
+
+    payload = asyncio.run(runner.run_conc_sweep(session_dir))
+
+    assert payload["status"] == "succeeded" and _summary(session_dir)["status"] == "succeeded"
+    assert _breakdown(session_dir) == {"schema_version": "v6.1"}
+
+
 def test_a_session_without_a_breakdown_still_gets_its_report(session_dir: Path, grid: SimpleNamespace):
     _state(session_dir)
 

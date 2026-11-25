@@ -13,7 +13,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from hyperloom_common import io as _common_io
-from hyperloom.inference_optimizer.breakdown.exporter import patch_breakdown_conc_sweep
+from hyperloom.inference_optimizer.breakdown import patch_breakdown_conc_sweep
 from hyperloom.inference_optimizer.roofline_ceiling import (
     ComputeTarget,
     DecodeShape,
@@ -219,7 +219,21 @@ def write_report(payload: dict[str, Any], reports: Path, *, breakdown: Path) -> 
     reports.mkdir(parents=True, exist_ok=True)
     _common_io.atomic_write_text(reports / SUMMARY_FILE, json.dumps(payload, indent=2, ensure_ascii=False, default=str))
     _write_csv(reports / RAW_FILE, [*payload["baseline"]["points"], *payload["optimized"]["points"]])
-    patch_breakdown_conc_sweep(breakdown, payload)
+    _carry_in_breakdown(payload, breakdown)
+
+
+def _carry_in_breakdown(payload: dict[str, Any], breakdown: Path) -> None:
+    """Copy the report into ``breakdown``, best effort: a breakdown that is missing or cannot be read or replaced costs
+    the copy, not the sweep, as it costs the breakdown's other post-write patches only their own section."""
+    if not breakdown.is_file():
+        log.warning("conc_sweep: no breakdown at %s; the report stays in %s only", breakdown, SUMMARY_FILE)
+        return
+    try:
+        patch_breakdown_conc_sweep(breakdown, payload)
+    except (OSError, ValueError):
+        log.warning(
+            "conc_sweep: could not carry the report in %s; it stays in %s only", breakdown, SUMMARY_FILE, exc_info=True
+        )
 
 
 def write_curve(payload: dict[str, Any], reports: Path, options: ConcCurveOptions) -> Path | None:

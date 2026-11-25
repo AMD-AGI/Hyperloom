@@ -152,6 +152,27 @@ def test_the_session_breakdown_beside_the_report_carries_the_sweep(tmp_path: Pat
     assert (document["schema_version"], document["tests"]) == ("multibranch-2", [])
 
 
+def test_each_agentx_test_lands_in_the_session_breakdown_as_it_ends(
+    tmp_path: Path, inferencex_base: None, monkeypatch: pytest.MonkeyPatch
+):
+    layout = _layout(tmp_path)
+    breakdown = layout.reports / "session_breakdown.json"
+    breakdown.write_text(json.dumps({"schema_version": "multibranch-2"}))
+    carried: list[int] = []
+    record = final.ConcSweep._record
+
+    def record_then_read(self: final.ConcSweep, rows: list[dict[str, Any]]) -> None:
+        record(self, rows)
+        section = json.loads(breakdown.read_text())["conc_sweep_summary"]
+        carried.append(sum(len(section[arm]["points"]) for arm in ("baseline", "optimized")))
+
+    monkeypatch.setattr(final.ConcSweep, "_record", record_then_read)
+
+    asyncio.run(_sweep(layout, _settings(AGENTX, parallel=1), _Tests()).run(_never()))
+
+    assert carried == [1, 2, 3, 4, 5, 6]
+
+
 def test_a_skipped_sweep_is_carried_in_the_session_breakdown(tmp_path: Path):
     layout = _layout(tmp_path)
     breakdown = layout.reports / "session_breakdown.json"

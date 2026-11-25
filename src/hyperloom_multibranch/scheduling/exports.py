@@ -21,6 +21,7 @@ dashboard is rebuilt a last time with the queue the stop left.
 from __future__ import annotations
 
 import asyncio
+import logging
 from collections import Counter
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, fields
@@ -29,7 +30,7 @@ from typing import Any
 
 from hyperloom_common.jsonio import read_jsonl
 from hyperloom.contracts.recipe import RecipeError
-from hyperloom.inference_optimizer.breakdown.exporter import CONC_SWEEP_SECTION
+from hyperloom.inference_optimizer.breakdown import CONC_SWEEP_SECTION
 from hyperloom.measure.compile import BlobError, BlobStore
 from hyperloom.orchestrator.knowledge.remote_recipe import KBStoreError
 from hyperloom.orchestrator.knowledge.remote_recipe.client import RemoteRecipeClient
@@ -63,6 +64,8 @@ from hyperloom_multibranch.scheduling.layout import SessionLayout
 from hyperloom_multibranch.contracts.llm import Completion
 from hyperloom_multibranch.scheduling.checkpoint_tally import CheckpointScope, CheckpointTally, checkpoint_tally
 from hyperloom_multibranch.scheduling.manifest import read_manifest
+
+logger = logging.getLogger(__name__)
 
 #: The single-lineage CLOSE's status when no Recipe KB is configured.
 KB_DISABLED = "disabled"
@@ -274,15 +277,35 @@ class SessionExports:
                 claw_session_id=manifest.claw_session_id,
             ),
         )
-        # A later CLOSE (a resume, a ``final-only``) rebuilds the breakdown after a sweep may already have run, and a
-        # sweep that has settled never writes its report again, so the rebuild carries it.
-        sweep = read_summary(self._layout.reports)
+        sweep = self._sweep_of(final)
         if sweep is not None:
             document = {**document, CONC_SWEEP_SECTION: sweep}
         breakdown = write_breakdown(self._layout.reports, document)
         dashboard = await self._dashboard.write(queue)
         checkpoint = None if self._checkpoint is None else checkpoint_tally(snapshot, self._checkpoint)
         return CloseExports(kb_write_back, knowledge, playbook, breakdown, dashboard, curation, checkpoint)
+
+    def _sweep_of(self, final: FinalChoice | None) -> dict[str, Any] | None:
+        """The sweep report on disk, when it measured the commit this CLOSE chose.
+
+        A later CLOSE (a resume, a ``final-only``) rebuilds the breakdown after a sweep may already have run, and the
+        breakdown keeps that sweep until the next one writes; a report of another commit, or a skipped one, would
+        describe a choice this CLOSE did not make, and the sweep that follows writes its own. A report that cannot be
+        read costs the section, not the breakdown.
+        """
+        try:
+            report = read_summary(self._layout.reports)
+        except (OSError, ValueError):
+            logger.warning("CLOSE: the conc sweep report in %s cannot be read; not carried", self._layout.reports)
+            return None
+        chosen = None if final is None or final.chosen is None else final.chosen.commit
+        if report is None or chosen is None:
+            return None
+        optimized = report.get("optimized")
+        if not isinstance(optimized, dict) or optimized.get("commit") != chosen:
+            logger.info("CLOSE: the conc sweep report on disk did not measure %s; not carried", chosen)
+            return None
+        return report
 
     async def _ask_author(self, system: str, user: str) -> str:
         return (await self._author.completion(system, user)).text

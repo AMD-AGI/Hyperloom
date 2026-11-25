@@ -358,6 +358,7 @@ def _patch_breakdown_file(target: Path, section: str, revise: Callable[[dict[str
         return False
     breakdown = json.loads(target.read_text(encoding="utf-8"))
     if not isinstance(breakdown, dict):
+        log.warning("session_breakdown: %s is not a JSON object; %s section not refreshed", target, section)
         return False
     if not revise(breakdown):
         return False
@@ -382,8 +383,9 @@ def patch_breakdown_conc_sweep(breakdown_path: Path | str, report: dict[str, Any
     Returns:
         ``True`` when the breakdown was rewritten, ``False`` otherwise.
     """
-    # Round-tripped so the comparison and the file see the values JSON keeps, not a tuple or a Path the report holds.
-    carried = json.loads(json.dumps(report, default=_json_default))
+    # Round-tripped the way ``conc_sweep_summary.json`` is written, so the section equals that file value for value and
+    # the comparison sees what JSON keeps rather than a tuple or a Path the report holds.
+    carried = json.loads(json.dumps(report, default=str))
 
     def _revise(breakdown: dict[str, Any]) -> bool:
         if breakdown.get(CONC_SWEEP_SECTION) == carried:

@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 from .exporter import (
+    CONC_SWEEP_SECTION,
     build,
     patch_breakdown_close,
     patch_breakdown_conc_sweep,
@@ -17,6 +18,7 @@ from .exporter import (
 from .session_package import package_session_artifacts
 
 __all__ = [
+    "CONC_SWEEP_SECTION",
     "build",
     "package_session_artifacts",
     "patch_breakdown_close",

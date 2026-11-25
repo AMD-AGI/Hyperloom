@@ -149,8 +149,27 @@ The concurrency sweep that runs after CLOSE (`--enable-conc-sweep` or
 `hyperloom conc-sweep`) adds its report to the breakdown as the top-level
 `conc_sweep_summary`: the `reports/conc_sweep_summary.json` it writes,
 verbatim, rewritten after every point. A breakdown of a session that ran no
-sweep has no such key. A multi-branch breakdown carries it the same way, from
-`MB-reports/conc_sweep_summary.json`.
+sweep has no such key. The copy is best effort: a breakdown the sweep cannot
+read or replace keeps its earlier content, and the report stays in `reports/`.
+Because the sweep runs after CLOSE, the breakdown CLOSE sends to Langfuse never
+carries it, and a consumer that read the breakdown at CLOSE has to read it again
+for the sweep.
+
+The section is the schema `2.0` report, under the key breakdowns carried the
+sweep under before #1455. Its point rows, `comparison` and `summary` keep the
+fields of that earlier block; its header does not: `concs` and `concs_source`
+replace `concs_requested`, the budget keys, `was_skipped` and the report paths
+are gone, `estimated_sec` and `cancel_reason` are new, and `status` is one of
+`in_progress`, `succeeded`, `partial`, `failed`, `skipped` or `cancelled`.
+
+A multi-branch breakdown carries it the same way, from
+`MB-reports/conc_sweep_summary.json`, and its arms differ in shape: a
+single-lineage arm holds the launch settings it ran (`extra_server_args`,
+`extra_envs`, `overlay`) and fixed point fields, a multi-branch arm holds the
+`commit` it measured and one point per test, with that test's `request_id`.
+The breakdown's own `schema_version` (`hyperloom.session_breakdown.v6.1` or
+`multibranch-2`) tells them apart. A later multi-branch CLOSE keeps the section
+only when it measured the commit that CLOSE chose.
 
 V6 was the preceding cutover, for the timeline: each action records its own event
 while it runs, so an event's `start_time` is when the work began rather than
@@ -189,7 +208,9 @@ Compatibility rules:
   version's file.
 * **Missing data** is always represented as `null`, `[]`, or `{}` —
   never as a default / fabricated value. Consumers MUST treat
-  missing data as "not available".
+  missing data as "not available". The one exception is the optional
+  top-level `conc_sweep_summary`, which is absent until a concurrency sweep
+  has run.
 * All values are JSON-serializable (no dataclasses, enums, or
   Python-specific types in the wire shape).
 
@@ -213,12 +234,16 @@ The following JSON structure shows all top-level fields in `session_breakdown.js
   "outcome":            { /* terminal result — SaFE contract core */ },
   "timeline":           [ /* the run itself: one event per stage, in order */ ],
   "close":              { /* what the session settled at close */ },
-  "critic":             { /* the critic agent's own run, iteration by iteration */ }
+  "critic":             { /* the critic agent's own run, iteration by iteration */ },
+
+  "conc_sweep_summary": { /* optional: the concurrency sweep run after CLOSE */ }
 }
 ```
 
-Those eight keys are the whole of the export. Every key is always present; a
-section the run produced nothing for is `{}` or `[]` rather than absent.
+The first eight keys are always present; a section the run produced nothing for
+is `{}` or `[]` rather than absent. `conc_sweep_summary` is the exception: it
+is absent until a concurrency sweep has run after CLOSE, and then holds that
+sweep's report.
 
 Two things a reader of an older export will look for and not find. The flat
 per-topic sections (`baseline`, `final`, `phase_timeline`,

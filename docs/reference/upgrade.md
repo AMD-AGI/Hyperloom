@@ -368,10 +368,16 @@ the package carries them. The `conc_sweep` timeline event of
 session recorded in `SWEEP` does not resume: finish it under the build that
 started it.
 
-The sweep that runs after CLOSE writes the report files again and adds its
-summary to `session_breakdown.json` as the top-level `conc_sweep_summary`, the
-key breakdowns carried it under before #1455. A consumer that read the sweep
-from the `conc_sweep` timeline event reads it there instead.
+The sweep also adds its report to `session_breakdown.json` as the top-level
+`conc_sweep_summary`, rewritten after every point. A consumer that read the sweep from the
+`conc_sweep` timeline event reads it there instead, and has to read the
+breakdown again after CLOSE to see it. The key is the one breakdowns carried
+the sweep under before #1455, but the section is the schema `2.0` report: its
+point rows, `comparison` and `summary` keep their fields, while its header
+names the ladder `concs`, drops the budget keys, `was_skipped` and the report
+paths, and adds `partial`, `in_progress` and `cancelled` to `status`. Both
+lineages' shapes are in
+[`session_breakdown.json` integration in Hyperloom](session-breakdown.md).
 
 ### Recommended: commands that stay outside `hyperloom.cli`
 
