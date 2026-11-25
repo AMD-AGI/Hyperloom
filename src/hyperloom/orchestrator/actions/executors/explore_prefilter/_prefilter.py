@@ -3,18 +3,16 @@
 
 """Narrow an EXPLORE round before it benchmarks anything, and record what it measured.
 
-Three opt-in filters run once, before the per-variant loop, against the stack
+Two opt-in filters run once, before the per-variant loop, against the stack
 the round opens on, in this order:
 
 1. ``HYPERLOOM_MEASUREMENT_STORE`` -- a variant whose exact launch on this
    stack already reverted on the performance gate (:mod:`_reuse`).
-2. ``HYPERLOOM_EXPLORE_SCREEN`` -- a reduced-scale probe puts it decisively
-   behind the stack (:mod:`_screen`).
-3. ``HYPERLOOM_EXPLORE_PROJECTION`` -- InferaSim projects it decisively behind
+2. ``HYPERLOOM_EXPLORE_PROJECTION`` -- InferaSim projects it decisively behind
    the stack, or outside the top 5 (:mod:`_projection`).
 
 Each only removes variants, as ``SKIPPED_DEDUP`` rows that are neither
-journaled nor written to the KB. None produces a number that reaches
+journaled nor written to the KB. Neither produces a number that reaches
 KEEP/REVERT: a KEEP always rests on the survivor's own decision round, measured
 now. Variants the caller protects -- a stack revalidation, a config replay --
 are never filtered.
@@ -43,7 +41,6 @@ from hyperloom.inference_optimizer.grading import resolved_grading
 from . import _reuse as reuse
 from ._projection import ProjectionRequest, projection_enabled, route_variants
 from ._remeasure import _is_config_replay_variant, is_stack_revalidation
-from ._screen import screen_enabled, screen_variants
 from ..grid._grid_base import GridVariant
 from ..grid._grid_runner import GridRecipe, _build_variant_yaml
 from ..workload._workload_envs import BenchmarkTarget, LaunchLayer
@@ -250,16 +247,9 @@ async def prefilter_variants(
     """
     protected = {gv.name for gv in variants if revalidation or _is_config_replay_variant(gv)}
     candidates = [gv for gv in variants if gv.name not in protected]
-    if not candidates or not (reuse.reuse_enabled() or screen_enabled() or projection_enabled()):
+    if not candidates or not (reuse.reuse_enabled() or projection_enabled()):
         return Prefiltered(list(variants))
     candidates, dropped = _drop_known_reverts(candidates, ctx, stack)
-    candidates, screened_out = await asyncio.to_thread(
-        screen_variants,
-        candidates,
-        lambda gv, subdir: ctx.materialize(gv, stack, subdir),
-        Path(ctx.output_root) / "_screen",
-        session_dir=ctx.session_dir,
-    )
     request = ProjectionRequest(
         materialize=lambda gv, subdir: ctx.materialize(gv, stack, subdir),
         output_root=Path(ctx.output_root) / "_projection",
@@ -270,7 +260,7 @@ async def prefilter_variants(
     routed = await asyncio.to_thread(route_variants, candidates, request)
     kept = {id(gv) for gv in routed.survivors}
     runnable = [gv for gv in variants if gv.name in protected or id(gv) in kept]
-    return Prefiltered(runnable, [*dropped, *screened_out, *routed.dropped], routed.summary)
+    return Prefiltered(runnable, [*dropped, *routed.dropped], routed.summary)
 
 
 async def prefilter_round(explore_round: Any, session_dir: Path | None) -> RoundContext:
