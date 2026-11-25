@@ -335,7 +335,7 @@ def _refuse_framework_script_mismatch(bench: dict[str, Any]) -> None:
 
 
 def _pin_workload_shape_envs(envs: dict[str, Any], *, in_session: bool) -> None:
-    for env_key in ("CONC", "ISL", "OSL", "MAX_MODEL_LEN", "TP", "EP", "PORT", "NUM_PROMPTS"):
+    for env_key in ("CONC", "ISL", "OSL", "MAX_MODEL_LEN", "TP", "EP", "PORT"):
         val = os.environ.get(env_key, "").strip()
         if val:
             envs[env_key] = _coerce_workload_int_env(env_key, val)

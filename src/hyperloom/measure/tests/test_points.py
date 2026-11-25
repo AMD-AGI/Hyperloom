@@ -74,7 +74,6 @@ def clean_process_env(monkeypatch, tmp_path):
         "EP",
         "PORT",
         "MAX_MODEL_LEN",
-        "NUM_PROMPTS",
         "PRECISION",
     ):
         monkeypatch.delenv(name, raising=False)
@@ -191,26 +190,6 @@ def test_a_point_whose_surface_drifted_from_the_canonical_one_is_refused(
 
     with pytest.raises(SurfaceViolation, match="changes the measurement surface"):
         generate_points(env, canonical, tmp_path / "points")
-
-
-def test_an_exported_num_prompts_is_the_count_of_the_canonical_and_of_every_point(tmp_path, model, blobs, monkeypatch):
-    monkeypatch.setenv("NUM_PROMPTS", "39")
-    canonical = default_canonical(tmp_path / "canonical", primary_concurrency=32, model_path=str(model))
-
-    generated = generate_points(environment(blobs, tmp_path), canonical, tmp_path / "points", concurrency=(1, 32))
-
-    rendered = [tmp_path / "canonical" / CANONICAL_FILE, *generated]
-    assert [load(path)["benchmark"]["envs"]["NUM_PROMPTS"] for path in rendered] == [39, 39, 39]
-
-
-def test_a_profile_point_keeps_its_capture_count_with_num_prompts_exported(canonical, blobs, tmp_path, monkeypatch):
-    env = environment(blobs, tmp_path)
-    (sized,) = generate_profile_point(env, canonical, tmp_path / "sized")
-    monkeypatch.setenv("NUM_PROMPTS", "7")
-
-    (exported,) = generate_profile_point(env, canonical, tmp_path / "exported")
-
-    assert load(exported)["benchmark"]["envs"]["NUM_PROMPTS"] == load(sized)["benchmark"]["envs"]["NUM_PROMPTS"] != 7
 
 
 def test_a_launch_variable_the_renderer_drops_is_refused(canonical, blobs, tmp_path):

@@ -358,67 +358,6 @@ def test_a_manifest_written_before_the_prompt_dataset_was_recorded_reads_back_on
     assert read_manifest(tmp_path / "MB-manifest.json").settings.workload.inferencex == InferenceXShape(1024, 512)
 
 
-def test_a_run_records_the_request_count_exported_when_it_starts_and_an_agentx_one_none(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    monkeypatch.setenv("NUM_PROMPTS", " 39 ")
-
-    assert _settings().workload.inferencex == InferenceXShape(1024, 512, num_prompts=39)
-    assert _settings(workload=AGENTX_ARGS).workload.inferencex is None
-
-
-@pytest.mark.parametrize("value", ["all", "0", "-3"])
-def test_a_run_refuses_an_exported_request_count_that_is_no_positive_integer(
-    monkeypatch: pytest.MonkeyPatch, value: str
-) -> None:
-    monkeypatch.setenv("NUM_PROMPTS", value)
-
-    with pytest.raises(ValueError, match="NUM_PROMPTS"):
-        _settings()
-
-
-@pytest.mark.parametrize(
-    ("started_with", "resumed_with", "sent"),
-    [("39", None, "39"), ("39", "7", "39"), (None, "39", None)],
-    ids=["resumed_without_it", "resumed_on_another", "default_count_resumed_with_one"],
-)
-def test_a_resumed_run_sends_the_request_count_its_manifest_records(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    started_with: str | None,
-    resumed_with: str | None,
-    sent: str | None,
-) -> None:
-    from hyperloom_multibranch.scheduling.local_peers import _export_workload, workload_environment
-
-    monkeypatch.delenv("HL_MODEL_BASE", raising=False)
-    if started_with is not None:
-        monkeypatch.setenv("NUM_PROMPTS", started_with)
-    settings = _settings()
-    manifest = SessionManifest(code_version(), dict(rule_pack_identity()), "MB-x", 0.0, 3600.0, settings, "", {})
-    manifest.write(tmp_path / "MB-manifest.json")
-    for name in workload_environment(settings.workload):
-        monkeypatch.setenv(name, "")
-    monkeypatch.delenv("NUM_PROMPTS", raising=False)
-    if resumed_with is not None:
-        monkeypatch.setenv("NUM_PROMPTS", resumed_with)
-
-    _export_workload(read_manifest(tmp_path / "MB-manifest.json").settings.workload, tmp_path, "registry.example/x:v1")
-
-    assert os.environ.get("NUM_PROMPTS") == sent
-
-
-def test_a_manifest_written_before_the_request_count_was_recorded_reads_back_without_one(tmp_path: Path) -> None:
-    settings = _settings()
-    document = encode(
-        SessionManifest(code_version(), dict(rule_pack_identity()), "MB-x", 0.0, 3600.0, settings, "", {})
-    )
-    del document["settings"]["workload"]["inferencex"]["num_prompts"]
-    _write(tmp_path / "MB-manifest.json", document)
-
-    assert read_manifest(tmp_path / "MB-manifest.json").settings.workload.inferencex == InferenceXShape(1024, 512)
-
-
 def test_run_help_names_the_ep_option(capsys: pytest.CaptureFixture[str]) -> None:
     with pytest.raises(SystemExit):
         cli.main(["run", "--help"])
@@ -946,7 +885,6 @@ def eight_cards(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv(AGENTX_ENV, raising=False)
     monkeypatch.delenv(BENCHMARK_CONFIG_ENV, raising=False)
     monkeypatch.delenv("DATASET_PATH", raising=False)
-    monkeypatch.delenv("NUM_PROMPTS", raising=False)
 
 
 @pytest.mark.parametrize(

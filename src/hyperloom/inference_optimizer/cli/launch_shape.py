@@ -11,13 +11,7 @@ import os
 import sys
 from typing import Any
 
-from hyperloom.common.outside_facts import ENV_NUM_PROMPTS
-from hyperloom.common.perf_metric import (
-    DATASET_PATH_ENV,
-    agentx_enabled as _agentx_enabled,
-    recorded_num_prompts,
-    request_lengths_from_data,
-)
+from hyperloom.common.perf_metric import DATASET_PATH_ENV, agentx_enabled as _agentx_enabled, request_lengths_from_data
 from hyperloom.common.workload_defaults import (
     DEFAULT_ISL,
     DEFAULT_OSL,
@@ -124,19 +118,11 @@ def _seed_env_from_resumed_state(state: Any, pins: dict[str, str]) -> None:
     Hyperloom's own repro scripts ``export TP``/``CONC``/``ISL``/``OSL``, and sourcing one before a resume must not
     silently re-measure the session at another shape. ``pins`` -- this resume's ``--extra-env``, or, when it
     passes none, the pins persisted from the launch -- is skipped, so changing the workload stays an explicit act.
-    ``NUM_PROMPTS`` is the one name also removed: a session that recorded none derives each round's count from its
-    concurrency, and a count the shell or ``.env`` carries would re-measure it at another.
     """
     for name in ("ISL", "OSL", "CONC", "TP", "EP", "MAX_MODEL_LEN"):
         recorded = getattr(state, name.lower(), 0)
         if recorded and name not in pins:
             os.environ[name] = str(recorded)
-    if ENV_NUM_PROMPTS in pins:
-        return
-    if count := recorded_num_prompts(state):
-        os.environ[ENV_NUM_PROMPTS] = str(count)
-    else:
-        os.environ.pop(ENV_NUM_PROMPTS, None)
 
 
 def _resolve_workload_knobs(

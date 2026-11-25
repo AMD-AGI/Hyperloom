@@ -22,10 +22,8 @@ from hyperloom_common.env import forge_explicitly_enabled
 from hyperloom.common.gpu_power_settings import SCLK_MAX_MHZ, DeclaredPowerSettings
 from hyperloom.common.perf_metric import (
     agentx_enabled as _agentx_enabled,
-    exported_num_prompts,
     is_agentx_mode,
     prompt_dataset,
-    recorded_num_prompts,
     recorded_prompt_dataset,
 )
 from hyperloom_common.timeutil import now_iso
@@ -250,28 +248,7 @@ def fresh_measurement_fields(state: Any) -> dict[str, Any]:
         "benchmark_mode": str(getattr(state, "benchmark_mode", "") or ""),
         "agentx_backend": str(getattr(state, "agentx_backend", "") or ""),
         "prompt_dataset": recorded_prompt_dataset(state),
-        "num_prompts": recorded_num_prompts(state),
     }
-
-
-def _pinned_num_prompts_mismatch(state: Any) -> str:
-    """Why this run's ``--extra-env NUM_PROMPTS`` cannot continue *state*, or ``\"\"``. Only a pin is compared: a
-    resume writes the recorded count over a value the shell or ``.env`` carries."""
-    from hyperloom.common.env_safety import operator_extra_env
-    from hyperloom.common.outside_facts import ENV_NUM_PROMPTS
-
-    try:
-        pinned = exported_num_prompts(operator_extra_env())
-    except ValueError as refused:
-        return f"this run's --extra-env cannot be used: {refused}"
-    had = recorded_num_prompts(state)
-    if not pinned or pinned == had:
-        return ""
-    return (
-        f"session was measured sending {had or 'the per-concurrency default number of'} prompts a round but this "
-        f"run pins {ENV_NUM_PROMPTS}={pinned}; the recorded results describe a different workload and cannot "
-        "anchor or be compared against"
-    )
 
 
 def measurement_state_is_stale(state: Any) -> str:
@@ -298,18 +275,17 @@ def measurement_state_is_stale(state: Any) -> str:
             f"{want_dataset!r}; the recorded results describe a different workload and "
             "cannot anchor or be compared against"
         )
-    if not is_agentx_mode(want_mode):
-        return _pinned_num_prompts_mismatch(state)
-    from hyperloom.common.agentx_workload import agentic_backend
+    if is_agentx_mode(want_mode):
+        from hyperloom.common.agentx_workload import agentic_backend
 
-    had_backend = str(getattr(state, "agentx_backend", "") or "")
-    want_backend = agentic_backend()
-    if had_backend != want_backend:
-        return (
-            f"session was measured with agentic backend {had_backend!r} but this "
-            f"run is {want_backend!r}; the recorded results describe a different "
-            "workload and cannot anchor or be compared against"
-        )
+        had_backend = str(getattr(state, "agentx_backend", "") or "")
+        want_backend = agentic_backend()
+        if had_backend != want_backend:
+            return (
+                f"session was measured with agentic backend {had_backend!r} but this "
+                f"run is {want_backend!r}; the recorded results describe a different "
+                "workload and cannot anchor or be compared against"
+            )
     return ""
 
 
@@ -824,15 +800,6 @@ def _model_identity_fields(
     }
 
 
-def _seeded_num_prompts() -> int:
-    """The request count the session records; exits naming an exported value no round could be rendered with."""
-    try:
-        return exported_num_prompts()
-    except ValueError as refused:
-        print(f"ERROR: {refused}", file=sys.stderr)
-        raise SystemExit(2) from None
-
-
 def _workload_fields(args: argparse.Namespace) -> dict[str, Any]:
     """Seed the workload metadata fields of the SharedState from the CLI flags."""
 
@@ -857,7 +824,6 @@ def _workload_fields(args: argparse.Namespace) -> dict[str, Any]:
         "profile_osl": _int_arg("profile_osl", 0),
         "max_model_len": _int_arg("max_model_len", 0),
         "prompt_dataset": prompt_dataset(),
-        "num_prompts": _seeded_num_prompts(),
     }
 
 

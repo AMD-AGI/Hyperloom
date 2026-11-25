@@ -12,7 +12,7 @@ import os
 from collections.abc import Callable
 from pathlib import Path
 
-from hyperloom.common.perf_metric import DATASET_PATH_ENV, exported_num_prompts
+from hyperloom.common.perf_metric import DATASET_PATH_ENV
 from hyperloom.common.url_userinfo import CREDENTIALED_URL_RE
 from hyperloom.common.workload_defaults import DEFAULT_EP
 from hyperloom.inference_optimizer.framework_registry import native_component
@@ -487,11 +487,9 @@ def _agentx_only_errors(args: argparse.Namespace) -> list[str]:
 
 
 def _workload_shape(args: argparse.Namespace) -> InferenceXShape | None:
-    """The request shape the session records, its dataset and request count as this shell exports them; raises
-    ValueError for a ``NUM_PROMPTS`` that is not a positive integer."""
     if WorkloadKind(args.workload) is WorkloadKind.AGENTX:
         return None
-    return InferenceXShape(args.isl, args.osl, os.environ.get(DATASET_PATH_ENV, "").strip(), exported_num_prompts())
+    return InferenceXShape(args.isl, args.osl, os.environ.get(DATASET_PATH_ENV, "").strip())
 
 
 def _workload_model(args: argparse.Namespace) -> str:

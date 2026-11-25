@@ -175,87 +175,42 @@ def test_num_prompts_factor(monkeypatch, tmp_path, isl, osl, conc, factor):
     assert bench["envs"]["NUM_PROMPTS"] == conc * factor
 
 
-def test_an_exported_num_prompts_is_the_rounds_request_count(monkeypatch, tmp_path):
-    clear_env(monkeypatch)
-    monkeypatch.setenv("CONC", "4")
-    monkeypatch.setenv("NUM_PROMPTS", "39")
-    bench = materialize(write_config(tmp_path / "cfg.yaml"), tmp_path / "out")
-    assert bench["envs"]["NUM_PROMPTS"] == 39
-
-
-def test_a_value_the_caller_names_wins_over_an_exported_num_prompts(monkeypatch, tmp_path):
-    """The layer a boot round, a sweep rung and ``--extra-env`` name their own count in."""
-    clear_env(monkeypatch)
-    monkeypatch.setenv("NUM_PROMPTS", "39")
-    layer = we.LaunchLayer(extra_envs={"NUM_PROMPTS": "1"})
-    bench = materialize(write_config(tmp_path / "cfg.yaml"), tmp_path / "out", launch=layer)
-    assert bench["envs"]["NUM_PROMPTS"] == "1"
-
-
-def test_a_profile_round_keeps_its_capture_count_with_num_prompts_exported(monkeypatch, tmp_path):
-    clear_env(monkeypatch)
-    monkeypatch.setenv("CONC", "32")
-    src = write_config(tmp_path / "cfg.yaml", envs={"PROFILE": "1"})
-    sized = materialize(src, tmp_path / "sized")["envs"]["NUM_PROMPTS"]
-    monkeypatch.setenv("NUM_PROMPTS", "7")
-    assert materialize(src, tmp_path / "exported")["envs"]["NUM_PROMPTS"] == sized != 7
-
-
-def test_a_grid_round_keeps_the_points_num_prompts_with_another_exported(monkeypatch, tmp_path):
-    from hyperloom.orchestrator.actions.executors.workload._benchmark_runtime import apply_runtime_benchmark_overrides
-
-    clear_env(monkeypatch)
-    monkeypatch.setenv("NUM_PROMPTS", "39")
-    bench = {"framework": "sglang", "model": "/m", "envs": {"NUM_PROMPTS": 20, "TP": 1}}
-    assert apply_runtime_benchmark_overrides(bench)["NUM_PROMPTS"] == 20
-
-
-@pytest.mark.parametrize("value", ["all", "0", "-3"])
-def test_an_exported_num_prompts_that_is_no_positive_count_is_refused(monkeypatch, tmp_path, value):
-    clear_env(monkeypatch)
-    monkeypatch.setenv("NUM_PROMPTS", value)
-    with pytest.raises(ValueError):
-        materialize(write_config(tmp_path / "cfg.yaml"), tmp_path / "out")
-
-
-_DOTENV_WORKLOAD = {DATASET_PATH_ENV: "/data/prompts.jsonl", "NUM_PROMPTS": "39"}
-
-
-def _load_workload_dotenv(monkeypatch, checkout, exported=None):
-    """Preflight's read of a ``.env`` in ``checkout`` that sets the dataset and the request count, in a shell that
-    exports ``exported`` and neither otherwise."""
+def _load_dataset_dotenv(monkeypatch, checkout, exported=""):
+    """Preflight's read of a ``.env`` in ``checkout`` that names a dataset there, in a shell that exports ``exported``
+    as its own. Returns the path the ``.env`` names and what preflight reports."""
     clear_env(monkeypatch)
     monkeypatch.delenv(DATASET_PATH_ENV, raising=False)
-    for key, value in (exported or {}).items():
-        monkeypatch.setenv(key, value)
-    (checkout / ".env").write_text("".join(f"{k}={v}\n" for k, v in _DOTENV_WORKLOAD.items()), encoding="utf-8")
+    if exported:
+        monkeypatch.setenv(DATASET_PATH_ENV, exported)
+    dataset = checkout / "prompts.jsonl"
+    dataset.write_text('{"prompt": "a"}\n', encoding="utf-8")
+    (checkout / ".env").write_text(f"{DATASET_PATH_ENV}={dataset}\n", encoding="utf-8")
     monkeypatch.setenv("REPO_ROOT", str(checkout))
-    return preflight_env._load_dotenv_fallback()
+    return str(dataset), preflight_env._load_dotenv_fallback()
 
 
-def test_preflight_lends_the_dataset_and_the_request_count_of_a_dotenv(monkeypatch, tmp_path, capsys):
-    result = _load_workload_dotenv(monkeypatch, tmp_path)
+def test_preflight_lends_the_dataset_of_a_dotenv(monkeypatch, tmp_path, capsys):
+    dataset, result = _load_dataset_dotenv(monkeypatch, tmp_path)
 
-    assert result["detail"]["vars_loaded"] == len(_DOTENV_WORKLOAD)
-    assert {key: os.environ.get(key) for key in _DOTENV_WORKLOAD} == _DOTENV_WORKLOAD
+    assert result["detail"]["vars_loaded"] == 1
     assert "ignoring" not in capsys.readouterr().err
     # What a session records as its dataset is read after preflight.
-    assert prompt_dataset() == _DOTENV_WORKLOAD[DATASET_PATH_ENV]
+    assert prompt_dataset() == dataset
 
 
-def test_an_exported_dataset_and_request_count_win_over_a_dotenv(monkeypatch, tmp_path):
-    exported = {DATASET_PATH_ENV: "/data/exported.jsonl", "NUM_PROMPTS": "7"}
+def test_an_exported_dataset_wins_over_a_dotenv(monkeypatch, tmp_path):
+    _, result = _load_dataset_dotenv(monkeypatch, tmp_path, exported="/data/exported.jsonl")
 
-    assert _load_workload_dotenv(monkeypatch, tmp_path, exported)["detail"]["vars_loaded"] == 0
-    assert {key: os.environ.get(key) for key in exported} == exported
+    assert result["detail"]["vars_loaded"] == 0
+    assert os.environ[DATASET_PATH_ENV] == "/data/exported.jsonl"
 
 
-def test_a_dotenv_dataset_and_request_count_reach_the_rendered_config(monkeypatch, tmp_path):
-    _load_workload_dotenv(monkeypatch, tmp_path)
+def test_a_dotenv_dataset_reaches_the_rendered_config(monkeypatch, tmp_path):
+    dataset, _ = _load_dataset_dotenv(monkeypatch, tmp_path)
 
     envs = materialize(write_config(tmp_path / "cfg.yaml"), tmp_path / "out")["envs"]
 
-    assert {key: str(envs.get(key)) for key in _DOTENV_WORKLOAD} == _DOTENV_WORKLOAD
+    assert envs[DATASET_PATH_ENV] == dataset
 
 
 def test_server_args_merge_existing(monkeypatch, tmp_path):

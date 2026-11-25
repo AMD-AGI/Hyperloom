@@ -14,7 +14,6 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 
-from hyperloom.common.perf_metric import recorded_num_prompts
 from ..model_config_utils import summarize_model_config
 from ..session.manifest import load_manifest
 from .bootstrap import (
@@ -199,10 +198,6 @@ def _reexport_session_environment(
     )
     _emit_launch_info(info, launch_info_file=getattr(args, "launch_info_file", None))
     _seed_env_from_resumed_state(state, launch_shape.extra_env)
-    # Read while the state still holds the launch's pins, the only place an older session carries its count.
-    state.num_prompts = recorded_num_prompts(state)
-    if state.num_prompts:
-        print(f"  re-exported NUM_PROMPTS   : {state.num_prompts}")
     # The seeding above puts the recorded workload on the environment rung, so it outranks a shell export while an
     # explicit --isl/--conc/... on this resume still wins. The resolved values are then projected back into env so
     # resume sees the same workload contract (not YAML defaults).

@@ -67,13 +67,11 @@ class PlaybookMode(str, Enum):
 class InferenceXShape:
     """The requests an InferenceX workload sends: random prompts of ``isl`` tokens answered to ``osl``, or, when
     ``dataset`` names one, the prompts of that ``DATASET_PATH`` file, as given when the session started, answered to at
-    most ``osl``. ``num_prompts`` is the ``NUM_PROMPTS`` exported when the session started, which every measured round
-    sends; 0 when each round derives its count from its concurrency."""
+    most ``osl``."""
 
     isl: int
     osl: int
     dataset: str = ""
-    num_prompts: int = 0
 
 
 @dataclass(frozen=True)
