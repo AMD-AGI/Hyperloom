@@ -319,9 +319,7 @@ def test_a_specialist_keeps_only_citations_of_experiences_its_dispatch_showed(tm
 
 
 def test_finalize_strips_forbidden_fields_before_the_critic_can_see_them(tmp_path):
-    """The Critic is told to reject a proposal_set carrying self-reported gain
-    fields, which costs the round every idea in it. Dropping them makes that
-    verdict unreachable; the audit note still records what was there."""
+    """A self-reported gain field never reaches review; the audit note records what was there."""
     result, written = _finalize(
         _runner(),
         tmp_path,
