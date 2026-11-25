@@ -16,11 +16,7 @@ from hyperloom.common.gain_math import gain_pct, gain_pct_or_zero, graded_gate_r
 from hyperloom.common.perf_metric import VERDICT_KEEP, GradedComparison, GradingAnchor
 from hyperloom.orchestrator.measurement.runtime_findings import KEEP_REASON_CORRECTNESS_FIX
 
-from ....state.failure_evidence import (
-    FAILURE_ATTRIBUTION_ENVIRONMENT,
-    FAILURE_ATTRIBUTION_HARNESS,
-    classify_failure_attribution,
-)
+from ....state.failure_evidence import FAILURE_ATTRIBUTION_ENVIRONMENT, classify_failure_attribution
 from ....state.shared_state import SharedState, resolve_anchor_with_drift, resolve_graded_comparison
 from ...stop_attribution import stopped_by_the_run_class
 from .._accuracy_gate import accuracy_keep_block, eval_probe_summary
@@ -61,12 +57,16 @@ class PerfGateMixin:
         bench_result: dict[str, Any],
         gate_evidence: dict[str, Any],
     ) -> dict[str, Any]:
-        """Throughput KEEP / REVERT decision of a bench :func:`unrated_verdict` leaves to grade."""
+        """Throughput KEEP / REVERT decision, or no verdict when the run stopped it or the environment left it unmeasured."""
         shared_state = attempt.shared_state
         assert attempt.output_root is not None
         base_tput = _live_base_tput(params, shared_state)
 
         keep_threshold_pct = float(params.get("keep_threshold_pct", self.keep_threshold_pct))
+
+        unrated = _unrated_verdict(attempt, bench_result)
+        if unrated is not None:
+            return unrated
 
         throughput = _grade_throughput(shared_state, bench_result, _GateBasis(base_tput, keep_threshold_pct))
         if throughput.cleared and accuracy_round_due(shared_state):
@@ -576,20 +576,17 @@ def _weigh_gate(
     )
 
 
-def unrated_verdict(attempt: IntegrateAttempt, bench_result: dict[str, Any]) -> dict[str, Any] | None:
-    """The failed verdict of a bench the run stopped, or the environment or the harness kept from measuring; ``None``
-    for one a gate grades. Such a bench says nothing about the candidate's throughput, so the throughput gate never
-    grades it; the enablement gate still accepts one whose boot reached a deeper wall."""
+def _unrated_verdict(attempt: IntegrateAttempt, bench_result: dict[str, Any]) -> dict[str, Any] | None:
+    """The failed verdict of a bench the run stopped or the environment kept from measuring; ``None`` otherwise."""
     bench_class = str(bench_result.get("error_class") or "")
     stopped = stopped_by_the_run_class(bench_class)
-    attribution = _not_the_candidates(bench_result, framework_changed=attempt.changes_framework)
     if stopped is not None:
         fields: dict[str, Any] = {"error_class": stopped.error_class, "error": stopped.interrupted}
-    elif attribution:
+    elif _environment_unmeasured(bench_result, framework_changed=attempt.changes_framework):
         fields = {
             "error_class": BENCH_UNMEASURED_CLASS,
             "bench_error_class": bench_class,
-            "failure_attribution": attribution,
+            "failure_attribution": FAILURE_ATTRIBUTION_ENVIRONMENT,
             "error": str(bench_result.get("error") or ""),
         }
     else:
@@ -606,18 +603,17 @@ def unrated_verdict(attempt: IntegrateAttempt, bench_result: dict[str, Any]) -> 
     }
 
 
-def _not_the_candidates(bench_result: dict[str, Any], *, framework_changed: bool) -> str:
-    """Whose fault a bench that measured nothing is, when it is the environment's or the harness's; ``""`` when it
-    measured, or when its failure may be the candidate's."""
+def _environment_unmeasured(bench_result: dict[str, Any], *, framework_changed: bool) -> bool:
+    """Whether the bench produced no throughput and its error is evidence of an environment fault."""
     tput = bench_result.get("output_throughput")
     if isinstance(tput, (int, float)) and tput > 0:
-        return ""
+        return False
     attribution = classify_failure_attribution(
         error_class=bench_result.get("error_class"),
         framework_changed=framework_changed,
         error_excerpt=bench_result.get("error"),
     )
-    return attribution if attribution in (FAILURE_ATTRIBUTION_ENVIRONMENT, FAILURE_ATTRIBUTION_HARNESS) else ""
+    return attribution == FAILURE_ATTRIBUTION_ENVIRONMENT
 
 
 def _empty_source_evidence() -> dict[str, Any]:
