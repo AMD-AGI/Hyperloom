@@ -739,7 +739,7 @@ def _local_tools(
     laid below ``directory``); the last
     two are served only where a card can be spared for them. The first three read a trace that is already there, or
     ask GitHub from this process; TraceLens and the roofline lease a card from ``leases`` only to measure a board's
-    arch spec. The log says whether the PR search asks GitHub with a token."""
+    arch spec."""
     if options.tools is not None:
         return options.tools
     tuners: list[AsyncTool] = []
