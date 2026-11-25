@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Bind concurrent Implementer lanes to their own workspace copies, and refuse providers that cannot isolate them."""
+"""Bind each lane that runs beside others to its own workspace copy, and refuse what cannot run lanes side by side."""
 
 from __future__ import annotations
 
@@ -11,10 +11,16 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Iterable
 
 from kernelforge.config import Config
+from kernelforge.evaluation.scoring import GateScoring
+from kernelforge.utils.device_queue import RUNNER_CONFIG_NAME, hidden_device_environment
+from kernelforge.utils.git import repository_selected_by_environment
 from kernelforge.utils.import_root import import_name_of, import_path_first
 from kernelforge.workflows.forge_loop.bootstrap.errors import ForgeLoopError
+from kernelforge.workflows.forge_loop.gate.gate_settings import DeviceAccess
+from kernelforge.workflows.forge_loop.roles.agent_extras import declared_extras
 
 if TYPE_CHECKING:
+    from kernelforge.workflows.forge_loop.iteration.fanout import LaneSeat
     from kernelforge.workflows.forge_loop.roles.agent import ImplementerSetup
 
 
@@ -72,32 +78,21 @@ _LANE_PROVIDER_REQUIREMENTS = (
 
 # Guarantees a lane is better off with and can still run without.
 #
-# What ``stop_hooks`` buys a lane is in-session denial: the PreToolUse
-# callbacks refuse an edit to the driver, harness or oracle, and refuse a driver
-# run that skips the shared device lock. A provider that ignores
+# What ``stop_hooks`` buys a lane is in-session denial: the PreToolUse callbacks refuse an edit to the driver, harness
+# or oracle, and refuse a command that selects a device around the queue the lanes share. A provider that ignores
 # ``AgentRunSpec.hooks`` gets neither.
 #
-# It is an advisory rather than a refusal because a campaign's published
-# numbers do not rest on it. A lane candidate that touches the measurement
-# surface is refused by ``IterationRunner._lane_rejection`` on its patch paths,
-# the canonical driver is re-checked byte-for-byte by
-# ``_validate_driver_integrity`` after the patch applies, and every candidate is
-# re-measured one at a time in the canonical tree -- a lane's own timings never
-# decide a KEEP. Unlocked concurrent benchmarking is caught after the fact too,
-# by the lane teardown's contention report, which voids the round out loud.
-#
-# So the cost of running without it is wasted budget, reported when it happens,
-# rather than a result nobody can distinguish from a real one.
+# It is an advisory rather than a refusal because a campaign's published numbers do not rest on it: a lane's patch
+# that touches the measurement surface is refused before it reaches the canonical tree, the canonical driver is
+# re-checked byte-for-byte after the patch applies, and a KEEP is decided by the canonical measurement alone.
 _LANE_PROVIDER_ADVISORIES = (
     (
         "stop_hooks",
         "run the callbacks in AgentRunSpec.hooks, which is what denies a lane "
         "an edit to the driver, harness or oracle while its session can still "
-        "be saved, and denies a driver run that skips the device lock its "
-        "siblings are queueing on. Without them a lane can lose its whole "
-        "session at the boundary check, and concurrent unlocked benchmarks can "
-        "corrupt their own and their siblings' timings -- the round is voided "
-        "rather than trusted when that happens",
+        "be saved, and denies a command that selects a device around the queue "
+        "its siblings wait in. Without them a lane can lose its whole session "
+        "at the boundary check",
     ),
 )
 
@@ -132,6 +127,22 @@ def _require_lane_provider_capabilities(provider: str, lanes: int) -> None:
     )
 
 
+def _require_copyable_workspace(lanes: int) -> None:
+    """Refuse side-by-side lanes on a workspace that cannot be copied, before the campaign spends anything.
+
+    Lanes that run side by side each work in a copy of the workspace. A workspace whose repository is selected
+    through the environment -- a framework tree edited where it is installed, its history kept elsewhere -- has no
+    repository a copy could carry. One lane works in the workspace itself and needs none.
+    """
+    selected = repository_selected_by_environment()
+    if lanes < 2 or not selected:
+        return
+    raise ForgeLoopError(
+        f"--lanes {lanes} runs lanes in copies of the workspace, and this workspace's repository is selected "
+        f"through {' and '.join(selected)}, which a copy cannot carry. Re-run with --lanes 1."
+    )
+
+
 @dataclass(frozen=True)
 class LaneBinding:
     """The canonical workspace paths a lane rebinds onto its own copy."""
@@ -153,55 +164,76 @@ def _make_lane_agent_factory(
     from kernelforge.agent_backends.base import session_environment
     from kernelforge.utils.aiter_cache import child_cache_environment
 
-    def factory(lane_dir: str, serialized_driver: str | None):
+    def factory(seat: LaneSeat):
         # Each lane gets its own Config: a provider that requires the workspace as its cwd would otherwise start every
         # lane's session in the shared canonical workspace.
-        lane_root = Path(lane_dir).resolve()
+        lane_dir = str(seat.lane_dir)
+        lane_root = seat.lane_dir.resolve()
         lane_config = replace(config, workspace=str(lane_root))
-        lane_driver = _lane_workspace_path(
-            binding.driver,
-            lane_dir=lane_dir,
-            workspace_dir=binding.workspace_dir,
-            label="driver",
-        )
-        lane_sources = [
-            _lane_workspace_path(
-                path,
-                lane_dir=lane_dir,
-                workspace_dir=binding.workspace_dir,
-                label="source file",
-            )
-            for path in binding.source_files
-        ]
-        lane_setup = replace(
-            setup,
-            task=replace(setup.task, source_files=lane_sources, profiling_enabled=False),
-            # The lock-taking wrapper the round installed for this lane.
-            measurement=replace(setup.measurement, driver_script=lane_driver, interposed_driver_path=serialized_driver),
-            session=replace(setup.session, insession_gate=True, insession_gate_stop_check=False),
-        )
-        lane_agent = make_agent(lane_config, lane_setup, usage=usage)
+
+        def rebound(value: str, label: str) -> str:
+            return _lane_workspace_path(value, lane_dir=lane_dir, workspace_dir=binding.workspace_dir, label=label)
+
         # Each lane compiles a different edit of the same kernel. aiter imports a JIT module by name and never checks
         # the .so against the source it was built from, so lanes sharing one build cache load each other's binaries
         # and each one measures a kernel it did not write.
-        lane_env = child_cache_environment(lane_root.with_name(lane_root.name + _LANE_AITER_CACHE_SUFFIX))
+        measurement_env = child_cache_environment(lane_root.with_name(lane_root.name + _LANE_AITER_CACHE_SUFFIX))
         if import_name_of(Path(binding.workspace_dir)):
             # The lane copy stands under the workspace's name in a directory of its own, which has to come before the
             # one holding the canonical workspace: by that name the lane's session would otherwise import the
             # canonical workspace, and time a kernel the lane did not write.
-            lane_env["PYTHONPATH"] = import_path_first(lane_root.parent, os.environ.get("PYTHONPATH", ""))
+            measurement_env["PYTHONPATH"] = import_path_first(lane_root.parent, os.environ.get("PYTHONPATH", ""))
+        device = DeviceAccess(
+            runner=str(seat.device_runner),
+            queue_root=str(seat.queue_root),
+            hold_limit_sec=seat.hold_limit_sec,
+            usage_log=str(seat.usage_log),
+            lane=seat.assignment.lane_id,
+            environment=measurement_env,
+        )
+        runner_files = [str(seat.device_runner), str(seat.device_runner.with_name(RUNNER_CONFIG_NAME))]
+        lane_setup = replace(
+            setup,
+            task=replace(
+                setup.task,
+                source_files=[rebound(path, "source file") for path in binding.source_files],
+                extra_protected_paths=[*(setup.task.extra_protected_paths or []), *runner_files],
+            ),
+            measurement=replace(
+                setup.measurement,
+                driver_script=rebound(binding.driver, "driver"),
+                device=device,
+                # A lane runs beside others: a correct candidate may stop, and what it gained is the merge's to use.
+                gain_required=False,
+            ),
+            session=replace(setup.session, insession_gate=True),
+        )
+        lane_agent = make_agent(lane_config, lane_setup, usage=usage)
+        # The session itself sees no device: every command that needs one goes through the lane's runner.
+        session_env = {**measurement_env, **hidden_device_environment()}
 
-        async def session(kernel_path: str, plan: str, *, session_sink: dict | None = None) -> str:
+        async def session(
+            kernel_path: str,
+            history: str,
+            session_sink: dict | None = None,
+            gate_scoring: GateScoring = GateScoring(),
+        ) -> str:
+            """Run the lane's Implementer session under the Implementer callback's own contract.
+
+            The loop hands a session only the optional arguments it names, so both are named here: the scoring state
+            the lane's stop check measures against, and the sink the round reads the lane's result from.
+            """
             _assert_lane_session_cwd(
                 kernel_path=kernel_path,
                 workspace=lane_config.workspace,
                 lane_dir=lane_dir,
             )
+            extras = declared_extras(lane_agent, {"session_sink": session_sink, "gate_scoring": gate_scoring})
             try:
-                with session_environment(lane_env):
-                    return await lane_agent(kernel_path, plan, session_sink=session_sink)
+                with session_environment(session_env):
+                    return await lane_agent(kernel_path, history, **extras)
             finally:
-                # The backend was built for this one session and nothing resumes it once the lane returns.
+                # The backend was built for this one session; its record turn resumes the session by id.
                 lane_agent.close()
 
         return session

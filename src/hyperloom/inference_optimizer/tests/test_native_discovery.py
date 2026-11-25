@@ -18,7 +18,7 @@ from hyperloom.common.tests.handed_names import (
 )
 from hyperloom.inference_optimizer.session.paths import ENV_CURRENT_SESSION_DIR
 from hyperloom.inference_optimizer.session.session_paths import runs_root
-from hyperloom.orchestrator.prompts.native_discovery import gpu_kernel_dirs, native_discovery
+from hyperloom.orchestrator.prompts.native_discovery import OptionList, gpu_kernel_dirs, native_discovery
 from hyperloom.orchestrator.prompts.specialist_prompt_builder import build_specialist_prompts
 from hyperloom.orchestrator.specialists.domains import SPECIALIST_DOMAINS, get_domain
 from hyperloom.orchestrator.specialists.prompt_inputs import SpecialistPromptInputs
@@ -33,8 +33,12 @@ _LLAMA_SERVER_LOG = (
 )
 
 
-def _section() -> str:
-    return native_discovery("llamacpp", carried=_CARRIED, logs=_LOGS)
+#: The option list of a session whose server takes 212 options, 15 of them set by its launch.
+_OPTIONS = OptionList(Path("/session/server_options.json"), total=212, unset=197)
+
+
+def _section(options: OptionList | None = None) -> str:
+    return native_discovery("llamacpp", carried=_CARRIED, logs=_LOGS, options=options)
 
 
 def test_the_section_names_the_directories_of_the_files_the_component_s_kernel_knobs_are_set_in():
@@ -49,10 +53,10 @@ _STATED = " ".join((*NATIVE_SERVING["llamacpp"].values(), *NATIVE_AUX_MODEL_FLAG
 
 def test_the_section_names_of_the_server_only_what_the_rule_pack_states_of_it():
     """An option, a kernel constant or a pull request the section named would be the answer handed over."""
-    section = _section()
+    section = _section(_OPTIONS)
 
     assert server_options_named(section) == server_options_named(_STATED)
-    assert identifiers_named(section) <= identifiers_named(_STATED)
+    assert identifiers_named(section) <= identifiers_named(_STATED) | {_OPTIONS.file.stem}
     assert not knob_words_named(section) and not pull_requests_named(section)
 
 

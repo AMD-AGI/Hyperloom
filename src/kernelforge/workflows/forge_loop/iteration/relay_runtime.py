@@ -6,7 +6,6 @@
 from __future__ import annotations
 
 import copy
-import json
 from dataclasses import asdict
 
 from kernelforge.workflows.forge_loop.search.agent_relay import (
@@ -21,7 +20,7 @@ from kernelforge.workflows.forge_loop.search.agent_relay import (
     select_relay_intervention,
     select_replacement_for_unavailable,
 )
-from kernelforge.workflows.forge_loop.campaign.run_state import CriticRuling, make_event
+from kernelforge.workflows.forge_loop.campaign.run_state import make_event
 from kernelforge.workflows.forge_loop.search.search_actors import SearchActorBundle, SearchActorPool
 from kernelforge.workflows.forge_loop.search.search_policy import (
     OBJECTIVE_DISCOVER_NEW_MECHANISM,
@@ -105,7 +104,6 @@ class RelayRuntimeMixin:
             mode=SEARCH_MODE_DIVERSIFY,
             reason_codes=("AGENT_RELAY_BLOCKAGE",),
             objective_kind=OBJECTIVE_DISCOVER_NEW_MECHANISM,
-            residence_iterations_remaining=0,
         )
 
     def _blockage_reached(self) -> bool:
@@ -115,23 +113,6 @@ class RelayRuntimeMixin:
         intervention a stalled search gets, not when the search has stalled.
         """
         return relay_blockage_reached(self.run_state.agent_relay, threshold=self.ic.supervise_after)
-
-    def _lane_plans_match_active_profile(self, planned_iteration: int) -> bool:
-        """Whether a recoverable lane plan was written by the profile now active, so it may still be dispatched."""
-        try:
-            manifest = json.loads(self._lane_plan_manifest_path(planned_iteration).read_text(encoding="utf-8"))
-            planned_profile_id = str(manifest.get("agent_profile_id") or "")
-        except (OSError, ValueError, TypeError):
-            return False
-        active_profile_id = self.run_state.agent_relay.active_profile_id
-        if active_profile_id and planned_profile_id != active_profile_id:
-            print(
-                f"  [lanes] iteration {planned_iteration} belongs to "
-                f"{planned_profile_id or 'a legacy profile'}, not active "
-                f"profile {active_profile_id}; planning this round afresh"
-            )
-            return False
-        return True
 
     def _select_boundary_intervention(
         self,
@@ -164,9 +145,6 @@ class RelayRuntimeMixin:
             relay.active_profile_id = search_actors.start_profile_id
             self.state_store.save(self.run_state)
         self._recheck_profiles(iteration, search_actors)
-        if self._lane_queue:
-            self._defer_intervention()
-            return self._runnable_bundle(search_actors)
         intervention, event_type = self._select_boundary_intervention(search_actors)
         if intervention is None:
             return search_actors.bundle(relay.active_profile_id)
@@ -187,15 +165,6 @@ class RelayRuntimeMixin:
             return search_actors.bundle(relay.active_profile_id)
         self._switch_search_actor(iteration, intervention)
         return search_actors.bundle(relay.active_profile_id)
-
-    def _defer_intervention(self) -> None:
-        """Measure the candidates a round already bought before any intervention changes the next plan."""
-        relay = self.run_state.agent_relay
-        if self._blockage_reached():
-            print(
-                f"  [relay] blockage reached on {relay.active_profile_id}; measuring "
-                f"{len(self._lane_queue)} queued lane candidate(s) before intervening"
-            )
 
     def _recheck_profiles(self, iteration: int, search_actors: SearchActorPool) -> None:
         """Re-run the startup check of every profile whose API retries ran out, before anything is selected."""
@@ -220,17 +189,13 @@ class RelayRuntimeMixin:
             self.state_store.save(self.run_state)
 
     def _switch_search_actor(self, iteration: int, intervention: RelayIntervention) -> None:
-        """Persist the switch before the new profile runs, dropping what the previous profile planned."""
+        """Persist the switch before the new profile runs."""
         if self._pending_keep_path.exists():
             raise RuntimeError("cannot switch Agent profile while pending KEEP exists")
         if self._working_tree_diff().strip():
             raise RuntimeError("cannot switch Agent profile with a tracked candidate diff")
-        if self._lane_queue:
-            raise RuntimeError("cannot switch Agent profile with queued lane candidates")
         relay = self.run_state.agent_relay
         apply_profile_switch(relay, intervention=intervention, iteration=iteration)
-        self.run_state.last_critic = CriticRuling()
-        self._last_lane_plans = []
         self.state_store.save(self.run_state)
         self.state_store.append_event(
             make_event(

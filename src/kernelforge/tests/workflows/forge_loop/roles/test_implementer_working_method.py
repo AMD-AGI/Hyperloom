@@ -223,10 +223,11 @@ def test_only_the_provider_that_marks_its_sessions_declares_it() -> None:
     assert marking == {"claude"}
 
 
-def test_the_method_takes_a_round_plan_as_the_direction_and_chooses_only_without_one(gated_system_prompt) -> None:
-    """One method serves a session handed a plan and a session left to choose, and tells neither to do both."""
+def test_the_method_leaves_the_direction_to_the_session_inside_its_lanes_focus(gated_system_prompt) -> None:
+    """One method serves a round's only session and a lane given a focus: both choose their own direction."""
     prompt = gated_system_prompt(correctness_only=False)
 
-    assert "When this invocation names a required optimization plan, that plan is the direction" in prompt
-    assert "When it leaves the direction to you, choose it from the evidence in this prompt" in prompt
+    assert "Choose it from the evidence in this prompt" in prompt
+    assert "When this invocation names a focus for this lane, choose inside it." in prompt
+    assert "required optimization plan" not in prompt
     assert "Choose this session's direction" not in prompt

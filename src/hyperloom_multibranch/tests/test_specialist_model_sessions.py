@@ -44,7 +44,7 @@ def test_a_branch_s_sessions_and_its_worktree_tools_share_one_worktree_on_one_so
     package.mkdir(parents=True)
     (package / "config.py").write_bytes(b"max_num_seqs = 128\n")
     installed = PackageBase("vllm", package, None, None)
-    monkeypatch.setattr(worktree_module, "locate_installed_package", lambda _layout: installed)
+    monkeypatch.setattr(worktree_module, "locate_source", lambda _layout: installed)
     role = role_prompt(RoleWorkload("qwen3-8b on vllm, TP 1, concurrency 64"))
     command = AgentCommand("claude", "claude", model="claude-opus-5-5")
     setup = AgentSetup(command, role, {}, object(), object(), object(), object())
@@ -97,7 +97,7 @@ def test_a_branch_whose_task_names_an_agent_runs_it_on_ports_of_its_own_in_the_s
     package.mkdir(parents=True)
     (package / "config.py").write_bytes(b"max_num_seqs = 128\n")
     installed = PackageBase("vllm", package, None, None)
-    monkeypatch.setattr(worktree_module, "locate_installed_package", lambda _layout: installed)
+    monkeypatch.setattr(worktree_module, "locate_source", lambda _layout: installed)
     setup = AgentSetup(AgentCommand("claude", "claude"), "role", {}, object(), object(), object(), object())
     base = SourceBase(tmp_path / "MB-source")
 

@@ -182,7 +182,7 @@ class AnalysisRuntimeMixin(AnalysisEvidenceMixin):
     ):
         """Refresh Analysis when policy requires it, otherwise reuse evidence."""
         planning_iteration = self.run_state.iteration if iteration is None else int(iteration)
-        context = self._build_orchestration_context()
+        context = self._build_evidence_context()
         restore_published = getattr(
             analysis_service,
             "apply_published_evidence",
