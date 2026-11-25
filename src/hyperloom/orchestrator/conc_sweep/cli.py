@@ -34,6 +34,9 @@ from .runner import run_conc_sweep
 
 log = logging.getLogger(__name__)
 
+#: What the sweep keeps of its deadline for packaging the session once its last point is written.
+PACKAGE_MARGIN_SEC = 600.0
+
 
 @contextmanager
 def _cancelled_by_signals(scope: CancelScope) -> Iterator[None]:
@@ -54,13 +57,14 @@ async def sweep_session(
     session_dir: Path, *, concs: Sequence[int] = (), deadline_unix: float | None = None
 ) -> dict[str, Any]:
     """Run the sweep of the session in ``session_dir`` under its lock, over ``concs`` when given, starting no point that
-    would end past ``deadline_unix``, then package the session so the package carries the report; raises
-    ``SessionAlreadyRunning``."""
+    would end within :data:`PACKAGE_MARGIN_SEC` of ``deadline_unix``, when the process must have ended, then package
+    the session so the package carries the report; raises ``SessionAlreadyRunning``."""
     session_dir = session_dir.resolve()
     os.environ[ENV_CURRENT_SESSION_DIR] = str(session_dir)
     scope = CancelScope()
     with SessionLock(session_dir), use_cancel_scope(scope), _cancelled_by_signals(scope):
-        payload = await run_conc_sweep(session_dir, concs=concs, deadline_unix=deadline_unix)
+        points_end = None if deadline_unix is None else deadline_unix - PACKAGE_MARGIN_SEC
+        payload = await run_conc_sweep(session_dir, concs=concs, deadline_unix=points_end)
     _package(session_dir)
     return payload
 

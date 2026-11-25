@@ -199,13 +199,16 @@ def _run() -> int:
         print("[hosted] a stop was requested before this leg started; ending the run", flush=True)
         write_exit(info.state_dir, final=True, returncode=0, stop_reason=STOP_REQUEST_REASON)
         return 0
-    _require_own_ledger(session_dir)
+    sweeping = spec.flow == FLOW_CONC_SWEEP
+    if not sweeping:  # an optimize leg's checks: a sweep spends no credential and its lock refuses a running session
+        _require_own_ledger(session_dir)
     _put_interpreter_first_on_path()
     _run_installer(info.state_dir)
-    _confirm_previous_containers_gone(session_dir)
-    _require_resume_safe(session_dir)
+    if not sweeping:
+        _confirm_previous_containers_gone(session_dir)
+        _require_resume_safe(session_dir)
     with _plug_inputs(lock, info), _mcp_service(info, session_dir):
-        if spec.flow == FLOW_CONC_SWEEP:
+        if sweeping:
             return _sweep(info.state_dir, session_dir, _grant_end_unix(info), spec.sweep_concs or ())
         if is_resumable(session_dir) and sweep_unfinished(session_dir):
             return _sweep(info.state_dir, session_dir, _grant_end_unix(info))

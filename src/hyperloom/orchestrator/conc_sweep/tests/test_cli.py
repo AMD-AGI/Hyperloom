@@ -96,3 +96,20 @@ def test_the_command_sweeps_the_operators_points_with_no_deadline(
     assert cli.main([str(session_dir), "--conc-sweep-concs", "8,2"]) == 0
 
     assert calls == [{"concs": (2, 8), "deadline_unix": None}]
+
+
+def test_the_sweep_keeps_a_packaging_margin_of_the_deadline_it_is_given(
+    session_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    ends: list[float | None] = []
+
+    async def run_conc_sweep(path: Path, **kwargs: Any) -> dict[str, Any]:
+        ends.append(kwargs["deadline_unix"])
+        return {"status": "succeeded"}
+
+    monkeypatch.setattr(cli, "run_conc_sweep", run_conc_sweep)
+    monkeypatch.setattr(cli, "package_session_artifacts", lambda *_, **__: None)
+
+    asyncio.run(cli.sweep_session(session_dir, deadline_unix=10_000.0))
+
+    assert ends == [10_000.0 - cli.PACKAGE_MARGIN_SEC]
