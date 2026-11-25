@@ -564,6 +564,45 @@ def test_csv_jit_kernel_rows_does_not_let_another_libtype_replace_a_row(tmp_path
     assert aj.csv_jit_kernel_rows(csv_path) == [("ck_kernel", "ck"), ("tile_kernel", "cktile")]
 
 
+#: Rows of aiter's ``aiter/configs/model_configs/narrow_n_a4w4_blockscale_tuned_gemm.csv`` (ROCm/aiter aaa0597413, which
+#: added it): Triton and FlyDSL winners with no libtype column, falling back to an ASM, a CK or no kernel.
+_NARROW_N_A4W4 = (
+    "gfx,cu_num,M,N,K,kernelId,splitK,us,kernelName,tflops,bw,errRatio,fallbackKernelName,fallbackSplitK\n"
+    "gfx950,256,32,512,4096,-1,0,5.2685,flydsl_mxpsh_32x32x256_F4_F4_B16_w2_x0_sk8,25.48,217.69,0.01,"
+    "_ZN5aiter41f4gemm_bf16_per1x32Fp4_BpreShuffle_32x128E,0\n"
+    "gfx950,256,96,512,7168,-1,0,7.3241,triton_preshuffle_bm32_bn128_bk256_ks8_w4_wpe2_s3_g1_mi16_cmcg,96.21,310.94,0.01,"
+    "a4w4_blockscale_256x64x128x128_16x16_16x16_8x32x1_8x32x1_1x32x1x8_8_2x2_intrawave_v3,0\n"
+    "gfx950,256,32,512,7168,-1,0,5.8144,flydsl_mxpsh_32x32x256_F4_F4_B16_w2_x0_sk14,40.40,340.96,0.01,"
+    "a4w4_blockscale_256x96x128x128_16x16_16x16_8x32x1_8x32x1_1x32x1x8_8_2x2_intrawave_v3,0\n"
+    "gfx950,256,64,256,8192,-1,0,6.3256,triton_preshuffle_bm32_bn64_bk256_ks8_w4_wpe2_s3_g1_mi16_cmcg,42.44,212.39,0.01,,0\n"
+)
+_A4W4_CK_FALLBACKS = [
+    ("a4w4_blockscale_256x64x128x128_16x16_16x16_8x32x1_8x32x1_1x32x1x8_8_2x2_intrawave_v3", ""),
+    ("a4w4_blockscale_256x96x128x128_16x16_16x16_8x32x1_8x32x1_1x32x1x8_8_2x2_intrawave_v3", ""),
+]
+
+
+def test_csv_jit_kernel_rows_gives_the_ck_fallbacks_of_triton_and_flydsl_rows(tmp_path):
+    """aiter's a4w4 CK codegen drops ``_ZN``/``triton_``/``flydsl_`` rows and builds their CK fallbacks."""
+    table = tmp_path / "narrow_n_a4w4_blockscale_tuned_gemm.csv"
+    table.write_text(_NARROW_N_A4W4, encoding="utf-8")
+    assert aj.csv_jit_kernel_rows(table, frozenset({("gfx950", 256)})) == _A4W4_CK_FALLBACKS
+    assert aj.csv_jit_kernel_rows(table, frozenset({("gfx950", 304)})) == []
+
+
+def test_a4w4_module_with_the_ck_fallbacks_covers_the_narrow_n_table(tmp_path):
+    jit_dir = tmp_path / "jit"
+    jit_dir.mkdir()
+    table = tmp_path / "narrow_n_a4w4_blockscale_tuned_gemm.csv"
+    table.write_text(_NARROW_N_A4W4, encoding="utf-8")
+    rows = aj.csv_jit_kernel_rows(table, frozenset({("gfx950", 256)}))
+    module = jit_dir / "module_gemm_a4w4_blockscale.so"
+    module.write_bytes(b"\0".join(name.encode() for name, _ in _A4W4_CK_FALLBACKS))
+    assert aj.serving_modules_cover_rows(jit_dir, ("module_gemm_a4w4_blockscale",), rows)
+    module.write_bytes(_A4W4_CK_FALLBACKS[0][0].encode())
+    assert not aj.serving_modules_cover_rows(jit_dir, ("module_gemm_a4w4_blockscale",), rows)
+
+
 def test_serving_modules_cover_rows_when_a_replaced_row_is_missing_from_so(tmp_path):
     jit_dir = tmp_path / "jit"
     jit_dir.mkdir()
