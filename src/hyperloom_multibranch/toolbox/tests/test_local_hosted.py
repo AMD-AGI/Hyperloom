@@ -136,18 +136,19 @@ def test_the_host_hugging_face_settings_reach_the_runner_template(
     assert template.envs["HF_HUB_OFFLINE"] == "1"
 
 
-def test_a_measured_runner_pins_its_server_to_the_cpus_the_host_names(
+def test_only_a_runner_of_a_framework_built_from_its_checkout_is_handed_the_server_cpus(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """A local runner starts from an emptied environment, so the CPUs a round pins its server to come from the host."""
     session = LocalSession(tmp_path, "run-1", [0])
     template = _runner_template(session, LocalOptions())
+    base = {BASE_BINS_ENV: str(tmp_path / "base-builds" / "k" / "llamacpp" / "bin")}
     monkeypatch.setenv(SERVER_CPUS_ENV, "32-47,96-111")
 
-    assert _measured_template(session, template, LocalOptions(), {}).envs[SERVER_CPUS_ENV] == "32-47,96-111"
+    assert _measured_template(session, template, LocalOptions(), {}, base).envs[SERVER_CPUS_ENV] == "32-47,96-111"
+    assert SERVER_CPUS_ENV not in _measured_template(session, template, LocalOptions(), {}).envs
     assert SERVER_CPUS_ENV not in template.envs, "a branch's own sandbox runs no measured server"
     monkeypatch.delenv(SERVER_CPUS_ENV)
-    assert SERVER_CPUS_ENV not in _measured_template(session, template, LocalOptions(), {}).envs
+    assert SERVER_CPUS_ENV not in _measured_template(session, template, LocalOptions(), {}, base).envs
 
 
 def test_a_measured_runner_is_named_the_base_builds_executables(tmp_path: Path) -> None:
