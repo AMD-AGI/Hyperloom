@@ -15,11 +15,13 @@ from hyperloom_multibranch.toolbox.tools.base import (
     UnknownTool,
 )
 from hyperloom_multibranch.toolbox.tools.kernel_tune import KERNEL_TUNE_TOOL, KernelTuneTool, kernel_tune_tool
+from hyperloom_multibranch.toolbox.tools.knob_tune import KNOB_TUNE_TOOL, knob_tune_tool
 from hyperloom_multibranch.toolbox.tools.roofline import ROOFLINE_TOOL, TRACELENS_TOOL, roofline_tool, tracelens_tool
 from hyperloom_multibranch.toolbox.tools.upstream_pr import UPSTREAM_PR_TOOL, UpstreamPrSearch
 
 __all__ = [
     "KERNEL_TUNE_TOOL",
+    "KNOB_TUNE_TOOL",
     "ROOFLINE_TOOL",
     "TRACELENS_TOOL",
     "UPSTREAM_PR_TOOL",
@@ -35,6 +37,7 @@ __all__ = [
     "UnknownTool",
     "UpstreamPrSearch",
     "kernel_tune_tool",
+    "knob_tune_tool",
     "roofline_tool",
     "tracelens_tool",
 ]
