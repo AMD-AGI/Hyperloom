@@ -1322,6 +1322,7 @@ def test_the_sweep_flow_refuses_a_session_that_has_not_closed(run, monkeypatch):
 def test_the_sweep_flow_hands_a_directory_that_is_no_single_lineage_session_to_the_multibranch_entry(
     run, monkeypatch, tmp_path
 ):
+    (tmp_path / "MB-session").mkdir()
     _sweep_spec(run, tmp_path / "MB-session", measurement="hosted", profile="hosted-gpu")
     calls = []
     monkeypatch.setattr(entry.shutil, "which", lambda name: "/usr/bin/" + name)
@@ -1330,3 +1331,28 @@ def test_the_sweep_flow_hands_a_directory_that_is_no_single_lineage_session_to_t
     entry.main(["run"])
 
     assert calls == [["hyperloom-multibranch", "hosted", "run"]]
+
+
+def test_the_sweep_flow_sweeps_a_session_whose_own_run_was_asked_to_stop(run, monkeypatch):
+    from hyperloom.orchestrator.conc_sweep import cli as sweep_cli
+
+    session = _closed_session(run, monkeypatch)
+    entry.stop_request_path(session).parent.mkdir(parents=True, exist_ok=True)
+    entry.stop_request_path(session).write_text("{}")
+    _sweep_spec(run, session)
+    swept: list[Path] = []
+    monkeypatch.setattr(sweep_cli, "sweep_and_report", lambda path, **kw: swept.append(path) or 0)
+    run.restart()
+
+    assert entry.main(["run"]) == 0
+
+    assert swept == [session]
+
+
+def test_the_sweep_flow_refuses_a_session_dir_that_is_no_directory(run, monkeypatch, tmp_path):
+    _sweep_spec(run, tmp_path / "gone")
+    monkeypatch.setattr(entry.os, "execvp", lambda file, argv: pytest.fail("handed to the multibranch entry"))
+
+    assert entry.main(["run"]) == entry.RETURNCODE_REFUSED
+
+    assert "is not a directory" in _exit(run)["error"]

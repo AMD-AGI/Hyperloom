@@ -169,6 +169,8 @@ def _run() -> int:
         raise Refused(str(exc)) from None
     _check_shared_storage(info.state_dir, user_data)
     _default_runtime_dir()
+    if spec.flow == FLOW_CONC_SWEEP and not Path(str(spec.sweep_session_dir)).is_dir():
+        raise Refused(f"conc_sweep.session_dir {spec.sweep_session_dir} is not a directory")
     if spec.flow == FLOW_MULTIBRANCH or (
         spec.flow == FLOW_CONC_SWEEP and not is_resumable(Path(str(spec.sweep_session_dir)))
     ):
@@ -192,7 +194,8 @@ def _run() -> int:
     os.environ[ENV_PACKAGE_DEST_ROOT] = str(archive)  # the package outlives the container
     os.environ[ENV_IMAGE] = spec.framework_image
     _announce_grant(info)
-    if stop_request_path(session_dir).is_file():
+    # A sweep's session closed long ago; a stop request it holds was the run that closed it, not this one.
+    if spec.flow != FLOW_CONC_SWEEP and stop_request_path(session_dir).is_file():
         print("[hosted] a stop was requested before this leg started; ending the run", flush=True)
         write_exit(info.state_dir, final=True, returncode=0, stop_reason=STOP_REQUEST_REASON)
         return 0
