@@ -67,6 +67,11 @@ class LaunchError(RuntimeError):
     """A host refused the launch, or the cluster did not come up."""
 
 
+class OverrideRefused(LaunchError, ValueError):
+    """An override the launch refuses as input, before a host runs it: the launcher owns the flag, it names no role, or
+    the engine does not list it."""
+
+
 def http_ok(url: str) -> bool:
     """Whether ``url`` answers 200, bypassing any proxy."""
     try:
@@ -290,7 +295,7 @@ def _refuse_untaken_overrides(launch: PdLaunch, overrides: Mapping[str, Sequence
     """Refuse engine overrides that :func:`fit_to_engine` would drop from ``launch`` on an engine listing ``flags``.
 
     Raises:
-        LaunchError: an override sets a flag the role's engine does not take: any unlisted flag of a non-operator
+        OverrideRefused: an override sets a flag the role's engine does not take: any unlisted flag of a non-operator
             launch, or a prefill split flag the engine lists only in its decode spelling.
     """
     if not flags:
@@ -303,7 +308,7 @@ def _refuse_untaken_overrides(launch: PdLaunch, overrides: Mapping[str, Sequence
         if name and not _engine_takes(role, name, flags) and (not operator or name in SPLIT_ROLE_FLAGS)
     ]
     if untaken:
-        raise LaunchError(f"the engine does not list the round's flags {untaken}")
+        raise OverrideRefused(f"the engine does not list the round's flags {untaken}")
 
 
 def replace_flags(args: Sequence[str], overrides: Sequence[str]) -> tuple[str, ...]:
@@ -324,17 +329,17 @@ def with_overrides(launch: PdLaunch, overrides: Mapping[str, Sequence[str]]) -> 
     ``router``.
 
     Raises:
-        LaunchError: an override sets a flag the launcher owns, or names no role of the launch.
+        OverrideRefused: an override sets a flag the launcher owns, or names no role of the launch.
     """
     unknown = set(overrides) - {*(role.value for role in launch.served_roles), ROUTER}
     if unknown:
-        raise LaunchError(f"overrides name no role: {sorted(unknown)}")
+        raise OverrideRefused(f"overrides name no role: {sorted(unknown)}")
     roles = {}
     for role in launch.served_roles:
         given = list(overrides.get(role.value, ()))
         owned = render_role(launch.framework, given, {}).stripped
         if owned:
-            raise LaunchError(f"the launcher sets {list(owned)}; they cannot be overridden on {role.value}")
+            raise OverrideRefused(f"the launcher sets {list(owned)}; they cannot be overridden on {role.value}")
         roles[role] = replace(launch.role(role), args=replace_flags(launch.role(role).args, given))
     frontend = replace(launch.frontend, args=replace_flags(launch.frontend.args, list(overrides.get(ROUTER, ()))))
     return replace(launch.with_roles(roles), frontend=frontend)
@@ -356,9 +361,14 @@ def _engine_commands(launch: PdLaunch, nodes: NodeList) -> list[HostCommand]:
     return [command for command in cluster_commands(launch, nodes) if command.role != ROUTER]
 
 
-def engines_gone(launch: PdLaunch, cluster: Cluster, key: str, timeout: int = 30) -> list[HostCommand]:
+def engines_gone(launch: PdLaunch, cluster: Cluster) -> list[HostCommand]:
     """The engine hosts whose launched server no longer runs (a restarted container lost it, or it exited); one
     still in its launch script, waiting for the GPUs before it execs the server, runs."""
+    return _engines_gone(launch, cluster, _launch_key(launch))
+
+
+def _engines_gone(launch: PdLaunch, cluster: Cluster, key: str, timeout: int = 30) -> list[HostCommand]:
+    """:func:`engines_gone` under the pidfiles of ``key``, the frozen launch's key."""
     gone = []
     for command in _engine_commands(launch, cluster.nodes):
         needle = process_needle(command.role, launch.framework, launch.frontend.type)
@@ -385,7 +395,7 @@ def _await(urls: Sequence[str], launch: PdLaunch, cluster: Cluster, options: Lau
         waiting = [url for url in waiting if not http_ok(url)]
         if not waiting:
             return
-        gone = engines_gone(launch, cluster, key)
+        gone = _engines_gone(launch, cluster, key)
         if gone:
             tail = _log_tail(cluster, gone[0], _SSH_TIMEOUT_S, options.log_dir)
             raise LaunchError(f"{gone[0].role} on {gone[0].host} exited during startup:\n{tail}")
@@ -453,6 +463,7 @@ __all__ = [
     "Cluster",
     "LaunchError",
     "LaunchOptions",
+    "OverrideRefused",
     "check_env",
     "engines_gone",
     "exportable_env_key",

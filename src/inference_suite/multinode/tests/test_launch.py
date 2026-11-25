@@ -168,7 +168,7 @@ def test_an_engine_still_in_its_launch_script_is_not_gone(tmp_path, monkeypatch,
         (tmp_path / "decode.pid").write_text(str(engine.pid))
         client = SshClient(SshAccess(22, "root", "/keys/id"), tmp_path / "known_hosts", runner=_local_hosts)
         cluster = Cluster(_nodes(), client)
-        assert [gone.role for gone in engines_gone(_launch(), cluster, "key")] == ["prefill"]
+        assert [gone.role for gone in engines_gone(_launch(), cluster)] == ["prefill"]
     finally:
         engine.kill()
         engine.wait()

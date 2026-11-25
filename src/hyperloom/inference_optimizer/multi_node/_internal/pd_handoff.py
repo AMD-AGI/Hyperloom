@@ -63,6 +63,11 @@ def is_pd_state(state: dict[str, Any]) -> bool:
     return backend in PD_BACKENDS or (backend == INFERA and state.get(NODE_LIST_KEY) is True)
 
 
+def is_ssh_backed(state: dict[str, Any]) -> bool:
+    """Whether a cluster's GPU hosts are reached over SSH: an Infera idle-pod cluster, or a node-list PD one."""
+    return str(state.get("backend") or "") == INFERA or is_pd_state(state)
+
+
 def pod(nodes: NodeList, role: str, index: int, host: str) -> dict[str, Any]:
     """The SSH target of ``host``, the ``index``-th host of ``role``."""
     return {
@@ -116,6 +121,7 @@ __all__ = [
     "SSH_BACKENDS",
     "handed_node_list",
     "is_pd_state",
+    "is_ssh_backed",
     "node_list_backend",
     "pd_state",
     "pod",

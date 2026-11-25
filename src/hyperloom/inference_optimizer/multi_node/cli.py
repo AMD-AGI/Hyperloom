@@ -19,6 +19,7 @@ import httpx
 from hyperloom_common.env import EnvValueError
 
 from ._internal.log import info, warn, err
+from ._internal.pd_handoff import is_ssh_backed
 from ._internal.server_args_safety import ServerArgsRejected, validate_server_args
 from .cluster_access import (
     EXIT_CONFIG_ERROR,
@@ -71,8 +72,9 @@ _DEFAULT_RESUME_PROBE_TIMEOUT_S = 30
 
 
 def install_geak_on_pods_best_effort() -> int:
-    """Install GEAK on the Infera GPU pods (provisioner hook); raised errors propagate, the return code is the caller's."""
-    if _load_state().get("backend") != "infera":
+    """Install GEAK on the SSH-reached GPU pods (provisioner hook); raised errors propagate, the return code is the
+    caller's."""
+    if not is_ssh_backed(_load_state()):
         return 0
     ns = argparse.Namespace(
         geak_src=None,
@@ -254,7 +256,7 @@ from .commands.infera import (
 
 def cmd_apply_patch(args: argparse.Namespace) -> int:
     """Fan out a kernel patch to every pod (head + workers)."""
-    if _load_state().get("backend") == "infera":
+    if is_ssh_backed(_load_state()):
         return _infera_apply_patch(args)
     state = _load_state()
     head_ip = (state.get("head_pod_ip") or "").strip()
@@ -304,7 +306,7 @@ def cmd_apply_patch(args: argparse.Namespace) -> int:
 
 def cmd_revert_patch(args: argparse.Namespace) -> int:
     """Fan out a kernel patch revert across the pods that originally received it."""
-    if _load_state().get("backend") == "infera":
+    if is_ssh_backed(_load_state()):
         return _infera_revert_patch(args)
     state = _load_state()
     head_ip = (state.get("head_pod_ip") or "").strip()
@@ -349,7 +351,7 @@ def cmd_revert_patch(args: argparse.Namespace) -> int:
 
 def cmd_finalize_patch(args: argparse.Namespace) -> int:
     """Delete backups after a patch becomes the accepted baseline."""
-    if _load_state().get("backend") == "infera":
+    if is_ssh_backed(_load_state()):
         return _infera_finalize_patch(args)
     state = _load_state()
     if not (state.get("head_pod_ip") or "").strip():
@@ -382,7 +384,7 @@ def cmd_finalize_patch(args: argparse.Namespace) -> int:
 
 def cmd_apply_tracelens_patch(args: argparse.Namespace) -> int:
     """Fan out the TraceLens SGLang patch set to every pod via apply_tracelens_patch_multinode.py; multi-node only."""
-    if _load_state().get("backend") == "infera":
+    if is_ssh_backed(_load_state()):
         return _infera_apply_tracelens_patch(args)
     state = _load_state()
     head_ip = (state.get("head_pod_ip") or "").strip()

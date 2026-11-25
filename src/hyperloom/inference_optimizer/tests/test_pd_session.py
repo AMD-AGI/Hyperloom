@@ -312,3 +312,26 @@ def test_a_profiling_round_gives_each_engine_role_its_own_profiler_dir() -> None
         "decode": {pd_session.PROFILER_DIR_ENV: "/t/decode"},
     }
     assert pd_session.launch_options({"SGLANG_X": "1"}, 60).role_env == {}
+
+
+@pytest.mark.parametrize("backend", ["atomesh", "sglangrouter"])
+def test_a_node_list_cluster_installs_geak_over_ssh(monkeypatch, backend):
+    monkeypatch.setattr(mn_cli, "_load_state", lambda: {"backend": backend, "node_list": True})
+    monkeypatch.setattr(mn_cli, "cmd_install_geak", lambda _args: 5)
+    assert mn_cli.install_geak_on_pods_best_effort() == 5
+
+
+@pytest.mark.parametrize(
+    ("command", "infera_command"),
+    [
+        ("cmd_apply_patch", "_infera_apply_patch"),
+        ("cmd_revert_patch", "_infera_revert_patch"),
+        ("cmd_finalize_patch", "_infera_finalize_patch"),
+        ("cmd_apply_tracelens_patch", "_infera_apply_tracelens_patch"),
+    ],
+)
+@pytest.mark.parametrize("backend", ["atomesh", "sglangrouter"])
+def test_a_node_list_cluster_takes_the_ssh_patch_path(monkeypatch, command, infera_command, backend):
+    monkeypatch.setattr(mn_cli, "_load_state", lambda: {"backend": backend, "node_list": True})
+    monkeypatch.setattr(mn_cli, infera_command, lambda _args: 7)
+    assert getattr(mn_cli, command)(argparse.Namespace()) == 7

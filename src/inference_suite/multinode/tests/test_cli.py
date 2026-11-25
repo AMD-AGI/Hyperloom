@@ -9,6 +9,7 @@ import pytest
 
 from inference_suite.contracts.base_launch import LaunchQuery, Workload
 from inference_suite.multinode import cli
+from inference_suite.multinode import launch as launch_module
 from inference_suite.multinode.launch import LaunchError
 from inference_suite.multinode.nodes import NODE_LIST_ENV
 from inference_suite.multinode.record import (
@@ -106,3 +107,16 @@ def test_node_list_without_ssh_is_refused(record, monkeypatch, capsys):
 
 def test_record_defaults_to_the_session_dir(tmp_path):
     assert cli.default_record({cli.SESSION_DIR_ENV: str(tmp_path)}) == tmp_path / "pd_launch.json"
+
+
+@pytest.mark.parametrize(
+    ("flag", "value", "reason"),
+    [("--decode-args", "--port 9000", "launcher sets"), ("--worker-args", "--x 1", "overrides name no role")],
+)
+def test_an_override_refused_before_any_host_is_contacted_exits_2(record, monkeypatch, flag, value, reason, capsys):
+    def contacted(*_args):
+        raise AssertionError("a host was contacted")
+
+    monkeypatch.setattr(launch_module, "probe_engine_flags", contacted)
+    assert main(["multinode", "restart", "--record", str(record), flag, value]) == 2
+    assert reason in capsys.readouterr().err
