@@ -70,6 +70,7 @@ from hyperloom.measure.jit.native.key import BuildInputs
 from hyperloom.measure.jit.native.record import COMPILE_ENV_PREFIX, FAILED, READY, OutputFile
 from hyperloom.measure.jit.native.store import BuildInfraError
 from hyperloom.measure.jit.store import SnapshotInvalid, read_bounded
+from hyperloom.measure.local_templates import IMAGE_ENV_NAMES
 from hyperloom.measure.runner.native.builder import LaidTree
 from hyperloom.measure.runner.native.planning import NativePlanner, PlannedBuild
 from hyperloom.measure.runner.native.process_group import run_in_group
@@ -457,9 +458,22 @@ def _give(work: Path, uid: int) -> None:
             os.lchown(os.path.join(directory, name), uid, uid)
 
 
-def _child_environment(work: Path) -> dict[str, str]:
-    """The child's whole environment: no variable of this process (none of its credentials, proxies or key paths)."""
-    return {"PATH": os.environ.get("PATH", os.defpath), "HOME": str(work), "TMPDIR": str(work), "LC_ALL": "C.UTF-8"}
+def _child_environment(work: Path, environ: Mapping[str, str] | None = None) -> dict[str, str]:
+    """The child's whole environment: ``PATH``, a home and temporary directory in ``work``, and the image's library
+    search path (:data:`~hyperloom.measure.local_templates.IMAGE_ENV_NAMES`) where ``environ`` (this process's by
+    default) sets it; no other variable of this process (none of its credentials, proxies or key paths).
+
+    The image's torch may load a library only that search path names (a ROCm SDK's ``libamd_smi.so`` beside the
+    image's packages): without it the child's preflight cannot import torch, nor can the compile."""
+    source = os.environ if environ is None else environ
+    loader = {name: source[name] for name in sorted(IMAGE_ENV_NAMES) if source.get(name)}
+    return {
+        "PATH": source.get("PATH", os.defpath),
+        "HOME": str(work),
+        "TMPDIR": str(work),
+        "LC_ALL": "C.UTF-8",
+        **loader,
+    }
 
 
 def _children_cpu_seconds() -> float:

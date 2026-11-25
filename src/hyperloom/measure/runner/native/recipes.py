@@ -33,6 +33,7 @@ from pathlib import Path, PurePosixPath
 
 from hyperloom.common.outside_facts import component_layouts
 from hyperloom.measure.compile import ComponentLayout
+from hyperloom.measure.local_templates import IMAGE_ENV_NAMES
 from hyperloom.measure.runner.native.preflight import Preflight, native_preflight
 from hyperloom.orchestrator.enablement.runtime.build_actions import TargetedBuildAction
 from hyperloom.orchestrator.enablement.runtime.targeted_build import SglKernelBuild, VllmBuild, default_budget_sec
@@ -173,12 +174,15 @@ class NativeRecipe:
         return [[_filled(part, values) for part in step] for step in self.steps]
 
     def environment(self, gfx_arch: str, scratch: Path) -> dict[str, str]:
-        """The compile's whole environment: no variable of the service (none of its credentials) reaches it."""
+        """The compile's whole environment: no variable of the service (none of its credentials) reaches it, but the
+        image's library search path (:data:`~hyperloom.measure.local_templates.IMAGE_ENV_NAMES`) does where it is set,
+        which the image's torch may need to load."""
         return {
             "PATH": os.environ.get("PATH", os.defpath),
             "HOME": str(scratch),
             "TMPDIR": str(scratch),
             "LC_ALL": "C.UTF-8",
+            **{name: os.environ[name] for name in sorted(IMAGE_ENV_NAMES) if os.environ.get(name)},
             "MAX_JOBS": str(self.max_jobs),
             **self.variables(),
             self.gfx_variable: gfx_arch,
