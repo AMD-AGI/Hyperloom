@@ -125,7 +125,7 @@ def _backoff(time: _FakeTime, latest: float | None = None) -> InfraBackoff:
 
 
 async def _run(
-    reason: str | tuple[str, ...], latest: float | None = None
+    reason: str | tuple[str, ...], latest: float | None = None, kind: TestKind = TestKind.TEST
 ) -> tuple[TestResult, _ScriptedExecutor, list[str]]:
     executor = _ScriptedExecutor(reason)
     reported: list[str] = []
@@ -137,7 +137,8 @@ async def _run(
     runner = AttemptRunner(
         executor, avoid=frozenset, on_node_failure=on_node_failure, max_infra_retries=3, backoff=backoff
     )
-    return await runner.run(_job()), executor, reported
+    job = _job()
+    return await runner.run(replace(job, request=replace(job.request, kind=kind))), executor, reported
 
 
 @pytest.mark.parametrize(
@@ -506,10 +507,14 @@ class _TimedOutExecutor(_ScriptedExecutor):
 
 @pytest.mark.parametrize(
     "kind, runs, validity",
-    [(TestKind.SWEEP, 1, Validity.MEASUREMENT_FAILED), (TestKind.TEST, 2, Validity.CANDIDATE_FAILED)],
-    ids=["sweep", "test"],
+    [
+        (TestKind.SWEEP, 1, Validity.MEASUREMENT_FAILED),
+        (TestKind.PROFILE, 1, Validity.MEASUREMENT_FAILED),
+        (TestKind.TEST, 2, Validity.CANDIDATE_FAILED),
+    ],
+    ids=["sweep", "profile", "test"],
 )
-async def test_a_sweep_that_ran_out_of_time_is_not_rerun(kind, runs, validity) -> None:
+async def test_a_sweep_or_a_profile_that_ran_out_of_time_is_not_rerun(kind, runs, validity) -> None:
     executor = _TimedOutExecutor(TEST_TIMEOUT_REASON)
     time = _FakeTime()
     reported: list[str] = []
@@ -605,11 +610,13 @@ async def test_a_profile_whose_server_stalled_inside_its_window_is_not_retried_a
     assert reported == [], "the image's profiler, not the node, hung the server"
 
 
-async def test_a_profile_whose_server_stalled_outside_its_window_is_still_rerun_once() -> None:
-    result, executor, _ = await _profile("", StepFailure(FailedStep.SERVER_STALLED, _SILENT))
+async def test_a_profile_whose_server_stalled_outside_its_window_is_not_rerun_and_ends_unmeasured() -> None:
+    result, executor, reported = await _profile("", StepFailure(FailedStep.SERVER_STALLED, _SILENT))
 
-    assert len(executor.jobs) == 2, "a stall the profiler did not start is unclear: one rerun"
+    assert len(executor.jobs) == 1, "a profile's rerun fails again for the same cause"
+    assert result.validity is Validity.MEASUREMENT_FAILED, "an unclear profile is not held against its candidate"
     assert result.failure_class is FailureClass.UNCLEAR and result.failure_reason == "server_stalled"
+    assert reported == []
 
 
 _ENGINE_DIED = "RuntimeError: Engine core process EngineCore died unexpectedly.\n"
@@ -630,11 +637,45 @@ async def test_a_profile_whose_server_died_inside_its_window_is_retried_once_els
     assert reported == [], "the image's profiler, not the node, killed the server"
 
 
-async def test_a_profile_whose_server_died_outside_its_window_is_still_rerun_once() -> None:
-    result, executor, _ = await _profile(_ENGINE_DIED, StepFailure(FailedStep.SERVER_DIED, _FATAL))
+async def test_a_profile_whose_server_died_outside_its_window_is_not_rerun_and_ends_unmeasured() -> None:
+    result, executor, reported = await _profile(_ENGINE_DIED, StepFailure(FailedStep.SERVER_DIED, _FATAL))
 
-    assert len(executor.jobs) == 2, "a death the profiler did not cause is unclear: one rerun"
+    assert len(executor.jobs) == 1, "a profile's rerun fails again for the same cause"
+    assert result.validity is Validity.MEASUREMENT_FAILED
     assert result.failure_class is FailureClass.UNCLEAR and result.failure_reason.startswith("python_exception: ")
+    assert reported == []
+
+
+@pytest.mark.parametrize(
+    "reason", [PORT_REASON, HUNG_REASON, f"{RUNNER_LOST}: the sandbox is gone"], ids=["port", "hung", "runner_lost"]
+)
+async def test_a_profile_ends_unmeasured_when_its_retry_failed_for_the_same_infrastructure_reason(reason) -> None:
+    result, executor, reported = await _run(reason, kind=TestKind.PROFILE)
+
+    assert len(executor.jobs) == 2, "a third attempt would hold cards for the cause two nodes already met"
+    assert result.validity is Validity.MEASUREMENT_FAILED and result.failure_class is FailureClass.INFRA
+    assert result.failure_reason == reason
+    assert "n2" not in reported, "a cause two nodes met is not the second node's"
+
+
+async def test_a_profile_retries_another_infrastructure_reason_after_a_first_one() -> None:
+    result, executor, reported = await _run((PORT_REASON, DISK_FULL_REASON, PORT_REASON), kind=TestKind.PROFILE)
+
+    assert len(executor.jobs) == 3, "the third attempt meets the first one's cause again"
+    assert result.validity is Validity.MEASUREMENT_FAILED and result.failure_reason == PORT_REASON
+    assert reported == ["n1", "n2"]
+    assert executor.jobs[2].avoid_nodes == ("n1", "n2")
+
+
+@pytest.mark.parametrize(
+    "reason", [FOREIGN_REASON, START_TIMEOUT_REASON, CAPACITY_REASON], ids=["busy_cards", "no_sandbox", "no_capacity"]
+)
+async def test_a_profile_still_waits_out_a_failure_that_came_before_it_started(reason) -> None:
+    result, executor, _ = await _run(reason, kind=TestKind.PROFILE)
+
+    assert len(executor.jobs) == 4, "it held no card and says nothing of the profile"
+    assert result.failure_reason == f"4 attempts failed for infrastructure reasons: {reason}"
+    assert executor.clock.waits == [60.0, 120.0, 240.0]
 
 
 async def test_a_profile_whose_candidate_crashed_is_still_a_candidate_failure() -> None:
