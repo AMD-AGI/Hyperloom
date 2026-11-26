@@ -241,7 +241,7 @@ def _rocm_smi_card(row: dict[str, Any]) -> GpuCard:
     if not (gfx and memory_bytes):
         raise AmdSmiError("rocm-smi reports a card without its arch or memory size")
     return GpuCard(
-        name=_text(row.get("Card Series")),
+        name=_market_name(row.get("Card Series")),
         device_id=_text(row.get("Card Model")).lower().removeprefix("0x"),
         gfx=gfx,
         compute_units=None,
@@ -256,7 +256,7 @@ def _torch_card(facts: dict[str, Any]) -> GpuCard:
     if not (gfx and memory_bytes):
         raise AmdSmiError("torch reports a card without its arch or memory size")
     return GpuCard(
-        name=_text(facts.get("name")),
+        name=_market_name(facts.get("name")),
         device_id="",
         gfx=gfx,
         compute_units=None,
@@ -275,9 +275,8 @@ def _card(row: dict[str, Any]) -> GpuCard:
         required = (("arch", gfx), ("compute-unit count", compute_units), ("memory size", memory_mib))
         missing = ", no ".join(what for what, value in required if not value)
         raise AmdSmiError(f"amd-smi static: card {row['gpu']} reports no {missing}")
-    name = _text(asic.get("market_name"))
     return GpuCard(
-        name="" if _BARE_DEVICE_ID.fullmatch(name) else name,
+        name=_market_name(asic.get("market_name")),
         device_id=_text(asic.get("device_id")).lower().removeprefix("0x"),
         gfx=gfx,
         compute_units=compute_units,
@@ -296,6 +295,12 @@ def _text(value: Any) -> str:
     """A string amd-smi reported; empty for ``N/A`` and for anything else."""
     text = value.strip() if isinstance(value, str) else ""
     return "" if text.upper() == "N/A" else text
+
+
+def _market_name(value: Any) -> str:
+    """A card's marketing name; empty for a name that is only its device id."""
+    name = _text(value)
+    return "" if _BARE_DEVICE_ID.fullmatch(name) else name
 
 
 def _number(block: Any) -> float | None:

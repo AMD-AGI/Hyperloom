@@ -212,6 +212,14 @@ def test_torch_describes_a_cards_name_arch_and_memory_among_other_lines():
     assert probed_cards(f"[INFO] started {{attempt: 1}}\n{json.dumps(_TORCH)}\n[INFO] done\n") == [_TORCH_MI325X]
 
 
+@pytest.mark.parametrize("name", ["N/A", "0x74a1"])
+def test_a_card_rocm_smi_or_torch_cannot_name_has_no_name(name):
+    rocm_smi = {"card0": {**_ROCM_SMI["card0"], "Card Series": name}}
+    torch = {"torch": [{**_TORCH["torch"][0], "name": name}]}
+
+    assert [card.name for card in [*probed_cards(json.dumps(rocm_smi)), *probed_cards(json.dumps(torch))]] == ["", ""]
+
+
 def test_output_that_describes_no_card_or_one_without_its_arch_is_refused():
     with pytest.raises(AmdSmiError, match="no GPU is described in 'amd-smi: command not found'"):
         probed_cards("amd-smi: command not found\n")
