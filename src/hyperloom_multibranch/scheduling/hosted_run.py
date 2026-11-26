@@ -94,6 +94,7 @@ from hyperloom_multibranch.scheduling.budget import (
     FinalWork,
 )
 from hyperloom_multibranch.scheduling.final import sweep_unfinished
+from hyperloom.orchestrator.conc_sweep.report import read_summary
 from hyperloom_multibranch.scheduling.launch_isolation import launch_isolation
 from hyperloom_multibranch.scheduling.layout import SessionLayout
 from hyperloom_multibranch.scheduling.manifest import read_manifest
@@ -107,7 +108,7 @@ from hyperloom_multibranch.scheduling.resumption import (
     require_resumable,
 )
 from hyperloom_multibranch.scheduling.session_environment import EnvironmentIncomplete
-from hyperloom_multibranch.scheduling.settings import RunSettings
+from hyperloom_multibranch.scheduling.settings import RunSettings, Workload
 from hyperloom_multibranch.scheduling.specialist_reach import require_specialist_reach
 from hyperloom_multibranch.scheduling.stops import SessionStopReason
 from hyperloom_multibranch.toolbox.hosted_leases import GrantLimits, lease_shortfall
@@ -820,6 +821,70 @@ def reported_stop_reason(root: Path) -> str | None:
     return json.loads(text)["stop_reason"]
 
 
+# -- a hosted conc_sweep run: the closed session it sweeps, the earlier start it takes it over from, and its ending --
+
+#: The prefix of the stop reason a hosted sweep's ``exit.json`` carries, before the sweep's status.
+SWEEP_STOP_PREFIX = "conc_sweep_"
+
+
+def swept_session(spec: CampaignSpec, env: Mapping[str, str]) -> SessionLayout:
+    """The closed multi-branch session ``conc_sweep.session_dir`` names.
+
+    Raises:
+        HostedRefused: When the path is not the directory it resolves to (a link or a ``..`` on the way), lies outside
+            the run's ``USER_DATA_PATH``, or holds no closed multi-branch session.
+    """
+
+    named = Path(str(spec.sweep_session_dir))
+    resolved = named.resolve()
+    if resolved != named:
+        raise HostedRefused(f"conc_sweep.session_dir {named} resolves to {resolved}: name the directory itself")
+    user_data = Path(env.get(ENV_USER_DATA_PATH, "")).resolve()
+    if not resolved.is_relative_to(user_data) or resolved == user_data:
+        raise HostedRefused(f"conc_sweep.session_dir {named} is not below the run's {ENV_USER_DATA_PATH} {user_data}")
+    layout = SessionLayout(resolved)
+    if not (layout.manifest.is_file() and layout.report.is_file()):
+        raise HostedRefused(f"conc_sweep.session_dir {named} holds no closed multi-branch session")
+    return layout
+
+
+def require_spec_matches(spec: CampaignSpec, workload: Workload) -> None:
+    """Refuse a spec that describes another workload than the swept session's: its TP, GPU type and framework.
+
+    Raises:
+        HostedRefused: Naming the first field that differs.
+    """
+
+    for field, asked, swept in (
+        ("hardware.tp", spec.tp, workload.tp),
+        ("hardware.gpu_type", spec.gpu_type.lower(), workload.gpu_type.lower()),
+        ("framework.name", spec.framework_name.lower(), workload.framework.lower()),
+    ):
+        if asked != swept:
+            raise HostedRefused(f"{field} {asked} is not the swept session's {swept}")
+
+
+def take_over_swept_session(state_dir: Path, layout: SessionLayout) -> None:
+    """Take ``layout`` as the run's session: the lock an earlier start of this run left in it is released, the rest of
+    the process writes under the group's umask, and ``session.json`` names it. A lock of another run stays."""
+
+    if recorded_session(state_dir) == layout.root:
+        release_earlier_lock(layout)
+    share_with_the_group(layout.root)
+    record_session(state_dir, layout.root)
+
+
+def sweep_stop_reason(layout: SessionLayout) -> str | None:
+    """``conc_sweep_<status>``, with ``:<skip_reason>`` for a skipped sweep, as the report in ``layout`` says; ``None``
+    when the sweep wrote none."""
+
+    summary = read_summary(layout.reports)
+    if summary is None:
+        return None
+    reason = f"{SWEEP_STOP_PREFIX}{summary['status']}"
+    return f"{reason}:{summary['skip_reason']}" if summary.get("skip_reason") else reason
+
+
 __all__ = [
     "CANNOT_READ_SESSION",
     "EXIT_FILE",
@@ -829,6 +894,7 @@ __all__ = [
     "FINAL_WIND_DOWN_SECONDS",
     "GRANT_MARGIN_SECONDS",
     "SESSION_FILE",
+    "SWEEP_STOP_PREFIX",
     "EarlierSession",
     "GrantDeadline",
     "GrantEnd",
@@ -854,12 +920,16 @@ __all__ = [
     "reported_stop_reason",
     "require_hosted_isolation",
     "require_local_image",
+    "require_spec_matches",
     "run_argv",
     "share_with_the_group",
     "spec_make_before_break",
     "started_session",
     "stop_before_grant_ends",
+    "sweep_stop_reason",
+    "swept_session",
     "take_over_earlier_session",
+    "take_over_swept_session",
     "toolbox_grant",
     "write_final_exit",
 ]

@@ -172,21 +172,19 @@ from hyperloom_multibranch.scheduling.hosted_run import (
     reported_stop_reason,
     require_hosted_isolation,
     require_local_image,
+    require_spec_matches,
     run_argv,
     share_with_the_group,
     spec_make_before_break,
     started_session,
     stop_before_grant_ends,
+    sweep_stop_reason,
+    swept_session,
     take_over_earlier_session,
+    take_over_swept_session,
     write_final_exit,
 )
 from hyperloom_multibranch.scheduling import review
-from hyperloom_multibranch.scheduling.hosted_sweep import (
-    require_spec_matches,
-    swept_session,
-    sweep_stop_reason,
-    take_over_swept_session,
-)
 from hyperloom_multibranch.scheduling.layout import SessionLayout, create_session
 from hyperloom_multibranch.scheduling.lifecycle import Session
 from hyperloom_multibranch.scheduling.llm import (

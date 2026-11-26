@@ -10,7 +10,7 @@ from types import SimpleNamespace
 import pytest
 
 from hyperloom_multibranch.scheduling import hosted_run
-from hyperloom_multibranch.scheduling.hosted_sweep import (
+from hyperloom_multibranch.scheduling.hosted_run import (
     require_spec_matches,
     swept_session,
     sweep_stop_reason,
