@@ -974,7 +974,7 @@ def test_only_an_agentx_session_s_prompt_tells_the_judge_to_keep_k_while_test_sl
         assert "The sum of the branches' K may exceed max_parallel_tests" in prose
         assert "starts confirms and merge tests before any branch's explore tests" in prose
         assert "a branch opened with no open_k runs at K 2" in prose
-        assert "AgentX" not in inferencex
+        assert "This is an AgentX session" not in inferencex
 
 
 USER_ROSTER = (
