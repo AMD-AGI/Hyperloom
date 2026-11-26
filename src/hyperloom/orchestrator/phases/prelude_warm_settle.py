@@ -46,8 +46,34 @@ from .warm_replay_eval import read_replay_eval
 log = _logging.getLogger(__name__)
 
 
+#: A reproduced replay whose measured gain is below this fraction of the recipe's expected gain is flagged.
+MIN_EXPECTED_GAIN_FRACTION = 0.5
+
+
 def _gain_pct(after: float, before: float) -> float:
     return (after / before - 1.0) * 100.0
+
+
+def _record_reproduced_gain(outcome: dict) -> None:
+    """Log an adopted replay and flag it on ``outcome`` when it measured far below the recipe's expected gain."""
+    actual = to_float(outcome.get("actual_gain_pct"), 0.0)
+    expected = to_float(outcome.get("expected_gain_pct"), 0.0)
+    if expected <= 0.0:
+        log.info("warm-replay REPRODUCED: measured=+%.2f%%; pushed warm_replay onto stack", actual)
+        return
+    outcome["gain_vs_expected"] = round(actual / expected, 3)
+    if actual < expected * MIN_EXPECTED_GAIN_FRACTION:
+        outcome["below_expected_gain"] = True
+        log.warning(
+            "warm-replay REPRODUCED below the expected gain: measured=+%.2f%% (expected=+%.2f%%); "
+            "the recipe's recorded throughput was not confirmed; pushed warm_replay onto stack",
+            actual,
+            expected,
+        )
+        return
+    log.info(
+        "warm-replay REPRODUCED: measured=+%.2f%% (expected=+%.2f%%); pushed warm_replay onto stack", actual, expected
+    )
 
 
 class _WarmReplaySettleMixin:
@@ -652,11 +678,7 @@ class _WarmReplaySettleMixin:
         # and the post-ruling mirror agree there is nothing adopted.
         state.warm_replay_outcome = outcome
         self._coord.writeback.validate(float(outcome["throughput_after"]), result, source="warm_replay")
-        log.info(
-            "warm-replay REPRODUCED: measured=+%.2f%% (expected=+%.2f%%); pushed warm_replay onto stack",
-            outcome["actual_gain_pct"],
-            to_float(outcome.get("expected_gain_pct"), 0.0),
-        )
+        _record_reproduced_gain(outcome)
         self._journal_warm_replay(result, task, outcome, warm_args)
         return self._conclude_warm_replay(outcome, Verdict.ADOPTED, clear_pending=True)
 
