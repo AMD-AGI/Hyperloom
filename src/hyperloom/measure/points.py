@@ -58,6 +58,7 @@ from hyperloom.orchestrator.actions.executors import (
     BenchmarkTarget,
     LaunchLayer,
     MaterializeOptions,
+    PromptDatasetError,
     default_baseline_config,
     materialize_benchmark_config,
 )
@@ -112,7 +113,10 @@ def _render(canonical: CanonicalMeasurement, out_dir: Path, name: str, **overrid
         pins = dict(options.get("extra_envs") or {})
         concurrency = pins.pop(ENV_CONC)
         options["extra_envs"], _ = filter_untrusted_env_mapping(pins, allow_predicate=is_allowed_variant_env_key)
-    path = materialize_benchmark_config(canonical.config_path, out_dir, **_materialize_args(options))
+    try:
+        path = materialize_benchmark_config(canonical.config_path, out_dir, **_materialize_args(options))
+    except PromptDatasetError as exc:
+        raise PointError(str(exc)) from exc
     with path.open(encoding=_UTF8) as handle:
         config = yaml.safe_load(handle) or {}
     if concurrency is not None:

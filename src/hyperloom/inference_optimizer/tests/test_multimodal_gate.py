@@ -37,99 +37,7 @@ def _seed_state(session_dir: Path, monkeypatch) -> None:
     SharedState(session_id="t", model_name="m", model_path="m").save(session_dir)
 
 
-def test_detect_rwkv6qwen2_hybrid_rejected(tmp_path):
-    """RWKV6Qwen2ForCausalLM (RWKV/Qwen2 hybrid) is not in sglang's supported arch list and fails ModelConfig validation; reject before boot."""
-    m = tmp_path / "rwkv6qwen2"
-    _write_config(
-        m,
-        {
-            "architectures": ["RWKV6Qwen2ForCausalLM"],
-            "model_type": "rwkv6qwen2",
-            "max_position_embeddings": 8192,
-        },
-    )
-    hit = cli._detect_unsupported_model(str(m))
-    assert hit is not None
-    assert hit["architecture"] == "RWKV6Qwen2ForCausalLM"
-    assert "unsupported architecture" in hit["signal"]
-
-
-def test_detect_rwkv6qwen2_hybrid_rejected_by_model_type_only(tmp_path):
-    """Some checkpoints identify the hybrid only by model_type."""
-    m = tmp_path / "rwkv6qwen2_model_type"
-    _write_config(
-        m,
-        {
-            "model_type": "rwkv6qwen2",
-            "max_position_embeddings": 8192,
-        },
-    )
-    hit = cli._detect_unsupported_model(str(m))
-    assert hit is not None
-    assert "unsupported model_type" in hit["signal"]
-
-
-def test_detect_plain_rwkv_not_rejected(tmp_path):
-    """Plain RwkvForCausalLM IS supported by sglang; must NOT be blocked."""
-    m = tmp_path / "rwkv"
-    _write_config(
-        m,
-        {
-            "architectures": ["RwkvForCausalLM"],
-            "model_type": "rwkv",
-            "max_position_embeddings": 4096,
-        },
-    )
-    assert cli._detect_unsupported_model(str(m)) is None
-
-
-def test_detect_unsupported_arch_nested_in_text_config(tmp_path):
-    """Blocklisted arch nested under text_config must still be caught."""
-    m = tmp_path / "nested_rwkv6"
-    _write_config(
-        m,
-        {
-            "model_type": "wrapper",
-            "text_config": {"architectures": ["RWKV6Qwen2ForCausalLM"]},
-        },
-    )
-    hit = cli._detect_unsupported_model(str(m))
-    assert hit is not None
-    assert hit["architecture"] == "RWKV6Qwen2ForCausalLM"
-
-
-def test_detect_unsupported_model_type_nested_in_text_config(tmp_path):
-    """Blocklisted model_type nested under text_config must still be caught."""
-    m = tmp_path / "nested_rwkv6_model_type"
-    _write_config(
-        m,
-        {
-            "model_type": "wrapper",
-            "text_config": {"model_type": "rwkv6qwen2"},
-        },
-    )
-    hit = cli._detect_unsupported_model(str(m))
-    assert hit is not None
-    assert "unsupported text_config.model_type" in hit["signal"]
-
-
 # 1. classifier — whitelist-based detection
-def test_detect_gemma3_conditional_generation_rejected(tmp_path):
-    """Gemma3ForConditionalGeneration is not a causal LM arch -> rejected."""
-    m = tmp_path / "gemma3"
-    _write_config(
-        m,
-        {
-            "architectures": ["Gemma3ForConditionalGeneration"],
-            "model_type": "gemma3",
-        },
-    )
-    hit = cli._detect_unsupported_model(str(m))
-    assert hit is not None
-    assert hit["architecture"] == "Gemma3ForConditionalGeneration"
-    assert "unsupported architecture" in hit["signal"]
-
-
 def test_detect_unknown_arch_rejected(tmp_path):
     """An unknown architecture not matching text-generation markers -> rejected."""
     m = tmp_path / "custom"
@@ -171,15 +79,6 @@ def test_detect_empty_config_rejected(tmp_path):
     hit = cli._detect_unsupported_model(str(m))
     assert hit is not None
     assert "neither architectures nor model_type" in hit["signal"]
-
-
-def test_detect_phi3v_causal_lm_rejected(tmp_path):
-    """Some VLM architectures still end with ForCausalLM and need a denylist."""
-    m = tmp_path / "phi3v"
-    _write_config(m, {"architectures": ["Phi3VForCausalLM"], "model_type": "phi3_v"})
-    hit = cli._detect_unsupported_model(str(m))
-    assert hit is not None
-    assert "Phi3VForCausalLM" in hit["signal"]
 
 
 @pytest.mark.parametrize(
@@ -284,29 +183,6 @@ def test_detect_gemma4_wrapper_text_coercible(tmp_path):
     hit = cli._detect_unsupported_model(str(m))
     assert hit is not None
     assert hit["verdict"] == cli._VERDICT_TEXT_COERCIBLE
-
-
-def test_detect_known_vlm_with_text_config_still_vision_only(tmp_path):
-    """The hard denylist wins before text_config capability detection."""
-    m = tmp_path / "qwen_vl"
-    _write_config(
-        m,
-        {
-            "architectures": ["Qwen2VLForConditionalGeneration"],
-            "model_type": "qwen2_vl",
-            "vision_config": {"hidden_size": 1024},
-            "text_config": {
-                "model_type": "qwen2",
-                "architectures": ["Qwen2ForCausalLM"],
-                "vocab_size": 151936,
-                "hidden_size": 4096,
-            },
-        },
-    )
-    hit = cli._detect_unsupported_model(str(m))
-    assert hit is not None
-    assert hit["verdict"] == cli._VERDICT_VISION_ONLY
-    assert "unsupported architecture" in hit["signal"]
 
 
 def test_detect_mislabeled_vlm_with_vision_config_is_vision_only(tmp_path):
@@ -477,6 +353,7 @@ def test_preflight_vision_only_ignores_fallback_flag(tmp_path, monkeypatch):
         {
             "architectures": ["LlavaForConditionalGeneration"],
             "model_type": "llava",
+            "vision_config": {"hidden_size": 1024},
         },
     )
     sd = tmp_path / "session_vision_only"

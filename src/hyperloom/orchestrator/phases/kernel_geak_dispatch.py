@@ -521,6 +521,7 @@ class _GeakDispatchMixin:
         previous = state.geak_result or {}
         if previous.get("kernel_event_id") and _geak_rebench.geak_candidate_matches(previous, result):
             result["kernel_event_id"] = previous["kernel_event_id"]
+        _geak_rebench.keep_unmeasured_count(previous, result)
         state.geak_result = result
         self._record_geak_measurement(result)
         # Rebench-first: record the recovered win as an UNVALIDATED candidate;
@@ -641,8 +642,9 @@ class _GeakDispatchMixin:
                 handoff=handoff,
             )
             return None
-        # Carry the actual exit code so the breakdown can audit a nonzero rc. Nothing else is added: the persisted
-        # record stays the product GEAK wrote, so the next KERNEL entry recognizes its own settled candidate.
+        _geak_rebench.keep_unmeasured_count(self.shared_state.geak_result, result)
+        # Carry the actual exit code so the breakdown can audit a nonzero rc. Nothing else of the runner's is added:
+        # the persisted record stays the product GEAK wrote, so the next KERNEL entry recognizes its own candidate.
         result.setdefault("returncode", proc.returncode)
         return result
 

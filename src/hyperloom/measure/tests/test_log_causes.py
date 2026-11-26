@@ -317,6 +317,38 @@ def test_an_engine_capacity_error_names_its_line_and_decides_the_test() -> None:
     assert decides_test(verdict)
 
 
+def test_the_kv_cache_token_limit_is_an_engine_capacity_error() -> None:
+    log = ENGINE_CAPACITY_LOG.replace(
+        "max_num_seqs (256) exceeds available Mamba cache blocks (237). Each decode sequence requires one Mamba cache "
+        "block.",
+        "The model's max seq len (131072) is larger than the maximum number of tokens that can be stored in KV cache "
+        "(65536).",
+    )
+    verdict = classify_test_failure(returncode=1, evidence=FailureEvidence(logs=(log,)))
+
+    assert verdict.failure_class is FailureClass.CANDIDATE
+    assert verdict.failure_reason == (
+        "engine_capacity: (EngineCore pid=7) ERROR 01-01 00:00:00 [core.py:700] ValueError: The model's max seq len "
+        "(131072) is larger than the maximum number of tokens that can be stored in KV cache (65536)."
+    )
+
+
+def test_a_card_short_of_free_memory_at_start_is_not_the_candidates() -> None:
+    """Another process holding the card reads the same as the launch's utilization, so a fresh sandbox reruns it."""
+    log = ENGINE_CAPACITY_LOG.replace(
+        "max_num_seqs (256) exceeds available Mamba cache blocks (237). Each decode sequence requires one Mamba cache "
+        "block.",
+        "Free memory on device cuda:0 (5.2/191.5 GiB) on startup is less than desired GPU memory utilization "
+        "(0.9, 172.4 GiB). Decrease GPU memory utilization or reduce GPU memory used by other processes.",
+    )
+    verdict = classify_test_failure(returncode=1, evidence=FailureEvidence(logs=(log,)))
+
+    assert (verdict.failure_class, verdict.failure_reason) == (
+        FailureClass.UNCLEAR,
+        "python_exception: (APIServer pid=1) RuntimeError: Engine core initialization failed. See root cause above.",
+    )
+
+
 def test_another_resource_constraint_stays_the_bare_kind_and_does_not_decide_the_test() -> None:
     verdict = classify_test_failure(returncode=1, evidence=FailureEvidence(logs=(OUT_OF_MEMORY_LOG,)))
 

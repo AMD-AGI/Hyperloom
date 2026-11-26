@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -242,6 +243,93 @@ def test_a_cancel_keeps_the_points_measured_before_it(
     assert [call["name"] for call in grid.calls] == ["baseline_conc16"]
     assert (payload["status"], payload["cancel_reason"]) == ("cancelled", "SIGTERM")
     assert [point["conc"] for point in _summary(session_dir)["baseline"]["points"]] == [16]
+
+
+def _breakdown(session_dir: Path) -> dict[str, Any]:
+    return json.loads((session_dir / "session_breakdown.json").read_text())
+
+
+def test_the_session_breakdown_carries_the_sweep_as_each_point_lands(
+    session_dir: Path, grid: SimpleNamespace, monkeypatch: pytest.MonkeyPatch
+):
+    _state(session_dir)
+    (session_dir / "session_breakdown.json").write_text(json.dumps({"schema_version": "v6.1", "outcome": {}}))
+    carried: list[int] = []
+    measured = runner._Sweep.record
+
+    def record_then_read(self: Any, arm: Any, result: VariantResult) -> None:
+        measured(self, arm, result)
+        carried.append(len(_breakdown(session_dir)["conc_sweep_summary"][arm.name]["points"]))
+
+    monkeypatch.setattr(runner._Sweep, "record", record_then_read)
+
+    asyncio.run(runner.run_conc_sweep(session_dir))
+
+    breakdown = _breakdown(session_dir)
+    assert carried == [1, 2, 3, 4, 1, 2, 3, 4]
+    assert breakdown["conc_sweep_summary"] == _summary(session_dir)
+    assert breakdown["conc_sweep_summary"]["status"] == "succeeded"
+    assert (breakdown["schema_version"], breakdown["outcome"]) == ("v6.1", {})
+
+
+def test_a_skipped_sweep_is_carried_in_the_breakdown_too(session_dir: Path, grid: SimpleNamespace):
+    _state(session_dir, cumulative_gain_validated=0.0)
+    (session_dir / "session_breakdown.json").write_text(json.dumps({"schema_version": "v6.1"}))
+
+    asyncio.run(runner.run_conc_sweep(session_dir))
+
+    carried = _breakdown(session_dir)["conc_sweep_summary"]
+    assert (carried["status"], carried["skip_reason"]) == ("skipped", "no_optimization")
+
+
+@pytest.mark.parametrize("content", ["{truncated", "[]"], ids=["unparseable", "not_an_object"])
+def test_a_breakdown_the_sweep_cannot_carry_its_report_in_does_not_stop_the_sweep(
+    session_dir: Path, grid: SimpleNamespace, content: str
+):
+    _state(session_dir)
+    (session_dir / "session_breakdown.json").write_text(content)
+
+    payload = asyncio.run(runner.run_conc_sweep(session_dir))
+
+    assert payload["status"] == "succeeded" and len(grid.calls) == 8
+    assert _summary(session_dir)["status"] == "succeeded"
+    assert (session_dir / "session_breakdown.json").read_text() == content
+
+
+def test_a_breakdown_that_cannot_be_replaced_does_not_stop_the_sweep(
+    session_dir: Path, grid: SimpleNamespace, monkeypatch: pytest.MonkeyPatch
+):
+    from hyperloom.inference_optimizer.breakdown import exporter
+
+    _state(session_dir)
+    (session_dir / "session_breakdown.json").write_text(json.dumps({"schema_version": "v6.1"}))
+
+    def refuse(path: Path, _text: str) -> None:
+        raise PermissionError(13, "Permission denied", str(path))
+
+    monkeypatch.setattr(exporter, "atomic_write_text", refuse)
+
+    payload = asyncio.run(runner.run_conc_sweep(session_dir))
+
+    assert payload["status"] == "succeeded" and _summary(session_dir)["status"] == "succeeded"
+    assert _breakdown(session_dir) == {"schema_version": "v6.1"}
+
+
+_REPORT_LOGGER = "hyperloom.orchestrator.conc_sweep.report"
+
+
+def test_a_session_without_a_breakdown_still_gets_its_report(
+    session_dir: Path, grid: SimpleNamespace, caplog: pytest.LogCaptureFixture
+):
+    _state(session_dir)
+
+    with caplog.at_level(logging.WARNING, logger=_REPORT_LOGGER):
+        asyncio.run(runner.run_conc_sweep(session_dir))
+
+    assert _summary(session_dir)["status"] == "succeeded"
+    assert not (session_dir / "session_breakdown.json").exists()
+    missing = [r for r in caplog.records if r.name == _REPORT_LOGGER]
+    assert missing and all("no breakdown at" in r.getMessage() and r.exc_info is None for r in missing)
 
 
 def test_the_session_report_points_at_the_sweep(session_dir: Path, grid: SimpleNamespace):

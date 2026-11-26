@@ -130,6 +130,7 @@ from functools import partial
 from pathlib import Path
 from typing import Any
 
+from hyperloom_common.llm.llm_config import expand_custom_header_env_refs
 from hyperloom_common.shared_storage import open_shared_append
 from hyperloom.hosted.campaign import MEASUREMENT_LOCAL, CampaignSpec
 from hyperloom.hosted.host_info import HostGroup, HostInfo, take_host_info
@@ -457,8 +458,11 @@ def hosted_ready_session(host: HostInfo, workload: Workload, *, local: bool = Fa
 def ready_session(workload: Workload, load: Callable[[Workload], PeerFactory], **storage: Path) -> ReadySession:
     """The peers ``load`` has for ``workload`` and the services, the Recipe KB, the RSI archive and the directories of
     ``storage`` checked and the Experience KB service started first; raises :class:`EnvironmentIncomplete` or
-    :class:`PeersUnavailable` naming the problem."""
+    :class:`PeersUnavailable` naming the problem. The credential references of the gateway headers are expanded before
+    anything starts, as ``hyperloom optimize``'s preflight does: the specialists' agent CLI sends the headers it
+    inherits as written."""
 
+    expand_custom_header_env_refs()
     recipe_kb = recipe_kb_from_env()
     require_writable_storage(os.environ, storage)
     start_experience_kb()
