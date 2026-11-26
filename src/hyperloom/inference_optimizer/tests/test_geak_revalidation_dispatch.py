@@ -260,7 +260,13 @@ async def test_geak_launch_controls_reach_materialized_rebench(
     state.baseline_config_path = str(baseline)
     state.baseline_tput = 100.0
     state.current_best = {"tput": 110.0, **current}
-    state.geak_result = {"schema_version": 2, "status": "ok", "accepted_config": accepted}
+    state.geak_result = {
+        "schema_version": 2,
+        "status": "ok",
+        "accepted_config": accepted,
+        "ttft_ms": 12.0,
+        "tpot_ms": 3.0,
+    }
     enqueued = coordinator.writeback.geak_rebench_params(reason="launch_controls_regression")
     task, _ = await coordinator.tasks.create_or_return_existing(
         TaskSpec(kind="explore", params=enqueued, idempotency_key="geak-revalidate-c0")
@@ -324,6 +330,8 @@ async def test_geak_launch_controls_reach_materialized_rebench(
     assert coordinator.phase_kernel.promote_geak_from_candidate(
         state.geak_result, measured_tput=120.0, measurement_provenance=result["best_variant"], overlay_loaded=False
     )
+    # GEAK's own latencies are another harness's; the executor's winner row carries no means of the round.
+    assert (state.current_best["ttft_mean_ms"], state.current_best["tpot_mean_ms"]) == (None, None)
     state.geak_result = {}
     state.save(coordinator.session_dir)
     coordinator.shared_state = SharedState.load_or_init(coordinator.session_dir)
