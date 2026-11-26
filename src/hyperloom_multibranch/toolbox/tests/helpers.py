@@ -34,6 +34,7 @@ from hyperloom.measure.tests.bundle_factory import base_launch, lm_eval_at_its_p
 from hyperloom.measure.tests.gpu_free_host import IDLE_CARDS_PYTHON
 from hyperloom.orchestrator.state import base_launch as state_base_launch
 from hyperloom.orchestrator.state.base_launch import freeze_base
+from hyperloom.orchestrator.actions.executors import GoldenLookup
 from hyperloom.contracts.recipe import ConfigDelta, Recipe, RecipeDelta, RecipeError
 from hyperloom_multibranch.contracts.gate import ResultUnverified
 from hyperloom_multibranch.contracts.blackboard import INTEGRATION_BRANCH, Role, Writer
@@ -215,6 +216,7 @@ def build(
     sleep: Callable[[float], Awaitable[None]] | None = None,
     tests_end_by: float | None = None,
     kind: type[RealToolbox] = RealToolbox,
+    golden: GoldenLookup | None = None,
 ) -> Rig:
     """A toolbox of class ``kind`` over a blackboard directory and a submit log under ``tmp_path``; building again over
     the same ``tmp_path`` is a restart. ``builds`` drives the native builds a test waits for. Infrastructure retries wait
@@ -240,7 +242,9 @@ def build(
     toolbox = kind(
         stores,
         executor,
-        AcceptanceSetup(repo, planner, active_image, workload_kind, aiter_builds_missing=aiter_builds_missing),
+        AcceptanceSetup(
+            repo, planner, active_image, workload_kind, aiter_builds_missing=aiter_builds_missing, golden=golden
+        ),
         tools=tools(blackboard) if tools else None,  # type: ignore[arg-type]
         tuning=ToolboxTuning(
             policy=policy,

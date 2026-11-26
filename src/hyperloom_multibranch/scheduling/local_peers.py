@@ -90,6 +90,7 @@ from hyperloom_multibranch.specialist.judging import Judging
 from hyperloom_multibranch.specialist.runtime import RuntimePacing, SessionFactory, SpecialistRuntime
 
 if TYPE_CHECKING:
+    from hyperloom.orchestrator.actions.executors import GoldenLookup
     from hyperloom_multibranch.specialist.agent_onboarding import AgentSpec
     from hyperloom_multibranch.specialist.gate_client import GateClient
     from pathlib import Path
@@ -536,9 +537,27 @@ def _toolbox(
     if workload.kind is WorkloadKind.AGENTX:
         checkpoint = CheckpointReferences(setup.agentx_early_stop, workload.agentx_objective, blackboard)
     acceptance = AcceptanceSetup(
-        repo, planner, image.digest, workload_kind=workload.kind, explore_accuracy=False, checkpoint=checkpoint
+        repo,
+        planner,
+        image.digest,
+        workload_kind=workload.kind,
+        explore_accuracy=False,
+        checkpoint=checkpoint,
+        golden=_golden_lookup(layout.toolbox, workload),
     )
     return host.backend.toolbox(setup, blackboard, acceptance, spec)
+
+
+def _golden_lookup(toolbox_dir: Path, workload: Workload) -> GoldenLookup | None:
+    """How acceptance reads the golden acceptance of a draft a candidate turns on: from the staged InferenceX, for the
+    model of the base launch frozen in ``toolbox_dir``; ``None`` for an AgentX workload and for one that sends a
+    prompt dataset, whose prompts are real."""
+
+    from hyperloom.orchestrator.actions.executors import session_golden_lookup
+
+    if workload.inferencex is None or workload.inferencex.dataset:
+        return None
+    return session_golden_lookup(toolbox_dir, workload.framework)
 
 
 def _specialist_briefs(setup: PeerSetup, repo: GitExperimentRepo) -> SessionBriefs:

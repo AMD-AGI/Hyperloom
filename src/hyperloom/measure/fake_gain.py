@@ -3,8 +3,9 @@
 
 """Public names for main's refusals of a fake gain, so the multi-branch toolbox refuses the same requests.
 
-Main refuses four gains that a measurement can show without the candidate being better: a context-copying
-speculative draft on a synthetic benchmark, a simulated acceptance in place of a draft the base verifies, a change of a
+Main refuses five gains that a measurement can show without the candidate being better: a context-copying
+speculative draft on a synthetic benchmark, a model-based draft turned on there at another acceptance than InferenceX
+records for it, a simulated acceptance in place of a draft the base verifies, a change of a
 draft whose acceptance length is simulated, and an AgentX baseline served with the prefix cache off. Its flow does that
 in the explore and baseline executors, and refuses the context-copying draft in the integrate bench and the PRELUDE
 warm replay too; a test launched through ``hyperloom.measure`` never reaches them. This module re-exports the checks
@@ -26,10 +27,13 @@ from hyperloom.contracts.recipe import LaunchConfig
 from hyperloom.orchestrator.actions.executors import (
     PREFIX_CACHE_OFF_ERROR_CLASS,
     CONTEXT_COPY_REFUSAL,
+    GOLDEN_ACCEPTANCE_REFUSAL,
+    GoldenLookup,
     RoundFolder,
     SpeculativeDecodingPinnedError,
     context_copy_refusal,
     declared_acceptance_reason,
+    golden_acceptance_refusal,
     is_round_folder,
     refuse_cacheless_agentx_baseline,
     refuse_unpinned_speculative_change,
@@ -46,6 +50,7 @@ class RoundUnreadable(ValueError):
 
 __all__ = [
     "CONTEXT_COPY_REFUSAL",
+    "GOLDEN_ACCEPTANCE_REFUSAL",
     "PREFIX_CACHE_OFF_ERROR_CLASS",
     "FAKE_GAINS",
     "FakeGain",
@@ -54,6 +59,7 @@ __all__ = [
     "baseline_prefix_cache_refusal",
     "declared_acceptance_refusal",
     "launch_context_copy_refusal",
+    "launch_golden_acceptance_refusal",
     "pinned_speculative_refusal",
 ]
 
@@ -65,6 +71,13 @@ def _argv(launch: LaunchConfig) -> tuple[str, dict[str, Any]]:
 def launch_context_copy_refusal(base: LaunchConfig, candidate: LaunchConfig) -> str:
     """Why ``candidate`` may not run on a synthetic (InferenceX) benchmark, or ``""``; main's #1904 check."""
     return context_copy_refusal(*_argv(base), *_argv(candidate))
+
+
+def launch_golden_acceptance_refusal(base: LaunchConfig, candidate: LaunchConfig, lookup: GoldenLookup) -> str:
+    """Why ``candidate`` may not turn a model-based draft on over ``base`` on a synthetic (InferenceX) benchmark, or
+    ``""``: it must force the acceptance InferenceX records for that draft, which ``lookup`` reads; main's explore
+    check."""
+    return golden_acceptance_refusal(*_argv(base), *_argv(candidate), lookup)
 
 
 def declared_acceptance_refusal(base: LaunchConfig, candidate: LaunchConfig) -> str:
@@ -146,6 +159,16 @@ FAKE_GAINS = (
         shows_as="A speculative draft that copies the context accepts nearly every token of a synthetic benchmark.",
         refusal_code=CONTEXT_COPY_REFUSAL,
         check=launch_context_copy_refusal,
+        where=_ACCEPTANCE,
+    ),
+    FakeGain(
+        name="model_draft_on_synthetic_off_golden",
+        shows_as=(
+            "A model-based draft turned on over a base without one accepts a synthetic benchmark's repetition loops "
+            "far above what InferenceX records for it on real prompts."
+        ),
+        refusal_code=GOLDEN_ACCEPTANCE_REFUSAL,
+        check=launch_golden_acceptance_refusal,
         where=_ACCEPTANCE,
     ),
     FakeGain(

@@ -28,9 +28,12 @@ from hyperloom.measure.eval_context import EvalContextError
 from hyperloom.measure.jit.key import build_surface
 from hyperloom.measure.points import AcceptedMeasurement, ProfileUnsupported
 from hyperloom.measure.fake_gain import (
+    GOLDEN_ACCEPTANCE_REFUSAL,
+    GoldenLookup,
     CONTEXT_COPY_REFUSAL,
     SPECULATIVE_DECODING_PINNED,
     declared_acceptance_refusal,
+    launch_golden_acceptance_refusal,
     launch_context_copy_refusal,
     pinned_speculative_refusal,
 )
@@ -264,6 +267,11 @@ class AcceptanceSetup:
 
     ``checkpoint`` is an AgentX session's checkpoint (:mod:`.agentx_checkpoint`): the tests it judges carry it, with
     their parent's reference. ``None`` (an InferenceX session's) judges none.
+
+    ``golden`` reads the acceptance InferenceX records for a draft: with it, a candidate that turns a model-based draft
+    on over a parent without one is refused unless it forces that acceptance, since a synthetic benchmark's
+    repetition loops grade a measured one far above what real prompts reach. ``None`` (an AgentX session's, or one
+    that sends a prompt dataset) refuses none.
     """
 
     repo: ExperimentRepo
@@ -276,6 +284,7 @@ class AcceptanceSetup:
     explore_accuracy: bool = True
     aiter_builds_missing: str | None = None
     checkpoint: CheckpointReferences | None = None
+    golden: GoldenLookup | None = None
 
 
 @dataclass(frozen=True)
@@ -310,6 +319,7 @@ class Acceptance:
         self._explore_accuracy = setup.explore_accuracy
         self._aiter_builds_missing = setup.aiter_builds_missing
         self._checkpoint = setup.checkpoint
+        self._golden = setup.golden
         self._root: tuple[str, LaunchConfig] | None = None
 
     def with_required_accuracy(self, request: TestRequest) -> TestRequest:
@@ -347,6 +357,7 @@ class Acceptance:
             self._check_profile_exists(request, digest)
         self._check_fake_gain(recipe, candidate)
         if not replay:
+            await self._check_golden_acceptance(recipe, candidate)
             _check_explore_changes_the_parent(recipe, candidate, request)
             _check_online_tuning(candidate)
             _check_weight_precision(*await self._root_launch(), candidate)
@@ -500,6 +511,19 @@ class Acceptance:
             reason = refusal(parent.launch, candidate.launch)
             if reason:
                 raise RequestRejected(reason, code)
+
+    async def _check_golden_acceptance(self, parent: Recipe, candidate: Recipe) -> None:
+        """Refuse a candidate that turns a model-based draft on at an acceptance InferenceX does not record for it.
+
+        The lookup runs the staged InferenceX interpreter, so it runs off the event loop.
+        """
+        if self._golden is None:
+            return
+        reason = await asyncio.to_thread(
+            launch_golden_acceptance_refusal, parent.launch, candidate.launch, self._golden
+        )
+        if reason:
+            raise RequestRejected(reason, GOLDEN_ACCEPTANCE_REFUSAL)
 
     def _plan(self, recipe: Recipe, request: TestRequest) -> object:
         try:

@@ -10,6 +10,9 @@ from pathlib import Path
 import pytest
 
 from hyperloom.contracts.recipe import ConfigDelta, LaunchConfig, Recipe, RecipeDelta
+from hyperloom.orchestrator.actions.executors import GoldenLookup
+from inference_suite import SourceGolden
+from inference_suite.contracts.base_launch import GoldenCurve
 from hyperloom_multibranch.contracts.toolbox import RequestRejected, WorkloadKind
 from hyperloom_multibranch.toolbox.tests.helpers import IMAGE, FakeRepo, build, req
 
@@ -21,8 +24,10 @@ def _repo(server_args: str = "", envs: dict[str, str] | None = None) -> FakeRepo
     return FakeRepo(Recipe(base_image_digest=IMAGE, launch=LaunchConfig(server_args=server_args, envs=envs or {})))
 
 
-async def _refused_with(tmp_path: Path, repo: FakeRepo, kind: WorkloadKind, server_args: str) -> str | None:
-    rig = build(tmp_path, repo=repo, workload_kind=kind)
+async def _refused_with(
+    tmp_path: Path, repo: FakeRepo, kind: WorkloadKind, server_args: str, golden: GoldenLookup | None = None
+) -> str | None:
+    rig = build(tmp_path, repo=repo, workload_kind=kind, golden=golden)
     try:
         await rig.toolbox.submit_test(req(server_args=server_args))
     except RequestRejected as refused:
@@ -117,3 +122,39 @@ async def test_an_inferencex_campaign_does_not_pin_a_simulated_draft(tmp_path: P
 
 LLAMACPP_MTP = "-md /models/mtp-head.gguf --spec-type draft-mtp --spec-draft-n-max 5"
 SYNTHETIC_LENGTH = "--spec-synth-len 4"
+
+
+# --- InferenceX: a model-based draft a candidate turns on runs at the acceptance InferenceX records for it ---
+
+GOLDEN_CODE = "speculative_acceptance_not_golden_on_synthetic"
+MTP = '--speculative-config \'{"method": "mtp", "num_speculative_tokens": 3}\''
+FORCED_MTP = (
+    '--speculative-config \'{"method": "mtp", "num_speculative_tokens": 3, '
+    '"rejection_sample_method": "synthetic", "synthetic_acceptance_length": %s}\''
+)
+_CURVE = GoldenCurve(
+    repo="https://github.com/SemiAnalysisAI/InferenceX",
+    commit="4" * 40,
+    path="inferencex-e2e/infx/golden_al_distribution/m__mtp__native__default-default.yaml",
+    sha256="a" * 64,
+)
+
+
+def golden_lookup() -> GoldenLookup:
+    return GoldenLookup("vllm", lambda argv: SourceGolden(2.32, curve=_CURVE))
+
+
+@pytest.mark.parametrize("server_args", [MTP, FORCED_MTP % "3.5"], ids=["real-draft", "another-value"])
+async def test_an_inferencex_candidate_that_turns_a_draft_on_off_its_golden_acceptance_is_refused(
+    tmp_path: Path, server_args: str
+) -> None:
+    assert await _refused_with(tmp_path, _repo(), WorkloadKind.INFERENCEX, server_args, golden_lookup()) == GOLDEN_CODE
+
+
+async def test_an_inferencex_candidate_that_forces_its_golden_acceptance_is_accepted(tmp_path: Path) -> None:
+    assert await _refused_with(tmp_path, _repo(), WorkloadKind.INFERENCEX, FORCED_MTP % "2.32", golden_lookup()) is None
+
+
+async def test_a_parent_that_already_drafts_leaves_its_candidates_to_the_other_checks(tmp_path: Path) -> None:
+    code = await _refused_with(tmp_path, _repo(MTP), WorkloadKind.INFERENCEX, "--max-num-seqs 128", golden_lookup())
+    assert code is None

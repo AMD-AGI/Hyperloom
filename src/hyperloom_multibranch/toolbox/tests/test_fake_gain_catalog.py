@@ -16,8 +16,10 @@ from hyperloom_multibranch.toolbox.tests.test_acceptance_fake_gain import (
     NGRAM,
     SIM_ENV,
     SIMULATING,
+    MTP,
     SYNTHETIC_LENGTH,
     _refused_with,
+    golden_lookup,
     _repo,
 )
 from hyperloom_multibranch.toolbox.tests.test_hosted_executor_cacheless import SGLANG_OFF, _run
@@ -25,9 +27,10 @@ from hyperloom_multibranch.toolbox.tests.test_hosted_executor_cacheless import S
 ROWS = {row.name: row for row in FAKE_GAINS}
 
 
-def test_the_catalog_has_the_four_known_rows_with_a_known_enforcement_point() -> None:
+def test_the_catalog_has_the_five_known_rows_with_a_known_enforcement_point() -> None:
     assert set(ROWS) == {
         "context_copy_draft_on_synthetic",
+        "model_draft_on_synthetic_off_golden",
         "declared_acceptance_over_verified_draft",
         "speculative_decoding_pinned",
         "agentx_baseline_prefix_cache_off",
@@ -48,6 +51,12 @@ def _row(name: str) -> FakeGain:
 async def test_the_context_copy_row_is_refused_by_acceptance(tmp_path: Path) -> None:
     row = _row("context_copy_draft_on_synthetic")
     assert await _refused_with(tmp_path, _repo(), WorkloadKind.INFERENCEX, NGRAM) == row.refusal_code
+
+
+async def test_the_golden_acceptance_row_is_refused_by_acceptance(tmp_path: Path) -> None:
+    row = _row("model_draft_on_synthetic_off_golden")
+    code = await _refused_with(tmp_path, _repo(), WorkloadKind.INFERENCEX, MTP, golden_lookup())
+    assert code == row.refusal_code
 
 
 async def test_the_pinned_speculative_row_is_refused_by_acceptance(tmp_path: Path) -> None:

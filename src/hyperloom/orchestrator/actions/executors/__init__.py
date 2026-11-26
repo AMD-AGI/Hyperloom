@@ -43,6 +43,12 @@ from ._suite.rounds import (
     external_agentx_config,
     staged_tool_cache,
 )
+from .explore_prefilter.spec_decode_golden import (
+    GOLDEN_ACCEPTANCE_REFUSAL,
+    GoldenLookup,
+    golden_acceptance_refusal,
+    session_golden_lookup,
+)
 from .framework_change._spec_decode_context_copy import CONTEXT_COPY_REFUSAL, context_copy_refusal
 from .framework_change._spec_decode_pin import (
     SpeculativeDecodingPinnedError,
@@ -65,6 +71,8 @@ __all__ = [
     "is_patched_copy",
     "lay_tracelens_patch",
     "CONTEXT_COPY_REFUSAL",
+    "GOLDEN_ACCEPTANCE_REFUSAL",
+    "GoldenLookup",
     "CHECK_SERVER_ENVS",
     "BenchmarkTarget",
     "COOPERATIVE_REAP_BUDGET_SEC",
@@ -90,6 +98,7 @@ __all__ = [
     "content_fingerprint",
     "controls_of",
     "context_copy_refusal",
+    "golden_acceptance_refusal",
     "default_baseline_config",
     "explore_executor",
     "failed_step_error_class",
@@ -112,6 +121,7 @@ __all__ = [
     "run_with_session_kill",
     "session_breakdown_executor",
     "staged_tool_cache",
+    "session_golden_lookup",
     "speculative_pin_reason",
     "teardown_variant_server",
     "variant_slot",

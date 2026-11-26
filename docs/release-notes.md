@@ -59,7 +59,10 @@ it.
   value to force and the curve it comes from. A draft InferenceX records no
   value for, Qwen3.8-27B's MTP among them, is refused until one is measured.
   A session that sends a prompt dataset (`DATASET_PATH`) sends real prompts,
-  so it still refuses only a context-copying draft.
+  so it still refuses only a context-copying draft. A multi-branch InferenceX
+  campaign on random prompts refuses the same candidates at acceptance, as
+  `speculative_acceptance_not_golden_on_synthetic`, the fifth row of
+  `FAKE_GAINS`.
   A variant whose launch forces an acceptance length is graded for accuracy
   on an accuracy round of its own with the forcing taken out, since an eval
   on the forced server scores text the target model never verified; an
