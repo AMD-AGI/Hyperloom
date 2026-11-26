@@ -50,6 +50,7 @@ def test_inspector_reads_the_paths_session_paths_names(tmp_path: Path) -> None:
         "paths.shared_db_path_for": (watcher.db.path, paths.shared_db_path_for(session)),
         "session_paths.llm_calls_path": (watcher._llm_tail.path, session_paths.llm_calls_path(session)),
         "session_paths.sbd_v6_timeline_dir": (watcher._timeline_files.root, session_paths.sbd_v6_timeline_dir(session)),
+        "session_paths.runs_root": (watcher._benchmarks.root, session_paths.runs_root(session)),
         "session_paths.state_path": (session / session_layout.STATE_FILE, session_paths.state_path(session)),
     }
     for producer, (inspector, written) in pairs.items():

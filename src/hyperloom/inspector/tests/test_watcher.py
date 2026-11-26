@@ -166,6 +166,62 @@ def test_replay_delta_releases_items_and_resets_on_rewind(session_dir):
     assert w.delta(cursors)["reset"] is True
 
 
+def _bench_file(session_dir, rel, end, tput, ttft):
+    path = session_dir / "runs" / rel / "inferencex_result.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        json.dumps(
+            {"output_throughput": tput, "mean_ttft_ms": ttft, "p99_ttft_ms": ttft * 3, "benchmark_end_time_unix": end}
+        ),
+        encoding="utf-8",
+    )
+
+
+def test_measured_benchmark_runs_become_points_released_by_the_clock(session_dir):
+    _bench_file(session_dir, "explore/t-exp/v00_a/variant_00_a/benchmark_1", T0 + 200, 1000.0, 80.0)
+    _bench_file(session_dir, "explore/t-exp/v00_a/warmup_round/variant_00_a/benchmark_0", T0 + 100, 900.0, 95.0)
+    _bench_file(session_dir, "explore/t-exp/v01_b/variant_00_b/benchmark_2", T0 + 500, 1200.0, 70.0)
+    (session_dir / "runs" / "explore" / "t-exp" / "v01_b" / "stray.json").write_text("{}", encoding="utf-8")
+
+    live = _live(session_dir).snapshot()["streams"]["benchmark"]
+    assert [(p["variant"], p["output_throughput"], p["latency"]["ttft"]) for p in live] == [
+        ("a", 1000.0, {"mean": 80.0, "median": None, "p99": 240.0}),
+        ("b", 1200.0, {"mean": 70.0, "median": None, "p99": 210.0}),
+    ]
+    assert {p["task_id"] for p in live} == {"t-exp"}
+
+    early = _replay_at(session_dir, T0 + 250).snapshot()["streams"]["benchmark"]
+    assert [p["variant"] for p in early] == ["a"]
+
+
+def test_baseline_point_is_released_once_from_its_timeline_record_with_the_raw_file_percentiles(session_dir):
+    path = session_dir / "reports" / "sbd_v6" / "timeline" / "000001-baseline.json"
+    assert _live(session_dir).snapshot()["streams"]["benchmark"] == []
+
+    action = {
+        "task_id": "t-base",
+        "end_time": iso(T0 + 600),
+        "measurement": {"output_throughput": 1685.2, "ttft_mean_ms": 60.2},
+    }
+    path.write_text(json.dumps({"id": 1, "kind": "baseline", "ext": {"actions": [action]}}), encoding="utf-8")
+    raw = session_dir / "runs" / "baseline" / "t-base" / "measure_round" / "benchmark_1" / "inferencex_result.json"
+    raw.parent.mkdir(parents=True)
+    raw.write_text(json.dumps({"mean_ttft_ms": 60.2, "median_ttft_ms": 51.0, "p99_ttft_ms": 190.0}), encoding="utf-8")
+    w = _live(session_dir)
+    path.write_text(
+        json.dumps({"id": 1, "kind": "baseline", "ext": {"actions": [action], "again": 1}}), encoding="utf-8"
+    )
+    os.utime(path, (T0 + 900, T0 + 900))
+    w.poll()
+    points = w.snapshot()["streams"]["benchmark"]
+    assert [(p["kind"], p["task_id"], p["output_throughput"]) for p in points] == [("baseline", "t-base", 1685.2)]
+    assert points[0]["latency"]["ttft"] == {"mean": 60.2, "median": 51.0, "p99": 190.0}
+    assert points[0]["_t"] == T0 + 600
+
+    raw.unlink()
+    assert _live(session_dir).snapshot()["streams"]["benchmark"][0]["latency"]["ttft"]["median"] is None
+
+
 def test_clock_range_speed_and_pause():
     clock = Clock(replay=True, speed=10.0)
     clock.set_range(100.0, 200.0)

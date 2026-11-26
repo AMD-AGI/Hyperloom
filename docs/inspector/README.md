@@ -121,6 +121,8 @@ an error badge saying that the tasks cannot be read, rather than an empty task l
 - **Drawer**: graph nodes, timeline bars, tasks, bus events and LLM calls open the raw record, related records,
   artifacts and, for LLM calls, the prompt and response.
 - **Tabs** for tasks, bus events, LLM calls and the throughput journal.
+- **Throughput versus latency**: the journal tab plots each measured benchmark run's throughput against a latency
+  you pick (TTFT, TPOT or end-to-end latency; mean, median or p99).
 - **Replay** with a scrubber and speed control.
 
 ## Security

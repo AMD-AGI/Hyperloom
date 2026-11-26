@@ -53,8 +53,16 @@ export function journalRows(journal: StreamItem[], tasks: Task[], filter: string
   return journal.filter((j) => j.task_id != null && node.get(String(j.task_id)) === filter);
 }
 
-/** Joins a journal entry (`variant_name`) and a measured variant (`variant`) to the same variant of a task. */
+/** Joins a journal entry (`variant_name`) and a benchmark run (`variant`) to the same variant of a task. */
 export const variantKey = (item: StreamItem): string => `${item.task_id}/${item.variant_name ?? item.variant ?? ""}`;
+
+/** The journal's outcome for each explore variant and the baseline, by `variantKey`, to color its benchmark run. */
+export function variantOutcomes(journal: StreamItem[]): Map<string, string> {
+  const outcomes = new Map<string, string>();
+  for (const j of journal)
+    if (j.task_id && (j.variant_name || j.kind === "baseline")) outcomes.set(variantKey(j), String(j.outcome));
+  return outcomes;
+}
 
 export type Unit = ProgressUnit & { task_id: string; key: string };
 

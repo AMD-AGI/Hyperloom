@@ -18,6 +18,7 @@ import {
   stepText,
   taskRows,
   variantKey,
+  variantOutcomes,
   variantThroughputs,
   variantUnits,
 } from "./rows";
@@ -100,6 +101,24 @@ describe("rows", () => {
     const j = [item({ task_id: "a" }), item({ task_id: null }), item({ task_id: "b" })];
     expect(journalRows(j, tasks, null)).toHaveLength(3);
     expect(journalRows(j, tasks, "exec:baseline")).toEqual([j[0]]);
+  });
+
+  it("joins benchmark runs to the journal's outcome for their variant", () => {
+    const journal = [
+      item({ task_id: "a", variant_name: "v1", outcome: "KEEP" }),
+      item({ task_id: "a", variant_name: "v2", outcome: "REVERT" }),
+      item({ task_id: "b", variant_name: "v1", outcome: "REVERT" }),
+      item({ task_id: "a", variant_name: "", outcome: "KEEP" }),
+      item({ task_id: null, variant_name: "v1", outcome: "KEEP" }),
+      item({ task_id: "base", kind: "baseline", outcome: "KEEP" }),
+      item({ task_id: "spec", kind: "other", outcome: "KEEP" }),
+    ];
+    const outcomes = variantOutcomes(journal);
+    expect(outcomes.size).toBe(4);
+    expect(outcomes.get(variantKey(item({ task_id: "base", variant: null })))).toBe("KEEP");
+    expect(outcomes.get(variantKey(item({ task_id: "a", variant: "v1" })))).toBe("KEEP");
+    expect(outcomes.get(variantKey(item({ task_id: "b", variant: "v1" })))).toBe("REVERT");
+    expect(outcomes.get(variantKey(item({ task_id: "a", variant: "other" })))).toBeUndefined();
   });
 
   it("takes each succeeded variant's measured tok/s from the task's progress units", () => {

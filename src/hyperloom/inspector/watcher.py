@@ -54,7 +54,7 @@ from hyperloom.inspector.session_layout import STATE_FILE, coordinator_db, varia
 log = logging.getLogger(__name__)
 
 _METRICS_STREAM = "metrics"
-STREAMS = ("event", "llm_call", "journal", "review", _METRICS_STREAM)
+STREAMS = ("event", "llm_call", "journal", "review", _METRICS_STREAM, "benchmark")
 # Folders of a session directory and the task kind and state the watcher looks for.
 _REPORTS_DIR = "reports"
 _RUNS_DIR = "runs"
@@ -64,6 +64,7 @@ _TS_KEYS = ("ts_unix", "ts", "recorded_unix", "completed_at", "started_at", "sta
 _METRIC_SAMPLES = 4000
 _METRIC_EVERY_SEC = 5.0
 _INDEX_EVERY_SEC = 10.0
+_BENCH_EVERY_SEC = 10.0
 _ACTIVE_SEC = 600.0
 
 
@@ -195,6 +196,7 @@ class Watcher:
         self._llm_tail = JsonlTail(reports / "trace" / "llm_calls.jsonl")
         self._timeline_files = ChangedFiles(reports / "sbd_v6" / "timeline", "*.json")
         self._reviews = ChangedFiles(self.session_dir / "critic-workdir", "*/review.json")
+        self._benchmarks = ChangedFiles(self.session_dir / _RUNS_DIR, "*/*/**/inferencex_result.json")
         self.state: dict = {}
         self.manifest: dict = {}
         self.pod_history: list[dict] = []
@@ -203,8 +205,10 @@ class Watcher:
         self.unit_errors: dict[tuple[str, str], str | None] = {}
         self.timeline: dict[str, dict] = {}
         self.journal_seen = 0
+        self._baselines: set[str] = set()
         self.artifact_index = artifacts_mod.ArtifactIndex()
         self._last_index = 0.0
+        self._last_bench = 0.0
         self._last_sample = 0.0
         self.history = history
         if history is not None:
@@ -261,12 +265,39 @@ class Watcher:
             if isinstance(rec, dict):
                 self.timeline[path.name] = rec
                 changed = True
+                point = derive.baseline_point(rec, parse_ts, self._baseline_raw)
+                if point is not None and point["task_id"] not in self._baselines:
+                    self._baselines.add(point["task_id"])
+                    self.streams["benchmark"].add(point, point["ts"])
         for path, rec in self._reviews.read_changed():
             for verdict in (rec or {}).get("review_verdicts") or []:
                 t = newest_mtime(path)
                 self.streams["review"].add({**verdict, "turn": path.parent.name}, t)
                 changed = True
         changed |= self._poll_journal()
+        changed |= self._poll_benchmarks()
+        return changed
+
+    def _baseline_raw(self, task_id: str) -> Any:
+        """The baseline's measured-round result file, which has the percentiles its timeline record lacks."""
+        if Path(task_id).name != task_id:
+            return None
+        runs = self.session_dir / _RUNS_DIR / _BASELINE_KIND / task_id
+        path = next(iter(sorted(runs.glob("measure_round/*/inferencex_result.json"))), None)
+        return read_json(path) if path else None
+
+    def _poll_benchmarks(self) -> bool:
+        """Benchmark result files under ``runs/``; the walk is throttled because that tree can be large."""
+        now = time.monotonic()
+        if self._last_bench and now - self._last_bench < _BENCH_EVERY_SEC:
+            return False
+        self._last_bench = now
+        changed = False
+        for path, raw in self._benchmarks.read_changed():
+            point = derive.benchmark_point(path.relative_to(self._benchmarks.root).parts, raw, newest_mtime(path))
+            if point is not None:
+                self.streams["benchmark"].add(point, point["ts"])
+                changed = True
         return changed
 
     def _poll_journal(self) -> bool:

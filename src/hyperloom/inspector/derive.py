@@ -40,10 +40,11 @@ STATE_KEYS = (
     "cumulative_gain_validated",
 )
 
-# Task states and health values that the views spell several times.
+# Task states and health values, and the baseline run kind, that the views spell several times.
 _CRASHED = "crashed"
 _FAILED = "failed"
 _RUNNING = "running"
+_BASELINE = "baseline"
 # Severity levels of the top-of-page badges.
 _LEVEL_ERROR = "error"
 _LEVEL_WARN = "warn"
@@ -264,6 +265,104 @@ def throughput_series(journal: dict | None) -> list[dict]:
             }
         )
     return out
+
+
+LATENCY_KINDS = ("ttft", "tpot", "e2el")
+LATENCY_STATS = ("mean", "median", "p99")
+
+
+def _numbers(*values: Any) -> bool:
+    return all(isinstance(v, (int, float)) and not isinstance(v, bool) for v in values)
+
+
+def _number(value: Any) -> float | None:
+    return float(value) if _numbers(value) else None
+
+
+def _latencies(source: dict, key) -> dict[str, dict[str, float | None]]:
+    """Each latency kind's stats, read from *source* under ``key(kind, stat)``; a stat it lacks is None."""
+    return {kind: {stat: _number(source.get(key(kind, stat))) for stat in LATENCY_STATS} for kind in LATENCY_KINDS}
+
+
+def _has_latency(latency: dict) -> bool:
+    return any(v is not None for stats in latency.values() for v in stats.values())
+
+
+# Directories a grid variant's slot runs a discarded round in: its warm-up round and its multi-node client warm-up
+# (orchestrator/actions/executors/grid/_grid_base.py WARMUP_ROUND_DIR and MN_WARMUP_DIR). Mirrored, not imported:
+# the Inspector may not import the orchestrator (the import-linter layers and acyclic contracts), and _grid_base would
+# add about half a second to its start; test_discarded_rounds_are_not_points reads the producer's constants.
+DISCARDED_ROUND_DIRS = frozenset({"warmup_round", "mn_warmup"})
+
+
+def benchmark_point(parts: tuple[str, ...], raw: Any, mtime: float | None) -> dict | None:
+    """One measured benchmark run as a (tok/s, latencies) point, from its result file.
+
+    *parts* is the file's path below ``runs/``: ``<kind>/<task_id>/.../benchmark_*/inferencex_result.json``.
+    Discarded rounds (:data:`DISCARDED_ROUND_DIRS`) and runs with no throughput or no latency are not points,
+    and the baseline is :func:`baseline_point`'s.
+    """
+    if (
+        not isinstance(raw, dict)
+        or len(parts) < 3
+        or not DISCARDED_ROUND_DIRS.isdisjoint(parts)
+        or parts[0] == _BASELINE
+    ):
+        return None
+    tput = raw.get("output_throughput")
+    latency = _latencies(raw, lambda kind, stat: f"{stat}_{kind}_ms")
+    if not _numbers(tput) or not _has_latency(latency):
+        return None
+    variant = next((p.split("_", 1)[1] for p in parts[2:] if p[:1] == "v" and p[1:3].isdigit() and "_" in p), None)
+    return {
+        "ts": raw.get("benchmark_end_time_unix") or mtime,
+        "kind": parts[0],
+        "task_id": parts[1],
+        "variant": variant,
+        "output_throughput": float(tput),
+        "latency": latency,
+        "concurrency": raw.get("max_concurrency"),
+    }
+
+
+def _measured_throughput(measurement: dict) -> Any:
+    """The whole-server output rate a baseline timeline record measured.
+
+    Hyperloom 1.2.0 renamed the key from ``throughput_tok_s_per_gpu`` (which never was per GPU) to
+    ``output_throughput``; the old key is still read, holding the same figure, so a session recorded before the
+    rename keeps its baseline point.
+    """
+    return measurement.get("output_throughput", measurement.get("throughput_tok_s_per_gpu"))
+
+
+def baseline_point(timeline: Any, parse_ts, read_raw) -> dict | None:
+    """The baseline's (tok/s, latencies) point from its timeline record, once it is measured.
+
+    The record only has mean latencies; *read_raw* (task id -> the baseline's raw result, or None) adds the rest.
+    """
+    if not isinstance(timeline, dict) or timeline.get("kind") != _BASELINE:
+        return None
+    for action in (timeline.get("ext") or {}).get("actions") or []:
+        m = action.get("measurement") or {}
+        tput, task_id = _measured_throughput(m), action.get("task_id")
+        if not task_id or not _numbers(tput):
+            continue
+        raw = read_raw(task_id)
+        if isinstance(raw, dict):
+            latency = _latencies(raw, lambda kind, stat: f"{stat}_{kind}_ms")
+        else:
+            latency = _latencies(m, lambda kind, stat: f"{kind}_{stat}_ms")
+        if _has_latency(latency):
+            return {
+                "ts": parse_ts(action.get("end_time")),
+                "kind": _BASELINE,
+                "task_id": task_id,
+                "variant": None,
+                "output_throughput": float(tput),
+                "latency": latency,
+                "concurrency": None,
+            }
+    return None
 
 
 def result_throughput(kind: str, result: Any) -> tuple[float, str] | None:

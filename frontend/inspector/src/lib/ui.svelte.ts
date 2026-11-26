@@ -5,6 +5,7 @@
 // record.
 
 import { SvelteSet } from "svelte/reactivity";
+import type { LatencyPick } from "./latency";
 import type { Range } from "./timeline/scale";
 import type { StreamItem } from "./types";
 
@@ -66,6 +67,8 @@ export class UiState {
   /** The artifact tree's search box and type filter, and the entries opened or closed against their default. */
   artQuery = $state({ q: "", type: "" });
   artToggled = new SvelteSet<string>();
+  /** The latency the throughput tab's scatter plots against tok/s. */
+  latency = $state<LatencyPick>({ kind: "ttft", stat: "mean" });
 
   toggleFilter(node: string): void {
     this.filter = this.filter === node ? null : node;

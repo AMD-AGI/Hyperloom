@@ -275,3 +275,17 @@ def producer_says_failed(runner_status: str, reason: str) -> bool:
     ftype, _retry = failure_class.classify_specialist_failure(runner_status, reason)
     kinds = failure_class.SpecialistFailureType
     return ftype in (kinds.TIMEOUT, kinds.STALE_HEARTBEAT, kinds.CRASH)
+
+
+# ----- benchmark results ----------------------------------------------------------------------------------------
+
+
+def dataset_client_result() -> dict:
+    """A raw benchmark result as Hyperloom's dataset client saves it (``summarize`` keyed by ``_result``)."""
+    client = Upstream("inference_suite.load.dataset_client")
+    outputs = [
+        client.RequestOutput(success=True, latency=2.0, ttft=0.1, prompt_len=100, output_tokens=50) for _ in range(4)
+    ]
+    sent = client.Pass(outputs=outputs, duration=4.0, start_unix=1000.0, end_unix=1004.0)
+    metrics = client.summarize(outputs, sent.duration, [99.0])
+    return client._result(argparse.Namespace(num_prompts=4), sent, metrics, {"status": "passed"})

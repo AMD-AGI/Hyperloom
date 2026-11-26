@@ -4,7 +4,7 @@
 // Shapes of the Inspector API (src/hyperloom/inspector/watcher.py). Only the fields the page reads are typed; the
 // server sends more, and every record is redacted server-side.
 
-export const STREAM_NAMES = ["event", "llm_call", "journal", "review", "metrics"] as const;
+export const STREAM_NAMES = ["event", "llm_call", "journal", "review", "metrics", "benchmark"] as const;
 export type StreamName = (typeof STREAM_NAMES)[number];
 
 /** A stream record; `_t` is its release time in epoch seconds. */

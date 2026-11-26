@@ -111,6 +111,116 @@ def test_throughput_series_reads_throughput_after():
     assert derive.throughput_series(None) == []
 
 
+def _raw(**over):
+    raw = {"output_throughput": 1800.5, "max_concurrency": 64, "benchmark_end_time_unix": 1000.0}
+    for kind, (mean, median, p99) in {
+        "ttft": (76.2, 64.4, 217.4),
+        "tpot": (3.3, 3.2, 3.4),
+        "e2el": (3500.0, 3498.0, 3614.0),
+    }.items():
+        raw |= {f"mean_{kind}_ms": mean, f"median_{kind}_ms": median, f"p99_{kind}_ms": p99}
+    return raw | over
+
+
+def test_benchmark_point_reads_the_path_the_throughput_and_the_latency_stats():
+    measured = ("explore", "t1", "v02_fp8-kv", "variant_00_fp8-kv", "benchmark_vllm_1", "inferencex_result.json")
+    point = derive.benchmark_point(measured, _raw(), mtime=5.0)
+    assert point == {
+        "ts": 1000.0,
+        "kind": "explore",
+        "task_id": "t1",
+        "variant": "fp8-kv",
+        "output_throughput": 1800.5,
+        "latency": {
+            "ttft": {"mean": 76.2, "median": 64.4, "p99": 217.4},
+            "tpot": {"mean": 3.3, "median": 3.2, "p99": 3.4},
+            "e2el": {"mean": 3500.0, "median": 3498.0, "p99": 3614.0},
+        },
+        "concurrency": 64,
+    }
+    warmup = ("explore", "t1", "v02_fp8-kv", "warmup_round", "variant_00_fp8-kv", "b", "inferencex_result.json")
+    assert derive.benchmark_point(warmup, _raw(), 5.0) is None
+    patch = ("integrate_patch", "t0", "measure_round", "benchmark_vllm_1", "inferencex_result.json")
+    assert derive.benchmark_point(patch, _raw(benchmark_end_time_unix=None), mtime=5.0)["ts"] == 5.0
+    assert derive.benchmark_point(patch, _raw(), 5.0)["variant"] is None
+
+
+def test_benchmark_point_keeps_a_missing_stat_as_none_and_needs_throughput_and_some_latency():
+    parts = ("explore", "t1", "b", "inferencex_result.json")
+    only_ttft_mean = {"output_throughput": 10, "mean_ttft_ms": 5.0}
+    latency = derive.benchmark_point(parts, only_ttft_mean, 1.0)["latency"]
+    assert latency["ttft"] == {"mean": 5.0, "median": None, "p99": None}
+    assert latency["e2el"] == {"mean": None, "median": None, "p99": None}
+    assert derive.benchmark_point(parts, {"output_throughput": 10}, 1.0) is None
+    assert derive.benchmark_point(parts, {"mean_ttft_ms": 5.0}, 1.0) is None
+    assert derive.benchmark_point(parts, {"output_throughput": 10, "mean_ttft_ms": None}, 1.0) is None
+    assert derive.benchmark_point(parts, {"output_throughput": True, "mean_ttft_ms": 5}, 1.0) is None
+    assert derive.benchmark_point(parts, ["not", "a", "dict"], 1.0) is None
+    assert derive.benchmark_point(("explore", "x.json"), _raw(), 1.0) is None
+
+
+def test_baseline_point_comes_from_the_timeline_record_and_borrows_percentiles_from_the_raw_file():
+    timeline = {
+        "kind": "baseline",
+        "ext": {
+            "actions": [
+                {"task_id": "t0", "end_time": "5", "measurement": {"ttft_mean_ms": 60.2}},
+                {
+                    "task_id": "t0",
+                    "end_time": "7",
+                    "measurement": {
+                        "output_throughput": 13736.3,
+                        "ttft_mean_ms": 60.2,
+                        "tpot_mean_ms": 4.6,
+                        "e2el_mean_ms": 4759.6,
+                    },
+                },
+            ]
+        },
+    }
+    point = derive.baseline_point(timeline, float, lambda task_id: None)
+    assert point == {
+        "ts": 7.0,
+        "kind": "baseline",
+        "task_id": "t0",
+        "variant": None,
+        "output_throughput": 13736.3,
+        "latency": {
+            "ttft": {"mean": 60.2, "median": None, "p99": None},
+            "tpot": {"mean": 4.6, "median": None, "p99": None},
+            "e2el": {"mean": 4759.6, "median": None, "p99": None},
+        },
+        "concurrency": None,
+    }
+    seen = []
+    full = derive.baseline_point(timeline, float, lambda task_id: seen.append(task_id) or _raw())
+    assert seen == ["t0"]
+    assert full["output_throughput"] == 13736.3
+    assert full["latency"]["ttft"] == {"mean": 76.2, "median": 64.4, "p99": 217.4}
+    assert derive.baseline_point({**timeline, "kind": "stack"}, float, lambda t: None) is None
+    assert (
+        derive.baseline_point({"kind": "baseline", "ext": {"actions": [{"task_id": "t0"}]}}, float, lambda t: None)
+        is None
+    )
+    assert derive.baseline_point(None, float, lambda t: None) is None
+    measure = ("baseline", "t0", "measure_round", "b", "inferencex_result.json")
+    assert derive.benchmark_point(measure, _raw(), 1.0) is None
+
+
+def test_baseline_point_reads_a_session_recorded_before_the_measurement_key_was_renamed():
+    # Hyperloom before 1.2.0 wrote the same whole-server rate as ``throughput_tok_s_per_gpu``.
+    measurement = {"throughput_tok_s_per_gpu": 1685.2, "ttft_mean_ms": 60.2}
+    timeline = {
+        "kind": "baseline",
+        "ext": {"actions": [{"task_id": "t0", "end_time": "5", "measurement": measurement}]},
+    }
+    point = derive.baseline_point(timeline, float, lambda task_id: None)
+    assert point["output_throughput"] == 1685.2
+    renamed = {**measurement, "output_throughput": 1700.0}
+    timeline["ext"]["actions"][0]["measurement"] = renamed
+    assert derive.baseline_point(timeline, float, lambda task_id: None)["output_throughput"] == 1700.0
+
+
 def test_health_badges_order_and_thresholds():
     tasks = [{"health": "crashed", "label": "scout"}, {"health": "stalled"}]
     memory = {"used_bytes": 96, "limit_bytes": 100}
