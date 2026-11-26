@@ -24,8 +24,8 @@ from inference_suite.contracts.base_launch import Workload
 from inference_suite.argv import canonical_flag_name
 from inference_suite.frameworks import Framework
 from inference_suite.multinode.query import PdQuery, RoleAsk
-from inference_suite.multinode.render import TOPOLOGY_SPELLING
-from inference_suite.multinode.record import PD_ROLES, PdSourceKind, Role
+from inference_suite.multinode.render import DP_ATTENTION, TOPOLOGY_SPELLING
+from inference_suite.multinode.record import PD_ROLES, Role
 from inference_suite.recipe.inferencex import (
     MASTER,
     PROJECT,
@@ -62,19 +62,14 @@ class Candidate:
     """One InferenceX recipe variant that serves a query: where it is, the merged recipe, both roles' topology, the
     entry's KV transfer backend and benchmarked concurrency and the warnings it carries."""
 
-    kind: PdSourceKind
     entry: str
     path: str
     locator: str
     recipe: Mapping[str, Any]
     fits: Mapping[Role, RoleFit]
+    conc: int
     transfer_backend: str = ""
-    conc: int | None = None
     warnings: tuple[str, ...] = ()
-
-    @property
-    def name(self) -> str:
-        return f"{self.path}:{self.locator}" if self.locator else self.path
 
 
 @dataclass(frozen=True)
@@ -258,7 +253,7 @@ def recipe_fit(role: Mapping[str, Any], framework: Framework) -> RoleFit:
         ep = tp if _arg(args, _spellings(spelling.ep_switch)) else 1
     else:
         ep = int(_arg(args, _spellings(spelling.ep)) or 1)
-    return RoleFit(int(role.get("workers") or 1), tp, ep, bool(_arg(args, ("enable-dp-attention",))), gpus or tp)
+    return RoleFit(int(role.get("workers") or 1), tp, ep, bool(_arg(args, (DP_ATTENTION,))), gpus or tp)
 
 
 def _row_fits(row: Mapping[str, Any]) -> dict[Role, RoleFit]:
@@ -326,7 +321,6 @@ def _row_candidate(query: PdQuery, checkout: Checkout, master_row: _MasterRow) -
     if unported is not None:
         return unported
     return Candidate(
-        kind=PdSourceKind.INFERENCEX_MASTER,
         entry=master_row.arm,
         path=path,
         locator=selector,

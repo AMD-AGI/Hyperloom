@@ -35,26 +35,28 @@ _ROUTER = "router"
 ROUTER_PORT = 8000
 _SGLANG_ENGINE_PORT = 8000
 #: Engine HTTP ports when the node list names no engine URL.
-DEFAULT_ENGINE_PORTS = {
+_DEFAULT_ENGINE_PORTS = {
     Framework.SGLANG: {Role.PREFILL: _SGLANG_ENGINE_PORT, Role.DECODE: _SGLANG_ENGINE_PORT},
     Framework.ATOM: {Role.PREFILL: 8010, Role.DECODE: 8020},
 }
 #: The HTTP port of an aggregated worker, every framework alike.
-WORKER_PORT = _SGLANG_ENGINE_PORT
+_WORKER_PORT = _SGLANG_ENGINE_PORT
 #: The HTTP port of an Infera engine.
-INFERA_ENGINE_PORT = 30000
+_INFERA_ENGINE_PORT = 30000
 _SSH_PORT = "ssh_port"
 _REQUIRED = ("framework", "model", "service_url", "gpus_per_node")
-_KEYS = (
-    frozenset(_REQUIRED)
-    | {_ROUTER, "mode", *(role.value for role in Role)}
-    | {"prefill_url", "decode_url", "ssh", "transfer_backend", "topology", "launch_mode"}
-    | {"config", "frontend"}
+_KEYS = tuple(
+    sorted(
+        frozenset(_REQUIRED)
+        | {_ROUTER, "mode", *(role.value for role in Role)}
+        | {"prefill_url", "decode_url", "ssh", "transfer_backend", "topology", "launch_mode"}
+        | {"config", "frontend"}
+    )
 )
-_SSH_KEYS = frozenset({"port", "user", "key_file", "known_hosts_file"})
-_TOPOLOGY_KEYS = frozenset({"tp", "ep", "dp_attention"})
+_SSH_KEYS = ("key_file", "known_hosts_file", "port", "user")
+_TOPOLOGY_KEYS = ("dp_attention", "ep", "tp")
 _ROUTER_ARGS = "router_args"
-_HOST_KEYS = frozenset({"host", _SSH_PORT})
+_HOST_KEYS = ("host", _SSH_PORT)
 _HTTP = ("http://", "https://")
 _MAX_PORT = 65535
 
@@ -162,15 +164,6 @@ class NodeList:
         )
 
 
-def _mapping(value: Any, what: str, keys: frozenset[str]) -> Mapping[str, Any]:
-    if not isinstance(value, Mapping):
-        raise NodeListError(f"{what} must be an object, got {type(value).__name__}")
-    unknown = sorted(set(value) - keys)
-    if unknown:
-        raise NodeListError(f"{what} has unknown keys {unknown}")
-    return value
-
-
 def _integer(value: Any, what: str, maximum: int | None = None) -> int:
     number = _FIELDS.integer(value, what, minimum=1)
     if maximum and number > maximum:
@@ -186,15 +179,14 @@ def _url(value: Any, what: str) -> str:
 
 
 def _host(value: Any, what: str) -> str:
-    return _FIELDS.text(_mapping(value, what, _HOST_KEYS).get("host"), f"{what}'s host")
+    return _FIELDS.text(_FIELDS.known(value, _HOST_KEYS, what).get("host"), f"{what}'s host")
 
 
 def _hosts(value: Any, role: Role) -> tuple[str, ...]:
     if not isinstance(value, list) or not value:
         raise NodeListError(f"{role.value} must be a non-empty list of hosts, got {value!r}")
     hosts = tuple(_host(item, f"{role.value}[{index}]") for index, item in enumerate(value))
-    if len(set(hosts)) != len(hosts):
-        raise NodeListError(f"{role.value} names a host twice: {list(hosts)}")
+    _FIELDS.unique(hosts, f"{role.value} host")
     return hosts
 
 
@@ -210,7 +202,7 @@ def _host_ports(fields: Mapping[str, Any]) -> dict[str, int]:
 
 
 def _ssh(value: Any) -> SshAccess:
-    fields = _mapping(value, "ssh", _SSH_KEYS)
+    fields = _FIELDS.known(value, _SSH_KEYS, "ssh")
     key_file = _FIELDS.text(fields.get("key_file"), "ssh.key_file")
     if not key_file.startswith("/"):
         raise NodeListError("ssh.key_file must be an absolute path")
@@ -225,19 +217,12 @@ def _ssh(value: Any) -> SshAccess:
     )
 
 
-def _optional_integer(value: Any, what: str) -> int | None:
-    return _FIELDS.optional_integer(value, what, minimum=1)
-
-
 def _role_topology(value: Any, role: Role) -> RoleTopology:
-    fields = _mapping(value, f"topology.{role.value}", _TOPOLOGY_KEYS)
-    dp = fields.get("dp_attention")
-    if dp is not None and not isinstance(dp, bool):
-        raise NodeListError(f"topology.{role.value}.dp_attention must be true, false or null, got {dp!r}")
+    fields = _FIELDS.known(value, _TOPOLOGY_KEYS, f"topology.{role.value}")
     return RoleTopology(
-        tp=_optional_integer(fields.get("tp"), f"topology.{role.value}.tp"),
-        ep=_optional_integer(fields.get("ep"), f"topology.{role.value}.ep"),
-        dp_attention=dp,
+        tp=_FIELDS.optional_integer(fields.get("tp"), f"topology.{role.value}.tp", minimum=1),
+        ep=_FIELDS.optional_integer(fields.get("ep"), f"topology.{role.value}.ep", minimum=1),
+        dp_attention=_FIELDS.optional_boolean(fields.get("dp_attention"), f"topology.{role.value}.dp_attention"),
     )
 
 
@@ -255,7 +240,7 @@ def _args(value: Any, what: str) -> tuple[str, ...]:
 def _operator(value: Any, mode: PdMode) -> OperatorArgs:
     """The operator's args of ``config``, which names the args of the mode's roles and the router's only."""
     keys = {f"{role.value}_args": role for role in MODE_ROLES[mode]}
-    fields = _mapping(value, "config", frozenset({*keys, _ROUTER_ARGS}))
+    fields = _FIELDS.known(value, tuple(sorted({*keys, _ROUTER_ARGS})), "config")
     given = {role: _args(fields.get(key), f"config.{key}") for key, role in keys.items()}
     return OperatorArgs(
         prefill=given.get(Role.PREFILL, ()),
@@ -307,12 +292,12 @@ def engine_port(nodes: NodeList, role: Role) -> int:
     """The port a role's engines serve on: Infera's engine port, else that of the node list's role URL, else the
     framework's default."""
     if nodes.frontend is FrontendType.INFERA:
-        return INFERA_ENGINE_PORT
+        return _INFERA_ENGINE_PORT
     if role is Role.WORKER:
-        return WORKER_PORT
+        return _WORKER_PORT
     url = role_url(nodes, role)
     port = urlsplit(url).port if url else None
-    return port or DEFAULT_ENGINE_PORTS[nodes.framework][role]
+    return port or _DEFAULT_ENGINE_PORTS[nodes.framework][role]
 
 
 def parse_node_list(document: Any) -> NodeList:
@@ -322,7 +307,7 @@ def parse_node_list(document: Any) -> NodeList:
         NodeListError: a key is missing, unknown or of the wrong kind, a role the mode does not run names hosts, or
             the roles share a host.
     """
-    fields = _mapping(document, "the node list", _KEYS)
+    fields = _FIELDS.known(document, _KEYS, "the node list")
     mode = _FIELDS.enum(PdMode, fields.get("mode", PdMode.DISAGGREGATED.value), "mode")
     frontend = _frontend(fields, _framework(fields.get("framework"))) if "framework" in fields else None
     required = (*_REQUIRED, *(() if frontend is FrontendType.INFERA else (_ROUTER,)))
@@ -332,7 +317,7 @@ def parse_node_list(document: Any) -> NodeList:
     framework = _framework(fields["framework"])
     hosts = _role_hosts(fields, mode)
     router = _host(fields[_ROUTER], _ROUTER) if fields.get(_ROUTER) is not None else ""
-    topology = _mapping(fields.get("topology") or {}, "topology", frozenset(role.value for role in MODE_ROLES[mode]))
+    topology = _FIELDS.known(fields.get("topology") or {}, tuple(role.value for role in MODE_ROLES[mode]), "topology")
     ssh = _ssh(fields["ssh"]) if fields.get("ssh") is not None else None
     ports = _host_ports(fields)
     nodes = NodeList(
@@ -390,11 +375,8 @@ def read_node_list(environ: Mapping[str, str]) -> NodeList:
 
 
 __all__ = [
-    "DEFAULT_ENGINE_PORTS",
-    "INFERA_ENGINE_PORT",
     "NODE_LIST_ENV",
     "ROUTER_PORT",
-    "WORKER_PORT",
     "LaunchMode",
     "NodeList",
     "NodeListError",
