@@ -38,9 +38,11 @@ _BOARD_POLICIES: dict[str, BoardPolicy] = {
     "mi350x": BoardPolicy(),
     "mi355x": BoardPolicy(names_its_arch=True),
     "r9700": BoardPolicy(
-        validated_frameworks=_VLLM_OR_LLAMACPP, targeted_build_validated=False, geak_identity_pinned=True
+        validated_frameworks=_VLLM_OR_LLAMACPP | {"sglang"}, targeted_build_validated=False, geak_identity_pinned=True
     ),
-    "r9600d": BoardPolicy(validated_frameworks=_VLLM_ONLY, targeted_build_validated=False, geak_identity_pinned=True),
+    "r9600d": BoardPolicy(
+        validated_frameworks=_VLLM_ONLY | {"sglang"}, targeted_build_validated=False, geak_identity_pinned=True
+    ),
     "w7900": BoardPolicy(validated_frameworks=_VLLM_ONLY, targeted_build_validated=False),
     "w7900d": BoardPolicy(validated_frameworks=_VLLM_OR_LLAMACPP, targeted_build_validated=False),
     "radeon8060s": BoardPolicy(),

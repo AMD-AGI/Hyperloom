@@ -43,7 +43,8 @@ The following table lists the minimum requirements for running Hyperloom.
 +=====================+========================================================+
 | AMD Instinct™ GPU   | MI300X, MI325X, MI355X                                 |
 +---------------------+--------------------------------------------------------+
-| AMD Radeon™ GPU     | Radeon AI PRO R9700 (gfx1201), vLLM and llama.cpp;     |
+| AMD Radeon™ GPU     | Radeon AI PRO R9700 (gfx1201), vLLM, SGLang, llama.cpp;|
+|                     | Radeon AI PRO R9600D (gfx1201), vLLM and SGLang;       |
 |                     | Radeon PRO W7900D (gfx1100), vLLM and llama.cpp        |
 +---------------------+--------------------------------------------------------+
 | Operating System    | Ubuntu 24.04 (recommended); Ubuntu 22.04 (legacy)      |
@@ -118,7 +119,7 @@ The following inference frameworks are supported:
      - Notes
    * - SGLang
      - 10.0 (docker) / 7.2.4 (bare-metal wheel)
-     - Default framework. Validated ``docker`` images use ROCm 10.0 (``rocm10`` tags below). On a ROCm 7.2.x bare-metal host the installer still derives ``SGLANG_ROCM_EXTRA=rocm724`` from ``torch.version.hip`` (see below).
+    - Default framework. For R9700 and R9600D, use the gfx1201 image in :doc:`/how-to/running-hyperloom-on-r9700`. Validated ``docker`` images use ROCm 10.0 (``rocm10`` tags below). On a ROCm 7.2.x bare-metal host the installer still derives ``SGLANG_ROCM_EXTRA=rocm724`` from ``torch.version.hip`` (see below).
    * - vLLM
      - 10.0 (docker, bare-metal source)
      - Validated ``docker`` image is the ROCm 10.0 build below. On bare metal the

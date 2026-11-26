@@ -10,9 +10,11 @@ import pytest
 
 from hyperloom.common.benchmark_config import BENCHMARK_CONFIG_ENV
 from hyperloom.inference_optimizer import cli
-from hyperloom.inference_optimizer.cli import launch_shape
+from hyperloom.inference_optimizer.cli import base_launch, launch_shape
 from hyperloom.inference_optimizer.cli.benchmark_config import configure_benchmark
 from hyperloom.inference_optimizer.cli.parser import _build_parser
+from inference_suite import SourceSnapshot
+from inference_suite.recipe.resolve import UnreadSource
 
 from .conftest import cli_call_sequence
 
@@ -40,10 +42,10 @@ def isolated_env(monkeypatch):
         monkeypatch.setenv(key, "")
 
 
-def _seed(tmp_path, monkeypatch, framework: str) -> None:
-    args = _build_parser().parse_args(
-        ["optimize", "--model", "/model", "--framework", framework, "--gpu-type", "r9700"]
-    )
+def _seed(tmp_path, monkeypatch, framework: str, board: str) -> None:
+    args = _build_parser().parse_args(["optimize", "--model", "/model", "--framework", framework, "--gpu-type", board])
+    offline = SourceSnapshot(None, 0, unread=UnreadSource("InferenceX", "offline"))
+    monkeypatch.setattr(base_launch, "fetch_sources", lambda *args, **kwargs: offline)
     configure_benchmark(args)
     launch_shape._resolve_run_topology(args)
     for name in ("_enforce_expected_framework", "_apply_operator_supplied_paths", "_check_gfx_arch_resolvable"):
@@ -64,16 +66,19 @@ def _seed(tmp_path, monkeypatch, framework: str) -> None:
         asyncio.run(cli._seed_fresh_session(args, nodes_resolved=1))
 
 
-def test_fresh_r9700_sglang_launch_exits_2(tmp_path, monkeypatch, capsys):
+@pytest.mark.parametrize("board", ["r9700", "r9600d"])
+def test_fresh_atom_launch_exits_2(tmp_path, monkeypatch, capsys, board):
     with pytest.raises(SystemExit) as exc:
-        _seed(tmp_path, monkeypatch, "sglang")
+        _seed(tmp_path, monkeypatch, "atom", board)
     assert exc.value.code == 2
-    assert "r9700 is currently validated only for llamacpp, vllm" in capsys.readouterr().err
+    assert "framework 'atom' has not been validated on it" in capsys.readouterr().err
 
 
-def test_fresh_r9700_vllm_launch_passes_the_gate_and_exports_the_board_itself(tmp_path, monkeypatch):
-    _seed(tmp_path, monkeypatch, "vllm")
-    assert os.environ["GPU_TYPE"] == os.environ["TARGET_GPU_TYPE"] == "r9700"
+@pytest.mark.parametrize("board", ["r9700", "r9600d"])
+@pytest.mark.parametrize("framework", ["vllm", "sglang"])
+def test_fresh_launch_passes_the_gate_and_exports_the_board(tmp_path, monkeypatch, board, framework):
+    _seed(tmp_path, monkeypatch, framework, board)
+    assert os.environ["GPU_TYPE"] == os.environ["TARGET_GPU_TYPE"] == board
 
 
 def test_resume_runs_the_gate():
