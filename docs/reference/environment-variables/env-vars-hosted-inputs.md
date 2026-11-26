@@ -16,7 +16,7 @@ and input variables are always required except for a session started by hand on 
 required. A multi-branch `hosted run` whose spec says `placement.measurement: local` measures on the app container's own cards:
 it needs no sandbox variable, key or source pair, and `HYPERLOOM_GRANT_LIMITS` is optional (its `max_runtime_sec`, when given,
 bounds the session together with the spec's `budget.max_hours`; see
-[Run hosted multi-branch on a new cluster](../how-to/hosted-multibranch-new-cluster.md)).
+[Run hosted multi-branch on a new cluster](../../how-to/hosted-multibranch-new-cluster.md)).
 
 | Variable | Required | Description |
 |----------|----------|-------------|

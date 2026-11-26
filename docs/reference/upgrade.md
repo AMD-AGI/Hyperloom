@@ -43,6 +43,12 @@ host the CLI defaults to `session/` under the current directory instead. Prefer
 
 ---
 
+```{note}
+Steps for upgrading from 1.1.4, 1.1.3, 1.1.1, and 1.1.0 are in each version's
+[GitHub release](https://github.com/AMD-AGI/Hyperloom/releases) under the
+"Upgrade steps" heading, alongside the changelog for that release.
+```
+
 ## Upgrading from 1.1.5
 
 Finish in-flight sessions under the build that started them. Every session's

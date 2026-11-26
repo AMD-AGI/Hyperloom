@@ -252,12 +252,12 @@ that every future run has a speedup. Kernel results also do not establish E2E ga
 
 ## Minimal example and tests
 
-The FlyDSL vector-add example
+The FlyDSL vector-add example in `examples/flydsl2asm-vector-add/`
 has one specialization, an independent exact oracle, changed inputs, a nondefault
 stream and graph replay. It demonstrates compiler capture and instruction edits,
 without a handwritten seed or a performance claim.
 
-The Triton vector-add example
+The Triton vector-add example in `examples/triton2asm-vector-add/`
 uses a normal bracket launch. `test_assembly_triton_gpu.py` exercises Triton,
 Gluon, and a standalone HIP build through the same preparation gates, then replays
 each patch in a fresh checkout. These tests require their respective compilers.
