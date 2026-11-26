@@ -16,10 +16,10 @@ import resource
 NO_GPU_COREDUMP_ENV = {"HSA_DISABLE_COREDUMP_ON_EXCEPTION": "1"}
 
 
-def forbid_core_dumps() -> None:
-    """Set this process's core file limit to 0, the hard limit too, so nothing it starts can raise it back; meant as a
-    child's ``preexec_fn``."""
-    resource.setrlimit(resource.RLIMIT_CORE, (0, 0))
+def forbid_core_dumps(pid: int = 0) -> None:
+    """Set the core file limit of ``pid`` (this process when 0) to 0, the hard limit too, so nothing it starts can raise
+    it back."""
+    resource.prlimit(pid, resource.RLIMIT_CORE, (0, 0))
 
 
 __all__ = ["NO_GPU_COREDUMP_ENV", "forbid_core_dumps"]

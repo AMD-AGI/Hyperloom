@@ -139,18 +139,16 @@ def spawn(
             stderr=files[1] if len(files) > 1 else subprocess.STDOUT,
             start_new_session=True,
             cwd=place.cwd,
-            preexec_fn=_child_setup(place.cpus),
+            preexec_fn=_pinned_to(place.cpus) if place.cpus else None,
         )
+    # Set from here, not in a preexec_fn, which can deadlock a child forked from a threaded process. ROCr also honours
+    # the env flag from load, and workers fork long after this, so they inherit the limit.
+    forbid_core_dumps(proc.pid)
     return Spawned(proc, mark)
 
 
-def _child_setup(cpus: tuple[int, ...]) -> Callable[[], None]:
-    def setup() -> None:
-        forbid_core_dumps()
-        if cpus:
-            os.sched_setaffinity(0, cpus)
-
-    return setup
+def _pinned_to(cpus: tuple[int, ...]) -> Callable[[], None]:
+    return lambda: os.sched_setaffinity(0, cpus)
 
 
 def listening_inodes(port: int) -> frozenset[int]:

@@ -375,6 +375,20 @@ def test_a_server_and_the_workers_it_starts_cannot_write_core_dumps(tmp_path):
     assert b"HSA_DISABLE_COREDUMP_ON_EXCEPTION=1" in environ
 
 
+def test_an_unpinned_child_runs_no_python_between_fork_and_exec(tmp_path, monkeypatch):
+    # Rounds spawn from threaded processes, where a preexec_fn can deadlock the child before it execs.
+    kwargs = {}
+    popen = subprocess.Popen
+
+    def recording_popen(*args, **kw):
+        kwargs.update(kw)
+        return popen(*args, **kw)
+
+    monkeypatch.setattr(subprocess, "Popen", recording_popen)
+    process.spawn([sys.executable, "-c", "pass"], dict(os.environ), tmp_path / "out.log").proc.wait()
+    assert kwargs["preexec_fn"] is None
+
+
 def test_cpus_the_server_cannot_run_on_are_refused_before_spawning(tmp_path):
     rig = _Rig(tmp_path)
     stopped = rig.lifecycle(_pinned(rig.config("r1"), min(os.sched_getaffinity(0)), 100_000)).acquire()
