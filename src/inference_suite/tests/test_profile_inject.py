@@ -1,7 +1,8 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Contract of the profiler layer: each framework's injection, its place last in the launch, and the trace dirs."""
+"""Contract of the profiler layer: each framework's injection, its place last in the launch, the admin key a profile
+round's SGLang server takes, and the trace dirs."""
 
 from __future__ import annotations
 
@@ -17,6 +18,7 @@ from inference_suite.contracts.launch import Launch, LaunchError, LayerSource
 from inference_suite.frameworks import Framework, framework_facts
 from inference_suite.profile.inject import (
     SGLANG_PROFILER_DIR_ENV,
+    admin_key,
     make_trace_dirs,
     profiler_layer,
     settle_traces,
@@ -113,6 +115,23 @@ def test_sglang_start_body_carries_the_step_window_and_the_others_take_it_as_giv
     assert start_body(_WINDOW, Framework.SGLANG) == {"record_shapes": True, "start_step": 40, "num_steps": 8}
     assert start_body(_WINDOW, Framework.VLLM) == {"record_shapes": True}
     assert start_body(ProfileConfig(True, agentx_open_after_sec=0, agentx_duration_sec=30), Framework.SGLANG) == {}
+
+
+def test_a_profile_rounds_sglang_server_gets_a_fresh_admin_key_and_the_others_none():
+    argv = ("python3", "-m", "sglang.launch_server", "--tp", "8")
+    first, second = admin_key(Framework.SGLANG, argv, {}), admin_key(Framework.SGLANG, argv, {})
+
+    assert first and second and first != second
+    assert admin_key(Framework.VLLM, ("vllm", "serve"), {}) is None
+    assert admin_key(Framework.ATOM, ("python3", "-m", "atom.entrypoints.openai_server"), {}) is None
+
+
+@pytest.mark.parametrize(
+    ("args", "env"),
+    [(("--grpc-port", "50051"), {}), (("--grpc_port=50051",), {}), ((), {"SGLANG_GRPC_PORT": "50051"})],
+)
+def test_an_sglang_server_with_its_grpc_listener_gets_no_admin_key_since_it_would_refuse_to_start(args, env):
+    assert admin_key(Framework.SGLANG, ("python3", "-m", "sglang.launch_server", *args), env) is None
 
 
 def test_capture_sidecars_land_beside_torch_trace_not_flattened(tmp_path):

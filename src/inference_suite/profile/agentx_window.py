@@ -8,8 +8,8 @@ aiperf's setup and warmup take minutes and vary between replays, so a window at 
 mark, the first profiling-phase request, and closes ``agentx_duration_sec`` later or at the finished mark, when the
 profiling phase's last request returns or the client exits, whichever comes first; either way before the export is
 aggregated. When it opens it reads the server's running-request count once. ``profile/capture.json`` records the
-profiling start, both window instants, that count, and a control request the server refused, which leaves no trace
-rather than failing the round.
+profiling start, both window instants, that count, and a control request the server refused or did not answer; a
+``/start_profile`` it refused ends the round at once (:func:`~inference_suite.profile.inject.start_refusal`).
 """
 
 from __future__ import annotations
@@ -24,8 +24,10 @@ from inference_suite.profile.inject import (
     WindowCapture,
     server_request,
     start_body,
+    start_refusal,
 )
 from inference_suite.runtime.phases import Phase, PhaseClock, PhaseMark
+from inference_suite.runtime.watch import Stop
 from inference_suite.telemetry.kv_poll import parse_prometheus_text, running_requests
 
 METRICS_PATH = "/metrics"
@@ -38,7 +40,9 @@ def _unix(mark: PhaseMark | None) -> float | None:
 class AgentxWindow:
     """Opens and closes the server's profiler as the round's phase clock goes by; fed by the load at every poll."""
 
-    def __init__(self, profile: ProfileConfig, framework: Framework, base_url: str, clock: PhaseClock) -> None:
+    def __init__(
+        self, profile: ProfileConfig, framework: Framework, base_url: str, clock: PhaseClock, key: str | None = None
+    ) -> None:
         if profile.agentx_open_after_sec is None or profile.agentx_duration_sec is None:
             raise ValueError("an AgentX profile window needs agentx_open_after_sec and agentx_duration_sec")
         self._open_after = profile.agentx_open_after_sec
@@ -46,33 +50,37 @@ class AgentxWindow:
         self._body = start_body(profile, framework)
         self._base_url = base_url.rstrip("/")
         self._clock = clock
+        self._key = key
         self._opened: PhaseMark | None = None
         self._closed: PhaseMark | None = None
         self._running: int | None = None
         self._error: str | None = None
 
-    def hear(self, now: float) -> None:
+    def hear(self, now: float) -> Stop | None:
         """At monotonic ``now``, open the window once the measured mark is ``agentx_open_after_sec`` old, and close it
-        once it has run ``agentx_duration_sec`` or the finished mark is set; a window never opens after that mark."""
+        once it has run ``agentx_duration_sec`` or the finished mark is set; a window never opens after that mark.
+        Returns why the round has to end, if the server refused to open the window."""
         if self._closed is not None or self._error is not None:
-            return
+            return None
         finished = self._clock.first(Phase.FINISHED) is not None
         if self._opened is not None:
             if finished or now >= self._opened.mono + self._duration:
                 self._close(now)
-            return
+            return None
         measured = self._clock.first(Phase.MEASURED)
         if not finished and measured is not None and now >= measured.mono + self._open_after:
-            self._open(now)
+            return self._open(now)
+        return None
 
-    def _open(self, now: float) -> None:
+    def _open(self, now: float) -> Stop | None:
         try:
-            server_request(self._base_url + START_PROFILE_PATH, self._body)
+            server_request(self._base_url + START_PROFILE_PATH, self._body, self._key)
         except SERVER_REQUEST_ERRORS as exc:
             self._error = f"{START_PROFILE_PATH}: {exc}"
-            return
+            return start_refusal(self._error, exc)
         self._opened = self._clock.mark(Phase.PROFILE_OPEN, now)
         self._running = self._running_requests()
+        return None
 
     def _running_requests(self) -> int | None:
         try:
@@ -85,7 +93,7 @@ class AgentxWindow:
     def _close(self, now: float) -> None:
         self._closed = self._clock.mark(Phase.PROFILE_CLOSE, now)
         try:
-            server_request(self._base_url + STOP_PROFILE_PATH, {})
+            server_request(self._base_url + STOP_PROFILE_PATH, {}, self._key)
         except SERVER_REQUEST_ERRORS as exc:
             self._error = f"{STOP_PROFILE_PATH}: {exc}"
 

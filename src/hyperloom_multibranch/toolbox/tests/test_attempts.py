@@ -31,6 +31,7 @@ from hyperloom.measure.failures import (
     JIT_BUILD_TIMEOUT,
     PROFILER_DIED,
     PROFILER_HUNG,
+    PROFILE_REFUSED,
     PROFILER_SNAPSHOT_FAILED,
     RESULT_DOWNLOAD_INCOMPLETE,
     TEST_TIMEOUT_REASON,
@@ -622,6 +623,18 @@ async def test_a_profile_whose_server_stalled_inside_its_window_is_not_retried_a
     assert result.validity is Validity.MEASUREMENT_FAILED and result.failure_class is FailureClass.INFRA
     assert result.failure_reason == f"{PROFILER_HUNG}: {_TRACER_HANG}"
     assert reported == [], "the image's profiler, not the node, hung the server"
+
+
+async def test_a_profile_whose_server_refused_to_start_profiling_is_not_retried_and_names_the_refusal() -> None:
+    """A gating image (403 without an admin key) refuses every sandbox the same way; the reason quotes the refusal."""
+    refused = StepFailure(FailedStep.PROFILE_REFUSED, "/start_profile: HTTP Error 403: Forbidden")
+
+    result, executor, reported = await _profile("", refused)
+
+    assert len(executor.jobs) == 1, "every server of the image refuses it"
+    assert result.validity is Validity.MEASUREMENT_FAILED and result.failure_class is FailureClass.INFRA
+    assert result.failure_reason == f"{PROFILE_REFUSED}: /start_profile: HTTP Error 403: Forbidden"
+    assert reported == [], "the image's server, not the node, refused"
 
 
 async def test_a_profile_whose_server_stalled_outside_its_window_is_not_rerun_and_ends_unmeasured() -> None:
