@@ -13,25 +13,42 @@ TraceLens-patched servers write their CUDA-graph capture sidecars into ``capture
 tells a step trace from a sidecar by its directory.
 
 Every framework captures only between ``/start_profile`` and ``/stop_profile``; each load's window sends them through
-:func:`server_request` and records what it did as ``profile/capture.json`` (:class:`WindowCapture`).
+:func:`server_request` and records what it did as ``profile/capture.json`` (:class:`WindowCapture`). A newer SGLang
+refuses both with 403 unless its server holds an admin key, so a profile round gives its server a fresh key
+(:func:`admin_key`) and sends it with both requests; the key lives only in the server's environment and the window,
+never in ``launch.json``. An older SGLang ignores the variable and the header.
+
+A ``/start_profile`` the server answers with an error status ends the round at once (``profile_refused``): the
+window would capture nothing, however long the load ran on. One the server does not answer is only recorded, and the
+round's server watch decides what became of the server.
 """
 
 from __future__ import annotations
 
 import http.client
 import json
+import secrets
 import urllib.error
 import urllib.request
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import asdict, dataclass
 from pathlib import Path
 
+from inference_suite.argv import argv_flag_occurrences
 from inference_suite.contracts.config import LaunchDelta, ProfileConfig, SuiteConfig
 from inference_suite.contracts.launch import LaunchError
 from inference_suite.contracts.layout import CAPTURE_TRACE_DIRS, RunLayout
+from inference_suite.contracts.report import FailedStep
 from inference_suite.frameworks import Framework
+from inference_suite.runtime.watch import Stop
 
 SGLANG_PROFILER_DIR_ENV = "SGLANG_TORCH_PROFILER_DIR"
+#: Where SGLang's server reads its admin key from when ``--admin-api-key`` is not given.
+SGLANG_ADMIN_KEY_ENV = "SGLANG_ADMIN_API_KEY"
+#: SGLang refuses to start with an admin key beside its native gRPC listener, which bypasses HTTP auth; the listener is
+#: on when either is set.
+_SGLANG_GRPC_FLAG = "grpc-port"
+_SGLANG_GRPC_ENV = "SGLANG_GRPC_PORT"
 ATOM_PROFILER_DIR_FLAG = "--torch-profiler-dir"
 #: How long ATOM's server waits for its engine to write the trace before ``/stop_profile`` fails (300 s by default);
 #: set to the round's own wait, so a capture the round would still wait for is not cut short by the server.
@@ -85,13 +102,33 @@ def start_body(profile: ProfileConfig, framework: Framework) -> dict[str, object
     return body
 
 
-def server_request(url: str, body: Mapping[str, object] | None) -> bytes:
-    """POST ``body`` as JSON to ``url`` (GET when ``body`` is ``None``) and return the answer; raises one of
-    :data:`SERVER_REQUEST_ERRORS` when the server refuses the request or does not answer."""
+def admin_key(framework: Framework, argv: Sequence[str], env: Mapping[str, str]) -> str | None:
+    """A fresh admin key for a profile round's server launched with ``argv`` and ``env``; ``None`` for a server that
+    takes none: not SGLang, or SGLang with its gRPC listener on, whose profiler then stays refused."""
+    if framework is not Framework.SGLANG or _SGLANG_GRPC_ENV in env:
+        return None
+    if any(name == _SGLANG_GRPC_FLAG for name, _ in argv_flag_occurrences(argv)):
+        return None
+    return secrets.token_urlsafe(32)
+
+
+def server_request(url: str, body: Mapping[str, object] | None, key: str | None = None) -> bytes:
+    """POST ``body`` as JSON to ``url`` (GET when ``body`` is ``None``), with ``key`` as its bearer token when given,
+    and return the answer; raises one of :data:`SERVER_REQUEST_ERRORS` when the server refuses the request or does not
+    answer."""
     data = None if body is None else json.dumps(body).encode()
-    request = urllib.request.Request(url, data=data, headers={"Content-Type": "application/json"})
+    headers = {"Content-Type": "application/json"}
+    if key is not None:
+        headers["Authorization"] = f"Bearer {key}"
+    request = urllib.request.Request(url, data=data, headers=headers)
     with _OPENER.open(request, timeout=_CONTROL_TIMEOUT_SEC) as response:
         return response.read()
+
+
+def start_refusal(error: str, exc: Exception) -> Stop | None:
+    """The stop a ``/start_profile`` that raised ``exc``, recorded as ``error``, makes: ``profile_refused`` when the
+    server answered it with an error status, none when the server did not answer."""
+    return Stop(FailedStep.PROFILE_REFUSED, error) if isinstance(exc, urllib.error.HTTPError) else None
 
 
 @dataclass(frozen=True)
@@ -99,7 +136,7 @@ class WindowCapture:
     """What a window did, as ``profile/capture.json`` records it; every instant is Unix seconds.
 
     ``profiling_start_unix`` is the AgentX replay's first profiling request (``None`` for a fixed load), and ``error``
-    the control request the server refused, which leaves no trace rather than failing the round.
+    the control request the server refused or did not answer.
     """
 
     profiling_start_unix: float | None
@@ -141,13 +178,16 @@ def settle_traces(layout: RunLayout) -> tuple[str, ...]:
 
 __all__ = [
     "SERVER_REQUEST_ERRORS",
+    "SGLANG_ADMIN_KEY_ENV",
     "SGLANG_PROFILER_DIR_ENV",
     "START_PROFILE_PATH",
     "STOP_PROFILE_PATH",
     "WindowCapture",
+    "admin_key",
     "make_trace_dirs",
     "profiler_layer",
     "server_request",
     "settle_traces",
     "start_body",
+    "start_refusal",
 ]

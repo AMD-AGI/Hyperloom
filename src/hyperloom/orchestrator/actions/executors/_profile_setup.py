@@ -23,10 +23,14 @@ from pathlib import Path
 from types import MappingProxyType
 from typing import Any, Callable, Mapping, NamedTuple
 
+import yaml
+
 from hyperloom_common.env import env_bool, env_flag, is_truthy
 from hyperloom.common.workload_defaults import DEFAULT_CONC, DEFAULT_OSL
+from hyperloom.inference_optimizer import framework_registry
 from hyperloom.inference_optimizer.model_config_utils import model_is_gemma2
 from hyperloom.inference_optimizer.runtime_environment import prepend_launch_path
+from hyperloom.inference_optimizer.session.paths import asset_root
 from inference_suite.argv import argv_flag_occurrences, canonical_flag_name
 from inference_suite.contracts import BaseLaunch, ConfigError, LaunchDelta, ProfileConfig, ServerConfig
 from inference_suite.frameworks import Framework
@@ -644,6 +648,13 @@ _SGLANG_ANNOTATION_ENV = MappingProxyType(
 )
 _SGLANG_GRAPH_PROFILE_FLAG = "--enable-profile-cuda-graph"
 _SGLANG_EAGER_FLAG = "--disable-cuda-graph"
+#: The HIP runtime's switches to replay a captured graph node by node, one per ROCm line, without which the profiler
+#: records almost none of a replay's kernels. A fixed-sequence profile takes them from its shipped configuration.
+_GRAPH_REPLAY_SWITCHES = (
+    "DEBUG_CLR_GRAPH_PACKET_CAPTURE",
+    "DEBUG_HIP_GRAPH_SEGMENT_SCHEDULING",
+    "DEBUG_HIP_GRAPH_CLASSIC_PATH",
+)
 
 
 def torch_profiler(bench: Mapping[str, Any]) -> Mapping[str, Any]:
@@ -708,6 +719,14 @@ def _atom_annotation(user: LaunchDelta, base: BaseLaunch) -> LaunchDelta:
     return LaunchDelta(env_set=env)
 
 
+@cache
+def _graph_replay_env(framework: Framework) -> Mapping[str, str]:
+    """The graph-replay switches as ``framework``'s shipped profile configuration sets them."""
+    name = framework_registry.shipped_config_name("profile", framework.value)
+    envs = yaml.safe_load((asset_root() / "assets" / "configs" / name).read_text(encoding="utf-8"))["benchmark"]["envs"]
+    return MappingProxyType({switch: str(envs[switch]) for switch in _GRAPH_REPLAY_SWITCHES})
+
+
 class _AgentxProfileSpelling(NamedTuple):
     """How one framework's server is profiled in an AgentX round."""
 
@@ -719,12 +738,16 @@ class _AgentxProfileSpelling(NamedTuple):
     annotates_on_start: bool = False
     #: The window it records when the point sets no ``capture_timeout_seconds``.
     default_capture_sec: float = _AGENTX_CAPTURE_SEC
+    #: Whether its capture replays graphs node by node, as its fixed-sequence profile does (:func:`_graph_replay_env`).
+    replays_node_by_node: bool = False
 
 
 _AGENTX_PROFILES: Mapping[Framework, _AgentxProfileSpelling] = MappingProxyType(
     {
         Framework.SGLANG: _AgentxProfileSpelling(_sglang_annotation, annotates_on_start=True),
-        Framework.VLLM: _AgentxProfileSpelling(_vllm_annotation, plain=_vllm_profiler_config(patched=False)),
+        Framework.VLLM: _AgentxProfileSpelling(
+            _vllm_annotation, plain=_vllm_profiler_config(patched=False), replays_node_by_node=True
+        ),
         Framework.ATOM: _AgentxProfileSpelling(_atom_annotation, default_capture_sec=_ATOM_AGENTX_CAPTURE_SEC),
     }
 )
@@ -738,7 +761,10 @@ def _agentx_profile_layer(
     if not settings.get("enabled"):
         return LaunchDelta()
     spelling = _AGENTX_PROFILES[framework]
-    return spelling.annotation(user, base) if settings.get("detailed_annotations") is True else spelling.plain
+    layer = spelling.annotation(user, base) if settings.get("detailed_annotations") is True else spelling.plain
+    if not spelling.replays_node_by_node:
+        return layer
+    return replace(layer, env_set={**layer.env_set, **_graph_replay_env(framework)})
 
 
 def profiled_server(server: ServerConfig, bench: Mapping[str, Any], base: BaseLaunch) -> ServerConfig:

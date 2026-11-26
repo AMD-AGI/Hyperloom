@@ -344,6 +344,23 @@ def test_a_vllm_agentx_profile_passes_the_profiler_fields_its_annotations_need()
     assert config.profile.agentx_duration_sec == 600.0
 
 
+@pytest.mark.parametrize("annotated", [True, False])
+def test_a_vllm_agentx_profile_replays_graphs_node_by_node_as_the_fixed_sequence_profile_does(annotated) -> None:
+    """Without the HIP runtime's switches the profiler records almost none of a graph replay's kernels."""
+    base = _base()
+    base = replace(base, framework="vllm", query=replace(base.query, framework="vllm"), entrypoint=("vllm", "serve"))
+    point = _profiled("vllm", detailed_annotations=annotated)
+    point["benchmark"]["agentx"]["launch_overrides"].update(append_args=list(base.args), env={})
+
+    env = suite_config(point, base, _settings()).server.user.env_set
+
+    assert {
+        "DEBUG_CLR_GRAPH_PACKET_CAPTURE": "0",
+        "DEBUG_HIP_GRAPH_SEGMENT_SCHEDULING": "0",
+        "DEBUG_HIP_GRAPH_CLASSIC_PATH": "1",
+    }.items() <= env.items()
+
+
 @pytest.mark.parametrize(
     ("settings", "message"),
     [({"num_profiles": 2}, "2 captures"), ({"flush_timeout_seconds": 1800}, "flush_timeout_seconds")],
