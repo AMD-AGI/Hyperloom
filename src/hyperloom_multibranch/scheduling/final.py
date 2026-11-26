@@ -521,6 +521,11 @@ def _seeded_plan(chosen: str, points: SweepPoints, base: BaseLaunch) -> SweepPla
     return SweepPlan(chosen, points, groups)
 
 
+def sweep_tests_at_once(settings: RunSettings) -> int:
+    """How many of the sweep's tests run at once: ``--conc-sweep-parallel``, within ``--max-parallel-tests``."""
+    return min(settings.conc_sweep_parallel, settings.caps.max_parallel_tests)
+
+
 def sweep_unfinished(layout: SessionLayout, settings: RunSettings) -> bool:
     """Whether the session in ``layout`` closed after a FINAL that chose, asked for a conc sweep, and that sweep has
     not run its course; a session that ended before FINAL chose is finished first."""
@@ -788,6 +793,7 @@ __all__ = [
     "session_candidates",
     "sweep_curve",
     "sweep_plan",
+    "sweep_tests_at_once",
     "sweep_unfinished",
     "write_skipped",
 ]

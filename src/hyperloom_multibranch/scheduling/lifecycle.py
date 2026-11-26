@@ -106,6 +106,7 @@ from hyperloom_multibranch.scheduling.final import (
     FinalSelector,
     SweepPlan,
     session_candidates,
+    sweep_tests_at_once,
 )
 from hyperloom_multibranch.scheduling.forks import ForkDesk
 from hyperloom_multibranch.scheduling.integrator import BundlingIntegrator, Integrator, LlmPatchResolver, MergeRecords
@@ -437,7 +438,7 @@ class Session:
             self._layout,
             self._settings.workload,
             self._tests,
-            min(self._settings.conc_sweep_parallel, self._settings.caps.max_parallel_tests),
+            sweep_tests_at_once(self._settings),
             longest,
             deadline_unix,
         )

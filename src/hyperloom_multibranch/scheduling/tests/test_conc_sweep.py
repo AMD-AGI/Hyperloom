@@ -110,7 +110,7 @@ def _sweep(
 ) -> final.ConcSweep:
     plan = final.sweep_plan(layout, settings)
     assert isinstance(plan, final.SweepPlan)
-    parallel = min(settings.conc_sweep_parallel, settings.caps.max_parallel_tests)
+    parallel = final.sweep_tests_at_once(settings)
     return final.ConcSweep(plan, "root", layout, settings.workload, tests, parallel, 600.0, deadline_unix)
 
 
@@ -290,12 +290,12 @@ class _Counting(_Tests):
             self.running -= 1
 
 
-@pytest.mark.parametrize(("sweep_parallel", "peak"), [(1, 1), (2, 2), (4, 4)])
-def test_the_sweep_runs_as_many_tests_at_once_as_asked_pairing_each_concurrency(
-    tmp_path: Path, inferencex_base: None, sweep_parallel: int, peak: int
+@pytest.mark.parametrize(("sweep_parallel", "parallel", "peak"), [(1, 8, 1), (2, 8, 2), (4, 8, 4), (4, 2, 2)])
+def test_the_sweep_runs_as_many_tests_at_once_as_asked_within_the_tests_allowed_pairing_each_concurrency(
+    tmp_path: Path, inferencex_base: None, sweep_parallel: int, parallel: int, peak: int
 ):
     tests = _Counting()
-    settings = _settings(AGENTX, parallel=8, sweep_parallel=sweep_parallel)
+    settings = _settings(AGENTX, parallel=parallel, sweep_parallel=sweep_parallel)
 
     asyncio.run(_sweep(_layout(tmp_path), settings, tests).run(_never()))
 
