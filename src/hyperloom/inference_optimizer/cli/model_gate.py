@@ -26,7 +26,7 @@ from ..model_config_utils import (
     load_model_config_dict,
     _load_model_max_position_embeddings,
 )
-from .model_compat import _detect_incompatible_model_config, _detect_unrecognized_architecture
+from .model_compat import _detect_incompatible_model_config
 
 log = logging.getLogger(__name__)
 
@@ -80,45 +80,6 @@ _SUPPORTED_MODEL_TYPES = frozenset(
         "granitemoeshared",
         "stablelm",
         "persimmon",
-    }
-)
-
-_UNSUPPORTED_MODEL_TYPES = frozenset(
-    {
-        # RWKV6/Qwen2 hybrid identifiable by model_type alone in some checkpoints.
-        "rwkv6qwen2",
-        "gemma3",
-        "mllama",
-        "llava",
-        "llava_next",
-        "qwen2_vl",
-        "qwen2_5_vl",
-        "idefics",
-        "idefics2",
-        "idefics3",
-        "paligemma",
-        "pixtral",
-        "internvl_chat",
-        "phi3_v",
-    }
-)
-
-_UNSUPPORTED_ARCHITECTURES = frozenset(
-    {
-        # RWKV6/Qwen2 hybrid linear-attention arch: fails ModelConfig validation at boot.
-        "RWKV6Qwen2ForCausalLM",
-        "Gemma3ForConditionalGeneration",
-        "InternVLChatModel",
-        "Phi3VForCausalLM",
-        "LlavaForConditionalGeneration",
-        "LlavaNextForConditionalGeneration",
-        "MllamaForConditionalGeneration",
-        "PaliGemmaForConditionalGeneration",
-        "Qwen2VLForConditionalGeneration",
-        "Qwen2_5_VLForConditionalGeneration",
-        "Idefics2ForConditionalGeneration",
-        "Idefics3ForConditionalGeneration",
-        "PixtralForConditionalGeneration",
     }
 )
 
@@ -300,30 +261,13 @@ def _detect_unsupported_model(model_path: str) -> dict | None:
         return None
     nested = config.get("text_config")
     nested = nested if isinstance(nested, dict) else {}
-    # Wrapper models may nest the real arch under text_config; merge so the unsupported-arch blocklist still matches.
+    # Wrapper models may nest the real arch under text_config.
     architectures = list(dict.fromkeys(_config_architectures(config) + _config_architectures(nested)))
     first_arch = architectures[0] if architectures else ""
     model_type = str(config.get("model_type") or "").strip()
     model_type_l = model_type.lower()
-    nested_model_type = str(nested.get("model_type") or "").strip()
 
-    # Registry/config incompatibilities are handled by the model-config gate so they get the precise
-    # model_config_incompatible stop reason.
-    if _detect_unrecognized_architecture(config) is not None:
-        return None
-
-    # Hard denylist wins first: explicit VLM arch / model_type is vision_only even if it also carries a ForCausalLM
-    # marker.
-    for arch in architectures:
-        if arch in _UNSUPPORTED_ARCHITECTURES:
-            return _unsupported_hit(arch, model_type, f"unsupported architecture '{arch}'")
-    if model_type_l in _UNSUPPORTED_MODEL_TYPES:
-        return _unsupported_hit(first_arch, model_type, f"unsupported model_type '{model_type}'")
-    if nested_model_type.lower() in _UNSUPPORTED_MODEL_TYPES:
-        return _unsupported_hit(first_arch, model_type, f"unsupported text_config.model_type '{nested_model_type}'")
-
-    # A multimodal config key is only a degrade signal, not a hard block: if a text decoder exists we coerce to the
-    # text path with a warning.
+    # A multimodal config key is a degrade signal: with a text decoder the model runs on the text path with a warning.
     _has_text_decoder = _config_declares_text_decoder(config, architectures, model_type_l)
     for key in _UNSUPPORTED_CONFIG_KEYS:
         if key in config:
@@ -760,11 +704,7 @@ def _preflight_context_window(args: argparse.Namespace, session_dir: Path) -> bo
 def _refuse_model_config(args: argparse.Namespace, session_dir: Path, *, model: str, detail: str) -> None:
     """Record the model-config gate failure, persist its stop report and breakdown, and print the refusal."""
     name = Path(model).name or model
-    reason = (
-        f"Model '{name}' has an incompatible config: {detail} Refusing to run "
-        f"before the heavy server bring-up. Upgrade the framework/transformers "
-        f"to a version that supports this model, or skip it on this hardware."
-    )
+    reason = f"Model '{name}' has an incompatible config: {detail} Refusing to run before the heavy server bring-up."
     _persist_gate_stop_report(
         session_dir,
         stop_reason="model_config_incompatible",
