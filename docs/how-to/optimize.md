@@ -227,7 +227,8 @@ point boots its own server, so a stop leaves pairs measured.
 
 The sweep logs its estimated length before it starts, rewrites
 `reports/conc_sweep_summary.json` and `reports/conc_sweep_raw.csv` after every
-point, and draws `reports/conc_sweep_curve.png` (interactivity against
+point, carrying the summary each time as `conc_sweep_summary` in the session's
+`session_breakdown.json`, and draws `reports/conc_sweep_curve.png` (interactivity against
 throughput per GPU) at the end. The summary's header names the framework,
 precision, GPU type and count, TP and EP, the image and the recipe the base came
 from, where the points' launches come from (`point_launches`: `source` or

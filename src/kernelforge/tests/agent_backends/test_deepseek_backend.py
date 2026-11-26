@@ -9,7 +9,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from hyperloom_common.llm.deepseek_session import DEEPSEEK_PROVIDER_ROUTE
+from hyperloom_common.llm.deepseek_session import GATEWAY_PROVIDER_ROUTE
 from hyperloom_common.llm.reasoning_effort import harness_reasoning_effort
 from kernelforge.agent_backends.base import (
     AgentRunSpec,
@@ -194,7 +194,7 @@ def test_run_sends_the_system_prompt_with_the_task_and_names_the_route(tmp_path:
 
     assert result.session_id.startswith("forge-")
     harness = _FakeHarness.instances[-1]
-    assert harness.kwargs["provider"] == DEEPSEEK_PROVIDER_ROUTE
+    assert harness.kwargs["provider"] == GATEWAY_PROVIDER_ROUTE
     # The sandbox root comes from the subprocess working directory, so a runtime rooted anywhere else would confine a
     # read-only session to the wrong tree.
     assert harness.kwargs["runtime_cwd"] == str(repo.resolve())

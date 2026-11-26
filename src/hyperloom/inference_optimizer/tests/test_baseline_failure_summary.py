@@ -203,6 +203,21 @@ def test_failure_summary_from_server_init_dead_attempt():
     assert fs["last_attempt_id"] == "baseline-1"
 
 
+def test_failure_summary_names_the_exception_above_the_engines_report_of_its_death():
+    """vLLM's own death report comes last; the root cause the operator reads is the exception that caused it."""
+    error = (
+        "(EngineCore_DP0 pid=7) ERROR EngineCore failed to start.\n"
+        "(EngineCore_DP0 pid=7) ERROR ValueError: Unquantized MoE backend 'ROCm AITER' does not support the "
+        "deployment configuration.\n"
+        "(APIServer pid=1) RuntimeError: Engine core initialization failed. See root cause above."
+    )
+    fs = _build_failure_summary(_failed_state(error_class="server_init_dead", error=error))
+    assert fs is not None
+    assert fs["root_cause"] == (
+        "ValueError: Unquantized MoE backend 'ROCm AITER' does not support the deployment configuration."
+    )
+
+
 def test_failure_summary_build_error_is_not_reported_as_no_failed_attempt(monkeypatch):
     def _broken_headline(text):
         raise TypeError("headline picker broke")

@@ -189,10 +189,23 @@ sent), sends those prompts instead through `inference_suite.load.dataset_client`
 one user message each to `/v1/chat/completions`, rendered by the server's chat
 template, at temperature 0 with `max_tokens` the `OSL` and EOS honoured.
 Each pass sends its prompt count from the file's lines, shuffled by its seed and
-cycled, so every arm sends the same requests. That count is `NUM_PROMPTS`; a point
-that sets none sends the round's per-concurrency default, which can cover only part
-of the file: set `NUM_PROMPTS` to the file's line count to send all of it, and pass a
-shorter file to send fewer. A concurrency sweep sets its own count per rung. A session
+cycled, so every arm sends the same requests. A measured round's count is the number
+of prompts in the file, so it sends the whole file once at every concurrency level;
+a point without a dataset sends its concurrency times 10, 5, 3 or 2, fewer the
+longer `ISL` + `OSL`. The count is written
+into the point as `NUM_PROMPTS` when the point is rendered, on the host that renders
+it: a file that host cannot read, or a line that holds no prompt, fails the render
+naming the file. `NUM_PROMPTS` is not read from the environment; a point's own
+`envs.NUM_PROMPTS` and `hyperloom optimize --extra-env NUM_PROMPTS=<n>` override the
+count in the baseline round and the candidate rounds, which are rendered from the
+session's baseline config. A concurrency sweep sets its own count per rung, for a
+dataset session the file's prompt count whatever is pinned. A boot round sends one
+request. A profile round keeps its own count over a point's `envs.NUM_PROMPTS`, but
+an `--extra-env NUM_PROMPTS=<n>` reaches it too. Pass a shorter file to send fewer.
+A round whose concurrency is above the file's prompt count never has
+that many requests in flight, and the client's stderr says so; at concurrency 1 the
+whole file is sent one request at a time, inside the same
+`INFERENCE_OPTIMIZER_BENCHMARK_TIMEOUT_SEC` as any round. A session
 with a dataset serves the model's own context window, as an AgentX session does, in
 place of `ISL` + `OSL` plus headroom, since the prompts carry their own lengths;
 `MAX_MODEL_LEN` still overrides it. A prompt the server answers with a 4xx status, as it

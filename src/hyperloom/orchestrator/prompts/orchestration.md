@@ -390,6 +390,19 @@ the code actually is; SESSION CONTEXT names the tree this session optimises
   stands only while its gain is below the current KEEP bar, so a variant
   that missed an earlier cycle's higher bar may be proposed again; an
   accuracy or tail-latency REVERT stands regardless.
+* **`explore` does not relaunch a change the framework refused at start.**
+  Once a variant's server exits before ready on its own change and its log
+  names a configuration error (a `ValueError`, `NotImplementedError`,
+  `AssertionError`, `TypeError` or `ValidationError`; a capacity,
+  out-of-memory or free-device-memory shortfall, or a fault whose log names
+  the host, does not count, while another host fault raised under one of
+  these names, such as missing weights or a full disk, does), any later
+  variant this session carrying that change whole is skipped as
+  `known_dead_change`, on any stack, unless the stack already runs it; the
+  delegated result's `skipped:` line names the dead variant and its cause.
+  A grid made only of such variants is denied as
+  `explore_grid_already_covered`. Adding a fix on top does not lift it:
+  change or drop the dead setting itself.
 * **`explore` validates its own KEEPs.**
   An `explore` KEEP is measured on the full `optimization_stack` and
   advances `cumulative_gain_validated` as a side effect; there is no
