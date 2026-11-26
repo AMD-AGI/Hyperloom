@@ -178,6 +178,34 @@ def test_an_agentx_slots_own_forced_acceptance_is_taken_out_on_a_base_without_go
     assert "--speculative-algorithm" in config.server.user.args_add
 
 
+def test_a_base_without_golden_that_forces_acceptance_serves_the_round_with_the_draft_and_no_forcing() -> None:
+    draft = ("--speculative-algorithm", "EAGLE", "--speculative-num-steps", "3")
+    base = replace(_agentx_base(golden=None), args=(*_BASE_ARGS, *draft), env={**_BASE_ENV, **_SGLANG_FORCING})
+
+    config = accuracy_config(_agentx_point(base, LaunchChanges()), base, _settings(), 900.0)
+
+    launch = compose(config, base, RoundFacts("0" * 64, "0.0.0", VersionCheck.NOT_APPLICABLE))
+    assert isinstance(launch, Launch), launch
+    assert not _SGLANG_FORCING.keys() & {env.name for env in launch.env_sources}
+    assert {"--speculative-algorithm", "--speculative-num-steps"} <= {arg.flag for arg in launch.args}
+
+
+def test_a_fixed_points_round_takes_the_forcing_its_base_args_set_out_of_the_composed_launch() -> None:
+    base = _base("vllm")
+    base = replace(
+        base, args=(*base.args, *_FORCED_MTP.split(" "), "--speculative-config.synthetic-acceptance-length", "2.32")
+    )
+    point = _seeded(_point("vllm", EXTRA_VLLM_ARGS="--max-num-seqs 64"), base)
+
+    config = accuracy_config(point, base, _settings(), 900.0)
+
+    launch = compose(config, base, RoundFacts("0" * 64, "0.0.0", VersionCheck.NOT_APPLICABLE))
+    assert isinstance(launch, Launch), launch
+    tokens = [token for arg in launch.args for token in (arg.flag, *arg.values)]
+    assert speculative_config(argv_flag_occurrences(tokens)) == {"method": "mtp", "num_speculative_tokens": 3}
+    assert "--max-num-seqs" in tokens
+
+
 def _unseeded(point: dict) -> dict:
     point["benchmark"]["agentx"]["launch_overrides"]["replace_args"] = False
     return point

@@ -59,7 +59,14 @@ from hyperloom.common.outside_facts import (
 )
 from hyperloom.inference_optimizer.framework_paths import KERNEL_LIBRARY_PACKAGES
 from hyperloom.inference_optimizer.framework_registry import extra_args_env
-from inference_suite.argv import argv_flag_occurrences, canonical_flag_name, normalize_argv, remove_server_args
+from inference_suite.argv import (
+    argv_flag_occurrences,
+    canonical_flag_name,
+    json_object,
+    normalize_argv,
+    parse_removal_specs,
+    remove_server_args,
+)
 from inference_suite.contracts import (
     AGENTX_CLIENT_ENV_PREFIX,
     AGENTX_DEFAULT_DURATION_SEC,
@@ -880,13 +887,41 @@ def check_server_config(document: Mapping[str, object], base: BaseLaunch, settin
     )
 
 
+def _real_acceptance_layer(user: LaunchDelta, base: BaseLaunch) -> LaunchDelta:
+    """``user`` with every acceptance simulation the composed launch would run taken out: its own, and what it would
+    inherit from ``base``'s args and env, which it removes and, for a speculative config, restates without the
+    simulation. The draft stays."""
+    args, env = real_acceptance(user.args_add, user.env_set)
+    real_args, real_env = real_acceptance(base.args, base.env)
+    inherited = dict(argv_flag_occurrences(base.args))
+    real = dict(argv_flag_occurrences(real_args))
+    layered = {name for name, _ in argv_flag_occurrences(args)}
+    layered |= {canonical_flag_name(flag) for flag, _ in parse_removal_specs(list(user.args_remove))}
+    removed = sorted(f"--{name}" for name in inherited.keys() - real.keys() - layered)
+    restated = [
+        token
+        for name, value in real.items()
+        if name not in layered and (json_object(value) or value) != (json_object(inherited[name]) or inherited[name])
+        for token in (f"--{name}", value)
+    ]
+    unset = sorted(base.env.keys() - real_env.keys() - env.keys() - set(user.env_unset))
+    return replace(
+        user,
+        args_add=(*args, *restated),
+        args_remove=(*user.args_remove, *removed),
+        env_set=env,
+        env_unset=(*user.env_unset, *unset),
+    )
+
+
 def accuracy_config(
     document: Mapping[str, object], base: BaseLaunch, settings: RoundSettings, timeout_sec: float
 ) -> SuiteConfig:
     """The accuracy round of the point ``document``: its launch on ``base`` with every acceptance simulation taken
-    out, eval only. The base's golden layer is left out (D9), and a forced acceptance the point's own layer sets is
-    removed (:func:`~inference_suite.golden.real_acceptance`), so the eval scores the target model's own text; an
-    AgentX point's launch is its AgentX server's, any other point's the fixed round's.
+    out, eval only. The base's golden layer is left out (D9), and a forced acceptance the point's own layer sets or
+    inherits from the base's args and env is removed (:func:`~inference_suite.golden.real_acceptance`), so the eval
+    scores the target model's own text; an AgentX point's launch is its AgentX server's, any other point's the fixed
+    round's.
 
     The round owns its server, so a client-only session, whose server is someone else's, has no accuracy round.
     ``timeout_sec`` bounds the server's boot and the eval each.
@@ -905,11 +940,10 @@ def accuracy_config(
         server = _agentx_server(point, bench, base, settings)
     else:
         server = _server(point, base, settings, None, _user_layer(point, base))
-    args, env = real_acceptance(server.user.args_add, server.user.env_set)
     return SuiteConfig(
         server=replace(
             server,
-            user=replace(server.user, args_add=args, env_set=env),
+            user=_real_acceptance_layer(server.user, base),
             golden=GoldenUse.APPLY if base.golden_al is None else GoldenUse.EXCLUDE,
         ),
         workload=WorkloadKind.NONE,
