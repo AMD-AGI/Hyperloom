@@ -186,12 +186,12 @@ def test_launch_names_the_model_and_its_context(checkout):
 
 def test_replay_keeps_the_launch_on_new_hosts(checkout):
     first = resolve(_query(), ResolveInputs(inferencex=lambda: checkout))
-    replayed = resolve(_query(router_host="r1"), ResolveInputs(replay=first))
+    replayed = resolve(_query(router_host="r1"), ResolveInputs(inferencex=None, replay=first))
     assert replayed.digest() == first.digest() and replayed.frontend.host == "r1"
     with pytest.raises(PdResolveError, match="hosts"):
-        resolve(_query(decode=2), ResolveInputs(replay=first))
+        resolve(_query(decode=2), ResolveInputs(inferencex=None, replay=first))
     with pytest.raises(PdResolveError, match="serves"):
-        resolve(_query(model_path="/models/N"), ResolveInputs(replay=first))
+        resolve(_query(model_path="/models/N"), ResolveInputs(inferencex=None, replay=first))
 
 
 def _unreadable():
@@ -299,10 +299,6 @@ def test_table_runs_the_asked_router_without_the_other_routers_args():
     assert asked.role(Role.PREFILL).args == default.role(Role.PREFILL).args
 
 
-def test_infera_serves_sglang_through_the_platform_frontend():
-    assert _query(frontend=FrontendType.INFERA).served_frontend is FrontendType.INFERA
-
-
 def _aggregated(workers=2, **fields):
     query = _query(roles={Role.WORKER: RoleAsk(tuple(f"w{i}" for i in range(workers)))}, mode=PdMode.AGGREGATED)
     return replace(query, frontend=FrontendType.INFERA, **fields)
@@ -331,40 +327,46 @@ def test_aggregated_workers_run_the_single_node_base(checkout):
 
 
 def test_a_base_spanning_hosts_is_one_worker():
-    launch = resolve(_aggregated(), ResolveInputs(base=lambda: _base_launch(tp=16)))
+    launch = resolve(_aggregated(), ResolveInputs(inferencex=None, base=lambda: _base_launch(tp=16)))
     assert (launch.role(Role.WORKER).workers, launch.role(Role.WORKER).tp) == (1, 16)
 
 
 def test_aggregated_operator_args_win_over_the_base():
     operator = OperatorArgs(worker=("--tp-size", "16", "--x"))
-    launch = resolve(_aggregated(), ResolveInputs(operator=operator, base=lambda: pytest.fail("resolved a base")))
+    launch = resolve(
+        _aggregated(), ResolveInputs(inferencex=None, operator=operator, base=lambda: pytest.fail("resolved a base"))
+    )
     assert launch.source.kind is PdSourceKind.OPERATOR and launch.role(Role.WORKER).args == ("--x",)
 
 
 def test_aggregated_session_without_a_base_is_refused():
     with pytest.raises(PdResolveError, match="no source serves the workers"):
-        resolve(_aggregated(), ResolveInputs(base=lambda: Miss(())))
+        resolve(_aggregated(), ResolveInputs(inferencex=None, base=lambda: Miss(())))
     with pytest.raises(PdResolveError, match="no resolver"):
-        resolve(_aggregated(), ResolveInputs())
+        resolve(_aggregated(), ResolveInputs(inferencex=None))
 
 
 def test_replay_keeps_the_mode():
-    first = resolve(_aggregated(), ResolveInputs(base=_base_launch))
-    assert resolve(_aggregated(router_host="r9"), ResolveInputs(replay=first)).digest() == first.digest()
+    first = resolve(_aggregated(), ResolveInputs(inferencex=None, base=_base_launch))
+    assert (
+        resolve(_aggregated(router_host="r9"), ResolveInputs(inferencex=None, replay=first)).digest() == first.digest()
+    )
     with pytest.raises(PdResolveError, match="aggregated, not disaggregated"):
-        resolve(_query(), ResolveInputs(replay=first))
+        resolve(_query(), ResolveInputs(inferencex=None, replay=first))
 
 
 def test_operator_topology_is_the_launch_topology():
     operator = OperatorArgs(decode=("--tp-size", "16", "--ep-size", "16", "--enable-dp-attention", "--dp-size", "16"))
-    decode = resolve(_query(decode=2), ResolveInputs(operator=operator)).role(Role.DECODE)
+    decode = resolve(_query(decode=2), ResolveInputs(inferencex=None, operator=operator)).role(Role.DECODE)
     assert (decode.tp, decode.ep, decode.dp_attention, decode.workers) == (16, 16, True, 1)
 
 
 def test_operator_topology_conflicting_with_the_node_list_is_refused():
     query = replace(_query(), roles={Role.PREFILL: RoleAsk(("p0",), tp=8), Role.DECODE: RoleAsk(("d0",))})
     with pytest.raises(PdResolveError, match="prefill tp"):
-        resolve(query, ResolveInputs(operator=OperatorArgs(prefill=("--tp-size", "4"), decode=("--x",))))
+        resolve(
+            query, ResolveInputs(inferencex=None, operator=OperatorArgs(prefill=("--tp-size", "4"), decode=("--x",)))
+        )
 
 
 def test_router_args_alone_replace_the_source_router(checkout):

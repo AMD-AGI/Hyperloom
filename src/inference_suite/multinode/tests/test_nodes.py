@@ -59,17 +59,17 @@ def test_minimal_node_list_takes_defaults():
 @pytest.mark.parametrize(
     ("fields", "match"),
     [
-        ({"extra": 1}, "unknown keys"),
+        ({"extra": 1}, "unknown key"),
         ({"framework": "vllm"}, "framework"),
         ({"service_url": "msg1:8000"}, "service_url"),
         ({"decode": [{"host": "10.0.0.2"}]}, "share hosts"),
-        ({"decode": [{"host": "10.0.0.3"}, {"host": "10.0.0.3"}]}, "twice"),
+        ({"decode": [{"host": "10.0.0.3"}, {"host": "10.0.0.3"}]}, "duplicate"),
         ({"decode": []}, "non-empty list"),
         ({"ssh": {"key_file": "key"}}, "absolute"),
         ({"ssh": {"key_file": "/k", "port": 70000}}, "ssh.port"),
         ({"gpus_per_node": 0}, "gpus_per_node"),
         ({"launch_mode": "remote"}, "launch_mode"),
-        ({"topology": {"router": {}}}, "unknown keys"),
+        ({"topology": {"router": {}}}, "unknown key"),
         ({"topology": {"decode": {"dp_attention": "yes"}}}, "dp_attention"),
         ({"config": {"prefill_args": "--a '1"}}, "tokenizable"),
         ({"framework": "atom", "frontend": "infera"}, "does not serve through the infera frontend"),
@@ -156,9 +156,9 @@ def test_aggregated_node_list_names_worker_hosts():
     [
         ({"prefill": [{"host": "10.0.0.2"}]}, "aggregated node list names no prefill"),
         ({"worker": None}, "lacks"),
-        ({"config": {"prefill_args": "--a"}}, "unknown keys"),
-        ({"topology": {"decode": {}}}, "unknown keys"),
-        ({"worker": [{"host": "10.0.0.5"}, {"host": "10.0.0.5"}]}, "twice"),
+        ({"config": {"prefill_args": "--a"}}, "unknown key"),
+        ({"topology": {"decode": {}}}, "unknown key"),
+        ({"worker": [{"host": "10.0.0.5"}, {"host": "10.0.0.5"}]}, "duplicate"),
         ({"mode": "mixed"}, "mode"),
     ],
 )
@@ -170,7 +170,7 @@ def test_invalid_aggregated_node_list_is_refused(fields, match):
 def test_a_disaggregated_node_list_names_no_workers():
     with pytest.raises(NodeListError, match="disaggregated node list names no worker"):
         parse_node_list(_document(worker=[{"host": "10.0.0.9"}]))
-    with pytest.raises(NodeListError, match="unknown keys"):
+    with pytest.raises(NodeListError, match="unknown key"):
         parse_node_list(_document(config={"worker_args": "--w"}))
 
 

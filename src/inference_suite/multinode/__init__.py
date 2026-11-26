@@ -18,10 +18,9 @@ from inference_suite.multinode.record import (
     read_record,
     write_record,
 )
-from inference_suite.multinode.ssh import HOST_KEY_ERRORS, SshClient, SshError, is_host_key_error, keyscan, ssh_options
+from inference_suite.multinode.ssh import SshError, is_host_key_error, keyscan, ssh_options
 
 __all__ = [
-    "HOST_KEY_ERRORS",
     "NODE_LIST_ENV",
     "NodeList",
     "NodeListError",
@@ -32,7 +31,6 @@ __all__ = [
     "RAN_RECORD_NAME",
     "RECORD_NAME",
     "Role",
-    "SshClient",
     "SshError",
     "is_host_key_error",
     "keyscan",
