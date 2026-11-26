@@ -90,6 +90,7 @@ from inference_suite.contracts import (
     WorkloadKind,
 )
 from inference_suite.frameworks import Framework, FrameworkKind, framework_facts
+from inference_suite.golden import real_acceptance
 
 from ..gpu._gpu_pin import ROCR_AUTOFILL_ENV
 from ..workload._workload_envs import QUALITY_REF_ENVS
@@ -882,26 +883,35 @@ def check_server_config(document: Mapping[str, object], base: BaseLaunch, settin
 def accuracy_config(
     document: Mapping[str, object], base: BaseLaunch, settings: RoundSettings, timeout_sec: float
 ) -> SuiteConfig:
-    """The D9 accuracy round of the AgentX point ``document``: its launch on ``base`` less the golden layer, eval only.
+    """The accuracy round of the point ``document``: its launch on ``base`` with every acceptance simulation taken
+    out, eval only. The base's golden layer is left out (D9), and a forced acceptance the point's own layer sets is
+    removed (:func:`~inference_suite.golden.real_acceptance`), so the eval scores the target model's own text; an
+    AgentX point's launch is its AgentX server's, any other point's the fixed round's.
 
     The round owns its server, so a client-only session, whose server is someone else's, has no accuracy round.
     ``timeout_sec`` bounds the server's boot and the eval each.
 
     Raises:
-        ConfigError: When the point is not AgentX, does not run the session base, names another framework or topology
-            than ``base``, or the session's rounds measure an external server.
+        ConfigError: When the point does not run the session base, names another framework or topology than ``base``,
+            or the session's rounds measure an external server.
     """
     bench = _bench(document)
-    if not is_agentx(bench):
-        raise ConfigError("an accuracy round serves an AgentX point")
     if settings.server_url is not None:
         raise ConfigError("an accuracy round owns its server, and a client-only session's server is external")
     point = _point_of(bench, timeout_sec, timeout_sec)
     point = replace(point, model=point.text(_MODEL_PATH_ENV) or point.model)
     _check_base(point, base)
-    server = _agentx_server(point, bench, base, settings)
+    if is_agentx(bench):
+        server = _agentx_server(point, bench, base, settings)
+    else:
+        server = _server(point, base, settings, None, _user_layer(point, base))
+    args, env = real_acceptance(server.user.args_add, server.user.env_set)
     return SuiteConfig(
-        server=replace(server, golden=GoldenUse.APPLY if base.golden_al is None else GoldenUse.EXCLUDE),
+        server=replace(
+            server,
+            user=replace(server.user, args_add=args, env_set=env),
+            golden=GoldenUse.APPLY if base.golden_al is None else GoldenUse.EXCLUDE,
+        ),
         workload=WorkloadKind.NONE,
         eval=_eval(point, enabled=True),
         telemetry=settings.telemetry,

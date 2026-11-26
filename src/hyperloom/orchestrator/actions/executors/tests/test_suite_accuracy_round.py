@@ -1,10 +1,11 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""The D9 accuracy round of an AgentX slot: the slot's launch on a server of its own, without golden, eval only.
+"""The accuracy round of a slot: the slot's launch on a server of its own, without golden, eval only.
 
-The points are composed the way the baseline composes them: the session base and its golden layer seeded in place of
-the recipe's argv, the slot's own layer applied above.
+The AgentX points are composed the way the baseline composes them: the session base and its golden layer seeded in
+place of the recipe's argv, the slot's own layer applied above. A fixed point's round is its fixed launch; either
+way an acceptance the slot's own layer forces is taken out, so the eval scores the target model's own text.
 """
 
 from __future__ import annotations
@@ -31,9 +32,10 @@ from hyperloom.orchestrator.actions.executors._suite.rounds import (
 from hyperloom.orchestrator.actions.executors.agentx_point import LaunchChanges, apply_launch_changes
 from hyperloom.orchestrator.actions.executors.agentx_point import seed_session_base
 from hyperloom.orchestrator.actions.executors.benchmark_run.accuracy import AccuracyRoundOutcome, run_accuracy_round
-from hyperloom.orchestrator.actions.executors.tests.test_suite_config import _settings
+from hyperloom.orchestrator.actions.executors.tests.test_suite_config import _base, _point, _seeded, _settings
 from hyperloom.orchestrator.state.base_launch import ServerBase
 from hyperloom.orchestrator.state.tests._session_base import freeze_base, session_base
+from inference_suite.argv import argv_flag_occurrences, speculative_config
 from inference_suite.compose import RoundFacts, compose
 from inference_suite.contracts import (
     BaseLaunch,
@@ -133,9 +135,47 @@ def test_a_base_without_a_golden_layer_has_nothing_to_exclude() -> None:
     assert config.workload is WorkloadKind.NONE and config.eval.enabled
 
 
-def _fixed(point: dict) -> dict:
-    point["benchmark"]["agentx"] = {"enabled": False}
-    return point
+#: Compact, as a launch carries it: the launcher expands the args variable unquoted, so the shell splits it on spaces.
+_FORCED_MTP = (
+    '--speculative-config {"method":"mtp","num_speculative_tokens":3,'
+    '"rejection_sample_method":"synthetic","synthetic_acceptance_length":2.32}'
+)
+_SGLANG_FORCING = {"SGLANG_SIMULATE_ACC_LEN": "2.32", "SGLANG_SIMULATE_ACC_METHOD": "match-expected"}
+
+
+def test_a_fixed_points_round_serves_its_launch_with_the_forced_acceptance_taken_out() -> None:
+    base = _base("vllm")
+    point = _seeded(_point("vllm", EXTRA_VLLM_ARGS=f"--max-num-seqs 64 {_FORCED_MTP}"), base)
+
+    config = accuracy_config(point, base, _settings(), 900.0)
+
+    assert (config.workload, config.server.golden, config.eval.enabled) == (WorkloadKind.NONE, GoldenUse.APPLY, True)
+    assert speculative_config(argv_flag_occurrences(config.server.user.args_add)) == {
+        "method": "mtp",
+        "num_speculative_tokens": 3,
+    }
+    assert "--max-num-seqs" in config.server.user.args_add
+
+
+def test_a_fixed_sglang_points_round_drops_the_simulation_env_and_keeps_the_draft() -> None:
+    base = _base("sglang")
+    draft = "--speculative-algorithm EAGLE --speculative-num-steps 3"
+    point = _seeded(_point("sglang", EXTRA_SGLANG_ARGS=draft, **_SGLANG_FORCING), base)
+
+    config = accuracy_config(point, base, _settings(), 900.0)
+
+    assert not _SGLANG_FORCING.keys() & config.server.user.env_set.keys()
+    assert "--speculative-algorithm" in config.server.user.args_add
+
+
+def test_an_agentx_slots_own_forced_acceptance_is_taken_out_on_a_base_without_golden() -> None:
+    base = _agentx_base(golden=None)
+    layer = LaunchChanges(args="--speculative-algorithm EAGLE --speculative-num-steps 3", env=_SGLANG_FORCING)
+
+    config = accuracy_config(_agentx_point(base, layer), base, _settings(), 900.0)
+
+    assert not _SGLANG_FORCING.keys() & config.server.user.env_set.keys()
+    assert "--speculative-algorithm" in config.server.user.args_add
 
 
 def _unseeded(point: dict) -> dict:
@@ -146,7 +186,6 @@ def _unseeded(point: dict) -> dict:
 @pytest.mark.parametrize(
     ("change", "settings", "message"),
     [
-        (_fixed, {}, "serves an AgentX point"),
         (_unseeded, {}, "does not run the session base"),
         (lambda point: point, {"server_url": "http://10.0.0.2:30000"}, "client-only session"),
     ],
@@ -209,9 +248,9 @@ def test_a_slot_run_again_replaces_the_accuracy_round_an_earlier_attempt_left(se
     assert not (slot / ACCURACY_DIR / "leftover").exists()
 
 
-def test_a_fixed_point_refuses_the_accuracy_round_as_config_invalid(session, tmp_path) -> None:
+def test_a_point_off_the_session_base_refuses_the_accuracy_round_as_config_invalid(session, tmp_path) -> None:
     slot = tmp_path / "slot"
-    point = _write(slot / "point.yaml", _fixed(_agentx_point(_agentx_base())))
+    point = _write(slot / "point.yaml", _unseeded(_agentx_point(_agentx_base())))
     route = session_route(session)
     assert route is not None
 
