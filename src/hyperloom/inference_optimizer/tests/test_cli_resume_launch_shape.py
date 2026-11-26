@@ -415,11 +415,11 @@ def test_a_pin_passed_on_the_resume_outranks_the_persisted_one(tmp_path, monkeyp
     assert exc.value.code == 2
 
 
-def test_the_resume_exports_its_pins_again_after_the_topology_step_rewrote_them(tmp_path, monkeypatch, request):
-    """The topology step sets SKIP_VARIANTS from its flag after the early pin export; the resume must put the pin back."""
-    import asyncio
+def _prepare_resume_session(tmp_path, monkeypatch, request, *, name, operator_extra_env=None, pd_record=False):
+    """Write a resumable session named ``name`` and patch the CLI up to the first step the resume tests inspect.
 
-    from hyperloom.inference_optimizer.cli import _build_parser, _run_optimize
+    ``pd_record`` also writes a node-list PD record, so the resume takes the PD branch.
+    """
     from hyperloom.inference_optimizer.cli.bootstrap import MEASUREMENT_EPOCH
 
     cli_mod = "hyperloom.inference_optimizer.cli"
@@ -427,19 +427,23 @@ def test_the_resume_exports_its_pins_again_after_the_topology_step_rewrote_them(
     request.addfinalizer(lambda: (os.environ.clear(), os.environ.update(saved_environ)))
 
     workspace = tmp_path / "sessions"
-    resume_dir = workspace / "Qwen-Test" / "pinned-skip"
+    resume_dir = workspace / "Qwen-Test" / name
     model = tmp_path / "Qwen-Test"
     (resume_dir / "reports").mkdir(parents=True, exist_ok=True)
     SharedState(
-        session_id="resume-pinned-skip",
+        session_id=f"resume-{name}",
         model_name=model.name,
         model_path=str(model),
         measurement_epoch=MEASUREMENT_EPOCH,
-        operator_extra_env={"SKIP_VARIANTS": "pinned"},
+        operator_extra_env=dict(operator_extra_env or {}),
     ).save(resume_dir)
     (resume_dir / "manifest.json").write_text(
-        json.dumps({"schema_version": 4, "session_id": "resume-pinned-skip"}), encoding="utf-8"
+        json.dumps({"schema_version": 4, "session_id": f"resume-{name}"}), encoding="utf-8"
     )
+    if pd_record:
+        from inference_suite.multinode import RECORD_NAME
+
+        (resume_dir / RECORD_NAME).write_text("{}", encoding="utf-8")
 
     monkeypatch.setenv("INFERENCE_OPTIMIZER_CURRENT_SESSION_DIR", str(resume_dir))
     monkeypatch.setenv("USER_DATA_PATH", str(workspace))
@@ -452,6 +456,19 @@ def test_the_resume_exports_its_pins_again_after_the_topology_step_rewrote_them(
     )
     monkeypatch.setattr(f"{cli_mod}._preflight", lambda args: ("", ""))
     monkeypatch.setattr(f"{cli_mod}._check_codex_sandbox", lambda backend: None)
+    return resume_dir
+
+
+def test_the_resume_exports_its_pins_again_after_the_topology_step_rewrote_them(tmp_path, monkeypatch, request):
+    """The topology step sets SKIP_VARIANTS from its flag after the early pin export; the resume must put the pin back."""
+    import asyncio
+
+    from hyperloom.inference_optimizer.cli import _build_parser, _run_optimize
+
+    cli_mod = "hyperloom.inference_optimizer.cli"
+    resume_dir = _prepare_resume_session(
+        tmp_path, monkeypatch, request, name="pinned-skip", operator_extra_env={"SKIP_VARIANTS": "pinned"}
+    )
 
     def past_the_export(*a, **kw):
         raise RuntimeError("resume passed its pin export")
@@ -470,41 +487,10 @@ def test_a_resumed_pd_session_refuses_server_args_before_it_persists(tmp_path, m
     """A node-list PD session freezes no ``--server-args``, so a resume that passes one exits 2 before any state write."""
     import asyncio
 
-    from inference_suite.multinode import RECORD_NAME
-
     from hyperloom.inference_optimizer.cli import _build_parser, _run_optimize
-    from hyperloom.inference_optimizer.cli.bootstrap import MEASUREMENT_EPOCH
 
     cli_mod = "hyperloom.inference_optimizer.cli"
-    saved_environ = dict(os.environ)
-    request.addfinalizer(lambda: (os.environ.clear(), os.environ.update(saved_environ)))
-
-    workspace = tmp_path / "sessions"
-    resume_dir = workspace / "Qwen-Test" / "pd-resume"
-    model = tmp_path / "Qwen-Test"
-    (resume_dir / "reports").mkdir(parents=True, exist_ok=True)
-    SharedState(
-        session_id="resume-pd",
-        model_name=model.name,
-        model_path=str(model),
-        measurement_epoch=MEASUREMENT_EPOCH,
-    ).save(resume_dir)
-    (resume_dir / "manifest.json").write_text(
-        json.dumps({"schema_version": 4, "session_id": "resume-pd"}), encoding="utf-8"
-    )
-    (resume_dir / RECORD_NAME).write_text("{}", encoding="utf-8")
-
-    monkeypatch.setenv("INFERENCE_OPTIMIZER_CURRENT_SESSION_DIR", str(resume_dir))
-    monkeypatch.setenv("USER_DATA_PATH", str(workspace))
-    monkeypatch.setenv("INFERENCE_OPTIMIZER_EXTRA_ENV", "")
-    monkeypatch.delenv("SKIP_VARIANTS", raising=False)
-    monkeypatch.delenv("MODEL_PATH", raising=False)
-    monkeypatch.setattr(
-        f"{cli_mod}.clean_stale_aiter_locks",
-        lambda: {"dir": "", "deleted": 0, "skipped_fresh": 0, "errors": 0},
-    )
-    monkeypatch.setattr(f"{cli_mod}._preflight", lambda args: ("", ""))
-    monkeypatch.setattr(f"{cli_mod}._check_codex_sandbox", lambda backend: None)
+    resume_dir = _prepare_resume_session(tmp_path, monkeypatch, request, name="pd", pd_record=True)
 
     def past_the_refusal(*a, **kw):
         raise RuntimeError("resume passed the server-args refusal")
