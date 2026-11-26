@@ -401,14 +401,15 @@ def test_an_inferencex_base_reports_its_recipe_commit_variant_files_and_image(tm
 
 
 def test_a_reference_script_url_is_reported_without_its_credentials(tmp_path):
-    url = "https://bob:hunter2@example.com/launch.sh?token=abc123def456"
+    planted = "x" * 12
+    url = f"https://bob:hunter2@example.com/launch.sh?token={planted}"
     source = {**_frozen_base().to_document()["source"], "kind": "user_file", "path": url, "files": {url: "ab" * 32}}
     _frozen_with(tmp_path, source=source)
 
     reported = ex.build(tmp_path)["metadata"]["base_launch"]["source"]
 
     text = json.dumps(reported)
-    assert not any(word in text for word in ("bob", "hunter2", "abc123def456"))
+    assert not any(word in text for word in ("bob", "hunter2", planted))
     assert reported["path"].startswith("https://example.com/launch.sh?token=")
     assert list(reported["files"]) == [reported["path"]]
 
