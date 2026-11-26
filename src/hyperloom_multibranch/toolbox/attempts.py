@@ -54,6 +54,7 @@ from hyperloom.measure.failures import (
     FOREIGN_PROCESS_ON_CARD,
     HUB_RATE_LIMITED,
     JIT_BUILD_TIMEOUT,
+    OUTPUT_TOO_LARGE,
     PROFILER_DIED,
     PROFILER_HUNG,
     PROFILER_SNAPSHOT_FAILED,
@@ -93,7 +94,8 @@ INFRA_BACKOFF_SECONDS: tuple[float, ...] = (60.0, 120.0, 240.0)
 #: (``PROFILER_HUNG``) hangs again at the same point on the same image; a retry only holds the cards for another silence
 #: limit, or meets them still held by the hung server's ranks. The failed profile tells the session its backend cannot
 #: profile, so it asks for none again. A sandbox whose framework is another version than the one the candidate's files
-#: were compiled against (``FRAMEWORK_VERSION_MISMATCH``) runs the same image as every other sandbox of the test.
+#: were compiled against (``FRAMEWORK_VERSION_MISMATCH``) runs the same image as every other sandbox of the test. A test
+#: whose output is more than its result may carry (``OUTPUT_TOO_LARGE``) writes the same output in the next sandbox.
 UNRETRIED_INFRA_REASONS: frozenset[str] = frozenset(
     {
         INERT_PATCH,
@@ -102,6 +104,7 @@ UNRETRIED_INFRA_REASONS: frozenset[str] = frozenset(
         PROFILER_SNAPSHOT_FAILED,
         PROFILER_HUNG,
         FRAMEWORK_VERSION_MISMATCH,
+        OUTPUT_TOO_LARGE,
     }
 )
 #: The hosted backend's ``error_class`` when the platform made the sandbox and it failed before it ran

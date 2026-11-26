@@ -197,6 +197,7 @@ def ended(run: Run) -> _Ended:
         step_failure=_step_failure(failing),
         unrun=_unrun(failing),
         framework_changed=run.call.framework_changed,
+        patched_sources=run.call.patched_sources,
     )
     verdict = classify_test_failure(returncode=returncode, evidence=evidence)
     return _Ended(rounds, returncode, stderr, verdict)

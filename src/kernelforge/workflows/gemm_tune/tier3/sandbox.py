@@ -17,20 +17,14 @@ from pathlib import Path
 from collections.abc import Iterator
 from typing import Any
 
+from hyperloom_common.core_dumps import NO_GPU_COREDUMP_ENV, forbid_core_dumps
+
 from ..utils import cap_build_parallelism
 
 log = logging.getLogger(__name__)
 
 DEFAULT_TIMEOUT_S = 1800
 _TAIL_CHARS = 4000
-# A candidate that faults the GPU makes ROCr dump the process's GPU memory into the cwd (35 GB in one run). ROCr reads
-# this flag once at runtime load and also skips the dump whenever RLIMIT_CORE's soft limit is 0 at fault time.
-NO_GPU_COREDUMP_ENV = {"HSA_DISABLE_COREDUMP_ON_EXCEPTION": "1"}
-
-
-def _forbid_core_dumps() -> None:
-    # Hard limit too, so a generated script cannot raise it back for its workers.
-    resource.setrlimit(resource.RLIMIT_CORE, (0, 0))
 
 
 @contextlib.contextmanager
@@ -127,7 +121,7 @@ def run_generated_tuner(
                 stderr=subprocess.STDOUT,
                 timeout=limits.timeout_s,
                 check=False,
-                preexec_fn=_forbid_core_dumps,
+                preexec_fn=forbid_core_dumps,
             )
         rc = proc.returncode
     except subprocess.TimeoutExpired:

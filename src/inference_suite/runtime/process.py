@@ -3,7 +3,8 @@
 
 """Which processes a round owns, and ending them.
 
-Every child starts in a session of its own with a fresh run mark in its env. What a reap reaches is the child's tree
+Every child starts in a session of its own with a fresh run mark in its env, and can write no core dump (a GPU fault
+would otherwise leave one as large as the GPU memory each process held). What a reap reaches is the child's tree
 and every process still carrying its mark, however it detached; it never scans the host by port or command line, and
 never signals the caller's own process group. ``server.pid`` names a server across rounds: the incarnation it was
 (pid and start time), its mark, and the launch it runs.
@@ -22,6 +23,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from hyperloom_common.contract_fields import ContractFields, field_names
+from hyperloom_common.core_dumps import NO_GPU_COREDUMP_ENV, forbid_core_dumps
 from hyperloom_common.proctree import (
     REAP_MARK_ENV,
     collect_tree,
@@ -115,10 +117,11 @@ def spawn(
     stderr: Path | None = None,
     place: ChildPlace = ChildPlace(),
 ) -> Spawned:
-    """Start ``argv`` in its own session with exactly ``env`` and a fresh mark, appending its output to ``stdout``.
+    """Start ``argv`` in its own session with ``env`` and a fresh mark, appending its output to ``stdout``.
 
-    ``stderr`` defaults to the same file. Appending keeps what an earlier server wrote to a shared log. ``place`` is where
-    the child starts and the CPUs it may run on; they are set before it runs, so every thread it starts inherits them.
+    The child and everything it starts can write no core dump. ``stderr`` defaults to the same file. Appending keeps
+    what an earlier server wrote to a shared log. ``place`` is where the child starts and the CPUs it may run on; they
+    are set before it runs, so every thread it starts inherits them.
     """
 
     mark = uuid.uuid4().hex
@@ -130,19 +133,24 @@ def spawn(
                 files.append(stack.enter_context(path.open("ab")))
         proc = subprocess.Popen(
             list(argv),
-            env={**env, REAP_MARK_ENV: mark},
+            env={**env, **NO_GPU_COREDUMP_ENV, REAP_MARK_ENV: mark},
             stdin=subprocess.DEVNULL,
             stdout=files[0],
             stderr=files[1] if len(files) > 1 else subprocess.STDOUT,
             start_new_session=True,
             cwd=place.cwd,
-            preexec_fn=_pinned_to(place.cpus) if place.cpus else None,
+            preexec_fn=_child_setup(place.cpus),
         )
     return Spawned(proc, mark)
 
 
-def _pinned_to(cpus: tuple[int, ...]) -> Callable[[], None]:
-    return lambda: os.sched_setaffinity(0, cpus)
+def _child_setup(cpus: tuple[int, ...]) -> Callable[[], None]:
+    def setup() -> None:
+        forbid_core_dumps()
+        if cpus:
+            os.sched_setaffinity(0, cpus)
+
+    return setup
 
 
 def listening_inodes(port: int) -> frozenset[int]:

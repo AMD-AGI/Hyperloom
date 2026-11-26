@@ -624,6 +624,19 @@ def patched_configs(farm: Farm | None) -> dict[str, Path | None]:
     return patched
 
 
+def patched_sources(farm: Farm | None) -> frozenset[str]:
+    """The Python files the farm lays for the patch, by their path below the import path (``vllm/model_executor/x.py``):
+    the ones it writes, not the ones it deletes or links from the image."""
+    if farm is None:
+        return frozenset()
+    return frozenset(
+        f"{root.import_name}/{entry.path}"
+        for root in farm.roots
+        for entry in root.entries
+        if entry.op != _DELETE and entry.path.endswith(".py")
+    )
+
+
 def place_farm(config_path: Path, farm: Farm, inherited: Mapping[str, str]) -> Mapping[str, Any]:
     """Put the farm first on the import path and its executables first on the ``PATH`` of the server ``config_path``
     launches; return the variables it gets. ``inherited`` is what the server's process inherits

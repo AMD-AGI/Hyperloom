@@ -67,6 +67,7 @@ from hyperloom.measure.farm import (
     inherited_environment,
     lay_profile_patch,
     patched_configs,
+    patched_sources,
     prepend_base_bins,
     record_unpatched,
     server_environment,
@@ -597,7 +598,11 @@ def _own_directories(
     that rebuilds stale aiter modules at its first prefill gets a watchdog that waits for the builds
     (``rebuild_watchdog``)."""
     call = dataclasses.replace(
-        call, jit=session, tables_patch=patched_configs(farm), framework_changed=farm is not None
+        call,
+        jit=session,
+        tables_patch=patched_configs(farm),
+        framework_changed=farm is not None,
+        patched_sources=patched_sources(farm),
     )
     own = own_aiter_jit(call, farm, ctx.environ, _compile_dir(ctx, call.task_id) / OWN_AITER_JIT_DIR, gfx_arch)
     built = session.built_by_server if session is not None else frozenset()

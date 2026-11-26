@@ -158,6 +158,9 @@ class TestCall:
     #: Whether the points put a rebuilt framework (a farm, ``measure.farm``) first on the server's import path. Whoever
     #: laid the farm sets it; a serving interpreter that cannot import its framework is the candidate's failure only then.
     framework_changed: bool = False
+    #: The Python files the farm lays for the patch, by their path below the import path (``vllm/model_executor/x.py``;
+    #: ``measure.farm.patched_sources``); whoever laid the farm sets them. A traceback through one is the patch's.
+    patched_sources: frozenset[str] = frozenset()
     #: How long, at least, the server of each round may take to be ready, never more than ``timeout_sec``
     #: (``measure.boot_watch.boot_limit_sec``); ``None`` gives it the share of the round's budget it always had, and a
     #: budget below that share keeps the share.

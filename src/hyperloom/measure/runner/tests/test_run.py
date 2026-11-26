@@ -1158,3 +1158,27 @@ def test_the_runner_tells_the_rounds_verdict_whether_its_farm_changed_the_framew
     call = TestCall(points=(), output_dir=tmp_path, timeout_sec=1, cwd=str(tmp_path), task_id="t")
 
     assert runner._own_directories(context, call, None, farm, None).framework_changed is laid
+
+
+def test_the_runner_tells_the_rounds_verdict_which_python_files_its_farm_laid(tmp_path, monkeypatch):
+    """A traceback through one of them is the patch's (``failures.CANDIDATE_CODE_ERROR``)."""
+    from types import SimpleNamespace
+
+    from hyperloom.measure.farm import Farm
+    from hyperloom.measure.spec import EnvEntry, EnvRoot
+
+    monkeypatch.setattr(runner, "own_aiter_jit", lambda *args: {})
+    monkeypatch.setattr(runner, "raise_rebuild_watchdog", lambda *args: None)
+    context = SimpleNamespace(environ={}, work=tmp_path, notes=[], compile=tmp_path / "compile")
+    entries = (
+        EnvEntry("srt/layers/rotary_embedding.py", "upsert", blob="a" * 64),
+        EnvEntry("srt/layers/gone.py", "delete"),
+        EnvEntry("srt/configs/table.json", "upsert", blob="b" * 64),
+    )
+    root = EnvRoot("sglang", "package", "sglang", "sglang", "0", entries)
+    farm = Farm(site=tmp_path / "farm" / "site", packages=("sglang",), roots=(root,))
+    call = TestCall(points=(), output_dir=tmp_path, timeout_sec=1, cwd=str(tmp_path), task_id="t")
+
+    laid = runner._own_directories(context, call, None, farm, None)
+
+    assert laid.patched_sources == {"sglang/srt/layers/rotary_embedding.py"}

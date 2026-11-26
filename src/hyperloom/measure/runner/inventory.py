@@ -12,6 +12,7 @@ import shutil
 from pathlib import Path
 
 from hyperloom.measure import fsafe
+from hyperloom.measure.failures import OUTPUT_TOO_LARGE
 from hyperloom.measure.farm import Farm
 from hyperloom.measure.manifest import RESERVED_NAMES, ManifestFile
 
@@ -78,7 +79,7 @@ def inventory(files_dir: Path, *, max_total_bytes: int) -> tuple[ManifestFile, .
                 os.close(fd)
             total += size
             if total > max_total_bytes:
-                raise OutputRejected("output_too_large", f"the output exceeds {max_total_bytes} bytes")
+                raise OutputRejected(OUTPUT_TOO_LARGE, f"the output exceeds {max_total_bytes} bytes")
             entries.append(ManifestFile(relative, size, sha256))
     except fsafe.UnsafeEntry as exc:
         raise OutputRejected(_UNSAFE, str(exc)) from exc

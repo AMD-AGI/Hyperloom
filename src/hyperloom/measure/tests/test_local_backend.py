@@ -596,6 +596,41 @@ def test_a_server_that_stalled_with_its_profile_window_open_is_the_profilers_fai
     assert (outcome.failure_class, outcome.failure_reason) == (failure_class, reason)
 
 
+@pytest.mark.parametrize(
+    ("patched", "failure_class", "reason"),
+    [
+        (
+            frozenset({test_log_causes.STATIC_ASSERT_SOURCE}),
+            "candidate",
+            "candidate_code_error: triton.compiler.errors.CompileTimeAssertionFailure: at 281:4:",
+        ),
+        (
+            frozenset({"vllm/v1/attention/backends/rocm_aiter_fa.py"}),
+            "unclear",
+            "python_exception: RuntimeError: Engine core initialization failed. See root cause above. Failed core "
+            "proc(s): {}",
+        ),
+    ],
+    ids=["raised_through_the_patch", "raised_elsewhere"],
+)
+def test_a_server_that_died_on_an_error_of_its_patched_code_ends_the_test_as_the_candidates(
+    grid, server, tmp_path, patched, failure_class, reason
+):
+    _graded_answers(grid)
+    workspace = write_run_dir(
+        grid.tmp_path / "ws" / "warmup", failed_step=FailedStep.SERVER_DIED, failure_detail="the server exited with 1"
+    )
+    RunLayout(workspace).server_log.write_text(test_log_causes.STATIC_ASSERT_LOG, encoding="utf-8")
+    grid.answers["warmup"] = grid.result(
+        "warmup", status="failed", returncode=1, error="server_died", server_log_path=str(workspace / "server.log")
+    )
+
+    outcome = _run(_graded_call(tmp_path, patched_sources=patched))
+
+    assert (outcome.failure_class, outcome.failure_reason) == (failure_class, reason)
+    assert [c["grid"][0].name for c in grid.calls] == ["warmup"], "a server that crashed is not booted again"
+
+
 #: What vLLM's engine logs when the tracer killed a worker under it: a Python exception, which alone reads as unclear.
 _ENGINE_DIED = (
     "ERROR EngineCore encountered a fatal error.\nRuntimeError: Engine core process EngineCore died unexpectedly.\n"

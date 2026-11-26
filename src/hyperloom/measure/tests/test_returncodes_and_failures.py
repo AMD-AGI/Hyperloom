@@ -14,6 +14,7 @@ import pytest
 
 from hyperloom.common import failure_signature
 from hyperloom.measure import failures, returncodes
+from hyperloom.measure.tests import test_log_causes
 from hyperloom.measure.failures import (
     LOG_TAIL_CHARS,
     Disposition,
@@ -750,3 +751,98 @@ def test_a_candidate_crash_without_the_snapshot_dump_is_not_an_infrastructure_fa
 
     assert verdict.failure_class is FailureClass.UNCLEAR
     assert verdict.failure_reason == "python_exception: RuntimeError: shape mismatch in the candidate's fused kernel"
+
+
+#: A test's patch that lays a file the logs below are not about, and a frame of it under a library's.
+_PATCHED = frozenset({"vllm/model_executor/layers/rotary_embedding.py"})
+_PATCHED_FRAME = '  File "/work/farm/site/vllm/model_executor/layers/rotary_embedding.py", line 88, in forward_hip\n'
+_LIBRARY_FRAME = '  File "/opt/venv/lib/python3.12/site-packages/torch/_ops.py", line 1243, in __call__\n'
+
+
+def _traceback(*frames: str, raised: str) -> str:
+    return "".join(("Traceback (most recent call last):\n", *frames, f"{raised}\n"))
+
+
+@pytest.mark.parametrize(
+    ("log", "source", "raised"),
+    [
+        (
+            test_log_causes.IMPORT_NAME_ERROR_LOG,
+            test_log_causes.IMPORT_NAME_ERROR_SOURCE,
+            "NameError: name '_hl_triton' is not defined",
+        ),
+        (
+            test_log_causes.STATIC_ASSERT_LOG,
+            test_log_causes.STATIC_ASSERT_SOURCE,
+            "triton.compiler.errors.CompileTimeAssertionFailure: at 281:4:",
+        ),
+        (
+            test_log_causes.DYNAMO_LOG,
+            test_log_causes.DYNAMO_SOURCE,
+            "torch._dynamo.exc.Unsupported: logging.Logger method not supported for non-export cases",
+        ),
+        (test_log_causes.ASSERTION_LOG, test_log_causes.ASSERTION_SOURCE, "AssertionError"),
+    ],
+    ids=["name_at_import", "triton_static_assert", "dynamo_unsupported", "own_assertion"],
+)
+def test_an_error_the_candidates_code_raises_on_every_run_ends_its_test_as_the_candidates(
+    log: str, source: str, raised: str
+) -> None:
+    patched = frozenset({source, "vllm/envs.py"})
+
+    verdict = classify_test_failure(returncode=1, evidence=FailureEvidence(logs=(log,), patched_sources=patched))
+
+    assert (verdict.failure_class, verdict.failure_reason) == (
+        FailureClass.CANDIDATE,
+        f"candidate_code_error: {raised}",
+    )
+    assert decides_test(verdict), "the next round's server fails on the same code"
+
+
+@pytest.mark.parametrize(
+    "raised",
+    [
+        "TypeError: unhashable type: 'list'",
+        "AttributeError: 'RotaryEmbedding' object has no attribute 'cos_sin'",
+        "triton.compiler.errors.CompilationError: at 71:10:",
+    ],
+    ids=["type", "attribute", "triton_compile"],
+)
+def test_an_error_raised_beneath_the_candidates_code_is_the_candidates(raised: str) -> None:
+    log = _traceback(_PATCHED_FRAME, _LIBRARY_FRAME, raised=raised)
+
+    verdict = classify_test_failure(returncode=1, evidence=FailureEvidence(logs=(log,), patched_sources=_PATCHED))
+
+    assert (verdict.failure_class, verdict.failure_reason) == (
+        FailureClass.CANDIDATE,
+        f"candidate_code_error: {raised}",
+    )
+
+
+def test_the_same_error_from_a_test_that_laid_no_python_file_stays_unclear() -> None:
+    verdict = classify_test_failure(returncode=1, evidence=FailureEvidence(logs=(test_log_causes.STATIC_ASSERT_LOG,)))
+
+    assert verdict.failure_class is FailureClass.UNCLEAR
+    assert verdict.failure_reason == (
+        "python_exception: RuntimeError: Engine core initialization failed. See root cause above. "
+        "Failed core proc(s): {}"
+    )
+
+
+@pytest.mark.parametrize(
+    "log",
+    [
+        test_log_causes.IMPORT_NAME_ERROR_LOG,
+        _traceback(
+            _PATCHED_FRAME, _LIBRARY_FRAME, raised="RuntimeError: shape mismatch in the candidate's fused kernel"
+        ),
+        _traceback(_PATCHED_FRAME, _LIBRARY_FRAME, raised="TimeoutError: [Errno 110] Connection timed out"),
+        _traceback(_PATCHED_FRAME, _LIBRARY_FRAME, raised="KeyError: 'rope'"),
+    ],
+    ids=["not_through_a_patched_file", "runtime_error", "timeout", "key_error"],
+)
+def test_an_error_a_rerun_may_not_repeat_or_not_raised_through_the_patch_stays_unclear(log: str) -> None:
+    verdict = classify_test_failure(returncode=1, evidence=FailureEvidence(logs=(log,), patched_sources=_PATCHED))
+
+    assert verdict.failure_class is FailureClass.UNCLEAR
+    assert (verdict.failure_reason or "").startswith("python_exception: ")
