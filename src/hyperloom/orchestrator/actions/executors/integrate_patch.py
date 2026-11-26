@@ -84,8 +84,6 @@ class IntegratePatchExecutor(
         if provision_early is not None:
             return provision_early
 
-        await self._stage_localize_source(attempt, params)
-
         # The apply and the gate both mutate the framework tree behind the
         # operator's auto-stash, and both cross awaits while it is on the stack --
         # the apply stage writes a KB record on each of its failure verdicts. So

@@ -142,6 +142,10 @@ def reports_dir(session_dir: Path) -> Path:
     return Path(session_dir) / "reports"
 
 
+#: The report the concurrency sweep writes into a session's reports directory once the session has closed.
+CONC_SWEEP_SUMMARY_FILENAME: str = "conc_sweep_summary.json"
+
+
 def sbd_v6_dir(session_dir: Path) -> Path:
     """Compute ``<sd>/reports/sbd_v6/`` for V6 timeline source events."""
     return reports_dir(session_dir) / "sbd_v6"
@@ -416,6 +420,7 @@ def failure_evidence_path(session_dir: Path, failure_id: str) -> Path:
 
 __all__ = [
     "BREAKDOWN_FILENAME",
+    "CONC_SWEEP_SUMMARY_FILENAME",
     "CONTAINER_RECORD_KIND",
     "RESOURCES_RELATIVE_PATH",
     "SPECIALIST_RECORD_KIND",

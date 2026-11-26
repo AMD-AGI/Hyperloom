@@ -14,8 +14,7 @@ import pytest
 
 from hyperloom.plugs import Implementation, ManifestSources, PlugHost, activated, builtin_registry, resolve_manifest
 from hyperloom.plugs import progress
-from hyperloom.plugs.host import EVENT_LOCK_MISMATCH
-from hyperloom.plugs.manifest import LockMismatch, ResolvedManifest, SocketSetting
+from hyperloom.plugs.manifest import ResolvedManifest
 
 _SCHEMA = json.loads(
     (Path(progress.__file__).parents[1] / "contracts" / "hyperloom_events.v1.schema.json").read_text(encoding="utf-8")
@@ -24,7 +23,6 @@ _SCHEMA = json.loads(
 # The v1 type set shared with the platform: nothing is added without a schema entry, nothing dropped without one.
 _V1_TYPES = {
     "hyperloom.campaign_started",
-    "hyperloom.plugs_lock_mismatch",
     "hyperloom.phase_changed",
     "hyperloom.measurement_started",
     "hyperloom.measurement_finished",
@@ -100,20 +98,8 @@ def test_what_the_emit_helpers_send_matches_the_schema():
     assert spy.events[5][1]["gain_pct"] is None
 
 
-def test_the_plug_host_lock_mismatch_event_matches_the_schema():
-    spy = _Spy()
-    registry = builtin_registry()
-    registry.register(Implementation("events", "spy", lambda ctx: spy))
-    manifest = ResolvedManifest(
-        "p", {"events": SocketSetting("spy", {}, "test")}, (LockMismatch("measurement", "local", "hosted"),)
-    )
-    PlugHost(manifest, registry, session_dir=None).start()
-    assert [t for t, _ in spy.events] == [EVENT_LOCK_MISMATCH]
-    _valid(*spy.events[0])
-
-
 def test_a_host_without_an_events_socket_drops_the_event():
-    host = PlugHost(ResolvedManifest("p", {}, ()), builtin_registry(), session_dir=None)
+    host = PlugHost(ResolvedManifest("p", {}), builtin_registry(), session_dir=None)
     host.start()
     with activated(host):
         progress.warn("c", "m")

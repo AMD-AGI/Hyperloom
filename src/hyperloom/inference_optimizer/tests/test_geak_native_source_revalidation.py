@@ -7,12 +7,15 @@ from __future__ import annotations
 
 import asyncio
 import copy
+import json
+import subprocess
 from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 
 from hyperloom.common.perf_metric import GRADED_OUTPUT
+from hyperloom.inference_optimizer.session.geak_rebench_verdict import REBENCH_UNMEASURED_GIVEN_UP
 from hyperloom.orchestrator.actions.executors.benchmark_run.accuracy import AccuracyRoundOutcome
 from hyperloom.orchestrator.actions.executors.integrate import _integrate_bench
 from hyperloom.orchestrator.actions.executors.integrate._integrate_vocabulary import RESULT_GRADED
@@ -20,7 +23,8 @@ from hyperloom.orchestrator.actions.executors.integrate_patch import IntegratePa
 from hyperloom.orchestrator.actions.executors.workload._workload_envs import FrameworkScriptMismatchError
 from hyperloom.orchestrator.actions.stop_attribution import SESSION_TIME_EXHAUSTED_CLASS, STOPPED_BY_THE_RUN
 from hyperloom.orchestrator.phases.geak_native_revalidation import ORIGIN, source_rebench_params
-from hyperloom.orchestrator.phases.geak_rebench import geak_candidate_is_adjudicated
+from hyperloom.orchestrator.phases.geak_rebench import REVALIDATION_UNMEASURED, geak_candidate_is_adjudicated
+from hyperloom.orchestrator.phases.kernel_geak_promotion import GeakRunnerFacts
 from hyperloom.orchestrator.tests._helpers import init_git_repo, patch_integrate_patch_roots
 from .test_geak_revalidation_dispatch import coordinator as coordinator
 
@@ -280,6 +284,113 @@ async def test_bench_that_graded_nothing_settles_failed_and_stays_open(
     assert not state.optimization_stack
     assert (repo / "kernel.py").read_text() == "old\n"
     assert not geak_candidate_is_adjudicated(state.geak_result, reported, harness_can_replay=False)
+
+
+async def _next_kernel_entry(coordinator, reported) -> bool:
+    """What the next KERNEL entry does with the product GEAK left on disk; whether it measured it again."""
+    geak_dir = coordinator.session_dir / "geak"
+    geak_dir.mkdir(exist_ok=True)
+    (geak_dir / "result.json").write_text(json.dumps(reported), encoding="utf-8")
+    coordinator.phase_kernel._record_geak_kernel_journey = lambda _result: None
+    return await coordinator.phase_kernel._promote_crashed_geak_result({}, agentx=True, cards=None)
+
+
+def _given_up(state) -> bool:
+    return state.geak_result.get("revalidation_error_class") == REBENCH_UNMEASURED_GIVEN_UP
+
+
+class _KernelTimeline:
+    """Keeps the rebench conclusions a KERNEL entry records; every other record is accepted and dropped."""
+
+    def __init__(self):
+        self.conclusions = []
+
+    def record_geak_rebench_conclusion(self, **conclusion):
+        self.conclusions.append(conclusion)
+
+    def __getattr__(self, name):
+        return lambda *args, **kwargs: None
+
+
+@pytest.mark.asyncio
+async def test_candidate_that_keeps_ending_unmeasured_is_given_up_and_not_measured_again(
+    coordinator, tmp_path, monkeypatch
+):
+    _framework_tree(tmp_path, monkeypatch)
+    benches = []
+
+    async def bench(self, bench_leg, **kwargs):
+        benches.append(bench_leg)
+        raise OSError(28, "No space left on device")
+
+    timeline = _KernelTimeline()
+    monkeypatch.setattr(coordinator.phase_kernel, "timeline", lambda: timeline)
+    reported = await _measure_with_bench(coordinator, tmp_path, monkeypatch, bench)
+    state = coordinator.shared_state
+    assert not _given_up(state)
+    assert timeline.conclusions == []
+    assert "dropped unvalidated (rebench_failed)" in state.to_mission_summary()
+    assert await _next_kernel_entry(coordinator, reported), "an open candidate is measured again"
+    assert state.geak_result["revalidation_status"] == "failed"
+    assert state.geak_result[REVALIDATION_UNMEASURED] == 2
+    assert _given_up(state)
+    assert "dropped unvalidated (rebench_failed, given up unmeasured)" in state.to_mission_summary()
+    assert [(c["final_status"], c["final_error_class"]) for c in timeline.conclusions] == [
+        ("failed", REBENCH_UNMEASURED_GIVEN_UP)
+    ]
+    assert "No space left on device" in timeline.conclusions[0]["final_error"]
+    assert geak_candidate_is_adjudicated(state.geak_result, reported, harness_can_replay=False)
+    assert not await _next_kernel_entry(coordinator, reported), "a candidate given up is left alone"
+    assert len(benches) == 2
+    assert state.current_best["tput"] == _INCUMBENT["tput"]
+
+
+@pytest.mark.asyncio
+async def test_verdict_on_a_candidate_that_once_ended_unmeasured_settles_it(coordinator, tmp_path, monkeypatch):
+    _framework_tree(tmp_path, monkeypatch)
+    out_of_space = _bench_raising(OSError(28, "No space left on device"))
+    reported = await _measure_with_bench(coordinator, tmp_path, monkeypatch, out_of_space)
+    state = coordinator.shared_state
+    below_the_bar = _bench_returning({"status": "succeeded", **_agentx_round(10.0)})
+    monkeypatch.setattr(IntegratePatchExecutor, "_bench_patch", below_the_bar)
+    assert await _next_kernel_entry(coordinator, reported)
+    assert state.geak_result["revalidation_status"] == "no_promote"
+    assert not _given_up(state)
+    assert geak_candidate_is_adjudicated(state.geak_result, reported, harness_can_replay=False)
+
+
+@pytest.mark.asyncio
+async def test_unmeasured_count_of_one_product_is_not_held_against_the_next(coordinator, tmp_path, monkeypatch):
+    _framework_tree(tmp_path, monkeypatch)
+    out_of_space = _bench_raising(OSError(28, "No space left on device"))
+    reported = await _measure_with_bench(coordinator, tmp_path, monkeypatch, out_of_space)
+    state = coordinator.shared_state
+    assert state.geak_result[REVALIDATION_UNMEASURED] == 1
+    another_run = {**reported, "final_throughput_tok_s": reported["final_throughput_tok_s"] + 1.0}
+    assert await _next_kernel_entry(coordinator, another_run)
+    assert state.geak_result["revalidation_status"] == "failed"
+    assert state.geak_result[REVALIDATION_UNMEASURED] == 1
+    assert not _given_up(state)
+
+
+@pytest.mark.asyncio
+async def test_unmeasured_count_follows_a_product_the_geak_runner_hands_back(coordinator, tmp_path, monkeypatch):
+    _framework_tree(tmp_path, monkeypatch)
+    out_of_space = _bench_raising(OSError(28, "No space left on device"))
+    reported = await _measure_with_bench(coordinator, tmp_path, monkeypatch, out_of_space)
+    result_path = coordinator.session_dir / "geak" / "result.json"
+    result_path.parent.mkdir(exist_ok=True)
+
+    def handed_back(product):
+        result_path.write_text(json.dumps(product), encoding="utf-8")
+        exited = subprocess.CompletedProcess(args=["geak"], returncode=1, stdout="", stderr="")
+        return coordinator.phase_kernel._settle_geak_runner_exit(
+            exited, handoff={}, agentx=True, facts=GeakRunnerFacts()
+        )
+
+    assert handed_back(reported)[REVALIDATION_UNMEASURED] == 1
+    another_product = {**reported, "final_throughput_tok_s": reported["final_throughput_tok_s"] + 1.0}
+    assert REVALIDATION_UNMEASURED not in handed_back(another_product)
 
 
 @pytest.mark.asyncio

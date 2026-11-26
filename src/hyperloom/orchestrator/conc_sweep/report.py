@@ -8,11 +8,16 @@ from __future__ import annotations
 import csv
 import json
 import logging
+import os
+import socket
+from collections.abc import Mapping
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from hyperloom_common import io as _common_io
+from hyperloom.inference_optimizer.breakdown import patch_breakdown_conc_sweep
 from hyperloom.inference_optimizer.roofline_ceiling import (
     ComputeTarget,
     DecodeShape,
@@ -21,9 +26,10 @@ from hyperloom.inference_optimizer.roofline_ceiling import (
     select_peak_and_bound,
 )
 from hyperloom.inference_optimizer.roofline_model_meta import load_model_meta
-from hyperloom.inference_optimizer.session.session_paths import reports_dir
+from hyperloom.inference_optimizer.session.session_paths import CONC_SWEEP_SUMMARY_FILENAME, reports_dir
 
 from .plot import ConcCurveOptions, render_conc_sweep_curve
+from .points import SCHEMA_VERSION, point_launches
 
 if TYPE_CHECKING:
     from hyperloom.orchestrator.actions.executors.grid._grid_runner import VariantResult
@@ -31,13 +37,46 @@ if TYPE_CHECKING:
 
 log = logging.getLogger(__name__)
 
-SUMMARY_FILE = "conc_sweep_summary.json"
+SUMMARY_FILE = CONC_SWEEP_SUMMARY_FILENAME
 RAW_FILE = "conc_sweep_raw.csv"
 CURVE_FILE = "conc_sweep_curve.png"
 FINAL_FILE = "final.json"
 _ENCODING = "utf-8"
 #: The statuses of a sweep that ran its course, whatever it measured.
 SETTLED = frozenset({"succeeded", "partial", "skipped"})
+
+
+def run_facts(session: Path) -> dict[str, Any]:
+    """The report header's provenance: the cards, image and recipe of the base the session at ``session`` froze (none
+    where it froze none or its base fails its checks, which a skip reports), where its points' launches come from, and
+    the host and process writing the report, with when -- a report still ``in_progress`` whose
+    process is gone was cut short."""
+    from hyperloom.orchestrator.state import base_launch
+
+    try:
+        frozen = base_launch.frozen_base(session)
+    except base_launch.BaseLaunchMismatch:
+        frozen = None
+    base = None if frozen is None else frozen.launch
+    source = None if base is None else base.source
+    recipe = None
+    if source is not None:
+        recipe = {
+            "kind": source.kind.value,
+            "repo": source.repo,
+            "commit": source.commit,
+            "entry": source.entry,
+            "locator": source.locator,
+        }
+    return {
+        **({} if base is None else {"gpu_count": base.cards}),
+        "base_image": None if base is None else base.image.run or base.image.recipe,
+        "point_launches": point_launches(base),
+        "recipe": recipe,
+        "host": socket.gethostname(),
+        "pid": os.getpid(),
+        "updated_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+    }
 
 
 def point_from_variant(v: VariantResult, *, arm: str) -> dict[str, Any]:
@@ -60,6 +99,7 @@ def point_from_variant(v: VariantResult, *, arm: str) -> dict[str, Any]:
         "request_throughput": v.request_throughput,
         "total_token_throughput": total,
         "input_throughput": v.input_throughput,
+        "e2e_norm_intvty_p50": v.intvty_p50,
         "e2e_norm_intvty_p90": v.intvty_p90,
         "tpot_p90_ms": v.tpot_p90_ms,
         "ttft_mean_ms": v.ttft_mean_ms,
@@ -93,6 +133,7 @@ def _write_csv(csv_path: Path, points: list[dict[str, Any]]) -> None:
         "completed_requests",
         "error_class",
         "error",
+        "e2e_norm_intvty_p50",
     ]
     csv_path.parent.mkdir(parents=True, exist_ok=True)
     with csv_path.open("w", newline="", encoding=_ENCODING) as fp:
@@ -203,27 +244,58 @@ def _model_meta_record(meta: Any) -> dict[str, Any]:
     }
 
 
+def take_earlier_summary(reports: Path) -> dict[str, Any] | None:
+    """The summary an earlier run of the sweep left in ``reports`` when this schema wrote it; one of another schema is
+    set aside (:func:`_set_aside`), since the run about to start writes over it."""
+    earlier = read_summary(reports)
+    if earlier is None or earlier.get("schema_version") == SCHEMA_VERSION:
+        return earlier
+    _set_aside(reports, earlier)
+    return None
+
+
+def keep_measured_summary(reports: Path) -> None:
+    """Set aside the summary an earlier run left in ``reports`` when it holds measured points, before a skip's report
+    is written where it was: a sweep that measures nothing never takes the place of one that measured."""
+    earlier = read_summary(reports)
+    if earlier is not None and any(earlier.get(arm, {}).get("points") for arm in ("baseline", "optimized")):
+        _set_aside(reports, earlier)
+
+
+def _set_aside(reports: Path, earlier: Mapping[str, Any]) -> None:
+    (reports / SUMMARY_FILE).rename(reports / f"conc_sweep_summary.{earlier.get('schema_version')}.json")
+
+
 def read_summary(reports: Path) -> dict[str, Any] | None:
     """The summary an earlier run of the sweep left in ``reports``, or ``None``."""
     path = reports / SUMMARY_FILE
     return json.loads(path.read_text(encoding=_ENCODING)) if path.is_file() else None
 
 
-def sweep_unfinished(session_dir: Path) -> bool:
-    """Whether the optimize session in ``session_dir`` closed, asked for a conc sweep, and that sweep has not run its
-    course; read off ``state.json`` and the summary alone."""
-    state = json.loads((session_dir / "state.json").read_text(encoding=_ENCODING))
-    if not (state.get("conc_sweep_enabled") and state.get("close_sequence_done")):
-        return False
-    summary = read_summary(reports_dir(session_dir))
-    return summary is None or summary["status"] not in SETTLED
+def write_report(payload: dict[str, Any], reports: Path, *, breakdown: Path) -> None:
+    """Atomically write the summary JSON and the raw CSV into ``reports``, and carry the summary in ``breakdown``.
 
-
-def write_report(payload: dict[str, Any], reports: Path) -> None:
-    """Atomically write the summary JSON and the raw CSV into ``reports``."""
+    ``breakdown`` is the session's ``session_breakdown.json``: CLOSE wrote it before the sweep began, and it is the
+    document a session's results are ingested from.
+    """
     reports.mkdir(parents=True, exist_ok=True)
     _common_io.atomic_write_text(reports / SUMMARY_FILE, json.dumps(payload, indent=2, ensure_ascii=False, default=str))
     _write_csv(reports / RAW_FILE, [*payload["baseline"]["points"], *payload["optimized"]["points"]])
+    _carry_in_breakdown(payload, breakdown)
+
+
+def _carry_in_breakdown(payload: dict[str, Any], breakdown: Path) -> None:
+    """Copy the report into ``breakdown``, best effort: a breakdown that is missing or cannot be read or replaced costs
+    the copy, not the sweep, as it costs the breakdown's other post-write patches only their own section."""
+    if not breakdown.is_file():
+        log.warning("conc_sweep: no breakdown at %s; the report stays in %s only", breakdown, SUMMARY_FILE)
+        return
+    try:
+        patch_breakdown_conc_sweep(breakdown, payload)
+    except (OSError, ValueError):
+        log.warning(
+            "conc_sweep: could not carry the report in %s; it stays in %s only", breakdown, SUMMARY_FILE, exc_info=True
+        )
 
 
 def write_curve(payload: dict[str, Any], reports: Path, options: ConcCurveOptions) -> Path | None:
@@ -234,7 +306,12 @@ def write_curve(payload: dict[str, Any], reports: Path, options: ConcCurveOption
 def publish_curve(payload: dict[str, Any], session_dir: Path, options: ConcCurveOptions) -> None:
     """Draw the sweep's curve and point the session's ``final.json`` at the summary and the curve."""
     reports = reports_dir(session_dir)
-    curve = write_curve(payload, reports, options)
+    point_final_at(payload, session_dir, write_curve(payload, reports, options))
+
+
+def point_final_at(payload: dict[str, Any], session_dir: Path, curve: Path | None = None) -> None:
+    """Point the session's ``final.json``, when it has one, at the summary ``payload`` is and at its ``curve``."""
+    reports = reports_dir(session_dir)
     final = reports / FINAL_FILE
     if not final.is_file():
         return

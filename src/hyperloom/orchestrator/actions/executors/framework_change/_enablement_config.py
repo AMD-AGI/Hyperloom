@@ -11,12 +11,11 @@ from pathlib import Path
 from typing import Any
 
 from hyperloom.common.env_safety import filter_untrusted_env_mapping, is_allowed_variant_env_key
-from hyperloom.common.failure_signature import RESOURCE_CONSTRAINT, FailureSignature
 from hyperloom.inference_optimizer.grid_server_args import dedupe_extra_server_args, merge_server_args
 from inference_suite.argv import tokenize_server_args_preserving_json
 
 from . import _framework_switch_manifest as _switch_manifest
-from ..patching._patch_sources import _acquiring_round, _done_field
+from ..patching._patch_sources import _done_field
 
 log = logging.getLogger(__name__)
 
@@ -26,21 +25,6 @@ log = logging.getLogger(__name__)
 # spread well under 1%, so a band this wide clears noise by a comfortable margin
 # while still catching a patch that is not actually inert when disabled.
 DEFAULT_SWITCH_OFF_PARITY_BAND_PCT = 2.0
-
-
-def _enablement_gap(params: dict[str, Any]) -> FailureSignature | None:
-    """The round's capability gap, when it calls for code the stack lacks.
-
-    Read from the verdict the round was dispatched on; None for a round that
-    acquires nothing and for a gap no code closes.
-    """
-    if not _acquiring_round(params):
-        return None
-    raw = params.get("enablement_failure_signature")
-    if not isinstance(raw, dict) or not raw:
-        return None
-    signature = FailureSignature.from_dict(raw)
-    return signature if signature.kind != RESOURCE_CONSTRAINT else None
 
 
 def _established_enablement_config(params: dict[str, Any], shared_state: Any) -> tuple[str, dict[str, str]]:

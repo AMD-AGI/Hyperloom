@@ -25,11 +25,10 @@ from hyperloom_common.llm.llm_config import (
     CLAUDE_OAUTH_TOKEN_ENV,
     DEFAULT_CLAUDE_MODEL,
     anthropic_synthesizable_key,
+    expand_custom_header_env_refs,
     preferred_agent_backend,
-    with_synthesized_anthropic_keys,
 )
 from hyperloom_common.env import forge_explicitly_enabled
-from hyperloom_common.llm.llm_headers import expand_env_refs
 from hyperloom_common.gpu_identity import AMD_GPU_BOARDS
 from hyperloom.common.platform_probe import probe_cpu_platform
 from hyperloom_common.pr_monitor_urls import kb_store_url
@@ -84,34 +83,6 @@ from ..session.paths import (
 
 log = logging.getLogger("hyperloom.inference_optimizer.cli")
 _ASSETS = Path(__file__).resolve().parent.parent / "assets"
-
-
-#: What a custom header may reference. Every child inherits the expanded header, so expanding any other name would
-#: hand a child the value of a secret its environment allowlist strips, such as ``${GITHUB_TOKEN}``.
-_HEADER_REF_ALLOWLIST = frozenset({"ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "OPENAI_API_KEY"})
-
-
-def _expand_custom_header_env_refs() -> None:
-    """Resolve the credential ``${VAR}`` references in the ``*_CUSTOM_HEADERS`` settings in place.
-
-    Child processes (specialists, the Critic, GEAK) forward these verbatim, and an agent CLI sends them
-    verbatim, so an unexpanded ``${ANTHROPIC_API_KEY}`` reaches the gateway as literal text and is rejected.
-    References resolve against the same view ``claude_sdk_env_options`` uses, so a key it would fill in from the
-    other Anthropic credential is not erased here. A reference outside ``_HEADER_REF_ALLOWLIST`` is left as
-    written, which is what children received before this expansion existed.
-    """
-    source = with_synthesized_anthropic_keys(os.environ)
-    for key in ("ANTHROPIC_CUSTOM_HEADERS", "OPENAI_CUSTOM_HEADERS"):
-        raw = os.environ.get(key)
-        if not raw or "${" not in raw:
-            continue
-        os.environ[key] = expand_env_refs(raw, source, only=_HEADER_REF_ALLOWLIST)
-        if "${" in os.environ[key]:
-            log.warning(
-                "%s references a variable outside %s; child processes receive that reference unexpanded",
-                key,
-                ", ".join(sorted(_HEADER_REF_ALLOWLIST)),
-            )
 
 
 # /dev/shm threshold: below this, a launch can collide with stale vLLM/NCCL shm segments.
@@ -839,7 +810,7 @@ def _normalize_preflight_env(args: argparse.Namespace, install_event: dict[str, 
         action=_normalize_legacy_deepseek_env,
     )
     # After the legacy normalization, which can create the credentials a header references.
-    _expand_custom_header_env_refs()
+    expand_custom_header_env_refs()
 
     # Fail fast on missing credentials after the fallback loaders.
     _run_install_step(

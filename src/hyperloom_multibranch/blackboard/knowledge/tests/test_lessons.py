@@ -14,6 +14,8 @@ from hyperloom_multibranch.blackboard.knowledge.lessons import (
     MAX_ITEM_CHARS,
     MAX_ITEMS,
     LessonKind,
+    clip,
+    clipped,
     lesson_of,
     listed,
     per_test_lessons,
@@ -116,6 +118,21 @@ def test_lists_drop_repeats_clip_long_items_and_stop_at_the_cap() -> None:
 
     assert listed(["a", "a", long]) == ("a", "x" * (MAX_ITEM_CHARS - 3) + "...")
     assert len(listed(str(index) for index in range(MAX_ITEMS + 5))) == MAX_ITEMS
+
+
+def test_a_line_cut_at_either_length_keeps_the_id_it_ends_with() -> None:
+    """A brief's line is cut twice, at :data:`MAX_ITEM_CHARS` and then at the brief's line length; an Experience to
+    re-verify that was measured on another objective passes the first, and its id is what the specialist cites."""
+    exp = "[exp-0a1b2c3d4e5f60718293a4b5c6d7e8f9]"
+    differ = "model, gpu, framework, precision, tp, conc, isl, osl, framework_version, objective differ"
+    line = f"to re-verify: {'s' * 160}: keep +3.10% on total throughput ({differ}) {exp}"
+
+    once = clipped(line)
+    twice = clip(once, 160)
+
+    assert len(line) > MAX_ITEM_CHARS and len(once) == MAX_ITEM_CHARS and len(twice) == 160
+    assert once.endswith(f"... {exp}") and twice.endswith(f"... {exp}") and twice.startswith("to re-verify: sss")
+    assert clip("x" * 200 + " [kind, purpose]", 160) == "x" * 157 + "..."
 
 
 def test_gaps_need_a_profile_and_a_positive_bound() -> None:

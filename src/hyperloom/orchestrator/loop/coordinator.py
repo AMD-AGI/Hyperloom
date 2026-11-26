@@ -37,7 +37,6 @@ _BACKEND_UNHEALTHY_STOP_SEC: float = 3600.0
 # How many turns in a row one agent may answer without an intent before the session stops.
 _NO_INTENT_STOP_TURNS: int = 50
 from ..phases import machine_state as _phase_state
-from hyperloom.inference_optimizer.session.paths import stop_request_path
 from hyperloom.inference_optimizer.session.session_binding import bind_session
 from ..roles.agent_role import AgentRole, default_role_registry
 from ..roles.base import Backend, BackendError, BackendTurnResult, LLMCallFailed
@@ -739,13 +738,13 @@ class Coordinator:
     def stop_requested(self) -> bool:
         """Whether an operator has asked this run to stop.
 
-        Reads the asyncio event, the drain's threading event and the stop-request file, so the end-of-tick check
-        sees a signal that arrived during that tick and a request that came while no drain was armed.
+        Reads the asyncio event and the drain's threading event, so the end-of-tick check sees a signal that arrived
+        during that tick.
 
         Returns:
             bool: True once a stop has been asked for by either route.
         """
-        if self._stop.is_set() or stop_request_path(self.session_dir).is_file():
+        if self._stop.is_set():
             return True
         drain = self._signals
         return drain is not None and drain.requested.is_set()

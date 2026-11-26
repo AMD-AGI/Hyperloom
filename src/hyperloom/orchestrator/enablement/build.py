@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import os
 import sqlite3
-from typing import TYPE_CHECKING, Any, NamedTuple
+from typing import TYPE_CHECKING, Any
 
 from hyperloom_common.coerce import first_text
 from hyperloom_common.fs_utils import read_text_nofollow
@@ -76,37 +76,6 @@ def _compiled_gap_component(framework: str, symbol: str, launch_log: str) -> str
     ):
         return "vllm_source"
     return "aiter"
-
-
-class _BuildSource(NamedTuple):
-    """Where a targeted build fetches from: the repo, the ref, and the PR the ref came from."""
-
-    repo_url: str
-    ref: str
-    source_pr_url: str
-
-
-def _targeted_build_source(state: Any, component: str) -> _BuildSource:
-    """The kept stack's repo and ref, else the first discovered candidate ref that suits ``component``."""
-    # Derive novelty fields from the current failure + session context.
-    existing_stack = state.enablement.kept_stack_action or {}
-    repo_url = first_text(existing_stack.get("repo_url"))
-    ref = first_text(existing_stack.get("ref"))
-
-    source_pr_url = ""
-    # When no operator-pinned/kept ref, try the top discovery candidate.
-    if not ref:
-        from .runtime.build_actions import resolve_build_ref
-
-        for _cand in list(state.enablement.candidate_refs):
-            _repo, _ref, _pr_url = resolve_build_ref(str(_cand), repo_url)
-            if not _ref or not _repo_matches_targeted_build_component(_repo or _cand, component):
-                continue
-            repo_url = _repo or repo_url
-            ref = _ref
-            source_pr_url = _pr_url
-            break
-    return _BuildSource(repo_url, ref, source_pr_url)
 
 
 def _log_escalated_build(
@@ -211,7 +180,8 @@ class EnablementBuild(CoordinatorCollaborator):
             component = _compiled_gap_component(framework, signature.offending_symbol, launch_log)
             reason = f"Rung-5 auto-escalation from {signature.kind}"
 
-        repo_url, ref, source_pr_url = _targeted_build_source(state, component)
+        kept_stack = state.enablement.kept_stack_action or {}
+        repo_url = first_text(kept_stack.get("repo_url"))
 
         if not _repo_matches_targeted_build_component(repo_url, component):
             log.warning(
@@ -227,9 +197,8 @@ class EnablementBuild(CoordinatorCollaborator):
             capability=signature.offending_symbol or signature.kind,
             reason=reason,
             repo_url=repo_url,
-            ref=ref,
+            ref=first_text(kept_stack.get("ref")),
             gpu_arch=gfx_arch_for_gpu_type(gpu_type) or "",
-            source_pr_url=source_pr_url,
         )
         task_id = await self._enqueue_on_validated_board(action)
         if task_id:

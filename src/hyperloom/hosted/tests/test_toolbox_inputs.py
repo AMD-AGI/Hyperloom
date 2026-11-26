@@ -44,8 +44,6 @@ def env(tmp_path):
         Var.RUN_ID: "run-1",
         Var.RUN_CREATED_AT: "2026-10-01T12:30:00Z",
         Var.STATE_DIR: str(tmp_path / "state"),
-        Var.MCP_PORT: "8765",
-        Var.MCP_TOKEN: "sentinel-mcp-token",
         Var.SANDBOX_TEMPLATES: json.dumps(_TEMPLATES),
         Var.E2B_API_URL: "https://api.sandbox.example.test",
         Var.E2B_SANDBOX_URL: "https://sbx.example.test",
@@ -156,7 +154,6 @@ def test_host_info_never_shows_the_keys(env, caplog):
     shown = repr(info) + str(info) + repr(dataclasses.asdict(info)) + caplog.text
     assert _MEASUREMENT not in shown
     assert _DEV not in shown
-    assert "sentinel-mcp-token" not in shown
 
 
 def test_grant_limits_totals_is_public_and_converts_all_four_totals():

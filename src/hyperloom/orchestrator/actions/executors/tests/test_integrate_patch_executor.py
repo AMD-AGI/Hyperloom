@@ -129,7 +129,6 @@ def _integrate_patch_test_framework_roots(monkeypatch, tmp_path):
 def _stub_external_integrate_operations(monkeypatch):
     from types import SimpleNamespace
 
-    from hyperloom.agents.framework.sources import github
     from hyperloom.orchestrator.actions.executors import _multi_node_env
     from hyperloom.orchestrator.enablement.recipe import keep_probe
     from hyperloom.orchestrator.enablement.runtime import adapters
@@ -140,7 +139,6 @@ def _stub_external_integrate_operations(monkeypatch):
     monkeypatch.setattr(_multi_node_env, "is_multi_node", lambda: False)
     monkeypatch.setattr(integrate_bench, "run_grid", forbidden)
     monkeypatch.setattr(integrate_resolve, "materialize_candidate_patches", forbidden)
-    monkeypatch.setattr(github, "pr_patches", forbidden)
     monkeypatch.setattr(
         adapters,
         "get_adapter",
@@ -468,7 +466,6 @@ async def test_same_executor_second_early_return_does_not_reuse_runtime(tmp_path
 
     from hyperloom.agents.framework import isolation
     from hyperloom.orchestrator.enablement.runtime import adapters
-    from hyperloom.common.failure_signature import classify_failure
     from hyperloom.orchestrator.enablement.runtime.stack_actions import (
         EnablementStackAction,
         FrameworkRuntime,
@@ -499,7 +496,6 @@ async def test_same_executor_second_early_return_does_not_reuse_runtime(tmp_path
         "get_adapter",
         lambda _framework: SimpleNamespace(
             build_stack_action=lambda _request: EnablementStackAction(
-                kind="runtime_candidate",
                 framework="vllm",
                 gap_id="gap.enablement.missing_model_arch",
                 capability="missing_model_arch",
@@ -525,9 +521,6 @@ async def test_same_executor_second_early_return_does_not_reuse_runtime(tmp_path
         {
             "specialist_task_id": "spec-first",
             "enablement": True,
-            "enablement_failure_signature": classify_failure(
-                "ValueError: Model architectures ['DeepseekV4ForCausalLM'] are not supported for now."
-            ).to_dict(),
             "extra_envs": {"VLLM_USE_AITER": "1"},
             "apply_only": True,
         },

@@ -17,7 +17,7 @@ variables are required unless the reader is told the run has no host
 variable that is not required may still be set; it is then checked like a
 required one and read into its field.
 
-Credentials (sandbox keys, the MCP token, archive credentials) are held in
+Credentials (sandbox keys, archive credentials) are held in
 :class:`Secret`, whose ``repr``, ``str`` and format output never contain the
 value, and no error message here carries a value, only variable names and a
 reason.  :func:`take_host_info` also removes every host-only input from the
@@ -45,6 +45,8 @@ class Var:
     RUN_ID = "HYPERLOOM_RUN_ID"
     RUN_CREATED_AT = "HYPERLOOM_RUN_CREATED_AT"
     STATE_DIR = "HYPERLOOM_STATE_DIR"
+    # No longer read: the progress events and the MCP server of the retired single flow.  Named so that
+    # :data:`HOST_ONLY_VARS` still removes them from the environment a host may still set them in.
     EVENTS_DIR = "HYPERLOOM_EVENTS_DIR"
     MCP_HOST = "HYPERLOOM_MCP_HOST"
     MCP_PORT = "HYPERLOOM_MCP_PORT"
@@ -69,9 +71,6 @@ class Var:
     NODE_NAME = "NODE_NAME"
     CLAW_SESSION_ID = "CLAW_SESSION_ID"
 
-
-#: Shortest accepted ``HYPERLOOM_MCP_TOKEN``; the MCP server refuses a shorter host token.
-MIN_MCP_TOKEN_LENGTH = 16
 
 #: Every variable whose value is a credential.  Removed from the environment by :func:`take_host_info`.
 SECRET_VARS: tuple[str, ...] = (
@@ -98,7 +97,6 @@ HOST_ONLY_VARS: tuple[str, ...] = tuple(
 class HostGroup(str, Enum):
     """A set of inputs a run needs only when it hosts the part that reads them."""
 
-    MCP = "mcp"
     MCP_PUBLIC_URL = "mcp-public-url"
     SANDBOX = "sandbox"
     MEASUREMENT_KEY = "measurement-key"
@@ -111,7 +109,6 @@ class HostGroup(str, Enum):
 _RUN_INPUTS: tuple[str, ...] = (Var.INPUT_FILE, Var.RUN_ID, Var.RUN_CREATED_AT, Var.STATE_DIR)
 
 _GROUP_VARS: Mapping[HostGroup, tuple[str, ...]] = {
-    HostGroup.MCP: (Var.MCP_PORT, Var.MCP_TOKEN),
     HostGroup.MCP_PUBLIC_URL: (Var.MCP_PUBLIC_URL,),
     HostGroup.SANDBOX: (Var.SANDBOX_TEMPLATES, Var.E2B_API_URL, Var.E2B_SANDBOX_URL),
     HostGroup.MEASUREMENT_KEY: (Var.SANDBOX_KEY_MEASUREMENT,),
@@ -122,8 +119,8 @@ _GROUP_VARS: Mapping[HostGroup, tuple[str, ...]] = {
     HostGroup.SOURCE: (Var.SOURCE_REPO, Var.SOURCE_SHA),
 }
 
-#: Required by default: the shape of the first hosted profile (run, state, input and the MCP server).
-DEFAULT_REQUIRE: frozenset[HostGroup] = frozenset({HostGroup.MCP})
+#: Required by default: no group, only the run, state and input variables.
+DEFAULT_REQUIRE: frozenset[HostGroup] = frozenset()
 
 _BUCKET_RE = re.compile(r"^[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]$")
 _COMMIT_SHA_RE = re.compile(r"^[0-9a-f]{40}$")
@@ -213,16 +210,12 @@ class GrantLimits:
 @dataclass(frozen=True)
 class HostInfo:
     """Everything the host injected, typed.  Optional fields are ``None`` when the host did not set them; so are the
-    run, state and input fields, and ``events_dir`` with them, of a read with ``require_run=False`` that lacks them."""
+    run, state and input fields of a read with ``require_run=False`` that lacks them."""
 
     input_file: Path
     run_id: str
     run_created_at: datetime
     state_dir: Path
-    events_dir: Path
-    mcp_host: str | None
-    mcp_port: int | None
-    mcp_token: Secret | None
     mcp_public_url: str | None
     sandbox_templates: dict[str, object] | None
     e2b_api_url: str | None
@@ -273,9 +266,6 @@ class _Reader:
     def text(self, name: str) -> str | None:
         return self._parsed(name, _plain_text)
 
-    def path(self, name: str) -> Path | None:
-        return self._parsed(name, _absolute_path)
-
     def existing_file(self, name: str) -> Path | None:
         return self._parsed(name, _existing_file)
 
@@ -284,9 +274,6 @@ class _Reader:
 
     def url(self, name: str) -> str | None:
         return self._parsed(name, _http_url)
-
-    def port(self, name: str) -> int | None:
-        return self._parsed(name, _port)
 
     def timestamp(self, name: str) -> datetime | None:
         return self._parsed(name, _timestamp)
@@ -303,14 +290,8 @@ class _Reader:
     def commit_sha(self, name: str) -> str | None:
         return self._parsed(name, _commit_sha)
 
-    def secret(self, name: str, *, force: bool = False, min_length: int = 0) -> Secret | None:
-        def parse(value: str) -> str:
-            text = _plain_text(value)
-            if len(text) < min_length:
-                raise ValueError(f"must be at least {min_length} characters")
-            return text
-
-        value = self._parsed(name, parse, force=force)
+    def secret(self, name: str, *, force: bool = False) -> Secret | None:
+        value = self._parsed(name, _plain_text, force=force)
         return None if value is None else Secret(value)
 
 
@@ -358,12 +339,6 @@ def _http_url(value: str) -> str:
     if parts.username is not None or parts.password is not None or parts.query or parts.fragment:
         raise ValueError("must not carry credentials, a query or a fragment")
     return value
-
-
-def _port(value: str) -> int:
-    if not (value.isascii() and value.isdecimal()) or not 1 <= int(value) <= 65535:
-        raise ValueError("must be an integer from 1 to 65535")
-    return int(value)
 
 
 def _timestamp(value: str) -> datetime:
@@ -468,18 +443,12 @@ def _archive_credentials(reader: _Reader, archive: ArchiveLocation | None) -> Ar
 
 
 def _build(reader: _Reader) -> HostInfo:
-    state_dir = reader.existing_dir(Var.STATE_DIR)
-    events_dir = reader.path(Var.EVENTS_DIR)
     result_archive = reader.archive(Var.RESULT_ARCHIVE)
     return HostInfo(
         input_file=reader.existing_file(Var.INPUT_FILE),  # type: ignore[arg-type]
         run_id=reader.text(Var.RUN_ID),  # type: ignore[arg-type]
         run_created_at=reader.timestamp(Var.RUN_CREATED_AT),  # type: ignore[arg-type]
-        state_dir=state_dir,  # type: ignore[arg-type]
-        events_dir=events_dir or (state_dir / "events" if state_dir else None),  # type: ignore[arg-type]
-        mcp_host=reader.text(Var.MCP_HOST),
-        mcp_port=reader.port(Var.MCP_PORT),
-        mcp_token=reader.secret(Var.MCP_TOKEN, min_length=MIN_MCP_TOKEN_LENGTH),
+        state_dir=reader.existing_dir(Var.STATE_DIR),  # type: ignore[arg-type]
         mcp_public_url=reader.url(Var.MCP_PUBLIC_URL),
         sandbox_templates=reader.templates(Var.SANDBOX_TEMPLATES),
         e2b_api_url=reader.url(Var.E2B_API_URL),

@@ -314,6 +314,8 @@ class SourceLaunch:
     and ``env`` carry no runner-owned keys; ``stripped`` names what was taken out for that reason. ``client_env`` is
     the load generator's environment the source pairs with the launch, the point's own workload settings left out.
     ``source_concs`` are the concurrencies, ascending, the source publishes for the launch's arm; empty for none.
+    ``source_launches`` are the launches the source binds at those concurrencies, each as this one is bound, one per
+    concurrency the source could reproduce; empty for a source that publishes no arm.
     """
 
     source: LaunchSource
@@ -331,6 +333,7 @@ class SourceLaunch:
     stripped: tuple[str, ...] = ()
     warnings: tuple[str, ...] = ()
     source_concs: tuple[int, ...] = ()
+    source_launches: tuple[SourceLaunch, ...] = ()
 
     @property
     def cards(self) -> int:
