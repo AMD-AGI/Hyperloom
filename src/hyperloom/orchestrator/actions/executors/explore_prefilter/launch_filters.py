@@ -16,6 +16,7 @@ import yaml
 from hyperloom_common.coerce import to_str_list
 from hyperloom.common.launch_log_evidence import settings_the_engine_rewrote
 from ..framework_change._spec_decode_context_copy import CONTEXT_COPY_REFUSAL, context_copy_refusal
+from ..framework_change._spec_decode_pin import simulates_acceptance, speculative_identity
 from ..grid._explore_variants import variant_fingerprint
 from ..grid._grid_base import GridVariant
 from ..grid._grid_runner import GridRecipe, _build_variant_yaml
@@ -64,6 +65,18 @@ def _materialized_launch(recipe: GridRecipe, gv: GridVariant, output_subdir: Pat
 
 #: What reading a probe launch can raise; a launch that cannot be read is never judged unchanged.
 _UNREADABLE_LAUNCH = (OSError, ValueError, yaml.YAMLError, ConfigUnreadable)
+
+
+def launch_forces_acceptance(recipe: GridRecipe, gv: GridVariant) -> bool:
+    """Whether the launch *gv* materializes on ``recipe`` simulates speculative-decoding acceptance, so an eval on
+    its server would score text the target model never verified; a launch that cannot be materialized fails its round
+    before any eval, and is judged not to."""
+    with tempfile.TemporaryDirectory(prefix="explore_acceptance_probe_") as tmp_dir:
+        try:
+            argv, envs = _materialized_launch(recipe, gv, Path(tmp_dir))
+        except _UNREADABLE_LAUNCH:
+            return False
+    return simulates_acceptance(speculative_identity(argv, envs))
 
 
 def _probe_launch(recipe: GridRecipe, gv: GridVariant, output_subdir: Path) -> Launch:

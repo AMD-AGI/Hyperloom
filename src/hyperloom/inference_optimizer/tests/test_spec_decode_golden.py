@@ -29,7 +29,10 @@ from hyperloom.orchestrator.actions.executors.explore_prefilter.spec_decode_gold
     session_golden_lookup,
     synthetic_draft_refusal,
 )
-from hyperloom.orchestrator.actions.executors.explore_prefilter.launch_filters import filter_synthetic_drafts
+from hyperloom.orchestrator.actions.executors.explore_prefilter.launch_filters import (
+    filter_synthetic_drafts,
+    launch_forces_acceptance,
+)
 
 _CURVE = GoldenCurve(
     repo="https://github.com/SemiAnalysisAI/InferenceX",
@@ -200,3 +203,17 @@ def test_explore_drops_each_variant_under_its_own_reason_and_keeps_the_forced_dr
         "copying": CONTEXT_COPY_REFUSAL,
     }
     assert "SGLANG_SIMULATE_ACC_LEN=2.32" in {name: detail for name, _, detail in dropped}["real"]
+
+
+@pytest.mark.parametrize(
+    ("variant", "forces"),
+    [
+        pytest.param(GridVariant("forced", extra_server_args=_SGLANG, extra_envs=_SGLANG_FORCED), True, id="forced"),
+        pytest.param(GridVariant("real", extra_server_args=_SGLANG), False, id="real-draft"),
+        pytest.param(GridVariant("lever", extra_server_args="--max-running-requests 64"), False, id="no-draft"),
+    ],
+)
+def test_explore_knows_which_launch_would_eval_under_a_forced_acceptance(tmp_path: Path, variant, forces) -> None:
+    recipe = _noop_filter_kwargs(tmp_path)["recipe"]
+
+    assert launch_forces_acceptance(recipe, variant) is forces

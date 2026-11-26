@@ -76,6 +76,7 @@ from .explore_prefilter.launch_filters import (
     filter_baseline_noop_variants,
     filter_operator_pinned_envs,
     filter_synthetic_drafts,
+    launch_forces_acceptance,
     launch_identity,
     observed_launch_from_state,
 )
@@ -273,6 +274,7 @@ class _ExploreRound:
         self.grid: list[GridVariant] = []
         self.runnable: list[GridVariant] = []
         self.skipped: list[dict[str, Any]] = []
+        self.forcing: set[str] = set()  # variants whose launch simulates acceptance: their eval runs on its own
         self.winners: list[dict[str, Any]] = []
         self.losers: list[dict[str, Any]] = []
         self.rejected: list[dict[str, Any]] = []
@@ -622,6 +624,8 @@ class _ExploreRound:
         # Judged against the stack as it stands now: a KEEP earlier in this round may have changed it.
         if not self.refuse_synthetic_drafts:
             return False
+        if launch_forces_acceptance(self._recipe(), gv):
+            self.forcing.add(gv.name)
         lookup = session_golden_lookup(self.session_dir, self.framework)
         _, refused = filter_synthetic_drafts([gv], recipe=self._recipe(), lookup=lookup)
         if not refused:
@@ -649,6 +653,7 @@ class _ExploreRound:
         return True
 
     async def _measure(self, gv: GridVariant, run_gv: GridVariant, idx: int, slot: Path) -> Any:
+        run_gv = variant_with_eval_off(run_gv) if gv.name in self.forcing else run_gv
         self.launched[launch_identity(self._recipe(), gv)] = variant_fingerprint(gv)
         # The warmup and decision rounds share this slot as the lifecycle pid_dir so the decision round
         # re-attaches to the server the warmup left hot.
@@ -782,7 +787,7 @@ class _ExploreRound:
             "validation_basis": "",
         }
         if row["outcome"] == TS_FAILED and not row["reason"]:
-            if accuracy_round_due(self.ss):
+            if accuracy_round_due(self.ss) or (gv.name in self.forcing and self.accuracy_reference.score > 0):
                 await self._run_accuracy_round(row, slot, r.workspace)
             self._apply_accuracy_gate(row, slot)
         self._record(gv, row)

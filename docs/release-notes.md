@@ -58,6 +58,10 @@ it.
   (`speculative_acceptance_not_golden_on_synthetic`); the refusal names the
   value to force and the curve it comes from. A draft InferenceX records no
   value for, Qwen3.8-27B's MTP among them, is refused until one is measured.
+  A variant whose launch forces an acceptance length is graded for accuracy
+  on an accuracy round of its own with the forcing taken out, since an eval
+  on the forced server scores text the target model never verified; an
+  AgentX accuracy round takes a forcing its candidate set out the same way.
   Before, such a variant was graded on the acceptance it measured, which the
   synthetic benchmark's greedy repetition loops inflate: Qwen3.8-27B with 3
   MTP draft tokens accepted 89% of its draft tokens there against 63–65% under

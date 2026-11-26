@@ -130,7 +130,8 @@ gain. Explore refuses before launch a variant that enables a real draft, or
 forces another value than the golden one, as
 `speculative_acceptance_not_golden_on_synthetic`; the refusal names the value
 InferenceX records for that draft and the curve it is read from, so restate the
-variant with that value. A draft InferenceX records no curve for is refused
+variant with that value; its accuracy is then scored on a round of its own with
+the forcing taken out. A draft InferenceX records no curve for is refused
 there too: leave speculative decoding off for that model. In an AgentX session,
 which replays real traces, a variant may enable it with a real draft too.
 
