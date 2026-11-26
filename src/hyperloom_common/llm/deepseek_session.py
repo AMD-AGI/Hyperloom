@@ -232,7 +232,21 @@ def step_usage(event: Mapping[str, Any]) -> dict[str, int] | None:
     One implementation for every reader of the harness's records: the live
     events of a turn and the records of a session log share this shape.
     """
-    if event.get("type") != "assistant/message":
+    return _reported_usage(event, "assistant/message")
+
+
+def compaction_usage(event: Mapping[str, Any]) -> dict[str, int] | None:
+    """The token counts one ``compaction/summary`` event reports, or ``None`` for any other event and for a
+    compaction that called no model.
+
+    The runtime summarizes the messages it drops from a long conversation with a model call of its own, which no
+    ``assistant/message`` reports.
+    """
+    return _reported_usage(event, "compaction/summary")
+
+
+def _reported_usage(event: Mapping[str, Any], kind: str) -> dict[str, int] | None:
+    if event.get("type") != kind:
         return None
     data = event.get("data")
     usage = data.get("usage") if isinstance(data, dict) else None
@@ -458,6 +472,7 @@ __all__ = [
     "HarnessLaunch",
     "MAX_TOKENS_ENV",
     "child_environment",
+    "compaction_usage",
     "gateway_env",
     "load_harness_sdk",
     "max_tokens_from_env",

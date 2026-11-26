@@ -18,8 +18,11 @@ writes:
 - ``assistant`` for every model call, with its text, reasoning and tool calls, its model and its token counts, a
   sub-agent's marked by ``parent_tool_use_id``; ``user`` for every tool result;
 - ``system``/``api_retry`` for every model call the runtime retries;
+- ``system``/``compact_boundary`` for every model call the runtime summarizes with what it drops from a long
+  conversation, with its model and token counts;
 - ``result`` when the turn ends: its last reply, or the failure the runtime ended it with (``is_error``, with the
-  gateway's status as ``api_error_status`` when it gave one), the model calls it made and their summed token counts.
+  gateway's status as ``api_error_status`` when it gave one), the model calls it made, a compaction's among them,
+  and their summed token counts.
 
 ``--session-id`` names the conversation a fresh launch opens and ``--resume`` the one a launch goes on with, restored
 from the session log an earlier process left in the same ``DSH_HOME``; a conversation that cannot be restored ends the
@@ -67,6 +70,7 @@ from hyperloom_common.llm.deepseek_session import (
     DeepSeekSessionError,
     HarnessLaunch,
     child_environment,
+    compaction_usage,
     load_harness_sdk,
     normalize_run_result,
     sdk_failures,
@@ -137,9 +141,11 @@ CONTEXT_EXCEEDED_CODE = "CONTEXT_WINDOW_EXCEEDED"
 CONTEXT_EXCEEDED_STOP = "model_context_window_exceeded"
 MAX_TOKENS_FINISH, MAX_TOKENS_STOP = "max-tokens", "max_tokens"
 _ASSISTANT_MESSAGE, _ASSISTANT_ATTEMPT = "assistant/message", "assistant/attempt"
-#: The events of a session that open and close the wait for a model call's reply.
-_CALL_OPENS = frozenset({"step/start", "llm/retry-started"})
-_CALL_CLOSES = frozenset({_ASSISTANT_MESSAGE, _ASSISTANT_ATTEMPT, "step/end", "turn/end"})
+#: The event of the model call the runtime summarizes with what it drops from a long conversation.
+_COMPACTION_SUMMARY = "compaction/summary"
+#: The events of a session that open and close the wait for a model call's reply: a step's, and a compaction's.
+_CALL_OPENS = frozenset({"step/start", "llm/retry-started", "compaction/start"})
+_CALL_CLOSES = frozenset({_ASSISTANT_MESSAGE, _ASSISTANT_ATTEMPT, "step/end", "turn/end", "compaction/end"})
 #: The events a tool call runs between, and the one that ends every tool call of its session.
 _TOOL_STARTS, _TOOL_RESULT, _TURN_END = "tool/call", "tool/result", "turn/end"
 #: The type of the rows that are no message of the conversation, and of a content block that is text.
@@ -211,6 +217,8 @@ class Turn:
             row = self._assistant(event, data)
         elif kind == _ASSISTANT_ATTEMPT:
             self.calls += 1
+        elif kind == _COMPACTION_SUMMARY:
+            row = self._compaction(event, data)
         elif kind == "tool/result":
             row = _tool_result(data)
         elif kind == "llm/retry":
@@ -259,9 +267,7 @@ class Turn:
         message = data.get("message")
         message = message if isinstance(message, dict) else {}
         source = message.get("source")
-        usage = {name: count for name, count in (step_usage(event) or {}).items() if name in _USAGE_NAMES}
-        for name, count in usage.items():
-            self.usage[name] = self.usage.get(name, 0) + count
+        usage = self._spent(step_usage(event))
         return {
             "type": "assistant",
             "message": {
@@ -273,6 +279,28 @@ class Turn:
                 "usage": usage,
             },
         }
+
+    def _compaction(self, event: Mapping[str, object], data: Mapping[str, object]) -> dict[str, object] | None:
+        """The row of a compaction that called a model, as a Claude CLI marks one, with what the call used: a model
+        call of the turn that no reply of the conversation reports."""
+        reported = compaction_usage(event)
+        if reported is None:
+            return None
+        self.calls += 1
+        return {
+            "type": _SYSTEM,
+            "subtype": "compact_boundary",
+            "compact_metadata": {"trigger": "auto", "pre_tokens": data.get("shadowedTokenCount")},
+            "model": str(data.get("model") or ""),
+            "usage": self._spent(reported),
+        }
+
+    def _spent(self, reported: Mapping[str, int] | None) -> dict[str, int]:
+        """Add what one model call ``reported`` to the turn's token counts; the counts a row carries of it."""
+        usage = {name: count for name, count in (reported or {}).items() if name in _USAGE_NAMES}
+        for name, count in usage.items():
+            self.usage[name] = self.usage.get(name, 0) + count
+        return usage
 
 
 #: The token counts of a row, by the names an Anthropic ``usage`` block gives them.

@@ -192,6 +192,58 @@ def test_a_model_call_is_in_flight_from_its_step_s_start_to_its_reply_by_session
     assert turn.in_flight() == {}
 
 
+def _compaction(**usage: int) -> SimpleNamespace:
+    """The event of the model call the runtime summarized dropped messages with, as a long conversation's log has it."""
+    data = {"compactionId": "c1", "summary": [{"type": "text", "text": "## Primary Request"}], "llmStreamCall": True}
+    return _event("compaction/summary", {**data, "shadowedTokenCount": 8511, "model": MODEL, "usage": usage})
+
+
+def test_the_model_call_a_compaction_makes_is_in_flight_and_counted_with_the_turn_s(tmp_path: Path) -> None:
+    out, clock = io.StringIO(), SimpleNamespace(now=100.0)
+    turn = Turn(Rows(out), SID, lambda: clock.now)
+
+    # The runtime compacts before the turn's first step, a model call of its own that takes half a minute.
+    turn.note(_event("compaction/start", {"compactionId": "c1"}))
+    clock.now = 135.0
+    assert turn.in_flight() == {"model_request": 35.0}
+    spent = {"inputTokens": 4, "outputTokens": 1837, "cacheReadTokens": 17535, "cacheWriteTokens": 11864}
+    turn.note(_compaction(**spent, totalTokens=31240))
+    turn.note(_event("compaction/end", {"compactionId": "c1"}))
+    assert turn.in_flight() == {}
+    turn.note(_call([{"type": "text", "text": "done"}], inputTokens=200, outputTokens=34, cacheReadTokens=1000))
+
+    boundary, said = _rows(out)
+    assert (boundary["type"], boundary["subtype"], boundary["model"]) == ("system", "compact_boundary", MODEL)
+    assert boundary["compact_metadata"] == {"trigger": "auto", "pre_tokens": 8511}
+    assert boundary["usage"]["output_tokens"] == 1837 and said["type"] == "assistant"
+    row = result_row(turn, _outcome(text="done"), 40.0)
+    assert (row["num_turns"], row["usage"]) == (
+        2,
+        {
+            "input_tokens": 204,
+            "output_tokens": 1871,
+            "cache_read_input_tokens": 18535,
+            "cache_creation_input_tokens": 11864,
+        },
+    )
+    # A session reads the spend off the turn's result, and the conversation's size off its last reply, not the summary.
+    log = tmp_path / "process.log"
+    log.write_text("".join(json.dumps(item) + "\n" for item in (boundary, said, row)), encoding="utf-8")
+    turns = TurnLog(log)
+    assert turns.ended() == 1 and turns.context == 1200
+    assert dict(launch_usage(log).tokens) == {MODEL: TokenCounts(204, 1871, 18535, 11864)}
+
+
+def test_a_compaction_that_called_no_model_is_no_row_and_no_call() -> None:
+    out = io.StringIO()
+    turn = Turn(Rows(out), SID)
+
+    turn.note(_event("compaction/prune", {"prunedCount": 3}))
+    turn.note(_event("compaction/summary", {"compactionId": "c2", "summary": []}))
+
+    assert (_rows(out), turn.calls, turn.usage) == ([], 0, {})
+
+
 def test_a_tool_call_is_in_flight_from_its_call_to_its_result_or_the_end_of_its_session_s_turn() -> None:
     clock = SimpleNamespace(now=100.0)
     turn = Turn(Rows(io.StringIO()), SID, lambda: clock.now)
