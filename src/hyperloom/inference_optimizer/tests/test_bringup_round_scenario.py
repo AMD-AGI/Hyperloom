@@ -123,7 +123,6 @@ def _lane(session: Path, tasks: TaskRegistry, rounds: RoundStore, launch_log: st
     )
     for owner, name in (
         (EnablementParams, "build_enablement_specialist_params"),
-        (EnablementParams, "_discover_enablement_candidate_refs"),
         (EnablementLane, "_maybe_record_enablement_human_review"),
         (EnablementLane, "maybe_rearm_enablement"),
         (EnablementLane, "_maybe_enqueue_enablement_specialist"),
@@ -172,12 +171,9 @@ async def test_the_enablement_attempt_cap_stops_a_round_that_keeps_asking(
     monkeypatch,
 ):
     """Consecutive rounds that repair nothing exhaust the cap and stop the run."""
-    import hyperloom.agents.framework.sources as sources
-
     from hyperloom.orchestrator.actions.executors import _multi_node_env as multi_node
     from hyperloom.orchestrator.phases.machine_state import ENABLEMENT_MAX_ATTEMPTS as _ENABLEMENT_MAX_ATTEMPTS
 
-    monkeypatch.setattr(sources, "enumerate_candidates", lambda _request: [])
     monkeypatch.setattr(multi_node, "is_multi_node", lambda: False)
 
     session, _slot = round_slot
@@ -207,12 +203,9 @@ async def test_an_advancing_round_does_not_exhaust_the_cap(
     monkeypatch,
 ):
     """An advancing round resets the streak so a bring-up outlives the cap."""
-    import hyperloom.agents.framework.sources as sources
-
     from hyperloom.orchestrator.actions.executors import _multi_node_env as multi_node
     from hyperloom.orchestrator.phases.machine_state import ENABLEMENT_MAX_ATTEMPTS as _ENABLEMENT_MAX_ATTEMPTS
 
-    monkeypatch.setattr(sources, "enumerate_candidates", lambda _request: [])
     monkeypatch.setattr(multi_node, "is_multi_node", lambda: False)
 
     session, _slot = round_slot
@@ -246,11 +239,8 @@ async def test_a_round_settles_when_the_caller_has_no_reason_to_give(
     monkeypatch,
 ):
     """Most settles carry a reason and some carry none; both end the round."""
-    import hyperloom.agents.framework.sources as sources
-
     from hyperloom.orchestrator.actions.executors import _multi_node_env as multi_node
 
-    monkeypatch.setattr(sources, "enumerate_candidates", lambda _request: [])
     monkeypatch.setattr(multi_node, "is_multi_node", lambda: False)
 
     session, _slot = round_slot

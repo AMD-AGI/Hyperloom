@@ -100,10 +100,9 @@ class SpecialistPromptInputs:
     # the static_recon_specialist dispatch.
     static_recon_checklist: str = ""
 
-    # Enablement dispatch evidence, folded into the §1b mandate. Empty for
-    # every non-enablement domain; the mandate omits whichever is empty.
+    # Source lines near the offending site, folded into the §1b mandate. Empty
+    # for every non-enablement domain.
     enablement_source_context: str = ""
-    enablement_candidate_refs: tuple[str, ...] = ()
     # The serialized FailureSignature the round was dispatched on; required for
     # the enablement domain, empty for every other.
     enablement_failure_signature: dict[str, Any] = field(default_factory=dict)
