@@ -17,6 +17,9 @@ them:
   its :attr:`~.analysis.AnalysisStarter.analysis_tools`, which the tool's schema and description list, no more) on the
   branch's head commit, or on the landed output of the test ``kernel_tune`` names (an
   :class:`~.analysis.AnalysisStarter`, the real toolbox);
+* ``analysis_result``, served with an analysis tool, reads the result record of a job of the branch from the toolbox,
+  in pages when it is over :data:`ANALYSIS_RESULT_MAX_CHARS`: the inbox carries a job's summary, and a specialist's
+  sandbox does not show the toolbox's files;
 * ``poll_inbox`` reads the branch's inbox, one page at a time (:data:`POLL_INBOX_MAX_ITEMS` items at most);
 * ``option_review``, served where the session laid an option inventory, records the branch's verdicts on the options
   the launch leaves unset (:class:`~.option_reviews.OptionReviews`) and answers what its review still leaves out;
@@ -87,6 +90,7 @@ from hyperloom_multibranch.toolbox.option_reviews import (
     ReviewRefused,
 )
 from hyperloom_multibranch.toolbox.tools.kernel_tune import KERNEL_TUNE_TOOL
+from hyperloom_multibranch.toolbox.tools.knob_tune import KNOB_TUNE_TOOL
 from hyperloom_multibranch.toolbox.tools.roofline import ROOFLINE_TOOL, TRACELENS_TOOL
 from hyperloom_multibranch.toolbox.tools.upstream_pr import DEFAULT_LIMIT, MAX_LIMIT, UPSTREAM_PR_TOOL
 
@@ -127,6 +131,22 @@ _POLL_INBOX_TOOL = "poll_inbox"
 #: showing it; 16,000 characters stay near 5,000 tokens.
 POLL_INBOX_MAX_ITEMS = 20
 POLL_INBOX_MAX_BYTES = 16_000
+#: The longest ``analysis_result`` reply, under the 50,000 characters Claude Code shows; a longer record is paged.
+ANALYSIS_RESULT_MAX_CHARS = 45_000
+_ANALYSIS_RESULT_TOOL = "analysis_result"
+_ANALYSIS_RESULT: dict[str, Any] = {
+    "type": _OBJECT,
+    "properties": {
+        "job_id": {"type": _STRING, "minLength": 1},
+        "offset": {
+            "type": _INTEGER,
+            "minimum": 0,
+            "description": "Where a page of a long record starts: the next_offset of the page before; 0 when left out.",
+        },
+    },
+    "required": ["job_id"],
+    "additionalProperties": False,
+}
 #: What a page's document needs besides its items and its cursor: the keys, the counts and the marker.
 _POLL_PAGE_OVERHEAD = 200
 _PAGE_CURSOR = "page:"
@@ -194,6 +214,7 @@ _ANALYSIS_BLURBS = {
     TRACELENS_TOOL: "analyse a trace",
     ROOFLINE_TOOL: "the kernel roofline of a trace",
     KERNEL_TUNE_TOOL: "tune GEMM shapes on one card",
+    KNOB_TUNE_TOOL: "sweep a compile-time kernel knob on one card",
     UPSTREAM_PR_TOOL: "search upstream pull requests",
 }
 #: Whose tests ``test_result`` reads, and ``wait_test`` waits for: as a session of an installed framework is told,
@@ -254,7 +275,7 @@ _KERNEL_TUNE_GUIDE = (
     "with params.shapes, which are tuned as named. The decode "
     "CUDA-graph batch sizes the test's servers captured are added to the shapes as M. It runs Forge's tuner on one "
     "card leased for the job, so it is refused (lease_leaves_no_measurement) when no card can be spared from "
-    "measurement, and its result arrives in poll_inbox: per table, the tuned rows as a rows-only CSV for "
+    "measurement, and analysis_result returns its result: per table, the tuned rows as a rows-only CSV for "
     "put_kernel_artifact(rows_only=true), each row checked against the reference GEMM (a row that failed or could "
     "not be checked is listed with verified=false and is not in the CSV). By default a row is handed over only with "
     "a mismatch ratio of at most 0.01 (an asm kernel at a splitK above 1 may instead have a relative-norm error of at "
@@ -264,6 +285,25 @@ _KERNEL_TUNE_GUIDE = (
     "err_ratio_above_default): they are not checked rows and are never in rows_csv; using them is your explicit "
     "choice, and only an end-to-end accuracy check (GSM8K, and the long-context check for attention or KV paths) "
     "decides whether they stand. Its microseconds are advice only; a test of the rows says whether they help."
+)
+_KNOB_TUNE_GUIDE = (
+    " knob_tune: sweeps a compile-time launch parameter of a native kernel of a component the toolbox builds from its "
+    "pinned checkout. params.knob names a knob the rule pack declares for such a component: a request that names none, "
+    "or one the pack does not declare, is refused with the knobs it takes, each with its axes, their values and the "
+    "values it may be given. A key is one value of each axis. params.axes maps an axis of the knob to the values of it "
+    "to sweep (an axis left out takes all its values), params.values the values to force (all of the knob's when "
+    "omitted). params.shapes is the "
+    "weight shapes [m, k] of your model each key is timed at (required), params.copies the weights of each shape "
+    "multiplied in one launch so they exceed the GPU's cache as a model's do (default 4), params.rounds the timed "
+    "rounds (default 5). A case must be larger than the GPU's cache (copies times the weight's bytes): otherwise its "
+    "repeats read a cached matrix and overstate the gain. "
+    "It builds the pinned commit once per value, no card held, then times every key with the component's own operator "
+    "benchmark on a card "
+    "leased per round, the default build twice per round for the noise (refused with lease_leaves_no_measurement when "
+    "no card can be spared). poll_inbox shows the job's summary, how many keys beat the default; analysis_result "
+    "returns its result: the ranked table, the noise, each key's winning value where it beat the default beyond the "
+    "noise and matched the CPU backend, and the patch forcing the winners (a git patch over the pinned commit). Commit "
+    "it on your branch and submit a test: the microbenchmark is advice only."
 )
 
 
@@ -278,8 +318,9 @@ _UPSTREAM_PR_GUIDE = (
     "or all search pull requests of every state) are optional. The tool runs in the toolbox's host process and asks "
     "GitHub. poll_inbox shows you the job's summary: how many candidates the search kept, of how many pull requests "
     'matched when the limit left some out ("10 of 266"), and the ref and title of the first candidate, the best '
-    "match. The other candidates are in the job's result record, which you are not shown: to see another pull "
-    "request, search again with fewer, more specific words. A GitHub that cannot be asked fails the job and says "
+    "match. The other candidates are in the job's result record, which analysis_result returns, in pages when it is "
+    f"over {ANALYSIS_RESULT_MAX_CHARS} characters: to see another pull request, search again with fewer, more "
+    "specific words. A GitHub that cannot be asked fails the job and says "
     "why, which is not an empty answer: a failure that names a wait is a spent rate limit, so ask again after it; "
     "after a token GitHub refuses or a GitHub that cannot be reached, go on without this tool."
 )
@@ -321,10 +362,12 @@ def _start_analysis_description(served: Sequence[str]) -> str:
         return "This toolbox serves no analysis tool: every call is refused by name."
     named = " or ".join(f"{name} ({_ANALYSIS_BLURBS[name]})" if name in _ANALYSIS_BLURBS else name for name in served)
     return (
-        f"Start {named} for this branch; returns the job id at once and the result arrives in poll_inbox. The commit "
+        f"Start {named} for this branch; returns the job id at once. When the job ends its summary arrives in "
+        f"poll_inbox, and {_ANALYSIS_RESULT_TOOL} with the job id returns its result. The commit "
         "analysed is this branch's head, set by the server; with a profile_request_id of any branch's profile test of "
         "its recipe the pointer carries its op shares."
         + (_KERNEL_TUNE_GUIDE if KERNEL_TUNE_TOOL in served else "")
+        + (_KNOB_TUNE_GUIDE if KNOB_TUNE_TOOL in served else "")
         + (_UPSTREAM_PR_GUIDE if UPSTREAM_PR_TOOL in served else "")
     )
 
@@ -547,6 +590,49 @@ def _start_analysis(
             raise ToolError(f"rejected ({exc.code}): {exc.reason}") from exc
 
     return handle
+
+
+def _analysis_result(
+    analysis: AnalysisStarter, home: asyncio.AbstractEventLoop | None
+) -> Callable[[dict[str, Any], CallContext], Any]:
+    async def handle(arguments: dict[str, Any], ctx: CallContext) -> dict[str, Any]:
+        job_id = arguments["job_id"]
+        try:
+            record = await on_home_loop(home, analysis.analysis_result(ctx.principal.branch, job_id))
+        except PermissionError:
+            raise ToolForbidden("a specialist reads the jobs of its own branch only") from None
+        except LookupError:
+            raise ToolError(f"this toolbox ran no job {job_id!r}") from None
+        text, offset = json.dumps(record, default=str), int(arguments.get("offset") or 0)
+        if not offset and len(text) <= ANALYSIS_RESULT_MAX_CHARS:
+            return dict(record)
+        if offset >= len(text):
+            raise ToolError(
+                f"offset {offset} is past the end of the {len(text)} characters of the result record of {job_id}"
+            )
+        return _record_page(job_id, text, offset)
+
+    return handle
+
+
+def _record_page(job_id: str, text: str, offset: int) -> dict[str, Any]:
+    """The page of ``text``, the JSON of the result record of ``job_id``, that starts at ``offset``: as much of it as
+    one reply of :data:`ANALYSIS_RESULT_MAX_CHARS` holds beside the page's other fields, but always one character so
+    that every page moves on. The reply is JSON too, so a quote or a backslash of the page is sent as two characters.
+    The pages joined in order are the record's JSON."""
+
+    def upto(end: int) -> dict[str, Any]:
+        page = {"job_id": job_id, "chars": len(text), "offset": offset, "page": text[offset:end], "next_offset": None}
+        if end < len(text):
+            page |= {"next_offset": end, "more": f"call {_ANALYSIS_RESULT_TOOL} with offset {end} for the next page"}
+        return page
+
+    # An empty page names its own offset twice as the next; the real next has at most the digits of the length.
+    room = ANALYSIS_RESULT_MAX_CHARS - len(json.dumps(upto(offset))) - 2 * (len(str(len(text))) - len(str(offset)))
+    end = offset
+    while end < len(text) and (room := room - (2 if text[end] in '"\\' else 1)) >= 0:
+        end += 1
+    return upto(max(end, offset + 1))
 
 
 def _result_document(request_id: str, record: Any) -> dict[str, Any]:
@@ -931,6 +1017,22 @@ def _register_start_analysis(
         description=_start_analysis_description(served),
         schema=_start_analysis_schema(served),
         handler=_start_analysis(analysis, home),
+        scopes=_SPECIALIST_SCOPES,
+    )
+    if analysis is None or not served:
+        return
+    server.register(
+        _ANALYSIS_RESULT_TOOL,
+        description=(
+            "The result record of a job start_analysis started for this branch: its status and summary and, once it "
+            "ended, the tool's whole result, of which poll_inbox shows the summary only, or the error it failed with. "
+            f"A job that still runs answers its status alone. A record over {ANALYSIS_RESULT_MAX_CHARS} characters "
+            "is returned in pages: page is a part of the record's JSON text, chars the length of the whole text and "
+            "next_offset where the next page starts. Call again with it as offset until next_offset is null, and "
+            "join the pages in order to have the record."
+        ),
+        schema=_ANALYSIS_RESULT,
+        handler=_analysis_result(analysis, home),
         scopes=_SPECIALIST_SCOPES,
     )
 
