@@ -8,13 +8,14 @@ The root recipe is the framework checkout the session runs on, at its ``HEAD``, 
 root commit, the integration branch is opened on it with its K at once, and the session profile is written, with the decode ceiling the
 main flow's roofline models for the workload (:func:`roofline_ceiling`). Three
 things then run together, any of them failing ending the others: as many tests of the root as the rule gate asks for,
-from which the gate writes the baseline and its bar; a PROFILE test of the root and its TraceLens analysis in the
-toolbox (:meth:`~hyperloom_multibranch.scheduling.events.IntegrationProfiler.profile_root`), which PRELUDE waits for so
-the opening judge call reads the root's op shares, and which a backend that cannot profile or analyse leaves as its
-decision only; and the replay of the Recipe KB's champion. An AgentX root's analysis is submitted once the baseline
-measurement has ended, since its phase windows are weighted by the lengths the baseline measured; PRELUDE waits for that
-measurement anyway, so the opening judge call reads shares weighted by them. The longest of the root tests, start to finish, is how long
-one test of this workload takes; it is FINAL's reserve.
+from which the gate writes the baseline and its bar; a PROFILE test of the root
+(:meth:`~hyperloom_multibranch.scheduling.events.IntegrationProfiler.profile_root`); and the replay of the Recipe KB's
+champion. PRELUDE waits for the PROFILE test, not for its TraceLens analysis, which holds no card: the analysis goes on
+as the integration branch's running profile once EXPLORE opened, whose events record how it ended and show the judge
+the root's op shares when it left them, and the session waits for it only to map its agents' directions by those
+shares. A failure that ends PRELUDE stops the analysis too. An AgentX root's analysis is submitted once the baseline
+measurement has ended, since its phase windows are weighted by the lengths the baseline measured. The longest of the
+root tests, start to finish, is how long one test of this workload takes; it is FINAL's reserve.
 
 The session profile is known once the root is committed, so the Recipe KB's champions for it are read as warm-start
 leads for the specialists at once, the best of them prepared for replay on the root's image and offered to the
@@ -121,14 +122,15 @@ class _Replayed:
 class PreludeResult:
     """The root commit the session is anchored on and the commit EXPLORE opens on, the profile it runs on, the Recipe
     KB's leads for it, the longest wall time, in seconds, of the root tests the baseline anchored on, and the toolbox's
-    job that analysed the root's profile (``""`` when none did); the rest is in the blackboard and ``MB-prelude/``."""
+    job that analysed the root's profile once that analysis ended (``""`` when none did, or it was stopped first); the
+    rest is in the blackboard and ``MB-prelude/``."""
 
     root_commit: str
     start_commit: str
     profile: SessionProfile
     warm_leads: tuple[WarmLead, ...]
     longest_root_test: float
-    root_profile_job: str
+    root_profile_job: asyncio.Future[str]
 
 
 #: Puts the integration branch at the root commit on the roster with its K and gives the toolbox the quota.
@@ -136,9 +138,10 @@ OpenIntegration = Callable[[str], Awaitable[None]]
 #: Replays the champion on the root commit and returns the commit EXPLORE opens on; the replay is judged once the
 #: awaitable, the baseline's anchoring, has ended.
 ReplayChampion = Callable[[PreparedReplay, str, Awaitable[object]], Awaitable[ChampionOutcome]]
-#: Profiles the root commit in the toolbox and analyses the profile, returning how that ended; the analysis is submitted
-#: once the awaitable, the baseline's measurement, has ended when one is given.
-ProfileRoot = Callable[[str, Awaitable[object] | None], Awaitable[ProfileOutcome]]
+#: Profiles the root commit in the toolbox and returns, once the PROFILE test ended, the analysis of the profile going
+#: on beside the session, which ends with how the profile ended; the analysis is submitted once the awaitable, the
+#: baseline's measurement, has ended when one is given.
+ProfileRoot = Callable[[str, Awaitable[object] | None], Awaitable[asyncio.Future[ProfileOutcome]]]
 
 
 @dataclass(frozen=True)
@@ -177,8 +180,8 @@ class Prelude:
 
     async def root(self, workload: Workload, base_image_digest: str) -> PreludeResult:
         """Root the session on ``base_image_digest`` and measure its baseline; raises :class:`PreludeFailed` when there
-        is none. The root tests, the root's profile and the champion's replay run together once the root is committed,
-        any of them failing ending the others."""
+        is none. The root tests, the root's PROFILE test and the champion's replay run together once the root is
+        committed, any of them failing ending the others and the profile's analysis."""
 
         recipe = await self._launched_root(workload.framework, base_image_digest)
         opened = await self._open_root(recipe, workload)
@@ -189,11 +192,16 @@ class Prelude:
         baseline = asyncio.ensure_future(self._measure_baseline(opened.commit))
         # An AgentX point names no prompt and output length: its analysis waits for the lengths the baseline measures.
         lengths = baseline if workload.inferencex is None else None
-        profiled = asyncio.ensure_future(self._profile_root_commit(opened.commit, lengths))
+        profiled = asyncio.ensure_future(self._profile_root(opened.commit, lengths))
         replayed = asyncio.ensure_future(self._replay(opened, baseline))
-        await together(baseline, profiled, replayed)
+        try:
+            await together(baseline, profiled, replayed)
+        except BaseException:
+            await _stop_analysis(profiled)
+            raise
         leads, start = replayed.result().warm_leads, replayed.result().start_commit
-        return PreludeResult(opened.commit, start, opened.profile, leads, baseline.result(), profiled.result())
+        job = _analysis_job(profiled.result())
+        return PreludeResult(opened.commit, start, opened.profile, leads, baseline.result(), job)
 
     async def landed(self) -> PreludeResult:
         """What the PRELUDE an earlier run of this session recorded, for a resumed session that runs none: the root of
@@ -207,15 +215,9 @@ class Prelude:
         baseline = baseline_decision(rows)
         assert baseline is not None, "resumable_run admits a session only once PRELUDE recorded its baseline decision"
         profiled = next((row for row in rows if row["kind"] == DecisionKind.PROFILE.value), None)
-        job = "" if profiled is None else str(profiled["detail"].get("job_id") or "")
+        job: asyncio.Future[str] = asyncio.get_running_loop().create_future()
+        job.set_result("" if profiled is None else str(profiled["detail"].get("job_id") or ""))
         return PreludeResult(root, start, profile, (), float(baseline["detail"]["longest_test_seconds"]), job)
-
-    async def _profile_root_commit(self, root: str, baseline: Awaitable[object] | None) -> str:
-        """Profile ``root``, analysed once ``baseline`` ended when there is one, and record how; the job that analysed
-        the profile, ``""`` when none did."""
-        outcome = await self._profile_root(root, baseline)
-        self._decisions.record(Decision(DecisionKind.PROFILE, outcome.reason, detail=outcome.detail))
-        return str(outcome.detail.get("job_id") or "")
 
     async def _launched_root(self, framework: str, base_image_digest: str) -> Recipe:
         try:
@@ -331,6 +333,30 @@ class Prelude:
 
     async def _withdraw(self, request_ids: list[str]) -> None:
         await asyncio.gather(*(self._tests.withdraw(request_id) for request_id in request_ids))
+
+
+async def _stop_analysis(profiled: asyncio.Future[asyncio.Future[ProfileOutcome]]) -> None:
+    """Stop the analysis of the root's profile that ``profiled``, ended, handed over, if it did."""
+
+    if profiled.cancelled() or profiled.exception() is not None:
+        return
+    analysis = profiled.result()
+    analysis.cancel()
+    await asyncio.gather(analysis, return_exceptions=True)
+
+
+def _analysis_job(analysis: asyncio.Future[ProfileOutcome]) -> asyncio.Future[str]:
+    """The toolbox's job that ran ``analysis`` once it ended: ``""`` when none did, or it was stopped or raised, which
+    the profile's events report."""
+
+    job: asyncio.Future[str] = asyncio.get_running_loop().create_future()
+
+    def ended(done: asyncio.Future[ProfileOutcome]) -> None:
+        failed = done.cancelled() or done.exception() is not None
+        job.set_result("" if failed else str(done.result().detail.get("job_id") or ""))
+
+    analysis.add_done_callback(ended)
+    return job
 
 
 def _longest_wall_seconds(results: Iterable[TestResult]) -> float:

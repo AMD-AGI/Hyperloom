@@ -600,12 +600,16 @@ class Session:
             prelude = await self._root_session()
         except PreludeFailed as exc:
             return SessionOutcome(SessionStopReason.PRELUDE_FAILED, None, None, str(exc))
-        await self._adopt_playbook()
-        await self._record_versions()
-        if self._settings.stop_after_map:
-            # Its stop is the review point: the map is kept and reviewed offline, so the session does not pause.
-            return await self._stop_after_map(prelude)
-        return await self._explore_and_final(prelude, budget)
+        try:
+            await self._adopt_playbook()
+            await self._record_versions()
+            if self._settings.stop_after_map:
+                # Its stop is the review point: the map is kept and reviewed offline, so the session does not pause.
+                return await self._stop_after_map(prelude)
+            return await self._explore_and_final(prelude, budget)
+        finally:
+            # The analysis of the root's profile PRELUDE left running ends with the phases, whether EXPLORE ran or not.
+            await self._events.stop_profiling()
 
     async def _resumed_phases(self, budget: SessionBudget, ended: SessionStopReason) -> SessionOutcome:
         await self._take_up(ended)
@@ -869,10 +873,11 @@ class Session:
         return SessionOutcome(SessionStopReason.MAPPED, None, None, "")
 
     async def _root_shares(self, prelude: PreludeResult) -> RootShares | None:
-        """The root's op shares, waited for, recorded as a ``PRELUDE`` decision; ``None`` when it has none."""
+        """The root's op shares, waited for once the analysis of the root's profile ended, recorded as a ``PRELUDE``
+        decision; ``None`` when it has none."""
 
         sources = ShareSources(self._blackboard, self._toolbox, self._clock)
-        read = await root_shares(sources, prelude.root_commit, prelude.root_profile_job)
+        read = await root_shares(sources, prelude.root_commit, await asyncio.shield(prelude.root_profile_job))
         self._decisions.record(Decision(DecisionKind.PRELUDE, ROOT_SHARES_READ, INTEGRATION_BRANCH, read.detail))
         return read.shares
 

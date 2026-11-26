@@ -1153,7 +1153,7 @@ class ProfilingToolbox(RecordingToolbox):
 ROOT_SHARES = {"moe_gemm": 41.5, "attention": 22.0}
 
 
-async def test_a_session_opens_explore_on_the_roots_own_profile_read_before_the_opening_judge_call(
+async def test_a_session_profiles_its_root_in_prelude_and_shows_the_judge_the_roots_shares_once_they_landed(
     tmp_path: Path,
 ) -> None:
     stage = _stage(tmp_path)
@@ -1171,9 +1171,12 @@ async def test_a_session_opens_explore_on_the_roots_own_profile_read_before_the_
     shares = await stage.handle(Role.OBSERVER).op_shares(root)
     assert shares is not None and dict(shares.shares) == ROOT_SHARES
     rows = _decisions(stage)
-    profiled = next(index for index, row in enumerate(rows) if row["kind"] == "profile")
-    assert rows[profiled]["reason"] == PROFILED and rows[profiled]["detail"]["commit"] == root
-    assert profiled < next(index for index, row in enumerate(rows) if row["kind"] == "judge")
+    [profiled] = [row for row in rows if row["kind"] == "profile"]
+    assert profiled["reason"] == PROFILED and profiled["detail"]["commit"] == root
+    [landed] = [row for row in rows if row["kind"] == "event"]
+    assert (landed["detail"]["event"], landed["detail"]["commit"]) == ("root_profiled", root)
+    calls = [json.loads(line) for line in stage.layout.judge.read_text().splitlines()]
+    assert any('"root_profiled"' in call["prompt"] for call in calls)
     [rooted] = [row for row in rows if row["reason"] == "root committed"]
     assert rooted["detail"] == {"root_commit": root}
     assert stage.sessions.started == {"b01": root}
@@ -3958,4 +3961,5 @@ async def test_an_agentx_large_merge_leaves_the_head_unprofiled_until_the_judge_
     calls = [json.loads(line) for line in stage.layout.judge.read_text().splitlines()]
     running = [(call["at"], '"profile_running": true' in call["prompt"]) for call in calls]
     after = moved["at"] + SETTINGS.judge_interval_seconds
-    assert running[:3] == [(calls[0]["at"], False), (moved["at"], False), (after, True)]
+    # The opening call is made while the analysis of the root's profile, which PRELUDE left running, still runs.
+    assert running[:3] == [(calls[0]["at"], True), (moved["at"], False), (after, True)]

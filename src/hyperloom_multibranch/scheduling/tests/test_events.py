@@ -449,6 +449,49 @@ async def test_a_large_merge_profiles_the_integration_head_and_a_moved_bottlenec
     assert rows[1]["detail"]["request_id"] == request_id and rows[1]["detail"]["analysis"] == "succeeded"
 
 
+async def test_the_root_profile_returns_once_its_test_ended_and_its_analysis_landing_is_an_event(log: Path) -> None:
+    shares = _Shares()
+    toolbox = _AnalysingToolbox(shares)
+    shares.toolbox = toolbox
+    profiler = IntegrationProfiler(toolbox, SessionTests(toolbox, CLOCK), shares, CLOCK)  # type: ignore[arg-type]
+    events = SessionEvents(_Health(), DecisionLog(log, CLOCK), profiler, toolbox, INFERENCEX)  # type: ignore[arg-type]
+
+    analysis = await profiler.profile_root("c-root")
+
+    [(request_id, request)] = toolbox.requests.items()
+    assert (request.purpose, request.parent_commit) == (Purpose.PROFILE, "c-root") and request_id in toolbox.results
+    await _until(lambda: toolbox.analyses)
+    assert not analysis.done() and events.profiling and not await events.detect()
+    toolbox.finish("c-root", {"gemm": 55.0, "attn": 30.0})
+    await _until(lambda: not events.profiling)
+
+    assert await events.detect()
+    [profiled] = events.hand_over()
+    assert (profiled.kind, profiled.detail) == (
+        EventKind.ROOT_PROFILED,
+        {"commit": "c-root", "largest_op": "gemm", "share_pct": 55.0},
+    )
+    assert [(row["kind"], row["reason"]) for row in _logged(log)] == [("profile", PROFILED), ("event", profiled.reason)]
+    assert analysis.result().reason == PROFILED
+
+
+async def test_a_root_profile_whose_analysis_left_no_shares_is_no_event(log: Path) -> None:
+    shares = _Shares()
+    toolbox = _AnalysingToolbox(shares)
+    shares.toolbox = toolbox
+    profiler = IntegrationProfiler(toolbox, SessionTests(toolbox, CLOCK), shares, CLOCK)  # type: ignore[arg-type]
+    events = SessionEvents(_Health(), DecisionLog(log, CLOCK), profiler, toolbox, INFERENCEX)  # type: ignore[arg-type]
+
+    await profiler.profile_root("c-root")
+    await _until(lambda: toolbox.analyses)
+    toolbox.status = JobStatus.FAILED
+    await _until(lambda: not events.profiling)
+
+    assert not await events.detect()
+    [profile] = _logged(log)
+    assert (profile["kind"], profile["reason"]) == ("profile", PROFILE_NOT_ANALYSED)
+
+
 async def test_a_profile_whose_analysis_left_no_shares_is_not_a_profile_the_head_has(log: Path) -> None:
     shares = _Shares({"c-root": _op_shares("c-root", BEFORE)})
     toolbox = _AnalysingToolbox(shares)
