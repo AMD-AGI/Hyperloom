@@ -13,6 +13,7 @@ from hyperloom.contracts.measurement import (
     FailureClass,
     PhaseTiming,
     Purpose,
+    RoundValue,
     SandboxFacts,
     TestKind,
     TestRequest,
@@ -579,7 +580,13 @@ async def _profile(
     async def on_node_failure(node: str, _reason: str, _reproduced: bool) -> None:
         reported.append(node)
 
-    runner = AttemptRunner(executor, avoid=frozenset, on_node_failure=on_node_failure, max_infra_retries=3)
+    runner = AttemptRunner(
+        executor,
+        avoid=frozenset,
+        on_node_failure=on_node_failure,
+        max_infra_retries=3,
+        backoff=_backoff(executor.clock),
+    )
     job = _job()
     job = replace(job, request=replace(job.request, kind=TestKind.PROFILE, purpose=Purpose.PROFILE))
     return await runner.run(job), executor, reported
@@ -663,14 +670,112 @@ async def test_a_profile_whose_server_died_outside_its_window_is_not_rerun_and_e
 _NCCL = "RuntimeError: NCCL error: unhandled cuda error\n"
 
 
-@pytest.mark.parametrize("phases", [BOOTED, ()], ids=["booted", "no_phases"])
-async def test_a_profile_whose_server_failed_before_it_was_ready_is_still_rerun_once(phases) -> None:
-    """A boot also fails for a passing fault of its node; the rerun keeps the session's profile."""
+@pytest.mark.parametrize("phases, runs", [(BOOTED, 4), ((), 2)], ids=["booted", "no_phases"])
+async def test_a_profile_whose_server_failed_before_it_was_ready_is_still_rerun(phases, runs) -> None:
+    """A boot also fails for a passing fault of its node; the reruns keep the session's profile."""
     exited = StepFailure(FailedStep.SERVER_EXITED_BEFORE_READY, "the server exited with code -9 before it was ready")
 
     result, executor, _ = await _profile(_NCCL, exited, phases)
 
-    assert len(executor.jobs) == 2 and "n1" in executor.jobs[1].avoid_nodes
+    assert len(executor.jobs) == runs and "n1" in executor.jobs[1].avoid_nodes
+    assert result.validity is Validity.CANDIDATE_FAILED and result.failure_class is FailureClass.UNCLEAR
+    assert executor.clock.waits == ([60.0, 120.0, 240.0] if runs == 4 else [])
+
+
+#: The unclear failure of a server whose collective failed to initialise while it booted.
+_BOOT_REASON = "python_exception: RuntimeError: NCCL error: unhandled cuda error"
+
+
+class _UnclearExecutor(_ScriptedExecutor):
+    """Fails its first ``failures`` attempts as an unclear failure, each on its own node, then measures on the next
+    node. ``phases`` gives the phases of each attempt, the last for every later one."""
+
+    def __init__(self, failures: int, phases: tuple[tuple[PhaseTiming, ...], ...], reason: str = _BOOT_REASON) -> None:
+        super().__init__(reason)
+        self.failures = failures
+        self.phases_by_attempt = phases
+
+    async def run(self, job: TestJob) -> TestResult:
+        self.jobs.append(job)
+        self.started.append(self.clock())
+        sandbox = SandboxFacts(sandbox_id=f"s{job.attempt}", node_name=f"n{job.attempt}")
+        if job.attempt > self.failures:
+            return TestResult(
+                request_id="r1",
+                validity=Validity.SUCCEEDED,
+                rounds=(RoundValue("measure", 64, {"output_tps": 1000.0}),),
+                sandbox=sandbox,
+            )
+        phases = self.phases_by_attempt[min(job.attempt, len(self.phases_by_attempt)) - 1]
+        return TestResult(
+            request_id="r1",
+            validity=Validity.CANDIDATE_FAILED,
+            failure_class=FailureClass.UNCLEAR,
+            failure_reason=self.reason,
+            sandbox=sandbox,
+            phases=phases,
+            unaccounted_seconds=0.0 if phases else None,
+        )
+
+
+async def _unclear(
+    failures: int, phases: tuple[tuple[PhaseTiming, ...], ...], reason: str = _BOOT_REASON
+) -> tuple[TestResult, _UnclearExecutor, list[tuple[str, bool]]]:
+    executor = _UnclearExecutor(failures, phases, reason)
+    reported: list[tuple[str, bool]] = []
+
+    async def on_node_failure(node: str, _reason: str, reproduced: bool) -> None:
+        reported.append((node, reproduced))
+
+    runner = AttemptRunner(executor, avoid=frozenset, on_node_failure=on_node_failure, backoff=_backoff(executor.clock))
+    return await runner.run(_job()), executor, reported
+
+
+async def test_a_server_that_failed_to_boot_three_times_is_rerun_after_waits_and_its_success_is_the_result() -> None:
+    """Boots fail in bursts of minutes whatever the candidate; the reruns are spread over the infrastructure backoff."""
+    result, executor, reported = await _unclear(3, (BOOTED,))
+
+    assert result.validity is Validity.SUCCEEDED and result.failure_class is None
+    assert executor.clock.waits == [60.0, 120.0, 240.0]
+    gaps = [later - earlier for earlier, later in zip(executor.started, executor.started[1:])]
+    assert gaps == [60.0, 120.0, 240.0], "each rerun starts only after its wait, no attempt is running meanwhile"
+    assert [job.avoid_nodes for job in executor.jobs] == [(), ("n1",), ("n1", "n2"), ("n1", "n2", "n3")]
+    assert [a.failure_class for a in result.attempts] == [FailureClass.INFRA] * 3 + [None]
+    assert all(a.failure_reason.startswith("unclear failure did not reproduce on a rerun") for a in result.attempts[:3])
+    assert reported == [("n1", False), ("n2", False), ("n3", False)], "each one a failure that did not reproduce"
+
+
+async def test_a_server_that_fails_every_boot_is_still_a_candidate_failure_after_its_last_rerun() -> None:
+    result, executor, reported = await _unclear(4, (BOOTED,))
+
+    assert len(executor.jobs) == 4 and len(result.attempts) == 4
+    assert result.validity is Validity.CANDIDATE_FAILED and result.failure_class is FailureClass.UNCLEAR
+    assert result.failure_reason == _BOOT_REASON
+    assert executor.clock.waits == [60.0, 120.0, 240.0]
+    assert reported == []
+
+
+@pytest.mark.parametrize("phases", [SERVED, ()], ids=["served", "no_phases"])
+async def test_an_unclear_failure_that_did_not_end_a_boot_is_rerun_once_at_once(phases) -> None:
+    result, executor, _ = await _unclear(2, (phases,))
+
+    assert len(executor.jobs) == 2 and executor.jobs[1].avoid_nodes == ("n1",)
+    assert result.validity is Validity.CANDIDATE_FAILED and result.failure_class is FailureClass.UNCLEAR
+    assert executor.clock.waits == []
+
+
+async def test_a_test_that_ran_out_of_its_time_while_it_booted_is_rerun_once_at_once() -> None:
+    result, executor, _ = await _unclear(2, (BOOTED,), reason=TEST_TIMEOUT_REASON)
+
+    assert len(executor.jobs) == 2 and executor.clock.waits == []
+    assert result.validity is Validity.CANDIDATE_FAILED
+
+
+async def test_a_failed_boot_after_a_failure_once_served_gets_the_boot_reruns_left() -> None:
+    result, executor, _ = await _unclear(4, (SERVED, BOOTED))
+
+    assert len(executor.jobs) == 4, "the served failure took one of the reruns"
+    assert executor.clock.waits == [60.0, 120.0], "only the reruns after a failed boot wait"
     assert result.validity is Validity.CANDIDATE_FAILED and result.failure_class is FailureClass.UNCLEAR
 
 

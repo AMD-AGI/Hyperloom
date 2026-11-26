@@ -29,9 +29,12 @@ attempts into the request's single result:
   once only.
 * ``candidate`` failure (a known failure signature): ``candidate_failed`` at once.
 * ``unclear`` failure: one rerun away from the first node. A second failure is ``candidate_failed``; a success is the
-  result, and the first attempt is re-labelled an infrastructure failure of its node and reported as a failure that
-  did not reproduce. A profile whose server was ready before it failed, and a sweep that ran out of its time
-  (:data:`TEST_TIMEOUT_REASON`), is not rerun: ``measurement_failed`` at once (:func:`_rerun_refused`).
+  result, and each unclear attempt before it is re-labelled an infrastructure failure of its node and reported as a
+  failure that did not reproduce. One that ended while its server booted (:func:`_failed_booting`) is rerun up to
+  :data:`BOOT_RERUNS` times, each rerun after a wait of the :class:`InfraBackoff`, away from every node an earlier
+  attempt failed on, before it is ``candidate_failed``. A profile whose server was ready before it failed, and a sweep
+  that ran out of its time (:data:`TEST_TIMEOUT_REASON`), is not rerun: ``measurement_failed`` at once
+  (:func:`_rerun_refused`).
 * an executor that raises :class:`MeasurementRefused` (a rejected spec, a result that fails verification): no retry,
   ``measurement_failed``.
 
@@ -63,6 +66,7 @@ from hyperloom.measure.failures import (
     SANDBOX_ACQUIRE_TIMEOUT,
     TEST_TIMEOUT_REASON,
 )
+from hyperloom.measure.phases import SERVER_BOOT
 from hyperloom.measure.round_marks import SERVED_PHASES
 from hyperloom.measure.runner.import_outcome import INERT_PATCH
 from hyperloom.contracts.measurement import (
@@ -88,6 +92,13 @@ RETRIES_EXHAUSTED = "attempts failed for infrastructure reasons"
 #: outside the test held for a minute ended it ``measurement_failed``; these spread them over seven minutes. The wait
 #: holds no card or sandbox, but the test stays running in the queue: it keeps its dispatch slot and its branch's K.
 INFRA_BACKOFF_SECONDS: tuple[float, ...] = (60.0, 120.0, 240.0)
+#: How many reruns an unclear failure that ended while its server booted gets (:func:`_failed_booting`), each after
+#: the wait of an infrastructure retry that waits: one per step of :data:`INFRA_BACKOFF_SECONDS`. A collective that
+#: failed to initialise at boot (``ncclCommInitRank``: "HIP failure: 'invalid argument'", the server killed before it
+#: was ready) has failed boots in bursts of several minutes, the parent's recipe as well as the candidate's; a single
+#: rerun a minute later met the same burst and ended the candidate ``candidate_failed``. A candidate whose server cannot
+#: boot still ends ``candidate_failed``, after its last rerun.
+BOOT_RERUNS = len(INFRA_BACKOFF_SECONDS)
 #: Infrastructure failures a fresh sandbox repeats, by the name a reason starts with (before its ``: <detail>``). They are
 #: about how the test was built, not about a node: a patch whose files the server did not import from the farm imports
 #: them from the same place in every sandbox, so a retry only spends GPU time. An attempt that waited the test's whole
@@ -318,6 +329,25 @@ def _served(result: TestResult) -> bool:
     return any(phase.name in SERVED_PHASES for phase in result.phases)
 
 
+def _failed_booting(result: TestResult) -> bool:
+    """Whether an unclear failure ended its attempt while the attempt's server booted: its phases hold a boot
+    (:data:`~hyperloom.measure.phases.SERVER_BOOT`, all a round that failed before its ready stamp counts as) and none a
+    round begins only at that stamp (:func:`_served`). An attempt that stamped no boot says nothing of where it failed,
+    and one that ran out of the test's time (:data:`TEST_TIMEOUT_REASON`) would hold its cards for the whole timeout
+    again on every rerun; neither counts."""
+    booted = any(phase.name == SERVER_BOOT for phase in result.phases)
+    return booted and not _served(result) and _reason_name(result.failure_reason) != TEST_TIMEOUT_REASON
+
+
+def _unclear_reruns(request: TestRequest, result: TestResult) -> int:
+    """How many reruns of the request an unclear failure ``result`` allows: none when it is refused one
+    (:func:`_rerun_refused`), :data:`BOOT_RERUNS` when it ended while its server booted (:func:`_failed_booting`),
+    else one."""
+    if _rerun_refused(request, result):
+        return 0
+    return BOOT_RERUNS if _failed_booting(result) else 1
+
+
 def _attempt_of(result: TestResult) -> Attempt:
     return Attempt(
         sandbox=result.sandbox,
@@ -402,7 +432,7 @@ class AttemptRunner:
 
     async def run(self, job: TestJob) -> TestResult:
         attempts: list[Attempt] = []
-        infra_retries, reran = 0, False
+        infra_retries, reruns, boot_reruns = 0, 0, 0
         last: TestResult | None = None
         while True:
             avoided = set(job.request.avoid_nodes) | self._avoid() | set(_facts_nodes(attempts))
@@ -431,10 +461,13 @@ class AttemptRunner:
                     job, result, attempts, _Ending(Validity.CANDIDATE_FAILED, failure, result.failure_reason)
                 )
             if failure is FailureClass.UNCLEAR:
-                if reran or _rerun_refused(job.request, result):
-                    validity = Validity.CANDIDATE_FAILED if reran else Validity.MEASUREMENT_FAILED
+                if reruns >= _unclear_reruns(job.request, result):
+                    validity = Validity.CANDIDATE_FAILED if reruns else Validity.MEASUREMENT_FAILED
                     return self._final(job, result, attempts, _Ending(validity, failure, result.failure_reason))
-                reran = True
+                reruns += 1
+                if _failed_booting(result):
+                    boot_reruns += 1
+                    await self._wait_out_boot(job.request, boot_reruns)
                 continue
             if _retry_refused(job.request, result, attempts):
                 return self._final(
@@ -466,12 +499,22 @@ class AttemptRunner:
             log.info("test %s: infrastructure retry %d waits %.0f s first", request.request_id, retry, wait)
             await self._backoff.sleep(wait)
 
+    async def _wait_out_boot(self, request: TestRequest, rerun: int) -> None:
+        """Wait before the ``rerun``-th rerun of an unclear failure that ended while its server booted, as long as the
+        infrastructure retry that waits of the same number; the failed attempt's sandbox and cards are already released
+        (an attempt is one sandbox, closed when :meth:`Executor.run` returns)."""
+        wait = self._backoff.before(rerun, request)
+        if wait > 0:
+            log.info("test %s: rerun %d after a failed boot waits %.0f s first", request.request_id, rerun, wait)
+            await self._backoff.sleep(wait)
+
     async def _succeeded(self, job: TestJob, result: TestResult, attempts: list[Attempt]) -> TestResult:
-        first = attempts[0]
-        if len(attempts) > 1 and first.failure_class is FailureClass.UNCLEAR:
-            reason = f"unclear failure did not reproduce on a rerun: {first.failure_reason or 'no reason given'}"
-            attempts[0] = replace(first, failure_class=FailureClass.INFRA, failure_reason=reason)
-            await self._report(attempts[0], reason, reproduced=False)
+        for index, attempt in enumerate(attempts[:-1]):
+            if attempt.failure_class is not FailureClass.UNCLEAR:
+                continue
+            reason = f"unclear failure did not reproduce on a rerun: {attempt.failure_reason or 'no reason given'}"
+            attempts[index] = replace(attempt, failure_class=FailureClass.INFRA, failure_reason=reason)
+            await self._report(attempts[index], reason, reproduced=False)
         return self._final(job, result, attempts, _Ending(result.validity, None, None))
 
     async def _report(self, attempt: Attempt, reason: str | None, *, reproduced: bool) -> None:
