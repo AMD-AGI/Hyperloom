@@ -263,6 +263,19 @@ def test_a_specialist_submits_a_probe_as_a_repro_test_of_its_own_purpose(rig: Ri
     assert (request.kind, request.purpose, request.branch_id) == (TestKind.REPRO, Purpose.PROBE, "s1")
 
 
+def test_a_probe_naming_an_intent_is_refused_so_the_explore_of_that_intent_keeps_its_claim(rig: Rig) -> None:
+    """A request with an intent takes the intent's claim and answers whether the intent was tested."""
+    token = rig.token("s1")
+    case = {"id": "probe-case", "kind": "dir", "sha256": "a" * 64}
+    probe = {"kind": "repro", "purpose": "probe", "parent_commit": "c1", "attachments": [case]}
+
+    _, reply = rig.call(token, "submit_test", **probe, intent_fingerprint="i1")
+    rig.ok(token, "submit_test", kind="test", purpose="explore", parent_commit="c1", intent_fingerprint="i1")
+
+    assert reply["error"]["code"] == -32602 and "without intent_fingerprint" in reply["error"]["message"]
+    assert [(r.purpose, r.intent_fingerprint) for r in rig.toolbox.submitted] == [(Purpose.EXPLORE, "i1")]
+
+
 @pytest.mark.parametrize(
     ("kind", "purpose"), [("test", "profile"), ("profile", "explore"), ("repro", "explore"), ("test", "probe")]
 )

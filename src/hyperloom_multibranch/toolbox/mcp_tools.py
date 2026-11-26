@@ -205,7 +205,10 @@ _SUBMIT_TEST: dict[str, Any] = {
                 "only: its upstream_ref and upstream_repo are refused as upstream_label_unsupported."
             ),
         },
-        "intent_fingerprint": {"type": [_STRING, _NULL]},
+        "intent_fingerprint": {
+            "type": [_STRING, _NULL],
+            "description": "The intent an explore measures; a probe measures none and is refused with one.",
+        },
         "avoid_nodes": {"type": _ARRAY, "items": {"type": _STRING}},
         "accuracy": {"type": _BOOLEAN},
         "concurrency": {"type": _ARRAY, "items": {"type": _INTEGER, "minimum": 1}},
@@ -520,6 +523,11 @@ def _submit_test(
         if (kind, purpose) not in _SPECIALIST_PAIR_VALUES:
             raise InvalidParamsError(
                 f"kind {kind} does not go with purpose {purpose}: a specialist submits {_SPECIALIST_PAIRS_TEXT}"
+            )
+        # The claim hand-over and the blackboard's tested answer read any request with an intent as a measurement of it.
+        if purpose == Purpose.PROBE.value and arguments.get("intent_fingerprint") is not None:
+            raise InvalidParamsError(
+                "a probe measures no intent: submit it without intent_fingerprint; the explore of the change carries it"
             )
         try:
             request = MeasuredRequest.from_document({**arguments, "branch_id": ctx.principal.branch})
