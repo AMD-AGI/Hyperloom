@@ -170,3 +170,11 @@ def test_llm_call_conversation_lookup(page):
         shown.append(page.text_content(UI.drawer))
     assert any("use key" in t for t in shown)
     assert not any(FAKE_KEY in t for t in shown)
+
+
+def test_folding_the_uplift_panel_leaves_its_summary(page):
+    strips = page.locator("[data-testid=uplift-svg]")
+    expect(strips).to_be_visible()
+    page.click("[data-testid=uplift-toggle]")
+    expect(page.locator("[data-testid=uplift-peek]")).to_be_visible()
+    expect(strips).to_have_count(0)

@@ -299,6 +299,19 @@ def test_best_throughput_falls_back_to_results_when_state_has_none(session_dir):
     assert _replay_at(session_dir, T0 + 601).snapshot()["summary"]["current_best"]["hot_tput"] == 1685.16
 
 
+def test_accuracy_from_state_appears_once_the_clock_passes_it(session_dir):
+    state = json.loads((session_dir / "state.json").read_text())
+    state["baseline_accuracy"] = 0.968
+    accepted = [{"name": "k7", "accuracy": 0.962, "ts": iso(T0 + 700)}, {"name": "ungated", "accuracy": None}]
+    state["explore_search"] = {"accepted": accepted}
+    (session_dir / "state.json").write_text(json.dumps(state))
+    live = _live(session_dir).snapshot()["summary"]["accuracy"]
+    assert live == {"baseline": 0.968, "variants": [{"variant": "k7", "value": 0.962, "t": T0 + 700}]}
+    assert _replay_at(session_dir, T0 + 699).snapshot()["summary"]["accuracy"]["variants"] == []
+    assert _replay_at(session_dir, T0 + 701).snapshot()["summary"]["accuracy"] == live
+    assert _replay_at(session_dir, T0 + 1).snapshot()["summary"]["accuracy"]["baseline"] is None
+
+
 def test_running_task_shows_its_step_and_failed_variants_their_root_cause(session_dir):
     notes = [
         {"progress": {"unit": "variant", "label": "k7", "status": "failed"}, "ts": iso(T0 + 720)},

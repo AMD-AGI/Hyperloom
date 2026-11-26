@@ -365,6 +365,20 @@ def baseline_point(timeline: Any, parse_ts, read_raw) -> dict | None:
     return None
 
 
+def accuracy_results(state: dict, parse_ts) -> dict:
+    """The accuracy a run's state.json records, as fractions: the baseline's (``baseline_accuracy``, 0 until one is
+    measured) and each kept variant's with the time it was measured (the ``explore_search.accepted`` rows; a variant
+    that was never gated has none). Reverted variants' accuracy is not kept there."""
+    base = state.get("baseline_accuracy")
+    rows = (state.get("explore_search") or {}).get("accepted") or []
+    variants = [
+        {"variant": row.get("name"), "value": float(row["accuracy"]), "t": parse_ts(row.get("ts"))}
+        for row in rows
+        if isinstance(row, dict) and _numbers(row.get("accuracy"))
+    ]
+    return {"baseline": float(base) if _numbers(base) and base > 0 else None, "variants": variants}
+
+
 def result_throughput(kind: str, result: Any) -> tuple[float, str] | None:
     """(tok/s, label) of the configuration a succeeded baseline/explore result left as the best."""
     if not isinstance(result, dict) or str(result.get("status") or "").lower() != "succeeded":

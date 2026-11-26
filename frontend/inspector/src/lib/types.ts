@@ -97,12 +97,18 @@ export interface RunInfo {
   optimizer?: { alive: boolean | null; reason?: string; host?: string };
 }
 
+/** The accuracy state.json records, as fractions: the baseline's, and each kept variant's with when it was measured. */
+export interface AccuracyView {
+  baseline: number | null;
+  variants: { variant: string; value: number; t: number | null }[];
+}
+
 /** `/api/snapshot` without streams, as the SSE `view` event sends it. */
 export interface View {
   version: number;
   clock: Clock;
   run: RunInfo;
-  summary: Record<string, unknown> & { phase?: string; session_id?: string };
+  summary: Record<string, unknown> & { phase?: string; session_id?: string; accuracy?: AccuracyView };
   budget: { used_sec: number; total_sec: number; pct: number } | null;
   tasks: Task[];
   graph: { nodes: GraphNode[]; edges: GraphEdge[] };

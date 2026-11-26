@@ -247,6 +247,19 @@ def record_phase(state: Any, to_phase: str, reason: str, ts_unix: float) -> dict
     return machine.record_phase_transition(state, to_phase=to_phase, reason=reason, at=clock)
 
 
+def promote_baseline(state: Any, result: dict) -> None:
+    """A promoted baseline's run facts (its accuracy among them) recorded on *state* as the coordinator records them
+    when the baseline lands (``BaselinePromotionMixin._promote_anchor_run_facts``, which reads only ``shared_state``)."""
+    mixin = Upstream("hyperloom.orchestrator.loop._baseline_promotion").BaselinePromotionMixin
+    mixin._promote_anchor_run_facts(argparse.Namespace(shared_state=state), result, {})
+
+
+def accept_variant(state: Any, name: str, accuracy: float | None) -> None:
+    """A kept variant's ``explore_search.accepted`` row through ``SharedState.record_explore_accepted``, the variant
+    carrying the keys the explore executor's KEEP row gives it (a literal in ``explore.py``), stamped now."""
+    state.record_explore_accepted({"name": name, "fingerprint": f"fp-{name}", "accuracy": accuracy})
+
+
 def record_baseline(session_dir: Path, task_id: str, measured: dict) -> None:
     """The baseline's ``reports/sbd_v6/timeline`` event, through the recorder a dispatched baseline gets
     (``make_baseline_recorder`` and ``finish``), in a session bound as startup binds it."""

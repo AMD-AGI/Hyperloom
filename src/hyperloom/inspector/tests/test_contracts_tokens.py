@@ -1,8 +1,8 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Contract tests, part 4 (throughput vs latency): the benchmark points the Inspector plots come from the
-files Hyperloom writes, read under the names Hyperloom writes them.
+"""Contract tests, part 4 (throughput vs latency, uplift): the benchmark points and the accuracy the Inspector plots
+come from the files Hyperloom writes, read under the names Hyperloom writes them.
 
 Each test writes a session artifact with the real producer (see :mod:`.producers`) or compares the Inspector's
 names with the producer's schema. A failure means a producer changed what it writes: update the Inspector reader the
@@ -13,6 +13,7 @@ failure message names, then this test. A test marked ``xfail(strict=True)`` pins
 from __future__ import annotations
 
 import json
+import time
 from pathlib import Path
 
 import pytest
@@ -25,6 +26,9 @@ pytestmark = pytest.mark.inspector_contract
 
 
 _BENCH = "derive.py (benchmark_point)"
+
+
+_ACCURACY = "derive.py (accuracy_results)"
 
 
 # A measured baseline result, as the baseline executor returns it to its recorder.
@@ -109,3 +113,24 @@ def test_baseline_rounds_are_left_to_the_baseline_point() -> None:
         assert derive.benchmark_point(parts, producers.dataset_client_result(), None) is None, contract_message(
             "benchmark_run.records", _BENCH, f"baseline round {name} plotted twice"
         )
+
+
+def test_accuracy_recorded_by_shared_state_is_read(tmp_path: Path) -> None:
+    session = producers.new_session(tmp_path)
+    state = producers.new_state(model_name="m")
+    producers.promote_baseline(state, {"accuracy": 0.968})
+    before = time.time()
+    producers.accept_variant(state, "fp8_kv", 0.962)
+    producers.accept_variant(state, "ungated", None)
+    state.save(session)
+    accuracy = producers.watch(session).snapshot()["summary"]["accuracy"]
+    assert accuracy["baseline"] == 0.968, contract_message(
+        "SharedState.baseline_accuracy (_promote_anchor_run_facts)", _ACCURACY, accuracy
+    )
+    (variant,) = accuracy["variants"]
+    assert variant["variant"] == "fp8_kv" and variant["value"] == 0.962, contract_message(
+        "SharedState.record_explore_accepted (explore_search.accepted name / accuracy)", _ACCURACY, accuracy
+    )
+    assert before - 1 <= variant["t"] <= time.time() + 1, contract_message(
+        "explore_search.accepted ts", _ACCURACY, variant
+    )

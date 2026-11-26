@@ -456,10 +456,12 @@ class Watcher:
         """state.json summary; in replay, rolled back to *clock*.
 
         state.json holds each field's last value only. In replay, phase, budget used and best throughput are
-        worked out for the clock; the baseline, the stop and the validated gain appear once the clock passes them;
+        worked out for the clock; the baseline (its accuracy too), the stop, the validated gain and each variant's
+        accuracy appear once the clock passes them;
         tick and crash count, which have no history, are left out.
         """
         summary = derive.state_summary(self.state)
+        summary["accuracy"] = derive.accuracy_results(self.state, parse_ts)
         if not self.clock.replay:
             summary["current_best"] = self._best_at(summary.get("current_best") or {}, None)
             return summary
@@ -474,8 +476,10 @@ class Watcher:
         start, used = parse_ts(summary.get("start_ts")), summary.get("elapsed_charged_sec")
         if start is not None and isinstance(used, (int, float)):
             summary["elapsed_charged_sec"] = max(0.0, min(float(used), clock - start))
+        accuracy = summary["accuracy"]
+        accuracy["variants"] = [v for v in accuracy["variants"] if v["t"] is not None and v["t"] <= clock]
         if not self._baseline_by(clock):
-            summary["baseline_tput"] = None
+            summary["baseline_tput"] = accuracy["baseline"] = None
         stop = parse_ts(summary.get("stop_ts"))
         if stop is None or stop > clock:
             summary["stop_ts"] = summary["stop_reason"] = summary["cumulative_gain_validated"] = None
