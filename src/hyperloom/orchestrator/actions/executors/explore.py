@@ -6,6 +6,7 @@
 from __future__ import annotations
 from hyperloom.orchestrator.actions.executors.workload._workload_envs import prepare_grid_benchmark_config
 from hyperloom.common.benchmark_config import BenchmarkPoint
+import asyncio
 import functools
 import logging
 import os
@@ -298,7 +299,7 @@ class _ExploreRound:
         self._open_schedule()
         round_ctx = await prefilter_round(self, session_dir)
         for idx, gv in enumerate(self.runnable):
-            if self._refused(gv, idx):
+            if await self._refused(gv, idx):
                 if self.run_stop is not None:
                     break
                 continue
@@ -510,7 +511,7 @@ class _ExploreRound:
 
     # ----- one variant -----------------------------------------------------
 
-    def _refused(self, gv: GridVariant, idx: int) -> bool:
+    async def _refused(self, gv: GridVariant, idx: int) -> bool:
         if twin := self.launched.get(launch_identity(self._recipe(), gv)):
             self._decided_without_measuring(gv, ROUND_DUP, duplicate_of=twin)
             return True
@@ -521,7 +522,7 @@ class _ExploreRound:
         if self._already_measured(gv):
             self.judged_without_measuring += 1
             return True
-        return self._out_of_budget(idx) or self._refuses_synthetic_draft(gv)
+        return self._out_of_budget(idx) or await self._refuses_synthetic_draft(gv)
 
     def _decided_without_measuring(
         self, gv: GridVariant, reason: str, *, detail: str = "", duplicate_of: str = ""
@@ -619,7 +620,7 @@ class _ExploreRound:
         )
         return True
 
-    def _refuses_synthetic_draft(self, gv: GridVariant) -> bool:
+    async def _refuses_synthetic_draft(self, gv: GridVariant) -> bool:
         # Whether the synthetic benchmark refuses this variant's speculative-decoding draft, recording it.
         # Judged against the stack as it stands now: a KEEP earlier in this round may have changed it.
         if not self.refuse_synthetic_drafts:
@@ -627,7 +628,8 @@ class _ExploreRound:
         if launch_forces_acceptance(self._recipe(), gv):
             self.forcing.add(gv.name)
         lookup = session_golden_lookup(self.session_dir, self.framework)
-        _, refused = filter_synthetic_drafts([gv], recipe=self._recipe(), lookup=lookup)
+        # The lookup runs the staged interpreter, up to its timeout: off the event loop, the verdict recorded on it.
+        _, refused = await asyncio.to_thread(filter_synthetic_drafts, [gv], recipe=self._recipe(), lookup=lookup)
         if not refused:
             return False
         log.warning("explore: refusing variant %s (%s)", gv.name, refused[0][2])
