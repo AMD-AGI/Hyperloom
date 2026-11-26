@@ -25,12 +25,13 @@ attempts into the request's single result:
   retried once, and its node is not reported either. One that says nothing about
   the node (:data:`NODE_BLAMELESS_INFRA_REASONS`: a runner that could not start, a runner lost, a Hub download refused
   for its rate limit, a result file whose download came back short) is retried like any other, and its node is not
-  reported.
+  reported. A profile whose server was ready before it failed (:func:`_served`) retries every infrastructure failure
+  once only.
 * ``candidate`` failure (a known failure signature): ``candidate_failed`` at once.
 * ``unclear`` failure: one rerun away from the first node. A second failure is ``candidate_failed``; a success is the
   result, and the first attempt is re-labelled an infrastructure failure of its node and reported as a failure that
-  did not reproduce. A sweep that ran out of its time (:data:`TEST_TIMEOUT_REASON`) is not rerun: ``measurement_failed``
-  at once (:func:`_outran`).
+  did not reproduce. A profile whose server was ready before it failed, and a sweep that ran out of its time
+  (:data:`TEST_TIMEOUT_REASON`), are not rerun: ``measurement_failed`` at once (:func:`_rerun_refused`).
 * an executor that raises :class:`MeasurementRefused` (a rejected spec, a result that fails verification): no retry,
   ``measurement_failed``.
 
@@ -62,6 +63,7 @@ from hyperloom.measure.failures import (
     SANDBOX_ACQUIRE_TIMEOUT,
     TEST_TIMEOUT_REASON,
 )
+from hyperloom.measure.round_marks import SERVED_PHASES
 from hyperloom.measure.runner.import_outcome import INERT_PATCH
 from hyperloom.contracts.measurement import (
     Attempt,
@@ -77,6 +79,10 @@ from hyperloom_multibranch.toolbox.merge_smoke import SMOKE_NOT_RUN
 log = logging.getLogger(__name__)
 
 DEFAULT_MAX_INFRA_RETRIES = 3
+#: What the reason of a test whose executor raised :class:`MeasurementRefused` starts with, before the refusal.
+MEASUREMENT_REFUSED = "measurement refused"
+#: What the reason of a test whose infrastructure retries ran out says after the count of its attempts.
+RETRIES_EXHAUSTED = "attempts failed for infrastructure reasons"
 #: How long the attempts wait before each infrastructure retry that waits (:data:`WAITED_INFRA_REASONS`), the first, the
 #: second and every later one. Back to back, the four attempts of a test spent about forty seconds, so cards a process
 #: outside the test held for a minute ended it ``measurement_failed``; these spread them over seven minutes. The wait
@@ -260,27 +266,56 @@ def _reason_name(reason: str | None) -> str:
     return (reason or "").partition(":")[0].strip()
 
 
+def ending_cause(reason: str | None) -> str:
+    """The name of the failure that ended a test, from the ``reason`` of its result: a refused measurement's own reason
+    under its :data:`MEASUREMENT_REFUSED` prefix, and empty when the infrastructure retries ran out
+    (:data:`RETRIES_EXHAUSTED`), whose attempts may each have failed another way."""
+    name, _, detail = (reason or "").partition(":")
+    if name.strip() == MEASUREMENT_REFUSED:
+        return _reason_name(detail)
+    return "" if name.endswith(RETRIES_EXHAUSTED) else name.strip()
+
+
 def node_unquarantined(reason: str | None) -> bool:
     """Whether a failure's ``reason`` names one that never quarantines its node (:data:`_UNQUARANTINED_INFRA_REASONS`):
     one never held against it, or cards a process outside the test held."""
     return _reason_name(reason) in _UNQUARANTINED_INFRA_REASONS
 
 
-def _retry_refused(reason: str | None, attempts: list[Attempt]) -> bool:
-    """Whether an infrastructure failure's ``reason`` names one that a retry in a fresh sandbox repeats, or one retried
-    once only that ``attempts`` (this one included) already met before."""
-    name = _reason_name(reason)
+def _retry_refused(request: TestRequest, result: TestResult, attempts: list[Attempt]) -> bool:
+    """Whether an infrastructure failure ``result`` names one that a retry in a fresh sandbox repeats, or one retried
+    once only that ``attempts`` (this one included) already met before. A profile whose server was ready before it
+    failed (:func:`_served`) retries every reason once only: its failures then mostly come from the profiler on the
+    image, and a retry that met one again met it on a second node, where it would only hold the cards for a third."""
+    name = _reason_name(result.failure_reason)
     if name in UNRETRIED_INFRA_REASONS:
         return True
-    return name in ONCE_RETRIED_INFRA_REASONS and sum(_reason_name(a.failure_reason) == name for a in attempts) > 1
+    once = name in ONCE_RETRIED_INFRA_REASONS or (request.kind is TestKind.PROFILE and _served(result))
+    return once and sum(_reason_name(a.failure_reason) == name for a in attempts) > 1
 
 
-def _outran(request: TestRequest, reason: str | None) -> bool:
-    """Whether an unclear failure is a sweep that ran out of its time. Its rerun gets the same time for the same concs,
-    which a sweep at a low conc outruns again; FINAL, the sweep's one requester, ranks a candidate whose sweep gave
-    nothing on its reproduction (``hyperloom_multibranch.scheduling.final``), so a rerun only holds FINAL for one more
-    timeout. The sweep ends ``measurement_failed``, nothing held against the candidate or the node."""
-    return request.kind is TestKind.SWEEP and _reason_name(reason) == TEST_TIMEOUT_REASON
+def _rerun_refused(request: TestRequest, result: TestResult) -> bool:
+    """Whether an unclear failure ``result`` ends ``measurement_failed`` without its rerun, nothing held against the
+    candidate or the node.
+
+    A profile whose server was ready before it failed (:func:`_served`) nearly always fails its rerun for the same cause
+    (a server that dies or stalls under the tracer, a client that times out), after another boot and window on its
+    cards; a profile is evidence for the session, not a verdict on its candidate. One that failed while its server
+    booted keeps its rerun: a boot also fails for a passing fault of its node, and a profile that ended on one would
+    switch profiling off for the session. A sweep that ran out of its time gets the same time for the same concs on its
+    rerun, which a sweep at a low conc outruns again; FINAL, the sweep's one requester, ranks a candidate whose sweep
+    gave nothing on its reproduction (``hyperloom_multibranch.scheduling.final``), so a rerun only holds FINAL for one
+    more timeout."""
+    if request.kind is TestKind.PROFILE:
+        return _served(result)
+    return request.kind is TestKind.SWEEP and _reason_name(result.failure_reason) == TEST_TIMEOUT_REASON
+
+
+def _served(result: TestResult) -> bool:
+    """Whether an attempt's server was ready before the attempt failed: its phases hold one a round begins only at its
+    server's ready stamp (:data:`~hyperloom.measure.round_marks.SERVED_PHASES`). An attempt that stamped no phases (no
+    result landed, or a backend that stamps none) counts as not ready."""
+    return any(phase.name in SERVED_PHASES for phase in result.phases)
 
 
 def _attempt_of(result: TestResult) -> Attempt:
@@ -383,7 +418,7 @@ class AttemptRunner:
             try:
                 result = await self._executor.run(attempt_job)
             except MeasurementRefused as error:
-                ending = _Ending(Validity.MEASUREMENT_FAILED, FailureClass.INFRA, f"measurement refused: {error}")
+                ending = _Ending(Validity.MEASUREMENT_FAILED, FailureClass.INFRA, f"{MEASUREMENT_REFUSED}: {error}")
                 return self._final(job, last, attempts, ending)
             result = _mark_same_node(result, avoided)
             attempts.append(_attempt_of(result))
@@ -396,12 +431,12 @@ class AttemptRunner:
                     job, result, attempts, _Ending(Validity.CANDIDATE_FAILED, failure, result.failure_reason)
                 )
             if failure is FailureClass.UNCLEAR:
-                if reran or _outran(job.request, result.failure_reason):
+                if reran or _rerun_refused(job.request, result):
                     validity = Validity.CANDIDATE_FAILED if reran else Validity.MEASUREMENT_FAILED
                     return self._final(job, result, attempts, _Ending(validity, failure, result.failure_reason))
                 reran = True
                 continue
-            if _retry_refused(result.failure_reason, attempts):
+            if _retry_refused(job.request, result, attempts):
                 return self._final(
                     job,
                     result,
@@ -411,7 +446,7 @@ class AttemptRunner:
             if _reason_name(result.failure_reason) not in _UNREPORTED_INFRA_REASONS:
                 await self._report(attempts[-1], result.failure_reason, reproduced=True)
             if infra_retries >= self._max_infra_retries:
-                reason = f"{infra_retries + 1} attempts failed for infrastructure reasons: {result.failure_reason}"
+                reason = f"{infra_retries + 1} {RETRIES_EXHAUSTED}: {result.failure_reason}"
                 return self._final(
                     job, result, attempts, _Ending(Validity.MEASUREMENT_FAILED, FailureClass.INFRA, reason)
                 )

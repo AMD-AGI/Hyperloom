@@ -28,6 +28,7 @@ from hyperloom.measure.round_marks import (
     ROLE_EVAL,
     ROLE_MEASURE,
     ROLE_WARMUP,
+    SERVED_PHASES,
     Boundary,
     BootParts,
     RoundShape,
@@ -344,6 +345,18 @@ def test_a_round_that_only_boots_the_server_counts_what_follows_its_ready_as_war
 
 def test_a_round_whose_server_never_got_ready_is_all_boot() -> None:
     assert _phases(round_boundaries(WINDOW, [], _shape(failed=True))) == [("server_boot", 300.0)]
+
+
+@pytest.mark.parametrize(
+    "shape",
+    [_shape(failed=True), _shape(ROLE_BOOT, failed=True), _shape(ROLE_WARMUP, failed=True), _shape(agentx=True)],
+    ids=["measure", "boot", "warmup", "agentx"],
+)
+def test_only_a_round_whose_server_got_ready_has_a_served_phase(shape: RoundShape) -> None:
+    booted = _run(ready=T0 + 90.0, boot_seconds=80.0, ended=T0 + 100.0)
+
+    assert not {name for name, _ in _phases(round_boundaries(WINDOW, [], shape))} & SERVED_PHASES
+    assert {name for name, _ in _phases(round_boundaries(WINDOW, [booted], shape))} & SERVED_PHASES
 
 
 @pytest.mark.parametrize(
