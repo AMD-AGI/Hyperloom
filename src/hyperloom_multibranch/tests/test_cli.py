@@ -3386,12 +3386,12 @@ def test_a_hosted_sweep_ends_with_its_status_as_the_stop_reason(
 def test_a_frozen_base_that_no_longer_loads_ends_the_run_for_good(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    from hyperloom.orchestrator.state.base_launch import BaseLaunchMismatch
+    from hyperloom_multibranch.scheduling.final import FrozenBaseUnusable
 
     host = _sweep_host(tmp_path, monkeypatch)
 
     def run() -> int:
-        raise BaseLaunchMismatch("the frozen base no longer matches its digest")
+        raise FrozenBaseUnusable("the session's frozen base cannot be read: it no longer matches its digest")
 
     monkeypatch.setattr(cli, "take_host_info", lambda env, require: host)
     monkeypatch.setattr(cli, "_hosted_start", lambda _host: cli.HostedStart(run))

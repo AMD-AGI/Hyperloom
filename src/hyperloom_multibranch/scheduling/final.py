@@ -493,6 +493,10 @@ class SweepPlan:
         return 1 if workload.inferencex is None else max(map(len, self.launch_groups()))
 
 
+class FrozenBaseUnusable(ValueError):
+    """The closed session's frozen base no longer loads; a sweep started again would meet the same file."""
+
+
 def sweep_plan(layout: SessionLayout, settings: RunSettings) -> SweepPlan | str:
     """What the sweep of the closed session in ``layout`` measures, or why it measures nothing."""
     document = read_json_strict(layout.report, require_dict=True)
@@ -503,9 +507,13 @@ def sweep_plan(layout: SessionLayout, settings: RunSettings) -> SweepPlan | str:
     check = next(check for check in choice.checks if check.candidate == chosen)
     if not (check.gain_pct or 0.0) > 0:
         return NO_OPTIMIZATION
-    from hyperloom.orchestrator.state.base_launch import frozen_base
+    from hyperloom.orchestrator.state.base_launch import BaseLaunchMismatch, frozen_base
+    from inference_suite.contracts import BaseLaunchError
 
-    frozen = frozen_base(layout.toolbox)
+    try:
+        frozen = frozen_base(layout.toolbox)
+    except (BaseLaunchMismatch, BaseLaunchError) as exc:
+        raise FrozenBaseUnusable(f"the session's frozen base cannot be read: {exc}") from exc
     workload = settings.workload
     base = None if frozen is None else frozen.launch
     if (missing := launches_missing(base)) is not None:
@@ -784,6 +792,7 @@ class ConcSweep:
 
 
 __all__ = [
+    "FrozenBaseUnusable",
     "BASELINE",
     "BELOW_REPRODUCTION_TOLERANCE",
     "MB_REPRODUCTION_TOLERANCE_PCT",

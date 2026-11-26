@@ -438,3 +438,15 @@ def test_an_inferencex_base_frozen_before_it_recorded_its_launches_is_not_swept(
     monkeypatch.setattr(base_launch, "frozen_base", lambda _toolbox: SimpleNamespace(launch=launch))
 
     assert final.sweep_plan(_layout(tmp_path), _settings()) == NO_SOURCE_LAUNCHES
+
+
+def test_a_frozen_base_that_no_longer_loads_refuses_the_sweep(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    from hyperloom.orchestrator.state.base_launch import BaseLaunchMismatch
+
+    def mismatch(_toolbox: Path) -> None:
+        raise BaseLaunchMismatch("digest differs")
+
+    monkeypatch.setattr(base_launch, "frozen_base", mismatch)
+
+    with pytest.raises(final.FrozenBaseUnusable, match="digest differs"):
+        final.sweep_plan(_layout(tmp_path), _settings())
