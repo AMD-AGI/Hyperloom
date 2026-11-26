@@ -201,6 +201,7 @@ class CandidateCheck:
     ``gain_pct`` is its reproduction's gain over the root's PRELUDE baseline and ``reproduction_pct`` how far that
     reproduction measured from the commit's record, each ``None`` when none was judged; ``refused_by`` is what kept the
     reproduction from holding, and ``waived`` the speed refusals a root's reproduction was not held to.
+    ``cache_states_differ`` is its reproduction judgement's (:attr:`~..contracts.judgement.Judgement.cache_states_differ`).
     """
 
     candidate: FinalCandidate
@@ -217,6 +218,7 @@ class CandidateCheck:
     reproduction_pct: float | None = None
     refused_by: tuple[str, ...] = ()
     waived: tuple[str, ...] = ()
+    cache_states_differ: tuple[str, ...] = ()
 
     @property
     def eligible(self) -> bool:
@@ -330,7 +332,8 @@ class _Reproduction:
     ``refused_by`` is what kept it from holding and ``reproduction_pct`` how far it measured from the record.
 
     ``value`` is what it measured of the primary metric at the operating point that decides, which is the sweep's
-    primary point: the candidate is ranked on it when the sweep gave nothing there.
+    primary point: the candidate is ranked on it when the sweep gave nothing there. ``cache_states_differ`` is the
+    judgement's flag, kept for the candidate's check.
     """
 
     reproduced: bool
@@ -339,6 +342,7 @@ class _Reproduction:
     reproduction_pct: float
     refused_by: tuple[str, ...]
     waived: tuple[str, ...]
+    cache_states_differ: tuple[str, ...] = ()
 
 
 class FinalSelector:
@@ -405,6 +409,7 @@ class FinalSelector:
             reproduction_pct=reproduction.reproduction_pct,
             refused_by=reproduction.refused_by,
             waived=reproduction.waived,
+            cache_states_differ=reproduction.cache_states_differ,
         )
         if self._workload.conc in check.curve:
             return check
@@ -445,7 +450,8 @@ class FinalSelector:
             waived = (*tolerance, *(reason for reason in judgement.refused_by if reason in speed))
             refused_by = tuple(reason for reason in defects if reason not in speed)
         value = judgement.recorded_value.get(self._metric)
-        return _Reproduction(not refused_by, accuracy, value, judgement.gain_pct, refused_by, waived)
+        differ = judgement.cache_states_differ
+        return _Reproduction(not refused_by, accuracy, value, judgement.gain_pct, refused_by, waived, differ)
 
 
 BASELINE, OPTIMIZED = "baseline", "optimized"

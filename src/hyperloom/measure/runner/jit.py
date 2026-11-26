@@ -8,7 +8,8 @@ and the environment of the server. This module reads those facts, asks :mod:`hyp
 each kind and hands the backend a :class:`~hyperloom.measure.jit.session.JitCacheSession`. Nothing here is a reason
 for a test to fail: a fact that cannot be read switches the kind that needs it off, with a note, and the test builds cold.
 
-``HYPERLOOM_JIT_CACHE`` names the cache's directory; the template mounts it read-only, and without it there is no cache.
+``HYPERLOOM_JIT_CACHE`` names the cache's directory, for a runner on the store's own machine (the local toolbox sets it);
+a hosted ``measurement`` template must not set it. Without it there is no cache.
 """
 
 from __future__ import annotations

@@ -31,6 +31,7 @@ from hyperloom.measure import farm as farm_module
 from hyperloom.measure import local, signing
 from hyperloom.measure.jit.publish import STAGING_PATH, publish_contributions
 from hyperloom.measure.jit.store import DirJitStore
+from hyperloom.sandbox.socket import DirEntry
 from hyperloom.measure.jit.tests.triton_cache import find_kernel, get_group
 from hyperloom.measure.farm import NativeModule
 from hyperloom.measure.manifest import JitCacheFacts, ResultManifest
@@ -138,8 +139,14 @@ class _OutHandle:
     def read_file(self, path: str) -> bytes:
         return self._path(path).read_bytes()
 
-    def copy_out(self, source: str, destination: Path) -> None:
-        destination.write_bytes(self._path(source).read_bytes())
+    def copy_out(self, source: str, destination: Path) -> int:
+        data = self._path(source).read_bytes()
+        destination.write_bytes(data)
+        return len(data)
+
+    def list_entries(self, path: str) -> list[DirEntry]:
+        listed = sorted(self._path(f"{path}/").iterdir())
+        return [DirEntry(p.name, "link" if p.is_symlink() else "file", p.lstat().st_size) for p in listed]
 
 
 class Rig:
