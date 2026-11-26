@@ -23,7 +23,6 @@ from pathlib import Path
 from typing import Any
 
 from hyperloom.inference_optimizer.breakdown import package_session_artifacts
-from hyperloom.inference_optimizer.cli.bootstrap import hosted_grant_end_unix
 from hyperloom.inference_optimizer.session.lock import SessionAlreadyRunning, SessionLock
 from hyperloom.inference_optimizer.session.paths import ENV_CURRENT_SESSION_DIR
 from hyperloom.orchestrator.actions.cancel_channel import CancelScope, use_cancel_scope
@@ -51,13 +50,13 @@ def _cancelled_by_signals(scope: CancelScope) -> Iterator[None]:
 
 
 async def sweep_session(session_dir: Path) -> dict[str, Any]:
-    """Run the sweep of the session in ``session_dir`` under its lock, warned at a hosted run's grant end, then package
-    the session so the package carries the report; raises ``SessionAlreadyRunning``."""
+    """Run the sweep of the session in ``session_dir`` under its lock, then package the session so the package carries
+    the report; raises ``SessionAlreadyRunning``."""
     session_dir = session_dir.resolve()
     os.environ[ENV_CURRENT_SESSION_DIR] = str(session_dir)
     scope = CancelScope()
     with SessionLock(session_dir), use_cancel_scope(scope), _cancelled_by_signals(scope):
-        payload = await run_conc_sweep(session_dir, grant_end_unix=hosted_grant_end_unix())
+        payload = await run_conc_sweep(session_dir)
     _package(session_dir)
     return payload
 

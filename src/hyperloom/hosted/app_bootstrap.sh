@@ -15,8 +15,9 @@
 #      that wheel, and nothing else, into the framework Python's environment (the one the legacy flow's install.sh
 #      installs into, with the image's torch and ROCm stack) when this account can write it, and otherwise into a
 #      virtual environment beside it, ${TMPDIR:-/tmp}/hyperloom-venv, that sees that stack (below). The runtime
-#      dependencies are not installed here: the entry runs the wheel's install.sh before optimize, which resolves them
-#      in the environment the wheel went into, as the legacy launchers do,
+#      dependencies are not installed here: the entry runs the wheel's install.sh before it hands the run to
+#      hyperloom-multibranch, and install.sh resolves them in the environment the wheel went into, as the legacy
+#      launchers do,
 #   4. sets HYPERLOOM_CODE_REVISION=<sha> and runs `python -m hyperloom hosted run` with the Python of that environment
 #      (the framework's, or the venv's, whose bin directory then leads PATH, ahead of the framework's).
 #

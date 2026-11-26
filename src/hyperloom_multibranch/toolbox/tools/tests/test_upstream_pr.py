@@ -37,9 +37,8 @@ def req(**params: object) -> ToolRequest:
 
 def test_a_search_asks_github_for_the_callers_terms() -> None:
     search = build_search({"repo_url": REPO, "keywords": "moe, gemm", "limit": 3, "states": ["merged"]})
-    assert search.request.search_modes == ("github",)
-    assert search.request.keywords == ("moe", "gemm")
-    assert (search.request.max_search_candidates, search.states) == (3, ("merged",))
+    assert search.keywords == ("moe", "gemm")
+    assert (search.limit, search.states) == (3, ("merged",))
 
 
 def test_only_a_search_for_open_pull_requests_is_held_to_them() -> None:
@@ -107,7 +106,7 @@ async def test_candidates_come_back_through_the_inbox(tmp_path: Path) -> None:
 
     status, sink = await run(tmp_path, enumerate_fn, req(keywords=["moe"]))
     assert status is JobStatus.SUCCEEDED
-    assert seen[0].request.keywords == ("moe",)
+    assert seen[0].keywords == ("moe",)
     assert sink.pointers[0].summary == f"succeeded: 1 upstream PR candidate(s) in {REPO}; top: PR:42 Faster MoE decode"
     record = json.loads(Path(sink.pointers[0].location).read_text())
     assert record["result"] == {

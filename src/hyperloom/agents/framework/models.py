@@ -1,19 +1,11 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""PR/ref candidate records and the search request that enumerates them."""
+"""PR/ref candidate records."""
 
 from __future__ import annotations
 
 from dataclasses import dataclass
-
-
-@dataclass(frozen=True)
-class PRMonitorConfig:
-    """Connection settings for the pr_monitor service."""
-
-    base_url: str
-    timeout_sec: float = 10.0
 
 
 @dataclass(frozen=True)
@@ -37,15 +29,3 @@ class Candidate:
                 out.append("-")
         slug = "".join(out).strip("-")
         return slug or "candidate"
-
-
-@dataclass(frozen=True)
-class CandidateSearchRequest:
-    """What :func:`sources.enumerate_candidates` looks for in one repo."""
-
-    repo_url: str
-    max_search_candidates: int = 5
-    pr_monitor: PRMonitorConfig | None = None
-    # Title keywords for the pr_monitor search and rerank; empty takes the unranked listing.
-    keywords: tuple[str, ...] = ()
-    search_modes: tuple[str, ...] = ("pr_monitor", "github")

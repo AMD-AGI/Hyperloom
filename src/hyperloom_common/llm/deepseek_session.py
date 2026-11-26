@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import json
 import os
 import uuid
 from collections.abc import Mapping
@@ -22,10 +23,21 @@ from hyperloom_common.llm.llm_config import (
 )
 from hyperloom_common.llm.reasoning_effort import DEFAULT_REASONING_EFFORT, harness_reasoning_effort
 
-#: The route the harness mounts for DeepSeek models in its own default plugin
-#: composition. Naming any other provider needs a composition that mounts an
-#: adapter owning it, which initialization refuses to guess at.
-DEEPSEEK_PROVIDER_ROUTE = "deepseek-official"
+#: The route every Hyperloom harness runtime sends its model requests through:
+#: the gateway, spoken to over the Anthropic Messages protocol by the harness's
+#: ``llm-pi-ai`` adapter. The adapter replays the ``redacted_thinking`` blocks
+#: the gateway returns; the route is declared by :func:`gateway_route_patch`.
+GATEWAY_PROVIDER_ROUTE = "gateway"
+
+#: Names the harness adapter reads the gateway from; :func:`gateway_env` sets them.
+GATEWAY_BASE_URL_ENV = "DEEPSEEK_BASE_URL"
+GATEWAY_API_KEY_ENV = "DEEPSEEK_API_KEY"
+
+#: Context window declared for the gateway model. Compaction triggers on a
+#: fraction of it, so it fixes the size of a request when the harness compacts.
+_GATEWAY_CONTEXT_WINDOW = 1_000_000
+_GATEWAY_REASONING_LEVELS = ("low", "high", "max")
+_GATEWAY_PATCH_NAME = "hyperloom-gateway-route.yml"
 
 #: Instructions the harness needs in order to read prompts written for Claude's
 #: tool names. The harness exposes equivalent capabilities under its own names,
@@ -58,7 +70,7 @@ _COMPACTION_PATCH_NAME = "hyperloom-compaction.yml"
 _INITIALIZE_TIMEOUT_SEC = 120.0
 
 #: Environment variable that caps the output tokens of each model request. Unset
-#: keeps the harness default, which exceeds the output limit of some routed models.
+#: keeps the ``llm-pi-ai`` default of 128000.
 MAX_TOKENS_ENV = "HYPERLOOM_DSH_MAX_TOKENS"
 
 #: Harness token fields, in their wire spelling, mapped onto the shared names.
@@ -146,7 +158,46 @@ def gateway_env(env: Mapping[str, str]) -> dict[str, str]:
             "the DeepSeek Harness speaks the OpenAI-compatible protocol and needs "
             "both OPENAI_BASE_URL and OPENAI_API_KEY"
         )
-    return {"DEEPSEEK_BASE_URL": gateway.base_url, "DEEPSEEK_API_KEY": gateway.api_key}
+    return {GATEWAY_BASE_URL_ENV: gateway.base_url, GATEWAY_API_KEY_ENV: gateway.api_key}
+
+
+def gateway_route_patch(base_url: str, model: str, *, max_tokens: int | None = None) -> str:
+    """The ``llm-pi-ai`` patch row that declares the gateway route serving ``model``.
+
+    ``base_url`` is the OpenAI-compatible gateway root, which ends in ``/v1``; the
+    Anthropic Messages client appends ``/v1/messages`` itself, so the segment is
+    dropped. The key is read from ``GATEWAY_API_KEY_ENV`` at request time, so the
+    patch carries no secret.
+
+    Args:
+        base_url: The gateway root as configured for the OpenAI-compatible line.
+        model: The model id the gateway serves.
+        max_tokens: Per-request output-token cap, or ``None`` for the ``llm-pi-ai`` default.
+    """
+    root = base_url.strip().rstrip("/")
+    root = root.removesuffix("/v1")
+    model_lines = [
+        f"          - id: {json.dumps(model, ensure_ascii=False)}",
+        f"            contextWindow: {_GATEWAY_CONTEXT_WINDOW}",
+    ]
+    if max_tokens is not None:
+        model_lines.append(f"            maxTokens: {max_tokens}")
+    model_lines.append("            reasoningEfforts:")
+    model_lines.append("              off:")
+    model_lines.extend(f"              {level}: {level}" for level in _GATEWAY_REASONING_LEVELS)
+    lines = [
+        "- id: llm-pi-ai",
+        "  config:",
+        "    providers:",
+        f"      {GATEWAY_PROVIDER_ROUTE}:",
+        "        api: anthropic-messages",
+        f"        baseURL: {json.dumps(root)}",
+        f"        apiKeyEnv: {GATEWAY_API_KEY_ENV}",
+        f"        reasoning: {DEFAULT_REASONING_EFFORT}",
+        "        models:",
+        *model_lines,
+    ]
+    return "\n".join(lines) + "\n"
 
 
 def with_deepseek_gateway(env: Mapping[str, str]) -> dict[str, str]:
@@ -197,6 +248,10 @@ def start_harness(sdk: Any, launch: HarnessLaunch) -> Any:
     launch.dsh_home.mkdir(parents=True, exist_ok=True)
     compaction_patch = launch.dsh_home / _COMPACTION_PATCH_NAME
     compaction_patch.write_text(COMPACTION_PATCH, encoding="utf-8")
+    gateway_patch = launch.dsh_home / _GATEWAY_PATCH_NAME
+    gateway_patch.write_text(
+        gateway_route_patch(launch.env[GATEWAY_BASE_URL_ENV], launch.model, max_tokens=max_tokens), encoding="utf-8"
+    )
     harness = sdk.DeepSeekHarness(
         dsh_home=str(launch.dsh_home),
         cwd=workspace,
@@ -204,14 +259,14 @@ def start_harness(sdk: Any, launch: HarnessLaunch) -> Any:
         # directory, so a runtime rooted anywhere else would confine a
         # read-only session to the wrong tree.
         runtime_cwd=workspace,
-        provider=DEEPSEEK_PROVIDER_ROUTE,
+        provider=GATEWAY_PROVIDER_ROUTE,
         model=launch.model,
         reasoning_effort=launch.reasoning_effort,
         max_tokens=max_tokens,
         env=dict(launch.env),
         initialize_timeout_seconds=launch.initialize_timeout_sec,
         request_timeout_seconds=launch.request_timeout_sec,
-        patches=(str(compaction_patch),),
+        patches=(str(compaction_patch), str(gateway_patch)),
     )
     try:
         harness.start()
@@ -444,8 +499,9 @@ class DeepSeekSession:
 
 __all__ = [
     "COMPACTION_PATCH",
-    "DEEPSEEK_PROVIDER_ROUTE",
     "DEEPSEEK_RUNTIME_MAPPING",
+    "GATEWAY_BASE_URL_ENV",
+    "GATEWAY_PROVIDER_ROUTE",
     "DeepSeekSession",
     "DeepSeekSessionError",
     "DeepSeekSessionResult",
@@ -455,6 +511,7 @@ __all__ = [
     "MAX_TOKENS_ENV",
     "child_environment",
     "gateway_env",
+    "gateway_route_patch",
     "load_harness_sdk",
     "max_tokens_from_env",
     "normalize_run_result",

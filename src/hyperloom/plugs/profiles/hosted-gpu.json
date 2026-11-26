@@ -1,7 +1,0 @@
-{
-  "schema": "hyperloom.plugs/v1",
-  "profile": "hosted-gpu",
-  "sockets": {
-    "events": {"impl": "hosted"}
-  }
-}

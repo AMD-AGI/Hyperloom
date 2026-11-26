@@ -202,7 +202,11 @@ class V6WorkflowMetadata(TypedDict, total=False):
 
 
 class V6Metadata(TypedDict, total=False):
-    """V6 task identity, configuration, versions, and trace entrypoint."""
+    """V6 task identity, configuration, versions, and trace entrypoint.
+
+    ``base_launch`` is the ``source``, ``image`` and ``topology`` of the session's frozen ``base_launch.json``, with
+    the locations in ``source`` stripped of credentials; absent for a session that froze none.
+    """
 
     exported_at_utc: str
     versions: V6MetadataVersions
@@ -211,6 +215,7 @@ class V6Metadata(TypedDict, total=False):
     grading: V6Grading
     langfuse: V6MetadataLangfuse
     workflow: V6WorkflowMetadata
+    base_launch: dict[str, Any]
     warnings: list[str]
 
 
@@ -752,6 +757,9 @@ class SessionBreakdown(TypedDict, total=False):
     timeline: list[V6TimelineEvent]
     close: V6Close
     critic: V6Critic
+    # The concurrency sweep's ``reports/conc_sweep_summary.json``, verbatim. Absent until a sweep runs, which is after
+    # CLOSE (``--enable-conc-sweep`` or ``hyperloom conc-sweep``); the sweep adds it each time it rewrites its report.
+    conc_sweep_summary: dict[str, Any]
 
 
 __all__ = [

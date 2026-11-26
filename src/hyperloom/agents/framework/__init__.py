@@ -1,4 +1,4 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Framework Agent - standalone PR/ref exploration agent for Hyperloom serving frameworks."""
+"""Candidate records, GitHub's pull-request search and isolated workspaces for serving-framework refs."""

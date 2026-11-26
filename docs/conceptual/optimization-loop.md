@@ -183,17 +183,18 @@ text, built by `build_enablement_ladder_book` in
 `hyperloom.orchestrator.enablement.mandate` and injected into the enablement
 authoring specialist's prompt. The rungs, in increasing complexity:
 
-0. **Rung 0 — diagnose / capability-gap localization.** Read-only:
+- **Rung 0 — diagnose / capability-gap localization.** Read-only:
    classify the failure, read `config.json`, check the supported-arch registry
    and version, and look up upstream. Output: the missing layer and the entry
    rung.
-1. **Rung 1 — serve-flag / config wire-up.** The architecture is supported and
+- **Rung 1 — serve-flag / config wire-up.** The architecture is supported and
    only a serve flag / env / tokenizer-mode / trivial registration alias is
    missing. No new code or dependencies.
-2. **Rung 2 — in-tree source patch.** A unified diff against the source tree
+- **Rung 2 — in-tree source patch.** A unified diff against the source tree
    the server imports: register the arch, a small forward/config/tokenizer
-   bridge, or backport a merged PR. Pure Python, no compile.
-3. **Rung 3 — attempt-scoped runtime.** The specialist names the version
+   bridge, or backport a merged PR. Pure Python, no compile; a change that
+   touches compiled or build-backend files is left to Rung 5.
+- **Rung 3 — attempt-scoped runtime.** The specialist names the version
    that carries the fix as a `needs_runtime` request in its
    `specialist_done`: a framework ref (PR, tag, branch or sha) installed
    editable, pip packages, or both. No operator setting or failure kind
@@ -208,17 +209,10 @@ authoring specialist's prompt. The rungs, in increasing complexity:
    process environment to point at an attempt runtime. While one is active,
    the source tree the server imports is that runtime's own — the editable
    checkout, or the venv's site-packages when the framework itself was
-   installed there — so Rung 2 and Rung 4 patches land there. A kept runtime
+   installed there — so Rung 2 patches land there. A kept runtime
    is re-provisioned for every later round, whatever that round's failure or
    request.
-4. **Rung 4 — source localization.** Localize a merged-PR or vendored
-   closure into the source tree the server imports. Only the files under the
-   framework's package are localized. A change that touches compiled or
-   build-backend files cannot be satisfied by a plain source edit, and one
-   that is oversize or does not apply to the tree is not backported either;
-   in each case the round runs on its own patches, and a compiled gap is
-   left to Rung 5.
-5. **Rung 5 — off-loop compiled build.** Perform a compiled-component build
+- **Rung 5 — off-loop compiled build.** Perform a compiled-component build
    (AITER kernels, sgl-kernel, or vLLM-from-source). Builds run *off* the
    coordinator tick loop on a dedicated single-slot build lane: each build
    is spawned detached and reaped across later ticks against a wall-clock
@@ -500,15 +494,18 @@ a genuine baseline revalidates it. Otherwise the build reverts, or, if the
 boot advanced past the original failure to a new or deeper gap, the loop
 advances to the next round to repair that gap.
 
-### Discovery-driven build refs
+### Build refs
 
-Candidate PR refs discovered by the framework-agent feed directly into the
-build: a PR reference becomes a checkout of that PR's head, not just a
-released-tag autoselect. This makes support that exists only in an
-unreleased PR or branch reachable. When a discovered PR ref drives the
+A specialist's build request names its ref: a PR reference becomes a checkout
+of that PR's head, not just a released-tag autoselect. This makes support that
+exists only in an unreleased PR or branch reachable. When a PR ref drives the
 build, the source PR URL is recorded as build provenance in the session
 breakdown's `installed_versions` map (`source_pr_url`); see the
 [`enablement` section](../reference/session-breakdown.md#enablement--admission-round-lifecycle-builds--attempt-runtimes).
+An auto-escalated build names no PR: it builds the ref of the runtime the
+session already kept, and otherwise names no ref. With no ref, the AITER build
+takes the newest tag that builds and imports; sgl-kernel and vLLM build the
+default branch.
 
 ### Novelty and crash safety
 

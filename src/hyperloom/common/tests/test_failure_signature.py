@@ -554,7 +554,7 @@ def test_targeted_build_candidate_hip_kernel_missing_kind() -> None:
 
 
 def test_targeted_build_candidate_pure_python_dtype_rejected() -> None:
-    """A dtype guard with no native evidence stays Rung 4 (pure Python)."""
+    """A dtype guard with no native evidence is a pure-Python gap, not a compiled one."""
     sig = FailureSignature(kind=UNSUPPORTED_DTYPE, bridge_layer="framework", raw_excerpt="dtype bf16 is not supported")
     assert is_targeted_build_candidate(sig) is False
 

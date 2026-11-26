@@ -16,7 +16,7 @@ import logging
 import os
 import re
 import subprocess
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Sequence
 
 from hyperloom_common.unified_diff import parse_unified_diff
@@ -361,6 +361,11 @@ def kernel_shape_tool_dir() -> Path | None:
         return None
     tool = root.joinpath(*_KERNEL_SHAPE_TOOL_REL)
     return tool if tool.is_dir() else None
+
+
+def is_kernel_shape_tool(entry: str) -> bool:
+    """Whether the ``PYTHONPATH`` entry ``entry`` is the no-patch TraceLens ``kernel_shape_tool`` dir, under any root."""
+    return PurePosixPath(entry).parts[-len(_KERNEL_SHAPE_TOOL_REL) :] == _KERNEL_SHAPE_TOOL_REL
 
 
 def _detect_installed_sglang_version() -> str | None:
@@ -963,5 +968,6 @@ __all__ = [
     "ensure_vllm_patched_for_tracelens",
     "ensure_sglang_patched_for_tracelens",
     "ensure_xdit_patched_for_tracelens",
+    "is_kernel_shape_tool",
     "lay_tracelens_patch",
 ]
