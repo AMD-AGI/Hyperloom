@@ -1936,6 +1936,13 @@ def test_an_inferencex_integration_branch_opens_at_two_tests_at_once_and_an_agen
     assert (inferencex.integration_k, agentx.integration_k) == (2, 1)
 
 
+def test_an_agentx_specialist_branch_opens_at_two_tests_at_once_and_an_inferencex_one_at_one() -> None:
+    agentx = Workload("org/model", "sglang", 4, 10, "fp4", "mi355x", KernelOptimizer.FORGE, None)
+    inferencex = replace(agentx, inferencex=InferenceXShape(1024, 1024))
+
+    assert (agentx.open_k, inferencex.open_k) == (2, 1)
+
+
 async def test_a_bundle_that_improves_lands_as_one_commit_of_every_member_after_one_merge_test(
     tmp_path: Path,
 ) -> None:

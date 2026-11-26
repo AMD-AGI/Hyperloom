@@ -62,6 +62,10 @@ from hyperloom_multibranch.scheduling.judge import (
     system_prompt,
 )
 from hyperloom_multibranch.scheduling.judge_prompt import (
+    AGENTX_JUDGE_PROMPT_VERSION,
+    AGENTX_JUDGE_SYSTEM_PROMPT,
+    AGENTX_PLAYBOOK_JUDGE_PROMPT,
+    AGENTX_PLAYBOOK_JUDGE_PROMPT_VERSION,
     JUDGE_PROMPT_VERSION,
     JUDGE_SYSTEM_PROMPT,
     PLAYBOOK_JUDGE_PROMPT,
@@ -78,6 +82,7 @@ from hyperloom_multibranch.scheduling.roster import (
     StopCause,
     open_specialists,
 )
+from hyperloom_multibranch.scheduling.settings import InferenceXShape, KernelOptimizer, Workload
 from hyperloom_multibranch.scheduling.similarity import SimilarBranch
 from hyperloom_multibranch.scheduling.widening import WideningSignals
 from hyperloom_multibranch.toolbox.tests.fake import FakeToolbox, FakeWiring
@@ -120,6 +125,8 @@ CAPS = RosterCaps(max_branches=4, max_k_per_branch=2, max_parallel_tests=8)
 #: A session whose cards hold two tests at once, and one whose cards hold one.
 TWO_TESTS, ONE_TEST = replace(CAPS, max_parallel_tests=2), replace(CAPS, max_parallel_tests=1)
 WIDENING = WideningSignals(min_useful_seconds=1350.0, cold_start_seconds=90.0, toolbox_headroom=3)
+AGENTX = Workload("org/model", "sglang", 4, 10, "fp4", "mi355x", KernelOptimizer.FORGE, None)
+INFERENCEX = replace(AGENTX, inferencex=InferenceXShape(1024, 1024))
 
 
 def _view(
@@ -145,6 +152,7 @@ def _view(
     roofline_ceiling: dict[str, float] | None = None,
     focus: dict[str, str] | None = None,
     caps: RosterCaps = CAPS,
+    workload: Workload = INFERENCEX,
 ) -> JudgeView:
     return JudgeView(
         now=NOW,
@@ -190,6 +198,7 @@ def _view(
         queued=queued or {},
         focus=focus or {},
         building=building or {},
+        workload=workload,
     )
 
 
@@ -597,6 +606,14 @@ def test_the_prompt_version_is_derived_from_the_prompt_text() -> None:
     assert (
         PLAYBOOK_JUDGE_PROMPT_VERSION == hashlib.sha256(f"{PLAYBOOK_JUDGE_PROMPT}\n{reply}".encode()).hexdigest()[:12]
     )
+    assert (
+        AGENTX_JUDGE_PROMPT_VERSION
+        == hashlib.sha256(f"{AGENTX_JUDGE_SYSTEM_PROMPT}\n{reply}".encode()).hexdigest()[:12]
+    )
+    assert (
+        AGENTX_PLAYBOOK_JUDGE_PROMPT_VERSION
+        == hashlib.sha256(f"{AGENTX_PLAYBOOK_JUDGE_PROMPT}\n{reply}".encode()).hexdigest()[:12]
+    )
 
 
 def test_a_branch_row_names_what_its_expected_gain_rests_on() -> None:
@@ -715,6 +732,7 @@ def test_cap_drops_unknown_stopped_and_integration_orders_and_clamps_k() -> None
 
     assert cap_decision(decision, _view()) == JudgeDecision(
         open_count=3,
+        open_k=1,
         k=(KOrder("b01", 2), KOrder(INTEGRATION_BRANCH, 5)),
         stop=(StopOrder("b02", "flat"),),
         session_stop="done",
@@ -797,8 +815,8 @@ def test_no_branch_opens_for_an_unheld_direction_with_less_explore_time_left_tha
     view = replace(_view(caps=FIVE_SLOTS), undealt=UNHELD)
     short = replace(view, widening=replace(WIDENING, min_useful_seconds=view.explore_remaining_seconds + 1.0))
 
-    assert cap_decision(JudgeDecision(), short) == JudgeDecision()
-    assert cap_decision(JudgeDecision(), view) == JudgeDecision(open_count=2, unfocused=2)
+    assert cap_decision(JudgeDecision(), short) == JudgeDecision(open_k=1)
+    assert cap_decision(JudgeDecision(), view) == JudgeDecision(open_count=2, open_k=1, unfocused=2)
 
 
 def test_the_focus_the_judge_names_is_for_the_branches_opened_after_those_of_the_unheld_directions() -> None:
@@ -871,7 +889,7 @@ async def test_decide_returns_the_capped_decision_and_logs_the_exchange(tmp_path
     played = replace(_view(), playbook=H0.render())
     await judge.decide(played)
 
-    assert decision == JudgeDecision(open_count=3, k=(KOrder("b01", 2),))
+    assert decision == JudgeDecision(open_count=3, open_k=1, k=(KOrder("b01", 2),))
     assert seen == [(JUDGE_SYSTEM_PROMPT, render_prompt(_view())), (PLAYBOOK_JUDGE_PROMPT, render_prompt(played))]
     row, _played = [json.loads(line) for line in transcript.read_text().splitlines()]
     assert row["at"] == NOW and row["error"] == "" and row["prompt"] == seen[0][1]
@@ -923,6 +941,42 @@ def test_the_opening_k_is_read_and_clamped() -> None:
     assert parse_decision(_reply({"open": 2, "open_k": "two"})) is None
 
 
+def test_a_branch_opened_with_no_k_named_runs_at_its_workload_s_k_within_the_caps() -> None:
+    view = _view(opening=True, roster=OPENING_ROSTER, free_slots=4)
+    agentx_view = replace(view, workload=AGENTX)
+    unnamed = parse_decision(_reply({"open": 2}))
+    named = parse_decision(_reply({"open": 2, "open_k": 1}))
+    assert unnamed is not None and unnamed.open_k is None and named is not None
+
+    agentx = cap_decision(unnamed, agentx_view)
+
+    assert agentx.open_k == 2 and cap_decision(agentx, agentx_view) == agentx
+    assert cap_decision(unnamed, view).open_k == 1
+    assert cap_decision(unnamed, replace(agentx_view, caps=replace(CAPS, max_k_per_branch=1))).open_k == 1
+    assert cap_decision(named, agentx_view).open_k == 1
+
+
+def test_only_an_agentx_session_s_prompt_tells_the_judge_to_keep_k_while_test_slots_are_free() -> None:
+    agentx_view = _view(workload=AGENTX)
+    played = replace(agentx_view, playbook=H0.render())
+    pairs = ((AGENTX_JUDGE_SYSTEM_PROMPT, JUDGE_SYSTEM_PROMPT), (AGENTX_PLAYBOOK_JUDGE_PROMPT, PLAYBOOK_JUDGE_PROMPT))
+
+    assert (system_prompt(agentx_view), system_prompt(played)) == (
+        AGENTX_JUDGE_SYSTEM_PROMPT,
+        AGENTX_PLAYBOOK_JUDGE_PROMPT,
+    )
+    for agentx, inferencex in pairs:
+        head, tail = inferencex.split("\nA branch's basis", 1)
+        assert agentx.startswith(f"{head}\nThis is an AgentX session")
+        assert agentx.endswith(f"\nA branch's basis{tail}")
+        prose = " ".join(agentx.split())
+        assert "while toolbox_headroom is above 0 a test slot is free, and you do not lower any branch's K" in prose
+        assert "The sum of the branches' K may exceed max_parallel_tests" in prose
+        assert "starts confirms and merge tests before any branch's explore tests" in prose
+        assert "a branch opened with no open_k runs at K 2" in prose
+        assert "AgentX" not in inferencex
+
+
 USER_ROSTER = (
     _entry(INTEGRATION_BRANCH, kind=BranchKind.INTEGRATION),
     _entry("b01", origin=BranchOrigin.USER, k=2),
@@ -938,10 +992,10 @@ def test_a_branch_in_its_grace_is_neither_stopped_nor_lowered_and_one_past_it_is
     capped = cap_decision(decision, _view(roster=USER_ROSTER))
 
     assert hold_decision(capped, dict.fromkeys(("b01", "b02"), HoldReason.GRACE), USER_ROSTER) == JudgeDecision(
-        held=(HeldOrder("b01", HoldReason.GRACE), HeldOrder("b02", HoldReason.GRACE))
+        open_k=1, held=(HeldOrder("b01", HoldReason.GRACE), HeldOrder("b02", HoldReason.GRACE))
     )
     assert hold_decision(capped, {"b02": HoldReason.GRACE}, USER_ROSTER) == JudgeDecision(
-        stop=(StopOrder("b01", STOP_REASON),), held=(HeldOrder("b02", HoldReason.GRACE),)
+        open_k=1, stop=(StopOrder("b01", STOP_REASON),), held=(HeldOrder("b02", HoldReason.GRACE),)
     )
 
 
@@ -1136,14 +1190,14 @@ def test_a_judge_stop_or_lower_k_of_a_branch_with_a_pending_candidate_is_refused
 
     held = hold_decision(capped, waiting, roster)
 
-    assert held == JudgeDecision(k=(KOrder("b02", 1),), held=(HeldOrder("b01", HoldReason.PENDING_CONFIRM),))
+    assert held == JudgeDecision(open_k=1, k=(KOrder("b02", 1),), held=(HeldOrder("b01", HoldReason.PENDING_CONFIRM),))
     assert hold_decision(held, waiting, roster) == held
     assert cap_decision(held, _view(roster=roster)) == held
     assert hold_decision(JudgeDecision(k=(KOrder("b01", 2),)), waiting, roster).k == (KOrder("b01", 2),)
     assert (
         hold_decision(capped, {}, roster)
         == capped
-        == JudgeDecision(k=(KOrder("b02", 1),), stop=(StopOrder("b01", STOP_REASON),))
+        == JudgeDecision(open_k=1, k=(KOrder("b02", 1),), stop=(StopOrder("b01", STOP_REASON),))
     )
 
 

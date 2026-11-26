@@ -188,6 +188,20 @@ def test_a_running_confirm_does_not_use_a_slot_of_k() -> None:
     assert queue.take().request_id == "explore"  # type: ignore[union-attr]
 
 
+def test_branches_whose_k_overcommits_the_slots_keep_their_explores_behind_confirms_and_merge_tests() -> None:
+    queue = _queue(per_branch_k=2, branch_k={"integration": 1}, global_concurrency=2)
+    _backlog(queue, "b1", range(2))
+    _backlog(queue, "b2", range(2))
+    assert _starts(queue, 2) == ["b1", "b2"]
+    queue.push(_item("merge", "integration", purpose=Purpose.INTEGRATION))
+    queue.push(_item("confirm", "b2", purpose=Purpose.CONFIRM, retest_of="b2-0"))
+    order = []
+    for running in ("b1-0", "b2-0", "confirm", "merge"):
+        queue.remove(running)
+        order.append(queue.take().request_id)  # type: ignore[union-attr]
+    assert order == ["confirm", "merge", "b1-1", "b2-1"]
+
+
 def test_the_global_limit_applies_to_exempt_tests_too() -> None:
     queue = _queue(per_branch_k=5, global_concurrency=1)
     queue.push(_item("confirm", purpose=Purpose.CONFIRM, retest_of="x"))
@@ -241,6 +255,20 @@ def test_the_queue_state_counts_by_priority_branch_and_running() -> None:
     state = queue.state()
     assert dict(state.queued_by_priority) == {0: 0, 1: 0, 2: 0, 3: 0, 4: 1}
     assert dict(state.running_by_branch) == {"b1": 1} and dict(state.queued_by_branch) == {"b1": 1}
+
+
+def test_the_queue_state_gives_each_branch_its_k_and_the_tests_that_take_a_slot_of_it() -> None:
+    queue = _queue(per_branch_k=1, branch_k={"b1": 3, "idle": 2}, global_concurrency=9)
+    queue.push(_item("explore"))
+    queue.push(_item("profile", purpose=Purpose.PROFILE))
+    queue.push(_pending("built"))
+    queue.push(_item("confirm", purpose=Purpose.CONFIRM, retest_of="explore"))
+    queue.push(_item("baseline", "integration", purpose=Purpose.BASELINE))
+    queue.take()
+    state = queue.state()
+    assert dict(state.k_by_branch) == {"b1": 3, "idle": 2, "integration": 1}
+    assert dict(state.counted_by_branch) == {"b1": 3}, "the confirm-retest and the baseline take no slot"
+    assert [state.free_slots(b) for b in ("b1", "idle", "integration", "unknown")] == [0, 2, 1, 0]
 
 
 def test_a_new_policy_reprioritises_only_queued_tests_without_an_explicit_priority() -> None:
