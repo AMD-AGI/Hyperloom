@@ -79,6 +79,8 @@ __all__ = [
     "HSA_STATUS_ERROR",
     "HUB_RATE_LIMITED",
     "INITIAL_PID_NAMESPACE",
+    "KFD_DOMAIN_KEY",
+    "KFD_LOCATION_ID_KEY",
     "KFD_NODES",
     "KFD_NODE_GPU_ID",
     "KFD_NODE_PROPERTIES",
@@ -271,6 +273,8 @@ _kfd = _PACK.names(
     "vram_prefix",
     "node_properties",
     "render_minor_key",
+    "domain_key",
+    "location_id_key",
 )
 KFD_ROOT = _kfd["root"]
 KFD_PROCESSES = _kfd["processes"]
@@ -281,6 +285,8 @@ KFD_QUEUE_GPU_ID = _kfd["queue_gpu_id"]
 KFD_VRAM_PREFIX = _kfd["vram_prefix"]
 KFD_NODE_PROPERTIES = _kfd["node_properties"]
 KFD_RENDER_MINOR_KEY = _kfd["render_minor_key"]
+KFD_DOMAIN_KEY = _kfd["domain_key"]
+KFD_LOCATION_ID_KEY = _kfd["location_id_key"]
 
 _drm = _PACK.names("drm_fdinfo", "fd_dir", "fdinfo_dir", "render_node_prefix", "client_id_key", "vram_key")
 DRM_FD_DIR = _drm["fd_dir"]

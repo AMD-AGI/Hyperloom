@@ -34,6 +34,7 @@ from hyperloom.common import outside_facts
 _NOT_SCANNED = frozenset(
     {
         "HIP_GRAPH_PACKET_CAPTURE_NODE_BY_NODE",
+        "KFD_DOMAIN_KEY",
         "KFD_NODES",
         "KFD_NODE_GPU_ID",
         "KFD_NODE_PROPERTIES",

@@ -1,8 +1,8 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""The GPUs of the kernel's compute topology, numbered the way ``ROCR_VISIBLE_DEVICES`` numbers them, and the video
-memory in use on each.
+"""The GPUs of the kernel's compute topology, numbered the way ``ROCR_VISIBLE_DEVICES`` numbers them, the PCI address
+of each and the video memory in use on it.
 
 The topology (the rule pack's ``kfd_process_listing``) has a node per device. A GPU node's ``gpu_id`` is the id the
 kernel's process list names that GPU by, and the ROCm runtime numbers the GPU nodes it can read in node order: that
@@ -11,9 +11,11 @@ the ``gpu_id`` and ``properties`` of every GPU node it is not given, and the run
 numbers the cards; so does this reader. A view that is refused every GPU node, or a card it cannot read, is not one
 whose cards are free: its error is ``denied``.
 
-A card's memory is read from the driver's counters (the rule pack's ``amdgpu_vram_counters``) in the device directory
-of the render node its node of the topology names. The DRM class directory lists every GPU of the machine, other
-containers' as well, and neither its order nor rocm-smi's is the runtime's, so a card is never found by a position.
+A card's PCI address is the one its node's properties state, which is how a tool that numbers cards by PCI address
+(rocm-smi, amd-smi) is matched to it. A card's memory is read from the driver's counters (the rule pack's
+``amdgpu_vram_counters``) in the device directory of the render node its node of the topology names. The DRM class
+directory lists every GPU of the machine, other containers' as well, and neither its order nor rocm-smi's is the
+runtime's, so a card is never found by a position.
 
 :data:`KFD_PATH` and :data:`DRM_PATH` are read when a reader is called, not when it is defined, so a test points every
 reader of the machine at a tree of its own at once.
@@ -31,6 +33,8 @@ from hyperloom.common.outside_facts import (
     DRM_RENDER_NODE_PREFIX,
     DRM_VRAM_TOTAL_FILE,
     DRM_VRAM_USED_FILE,
+    KFD_DOMAIN_KEY,
+    KFD_LOCATION_ID_KEY,
     KFD_NODE_GPU_ID,
     KFD_NODE_PROPERTIES,
     KFD_NODES,
@@ -45,6 +49,7 @@ __all__ = [
     "GpuNode",
     "GpuVram",
     "KfdUnreadable",
+    "card_pci_addresses",
     "card_vram",
     "list_names",
     "read_number",
@@ -182,17 +187,39 @@ def select_gpus(kfd: Path, cards: Sequence[int]) -> dict[int, GpuNode]:
     return {card: gpus[card] for card in cards}
 
 
-def render_minor(kfd: Path, node: int) -> int | None:
-    """The minor of the render node of a GPU's topology node, or ``None`` when its properties do not say."""
+def _properties(kfd: Path, node: int) -> dict[str, str]:
+    """The properties of a GPU's topology node, by key; none when they cannot be read."""
     try:
         text = (kfd / KFD_NODES / str(node) / KFD_NODE_PROPERTIES).read_text(encoding="utf-8", errors="replace")
     except OSError:
-        return None
-    for line in text.splitlines():
-        key, _, value = line.partition(" ")
-        if key == KFD_RENDER_MINOR_KEY:
-            return int(value) if value.strip().isdigit() and int(value) > 0 else None
-    return None
+        return {}
+    return {key: value.strip() for key, _, value in (line.partition(" ") for line in text.splitlines())}
+
+
+def render_minor(kfd: Path, node: int) -> int | None:
+    """The minor of the render node of a GPU's topology node, or ``None`` when its properties do not say."""
+    value = _properties(kfd, node).get(KFD_RENDER_MINOR_KEY, "")
+    return int(value) if value.isdigit() and int(value) > 0 else None
+
+
+def card_pci_addresses(cards: Sequence[int]) -> dict[int, str]:
+    """The PCI address of each of ``cards`` (``0000:f5:00.0``), as the domain and location_id of its node state it.
+
+    Raises:
+        KfdUnreadable: When a card is not one this view can read (see :func:`select_gpus`), or its node states no PCI
+            address.
+    """
+    kfd = KFD_PATH
+    return {card: _pci_address(kfd, gpu) for card, gpu in select_gpus(kfd, cards).items()}
+
+
+def _pci_address(kfd: Path, gpu: GpuNode) -> str:
+    properties = _properties(kfd, gpu.node)
+    domain, location = properties.get(KFD_DOMAIN_KEY, ""), properties.get(KFD_LOCATION_ID_KEY, "")
+    if not (domain.isdigit() and location.isdigit()):
+        raise KfdUnreadable(f"node {gpu.node} of the GPU topology of {kfd} states no PCI address")
+    bus, devfn = divmod(int(location), 256)
+    return f"{int(domain):04x}:{bus:02x}:{devfn >> 3:02x}.{devfn & 7:x}"
 
 
 def card_vram(cards: Sequence[int] | None = None) -> dict[int, GpuVram]:

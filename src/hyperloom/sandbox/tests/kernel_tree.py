@@ -5,9 +5,9 @@
 tests that read who holds a card and how much of its memory is in use.
 
 The layout is the one the rule pack's ``kfd_process_listing`` describes: a topology of node directories (a CPU node
-has ``gpu_id`` 0), and a directory per process id with ``vram_<gpu id>`` files and a ``queues`` directory. Every GPU of
-the machine has the driver's memory counters (``amdgpu_vram_counters``) in the device directory of its render node, as
-an idle card reads them.
+has ``gpu_id`` 0, a GPU node's properties name its render node and PCI address), and a directory per process id with
+``vram_<gpu id>`` files and a ``queues`` directory. Every GPU of the machine has the driver's memory counters
+(``amdgpu_vram_counters``) in the device directory of its render node, as an idle card reads them.
 """
 
 from __future__ import annotations
@@ -53,7 +53,10 @@ class KernelTree:
             directory.mkdir(parents=True)
             (directory / "gpu_id").write_text(f"{0 if node < cpus else self.gpu_id(node - cpus)}\n")
             minor = 0 if node < cpus else self.render_minor(node - cpus)
-            (directory / "properties").write_text(f"cpu_cores_count 0\ndrm_render_minor {minor}\nlocation_id 8\n")
+            location = 0 if node < cpus else self._bus(node - cpus) << 8
+            (directory / "properties").write_text(
+                f"cpu_cores_count 0\ndrm_render_minor {minor}\ndomain 0\nlocation_id {location}\n"
+            )
         for card in range(gpus):
             self.vram_used(card, _IDLE_VRAM_USED)
             (self.device(card) / "mem_info_vram_total").write_text(f"{_VRAM_TOTAL}\n")
@@ -71,6 +74,14 @@ class KernelTree:
     def gpu_id(card: int) -> int:
         """The kernel's id of the ``card``-th GPU: a number that is not the card's own, as on a real machine."""
         return 28851 + 17 * card
+
+    def pci_address(self, card: int) -> str:
+        """The PCI address of the ``card``-th GPU. The GPUs sit on the PCI buses in the reverse of their nodes' order, so
+        a tool that numbers the cards by PCI address (rocm-smi, amd-smi) does not number them as the runtime does."""
+        return f"0000:{self._bus(card):02x}:00.0"
+
+    def _bus(self, card: int) -> int:
+        return 0x05 + 0x10 * (self._gpus - 1 - card)
 
     def process(
         self,

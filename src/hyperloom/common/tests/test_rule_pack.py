@@ -140,6 +140,8 @@ _LITERALS: dict[str, str | list[str] | dict[str, str]] = {
     "HSA_STATUS_ERROR": "HSA_STATUS_ERROR",
     "HUB_RATE_LIMITED": r"429 Too Many Requests(?:: you have reached your '[^']+' rate limit| for url: https://huggingface\.co/)",
     "INITIAL_PID_NAMESPACE": "pid:[4026531836]",
+    "KFD_DOMAIN_KEY": "domain",
+    "KFD_LOCATION_ID_KEY": "location_id",
     "KFD_NODES": "topology/nodes",
     "KFD_NODE_GPU_ID": "gpu_id",
     "KFD_NODE_PROPERTIES": "properties",

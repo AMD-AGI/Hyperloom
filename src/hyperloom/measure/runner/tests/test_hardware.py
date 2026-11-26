@@ -5,12 +5,15 @@ from __future__ import annotations
 
 import json
 import subprocess
+from collections.abc import Sequence
 from pathlib import Path
 
 import pytest
 from hyperloom_common import amd_smi
+from hyperloom_common.amd_smi import AmdSmiError
 
 from hyperloom.common import kfd_topology
+from hyperloom.measure.runner import hardware
 from hyperloom.measure.runner.hardware import (
     EccCounts,
     GpuFacts,
@@ -25,6 +28,12 @@ from hyperloom.sandbox.tests.kernel_tree import KernelTree
 
 def _runner(answers):
     return lambda args: answers.get(" ".join(args))
+
+
+@pytest.fixture(autouse=True)
+def _amd_smi_numbers_the_cards_as_the_runtime_does(monkeypatch: pytest.MonkeyPatch) -> None:
+    """amd-smi's card n is the runtime's card n, unless a test of the mapping sets another order."""
+    monkeypatch.setattr(hardware, "gpus_in_rocm_order", lambda: list(range(4)))
 
 
 STATIC = json.dumps(
@@ -60,6 +69,31 @@ def test_facts_of_the_visible_gpus_only():
         GpuFacts(1, "AMD Instinct MI355X", 1400.0, "SPX/NPS1"),
         GpuFacts(2, "AMD Instinct MI355X", 1400.0, "SPX/NPS1"),
     ]
+    assert [gpu.index for gpu in read_gpu_facts([1, 9], run)] == [1], "a card amd-smi does not list is counted missing"
+
+
+def test_the_facts_and_ecc_counts_of_a_card_are_those_of_the_amd_smi_card_at_its_kfd_node(monkeypatch):
+    """amd-smi numbers the cards by PCI address and the runtime by KFD node; on MI300X-class boards the two differ."""
+    monkeypatch.setattr(hardware, "gpus_in_rocm_order", lambda: [3, 0, 2, 1])
+    static = json.dumps({"gpu_data": [{"gpu": i, "asic": {"market_name": f"amd-smi card {i}"}} for i in range(4)]})
+
+    facts = read_gpu_facts([0, 1], _runner({"static --json": static}))
+
+    assert [(gpu.index, gpu.model) for gpu in facts] == [(0, "amd-smi card 3"), (1, "amd-smi card 0")]
+    assert ecc_counts([0, 1], _runner({"metric --ecc --json": ECC}), _runner({})) == {
+        0: EccCounts(3, 0),
+        1: EccCounts(0, 0),
+    }
+
+
+def test_an_amd_smi_that_cannot_say_how_it_numbers_the_cards_gives_no_reading(monkeypatch):
+    def unknown():
+        raise AmdSmiError("amd-smi list reports a card without its KFD node, so its ROCm number is unknown")
+
+    monkeypatch.setattr(hardware, "gpus_in_rocm_order", unknown)
+
+    assert read_gpu_facts([0], _runner({"static --json": STATIC})) is None
+    assert ecc_counts([0], _runner({"metric --ecc --json": ECC}), _runner({})) is None
 
 
 @pytest.mark.parametrize(
@@ -228,34 +262,58 @@ RAS = _ras(
 )
 
 
-def test_ecc_counts_fall_back_to_the_ras_information_when_amd_smi_is_absent():
-    counts = ecc_counts([0, 1], _runner({}), _runner({"--showrasinfo": RAS}))
-
-    assert counts == {0: EccCounts(5, 1), 1: EccCounts(0, 0)}
-
-
-def test_the_ras_counts_are_those_of_the_visible_gpus_only():
-    assert ecc_counts([1], _runner({}), _runner({"--showrasinfo": RAS})) == {1: EccCounts(0, 0)}
+def _rocm_smi(tree: KernelTree, ras: str, cards: Sequence[int] = (0, 1)):
+    """rocm-smi on ``tree``'s machine: ``--showrasinfo`` prints ``ras`` and ``--showbus`` lists the machine's ``cards``
+    by PCI address, as rocm-smi numbers them."""
+    listed = sorted(cards, key=tree.pci_address)
+    bus = "\n".join(f"GPU[{index}]\t\t: PCI Bus: {tree.pci_address(card).upper()}" for index, card in enumerate(listed))
+    return _runner({"--showrasinfo": ras, "--showbus": bus})
 
 
-def test_amd_smi_is_asked_first_and_the_ras_information_only_when_it_cannot_say():
-    ras = _runner({"--showrasinfo": RAS})
+@pytest.fixture
+def machine(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> KernelTree:
+    """A machine of 2 GPUs on PCI buses in the reverse of their nodes' order: rocm-smi's card 0 is the runtime's 1."""
+    tree = KernelTree(tmp_path, gpus=2)
+    monkeypatch.setattr(kfd_topology, "KFD_PATH", tree.kfd)
+    return tree
+
+
+def test_ecc_counts_fall_back_to_the_ras_information_when_amd_smi_is_absent(machine: KernelTree) -> None:
+    counts = ecc_counts([0, 1], _runner({}), _rocm_smi(machine, RAS))
+
+    assert counts == {0: EccCounts(0, 0), 1: EccCounts(5, 1)}
+
+
+def test_the_ras_counts_are_those_of_the_visible_gpus_only(machine: KernelTree) -> None:
+    assert ecc_counts([1], _runner({}), _rocm_smi(machine, RAS)) == {1: EccCounts(5, 1)}
+
+
+def test_amd_smi_is_asked_first_and_the_ras_information_only_when_it_cannot_say(machine: KernelTree) -> None:
+    ras = _rocm_smi(machine, RAS)
 
     assert ecc_counts([0, 1], _runner({"metric --ecc --json": ECC}), ras) == {
         0: EccCounts(0, 0),
         1: EccCounts(1, 0),
     }
     assert ecc_counts([0, 1], _runner({"metric --ecc --json": "not json"}), ras) == {
-        0: EccCounts(5, 1),
-        1: EccCounts(0, 0),
+        0: EccCounts(0, 0),
+        1: EccCounts(5, 1),
     }
 
 
-def test_ras_information_that_does_not_cover_every_visible_gpu_is_not_a_reading():
-    assert ecc_counts([0, 2], _runner({}), _runner({"--showrasinfo": RAS})) is None
-    assert ecc_counts([0], _runner({}), _runner({"--showrasinfo": "WARNING: no RAS"})) is None
+def test_ras_information_that_does_not_cover_every_visible_gpu_is_not_a_reading(machine: KernelTree) -> None:
+    assert ecc_counts([0, 1], _runner({}), _rocm_smi(machine, _ras({"UMC": (3, 1)}))) is None
+    assert ecc_counts([0], _runner({}), _rocm_smi(machine, "WARNING: no RAS")) is None
+    assert ecc_counts([0, 1], _runner({}), _rocm_smi(machine, RAS, cards=[1])) is None, "rocm-smi does not list card 0"
     # a GPU whose blocks list no counts says nothing about its errors
-    assert ecc_counts([0], _runner({}), _runner({"--showrasinfo": _ras({"ATHUB": None})})) is None
+    assert ecc_counts([1], _runner({}), _rocm_smi(machine, _ras({"ATHUB": None}))) is None
+
+
+def test_the_ras_counts_need_the_pci_address_of_every_visible_card(machine: KernelTree) -> None:
+    (machine.node(0) / "properties").write_text("drm_render_minor 128\n")
+
+    assert ecc_counts([1], _runner({}), _rocm_smi(machine, RAS)) == {1: EccCounts(5, 1)}
+    assert ecc_counts([0, 1], _runner({}), _rocm_smi(machine, RAS)) is None, "card 0's node states no PCI address"
 
 
 @pytest.fixture
@@ -289,3 +347,19 @@ def test_memory_use_that_cannot_be_read_is_none_not_free(container: KernelTree) 
     (container.device(7) / "mem_info_vram_total").write_text("0\n")
     for card in (1, 2, 3):
         assert busy_gpus([card]) is None, card
+
+
+def test_the_ras_counts_of_a_card_are_those_rocm_smi_lists_at_its_pci_address(container: KernelTree) -> None:
+    """rocm-smi lists a container's cards by PCI address, so its card 0 is the runtime's card 3 here; in a container
+    given 4 of an MI325X machine's 8 GPUs, the runtime's 0 to 3 are rocm-smi's 3, 0, 2 and 1."""
+    ras = _ras({"UMC": (7, 2)}, {"UMC": (0, 0)}, {"UMC": (0, 0)}, {"UMC": (0, 0)})
+
+    counts = ecc_counts([0, 1, 2, 3], _runner({}), _rocm_smi(container, ras, cards=[4, 5, 6, 7]))
+
+    assert counts == {0: EccCounts(0, 0), 1: EccCounts(0, 0), 2: EccCounts(0, 0), 3: EccCounts(7, 2)}
+
+
+def test_a_card_s_pci_address_is_the_domain_and_location_its_node_states(container: KernelTree) -> None:
+    (container.node(5) / "properties").write_text("drm_render_minor 168\ndomain 2\nlocation_id 62730\n")
+
+    assert kfd_topology.card_pci_addresses([0, 1]) == {0: "0000:35:00.0", 1: "0002:f5:01.2"}
