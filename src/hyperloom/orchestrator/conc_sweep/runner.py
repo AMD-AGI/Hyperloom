@@ -53,7 +53,7 @@ from hyperloom.orchestrator.state.base_launch import frozen_base, server_base, s
 from hyperloom.orchestrator.state.shared_state import SharedState
 from hyperloom_common.coerce import to_str_list
 from hyperloom_common.timeutil import utc_now_compact
-from inference_suite.argv import remove_server_args
+from inference_suite.argv import argv_flag_occurrences, canonical_flag_name, remove_server_args
 from inference_suite.contracts import BaseLaunch
 
 from .plot import ConcCurveOptions
@@ -155,13 +155,18 @@ def _conc_layer(frozen: BaseLaunch | None, conc: int) -> _Layer:
 
 
 def _stacked(lower: _Layer, upper: _Layer) -> _Layer:
-    """``upper`` over ``lower``: what ``upper`` removes or unsets goes even where ``lower`` sets it."""
+    """``upper`` over ``lower``: what ``upper`` removes or unsets goes even where ``lower`` sets it, and what ``upper``
+    sets stays even where ``lower`` removes or unsets it."""
     args = merge_server_args(remove_server_args(lower.args, list(upper.remove_args)), upper.args)
     envs = {name: value for name, value in lower.envs.items() if name not in upper.unset_envs} | dict(upper.envs)
     unset = [name for name in lower.unset_envs if name not in upper.envs] + list(upper.unset_envs)
-    return _Layer(
-        args, envs, tuple(dict.fromkeys((*lower.remove_args, *upper.remove_args))), tuple(dict.fromkeys(unset))
-    )
+    upper_flags = {name for name, _value in argv_flag_occurrences(upper.args.split())}
+    removed = [spec for spec in lower.remove_args if _flag_name(spec) not in upper_flags] + list(upper.remove_args)
+    return _Layer(args, envs, tuple(dict.fromkeys(removed)), tuple(dict.fromkeys(unset)))
+
+
+def _flag_name(removal: str) -> str:
+    return canonical_flag_name(removal.split()[0].partition("=")[0])
 
 
 @dataclass(frozen=True)
@@ -428,13 +433,20 @@ async def _run_cold(sweep: _Sweep) -> None:
 
 
 async def _run_held_arm(sweep: _Sweep, arm: Arm, lifecycle: Mapping[str, Any]) -> None:
-    """Run ``arm``'s pending points, a run of points that launch alike on one held server."""
-    concs = sweep.pending(arm)
+    """Run ``arm``'s pending points, a run of points that launch alike on one held server: the points of one launch
+    run together, the launch of the first pending point first, each in ladder order."""
+    ladder_order = sweep.pending(arm)
+    by_conc = {conc: sweep.layer(arm, conc) for conc in ladder_order}
+    launches: list[_Layer] = []
+    for conc in ladder_order:
+        if by_conc[conc] not in launches:
+            launches.append(by_conc[conc])
+    concs = sorted(ladder_order, key=lambda conc: launches.index(by_conc[conc]))
     pid_dir = sweep.setup.workspace / f"server_{arm.name}"
     pid_dir.mkdir(parents=True, exist_ok=True)
     port = int(lifecycle.get("port") or 8888)
     booted = False
-    layers = [sweep.layer(arm, conc) for conc in concs]
+    layers = [by_conc[conc] for conc in concs]
     try:
         for idx, conc in enumerate(concs):
             if sweep.observe_cancel():

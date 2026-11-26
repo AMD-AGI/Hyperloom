@@ -350,6 +350,20 @@ def test_what_the_optimization_removes_stays_removed_at_every_concurrency(
     assert "--max-running-requests" in optimized["optimized_conc32"]["remove"]
 
 
+def test_a_flag_the_recipe_drops_at_a_concurrency_stays_where_the_optimization_sets_it(
+    session_dir: Path, grid: SimpleNamespace, monkeypatch: pytest.MonkeyPatch
+):
+    _state(session_dir, current_best={"extra_server_args": "--cuda-graph-max-bs 512", "extra_envs": {}})
+    _per_conc_base(monkeypatch, "--cuda-graph-max-bs 128", {4: "", 16: "--cuda-graph-max-bs 128"})
+
+    asyncio.run(runner.run_conc_sweep(session_dir))
+
+    calls = {call["name"]: call for call in grid.calls}
+    assert calls["optimized_conc4"]["args"] == "--cuda-graph-max-bs 512"
+    assert "--cuda-graph-max-bs" not in calls["optimized_conc4"]["remove"]
+    assert "--cuda-graph-max-bs" in calls["baseline_conc4"]["remove"]
+
+
 def test_a_held_server_is_booted_again_where_the_next_point_launches_otherwise(
     session_dir: Path, grid: SimpleNamespace, monkeypatch: pytest.MonkeyPatch
 ):
@@ -361,6 +375,19 @@ def test_a_held_server_is_booted_again_where_the_next_point_launches_otherwise(
     baseline = [call for call in grid.calls if call["name"].startswith("baseline")]
     assert [call["name"] for call in baseline] == [f"baseline_conc{c}" for c in (16, 4, 8, 32)]
     assert [call["ready"] for call in baseline] == [False, False, True, False]
+
+
+def test_a_held_arm_runs_the_points_of_one_launch_together_so_each_launch_boots_once(
+    session_dir: Path, grid: SimpleNamespace, monkeypatch: pytest.MonkeyPatch
+):
+    _state(session_dir)
+    _per_conc_base(monkeypatch, "--a 2", {4: "--a 1", 8: "--a 1", 16: "--a 2", 32: "--a 2"})
+
+    asyncio.run(runner.run_conc_sweep(session_dir))
+
+    baseline = [call for call in grid.calls if call["name"].startswith("baseline")]
+    assert [call["name"] for call in baseline] == [f"baseline_conc{c}" for c in (16, 32, 4, 8)]
+    assert [call["ready"] for call in baseline] == [False, True, False, True]
 
 
 def test_a_replacing_argv_keeps_its_changes_and_takes_the_recipes_values_at_each_concurrency(
