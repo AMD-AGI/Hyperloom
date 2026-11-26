@@ -24,7 +24,8 @@ no Recipe KB, or none of its champions in this session's scope, gives none, and 
 and gives none either. Each replay is checked against the toolbox's acceptance on the root, queueing nothing: one it
 refuses stays a lead with the refusal named in place of the replay, unless the champion was built on another image,
 whose launch config alone is checked in its place, and one acceptance has not answered for when
-:data:`PREFLIGHT_SECONDS` run out stays offered, its lead saying it was not checked.
+:data:`PREFLIGHT_SECONDS` run out stays offered, its lead saying it was not checked. In a session that keeps no source
+changes every champion is prepared as its launch config alone, before any check: acceptance would refuse the rest.
 
 A resumed session runs no PRELUDE: :meth:`Prelude.landed` reads back what its first one recorded.
 """
@@ -84,6 +85,8 @@ if TYPE_CHECKING:
 PREFLIGHT_SECONDS = 120.0
 #: Why a lead was not checked: acceptance had not answered for its replay when :data:`PREFLIGHT_SECONDS` ran out.
 PREFLIGHT_OUT_OF_TIME = "PRELUDE's time for the check ran out"
+#: Why a champion replays its launch config alone in a session that keeps no source changes, and what its gain is of.
+NO_SOURCE_CHANGES_REASON = "this session keeps launch configuration only, and its gain was measured on its whole recipe"
 ROOT_COMMITTED = "root committed"
 BASELINE_ESTABLISHED = "baseline established"
 
@@ -157,13 +160,21 @@ class PreludeServices:
 
 
 class Prelude:
-    """Runs PRELUDE for one session; ``warm_start`` is ``None`` when no Recipe KB is configured."""
+    """Runs PRELUDE for one session; ``warm_start`` is ``None`` when no Recipe KB is configured, and
+    ``source_changes`` is off for a session held to launch configuration, which its profile records: such a session
+    replays a champion's launch config alone."""
 
     def __init__(
-        self, context: SchedulerContext, services: PreludeServices, *, warm_start: WarmStartSource | None
+        self,
+        context: SchedulerContext,
+        services: PreludeServices,
+        *,
+        warm_start: WarmStartSource | None,
+        source_changes: bool,
     ) -> None:
         self._layout = context.layout
         self._warm_start_source = warm_start
+        self._source_changes = source_changes
         self._blackboard = context.blackboard
         self._repo = services.repo
         self._gate = services.gate
@@ -234,7 +245,8 @@ class Prelude:
         model_config = await asyncio.to_thread(summarize_model_config, workload.model)
         profile = _session_profile(self._layout.session_id, workload, version, model_config)
         ceiling = await asyncio.to_thread(roofline_ceiling, workload)
-        return _OpenedRoot(recipe, root, replace(profile, roofline_ceiling=ceiling))
+        profile = replace(profile, roofline_ceiling=ceiling, source_changes=self._source_changes)
+        return _OpenedRoot(recipe, root, profile)
 
     async def _replay(self, opened: _OpenedRoot, anchored: Awaitable[object]) -> _Replayed:
         """Read the warm-start leads and replay the best champion among them on the root, judged once ``anchored``
@@ -260,6 +272,8 @@ class Prelude:
             try:
                 found = await asyncio.to_thread(warm_leads, source.recipe_kb, profile)
                 leads = await asyncio.to_thread(replay_leads, source.recipe_kb, profile, found, target)
+                if not profile.source_changes:
+                    leads = tuple(map(_launch_only, leads))
             except KBStoreError as exc:
                 unread = f"{type(exc).__name__}: {exc}"
         leads = await self._preflight(leads, root, root_commit)
@@ -331,6 +345,12 @@ class Prelude:
 
     async def _withdraw(self, request_ids: list[str]) -> None:
         await asyncio.gather(*(self._tests.withdraw(request_id) for request_id in request_ids))
+
+
+def _launch_only(lead: WarmLead) -> WarmLead:
+    """``lead`` replaying its champion's launch config alone, its patches and kernel artifacts listed as left out."""
+
+    return lead if lead.replay is None else replace(lead, replay=lead.replay.launch_only(NO_SOURCE_CHANGES_REASON))
 
 
 def _longest_wall_seconds(results: Iterable[TestResult]) -> float:

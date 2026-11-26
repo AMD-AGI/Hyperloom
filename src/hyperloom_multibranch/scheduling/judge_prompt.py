@@ -2,10 +2,11 @@
 # SPDX-License-Identifier: MIT
 
 """The judge's system prompt: :data:`JUDGE_SYSTEM_PROMPT` in a session that plays no scheduling playbook, and
-:data:`PLAYBOOK_JUDGE_PROMPT` in one that plays one, where the stall evidence is the one stop rule for a stall.
+:data:`PLAYBOOK_JUDGE_PROMPT` in one that plays one, where the stall evidence is the one stop rule for a stall; and
+:data:`LAUNCH_CONFIG_ONLY`, what the user prompt of a session that keeps no source changes adds to either.
 
 The two differ in eight parts (:class:`PromptParts`). Each has a version in the session's manifest fingerprint, derived
-from its text and the reply format every user prompt ends with (:data:`REPLY_FORMAT`).
+from its text, the reply format every user prompt ends with (:data:`REPLY_FORMAT`) and :data:`LAUNCH_CONFIG_ONLY`.
 """
 
 from __future__ import annotations
@@ -240,6 +241,19 @@ REPLY_FORMAT = """Reply with one JSON object of this shape:
  "stop_session": null or {"reason": "<why the session should stop now>"}}
 List only the branches whose K should change. Branches not named keep their K and keep running."""
 
+#: What the judge of a session held to launch configuration (``run --no-source-changes``) reads below the session's
+#: state: its branches test settings alone, a space they finish, so a slot is refilled only for an op or a direction no
+#: branch worked on and the session stops early once none is left.
+LAUNCH_CONFIG_ONLY = """\
+Launch configuration only: this session was started with --no-source-changes. Its toolbox refuses every test whose
+recipe holds a patch or a kernel artifact, so its branches test server arguments and environment variables alone, a
+space far smaller than source work and one a branch finishes. A branch whose specialist gave up with nothing left to
+test, its exhausted record saying all_tested_or_claimed, finished the settings of its direction: open a branch in its
+place only on an op or a direction no branch of this session worked on. This overrides the rule to refill the free
+slots rather than stop the session: when every op and direction was worked on and no running branch is expected to
+gain, stop the session whatever time is left. FINAL validates what it kept, and an early stop is the expected end of
+such a session."""
+
 #: The system prompt of a session that plays no scheduling playbook.
 JUDGE_SYSTEM_PROMPT = _TEMPLATE.format(**asdict(_WITHOUT_PLAYBOOK))
 #: The system prompt of a session that plays one: its stall evidence is the one stop rule for a stall.
@@ -247,7 +261,7 @@ PLAYBOOK_JUDGE_PROMPT = _TEMPLATE.format(**asdict(_WITH_PLAYBOOK))
 
 
 def _version(system: str) -> str:
-    return hashlib.sha256(f"{system}\n{REPLY_FORMAT}".encode()).hexdigest()[:VERSION_HEX]
+    return hashlib.sha256(f"{system}\n{REPLY_FORMAT}\n{LAUNCH_CONFIG_ONLY}".encode()).hexdigest()[:VERSION_HEX]
 
 
 #: The judge prompt's version in the session's manifest fingerprint, derived from its text as the specialist prompts';
@@ -259,6 +273,7 @@ PLAYBOOK_JUDGE_PROMPT_VERSION = _version(PLAYBOOK_JUDGE_PROMPT)
 __all__ = [
     "JUDGE_PROMPT_VERSION",
     "JUDGE_SYSTEM_PROMPT",
+    "LAUNCH_CONFIG_ONLY",
     "PLAYBOOK_JUDGE_PROMPT",
     "PLAYBOOK_JUDGE_PROMPT_VERSION",
     "REPLY_FORMAT",

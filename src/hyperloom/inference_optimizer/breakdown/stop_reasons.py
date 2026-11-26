@@ -47,6 +47,11 @@ PATCH_RECOVERY_INCOMPLETE_STOP_REASON: str = "patch_recovery_incomplete"
 #: every proposal times out denied, so the rest of the budget would buy nothing.
 BACKEND_UNHEALTHY_STOP_REASON: str = "backend_unhealthy"
 
+#: Under ``--no-source-changes`` an enablement round delivered a source, file or runtime change as its fix, which
+#: the session refuses. Another round would author a change that is refused again, so the run halts on the FIRST
+#: such round instead of spending the enablement attempts, and the reason names the flag that decided it.
+SOURCE_CHANGE_REFUSED_STOP_REASON: str = "enablement_blocked_by_no_source_changes"
+
 #: Terminals that mean the run optimized and closed normally.
 SUCCESS_STOP_REASONS: frozenset[str] = frozenset(
     {
@@ -131,6 +136,7 @@ STOP_REASON_VOCAB: frozenset[str] = frozenset(
         # Enablement attempt cap: too many consecutive rounds bought no ground.
         # A bring-up that is still advancing is bounded by the run's wall clock.
         "enablement_attempts_exhausted",
+        SOURCE_CHANGE_REFUSED_STOP_REASON,
         # The baseline could not produce an accuracy result even though the
         # accuracy test was expected to run (broken eval / missing quality
         # gate). Optimizing against an unvalidated baseline is unsafe, so the
@@ -200,6 +206,7 @@ __all__ = [
     "INFRASTRUCTURE_STOP_REASONS",
     "MODEL_GATE_STOP_REASONS",
     "PATCH_RECOVERY_INCOMPLETE_STOP_REASON",
+    "SOURCE_CHANGE_REFUSED_STOP_REASON",
     "STOP_REASON_VOCAB",
     "SUCCESS_STOP_REASONS",
     "SUPERVISOR_RESTART_REASON",

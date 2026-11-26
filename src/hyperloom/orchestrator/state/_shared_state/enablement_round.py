@@ -33,6 +33,11 @@ _KEEP_OBSERVED_FIELDS = (
 #: clean scan and certify exactly what the observation exists to withhold.
 _KEEP_TRISTATE_FIELDS = ("build_extensions_not_carried", "levers_without_readers")
 
+#: What ``last_refused_source_changes`` holds for a targeted build a specialist asked for.
+_REFUSED_BUILD = "a targeted build"
+#: The round statuses the lane rearms on: the round moved the lane forward.
+_GROUND_STATUSES = frozenset({"kept", "advanced"})
+
 
 def _first_writer_wins(bound: Mapping[str, str], incoming: Mapping[str, str]) -> dict[str, str]:
     """``bound`` plus each binding of ``incoming`` it lacks; a recorded binding is never replaced."""
@@ -107,6 +112,9 @@ class EnablementRound:
     # (stderr, reject hunks, target source window), injected into the next
     # round's mandate so it re-grounds instead of resubmitting the same diff.
     last_apply_feedback: list = field(default_factory=list)
+    # What the last round delivered that ``--no-source-changes`` refuses (patches, a runtime, a build request). The
+    # lane stops on it: another round would author a change that is refused again.
+    last_refused_source_changes: list = field(default_factory=list)
     # Whether the last round's kept patches targeted more than one source tree;
     # injected into the next mandate so the specialist splits them per round.
     patches_span_multiple_roots: bool = False
@@ -211,6 +219,17 @@ class EnablementRound:
         self.last_setup_refusals = [str(c) for c in (result.get("setup_commands_refused") or [])[:8]]
         self.last_inert_round_env_reads = [str(n) for n in (result.get("inert_round_env_reads") or [])[:8]]
         self.patches_span_multiple_roots = bool(result.get("patches_span_multiple_roots"))
+        refused = [str(c) for c in (result.get("source_changes") or [])[:8]]
+        # A build request is refused when its specialist delivers it, ahead of this result of the same round: only
+        # a round that bought ground answers it.
+        asked_for_build = _REFUSED_BUILD in self.last_refused_source_changes and _REFUSED_BUILD not in refused
+        if asked_for_build and str(result.get("status") or "") not in _GROUND_STATUSES:
+            refused.append(_REFUSED_BUILD)
+        self.last_refused_source_changes = refused
+
+    def note_refused_build_request(self) -> None:
+        """Record that this round's specialist asked for a targeted build ``--no-source-changes`` refuses."""
+        self.last_refused_source_changes = [_REFUSED_BUILD]
 
     def record_launch_observation(self, *, log: str, observation_path: str) -> None:
         """Record the boot the next enablement round authors against.

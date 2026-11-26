@@ -30,6 +30,7 @@ from hyperloom.common.agent_isolation import HOST_LAYER_ENV
 from hyperloom.common.env_safety import SPECIALIST_USER_ENV, RunAs
 from hyperloom.hosted.campaign import CampaignSpec, parse_campaign
 from hyperloom.hosted.host_info import HostInfo, read_host_info
+from hyperloom_multibranch.cli_options import build_parser, settings_from
 from hyperloom_multibranch.scheduling import hosted_run as hosted_run_module
 from hyperloom_multibranch.scheduling.budget import MB_CLOSE_GRACE_CAP_SECONDS
 from hyperloom_multibranch.scheduling.hosted_run import (
@@ -154,6 +155,33 @@ def test_a_reference_script_that_is_no_path_is_refused_naming_the_field(path: ob
 
     with pytest.raises(HostedRefused, match="multibranch.reference_script must be the path of a launch script"):
         run_argv(spec, 1.0, 1)
+
+
+@pytest.mark.parametrize(
+    ("options", "held"),
+    [({"source_changes": False}, True), ({"source_changes": True}, False), ({}, False)],
+    ids=["off", "on", "not-given"],
+)
+def test_a_spec_that_turns_source_changes_off_holds_the_session_to_launch_configuration(
+    options: dict[str, bool], held: bool
+) -> None:
+    """``options.source_changes: false`` is ``run --no-source-changes``; the option is read by ``run``'s own
+    parser, so the session is built as a command-line one is."""
+    argv = run_argv(_spec("hosted", options=options), 1.0, 1)
+
+    assert ("--no-source-changes" in argv) is held
+    assert settings_from(build_parser().parse_args(argv), lambda tp: 1).source_changes is not held
+
+
+def test_a_spec_held_to_launch_configuration_takes_no_autonomous_agent() -> None:
+    spec = _spec(
+        "hosted",
+        options={"source_changes": False},
+        multibranch={"workload": "inferencex", "autonomous_agents": ["/agents/a"]},
+    )
+
+    with pytest.raises(ValueError, match="--no-source-changes is not taken with --autonomous-agent"):
+        settings_from(build_parser().parse_args(run_argv(spec, 1.0, 1)), lambda tp: 1)
 
 
 @pytest.mark.parametrize(

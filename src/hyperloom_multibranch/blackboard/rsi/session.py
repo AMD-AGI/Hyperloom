@@ -524,16 +524,16 @@ def archived_history(archive: TreeArchive | None = None) -> tuple[SearchTree, ..
         return ()
 
 
-def session_menus(metric: str, reports: Path | None) -> DirectionMenus | None:
+def session_menus(metric: str, reports: Path | None, source_changes: bool = True) -> DirectionMenus | None:
     """The session's direction menus, for ``SessionBriefs(menus=...)``: over the archive a running session reads,
-    read once, each menu logged to ``<reports>/menus.jsonl`` for CLOSE to read; ``None`` without an
-    archive, so a session that reads none is briefed as one without the RSI."""
+    read once, each menu logged to ``<reports>/menus.jsonl`` for CLOSE to read, its code list only where the session
+    keeps ``source_changes``; ``None`` without an archive, where a session is briefed as one without the RSI."""
 
     target = TreeArchive.read_from_env()
     if target is None:
         return None
     log_to = MenuLog(reports / MENU_LOG) if reports is not None else None
-    return DirectionMenus(archived_history(target), metric, log_to)
+    return DirectionMenus(archived_history(target), metric, log_to, source_changes)
 
 
 def judge_history(snapshot: BlackboardSnapshot, history: Sequence[SearchTree], metric: str) -> str:

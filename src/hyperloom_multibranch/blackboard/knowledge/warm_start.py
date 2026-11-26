@@ -39,9 +39,9 @@ PRELUDE checks each replay against the toolbox's acceptance on the root. A repla
 answer for in PRELUDE's time stays offered, its lead saying it was not checked. A cross-image replay whose patches
 acceptance refuses, as a stack that does not apply in order on this image, is checked again as
 :meth:`PreparedReplay.launch_only`: its launch config without the environment its patches read, the patches listed
-as references. The champion PRELUDE then replays on the root and whose replay never runs, the toolbox refusing it at
-submit or its test not measuring, keeps its lead too, saying so in place of the replay (:func:`after_replay`):
-replayed whole on another head, it would come to the same end.
+as references; a session that keeps no source changes prepares every replay so. The champion PRELUDE then replays on
+the root and whose replay never runs, the toolbox refusing it at submit or its test not measuring, keeps its lead too,
+saying so in place of the replay (:func:`after_replay`): replayed whole on another head, it would come to the same end.
 """
 
 from __future__ import annotations

@@ -55,7 +55,12 @@ from hyperloom_multibranch.scheduling.branches import REPAIR_PROTECTED_SECONDS
 from hyperloom_multibranch.scheduling.clock import Clock
 from hyperloom_multibranch.scheduling.events import SessionEvent
 from hyperloom_multibranch.scheduling.forks import PendingBranch
-from hyperloom_multibranch.scheduling.judge_prompt import JUDGE_SYSTEM_PROMPT, PLAYBOOK_JUDGE_PROMPT, REPLY_FORMAT
+from hyperloom_multibranch.scheduling.judge_prompt import (
+    JUDGE_SYSTEM_PROMPT,
+    LAUNCH_CONFIG_ONLY,
+    PLAYBOOK_JUDGE_PROMPT,
+    REPLY_FORMAT,
+)
 from hyperloom_multibranch.contracts.llm import Completion, CompletionFailed
 from hyperloom_multibranch.scheduling.roster import (
     BranchEntry,
@@ -141,6 +146,8 @@ class JudgeView:
     as :func:`~hyperloom_multibranch.scheduling.agent_map.render_map` gives it, empty for a session with none.
     ``undealt`` names the session's directions no branch has held yet that branches opened now with no focus would be
     dealt, none while the scheduler would open no such branch; :func:`coverage_floor` opens a branch for each.
+    ``source_changes`` is the session's ``RunSettings.source_changes``: off, the prompt says the session keeps launch
+    configuration only and when to stop it (:data:`~.judge_prompt.LAUNCH_CONFIG_ONLY`).
     """
 
     now: float
@@ -176,6 +183,7 @@ class JudgeView:
     playbook: str = ""
     agent_map: str = ""
     undealt: tuple[str, ...] = ()
+    source_changes: bool = True
 
 
 @dataclass(frozen=True)
@@ -491,7 +499,8 @@ def render_prompt(view: JudgeView) -> str:
         _KEY_BRANCHES: [_branch_row(entry, progress.get(entry.branch), view) for entry in view.roster],
     }
     history = f"How similar past sessions went:\n{view.history}\n\n" if view.history else ""
-    sections = "".join(f"{text}\n\n" for text in (view.open_areas, view.agent_map, view.playbook) if text)
+    kept = "" if view.source_changes else LAUNCH_CONFIG_ONLY
+    sections = "".join(f"{text}\n\n" for text in (kept, view.open_areas, view.agent_map, view.playbook) if text)
     return f"Session state:\n{json.dumps(state, indent=2, sort_keys=True)}\n\n{history}{sections}{REPLY_FORMAT}"
 
 

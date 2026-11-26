@@ -268,6 +268,34 @@ def test_the_route_the_discovery_specialist_returns_picks_the_track(
     assert sorted(c["kind"] for c in stub.tasks.created) == sorted(kinds)
 
 
+@pytest.mark.parametrize(
+    ("route", "kinds", "statuses"),
+    [
+        ("direct_framework", [], ["skipped"]),
+        ("author_via_specialist", ["specialist"], []),
+        ("unrecognised", ["specialist"], []),
+    ],
+)
+def test_no_source_changes_never_queues_the_pull_requests_own_diff(
+    tmp_path: Path, route: str, kinds: list[str], statuses: list[str]
+):
+    """That diff is a source change the gate could only skip: the author track still runs, and a candidate with no
+    author track ends ``skipped`` without an ``integrate_patch`` round and is not selected again."""
+    stub = _stub(tmp_path)
+    stub.shared_state.no_source_changes = True
+    _seed_batch(stub, dict(_CANDIDATE, route=route))
+
+    _pump_then_materialize(stub)
+
+    assert sorted(c["kind"] for c in stub.tasks.created) == sorted(kinds)
+    rows = stub.shared_state.framework_agent_phase_progress
+    assert [(row["candidate_id"], row["status"], row["kept"]) for row in rows] == [
+        (_CANDIDATE["pr_url"], status, False) for status in statuses
+    ]
+    if statuses:
+        assert stub.phase_framework._unprocessed_framework_agent_candidates() == []
+
+
 def test_authoring_inflight_detects_specialist_and_proposals(tmp_path: Path):
     stub = _stub(tmp_path)
     # One unprocessed candidate so the signal has a valid target.
@@ -990,3 +1018,29 @@ async def test_discovery_fallback_waits_until_nothing_is_in_flight(parallel_phas
     parallel_phase.tasks._queued.clear()
     await parallel_phase.phase_framework._pump_framework_agent_phase()
     assert parallel_phase.discoveries == ["candidate_pool_empty"]
+
+
+@pytest.mark.asyncio
+async def test_an_authored_patch_skipped_by_no_source_changes_is_finished_not_reauthored(tmp_path: Path) -> None:
+    """A policy skip is the candidate's last word: no re-author, and the pump does not select it again."""
+    stub = _stub(tmp_path)
+    pr_url = "https://github.com/vllm-project/vllm/pull/60077"
+    _seed_batch(stub, {"pr_url": pr_url, "diff_url": f"{pr_url}.diff"})
+    task = SimpleNamespace(
+        task_id="integrate-60077",
+        kind="integrate_patch",
+        params={"framework_agent_authoring": True, "framework_agent_candidate_id": pr_url, "specialist_task_id": "s"},
+    )
+    result = SubAgentResult(
+        task_id=task.task_id,
+        state="succeeded",
+        result={"status": "skipped", "skipped_reason": "no_source_changes", "specialist_task_id": "s"},
+    )
+
+    await stub.phase_framework.on_integrate_patch_settled(task, result, Verdict.FAILED)
+
+    assert stub.shared_state.apply_fail_reauthor_attempts == {}
+    assert stub.tasks.created == []
+    rows = stub.shared_state.framework_agent_phase_progress
+    assert [(row["candidate_id"], row["status"], row["kept"]) for row in rows] == [(pr_url, "skipped", False)]
+    assert stub.phase_framework._unprocessed_framework_agent_candidates() == []

@@ -94,6 +94,7 @@ class PeerSetup:
     ``make_before_break`` is the session's ``RunSettings.make_before_break``: whether a hosted toolbox keeps a
     finished test's sandbox until the next test's runs (``HostedOptions.make_before_break``). ``test_points`` is how
     many points one test measures one after the other; one attempt of a test may run that many times as long.
+    ``source_changes`` is the session's ``RunSettings.source_changes``, which its toolbox's acceptance is built on.
     """
 
     layout: SessionLayout
@@ -117,6 +118,7 @@ class PeerSetup:
     agentx_early_stop: EarlyStopMode = EarlyStopMode.SHADOW
     make_before_break: bool = True
     test_points: int = 1
+    source_changes: bool = True
 
 
 PeerFactory = Callable[[PeerSetup], Peers]

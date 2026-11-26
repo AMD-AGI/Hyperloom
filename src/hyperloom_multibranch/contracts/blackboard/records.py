@@ -896,7 +896,8 @@ class SessionProfile:
     workload, empty when it models none. ``agentx_objective`` is what an AgentX session is graded on; a profile written
     before sessions chose one was graded on P50 interactivity. ``dataset`` is the ``DATASET_PATH`` file the fixed
     rounds send in place of random prompts, as given, empty when none: ``isl`` and ``osl`` then do not describe the
-    requests.
+    requests. ``source_changes`` is off for a session held to launch configuration (``run --no-source-changes``); a
+    profile without it kept source changes.
     """
 
     session_id: str
@@ -915,6 +916,7 @@ class SessionProfile:
     roofline_ceiling: Mapping[str, float] = field(default_factory=dict)
     agentx_objective: AgentXObjective = AgentXObjective.P50_INTERACTIVITY
     dataset: str = ""
+    source_changes: bool = True
 
 
 @dataclass(frozen=True)

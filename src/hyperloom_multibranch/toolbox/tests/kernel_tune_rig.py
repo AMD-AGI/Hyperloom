@@ -187,6 +187,7 @@ def build_rig(tmp_path: Path, monkeypatch: Any, made: list[LocalHostedToolbox], 
         points: Mapping[str, Path] | None = None,
         card_holders: Callable[[Sequence[int]], CardReading] = read_holders,
         card_guard: CardGuard | None = None,
+        source_changes: bool = True,
     ) -> Rig:
         session = tmp_path / f"session-{len(made)}"
         freeze_session_base(session)
@@ -195,7 +196,13 @@ def build_rig(tmp_path: Path, monkeypatch: Any, made: list[LocalHostedToolbox], 
         box = local_hosted.build_local_toolbox(
             LocalSession(session, f"run-{len(made)}", range(cards), tp=tp),
             blackboard,
-            AcceptanceSetup(FakeRepo(), _PointPerBranch(dict(points or {})), IMAGE, WorkloadKind.AGENTX),
+            AcceptanceSetup(
+                FakeRepo(),
+                _PointPerBranch(dict(points or {})),
+                IMAGE,
+                WorkloadKind.AGENTX,
+                source_changes=source_changes,
+            ),
             spec_context(session, blob_root=str(session / "hosted" / "blobs")),
             options=LocalOptions(
                 poll_interval_sec=0.05,

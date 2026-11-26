@@ -215,6 +215,7 @@ def build(
     sleep: Callable[[float], Awaitable[None]] | None = None,
     tests_end_by: float | None = None,
     kind: type[RealToolbox] = RealToolbox,
+    source_changes: bool = True,
 ) -> Rig:
     """A toolbox of class ``kind`` over a blackboard directory and a submit log under ``tmp_path``; building again over
     the same ``tmp_path`` is a restart. ``builds`` drives the native builds a test waits for. Infrastructure retries wait
@@ -240,7 +241,14 @@ def build(
     toolbox = kind(
         stores,
         executor,
-        AcceptanceSetup(repo, planner, active_image, workload_kind, aiter_builds_missing=aiter_builds_missing),
+        AcceptanceSetup(
+            repo,
+            planner,
+            active_image,
+            workload_kind,
+            aiter_builds_missing=aiter_builds_missing,
+            source_changes=source_changes,
+        ),
         tools=tools(blackboard) if tools else None,  # type: ignore[arg-type]
         tuning=ToolboxTuning(
             policy=policy,

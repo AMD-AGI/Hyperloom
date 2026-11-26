@@ -74,6 +74,10 @@ class TestWithdrawn(ToolboxError):
         self.reason = reason
 
 
+#: The refusal of a candidate whose recipe holds a patch or a kernel artifact, in a session that keeps launch
+#: configuration only (``run --no-source-changes``).
+LAUNCH_CONFIG_ONLY_CODE = "launch_config_only"
+
 #: The checks acceptance can refuse on, as the ``code`` of :class:`RequestRejected`.
 REJECTION_CODES = (
     "invalid_request",  # the request breaks the contract of 3.7
@@ -94,6 +98,7 @@ REJECTION_CODES = (
     "no_effective_change",  # an explore test whose candidate recipe equals its parent's: the delta restates the parent
     "upstream_label_unsupported",  # a delta moves the upstream_ref or upstream_repo of a component the parent has
     "online_tuning_unsupported",  # the candidate runs TunableOp with tuning on: its test never ends in a bounded time
+    LAUNCH_CONFIG_ONLY_CODE,
     "context_below_eval",  # an accuracy test whose launch serves less context than its evaluation runs in (every request answers 400)
     "attachment_too_large",  # ``put_attachment``: the data, or what a directory archive expands to, passes the cap
     "attachment_unreadable",  # ``put_attachment``: a ``dir`` attachment is not a tar archive
@@ -350,6 +355,7 @@ class Toolbox(Protocol):
 
 
 __all__ = [
+    "LAUNCH_CONFIG_ONLY_CODE",
     "SCOPE_HOST",
     "SCOPE_SPECIALIST",
     "REJECTION_CODES",

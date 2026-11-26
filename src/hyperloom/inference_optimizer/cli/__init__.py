@@ -142,6 +142,7 @@ from .preflight import (
 )
 from .session_resume import (
     _OperatorLaunchShape,
+    _keep_launch_config_only,
     _open_next_leg,
     _open_resumed_session,
     _reexport_session_environment,
@@ -194,6 +195,7 @@ class OrchestrationPromptContext:
     objective: Objective
     max_minutes: int
     no_framework_agent: bool = False
+    no_source_changes: bool = False
     transport: str = TRANSPORT_TOOLS
     benchmark_mode: str = ""
     agentx_corpus_shape: Mapping[str, Any] | None = None
@@ -218,6 +220,7 @@ def _build_orchestration_prompt(
         session=SessionContext(
             framework=framework,
             framework_agent_phase_enabled=not no_framework_agent,
+            no_source_changes=context.no_source_changes,
             objective_kind=kind,
             objective_value=value,
             max_minutes=int(context.max_minutes),
@@ -244,6 +247,7 @@ def _reset_state_file(session_dir: Path, state: SharedState) -> None:
 
     The fresh state keeps ``framework`` and the measurement identity of *state*: the session is single-framework and
     keeps its measurement path, nothing after this point re-derives either, and a later resume checks the latter.
+    It keeps ``--no-source-changes`` too, with the phases that flag turns off: a resume never turns it off.
     """
     state_path = session_dir / "state.json"
     if not state_path.exists():
@@ -254,7 +258,10 @@ def _reset_state_file(session_dir: Path, state: SharedState) -> None:
     except OSError as exc:
         log.warning("--reset-state: could not move %s → %s: %s", state_path, backup_path, exc)
         return
-    SharedState(framework=state.framework, **fresh_measurement_fields(state)).save(session_dir)
+    fresh = SharedState(framework=state.framework, **fresh_measurement_fields(state))
+    if state.no_source_changes:
+        _keep_launch_config_only(fresh)
+    fresh.save(session_dir)
     log.info(
         "--reset-state: backed up state.json to %s; session starts blank except for framework=%s.",
         backup_path.name,
@@ -765,6 +772,7 @@ def _install_system_prompts(
     prompt_context = OrchestrationPromptContext(
         no_kernel=lineup.no_kernel,
         no_framework_agent=lineup.no_framework_agent,
+        no_source_changes=state.no_source_changes,
         framework=state.framework,
         objective=objective,
         max_minutes=int(round(float(args.max_hours) * 60)),

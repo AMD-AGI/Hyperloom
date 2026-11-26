@@ -134,7 +134,7 @@ from hyperloom_multibranch.scheduling.exports import ARCHIVED_BEFORE
 from hyperloom_multibranch.scheduling.final import INTEGRATION_LABEL, PRIMARY_POINT_ONLY
 from hyperloom_multibranch.scheduling import judge
 from hyperloom_multibranch.scheduling.judge import GRACE_KEY, HoldReason
-from hyperloom_multibranch.scheduling.judge_prompt import JUDGE_PROMPT_VERSION
+from hyperloom_multibranch.scheduling.judge_prompt import JUDGE_PROMPT_VERSION, LAUNCH_CONFIG_ONLY
 from hyperloom_multibranch.scheduling.integrator import ADOPTING_LEAD, EXPLORATION_ENDED
 from hyperloom_multibranch.scheduling.launch_isolation import LaunchIsolation
 from hyperloom_multibranch.scheduling.hosted_run import prelude_landed
@@ -1050,8 +1050,16 @@ async def test_a_run_given_the_inferencex_checkout_briefs_its_launches_for_the_s
         ("make_before_break", False),
         ("agent_port", 32100),
         ("inferencex_commit", "8a76a78e41"),
+        ("source_changes", False),
     ],
-    ids=["dev-leases", "make-before-break-on", "make-before-break-off", "agent-port", "inferencex-commit"],
+    ids=[
+        "dev-leases",
+        "make-before-break-on",
+        "make-before-break-off",
+        "agent-port",
+        "inferencex-commit",
+        "no-source-changes",
+    ],
 )
 async def test_a_setting_of_the_run_reaches_the_peers(tmp_path: Path, name: str, value: object) -> None:
     stage = _stage(tmp_path)
@@ -1070,6 +1078,20 @@ async def test_the_integrator_compares_merges_by_the_option_inventory_the_peers_
     session = stage._session()
 
     assert session._integrator.options == inventory
+
+
+@pytest.mark.parametrize("kept", [True, False], ids=["source-changes-kept", "launch-configuration-only"])
+async def test_a_session_held_to_launch_configuration_says_so_in_its_profile_and_to_its_judge_at_every_call(
+    tmp_path: Path, kept: bool
+) -> None:
+    stage = _stage(tmp_path)
+    stage.settings = replace(stage.settings, source_changes=kept)
+
+    await stage.run()
+
+    prompts = _judge_prompts(stage)
+    assert prompts and all((LAUNCH_CONFIG_ONLY in prompt) is not kept for prompt in prompts)
+    assert (await stage.handle(Role.OBSERVER).session_profile()).source_changes is kept
 
 
 @pytest.mark.parametrize(("review_gate", "handed"), [(True, "host"), (False, "off")])

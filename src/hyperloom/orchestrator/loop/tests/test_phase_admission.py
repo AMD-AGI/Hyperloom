@@ -10,6 +10,7 @@ at a transition, so anything admitted here runs.
 
 from __future__ import annotations
 
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -31,7 +32,8 @@ def _dispatcher(phase: str, *, baseline_tput: float = 800.0) -> DispatcherCollab
     no_tasks = SimpleNamespace(
         queued_context_sync=list, running_context_sync=list, with_key_prefix_sync=lambda kind, key_prefix: []
     )
-    return DispatcherCollaborator(SimpleNamespace(shared_state=state, tasks=no_tasks))
+    coordinator = SimpleNamespace(shared_state=state, tasks=no_tasks, session_dir=Path("/session"))
+    return DispatcherCollaborator(coordinator)
 
 
 def test_a_baseline_proposed_in_the_optimisation_phase_is_refused():

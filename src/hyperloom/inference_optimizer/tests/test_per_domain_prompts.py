@@ -161,6 +161,25 @@ def test_enablement_mandate_carries_the_dispatch_evidence():
     assert weights in user
 
 
+@pytest.mark.parametrize("no_source_changes", [True, False])
+def test_the_enablement_playbook_says_which_rung_is_kept_exactly_under_no_source_changes(no_source_changes):
+    """The specialist is told that a fix above Rung 1 is refused and ends the run, so it looks for configuration first."""
+    domain = get_domain("enablement_specialist")
+    inp = SpecialistPromptInputs(
+        domain=domain,
+        max_turns=4,
+        gap_canonical_id="gap.enablement.example",
+        gap_symptom="example symptom",
+        gap_layer=domain.layer,
+        framework="vllm",
+        enablement_failure_signature=_DISPATCHED,
+        no_source_changes=no_source_changes,
+    )
+    _system, user = build_specialist_prompts(inp)
+    assert ("### Launch configuration only (`--no-source-changes`)" in user) is no_source_changes
+    assert ("enablement_blocked_by_no_source_changes" in user) is no_source_changes
+
+
 def test_enablement_mandate_renders_the_dispatched_signature():
     """The verdict the round was dispatched on reaches the prompt verbatim; the builder never re-classifies a log to recover it."""
     domain = get_domain("enablement_specialist")
@@ -851,3 +870,22 @@ def test_enablement_ladder_rendered_exactly_once():
     _, user = build_specialist_prompts(inp)
     count = user.count("ENABLEMENT METHODOLOGY")
     assert count == 1, f"Expected 'ENABLEMENT METHODOLOGY' exactly once, found {count}"
+
+
+@pytest.mark.parametrize("no_source_changes", [True, False])
+def test_a_patch_mode_mandate_says_only_configuration_is_kept_exactly_under_no_source_changes(no_source_changes):
+    """A benching or enablement specialist still runs in patch mode under the flag; it is told what will be kept."""
+    domain = get_domain("serving_specialist")
+    inp = SpecialistPromptInputs(
+        domain=domain,
+        max_turns=4,
+        gap_canonical_id="gap.serving.example",
+        gap_symptom="example symptom",
+        framework="vllm",
+        workspace_path="/tmp/test/serving",
+        no_source_changes=no_source_changes,
+    )
+    system, user = build_specialist_prompts(inp)
+    text = system + "\n" + user
+    assert ("deliver configuration proposals" in text) is no_source_changes
+    assert ("Altitude — where the durable wins are" in text) is not no_source_changes

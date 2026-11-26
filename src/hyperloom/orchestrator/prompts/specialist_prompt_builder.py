@@ -34,6 +34,8 @@ from .proposal_schemas import (
 from .specialist_focus import _DOMAIN_FOCUS_TEMPLATES
 from .specialist_prompt_text import (
     IDENTITY_MANDATE_LINES,
+    ENABLEMENT_LAUNCH_CONFIG_ONLY_LINES,
+    KEPT_LAUNCH_CONFIG_ONLY_ROW,
     ORCHESTRATOR_CHANNEL_LINES,
     PATCH_FIELD_LINES,
     PROPOSAL_SET_RULES,
@@ -121,7 +123,7 @@ _THROUGHPUT_AUTHORING_DOMAINS = frozenset(
 
 def _source_patch_altitude_block(inp: SpecialistPromptInputs) -> list[str]:
     """Where the durable wins are, for a throughput dispatch that may author code."""
-    if not (_authors_patches(inp) and inp.domain.key in _THROUGHPUT_AUTHORING_DOMAINS):
+    if not (_authors_patches(inp) and inp.domain.key in _THROUGHPUT_AUTHORING_DOMAINS) or inp.no_source_changes:
         return []
     return [
         "",
@@ -418,6 +420,7 @@ def _section_mandate(inp: SpecialistPromptInputs) -> list[str]:
     ]
     if anchor:
         rows.append(f"- anchor: `{anchor}`")
+    rows.extend([KEPT_LAUNCH_CONFIG_ONLY_ROW] if inp.no_source_changes and _authors_patches(inp) else [])
     rows.extend(_mandate_run_status(inp))
 
     rows.extend(
@@ -763,9 +766,9 @@ def _section_iron_rules(inp: SpecialistPromptInputs) -> list[str]:
         "4. You **MUST** finish within ``max_turns`` LLM turns and end with",
         "   exactly one ``specialist_done`` exit signal. Silence past the cap",
         "   synthesizes an empty done.",
-        f"5. Use ``{workspace}/`` for ALL writes. It and ``SESSION_DIR`` are the",
-        "   only directories the dispatcher hands you to write; the source trees",
-        "   are yours to read.",
+        f"5. Use ``{workspace}/`` for ALL writes. It and ``SESSION_DIR`` are the only directories the dispatcher",
+        "   hands you to write; the source trees are yours to read. Keep your own probe scripts, logs and any",
+        "   server you start under ``scratch/`` there: that folder is never part of what you deliver.",
         "6. On tool error or no useful action left, emit",
         "   ``specialist_done{proposal_set=[], summary='<why>'}``.",
         f"7. {BASH_KILL_SAFETY_PREAMBLE}",
@@ -803,6 +806,7 @@ def _section_enablement_playbook(inp: SpecialistPromptInputs) -> list[str]:
     )
     rows = ["## 1b. ENABLEMENT PLAYBOOK", ""]
     rows.extend(mandate.splitlines())
+    rows.extend(ENABLEMENT_LAUNCH_CONFIG_ONLY_LINES if inp.no_source_changes else ())
     acc_cfg = inp.enablement_accepted_config or {}
     acc_envs = {str(k): str(v) for k, v in (acc_cfg.get("extra_envs") or {}).items()}
     acc_args = str(acc_cfg.get("extra_server_args") or "").strip()

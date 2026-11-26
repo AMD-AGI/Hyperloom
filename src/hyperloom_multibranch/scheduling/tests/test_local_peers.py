@@ -652,6 +652,7 @@ async def _peers(
     base: BaseLaunch | None = None,
     agent_launch: str = "/launches/agent.json",
     kb_url: str = "",
+    source_changes: bool = True,
 ) -> AsyncIterator[_Built]:
     """The real peers of a session of ``workload`` on ``host`` in ``tmp_path`` lending ``dev_leases`` dev sandboxes,
     with the wiring their specialist sessions were built on; a branch's worktree, holding no component, is served
@@ -686,6 +687,7 @@ async def _peers(
         reference_script,
         agent_launch=agent_launch,
         inferencex_commit=inferencex_commit,
+        source_changes=source_changes,
     )
     wired: list[SessionWiring] = []
 
@@ -822,6 +824,27 @@ def test_an_agentx_budget_of_half_an_hour_keeps_the_window_s_timeout_and_its_hou
     assert boot_limit_sec(_serving_point(timeout), timeout, 1800) == timeout * BOOT_SHARE, (
         "not halved to the 1800 s budget"
     )
+
+
+@pytest.mark.parametrize("kept", [True, False])
+async def test_the_sessions_source_changes_setting_is_the_one_its_toolbox_accepts_tests_by(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, kept: bool
+) -> None:
+    """``run --no-source-changes`` (``RunSettings`` and ``PeerSetup``) reaches the acceptance every test passes, with
+    the session's directory, under which a setting may name no file."""
+    accepted_by: list[object] = []
+    build = local_hosted.build_local_toolbox
+
+    def recorded(session: object, blackboard: object, acceptance: object, spec: object, **options: object) -> object:
+        accepted_by.append((acceptance.source_changes, acceptance.session_dir))  # type: ignore[attr-defined]
+        return build(session, blackboard, acceptance, spec, **options)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(local_hosted, "build_local_toolbox", recorded)
+
+    async with _peers(tmp_path, monkeypatch, WORKLOAD, source_changes=kept) as built:
+        pass
+
+    assert accepted_by == [(kept, built.layout.root)]
 
 
 def _serving_point(timeout_sec: int) -> BenchmarkPoint:
@@ -1517,8 +1540,11 @@ async def test_a_session_without_agents_reads_no_canonical(built: _Built, monkey
     assert clients == [None]
 
 
-def _specialist_setup(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, workload: Workload) -> AgentSetup:
-    """The setup ``model_backed_sessions`` builds every branch's specialist from, on ``workload``."""
+def _specialist_setup(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, workload: Workload, source_changes: bool = True
+) -> AgentSetup:
+    """The setup ``model_backed_sessions`` builds every branch's specialist from, on ``workload``, in a session that
+    keeps ``source_changes`` or is held to launch configuration."""
     built: list[AgentSetup] = []
 
     def sessions(setup: AgentSetup, **_: object) -> ModelSessions:
@@ -1546,6 +1572,7 @@ def _specialist_setup(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, workload:
         agent_review="",
         agent_maps=None,
         agent_share_minutes=SHARE_MINUTES,
+        source_changes=source_changes,
     )
     wiring = SimpleNamespace(
         setup=setup,
@@ -1574,6 +1601,19 @@ async def test_an_agentx_session_s_specialists_are_told_its_objective(
         RoleWorkload(_specialist_role(TOTAL_AGENTX), objective), references={}, server=RoleServer(BASE)
     )
     assert objective.description in " ".join(setup.role.split())
+
+
+def test_the_specialists_of_a_session_held_to_launch_configuration_are_told_so_and_others_are_not(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``run --no-source-changes`` (``PeerSetup.source_changes``) reaches every specialist's role."""
+    held = _specialist_setup(tmp_path, monkeypatch, WORKLOAD, source_changes=False)
+    kept = _specialist_setup(tmp_path, monkeypatch, WORKLOAD)
+
+    named = _specialist_role(WORKLOAD)
+    assert held.role == role_prompt(RoleWorkload(named, None, False), references={}, server=RoleServer(BASE))
+    assert kept.role == role_prompt(RoleWorkload(named), references={}, server=RoleServer(BASE))
+    assert "--no-source-changes" in held.role and "--no-source-changes" not in kept.role
 
 
 @pytest.mark.parametrize(("workload", "ttl"), [(WORKLOAD, "1h"), (AGENTX, None)])
@@ -1633,6 +1673,7 @@ async def test_the_specialists_are_told_of_and_give_back_the_dev_sandboxes_the_s
                 agent_review="",
                 agent_maps=None,
                 agent_share_minutes=SHARE_MINUTES,
+                source_changes=True,
             ),
             tokens=None,
             repo=None,
@@ -1774,6 +1815,7 @@ def _source_wiring(tmp_path: Path, source: str, native: Mapping[str, object]) ->
         agent_review="",
         agent_maps=None,
         agent_share_minutes=SHARE_MINUTES,
+        source_changes=True,
     )
     return SimpleNamespace(
         setup=setup,

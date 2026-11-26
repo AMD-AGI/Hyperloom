@@ -734,11 +734,13 @@ class MenuLog:
 @dataclass
 class DirectionMenus:
     """The session's menus: the archived ``trees`` read once for the session's conditions, the ``log`` of the menus
-    given, and the last each branch was given, what a claim's note reads."""
+    given, and the last each branch was given, what a claim's note reads. A session that keeps no ``source_changes``
+    (launch configuration only) gives a menu without the code list, whose every line its toolbox would refuse."""
 
     trees: Sequence[SearchTree] = ()
     metric: str = ""
     log: MenuLog | None = None
+    source_changes: bool = True
     _evidence: MenuEvidence | None = field(default=None, init=False)
     _given: dict[str, DirectionMenu] = field(default_factory=dict, init=False)
 
@@ -752,6 +754,8 @@ class DirectionMenus:
         """The menu of ``branch`` on ``commit``, logged."""
 
         found = direction_menu(snapshot, branch, commit, self.evidence(snapshot), metric=self.metric)
+        if not self.source_changes:
+            found = replace(found, code=())
         self._given[branch] = found
         if self.log is not None:
             self.log.record(found)

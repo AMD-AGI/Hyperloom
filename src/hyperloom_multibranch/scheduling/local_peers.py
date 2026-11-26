@@ -536,7 +536,14 @@ def _toolbox(
     if workload.kind is WorkloadKind.AGENTX:
         checkpoint = CheckpointReferences(setup.agentx_early_stop, workload.agentx_objective, blackboard)
     acceptance = AcceptanceSetup(
-        repo, planner, image.digest, workload_kind=workload.kind, explore_accuracy=False, checkpoint=checkpoint
+        repo,
+        planner,
+        image.digest,
+        workload_kind=workload.kind,
+        explore_accuracy=False,
+        checkpoint=checkpoint,
+        source_changes=setup.source_changes,
+        session_dir=setup.layout.root,
     )
     return host.backend.toolbox(setup, blackboard, acceptance, spec)
 
@@ -554,7 +561,7 @@ def _specialist_briefs(setup: PeerSetup, repo: GitExperimentRepo) -> SessionBrie
         learnings=learnings,
         repo=repo,
         stack_slot=repo.stack_kernel_slot,
-        menus=session_menus(setup.workload.metric, setup.layout.reports),
+        menus=session_menus(setup.workload.metric, setup.layout.reports, setup.source_changes),
         cases=CasePool.from_env(),
     )
 
@@ -820,7 +827,9 @@ def model_backed_sessions(command: AgentCommand) -> SpecialistSessions:
             command=command,
             role=role_prompt(
                 RoleWorkload(
-                    _specialist_role(workload), workload.agentx_objective if workload.inferencex is None else None
+                    _specialist_role(workload),
+                    workload.agentx_objective if workload.inferencex is None else None,
+                    wiring.setup.source_changes,
                 ),
                 references=wiring.setup.references,
                 server=RoleServer(wiring.base, _checkout_built((workload.framework,)), layout.toolbox, profiled),

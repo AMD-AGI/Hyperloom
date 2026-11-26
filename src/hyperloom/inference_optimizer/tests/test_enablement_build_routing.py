@@ -122,6 +122,24 @@ async def test_build_pumps_propagate_their_failures(coord, monkeypatch, entry):
 
 
 @pytest.mark.asyncio
+async def test_no_build_is_escalated_under_no_source_changes(coord, monkeypatch):
+    """A build can only end in a launch-only round the integrate gate skips, so it is never started."""
+    coord.shared_state.gpu_type = "mi355x"
+    coord.shared_state.framework = "vllm"
+    coord.shared_state.no_source_changes = True
+
+    from hyperloom.orchestrator.actions.executors import _multi_node_env as mne
+
+    monkeypatch.setattr(mne, "is_multi_node", lambda: False)
+
+    await coord.enablement_build.maybe_escalate_to_targeted_build(
+        "hipErrorNoBinaryForGpu: no kernel image is available"
+    )
+
+    assert [t for t in await coord.tasks.queued() if t.kind == "targeted_build"] == []
+
+
+@pytest.mark.asyncio
 async def test_escalate_skipped_for_pure_python_gap(coord, monkeypatch):
     coord.shared_state.framework = "vllm"
 
@@ -276,6 +294,50 @@ async def test_specialist_requested_build_enqueued(coord, monkeypatch):
     assert action.gpu_arch == "gfx950"
     # Consume-once: the marker is cleared so the next tick does not re-enqueue.
     assert coord.shared_state.enablement.last_specialist_task_id == ""
+
+
+@pytest.mark.asyncio
+async def test_no_specialist_requested_build_starts_under_no_source_changes(coord, monkeypatch):
+    """The request is consumed, not built: its runtime could only reach a round integrate_patch skips."""
+    coord.shared_state.framework = "vllm"
+    coord.shared_state.gpu_type = "mi355x"
+    coord.shared_state.no_source_changes = True
+
+    from hyperloom.orchestrator.actions.executors import _multi_node_env as mne
+
+    monkeypatch.setattr(mne, "is_multi_node", lambda: False)
+
+    tid = "spec-no-source"
+    coord.shared_state.enablement.last_specialist_task_id = tid
+
+    await coord.enablement_build.maybe_enqueue_specialist_requested_build(
+        task_id=tid,
+        payload={
+            "needs_targeted_build": {
+                "component": "aiter",
+                "capability": "deepseek_v4_nsa",
+                "repo_url": "https://github.com/ROCm/aiter",
+                "ref": "PR:1234",
+            }
+        },
+    )
+
+    assert [t for t in await coord.tasks.queued() if t.kind == "targeted_build"] == []
+    assert coord.shared_state.enablement.last_specialist_task_id == ""
+    assert coord.shared_state.enablement.last_refused_source_changes == ["a targeted build"]
+
+
+@pytest.mark.asyncio
+async def test_a_build_request_switched_off_by_the_environment_is_not_a_refused_source_change(coord, monkeypatch):
+    """Only ``--no-source-changes`` turns a dropped build request into the lane's terminal."""
+    monkeypatch.setenv("HYPERLOOM_ENABLEMENT_DISABLE_TARGETED_BUILD", "1")
+
+    await coord.enablement_build.maybe_enqueue_specialist_requested_build(
+        task_id="spec-env-off",
+        payload={"needs_targeted_build": {"component": "aiter", "capability": "deepseek_v4_nsa"}},
+    )
+
+    assert coord.shared_state.enablement.last_refused_source_changes == []
 
 
 @pytest.mark.asyncio

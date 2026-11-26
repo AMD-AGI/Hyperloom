@@ -1,23 +1,33 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""An explore reaches dispatch with variants to measure: its own grid, or a seed source that fills one."""
+"""An explore reaches dispatch with variants to measure, none of them a file change a ``--no-source-changes`` session refuses."""
 
 from __future__ import annotations
 
 from collections.abc import Mapping
+from pathlib import Path
 from typing import Any
+
+from hyperloom.common.env_safety import launch_settings_naming_path_under
 
 from ..actions.executors.explore_prefilter.grid_payload import runnable_grid_variants
 from ..policy.denial import PolicyDenied
 
-__all__ = ["EXPLORE_ACTION_NAME", "EXPLORE_GRID_MISSING", "explore_grid_denial"]
+__all__ = [
+    "EXPLORE_ACTION_NAME",
+    "EXPLORE_GRID_MISSING",
+    "EXPLORE_NAMES_SESSION_FILE",
+    "explore_grid_denial",
+    "explore_session_file_denial",
+]
 
 # Grid measurement action name; the gate is called for every action, so it needs its own name to
 # answer only for itself.
 EXPLORE_ACTION_NAME: str = "explore"
 
 EXPLORE_GRID_MISSING = "explore_grid_missing"
+EXPLORE_NAMES_SESSION_FILE = "explore_names_session_file"
 
 
 def explore_grid_denial(
@@ -61,4 +71,34 @@ def explore_grid_denial(
             "({'name': ..., 'extra_server_args': ..., 'extra_envs': {...}}) built from the GRID INPUT "
             "and specialist proposals; an explore with nothing to measure has no result to report."
         ),
+    )
+
+
+def explore_session_file_denial(
+    action_name: str,
+    params: Mapping[str, Any] | None,
+    shared_state: Any,
+    session_dir: Path,
+) -> PolicyDenied | None:
+    """Refuse, under ``--no-source-changes``, an explore with a variant whose setting names a file of this session.
+
+    Everything a specialist or a stage writes lands under the session directory, so a setting that points the server
+    there carries that file into the kept launch by name: a tuned table, a template, a script. The integrate gate
+    refuses the same file when it arrives as a deliverable; a grid is the other way a setting reaches a kept step.
+    """
+    if action_name != EXPLORE_ACTION_NAME or not getattr(shared_state, "no_source_changes", False):
+        return None
+    naming = {
+        variant.name: settings
+        for variant in runnable_grid_variants(params, shared_state)
+        if (settings := launch_settings_naming_path_under(session_dir, variant.extra_server_args, variant.extra_envs))
+    }
+    if not naming:
+        return None
+    detail = "; ".join(f"{name}: {', '.join(settings)}" for name, settings in naming.items())
+    return PolicyDenied(
+        f"{EXPLORE_ACTION_NAME}: --no-source-changes keeps server arguments and environment variables only, and "
+        f"these variants point the server at a file under the session directory ({detail})",
+        rule=EXPLORE_NAMES_SESSION_FILE,
+        hint="Resend the grid without those variants, or with values that name no file this session wrote.",
     )

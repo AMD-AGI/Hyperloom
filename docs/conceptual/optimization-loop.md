@@ -147,7 +147,11 @@ A KEEP in ENABLEMENT is graded on runnability and the accuracy floor, not
 throughput. The phase exits normally when `baseline_tput > 0`, the
 revalidation window is closed, and all in-flight enablement work is drained.
 It exits terminally on `server_argv_invalid`, `environment_fault`, or
-`enablement_attempts_exhausted` (eight consecutive failed rounds).
+`enablement_attempts_exhausted` (eight consecutive failed rounds). Under
+`--no-source-changes` it also exits on
+`enablement_blocked_by_no_source_changes`, at the first round whose fix is a
+source, file or runtime change: the session refuses that fix, and another round
+would author one that is refused again.
 
 Only the enablement lane authors rounds here; the LLM proposes `target_analysis`.
 A round that reaches its executor after the lane stopped taking rounds is skipped.
@@ -552,6 +556,30 @@ error plus the merge steps. A `perf_framework` or `perf_explore` patch is then
 re-authored on the kept stack, within the authored-lane retry cap. A tree that
 is not a git checkout has no merge step: a patch that does not apply ends the
 round `apply_failed`.
+
+`--no-source-changes` keeps the second lever to launch configuration: every
+route that can change a source tree or the installed environment lands through
+`integrate_patch`, which skips such a round (`skipped_reason=no_source_changes`)
+before anything is applied. A server argument or environment variable whose
+value names a file under the session directory is such a change, since the file
+is what would be kept: `integrate_patch` skips that round, and an `explore`
+whose grid holds such a variant is denied at admission
+(`explore_names_session_file`). Specialists still run and their configuration
+proposals are still benched, but work only that gate would refuse is not
+started: a specialist that would author a patch without a bench loop runs as
+read-only research, no targeted build is started, and an upstream pull request's
+own diff is not queued (a candidate with no authoring route ends `skipped`).
+Framework authoring rounds (an upstream-PR port, the local-exploration arm)
+still run and are told only configuration is kept: a patch they deliver is
+skipped by that gate, a configuration proposal is benched.
+`--no-framework-local-explore` remains the switch that saves the
+local-exploration arm's budget. The kernel phase and the PRELUDE warm replay
+never reach that gate, so the flag turns both off as well, as `--no-kernel` and
+`--no-warm-replay` do: the one flag gives a result that holds only server
+arguments and environment variables. Passed on a resume, the flag holds from
+that leg on and removes nothing the session kept before it: a source patch stays
+on the stack, and a session that kept an install or a runtime in enablement has
+its next enablement round refused.
 
 `specialist` serves both levers — investigation, patch authoring, and
 candidate discovery are all dispatches of the one specialist action. An

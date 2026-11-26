@@ -13,7 +13,7 @@ from hyperloom.common.deadline import Deadline
 from ..bus.gpu_pool import GPU_LEASE_TTL_GRACE
 from ..phases import machine_state as _phase_state
 from ..policy.denial import PolicyDenied
-from ..specialists.profile import resolve_specialist_profile, wall_budget_base_min
+from ..specialists.profile import apply_session_policy, resolve_specialist_profile, wall_budget_base_min
 
 if TYPE_CHECKING:
     from ..state.shared_state import SharedState
@@ -116,10 +116,13 @@ def specialist_admission_minutes(shared_state: SharedState, params: dict[str, An
 
     That is its mode's base budget and, for one that benches, room for one measured benchmark round after startup.
     Admission asks only for this minimum; a dispatched specialist runs to its full wall budget, tightened to the
-    session and phase ends.
+    session and phase ends. It is priced in the mode this session will run it in: admission comes before the
+    warm-up that writes the session's policy onto the dispatch.
     """
-    floor_min = wall_budget_base_min(params)
-    if resolve_specialist_profile(params).reserves_benchmark_lane:
+    priced = dict(params or {})
+    apply_session_policy(priced, no_source_changes=shared_state.no_source_changes)
+    floor_min = wall_budget_base_min(priced)
+    if resolve_specialist_profile(priced).reserves_benchmark_lane:
         round_min = measured_baseline_runtime_sec(shared_state) / _SECONDS_PER_MINUTE
         floor_min = max(floor_min, round_min + _BENCH_SPECIALIST_STARTUP_MIN)
     return floor_min

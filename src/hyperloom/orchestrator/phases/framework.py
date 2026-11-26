@@ -743,6 +743,7 @@ class FrameworkPhase(
         if audit_step not in ("direct_framework", "author_via_specialist"):
             want_raw = True
             want_author = True
+        want_raw = want_raw and not self._skip_direct_route(cand_id, batch_id, authored=want_author)
         log.info(
             "FRAMEWORK: critic-approved candidate=%s batch=%s audit_step=%s raw=%s author=%s",
             cand_id,
@@ -780,6 +781,26 @@ class FrameworkPhase(
                             extra={"error": repr(exc)},
                         )
                     )
+
+    def _skip_direct_route(self, cand_id: str, batch_id: str, *, authored: bool) -> bool:
+        """Leave the pull request's own diff unqueued in a ``--no-source-changes`` session; True when it was left.
+
+        That diff is a source change ``integrate_patch`` could only skip. The author track may still return
+        configuration, so a candidate that has one goes on there; one without it ends here as ``skipped``.
+        """
+        if not self.shared_state.no_source_changes:
+            return False
+        if not authored:
+            self._stamp_framework_progress(
+                ProgressStamp(
+                    candidate_id=cand_id,
+                    batch_id=batch_id,
+                    status="skipped",
+                    rationale="--no-source-changes: the pull request's own diff is a source change; not queued",
+                    provenance="pump",
+                )
+            )
+        return True
 
     def _stamp_framework_progress(self, stamp: ProgressStamp) -> bool:
         """Idempotently stamp a terminal ``framework_agent_phase_progress`` row."""

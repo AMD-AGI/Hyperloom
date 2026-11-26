@@ -200,6 +200,48 @@ host has no token. The session logs one WARNING when its toolbox is built. Every
   none. With none installed, every source is onboarded by a model, and the map, pack, launch and dossier options have
   no agent to act on.
 - **Scheduling playbook:** `--playbook auto|champion|challenger` (default `auto`).
+- **What the session keeps:** `--no-source-changes` holds it to launch configuration; see
+  [Launch configuration only](#launch-configuration-only).
+
+## Launch configuration only
+
+`hyperloom-multibranch run --no-source-changes` gives a result that holds only server arguments and environment
+variables, as `hyperloom optimize --no-source-changes` does for a single-lineage run: one that fits where no patch and
+no kernel file can be carried along.
+
+- **What is refused:** the toolbox's acceptance refuses, as `launch_config_only`, every test whose recipe holds a
+  patch or a kernel artifact (a tuned table included), or a component its parent's recipe lacks. Every test of a
+  session passes acceptance and every commit is the recipe of a test it accepted, so no branch, merge, replay or FINAL
+  hands such a recipe on, whoever submits the test. A refused test queues nothing and holds no card.
+- **A file carried in by name:** a server argument or an environment variable whose value names a path under the
+  session's directory (a table a specialist wrote, an entry on `PYTHONPATH`, a template) is refused the same way:
+  the file is what such a setting would keep, and the recipe cannot hold it.
+- **Tuners:** `kernel_tune` and `knob_tune` are not offered. What they return is a kernel table or a patch, and a
+  tuner holds a card while it runs.
+- **Warm start:** a Recipe KB champion whose recipe holds patches or kernel artifacts replays its launch configuration
+  alone, on the root and for the specialists, without the variables only its patches read; its lead names the files
+  left out.
+- **Specialists:** their role ends by saying that only server arguments and environment variables are kept and that
+  this overrides its guidance on source work, and their brief has no "Source and kernel changes" list. They still read
+  the framework's source, the logs and the profiles to find the settings an operator's path reads.
+- **A session that runs out of settings** is meant to end early. A specialist records a direction with no setting left
+  as exhausted, and its branch stops once it finds nothing to test. The judge is told that such a branch is replaced
+  only for an op or a direction no branch worked on, and to stop the session when none is left, whatever time
+  remains; that stop is `judge_stopped`, as any early stop of the judge's. FINAL then validates the integration head,
+  or the root when nothing was kept, and the session counts as one that ran its course (exit 0). There is no stop
+  reason of its own: nothing in a session needs a source change to go on.
+- **Autonomous agents:** not taken with the option (a usage error): an agent works by its own logic on cards of its
+  own, and nothing keeps it from spending them on source work that cannot land.
+- **Resume:** the manifest records the setting, so `run --resume` continues the session held to it; `--resume` takes no
+  `--no-source-changes` beside it.
+- **RSI archive:** the session reads the archive as any other, and CLOSE leaves nothing of it there: no search tree,
+  playbook trial, lesson, judge decision or playbook proposal, each step reported `skipped` with the reason
+  `started_with_no_source_changes`. The archive's readers pool sessions by workload kind, and such a session's gains,
+  stalls and stops are those of settings alone, so sessions that keep source changes would read it as a peer and a
+  playbook on trial would be scored on it. The Experience KB and the Recipe KB are written as for any session.
+- **Not covered:** a setting that names a file outside the session's directory passes as launch configuration:
+  the image's own files are such, and so is a file a specialist wrote elsewhere on a host that cannot confine its
+  tests.
 
 ## Resuming a stopped session
 
@@ -239,7 +281,8 @@ the profile and the root commit are the ones the first PRELUDE recorded.
   ran on another build, is still running, already chose in FINAL, failed in PRELUDE or recorded no baseline, was
   measured in a grant's sandboxes (`--measurement hosted`), was to stop once its map was made, or already spent the GPU
   hours EXPLORE has under `--max-gpu-hours` (all of it less FINAL's share), which would send it straight to FINAL; or
-  any other `run` option is given beside `--resume`.
+  any other `run` option is given beside `--resume`, `--no-source-changes` included: the session keeps the setting it
+  started with.
 
 A session that cannot be resumed but stopped before FINAL can still be finished with `final-only SESSION_DIR`.
 

@@ -308,6 +308,7 @@ class Session:
             settings.agentx_early_stop,
             make_before_break=settings.make_before_break,
             test_points=self._test_points,
+            source_changes=settings.source_changes,
         )
 
     def _map_calls(self) -> MapCalls:
@@ -343,7 +344,8 @@ class Session:
             self._integrator.replay_champion,
             profiler.profile_root,
         )
-        return Prelude(self._context, prelude_services, warm_start=warm_start)
+        source_changes = self._settings.source_changes
+        return Prelude(self._context, prelude_services, warm_start=warm_start, source_changes=source_changes)
 
     def _build_integrator(self, repo: ExperimentRepo, checks: SessionChecks, services: SessionServices) -> Integrator:
         """The integrator, writing as itself to the blackboard and the merge log, with the LLM patch resolver whose
@@ -635,6 +637,7 @@ class Session:
             opening.plans,
             opening.map_for,
             final_cap,
+            source_changes=self._settings.source_changes,
         )
         reason = await self._explorer().run(window)
         if reason is SessionStopReason.NO_MEASUREMENT_CARDS:

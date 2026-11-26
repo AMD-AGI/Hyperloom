@@ -199,8 +199,9 @@ class SpecialistDispatchCollaborator(CoordinatorCollaborator):
         plane = self.knowledge_plane
 
         from .domains import dispatch_domain, gap_backfilled_domain
-        from .profile import resolve_specialist_profile
+        from .profile import apply_session_policy, resolve_specialist_profile
 
+        apply_session_policy(params, no_source_changes=state.no_source_changes)
         # Bench-capable specialists run a real serving + benchmark loop, so
         # default needs_gpu to route them through the gpu_specialist_pool.
         if resolve_specialist_profile(params).reserves_benchmark_lane:
