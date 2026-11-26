@@ -401,17 +401,26 @@ def test_an_inferencex_base_reports_its_recipe_commit_variant_files_and_image(tm
 
 
 def test_a_reference_script_url_is_reported_without_its_credentials(tmp_path):
-    planted = "x" * 12
-    url = f"https://bob:hunter2@example.com/launch.sh?token={planted}"
+    planted, signature = "x" * 12, "y" * 12
+    url = f"https://bob:hunter2@example.com/launch.sh?token={planted}&sig={signature}#top"
     source = {**_frozen_base().to_document()["source"], "kind": "user_file", "path": url, "files": {url: "ab" * 32}}
     _frozen_with(tmp_path, source=source)
 
     reported = ex.build(tmp_path)["metadata"]["base_launch"]["source"]
 
+    # A signed URL's signature has no credential-like name, so an operator's file loses its whole query.
     text = json.dumps(reported)
-    assert not any(word in text for word in ("bob", "hunter2", planted))
-    assert reported["path"].startswith("https://example.com/launch.sh?token=")
+    assert not any(word in text for word in ("bob", "hunter2", planted, signature))
+    assert reported["path"] == "https://example.com/launch.sh"
     assert list(reported["files"]) == [reported["path"]]
+
+
+def test_a_recipe_source_keeps_the_query_that_names_its_point(tmp_path):
+    locator = "https://recipes.vllm.ai/deepseek-ai/DeepSeek-V4.1-Flash.json?hardware=mi300x&point=tp4_c32"
+    source = {**_IX_SOURCE, "kind": "vllm_recipes", "locator": locator}
+    _frozen_with(tmp_path, source=source, image=_IX_IMAGE)
+
+    assert ex.build(tmp_path)["metadata"]["base_launch"]["source"]["locator"] == locator
 
 
 def test_a_base_launch_that_cannot_be_read_is_a_warning_not_a_block(tmp_path):

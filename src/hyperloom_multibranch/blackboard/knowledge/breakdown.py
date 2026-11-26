@@ -12,7 +12,8 @@ export has its own schema version and its own sections:
   ``plugs`` and ``hosted_measurement``, and the records ``measurement_sandboxes`` (one per test, keyed by
   ``request_id`` as ``tests`` are). From the agent runner's samples it holds ``specialist_resources``, one record per
   specialist, and ``container_resources``, the container's last reading. ``base_launch`` is where the session's frozen
-  base was resolved from, its image and its topology, as ``MB-toolbox/base_launch.json`` records them.
+  base was resolved from, its image and its topology, from ``MB-toolbox/base_launch.json``, with the locations in
+  ``source`` stripped of credentials as the single-lineage breakdown's are.
 * ``baseline``: the root's recorded values, dispersion and thresholds.
 * ``lineage``: every commit and branch, with when each was made, opened or stopped, and a commit's recipe digest when
   its writer named it.

@@ -243,7 +243,8 @@ def test_a_sweep_whose_dataset_cannot_be_counted_is_skipped_naming_the_file(
 
     assert (payload["status"], payload["skip_reason"]) == ("skipped", "prompt_dataset_unreadable")
     assert not rounds.children
-    (record,) = caplog.records
+    # The session has no breakdown, so the report also warns that it is carried in none.
+    (record,) = [record for record in caplog.records if record.name == runner.log.name]
     assert missing in record.getMessage() and record.exc_info is None
 
 

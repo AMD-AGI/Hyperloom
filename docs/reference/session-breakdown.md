@@ -365,7 +365,9 @@ every file read (`files`); a cookbook, a recipe API, the default table, a shippe
 script or an operator's `--reference-script` fills the fields it has and leaves
 the rest null. Every location in `source` (`repo`, `path`, `entry`, `locator` and
 the keys of `files`) is reported without a URL's userinfo or a recognizable
-credential value, since an operator's file is recorded as given. `image.recipe`
+credential value, and an operator's file (`kind` `user_file`) without a URL's
+query and fragment too, since it is recorded as given and may be a signed URL;
+a recipe source keeps its query, which names the point it read. `image.recipe`
 is the image reference the base named, with its digest, and `topology` the TP
 and EP every round runs at. A consumer can match the session against
 InferenceX's own runs of the same recipe on these. A multi-branch breakdown
