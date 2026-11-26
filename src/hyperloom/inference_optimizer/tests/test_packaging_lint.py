@@ -29,6 +29,14 @@ _UNPACKAGED_ASSETS = (
     "kernelforge/workflows/gemm_tune/*.md",
 )
 
+# package-data globs over a gitignored build output, which match nothing in a checkout until the build runs.
+_BUILD_OUTPUT_GLOBS = frozenset(
+    {
+        # The Inspector UI (build_backend/hyperloom_build.py); scripts/check_wheel_contents.py checks the wheel has it.
+        ("hyperloom.inspector", "static/modern/**/*"),
+    }
+)
+
 try:  # tomllib is stdlib from 3.11; the ``ci`` extra pins tomli for 3.10.
     import tomllib
 except ModuleNotFoundError:  # pragma: no cover - exercised only on py3.10
@@ -70,7 +78,7 @@ def test_package_data_globs_all_match_at_least_one_file():
             dead.append(f"{package}: package directory {package_dir} does not exist")
             continue
         for pattern in patterns:
-            if not list(package_dir.glob(pattern)):
+            if (package, pattern) not in _BUILD_OUTPUT_GLOBS and not list(package_dir.glob(pattern)):
                 dead.append(f"{package}: '{pattern}' matches no file")
     assert not dead, "dead package-data declarations (setuptools ignores these silently): " + "; ".join(dead)
 

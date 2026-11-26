@@ -68,6 +68,9 @@ _IMMUTABLE = {"Cache-Control": "public, max-age=31536000, immutable"}
 _NO_BUILD = (
     b"The Inspector UI is not in this install.\n\n"
     b"In a source tree, build it with `npm ci && npm run build` in frontend/inspector.\n"
+    b"A package built from source without Node has no UI: install it again from a source checkout (a git clone)\n"
+    b"with Node 18.19 or later on PATH, or install the release from PyPI, which carries the UI. An sdist built\n"
+    b"without Node cannot be fixed this way: it has no frontend/inspector to build the UI from.\n"
     b"To run the Inspector in a pod, build it on your machine and copy the tree in, as docs/inspector/README.md\n"
     b'("In a pod") describes.\n'
 )

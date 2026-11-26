@@ -133,5 +133,5 @@ audit.md
 session-breakdown-change.md
 /core
 /session/
-# Inspector modern UI: built from frontend/inspector by npm run build
+# Inspector modern UI: built from frontend/inspector by npm run build or the wheel build
 /src/hyperloom/inspector/static/modern/

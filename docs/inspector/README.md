@@ -39,6 +39,17 @@ Other scripts:
 - `npm test`: vitest.
 - `npm run format:check`: prettier.
 
+Wheels and sdists run `npm ci && npm run build` themselves, through the build backend in `build_backend/`:
+
+- If npm is missing or its build fails, an existing `static/modern/` build ships as is, with a warning. With
+  neither, the package ships without the UI, with a warning, and the Inspector says how to get it. `pip install`
+  shows the warning only with `-v`.
+- `HYPERLOOM_REQUIRE_UI=1`, which the release and packaging CI set, fails the build instead of shipping without
+  the UI.
+- `HYPERLOOM_SKIP_UI_BUILD=1` skips the frontend build, and whatever `static/modern/` holds ships as is.
+
+Editable installs never build the UI: run `npm run build` by hand.
+
 ## Run
 
 ```bash
@@ -64,7 +75,7 @@ Options:
 Run the Inspector in a pod from a source tree copied in from your machine. The copy carries the parts of Hyperloom
 the Inspector imports, so the Hyperloom version the image has does not matter; the pod's Python needs PyYAML, which
 any image with Hyperloom installed has.
-Don't run it from the pod's own checkout: it has no UI build, so the page only
+Don't run it from the pod's own checkout: an editable install never builds the UI, so the page only
 shows the build error. Build the UI first (the copy includes the gitignored build), then copy the tree in, start the
 Inspector and forward its port:
 

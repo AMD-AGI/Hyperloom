@@ -13,7 +13,7 @@ export default defineConfig({
   // Relative asset URLs, so the page works wherever the server mounts it.
   base: "./",
   build: {
-    // Served by the Python inspector from its package directory; gitignored.
+    // Package data of the Python inspector; gitignored, rebuilt by the wheel build.
     outDir: "../../src/hyperloom/inspector/static/modern",
     emptyOutDir: true,
     target: "es2022",

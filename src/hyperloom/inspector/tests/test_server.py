@@ -98,6 +98,10 @@ def test_without_a_build_root_says_how_to_build_it(server):
     assert resp.getheader("Content-Type").startswith("text/plain")
     assert b"npm run build" in body
     assert b'"In a pod"' in body
+    # An install pip built without Node has no frontend/ to build in, and neither has an sdist built that way: only
+    # a source checkout with Node, or the release, brings the UI back.
+    assert b"install it again from a source checkout" in body
+    assert b"sdist" in body
     assert _get(server, "/assets/index-Ab_1.js")[0] == 404
 
 

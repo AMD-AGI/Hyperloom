@@ -62,6 +62,13 @@ jobs:
         with:
           python-version: "3.11"
 
+      # The build backend runs npm for the Inspector UI (build_backend/hyperloom_build.py).
+      - uses: actions/setup-node@v7
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: frontend/inspector/package-lock.json
+
       - name: Install build tooling
         # setuptools>=77 matches the build-system floor (PEP 639 license form).
         run: |
@@ -70,6 +77,11 @@ jobs:
 
       - name: Build wheel
         id: build
+        # An explicit bash adds pipefail, so a failed build is not hidden behind tee's exit status.
+        shell: bash
+        env:
+          # A wheel without the Inspector UI is a packaging bug here, not a fallback.
+          HYPERLOOM_REQUIRE_UI: "1"
         run: |
           python -m build --wheel --no-isolation --outdir dist 2>&1 | tee build.log
           echo "wheel=$(ls dist/*.whl)" >> "$GITHUB_OUTPUT"

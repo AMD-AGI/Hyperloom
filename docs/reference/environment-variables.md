@@ -1528,6 +1528,21 @@ infrastructure failure `smoke_not_run`, retried once.
 |----------|---------|-------------|
 | `HYPERLOOM_MERGE_SMOKE` | Unset (on) | Read from the toolbox host's environment when the toolbox is built. Unset, empty or `on` (any case, surrounding spaces ignored) keeps the merge smoke on; `off` turns it off, so every test goes straight to its sandbox. Any other value is refused: building the toolbox fails with a `ValueError`. Operator configuration. |
 
+## Inspector UI build
+
+Read by the build backend (`build_backend/hyperloom_build.py`) when an sdist or a wheel is built from a checkout
+(`python -m build`, `pip wheel`, a non-editable `pip install`), from the environment of that build; never at run time.
+Before setuptools runs, the backend runs `npm ci && npm run build` in `frontend/inspector`, which writes the
+Inspector's web UI to `src/hyperloom/inspector/static/modern/`. When npm is missing or its build fails, an existing
+build ships as is, with a warning; with none, the package ships without the UI, with a warning, and the installed
+Inspector says how to get it. Editable installs never build the UI. See the [Inspector](../inspector/README.md)
+reference.
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `HYPERLOOM_REQUIRE_UI` | Unset (a package without the UI is built, with a warning) | `1`, `true` or `yes` (any case, surrounding spaces ignored) fails the build when `static/modern/` holds no UI after the npm step, instead of shipping the package without it. An existing build that a failed npm step left in place still ships, with a warning. Any other value counts as unset. The packaging and release CI workflows set it to `1`. Operator configuration. |
+| `HYPERLOOM_SKIP_UI_BUILD` | Unset (npm runs) | `1`, `true` or `yes` (any case, surrounding spaces ignored) skips `npm ci && npm run build`, and whatever `static/modern/` holds ships as is, even a stale build. With no build there, the package ships without the UI, unless `HYPERLOOM_REQUIRE_UI` is set, which fails the build. Any other value counts as unset. Operator configuration. |
+
 ## Variables intentionally not exposed
 
 These are read by `os.environ` somewhere in the codebase but are

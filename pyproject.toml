@@ -2,7 +2,9 @@
 # setuptools>=77 is the floor for the PEP 639 ``license``/``license-files``
 # form used below (the deprecated TOML-table form breaks on 2027-Feb-18).
 requires = ["setuptools>=77", "wheel"]
-build-backend = "setuptools.build_meta"
+# setuptools plus the Inspector UI (npm build before sdist/wheel); see build_backend/hyperloom_build.py.
+build-backend = "hyperloom_build"
+backend-path = ["build_backend"]
 
 [project]
 name = "hyperloom-inference_optimizer"
@@ -335,6 +337,11 @@ hyperloom = [
 ]
 "hyperloom.inference_optimizer.multi_node.scripts" = [
     "*.sh",
+]
+# The Inspector UI, which the build backend builds into static/modern/ with npm. The tree is gitignored, so the glob
+# matches nothing until it is built; scripts/check_wheel_contents.py checks that the wheel has it.
+"hyperloom.inspector" = [
+    "static/modern/**/*",
 ]
 # KernelForge's read-only resources live with their owning features and are
 # resolved through ``kernelforge.config.resources.resource_path``. The globs are
