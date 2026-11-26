@@ -63,6 +63,10 @@ _DOTTED_FORCED = (
 _RECORDED = SourceGolden(2.32, curve=_CURVE)
 
 
+def _without(envs: dict[str, str], name: str) -> dict[str, str]:
+    return {key: value for key, value in envs.items() if key != name}
+
+
 class _Lookup:
     """Stands in for the session's lookup: answers ``golden`` and records the argv it was asked about."""
 
@@ -103,6 +107,9 @@ def test_a_real_draft_turned_on_is_refused_with_the_value_to_force_and_its_curve
         pytest.param("vllm", _FORCED % "2.320", {}, id="vllm-same-number-spelled-otherwise"),
         pytest.param("vllm", _DOTTED_FORCED, {}, id="vllm-per-key-flags"),
         pytest.param("sglang", _SGLANG, _SGLANG_FORCED, id="sglang"),
+        pytest.param(
+            "sglang", _SGLANG, _without(_SGLANG_FORCED, "SGLANG_SIMULATE_ACC_METHOD"), id="sglang-method-by-default"
+        ),
         pytest.param("atom", f"{_ATOM} --spec-decode-acceptance-length 2.32", {}, id="atom"),
     ],
 )
@@ -123,6 +130,21 @@ def test_a_length_the_engine_does_not_read_leaves_a_real_draft(framework: str, a
     reason = golden_acceptance_refusal("", {}, argv, envs, GoldenLookup(framework, _Lookup()))
 
     assert "verifies a real draft" in reason
+
+
+@pytest.mark.parametrize(
+    "envs",
+    [
+        pytest.param({**_SGLANG_FORCED, "SGLANG_SIMULATE_ACC_METHOD": "multinomial"}, id="multinomial"),
+        pytest.param({**_SGLANG_FORCED, "SGLANG_SIMULATE_ACC_TOKEN_MODE": "fixed"}, id="fixed-token-mode"),
+        pytest.param(_without(_SGLANG_FORCED, "SGLANG_SIMULATE_ACC_TOKEN_MODE"), id="token-mode-by-default"),
+    ],
+)
+def test_an_sglang_simulation_unlike_inferencexs_is_refused_even_at_the_recorded_length(envs: dict) -> None:
+    reason = golden_acceptance_refusal("", {}, _SGLANG, envs, GoldenLookup("sglang", _Lookup()))
+
+    assert "does not force its draft's acceptance as InferenceX does" in reason
+    assert "SGLANG_SIMULATE_ACC_METHOD=match-expected" in reason and "real-draft-token" in reason
 
 
 def test_another_forced_value_is_refused_naming_both() -> None:

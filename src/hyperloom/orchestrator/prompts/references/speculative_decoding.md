@@ -126,8 +126,10 @@ against. On the synthetic benchmark (InferenceX's random prompts at temperature
 golden AL for its own draft** (synthetic acceptance per the rules above): the
 model falls into repetition loops there that any draft, MTP and EAGLE included,
 predicts almost perfectly, so a real draft's measured acceptance overstates its
-gain. Explore refuses before launch a variant that enables a real draft, or
-forces another value than the golden one, as
+gain. Explore refuses before launch a variant that enables a real draft, forces
+another value than the golden one, or forces it in another form than InferenceX
+does (on SGLang, `SGLANG_SIMULATE_ACC_METHOD` other than `match-expected` or
+`SGLANG_SIMULATE_ACC_TOKEN_MODE` other than `real-draft-token`), as
 `speculative_acceptance_not_golden_on_synthetic`; the refusal names the value
 InferenceX records for that draft and the curve it is read from, so restate the
 variant with that value; its accuracy is then scored on a round of its own with

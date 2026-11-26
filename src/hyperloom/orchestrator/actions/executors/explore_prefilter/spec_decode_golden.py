@@ -60,16 +60,23 @@ class GoldenLookup:
     answer: Callable[[Sequence[str]], SourceGolden | None]
 
 
-#: Each engine's forced acceptance length, and what else that engine needs set for the length to take effect: vLLM
-#: reads ``synthetic_acceptance_length`` only under its synthetic rejection sampler, and ignores SGLang's environment.
+#: Each engine's forced acceptance length, and what else must hold for it to be forced as InferenceX forces it: vLLM
+#: reads ``synthetic_acceptance_length`` only under its synthetic rejection sampler, and ignores SGLang's environment;
+#: SGLang holds the mean length only with its ``match-expected`` method (``multinomial`` rounds a normal draw), and
+#: InferenceX streams the drafted tokens (``real-draft-token``) rather than SGLang's default ``fixed`` one.
 _FORCED_LENGTH: Mapping[str, tuple[str, Mapping[str, str]]] = {
     "vllm": (
         "--speculative-config.synthetic_acceptance_length",
         {"--speculative-config.rejection_sample_method": "synthetic"},
     ),
-    "sglang": ("SGLANG_SIMULATE_ACC_LEN", {}),
+    "sglang": (
+        "SGLANG_SIMULATE_ACC_LEN",
+        {"SGLANG_SIMULATE_ACC_METHOD": "match-expected", "SGLANG_SIMULATE_ACC_TOKEN_MODE": "real-draft-token"},
+    ),
     "atom": ("--spec-decode-acceptance-length", {}),
 }
+#: What an engine reads a setting as when a launch leaves it unset.
+_UNSET_READS_AS = {"SGLANG_SIMULATE_ACC_METHOD": "match-expected"}
 _WHY = (
     "on the synthetic benchmark (random prompts at temperature 0, held to their full output length) the model falls "
     "into repetition loops that a draft predicts almost perfectly, so a measured acceptance does not carry over to "
@@ -82,7 +89,8 @@ def _forced_length(framework: str, identity: Mapping[str, str]) -> str | None:
     if framework not in _FORCED_LENGTH:
         return None
     key, required = _FORCED_LENGTH[framework]
-    return identity.get(key) if all(identity.get(name) == value for name, value in required.items()) else None
+    held = all(identity.get(name, _UNSET_READS_AS.get(name)) == value for name, value in required.items())
+    return identity.get(key) if held else None
 
 
 def _how_to_force(value: float) -> str:
@@ -95,7 +103,8 @@ def _how_to_force(value: float) -> str:
 
 
 def _graded(golden: SourceGolden, forced: str | None) -> str:
-    """Why a draft forcing ``forced`` (``None``: forcing nothing) is not graded at ``golden``, or ``""``."""
+    """Why a draft forcing ``forced`` (``None``: forcing no length as InferenceX does) is not graded at ``golden``, or
+    ``""``."""
     if golden.value is None:
         return (
             f"InferenceX records no acceptance length for this draft ({golden.reason}), and {_WHY}; its gain cannot "
@@ -105,7 +114,8 @@ def _graded(golden: SourceGolden, forced: str | None) -> str:
     source = golden.curve.path if golden.curve is not None else "InferenceX"
     if forced is None:
         return (
-            f"this candidate verifies a real draft, and {_WHY}. InferenceX records {golden.value:g} for it "
+            f"this candidate does not force its draft's acceptance as InferenceX does (it verifies a real draft, or "
+            f"simulates acceptance in another form), and {_WHY}. InferenceX records {golden.value:g} for it "
             f"({source}); {_how_to_force(golden.value)}."
         )
     if forced != canonical_value(golden.value):
