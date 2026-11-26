@@ -41,6 +41,7 @@ from hyperloom.common.agentx_workload import (
 )
 from hyperloom.common.benchmark_config import AgentxLaunch, BenchmarkPoint, is_agentx
 from hyperloom.common.gain_math import AGENTX_ERROR_RATE_THRESHOLD_PCT
+from hyperloom.common.perf_metric import DATASET_PATH_ENV
 from hyperloom.common.outside_facts import (
     ENV_CONC,
     ENV_EP,
@@ -79,6 +80,7 @@ from inference_suite.contracts import (
     LifecycleMode,
     MlperfWorkload,
     ProfileConfig,
+    PromptDataset,
     RunPaths,
     ScriptableRunEnv,
     ScriptableWorkload,
@@ -157,6 +159,7 @@ _CONSUMED_ENV = frozenset(
         _REMOTE_SERVER_ENV,
         _PROFILE_ENV,
         _PROFILE_BODY_ENV,
+        DATASET_PATH_ENV,
     }
 )
 
@@ -187,6 +190,7 @@ class RoundSettings:
     ``base_path`` is where the frozen base the round composes on is stored; ``silence_sec`` bounds how long the
     server may log nothing once ready; ``env_inherit`` names the host environment the server and client may see;
     ``server_url`` is the server a client-only round measures, which a point's own ``BENCHMARK_BASE_URL`` overrides.
+    ``server_cpus`` are the CPUs the round's server is pinned to (empty: the round's own).
     ``boot_budget_sec`` is the boot budget of the test the round belongs to (``Deadlines.boot_budget_sec``), ``None``
     for none.
     """
@@ -200,6 +204,7 @@ class RoundSettings:
     env_inherit: tuple[str, ...] = ()
     deadline_unix: int | None = None
     server_url: str | None = None
+    server_cpus: tuple[int, ...] = ()
     boot_budget_sec: float | None = None
 
 
@@ -284,9 +289,9 @@ def _user_args(point: _Point) -> tuple[str, ...]:
     extra = tuple((point.text(extra_args_env(point.framework.value)) or "").split())
     flags = {name for name, _ in argv_flag_occurrences(extra)}
     added: tuple[str, ...] = ()
-    context_flag = framework_facts(point.framework).server_flags.context_length
-    if point.framework in _LAUNCHER_CONTEXT_LENGTH and canonical_flag_name(context_flag) not in flags:
-        added = (context_flag, str(point.integer(ENV_MAX_MODEL_LEN, _LAUNCHER_MAX_MODEL_LEN)))
+    context = framework_facts(point.framework).server_flags.context_length
+    if point.framework in _LAUNCHER_CONTEXT_LENGTH and context.value(extra) is None:
+        added = (context.aliases[0], str(point.integer(ENV_MAX_MODEL_LEN, _LAUNCHER_MAX_MODEL_LEN)))
     conflicts = _LAUNCHER_CONFLICTS.get(point.framework, ())
     dropped = [drop for need, drop in conflicts if canonical_flag_name(need) in flags]
     if dropped:
@@ -361,6 +366,7 @@ def _server(
         user=user,
         import_packages=KERNEL_LIBRARY_PACKAGES,
         env_inherit=settings.env_inherit,
+        cpus=settings.server_cpus,
     )
 
 
@@ -370,6 +376,7 @@ def fixed_workload(document: Mapping[str, object]) -> FixedWorkload:
 
 
 def _fixed(point: _Point) -> FixedWorkload:
+    dataset = point.text(DATASET_PATH_ENV)
     return FixedWorkload(
         concurrency=point.integer(ENV_CONC),
         isl=point.integer(ENV_ISL),
@@ -381,6 +388,7 @@ def _fixed(point: _Point) -> FixedWorkload:
         warmup_seed=WARMUP_SEED,
         tokenizer_mode=point.text(_TOKENIZER_MODE_ENV) or _CLIENT_TOKENIZER_MODE,
         trust_remote_code=point.flag(_CLIENT_TRUST_ENV, default=False),
+        dataset=None if dataset is None else PromptDataset(dataset),
     )
 
 

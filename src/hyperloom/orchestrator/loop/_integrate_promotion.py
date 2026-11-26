@@ -419,21 +419,3 @@ class IntegratePromotionMixin:
                 watermark_reason="integrate_patch_keep_watermark",
             )
         return lifted
-
-    async def _promote_conc_sweep(
-        self,
-        result: dict,
-        task: "Task | None",
-        outcome: _PromoteOutcome,
-    ) -> None:
-        """Promote a conc_sweep result: record_conc_sweep + save; discovery-only.
-
-        No audit attempt is written: ``record_action_attempt`` returns early for
-        any kind outside ``_AUDIT_ACTIONS``, which conc_sweep is not in. The
-        conc_sweep event carries the skip reason, the budget verdict and the
-        summary instead.
-        """
-        outcome.early_return = True
-        # Write last_conc_sweep so the SWEEP exit logic can distinguish an honest sweep_done from a no-pair sweep_failed.
-        self.shared_state.record_conc_sweep(result)
-        self.shared_state.save(self.session_dir)

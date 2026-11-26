@@ -2,31 +2,44 @@
 # SPDX-License-Identifier: MIT
 
 import json
+import urllib.parse
+import urllib.request
 from pathlib import Path
 
 import pytest
 
 from hyperloom.agents.framework.models import Candidate
-from hyperloom.agents.framework.sources import SourceConfigError
+from hyperloom.inference_optimizer import framework_registry
 from hyperloom_multibranch.toolbox.tools import InvalidRequest, JobStatus, ToolJobs, ToolRequest, UpstreamPrSearch
 from hyperloom_multibranch.toolbox.tools.tests.sinks import RecordingSink
-from hyperloom_multibranch.toolbox.tools.upstream_pr import UpstreamSearch, build_search
+from hyperloom_multibranch.toolbox.tools.upstream_pr import Found, UpstreamSearch, build_search, search_github
 
 REPO = "https://github.com/sgl-project/sglang"
+
+
+class _Response:
+    def __init__(self, body: bytes) -> None:
+        self._body = body
+
+    def __enter__(self) -> "_Response":
+        return self
+
+    def __exit__(self, *exc: object) -> bool:
+        return False
+
+    def read(self) -> bytes:
+        return self._body
 
 
 def req(**params: object) -> ToolRequest:
     return ToolRequest("upstream_pr_search", "s1", {"repo_url": REPO, **params})
 
 
-def test_the_search_is_github_only_until_a_pr_monitor_is_named() -> None:
+def test_a_search_asks_github_for_the_callers_terms() -> None:
     search = build_search({"repo_url": REPO, "keywords": "moe, gemm", "limit": 3, "states": ["merged"]})
     assert search.request.search_modes == ("github",)
     assert search.request.keywords == ("moe", "gemm")
-    assert (search.request.max_search_candidates, search.states, search.request.pr_monitor) == (3, ("merged",), None)
-    monitored = build_search({"repo_url": REPO, "pr_monitor_url": "http://monitor.example/"})
-    assert monitored.request.search_modes == ("pr_monitor", "github")
-    assert monitored.request.pr_monitor is not None
+    assert (search.request.max_search_candidates, search.states) == (3, ("merged",))
 
 
 def test_only_a_search_for_open_pull_requests_is_held_to_them() -> None:
@@ -43,11 +56,40 @@ def test_only_a_search_for_open_pull_requests_is_held_to_them() -> None:
         ({"repo_url": REPO, "limit": 99}, "between 1 and 20"),
         ({"repo_url": REPO, "limit": "many"}, "must be an integer"),
         ({"repo_url": REPO, "states": ["draft"]}, "states must come from"),
+        ({"repo_url": REPO, "keywords": ["mmq", '"']}, "holds no word to search for"),
     ],
 )
 def test_a_bad_search_is_refused_with_its_reason(params: dict, match: str) -> None:
     with pytest.raises(InvalidRequest, match=match):
         build_search(params)
+
+
+@pytest.mark.parametrize(
+    ("keywords", "terms"),
+    [
+        (
+            ["gated delta net", "HIP", "ROCm", "RDNA3", "mmq", "mmvq"],
+            '("gated delta net" OR "hip" OR "rocm" OR "rdna3" OR "mmq" OR "mmvq")',
+        ),
+        ("few-row MMQ", '("few-row" OR "mmq")'),
+        (
+            ['mmq") repo:someone/private-repo ("x', "is:closed"],
+            '("mmq ) repo:someone/private-repo ( x" OR "is:closed")',
+        ),
+        (["rdna3\\", " author:someone \\", "ggml-cuda\\mmq"], '("rdna3" OR "author:someone" OR "ggml-cuda mmq")'),
+    ],
+    ids=["a-phrase-among-words", "a-string-of-words", "a-qualifier-in-a-keyword", "a-backslash-in-a-keyword"],
+)
+def test_each_keyword_is_one_phrase_of_the_query(monkeypatch: pytest.MonkeyPatch, keywords: object, terms: str) -> None:
+    queries: list[str] = []
+
+    def urlopen(request: urllib.request.Request, timeout: float | None = None) -> _Response:
+        queries.extend(urllib.parse.parse_qs(urllib.parse.urlsplit(request.full_url).query)["q"])
+        return _Response(b'{"total_count": 0, "items": []}')
+
+    monkeypatch.setattr(urllib.request, "urlopen", urlopen)
+    search_github(build_search({"repo_url": REPO, "keywords": keywords}))
+    assert queries == [f"repo:sgl-project/sglang is:pr {terms} is:open"]
 
 
 async def run(tmp_path: Path, enumerate_fn, request: ToolRequest) -> tuple[JobStatus, RecordingSink]:
@@ -59,43 +101,46 @@ async def run(tmp_path: Path, enumerate_fn, request: ToolRequest) -> tuple[JobSt
 async def test_candidates_come_back_through_the_inbox(tmp_path: Path) -> None:
     seen: list[UpstreamSearch] = []
 
-    def enumerate_fn(search: UpstreamSearch) -> list[Candidate]:
+    def enumerate_fn(search: UpstreamSearch) -> Found:
         seen.append(search)
-        return [Candidate("PR:42", "Faster MoE decode", f"{REPO}/pull/42")]
+        return Found([Candidate("PR:42", "Faster MoE decode", f"{REPO}/pull/42")], 1)
 
     status, sink = await run(tmp_path, enumerate_fn, req(keywords=["moe"]))
     assert status is JobStatus.SUCCEEDED
     assert seen[0].request.keywords == ("moe",)
     assert sink.pointers[0].summary == f"succeeded: 1 upstream PR candidate(s) in {REPO}; top: PR:42 Faster MoE decode"
     record = json.loads(Path(sink.pointers[0].location).read_text())
-    assert record["result"]["candidates"] == [{"ref": "PR:42", "title": "Faster MoE decode", "url": f"{REPO}/pull/42"}]
+    assert record["result"] == {
+        "repo_url": REPO,
+        "keywords": ["moe"],
+        "candidates": [{"ref": "PR:42", "title": "Faster MoE decode", "url": f"{REPO}/pull/42"}],
+        "matched_prs": 1,
+        "not_shown": 0,
+    }
 
 
 async def test_no_match_is_a_success_with_an_empty_list(tmp_path: Path) -> None:
-    status, sink = await run(tmp_path, lambda search: [], req())
+    status, sink = await run(tmp_path, lambda search: Found([], 0), req())
     assert status is JobStatus.SUCCEEDED
     assert json.loads(Path(sink.pointers[0].location).read_text())["result"]["candidates"] == []
 
 
-async def test_a_misconfigured_source_fails_with_that_reason(tmp_path: Path) -> None:
-    def broken(search: UpstreamSearch) -> list[Candidate]:
-        raise SourceConfigError("no pr_monitor config")
-
-    status, sink = await run(tmp_path, broken, req())
-    assert status is JobStatus.FAILED
-    assert sink.pointers[0].summary == "failed: upstream PR search is misconfigured: no pr_monitor config"
-
-
 async def test_an_unreachable_backend_fails_instead_of_crashing(tmp_path: Path) -> None:
-    def down(search: UpstreamSearch) -> list[Candidate]:
-        raise TimeoutError("pr_monitor unreachable")
+    def down(search: UpstreamSearch) -> Found:
+        raise TimeoutError("search backend unreachable")
 
     status, sink = await run(tmp_path, down, req())
     assert status is JobStatus.FAILED
-    assert "TimeoutError: pr_monitor unreachable" in sink.pointers[0].summary
+    assert "TimeoutError: search backend unreachable" in sink.pointers[0].summary
 
 
 async def test_a_bad_repo_is_refused_at_submit(tmp_path: Path) -> None:
-    runner = ToolJobs([UpstreamPrSearch(lambda s: [])], RecordingSink(), tmp_path)
+    runner = ToolJobs([UpstreamPrSearch(lambda s: Found([], 0))], RecordingSink(), tmp_path)
     with pytest.raises(InvalidRequest, match="not a GitHub repository URL"):
         runner.submit(ToolRequest("upstream_pr_search", "s1", {"repo_url": "nope"}))
+
+
+def test_the_llamacpp_repository_the_framework_registry_names_is_searched() -> None:
+    url = framework_registry.repo_url("llamacpp")
+    search = build_search({"repo_url": url})
+    assert (search.request.repo_url, search.state_qualifier()) == (url, "is:open")

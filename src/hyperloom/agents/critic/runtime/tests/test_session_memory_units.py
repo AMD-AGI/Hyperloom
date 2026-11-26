@@ -29,37 +29,8 @@ def test_session_dir_rejects_invalid_ids(sm):
         sm.session_dir("..")
 
 
-def test_save_context_rejects_non_dict(sm):
-    with pytest.raises(SessionMemoryError):
-        sm.save_context("s1", ["not", "dict"])  # type: ignore[arg-type]
-
-
-def test_merge_context_rejects_non_dict(sm):
-    with pytest.raises(SessionMemoryError):
-        sm.merge_context("s1", ["nope"])  # type: ignore[arg-type]
-
-
-def test_merge_context_fills_from_memory(sm):
-    sm.save_context("s1", {"model": "m1", "framework": "sglang"})
-    result = sm.merge_context("s1", {"workload": "decode"})
-    assert result.merged["model"] == "m1"
-    assert result.merged["framework"] == "sglang"
-    assert result.merged["workload"] == "decode"
-
-
-def test_append_decision_writes_jsonl(sm):
-    sm.append_decision("s1", {"verdict": "approve"})
-    decision = json.loads(sm._decisions_path("s1").read_text("utf-8").splitlines()[0])
-    assert decision["decision_review"]["verdict"] == "approve"
-
-
-def test_append_decision_rejects_non_dict(sm):
-    with pytest.raises(SessionMemoryError):
-        sm.append_decision("s1", "nope")  # type: ignore[arg-type]
-
-
 def test_reviewed_helpers_roundtrip(sm):
-    sm.mark_reviewed("s1", "m1", "approve", decision_id="d1")
+    sm.mark_reviewed("s1", "m1", "approve")
     assert sm.filter_unreviewed("s1", ["m1", "m2"]) == ["m2"]
 
 
@@ -88,7 +59,7 @@ def test_mark_reviewed_rejects_non_dict_data(sm):
 
 def test_read_json_corrupt_raises(sm):
     sm._ensure_session_dir("s1")
-    path = sm._context_path("s1")
+    path = sm._reviewed_path("s1")
     path.write_text("{not json", encoding="utf-8")
     with pytest.raises(SessionMemoryError):
-        sm.load_context("s1")
+        sm.mark_reviewed("s1", "m1", "approve")

@@ -10,7 +10,14 @@ import sys
 
 import pytest
 
-from hyperloom.measure.local_templates import host_hf_env, image_env, local_runner_command, local_runner_template
+from hyperloom.measure.local_templates import (
+    host_hf_env,
+    host_prefetch_env,
+    image_env,
+    local_runner_command,
+    local_runner_template,
+)
+from hyperloom_common.weight_prefetch import WEIGHT_PREFETCH_ENV
 
 
 def _expanded(command: tuple[str, ...], root: str) -> str:
@@ -164,3 +171,15 @@ def test_a_template_without_envs_carries_the_host_hugging_face_settings(monkeypa
     template = local_runner_template()
     assert template.envs["HF_HOME"] == "/data/hf"
     assert template.envs["HF_HUB_OFFLINE"] == "1"
+
+
+def test_the_prefetch_switch_set_on_the_host_reaches_a_local_runner(monkeypatch) -> None:
+    assert host_prefetch_env({WEIGHT_PREFETCH_ENV: "1"}) == {WEIGHT_PREFETCH_ENV: "1"}
+    assert host_prefetch_env({WEIGHT_PREFETCH_ENV: "0"}) == {WEIGHT_PREFETCH_ENV: "0"}
+    assert host_prefetch_env({WEIGHT_PREFETCH_ENV: " "}) == {}
+    assert host_prefetch_env({}) == {}, "unset on the host: unset in the sandbox, so off"
+
+    monkeypatch.setenv(WEIGHT_PREFETCH_ENV, "1")
+    assert local_runner_template().envs[WEIGHT_PREFETCH_ENV] == "1"
+    monkeypatch.delenv(WEIGHT_PREFETCH_ENV)
+    assert WEIGHT_PREFETCH_ENV not in local_runner_template().envs

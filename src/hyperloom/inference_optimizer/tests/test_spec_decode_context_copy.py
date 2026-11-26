@@ -64,6 +64,8 @@ from hyperloom.orchestrator.tests._helpers import integrate_extra
             "",
             id="replaces-object",
         ),
+        pytest.param("--spec-type draft-mtp,ngram-mod -md /m/head.gguf", "ngram-mod", id="llamacpp-ngram-in-a-list"),
+        pytest.param("--spec-type ngram-simple --spec-type draft-mtp", "", id="llamacpp-last-wins"),
         pytest.param("--speculative-algorithm EAGLE3 --speculative-num-steps 3", "", id="sglang-eagle3"),
         pytest.param("--speculative-algorithm NEXTN", "", id="sglang-nextn"),
         pytest.param("--max-num-seqs 64 --kv-cache-dtype fp8", "", id="no-draft"),
@@ -79,11 +81,18 @@ def test_a_copying_draft_in_a_server_args_env_is_found():
     assert context_copy_method("", {"VLLM_ROCM_USE_AITER": "1"}) == ""
 
 
+def test_a_copying_draft_llama_server_reads_from_its_environment_is_found_unless_the_argv_names_another():
+    assert context_copy_method("-ngl 99", {"LLAMA_ARG_SPEC_TYPE": "ngram-map-k"}) == "ngram-map-k"
+    assert context_copy_method("--spec-type draft-mtp", {"LLAMA_ARG_SPEC_TYPE": "ngram-map-k"}) == ""
+
+
 # --------------------------------------------------------------------------
 # what introducing or changing one means
 # --------------------------------------------------------------------------
 _NGRAM = '--speculative-config {"method":"ngram","num_speculative_tokens":7}'
 _EAGLE = '--speculative-config {"method":"eagle3","model":"/m/eagle","num_speculative_tokens":3}'
+_LLAMA_MTP = "-md /m/head.gguf --spec-type draft-mtp --spec-draft-n-max 5"
+_LLAMA_NGRAM = "--spec-type ngram-simple"
 
 
 @pytest.mark.parametrize(
@@ -98,6 +107,9 @@ _EAGLE = '--speculative-config {"method":"eagle3","model":"/m/eagle","num_specul
         pytest.param(_NGRAM, _EAGLE, False, id="switches-to-a-model-draft"),
         pytest.param("", _EAGLE, False, id="introduces-a-model-draft"),
         pytest.param("", "--max-num-seqs 64", False, id="no-draft"),
+        pytest.param(_LLAMA_MTP, f"{_LLAMA_MTP} --spec-type draft-mtp,ngram-mod", True, id="llamacpp-adds-to-a-draft"),
+        pytest.param("-ngl 99", f"-ngl 99 {_LLAMA_NGRAM}", True, id="llamacpp-introduces"),
+        pytest.param(_LLAMA_NGRAM, f"{_LLAMA_NGRAM} --spec-ngram-simple-size-n 16", True, id="llamacpp-tunes"),
     ],
 )
 def test_a_candidate_is_refused_when_it_introduces_or_changes_a_copying_draft(base, candidate, refused):
@@ -112,6 +124,13 @@ def test_a_speculative_env_change_on_a_copying_base_is_a_change():
     argv = "--speculative-algorithm NGRAM"
     assert context_copy_refusal(argv, base_envs, argv, {"SGLANG_ENABLE_SPEC_V2": "1"})
     assert not context_copy_refusal(argv, base_envs, argv, {**base_envs, "SGLANG_USE_AITER": "1"})
+
+
+def test_a_copying_draft_switched_through_llama_server_s_environment_is_a_change():
+    argv = "-ngl 99"
+    assert context_copy_refusal(
+        argv, {"LLAMA_ARG_SPEC_TYPE": "ngram-simple"}, argv, {"LLAMA_ARG_SPEC_TYPE": "ngram-mod"}
+    )
 
 
 # --------------------------------------------------------------------------

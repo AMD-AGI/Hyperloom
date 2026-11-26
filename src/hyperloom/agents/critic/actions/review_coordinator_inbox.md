@@ -1,31 +1,19 @@
 # Review Coordinator Inbox
 
-Use this action for every Critic turn. The host has
-forwarded the Coordinator's per-turn prompt verbatim (see
-[references/coordinator_protocol.md](../references/coordinator_protocol.md)).
+Use this action for every Critic turn.
 
-## Step 1 — Prepare
+The judge bundle contains:
 
-```bash
-python -m hyperloom.agents.critic.runtime.cli prepare-review \
-  --request "$CRITIC_WORKDIR/request.json" \
-  --out "$CRITIC_WORKDIR/judge_bundle.json"
-```
-
-`judge_bundle.json` will contain:
-
-- `merged_context` — model / framework / precision / workload / etc.
-  combined with session memory.
-- `missing_context` — keys that fell back to `unknown` (informational).
+- `context` — model / framework / precision / workload / etc.
 - `required_context` — non-empty when critical keys (`model`,
-  `framework`) are still missing; if so, see Step 2.
+  `framework`) are still missing; if so, see *Special cases* below.
 - `proposals` — only proposals not yet reviewed in this session.
 - `review_constraints` — allowed verdicts, action-class-scoped approve
   checklists (`approve_requires_by_class`), and a `{msg_id: class}`
   map in `proposal_action_classes` so you can apply the right per-
   proposal bar in a heterogeneous batch.
 
-## Step 2 — Reason
+## Reason
 
 For each proposal in `proposals`:
 
@@ -38,11 +26,9 @@ For each proposal in `proposals`:
    class present in the batch (a fallback for callers that do not look
    at `proposal_action_classes`); always prefer the per-proposal class
    when emitting verdicts.
-3. Cross-reference with
-   [references/risk_rules.md](../references/risk_rules.md) for
-   blocker / major / minor categorisation and
-   [references/verdict_schema.md](../references/verdict_schema.md) for
-   per-verdict required fields.
+3. Grade risks and confidence as `SKILL.md` describes: the blocker and
+   major lists under the `patch_landing` Approve Standard, and *Severity
+   and Confidence*.
 
 Default behavior summary:
 
@@ -68,36 +54,8 @@ Special cases:
 - `judge_bundle.required_context` is non-empty → emit `needs_review`
   for every proposal with `source = "critic_unavailable"` and list the
   missing keys in `notes`.
-- `proposals` is empty → emit nothing; the runtime will fall back to a
-  an idle intent in Step 3.
-
-Write the result to `$CRITIC_WORKDIR/review.json`:
-
-```json
-{
-  "review_verdicts": [
-    {
-      "target_proposal_msg_id": "abc1",
-      "verdict": "approve",
-      "source": "critic",
-      "reasoning": "Active dispatch path proven; benchmark within tolerance; rollback documented.",
-      "confidence": "high",
-      "predicted_gain_pct": 4.2,
-      "kb_evidence": ["kb_xxx"],
-      "packet_evidence": ["benchmark.after.gain_pct", "accuracy_gate.status"],
-      "risks": [],
-      "required_evidence": [],
-      "notes": []
-    }
-  ],
-  "advice": [
-    {
-      "target_proposal_msg_id": "abc1",
-      "body_md": "Re-run the sweep at higher concurrency before promotion."
-    }
-  ]
-}
-```
+- `proposals` is empty → emit nothing; the runtime will fall back to an
+  idle intent.
 
 The concrete `advise` text may be written either inline on
 `review_verdicts[].advice_text` or as a separate `advice[].body_md`
@@ -108,22 +66,3 @@ the `advice[]` bodies, joined with a blank line), so the
 `review_verdict` payload always carries the full advisory. The separate
 `advice[]` entries are still broadcast to the Coordinator inbox; the two
 are complementary, not mutually exclusive.
-
-## Step 3 — Commit
-
-```bash
-python -m hyperloom.agents.critic.runtime.cli commit-review \
-  --request "$CRITIC_WORKDIR/request.json" \
-  --review "$CRITIC_WORKDIR/review.json" \
-  --out "$CRITIC_WORKDIR/emit.json"
-```
-
-`emit.json["intent_envelope"]` is the canonical reply for the host.
-
-## Failure modes
-
-- **Schema validation error** — runtime exits with code 2; the host
-  should treat it as a Critic outage and fall back to an idle intent
-  envelope.
-- **Missing critical context** — produce `needs_review` verdicts and
-  set `source = "critic_unavailable"`.

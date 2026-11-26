@@ -25,13 +25,16 @@ from pathlib import Path
 
 from hyperloom.measure.compile import PackageBase
 from hyperloom.measure.runner.native.aiter_modules import aiter_module_recipe
-from hyperloom.measure.runner.native.recipes import NativeRecipe, Preflight
+from hyperloom.measure.runner.native.preflight import Preflight
+from hyperloom.measure.runner.native.recipes import NativeRecipe
 
 MODULE = "module_gemm"
 OTHER = "module_other"
 KERNEL = "csrc/kernels/k.cu"
 TABLE_VARIABLE = "AITER_CONFIG_GEMM_A8W8"
 TABLE = "aiter/configs/a8w8_tuned_gemm.csv"
+#: The amd-aiter version of the stand-in image.
+VERSION = "0.1.23"
 #: ``module_gemm`` is generated from the variable's tuned table, as aiter's GEMM modules are.
 GENERATOR = f"f'{{AITER_CSRC_DIR}}/kernels/gen.py {{{{}}}} --tune_file {{AITER_CONFIGS.{TABLE_VARIABLE}_FILE}}'"
 IMAGE_KERNEL = "// image k.cu\n"
@@ -165,7 +168,13 @@ def aiter_image(root: Path, extra: dict[str, str] | None = None) -> Path:
 
 
 def package_base(package: Path) -> PackageBase:
-    return PackageBase("aiter", package, "amd-aiter", "0.1.23")
+    return PackageBase("aiter", package, "amd-aiter", VERSION)
+
+
+def installed_version(dist_name: str, python: str, cwd: Path) -> str:
+    """The farm's probe of the server's interpreter for the stand-in image: it has the version :func:`package_base`
+    records, whatever the interpreter running the tests has installed."""
+    return VERSION
 
 
 def _preflight(scratch: Path, gfx_arch: str) -> Preflight:

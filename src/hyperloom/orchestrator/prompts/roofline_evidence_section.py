@@ -10,6 +10,7 @@ from typing import Any
 
 from hyperloom.common.prompt_safety import flatten_for_prompt
 from hyperloom.common.tracelens_report import system_metric_text
+from hyperloom.inference_optimizer import framework_registry
 
 from ..specialists.prompt_inputs import SpecialistPromptInputs
 
@@ -151,6 +152,22 @@ def _system_findings_rows(findings: Any) -> list[str]:
     return rows
 
 
+def _no_snapshot(framework: str) -> str:
+    """What the section says while it has no evidence: that a snapshot is on its way, or that none will come for a
+    framework that runs under no torch profiler, of which no roofline is enqueued."""
+    if not framework_registry.torch_profiled(framework):
+        return (
+            f"(none — {framework} runs under no torch profiler, so this session records no roofline snapshot of it "
+            "and none is in flight: do not wait for one.)"
+        )
+    return (
+        "(none — no fresh roofline snapshot has been recorded yet. "
+        "The Coordinator auto-enqueues `roofline` at the end of "
+        "PRELUDE and again after every 10% watermark crossing; if "
+        "you are seeing this, the snapshot is still in-flight.)"
+    )
+
+
 def roofline_evidence_section(inp: SpecialistPromptInputs) -> list[str]:
     """Render the ROOFLINE EVIDENCE section from ``inp.roofline_evidence``;
     empty evidence renders a heading + ``(none)`` placeholder.
@@ -164,12 +181,7 @@ def roofline_evidence_section(inp: SpecialistPromptInputs) -> list[str]:
     rows = ["## 4a. ROOFLINE EVIDENCE", ""]
     ev = inp.roofline_evidence
     if not ev:
-        rows.append(
-            "(none — no fresh roofline snapshot has been recorded yet. "
-            "The Coordinator auto-enqueues `roofline` at the end of "
-            "PRELUDE and again after every 10% watermark crossing; if "
-            "you are seeing this, the snapshot is still in-flight.)"
-        )
+        rows.append(_no_snapshot(inp.framework))
         return rows
 
     snap_id = ev.get("roofline_snapshot_id")

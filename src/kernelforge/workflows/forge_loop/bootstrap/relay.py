@@ -48,27 +48,26 @@ class SearchActorBuildContext:
     lane_binding: LaneBinding
     lanes: int
     program_md: str
-    specialist_definitions: dict
-    critic_enabled: bool
     usage: Any = None
     supervisor_backend: str = ""
     # This session's relay; ``None`` for a campaign without relay, whose one actor may fall back to another provider.
     relay: AgentRelayConfig | None = None
 
     def build(self, profile: AgentProfile) -> SearchActorBundle:
-        """Build and probe all profile-bound planning and implementation services."""
+        """Build and probe the profile-bound services: the canonical session, the lane factory and the Supervisor."""
         from kernelforge.workflows.forge_loop.bootstrap.lanes import (
             _make_lane_agent_factory,
+            _require_copyable_workspace,
             _require_lane_provider_capabilities,
         )
         from kernelforge.workflows.forge_loop.roles.agent import make_agent_fn
-        from kernelforge.workflows.forge_loop.roles.orchestration import make_orchestration_service
         from kernelforge.workflows.forge_loop.roles.supervisor import make_supervisor_fn
 
         actor_config = self._profile_config(profile) if self.relay is not None else self.config
         setup = replace(self.setup, session=replace(self.setup.session, agent_backend=profile.provider))
         actor_fn = make_agent_fn(actor_config, setup, usage=self.usage)
         effective_profile = self._resolved_profile(profile, actor_fn)
+        _require_copyable_workspace(self.lanes)
         _require_lane_provider_capabilities(effective_profile.provider, self.lanes)
         lane_factory = _make_lane_agent_factory(
             make_agent=make_agent_fn,
@@ -76,12 +75,6 @@ class SearchActorBuildContext:
             binding=self.lane_binding,
             setup=setup,
             usage=self.usage,
-        )
-        orchestration = make_orchestration_service(
-            config=actor_config,
-            usage=self.usage,
-            definitions=self.specialist_definitions,
-            enable_plan_critic=self.critic_enabled,
         )
         supervisor_provider = self.supervisor_backend or profile.provider
         supervisor = make_supervisor_fn(
@@ -91,7 +84,7 @@ class SearchActorBuildContext:
             usage=self.usage,
             config=self._supervisor_config(supervisor_provider, profile, actor_config),
         )
-        return SearchActorBundle(effective_profile, actor_fn, orchestration, lane_factory, supervisor)
+        return SearchActorBundle(effective_profile, actor_fn, lane_factory, supervisor)
 
     def _profile_config(self, profile: AgentProfile) -> Config:
         return config_for_profile(self.config, profile, primary_provider=self.relay.primary_profile.provider)
@@ -117,11 +110,7 @@ class SearchActorBuildContext:
         return AgentProfile(profile.profile_id, effective[0], effective[1], profile.reasoning_effort)
 
 
-def resolve_relay_policy(
-    config: Config,
-    *,
-    blockage_threshold: int = 3,
-) -> AgentRelayPolicy:
+def resolve_relay_policy(config: Config) -> AgentRelayPolicy:
     """One relay member per auto-selectable provider, the provider this campaign starts on first as primary.
 
     A provider only an explicit name reaches joins the relay only as the primary that name chose.
@@ -134,7 +123,6 @@ def resolve_relay_policy(
     return AgentRelayPolicy(
         primary_profile_id=primary,
         profiles=tuple(AgentProfileSpec(provider, provider) for provider in providers),
-        blockage_threshold=blockage_threshold,
     )
 
 
@@ -160,11 +148,7 @@ def resolve_session_relay(policy: AgentRelayPolicy | None, config: Config) -> Ag
         model = config.agent_model if member.profile_id == primary.profile_id else ""
         runtime = agent_runtime_for(strict_config, member.provider, model or resolve_agent_model(member.provider))
         profiles.append(AgentProfile(member.profile_id, member.provider, runtime.model, runtime.reasoning_effort))
-    return AgentRelayConfig(
-        primary_profile_id=primary.profile_id,
-        profiles=tuple(profiles),
-        blockage_threshold=policy.blockage_threshold,
-    )
+    return AgentRelayConfig(primary_profile_id=primary.profile_id, profiles=tuple(profiles))
 
 
 def config_for_profile(

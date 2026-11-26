@@ -280,7 +280,8 @@ class AgentSetup:
     ``readable`` are what every specialist of the session reads besides its worktree and workspace (the session's
     references, its model), and ``lease_area(branch)`` the directory the roots of ``branch``'s dev leases are made in;
     where a launch runs in a bubblewrap sandbox, those that exist are shown read-only, with the files the branch's
-    worktree links and its git metadata, and another branch's leases are not.
+    worktree links and its git metadata, and another branch's leases are not. ``profiled`` says whether the session's
+    server runs under a profiler, whose ranking the nudge of an idle turn then names.
     """
 
     command: AgentCommand
@@ -301,6 +302,7 @@ class AgentSetup:
     wait_wake_s: float = WAIT_WAKE_S
     readable: tuple[Path, ...] = ()
     lease_area: Callable[[str], Path] | None = None
+    profiled: bool = True
 
 
 class SessionBlackboard(BranchLogStore, UsageSink, Inbox, LearningStore, AgentRecords, LineageSink, Protocol):
@@ -595,7 +597,10 @@ class AgentSession:
             if strain >= _SILENT * len(waits):
                 raise await self._idle_end(handle, launch, quiet)
             try:
-                await self._setup.runner.send(handle, self._setup.command.message(message or nudge_message()).encode())
+                await self._setup.runner.send(
+                    handle,
+                    self._setup.command.message(message or nudge_message(profiled=self._setup.profiled)).encode(),
+                )
             except AgentEnded:
                 return await self._setup.runner.poll(handle)
             sent += 1

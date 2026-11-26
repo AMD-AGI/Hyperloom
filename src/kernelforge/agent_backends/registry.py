@@ -396,6 +396,8 @@ register_agent_provider(
             # ClaudeBackend._provider_options folds spec.env into the SDK's env option, which the SDK applies over the
             # environment it spawns the CLI with.
             session_env=True,
+            # ClaudeBackend starts the CLI under a SessionMark and reaps what carries it when the session ends.
+            session_process_mark=True,
             workspace_guard=True,
             # ClaudeBackend sends AgentRunSpec.shared_prompt_prefix as a text block with its own cache breakpoint and
             # reports on_response_started from the SDK's partial stream events.

@@ -20,7 +20,9 @@ specialist gave up, a fork the gate did not land, or an admitted fork or repair 
 changes what the branches are worth: a merge that moved the integration head by a large gain, the bottleneck of the
 profile taken of the integration head after such a merge moving, or a quarantined measurement node. A branch the
 judge opens after the opening batch starts from the integration head, briefed on a focus; in a session that plays a
-playbook, one opens while the open areas leave no op open only on a focus the judge names. The judge reads the
+playbook, one opens while the open areas leave no op open only on a focus the judge names. While directions of the
+session are left that no branch has held, every judge round opens a branch with no focus for each, within the free
+slots, whatever the judge answers (:func:`~hyperloom_multibranch.scheduling.judge.coverage_floor`). The judge reads the
 frontier-scored progress, how similar archived sessions went, which running branches made much the same change, the
 events since its last call, how far each branch lies behind the integration head, which branches lead it while their
 commits fail to merge, whether a profile of the integration head runs, the GPU hours (tests' GPU time plus card
@@ -30,10 +32,17 @@ again), which explore tests each branch has queued and which native builds its t
 what to stop. No judge round starts once less of EXPLORE is left than a branch needs to start, since nothing it
 decided could take effect; a judge call that has not answered by the EXPLORE deadline counts as failed, and a
 branch that has not opened by then is withdrawn, so neither eats into FINAL. The integrator merges in a background task
-of its own, in rounds as wide as the integration branch's K. When EXPLORE ends that task is cancelled and the
-integrator abandons its round, so the integration head the FINAL candidates are read from no longer moves and no merge
-test competes with FINAL's measurements; a profile of the integration head still running is cancelled before that,
-taking its test back. Under ``--max-gpu-hours`` EXPLORE also ends, at a tick, once the session's tests have used the GPU
+of its own, in rounds as wide as the integration branch's K. When EXPLORE ends, :meth:`Explorer.run` first ends
+exploration (:meth:`~hyperloom_multibranch.scheduling.stops.SessionStopper.end_exploration`): every specialist branch
+stops and its tests are withdrawn, so their cards are free. Then the integrator starts no more merge tests and takes
+back those still at their first reading; a merge whose first reading the rule gate already judged a gain, and whose
+confirm is queued or running, gets the time of one test for that confirm to end (:func:`confirm_seconds`), else it is
+named in a warning. A round with a merge whose test ended in that time still runs its regression set and lands that
+merge, up to a tick short of the session's deadline or the caller's cap, so FINAL reads that gain, and its merge tests
+still running by then are taken back. Then that task is cancelled and
+the integrator abandons its round, so the integration head the FINAL candidates are read from no longer moves and no
+merge test competes with FINAL's measurements; a profile of the integration head still running is cancelled before
+that, taking its test back. Under ``--max-gpu-hours`` EXPLORE also ends, at a tick, once the session's tests have used the GPU
 hours FINAL's share leaves it, and under ``--max-llm-usd`` once the LLM spend recorded by the specialists, the judge
 and the patch resolver reaches it: FINAL runs no specialist and asks no judge, so it gets no share of that cap. EXPLORE
 ends at a tick as well once the toolbox has fewer usable cards than one test needs, and the session then skips FINAL.
@@ -52,6 +61,7 @@ from typing import TYPE_CHECKING
 
 from hyperloom_multibranch.contracts.lifecycle import SpecialistLifecycle, SpecialistStatus
 from hyperloom_multibranch.contracts.blackboard import INTEGRATION_BRANCH, ConflictingWrite
+from hyperloom_multibranch.contracts.blackboard.vocab import GAVE_UP_AFTER_CRASHES
 from hyperloom_multibranch.contracts.blackboard.records import BranchProgress, BlackboardSnapshot, OpShares, priced_usd
 from hyperloom_multibranch.contracts.toolbox import Toolbox
 from hyperloom_multibranch.blackboard.rsi.frontier import FrontierScoring, probation_event
@@ -61,7 +71,13 @@ from hyperloom_multibranch.blackboard.rsi.session import judge_history, judge_op
 from hyperloom_multibranch.blackboard.rsi.stranded import stranded_leads
 from hyperloom_multibranch.scheduling.agent_map import render_map
 from hyperloom_multibranch.scheduling.budget import MB_SECONDS_PER_HOUR
-from hyperloom_multibranch.scheduling.branches import SPECIALIST_START_SECONDS, BatchStart, BranchControl, BranchFocus
+from hyperloom_multibranch.scheduling.branches import (
+    SPECIALIST_START_SECONDS,
+    UNFOCUSED,
+    BatchStart,
+    BranchControl,
+    BranchFocus,
+)
 from hyperloom_multibranch.scheduling.build_waits import waiting_builds
 from hyperloom_multibranch.scheduling.context import SchedulerContext
 from hyperloom_multibranch.scheduling.dashboard import SessionDashboard
@@ -94,7 +110,7 @@ from hyperloom_multibranch.scheduling.roster import (
 )
 from hyperloom_multibranch.scheduling.settle import failure_text, settled
 from hyperloom_multibranch.scheduling.similarity import BranchSimilarity
-from hyperloom_multibranch.scheduling.stops import SessionStopReason
+from hyperloom_multibranch.scheduling.stops import SessionStopper, SessionStopReason
 from hyperloom_multibranch.scheduling.widening import Widening, refill_focus
 
 if TYPE_CHECKING:
@@ -108,13 +124,15 @@ OPEN_CUT_REASON = "branch slots taken"
 FORK_NOT_LANDED = "the rule gate did not land the fork"
 PLAYBOOK_FALLBACK_REASON = "the challenger playbook broke the safety envelope; the champion plays from now on"
 PLAYBOOK_OPEN_CUT_REASON = "the playbook opens no more branches now"
+#: The ends of EXPLORE that leave a merge no confirm: the GPU hours EXPLORE has are used, or no card is left to measure on.
+ENDS_WITHOUT_CONFIRM = frozenset({SessionStopReason.GPU_HOURS_EXHAUSTED, SessionStopReason.NO_MEASUREMENT_CARDS})
 
 
 def gave_up_reason(status: SpecialistStatus) -> str:
     """Why a branch whose specialist gave up is stopped, from what the runtime keeps: why it could not be started, why
-    its agent's run ended of itself, the crashes it gave up after and how many of them lost their heartbeat, or no
-    crash at all, which leaves the sessions that found nothing to test as the only way it gives up, quoting the
-    specialist's last exhausted record when it wrote one.
+    its agent's run ended of itself, the crashes it gave up after and how many of them lost their heartbeat when the
+    runtime says it crashed out, or else the sessions that found nothing to test, whatever crashes came before them,
+    quoting the specialist's last exhausted record when it wrote one.
 
     The counts are reported rather than the limit they crossed, which is the runtime's own to name.
     """
@@ -123,11 +141,11 @@ def gave_up_reason(status: SpecialistStatus) -> str:
         return f"its specialist could not be started: {status.unready}"
     if status.finished:
         return status.finished
-    if not status.crashes:
+    if not status.crashed_out:
         why = status.exhausted or "its sessions in a row found nothing to test"
         return f"its specialist gave up: {why}"
     lost = f", {status.lost} of them with a lost heartbeat" if status.lost else ""
-    return f"its specialist gave up after {status.crashes} crashes{lost}"
+    return f"{GAVE_UP_AFTER_CRASHES} {status.crashes} crashes{lost}"
 
 
 async def _uncapped() -> float:
@@ -143,7 +161,8 @@ class ExploreWindow:
     component agents whose directions one mapping branch maps in EXPLORE before each runs its share (empty for none).
 
     ``root_commit`` is the session's measurement anchor and nothing moves it. ``start_commit`` is where EXPLORE opens:
-    the root, or the Recipe KB champion PRELUDE replayed onto it. ``final_cap`` says, asked every tick, the
+    the root, or the Recipe KB champion PRELUDE replayed onto it. ``test_seconds`` is how long one test of the
+    workload takes, the longest root test of the baseline. ``final_cap`` says, asked every tick, the
     latest EXPLORE may now end at for FINAL to end inside a limit of the session's caller, which comes sooner as the
     validation FINAL would run grows; ``explore_end`` moves to it when it is sooner.
     """
@@ -152,6 +171,7 @@ class ExploreWindow:
     start_commit: str
     explore_end: float
     session_deadline: float
+    test_seconds: float
     explore_gpu_seconds: float
     max_llm_usd: float
     user_directions: tuple[str, ...]
@@ -194,6 +214,18 @@ def spent_gpu_seconds(progress: Iterable[BranchProgress]) -> float:
     return sum(row.gpu_seconds + row.held_card_seconds for row in progress)
 
 
+def confirm_seconds(window: ExploreWindow, ended: SessionStopReason, now: float, cap: float) -> float:
+    """The clock seconds a round's merge tests waiting for their confirm get once EXPLORE ``ended`` at ``now``: one test
+    of the workload, or none where that test would end past the session's deadline or past ``cap``, what the window's
+    :attr:`~ExploreWindow.final_cap` last said, or where EXPLORE ended out of GPU hours or of cards to measure on.
+
+    It bounds the merge tests only: a round with a merge whose test ended in it still runs its regression set and lands
+    that merge, until one tick short of that deadline and ``cap``, so FINAL still starts before the deadline."""
+
+    fits = now + window.test_seconds <= min(window.session_deadline, cap)
+    return window.test_seconds if fits and ended not in ENDS_WITHOUT_CONFIRM else 0.0
+
+
 def integration_row(progress: tuple[BranchProgress, ...]) -> BranchProgress | None:
     return next((row for row in progress if row.branch == INTEGRATION_BRANCH), None)
 
@@ -208,7 +240,10 @@ class Explorer:
         branches: BranchControl,
         integrator: Integrator,
         steering: Steering,
+        stopper: SessionStopper,
     ) -> None:
+        self._stopper = stopper
+        self._cap = math.inf
         self._roster = context.roster
         self._branches = branches
         self._desk = context.desk
@@ -235,7 +270,9 @@ class Explorer:
         self._areas_profile: OpShares | None = None
 
     async def run(self, window: ExploreWindow) -> SessionStopReason:
-        """Explore until the deadline or the judge's soft stop; the integrator is stopped before this returns.
+        """Explore until the deadline or the judge's soft stop, then end exploration, in this order: the specialist
+        branches stop and their tests are withdrawn, a merge waiting for its confirm gets :func:`confirm_seconds` on
+        the cards that freed, then its regression set runs, and the integrator is stopped, all before this returns.
 
         The user branches open before the opening judge call; the opening batch opens nothing more when that call
         asks for the soft stop or answers only once EXPLORE is over, and opens one branch when it fails and no
@@ -245,17 +282,58 @@ class Explorer:
         the op shares of the commit they open on rather than the root's, which PRELUDE analysed from another recipe.
         """
 
+        merging: asyncio.Future[None] | None = None
         try:
             if window.start_commit != window.root_commit:
                 self._events.start_profiling(window.start_commit, window.root_commit)
-            return await self._explore(window)
+            reason = await self._opened(window)
+            if reason is None:
+                await self._dashboard.refresh()
+                merging = asyncio.ensure_future(self._merge_forever())
+                reason = await self._steer(window, merging)
+            await self._stopper.end_exploration(reason)
+            if merging is not None:
+                await self._wait_for_confirm(window, reason)
+            return reason
+        finally:
+            await self._stop_merging(merging)
+
+    async def _stop_merging(self, merging: asyncio.Future[None] | None) -> None:
+        try:
+            if merging is not None:
+                merging.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await merging
         finally:
             try:
                 await self._events.stop_profiling()
             finally:
                 await self._integrator.abandon()
 
-    async def _explore(self, window: ExploreWindow) -> SessionStopReason:
+    async def _wait_for_confirm(self, window: ExploreWindow, ended: SessionStopReason) -> None:
+        seconds = confirm_seconds(window, ended, self._clock.now(), self._cap)
+        if not seconds:
+            return
+        try:
+            await self._clock.wait_for(self._integrator.finish_round(), seconds)
+        except asyncio.TimeoutError:
+            if left := self._integrator.unfinished():
+                logger.warning(
+                    "the merge tests of %s did not end within %.0f s of the end of EXPLORE: they are withdrawn, and "
+                    "FINAL reads an integration head without them",
+                    ", ".join(left),
+                    seconds,
+                )
+                if not await self._integrator.withdraw_unfinished():
+                    return
+            # The round is in its regression set. A tick short: a session in EXPLORE at its deadline runs no FINAL.
+            latest = min(window.session_deadline, self._cap) - EXPLORE_TICK_SECONDS
+            with contextlib.suppress(asyncio.TimeoutError):
+                await self._clock.wait_for(self._integrator.finish_round(), latest - self._clock.now())
+
+    async def _opened(self, window: ExploreWindow) -> SessionStopReason | None:
+        """Open the named branches and the opening batch; why EXPLORE is over already, if it is."""
+
         await self._open_named(window)
         opening = await self._ask(window, opening=True)
         first_batch = BatchStart(BranchOrigin.FIRST_BATCH, window.start_commit, window.explore_end)
@@ -263,16 +341,7 @@ class Explorer:
             await self._open_batch(0 if specialist_open(self._roster.entries()) else 1, 1, first_batch)
         elif await self._apply(opening, first_batch):
             return SessionStopReason.JUDGE_STOPPED
-        if self._clock.now() >= window.explore_end:
-            return SessionStopReason.TIME_EXHAUSTED
-        await self._dashboard.refresh()
-        merging = asyncio.ensure_future(self._merge_forever())
-        try:
-            return await self._steer(window, merging)
-        finally:
-            merging.cancel()
-            with contextlib.suppress(asyncio.CancelledError):
-                await merging
+        return SessionStopReason.TIME_EXHAUSTED if self._clock.now() >= window.explore_end else None
 
     async def _open_named(self, window: ExploreWindow) -> None:
         if self._clock.now() < window.explore_end:
@@ -312,9 +381,9 @@ class Explorer:
         return SessionStopReason.TIME_EXHAUSTED
 
     async def _capped(self, window: ExploreWindow) -> ExploreWindow:
-        """``window``, ending no later than its :attr:`~ExploreWindow.final_cap` now says."""
+        """``window``, ending no later than its :attr:`~ExploreWindow.final_cap` now says, which is kept."""
 
-        cap = await window.final_cap()
+        cap = self._cap = await window.final_cap()
         if cap >= window.explore_end:
             return window
         logger.info("EXPLORE ends sooner, at %.0f: the validation FINAL would run grew", cap)
@@ -384,6 +453,7 @@ class Explorer:
         snapshot = await self._blackboard.snapshot()
         specialists = await self._specialist_states()
         await self._record_probations(snapshot, progress)
+        opens_on = window.start_commit if opening else await self._branches.integration_head()
         view = JudgeView(
             now=now,
             explore_remaining_seconds=max(window.explore_end - now, 0.0),
@@ -414,6 +484,7 @@ class Explorer:
             queued=queued_intents(snapshot.records, snapshot.intents),
             building=await waiting_builds(self._toolbox, snapshot.records),
             focus={node.branch: node.focus for node in snapshot.lineage.branches if node.focus},
+            undealt=await self._specialists.undealt_directions(opens_on),
         )
         view = self._with_playbook(view, snapshot)
         view = replace(view, agent_map=render_map(snapshot))
@@ -428,7 +499,8 @@ class Explorer:
 
     def _with_playbook(self, view: JudgeView, snapshot: BlackboardSnapshot) -> JudgeView:
         """``view`` with the playbook the session plays and where a new branch could open under it in what is left of
-        EXPLORE, kept for the round's opens; as it is for a session that plays none."""
+        EXPLORE, kept for the round's opens, and with no direction to deal at a steering call the playbook lets no
+        unfocused branch open at (:meth:`_playbook_room`); as it is for a session that plays none."""
 
         if self._play is None:
             return view
@@ -437,6 +509,8 @@ class Explorer:
             snapshot, self._progress.history, self._metric, seconds_left=left, playbook=playbook
         )
         self._areas_profile = snapshot.op_shares.get(self._areas.profiled)
+        if not view.opening and (self._areas.too_late or self._areas.exhausted):
+            view = replace(view, undealt=())
         return replace(view, open_areas=self._areas.render(), playbook=self._play.render())
 
     async def _specialist_states(self) -> dict[str, SpecialistStatus]:
@@ -518,6 +592,7 @@ class Explorer:
                 detail={
                     "open": decision.open_count,
                     "open_k": decision.open_k,
+                    "unfocused": decision.unfocused,
                     "k": {order.branch: order.k for order in decision.k},
                     "stop": {order.branch: order.reason for order in decision.stop},
                     "held": {order.branch: order.reason.value for order in decision.held},
@@ -583,15 +658,20 @@ class Explorer:
         await asyncio.to_thread(_record_versions, self._manifest, played)
 
     async def _focus(self, decision: JudgeDecision, start: BatchStart) -> tuple[BranchFocus, ...]:
-        """The focus of each branch the judge opens from ``start`` after the opening batch: in a session that plays a
-        playbook, the profile op the judge named for it, else the round's open areas in turn, and only the named ones
-        while those areas leave no op open; in one that plays none, as :meth:`SessionEvents.focus_on` gives it."""
+        """The focus of each branch opened from ``start`` after the opening batch: none for the first ones, which the
+        decision opens for the directions no branch has held, then, in a session that plays a playbook, the profile
+        op the judge named for it, else the round's open areas in turn, and only the named ones while those areas
+        leave no op open; in one that plays none, as :meth:`SessionEvents.focus_on` gives it."""
 
+        asked = decision.open_count - decision.unfocused
         if self._areas is None:
-            return await self._events.focus_on(start.start_commit, decision.focus, decision.open_count)
-        ranked = [item.op for item in self._areas.ops]
-        focus = refill_focus(decision.focus, decision.open_count, self._areas_profile, ranked)
-        return tuple(aim for aim in focus if aim.text) if self._areas.exhausted else focus
+            focus = await self._events.focus_on(start.start_commit, decision.focus, asked)
+        else:
+            ranked = [item.op for item in self._areas.ops]
+            focus = refill_focus(decision.focus, asked, self._areas_profile, ranked)
+            if self._areas.exhausted:
+                return tuple(aim for aim in focus if aim.text)
+        return (UNFOCUSED,) * decision.unfocused + focus
 
     async def _open_batch(
         self, count: int, k: int, start: BatchStart, focus: tuple[BranchFocus, ...] = ()
@@ -638,6 +718,7 @@ __all__ = [
     "ExploreWindow",
     "Explorer",
     "Steering",
+    "confirm_seconds",
     "gave_up_reason",
     "integration_row",
     "spent_gpu_seconds",

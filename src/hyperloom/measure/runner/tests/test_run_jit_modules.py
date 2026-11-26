@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import sys
 from pathlib import Path
 
@@ -29,14 +30,17 @@ from hyperloom.measure.jit.native.trust import Signer, Trust, TrustedKey
 from hyperloom.measure.jit.modules import read_config
 from hyperloom.measure.runner.native import aiter_modules
 from hyperloom.measure.runner.native.aiter_modules import AiterModules
-from hyperloom.measure.runner.native.builder import BuildMachine
+from hyperloom.contracts.recipe import ComponentPatches
+from hyperloom.measure.runner.native.builder import BuildMachine, BuildRequest, compile_tree, plan
 from hyperloom.measure.runner.native.isolated import IsolatedBuilds, Isolation
 from hyperloom.measure.runner.native.planning import NativePlanner, NativeSite
 from hyperloom.measure.runner.native.service import ensure_build
 from hyperloom.measure.runner import run as run_module
 from hyperloom.measure.runner.native.tests import _aiter_standin as standin
+from hyperloom.measure.runner.native.tests import _native as native_bench
 from hyperloom.measure.runner.tests.test_run import SHEET_IMAGE
 from hyperloom.measure.runner.tests.test_run_jit import (  # noqa: F401 - fixtures
+    IMAGE_VERSION,
     Rig,
     _kind,
     _states,
@@ -86,8 +90,8 @@ class Built:
     def roots(self) -> tuple[EnvRoot, ...]:
         entry = EnvEntry(standin.KERNEL, "upsert", self.blob, "0644")
         return (
-            EnvRoot("aiter", "aiter", "amd-aiter", "0", ()),
-            EnvRoot("aiter.meta", "aiter_meta", "amd-aiter", "0", (entry,)),
+            EnvRoot("aiter", "aiter", "amd-aiter", IMAGE_VERSION, ()),
+            EnvRoot("aiter.meta", "aiter_meta", "amd-aiter", IMAGE_VERSION, (entry,)),
         )
 
     def environ(self) -> dict:
@@ -330,6 +334,44 @@ def test_a_module_build_named_for_another_package_is_refused(image, tmp_path, mo
 
     assert status["error_class"] == "spec_rejected"
     assert "sglang: a package root whose modules no CPU build makes" in status["message"]
+
+
+def test_the_build_of_an_executable_root_is_first_on_the_servers_path_not_taken_for_aiters_modules(
+    image, tmp_path
+) -> None:
+    bench = native_bench.Bench(tmp_path / "bench")
+    stack = ComponentPatches(native_bench.COMPONENT, "https://example.invalid/fake.git", "a" * 40, ())
+    machine = BuildMachine(SHEET_IMAGE, BUILDER, GFX)
+    request = BuildRequest(native_bench.executable_recipe(), stack, bench.upstream, bench.image, machine)
+    inputs, laid = plan(request, bench.blobs)
+    record = ensure_build(
+        bench.store, inputs, lambda scratch: compile_tree(request, laid, bench.blobs, scratch), bench.signer
+    ).record
+    trust = tmp_path / "trust.json"
+    public = bench.trust.keys[0].public_key_pem
+    trust.write_text(json.dumps({"min_epoch": 1, "keys": [{"public_key_pem": public, "epoch": 1}]}))
+    runner_path = os.pathsep.join(["/runner/bin", "/opt/rocm/bin"])
+    environ = {
+        "HYPERLOOM_BUILD_STORE": str(bench.tmp / "store"),
+        "HYPERLOOM_BUILD_TRUST": str(trust),
+        "PATH": runner_path,
+    }
+
+    def sheet(run: Path) -> dict:
+        document = image.sheet(run)
+        server = {"id": stack.component, "kind": "executable", "import_name": stack.component, "entries": []}
+        document["environment"]["roots"] = [{**server, "dist": {"name": stack.component, "version": "1"}}]
+        ref = {"root_id": stack.component, "key": record.key, "manifest_sha256": manifest_sha256(record)}
+        document["environment"]["builds"] = [ref]
+        return document
+
+    manifest, _, _ = image.run("executable", sheet, extra_env=environ)
+
+    assert manifest.outcome.failure_class is None
+    (path,) = {config["benchmark"]["envs"]["PATH"] for config in image.grid.configs}
+    first, *rest = path.split(os.pathsep)
+    assert Path(first, Path(native_bench.OUTPUT).name).read_bytes() == native_bench.compiled(native_bench.BASE_SOURCE)
+    assert rest == runner_path.split(os.pathsep), "the runner's PATH is kept whole behind the farm's"
 
 
 def test_a_compile_that_claims_a_variable_it_was_not_given_is_not_believed(image, tmp_path, monkeypatch) -> None:

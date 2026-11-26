@@ -182,20 +182,20 @@ def test_the_factory_receives_expanded_config_and_the_session_dir(tmp_path) -> N
     got = {}
     registry.register(Implementation("a", "impl", lambda ctx: got.setdefault("ctx", ctx)))
     manifest = ResolvedManifest("t", {"a": SocketSetting("impl", {"dir": "${ROOT}/ev"}, "cli")})
-    PlugHost(manifest, registry, session_dir=tmp_path, host_info="info", env={"ROOT": "/r"}).start()
+    PlugHost(manifest, registry, session_dir=tmp_path, env={"ROOT": "/r"}).start()
     ctx = got["ctx"]
-    assert (ctx.socket, dict(ctx.config), ctx.session_dir, ctx.host_info) == ("a", {"dir": "/r/ev"}, tmp_path, "info")
+    assert (ctx.socket, dict(ctx.config), ctx.session_dir) == ("a", {"dir": "/r/ev"}, tmp_path)
 
 
 def test_describe_traces_the_manifest_without_expanding_variables() -> None:
     registry = PlugRegistry()
     registry.define(Socket("a", object))
     registry.register(Implementation("a", "impl", lambda ctx: object(), origin="vendor==1"))
-    manifest = ResolvedManifest("prof", {"a": SocketSetting("impl", {"token": "${SECRET}"}, "locked")})
+    manifest = ResolvedManifest("prof", {"a": SocketSetting("impl", {"token": "${SECRET}"}, "cli")})
     host = PlugHost(manifest, registry, session_dir=None, env={"SECRET": "s3cret"})
     traced = host.describe()
     assert traced["sockets"] == {
-        "a": {"impl": "impl", "origin": "vendor==1", "layer": "locked", "config": {"token": "${SECRET}"}}
+        "a": {"impl": "impl", "origin": "vendor==1", "layer": "cli", "config": {"token": "${SECRET}"}}
     }
     assert traced["profile"] == "prof" and traced["fingerprint"] == host.fingerprint()
     assert "s3cret" not in repr(traced)

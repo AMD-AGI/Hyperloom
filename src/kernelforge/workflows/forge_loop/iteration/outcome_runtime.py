@@ -19,12 +19,14 @@ from kernelforge.workflows.forge_loop.iteration.iteration_types import (
     DirectionEvidence,
     IterationResult,
     WindowGain,
+    RoundSession,
     _Attempt,
     _IterationFrame,
     _Ruling,
     _decision_label,
     _verdict_of,
 )
+from kernelforge.workflows.forge_loop.memory.insights import insight_request, split_insights
 from kernelforge.workflows.forge_loop.memory.lessons import (
     LessonScope,
     OutcomeMeasurement,
@@ -44,7 +46,7 @@ from kernelforge.workflows.forge_loop.memory.lessons import (
     parse_negatives_marker,
     summarize_iteration,
 )
-from kernelforge.workflows.forge_loop.iteration.merge_candidates import case_spreads, cases_beating_reference
+from kernelforge.workflows.forge_loop.iteration.case_gains import case_spreads, cases_beating_reference
 from kernelforge.workflows.forge_loop.campaign.run_state import (
     ITERATION_RESULT,
     LoopStanding,
@@ -69,7 +71,6 @@ _LABELS_WITHOUT_A_MEASURED_NEGATIVE = frozenset(
         DecisionLabel.NO_CHANGES.value,
         DecisionLabel.API_ERROR.value,
         DecisionLabel.AGENT_ERROR.value,
-        DecisionLabel.ORCHESTRATION_ERROR.value,
     }
 )
 
@@ -210,7 +211,7 @@ class OutcomeMixin:
             self.run_state,
             _verdict_of(result, decision_label, plan),
             LoopStanding(self.ic.baseline_wall_ms, self.best_wall_ms, self.best_mean_case_speedup),
-            self._stall_policy(),
+            stall_threshold=self.ic.supervise_after,
         )
         self._apply_relay_outcome(result, decision_label)
 
@@ -330,7 +331,6 @@ class OutcomeMixin:
             best_after_ms=(result.wall_ms if result.kept else self.best_wall_ms),
             best_after_mean_case_speedup=(result.mean_case_speedup if result.kept else self.best_mean_case_speedup),
             is_new_best=result.kept,
-            diversification_cycle_completed=(self.run_state.diversification_cycle_completed),
         )
 
     def _record_iteration_handoff(
@@ -338,7 +338,6 @@ class OutcomeMixin:
         *,
         iteration: int,
         decision: str,
-        optimization_plan_path: str,
         session_sink: dict,
         archived_path: Path | None = None,
     ) -> Path | None:
@@ -356,13 +355,6 @@ class OutcomeMixin:
             )
             lesson_path, handoff_plan = self._handoff_lesson(iteration, str(session_sink.get("plan") or ""))
             workspace = Path(self.ic.workspace_dir).resolve()
-            relative_plan_path = ""
-            orchestration_artifacts = ""
-            if optimization_plan_path:
-                plan_path = Path(optimization_plan_path).resolve()
-                if plan_path.is_file():
-                    relative_plan_path = str(plan_path.relative_to(workspace))
-                    orchestration_artifacts = str(plan_path.parent.relative_to(workspace))
             supervisor_ruling_path = ""
             current_ruling = latest_supervisor_ruling_path(self.ic.workspace_dir)
             if current_ruling.is_file():
@@ -374,13 +366,9 @@ class OutcomeMixin:
                 search_mode=self.run_state.search_mode,
                 search_reason_codes=tuple(self.run_state.search_reason_codes),
                 search_objective=self.run_state.search_objective,
-                search_mode_residence_remaining=(self.run_state.search_mode_residence_remaining),
-                diversification_cycle_complete=(self.run_state.diversification_cycle_completed),
-                optimization_plan_path=relative_plan_path,
                 supervisor_ruling_path=supervisor_ruling_path,
                 plan=handoff_plan,
                 lesson_path=lesson_path,
-                orchestration_artifacts=orchestration_artifacts,
                 candidate_archive=(
                     str(archived_path.resolve().relative_to(Path(self.ic.workspace_dir).resolve()))
                     if archived_path is not None
@@ -407,8 +395,8 @@ class OutcomeMixin:
             candidate = self.lessons.path(iteration)
             if candidate.is_file():
                 lesson_path = str(candidate.resolve().relative_to(Path(self.ic.workspace_dir).resolve()))
-                # The planner reads handoffs, not lesson documents, and a refutation quoted out of a handoff is
-                # how one sweep at one M became a ban on every case.
+                # A handoff is read without its lesson document, and a refutation quoted out of one is how a sweep
+                # at one M became a ban on every case.
                 scope = self.lessons.scope_of(iteration)
                 if scope is not None:
                     line = format_scope_line(scope)
@@ -468,7 +456,9 @@ class OutcomeMixin:
             disproof=parse_disproof_marker(document),
         )
 
-    async def _request_lesson(self, iteration: int, end_reason: str, summarizer) -> SummaryOutcome:
+    async def _request_lesson(
+        self, iteration: int, end_reason: str, summarizer, *, insight_request: str = ""
+    ) -> SummaryOutcome:
         """Ask the session for its record while the campaign still has time for the turn."""
         if self._time_remaining() < SUMMARY_MIN_SECONDS:
             # Time to produce the summary, not the loop's session-admission reserve: a campaign that can no
@@ -480,12 +470,59 @@ class OutcomeMixin:
                 end_reason=end_reason,
                 summarizer=summarizer,
                 references=PrReferenceNote(self.ic.pr_reference_labels, self.ic.pr_reference_context),
+                insight_request=insight_request,
             )
         except Exception as error:  # isolation boundary: one iteration's lesson summarizer step
             log.warning("lessons: summarizer step failed", exc_info=True)
             return SummaryOutcome(reason=f"{type(error).__name__}: {str(error)[:200]}")
         finally:
             self._checkpoint_llm_usage()
+
+    async def _session_record_with_insights(
+        self, iteration: int, end_reason: str, session_sink: dict
+    ) -> SummaryOutcome:
+        """The session's record from its own record turn, which also returns the campaign's insight list as it now stands.
+
+        The list is taken out of the reply and stored on its own, so the record stays an account of one session. A
+        round's sessions are asked one after another, so each one reads the list as the one before it left it.
+        """
+        insights = getattr(self, "insights", None)
+        request = insight_request(insights.read()) if insights is not None else ""
+        record = await self._request_lesson(
+            iteration, end_reason, session_sink.get("summarize"), insight_request=request
+        )
+        if not record or insights is None:
+            return record
+        text, entries = split_insights(record.text)
+        if insights.replace(iteration, entries):
+            print(f"  [insights] {len(entries)} entries after iter {iteration}")
+            self.state_store.append_event(make_event("insights_updated", iteration, entries=len(entries)))
+        return SummaryOutcome(text=text, reason=record.reason) if text else record
+
+    async def _round_record(self, iteration: int, sessions: tuple[RoundSession, ...]) -> SummaryOutcome:
+        """The round's record: each session's own, asked for in turn and set under its label when there are several.
+
+        A session that left no record is named with the reason, unless none of them left one: then the round has no
+        record, and the caller falls back to what the loop itself observed.
+        """
+        records = [
+            (
+                session.label,
+                await self._session_record_with_insights(
+                    iteration, str(session.sink.get("end_reason") or ""), session.sink
+                ),
+            )
+            for session in sessions
+        ]
+        if not any(record for _label, record in records):
+            return SummaryOutcome(
+                reason="; ".join(f"{label}: {record.reason}" if label else record.reason for label, record in records)
+            )
+        parts = []
+        for label, record in records:
+            text = record.text if record else f"(no record: {record.reason})"
+            parts.append(f"## {label}\n\n{text}" if label else text)
+        return SummaryOutcome(text="\n\n".join(parts))
 
     async def _record_lesson(
         self,
@@ -494,19 +531,16 @@ class OutcomeMixin:
         decision: str,
         session_sink: dict,
         diff_summary: str = "",
-        lane_record: SummaryOutcome | None = None,
+        sessions: tuple[RoundSession, ...] = (),
     ) -> None:
-        """Write this iteration's free-form factual session record."""
+        """Write this iteration's free-form factual record: every session of its round, in its own words."""
         store = getattr(self, "lessons", None)
         if store is None or session_sink.get("session_started") is not True:
             # No agent ran this iteration (e.g. the baseline measurement path): there is no exploration to record.
             return
 
         iteration = result.iteration
-        # A lane's record was taken in its round. None means this iteration ran the session itself.
-        record = lane_record
-        if record is None:
-            record = await self._request_lesson(iteration, result.session_end_reason, session_sink.get("summarize"))
+        record = await self._round_record(iteration, sessions or (RoundSession("", session_sink),))
         if record and store.write(iteration, record.text) is None:
             record = SummaryOutcome(reason="failed to persist lesson document")
         has_narrative = bool(record)

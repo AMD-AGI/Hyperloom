@@ -14,24 +14,21 @@ forge_experiments/
   pending_keep.json
   candidates/
   lessons/
+  insights.md
   handoffs/
   analysis/
     work/<commit>/
     <commit>/
       report.md
+      lanes.md
       source_map.md
       cases/<case>/profile/
-  orchestration/
+  rounds/
     iter_NNN/
-      context.json
-      dispatch.json
-      specialists.json
-      structured_output.json
-      lane_plans.json
-      draft_plan.md
-      critic_review.md
-      optimization_plan.md
-      lane_NNN.md
+      lane_K/
+        change.diff
+        lane.json
+  device_usage.jsonl
   supervisor/
     intervention_iter_NNN.md
     latest.md
@@ -40,15 +37,14 @@ forge_experiments/
 
 The loader accepts exactly the field set the current code writes: a checkpoint
 with a missing or unknown field, top-level or nested, is rejected rather than
-filled in. The loader also rejects a campaign wall-clock shorter than the
-planning charged to it, so the share cannot exceed 100 by way of a hand-edited
-checkpoint.
+filled in. A checkpoint written by a version of the loop that planned its
+rounds therefore does not load: such a campaign is not resumed.
 
 The state contains:
 
 - Campaign, session, branch, task, and Git HEAD identity.
 - Current and next iteration numbers.
-- KEEP, REVERT, API error, and orchestration error counters.
+- KEEP, REVERT and API error counters.
 - EXPLOIT/DIVERSIFY search state.
 - Pristine per-case baseline and complete KEEP/REVERT scoring state.
 - Current best commit and score.
@@ -59,17 +55,12 @@ The state contains:
   which an intervention resets so a newly injected direction gets its fair
   chance. Sharing one counter made the two mutually exclusive: the reset erased
   the stall evidence the mode switch reads later in the same iteration.
-- What the campaign's own rounds have cost: planning, canonical measurement and
-  total wall-clock per round for the last few, plus campaign-wide totals. This
-  is what the round admission guard prices the next round from. The campaign's
-  own wall-clock is carried here too, advanced on the same call that charges
-  planning to it, so the cumulative planning has a span of the same campaign to
-  be reported as a share of rather than the current process's elapsed time.
+- The campaign's own wall-clock across all of its sessions.
 - Pinned iterations and termination reason.
 
-Detailed candidate code, diffs, measurements, profiles, lessons, and
-orchestration analysis remain in their dedicated artifact directories and are
-not copied into `run_state.json`.
+Detailed candidate code, diffs, measurements, profiles, lessons, and what each
+round's lanes left remain in their dedicated artifact directories and are not
+copied into `run_state.json`.
 
 ## Events
 
@@ -84,9 +75,7 @@ and `iter`. Event types include:
 - `analysis_refresh_decision`
 - `analysis_result`
 - `supervisor_ruling`
-- `round_admission`
 - `round_dispatch`
-- `round_cost`
 - `iteration_result`
 - `run_terminated`
 
@@ -113,212 +102,52 @@ rejected.
 Every process-local resume creates a new experiment segment while retaining the
 campaign identity and cumulative state.
 
-## Planning artifacts
+## Round artifacts
 
-Each iteration runs:
+The loop has no planning stage. Every iteration is one round of lanes, and a
+round has the same shape whatever its width:
 
-1. Evidence-scoped specialist dispatch.
-2. Parallel read-only specialist analysis.
-3. Orchestration synthesis: one plan per lane at `--lanes N`, one fused plan at
-   `--lanes 1`.
-4. For sessions longer than two hours, one same-model, independent Critic
-   review. `REVISE`/`REPLACE` permits one Orchestration revision without
-   rerunning specialists. The revision resumes the original synthesis session
-   when its backend exposes a session handle, otherwise it uses one fresh
-   revision session. A resumed revision keeps the synthesis session's system
-   prompt and carries the revision instructions in its message, so the cached
-   synthesis conversation is read rather than rewritten, and backends that
-   apply a system prompt only when a session starts still receive the
-   instructions. Both calls have a 100-turn ceiling, and incomplete output
-   is rejected. The revision has a 10-minute runtime ceiling; the Critic's is
-   10 minutes per plan it reads, bounded by the Orchestration session timeout,
-   because a round of several plans is several times the reading. Sized for one
-   plan it was not enough: a measured two-lane review ran about eleven minutes,
-   timed out, and lost a verdict that had found a lane not worth its session.
-   Critic failure -- an outage, or an answer that is not in the shape the
-   review is held to -- uses the draft and records the verdict `NOT_REVIEWED`;
-   revision failure publishes a non-executable framework fallback. Diagnostics
-   retain phase duration. Shorter sessions skip this step.
-5. Publication of the final `optimization_plan.md`.
-6. Implementer execution of that plan.
-7. Canonical validation, benchmark, and KEEP/REVERT.
+1. The round runs one lane per focus the Analysis evidence in force divides the
+   work into, up to `--lanes`, and one lane with no focus when it divides
+   nothing. The division is the Analysis Agent's: `analysis/<commit>/lanes.md`
+   holds one `## Lane N` section per focus, and the loop reads only the
+   sections. It stays in force until the next Analysis.
+2. A round's only lane is an Implementer session in the workspace itself: it
+   reaches the device directly, and what it leaves on the tree is the
+   candidate. Steps 3 to 5 apply to a round of several lanes. There each lane
+   is an Implementer session in its own copy of the workspace. The copy leaves
+   out `forge_experiments/analysis/`, which a session reads by absolute path.
+   The copies live beside the workspace under `forge-lanes-*/` and are removed
+   when the iteration ends. A workspace whose repository is selected through
+   `GIT_DIR` or `GIT_WORK_TREE` cannot be copied, and `--lanes` above 1 is
+   refused on it at startup.
+3. Every lane reaches the device through its copy's `forge_device.py`, which
+   queues at `<workspace>.forge-device-queue/` beside the workspace. The queue
+   is a directory of numbered tickets: a ticket is created with a number above
+   every existing one, its owner holds the device while it is the lowest, and a
+   ticket whose owner died is removed by whoever finds it. A lane's stop check
+   takes a ticket in the same queue. Each hold is one line of
+   `device_usage.jsonl`.
+4. What each lane changed is read as a patch against the round's base, the
+   allowlisted new files it created included, and filed under
+   `rounds/iter_NNN/lane_K/` as `change.diff`, with `lane.json` recording the
+   lane's focus, how its session ended, whether its own stop check passed, the
+   score it measured and its per-case times. A patch that touches the
+   measurement surface is refused and its reason is recorded there.
+5. One changed lane is the round's candidate. Several are merged by an
+   Implementer session on the canonical tree, which starts from the lane whose
+   stop check scored highest above the current best, or from the base when none
+   did. Its stop is judged against the current best; a merge that takes nothing
+   stops on the lane it started from, which is then the candidate.
+6. The canonical validation and benchmark judge the candidate; nothing a lane
+   measured beside other lanes decides a KEEP. The three benchmark runs of a
+   stop check taken on the canonical tree with no other lane running, a
+   round's only lane's or a merge session's, are reused as the canonical ones
+   when they still describe the tree.
 
-`optimization_plan.md` is the Implementer's planning source of truth for that
-iteration. The iteration handoff records its path together with the canonical
-verdict, the latest Supervisor Ruling path, and audit pointers. Handoffs do not
-restore control state. When Critic review runs, `draft_plan.md` and
-`critic_review.md` are immutable audit artifacts for that planning cycle.
-
-A fan-out round (`--lanes N`) synthesizes one plan per lane instead of one for
-the round. It first buys one partition call that reads every specialist analysis
-and names each lane's ground in files, functions and mechanisms — the terms an
-edit lands in, rather than the specialist role the evidence came from, because
-the roles are several readings of one kernel and dividing by role divides no
-code. Each lane is then given its own ground, every other lane's, and the whole
-round's evidence. The partition may return fewer lanes than asked for when the
-evidence supports fewer, and one ground is planned as an ordinary single-lane
-round. A partition that cannot be bought collapses the round to a single lane
-rather than dealing the analyses out across many: dividing the evidence by role
-divides no code, so a wide fallback would spend N Implementer sessions on lanes
-that overlap and may get one answer for them.
-
-A ground is a planning boundary, not an enforced one. It reaches the Implementer
-as an instruction and is reviewed as one, but a lane's candidate is admitted on
-the rules every candidate is admitted on — it applies, and it leaves the
-measurement surface alone — and nothing checks the files it touched against the
-ground it was given. Two lanes that overlap therefore still cost two sessions
-for one answer; what the partition buys is that they usually do not.
-
-Lane 1's stays `optimization_plan.md`, and lanes 2..N are published
-beside it as `lane_002.md`, `lane_003.md` and so on, so the round is auditable
-after the fact. `lane_plans.json` records the count and the commit the plans
-describe, and is written last: an iteration's plans are readable only once that
-file is present. The latest iteration BEFORE the one asking that started and
-never reported a result is the one round whose plans were never dispatched, and
-the next process picks those plans back up rather than paying to synthesize them
-again -- unless the tree has moved off the commit they were written against,
-which makes them stale. The asking iteration is excluded because the loop marks
-an iteration started before it plans anything, so that iteration is always
-itself started and unfinished. A round refused for budget after planning leaves
-exactly this state on purpose.
-
-What the round produced is published too. Its candidates are spent one per
-iteration, so a process that ends with any of them unspent -- a budget that ran
-out mid-round, not only a crash -- would otherwise throw away finished
-Implementer sessions whose lane workspaces are already deleted. `lane_queue.json`
-holds what is still owed a measurement, is rewritten as each candidate is taken,
-and is read before the first iteration of the next process, which measures those
-candidates before it plans a new round. Each entry carries the lesson the lane
-recorded in its round, or in `lesson_reason` why it has none.
-
-A queued candidate whose diff no longer applies to the canonical tree, even
-three-way, because a sibling's KEEP edited the same code, is never measured.
-It is filed under `unmeasured_lanes/round_NNN_lane_K/`: its `change.diff`
-against the commit its round was built on, its `plan.md`, the `lesson.md` its
-session recorded, and a `meta.json` naming that base commit, the iteration that
-dropped it and the canonical commit it no longer applied to.
-`unmeasured_lanes/index.jsonl` lists them, and each drop is logged as a
-`lane_candidate_unmeasured` event. Every later planning context cites the index
-as `unmeasured_lane_candidates`, and the Implementer's retrieval map names the
-directory, so a later round can take an idea up again from the session that
-already built it. The store is kept apart from the candidate archive: merge
-stacking, the history digest, export and the knowledge base read that
-archive's entries as measured ones, and these were not. A candidate rejected for
-changing the measurement surface or the driver is not filed; it is logged as a
-`lane_candidate_rejected` event.
-
-A fan-out round that ends with no candidate to measure -- because planning was
-unavailable, because only one plan came back, because the lane workspaces could
-not be made, or because no lane wrote anything -- hands the iteration to the
-ordinary single-session path. It hands over its plan with it, so the iteration
-runs its session on the round it has already paid for; a planning outage is
-reported as this iteration's `ORCHESTRATION_ERROR` rather than re-asking the
-backend that just refused.
-
-The same `max_hours > 2` long-horizon gate enables both the Plan Critic and
-hardware profiling. Shorter sessions keep Analysis static-only and do not
-inject self-profiling guidance into the Implementer.
-
-The Plan Critic reviews the first round a synthesis produced, at any width, and
-a later one only when the previous round kept no candidate of its own, the
-search is in DIVERSIFY mode, or the last critic asked for a challenger lane. A
-round that continues, in EXPLOIT mode, a route its predecessor kept a candidate
-on publishes its drafts unreviewed and records
-`plan_critic.status = "skipped_not_requested"`; every round logs its decision as
-a `plan_review` event naming the rule. A KEEP of two stacked archived gains is
-not a candidate any round planned, so it does not count as the previous round's.
-Every planning happens in an admitted round, including the one an iteration
-buys when the queued lane candidate it held no longer applies, and admission
-prices a round's planning without the review time observed rounds spent, since
-that round may skip it. A wide
-round is reviewed once, with its division in view: whether any lane's ground is
-worth an Implementer session, whether two lanes are one change described twice,
-whether a lane would have to edit code another lane owns, and whether the round
-as a whole is working at a level that has stopped paying. One verdict covers the
-round, so `REVISE` and `REPLACE` reach every lane, each resuming its own
-synthesis session. A lane whose revision fails keeps its draft and is named in
-`plan_revision.unrevised_lanes`; a single-lane round that cannot be revised
-still publishes the non-executable fallback, because nothing else is left in it.
-
-How wide the round runs is answered per lane rather than by the verdict. The
-review is one structured answer: `verdict`, the prose `review` a person reads and
-the revision is fed, and `lane_narrowing`, the lanes the review judges not worth
-an Implementer session of its own, each with its reason:
-
-```json
-{"verdict": "REVISE", "review": "...", "lane_narrowing": [{"lane_id": 2, "reason": "it is lane 1's change in different words"}]}
-```
-
-A provider that can hold a session to a JSON Schema is given this answer's; one
-that cannot is shown the schema in its prompt. An answer that is not in that
-shape -- a review in prose only, a verdict outside the three, a drop with no
-reason -- is no review: the round fails open to its drafts as for an outage.
-
-A named lane is not published, so the round spends fewer Implementer sessions
-than it planned; an empty list runs every lane. The finding is older than the
-outlet: across sixty-eight measured rounds, six reviews said a specific lane was
-not worth its session and every one of those rounds ran it, because a round-wide
-verdict cannot single a lane out. Narrowing is applied before the revision, so no
-revision turn is spent on a lane that will not run, and `lanes.published` records
-what the round actually handed to Implementer sessions beside what it planned.
-
-Three decisions can move a round's width, and they are ordered so they cannot
-contradict each other. The partition decides how wide the round is planned and
-its collapse fallback is the floor. The narrowing decides how many of those
-lanes are published; it runs last and therefore wins on width. A pending
-`REPLACE` outranks both: exactly one lane is validating the alternative that
-verdict named and which lane that is was never written down, so a challenged
-round refuses narrowing whole. Under all of them one lane is the floor — a
-narrowing that would empty the round is refused whole rather than applied down
-to a survivor the review never ranked. A lane the partition widened to joint
-ground is no exception: the review is given that lane's `joint` flag and its
-fallback and rules on the lane with them in view, so a drop naming it is
-carried out like any other, and the round records under `dropped_joint` that
-it spent wider ground than a region and measured none of it. Every drop and
-every refusal is recorded under `lane_narrowing` in `structured_output.json`
-with the reason, and `status` says what happened to the ruling, so a round that
-published fewer lanes than it planned can be audited afterwards. A note under
-`notes` says why a drop was not carried out -- a lane the round does not have --
-or what carrying it out spent, as the joint-lane cost; `status` and `dropped`
-are what say how the round ended, and the round warns that a narrowing was not
-applied only where that is the outcome.
-
-`structured_output.json` also records `phase_durations_sec`: what dispatch, the
-specialists, the partition, the synthesis, the Critic review and the revision
-each cost, and the round's own total. Ten production campaigns spent a median
-21.6 minutes per round on planning, about a quarter of an eleven-hour budget,
-and roughly a third of that window could only be recovered by subtracting the
-phases that persisted their timings from the total — which made the second most
-expensive phase the only invisible one. `total` is the orchestration call's own
-wall-clock rather than the sum of the parts, so whatever the named phases do not
-account for stays visible as the difference. Publishing the plans happens in the
-loop outside that call and is part of that remainder.
-
-A `REPLACE` verdict also outlives the round it judged. It says the route itself
-is dominated, which the round it was passed on can no longer act on, so the
-ruling is carried into the next round's partition: that round gives exactly one
-lane to validating the alternative the review names, and divides the rest over
-ground the challenger does not touch. The fallback carries it too — a partition
-that could not be bought collapses to the single challenger lane rather than
-dealing every lane back onto the route the verdict just dominated. The challenger
-is measured under the same
-correctness and KEEP gates as any other lane and is allowed to lose.
-
-The verdict is control state, so it survives the process that recorded it.
-`run_state.json` holds the verdict and the path to the review that made it,
-because a critic rules on a round already planned and a campaign routinely
-reaches its budget between that round and the one the ruling is spent on. The
-review stays where it was published; a ruling whose review can no longer be read
-is dropped rather than resumed, since the alternative to validate is named in
-the review and not in the word `REPLACE`. A review that failed open records no
-ruling at all: its artifact holds the outage that stopped it.
-
-Planning Agent output is best-effort. The Framework binds specialist roles,
-cases, and exact evidence paths; partial or failed specialists are recorded but
-do not block synthesis. If every planning Agent fails, the Framework still
-writes an `optimization_plan.md` that points the Implementer at the current Analysis
-bundle and asks it to plan directly. `ORCHESTRATION_ERROR` is reserved for
-deterministic infrastructure failures such as being unable to persist that plan.
+Nothing of a round outlives its iteration except these artifacts and the
+iteration's lesson, so there is no queue to restore on resume: an iteration
+interrupted before its verdict is run again from its base.
 
 Analysis evidence is commit-bound but is not rebuilt after every KEEP. The
 refresh threshold is currently a code-level constant of 5%. A stale bundle is
@@ -327,8 +156,8 @@ at the evidence commit multiplied by `1.05`, or immediately before a Supervisor
 intervention. Supervisor admission does not reprofile evidence that already
 matches the current canonical.
 
-Between refreshes, Orchestration, specialists, the Supervisor, and the
-Implementer receive the last published bundle, its absolute artifact paths, the
+Between refreshes, the Supervisor and the round's sessions receive the last
+published bundle, its absolute artifact paths, the
 commit it measured, the current canonical commit, current case timings, and the
 cumulative Git diff between those commits. Historical profiling is explicitly
 marked stale and is never presented as a current measurement. Cumulative diff
@@ -340,13 +169,16 @@ artifact from the current partial checkpoint.
 
 When a refresh is admitted, the Analysis Agent receives the cumulative diff and
 previous published bundle so it can update only affected profiling and analysis
-artifacts. The diff may span multiple accepted KEEP commits. Each canonical
+artifacts: it re-profiles only the cases whose measurements the change
+invalidates, once each, keeps the parent evidence for the rest, and rewrites
+`report.md` as the brief for the new canonical. The diff may span multiple
+accepted KEEP commits. Each canonical
 commit may start at most two Analysis sessions across resume; the
 `AnalysisSessionJournal` is the sole owner of that budget. The refresh policy
-prevents duplicate calls within one planning iteration, retries a failed
-Analysis in the next planning iteration, and stops after the journal reports
+prevents duplicate calls within one iteration, retries a failed
+Analysis in the next iteration, and stops after the journal reports
 that both session attempts are exhausted. A PARTIAL bundle is eligible for its
-second attempt in the next planning iteration.
+second attempt in the next iteration.
 
 Every session and every Analysis Bash command is bounded by the earlier of the
 configured Analysis timeout and the campaign deadline; session cleanup
@@ -355,15 +187,14 @@ session never reuses a static-only cache entry. A case is marked profiled only
 when raw output, normalized metrics, and successful per-case command provenance
 are all present.
 
-DIVERSIFY influences Framework dispatch and the requested planning objective;
-missing specialist coverage is recorded in diagnostics rather than treated as a
-hard gate. Three consecutive infrastructure-level `ORCHESTRATION_ERROR`
-outcomes open the circuit and pause the campaign.
+DIVERSIFY reaches a session as the instruction to choose a mechanism materially
+different from the ones already tried. The search turns to it after one round
+without a new best and stays there until a round produces one.
 
 ## Lessons and Supervisor rulings
 
-After each Implementer session, the same session is resumed read-only to write a
-free-form factual record of actions it actually attempted and results it
+After a round's verdict, each of its sessions -- every lane, then the merge --
+is resumed read-only, one after another, to write a free-form factual record of actions it actually attempted and results it
 actually observed. The prompt forbids global optimization conclusions and
 recommendations to future iterations. The loop appends its machine-authored
 `OUTCOME` line after canonical validation and benchmarking.
@@ -373,10 +204,31 @@ direction status, suppression list, or PR adoption classification. A
 `REVERT_PERF` records only that the concrete candidate missed the KEEP
 threshold; it never suppresses the broader direction.
 
+Only the most recent lesson documents fit a prompt in full, so two things carry
+the earlier ones forward. The next session is shown a list of measured
+negatives with one line for every past iteration that recorded any: what its
+`NEGATIVES` line says measured worse, the constants and cases it was measured
+under, and whether that still stands. A line is `IN SCOPE` while those
+conditions hold, `RE-OPENABLE` once a pinned constant has moved or a scored case
+was not measured, and `UNSCOPED` when the conditions were never recorded. The
+session is asked to check its direction against the list before choosing it.
+
+The same lesson turn also maintains `insights.md`, the campaign's insight list:
+at most 12 one-sentence facts about the kernel and about measuring it, each with
+the measurement behind it -- what makes a quick bench agree with the driver, a
+bound that was measured, how the toolchain compiles a construct, a correctness
+condition a change has to keep. The turn is shown the list as it stands and
+returns it as it should stand, on `INSIGHT:` lines that are taken out of the
+lesson document and replace the stored list whole; a reply with no such line
+leaves the list unchanged. Every later session reads the whole list. The record
+turns of a round run one after another, so each reads the list the one before
+it left. A round of several sessions sets each record under its own heading in
+the iteration's one lesson document.
+
 Every Supervisor attempt is archived verbatim in
 `supervisor/intervention_iter_NNN.md`. A non-empty review also atomically
 replaces `supervisor/latest.md`, which is loaded on resume and passed verbatim to
-Orchestration and the Implementer. The latest ruling may override subjective
+the sessions of the rounds that follow. The latest ruling may override subjective
 conclusions in historical lessons but never objective validation or measurement
 facts. Supervisor output is free-form and is not parsed, repaired, or translated
 into a programmatic search-policy action. The active ruling expires when a KEEP
@@ -390,7 +242,7 @@ intervention files remain available for audit.
 stall state, recent factual outcomes, and retrieval paths.
 
 The Implementer reads detailed candidate, lesson, handoff, Analysis, and
-orchestration artifacts from disk on demand. Objective measurements are
+round artifacts from disk on demand. Objective measurements are
 authoritative; the latest Supervisor Ruling outranks subjective conclusions in
 historical lesson records.
 
@@ -398,11 +250,22 @@ historical lesson records.
 
 The pristine baseline uses per-case medians from three independent measurements
 and never changes. Every candidate is measured three times; each run is scored
-independently with the equal-weight arithmetic mean:
+independently with the equal-weight mean of its per-case speedups. Which mean is
+the campaign's `--case-aggregate`, fixed when the campaign is created:
 
 ```text
-mean(pristine_case_ms / candidate_run_case_ms)
+arithmetic (default): mean(pristine_case_ms / candidate_run_case_ms)
+geometric:            geomean(pristine_case_ms / candidate_run_case_ms)
 ```
+
+Every case weighs the same under both. The arithmetic mean counts a large gain
+on one case in full; the geometric mean counts its ratio, so a 4x on one case
+and a 0.25x on another cancel. The in-session gate, the KEEP decision, the
+Implementer's instructions and every published score
+use the campaign's aggregate, and the result names it as `case_aggregate`.
+Choose the one whoever consumes the result scores by: a campaign that
+optimizes one mean and is graded on the other keeps candidates its grader
+scores lower.
 
 Drivers must emit complete, unique `case_ms` coverage for every scored case.
 The mean of the three run scores must be at least
@@ -417,7 +280,9 @@ current best, both so three near-identical measurements cannot drive it to zero
 and because a gain under 0.1% is not worth the KEEP even when it is real.
 
 `sigma` is the sample standard deviation of the three scores, except when one
-case supplies the majority of the objective's variance while carrying less than
+case supplies the majority of the objective's variance (under the geometric
+aggregate, of the variance of its logarithm, which splits between cases the
+same way) while carrying less than
 its equal share of the suite's wall time. Three aggregate scores estimate that
 case's spread to within 50% of itself, and the margin then charges the draw to
 every candidate: on one campaign a 10 us case holding 87% of the variance drew a

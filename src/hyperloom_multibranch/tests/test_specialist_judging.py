@@ -15,6 +15,7 @@ from hyperloom.contracts.measurement import (
     NOT_REPRODUCED,
     REPRODUCED,
     AttachmentRef,
+    JitCacheState,
     Purpose,
     TestKind,
     TestRequest,
@@ -103,7 +104,7 @@ class _Checked(LocalBlackboard):
 class _Session:
     """PRELUDE done and s1 open at the root: the fake toolbox measures, the real gate settles, s1's judge acts."""
 
-    def __init__(self, root, driver=BranchDriver.SPECIALIST, checked=False, **config):
+    def __init__(self, root, driver=BranchDriver.SPECIALIST, checked=False, board=None, **config):
         self.driver = driver
         toolbox_writer = Writer(Role.TOOLBOX, "toolbox")
         self.toolbox = FakeToolbox(
@@ -114,7 +115,7 @@ class _Session:
                 accuracy_scores={WRONG.fingerprint(): 0.80},
                 **config,
             ),
-            blackboard=(_Checked if checked else LocalBlackboard)(root, toolbox_writer),
+            blackboard=(board or (_Checked if checked else LocalBlackboard))(root, toolbox_writer),
             autorun=False,
         )
         self.scheduler = LocalBlackboard(root, Writer(Role.SCHEDULER, "scheduler"))
@@ -204,6 +205,7 @@ async def test_a_gain_is_retested_on_another_node_and_lands_on_its_branch(sessio
     assert (await session.runtime.record(retest.request_id)).result.sandbox.node_name != first_node
     (notice,) = await session.notices()
     assert notice.startswith(f"{NOTICE} {first} landed on your branch at +") and f"% over {ROOT};" in notice
+    assert notice.endswith(f"; your next candidates go on the new head {record.commit_id}")
 
 
 async def test_the_retest_carries_the_files_the_candidate_was_measured_with(session):
@@ -313,6 +315,7 @@ async def test_a_commit_whose_notice_a_stop_cut_off_is_announced_by_the_next_jud
 
     (notice,) = await session.notices()
     assert notice.startswith(f"{NOTICE} {first} landed on your branch at +") and f"% over {ROOT};" in notice
+    assert notice.endswith(f"; your next candidates go on the new head {await session.repo.head(BRANCH)}")
 
 
 async def test_a_fork_whose_notice_a_stop_cut_off_is_announced_by_the_next_judge(session, tmp_path):
@@ -342,7 +345,8 @@ async def test_a_gain_whose_moved_on_notice_a_stop_cut_off_is_announced_by_the_n
     await session.new_judge().reconcile()
 
     assert [notice for notice in await session.notices() if second in notice] == [
-        f"{NOTICE} {second} improved on {ROOT}, but the branch has moved on; submit it again on the head as a new test"
+        f"{NOTICE} {second} improved on {ROOT}, but the branch has moved on; "
+        f"submit it again on the head {await session.repo.head(BRANCH)} as a new test"
     ]
 
 
@@ -616,10 +620,82 @@ async def test_of_two_gains_on_one_parent_the_second_does_not_land(session):
     assert await session.repo.head(BRANCH) == landed.commit_id
     first_landed, second_moved = await session.notices()
     assert f"{first} landed on your branch" in first_landed
-    assert (
-        f"{second} improved on {ROOT}, but the branch has moved on; submit it again on the head as a new test"
-        in second_moved
+    assert second_moved == (
+        f"{NOTICE} {second} improved on {ROOT}, but the branch has moved on; "
+        f"submit it again on the head {landed.commit_id} as a new test"
     )
+
+
+def _stacking(request: TestRequest) -> float:
+    """What a change is worth: more on a commit than on the root, so a change on a commit clears the bar over it."""
+    if request.delta == RecipeDelta():
+        return 0.0
+    return 0.05 if request.parent_commit == ROOT else 0.12
+
+
+async def test_a_gain_its_moved_on_branch_kept_out_is_told_once_however_far_the_head_moves(tmp_path):
+    session = _Session(tmp_path / "blackboard", effect_fn=_stacking)
+    await session.prelude()
+    first, second = await session.explore(FAST), await session.explore(FAST_TOO)
+    await session.step()
+    await session.step()
+    head = await session.repo.head(BRANCH)
+    await session.toolbox.submit_test(_request(BRANCH, Purpose.EXPLORE, FLAT, parent=head))
+    await session.step()
+    await session.step()
+    await session.new_judge().reconcile()
+
+    assert (await session.runtime.record(first)).commit_id == head != await session.repo.head(BRANCH)
+    assert [notice for notice in await session.notices() if second in notice] == [
+        f"{NOTICE} {second} improved on {ROOT}, but the branch has moved on; "
+        f"submit it again on the head {head} as a new test"
+    ]
+
+
+async def _first_reading_off_the_head(session: "_Session") -> tuple[str, str]:
+    """A gain landed, then a change measured above the bar on the parent the branch left; the head and that test."""
+    await session.explore(FAST)
+    await session.step()
+    await session.step()
+    late = await session.explore(FAST_TOO)
+    return await session.repo.head(BRANCH), late
+
+
+async def test_a_first_reading_on_a_parent_the_branch_left_is_recorded_without_a_retest(session):
+    head, late = await _first_reading_off_the_head(session)
+    assert head != ROOT
+    await session.step()
+    await session.step()
+    await session.new_judge().reconcile()
+
+    record = await session.runtime.record(late)
+    assert (record.judgement.verdict, record.conclusion, record.commit_id) == (
+        Verdict.NEEDS_CONFIRM,
+        Conclusion.RECORDED_ONLY,
+        None,
+    )
+    assert record.judgement.request_ids == (late,)
+    assert late not in {retest.retest_of for retest in session.retests()}
+    assert await session.repo.head(BRANCH) == head
+    assert [notice for notice in await session.notices() if late in notice] == [
+        f"{NOTICE} {late} read {record.judgement.gain_pct:+.2f}% over {ROOT}, which is not your branch head, "
+        f"and was not retested; submit it again on the head {head} as a new test"
+    ]
+
+
+async def test_a_first_reading_off_the_head_whose_notice_a_stop_cut_off_is_told_by_the_next_judge(session):
+    head, late = await _first_reading_off_the_head(session)
+    _CutOff(session, "was not retested")
+    with pytest.raises(asyncio.CancelledError):
+        await session.step()
+    assert (await session.runtime.record(late)).conclusion is Conclusion.RECORDED_ONLY
+
+    await session.new_judge().reconcile()
+    await session.new_judge().reconcile()
+
+    (notice,) = [notice for notice in await session.notices() if late in notice]
+    assert notice.endswith(f"and was not retested; submit it again on the head {head} as a new test")
+    assert late not in {retest.retest_of for retest in session.retests()}
 
 
 async def test_a_candidate_on_a_commit_the_blackboard_does_not_know_does_not_stop_the_branch(session):
@@ -749,3 +825,57 @@ async def test_a_flat_fix_measured_without_an_eval_is_not_checked_as_a_fix(skipp
     record = await skipping.runtime.record(first)
     assert (record.conclusion, record.judgement.fixes_correctness) == (Conclusion.RECORDED_ONLY, False)
     assert await skipping.repo.head(BRANCH) == ROOT
+
+
+class _ColdCandidates(LocalBlackboard):
+    """The toolbox's blackboard, whose results state the compiled-code cache as hosted results do: the tests named in
+    :attr:`cold` met it ``miss``, every other ``hit``."""
+
+    cold: set[str] = set()
+
+    async def write_result(self, result):
+        state = JitCacheState("aiter_jit", "miss" if result.request_id in self.cold else "hit")
+        return await super().write_result(replace(result, jit_cache=(state,)))
+
+
+@pytest.fixture
+async def cold_session(tmp_path):
+    _ColdCandidates.cold = set()
+    session = _Session(tmp_path / "blackboard", board=_ColdCandidates)
+    await session.prelude()
+    return session
+
+
+async def test_a_candidate_that_met_the_cache_cold_while_its_parents_tests_met_it_warm_is_flagged_as_judged(
+    cold_session,
+):
+    """A specialist's candidate is judged by its branch judge, not the gate's compare: the flag is set there too."""
+    first = await cold_session.explore(FLAT)
+    _ColdCandidates.cold.add(first)
+    await cold_session.step()
+
+    record = await cold_session.runtime.record(first)
+    assert record.judgement.verdict is Verdict.FLAT, "the flag changes no verdict"
+    assert record.judgement.cache_states_differ == ("aiter_jit: miss vs hit",)
+
+
+async def test_a_gain_and_its_retest_that_met_the_cache_as_the_parents_tests_did_are_not_flagged(cold_session):
+    first = await cold_session.explore(FAST)
+    await cold_session.step()
+    await cold_session.step()
+
+    record = await cold_session.runtime.record(first)
+    assert record.judgement.verdict is Verdict.IMPROVED and len(record.judgement.request_ids) == 2
+    assert record.judgement.cache_states_differ == ()
+
+
+async def test_a_retest_that_met_the_cache_cold_flags_the_gain_it_confirms(cold_session):
+    first = await cold_session.explore(FAST)
+    await cold_session.step()
+    (retest,) = cold_session.retests()
+    _ColdCandidates.cold.add(retest.request_id)
+    await cold_session.step()
+
+    record = await cold_session.runtime.record(first)
+    assert record.judgement.verdict is Verdict.IMPROVED
+    assert record.judgement.cache_states_differ == ("aiter_jit: hit/miss vs hit",)

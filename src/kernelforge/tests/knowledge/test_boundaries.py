@@ -77,10 +77,6 @@ def _find_import_cycle(graph: dict[str, set[str]]) -> list[str]:
     return []
 
 
-def test_data_directory_is_retired() -> None:
-    assert not (_PACKAGE_ROOT / "data").exists()
-
-
 def test_knowledge_root_contains_no_flat_implementation_modules() -> None:
     assert {path.name for path in _KNOWLEDGE_ROOT.glob("*.py")} == {"__init__.py"}
 

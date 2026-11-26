@@ -315,7 +315,7 @@ class KernelStackPhase(CoordinatorCollaborator):
             kid = str(pending.get("kernel_id") or "")
             integration_id = str(pending.get("integration_id") or "")
             log.info(
-                "SWEEP entry: draining pending KEEP integrate for kernel_id=%s integration_id=%s (drained %d so far)",
+                "CYCLE_END entry: draining pending KEEP integrate for kernel_id=%s integration_id=%s (drained %d so far)",
                 kid,
                 integration_id,
                 drained,
@@ -337,7 +337,7 @@ class KernelStackPhase(CoordinatorCollaborator):
                         await self._coord.writeback.record_integrate_keep(result)
             except Exception as exc:  # isolation boundary: one pending KEEP integrate, marked rejected
                 log.exception(
-                    "SWEEP entry: integrate(%s) raised %r; marking rejected to prevent drain loop deadlock",
+                    "CYCLE_END entry: integrate(%s) raised %r; marking rejected to prevent drain loop deadlock",
                     kid,
                     exc,
                 )
@@ -346,7 +346,7 @@ class KernelStackPhase(CoordinatorCollaborator):
             drained += 1
         if drained >= max_drain:
             log.warning(
-                "SWEEP entry: drain cap (%d) reached; remaining pending KEEPs stay queued",
+                "CYCLE_END entry: drain cap (%d) reached; remaining pending KEEPs stay queued",
                 max_drain,
             )
 
@@ -494,7 +494,7 @@ class KernelStackPhase(CoordinatorCollaborator):
     def halt_stack_recovery(self, error: Exception) -> NoReturn:
         """Stop the session on stack state no resume can account for, keeping the evidence, then raise ``error``.
 
-        A raise alone does not end the run: the tick that sees it only counts it toward the crash limit, so SWEEP
+        A raise alone does not end the run: the tick that sees it only counts it toward the crash limit, so CYCLE_END
         could still benchmark the tree. The stop reason is what actually ends the run, and it is deliberately not an
         infrastructure one: a tree that no longer matches the ledger is a failed session, not an aborted one.
         """

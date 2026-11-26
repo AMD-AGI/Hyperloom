@@ -17,7 +17,7 @@ from kernelforge.cli.options import (
     _validate_max_hours,
     _validate_optional_agent_provider,
 )
-from kernelforge.evaluation.scoring import DEFAULT_SNR_THRESHOLD_DB
+from kernelforge.evaluation.scoring import DEFAULT_SNR_THRESHOLD_DB, CaseAggregate
 from kernelforge.workflows.forge_loop.api import (
     ForgeLoopError,
     ForgeLoopUsageError,
@@ -33,7 +33,6 @@ from kernelforge.workflows.forge_loop.bootstrap.request import (
     KnowledgeOptions,
     LoopShape,
     RunArtifacts,
-    SpecialistProbeOptions,
     TaskContext,
     TaskIdentity,
     TimeBudget,
@@ -53,6 +52,18 @@ ANALYSIS_TIMEOUT_SEC = 7200
         click.option("--driver", default=None, help="Fresh campaign: validation/bench driver"),
         click.option("--workspace", "workspace_dir", required=True, help="Git workspace dir"),
         click.option(
+            "--import-name",
+            default=None,
+            help="The package the workspace is: the workspace holds that package's own "
+            "files at its root, as a checkout of a snapshot of an installed package "
+            "does, and is the directory of that name. The directory holding it then "
+            "goes first on the import path of everything the loop runs, so a driver "
+            "importing the package by name loads the tree being edited, and each "
+            "lane copy is laid out the same way. Whatever is linked beside the "
+            "workspace -- what the package is installed beside and finds by its own "
+            "location -- is linked beside each lane copy too.",
+        ),
+        click.option(
             "--snr-threshold",
             default=DEFAULT_SNR_THRESHOLD_DB,
             type=float,
@@ -70,9 +81,7 @@ ANALYSIS_TIMEOUT_SEC = 7200
             default=1.0,
             type=float,
             callback=_validate_max_hours,
-            help="Max runtime hours (default: 1.0, minimum 1.0). Budgets "
-            ">2 hours enable Analysis profiling and, for single-lane "
-            "rounds, Plan Critic review.",
+            help="Max runtime hours (default: 1.0, minimum 1.0). Budgets >2 hours enable Analysis profiling.",
         ),
         click.option(
             "--session-timeout-sec",
@@ -153,9 +162,10 @@ ANALYSIS_TIMEOUT_SEC = 7200
             "--profile-timeout-sec",
             default=ANALYSIS_TIMEOUT_SEC,
             type=int,
-            help="Ceiling (seconds) for the single complete Analysis Agent "
-            "session. The Agent persists phase and case artifacts for "
-            "resume when the deadline is reached. Default 7200 (2 hours).",
+            help="Time box (seconds) for the single complete Analysis Agent "
+            "session. The Agent is told to treat it as its budget and to "
+            "write its brief early, and persists phase and case artifacts "
+            "for resume when the deadline is reached. Default 7200 (2 hours).",
         ),
         click.option(
             "--supervisor-backend",
@@ -191,27 +201,20 @@ ANALYSIS_TIMEOUT_SEC = 7200
             "--lanes",
             default=3,
             type=click.IntRange(min=1, max=8),
-            help="Implementer lanes per round. Above 1 the round's analysis is "
-            "partitioned into that many non-overlapping plans, each run "
-            "concurrently in its own workspace copy, and each candidate is "
-            "measured on its own. Default 3: the lanes of a round run "
-            "concurrently, so a lane costs a session rather than a share "
-            "of the round's wall clock, and three is what the three "
-            "specialist analyses can be divided into. The partition "
-            "returns fewer when the evidence supports fewer. Above 1 "
-            "needs a provider that declares session_env and is refused on "
+            help="The most Implementer lanes a round runs side by side. The Analysis "
+            "Agent is told this number and divides its evidence into at most "
+            "that many focuses -- different optimization directions, or "
+            "different scored cases -- and each focus is one lane: a session in "
+            "its own copy of the workspace, choosing its own direction inside "
+            "the focus. A merge session then combines what the lanes left into "
+            "the one candidate the round measures. At 1, or when the Analysis "
+            "divides nothing, a round is one session with no focus, working in "
+            "the workspace itself. The lanes "
+            "share the campaign's GPU: every command that needs it waits its "
+            "turn, so a wider round spends more of each session waiting. Above "
+            "1 needs a provider that declares session_env and is refused on "
             "one that does not; a provider without stop_hooks runs and is "
-            "warned, because it can waste a round but not misreport one.",
-        ),
-        click.option(
-            "--merge-stacking/--no-merge-stacking",
-            default=True,
-            help="Once consecutive iterations stop producing a new best, spend "
-            "one iteration measuring two archived rejected gains applied "
-            "together, chosen for winning on different cases. Costs a "
-            "measurement but no Implementer session. Default on; this "
-            "applies at every --lanes setting, so turn it off to compare "
-            "against a run that predates it.",
+            "warned.",
         ),
         click.option(
             "--bench-repeat",
@@ -221,6 +224,18 @@ ANALYSIS_TIMEOUT_SEC = 7200
             "reporting the per-case median. Default 1 (single shot). >1 "
             "shrinks run-to-run spread. Requires a driver that accepts "
             "--repeat; the flag is omitted entirely when this is 1.",
+        ),
+        click.option(
+            "--case-aggregate",
+            default=CaseAggregate.ARITHMETIC.value,
+            type=click.Choice([aggregate.value for aggregate in CaseAggregate]),
+            help="How one measurement's per-case speedups combine into the score "
+            "every KEEP, in-session gate and report is judged on. Every case "
+            "weighs the same under both; 'arithmetic' (default) counts a large "
+            "gain on one case in full, 'geometric' counts its ratio. Choose the "
+            "one whoever consumes the result scores by. Immutable per campaign: "
+            "it is snapshotted into campaign_config.json and read back on "
+            "--resume.",
         ),
         click.option(
             "--commit-new-path",
@@ -338,47 +353,6 @@ ANALYSIS_TIMEOUT_SEC = 7200
             help="Inject upstream pull-request references from the PR Monitor "
             "as Implementer prior knowledge (default off). Falls back to "
             "PR_KB_ENABLE when unset.",
-        ),
-    ),
-    option_group(
-        "probe",
-        SpecialistProbeOptions,
-        click.option(
-            "--specialist-probe/--no-specialist-probe",
-            default=None,
-            help="Let the read-only planning specialists measure one variant per probe "
-            "in a scratch tree, instead of only arguing about a dispatch constant "
-            "(default on). Each probe re-runs the workspace driver for one case "
-            "with declared constants overridden; it queues on the same device lock "
-            "the fan-out lanes take, and never touches the canonical tree. Falls "
-            "back to FORGE_SPECIALIST_PROBE when unset.",
-        ),
-        click.option(
-            "--specialist-probe-max",
-            default=None,
-            type=click.IntRange(min=1),
-            help="Probes ONE analysis round may make in total, shared by every "
-            "specialist it dispatches (default 6). Every call counts, including "
-            "one that is refused. Falls back to FORGE_SPECIALIST_PROBE_MAX when "
-            "unset.",
-        ),
-        click.option(
-            "--specialist-probe-budget-sec",
-            default=None,
-            type=click.FloatRange(min=1.0),
-            help="Seconds on the device ONE analysis round may spend probing, shared by "
-            "every specialist it dispatches (default 600). Cut down further at "
-            "call time so no probe can leave a specialist without the time to "
-            "write its analysis. Falls back to FORGE_SPECIALIST_PROBE_BUDGET_SEC "
-            "when unset.",
-        ),
-        click.option(
-            "--specialist-probe-scratch-root",
-            default=None,
-            help="Where the round scratch trees are created. Must be absolute and lie "
-            "outside the workspace. Default: <experiments-dir>/specialist_probe, "
-            "or a sibling of the workspace when that would land inside it. Falls "
-            "back to FORGE_SPECIALIST_PROBE_SCRATCH_ROOT when unset.",
         ),
     ),
     click.option(

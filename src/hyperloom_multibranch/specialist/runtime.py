@@ -4,7 +4,8 @@
 """The specialist lifecycle: on each branch, the specialist's session and the branch's judge.
 
 A branch started with no direction, no repair, no focus and no third-party agent takes one of the session's
-:data:`~hyperloom_multibranch.specialist.directions.DIRECTIONS` that no branch has held yet, so the branches split the
+directions (:func:`~hyperloom_multibranch.specialist.directions.session_directions`, given at construction) that no
+branch has held yet, so the branches split the
 work instead of all sweeping the same settings, and a stopped branch's direction is not handed out again while another
 was never tried. Once each was held, it takes the one the fewest branches held over the session, then the one the
 fewest running branches hold. A direction given to a branch counts when it is one of these. A direction whose
@@ -50,7 +51,7 @@ from hyperloom_multibranch.contracts.lifecycle import BranchTask, SpecialistStat
 from hyperloom_multibranch.contracts.blackboard.exhausted import exhausted_records, latest_exhausted
 from hyperloom_multibranch.contracts.blackboard.interfaces import ClaimService, BlackboardError
 from hyperloom_multibranch.contracts.blackboard.vocab import ClaimStatus
-from hyperloom_multibranch.specialist.directions import DIRECTIONS, session_direction
+from hyperloom_multibranch.specialist.directions import DIRECTIONS, direction_name, session_direction
 from hyperloom_multibranch.specialist.judging import NOTICE, BranchJudge, JudgeBlackboard, Judging
 
 logger = logging.getLogger(__name__)
@@ -200,6 +201,7 @@ class _Branch:
     unready: str = ""
     finished: str = ""
     exhausted: str = ""
+    crashed_out: bool = False
     judge: BranchJudge | None = None
 
 
@@ -239,11 +241,13 @@ class SpecialistRuntime:
         sessions: SessionFactory,
         *,
         pacing: RuntimePacing = RuntimePacing(),
+        directions: tuple[str, ...] = DIRECTIONS,
     ) -> None:
         self._blackboard_for = blackboard_for
         self._judging = judging
         self._sessions = sessions
         self._pacing = pacing
+        self._directions = directions
         self._branches: dict[str, _Branch] = {}
         self._held: Counter[str] = Counter()
         self._closed: set[tuple[str, str]] = set()
@@ -253,10 +257,8 @@ class SpecialistRuntime:
         if branch in self._branches or branch in self._finishing:
             raise ValueError(f"branch {branch!r} already has a specialist")
         if not task.direction.strip() and task.repair is None and not task.agent and not task.focus:
-            for state in self._branches.values():
-                await self._learn_exhausted(state)
-            task = replace(task, direction=self._least_held(start_commit))
-        if task.direction in DIRECTIONS:
+            task = replace(task, direction=self._least_held(await self._open_on(start_commit)))
+        if task.direction in self._directions:
             self._held[task.direction] += 1
         state = _Branch(branch, start_commit, task, self._blackboard_for(branch))
         self._branches[branch] = state
@@ -294,7 +296,11 @@ class SpecialistRuntime:
             state.unready,
             state.finished,
             state.exhausted,
+            state.crashed_out,
         )
+
+    async def undealt_directions(self, start_commit: str) -> tuple[str, ...]:
+        return tuple(direction_name(d) for d in await self._open_on(start_commit) if not self._held[d])
 
     async def stop(self, branch: str, *, finish_tests: bool = False) -> None:
         """Stop the branch's specialist, at most once whoever asks; a branch already stopped is left alone.
@@ -384,7 +390,7 @@ class SpecialistRuntime:
                 if not why:
                     await _notice(state, _restarted(error))
                     continue
-                state.session, state.gave_up = None, True
+                state.session, state.gave_up, state.crashed_out = None, True, True
                 await _notice(state, f"the specialist {why} ({error!r}); it is not restarted")
                 return
 
@@ -434,7 +440,7 @@ class SpecialistRuntime:
     async def _learn_exhausted(self, state: _Branch) -> None:
         """Close, on its head, each of the session's directions that ``state``'s specialist recorded exhausted."""
         for exhausted in exhausted_records(record.entry for record in await state.blackboard.branch_log(state.name)):
-            direction = session_direction(exhausted.direction)
+            direction = session_direction(exhausted.direction, self._directions)
             if direction is None:
                 logger.warning(
                     "an exhausted record of %s names none of the session's directions: %r",
@@ -444,9 +450,15 @@ class SpecialistRuntime:
                 continue
             self._closed.add((exhausted.head, direction))
 
-    def _least_held(self, start_commit: str) -> str:
+    async def _open_on(self, start_commit: str) -> list[str]:
+        """The session's directions not closed on ``start_commit``, by the exhausted records written so far."""
+        # A stop that ends while a log is read takes its branch out of the dict.
+        for state in tuple(self._branches.values()):
+            await self._learn_exhausted(state)
+        return [d for d in self._directions if (start_commit, d) not in self._closed]
+
+    def _least_held(self, open_here: list[str]) -> str:
         running = [state.task.direction for state in self._branches.values()]
-        open_here = [d for d in DIRECTIONS if (start_commit, d) not in self._closed]
         return min(open_here, key=lambda d: (self._held[d], running.count(d)), default="")
 
     async def _judge(self, state: _Branch, judge: BranchJudge) -> None:

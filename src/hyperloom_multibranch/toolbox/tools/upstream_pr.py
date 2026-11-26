@@ -1,51 +1,42 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""The ``upstream_pr_search`` tool: find upstream pull requests that look relevant, with the framework agent's search.
+"""The ``upstream_pr_search`` tool: find upstream pull requests that look relevant.
 
-The search runs in the process that hosts the toolbox, never in a measurement sandbox, and answers only for the repositories
-the rule pack names (``UPSTREAM_PR_REPOS``). The framework agent's own GitHub search is best-effort: an unreachable host, a
-refused token and an exhausted quota all come back as an empty list, which would read as "no pull request matches". The
-search made here asks GitHub the same question with the same query and fails instead, saying why
-(:class:`GitHubUnavailable`); an empty list means GitHub answered and found none. A search that also names a monitor service
-is the framework agent's own (host configuration only: a specialist cannot name one).
+The tool runs in the process that hosts the toolbox, never in a measurement sandbox, and answers only for the repositories
+the rule pack names (``UPSTREAM_PR_REPOS``). The framework agent's own GitHub search is best-effort: an unreachable
+host, a refused token and an exhausted quota all come back as an empty list, which would read as "no pull request
+matches". The search made here asks GitHub the same question, each keyword as a quoted phrase, and fails instead,
+saying why (:class:`GitHubUnavailable`); an empty list means GitHub answered and found none.
+
+Pull-request text is data: the summary carries the ref and the title of the first candidate only.
 """
 
 from __future__ import annotations
 
 import asyncio
-import http.client
-import json
-import urllib.error
-import urllib.parse
-import urllib.request
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from hyperloom.agents.framework.models import Candidate, CandidateSearchRequest, PRMonitorConfig
-from hyperloom.agents.framework.sources import SourceConfigError, enumerate_candidates
-from hyperloom.agents.framework.sources.github import PERF_TERMS, auth_headers, build_query
+from hyperloom.agents.framework.models import Candidate, CandidateSearchRequest
+from hyperloom.agents.framework.sources.github import PERF_TERMS, GitHubUnavailable, build_query, search_issues
 from hyperloom.common.github_urls import repo_slug
 from hyperloom.common.outside_facts import UPSTREAM_PR_REPOS
 from hyperloom_multibranch.toolbox.tools.base import InvalidRequest, ToolFailure, ToolOutput, ToolRequest
 
 UPSTREAM_PR_TOOL = "upstream_pr_search"
 MAX_LIMIT = 20
-DEFAULT_LIMIT = 5
+DEFAULT_LIMIT = 10
 _OPEN = "open"
 _STATES = frozenset({_OPEN, "merged", "closed", "all"})
 #: What is searched when the caller names no state: open pull requests only.
 _OPEN_ONLY = (_OPEN,)
-#: The names the framework agent gives its two sources of candidates (its ``search_modes``).
-_MONITOR, _GITHUB = "pr_monitor", "github"
+#: The framework agent's name for its GitHub source of candidates (one of its ``search_modes``).
+_GITHUB = "github"
 _SEARCHED = frozenset(repo.lower() for repo in UPSTREAM_PR_REPOS)
-#: GitHub's search endpoint for issues and pull requests.
-_SEARCH_URL = "https://api.github.com/search/issues"
 _TIMEOUT_SEC = 10.0
-_HTTP_UNAUTHORIZED = 401
-_HTTP_RATE_LIMITED = (403, 429)
 
 
 @dataclass(frozen=True)
@@ -60,74 +51,55 @@ class UpstreamSearch:
         return "is:open" if set(self.states) == {_OPEN} else ""
 
 
-Enumerate = Callable[[UpstreamSearch], list[Candidate]]
+@dataclass(frozen=True)
+class Found:
+    """The candidates of a search, best first, and ``matched``: how many pull requests matched in all."""
+
+    candidates: list[Candidate]
+    matched: int
 
 
-class GitHubUnavailable(RuntimeError):
-    """GitHub's search cannot be used from this host; the message says why."""
+Enumerate = Callable[[UpstreamSearch], Found]
 
 
-def _token_hint() -> str:
-    """What to do about it: a request that carries no ``Authorization`` header was made without a token."""
-    held = "Authorization" in auth_headers("application/json")
-    return (
-        ""
-        if held
-        else "; the host has no GITHUB_TOKEN or GH_TOKEN, and an anonymous search is allowed very few requests"
-    )
+#: What a keyword may not carry into its quotes: a quote ends the phrase, and GitHub reads a backslash before the
+#: closing quote as a quote of the phrase, which then runs on into the next keyword. Each becomes a space, not
+#: nothing: the search finds a backslash between two words as it finds a space there.
+_BREAKS_A_PHRASE = str.maketrans({'"': " ", "\\": " "})
 
 
-def _refusal(code: int) -> str:
-    if code == _HTTP_UNAUTHORIZED:
-        return "GitHub rejected the token of this host (GITHUB_TOKEN or GH_TOKEN)"
-    if code in _HTTP_RATE_LIMITED:
-        return f"GitHub refused the search (HTTP {code}), most likely a rate limit{_token_hint()}"
-    return f"GitHub answered the search with HTTP {code}"
+def _words(keyword: str) -> str:
+    """What GitHub is asked to find for ``keyword``: its words, in lower case, one space apart."""
+    return " ".join(keyword.lower().translate(_BREAKS_A_PHRASE).split())
 
 
-def _github_answer(search: UpstreamSearch) -> dict[str, Any]:
-    """GitHub's answer to ``search``, the query the framework agent's own search sends, held to the caller's states.
-
-    Raises:
-        GitHubUnavailable: GitHub could not be asked, refused, or did not answer with a search result.
-    """
-    request = search.request
-    terms = tuple(word.lower() for word in request.keywords if word.strip()) or PERF_TERMS
-    query = " ".join(filter(None, (build_query(repo_slug(request.repo_url), terms=terms), search.state_qualifier())))
-    url = f"{_SEARCH_URL}?" + urllib.parse.urlencode({"q": query, "per_page": str(request.max_search_candidates)})
-    request = urllib.request.Request(url, headers=auth_headers("application/vnd.github+json"))
-    try:
-        with urllib.request.urlopen(request, timeout=_TIMEOUT_SEC) as response:  # nosec B310 - fixed GitHub HTTPS API URL.
-            answer = json.loads(response.read().decode("utf-8"))
-    except urllib.error.HTTPError as exc:
-        raise GitHubUnavailable(_refusal(exc.code)) from None
-    except (OSError, http.client.HTTPException, ValueError) as exc:
-        raise GitHubUnavailable(
-            f"GitHub cannot be reached from this host ({type(exc).__name__}); check its network and proxy"
-        ) from None
-    if not isinstance(answer, dict) or not isinstance(answer.get("items"), list):
-        raise GitHubUnavailable("GitHub answered the search with something that is not a search result")
-    return answer
+def _phrases(keywords: tuple[str, ...]) -> tuple[str, ...]:
+    """Each of ``keywords`` as a quoted phrase of a GitHub search. Unquoted, GitHub requires the leading words of a
+    keyword of several words of every result, whatever the other keywords are, and reads a qualifier in a keyword."""
+    return tuple(f'"{_words(keyword)}"' for keyword in keywords)
 
 
-def search_github(search: UpstreamSearch) -> list[Candidate]:
-    """The pull requests GitHub's search finds for ``search``, best first.
+def search_github(search: UpstreamSearch) -> Found:
+    """The pull requests GitHub's search finds for ``search``: those that hold any one of its first
+    :data:`~hyperloom.agents.framework.sources.github.MAX_OR_TERMS` keywords, held to the caller's states.
 
     Raises:
         GitHubUnavailable: GitHub could not be asked or refused (never an empty list for that).
     """
-    if _MONITOR in search.request.search_modes:
-        return enumerate_candidates(search.request)
-    found = []
-    for item in _github_answer(search)["items"]:
+    request = search.request
+    terms = _phrases(request.keywords) or PERF_TERMS
+    query = " ".join(filter(None, (build_query(repo_slug(request.repo_url), terms=terms), search.state_qualifier())))
+    answer = search_issues(query, per_page=request.max_search_candidates, timeout_sec=_TIMEOUT_SEC)
+    candidates = []
+    for item in answer.items:
         number = item.get("number") if isinstance(item, dict) else None
         if isinstance(number, int):
-            found.append(
+            candidates.append(
                 Candidate(
                     ref=f"PR:{number}", title=str(item.get("title") or ""), html_url=str(item.get("html_url") or "")
                 )
             )
-    return found[: search.request.max_search_candidates]
+    return Found(candidates[: request.max_search_candidates], answer.total_count)
 
 
 def _strings(value: Any) -> tuple[str, ...]:
@@ -156,19 +128,40 @@ def build_search(params: Mapping[str, Any]) -> UpstreamSearch:
     states = _strings(params.get("states")) or _OPEN_ONLY
     if not set(states) <= _STATES:
         raise InvalidRequest(f"states must come from {sorted(_STATES)}")
-    monitor_url = str(params.get("pr_monitor_url") or "").strip()
+    keywords = _strings(params.get("keywords"))
+    wordless = [keyword for keyword in keywords if not _words(keyword)]
+    if wordless:
+        raise InvalidRequest(f"keyword {wordless[0]!r} holds no word to search for")
     request = CandidateSearchRequest(
         repo_url=repo_url,
         max_search_candidates=limit,
-        pr_monitor=PRMonitorConfig(monitor_url) if monitor_url else None,
-        keywords=_strings(params.get("keywords")),
-        search_modes=(_MONITOR, _GITHUB) if monitor_url else (_GITHUB,),
+        keywords=keywords,
+        search_modes=(_GITHUB,),
     )
     return UpstreamSearch(request, states)
 
 
+def _candidates(found: Found, search: UpstreamSearch) -> ToolOutput:
+    """What ``search`` ``found``, with how many pull requests the limit left out."""
+    prs = [{"ref": c.ref, "title": c.title, "url": c.html_url} for c in found.candidates]
+    not_shown = found.matched - len(prs)
+    shown = f"{len(prs)} of {found.matched}" if not_shown else str(len(prs))
+    top = f"; top: {prs[0]['ref']} {prs[0]['title']}" if prs else ""
+    repo_url = search.request.repo_url
+    return ToolOutput(
+        result={
+            "repo_url": repo_url,
+            "keywords": list(search.request.keywords),
+            "candidates": prs,
+            "matched_prs": found.matched,
+            "not_shown": not_shown,
+        },
+        summary=f"{shown} upstream PR candidate(s) in {repo_url}{top}",
+    )
+
+
 class UpstreamPrSearch:
-    """Params: ``repo_url`` (required), ``keywords``, ``limit`` (default 5, at most 20), ``states``, ``pr_monitor_url``."""
+    """Params: ``repo_url`` (required), ``keywords``, ``limit`` (default 10, at most 20) and ``states``."""
 
     name = UPSTREAM_PR_TOOL
 
@@ -181,17 +174,6 @@ class UpstreamPrSearch:
     async def run(self, request: ToolRequest, workdir: Path) -> ToolOutput:
         search = build_search(request.params)
         try:
-            found = await asyncio.to_thread(self._enumerate, search)
-        except SourceConfigError as exc:
-            raise ToolFailure(f"upstream PR search is misconfigured: {exc}") from exc
+            return _candidates(await asyncio.to_thread(self._enumerate, search), search)
         except GitHubUnavailable as exc:
             raise ToolFailure(f"upstream PR search cannot use GitHub: {exc}") from exc
-        except Exception as exc:
-            raise ToolFailure(f"upstream PR search failed: {type(exc).__name__}: {exc}") from exc
-        prs = [{"ref": c.ref, "title": c.title, "url": c.html_url} for c in found]
-        top = f"; top: {prs[0]['ref']} {prs[0]['title']}" if prs else ""
-        repo_url = search.request.repo_url
-        return ToolOutput(
-            result={"repo_url": repo_url, "keywords": list(search.request.keywords), "candidates": prs},
-            summary=f"{len(prs)} upstream PR candidate(s) in {repo_url}{top}",
-        )

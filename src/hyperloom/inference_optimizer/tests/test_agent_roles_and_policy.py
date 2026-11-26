@@ -13,30 +13,11 @@ from hyperloom.inference_optimizer.protocol.intent import (
     EXTEND_LEASE_MAX_SEC,
     Intent,
     IntentType,
-    IntentValidationError,
-    validate_envelope,
 )
 from hyperloom.inference_optimizer.protocol.action_surfaces import COORDINATOR_OWNED_KERNEL_REQUEST_KINDS
 from hyperloom.orchestrator.policy.denial import PolicyDenied
 from hyperloom.orchestrator.policy.gate import PolicyGate
 from hyperloom.orchestrator.state.shared_state import SharedState
-
-
-# Intent vocabulary
-@pytest.mark.parametrize(
-    ("intent_type", "payload"),
-    [
-        pytest.param("kill_task", {"task_id": "t1", "reason": "stalled"}, id="kill_task"),
-        # Requests are answered inline on the ``response`` topic.
-        pytest.param("response", {"in_reply_to": "m1", "kind": "profile_done"}, id="response"),
-    ],
-)
-def test_retired_intent_type_is_rejected(intent_type, payload):
-    """A retired intent type left the vocabulary; an envelope carrying it must be rejected."""
-    assert intent_type not in {member.value for member in IntentType}
-    envelope = {"intents": [{"intent_type": intent_type, "payload": payload}]}
-    with pytest.raises(IntentValidationError, match="not in allowed set"):
-        validate_envelope(envelope)
 
 
 # PolicyGate validation

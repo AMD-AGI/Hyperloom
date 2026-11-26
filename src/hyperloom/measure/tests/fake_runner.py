@@ -44,9 +44,18 @@ its own after the measured bench): a warmup round, the measured round and the ac
 own, and the accuracy round's report holds the score of ``fake_accuracy``.
 ``fake_log_line: <text>`` writes a server log whose last line that is, so the runner's progress reports it as the last
 line of the live output.
+``fake_round_tree: true`` writes, before it runs, what a real round leaves below its own directory
+(:data:`ROUND_TREE`, below :data:`ROUND_DIR`): the server log, a client log, the phase marks, ``launch.json``, a boot
+stamp and a profiler trace, plus a link out of the sandbox root (:data:`ROUND_LINK`) whose target holds a log.
+``fake_round_ready: <seconds>`` writes, before it runs, the ready stamp of a round below :data:`ROUND_DIR` that says its
+server booted in that many seconds.
+``fake_round_ruling: <mapping>`` writes, before it runs, that mapping as the AgentX checkpoint's ruling in the measured
+round's slot (the directory above :data:`ROUND_DIR`), where a round the checkpoint ruled on leaves it.
 ``fake_jit: true`` stages a contribution to the shared compiled-code cache (one aiter module, below ``/out/jit-cache``) and
 signs it into the manifest as a test that compiled it would; ``fake_jit_swap: true`` changes the staged list after the
-signing, as something that can write ``/out`` could.
+signing, as something that can write ``/out`` could. ``fake_jit: read_only`` signs the kind as a test given the cache
+read only does (a hit, no contribution) while the same files lie staged, as the code of a test the key does not cover
+could leave them there.
 """
 
 from __future__ import annotations
@@ -91,6 +100,27 @@ def _atomic(path: Path, data: bytes) -> None:
     scratch = path.with_name(f".{path.name}.tmp")
     scratch.write_bytes(data)
     os.replace(scratch, path)
+
+
+#: Where ``fake_round_tree`` puts a round, and what it writes there.
+ROUND_DIR = "variant_00_test/suite_run_0"
+ROUND_TREE = {
+    "server.log": b"Load weight begin\nFinished streaming dequant fp8 wo_a\n",
+    "client/aiperf.log": b"client waiting for the server\n",
+    "phase_marks.json": b'{"server_ready": null}\n',
+    "launch.json": b'{"framework": "fake"}\n',
+    "server_boot_active_at": b"1700000000.0\n",
+    "torch_trace/rank0.json": b'{"traceEvents": []}\n',
+}
+ROUND_LINK = "outside"
+
+
+def _round_tree(files: Path, root: Path) -> None:
+    for relative, data in ROUND_TREE.items():
+        _atomic(files / ROUND_DIR / relative, data)
+    outside = root.parent / f"{root.name}-outside"
+    _atomic(outside / "secret.log", b"not the sandbox's\n")
+    (files / ROUND_DIR / ROUND_LINK).symlink_to(outside, target_is_directory=True)
 
 
 def _visible_cards() -> list[int]:
@@ -158,8 +188,6 @@ def _write_files(out: Path, config: dict[str, Any], mode: str) -> dict[str, byte
             {"point": 0, "phase": "warmup", "dir": f"variant_00_warmup/{bench}", "returncode": 0},
             {"point": 0, "phase": "measure", "dir": f"variant_00_test/{bench}", "returncode": 0},
         ]
-    if config.get("fake_inventory"):
-        files["farm_inventory.json"] = json.dumps(config["fake_inventory"]).encode()
     if "fake_accuracy" in config:
         score = config["fake_accuracy"]
         values = [] if score is None else [{"task": "gsm8k", "metric": "exact_match,flexible-extract", "score": score}]
@@ -228,8 +256,9 @@ JIT_KEY = "a" * 64
 JIT_MODULE = b"\x7fELF the module a fake test compiled"
 
 
-def _stage_jit(out: Path) -> dict[str, Any]:
-    """Stage one aiter module as a runner does and give the ``jit_cache`` block that signs it."""
+def _stage_jit(out: Path, read_only: bool = False) -> dict[str, Any]:
+    """Stage one aiter module as a runner does and give the ``jit_cache`` block that signs it; ``read_only`` signs no
+    contribution of it, as a runner that gave the kind read only does."""
     staged = out / "jit-cache" / AITER_JIT.name
     sha = hashlib.sha256(JIT_MODULE).hexdigest()
     _atomic(staged / "blobs" / sha, JIT_MODULE)
@@ -239,11 +268,11 @@ def _stage_jit(out: Path) -> dict[str, Any]:
     kind = {
         "kind": AITER_JIT.name,
         "key": JIT_KEY,
-        "state": "miss",
+        "state": "hit" if read_only else "miss",
         "seed_files": 0,
         "seed_bytes": 0,
         "seed_snapshot": None,
-        "contribution": contribution,
+        "contribution": None if read_only else contribution,
     }
     return {"kinds": [kind], "builds_seen": 1, "jit_compile_sec": 3.0}
 
@@ -379,7 +408,7 @@ def _publish(
         files.update(_attached_env_files(spec, sandbox_root, out, config["fake_attached_env"]))
     manifest = _manifest(spec, raw, key, files, mode, config)
     if config.get("fake_jit"):
-        manifest["jit_cache"] = _stage_jit(out)
+        manifest["jit_cache"] = _stage_jit(out, read_only=config["fake_jit"] == "read_only")
     manifest_raw = encode_manifest(manifest)
     signer = signing.generate_private_key() if mode == "wrong_key" else key
     if mode == "tamper":
@@ -410,6 +439,15 @@ def main() -> int:
         mode = str(config.get("fake_mode", "ok"))
         if "fake_log_line" in config:
             _atomic(out / "files" / "server.log", f"boot\n{config['fake_log_line']}\n".encode())
+        if config.get("fake_round_tree"):
+            _round_tree(out / "files", root)
+        if "fake_round_ready" in config:
+            _atomic(
+                out / "files" / ROUND_DIR / "server_ready_at", f"{time.time()} {config['fake_round_ready']}\n".encode()
+            )
+        if "fake_round_ruling" in config:
+            slot = out / "files" / Path(ROUND_DIR).parent
+            _atomic(slot / "agentx_checkpoint.json", json.dumps(config["fake_round_ruling"]).encode())
         if config.get("fake_ready"):
             _atomic(out / "files" / "server_ready_at", f"{time.time()} 5\n".encode())
         progress.touch()

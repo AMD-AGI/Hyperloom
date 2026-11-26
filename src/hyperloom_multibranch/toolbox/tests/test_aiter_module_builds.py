@@ -41,7 +41,7 @@ from hyperloom_multibranch.toolbox.acceptance import AITER_SOURCES_REASON
 from hyperloom_multibranch.toolbox.local_hosted import aiter_builds_missing
 from hyperloom_multibranch.toolbox.native_builds import compiled_needs, native_builds, with_native_plan
 from hyperloom_multibranch.toolbox.pending_builds import PendingBuilds
-from hyperloom_multibranch.toolbox.store_builds import BuildSite, StoreBuildDriver
+from hyperloom_multibranch.toolbox.store_builds import StoreBuildDriver
 from hyperloom_multibranch.toolbox.tests.helpers import FakeRepo, build, req
 from hyperloom_multibranch.toolbox.tests.test_native_builds import REQUEST, Hooks
 
@@ -60,6 +60,7 @@ class AiterRig:
         locate = lambda name, python, cwd: self.package.parent / name  # noqa: E731
         monkeypatch.setattr(aiter_modules, "locate_package", locate)
         monkeypatch.setattr(farm_module, "locate_package", locate)
+        monkeypatch.setattr(farm_module, "installed_version", standin.installed_version)
         key = signing.generate_private_key()
         self.store = BuildStore(tmp / "store", Trust((TrustedKey(signing.public_key_pem(key), 1),), 1))
         self.machine = machine = BuildMachine(IMAGE, BUILDER, "gfx942", sys.executable)
@@ -67,8 +68,8 @@ class AiterRig:
         history = partial(self.store.ready_records, AITER_COMPONENT, IMAGE)
         self.modules = AiterModules(planner, history=history, environ={})
         runner = IsolatedBuilds(planner, self.blobs, isolation, {AITER_COMPONENT: standin.FACTORY})
-        site = BuildSite(IMAGE, BUILDER, "gfx942", {AITER_COMPONENT: standin.recipe()})
-        self.driver = StoreBuildDriver(self.store, Signer(key), site, compiled_needs, runner)
+        recipes = {AITER_COMPONENT: standin.recipe()}
+        self.driver = StoreBuildDriver(self.store, Signer(key), recipes, compiled_needs, runner)
         self.compiler = EnvironmentCompiler(
             self.blobs, IMAGE, lambda layout: standin.package_base(self.package), modules=self.modules
         )
@@ -204,14 +205,25 @@ async def test_a_csrc_patch_on_a_toolbox_whose_tests_cannot_build_its_modules_is
 
 
 async def test_a_csrc_patch_is_accepted_where_its_tests_can_build_the_modules(rig: AiterRig) -> None:
-    for missing, launch in ((None, {}), (NO_JIT_DIR, {"AITER_REBUILD": "1"})):
-        box = build(
-            rig.tmp / f"box-{len(launch)}",
-            repo=FakeRepo(rig.recipe(**launch)),
-            planner=OnCardPlanner(rig),
-            aiter_builds_missing=missing,
-        )
-        assert await box.toolbox.submit_test(req(purpose=Purpose.HEALTH)), (missing, launch)
+    box = build(rig.tmp / "box", repo=FakeRepo(rig.recipe()), planner=OnCardPlanner(rig), aiter_builds_missing=None)
+
+    assert await box.toolbox.submit_test(req(purpose=Purpose.HEALTH))
+
+
+async def test_a_csrc_patch_whose_launch_rebuilds_every_module_is_still_refused_without_a_jit_directory(
+    rig: AiterRig,
+) -> None:
+    """Its runner refuses the test before it looks at ``AITER_REBUILD``: it needs the test's own JIT directory."""
+    box = build(
+        rig.tmp / "box",
+        repo=FakeRepo(rig.recipe(AITER_REBUILD="1")),
+        planner=OnCardPlanner(rig),
+        aiter_builds_missing=NO_JIT_DIR,
+    )
+
+    with pytest.raises(RequestRejected) as refused:
+        await box.toolbox.submit_test(req(purpose=Purpose.HEALTH))
+    assert refused.value.code == "delta_not_applicable"
 
 
 async def test_a_toolbox_with_no_jit_directory_still_takes_a_candidate_that_leaves_aiters_sources(
@@ -222,9 +234,9 @@ async def test_a_toolbox_with_no_jit_directory_still_takes_a_candidate_that_leav
     assert await box.toolbox.submit_test(req(purpose=Purpose.HEALTH))
 
 
-def test_a_runner_with_the_jit_cache_or_a_full_rebuild_can_build_aiters_modules() -> None:
+def test_only_a_runner_with_the_jit_cache_can_build_aiters_modules() -> None:
     assert NO_JIT_DIR is not None and "HYPERLOOM_JIT_STORE" in NO_JIT_DIR
     assert aiter_builds_missing({"HYPERLOOM_JIT_CACHE": " "}) == NO_JIT_DIR, "an empty value names no directory"
     assert aiter_builds_missing({"HYPERLOOM_JIT_CACHE": "/jit"}) is None
-    assert aiter_builds_missing({"AITER_REBUILD": "1"}) is None
+    assert aiter_builds_missing({"AITER_REBUILD": "1"}) == NO_JIT_DIR, "its runner refuses the test before it rebuilds"
     assert aiter_builds_missing({"AITER_REBUILD": "0"}) == NO_JIT_DIR

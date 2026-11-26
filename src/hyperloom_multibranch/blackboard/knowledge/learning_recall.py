@@ -24,7 +24,7 @@ from typing import Any
 
 from hyperloom_kb import ReadStatus
 from hyperloom_multibranch.contracts.blackboard.records import LearningRecord, BlackboardSnapshot, SessionProfile
-from hyperloom_multibranch.blackboard.knowledge.experience import experience_identity
+from hyperloom_multibranch.blackboard.knowledge.experience import DATASET_KEY, experience_identity
 from hyperloom_multibranch.blackboard.knowledge.recall import WORKLOAD_KEYS, ExperienceReader, IdentityIndex, classify
 from hyperloom_multibranch.blackboard.families import Family
 from hyperloom_multibranch.blackboard.learning_search import (
@@ -42,7 +42,7 @@ from hyperloom_multibranch.blackboard.learning_search import (
 
 LEARNING_DECISION = "Choose the next step of one branch of a multi-branch LLM inference optimization session."
 LEARNING_OBJECTIVE = "specialist_learning@v1"
-LEARNING_CONDITIONS = ("model", "gpu", "framework", "tp", "conc", "isl", "osl")
+LEARNING_CONDITIONS = ("model", "gpu", "framework", "tp", "conc", "isl", "osl", DATASET_KEY)
 PAST_HEADING = "Past sessions' learnings:"
 MEASURED = "measured"
 CACHE_SIZE = 64

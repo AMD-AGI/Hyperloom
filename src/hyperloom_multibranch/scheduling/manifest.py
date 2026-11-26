@@ -12,7 +12,6 @@ rewrites, and a resumed or ``final-only`` leg records the Claw session it runs u
 
 from __future__ import annotations
 
-from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -25,38 +24,13 @@ from hyperloom_multibranch.scheduling.settings import RunSettings
 
 
 @dataclass(frozen=True)
-class ImageCheckSummary:
-    """:meth:`~hyperloom.common.outside_facts.image_check.ImageCheckReport.summary` as the manifest records it, in
-    the image check's own shape, which the manifest carries and does not read."""
-
-    fields: Mapping[str, object]
-
-    def to_document(self) -> dict[str, object]:
-        return dict(self.fields)
-
-    @classmethod
-    def from_document(cls, document: object) -> ImageCheckSummary:
-        if not isinstance(document, Mapping):
-            raise TypeError(f"expected an image check summary, got {document!r}")
-        return cls(dict(document))
-
-
-#: The summary a manifest without one reads as.
-NO_IMAGE_CHECK = ImageCheckSummary({})
-
-
-@dataclass(frozen=True)
 class SessionManifest:
     """The manifest document: the build the session ran on, the rule pack it read, the window it was given, the
-    settings it ran under, the metric it optimized, the policy versions it scored with, what the image check found and
-    how its agents were isolated.
+    settings it ran under, the metric it optimized, the policy versions it scored with and how its agents were
+    isolated.
 
     ``rule_pack`` is :func:`hyperloom.common.outside_facts.rule_pack.rule_pack_identity`'s version and digest, so a session's
-    prompts can be told apart from another's when the pack moves under a single build. ``image_check`` is the
-    :meth:`~hyperloom.common.outside_facts.image_check.ImageCheckReport.summary` of the check the session ran before its
-    first phase: its mode, the pack digest, the counts and the facts that failed; a manifest without it reads as
-    empty, so a session directory an earlier build wrote still reads back far enough to be refused for its build.
-    ``agent_isolation`` is how the session's peers launched its specialists, agent and dev sandboxes and tests
+    prompts can be told apart from another's when the pack moves under a single build. ``agent_isolation`` is how the session's peers launched its specialists, agent and dev sandboxes and tests
     (:mod:`~hyperloom_multibranch.scheduling.launch_isolation`), and why a launch on its host was not isolated; ``None``
     in a manifest an earlier build wrote. ``claw_session_id`` is the Claw session that hosts the session, from
     ``CLAW_SESSION_ID`` at its start, and the one each ``run --resume`` or ``final-only`` leg is given after that
@@ -72,7 +46,6 @@ class SessionManifest:
     settings: RunSettings
     metric: str
     policy_versions: dict[str, str]
-    image_check: ImageCheckSummary = NO_IMAGE_CHECK
     agent_isolation: LaunchIsolation | None = None
     claw_session_id: str | None = None
 
@@ -93,7 +66,6 @@ def read_manifest(path: Path) -> SessionManifest:
 __all__ = [
     "MB_DISTRIBUTION",
     "CodeVersion",
-    "ImageCheckSummary",
     "SessionManifest",
     "code_version",
     "read_manifest",

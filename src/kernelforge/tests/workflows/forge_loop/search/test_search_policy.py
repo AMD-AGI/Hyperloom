@@ -6,12 +6,14 @@ import pytest
 
 from kernelforge.workflows.forge_loop.campaign.run_state import RunState
 from kernelforge.workflows.forge_loop.search.search_policy import (
+    DIVERSIFY_AFTER_ROUNDS,
     MARGINAL_GAIN_FLOOR,
     NO_CHANGES_ESCALATION_THRESHOLD,
     OBJECTIVE_DISCOVER_NEW_MECHANISM,
-    OBJECTIVE_IMMEDIATE_CANONICAL_GAIN,
+    OBJECTIVE_CANONICAL_GAIN,
     SEARCH_MODE_DIVERSIFY,
     SEARCH_MODE_EXPLOIT,
+    SUPERVISE_AFTER_ROUNDS,
     RecentProgress,
     SearchPolicyDecision,
     SearchPolicyEngine,
@@ -21,7 +23,7 @@ from kernelforge.workflows.forge_loop.search.search_policy import (
 
 def test_warm_start_exploits_until_stalled():
     decision = SearchPolicyEngine().decide(
-        SearchState(best_source="warm_start", no_improvement_iters=0), stall_threshold=3
+        SearchState(best_source="warm_start", no_improvement_iters=0), diversify_after=3
     )
 
     assert decision.mode == SEARCH_MODE_EXPLOIT
@@ -30,7 +32,7 @@ def test_warm_start_exploits_until_stalled():
 
 def test_stalled_warm_start_enters_diversify():
     decision = SearchPolicyEngine().decide(
-        SearchState(best_source="warm_start", no_improvement_iters=3), stall_threshold=3
+        SearchState(best_source="warm_start", no_improvement_iters=3), diversify_after=3
     )
 
     assert decision.mode == SEARCH_MODE_DIVERSIFY
@@ -39,7 +41,7 @@ def test_stalled_warm_start_enters_diversify():
 
 def test_fresh_productive_search_exploits():
     decision = SearchPolicyEngine().decide(
-        SearchState(best_source="iteration", no_improvement_iters=0), stall_threshold=3
+        SearchState(best_source="iteration", no_improvement_iters=0), diversify_after=3
     )
 
     assert decision.mode == SEARCH_MODE_EXPLOIT
@@ -47,70 +49,46 @@ def test_fresh_productive_search_exploits():
 
 def test_stall_enters_diversify():
     stalled = SearchPolicyEngine().decide(
-        SearchState(best_source="iteration", no_improvement_iters=3), stall_threshold=3
+        SearchState(best_source="iteration", no_improvement_iters=3), diversify_after=3
     )
 
     assert stalled.mode == SEARCH_MODE_DIVERSIFY
     assert stalled.reason_codes == ("NO_IMPROVEMENT_STALL",)
 
 
-def test_completed_diversify_cycle_opens_bounded_exploit_window():
+def test_a_stalled_search_stays_diversified_until_a_new_best():
+    """Nothing but a new best ends the stall: every round in it is sent to a different mechanism."""
     engine = SearchPolicyEngine()
 
-    first = engine.decide(
-        SearchState(
-            best_source="warm_start",
-            no_improvement_iters=1,
-            current_mode=SEARCH_MODE_DIVERSIFY,
-            diversification_cycle_completed=True,
-        ),
-        stall_threshold=3,
-    )
-    second = engine.decide(
-        SearchState(
-            best_source="warm_start",
-            no_improvement_iters=2,
-            current_mode=first.mode,
-            residence_iterations_remaining=first.residence_iterations_remaining,
-        ),
-        stall_threshold=3,
-    )
+    def decide(stalled: int) -> SearchPolicyDecision:
+        return engine.decide(
+            SearchState(best_source="iteration", no_improvement_iters=stalled), diversify_after=DIVERSIFY_AFTER_ROUNDS
+        )
 
-    assert first.mode == SEARCH_MODE_EXPLOIT
-    assert first.reason_codes == ("DIVERSIFY_PLAN_CREATED",)
-    assert first.residence_iterations_remaining == 2
-    assert second.mode == SEARCH_MODE_EXPLOIT
-    assert second.reason_codes == ("MODE_RESIDENCE",)
-    assert second.residence_iterations_remaining == 1
+    assert [decide(stalled).mode for stalled in (1, 2, 3, 4)] == [SEARCH_MODE_DIVERSIFY] * 4
+    assert decide(0).mode == SEARCH_MODE_EXPLOIT
 
 
-def test_incomplete_diversify_cycle_stays_in_diversify():
-    decision = SearchPolicyEngine().decide(
-        SearchState(best_source="iteration", no_improvement_iters=5, current_mode=SEARCH_MODE_DIVERSIFY),
-        stall_threshold=3,
-    )
-
-    assert decision.mode == SEARCH_MODE_DIVERSIFY
-    assert decision.reason_codes == ("NO_IMPROVEMENT_STALL",)
+def test_the_search_turns_one_round_before_the_supervisor_reviews_it():
+    assert (DIVERSIFY_AFTER_ROUNDS, SUPERVISE_AFTER_ROUNDS) == (1, 2)
 
 
 def test_repeated_no_changes_diversifies_below_the_stall_threshold():
     decision = SearchPolicyEngine().decide(
         SearchState(best_source="iteration", no_improvement_iters=NO_CHANGES_ESCALATION_THRESHOLD),
-        stall_threshold=NO_CHANGES_ESCALATION_THRESHOLD + 1,
+        diversify_after=NO_CHANGES_ESCALATION_THRESHOLD + 1,
         recent=RecentProgress(consecutive_no_changes=NO_CHANGES_ESCALATION_THRESHOLD),
     )
 
     assert decision.mode == SEARCH_MODE_DIVERSIFY
     assert decision.reason_codes == ("REPEATED_NO_CHANGES",)
     assert decision.objective_kind == OBJECTIVE_DISCOVER_NEW_MECHANISM
-    assert decision.residence_iterations_remaining == 0
 
 
 def test_first_no_changes_does_not_escalate():
     decision = SearchPolicyEngine().decide(
         SearchState(best_source="iteration", no_improvement_iters=1),
-        stall_threshold=3,
+        diversify_after=3,
         recent=RecentProgress(consecutive_no_changes=NO_CHANGES_ESCALATION_THRESHOLD - 1),
     )
 
@@ -118,57 +96,23 @@ def test_first_no_changes_does_not_escalate():
     assert decision.reason_codes == ("CANONICAL_GAIN_AVAILABLE",)
 
 
-def test_repeated_no_changes_outranks_mode_residence():
-    """Escalate on empty diffs even while the mode is held in EXPLOIT."""
-    engine = SearchPolicyEngine()
-
-    held = engine.decide(
-        SearchState(
-            best_source="iteration",
-            no_improvement_iters=0,
-            current_mode=SEARCH_MODE_EXPLOIT,
-            residence_iterations_remaining=2,
-        ),
-        stall_threshold=3,
-        recent=RecentProgress(consecutive_no_changes=NO_CHANGES_ESCALATION_THRESHOLD),
-    )
-    # Same residence, one empty diff short of the threshold: the only difference is the streak, so residence must
-    # still win here or the test above proves nothing about which signal outranks which.
-    not_yet = engine.decide(
-        SearchState(
-            best_source="iteration",
-            no_improvement_iters=0,
-            current_mode=SEARCH_MODE_EXPLOIT,
-            residence_iterations_remaining=2,
-        ),
-        stall_threshold=3,
-        recent=RecentProgress(consecutive_no_changes=NO_CHANGES_ESCALATION_THRESHOLD - 1),
-    )
-
-    assert held.mode == SEARCH_MODE_DIVERSIFY
-    assert held.reason_codes == ("REPEATED_NO_CHANGES",)
-    assert not_yet.mode == SEARCH_MODE_EXPLOIT
-    assert not_yet.reason_codes == ("MODE_RESIDENCE",)
-
-
 def test_diminishing_returns_diversify_while_the_last_iteration_still_kept():
     """A ladder can flatten without ever stopping, and that is the case here."""
     decision = SearchPolicyEngine().decide(
         SearchState(best_source="iteration", no_improvement_iters=0),
-        stall_threshold=3,
+        diversify_after=3,
         recent=RecentProgress(window_gain_ratio=MARGINAL_GAIN_FLOOR / 5),
     )
 
     assert decision.mode == SEARCH_MODE_DIVERSIFY
     assert decision.reason_codes == ("DIMINISHING_RETURNS",)
     assert decision.objective_kind == OBJECTIVE_DISCOVER_NEW_MECHANISM
-    assert decision.residence_iterations_remaining == 0
 
 
 def test_a_ladder_still_climbing_keeps_its_direction():
     decision = SearchPolicyEngine().decide(
         SearchState(best_source="iteration", no_improvement_iters=0),
-        stall_threshold=3,
+        diversify_after=3,
         recent=RecentProgress(window_gain_ratio=MARGINAL_GAIN_FLOOR * 2),
     )
 
@@ -180,7 +124,7 @@ def test_an_unmeasured_window_is_not_a_flat_one():
     """No window yet must not read as a window of zero gain."""
     decision = SearchPolicyEngine().decide(
         SearchState(best_source="iteration", no_improvement_iters=0),
-        stall_threshold=3,
+        diversify_after=3,
         recent=RecentProgress(window_gain_ratio=None),
     )
 
@@ -192,7 +136,7 @@ def test_diminishing_returns_outrank_a_warm_started_incumbent():
     """A warm start earns exploitation, but not a whole flat window of it."""
     decision = SearchPolicyEngine().decide(
         SearchState(best_source="warm_start", no_improvement_iters=0),
-        stall_threshold=3,
+        diversify_after=3,
         recent=RecentProgress(window_gain_ratio=0.0),
     )
 
@@ -200,42 +144,11 @@ def test_diminishing_returns_outrank_a_warm_started_incumbent():
     assert decision.reason_codes == ("DIMINISHING_RETURNS",)
 
 
-def test_mode_residence_outranks_diminishing_returns():
-    """The round after a diversification is protected from the new trigger."""
-    engine = SearchPolicyEngine()
-
-    completed = engine.decide(
-        SearchState(
-            best_source="iteration",
-            no_improvement_iters=0,
-            current_mode=SEARCH_MODE_DIVERSIFY,
-            diversification_cycle_completed=True,
-        ),
-        stall_threshold=3,
-        recent=RecentProgress(window_gain_ratio=0.0),
-    )
-    held = engine.decide(
-        SearchState(
-            best_source="iteration",
-            no_improvement_iters=0,
-            current_mode=completed.mode,
-            residence_iterations_remaining=completed.residence_iterations_remaining,
-        ),
-        stall_threshold=3,
-        recent=RecentProgress(window_gain_ratio=0.0),
-    )
-
-    assert completed.mode == SEARCH_MODE_EXPLOIT
-    assert completed.reason_codes == ("DIVERSIFY_PLAN_CREATED",)
-    assert held.mode == SEARCH_MODE_EXPLOIT
-    assert held.reason_codes == ("MODE_RESIDENCE",)
-
-
 def test_a_stall_is_still_reported_as_a_stall():
     """A flat window and a stalled one are the same campaign; codes must not swap."""
     decision = SearchPolicyEngine().decide(
         SearchState(best_source="iteration", no_improvement_iters=3),
-        stall_threshold=3,
+        diversify_after=3,
         recent=RecentProgress(window_gain_ratio=0.0),
     )
 
@@ -249,7 +162,7 @@ def test_a_gain_ratio_that_is_not_a_number_is_refused(ratio):
     with pytest.raises(ValueError, match="window_gain_ratio"):
         SearchPolicyEngine().decide(
             SearchState(best_source="iteration", no_improvement_iters=0),
-            stall_threshold=3,
+            diversify_after=3,
             recent=RecentProgress(window_gain_ratio=ratio),
         )
 
@@ -270,17 +183,15 @@ def test_a_decision_must_state_why_it_was_taken():
         SearchPolicyDecision(
             mode=SEARCH_MODE_EXPLOIT,
             reason_codes=(),
-            objective_kind=OBJECTIVE_IMMEDIATE_CANONICAL_GAIN,
+            objective_kind=OBJECTIVE_CANONICAL_GAIN,
         )
 
 
-def test_run_state_persists_plan_search_policy():
+def test_run_state_persists_the_search_policy():
     state = RunState(
         search_mode=SEARCH_MODE_DIVERSIFY,
         search_reason_codes=["NO_IMPROVEMENT_STALL"],
         search_objective=OBJECTIVE_DISCOVER_NEW_MECHANISM,
-        search_mode_residence_remaining=2,
-        diversification_cycle_completed=True,
     )
 
     restored = RunState.from_dict(state.to_dict())
@@ -288,5 +199,3 @@ def test_run_state_persists_plan_search_policy():
     assert restored.search_mode == SEARCH_MODE_DIVERSIFY
     assert restored.search_reason_codes == ["NO_IMPROVEMENT_STALL"]
     assert restored.search_objective == OBJECTIVE_DISCOVER_NEW_MECHANISM
-    assert restored.search_mode_residence_remaining == 2
-    assert restored.diversification_cycle_completed is True

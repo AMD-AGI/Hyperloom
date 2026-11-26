@@ -46,6 +46,12 @@ EXPLORE_VARIANT_CONTRACT: tuple[str, ...] = (
         "Put every co-required flag in THIS one entry; do not scatter a "
         "coupling across several proposals."
     ),
+    (
+        "- Do not invent a flag, an environment variable or a value the "
+        "framework does not read: the accepted names and values differ by "
+        "framework and image version. Take them from the help of the "
+        "installed framework's server launch command, or from its source."
+    ),
 )
 # FrameworkPhase._candidates_from_discovery_proposals drops a candidate whose framework is not one of these exactly.
 _REGISTERED_FRAMEWORKS = ", ".join(framework_registry.names())

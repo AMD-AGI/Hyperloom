@@ -14,12 +14,9 @@ from pathlib import Path
 from typing import Any
 
 from hyperloom_common.io import JsonFormat, WriteOptions, atomic_write_bytes, atomic_write_json
+from hyperloom_common.kb_store import FILES_MEMBER_ROOT, KBStoreError
 
-from .remote_recipe._vendor.kb_store_client import (
-    FILES_MEMBER_ROOT,
-    KBStoreError,
-    KnowledgeSections,
-)
+from .remote_recipe.sections import KnowledgeSections
 from .remote_recipe.models import CONFIG_SECTION, KERNEL_SECTION, PATCH_SECTION
 from .remote_recipe.sanitize import HOST_ORIGIN_KEY
 

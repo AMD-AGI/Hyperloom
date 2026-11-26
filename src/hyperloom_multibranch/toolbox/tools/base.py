@@ -23,6 +23,7 @@ the loop goes away, instead of leaving it for the interpreter to wait on at exit
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import re
 import uuid
@@ -254,9 +255,6 @@ class ToolJobs:
             job.recipients.remove(branch)
         return False if job.recipients else self.cancel(job_id)
 
-    def has_job(self, job_id: str) -> bool:
-        return job_id in self._jobs
-
     def status(self, job_id: str) -> JobStatus:
         return self._job(job_id).status
 
@@ -264,6 +262,26 @@ class ToolJobs:
         """The tool's own result of the job; empty while it runs, when the tool raised, or for a job a restarted runner
         adopted from the shared record."""
         return self._job(job_id).result
+
+    def document(self, job_id: str, branch: str) -> Mapping[str, Any]:
+        """The record of the job ``job_id`` as its result file holds it, the tool's whole result or its error, for a
+        branch the result goes to; its id and status alone while it runs. The file is read, so a job that a runner
+        before this one ended is served too, to the branch that started it.
+
+        Raises :class:`LookupError` for an id no job has and :class:`PermissionError` for another branch's job.
+        """
+        job = self._jobs.get(job_id)
+        path = self._workdir(job_id) / RESULT_FILE
+        if job is not None and job.pointer is None:  # the file is written just before the pointer is set
+            record = {"job_id": job_id, "status": JobStatus.RUNNING.value}
+        elif _JOB_ID.match(job_id) and path.is_file():
+            record = json.loads(path.read_text(encoding="utf-8"))
+        else:
+            raise LookupError(f"no job {job_id!r}")
+        readers = (job.request.branch, *job.recipients) if job is not None else (record["branch"],)
+        if branch not in readers:
+            raise PermissionError(f"job {job_id!r} is not one of branch {branch!r}")
+        return record
 
     def cancel(self, job_id: str) -> bool:
         """Ask the job to stop; False when it already ended. The branch still gets a pointer, saying cancelled."""

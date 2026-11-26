@@ -1,12 +1,21 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Which files of a contribution the host fetches back from the sandbox, and how often it reads the snapshot it extends."""
+"""Which files of a contribution the host fetches back from the sandbox, how often it reads the snapshot it extends,
+and that it reads what the sandbox staged as untrusted."""
 
 from __future__ import annotations
 
+import hashlib
+import os
+from pathlib import Path
+
+import pytest
+
 from hyperloom.measure.jit import publish
-from hyperloom.measure.jit.store import Snapshot, StoredFile
+from hyperloom.measure.jit.store import DirJitStore, Snapshot, StoredFile
+from hyperloom.measure.manifest import JitCacheFacts
+from hyperloom.sandbox.socket import DirEntry
 
 _PARENT = "a" * 64
 
@@ -50,3 +59,72 @@ def test_a_first_snapshot_was_staged_whole_and_one_whose_parent_is_gone_is_taken
     assert store.reads == 0
     assert publish._staged_by_runner(store, Snapshot("triton", "k" * 64, _PARENT, files)) == frozenset()
     assert store.reads == 1
+
+
+# -- the publish path reads the sandbox as untrusted -------------------------------------------------------
+
+_KEY = "b" * 64
+_MODULE = b"\x7fELF a module"
+
+
+class _DirSandbox:
+    """A sandbox whose files are a directory: the file API reads through links, the listing does not."""
+
+    sandbox_id = "sbx"
+
+    def __init__(self, root: Path) -> None:
+        self.root = root
+
+    def _at(self, path: str) -> Path:
+        return self.root / path.lstrip("/")
+
+    def read_file(self, path: str) -> bytes:
+        return self._at(path).read_bytes()
+
+    def copy_out(self, path: str, dest: Path) -> int:
+        data = self._at(path).read_bytes()
+        dest.write_bytes(data)
+        return len(data)
+
+    def list_entries(self, path: str) -> list[DirEntry]:
+        found = []
+        for child in sorted(self._at(path).iterdir()):
+            kind = "link" if child.is_symlink() else "dir" if child.is_dir() else "file"
+            found.append(DirEntry(child.name, kind, child.lstat().st_size))
+        return found
+
+
+def _staged(tmp_path: Path, data: bytes, *, listed_size: int | None = None, link: bool = False) -> JitCacheFacts:
+    staged = tmp_path / "out" / "jit-cache" / "aiter_jit"
+    (staged / "blobs").mkdir(parents=True)
+    sha = hashlib.sha256(data).hexdigest()
+    if link:
+        (tmp_path / "target").write_bytes(data)
+        (staged / "blobs" / sha).symlink_to(tmp_path / "target")
+    else:
+        (staged / "blobs" / sha).write_bytes(data)
+    snapshot = Snapshot("aiter_jit", _KEY, None, {"module_a.so": StoredFile(sha, listed_size or len(data))})
+    (staged / "manifest.json").write_bytes(snapshot.to_bytes())
+    contribution = {"sha256": snapshot.sha256(), "files": 1, "bytes": len(data)}
+    kind = {"kind": "aiter_jit", "key": _KEY, "state": "miss", "seed_files": 0, "seed_bytes": 0, "seed_snapshot": None}
+    document = {"kinds": [{**kind, "contribution": contribution}], "builds_seen": 0, "jit_compile_sec": 0.0}
+    return JitCacheFacts.parse(document, "jit_cache")
+
+
+@pytest.mark.parametrize("how", ["link", "size"])
+def test_a_staged_blob_that_is_a_link_or_not_its_listed_size_is_not_fetched(tmp_path, how) -> None:
+    facts = _staged(tmp_path, _MODULE, link=how == "link", listed_size=len(_MODULE) + 5 if how == "size" else None)
+    store = DirJitStore(tmp_path / "store")
+    (tmp_path / "scratch").mkdir()
+
+    assert publish.publish_contributions(store, _DirSandbox(tmp_path), facts, tmp_path / "scratch") == 0
+    assert not (tmp_path / "store" / "blobs").exists()
+
+
+def test_a_staged_plain_blob_of_its_listed_size_is_published(tmp_path) -> None:
+    facts = _staged(tmp_path, _MODULE)
+    store = DirJitStore(tmp_path / "store")
+    (tmp_path / "scratch").mkdir()
+
+    assert publish.publish_contributions(store, _DirSandbox(tmp_path), facts, tmp_path / "scratch") == 1
+    assert os.path.isdir(tmp_path / "store" / "blobs")

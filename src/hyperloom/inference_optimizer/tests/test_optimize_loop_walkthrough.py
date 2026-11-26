@@ -22,11 +22,8 @@ from ._geak_helpers import stop_geak_before_launch
 
 def _coordinator(session_dir: Path):
     from hyperloom.orchestrator.loop.coordinator import Coordinator
-    from hyperloom.orchestrator.roles import (
-        MockBackend,
-        MockCriticBackend,
-        ScriptedPlan,
-    )
+    from hyperloom.orchestrator.roles import MockCriticBackend
+    from hyperloom.orchestrator.tests.mock_backend import MockBackend, ScriptedPlan
 
     # Orchestration says nothing: what the phases do on their own is the point.
     silent = ScriptedPlan(
@@ -137,6 +134,8 @@ async def test_both_arms_dry_walks_the_rest_of_the_chain(
         # Source arm: no local exploration, and discovery past its retries.
         state.framework_local_explore_enabled = False
         state.framework_agent_empty_discoveries = 99
+        # One more cycle without gain converges the run, so CYCLE_END closes rather than loops back.
+        state.no_gain_cycle_streak = ps.DEFAULT_GLOBAL_CONVERGENCE_NO_GAIN_CYCLES - 1
         # Config arm: a run of benched variants past the streak floor, none adopted.
         for i in range(ps.DEFAULT_PLATEAU_EXPLORE_EMPTY_STREAK + 1):
             record_attempt_row(
@@ -166,8 +165,9 @@ async def test_both_arms_dry_walks_the_rest_of_the_chain(
         assert getattr(state, result_field)[result_key] == expected
         visited = [to_phase for _, to_phase, _ in _chain(state)]
         assert visited[:2] == [ps.PHASE_PRELUDE, ps.PHASE_FRAMEWORK_AGENT]
-        assert visited[-3:] == [ps.PHASE_KERNEL_AGENT, ps.PHASE_SWEEP, ps.PHASE_CLOSE]
+        assert visited[-3:] == [ps.PHASE_KERNEL_AGENT, ps.PHASE_CYCLE_END, ps.PHASE_CLOSE]
         reasons = {reason for _, _, reason in _chain(state)}
         assert "optimize_no_more_leverage" in reasons
+        assert state.stop_reason == "global_converged"
     finally:
         await coord.stop()

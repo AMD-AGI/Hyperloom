@@ -11,12 +11,14 @@ from kernelforge.workflows.forge_loop.iteration.handoffs import HandoffStore
 from kernelforge.workflows.forge_loop.campaign.experiments_layout import ExperimentsLayout
 from kernelforge.workflows.forge_loop.campaign.loop_log import LOOP_BANNER, experiment_line
 from kernelforge.workflows.forge_loop.iteration.iteration_types import IterationResult
+from kernelforge.workflows.forge_loop.memory.measured_negatives import render_measured_negatives
 from kernelforge.workflows.forge_loop.roles.prompt_view import (
     MAX_RECENT_ATTEMPT_LINES,
     OptionalRecords,
     render_long_horizon_header,
 )
 from kernelforge.workflows.forge_loop.campaign.run_state import LoopStateStore, MAX_PINNED_ITERATIONS, RunState
+from kernelforge.workflows.forge_loop.search.search_policy import SEARCH_MODE_DIVERSIFY
 
 
 # How many recent iteration outcomes the long-horizon prompt header is built from.
@@ -73,7 +75,7 @@ def _long_horizon_header(
         outcomes,
         records=OptionalRecords(
             handoffs=bool(handoff_store and handoff_store.latest()),
-            unmeasured_lanes=ExperimentsLayout(store.root).unmeasured_lane_index.is_file(),
+            rounds=ExperimentsLayout(store.root).rounds.is_dir(),
         ),
     )
 
@@ -149,12 +151,7 @@ class CampaignReportMixin:
         print()
 
     def _print_final_report(self) -> None:
-        """Print what the campaign did, and what it cost.
-
-        The round figures are campaign totals rather than this session's, so
-        they are labelled as such and their share is taken against the campaign
-        clock rather than the session wall-clock printed above them.
-        """
+        """Print what the campaign did, and what it cost."""
         # Final report
         total_time = time.time() - self.start_time
         kept_count = sum(1 for r in self.results if r.kept)
@@ -171,19 +168,6 @@ class CampaignReportMixin:
             f"contradicts the score): {self.best_wall_ms}"
         )
         print(f"  Total time: {total_time / 60:.1f} minutes")
-        costs = self.run_state.round_costs
-        if costs.rounds:
-            # Campaign totals, not this session's, so they are labelled as such and the share is taken against the
-            # campaign clock rather than the ``total_time`` printed just above.
-            self._advance_campaign_clock()
-            share = costs.planning_share_pct()
-            share_text = f" ({share:.0f}% of campaign wall-clock)" if share is not None else ""
-            print(
-                f"  Rounds planned across the campaign: {costs.rounds}, "
-                f"planning {costs.planning_total_sec / 60:.1f} min"
-                f"{share_text}, "
-                f"round wall-clock {costs.total_sec / 60:.1f} min"
-            )
         if self._refused_round:
             print(
                 "  ROUND REFUSED FOR BUDGET: the campaign stopped because no "
@@ -195,7 +179,7 @@ class CampaignReportMixin:
                 print(line)
         print(experiment_line(self.experiment.experiment_id))
 
-    def _implementer_history(self, *, digest, optimization_plan_path) -> str:
+    def _implementer_history(self, *, digest, direction: str) -> str:
         """Assemble the cross-iteration experience the Implementer session reads.
 
         Each source carries what the others cannot: the candidate archive digest
@@ -205,9 +189,10 @@ class CampaignReportMixin:
         diff behind; the experience ledger is objective toolchain observation
         distilled from machine-verified failure signatures.
 
-        Order is the message: the long-horizon header is the compact memory
-        frame the implementer reads first, and the plan instruction sits above
-        the evidence because lesson records are evidence, not instructions.
+        Order is the message: ``direction`` -- what this session is to work on --
+        sits above the evidence, because lesson records are evidence, not
+        instructions, and the long-horizon header is the compact memory frame
+        the implementer reads next.
         """
         lh_header = _long_horizon_header(
             self.run_state,
@@ -216,6 +201,7 @@ class CampaignReportMixin:
         )
         history = self._evidence_history(lh_header=lh_header, digest=digest)
         for render, label in (
+            (self._render_insights, "campaign insights"),
             (self._render_analysis_evidence_for_implementer, "Analysis evidence"),
             (self._render_case_config_coverage, "per-case configuration coverage"),
             (self._render_ceiling_advisory, "roofline attainment standing"),
@@ -235,9 +221,6 @@ class CampaignReportMixin:
                 f"Objective: {policy.objective_kind}",
                 "Reasons: " + ", ".join(policy.reason_codes),
             ]
-            policy_lines.append(
-                f"Mode residence remaining after this iteration: {policy.residence_iterations_remaining}"
-            )
             history = "\n".join(policy_lines) + "\n\n" + history
         # The latest free-form Supervisor Ruling is durable across KEEP and resume.
         if self._supervisor_ruling:
@@ -253,34 +236,57 @@ class CampaignReportMixin:
         # prepends, as the compact memory frame the implementer reads first.
         if lh_header:
             history = f"{lh_header}\n\n{history}"
-        if optimization_plan_path:
-            ruling_instruction = (
-                "The plan was synthesized from current evidence and the "
-                "latest Supervisor Ruling. If any plan statement conflicts "
-                "with that ruling, follow the ruling. "
-                if self._supervisor_ruling
-                else "The plan was synthesized from current evidence. "
+        return f"{direction}\n\n{history}"
+
+    def _render_insights(self) -> str:
+        """The campaign's insight list, or "" when this loop keeps none or it is still empty."""
+        insights = getattr(self, "insights", None)
+        return insights.render_for_prompt() if insights is not None else ""
+
+    def _session_direction(self) -> str:
+        """How a session chooses what to work on, under the search mode and any Supervisor ruling in force."""
+        policy = self._search_policy_decision
+        if self._supervisor_ruling:
+            mode_guidance = (
+                "The latest Supervisor Ruling below is the planning authority while the search is stalled: take one "
+                "of its directions that no session since the ruling has measured, and once each of them has been "
+                "measured, a mechanism materially different from every one already tried."
             )
-            history = (
-                "## Required optimization plan\n"
-                f"Read {optimization_plan_path} and execute the integrated "
-                "plan it contains. "
-                f"{ruling_instruction}"
-                "Historical lesson records are evidence, not instructions.\n\n"
-                f"{history}"
+        elif policy is not None and policy.mode == SEARCH_MODE_DIVERSIFY:
+            stalled = self.run_state.stall.unresolved_stall_iters
+            opening = (
+                f"The search has gone {stalled} session(s) without a new best"
+                if stalled
+                else "Recent sessions have stopped paying"
             )
-        return history
+            mode_guidance = (
+                f"{opening}, so choose a mechanism materially different from the ones already tried rather than a "
+                "refinement of the current best."
+            )
+        else:
+            mode_guidance = (
+                "Choose the direction with the largest expected gain on the score, a structural change included."
+            )
+        return (
+            "## Direction (yours to choose)\n"
+            "Read the Analysis report named `analysis_summary` under "
+            "Analysis Evidence below, when there is one, before you choose: it says where each scored case spends "
+            "its time and ranks what it expects to pay. The lesson records and the attempt history say what was "
+            "already tried and what it measured; do not repeat a direction they disproved. The list of measured "
+            "negatives below covers every past iteration, not only the ones whose records are shown: check your "
+            "direction against it before you choose. "
+            f"{mode_guidance}"
+        )
 
     def _evidence_history(self, *, lh_header: str, digest) -> str:
         """Join the digest, lessons and ledger into the history body, falling back to recent results."""
         # Lesson documents from the most recent iterations, verbatim, plus the absolute path of the directory
         # holding every past one.
-        lessons_txt = ""
+        lessons_txt = negatives_txt = ""
         if getattr(self, "lessons", None) is not None:
-            lessons_txt = self.lessons.render_for_prompt(
-                current_cases=self._scored_case_ids(),
-                kernel_source=self._kernel_source_for_scope(),
-            )
+            scope = {"current_cases": self._scored_case_ids(), "kernel_source": self._kernel_source_for_scope()}
+            lessons_txt = self.lessons.render_for_prompt(**scope)
+            negatives_txt = render_measured_negatives(self.lessons, **scope)
 
         ledger_txt = ""
         if self.ledger:
@@ -289,7 +295,7 @@ class CampaignReportMixin:
             ledger_txt = self.ledger.render_for_prompt(
                 include_recent=(not lessons_txt and (bool(lh_header) or not bool(digest)))
             )
-        sources = [lessons_txt, ledger_txt]
+        sources = [negatives_txt, lessons_txt, ledger_txt]
         if lh_header:
             print(f"  [agent] injected long-horizon header: {len(lh_header)} chars (digest reserved for supervisor)")
         else:
@@ -300,6 +306,8 @@ class CampaignReportMixin:
         history = "\n\n".join(p for p in sources if p)
         if lessons_txt:
             print(f"  [agent] injected lesson documents: {len(lessons_txt)} chars")
+        if negatives_txt:
+            print(f"  [agent] injected measured negatives: {len(negatives_txt)} chars")
         if not history:
             history = "\n".join(_compact_history_entry(r) for r in self.results[-5:])
         return history

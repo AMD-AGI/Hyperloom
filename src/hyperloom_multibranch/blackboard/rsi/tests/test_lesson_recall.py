@@ -16,6 +16,8 @@ from hyperloom_multibranch.contracts.blackboard.peers import IntentLayer
 from hyperloom_multibranch.contracts.blackboard.records import Learning, LearningRecord, BlackboardSnapshot
 from hyperloom_multibranch.contracts.blackboard.vocab import LearningKind
 from hyperloom_multibranch.blackboard.families import Family, Mechanism
+from hyperloom_multibranch.blackboard.knowledge.experience import experience_identity
+from hyperloom_multibranch.blackboard.knowledge.tests.fakes import FakeExperienceReader, completed_read
 from hyperloom_multibranch.blackboard.learning_search import LEARNINGS_LOG, NOTES_HEADING, RetrievalLog
 from hyperloom_multibranch.blackboard.rsi.briefing import CrossSessionBriefing, RecallCache
 from hyperloom_multibranch.blackboard.rsi.lesson_recall import GIST_CHARS, SHOWN_BEFORE, LessonRecall, edited_lessons
@@ -98,6 +100,17 @@ def test_a_lesson_bears_on_a_query_by_its_words_from_a_session_alike_enough_to_t
     assert LessonRecall().past_revision() == ""
     assert LessonRecall().notes(snapshot, "cuda graph", limit=5).past == ()
     assert recall.notes(dataclasses.replace(snapshot, profile=None), "cuda graph", limit=5).past == ()
+
+
+def test_a_lesson_measured_on_a_prompt_dataset_reaches_a_session_on_random_prompts_naming_the_dataset(
+    snapshot: BlackboardSnapshot, pool: LessonPool
+) -> None:
+    on_a_dataset = task_conditions(profile(dataset="/data/prompts.jsonl"))
+    graph = lesson(pool, "graph", CORRECTION, on_a_dataset, evidence=MEASURED)
+
+    found = LessonRecall(pool=pool).notes(snapshot, "cuda graph padding", limit=5)
+
+    assert [item.render() for item in found.past] == [f"- [past-1, dataset differ, measured] {CORRECTION} [{graph}]"]
 
 
 def test_a_lesson_this_session_revised_or_retired_is_shown_no_more_and_the_standing_weighs_the_rest(
@@ -218,3 +231,71 @@ async def test_the_brief_shows_past_lessons_as_learnt_before(tmp_path: Path, poo
     brief = await briefing.startup_brief("c0")
 
     assert f"learnt before: [past-1, same conditions, measured] {CORRECTION} [{graph}]" in brief.lessons
+
+
+def _kb_item(text: str, experience_id: str = "exp-kb", session: str = "sess-0") -> dict[str, object]:
+    return {
+        "experience_id": experience_id,
+        "source_run_id": session,
+        "identity": experience_identity(profile()),
+        "change_summary": text,
+        "decision": "measured",
+    }
+
+
+def _kb_learning(text: str) -> FakeExperienceReader:
+    return FakeExperienceReader(completed_read(_kb_item(text)))
+
+
+async def test_the_brief_and_the_learnings_tool_fill_the_slots_left_with_the_kbs_learnings_and_a_claim_reads_none(
+    tmp_path: Path, pool: LessonPool
+) -> None:
+    blackboard = await scripted_session(tmp_path / "blackboard", FakeClock())
+    snapshot = await blackboard.snapshot()
+    graph = lesson(pool, "graph", CORRECTION, evidence=MEASURED)
+    reader = _kb_learning("cuda graph capture needs eager prefill on this model")
+    log = tmp_path / LEARNINGS_LOG
+    recall = LessonRecall(reader, pool=pool, log=RetrievalLog(log))
+    kb = "[sess-0, same conditions, measured] cuda graph capture needs eager prefill on this model [exp-kb]"
+
+    told = await recall.lines(snapshot, "cuda graph", limit=5, branch="s1")
+    await recall.about(snapshot, "cuda graph max batch size", branch="s1")
+    brief = await CrossSessionBriefing(
+        blackboard, recalls=RecallCache(), champions={}, refused={}, focus="cuda graph", branch="s2", learnings=recall
+    ).startup_brief("c0")
+    (asked, claim, _) = [json.loads(line) for line in log.read_text(encoding="utf-8").splitlines()]
+
+    assert told == [NOTES_HEADING, f"- [past-1, same conditions, measured] {CORRECTION} [{graph}]", f"- {kb}"]
+    assert f"learnt before: {kb}" in brief.lessons
+    assert (asked["past"], claim["past"]) == ([graph, "exp-kb"], [graph])
+    assert [context["observations"]["query"] for _, context, _ in reader.calls] == ["cuda graph"]
+
+
+def test_a_kb_learning_that_says_what_a_pool_lesson_says_or_said_is_left_to_the_pool(
+    snapshot: BlackboardSnapshot, pool: LessonPool
+) -> None:
+    """CLOSE writes a session's learnings to the pool and the KB alike: the KB's copy of a live lesson would list it
+    twice, and its copy of a retired one would bring back what the pool retired."""
+    graph = lesson(pool, "graph", CORRECTION, evidence=MEASURED)
+    gone = lesson(pool, "gone", "cuda graph capture needs eager prefill here")
+    pool.retire(LessonRetirement(gone, human_author("curator"), START, "fixed upstream"))
+    copies = (
+        _kb_item(f"  {CORRECTION.upper()} ", "exp-live", "past-1"),
+        _kb_item("cuda graph capture needs eager prefill here", "exp-gone", "past-1"),
+    )
+    reader = FakeExperienceReader(completed_read(*copies, _kb_item("cuda graph warmup needs two batches", "exp-new")))
+
+    found = LessonRecall(reader, pool=pool).notes(snapshot, "cuda graph", limit=5)
+
+    assert [item.experience_id for item in found.past] == [graph, "exp-new"]
+
+
+def test_no_kb_read_once_this_session_and_the_pool_fill_the_list(
+    snapshot: BlackboardSnapshot, pool: LessonPool
+) -> None:
+    graph = lesson(pool, "graph", CORRECTION, evidence=MEASURED)
+    reader = _kb_learning("cuda graph capture needs eager prefill on this model")
+
+    found = LessonRecall(reader, pool=pool).notes(snapshot, "cuda graph", limit=1)
+
+    assert [item.experience_id for item in found.past] == [graph] and reader.calls == []

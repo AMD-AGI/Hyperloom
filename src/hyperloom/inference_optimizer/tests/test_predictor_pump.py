@@ -263,7 +263,7 @@ async def coordinator(service, tmp_path, monkeypatch):
     """A real Coordinator in FRAMEWORK whose predictor has queued one row, ``--kv-cache-dtype fp8``."""
     from hyperloom.inference_optimizer.session.paths import make_session_dir
     from hyperloom.orchestrator.loop.coordinator import Coordinator
-    from hyperloom.orchestrator.roles import MockBackend, ScriptedPlan
+    from hyperloom.orchestrator.tests.mock_backend import MockBackend, ScriptedPlan
 
     monkeypatch.setenv("USER_DATA_PATH", str(tmp_path))
     silent = ScriptedPlan(turns=[])
@@ -544,7 +544,7 @@ async def test_entry_asks_at_its_own_decision_point_after_filing_an_earlier_answ
     # Answered while FRAMEWORK was away, so nothing filed it.
     await phase._predictor._inflight
     state.macro_cycle = 1
-    await phase.on_enter_framework(SimpleNamespace(from_phase="SWEEP"))
+    await phase.on_enter_framework(SimpleNamespace(from_phase="CYCLE_END"))
 
     assert len(service.requests) == 2
     assert [(r["round_id"], r["cycle"]) for r in _predictor_rounds(state)] == [("c0-s0-r0", 0), ("c1-s0-r0", 1)]

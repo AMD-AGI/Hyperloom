@@ -21,12 +21,13 @@ from typing import Any
 from hyperloom_common.io import SHARED, atomic_write_json
 from hyperloom_common.jsonio import read_json_strict
 from hyperloom_multibranch.contracts.blackboard import INTEGRATION_BRANCH
-from hyperloom_multibranch.contracts.blackboard.vocab import BranchDriver
+from hyperloom_multibranch.contracts.blackboard.vocab import GAVE_UP_CAUSE, BranchDriver
 from hyperloom_multibranch.scheduling.clock import Clock
 from hyperloom_multibranch.toolbox.queue import QueuePolicy
 
-#: Names how :meth:`Roster.quota_policy` hands out K; recorded in the manifest fingerprint.
-QUOTA_POLICY_VERSION = "quota-5"
+#: Names how :meth:`Roster.quota_policy` hands out K and what a K gives a branch in the toolbox's queue; recorded in the
+#: manifest fingerprint.
+QUOTA_POLICY_VERSION = "quota-6"
 
 
 class BranchKind(str, Enum):
@@ -92,7 +93,7 @@ class StopCause(str, Enum):
     JUDGE = "judge"
     SESSION_END = "session_end"
     START_FAILED = "start_failed"
-    GAVE_UP = "gave_up"
+    GAVE_UP = GAVE_UP_CAUSE
     REPAIR_TIME_LIMIT = "repair_time_limit"
 
     @property
@@ -146,11 +147,17 @@ class BranchEntry:
         return self.stop is not None and self.stop.cause.lets_tests_finish
 
 
-def specialist_open(entries: Iterable[BranchEntry]) -> bool:
-    """Whether a branch among ``entries`` whose specialist the judge steers is admitted or running; an agent's branch
-    searches by its own logic, so it does not stand for the session's specialists."""
+def open_specialists(entries: Iterable[BranchEntry]) -> int:
+    """How many branches among ``entries`` whose specialist the judge steers are admitted or running; an agent's
+    branch searches by its own logic, so it does not stand for the session's specialists."""
 
-    return any(entry.counts_toward_cap and entry.origin.steered_by_judge for entry in entries)
+    return sum(entry.counts_toward_cap and entry.origin.steered_by_judge for entry in entries)
+
+
+def specialist_open(entries: Iterable[BranchEntry]) -> bool:
+    """Whether any of :func:`open_specialists` is."""
+
+    return open_specialists(entries) > 0
 
 
 @dataclass(frozen=True)

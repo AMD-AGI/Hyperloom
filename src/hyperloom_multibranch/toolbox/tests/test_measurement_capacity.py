@@ -137,7 +137,6 @@ async def test_a_local_toolbox_is_one_node_and_never_quarantines_it(tmp_path: Pa
         await toolbox._node_failed(NODE, "unclear failure", reproduced=False)
         await toolbox._node_failed(NODE, "unclear failure", reproduced=False)
         assert toolbox.quarantined == frozenset() and await blackboard.quarantined() == ()
-        assert toolbox.node_failures == {NODE: 3}
     finally:
         await toolbox.close()
 
@@ -310,21 +309,6 @@ async def test_restoring_lost_cards_works_while_a_process_holds_a_card_that_is_n
         assert await asyncio.to_thread(second.provider.pool.acquire, 5, 0.0) == (1, 2, 4, 5, 7), "but is not handed out"
     finally:
         await second.close()
-
-
-async def test_lifting_a_node_keeps_the_cards_lost_for_good(tmp_path: Path) -> None:
-    blackboard = LocalBlackboard(tmp_path / "blackboard", Writer(Role.TOOLBOX, "toolbox"))
-    toolbox = _local_toolbox(tmp_path, blackboard)
-    try:
-        await toolbox.start()
-        toolbox.provider.quarantined.add(2)
-        await toolbox.tick()
-        await toolbox._quarantine.add(NODE, "infra failure")
-        assert await toolbox._quarantine.lift(NODE, "operator") is True
-        assert [e.gpu_ids for e in await _gpu_events(blackboard)] == [(2,)]
-        assert toolbox.quarantined == frozenset()
-    finally:
-        await toolbox.close()
 
 
 async def test_cards_leaked_while_shutting_down_are_recorded(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

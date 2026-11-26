@@ -98,13 +98,17 @@ async def test_a_dispatch_tag_beyond_the_primary_domain_adds_that_domains_focus(
         task_id="t1",
         kind="specialist",
         state="queued",
-        params={"domain": "serving_specialist", "tags": ["serving_specialist", "comm_specialist"], "mode": "research"},
+        params={
+            "domain": "research_scout_specialist",
+            "tags": ["research_scout_specialist", "static_recon_specialist"],
+            "mode": "research",
+        },
         idempotency_key="t1",
         requires_lanes=tuple(),
     )
     prep = await _runner(session_dir=tmp_path)._prepare(RunnerContext(task=task, lease=None, extra={}))
-    assert prep.system_prompt.count("### Domain focus — serving_specialist") == 1
-    assert "### Domain focus — comm_specialist" in prep.system_prompt
+    assert prep.system_prompt.count("### Domain focus — research_scout_specialist") == 1
+    assert "### Domain focus — static_recon_specialist" in prep.system_prompt
 
 
 def test_classify_succeeded():
@@ -315,9 +319,7 @@ def test_a_specialist_keeps_only_citations_of_experiences_its_dispatch_showed(tm
 
 
 def test_finalize_strips_forbidden_fields_before_the_critic_can_see_them(tmp_path):
-    """The Critic is told to reject a proposal_set carrying self-reported gain
-    fields, which costs the round every idea in it. Dropping them makes that
-    verdict unreachable; the audit note still records what was there."""
+    """A self-reported gain field never reaches review; the audit note records what was there."""
     result, written = _finalize(
         _runner(),
         tmp_path,

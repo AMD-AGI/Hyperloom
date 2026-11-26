@@ -198,6 +198,19 @@ def _fill_integrate_recipe_from_current_best(
     for key in ("remove_args", "unset_envs"):
         resolved[key] = to_str_list(resolved.get(key, current_best.get(key)))
     resolved.setdefault("args_mode", current_best.get("args_mode") or "append")
+    _inherit_overlay(resolved, current_best)
+
+
+def _inherit_overlay(resolved: dict, current_best: Mapping[str, Any]) -> None:
+    """Put the directory ``current_best`` was measured with on the candidate's import path, unless it names its own.
+
+    ``PYTHONPATH`` in ``extra_envs`` never reaches a launch, so the overlay travels as a runtime override.
+    """
+    overlay = str(current_best.get("final_overlay") or "").strip()
+    override = resolved.get("runtime_override")
+    override = dict(override) if isinstance(override, Mapping) else {}
+    if overlay and not override.get("pythonpath_prefix"):
+        resolved["runtime_override"] = {**override, "pythonpath_prefix": overlay}
 
 
 def _merge_integrate_extra_envs(

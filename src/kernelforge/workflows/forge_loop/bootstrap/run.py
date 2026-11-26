@@ -26,7 +26,6 @@ from kernelforge.workflows.forge_loop.bootstrap.preparation import (
 from kernelforge.workflows.forge_loop.bootstrap.reporter import _Implementer, _RunReporter
 from kernelforge.workflows.forge_loop.bootstrap.request import (
     ForgeLoopRequest,
-    SpecialistProbeOptions,
     validate_roofline_target,
 )
 from kernelforge.workflows.forge_loop.bootstrap.run_context import _ForgeDeadline, _ForgeRun
@@ -34,9 +33,11 @@ from kernelforge.workflows.forge_loop.bootstrap.session_budget import _forge_ses
 from kernelforge.workflows.forge_loop.bootstrap.warm_start import _read_kb_warm_start, _WarmStart
 from kernelforge.agent_backends.runtime import agent_runtime
 from kernelforge.config import Config, KnowledgeConfig, agent_runtime_overrides
+from kernelforge.evaluation.scoring import CaseAggregate
 from kernelforge.workflows.forge_loop.memory.knowledge_integration import kb_reference_program_md
 from hyperloom_common.io import DURABLE, JsonFormat, atomic_write_json
 from kernelforge.utils.git import git_head
+from kernelforge.utils.import_root import import_path_first
 from kernelforge.utils.gpu_arch import Profiler, arch_profile
 from kernelforge.workflows.forge_loop.campaign.schema import ExperimentSubject
 
@@ -270,6 +271,7 @@ def _resolve_campaign(request: ForgeLoopRequest, workspace: Path, agent_relay) -
                 framework=request.identity.framework,
                 nproc_per_node=request.loop_shape.nproc_per_node,
                 bench_repeat=request.loop_shape.bench_repeat,
+                case_aggregate=CaseAggregate(request.loop_shape.case_aggregate),
                 commit_new_paths=tuple(request.loop_shape.commit_new_paths),
                 agent_relay=agent_relay,
             ),
@@ -281,7 +283,6 @@ def _resolve_campaign(request: ForgeLoopRequest, workspace: Path, agent_relay) -
 
 
 def _session_config(
-    probe: SpecialistProbeOptions,
     campaign: CampaignConfig,
     workspace: Path,
     knowledge_config: KnowledgeConfig,
@@ -289,16 +290,6 @@ def _session_config(
 ) -> Config:
     """The Config this session runs under: the campaign's GPU and producer, plus only the overrides asked for."""
     overrides = {"gpu_target": campaign.gpu_target, "gpu_type": campaign.gpu_type, "producer": campaign.producer}
-    # Only what was actually asked for: an override present with a None value still wins over ``Config.from_env``'s
-    # environment lookup, which is what made the FORGE_SPECIALIST_PROBE* variables dead on this path.
-    for _name, _value in (
-        ("specialist_probe", probe.specialist_probe),
-        ("specialist_probe_max", probe.specialist_probe_max),
-        ("specialist_probe_budget_sec", probe.specialist_probe_budget_sec),
-        ("specialist_probe_scratch_root", probe.specialist_probe_scratch_root),
-    ):
-        if _value is not None:
-            overrides[_name] = _value
     overrides.update(agent_runtime_overrides)
     if campaign.gpu_target:
         os.environ["GPU_TARGET"] = campaign.gpu_target
@@ -444,15 +435,29 @@ class _PreparedCampaign:
 
 @dataclass(frozen=True)
 class _SearchPlan:
-    """What the search starts with: the implementer setup, the planning roles, and what the KB and assembly gave."""
+    """What the search starts with: the implementer setup, and what the KB and assembly gave."""
 
     setup: ImplementerSetup
     source_files: list[str]
-    specialist_definitions: dict
     profiling_enabled: bool
-    critic_enabled: bool
     warm_start: _WarmStart
     assembly: _AssemblyPreparation
+
+
+def _put_workspace_first_on_import_path(import_name: str | None, workspace: Path) -> None:
+    """Make ``workspace`` the package ``import_name`` for everything this process starts.
+
+    The directory holding the workspace goes first on this process's ``PYTHONPATH``, which the driver runs, the agent
+    sessions and the lanes all start from.
+    """
+    if not import_name:
+        return
+    if workspace.name != import_name:
+        raise ForgeLoopError(
+            f"--import-name {import_name} names a package the workspace cannot be imported as: the workspace has to "
+            f"be a directory of that name, and is {workspace}"
+        )
+    os.environ["PYTHONPATH"] = import_path_first(workspace.parent, os.environ.get("PYTHONPATH", ""))
 
 
 def run_forge_loop(request: ForgeLoopRequest, *, publish_result: Callable[[dict], None]) -> dict:
@@ -477,6 +482,7 @@ def run_forge_loop(request: ForgeLoopRequest, *, publish_result: Callable[[dict]
         raise ForgeLoopError("--profile-timeout-sec must be positive")
 
     workspace = Path(request.campaign.workspace_dir).resolve()
+    _put_workspace_first_on_import_path(request.campaign.import_name, workspace)
     workspace_lock = WorkspaceLock(workspace / "forge_experiments" / "workspace.lock")
     try:
         workspace_lock.acquire()
@@ -539,14 +545,10 @@ def _run_campaign(inputs: _RunInputs) -> dict:
     run.iter_config.program_md = warm_start.program_md
 
     profiling = _profiling_plan(bool(request.roles.profiling and long_horizon), opened.resolution.campaign.gpu_target)
-    from kernelforge.workflows.forge_loop.roles.orchestration import default_specialist_definitions
-
     plan = _SearchPlan(
         setup=_implementer_setup(run, assembly.source_files, session_timeout_sec, profiling.implementer),
         source_files=assembly.source_files,
-        specialist_definitions=default_specialist_definitions(),
         profiling_enabled=profiling.analysis,
-        critic_enabled=bool(long_horizon),
         warm_start=warm_start,
         assembly=assembly,
     )
@@ -585,9 +587,7 @@ def _agent_session(inputs: _RunInputs, opened: _OpenedCampaign) -> _AgentSession
     profile_timeout_sec = _profile_timeout_override(
         os.environ.get("FORGE_PROFILE_TIMEOUT_SEC"), request.roles.profile_timeout_sec
     )
-    config = _session_config(
-        request.probe, campaign, workspace, inputs.knowledge_config, opened.agent_runtime_overrides
-    )
+    config = _session_config(campaign, workspace, inputs.knowledge_config, opened.agent_runtime_overrides)
     try:
         session_relay = resolve_session_relay(campaign.agent_relay, config)
     except ValueError as error:
@@ -636,8 +636,8 @@ def _iteration_config(inputs: _RunInputs, campaign: CampaignConfig) -> Iteration
         nproc_per_node=campaign.nproc_per_node,
         # Measurement fidelity: in-process repeats within each independent bench.
         bench_repeat=campaign.bench_repeat,
+        case_aggregate=campaign.case_aggregate,
         lanes=request.loop_shape.lanes,
-        merge_stacking=request.loop_shape.merge_stacking,
         # New files a KEEP may carry; a REVERT removes exactly the same set. From the campaign, so a resumed session
         # can still ship or remove the new file an earlier session was configured to.
         commit_new_paths=list(campaign.commit_new_paths),
@@ -750,6 +750,7 @@ def _implementer_setup(
             stage_timeout_sec=iter_config.validate_stage_timeout_sec,
             bench_timeout_sec=iter_config.bench_timeout_sec,
             bench_repeat=iter_config.bench_repeat,
+            case_aggregate=iter_config.case_aggregate,
         ),
         SessionOptions(
             session_timeout_sec=session_timeout_sec,
@@ -774,8 +775,6 @@ def _start_actors(
         lane_binding=LaneBinding(iter_config.workspace_dir, iter_config.driver_script, plan.source_files),
         lanes=request.loop_shape.lanes,
         program_md=iter_config.program_md,
-        specialist_definitions=plan.specialist_definitions,
-        critic_enabled=plan.critic_enabled,
         usage=run.usage,
         supervisor_backend=request.roles.supervisor_backend,
     )
@@ -804,16 +803,12 @@ def _search(
         usage=run.usage,
         timeout_sec=session.profile_timeout_sec,
         profiling_enabled=plan.profiling_enabled,
+        lanes=run.request.loop_shape.lanes,
     )
     print("  Analysis Agent: " + ("profiled" if plan.profiling_enabled else "static-only"))
-    print(f"  Orchestration: enabled with parallel specialists ({', '.join(sorted(plan.specialist_definitions))})")
     print(
-        "  Plan Critic: "
-        + (
-            "enabled (long-horizon, same backend/model; skips rounds that continue a kept route)"
-            if plan.critic_enabled
-            else "disabled (requires --max-hours > 2)"
-        )
+        f"  Lanes: up to {run.request.loop_shape.lanes} per round, one for each focus the Analysis divides its "
+        "evidence into; each session chooses its own direction"
     )
 
     reporter = _RunReporter(
@@ -827,9 +822,8 @@ def _search(
         loop_runner.run(
             LoopAgents(
                 agent_fn=start_bundle.agent_fn,
-                agent_factory=start_bundle.agent_factory if run.request.loop_shape.lanes > 1 else None,
+                agent_factory=start_bundle.agent_factory,
                 analysis_service=analysis_service,
-                orchestration_service=start_bundle.orchestration_service,
                 supervisor_fn=start_bundle.supervisor_fn,
                 search_actors=actors.loop_search_actors,
             ),

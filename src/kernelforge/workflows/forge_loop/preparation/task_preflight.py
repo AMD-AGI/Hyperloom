@@ -18,6 +18,7 @@ import sys
 import tempfile
 import time
 import traceback
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -170,6 +171,20 @@ def _harness_measured():
         return False
 
 
+def _misloaded():
+    """The campaign's source modules this process loaded from a file that is not the campaign's."""
+    try:
+        expected = json.loads(os.environ.get("GRAPH_PROBE_SOURCES") or "{}")
+    except ValueError:
+        return {}
+    found = {}
+    for name, path in expected.items():
+        loaded = getattr(sys.modules.get(name), "__file__", None)
+        if loaded and os.path.realpath(loaded) != path:
+            found[name] = os.path.realpath(loaded)
+    return found
+
+
 def _dump():
     out = os.environ.get("GRAPH_PROBE_OUT")
     if not out:
@@ -177,6 +192,7 @@ def _dump():
     try:
         payload = {
             "replays": _n[0],
+            "misloaded": _misloaded(),
             "rank": os.environ.get("RANK"),
             "local_rank": os.environ.get("LOCAL_RANK"),
             "world_size": os.environ.get("WORLD_SIZE"),
@@ -245,6 +261,7 @@ def _cleanup_probe(out_path: str, probe_dir: str) -> None:
 # a violated distributed contract is a verdict on it.
 PROBE_FAILED = -1
 PROBE_DISTRIBUTED_VIOLATION = -2
+PROBE_SOURCE_VIOLATION = -3
 
 
 @dataclass(frozen=True)
@@ -485,20 +502,44 @@ async def _abandon_probe(proc: asyncio.subprocess.Process, out_path: str, probe_
     _cleanup_probe(out_path, probe_dir)
 
 
+def _source_violation(out_path: str) -> str:
+    """Why the driver did not run the campaign's sources, from what each of its processes reported; empty if it did."""
+    misloaded: dict[str, str] = {}
+    for shard in glob.glob(f"{out_path}.*"):
+        try:
+            payload = json.loads(Path(shard).read_text())
+        except (OSError, ValueError):
+            continue
+        if isinstance(payload, dict) and isinstance(payload.get("misloaded"), dict):
+            misloaded.update(payload["misloaded"])
+    if not misloaded:
+        return ""
+    loaded = "; ".join(f"{name} from {where}" for name, where in sorted(misloaded.items()))
+    return (
+        f"the driver loaded {loaded}, which is not the campaign workspace: it times code the campaign does not edit. "
+        "Load the kernel from the workspace the driver is in"
+    )
+
+
 async def _count_graph_replays(
     driver: str,
     warmup: int,
     iters: int,
     *,
     timeout_sec: float = 300,
-    require_ranks: int = 1,
+    contract: DriverContract | None = None,
 ) -> tuple[int, str]:
-    """Run the driver and return its effective CUDA graph replay count."""
+    """Run the driver and return its effective CUDA graph replay count.
+
+    ``contract`` names the ranks the driver must launch and the modules it must load from the campaign workspace.
+    """
+    require_ranks = contract.require_ranks if contract is not None else 1
     fd, out_path = tempfile.mkstemp(prefix="forge_graph_probe_")
     os.close(fd)
     probe_dir = tempfile.mkdtemp(prefix="forge_graph_probe_site_")
     pathlib.Path(probe_dir, "sitecustomize.py").write_text(_GRAPH_PROBE_SITECUSTOMIZE)
     env = _graph_probe_env(out_path, probe_dir, require_ranks)
+    env["GRAPH_PROBE_SOURCES"] = json.dumps(dict(contract.sources) if contract is not None else {})
     cmd = [
         sys.executable,
         driver,
@@ -537,11 +578,14 @@ async def _count_graph_replays(
             detail += f": {tail}"
         return PROBE_FAILED, detail
 
+    violation = _source_violation(out_path)
     replays, shard_error = _read_graph_probe_shards(
         out_path,
         expected_world_size=require_ranks if require_ranks > 1 else None,
     )
     _cleanup_probe(out_path, probe_dir)
+    if violation:
+        return PROBE_SOURCE_VIOLATION, violation
     if shard_error:
         detail = shard_error
         if tail:
@@ -561,6 +605,9 @@ class DriverContract:
     require_graph: bool = False
     require_ranks: int = 1
     expected_case_ids: list[str] | None = None
+    #: The campaign's source modules and the workspace file each has to be loaded from
+    #: (:func:`~.loaded_sources.declared_source_modules`). A driver that loads one from elsewhere is refused.
+    sources: Mapping[str, str] = field(default_factory=dict)
 
 
 def _stage_seconds(since: float) -> float:
@@ -670,7 +717,7 @@ class _PreflightWork:
             warmup,
             iters,
             timeout_sec=_deadline_timeout(deadline_unix, PREFLIGHT_GRAPH_TIMEOUT_S),
-            require_ranks=contract.require_ranks,
+            contract=contract,
         )
         self.details["graph"] = {
             "replays": replays,
@@ -680,7 +727,10 @@ class _PreflightWork:
         if replays >= iters:
             return _GraphVerdict(graph_ok=True, ranks_ok=True)
         self.diagnostics["graph"] = tail
-        if replays == PROBE_DISTRIBUTED_VIOLATION:
+        if replays == PROBE_SOURCE_VIOLATION:
+            # A verdict on the driver as well: what it times is not the campaign's.
+            self.reasons.append(tail)
+        elif replays == PROBE_DISTRIBUTED_VIOLATION:
             # A verdict on the driver, not a failure of the probe, so it is
             # reported against the rank contract rather than graph timing.
             self.reasons.append(f"distributed measurement contract violated: {tail}")

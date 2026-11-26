@@ -14,10 +14,10 @@ ends with: attainment has to follow the incumbent, measured over repeated runs.
 The campaign's own per-case medians are the only divisor that makes the ratio
 mean anything, so attainment is computed where those live and cached nowhere.
 
-Aggregation is the equal-weight mean over cases, matching
-``calculate_mean_case_speedup`` -- the objective a KEEP is already judged by. A
+Aggregation is the campaign's own equal-weight mean over cases -- arithmetic or
+geometric, whichever ``calculate_mean_case_speedup`` scores a KEEP by. A
 stopping rule and a KEEP rule that optimize different aggregates would pull the
-campaign in two directions.
+campaign in two directions, so the caller names the one it is scored under.
 
 Coverage is the load-bearing part. A case whose ceiling cannot be scored is
 excluded from the mean, which means the mean no longer describes the objective:
@@ -32,6 +32,8 @@ from __future__ import annotations
 import math
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
+
+from kernelforge.evaluation.scoring import CaseAggregate
 
 #: An attainment above this is arithmetically impossible: the ceiling claims a
 #: latency the kernel already beat, so the work model understates the minimum
@@ -99,12 +101,14 @@ def measure_attainment(
     current_ms: Mapping[str, float] | None,
     *,
     unscored_cases: Sequence[str] | set[str] | None = None,
+    aggregate: CaseAggregate = CaseAggregate.ARITHMETIC,
 ) -> Attainment:
     """Score one ceiling report against the latencies a campaign is measuring.
 
     ``report`` is a :class:`~kernelforge.roofline_ceiling.contract.CeilingReport`;
     ``current_ms`` is the campaign's own per-case medians, never the ceiling
-    run's profiled observation.
+    run's profiled observation; ``aggregate`` is the mean the campaign is scored
+    by, which the per-case attainments are combined under.
 
     A case is excluded, with a reason, when it was not measured, when either
     latency is not a positive number, when the objective does not score it, or
@@ -153,7 +157,7 @@ def measure_attainment(
             )
         )
 
-    mean = (sum(entry.attainment for entry in scored) / len(scored)) if scored else None
+    mean = aggregate.combine([entry.attainment for entry in scored]) if scored else None
     return Attainment(mean=mean, cases=tuple(scored), excluded=excluded)
 
 

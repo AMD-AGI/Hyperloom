@@ -6,7 +6,6 @@
 from ._proposal_identity import content_fingerprint, controls_of, is_executable, normalize_proposal
 from .baseline import baseline_executor
 from .explore import explore_executor
-from .conc_sweep import conc_sweep_executor
 from .report import report_executor
 from .session_breakdown import session_breakdown_executor
 from .target_analysis import TargetAnalysisExecutor
@@ -37,16 +36,23 @@ from .workload._agentx_prefix_cache import PREFIX_CACHE_OFF_ERROR_CLASS, refuse_
 from ._failed_step import failed_step_error_class
 from ._round_folder import RoundFolder, is_round_folder, read_round_launch
 from ._suite.config import CHECK_SERVER_ENVS, fixed_workload
-from ._suite.rounds import TOOL_CACHE_ENV, SuiteRoundRefused, external_agentx_config, staged_tool_cache
+from ._suite.rounds import (
+    SERVER_CPUS_ENV,
+    TOOL_CACHE_ENV,
+    SuiteRoundRefused,
+    external_agentx_config,
+    staged_tool_cache,
+)
 from .framework_change._spec_decode_context_copy import CONTEXT_COPY_REFUSAL, context_copy_refusal
 from .framework_change._spec_decode_pin import (
     SpeculativeDecodingPinnedError,
+    declared_acceptance_reason,
     refuse_unpinned_speculative_change,
     speculative_pin_reason,
 )
 from .patching._patch_laying import PatchedServer, is_patched_copy
 from ._profile_setup import SGLANG_PATCH_SERVER_FLAG
-from ._server_patcher import ensure_patched_copy, lay_tracelens_patch
+from ._server_patcher import ensure_patched_copy, is_kernel_shape_tool, lay_tracelens_patch
 
 __all__ = [
     "BOOT_BUDGET_ENV",
@@ -56,6 +62,7 @@ __all__ = [
     "ensure_patched_copy",
     "ensure_vllm_patched_for_tracelens",
     "PREFIX_CACHE_OFF_ERROR_CLASS",
+    "is_kernel_shape_tool",
     "is_patched_copy",
     "lay_tracelens_patch",
     "CONTEXT_COPY_REFUSAL",
@@ -75,12 +82,12 @@ __all__ = [
     "RoundWatch",
     "SESSION_TIME_EXHAUSTED_RETURNCODE",
     "SpeculativeDecodingPinnedError",
+    "SERVER_CPUS_ENV",
     "SuiteRoundRefused",
     "TOOL_CACHE_ENV",
     "TargetAnalysisExecutor",
     "VariantResult",
     "baseline_executor",
-    "conc_sweep_executor",
     "content_fingerprint",
     "controls_of",
     "context_copy_refusal",
@@ -96,6 +103,7 @@ __all__ = [
     "materialize_benchmark_config",
     "normalize_proposal",
     "read_round_launch",
+    "declared_acceptance_reason",
     "refuse_cacheless_agentx_baseline",
     "refuse_unpinned_speculative_change",
     "report_executor",

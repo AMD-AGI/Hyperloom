@@ -39,7 +39,7 @@ from ._integrate_results import (
     _perf_revert,
     _revert_status,
 )
-from ._integrate_vocabulary import BENCH_UNMEASURED_CLASS
+from ._integrate_vocabulary import BENCH_UNMEASURED_CLASS, RESULT_GRADED
 from ..patching._patch_git import _uncommitted_revert
 from ..patching._patch_sources import _done_field
 
@@ -220,7 +220,7 @@ class PerfGateMixin:
             attempt.specialist_task_id,
             parity.get("reason"),
         )
-        return parity, _perf_revert(
+        revert = _perf_revert(
             attempt,
             measured,
             status="reverted",
@@ -228,6 +228,9 @@ class PerfGateMixin:
             error_class="switch_off_parity_inconclusive" if inconclusive else "switch_off_parity_failed",
             switch_off_parity=parity,
         )
+        if inconclusive:
+            revert[RESULT_GRADED] = False
+        return parity, revert
 
     def _capture_source_layer(
         self,
@@ -549,6 +552,7 @@ def _weigh_gate(
         ) + _fix_accuracy_refusals(accuracy_pass)
         if not fix_refusals:
             gate_pass = correctness_fix = True
+    round_measured = bench_result.get("status") == "succeeded"
     measured = _PatchMeasurement(
         bench_result=bench_result,
         new_tput=bench_result.get("output_throughput"),
@@ -557,9 +561,10 @@ def _weigh_gate(
         keep_threshold_pct=keep_threshold_pct,
         accuracy_pass=accuracy_pass,
         measured_against=_measured_against(params, base_tput=base_tput),
+        graded=round_measured and graded.comparable,
         gates=(
             (graded_gate_row(graded, keep_threshold_pct, graded.veto_reason or graded.refused_by),)
-            if bench_result.get("status") == "succeeded"
+            if round_measured
             else ()
         ),
     )

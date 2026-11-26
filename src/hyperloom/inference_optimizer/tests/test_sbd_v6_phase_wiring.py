@@ -78,15 +78,22 @@ def test_the_real_transition_opens_the_phase_it_entered(tmp_path):
 
 def test_stage_fact_keeps_the_deepest_phase_after_a_reloop(tmp_path):
     state = _state(tmp_path)
-    for phase in ("PRELUDE", "ENABLEMENT", "FRAMEWORK_AGENT", "KERNEL_AGENT", "SWEEP"):
+    for phase in ("PRELUDE", "ENABLEMENT", "FRAMEWORK_AGENT", "KERNEL_AGENT", "CYCLE_END"):
         machine_state.record_phase_transition(state, to_phase=phase, reason="phase_entered")
-    assert assemble_parts(tmp_path)["outcome"]["stage_reached_recorded"] == "conc_sweep"
+    assert assemble_parts(tmp_path)["outcome"]["stage_reached_recorded"] == "cycle_end"
 
     machine_state.record_phase_transition(state, to_phase="FRAMEWORK_AGENT", reason="cycle_reloop")
-    assert assemble_parts(tmp_path)["outcome"]["stage_reached_recorded"] == "conc_sweep"
+    assert assemble_parts(tmp_path)["outcome"]["stage_reached_recorded"] == "cycle_end"
 
     machine_state.record_phase_transition(state, to_phase="CLOSE", reason="time_exhausted")
     assert assemble_parts(tmp_path)["outcome"]["stage_reached_recorded"] == "close"
+
+
+def test_a_session_last_in_cycle_end_reports_that_stage_without_a_recorded_one():
+    from hyperloom.inference_optimizer.breakdown.collectors.v6 import _stage_reached
+
+    history = [{"to_phase": "KERNEL_AGENT"}, {"to_phase": "CYCLE_END"}]
+    assert _stage_reached({"phase": "CYCLE_END", "phase_history": history}, "", []) == "cycle_end"
 
 
 def test_the_real_transition_closes_the_phase_it_left(tmp_path):
@@ -124,7 +131,7 @@ def test_a_real_re_entry_is_a_second_segment_on_one_event(tmp_path):
     machine_state.record_phase_transition(state, to_phase="FRAMEWORK_AGENT", reason="start")
     machine_state.record_phase_transition(state, to_phase="KERNEL_AGENT", reason="plateau_no_gain")
     machine_state.record_phase_transition(state, to_phase="FRAMEWORK_AGENT", reason="kernel_done")
-    machine_state.record_phase_transition(state, to_phase="SWEEP", reason="plateau_no_gain")
+    machine_state.record_phase_transition(state, to_phase="CYCLE_END", reason="plateau_no_gain")
 
     ext = _ext("FRAMEWORK_AGENT")
     assert ext["entries"] == 2

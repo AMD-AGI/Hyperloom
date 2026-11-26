@@ -3,10 +3,18 @@
 
 import json
 from dataclasses import replace
+from pathlib import Path
 
 import pytest
 
+from hyperloom.common.outside_facts import NATIVE_AUX_MODEL_FLAGS, NATIVE_SERVING, kernel_knobs
+from hyperloom.common.tests.handed_names import (
+    knob_words_named,
+    pull_requests_named,
+    server_options_named,
+)
 from hyperloom.contracts.recipe import ConfigDelta, RecipeDelta
+from hyperloom.measure.runner.native.server_options import OptionInventory, ServerOption, write_inventory
 from hyperloom.orchestrator.state.base_launch import ServerBase
 from hyperloom.orchestrator.prompts.specialist_prompt_builder import BASH_KILL_SAFETY_PREAMBLE
 from hyperloom_multibranch.contracts.branch_log import BranchLogEntry, BranchLogType
@@ -18,7 +26,7 @@ from hyperloom_multibranch.contracts.blackboard.records import BranchLogRecord, 
 from hyperloom_multibranch.contracts.blackboard.vocab import InboxKind
 from hyperloom_multibranch.rulegate.agentx import AgentXObjective
 from hyperloom_multibranch.specialist import prompts
-from hyperloom_multibranch.specialist.directions import DIRECTIONS
+from hyperloom_multibranch.specialist.directions import CHECKOUT_DIRECTIONS, DIRECTIONS
 from hyperloom_multibranch.contracts.blackboard.exhausted import EXHAUSTED_PREFIX, ExhaustedWhy
 from hyperloom_multibranch.contracts.sources import NativeTree, SourceRoot
 from hyperloom_multibranch.specialist.prompts import (
@@ -30,6 +38,7 @@ from hyperloom_multibranch.specialist.prompts import (
     RoleWorkload,
     launch_prompt,
     prompt_versions,
+    RoleServer,
     role_prompt,
 )
 from hyperloom_multibranch.specialist.judging import NOTICE
@@ -111,14 +120,14 @@ def test_the_role_names_the_config_delta_keys_that_recipe_delta_reads():
 
 def test_the_role_shows_the_session_s_frozen_base_launch_read_only():
     base = ServerBase(args="--tp-size 4 --enable-hierarchical-cache --hicache-size 180", env={"SGLANG_X": "true"})
-    prompt = " ".join(role_prompt(WORKLOAD, base=base).split())
+    prompt = " ".join(role_prompt(WORKLOAD, server=RoleServer(base)).split())
 
     assert "The session's base launch, frozen when it started and read-only" in prompt
     assert "Server arguments: --tp-size 4 --enable-hierarchical-cache --hicache-size 180." in prompt
     assert "Environment: SGLANG_X=true." in prompt
     assert "an empty extra_server_args means this launch as it is" in prompt
     assert "frozen when it started" not in " ".join(role_prompt(WORKLOAD).split())
-    empty = " ".join(role_prompt(WORKLOAD, base=ServerBase()).split())
+    empty = " ".join(role_prompt(WORKLOAD, server=RoleServer(ServerBase())).split())
     assert "Server arguments: none. Environment: none." in empty
 
 
@@ -134,7 +143,7 @@ def test_the_wake_and_nudge_messages_say_what_arrived_or_that_nothing_did():
 
     woken = prompts.wake_message([item], [])
     assert "this arrived for your branch" in woken and "- judgement r7: r7 measured +2.1%: committed" in woken
-    nudge = prompts.nudge_message()
+    nudge = prompts.nudge_message(profiled=True)
     assert "nothing new for your branch" in nudge
     assert "Nothing arrives on its own" in nudge and "blackboard_brief" in nudge
     assert "decides when your branch stops" not in nudge
@@ -289,6 +298,22 @@ def test_the_session_s_directions_are_distinct_and_lead_with_the_four_a_small_se
     ]
 
 
+#: The options of the server the rule pack states, which a prompt repeats.
+_STATED_OPTIONS = server_options_named(
+    " ".join((*NATIVE_SERVING["llamacpp"].values(), *NATIVE_AUX_MODEL_FLAGS["llamacpp"]))
+)
+
+
+def _handed_over(text: str) -> set[str]:
+    """What ``text`` names that a specialist is to find: a prompt teaches the method and asks for evidence, and an
+    option of the server, a word of a kernel knob or a pull request it named would be the answer handed over."""
+    return (server_options_named(text) - _STATED_OPTIONS) | knob_words_named(text) | pull_requests_named(text)
+
+
+def test_the_directions_of_a_checkout_built_server_name_no_answer():
+    assert [_handed_over(text) for text in CHECKOUT_DIRECTIONS] == [set()] * len(CHECKOUT_DIRECTIONS)
+
+
 def test_each_prompt_is_versioned_by_its_own_text(monkeypatch):
     versions = prompt_versions()
 
@@ -305,11 +330,17 @@ def test_each_prompt_is_versioned_by_its_own_text(monkeypatch):
     [
         ("_DEV_SANDBOX", lambda text: text + " One more rule.", "specialist_role"),
         ("_NATIVE", lambda text: text + " One more rule.", "specialist_role"),
+        ("_CHECKOUT_CARRIED", lambda text: text + " One more rule.", "specialist_role"),
+        ("_CHECKOUT_LOGS", lambda text: text + " One more rule.", "specialist_role"),
+        ("DISCOVERY_TEXTS", lambda texts: (*texts, "One more rule."), "specialist_role"),
         ("_REFERENCES", lambda text: text + " One more rule.", "specialist_role"),
         ("_BASE", lambda text: text + " One more rule.", "specialist_role"),
         ("_HOLDS", lambda holds: {**holds, "geak": holds["geak"] + " more"}, "specialist_role"),
         ("_INFERENCEX_GRADING", lambda grading: replace(grading, trade_off=", more"), "specialist_role"),
         ("_LEASE_WAKE", lambda text: text + " One more rule.", "specialist_launch"),
+        ("_UNPROFILED", lambda text: text + " One more rule.", "specialist_role"),
+        ("_CHECKOUT_REVIEW", lambda text: text + " One more rule.", "specialist_role"),
+        ("_FIRST_IDEA_CHECKOUT", lambda text: text + " One more rule.", "specialist_role"),
         ("_WAIT_WAKE", lambda text: text + " One more rule.", "specialist_launch"),
     ],
 )
@@ -401,3 +432,37 @@ def test_the_role_names_native_sources_only_when_the_session_lays_them_out(tmp_p
     assert "sgl_kernel" not in role_prompt(WORKLOAD).split("sglang/kernels/jit/csrc")[1]
     assert "python/sglang/kernels/aot" in native and "pending_build" in native and "CMakeLists.txt" in native
     assert native.startswith(role_prompt(WORKLOAD))
+
+
+def test_the_role_tells_a_specialist_of_a_checkout_built_framework_which_trees_it_may_change():
+    server = RoleServer(checkouts=("llamacpp",), test_outputs=_TEST_OUTPUTS)
+    prompt = " ".join(role_prompt(WORKLOAD, server=server).split())
+
+    assert "llamacpp's source: your worktree holds the llamacpp repository" in prompt
+    assert "ggml/, src/, include/, common/, tools/server/. Only these trees are yours to change" in prompt
+    assert "CMakeLists.txt" in prompt and "pending_build" in prompt and "worktree_check does not apply" in prompt
+    assert "llamacpp's source" not in role_prompt(WORKLOAD)
+
+
+def test_what_a_specialist_of_a_checkout_built_server_is_told_names_no_answer(tmp_path):
+    server = RoleServer(checkouts=("llamacpp",), test_outputs=_inventory(tmp_path).parent, profiled=False)
+    role = role_prompt(WORKLOAD, server=server)
+
+    assert _handed_over(role) == set()
+    assert not any(knob in role for knob in kernel_knobs())
+    assert "the settings branch sweeps" not in role
+    assert _handed_over(prompts.nudge_message(profiled=False)) == set()
+
+
+#: The directory a test result's output_dir is relative to.
+_TEST_OUTPUTS = Path("/mb/MB-toolbox")
+
+
+def _inventory(directory: Path) -> Path:
+    """The option file of a server that takes three options, one of them set by its launch, in ``directory``."""
+    options = (
+        ServerOption(("-a", "--alpha"), "the first", set_by_base=True),
+        ServerOption(("--beta",), "the second", set_by_base=False),
+        ServerOption(("--gamma", "--no-gamma"), "the third", set_by_base=False),
+    )
+    return write_inventory(OptionInventory("server", "0" * 64, "--alpha 1", options), directory)

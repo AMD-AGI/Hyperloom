@@ -1,6 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
+import dataclasses
 
 import pytest
 
@@ -8,7 +9,7 @@ from hyperloom.common.gain_math import ACCURACY_METRICS
 from hyperloom.common.perf_metric import (
     GRADED_INTVTY_P50,
 )
-from hyperloom.contracts.measurement import Purpose, TestKind, TestRequest
+from hyperloom.contracts.measurement import JitCacheState, Purpose, TestKind, TestRequest
 from hyperloom.contracts.recipe import LaunchConfig, Recipe, RecipeDelta
 from hyperloom_multibranch.contracts.gate import NotMeasured, ResultUnverified
 from hyperloom_multibranch.contracts.judgement import Verdict
@@ -304,3 +305,41 @@ async def test_an_accuracy_test_that_does_not_re_verify_is_not_judged(session):
 
     with pytest.raises(ResultUnverified):
         await session.gate.accuracy_passes(check)
+
+
+def _with_cache_states(session: _Session, states: dict[str, str]) -> None:
+    """Every record the gate reads carries the compiled-code cache state ``states`` names for its request, ``"hit"``
+    for any other: as hosted results record what their signed manifests state."""
+    read = session.blackboard.record
+
+    async def record(request_id: str):
+        found = await read(request_id)
+        if found.result is None:
+            return found
+        state = JitCacheState("aiter_jit", states.get(request_id, "hit"))
+        return dataclasses.replace(found, result=dataclasses.replace(found.result, jit_cache=(state,)))
+
+    session.blackboard.record = record  # type: ignore[method-assign]
+
+
+async def test_a_candidate_that_met_the_cache_cold_while_its_parents_tests_met_it_warm_is_flagged(session):
+    merge = await session.toolbox.submit_test(_request(Purpose.INTEGRATION, FLAT))
+    _with_cache_states(session, {merge: "miss"})
+
+    judgement = await session.gate.compare(merge)
+
+    assert judgement.verdict is Verdict.FLAT, "the flag changes no verdict"
+    assert judgement.cache_states_differ == ("aiter_jit: miss vs hit",)
+
+
+async def test_a_candidate_that_met_the_cache_as_its_parents_tests_did_is_not_flagged(session):
+    merge = await session.toolbox.submit_test(_request(Purpose.INTEGRATION, FLAT))
+    _with_cache_states(session, {})
+
+    assert (await session.gate.compare(merge)).cache_states_differ == ()
+
+
+async def test_results_that_state_no_cache_are_not_called_different(session):
+    merge = await session.toolbox.submit_test(_request(Purpose.INTEGRATION, FLAT))
+
+    assert (await session.gate.compare(merge)).cache_states_differ == ()

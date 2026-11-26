@@ -62,7 +62,7 @@ from hyperloom_multibranch.scheduling.roster import (
     BranchKind,
     BranchOrigin,
     RosterCaps,
-    specialist_open,
+    open_specialists,
 )
 from hyperloom_multibranch.scheduling.similarity import SimilarBranch
 from hyperloom_multibranch.scheduling.widening import WideningSignals
@@ -76,9 +76,9 @@ _KEY_BRANCHES = "branches"
 _KEY_STOP = "stop"
 _KEY_STOP_SESSION = "stop_session"
 _KEY_BRANCH = "branch"
-#: What the runtime knows of a specialist but the judge's prompt does not name: why an agent's run ended of itself is
-#: the scheduler's stop reason, since the scheduler stops that branch.
-_NOT_JUDGED = frozenset({"finished"})
+#: What the runtime knows of a specialist but the judge's prompt does not name: why an agent's run ended of itself,
+#: and whether one that gave up crashed out, are the scheduler's stop reason, since the scheduler stops that branch.
+_NOT_JUDGED = frozenset({"finished", "crashed_out"})
 _KEY_REASON = "reason"
 #: Decimals the GPU hours in the judge's view are rounded to.
 _GPU_HOURS_DIGITS = 3
@@ -112,7 +112,7 @@ _STOP_ONLY_HOLDS = ENVELOPE_HOLDS | {HoldReason.DEV_WAIT}
 @dataclass(frozen=True)
 class JudgeView:
     """What the judge sees; ``opening`` is true only for the call that sizes the opening batch, which opens at least
-    one branch unless a specialist branch is open already.
+    as many branches as tests can run at once, less the specialist branches open already.
 
     ``free_slots`` is the roster's own count of branches that may still be opened; ``pending`` are the shares, forks
     and repairs the fork desk queued for a slot: shares first, then forks and repairs oldest first; ``history`` is
@@ -139,6 +139,8 @@ class JudgeView:
     ``open_areas`` says where a new branch could open and ``playbook`` is the scheduling playbook the session
     plays, as the RSI renders them; both are empty for a session that reads no archive. ``agent_map`` is the agent map
     as :func:`~hyperloom_multibranch.scheduling.agent_map.render_map` gives it, empty for a session with none.
+    ``undealt`` names the session's directions no branch has held yet that branches opened now with no focus would be
+    dealt, none while the scheduler would open no such branch; :func:`coverage_floor` opens a branch for each.
     """
 
     now: float
@@ -173,6 +175,7 @@ class JudgeView:
     open_areas: str = ""
     playbook: str = ""
     agent_map: str = ""
+    undealt: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -332,10 +335,13 @@ class JudgeDecision:
     ``open_k`` is the K of the branches opened now; a K order cannot name them before they exist. ``focus`` is the op
     the judge names for each branch opened now, in the order they open; ``""`` and a branch past its end leave the
     branch to the default focus. ``held`` names the branches whose stop or lower K was refused, once each.
+    ``unfocused`` is how many of the branches opened now, the first ones, open with no focus for the directions no
+    branch has held (:func:`coverage_floor`); ``focus`` is for the branches after them.
     """
 
     open_count: int = 0
     open_k: int = 1
+    unfocused: int = 0
     focus: tuple[str, ...] = ()
     k: tuple[KOrder, ...] = ()
     stop: tuple[StopOrder, ...] = ()
@@ -465,6 +471,7 @@ def render_prompt(view: JudgeView) -> str:
         "min_useful_seconds": round(view.widening.min_useful_seconds),
         "cold_start": _cold_start(view.widening),
         "toolbox_headroom": view.widening.toolbox_headroom,
+        "undealt_directions": list(view.undealt),
         "pending": [_pending_row(pending, view.now) for pending in view.pending],
         "session_remaining_seconds": round(view.session_remaining_seconds),
         "integration": {
@@ -564,13 +571,24 @@ def parse_decision(reply: str) -> JudgeDecision | None:
         return None
 
 
+def coverage_floor(view: JudgeView) -> int:
+    """How many branches open at this call with no focus whatever the judge answers: one for each direction no branch
+    has held, within the free slots, while a branch opened now still has the time to show a trend."""
+
+    if view.explore_remaining_seconds < view.widening.min_useful_seconds:
+        return 0
+    return min(view.free_slots, len(view.undealt))
+
+
 def cap_decision(decision: JudgeDecision, view: JudgeView) -> JudgeDecision:
     """``decision`` cut to the caps and to the live branches; applying it twice changes nothing more.
 
     Orders naming an unknown or stopped branch are dropped, the integration branch cannot be stopped, a branch being
     stopped gets no K order, and a later order for the same branch replaces an earlier one. The opening call opens
-    at least one branch unless a specialist branch is open already; no call opens more than ``max_branches``. The
-    free slots are not a cut here: they are read before the stops free theirs, and the branches that find no slot
+    at least as many branches as tests can run at once (``max_parallel_tests``, within ``max_branches``), less the
+    specialist branches open already, so no card waits for the one branch's next test; every call opens at least the
+    :func:`coverage_floor`, those branches first and with no focus, and no call opens more than
+    ``max_branches``. The free slots are not a cut here: they are read before the stops free theirs, and the branches that find no slot
     are cut as they open. The held branches are not a cut here either: :func:`hold_decision` cuts them as the
     decision is applied.
     """
@@ -586,12 +604,15 @@ def cap_decision(decision: JudgeDecision, view: JudgeView) -> JudgeDecision:
         for order in decision.k
         if order.branch in live and order.branch not in asked
     }
-    floor = 1 if view.opening and not specialist_open(view.roster) else 0
-    opened = min(max(decision.open_count, floor), view.caps.max_branches)
+    wide = min(view.caps.max_branches, view.caps.max_parallel_tests)
+    floor = max(wide - open_specialists(view.roster), 0) if view.opening else 0
+    unfocused = coverage_floor(view)
+    opened = min(max(decision.open_count, floor, unfocused), view.caps.max_branches)
     return JudgeDecision(
         open_count=opened,
         open_k=view.caps.clamp_k(decision.open_k, BranchKind.SPECIALIST),
-        focus=decision.focus[:opened],
+        unfocused=unfocused,
+        focus=decision.focus[: opened - unfocused],
         k=tuple(ks.values()),
         stop=tuple(asked.values()),
         session_stop=decision.session_stop,
@@ -669,6 +690,7 @@ __all__ = [
     "QueuedIntent",
     "StopOrder",
     "cap_decision",
+    "coverage_floor",
     "dev_wait_holds",
     "envelope_holds",
     "parse_decision",

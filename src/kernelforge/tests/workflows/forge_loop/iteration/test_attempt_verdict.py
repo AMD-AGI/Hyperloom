@@ -5,6 +5,8 @@
 
 from __future__ import annotations
 
+from kernelforge.tests.workflows.forge_loop.iteration._iteration_loop import lane_agents
+
 import asyncio
 import subprocess
 import sys
@@ -13,7 +15,7 @@ from pathlib import Path
 import pytest
 import yaml
 
-from kernelforge.workflows.forge_loop.iteration import runner as runner_module
+from kernelforge.evaluation.scoring import CaseAggregate
 from kernelforge.workflows.forge_loop.campaign.run_state import LoopStateStore
 from kernelforge.workflows.forge_loop.iteration.runner import IterationResult
 from kernelforge.tests.workflows.forge_loop.iteration._iteration_loop import (
@@ -259,13 +261,44 @@ async def test_iteration_keeps_winning_mean_despite_one_regressed_case(monkeypat
     assert result.bench_detail["mean_case_speedup"] == pytest.approx((2.0 + 2.0 / 3.0) / 2.0)
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "aggregate,expected_keep,expected_score",
+    [(CaseAggregate.ARITHMETIC, True, 2.1), (CaseAggregate.GEOMETRIC, False, 0.8**0.5)],
+)
+async def test_a_large_gain_paid_for_by_one_case_is_judged_by_the_campaigns_aggregate(
+    monkeypatch, aggregate, expected_keep, expected_score
+):
+    """One case 4x faster and one 5x slower: an arithmetic win, a geometric loss."""
+    case_times = {"small": 0.25, "large": 5.0}
+    loop, _benchmark_calls = _measurement_loop(
+        monkeypatch,
+        {
+            "success": True,
+            "median_ms": 2.625,
+            "case_times": case_times,
+            "unscored_cases": [],
+            "measurement_count": 3,
+            "measurements": [{"success": True, "case_times": case_times, "unscored_cases": []} for _ in range(3)],
+            "message": "three measurements",
+        },
+    )
+    loop.ic.case_aggregate = aggregate
+    loop.ic.pristine_baseline_wall_ms = 1.0
+
+    result = await loop.run_one_iteration(1)
+
+    assert result.kept is expected_keep
+    assert result.bench_detail["mean_case_speedup"] == pytest.approx(expected_score)
+
+
 def test_agent_error_is_reduced_and_persisted(tmp_path, monkeypatch):
     loop, workspace = _make_loop(tmp_path, monkeypatch)
 
     async def failing_agent(*_args, **_kwargs):
         raise RuntimeError("agent exploded")
 
-    asyncio.run(loop.run(runner_module.LoopAgents(agent_fn=failing_agent, supervisor_fn=_unused_supervisor)))
+    asyncio.run(loop.run(lane_agents(failing_agent, supervisor_fn=_unused_supervisor)))
 
     store = LoopStateStore(str(workspace))
     state = store.load()
@@ -299,9 +332,7 @@ def test_agent_error_with_diff_is_handed_to_outer_validation(tmp_path, monkeypat
         )
 
     monkeypatch.setattr(loop, "run_one_iteration", reject_candidate)
-    asyncio.run(
-        loop.run(runner_module.LoopAgents(agent_fn=editing_then_failing_agent, supervisor_fn=_unused_supervisor))
-    )
+    asyncio.run(loop.run(lane_agents(editing_then_failing_agent, supervisor_fn=_unused_supervisor)))
 
     decisions = [
         event.get("decision")
@@ -347,7 +378,7 @@ def test_integrity_violation_restores_and_skips_canonical_validation(
 
     monkeypatch.setattr(loop, "run_one_iteration", unexpected_validation)
 
-    asyncio.run(loop.run(runner_module.LoopAgents(agent_fn=unsafe_agent, supervisor_fn=_unused_supervisor)))
+    asyncio.run(loop.run(lane_agents(unsafe_agent, supervisor_fn=_unused_supervisor)))
 
     assert validation_calls == []
     assert kernel.read_text() == "def kernel():\n    return 1\n"
@@ -373,7 +404,7 @@ def test_an_api_outage_is_not_recorded_as_an_agent_decision(tmp_path, monkeypatc
         session_sink["end_reason"] = "api_error"
         return "agent session ended with an API error"
 
-    asyncio.run(loop.run(runner_module.LoopAgents(agent_fn=api_failed_agent, supervisor_fn=_unused_supervisor)))
+    asyncio.run(loop.run(lane_agents(api_failed_agent, supervisor_fn=_unused_supervisor)))
 
     store = LoopStateStore(str(workspace))
     decisions = [event.get("decision") for event in store.read_events() if event.get("type") == "iteration_result"]
@@ -384,7 +415,7 @@ def test_an_api_outage_is_not_recorded_as_an_agent_decision(tmp_path, monkeypatc
 
 def test_no_change_attempt_is_reduced_and_persisted(tmp_path, monkeypatch):
     loop, workspace = _make_loop(tmp_path, monkeypatch)
-    asyncio.run(loop.run(runner_module.LoopAgents(agent_fn=_no_change_agent, supervisor_fn=_unused_supervisor)))
+    asyncio.run(loop.run(lane_agents(_no_change_agent, supervisor_fn=_unused_supervisor)))
 
     store = LoopStateStore(str(workspace))
     state = store.load()

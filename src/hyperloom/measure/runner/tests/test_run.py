@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import errno
 import hashlib
+import importlib.metadata
 import json
 import os
 import shutil
@@ -101,7 +102,7 @@ def env(tmp_path, key, monkeypatch):
         IMAGE_DIGEST_VAR: SHEET_IMAGE,
         CACHE_ENV: str(stage_into(tmp_path / "runner-cache").parents[1]),
     }
-    monkeypatch.setattr(runner, "ensure_inferencex", lambda commit, cache: tmp_path / "ix")
+    monkeypatch.setattr(runner, "ensure_inferencex", lambda commit, cache, store: tmp_path / "ix")
     # this interpreter's identity of the published staging; lm-eval is not installed in CI
     monkeypatch.setattr(runner_tools, "normalised_manifest", lambda tool_cache: STAGING)
     # a machine that answers every question: the sheet's card, no errors, nothing resident
@@ -233,6 +234,31 @@ def test_a_missing_signing_key_stops_the_runner_at_start(tmp_path, env):
 
     assert _go(tmp_path, env, _sheet()) == 2
     assert _status(tmp_path)["error_class"] == "runner_start_failed"
+
+
+def test_a_base_build_the_runner_cannot_see_stops_it_at_start(tmp_path, env, monkeypatch):
+    backend = _Backend(_ok)
+    monkeypatch.setattr(runner, "LocalMeasurementBackend", backend)
+    gone = tmp_path / "base-builds" / "k" / "llamacpp" / "bin"
+    env["HYPERLOOM_BASE_BINS"] = str(gone)
+
+    assert _go(tmp_path, env, _sheet()) == 2
+    status = _status(tmp_path)
+    assert status["error_class"] == "runner_start_failed" and str(gone) in status["message"]
+    assert backend.calls == []
+
+
+def test_the_base_builds_the_session_laid_are_first_on_the_path_a_test_runs_with(tmp_path, env, monkeypatch):
+    backend = _Backend(_ok)
+    monkeypatch.setattr(runner, "LocalMeasurementBackend", backend)
+    bins = [tmp_path / "base-builds" / key / "llamacpp" / "bin" for key in ("k1", "k2")]
+    for base in bins:
+        base.mkdir(parents=True)
+    env.update({"HYPERLOOM_BASE_BINS": os.pathsep.join(map(str, bins)), "PATH": "/opt/rocm/bin:/usr/bin"})
+
+    assert _go(tmp_path, env, _sheet()) == 0
+    assert len(backend.calls) == 1
+    assert env["PATH"].split(os.pathsep) == [*map(str, bins), "/opt/rocm/bin", "/usr/bin"]
 
 
 def test_a_successful_test_leaves_a_signed_manifest_and_status_last(tmp_path, env, key, monkeypatch):
@@ -772,7 +798,8 @@ def test_a_blob_that_is_not_in_the_sandbox_is_spec_rejected(tmp_path, env, monke
     _refused(tmp_path, env, monkeypatch, _sheet(attachments=[attachment]), "is not in /in/blobs")
 
 
-def test_a_framework_file_blob_that_is_not_its_address_is_spec_rejected(tmp_path, env, monkeypatch):
+def _framework_sheet(tmp_path, address: str, version: str) -> dict:
+    """A sheet whose one root replaces ``yaml/__init__.py`` with ``address``, compiled against PyYAML ``version``."""
     point = yaml.safe_dump(
         {
             "benchmark": {
@@ -781,21 +808,39 @@ def test_a_framework_file_blob_that_is_not_its_address_is_spec_rejected(tmp_path
             }
         }
     )
-    address = _blob(tmp_path, b"MARKER = 1\n", stored_as=b"another file")
     entry = {"path": "__init__.py", "op": "upsert", "blob": address, "mode": "0644"}
     root = {
         "id": "yaml",
         "kind": "package",
         "import_name": "yaml",
-        "dist": {"name": "PyYAML", "version": "0"},
+        "dist": {"name": "PyYAML", "version": version},
         "entries": [entry],
     }
-    sheet = _sheet(
+    return _sheet(
         config=[{"yaml": point, "sha256": hashlib.sha256(point.encode()).hexdigest()}],
         environment={"roots": [root], "runtime": None, "blob_root": "/b"},
     )
 
+
+def test_a_framework_file_blob_that_is_not_its_address_is_spec_rejected(tmp_path, env, monkeypatch):
+    address = _blob(tmp_path, b"MARKER = 1\n", stored_as=b"another file")
+    sheet = _framework_sheet(tmp_path, address, importlib.metadata.version("PyYAML"))
+
     _refused(tmp_path, env, monkeypatch, sheet, "does not hash to")
+
+
+def test_framework_files_compiled_against_another_version_are_refused_as_a_version_mismatch(tmp_path, env, monkeypatch):
+    sheet = _framework_sheet(tmp_path, _blob(tmp_path, b"MARKER = 1\n"), "0.0.1")
+    backend = _Backend(_ok)
+    monkeypatch.setattr(runner, "LocalMeasurementBackend", backend)
+
+    assert _go(tmp_path, env, sheet) == 1
+
+    status = _status(tmp_path)
+    installed = importlib.metadata.version("PyYAML")
+    assert status["error_class"] == "framework_version_mismatch", status
+    assert "PyYAML 0.0.1" in status["message"] and f"has PyYAML {installed}" in status["message"], status
+    assert backend.calls == [] and not (tmp_path / "out" / "manifest.json").exists()
 
 
 def _snapshot(tmp_path) -> tuple[str, str]:

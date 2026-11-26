@@ -24,7 +24,7 @@ from kernelforge.workflows.forge_loop.search.agent_relay import (
 )
 from kernelforge.workflows.forge_loop.campaign.experiments_layout import ARCHIVE_TIME_FORMAT, ExperimentsLayout
 from kernelforge.workflows.forge_loop.search.search_policy import (
-    OBJECTIVE_IMMEDIATE_CANONICAL_GAIN,
+    OBJECTIVE_CANONICAL_GAIN,
     SEARCH_MODE_EXPLOIT,
     SEARCH_MODES,
 )
@@ -53,17 +53,6 @@ _TERMINAL_SESSION_STATUSES = {
     SESSION_COMPLETED,
     SESSION_INTERRUPTED,
 }
-
-ORCHESTRATION_CIRCUIT_CLOSED = "closed"
-ORCHESTRATION_CIRCUIT_OPEN = "open"
-ORCHESTRATION_CIRCUIT_HALF_OPEN = "half_open"
-ORCHESTRATION_CIRCUIT_STATES = frozenset(
-    {
-        ORCHESTRATION_CIRCUIT_CLOSED,
-        ORCHESTRATION_CIRCUIT_OPEN,
-        ORCHESTRATION_CIRCUIT_HALF_OPEN,
-    }
-)
 
 
 @dataclass
@@ -111,76 +100,6 @@ class AnalysisRefreshState:
 
 
 @dataclass
-class CriticRuling:
-    """The last Plan Critic verdict, and where the review that made it lives."""
-
-    verdict: str = ""
-    review_path: str = ""
-
-
-# How many recent rounds the cost history keeps.
-ROUND_COST_WINDOW = 5
-
-
-@dataclass
-class RoundCost:
-    """What one round cost, split at the point its plans were published."""
-
-    iteration: int = 0
-    lanes: int = 1
-    planning_sec: float = 0.0
-    total_sec: float = 0.0
-    measurement_sec: float = 0.0
-    # The part of ``planning_sec`` the plan critic and the revision it asked for took.
-    review_sec: float = 0.0
-
-
-@dataclass
-class RoundCostState:
-    """Observed round costs: campaign totals, plus a bounded recent window."""
-
-    rounds: int = 0
-    planning_total_sec: float = 0.0
-    total_sec: float = 0.0
-    campaign_sec: float = 0.0
-    recent: list[RoundCost] = field(default_factory=list)
-
-    def planning_share_pct(self) -> float | None:
-        """Planning as a percentage of the campaign wall-clock it was spent in."""
-        if self.campaign_sec <= 0:
-            return None
-        return 100.0 * self.planning_total_sec / self.campaign_sec
-
-
-def _validate_round_costs(costs: "RoundCostState") -> None:
-    """Reject a cost history the admission estimate could not be built on."""
-    durations: list[tuple[str, object]] = [
-        ("round_costs.planning_total_sec", costs.planning_total_sec),
-        ("round_costs.total_sec", costs.total_sec),
-        ("round_costs.campaign_sec", costs.campaign_sec),
-    ]
-    for index, entry in enumerate(costs.recent):
-        durations.append((f"round_costs.recent[{index}].planning_sec", entry.planning_sec))
-        durations.append((f"round_costs.recent[{index}].total_sec", entry.total_sec))
-        durations.append(
-            (
-                f"round_costs.recent[{index}].measurement_sec",
-                entry.measurement_sec,
-            )
-        )
-        durations.append((f"round_costs.recent[{index}].review_sec", entry.review_sec))
-    for label, value in durations:
-        if isinstance(value, bool) or not isinstance(value, (int, float)):
-            raise ValueError(f"run state {label} must be a number")
-        if not math.isfinite(float(value)) or float(value) < 0:
-            raise ValueError(f"run state {label} must be a non-negative finite duration")
-    if costs.rounds < 0:
-        raise ValueError("run state round_costs.rounds must not be negative")
-    if float(costs.campaign_sec) < float(costs.planning_total_sec):
-        raise ValueError("run state round_costs.campaign_sec must cover round_costs.planning_total_sec")
-
-
-@dataclass
 class RunState:
     """Small, resumable control checkpoint for one forge-loop campaign."""
 
@@ -195,17 +114,13 @@ class RunState:
     iteration: int = 0
     next_iteration: int = 1
     cumulative: CumulativeCounters = field(default_factory=CumulativeCounters)
-    orchestration_error_streak: int = 0
-    orchestration_circuit_state: str = ORCHESTRATION_CIRCUIT_CLOSED
     intervention_count: int = 0
     agent_relay: AgentRelayState = field(default_factory=AgentRelayState)
     agent_availability_snapshot: AgentAvailabilitySnapshot = field(default_factory=AgentAvailabilitySnapshot)
     phase: str = PHASE_EXPLORE
     search_mode: str = SEARCH_MODE_EXPLOIT
     search_reason_codes: list[str] = field(default_factory=list)
-    search_objective: str = OBJECTIVE_IMMEDIATE_CANONICAL_GAIN
-    search_mode_residence_remaining: int = 0
-    diversification_cycle_completed: bool = False
+    search_objective: str = OBJECTIVE_CANONICAL_GAIN
     baseline_wall_ms: float | None = None
     pristine_baseline_wall_ms: float | None = None
     # Per-scored-case baseline wall times (case_id -> ms), captured once on the pristine kernel.
@@ -220,10 +135,8 @@ class RunState:
     best: BestRecord = field(default_factory=BestRecord)
     stall: StallState = field(default_factory=StallState)
     analysis: AnalysisRefreshState = field(default_factory=AnalysisRefreshState)
-    last_critic: CriticRuling = field(default_factory=CriticRuling)
-    # What this campaign's own rounds have cost, which is what decides whether the remaining budget can pay for
-    # another one.
-    round_costs: RoundCostState = field(default_factory=RoundCostState)
+    # Wall-clock the campaign has spent across all of its sessions.
+    campaign_sec: float = 0.0
     # Iterations worth re-reading in full (best + notable near-misses).
     pinned_iterations: list[int] = field(default_factory=list)
     # The roofline ceiling this campaign estimated. A resume reads it back rather than estimating again: the stop
@@ -279,22 +192,6 @@ class RunState:
             CumulativeCounters,
             "cumulative",
         )
-        payload["last_critic"] = nested(
-            payload["last_critic"],
-            CriticRuling,
-            "last_critic",
-        )
-        round_costs = nested(
-            payload["round_costs"],
-            RoundCostState,
-            "round_costs",
-        )
-        if not isinstance(round_costs.recent, list):
-            raise ValueError("run state round_costs.recent must be a list")
-        round_costs.recent = [
-            nested(entry, RoundCost, f"round_costs.recent[{index}]") for index, entry in enumerate(round_costs.recent)
-        ]
-        payload["round_costs"] = round_costs
         payload["agent_relay"] = nested(
             payload["agent_relay"],
             AgentRelayState,
@@ -305,13 +202,13 @@ class RunState:
             payload["agent_availability_snapshot"]
         )
         state = cls(**payload)
-        _validate_round_costs(state.round_costs)
+        campaign_sec = state.campaign_sec
+        if isinstance(campaign_sec, bool) or not isinstance(campaign_sec, (int, float)):
+            raise ValueError("run state campaign_sec must be a number")
+        if not math.isfinite(float(campaign_sec)) or float(campaign_sec) < 0:
+            raise ValueError("run state campaign_sec must be a non-negative finite duration")
         if state.search_mode not in SEARCH_MODES:
             raise ValueError(f"run state has unsupported search mode: {state.search_mode!r}")
-        if state.orchestration_circuit_state not in ORCHESTRATION_CIRCUIT_STATES:
-            raise ValueError(
-                f"run state has unsupported orchestration circuit state: {state.orchestration_circuit_state!r}"
-            )
         if state.next_iteration < 1:
             raise ValueError("run state next_iteration must be positive")
         return state
@@ -392,7 +289,7 @@ def make_event(event_type: str, iteration: int, **fields: object) -> dict:
 _DEFAULT_STALL_PHASE_THRESHOLD = 3
 
 # Decisions that record an infrastructure failure rather than an attempt at the kernel.
-INFRASTRUCTURE_DECISIONS = frozenset({"API_ERROR", "ORCHESTRATION_ERROR"})
+INFRASTRUCTURE_DECISIONS = frozenset({"API_ERROR"})
 
 
 def is_infrastructure_decision(decision: str) -> bool:
@@ -441,19 +338,12 @@ class LoopStanding:
     best_mean_case_speedup: float | None = None
 
 
-@dataclass(frozen=True)
-class StallPolicy:
-    """How many stalled iterations make the stalled phase, and how many orchestration errors open the circuit."""
-
-    stall_threshold: int = _DEFAULT_STALL_PHASE_THRESHOLD
-    orchestration_error_threshold: int = 3
-
-
 def apply_iteration(
     state: "RunState",
     verdict: IterationVerdict,
     standing: LoopStanding,
-    policy: StallPolicy = StallPolicy(),
+    *,
+    stall_threshold: int = _DEFAULT_STALL_PHASE_THRESHOLD,
 ) -> "RunState":
     """Reduce one finished iteration's outcome into the run state (in place)."""
     iteration, decision, kept = verdict.iteration, verdict.decision, verdict.kept
@@ -489,16 +379,6 @@ def apply_iteration(
     elif not infrastructure:
         state.stall.no_improvement_iters += 1
         state.stall.unresolved_stall_iters += 1
-    if str(decision or "").strip().upper() == "ORCHESTRATION_ERROR":
-        state.orchestration_error_streak += 1
-        if (
-            state.orchestration_circuit_state == ORCHESTRATION_CIRCUIT_HALF_OPEN
-            or state.orchestration_error_streak >= max(1, policy.orchestration_error_threshold)
-        ):
-            state.orchestration_circuit_state = ORCHESTRATION_CIRCUIT_OPEN
-    else:
-        state.orchestration_error_streak = 0
-        state.orchestration_circuit_state = ORCHESTRATION_CIRCUIT_CLOSED
 
     # Safety sync of the loop's authoritative mean case speedup, but ONLY once a real KEEP exists.
     if (
@@ -509,55 +389,7 @@ def apply_iteration(
         state.best.mean_case_speedup = best_mean_case_speedup
         state.best.wall_ms = best_wall_ms
 
-    state.phase = _phase_for(state, policy.stall_threshold)
-    return state
-
-
-def apply_round_cost(state: "RunState", cost: RoundCost, *, campaign_sec: float) -> "RunState":
-    """Record what one finished round cost (in place)."""
-    planning = max(0.0, float(cost.planning_sec))
-    total = max(planning, float(cost.total_sec))
-    measurement = max(0.0, float(cost.measurement_sec))
-    review = min(planning, max(0.0, float(cost.review_sec)))
-    if planning <= 0:
-        raise ValueError("a round that did not plan has no cost to record")
-    costs = state.round_costs
-    costs.rounds += 1
-    costs.planning_total_sec += planning
-    costs.total_sec += total
-    costs.campaign_sec = max(
-        costs.campaign_sec,
-        float(campaign_sec),
-        costs.planning_total_sec,
-    )
-    costs.recent.append(
-        RoundCost(
-            iteration=cost.iteration,
-            lanes=max(1, int(cost.lanes)),
-            planning_sec=planning,
-            total_sec=total,
-            measurement_sec=measurement,
-            review_sec=review,
-        )
-    )
-    costs.recent = costs.recent[-ROUND_COST_WINDOW:]
-    return state
-
-
-def begin_orchestration_probe(state: "RunState") -> "RunState":
-    """Move an explicitly resumed open circuit into half-open state."""
-    if state.orchestration_circuit_state != ORCHESTRATION_CIRCUIT_OPEN:
-        raise ValueError("only an open orchestration circuit can enter half-open")
-    state.orchestration_circuit_state = ORCHESTRATION_CIRCUIT_HALF_OPEN
-    return state
-
-
-def complete_orchestration_probe(state: "RunState") -> "RunState":
-    """Close the circuit after one successful orchestration call."""
-    if state.orchestration_circuit_state == ORCHESTRATION_CIRCUIT_OPEN:
-        raise ValueError("an open orchestration circuit cannot complete a probe")
-    state.orchestration_error_streak = 0
-    state.orchestration_circuit_state = ORCHESTRATION_CIRCUIT_CLOSED
+    state.phase = _phase_for(state, stall_threshold)
     return state
 
 

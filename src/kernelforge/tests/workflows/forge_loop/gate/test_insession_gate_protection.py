@@ -12,30 +12,11 @@ from kernelforge.workflows.forge_loop.gate.gate_settings import GateMeasurement,
 from kernelforge.workflows.forge_loop.gate.insession_gate import InSessionGate
 from kernelforge.workflows.forge_loop.gate.insession_scope import _python_command_payloads
 from kernelforge.utils.git import GitError
+from kernelforge.tests.workflows.forge_loop.gate._gate_workspace import committed_task_workspace
 
 
 def _gate(tmp_path: Path) -> tuple[InSessionGate, Path]:
-    workspace = tmp_path / "ws"
-    scripts = workspace / "scripts"
-    source = workspace / "aiter" / "csrc"
-    scripts.mkdir(parents=True)
-    source.mkdir(parents=True)
-
-    (workspace / "config.yaml").write_text("task_type: image_kernel\n")
-    (workspace / "forge_driver.py").write_text("print('driver')\n")
-    (scripts / "task_runner.py").write_text("print('runner')\n")
-    kernel = source / "kernel.cu"
-    kernel.write_text("__global__ void kernel() {}\n")
-    # The gate diffs the session's edits against HEAD, so its workspace is a repo that has one.
-    subprocess.run(["git", "init", "-q"], cwd=workspace, check=True, capture_output=True)
-    subprocess.run(["git", "add", "-A"], cwd=workspace, check=True, capture_output=True)
-    subprocess.run(
-        ["git", "-c", "user.email=t@t", "-c", "user.name=t", "commit", "-q", "-m", "base"],
-        cwd=workspace,
-        check=True,
-        capture_output=True,
-    )
-
+    workspace, kernel = committed_task_workspace(tmp_path)
     gate = InSessionGate(
         GateMeasurement(driver_script=str(workspace / "forge_driver.py"), snr_threshold=30.0),
         GateScope(kernel_file=str(kernel), target_files=[str(kernel)]),

@@ -42,7 +42,7 @@ async def branch_rig(tmp_path: Path, recipe: Recipe, branch: str) -> BranchRig:
     installed = PackageBase("vllm", package, None, None)
     base = SourceBase(tmp_path / "source")
     with pytest.MonkeyPatch.context() as patch:
-        patch.setattr(worktree_module, "locate_installed_package", lambda _layout: installed)
+        patch.setattr(worktree_module, "locate_source", lambda _layout: installed)
         base.build(["vllm"])
     repo = GitExperimentRepo(
         tmp_path / "experiments.git", LocalBlobStore(tmp_path / "blobs"), lambda _layout: installed

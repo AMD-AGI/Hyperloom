@@ -19,7 +19,7 @@ import subprocess
 import sys
 import textwrap
 from collections import Counter
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from fnmatch import fnmatchcase
 from pathlib import Path
 from typing import Any
@@ -98,7 +98,6 @@ _LITERALS: dict[str, str | list[str] | dict[str, str]] = {
     "AITER_DEVELOP_MODE": "develop",
     "AITER_INSTALL_MODE_FILE": "install_mode",
     "AITER_LOG_TUNED_CONFIG_ENV": "AITER_LOG_TUNED_CONFIG",
-    "AITER_MERGED_VIEW_DIR": "/tmp/aiter_configs",
     "AITER_META_DIR_ENV": "AITER_META_DIR",
     "AITER_META_MARKER_DIR": "csrc",
     "AITER_META_WHEEL_DIR": "aiter_meta",
@@ -146,6 +145,29 @@ _LITERALS: dict[str, str | list[str] | dict[str, str]] = {
     "KFD_RENDER_MINOR_KEY": "drm_render_minor",
     "KFD_ROOT": "/sys/class/kfd/kfd",
     "KFD_VRAM_PREFIX": "vram_",
+    "LLAMACPP_BACKEND_OPS": {
+        "executable": "test-backend-ops",
+        "mode": "perf",
+        "backend": "ROCm0",
+        "enum_header": "ggml/include/ggml.h",
+        "op_enum": "ggml_op",
+        "type_enum": "ggml_type",
+        "op_prefix": "GGML_OP_",
+        "type_prefix": "GGML_TYPE_",
+        "activation_type": "F32",
+    },
+    "NATIVE_AUX_MODEL_FLAGS": {"llamacpp": ["--spec-draft-model", "-md", "--model-draft"]},
+    "NATIVE_SERVING": {
+        "llamacpp": {
+            "option_table": "common/arg.cpp",
+            "option_entry": "add_opt(common_arg(",
+            "help_command": "llama-server --help",
+            "request_timing": "eval time =",
+            "speculative_stats": "draft acceptance =",
+            "host_loop": "tools/server/server-context.cpp, common/sampling.cpp, common/speculative.cpp",
+        },
+    },
+    "NATIVE_TIMING_LINES": {"llamacpp": [r"(?<!prompt )eval time =", "draft acceptance ="]},
     "PID_NAMESPACE_LINK": "self/ns/pid",
     "PY_IMPORT_ERROR": "ImportError",
     "PY_MODULE_NOT_FOUND_ERROR": "ModuleNotFoundError",
@@ -170,7 +192,20 @@ _LITERALS: dict[str, str | list[str] | dict[str, str]] = {
     "TUNABLEOP_TUNING_ENV": "PYTORCH_TUNABLEOP_TUNING",
     "TUNED_LIBTYPE_COLUMN": "libtype",
     "TUNED_SPLITK_COLUMN": "splitK",
-    "UPSTREAM_PR_REPOS": ["sgl-project/sglang", "vllm-project/vllm", "ROCm/aiter", "pytorch/pytorch"],
+    "UPSTREAM_PR_REPOS": [
+        "sgl-project/sglang",
+        "vllm-project/vllm",
+        "ROCm/aiter",
+        "pytorch/pytorch",
+        "ggml-org/llama.cpp",
+    ],
+    "UPSTREAM_PR_REPO_OF": {
+        "sglang": "sgl-project/sglang",
+        "vllm": "vllm-project/vllm",
+        "aiter": "ROCm/aiter",
+        "pytorch": "pytorch/pytorch",
+        "llamacpp": "ggml-org/llama.cpp",
+    },
 }
 
 Facts = dict[str, Any]
@@ -197,15 +232,10 @@ def _set(entry: str, field: str, value: object) -> Callable[[Facts], None]:
 
 def _forget_role(facts: Facts) -> None:
     del facts["pytorch_tunableop_env"]["names"]["tuning"]
-    del facts["pytorch_tunableop_env"]["image_check"]
 
 
 def _rename_sglang_flag(facts: Facts) -> None:
-    """The flag a changed fact names, and the help its image check is pinned to, which shows the renamed flag."""
-    entry = facts["context_length_flags"]
-    entry["names"]["sglang"] = "--ctx"
-    example = entry["image_check"][0]["examples"]["pass"][0]
-    example["help"] = example["help"].replace("--context-length", "--ctx")
+    facts["context_length_flags"]["names"]["sglang"] = "--ctx"
 
 
 def _forget_entry(facts: Facts) -> None:
@@ -226,14 +256,22 @@ def _fresh(code: str, pack: str | None) -> subprocess.CompletedProcess[str]:
     )
 
 
+def _plain(value: object) -> object:
+    """``value`` with every tuple as a list and every mapping as a dict, as ``_LITERALS`` writes them."""
+    if isinstance(value, Mapping):
+        return {key: _plain(item) for key, item in value.items()}
+    return [_plain(item) for item in value] if isinstance(value, tuple) else value
+
+
 def test_the_reference_pack_loads_and_passes_its_own_examples() -> None:
     pack = load_pack(DEFAULT_PACK_PATH)
     assert pack.version == str(yaml.safe_load(DEFAULT_PACK_PATH.read_text(encoding="utf-8"))["version"])
     assert Counter(entry.kind for entry in pack.entries.values()) == {
-        Kind.NAMES: 18,
-        Kind.LOG_REGEX: 17,
+        Kind.NAMES: 19,
+        Kind.LOG_REGEX: 19,
         Kind.ENV_DEFAULT: 2,
-        Kind.COMPONENT_LAYOUT: 9,
+        Kind.COMPONENT_LAYOUT: 10,
+        Kind.KERNEL_KNOB: 2,
     }
 
 
@@ -242,7 +280,7 @@ def test_every_outside_fact_is_the_literal_it_was_before_the_pack() -> None:
     assert sorted(held) == sorted(_LITERALS)
     for name, literal in _LITERALS.items():
         value = getattr(outside_facts, name)
-        assert (list(value) if isinstance(value, tuple) else value) == literal, name
+        assert _plain(value) == literal, name
 
 
 def test_every_entry_of_the_reference_pack_is_read_by_outside_facts() -> None:
@@ -254,8 +292,12 @@ def test_every_entry_of_the_reference_pack_is_read_by_outside_facts() -> None:
         and isinstance(call.func, ast.Attribute)
         and isinstance(call.func.value, ast.Name)
         and call.func.value.id == "_PACK"
+        and call.args
     }
-    assert read == set(load_pack(DEFAULT_PACK_PATH).entries)
+    entries = load_pack(DEFAULT_PACK_PATH).entries
+    # The knobs are read as a kind (kernel_knobs), not by their ids.
+    read |= {entry_id for entry_id, entry in entries.items() if entry.kind is Kind.KERNEL_KNOB}
+    assert read == set(entries)
 
 
 @pytest.mark.parametrize(
@@ -266,8 +308,8 @@ def test_every_entry_of_the_reference_pack_is_read_by_outside_facts() -> None:
         (_set("hip_error_prefix", "pattern", "hipError("), "hip_error_prefix", "does not compile"),
         (_set("pytorch_tunableop_env", "examples", []), "pytorch_tunableop_env", "at least one example"),
         (_set("hip_graph_packet_capture", "value", 0), "hip_graph_packet_capture", "non-empty string"),
-        (_drop("aiter_merged_view", "reason"), "aiter_merged_view", "holds exactly"),
-        (_set("aiter_merged_view", "colour", "red"), "aiter_merged_view", "holds exactly"),
+        (_drop("aiter_meta_dir", "reason"), "aiter_meta_dir", "holds exactly"),
+        (_set("aiter_meta_dir", "colour", "red"), "aiter_meta_dir", "holds exactly"),
         (
             _set("component_layout_triton", "examples", {"place": ["torch/x.py -> package:x.py"], "refuse": ["a.so"]}),
             "component_layout_triton",
@@ -312,8 +354,8 @@ def test_every_entry_of_the_reference_pack_is_read_by_outside_facts() -> None:
         ),
         (_drop("component_layout_torch", "refuse"), "component_layout_torch", "holds exactly"),
         (_drop("component_layout_vllm", "native"), "component_layout_vllm", "holds exactly"),
-        (_set("aiter_merged_view", "kind", "arg_value"), "aiter_merged_view", "reserved"),
-        (_set("aiter_merged_view", "kind", "predicate"), "aiter_merged_view", "is not one of"),
+        (_set("aiter_meta_dir", "kind", "arg_value"), "aiter_meta_dir", "reserved"),
+        (_set("aiter_meta_dir", "kind", "predicate"), "aiter_meta_dir", "is not one of"),
     ],
     ids=[
         "failed-must-match",

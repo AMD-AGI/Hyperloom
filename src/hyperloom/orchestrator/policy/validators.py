@@ -9,14 +9,11 @@ import logging
 from typing import TYPE_CHECKING, Any
 
 from hyperloom.inference_optimizer import framework_registry
-from hyperloom_common.coerce import first_text
 from hyperloom.inference_optimizer.protocol.intent import ALLOWED_VERDICTS
 from hyperloom.inference_optimizer.protocol.action_surfaces import COORDINATOR_INTERNAL_ACTIONS
 from ..specialists.domains import (
     KNOWLEDGE_DOMAIN_TAG_SET,
     SPECIALIST_MAX_TURNS_HARD_CAP,
-    domain_for_tag,
-    get_domain,
 )
 from .denial import PolicyDenied
 from ..specialists.profile import (
@@ -24,7 +21,6 @@ from ..specialists.profile import (
     SCOPE_DOMAINS as SPECIALIST_SCOPE_DOMAINS,
     SCOPE_VALUES as SPECIALIST_SCOPE_VALUES,
 )
-from ..state._shared_state.phase_state import gap_actionability_key
 
 if TYPE_CHECKING:  # pragma: no cover — type-only
     from ..roles.agent_role import AgentRole
@@ -160,10 +156,9 @@ def validate_review_verdict(role: "AgentRole", payload: dict[str, Any]) -> None:
             rule="payload",
             hint=(
                 "single-proposal review: emit {target_proposal_msg_id, "
-                "verdict, reasoning, failure_reason_code?}. Explore batch "
+                "verdict, reasoning}. Explore batch "
                 "review: emit {target_proposal_msg_id, verdict_map: "
-                "{variant_name: {verdict, rationale?, "
-                "failure_reason_code?}}}"
+                "{variant_name: {verdict, rationale?}}}"
             ),
         )
     if has_single:
@@ -296,71 +291,6 @@ def log_specialist_dispatch_coherence(scope_raw: str, tags: list[str]) -> None:
         log.info("specialist dispatch scope='domains' with %d tag(s)=%r; profile will re-infer", len(tags), tags)
     elif scope_raw == SPECIALIST_SCOPE_DOMAIN and len(tags) > 1:
         log.info("specialist dispatch scope='domain' with %d tags=%r", len(tags), tags)
-
-
-def autofill_gap_from_ledger(
-    shared_state: Any,
-    params: dict[str, Any],
-    tags: list[str],
-) -> str:
-    """Backfill ``params.gap_canonical_id`` from the gaps[] ledger.
-
-    Matches the dispatch anchor (domain key, its kb_anchor, and the
-    knowledge-domain ``tags``) against each gap's ``domain_hint``. Among the
-    matches, prefers the most actionable: highest severity, then the
-    least-attempted, then the oldest (most-stalled) gap. Mutates ``params``
-    in place and returns the chosen canonical id (``""`` when nothing
-    matches, leaving the caller's required-gap rejection intact).
-
-    Args:
-        shared_state (Any): the session state holding the gaps[] ledger, or ``None``.
-        params (dict[str, Any]): the dispatch ``params``; mutated in place
-            with the chosen ``gap_canonical_id`` when a match is found.
-        tags (list[str]): the knowledge-domain tags used to build the anchor
-            candidate set.
-
-    Returns:
-        str: the chosen canonical gap id, or ``""`` when no gap matches.
-    """
-    state = shared_state
-    gaps = list(getattr(state, "gaps", None) or []) if state is not None else []
-    if not gaps:
-        return ""
-
-    # Build the anchor candidate set the gap's domain_hint may name.
-    candidates: set[str] = set()
-    domain_key = first_text(params.get("domain"))
-    if domain_key:
-        candidates.add(domain_key.lower())
-        d = get_domain(domain_key)
-        if d and d.kb_anchor:
-            candidates.add(d.kb_anchor.lower())
-    for t in tags:
-        t_l = str(t).strip().lower()
-        if t_l:
-            candidates.add(t_l)
-        dt = domain_for_tag(t)
-        if dt:
-            candidates.add(dt.key.lower())
-            if dt.kb_anchor:
-                candidates.add(dt.kb_anchor.lower())
-    if not candidates:
-        return ""
-
-    matches = [
-        g
-        for g in gaps
-        if isinstance(g, dict)
-        and first_text(g.get("canonical_id"))
-        and first_text(g.get("domain_hint")).lower() in candidates
-    ]
-    if not matches:
-        return ""
-    matches.sort(key=gap_actionability_key)
-    # Every match carries a non-empty canonical id.
-    chosen = first_text(matches[0].get("canonical_id"))
-    params["gap_canonical_id"] = chosen
-    return chosen
 
 
 def check_freeform_task_description(desc: str, *, where: str) -> None:

@@ -3,22 +3,25 @@
 
 """The integrator: carries specialist commits onto the integration branch, in rounds of up to K merge tests.
 
-Candidates are the blackboard's committed specialist commits, whatever became of the branch that made them: those no
-merge attempt took yet, then those coming back, each in the order the blackboard gives them (foundation fixes first,
-then by their own gain). Each is tried once per integration head, until it is merged or found already on the head,
+Candidates are the blackboard's committed specialist commits, whatever became of the branch that made them: those a
+round superseded, then those no merge attempt took yet, then the others coming back, each in the order the blackboard
+gives them (foundation fixes first, then by their own gain). Each is tried once per integration head, until it is
+merged or found already on the head,
 except that one the rule gate measured as not stackable waits until a later merge changes something its own change
 names, and is not offered again once measured not stackable on
 :data:`~hyperloom_multibranch.scheduling.candidates.NOT_STACKABLE_ANSWERS` heads; the merge-log entry of the answer
 that reaches the cap says so. See :mod:`hyperloom_multibranch.scheduling.candidates`. A round
 tests up to the integration branch's K candidates at once on the same head, and a slot it had nothing to fill takes
-the first commit committed while it runs rather than standing idle until the round ends; the round ends its tests in
-the order it started them, and the first of them that
-may be merged is merged, and every other one that may is superseded: it gets no judgement and is tried again on the
-new head. So is a merge whose test did not measure, a limited number of times where it ended as an infrastructure
+the first commit committed while it runs rather than standing idle until the round ends; once its tests have ended,
+the one that may be merged and gained most on the head is merged, a lead adoption or a foundation fix before any
+other, and every other one that may is superseded: it gets no judgement and is tried again on the
+new head, before the commits no merge attempt took yet. A merge whose test did not measure is tried again too, a
+limited number of times where it ended as an infrastructure
 failure, and one whose regression set did not run clean: the set says a
 case did not come back clean, not whether it reproduced or never ran, so it settles nothing about the candidate. A
 merge the experiment repository cannot combine, or whose test the toolbox refuses, is skipped and recorded
-like an unresolved conflict. One that leaves the head's recipe as it is is skipped untested as already on the head:
+like an unresolved conflict. One that leaves the head's recipe as it is, or in a session that keeps an option
+inventory only spells an option of the head's launch another way, is skipped untested as already on the head:
 another branch's commit already brought the same change, and the head keeps it, so it is not tried again, as a merged
 commit is not.
 
@@ -54,6 +57,18 @@ back: each of them is then owed a merge test of its own, on whatever head is cur
 never merges what single tests would not and never stands in for a member's own answer. A foundation fix is never bundled, since it merges without the gain a bundle
 is judged on.
 
+When EXPLORE ends, :meth:`Integrator.finish_round` ends the rounds: no merge test starts any more, and the round under
+way takes back each merge test the rule gate has not asked a confirm for. A merge waiting for its confirm goes on to
+its end, so a gain measured once already still reaches the integration head FINAL reads, and of two that end the
+round merges the one it would have merged before; the caller says how long it waits for the tests and for the set.
+When the wait for the tests runs out, :meth:`Integrator.withdraw_unfinished` takes back those still running, so the
+round concludes the merges whose tests ended.
+
+A caller with no time left for that cancels the round instead, and no regression set runs after that. So a round that
+holds a merge that may be merged while its other tests run puts the regression set to it as its test ends, and a
+cancelled round merges, of those it holds, the one that gained most among those the set has passed on. One that may be
+merged and is not, because the set had not passed on it, is recorded as such in the merge log and warned about.
+
 Before EXPLORE opens, :meth:`Integrator.replay_champion` carries the Recipe KB champion PRELUDE prepared onto the
 root the same way and by the same rule, judged once PRELUDE has anchored the baseline. It is nobody's candidate, so no merge attempt records it and the regression
 set it would run is still empty; what it leaves the integration branch at is the commit EXPLORE opens on.
@@ -63,14 +78,16 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import logging
 from collections.abc import Awaitable, Callable, Sequence, Set
 from dataclasses import dataclass, field, replace
 from enum import Enum
 from functools import partial
+from typing import TYPE_CHECKING
 
 from hyperloom_common.jsonio import extract_last_json_with_key
 from hyperloom.contracts.measurement import Purpose, TestKind
-from hyperloom.contracts.recipe import ComponentPatches, RecipeDelta, RecipeError, ValueChange, apply
+from hyperloom.contracts.recipe import ComponentPatches, Recipe, RecipeDelta, RecipeError, ValueChange, apply
 from hyperloom.measure.compile import BlobError
 from hyperloom_multibranch.contracts.gate import NotMeasured
 from hyperloom_multibranch.contracts.judgement import AccuracyVerdict, Judgement, Verdict
@@ -97,7 +114,15 @@ from hyperloom_multibranch.scheduling.decisions import Decision, DecisionKind, D
 from hyperloom_multibranch.contracts.llm import STOPPED_AT_MAX_TOKENS, Completion, CompletionFailed, CompletionReply
 from hyperloom_multibranch.scheduling.requests import SessionChecks, integration_test_request
 
+if TYPE_CHECKING:
+    from hyperloom.measure.runner.native.server_options import OptionInventory
+
+logger = logging.getLogger(__name__)
+
 SUPERSEDED = "superseded: another candidate of the round was merged onto this head first"
+#: How the reason begins of a merge that may be merged and was not: nothing runs the regression set once the round is
+#: cancelled, as it is when EXPLORE ends with no time for a confirm, out of GPU hours or of cards.
+NOT_CHECKED_AT_CANCEL = "not merged: the round was cancelled before the regression set passed on this merge"
 EXPLORATION_ENDED = "exploration ended"
 ALREADY_ON_HEAD = "its change is already on the integration head"
 #: How a lead adoption's reason begins, naming the branch whose head it merges.
@@ -425,15 +450,50 @@ class _Skipped(Exception):
 
 @dataclass(frozen=True)
 class _TestedMerge:
-    """A merge test the rule gate judged; ``report`` is still ``PENDING`` and ``delta`` is what was tested."""
+    """A merge test the rule gate judged; ``report`` is still ``PENDING``, ``delta`` is what was tested, and
+    ``checked`` says the regression set has passed on it."""
 
     report: MergeReport
     delta: RecipeDelta
     judgement: Judgement
+    checked: bool = False
+
+    @property
+    def may_merge(self) -> bool:
+        """Whether the judgement lets the merge land once the regression set passes."""
+
+        return not not_stackable_reason(self.judgement, foundation_fix=self.report.foundation_fix)
+
+
+def _merge_order(tested: _TestedMerge) -> tuple[bool, bool, float]:
+    """Sorts the merges of a round that may be merged into the order the round tries to land them in: a lead
+    adoption, then a foundation fix, which needs no gain, then by the gain measured on the head, the largest first."""
+
+    return (not tested.report.adopts, not tested.report.foundation_fix, -tested.judgement.gain_pct)
 
 
 #: What a merge test ends as: a report of its own, or a judged merge the round has still to conclude.
 _Tested = MergeReport | _TestedMerge
+
+
+def _ended_first(running: list[asyncio.Task[_Tested]]) -> list[_Tested]:
+    """What the tests at the front of ``running`` that have ended ended as, taken off it; a cancelled one ended as
+    nothing."""
+
+    ended = []
+    while running and running[0].done():
+        task = running.pop(0)
+        if not task.cancelled():
+            ended.append(task.result())
+    return ended
+
+
+def _ended_mergeable(running: Sequence[asyncio.Task[_Tested]]) -> list[_TestedMerge]:
+    """The merges that may be merged among the tests of ``running`` that ended and still wait there for a test started
+    before them."""
+
+    ended = [task.result() for task in running if task.done() and not task.cancelled() and not task.exception()]
+    return [item for item in ended if isinstance(item, _TestedMerge) and item.may_merge]
 
 
 @dataclass(frozen=True)
@@ -442,6 +502,14 @@ class _Start:
 
     pending: MergeReport
     merging: Callable[[], Awaitable[RepoMerge]]
+
+
+@dataclass
+class _InRound:
+    """A merge the round under way tests: the task testing it and, once the toolbox took its merge test, that test."""
+
+    task: asyncio.Task[_Tested]
+    request_id: str = ""
 
 
 async def _carried(merge: RepoMerge) -> RepoMerge:
@@ -485,10 +553,15 @@ class MergeRecords:
 class Integrator:
     """Merges committed specialist commits onto the integration branch; the caller runs one round at a time.
 
-    A cancelled round takes its merge tests back; a caller that cancels one then awaits :meth:`abandon`, which takes
-    back the retests the gate asked for too and leaves the repository and the blackboard agreeing on the integration
-    head.
+    A cancelled round takes its merge tests back, once it has merged what it held that the regression set had passed
+    on; a caller that cancels one then awaits :meth:`abandon`, which takes back the retests the gate asked for too and
+    leaves the repository and the blackboard agreeing on the integration head. A caller that still has time for a
+    confirm at the end of EXPLORE awaits :meth:`finish_round` before that.
     """
+
+    #: The options the session's server takes, by which a merge is compared with the head's launch; ``None`` in a
+    #: session that keeps no option inventory.
+    options: OptionInventory | None = None
 
     def __init__(
         self,
@@ -510,45 +583,78 @@ class Integrator:
         self._decisions = records.merges
         self._recording: asyncio.Future[MergeReport] | None = None
         self._adopted: set[tuple[str, str]] = set()
+        self._round: dict[str, _InRound] = {}
+        self._round_over = asyncio.Event()
+        self._round_over.set()
+        self._ended = False
 
     async def integrate_next(self, width: int, tick: float, leads: Sequence[StrandedLead]) -> tuple[MergeReport, ...]:
         """Test the commits offered on the current head, ``width`` of them at once; ``()`` when none is offered.
 
         The first of ``leads``, the stranded leads largest first, whose head was not adopted on this head yet takes the
-        round's first slot, so an adoption that may be merged is the one the round merges.
+        round's first slot, and an adoption that may be merged is the one the round merges.
 
         A slot the round has nothing to fill takes a commit committed while it runs, looked for every ``tick`` clock
         seconds, instead of standing idle until the round ends. The head stays where the round found it, so that
-        commit is tested on the same head as the rest. At most one merge lands, of one commit or of a bundle, and once
-        one does the round starts no more: the head has moved under the rest, which are offered again on the head it
-        moved to.
+        commit is tested on the same head as the rest. At most one merge lands, of one commit or of a bundle: the
+        head has moved under the rest, which are offered again on the head it moved to.
 
-        A test that ends waits for the tests the round started before it, so which commit a round merges follows the
-        order the blackboard offers them in rather than how long each one took to measure.
+        A test that ends waits for the tests the round started before it, and one that may be merged for every test
+        of the round, which starts no more meanwhile; the regression set runs on the first of those held as its test
+        ends, and on the next where it fails. Of those that may be merged the round merges a lead adoption, else a
+        foundation fix, else the one that gained most on the head, the one started first of two that gained the
+        same (:func:`_merge_order`), so which commit a round merges follows what each measured on the head rather
+        than the gain it made on its own branch or how long it took to measure.
+
+        Once :meth:`finish_round` ended the rounds no test starts, in this round or a later one, and a test it took
+        back leaves no report; the round waits for the tests left, those waiting for their confirm, and merges by
+        the same order.
+
+        A cancelled round concludes the merges that may be merged in the same order before it takes its tests back,
+        but runs no regression set: the first the set has passed on is merged and those after it are superseded,
+        while one before it, or with none merged, is logged and warned about as :data:`NOT_CHECKED_AT_CANCEL`.
         """
 
+        if self._ended:
+            return ()
         head = await self._repo.head(INTEGRATION_BRANCH)
         adoptions = await self._claim_adoption(leads, head)
-        running = [asyncio.create_task(self._test(self._single(adoption))) for adoption in adoptions]
+        running = [self._begin(self._single(adoption)) for adoption in adoptions]
         started = {adoption.candidate for adoption in adoptions}
         reports: list[MergeReport] = []
-        merged = False
+        mergeable: list[_TestedMerge] = []
+        self._recording = None
+        self._round_over.clear()
         try:
             while True:
-                for start in await self._to_start(head, 0 if merged else width - len(running) - len(reports), started):
+                free = 0 if mergeable or self._ended else width - len(running) - len(reports)
+                starts = await self._to_start(head, free, started)
+                # finish_round can run during that look, and it cancels only the tests begun before it.
+                for start in () if self._ended else starts:
                     started.update(start.pending.sources)
-                    running.append(asyncio.create_task(self._test(start)))
-                while running and running[0].done():
-                    report = await self._concluded(running.pop(0).result(), merged)
-                    merged = merged or report.outcome is MergeOutcome.MERGED
-                    reports.append(report)
+                    running.append(self._begin(start))
+                reports += await self._settled(_ended_first(running), mergeable)
+                reports += await (self._checked(mergeable) if running else self._landed(mergeable))
                 if not running:
                     return tuple(reports)
                 await self._until_one_ends([task for task in running if not task.done()], tick)
+        except asyncio.CancelledError:
+            mergeable.extend(_ended_mergeable(running))
+            await self._landed(mergeable, cancelled=True)
+            raise
         finally:
             for task in running:
                 task.cancel()
             await asyncio.gather(*running, return_exceptions=True)
+            self._round.clear()
+            self._round_over.set()
+
+    def _begin(self, start: _Start) -> asyncio.Task[_Tested]:
+        """The task testing ``start``, kept as a merge of the round under way."""
+
+        task = asyncio.create_task(self._test(start))
+        self._round[start.pending.candidate] = _InRound(task)
+        return task
 
     async def _claim_adoption(self, leads: Sequence[StrandedLead], head: str) -> tuple[MergeReport, ...]:
         """The adoption of the first of ``leads`` whose head was neither adopted on ``head`` yet nor already tried on it
@@ -634,10 +740,74 @@ class Integrator:
         carried = await self._repo.merge(candidate, onto, await self._foundation_fixes())
         return await self._resolved(carried, candidate)
 
-    async def _concluded(self, item: _Tested, merged: bool) -> MergeReport:
-        """What came of a merge test that ended, logged."""
+    async def _settled(self, ended: Sequence[_Tested], mergeable: list[_TestedMerge]) -> list[MergeReport]:
+        """What came of the merge tests that ``ended`` with nothing to merge, logged; the judged merges that may be
+        merged join ``mergeable`` instead, before anything is awaited, so a round cancelled meanwhile holds them."""
 
-        return self._logged_failure(item) if isinstance(item, MergeReport) else await self._conclude(item, merged)
+        mergeable.extend(item for item in ended if isinstance(item, _TestedMerge) and item.may_merge)
+        reports = []
+        for item in ended:
+            if isinstance(item, MergeReport):
+                reports.append(self._logged_failure(item))
+            elif not item.may_merge:
+                reports.append(await self._conclude(item, False))
+        return reports
+
+    async def _checked(self, mergeable: list[_TestedMerge]) -> list[MergeReport]:
+        """Run the regression set on the merges the round holds in ``mergeable``, in the order their tests ended,
+        until it has passed on one, which a cancelled round can then still merge; the reports of those that failed."""
+
+        reports = []
+        while mergeable and not any(tested.checked for tested in mergeable):
+            failed = await self._check(mergeable[0], mergeable)
+            if failed is not None:
+                reports.append(failed)
+        return reports
+
+    async def _check(self, tested: _TestedMerge, mergeable: list[_TestedMerge]) -> MergeReport | None:
+        """Run the regression set on ``tested``, one of ``mergeable``, which holds it as checked once the set passed;
+        one the set did not run clean on leaves ``mergeable`` and stays pending, and its report, logged, is returned."""
+
+        failed = await self._regression_failure(tested.report, tested.delta)
+        at = mergeable.index(tested)
+        if failed:
+            del mergeable[at]
+            return self._logged_failure(replace(tested.report, reason=failed))
+        mergeable[at] = replace(tested, checked=True)
+        return None
+
+    async def _landed(self, mergeable: list[_TestedMerge], *, cancelled: bool = False) -> list[MergeReport]:
+        """What came of ``mergeable``, the round's merges that may be merged, each taken off it as it is concluded,
+        in :func:`_merge_order`: the first that keeps the regression set passing is merged and those after it are
+        superseded.
+
+        A ``cancelled`` round runs no regression set: it merges the first the set has passed on, and one before it is
+        not merged (:data:`NOT_CHECKED_AT_CANCEL`). A merge the round was recording when it was cancelled is the one
+        that lands, as :meth:`abandon` waits for."""
+
+        reports: list[MergeReport] = []
+        merged = cancelled and self._recording is not None
+        while mergeable:
+            tested = min(mergeable, key=_merge_order)
+            if merged or tested.checked:
+                mergeable.remove(tested)
+                reports.append(await self._conclude(tested, merged))
+                merged = True
+            elif cancelled:
+                mergeable.remove(tested)
+                reports.append(self._not_checked(tested))
+            elif (failed := await self._check(tested, mergeable)) is not None:
+                reports.append(failed)
+        return reports
+
+    def _not_checked(self, tested: _TestedMerge) -> MergeReport:
+        """The report, logged and warned about, of a merge that may be merged and is not: the round was cancelled
+        before the regression set passed on it."""
+
+        reason = f"{NOT_CHECKED_AT_CANCEL}; judged {_verdict_on_head(tested.judgement)}"
+        report = self._logged(replace(tested.report, reason=reason))
+        logger.warning("the merge of %s onto %s was %s", report.candidate, report.onto, report.reason)
+        return report
 
     def _logged_failure(self, report: MergeReport) -> MergeReport:
         """``report`` of a merge that failed, logged; a bundle's members are each owed a test of their own. A superseded
@@ -654,7 +824,7 @@ class Integrator:
         try:
             merge = await start.merging()
             onto = await self._repo.read_recipe(pending.onto)
-            if apply(onto, merge.delta).digest() == onto.digest():
+            if apply(onto, self._spelled_as(onto, merge.delta)).digest() == onto.digest():
                 return await self._skip(pending, ALREADY_ON_HEAD, MergeOutcome.ALREADY_ON_HEAD, merge)
             request = integration_test_request(TestKind.TEST, Purpose.INTEGRATION, pending.onto, merge.delta)
             if pending.adopts:
@@ -669,6 +839,15 @@ class Integrator:
         except _Skipped as exc:
             skipped = await self._skip(pending, exc.reason, MergeOutcome.CONFLICT_SKIPPED, exc.merge)
             return replace(skipped, lost_to=exc.lost_to)
+
+    def _spelled_as(self, onto: Recipe, delta: RecipeDelta) -> RecipeDelta:
+        """``delta`` with its arguments spelled as ``onto``'s launch spells the same options, by the session's option
+        inventory; ``delta`` itself in a session that keeps none."""
+
+        if self.options is None:
+            return delta
+        args = self.options.spelled_as(delta.config.server_args, onto.launch.server_args)
+        return replace(delta, config=replace(delta.config, server_args=args))
 
     async def _merged_commits(self) -> frozenset[str]:
         """The committed commits a merge onto the integration branch carried."""
@@ -685,6 +864,7 @@ class Integrator:
         )
 
     async def _judge(self, merge: RepoMerge, pending: MergeReport, request_id: str) -> _Tested:
+        self._round[pending.candidate].request_id = request_id
         attempt = MergeAttempt(merge.carried, merge.onto, request_id, resolved_patches=merge.resolved_patches)
         await self._blackboard.record_merge_attempt(attempt)
         tested = replace(
@@ -737,9 +917,9 @@ class Integrator:
         return named
 
     async def _conclude(self, tested: _TestedMerge, superseded: bool) -> MergeReport:
-        """A superseded candidate gets no integration judgement and runs no regression set: it stays pending and is
-        tried on the new head, as does one whose regression set did not run clean. Any other candidate that may be
-        merged is merged once the regression set passes on the merge. The report is logged."""
+        """A superseded candidate gets no integration judgement: it stays pending and is tried on the new head. Any
+        other candidate that may be merged is merged; the regression set has passed on the merge by then
+        (:meth:`_check`). The report is logged."""
 
         report, judgement = tested.report, tested.judgement
         reason = not_stackable_reason(judgement, foundation_fix=report.foundation_fix)
@@ -750,10 +930,8 @@ class Integrator:
             reason += await self._no_longer_offered(report.sources)
             return self._logged_failure(replace(report, outcome=MergeOutcome.NOT_STACKABLE, reason=reason))
         if superseded:
+            self._candidates.record_superseded(str(report.request_id))
             return self._logged(replace(report, reason=SUPERSEDED))
-        failed = await self._regression_failure(report, tested.delta)
-        if failed:
-            return self._logged_failure(replace(report, reason=failed))
         self._recording = asyncio.ensure_future(self._record_merge(report, tested.delta, judgement))
         return await asyncio.shield(self._recording)
 
@@ -878,6 +1056,44 @@ class Integrator:
         self._decisions.record(Decision(DecisionKind.MERGE, reason, INTEGRATION_BRANCH, detail))
         return landed or onto
 
+    async def finish_round(self) -> None:
+        """End the rounds, as EXPLORE ends, and return once the round under way is over.
+
+        No merge test starts from now on. The round takes back each merge test the gate has not asked a confirm for,
+        as a cancelled round does, and goes on with those waiting for their confirm: their gain was measured once
+        already, and the integration head FINAL reads lacks it unless they end. The caller bounds this wait, longer once
+        no merge test is left (:meth:`withdraw_unfinished`), and cancels the round and awaits :meth:`abandon` after it
+        either way.
+        """
+
+        self._ended = True
+        retested = {record.request.retest_of for record in (await self._blackboard.snapshot()).records}
+        for merge in self._round.values():
+            if merge.request_id not in retested:
+                merge.task.cancel()
+        await self._round_over.wait()
+
+    def unfinished(self) -> tuple[str, ...]:
+        """The candidates whose merge tests the round under way has not ended."""
+
+        return tuple(candidate for candidate, merge in self._round.items() if not merge.task.done())
+
+    async def withdraw_unfinished(self) -> bool:
+        """Whether the round under way holds a merge that may be merged; if so its merge tests still running are
+        taken back, confirms included, and the round goes on to conclude what it holds. Otherwise nothing changes."""
+
+        tasks = [merge.task for merge in self._round.values()]
+        if not _ended_mergeable(tasks):
+            return False
+        left = {merge.request_id for merge in self._round.values() if not merge.task.done()}
+        # Cancelled first: a task that saw its confirm withdrawn would record the merge test as failed.
+        for task in tasks:
+            task.cancel()
+        for record in (await self._blackboard.snapshot()).records:
+            if record.request.retest_of in left:
+                await self._tests.withdraw(record.request_id)
+        return True
+
     async def abandon(self) -> None:
         """After the round was cancelled: take back every integration test still running, the gate's retests
         included, and finish recording a merge already committed."""
@@ -951,6 +1167,7 @@ __all__ = [
     "CONFLICT_UNRESOLVED",
     "FOUNDATION_FIX_VERDICTS",
     "GAIN_ONLY_REFUSALS",
+    "NOT_CHECKED_AT_CANCEL",
     "NOT_OFFERED_AGAIN",
     "RESOLVER_ATTEMPTS",
     "RESOLVER_UNREACHED",

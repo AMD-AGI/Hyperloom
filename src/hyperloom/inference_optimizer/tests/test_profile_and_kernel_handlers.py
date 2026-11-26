@@ -43,10 +43,7 @@ from hyperloom.orchestrator.actions.executors.profile import (
 )
 from hyperloom.orchestrator.trace_analysis._trace_rank import trace_rank as _trace_rank
 from inference_suite.contracts import RunLayout
-from hyperloom.orchestrator.roles import (
-    MockBackend,
-    ScriptedPlan,
-)
+from hyperloom.orchestrator.tests.mock_backend import MockBackend, ScriptedPlan
 from hyperloom.orchestrator.loop.coordinator import Coordinator
 from hyperloom.inference_optimizer.protocol.intent import Intent, IntentType
 from hyperloom.orchestrator.state.task_registry import TaskRegistry, TaskSpec

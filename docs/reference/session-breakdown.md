@@ -26,8 +26,7 @@ The authoritative source of truth for the wire shape is
 [`src/hyperloom/inference_optimizer/breakdown/schema.py`](https://github.com/AMD-AGI/Hyperloom/blob/main/src/hyperloom/inference_optimizer/breakdown/schema.py),
 with the FRAMEWORK_AGENT and KERNEL timeline events in
 [`schema_framework.py`](https://github.com/AMD-AGI/Hyperloom/blob/main/src/hyperloom/inference_optimizer/breakdown/schema_framework.py) and
-[`schema_kernel.py`](https://github.com/AMD-AGI/Hyperloom/blob/main/src/hyperloom/inference_optimizer/breakdown/schema_kernel.py), the concurrency sweep in
-[`schema_conc_sweep.py`](https://github.com/AMD-AGI/Hyperloom/blob/main/src/hyperloom/inference_optimizer/breakdown/schema_conc_sweep.py), and the enablement, phase and stack sections in
+[`schema_kernel.py`](https://github.com/AMD-AGI/Hyperloom/blob/main/src/hyperloom/inference_optimizer/breakdown/schema_kernel.py), and the enablement, phase and stack sections in
 [`schema_phase.py`](https://github.com/AMD-AGI/Hyperloom/blob/main/src/hyperloom/inference_optimizer/breakdown/schema_phase.py) beside it.
 This page describes the contract from a consumer's perspective.
 
@@ -113,6 +112,15 @@ The value `bypass` is no longer written either: `route` is `agent` or
 entry, a trace certificate's `usable_by` names only `tracelens`, and the
 warning code `bypass_graph_under_recorded` is now `graph_under_recorded`.
 
+The loop no longer holds a Critic verdict to an advisory rule, so the keys that
+recorded the hold are removed with the disposition
+`removed in 6.1, producer removed`: `critic_review.held_to_rule`,
+`critic_review.effective_verdict` and `critic_review.failure_reason_code` on
+phase and framework proposals and on each of their `critic_review.variants[]`
+rows, and `effective_verdict` and `failure_reason_code` on
+`critic.iterations[].framework_reviews[]`. Read `verdict`: it is the verdict
+the loop acted on.
+
 Two figures are null instead of a fabricated default when they were not
 measured or not provided. `outcome.validation.attributed_gain_pct` and
 `unattributed_gain_pct` are null when no adoption could be measured, rather than
@@ -126,6 +134,16 @@ the gain keep their values, and `metadata.workflow.contract_digest` keeps the
 digest recorded at session creation rather than the one pinned by the packaged
 workflow-evaluation schema. The default output path overwrites the archived
 `<session_dir>/session_breakdown.json`; pass `--output` to keep it.
+
+Within 6.1 the `conc_sweep` timeline event is no longer written: the session
+runs no concurrency sweep. The phase that closes each macro-cycle is
+`CYCLE_END` rather than `SWEEP` in every `phase` value, and its predicate
+inputs are `cycle_end_result` (`settled`, `reloop`) rather than
+`sweep_result`. The SWEEP stop reasons are replaced by `cycle_end_done`, so
+`metadata.workflow.workflow_contract_version` moves to
+`hyperloom.workflow_evaluation.v4` and the contract digest changes with it. A
+session that reached the phase reports `outcome.stage_reached` `cycle_end`
+where it reported `conc_sweep`.
 
 V6 was the preceding cutover, for the timeline: each action records its own event
 while it runs, so an event's `start_time` is when the work began rather than
@@ -270,6 +288,10 @@ breakdown.
 `metadata.grading` — the grading mode this session was started in:
 `benchmark_mode` (`agentx` or `synthetic`), `objective`, and the `tput_guard`
 that rides along with the interactivity objective (`enabled`, `noise_pct`).
+`prompt_dataset: true` is present on a session whose fixed rounds sent a
+`DATASET_PATH` file: `task_config.isl` and `osl` do not describe its requests, so
+it publishes no Experience and reads none, and the Recipe KB neither warm-starts
+it nor takes its recipe.
 
 An AgentX replay is ranked on the median interactivity percentile
 (`e2e_norm_intvty_p50`) with the slow tail (`e2e_norm_intvty_p90`) and total
@@ -447,9 +469,7 @@ asked forty times and ruled on nothing reads very differently from one where
 it was never asked.
 
 `framework_reviews` holds the framework-phase rulings of that pass, each with
-both the authored `verdict` and the `effective_verdict` the loop held it to.
-Both are kept: a reject the loop downgraded to advice still ran, and
-reporting either alone misreads the round.
+the `verdict` the Critic wrote.
 
 ---
 
@@ -662,7 +682,6 @@ The following example shows a complete `session_breakdown.json` for a finished G
             "proposal_msg_id": "msg-4f21",
             "arm": "config",
             "verdict": "reject",
-            "effective_verdict": "advise",
             "reasoning": "no measurement backs the projected gain"
           }
         ]
@@ -725,5 +744,4 @@ Use the following resources for related reference information.
 * [`src/hyperloom/inference_optimizer/breakdown/schema.py`](https://github.com/AMD-AGI/Hyperloom/blob/main/src/hyperloom/inference_optimizer/breakdown/schema.py): TypedDict source of truth.
 * [`src/hyperloom/inference_optimizer/breakdown/schema_framework.py`](https://github.com/AMD-AGI/Hyperloom/blob/main/src/hyperloom/inference_optimizer/breakdown/schema_framework.py): FRAMEWORK_AGENT timeline event shapes.
 * [`src/hyperloom/inference_optimizer/breakdown/schema_kernel.py`](https://github.com/AMD-AGI/Hyperloom/blob/main/src/hyperloom/inference_optimizer/breakdown/schema_kernel.py): KERNEL timeline event shapes.
-* [`src/hyperloom/inference_optimizer/breakdown/schema_conc_sweep.py`](https://github.com/AMD-AGI/Hyperloom/blob/main/src/hyperloom/inference_optimizer/breakdown/schema_conc_sweep.py): concurrency sweep shapes.
 * [`src/hyperloom/inference_optimizer/breakdown/schema_phase.py`](https://github.com/AMD-AGI/Hyperloom/blob/main/src/hyperloom/inference_optimizer/breakdown/schema_phase.py): enablement, phase and stack shapes.

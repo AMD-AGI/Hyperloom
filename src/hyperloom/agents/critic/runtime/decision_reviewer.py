@@ -133,10 +133,8 @@ class JudgeBundle:
     """Phase-1 output. The SKILL prompts read this to produce review JSON."""
 
     session_id: str
-    decision_id: str | None
     phase: str = ""
-    merged_context: dict[str, Any] = field(default_factory=dict)
-    missing_context: list[str] = field(default_factory=list)
+    context: dict[str, Any] = field(default_factory=dict)
     required_context: list[str] = field(default_factory=list)
     proposals: list[dict[str, Any]] = field(default_factory=list)
     review_constraints: dict[str, Any] = field(default_factory=dict)
@@ -145,10 +143,8 @@ class JudgeBundle:
         """Return a deep, JSON-serialisable copy of the judge bundle."""
         return {
             "session_id": self.session_id,
-            "decision_id": self.decision_id,
             "phase": self.phase,
-            "merged_context": dict(self.merged_context),
-            "missing_context": list(self.missing_context),
+            "context": dict(self.context),
             "required_context": list(self.required_context),
             "proposals": [dict(p) for p in self.proposals],
             "review_constraints": dict(self.review_constraints),
@@ -160,15 +156,11 @@ class CommitOutcome:
     """Phase-2 output."""
 
     session_id: str
-    decision_id: str | None
     intent_envelope: dict[str, Any] | None = None
 
     def to_dict(self) -> dict[str, Any]:
         """Return a JSON-serialisable copy of the commit outcome."""
-        out: dict[str, Any] = {
-            "session_id": self.session_id,
-            "decision_id": self.decision_id,
-        }
+        out: dict[str, Any] = {"session_id": self.session_id}
         if self.intent_envelope is not None:
             out["intent_envelope"] = self.intent_envelope
         return out
@@ -191,7 +183,6 @@ def _review_verdict(item: dict[str, Any], target: str, verdict: str, advice_text
         alternative_action=item.get("alternative_action"),
         advice_text=advice_text,
         notes=item.get("notes") or [],
-        failure_reason_code=str(item.get("failure_reason_code") or ""),
     )
 
 
@@ -218,21 +209,15 @@ class DecisionReviewer:
         req = parse_request(raw_request)
         bundle = JudgeBundle(
             session_id=req.session_id,
-            decision_id=req.decision_id,
             phase=str(req.context.get("phase") or "").strip().upper(),
         )
-        self._populate_inbox(req)
-        merge = self.session_memory.merge_context(req.session_id, req.context)
-        bundle.merged_context = merge.merged
-        bundle.missing_context = list(merge.missing_keys)
-        bundle.proposals = [p.to_dict() for p in req.proposals]
-        bundle.review_constraints = self._review_constraints(req.proposals)
-        known = req.options.get("known_actions")
-        if isinstance(known, list) and known:
-            bundle.review_constraints["known_actions"] = sorted(str(a) for a in known if isinstance(a, str))
+        proposals = self._unreviewed_proposals(req)
+        bundle.context = dict(req.context)
+        bundle.proposals = [p.to_dict() for p in proposals]
+        bundle.review_constraints = self._review_constraints(proposals)
 
         # If model/framework unknown, fall back to needs_review.
-        bundle.required_context = [k for k in CRITICAL_CONTEXT_KEYS if merge.merged.get(k) in (None, "", "unknown")]
+        bundle.required_context = [k for k in CRITICAL_CONTEXT_KEYS if req.context.get(k) in (None, "", "unknown")]
         return bundle
 
     # Phase 2: commit-review
@@ -243,29 +228,19 @@ class DecisionReviewer:
     ) -> CommitOutcome:
         """Validate and commit a SKILL-produced review (phase 2)."""
         req = parse_request(raw_request)
-        self._populate_inbox(req)
         if not isinstance(review, dict):
             raise ReviewValidationError(f"review must be a dict, got {type(review).__name__}")
 
-        outcome = CommitOutcome(
-            session_id=req.session_id,
-            decision_id=req.decision_id,
-        )
+        outcome = CommitOutcome(session_id=req.session_id)
         self._commit_coordinator_inbox(req, review, outcome)
         return outcome
 
     # Implementation helpers
-    def _populate_inbox(self, req: CriticRequest) -> None:
-        """Parse proposals from a coordinator-inbox prompt, in place."""
-        if req.proposals:
-            return
-        parsed = parse_inbox_prompt(req.raw_prompt)
-        if not req.context:
-            req.context.update({k: parsed.shared_state[k] for k in parsed.shared_state})
-        # Filter out proposals already handled in this session (idempotency).
-        new_msg_ids = self.session_memory.filter_unreviewed(req.session_id, [p.msg_id for p in parsed.proposals])
-        keep = set(new_msg_ids)
-        req.proposals = [p for p in parsed.proposals if p.msg_id in keep]
+    def _unreviewed_proposals(self, req: CriticRequest) -> list[Proposal]:
+        """The proposals in a coordinator-inbox prompt that this session has not reviewed yet."""
+        proposals = parse_inbox_prompt(req.raw_prompt)
+        keep = set(self.session_memory.filter_unreviewed(req.session_id, [p.msg_id for p in proposals]))
+        return [p for p in proposals if p.msg_id in keep]
 
     def _review_constraints(
         self,
@@ -340,19 +315,9 @@ class DecisionReviewer:
             except IntentEnvelopeValidationError as exc:
                 raise ReviewValidationError(str(exc)) from exc
 
-        for item, verdict_review in zip(verdicts_raw, reviews):
-            target, verdict = verdict_review.target_proposal_msg_id, verdict_review.verdict
-            self.session_memory.mark_reviewed(req.session_id, target, verdict, decision_id=req.decision_id)
-            self.session_memory.append_decision(
-                req.session_id,
-                {
-                    "target_proposal_msg_id": target,
-                    "verdict": verdict,
-                    "reasoning": item.get("reasoning"),
-                    "source": verdict_review.source,
-                    "failure_reason_code": verdict_review.failure_reason_code,
-                    "kb_evidence": verdict_review.kb_evidence,
-                },
+        for verdict_review in reviews:
+            self.session_memory.mark_reviewed(
+                req.session_id, verdict_review.target_proposal_msg_id, verdict_review.verdict
             )
 
         # Every advisory also goes out as a standalone advice message, whatever the target's verdict (or if

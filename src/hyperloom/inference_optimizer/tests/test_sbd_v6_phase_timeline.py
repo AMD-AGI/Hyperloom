@@ -130,7 +130,7 @@ def test_a_re_entered_phase_sums_its_own_time_only(tmp_path):
     _enter("KERNEL_AGENT", sequence=2, at=30.0, from_phase="FRAMEWORK_AGENT")
     _exit("KERNEL_AGENT", at=130.0, to_phase="FRAMEWORK_AGENT")
     _enter("FRAMEWORK_AGENT", sequence=3, at=130.0, from_phase="KERNEL_AGENT")
-    _exit("FRAMEWORK_AGENT", at=145.0, to_phase="SWEEP")
+    _exit("FRAMEWORK_AGENT", at=145.0, to_phase="CYCLE_END")
 
     ext = _ext("FRAMEWORK_AGENT")
     assert ext["entries"] == 2
@@ -139,13 +139,13 @@ def test_a_re_entered_phase_sums_its_own_time_only(tmp_path):
 
 
 def test_the_second_entry_settles_its_own_segment(tmp_path):
-    _enter("SWEEP", sequence=1, at=10.0)
-    _exit("SWEEP", at=20.0, to_phase="FRAMEWORK_AGENT", reason="sweep_done")
-    _enter("SWEEP", sequence=2, at=60.0, from_phase="FRAMEWORK_AGENT")
-    _exit("SWEEP", at=95.0, to_phase="CLOSE", reason="budget_spent")
+    _enter("CYCLE_END", sequence=1, at=10.0)
+    _exit("CYCLE_END", at=20.0, to_phase="FRAMEWORK_AGENT", reason="cycle_end_done")
+    _enter("CYCLE_END", sequence=2, at=60.0, from_phase="FRAMEWORK_AGENT")
+    _exit("CYCLE_END", at=95.0, to_phase="CLOSE", reason="budget_spent")
 
-    segments = _ext("SWEEP")["segments"]
-    assert [row["exit_reason"] for row in segments] == ["sweep_done", "budget_spent"]
+    segments = _ext("CYCLE_END")["segments"]
+    assert [row["exit_reason"] for row in segments] == ["cycle_end_done", "budget_spent"]
     assert [row["duration_sec"] for row in segments] == [10.0, 35.0]
 
 
@@ -213,13 +213,13 @@ def test_an_action_that_outlived_its_phase_stays_with_its_phase(tmp_path):
 
 
 def test_a_dispatch_killed_mid_flight_reads_as_dispatched(tmp_path):
-    _enter("SWEEP", sequence=1, at=10.0)
+    _enter("KERNEL_AGENT", sequence=1, at=10.0)
     phase_event.record_dispatch(
-        ActionDispatch(at=PhaseCycle("SWEEP", 0), action="conc_sweep", task_id="t-9", dispatched_unix=11.0)
+        ActionDispatch(at=PhaseCycle("KERNEL_AGENT", 0), action="integrate", task_id="t-9", dispatched_unix=11.0)
     )
-    _exit("SWEEP", at=20.0, to_phase="CLOSE")
+    _exit("KERNEL_AGENT", at=20.0, to_phase="CLOSE")
 
-    actions = _ext("SWEEP")["actions"]
+    actions = _ext("KERNEL_AGENT")["actions"]
     assert actions["count"] == 1
     assert actions["settled"] == 0
     assert actions["rows"][0].get("status", "") == ""
@@ -319,7 +319,7 @@ def test_a_phase_where_nothing_settled_well_is_degraded(tmp_path):
     _enter("KERNEL_AGENT", sequence=1, at=10.0)
     phase_event.record_dispatch(ActionDispatch(at=PhaseCycle("KERNEL_AGENT", 0), action="kernel_opt", task_id="t-1"))
     phase_event.record_settle(ActionSettlement(task_id="t-1", status="failed", decision="failed"))
-    _exit("KERNEL_AGENT", at=60.0, to_phase="SWEEP")
+    _exit("KERNEL_AGENT", at=60.0, to_phase="CYCLE_END")
 
     assert _status("KERNEL_AGENT") == phase_event.STATUS_DEGRADED
 
@@ -413,29 +413,12 @@ def test_a_kernel_phase_ruling_is_filed_on_the_thing_it_ruled_on(tmp_path):
             verdict="reject",
             reasoning="the kernel is already fused",
             confidence=0.8,
-            failure_reason_code="no_headroom",
         ),
     )
 
     review = _ext("KERNEL_AGENT")["proposals"]["rows"][0]["critic_review"]
     assert review["verdict"] == "reject"
-    assert review["effective_verdict"] == "reject"
-    assert review["held_to_rule"] is False
     assert review["confidence"] == 0.8
-    assert review["failure_reason_code"] == "no_headroom"
-
-
-def test_a_ruling_the_envelope_overrode_says_it_was_held_to_a_rule(tmp_path):
-    _enter("KERNEL_AGENT", sequence=1, at=10.0)
-    _propose("m-1")
-    phase_event.record_proposal_review(
-        ProposalReview(proposal_msg_id="m-1", verdict="approve", effective_verdict="needs_review")
-    )
-
-    review = _ext("KERNEL_AGENT")["proposals"]["rows"][0]["critic_review"]
-    assert review["verdict"] == "approve"
-    assert review["effective_verdict"] == "needs_review"
-    assert review["held_to_rule"] is True
 
 
 def test_a_ruling_reaching_a_proposal_after_its_phase_exited_still_lands_on_it(tmp_path):

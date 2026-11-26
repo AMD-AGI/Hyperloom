@@ -5,11 +5,11 @@
 
 Steps: the request validates (done by its constructor, plus the toolbox's own: no preset ``request_id``, a
 ``retest_of`` that names an accepted request, a PROFILE that no live profile already covers); the parent recipe is read
-from the experiment repository; the delta applies, changes an explore's parent recipe, keeps the weight precision of the
-session's root recipe, and the environment compiles; the measurement surface matches the canonical one, and a test that
-carries the accuracy evaluation serves a context that evaluation can run in. Compile, points, surface and the
-evaluation's context come from hosted measurement (``hyperloom.measure``) through the one :class:`MeasurementPlanner`
-seam.
+from the experiment repository, and an explore of a specialist branch names that branch's head; the delta applies,
+changes an explore's parent recipe, keeps the weight precision of the session's root recipe, and the environment
+compiles; the measurement surface matches the canonical one, and a test that carries the accuracy evaluation serves a
+context that evaluation can run in. Compile, points, surface and the evaluation's context come from hosted measurement
+(``hyperloom.measure``) through the one :class:`MeasurementPlanner` seam.
 """
 
 from __future__ import annotations
@@ -25,15 +25,16 @@ from hyperloom.contracts.recipe import LaunchConfig, Recipe, RecipeDelta, Recipe
 from hyperloom.common.outside_facts import AITER_META_WHEEL_DIR
 from hyperloom.measure.compile import BaseImageMismatchError, BlobStore, CompiledEnvironment
 from hyperloom.measure.eval_context import EvalContextError
-from hyperloom.measure.jit.key import build_surface
-from hyperloom.measure.points import AcceptedMeasurement
+from hyperloom.measure.points import AcceptedMeasurement, ProfileUnsupported
 from hyperloom.measure.fake_gain import (
     CONTEXT_COPY_REFUSAL,
     SPECULATIVE_DECODING_PINNED,
+    declared_acceptance_refusal,
     launch_context_copy_refusal,
     pinned_speculative_refusal,
 )
 from hyperloom.measure.surface import SurfaceViolation
+from hyperloom_multibranch.contracts.blackboard.vocab import INTEGRATION_BRANCH
 from hyperloom_multibranch.contracts.repo import ExperimentRepo
 from hyperloom_multibranch.contracts.toolbox import RequestRejected, WorkloadKind
 from hyperloom_multibranch.toolbox.agentx_checkpoint import CheckpointReferences
@@ -55,6 +56,7 @@ ONLINE_TUNING_CODE = "online_tuning_unsupported"
 CONTEXT_BELOW_EVAL_CODE = "context_below_eval"
 NO_EFFECTIVE_CHANGE_CODE = "no_effective_change"
 DELTA_NOT_APPLICABLE_CODE = "delta_not_applicable"
+PARENT_NOT_HEAD_CODE = "parent_not_head"
 #: The refusal of a candidate that patches aiter's ``csrc`` or ``hsa`` on a toolbox whose tests cannot build the modules
 #: the patch touches; the reason the toolbox gives (``AcceptanceSetup.aiter_builds_missing``) follows it.
 AITER_SOURCES_REASON = "aiter csrc/hsa patches need native builds; this toolbox has none configured"
@@ -177,15 +179,16 @@ def _check_weight_precision(root_commit: str, root: LaunchConfig, candidate: Rec
 
 def _check_aiter_sources(accepted: object, missing: str | None) -> None:
     """Refuse a candidate that patches aiter's ``csrc`` or ``hsa`` when this toolbox cannot build the modules it touches
-    (``missing`` says why), unless its launch rebuilds every module itself (``AITER_REBUILD``): each attempt of its
-    test would be refused by its runner, and the image's prebuilt modules are not the patch."""
+    (``missing`` says why), also when its launch rebuilds every module (``AITER_REBUILD``): each attempt of its test
+    would be refused by its runner, which needs the test's own JIT directory first, and the image's prebuilt modules are
+    not the patch."""
     environment = getattr(accepted, "environment", None)
     if missing is None or not isinstance(environment, CompiledEnvironment):
         return
     paths = [
         entry.path for root in environment.roots if root.import_name == AITER_META_WHEEL_DIR for entry in root.entries
     ]
-    if paths and not build_surface((), environment.recipe.launch.envs, {}).rebuild:
+    if paths:
         raise RequestRejected(f"{paths[0]}: {AITER_SOURCES_REASON}: {missing}", DELTA_NOT_APPLICABLE_CODE)
 
 
@@ -336,6 +339,7 @@ class Acceptance:
         recipe = await self._read_parent(request)
         self._check_image(recipe)
         if not replay:  # a request an earlier toolbox accepted is not withdrawn by a later rule
+            await self._check_parent_is_head(request)
             _check_upstream_label(recipe, request)
         candidate = self._check_delta(recipe, request)
         digest = candidate.digest()
@@ -435,6 +439,30 @@ class Acceptance:
                 f"parent commit {request.parent_commit!r} is not in the experiment repository", "unknown_parent"
             ) from None
 
+    async def _check_parent_is_head(self, request: TestRequest) -> None:
+        """Refuse an explore of a specialist branch whose parent is not that branch's head, and name the head.
+
+        The rule gate lands a gain only while the branch is still at the commit it was measured against, so the test
+        and its confirm could only be recorded. Every other test measures a commit wherever it is and passes: a
+        confirm repeats the parent of its explore, which a sibling's commit may have left behind; a profile, a
+        reproduction, a health or an accuracy test lands nothing; the session's own tests name commits of any branch
+        under the integration branch, which takes commits from the integrator alone. A branch the repository has not
+        cut has no head to be off: whether it may submit is the queue policy's check.
+        """
+        if request.purpose is not Purpose.EXPLORE or request.branch == INTEGRATION_BRANCH:
+            return
+        try:
+            head = await self._repo.head(request.branch)
+        except KeyError:
+            return
+        if request.parent_commit != head:
+            raise RequestRejected(
+                f"parent commit {request.parent_commit} is not the head of branch {request.branch}, which is at "
+                f"{head}: a gain lands only while its branch is at the commit it was measured against, so this test "
+                f"could only be recorded; submit the change on {head}",
+                PARENT_NOT_HEAD_CODE,
+            )
+
     def _check_image(self, recipe: Recipe) -> None:
         """Refuse a recipe on another base image. Only the base image is compared, as the compile does
         (:func:`~hyperloom.measure.compile.check_base_image`): a ``runtime_snapshot`` names no image to compare, and the
@@ -457,15 +485,21 @@ class Acceptance:
     def _check_fake_gain(self, parent: Recipe, candidate: Recipe) -> None:
         """Refuse a candidate whose gain main refuses as fake: its launch is compared with its parent's.
 
-        InferenceX runs a synthetic benchmark, where a context-copy draft is refused (#1904); AgentX runs real
-        datasets, where a draft whose acceptance length the parent simulates stays pinned (#1885).
+        InferenceX runs a synthetic benchmark, where a context-copy draft is refused (#1904) and so is a simulated
+        acceptance in place of a draft the parent verifies; AgentX runs real datasets, where a draft whose acceptance
+        length the parent simulates stays pinned as well (#1885).
         """
         if self._workload is WorkloadKind.INFERENCEX:
-            reason, code = launch_context_copy_refusal(parent.launch, candidate.launch), CONTEXT_COPY_REFUSAL
+            refusals = (
+                (launch_context_copy_refusal, CONTEXT_COPY_REFUSAL),
+                (declared_acceptance_refusal, SPECULATIVE_DECODING_PINNED),
+            )
         else:
-            reason, code = pinned_speculative_refusal(parent.launch, candidate.launch), SPECULATIVE_DECODING_PINNED
-        if reason:
-            raise RequestRejected(reason, code)
+            refusals = ((pinned_speculative_refusal, SPECULATIVE_DECODING_PINNED),)
+        for refusal, code in refusals:
+            reason = refusal(parent.launch, candidate.launch)
+            if reason:
+                raise RequestRejected(reason, code)
 
     def _plan(self, recipe: Recipe, request: TestRequest) -> object:
         try:
@@ -478,5 +512,7 @@ class Acceptance:
             raise RequestRejected(str(error), "base_image_mismatch") from error
         except EvalContextError as error:
             raise RequestRejected(str(error), CONTEXT_BELOW_EVAL_CODE) from error
+        except ProfileUnsupported as error:
+            raise RequestRejected(str(error), "unsupported_kind") from error
         except RecipeError as error:
             raise RequestRejected(f"the environment does not compile: {error}", DELTA_NOT_APPLICABLE_CODE) from error

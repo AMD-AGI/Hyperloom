@@ -8,26 +8,9 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any, Iterable
 
-from hyperloom.inference_optimizer.protocol.intent import (
-    DEFAULT_IDLE_BODY,
-    IntentType,
-    IntentValidationError,
-)
-from hyperloom.inference_optimizer.protocol.intent import (
-    validate_envelope as _validate_protocol_envelope,
-)
+from hyperloom.inference_optimizer.protocol.intent import DEFAULT_IDLE_BODY
 
 from .errors import IntentEnvelopeValidationError
-
-
-# Intent types the Critic role is allowed to emit.
-ALLOWED_CRITIC_INTENTS: frozenset[str] = frozenset(
-    {
-        IntentType.REVIEW_VERDICT.value,
-        IntentType.SEND_MESSAGE.value,
-        IntentType.ALERT.value,
-    }
-)
 
 
 # Verdict source vocabulary.
@@ -71,27 +54,6 @@ class IntentEnvelope:
         self.intents.append(intent)
 
 
-def validate_envelope(envelope: dict[str, Any]) -> IntentEnvelope:
-    """Validate the dict form and return a typed :class:`IntentEnvelope`."""
-    if isinstance(envelope, dict) and envelope.get("intents") == []:
-        raise IntentEnvelopeValidationError("envelope.intents must be a non-empty list")
-    try:
-        validated = _validate_protocol_envelope(envelope)
-    except IntentValidationError as exc:
-        raise IntentEnvelopeValidationError(str(exc)) from exc
-    out = IntentEnvelope()
-    for i, item in enumerate(validated):
-        intent_type = item.type.value
-        if intent_type not in ALLOWED_CRITIC_INTENTS:
-            raise IntentEnvelopeValidationError(
-                f"envelope.intents[{i}].intent_type {intent_type!r} is not "
-                f"a Critic-permitted intent (allowed: "
-                f"{sorted(ALLOWED_CRITIC_INTENTS)!r})"
-            )
-        out.append(Intent(intent_type=intent_type, payload=dict(item.payload)))
-    return out
-
-
 @dataclass(frozen=True)
 class ReviewVerdict:
     """The Critic's verdict on one proposal, as carried by a ``review_verdict`` intent."""
@@ -109,7 +71,6 @@ class ReviewVerdict:
     alternative_action: str | None = None
     advice_text: str = ""
     notes: Iterable[str] | None = None
-    failure_reason_code: str = ""
 
 
 # Builders — convenience constructors used by decision_reviewer.
@@ -130,7 +91,6 @@ def build_review_verdict_intent(review: ReviewVerdict) -> Intent:
         "alternative_action": review.alternative_action,
         "advice_text": review.advice_text,
         "notes": list(review.notes or []),
-        "failure_reason_code": review.failure_reason_code,
     }
     if review.confidence is not None:
         payload["confidence"] = review.confidence
@@ -155,13 +115,10 @@ def build_envelope(intents: Iterable[Intent]) -> IntentEnvelope:
     env = IntentEnvelope()
     for intent in intents:
         env.append(intent)
-    # Self-check at build time.
-    validate_envelope(env.to_dict())
     return env
 
 
 __all__ = [
-    "ALLOWED_CRITIC_INTENTS",
     "ALLOWED_VERDICT_SOURCES",
     "DEFAULT_ADVICE_TOPIC",
     "Intent",
@@ -171,5 +128,4 @@ __all__ = [
     "build_envelope",
     "build_idle_intent",
     "build_review_verdict_intent",
-    "validate_envelope",
 ]

@@ -349,7 +349,7 @@ class SpecialistDispatchCollaborator(CoordinatorCollaborator):
         """Warm the targeted gap's symptom, layer and recent attempts from the gaps[] ledger."""
         state = self.shared_state
         # Fill gap-specific anchors from the gaps[] ledger.
-        gap_cid = str(params.get("gap_canonical_id") or "").strip() or str(params.get("gap") or "").strip()
+        gap_cid = str(params.get("gap_canonical_id") or "").strip()
         if gap_cid:
             gap = state.find_gap(gap_cid)
             if gap is not None:
@@ -859,7 +859,6 @@ class SpecialistDispatchCollaborator(CoordinatorCollaborator):
             "new_findings": round_entry.get("new_findings") or [],
             "residual_questions": round_entry.get("residual_questions") or [],
             "notes": round_entry.get("notes") or [],
-            "ensemble_scores": round_entry.get("ensemble_scores") or {},
         }
         source_phase = str(round_entry.get("source_phase") or "").strip().upper()
         recorder = self._coord.phase_framework.timeline()
@@ -900,7 +899,6 @@ class SpecialistDispatchCollaborator(CoordinatorCollaborator):
             run_error: Dispatch failure text when the specialist produced no
                 usable payload.
         """
-        task_params = task.params or {}
         round_entry = self.build_specialist_round_entry(
             task=task,
             done_payload=done_payload,
@@ -917,31 +915,6 @@ class SpecialistDispatchCollaborator(CoordinatorCollaborator):
                     task_id=task.task_id,
                     result={"error_class": error_class, "error": "; ".join(str(d) for d in dropped[:4])},
                 )
-        # Advisory multi-model scoring of the proposal_set; informational only, gates nothing.
-        proposal_scorer = self._coord.proposal_scorer
-        if proposal_scorer is not None and round_entry["proposal_set"]:
-            scores = await proposal_scorer.score(
-                gap={
-                    "domain": round_entry["domain"].strip(),
-                    "gap_canonical_id": done_payload.get("gap_canonical_id", ""),
-                    "gap_symptom": task_params.get("gap_symptom"),
-                    "gap_evidence": task_params.get("gap_evidence"),
-                    "summary": done_payload.get("summary", ""),
-                },
-                proposals=round_entry["proposal_set"],
-                task_id=task.task_id,
-                tick=int(self.shared_state.tick or 0),
-                phase=self.shared_state.phase or None,
-            )
-            if scores.get("models") or scores.get("errors"):
-                round_entry["ensemble_scores"] = scores
-                input_err = (scores.get("errors") or {}).get("input")
-                if input_err and not scores.get("models"):
-                    log.warning(
-                        "specialist bookkeeping: proposal scoring skipped for task=%s: %s",
-                        task.task_id,
-                        input_err,
-                    )
         self.shared_state.record_specialist_round(round_entry)
         self._record_specialist_round_product(task=task, round_entry=round_entry)
 

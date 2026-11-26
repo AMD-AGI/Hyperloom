@@ -18,7 +18,7 @@ _CEILING_UNLOADED = object()
 
 
 class CeilingMixin:
-    """Estimate and read back this kernel's ceiling, and render the incumbent's standing against it for the planner and the log."""
+    """Estimate and read back this kernel's ceiling, and render the incumbent's standing against it for the sessions, the Supervisor and the log."""
 
     async def _establish_ceiling(self) -> None:
         """Estimate this kernel's per-shape ceiling once per campaign, before its first round.
@@ -151,6 +151,7 @@ class CeilingMixin:
             report,
             self._best_case_times or self._baseline_case_times,
             unscored_cases=self._unscored_cases,
+            aggregate=self.ic.case_aggregate,
         )
 
     def _is_roofline_target_met(self) -> bool:
@@ -204,10 +205,10 @@ class CeilingMixin:
     def _render_ceiling_advisory(self) -> str:
         """Render the roofline standing for the implementer, when a ceiling is published.
 
-        The planner has already chosen the round's cases from the same standing,
-        carried as case evidence by ``_with_ceiling_standing``; this is the
-        implementer's view of it, so the session working a case knows how far
-        that case sits from its ceiling. Guidance, not a verdict: because the
+        The Supervisor reads the same standing as case evidence, carried by
+        ``_with_ceiling_standing``; this is the implementer's view of it, so
+        the session working a case knows how far that case sits from its
+        ceiling. Guidance, not a verdict: because the
         ceiling is fixed for the campaign, pointing the agent at attainment and
         pointing it at latency ask for the same thing, so this block adds a
         direction without adding an incentive.
@@ -222,20 +223,18 @@ class CeilingMixin:
             self._best_case_times or self._baseline_case_times,
             target=float(self.ic.roofline_target or 0.0),
             unscored_cases=sorted(self._unscored_cases),
+            aggregate=self.ic.case_aggregate,
         )
 
     def _with_ceiling_standing(self, context):
-        """Attach the roofline standing to a planning context, when a ceiling is published.
+        """Attach the roofline standing to an evidence context, when a ceiling is published.
 
-        This is where the ceiling steers the campaign: the planner decides which
-        cases the round's effort goes to, so it is the one that has to see which
-        still have headroom, and the supervisor reviewing a stall has to see
-        whether the kernel is near its ceiling or far from it. Each case carries
-        its own figure; the context carries the mean, the target and how to
-        read both. The implementer's copy, from ``_render_ceiling_advisory``,
-        arrives after the round's cases are chosen. Like the rest of the
-        planning evidence it is guidance for the next round and never enters a
-        KEEP.
+        The Supervisor reviewing a stall has to see whether the kernel is near
+        its ceiling or far from it, and which cases still have headroom. Each
+        case carries its own figure; the context carries the mean, the target
+        and how to read both. A session reads its own copy, rendered by
+        ``_render_ceiling_advisory``. Like the rest of the evidence it is
+        guidance for the next round and never enters a KEEP.
         """
         report = self._ceiling()
         standing = self._roofline_attainment()

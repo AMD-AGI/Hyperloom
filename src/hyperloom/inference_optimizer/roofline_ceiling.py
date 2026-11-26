@@ -62,10 +62,10 @@ HW_SPECS: dict[str, dict[str, Any]] = {
 #: Point ``benchmark.envs`` keys that carry the runtime server args for the
 #: text-serving frameworks. The baseline yaml only ever sets the one matching
 #: its framework, so reading these and concatenating is safe.
-_RUNTIME_SERVER_ARG_ENV_KEYS = (
-    "EXTRA_SGLANG_ARGS",
-    "EXTRA_VLLM_ARGS",
-    "EXTRA_ATOM_ARGS",
+_RUNTIME_SERVER_ARG_ENV_KEYS = tuple(
+    spec.extra_args_env
+    for name, spec in framework_registry.FRAMEWORKS.items()
+    if not framework_registry.is_scriptable(name)
 )
 
 

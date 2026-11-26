@@ -5,7 +5,7 @@
 
 Both files are written by the analyst, not by this module. It names them, reads
 one of them, and renders the attainment block a campaign hands its
-implementer. The planner gets the same standing as structured case evidence,
+implementer. The Supervisor gets the same standing as structured case evidence,
 attached by the loop rather than rendered here.
 """
 
@@ -15,6 +15,7 @@ import json
 from collections.abc import Mapping, Sequence
 from pathlib import Path
 
+from kernelforge.evaluation.scoring import CaseAggregate
 from kernelforge.roofline_ceiling.attainment import measure_attainment
 from kernelforge.roofline_ceiling.contract import CeilingReport, load_report
 
@@ -48,13 +49,14 @@ def render_for_prompt(
     *,
     target: float = 0.0,
     unscored_cases: Sequence[str] | None = None,
+    aggregate: CaseAggregate = CaseAggregate.ARITHMETIC,
 ) -> str:
     """Render the roofline block a campaign injects into its implementer's prompt.
 
     Names the target, the standing, and which shapes are short of it. The table
     is ordered worst-first, which is the point of showing it: the score is the
-    equal-weight mean across cases, so the shape furthest from its ceiling is
-    where the next unit of effort buys most.
+    equal-weight mean across cases under the campaign's ``aggregate``, so the
+    shape furthest from its ceiling is where the next unit of effort buys most.
 
     A ceiling is derived, not measured, so a case reported near its ceiling is
     also a reason to read the derivation before believing the headroom is gone.
@@ -64,7 +66,7 @@ def render_for_prompt(
     if not report.cases:
         return ""
 
-    standing = measure_attainment(report, current_ms, unscored_cases=unscored_cases)
+    standing = measure_attainment(report, current_ms, unscored_cases=unscored_cases, aggregate=aggregate)
     lines = [
         "### Roofline attainment",
         "",
@@ -75,7 +77,10 @@ def render_for_prompt(
     ]
 
     if standing.usable:
-        lines.append(f"Campaign attainment: **{standing.mean * 100:.1f}%** (equal-weight mean across scored cases).")
+        lines.append(
+            f"Campaign attainment: **{standing.mean * 100:.1f}%** "
+            f"(equal-weight {aggregate.value} mean across scored cases)."
+        )
         if target > 0:
             short = standing.below(target)
             lines.append(

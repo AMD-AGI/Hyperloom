@@ -71,6 +71,10 @@ class PointError(RecipeError):
     """A point cannot be generated the way the request describes it."""
 
 
+class ProfileUnsupported(PointError):
+    """The framework runs under no torch profiler, so none of its tests can be profiled."""
+
+
 @dataclass(frozen=True)
 class CanonicalMeasurement:
     """The active canonical measurement configuration: a base YAML, how it is rendered, and its surface.
@@ -312,11 +316,10 @@ _PROFILE_PINNED = (ENV_TP, ENV_EP, ENV_ISL, ENV_RANDOM_RANGE_RATIO, ENV_MAX_MODE
 def _profile_canonical(canonical: CanonicalMeasurement) -> CanonicalMeasurement:
     """The canonical measurement rendered from the shipped profile configuration of its framework."""
 
-    framework = canonical.surface.fields.get("benchmark.framework") or framework_registry.DEFAULT_FRAMEWORK
-    name = framework_registry.shipped_config_name("profile", str(framework))
-    path = default_baseline_config().parent / name
-    if not path.is_file():
-        raise PointError(f"there is no shipped profile configuration for framework {framework!r}")
+    framework = str(canonical.surface.fields.get("benchmark.framework") or framework_registry.DEFAULT_FRAMEWORK)
+    if not framework_registry.torch_profiled(framework):
+        raise ProfileUnsupported(f"framework {framework!r} runs under no torch profiler, so it has no profile")
+    path = default_baseline_config().parent / framework_registry.shipped_config_name("profile", framework)
     return CanonicalMeasurement(path, canonical.surface, canonical.primary_concurrency, canonical.materialize)
 
 
@@ -416,6 +419,7 @@ __all__ = [
     "AcceptedMeasurement",
     "CanonicalMeasurement",
     "PointError",
+    "ProfileUnsupported",
     "accept_measurement",
     "default_canonical",
     "generate_points",

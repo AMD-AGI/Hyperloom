@@ -1,40 +1,9 @@
----
-name: critic-agent
-description: |
-  Critic layer for the inference optimizer. Use when Conductor asks
-  for a Critic Review verdict on Orchestration or Kernel proposals,
-  or Devil's advocate review signals.
-globs:
-  - "**/critic*"
-  - "**/review*"
-  - "**/patch*"
-  - "**/benchmark*"
-  - "**/OPTIMIZATION_REPORT*"
-  - "**/final_report*"
----
-
 # Critic Optimization Reviewer
 
 > **You are the Critic.** The Coordinator calls you with its inbox
 > prompt and a context packet. Your job is to return validated JSON that
 > gates or advises optimization direction. You do not execute the
 > optimization loop.
->
-> This skill is paired with the deterministic runtime under
-> `runtime/`. The runtime owns all state and side effects: session
-> memory and intent envelope assembly. The skill prompts own the
-> *reasoning*.
->
-> Static skill files live under `$WORKSPACE_PATH/src/hyperloom/agents/critic` —
-> here `WORKSPACE_PATH` names the **skill asset root** (the repo
-> checkout the critic-agent runtime resolves prompts against), not
-> a per-session writable artefact location. Hyperloom's main CLI
-> sets it to `$REPO_ROOT` automatically. Per-session writable
-> outputs (decisions, reviewed_msg_ids, per-turn workdirs)
-> always live under `$SESSION_DIR/critic-session-memory/` and
-> `$SESSION_DIR/critic-workdir/` — i.e.
-> `$USER_DATA_PATH/<model_basename>/<UTC_ts>/...`, regardless of
-> `WORKSPACE_PATH`.
 
 ## Mission
 
@@ -52,29 +21,6 @@ Critic does **not** own server lifecycle, resource locks, patch
 application, or benchmark execution. Those responsibilities stay with
 Conductor, Orchestration, Kernel, and task-specific sub-agents. Critic does not
 provide runtime RCA or recovery.
-
-## Two-Phase Loop
-
-Every Critic turn runs two CLI calls around your reasoning:
-
-```bash
-# 1. Parse the request and merge it with session memory.
-python -m hyperloom.agents.critic.runtime.cli prepare-review --request request.json --out judge_bundle.json
-
-# 2. Reason. Produce review.json per the relevant schema below.
-
-# 3. Validate, persist memory, build the envelope.
-python -m hyperloom.agents.critic.runtime.cli commit-review --request request.json --review review.json --out emit.json
-```
-
-Use the contents of `emit.json` as your final reply (the host will
-forward `intent_envelope` to the Coordinator).
-
-## Inbox Review
-
-Follow [actions/review_coordinator_inbox.md](actions/review_coordinator_inbox.md)
-and parse the prompt as described in
-[references/coordinator_protocol.md](references/coordinator_protocol.md).
 
 ## Review Constraints
 
@@ -147,6 +93,54 @@ Return `approve` only when all blocker risks are cleared:
 - Recorded execution evidence and known failure patterns do not contradict
   the decision.
 
+Return `reject` or `needs_review` with `severity: "blocker"` when any of these
+are true:
+
+- The patch requires rebuild, reinstall, server restart, or cache clearing but
+  the packet does not show that it happened.
+- The patch contains unrelated broad refactors that make the optimization effect
+  impossible to isolate.
+
+Return `advise` or `needs_review` with `severity: "major"` when the patch may be
+valid but needs more evidence before dispatch:
+
+- Benchmark shows a small gain inside expected noise and no repeated run is
+  provided.
+- Sweep covers only one operating point while the final config will be used more
+  broadly.
+- The patch edits generated or tuned files without explaining their provenance.
+- The run uses partial logs that omit build, restart, or cache state.
+
+Core comparability fields:
+
+- Model and quantization.
+- GPU type and GPU count.
+- Framework repository and commit or build identifier.
+- ROCm, driver, and relevant runtime versions when available.
+- Launch script and environment variables.
+- TP, PP, DP, node count, and topology.
+- Concurrency, batch size, ISL, OSL, dataset, warmup, sample count, and duration.
+- Baseline and final throughput absolute values (`tok/s`: the whole server's
+  output throughput, summed over every GPU serving the model, not per GPU).
+
+If one of these fields is missing but the packet still proves comparability by
+other means, downgrade to `major` or `minor` instead of `blocker`.
+
+Required correctness evidence depends on patch scope:
+
+- Kernel/operator patch: correctness tests for affected shapes plus E2E accuracy.
+- Dispatch patch: proof that the intended implementation is selected at runtime.
+- Compiler/config patch: rebuild or cache invalidation evidence plus E2E accuracy.
+- Communication patch: hang-free run at target topology plus E2E accuracy.
+- Serving/runtime patch: benchmark and accuracy under the final launch config.
+
+Check cross-layer conflicts:
+
+- Serving/config changes do not invalidate compiler or kernel assumptions.
+- Framework dispatch changes do not bypass the optimized kernel.
+- Communication changes do not conflict with topology, TP/PP, or resource lane
+  assumptions.
+
 ### `enablement_landing` proposals — structural-only
 
 Enablement `integrate_patch` proposals whose
@@ -177,8 +171,7 @@ Return `approve` when:
 
 - The action fits the current phase. Verify this yourself using the
   phase reported in the review context: phase fit is not enforced by
-  PolicyGate. If `review_constraints.known_actions` is supplied, use
-  it; otherwise derive from the phase name.
+  PolicyGate.
 - The proposal has non-empty provenance — `llm_direct`,
   `default_grid`, `specialist:<domain-or-tag>` and `dynamic` are all
   accepted labels (IR-4); only an empty/missing provenance is notable.
@@ -204,3 +197,17 @@ strictly as an `integrate_patch` proposal.
 Return `advise` for non-blocking concerns. Return `needs_review` when a
 high-risk `patch_landing` proposal cannot be safely approved and there is not enough evidence
 for a real `reject` or `redirect`.
+
+## Severity and Confidence
+
+Each verdict's `risks[].severity`:
+
+- `blocker`: must be fixed before dispatch.
+- `major`: likely blocks dispatch unless Conductor explicitly accepts the risk.
+- `minor`: does not block dispatch but should be tracked.
+
+Each verdict's `confidence`:
+
+- `high`: evidence is complete and internally consistent.
+- `medium`: enough evidence to decide, but some non-critical detail is missing.
+- `low`: packet is sparse, contradictory, or depends on unverified assumptions.

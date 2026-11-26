@@ -5,7 +5,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping, Sequence
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -90,7 +90,6 @@ class LaunchAttempt:
     """One launch attempt: what it did, how long it took, what it left behind.
 
     Attributes:
-        name: Label carried into the recorded call.
         outcome: One of the module's four outcome constants.
         stage: Ladder stage the boot stopped at, for :data:`STAGE_FAILED`.
         message: Failure line to write instead of the stage's canonical one.
@@ -106,7 +105,6 @@ class LaunchAttempt:
             or the scriptable script's result document.
     """
 
-    name: str = ""
     outcome: str = READY
     stage: str = ""
     message: str = ""
@@ -167,24 +165,6 @@ class LaunchAttempt:
             return ""
         return self.message or _STAGE_FAILURE.get(stage, _GENERIC_FAILURE)
 
-    @classmethod
-    def from_dict(cls, raw: Mapping[str, Any]) -> "LaunchAttempt":
-        """Build an attempt from its serialized form.
-
-        Args:
-            raw: One entry of a scenario's ``attempts`` list.
-
-        Returns:
-            LaunchAttempt: The parsed attempt.
-
-        Raises:
-            ScenarioError: On a key the format does not define.
-        """
-        unknown = sorted(set(raw) - set(cls.__dataclass_fields__))
-        if unknown:
-            raise ScenarioError(f"unknown attempt keys: {unknown}")
-        return cls(**dict(raw))
-
 
 @dataclass(frozen=True)
 class LaunchScenario:
@@ -192,11 +172,9 @@ class LaunchScenario:
 
     Attributes:
         attempts: The attempts, in the order they are served.
-        name: Label for the scenario as a whole.
     """
 
     attempts: tuple[LaunchAttempt, ...] = ()
-    name: str = ""
 
     def __post_init__(self) -> None:
         """Reject a scenario with nothing to play.
@@ -206,54 +184,6 @@ class LaunchScenario:
         """
         if not self.attempts:
             raise ScenarioError("a scenario needs at least one attempt")
-
-    @classmethod
-    def from_dict(cls, raw: Mapping[str, Any]) -> "LaunchScenario":
-        """Build a scenario from its serialized form.
-
-        Args:
-            raw: The scenario mapping.
-
-        Returns:
-            LaunchScenario: The parsed scenario.
-
-        Raises:
-            ScenarioError: When the mapping declares neither spelling, or both,
-                or when the spelling it declares is not a list.
-        """
-        name = str(raw.get("name", ""))
-        has_attempts = "attempts" in raw
-        has_blockers = "blockers" in raw
-        if has_attempts == has_blockers:
-            raise ScenarioError("a scenario declares exactly one of 'attempts' or 'blockers'")
-        if has_attempts:
-            entries = _entry_list(raw, "attempts")
-            return cls(attempts=tuple(LaunchAttempt.from_dict(e) for e in entries), name=name)
-        blockers = _entry_list(raw, "blockers")
-        return cls(attempts=_peel(blockers, clean_after=bool(raw.get("clean_after", True))), name=name)
-
-
-def _entry_list(raw: Mapping[str, Any], key: str) -> Sequence[Any]:
-    """Return the list ``key`` declares, rejecting anything else."""
-    value = raw[key]
-    if not isinstance(value, (list, tuple)):
-        raise ScenarioError(f"a scenario's {key!r} is a list, not {type(value).__name__}")
-    return value
-
-
-def _peel(blockers: Sequence[Any], *, clean_after: bool) -> tuple[LaunchAttempt, ...]:
-    """Expand a stack of stage names, or mappings naming one, into one attempt each."""
-    if not blockers:
-        raise ScenarioError("a blocker stack needs at least one blocker")
-    attempts: list[LaunchAttempt] = []
-    for index, blocker in enumerate(blockers):
-        entry: dict[str, Any] = {"stage": blocker} if isinstance(blocker, str) else dict(blocker)
-        entry["outcome"] = STAGE_FAILED
-        entry.setdefault("name", f"blocker-{index}-{entry.get('stage', '')}")
-        attempts.append(LaunchAttempt.from_dict(entry))
-    if clean_after:
-        attempts.append(LaunchAttempt(name="clean-boot", outcome=READY))
-    return tuple(attempts)
 
 
 def boot_log_for(stage: LadderStage | None, *, message: str = "") -> str:

@@ -19,8 +19,6 @@ MAPPING = "kernelforge-v1"
 CAMPAIGN = "5f1c0a9e2b7d4c38a6e0f1b2c3d4e5f6"
 TOKEN_PLAN = "Summary: per token: one scale."
 REASONING = "Summary: Two passes over each row cost a second read.\n\n## Evidence\nFusing them halves the traffic."
-ANALYSIS_REPORT = "# Analysis report\n\nEach row is read twice; both passes are bound by memory bandwidth."
-GENERATION = "analysis/ce146831869e122424b2a67038ae466565882a3d/generation-001"
 
 
 def _file(path: Path, content: str) -> Path:
@@ -36,9 +34,7 @@ def _ref(path: Path) -> dict[str, Any]:
 
 @pytest.fixture
 def files(tmp_path: Path) -> dict[str, Path]:
-    orchestration = tmp_path / "orchestration" / "iter_001"
     return {
-        "plan": _file(orchestration / "optimization_plan.md", "Summary: Fuse the passes.\n\n# Fuse\nOne sweep.\n"),
         "kernel": _file(tmp_path / "candidates" / "iter_001" / "softmax_kernel.py", "BLOCK = 128\n"),
         "diff": _file(tmp_path / "candidates" / "iter_001" / "change.diff", "--- a/softmax_kernel.py\n"),
         "raw_log": _file(tmp_path / "raw-logs-not-collected.log", ""),
@@ -46,7 +42,7 @@ def files(tmp_path: Path) -> dict[str, Path]:
 
 
 def _session_unit(files: dict[str, Path], **fields: Any) -> dict[str, Any]:
-    """A single-session iteration unit, shaped as the normalizer writes it."""
+    """One round's candidate unit, shaped as the normalizer writes it."""
 
     unit = {
         "unit_id": "forge_loop_triton_softmax/iteration-1",
@@ -62,19 +58,15 @@ def _session_unit(files: dict[str, Path], **fields: Any) -> dict[str, Any]:
                 "bench": {"measurements": [{"median_ms": 0.044, "all_times_ms": [0.043, 0.044, 0.045]}]},
                 "vgpr": None,
             },
-            "analysis_generation": GENERATION,
         },
         "started_at": "2026-10-15T10:00:00",
         "completed_at": "2026-10-15T10:04:30",
         "best_wall_ms_before": 0.052,
         "decision": "KEEP",
         "candidate_wall_ms": 0.044,
-        "plan_file": str(files["plan"]),
-        "plan": "Small rows are bound by launch latency. This plan fuses the max and sum passes.",
         "source_ms": 0.052,
         "source_code": str(files["kernel"]),
         "change_diff_file": str(files["diff"]),
-        "analysis_report": ANALYSIS_REPORT,
         "reasoning": f"{REASONING}\n",
     }
     unit.update(fields)
@@ -111,14 +103,13 @@ def test_the_mapping_produces_the_packaged_kernelforge_declaration() -> None:
         if field.kind is FieldKind.FILE
     ]
     assert linked == [
-        ("rationale", "plan_file"),
         ("change", "source_code"),
         ("change", "change_diff_file"),
     ]
     assert mapping.code_fields == frozenset({"change.source_code", "change.change_diff_file"})
-    assert [(field.name, field.kind.value, field.required) for field in declaration.fields("reflection")] == [
-        ("analysis_report", "text", False),
-    ]
+    # A round has no plan and the Analysis report is not collected: the lesson is the only reasoning record.
+    assert {field.name for field in declaration.fields("rationale")} == {"reasoning", "alternatives", "preconditions"}
+    assert declaration.fields("reflection") == ()
 
 
 def test_a_session_unit_projects_a_complete_experience(files: dict[str, Path]) -> None:
@@ -142,18 +133,13 @@ def test_a_session_unit_projects_a_complete_experience(files: dict[str, Path]) -
         "gpu": "mi300x",
     }
     assert experience["baseline"] == {"best_wall_ms_before": 0.052, "source_ms": 0.052}
-    assert experience["rationale"] == {
-        "reasoning": REASONING,
-        "plan": "Small rows are bound by launch latency. This plan fuses the max and sum passes.",
-        "plan_file": _ref(files["plan"]),
-    }
+    assert experience["rationale"] == {"reasoning": REASONING}
     assert experience["change"] == {"source_code": _ref(files["kernel"]), "change_diff_file": _ref(files["diff"])}
     assert experience["outcome"] == {"decision": "KEEP", "candidate_wall_ms": 0.044}
-    assert experience["reflection"] == {"analysis_report": ANALYSIS_REPORT}
+    assert experience["reflection"] == {}
     assert experience["provenance"]["source_ref"] == "forge_loop_triton_softmax/iteration-1"
     assert experience["provenance"]["extra"] == {
         "candidate_origin": "session",
-        "analysis_generation": GENERATION,
         "meta": {"commit_hash": "abc1234", "wall_ms": 0.044, "mean_case_speedup": 1.18},
     }
     assert (
@@ -169,11 +155,16 @@ def test_a_session_unit_projects_a_complete_experience(files: dict[str, Path]) -
     )
 
 
-def test_a_unit_without_an_analysis_report_projects_none(files: dict[str, Path]) -> None:
-    report = collect(MAPPING, {"runs": [_session_unit(files, analysis_report=None)]}, dry_run=True).to_dict()
+def test_fields_an_older_export_wrote_for_a_plan_are_not_collected(files: dict[str, Path]) -> None:
+    """A document written before rounds had no plan still names one; the mapping reads none of it."""
+    unit = _session_unit(files, plan=TOKEN_PLAN, plan_file=str(files["kernel"]), analysis_report="# Analysis report")
 
-    [row] = report["collected"]
-    assert "analysis_report" not in row["experience"]["reflection"]
+    report = collect(MAPPING, {"runs": [unit], "raw_logs": [str(files["raw_log"])]}, dry_run=True).to_dict()
+
+    assert report["skipped"] == [] and report["counts"]["collected"] == 1
+    experience = report["collected"][0]["experience"]
+    assert experience["rationale"] == {"reasoning": REASONING}
+    assert experience["reflection"] == {}
 
 
 @pytest.mark.parametrize(
@@ -227,14 +218,14 @@ def test_a_kernel_and_its_diff_are_screened_with_the_token_formats_only(
     )
 
 
-def test_a_per_token_plan_and_its_file_are_collected(files: dict[str, Path]) -> None:
-    files["plan"].write_text(f"{TOKEN_PLAN}\n", encoding="utf-8")
-    unit = _session_unit(files, plan=TOKEN_PLAN)
+def test_reasoning_that_names_a_per_token_quantity_is_collected(files: dict[str, Path]) -> None:
+    """The lesson is prose: a sentence about tokens is not a credential assignment."""
+    unit = _session_unit(files, reasoning=TOKEN_PLAN)
 
     report = collect(MAPPING, {"runs": [unit], "raw_logs": [str(files["raw_log"])]}, dry_run=True).to_dict()
 
     assert report["skipped"] == [] and report["counts"]["collected"] == 1
-    assert report["collected"][0]["experience"]["rationale"]["plan"] == TOKEN_PLAN
+    assert report["collected"][0]["experience"]["rationale"]["reasoning"] == TOKEN_PLAN
 
 
 def test_a_token_named_case_and_plan_prose_in_meta_are_not_published(files: dict[str, Path]) -> None:

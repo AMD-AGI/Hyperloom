@@ -28,6 +28,7 @@ from hyperloom.measure.archive import ResultArchive
 from hyperloom.measure.framework.base import SESSION_SNAPSHOT_DIR, framework_envs
 from hyperloom.measure.hosted import HostedConfig, HostedMeasurementBackend
 from hyperloom.measure.hosted_spec import SpecContext
+from hyperloom.measure.jit.store import DirJitStore
 from hyperloom.measure.runner.cache_layout import MANIFEST_PIN_ENV
 from hyperloom.measure.sandboxes import (
     DEFAULT_HANDOVER_TIMEOUT_SEC,
@@ -44,6 +45,7 @@ from hyperloom_multibranch.contracts.blackboard.vocab import LeaseKind
 from hyperloom_multibranch.contracts.toolbox import BranchLease, LeaseCharge
 from hyperloom_multibranch.toolbox.attempts import DEFAULT_MAX_INFRA_RETRIES, INFRA_BACKOFF_SECONDS
 from hyperloom_multibranch.toolbox.hosted_executor import DEFAULT_TEST_TIMEOUT_SEC, HostedExecutor
+from hyperloom_multibranch.toolbox.jit_store import REFUSED_HOSTED, named_jit_store, session_jit_store
 from hyperloom_multibranch.toolbox.merge_smoke import merge_smoke_from
 from hyperloom_multibranch.toolbox.hosted_leases import (
     HANDOVER_MIN_TESTS,
@@ -64,7 +66,7 @@ from hyperloom_multibranch.toolbox.leased_toolbox import (
 )
 from hyperloom_multibranch.toolbox.queue import QueuePolicy
 from hyperloom_multibranch.toolbox.resume_guard import MeasuredOn
-from hyperloom_multibranch.toolbox.native_builds import native_builds, with_native_plan
+from hyperloom_multibranch.toolbox.native_builds import base_bins_env, native_builds, with_native_plan
 from hyperloom_multibranch.toolbox.long_context import environment_long_context, sees_runner_cache
 from hyperloom_multibranch.toolbox.short_prompts import ShortPromptSetup, environment_short_prompts
 from hyperloom_multibranch.toolbox.tools import AsyncTool, tracelens_tool
@@ -95,6 +97,9 @@ _COMMIT = re.compile(r"[0-9a-f]{40}|[0-9a-f]{64}")
 _MANIFEST_DIGEST = re.compile(r"[0-9a-f]{64}")
 _GRANT_KEYS = ("max_sandboxes", "max_gpus", "gpu_hours", "max_runtime_sec")
 _REQUIRED_TEXT = ("run_id", "api_url", "sandbox_url", "measurement_key")
+#: Where the base builds of the frameworks built from a pinned checkout are laid, below the session directory the runner
+#: sandboxes read at the same path.
+_BASE_BUILDS = "base-builds"
 
 log = logging.getLogger(__name__)
 
@@ -241,7 +246,10 @@ class HostedOptions:
     every test reads private copies of, snapshotted below ``session_dir/framework`` as the toolbox is built, where the
     runner sandboxes read it at the same path: the image's when omitted, ``""`` for none. The snapshot is named to every
     runner sandbox by ``HYPERLOOM_FRAMEWORK_SNAPSHOT`` and ``HYPERLOOM_FRAMEWORK_SESSION_SHA256``, which the runner
-    template must therefore accept; without it a test that adds tuned rows to a default table is refused.
+    template must therefore accept; without it a test that adds tuned rows to a default table is refused. A session
+    whose framework is built from its pinned checkout lays that base build below ``session_dir`` and names it to every
+    runner sandbox by ``HYPERLOOM_BASE_BINS``, which the template must accept too: a test that does not rebuild the
+    framework runs it, never whatever the sandbox's ``PATH`` finds.
     ``make_before_break`` keeps the sandbox of a finished test until the next test's sandbox runs (:func:`handover_for`)
     where the grant fits at least :data:`~.hosted_leases.HANDOVER_MIN_TESTS` tests; there it costs one test of the
     grant's parallelism (:func:`parallel_tests_for`). ``False`` runs as many tests at once as the grant fits and closes
@@ -251,6 +259,11 @@ class HostedOptions:
     session that lends none builds no branch leases (``HostedToolbox.leases`` is ``None``) and reads no ``dev`` template,
     whatever ``dev`` key the host gave. A hosted session sets it from its ``dev_leases`` and ``agents``
     (:class:`~hyperloom_multibranch.scheduling.hosted_peers.HostedSandboxes`).
+    ``jit_store`` (else ``HYPERLOOM_JIT_STORE``) is the shared compiled-code cache this host checks and prunes as the
+    session starts (:func:`~.jit_store.session_jit_store`, which says what happens to one it refuses). Nothing arrives
+    in it yet: no sandbox runner reads it or stages a contribution, so nothing is published. It belongs on this host's
+    own disk, where no sandbox can write it (a sandbox's code could put snapshots there that later tests load), and the
+    ``measurement`` template must neither mount it nor set ``HYPERLOOM_JIT_CACHE``.
     """
 
     policy: QueuePolicy | None = None
@@ -267,6 +280,7 @@ class HostedOptions:
     framework_configs: str | None = None
     make_before_break: bool = True
     dev_leases: bool = True
+    jit_store: Path | None = None
 
 
 class HostedToolbox(LeasedToolbox):
@@ -534,6 +548,12 @@ def _acceptance_with_prompts(
     return named
 
 
+def _session_jit_store(options: HostedOptions, session_dir: Path) -> DirJitStore | None:
+    """The compiled-code cache this host publishes to, checked and pruned; ``None`` when none is named or it is refused."""
+    root = named_jit_store(options.jit_store, os.environ)
+    return session_jit_store(root, session_dir, REFUSED_HOSTED) if root is not None else None
+
+
 def build_hosted_toolbox(
     inputs: HostedToolboxInputs,
     blackboard: LocalBlackboard,
@@ -597,10 +617,12 @@ def build_hosted_toolbox(
             **inputs.create_envs(),
             **framework_envs(directory / SESSION_SNAPSHOT_DIR, options.framework_configs),
             **(native.runner_envs if native else {}),
+            **base_bins_env(native, directory / _BASE_BUILDS),  # built once the inputs are known to run a test
         },
         archive=session_archive(options.archive, directory),
         max_parallel_tests=parallel,
         poll_interval_sec=options.poll_interval_sec,
+        jit_store=_session_jit_store(options, directory),
         handover=handover,
     )
     backend = started_backend(provider, config)

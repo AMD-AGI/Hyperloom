@@ -16,7 +16,7 @@ import logging
 import os
 import subprocess
 import uuid
-from collections.abc import Iterable, Mapping, Sequence
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from contextlib import ExitStack
 from dataclasses import dataclass
 from pathlib import Path
@@ -99,13 +99,26 @@ class Spawned:
         return outcome
 
 
+@dataclass(frozen=True)
+class ChildPlace:
+    """Where a child starts: its directory (``cwd``, this process's own when ``None``) and the CPUs it may run on
+    (``cpus``, this process's own when empty)."""
+
+    cwd: Path | None = None
+    cpus: tuple[int, ...] = ()
+
+
 def spawn(
-    argv: Sequence[str], env: Mapping[str, str], stdout: Path, stderr: Path | None = None, cwd: Path | None = None
+    argv: Sequence[str],
+    env: Mapping[str, str],
+    stdout: Path,
+    stderr: Path | None = None,
+    place: ChildPlace = ChildPlace(),
 ) -> Spawned:
     """Start ``argv`` in its own session with exactly ``env`` and a fresh mark, appending its output to ``stdout``.
 
-    ``stderr`` defaults to the same file. Appending keeps what an earlier server wrote to a shared log. ``cwd`` is where
-    the child starts, this process's own directory when ``None``.
+    ``stderr`` defaults to the same file. Appending keeps what an earlier server wrote to a shared log. ``place`` is where
+    the child starts and the CPUs it may run on; they are set before it runs, so every thread it starts inherits them.
     """
 
     mark = uuid.uuid4().hex
@@ -122,9 +135,14 @@ def spawn(
             stdout=files[0],
             stderr=files[1] if len(files) > 1 else subprocess.STDOUT,
             start_new_session=True,
-            cwd=cwd,
+            cwd=place.cwd,
+            preexec_fn=_pinned_to(place.cpus) if place.cpus else None,
         )
     return Spawned(proc, mark)
+
+
+def _pinned_to(cpus: tuple[int, ...]) -> Callable[[], None]:
+    return lambda: os.sched_setaffinity(0, cpus)
 
 
 def listening_inodes(port: int) -> frozenset[int]:

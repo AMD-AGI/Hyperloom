@@ -27,7 +27,6 @@ _NON_SEARCH_DECISIONS = frozenset(
     {
         "AGENT_ERROR",
         "API_ERROR",
-        "ORCHESTRATION_ERROR",
         "REVERT_CONTENDED",
         "REVERT_INTEGRITY",
     }
@@ -50,17 +49,18 @@ class AgentProfileSpec:
 
 @dataclass(frozen=True)
 class AgentRelayPolicy:
-    """Campaign-immutable relay membership and blockage policy.
+    """Campaign-immutable relay membership.
 
-    Models and reasoning effort are session options: each session resolves them into an ``AgentRelayConfig``.
+    Models and reasoning effort are session options: each session resolves them into an ``AgentRelayConfig``. How
+    many iterations without a new best make a blockage is the loop's stall count, which follows the session's loop
+    shape, so the campaign records none.
     """
 
     primary_profile_id: str
     profiles: tuple[AgentProfileSpec, ...]
-    blockage_threshold: int = 3
 
     def __post_init__(self) -> None:
-        _validate_relay_membership(self.primary_profile_id, self.profiles, self.blockage_threshold)
+        _validate_relay_membership(self.primary_profile_id, self.profiles)
 
     @property
     def primary_profile(self) -> AgentProfileSpec:
@@ -79,7 +79,6 @@ class AgentRelayPolicy:
         return cls(
             primary_profile_id=str(data["primary_profile_id"]),
             profiles=profiles,
-            blockage_threshold=int(data["blockage_threshold"]),
         )
 
 
@@ -107,10 +106,9 @@ class AgentRelayConfig:
 
     primary_profile_id: str
     profiles: tuple[AgentProfile, ...]
-    blockage_threshold: int = 3
 
     def __post_init__(self) -> None:
-        _validate_relay_membership(self.primary_profile_id, self.profiles, self.blockage_threshold)
+        _validate_relay_membership(self.primary_profile_id, self.profiles)
 
     @property
     def primary_profile(self) -> AgentProfile:
@@ -238,7 +236,7 @@ def apply_relay_search_outcome(
 ) -> AgentRelayState:
     """Advance the active profile's streak by one non-KEEP outcome it produced and that counts as search.
 
-    An outcome no profile produced, such as a stacked merge of two archived candidates, is not the active profile's.
+    An outcome another profile's session produced is not the active profile's.
     """
     if producer_profile_id != state.active_profile_id:
         return state
@@ -248,7 +246,7 @@ def apply_relay_search_outcome(
 
 
 def relay_blockage_reached(state: AgentRelayState, *, threshold: int) -> bool:
-    """Whether the active profile has reached the configured blockage threshold."""
+    """Whether the active profile has gone ``threshold`` search iterations in a row without a new best."""
     _require_positive_threshold(threshold)
     return state.active_no_improvement_streak >= threshold
 
@@ -456,10 +454,9 @@ def migrate_run_state_relay_fields(payload: object) -> dict[str, Any]:
     return migrated
 
 
-def _validate_relay_membership(primary_profile_id: str, profiles: Sequence, blockage_threshold: int) -> None:
+def _validate_relay_membership(primary_profile_id: str, profiles: Sequence) -> None:
     if primary_profile_id not in _profile_mapping(profiles):
         raise ValueError("primary Agent profile is not configured")
-    _require_positive_threshold(blockage_threshold)
 
 
 def _require_positive_threshold(threshold: int) -> None:

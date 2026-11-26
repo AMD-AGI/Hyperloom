@@ -40,6 +40,7 @@ async def _refused_with(tmp_path: Path, repo: FakeRepo, kind: WorkloadKind, serv
         "--speculative-config.method suffix",
         '--speculative-config \'{"model": "[ngram]"}\'',
         "--speculative-algorithm NGRAM",
+        "--spec-type draft-mtp,ngram-mod",
     ],
 )
 async def test_an_inferencex_candidate_that_adds_a_context_copy_draft_is_refused(
@@ -110,3 +111,9 @@ async def test_an_inferencex_campaign_does_not_pin_a_simulated_draft(tmp_path: P
         tmp_path, _repo(SIMULATING, SIM_ENV), WorkloadKind.INFERENCEX, "--speculative-num-steps 5"
     )
     assert code is None
+
+
+# --- InferenceX: a draft the parent verifies keeps its measured acceptance ---
+
+LLAMACPP_MTP = "-md /models/mtp-head.gguf --spec-type draft-mtp --spec-draft-n-max 5"
+SYNTHETIC_LENGTH = "--spec-synth-len 4"

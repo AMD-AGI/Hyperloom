@@ -12,7 +12,6 @@ from typing import Any, NamedTuple
 
 from . import (
     baseline_event,
-    conc_sweep_event,
     enablement_event,
     framework_event,
     kernel_event,
@@ -26,7 +25,6 @@ from .assembler import event_parts
 from .event_timeline import EVENT_STATUS_INTERRUPTED, EventHeader, finish_event, residual_events
 from .sections import (
     BASELINE_EVENT_SECTIONS,
-    CONC_SWEEP_EVENT_SECTIONS,
     ENABLEMENT_EVENT_SECTIONS,
     EVENT_SECTIONS,
     FRAMEWORK_EVENT_SECTIONS,
@@ -75,13 +73,6 @@ _EVENT_TYPES: tuple[_EventType, ...] = (
         event_section=baseline_event.SECTION_EVENT,
         sections=BASELINE_EVENT_SECTIONS,
         assemble=baseline_event.assemble_baseline_ext,
-    ),
-    _EventType(
-        event_type=conc_sweep_event.EVENT_TYPE,
-        kind=conc_sweep_event.EVENT_KIND,
-        event_section=conc_sweep_event.SECTION_EVENT,
-        sections=CONC_SWEEP_EVENT_SECTIONS,
-        assemble=conc_sweep_event.assemble_conc_sweep_ext,
     ),
     _EventType(
         event_type=enablement_event.EVENT_TYPE,

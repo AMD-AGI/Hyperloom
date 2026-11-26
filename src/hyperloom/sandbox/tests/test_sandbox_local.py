@@ -199,7 +199,7 @@ def test_a_dev_symlink_cannot_escape_the_root(make) -> None:
         sb.write_file("/work/tmpdir/escape.txt", b"x")
 
 
-@pytest.mark.parametrize("verb", ["read_file", "copy_out", "list_dir", "write_file"])
+@pytest.mark.parametrize("verb", ["read_file", "copy_out", "list_entries", "write_file"])
 def test_a_path_swapped_for_a_link_out_after_its_gate_is_never_followed(
     make, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, verb: str
 ) -> None:
@@ -214,12 +214,12 @@ def test_a_path_swapped_for_a_link_out_after_its_gate_is_never_followed(
     real_gate = local_sandbox.LocalSandbox._gate
 
     files = sb.fs / "work" / "out" / "files"
-    gated, target = (files, outside) if verb == "list_dir" else (files / "a.log", outside / "credentials.json")
+    gated, target = (files, outside) if verb == "list_entries" else (files / "a.log", outside / "credentials.json")
 
     def swapped(self, path: str, *, write: bool):
         if gated.is_symlink():  # what any gate (a second one too) checks is the sandbox's own file
             gated.unlink()
-            gated.mkdir() if verb == "list_dir" else gated.write_text("harmless\n")
+            gated.mkdir() if verb == "list_entries" else gated.write_text("harmless\n")
         found = real_gate(self, path, write=write)
         (self.fs / "work" / "swap").symlink_to(target)
         if gated.is_dir():
@@ -283,7 +283,7 @@ def test_path_traversal_is_confined_to_the_root(make) -> None:
     provider = make([LocalTemplate("dev", "dev")])
     sb = _create(provider, "dev", "dev")
     sb.write_file("/work/../../../../escape.txt", b"x")  # collapses to /escape.txt inside the root
-    assert "escape.txt" in sb.list_dir("/")
+    assert "escape.txt" in [e.name for e in sb.list_entries("/")]
     assert not Path("/escape.txt").exists()
 
 
@@ -1260,3 +1260,21 @@ def test_provider_reports_the_shared_node_name(monkeypatch) -> None:
 
     with LocalSandboxProvider([LocalTemplate("dev", "dev")]) as provider:
         assert _create(provider, "dev", "dev").info().metadata["agent-sandbox.io/node-name"] == socket.gethostname()
+
+
+def test_list_entries_says_what_each_entry_is_without_following_a_link(make) -> None:
+    provider = make([LocalTemplate("dev", "dev")])
+    sb = _create(provider, "dev", "dev")
+    sb.run("mkdir -p out/files/round && printf 'hello' > out/files/a.log && ln -s /etc out/files/etc")
+    sb.run("ln -s a.log out/files/same.log && mkfifo out/files/pipe")
+    entries = sb.list_entries("/work/out/files")
+    assert [(e.name, e.kind) for e in entries] == [
+        ("a.log", "file"),
+        ("etc", "link"),
+        ("pipe", "other"),
+        ("round", "dir"),
+        ("same.log", "link"),
+    ]
+    assert entries[0].size == 5
+    with pytest.raises(FileNotFoundError):
+        sb.list_entries("/work/missing")

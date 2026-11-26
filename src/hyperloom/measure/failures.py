@@ -58,8 +58,9 @@ LOG_TAIL_CHARS = 128 * 1024
 #: could stall a runner or the tool layer for minutes.
 LOG_LINE_CHARS = 2000
 
-#: A process outside the test held one of the test's cards, so nothing the test showed is the candidate's: retried on
-#: other cards like any infrastructure failure (``hyperloom.measure.runner.card_watch``).
+#: A process outside the test held one of the test's cards, so nothing the test showed is the candidate's: an
+#: infrastructure failure whose retry waits for the cards to free and may run on the same node, which is neither
+#: reported nor quarantined (``hyperloom.measure.runner.card_watch``).
 FOREIGN_PROCESS_ON_CARD = "foreign_process_on_card"
 
 #: The runner's view of the machine refused it the kernel's list for its cards (a container shown only some GPUs), so the
@@ -75,11 +76,25 @@ CARDS_UNOBSERVABLE = "cards_unobservable"
 DISK_FULL = "disk_full"
 _DISK_FULL_ERRNOS = frozenset({errno.ENOSPC, errno.EDQUOT})
 
+#: The candidate's framework files were compiled against one version of the framework and the sandbox's interpreter has
+#: another installed (``hyperloom.measure.farm.FrameworkVersionMismatch``): laying them would mix two releases in one
+#: package, so the runner refuses the test before it lays anything. The candidate is not to blame, and every sandbox of
+#: the same image has the same version: an infrastructure failure that is not retried
+#: (``hyperloom_multibranch.toolbox.attempts``) and not held against the node.
+FRAMEWORK_VERSION_MISMATCH = "framework_version_mismatch"
+
 #: No sandbox started within the runner's start timeout (``hyperloom.measure.hosted``): the platform short of sandboxes,
 #: or on a local host every card held by a process outside the toolbox. Retried like any infrastructure failure.
 RUNNER_START_TIMEOUT = "runner_start_timeout"
 #: The platform had no room for the sandbox. Retried like any infrastructure failure.
 CAPACITY_UNAVAILABLE = "capacity_unavailable"
+
+#: A listed result file whose every copy out of the sandbox received another byte count than the signed manifest lists
+#: (``hyperloom.measure.hosted_copy``); the detail names the path and both sizes. The platform's file API ended the
+#: transfer early, so neither the candidate nor the node is to blame: ``hyperloom_multibranch.toolbox.attempts`` retries
+#: it in a new sandbox after a wait and does not hold it against the node. A download whose sizes all match and then
+#: fails verification stays a refused result.
+RESULT_DOWNLOAD_INCOMPLETE = "result_download_incomplete"
 
 #: The runner process exited without writing ``status.json`` (it died importing, say): the host stops waiting at once
 #: instead of polling until the test's timeout. Retried like any infrastructure failure.
@@ -154,12 +169,14 @@ INFRA_ERROR_CLASSES: frozenset[str] = frozenset(
         "preflight_mismatch",
         FOREIGN_PROCESS_ON_CARD,
         DISK_FULL,
+        FRAMEWORK_VERSION_MISMATCH,
         "node_fault",
         "no_spec",
         "sandbox_create_failed",
         CAPACITY_UNAVAILABLE,
         "image_pull_failed",
         "result_read_failed",
+        RESULT_DOWNLOAD_INCOMPLETE,
         "archive_failed",
         # The test went silent before its server was ready (``boot_watch``): a hang a new sandbox does not repeat.
         HUNG_BEFORE_READY,

@@ -96,6 +96,9 @@ class AgentCapabilities:
     requires_workspace_cwd: bool = False
     # Whether the provider applies ``AgentRunSpec.env`` over the environment it spawns the session with.
     session_env: bool = False
+    # Whether the provider marks every process a session starts and ends them with the session. The mark is what
+    # ``kernelforge.utils.session_kill`` selects by, so only a session of such a provider can use it.
+    session_process_mark: bool = False
     # Whether ``AgentRunSpec.shared_prompt_prefix`` becomes a cache entry of its own that a later session sending the
     # same prefix reads, and whether the provider reports ``on_response_started``.
     shared_prompt_cache: bool = False
@@ -265,7 +268,7 @@ class AgentRunSpec:
     # Appended, like the field above, to keep the positional contract.
     max_reasoning_effort: str = ""
     # What this session is for, in a name a human reading the campaign summary
-    # will recognise: "implementer", "analysis", "orchestration", "fusion
+    # will recognise: "implementer", "analysis", "supervisor", "fusion
     # author". Purely for accounting -- no provider changes behaviour on it --
     # but without it a campaign's spend is one number, and a number that cannot
     # be attributed cannot be argued with. Empty folds into "unattributed" so a

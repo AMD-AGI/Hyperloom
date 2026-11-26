@@ -82,7 +82,6 @@ class V6FrameworkRun(TypedDict, total=False):
     empty: bool | None
     confidence: float | None
     confidence_avg: float | None
-    ensemble_scores: dict[str, Any]
     produced_ids: list[str]
 
 
@@ -94,10 +93,7 @@ class V6FrameworkCriticVariantRuling(TypedDict, total=False):
 
     variant_name: str
     verdict: str
-    effective_verdict: str
-    held_to_rule: str
     reason: str
-    failure_reason_code: str
 
 
 class V6FrameworkCriticReviewOutcome(TypedDict, total=False):
@@ -117,19 +113,14 @@ class V6FrameworkCriticReviewOutcome(TypedDict, total=False):
 class V6FrameworkCriticReview(TypedDict, total=False):
     """The Critic's ruling on one proposal, inline on the proposal.
 
-    Both verdicts are kept: a reject the loop held to a rule that only declared
-    ``advise`` is two facts, and either alone misreads the round. ``reviewer``
-    separates a ruling the Critic authored from one it never got to make.
-    The Critic's advisory keys are merged in as authored, so a consumer may
-    meet fields beyond the ones named here."""
+    ``reviewer`` separates a ruling the Critic authored from one it never got
+    to make. The Critic's advisory keys are merged in as authored, so a
+    consumer may meet fields beyond the ones named here."""
 
     verdict: str
-    effective_verdict: str
-    held_to_rule: str
     reviewer: str
     reason: str
     confidence: float | None
-    failure_reason_code: str
     concerns: list[str]
     reviewed_at: str
     variants: list[V6FrameworkCriticVariantRuling]

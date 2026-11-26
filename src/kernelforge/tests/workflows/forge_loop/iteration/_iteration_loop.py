@@ -9,7 +9,9 @@ import subprocess
 from pathlib import Path
 from types import SimpleNamespace
 
+from kernelforge.evaluation.scoring import CaseAggregate
 from kernelforge.workflows.forge_loop.campaign.run_state import LoopStateStore, RunState
+from kernelforge.workflows.forge_loop.iteration.iteration_types import LoopAgents
 from kernelforge.workflows.forge_loop.iteration.runner import IterationConfig, IterationLoop, IterationResult
 from kernelforge.workflows.forge_loop.campaign.experiment import ExperimentTracker
 from kernelforge.workflows.forge_loop.iteration import attempt_verdict
@@ -17,9 +19,9 @@ from kernelforge.tests.conftest import patch_iteration_name, silence_jit_rebuild
 
 
 # The stand-in for "budget is not what this test is about". It has to clear the
-# round admission guard, which prices a whole round -- planning, a session worth
-# starting, the canonical measurement and the finalize reserve -- so a value near
-# the reserve itself would silently turn these tests into admission tests.
+# round admission guard, which prices a whole round -- a session worth starting,
+# the canonical measurement and the finalize reserve -- so a value near the
+# reserve itself would silently turn these tests into admission tests.
 _AMPLE_BUDGET_SEC = 12 * 3600.0
 
 
@@ -72,6 +74,8 @@ def _make_loop(
         git_branch="test-loop",
         workspace_dir=str(workspace),
         supervise_after=supervise_after,
+        # These loops turn the search when the Supervisor would be called, unless a test sets the count itself.
+        diversify_after=supervise_after,
         supervise_cooldown=0,
     )
     tracker = ExperimentTracker(tmp_path / "experiments")
@@ -87,6 +91,15 @@ def _make_loop(
         lambda: _AMPLE_BUDGET_SEC if len(loop.results) < session_count else 0.0,
     )
     return loop, workspace
+
+
+def lane_agents(agent_fn, **services) -> LoopAgents:
+    """The loop's agents around one fake session.
+
+    The same callable serves as a lane's session, where it is handed the kernel of the lane's own copy, and as the
+    canonical session that merges a round's lanes.
+    """
+    return LoopAgents(agent_fn=agent_fn, agent_factory=lambda _seat: agent_fn, **services)
 
 
 async def _unused_supervisor(**_kwargs):
@@ -106,38 +119,6 @@ def _reduction_loop(tmp_path, monkeypatch, workspace_state=None):
     loop.best_wall_ms = 1.0
     loop.best_mean_case_speedup = 1.0
     return loop, workspace
-
-
-def _lane_agent_factory(edits):
-    """An agent that writes the edit its lane was assigned, in that lane's copy."""
-
-    def factory(lane_dir, _serialized_driver):
-        async def agent(_kernel_file, prompt, session_sink=None):
-            path = Path(lane_dir) / "kernel.py"
-            for plan, (old, new) in edits.items():
-                if plan in prompt:
-                    path.write_text(path.read_text().replace(old, new))
-                    return
-
-        return agent
-
-    return factory
-
-
-def _counting_plan(loop, workspace, rounds, *, plans=("a", "b"), unavailable=False):
-    """Stand in for planning, recording every round an iteration is charged for."""
-
-    async def _plan(*, iteration, lanes=1, **_kwargs):
-        rounds.append(lanes)
-        if unavailable:
-            return None, "OrchestrationInfrastructureError: backend unreachable"
-        loop._last_lane_plans = list(plans)
-        plan_path = workspace / "forge_experiments" / "orchestration" / f"iter_{iteration:03d}" / "optimization_plan.md"
-        plan_path.parent.mkdir(parents=True, exist_ok=True)
-        plan_path.write_text(f"# Optimization plan\n{plans[0]}\n")
-        return plan_path, ""
-
-    return _plan
 
 
 def _diff_of(workspace: Path, edit) -> str:
@@ -195,6 +176,7 @@ def _measurement_loop(monkeypatch, benchmark_result, workspace_dir="."):
         validate_stage_timeout_sec=300,
         bench_timeout_sec=300,
         bench_repeat=1,
+        case_aggregate=CaseAggregate.ARITHMETIC,
         nproc_per_node=1,
         build_dir=None,
         baseline_wall_ms=5.0,
@@ -211,10 +193,6 @@ def _measurement_loop(monkeypatch, benchmark_result, workspace_dir="."):
     loop._best_case_times = {"small": 1.0, "large": 1.0}
     loop._case_times = {}
     loop.config = SimpleNamespace(gpu_target="gfx942")
-    # No round is open around these iterations, so the measurement they run is
-    # charged to nothing -- which is also what a drain iteration does.
-    loop._round_started_at = None
-    loop._round_measurement_sec = 0.0
     return loop, benchmark_calls
 
 

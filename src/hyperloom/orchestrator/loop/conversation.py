@@ -183,8 +183,7 @@ def _format_delegated_result(head: str, payload: dict[str, Any], max_variant_row
     error = payload.get("error") or result.get("error")
     if error:
         parts.append(f"error={str(error)[:200]!r}")
-    # patch_safety_numeric is the Critic's artifact, not a lever here.
-    notes = [str(n) for n in result.get("notes") or () if n and not str(n).startswith("patch_safety_numeric:")]
+    notes = [str(n) for n in result.get("notes") or () if n]
     if notes:
         shown = "; ".join(notes[:_OUTCOME_NOTES_MAX])
         parts.append(f"notes={shown[:300]!r}")
@@ -253,7 +252,6 @@ _ADVISORY_BLOCKS: tuple[_AdvisoryRow, ...] = (
     ("=== Current gaps ===", lambda c: c.shared_state.to_gaps_summary()),
     (None, lambda c: c._specialist_findings_block()),
     ("=== External target gap (advisory) ===", lambda c: c.target_gap_advisory_block()),
-    ("=== Specialist proposal scores (advisory) ===", lambda c: c.shared_state.to_proposal_scores_summary()),
     ("=== Priors-match (advisory ordering) ===", lambda c: c._priors_match_advisory_block()),
     ("=== Intervention mix (telemetry) ===", lambda c: c.shared_state.to_intervention_mix_summary()),
     ("=== Bottleneck redirect (advisory) ===", lambda c: c._bottleneck_redirect_advisory_block()),

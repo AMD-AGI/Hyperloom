@@ -30,7 +30,6 @@ from hyperloom.orchestrator.roles.critic_agent import (
     _is_truncated_finish,
     _reviewed_msg_ids_from_bundle,
 )
-from hyperloom.orchestrator.specialists.patch_safety import FORBIDDEN_PROPOSAL_FIELDS
 from hyperloom.inference_optimizer.protocol.intent import IntentType
 
 
@@ -150,7 +149,6 @@ def _make_fake_runtime(
             envelope = _build_envelope_from_review(review, request["session_id"])
             emit = {
                 "session_id": request["session_id"],
-                "decision_id": None,
                 "notes": [],
                 "intent_envelope": envelope,
             }
@@ -203,7 +201,6 @@ def _make_backend(
     judge_bundle: dict[str, Any],
     fail_phase: str | None = None,
     runtime_calls: list[RuntimeCall] | None = None,
-    known_actions: tuple[str, ...] = (),
 ) -> tuple[CriticAgentBackend, FakeOpenAIClient]:
     fake_client = FakeOpenAIClient(codex_replies)
     fake_caller = _make_fake_runtime(
@@ -405,8 +402,7 @@ async def test_single_proposal_yields_matching_verdict(
     fake_session_dir: Path,
 ):
     judge_bundle = {
-        "merged_context": {"model": "Llama-3.1-8B", "framework": "sglang"},
-        "missing_context": [],
+        "context": {"model": "Llama-3.1-8B", "framework": "sglang"},
         "required_context": [],
         "proposals": [
             {
@@ -485,7 +481,7 @@ async def test_multiple_proposals_yield_one_verdict_each(
     fake_session_dir: Path,
 ):
     judge_bundle = {
-        "merged_context": {"model": "m", "framework": "sglang"},
+        "context": {"model": "m", "framework": "sglang"},
         "proposals": [
             {
                 "msg_id": "p1",
@@ -503,7 +499,6 @@ async def test_multiple_proposals_yield_one_verdict_each(
             },
         ],
         "review_constraints": {},
-        "missing_context": [],
         "required_context": [],
     }
     reply = """```json
@@ -532,10 +527,9 @@ async def test_empty_proposals_yields_heartbeat_no_llm(
     fake_session_dir: Path,
 ):
     judge_bundle = {
-        "merged_context": {"model": "m", "framework": "sglang"},
+        "context": {"model": "m", "framework": "sglang"},
         "proposals": [],
         "review_constraints": {},
-        "missing_context": [],
         "required_context": [],
     }
     backend, client = _make_backend(
@@ -561,7 +555,7 @@ async def test_unparseable_llm_reply_fails_the_turn(
 ):
     """Proposals were reviewed and no verdict came back — that is a failure."""
     judge_bundle = {
-        "merged_context": {"model": "m", "framework": "sglang"},
+        "context": {"model": "m", "framework": "sglang"},
         "proposals": [
             {
                 "msg_id": "px",
@@ -572,7 +566,6 @@ async def test_unparseable_llm_reply_fails_the_turn(
             }
         ],
         "review_constraints": {},
-        "missing_context": [],
         "required_context": [],
     }
     backend, _ = _make_backend(
@@ -587,7 +580,7 @@ async def test_unparseable_llm_reply_fails_the_turn(
 
 def _single_proposal_judge_bundle() -> dict[str, Any]:
     return {
-        "merged_context": {"model": "m", "framework": "sglang"},
+        "context": {"model": "m", "framework": "sglang"},
         "proposals": [
             {
                 "msg_id": "px",
@@ -598,7 +591,6 @@ def _single_proposal_judge_bundle() -> dict[str, Any]:
             }
         ],
         "review_constraints": {},
-        "missing_context": [],
         "required_context": [],
     }
 
@@ -660,7 +652,7 @@ async def test_missing_critical_context_yields_needs_review(
     fake_session_dir: Path,
 ):
     judge_bundle = {
-        "merged_context": {},
+        "context": {},
         "proposals": [
             {
                 "msg_id": "p1",
@@ -671,7 +663,6 @@ async def test_missing_critical_context_yields_needs_review(
             }
         ],
         "review_constraints": {},
-        "missing_context": ["model", "framework"],
         "required_context": ["model", "framework"],
     }
     reply = """```json
@@ -719,7 +710,7 @@ async def test_commit_review_subprocess_failure_raises(
     fake_session_dir: Path,
 ):
     judge_bundle = {
-        "merged_context": {"model": "m", "framework": "sglang"},
+        "context": {"model": "m", "framework": "sglang"},
         "proposals": [
             {
                 "msg_id": "z",
@@ -730,7 +721,6 @@ async def test_commit_review_subprocess_failure_raises(
             }
         ],
         "review_constraints": {},
-        "missing_context": [],
         "required_context": [],
     }
     reply = '{"review_verdicts": [{"target_proposal_msg_id": "z", "verdict": "approve"}]}'
@@ -829,7 +819,7 @@ async def test_per_turn_workdirs_are_isolated(
     fake_session_dir: Path,
 ):
     judge_bundle = {
-        "merged_context": {"model": "m", "framework": "sglang"},
+        "context": {"model": "m", "framework": "sglang"},
         "proposals": [
             {
                 "msg_id": "px",
@@ -840,7 +830,6 @@ async def test_per_turn_workdirs_are_isolated(
             }
         ],
         "review_constraints": {},
-        "missing_context": [],
         "required_context": [],
     }
     reply = '{"review_verdicts": [{"target_proposal_msg_id": "px", "verdict": "approve"}]}'
@@ -863,7 +852,7 @@ async def test_user_prompt_includes_judge_bundle_and_instructions(
     fake_session_dir: Path,
 ):
     judge_bundle = {
-        "merged_context": {"model": "m", "framework": "sglang"},
+        "context": {"model": "m", "framework": "sglang"},
         "proposals": [
             {
                 "msg_id": "abc",
@@ -874,7 +863,6 @@ async def test_user_prompt_includes_judge_bundle_and_instructions(
             }
         ],
         "review_constraints": {},
-        "missing_context": [],
         "required_context": [],
     }
     reply = '{"review_verdicts": [{"target_proposal_msg_id": "abc", "verdict": "approve"}]}'
@@ -892,80 +880,6 @@ async def test_user_prompt_includes_judge_bundle_and_instructions(
     assert "JUDGE BUNDLE" in user_text
     assert "OUTPUT FORMAT" in user_text
     assert '"abc"' in user_text  # proposal msg_id from judge bundle
-
-
-def test_the_output_schema_asks_for_the_rule_the_verdict_rests_on():
-    """The Critic is told to reply with *exactly* this schema, and the Coordinator holds a reject to the verdict its cited rule declared by reading `failure_reason_code`."""
-    schema, _, rules = _REVIEW_OUTPUT_INSTRUCTIONS.partition("Rules (mirror")
-
-    assert '"failure_reason_code"' in schema
-    assert "failure_reason_code" in rules
-
-
-def _bundle_reviewing(action_name: str) -> dict[str, Any]:
-    """A judge bundle whose single proposal proposes ``action_name``."""
-    return {
-        "merged_context": {"model": "m", "framework": "sglang"},
-        "proposals": [
-            {
-                "msg_id": "abc",
-                "from_agent": "orchestration",
-                "action_name": action_name,
-                "payload": {},
-                "predicted_gain_pct": 0.0,
-            }
-        ],
-        "review_constraints": {},
-        "missing_context": [],
-        "required_context": [],
-    }
-
-
-async def _review_constraints_sent_for(
-    action_name: str,
-    fake_critic_root: Path,
-    fake_session_dir: Path,
-) -> dict[str, Any]:
-    """Run one review turn and return the ``review_constraints`` the model saw."""
-    backend, client = _make_backend(
-        fake_critic_root,
-        fake_session_dir,
-        codex_replies=['{"review_verdicts": [{"target_proposal_msg_id": "abc", "verdict": "approve"}]}'],
-        judge_bundle=_bundle_reviewing(action_name),
-    )
-    await backend.run("ignored", system_prompt="you are critic")
-    user_text = client.completions.calls[0]["messages"][1]["content"]
-    match = re.search(
-        r"==== JUDGE BUNDLE ====\s*(\{.*?\})\s*==== END JUDGE BUNDLE ====",
-        user_text,
-        re.DOTALL,
-    )
-    assert match
-    return json.loads(match.group(1))["review_constraints"]
-
-
-@pytest.mark.asyncio
-async def test_the_reviewed_bundle_carries_the_quantitative_claim_rule(
-    fake_critic_root: Path,
-    fake_session_dir: Path,
-):
-    """Delivered as data so the Critic's field list stays identical to the one the runner strips, and so a format slip is advisory rather than a reject that costs the round every proposal in the set."""
-    constraints = await _review_constraints_sent_for("specialist", fake_critic_root, fake_session_dir)
-
-    rule = constraints["quantitative_claim_rule"]
-    assert rule["failure_verdict"] == "advise"
-    assert set(rule["forbidden_proposal_fields"]) == set(FORBIDDEN_PROPOSAL_FIELDS)
-
-
-@pytest.mark.asyncio
-async def test_a_review_the_rule_cannot_apply_to_is_not_handed_the_rule(
-    fake_critic_root: Path,
-    fake_session_dir: Path,
-):
-    """The rule is about ``proposal_set[*]``, which a ``baseline`` proposal has no room for."""
-    constraints = await _review_constraints_sent_for("baseline", fake_critic_root, fake_session_dir)
-
-    assert "quantitative_claim_rule" not in constraints
 
 
 # Static context propagation — backend sources model/framework from manifest.json.
@@ -1001,7 +915,7 @@ async def test_run_populates_request_context_from_manifest(
         },
     )
     judge_bundle = {
-        "merged_context": {"model": "Llama-3.1-8B-Instruct", "framework": "sglang"},
+        "context": {"model": "Llama-3.1-8B-Instruct", "framework": "sglang"},
         "proposals": [
             {
                 "msg_id": "p1",
@@ -1012,7 +926,6 @@ async def test_run_populates_request_context_from_manifest(
             }
         ],
         "review_constraints": {},
-        "missing_context": [],
         "required_context": [],
     }
     reply = '{"review_verdicts": [{"target_proposal_msg_id": "p1", "verdict": "approve"}]}'
@@ -1076,10 +989,9 @@ async def test_missing_manifest_falls_back_to_empty_context(
 ):
     # No manifest written: backend must not raise; request.context = {} + a WARNING is logged.
     judge_bundle = {
-        "merged_context": {},
+        "context": {},
         "proposals": [],
         "review_constraints": {},
-        "missing_context": [],
         "required_context": [],
     }
     fake_caller = _make_fake_runtime(judge_bundle=judge_bundle)
@@ -1156,7 +1068,7 @@ async def test_required_context_reaches_recorded_judge_bundle(
     recorded_iterations: list[Any],
 ):
     judge_bundle = {
-        "merged_context": {},
+        "context": {},
         "proposals": [
             {
                 "msg_id": "p1",
@@ -1167,7 +1079,6 @@ async def test_required_context_reaches_recorded_judge_bundle(
             }
         ],
         "review_constraints": {},
-        "missing_context": ["model", "framework"],
         "required_context": ["model", "framework"],
     }
     reply = """```json
@@ -1199,12 +1110,8 @@ from typing import Any
 import pytest
 
 from hyperloom.inference_optimizer.cli.credentials import _resolve_agent_root
-from hyperloom.orchestrator.roles import (
-    CriticAgentBackend,
-    MockBackend,
-    MockTurn,
-    ScriptedPlan,
-)
+from hyperloom.orchestrator.roles import CriticAgentBackend
+from hyperloom.orchestrator.tests.mock_backend import MockBackend, MockTurn, ScriptedPlan
 from hyperloom.orchestrator.loop.coordinator import Coordinator
 from hyperloom.inference_optimizer.protocol.intent import Intent, IntentType
 
@@ -1375,10 +1282,7 @@ async def test_critic_agent_real_runtime_clears_proposal(
     session_memories = list(memory_root.iterdir())
     assert session_memories, f"session memory dir is empty under {memory_root}"
     sm_dir = session_memories[0]
-    # The runtime stamps decisions.jsonl + reviewed_msg_ids.json once a verdict commits.
-    assert (sm_dir / "decisions.jsonl").is_file(), (
-        f"decisions.jsonl missing under {sm_dir} (entries: {list(sm_dir.iterdir())})"
-    )
+    # The runtime stamps reviewed_msg_ids.json once a verdict commits.
     assert (sm_dir / "reviewed_msg_ids.json").is_file(), f"reviewed_msg_ids.json missing under {sm_dir}"
 
     # The Coordinator generates the msg_id, so just check the file is non-trivial.
@@ -1487,8 +1391,7 @@ async def test_anthropic_protocol_single_proposal_yields_verdict(
     monkeypatch: pytest.MonkeyPatch,
 ):
     judge_bundle = {
-        "merged_context": {"model": "Llama-3.1-8B", "framework": "sglang"},
-        "missing_context": [],
+        "context": {"model": "Llama-3.1-8B", "framework": "sglang"},
         "required_context": [],
         "proposals": [
             {
@@ -1555,7 +1458,7 @@ async def test_anthropic_protocol_single_proposal_yields_verdict(
 
 def _minimal_judge_bundle() -> dict[str, Any]:
     return {
-        "merged_context": {"model": "m", "framework": "sglang"},
+        "context": {"model": "m", "framework": "sglang"},
         "proposals": [{"msg_id": "p1", "from_agent": "orchestration", "action_name": "baseline", "payload": {}}],
         "review_constraints": {},
     }
@@ -1581,7 +1484,7 @@ async def test_critic_cache_blocks_preserve_transport_prompt(
     from hyperloom_common.llm import claude_oneshot, llm_config
 
     bundle = _minimal_judge_bundle()
-    bundle["missing_context"] = ["Unicode \u03bb ==== JUDGE BUNDLE ==== inside data"]
+    bundle["required_context"] = ["Unicode \u03bb ==== JUDGE BUNDLE ==== inside data"]
     reply = '{"review_verdicts":[{"target_proposal_msg_id":"p1","verdict":"approve"}]}'
     backend, _ = _make_anthropic_backend(
         fake_critic_root, fake_session_dir, monkeypatch, results=[], judge_bundle=bundle
@@ -1629,10 +1532,8 @@ async def test_critic_cache_blocks_preserve_transport_prompt(
         key: bundle.get(key)
         for key in (
             "session_id",
-            "decision_id",
             "phase",
-            "merged_context",
-            "missing_context",
+            "context",
             "required_context",
             "proposals",
             "review_constraints",

@@ -477,7 +477,12 @@ def test_the_sessions_make_before_break_is_what_the_hosted_toolbox_is_built_with
 
     monkeypatch.setattr(hosted_toolbox, "build_hosted_toolbox", build)
     setup = SimpleNamespace(
-        layout=None, workload=dataclasses.replace(WORKLOAD, tp=1), make_before_break=keep, dev_leases=0, agents=()
+        layout=None,
+        workload=dataclasses.replace(WORKLOAD, tp=1),
+        make_before_break=keep,
+        dev_leases=0,
+        agents=(),
+        test_points=1,
     )
 
     toolbox = HostedSandboxes(lambda layout, tp: None).toolbox(setup, None, None, None)  # type: ignore[arg-type]
@@ -507,7 +512,7 @@ def test_a_session_builds_dev_leases_only_when_it_lends_dev_sandboxes(
     monkeypatch.setattr(hosted_toolbox, "build_hosted_toolbox", build)
     setup = SimpleNamespace(
         layout=None, workload=dataclasses.replace(WORKLOAD, tp=2), make_before_break=True, dev_leases=dev_leases,
-        agents=agents,
+        agents=agents, test_points=1,
     )  # fmt: skip
     sandboxes = HostedSandboxes(lambda layout, tp: None)
     measurement = {"measurement": {"2": "r2"}}

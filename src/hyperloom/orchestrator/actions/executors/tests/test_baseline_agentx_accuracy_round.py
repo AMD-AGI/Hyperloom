@@ -70,7 +70,7 @@ def _baseline(
     monkeypatch.setattr(executor, "_maybe_stop_on_missing_baseline_accuracy", lambda ctx, result: None)
     state = SharedState(agentx_accuracy=agentx_accuracy, benchmark_mode="agentx" if agentx else "")
     ctx = SimpleNamespace(task=SimpleNamespace(task_id="t1", kind=kind, params={}), extra={"shared_state": state})
-    return asyncio.run(executor._run_retrying(ctx)), calls, slot
+    return asyncio.run(executor._run_with_accuracy(ctx)), calls, slot
 
 
 def test_a_native_agentx_baseline_runs_its_accuracy_round_in_its_slot(tmp_path, monkeypatch) -> None:

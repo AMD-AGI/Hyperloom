@@ -32,6 +32,7 @@ from hyperloom.measure.docs import DocumentError
 from hyperloom.measure.failures import (
     DISK_FULL,
     FOREIGN_PROCESS_ON_CARD,
+    FRAMEWORK_VERSION_MISMATCH,
     Disposition,
     FailureClassification,
     FailureEvidence,
@@ -60,11 +61,13 @@ from hyperloom.measure.attachments import AttachmentError, place_attachments
 from hyperloom.measure.farm import (
     Farm,
     FarmError,
+    FrameworkVersionMismatch,
     build_farm,
     built_roots,
     inherited_environment,
     lay_profile_patch,
     patched_configs,
+    prepend_base_bins,
     record_unpatched,
     server_environment,
     server_python,
@@ -86,6 +89,8 @@ from hyperloom.measure.runner.service import Progress, RunnerFailure, join_notes
 from hyperloom.measure.runner.snapshot import SnapshotError, check_snapshot
 from hyperloom.measure.runner.cache_layout import CACHE_ENV, DEFAULT_CACHE_DIR
 from hyperloom.measure.runner.tools import (
+    INFERENCEX_STORE,
+    TOOL_CHECKOUTS_DIR,
     StagingMismatch,
     ToolError,
     ensure_inference_suite,
@@ -295,9 +300,11 @@ def _surface_sha256(points: list[Path]) -> str:
 def _prepare(ctx: _Context, spec: MeasurementSpec) -> tuple[list[Path], Path, Farm | None]:
     """Tools, attachments, farm and the rewritten YAML; returns the point path and the InferenceX checkout."""
     try:
-        inferencex = ensure_inferencex(spec.tools.inferencex, ctx.cache)
+        runner_cache = Path(ctx.environ.get(CACHE_ENV) or DEFAULT_CACHE_DIR)
+        inferencex = ensure_inferencex(
+            spec.tools.inferencex, ctx.cache, runner_cache / TOOL_CHECKOUTS_DIR / INFERENCEX_STORE
+        )
         if spec.tools.staging is not None:
-            runner_cache = Path(ctx.environ.get(CACHE_ENV) or DEFAULT_CACHE_DIR)
             staged = ensure_inference_suite(runner_cache, spec.tools.staging)
             ctx.environ[TOOL_CACHE_ENV], ctx.staging = str(staged.tool_cache), staged.normalised
     except StagingMismatch as exc:
@@ -307,12 +314,13 @@ def _prepare(ctx: _Context, spec: MeasurementSpec) -> tuple[list[Path], Path, Fa
     try:
         placed = place_attachments(spec.attachments, ctx.work / "attach", ctx.read_blob)
         python = server_python(yaml.safe_load(spec.config[0].yaml) or {}, default="python3")
+        inherited = inherited_environment(ctx.environ, spec.process_env, spec.unset_envs)
         farm = build_farm(
             built_roots(spec.environment.roots, _sheet_builds(spec, ctx.environ)),
             ctx.work / "farm",
             python=python,
             read_blob=ctx.read_blob,
-            inherited=inherited_environment(ctx.environ, spec.process_env, spec.unset_envs),
+            inherited=inherited,
         )
         unpatched = (
             lay_profile_patch(farm, yaml.safe_load(spec.config[0].yaml) or {}) if spec.kind == _PROFILE else None
@@ -328,6 +336,7 @@ def _prepare(ctx: _Context, spec: MeasurementSpec) -> tuple[list[Path], Path, Fa
             visible_devices=ctx.environ.get(ROCR_VISIBLE_DEVICES_ENV),
             farm=farm,
             path=ctx.environ.get("PATH"),
+            inherited=inherited,
         )
         points = [
             rewrite_config(point.yaml, ctx.work / f"point_{index}.yaml", placement)
@@ -339,9 +348,19 @@ def _prepare(ctx: _Context, spec: MeasurementSpec) -> tuple[list[Path], Path, Fa
         if farm is not None:
             for point in points:
                 verify_farm(farm, server_environment(yaml.safe_load(point.read_text())), python=python, cwd=ctx.work)
+    except FrameworkVersionMismatch as exc:
+        # Before the generic refusal: the sheet is sound, the image this sandbox runs is not the one it was compiled on.
+        raise RunnerFailure(FRAMEWORK_VERSION_MISMATCH, str(exc)) from exc
     except (AttachmentError, FarmError, NativeLayError, ValueError) as exc:
         raise RunnerFailure(_SPEC_REJECTED, str(exc)) from exc
     return points, inferencex, farm
+
+
+def _prepend_base_bins(environ: MutableMapping[str, str]) -> None:
+    try:
+        prepend_base_bins(environ)
+    except FarmError as exc:
+        raise RunnerFailure(_START_FAILED, str(exc)) from exc
 
 
 def _sheet_builds(spec: MeasurementSpec, environ: Mapping[str, str]) -> SheetBuilds | None:
@@ -722,6 +741,7 @@ def run(
         try:
             key = _load_key(environ)
             take_topology(environ)
+            _prepend_base_bins(environ)
             _check_cards_free(ctx, _visible(environ))
             progress.phase("waiting_spec")
             if not wait_for_file(in_dir / "READY", spec_wait_sec):

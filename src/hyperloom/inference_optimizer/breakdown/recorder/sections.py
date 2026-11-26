@@ -88,17 +88,6 @@ BASELINE_EVENT_SECTIONS: tuple[str, ...] = (
     "baseline_round",
 )
 
-#: An arm is a whole ladder run under one set of server args, a variant one
-#: rung of it including rungs that only ever attempted to boot, a pair the two
-#: arms joined at one concurrency.
-CONC_SWEEP_EVENT_SECTIONS: tuple[str, ...] = (
-    "conc_sweep_event",
-    "conc_sweep_action",
-    "conc_sweep_arm",
-    "conc_sweep_variant",
-    "conc_sweep_pair",
-)
-
 #: One event per session: the lane's trigger and the round that settles it are
 #: recorded from different phases and must land on the same event.
 ENABLEMENT_EVENT_SECTIONS: tuple[str, ...] = (
@@ -162,7 +151,6 @@ EVENT_SECTIONS: tuple[str, ...] = (
     KERNEL_EVENT_SECTIONS
     + ROOFLINE_EVENT_SECTIONS
     + BASELINE_EVENT_SECTIONS
-    + CONC_SWEEP_EVENT_SECTIONS
     + ENABLEMENT_EVENT_SECTIONS
     + PHASE_EVENT_SECTIONS
     + STACK_EVENT_SECTIONS
@@ -173,7 +161,6 @@ EVENT_SECTIONS: tuple[str, ...] = (
 
 __all__ = [
     "BASELINE_EVENT_SECTIONS",
-    "CONC_SWEEP_EVENT_SECTIONS",
     "ENABLEMENT_EVENT_SECTIONS",
     "EVENT_SECTIONS",
     "FRAMEWORK_EVENT_SECTIONS",

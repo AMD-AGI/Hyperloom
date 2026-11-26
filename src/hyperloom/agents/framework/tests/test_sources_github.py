@@ -5,9 +5,13 @@
 
 from __future__ import annotations
 
+import email.message
+import http.client
 import io
 import json
 import urllib.error
+
+import pytest
 
 from hyperloom.agents.framework.sources import github as gh
 from hyperloom.agents.framework.sources._shared import GitHubPr
@@ -191,3 +195,64 @@ def test_pr_patches_anonymous_when_no_token(monkeypatch):
 
 def test_source_patch_exports():
     assert "pr_patches" in gh.__all__
+
+
+# search_issues: a failure is raised, never an empty answer -------------------------------------------------
+
+
+QUERY = "repo:ggml-org/llama.cpp is:pr (decode)"
+
+
+def _refusing(code: int, headers: dict[str, str] | None = None, body: bytes = b""):
+    def _open(req):
+        message = email.message.Message()
+        for name, value in (headers or {}).items():
+            message[name] = value
+        raise urllib.error.HTTPError(req.get_full_url(), code, "refused", message, io.BytesIO(body))
+
+    return _open
+
+
+NOW = 1_800_000_000
+SPENT = {"x-ratelimit-remaining": "0", "x-ratelimit-reset": str(NOW + 1500)}
+
+
+@pytest.mark.parametrize(
+    ("code", "headers", "body", "said"),
+    [
+        (403, SPENT, b"", "GitHub's rate limit for this host is spent (HTTP 403): ask again in 25 min"),
+        (
+            403,
+            {"x-ratelimit-remaining": "4990"},
+            b'{"message": "You have exceeded a secondary rate limit."}',
+            "GitHub's rate limit for this host is spent (HTTP 403): ask again in 60 s",
+        ),
+    ],
+    ids=["quota-spent", "no-wait-named"],
+)
+def test_a_rate_limit_that_names_no_retry_after_still_says_how_long_to_wait(
+    monkeypatch, code: int, headers: dict[str, str], body: bytes, said: str
+) -> None:
+    monkeypatch.setenv("GITHUB_TOKEN", "a-token")
+    monkeypatch.setattr(gh.time, "time", lambda: NOW)
+    _install_urlopen(monkeypatch, _refusing(code, headers, body))
+    with pytest.raises(gh.GitHubUnavailable) as refused:
+        gh.search_issues(QUERY, per_page=5)
+    assert str(refused.value) == said
+
+
+def _checking_headers_as_http_client_does(req):
+    connection = http.client.HTTPSConnection("api.github.com")  # opens no socket before a request is sent
+    connection.putrequest("GET", "/")
+    for name, value in req.header_items():
+        connection.putheader(name, value)
+    raise AssertionError("http.client took the token as a header value")
+
+
+@pytest.mark.parametrize("token", ["ghp_first_line\nsecond_line", "ghp_not_latin_✓"], ids=["line-break", "not-latin-1"])
+def test_a_token_no_header_can_carry_is_named_without_its_value(monkeypatch, token: str) -> None:
+    monkeypatch.setenv("GITHUB_TOKEN", token)
+    _install_urlopen(monkeypatch, _checking_headers_as_http_client_does)
+    with pytest.raises(gh.GitHubUnavailable, match="GITHUB_TOKEN or GH_TOKEN. holds a line break") as refused:
+        gh.search_issues(QUERY, per_page=5)
+    assert not any(part in str(refused.value) for part in ("ghp_", "second_line", "✓"))

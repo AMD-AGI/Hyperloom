@@ -6,7 +6,6 @@
 from __future__ import annotations
 
 import copy
-import json
 from dataclasses import asdict
 
 from kernelforge.workflows.forge_loop.search.agent_relay import (
@@ -21,7 +20,7 @@ from kernelforge.workflows.forge_loop.search.agent_relay import (
     select_relay_intervention,
     select_replacement_for_unavailable,
 )
-from kernelforge.workflows.forge_loop.campaign.run_state import CriticRuling, make_event
+from kernelforge.workflows.forge_loop.campaign.run_state import make_event
 from kernelforge.workflows.forge_loop.search.search_actors import SearchActorBundle, SearchActorPool
 from kernelforge.workflows.forge_loop.search.search_policy import (
     OBJECTIVE_DISCOVER_NEW_MECHANISM,
@@ -41,7 +40,10 @@ class RelayRuntimeMixin:
     def _supervisor_banner(self) -> str:
         """How the Supervisor is scheduled this session, in the operator's terms."""
         if self._search_actors is not None:
-            return "  Supervisor: enabled at a relay blockage when no other Agent profile is available"
+            return (
+                f"  Supervisor: enabled at a relay blockage ({self.ic.supervise_after} iterations without a new best) "
+                "when no other Agent profile is available"
+            )
         return (
             f"  Supervisor: enabled (after {self.ic.supervise_after} stalls, "
             f"cooldown {self.ic.supervise_cooldown}, no intervention cap)"
@@ -102,25 +104,15 @@ class RelayRuntimeMixin:
             mode=SEARCH_MODE_DIVERSIFY,
             reason_codes=("AGENT_RELAY_BLOCKAGE",),
             objective_kind=OBJECTIVE_DISCOVER_NEW_MECHANISM,
-            residence_iterations_remaining=0,
         )
 
-    def _lane_plans_match_active_profile(self, planned_iteration: int) -> bool:
-        """Whether a recoverable lane plan was written by the profile now active, so it may still be dispatched."""
-        try:
-            manifest = json.loads(self._lane_plan_manifest_path(planned_iteration).read_text(encoding="utf-8"))
-            planned_profile_id = str(manifest.get("agent_profile_id") or "")
-        except (OSError, ValueError, TypeError):
-            return False
-        active_profile_id = self.run_state.agent_relay.active_profile_id
-        if active_profile_id and planned_profile_id != active_profile_id:
-            print(
-                f"  [lanes] iteration {planned_iteration} belongs to "
-                f"{planned_profile_id or 'a legacy profile'}, not active "
-                f"profile {active_profile_id}; planning this round afresh"
-            )
-            return False
-        return True
+    def _blockage_reached(self) -> bool:
+        """Whether the active profile has gone the loop's stall count without a new best.
+
+        The count is the one that schedules the Supervisor in a loop without a relay: a relay decides which
+        intervention a stalled search gets, not when the search has stalled.
+        """
+        return relay_blockage_reached(self.run_state.agent_relay, threshold=self.ic.supervise_after)
 
     def _select_boundary_intervention(
         self,
@@ -141,7 +133,7 @@ class RelayRuntimeMixin:
                 return replacement, "relay_profile_unavailable"
             if not search_actors.has_bundle(relay.active_profile_id):
                 raise RuntimeError(f"no Agent profile can run: {relay.active_profile_id} has no search actor")
-        if not relay_blockage_reached(relay, threshold=search_actors.blockage_threshold):
+        if not self._blockage_reached():
             return None, ""
         intervention = select_relay_intervention(relay, profiles=search_actors.profiles, availability=availability)
         return intervention, "relay_blockage_detected"
@@ -153,9 +145,6 @@ class RelayRuntimeMixin:
             relay.active_profile_id = search_actors.start_profile_id
             self.state_store.save(self.run_state)
         self._recheck_profiles(iteration, search_actors)
-        if self._lane_queue:
-            self._defer_intervention(search_actors)
-            return self._runnable_bundle(search_actors)
         intervention, event_type = self._select_boundary_intervention(search_actors)
         if intervention is None:
             return search_actors.bundle(relay.active_profile_id)
@@ -176,15 +165,6 @@ class RelayRuntimeMixin:
             return search_actors.bundle(relay.active_profile_id)
         self._switch_search_actor(iteration, intervention)
         return search_actors.bundle(relay.active_profile_id)
-
-    def _defer_intervention(self, search_actors: SearchActorPool) -> None:
-        """Measure the candidates a round already bought before any intervention changes the next plan."""
-        relay = self.run_state.agent_relay
-        if relay_blockage_reached(relay, threshold=search_actors.blockage_threshold):
-            print(
-                f"  [relay] blockage reached on {relay.active_profile_id}; measuring "
-                f"{len(self._lane_queue)} queued lane candidate(s) before intervening"
-            )
 
     def _recheck_profiles(self, iteration: int, search_actors: SearchActorPool) -> None:
         """Re-run the startup check of every profile whose API retries ran out, before anything is selected."""
@@ -209,17 +189,13 @@ class RelayRuntimeMixin:
             self.state_store.save(self.run_state)
 
     def _switch_search_actor(self, iteration: int, intervention: RelayIntervention) -> None:
-        """Persist the switch before the new profile runs, dropping what the previous profile planned."""
+        """Persist the switch before the new profile runs."""
         if self._pending_keep_path.exists():
             raise RuntimeError("cannot switch Agent profile while pending KEEP exists")
         if self._working_tree_diff().strip():
             raise RuntimeError("cannot switch Agent profile with a tracked candidate diff")
-        if self._lane_queue:
-            raise RuntimeError("cannot switch Agent profile with queued lane candidates")
         relay = self.run_state.agent_relay
         apply_profile_switch(relay, intervention=intervention, iteration=iteration)
-        self.run_state.last_critic = CriticRuling()
-        self._last_lane_plans = []
         self.state_store.save(self.run_state)
         self.state_store.append_event(
             make_event(

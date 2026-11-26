@@ -14,19 +14,18 @@ from pathlib import Path
 from kernelforge.workflows.forge_loop.campaign.archive import CandidateArchive
 from kernelforge.workflows.forge_loop.iteration.device_hazard import DeviceHazard, DeviceHazardLog
 from kernelforge.workflows.forge_loop.memory.experience import ExperienceLedger
-from kernelforge.workflows.forge_loop.iteration.fanout import LaneResult
+from kernelforge.workflows.forge_loop.iteration.fanout import LaneRound
 from kernelforge.workflows.forge_loop.iteration.handoffs import HandoffStore
 from kernelforge.workflows.forge_loop.iteration.iteration_types import IterationResult
 from kernelforge.evaluation.jit_rebuild import force_jit_rebuild
+from kernelforge.workflows.forge_loop.memory.insights import InsightStore
 from kernelforge.workflows.forge_loop.memory.lessons import LessonStore
 from kernelforge.workflows.forge_loop.campaign.reporting import BestResultPublisher
 from kernelforge.workflows.forge_loop.campaign.run_state import (
     BestRecord,
-    ORCHESTRATION_CIRCUIT_OPEN,
     RunState,
     SESSION_COMPLETED,
     SESSION_PAUSED,
-    begin_orchestration_probe,
     finish_session,
     make_event,
     should_resume,
@@ -232,9 +231,7 @@ class CampaignMixin:
         ):
             raise RuntimeError("failed to publish validated warm-start best artifact")
 
-    def _restore_or_begin_campaign(
-        self, *, state_exists, current_ruling_path, agent_fn, orchestration_service, on_best_committed
-    ) -> None:
+    def _restore_or_begin_campaign(self, *, state_exists, current_ruling_path, on_best_committed) -> None:
         """Bring the run state up to where the campaign left off, or start a fresh one.
 
         A fresh campaign refuses a workspace that already holds one, because
@@ -264,19 +261,6 @@ class CampaignMixin:
             if self._recovered_pending_keep is None:
                 self._reconcile_best_publication()
             self.run_state.next_iteration = self._reconciled_next_iteration()
-            if self.run_state.termination_reason == "orchestration_failed":
-                if self.run_state.orchestration_circuit_state != ORCHESTRATION_CIRCUIT_OPEN:
-                    raise ValueError("orchestration_failed resume requires an open circuit")
-                if agent_fn is None or orchestration_service is None:
-                    raise ValueError("orchestration_failed resume requires one orchestration probe")
-                begin_orchestration_probe(self.run_state)
-                self.state_store.append_event(
-                    make_event(
-                        "orchestration_circuit_half_open",
-                        self.run_state.iteration,
-                    )
-                )
-                self.state_store.save(self.run_state)
         else:
             self._validate_driver_integrity(self.run_state)
             if (
@@ -346,15 +330,8 @@ class CampaignMixin:
             self.ic.pr_kb_event = {}
 
     def _persist_terminal_state(self) -> None:
-        """Close the last round and record why the run ended.
-
-        Whatever the last iteration cost belongs to this campaign's history even
-        though no further round will read it: a resumed session will, and so
-        will an inspection asking what the final best was.
-        """
-        # Whatever the last iteration cost belongs to this campaign's history even though no further round will read
-        # it: a resumed session will.
-        self._close_round()
+        """Record why the run ended, and what the final best was."""
+        self._advance_campaign_clock()
         self.best_publisher.refresh_round_budget(self._round_budget_summary())
 
         # Persist the terminal control state so a resume/inspection sees why the run ended and what the final best
@@ -421,14 +398,6 @@ class CampaignMixin:
                     f"({entry.t_current_ms:.6g} ms vs ceiling {entry.t_ideal_ms:.6g} ms)"
                 )
             return True, None
-        if self.run_state.orchestration_circuit_state == ORCHESTRATION_CIRCUIT_OPEN:
-            self.termination_reason = "orchestration_failed"
-            print(
-                "\nORCHESTRATION FAILED repeatedly; stopping after "
-                f"{self.run_state.orchestration_error_streak} "
-                "consecutive infrastructure errors"
-            )
-            return True, None
         if self._is_budget_exhausted():
             self.termination_reason = "budget_exhausted"
             print(f"\nBUDGET EXHAUSTED after {len(self.results)} iterations in this session")
@@ -451,7 +420,7 @@ class CampaignMixin:
         return False, hazard
 
     def _initialize_campaign_runtime(self, usage) -> None:
-        """Initialize process-local stores and candidate queues for one session."""
+        """Initialize process-local stores for one session."""
         self.start_time = time.time()
         self.results = []
         self._usage = usage
@@ -464,20 +433,17 @@ class CampaignMixin:
         # signatures, then feeds concise toolchain observations and recent entries into the next prompt.
         self.ledger = ExperienceLedger(self.ic.workspace_dir)
 
-        # Per-iteration lesson documents.
+        # Per-iteration lesson documents, and the insight list their record turns maintain across iterations.
         self.lessons = LessonStore(self.ic.workspace_dir)
+        self.insights = InsightStore(self.ic.workspace_dir)
         self.handoff_store = HandoffStore(self.ic.workspace_dir)
 
         # Full-fidelity candidate archive: persists each iteration's WHOLE solution (kernel snapshot + diff + full
         # profile + measurements + decision) so a later iteration can read back any prior attempt's real code.
         self.archive = CandidateArchive(self.ic.workspace_dir, self.ic.kernel_file)
         self.best_publisher = BestResultPublisher(self.ic.workspace_dir)
-        # Candidates from one concurrent fan-out, spent one per iteration so each is measured and judged on its own by
-        # the ordinary decision path.
-        self._lane_queue: list[LaneResult] = []
-        self._last_lane_plans: list[str] = []
-        # Stacked iterations run back to back so far.
-        self._merge_precedence_streak = 0
+        # The workspace copies of the round in progress, kept until its sessions have written their records.
+        self._lane_round: LaneRound | None = None
         # A device the campaign may not measure on, recorded by whichever iteration found it and re-checked by every
         # iteration after it.
         self.device_hazard = DeviceHazardLog(self.ic.workspace_dir)

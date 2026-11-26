@@ -74,6 +74,7 @@ from inference_suite.load.fixed import (
     FixedRound,
     MeasuredWindow,
     OutputActivity,
+    dataset_refusal,
     measured_invocation,
     run_fixed,
 )
@@ -630,6 +631,8 @@ def _load_refusal(config: SuiteConfig) -> Stop | None:
         return agentx.refusal(config.agentx)
     if config.mlperf is not None:
         return mlperf.refusal(config.mlperf)
+    if config.fixed is not None:
+        return dataset_refusal(config.fixed)
     return None
 
 

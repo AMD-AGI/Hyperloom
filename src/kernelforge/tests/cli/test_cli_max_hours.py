@@ -74,13 +74,13 @@ def test_forge_loop_rejects_short_max_hours():
     assert "must be >=" in result.output
 
 
-def test_max_hours_help_describes_long_horizon_agents():
+def test_max_hours_help_describes_what_a_long_budget_enables():
     result = CliRunner().invoke(main, ["forge-loop", "--help"])
 
     assert result.exit_code == 0
     assert "Analysis profiling" in result.output
     assert "Implementer" in result.output
-    assert "Plan Critic" in result.output
+    assert "Plan Critic" not in result.output
 
 
 def test_forge_loop_rejects_an_unregistered_producer():
@@ -102,13 +102,6 @@ def test_forge_loop_rejects_an_unregistered_producer():
     assert result.exit_code != 0
     assert "--producer must be one of" in result.output
     assert "fusion" in result.output
-
-
-def test_legacy_loop_command_is_removed():
-    result = CliRunner().invoke(main, ["loop", "--help"])
-
-    assert result.exit_code != 0
-    assert "No such command 'loop'" in result.output
 
 
 def test_remote_publication_view_marks_only_latest_best_authoritative():

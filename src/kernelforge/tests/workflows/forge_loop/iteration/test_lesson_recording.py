@@ -5,19 +5,19 @@
 
 from __future__ import annotations
 
+from kernelforge.tests.workflows.forge_loop.iteration._iteration_loop import lane_agents
+
 import asyncio
 import logging
 import json
 from pathlib import Path
 
-from kernelforge.workflows.forge_loop.iteration import runner as runner_module
 from kernelforge.workflows.forge_loop.memory.lessons import SummaryOutcome
 from kernelforge.workflows.forge_loop.campaign.run_state import RunState
+from kernelforge.workflows.forge_loop.iteration.iteration_types import RoundSession
 from kernelforge.tests.workflows.forge_loop.iteration._iteration_loop import (
-    _lane_agent_factory,
     _lesson_result,
     _make_loop,
-    _reduction_loop,
     _stub_measurement,
 )
 
@@ -33,71 +33,90 @@ async def _fake_summarizer(_prompt: str) -> str:
     return "tried three tile shapes\n- [worse] BLOCK_N 128 | 0.94x"
 
 
-def test_record_lesson_writes_a_carried_lane_lesson_without_asking(tmp_path, monkeypatch, capsys):
-    """The lane already answered, in its round. An answer without a record is the machine fallback, naming why."""
+def _session(label: str, reply: str, prompts: list[str] | None = None) -> RoundSession:
+    """One session of a round, whose record turn answers ``reply``."""
+
+    async def summarize(prompt: str) -> str:
+        if prompts is not None:
+            prompts.append(prompt)
+        return reply
+
+    return RoundSession(label, {"session_started": True, "summarize": summarize, "end_reason": "candidate_submitted"})
+
+
+def test_a_round_of_several_sessions_records_each_under_its_label(tmp_path, monkeypatch):
+    """Every session of the round is asked for its own record, in order, and the iteration's document holds them all."""
     loop, workspace = _make_loop(tmp_path, monkeypatch)
     store = _attach_lessons(loop, workspace)
-    asked = {"n": 0}
-
-    async def counting(_prompt: str) -> str:
-        asked["n"] += 1
-        return "should not run"
+    sessions = (
+        _session("lane 1", "widened the loads\nNEGATIVES: BLOCK_N=128 (m64 +4%)"),
+        _session("lane 2", "split the K loop\nNEGATIVES: none"),
+        _session("merge", "took lane 1 for small cases and lane 2 for large ones\nNEGATIVES: none"),
+    )
 
     asyncio.run(
         loop._record_lesson(
             result=_lesson_result(),
-            decision="REVERT_PERF",
-            session_sink={
-                "session_started": True,
-                "summarize": counting,
-            },
-            lane_record=SummaryOutcome(text="lane 2 widened the loads"),
+            decision="KEEP",
+            session_sink=sessions[-1].sink,
+            sessions=sessions,
         )
     )
+
+    document = store.read(3)
+    assert document.index("## lane 1") < document.index("## lane 2") < document.index("## merge")
+    assert "widened the loads" in document and "split the K loop" in document
+    # The negatives of every session reach the list later sessions are shown.
+    from kernelforge.workflows.forge_loop.memory.lessons import listed_negatives
+
+    assert listed_negatives(document) == "BLOCK_N=128 (m64 +4%)"
+
+
+def test_a_session_of_a_round_that_left_no_record_is_named_with_the_reason(tmp_path, monkeypatch):
+    loop, workspace = _make_loop(tmp_path, monkeypatch)
+    store = _attach_lessons(loop, workspace)
+    silent = RoundSession("lane 2", {"session_started": True, "summarize": None})
+    sessions = (_session("lane 1", "widened the loads\nNEGATIVES: none"), silent)
+
     asyncio.run(
         loop._record_lesson(
-            result=_lesson_result(iteration=4),
-            decision="REVERT_PERF",
-            session_sink={
-                "session_started": True,
-                "summarize": counting,
-                "findings": "compile error: invalid cast",
-            },
-            lane_record=SummaryOutcome(reason="session replied with no text"),
+            result=_lesson_result(), decision="REVERT_PERF", session_sink=sessions[0].sink, sessions=sessions
         )
     )
 
-    assert asked["n"] == 0
-    assert store.read(3).startswith("lane 2 widened the loads")
-    assert store.read(4).startswith("(no agent summary)")
-    assert "session replied with no text" in capsys.readouterr().out
+    document = store.read(3)
+    assert "## lane 1\n\nwidened the loads" in document
+    assert "## lane 2\n\n(no record: " in document
 
 
-async def test_a_lane_without_a_record_names_why_in_its_lesson(tmp_path, monkeypatch, capsys):
-    """A provider that cannot resume the lane session leaves a reason, and the queue carries it into the lesson."""
-    loop, workspace = _reduction_loop(tmp_path, monkeypatch)
-    store = _attach_lessons(loop, workspace)
+def test_each_record_turn_of_a_round_reads_the_insight_list_the_one_before_left(tmp_path, monkeypatch):
+    """The record turns run one after another, so the list always has one writer and none of them loses another's entry."""
+    from kernelforge.workflows.forge_loop.memory.insights import InsightStore
 
-    await loop._fill_lane_queue(
-        agent_factory=_lane_agent_factory({"tune prefill": ("return 1", "return 2")}),
-        lane_plans=["tune prefill"],
-    )
-    queued = json.loads(loop._lane_queue_path().read_text(encoding="utf-8"))["candidates"]
-    loop._lane_queue = []
-    loop._restore_lane_queue()
-    lane = loop._take_lane_candidate(1)
-    await loop._record_lesson(
-        result=_lesson_result(iteration=1),
-        decision="REVERT_PERF",
-        session_sink={"session_started": True, "plan": lane.plan},
-        diff_summary=loop._diff_summary_from_diff(lane.diff),
-        lane_record=lane.lesson,
+    from kernelforge.workflows.forge_loop.campaign.run_state import LoopStateStore
+
+    loop, workspace = _make_loop(tmp_path, monkeypatch)
+    _attach_lessons(loop, workspace)
+    loop.state_store = LoopStateStore(str(workspace))
+    loop.insights = InsightStore(str(workspace))
+    second_prompts: list[str] = []
+    sessions = (
+        _session("lane 1", "record one\nINSIGHT: the driver times a cold cache"),
+        _session(
+            "lane 2",
+            "record two\nINSIGHT: the driver times a cold cache\nINSIGHT: launch overhead is 9 us",
+            second_prompts,
+        ),
     )
 
-    assert [entry["lesson_reason"] for entry in queued] == ["provider cannot resume the session"]
-    assert lane.lesson == SummaryOutcome(reason="provider cannot resume the session")
-    assert "Summary unavailable: provider cannot resume the session" in store.read(1)
-    assert "[lesson] no summary (provider cannot resume the session)" in capsys.readouterr().out
+    asyncio.run(
+        loop._record_lesson(
+            result=_lesson_result(), decision="REVERT_PERF", session_sink=sessions[0].sink, sessions=sessions
+        )
+    )
+
+    assert "INSIGHT: the driver times a cold cache" in second_prompts[0]
+    assert loop.insights.read() == ["the driver times a cold cache", "launch overhead is 9 us"]
 
 
 def test_record_lesson_writes_narrative_and_outcome(tmp_path, monkeypatch):
@@ -386,7 +405,7 @@ def test_an_unreadable_kernel_reaches_the_prompt_as_unchecked(tmp_path, monkeypa
         session_sink["summarize"] = summarizer
         return "rationale"
 
-    asyncio.run(loop.run(runner_module.LoopAgents(agent_fn=agent_fn)))
+    asyncio.run(loop.run(lane_agents(agent_fn)))
 
     assert len(prompts) == 2
     assert "were not checked against the current kernel" in prompts[1]
@@ -801,7 +820,7 @@ def test_an_unscored_case_does_not_reopen_a_stored_negative_in_the_prompt(tmp_pa
         session_sink["plan"] = "inspect only"
         return "No source change was needed."
 
-    asyncio.run(loop.run(runner_module.LoopAgents(agent_fn=agent_fn)))
+    asyncio.run(loop.run(lane_agents(agent_fn)))
 
     assert loop._scored_case_ids() == ["decode-t1", "prefill-t16384"]
     assert prompts and "swept split-K" in prompts[0]
@@ -854,7 +873,6 @@ def test_handoff_carries_the_scope_of_the_iterations_lesson(tmp_path, monkeypatc
     loop._record_iteration_handoff(
         iteration=3,
         decision="REVERT_PERF",
-        optimization_plan_path="",
         session_sink={"plan": "sweep split-K"},
     )
 
@@ -875,7 +893,6 @@ def test_handoff_plan_is_unchanged_when_no_lesson_was_written(tmp_path, monkeypa
     loop._record_iteration_handoff(
         iteration=3,
         decision="NO_CHANGES",
-        optimization_plan_path="",
         session_sink={"plan": "inspect only"},
     )
 
@@ -1139,7 +1156,7 @@ def test_lesson_flows_from_one_iteration_into_the_next_prompt(tmp_path, monkeypa
         session_sink["summarize"] = summarizer
         return "rationale"
 
-    asyncio.run(loop.run(runner_module.LoopAgents(agent_fn=agent_fn)))
+    asyncio.run(loop.run(lane_agents(agent_fn)))
 
     # The first iteration produced a document with both authors' halves.
     first = (workspace / "forge_experiments" / "lessons" / "iter_001.md").read_text()
@@ -1155,6 +1172,63 @@ def test_lesson_flows_from_one_iteration_into_the_next_prompt(tmp_path, monkeypa
     assert "Implementer session records from recent iterations" in prompts[1]
     lessons_dir = str((workspace / "forge_experiments" / "lessons").resolve())
     assert lessons_dir in prompts[1]
+
+
+def test_the_insight_list_and_every_measured_negative_reach_the_sessions_that_follow(tmp_path, monkeypatch):
+    """A record turn hands the list on, and a negative stays in front of later sessions after its record scrolls out.
+
+    session 1 -> record + insight lines -> insights.md and lessons/iter_001.md
+    -> session 2 is shown the list, and asked for it as it should stand next
+    -> session 3 is shown both negatives, one line each.
+    """
+    loop, workspace = _make_loop(tmp_path, monkeypatch, session_count=3)
+    _stub_measurement(monkeypatch, walls=[0.5, 0.9, 0.9])
+    kernel = Path(loop.ic.kernel_file)
+    prompts: list[str] = []
+    record_prompts: list[str] = []
+    flush_insight = "INSIGHT: a quick bench agrees with the driver only after a 1 GiB read flush"
+    replies = [
+        f"widened the loads\nNEGATIVES: split-K=4 (case +9%)\n{flush_insight}",
+        f"tried a fused reduce\nNEGATIVES: fused reduce (case +12%)\n{flush_insight}\n"
+        + "INSIGHT: a raw read probe gives 4.1 TB/s",
+        "nothing new\nNEGATIVES: none",
+    ]
+
+    async def summarizer(prompt: str) -> str:
+        record_prompts.append(prompt)
+        return replies[len(record_prompts) - 1]
+
+    async def agent_fn(_kernel_path, experiment_history, session_sink):
+        prompts.append(experiment_history)
+        kernel.write_text(f"def kernel():\n    return {len(prompts) + 1}\n")
+        session_sink["plan"] = f"edit {len(prompts)}"
+        session_sink["end_reason"] = "candidate_submitted"
+        session_sink["summarize"] = summarizer
+        return "rationale"
+
+    asyncio.run(loop.run(lane_agents(agent_fn)))
+
+    flush, probe = (
+        "a quick bench agrees with the driver only after a 1 GiB read flush",
+        "a raw read probe gives 4.1 TB/s",
+    )
+    # The record keeps the session's account and its negatives; the insight lines live in the list alone.
+    first = (workspace / "forge_experiments" / "lessons" / "iter_001.md").read_text()
+    assert "NEGATIVES: split-K=4 (case +9%)" in first
+    assert "INSIGHT:" not in first
+    # A reply that carries no list leaves the one the session before it wrote.
+    assert loop.insights.read() == [flush, probe]
+    # Each record turn is shown the list as it stood, and each session that follows reads it.
+    assert "The list as it stands:\n  (empty)" in record_prompts[0]
+    assert f"  INSIGHT: {flush}" in record_prompts[1]
+    assert "## Campaign insights (cumulative)" not in prompts[0]
+    assert f"- {flush}" in prompts[1] and probe not in prompts[1]
+    assert f"- {flush}\n- {probe}" in prompts[2]
+    # Both negatives are in front of the third session, whether or not their records are.
+    assert "## Measured negatives from every past iteration" in prompts[2]
+    assert "- iter 1 [" in prompts[2] and "split-K=4 (case +9%)" in prompts[2]
+    assert "- iter 2 [" in prompts[2] and "fused reduce (case +12%)" in prompts[2]
+    assert "check your direction against it before you choose" in prompts[2]
 
 
 def test_prompt_omits_the_digest_once_lessons_exist(tmp_path, monkeypatch):
@@ -1180,7 +1254,7 @@ def test_prompt_omits_the_digest_once_lessons_exist(tmp_path, monkeypatch):
         session_sink["summarize"] = summarizer
         return "rationale"
 
-    asyncio.run(loop.run(runner_module.LoopAgents(agent_fn=agent_fn)))
+    asyncio.run(loop.run(lane_agents(agent_fn)))
 
     # The archive digest's own header would appear verbatim if it were inlined.
     assert "Solution archive — your lineage so far" not in prompts[1]

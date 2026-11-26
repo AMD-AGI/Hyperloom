@@ -17,6 +17,7 @@ import time
 from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass, replace
 from pathlib import Path
+from types import MappingProxyType
 from typing import Any, Literal
 
 from hyperloom.contracts.measurement import (
@@ -82,7 +83,7 @@ from hyperloom_multibranch.toolbox.pending_builds import (
 from hyperloom_multibranch.toolbox.quarantine import Quarantine
 from hyperloom_multibranch.toolbox.long_context import with_root_reading
 from hyperloom_multibranch.toolbox.short_prompt_pool import ShortPromptPool, pooled_result
-from hyperloom_multibranch.toolbox.queue import QueuedTest, QueuePolicy, State, WorkQueue, sandbox_priority
+from hyperloom_multibranch.toolbox.queue import QueuedTest, QueuePolicy, State, WorkQueue
 from hyperloom_multibranch.toolbox.resume_guard import MeasuredOn
 from hyperloom_multibranch.toolbox.submission_log import LogEntry, SubmissionLog
 from hyperloom_multibranch.toolbox.tools import JobStatus, ToolJobs, ToolRequest
@@ -159,6 +160,10 @@ class RealToolbox:
     #: Where the tests run, recorded when the first baseline test is accepted so a resume can tell whether the baseline
     #: still holds (:mod:`~hyperloom_multibranch.toolbox.resume_guard`); ``None``: nothing is recorded.
     measured_on: MeasuredOn | None = None
+    #: What a process of this machine runs the base build of the tests' server with, over its own environment: the
+    #: runner variable naming the base builds' executables and the mask of one of the session's cards. Empty for a
+    #: toolbox that lays no base build.
+    base_probe_env: Mapping[str, str] = MappingProxyType({})
 
     def __init__(
         self,
@@ -549,6 +554,12 @@ class RealToolbox:
             raise UnknownTestRequest(job_id)
         return self._tools.result(job_id)
 
+    async def analysis_result(self, branch: str, job_id: str) -> Mapping[str, Any]:
+        """The result record of the tool job ``job_id``, for a branch its result goes to (:meth:`ToolJobs.document`)."""
+        if self._tools is None:
+            raise UnknownTestRequest(job_id)
+        return self._tools.document(job_id, branch)
+
     def record_cold_start(self, seconds: float) -> None:
         self._queue.cold_start_seconds = seconds
 
@@ -715,7 +726,7 @@ class RealToolbox:
     async def _execute(self, item: QueuedTest) -> TestResult:
         try:
             environment = self._builds.resolved(item.environment)
-            job = TestJob(item.request, 1, (), item.priority, sandbox_priority(item.priority), environment)
+            job = TestJob(item.request, 1, (), item.priority, environment)
             result = await self._runner.run(job)
         except Exception as error:
             logger.exception("test %s failed in the executor", item.request_id)
@@ -823,12 +834,6 @@ class RealToolbox:
         """
 
         return False
-
-    @property
-    def node_failures(self) -> dict[str, int]:
-        """The failures reported against each node this session, quarantined or not."""
-
-        return dict(self._quarantine.failures)
 
     async def _node_failed(self, node: str, reason: str, reproduced: bool) -> None:
         failures = self._quarantine.count_failure(node)

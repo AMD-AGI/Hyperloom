@@ -20,7 +20,7 @@ from hyperloom_kb.identity import (
 from hyperloom_kb.knowledge_read import (
     PLANNER_PROMPT_HASH,
     PLANNER_SYSTEM_PROMPT,
-    AnthropicPlannerBackend,
+    GatewayPlannerBackend,
     KnowledgeReadError,
     KnowledgeReadService,
     LLMQueryPlanner,
@@ -134,9 +134,6 @@ from hyperloom_kb.schema import (
     default_search_weight,
     derive_schema_ref,
 )
-from hyperloom_kb.service import (
-    CompleteExperienceRequired,
-)
 from hyperloom_kb.storage import (
     ExperienceStore,
     ImmutableExperienceConflict,
@@ -154,12 +151,8 @@ from hyperloom_kb.sync import (
     SyncUnavailable,
     global_config_from_env,
 )
-from hyperloom_kb.transitions import (
-    ExperienceConflictError,
-)
 
 __all__ = [
-    "AnthropicPlannerBackend",
     "CATEGORIES",
     "CURRENT_SCHEMA_VERSION",
     "KNOWLEDGE_FIELDS",
@@ -172,12 +165,10 @@ __all__ = [
     "CandidateProvider",
     "CapabilityState",
     "CapabilityUnavailable",
-    "CompleteExperienceRequired",
     "ConfigurationError",
     "ConfiguredExperienceKB",
     "EXPERIENCE_ID_NAMESPACE",
     "Experience",
-    "ExperienceConflictError",
     "ExperienceDeclaration",
     "ExperienceHTTPService",
     "ExperienceRenderer",
@@ -195,6 +186,7 @@ __all__ = [
     "FileStore",
     "GLOBAL_TOKEN_ENV",
     "GLOBAL_URL_ENV",
+    "GatewayPlannerBackend",
     "GroupCandidate",
     "HTTPServiceConfig",
     "HTTPServiceError",
