@@ -87,6 +87,15 @@ def test_a_draft_inferencex_records_is_answered_with_its_value_and_the_staged_cu
     }
 
 
+def test_a_draft_spelled_with_per_key_flags_is_asked_about_as_its_json_spelling_is(cache) -> None:
+    dotted = ("--speculative-config.method", "mtp", "--speculative-config.num_speculative_tokens", "3")
+
+    golden = candidate_golden(cache, "vllm", _MODEL, dotted)
+
+    assert golden is not None and golden.value == 2.32
+    assert _asked(cache)["spec"] == {"method": "mtp", "num_speculative_tokens": 3}
+
+
 def test_a_draft_that_already_forces_an_acceptance_is_asked_about_without_it(cache) -> None:
     spec = {"method": "mtp", "num_speculative_tokens": 3, "rejection_sample_method": "synthetic"}
     forced = ("--speculative-config", json.dumps({**spec, "synthetic_acceptance_length": 9.9}))

@@ -24,6 +24,7 @@ from hyperloom.orchestrator.actions.executors.grid._grid_runner import GridVaria
 from hyperloom.orchestrator.actions.executors.framework_change._spec_decode_context_copy import CONTEXT_COPY_REFUSAL
 from hyperloom.orchestrator.actions.executors.explore_prefilter.spec_decode_golden import (
     GOLDEN_ACCEPTANCE_REFUSAL,
+    GoldenLookup,
     golden_acceptance_refusal,
     session_golden_lookup,
     synthetic_draft_refusal,
@@ -47,7 +48,12 @@ _SGLANG_FORCED = {
     "SGLANG_SIMULATE_ACC_METHOD": "match-expected",
     "SGLANG_SIMULATE_ACC_TOKEN_MODE": "real-draft-token",
 }
+_ATOM = "--method mtp --num-speculative-tokens 3"
 _NGRAM = '--speculative-config {"method":"ngram","num_speculative_tokens":7}'
+_DOTTED_FORCED = (
+    "--speculative-config.method mtp --speculative-config.num_speculative_tokens 3 "
+    "--speculative-config.rejection_sample_method synthetic --speculative-config.synthetic_acceptance_length 2.32"
+)
 
 
 _RECORDED = SourceGolden(2.32, curve=_CURVE)
@@ -68,13 +74,17 @@ class _Lookup:
         return self.golden
 
 
+def _vllm(answer: _Lookup | None = None) -> GoldenLookup:
+    return GoldenLookup("vllm", answer or _Lookup())
+
+
 # --------------------------------------------------------------------------
 # the rule
 # --------------------------------------------------------------------------
 def test_a_real_draft_turned_on_is_refused_with_the_value_to_force_and_its_curve() -> None:
     lookup = _Lookup()
 
-    reason = golden_acceptance_refusal("", {}, _MTP, {}, lookup)
+    reason = golden_acceptance_refusal("", {}, _MTP, {}, _vllm(lookup))
 
     assert "verifies a real draft" in reason and "repetition loops" in reason
     assert '"synthetic_acceptance_length": 2.32' in reason and "SGLANG_SIMULATE_ACC_LEN=2.32" in reason
@@ -83,19 +93,36 @@ def test_a_real_draft_turned_on_is_refused_with_the_value_to_force_and_its_curve
 
 
 @pytest.mark.parametrize(
-    ("argv", "envs"),
+    ("framework", "argv", "envs"),
     [
-        pytest.param(_FORCED % "2.32", {}, id="vllm"),
-        pytest.param(_FORCED % "2.320", {}, id="vllm-same-number-spelled-otherwise"),
-        pytest.param(_SGLANG, _SGLANG_FORCED, id="sglang"),
+        pytest.param("vllm", _FORCED % "2.32", {}, id="vllm"),
+        pytest.param("vllm", _FORCED % "2.320", {}, id="vllm-same-number-spelled-otherwise"),
+        pytest.param("vllm", _DOTTED_FORCED, {}, id="vllm-per-key-flags"),
+        pytest.param("sglang", _SGLANG, _SGLANG_FORCED, id="sglang"),
+        pytest.param("atom", f"{_ATOM} --spec-decode-acceptance-length 2.32", {}, id="atom"),
     ],
 )
-def test_the_recorded_value_forced_is_not_refused(argv: str, envs: dict[str, str]) -> None:
-    assert golden_acceptance_refusal("", {}, argv, envs, _Lookup()) == ""
+def test_the_recorded_value_forced_is_not_refused(framework: str, argv: str, envs: dict[str, str]) -> None:
+    assert golden_acceptance_refusal("", {}, argv, envs, GoldenLookup(framework, _Lookup())) == ""
+
+
+@pytest.mark.parametrize(
+    ("framework", "argv", "envs"),
+    [
+        pytest.param("vllm", _MTP, _SGLANG_FORCED, id="sglangs-env-on-vllm"),
+        pytest.param("vllm", _FORCED.replace('"synthetic"', '"standard"') % "2.32", {}, id="vllm-without-its-sampler"),
+        pytest.param("sglang", _FORCED % "2.32", {}, id="vllms-flags-on-sglang"),
+        pytest.param("atom", _ATOM, _SGLANG_FORCED, id="atom-real-draft-with-sglangs-env"),
+    ],
+)
+def test_a_length_the_engine_does_not_read_leaves_a_real_draft(framework: str, argv: str, envs: dict) -> None:
+    reason = golden_acceptance_refusal("", {}, argv, envs, GoldenLookup(framework, _Lookup()))
+
+    assert "verifies a real draft" in reason
 
 
 def test_another_forced_value_is_refused_naming_both() -> None:
-    reason = golden_acceptance_refusal("", {}, _FORCED % "3.5", {}, _Lookup())
+    reason = golden_acceptance_refusal("", {}, _FORCED % "3.5", {}, _vllm())
 
     assert "forces an acceptance length of 3.5" in reason and "records 2.32" in reason
     assert "not a knob" in reason
@@ -104,14 +131,16 @@ def test_another_forced_value_is_refused_naming_both() -> None:
 def test_a_draft_inferencex_records_nothing_for_is_refused_with_why() -> None:
     lookup = _Lookup(SourceGolden(None, reason="InferenceX names no model prefix for Qwen/Qwen3.8-27B"))
 
-    reason = golden_acceptance_refusal("", {}, _FORCED % "2.32", {}, lookup)
+    reason = golden_acceptance_refusal("", {}, _FORCED % "2.32", {}, _vllm(lookup))
 
     assert "records no acceptance length" in reason and "Qwen/Qwen3.8-27B" in reason
     assert "SPEED-Bench" in reason and "Leave speculative decoding off" in reason
 
 
 def test_a_lookup_that_cannot_answer_refuses_naming_why() -> None:
-    reason = golden_acceptance_refusal("", {}, _MTP, {}, _Lookup(error="the staged InferenceX exited with code 1"))
+    reason = golden_acceptance_refusal(
+        "", {}, _MTP, {}, _vllm(_Lookup(error="the staged InferenceX exited with code 1"))
+    )
 
     assert "could not be read" in reason and "exited with code 1" in reason
 
@@ -131,24 +160,24 @@ def test_bases_that_draft_and_candidates_that_draft_nothing_are_left_alone(
 ) -> None:
     lookup = _Lookup()
 
-    assert golden_acceptance_refusal(base, base_envs, candidate, {}, lookup) == ""
+    assert golden_acceptance_refusal(base, base_envs, candidate, {}, _vllm(lookup)) == ""
     assert lookup.asked == []
 
 
 def test_a_launch_inferencex_reads_no_draft_from_is_not_refused() -> None:
-    assert golden_acceptance_refusal("", {}, _MTP, {}, _Lookup(golden=None)) == ""
+    assert golden_acceptance_refusal("", {}, _MTP, {}, _vllm(_Lookup(golden=None))) == ""
 
 
 def test_a_context_copying_draft_is_the_copy_checks_and_a_model_draft_the_golden_checks() -> None:
-    assert synthetic_draft_refusal("", {}, _NGRAM, {}, _Lookup())[0] == CONTEXT_COPY_REFUSAL
-    assert synthetic_draft_refusal("", {}, _MTP, {}, _Lookup())[0] == GOLDEN_ACCEPTANCE_REFUSAL
-    assert synthetic_draft_refusal("", {}, _FORCED % "2.32", {}, _Lookup()) is None
+    assert synthetic_draft_refusal("", {}, _NGRAM, {}, _vllm())[0] == CONTEXT_COPY_REFUSAL
+    assert synthetic_draft_refusal("", {}, _MTP, {}, _vllm())[0] == GOLDEN_ACCEPTANCE_REFUSAL
+    assert synthetic_draft_refusal("", {}, _FORCED % "2.32", {}, _vllm()) is None
 
 
 def test_a_session_without_a_frozen_base_cannot_look_a_draft_up(tmp_path: Path) -> None:
     for session in (None, tmp_path):
         with pytest.raises(GoldenLookupError, match="froze no base launch"):
-            session_golden_lookup(session, "vllm")(("--speculative-config", "{}"))
+            session_golden_lookup(session, "vllm").answer(("--speculative-config", "{}"))
 
 
 # --------------------------------------------------------------------------
@@ -163,7 +192,7 @@ def test_explore_drops_each_variant_under_its_own_reason_and_keeps_the_forced_dr
         GridVariant("lever", extra_server_args="--max-running-requests 64"),
     ]
 
-    kept, dropped = filter_synthetic_drafts(grid, recipe=recipe, lookup=_Lookup())
+    kept, dropped = filter_synthetic_drafts(grid, recipe=recipe, lookup=GoldenLookup("sglang", _Lookup()))
 
     assert [gv.name for gv in kept] == ["forced", "lever"]
     assert {name: reason for name, reason, _ in dropped} == {

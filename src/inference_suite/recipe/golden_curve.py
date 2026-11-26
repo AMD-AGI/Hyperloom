@@ -180,6 +180,9 @@ def _sglang_draft(occurrences: list[tuple[str, str]], env: Mapping[str, str]) ->
 
 def _vllm_draft(occurrences: list[tuple[str, str]], env: Mapping[str, str]) -> LaunchDraft:
     spec = speculative_config(occurrences)
+    if "num_speculative_tokens" in spec:
+        # A per-key flag carries the count as text, and golden_length reads only an integer.
+        spec["num_speculative_tokens"] = _count(str(spec["num_speculative_tokens"]))
     method = spec.get("rejection_sample_method")
     verify = "block" if method == _SYNTHETIC else str(method or "standard")
     # vLLM's synthetic sampler streams the drafted tokens it accepts, as sglang's real-draft-token mode does.

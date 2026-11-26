@@ -22,6 +22,7 @@ real traces and are out of scope.
 from __future__ import annotations
 
 from collections.abc import Callable, Mapping, Sequence
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -49,11 +50,26 @@ __all__ = [
 #: Reason a refused candidate is recorded with.
 GOLDEN_ACCEPTANCE_REFUSAL = "speculative_acceptance_not_golden_on_synthetic"
 
-#: The golden acceptance InferenceX records for the draft a launch's argv tokens configure, ``None`` when they draft
-#: nothing; the caller binds the framework and the model.
-GoldenLookup = Callable[[Sequence[str]], SourceGolden | None]
 
-_SIMULATED_LENGTH_KEYS = ("SGLANG_SIMULATE_ACC_LEN", "--speculative-config.synthetic_acceptance_length")
+@dataclass(frozen=True)
+class GoldenLookup:
+    """The framework a session serves on, and the golden acceptance InferenceX records for the draft a launch's argv
+    tokens configure on it (``None`` when they draft nothing), the model bound by the caller."""
+
+    framework: str
+    answer: Callable[[Sequence[str]], SourceGolden | None]
+
+
+#: Each engine's forced acceptance length, and what else that engine needs set for the length to take effect: vLLM
+#: reads ``synthetic_acceptance_length`` only under its synthetic rejection sampler, and ignores SGLang's environment.
+_FORCED_LENGTH: Mapping[str, tuple[str, Mapping[str, str]]] = {
+    "vllm": (
+        "--speculative-config.synthetic_acceptance_length",
+        {"--speculative-config.rejection_sample_method": "synthetic"},
+    ),
+    "sglang": ("SGLANG_SIMULATE_ACC_LEN", {}),
+    "atom": ("--spec-decode-acceptance-length", {}),
+}
 _WHY = (
     "on the synthetic benchmark (random prompts at temperature 0, held to their full output length) the model falls "
     "into repetition loops that a draft predicts almost perfectly, so a measured acceptance does not carry over to "
@@ -61,15 +77,20 @@ _WHY = (
 )
 
 
-def _forced_length(identity: Mapping[str, str]) -> str | None:
-    return next((identity[key] for key in _SIMULATED_LENGTH_KEYS if key in identity), None)
+def _forced_length(framework: str, identity: Mapping[str, str]) -> str | None:
+    """The acceptance length ``identity`` forces on ``framework``, ``None`` when that engine forces none."""
+    if framework not in _FORCED_LENGTH:
+        return None
+    key, required = _FORCED_LENGTH[framework]
+    return identity.get(key) if all(identity.get(name) == value for name, value in required.items()) else None
 
 
 def _how_to_force(value: float) -> str:
     return (
         f'force it: on vLLM, "rejection_sample_method": "synthetic" and "synthetic_acceptance_length": {value:g} in '
         f"--speculative-config; on SGLang, SGLANG_SIMULATE_ACC_LEN={value:g} with "
-        "SGLANG_SIMULATE_ACC_METHOD=match-expected and SGLANG_SIMULATE_ACC_TOKEN_MODE=real-draft-token"
+        "SGLANG_SIMULATE_ACC_METHOD=match-expected and SGLANG_SIMULATE_ACC_TOKEN_MODE=real-draft-token; on ATOM, "
+        f"--spec-decode-acceptance-length {value:g}"
     )
 
 
@@ -111,25 +132,25 @@ def golden_acceptance_refusal(
         return ""
     parsed = tokenize_server_args_preserving_json(argv)
     try:
-        golden = lookup(parsed[1] if parsed is not None else argv.split())
+        golden = lookup.answer(parsed[1] if parsed is not None else argv.split())
     except GoldenLookupError as exc:
         return f"the acceptance InferenceX records for this draft could not be read ({exc}), and {_WHY}."
     if golden is None:
         return ""
-    return _graded(golden, _forced_length(candidate))
+    return _graded(golden, _forced_length(lookup.framework, candidate))
 
 
 def session_golden_lookup(session_dir: Path | None, framework: str) -> GoldenLookup:
     """The lookup a candidate of the session at ``session_dir`` is graded with: the model its frozen base was resolved
     for, on ``framework``, from the staged InferenceX. The base is read when a draft is first looked up."""
 
-    def lookup(argv: Sequence[str]) -> SourceGolden | None:
+    def answer(argv: Sequence[str]) -> SourceGolden | None:
         frozen = None if session_dir is None else frozen_base(Path(session_dir))
         if frozen is None:
             raise GoldenLookupError(f"the session {session_dir} froze no base launch to name its model")
         return candidate_golden(staged_tool_cache(), framework, frozen.launch.query.model_id, argv)
 
-    return lookup
+    return GoldenLookup(framework, answer)
 
 
 def synthetic_draft_refusal(
