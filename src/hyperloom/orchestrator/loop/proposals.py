@@ -172,29 +172,6 @@ def record_config_proposal(
     recorder.record_proposal_step(proposal_id, step=STEP_PROPOSED, outcome=outcome)
 
 
-def apply_critic_grid_filter(
-    params: dict[str, Any],
-    *,
-    original_grid: list[Any],
-    approved_variant_names: set[str] | None,
-) -> bool:
-    """Restrict ``params['grid']`` to Critic-approved variant names."""
-    stamped_grid: list[Any] = []
-    for variant in original_grid:
-        if not isinstance(variant, dict):
-            if approved_variant_names is None:
-                stamped_grid.append(variant)
-            continue
-        vname = str(variant.get("name") or "").strip()
-        if approved_variant_names is not None and vname not in approved_variant_names:
-            continue
-        stamped_grid.append(dict(variant))
-    params["grid"] = stamped_grid
-    if approved_variant_names is None:
-        return True
-    return bool(stamped_grid)
-
-
 def _framework_recorder(coll: Any, pending: Any) -> Any:
     """The framework recorder to write one config-arm proposal's step onto.
 
@@ -252,10 +229,9 @@ def _record_config_routed(coll: Any, pending: Any, *, task_id: str) -> None:
 def _record_config_dropped(coll: Any, pending: Any, *, reason: str) -> None:
     """Settle one config-arm grid that never reached a bench.
 
-    The empty-grid case is the one that most needs saying: the Critic approved
-    the proposal and then named no variant that survived the filter, so the
-    arm spent a review and benched nothing. Without a settled row that reads
-    as a proposal still under way.
+    The Critic approved the proposal and the grid then had nothing left to
+    measure, so the arm spent a review and benched nothing. Without a settled
+    row that reads as a proposal still under way.
     """
     recorder = _framework_recorder(coll, pending)
     if recorder is None:
@@ -333,13 +309,8 @@ class ProposalsCollaborator(CoordinatorCollaborator):
         cursor = int((self.shared_state.explore_search or {}).get("cursor") or 0)
         params.setdefault("explore_search_cursor", cursor)
 
-    async def materialize_approved_proposal(
-        self,
-        pending: PendingProposal,
-        *,
-        approved_variant_names: set[str] | None = None,
-    ) -> None:
-        """Promote an approved proposal into a TaskRegistry entry. Stack-aware actions get current_best's anchor and the base config it was measured on; approved_variant_names filters the explore grid (None keeps full)."""
+    async def materialize_approved_proposal(self, pending: PendingProposal) -> None:
+        """Promote an approved proposal into a TaskRegistry entry. Stack-aware actions get current_best's anchor and the base config it was measured on."""
         if is_upstream_pr_prescreen(pending.action_name, pending.payload):
             await self._coord.phase_framework.materialize_candidate(pending)
             return
@@ -350,7 +321,7 @@ class ProposalsCollaborator(CoordinatorCollaborator):
                 "predicted_gain_pct",
                 float(pending.predicted_gain_pct),
             )
-        if not await self._seed_materialized_params(pending, params, approved_variant_names):
+        if not await self._seed_materialized_params(pending, params):
             return
         lanes, ttl = self._coord.dispatcher.registry_lanes_ttl(pending.action_name)
         # Content-addressed so a batch of proposals that would launch identical work collapses to one task; an
@@ -407,25 +378,9 @@ class ProposalsCollaborator(CoordinatorCollaborator):
             )
         )
 
-    async def _seed_materialized_params(
-        self,
-        pending: PendingProposal,
-        params: dict[str, Any],
-        approved_variant_names: set[str] | None,
-    ) -> bool:
+    async def _seed_materialized_params(self, pending: PendingProposal, params: dict[str, Any]) -> bool:
         """Seed an approved proposal's params for its action; ``False`` (skip recorded) when it must not run."""
         action = pending.action_name
-        # Filter the grid to the Critic-approved subset.
-        if action == "explore" and isinstance(params.get("grid"), list):
-            original_grid = list(params["grid"])
-            if not apply_critic_grid_filter(
-                params,
-                original_grid=original_grid,
-                approved_variant_names=approved_variant_names,
-            ):
-                await self._record_materialize_skipped(pending, "critic_filter_empty_grid")
-                _record_config_dropped(self, pending, reason="critic_filter_empty_grid")
-                return False
         if action == "explore":
             if not await self._explore_grid_runnable(pending, params):
                 return False
@@ -441,8 +396,8 @@ class ProposalsCollaborator(CoordinatorCollaborator):
     async def _explore_grid_runnable(self, pending: PendingProposal, params: dict[str, Any]) -> bool:
         """Re-judge an approved explore against what it still has to measure.
 
-        Admission judged the grid the proposal carried; the Critic filter above and the session's seed
-        sources both move underneath it between proposal and approval.
+        Admission judged the grid the proposal carried; the session's seed sources move underneath it
+        between proposal and approval.
         """
         denied = explore_grid_denial(pending.action_name, params, self.shared_state)
         if denied is None:

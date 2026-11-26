@@ -270,7 +270,7 @@ def _section_phase_semantics(
             "",
             f"{', '.join(sorted(COORDINATOR_INTERNAL_ACTIONS))} are never in the",
             "sets above: the Coordinator dispatches them and PolicyGate denies",
-            "any attempt to propose them (`coordinator_managed_action`). Denial",
+            "any attempt to propose them (`phase_incompatible`). Denial",
             "of any action lands in your inbox as a `policy_denied` event.",
             "",
             "Phase transitions are Coordinator-owned. The hard advance gates",
@@ -704,7 +704,7 @@ def _failure_recovery_lines(*, phase: str, transport: str = "") -> list[str]:
             " send observation 'blocked: …' quoting the failure excerpt."
             " Explore variants may be re-proposed, except one carrying a change the framework refused at start"
             " on a configuration error (`known_dead_change`); read the failure log first.",
-            "* **RULE F3** — `policy_denial_streak` is information only."
+            "* **RULE F3** — a `policy_denied` event names the rule that refused the intent."
             " Change something substantive; re-emitting the identical intent wastes a tick.",
         ]
     )

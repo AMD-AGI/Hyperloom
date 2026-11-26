@@ -77,12 +77,12 @@ def test_format_review_verdict_and_denial():
 
     denial = _format_inbox_event(
         _msg(
-            "policy_denial",
-            {"action_name": "kernel_opt", "rule": "phase_incompatible", "hint": "not allowed here"},
+            "observation",
+            {"kind": "policy_denied", "rule": "phase_incompatible", "hint": "not allowed here"},
         )
     )
-    assert "action='kernel_opt'" in denial
-    assert "rule='phase_incompatible'" in denial
+    assert "kind='policy_denied'" in denial
+    assert "phase_incompatible" in denial and "not allowed here" in denial
 
 
 def test_format_unknown_topic_falls_back_to_payload_dump():

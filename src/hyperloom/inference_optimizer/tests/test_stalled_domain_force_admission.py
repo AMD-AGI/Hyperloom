@@ -86,7 +86,6 @@ async def test_a_force_an_admission_gate_would_refuse_is_held_every_tick_without
 
     assert await _queued_specialists(coord) == 0
     assert await _policy_denials(coord) == []
-    assert coord.shared_state.policy_denial_streak == {}
     assert "stalled-domain force: dispatched" not in caplog.text
 
 

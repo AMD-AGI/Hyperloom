@@ -38,7 +38,7 @@ _REAL_EXECUTORS_FULL: dict[str, Any] = {
     "baseline": baseline_executor,
     # replay_warm_recipe reuses BaselineExecutor, applying warm_start_recipe.best_config.
     "replay_warm_recipe": baseline_executor,
-    # profile: Coordinator-internal; PolicyGate denies LLM-proposed delegate.
+    # profile: Coordinator-internal; no phase offers it to an agent.
     "profile": profile_executor,
     "explore": explore_executor,
     "report": report_executor,

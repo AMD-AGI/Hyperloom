@@ -33,9 +33,6 @@ class AdmissionMixin:
     def _phase_denial_for_action(self, action_name: str) -> PolicyDenied | None:
         """Refuse an action the current phase does not let an agent propose.
 
-        Before the phase machine has entered its first phase there is no
-        contract to hold the action to, so the gate abstains.
-
         Args:
             action_name: The proposed/delegated action name.
 
@@ -45,7 +42,7 @@ class AdmissionMixin:
         action = str(action_name or "").strip()
         phase = str(self.shared_state.phase or "").strip().upper()
         proposable = _phase_state.allowed_actions_for(phase)
-        if not phase or action in proposable:
+        if action in proposable:
             return None
         return PolicyDenied(
             f"action={action!r} is not proposable while the phase is {phase!r}",

@@ -2025,22 +2025,6 @@ async def test_replay_for_resume_rebuilds_undecided_proposals(coord: Coordinator
     assert list(coord.state.pending_proposals) == [p1.msg_id]
 
 
-@pytest.mark.asyncio
-async def test_replay_for_resume_verdict_map_backcompat(coord: Coordinator) -> None:
-    p1 = Message.new("kernel_agent", "orchestration", "proposal", {"action_name": "explore"})
-    await coord.bus.append_and_seq(p1)
-    await coord.bus.append_and_seq(
-        Message.new(
-            "critic",
-            "orchestration",
-            "review_verdict",
-            {"target_proposal_msg_id": p1.msg_id, "verdict_map": {"x": "ok"}},
-        )
-    )
-    await coord.writeback.replay_for_resume()
-    assert p1.msg_id not in coord.state.pending_proposals
-
-
 # -- _context_analysis_reader fallback (path read) --------------------------
 def test_context_analysis_reader_strips_base64_from_the_cached_text(coord: Coordinator) -> None:
     coord.shared_state.last_trace_analyze = {
@@ -2669,25 +2653,11 @@ def test_specialist_owner_is_frozen_at_creation_outside_agent_phases(
 
 
 @pytest.mark.asyncio
-async def test_materialize_explore_filters_grid(coord: Coordinator, monkeypatch) -> None:
+async def test_materialize_explore_announces_the_task_it_became(coord: Coordinator, monkeypatch) -> None:
     coord.shared_state.baseline_tput = 800.0
     monkeypatch.setattr(coord.proposals, "phase_framework", coord.phase_framework, raising=False)
-    pending = _pending(
-        "explore",
-        {
-            "params": {
-                "grid": [
-                    {"name": "v0"},
-                    {"name": "v1"},
-                    "non-dict-slot",
-                ]
-            }
-        },
-    )
-    await coord.proposals.materialize_approved_proposal(
-        pending,
-        approved_variant_names={"v0"},
-    )
+    pending = _pending("explore", {"params": {"grid": [{"name": "v0"}, {"name": "v1"}]}})
+    await coord.proposals.materialize_approved_proposal(pending)
     tail = await coord.bus.tail(topic="decision", n=10)
     assert any(m.payload.get("kind") == "approved_proposal" for m in tail)
     task = await coord.tasks.get((await coord.tasks.queued())[0].task_id)

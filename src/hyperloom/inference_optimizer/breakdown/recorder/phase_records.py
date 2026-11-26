@@ -271,7 +271,6 @@ class ProposalReview:
     reasoning: Any = None
     confidence: Any = None
     advisory: Mapping[str, Any] | None = None
-    variants: Any = None
 
     def row(self) -> dict[str, Any]:
         """The proposal row fields this ruling persists as."""
@@ -287,7 +286,6 @@ class ProposalReview:
                 "risks": [dict(risk) for risk in _as_list(advice.get("risks")) if isinstance(risk, Mapping)],
                 "advice_text": _text_or_none(advice.get("advice_text")),
                 "alternative_action": _text_or_none(advice.get("alternative_action")),
-                "variants": [dict(row) for row in _as_list(self.variants) if isinstance(row, Mapping)],
                 "reviewed_at": _now(),
             },
         }

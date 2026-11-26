@@ -6,11 +6,9 @@
 from __future__ import annotations
 
 import logging
-from typing import TYPE_CHECKING, Any
+from typing import Any
 
 from hyperloom.inference_optimizer import framework_registry
-from hyperloom.inference_optimizer.protocol.intent import ALLOWED_VERDICTS
-from hyperloom.inference_optimizer.protocol.action_surfaces import COORDINATOR_INTERNAL_ACTIONS
 from ..specialists.domains import (
     KNOWLEDGE_DOMAIN_TAG_SET,
     SPECIALIST_MAX_TURNS_HARD_CAP,
@@ -21,10 +19,6 @@ from ..specialists.profile import (
     SCOPE_DOMAINS as SPECIALIST_SCOPE_DOMAINS,
     SCOPE_VALUES as SPECIALIST_SCOPE_VALUES,
 )
-
-if TYPE_CHECKING:  # pragma: no cover — type-only
-    from ..roles.agent_role import AgentRole
-
 
 log = logging.getLogger(__name__)
 
@@ -38,9 +32,6 @@ GEMM_TUNING_ACTION_NAME: str = "gemm_tuning"
 SPECIALIST_FREEFORM_WAVE_MAX: int = 16
 SPECIALIST_FREEFORM_TASK_DESC_MAX_CHARS: int = 8000
 
-# Critic-only: REVIEW_VERDICT
-REVIEW_VERDICT_SOURCE_ALLOWLIST: frozenset[str] = frozenset({"critic"})
-
 # prune_branch scopes. ``family`` retires the action for the rest of the run;
 # ``queued`` only drains the backlog and leaves the family usable.
 PRUNE_BRANCH_SCOPE_FAMILY: str = "family"
@@ -51,28 +42,6 @@ PRUNE_BRANCH_ALLOWED_SCOPES: frozenset[str] = frozenset(
         PRUNE_BRANCH_SCOPE_QUEUED,
     }
 )
-
-
-def validate_coordinator_managed_action(action_name: str, *, intent_kind: str) -> None:
-    """Deny an agent-initiated copy of an action the Coordinator dispatches itself.
-
-    Phase-independent: these actions carry their own entry conditions and
-    SharedState accounting, which a second run would skip.
-
-    Args:
-        action_name: The proposed/delegated action name.
-        intent_kind: The channel it arrived on, for the message.
-
-    Raises:
-        PolicyDenied: when ``action_name`` is Coordinator-managed.
-    """
-    if action_name not in COORDINATOR_INTERNAL_ACTIONS:
-        return
-    raise PolicyDenied(
-        f"action {action_name!r} is Coordinator-managed and not LLM-proposable ({intent_kind})",
-        rule="coordinator_managed_action",
-        hint="read the outcome in SharedState rather than ordering a second run.",
-    )
 
 
 # GEMM tuning ownership
@@ -111,74 +80,10 @@ def validate_gemm_tuning_action(
     )
 
 
-def validate_review_verdict(role: "AgentRole", payload: dict[str, Any]) -> None:
-    """Validate a ``REVIEW_VERDICT`` intent (Critic-only).
-
-    Enforces that the source role is on
-    :data:`REVIEW_VERDICT_SOURCE_ALLOWLIST`, that
-    ``target_proposal_msg_id`` is present, and that exactly one of the
-    single ``verdict`` field or the per-variant ``verdict_map`` is
-    supplied. Every verdict string (single or per-variant) must belong
-    to the closed :data:`ALLOWED_VERDICTS` vocabulary.
-
-    Args:
-        role (AgentRole): the resolved role of the emitting agent.
-        payload (dict[str, Any]): the review_verdict payload, carrying
-            ``target_proposal_msg_id`` and either ``verdict`` or
-            ``verdict_map``.
-
-    Returns:
-        None: returns silently when the verdict is well-formed.
-
-    Raises:
-        PolicyDenied: if the role is not a Critic, the target id is
-            missing, neither/both verdict forms are present, or a
-            verdict string is outside ``ALLOWED_VERDICTS``.
-    """
-    if role.name not in REVIEW_VERDICT_SOURCE_ALLOWLIST:
-        raise PolicyDenied(
-            f"role={role.name!r} cannot emit review_verdict (allowed: {sorted(REVIEW_VERDICT_SOURCE_ALLOWLIST)!r})",
-            rule="review_verdict_source",
-        )
-    target = str(payload.get("target_proposal_msg_id", "")).strip()
-    if not target:
-        raise PolicyDenied(
-            "review_verdict missing target_proposal_msg_id",
-            rule="payload",
-        )
-    # Accept the single ``verdict`` or the per-variant ``verdict_map``.
-    has_single = "verdict" in payload
-    verdict_map = payload.get("verdict_map")
-    has_map = isinstance(verdict_map, dict) and bool(verdict_map)
-    if has_single == has_map:
-        raise PolicyDenied(
-            "review_verdict: exactly one of 'verdict' or 'verdict_map' must be present",
-            rule="payload",
-            hint=(
-                "single-proposal review: emit {target_proposal_msg_id, "
-                "verdict, reasoning}. Explore batch "
-                "review: emit {target_proposal_msg_id, verdict_map: "
-                "{variant_name: {verdict, rationale?}}}"
-            ),
-        )
-    if has_single:
-        verdict = str(payload.get("verdict", "")).strip()
-        if verdict not in ALLOWED_VERDICTS:
-            raise PolicyDenied(
-                f"review_verdict.verdict={verdict!r} not in allowed set {sorted(ALLOWED_VERDICTS)!r}",
-                rule="payload",
-                hint=f"use one of {'/'.join(sorted(ALLOWED_VERDICTS))}",
-            )
-        return
-    # verdict_map path — every entry's verdict must be in the closed vocab.
-    for vname, entry in verdict_map.items():
-        v = str((entry or {}).get("verdict") or "").strip()
-        if v not in ALLOWED_VERDICTS:
-            raise PolicyDenied(
-                f"review_verdict.verdict_map[{vname!r}].verdict={v!r} not in allowed set {sorted(ALLOWED_VERDICTS)!r}",
-                rule="payload",
-                hint=f"every per-variant verdict must be one of {'/'.join(sorted(ALLOWED_VERDICTS))}",
-            )
+def validate_review_verdict(payload: dict[str, Any]) -> None:
+    """Refuse a ``REVIEW_VERDICT`` whose ``target_proposal_msg_id`` is blank."""
+    if not str(payload.get("target_proposal_msg_id", "")).strip():
+        raise PolicyDenied("review_verdict missing target_proposal_msg_id", rule="payload")
 
 
 def validate_prune_branch(payload: dict[str, Any]) -> None:

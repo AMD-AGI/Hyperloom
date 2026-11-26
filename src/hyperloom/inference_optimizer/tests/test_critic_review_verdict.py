@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Critic per-variant ``verdict_map`` tests."""
+"""Critic ``review_verdict`` handling: the gate, routing, the rebroadcast, the patch-verdict mirror and materialisation."""
 
 from __future__ import annotations
 
@@ -17,189 +17,26 @@ from hyperloom.orchestrator.roles.agent_role import default_role_registry
 from hyperloom.orchestrator.loop.coordinator import Coordinator
 from hyperloom.orchestrator.loop.coordinator_state import CoordinatorState
 from hyperloom.orchestrator.state.pending_proposal import PendingProposal
-from hyperloom.inference_optimizer.protocol.intent import (
-    Intent,
-    IntentType,
-    IntentValidationError,
-    validate_envelope,
-)
-from hyperloom.orchestrator.loop.verdicts import (
-    collapse_verdict_map,
-    collapse_verdicts,
-    proceedable_variant_names,
-)
-from hyperloom.orchestrator.policy.denial import PolicyDenied
+from hyperloom.inference_optimizer.protocol.intent import Intent, IntentType
 from hyperloom.orchestrator.policy.gate import (
     INTEGRATE_PATCH_PERMISSIVE_VERDICTS,
     PolicyGate,
 )
 
 
-# 1. intent_parser — envelope schema accepts verdict OR verdict_map
-def _envelope(**payload: Any) -> dict[str, Any]:
-    return {
-        "intents": [
-            {
-                "intent_type": "review_verdict",
-                "payload": payload,
-            }
-        ],
-    }
-
-
-def test_intent_parser_accepts_legacy_single_verdict():
-    intents = validate_envelope(
-        _envelope(
-            target_proposal_msg_id="msg-1",
-            verdict="approve",
-            reasoning="ok",
-        )
-    )
-    assert len(intents) == 1
-    assert intents[0].type is IntentType.REVIEW_VERDICT
-    assert intents[0].payload["verdict"] == "approve"
-
-
-def test_intent_parser_accepts_per_variant_verdict_map():
-    intents = validate_envelope(
-        _envelope(
-            target_proposal_msg_id="msg-1",
-            verdict_map={
-                "v_a": {"verdict": "approve", "rationale": "looks promising"},
-                "v_b": {"verdict": "reject", "rationale": "kb says no"},
-            },
-        )
-    )
-    assert intents[0].payload["verdict_map"]["v_a"]["verdict"] == "approve"
-
-
-def test_intent_parser_rejects_both_verdict_and_verdict_map():
-    with pytest.raises(IntentValidationError) as exc:
-        validate_envelope(
-            _envelope(
-                target_proposal_msg_id="msg-1",
-                verdict="approve",
-                verdict_map={"v_a": {"verdict": "reject"}},
-            )
-        )
-    assert "mutually exclusive" in str(exc.value)
-
-
-def test_intent_parser_rejects_neither_verdict_nor_verdict_map():
-    with pytest.raises(IntentValidationError) as exc:
-        validate_envelope(_envelope(target_proposal_msg_id="msg-1"))
-    assert "must include either" in str(exc.value)
-
-
-def test_intent_parser_rejects_empty_verdict_map():
-    with pytest.raises(IntentValidationError):
-        validate_envelope(
-            _envelope(
-                target_proposal_msg_id="msg-1",
-                verdict_map={},
-            )
-        )
-
-
-def test_intent_parser_rejects_verdict_map_entry_missing_verdict():
-    with pytest.raises(IntentValidationError) as exc:
-        validate_envelope(
-            _envelope(
-                target_proposal_msg_id="msg-1",
-                verdict_map={"v_a": {"rationale": "no verdict key"}},
-            )
-        )
-    assert "missing required 'verdict'" in str(exc.value)
-
-
-def test_intent_parser_rejects_non_dict_verdict_map_entry():
-    with pytest.raises(IntentValidationError):
-        validate_envelope(
-            _envelope(
-                target_proposal_msg_id="msg-1",
-                verdict_map={"v_a": "approve"},
-            )
-        )
-
-
-# 2. PolicyGate — verdict_map content validation
 @pytest.fixture
 def gate() -> PolicyGate:
     return PolicyGate(role_registry=default_role_registry())
 
 
-def _critic_intent(**payload: Any) -> Intent:
-    return Intent(type=IntentType.REVIEW_VERDICT, payload=payload)
-
-
-def test_policy_gate_accepts_legacy_single_verdict(gate):
+def test_policy_gate_accepts_a_critic_verdict(gate):
     gate.validate_intent(
         "critic",
-        _critic_intent(
-            target_proposal_msg_id="msg-1",
-            verdict="approve",
-        ),
+        Intent(type=IntentType.REVIEW_VERDICT, payload={"target_proposal_msg_id": "msg-1", "verdict": "approve"}),
     )
 
 
-def test_policy_gate_accepts_per_variant_verdict_map(gate):
-    gate.validate_intent(
-        "critic",
-        _critic_intent(
-            target_proposal_msg_id="msg-1",
-            verdict_map={
-                "v_a": {"verdict": "approve"},
-                "v_b": {"verdict": "reject", "rationale": "no"},
-            },
-        ),
-    )
-
-
-def test_policy_gate_rejects_when_both_present(gate):
-    with pytest.raises(PolicyDenied) as exc:
-        gate.validate_intent(
-            "critic",
-            _critic_intent(
-                target_proposal_msg_id="msg-1",
-                verdict="approve",
-                verdict_map={"v_a": {"verdict": "approve"}},
-            ),
-        )
-    assert exc.value.rule == "payload"
-    # Either "exactly one" (PolicyGate) or "mutually exclusive" (intent_parser) is valid.
-    msg = str(exc.value) + " " + (exc.value.hint or "")
-    assert "exactly one" in msg or "mutually exclusive" in msg
-
-
-def test_policy_gate_rejects_when_neither_present(gate):
-    """Defense in depth — PolicyGate still rejects even though intent_parser fires first."""
-    with pytest.raises(PolicyDenied) as exc:
-        gate.validate_intent(
-            "critic",
-            _critic_intent(
-                target_proposal_msg_id="msg-1",
-            ),
-        )
-    assert exc.value.rule == "payload"
-
-
-def test_policy_gate_rejects_unknown_per_variant_verdict(gate):
-    with pytest.raises(PolicyDenied) as exc:
-        gate.validate_intent(
-            "critic",
-            _critic_intent(
-                target_proposal_msg_id="msg-1",
-                verdict_map={
-                    "v_a": {"verdict": "approve"},
-                    "v_b": {"verdict": "obliterate"},  # not a valid verdict
-                },
-            ),
-        )
-    assert "verdict_map" in str(exc.value)
-    assert "obliterate" in str(exc.value)
-
-
-# 3. Coordinator helpers — _handle_review_verdict dispatch
+# Coordinator helpers — _handle_review_verdict dispatch
 @dataclass
 class _BareSharedState:
     """SharedState double exposing the fields the review-verdict handler touches."""
@@ -276,15 +113,11 @@ def coord(tmp_path: Path):
     c.knowledge_plane = KnowledgePlane(recipe_kb=_StubRecipeKB())
     c.bus = _StubBus()
     c.bus.record_observation = AsyncMock()  # type: ignore[method-assign]
-    materialise_calls: list[tuple[PendingProposal, set[str] | None]] = []
+    materialise_calls: list[PendingProposal] = []
     c._materialise_calls = materialise_calls  # type: ignore[attr-defined]
 
-    async def _mat(
-        pending: PendingProposal,
-        *,
-        approved_variant_names: set[str] | None = None,
-    ) -> None:
-        materialise_calls.append((pending, approved_variant_names))
+    async def _mat(pending: PendingProposal) -> None:
+        materialise_calls.append(pending)
 
     c.proposals.materialize_approved_proposal = _mat  # type: ignore[method-assign]
     return c
@@ -311,8 +144,7 @@ def _seed_explore_proposal(
 
 # routing
 @pytest.mark.asyncio
-async def test_legacy_single_verdict_still_materialises_whole_proposal(coord):
-    """Non-grid actions keep the single-verdict path: approve materialises the whole proposal."""
+async def test_an_approve_materialises_the_proposal(coord):
     pending = PendingProposal(
         proposal_msg_id="msg-kernel",
         from_agent="orchestration",
@@ -329,103 +161,9 @@ async def test_legacy_single_verdict_still_materialises_whole_proposal(coord):
     bus_msgs = [m for m in coord.bus.messages if m.topic == "review_verdict"]
     assert len(bus_msgs) == 1
     assert bus_msgs[0].payload["verdict"] == "approve"
-    assert "verdict_map" not in bus_msgs[0].payload
-    assert len(coord._materialise_calls) == 1
-    assert coord._materialise_calls[0][1] is None
+    assert coord._materialise_calls == [pending]
     assert pending.proposal_msg_id not in coord.state.pending_proposals
     assert _posted_verdict(coord) == "approve"
-
-
-@pytest.mark.asyncio
-async def test_verdict_map_collapses_to_summary_single_verdict(coord):
-    """A mixed map proceeds on the approved subset, not the whole grid."""
-    pending = _seed_explore_proposal(coord)
-    intent = Intent(
-        type=IntentType.REVIEW_VERDICT,
-        payload={
-            "target_proposal_msg_id": pending.proposal_msg_id,
-            "verdict_map": {
-                "v_a": {"verdict": "approve"},
-                "v_b": {"verdict": "reject", "rationale": "kb says no"},
-                "v_c": {"verdict": "reject", "rationale": "duplicate"},
-                "v_d": {"verdict": "reject"},
-            },
-        },
-    )
-    await coord.router._handle_review_verdict("critic", intent)
-    assert pending.proposal_msg_id not in coord.state.pending_proposals
-    assert _posted_verdict(coord) == "approve"
-    assert len(coord._materialise_calls) == 1
-    assert coord._materialise_calls[0][1] == {"v_a"}
-    bus_msgs = [m for m in coord.bus.messages if m.topic == "review_verdict"]
-    assert len(bus_msgs) == 1
-    assert bus_msgs[0].payload["verdict"] == "approve"
-    assert "verdict_map" not in bus_msgs[0].payload
-
-
-@pytest.mark.asyncio
-async def test_verdict_map_mixed_collapse_logs_audit(coord, caplog):
-    """A mixed map still logs the collapse, and materialises only the proceedable names."""
-    import logging
-
-    pending = _seed_explore_proposal(coord)
-    intent = Intent(
-        type=IntentType.REVIEW_VERDICT,
-        payload={
-            "target_proposal_msg_id": pending.proposal_msg_id,
-            "verdict_map": {
-                "v_a": {"verdict": "approve"},
-                "v_b": {"verdict": "reject"},
-            },
-        },
-    )
-    with caplog.at_level(logging.WARNING, logger="hyperloom.orchestrator.loop.intent_router"):
-        await coord.router._handle_review_verdict("critic", intent)
-    assert _posted_verdict(coord) == "approve"
-    assert len(coord._materialise_calls) == 1
-    assert coord._materialise_calls[0][1] == {"v_a"}
-    assert any("review_verdict collapse" in r.getMessage() for r in caplog.records)
-
-
-@pytest.mark.asyncio
-async def test_verdict_map_all_rejected_collapses_to_reject(coord):
-    pending = _seed_explore_proposal(coord)
-    intent = Intent(
-        type=IntentType.REVIEW_VERDICT,
-        payload={
-            "target_proposal_msg_id": pending.proposal_msg_id,
-            "verdict_map": {
-                "v_a": {"verdict": "reject"},
-                "v_b": {"verdict": "reject"},
-                "v_c": {"verdict": "reject"},
-                "v_d": {"verdict": "reject"},
-            },
-        },
-    )
-    await coord.router._handle_review_verdict("critic", intent)
-    assert _posted_verdict(coord) == "reject"
-    assert coord._materialise_calls == []
-
-
-@pytest.mark.asyncio
-async def test_a_genuine_reject_does_not_sink_advised_siblings(coord):
-    """A substantive reject on one variant must not discard siblings the Critic advised through."""
-    pending = _seed_explore_proposal(coord, msg_id="msg-partial", variants=["v_a", "v_b", "v_c"])
-    intent = Intent(
-        type=IntentType.REVIEW_VERDICT,
-        payload={
-            "target_proposal_msg_id": pending.proposal_msg_id,
-            "verdict_map": {
-                "v_a": {"verdict": "advise", "rationale": "worth a look"},
-                "v_b": {"verdict": "reject", "rationale": "kb says no"},
-                "v_c": {"verdict": "approve"},
-            },
-        },
-    )
-    await coord.router._handle_review_verdict("critic", intent)
-    assert _posted_verdict(coord) == "approve"
-    assert len(coord._materialise_calls) == 1
-    assert coord._materialise_calls[0][1] == {"v_a", "v_c"}
 
 
 @pytest.mark.asyncio
@@ -551,7 +289,7 @@ async def test_single_verdict_without_advisory_keeps_bare_payload(coord):
     assert "advice=" not in line
 
 
-# 3b. A reject ends the proposal, and the verdict is mirrored for the integrate_patch gate
+# A reject ends the proposal, and the verdict is mirrored for the integrate_patch gate
 @dataclass
 class _PatchVerdictSharedState(_BareSharedState):
     """Adds the patch-verdict mirror the integrate_patch gate reads."""
@@ -607,155 +345,7 @@ async def test_a_rejected_proposal_is_not_a_landing_permit(coord, action_name, p
 
 
 @pytest.mark.asyncio
-async def test_a_verdict_map_mirrors_the_verdict_it_collapsed_to(coord):
-    coord.shared_state = _PatchVerdictSharedState()
-    _seed_pending(coord, "msg-map", "specialist", {"task_id": "t-map"})
-    await _rule(coord, "msg-map", verdict_map={"v_a": {"verdict": "advise"}, "v_b": {"verdict": "reject"}})
-
-    assert _posted_verdict(coord) == "advise"
-    assert coord.shared_state.patch_verdicts["t-map"] == "advise"
-
-
-@pytest.mark.parametrize(
-    "verdicts",
-    [
-        pytest.param(["redirect", ""], id="only_verdicts_outside_the_order"),
-        pytest.param([], id="empty_map"),
-    ],
-)
-def test_a_map_of_verdicts_none_of_which_decides_asks_for_review(verdicts):
-    """A map with no verdict in the collapse order decides nothing and must fall back to review, whether it is empty or carries only verdicts outside the order, such as the legal ``redirect``."""
-    assert collapse_verdicts(verdicts) == "needs_review"
-
-
-@pytest.mark.parametrize(
-    ("verdicts", "expected"),
-    [
-        pytest.param(["approve", "reject", "advise", "needs_review"], "approve", id="one_approve_carries_it"),
-        pytest.param(["reject", "advise", "needs_review"], "reject", id="reject_outranks_advice"),
-        pytest.param(["advise", "needs_review"], "advise", id="advice_outranks_more_review"),
-    ],
-)
-def test_the_collapse_keeps_its_priority_order(verdicts, expected):
-    assert collapse_verdicts(verdicts) == expected
-
-
-def test_proceedable_names_drop_rejects_and_blank_keys():
-    assert proceedable_variant_names(
-        {"v_a": "approve", "v_b": "reject", "": "advise", "v_c": "advise", "v_d": "needs_review"}
-    ) == {"v_a", "v_c"}
-
-
-def test_collapse_verdict_map_keeps_proceedable_siblings():
-    summary, names = collapse_verdict_map({"v_a": "advise", "v_b": "reject", "v_c": "approve"})
-    assert summary == "approve"
-    assert names == {"v_a", "v_c"}
-
-
-def test_collapse_verdict_map_advise_survives_a_sibling_reject():
-    summary, names = collapse_verdict_map({"v_a": "advise", "v_b": "reject"})
-    assert summary == "advise"
-    assert names == {"v_a"}
-
-
-def test_collapse_verdict_map_with_no_proceedable_variant_stays_reject():
-    summary, names = collapse_verdict_map({"v_a": "reject", "v_b": "needs_review"})
-    assert summary == "reject"
-    assert names is None
-
-
-# 4. materialize_approved_proposal — filter semantics (unit)
-@pytest.mark.asyncio
-async def test_materialize_filter_drops_rejected_variants(tmp_path: Path):
-    """Pin the ``approved_variant_names`` filter contract independently."""
-    coord = Coordinator.__new__(Coordinator)
-    coord.session_dir = tmp_path
-    coord.shared_state = _BareSharedState()
-    coord.state = CoordinatorState()
-    coord.knowledge_plane = KnowledgePlane(recipe_kb=_StubRecipeKB())
-    coord.bus = _StubBus()
-    coord.bus.record_observation = AsyncMock()  # type: ignore[method-assign]
-
-    create_calls: list[dict[str, Any]] = []
-
-    class _StubTaskRegistry:
-        async def create_or_return_existing(self, spec):
-            create_calls.append(dict(vars(spec)))
-            from hyperloom.orchestrator.state.task_registry import Task
-
-            return (
-                Task(
-                    task_id="t-explore-filtered",
-                    kind=spec.kind,
-                    state="queued",
-                    params=spec.params,
-                    idempotency_key=spec.idempotency_key,
-                ),
-                False,
-            )
-
-    coord.tasks = _StubTaskRegistry()
-    pending = _seed_explore_proposal(
-        coord,
-        variants=["v_a", "v_b", "v_c", "v_d"],
-    )
-
-    @dataclass
-    class _MoreState(_BareSharedState):
-        baseline_config_path: str = ""
-        baseline_tput: float = 1000.0
-        backends_search: dict = field(default_factory=dict)
-        params_search: dict = field(default_factory=dict)
-        current_best: dict = field(default_factory=dict)
-
-    coord.shared_state = _MoreState()
-    await coord.proposals.materialize_approved_proposal(
-        pending,
-        approved_variant_names={"v_a", "v_c"},
-    )
-    assert create_calls, "materialize must enqueue a task"
-    grid = create_calls[0]["params"]["grid"]
-    names = [v["name"] for v in grid]
-    assert names == ["v_a", "v_c"]
-
-
-@pytest.mark.asyncio
-async def test_materialize_filter_skips_when_no_variant_survives(tmp_path: Path):
-    """A filter that matches nothing must not enqueue an empty explore grid."""
-    coord = Coordinator.__new__(Coordinator)
-    coord.session_dir = tmp_path
-    coord.state = CoordinatorState()
-    coord.knowledge_plane = KnowledgePlane(recipe_kb=_StubRecipeKB())
-    coord.bus = _StubBus()
-    coord.bus.record_observation = AsyncMock()  # type: ignore[method-assign]
-    create_calls: list[dict[str, Any]] = []
-
-    class _StubTaskRegistry:
-        async def create_or_return_existing(self, spec):
-            create_calls.append(dict(vars(spec)))
-            raise AssertionError("empty filtered grid must not create a task")
-
-    coord.tasks = _StubTaskRegistry()
-    pending = _seed_explore_proposal(coord, variants=["v_a", "v_b"])
-
-    @dataclass
-    class _MoreState(_BareSharedState):
-        baseline_config_path: str = ""
-        baseline_tput: float = 1000.0
-        backends_search: dict = field(default_factory=dict)
-        params_search: dict = field(default_factory=dict)
-        current_best: dict = field(default_factory=dict)
-
-    coord.shared_state = _MoreState()
-    await coord.proposals.materialize_approved_proposal(pending, approved_variant_names={"no-such-variant"})
-    assert create_calls == []
-    kinds = [call.args[2].get("kind") for call in coord.bus.record_observation.await_args_list]
-    assert "proposal_materialize_skipped" in kinds
-
-
-@pytest.mark.asyncio
-async def test_materialize_without_filter_keeps_full_grid(tmp_path: Path):
-    """``approved_variant_names=None`` leaves the grid untouched."""
+async def test_an_approved_explore_materialises_its_whole_grid(tmp_path: Path):
     coord = Coordinator.__new__(Coordinator)
     coord.session_dir = tmp_path
     coord.state = CoordinatorState()
@@ -801,7 +391,7 @@ async def test_materialize_without_filter_keeps_full_grid(tmp_path: Path):
     assert names == ["v_a", "v_b", "v_c"]
 
 
-# 5. handle_delegate — explore grid runs directly (no Critic pre-review)
+# handle_delegate — explore grid runs directly (no Critic pre-review)
 def _delegate_coord(tmp_path: Path):
     """Coordinator double reaching the direct explore-task creation path."""
     c = Coordinator.__new__(Coordinator)
@@ -816,9 +406,6 @@ def _delegate_coord(tmp_path: Path):
 
         def is_pruned(self, _action_name: str) -> bool:
             return False
-
-        def reset_policy_denial_streak(self, _action_name: str) -> None:
-            return None
 
     c.shared_state = _State()
     c.state = CoordinatorState()

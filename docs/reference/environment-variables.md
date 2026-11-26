@@ -357,8 +357,11 @@ Globally, on every backend including the default `geak`:
 
 - **`kernel_opt` and `gemm_tuning` are no longer model-issued.** Orchestration
   can neither propose either action nor request `run_optimization` /
-  `run_gemm_tuning` of the kernel agent; both are refused as
-  `phase_incompatible`. The Coordinator dispatches each lane once at KERNEL
+  `run_gemm_tuning` of the kernel agent: a proposal of either action is refused
+  as `phase_incompatible`, a request for `run_gemm_tuning` as `request_kind`,
+  and `run_optimization` has no handler, so a request for it is answered with a
+  failed `unknown_kernel_kind` response.
+  The Coordinator dispatches each lane once at KERNEL
   entry from a lane budget, the way the fusion lane already worked. `integrate` stays proposable, so draining the KEEP queue is still the
   model's job.
 
