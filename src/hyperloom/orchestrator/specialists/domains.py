@@ -208,7 +208,6 @@ def _derive_knowledge_domain_tags() -> tuple[str, ...]:
     """Collect the distinct knowledge-domain tags from the catalogue."""
     seen: dict[str, None] = {}
     for d in SPECIALIST_DOMAINS:
-        # Operator-defined domains are per session, so they get no round counters.
         if d.layer == OPERATOR_DEFINED_LAYER:
             continue
         anchor = d.kb_anchor.strip()
