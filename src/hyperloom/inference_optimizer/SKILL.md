@@ -774,7 +774,7 @@ and the operator's stated value is lost:
 | Custom bench scripts | `--benchmark-scripts-dir` | **Required for `--framework custom`.** Holds the entrypoint, looked up as `custom_<gpu-type>.sh`. Every knob it reads must be forwarded as `--extra-env`; the throughput unit is whatever its report declares. May also hold `levers.json` — the adapter's declared explore grid (see below). |
 | Declared levers (`custom`) | `<benchmark-scripts-dir>/levers.json` | Optional. A JSON **list** of explore variants the adapter declares for itself — `{"name": ..., "extra_envs": {...}}` (an object), or any of `extra_args` / `remove_args` / `unset_envs` / `args_mode: "replace"`. `custom` has no framework source to infer knobs from, so without this its seed grid is empty and EXPLORE has nothing to sweep until the model guesses. Declarations seed **ahead of** model proposals (a model variant of the same name wins) and are not re-seeded once their name appears in the explore ledger's `tested` rows. A malformed file — or one whose variant normalizes to nothing a restart could apply — fails the launch with exit 2; it never degrades to an empty grid. |
 | xDiT model name | `--xdit-model-name` | **Required for `--framework xdit`.** The xDiT model registry name (e.g., `FLUX.2-dev` or `black-forest-labs/FLUX.2-dev`). xDiT uses this to select the correct diffusion pipeline class; unlike vLLM/SGLang, it cannot infer the pipeline from the model path alone. |
-| GPU type | `--gpu-type` | Pass only a GPU the prompt names, as a label such as `mi355x`; any name is taken as given. When unset, the label of the card `amd-smi` reports (see `## GPU Type`). |
+| GPU type | `--gpu-type` | The label of the card the machine reports. Pass only a GPU the prompt names, as a label such as `mi355x`; it is used when the card reports no model name (see `## GPU Type`). |
 | Model class | `--model-class` | categorical key for the deterministic consumers (atom seed grid, framework-agent gap search token, recipe key, prompt label); when unset, Coordinator boot infers and persists it from model metadata or model-path family keywords. For richer advisory model context see Step 1.5 (`model_arch.json`) |
 | Input seq length | `--isl` | Pass the prompt's ISL. Default `1024` when omitted. |
 | Output seq length | `--osl` | Pass the prompt's OSL. Default `1024` when omitted. |
@@ -1239,18 +1239,19 @@ partition sizing and Recipe KB arch matching. There is no list of supported
 boards, so a GPU Hyperloom has not seen before still runs.
 
 The GPU type is the label results, recipes and benchmark scripts are filed
-under. Pass `--gpu-type` or `$GPU_TYPE` only when the prompt names the GPU;
-without either, it is the card's market name reduced to its model designation
-(`AMD Instinct MI355X` → `mi355x`, `AMD Radeon AI PRO R9700` → `r9700`), or its
-arch when the driver gives the card no model name.
+under: the card's market name reduced to its model designation (`AMD Instinct
+MI355X` → `mi355x`, `AMD Radeon AI PRO R9700` → `r9700`). Pass `--gpu-type` or
+`$GPU_TYPE` only when the prompt names the GPU; the name is used when the
+driver gives the card no model name or no card was read, and without one such
+a card is filed under its arch.
 
 ```bash
 python3 -m hyperloom optimize --gpu-type mi355x --model "$MODEL_PATH" --max-hours 2
 GPU_TYPE=mi300x python3 -m hyperloom optimize --model "$MODEL_PATH" --max-hours 2
 ```
 
-Any name is taken as given; when it differs from the card's own label, the
-launch prints a `WARN` naming both. A resume keeps the label the session
+The card's own name wins over a given one, so that recipes and KB rows match
+the hardware: the launch prints a `WARN` naming both. A resume keeps the label the session
 recorded and reads the card again. With no card read and no name given, the
 session has no label and its base launch is refused: pass `--gpu-type`.
 

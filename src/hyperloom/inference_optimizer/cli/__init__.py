@@ -149,7 +149,7 @@ from .session_setup import (
     _enforce_expected_framework,
     _export_partition_shape,
     _publish_gpu_power_settings,
-    _read_session_card,
+    read_session_card,
     _registered_framework_or_exit,
     _require_custom_entrypoint,
     _restore_partition_shape_from_state,
@@ -439,7 +439,7 @@ def _start_experience_kb() -> None:
 
 def _resolve_target_gpu(args: argparse.Namespace, *, nodes: int) -> None:
     """Read the session's card and publish it, then settle ``args.gpu_type`` and export it as ``GPU_TYPE``."""
-    card = _read_session_card(nodes)
+    card = read_session_card(nodes)
     gpu_card.publish_session_card(card)
     given = args.gpu_type or os.environ.get("TARGET_GPU_TYPE") or os.environ.get("GPU_TYPE") or ""
     gpu_type = _session_label(given.strip().lower(), card)

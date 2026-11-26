@@ -393,12 +393,11 @@ def specialist_recall(reports: Path, learnings: ExperienceReader | None = None) 
 
 
 def local_peers(host: MeasurementHost, sessions: SpecialistSessions, setup: PeerSetup) -> Peers:
-    """The session's peers on this machine; exports the workload into this process (:func:`_export_workload`), publishes
-    the card the tests run on as the session's (:func:`_publish_session_card`) and freezes the base launch every test
-    runs on in ``MB-toolbox`` unless the session froze one
-    (:func:`~hyperloom_multibranch.scheduling.session_base.freeze_session_base`), which its component agents are served
-    unless the operator gave them a launch file. Raises :class:`PeersUnavailable` when the backend cannot describe its
-    card, no base launch can be frozen or the session's canonical measurement cannot be taken.
+    """The session's peers on this machine; exports the workload (:func:`_export_workload`) and the card the tests run
+    on (:func:`_publish_session_card`) into this process and freezes the base launch every test runs on in ``MB-toolbox``
+    unless the session froze one (:func:`~hyperloom_multibranch.scheduling.session_base.freeze_session_base`), which
+    its component agents are served unless the operator gave them a launch file. Raises :class:`PeersUnavailable` when
+    the backend cannot describe its card, no base launch can be frozen or the canonical measurement cannot be taken.
 
     Called on the event loop the session runs on. The toolbox is built, not started: the session starts it, and its
     close releases the backend and the sandboxes. The MCP service is started; the session stop stops it. How the
@@ -417,8 +416,7 @@ def local_peers(host: MeasurementHost, sessions: SpecialistSessions, setup: Peer
     _export_workload(workload, layout.toolbox, host.image.ref)
     card = _publish_session_card(host.backend, workload)
     frozen = freeze_session_base(layout.toolbox, workload, setup.reference_script, setup.inferencex_commit)
-    served = served_launch(frozen, setup.agent_launch)
-    base, setup = server_base(frozen.launch), replace(setup, agent_launch=served)
+    base, setup = server_base(frozen.launch), replace(setup, agent_launch=served_launch(frozen, setup.agent_launch))
     native = native_trees(os.environ)
     repo = GitExperimentRepo(layout.repo, setup.blobs, native=native)
     canonical_dir = layout.toolbox / CANONICAL_DIR
@@ -532,12 +530,13 @@ def _publish_session_card(backend: ToolboxBackend, workload: Workload) -> GpuCar
 
     card = backend.card()
     gpu_card.publish_session_card(card)
-    if card.label() != workload.gpu_type:
+    named = gpu_card.board_label(card.name)
+    if named and named != workload.gpu_type:
         logger.warning(
             "the GPU type is given as %r, but the cards are %r (%s); recipes, KB rows and TraceLens specs are looked "
             "up under %r",
             workload.gpu_type,
-            card.label(),
+            named,
             card.describe(),
             workload.gpu_type,
         )

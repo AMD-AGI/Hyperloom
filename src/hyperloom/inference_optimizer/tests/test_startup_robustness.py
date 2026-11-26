@@ -408,15 +408,17 @@ def test_session_label_without_a_disagreement_is_silent(given, card, label, caps
     assert capsys.readouterr().err == ""
 
 
-@pytest.mark.parametrize(
-    ("card", "own"),
-    [(MI355X_CARD, "mi355x"), (replace(MI355X_CARD, name="AMD Radeon Graphics", gfx="gfx1201"), "gfx1201")],
-    ids=["named", "unnamed"],
-)
-def test_a_given_name_that_is_not_the_cards_own_is_kept_with_a_warn_naming_both(card, own, capsys):
-    assert session_setup._session_label("mi300x", card) == "mi300x"
+def test_session_label_is_the_cards_own_name_over_a_given_one_with_a_warn_naming_both(capsys):
+    assert session_setup._session_label("mi300x", MI355X_CARD) == "mi355x"
     warning = capsys.readouterr().err
-    assert warning.startswith("WARN:") and "'mi300x'" in warning and repr(own) in warning
+    assert warning.startswith("WARN:") and "'mi300x'" in warning and "using 'mi355x'" in warning
+
+
+def test_session_label_is_the_given_name_on_a_card_without_one_with_a_warn(capsys):
+    unnamed = replace(MI355X_CARD, name="AMD Radeon Graphics", gfx="gfx1201")
+
+    assert session_setup._session_label("r9700", unnamed) == "r9700"
+    assert "reports no model name" in capsys.readouterr().err
 
 
 # _emit_launch_info

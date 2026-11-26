@@ -95,9 +95,9 @@ default** — so a value left over in the shell cannot displace the shape the
 session was measured at. `PRECISION` is not on that ladder: on both branches it
 is **`--precision`, then `$PRECISION`, then the session's recorded value, then
 the checkpoint's own dtype, then the default**, so on a resume a `$PRECISION`
-left in the shell still outranks the recorded value. When `--gpu-type` is
-omitted, `TARGET_GPU_TYPE`, then `GPU_TYPE`, name the GPU; without any of them
-the GPU type is the label of the card the session reads (see
+left in the shell still outranks the recorded value. The GPU type is the
+label of the card the session reads when the card names its model; otherwise
+`--gpu-type`, then `TARGET_GPU_TYPE`, then `GPU_TYPE`, name it (see
 [GPU card](#gpu-card)).
 
 - **Model / workload shape:** `--model`, `--model-class`, `--framework`,
@@ -472,17 +472,20 @@ it uses no arch-specific launch row, opens no arch-specific gate and has no
 vendor peak. Nothing in Hyperloom keeps a list of boards; every hardware fact
 comes from the card.
 
-The GPU type (`--gpu-type`, `TARGET_GPU_TYPE`, `GPU_TYPE`) is only the label
-results, recipes and scripts are filed under. Any name is taken as given, and
-one that differs from the card's own label is kept with a warning naming both.
-Without one, the label is the card's market name reduced to its model
-designation (`AMD Instinct MI355X` becomes `mi355x`), or its arch (`gfx1201`)
-when the driver gives the card no model name.
+The GPU type is only the label results, recipes and scripts are filed under.
+It is the card's market name reduced to its model designation (`AMD Instinct
+MI355X` becomes `mi355x`); the card's own name wins over a given one, with a
+warning naming both, so that recipes and KB rows match the hardware. When the
+driver gives the card no model name, or no card was read, `--gpu-type`, then
+`TARGET_GPU_TYPE`, then `GPU_TYPE`, name it (any name is accepted); with none
+of them an unnamed card is filed under its arch (`gfx1201`). A multi-branch
+session is filed under the `--gpu-type` it is given, and warns when the card
+names itself otherwise.
 
 | Variable | Set by | Description |
 |----------|--------|-------------|
 | `HYPERLOOM_GPU_CARD` | The session | The card the session read, as JSON (`name`, `device_id`, `gfx`, `compute_units`, `memory_mib`, `memory_bandwidth_gbps`, `engine_clock_mhz`); unset when it read none. Every process the session starts on its own host inherits it, specialists included, and reads the card from it instead of probing the GPU again. Not an operator setting: each start and resume overwrites or clears it. The manifest archives the same card as `gpu_card`. |
-| `HYPERLOOM_GFX_ARCH` (or `GFX_ARCH`) | Operator | Overrides the arch recorded in provenance and the platform fingerprint (`gfx_arch`), which is otherwise the card's. Nothing else reads it: the launch row, the FP4 gate and every other arch decision follow the card. |
+| `HYPERLOOM_GFX_ARCH` (or `GFX_ARCH`) | Operator | Overrides the arch recorded in provenance and the platform fingerprint (`gfx_arch`), which is otherwise the card's. A native build (the llama.cpp server a session compiles) and its knob sweep read it too; the launch row, the FP4 gate and every other arch decision follow the card. |
 | `HYPERLOOM_RUNNER_GPU_CARD` | Operator, on the app host | Path on the app host to a recording of `amd-smi static --json` taken on a node the measurement sandboxes run on. Required for a hosted multi-branch session whose tests run in measurement sandboxes: the app container holds none of their cards, so the session takes its card from this file and every runner checks its own cards against it before a test. A missing, unreadable or mixed recording stops the session before any test; see [Run hosted multi-branch on a new cluster](../how-to/hosted-multibranch-new-cluster.md). |
 
 ## Compute partitioning (AMD)

@@ -104,7 +104,7 @@ def _restore_operator_supplied_paths_from_state(args: Any, state: SharedState) -
             os.environ[_XDIT_MODEL_NAME_ENV] = archived
 
 
-def _read_session_card(nodes: int) -> GpuCard | None:
+def read_session_card(nodes: int) -> GpuCard | None:
     """The card this session runs on, a remote node's for a multi-node run: the first one, with a WARN when its cards
     are not one kind."""
     try:
@@ -143,16 +143,22 @@ def _visible_cards(cards: list[GpuCard]) -> list[GpuCard]:
 
 
 def _session_label(given: str, card: GpuCard | None) -> str:
-    """The name the session files its results under: the one given, else the card's own; a given name that is not the
-    card's own is taken with a WARN."""
-    own = card.label() if card else ""
-    if card and given and given != own:
+    """The name the session files its results under: the card's model designation, else the one given, else the card's
+    arch. The card's own name wins so that recipes and KB rows match the hardware; a given name it overrides, or one
+    the card has no name to check against, is said with a WARN."""
+    named = gpu_card.board_label(card.name) if card else ""
+    if named and given and given != named:
         print(
-            f"WARN: the GPU type is given as {given!r}, but the card is {own!r} ({card.describe()}); recipes, KB rows "
-            f"and TraceLens specs are looked up under {given!r}",
+            f"WARN: the GPU type is given as {given!r}, but the card is {named!r} ({card.name}); using {named!r}",
             file=sys.stderr,
         )
-    return given or own
+    elif card and given and not named:
+        print(
+            f"WARN: the card reports no model name ({card.describe()}), so the given GPU type {given!r} is not "
+            "checked against it",
+            file=sys.stderr,
+        )
+    return named or given or (card.gfx if card else "")
 
 
 def _require_custom_entrypoint(framework: str, gpu_type: str | None = None) -> None:

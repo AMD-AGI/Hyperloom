@@ -97,25 +97,27 @@ def test_any_name_is_accepted_as_the_gpu_type():
     assert args.gpu_type == "mi300a"
 
 
-def test_a_given_gpu_type_counts_even_when_the_card_names_itself_otherwise(monkeypatch, capsys):
+def test_the_cards_own_name_wins_over_a_given_gpu_type_and_says_so(monkeypatch, capsys):
+    """Recipes and KB rows must match the hardware, so a wrong name, or one left in the environment, does not stick."""
     _host(monkeypatch, MI355X_CARD)
     args = _args("--gpu-type", "mi350x")
 
     cli._resolve_target_gpu(args, nodes=1)
 
-    assert args.gpu_type == os.environ["GPU_TYPE"] == "mi350x"
-    assert gpu_card.session_card() == MI355X_CARD
-    assert "'mi355x'" in capsys.readouterr().err
+    assert args.gpu_type == os.environ["GPU_TYPE"] == os.environ["TARGET_GPU_TYPE"] == "mi355x"
+    warning = capsys.readouterr().err
+    assert warning.startswith("WARN:") and "'mi350x'" in warning and "using 'mi355x'" in warning
 
 
-def test_the_environment_names_the_gpu_type_when_the_flag_does_not(monkeypatch):
-    _host(monkeypatch, MI355X_CARD)
+def test_without_a_readable_card_the_flag_then_the_environment_names_the_gpu_type(monkeypatch):
     monkeypatch.setenv("TARGET_GPU_TYPE", "MI350X")
     monkeypatch.setenv("GPU_TYPE", "mi300x")
 
     cli._resolve_target_gpu(args := _args(), nodes=1)
-
     assert args.gpu_type == "mi350x"
+
+    cli._resolve_target_gpu(args := _args("--gpu-type", "mi325x"), nodes=1)
+    assert args.gpu_type == "mi325x"
 
 
 def test_a_host_whose_cards_cannot_be_read_runs_without_a_card(monkeypatch, capsys):
@@ -172,12 +174,15 @@ def test_a_mask_naming_a_card_the_machine_does_not_have_exits_two(monkeypatch, c
     assert f"the visible-device mask {mask!r} names a GPU this machine does not have" in capsys.readouterr().err
 
 
-def test_a_card_without_a_model_designation_is_filed_under_its_arch(monkeypatch):
+def test_a_card_without_a_model_designation_takes_the_given_name_else_its_arch(monkeypatch, capsys):
     _host(monkeypatch, replace(MI355X_CARD, name="AMD Radeon Graphics", gfx="gfx1201"))
 
     cli._resolve_target_gpu(args := _args(), nodes=1)
-
     assert args.gpu_type == os.environ["GPU_TYPE"] == "gfx1201"
+
+    cli._resolve_target_gpu(args := _args("--gpu-type", "r9700"), nodes=1)
+    assert args.gpu_type == "r9700"
+    assert "reports no model name" in capsys.readouterr().err
 
 
 def test_the_visible_device_mask_picks_the_cards_by_rocm_number(monkeypatch):

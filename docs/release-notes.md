@@ -196,15 +196,17 @@ it.
   are not one kind (arch, compute units, memory) the launch warns, listing each
   kind, and takes the first; a device mask may name cards by ROCm number or
   UUID.
-- **`--gpu-type` accepts any name and is taken as given.** It names the label
-  results, recipes and KB rows are filed under (the flag, then
-  `TARGET_GPU_TYPE`, then `GPU_TYPE`). A detected board no longer overrides it;
-  a `WARN` names both when it differs from the card's own label. Without a name
-  the label is the model designation in the card's market name (`AMD Instinct
-  MI355X` is `mi355x`; `MI300XL` and `R9700S` are labels of their own), or the
-  card's arch when the driver gives it no model name. A session with neither a
-  card nor a name exits 2 asking for `--gpu-type`. No framework is refused at
-  launch as not validated on a Radeon board (R9700, R9600D, W7900, W7900D).
+- **`--gpu-type` accepts any name; the card's own name still wins.** The GPU
+  type is the label results, recipes and KB rows are filed under. It is the
+  model designation in the card's market name (`AMD Instinct MI355X` is
+  `mi355x`; `MI300XL` and `R9700S` are labels of their own), and it overrides a
+  given name that differs, with a `WARN` naming both, as the detected board
+  did. `--gpu-type`, then `TARGET_GPU_TYPE`, then `GPU_TYPE`, name the GPU when
+  the driver gives the card no model name or no card was read, and any name is
+  accepted there (the closed list of ten boards is gone); with none of them an
+  unnamed card is filed under its arch. A session with neither a card nor a
+  name exits 2 asking for `--gpu-type`. No framework is refused at launch as
+  not validated on a Radeon board (R9700, R9600D, W7900, W7900D).
 - **A recipe serves only the board it names.** InferenceX points, SGLang
   cookbook cells and headings, and ATOM catalog runners and headings match the
   session's GPU type by name. Boards sharing an arch and memory size no longer
@@ -239,9 +241,10 @@ it.
   the roofline TraceLens computes from a profile is unaffected. On Radeon the
   driver's top clock level is below the boost clock AMD's published peak uses,
   so the vendor peak computed there is 19% to 30% under the published figure.
-  **Upgrade note:** in a `TRACELENS_ROOT` checkout you maintain, delete any
-  `<LABEL>.json` an earlier Hyperloom wrote with vendor peaks; it is now read
-  as measured.
+  `hyperloom conc-sweep` run on its own reads the card the session archived in
+  its manifest, else the machine's. **Upgrade note:** in a `TRACELENS_ROOT`
+  checkout you maintain, delete any `<LABEL>.json` an earlier Hyperloom wrote
+  with vendor peaks; it is now read as measured.
 - **Nothing defaults to MI355X.** `tracelens_analysis --target-platform` is
   required, and a `trace_analyze` request with no GPU type fails with
   `gpu_label_missing`. A custom workload no longer looks for `custom_mi355x.sh`
@@ -261,11 +264,14 @@ it.
   together.
 - **Multi-branch sessions take any `--gpu-type` and read their card**: locally
   from the machine, hosted from the recording of `amd-smi static --json` that
-  `HYPERLOOM_RUNNER_GPU_CARD` names on the app host. The session stops before
-  any test when the variable is unset or the recording describes no one kind of
-  card. The roofline and TraceLens tools default to the session's GPU type.
-  **Upgrade note:** set `HYPERLOOM_RUNNER_GPU_CARD` on every hosted app host
-  before upgrading; see [Run hosted multi-branch on a new
+  `HYPERLOOM_RUNNER_GPU_CARD` names on the app host. The session is filed under
+  the `--gpu-type` it is given and warns when the card names itself otherwise;
+  the list of six boards is gone, and `r9700` and `w7900d` are no longer
+  limited to `--framework llamacpp`. The session stops before any test when the
+  variable is unset or the recording describes no one kind of card. The
+  roofline and TraceLens tools default to the session's GPU type. **Upgrade
+  note:** set `HYPERLOOM_RUNNER_GPU_CARD` on every hosted app host before
+  upgrading; see [Run hosted multi-branch on a new
   cluster](how-to/hosted-multibranch-new-cluster.md).
 - **KernelForge maps only gfx ids and its four stored labels** (`mi300x`,
   `mi355x`, `w7900`, `radeon8060s`) to an arch: pass `gfx942` or `gfx1201` for

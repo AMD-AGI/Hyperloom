@@ -40,7 +40,7 @@ from .session_setup import (
     _apply_operator_supplied_paths,
     _enforce_expected_framework,
     _persist_operator_supplied_paths,
-    _read_session_card,
+    read_session_card,
     _registered_framework_or_exit,
     _require_custom_entrypoint,
     _restore_operator_supplied_paths_from_state,
@@ -172,7 +172,7 @@ def _reexport_session_identity(args: argparse.Namespace, state, session_dir: Pat
         print(f"  re-exported GPU_TYPE  : {state.gpu_type}")
     # Read again rather than restored: the facts are the machine's this leg runs on.
     nodes = max(int(getattr(args, "nodes", 1) or 1), int(getattr(state, "nodes", 1) or 1))
-    gpu_card.publish_session_card(_read_session_card(nodes))
+    gpu_card.publish_session_card(read_session_card(nodes))
 
 
 def _reexport_session_environment(
