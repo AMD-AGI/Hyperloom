@@ -89,8 +89,9 @@ class GpuCard:
     engine_clock_mhz: int | None
 
     def same_kind(self, other: GpuCard) -> bool:
-        """Whether ``other`` has this card's arch, compute units and memory."""
-        return (self.gfx, self.compute_units, self.memory_mib) == (other.gfx, other.compute_units, other.memory_mib)
+        """Whether ``other`` has this card's arch and memory, and its compute units where both cards report them."""
+        units = (self.compute_units, other.compute_units)
+        return (None in units or units[0] == units[1]) and (self.gfx, self.memory_mib) == (other.gfx, other.memory_mib)
 
     def peak_tflops(self, precision: str) -> float | None:
         """Vendor dense peak in TFLOPS; ``None`` without compute units, an engine clock or a rate for the arch."""

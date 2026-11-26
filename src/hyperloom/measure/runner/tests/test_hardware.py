@@ -180,6 +180,14 @@ def test_another_kind_of_card_is_refused_whatever_its_name_says():
     assert _kind_problems(dataclasses.replace(MI355X_CARD, engine_clock_mhz=2402), MI355X_CARD) == []
 
 
+def test_a_sheet_card_read_without_compute_units_is_compared_on_arch_and_memory():
+    """A session that fell back to rocm-smi or torch knows no compute units; the runner's amd-smi does."""
+    probed = dataclasses.replace(MI300X_CARD, compute_units=None, memory_bandwidth_gbps=None, engine_clock_mhz=None)
+
+    assert _kind_problems(MI300X_CARD, probed) == []
+    assert _kind_problems(MI355X_CARD, dataclasses.replace(probed, memory_mib=MI355X_CARD.memory_mib)) != []
+
+
 def test_a_sheet_without_a_card_is_not_compared_with_the_machine_s_cards():
     assert _kind_problems(MI325X_CARD, None) == []
 
