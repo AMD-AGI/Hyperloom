@@ -514,7 +514,8 @@ def test_an_invalid_output_token_cap_fails_the_dsh_task(
         dsh_launch.build_dsh_launch(_dsh_request(tmp_path), dict(_OPENAI_ENV))
 
 
-def test_the_harness_runtime_is_routed_to_the_gateway_over_the_anthropic_messages_protocol(tmp_path: Path) -> None:
+def _start_harness(tmp_path: Path, env: dict[str, str]) -> tuple[dict[str, Any], str]:
+    """Start a harness runtime on a fake SDK; return what it was constructed with and its gateway route patch."""
     from hyperloom_common.llm import deepseek_session
 
     seen: dict[str, Any] = {}
@@ -526,77 +527,40 @@ def test_the_harness_runtime_is_routed_to_the_gateway_over_the_anthropic_message
         def start(self) -> None:
             return None
 
-    class _Sdk:
-        DeepSeekHarness = _Harness
-
     deepseek_session.start_harness(
-        _Sdk(),
+        SimpleNamespace(DeepSeekHarness=_Harness),
         deepseek_session.HarnessLaunch(
             dsh_home=tmp_path / "home",
             cwd=tmp_path,
             model="claude-opus-5.5",
             reasoning_effort="high",
-            env={"DEEPSEEK_BASE_URL": "https://gateway.invalid/Unified/v1", "DEEPSEEK_API_KEY": "gateway-key"},
+            env=env,
             request_timeout_sec=30.0,
         ),
     )
+    route_patch = next(Path(p) for p in seen["patches"] if Path(p).name == "hyperloom-gateway-route.yml")
+    return seen, route_patch.read_text(encoding="utf-8")
+
+
+def test_the_harness_runtime_is_routed_to_the_gateway_over_the_anthropic_messages_protocol(tmp_path: Path) -> None:
+    seen, text = _start_harness(
+        tmp_path, {"DEEPSEEK_BASE_URL": "https://gateway.invalid/Unified/v1", "DEEPSEEK_API_KEY": "gateway-key"}
+    )
 
     assert seen["provider"] == "gateway"
-    route_patch = next(Path(p) for p in seen["patches"] if Path(p).name == "hyperloom-gateway-route.yml")
-    text = route_patch.read_text(encoding="utf-8")
     route = _patch_rows(text)["llm-pi-ai"]["config"]["providers"]["gateway"]
     assert route["api"] == "anthropic-messages"
     assert route["baseURL"] == "https://gateway.invalid/Unified"
     assert "gateway-key" not in text
 
 
-def test_a_harness_runtime_without_a_gateway_url_is_unavailable(tmp_path: Path) -> None:
-    from hyperloom_common.llm import deepseek_session
-
-    with pytest.raises(deepseek_session.DeepSeekSessionUnavailableError, match="DEEPSEEK_BASE_URL"):
-        deepseek_session.start_harness(
-            SimpleNamespace(DeepSeekHarness=lambda **kwargs: None),
-            deepseek_session.HarnessLaunch(
-                dsh_home=tmp_path / "home",
-                cwd=tmp_path,
-                model="claude-opus-5.5",
-                reasoning_effort="high",
-                env={},
-                request_timeout_sec=30.0,
-            ),
-        )
-
-
 def test_the_output_token_cap_is_passed_to_the_harness_runtime(tmp_path: Path) -> None:
-    from hyperloom_common.llm import deepseek_session
-
-    seen: dict[str, Any] = {}
-
-    class _Harness:
-        def __init__(self, **kwargs: Any) -> None:
-            seen.update(kwargs)
-
-        def start(self) -> None:
-            return None
-
-    class _Sdk:
-        DeepSeekHarness = _Harness
-
-    deepseek_session.start_harness(
-        _Sdk(),
-        deepseek_session.HarnessLaunch(
-            dsh_home=tmp_path / "home",
-            cwd=tmp_path,
-            model="claude-opus-5.5",
-            reasoning_effort="high",
-            env={"HYPERLOOM_DSH_MAX_TOKENS": "64000", "DEEPSEEK_BASE_URL": "https://gateway.invalid/v1"},
-            request_timeout_sec=30.0,
-        ),
+    seen, text = _start_harness(
+        tmp_path, {"HYPERLOOM_DSH_MAX_TOKENS": "64000", "DEEPSEEK_BASE_URL": "https://gateway.invalid/v1"}
     )
 
     assert seen["max_tokens"] == 64000
-    route_patch = next(Path(p) for p in seen["patches"] if Path(p).name == "hyperloom-gateway-route.yml")
-    assert _gateway_model(route_patch.read_text(encoding="utf-8"))["maxTokens"] == 64000
+    assert _gateway_model(text)["maxTokens"] == 64000
 
 
 def test_a_cut_off_dsh_session_log_still_yields_its_complete_records(tmp_path: Path) -> None:

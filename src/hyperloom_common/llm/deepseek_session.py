@@ -70,7 +70,7 @@ _COMPACTION_PATCH_NAME = "hyperloom-compaction.yml"
 _INITIALIZE_TIMEOUT_SEC = 120.0
 
 #: Environment variable that caps the output tokens of each model request. Unset
-#: keeps the harness default, which exceeds the output limit of some routed models.
+#: keeps the ``llm-pi-ai`` default of 128000.
 MAX_TOKENS_ENV = "HYPERLOOM_DSH_MAX_TOKENS"
 
 #: Harness token fields, in their wire spelling, mapped onto the shared names.
@@ -172,7 +172,7 @@ def gateway_route_patch(base_url: str, model: str, *, max_tokens: int | None = N
     Args:
         base_url: The gateway root as configured for the OpenAI-compatible line.
         model: The model id the gateway serves.
-        max_tokens: Per-request output-token cap, or ``None`` for the harness default.
+        max_tokens: Per-request output-token cap, or ``None`` for the ``llm-pi-ai`` default.
     """
     root = base_url.strip().rstrip("/")
     root = root.removesuffix("/v1")
@@ -248,13 +248,10 @@ def start_harness(sdk: Any, launch: HarnessLaunch) -> Any:
     launch.dsh_home.mkdir(parents=True, exist_ok=True)
     compaction_patch = launch.dsh_home / _COMPACTION_PATCH_NAME
     compaction_patch.write_text(COMPACTION_PATCH, encoding="utf-8")
-    base_url = launch.env.get(GATEWAY_BASE_URL_ENV, "").strip()
-    if not base_url:
-        raise DeepSeekSessionUnavailableError(
-            f"the harness gateway route needs {GATEWAY_BASE_URL_ENV} in its environment"
-        )
     gateway_patch = launch.dsh_home / _GATEWAY_PATCH_NAME
-    gateway_patch.write_text(gateway_route_patch(base_url, launch.model, max_tokens=max_tokens), encoding="utf-8")
+    gateway_patch.write_text(
+        gateway_route_patch(launch.env[GATEWAY_BASE_URL_ENV], launch.model, max_tokens=max_tokens), encoding="utf-8"
+    )
     harness = sdk.DeepSeekHarness(
         dsh_home=str(launch.dsh_home),
         cwd=workspace,
