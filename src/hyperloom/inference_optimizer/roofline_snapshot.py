@@ -647,7 +647,7 @@ def direction_saturation(snapshot: dict[str, Any] | None) -> dict[str, Any]:
 
 def _system_findings_lines(trace_analyze: dict[str, Any]) -> list[str]:
     """The digest's ``system_findings`` block; empty when TraceLens reported none."""
-    rows = [f"  {system_finding_summary(f)}" for f in trace_analyze.get("system_findings") or [] if isinstance(f, dict)]
+    rows = [f"  {system_finding_summary(f)}" for f in trace_analyze.get("system_findings") or []]
     return ["system_findings:", *rows] if rows else []
 
 

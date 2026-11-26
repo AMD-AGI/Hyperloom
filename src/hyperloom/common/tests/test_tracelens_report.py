@@ -150,8 +150,6 @@ def test_a_system_finding_summary_shows_the_share_tracelens_ranks_it_by():
             {"metric": "Copy %", "value": None, "unit": "%"},
         ],
     }
-    no_share = {**unread, "metrics": [{"metric": "Copy Count", "value": 70.0, "unit": "count"}]}
 
     assert system_finding_summary(comm) == "P1 Exposed Collective Communication  Exposed Communication %: 60.72%"
     assert system_finding_summary(unread) == "P4 D2H Memory Copy Overhead [node-1]  Copy %: n/a"
-    assert system_finding_summary(no_share) == "P4 D2H Memory Copy Overhead [node-1]  Copy Count: 70"

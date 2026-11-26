@@ -78,28 +78,12 @@ def fusion_findings(report_path: str | Path) -> list[dict[str, Any]]:
     return findings
 
 
-def _metric_text(row: Mapping[str, Any]) -> str:
-    """One metric row of a system finding as ``<metric>: <value>[<unit>]``; ``n/a`` for a value TraceLens could not read."""
-    value, unit = row.get("value"), str(row.get("unit") or "")
-    if not isinstance(value, (int, float)):
-        shown = "n/a"
-    elif unit == "%":
-        shown = f"{value:g}%"
-    else:
-        shown = f"{value:g} {unit}" if unit and unit != "count" else f"{value:g}"
-    return f"{row.get('metric') or '?'}: {shown}"
-
-
 def system_finding_summary(finding: Mapping[str, Any]) -> str:
-    """A system finding on one line: priority, title, node and its share metric.
-
-    The share is the first ``%`` row, the one TraceLens ranks the findings by; a finding without one shows its first row.
-    """
-    metrics = list(finding.get("metrics") or [])
-    share = next((m for m in metrics if m.get("unit") == "%"), metrics[0] if metrics else None)
-    node = f" [{finding['node']}]" if finding.get("node") else ""
-    shown = f"  {_metric_text(share)}" if share else ""
-    return f"P{finding.get('priority') or '?'} {finding.get('operation') or '?'}{node}{shown}"
+    """A system finding on one line: priority, title, node and its share, the first ``%`` row TraceLens ranks it by."""
+    share = next(m for m in finding["metrics"] if m["unit"] == "%")
+    value = "n/a" if share["value"] is None else f"{share['value']:g}%"
+    node = f" [{finding['node']}]" if finding["node"] else ""
+    return f"P{finding['priority']} {finding['operation']}{node}  {share['metric']}: {value}"
 
 
 def system_findings(report_path: str | Path) -> list[dict[str, Any]]:
