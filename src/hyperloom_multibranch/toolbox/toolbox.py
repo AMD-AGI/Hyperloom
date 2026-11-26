@@ -554,6 +554,12 @@ class RealToolbox:
             raise UnknownTestRequest(job_id)
         return self._tools.result(job_id)
 
+    async def analysis_result(self, branch: str, job_id: str) -> Mapping[str, Any]:
+        """The result record of the tool job ``job_id``, for a branch its result goes to (:meth:`ToolJobs.document`)."""
+        if self._tools is None:
+            raise UnknownTestRequest(job_id)
+        return self._tools.document(job_id, branch)
+
     def record_cold_start(self, seconds: float) -> None:
         self._queue.cold_start_seconds = seconds
 

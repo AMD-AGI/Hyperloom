@@ -53,19 +53,18 @@ class TopologySpelling:
     ep_switch: tuple[str, ...] = ()
     dp: tuple[str, ...] = ()
 
+    def value(self, args: Sequence[str], spellings: tuple[str, ...]) -> str | None:
+        """The value ``args`` give the last of ``spellings``, ``None`` when they give none."""
+        return last_alias_value(argv_flag_occurrences(args), frozenset(map(canonical_flag_name, spellings)))
+
     def read(self, args: Sequence[str]) -> Topology:
         """The topology ``args`` run, an unset size being 1."""
-        occurrences = argv_flag_occurrences(args)
-
-        def value(spellings: tuple[str, ...]) -> str | None:
-            return last_alias_value(occurrences, frozenset(map(canonical_flag_name, spellings)))
-
-        tp = _size(value(self.tp), "tp")
+        tp = _size(self.value(args, self.tp), "tp")
         if self.ep:
-            return Topology(tp=tp, ep=_size(value(self.ep), "ep"))
-        if value(self.ep_switch) is None:
+            return Topology(tp=tp, ep=_size(self.value(args, self.ep), "ep"))
+        if self.value(args, self.ep_switch) is None:
             return Topology(tp=tp)
-        return Topology(tp=tp, ep=tp * _size(value(self.dp), "dp"))
+        return Topology(tp=tp, ep=tp * _size(self.value(args, self.dp), "dp"))
 
     def argv(self, topology: Topology) -> tuple[str, ...] | str:
         """The flags that run ``topology`` on one replica, or why the framework cannot."""

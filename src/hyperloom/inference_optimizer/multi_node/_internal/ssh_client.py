@@ -17,11 +17,6 @@ from .env_safety import assert_forward_env_keys
 DEFAULT_SSH_PORT = 2233
 
 
-def _ssh_common_opts(known_hosts: Path) -> list[str]:
-    """Build hardened non-interactive SSH options using a session known_hosts file."""
-    return ssh_options(known_hosts)
-
-
 def _ssh_identity(key_path: Path | str) -> str:
     """Return the identity path to hand to ``ssh -i``."""
     return str(key_path)
@@ -40,7 +35,7 @@ class SshTarget:
         """The ``ssh`` argv up to and including ``root@host``."""
         return [
             "ssh",
-            *_ssh_common_opts(self.known_hosts),
+            *ssh_options(self.known_hosts),
             "-o",
             "IdentitiesOnly=yes",
             "-i",
