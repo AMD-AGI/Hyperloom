@@ -152,9 +152,9 @@ def test_an_inferencex_arm_is_one_sweep_test_and_both_arms_run_at_once(tmp_path:
     payload = asyncio.run(_sweep(layout, _settings(), tests).run(_never()))
 
     assert sorted((r.parent_commit, r.concurrency) for r in tests.requests) == [
-        ("c0ffee", (4, 16, 32)),
-        ("root", (4, 16, 32)),
-    ]
+        ("c0ffee", (16, 4, 32)),
+        ("root", (16, 4, 32)),
+    ], "one test per arm, the workload's conc first"
     assert {r.purpose.value for r in tests.requests} == {"health"} and not any(r.accuracy for r in tests.requests)
     assert payload["status"] == "succeeded" and payload["summary"]["successful_pairs"] == 3
     assert _summary(layout)["optimized"]["commit"] == "c0ffee"
@@ -377,6 +377,6 @@ def test_under_a_deadline_a_test_of_several_points_runs_those_that_fit_and_skips
 
     payload = asyncio.run(sweep.run(_never()))
 
-    assert len(tests.requests[0].concurrency) == 2
+    assert tests.requests[0].concurrency == (16, 4), "the workload's conc first, then low to high"
     baseline = {p["conc"]: p["status"] for p in payload["baseline"]["points"]}
-    assert sorted(baseline.values()).count(final.SKIPPED_BUDGET) == 1
+    assert baseline[32] == final.SKIPPED_BUDGET

@@ -648,6 +648,7 @@ class ConcSweep:
         async with slots:
             if self.cancel_reason:
                 return
+            concs = tuple(ladder(concs, self.workload.conc))
             fit = self._points_that_fit(len(concs))
             if fit < len(concs):
                 self._record([{"arm": arm, "conc": conc, "status": SKIPPED_BUDGET} for conc in concs[fit:]])
