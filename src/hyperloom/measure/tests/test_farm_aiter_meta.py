@@ -375,7 +375,7 @@ def test_a_worker_spawned_by_the_server_imports_the_farms_aiter_and_the_check_pa
     envs = place_farm(_point(tmp_path, image), farm, {})
 
     assert _serve_with_a_worker(tmp_path, image, envs) == ["patched", "patched"]
-    assert refine_imports(dict(_ENDED_WELL), farm) == _ENDED_WELL
+    assert refine_imports(dict(_ENDED_WELL), farm, needs_server=True) == _ENDED_WELL
     assert {note.package for note in read_import_notes(farm)} == {"aiter"} and len(read_import_notes(farm)) == 2
 
 
@@ -387,7 +387,7 @@ def test_told_the_images_checkout_as_meta_directory_the_worker_imports_the_image
     envs = {**place_farm(_point(tmp_path, image), farm, {}), "AITER_META_DIR": str(image.meta)}
 
     assert _serve_with_a_worker(tmp_path, image, envs) == ["patched", "image"]
-    refined = refine_imports(dict(_ENDED_WELL), farm)
+    refined = refine_imports(dict(_ENDED_WELL), farm, needs_server=True)
 
     assert refined["failure_class"] == "infra" and refined["returncode"] != 0
     assert refined["failure_reason"].startswith(f"{INERT_PATCH}: process ")
@@ -421,12 +421,23 @@ def test_a_server_that_failed_before_importing_is_not_called_inert_but_one_that_
     farm = _build(tmp_path, image)
     failed = {**_ENDED_WELL, "returncode": 1, "failure_class": "unclear"}
 
-    assert refine_imports(dict(failed), farm) == failed
-    refined = refine_imports(dict(_ENDED_WELL), farm)
+    assert refine_imports(dict(failed), farm, needs_server=True) == failed
+    refined = refine_imports(dict(_ENDED_WELL), farm, needs_server=True)
     assert (
         refined["failure_class"] == "infra"
         and "no process of the server noted importing aiter" in refined["failure_reason"]
     )
+
+
+def test_a_test_with_no_server_is_inert_only_for_a_package_imported_from_outside_the_farm(tmp_path, image):
+    """A probe that needs no server runs its own script alone, which need not import aiter at all."""
+    farm = _build(tmp_path, image)
+
+    assert refine_imports(dict(_ENDED_WELL), farm, needs_server=False) == _ENDED_WELL
+    import_notes(farm).mkdir()
+    (import_notes(farm) / "41-aiter.json").write_text("{", encoding="utf-8")
+    refined = refine_imports(dict(_ENDED_WELL), farm, needs_server=False)
+    assert refined["failure_reason"].startswith(f"{INERT_PATCH}: process 0 imported aiter from an unreadable note")
 
 
 def test_an_unreadable_note_is_an_import_from_an_unknown_place(tmp_path, image):
@@ -434,7 +445,7 @@ def test_an_unreadable_note_is_an_import_from_an_unknown_place(tmp_path, image):
     import_notes(farm).mkdir()
     (import_notes(farm) / "41-aiter.json").write_text("{", encoding="utf-8")
 
-    refined = refine_imports(dict(_ENDED_WELL), farm)
+    refined = refine_imports(dict(_ENDED_WELL), farm, needs_server=True)
 
     assert (
         refined["failure_class"] == "infra"

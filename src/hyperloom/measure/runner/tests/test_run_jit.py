@@ -35,6 +35,7 @@ from hyperloom.sandbox.socket import DirEntry
 from hyperloom.measure.jit.tests.triton_cache import find_kernel, get_group
 from hyperloom.measure.farm import NativeModule
 from hyperloom.measure.manifest import JitCacheFacts, ResultManifest
+from hyperloom.measure.repro import LOG_FILE, PROBE_SCRIPT, REPRO_DIR
 from hyperloom.measure.returncodes import HOSTED_INFRA_FAILURE_RC
 from hyperloom.measure.runner import jit as runner_jit
 from hyperloom.measure.runner import own_jit
@@ -223,12 +224,11 @@ class Rig:
             "entries": [entry],
         }
 
-    def directory_attachment(self, run: Path) -> dict:
-        """An attachment that is a directory: unlike a table file it can hold code the server runs."""
+    def directory_attachment(self, run: Path, name: str = "helper.py", data: bytes = b"print('hello')\n") -> dict:
+        """An attachment that is a directory holding ``name``: unlike a table file it can hold code the server runs."""
         buffer = io.BytesIO()
         with tarfile.open(fileobj=buffer, mode="w") as archive:
-            data = b"print('hello')\n"
-            member = tarfile.TarInfo("helper.py")
+            member = tarfile.TarInfo(name)
             member.size = len(data)
             archive.addfile(member, io.BytesIO(data))
         return {"id": "ext", "kind": "dir", "blob": _blob(run, buffer.getvalue()), "manifest_sha256": "1" * 64}
@@ -649,6 +649,21 @@ def test_a_run_whose_server_never_imported_the_patched_aiter_ends_as_an_inert_pa
     assert (patched.outcome.failure_class, patched.outcome.returncode) == ("infra", HOSTED_INFRA_FAILURE_RC)
     assert str(patched.outcome.failure_reason).startswith("inert_patch: no process of the server noted importing aiter")
     assert (run / "scratch" / "test" / "farm" / "site" / "sitecustomize.py").is_file(), "the runner installed the watch"
+
+
+def test_a_probe_with_no_server_and_a_patched_aiter_ends_well_though_no_process_imported_it(rig) -> None:
+    """Only a server's processes must import the farm's aiter; a probe that needs none runs its script alone."""
+    probe = _arm(
+        rig,
+        kind="repro",
+        roots=_aiter_patch(rig),
+        attachments=lambda run: [rig.directory_attachment(run, PROBE_SCRIPT, b"echo hello\n")],
+    )
+    manifest, _, run = rig.run("probe", probe)
+
+    assert (manifest.outcome.failure_class, manifest.outcome.returncode) == (None, 0)
+    assert rig.grid.calls == [], "no server was booted"
+    assert (run / "out" / "files" / REPRO_DIR / LOG_FILE).read_text().startswith("hello\n")
 
 
 def test_the_runners_own_import_of_a_native_module_the_farm_laid_is_not_counted_as_the_servers(

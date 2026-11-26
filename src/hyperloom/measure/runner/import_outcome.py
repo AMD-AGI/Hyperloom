@@ -12,8 +12,8 @@ Each process notes where it imported every rebuilt package from (:mod:`.import_o
 :func:`install_import_watch` puts in the farm's ``site`` directory as its ``sitecustomize``). A
 test where one of them came from anywhere but the farm ends as an infrastructure failure, ``inert_patch``, naming the file
 that was loaded: it is a ``measurement_failed`` that no negative result is written for, whatever the run itself ended
-with. A test that ended well although no process imported a rebuilt package at all, or whose processes noted nothing,
-ends the same way: the patch never ran, or whether it ran cannot be told.
+with. A test of a server that ended well although no process imported a rebuilt package at all, or whose processes
+noted nothing, ends the same way: the patch never ran, or whether it ran cannot be told.
 
 The notes are read after the run rather than polled at readiness: the processes write them when they import, which is
 before the server answers, and the file read is the same. The runner's own processes write them too (its check of the
@@ -119,14 +119,16 @@ def _never_imported(farm: Farm, notes: list[ImportNote]) -> str | None:
     )
 
 
-def refine_imports(document: dict[str, Any], farm: Farm | None) -> dict[str, Any]:
+def refine_imports(document: dict[str, Any], farm: Farm | None, *, needs_server: bool) -> dict[str, Any]:
     """``document`` (the outcome the runner reports) as an ``inert_patch`` infrastructure failure when the patch did not
-    run in the server, or as it was. A package no process imported counts only for a test that otherwise ended well: a
-    server that failed may have failed before it imported anything."""
+    run in the server, or as it was. A package no process imported counts only for a test that ran a server and
+    otherwise ended well: a server that failed may have failed before it imported anything, and a probe that needs no
+    server runs its own script alone, which need not import every rebuilt package. One imported from anywhere but the
+    farm counts for every test."""
     if farm is None or not farm.packages:
         return document
     notes = read_import_notes(farm)
     reason = _misplaced(farm, notes)
-    if reason is None and document["failure_class"] is None and document["returncode"] == 0:
+    if reason is None and needs_server and document["failure_class"] is None and document["returncode"] == 0:
         reason = _never_imported(farm, notes)
     return document if reason is None else failed_outcome(document, FailureClass.INFRA, reason)

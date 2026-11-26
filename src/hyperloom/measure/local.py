@@ -128,7 +128,7 @@ from hyperloom.orchestrator.actions.executors import (
 from hyperloom.orchestrator.actions.cancel_channel import CancelScope, current_cancel_scope, use_cancel_scope
 from hyperloom.orchestrator.state.base_launch import freeze_base
 
-__all__ = ["LocalMeasurementBackend", "SUPPORTED_KINDS", "TestCallRefused"]
+__all__ = ["LocalMeasurementBackend", "SUPPORTED_KINDS", "TestCallRefused", "repro_case"]
 
 #: ``VariantResult.error_class`` of a round the per-round cap reaped.
 _TIMEOUT_CLASSES = frozenset({FailedStep.ROUND_TIMEOUT.value})
@@ -864,6 +864,11 @@ async def _sweep_by_restart(run: Run, order: list[int]) -> None:
             return
 
 
+def repro_case(call: TestCall) -> Case:
+    """The case of a repro test: the one entry script its attachments hold, where the runner unpacked them."""
+    return find_case(Path(call.cwd) / "attach", [attachment.id for attachment in call.attachments])
+
+
 async def _repro(run: Run) -> None:
     """Boot the server the way a test does, run the case against it, tear the server down; a probe that needs no
     server runs with none.
@@ -871,9 +876,8 @@ async def _repro(run: Run) -> None:
     No warmup and no measured round: the server only has to be up. A server that does not boot ends the test as a
     failed test does; a case that cannot run to a verdict ends it as a failure of the measurement, never a verdict.
     """
-    call = run.call
     try:
-        case = find_case(Path(call.cwd) / "attach", [attachment.id for attachment in call.attachments])
+        case = repro_case(run.call)
     except ReproError as exc:
         _fail_case(run, str(exc))
         return

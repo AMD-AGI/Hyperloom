@@ -39,7 +39,7 @@ from hyperloom.measure.failures import (
     classify_test_failure,
     is_disk_full,
 )
-from hyperloom.measure.local import LocalMeasurementBackend, TestCallRefused
+from hyperloom.measure.local import LocalMeasurementBackend, TestCallRefused, repro_case
 from hyperloom.measure.manifest import encode_manifest, manifest_notes, ManifestFile, RESULT_SCHEMA
 from hyperloom.measure.phases import (
     BOOTSTRAP,
@@ -52,6 +52,7 @@ from hyperloom.measure.phases import (
     manifest_document,
 )
 from hyperloom.measure.pins import IMAGE_DIGEST_VAR
+from hyperloom.measure.repro import ReproError
 from hyperloom.measure.jit.native.config import store_from_environment
 from hyperloom.measure.jit.native.laying import NamedBuild, NativeLayError, SheetBuilds, sheet_builds
 from hyperloom.measure.jit.session import JitCacheSession
@@ -376,6 +377,17 @@ def _case_attachments(spec: MeasurementSpec) -> tuple[AttachmentRef, ...]:
     return tuple(AttachmentRef(a.id, a.kind, a.blob.removeprefix("sha256:")) for a in spec.attachments)  # type: ignore[arg-type]
 
 
+def _needs_a_server(call: TestCall) -> bool:
+    """Whether the test runs a server: every test does but a repro test whose case is a probe that needs none, or that
+    holds no case and so runs nothing."""
+    if call.kind != "repro":
+        return True
+    try:
+        return repro_case(call).needs_server
+    except ReproError:
+        return False
+
+
 def _call(ctx: _Context, spec: MeasurementSpec, points: list[Path], inferencex: Path, progress: Progress) -> TestCall:
     p = spec.procedure
     remaining = p.deadline_unix - time.time() if p.deadline_unix else p.timeout_sec
@@ -665,7 +677,11 @@ def _run_sheet(ctx: _Context, spec_path: Path, key, progress: Progress) -> None:
     _write_bundle(
         ctx,
         _Signed(spec, raw, key),
-        refine_imports(refine_outcome(_outcome_document(outcome, timed_out), session, cold.builds), farm),
+        refine_imports(
+            refine_outcome(_outcome_document(outcome, timed_out), session, cold.builds),
+            farm,
+            needs_server=_needs_a_server(call),
+        ),
         _Findings(files, facts, changed, timing, visible, surface, None if report is None else report.document()),
     )
 
