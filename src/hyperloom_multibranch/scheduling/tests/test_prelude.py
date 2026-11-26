@@ -237,7 +237,7 @@ def _prelude(
         peers.toolbox,
         open_integration,
         replay or replay_champion,
-        profiler.profile_root,
+        profiler,
     )
     return Prelude(context, services, warm_start=warm_start)
 
@@ -291,7 +291,6 @@ async def test_prelude_starts_no_process_and_roots_on_the_checkout_with_root_tes
     assert len(baseline_tests) == BASELINE_TESTS and len(peers.toolbox.requests) == BASELINE_TESTS + 1
     request = peers.toolbox.requests[profile]
     assert (request.kind, request.branch_id, request.parent_commit) == (TestKind.PROFILE, INTEGRATION_BRANCH, root)
-    job, outcome = await _root_profile(peers, result)
     assert peers.toolbox.analysed == [profile]
     # The point names its prompt and output length: the analysis does not wait for the baseline.
     assert peers.toolbox.baseline_written == [False]
@@ -306,16 +305,18 @@ async def test_prelude_starts_no_process_and_roots_on_the_checkout_with_root_tes
     assert (session_profile.model_type, session_profile.architectures) == ("", ())
     shares = await _blackboard(layout).op_shares(root)
     assert shares is not None and (dict(shares.shares), shares.profile_request_id) == (ROOT_SHARES, profile)
-    assert job == "tracelens-1"
-    assert (outcome.reason, outcome.detail["commit"], outcome.detail["request_id"]) == (PROFILED, root, profile)
-    assert outcome.event is not None and outcome.event.kind is EventKind.ROOT_PROFILED
-    assert outcome.event.detail == {"commit": root, "largest_op": "gemm", "share_pct": ROOT_SHARES["gemm"]}
+    assert result.root_profile_job.result() == "tracelens-1"
+    assert peers.profiler is not None and not peers.profiler.running and peers.profiler.take_outcome() is None
     assert peers.replays == [("inference:champion", False)]
     rows = _logged(layout)
     [rooted] = [entry["detail"] for entry in rows if entry["reason"] == "root committed"]
     assert rooted == {"root_commit": root}
-    # The profile's decision is the events' to record when they take its outcome, as for any profile of the head.
-    assert not [entry for entry in rows if entry["kind"] == "profile"]
+    [profiled] = [entry for entry in rows if entry["kind"] == "profile"]
+    assert (profiled["reason"], profiled["detail"]["commit"], profiled["detail"]["request_id"]) == (
+        PROFILED,
+        root,
+        profile,
+    )
 
 
 class _BaselineAfterProfile:
@@ -354,6 +355,14 @@ async def test_an_agentx_prelude_anchors_its_baseline_on_one_root_test_and_has_n
     # Its point names no prompt and output length, which the analysis takes from the baseline: it waited for it.
     assert peers.toolbox.baseline_written == [True]
     assert outcome.detail["after_baseline"] is True
+    assert outcome.event is not None and outcome.event.kind is EventKind.ROOT_PROFILED
+    assert outcome.event.detail == {
+        "commit": result.root_commit,
+        "largest_op": "gemm",
+        "share_pct": ROOT_SHARES["gemm"],
+    }
+    # PRELUDE left the analysis running: its decision is the events' to record when they take its outcome.
+    assert not [entry for entry in _logged(layout) if entry["kind"] == "profile"]
     [established] = [entry for entry in _logged(layout) if entry["reason"] == "baseline established"]
     assert established["detail"]["request_ids"] == [root_test]
     profile_record = await _blackboard(layout).session_profile()
@@ -437,6 +446,22 @@ async def test_a_prelude_whose_backend_cannot_analyse_the_root_profile_records_i
     result = await _run(_prelude(layout, peers))
 
     assert (await _blackboard(layout).baseline()).root_commit == result.root_commit
+    assert await _blackboard(layout).op_shares(result.root_commit) is None
+    assert result.root_profile_job.result() == ""
+    [unavailable] = [entry for entry in _logged(layout) if entry["kind"] == "profile"]
+    assert (unavailable["reason"], unavailable["detail"]["code"]) == (PROFILE_UNAVAILABLE, CODE_TOOL_UNAVAILABLE)
+
+
+async def test_an_agentx_prelude_whose_backend_cannot_analyse_the_root_profile_leaves_that_to_its_outcome(
+    tmp_path: Path,
+) -> None:
+    layout = _layout(tmp_path)
+    peers = _peers(layout)
+    peers.toolbox.analysis_refusal = RequestRejected("no TraceLens on this backend", CODE_TOOL_UNAVAILABLE)
+
+    result = await _run(_prelude(layout, peers), AGENTX)
+
+    assert (await _blackboard(layout).baseline()).root_commit == result.root_commit
     job, unavailable = await _root_profile(peers, result)
     assert await _blackboard(layout).op_shares(result.root_commit) is None
     assert job == ""
@@ -447,7 +472,7 @@ async def test_a_prelude_whose_backend_cannot_analyse_the_root_profile_records_i
     )
 
 
-async def test_prelude_ends_once_the_root_profile_test_ended_and_leaves_its_analysis_running_as_the_profile(
+async def test_an_inferencex_prelude_waits_for_the_analysis_of_its_root_profile(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     layout = _layout(tmp_path)
@@ -455,7 +480,29 @@ async def test_prelude_ends_once_the_root_profile_test_ended_and_leaves_its_anal
     analysis = [JobStatus.RUNNING]
     monkeypatch.setattr(peers.toolbox, "tool_status", lambda job_id: analysis[0])
 
-    result = await asyncio.wait_for(_run(_prelude(layout, peers)), 60)
+    prelude = asyncio.ensure_future(_run(_prelude(layout, peers)))
+    while not (peers.toolbox.analysed and _established(layout)):
+        await asyncio.sleep(0.01)
+    await asyncio.sleep(0.05)
+
+    assert not prelude.done()
+    analysis[0] = JobStatus.SUCCEEDED
+    result = await asyncio.wait_for(prelude, 60)
+    assert result.root_profile_job.result() == "tracelens-1"
+    assert peers.profiler is not None and not peers.profiler.running and peers.profiler.take_outcome() is None
+    [profiled] = [entry for entry in _logged(layout) if entry["kind"] == "profile"]
+    assert profiled["reason"] == PROFILED
+
+
+async def test_an_agentx_prelude_ends_once_the_root_profile_test_ended_and_leaves_its_analysis_running(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    layout = _layout(tmp_path)
+    peers = _peers(layout)
+    analysis = [JobStatus.RUNNING]
+    monkeypatch.setattr(peers.toolbox, "tool_status", lambda job_id: analysis[0])
+
+    result = await asyncio.wait_for(_run(_prelude(layout, peers), AGENTX), 60)
 
     [profile] = _by_purpose(peers.toolbox, Purpose.PROFILE)
     assert profile in peers.toolbox.results and _established(layout)
@@ -467,19 +514,24 @@ async def test_prelude_ends_once_the_root_profile_test_ended_and_leaves_its_anal
     assert outcome.event is not None and outcome.event.kind is EventKind.ROOT_PROFILED
 
 
+@pytest.mark.parametrize("workload", [WORKLOAD, AGENTX], ids=["inferencex", "agentx"])
 async def test_a_baseline_failing_after_the_root_profile_test_ended_stops_its_analysis(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, workload: Workload
 ) -> None:
     layout = _layout(tmp_path)
     peers = _peers(layout)
     monkeypatch.setattr(peers.toolbox, "tool_status", lambda job_id: JobStatus.RUNNING)
     peers.toolbox.script(lambda request: request.purpose is Purpose.BASELINE, [Fate.MEASUREMENT])
-    _root_tests_held_until(monkeypatch, peers, lambda: bool(peers.toolbox.analysed))
+
+    def profile_measured() -> bool:
+        return any(request_id in peers.toolbox.results for request_id in _by_purpose(peers.toolbox, Purpose.PROFILE))
+
+    _root_tests_held_until(monkeypatch, peers, profile_measured)
 
     with pytest.raises(PreludeFailed, match="the baseline anchors nothing"):
-        await asyncio.wait_for(_run(_prelude(layout, peers)), 60)
+        await asyncio.wait_for(_run(_prelude(layout, peers), workload), 60)
 
-    assert peers.toolbox.analysed and not _established(layout)
+    assert not _established(layout)
     assert peers.profiler is not None and not peers.profiler.running
 
 

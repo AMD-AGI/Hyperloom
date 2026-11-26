@@ -1153,7 +1153,7 @@ class ProfilingToolbox(RecordingToolbox):
 ROOT_SHARES = {"moe_gemm": 41.5, "attention": 22.0}
 
 
-async def test_a_session_profiles_its_root_in_prelude_and_shows_the_judge_the_roots_shares_once_they_landed(
+async def test_a_session_opens_explore_on_the_roots_own_profile_read_before_the_opening_judge_call(
     tmp_path: Path,
 ) -> None:
     stage = _stage(tmp_path)
@@ -1171,15 +1171,37 @@ async def test_a_session_profiles_its_root_in_prelude_and_shows_the_judge_the_ro
     shares = await stage.handle(Role.OBSERVER).op_shares(root)
     assert shares is not None and dict(shares.shares) == ROOT_SHARES
     rows = _decisions(stage)
-    [profiled] = [row for row in rows if row["kind"] == "profile"]
-    assert profiled["reason"] == PROFILED and profiled["detail"]["commit"] == root
-    [landed] = [row for row in rows if row["kind"] == "event"]
-    assert (landed["detail"]["event"], landed["detail"]["commit"]) == ("root_profiled", root)
-    calls = [json.loads(line) for line in stage.layout.judge.read_text().splitlines()]
-    assert any('"root_profiled"' in call["prompt"] for call in calls)
+    profiled = next(index for index, row in enumerate(rows) if row["kind"] == "profile")
+    assert rows[profiled]["reason"] == PROFILED and rows[profiled]["detail"]["commit"] == root
+    assert profiled < next(index for index, row in enumerate(rows) if row["kind"] == "judge")
     [rooted] = [row for row in rows if row["reason"] == "root committed"]
     assert rooted["detail"] == {"root_commit": root}
     assert stage.sessions.started == {"b01": root}
+
+
+async def test_an_agentx_session_opens_explore_before_its_roots_analysis_ended_and_shows_the_judge_its_shares_after(
+    tmp_path: Path,
+) -> None:
+    stage = _stage(tmp_path)
+    stage.settings = replace(ONE_TEST, workload=AGENTX)
+    stage.toolbox_type = ProfilingToolbox
+    stage.judge = ScriptedCompletion([_reply({"open": 1, "branches": [], "stop": []})])
+
+    outcome = await stage.run()
+
+    assert (outcome.stop_reason, outcome.error, outcome.exit_code) == (SessionStopReason.TIME_EXHAUSTED, "", 0)
+    root = await stage.root()
+    shares = await stage.handle(Role.OBSERVER).op_shares(root)
+    assert shares is not None and dict(shares.shares) == ROOT_SHARES
+    rows = _decisions(stage)
+    opening = next(index for index, row in enumerate(rows) if row["kind"] == "judge")
+    [profiled] = [index for index, row in enumerate(rows) if row["kind"] == "profile"]
+    assert rows[profiled]["reason"] == PROFILED and rows[profiled]["detail"]["commit"] == root and profiled > opening
+    [landed] = [row for row in rows if row["kind"] == "event"]
+    assert (landed["detail"]["event"], landed["detail"]["commit"]) == ("root_profiled", root)
+    calls = [json.loads(line) for line in stage.layout.judge.read_text().splitlines()]
+    assert '"profile_running": true' in calls[0]["prompt"]
+    assert any('"root_profiled"' in call["prompt"] for call in calls[1:])
 
 
 async def test_an_agentx_champion_replay_asks_for_no_confirm_ahead_of_its_judgement(tmp_path: Path) -> None:

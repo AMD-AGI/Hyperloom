@@ -19,9 +19,10 @@ branch builds on. Nothing here scores the frontier, which logs a round every tim
 
 After the integration head moved, :class:`IntegrationProfiler` profiles it, one profile at a time, in a task of its own:
 a PROFILE test of the head, then a TraceLens analysis of that test's trace, whose op shares the bottleneck is read from.
-PRELUDE has it profile the root the same way, and waits for the root's PROFILE test alone: the analysis, which holds no
-card, goes on as the running profile once EXPLORE opened, and the op shares it leaves are an event (``root_profiled``)
-for the judge. An AgentX root's analysis is submitted only once the
+PRELUDE has it profile the root the same way, and waits for the root's PROFILE test. A workload whose PRELUDE waits for
+the analysis as well (:attr:`~.settings.Workload.prelude_awaits_root_analysis`) has PRELUDE take its outcome; on any
+other the analysis, which holds no card, goes on as the running profile once EXPLORE opened, and the op shares it leaves
+are an event (``root_profiled``) for the judge. An AgentX root's analysis is submitted only once the
 baseline measurement has ended: its point names no prompt and output length, so the analysis weights its prefill and
 decode windows by the lengths the baseline measured (``toolbox/analysis.py``), and an analysis submitted before the rule
 gate wrote the baseline would stay degraded under the profile's shared key, for every branch and the judge.

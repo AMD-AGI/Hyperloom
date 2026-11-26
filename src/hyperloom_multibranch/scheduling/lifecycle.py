@@ -353,7 +353,7 @@ class Session:
             peers.toolbox,
             self._open_integration,
             self._integrator.replay_champion,
-            profiler.profile_root,
+            profiler,
         )
         return Prelude(self._context, prelude_services, warm_start=warm_start)
 
