@@ -135,4 +135,17 @@ def candidate_golden(tool_cache: Path, framework: str, model_id: str, args: Sequ
     return SourceGolden(answer.value, curve=curve)
 
 
-__all__ = ["GoldenLookupError", "candidate_golden"]
+def runs_a_draft(framework: str, args: Sequence[str]) -> bool:
+    """Whether a ``framework`` launch of ``args`` runs a draft, read as InferenceX keys a curve by it: an SGLang launch
+    only once ``--speculative-algorithm`` names one, whatever draft tuning flags it also carries.
+
+    Raises:
+        GoldenLookupError: InferenceX reads no drafts of ``framework``.
+    """
+    try:
+        return bool(launch_draft(framework, args, {}).spec)
+    except RecipeSourceError as exc:
+        raise GoldenLookupError(str(exc)) from exc
+
+
+__all__ = ["GoldenLookupError", "candidate_golden", "runs_a_draft"]

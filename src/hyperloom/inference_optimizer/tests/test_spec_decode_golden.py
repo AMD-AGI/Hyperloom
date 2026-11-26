@@ -147,6 +147,15 @@ def test_an_sglang_simulation_unlike_inferencexs_is_refused_even_at_the_recorded
     assert "SGLANG_SIMULATE_ACC_METHOD=match-expected" in reason and "real-draft-token" in reason
 
 
+def test_a_base_with_draft_tuning_but_no_sglang_algorithm_runs_no_draft_and_exempts_nothing() -> None:
+    lookup = _Lookup()
+
+    reason = golden_acceptance_refusal("--speculative-num-steps 3", {}, _SGLANG, {}, GoldenLookup("sglang", lookup))
+
+    assert "verifies a real draft" in reason and "SGLANG_SIMULATE_ACC_LEN=2.32" in reason
+    assert len(lookup.asked) == 1
+
+
 def test_another_forced_value_is_refused_naming_both() -> None:
     reason = golden_acceptance_refusal("", {}, _FORCED % "3.5", {}, _vllm())
 

@@ -54,7 +54,7 @@ from inference_suite.contracts.base_launch import LaunchQuery
 from inference_suite.contracts.layout import RunDirError
 from inference_suite.framework_probe import FrameworkProbeError, native_executable, native_help
 from inference_suite.parser_check import HelpOption, help_options
-from inference_suite.golden_lookup import GoldenLookupError, candidate_golden
+from inference_suite.golden_lookup import GoldenLookupError, candidate_golden, runs_a_draft
 from inference_suite.load.fixed import ClientPass, ClientTarget, ClientTool, client_argv, fixed_client_env, warmup_pass
 from inference_suite.recipe.model import SourceGolden
 from inference_suite.recipe.resolve import Miss, SourceSnapshot, resolve_base
@@ -127,6 +127,7 @@ __all__ = [
     "parse_user_file",
     "resolve_base",
     "run_round",
+    "runs_a_draft",
     "runner_owned",
     "scriptable_base",
     "staging_key",

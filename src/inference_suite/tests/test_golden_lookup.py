@@ -20,7 +20,7 @@ from pathlib import Path
 
 import pytest
 
-from inference_suite import GoldenLookupError, SourceGolden, candidate_golden
+from inference_suite import GoldenLookupError, SourceGolden, candidate_golden, runs_a_draft
 from inference_suite.pins import INFERENCEX_CLIENT_COMMIT
 from inference_suite.recipe.inferencex import GOLDEN_DIR, INFERENCEX_REPO
 from inference_suite.staging import AGENTX_PYTHON, GOLDEN_PACKAGE, MASTER_CONFIG, inferencex_root
@@ -169,3 +169,22 @@ def test_an_interpreter_that_fails_raises_with_its_error(cache) -> None:
 
     with pytest.raises(GoldenLookupError, match="broken staging"):
         candidate_golden(cache, "vllm", _MODEL, _MTP3)
+
+
+@pytest.mark.parametrize(
+    ("framework", "args", "drafts"),
+    [
+        pytest.param("sglang", ["--speculative-algorithm", "EAGLE", "--speculative-num-steps", "3"], True, id="sglang"),
+        pytest.param("sglang", ["--speculative-num-steps", "3"], False, id="sglang-tuning-without-an-algorithm"),
+        pytest.param("vllm", ["--speculative-config", '{"method":"mtp","num_speculative_tokens":3}'], True, id="vllm"),
+        pytest.param("vllm", ["--max-num-seqs", "64"], False, id="vllm-no-draft"),
+        pytest.param("atom", ["--method", "mtp"], True, id="atom"),
+    ],
+)
+def test_a_launch_runs_a_draft_as_inferencex_reads_it(framework: str, args: list[str], drafts: bool) -> None:
+    assert runs_a_draft(framework, args) is drafts
+
+
+def test_a_framework_inferencex_reads_no_drafts_of_raises() -> None:
+    with pytest.raises(GoldenLookupError, match="custom"):
+        runs_a_draft("custom", ["--speculative-num-steps", "3"])
