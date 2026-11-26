@@ -12,6 +12,7 @@ import os
 from collections.abc import Callable
 from pathlib import Path
 
+from hyperloom.common.model_paths import resolve_serving_model_path
 from hyperloom.common.perf_metric import DATASET_PATH_ENV
 from hyperloom.common.url_userinfo import CREDENTIALED_URL_RE
 from hyperloom.common.workload_defaults import DEFAULT_EP
@@ -489,7 +490,12 @@ def _agentx_only_errors(args: argparse.Namespace) -> list[str]:
 def _workload_shape(args: argparse.Namespace) -> InferenceXShape | None:
     if WorkloadKind(args.workload) is WorkloadKind.AGENTX:
         return None
-    return InferenceXShape(args.isl, args.osl, os.environ.get(DATASET_PATH_ENV, "").strip())
+    from hyperloom.inference_optimizer.cli.launch_shape import resolve_run_max_model_len
+
+    dataset = os.environ.get(DATASET_PATH_ENV, "").strip()
+    served = resolve_serving_model_path(args.model)
+    max_model_len, _ = resolve_run_max_model_len(served, args.isl, args.osl, lengths_from_data=bool(dataset))
+    return InferenceXShape(args.isl, args.osl, dataset, max_model_len)
 
 
 def _workload_model(args: argparse.Namespace) -> str:

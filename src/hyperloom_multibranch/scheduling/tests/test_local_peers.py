@@ -255,6 +255,16 @@ def test_a_workload_on_a_prompt_dataset_reaches_the_renderer_with_it(monkeypatch
     assert "DATASET_PATH" not in workload_environment(WORKLOAD)
 
 
+def test_a_workload_reaches_the_renderer_at_the_context_it_was_settled_at_and_an_earlier_one_at_none(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("HL_MODEL_BASE", raising=False)
+    settled = replace(WORKLOAD, inferencex=InferenceXShape(8192, 1024, max_model_len=13312))
+
+    assert workload_environment(settled)["MAX_MODEL_LEN"] == "13312"
+    assert "MAX_MODEL_LEN" not in workload_environment(WORKLOAD)
+
+
 @pytest.mark.parametrize(
     ("workload", "exported", "sent"),
     [

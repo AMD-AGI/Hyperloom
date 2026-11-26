@@ -58,6 +58,7 @@ from hyperloom_common.llm.llm_config import (
     resolve_forge_llm_model,
 )
 from hyperloom.common.model_paths import resolve_serving_model_path
+from hyperloom.common.outside_facts import ENV_MAX_MODEL_LEN
 from hyperloom.common.perf_metric import DATASET_PATH_ENV
 from hyperloom_multibranch.contracts.llm_prices import price_of
 from hyperloom_multibranch.contracts.blackboard import Role, Writer
@@ -268,15 +269,16 @@ def workload_environment(workload: Workload) -> Mapping[str, str]:
     renders the canonical measurement and every test's points with, and to the kernel tuning the toolbox runs, which
     takes its backend from ``KERNEL_OPT_BACKEND_ORDER``; ``hyperloom optimize`` exports the same, the model resolved to
     the directory a server loads it from. ``GPU_TYPE`` and ``TARGET_GPU_TYPE`` are both the board, as ``hyperloom optimize``
-    sets them. An InferenceX workload carries its sequence lengths and the prompt dataset it
-    names; an AgentX one carries :data:`AGENTX_ENV` instead."""
+    sets them. An InferenceX workload carries its sequence lengths, the prompt dataset it names and the context it was
+    settled at; an AgentX one carries :data:`AGENTX_ENV` instead."""
 
     shape = workload.inferencex
     if shape is None:
         workload_specific = {AGENTX_ENV: "1"}
     else:
         dataset = {DATASET_PATH_ENV: shape.dataset} if shape.dataset else {}
-        workload_specific = {"ISL": str(shape.isl), "OSL": str(shape.osl), **dataset}
+        context = {ENV_MAX_MODEL_LEN: str(shape.max_model_len)} if shape.max_model_len is not None else {}
+        workload_specific = {"ISL": str(shape.isl), "OSL": str(shape.osl), **dataset, **context}
     return {
         "FRAMEWORK": workload.framework,
         "MODEL_PATH": resolve_serving_model_path(workload.model),
