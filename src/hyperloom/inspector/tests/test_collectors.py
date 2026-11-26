@@ -18,6 +18,7 @@ from hyperloom.inspector.collectors import (
     read_json,
     resolve_inside,
     specialist_turn,
+    tail_file,
 )
 
 
@@ -90,6 +91,14 @@ def test_resolve_inside_refuses_symlinks_out(session_dir, tmp_path):
     (session_dir / "link.txt").symlink_to(tmp_path / "outside.txt")
     assert resolve_inside(session_dir, "link.txt") is None
     assert resolve_inside(session_dir, "state.json") == (session_dir / "state.json").resolve()
+
+
+def test_tail_file_reads_the_end_of_a_file(session_dir):
+    big = session_dir / "runs" / "big.log"
+    big.write_text("first\n" + "y" * 100 + "\nlast\n", encoding="utf-8")
+    text = tail_file(big, max_bytes=20)
+    assert text.endswith("last\n") and "first" not in text
+    assert tail_file(session_dir / "missing.log") == ""
 
 
 def test_newest_mtime(session_dir, tmp_path):

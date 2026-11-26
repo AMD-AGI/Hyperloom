@@ -113,4 +113,76 @@ describe("NarratorStore", () => {
     await Promise.all([asking, forced]);
     expect(calls).toEqual(["api/ask", "api/narrate?force=1"]);
   });
+  it("explains an item in the open panel and keeps it for follow-ups", async () => {
+    const { calls, fetcher } = server(ready(), [
+      [200, {}],
+      [200, {}],
+      [200, {}],
+    ]);
+    const n = new NarratorStore(fetcher);
+    await n.refresh();
+    n.setOpen(false);
+    n.setFocus("memory");
+    const ref = { kind: "task", id: "t1" } as const;
+    expect(await n.ask("plain")).toBe(true);
+    const explaining = n.explain(ref, "Explain task roofline: what it did, how it went and why.", "roofline");
+    expect(n.open).toBe(true);
+    expect(n.explaining).toEqual({ ref, label: "roofline" });
+    expect(await explaining).toBe(true);
+    expect(n.explaining).toBeNull();
+    expect(n.followUp).toEqual({ ref, label: "roofline" });
+    expect(n.focus).toBe("memory");
+    expect(await n.ask("and then?")).toBe(true);
+    const bodies = calls.filter((c) => c.method === "POST").map((c) => JSON.parse(c.body!));
+    expect(bodies).toEqual([
+      { question: "plain", focus: "memory" },
+      { question: "Explain task roofline: what it did, how it went and why.", focus: "memory", item: ref },
+      { question: "and then?", focus: "memory", item: ref },
+    ]);
+  });
+  it("drops the follow-up item when cleared and keeps none after a failed explanation", async () => {
+    const { calls, fetcher } = server(ready(), [
+      [200, {}],
+      [200, {}],
+      [502, { error: "boom" }],
+    ]);
+    const n = new NarratorStore(fetcher);
+    await n.refresh();
+    expect(await n.explain({ kind: "node", id: "spec:roofline" }, "Explain roofline: …", "roofline")).toBe(true);
+    n.clearFollowUp();
+    expect(n.followUp).toBeNull();
+    expect(await n.ask("next?")).toBe(true);
+    expect(await n.explain({ kind: "event", seq: 7 }, "Explain this …", "event")).toBe(false);
+    expect(n.explaining).toBeNull();
+    expect(n.followUp).toBeNull();
+    expect(n.error).toBe("boom");
+    const bodies = calls.filter((c) => c.method === "POST").map((c) => JSON.parse(c.body!));
+    expect(bodies[1]).toEqual({ question: "next?" });
+  });
+  it("waits for a call in flight and ignores a second press on the pending item", async () => {
+    let release = () => {};
+    const gate = new Promise<void>((r) => (release = r));
+    const calls: string[] = [];
+    const fetcher = (async (url: string, init?: RequestInit) => {
+      if (init?.method === "POST") {
+        calls.push(url);
+        if (url.startsWith("api/narrate")) await gate;
+      }
+      return new Response(JSON.stringify(ready()), { status: 200 });
+    }) as typeof fetch;
+    const n = new NarratorStore(fetcher);
+    await n.refresh();
+    const ref = { kind: "variant", task_id: "t1", label: "dflash" } as const;
+    const narrating = n.narrate(false);
+    const explaining = n.explain(ref, "Explain the candidate dflash: …", "dflash");
+    expect(await n.explain({ ...ref }, "Explain the candidate dflash: …", "dflash")).toBe(false);
+    await Promise.resolve();
+    expect(calls).toEqual(["api/narrate?force=0"]);
+    expect(n.explaining?.label).toBe("dflash");
+    release();
+    await narrating;
+    expect(await explaining).toBe(true);
+    expect(calls).toEqual(["api/narrate?force=0", "api/ask"]);
+    expect(n.explaining).toBeNull();
+  });
 });

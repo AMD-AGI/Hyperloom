@@ -1,7 +1,8 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Contract tests, part 5 (narrator): the narrator calls Hyperloom's LLM configuration with the arguments it declares.
+"""Contract tests, part 5 (narrator and "Explain this"): the narrator calls Hyperloom's LLM configuration with the
+arguments it declares, and "Explain this" names a journal change as Hyperloom's journal names it.
 
 Calls into ``hyperloom_common.llm.llm_config`` are checked against the real functions' signatures (a stand-in only
 replaces the network), and the OpenAI path runs through the real ``chat_completion``. A failure means a producer
@@ -167,4 +168,24 @@ def test_each_narrator_client_attributes_its_calls_to_that_component(backend: st
     )
     assert call["operation"] == ("narrate" if backend == "anthropic" else "ask"), contract_message(
         "llm_config attribution", _NARRATOR, f"operation={call['operation']!r}"
+    )
+
+
+# Variants as a grid entry carries them: server args, env vars, both, or a name alone.
+_VARIANTS = [
+    {"name": "mnbt", "extra_server_args": "--max-num-batched-tokens 8192"},
+    {"name": "aiter", "extra_envs": {"VLLM_ROCM_USE_AITER": "1"}},
+    {"name": "both", "extra_server_args": " --tp 2 ", "extra_envs": {"A": "1", "B": "2"}},
+    {"name": "named", "extra_server_args": "", "extra_envs": {}},
+]
+
+
+@pytest.mark.parametrize("variant", _VARIANTS, ids=[v["name"] for v in _VARIANTS])
+def test_recipe_change_matches_the_journal_s_change(variant: dict) -> None:
+    from hyperloom.inference_optimizer.session.optimization_journal import summarize_change
+
+    from hyperloom.inspector.explain import _recipe_change
+
+    assert _recipe_change(variant) == summarize_change("explore", variant), contract_message(
+        "optimization_journal.summarize_change", "explain.py (_recipe_change)", repr(variant)
     )

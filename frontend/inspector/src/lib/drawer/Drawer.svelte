@@ -6,9 +6,12 @@
   import { cubicOut } from "svelte/easing";
   import { fade, fly } from "svelte/transition";
   import Conversation from "../Conversation.svelte";
+  import { refFor } from "../explain";
+  import ExplainButton from "../ExplainButton.svelte";
   import { fmtTime } from "../format";
   import JsonTree from "../JsonTree.svelte";
   import { ms } from "../motion";
+  import type { NarratorStore } from "../narrator-store.svelte";
   import type { InspectorStore } from "../store.svelte";
   import { tsOf } from "../timeline/scale";
   import type { UiState } from "../ui.svelte";
@@ -17,12 +20,14 @@
   import Section from "./Section.svelte";
   import TaskBody from "./TaskBody.svelte";
 
-  let { store, ui }: { store: InspectorStore; ui: UiState } = $props();
+  let { store, ui, narrator }: { store: InspectorStore; ui: UiState; narrator: NarratorStore } = $props();
 
   const sel = $derived(ui.selection);
   const view = $derived(store.view);
   const task = $derived(sel?.kind === "task" ? (view?.tasks.find((t) => t.task_id === sel.id) ?? null) : null);
   const node = $derived(sel?.kind === "node" ? (view?.graph.nodes.find((n) => n.id === sel.id) ?? null) : null);
+  // What the Explain button asks about: null for raw records that aren't journal entries.
+  const explainRef = $derived(sel ? refFor(sel) : null);
   const callTask = $derived(
     sel?.kind === "call" && sel.item.task_id ? view?.tasks.find((t) => t.task_id === sel.item.task_id) : undefined,
   );
@@ -58,6 +63,7 @@
         <button onclick={() => ui.back()} aria-label="back" data-testid="dr-back">←</button>
       {/if}
       <b class="title" data-testid="dr-title" {title}>{title}</b>
+      <ExplainButton {narrator} {store} ref={explainRef} />
       <button onclick={() => ui.select(null)} aria-label="close" data-testid="dr-close">✕</button>
     </header>
     {#key sel}

@@ -23,7 +23,7 @@ from http import HTTPStatus
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Protocol
 
-from hyperloom.inspector import digest
+from hyperloom.inspector import digest, explain
 from hyperloom.inspector.redact import redact_text
 
 if TYPE_CHECKING:
@@ -45,6 +45,7 @@ DEFAULT_MAX_TOKENS = 1600
 _MAX_ENTRIES = 200
 _EARLIER = 5
 _REPLAY_BUCKET_SEC = 300.0
+_REUSE_SEC = 60.0
 # The two LLM backends the narrator can talk to, as HYPERLOOM_INSPECTOR_LLM_BACKEND names them.
 _BACKEND_ANTHROPIC = "anthropic"
 _BACKEND_OPENAI = "openai"
@@ -76,6 +77,17 @@ moment ("now" is the digest's clock), plus earlier narrations and answers.
 Answer the question from the digest in at most eight short lines; bullets start with "- ". Name the tasks, agents,
 phases and times you rely on. If the digest doesn't contain the answer, say so and say what would show it (a log,
 an artifact, a tab of the Inspector). Plain text only, no preamble."""
+
+SYSTEM_EXPLAIN = """\
+You explain one item of a Hyperloom inference-optimization session to an engineer watching it in the Hyperloom
+Inspector. Hyperloom is a multi-agent harness: a coordinator dispatches executor tasks and specialist agents,
+while LLM roles (orchestration, critic) propose and review changes on a bus. You get a digest of the session as of
+one moment ("now" is the digest's clock), the item's own records, and a question about it.
+
+Answer in at most eight short lines; bullets start with "- ". Cover what the item is, what it did, how it went
+against the run so far (the best tok/s at the time, the baseline, the keep threshold) and why. Name the tasks,
+agents, phases and times you rely on. When the records don't show something, say so, and say what would show it
+(a log, an artifact, a tab of the Inspector). Plain text only, no preamble."""
 
 _ENV_FILE_KEY = re.compile(r"^(?:ANTHROPIC_|OPENAI_|HYPERLOOM_INSPECTOR_LLM_)[A-Z0-9_]*$")
 _ENV_FILE_EXACT = {"CLAUDE_CODE_OAUTH_TOKEN", "CLAUDE_MODEL"}
@@ -305,8 +317,12 @@ class Narrator:
             prompt += f"\n\n## The user's focus\nPay particular attention to: {focus}"
         return self._call(_OPERATION_NARRATE, SYSTEM_NARRATE, prompt, clock, fingerprint=fp, focus=focus or None)
 
-    def ask(self, question: str, focus: str = "") -> tuple[int, dict]:
-        """An answer to *question*, from the digest at the clock and the earlier narrations and answers."""
+    def ask(self, question: str, focus: str = "", item: dict | None = None) -> tuple[int, dict]:
+        """An answer to *question*, from the digest at the clock and the earlier narrations and answers.
+
+        With *item* (a reference, see ``explain.parse_ref``) the item's own records go into the prompt too and the
+        answer explains it; the same question about the same item within a minute of the clock reuses the answer.
+        """
         if self.client is None:
             return HTTPStatus.SERVICE_UNAVAILABLE, {"error": f"narrator unavailable: {self.info.reason}"}
         question, focus = _clean(question, MAX_QUESTION), _clean(focus, MAX_FOCUS)
@@ -314,16 +330,31 @@ class Narrator:
             return HTTPStatus.BAD_REQUEST, {"error": "empty question"}
         view = self.watcher.snapshot()
         clock = view["clock"]["now"]
+        ref = label = section = None
+        if item is not None:
+            try:
+                ref = explain.parse_ref(item)
+                label, section = explain.item_section(self.watcher, view, ref, clock)
+            except ValueError as exc:
+                return HTTPStatus.BAD_REQUEST, {"error": str(exc)}
+            except LookupError as exc:
+                return HTTPStatus.NOT_FOUND, {"error": str(exc)}
         with self._gate.lock:
             earlier = self._visible(clock)
+            same = _reusable(earlier, ref, question, clock) if ref is not None else None
+            if same is not None:
+                return HTTPStatus.OK, {"entry": same, "reused": True}
             refusal = self._claim(interval=False)
             if refusal:
                 return HTTPStatus.TOO_MANY_REQUESTS, {"error": refusal}
         prompt = digest.build(view, earlier[-_EARLIER:])
         if focus:
             prompt += f"\n\n## The user's focus\n{focus}"
+        if section is not None:
+            prompt += f"\n\n## The item to explain\n{section}"
         prompt += f"\n\n## Question\n{question}"
-        return self._call("ask", SYSTEM_ASK, prompt, clock, question=question, focus=focus or None)
+        system = SYSTEM_ASK if ref is None else SYSTEM_EXPLAIN
+        return self._call("ask", system, prompt, clock, question=question, focus=focus or None, item=ref, label=label)
 
     def _claim(self, interval: bool) -> str | None:
         """Take the gate (its lock held), or say why not."""
@@ -362,6 +393,16 @@ class Narrator:
             self.entries.append(entry)
             del self.entries[:-_MAX_ENTRIES]
         return HTTPStatus.OK, {"entry": entry, "reused": False}
+
+
+def _reusable(entries: list[dict], ref: dict, question: str, clock: float) -> dict | None:
+    """The newest answer to *question* about the item *ref* written within a minute of *clock*, if any."""
+    for e in reversed(entries):
+        if e.get("kind") != "answer" or e.get("item") != ref or e.get("question") != question:
+            continue
+        if abs(e["clock"] - clock) <= _REUSE_SEC:
+            return e
+    return None
 
 
 def _clean(text: Any, limit: int) -> str:

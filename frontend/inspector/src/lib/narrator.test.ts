@@ -2,8 +2,9 @@
 // SPDX-License-Identifier: MIT
 
 import { describe, expect, it } from "vitest";
-import { blocks, chipper, current } from "./narrator";
-import type { GraphNode, NarratorEntry } from "./types";
+import type { Records } from "./explain";
+import { asked, blocks, chipper, current, explainHead } from "./narrator";
+import type { GraphNode, NarratorEntry, View } from "./types";
 
 const node = (id: string, label: string) => ({ id, label }) as GraphNode;
 
@@ -57,5 +58,32 @@ describe("current", () => {
     expect(got.narration?.id).toBe("3");
     expect(got.answers.map((a) => a.id)).toEqual(["2", "4"]);
     expect(current([]).narration).toBeNull();
+  });
+});
+
+describe("asked", () => {
+  const rec: Records = {
+    view: { graph: { nodes: [node("spec:roofline", "roofline")] }, tasks: [] } as unknown as View,
+    streams: {},
+  };
+  const answer = (extra: Partial<NarratorEntry>) => ({ id: "1", kind: "answer", ...extra }) as NarratorEntry;
+  const ref = { kind: "node", id: "spec:roofline" } as const;
+  const fixed = "Explain roofline: what does this agent do, what has it done so far, and is anything wrong with it?";
+
+  it("shows a typed question without a header", () => {
+    expect(asked(answer({ question: "why?" }), rec)).toEqual({ head: null, question: "why?" });
+    expect(asked(answer({}), rec)).toEqual({ head: null, question: null });
+  });
+  it("heads an explanation with the item and drops its fixed question", () => {
+    expect(asked(answer({ question: fixed, item: ref, label: "roofline agent" }), rec)).toEqual({
+      head: "Explain: roofline agent",
+      question: null,
+    });
+  });
+  it("keeps a follow-up's question and falls back to the local label", () => {
+    expect(asked(answer({ question: "and now?", item: ref }), rec)).toEqual({
+      head: explainHead("roofline"),
+      question: "and now?",
+    });
   });
 });

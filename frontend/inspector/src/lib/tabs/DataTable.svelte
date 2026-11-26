@@ -11,6 +11,7 @@
     cols,
     key = (r: T) => r,
     onpick,
+    oncontext,
     selected = () => false,
     testid,
   }: {
@@ -18,6 +19,8 @@
     cols: Col<T>[];
     key?: (row: T) => unknown;
     onpick?: (row: T) => void;
+    /** A right-click on a row, for the page's context menu. */
+    oncontext?: (row: T, e: MouseEvent) => void;
     selected?: (row: T) => boolean;
     testid?: string;
   } = $props();
@@ -49,6 +52,7 @@
         class:click={!!onpick}
         class:sel={selected(r)}
         onclick={() => onpick?.(r)}
+        oncontextmenu={oncontext && ((e) => oncontext(r, e))}
         animate:flip={{ duration: dur, easing: cubicOut }}
         in:fresh={{ duration: animated ? ms(1600) : 0 }}
       >

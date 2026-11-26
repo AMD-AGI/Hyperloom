@@ -4,15 +4,17 @@
   The narrator: a short summary of what the run is doing at the clock, written by the configured LLM, with a
   question box and a pinned focus. Node names in the text are chips that filter the views like a graph click. Auto
   mode asks for a narration when the panel opens, on a phase change and every two minutes; the server answers with
-  the latest one when nothing material changed.
+  the latest one when nothing material changed. Explained items head their answers in the thread, the pending one
+  scrolls the card into view, and the item last explained rides along with typed questions until removed.
 -->
 <script lang="ts">
-  import { untrack } from "svelte";
+  import { tick, untrack } from "svelte";
+  import { prefersReducedMotion } from "svelte/motion";
   import { slide } from "svelte/transition";
   import { fmtDur, fmtTime } from "./format";
   import { ms } from "./motion";
   import type { NarratorStore } from "./narrator-store.svelte";
-  import { blocks, chipper } from "./narrator";
+  import { asked, blocks, chipper, explainHead } from "./narrator";
   import type { InspectorStore } from "./store.svelte";
   import type { NarratorEntry } from "./types";
   import type { UiState } from "./ui.svelte";
@@ -25,6 +27,7 @@
   const STALE_SEC = 300;
 
   let question = $state("");
+  let card: HTMLElement | undefined = $state();
   let wall = $state(Date.now() / 1000);
   let sessionNow = $state(untrack(() => store.now()));
 
@@ -63,6 +66,18 @@
   const missing = $derived(narrator.status != null && latest.narration == null);
   $effect(() => {
     if (narrator.open && narrator.auto && available && missing) untrack(() => void narrator.narrate(false));
+  });
+
+  // An explanation started (from the drawer or a context menu): bring the card, opened by explain(), into view. Keyed
+  // on the item, so status refreshes don't scroll again.
+  const explainingKey = $derived(narrator.explaining ? JSON.stringify(narrator.explaining.ref) : "");
+  $effect(() => {
+    if (!explainingKey) return;
+    untrack(() => {
+      void tick().then(() =>
+        card?.scrollIntoView({ block: "nearest", behavior: prefersReducedMotion.current ? "auto" : "smooth" }),
+      );
+    });
   });
 
   async function ask(e: SubmitEvent) {
@@ -122,7 +137,7 @@
   {/each}
 {/snippet}
 
-<section class="narrator" data-testid="narrator">
+<section class="narrator" data-testid="narrator" bind:this={card}>
   <header>
     <button
       class="fold"
@@ -175,11 +190,13 @@
         <p class="muted">No narration at this point of the session yet{narrator.auto ? "" : "; press refresh"}.</p>
       {/if}
 
-      {#if latest.answers.length || narrator.asking}
+      {#if latest.answers.length || narrator.asking || narrator.explaining}
         <ol class="thread" data-testid="nar-thread">
           {#each latest.answers as a (a.id)}
+            {@const lines = asked(a, store)}
             <li transition:slide={{ duration: ms(160) }}>
-              <p class="q">{a.question}</p>
+              {#if lines.head}<p class="q head" data-testid="nar-explain-head">{lines.head}</p>{/if}
+              {#if lines.question}<p class="q">{lines.question}</p>{/if}
               <div class="a">{@render text(a.text)}</div>
               <p class="meta muted">{when(a)}</p>
             </li>
@@ -188,6 +205,12 @@
             <li>
               <p class="q">{narrator.asking}</p>
               <p class="muted">answering…</p>
+            </li>
+          {/if}
+          {#if narrator.explaining}
+            <li data-testid="nar-explaining">
+              <p class="q head" data-testid="nar-explain-head">{explainHead(narrator.explaining.label)}</p>
+              <p class="muted thinking">answering…</p>
             </li>
           {/if}
         </ol>
@@ -203,11 +226,22 @@
           </p>
         {/if}
         <form onsubmit={ask}>
+          {#if narrator.followUp}
+            {@const label = narrator.followUp.label}
+            <span class="followup" data-testid="nar-followup" title="Questions are about {label} until you remove it">
+              <span class="label">about {label}</span>
+              <button type="button" aria-label="Stop asking about {label}" onclick={() => narrator.clearFollowUp()}
+                >✕</button
+              >
+            </span>
+          {/if}
           <input
             data-testid="nar-question"
             bind:value={question}
             maxlength="500"
-            placeholder="Ask about the run, e.g. why did a specialist crash?"
+            placeholder={narrator.followUp
+              ? `Ask a follow-up about ${narrator.followUp.label}`
+              : "Ask about the run, e.g. why did a specialist crash?"}
           />
           <button type="submit" disabled={!question.trim() || !!narrator.asking}>ask</button>
           <button
@@ -354,6 +388,15 @@
     content: "Q: ";
     color: var(--muted);
   }
+  .q.head::before {
+    content: none;
+  }
+  .q.head {
+    color: var(--accent);
+  }
+  .q.head + .q {
+    font-weight: 400;
+  }
   .a {
     display: grid;
     gap: 0.2rem;
@@ -363,7 +406,34 @@
   }
   form {
     display: flex;
+    align-items: center;
     gap: 0.4rem;
+  }
+  .followup {
+    flex: none;
+    max-width: 40%;
+    display: flex;
+    align-items: center;
+    gap: 0.2rem;
+    padding: 0 0 0 6px;
+    border: 1px solid color-mix(in srgb, var(--accent) 40%, transparent);
+    border-radius: 4px;
+    background: color-mix(in srgb, var(--accent) 10%, transparent);
+    font-size: 12px;
+    white-space: nowrap;
+  }
+  .followup .label {
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  .followup button {
+    border: 0;
+    padding: 0 5px;
+    color: var(--muted);
+  }
+  .followup button:hover {
+    color: var(--fg);
   }
   input:not([type]) {
     flex: 1;

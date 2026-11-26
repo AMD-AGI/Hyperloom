@@ -1,6 +1,7 @@
 <!-- SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc. -->
 <!-- SPDX-License-Identifier: MIT -->
 <script lang="ts">
+  import { refFor } from "../explain";
   import { fmtTime, preview } from "../format";
   import type { InspectorStore } from "../store.svelte";
   import { tsOf } from "../timeline/scale";
@@ -28,6 +29,10 @@
   {rows}
   {cols}
   onpick={(e) => ui.select({ kind: "event", item: e })}
+  oncontext={(e, ev) => {
+    const sel = { kind: "event", item: e } as const;
+    ui.openMenu(ev, refFor(sel), () => ui.select(sel));
+  }}
   selected={(e) => ui.selection?.kind === "event" && ui.selection.item === e}
 />
 

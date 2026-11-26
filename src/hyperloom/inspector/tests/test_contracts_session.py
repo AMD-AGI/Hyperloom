@@ -486,7 +486,7 @@ def test_bus_vocabulary() -> None:
     from hyperloom.orchestrator.bus.message_bus import ROLE_SUBSCRIPTIONS, TOPIC_ALLOWLIST
 
     assert "delegated_result" in TOPIC_ALLOWLIST, contract_message(
-        "message_bus.TOPIC_ALLOWLIST", "watcher.py (_poll_db)", sorted(TOPIC_ALLOWLIST)
+        "message_bus.TOPIC_ALLOWLIST", "watcher.py (_poll_db), explain.py", sorted(TOPIC_ALLOWLIST)
     )
     known = {graph.COORDINATOR, *graph.LLM_ROLES}
     assert set(ROLE_SUBSCRIPTIONS) <= known, contract_message(

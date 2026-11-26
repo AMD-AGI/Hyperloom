@@ -18,9 +18,11 @@ Endpoints (all GET unless noted):
   built-in price sheet; ``download=1`` as a file, ``<session>.tokens.json``.
 * ``POST /api/replay?t=&speed=&paused=``: move the replay clock.
 * ``/api/narrator``: the narrator's status and its narrations and answers at the clock.
-* ``POST /api/narrate?force=`` (JSON ``{focus}``) and ``POST /api/ask`` (JSON ``{question, focus}``): have the
-  configured LLM narrate the session at the clock, or answer a question about it. Both need a JSON content type,
-  so a page on another origin can't trigger a call without a CORS preflight, which is never answered.
+* ``POST /api/narrate?force=`` (JSON ``{focus}``) and ``POST /api/ask`` (JSON ``{question, focus, item}``): have
+  the configured LLM narrate the session at the clock, or answer a question about it. Both need a JSON content
+  type, so a page on another origin can't trigger a call without a CORS preflight, which is never answered.
+  ``item`` (optional) names one thing to explain (``{"kind": "task", "id": ...}``, see ``explain.parse_ref``): its
+  own records go into the prompt; a bad reference is a 400, one unknown or not yet released at the clock a 404.
 
 The Host header must name a loopback address or the bound host, so a page on
 another origin can't reach the server through DNS rebinding.
@@ -42,7 +44,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 from urllib.parse import parse_qs, urlsplit
 
-from hyperloom.inspector import artifacts
+from hyperloom.inspector import artifacts, explain
 from hyperloom.inspector.history import MetricsHistory, history_path
 from hyperloom.inspector.narrator import Narrator, build_client
 from hyperloom.inspector.tokens import TokenTracker, dump
@@ -267,7 +269,13 @@ class Handler(BaseHTTPRequestHandler):
             return self._error(HTTPStatus.SERVICE_UNAVAILABLE, f"narrator unavailable: {NARRATOR_OFF_REASON}")
         focus = str(body.get("focus") or "")
         if route == "/api/ask":
-            status, data = n.ask(str(body.get("question") or ""), focus)
+            item = body.get("item")
+            if item is not None:
+                try:
+                    item = explain.parse_ref(item)
+                except ValueError as exc:
+                    return self._error(HTTPStatus.BAD_REQUEST, str(exc))
+            status, data = n.ask(str(body.get("question") or ""), focus, item)
         else:
             force = self._query().get("force", "").lower() in ("1", "true")
             status, data = n.narrate(force=force, focus=focus)

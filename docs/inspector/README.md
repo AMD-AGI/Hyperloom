@@ -134,10 +134,26 @@ the panel says the narrator is off, and the Inspector makes no LLM call.
 - How often it narrates: with the panel open and auto on, the page asks for a narration on open, on a phase change,
   and every 120 s. The server writes a new one at most every 20 s, and only when the session changed.
 - What each call sends: the session digest, at most 24,000 characters, plus the last 5 narrations and answers. The
-  digest is redacted.
+  digest is redacted. Explain adds at most 6,000 characters of the item's own records (see below).
 - One call runs at a time. History is kept in memory (200 entries) and is lost on restart.
 
 Without an LLM the panel says why, and the rest of the page is unchanged.
+
+### Explain this
+
+Point the narrator at one thing: press **Explain** in the drawer, or right-click an item and pick **Explain**. It
+works on graph nodes, tasks (rows and timeline bars), bus events, LLM calls, journal entries (rows and chart points)
+and explore variants. The answer lands in the narrator's thread under "Explain: <item>", and a follow-up question
+typed afterwards is about the same item until you remove its chip.
+
+- The server adds that item's own records to what the model sees, so items older than the summary's recent window
+  are covered too: a task's history, params, result and log tail; a variant's recipe, provenance, outcome and error;
+  a journal entry with the best tok/s before it and the keep threshold; a call's prompt and response. Redacted, at
+  most 6,000 characters, and in a replay only what happened before the clock.
+- Each kind has a fixed question ("Explain task roofline: what it did, how it went and why."). Pressing Explain again
+  on the same item at about the same clock reuses the answer instead of calling the model.
+- `POST /api/ask` takes an optional `item` (`{"kind": "task", "id": "…"}`; kinds `node`, `task`, `event`, `call`,
+  `journal`, `variant`); a malformed one is 400, an unknown or future one 404.
 
 ## Features
 
@@ -163,6 +179,8 @@ Without an LLM the panel says why, and the rest of the page is unchanged.
   [Tokens and cost](#tokens-and-cost)).
 - **Replay** with a scrubber and speed control.
 - **Narrator**: a summary at the clock, questions and a pinned focus; graph node names in the text are clickable.
+- **Explain this**: an Explain button in the drawer and a right-click menu on nodes, tasks, events, calls, journal
+  entries and variants; the answer is grounded in the item's own records.
 
 ## Tokens and cost
 

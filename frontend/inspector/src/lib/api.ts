@@ -3,7 +3,16 @@
 
 // Typed client for the Inspector's HTTP API. Paths are relative, so the page also works behind a path prefix.
 
-import type { Artifact, ArtifactPayload, Clock, DiffPayload, NarratorEntry, NarratorStatus, Snapshot } from "./types";
+import type {
+  Artifact,
+  ArtifactPayload,
+  Clock,
+  DiffPayload,
+  ItemRef,
+  NarratorEntry,
+  NarratorStatus,
+  Snapshot,
+} from "./types";
 
 export type Fetcher = typeof fetch;
 
@@ -90,7 +99,10 @@ export function postNarrate(force: boolean, focus: string, fetcher: Fetcher = fe
   return call<NarratorReply>(fetcher, "api/narrate", { force: force ? "1" : "0" }, { body });
 }
 
-export function postAsk(question: string, focus: string, fetcher: Fetcher = fetch) {
-  const body = focus ? { question, focus } : { question };
+/** A question, optionally about one item ("Explain this"), whose records the server adds to the prompt. */
+export function postAsk(question: string, focus: string, item?: ItemRef, fetcher: Fetcher = fetch) {
+  const body: { question: string; focus?: string; item?: ItemRef } = { question };
+  if (focus) body.focus = focus;
+  if (item) body.item = item;
   return call<NarratorReply>(fetcher, "api/ask", undefined, { body });
 }

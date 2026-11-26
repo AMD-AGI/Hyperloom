@@ -13,6 +13,8 @@ from hyperloom_common.llm import llm_config
 from hyperloom_common.llm.llm_headers import parse_custom_headers
 from hyperloom.inspector import digest
 from hyperloom.inspector.narrator import (
+    SYSTEM_ASK,
+    SYSTEM_EXPLAIN,
     ClientInfo,
     Narrator,
     _AnthropicClient,
@@ -28,9 +30,11 @@ class FakeClient:
     def __init__(self, reply="All quiet.\n- explore is benchmarking", error=None, gate=None):
         self.reply, self.error, self.gate = reply, error, gate
         self.prompts: list[tuple[str, str]] = []
+        self.systems: list[str] = []
 
     def complete(self, *, system, user, operation):
         self.prompts.append((operation, user))
+        self.systems.append(system)
         if self.gate is not None:
             self.gate.wait(5)
         if self.error is not None:
@@ -169,6 +173,79 @@ def test_without_a_client_the_narrator_says_why(session_dir):
     assert n.ask("why?")[0] == 503
 
 
+# ----- explain one item -------------------------------------------------------------------------------------
+
+TASK = {"kind": "task", "id": "t-scout"}
+QUESTION = "Explain task research_scout: what it did, how it went and why."
+
+
+def test_ask_with_an_item_adds_its_section_and_explains(session_dir):
+    client = FakeClient(reply="- it crashed")
+    n = _narrator(_watcher(session_dir), client)
+    status, data = n.ask(QUESTION, item={**TASK, "ignored": 1})
+    assert status == 200 and not data["reused"]
+    entry = data["entry"]
+    assert entry["kind"] == "answer" and entry["item"] == TASK and entry["label"] == "research_scout"
+    assert client.systems == [SYSTEM_EXPLAIN]
+    prompt = client.prompts[-1][1]
+    head, _, rest = prompt.partition("\n\n## The item to explain\n")
+    assert "## Run" in head and rest.startswith("Task research_scout (kind specialist")
+    assert rest.endswith(f"\n\n## Question\n{QUESTION}") and "Error: model refused" in rest
+    assert FAKE_KEY not in prompt
+    assert [e.get("label") for e in n.status()["entries"]] == ["research_scout"]
+    n.ask("What is running?")
+    assert client.systems[-1] == SYSTEM_ASK and "## The item to explain" not in client.prompts[-1][1]
+    assert "item" not in n.status()["entries"][-1] and "label" not in n.status()["entries"][-1]
+
+
+def test_explaining_the_same_item_again_reuses_the_answer(session_dir):
+    w = _watcher(session_dir, replay=True)
+    w.clock.seek(T0 + 400, paused=True)
+    client = FakeClient()
+    n = _narrator(w, client)
+    first = n.ask(QUESTION, item=TASK)[1]["entry"]
+    w.clock.seek(T0 + 450, paused=True)
+    status, again = n.ask(QUESTION, item=TASK)
+    assert status == 200 and again["reused"] is True and again["entry"]["id"] == first["id"]
+    assert len(client.prompts) == 1
+    # Another question, another item, or a clock more than a minute away is a new call.
+    assert not n.ask("Why did it crash?", item=TASK)[1]["reused"]
+    assert not n.ask(QUESTION, item={"kind": "task", "id": "t-recon"})[1]["reused"]
+    w.clock.seek(T0 + 470, paused=True)
+    assert not n.ask(QUESTION, item=TASK)[1]["reused"]
+    assert len(client.prompts) == 4
+
+
+def test_reuse_needs_no_gate(session_dir):
+    gate = threading.Event()
+    client = FakeClient()
+    n = _narrator(_watcher(session_dir), client)
+    first = n.ask(QUESTION, item=TASK)[1]["entry"]
+    client.gate = gate
+    worker = threading.Thread(target=n.narrate)
+    worker.start()
+    for _ in range(100):
+        if n.status()["busy"]:
+            break
+        threading.Event().wait(0.01)
+    status, data = n.ask(QUESTION, item=TASK)
+    gate.set()
+    worker.join(5)
+    assert status == 200 and data["reused"] and data["entry"]["id"] == first["id"]
+
+
+def test_bad_or_unknown_items_are_refused_without_a_call(session_dir):
+    w = _watcher(session_dir, replay=True)
+    w.clock.seek(T0 + 305, paused=True)
+    client = FakeClient()
+    n = _narrator(w, client)
+    assert n.ask(QUESTION, item={"kind": "bogus"})[0] == 400
+    status, data = n.ask(QUESTION, item={"kind": "task", "id": "t-roof"})
+    assert status == 404 and "t-roof" in data["error"]
+    assert n.ask(QUESTION, item={"kind": "variant", "task_id": "t-base", "label": "v1"})[0] == 404
+    assert client.prompts == [] and not n.status()["busy"]
+
+
 # ----- configuration -----------------------------------------------------------------------------------------
 
 
@@ -286,6 +363,39 @@ def test_endpoints_narrate_and_answer(served):
 def test_posts_need_a_small_json_body(served, body, ctype, code):
     httpd = served(lambda w: _narrator(w))
     assert _request(httpd, "POST", "/api/ask", body, ctype)[0] == code
+
+
+def test_ask_endpoint_explains_an_item(served):
+    client = FakeClient()
+    httpd = served(lambda w: _narrator(w, client))
+    body = json.dumps({"question": QUESTION, "item": TASK}).encode()
+    status, data = _request(httpd, "POST", "/api/ask", body)
+    assert status == 200 and data["entry"]["item"] == TASK and data["entry"]["label"] == "research_scout"
+    status, again = _request(httpd, "POST", "/api/ask", body)
+    assert status == 200 and again["reused"] is True and len(client.prompts) == 1
+    status, data = _request(httpd, "GET", "/api/narrator")
+    assert data["entries"][-1]["item"] == TASK
+
+
+@pytest.mark.parametrize(
+    ("item", "code", "message"),
+    [
+        ({"kind": "artifact", "path": "x"}, 400, "unknown item kind"),
+        ("t-scout", 400, "JSON object"),
+        ({"kind": "task", "id": 7}, 400, "must be a string"),
+        ({"kind": "event", "seq": "1"}, 400, "must be an integer"),
+        ({"kind": "task"}, 400, "item.id is required"),
+        ({"kind": "task", "id": "t" * 201}, 400, "over 200 characters"),
+        ({"kind": "task", "id": "t-nope"}, 404, "no task 't-nope'"),
+        ({"kind": "variant", "task_id": "t-base", "label": "v9"}, 404, "no candidate"),
+    ],
+)
+def test_ask_endpoint_refuses_bad_and_unknown_items(served, item, code, message):
+    client = FakeClient()
+    httpd = served(lambda w: _narrator(w, client))
+    status, data = _request(httpd, "POST", "/api/ask", json.dumps({"question": QUESTION, "item": item}).encode())
+    assert status == code and message in data["error"]
+    assert client.prompts == []
 
 
 def test_foreign_host_and_missing_narrator(served):

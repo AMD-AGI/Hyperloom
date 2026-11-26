@@ -2,11 +2,12 @@
 // SPDX-License-Identifier: MIT
 
 // State for the narrator panel: the server's status and entries, the call in flight, and the viewer's choices (panel
-// open, auto narration, pinned focus), which persist in localStorage when it is there.
+// open, auto narration, pinned focus), which persist in localStorage when it is there. One store serves the page:
+// the drawer and the views explain items through it, and the answers land in the narrator's thread.
 
 import { ApiError, fetchNarrator, postAsk, postNarrate, type Fetcher } from "./api";
 import { current } from "./narrator";
-import type { NarratorEntry, NarratorStatus } from "./types";
+import type { ItemRef, NarratorEntry, NarratorStatus } from "./types";
 
 const KEY = "hyperloom-inspector.narrator";
 
@@ -30,6 +31,11 @@ function load(): Saved {
 }
 
 export type Pending = null | "narrate" | "ask";
+/** An item being explained or followed up on, with its display name. */
+export interface Explained {
+  ref: ItemRef;
+  label: string;
+}
 
 export class NarratorStore {
   status = $state.raw<NarratorStatus | null>(null);
@@ -40,6 +46,10 @@ export class NarratorStore {
   open = $state(true);
   auto = $state(true);
   focus = $state("");
+  /** The item whose explanation is pending. */
+  explaining = $state.raw<Explained | null>(null);
+  /** The item last explained: typed questions carry it until the viewer removes it. */
+  followUp = $state.raw<Explained | null>(null);
 
   #fetch: Fetcher;
   #inflight: Promise<boolean> | null = null;
@@ -76,15 +86,40 @@ export class NarratorStore {
     await this.#run("narrate", () => postNarrate(force, this.focus, this.#fetch), force);
   }
 
-  /** Ask a question; one sent while a narration is being written waits for it rather than being dropped. */
-  async ask(question: string): Promise<boolean> {
+  /**
+   * Ask a question; one sent while a narration is being written waits for it rather than being dropped. It is about
+   * `item` when given, else about the follow-up item when there is one.
+   */
+  async ask(question: string, item?: ItemRef): Promise<boolean> {
     const q = question.trim().slice(0, 500);
     if (!q || this.asking || !this.available) return false;
+    const ref = item ?? this.followUp?.ref;
     this.asking = q;
-    while (this.#inflight) await this.#inflight;
-    const ok = await this.#run("ask", () => postAsk(q, this.focus, this.#fetch), true);
+    const ok = await this.#question(q, ref);
     this.asking = "";
     return ok;
+  }
+
+  /**
+   * Explain one item: the action behind the drawer's Explain button and the context menus. Opens the panel, asks the
+   * fixed question about the item (after a call in flight, as `ask` does) and, once answered, keeps the item for
+   * follow-up questions. A press on the item already pending is ignored; one on another item waits its turn and
+   * shows as the pending one. The pinned focus is left alone (D5).
+   */
+  async explain(ref: ItemRef, question: string, label: string): Promise<boolean> {
+    const q = question.trim().slice(0, 500);
+    if (!q || !this.available || (this.explaining && sameItem(this.explaining.ref, ref))) return false;
+    this.setOpen(true);
+    const mine: Explained = { ref, label };
+    this.explaining = mine;
+    const ok = await this.#question(q, ref);
+    if (ok) this.followUp = mine;
+    if (this.explaining === mine) this.explaining = null;
+    return ok;
+  }
+
+  clearFollowUp(): void {
+    this.followUp = null;
   }
 
   setOpen(open: boolean): void {
@@ -100,6 +135,11 @@ export class NarratorStore {
   setFocus(focus: string): void {
     this.focus = focus.trim().slice(0, 300);
     this.#save();
+  }
+
+  async #question(q: string, item: ItemRef | undefined): Promise<boolean> {
+    while (this.#inflight) await this.#inflight;
+    return this.#run("ask", () => postAsk(q, this.focus, item, this.#fetch), true);
   }
 
   #run(kind: Pending, call: () => Promise<unknown>, loud: boolean): Promise<boolean> {
@@ -131,6 +171,12 @@ export class NarratorStore {
       // Storage is a convenience; the choice still holds for this page.
     }
   }
+}
+
+/** Whether two references name the same item. */
+export function sameItem(a: ItemRef, b: ItemRef): boolean {
+  const keys = new Set([...Object.keys(a), ...Object.keys(b)]);
+  return [...keys].every((k) => (a as Record<string, unknown>)[k] === (b as Record<string, unknown>)[k]);
 }
 
 function message(e: unknown): string {

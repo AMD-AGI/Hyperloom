@@ -1,6 +1,7 @@
 <!-- SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc. -->
 <!-- SPDX-License-Identifier: MIT -->
 <script lang="ts">
+  import { refFor } from "../explain";
   import { fmtNum, fmtTime } from "../format";
   import type { InspectorStore } from "../store.svelte";
   import { tsOf } from "../timeline/scale";
@@ -54,6 +55,10 @@
   rows={calls}
   cols={callCols}
   onpick={(c) => ui.select({ kind: "call", item: c })}
+  oncontext={(c, e) => {
+    const sel = { kind: "call", item: c } as const;
+    ui.openMenu(e, refFor(sel), () => ui.select(sel));
+  }}
   selected={(c) => c === picked}
 />
 

@@ -1,9 +1,10 @@
 // SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 // SPDX-License-Identifier: MIT
 
-// Pure helpers for the narrator panel: split the model's text into paragraphs and bullets, and turn graph node names
-// in it into chips. The text is always rendered as text, never as HTML.
+// Pure helpers for the narrator panel: split the model's text into paragraphs and bullets, turn graph node names in
+// it into chips, and head the answers that explain an item. The text is always rendered as text, never as HTML.
 
+import { labelFor, questionFor, type Records } from "./explain";
 import type { GraphNode, NarratorEntry } from "./types";
 
 export type Block = { kind: "p"; text: string } | { kind: "list"; items: string[] };
@@ -78,4 +79,18 @@ export function chipper(nodes: GraphNode[]): (text: string) => Segment[] {
 export function current(entries: NarratorEntry[]): { narration: NarratorEntry | null; answers: NarratorEntry[] } {
   const narration = [...entries].reverse().find((e) => e.kind === "narration") ?? null;
   return { narration, answers: entries.filter((e) => e.kind === "answer").slice(-6) };
+}
+
+/** The thread's header for an explained item, e.g. "Explain: roofline". */
+export const explainHead = (label: string): string => `Explain: ${label}`;
+
+/**
+ * The lines above an answer in the thread: a header when it explains an item, and the question unless it is just the
+ * item's fixed question (the header says it); a typed follow-up about the item keeps its question.
+ */
+export function asked(entry: NarratorEntry, rec: Records): { head: string | null; question: string | null } {
+  const question = entry.question || null;
+  if (!entry.item) return { head: null, question };
+  const head = explainHead(entry.label || labelFor(entry.item, rec));
+  return { head, question: question === questionFor(entry.item, rec) ? null : question };
 }
