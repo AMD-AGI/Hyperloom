@@ -211,7 +211,9 @@ Each point launches as the recipe launches its own concurrency: the base the
 session froze holds the recipe's launch at every concurrency of its arm
 (`point.source_launches` in `base_launch.json`), and a point runs that launch's
 args and environment in place of the session's own, with the optimization
-stacked on top (what it sets wins; what it removes stays removed). A concurrency
+stacked on top (what it changes of the session's launch wins; what it removes
+stays removed; a value it merely restates from that launch leaves each point the
+recipe's own). A concurrency
 the recipe does not publish runs the launch of the nearest higher one, else its
 highest. An AgentX point boots a server of its own; a fixed-length workload
 keeps one server across consecutive points that launch alike. A point runs the
@@ -228,11 +230,19 @@ The sweep logs its estimated length before it starts, rewrites
 point, and draws `reports/conc_sweep_curve.png` (interactivity against
 throughput per GPU) at the end. The summary's header names the framework,
 precision, GPU type and count, TP and EP, the image and the recipe the base came
-from, and the host and process writing it with `updated_at`, so a summary still
+from, where the points' launches come from (`point_launches`: `source` or
+`session`), and the host and process writing it with `updated_at`, so a summary still
 `in_progress` whose process is gone reads as cut short. Its `status` is
 `succeeded`, `partial`, `failed`, `skipped` (with `skip_reason`) or `cancelled`
 (SIGINT or SIGTERM; the measured points stay). A later run measures only the points not yet measured on the
-same launch of each arm. Multi-node and MLPerf sessions are skipped, and so are a
+same launch of each arm; a report an earlier schema wrote is set aside as
+`conc_sweep_summary.<version>.json` and its points measured again. An InferenceX
+base frozen before it recorded `point.source_launches` is skipped
+(`no_source_launches`) until they are backfilled: rerun `python -m
+inference_suite resolve` with the base's own `query`, `--inferencex-commit
+<source.commit>` and its cards as `--gpus`, check the new file's `digest` is the
+base's, and copy its `point.source_concs` and `point.source_launches` into the
+base. A base so backfilled is read only by a Hyperloom that knows those fields. Multi-node and MLPerf sessions are skipped, and so are a
 session whose server is built from its checkout (`checkout_built_server`) and one
 whose retained overlay cannot load (`optimized_overlay_unavailable`).
 The session package is rebuilt after the sweep so it carries the report.

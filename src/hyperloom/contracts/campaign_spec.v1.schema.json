@@ -95,7 +95,7 @@
       "type": "object",
       "description": "Read for flow conc_sweep only, and refused beside any other flow.",
       "properties": {
-        "session_dir": {"type": "string", "minLength": 1, "pattern": "^/", "description": "The closed multi-branch session to sweep, an absolute path the run can read and write; the report is written back into it."},
+        "session_dir": {"type": "string", "minLength": 1, "pattern": "^/", "description": "The closed multi-branch session to sweep: an absolute path below the run's USER_DATA_PATH, with no link or .. on the way, that the run can read and write; the report is written back into it. Its TP, GPU type and framework must be the spec's."},
         "concs": {"type": "array", "minItems": 1, "items": {"type": "integer", "minimum": 1}, "description": "The concurrencies to sweep, in place of those the session's InferenceX recipe publishes; the session's own is always among them."},
         "parallel": {"type": "integer", "minimum": 1, "description": "The sweep's tests running at once; within placement.max_parallel_tests."}
       }
