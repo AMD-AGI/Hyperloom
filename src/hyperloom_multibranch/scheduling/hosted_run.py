@@ -654,6 +654,16 @@ class EarlierSession:
     sweep: SessionLayout | None = None
 
 
+def release_earlier_lock(layout: SessionLayout) -> None:
+    """Remove the ``final-only`` lock an earlier start of this run left in ``layout``: the host starts a run again only
+    once its earlier start has ended, so the pid the lock names is of a process that is gone."""
+
+    lock = layout.final_only_lock
+    if lock.is_file():
+        log.warning("removing %s, which the earlier start of this run left", lock)
+        lock.unlink(missing_ok=True)
+
+
 def take_over_earlier_session(state_dir: Path) -> EarlierSession:
     """The session ``session.json`` names, read back and taken over from the earlier start; raises what :func:`recorded_session` and
     :func:`~hyperloom_multibranch.scheduling.resumption.persisted_run` raise. Blocks.
@@ -666,10 +676,7 @@ def take_over_earlier_session(state_dir: Path) -> EarlierSession:
     previous = recorded_session(state_dir)
     if previous is None or not SessionLayout(previous).root_recipe.is_file():
         return EarlierSession()
-    lock = SessionLayout(previous).final_only_lock
-    if lock.is_file():
-        log.warning("removing %s, which the earlier start of this run left", lock)
-        lock.unlink(missing_ok=True)
+    release_earlier_lock(SessionLayout(previous))
     if prelude_landed(previous):
         layout = SessionLayout(previous)
         if sweep_unfinished(layout, read_manifest(layout.manifest).settings):
@@ -843,6 +850,7 @@ __all__ = [
     "record_session",
     "recorded_session",
     "refuse_unhosted_branches",
+    "release_earlier_lock",
     "reported_stop_reason",
     "require_hosted_isolation",
     "require_local_image",

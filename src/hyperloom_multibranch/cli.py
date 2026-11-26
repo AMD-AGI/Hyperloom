@@ -151,6 +151,8 @@ from hyperloom_multibranch.cli_options import (
 from hyperloom_multibranch.rulegate.critic import LlmCritic, anthropic_critic
 from hyperloom_multibranch.scheduling.clock import Clock
 from hyperloom.orchestrator.conc_sweep.report import SETTLED
+from hyperloom.orchestrator.state.base_launch import BaseLaunchMismatch
+from inference_suite.contracts import BaseLaunchError
 from hyperloom_multibranch.scheduling.final import sweep_plan, write_skipped
 from hyperloom_multibranch.scheduling.hosted_peers import PinnedToolboxInputs, load_hosted_peers, local_grant_peers
 from hyperloom_multibranch.scheduling.hosted_run import (
@@ -179,6 +181,12 @@ from hyperloom_multibranch.scheduling.hosted_run import (
     write_final_exit,
 )
 from hyperloom_multibranch.scheduling import review
+from hyperloom_multibranch.scheduling.hosted_sweep import (
+    require_spec_matches,
+    swept_session,
+    sweep_stop_reason,
+    take_over_swept_session,
+)
 from hyperloom_multibranch.scheduling.layout import SessionLayout, create_session
 from hyperloom_multibranch.scheduling.lifecycle import Session
 from hyperloom_multibranch.scheduling.llm import (
@@ -475,9 +483,10 @@ def ready_session(workload: Workload, load: Callable[[Workload], PeerFactory], *
 
 @dataclass(frozen=True)
 class HostedStart:
-    """What ``hosted run`` runs."""
+    """What ``hosted run`` runs, and the stop reason its ``exit.json`` carries when not the session's own."""
 
     run: Callable[[], int]
+    stop_reason: Callable[[], str | None] | None = None
 
 
 def hosted_run() -> int:
@@ -500,8 +509,13 @@ def hosted_run() -> int:
         returncode = start.run()
     except (EnvironmentIncomplete, PeersUnavailable, CacheBuildError, ToolboxInputsError, PermissionError) as exc:
         return _not_run(host.state_dir, EXIT_FAILED, exc)
+    except (BaseLaunchMismatch, BaseLaunchError) as exc:  # a frozen base that does not load stays so on a restart
+        return _not_run(host.state_dir, EXIT_USAGE, exc)
     root = recorded_session(host.state_dir)
-    stop_reason = None if root is None else reported_stop_reason(root)
+    if start.stop_reason is not None:
+        stop_reason = start.stop_reason()
+    else:
+        stop_reason = None if root is None else reported_stop_reason(root)
     write_final_exit(host.state_dir, HostedExit(returncode, stop_reason=stop_reason))
     return returncode
 
@@ -544,22 +558,21 @@ def _hosted_start(host: HostInfo) -> HostedStart:
 
 def _hosted_sweep(host: HostInfo, spec: CampaignSpec) -> HostedStart:
     """The conc sweep of the closed session ``conc_sweep.session_dir`` names, over the spec's points and as many tests
-    at once as it asks, measured where it says and written back into the session; raises ValueError when the directory
-    holds no closed multi-branch session or the spec's TP is not the session's."""
+    at once as it asks, measured where it says and written back into the session, taken over from an earlier start of
+    the run; raises ValueError when the spec does not name a closed multi-branch session it describes
+    (:func:`swept_session`, :func:`require_spec_matches`)."""
 
-    layout = SessionLayout(Path(str(spec.sweep_session_dir)))
-    if not (layout.manifest.is_file() and layout.report.is_file()):
-        raise ValueError(f"conc_sweep.session_dir {layout.root} holds no closed multi-branch session")
+    layout = swept_session(spec, os.environ)
     settings = _with_sweep_options(read_manifest(layout.manifest).settings, spec.sweep_concs, spec.sweep_parallel)
-    if settings.workload.tp != spec.tp:
-        raise ValueError(f"hardware.tp {spec.tp} is not the swept session's TP {settings.workload.tp}")
+    require_spec_matches(spec, settings.workload)
     local = spec.measurement == MEASUREMENT_LOCAL
     fit = machine_parallel_tests if local else grant_tests_that_fit(host, spec_make_before_break(spec))
     tests = min(spec.max_parallel_tests, fit(settings.workload.tp))
     settings = replace(settings, caps=replace(settings.caps, max_parallel_tests=tests))
     ready = hosted_ready_session(host, settings.workload, local=local)
+    take_over_swept_session(host.state_dir, layout)
     sweep = partial(conc_sweep, layout, settings, ready.peer_factory, ready.services)
-    return HostedStart(partial(sweep, deadline_unix=grant_tests_end_by(host)))
+    return HostedStart(partial(sweep, deadline_unix=grant_tests_end_by(host)), partial(sweep_stop_reason, layout))
 
 
 def _stop_before_grant_ends(host: HostInfo) -> None:

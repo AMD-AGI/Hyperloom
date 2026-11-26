@@ -3300,10 +3300,18 @@ def _sweep_spec(session_dir: Path, tp: int = 2) -> CampaignSpec:
     return parse_campaign(doc)
 
 
+def _sweep_host(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> SimpleNamespace:
+    """A host whose run keeps its user data in ``tmp_path``, where the swept sessions are."""
+    monkeypatch.setenv("USER_DATA_PATH", str(tmp_path))
+    (tmp_path / "state").mkdir(exist_ok=True)
+    return SimpleNamespace(grant_limits=None, state_dir=tmp_path / "state")
+
+
 def test_a_sweep_spec_sweeps_the_closed_session_it_names_on_its_points_and_tests_at_once(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     layout = _ended_before_final(tmp_path / "session")
+    host = _sweep_host(tmp_path, monkeypatch)
     swept: list[tuple[Path, RunSettings, float | None]] = []
     ready = SimpleNamespace(peer_factory="peers", services="services")
     monkeypatch.setattr(cli, "hosted_ready_session", lambda host, workload, *, local: ready)
@@ -3316,9 +3324,10 @@ def test_a_sweep_spec_sweeps_the_closed_session_it_names_on_its_points_and_tests
         ),
     )
 
-    start = cli._hosted_sweep(SimpleNamespace(grant_limits=None), _sweep_spec(layout.root))  # type: ignore[arg-type]
+    start = cli._hosted_sweep(host, _sweep_spec(layout.root))  # type: ignore[arg-type]
 
     assert start.run() == 0
+    assert hosted_run_module.recorded_session(host.state_dir) == layout.root
     [(root, settings, deadline)] = swept
     assert root == layout.root and deadline is None
     assert (settings.conc_sweep_concs, settings.conc_sweep_parallel) == ((2, 8), 4)
@@ -3327,13 +3336,53 @@ def test_a_sweep_spec_sweeps_the_closed_session_it_names_on_its_points_and_tests
     assert settings == replace(expected, caps=replace(expected.caps, max_parallel_tests=2))
 
 
-def test_a_sweep_spec_naming_no_closed_multibranch_session_is_refused(tmp_path: Path) -> None:
+def test_a_sweep_spec_naming_no_closed_multibranch_session_is_refused(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    host = _sweep_host(tmp_path, monkeypatch)
     with pytest.raises(ValueError, match="holds no closed multi-branch session"):
-        cli._hosted_sweep(SimpleNamespace(grant_limits=None), _sweep_spec(tmp_path / "nothing"))  # type: ignore[arg-type]
+        cli._hosted_sweep(host, _sweep_spec(tmp_path / "nothing"))  # type: ignore[arg-type]
 
 
-def test_a_sweep_spec_whose_tp_is_not_the_sessions_is_refused(tmp_path: Path) -> None:
+def test_a_sweep_spec_whose_tp_is_not_the_sessions_is_refused(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     layout = _ended_before_final(tmp_path / "session")
+    host = _sweep_host(tmp_path, monkeypatch)
 
-    with pytest.raises(ValueError, match="is not the swept session's TP 2"):
-        cli._hosted_sweep(SimpleNamespace(grant_limits=None), _sweep_spec(layout.root, tp=8))  # type: ignore[arg-type]
+    with pytest.raises(ValueError, match="hardware.tp 8 is not the swept session's 2"):
+        cli._hosted_sweep(host, _sweep_spec(layout.root, tp=8))  # type: ignore[arg-type]
+
+
+def test_a_hosted_sweep_ends_with_its_status_as_the_stop_reason(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    host = _sweep_host(tmp_path, monkeypatch)
+    start = cli.HostedStart(lambda: 0, lambda: "conc_sweep_skipped:no_optimization")
+    monkeypatch.setattr(cli, "take_host_info", lambda env, require: host)
+    monkeypatch.setattr(cli, "_hosted_start", lambda _host: start)
+    monkeypatch.setattr(cli, "_stop_before_grant_ends", lambda _host: None)
+
+    assert cli.hosted_run() == 0
+
+    document = json.loads((host.state_dir / hosted_run_module.EXIT_FILE).read_text())
+    assert document == {"final": True, "returncode": 0, "stop_reason": "conc_sweep_skipped:no_optimization"}
+
+
+def test_a_frozen_base_that_no_longer_loads_ends_the_run_for_good(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from hyperloom.orchestrator.state.base_launch import BaseLaunchMismatch
+
+    host = _sweep_host(tmp_path, monkeypatch)
+
+    def run() -> int:
+        raise BaseLaunchMismatch("the frozen base no longer matches its digest")
+
+    monkeypatch.setattr(cli, "take_host_info", lambda env, require: host)
+    monkeypatch.setattr(cli, "_hosted_start", lambda _host: cli.HostedStart(run))
+    monkeypatch.setattr(cli, "_stop_before_grant_ends", lambda _host: None)
+
+    assert cli.hosted_run() == cli.EXIT_USAGE
+
+    document = json.loads((host.state_dir / hosted_run_module.EXIT_FILE).read_text())
+    assert (document["final"], document["returncode"]) == (True, cli.EXIT_USAGE)
+    assert "no longer matches" in document["error"]
