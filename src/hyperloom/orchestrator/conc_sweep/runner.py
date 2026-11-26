@@ -24,7 +24,7 @@ from hyperloom.common.overlay import is_safe_path_entry, overlay_is_loadable
 from hyperloom.common.perf_metric import GRADED_INTVTY, GRADED_OUTPUT, agentx_replay_session, is_agentx_mode
 from hyperloom.inference_optimizer.framework_registry import is_scriptable, native_component
 from hyperloom.inference_optimizer.grading import resolved_grading
-from hyperloom.inference_optimizer.session.session_paths import reports_dir, runs_root
+from hyperloom.inference_optimizer.session.session_paths import BREAKDOWN_FILENAME, reports_dir, runs_root
 from hyperloom.orchestrator.actions.cancel_channel import current_cancel_scope
 from hyperloom.orchestrator.actions.executors._proposal_identity import controls_of, is_executable, normalize_proposal
 from hyperloom.orchestrator.actions.executors.grid._grid_runner import (
@@ -196,7 +196,7 @@ class _Sweep:
     def record(self, arm: Arm, result: VariantResult) -> None:
         point = point_from_variant(result, arm=arm.name)
         self.measured[arm.name][point["conc"]] = point
-        write_report(self.payload(), reports_dir(self.session_dir))
+        _write(self.session_dir, self.payload())
 
     def payload(self, *, final: bool = False) -> dict[str, Any]:
         state = self.state
@@ -240,6 +240,11 @@ class _Sweep:
         return "partial" if summary["successful_pairs"] else "failed"
 
 
+def _write(session_dir: Path, payload: dict[str, Any]) -> None:
+    """Write the report into the session's ``reports/`` and carry it in the session's breakdown."""
+    write_report(payload, reports_dir(session_dir), breakdown=session_dir / BREAKDOWN_FILENAME)
+
+
 def _header(state: SharedState, session_dir: Path) -> dict[str, Any]:
     return {
         "schema_version": SCHEMA_VERSION,
@@ -262,7 +267,7 @@ def _skipped(state: SharedState, session_dir: Path, reason: str, **detail: Any) 
         "optimized": {"points": []},
         "summary": {},
     }
-    write_report(payload, reports_dir(session_dir))
+    _write(session_dir, payload)
     log.info("conc_sweep: skipped (%s)", reason)
     return payload
 
@@ -394,7 +399,7 @@ async def run_conc_sweep(session_dir: Path) -> dict[str, Any]:
     )
     if ceiling is not None:
         payload["roofline_ceiling"] = ceiling
-    write_report(payload, reports_dir(session_dir))
+    _write(session_dir, payload)
     curve = ConcCurveOptions(state.model_name, state.gpu_type, state.tp, state.isl, state.osl)
     publish_curve(payload, session_dir, curve)
     log.info(
