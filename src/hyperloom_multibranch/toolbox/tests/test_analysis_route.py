@@ -42,7 +42,7 @@ from hyperloom_multibranch.toolbox.tools import op_shares as op_shares_module
 from hyperloom_multibranch.toolbox.tools.op_shares import with_op_shares
 from hyperloom_multibranch.toolbox.tools.baseline_lengths import measuring_run_dirs
 from hyperloom_multibranch.scheduling.clock import Clock
-from hyperloom_multibranch.scheduling.events import PROFILE_NOT_ANALYSED, PROFILED, IntegrationProfiler
+from hyperloom_multibranch.scheduling.events import PROFILE_NOT_ANALYSED, PROFILED, IntegrationProfiler, ProfileOutcome
 from hyperloom_multibranch.scheduling.requests import SessionTests
 from hyperloom_multibranch.toolbox.tools.kernel_launchers import Relabelled
 from hyperloom_multibranch.toolbox.tools.kernel_shares import KERNEL_SHARES_FILE, GpuEvent, kernel_window
@@ -803,13 +803,17 @@ def _root_profiler(stack: Stack) -> IntegrationProfiler:
 
 async def _profiled_root(
     stack: Stack, tmp_path: Path, point: str, baseline: asyncio.Future[None] | None
-) -> asyncio.Task:
+) -> asyncio.Task[ProfileOutcome]:
     """PRELUDE's profile of the root, started with ``baseline`` as the baseline's measurement, once its profile test
-    ended; the profile test lands ``point``."""
+    ended, ending with its analysis's outcome; the profile test lands ``point``."""
     (tmp_path / "session" / LANDED / "variant_00_test").mkdir(parents=True)
     (tmp_path / "session" / LANDED / "variant_00_test" / "config.yaml").write_text(point, encoding="utf-8")
     stack.rig.executor.script = [lambda job: ok(job, **ROOT_PROFILED)]
-    task = asyncio.ensure_future(_root_profiler(stack).profile_root(PARENT, baseline))
+
+    async def analysed() -> ProfileOutcome:
+        return await (await _root_profiler(stack).profile_root(PARENT, baseline))
+
+    task = asyncio.ensure_future(analysed())
     while not stack.rig.executor.jobs:
         await asyncio.sleep(0.01)
     await stack.rig.toolbox.drain()

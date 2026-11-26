@@ -129,6 +129,14 @@ class Workload:
         return self.inferencex is not None
 
     @property
+    def prelude_awaits_root_analysis(self) -> bool:
+        """Whether PRELUDE waits for the analysis of the root's profile, so the opening judge call reads the root's op
+        shares, or only for its PROFILE test, the analysis going on once EXPLORE opened. An InferenceX analysis is
+        short; an AgentX one, on the CPU alone, can run for tens of minutes while every card would wait."""
+
+        return self.inferencex is not None
+
+    @property
     def integration_k(self) -> int:
         """The K the integration branch opens at: 2 for InferenceX, whose merge tests and profiles are short; 1 for
         AgentX, whose merge test holds one of a few large slots for its whole trace window."""
