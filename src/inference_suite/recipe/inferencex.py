@@ -143,6 +143,14 @@ class InferencexPoint:
         return f"{self.entry}/{self.scenario.value}[{self.group}]/search-space[{self.arm}]"
 
     @property
+    def series_key(self) -> str:
+        """The point without its concurrency and the recipe override InferenceX picks for it: the rows of one entry that
+        share it sweep one launch over concurrency, as one row listing several concurrencies does."""
+        launch = (self.recipe.partition(":")[0], self.tp, self.ep, self.pp, self.dcp, self.pcp, self.dp_attention)
+        workload = (self.spec_decoding, self.isl, self.osl, self.kv_offloading, self.kv_offload_backend, self.router)
+        return json.dumps([self.entry, self.scenario.value, self.group, *launch, *workload], sort_keys=True)
+
+    @property
     def key(self) -> str:
         """The point's name in a snapshot's selections."""
         return f"{self.arm_key}/conc{self.conc}"
@@ -606,6 +614,22 @@ def _misfit(point: InferencexPoint, query: LaunchQuery) -> str | None:
     return None
 
 
+def _series(points: Sequence[InferencexPoint]) -> dict[str, list[InferencexPoint]]:
+    """``points`` by the arm each sweeps in, named by its first row: the rows of a series, one per concurrency, are one
+    arm; a series that would launch one concurrency twice keeps its rows apart."""
+    by_series: dict[str, list[InferencexPoint]] = {}
+    for point in points:
+        by_series.setdefault(point.series_key, []).append(point)
+    arms: dict[str, list[InferencexPoint]] = {}
+    for members in by_series.values():
+        if len({point.conc for point in members}) == len(members):
+            arms[members[0].arm_key] = members
+            continue
+        for point in members:
+            arms.setdefault(point.arm_key, []).append(point)
+    return arms
+
+
 def _arm_point(points: Sequence[InferencexPoint], target: int) -> InferencexPoint | None:
     """The arm's point at ``target``, else its nearest larger one: a launch tuned for more concurrency serves less."""
     fitting = [point for point in points if point.conc >= target]
@@ -677,16 +701,16 @@ def inferencex_launches(query: LaunchQuery, snapshot: InferencexSnapshot) -> tup
             SourceKind.INFERENCEX, f"no entry serves {query.model_id} with {query.framework} on a {query.board}"
         )
     target = max(query.concurrencies)
-    arms: dict[str, list[InferencexPoint]] = {}
+    fitting: list[InferencexPoint] = []
     reasons = dict(served.unread)
     for point in served.points:
         misfit = _misfit(point, query)
         if misfit is None:
-            arms.setdefault(point.arm_key, []).append(point)
+            fitting.append(point)
         else:
             reasons.setdefault(point.arm_key, misfit)
     launches = []
-    for arm_key, points in arms.items():
+    for arm_key, points in _series(fitting).items():
         point = _arm_point(points, target)
         concs = tuple(sorted({each.conc for each in points}))
         launch = (
