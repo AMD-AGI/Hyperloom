@@ -52,7 +52,7 @@ from .framework_change._spec_decode_pin import (
 )
 from .patching._patch_laying import PatchedServer, is_patched_copy
 from ._profile_setup import SGLANG_PATCH_SERVER_FLAG
-from ._server_patcher import ensure_patched_copy, lay_tracelens_patch
+from ._server_patcher import ensure_patched_copy, is_kernel_shape_tool, lay_tracelens_patch
 
 __all__ = [
     "BOOT_BUDGET_ENV",
@@ -62,6 +62,7 @@ __all__ = [
     "ensure_patched_copy",
     "ensure_vllm_patched_for_tracelens",
     "PREFIX_CACHE_OFF_ERROR_CLASS",
+    "is_kernel_shape_tool",
     "is_patched_copy",
     "lay_tracelens_patch",
     "CONTEXT_COPY_REFUSAL",
