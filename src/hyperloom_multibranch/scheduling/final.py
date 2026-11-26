@@ -55,6 +55,7 @@ from hyperloom.measure.pins import ImagePinError, active_image
 from hyperloom.orchestrator.conc_sweep.points import SCHEMA_VERSION, SweepPoints, ladder, launches_missing, sweep_points
 from hyperloom.orchestrator.conc_sweep.report import (
     SETTLED,
+    keep_measured_summary,
     read_summary,
     run_facts,
     take_earlier_summary,
@@ -575,6 +576,7 @@ def write_skipped(layout: SessionLayout, workload: Workload, reason: str) -> dic
         "optimized": {"points": []},
         "summary": {},
     }
+    keep_measured_summary(layout.reports)
     write_report(payload, layout.reports)
     logger.info("conc_sweep: skipped (%s)", reason)
     return payload

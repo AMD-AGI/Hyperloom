@@ -63,6 +63,8 @@ from .report import (
     build_roofline_ceiling,
     point_from_variant,
     publish_curve,
+    keep_measured_summary,
+    point_final_at,
     take_earlier_summary,
     run_facts,
     write_report,
@@ -138,7 +140,7 @@ def _appended(arm: Arm, frozen: BaseLaunch | None) -> _Layer:
     layer = _arm_layer(arm)
     if frozen is None:
         return layer
-    change = launch_change(frozen, layer.args, layer.envs)
+    change = launch_change(frozen, layer.args, layer.envs, layer.remove_args)
     return replace(layer, args=change.args, envs=dict(change.env))
 
 
@@ -356,7 +358,9 @@ def _skipped(state: SharedState, session_dir: Path, reason: str, **detail: Any) 
         "optimized": {"points": []},
         "summary": {},
     }
+    keep_measured_summary(reports_dir(session_dir))
     write_report(payload, reports_dir(session_dir))
+    point_final_at(payload, session_dir)
     log.info("conc_sweep: skipped (%s)", reason)
     return payload
 

@@ -59,7 +59,7 @@ def validate_server_args_shell_safe(server_args: str | None) -> str:
     return args
 
 
-def _flag_groups(server_args: str | None) -> dict[str, list[str]]:
+def server_arg_groups(server_args: str | None) -> dict[str, list[str]]:
     """Each flag ``server_args`` names, by canonical name, as its tokens: the flag and the values after it; a later
     copy of a flag replaces an earlier one, as the engine's parser lets it."""
     groups: dict[str, list[str]] = {}
@@ -84,7 +84,7 @@ class ServerArgsDelta:
 def server_args_delta(before: str | None, after: str | None) -> ServerArgsDelta:
     """The change from ``before`` to ``after``: every flag ``after`` sets differently or ``before`` lacks, and every flag
     ``before`` names that ``after`` does not."""
-    old, new = _flag_groups(before), _flag_groups(after)
+    old, new = server_arg_groups(before), server_arg_groups(after)
     add = [" ".join(tokens) for name, tokens in new.items() if old.get(name) != tokens]
     remove = tuple(tokens[0].partition("=")[0] for name, tokens in old.items() if name not in new)
     return ServerArgsDelta(" ".join(add), remove)

@@ -487,3 +487,40 @@ def test_the_report_says_its_points_take_the_sources_launch_at_each_concurrency(
     payload = asyncio.run(runner.run_conc_sweep(session_dir))
 
     assert payload["point_launches"] == points.LAUNCHES_SOURCE
+
+
+def test_a_skip_sets_aside_an_earlier_report_that_measured_points_and_the_session_report_follows(
+    session_dir: Path, grid: SimpleNamespace, monkeypatch: pytest.MonkeyPatch
+):
+    _state(session_dir)
+    final = session_dir / "reports" / "final.json"
+    final.write_text(json.dumps({"stop_reason": "cycle_end_done"}))
+    asyncio.run(runner.run_conc_sweep(session_dir))
+    frozen = SimpleNamespace(launch=_base(SourceKind.INFERENCEX, (4, 8, 32)))
+    frozen.launch.point.source_launches = ()
+    monkeypatch.setattr(runner, "frozen_base", lambda _: frozen)
+    monkeypatch.setattr(state_base_launch, "frozen_base", lambda _: frozen)
+
+    asyncio.run(runner.run_conc_sweep(session_dir))
+
+    kept = json.loads((session_dir / "reports" / f"conc_sweep_summary.{points.SCHEMA_VERSION}.json").read_text())
+    assert kept["status"] == "succeeded" and len(kept["baseline"]["points"]) == 4
+    assert _summary(session_dir)["skip_reason"] == points.NO_SOURCE_LAUNCHES
+    assert json.loads(final.read_text())["conc_sweep_summary"]["status"] == "skipped"
+
+
+def test_a_flag_the_optimization_removes_and_sets_again_at_the_sessions_value_stays(
+    session_dir: Path, grid: SimpleNamespace, monkeypatch: pytest.MonkeyPatch
+):
+    best = {
+        "extra_server_args": "--max-running-requests 32",
+        "extra_envs": {},
+        "remove_args": ["--max-running-requests"],
+    }
+    _state(session_dir, current_best=best)
+    _per_conc_base(monkeypatch, _SLOTS[16], _SLOTS)
+
+    asyncio.run(runner.run_conc_sweep(session_dir))
+
+    optimized = {call["name"]: call for call in grid.calls if call["name"].startswith("optimized")}
+    assert optimized["optimized_conc32"]["args"] == "--max-running-requests 32"

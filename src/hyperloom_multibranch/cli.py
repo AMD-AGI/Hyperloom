@@ -560,7 +560,7 @@ def _hosted_sweep(host: HostInfo, spec: CampaignSpec) -> HostedStart:
     the run; raises ValueError when the spec does not name a closed multi-branch session it describes
     (:func:`swept_session`, :func:`require_spec_matches`)."""
 
-    layout = swept_session(spec, os.environ)
+    layout = swept_session(spec)
     settings = _with_sweep_options(read_manifest(layout.manifest).settings, spec.sweep_concs, spec.sweep_parallel)
     require_spec_matches(spec, settings.workload)
     local = spec.measurement == MEASUREMENT_LOCAL

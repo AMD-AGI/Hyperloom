@@ -83,7 +83,7 @@ from hyperloom.hosted.host_info import GrantLimits as HostGrantLimits
 from hyperloom.hosted.host_info import HostInfo, Var
 from hyperloom.measure.pins import ImagePinError, active_image
 from hyperloom.measure.short_prompts.staging import CACHE_ENV as RUNNER_CACHE_ENV
-from hyperloom.inference_optimizer.session.paths import ENV_USER_DATA_PATH
+from hyperloom.inference_optimizer.session.paths import ENV_USER_DATA_PATH, workspace_root
 from hyperloom_multibranch.blackboard import LocalBlackboard
 from hyperloom_multibranch.contracts.blackboard import Role, Writer
 from hyperloom_multibranch.contracts.toolbox import WorkloadKind
@@ -827,21 +827,21 @@ def reported_stop_reason(root: Path) -> str | None:
 SWEEP_STOP_PREFIX = "conc_sweep_"
 
 
-def swept_session(spec: CampaignSpec, env: Mapping[str, str]) -> SessionLayout:
-    """The closed multi-branch session ``conc_sweep.session_dir`` names.
+def swept_session(spec: CampaignSpec) -> SessionLayout:
+    """The closed multi-branch session ``conc_sweep.session_dir`` names, by the directory it resolves to: the run
+    reads and writes there through no link.
 
     Raises:
-        HostedRefused: When the path is not the directory it resolves to (a link or a ``..`` on the way), lies outside
-            the run's ``USER_DATA_PATH``, or holds no closed multi-branch session.
+        HostedRefused: When it resolves to no directory below the resolved workspace root sessions are made in
+            (``USER_DATA_PATH``, :func:`~hyperloom.inference_optimizer.session.paths.workspace_root`), or holds no
+            closed multi-branch session.
     """
 
     named = Path(str(spec.sweep_session_dir))
     resolved = named.resolve()
-    if resolved != named:
-        raise HostedRefused(f"conc_sweep.session_dir {named} resolves to {resolved}: name the directory itself")
-    user_data = Path(env.get(ENV_USER_DATA_PATH, "")).resolve()
-    if not resolved.is_relative_to(user_data) or resolved == user_data:
-        raise HostedRefused(f"conc_sweep.session_dir {named} is not below the run's {ENV_USER_DATA_PATH} {user_data}")
+    root = workspace_root().resolve()
+    if not resolved.is_relative_to(root) or resolved == root:
+        raise HostedRefused(f"conc_sweep.session_dir {named} is not below the run's workspace {root}")
     layout = SessionLayout(resolved)
     if not (layout.manifest.is_file() and layout.report.is_file()):
         raise HostedRefused(f"conc_sweep.session_dir {named} holds no closed multi-branch session")
@@ -875,11 +875,11 @@ def take_over_swept_session(state_dir: Path, layout: SessionLayout) -> None:
 
 
 def sweep_stop_reason(layout: SessionLayout) -> str | None:
-    """``conc_sweep_<status>``, with ``:<skip_reason>`` for a skipped sweep, as the report in ``layout`` says; ``None``
-    when the sweep wrote none."""
+    """``conc_sweep_<status>``, with ``:<skip_reason>`` for a skipped sweep, as the report this process wrote in
+    ``layout`` says; ``None`` when it wrote none, as when another run held the session."""
 
     summary = read_summary(layout.reports)
-    if summary is None:
+    if summary is None or summary.get("pid") != os.getpid():
         return None
     reason = f"{SWEEP_STOP_PREFIX}{summary['status']}"
     return f"{reason}:{summary['skip_reason']}" if summary.get("skip_reason") else reason

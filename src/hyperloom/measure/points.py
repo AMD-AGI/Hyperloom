@@ -298,7 +298,7 @@ def generate_points(
         raise PointError("an AgentX workload has no accuracy test: its report's valid_measurement is its check")
     launch = environment.recipe.launch
     if canonical.frozen_base is not None:  # levels seeded with the source's launch take what the recipe restates there
-        change = launch_change(canonical.frozen_base, launch.server_args, launch.envs)
+        change = launch_change(canonical.frozen_base, launch.server_args, launch.envs, launch.remove_args)
         launch = replace(launch, server_args=change.args, envs=dict(change.env))
     check_launch_envs([*launch.envs, *environment.envs])
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -379,7 +379,7 @@ def generate_profile_point(
         return (point,)
     launch = environment.recipe.launch
     if canonical.frozen_base is not None:  # levels seeded with the source's launch take what the recipe restates there
-        change = launch_change(canonical.frozen_base, launch.server_args, launch.envs)
+        change = launch_change(canonical.frozen_base, launch.server_args, launch.envs, launch.remove_args)
         launch = replace(launch, server_args=change.args, envs=dict(change.env))
     check_launch_envs([*launch.envs, *environment.envs])
     out_dir.mkdir(parents=True, exist_ok=True)

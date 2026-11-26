@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -38,31 +39,44 @@ def user_data(tmp_path: Path) -> Path:
     return path
 
 
-def test_a_closed_session_below_the_runs_user_data_is_swept(user_data: Path):
+@pytest.mark.parametrize(
+    "named",
+    [
+        lambda data: data / "Model" / "MB-1",
+        lambda data: data / "Model" / ".." / "Model" / "MB-1",
+        lambda data: data.parent / "user-data-link" / "Model" / "MB-1",
+    ],
+    ids=["the directory", "through ..", "through a link to the workspace"],
+)
+def test_a_closed_session_below_the_runs_workspace_is_swept_by_the_directory_it_resolves_to(
+    user_data: Path, monkeypatch: pytest.MonkeyPatch, named
+):
     layout = _closed(user_data / "Model" / "MB-1")
+    (user_data.parent / "user-data-link").symlink_to(user_data)
+    monkeypatch.setenv("USER_DATA_PATH", str(user_data.parent / "user-data-link"))
 
-    assert swept_session(_spec(layout.root), {"USER_DATA_PATH": str(user_data)}).root == layout.root
+    assert swept_session(_spec(named(user_data))).root == layout.root.resolve()
 
 
 @pytest.mark.parametrize(
     ("named", "message"),
     [
-        (lambda data, outside: outside, "is not below the run's USER_DATA_PATH"),
-        (lambda data, outside: data / "link", "resolves to"),
-        (lambda data, outside: data / "Model" / ".." / "Model" / "MB-1", "resolves to"),
+        (lambda data, outside: outside, "is not below the run's workspace"),
+        (lambda data, outside: data / "link", "is not below the run's workspace"),
         (lambda data, outside: data / "Model" / "empty", "holds no closed multi-branch session"),
     ],
+    ids=["outside", "a link out of the workspace", "not closed"],
 )
-def test_a_session_dir_outside_the_runs_data_through_a_link_or_not_closed_is_refused(
-    user_data: Path, tmp_path: Path, named, message: str
+def test_a_session_dir_outside_the_runs_workspace_or_not_closed_is_refused(
+    user_data: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, named, message: str
 ):
-    _closed(user_data / "Model" / "MB-1")
-    (user_data / "Model" / "empty").mkdir()
+    (user_data / "Model" / "empty").mkdir(parents=True)
     outside = _closed(tmp_path / "elsewhere" / "MB-2").root
     (user_data / "link").symlink_to(outside)
+    monkeypatch.setenv("USER_DATA_PATH", str(user_data))
 
     with pytest.raises(hosted_run.HostedRefused, match=message):
-        swept_session(_spec(named(user_data, outside)), {"USER_DATA_PATH": str(user_data)})
+        swept_session(_spec(named(user_data, outside)))
 
 
 @pytest.mark.parametrize(
@@ -109,9 +123,14 @@ def test_a_lock_another_run_holds_is_left_to_refuse_the_sweep(tmp_path: Path):
     ("summary", "reason"),
     [
         (None, None),
-        ({"status": "succeeded"}, "conc_sweep_succeeded"),
-        ({"status": "skipped", "skip_reason": "no_optimization"}, "conc_sweep_skipped:no_optimization"),
+        ({"status": "succeeded", "pid": os.getpid()}, "conc_sweep_succeeded"),
+        (
+            {"status": "skipped", "skip_reason": "no_optimization", "pid": os.getpid()},
+            "conc_sweep_skipped:no_optimization",
+        ),
+        ({"status": "succeeded", "pid": os.getpid() + 1}, None),
     ],
+    ids=["none", "succeeded", "skipped", "another run's"],
 )
 def test_the_stop_reason_is_the_sweeps_status(tmp_path: Path, summary: dict | None, reason: str | None):
     layout = _closed(tmp_path / "MB-1")

@@ -591,9 +591,10 @@ def _launch(
 def _arm_launches(
     points: Sequence[InferencexPoint], query: LaunchQuery, snapshot: InferencexSnapshot, concs: tuple[int, ...]
 ) -> tuple[SourceLaunch, ...]:
-    """The launch every point of an arm binds at its own concurrency, ascending; a point InferenceX refused or this
-    source cannot reproduce is left out."""
-    launches = (_launch(each, query, snapshot, each.conc, concs) for each in sorted(points, key=lambda p: p.conc))
+    """The launch every point of an arm binds at its own concurrency, ascending, one per concurrency an arm lists more
+    than once; a point InferenceX refused or this source cannot reproduce is left out."""
+    by_conc = {point.conc: point for point in points}
+    launches = (_launch(by_conc[conc], query, snapshot, conc, concs) for conc in sorted(by_conc))
     return tuple(launch for launch in launches if not isinstance(launch, str))
 
 

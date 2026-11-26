@@ -10,6 +10,7 @@ import json
 import logging
 import os
 import socket
+from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -244,12 +245,24 @@ def _model_meta_record(meta: Any) -> dict[str, Any]:
 
 def take_earlier_summary(reports: Path) -> dict[str, Any] | None:
     """The summary an earlier run of the sweep left in ``reports`` when this schema wrote it; one of another schema is
-    set aside as ``conc_sweep_summary.<its version>.json``, since the run about to start writes over it."""
+    set aside (:func:`_set_aside`), since the run about to start writes over it."""
     earlier = read_summary(reports)
     if earlier is None or earlier.get("schema_version") == SCHEMA_VERSION:
         return earlier
-    (reports / SUMMARY_FILE).rename(reports / f"conc_sweep_summary.{earlier.get('schema_version')}.json")
+    _set_aside(reports, earlier)
     return None
+
+
+def keep_measured_summary(reports: Path) -> None:
+    """Set aside the summary an earlier run left in ``reports`` when it holds measured points, before a skip's report
+    is written where it was: a sweep that measures nothing never takes the place of one that measured."""
+    earlier = read_summary(reports)
+    if earlier is not None and any(earlier.get(arm, {}).get("points") for arm in ("baseline", "optimized")):
+        _set_aside(reports, earlier)
+
+
+def _set_aside(reports: Path, earlier: Mapping[str, Any]) -> None:
+    (reports / SUMMARY_FILE).rename(reports / f"conc_sweep_summary.{earlier.get('schema_version')}.json")
 
 
 def read_summary(reports: Path) -> dict[str, Any] | None:
@@ -273,7 +286,12 @@ def write_curve(payload: dict[str, Any], reports: Path, options: ConcCurveOption
 def publish_curve(payload: dict[str, Any], session_dir: Path, options: ConcCurveOptions) -> None:
     """Draw the sweep's curve and point the session's ``final.json`` at the summary and the curve."""
     reports = reports_dir(session_dir)
-    curve = write_curve(payload, reports, options)
+    point_final_at(payload, session_dir, write_curve(payload, reports, options))
+
+
+def point_final_at(payload: dict[str, Any], session_dir: Path, curve: Path | None = None) -> None:
+    """Point the session's ``final.json``, when it has one, at the summary ``payload`` is and at its ``curve``."""
+    reports = reports_dir(session_dir)
     final = reports / FINAL_FILE
     if not final.is_file():
         return
