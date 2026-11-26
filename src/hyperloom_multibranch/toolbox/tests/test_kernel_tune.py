@@ -268,6 +268,17 @@ async def test_a_pool_that_cannot_spare_a_card_does_not_serve_the_tool_at_all(ma
     assert refused.value.code == "tool_unavailable_on_backend"
 
 
+async def test_a_session_held_to_launch_configuration_is_served_no_tuner(make: Make) -> None:
+    """``run --no-source-changes``: a tuner's table could not be kept, and it would hold a card while it runs."""
+    rig = await ready(await make(cards=2, source_changes=False))
+
+    assert rig.box.analysis_tools == ("tracelens", "roofline", "upstream_pr_search")
+    assert KERNEL_TUNE_TOOL not in rig.box._tools.tool_names  # type: ignore[union-attr]
+    with pytest.raises(RequestRejected) as refused:
+        await rig.submit(test_request_id=TEST_ID)
+    assert refused.value.code == "tool_unavailable_on_backend"
+
+
 async def test_a_branch_that_holds_a_sandbox_lease_may_run_the_tool_too_and_both_are_counted(make: Make) -> None:
     rig = await ready(await make(cards=4))
     await rig.box.lease_branch_sandbox("b1", 1)

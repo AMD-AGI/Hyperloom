@@ -366,7 +366,7 @@ def test_a_session_held_to_launch_configuration_ends_its_role_by_saying_what_it_
         "This overrides everything above",
         "refuses, as launch_config_only, every test whose recipe holds a patch or a kernel artifact",
         "Claim config intents only",
-        "start no kernel_tune and no knob_tune",
+        "start_analysis offers no kernel_tune and no knob_tune in this session",
         'A "left out:" patch or kernel of a replayed champion stays out',
         "A setting that names a file you wrote",
         "here, test the next setting",

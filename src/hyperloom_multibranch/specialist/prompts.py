@@ -637,7 +637,8 @@ patch and no kernel file can follow, so it may hold nothing but server arguments
 overrides everything above, and every direction, brief and runtime message, that tells you to change code:
 - The toolbox refuses, as {LAUNCH_CONFIG_ONLY_CODE}, every test whose recipe holds a patch or a kernel artifact, \
 whoever submits it. A patch, a fused or rewritten kernel, a tuned table, a port of a PR and a Forge run can never \
-land here: spend nothing of your branch on one, and start no kernel_tune and no knob_tune.
+land here: spend nothing of your branch on one. start_analysis offers no kernel_tune and no knob_tune in this \
+session.
 - Claim config intents only, and submit deltas that change only config.
 - Your direction and the brief's focus still say where the time goes: answer them with settings. Read the code on \
 the top operator's path, server.log and the profile for the flags and environment variables that path reads (a \

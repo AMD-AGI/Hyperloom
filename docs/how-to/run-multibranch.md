@@ -216,6 +216,8 @@ no kernel file can be carried along.
 - **A file carried in by name:** a server argument or an environment variable whose value names a path under the
   session's directory (a table a specialist wrote, an entry on `PYTHONPATH`, a template) is refused the same way:
   the file is what such a setting would keep, and the recipe cannot hold it.
+- **Tuners:** `kernel_tune` and `knob_tune` are not offered. What they return is a kernel table or a patch, and a
+  tuner holds a card while it runs.
 - **Warm start:** a Recipe KB champion whose recipe holds patches or kernel artifacts replays its launch configuration
   alone, on the root and for the specialists, without the variables only its patches read; its lead names the files
   left out.

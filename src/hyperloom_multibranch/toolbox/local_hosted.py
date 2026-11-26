@@ -124,6 +124,8 @@ from hyperloom_multibranch.toolbox.native_builds import (
 )
 from hyperloom_multibranch.toolbox.short_prompts import ShortPromptSetup, staged_short_prompts
 from hyperloom_multibranch.toolbox.tools import (
+    KERNEL_TUNE_TOOL,
+    KNOB_TUNE_TOOL,
     AsyncTool,
     UpstreamPrSearch,
     kernel_tune_tool,
@@ -698,6 +700,14 @@ def _provider(
     return provider
 
 
+def _kept_tools(tools: Sequence[AsyncTool], acceptance: AcceptanceSetup) -> Sequence[AsyncTool]:
+    """``tools`` without the tuners in a session that keeps launch configuration only: what they return, a kernel
+    table or a patch, is refused by its acceptance, and a tuner holds a card while it runs."""
+    if acceptance.source_changes:
+        return tools
+    return [tool for tool in tools if tool.name not in (KERNEL_TUNE_TOOL, KNOB_TUNE_TOOL)]
+
+
 def _local_tools(
     leases: BranchLeases, options: LocalOptions, native: NativeBuilds | None, directory: Path
 ) -> Sequence[AsyncTool]:
@@ -817,7 +827,9 @@ def build_local_toolbox(
         session_stores(blackboard, directory, session.run_id, native.driver if native else None),
         executor,
         _accepting_local_kinds(acceptance),
-        tools=session_tools(_local_tools(leases, options, native, directory), blackboard, directory),
+        tools=session_tools(
+            _kept_tools(_local_tools(leases, options, native, directory), acceptance), blackboard, directory
+        ),
         tuning=ToolboxTuning(
             policy=capped_policy(options.policy, parallel),
             max_infra_retries=options.max_infra_retries,
