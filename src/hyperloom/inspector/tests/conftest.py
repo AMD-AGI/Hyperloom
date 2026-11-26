@@ -260,6 +260,10 @@ def session_dir(tmp_path: Path) -> Path:
         },
     )
     _write(
+        root / "reports" / "sbd_v6" / "timeline" / "000001-baseline.json",
+        {"id": 1, "kind": "baseline", "start_time": iso(T0 + 12), "end_time": iso(T0 + 600), "status": "ok"},
+    )
+    _write(
         root / "critic-workdir" / "turn-0001" / "review.json",
         {"review_verdicts": [{"target_proposal_msg_id": "m4", "verdict": "approve", "reasoning": "fine"}]},
     )
@@ -281,6 +285,7 @@ def _set_mtimes(root: Path) -> None:
         "runs/baseline": T0 + 600,
         "runs/specialist": T0 + 300,
         "critic-workdir": T0 + 640,
+        "reports/sbd_v6": T0 + 600,
     }
     for path in root.rglob("*"):
         if path.is_file():

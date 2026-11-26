@@ -74,3 +74,18 @@ path = "src/inference_suite/tests/fixtures/llamacpp/**"
 precedence = "override"
 SPDX-FileCopyrightText = "2023-2026 The ggml authors"
 SPDX-License-Identifier = "MIT"
+
+# The Inspector's modern UI, compiled by Vite from frontend/inspector (gitignored in the tree). The
+# bundle mixes AMD's code with the npm packages listed, licence text included, in the THIRD_PARTY_LICENSES.txt the
+# build writes next to it. Svelte and xyflow are MIT, most d3 modules (the graph's force layout, and xyflow's pan
+# and zoom) are ISC, and d3-ease is BSD-3-Clause; a new licence type changes this expression. The ISC and BSD
+# texts ship in THIRD_PARTY_LICENSES.txt, not LICENSES/: `reuse lint` skips gitignored files, so it would report
+# them unused.
+[[annotations]]
+path = "src/hyperloom/inspector/static/modern/**"
+precedence = "override"
+SPDX-FileCopyrightText = [
+    "2026 Advanced Micro Devices, Inc.",
+    "Authors of the npm packages listed in static/modern/THIRD_PARTY_LICENSES.txt",
+]
+SPDX-License-Identifier = "MIT AND ISC AND BSD-3-Clause"

@@ -16,6 +16,7 @@ the annotations cannot.
 | `src/kernelforge/knowledge/local_wiki/resources/languages/flydsl/API_docs/examples/0{1,2,3,4}-*.py` | FlyDSL project | Apache-2.0 | Working reference kernels the agent reads when authoring FlyDSL. Four files. `04-preshuffle_gemm.py` carries no upstream header — see the note in `REUSE.toml`. |
 | `src/kernelforge/examples/flydsl-softmax-forge-loop/softmax_kernel.py` | FlyDSL project | Apache-2.0 | Starting point of a runnable example campaign. |
 | `src/kernelforge/examples/triton2flydsl-mxfp8-grouped-gemm/mxfp8_grouped_gemm.py` | SGLang (`kernels/ops/moe/mxfp8_moe_amd_gfx95.py`) | Apache-2.0 | The protected Triton oracle for a rewrite example. The pipeline reads it and never edits it; the FlyDSL port it produces is AMD's. |
+| `src/hyperloom/inspector/static/modern/**` (built, gitignored) | npm packages bundled by Vite from `frontend/inspector` (Svelte, Svelte Flow and the d3 modules it and the force layout use) | MIT, ISC, BSD-3-Clause (d3-ease) | The Inspector's modern UI is compiled ahead of time so the pod needs no Node. The build writes `static/modern/THIRD_PARTY_LICENSES.txt` with each bundled package's licence text and fails on a licence outside its allowlist; a new licence type also needs `LICENSES/` and the `REUSE.toml` entry updated. |
 
 ## Named but not vendored
 

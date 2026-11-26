@@ -38,8 +38,11 @@ def test_crashed_specialists_that_landed_as_succeeded_are_flagged(session_dir):
     assert tasks["t-recon"]["node"] == "spec:static_recon"
 
 
-def test_snapshot_budget(session_dir):
+def test_snapshot_graph_and_budget(session_dir):
     snap = _live(session_dir).snapshot()
+    edges = {(e["source"], e["target"], e["label"]): e["count"] for e in snap["graph"]["edges"]}
+    assert edges[("critic", "orchestration", "review_verdict")] == 1
+    assert edges[("coordinator", "bus", "delegated_result")] == 4
     assert snap["budget"]["pct"] == 25.0
     assert (snap["summary"]["tick"], snap["budget"]["used_sec"]) == (42, 1800)
     assert snap["llm"]["orchestration"]["errors"] == 1
@@ -62,6 +65,35 @@ def test_snapshot_is_redacted_and_never_lists_env_files(session_dir):
     blob = json.dumps(w.snapshot())
     assert FAKE_KEY not in blob
     assert not any(a["path"].startswith(".env") for a in w.artifacts_at())
+
+
+def test_phase_bands_skip_marker_rows(session_dir):
+    phases = _live(session_dir).snapshot()["timeline"]["phases"]
+    assert [(p["phase"], p["start"], p["end"]) for p in phases] == [
+        ("PRELUDE", T0 + 5, T0 + 650),
+        ("SYSTEM", T0 + 650, None),
+    ]
+
+
+def test_replay_chapters_cover_the_recording_past_the_clock(session_dir):
+    timeline = _replay_at(session_dir, T0 + 305).snapshot()["timeline"]
+    assert [(p["phase"], p["end"]) for p in timeline["phases"]] == [("PRELUDE", None)]
+    assert [(p["phase"], p["start"], p["end"]) for p in timeline["chapters"]] == [
+        ("PRELUDE", T0 + 5, T0 + 650),
+        ("SYSTEM", T0 + 650, None),
+    ]
+    assert "chapters" not in _live(session_dir).snapshot()["timeline"]
+
+
+def test_a_live_run_gone_quiet_ends_the_timeline_at_its_last_activity(session_dir, monkeypatch):
+    w = _live(session_dir)
+    snap = w.snapshot()
+    end = snap["timeline"]["end"]
+    assert T0 < end < w.clock.now() - 600
+    monkeypatch.setattr(w, "optimizer_status", lambda: {"alive": True})
+    snap = w.snapshot()
+    assert snap["timeline"]["end"] is None
+    assert _replay_at(session_dir, T0 + 305).snapshot()["timeline"]["end"] is None
 
 
 def test_an_optimizer_on_this_host_is_alive_while_its_process_runs(session_dir):

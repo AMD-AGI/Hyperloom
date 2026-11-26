@@ -4,9 +4,9 @@
 """Session artifacts written by Hyperloom's own writers, for the Inspector's contract tests.
 
 Each helper calls the producer that writes the artifact in a real ``hyperloom optimize`` session (the message bus,
-the task registry, the LLM-call ledger, the journal, the session lock, the manifest, ``SharedState``) and never
-spells the artifact's format itself. A contract test reads what a helper wrote with the Inspector's reader, so a
-change to a producer's format fails that test instead of passing a hand-written fixture.
+the task registry, the LLM-call ledger, the journal, the session lock, the manifest, ``SharedState``, the baseline
+timeline recorder) and never spells the artifact's format itself. A contract test reads what a helper wrote with the
+Inspector's reader, so a change to a producer's format fails that test instead of passing a hand-written fixture.
 
 Every helper reaches its producer through an :class:`Upstream` module, imported on first use: some take seconds to
 import cold, and the rest of the Inspector suite should not pay for them at collection. A producer name that is gone
@@ -245,6 +245,18 @@ def record_phase(state: Any, to_phase: str, reason: str, ts_unix: float) -> dict
     ts = datetime.fromtimestamp(ts_unix, tz=timezone.utc).isoformat(timespec="seconds")
     clock = machine.PhaseClock(ts=ts, ts_unix=ts_unix)
     return machine.record_phase_transition(state, to_phase=to_phase, reason=reason, at=clock)
+
+
+def record_baseline(session_dir: Path, task_id: str, measured: dict) -> None:
+    """The baseline's ``reports/sbd_v6/timeline`` event, through the recorder a dispatched baseline gets
+    (``make_baseline_recorder`` and ``finish``), in a session bound as startup binds it."""
+    event = Upstream("hyperloom.inference_optimizer.breakdown.recorder.baseline_event")
+    sink_type = Upstream("hyperloom.inference_optimizer.breakdown.recorder.event_sink").EventSink
+    session_scope = Upstream("hyperloom.inference_optimizer.session.session_binding").session_scope
+    with session_scope(session_dir):
+        request = event.BaselineRequest(task_id=task_id, task_kind="baseline", framework="vllm", params={})
+        sink = sink_type(event.baseline_event_id("prelude", 0), producer=event.PRODUCER)
+        event.make_baseline_recorder(sink, request).finish(measured)
 
 
 # ----- specialists ------------------------------------------------------------------------------------------------

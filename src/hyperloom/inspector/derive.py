@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Pure functions that turn raw session records into the views a client shows.
+"""Pure functions that turn raw session records into the views the page shows.
 
 The main job is to surface what the raw data hides: a specialist whose
 subprocess crashed still lands as a ``succeeded`` task, and a stuck round
@@ -12,7 +12,7 @@ from __future__ import annotations
 
 from typing import Any
 
-# Keys of state.json a client reads. Everything else stays server-side.
+# Keys of state.json the header and panels read. Everything else stays server-side.
 STATE_KEYS = (
     "session_id",
     "model_name",

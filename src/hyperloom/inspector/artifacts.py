@@ -123,7 +123,7 @@ def _mark_bulk(files: ArtifactIndex) -> ArtifactIndex:
     """Tag files below a large subtree (a source-tree copy, say) with ``bulk``: that subtree's root.
 
     The root is the outermost directory below the task dir (or below the first path segment for files that belong
-    to no task) that holds more than ``BULK_MIN_FILES`` files, so a client can show it as one collapsed entry.
+    to no task) that holds more than ``BULK_MIN_FILES`` files, so the UI can show it as one collapsed entry.
     """
     counts: dict[str, int] = {}
     for a in files:

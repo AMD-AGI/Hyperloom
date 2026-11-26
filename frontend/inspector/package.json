@@ -1,0 +1,37 @@
+{
+  "name": "hyperloom-inspector-ui",
+  "private": true,
+  "version": "0.0.0",
+  "description": "Modern UI for the Hyperloom Inspector, built into src/hyperloom/inspector/static/modern/",
+  "license": "MIT",
+  "type": "module",
+  "engines": {
+    "node": ">=18.19"
+  },
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "preview": "vite preview",
+    "check": "svelte-check --tsconfig ./tsconfig.json --fail-on-warnings",
+    "test": "vitest run",
+    "format": "prettier --write .",
+    "format:check": "prettier --check ."
+  },
+  "devDependencies": {
+    "@sveltejs/vite-plugin-svelte": "5.1.1",
+    "@tsconfig/svelte": "5.0.8",
+    "@types/d3-force": "3.0.10",
+    "@types/node": "18.19.130",
+    "prettier": "3.9.9",
+    "prettier-plugin-svelte": "3.5.2",
+    "svelte": "5.57.1",
+    "svelte-check": "4.7.6",
+    "typescript": "5.9.3",
+    "vite": "6.4.3",
+    "vitest": "3.2.7"
+  },
+  "dependencies": {
+    "@xyflow/svelte": "1.7.0",
+    "d3-force": "3.0.0"
+  }
+}
