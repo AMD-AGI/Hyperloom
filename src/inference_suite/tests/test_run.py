@@ -569,6 +569,7 @@ def test_a_profile_round_starts_sglang_with_an_admin_key_that_no_file_of_the_rou
     assert report.profile is not None and report.profile.has_step_traces
     served = rig.served.read_text().splitlines()
     key = served[-1]
+    assert not key.startswith("-")
     launch = Launch.from_document(json.loads(layout.launch.read_text()))
     assert tuple(served) == (*launch.argv, "--admin-api-key", key)
     assert [path for path in layout.root.rglob("*") if path.is_file() and key.encode() in path.read_bytes()] == []

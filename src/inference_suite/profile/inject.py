@@ -108,7 +108,8 @@ def admin_key(config: SuiteConfig, launch: Launch) -> AdminKey | None:
     flag = framework_facts(launch.framework.name).admin_key
     if not config.profile.enabled or flag is None or not flag.taken_by(launch.framework.installed_version):
         return None
-    return AdminKey(flag.flag, secrets.token_urlsafe(32))
+    # Hex, because the server's argparse reads a value that starts with "-" as the next option and refuses to start.
+    return AdminKey(flag.flag, secrets.token_hex(32))
 
 
 def server_request(url: str, body: Mapping[str, object] | None, key: AdminKey | None = None) -> bytes:
