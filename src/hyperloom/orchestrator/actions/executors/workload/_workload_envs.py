@@ -68,7 +68,13 @@ from hyperloom.inference_optimizer.framework_registry import server_args_env_nam
 from hyperloom.orchestrator.state.base_launch import ServerBase, session_cards, session_server_base
 from hyperloom.orchestrator.state.failure_evidence import YAML_BUILD_ERROR
 from ..gpu._gpu_pin import pin_rocr_visible_devices
-from ..serving._server_argv import add_server_arg_unless_pinned, seal_server_argv
+from ..serving._server_argv import (
+    NO_TRUST_REMOTE_CODE_FLAGS,
+    TRUST_REMOTE_CODE_FLAGS,
+    add_server_arg_unless_pinned,
+    seal_server_argv,
+    server_trusts_remote_code,
+)
 from .._profile_setup import _AtomTracelensCaps, _profiler_bound_holds, _profiler_flag_value, apply_atom_profile_caps
 from .._profile_setup import fit_capture_to_speculative
 from ._agentx_switch import agentx_env_for_conc, apply_agentx_switch
@@ -681,15 +687,17 @@ def _pin_model_launch_workarounds(bench: dict[str, Any], model_path: str | None)
 
 def _pin_client_model_access(bench: dict[str, Any], model_path: str | None, model_basename: str) -> None:
     envs = bench["envs"]
-    # The MI300X bench scripts always launch the SERVER with
-    # --trust-remote-code, so a custom-tokenizer model's CLIENT must load the
-    # same remote code or transformers raises mid-warmup. Mirror it onto every
-    # client-trust env. setdefault never overrides an operator opt-out.
+    # A custom-tokenizer model's CLIENT must load the remote code its SERVER
+    # runs, or transformers raises mid-warmup, and a server whose last
+    # remote-code switch is the negation runs none. Mirror the server's setting
+    # onto every client-trust env. setdefault never overrides an operator's own value.
+    _server_args = str(envs.get(server_args_env_name(bench.get("framework")), ""))
+    _client_trust = "0" if server_trusts_remote_code(_server_args) is False else "1"
     for _trust_key in (
         "BENCH_TRUST_REMOTE_CODE",  # the benchmark client
         "HF_HUB_TRUST_REMOTE_CODE",  # transformers / HF hub tokenizer auto-load
     ):
-        envs.setdefault(_trust_key, "1")
+        envs.setdefault(_trust_key, _client_trust)
     # Trusting remote code is not enough when transformers cannot map the
     # model_type at all: the client has to be told which loader to use.
     _model = model_path or bench.get("model")
@@ -704,7 +712,7 @@ def _pin_client_model_access(bench: dict[str, Any], model_path: str | None, mode
             envs,
             bench.get("framework"),
             "--trust-remote-code",
-            pinned_by=("--trust-remote-code", "--trust_remote_code"),
+            pinned_by=(*TRUST_REMOTE_CODE_FLAGS, *NO_TRUST_REMOTE_CODE_FLAGS),
         )
 
 

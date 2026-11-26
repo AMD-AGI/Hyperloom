@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -13,6 +14,7 @@ from unittest.mock import patch
 import pytest
 import yaml
 
+from hyperloom.orchestrator.actions.executors._suite.config import fixed_workload
 from hyperloom.orchestrator.actions.executors.grid._grid_inputs import (
     sanitize_result_dir,
     sanitize_script_name,
@@ -26,6 +28,7 @@ from hyperloom.orchestrator.actions.executors.workload._workload_envs import (
 from hyperloom.orchestrator.actions.executors.baseline import BaselineExecutor
 from hyperloom.orchestrator.actions.executors.benchmark_run.bringup import _with_cuda_graph_disabled
 from hyperloom.orchestrator.state.shared_state import SharedState
+from inference_suite import ClientPass, ClientTarget, ClientTool, client_argv
 
 
 _CLI_STUB = SimpleNamespace(
@@ -470,6 +473,81 @@ def test_reference_and_extra_single_value_flag_deduped_recipe_wins(tmp_path, mon
     assert args.count("--gpu-memory-utilization") == 1
     assert "0.97" in args and "0.95" not in args
     assert "--kv-cache-dtype fp8" in args
+
+
+def _materialize_custom_tokenizer_model(tmp_path, monkeypatch, server_args: str, **launch) -> Path:
+    """Materialize a vLLM point of a model whose tokenizer is custom code, over a recipe of ``server_args``."""
+    model = tmp_path / "custom-tokenizer-model"
+    model.mkdir()
+    auto_map = {"AutoTokenizer": ["tokenization_custom.CustomTokenizer", None]}
+    (model / "config.json").write_text(json.dumps({"model_type": "custom_text", "auto_map": auto_map}))
+    _seed_reference(tmp_path, monkeypatch, server_args=server_args)
+    base = tmp_path / "base.yaml"
+    _write_yaml(base, framework="vllm", model=str(model))
+    out = tmp_path / "out"
+    out.mkdir()
+
+    with patch.dict("sys.modules", {"hyperloom.inference_optimizer.cli.model_gate": _CLI_STUB}):
+        return materialize_config_with_envs(
+            base,
+            out,
+            launch=LaunchLayer(**launch),
+            target=BenchmarkTarget(model_path=str(model), gpu_type="mi300x"),
+        )
+
+
+@pytest.mark.parametrize("opt_out", ["--no-trust-remote-code", "--no-trust_remote_code", "--no_trust_remote_code"])
+def test_reference_remote_code_opt_out_survives_a_custom_tokenizer_model(tmp_path, monkeypatch, opt_out):
+    """A recipe that turns remote code off keeps it off for a model whose tokenizer is custom code, server and client.
+
+    vLLM applies the last of a switch and its negation, so an appended ``--trust-remote-code`` would turn it back on.
+    """
+    materialized = _materialize_custom_tokenizer_model(tmp_path, monkeypatch, f"--max-model-len 4096 {opt_out}")
+
+    document = yaml.safe_load(materialized.read_text())
+    envs = document["benchmark"]["envs"]
+    args = envs["EXTRA_VLLM_ARGS"].split()
+    assert opt_out in args
+    assert "--trust-remote-code" not in args
+    assert (envs["BENCH_TRUST_REMOTE_CODE"], envs["HF_HUB_TRUST_REMOTE_CODE"]) == ("0", "0")
+    client = client_argv(
+        ClientTool("/opt/venv/bin/python", "/tools"),
+        ClientTarget("http://127.0.0.1:8888", str(tmp_path / "custom-tokenizer-model"), "m"),
+        fixed_workload(document),
+        ClientPass(seed=0, num_prompts=1, result=None),
+    )
+    assert "--trust-remote-code" not in client
+
+
+def test_an_operator_client_trust_outlives_a_reference_remote_code_opt_out(tmp_path, monkeypatch):
+    materialized = _materialize_custom_tokenizer_model(
+        tmp_path, monkeypatch, "--no-trust-remote-code", extra_envs={"BENCH_TRUST_REMOTE_CODE": "1"}
+    )
+
+    envs = yaml.safe_load(materialized.read_text())["benchmark"]["envs"]
+    assert "--trust-remote-code" not in envs["EXTRA_VLLM_ARGS"].split()
+    assert (envs["BENCH_TRUST_REMOTE_CODE"], envs["HF_HUB_TRUST_REMOTE_CODE"]) == ("1", "0")
+
+
+@pytest.mark.parametrize(
+    ("task_server_args", "operator_server_args"),
+    [("--no-trust-remote-code", ""), ("", "--no-trust-remote-code")],
+    ids=["task", "operator"],
+)
+def test_a_remote_code_opt_out_counts_from_every_layer_of_the_server_args(
+    tmp_path, monkeypatch, task_server_args, operator_server_args
+):
+    """The task's args and the operator's ``INFERENCE_OPTIMIZER_SERVER_ARGS`` turn remote code off as a recipe does."""
+    monkeypatch.setenv("INFERENCE_OPTIMIZER_SERVER_ARGS", operator_server_args)
+    materialized = _materialize_custom_tokenizer_model(
+        tmp_path, monkeypatch, "--max-model-len 4096", extra_server_args=task_server_args
+    )
+
+    envs = yaml.safe_load(materialized.read_text())["benchmark"]["envs"]
+    args = envs["EXTRA_VLLM_ARGS"].split()
+    assert "--no-trust-remote-code" in args
+    assert "--trust-remote-code" not in args
+    assert (envs["BENCH_TRUST_REMOTE_CODE"], envs["HF_HUB_TRUST_REMOTE_CODE"]) == ("0", "0")
 
 
 def test_reference_envs_do_not_clobber_existing(tmp_path, monkeypatch):

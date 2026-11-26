@@ -25,6 +25,7 @@ from hyperloom.orchestrator.actions.executors.serving._server_argv import (
     config_point,
     config_server_argv,
     seal_server_argv,
+    server_trusts_remote_code,
 )
 from hyperloom.orchestrator.actions.executors.workload._workload_envs import materialize_config_with_envs, LaunchLayer
 
@@ -277,6 +278,22 @@ def test_an_injection_into_an_empty_env_is_the_whole_string():
 
     add_server_arg_unless_pinned(envs, "sglang", "--tp 8", pinned_by=("--tp",))
     assert envs["EXTRA_SGLANG_ARGS"] == "--tp 8"
+
+
+@pytest.mark.parametrize(
+    ("text", "trusts"),
+    [
+        ("", None),
+        ("--tp 8", None),
+        ("--trust-remote-code=false --trust-remote-code-note x", None),
+        ("--trust_remote_code", True),
+        ("--trust-remote-code --tp 8 --no-trust_remote_code", False),
+        ("--no-trust-remote-code --trust-remote-code", True),
+    ],
+)
+def test_the_last_remote_code_switch_decides_what_the_server_trusts(text, trusts):
+    """The server applies the last of the switch and its negation, and takes no ``=value`` or lookalike for either."""
+    assert server_trusts_remote_code(text) is trusts
 
 
 def test_the_seal_returns_the_argv_it_leaves_in_the_envs():

@@ -24,6 +24,14 @@ from .._multi_node_env import is_multi_node
 
 log = logging.getLogger(__name__)
 
+#: The spellings of the switch that lets a server run the model repository's code, and of its negation.
+TRUST_REMOTE_CODE_FLAGS: tuple[str, ...] = ("--trust-remote-code", "--trust_remote_code")
+NO_TRUST_REMOTE_CODE_FLAGS: tuple[str, ...] = (
+    "--no-trust-remote-code",
+    "--no-trust_remote_code",
+    "--no_trust_remote_code",
+)
+
 
 @dataclass(frozen=True)
 class ServerArgv:
@@ -76,6 +84,22 @@ def add_server_arg_unless_pinned(
     if _pinned_values(split[1] if split else [], pinned_by):
         return
     envs[env_name] = merge_server_args(existing, arg)
+
+
+def server_trusts_remote_code(text: str) -> bool | None:
+    """Whether a server launched with the argument string ``text`` runs the model repository's code.
+
+    The server applies the last of the switch and its negation, so the last one in ``text`` decides. ``None`` when
+    ``text`` holds neither, or cannot be split into argv.
+    """
+    split = tokenize_server_args_preserving_json(text)
+    trusts = None
+    for token in split[1] if split else ():
+        if token in TRUST_REMOTE_CODE_FLAGS:
+            trusts = True
+        elif token in NO_TRUST_REMOTE_CODE_FLAGS:
+            trusts = False
+    return trusts
 
 
 def _pinned_values(tokens: Sequence[str], aliases: Sequence[str]) -> list[str | None]:
