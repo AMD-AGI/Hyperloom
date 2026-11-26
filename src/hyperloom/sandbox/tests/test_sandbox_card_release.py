@@ -22,6 +22,7 @@ from collections.abc import Callable, Sequence
 
 import pytest
 
+from hyperloom.common import kfd_topology
 from hyperloom.sandbox import card_occupancy, local, local_sandbox, reaper
 from hyperloom.sandbox.card_occupancy import METHOD_CENSUS, CardGuard, CardReading, Holder
 from hyperloom.sandbox.gated_pool import CardsHeld, GatedPool
@@ -130,7 +131,7 @@ def test_a_provider_whose_caller_sets_no_reading_never_reads_the_hosts_cards(tmp
     read it, and its card goes back at once."""
     tree = KernelTree(tmp_path)
     tree.holds(4242, 0, vram=100 << 30)
-    monkeypatch.setattr(card_occupancy, "KFD_PATH", tree.kfd)
+    monkeypatch.setattr(kfd_topology, "KFD_PATH", tree.kfd)
     assert card_occupancy.read_listed((0,)).held_cards() == {0}, "the host's list as the real read sees it"
     with LocalSandboxProvider([LocalTemplate("dev", "dev", gpus=1)], hostname="node-a", gpus=[0]) as provider:
         _create(provider).kill()

@@ -5,11 +5,12 @@ from __future__ import annotations
 
 import json
 import subprocess
+from pathlib import Path
 
 import pytest
 from hyperloom_common import amd_smi
 
-from hyperloom.common.rocm_smi import GpuVram
+from hyperloom.common import kfd_topology
 from hyperloom.measure.runner.hardware import (
     EccCounts,
     GpuFacts,
@@ -19,6 +20,7 @@ from hyperloom.measure.runner.hardware import (
     ecc_counts,
     read_gpu_facts,
 )
+from hyperloom.sandbox.tests.kernel_tree import KernelTree
 
 
 def _runner(answers):
@@ -256,16 +258,33 @@ def test_ras_information_that_does_not_cover_every_visible_gpu_is_not_a_reading(
     assert ecc_counts([0], _runner({}), _runner({"--showrasinfo": _ras({"ATHUB": None})})) is None
 
 
-def test_busy_gpus_are_the_visible_ones_with_memory_resident():
-    free, held = GpuVram(300.0, 300000.0), GpuVram(120000.0, 300000.0)
+@pytest.fixture
+def container(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> KernelTree:
+    """A machine of 8 GPUs seen from a container given the last 4, which the runtime numbers 0 to 3; the DRM class
+    directory lists all 8."""
+    machine = KernelTree(tmp_path)
+    machine.show_only(4, 5, 6, 7)
+    machine.refuse_denied(monkeypatch)
+    monkeypatch.setattr(kfd_topology, "KFD_PATH", machine.kfd)
+    monkeypatch.setattr(kfd_topology, "DRM_PATH", machine.drm)
+    return machine
 
-    assert busy_gpus([0, 1], lambda: [free, held]) == [1]
-    assert busy_gpus([0], lambda: [free, held]) == [], "a card this sandbox cannot use is not its concern"
-    assert busy_gpus([0, 1], lambda: [free, free]) == []
+
+def test_busy_gpus_are_the_visible_cards_whose_own_memory_is_in_use(container: KernelTree) -> None:
+    container.vram_used(0, 120 << 30)
+    assert busy_gpus([0, 1]) == [], "the first GPU the machine lists is another container's, not card 0"
+
+    container.vram_used(5, 120 << 30)
+    assert busy_gpus([0, 1]) == [1]
+    assert busy_gpus([0]) == [], "a card this sandbox cannot use is not its concern"
 
 
-def test_memory_use_that_cannot_be_read_is_none_not_free():
-    held = GpuVram(120000.0, 300000.0)
-
-    assert busy_gpus([0], lambda: None) is None
-    assert busy_gpus([0, 3], lambda: [held, held]) is None, "a visible card the tool did not list is unread"
+def test_memory_use_that_cannot_be_read_is_none_not_free(container: KernelTree) -> None:
+    assert busy_gpus([4]) is None, "a card this view is not given is unread"
+    (container.node(4) / "properties").write_text("cpu_cores_count 0\n")
+    assert busy_gpus([0]) is None, "a card whose node names no render node is unread"
+    (container.device(5) / "mem_info_vram_total").unlink()
+    (container.device(6) / "mem_info_vram_used").write_text("N/A\n")
+    (container.device(7) / "mem_info_vram_total").write_text("0\n")
+    for card in (1, 2, 3):
+        assert busy_gpus([card]) is None, card

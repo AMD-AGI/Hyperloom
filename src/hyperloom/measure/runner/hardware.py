@@ -3,8 +3,9 @@
 
 """What the machine says about its GPUs: model, power cap, partition mode, ECC counts, memory in use.
 
-Everything is read through ``amd-smi`` and ``rocm-smi`` and is ``None`` when it cannot be read; a value that could not
-be read is never filled in, and a check that needs it is not made (the runner records that it was not).
+The memory in use is read from the driver's counters of each card (:mod:`hyperloom.common.kfd_topology`), the rest
+through ``amd-smi`` and ``rocm-smi``; each is ``None`` when it cannot be read. A value that could not be read is never
+filled in, and a check that needs it is not made (the runner records that it was not).
 """
 
 from __future__ import annotations
@@ -27,7 +28,7 @@ from hyperloom_common.gpu_identity import (
     normalise_device_id,
 )
 from hyperloom.common.gpu_power_settings import reading_matches, socket_power_cap_w
-from hyperloom.common.rocm_smi import GpuVram, gpu_vram_usage, vram_busy
+from hyperloom.common.kfd_topology import KfdUnreadable, card_vram, vram_busy
 
 log = logging.getLogger(__name__)
 
@@ -193,10 +194,12 @@ def ecc_counts(
     return counts if counts is not None else _rocm_smi_ras(visible, ras)
 
 
-def busy_gpus(visible: Sequence[int], usage: Callable[[], list[GpuVram] | None] = gpu_vram_usage) -> list[int] | None:
+def busy_gpus(visible: Sequence[int]) -> list[int] | None:
     """The visible GPUs that have memory resident, or ``None`` when the memory use of any of them cannot be read."""
-    used = usage()
-    if used is None or any(index >= len(used) for index in visible):
+    try:
+        used = card_vram(visible)
+    except KfdUnreadable as exc:
+        log.warning("the memory use of GPUs %s cannot be read: %s", list(visible), exc)
         return None
     return [index for index in visible if vram_busy(used[index])]
 

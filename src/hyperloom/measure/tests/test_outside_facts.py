@@ -42,6 +42,7 @@ _NOT_SCANNED = frozenset(
         "KFD_QUEUE_GPU_ID",
         "KFD_VRAM_PREFIX",
         "PID_NAMESPACE_LINK",
+        "DRM_DEVICE_DIR",
         "DRM_FD_DIR",
         "DRM_FDINFO_DIR",
         "AIPERF_ERROR_CLASS_KEY",
@@ -133,7 +134,7 @@ _PROBE = textwrap.dedent(
         elif isinstance(value, tuple):
             setattr(o, name, tuple(f"{name}_{i}" for i in range(len(value))))
 
-    from hyperloom.common import aiter_layout, env_safety, failure_signature, visible_devices
+    from hyperloom.common import aiter_layout, env_safety, failure_signature, kfd_topology, visible_devices
     from hyperloom.common.benchmark_config import BenchmarkPoint
     from hyperloom.measure import compile as compiled
     from hyperloom.measure import agentx_requests, eval_context, farm, hosted_spec, local, log_causes, points, surface
@@ -164,10 +165,10 @@ _PROBE = textwrap.dedent(
         "visible": run._visible({"ROCR_VISIBLE_DEVICES_ENV": "0,2"}),
         "export": list(agentx_requests._EXPORT_PATTERNS),
         "kfd": [
-            str(card_occupancy.KFD_PATH),
+            str(kfd_topology.KFD_PATH),
             card_occupancy.KFD_PROCESSES,
-            card_occupancy.KFD_NODES,
-            card_occupancy.KFD_NODE_GPU_ID,
+            kfd_topology.KFD_NODES,
+            kfd_topology.KFD_NODE_GPU_ID,
             card_occupancy.KFD_QUEUES,
             card_occupancy.KFD_QUEUE_GPU_ID,
             card_occupancy.KFD_VRAM_PREFIX,

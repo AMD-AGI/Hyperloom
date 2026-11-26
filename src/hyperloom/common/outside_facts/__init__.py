@@ -46,11 +46,15 @@ __all__ = [
     "ARGPARSE_UNRECOGNIZED_ARGUMENTS_RE",
     "ASM_LIBTYPE",
     "CONTEXT_LENGTH_FLAGS",
+    "DRM_CLASS_ROOT",
     "DRM_CLIENT_ID_KEY",
+    "DRM_DEVICE_DIR",
     "DRM_FDINFO_DIR",
     "DRM_FD_DIR",
     "DRM_RENDER_NODE_PREFIX",
     "DRM_VRAM_KEY",
+    "DRM_VRAM_TOTAL_FILE",
+    "DRM_VRAM_USED_FILE",
     "ENV_CONC",
     "ENV_EP",
     "ENV_EVAL_ONLY",
@@ -284,6 +288,12 @@ DRM_FDINFO_DIR = _drm["fdinfo_dir"]
 DRM_RENDER_NODE_PREFIX = _drm["render_node_prefix"]
 DRM_CLIENT_ID_KEY = _drm["client_id_key"]
 DRM_VRAM_KEY = _drm["vram_key"]
+
+_vram = _PACK.names("amdgpu_vram_counters", "root", "device", "vram_used", "vram_total")
+DRM_CLASS_ROOT = _vram["root"]
+DRM_DEVICE_DIR = _vram["device"]
+DRM_VRAM_USED_FILE = _vram["vram_used"]
+DRM_VRAM_TOTAL_FILE = _vram["vram_total"]
 
 _pid_namespace = _PACK.names("linux_pid_namespace", "link", "initial")
 PID_NAMESPACE_LINK = _pid_namespace["link"]
