@@ -9,7 +9,13 @@ import json
 
 import pytest
 
-from hyperloom.common.tracelens_report import analysis_json_path, fusion_findings, member_name, system_findings
+from hyperloom.common.tracelens_report import (
+    analysis_json_path,
+    fusion_findings,
+    member_name,
+    system_finding_summary,
+    system_findings,
+)
 
 _ATTENTION_GEMM = "Cijk_Alik_Bljk_B_BS_BH_Bias_HA_S_SAV_UserArgs_MT256x128x32..."
 _SOFTMAX = "void at::native::(anonymous namespace)::cunn_SoftMaxForwardReg<c10::BFloat1..."
@@ -123,3 +129,29 @@ def test_a_report_without_system_findings_reads_as_none(tmp_path):
 
     assert system_findings(tmp_path / "analysis.json") == []
     assert system_findings(tmp_path / "missing" / "analysis.md") == []
+
+
+def test_a_system_finding_summary_shows_the_share_tracelens_ranks_it_by():
+    comm = {
+        "operation": "Exposed Collective Communication",
+        "node": "",
+        "priority": 1,
+        "metrics": [
+            {"metric": "Exposed Communication Time", "value": 18913.274, "unit": "ms"},
+            {"metric": "Exposed Communication %", "value": 60.72, "unit": "%"},
+        ],
+    }
+    unread = {
+        "operation": "D2H Memory Copy Overhead",
+        "node": "node-1",
+        "priority": 4,
+        "metrics": [
+            {"metric": "Copy Count", "value": 1250.0, "unit": "count"},
+            {"metric": "Copy %", "value": None, "unit": "%"},
+        ],
+    }
+    no_share = {**unread, "metrics": [{"metric": "Copy Count", "value": 70.0, "unit": "count"}]}
+
+    assert system_finding_summary(comm) == "P1 Exposed Collective Communication  Exposed Communication %: 60.72%"
+    assert system_finding_summary(unread) == "P4 D2H Memory Copy Overhead [node-1]  Copy %: n/a"
+    assert system_finding_summary(no_share) == "P4 D2H Memory Copy Overhead [node-1]  Copy Count: 70"

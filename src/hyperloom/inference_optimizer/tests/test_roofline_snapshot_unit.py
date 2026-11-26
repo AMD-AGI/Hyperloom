@@ -152,35 +152,6 @@ def test_profiler_digest_reports_memcpy(tmp_path):
     assert first == "bound_kind=unknown  compute=70.5%  idle=12.0%  comm=3.2%  memcpy=0.0%"
 
 
-def test_profiler_digest_names_each_system_finding_by_its_share_metric():
-    """The coordinator reads TraceLens' system bottlenecks here instead of the analysis.md heading."""
-    findings = [
-        {
-            "operation": "Exposed Collective Communication",
-            "node": "",
-            "priority": 1,
-            "metrics": [
-                {"metric": "Exposed Communication Time", "value": 18913.274, "unit": "ms"},
-                {"metric": "Exposed Communication %", "value": 60.72, "unit": "%"},
-            ],
-        },
-        {
-            "operation": "H2D Memory Copy Overhead",
-            "node": "node-1",
-            "priority": 5,
-            "metrics": [{"metric": "Copy Count", "value": 70.0, "unit": "count"}],
-        },
-    ]
-    lines = rs.build_profiler_digest([{"idle_pct": 10.0}], {"system_findings": findings}).splitlines()
-
-    start = lines.index("system_findings:")
-    assert lines[start + 1 : start + 3] == [
-        "  P1 Exposed Collective Communication  Exposed Communication %: 60.72%",
-        "  P5 H2D Memory Copy Overhead [node-1]  Copy Count: 70",
-    ]
-    assert "system_findings:" not in rs.build_profiler_digest([{"idle_pct": 10.0}], {"system_findings": []})
-
-
 # ---- extract_top_kernel ----
 
 

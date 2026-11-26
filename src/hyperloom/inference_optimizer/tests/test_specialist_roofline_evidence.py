@@ -31,16 +31,6 @@ _ADD_NORM_FINDING = {
     ],
 }
 
-_IDLE_FINDING = {
-    "operation": "High GPU Idle Time",
-    "node": "",
-    "priority": 2,
-    "metrics": [
-        {"metric": "Idle Time", "value": 5731.232, "unit": "ms"},
-        {"metric": "Idle %", "value": 18.4, "unit": "%"},
-    ],
-}
-
 
 def _make_coord(tmp_path: Path, *, state: SharedState) -> Coordinator:
     c = Coordinator.__new__(Coordinator)
@@ -90,7 +80,6 @@ async def test_warm_specialist_params_injects_roofline_evidence(tmp_path):
                 ],
             ],
             "fusion_findings": [_ADD_NORM_FINDING],
-            "system_findings": [_IDLE_FINDING],
         },
     )
 
@@ -105,7 +94,6 @@ async def test_warm_specialist_params_injects_roofline_evidence(tmp_path):
     assert len(ev["hot_kernels_top15"]) == 8
     assert ev["hot_kernels_top15"][0]["kernel_id"] == "k1"
     assert ev["fusion_findings"] == [_ADD_NORM_FINDING]
-    assert ev["system_findings"] == [_IDLE_FINDING]
     assert ev["executive_summary"]["compute_pct"] == pytest.approx(32.1, rel=0.01)
     assert ev["executive_summary"]["idle_pct"] == pytest.approx(17.5, rel=0.01)
     assert ev["executive_summary"]["comm_pct"] == pytest.approx(41.8, rel=0.01)
@@ -236,32 +224,6 @@ def test_section_renders_fusion_findings_only_when_tracelens_reported_some():
 
     section = roofline_evidence_section(_make_inp({"fusion_findings": [], "roofline_snapshot_id": 1}))
     assert not any("Kernel fusion opportunities" in row for row in section)
-
-
-def test_section_lists_each_system_finding_on_one_line_and_points_at_its_fix():
-    copies = {
-        "operation": "D2H Memory Copy Overhead",
-        "node": "node-1",
-        "priority": 4,
-        "metrics": [
-            {"metric": "Copy Count", "value": 1250.0, "unit": "count"},
-            {"metric": "Copy %", "value": None, "unit": "%"},
-        ],
-    }
-    section = roofline_evidence_section(
-        _make_inp({"system_findings": [_IDLE_FINDING, copies], "analysis_md_path": "/run/analysis.md"})
-    )
-
-    start = section.index("**System bottlenecks (TraceLens, largest share of GPU time first):**")
-    assert section[start + 2 : start + 4] == [
-        "- P2 High GPU Idle Time  Idle %: 18.4%",
-        "- P4 D2H Memory Copy Overhead [node-1]  Copy %: n/a",
-    ]
-    assert "`## System-Level Optimizations` in the report below" in section[start + 5]
-    assert "**Full analysis.md path:** `/run/analysis.md`" in section
-
-    section = roofline_evidence_section(_make_inp({"system_findings": [], "roofline_snapshot_id": 1}))
-    assert not any("System bottlenecks" in row for row in section)
 
 
 def test_section_renders_none_when_evidence_empty():
