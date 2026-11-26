@@ -143,4 +143,4 @@ async def test_a_bad_repo_is_refused_at_submit(tmp_path: Path) -> None:
 def test_the_llamacpp_repository_the_framework_registry_names_is_searched() -> None:
     url = framework_registry.repo_url("llamacpp")
     search = build_search({"repo_url": url})
-    assert (search.request.repo_url, search.state_qualifier()) == (url, "is:open")
+    assert (search.repo_url, search.state_qualifier()) == (url, "is:open")
