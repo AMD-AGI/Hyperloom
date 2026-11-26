@@ -12,15 +12,17 @@ import pytest
 
 from hyperloom.inspector import tokens as tokens_mod
 from hyperloom.inspector.history import history_path
+from hyperloom.inspector.price_sheet import SHEET
 from hyperloom.inspector.tests import producers
 from hyperloom.inspector.tests.conftest import T0, iso
 from hyperloom.inspector.token_terms import TERMS
-from hyperloom.inspector.tokens import KINDS, StreamTurns, TokenTracker
+from hyperloom.inspector.tokens import KINDS, NO_MODEL, StreamTurns, TokenTracker
 from hyperloom.inspector.watcher import Watcher, WatchOptions
 from hyperloom.inference_optimizer.trace.parse_usage import (
     parse_claude_stream_json_turn_usages,
     parse_claude_stream_json_usage,
 )
+from hyperloom_common.llm.llm_prices import TokenCounts, price_of
 
 _USAGE_KEYS = ("input_tokens", "output_tokens", "cache_creation_input_tokens", "cache_read_input_tokens")
 
@@ -40,15 +42,21 @@ def _tool_result(t):
     return json.dumps({"type": "user", "message": {"content": [{"type": "tool_result"}]}, "timestamp": iso(t)})
 
 
-def _result(output, usage_output=None, duration_ms=None, **model_usage):
+def _result(output, usage_output=None, cost=None, duration_ms=None, **model_usage):
     return json.dumps(
         {
             "type": "result",
             "usage": {"output_tokens": usage_output if usage_output is not None else output},
             "modelUsage": {"claude-opus-5": {"outputTokens": output, **model_usage}},
+            **({"total_cost_usd": cost} if cost is not None else {}),
             **({"duration_ms": duration_ms} if duration_ms is not None else {}),
         }
     )
+
+
+LEDGER_USD = (1000 * 4 + 200 * 20 + 800 * 4 + 100 * 20 + 500 * 4 + 50 * 20) / 1e6
+# t-perf's turns at $5/$25, cache writes at 1.25x and reads at 0.1x the input price, output 1500.
+SPEC_USD = ((2000 + 2 + 3) * 5 + (10000 + 500 + 300) * 6.25 + (10000 + 10500) * 0.5 + 1500 * 25) / 1e6
 
 
 # t-perf (running from T0 + 23): three turns, the first split over two lines, then a subagent turn.
@@ -110,6 +118,30 @@ def _live(session_dir, tokens=None):
     w = Watcher(session_dir, WatchOptions(sample_metrics=False), tokens=tokens or TokenTracker(session_dir))
     w.poll()
     return w
+
+
+def _multibranch_usd(ev: dict) -> float:
+    """What multi-branch records as the spend of *ev*'s tokens: the sheet's rates, reasoning billed as output."""
+    counts = TokenCounts(
+        input=ev["input"] or 0,
+        output=(ev["output"] or 0) + (ev["reasoning"] or 0),
+        cache_read=ev["cache_read"] or 0,
+        cache_write=ev["cache_write"] or 0,
+    )
+    return price_of(ev["model"]).cost_usd(counts)
+
+
+def test_each_call_costs_what_multi_branch_records(session_dir):
+    w = Watcher(session_dir, WatchOptions(sample_metrics=False))
+    w.poll()
+    tokens, doc = w.snapshot()["tokens"], w.token_document()
+    assert tokens["totals"]["calls"] == doc["totals"]["calls"] == 3 and doc["terms"] == TERMS
+    assert tokens["pricing"]["source"] == doc["pricing"]["source"] == SHEET.source
+    for ev in doc["events"]:
+        assert ev["missing"] == [] and ev["cost_usd"] == pytest.approx(_multibranch_usd(ev), abs=1e-8)
+    assert doc["totals"]["cost_usd"] == tokens["totals"]["cost_usd"] == pytest.approx(LEDGER_USD)
+    assert tokens_mod.UNPRICED == ("no_model", "no_price", "no_search_price")
+    w.stop()
 
 
 @pytest.mark.parametrize(
@@ -222,7 +254,7 @@ def test_view_series_adds_up_and_replay_cuts_at_the_clock(session_dir):
     for j, kind in enumerate(KINDS):
         assert sum(r[2 + j] for r in series["rows"]) == view["totals"][kind]
     assert sum(r[2 + len(KINDS)] for r in series["rows"]) == view["totals"]["calls"] == 6
-    assert all(len(r) == 3 + len(KINDS) for r in series["rows"])
+    assert all(len(r) == 3 + 2 * len(KINDS) for r in series["rows"])
     assert view["by_node"]["spec:perf_model"]["calls"] == 3
     assert view["by_component"]["orchestration"] == {
         **dict.fromkeys(KINDS, 0),
@@ -232,7 +264,13 @@ def test_view_series_adds_up_and_replay_cuts_at_the_clock(session_dir):
         "calls": 2,
         "errors": 1,
         "web_searches": 0,
+        "cost_usd": round((1500 * 4 + 250 * 20) / 1e6, 6),
+        "unpriced": 0,
+        "no_model": 0,
+        "no_price": 0,
+        "no_search_price": 0,
     }
+    assert view["pricing"]["source"] == SHEET.source and view["totals"]["unpriced"] == 0
 
     w = Watcher(session_dir, WatchOptions(replay=True), tokens=TokenTracker(session_dir))
     w.poll()
@@ -265,8 +303,8 @@ def test_a_quiet_live_run_ends_its_charts_at_a_specialist_s_turns_after_the_coor
 def test_every_figure_has_one_name_and_a_definition(session_dir):
     terms = _live(session_dir).snapshot()["tokens"]["terms"]
     assert terms == TERMS
-    shown = {"total", "calls", "errors", "cache_hit", "output_pending", "recent"}
-    billed = (*KINDS,)
+    shown = {"total", "calls", "errors", "cache_hit", "cost_usd", "unpriced", "output_pending", "recent"}
+    billed = (*KINDS, "web_search")
     assert set(billed) | shown <= set(terms)
     assert all(t["group"] and t["label"] and t["definition"] for t in terms.values())
     assert len({t["label"] for t in terms.values()}) == len(terms)
@@ -284,8 +322,11 @@ def test_every_figure_has_one_name_and_a_definition(session_dir):
     # No price is assumed: a definition says where one comes from, as the built-in sheet prices it.
     assert not re.search(r"\$\d|\d times for|by default", json.dumps(terms)), "a term names a price"
     assert not re.search(r"per_web_search|price list", json.dumps(terms)), "a term names what the sheet does not have"
+    assert "is unpriced" in terms["web_search"]["definition"].split("\nHow it is billed: ")[1]
     assert "at the input price" in terms["cache_write"]["definition"]
+    assert "no price per search" in terms["web_search"]["definition"]
     assert _live(session_dir).snapshot()["tokens"]["terms"] == TERMS
+    assert "built-in price sheet" in terms["source"]["definition"]
 
 
 def test_timeline_file_is_written_outside_the_session(session_dir, tmp_path):
@@ -322,6 +363,43 @@ def test_saves_are_throttled_and_an_empty_session_still_gets_a_file(tmp_path):
     assert tracker.save(force=True)
     assert json.loads(tracker.path.read_text())["totals"]["input"] == 5
     assert not tracker.save(force=True)
+
+
+def test_every_event_is_priced_and_the_costs_add_up(session_dir):
+    _log(session_dir, [*TURNS, _result(1500)])
+    w = _live(session_dir)
+    events = w.tokens.events()
+    assert [e["cost_usd"] for e in events if e["call_id"]] == pytest.approx([0.008, 0.0052, 0.003])
+    view = w.snapshot()["tokens"]
+    assert view["totals"]["cost_usd"] == pytest.approx(LEDGER_USD + SPEC_USD)
+    assert events[-1]["cumulative"]["cost_usd"] == pytest.approx(LEDGER_USD + SPEC_USD)
+    assert view["by_node"]["spec:perf_model"]["cost_usd"] == pytest.approx(SPEC_USD)
+    assert view["totals"]["unpriced"] == 0
+    rows, k = view["series"]["rows"], len(KINDS)
+    assert sum(sum(r[3 + k :]) for r in rows) == pytest.approx(LEDGER_USD + SPEC_USD)
+    cache_read = sum(r[3 + k + KINDS.index("cache_read")] for r in rows)
+    assert cache_read == pytest.approx((10000 + 10500) * 0.5 / 1e6)
+    pricing = view["pricing"]
+    assert pricing["models"]["claude-opus-5"] == {
+        "id": "claude-opus-5",
+        "input": 5.0,
+        "cache_write": 6.25,
+        "cache_read": 0.5,
+        "output": 25.0,
+        "cache_basis": "listed",
+        "spent_usd": pytest.approx(
+            {
+                "input": (2000 + 2 + 3) * 5 / 1e6,
+                "cache_write": (10000 + 500 + 300) * 6.25 / 1e6,
+                "cache_read": (10000 + 10500) * 0.5 / 1e6,
+                "output": 1500 * 25 / 1e6,
+                "reasoning": 0,
+            }
+        ),
+    }
+    assert pricing["models"]["claude-opus-5-5"]["id"] == "claude-opus-5-5"
+    assert (pricing["source"], pricing["unpriced"], view["check"]) == (SHEET.source, {}, None)
+    assert list(pricing) == ["source", "built_from", "unit", "models", "unpriced"]
 
 
 @pytest.mark.parametrize("side_in_usage", [False, True], ids=["usage-of-the-turns", "usage-with-side-calls"])
@@ -411,13 +489,30 @@ def test_a_killed_specialist_s_recovered_ledger_rows_keep_their_counts(session_d
 
 
 def test_ledger_rows_that_name_no_model_take_it_from_the_log(session_dir):
-    # Older runners wrote no model on a specialist's rows: its model must not drop when they land.
+    # Older runners wrote no model on a specialist's rows: its cost must not drop when they land.
     _log(session_dir, [*TURNS, _result(1500)])
     w = _live(session_dir)
     _add_ledger(session_dir, [{**r, "model": None} for r in _ledger_rows([None, None, 1500])])
     w.poll()
     spec = [e for e in w.tokens.events() if e["task_id"] == "t-perf"]
     assert [(e["source"], e["model"]) for e in spec] == [("ledger", "claude-opus-5")] * 3
+    view = w.snapshot()["tokens"]
+    assert view["by_node"]["spec:perf_model"]["cost_usd"] == pytest.approx(SPEC_USD)
+    assert view["totals"]["unpriced"] == 0
+
+
+def test_a_total_with_no_priced_call_has_no_cost(session_dir):
+    _add_ledger(session_dir, [{**r, "model": None} for r in _ledger_rows([None, None, 1500])])  # and no log
+    w = _live(session_dir)
+    view = w.snapshot()["tokens"]
+    nothing = view["by_model"][NO_MODEL]
+    assert (nothing["calls"], nothing["unpriced"], nothing["no_model"], nothing["cost_usd"]) == (3, 3, 3, None)
+    assert (view["totals"]["no_model"], view["totals"]["no_price"]) == (3, 0)
+    assert view["by_node"]["spec:perf_model"]["cost_usd"] is None
+    assert view["pricing"]["unpriced"] == {NO_MODEL: {"calls": 3, "total": nothing["total"]}}
+    assert (view["totals"]["cost_usd"], view["totals"]["unpriced"]) == (pytest.approx(LEDGER_USD), 3)
+    empty = TokenTracker(session_dir).view(T0)
+    assert (empty["totals"]["cost_usd"], empty["recent"]["cost_usd"]) == (0.0, 0.0)
 
 
 def test_openai_rows_take_cached_input_and_reasoning_out(tmp_path):
@@ -430,6 +525,7 @@ def test_openai_rows_take_cached_input_and_reasoning_out(tmp_path):
     gpt, claude = tracker.events()
     assert [gpt[k] for k in ("input", "cache_read", "output", "reasoning")] == [24099 - 11648, 11648, 34, 10]
     assert gpt["total"] == 24099 + 44
+    assert gpt["cost_usd"] == pytest.approx((12451 * 1.36 + 11648 * 0.136 + 44 * 8.16) / 1e6)  # reasoning as output
     assert (claude["input"], claude["output"], claude["total"]) == (24099, 44, 24099 + 11648 + 44)
 
 
@@ -463,9 +559,42 @@ def test_the_writer_tells_whether_a_row_counts_by_the_openai_protocol(tmp_path, 
         assert ev["total"] == 1000 + cached + 100 + reasoning
 
 
-def test_side_calls_on_the_result_line_are_counted_once(session_dir):
+def test_a_model_with_no_price_is_unpriced_and_the_rest_still_cost(session_dir):
+    _add_ledger(session_dir, [{"component": "critic", "model": "Qwen3.8-27B", "input_tokens": 70, "ts": iso(T0 + 640)}])
+    w = _live(session_dir)
+    view = w.snapshot()["tokens"]
+    assert view["totals"]["cost_usd"] == pytest.approx(LEDGER_USD)
+    assert view["totals"]["unpriced"] == 1
+    qwen = view["by_model"]["Qwen3.8-27B"]
+    assert (qwen["cost_usd"], qwen["no_price"], qwen["no_model"]) == (None, 1, 0)
+    critic = view["by_node"]["critic"]
+    assert (critic["cost_usd"], critic["unpriced"]) == (pytest.approx((800 * 4 + 100 * 20) / 1e6), 1)
+    assert view["totals"]["no_price"] == 1 and view["totals"]["no_model"] == 0
+    assert view["pricing"]["unpriced"] == {"Qwen3.8-27B": {"calls": 1, "total": 70}}
+    assert w.token_document()["events"][-1]["cumulative"]["cost_usd"] == pytest.approx(LEDGER_USD)
+
+
+def test_a_call_that_searched_is_unpriced_as_the_sheet_has_no_price_per_search(tmp_path):
+    tracker = TokenTracker(tmp_path)
+    row = {"component": "critic", "model": "claude-opus-5", "input_tokens": 10, "cache_read_input_tokens": 5}
+    tracker.add_ledger({**row, "web_searches": 2, "status": "ok", "ts": iso(T0)})
+    tracker.add_ledger({**row, "status": "ok", "ts": iso(T0 + 1)})
+    tracker.poll([])
+    searched, plain = tracker.events()
+    assert (searched["missing"], searched["cost_usd"]) == (["web_search"], None)
+    assert (plain["missing"], plain["cost_usd"]) == ([], pytest.approx((10 * 5 + 5 * 0.5) / 1e6))
+    totals = tracker.view(T0 + 2)["totals"]
+    assert [totals[k] for k in ("unpriced", "no_search_price", "web_searches")] == [1, 1, 2]
+    assert tokens_mod.missing({**searched, "model": "claude-opus-9"}) == ["price"]
+    assert tokens_mod.missing({**searched, "model": None}) == ["model"]
+    assert tokens_mod.call_cost(searched) is None
+
+
+def test_side_calls_on_the_result_line_are_counted_once_and_match_the_cli_cost(session_dir):
+    side_usd = (400 * 5 + 1000 * 0.5) / 1e6
     result = _result(
         1500,
+        cost=SPEC_USD + side_usd,
         duration_ms=50_000,
         inputTokens=2005 + 400,
         cacheCreationInputTokens=10800,
@@ -478,8 +607,12 @@ def test_side_calls_on_the_result_line_are_counted_once(session_dir):
     assert (side[0]["task_id"], side[0]["turn"], side[0]["node"]) == ("t-perf", None, "spec:perf_model")
     assert [side[0][k] for k in ("input", "cache_write", "cache_read", "web_searches")] == [400, 0, 1000, 0]
     assert side[0]["t"] == T0 + 23 + 50  # the task's start plus the CLI's duration, never a file time
+    assert side[0]["cost_usd"] == pytest.approx(side_usd)
     view = w.snapshot()["tokens"]
     assert view["totals"]["calls"] == 6  # the side calls are not one call more
+    assert view["check"]["tasks"] == 1
+    assert view["check"]["claude_cli_usd"] == pytest.approx(SPEC_USD + side_usd)
+    assert view["check"]["priced_usd"] == pytest.approx(view["check"]["claude_cli_usd"])
     assert sum(r[2 + len(KINDS)] for r in view["series"]["rows"]) == 6
 
     _add_ledger(session_dir, _ledger_rows([None, None, 1500]))
@@ -487,14 +620,34 @@ def test_side_calls_on_the_result_line_are_counted_once(session_dir):
     spec = [e for e in w.tokens.events() if e["task_id"] == "t-perf"]
     assert [(e["source"], e["t"]) for e in spec][-1] == ("result", T0 + 400)  # the ledger's completion stamp
     assert [e["source"] for e in spec] == ["ledger", "ledger", "ledger", "result"]
+    assert w.snapshot()["tokens"]["by_node"]["spec:perf_model"]["cost_usd"] == pytest.approx(SPEC_USD + side_usd)
 
 
-def test_side_calls_on_another_model_count_toward_it(session_dir):
+def test_unpriced_side_usage_counts_toward_its_specialists_call_not_as_one_more(session_dir):
+    # One turn on a model the sheet does not list, then searches on it: both events are unpriced, one call.
+    usage = {"inputTokens": 100, "cacheReadInputTokens": 1000, "outputTokens": 1, "webSearchRequests": 2}
+    result = {"type": "result", "modelUsage": {"Qwen3.8-27B": usage}}
+    _log(session_dir, [_assistant("msg_a", 100, 0, 1000, 1, model="Qwen3.8-27B"), json.dumps(result)])
+    w = _live(session_dir)
+    assert [e["source"] for e in w.tokens.events() if e["task_id"] == "t-perf"] == ["live", "result"]
+    spec = w.snapshot()["tokens"]["by_node"]["spec:perf_model"]
+    assert {k: spec[k] for k in ("calls", "unpriced", "no_price", "web_searches", "cost_usd")} == {
+        "calls": 1,
+        "unpriced": 1,
+        "no_price": 1,
+        "web_searches": 2,
+        "cost_usd": None,
+    }
+
+
+def test_side_calls_on_another_model_are_priced_at_its_own_rates(session_dir):
     # t-perf's turns ran on Opus 5, its side calls on Haiku 5.5, which wrote 600 of the 1500 output tokens.
+    opus_usd, haiku_usd = SPEC_USD - 600 * 25 / 1e6, (400 * 0.1 + 600 * 0.5) / 1e6
     opus = {"inputTokens": 2005, "cacheCreationInputTokens": 10800, "cacheReadInputTokens": 20500, "outputTokens": 900}
     result = {
         "type": "result",
         "modelUsage": {"claude-opus-5": opus, "claude-haiku-5-5": {"inputTokens": 400, "outputTokens": 600}},
+        "total_cost_usd": opus_usd + haiku_usd,
         "duration_ms": 50_000,
     }
     _log(session_dir, [*TURNS, json.dumps(result)])
@@ -507,7 +660,10 @@ def test_side_calls_on_another_model_count_toward_it(session_dir):
             ("result", "claude-haiku-5-5", 600),
         ]
         view = w.snapshot()["tokens"]
+        assert view["by_model"]["claude-haiku-5-5"]["cost_usd"] == pytest.approx(haiku_usd)
+        assert view["by_node"]["spec:perf_model"]["cost_usd"] == pytest.approx(opus_usd + haiku_usd)
         assert view["by_node"]["spec:perf_model"]["output"] == 1500
+        assert view["check"]["priced_usd"] == pytest.approx(view["check"]["claude_cli_usd"])
 
     check(["live"] * 3)
     _add_ledger(session_dir, _ledger_rows([None, None, 1500]))  # the runner's session total on the last turn
@@ -515,7 +671,7 @@ def test_side_calls_on_another_model_count_toward_it(session_dir):
     check(["ledger"] * 3)
 
 
-def test_a_subagent_turn_on_another_model_counts_toward_it_though_the_ledger_names_the_specialists(session_dir):
+def test_a_subagent_turn_on_another_model_is_priced_at_its_rates_though_the_ledger_names_the_specialists(session_dir):
     # Turn 2 is a subagent's on Haiku 5.5, which also wrote 100 of the 1500 output tokens; the ledger puts the
     # specialist's claude-opus-5 on every turn.
     turns = [
@@ -524,11 +680,14 @@ def test_a_subagent_turn_on_another_model_counts_toward_it_though_the_ledger_nam
         _tool_result(T0 + 60),
         _assistant("msg_c", 3, 300, 10500, 2),
     ]
+    opus_usd = ((2000 + 3) * 5 + (10000 + 300) * 6.25 + 10500 * 0.5 + 1400 * 25) / 1e6
+    haiku_usd = (2 * 0.1 + 500 * 0.125 + 10000 * 0.01 + 100 * 0.5) / 1e6
     opus = {"inputTokens": 2003, "cacheCreationInputTokens": 10300, "cacheReadInputTokens": 10500, "outputTokens": 1400}
     small = {"inputTokens": 2, "cacheCreationInputTokens": 500, "cacheReadInputTokens": 10000, "outputTokens": 100}
     result = {
         "type": "result",
         "modelUsage": {"claude-opus-5": opus, "claude-haiku-5-5": small},
+        "total_cost_usd": opus_usd + haiku_usd,
         "duration_ms": 50_000,
     }
     _log(session_dir, [*turns, json.dumps(result)])
@@ -542,11 +701,38 @@ def test_a_subagent_turn_on_another_model_counts_toward_it_though_the_ledger_nam
             (source, "claude-opus-5", 1400),
             ("result", "claude-haiku-5-5", 100),
         ]
+        view = w.snapshot()["tokens"]
+        assert view["by_model"]["claude-opus-5"]["cost_usd"] == pytest.approx(opus_usd)
+        assert view["by_model"]["claude-haiku-5-5"]["cost_usd"] == round(haiku_usd, 6)  # to a millionth of a dollar
+        assert view["check"]["priced_usd"] == pytest.approx(view["check"]["claude_cli_usd"])
 
     check("live")
     _add_ledger(session_dir, _ledger_rows([None, None, 1500]))
     w.poll()
     check("ledger")
+
+
+def test_the_running_cost_is_null_until_a_call_is_priced_and_a_call_costing_nothing_counts(tmp_path):
+    tracker = TokenTracker(tmp_path)
+    for i, (model, tokens) in enumerate((("Qwen3.8-27B", 1000), ("claude-opus-5", 0), ("claude-opus-5", 1000))):
+        tracker.add_ledger({"component": "critic", "model": model, "input_tokens": tokens, "ts": iso(T0 + i)})
+    tracker.poll([])
+    unpriced, nothing, priced = tracker.events()
+    assert (unpriced["cost_usd"], unpriced["cumulative"]["cost_usd"]) == (None, None)
+    assert (nothing["cost_usd"], nothing["cumulative"]["cost_usd"]) == (0, 0)
+    assert priced["cumulative"]["cost_usd"] == pytest.approx(1000 * 5 / 1e6)
+
+
+def test_a_model_s_cost_by_kind_is_its_priced_calls_and_adds_up_to_its_cost(tmp_path):
+    tracker = TokenTracker(tmp_path)  # the call that searched is unpriced: the sheet has no price per search
+    for i, searches in enumerate((0, 1)):
+        row = {"component": "critic", "model": "claude-opus-5", "input_tokens": 1000, "output_tokens": 100}
+        tracker.add_ledger({**row, "web_searches": searches, "ts": iso(T0 + i)})
+    tracker.poll([])
+    for doc in (tracker.view(T0 + 10), tracker.document()):
+        spent, model = doc["pricing"]["models"]["claude-opus-5"]["spent_usd"], doc["by_model"]["claude-opus-5"]
+        assert spent == {"input": 0.005, "cache_write": 0, "cache_read": 0, "output": 0.0025, "reasoning": 0}
+        assert (sum(spent.values()), model["unpriced"]) == (pytest.approx(model["cost_usd"]), 1)
 
 
 def test_a_write_error_disables_the_file_not_the_watcher(session_dir, tmp_path, caplog):

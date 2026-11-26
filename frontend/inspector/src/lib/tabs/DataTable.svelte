@@ -95,6 +95,9 @@
   td:global(.trunc) {
     max-width: 360px;
   }
+  td:global(.wrap) {
+    white-space: normal;
+  }
   td:global(.mono) {
     font-family: var(--mono);
     font-size: 11px;

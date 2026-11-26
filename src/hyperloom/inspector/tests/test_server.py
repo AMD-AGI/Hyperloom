@@ -11,6 +11,7 @@ from urllib.parse import quote
 import pytest
 
 from hyperloom.inspector import server as server_mod
+from hyperloom.inspector.price_sheet import SHEET
 from hyperloom.inspector.server import InspectorServer, ServeOptions
 from hyperloom.inspector.tests.conftest import FAKE_KEY, T0
 from hyperloom.inspector.token_terms import TERMS
@@ -18,6 +19,7 @@ from hyperloom.inspector.watcher import Watcher, WatchOptions
 
 
 def _start(session_dir, replay=False):
+    """A server on *session_dir*, its tokens priced by the built-in price sheet, as the Inspector does."""
     watcher = Watcher(session_dir, WatchOptions(replay=replay, poll_sec=0.05, sample_metrics=False))
     watcher.poll()
     httpd = InspectorServer(("127.0.0.1", 0), watcher)
@@ -224,6 +226,17 @@ def test_artifact_index_and_conversation(server):
     assert _get(server, "/api/conversation?call_id=")[0] == 404
 
 
+def test_tokens_are_served_priced_by_the_built_in_sheet(server):
+    tokens = json.loads(_get(server, "/api/snapshot")[1])["tokens"]
+    assert tokens["totals"]["total"] == 2650 and tokens["totals"]["cost_usd"] == 0.0162
+    assert tokens["pricing"]["source"] == SHEET.source
+    for path in ("/api/tokens", "/api/tokens?download=1"):
+        status, body, _ = _get(server, path)
+        doc = json.loads(body)
+        assert status == 200 and doc["pricing"]["source"] == SHEET.source, path
+        assert doc["totals"]["calls"] == 3 and doc["totals"]["cost_usd"] == 0.0162, path
+
+
 def test_token_timeline_is_served_and_downloadable(server, replay_server):
     status, body, _ = _get(server, "/api/tokens")
     assert status == 200
@@ -284,3 +297,15 @@ def test_serve_never_puts_its_files_in_the_session(session_dir, monkeypatch):
     inside = session_dir / "scratch"
     server_mod.serve(session_dir, ServeOptions(port=0, history_dir=inside, token_dir=inside))
     assert sorted(p for p in session_dir.rglob("*")) == before
+
+
+def test_serve_prices_with_the_built_in_sheet(session_dir, tmp_path, monkeypatch, capsys):
+    served = []
+    monkeypatch.setattr(InspectorServer, "serve_forever", lambda self, poll_interval=0.5: served.append(self))
+    state = tmp_path / "state"
+    server_mod.serve(session_dir, ServeOptions(port=0, token_dir=state))
+    tokens = served[-1].watcher.snapshot()["tokens"]
+    assert tokens["totals"]["calls"] == 3
+    assert tokens["totals"]["cost_usd"] == 0.0162 and tokens["pricing"]["source"] == SHEET.source
+    assert [p.suffixes[-2:] for p in state.iterdir()] == [[".tokens", ".json"]]
+    assert "Prices: built-in price sheet\n" in capsys.readouterr().out

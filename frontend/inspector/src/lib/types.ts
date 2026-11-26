@@ -114,6 +114,15 @@ export interface TokenTotals {
   calls: number;
   errors: number;
   web_searches?: number;
+  /** USD at `pricing`'s prices; null where none of the calls is priced. */
+  cost_usd?: number | null;
+  /** Calls left out of `cost_usd`, as a price they need is missing; by why: `no_model`, with no model recorded;
+   * `no_price`, of a model the price sheet has no price for; `no_search_price`, with web searches and no price per
+   * search. */
+  unpriced?: number;
+  no_model?: number;
+  no_price?: number;
+  no_search_price?: number;
   /** Turns read from a specialist's log that the ledger has not got. */
   live?: number;
   /** Of those, a running specialist's, whose output is only known when it ends. */
@@ -122,7 +131,10 @@ export interface TokenTotals {
   output_unreported?: number;
 }
 
-/** Sparse buckets, `step` s from `start`: one `[bucket, node index, ...kinds, calls]` row per non-empty pair. */
+/**
+ * Sparse buckets, `step` s from `start`: one `[bucket, node index, ...kinds, calls, ...kinds]` row per non-empty pair,
+ * tokens then USD.
+ */
 export interface TokenSeries {
   start: number;
   end: number;
@@ -130,6 +142,28 @@ export interface TokenSeries {
   kinds: string[];
   nodes: string[];
   rows: number[][];
+}
+
+/** One model's entry on the price sheet, USD per 1M tokens. */
+export interface TokenPrice {
+  id: string;
+  input: number;
+  cache_write: number;
+  cache_read: number;
+  output: number;
+  /** "listed" on the sheet, or the input rate the sheet bills a cache write it lists none for at. */
+  cache_basis: string;
+  /** What this run's calls priced in full cost, by kind: the parts of the model's cost_usd. */
+  spent_usd: Record<"input" | "cache_write" | "cache_read" | "output" | "reasoning", number>;
+}
+
+export interface TokenPricing {
+  /** The built-in price sheet's file. */
+  source: string;
+  /** What the sheet says its rates come from. The sheet gives no price per search: a call that searches is unpriced. */
+  built_from?: string | null;
+  models: Record<string, TokenPrice>;
+  unpriced: Record<string, { calls: number; total: number }>;
 }
 
 /** A figure's name on the Tokens tab and what it means (tokens.py `TERMS`). */
@@ -148,8 +182,12 @@ export interface TokenView {
   pending_tasks: string[];
   /** Specialists that ended before reporting their output. */
   unreported_tasks?: string[];
-  recent: { window_sec: number; total: number; calls: number };
+  recent: { window_sec: number; total: number; calls: number; cost_usd?: number | null };
   series: TokenSeries;
+  /** What the cost is priced by: the built-in price sheet. */
+  pricing: TokenPricing;
+  /** The Claude CLI's own cost of its finished specialists next to ours for them. */
+  check?: { tasks: number; claude_cli_usd: number; priced_usd: number | null } | null;
   /** Names and definitions, keyed by field (`input`, `cache_read`, `total`, ...) or figure (`cache_hit`, ...). */
   terms?: Record<string, TokenTerm>;
   /** The token timeline file the Inspector keeps, or null when it keeps none. */

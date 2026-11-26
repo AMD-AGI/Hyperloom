@@ -57,6 +57,13 @@ def test_parser_defaults_and_missing_session(tmp_path, capsys):
     assert "no session" in capsys.readouterr().err
 
 
+@pytest.mark.parametrize("flag", ["--prices", "--prices-header", "--prices-patch", "--price", "--prices-merge"])
+def test_inspect_takes_no_price_flags(tmp_path, capsys, flag):
+    with pytest.raises(SystemExit) as info:
+        _build_parser().parse_args(["inspect", "--session-dir", str(tmp_path), flag, "https://gw.example/"])
+    assert info.value.code == 2 and flag in capsys.readouterr().err
+
+
 def test_module_entry_point_shares_the_options(tmp_path, capsys):
     from hyperloom.inspector.__main__ import main
 

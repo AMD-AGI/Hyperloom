@@ -14,8 +14,8 @@ Endpoints (all GET unless noted):
 * ``/api/artifact?path=&mode=&offset=&limit=``: one artifact's typed payload.
 * ``/api/diff?a=&b=``: side-by-side diff of two text artifacts.
 * ``/api/conversation?call_id=``: prompt/response of one LLM call.
-* ``/api/tokens?download=``: the token timeline document (replay: up to the clock); ``download=1`` as a file,
-  ``<session>.tokens.json``.
+* ``/api/tokens?download=``: the token timeline document (replay: up to the clock), with USD costs priced by the
+  built-in price sheet; ``download=1`` as a file, ``<session>.tokens.json``.
 * ``POST /api/replay?t=&speed=&paused=``: move the replay clock.
 
 The Host header must name a loopback address or the bound host, so a page on
@@ -303,7 +303,8 @@ class ServeOptions:
 
 def serve(session_dir: Path, options: ServeOptions | None = None) -> None:
     """Run the Inspector until interrupted; with *options.history_dir*, resource samples survive a restart; with
-    *options.token_dir*, the token timeline is kept there as JSON."""
+    *options.token_dir*, the token timeline is kept there as JSON. Tokens are priced in USD by the built-in price
+    sheet."""
     options = options or ServeOptions()
     history = None
     if options.history_dir is not None:
@@ -325,6 +326,7 @@ def serve(session_dir: Path, options: ServeOptions | None = None) -> None:
         print(f"Resource history: {history.path}", flush=True)
     if token_file is not None:
         print(f"Token timeline: {token_file}", flush=True)
+    print("Prices: built-in price sheet", flush=True)
     try:
         httpd.serve_forever(poll_interval=0.5)
     except KeyboardInterrupt:

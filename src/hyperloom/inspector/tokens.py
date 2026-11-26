@@ -19,11 +19,16 @@ timestamp of the tool result it answers (the task's start for the first turn).
 The ``result`` line's ``modelUsage`` also counts the CLI's side calls (WebSearch, WebFetch and the like), which never
 appear as assistant messages and so never reach the ledger; what it reports beyond the turns becomes a ``result``
 event per model at the end of the specialist. The ledger leaves a side call's output in the session total on the last
-turn; when the side call ran on another model, that output moves to its model's event, so it counts toward that
-model. OpenAI-protocol rows count cached input inside ``input_tokens`` and reasoning inside
+turn; when the side call ran on another model, that output moves to its model's event, so it is priced at that
+model's rates. OpenAI-protocol rows count cached input inside ``input_tokens`` and reasoning inside
 ``output_tokens``; both are taken out so the five kinds add up the same way for every provider. Which rows those are
 is told by their writer (:func:`_openai_usage`), not by the model's name alone: a model such as Kimi is served over
 either protocol.
+
+Every event is priced in USD by the built-in price sheet (:mod:`hyperloom_common.llm.llm_prices`, the one multi-branch
+spends by; :mod:`.price_sheet`), so the Inspector's cost of a session is what multi-branch records for it. An event that
+needs a price the sheet lacks (its model's, the price of a web search) is unpriced, and names what is missing; a total
+none of whose events is priced has a null cost too, never 0.
 
 The timeline file is written atomically outside the session (see :func:`hyperloom.inspector.history.history_path`);
 the session directory stays read-only.
@@ -36,12 +41,14 @@ import json
 import logging
 import os
 import time
+from collections import Counter
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, NamedTuple
 
 from hyperloom.inspector.collectors import ENDED_STATES, parse_ts, resolve_inside
 from hyperloom.inspector.graph import agent_node, task_node
+from hyperloom.inspector.price_sheet import SHEET, SheetPrice
 from hyperloom.inspector.model_names import normalize
 from hyperloom.inspector.token_terms import NO_MODEL, RECENT_SEC, TERMS
 
@@ -51,8 +58,9 @@ SCHEMA = "hyperloom.inspector.token_timeline/v1"
 # Anthropic semantics: ``input`` excludes the cached prefix, so the five kinds add up to what was processed.
 KINDS = ("input", "cache_write", "cache_read", "output", "reasoning")
 _INPUT, _CACHE_WRITE, _CACHE_READ, _OUTPUT, _REASONING = KINDS
-# The kinds that make up a call's input.
+# The kinds that make up a call's input, and those the sheet prices (reasoning is billed as output).
 _INPUT_KINDS = (_INPUT, _CACHE_WRITE, _CACHE_READ)
+_PRICED_KINDS = (*_INPUT_KINDS, _OUTPUT)
 # The count fields of a usage record (a ledger row, or the usage of a Claude CLI message), by the kind they count.
 _USAGE_INPUT = "input_tokens"
 _USAGE_CACHE_WRITE = "cache_creation_input_tokens"
@@ -98,6 +106,12 @@ _STATUS_ERROR = "error"
 _SPECIALIST = "specialist"
 # The field of an event (and of a call) that names its model; a call that names none lacks it.
 _MODEL = "model"
+# USD figures in totals, series and prices are rounded to a millionth of a dollar.
+_USD_DECIMAL_PLACES = 6
+
+# Why an event is unpriced: each price it lacks (missing), and the count it adds to in a total.
+_REASONS = {"model": "no_model", "price": "no_price", "web_search": "no_search_price"}
+UNPRICED = tuple(_REASONS.values())
 _CHUNK = 32 << 20
 
 
@@ -158,6 +172,17 @@ def _openai_split(counts: dict, row: dict) -> dict:
     return out
 
 
+def missing(call: dict) -> list[str]:
+    """The prices *call* needs that the sheet lacks, so that it is unpriced: ``model`` when it names none, ``price``
+    when the sheet lists no price for its model, else ``web_search`` when it searched, as the sheet has no price per
+    search. Empty for a call that can be priced. The sheet prices every token kind of a model it lists."""
+    if not call.get(_MODEL):
+        return [_MODEL]
+    if SHEET.lookup(call[_MODEL]) is None:
+        return ["price"]
+    return ["web_search"] if call["web_searches"] else []
+
+
 class _LiveTurn(NamedTuple):
     """A specialist turn as its live log has it: the turn's usage, and the parser of that log."""
 
@@ -198,6 +223,16 @@ def _ledger_counts(r: _LedgerRow) -> dict:
     return counts
 
 
+def call_cost(call: dict) -> dict[str, float] | None:
+    """What one LLM call cost in USD, by token kind: its tokens of each kind times its model's price per token on the
+    sheet; None when a price it needs is :func:`missing`, as for a call that searched."""
+    price = SHEET.lookup(call[_MODEL]) if not missing(call) else None
+    if price is None:
+        return None
+    rates = price.rates()
+    return {k: (call[k] or 0) * rates[k] for k in KINDS}
+
+
 class StreamTurns:
     """Per-turn usage of one Claude CLI stream-JSON log, read incrementally.
 
@@ -220,6 +255,7 @@ class StreamTurns:
         self.duration: float | None = None
         self.session_output: int | None = None
         self.session_input = 0
+        self.cost_usd: float | None = None
         self.model_usage: dict[str, dict[str, int]] = {}
         self._ids: set[str] = set()
         self.last_ts: float | None = None
@@ -277,6 +313,8 @@ class StreamTurns:
                 self.session_output = out
             usage = obj.get("usage")
             self.session_input = sum(_int(usage.get(k)) or 0 for k in _SIDE_KEYS) if isinstance(usage, dict) else 0
+            cost = obj.get("total_cost_usd")
+            self.cost_usd = float(cost) if isinstance(cost, (int, float)) and not isinstance(cost, bool) else None
             self.model_usage = _model_usage(obj)
             duration = _int(obj.get("duration_ms"))
             self.duration = duration / 1000.0 if duration and duration > 0 else None
@@ -330,7 +368,7 @@ class StreamTurns:
 
         Those are the CLI's side calls, which never show up as assistant messages. Their output is in the session
         total the runner puts on the last turn; a side model's share moves to its row (see ``own_output``), so it is
-        counted toward that model. Turns of a model the result does not name count against its largest entry.
+        priced at that model's rate. Turns of a model the result does not name count against its largest entry.
         """
         if not self.done or not self.model_usage or not self.usages():
             return []
@@ -386,6 +424,9 @@ def _empty() -> dict:
         "calls": 0,
         "errors": 0,
         "web_searches": 0,
+        "cost_usd": None,
+        "unpriced": 0,
+        **dict.fromkeys(UNPRICED, 0),
     }
 
 
@@ -396,39 +437,77 @@ def _add(acc: dict, ev: dict) -> None:
     acc["calls"] += ev["source"] != _SOURCE_RESULT  # side calls, not one call of their own
     acc["errors"] += ev["status"] == _STATUS_ERROR
     acc["web_searches"] += ev["web_searches"]
+    if ev["cost_usd"] is None:
+        # Counted by call: a specialist's side usage counts toward its last call, which may be unpriced too.
+        counted = acc.setdefault("_counted", {})
+        call = ev["of_call"] or id(ev)
+        for count in ("unpriced", *(reason for lack, reason in _REASONS.items() if lack in ev["missing"])):
+            if call not in (calls := counted.setdefault(count, set())):
+                calls.add(call)
+                acc[count] += 1
+    else:
+        acc["cost_usd"] = (acc["cost_usd"] or 0.0) + ev["cost_usd"]
+
+
+def _close(acc: dict) -> dict:
+    """``cost_usd`` rounded; null when none of the events is priced, 0 when there are none."""
+    acc.pop("_counted", None)
+    if acc["cost_usd"] is not None:
+        acc["cost_usd"] = round(acc["cost_usd"], _USD_DECIMAL_PLACES)
+    elif not acc["unpriced"]:
+        acc["cost_usd"] = 0.0
+    return acc
 
 
 def _totals(events: list[dict]) -> dict:
-    """Sums per kind plus ``calls``, ``errors``, ``web_searches``, then ``live`` (not yet in the ledger),
-    ``output_pending`` and ``output_unreported``."""
+    """Sums per kind plus ``calls``, ``errors``, ``web_searches``, ``cost_usd``, ``unpriced`` (calls whose usage is
+    left out of the cost, a specialist's side usage counted toward its last call) and why, by :data:`UNPRICED`:
+    ``no_model``, with no model recorded; ``no_price``, of a model without a price; ``no_search_price``, with web
+    searches and no price per search. Then ``live`` (not yet in the ledger), ``output_pending`` and
+    ``output_unreported``."""
     acc = _empty()
     for ev in events:
         _add(acc, ev)
     acc["live"] = sum(e["source"] == _SOURCE_LIVE for e in events)
     acc["output_pending"] = sum(e["output_pending"] for e in events)
     acc["output_unreported"] = sum(e["output_unreported"] for e in events)
-    return acc
+    return _close(acc)
 
 
 def _rollup(events: list[dict], key: str) -> dict[str, dict]:
     out: dict[str, dict] = {}
     for ev in events:
         _add(out.setdefault(str(ev.get(key) or NO_MODEL), _empty()), ev)
-    return dict(sorted(out.items(), key=lambda kv: -kv[1]["total"]))
+    return {k: _close(v) for k, v in sorted(out.items(), key=lambda kv: -kv[1]["total"])}
 
 
-def _bucket_rows(events: list[dict], t0: float, step: int) -> tuple[list[str], list[list]]:
-    """The series' node names and its ``[bucket, node index, *KINDS, calls]`` rows."""
+def _spent(events: list[dict], usd: list[dict[str, float] | None]) -> dict[str, Counter]:
+    """Per model, what its priced events cost by kind; an unpriced event adds nothing to any kind."""
+    out: dict[str, Counter] = {}
+    for ev, parts in zip(events, usd):
+        if parts is not None:
+            out.setdefault(str(ev.get("model") or NO_MODEL), Counter()).update(parts)
+    return out
+
+
+def _bucket_rows(
+    events: list[dict], usd: list[dict[str, float] | None], t0: float, step: int
+) -> tuple[list[str], list[list]]:
+    """The series' node names and its ``[bucket, node index, *KINDS, calls, *KINDS in USD]`` rows."""
     nodes: dict[str, int] = {}
     cells: dict[tuple[int, int], list[float]] = {}
     calls = len(KINDS)
-    for ev in events:
+    for ev, parts in zip(events, usd):
         key = (int((ev["t"] - t0) // step), nodes.setdefault(str(ev["node"]), len(nodes)))
-        cell = cells.setdefault(key, [0] * (calls + 1))
+        cell = cells.setdefault(key, [0] * (calls + 1) + [0.0] * calls)
         for j, k in enumerate(KINDS):
             cell[j] += ev[k] or 0
+            cell[calls + 1 + j] += parts[k] if parts is not None else 0.0
         cell[calls] += ev["source"] != _SOURCE_RESULT
-    rows = [[i, n, *cell] for (i, n), cell in sorted(cells.items())]
+    rows = [
+        [i, n, *cell[: calls + 1], *(round(v, _USD_DECIMAL_PLACES) for v in cell[calls + 1 :])]
+        for (i, n), cell in sorted(cells.items())
+    ]
     return list(nodes), rows
 
 
@@ -439,6 +518,37 @@ def _rollups(events: list[dict]) -> dict[str, dict]:
         "by_component": _rollup(events, "component"),
         "by_node": _rollup(events, "node"),
         "by_model": _rollup(events, _MODEL),
+    }
+
+
+def _model_pricing(price: SheetPrice, spent: Counter | None) -> dict:
+    """A model's prices on the sheet in USD per 1M tokens, and ``spent_usd``, what its priced calls cost by kind
+    (*spent*), which adds up to its ``cost_usd``."""
+    return {
+        "id": price.id,
+        **{k: round(getattr(price, k), _USD_DECIMAL_PLACES) for k in _PRICED_KINDS},
+        "cache_basis": price.cache_basis,
+        "spent_usd": {k: round(v, _USD_DECIMAL_PLACES) for k, v in (spent or dict.fromkeys(KINDS, 0.0)).items()},
+    }
+
+
+def _pricing(by_model: dict[str, dict], spent: dict[str, Counter]) -> dict:
+    """The prices behind ``cost_usd``: per model seen, its prices on the sheet and what it spent at them
+    (:func:`_model_pricing`), or, for a model the sheet lacks and the calls that name none (``NO_MODEL``), its calls
+    and tokens unpriced."""
+    models, unpriced = {}, {}
+    for model, acc in by_model.items():
+        price = SHEET.lookup(model) if model != NO_MODEL else None
+        if price is not None:
+            models[model] = _model_pricing(price, spent.get(model))
+        else:
+            unpriced[model] = {"calls": acc["calls"], "total": acc["total"]}
+    return {
+        "source": SHEET.source,
+        "built_from": SHEET.built_from,
+        "unit": "USD per 1M tokens",
+        "models": models,
+        "unpriced": unpriced,
     }
 
 
@@ -465,6 +575,8 @@ class TokenTracker:
         self._tasks: dict[str, tuple[str, float | None, bool]] = {}  # node, start, ended
         self._phases: list[tuple[float, str]] = []
         self._events: list[dict] = []
+        self._usd: list[dict[str, float] | None] = []
+        self._ends: dict[str, float | None] = {}
         self._times: list[float] = []
         self._dirty = True
         self._unsaved = True
@@ -522,10 +634,11 @@ class TokenTracker:
         }
         events, finished = self._ledger_events(live)
         events += self._live_events(live)
-        events += self._result_events(finished)
+        result, self._ends = self._result_events(finished)
+        events += result
         events.sort(key=lambda e: e["t"])
-        self._cumulate(events)
-        self._events, self._times = events, [e["t"] for e in events]
+        usd = self._price(events)
+        self._events, self._usd, self._times = events, usd, [e["t"] for e in events]
         self._dirty, self._unsaved = False, True
 
     def _ledger_time(self, r: _LedgerRow) -> float | None:
@@ -582,27 +695,37 @@ class TokenTracker:
             events.append(ev)
         return events
 
-    def _result_events(self, finished: dict) -> list[dict]:
-        """What each finished specialist's result line counts beyond its turns, as events at its end."""
-        events = []
+    def _result_events(self, finished: dict) -> tuple[list[dict], dict[str, float | None]]:
+        """What each finished specialist's result line counts beyond its turns, as events at its end; and the ends."""
+        events, ends = [], {}
         for tid, parser in self._logs.items():
             if not parser.done:
                 continue
-            t = self._end_time(tid, parser, finished.get(tid))
+            ends[tid] = t = self._end_time(tid, parser, finished.get(tid))
             for side in parser.side_usage() if t is not None else ():
                 counts = {k: side.get(src) for k, src in _LEDGER_KEYS.items()}
                 ev = self._event(_CallAt(t, _SPECIALIST, tid, None), side, counts, "ok", _SOURCE_RESULT)
+                ev["of_call"] = f"{tid}#{len(parser.usages())}"
                 events.append(ev)
-        return events
+        return events, ends
 
-    def _cumulate(self, events: list[dict]) -> None:
-        """Each event's running totals, in place."""
+    def _price(self, events: list[dict]) -> list[dict[str, float] | None]:
+        """Each event's cost, the prices it lacks and its running totals, in place; returns its cost by kind."""
+        priced = [(call_cost(ev), missing(ev)) for ev in events]
+        usd = [cost for cost, _ in priced]
         cum: dict[str, Any] = dict.fromkeys((*KINDS, "total"), 0)
-        for ev in events:
+        # Null until an event is priced, as a total none of whose events is priced: unpriced is not free.
+        cost: float | None = None
+        for ev, (parts, lacks) in zip(events, priced):
+            ev["cost_usd"] = round(sum(parts.values()), 8) if parts is not None else None
+            ev["missing"] = lacks if parts is None else []
             for k in KINDS:
                 cum[k] += ev[k] or 0
             cum["total"] += ev["total"]
-            ev["cumulative"] = dict(cum)
+            if ev["cost_usd"] is not None:
+                cost = (cost or 0.0) + ev["cost_usd"]
+            ev["cumulative"] = {**cum, "cost_usd": round(cost, _USD_DECIMAL_PLACES) if cost is not None else None}
+        return usd
 
     def _end_time(self, tid: str, parser: StreamTurns, ledger_ts: float | None) -> float | None:
         """When a finished specialist ended, from the session rather than file times (a copied session has new
@@ -637,10 +760,14 @@ class TokenTracker:
             "task_id": at.tid,
             "turn": at.turn,
             "call_id": row.get("call_id"),
+            # The call whose usage this is: a specialist's turn, or its last turn for the side usage of its result line.
+            "of_call": f"{at.tid}#{at.turn}" if at.tid and at.turn else None,
             "phase": phase,
             **counts,
             "total": sum(v or 0 for v in counts.values()),
             "web_searches": _int(row.get("web_searches")) or 0,
+            "cost_usd": None,
+            "missing": [],
             "status": status,
             "source": source,
             "output_pending": False,
@@ -651,16 +778,33 @@ class TokenTracker:
         events = self.events()
         return events if clock is None else events[: bisect.bisect_right(self._times, clock)]
 
+    def _check(self, events: list[dict], upto: float | None) -> dict | None:
+        """The Claude CLI's own cost of its finished specialists (Anthropic list prices) next to ours for them."""
+        cli = {
+            tid: p.cost_usd
+            for tid, p in self._logs.items()
+            if p.done and p.cost_usd is not None and (upto is None or (self._ends.get(tid) or 0) <= upto)
+        }
+        if not cli:
+            return None
+        ours = [e["cost_usd"] for e in events if e["task_id"] in cli]
+        return {
+            "tasks": len(cli),
+            "claude_cli_usd": round(sum(cli.values()), _USD_DECIMAL_PLACES),
+            "priced_usd": round(sum(ours), _USD_DECIMAL_PLACES) if None not in ours else None,
+        }
+
     # ----- views ---------------------------------------------------------------------------------------------
 
     def view(self, now: float, upto: float | None = None, start: float | None = None, end: float | None = None) -> dict:
         """Totals, rollups and a bucketed series for the page, up to *upto* (``None``: everything).
 
         The series spans *start* (default: the first event) to *end* (default: *now*), stretched to cover every
-        event. ``series.rows`` holds one ``[bucket, node index, *KINDS, calls]`` row per non-empty
+        event. ``series.rows`` holds one ``[bucket, node index, *KINDS, calls, *KINDS in USD]`` row per non-empty
         (bucket, node) pair; buckets are ``step`` seconds from ``series.start``, at most ``MAX_BUCKETS`` of them.
         """
         events = self._upto(upto)
+        usd = self._usd[: len(events)]
         pending = sorted({str(e["task_id"]) for e in events if e["output_pending"]})
         unreported = sorted({str(e["task_id"]) for e in events if e["output_unreported"]})
         recent = _totals([e for e in events if e["t"] > now - RECENT_SEC])
@@ -668,13 +812,13 @@ class TokenTracker:
         t0 = min(x for x in (start, events[0]["t"] if events else None, end) if x is not None)
         t1 = max(end, events[-1]["t"]) if events else end
         step = _step(max(t1 - t0, 1.0))
-        nodes, rows = _bucket_rows(events, t0, step)
+        nodes, rows = _bucket_rows(events, usd, t0, step)
         rollups = _rollups(events)
         return {
             **rollups,
             "pending_tasks": pending,
             "unreported_tasks": unreported,
-            "recent": {"window_sec": RECENT_SEC, **{k: recent[k] for k in ("total", "calls")}},
+            "recent": {"window_sec": RECENT_SEC, **{k: recent[k] for k in ("total", "calls", "cost_usd")}},
             "series": {
                 "start": t0,
                 "end": t1,
@@ -683,13 +827,16 @@ class TokenTracker:
                 "nodes": nodes,
                 "rows": rows,
             },
+            "pricing": _pricing(rollups["by_model"], _spent(events, usd)),
+            "check": self._check(events, upto),
             "terms": TERMS,
             "file": str(self.path) if self.path is not None else None,
             "saved_at": self.saved_at,
         }
 
     def document(self, upto: float | None = None) -> dict:
-        """The token timeline as saved: every event with its ISO time and running totals."""
+        """The token timeline as saved: every event with its ISO time, running totals and cost, and the prices behind
+        them (``pricing``)."""
         events = self._upto(upto)
         session_id = next((r.get("session_id") for r in self._ledger if r.get("session_id")), None)
         rollups = _rollups(events)
@@ -702,6 +849,8 @@ class TokenTracker:
             "kinds": list(KINDS),
             "notes": NOTES,
             "terms": TERMS,
+            "pricing": _pricing(rollups["by_model"], _spent(events, self._usd[: len(events)])),
+            "check": self._check(events, upto),
             **rollups,
             "events": [{"ts": _iso(e["t"]), **e} for e in events],
         }

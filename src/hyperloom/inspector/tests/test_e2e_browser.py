@@ -14,15 +14,16 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import socket
 from dataclasses import dataclass
 
 import pytest
 
 from hyperloom.inspector import server as server_mod
-from hyperloom.inspector.tests.conftest import FAKE_KEY
+from hyperloom.inspector.tests.conftest import FAKE_KEY, T0, iso
 from hyperloom.inspector.tests.test_server import _start
-from hyperloom.inspector.tests.test_tokens import TURNS, _log
+from hyperloom.inspector.tests.test_tokens import TURNS, _add_ledger, _log
 from hyperloom.inspector.token_terms import TERMS
 
 sync_api = pytest.importorskip("playwright.sync_api")
@@ -94,6 +95,11 @@ class TokensUi:
     models: str
     download: str
     rate: str
+    cost: str
+    cost_chart: str
+    pricing: str
+    unpriced: str
+    prices: str
     cache_hit: str
     total: str
     now: str
@@ -106,11 +112,19 @@ TOKENS = TokensUi(
     models="[data-testid=token-models]",
     download="[data-testid=token-download]",
     rate="[data-testid=token-rate]",
+    cost="[data-testid=token-cost]",
+    cost_chart="[data-testid=cost-chart]",
+    pricing="[data-testid=token-pricing]",
+    unpriced="[data-testid=token-unpriced]",
+    prices="[data-testid=token-prices]",
     cache_hit="[data-testid=token-cache-hit]",
     total="[data-testid=token-total]",
     now="line.now",
     legend="[data-testid=token-legend] button.chip",
 )
+
+# The fixture ledger runs claude-opus-5-5, $4 / $20 per 1M tokens on the built-in price sheet: its three calls cost
+# $0.0162.
 
 
 @pytest.fixture(scope="module")
@@ -127,6 +141,11 @@ def browser():
 
 
 @pytest.fixture
+def extra_calls():
+    return []
+
+
+@pytest.fixture
 def running():
     return False
 
@@ -137,7 +156,9 @@ def specialist_log():
 
 
 @pytest.fixture
-def page(browser, session_dir, running, specialist_log):
+def page(browser, session_dir, extra_calls, running, specialist_log):
+    if extra_calls:
+        _add_ledger(session_dir, extra_calls)
     if specialist_log:
         _log(session_dir, specialist_log)
     if running:
@@ -228,10 +249,21 @@ def test_token_tab_chart_and_download(page):
     expect(page.locator(TOKENS.agents)).to_contain_text("critic")
     assert page.locator(TOKENS.download).get_attribute("href") == "api/tokens?download=1"
     expect(page.locator(TOKENS.download)).to_have_text("Download receipt in JSON")
+    expect(page.locator(TOKENS.cost)).to_contain_text("0.016")
+    expect(page.locator(TOKENS.cost)).to_contain_text("llm_prices.json")
+    expect(page.locator(TOKENS.cost_chart).locator("path")).not_to_have_count(0)
+    expect(page.locator(TOKENS.pricing)).to_contain_text(
+        re.compile(r"Price source\s*hyperloom_common/llm/llm_prices\.json, the built-in price sheet")
+    )
+    expect(page.locator(TOKENS.prices)).to_contain_text("claude-opus-5-5")  # the price table's "Priced as"
+    # Under each price per 1M tokens, the tokens this run used at it and what they cost: 2,300 input at $4.
+    for text in ("$4.00 / million-tokens", "Used in this run", "2,300 tokens", "Cost in this run", "$0.0092"):
+        expect(page.locator("body")).to_contain_text(text)
     # The server's names on the cards; what each means is a hover hint (below).
     expect(page.locator(TOKENS.cache_hit)).to_contain_text("Input cache hit rate")
     page.click(TOKENS.rate)
     expect(page.locator(TOKENS.chart).locator("rect[fill^='#']")).not_to_have_count(0)
+    expect(page.locator(TOKENS.cost_chart).locator("rect[fill^='#']")).not_to_have_count(0)
 
 
 def test_token_names_show_their_definition_on_hover(page):
@@ -305,7 +337,7 @@ _TOTAL_ENDS = """svg => {
 @pytest.mark.parametrize("running", [True])
 def test_while_the_run_is_running_token_charts_carry_the_moving_now_line(page):
     page.click(UI.tab.format("tokens"))
-    for chart in (TOKENS.chart,):
+    for chart in (TOKENS.chart, TOKENS.cost_chart):
         line = page.locator(chart).locator(TOKENS.now)
         expect(line).to_contain_text("now ")
         first = line.text_content()
@@ -324,7 +356,7 @@ def test_a_specialist_that_ended_without_reporting_its_output_is_told_so_not_pen
     expect(page.locator("[data-testid=token-output-pending]")).to_have_count(0)
     expect(page.locator("body")).to_contain_text(
         "1 specialist ended without reporting its output (cancelled, say): their turns come from the live log, and "
-        "their output is unknown and left out of the totals."
+        "their output is unknown and left out of the totals and the cost."
     )
     page.hover("[data-testid=token-output-unreported]")
     expect(page.locator("#hint-tip")).to_have_text(TERMS["output_unreported"]["definition"])
@@ -332,11 +364,62 @@ def test_a_specialist_that_ended_without_reporting_its_output_is_told_so_not_pen
 
 def test_once_the_run_has_gone_quiet_token_charts_end_at_its_last_activity(page):
     page.click(UI.tab.format("tokens"))
-    for chart in (TOKENS.chart,):
+    for chart in (TOKENS.chart, TOKENS.cost_chart):
         expect(page.locator(chart).locator("path")).not_to_have_count(0)
         expect(page.locator(chart).locator(TOKENS.now)).to_have_count(0)
         ends = page.locator(chart).evaluate(_TOTAL_ENDS)
         assert ends["ends"] and all(x >= ends["right"] - 2 for x in ends["ends"]), ends
+
+
+def test_the_price_sheet_says_what_its_rates_come_from(page):
+    page.click(UI.tab.format("tokens"))
+    expect(page.locator(TOKENS.pricing)).to_contain_text(re.compile(r"Built from\s*The LLM gateway's rates"))
+
+
+# One call on a model the price sheet does not list, one that names no model.
+UNPRICED = [
+    {"component": "critic", "model": "unlisted-model", "input_tokens": 70, "ts": iso(T0 + 640)},
+    {"component": "critic", "input_tokens": 30, "ts": iso(T0 + 650)},
+]
+
+
+@pytest.mark.parametrize("extra_calls", [UNPRICED])
+def test_calls_without_a_price_are_flagged_with_why_not_costed_at_zero(page):
+    page.click(UI.tab.format("tokens"))
+    no_model, no_price = r"1 call(\(s\))? with no model recorded", r"1 call(\(s\))? with no price for the model"
+    cost = page.locator(TOKENS.cost)
+    expect(cost).to_contain_text("0.016")
+    expect(cost).to_contain_text(re.compile(f"Unpriced: {no_model}, {no_price}"))
+    models = page.locator(TOKENS.models)
+    expect(models.locator("tr", has_text="no model recorded")).to_contain_text(re.compile(f"– · unpriced: {no_model}"))
+    expect(models.locator("tr", has_text="unlisted-model")).to_contain_text(re.compile(f"– · unpriced: {no_price}"))
+    critic = page.locator(TOKENS.agents).locator("tr", has_text="critic")
+    expect(critic).to_contain_text(re.compile(f"· unpriced: {no_model}, {no_price}"))
+    why = page.locator(TOKENS.unpriced)
+    expect(why).to_have_class(re.compile(r"\bh-crashed\b"))
+    expect(why).to_contain_text(re.compile(r"2 of \d+ LLM call(s|\(s\)), left out of the estimated cost\."))
+    expect(why).to_contain_text(
+        re.compile(
+            r"1 LLM call(\(s\))? with no model recorded, as neither the call log nor the specialist's log names its "
+            r"model\.\s*1 LLM call(\(s\))? with no price for the model: unlisted-model \(1 call(\(s\))?\), as the price "
+            r"sheet lists no price for it\."
+        )
+    )
+    # Right after the price source, ahead of how a cost is worked out.
+    text = page.locator(TOKENS.pricing).text_content()
+    assert text.index("Price source") < text.index("left out of the estimated") < text.index("Cost in this run ="), text
+    cost.locator("[data-hint]", has_text="with no model recorded").hover()
+    expect(page.locator("#hint-tip")).to_have_text(TERMS["no_model"]["definition"])
+
+
+def test_the_tokens_tab_prices_with_the_built_in_sheet(page):
+    for tab in ("tasks", "artifacts", "bus", "llm", "tokens", "journal"):
+        expect(page.locator(UI.tab.format(tab))).to_be_visible()
+    page.click(UI.tab.format("tokens"))
+    expect(page.locator(TOKENS.agents)).to_contain_text(TERMS["cost_usd"]["label"])
+    expect(page.locator(TOKENS.pricing)).to_contain_text("built-in price sheet")
+    page.locator(TOKENS.agents).locator("th", has_text=TERMS["cache_read"]["label"]).hover()
+    expect(page.locator("#hint-tip").locator("div")).to_have_text(TERMS["cache_read"]["definition"].split("\n"))
 
 
 def test_folding_the_uplift_panel_leaves_its_summary(page):

@@ -1,15 +1,16 @@
 // SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 // SPDX-License-Identifier: MIT
 
-// The token chart's data: `view.tokens.series` (tokens.py) decoded into per-bucket series of tokens, by token kind
-// or by agent, then stacked, cumulatively or as a rate. Pure functions.
+// The token and cost charts' data: `view.tokens.series` (tokens.py) decoded into per-bucket series of tokens or USD,
+// by token kind or by agent, then stacked, cumulatively or as a rate. Pure functions.
 
-import type { TokenSeries, TokenTerm, TokenTotals } from "./types";
+import type { TokenSeries, TokenTerm, TokenTotals, TokenView } from "./types";
 
 export const KINDS = ["input", "cache_write", "cache_read", "output", "reasoning"] as const;
 export type Kind = (typeof KINDS)[number];
 export type Mode = "cumulative" | "rate";
 export type Group = "kind" | "node";
+export type Metric = "tokens" | "usd";
 export type Terms = Record<string, TokenTerm> | undefined;
 
 /** What the Tokens tab calls *key* (tokens.py `TERMS`), or the key itself from a server that sends no terms. */
@@ -34,6 +35,66 @@ export const OTHER = "other";
 const OTHER_COLOR = "#8994a3";
 /** tokens.py's key for the calls that name no model. */
 export const NO_MODEL = "unknown";
+/** Why calls are left out of the cost: tokens.py's counts per reason (`UNPRICED`). */
+export type Unpriced = "no_model" | "no_price" | "no_search_price";
+const UNPRICED: Record<Unpriced, string> = {
+  no_model: "with no model recorded",
+  no_price: "with no price for the model",
+  no_search_price: "with web searches and no price per search",
+};
+
+/** A row's unpriced calls, a phrase per reason: "306 calls with no model recorded". */
+export function unpricedReasons(x: Partial<Record<Unpriced, number>>): [Unpriced, string][] {
+  return (Object.keys(UNPRICED) as Unpriced[])
+    .filter((k) => x[k])
+    .map((k) => [k, `${x[k]} call${x[k] === 1 ? "" : "s"} ${UNPRICED[k]}`]);
+}
+
+const llmCalls = (n: number) => `${n} LLM call${n === 1 ? "" : "s"}`;
+const calls = (n: number) => `${n} call${n === 1 ? "" : "s"}`;
+
+/**
+ * Why the run's unpriced calls are left out of its cost, for under the price table: how many, and a line per reason
+ * with the models and the price each lacks.
+ * No sentence ends in a full stop; the page adds them.
+ */
+export function unpricedWhy(tv: Pick<TokenView, "totals" | "by_model" | "pricing">): {
+  head: string;
+  lines: string[];
+} {
+  const all = tv.pricing.unpriced;
+  const named = Object.entries(all).filter(([m]) => m !== NO_MODEL);
+  const line = (reason: string, models: string[]) => `${reason}: ${models.join("; ")}`;
+  const lines: string[] = [];
+  const noModel = all[NO_MODEL]?.calls ?? 0;
+  if (noModel) {
+    const its = noModel === 1 ? "its" : "their";
+    lines.push(
+      `${llmCalls(noModel)} with no model recorded, as neither the call log nor the specialist's log names ${its} model`,
+    );
+  }
+  if (named.length) {
+    lines.push(
+      line(
+        `${llmCalls(named.reduce((sum, [, x]) => sum + x.calls, 0))} with no price for the model`,
+        named.map(([m, x]) => `${m} (${calls(x.calls)}), as the price sheet lists no price for it`),
+      ),
+    );
+  }
+  const search = Object.entries(tv.by_model)
+    .filter(([, x]) => x.no_search_price)
+    .map(([m, x]) => `${m} (${calls(x.no_search_price ?? 0)}), as the price sheet gives no price per search`);
+  if (search.length) {
+    lines.push(line(`${llmCalls(tv.totals.no_search_price ?? 0)} with web searches and no price per search`, search));
+  }
+  return {
+    head: lines.length
+      ? `${tv.totals.unpriced ?? 0} of ${llmCalls(tv.totals.calls)}, left out of the estimated cost`
+      : "",
+    lines,
+  };
+}
+
 export interface Series {
   key: string;
   label: string;
@@ -59,19 +120,22 @@ const zeros = (n: number) => new Array<number>(n).fill(0);
 const sum = (xs: number[]) => xs.reduce((a, b) => a + b, 0);
 
 /**
- * Per-bucket series of *s* in tokens, restricted to the graph node *filter* when set: one per token kind
+ * Per-bucket series of *s* in tokens or USD, restricted to the graph node *filter* when set: one per token kind
  * (reasoning only when there is some) labelled by *terms*, or one per agent node, the largest
- * first, past `maxNodes` folded into "other".
+ * first, past `maxNodes` folded into "other". Agents are ranked by their tokens in either metric, so the token and
+ * USD charts of one series show the same agents in the same order, and fold the same ones.
  */
 export function decode(
   s: TokenSeries,
   group: Group,
   filter: string | null,
+  metric: Metric = "tokens",
   { maxNodes = NODE_COLORS.length, terms }: { maxNodes?: number; terms?: Terms } = {},
 ): Decoded {
   const n = bucketCount(s);
   const calls = zeros(n);
   const kinds = s.kinds;
+  const at = metric === "usd" ? 3 + kinds.length : 2;
   const byKind = new Map<string, number[]>(kinds.map((k) => [k, zeros(n)]));
   const byNode = new Map<string, number[]>();
   const weight = new Map<string, number>();
@@ -81,7 +145,7 @@ export function decode(
     if (filter && node !== filter) continue;
     let all = 0;
     kinds.forEach((k, j) => {
-      const v = row[2 + j] ?? 0;
+      const v = row[at + j] ?? 0;
       byKind.get(k)![i] += v;
       all += v;
     });

@@ -3,6 +3,8 @@
 
 """What each field and figure on the Tokens tab is called, and what it means: the page shows a definition on hover,
 and the token timeline file carries them under ``terms``.
+
+The costs are priced with the built-in price sheet.
 """
 
 from __future__ import annotations
@@ -22,10 +24,10 @@ def _billed(group: str, label: str, what: str, arises: str, billed: str) -> dict
     return _term(group, label, f"What it is: {what}\nHow it arises: {arises}\nHow it is billed: {billed}")
 
 
-_TYPES, _TOTALS, _CHARTS = "Token types", "Totals and rates", "Charts and tables"
+_TYPES, _TOTALS, _COST, _CHARTS = "Token types", "Totals and rates", "Cost", "Charts and tables"
 _RECENT_MIN = f"{RECENT_SEC / 60:g}"
 # The Tokens tab's names and definitions, which the page shows on hover and the timeline file carries. A definition
-# is one line, but a billed category's (a token kind) is three. Keys are the field names (KINDS,
+# is one line, but a billed category's (a token kind, web searches) is three. Keys are the field names (KINDS,
 # totals) or, for what has no field, the figure's own.
 TERMS: dict[str, dict[str, str]] = {
     "input": _billed(
@@ -117,6 +119,67 @@ TERMS: dict[str, dict[str, str]] = {
         "Call time",
         "When a call's request was sent; the charts place each call there.",
     ),
+    "cost_usd": _term(
+        _COST,
+        "Estimated cost",
+        "Sum over LLM calls and token types of tokens × price per 1M tokens ÷ 1,000,000; in US dollars.",
+    ),
+    "source": _term(
+        _COST,
+        "Price source",
+        "Where the prices come from: the built-in price sheet, the one multi-branch spends by.",
+    ),
+    "web_search": _billed(
+        _COST,
+        "Web searches",
+        "Searches a Claude CLI specialist ran with its WebSearch tool: a count, not tokens.",
+        "The model asks for a search, and the provider runs it and returns the results to the model. The CLI reports "
+        "the count when the specialist finishes, so the searches appear then.",
+        "Per search, but the built-in price sheet has no price per search, so a call that searched is unpriced. The "
+        "results the model reads are billed as input tokens.",
+    ),
+    "unpriced": _term(
+        _COST,
+        "Unpriced calls",
+        "LLM calls left out of the estimated cost, in whole or in part, as a price they need is missing (– if none is "
+        "priced).",
+    ),
+    "no_model": _term(
+        _COST,
+        "No model recorded",
+        "Neither the call log nor the specialist's log names the call's model, so it cannot be priced.",
+    ),
+    "no_price": _term(
+        _COST,
+        "No price for the model",
+        "The call names its model, but the price sheet lists no price for it.",
+    ),
+    "no_search_price": _term(
+        _COST,
+        "No web search price",
+        "The call ran web searches, and the price sheet has no price per search.",
+    ),
+    "price": _term(
+        _COST,
+        "Price per 1M tokens",
+        "US dollars per million tokens of one type, for each model: a rate, not what the run spent.",
+    ),
+    "priced_as": _term(
+        _COST,
+        "Priced as",
+        "The price sheet's entry that a call's model matched; its prices apply.",
+    ),
+    "cache_basis": _term(
+        _COST,
+        "Cache price basis",
+        "Where a model's cache prices come from: listed in the price sheet, or the input price for a cache write it "
+        "lacks.",
+    ),
+    "check": _term(
+        _COST,
+        "Cross-check",
+        "Finished Claude CLI specialists' own reported cost, next to the same calls priced by the Inspector.",
+    ),
     "agent": _term(
         _CHARTS,
         "Agent",
@@ -128,6 +191,7 @@ TERMS: dict[str, dict[str, str]] = {
         "The model that answered the call, named by the specialist's log, else the call log; else no model recorded.",
     ),
     "share": _term(_CHARTS, "Share of tokens", "A row's total tokens ÷ the whole run's."),
+    "cost_share": _term(_COST, "Share of cost", "A row's estimated cost ÷ the whole run's."),
     "running_total": _term(_CHARTS, "Running total", "Cumulative: at each time, everything since the run started."),
     "per_minute": _term(_CHARTS, "Per minute", "Rate: each bar is one time bucket's total ÷ its width in minutes."),
     "by_type": _term(

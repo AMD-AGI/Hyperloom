@@ -70,7 +70,7 @@ Options:
 - `--history-dir DIR`: where memory and GPU samples are kept, so a restarted Inspector backfills its chart; never
   inside the session. Default `$XDG_STATE_HOME/hyperloom-inspector` or `~/.local/state/hyperloom-inspector`.
 - `--no-history`: keep resource samples in memory only.
-- `--token-dir DIR`: where the token timeline (every LLM call's tokens over time, as JSON) is kept; never
+- `--token-dir DIR`: where the token timeline (every LLM call's tokens and cost over time, as JSON) is kept; never
   inside the session. Default `--history-dir`, else its default. `--no-token-file` keeps it in memory only. It is
   `<session>-<hash>.tokens.json`.
 - `--verbose`, `-v`: `hyperloom inspect` only. `-v` logs INFO messages; `-vv` adds DEBUG, with a line per HTTP
@@ -100,7 +100,7 @@ kubectl -n <namespace> port-forward deploy/<deployment> 8765:8765
 ```
 
 `src/hyperloom/common` holds the secret masking the Inspector applies before it serves anything, and
-`src/hyperloom_common` what that masking imports. For a replay
+`src/hyperloom_common` the price sheet the Tokens tab is priced by. For a replay
 next to the live view, start a second Inspector with `--port 8766 --replay --speed 600` and forward `8766:8766` as
 well.
 
@@ -128,17 +128,21 @@ an error badge saying that the tasks cannot be read, rather than an empty task l
   a latency you pick (TTFT, TPOT or end-to-end latency; mean, median or p99), and a foldable uplift panel on the
   timeline's time axis shows each explored variant's throughput gain over the baseline, its mean TTFT and, for the
   baseline and each kept variant, the accuracy state.json records.
-- **Tokens**: a Tokens tab with every LLM call's tokens (see [Tokens](#tokens)).
+- **Tokens and cost**: a Tokens tab with every LLM call's tokens and their cost in USD, priced by the built-in price
+  sheet (the one multi-branch spends by). A model the sheet lacks shows its tokens without a cost (see
+  [Tokens and cost](#tokens-and-cost)).
 - **Replay** with a scrubber and speed control.
 
-## Tokens
+## Tokens and cost
 
-The Tokens tab counts every LLM call's tokens.
+The Tokens tab counts every LLM call's tokens and estimates their cost in US dollars with Hyperloom's price sheet,
+`src/hyperloom_common/llm/llm_prices.json`, the one multi-branch spends by. A price the sheet lacks is never guessed:
+the call is left unpriced, and the tab says why.
 
 Where it shows:
 
-- **Tokens tab**: totals by token type, cache hit rate, a token chart over the run, and totals by agent and by
-  model.
+- **Tokens tab**: totals by token type, cache hit rate, token and cost charts over the run, totals by agent and by
+  model, and a price table with each model's prices and what the run used and spent at them.
 - `GET /api/tokens` and **Download receipt in JSON** serve the same data as JSON, as does the token timeline file
   (see `--token-dir`).
 
@@ -149,12 +153,46 @@ What is counted:
 - **Side calls**: what a specialist's closing `result` line counts beyond its turns (WebSearch, WebFetch and the
   like) is added when the specialist ends.
 - **Token types**: `input` (uncached), `cache_write`, `cache_read`, `output` and `reasoning`. Calls over the OpenAI
-  protocol report cached input inside input and reasoning inside output; the Inspector takes them out.
+  protocol report cached input inside input and reasoning inside output; the Inspector takes them out before pricing.
   Which calls those are follows from what wrote the row: the proposal scorer always, the critic when it reports
   reasoning, and roles and specialists on a Codex backend (models `gpt-`, `o1`, `o3`, `o4`, `codex`). A model such
   as Kimi counts either way, depending on which of them called it.
-- **Model**: each call counts toward the model that answered it, so a sub-agent's turn counts toward its own model.
+- **Model**: each call is priced as the model that answered it, so a sub-agent's turn is priced at its own model's
+  rates.
 - **Time**: each call is placed when its request was sent.
+
+How a call is priced:
+
+```text
+cost = ( input       × input price
+       + cache_write × cache write price
+       + cache_read  × cache read price
+       + output      × output price
+       + reasoning   × output price ) / 1,000,000
+```
+
+- **Prices**: the sheet's, in US dollars per 1M tokens.
+- **Model names**: a call's model is looked up as multi-branch looks it up: in lower case, with dots as dashes and
+  without a date (`-20261001`) or `[…]` suffix, so `Claude-Opus-5.5` and `claude-opus-5-5-20261001` are one model. A
+  name with a provider route or region (`bedrock/…`, `us.anthropic.…`) is not matched.
+- **Cache prices**: the sheet lists each model's cache read price; a cache write it lists no price for is billed at
+  the input price. The price table's cache price basis says which.
+- **Unpriced calls**: a missing price is never counted as $0. A call is unpriced when no model is recorded for it,
+  when the sheet does not list its model, or when it ran web searches. The tab counts unpriced calls by reason and
+  leaves them out of every part of the cost; a total none of whose calls is priced shows no cost.
+- **Not modelled**: long-prompt tiers, batch or priority rates, image and audio prices, and the 1-hour cache write
+  rate (every cache write is priced at the 5-minute one). Every call is priced at the sheet's one rate per token
+  type, so the cost is an estimate, not an invoice.
+- **Cross-check**: for finished Claude CLI specialists, the tab compares the Inspector's cost with the cost the CLI
+  reported, which uses Anthropic's list prices. The two differ where the sheet's prices differ from those.
+
+Limits:
+
+- The sheet has no price per web search, so a call that searched is unpriced.
+- A model the sheet does not list, such as one served on premises, shows its tokens without a cost.
+- To price such a model, add it to `llm_prices.json` under its name as the sheet looks it up, with `input`, `output`
+  and `cache_read` in US dollars per 1M tokens, and `cache_write` (and `cache_write_1h`) where it has them. The sheet
+  is Hyperloom's, so this also changes what multi-branch records as that model's spend.
 
 ## Security
 

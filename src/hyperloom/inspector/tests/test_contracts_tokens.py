@@ -1,8 +1,8 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Contract tests, part 4 (throughput vs latency, uplift and tokens): the benchmark points, the accuracy and the token
-counts the Inspector plots come from the files Hyperloom writes, read under the names Hyperloom writes them.
+"""Contract tests, part 4 (throughput vs latency, uplift, tokens and cost): the benchmark points, the accuracy and the
+token counts the Inspector plots come from the files Hyperloom writes, read under the names Hyperloom writes them.
 
 Each test writes a session artifact with the real producer (see :mod:`.producers`) or compares the Inspector's
 names with the producer's schema. A failure means a producer changed what it writes: update the Inspector reader the
@@ -116,6 +116,22 @@ def test_baseline_rounds_are_left_to_the_baseline_point() -> None:
         assert derive.benchmark_point(parts, producers.dataset_client_result(), None) is None, contract_message(
             "benchmark_run.records", _BENCH, f"baseline round {name} plotted twice"
         )
+
+
+def test_price_sheet_api_the_inspector_imports() -> None:
+    from hyperloom_common.llm import llm_prices
+
+    from hyperloom.inspector.price_sheet import SHEET
+
+    model = next(iter(json.loads(llm_prices.PRICE_SHEET.read_text(encoding="utf-8"))["models"]))
+    price, sheet = llm_prices.price_of(model), SHEET.lookup(model)
+    assert price is not None and sheet is not None, contract_message("llm_prices.price_of", "price_sheet.py", model)
+    assert (sheet.input, sheet.output, sheet.cache_write) == (price.input, price.output, price.write_rate), (
+        contract_message("llm_prices.ModelPrice", "price_sheet.py (SheetPrice.of)", f"{sheet} vs {price}")
+    )
+    assert SHEET.built_from == llm_prices.sheet_source(), contract_message(
+        "llm_prices.sheet_source", "price_sheet.py", ""
+    )
 
 
 def _killed_specialist_log(path: Path) -> None:

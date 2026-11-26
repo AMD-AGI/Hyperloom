@@ -16,7 +16,8 @@ Two kinds of data come out of here:
 
 Nothing here writes into the session directory, and every payload is
 redacted before it leaves the process. The token timeline file
-(:mod:`hyperloom.inspector.tokens`) is written outside it.
+(:mod:`hyperloom.inspector.tokens`) is written outside it. Tokens are always
+counted and priced by the built-in price sheet (:mod:`hyperloom.inspector.price_sheet`).
 """
 
 from __future__ import annotations

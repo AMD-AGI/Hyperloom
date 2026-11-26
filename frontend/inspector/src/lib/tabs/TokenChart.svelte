@@ -1,12 +1,12 @@
 <!-- SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc. -->
 <!-- SPDX-License-Identifier: MIT -->
-<!-- Tokens over the run: stacked areas of running totals, or stacked bars per minute; phase bands behind, a
+<!-- Tokens or USD over the run: stacked areas of running totals, or stacked bars per minute; phase bands behind, a
      readout of the bucket under the pointer. On the timeline's time axis, with its now line: the running total runs
      on to the line, so the chart moves with the session clock as the timeline does. -->
 <script lang="ts">
-  import { fmtCompact, fmtNum, fmtTime } from "../format";
+  import { fmtCompact, fmtNum, fmtTime, fmtUsd } from "../format";
   import { axisTicks, LABEL, tlScale, type Gap, type Range } from "../timeline/scale";
-  import { stack, valueTicks, type Decoded, type Mode } from "../tokens";
+  import { stack, valueTicks, type Decoded, type Metric, type Mode } from "../tokens";
   import type { Timeline, TokenSeries } from "../types";
 
   let {
@@ -16,6 +16,7 @@
     mode,
     phases,
     axis,
+    metric = "tokens",
     height = 240,
     now = null,
   }: {
@@ -26,6 +27,7 @@
     phases: Timeline["phases"];
     /** The timeline's time axis: its range (zoom and pan included) and compressed idle gaps. */
     axis: Range & { gaps: Gap[] };
+    metric?: Metric;
     height?: number;
     /** The session clock: the now line, drawn when it falls inside the axis, and where running totals end. */
     now?: number | null;
@@ -59,10 +61,11 @@
   const timeTicks = $derived(axisTicks(axis, W, sc));
   const nowIn = $derived(now != null && now >= axis.t0 && now <= axis.t1);
   const empty = $derived(!series.rows.length);
-  const fmtAxis = (v: number) => fmtCompact(v);
-  const exact = (v: number) => fmtNum(v, 0);
-  const unit = $derived("tokens" + (mode === "rate" ? "/min" : ""));
-  const clip = "tok-plot-tokens";
+  const usd = $derived(metric === "usd");
+  const fmtAxis = (v: number) => (usd ? fmtUsd(v, true) : fmtCompact(v));
+  const exact = (v: number) => (usd ? fmtUsd(v) : fmtNum(v, 0));
+  const unit = $derived((usd ? "USD" : "tokens") + (mode === "rate" ? "/min" : ""));
+  const clip = $derived(`tok-plot-${metric}`);
 
   const pts = (vals: number[]) => {
     const out = vals.map((v, k) => `${X(tk(k)).toFixed(1)},${Y(v).toFixed(1)}`);
@@ -109,7 +112,7 @@
     const x = mode === "cumulative" ? X(tk(i + 1)) : X(s0 + (i + 0.5) * step);
     const inBucket = rows.reduce((a, r) => a + r.tokens, 0);
     const calls = decoded.calls[i] ?? 0;
-    const amount = `${fmtNum(inBucket, 0)} tokens`;
+    const amount = usd ? fmtUsd(inBucket) : `${fmtNum(inBucket, 0)} tokens`;
     return {
       x,
       left: x + 230 > W ? x - 232 : x + 12,
@@ -129,8 +132,8 @@
     width={W}
     height={H}
     role="img"
-    aria-label="Token consumption, {mode === 'cumulative' ? 'running total' : unit}"
-    data-testid="token-chart"
+    aria-label="{usd ? 'Cost' : 'Token consumption'}, {mode === 'cumulative' ? 'running total' : unit}"
+    data-testid={usd ? "cost-chart" : "token-chart"}
     onpointermove={move}
     onpointerleave={() => (hover = null)}
   >
@@ -173,7 +176,7 @@
     {/if}
     <line class="axis" x1={LABEL} x2={W - R} y1={H - BOT} y2={H - BOT} />
     {#if nowIn && now != null}
-      <line class="now" x1={X(now)} x2={X(now)} y1="0" y2={H - BOT} data-testid="token-now">
+      <line class="now" x1={X(now)} x2={X(now)} y1="0" y2={H - BOT} data-testid={usd ? "cost-now" : "token-now"}>
         <title>now {fmtTime(now)}</title>
       </line>
     {/if}
@@ -182,7 +185,7 @@
     {/if}
   </svg>
   {#if readout}
-    <div class="tip" style="left: {readout.left}px" data-testid="token-readout">
+    <div class="tip" style="left: {readout.left}px" data-testid={usd ? "cost-readout" : "token-readout"}>
       <div class="when">{fmtTime(readout.from, s1)} – {fmtTime(readout.to, s1)}</div>
       {#each readout.rows as r (r.key)}
         <div class="row">

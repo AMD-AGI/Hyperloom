@@ -91,7 +91,7 @@ def add_inspect_arguments(insp: argparse.ArgumentParser) -> None:
         "--token-dir",
         type=Path,
         default=None,
-        help="Where the token timeline (every LLM call's tokens over time, with running totals) is kept as "
+        help="Where the token timeline (every LLM call's tokens and cost over time, with running totals) is kept as "
         "<session>-<hash>.tokens.json, rewritten as the run goes; never inside the session. Default: --history-dir, "
         "else the same default.",
     )
