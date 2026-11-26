@@ -123,12 +123,11 @@ class _BenchmarkPass(NamedTuple):
 
 
 class _MeasuredVariant(NamedTuple):
-    """One variant's measured round, the workspace and salvage it left on disk, and the warmup it discarded."""
+    """One variant's measured round, the workspace it left on disk, and the warmup it discarded."""
 
     rounds: _VariantRounds
     round: _BenchmarkPass
     workspace: Path
-    artifacts: list[Any]
     warmup_tput: float | None
 
 

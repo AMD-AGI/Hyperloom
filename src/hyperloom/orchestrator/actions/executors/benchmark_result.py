@@ -1,42 +1,30 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Benchmark result parsing shared by the round executors, plus post-run artifact harvesting and salvage helpers."""
+"""Benchmark result parsing shared by the round executors, plus salvage helpers and the multi-node fold of the pods'
+GPU sampler CSVs into a round's directory."""
 
 from __future__ import annotations
 
 import logging
 import csv
-import json
 import os
 import time
 import re
 import shutil
 from pathlib import Path
-from typing import Any, Callable, NamedTuple
+from typing import Any, Callable
 
 from hyperloom.common.benchmark_config import read_benchmark_point
 from hyperloom_common.coerce import first_float, first_int, to_float, to_int
 from hyperloom_common.jsonio import read_json
 from hyperloom.common.perf_metric import GRADED_INTVTY_P50_CHECKPOINT
 
-from .gpu._gpu_metrics import gpu_metrics_from_report, write_gpu_metrics
+from .gpu._gpu_metrics import gpu_metrics_from_report
 from ._round_folder import RoundFolder, is_round_folder
 
 log = logging.getLogger(__name__)
 
-
-# Wrapper-side files that leak outside the per-task workspace (under /workspace or env-derived roots like
-# $INFERENCEX_PATH, where append_lm_eval_summary ``mv ./``-s eval output); harvest_leaked_artifacts copies fresh
-# matches back.
-_DEFAULT_LEAK_ARTIFACT_GLOBS: tuple[str, ...] = (
-    "server.log",
-    "gpu_metrics.csv",
-    "profile_*.trace.json.gz",
-    "inferencex_result*.json",
-    "results*.json",
-)
-_DEFAULT_LEAK_ARTIFACT_ROOT: Path = Path("/workspace")
 
 # Slack subtracted from ``subprocess_started_unix`` before comparing a leak's ``st_mtime``, to reject stale prior-run
 # leaks without false-dropping fresh ones. 1s absorbs clock-vs-mtime / FS-granularity skew.
@@ -151,24 +139,6 @@ def _env_derived_leak_roots() -> list[Path]:
     return out
 
 
-def _resolve_leak_roots(leak_root: Path | None = None) -> tuple[Path, ...]:
-    """Return the directory roots to scan for wrapper-side leak files: ``leak_root`` alone when it is given."""
-    if leak_root is not None:
-        return (leak_root,)
-    env_raw = os.environ.get("INFERENCE_OPTIMIZER_LEAK_ROOTS", "").strip()
-    if env_raw:
-        parts = [Path(p.strip()) for p in env_raw.split(":") if p.strip()]
-        if parts:
-            return tuple(parts)
-    roots: list[Path] = [_DEFAULT_LEAK_ARTIFACT_ROOT]
-    seen = {_DEFAULT_LEAK_ARTIFACT_ROOT}
-    for root in _env_derived_leak_roots():
-        if root not in seen:
-            seen.add(root)
-            roots.append(root)
-    return tuple(roots)
-
-
 def _run_workspaces(root: Path) -> list[Path]:
     """The workspaces rounds left in ``root``: ``benchmark_*`` directories and inference_suite run_dirs."""
     if not root.is_dir():
@@ -201,106 +171,8 @@ def _is_fresh_leak_file(match: Path, subprocess_started_unix: float | None) -> b
     return True
 
 
-def _copy_leak_artifact(match: Path, destination: Path) -> Path | None:
-    """Copy one leak artifact into ``destination``; return its new path, or ``None`` when the copy failed."""
-    destination_path = destination / match.name
-    try:
-        shutil.copy2(match, destination_path)
-    except OSError as exc:
-        log.warning(
-            "benchmark_result.harvest: copy %s -> %s failed: %s",
-            match,
-            destination_path,
-            exc,
-        )
-        return None
-    return destination_path
-
-
-def _is_existing_dir(root: Path) -> bool:
-    """Whether ``root`` exists and is a directory; an OS error reads as no."""
-    try:
-        return root.exists() and root.is_dir()
-    except OSError:
-        return False
-
-
-def _is_unseen_outside(match: Path, ws_resolved: Path, seen: set[Path]) -> bool:
-    """Record a resolvable ``match`` as seen; True when it is new and resolves outside ``ws_resolved``."""
-    try:
-        resolved = match.resolve()
-    except OSError:
-        return False
-    if resolved in seen:
-        return False
-    seen.add(resolved)
-    try:
-        resolved.relative_to(ws_resolved)
-    except ValueError:
-        return True  # Outside the workspace: harvest it.
-    return False  # Already under the workspace — nothing to harvest.
-
-
-def harvest_leaked_artifacts(
-    destination: Path,
-    *,
-    subprocess_started_unix: float | None = None,
-    leak_root: Path | None = None,
-) -> list[tuple[Path, Path]]:
-    """Copy known InferenceX leak artifacts into ``destination``; a measurement runner names its own work
-    directory as ``leak_root`` so that nothing another test left elsewhere is copied into its signed output."""
-    harvested: list[tuple[Path, Path]] = []
-    leak_roots = _resolve_leak_roots(leak_root)
-    try:
-        destination.mkdir(parents=True, exist_ok=True)
-    except OSError as exc:
-        log.warning(
-            "benchmark_result.harvest: cannot prepare destination=%s: %s",
-            destination,
-            exc,
-        )
-        return harvested
-    try:
-        ws_resolved = destination.resolve()
-    except OSError:
-        return harvested
-
-    seen: set[Path] = set()
-    for root in leak_roots:
-        if not _is_existing_dir(root):
-            continue
-        for pattern in _DEFAULT_LEAK_ARTIFACT_GLOBS:
-            try:
-                matches = sorted(root.glob(pattern))
-            except OSError:
-                continue
-            for match in matches:
-                if not _is_unseen_outside(match, ws_resolved, seen):
-                    continue
-                if not _is_fresh_leak_file(match, subprocess_started_unix):
-                    continue
-                destination_path = _copy_leak_artifact(match, destination)
-                if destination_path is not None:
-                    harvested.append((match, destination_path))
-    # Multi-node: fold pod-side GPU sampler CSVs into this workspace and inject a flat gpu_monitor list into
-    # benchmark_report.json (no-op single-node).
-    try:
-        harvest_mn_gpu_metrics(destination, subprocess_started_unix=subprocess_started_unix)
-    except (OSError, ValueError, csv.Error) as exc:
-        log.warning("benchmark_result.harvest: MN GPU-metrics harvest failed: %s", exc)
-    # Whatever wrote the round's ``gpu_monitor`` block -- the single-node monitor, or the harvest above on several -- normalise
-    # it into an artifact of its own now, while the round's own workspace is the subject. Aggregating it per session
-    # instead averaged baseline, explore and roofline rounds together and described none of them.
-    # Best effort, and only that: the report may still be settling, in which case there is nothing to read yet and the
-    # settled path writes it instead. ``write_gpu_metrics`` owns the guarantee that it never raises, so wrapping it
-    # again here would only add a second, unreachable handler over the one that reports what actually went wrong.
-    write_gpu_metrics(destination)
-    return harvested
-
-
 # Multi-node GPU metrics: the GPU pods run a rocm-smi sampler (see launch_infera_node.py) streaming per-card samples
 # to ``$HYPERLOOM_MN_SERVER_LOG_DIR/gpu_metrics_<host>.csv`` on shared storage.
-_MN_GPU_SAMPLE_CAP: int = 5000
 _MN_GPU_WINDOW_SLACK_SEC: float = 2.0
 
 
@@ -310,80 +182,6 @@ def _num_from_cell(cell: Any) -> float | None:
         return None
     m = re.search(r"-?\d+\.?\d*", str(cell))
     return float(m.group(0)) if m else None
-
-
-def _row_to_gpu_sample(header: list[str], row: list[str]) -> dict[str, Any]:
-    """Map one rocm-smi ``--csv`` data row to a flat gpu_monitor sample."""
-    n = min(len(header), len(row))
-    cols = [(header[i] or "").strip().lower() for i in range(n)]
-    vals = [_num_from_cell(row[i]) for i in range(n)]
-
-    def _pick(*preds: Any) -> float | None:
-        """Return the first numeric cell whose column matches a predicate."""
-        for pred in preds:
-            for i in range(n):
-                if vals[i] is not None and pred(cols[i]):
-                    return vals[i]
-        return None
-
-    sample: dict[str, Any] = {}
-    temp = _pick(
-        lambda c: "temp" in c and "junction" in c,
-        lambda c: "temp" in c and "edge" in c,
-        lambda c: "temp" in c and "mem" not in c,
-        lambda c: "temp" in c,
-    )
-    if temp is not None:
-        sample["temperature_c"] = temp
-    power = _pick(
-        lambda c: "average" in c and "power" in c,
-        lambda c: "socket" in c and "power" in c,
-        lambda c: "power" in c,
-    )
-    if power is not None:
-        sample["power_w"] = power
-    clock = _pick(lambda c: "sclk" in c)
-    if clock is not None:
-        sample["clock_mhz"] = clock
-    util = _pick(lambda c: "gpu use" in c or "gpu_use" in c or c == "gpu%")
-    if util is not None:
-        sample["gpu_util_pct"] = util
-    vram = _pick(lambda c: "vram" in c or ("memory" in c and "use" in c))
-    if vram is not None:
-        sample["vram_pct"] = vram
-    return sample
-
-
-def _aggregate_gpu_samples_by_role(samples: list[dict[str, Any]]) -> dict[str, Any]:
-    """Aggregate flat GPU samples by ``role`` (prefill / decode)."""
-    groups: dict[str, list[dict[str, Any]]] = {}
-    for s in samples:
-        role = str(s.get("role") or "").strip()
-        if role:
-            groups.setdefault(role, []).append(s)
-    if not groups:
-        return {}
-
-    def _stat(rows: list[dict[str, Any]], key: str, fn: Any) -> float:
-        """Reduce a numeric field across ``rows`` via ``fn`` (0.0 when empty)."""
-        vals = [to_float(r.get(key)) for r in rows]
-        vals = [v for v in vals if v is not None]
-        return round(fn(vals), 2) if vals else 0.0
-
-    out: dict[str, Any] = {}
-    for role, rows in groups.items():
-        out[role] = {
-            "samples": len(rows),
-            "avg_power_w": _stat(rows, "power_w", lambda v: sum(v) / len(v)),
-            "max_power_w": _stat(rows, "power_w", max),
-            "avg_temp_c": _stat(rows, "temperature_c", lambda v: sum(v) / len(v)),
-            "max_temp_c": _stat(rows, "temperature_c", max),
-            "avg_gpu_util_pct": _stat(rows, "gpu_util_pct", lambda v: sum(v) / len(v)),
-            "max_gpu_util_pct": _stat(rows, "gpu_util_pct", max),
-            "avg_vram_pct": _stat(rows, "vram_pct", lambda v: sum(v) / len(v)),
-            "max_vram_pct": _stat(rows, "vram_pct", max),
-        }
-    return out
 
 
 def _pod_gpu_metric_csvs() -> list[Path]:
@@ -405,7 +203,7 @@ def _pod_gpu_metric_csvs() -> list[Path]:
 
 
 def _pod_role_by_ip(pd: dict[str, Any]) -> dict[str, str]:
-    """Pod IP to prefill/decode role, so metrics can be tagged and aggregated per role.
+    """Pod IP to prefill/decode role, so each merged row can be tagged with its pod's role.
 
     Empty unless the deployment is PD-disaggregated.
     """
@@ -417,22 +215,14 @@ def _pod_role_by_ip(pd: dict[str, Any]) -> dict[str, str]:
     return role_of
 
 
-class _HarvestedGpuRows(NamedTuple):
-    """What the pod CSVs yielded: the gpu_metrics.csv the harvest wrote, and the rows that parsed into samples."""
-
-    written: dict[str, Any]
-    samples: list[dict[str, Any]]
-
-
 def _write_pod_gpu_csv(
     destination: Path, pod_csvs: list[Path], role_of: dict[str, str], started_unix: float | None
-) -> _HarvestedGpuRows:
+) -> dict[str, Any]:
     """Tag every in-window pod row with its host and role and write them under one header as ``gpu_metrics.csv``."""
     lo = None if started_unix is None else float(started_unix) - _MN_GPU_WINDOW_SLACK_SEC
     hi = time.time() + _MN_GPU_WINDOW_SLACK_SEC
     header: list[str] | None = None
     merged: list[list[str]] = []
-    samples: list[dict[str, Any]] = []
     for pod_csv in pod_csvs:
         host = pod_csv.stem[len("gpu_metrics_") :]
         try:
@@ -442,22 +232,16 @@ def _write_pod_gpu_csv(
             continue
         if len(rows) < 2:
             continue
-        rocm_header = rows[0]
         role = role_of.get(host, "")
         if header is None:
-            header = (["host", "role"] if role_of else ["host"]) + rocm_header
+            header = (["host", "role"] if role_of else ["host"]) + rows[0]
         for row in rows[1:]:
             ts = _num_from_cell(row[0]) if row else None
             if ts is None or (lo is not None and (ts < lo or ts > hi)):
                 continue
             merged.append(([host, role] if role_of else [host]) + row)
-            s = _row_to_gpu_sample(rocm_header, row)
-            if s:
-                if role:
-                    s["role"] = role
-                samples.append(s)
     if not header or not merged:
-        return _HarvestedGpuRows({}, samples)
+        return {}
     csv_path = destination / "gpu_metrics.csv"
     try:
         destination.mkdir(parents=True, exist_ok=True)
@@ -467,42 +251,8 @@ def _write_pod_gpu_csv(
             w.writerows(merged)
     except OSError as exc:
         log.warning("benchmark_result: MN gpu_metrics.csv write failed: %s", exc)
-        return _HarvestedGpuRows({}, samples)
-    return _HarvestedGpuRows({"gpu_metrics_csv": str(csv_path), "rows": len(merged)}, samples)
-
-
-def _inject_gpu_monitor(report_path: Path, samples: list[dict[str, Any]], pd: dict[str, Any]) -> dict[str, Any]:
-    """Fold the pod GPU samples, and the per-role aggregate when disaggregated, into an existing report."""
-    if not samples or not report_path.is_file():
         return {}
-    try:
-        with report_path.open(encoding="utf-8") as f:
-            report = json.load(f)
-    except (OSError, json.JSONDecodeError):
-        return {}
-    if not isinstance(report, dict):
-        return {}
-    if len(samples) > _MN_GPU_SAMPLE_CAP:
-        stride = max(1, len(samples) // _MN_GPU_SAMPLE_CAP)
-        report["gpu_monitor"] = samples[::stride]
-    else:
-        report["gpu_monitor"] = samples
-    out: dict[str, Any] = {}
-    # PD-disaggregation: surface topology + per-role GPU aggregate so downstream analysis / the specialist
-    # LLM can target prefill (compute/TTFT) vs decode (bandwidth/TPOT).
-    if pd:
-        report["pd"] = pd
-        by_role = _aggregate_gpu_samples_by_role(samples)
-        if by_role:
-            report["gpu_monitor_by_role"] = by_role
-            out["gpu_monitor_by_role"] = {k: v.get("samples") for k, v in by_role.items()}
-    try:
-        with report_path.open("w", encoding="utf-8") as f:
-            json.dump(report, f, indent=2)
-        out["gpu_monitor_samples"] = len(report["gpu_monitor"])
-    except (OSError, TypeError) as exc:
-        log.warning("benchmark_result: gpu_monitor inject failed: %s", exc)
-    return out
+    return {"gpu_metrics_csv": str(csv_path), "rows": len(merged)}
 
 
 def harvest_mn_gpu_metrics(
@@ -510,7 +260,7 @@ def harvest_mn_gpu_metrics(
     *,
     subprocess_started_unix: float | None = None,
 ) -> dict[str, Any]:
-    """Fold pod-side GPU sampler CSVs into ``destination`` (multi-node only)."""
+    """Fold pod-side GPU sampler CSVs into ``destination`` as ``gpu_metrics.csv`` (multi-node only)."""
     # Multi-node only: a single-node round samples its own GPUs, so never touch its result path.
     # is_multi_node() is the authoritative gate (state nodes>=2 or $INFERENCE_OPTIMIZER_NODES>=2).
     from ._multi_node_env import is_multi_node, pd_topology_from_state
@@ -521,10 +271,8 @@ def harvest_mn_gpu_metrics(
     if not pod_csvs:
         return {}
 
-    pd = pd_topology_from_state()
-    harvested = _write_pod_gpu_csv(destination, pod_csvs, _pod_role_by_ip(pd), subprocess_started_unix)
-    out = harvested.written
-    out.update(_inject_gpu_monitor(destination / "benchmark_report.json", harvested.samples, pd))
+    role_of = _pod_role_by_ip(pd_topology_from_state())
+    out = _write_pod_gpu_csv(destination, pod_csvs, role_of, subprocess_started_unix)
     if out:
         log.info("benchmark_result: harvested MN GPU metrics %s", out)
     return out
@@ -946,7 +694,7 @@ def double_run_requested(params: dict | None, config_path: Path) -> bool:
 
 __all__ = [
     "extract_benchmark_measurement",
-    "harvest_leaked_artifacts",
+    "harvest_mn_gpu_metrics",
     "double_run_requested",
     "is_valid_measurement",
     "round_succeeded",

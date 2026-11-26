@@ -10,7 +10,7 @@ consumer can trust, per round, without knowing which producer wrote the block.
 Two things make that non-trivial, and both have burned this data before:
 
 * **The producers disagree on names and on shape.** The single-node monitor writes ``power_watts`` as a pre-aggregated
-  ``{min, max, avg}`` block; the multi-node harvester writes ``power_w`` as a flat scalar per sample. Reading only the
+  ``{min, max, avg}`` block; an archived multi-node report carries ``power_w`` as a flat scalar per sample. Reading only the
   short spelling is what left every single-node session's GPU numbers reading 0.0 -- not absent, *zero*, which is a
   plausible-looking lie.
 * **Absent and zero are different findings.** A card that drew no power and a card nobody sampled must not produce the
@@ -23,7 +23,6 @@ actually ran.
 
 from __future__ import annotations
 
-import json
 import logging
 from pathlib import Path
 from typing import Any
@@ -34,7 +33,6 @@ log = logging.getLogger(__name__)
 __all__ = [
     "GPU_ARTIFACT_NAME",
     "gpu_metrics_from_report",
-    "write_gpu_metrics",
     "write_gpu_metrics_from_report",
 ]
 
@@ -48,8 +46,8 @@ _TEMP_KEYS = ("temperature_c", "temp_c", "temperature")
 _CLOCK_KEYS = ("gpu_clock_mhz", "clock_mhz", "sclk_mhz")
 _MEM_CLOCK_KEYS = ("mem_clock_mhz", "memory_clock_mhz", "mclk_mhz")
 
-# Occupancy, in percent. ``gpu_util_pct`` / ``vram_pct`` are what the multi-node harvester writes (see
-# ``benchmark_result._row_to_gpu_sample``); the rest are spellings of the same percentage a producer might use.
+# Occupancy, in percent. ``gpu_util_pct`` / ``vram_pct`` are the names an inference_suite report's blocks use
+# (``GPU_METRIC_KEYS``); the rest are spellings of the same percentage a producer might use.
 #
 # Percent-named aliases only, deliberately. An absolute reading -- ``vram_used_mb``, ``memory_used_bytes`` -- is a
 # different quantity, and folding one into a field called ``_pct`` would put 81920 where a percentage belongs.
@@ -171,9 +169,8 @@ def gpu_metrics_from_report(report: Any) -> dict[str, Any]:
         "avg_clock_mhz": _avg(_CLOCK_KEYS),
         "max_clock_mhz": _max(_CLOCK_KEYS),
         "avg_mem_clock_mhz": _avg(_MEM_CLOCK_KEYS),
-        # Compute occupancy and memory pressure. Only the multi-node harvester reports these today -- the single-node
-        # monitor samples neither -- so a single-node round reports null for both. Null, not 0.0: "the GPU sat idle" and
-        # "nobody asked" lead to opposite conclusions about a round that looks slow.
+        # Compute occupancy and memory pressure. A block that sampled neither reports null for both. Null, not 0.0:
+        # "the GPU sat idle" and "nobody asked" lead to opposite conclusions about a round that looks slow.
         "avg_gpu_util_pct": _avg(_UTIL_KEYS),
         "max_gpu_util_pct": _max(_UTIL_KEYS),
         "avg_vram_pct": _avg(_VRAM_KEYS),
@@ -206,23 +203,3 @@ def write_gpu_metrics_from_report(workspace: Path | str, report: Any, *, source:
         log.warning("gpu_metrics: telemetry was read but could not be written to %s", out, exc_info=True)
         return None
     return str(out)
-
-
-def write_gpu_metrics(workspace: Path | str) -> str | None:
-    """Normalise the round's GPU telemetry into ``gpu_metrics.json``. Returns the path, or ``None``.
-
-    A missing report is not a failure here: harvest runs before the report is guaranteed to have settled, so this is
-    called again once one is in hand.
-    """
-    root = Path(workspace)
-    report_path = root / "benchmark_report.json"
-    if not report_path.is_file():
-        return None
-    try:
-        report = json.loads(report_path.read_text(encoding="utf-8"))
-    except (OSError, ValueError):
-        # A report still being written is the expected case at harvest time, not a fault worth warning about; the
-        # settled call that follows is what reports a genuinely unreadable one.
-        log.debug("gpu_metrics: %s is not readable yet", report_path, exc_info=True)
-        return None
-    return write_gpu_metrics_from_report(root, report, source=report_path.name)

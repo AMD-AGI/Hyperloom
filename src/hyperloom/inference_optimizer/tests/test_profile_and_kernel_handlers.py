@@ -138,13 +138,6 @@ def test_mi308x_session_records_the_real_gpu_type(tmp_path, monkeypatch):
     assert os.environ["TARGET_GPU_TYPE"] == "mi308x"
 
 
-@pytest.fixture(autouse=True)
-def _isolate_leak_root(tmp_path_factory, monkeypatch):
-    """Pin ``INFERENCE_OPTIMIZER_LEAK_ROOTS`` to an empty sandbox so the artifact harvest doesn't pick up the host's ``/workspace``."""
-    sandbox = tmp_path_factory.mktemp("isolated_leak_root")
-    monkeypatch.setenv("INFERENCE_OPTIMIZER_LEAK_ROOTS", str(sandbox))
-
-
 # ProfileExecutor
 def test_profile_yaml_has_torch_profiler_enabled():
     """The whole point of the profile config is profiler ON."""

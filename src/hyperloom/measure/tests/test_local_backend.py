@@ -384,14 +384,14 @@ def test_the_rounds_file_of_a_graded_test_lists_its_rounds_in_the_order_they_ran
 
 def test_the_warmup_round_of_a_held_test_says_what_run_grid_says_of_a_discarded_one(grid, server, tmp_path):
     _graded_answers(grid)
-    grid.answers["warmup"].nonfatal_warnings.append("harvested_leaked_artifact:x")
+    grid.answers["warmup"].nonfatal_warnings.append("warmup_note")
     grid.answers["test"].nonfatal_warnings.append("served_slowly")
     grid.answers["eval"].nonfatal_warnings.append("eval_note")
 
     outcome = _run(_graded_call(tmp_path))
 
     assert [r.nonfatal_warnings for r in outcome.rounds] == [
-        ("run_grid_warmup_discarded_first", "warmup_round_tput:1111.0", "harvested_leaked_artifact:x"),
+        ("run_grid_warmup_discarded_first", "warmup_round_tput:1111.0", "warmup_note"),
         ("served_slowly",),
         ("eval_note",),
     ]
@@ -912,26 +912,18 @@ def test_the_test_session_holds_the_calls_frozen_base_and_never_the_applications
     assert not frozen.path.exists(), "the test session is removed with the test"
 
 
-def test_the_per_round_cap_and_the_leak_scope_come_from_the_call(grid, tmp_path, monkeypatch):
-    captured: dict[str, str | None] = {}
+def test_the_per_round_cap_comes_from_the_call(grid, tmp_path, monkeypatch):
+    captured: list[str | None] = []
 
     async def look(**kwargs):
-        captured.update(
-            {
-                k: os.environ.get(k)
-                for k in ("INFERENCE_OPTIMIZER_BENCHMARK_TIMEOUT_SEC", "INFERENCE_OPTIMIZER_LEAK_ROOTS")
-            }
-        )
+        captured.append(os.environ.get("INFERENCE_OPTIMIZER_BENCHMARK_TIMEOUT_SEC"))
         return [VariantResult(name="test", extra_server_args="", extra_envs={}, status="succeeded", returncode=0)]
 
     monkeypatch.setattr(local, "run_grid", look)
 
     _run(_call(tmp_path, timeout_sec=321))
 
-    assert captured == {
-        "INFERENCE_OPTIMIZER_BENCHMARK_TIMEOUT_SEC": "321",
-        "INFERENCE_OPTIMIZER_LEAK_ROOTS": str(tmp_path),
-    }
+    assert captured == ["321"]
 
 
 @pytest.mark.parametrize(("budget", "named"), [(None, None), (14400.0, "14400.0")])

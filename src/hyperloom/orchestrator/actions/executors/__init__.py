@@ -31,7 +31,6 @@ from ._subprocess_kill import (
     RoundWatch,
     run_with_session_kill,
 )
-from .benchmark_result import harvest_leaked_artifacts
 from .workload._agentx_checkpoint import CHECKPOINT_ARTIFACT_NAME, AgentxCheckpoint
 from .workload._agentx_prefix_cache import PREFIX_CACHE_OFF_ERROR_CLASS, refuse_cacheless_agentx_baseline
 from ._failed_step import failed_step_error_class
@@ -99,7 +98,6 @@ __all__ = [
     "external_agentx_config",
     "fixed_workload",
     "grid_run_dirs",
-    "harvest_leaked_artifacts",
     "is_executable",
     "is_round_folder",
     "materialize_benchmark_config",

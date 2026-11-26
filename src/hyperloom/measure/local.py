@@ -463,7 +463,6 @@ def _test_environment(call: TestCall) -> Iterator[list[str]]:
     session = Path(tempfile.mkdtemp(prefix="hl-session-"))
     settings = {
         "INFERENCE_OPTIMIZER_CURRENT_SESSION_DIR": str(session),
-        "INFERENCE_OPTIMIZER_LEAK_ROOTS": str(call.cwd),
         "INFERENCE_OPTIMIZER_BENCHMARK_TIMEOUT_SEC": str(int(call.timeout_sec)),
     }
     if call.silence_timeout_sec is not None:

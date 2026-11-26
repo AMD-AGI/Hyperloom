@@ -195,7 +195,6 @@ def test_judge_rereads_an_export_whose_window_is_still_open(tmp_path):
 
 @pytest.mark.asyncio
 async def test_grid_records_a_stopped_round_and_moves_on(tmp_path, monkeypatch):
-    monkeypatch.setenv("INFERENCE_OPTIMIZER_LEAK_ROOTS", str(tmp_path / "leaks"))
     base = tmp_path / "base.yaml"
     write_benchmark_yaml(base)
     checkpoint = AgentxCheckpoint(25.0, enforce=True)

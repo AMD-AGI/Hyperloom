@@ -28,7 +28,7 @@ from hyperloom.orchestrator.actions.executors import VariantResult
 from hyperloom.sandbox import card_occupancy
 from hyperloom.sandbox.card_occupancy import CardReading
 
-WARNINGS = ["warmup_round_seed:1", "harvested_leaked_artifact:x", "warmup_round_seed:1"]
+WARNINGS = ["warmup_round_seed:1", "served_slowly", "warmup_round_seed:1"]
 
 
 async def fake_run_grid(*, grid: list[Any], output_root: Path, **_: Any) -> list[VariantResult]:
