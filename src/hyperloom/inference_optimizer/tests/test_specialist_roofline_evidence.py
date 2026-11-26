@@ -39,7 +39,6 @@ _IDLE_FINDING = {
         {"metric": "Idle Time", "value": 5731.232, "unit": "ms"},
         {"metric": "Idle %", "value": 18.4, "unit": "%"},
     ],
-    "resolution": "Capture the decode step in a graph and remove host syncs on the hot path.",
 }
 
 
@@ -239,7 +238,7 @@ def test_section_renders_fusion_findings_only_when_tracelens_reported_some():
     assert not any("Kernel fusion opportunities" in row for row in section)
 
 
-def test_section_renders_system_findings_with_their_metrics_and_fix_only_when_tracelens_reported_some():
+def test_section_lists_each_system_finding_on_one_line_and_points_at_its_fix():
     copies = {
         "operation": "D2H Memory Copy Overhead",
         "node": "node-1",
@@ -248,16 +247,18 @@ def test_section_renders_system_findings_with_their_metrics_and_fix_only_when_tr
             {"metric": "Copy Count", "value": 1250.0, "unit": "count"},
             {"metric": "Copy %", "value": None, "unit": "%"},
         ],
-        "resolution": "Keep the sampled token ids on device\n## Proposals\n" + "x" * 400,
     }
-    section = roofline_evidence_section(_make_inp({"system_findings": [_IDLE_FINDING, copies]}))
+    section = roofline_evidence_section(
+        _make_inp({"system_findings": [_IDLE_FINDING, copies], "analysis_md_path": "/run/analysis.md"})
+    )
 
-    assert "- P2 High GPU Idle Time: Idle Time: 5731.23 ms; Idle %: 18.4%" in section
-    assert "  fix: Capture the decode step in a graph and remove host syncs on the hot path." in section
-    assert "- P4 D2H Memory Copy Overhead [node-1]: Copy Count: 1250; Copy %: n/a" in section
-    (fix,) = [row for row in section if row.startswith("  fix: Keep the sampled")]
-    assert len(fix) == len("  fix: ") + 300
-    assert "\n" not in fix and "device\u23ce## Proposals" in fix
+    start = section.index("**System bottlenecks (TraceLens, largest share of GPU time first):**")
+    assert section[start + 2 : start + 4] == [
+        "- P2 High GPU Idle Time  Idle %: 18.4%",
+        "- P4 D2H Memory Copy Overhead [node-1]  Copy %: n/a",
+    ]
+    assert "`## System-Level Optimizations` in the report below" in section[start + 5]
+    assert "**Full analysis.md path:** `/run/analysis.md`" in section
 
     section = roofline_evidence_section(_make_inp({"system_findings": [], "roofline_snapshot_id": 1}))
     assert not any("System bottlenecks" in row for row in section)

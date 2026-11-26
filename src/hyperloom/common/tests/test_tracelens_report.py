@@ -73,7 +73,7 @@ def test_a_report_without_fusion_findings_reads_as_none(tmp_path):
     assert fusion_findings(tmp_path / "missing" / "analysis.md") == []
 
 
-def test_system_findings_keep_tracelens_order_with_their_metric_rows_and_resolution(tmp_path):
+def test_system_findings_keep_tracelens_order_with_their_metric_rows(tmp_path):
     report = {
         "system_optimizations": [
             {
@@ -108,14 +108,12 @@ def test_system_findings_keep_tracelens_order_with_their_metric_rows_and_resolut
                 {"metric": "Exposed Communication %", "value": 60.72, "unit": "%"},
                 {"metric": "Compute/Comm Overlap %", "value": None, "unit": "%"},
             ],
-            "resolution": "Prefetch each all-gather off the critical path.",
         },
         {
             "operation": "High GPU Idle Time",
             "node": "node-1",
             "priority": 2,
             "metrics": [{"metric": "Idle %", "value": 18.4, "unit": "%"}],
-            "resolution": "",
         },
     ]
 

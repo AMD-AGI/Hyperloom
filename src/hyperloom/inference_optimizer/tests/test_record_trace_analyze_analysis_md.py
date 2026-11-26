@@ -87,7 +87,6 @@ def test_records_the_system_findings_of_the_json_beside_the_md(tmp_path: Path) -
             "node": "",
             "priority": 1,
             "metrics": [{"metric": "Idle %", "value": 18.4, "unit": "%"}],
-            "resolution": "Capture the decode step in a graph.",
         }
     ]
 

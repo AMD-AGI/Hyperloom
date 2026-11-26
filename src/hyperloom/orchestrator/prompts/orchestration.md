@@ -500,9 +500,9 @@ them**:
   fix names (a host read such as `.item()`, a redundant `.contiguous()` or
   clone); neither is a kernel rewrite. TraceLens lists them under
   `system_findings` in `profiler_digest` (priority, title, share of GPU
-  time); a dispatched specialist also gets each one's metrics and the head of
-  its fix, whose full text stays under `## System-Level Optimizations`. For a
-  variant, prefer `provenance='specialist:<domain>'` targeting it.
+  time), and a dispatched specialist gets the same lines; each fix is under
+  `## System-Level Optimizations` in analysis.md. For a variant, prefer
+  `provenance='specialist:<domain>'` targeting it.
 
 <!-- phase: FRAMEWORK_AGENT -->
 ### Choosing specialist domain by bottleneck

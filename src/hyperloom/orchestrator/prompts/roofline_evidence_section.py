@@ -8,8 +8,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
-from hyperloom.common.prompt_safety import flatten_for_prompt
-from hyperloom.common.tracelens_report import system_metric_text
+from hyperloom.common.tracelens_report import system_finding_summary
 from hyperloom.inference_optimizer import framework_registry
 
 from ..specialists.prompt_inputs import SpecialistPromptInputs
@@ -121,35 +120,24 @@ def _fusion_findings_rows(findings: Any) -> list[str]:
     return rows
 
 
-# A TraceLens resolution runs to 2000 characters; the head names the lever, the full text stays in analysis.md.
-_SYSTEM_RESOLUTION_CHARS = 300
-
-
 def _system_findings_rows(findings: Any) -> list[str]:
-    """Render TraceLens' system bottlenecks with their metrics and fix; empty when the report has none."""
+    """List TraceLens' system bottlenecks one line each and point at their fixes; empty when the report has none."""
     if not findings:
         return []
-    rows = ["**System bottlenecks (TraceLens, report priority: largest share of GPU time first):**", ""]
-    for finding in findings:
-        node = f" [{finding['node']}]" if finding.get("node") else ""
-        metrics = "; ".join(system_metric_text(row) for row in finding.get("metrics") or [])
-        rows.append(f"- P{finding.get('priority') or '?'} {finding.get('operation') or ''}{node}: {metrics}")
-        resolution = flatten_for_prompt(str(finding.get("resolution") or ""))
-        if resolution:
-            rows.append(f"  fix: {resolution[:_SYSTEM_RESOLUTION_CHARS]}")
-    rows += [
+    return [
+        "**System bottlenecks (TraceLens, largest share of GPU time first):**",
         "",
-        "High GPU Idle Time points at CUDA-graph capture, batch size and async scheduling; Exposed Collective "
-        "Communication at parallel layout and compute/communication overlap; H2D / D2H / D2D Memory Copy Overhead at "
-        "pinned memory, non-blocking copies, keeping tensors on device and dropping redundant copies. Where the "
-        "framework exposes the lever as a server arg or env, propose it as an `explore` variant; where the fix names a "
-        "source change at a call site (a host read such as `.item()`, a redundant `.contiguous()` or clone), patch "
-        "that call site. Neither is a kernel rewrite. A family with no finding here is one TraceLens did not flag on "
-        f"this trace. Each `fix` is cut to {_SYSTEM_RESOLUTION_CHARS} characters; the full text is under "
-        "`## System-Level Optimizations` in analysis.md.",
+        *(f"- {system_finding_summary(finding)}" for finding in findings),
+        "",
+        "Each one's fix, which names its lever, is under `## System-Level Optimizations` in the report below: read it "
+        "before acting on one. Idle points at CUDA-graph capture, batch size and async scheduling; exposed "
+        "communication at parallel layout and compute/communication overlap; memory copies at pinned memory, "
+        "non-blocking copies and keeping tensors on device. A lever the framework exposes as a server arg or env is an "
+        "`explore` variant; a fix naming a source change at a call site (a host read such as `.item()`, a redundant "
+        "`.contiguous()`) is a patch there; neither is a kernel rewrite. A family not listed is one TraceLens did not "
+        "flag on this trace.",
         "",
     ]
-    return rows
 
 
 def _no_snapshot(framework: str) -> str:
