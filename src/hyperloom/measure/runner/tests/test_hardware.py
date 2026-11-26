@@ -277,6 +277,7 @@ def test_busy_gpus_are_the_visible_cards_whose_own_memory_is_in_use(container: K
     container.vram_used(5, 120 << 30)
     assert busy_gpus([0, 1]) == [1]
     assert busy_gpus([0]) == [], "a card this sandbox cannot use is not its concern"
+    assert kfd_topology.card_vram([1])[1].used_mib == 120 << 10, "the driver's bytes are read as MiB"
 
 
 def test_memory_use_that_cannot_be_read_is_none_not_free(container: KernelTree) -> None:
