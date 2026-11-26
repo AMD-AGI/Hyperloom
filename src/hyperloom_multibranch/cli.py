@@ -257,7 +257,8 @@ def run_session(
     """Create the session directory, hand it to ``report_root`` -- by default printed on one stdout line -- before
     anything else is built in it, run the session (:meth:`Session.run`, given ``grant``'s explore cap) and, when the
     settings ask for one and no signal stopped the session, its conc sweep under the session's lock file
-    (:func:`sweep_closed`, warned at ``grant``'s tests end), and return the session's exit code.
+    (:func:`sweep_closed`, which starts no test that would end past ``grant``'s tests end), and return the session's
+    exit code.
     A session whose specialists run as an account that cannot reach its directory is refused before it runs
     (:func:`~hyperloom_multibranch.scheduling.specialist_reach.require_specialist_reach`, raising
     :class:`EnvironmentIncomplete`), unless it stops once its map is made: that session starts no specialist.
@@ -354,7 +355,7 @@ def final_only(
 ) -> int:
     """Run FINAL and CLOSE over the session directory ``persisted`` was read from, print it on one stdout line and
     return the session's exit code. No session directory is created, which is why this cannot start one. For
-    ``restart``, a hosted run's, see :meth:`Session.finish`; its conc sweep is warned at ``grant``'s tests end."""
+    ``restart``, a hosted run's, see :meth:`Session.finish`; its conc sweep starts no test that would end past ``grant``'s tests end."""
 
     end = None if grant is None else grant.tests_end_by
     return _over_session(persisted, peer_factory, services, partial(Session.finish, restart=restart), end)
@@ -364,7 +365,7 @@ def resume(
     persisted: PersistedRun, peer_factory: PeerFactory, services: SessionServices, until: float, grant: GrantEnd | None
 ) -> int:
     """:func:`final_only` running :meth:`Session.resume` up to the deadline ``until`` with EXPLORE capped by ``grant``'s
-    explore cap, and its conc sweep warned at ``grant``'s tests end."""
+    explore cap, and its conc sweep starting no test that would end past ``grant``'s tests end."""
 
     cap, end = (None, None) if grant is None else (grant.explore_cap, grant.tests_end_by)
     return _over_session(

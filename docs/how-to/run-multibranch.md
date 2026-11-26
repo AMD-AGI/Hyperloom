@@ -263,10 +263,15 @@ has: a point that would end past the grant's tests' end is not started and reads
 `MB-reports/conc_sweep_summary.json`, `conc_sweep_raw.csv` and `conc_sweep_curve.png`, the summary after every test,
 with `status` `succeeded`, `partial`, `failed`, `skipped` or `cancelled` (a stop signal; the measured points stay). A
 later run measures only the points not yet measured, and a hosted restart of a session that closed before its sweep
-finished sweeps it again before it writes `exit.json`. A hosted run with `flow: "conc_sweep"` sweeps the closed
-session `conc_sweep.session_dir` names and optimizes nothing (see the single-lineage
-[optimize guide](optimize.md)); the runner source is cloned per commit (`MB-runner-source/<sha>`), so a run of newer
-code than the session's measures with its own.
+finished sweeps it again before it writes `exit.json`.
+
+A hosted run sweeps a closed session with a campaign spec of `flow: "conc_sweep"`: `conc_sweep.session_dir` names the
+session (an absolute path the run can read and write; the report is written back into it), `conc_sweep.concs` its
+points in place of the recipe's and `conc_sweep.parallel` its tests at once. `hardware.tp` must be the session's TP;
+`placement.measurement` says where the tests run, as for flow `multibranch`. The run optimizes nothing and ends
+`final: true` however the sweep ends; to finish a `partial` or `cancelled` sweep, start another such run on the same
+session, which measures only the points not yet measured. The runner source is cloned per commit
+(`MB-runner-source/<sha>`), so a run of newer code than the session's measures with its own.
 
 ## Exit codes
 

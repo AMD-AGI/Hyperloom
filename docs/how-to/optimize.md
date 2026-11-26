@@ -219,12 +219,9 @@ request cap the recipe sets at its concurrency (`--max-num-seqs`,
 `--max-running-requests`) even below that concurrency, as InferenceX measures it:
 an AgentX concurrency counts agent sessions, not requests in flight.
 
-A multi-branch session runs a concurrency's baseline and optimized point side by
-side, within `--max-parallel-tests`; `--conc-sweep-parallel N` runs up to N of
-the sweep's tests at once, 1 one at a time. A single-lineage session runs one
-point at a time: arm by arm on held servers, and a concurrency's two arms one
-after the other where each point boots its own server, so a stop leaves pairs
-measured.
+The sweep runs one point at a time: arm by arm on held servers, the points of
+one launch together, and a concurrency's two arms one after the other where each
+point boots its own server, so a stop leaves pairs measured.
 
 The sweep logs its estimated length before it starts, rewrites
 `reports/conc_sweep_summary.json` and `reports/conc_sweep_raw.csv` after every
@@ -234,9 +231,7 @@ precision, GPU type and count, TP and EP, the image and the recipe the base came
 from, and the host and process writing it with `updated_at`, so a summary still
 `in_progress` whose process is gone reads as cut short. Its `status` is
 `succeeded`, `partial`, `failed`, `skipped` (with `skip_reason`) or `cancelled`
-(SIGINT or SIGTERM; the measured points stay). In a hosted multi-branch run, a
-point that would end past the run's grant is not started and reads
-`skipped_budget`. A later run measures only the points not yet measured on the
+(SIGINT or SIGTERM; the measured points stay). A later run measures only the points not yet measured on the
 same launch of each arm. Multi-node and MLPerf sessions are skipped, and so are a
 session whose server is built from its checkout (`checkout_built_server`) and one
 whose retained overlay cannot load (`optimized_overlay_unavailable`).
@@ -246,15 +241,9 @@ The latency columns follow InferenceX's own reports: for an AgentX workload its
 client computes `itl` and `tpot` from the same per-request inter-token latency
 (`infx/results/agentic/request_metrics.py`), so `tpot_p90_ms` is the ITL p90.
 
-A hosted run sweeps a closed multi-branch session with a campaign spec of
-`flow: "conc_sweep"`: `conc_sweep.session_dir` names the session (an absolute
-path the run can read and write; the report is written back into it),
-`conc_sweep.concs` its points and `conc_sweep.parallel` its tests at once.
-`hardware.tp` must be the session's TP; `placement.measurement` says where the
-tests run, as for flow `multibranch`. The run optimizes nothing and ends
-`final: true` however the sweep ends; to finish a `partial` or `cancelled`
-sweep, start another such run on the same session, which measures only the
-points not yet measured.
+A multi-branch session sweeps the same way; its own guide,
+[Running a multi-branch session](run-multibranch.md), covers its sweep's parallelism,
+its deadline and the hosted sweep of a closed session.
 
 ## Troubleshooting
 

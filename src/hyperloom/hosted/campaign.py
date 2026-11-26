@@ -6,7 +6,7 @@
 The contract is ``contracts/campaign_spec.v1.schema.json``.  This module does not use a JSON Schema library at run
 time; :data:`FIELDS` is the same contract as a table, and a test holds the two together.  Unknown fields are ignored
 (a reader of one major version accepts what a later minor version adds).  ``multibranch`` is not looked at: it is kept
-as given for the multibranch entry.  ``flow`` may be left out; the only flow is ``multibranch``, and the retired
+as given for the multibranch entry.  ``flow`` may be left out for ``multibranch``, the default; the retired
 ``single`` is refused, naming why.  A spec with neither ``flow`` nor ``multibranch`` is one written for the retired
 default, the single flow, and is refused the same way.  Flow ``conc_sweep`` sweeps the closed multi-branch session
 ``conc_sweep.session_dir`` names and optimizes nothing.
