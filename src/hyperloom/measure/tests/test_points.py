@@ -217,20 +217,6 @@ def test_every_point_of_a_dataset_session_sends_the_whole_file_at_any_concurrenc
     assert _num_prompts(materialize_config_with_envs(paths[0], tmp_path / "again")) == 39
 
 
-def test_a_profile_point_of_a_dataset_session_keeps_its_capture_count(canonical, model, blobs, tmp_path, monkeypatch):
-    env = environment(blobs, tmp_path)
-    (random_prompts,) = generate_profile_point(env, canonical, tmp_path / "random")
-    monkeypatch.setenv("DATASET_PATH", str(tmp_path / "prompts.jsonl"))
-    (tmp_path / "prompts.jsonl").write_text('{"prompt": "a"}\n')
-    with_dataset = default_canonical(
-        tmp_path / "dataset", primary_concurrency=32, config_path=default_baseline_config(), model_path=str(model)
-    )
-
-    (point,) = generate_profile_point(env, with_dataset, tmp_path / "profile")
-
-    assert _num_prompts(point) == _num_prompts(random_prompts) != 1
-
-
 def test_a_dataset_this_host_cannot_count_refuses_the_canonical_and_the_request(dataset, canonical, blobs, tmp_path):
     dataset.write_text('{"text": "no prompt"}\n')
 

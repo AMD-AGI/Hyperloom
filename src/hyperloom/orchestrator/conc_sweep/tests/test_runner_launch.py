@@ -217,17 +217,13 @@ def test_each_rung_sends_the_request_window_the_session_measures_with(
     }
 
 
-def _dataset(path: Path, prompts: int = 39) -> str:
-    path.write_text("".join(json.dumps({"prompt": f"question {index}"}) + "\n" for index in range(prompts)))
-    return str(path)
-
-
 def test_each_rung_of_a_dataset_session_sends_the_whole_file(
     session_dir: Path, rounds: SimpleNamespace, monkeypatch: pytest.MonkeyPatch
 ):
     _hold_server(monkeypatch, False)
-    dataset = _dataset(session_dir / "prompts.jsonl")
-    _state(session_dir, _sglang_base({}), conc=4, conc_sweep_concs=[1, 64], prompt_dataset=dataset)
+    dataset = session_dir / "prompts.jsonl"
+    dataset.write_text("".join(json.dumps({"prompt": f"question {index}"}) + "\n" for index in range(39)))
+    _state(session_dir, _sglang_base({}), conc=4, conc_sweep_concs=[1, 64], prompt_dataset=str(dataset))
 
     asyncio.run(runner.run_conc_sweep(session_dir))
 

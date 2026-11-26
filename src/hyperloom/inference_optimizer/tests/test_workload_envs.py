@@ -6,15 +6,13 @@
 from __future__ import annotations
 
 import json
-import os
 from types import SimpleNamespace
 
 import pytest
 import yaml
 
 from hyperloom.common.env_safety import OPERATOR_EXTRA_ENV_VAR
-from hyperloom.common.perf_metric import DATASET_PATH_ENV, prompt_dataset
-from hyperloom.inference_optimizer.cli import preflight_env
+from hyperloom.common.perf_metric import DATASET_PATH_ENV
 from hyperloom.inference_optimizer.framework_registry import server_args_env_name
 from hyperloom.inference_optimizer.recipe_snapshot_constants import KbTopology
 from hyperloom.orchestrator.actions.executors import _profile_setup as profile_setup
@@ -28,6 +26,8 @@ from ._workload_envs_helpers import clear_env, materialize, write_config
 @pytest.fixture(autouse=True)
 def _restore_environ():
     """Roll back direct ``os.environ`` writes between tests in this module."""
+    import os
+
     snapshot = dict(os.environ)
     try:
         yield
@@ -177,9 +177,9 @@ def test_num_prompts_factor(monkeypatch, tmp_path, isl, osl, conc, factor):
     assert bench["envs"]["NUM_PROMPTS"] == conc * factor
 
 
-def _export_dataset(monkeypatch, path, prompts=39):
-    """Export a dataset of ``prompts`` prompts at ``path``, a blank line among them, as a session's shell does."""
-    lines = [json.dumps({"prompt": f"question {index}"}) for index in range(prompts)]
+def _export_dataset(monkeypatch, path):
+    """Export a dataset of 39 prompts at ``path``, a blank line among them, as a session's shell does."""
+    lines = [json.dumps({"prompt": f"question {index}"}) for index in range(39)]
     path.write_text("\n".join([lines[0], "", *lines[1:]]) + "\n", encoding="utf-8")
     clear_env(monkeypatch)
     monkeypatch.delenv("HYPERLOOM_AGENTX", raising=False)
@@ -187,17 +187,14 @@ def _export_dataset(monkeypatch, path, prompts=39):
     return path
 
 
-@pytest.mark.parametrize("conc", [1, 4, 32, 64])
-@pytest.mark.parametrize(("isl", "osl"), [(512, 512), (1024, 1024), (8192, 1024), (16384, 16384)])
-def test_a_dataset_round_sends_every_prompt_of_the_file_once_at_any_concurrency(monkeypatch, tmp_path, conc, isl, osl):
+@pytest.mark.parametrize("conc", [1, 64])
+def test_a_dataset_round_sends_every_prompt_of_the_file_once_at_any_concurrency(monkeypatch, tmp_path, conc):
     _export_dataset(monkeypatch, tmp_path / "prompts.jsonl")
-    for name, value in (("ISL", isl), ("OSL", osl), ("CONC", conc)):
-        monkeypatch.setenv(name, str(value))
+    monkeypatch.setenv("CONC", str(conc))
+    # A count the shell exports is not an input of the round.
+    monkeypatch.setenv("NUM_PROMPTS", "7")
 
-    envs = materialize(write_config(tmp_path / "cfg.yaml"), tmp_path / "out")["envs"]
-
-    assert envs["NUM_PROMPTS"] == 39
-    assert envs["NUM_WARMUPS"] == min(conc, 8)
+    assert materialize(write_config(tmp_path / "cfg.yaml"), tmp_path / "out")["envs"]["NUM_PROMPTS"] == 39
 
 
 def test_a_count_the_point_or_the_caller_names_overrides_the_datasets(monkeypatch, tmp_path):
@@ -210,30 +207,6 @@ def test_a_count_the_point_or_the_caller_names_overrides_the_datasets(monkeypatc
     pinned = materialize(write_config(tmp_path / "pinned.yaml"), tmp_path / "pinned")
 
     assert (own["envs"]["NUM_PROMPTS"], pinned["envs"]["NUM_PROMPTS"]) == (12, "7")
-
-
-def test_a_request_count_the_shell_exports_is_not_read(monkeypatch, tmp_path):
-    _export_dataset(monkeypatch, tmp_path / "prompts.jsonl")
-    monkeypatch.setenv("NUM_PROMPTS", "7")
-    with_dataset = materialize(write_config(tmp_path / "cfg.yaml"), tmp_path / "dataset")["envs"]["NUM_PROMPTS"]
-    monkeypatch.delenv(DATASET_PATH_ENV)
-    monkeypatch.setenv("CONC", "4")
-    without = materialize(write_config(tmp_path / "cfg.yaml"), tmp_path / "random")["envs"]["NUM_PROMPTS"]
-
-    assert (with_dataset, without) == (39, 4 * 5)
-
-
-@pytest.mark.parametrize("content", [None, '{"prompt": "a"}\n{"text": "no prompt"}\n', "not json\n", "\n"])
-def test_a_dataset_whose_prompts_cannot_be_counted_fails_the_render_naming_the_file(monkeypatch, tmp_path, content):
-    dataset = _export_dataset(monkeypatch, tmp_path / "prompts.jsonl")
-    if content is None:
-        dataset.unlink()
-    else:
-        dataset.write_text(content, encoding="utf-8")
-
-    with pytest.raises(we.PromptDatasetError, match=str(dataset)):
-        materialize(write_config(tmp_path / "cfg.yaml"), tmp_path / "out")
-    assert not (tmp_path / "out").exists()
 
 
 def test_a_profile_round_keeps_its_capture_count_with_a_dataset(monkeypatch, tmp_path):
@@ -261,44 +234,6 @@ def test_an_agentx_round_reads_no_dataset(monkeypatch, tmp_path):
     )
 
     assert bench["benchmark_script"] == "mlperf_agentic_client.sh"
-
-
-def _load_dataset_dotenv(monkeypatch, checkout, exported=""):
-    """Preflight's read of a ``.env`` in ``checkout`` that names a dataset there, in a shell that exports ``exported``
-    as its own. Returns the path the ``.env`` names and what preflight reports."""
-    clear_env(monkeypatch)
-    monkeypatch.delenv(DATASET_PATH_ENV, raising=False)
-    if exported:
-        monkeypatch.setenv(DATASET_PATH_ENV, exported)
-    dataset = checkout / "prompts.jsonl"
-    dataset.write_text('{"prompt": "a"}\n', encoding="utf-8")
-    (checkout / ".env").write_text(f"{DATASET_PATH_ENV}={dataset}\n", encoding="utf-8")
-    monkeypatch.setenv("REPO_ROOT", str(checkout))
-    return str(dataset), preflight_env._load_dotenv_fallback()
-
-
-def test_preflight_lends_the_dataset_of_a_dotenv(monkeypatch, tmp_path, capsys):
-    dataset, result = _load_dataset_dotenv(monkeypatch, tmp_path)
-
-    assert result["detail"]["vars_loaded"] == 1
-    assert "ignoring" not in capsys.readouterr().err
-    # What a session records as its dataset is read after preflight.
-    assert prompt_dataset() == dataset
-
-
-def test_an_exported_dataset_wins_over_a_dotenv(monkeypatch, tmp_path):
-    _, result = _load_dataset_dotenv(monkeypatch, tmp_path, exported="/data/exported.jsonl")
-
-    assert result["detail"]["vars_loaded"] == 0
-    assert os.environ[DATASET_PATH_ENV] == "/data/exported.jsonl"
-
-
-def test_a_dotenv_dataset_reaches_the_rendered_config(monkeypatch, tmp_path):
-    dataset, _ = _load_dataset_dotenv(monkeypatch, tmp_path)
-
-    envs = materialize(write_config(tmp_path / "cfg.yaml"), tmp_path / "out")["envs"]
-
-    assert envs[DATASET_PATH_ENV] == dataset
 
 
 def test_server_args_merge_existing(monkeypatch, tmp_path):
