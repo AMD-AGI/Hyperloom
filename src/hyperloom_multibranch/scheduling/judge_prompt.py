@@ -112,6 +112,11 @@ lower K only while no test slot is free. The sum of the branches' K may exceed m
 tests beyond the slots, starts confirms and merge tests before any branch's explore tests, and starts the rest as slots
 free. Open branches at K {AGENTX_OPEN_K} or more, within max_k_per_branch; a branch opened with no open_k runs at
 K {AGENTX_OPEN_K}."""
+#: How an AgentX session's events show the analysis of the root's profile, which goes on after EXPLORE opened.
+_AGENTX_ROOT_ANALYSIS = """
+The analysis of the root's profile goes on after EXPLORE opened, and profile_running is true while it runs; until it
+ends the root has no op shares, as a head never profiled has none. The event root_profiled says it left them:
+largest_op and share_pct name the root's largest op."""
 
 
 #: The judge's system prompt, the parts that differ by session (:class:`PromptParts`) left to fill.
@@ -256,8 +261,8 @@ JUDGE_SYSTEM_PROMPT = _TEMPLATE.format(**asdict(_WITHOUT_PLAYBOOK), slots="")
 #: The system prompt of a session that plays one: its stall evidence is the one stop rule for a stall.
 PLAYBOOK_JUDGE_PROMPT = _TEMPLATE.format(**asdict(_WITH_PLAYBOOK), slots="")
 #: The two system prompts of an AgentX session, the first for one that plays no playbook.
-AGENTX_JUDGE_SYSTEM_PROMPT = _TEMPLATE.format(**asdict(_WITHOUT_PLAYBOOK), slots=_AGENTX_SLOTS)
-AGENTX_PLAYBOOK_JUDGE_PROMPT = _TEMPLATE.format(**asdict(_WITH_PLAYBOOK), slots=_AGENTX_SLOTS)
+AGENTX_JUDGE_SYSTEM_PROMPT = _TEMPLATE.format(**asdict(_WITHOUT_PLAYBOOK), slots=_AGENTX_SLOTS + _AGENTX_ROOT_ANALYSIS)
+AGENTX_PLAYBOOK_JUDGE_PROMPT = _TEMPLATE.format(**asdict(_WITH_PLAYBOOK), slots=_AGENTX_SLOTS + _AGENTX_ROOT_ANALYSIS)
 
 
 def _version(system: str) -> str:
