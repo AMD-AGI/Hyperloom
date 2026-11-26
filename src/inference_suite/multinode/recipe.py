@@ -4,8 +4,8 @@
 """Resolve a multi-node launch once per session, from the first source that serves the query.
 
 The sources of a disaggregated query, in order: the operator's per-role args (or an earlier record, replayed
-exactly); an InferenceX main master multi-node disaggregated entry; an InferenceX main recipe no master entry names,
-found by its directory; a row of the PD default table. A query none of them serves is refused, naming what each
+exactly); an InferenceX main master multi-node disaggregated entry; a row of the PD default table. A query none of
+them serves is refused, naming what each
 passed over. InferenceX that cannot be read is passed over for the table, unless the session pinned an InferenceX
 commit. An aggregated query takes an earlier record, else the operator's worker args, else the single-node base
 launch the suite resolves for the GPUs of every worker host, whose args every worker runs.
@@ -17,11 +17,10 @@ from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from typing import Any
 
-from inference_suite.argv import argv_flag_occurrences, canonical_flag_name, last_alias_value
+from inference_suite.argv import argv_flag_occurrences
 from inference_suite.contracts.base_launch import BaseLaunch, Workload
 from inference_suite.frameworks import Framework
 from inference_suite.multinode.inferencex import (
-    NVIDIA_MASTER,
     Candidate,
     Candidates,
     RoleFit,
@@ -39,6 +38,7 @@ from inference_suite.multinode.record import (
     RoleLaunch,
 )
 from inference_suite.multinode.render import (
+    DP_ATTENTION,
     TOPOLOGY_SPELLING,
     TRUST_REMOTE_CODE,
     RenderedRole,
@@ -53,10 +53,9 @@ from inference_suite.recipe.resolve import Miss
 from inference_suite.recipe.sources import Checkout, SourceFetchError
 
 #: The KV transfer backend of a launch no source names one for, by framework.
-DEFAULT_TRANSFER_BACKEND = {Framework.SGLANG: "mori", Framework.ATOM: "mooncake"}
-_DP_ATTENTION = "enable-dp-attention"
+_DEFAULT_TRANSFER_BACKEND = {Framework.SGLANG: "mori", Framework.ATOM: "mooncake"}
 #: The router flags the PD launcher sets, in canonical spelling.
-ROUTER_OWNED = frozenset({"host", "port", "pd-disaggregation", "prefill", "decode", "worker-urls"})
+_ROUTER_OWNED = frozenset({"host", "port", "pd-disaggregation", "prefill", "decode", "worker-urls"})
 
 
 class PdResolveError(ValueError):
@@ -82,13 +81,13 @@ class OperatorArgs:
 
 @dataclass(frozen=True)
 class ResolveInputs:
-    """What a resolution reads besides the query: the operator's args, an earlier launch to replay, how to check
-    InferenceX out (``None`` reads none), whether its commit is pinned, and how an aggregated query's single-node
-    base launch is resolved (``None`` resolves none)."""
+    """What a resolution reads besides the query: how to check InferenceX out (``None`` reads none), the operator's
+    args, an earlier launch to replay, whether its commit is pinned, and how an aggregated query's single-node base
+    launch is resolved (``None`` resolves none)."""
 
+    inferencex: Callable[[], Checkout] | None
     operator: OperatorArgs = field(default_factory=OperatorArgs)
     replay: PdLaunch | None = None
-    inferencex: Callable[[], Checkout] | None = None
     pinned: bool = False
     base: Callable[[], BaseLaunch | Miss] | None = None
 
@@ -96,11 +95,9 @@ class ResolveInputs:
 # --- roles --------------------------------------------------------------------------------------------------------
 
 
-def _asked_fit(ask: RoleAsk, gpus_per_node: int) -> RoleFit:
-    """The topology a role takes from the operator, else one worker of the node's GPUs per node."""
-    tp = ask.tp or gpus_per_node
-    workers = max(1, len(ask.hosts) * gpus_per_node // max(tp, gpus_per_node))
-    return RoleFit(workers, tp, ask.ep or 1, bool(ask.dp_attention), tp)
+def _workers(hosts: int, gpus_per_node: int, tp: int) -> int:
+    """The workers ``hosts`` nodes of ``gpus_per_node`` GPUs run at ``tp``: one per ``max(tp, gpus_per_node)`` GPUs."""
+    return max(1, hosts * gpus_per_node // max(tp, gpus_per_node))
 
 
 def _role_launch(ask: RoleAsk, fit: RoleFit, rendered: RenderedRole) -> RoleLaunch:
@@ -118,7 +115,7 @@ def _role_launch(ask: RoleAsk, fit: RoleFit, rendered: RenderedRole) -> RoleLaun
 
 def _router_args(args: Sequence[str]) -> tuple[str, ...]:
     """``args`` without the router flags the launcher sets, each with its values."""
-    return tuple(token for group in flag_groups(args) if group_flag(group) not in ROUTER_OWNED for token in group)
+    return tuple(token for group in flag_groups(args) if group_flag(group) not in _ROUTER_OWNED for token in group)
 
 
 @dataclass(frozen=True)
@@ -138,7 +135,7 @@ def _assemble(query: PdQuery, bound: _Bound) -> PdLaunch:
     aggregated launch transfers no KV cache and names no backend."""
     asks = query.roles
     named = (bound.rendered[role].transfer_backend for role in asks)
-    fallback = DEFAULT_TRANSFER_BACKEND[query.framework]
+    fallback = _DEFAULT_TRANSFER_BACKEND[query.framework]
     backend = query.transfer_backend or bound.transfer_backend or next((b for b in named if b), fallback)
     roles = {role: _role_launch(ask, bound.fits[role], bound.rendered[role]) for role, ask in asks.items()}
     return PdLaunch(
@@ -157,14 +154,8 @@ def _assemble(query: PdQuery, bound: _Bound) -> PdLaunch:
 # --- sources ------------------------------------------------------------------------------------------------------
 
 
-def _named(args: Sequence[str], flags: Sequence[str]) -> str | None:
-    """The value the args give the last of ``flags``' spellings, ``None`` when they give none."""
-    return last_alias_value(argv_flag_occurrences(args), frozenset(canonical_flag_name(flag) for flag in flags))
-
-
-def _named_size(args: Sequence[str], flags: Sequence[str], role: Role, name: str) -> int | None:
-    """The size the args give through ``flags``, ``None`` when they give none."""
-    value = _named(args, flags)
+def _operator_size(role: Role, name: str, value: str | None) -> int | None:
+    """The size the operator's args give, ``None`` when they give none."""
     if value is None:
         return None
     try:
@@ -185,16 +176,16 @@ def _operator_fit(role: Role, ask: RoleAsk, args: Sequence[str], query: PdQuery)
     """The role's topology from the node list and the operator's own args; one worker of the node's GPUs per node
     where neither names a TP."""
     spelling = TOPOLOGY_SPELLING[query.framework]
-    tp = _agree(role, "tp", ask.tp, _named_size(args, spelling.tp, role, "tp")) or query.gpus_per_node
+    named_tp = _operator_size(role, "tp", spelling.value(args, spelling.tp))
+    tp = _agree(role, "tp", ask.tp, named_tp) or query.gpus_per_node
     if spelling.ep:
-        named_ep = _named_size(args, spelling.ep, role, "ep")
+        named_ep = _operator_size(role, "ep", spelling.value(args, spelling.ep))
     else:
-        named_ep = tp if _named(args, spelling.ep_switch) is not None else None
+        named_ep = tp if spelling.value(args, spelling.ep_switch) is not None else None
     ep = _agree(role, "ep", ask.ep, named_ep) or 1
-    named_dp = True if _named(args, ("enable-dp-attention",)) is not None else None
+    named_dp = True if spelling.value(args, (DP_ATTENTION,)) is not None else None
     dp = bool(_agree(role, "dp_attention", ask.dp_attention, named_dp))
-    workers = max(1, len(ask.hosts) * query.gpus_per_node // max(tp, query.gpus_per_node))
-    return RoleFit(workers, tp, ep, dp, tp)
+    return RoleFit(_workers(len(ask.hosts), query.gpus_per_node, tp), tp, ep, dp, tp)
 
 
 def _operator(query: PdQuery, operator: OperatorArgs) -> PdLaunch:
@@ -229,19 +220,14 @@ def _replay(query: PdQuery, launch: PdLaunch) -> PdLaunch:
 
 
 def _checkout_files(checkout: Checkout, candidate: Candidate) -> dict[str, str]:
-    paths = [MASTER, candidate.path]
-    if candidate.kind is PdSourceKind.INFERENCEX_MASTER:
-        paths.append(RUNNERS)
-    elif (checkout.root / NVIDIA_MASTER).is_file():
-        paths.append(NVIDIA_MASTER)
-    bundle = checkout.bundle(sorted(set(paths)))
+    bundle = checkout.bundle(sorted({MASTER, candidate.path, RUNNERS}))
     return {path: bundle.sha256(path) for path in bundle.files}
 
 
 def _candidate(query: PdQuery, checkout: Checkout, found: Sequence[Candidate]) -> PdLaunch:
     """The first of ``found`` at the nearest concurrency, with the others named as alternatives."""
     target = query.target_concurrency
-    ordered = sorted(found, key=lambda candidate: (candidate.conc or target) - target)
+    ordered = sorted(found, key=lambda candidate: candidate.conc - target)
     chosen, others = ordered[0], ordered[1:]
     roles = chosen.recipe["roles"]
     rendered = {
@@ -254,14 +240,14 @@ def _candidate(query: PdQuery, checkout: Checkout, found: Sequence[Candidate]) -
     }
     frontend = chosen.recipe.get("frontend") or {}
     source = PdSource(
-        kind=chosen.kind,
+        kind=PdSourceKind.INFERENCEX_MASTER,
         repo=checkout.repo,
         commit=checkout.commit,
         path=chosen.path,
         entry=chosen.entry,
         locator=chosen.locator,
         files=_checkout_files(checkout, chosen),
-        alternatives=tuple(other.entry or other.name for other in others),
+        alternatives=tuple(other.entry for other in others),
         warnings=chosen.warnings,
     )
     router = srtctl_cli_args("sglang", dict(frontend.get("args") or {}))
@@ -274,7 +260,7 @@ def _table_shape(fit: RoleFit) -> RoleShape:
 
 def _table(query: PdQuery, warnings: Sequence[str]) -> PdLaunch:
     """The PD default table's row for the model, composed for the query's topology."""
-    fits = {role: _asked_fit(ask, query.gpus_per_node) for role, ask in query.roles.items()}
+    fits = {role: _operator_fit(role, ask, (), query) for role, ask in query.roles.items()}
     hit = compose(
         query.framework,
         TableQuery(
@@ -342,8 +328,8 @@ def _base(query: PdQuery, inputs: ResolveInputs) -> PdLaunch:
         raise PdResolveError("no source serves the workers' base launch:\n  " + "\n  ".join(found.reasons()))
     ask = query.roles[Role.WORKER]
     tp, ep = found.topology.tp, found.topology.ep
-    workers = max(1, len(ask.hosts) * query.gpus_per_node // max(tp, query.gpus_per_node))
-    fit = RoleFit(workers, tp, ep, _DP_ATTENTION in dict(argv_flag_occurrences(found.args)), tp)
+    workers = _workers(len(ask.hosts), query.gpus_per_node, tp)
+    fit = RoleFit(workers, tp, ep, DP_ATTENTION in dict(argv_flag_occurrences(found.args)), tp)
     env = {key: value for key, value in found.env.items() if isinstance(value, str)}
     rendered = render_role(query.framework, found.args, env)
     held = tuple(f"env {key}" for key in found.env if key not in env)
@@ -405,8 +391,6 @@ def _from_sources(query: PdQuery, inputs: ResolveInputs) -> PdLaunch:
 
 
 __all__ = [
-    "DEFAULT_TRANSFER_BACKEND",
-    "ROUTER_OWNED",
     "OperatorArgs",
     "PdResolveError",
     "ResolveInputs",

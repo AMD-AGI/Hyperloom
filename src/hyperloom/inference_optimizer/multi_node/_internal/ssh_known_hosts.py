@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from inference_suite.multinode import SshError, is_host_key_error as _host_key_error, keyscan
+from inference_suite.multinode import SshError, keyscan
 
 from .log import info, warn
 
@@ -12,11 +12,6 @@ from .log import info, warn
 def default_known_hosts_path(ssh_dir: Path) -> Path:
     """Return the default known_hosts file adjacent to the SSH keypair."""
     return ssh_dir / "known_hosts"
-
-
-def is_host_key_error(stderr: str | None) -> bool:
-    """Return True when SSH stderr indicates a host-key mismatch."""
-    return _host_key_error(stderr or "")
 
 
 def refresh_known_hosts(

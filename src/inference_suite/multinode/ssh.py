@@ -19,7 +19,7 @@ from pathlib import Path
 from inference_suite.multinode.nodes import SshAccess
 
 #: stderr fragments that mean a pinned host key no longer verifies, lowercase.
-HOST_KEY_ERRORS = (
+_HOST_KEY_ERRORS = (
     "host key verification failed",
     "remote host identification has changed",
     "offending ed25519 key",
@@ -74,7 +74,7 @@ def ssh_options(known_hosts: Path) -> list[str]:
 def is_host_key_error(stderr: str) -> bool:
     """Whether ``stderr`` reports a host key that no longer verifies."""
     text = stderr.lower()
-    return any(marker in text for marker in HOST_KEY_ERRORS)
+    return any(marker in text for marker in _HOST_KEY_ERRORS)
 
 
 def keyscan(host: str, port: int, runner: Runner = run_process) -> str:
@@ -95,12 +95,7 @@ class SshClient:
 
     access: SshAccess
     known_hosts: Path
-    runner: Runner | None = None
-
-    def _exec(self, argv: Sequence[str], stdin: str, timeout: int) -> SshResult:
-        """Run ``argv`` through the runner, the subprocess runner unless one is given."""
-        run = self.runner if self.runner is not None else run_process
-        return run(argv, stdin, timeout)
+    runner: Runner = run_process
 
     def _argv(self, host: str) -> list[str]:
         argv = ["ssh", *ssh_options(self.known_hosts), "-o", "IdentitiesOnly=yes"]
@@ -110,7 +105,7 @@ class SshClient:
         """Whether ``known_hosts`` holds a key for ``host`` on its port, hashed entries included."""
         port = self.access.port_of(host)
         name = host if port == _DEFAULT_SSH_PORT else f"[{host}]:{port}"
-        found = self._exec(["ssh-keygen", "-F", name, "-f", str(self.known_hosts)], "", _KEYSCAN_TIMEOUT_S)
+        found = self.runner(["ssh-keygen", "-F", name, "-f", str(self.known_hosts)], "", _KEYSCAN_TIMEOUT_S)
         return found.returncode == 0 and bool(found.stdout.strip())
 
     def learn(self, hosts: Sequence[str]) -> None:
@@ -125,7 +120,7 @@ class SshClient:
             if self._pinned(host):
                 continue
             port = self.access.port_of(host)
-            scanned = keyscan(host, port, self._exec)
+            scanned = keyscan(host, port, self.runner)
             with self.known_hosts.open("a", encoding="utf-8") as pinned:
                 pinned.write(scanned)
 
@@ -136,7 +131,7 @@ class SshClient:
             SshError: the host's pinned key no longer verifies, or its key cannot be learned.
         """
         body = f"set -uo pipefail\n{script}\n"
-        result = self._exec([*self._argv(host), "bash", "-s"], body, timeout)
+        result = self.runner([*self._argv(host), "bash", "-s"], body, timeout)
         if result.returncode == 0 or not is_host_key_error(result.stderr):
             return result
         if self._pinned(host):
@@ -145,11 +140,10 @@ class SshClient:
                 "there to trust a new one"
             )
         self.learn([host])
-        return self._exec([*self._argv(host), "bash", "-s"], body, timeout)
+        return self.runner([*self._argv(host), "bash", "-s"], body, timeout)
 
 
 __all__ = [
-    "HOST_KEY_ERRORS",
     "Runner",
     "SshClient",
     "SshError",
