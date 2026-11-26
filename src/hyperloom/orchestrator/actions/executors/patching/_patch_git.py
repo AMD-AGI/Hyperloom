@@ -612,7 +612,6 @@ def restore_pending_integrate(pending: dict[str, Any], *, keep: bool = False) ->
 
 
 __all__ = [
-    "_detect_p_level",
     "_git_apply",
     "_git_apply_reverse",
     "_git_reset_clean",

@@ -1,189 +1,26 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Enablement discovery + authoring operations.
+"""The authoring task handed to the enablement specialist.
 
-Two halves of the enablement flow that both build on a
-:class:`.FailureSignature`:
+:func:`build_mandate` turns a framework/model and a :class:`.FailureSignature`
+into the task text: the failure, the source roots, the rung ladder and the
+patch invariants.
 
-* **Discovery** — given a failure signature, decide which repos to scout for an
-  enabling PR (the serving framework plus the ROCm / HIP / aiter bridge repos)
-  and rank candidate PR titles by enablement intent ("enable / support / add /
-  fix / port to ROCm"). See :func:`build_search_plan` and
-  :func:`score_enablement_title`.
-* **Authoring** — turn a framework/model + ranked candidates into the task
-  text (source roots + failure + ladder + patch invariants) handed to the
-  patch-authoring specialist. See :func:`build_mandate`.
-
-Pure-Python and GPU-free: no network or LLM access. :func:`build_mandate` reads
-the local filesystem (source-root probe + installed package version).
+No network or LLM access; :func:`build_mandate` reads the local filesystem
+(source-root probe + installed package version).
 """
 
 from __future__ import annotations
 
 import importlib.metadata
-import re
-from dataclasses import dataclass
-from pathlib import PurePath
-from typing import Sequence
 
 from hyperloom.common.failure_signature import FailureSignature
-from hyperloom.agents.framework.keywords import extract_keywords, score_title_with_anti_signal
-from hyperloom.agents.framework.repo_map import bridge_repo_urls, upstream_repo_urls
 from hyperloom.inference_optimizer.framework_paths import (
     resolve_kernel_search_roots,
     summarise_framework_root_discovery,
 )
 from hyperloom.inference_optimizer.framework_registry import python_package
-
-
-# ---------------------------------------------------------------------------
-# Discovery: repo selection + enablement-intent ranking
-# ---------------------------------------------------------------------------
-
-
-# Words in a PR title that signal it enables something previously broken.
-ENABLEMENT_INTENT_TERMS: frozenset[str] = frozenset(
-    {
-        "enable",
-        "enabled",
-        "support",
-        "supported",
-        "add",
-        "adds",
-        "implement",
-        "implements",
-        "fix",
-        "fixes",
-        "port",
-        "rocm",
-        "hip",
-        "register",
-        "compat",
-        "compatibility",
-    }
-)
-
-# The seeds of both HIP kinds: a kernel that is absent and a HIP call that failed are searched for alike.
-_HIP_SEED_KEYWORDS: tuple[str, ...] = ("rocm", "hip", "aiter", "kernel")
-
-# Per-kind seed keywords appended to the auto-extracted set. Keys are failure
-# ``kind`` ids.
-_KIND_SEED_KEYWORDS: dict[str, tuple[str, ...]] = {
-    "missing_model_arch": ("model", "architecture", "support", "add"),
-    "unsupported_dtype": ("dtype", "fp8", "quant", "support"),
-    "hip_kernel_missing": _HIP_SEED_KEYWORDS,
-    "hip_runtime_error": _HIP_SEED_KEYWORDS,
-    "import_error": ("build", "import", "compile"),
-    "shape_mismatch": ("shape", "reshape", "layout"),
-    "not_implemented": ("implement", "support", "rocm"),
-    "capability_disabled": ("enable", "rocm", "supported"),
-    "accuracy_below_floor": (),
-    "eval_runtime_failure": ("eval", "accuracy", "harness"),
-    "unknown": (),
-}
-
-
-@dataclass(frozen=True)
-class EnablementSearchPlan:
-    """Where to look and what to match for an enablement failure.
-
-    Attributes:
-        repos: Repo URLs to enumerate PRs from (framework first, then the
-            bridge repos for the signature's ``bridge_layer`` — empty for
-            ``framework`` / unknown layers), order-preserving and deduped.
-        keywords: Ranking keywords (auto-extracted + per-kind seeds + the
-            offending symbol/model tokens).
-    """
-
-    repos: tuple[str, ...] = ()
-    keywords: tuple[str, ...] = ()
-
-
-def _symbol_tokens(symbol: str) -> list[str]:
-    """Split an offending symbol / arch name into lowercase word tokens.
-
-    Handles CamelCase (``Glm5ForCausalLM`` -> glm, for, causal, lm),
-    snake_case and ``::`` C++ qualifiers.
-
-    Args:
-        symbol: The offending symbol/arch string.
-
-    Returns:
-        list[str]: Lowercased 2+ char tokens (may be empty).
-    """
-    if not symbol:
-        return []
-    spaced = re.sub(r"(?<=[a-z0-9])(?=[A-Z])", " ", symbol)
-    parts = re.split(r"[^A-Za-z0-9]+", spaced)
-    return [p.lower() for p in parts if len(p) >= 2]
-
-
-def build_search_plan(
-    signature: FailureSignature,
-    *,
-    framework_repo_url: str,
-    model: str = "",
-) -> EnablementSearchPlan:
-    """Build the repo set + ranking keywords for an enablement failure.
-
-    Includes the framework repo, its upstream when the framework repo is a fork,
-    and the bridge repos (ROCm / HIP / aiter) for the signature's ``bridge_layer``.
-
-    Args:
-        signature: The classified failure.
-        framework_repo_url: Canonical serving-framework repo URL.
-        model: Model id/path — its name is mined for extra keyword signal.
-
-    Returns:
-        EnablementSearchPlan: The deduped repo list and ranking keywords,
-            most discriminating first.
-    """
-    repos: list[str] = []
-    if framework_repo_url.strip():
-        repos.append(framework_repo_url.strip())
-    repos.extend(upstream_repo_urls(framework_repo_url))
-    repos.extend(bridge_repo_urls(signature.bridge_layer))
-
-    keywords: list[str] = []
-    keywords.extend(_symbol_tokens(signature.offending_symbol))
-    keywords.extend(extract_keywords(PurePath(model).name))
-    keywords.extend(_KIND_SEED_KEYWORDS.get(signature.kind, ()))
-
-    return EnablementSearchPlan(
-        repos=tuple(dict.fromkeys(repos)),
-        keywords=tuple(dict.fromkeys(k for k in keywords if k)),
-    )
-
-
-def score_enablement_title(
-    title: str,
-    plan: EnablementSearchPlan,
-) -> float:
-    """Rank a candidate PR title for enablement relevance.
-
-    Combines the anti-signal-aware gap-keyword overlap
-    (:func:`.keywords.score_title_with_anti_signal`) with a boost for
-    enablement-intent words (:data:`ENABLEMENT_INTENT_TERMS`).
-
-    Args:
-        title: The PR title.
-        plan: The search plan carrying ranking keywords.
-
-    Returns:
-        float: The combined score (>= 0.0); callers may drop ``0.0``.
-    """
-    if not title:
-        return 0.0
-    base = score_title_with_anti_signal(title, plan.keywords)
-    title_tokens = set(re.findall(r"[a-z][a-z0-9_]+", title.lower()))
-    intent = len(title_tokens & ENABLEMENT_INTENT_TERMS)
-    return base + float(intent)
-
-
-# ---------------------------------------------------------------------------
-# Authoring: the mandate handed to the patch-authoring sub-agent
-# ---------------------------------------------------------------------------
 
 
 # Source-root families the authored patch may target (fallback when discovery fails).
@@ -244,7 +81,7 @@ ENABLEMENT_PATCH_INVARIANTS: tuple[str, ...] = (
     "env var, or install) that ADVANCES past the current failure (a deeper boot gap, "
     "or a real accuracy gain toward the floor) (see PROGRESS DELIVERABLE below); "
     "do not refactor unrelated code.",
-    "If a discovered PR already implements the fix, adapt/backport it rather than authoring from scratch.",
+    "If an upstream PR already implements the fix, adapt/backport it rather than authoring from scratch.",
 )
 
 # Environment-setup authorization: the specialist MAY run dependency/tool
@@ -408,13 +245,12 @@ _LADDER_RUNGS: tuple[str, ...] = (
     "new code or dependencies.",
     "Rung 2 - In-tree source patch: a unified diff against the INSTALLED source tree "
     "— register the arch, a small forward/config/tokenizer bridge, or backport a "
-    "merged PR. Pure Python, no compile.",
+    "merged PR. Pure Python, no compile; a change touching compiled or "
+    "build-backend files defers to Rung 5.",
     "Rung 3 - Attempt-scoped runtime: the capability lives in a DIFFERENT version of "
     "the framework or of a pure-Python dependency — request that ref / those "
     "packages via needs_runtime (see below) and it is installed into an isolated "
     "per-attempt venv. No compile, no shared-venv mutation.",
-    "Rung 4 - Source localization: localize a merged-PR / vendored closure into the "
-    "source root; changes touching compiled or build-backend files defer to Rung 5.",
     "Rung 5 - Off-loop compiled build: AITER / sgl-kernel / vLLM-from-source, built "
     "in an isolated venv with the same ROCm pins as Rung 3 on the off-loop build "
     "lane. Request it via needs_targeted_build (see below); do not compile inline.",
@@ -424,7 +260,7 @@ _LADDER_KIND_TO_RUNG: tuple[str, ...] = (
     "serve_flag / tokenizer_error -> Rung 1",
     "missing_model_arch (pure registration) / capability_disabled -> Rung 2",
     "missing_model_arch / missing_weight (absent here, present in another version) -> Rung 3",
-    "import_error / merged-PR closure -> Rung 4",
+    "import_error -> Rung 2 (pure Python) or Rung 5 (compiled / build-backend files)",
     "hip_kernel_missing / hip_runtime_error / native unsupported_dtype / missing compiled symbol -> Rung 5",
     "resource_constraint (OOM / GPU count) -> NOT a code gap; cannot be patched",
     "accuracy_below_floor / eval_generation_pathology / eval_runtime_failure -> "
@@ -462,7 +298,7 @@ ENABLEMENT_HEURISTICS: tuple[str, ...] = (
 def build_enablement_ladder_book(signature: FailureSignature | None = None) -> str:
     """Render the advisory enablement methodology (the "ladder book").
 
-    Prose only: the two axes (diagnose once / climb as needed), the Rung 0-5
+    Prose only: the two axes (diagnose once / climb as needed), the rung
     ladder, an advisory ``kind -> recommended entry rung`` table, and the folded
     environment-setup / incremental-progress / attempt-runtime / targeted-build guidance. When a
     ``signature`` is given, a one-line entry-rung hint is added; it never routes
@@ -510,7 +346,6 @@ def build_mandate(
     model: str,
     signature: FailureSignature,
     *,
-    candidate_refs: Sequence[str] = (),
     source_context: str = "",
 ) -> str:
     """Render the authoring task handed to the enablement specialist.
@@ -520,7 +355,6 @@ def build_mandate(
         model: Model id/path that must become runnable.
         signature: The verdict the round was dispatched on. The caller owns it;
             the mandate never re-derives a signature from prompt text.
-        candidate_refs: Ranked bridging refs to suggest (best first).
         source_context: Optional snippet of source lines near the offending
             site, injected verbatim to ground the authoring sub-agent. Empty
             omits the block.
@@ -528,7 +362,6 @@ def build_mandate(
     Returns:
         str: A multi-line prompt body for the authoring sub-agent.
     """
-    refs = [r for r in candidate_refs if r]
     lines: list[str] = []
     lines.append(
         f"GOAL: make model `{model}` run correctly under the `{framework}` backend. "
@@ -551,11 +384,6 @@ def build_mandate(
         lines.append(source_context.rstrip("\n"))
         lines.append("```")
     lines.append("")
-    if refs:
-        lines.append("CANDIDATE BRIDGING PRs / REFS (most relevant first):")
-        for ref in refs:
-            lines.append(f"  - {ref}")
-        lines.append("")
     lines.append("SOURCE ROOTS TO SEARCH (advisory — where this session's code lives):")
     for hint in _resolve_actual_root_hints(framework):
         lines.append(f"  - {hint}")
@@ -571,14 +399,10 @@ def build_mandate(
 __all__ = [
     "ENABLEMENT_BUILD_REQUEST_GUIDANCE",
     "ENABLEMENT_HEURISTICS",
-    "ENABLEMENT_INTENT_TERMS",
     "ENABLEMENT_PATCH_INVARIANTS",
     "ENABLEMENT_PROGRESS_GUIDANCE",
     "ENABLEMENT_RUNTIME_REQUEST_GUIDANCE",
     "ENABLEMENT_SETUP_GUIDANCE",
-    "EnablementSearchPlan",
     "build_enablement_ladder_book",
     "build_mandate",
-    "build_search_plan",
-    "score_enablement_title",
 ]
