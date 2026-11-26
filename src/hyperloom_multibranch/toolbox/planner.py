@@ -16,7 +16,7 @@ from dataclasses import replace
 from pathlib import Path
 
 from hyperloom.common.outside_facts import AITER_LOG_TUNED_CONFIG_ENV
-from hyperloom.contracts.measurement import Purpose, TestRequest
+from hyperloom.contracts.measurement import Purpose, TestKind, TestRequest
 from hyperloom.contracts.recipe import Recipe, RecipeDelta, RecipeError
 from hyperloom.measure.compile import BlobStore, CompiledEnvironment, EnvironmentCompiler
 from hyperloom.measure.jit.native.needs import ModulePlan, NativePlan
@@ -85,6 +85,6 @@ class HostedPlanner:
         recipe's launch there, any other test every level with the session's own."""
         out_dir = self._root / uuid.uuid4().hex
         canonical = self._canonical
-        if request.purpose is not Purpose.HEALTH:
+        if not (request.kind is TestKind.SWEEP and request.purpose is Purpose.HEALTH):
             canonical = replace(canonical, frozen_base=None)
         return accept_measurement(request, parent, self._compiler, canonical, out_dir)  # type: ignore[arg-type]
