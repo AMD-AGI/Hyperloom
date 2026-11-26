@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Contract tests, part 1 (session reader): the session files the Inspector finds and reads are
+"""Contract tests, part 1 (session reader, entry point, server): the session files the Inspector finds and reads are
 the ones Hyperloom's own writers produce, and the names it maps to agents and views (task kinds, LLM components,
 bus topics, state keys, ledger and journal fields) are the ones Hyperloom uses.
 
@@ -89,7 +89,7 @@ async def test_session_with_private_ledger_is_read_or_reported(tmp_path: Path, m
     watcher = producers.watch(session)
     badges = [b["text"] for b in watcher.snapshot(include_streams=False)["badges"]]
     assert watcher.tasks or any("ledger" in b for b in badges), contract_message(
-        "state_file.database_target / paths.db_path_for", "watcher.py", f"no tasks and no badge: {badges}"
+        "state_file.database_target / paths.db_path_for", "watcher.py, cli.py", f"no tasks and no badge: {badges}"
     )
 
 
@@ -278,6 +278,27 @@ def test_manifest_without_a_model_name_reads_no_other_key(tmp_path: Path, monkey
     assert not unwritten, contract_message("manifest.build_manifest", _WATCHER, f"read, never written: {unwritten}")
 
 
+@pytest.mark.parametrize("name", ["manifest.json", "state.json"])
+def test_a_started_session_is_found_from_the_workspace(tmp_path: Path, monkeypatch, name: str) -> None:
+    from hyperloom.inference_optimizer.session import paths
+    from hyperloom.inspector.cli import resolve_session_dir
+
+    assert name in paths.SESSION_FILES, contract_message("paths.SESSION_FILES", "cli.py", paths.SESSION_FILES)
+    monkeypatch.setenv(paths.ENV_USER_DATA_PATH, str(tmp_path))
+    monkeypatch.setenv(paths.ENV_CURRENT_SESSION_DIR, "")
+    session = producers.new_session(tmp_path)
+    if name == "manifest.json":
+        producers.write_manifest(session, "/models/Qwen3-8B")
+    else:
+        producers.new_state().save(session)
+    found = None
+    try:
+        found = resolve_session_dir(tmp_path)
+    except FileNotFoundError:
+        pass
+    assert found == session, contract_message("paths.make_session_dir / SESSION_FILES", "cli.py", f"found {found}")
+
+
 def test_artifact_index_leaves_out_private_session_dirs(tmp_path: Path) -> None:
     from hyperloom.inference_optimizer.session import paths
     from hyperloom.inspector import artifacts
@@ -305,7 +326,7 @@ def test_the_inspector_s_session_files_are_hyperloom_s() -> None:
     from hyperloom.inspector import session_layout
 
     assert session_layout.SESSION_FILES == paths.SESSION_FILES, contract_message(
-        "paths.SESSION_FILES", "session_layout.py", session_layout.SESSION_FILES
+        "paths.SESSION_FILES", "session_layout.py (cli._is_session)", session_layout.SESSION_FILES
     )
 
 
@@ -564,8 +585,8 @@ _SRC = Path(__file__).resolve().parents[3]
 
 
 def _loaded_modules(*imports: str) -> list[str]:
-    """The modules a fresh interpreter has loaded after importing *imports*."""
-    probe = f"import json, sys\nimport {', '.join(imports)}\nprint(json.dumps(sorted(sys.modules)))"
+    """The modules a fresh interpreter has loaded after importing *imports* (none: what it loads by itself)."""
+    probe = "".join(f"import {name}\n" for name in ("json", "sys", *imports)) + "print(json.dumps(sorted(sys.modules)))"
     env = {**os.environ, "PYTHONPATH": str(_SRC)}
     out = subprocess.run([sys.executable, "-c", probe], capture_output=True, text=True, env=env, check=True).stdout
     return json.loads(out)
@@ -578,11 +599,28 @@ def _third_party(modules: list[str]) -> set[str]:
     return {t for t in tops if t not in sys.stdlib_module_names and t not in ours and not t.startswith("_")}
 
 
+def test_the_inspector_command_line_loads_only_the_stdlib_and_itself() -> None:
+    # ``hyperloom --help`` and ``python -m hyperloom.inspector --help`` import this; the rest waits for run_inspect.
+    # What the interpreter loads before any import of the probe's (``__main__``, ``sitecustomize``, the modules a
+    # ``.pth`` file pulls in, such as setuptools' ``_distutils_hack``) is no import of the Inspector's.
+    bare = set(_loaded_modules())
+    loaded = _loaded_modules("hyperloom.inspector.__main__")
+    others = [
+        m
+        for m in loaded
+        if m.split(".")[0] not in sys.stdlib_module_names
+        and m not in bare
+        and m != "hyperloom"
+        and not m.startswith("hyperloom.inspector")
+    ]
+    assert not others, contract_message("(the Inspector's own promise)", "cli.py, __main__.py", f"loads: {others[:8]}")
+
+
 def test_the_inspector_needs_no_package_the_hyperloom_command_does_not() -> None:
     # The Inspector runs with the Hyperloom it ships with: it may import that, never a package beyond what the
     # ``hyperloom`` command already needs.
-    inspector = _third_party(_loaded_modules("hyperloom.inspector.watcher"))
+    inspector = _third_party(_loaded_modules("hyperloom.inspector.__main__", "hyperloom.inspector.server"))
     hyperloom = _third_party(_loaded_modules("hyperloom.inference_optimizer.cli"))
     assert inspector <= hyperloom, contract_message(
-        "(the Inspector's own promise)", "watcher.py", f"needs beyond the hyperloom command: {inspector - hyperloom}"
+        "(the Inspector's own promise)", "__main__.py", f"needs beyond the hyperloom command: {inspector - hyperloom}"
     )

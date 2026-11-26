@@ -1123,5 +1123,9 @@ def main(argv: list[str] | None = None) -> int:
             return asyncio.run(_run_optimize(args))
     if args.command == "recover":
         return _run_recover_session(args)
+    if args.command == "inspect":
+        from hyperloom.inspector.cli import run_inspect
+
+        return run_inspect(args)
     parser.print_help()
     return 2

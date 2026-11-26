@@ -332,7 +332,7 @@ class Watcher:
         return derive.best_throughput(current, results, series)
 
     def snapshot(self, include_streams: bool = True) -> dict:
-        """Everything a client needs, at the current clock; redacted. Streams are optional."""
+        """Everything a client needs, at the current clock; redacted. Streams are optional (SSE view ticks)."""
         with self.lock:
             clock = self.clock.now()
             tasks = self.tasks_at(clock)

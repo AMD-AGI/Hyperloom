@@ -4,9 +4,9 @@
 """Where Hyperloom puts things in a session directory, as the Inspector needs to know it.
 
 Spelled here, not imported: their sources of truth, :mod:`hyperloom.inference_optimizer.session.paths` and the grid
-runner's ``hyperloom.orchestrator.actions.executors.grid._grid_base``, sit in packages that are to import the
-Inspector (the optimizer's command line, to offer it as a subcommand), so importing them back would make a cycle the
-architecture contracts (``.importlinter``) refuse. The contract tests (``tests/test_contracts_*.py``) hold every name here equal
+runner's ``hyperloom.orchestrator.actions.executors.grid._grid_base``, sit in packages that import the Inspector (the
+optimizer's command line registers ``hyperloom inspect``), so importing them back would make a cycle the architecture
+contracts (``.importlinter``) refuse. The contract tests (``tests/test_contracts_*.py``) hold every name here equal
 to Hyperloom's.
 """
 

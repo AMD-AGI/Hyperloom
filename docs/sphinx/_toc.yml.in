@@ -69,6 +69,8 @@ subtrees:
     title: InferenceSuite benchmark rounds
   - file: reference/operations.md
     title: Operations and self-hosting
+  - file: inspector/README.md
+    title: Inspector
   - file: reference/upgrade.md
     title: Upgrade guide
   - file: reference/session-breakdown.md

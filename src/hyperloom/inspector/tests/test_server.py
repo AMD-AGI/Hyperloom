@@ -1,0 +1,157 @@
+# SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
+# SPDX-License-Identifier: MIT
+
+from __future__ import annotations
+
+import http.client
+import json
+import threading
+from urllib.parse import quote
+
+import pytest
+
+from hyperloom.inspector import server as server_mod
+from hyperloom.inspector.server import InspectorServer, ServeOptions
+from hyperloom.inspector.tests.conftest import FAKE_KEY
+from hyperloom.inspector.watcher import Watcher, WatchOptions
+
+
+def _start(session_dir):
+    watcher = Watcher(session_dir, WatchOptions(poll_sec=0.05))
+    watcher.poll()
+    httpd = InspectorServer(("127.0.0.1", 0), watcher)
+    threading.Thread(target=httpd.serve_forever, kwargs={"poll_interval": 0.05}, daemon=True).start()
+    return httpd
+
+
+def _stop(httpd):
+    httpd.closing = True
+    httpd.shutdown()
+    httpd.server_close()
+
+
+@pytest.fixture
+def server(session_dir):
+    httpd = _start(session_dir)
+    yield httpd
+    _stop(httpd)
+
+
+def _get(httpd, path, host=None):
+    conn = http.client.HTTPConnection("127.0.0.1", httpd.server_address[1], timeout=5)
+    conn.request("GET", path, headers={"Host": host or f"127.0.0.1:{httpd.server_address[1]}"})
+    resp = conn.getresponse()
+    body = resp.read()
+    conn.close()
+    return resp.status, body, resp
+
+
+def test_snapshot_is_served_redacted(server):
+    status, body, resp = _get(server, "/api/snapshot")
+    assert status == 200
+    assert resp.getheader("X-Content-Type-Options") == "nosniff"
+    snap = json.loads(body)
+    assert {t["task_id"] for t in snap["tasks"] if t["health"] == "crashed"} == {"t-scout", "t-recon"}
+    assert FAKE_KEY.encode() not in body
+
+
+@pytest.mark.parametrize("path", ["../../etc/passwd", ".env", "/etc/passwd", "runs/../.env"])
+def test_artifact_path_jail(server, path):
+    status, body, _ = _get(server, "/api/artifact?path=" + quote(path))
+    assert status in (403, 404)
+    assert FAKE_KEY.encode() not in body
+
+
+_ARCHIVED = "archived secret"
+
+
+@pytest.fixture
+def archived(session_dir):
+    """The application-private ``archive`` with a file in it, and a link to that file from a served directory."""
+    (session_dir / "archive").mkdir()
+    (session_dir / "archive" / "package.tar").write_text(_ARCHIVED, encoding="utf-8")
+    (session_dir / "runs" / "package.tar").symlink_to(session_dir / "archive" / "package.tar")
+    return session_dir
+
+
+@pytest.mark.parametrize(
+    "query",
+    [
+        "/api/artifact?path=archive/package.tar",
+        "/api/artifact?path=runs/../archive/package.tar",
+        "/api/artifact?path=runs/package.tar",
+        "/api/diff?a=archive/package.tar&b=runs/specialist/t-scout/process.log",
+        "/api/diff?a=runs/specialist/t-scout/process.log&b=runs/package.tar",
+    ],
+)
+def test_the_private_archive_is_refused(archived, query):
+    httpd = _start(archived)
+    try:
+        status, body, _ = _get(httpd, query)
+        listed = json.loads(_get(httpd, "/api/artifacts")[1])["artifacts"]
+    finally:
+        _stop(httpd)
+    assert status == 403 and _ARCHIVED.encode() not in body
+    assert not [a["path"] for a in listed if "package.tar" in a["path"]]
+
+
+def test_foreign_host_header_is_refused(server):
+    status, _, _ = _get(server, "/api/snapshot", host="evil.example:8765")
+    assert status == 403
+
+
+def test_log_artifact_is_redacted_and_followable(server):
+    status, body, _ = _get(server, "/api/artifact?path=runs/specialist/t-scout/process.log")
+    assert status == 200
+    rec = json.loads(body)
+    assert "model refused" in rec["text"] and FAKE_KEY not in rec["text"]
+    status, body, _ = _get(server, f"/api/artifact?path=runs/specialist/t-scout/process.log&offset={rec['end']}")
+    assert json.loads(body)["text"] == ""
+
+
+def test_trace_is_metadata_only(server):
+    rec = json.loads(_get(server, "/api/artifact?path=runs/roofline/t-roof/rank0.pt.trace.json.gz")[1])
+    assert rec["mode"] == "meta" and "text" not in rec
+
+
+def test_config_diff(server):
+    a = "runs/baseline/t-base/baseline_config.with_envs.yaml"
+    b = "runs/roofline/t-roof/baseline_config.with_envs.yaml"
+    rec = json.loads(_get(server, f"/api/diff?a={quote(a)}&b={quote(b)}")[1])
+    assert ["replace", 3, "  A: '1'", 3, "  A: '2'"] in rec["rows"]
+
+
+def test_artifact_index_and_conversation(server):
+    paths = {a["path"] for a in json.loads(_get(server, "/api/artifacts")[1])["artifacts"]}
+    assert "state.json" in paths and ".env" not in paths
+    conv = json.loads(_get(server, "/api/conversation?call_id=c1")[1])
+    assert FAKE_KEY not in conv["prompt"]
+    assert _get(server, "/api/conversation?call_id=nope")[0] == 404
+    assert json.loads(_get(server, "/api/conversation?task_id=spec1&turn=1")[1])["response"] == "spec"
+    assert _get(server, "/api/conversation?call_id=")[0] == 404
+
+
+def test_sse_sends_hello(server):
+    conn = http.client.HTTPConnection("127.0.0.1", server.server_address[1], timeout=5)
+    conn.request("GET", "/api/stream", headers={"Host": "localhost"})
+    resp = conn.getresponse()
+    assert resp.getheader("Content-Type") == "text/event-stream"
+
+    def next_event():
+        name = None
+        while True:
+            line = resp.fp.readline().decode().rstrip("\n")
+            if line.startswith("event: "):
+                name = line[7:]
+            elif line.startswith("data: "):
+                return name, json.loads(line[6:])
+
+    assert next_event()[0] == "hello"
+    conn.close()
+
+
+def test_serve_never_puts_its_files_in_the_session(session_dir, monkeypatch):
+    monkeypatch.setattr(InspectorServer, "serve_forever", lambda self, poll_interval=0.5: None)
+    before = sorted(p for p in session_dir.rglob("*"))
+    server_mod.serve(session_dir, ServeOptions(port=0))
+    assert sorted(p for p in session_dir.rglob("*")) == before
