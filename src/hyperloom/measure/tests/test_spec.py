@@ -28,6 +28,7 @@ from hyperloom.measure.docs import DocumentError
 from hyperloom.measure.long_context.plan import LongContextPlan
 from hyperloom.measure.short_prompts.plan import ShortPromptPlan
 from hyperloom.measure.spec import (
+    PURPOSES,
     MeasurementSpec,
     blob_input_path,
     canonical_for_fingerprint,
@@ -75,6 +76,10 @@ def test_the_sheet_hash_changes_with_any_changed_byte() -> None:
 
 def test_the_valid_sheet_passes_the_json_schema() -> None:
     assert list(VALIDATOR.iter_errors(spec_document())) == []
+
+
+def test_the_schema_takes_every_purpose_a_request_is_made_for() -> None:
+    assert VALIDATOR.schema["properties"]["meta"]["properties"]["purpose"]["enum"] == list(PURPOSES)
 
 
 def _other_staging(document: dict[str, Any]) -> None:

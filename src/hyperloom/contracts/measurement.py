@@ -118,7 +118,10 @@ class TestKind(str, Enum):
 
 
 class Purpose(str, Enum):
-    """Why a test is run; the toolbox takes its default priority from it."""
+    """Why a test is run; the toolbox takes its default priority from it.
+
+    ``PROBE`` is a specialist's ``repro`` test: its case is a script whose output is its whole result, never a verdict.
+    """
 
     BASELINE = "baseline"
     HEALTH = "health"
@@ -128,6 +131,7 @@ class Purpose(str, Enum):
     PROFILE = "profile"
     ACCURACY = _ACCURACY
     REPRO = "repro"
+    PROBE = "probe"
     FINAL = "final"
 
 
@@ -935,6 +939,8 @@ class TestResult:
     ``timing_lines`` are the last lines each server log of the test timed its requests with, each led by the log's path
     below ``output_dir``, for a specialist that cannot open the logs; none for a test whose server logs no such lines,
     and none in a document written before they existed.
+    ``probe_log`` is the end of what the script of a probe printed, closed by the line that says how it ended; ``""``
+    for any other test.
     A document written while the greedy decode pass existed may carry ``decode_outputs`` and ``decode_identity``; they
     mean nothing now and ``from_document`` leaves them out, so such a document still loads.
     """
@@ -973,6 +979,7 @@ class TestResult:
     agentx_checkpoint: AgentxCheckpointRuling | None = None
     jit_cache: tuple[JitCacheState, ...] = ()
     timing_lines: tuple[str, ...] = ()
+    probe_log: str = ""
 
     def __post_init__(self) -> None:
         _text(self.request_id, "request_id")
@@ -1087,6 +1094,8 @@ class TestResult:
             document["jit_cache"] = [value.to_document() for value in self.jit_cache]
         if self.timing_lines:
             document["timing_lines"] = list(self.timing_lines)
+        if self.probe_log:
+            document["probe_log"] = self.probe_log
         return document
 
     @classmethod
@@ -1129,6 +1138,7 @@ class TestResult:
             agentx_checkpoint=None if checkpoint is None else AgentxCheckpointRuling.from_document(checkpoint),
             jit_cache=tuple(map(JitCacheState.from_document, _items(f.get("jit_cache", ()), "jit_cache"))),
             timing_lines=tuple(_items(f.get("timing_lines", ()), "timing_lines")),
+            probe_log=f.get("probe_log", ""),
         )
 
 

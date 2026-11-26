@@ -2,6 +2,8 @@
 # SPDX-License-Identifier: MIT
 
 import hashlib
+import io
+import tarfile
 from types import SimpleNamespace
 
 import pytest
@@ -10,7 +12,7 @@ from hyperloom.contracts.measurement import AttachmentRef
 from hyperloom.hosted.mcp_server import ToolError
 from hyperloom_multibranch.contracts.toolbox import SCOPE_SPECIALIST, RequestRejected
 from hyperloom_multibranch.rulegate.fix_case import FIX_CASE_ID, FixCase, read_case
-from hyperloom_multibranch.specialist.fix_tools import register_fix_tools
+from hyperloom_multibranch.specialist.fix_tools import PROBE_CASE_ID, register_fix_tools
 
 SCRIPT = '#!/bin/bash\ncurl -sf "$HL_BASE_URL/v1/models" >/dev/null || exit 1\nexit 0\n'
 DIAGNOSIS = "fp8 scales overflow at 8k context; clamp them before the cast"
@@ -55,6 +57,22 @@ async def test_a_case_is_stored_as_the_attachment_a_test_carries(rig):
     assert AttachmentRef.from_document(answer) == AttachmentRef(FIX_CASE_ID, kind, hashlib.sha256(data).hexdigest())
     assert kind == "dir"
     assert read_case(data) == FixCase(SCRIPT, DIAGNOSIS)
+
+
+@pytest.mark.parametrize(("probe", "entry_script"), [("served", "served-probe.sh"), ("no_server", "probe.sh")])
+async def test_a_probe_is_stored_under_its_own_id_and_entry_script_so_it_is_never_a_fix_s_case(
+    rig, probe, entry_script
+):
+    server, writer = rig
+
+    answer = await server.call("fix_case", repro_sh=SCRIPT, diagnosis=DIAGNOSIS, probe=probe)
+
+    kind, data = writer.stored[PROBE_CASE_ID]
+    assert answer["id"] == PROBE_CASE_ID != FIX_CASE_ID
+    with tarfile.open(fileobj=io.BytesIO(data)) as archive:
+        assert archive.getnames() == [entry_script, "DIAGNOSIS.md"]
+        assert archive.extractfile(entry_script).read().decode() == SCRIPT
+    assert server.tools["fix_case"].schema["properties"]["probe"]["enum"] == ["served", "no_server"]
 
 
 async def test_the_tool_is_a_specialist_s_and_takes_exactly_a_script_and_a_diagnosis(rig):

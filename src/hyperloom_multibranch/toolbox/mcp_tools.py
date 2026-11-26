@@ -163,14 +163,18 @@ _WAIT_TEST: dict[str, Any] = {
     "required": ["request_id"],
     "additionalProperties": False,
 }
-#: What a specialist tests, as ``(kind, purpose)`` pairs: a change of its own (``test`` for ``explore``) or the profile
-#: of its head (``profile`` for ``profile``). The other purposes and kinds are the session's (a baseline, a health check,
+#: What a specialist tests, as ``(kind, purpose)`` pairs: a change of its own (``test`` for ``explore``), the profile
+#: of its head (``profile`` for ``profile``) or a script of its own (``repro`` for ``probe``). The other purposes and kinds are the session's (a baseline, a health check,
 #: a final candidate, an integration, the confirm retest of a measured gain, a regression's reproduction, a final
 #: sweep): the queue exempts most of them from the branch's K and its backpressure, so a specialist that could send them
 #: would take the session's capacity. Kind and purpose are checked as one pair: a measured test sent as a profile would
 #: be queued at the profile's priority, ahead of every branch's explores, skip the explore-only checks and escape the
 #: profile dedup, which is keyed on the kind.
-SPECIALIST_PAIRS = ((TestKind.TEST, Purpose.EXPLORE), (TestKind.PROFILE, Purpose.PROFILE))
+SPECIALIST_PAIRS = (
+    (TestKind.TEST, Purpose.EXPLORE),
+    (TestKind.PROFILE, Purpose.PROFILE),
+    (TestKind.REPRO, Purpose.PROBE),
+)
 SPECIALIST_KINDS = tuple(kind for kind, _ in SPECIALIST_PAIRS)
 SPECIALIST_PURPOSES = tuple(purpose for _, purpose in SPECIALIST_PAIRS)
 _SPECIALIST_PAIR_VALUES = frozenset((kind.value, purpose.value) for kind, purpose in SPECIALIST_PAIRS)
@@ -188,8 +192,9 @@ _SUBMIT_TEST: dict[str, Any] = {
             "enum": [purpose.value for purpose in SPECIALIST_PURPOSES],
             "description": (
                 "explore (with kind test) for a change of yours, profile (with kind profile) for the profile of your "
-                "head; any other pair is refused. The runtime retests a measured gain itself (confirm) and the session "
-                "runs its own baselines, finals and integrations."
+                "head, probe (with kind repro) for a script fix_case stored as a probe; any other pair is refused. "
+                "The runtime retests a measured gain itself (confirm) and the session runs its own baselines, finals "
+                "and integrations."
             ),
         },
         "parent_commit": {"type": _STRING, "minLength": 1},

@@ -45,13 +45,14 @@ def _member(name: str, text: str, mode: int) -> tuple[tarfile.TarInfo, io.BytesI
     return info, io.BytesIO(data)
 
 
-def pack_case(repro_sh: str, diagnosis: str) -> bytes:
-    """The tar of a case; ``repro_sh`` exits 0 when the defect does not occur and 1 when it does."""
+def pack_case(repro_sh: str, diagnosis: str, entry_script: str = CASE_SCRIPT) -> bytes:
+    """The tar of a case; ``repro_sh`` exits 0 when the defect does not occur and 1 when it does. A probe is packed
+    the same way under its own ``entry_script`` (``hyperloom.measure.repro``), which is how the runner tells it."""
     if not repro_sh.strip() or not diagnosis.strip():
         raise CaseError(f"a case needs both a {CASE_SCRIPT} and a diagnosis")
     buffer = io.BytesIO()
     with tarfile.open(fileobj=buffer, mode="w", format=tarfile.USTAR_FORMAT) as archive:
-        archive.addfile(*_member(CASE_SCRIPT, repro_sh, _EXECUTABLE))
+        archive.addfile(*_member(entry_script, repro_sh, _EXECUTABLE))
         archive.addfile(*_member(DIAGNOSIS_FILE, diagnosis, _READABLE))
     return buffer.getvalue()
 

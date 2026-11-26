@@ -64,7 +64,7 @@ from hyperloom.measure.manifest import ResultManifest
 from hyperloom.measure.phases import RESULT_READ, account
 from hyperloom.measure.points import AcceptedMeasurement
 from hyperloom.measure.profile_traces import PROFILE_DIR, has_step_traces, has_traces, is_trace_file
-from hyperloom.measure.repro import REPRO_DIR, VERDICT_FILE, ReproError, read_verdict
+from hyperloom.measure.repro import LOG_FILE, REPRO_DIR, VERDICT_FILE, ReproError, read_verdict
 from hyperloom.measure.socket import (
     MeasurementTimeout,
     RoundOutcome,
@@ -126,6 +126,8 @@ _UTF8 = "utf-8"
 #: A profiled round, and a repro case's server, run once with no warmup: neither is a statistic.
 _NO_WARMUP = RoundPlan(warmup_rounds=0)
 _REASON_DETAIL_CHARS = 300
+#: The characters of a probe's log a result carries: what one tool reply holds beside the result itself.
+_PROBE_LOG_CHARS = 8000
 _ELIDED = " ... "
 #: What an infrastructure failure's reason keeps of what the runner or the platform said: its beginning, which names the
 #: failing step, with room for the sandbox and node it names after the runner's bounded message.
@@ -232,6 +234,7 @@ class HostedExecutor:
         result = self._result(request, accepted, call, outcome, _Span(started, self._clock()))
         result = await self._with_table_hits(result, accepted, call)
         result = await self._with_timing_lines(result, call)
+        result = await self._with_probe_log(result, request, call)
         result = await self._with_short_prompts(result, accepted, call)
         result = await self._with_long_context(result, accepted, call)
         return await self._with_request_classes(result, request, outcome, call)
@@ -384,7 +387,7 @@ class HostedExecutor:
         finished = self._clock()
         rounds, accuracy = _measured_values(request, accepted, outcome) if failure is None else ((), ())
         location = self._profile_location(call) if failure is None and request.kind is TestKind.PROFILE else ""
-        verdict = _landed_verdict(call) if failure is None and request.kind is TestKind.REPRO else ""
+        verdict = _landed_verdict(call) if failure is None and request.purpose is Purpose.REPRO else ""
         # What the attempt's directory holds counts only when a verified bundle landed it: an attempt that ended without
         # one holds at most the host's saved copy of its runner's files, which is never a sample, a ruling or a check.
         landed = Path(call.output_dir) if audit else None
@@ -436,6 +439,14 @@ class HostedExecutor:
         component = native_component(self._session_facts.base_launch.framework)
         lines = await asyncio.to_thread(read_test_timing_lines, component, Path(call.output_dir))
         return replace(result, timing_lines=lines)
+
+    async def _with_probe_log(self, result: TestResult, request: TestRequest, call: TestCall) -> TestResult:
+        """``result`` with the end of what a probe's script printed, which its specialist cannot open the log for."""
+        if result.validity is not Validity.SUCCEEDED or request.purpose is not Purpose.PROBE:
+            return result
+        log = Path(call.output_dir) / REPRO_DIR / LOG_FILE
+        text = await asyncio.to_thread(log.read_text, encoding="utf-8", errors="replace")
+        return replace(result, probe_log=text[-_PROBE_LOG_CHARS:])
 
     async def _with_short_prompts(
         self, result: TestResult, accepted: AcceptedMeasurement, call: TestCall

@@ -31,11 +31,12 @@ def test_default_priorities_follow_the_purpose() -> None:
     policy = QueuePolicy()
     confirm = req(purpose=Purpose.CONFIRM, retest_of="x")
     repro = req(purpose=Purpose.REPRO, kind=TestKind.REPRO, attachments=_attachment())
+    probe = req(purpose=Purpose.PROBE, kind=TestKind.REPRO, attachments=_attachment())
     got = [
         policy.priority_of(r)
-        for r in (confirm, repro, req(purpose=Purpose.INTEGRATION), req(purpose=Purpose.PROFILE), req())
+        for r in (confirm, repro, req(purpose=Purpose.INTEGRATION), req(purpose=Purpose.PROFILE), probe, req())
     ]
-    assert got == [0, 1, 2, 3, 4]
+    assert got == [0, 1, 2, 3, 3, 4]
 
 
 def test_an_explicit_priority_wins_and_the_scheduler_override_applies_to_the_rest() -> None:
@@ -199,6 +200,10 @@ def test_the_global_limit_applies_to_exempt_tests_too() -> None:
 def test_repro_by_kind_or_purpose_is_exempt_and_explore_is_not() -> None:
     assert exempt_from_k(req(purpose=Purpose.REPRO, kind=TestKind.REPRO, attachments=_attachment()))
     assert not exempt_from_k(req())
+
+
+def test_a_probe_takes_a_slot_of_its_branch_s_k_as_an_explore_does() -> None:
+    assert not exempt_from_k(req(purpose=Purpose.PROBE, kind=TestKind.REPRO, attachments=_attachment()))
 
 
 def test_session_measurements_are_exempt_and_integration_and_profile_tests_are_not() -> None:

@@ -73,7 +73,7 @@ import yaml
 from hyperloom.common.outside_facts.rule_pack import rule_pack_identity
 from hyperloom.measure import signing
 from hyperloom.measure.attachments import place_attachments, substitute
-from hyperloom.measure.repro import REPRO_DIR, find_case, run_case
+from hyperloom.measure.repro import REPRO_DIR, find_case, run_case, run_probe
 from hyperloom.measure.jit_kinds import AITER_JIT
 from hyperloom.measure.jit.store import Snapshot, StoredFile
 from hyperloom.measure.manifest import RESULT_SCHEMA, encode_manifest
@@ -246,8 +246,13 @@ def _attached_env_files(spec: MeasurementSpec, root: Path, out: Path, names: lis
 def _repro_files(spec: MeasurementSpec, root: Path, out: Path) -> dict[str, bytes]:
     """Place the sheet's attachments, run its case and return what it left below ``<out>/files/repro``."""
     placed = _place(spec, root)
-    script = find_case(root / "work" / "attach", list(placed))
-    run_case(script, base_url="http://127.0.0.1:1", model="fake-model", timeout_sec=30, output_dir=out / "files")
+    case = find_case(root / "work" / "attach", list(placed))
+    if case.is_probe:
+        run_probe(case.script, env=os.environ, base_url=None, timeout_sec=30, output_dir=out / "files")
+    else:
+        run_case(
+            case.script, base_url="http://127.0.0.1:1", model="fake-model", timeout_sec=30, output_dir=out / "files"
+        )
     directory = out / "files" / REPRO_DIR
     return {f"{REPRO_DIR}/{p.name}": p.read_bytes() for p in sorted(directory.iterdir())}
 

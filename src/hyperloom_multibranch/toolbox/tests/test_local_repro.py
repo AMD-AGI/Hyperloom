@@ -81,11 +81,9 @@ class _Rig:
             ),
         )
 
-    async def repro(self, script: str) -> TestResult:
-        case = case_attachment(self.spec.blobs, script)
-        request_id = await self.toolbox.submit_test(
-            req(kind=TestKind.REPRO, purpose=Purpose.REPRO, attachments=(case,))
-        )
+    async def repro(self, script: str, *, purpose: Purpose = Purpose.REPRO, name: str = "repro.sh") -> TestResult:
+        case = case_attachment(self.spec.blobs, script, name=name)
+        request_id = await self.toolbox.submit_test(req(kind=TestKind.REPRO, purpose=purpose, attachments=(case,)))
         await asyncio.wait_for(self.toolbox.drain(), 120)
         entry = self.toolbox._log.get(request_id)
         assert entry is not None and entry.outcome is not None and "result" in entry.outcome, entry
@@ -120,6 +118,24 @@ async def test_a_repro_test_runs_its_attached_case_against_the_server_and_report
         landed = rig.session / result.output_dir / "repro"
         assert (landed / "case.log").read_text() == f"case saw {_BASE_URL} /nonexistent/model\n"
         assert json.loads((landed / "verdict.json").read_text())["verdict"] == verdict
+        await rig.toolbox._executor.reverify(result)  # type: ignore[attr-defined]
+    finally:
+        await rig.toolbox.close()
+
+
+async def test_a_probe_runs_with_no_server_on_what_the_server_is_launched_with_and_its_log_is_in_the_result(
+    tmp_path: Path, checkout: tuple[Path, str]
+) -> None:
+    rig = await _rig(tmp_path, checkout)
+    try:
+        script = (
+            'echo "probe saw ${HL_BASE_URL:-no server} $HL_MODEL"\ntest -x "$HL_PYTHON" || echo no python\nexit 7\n'
+        )
+        result = await rig.repro(script, purpose=Purpose.PROBE, name="probe.sh")
+
+        assert result.validity is Validity.SUCCEEDED and result.repro_verdict == "", result
+        assert result.probe_log == "probe saw no server /nonexistent/model\n\n[exit code 7]\n"
+        assert result.rounds == () and not (rig.session / result.output_dir / "repro" / "verdict.json").exists()
         await rig.toolbox._executor.reverify(result)  # type: ignore[attr-defined]
     finally:
         await rig.toolbox.close()

@@ -100,6 +100,13 @@ def test_the_role_names_the_workload_every_step_s_tool_and_the_rules():
         role_prompt(RoleWorkload(" \n"))
 
 
+@pytest.mark.parametrize("dev_leases", [0, 1])
+def test_the_role_names_the_probe_once_whether_or_not_the_session_lends_dev_sandboxes(dev_leases):
+    prompt = " ".join(role_prompt(WORKLOAD, dev_leases=dev_leases).split())
+
+    assert prompt.count("kind repro and purpose probe") == 1 and "its numbers never enter the gate" in prompt
+
+
 def test_the_role_reads_the_briefs_two_direction_lists_before_claiming_and_chooses_as_before_without_them():
     prompt = " ".join(role_prompt(WORKLOAD).split())
     settings, code = (title.split(" (")[0] for title in (SETTINGS_TITLE, CODE_TITLE))
