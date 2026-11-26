@@ -5,6 +5,8 @@
   import Drawer from "./lib/drawer/Drawer.svelte";
   import { fmtArtifactCount } from "./lib/format";
   import Header from "./lib/Header.svelte";
+  import Narrator from "./lib/Narrator.svelte";
+  import { NarratorStore } from "./lib/narrator-store.svelte";
   import ReplayBar from "./lib/ReplayBar.svelte";
   import Graph from "./lib/graph/Graph.svelte";
   import Tabs from "./lib/tabs/Tabs.svelte";
@@ -15,6 +17,8 @@
 
   const store = new InspectorStore();
   const ui = new UiState();
+  // One narrator for the page.
+  const narrator = new NarratorStore();
   void store.start();
   onDestroy(() => store.stop());
 
@@ -31,6 +35,7 @@
       {view.tasks.length} tasks · {store.streams.event.length} bus events · {store.streams.llm_call.length} LLM calls ·
       {fmtArtifactCount(store.artifacts.length, view.artifacts_cut_at)}
     </p>
+    <Narrator {store} {ui} {narrator} />
     <Graph {store} {ui} />
     <Timeline {store} {ui} />
     <UpliftPanel {store} {ui} />

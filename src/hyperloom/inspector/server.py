@@ -17,6 +17,10 @@ Endpoints (all GET unless noted):
 * ``/api/tokens?download=``: the token timeline document (replay: up to the clock), with USD costs priced by the
   built-in price sheet; ``download=1`` as a file, ``<session>.tokens.json``.
 * ``POST /api/replay?t=&speed=&paused=``: move the replay clock.
+* ``/api/narrator``: the narrator's status and its narrations and answers at the clock.
+* ``POST /api/narrate?force=`` (JSON ``{focus}``) and ``POST /api/ask`` (JSON ``{question, focus}``): have the
+  configured LLM narrate the session at the clock, or answer a question about it. Both need a JSON content type,
+  so a page on another origin can't trigger a call without a CORS preflight, which is never answered.
 
 The Host header must name a loopback address or the bound host, so a page on
 another origin can't reach the server through DNS rebinding.
@@ -40,6 +44,7 @@ from urllib.parse import parse_qs, urlsplit
 
 from hyperloom.inspector import artifacts
 from hyperloom.inspector.history import MetricsHistory, history_path
+from hyperloom.inspector.narrator import Narrator, build_client
 from hyperloom.inspector.tokens import TokenTracker, dump
 from hyperloom.inspector.watcher import Watcher, WatchOptions
 
@@ -58,6 +63,8 @@ _SECURITY_HEADERS = {
 }
 _HEARTBEAT_SEC = 15.0
 _ENCODING = "utf-8"
+NARRATOR_OFF_REASON = "off (start the Inspector with --narrate to enable it)"
+_MAX_BODY = 4096
 
 
 _ASSET_TYPES = {
@@ -104,8 +111,9 @@ def _modern_asset(route: str) -> tuple[bytes, str] | None:
 class InspectorServer(ThreadingHTTPServer):
     daemon_threads = True
 
-    def __init__(self, address: tuple[str, int], watcher: Watcher) -> None:
+    def __init__(self, address: tuple[str, int], watcher: Watcher, narrator: Narrator | None = None) -> None:
         self.watcher = watcher
+        self.narrator = narrator
         self.allowed_hosts = _LOOPBACK | {address[0]}
         self.closing = False
         super().__init__(address, Handler)
@@ -180,6 +188,8 @@ class Handler(BaseHTTPRequestHandler):
                 return self._json(self._artifact(q))
             if route == "/api/diff":
                 return self._json(artifacts.diff(w.session_dir, q.get("a", ""), q.get("b", "")))
+            if route == "/api/narrator":
+                return self._json(self._narrator_status())
             if route == "/api/conversation":
                 rec = w.conversation(q.get("call_id", ""), q.get("task_id", ""), q.get("turn", ""))
                 return (
@@ -201,6 +211,8 @@ class Handler(BaseHTTPRequestHandler):
         if not self._host_ok():
             return self._error(HTTPStatus.FORBIDDEN, "host not allowed")
         route = urlsplit(self.path).path
+        if route in ("/api/narrate", "/api/ask"):
+            return self._narrate(route)
         if route != "/api/replay":
             return self._error(HTTPStatus.NOT_FOUND, "not found")
         clock = self.server.watcher.clock
@@ -216,6 +228,50 @@ class Handler(BaseHTTPRequestHandler):
         with self.server.watcher.lock:
             clock.seek(t, speed=speed, paused=paused)
         return self._json(clock.info())
+
+    def _narrator_status(self) -> dict:
+        n = self.server.narrator
+        if n is None:
+            return {"available": False, "reason": NARRATOR_OFF_REASON, "busy": False, "entries": []}
+        return n.status()
+
+    def _body_json(self) -> dict:
+        ctype = (self.headers.get("Content-Type") or "").split(";")[0].strip().lower()
+        if ctype != "application/json":
+            raise ValueError("Content-Type must be application/json")
+        try:
+            length = int(self.headers.get("Content-Length") or 0)
+        except ValueError as exc:
+            raise ValueError("bad Content-Length") from exc
+        if length > _MAX_BODY:
+            raise ValueError(f"body over {_MAX_BODY} bytes")
+        raw = self.rfile.read(length) if length > 0 else b""
+        try:
+            body = json.loads(raw or b"{}")
+        except json.JSONDecodeError as exc:
+            raise ValueError("body is not JSON") from exc
+        if not isinstance(body, dict):
+            raise ValueError("body must be a JSON object")
+        return body
+
+    def _narrate(self, route: str) -> None:
+        try:
+            body = self._body_json()
+        except ValueError as exc:
+            self.close_connection = True
+            wrong_type = "Content-Type" in str(exc)
+            status = HTTPStatus.UNSUPPORTED_MEDIA_TYPE if wrong_type else HTTPStatus.BAD_REQUEST
+            return self._error(status, str(exc))
+        n = self.server.narrator
+        if n is None:
+            return self._error(HTTPStatus.SERVICE_UNAVAILABLE, f"narrator unavailable: {NARRATOR_OFF_REASON}")
+        focus = str(body.get("focus") or "")
+        if route == "/api/ask":
+            status, data = n.ask(str(body.get("question") or ""), focus)
+        else:
+            force = self._query().get("force", "").lower() in ("1", "true")
+            status, data = n.narrate(force=force, focus=focus)
+        return self._json(data, status)
 
     def _artifact(self, q: dict[str, str]) -> dict:
         try:
@@ -289,22 +345,32 @@ def _token_file(session_dir: Path, token_dir: Path | None) -> Path | None:
         return None
 
 
+def _build_narrator(watcher: Watcher) -> Narrator:
+    """The narrator over *watcher*, its LLM taken from the environment; prints the backend it got, or why it has none."""
+    client, info = build_client()
+    what = f"{info.backend}, {info.model}" if client is not None else f"off: {info.reason}"
+    print(f"Narrator: {what}", flush=True)
+    return Narrator(watcher, client, info)
+
+
 @dataclass(frozen=True)
 class ServeOptions:
     """What :func:`serve` listens on (*host*, *port*), where it keeps resource samples (*history_dir*) and the token
-    timeline (*token_dir*), and how the watcher reads the session (*watch*). A directory left ``None`` is not written."""
+    timeline (*token_dir*), whether the narrator may call an LLM (*narrate*), and how the watcher reads the session
+    (*watch*). A directory left ``None`` is not written."""
 
     host: str = "127.0.0.1"
     port: int = 8765
     history_dir: Path | None = None
     token_dir: Path | None = None
+    narrate: bool = False
     watch: WatchOptions = field(default_factory=WatchOptions)
 
 
 def serve(session_dir: Path, options: ServeOptions | None = None) -> None:
     """Run the Inspector until interrupted; with *options.history_dir*, resource samples survive a restart; with
     *options.token_dir*, the token timeline is kept there as JSON. Tokens are priced in USD by the built-in price
-    sheet."""
+    sheet. The narrator calls an LLM only with *options.narrate*; LLM credentials alone do not enable it."""
     options = options or ServeOptions()
     history = None
     if options.history_dir is not None:
@@ -316,7 +382,10 @@ def serve(session_dir: Path, options: ServeOptions | None = None) -> None:
     tokens = TokenTracker(Path(session_dir), token_file)
     watcher = Watcher(Path(session_dir), options.watch, history=history, tokens=tokens)
     watcher.start()
-    httpd = InspectorServer((options.host, options.port), watcher)
+    narrator = _build_narrator(watcher) if options.narrate else None
+    if narrator is None:
+        print(f"Narrator: {NARRATOR_OFF_REASON}", flush=True)
+    httpd = InspectorServer((options.host, options.port), watcher, narrator)
     shown = "localhost" if _is_unspecified(options.host) else options.host
     mode = "replay" if options.watch.replay else "live"
     print(f"Hyperloom Inspector ({mode}): http://{shown}:{options.port}/ for {session_dir}", flush=True)

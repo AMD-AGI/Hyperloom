@@ -1,8 +1,8 @@
 ---
 myst:
     html_meta:
-        "description": "Hyperloom Inspector: a read-only web page for a live or finished Hyperloom session. How to build the UI, run it locally or in a pod, and what it shows."
-        "keywords": "Hyperloom, Inspector, session, observability, timeline, replay, Kubernetes, port-forward, AMD GPU, ROCm"
+        "description": "Hyperloom Inspector: a read-only web page for a live or finished Hyperloom session. How to build the UI, run it locally or in a pod, configure the LLM narrator, and what it shows."
+        "keywords": "Hyperloom, Inspector, session, observability, timeline, replay, narrator, Kubernetes, port-forward, AMD GPU, ROCm"
 ---
 # Hyperloom Inspector
 
@@ -73,6 +73,11 @@ Options:
 - `--token-dir DIR`: where the token timeline (every LLM call's tokens and cost over time, as JSON) is kept; never
   inside the session. Default `--history-dir`, else its default. `--no-token-file` keeps it in memory only. It is
   `<session>-<hash>.tokens.json`.
+- `--narrate`: turn the narrator on, so it calls the LLM. Off by default, even when LLM credentials are in the
+  environment (see [Narrator](#narrator)).
+- `--llm-env-file FILE`: with `--narrate`, a dotenv file to take the narrator's LLM settings from. Without
+  `--narrate` it is not read.
+- `--no-llm`: never call an LLM. Contradicts `--narrate`, and the Inspector refuses to start with both.
 - `--verbose`, `-v`: `hyperloom inspect` only. `-v` logs INFO messages; `-vv` adds DEBUG, with a line per HTTP
   request.
 
@@ -83,8 +88,8 @@ session's lock names another host, the Inspector samples nothing, as its own mac
 
 Run the Inspector in a pod from a source tree copied in from your machine. The copy carries the parts of Hyperloom
 the Inspector imports, so the Hyperloom version the image has does not matter; the pod's Python needs PyYAML, which
-any image with Hyperloom installed has.
-Don't run it from the pod's own checkout: an editable install never builds the UI, so the page only
+any image with Hyperloom installed has, and for the narrator the LLM client (`httpx` or `openai`) Hyperloom calls
+the model with. Don't run it from the pod's own checkout: an editable install never builds the UI, so the page only
 shows the build error. Build the UI first (the copy includes the gitignored build), then copy the tree in, start the
 Inspector and forward its port:
 
@@ -95,12 +100,12 @@ tar -c --exclude=__pycache__ --exclude='.env*' \
       sh -c 'mkdir -p /tmp/hl-insp && tar -x -C /tmp/hl-insp'
 kubectl -n <namespace> exec deploy/<deployment> -- sh -c \
   'cd /tmp/hl-insp && PYTHONPATH=src nohup python3 -m hyperloom.inspector \
-     --session-dir <session-dir> > inspect.log 2>&1 &'
+     --session-dir <session-dir> --narrate --llm-env-file <env-file> > inspect.log 2>&1 &'
 kubectl -n <namespace> port-forward deploy/<deployment> 8765:8765
 ```
 
 `src/hyperloom/common` holds the secret masking the Inspector applies before it serves anything, and
-`src/hyperloom_common` the price sheet the Tokens tab is priced by. For a replay
+`src/hyperloom_common` the price sheet the Tokens tab is priced by and the narrator's LLM client. For a replay
 next to the live view, start a second Inspector with `--port 8766 --replay --speed 600` and forward `8766:8766` as
 well.
 
@@ -108,6 +113,31 @@ A session whose operator pins hold a credential keeps its coordinator database o
 running account's private ledger: below `HYPERLOOM_LEDGER_DIR`, else below `TMPDIR`. To see its tasks, run the
 Inspector as that account, in the same container or with the same `HYPERLOOM_LEDGER_DIR`. Otherwise the page shows
 an error badge saying that the tasks cannot be read, rather than an empty task list.
+
+### Narrator
+
+The narrator writes a short summary of what the session is doing at the current clock, live or in a replay, with the
+LLM Hyperloom is configured with. You can ask it questions, and pin one as a focus for later summaries.
+
+It is opt-in. Start the Inspector with `--narrate` to enable it; LLM credentials alone do nothing. Without `--narrate`
+the panel says the narrator is off, and the Inspector makes no LLM call.
+
+- Credentials come from the Inspector's environment. Processes started with `kubectl exec` don't have the pod's LLM
+  variables, so pass `--llm-env-file` with `--narrate`. Only `ANTHROPIC_*`, `OPENAI_*`, `CLAUDE_MODEL`,
+  `CLAUDE_CODE_OAUTH_TOKEN` and `HYPERLOOM_INSPECTOR_LLM_*` are read from it, plus variables that `*_CUSTOM_HEADERS`
+  refers to as `${NAME}`. The environment wins, and values are never logged or served.
+- `HYPERLOOM_INSPECTOR_LLM_BACKEND`: `auto` (default; Anthropic when it has a usable credential, else an
+  OpenAI-compatible endpoint when `OPENAI_BASE_URL` or `OPENAI_API_KEY` is set), `anthropic`, `openai` or `none`.
+- `HYPERLOOM_INSPECTOR_LLM_MODEL` (else `CLAUDE_MODEL`, else Hyperloom's default Claude model) and
+  `HYPERLOOM_INSPECTOR_LLM_MAX_TOKENS` (default 1600; models that think count their thinking against it). A call
+  times out after 90 s. An answer cut off at the limit says so.
+- How often it narrates: with the panel open and auto on, the page asks for a narration on open, on a phase change,
+  and every 120 s. The server writes a new one at most every 20 s, and only when the session changed.
+- What each call sends: the session digest, at most 24,000 characters, plus the last 5 narrations and answers. The
+  digest is redacted.
+- One call runs at a time. History is kept in memory (200 entries) and is lost on restart.
+
+Without an LLM the panel says why, and the rest of the page is unchanged.
 
 ## Features
 
@@ -132,6 +162,7 @@ an error badge saying that the tasks cannot be read, rather than an empty task l
   sheet (the one multi-branch spends by). A model the sheet lacks shows its tokens without a cost (see
   [Tokens and cost](#tokens-and-cost)).
 - **Replay** with a scrubber and speed control.
+- **Narrator**: a summary at the clock, questions and a pinned focus; graph node names in the text are clickable.
 
 ## Tokens and cost
 
@@ -198,6 +229,7 @@ Limits:
 
 - It binds to `127.0.0.1` by default and accepts requests only for a loopback address or the bound host.
 - `.env*` files are never listed or served, and paths can't leave the session directory.
-- Everything it serves is redacted: secret-shaped keys and tokens are masked.
+- Everything it serves, and everything it sends to the LLM, is redacted: secret-shaped keys and tokens are masked.
+- The narrator's POST endpoints need a JSON body of at most 4 KB, so another web page can't trigger a paid call.
 - Treat the page as operator-only all the same: prompts and logs can hold sensitive content that redaction doesn't
   recognise.

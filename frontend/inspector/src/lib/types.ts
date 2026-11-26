@@ -269,3 +269,27 @@ export interface ArtifactPayload {
   truncated?: boolean;
   [key: string]: unknown;
 }
+
+/** A narration or an answer from the narrator; times are epoch seconds, `clock` the session time it describes. */
+export interface NarratorEntry {
+  id: string;
+  kind: "narration" | "answer";
+  clock: number;
+  written_at: number;
+  duration_sec: number;
+  model: string | null;
+  text: string;
+  focus?: string | null;
+  question?: string;
+}
+
+/** GET /api/narrator: whether an LLM is configured, and the entries at or before the clock. */
+export interface NarratorStatus {
+  available: boolean;
+  reason: string | null;
+  backend?: string;
+  model?: string | null;
+  busy: boolean;
+  clock?: number;
+  entries: NarratorEntry[];
+}

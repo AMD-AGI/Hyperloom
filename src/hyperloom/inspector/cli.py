@@ -96,6 +96,26 @@ def add_inspect_arguments(insp: argparse.ArgumentParser) -> None:
         "else the same default.",
     )
     insp.add_argument("--no-token-file", action=SWITCH, help="Track tokens in memory only (no file).")
+    _add_narrator_arguments(insp)
+
+
+def _add_narrator_arguments(insp: argparse.ArgumentParser) -> None:
+    insp.add_argument(
+        "--narrate",
+        action=SWITCH,
+        help="Turn the narrator on: it calls the LLM from the environment to summarize the session and answer "
+        "questions, and narrates on its own every 120 s while the page is open. Off by default, whatever "
+        "credentials are set.",
+    )
+    insp.add_argument(
+        "--llm-env-file",
+        type=Path,
+        default=None,
+        help="With --narrate: a dotenv file to take the narrator's LLM settings from (ANTHROPIC_*, OPENAI_*, "
+        "CLAUDE_MODEL, CLAUDE_CODE_OAUTH_TOKEN, HYPERLOOM_INSPECTOR_LLM_*) when the environment lacks them; nothing "
+        "else is read from it. Without --narrate it is not read. Default: the environment only.",
+    )
+    insp.add_argument("--no-llm", action=SWITCH, help="Never call an LLM; contradicts --narrate.")
 
 
 def run_inspect(args: argparse.Namespace) -> int:
@@ -104,11 +124,24 @@ def run_inspect(args: argparse.Namespace) -> int:
     from hyperloom.inspector.server import ServeOptions, serve
     from hyperloom.inspector.watcher import WatchOptions
 
+    if args.narrate and args.no_llm:
+        print("inspect: --narrate and --no-llm contradict each other: pass one", file=sys.stderr)
+        return 2
     try:
         session_dir = resolve_session_dir(Path(args.session_dir))
     except FileNotFoundError as exc:
         print(f"inspect: {exc}", file=sys.stderr)
         return 2
+    if args.llm_env_file is not None and args.narrate:
+        from hyperloom.inspector.narrator import load_llm_env
+
+        try:
+            names = load_llm_env(args.llm_env_file)
+        except OSError as exc:
+            print(f"inspect: cannot read --llm-env-file: {exc.strerror or exc}", file=sys.stderr)
+            return 2
+        shown = ", ".join(names) or "none"
+        print(f"Narrator: LLM settings taken from {args.llm_env_file}: {shown}", flush=True)
     try:
         history_dir = None if args.no_history else (args.history_dir or default_history_dir())
         token_dir = None if args.no_token_file else (args.token_dir or args.history_dir or default_history_dir())
@@ -117,6 +150,7 @@ def run_inspect(args: argparse.Namespace) -> int:
             port=args.port,
             history_dir=history_dir,
             token_dir=token_dir,
+            narrate=args.narrate,
             watch=WatchOptions(replay=args.replay, speed=args.speed),
         )
         serve(session_dir, options)

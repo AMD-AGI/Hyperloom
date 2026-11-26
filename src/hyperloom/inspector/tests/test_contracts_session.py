@@ -406,6 +406,9 @@ _NODE_OF_COMPONENT = {
     "tracelens": "tracelens",
     "breakdown": "breakdown",
     "quantization": "quantization",
+    # The narrator's own calls: they go to the gateway from the Inspector's process and Hyperloom writes no session
+    # row for them, so a row naming this component is drawn as a node of its own, like any other.
+    "inspector": "inspector",
 }
 
 

@@ -1543,6 +1543,21 @@ reference.
 | `HYPERLOOM_REQUIRE_UI` | Unset (a package without the UI is built, with a warning) | `1`, `true` or `yes` (any case, surrounding spaces ignored) fails the build when `static/modern/` holds no UI after the npm step, instead of shipping the package without it. An existing build that a failed npm step left in place still ships, with a warning. Any other value counts as unset. The packaging and release CI workflows set it to `1`. Operator configuration. |
 | `HYPERLOOM_SKIP_UI_BUILD` | Unset (npm runs) | `1`, `true` or `yes` (any case, surrounding spaces ignored) skips `npm ci && npm run build`, and whatever `static/modern/` holds ships as is, even a stale build. With no build there, the package ships without the UI, unless `HYPERLOOM_REQUIRE_UI` is set, which fails the build. Any other value counts as unset. Operator configuration. |
 
+## Inspector narrator
+
+Read by the Inspector (`hyperloom inspect`, `python3 -m hyperloom.inspector`) only when it is started with
+`--narrate`; without it the Inspector reads none of these and makes no LLM call. They come from the Inspector's
+environment, or, for a variable the environment lacks, from the dotenv file `--llm-env-file` names. The narrator
+calls the LLM with the credentials in [Credentials](#credentials) (`ANTHROPIC_*`, `OPENAI_*`,
+`CLAUDE_CODE_OAUTH_TOKEN`). When it cannot call one, the narrator is off and its panel says why; the rest of the
+Inspector is unaffected. See [Narrator](../inspector/README.md#narrator).
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `HYPERLOOM_INSPECTOR_LLM_BACKEND` | `auto` | Which LLM the narrator calls. `auto`: Anthropic when it has a usable credential, else an OpenAI-compatible endpoint when `OPENAI_BASE_URL` or `OPENAI_API_KEY` is set, else none. `anthropic` or `openai`: that side only. `none` (or `off`, `disabled`): never call an LLM. Any case, surrounding spaces ignored. An unknown value, or a side without a usable credential, turns the narrator off. Operator configuration. |
+| `HYPERLOOM_INSPECTOR_LLM_MODEL` | `CLAUDE_MODEL`, else `DEFAULT_CLAUDE_MODEL` | Model id the narrator asks, on either backend: with `openai`, name a model the OpenAI-compatible endpoint serves. Empty counts as unset. Operator configuration. |
+| `HYPERLOOM_INSPECTOR_LLM_MAX_TOKENS` | `1600` | Output tokens per narrator call; models that think count their thinking against it. An answer cut off at the limit ends with a note saying so. A value that is not an integer counts as unset. Operator configuration. |
+
 ## Variables intentionally not exposed
 
 These are read by `os.environ` somewhere in the codebase but are

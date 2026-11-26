@@ -309,3 +309,29 @@ def test_serve_prices_with_the_built_in_sheet(session_dir, tmp_path, monkeypatch
     assert tokens["totals"]["cost_usd"] == 0.0162 and tokens["pricing"]["source"] == SHEET.source
     assert [p.suffixes[-2:] for p in state.iterdir()] == [[".tokens", ".json"]]
     assert "Prices: built-in price sheet\n" in capsys.readouterr().out
+
+
+def test_credentials_alone_build_no_narrator(session_dir, tmp_path, monkeypatch, capsys):
+    monkeypatch.setenv("ANTHROPIC_API_KEY", FAKE_KEY)
+    monkeypatch.setattr(server_mod, "build_client", lambda *a, **kw: pytest.fail("narrator built without --narrate"))
+    served = []
+    monkeypatch.setattr(InspectorServer, "serve_forever", lambda self, poll_interval=0.5: served.append(self.narrator))
+    server_mod.serve(session_dir, ServeOptions(port=0, token_dir=tmp_path))
+    assert served == [None]
+    assert "Narrator: off (start the Inspector with --narrate to enable it)" in capsys.readouterr().out
+
+
+def test_narrate_builds_the_narrator_from_the_environment(session_dir, tmp_path, monkeypatch):
+    from hyperloom.inspector.narrator import ClientInfo
+
+    built = []
+
+    def fake_build_client(*args, **kwargs):
+        built.append(True)
+        return None, ClientInfo(reason="no LLM credentials in the environment")
+
+    monkeypatch.setattr(server_mod, "build_client", fake_build_client)
+    served = []
+    monkeypatch.setattr(InspectorServer, "serve_forever", lambda self, poll_interval=0.5: served.append(self.narrator))
+    server_mod.serve(session_dir, ServeOptions(port=0, token_dir=tmp_path, narrate=True))
+    assert built == [True] and served[0] is not None
