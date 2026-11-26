@@ -16,7 +16,7 @@ told the value to force, a forced value that differs from it is told the recorde
 nothing for is refused, since its gain cannot be graded on this benchmark until the model's acceptance is measured.
 A context-copying draft is refused by :mod:`.._spec_decode_context_copy`, a base that simulates acceptance pins its draft
 (:mod:`.._spec_decode_pin`), and a base that verifies a real draft is the operator's choice. AgentX sessions benchmark
-real traces and are out of scope.
+real traces, and a session that sends a prompt dataset sends real prompts; both are out of scope.
 """
 
 from __future__ import annotations

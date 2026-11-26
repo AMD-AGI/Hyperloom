@@ -135,7 +135,9 @@ InferenceX records for that draft and the curve it is read from, so restate the
 variant with that value; its accuracy is then scored on a round of its own with
 the forcing taken out. A draft InferenceX records no curve for is refused
 there too: leave speculative decoding off for that model. In an AgentX session,
-which replays real traces, a variant may enable it with a real draft too.
+which replays real traces, and in a session that sends a prompt dataset
+(`DATASET_PATH`), whose prompts are real, a variant may enable it with a real
+draft too.
 
 Before proposing or marking `KEEP` on any such variant, cross-check against the
 model's golden AL curve (if one exists per the lookup above):

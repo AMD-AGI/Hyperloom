@@ -275,3 +275,28 @@ def test_a_stack_revalidation_is_never_refused_and_a_forcing_it_replays_has_its_
     assert not asyncio.run(rnd._refuses_synthetic_draft(forced))
     assert not asyncio.run(rnd._refuses_synthetic_draft(real))
     assert rnd.forcing == {"forced"} and rnd.skipped == []
+
+
+def test_a_prompt_dataset_session_refuses_only_a_copying_draft_and_still_notes_a_forcing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from types import SimpleNamespace
+
+    from hyperloom.orchestrator.actions.executors import explore
+
+    recipe = _noop_filter_kwargs(tmp_path)["recipe"]
+    rnd = explore._ExploreRound.__new__(explore._ExploreRound)
+    rnd.synthetic, rnd.params, rnd.forcing, rnd.skipped = True, {}, set(), []
+    rnd.ss = SimpleNamespace(prompt_dataset="/data/prompts.jsonl")
+    rnd._recipe = lambda: recipe
+    monkeypatch.setattr(explore, "session_golden_lookup", lambda *_: pytest.fail("a dataset session is not looked up"))
+
+    assert not asyncio.run(rnd._refuses_synthetic_draft(GridVariant("real", extra_server_args=_SGLANG)))
+    assert not asyncio.run(
+        rnd._refuses_synthetic_draft(GridVariant("forced", extra_server_args=_SGLANG, extra_envs=_SGLANG_FORCED))
+    )
+    assert asyncio.run(
+        rnd._refuses_synthetic_draft(GridVariant("copying", extra_server_args="--speculative-algorithm NGRAM"))
+    )
+    assert rnd.forcing == {"forced"}
+    assert [(row["name"], row["reason"]) for row in rnd.skipped] == [("copying", CONTEXT_COPY_REFUSAL)]

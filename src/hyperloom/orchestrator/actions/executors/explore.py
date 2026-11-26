@@ -31,6 +31,7 @@ from hyperloom.common.perf_metric import (
     constraint_fields,
     graded_axes_of,
     perf_snapshot_from_mapping,
+    prompt_dataset_session,
     resolve_grading_anchor_perf,
     stamp_output_per_gpu,
 )
@@ -75,6 +76,7 @@ from .explore_prefilter.grid_payload import (
 )
 from .explore_prefilter.launch_filters import (
     filter_baseline_noop_variants,
+    filter_context_copy_drafts,
     filter_operator_pinned_envs,
     filter_synthetic_drafts,
     launch_forces_acceptance,
@@ -113,6 +115,7 @@ from .grid._grid_variant_filter import (
 from hyperloom.inference_optimizer.framework_registry import is_scriptable, server_args_env_name
 from hyperloom.inference_optimizer.grid_server_args import compose_server_args
 from .explore_prefilter.spec_decode_golden import session_golden_lookup
+from .framework_change._spec_decode_context_copy import CONTEXT_COPY_REFUSAL
 
 from .workload._launch_restatement import observed_launch_after
 from .serving._server_argv import ConfigUnreadable, config_point
@@ -628,9 +631,14 @@ class _ExploreRound:
             self.forcing.add(gv.name)
         if is_stack_revalidation(self.params):
             return False
-        lookup = session_golden_lookup(self.session_dir, self.framework)
-        # The lookup runs the staged interpreter, up to its timeout: off the event loop, the verdict recorded on it.
-        _, refused = await asyncio.to_thread(filter_synthetic_drafts, [gv], recipe=self._recipe(), lookup=lookup)
+        if prompt_dataset_session(self.ss):
+            # A dataset's prompts are real and end where the model ends them: only a copying draft is refused.
+            _, copied = filter_context_copy_drafts([gv], recipe=self._recipe())
+            refused = [(name, CONTEXT_COPY_REFUSAL, detail) for name, detail in copied]
+        else:
+            lookup = session_golden_lookup(self.session_dir, self.framework)
+            # The lookup runs the staged interpreter, up to its timeout: off the event loop.
+            _, refused = await asyncio.to_thread(filter_synthetic_drafts, [gv], recipe=self._recipe(), lookup=lookup)
         if not refused:
             return False
         log.warning("explore: refusing variant %s (%s)", gv.name, refused[0][2])
