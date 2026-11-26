@@ -306,6 +306,14 @@ def main(argv: list[str]) -> int:
     args = _parse(argv)
     target = _target(args)
     prompts = request_order(read_prompts(args.dataset), args.num_prompts, args.seed)
+    # A pass that saves no result is the warmup, which sends fewer requests than a high concurrency by design.
+    if args.result is not None and args.max_concurrency > len(prompts):
+        print(
+            f"WARNING: this pass sends {len(prompts)} prompts at concurrency {args.max_concurrency}: no more than "
+            f"{len(prompts)} requests are ever in flight, so it does not measure that concurrency",
+            file=sys.stderr,
+            flush=True,
+        )
     sent = run_requests(target, prompts, args.max_concurrency)
     metrics = summarize(sent.outputs, sent.duration, [float(p) for p in args.metric_percentiles.split(",")])
     refused = refusals(prompts, sent.outputs)

@@ -25,26 +25,6 @@
       },
       "additionalProperties": false
     },
-    "hyperloom.plugs_lock_mismatch": {
-      "type": "object",
-      "required": [
-        "socket",
-        "file_impl",
-        "locked_impl"
-      ],
-      "properties": {
-        "socket": {
-          "type": "string"
-        },
-        "file_impl": {
-          "type": "string"
-        },
-        "locked_impl": {
-          "type": "string"
-        }
-      },
-      "additionalProperties": false
-    },
     "hyperloom.phase_changed": {
       "type": "object",
       "required": [

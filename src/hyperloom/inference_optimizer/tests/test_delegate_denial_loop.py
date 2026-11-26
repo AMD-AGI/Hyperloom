@@ -528,3 +528,42 @@ def test_explore_grid_coverage_tells_a_variant_removal_from_the_base_one():
     queued = [SimpleNamespace(kind="explore", params={**base, "grid": [kept]})]
     assert explore_grid_already_covered({**base, "grid": [removes]}, queued, {}) is None
     assert explore_grid_already_covered({**base, "grid": [dict(kept, name="again")]}, queued, {}) is not None
+
+
+def test_explore_grid_coverage_refuses_a_grid_made_only_of_known_dead_changes():
+    """A grid whose every variant carries a change the framework refused at start launches nothing; it is refused."""
+    from types import SimpleNamespace
+
+    from hyperloom.inference_optimizer.canonical_fingerprint import workload_signature
+    from hyperloom.orchestrator.actions.executors.explore_prefilter.measured_variants import (
+        explore_grid_already_covered,
+    )
+
+    aiter_on = {"VLLM_ROCM_USE_AITER": "1", "VLLM_ROCM_USE_AITER_MOE": "1"}
+    death = {
+        "name": "v00",
+        "outcome": "FAILED",
+        "workload_signature": workload_signature(),
+        "extra_server_args": "",
+        "extra_envs": dict(aiter_on),
+        "error_class": "server_init_dead",
+        "error_excerpt": "ValueError: Unquantized MoE backend 'ROCm AITER' is unsupported",
+    }
+    ledger = {"tested": {"fp-v00": death}}
+    base = {"base_tput": 800.0}
+    sibling = {"name": "v02", "extra_envs": {**aiter_on, "HL_KNOB": "1"}}
+    new = {"name": "v01", "extra_envs": {"HL_KNOB": "1"}}
+
+    denied = explore_grid_already_covered({**base, "grid": [sibling]}, [], ledger)
+    assert denied is not None and denied.rule == "explore_grid_already_covered"
+    assert str(denied) == (
+        "delegate{action_name='explore'} adds nothing new: v02 carrying a change the framework refused at start"
+    )
+    queued = [SimpleNamespace(kind="explore", params={**base, "grid": [new]})]
+    mixed = explore_grid_already_covered({**base, "grid": [new, sibling]}, queued, ledger)
+    assert str(mixed) == (
+        "delegate{action_name='explore'} adds nothing new: v01 already measured, queued or running on the current "
+        "stack; v02 carrying a change the framework refused at start"
+    )
+    assert explore_grid_already_covered({**base, "grid": [sibling, new]}, [], ledger) is None
+    assert explore_grid_already_covered({**base, "source": "stack_revalidate", "grid": [sibling]}, [], ledger) is None

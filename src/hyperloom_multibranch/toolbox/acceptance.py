@@ -25,7 +25,6 @@ from hyperloom.contracts.recipe import LaunchConfig, Recipe, RecipeDelta, Recipe
 from hyperloom.common.outside_facts import AITER_META_WHEEL_DIR
 from hyperloom.measure.compile import BaseImageMismatchError, BlobStore, CompiledEnvironment
 from hyperloom.measure.eval_context import EvalContextError
-from hyperloom.measure.jit.key import build_surface
 from hyperloom.measure.points import AcceptedMeasurement, ProfileUnsupported
 from hyperloom.measure.fake_gain import (
     CONTEXT_COPY_REFUSAL,
@@ -180,15 +179,16 @@ def _check_weight_precision(root_commit: str, root: LaunchConfig, candidate: Rec
 
 def _check_aiter_sources(accepted: object, missing: str | None) -> None:
     """Refuse a candidate that patches aiter's ``csrc`` or ``hsa`` when this toolbox cannot build the modules it touches
-    (``missing`` says why), unless its launch rebuilds every module itself (``AITER_REBUILD``): each attempt of its
-    test would be refused by its runner, and the image's prebuilt modules are not the patch."""
+    (``missing`` says why), also when its launch rebuilds every module (``AITER_REBUILD``): each attempt of its test
+    would be refused by its runner, which needs the test's own JIT directory first, and the image's prebuilt modules are
+    not the patch."""
     environment = getattr(accepted, "environment", None)
     if missing is None or not isinstance(environment, CompiledEnvironment):
         return
     paths = [
         entry.path for root in environment.roots if root.import_name == AITER_META_WHEEL_DIR for entry in root.entries
     ]
-    if paths and not build_surface((), environment.recipe.launch.envs, {}).rebuild:
+    if paths:
         raise RequestRejected(f"{paths[0]}: {AITER_SOURCES_REASON}: {missing}", DELTA_NOT_APPLICABLE_CODE)
 
 

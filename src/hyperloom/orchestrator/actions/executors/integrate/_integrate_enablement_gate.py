@@ -5,7 +5,6 @@
 
 from __future__ import annotations
 
-import asyncio
 import logging
 import os
 import subprocess
@@ -27,7 +26,6 @@ from ....enablement.recipe import keep_probe, keep_records
 from ....enablement.recipe.projections import project_launch_evidence
 from ..framework_change import _framework_switch_manifest as _switch_manifest
 from .._accuracy_gate import enablement_correctness
-from .._git import _git_head_sha
 from .._integrate_attempt import IntegrateAttempt
 from ._integrate_results import _PatchBench
 from ..patching._nogit_patch import _is_git_tree
@@ -408,16 +406,6 @@ class EnablementGateMixin:
             **grade.evidence,
         }
         kept_result.update(attempt.accepted_runtime_records())
-        # Snapshot a manifest of the localized closure that survives rearm, so
-        # the closure is recorded and not re-fetched.
-        manifest = await asyncio.to_thread(
-            self._finalize_localization_keep,
-            attempt,
-            framework_root=attempt.framework_root,
-            specialist_task_id=specialist_task_id,
-        )
-        if manifest:
-            kept_result["enablement_localization_manifest"] = manifest
         try:
             kept_result.update(self._enablement_keep_records(attempt, params=params, bench_result=bench_result))
         except (OSError, subprocess.SubprocessError, ConfigUnreadable):
@@ -586,44 +574,3 @@ class EnablementGateMixin:
         if not ok:
             return note or "git commit failed", False
         return "", note == ""
-
-    def _finalize_localization_keep(
-        self,
-        attempt: IntegrateAttempt,
-        *,
-        framework_root: Path | None,
-        specialist_task_id: str,
-    ) -> dict[str, Any]:
-        """Record a localization manifest via :func:`snapshot_source_layer`.
-
-        Blocking (filesystem copies); call via ``asyncio.to_thread``. Returns the
-        manifest dict, empty when no localization ran.
-        """
-        touched = attempt.localization_touched
-        if not touched or framework_root is None:
-            return {}
-        action = attempt.localization_action
-        try:
-            from ....source_snapshot import SourceLayer, snapshot_source_layer
-
-            base_sha = _git_head_sha(framework_root)
-            dest = self.session_dir / "optimization_stack" / "localization" / (specialist_task_id or "keep")
-            snap = snapshot_source_layer(
-                SourceLayer(
-                    framework_root=framework_root,
-                    base_sha=base_sha,
-                    rel_paths=touched,
-                ),
-                dest_dir=dest,
-                provenance="localization",
-                extra={
-                    "specialist_task_id": specialist_task_id,
-                    "kind": str(getattr(action, "kind", "") or ""),
-                    "repo_url": str(getattr(action, "repo_url", "") or ""),
-                    "pr_number": int(getattr(action, "pr_number", 0) or 0),
-                },
-            )
-            return dict(snap) if snap else {}
-        except (OSError, ValueError, TypeError):
-            log.exception("integrate_patch: localization snapshot failed")
-            return {}

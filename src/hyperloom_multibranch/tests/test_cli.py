@@ -1028,6 +1028,22 @@ def test_a_ready_environment_without_an_experience_kb_runs_the_session_on_the_mo
     assert agent_cli == [_settings()]
 
 
+@pytest.mark.usefixtures("ready_environment", "agent_cli")
+def test_the_specialists_inherit_gateway_headers_with_their_credential_references_expanded(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The agent CLI sends ``ANTHROPIC_CUSTOM_HEADERS`` as written, so a ``${VAR}`` it inherits reaches the gateway as
+    literal text and every specialist turn is refused."""
+    key_var = "_".join(("ANTHROPIC", "API", "KEY"))
+    monkeypatch.setenv("USER_DATA_PATH", str(tmp_path))
+    monkeypatch.setenv(key_var, "ak-gateway-token")
+    monkeypatch.setenv("ANTHROPIC_CUSTOM_HEADERS", f"Ocp-Apim-Subscription-Key: ${{{key_var}}}")
+
+    assert cli.main(["run", *WORKLOAD_ARGS]) == 0
+
+    assert os.environ["ANTHROPIC_CUSTOM_HEADERS"] == "Ocp-Apim-Subscription-Key: ak-gateway-token"
+
+
 @pytest.mark.usefixtures("ready_environment")
 def test_a_ready_environment_with_an_experience_kb_starts_its_service_before_the_session_runs(
     agent_cli: list[RunSettings], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
