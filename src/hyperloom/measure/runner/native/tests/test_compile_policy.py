@@ -10,6 +10,7 @@ masked; and a compile bubblewrap cannot sandbox fails as the machine's, running 
 from __future__ import annotations
 
 import os
+import subprocess
 import sys
 from dataclasses import replace
 from pathlib import Path
@@ -285,17 +286,22 @@ def test_under_bubblewrap_the_compile_is_given_only_its_own_environment(
     }
 
 
-def test_the_child_is_given_the_images_library_search_path_and_no_other_variable(tmp_path: Path) -> None:
-    """The image's torch may load a library only its ``LD_LIBRARY_PATH`` names: the child's preflight imports it."""
-    environ = {
+def test_the_child_is_given_the_images_library_search_path_and_no_other_variable(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The image's torch may load a library only its ``LD_LIBRARY_PATH`` names: the child's preflight imports it. A
+    preload, credentials, proxies and an import path stay out."""
+    for name, value in {
         "PATH": "/usr/bin",
         "LD_LIBRARY_PATH": "/opt/venv/lib/python3.12/site-packages/_rocm_sdk_devel/lib",
+        "LD_PRELOAD": "/tmp/hook.so",
         "HF_TOKEN": "SECRET",
         "HTTPS_PROXY": "http://proxy",
         "PYTHONPATH": "/elsewhere",
-    }
+    }.items():
+        monkeypatch.setenv(name, value)
 
-    given = _child_environment(tmp_path, environ)
+    given = _child_environment(tmp_path)
 
     assert given == {
         "PATH": "/usr/bin",
@@ -304,7 +310,9 @@ def test_the_child_is_given_the_images_library_search_path_and_no_other_variable
         "LC_ALL": "C.UTF-8",
         "LD_LIBRARY_PATH": "/opt/venv/lib/python3.12/site-packages/_rocm_sdk_devel/lib",
     }
-    assert "LD_LIBRARY_PATH" not in _child_environment(tmp_path, {"PATH": "/usr/bin", "LD_LIBRARY_PATH": ""})
+    assert isolated.CHILD_PASSED_ENV_NAMES == ("LD_LIBRARY_PATH",)
+    monkeypatch.setenv("LD_LIBRARY_PATH", "")
+    assert "LD_LIBRARY_PATH" not in _child_environment(tmp_path)
 
 
 def test_under_bubblewrap_the_images_library_search_path_is_bound_for_the_child(
@@ -324,7 +332,9 @@ def test_under_bubblewrap_the_images_library_search_path_is_bound_for_the_child(
     assert str(library) in policy.read_only
 
 
-def test_a_torch_that_needs_the_images_library_path_imports_only_in_the_childs_environment(tmp_path: Path) -> None:
+def test_a_torch_that_needs_the_images_library_path_imports_only_in_the_childs_environment(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """A stand-in for the image's torch, which loads ``libamd_smi.so`` from a directory only ``LD_LIBRARY_PATH`` names:
     the probe fails without that path and passes in the environment the child is given."""
     library = tmp_path / "sdk" / "lib"
@@ -344,9 +354,14 @@ def test_a_torch_that_needs_the_images_library_path_imports_only_in_the_childs_e
     work.mkdir()
     site = {"PYTHONPATH": str(package.parent)}
 
-    reduced = probe_torch_abi(sys.executable, env={**_child_environment(work, {"PATH": os.defpath}), **site})
-    given = _child_environment(work, {"PATH": os.defpath, "LD_LIBRARY_PATH": str(library)})
-    probed = probe_torch_abi(sys.executable, env={**given, **site})
+    def in_child(environment: dict[str, str]):
+        return lambda argv, **kwargs: subprocess.run(argv, env={**environment, **site}, **kwargs)
+
+    monkeypatch.setenv("PATH", os.defpath)
+    monkeypatch.delenv("LD_LIBRARY_PATH", raising=False)
+    reduced = probe_torch_abi(sys.executable, run=in_child(_child_environment(work)))
+    monkeypatch.setenv("LD_LIBRARY_PATH", str(library))
+    probed = probe_torch_abi(sys.executable, run=in_child(_child_environment(work)))
 
     assert not reduced["is_rocm"] and "libamd_smi.so" in reduced["error"]
     assert probed["is_rocm"] and probed["torch_version"] == "2.11.0+rocm10.0.0" and "error" not in probed

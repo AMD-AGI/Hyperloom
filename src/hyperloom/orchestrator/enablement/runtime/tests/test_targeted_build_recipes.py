@@ -16,6 +16,7 @@ from types import SimpleNamespace
 import pytest
 
 from hyperloom.orchestrator.enablement.runtime.build_actions import TargetedBuildAction
+from hyperloom.orchestrator.enablement.runtime.build_utils import ABI_PROBE_MARKER
 from hyperloom.orchestrator.enablement.runtime.targeted_build import (
     _driver_main,
     _load_result_json,
@@ -131,7 +132,7 @@ def _make_aiter_run(
                 "python_version": "3.12.13",
                 "is_rocm": hip_ok,
             }
-            return _completed(stdout=json.dumps(data) + "\n")
+            return _completed(stdout=ABI_PROBE_MARKER + json.dumps(data) + "\n")
         if "which hipcc" in cmd:
             return _completed(stdout=toolchain_hipcc + "\n" if toolchain_hipcc else "")
         if "dirname" in cmd:
@@ -221,7 +222,8 @@ def _make_rocm_run(
             )
         if "is_rocm" in cmd:
             return _completed(
-                stdout=json.dumps(
+                stdout=ABI_PROBE_MARKER
+                + json.dumps(
                     {
                         "torch_version": torch_ver,
                         "hip_version": "7.2.53211",
@@ -811,7 +813,8 @@ def test_vllm_source_python_version_abi_guard(monkeypatch, tmp_path):
         cmd = " ".join(str(a) for a in argv)
         if "is_rocm" in cmd:
             return _completed(
-                stdout=json.dumps(
+                stdout=ABI_PROBE_MARKER
+                + json.dumps(
                     {
                         "torch_version": "2.10.0",
                         "hip_version": "7.2",

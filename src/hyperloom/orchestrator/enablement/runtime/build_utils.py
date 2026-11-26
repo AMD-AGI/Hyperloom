@@ -5,7 +5,6 @@
 
 from __future__ import annotations
 
-import re
 import subprocess
 from collections.abc import Iterator
 from contextlib import contextmanager
@@ -258,8 +257,6 @@ _ABI_PROBE = (
 )
 _ABI_PROBE_TIMEOUT_SEC = 30
 _ABI_PROBE_TAIL = 800
-#: A ROCm build label in a torch version (``2.11.0+rocm10.0.0``, ``2.9.0+rocm7.0``).
-_ROCM_LOCAL_VERSION = re.compile(r"\+rocm\d", re.IGNORECASE)
 
 
 def _empty_abi(error: str) -> dict[str, Any]:
@@ -272,12 +269,12 @@ def _tail(text: str) -> str:
 
 
 def _abi_line(stdout: str) -> dict[str, Any] | None:
-    """The facts of the last marked line of ``stdout``; without one, the last line that is a JSON object."""
+    """The facts of the last marked line of ``stdout``."""
     import json
 
     lines = [line.strip() for line in (stdout or "").splitlines() if line.strip()]
     marked = [line[len(ABI_PROBE_MARKER) :] for line in lines if line.startswith(ABI_PROBE_MARKER)]
-    for candidate in reversed(marked or [line for line in lines if line.startswith("{")]):
+    for candidate in reversed(marked):
         try:
             facts = json.loads(candidate)
         except ValueError:
@@ -291,19 +288,15 @@ def probe_torch_abi(
     python_exe: str,
     *,
     run: _RunCallable = subprocess.run,
-    env: Mapping[str, str] | None = None,
 ) -> dict[str, Any]:
     """Return torch/Python ABI facts from the given interpreter.
 
     The facts are read from the probe's marked stdout line only, so other output cannot break the parse. torch is a
-    ROCm build when ``torch.version.hip`` is set or its version carries a ``+rocmN`` label. When the probe fails the
-    result's ``error`` names the return code and the tail of its stderr; ``torch_version`` is then empty.
+    ROCm build when ``torch.version.hip`` is set. When the probe fails the result's ``error`` names the return code and
+    the tail of its stderr; ``torch_version`` is then empty.
     """
-    kwargs: dict[str, Any] = {"capture_output": True, "text": True, "timeout": _ABI_PROBE_TIMEOUT_SEC}
-    if env is not None:
-        kwargs["env"] = dict(env)
     try:
-        res = run([python_exe, "-c", _ABI_PROBE], **kwargs)
+        res = run([python_exe, "-c", _ABI_PROBE], capture_output=True, text=True, timeout=_ABI_PROBE_TIMEOUT_SEC)
     except subprocess.TimeoutExpired:
         return _empty_abi(f"the torch probe of {python_exe} timed out after {_ABI_PROBE_TIMEOUT_SEC}s")
     except OSError as exc:
@@ -315,13 +308,11 @@ def probe_torch_abi(
     if facts is None:
         detail = _tail(stderr) or _tail(stdout) or "no output"
         return _empty_abi(f"the torch probe of {python_exe} failed (rc={rc}): {detail}")
-    torch_version = str(facts.get("torch_version") or "")
-    hip_version = str(facts.get("hip_version") or "")
     return {
-        "torch_version": torch_version,
-        "hip_version": hip_version,
+        "torch_version": str(facts.get("torch_version") or ""),
+        "hip_version": str(facts.get("hip_version") or ""),
         "python_version": str(facts.get("python_version") or ""),
-        "is_rocm": bool(facts.get("is_rocm", hip_version)) or bool(_ROCM_LOCAL_VERSION.search(torch_version)),
+        "is_rocm": bool(facts.get("is_rocm")),
     }
 
 

@@ -590,6 +590,32 @@ def test_csv_jit_kernel_rows_gives_the_ck_fallbacks_of_triton_and_flydsl_rows(tm
     assert aj.csv_jit_kernel_rows(table, frozenset({("gfx950", 304)})) == []
 
 
+_A4W4_HEADER = "gfx,cu_num,M,N,K,kernelId,splitK,us,kernelName,tflops,bw,errRatio,fallbackKernelName,fallbackSplitK\n"
+
+
+def test_csv_jit_kernel_rows_requires_no_fallback_named_0(tmp_path):
+    """aiter writes ``0`` for a row with no fallback; no kernel of that name is built."""
+    table = tmp_path / "narrow_n_a4w4_blockscale_tuned_gemm.csv"
+    table.write_text(
+        _A4W4_HEADER
+        + "gfx950,256,64,256,8192,-1,0,6.3256,triton_preshuffle_bm32_bn64_bk256_ks8,42.44,212.39,0.01,0,0\n",
+        encoding="utf-8",
+    )
+    assert aj.csv_jit_kernel_rows(table) == []
+
+
+def test_csv_jit_kernel_rows_keeps_a_fallback_beside_a_ck_row_of_the_same_shape(tmp_path):
+    """A CK row and a Triton row's CK fallback of the same shape are both built: neither replaces the other."""
+    table = tmp_path / "a4w4_blockscale_tuned_gemm.csv"
+    table.write_text(
+        _A4W4_HEADER
+        + "gfx950,256,32,512,4096,1,0,6.1,a4w4_blockscale_ck_row,1,1,0.0,,0\n"
+        + "gfx950,256,32,512,4096,-1,0,5.2,triton_preshuffle_bm32_bn128_bk256_ks8,1,1,0.01,a4w4_blockscale_ck_fallback,0\n",
+        encoding="utf-8",
+    )
+    assert aj.csv_jit_kernel_rows(table) == [("a4w4_blockscale_ck_row", ""), ("a4w4_blockscale_ck_fallback", "")]
+
+
 def test_a4w4_module_with_the_ck_fallbacks_covers_the_narrow_n_table(tmp_path):
     jit_dir = tmp_path / "jit"
     jit_dir.mkdir()
