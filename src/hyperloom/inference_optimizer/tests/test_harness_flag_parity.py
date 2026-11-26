@@ -196,6 +196,27 @@ def test_an_agentx_candidate_adding_a_harness_flag_is_refused():
         apply_launch_changes(benchmark, LaunchChanges(args=NO_PC))
 
 
+def _agentx_launch_with_the_operators_flag() -> dict:
+    return {
+        "agentx": {"enabled": True, "launch_overrides": {"version": 1, "append_args": ["--max-num-seqs=256", NO_PC]}}
+    }
+
+
+def test_an_agentx_candidate_inheriting_the_accepted_harness_flag_is_launched():
+    from hyperloom.orchestrator.actions.executors.agentx_point import LaunchChanges, apply_launch_changes
+
+    benchmark = _agentx_launch_with_the_operators_flag()
+    apply_launch_changes(benchmark, LaunchChanges(args="--max-num-batched-tokens 16384"))
+    assert NO_PC in benchmark["agentx"]["launch_overrides"]["append_args"]
+
+
+def test_an_agentx_candidate_removing_the_accepted_harness_flag_is_refused():
+    from hyperloom.orchestrator.actions.executors.agentx_point import LaunchChanges, apply_launch_changes
+
+    with pytest.raises(HarnessFlagChangeError, match=NO_PC):
+        apply_launch_changes(_agentx_launch_with_the_operators_flag(), LaunchChanges(remove_args=[NO_PC]))
+
+
 def test_the_launch_refuses_a_harness_flag_set_through_the_variants_env(tmp_path):
     from hyperloom.orchestrator.actions.executors.grid._grid_runner import _build_variant_yaml
 
