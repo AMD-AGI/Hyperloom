@@ -35,7 +35,6 @@ from hyperloom_multibranch.scheduling.hosted_run import (
     GrantEnd,
     final_reserve_seconds,
     grant_end,
-    grant_explore_cap,
 )
 from hyperloom_multibranch.scheduling.final import FinalCandidate, FinalCandidates, FinalSelector
 from hyperloom_multibranch.scheduling.requests import SessionChecks
@@ -72,11 +71,8 @@ def _host(tmp_path: Path, **grant: int) -> HostInfo:
 
 
 @pytest.mark.parametrize("grant", [{}, {"max_gpus": 8}], ids=["no_grant", "no_runtime"])
-def test_a_run_whose_grant_states_no_runtime_has_no_grant_end_and_no_explore_cap(
-    tmp_path: Path, grant: dict[str, int]
-) -> None:
+def test_a_run_whose_grant_states_no_runtime_has_no_grant_end(tmp_path: Path, grant: dict[str, int]) -> None:
     assert grant_end(_host(tmp_path, **grant)) is None
-    assert grant_explore_cap(_host(tmp_path, **grant)) is None
 
 
 def test_the_reserve_of_one_test_covers_the_wind_down_three_attempts_their_backoff_and_a_cold_start() -> None:

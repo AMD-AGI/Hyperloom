@@ -18,7 +18,7 @@ SESSION_MINUTES = 24 * 60
 KERNEL_PCT = 0.15
 # Three entries of 3h each.
 ENTRY_SEC = 3 * 3600.0
-# Interleaved SWEEP segment, so KERNEL's total can never be confused with plain wall-clock elapsed since its first
+# Interleaved CYCLE_END segment, so KERNEL's total can never be confused with plain wall-clock elapsed since its first
 # entry.
 GAP_SEC = 600.0
 # A real epoch: zero reads as "phase not entered yet" throughout the machine.
@@ -57,12 +57,12 @@ def _enter(state: SharedState, phase: str, at_unix: float) -> None:
 
 
 def _three_kernel_entries(state: SharedState) -> float:
-    """Run KERNEL -> SWEEP three times; return the unix time after the third exit."""
+    """Run KERNEL -> CYCLE_END three times; return the unix time after the third exit."""
     now = T0
     for _ in range(3):
         _enter(state, ps.PHASE_KERNEL_AGENT, now)
         now += ENTRY_SEC
-        _enter(state, ps.PHASE_SWEEP, now)
+        _enter(state, ps.PHASE_CYCLE_END, now)
         now += GAP_SEC
     return now
 
@@ -75,7 +75,7 @@ def test_cumulative_time_sums_every_entry():
         exit_at = now + ENTRY_SEC
         assert ps.phase_elapsed_seconds(state, now_unix=exit_at) == ENTRY_SEC
         assert ps.phase_cumulative_seconds(state, now_unix=exit_at) == pytest.approx(ENTRY_SEC * (entry + 1))
-        _enter(state, ps.PHASE_SWEEP, exit_at)
+        _enter(state, ps.PHASE_CYCLE_END, exit_at)
         now = exit_at + GAP_SEC
 
     assert ps.phase_cumulative_seconds(
@@ -128,7 +128,7 @@ def test_a_macro_cycle_reentry_gets_budget_while_the_session_has_time_left():
         ps.PHASE_PRELUDE: 0.03,
         ps.PHASE_FRAMEWORK_AGENT: 0.80,
         ps.PHASE_KERNEL_AGENT: 0.0,
-        ps.PHASE_SWEEP: 0.10555555555555557,
+        ps.PHASE_CYCLE_END: 0.10555555555555557,
         ps.PHASE_CLOSE: 0.02,
     }
 
@@ -137,7 +137,7 @@ def test_a_macro_cycle_reentry_gets_budget_while_the_session_has_time_left():
     now += 9579.0
     _enter(state, ps.PHASE_FRAMEWORK_AGENT, now)
     now += 27567.0
-    _enter(state, ps.PHASE_SWEEP, now)
+    _enter(state, ps.PHASE_CYCLE_END, now)
     now += 67.0
     _enter(state, ps.PHASE_FRAMEWORK_AGENT, now)
 
@@ -150,13 +150,13 @@ def test_totals_accumulate_for_every_phase_not_just_explore():
     state = SharedState()
     _enter(state, ps.PHASE_FRAMEWORK_AGENT, T0)
     _enter(state, ps.PHASE_KERNEL_AGENT, T0 + 100.0)
-    _enter(state, ps.PHASE_SWEEP, T0 + 250.0)
+    _enter(state, ps.PHASE_CYCLE_END, T0 + 250.0)
     _enter(state, ps.PHASE_FRAMEWORK_AGENT, T0 + 300.0)
 
     assert state.phase_elapsed_totals == {
         ps.PHASE_FRAMEWORK_AGENT: 100.0,
         ps.PHASE_KERNEL_AGENT: 150.0,
-        ps.PHASE_SWEEP: 50.0,
+        ps.PHASE_CYCLE_END: 50.0,
     }
 
 
@@ -249,6 +249,6 @@ def test_budget_exit_evidence_reports_the_time_it_judged_on():
 
     assert out is not None
     target, reason, evidence = out
-    assert (target, reason) == (ps.PHASE_SWEEP, "kernel_phase_budget_exhausted")
+    assert (target, reason) == (ps.PHASE_CYCLE_END, "kernel_phase_budget_exhausted")
     assert evidence["entry_elapsed_seconds"] == pytest.approx(ENTRY_SEC)
     assert evidence["cumulative_elapsed_seconds"] == pytest.approx(3 * ENTRY_SEC)

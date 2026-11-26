@@ -27,9 +27,12 @@ improvements rarely makes room for a change it already turned down twice. The co
 merge attempt the candidate took part in, so a conflict on a later head, which replaces its latest merge, does not
 reset it.
 
-The commits offered on a head come in two groups, each in the order the blackboard gives them: first those no merge
-attempt took yet, then those coming back. The integration branch tests only as many merges at a time as its K, and a
-commit waiting for its first answer learns more, and tells its branch more, than one coming back for another.
+The commits offered on a head come in three groups, each in the order the blackboard gives them: first those whose
+latest merge test a round superseded, then those no merge attempt took yet, then the others coming back. A superseded
+commit was measured as one that may be merged and lost only to another of its round; behind every new commit it would
+meet a head that has moved further from the one it was measured on. The integration branch tests only as many merges
+at a time as its K, and a commit waiting for its first answer learns more, and tells its branch more, than one coming
+back for another.
 
 A commit that a retraction on its branch was committed on top of is never offered: the retraction undoes a change one
 of those commits made, the agent found that change invalid, and merging the retraction carries what the rest changed.
@@ -150,7 +153,9 @@ class Candidates:
     A commit's recipe never changes and a patch's text is fixed by its sha256, so each is read from ``repo`` once:
     the idle merge loop asks on every tick, and both sides of the overlap are changes between commits already read.
     The blackboard keeps only a candidate's latest merge, so the merge tests that ended as infrastructure failures are
-    tallied here as the integrator records each that measured nothing.
+    tallied here as the integrator records each that measured nothing. It leaves a superseded merge test pending as
+    it does one whose regression set did not run clean, so the integrator notes those here too; after a restart a
+    superseded commit comes back with the others.
     """
 
     def __init__(self, blackboard: CandidateBlackboard, repo: ExperimentRepo) -> None:
@@ -159,11 +164,12 @@ class Candidates:
         self._recipes: dict[str, Recipe] = {}
         self._patched: dict[str, frozenset[str]] = {}
         self._infra_ended: dict[str, set[str]] = {}
+        self._superseded: set[str] = set()
         self._retractions: dict[str, bool] = {}
 
     async def offered_on(self, head: str) -> tuple[CommittedCommit, ...]:
-        """The committed commits to test on ``head``: those no merge attempt took yet, then those coming back, each in
-        the order the blackboard gives them."""
+        """The committed commits to test on ``head``: those whose latest merge test a round superseded, then those no
+        merge attempt took yet, then the others coming back, each in the order the blackboard gives them."""
 
         committed = await self._blackboard.committed()
         unmerged = {commit.commit_id: commit for commit in committed if commit.merged_into is None}
@@ -172,7 +178,21 @@ class Candidates:
         for commit in committed:
             if commit.commit_id not in retracted and await self._offered(commit, head, unmerged):
                 offered.append(commit)
-        return tuple(sorted(offered, key=lambda commit: commit.merge_attempts > 0))
+        return tuple(sorted(offered, key=self._turn))
+
+    def _turn(self, commit: CommittedCommit) -> int:
+        """The group ``commit`` is offered in, the lowest first."""
+
+        last = commit.last_merge
+        if last is not None and last.request_id in self._superseded:
+            return 0
+        return 2 if commit.merge_attempts else 1
+
+    def record_superseded(self, request_id: str) -> None:
+        """Note ``request_id``, a merge test judged as one that may be merged which another merge of its round
+        superseded."""
+
+        self._superseded.add(request_id)
 
     async def _retracted(self, committed: tuple[CommittedCommit, ...]) -> set[str]:
         """The commits a retraction on their branch was committed on top of. The retraction undoes a change one of them

@@ -5,6 +5,8 @@
 
 from __future__ import annotations
 
+from kernelforge.tests.workflows.forge_loop.iteration._iteration_loop import lane_agents
+
 import asyncio
 
 import pytest
@@ -13,7 +15,6 @@ from kernelforge.workflows.forge_loop.iteration import runner as runner_module
 from kernelforge.workflows.forge_loop.campaign.run_state import (
     IterationVerdict,
     LoopStanding,
-    StallPolicy,
     PHASE_STALLED,
     _RECENT_RESULT_CACHE,
     BestRecord,
@@ -123,84 +124,6 @@ def test_warm_start_search_policy_is_exploit_and_persisted(
     assert persisted.search_reason_codes == ["KB_WARM_START_EXPLOIT"]
 
 
-def test_completed_diversify_cycle_enters_bounded_exploit_residence(
-    tmp_path,
-    monkeypatch,
-):
-    loop, workspace = _make_loop(
-        tmp_path,
-        monkeypatch,
-        supervise_after=3,
-    )
-    loop.state_store = LoopStateStore(str(workspace))
-    loop.run_state = RunState(
-        search_mode="DIVERSIFY",
-        diversification_cycle_completed=True,
-        best=BestRecord(
-            iteration=0,
-            mean_case_speedup=1.2,
-            commit_hash="warm-commit",
-            source="warm_start",
-        ),
-    )
-    loop.handoff_store = runner_module.HandoffStore(str(workspace))
-    loop.run_state.stall.unresolved_stall_iters = 1
-
-    exploit = loop._update_search_policy(2)
-    residence = loop._update_search_policy(3)
-
-    assert exploit.mode == "EXPLOIT"
-    assert exploit.reason_codes == ("DIVERSIFY_PLAN_CREATED",)
-    assert exploit.residence_iterations_remaining == 2
-    assert residence.mode == "EXPLOIT"
-    assert residence.reason_codes == ("MODE_RESIDENCE",)
-    assert residence.residence_iterations_remaining == 1
-
-
-def test_search_policy_uses_run_state_when_handoff_is_unavailable(
-    tmp_path,
-    monkeypatch,
-):
-    loop, workspace = _make_loop(
-        tmp_path,
-        monkeypatch,
-        supervise_after=3,
-    )
-    loop.state_store = LoopStateStore(str(workspace))
-    loop.handoff_store = None
-    loop.run_state = RunState(search_mode="DIVERSIFY")
-
-    loop._apply_iteration_planning_state(
-        optimization_plan_created=True,
-    )
-    decision = loop._update_search_policy(2)
-
-    assert decision.reason_codes == ("DIVERSIFY_PLAN_CREATED",)
-    assert decision.mode == "EXPLOIT"
-
-
-def test_unsuccessful_diversify_cycle_stays_in_diversify(
-    tmp_path,
-    monkeypatch,
-):
-    loop, workspace = _make_loop(
-        tmp_path,
-        monkeypatch,
-        supervise_after=3,
-    )
-    loop.state_store = LoopStateStore(str(workspace))
-    loop.run_state = RunState(search_mode="DIVERSIFY")
-    loop.run_state.stall.unresolved_stall_iters = 5
-
-    loop._apply_iteration_planning_state(
-        optimization_plan_created=False,
-    )
-    decision = loop._update_search_policy(4)
-
-    assert decision.reason_codes == ("NO_IMPROVEMENT_STALL",)
-    assert decision.mode == "DIVERSIFY"
-
-
 def test_a_supervisor_intervention_no_longer_erases_the_stall_it_answers(
     tmp_path,
     monkeypatch,
@@ -230,7 +153,7 @@ def test_a_supervisor_intervention_no_longer_erases_the_stall_it_answers(
                 plan="another pass over the same loop body",
             ),
             LoopStanding(baseline_wall_ms=1.0, best_wall_ms=1.0),
-            StallPolicy(stall_threshold=3),
+            stall_threshold=3,
         )
         loop.monitor.record(kept=False)
 
@@ -335,7 +258,7 @@ def test_a_diversification_starts_the_marginal_gain_window_again():
 
 @pytest.mark.parametrize(
     "failed_decision",
-    ["AGENT_ERROR", "API_ERROR", "ORCHESTRATION_ERROR"],
+    ["AGENT_ERROR", "API_ERROR"],
 )
 def test_a_diversification_that_concluded_nothing_is_still_a_boundary(
     failed_decision,
@@ -344,8 +267,7 @@ def test_a_diversification_that_concluded_nothing_is_still_a_boundary(
 
     The outcomes that fired the trigger are on the far side of it. If the failed
     round is skipped before its mode is read, the scan walks back into them and
-    the campaign diversifies again on evidence it already spent -- with only
-    mode residence left to brake it.
+    the campaign diversifies again on evidence it already spent.
     """
     older = [_kept_outcome(offset + 1, 1.50 + 0.005 * offset) for offset in range(MARGINAL_GAIN_WINDOW + 1)]
     failed = make_event(
@@ -497,7 +419,7 @@ def test_repeated_empty_diffs_escalate_before_the_generic_stall_threshold(
         observed_modes.append(loop.run_state.search_mode)
         return "No source change was needed."
 
-    asyncio.run(loop.run(runner_module.LoopAgents(agent_fn=stuck_agent, supervisor_fn=_unused_supervisor)))
+    asyncio.run(loop.run(lane_agents(stuck_agent, supervisor_fn=_unused_supervisor)))
 
     store = LoopStateStore(str(workspace))
     state = store.load()
@@ -513,7 +435,7 @@ def test_single_empty_diff_does_not_escalate(tmp_path, monkeypatch):
     """One session that found nothing to change is not proof of a dead end."""
     loop, workspace = _make_loop(tmp_path, monkeypatch)
 
-    asyncio.run(loop.run(runner_module.LoopAgents(agent_fn=_no_change_agent, supervisor_fn=_unused_supervisor)))
+    asyncio.run(loop.run(lane_agents(_no_change_agent, supervisor_fn=_unused_supervisor)))
 
     state = LoopStateStore(str(workspace)).load()
 
@@ -546,7 +468,7 @@ def test_the_empty_diff_streak_survives_a_reworded_plan_headline(
         observed_modes.append(loop.run_state.search_mode)
         return "No source change was needed."
 
-    asyncio.run(loop.run(runner_module.LoopAgents(agent_fn=reworded_agent, supervisor_fn=_unused_supervisor)))
+    asyncio.run(loop.run(lane_agents(reworded_agent, supervisor_fn=_unused_supervisor)))
 
     store = LoopStateStore(str(workspace))
     state = store.load()
@@ -580,7 +502,7 @@ def test_api_outage_does_not_break_the_empty_diff_streak(tmp_path, monkeypatch):
             return "agent session ended with an API error"
         return "No source change was needed."
 
-    asyncio.run(loop.run(runner_module.LoopAgents(agent_fn=flaky_agent, supervisor_fn=_unused_supervisor)))
+    asyncio.run(loop.run(lane_agents(flaky_agent, supervisor_fn=_unused_supervisor)))
 
     store = LoopStateStore(str(workspace))
     state = store.load()
@@ -613,7 +535,7 @@ def test_a_crashed_session_does_not_break_the_empty_diff_streak(
             raise RuntimeError("SDK stream died mid-session")
         return "No source change was needed."
 
-    asyncio.run(loop.run(runner_module.LoopAgents(agent_fn=crashing_agent, supervisor_fn=_unused_supervisor)))
+    asyncio.run(loop.run(lane_agents(crashing_agent, supervisor_fn=_unused_supervisor)))
 
     store = LoopStateStore(str(workspace))
     state = store.load()
@@ -652,7 +574,7 @@ def test_an_outage_run_cannot_push_the_first_empty_diff_out_of_the_window(
             return "agent session ended with an API error"
         return "No source change was needed."
 
-    asyncio.run(loop.run(runner_module.LoopAgents(agent_fn=outage_agent, supervisor_fn=_unused_supervisor)))
+    asyncio.run(loop.run(lane_agents(outage_agent, supervisor_fn=_unused_supervisor)))
 
     reopened = LoopStateStore(str(workspace))
     live = reopened.load()

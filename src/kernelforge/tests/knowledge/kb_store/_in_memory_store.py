@@ -118,8 +118,7 @@ class InMemoryKBStore:
             }
         )
 
-    def list_session_files(self, canonical_id, session_id, *, kind=""):
-        del kind
+    def list_session_files(self, canonical_id, session_id):
         return {
             "files": [
                 {
@@ -132,27 +131,34 @@ class InMemoryKBStore:
             ]
         }
 
-    def put_knowledge(self, canonical_id, knowledge, *, session_id="", mode="merge"):
-        # Mirrors the SDK: "merge" shallow-merges over the stored section and "replace" overwrites it.
-        if mode not in ("merge", "replace"):
-            raise record_store.KBStoreError(f"mode must be 'merge' or 'replace', got {mode!r}")
+    def _record(self, canonical_id, session_id):
         key = (canonical_id, session_id)
         if key not in self.knowledge:
             self.order.append(key)
-        if mode == "merge":
-            merged = dict(self.knowledge.get(key) or {})
-            merged.update(knowledge)
-            self.knowledge[key] = merged
-        else:
-            self.knowledge[key] = dict(knowledge)
-        return {"session_id": session_id, "mode": mode}
+        return key
 
-    def put_file(self, canonical_id, session_id, rel_path, local_path, *, kind="other", meta=None):
-        self.files.setdefault((canonical_id, session_id), {})[rel_path] = Path(local_path).read_bytes()
-        return f"kb://{canonical_id}/{session_id}/{rel_path}"
+    def replace_knowledge(self, canonical_id, session_id, knowledge, *, scope=None, objective_schema=""):
+        self.knowledge[self._record(canonical_id, session_id)] = dict(knowledge)
+        return {"session_id": session_id, "mode": "replace"}
 
-    def download_session(self, canonical_id, session_id, destination, *, include_values=True):
-        del include_values
+    def merge_knowledge(self, canonical_id, session_id, knowledge):
+        # Mirrors the service: a merge shallow-merges over the stored document.
+        key = self._record(canonical_id, session_id)
+        merged = dict(self.knowledge.get(key) or {})
+        merged.update(knowledge)
+        self.knowledge[key] = merged
+        return {"session_id": session_id, "mode": "merge"}
+
+    def put_files(self, canonical_id, session_id, uploads):
+        stored = self.files.setdefault((canonical_id, session_id), {})
+        refs = {}
+        for upload in uploads:
+            stored[upload.path] = Path(upload.source).read_bytes()
+            refs[upload.path] = f"kb://{canonical_id}/{session_id}/{upload.path}"
+        return refs
+
+    def download_session(self, canonical_id, session_id, destination, *, listing=None):
+        del listing
         self.downloads.append((canonical_id, session_id))
         root = Path(destination) / "files"
         root.mkdir(parents=True, exist_ok=True)

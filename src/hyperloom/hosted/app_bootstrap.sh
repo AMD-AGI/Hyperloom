@@ -6,16 +6,18 @@
 #
 # The host runs this script as the application's command. It
 #   1. reads the version to run from HYPERLOOM_SOURCE_REPO and HYPERLOOM_SOURCE_SHA (a full commit id),
-#   2. checks that this account can write the state directory and USER_DATA_PATH: the legs of a run may be different
-#      accounts of one group on the shared storage, and a directory an earlier leg left without group write ends the
-#      run here, naming it, instead of at its first write,
+#   2. takes HYPERLOOM_USER_DATA_PATH, when it is set and not empty, as USER_DATA_PATH (the host reserves that one to
+#      itself), and checks that this account can write the state directory and USER_DATA_PATH: the legs of a run may
+#      be different accounts of one group on the shared storage, and a directory an earlier leg left without group
+#      write ends the run here, naming it, instead of at its first write,
 #   3. builds the wheel for that commit in a directory of its own on the container's disk (never on the shared storage,
 #      where another account of the group could put a wheel of its own in its place before the install) and installs
 #      that wheel, and nothing else, into the framework Python's environment (the one the legacy flow's install.sh
 #      installs into, with the image's torch and ROCm stack) when this account can write it, and otherwise into a
 #      virtual environment beside it, ${TMPDIR:-/tmp}/hyperloom-venv, that sees that stack (below). The runtime
-#      dependencies are not installed here: the entry runs the wheel's install.sh before optimize, which resolves them
-#      in the environment the wheel went into, as the legacy launchers do,
+#      dependencies are not installed here: the entry runs the wheel's install.sh before it hands the run to
+#      hyperloom-multibranch, and install.sh resolves them in the environment the wheel went into, as the legacy
+#      launchers do,
 #   4. sets HYPERLOOM_CODE_REVISION=<sha> and runs `python -m hyperloom hosted run` with the Python of that environment
 #      (the framework's, or the venv's, whose bin directory then leads PATH, ahead of the framework's).
 #
@@ -87,6 +89,14 @@ fail() {
   echo "hosted bootstrap: $1" >&2
   exit 1
 }
+
+# A deployment that keeps hosted sessions under one root of its own names it here: the host reserves USER_DATA_PATH to
+# itself and points it at the submitting user's directory. The value replaces USER_DATA_PATH before any check below,
+# so each check, the entry and the commands it runs see the new root alone. Empty or unset, USER_DATA_PATH stays.
+if [[ -n "${HYPERLOOM_USER_DATA_PATH:-}" ]]; then
+  echo "hosted bootstrap: USER_DATA_PATH is $HYPERLOOM_USER_DATA_PATH (HYPERLOOM_USER_DATA_PATH; was ${USER_DATA_PATH:-unset})" >&2
+  export USER_DATA_PATH="$HYPERLOOM_USER_DATA_PATH"
+fi
 
 [[ -n "$state_dir" && "$state_dir" == /* ]] || fail_final "HYPERLOOM_STATE_DIR is not an absolute path"
 [[ "${USER_DATA_PATH:-}" == /* ]] || fail_final "USER_DATA_PATH is not an absolute path"

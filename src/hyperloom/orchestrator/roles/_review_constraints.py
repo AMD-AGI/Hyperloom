@@ -22,7 +22,7 @@ def apply_review_constraints(
     phase: str,
     action_verdict_policy: dict[str, str],
 ) -> None:
-    """Stamp this turn's review constraints onto the judge bundle: policy, phase, lever and the advisory rules."""
+    """Stamp this turn's review constraints onto the judge bundle: policy, phase and lever."""
     if action_verdict_policy:
         rc = judge_bundle.setdefault("review_constraints", {})
         if not isinstance(rc, dict):
@@ -32,8 +32,6 @@ def apply_review_constraints(
     _inject_phase_constraints(judge_bundle, phase)
     # The lever says what a KEEP has to clear; the phase cannot, since one phase carries several levers.
     _inject_lever_orientation(judge_bundle, _first_proposal(judge_bundle))
-    _maybe_inject_cross_domain_constraints(judge_bundle)
-    _maybe_inject_quantitative_claim_constraint(judge_bundle)
 
 
 def _first_proposal(judge_bundle: dict[str, Any]) -> dict[str, Any] | None:
@@ -43,21 +41,6 @@ def _first_proposal(judge_bundle: dict[str, Any]) -> dict[str, Any] | None:
         return None
     first = proposals[0]
     return first if isinstance(first, dict) else None
-
-
-def _proposal_scope_literal(proposal: dict[str, Any]) -> str:
-    """Read the ``scope`` dial off a proposal (top-level or nested ``params``)."""
-    if not isinstance(proposal, dict):
-        return ""
-    top = proposal.get("scope")
-    if isinstance(top, str) and top.strip():
-        return top.strip()
-    params = proposal.get("params") or {}
-    if isinstance(params, dict):
-        nested = params.get("scope")
-        if isinstance(nested, str):
-            return nested.strip()
-    return ""
 
 
 # Per-phase review orientation; only the live phase's entry is injected.
@@ -90,7 +73,7 @@ _PHASE_ORIENTATION: dict[str, str] = {
         "REQUEST) plus auto-managed `profile` / `roofline`. Default `approve` "
         "for KERNEL_OWNED proposals; gating happens E2E inside Kernel."
     ),
-    "SWEEP": ("Typical proposal is `sweep`. Mismatches → `advise` with the phase hint."),
+    "CYCLE_END": ("The phase admits no proposal. Anything that reaches review → `advise` with the phase hint."),
     "CLOSE": (
         "Typical proposals are `report` and `session_breakdown`. Both are "
         "archival: they transcribe existing state and introduce no new "
@@ -150,42 +133,3 @@ def _inject_phase_constraints(judge_bundle: dict[str, Any], phase: str) -> None:
     rc = judge_bundle.setdefault("review_constraints", {})
     rc["phase"] = normalized
     rc["phase_orientation"] = _PHASE_ORIENTATION[normalized]
-
-
-def _maybe_inject_cross_domain_constraints(judge_bundle: dict[str, Any]) -> None:
-    """Set ``review_constraints.cross_domain`` + rule descriptors when any proposal is cross-domain (unified ``scope == 'domains'`` dial)."""
-    proposals = judge_bundle.get("proposals") or []
-    if not isinstance(proposals, list):
-        return
-    from ..specialists.patch_safety import cross_domain_rule_descriptors
-    from ..specialists.profile import SCOPE_DOMAINS
-
-    has_cross_domain = any(_proposal_scope_literal(p) == SCOPE_DOMAINS for p in proposals)
-    if not has_cross_domain:
-        return
-    rc = judge_bundle.setdefault("review_constraints", {})
-    if not isinstance(rc, dict):
-        rc = {}
-        judge_bundle["review_constraints"] = rc
-    rc["cross_domain"] = True
-    rc["cross_domain_rules"] = cross_domain_rule_descriptors()
-
-
-def _maybe_inject_quantitative_claim_constraint(judge_bundle: dict[str, Any]) -> None:
-    """Set ``review_constraints.quantitative_claim_rule`` from the enforced list."""
-    from ..specialists.patch_safety import (
-        advisory_rules_govern,
-        quantitative_claim_rule_descriptor,
-    )
-
-    proposals = judge_bundle.get("proposals") or []
-    if not isinstance(proposals, list):
-        return
-    governed = any(advisory_rules_govern(str(p.get("action_name") or "")) for p in proposals if isinstance(p, dict))
-    if not governed:
-        return
-    rc = judge_bundle.setdefault("review_constraints", {})
-    if not isinstance(rc, dict):
-        rc = {}
-        judge_bundle["review_constraints"] = rc
-    rc["quantitative_claim_rule"] = quantitative_claim_rule_descriptor()

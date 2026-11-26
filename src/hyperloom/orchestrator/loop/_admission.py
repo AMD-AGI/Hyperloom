@@ -215,10 +215,6 @@ class AdmissionMixin:
                 "hint": getattr(denied, "hint", ""),
             },
         )
-        # A cancelled conc_sweep never writes last_conc_sweep on its own, so SWEEP
-        # would idle. Stamp the skip here so SWEEP can exit.
-        if str(task.kind or "") == "conc_sweep":
-            self._coord.phase_sweep.record_session_budget_conc_sweep_skip(denied=denied)
         return True
 
     def admission_denial_for_request(

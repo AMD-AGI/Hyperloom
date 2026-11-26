@@ -23,6 +23,7 @@ from hyperloom.common.agent_isolation import BwrapIsolation, NoIsolation
 from hyperloom.common.tests._id_map_helpers import HOST_MAP, ONE_ID_MAP, use_id_maps
 from hyperloom.measure.jit.native.config import BuildStoreConfigError
 from hyperloom.measure.runner.native import isolated
+from hyperloom.measure.runner.native.recipes import CommitSource, native_recipes
 from hyperloom_multibranch.toolbox import build_preflight as preflight
 from hyperloom_multibranch.toolbox.build_preflight import (
     ImageUpstream,
@@ -114,6 +115,42 @@ def test_a_file_others_cannot_read_or_run_is_named(tree: Path) -> None:
     assert unreachable(target, run=True).endswith("does not let user 65534 run it")
 
 
+def _acl(*entries: tuple[int, int, int]) -> bytes:
+    """A ``system.posix_acl_access`` value: version 2, then (tag, permissions, id) per entry."""
+    return (2).to_bytes(4, "little") + b"".join(
+        tag.to_bytes(2, "little") + perm.to_bytes(2, "little") + uid.to_bytes(4, "little") for tag, perm, uid in entries
+    )
+
+
+_USER_OBJ, _USER, _GROUP_OBJ, _MASK, _OTHER = 0x01, 0x02, 0x04, 0x10, 0x20
+_UNDEFINED = 0xFFFFFFFF
+
+
+def _set_acl(path: Path, nobody: int, other: int) -> None:
+    entries = ((_USER_OBJ, 7, _UNDEFINED), (_USER, nobody, 65534), (_GROUP_OBJ, 0, _UNDEFINED))
+    try:
+        os.setxattr(
+            path, "system.posix_acl_access", _acl(*entries, (_MASK, 7, _UNDEFINED), (_OTHER, other, _UNDEFINED))
+        )
+    except OSError as error:
+        pytest.skip(f"this filesystem keeps no POSIX ACL: {error}")
+
+
+def test_a_directory_private_but_for_an_acl_entry_of_user_65534_is_passed_through(tree: Path) -> None:
+    _set_acl(tree / "a", nobody=0o1, other=0)
+
+    assert stat.S_IMODE(os.stat(tree / "a").st_mode) & 0o007 == 0
+    assert unreachable(tree / "a" / "b" / "file") is None
+
+
+def test_an_acl_entry_of_user_65534_that_withholds_access_blocks_it_whatever_others_may(tree: Path) -> None:
+    _set_acl(tree / "a", nobody=0, other=0o5)
+
+    problem = unreachable(tree / "a" / "b" / "file")
+
+    assert problem is not None and problem.endswith("does not let user 65534 pass through")
+
+
 def test_what_user_65534_owns_is_judged_by_the_owner_bits(tree: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     def owned_by_nobody(path: Path) -> os.stat_result:
         found = stat_open_above(tree)(path)
@@ -196,6 +233,12 @@ def test_without_an_installed_sglang_the_image_commit_is_its_checkout_head_or_un
         ImageUpstream("sgl_kernel", head, tmp_path / "sglang")
     ]
     assert _upstreams(tmp_path / "site", tmp_path / "none") == []
+
+
+def test_every_native_component_the_image_installs_says_where_its_upstream_commit_is_read() -> None:
+    from_image = {c for c, recipe in native_recipes().items() if recipe.commit_source is CommitSource.IMAGE_DIST}
+
+    assert set(preflight._DISTRIBUTIONS) == from_image
 
 
 # --- TraceLens ------------------------------------------------------------------------------------------------------

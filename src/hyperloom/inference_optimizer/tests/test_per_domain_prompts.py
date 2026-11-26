@@ -12,7 +12,6 @@ from hyperloom.orchestrator.specialists.domains import (
     SPECIALIST_DOMAINS,
     get_domain,
 )
-from hyperloom.orchestrator.prompts.specialist_focus import _DOMAIN_FOCUS_TEMPLATES
 from hyperloom.orchestrator.specialists.prompt_inputs import SpecialistPromptInputs
 from hyperloom.orchestrator.prompts.specialist_prompt_builder import build_specialist_prompts
 
@@ -37,12 +36,6 @@ def _build(domain_key: str) -> str:
     )
     system, user = build_specialist_prompts(inp)
     return system + "\n" + user
-
-
-# 1. Coverage — every catalogue domain has a focus template
-def test_every_domain_has_focus_template():
-    for domain in SPECIALIST_DOMAINS:
-        assert domain.key in _DOMAIN_FOCUS_TEMPLATES, f"missing per-domain template for {domain.key!r}"
 
 
 # 2. Per-domain output contracts — the keys each consumer parses back
@@ -407,20 +400,21 @@ def test_R2_unknown_domain_allowed(gate):
     )
 
 
-def test_R2_missing_gap_denied(gate):
+def test_R2_missing_gap_denied_and_params_left_untouched():
+    state = SharedState()
+    state.upsert_gap(
+        {"canonical_id": "gap.framework.scheduler", "domain_hint": "serving_specialist", "severity": "high"}
+    )
+    gate = PolicyGate(role_registry=default_role_registry(), shared_state=state)
+    params = {"domain": "serving_specialist"}
     with pytest.raises(PolicyDenied) as exc:
         gate.validate_intent(
             "orchestration",
-            Intent(
-                type=IntentType.DELEGATE,
-                payload={
-                    "action_name": "specialist",
-                    "params": {"domain": "serving_specialist"},
-                },
-            ),
+            Intent(type=IntentType.DELEGATE, payload={"action_name": "specialist", "params": params}),
         )
     assert exc.value.rule == "specialist_dispatch_source"
     assert "gap" in str(exc.value)
+    assert params == {"domain": "serving_specialist"}
 
 
 def test_R2_max_turns_excess_denied(gate):

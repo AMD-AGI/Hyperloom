@@ -1,8 +1,8 @@
 """The orchestration agent's directive for the next macro-cycle.
 
-A SWEEP-phase turn asks Orchestration how the next cycle should open; the reply
+A CYCLE_END-phase turn asks Orchestration how the next cycle should open; the reply
 becomes ``SharedState.orchestration_memory``, whose ``next_cycle_directive`` is
-injected into the next cycle's system prompt. Pure helpers; the SWEEP pump owns
+injected into the next cycle's system prompt. Pure helpers; the CYCLE_END pump owns
 the turn.
 """
 
@@ -29,7 +29,7 @@ _DIRECTIVE_POLICY_BLACKLIST: tuple[str, ...] = (
     "ignore policy",
 )
 
-# Appended to an ordinary Orchestration turn while SWEEP is open and another cycle is feasible.
+# Appended to an ordinary Orchestration turn while CYCLE_END is open and another cycle is feasible.
 CYCLE_DIRECTIVE_REQUEST: str = f"""\
 === MACRO-CYCLE HANDOFF ===
 This macro-cycle is ending. Reply in 1-3 plain sentences with the directive the

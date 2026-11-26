@@ -40,8 +40,6 @@ from hyperloom_common.jsonio import read_jsonl
 from hyperloom_common.tests.shared_accounts import Accounts, other_accounts
 from hyperloom.common.perf_metric import GRADED_INTVTY_P50, GRADED_OUTPUT
 from hyperloom_common.proctree import running
-from hyperloom.common.outside_facts.image_check import FactResult, ImageCheckFailed, ImageCheckMode, ImageCheckReport
-from hyperloom.common.outside_facts.image_check_eval import Status
 from hyperloom.common.outside_facts.rule_pack import rule_pack_identity
 from hyperloom.contracts.measurement import (
     NOT_REPRODUCED,
@@ -55,6 +53,7 @@ from hyperloom.contracts.measurement import (
 )
 from hyperloom.contracts.recipe import Recipe, RecipeDelta
 from hyperloom.hosted.mcp_server import MIN_TOKEN_LENGTH, McpServer, McpServerConfig
+from hyperloom.measure.runner.native.server_options import OptionInventory, ServerOption, write_inventory
 from hyperloom.measure.versions import socket_versions
 from hyperloom_multibranch.contracts.fork import AdmissionStatus, ForkAdmission, ForkRequest, RepairRequest
 from hyperloom_multibranch.contracts.gate import RegressionOutcome
@@ -124,18 +123,19 @@ from hyperloom_multibranch.scheduling.budget import (
 )
 from hyperloom_multibranch.scheduling import branches
 from hyperloom_multibranch.scheduling import events
+from hyperloom_multibranch.scheduling import explore
 from hyperloom_multibranch.scheduling.events import PROFILE_UNAVAILABLE, PROFILED
 from hyperloom_multibranch.scheduling.explore import (
     EXPLORE_TICK_SECONDS,
     FORK_NOT_LANDED,
     OPEN_CUT_REASON,
 )
-from hyperloom_multibranch.scheduling.exports import ARCHIVED_BEFORE, IMAGE_CHECK_FILE
+from hyperloom_multibranch.scheduling.exports import ARCHIVED_BEFORE
 from hyperloom_multibranch.scheduling.final import INTEGRATION_LABEL, PRIMARY_POINT_ONLY
 from hyperloom_multibranch.scheduling import judge
 from hyperloom_multibranch.scheduling.judge import GRACE_KEY, HoldReason
 from hyperloom_multibranch.scheduling.judge_prompt import JUDGE_PROMPT_VERSION
-from hyperloom_multibranch.scheduling.integrator import ADOPTING_LEAD
+from hyperloom_multibranch.scheduling.integrator import ADOPTING_LEAD, EXPLORATION_ENDED
 from hyperloom_multibranch.scheduling.launch_isolation import LaunchIsolation
 from hyperloom_multibranch.scheduling.hosted_run import prelude_landed
 from hyperloom_multibranch.scheduling.layout import SessionLayout, create_session
@@ -203,7 +203,7 @@ from hyperloom_multibranch.scheduling.tests.model_checkout import model_checkout
 from hyperloom_multibranch.scheduling.processes import SCHEDULER_BRANCH
 from hyperloom_multibranch.tests.fakes import RecordingVerifier, RefusingCritic
 from hyperloom_multibranch.toolbox.attempts import TestJob
-from hyperloom_multibranch.toolbox.tests.fake_model import DEFAULT_BASELINE, Fate
+from hyperloom_multibranch.toolbox.tests.fake_model import DEFAULT_BASELINE, FakeToolboxConfig, Fate
 from hyperloom_multibranch.toolbox.tools.base import JobStatus
 from hyperloom_multibranch.scheduling.agent_plans import (
     DOSSIER_ENDED,
@@ -231,7 +231,7 @@ from hyperloom_multibranch.scheduling.settings import DOSSIER_MINUTES
 from hyperloom_multibranch.specialist import autonomous_session
 from hyperloom_multibranch.specialist.component_agent import MAPPED, SplitFailed
 from hyperloom_multibranch.specialist.dev_sandbox import DevLeases
-from hyperloom_multibranch.specialist.directions import DIRECTIONS
+from hyperloom_multibranch.specialist.directions import DIRECTIONS, direction_name
 from hyperloom_multibranch.specialist.dossier_pass import DossierOutcome, DossierPass, DossierStart
 from hyperloom_multibranch.specialist.prompts import prompt_versions
 from hyperloom_multibranch.specialist.runtime import MAX_LOSS_RESTARTS, SessionCrashed
@@ -245,14 +245,6 @@ WORKLOAD = Workload(
 )
 #: The same workload as an AgentX trace replay.
 AGENTX = replace(WORKLOAD, inferencex=None)
-#: What the session's image check finds: one fact of the rule pack that does not hold here, under the default mode.
-IMAGE_CHECK = ImageCheckReport(
-    ImageCheckMode.WARN,
-    rule_pack_identity(),
-    "2023-11-14T22:13:20Z",
-    {"python": "/usr/bin/python3"},
-    (FactResult("sglang.renamed-flag", "sglang", Status.FAIL, (), "the flag is gone"),),
-)
 #: How the session's peers launch its agents and tests: all unconfined, as no account is configured and no bubblewrap
 #: is found.
 ISOLATION = LaunchIsolation(
@@ -265,17 +257,20 @@ ISOLATION = LaunchIsolation(
 #: How the peers of a ``final-only`` recovery would launch agents, which is not how the session's ran.
 RECOVERY_ISOLATION = LaunchIsolation("bwrap", "none", "bwrap", False, ("an agent sandbox runs unconfined",))
 #: The review gate pauses a session with component agents for a person; these sessions open their branches without
-#: one, as ``run --no-review-gate`` does, and the review's own tests turn it on.
+#: one, as ``run --no-review-gate`` does, and the review's own tests turn it on. Two tests run at once, so the opening
+#: batch of two branches these sessions' judge asks for is its to size.
 SETTINGS = RunSettings(
     WORKLOAD,
     max_hours=0.5,
     max_gpu_hours=0.0,
     max_llm_usd=0.0,
-    caps=RosterCaps(3, 2, 8),
+    caps=RosterCaps(3, 2, 2),
     judge_interval_seconds=600.0,
     review_gate=False,
     agent_share_minutes=0.0,  # these sessions are shorter than the time one iteration of a component agent needs
 )
+#: A session whose cards hold one test at a time: its judge may open one branch alone.
+ONE_TEST = replace(SETTINGS, caps=RosterCaps(3, 2, 1))
 #: An InferenceX matrix with one single-node entry for the workload's model.
 LLAMA_MATRIX = """\
 llama3-bf16-mi355x-sglang:
@@ -309,6 +304,9 @@ LAUNCH_USD = 3.0
 JUDGE_TOKENS = TokenCounts(input=400, output=120, cache_read=3600)
 JUDGE_USD = 0.04
 CONVERGED_REASON = "every branch is flat"
+#: How long one test of the fake toolbox takes, which the session's longest root test is: the time a merge waiting
+#: for its confirm gets once EXPLORE ended.
+ONE_TEST_SECONDS = FakeToolboxConfig().attempt_seconds
 #: What the scheduler's own tests measure: the root, ``c1`` alone (the integration head once merged) and ``c2``, which
 #: sweeps higher than the integration head but measures the root's value when reproduced; every other recipe measures
 #: 1000.
@@ -383,7 +381,7 @@ def _measured(repo: Path, explored_curves: Curves, measured_curves: Curves) -> C
 class InsistingRuntime(RefusingRuntime):
     """A runtime whose stop hangs after the operator signals again; a failure double, not a placeholder."""
 
-    async def stop(self, branch: str) -> None:
+    async def stop(self, branch: str, *, finish_tests: bool = False) -> None:
         os.kill(os.getpid(), signal.SIGINT)
         await asyncio.Event().wait()
 
@@ -457,7 +455,6 @@ class Stage:
     critic: Callable[[UsageSink], FixReviewer] = lambda _usage: RefusingCritic()
     author: ScriptedCompletion = field(default_factory=ScriptedCompletion)
     learnings: LearningRecall | None = None
-    image_check: Callable[[], ImageCheckReport] = lambda: IMAGE_CHECK
     isolation: LaunchIsolation = ISOLATION
     dossier_pass: DossierPass | None = None
     dev_leases: DevLeases | None = None
@@ -594,10 +591,9 @@ class Stage:
         await then(branch, head)
 
     async def run(self) -> SessionOutcome:
-        """Run the session, its image check answered by ``image_check`` instead of this environment."""
+        """Run the session."""
 
-        with self._polls_on_virtual_time() as patch:
-            patch.setattr(lifecycle, "run_image_check", self.image_check)
+        with self._polls_on_virtual_time():
             return await self._session().run()
 
     async def finish(self, ended: SessionStopReason, *, restart: bool = False) -> SessionOutcome:
@@ -613,8 +609,7 @@ class Stage:
 
         if deadline is None:
             deadline = deadline_after_downtime(self.layout, self.time.now())
-        with self._polls_on_virtual_time() as patch:
-            patch.setattr(lifecycle, "run_image_check", self.image_check)
+        with self._polls_on_virtual_time():
             return await self._session().resume(ended, deadline)
 
     @contextlib.contextmanager
@@ -806,8 +801,6 @@ async def test_a_session_runs_every_phase_and_leaves_nothing_behind(tmp_path: Pa
     manifest = json.loads(stage.layout.manifest.read_text())
     assert set(manifest["code_version"]) == {"package", "git_sha"} and manifest["metric"] == GRADED_OUTPUT
     assert manifest["rule_pack"] == rule_pack_identity()
-    assert manifest["image_check"] == IMAGE_CHECK.summary()
-    assert json.loads((stage.layout.reports / IMAGE_CHECK_FILE).read_text()) == IMAGE_CHECK.to_json()
     assert manifest["agent_isolation"] == json.loads(stage.layout.report.read_text())["agent_isolation"]
     assert read_manifest(stage.layout.manifest).agent_isolation == ISOLATION
     assert "A" + ISOLATION.line()[1:] in stage.layout.report_markdown.read_text().splitlines()
@@ -1069,6 +1062,16 @@ async def test_a_setting_of_the_run_reaches_the_peers(tmp_path: Path, name: str,
     assert getattr(stage.setup, name) == value
 
 
+async def test_the_integrator_compares_merges_by_the_option_inventory_the_peers_laid(tmp_path: Path) -> None:
+    stage = _stage(tmp_path)
+    inventory = OptionInventory("llama-server", "0" * 64, "-c 4096", (ServerOption(("-c", "--ctx-size"), "", True),))
+    write_inventory(inventory, stage.layout.toolbox)
+
+    session = stage._session()
+
+    assert session._integrator.options == inventory
+
+
 @pytest.mark.parametrize(("review_gate", "handed"), [(True, "host"), (False, "off")])
 async def test_the_session_s_review_stands_in_for_each_component_agent_s_own(
     tmp_path: Path, review_gate: bool, handed: str
@@ -1154,6 +1157,7 @@ async def test_a_session_opens_explore_on_the_roots_own_profile_read_before_the_
     tmp_path: Path,
 ) -> None:
     stage = _stage(tmp_path)
+    stage.settings = ONE_TEST
     stage.toolbox_type = ProfilingToolbox
     stage.judge = ScriptedCompletion([_reply({"open": 1, "branches": [], "stop": []})])
 
@@ -1228,23 +1232,6 @@ async def test_the_profile_of_a_replayed_start_commit_is_stopped_before_final_wh
 
     assert outcome.stop_reason is SessionStopReason.JUDGE_STOPPED
     assert "profile" in order and "stop" in order[order.index("profile") : order.index("final")]
-
-
-def _fails_strictly() -> ImageCheckReport:
-    raise ImageCheckFailed(replace(IMAGE_CHECK, mode=ImageCheckMode.STRICT))
-
-
-async def test_a_strict_image_check_that_fails_stops_the_session_before_its_manifest_and_any_phase(
-    tmp_path: Path,
-) -> None:
-    stage = _stage(tmp_path)
-    stage.image_check = _fails_strictly
-
-    with pytest.raises(ImageCheckFailed, match="sglang.renamed-flag"):
-        await stage.run()
-
-    assert not stage.layout.manifest.exists() and not stage.layout.report.exists()
-    assert stage.judge.calls == []
 
 
 async def test_a_stop_signal_skips_to_close_and_stops_every_branch(tmp_path: Path) -> None:
@@ -1557,6 +1544,237 @@ async def test_a_judge_soft_stop_ends_explore_early_and_still_runs_final(tmp_pat
     assert sorted(stage.sessions.stopped) == ["b01", "b02"]
 
 
+def _merge_confirm_at_the_soft_stop(stage: Stage, seconds: float, hanging: str = "") -> None:
+    """``b01`` commits ``c1``; the judge stops the session once the confirm of ``c1``'s merge test runs, and that
+    confirm runs ``seconds`` of virtual time more, so EXPLORE ends while the merge waits for it. With ``hanging``, a
+    tag, the judge also waits for the confirm of the merge carrying it, which never ends. Test doubles for
+    a confirm in flight at the end of EXPLORE, not placeholders."""
+
+    running, stopping, hung = asyncio.Event(), asyncio.Event(), asyncio.Event()
+    if not hanging:
+        hung.set()
+
+    class ConfirmingToolbox(LeasingToolbox):
+        def __init__(self, *args: Any, **kwargs: Any) -> None:
+            super().__init__(*args, **kwargs)
+            measure = self.executor.run
+
+            async def run(job: TestJob) -> TestResult:
+                if job.request.branch_id == INTEGRATION_BRANCH and job.request.purpose is Purpose.CONFIRM:
+                    if hanging and hanging in job.request.delta.config.server_args:
+                        hung.set()
+                        await asyncio.Event().wait()
+                    running.set()
+                    await stopping.wait()
+                    await stage.time.sleep(seconds)
+                return await measure(job)
+
+            self.executor.run = run  # type: ignore[method-assign]
+
+    class StoppingJudge(ScriptedCompletion):
+        async def __call__(self, system: str, user: str) -> CompletionReply:
+            if self.calls:
+                await running.wait()
+                await hung.wait()
+                stopping.set()
+            return await super().__call__(system, user)
+
+    stage.toolbox_type = ConfirmingToolbox
+    stage.judge = StoppingJudge([OPENING, _reply({"open": 0, "stop_session": {"reason": CONVERGED_REASON}})])
+    stage.scripts = {"b01": SCRIPTS["b01"]}
+
+
+def _from_soft_stop_to_final(stage: Stage) -> tuple[float, list[object]]:
+    """How long after the judge's soft stop was recorded FINAL started, and the commits FINAL was given."""
+
+    decisions = _decisions(stage)
+    stopped = [row for row in decisions if row["kind"] == "judge"][-1]
+    [final_phase] = [row for row in decisions if row["kind"] == "phase" and row["reason"] == "final"]
+    waited = float(str(final_phase["at"])) - float(str(stopped["at"]))
+    return waited, [row["commit"] for row in final_phase["detail"]["candidates"]]
+
+
+async def test_a_merge_waiting_for_its_confirm_when_explore_ends_lands_before_final_reads_its_candidates(
+    tmp_path: Path,
+) -> None:
+    stage = _stage(tmp_path)
+    _merge_confirm_at_the_soft_stop(stage, ONE_TEST_SECONDS / 2)
+
+    outcome = await stage.run()
+
+    assert (outcome.stop_reason, outcome.error) == (SessionStopReason.JUDGE_STOPPED, "")
+    root, head = await stage.root(), await stage.repo.head(INTEGRATION_BRANCH)
+    assert head != root and recipe_tags(await stage.repo.read_recipe(head)) == {"c1"}
+    waited, candidates = _from_soft_stop_to_final(stage)
+    assert head in candidates and root not in candidates
+    assert ONE_TEST_SECONDS / 2 <= waited < ONE_TEST_SECONDS
+    assert EXPLORATION_ENDED not in stage.toolbox.withdrawn.values()
+
+
+async def test_a_merge_whose_confirm_outlasts_one_test_after_explore_ended_is_withdrawn_named_and_final_starts(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    stage = _stage(tmp_path)
+    _merge_confirm_at_the_soft_stop(stage, 2 * ONE_TEST_SECONDS)
+
+    with caplog.at_level(logging.WARNING, logger=explore.__name__):
+        outcome = await stage.run()
+
+    assert (outcome.stop_reason, outcome.error) == (SessionStopReason.JUDGE_STOPPED, "")
+    root = await stage.root()
+    assert await stage.repo.head(INTEGRATION_BRANCH) == root
+    waited, candidates = _from_soft_stop_to_final(stage)
+    assert root in candidates and ONE_TEST_SECONDS <= waited < 2 * ONE_TEST_SECONDS
+    [confirm, *_] = [
+        request_id
+        for request_id, test in stage.toolbox.requests.items()
+        if test.branch_id == INTEGRATION_BRANCH and test.purpose is Purpose.CONFIRM
+    ]
+    assert stage.toolbox.withdrawn[confirm] == EXPLORATION_ENDED
+    [warned] = [record.getMessage() for record in caplog.records if record.name == explore.__name__]
+    assert await stage.repo.head("b01") in warned and f"{ONE_TEST_SECONDS:.0f} s" in warned
+    assert outcome.final is not None and outcome.final.chosen is not None
+
+
+def _regression_set_taking(stage: Stage, wait: Callable[[], Awaitable[object]]) -> None:
+    """The session's regression set finishes ``wait`` before it answers for a merge. A test double for a merge with a
+    regression case left to run, not a placeholder."""
+
+    class SlowRegressionSet(FakeRegressionCheck):
+        async def check(
+            self, base_commit: str, candidate_delta: RecipeDelta, *, sources: tuple[str, ...]
+        ) -> RegressionOutcome:
+            await wait()
+            return await super().check(base_commit, candidate_delta, sources=sources)
+
+    stage.regression = SlowRegressionSet()
+
+
+async def test_a_merge_confirmed_in_the_wait_whose_regression_set_outlasts_it_still_lands(tmp_path: Path) -> None:
+    stage = _stage(tmp_path)
+    _merge_confirm_at_the_soft_stop(stage, ONE_TEST_SECONDS / 2)
+    _regression_set_taking(stage, lambda: stage.time.sleep(ONE_TEST_SECONDS))
+
+    outcome = await stage.run()
+
+    assert (outcome.stop_reason, outcome.error) == (SessionStopReason.JUDGE_STOPPED, "")
+    head = await stage.repo.head(INTEGRATION_BRANCH)
+    assert recipe_tags(await stage.repo.read_recipe(head)) == {"c1"}
+    waited, candidates = _from_soft_stop_to_final(stage)
+    assert head in candidates and ONE_TEST_SECONDS < waited < 2 * ONE_TEST_SECONDS
+
+
+async def test_a_merge_confirmed_in_the_wait_lands_though_another_merge_test_of_its_round_outlasts_the_wait(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    stage = _stage(tmp_path)
+    _merge_confirm_at_the_soft_stop(stage, ONE_TEST_SECONDS / 2, hanging="c2")
+    _regression_set_taking(stage, lambda: stage.time.sleep(0.75 * ONE_TEST_SECONDS))
+    stage.scripts = SCRIPTS
+    stage.measured = {**CURVES, frozenset({"c2"}): {MAIN_POINT: 1050.0, CONC: 1050.0}}
+
+    with caplog.at_level(logging.WARNING, logger=explore.__name__):
+        outcome = await stage.run()
+
+    assert (outcome.stop_reason, outcome.error) == (SessionStopReason.JUDGE_STOPPED, "")
+    head = await stage.repo.head(INTEGRATION_BRANCH)
+    assert recipe_tags(await stage.repo.read_recipe(head)) == {"c1"}
+    waited, candidates = _from_soft_stop_to_final(stage)
+    assert head in candidates and ONE_TEST_SECONDS < waited < 2 * ONE_TEST_SECONDS
+    [warned] = [record.getMessage() for record in caplog.records if record.name == explore.__name__]
+    assert await stage.repo.head("b02") in warned and await stage.repo.head("b01") not in warned
+    confirms = [
+        request_id
+        for request_id, test in stage.toolbox.requests.items()
+        if test.branch_id == INTEGRATION_BRANCH and test.purpose is Purpose.CONFIRM
+    ]
+    assert len(confirms) == len(SCRIPTS) and len(set(confirms) & set(stage.toolbox.withdrawn)) == 1
+    assert EXPLORATION_ENDED not in stage.toolbox.withdrawn.values()
+
+
+async def test_a_regression_set_that_hangs_after_the_confirm_is_cancelled_at_the_deadline_and_final_runs(
+    tmp_path: Path,
+) -> None:
+    stage = _stage(tmp_path)
+    _merge_confirm_at_the_soft_stop(stage, ONE_TEST_SECONDS / 2)
+    _regression_set_taking(stage, asyncio.Event().wait)
+
+    outcome = await stage.run()
+
+    assert outcome.final is not None and outcome.final.chosen is not None
+    assert await stage.repo.head(INTEGRATION_BRANCH) == await stage.root()
+    waited, _ = _from_soft_stop_to_final(stage)
+    assert waited > ONE_TEST_SECONDS
+
+
+def _confirm_queued_behind_specialist_tests(stage: Stage) -> list[bool]:
+    """``b01`` commits ``c1``. ``b02``'s test holds one of the session's two cards from the start; ``b03`` submits its
+    test while ``c1``'s merge test runs on the other, takes that card as the merge test ends and holds it. The judge
+    stops the session once the merge's confirm is queued; the list returned says whether that confirm had a card by
+    then. Test doubles for specialist tests that outlast EXPLORE, not placeholders."""
+
+    reading, confirming = asyncio.Event(), asyncio.Event()
+    on_a_card: list[bool] = []
+
+    def requested(branch: str, purpose: Purpose) -> bool:
+        return any(test.branch_id == branch and test.purpose is purpose for test in stage.toolbox.requests.values())
+
+    class CrowdedToolbox(LeasingToolbox):
+        def __init__(self, *args: Any, **kwargs: Any) -> None:
+            super().__init__(*args, **kwargs)
+            measure = self.executor.run
+
+            async def run(job: TestJob) -> TestResult:
+                branch, purpose = job.request.branch_id, job.request.purpose
+                if branch in ("b02", "b03"):
+                    await asyncio.Event().wait()
+                elif branch == INTEGRATION_BRANCH and purpose is Purpose.CONFIRM:
+                    confirming.set()
+                elif branch == INTEGRATION_BRANCH and purpose is Purpose.INTEGRATION:
+                    reading.set()
+                    while not requested("b03", Purpose.EXPLORE):
+                        await stage.time.sleep(VIRTUAL_POLL_SECONDS)
+                return await measure(job)
+
+            self.executor.run = run  # type: ignore[method-assign]
+
+    class StoppingJudge(ScriptedCompletion):
+        async def __call__(self, system: str, user: str) -> CompletionReply:
+            if self.calls:
+                while not requested(INTEGRATION_BRANCH, Purpose.CONFIRM):
+                    await stage.time.sleep(VIRTUAL_POLL_SECONDS)
+                on_a_card.append(confirming.is_set())
+            return await super().__call__(system, user)
+
+    async def once_the_merge_test_runs(branch: str) -> None:
+        await reading.wait()
+
+    stage.toolbox_type = CrowdedToolbox
+    opening, stop = {"open": 3, "branches": [], "stop": []}, {"open": 0, "stop_session": {"reason": CONVERGED_REASON}}
+    stage.judge = StoppingJudge([_reply(opening), _reply(stop)])
+    stage.scripts = {"b01": SCRIPTS["b01"], "b02": (tagged("held"),), "b03": (tagged("late"),)}
+    stage.steps = {"b03": once_the_merge_test_runs}
+    return on_a_card
+
+
+async def test_a_confirm_queued_behind_specialist_tests_when_explore_ends_gets_their_cards_and_its_merge_lands(
+    tmp_path: Path,
+) -> None:
+    stage = _stage(tmp_path)
+    on_a_card = _confirm_queued_behind_specialist_tests(stage)
+
+    outcome = await stage.run()
+
+    assert (outcome.stop_reason, outcome.error) == (SessionStopReason.JUDGE_STOPPED, "")
+    assert on_a_card == [False]
+    root, head = await stage.root(), await stage.repo.head(INTEGRATION_BRANCH)
+    assert head != root and recipe_tags(await stage.repo.read_recipe(head)) == {"c1"}
+    waited, candidates = _from_soft_stop_to_final(stage)
+    assert head in candidates and waited < ONE_TEST_SECONDS
+    taken_back = {stage.toolbox.requests[request_id].branch_id for request_id in stage.toolbox.withdrawn}
+    assert taken_back == {"b02", "b03"}
+
+
 async def test_a_specialist_that_never_stops_at_the_end_of_explore_does_not_hold_final_up(tmp_path: Path) -> None:
     stage = _stage(tmp_path)
     stage.judge = ScriptedCompletion([OPENING, _reply({"open": 0, "stop_session": {"reason": CONVERGED_REASON}})])
@@ -1585,6 +1803,52 @@ async def test_a_judge_stop_that_never_returns_does_not_freeze_explore(tmp_path:
     [stop] = [row for row in _decisions(stage) if row["kind"] == "stop" and row["branch"] == "b02"]
     assert stop["reason"] == f"judge: {STOP_REASON}" and "b02" in stage.toolbox.tool_cancels
     assert len(stage.judge.calls) > 2
+
+
+def _in_flight_at_the_judge_stop(stage: Stage) -> list[tuple[str, bool]]:
+    """``b02``'s one test runs until the judge has stopped the branch and measures the root's value; returns the
+    stops the runtime is asked for, each with whether it leaves the branch's tests to finish. Test doubles for a test
+    in flight at a judge stop, not placeholders."""
+
+    stops: list[tuple[str, bool]] = []
+
+    class OutlastingToolbox(LeasingToolbox):
+        def __init__(self, *args: Any, **kwargs: Any) -> None:
+            super().__init__(*args, **kwargs)
+            measure = self.executor.run
+
+            async def run(job: TestJob) -> TestResult:
+                while job.request.branch_id == "b02" and "b02" not in stage.sessions.stopped:
+                    await stage.time.sleep(VIRTUAL_POLL_SECONDS)
+                return await measure(job)
+
+            self.executor.run = run  # type: ignore[method-assign]
+
+    class NotingRuntime(RefusingRuntime):
+        async def stop(self, branch: str, *, finish_tests: bool = False) -> None:
+            stops.append((branch, finish_tests))
+            await super().stop(branch, finish_tests=finish_tests)
+
+    stage.toolbox_type, stage.runtime_type = OutlastingToolbox, NotingRuntime
+    stage.scripts = {"b02": (tagged("flat"),)}
+    return stops
+
+
+async def test_a_test_in_flight_when_the_judge_stops_its_branch_is_judged_and_its_judge_ends_with_explore(
+    tmp_path: Path,
+) -> None:
+    stage = _stage(tmp_path)
+    stops = _in_flight_at_the_judge_stop(stage)
+
+    outcome = await stage.run()
+
+    assert (outcome.stop_reason, outcome.error) == (SessionStopReason.TIME_EXHAUSTED, "")
+    records = (await stage.handle(Role.OBSERVER).snapshot()).records
+    [left] = [record for record in records if record.request.branch_id == "b02"]
+    [stop] = [row for row in _decisions(stage) if row["kind"] == "stop" and row["branch"] == "b02"]
+    assert stop["reason"] == f"judge: {STOP_REASON}" and left.measured_at is not None and left.measured_at > stop["at"]
+    assert left.judgement is not None and left.conclusion is Conclusion.RECORDED_ONLY
+    assert stops == [("b02", True), ("b01", False), ("b02", False)]
 
 
 async def test_a_first_signal_during_close_cuts_it_short_after_one_close_grace(tmp_path: Path) -> None:
@@ -2197,7 +2461,8 @@ async def test_a_resume_after_a_stop_signal_continues_explore_on_new_branches_an
     assert [row["reason"] for row in _decisions(stage) if row["kind"] == "phase"].count("prelude") == 1
     roster = {entry["branch"]: entry for entry in json.loads(stage.layout.roster.read_text())["entries"]}
     assert {"b01", "b02"} < roster.keys() and roster["b03"]["origin"] == BranchOrigin.FIRST_BATCH.value
-    assert resumed.sessions.started == {"b03": await stage.root()}
+    # The resumed leg's judge sizes two branches; the third opens for a direction no branch of that leg has held.
+    assert resumed.sessions.started == dict.fromkeys(("b03", "b04", "b05"), await stage.root())
     lineage = {branch.branch: branch for branch in (await resumed.handle(Role.OBSERVER).lineage()).branches}
     assert lineage[INTEGRATION_BRANCH].stop_reason == f"session_end: {SessionStopReason.TIME_EXHAUSTED.value}"
     report = json.loads(stage.layout.report.read_text())
@@ -2364,7 +2629,39 @@ async def test_an_unreadable_steering_reply_keeps_every_branch_and_k_as_they_wer
     ] * (len(stage.judge.calls) - 1)
     assert {row["reason"] for row in decisions if row["kind"] == "judge_failed"} == {"kept the status quo"}
     assert not [row for row in decisions if row["kind"] == "stop" and str(row["reason"]).startswith("judge:")]
-    assert stage.sessions.k == {"b01": 2, "b02": 2}
+    # The opening judge sizes two branches; the third opens for a direction no branch has held.
+    assert stage.sessions.k == {"b01": 2, "b02": 2, "b03": 2}
+
+
+async def test_every_judge_round_opens_a_branch_for_each_direction_no_branch_has_held_whatever_the_judge_answers(
+    tmp_path: Path,
+) -> None:
+    """A judge that sized the opening batch at two and answered ``open: 0`` at every steering call left free slots
+    unused and directions of the session without a branch."""
+
+    stage = _stage(tmp_path)
+    stop = _reply({"open": 0, "branches": [], "stop": [{"branch": "b02", "reason": STOP_REASON}]})
+    stage.judge = ScriptedCompletion([OPENING, stop], fallback=_reply({"open": 0}))
+    stage.settings = replace(SETTINGS, max_hours=2.0)
+
+    outcome = await stage.run()
+
+    assert (outcome.stop_reason, outcome.error) == (SessionStopReason.TIME_EXHAUSTED, "")
+    first, refill = BranchOrigin.FIRST_BATCH.value, BranchOrigin.REFILL.value
+    assert _origins(stage) == {"b01": first, "b02": first, "b03": first, "b04": refill}
+    assert {branch: runs[0] for branch, runs in stage.sessions.directions.items()} == dict(
+        zip(("b01", "b02", "b03", "b04"), DIRECTIONS)
+    )
+    names = [direction_name(direction) for direction in DIRECTIONS]
+    opening, stopping, refilling, *later = [_judge_state(prompt) for prompt in _judge_prompts(stage)]
+    assert opening["undealt_directions"] == names
+    assert (stopping["free_branch_slots"], stopping["undealt_directions"]) == (0, names[3:])
+    assert (refilling["free_branch_slots"], refilling["undealt_directions"]) == (1, names[3:])
+    held = [(state["free_branch_slots"], state["undealt_directions"]) for state in later]
+    assert held and all(state == (0, names[4:]) for state in held)
+    judged = [row["detail"] for row in _decisions(stage) if row["kind"] == "judge"]
+    assert [(detail["open"], detail["unfocused"]) for detail in judged[:3]] == [(3, 3), (0, 0), (1, 1)]
+    assert all((detail["open"], detail["unfocused"]) == (0, 0) for detail in judged[3:])
 
 
 async def test_a_judge_stop_the_runtime_refuses_does_not_end_the_session(tmp_path: Path) -> None:
@@ -3255,6 +3552,7 @@ async def test_a_judge_opens_a_later_batch_without_stopping_a_branch_on_the_larg
     tmp_path: Path,
 ) -> None:
     stage = _stage(tmp_path)
+    stage.settings = ONE_TEST
     opening = _reply({"open": 1, "focus": ["attention"], "branches": [], "stop": []})
     stage.judge = ScriptedCompletion([opening, _reply({"open": 1, "branches": [], "stop": []})])
 
@@ -3466,6 +3764,7 @@ async def test_a_branch_the_judge_opens_that_fails_to_start_does_not_have_the_ju
 
 async def test_a_repair_admitted_while_a_refill_starts_cuts_the_refill_and_the_session_goes_on(tmp_path: Path) -> None:
     stage = _stage(tmp_path)
+    stage.settings = ONE_TEST
     stage.judge = ScriptedCompletion([_reply({"open": 1}), _reply({"open": 2})])
 
     class CrowdingRefill(RefusingRuntime):
@@ -3529,6 +3828,7 @@ async def test_a_toolbox_without_cards_for_a_test_ends_explore_as_a_failed_sessi
     tmp_path: Path,
 ) -> None:
     stage = _stage(tmp_path)
+    stage.settings = ONE_TEST
     stage.judge = ScriptedCompletion([_reply({"open": 1, "branches": [], "stop": []})])
     stage.toolbox_type = CardsLostToolbox
 
@@ -3640,7 +3940,7 @@ async def test_an_agentx_large_merge_leaves_the_head_unprofiled_until_the_judge_
     tmp_path: Path,
 ) -> None:
     stage = _stage(tmp_path)
-    stage.settings = replace(SETTINGS, workload=AGENTX)
+    stage.settings = replace(ONE_TEST, workload=AGENTX)
     opening = _reply({"open": 1, "branches": [], "stop": []})
     stage.judge = ScriptedCompletion([opening, opening])
     stage.scripts = {"b01": (tagged("c1"),)}

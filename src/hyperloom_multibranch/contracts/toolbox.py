@@ -78,6 +78,7 @@ class TestWithdrawn(ToolboxError):
 REJECTION_CODES = (
     "invalid_request",  # the request breaks the contract of 3.7
     "unknown_parent",  # the parent commit is not in the experiment repository
+    "parent_not_head",  # an explore of a specialist branch names a parent commit that is not the branch's head
     # the delta does not fit the parent recipe, a patch does not apply, or it changes the root's weight precision or
     # makes the launch one the frameworks read in two ways
     "delta_not_applicable",
@@ -86,7 +87,7 @@ REJECTION_CODES = (
     "unknown_retest",  # ``retest_of`` names no accepted request
     "branch_stopped",  # the queue policy lists the branches that may submit and this one is not among them
     "speculative_context_copy_on_synthetic",  # an InferenceX candidate introduces or changes a context-copy draft
-    "speculative_decoding_pinned",  # an AgentX candidate changes the draft or simulated acceptance its parent pins
+    "speculative_decoding_pinned",  # a candidate simulates the acceptance of a draft its parent verifies, or an AgentX one changes the draft or simulated acceptance its parent pins
     "unsupported_kind",  # the toolbox's backend does not run this kind of test (a local backend: profile, repro), or has no cards to lease
     "profile_exists",  # a PROFILE of this commit and recipe is already queued, running or measured: ``existing_request_id``
     "empty_delta",  # an explore test whose delta changes nothing
@@ -104,6 +105,8 @@ REJECTION_CODES = (
     "lease_leaves_no_measurement",  # ``lease_branch_sandbox``, ``start_analysis kernel_tune``: leasing would leave fewer cards than one test needs
     "lease_exists",  # ``lease_branch_sandbox``: the branch already holds a lease
     "build_after_deadline",  # the native builds the stack still needs and one test of its kind would end past the branch's deadline
+    "options_unreviewed",  # a specialist's explore changes server arguments while its branch's option review leaves an unset option without a verdict
+    "option_set_by_env",  # a specialist's explore sets the environment variable the server reads an option from
 )
 
 
@@ -179,7 +182,7 @@ _PRIORITIES = range(PRIORITY_HIGHEST, PRIORITY_LOWEST + 1)
 class TestProgress:
     """How far a test that has not finished has got, as the toolbox knows it; a field it cannot tell is ``None``.
 
-    A ``queued`` test has ``queued_ahead``, the waiting tests the queue prefers to it by priority and arrival (a test of
+    A ``queued`` test has ``queued_ahead``, the waiting tests whose turn the queue puts before its own (a test of
     a branch at its K is counted, though it may not start first). A ``running`` test has ``running_seconds`` since it
     left the queue and, when its live output can be read, ``last_output_seconds_ago`` (since its newest server or
     benchmark log was written) and ``last_line`` (that log's last non-empty line, cleaned and shortened). A

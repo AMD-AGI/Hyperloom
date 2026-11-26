@@ -10,6 +10,12 @@ request share one cache:
 * **Triton** names a kernel's directory by the hash of its source, signature, options, target and its own compiler, so
   an entry is content-addressed already; the key is the image (which fixes Triton and the toolchain) and the GPU
   architecture.
+* **FlyDSL** names a launch's directory by a hash of FlyDSL's own compiler sources and libraries, the function's source,
+  the sources of the helpers it calls from its own directory and its scalar closure values, and the file by a hash of the
+  argument signatures; it leaves out code in other directories that a launch traces (a helper module of a monokernel
+  plugin, aiter's FlyDSL kernels, SGLang's side of the plugin), and the variables of the plugin that change its code
+  generation. The key is the machine, every patch to those sources (:data:`FLYDSL_SOURCES`) and the value of every
+  variable of FlyDSL, of the plugin and of aiter's FlyDSL kernels (:func:`flydsl_environment`).
 * **aiter** names a module only by ``md_name`` and builds nothing when ``<md_name>.so`` exists, whatever changed under
   it. The name does encode what a call asks for (``gen_func`` puts dtype, bias, mask and the like into ``md_name`` and
   the code generator command; a cpp_itfs library's directory is ``md_name`` plus the hash of every template argument),
@@ -28,7 +34,8 @@ That test errs toward fewer shared entries, never toward a leak.
 Variables that only name a location are found by that scan and left out of the key (:func:`build_surface`), because what
 they name is where something is kept or made, never an input of what is made:
 
-* ``AITER_JIT_DIR``, ``AITER_ROOT_DIR`` and ``TRITON_CACHE_DIR`` are the cache directories themselves; the session sets
+* ``AITER_JIT_DIR``, ``AITER_ROOT_DIR``, ``TRITON_CACHE_DIR`` and ``FLYDSL_RUNTIME_CACHE_DIR`` are the cache directories
+  themselves (and ``SGLANG_AMD_MONO_CACHE_DIR`` the monokernel plugin's own); the session sets
   each of them to the test's own for every kind it caches, so the value the sheet or the runner had never reaches the server.
 * ``HOME`` and ``USERPROFILE`` are read by aiter for one purpose: to default ``AITER_ROOT_DIR`` to ``$HOME/.aiter``
   (``csrc/cpp_itfs/utils.py``) and the user's ``jit`` directory to ``~/.aiter/jit`` (``aiter/jit/core.py``), the roots of
@@ -59,12 +66,16 @@ from hyperloom.measure.docs import canonical_json
 __all__ = [
     "AITER_PACKAGE",
     "CONFIG_FILE",
+    "FLYDSL_SOURCES",
     "BuildSurface",
     "Machine",
     "aiter_key",
     "build_surface",
     "entry_env_names",
     "env_names_in",
+    "flydsl_covers",
+    "flydsl_environment",
+    "flydsl_key",
     "plain_build_names",
     "scan_env_names",
     "touches_build_surface",
@@ -87,6 +98,8 @@ _LOCATIONS = frozenset(
         "AITER_JIT_DIR",
         "AITER_ROOT_DIR",
         "TRITON_CACHE_DIR",
+        "FLYDSL_RUNTIME_CACHE_DIR",
+        "SGLANG_AMD_MONO_CACHE_DIR",
         "HOME",
         "USERPROFILE",
         "TMPDIR",
@@ -128,6 +141,32 @@ _JIT_DIR = "jit"
 _PYTHON_SUFFIX = ".py"
 #: Text of a patch that can change what aiter builds from inside the server process, other than by naming a variable.
 _BUILD_SURFACE_WORDS = ("AITER_", "aiter.jit", "build_module", "compile_ops", "putenv", "unsetenv")
+#: The FlyDSL key's own revision.
+_FLYDSL_SCHEMA = 1
+#: The sources a FlyDSL launch is built from beyond what FlyDSL's own key hashes, as (package, path prefix below it): FlyDSL
+#: itself, aiter's FlyDSL kernels, SGLang's side of the monokernel plugin interface and the model files the plugin's specs
+#: are built for. A patch to any of them is part of the key. The plugin's own package is not listed: the rule pack has no
+#: layout for it, so no sheet carries a root of it; its prefix joins this list with such a layout.
+_SGLANG = "sglang"
+FLYDSL_SOURCES = (
+    ("flydsl", ""),
+    (AITER_PACKAGE, "ops/flydsl/"),
+    (_SGLANG, "kernels/plugin_kernels/amd/"),
+    (_SGLANG, "srt/kernel_plugins/amd/"),
+    (_SGLANG, "srt/monokernels/"),
+    (_SGLANG, "srt/models/"),
+)
+#: The families of variables FlyDSL, the monokernel plugin and aiter's FlyDSL kernels read: FlyDSL's options
+#: (``flydsl/utils/env.py``), the plugin's code generation, width and guard switches, and the switches of aiter's FlyDSL
+#: kernels (``aiter/ops/flydsl/``: ``AITER_FLYDSL_*`` and the ``MXFP4_*`` tuning of its MXFP4 MoE). A kernel may read one
+#: while it traces, where FlyDSL's own key does not see it.
+_FLYDSL_PREFIXES = ("FLYDSL_", "SGLANG_AMD_MONO_", "AITER_FLYDSL_", "MXFP4_")
+#: Variables FlyDSL reads outside its family: ``ARCH`` overrides the target and ``COMPILE_ONLY`` skips the launch
+#: (``CompileEnvManager``), and the one FlyDSL adds to the key of one target only (``_TARGET_CACHE_INVALIDATING_ENV_VARS``);
+#: and the two aiter's own FlyDSL cache hashes beside its families (``_ENV_EXTRA`` in ``aiter/ops/flydsl/aot_cache.py``).
+_FLYDSL_NAMES = frozenset(
+    {"ARCH", "COMPILE_ONLY", "LLVM_GFX1250_ANY_XNACK_CODEGEN", "HSA_OVERRIDE_GFX_VERSION", "COMPILE_OPT_LEVEL"}
+)
 _ENV_WRITE = re.compile(
     r"environ\s*\.\s*(?:update|setdefault|pop|clear)\b"  # a mapping call that writes
     r"|environ\s*\[\s*[^\s'\"\]][^\]]*\]\s*=(?!=)"  # a store under a name that is not a literal
@@ -186,6 +225,36 @@ def aiter_key(machine: Machine, tree: str, surface: BuildSurface) -> str:
             "environment": dict(sorted(surface.environment.items())),
         }
     )
+
+
+def flydsl_key(machine: Machine, tree: str, environments: Iterable[Mapping[str, str]]) -> str:
+    """The key of FlyDSL's cache: the machine, the identity of the sources it traces beyond its own key
+    (:data:`FLYDSL_SOURCES`) and the FlyDSL variables of each server of the test (:func:`flydsl_environment`)."""
+    servers = sorted({canonical_json(flydsl_environment(environment)) for environment in environments})
+    return _hash(
+        {
+            "schema": _FLYDSL_SCHEMA,
+            "kind": "flydsl",
+            "machine": machine.document(),
+            "tree": tree,
+            "environments": [json.loads(server) for server in servers],
+        }
+    )
+
+
+def flydsl_covers(package: str, path: str) -> bool:
+    """Whether ``path`` below the package imported as ``package`` is a source of a FlyDSL launch (:data:`FLYDSL_SOURCES`)."""
+    return any(package == name and path.startswith(prefix) for name, prefix in FLYDSL_SOURCES)
+
+
+def flydsl_environment(environment: Mapping[str, str]) -> dict[str, str]:
+    """The variables of ``environment`` that FlyDSL, the monokernel plugin or aiter's FlyDSL kernels read, but for the ones
+    naming a location."""
+    return {
+        name: value
+        for name, value in sorted(environment.items())
+        if (name.startswith(_FLYDSL_PREFIXES) or name in _FLYDSL_NAMES) and name not in _LOCATIONS
+    }
 
 
 def tree_identity(

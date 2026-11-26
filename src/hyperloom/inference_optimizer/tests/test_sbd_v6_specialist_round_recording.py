@@ -182,7 +182,6 @@ def test_a_framework_round_lands_on_the_run_that_dispatched_it(tmp_path) -> None
         confidence=0.5,
         new_findings=["m=8192 falls off the tile"],
         notes=["ran short of budget"],
-        ensemble_scores={"agree": 0.8},
     )
     recorder.finish(exit_reason="both_arms_plateaued")
 
@@ -195,7 +194,6 @@ def test_a_framework_round_lands_on_the_run_that_dispatched_it(tmp_path) -> None
     assert run["confidence"] == pytest.approx(0.5)
     assert run["new_findings"] == ["m=8192 falls off the tile"]
     assert run["notes"] == ["ran short of budget"]
-    assert run["ensemble_scores"] == {"agree": 0.8}
 
 
 def test_a_failing_round_record_propagates(monkeypatch) -> None:

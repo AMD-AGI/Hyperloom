@@ -30,14 +30,14 @@ import yaml
 
 from hyperloom.common.benchmark_config import BenchmarkPoint, read_benchmark_point
 from hyperloom.common.outside_facts import ENV_EVAL_LIMIT, ENV_EVAL_TASKS, ENV_EVAL_TOKENIZED_REQUESTS
-from hyperloom.common.agentx_workload import is_agentx_client_key
+from hyperloom.common.agentx_workload import is_agentx_client_key, is_agentx_client_script
 from hyperloom.common.visible_devices import mask_tokens
 from hyperloom.common.session_files import shared_options
 from hyperloom_common.coerce import to_str_list
 from hyperloom_common.io import atomic_write_text
 from hyperloom.inference_optimizer.runtime_environment import prepend_launch_path
 from hyperloom_common.gpu_identity import AMD_GPU_BOARDS
-from hyperloom.common.perf_metric import agentx_enabled
+from hyperloom.common.perf_metric import DATASET_PATH_ENV, agentx_enabled
 from hyperloom.common.env_safety import (
     BENCHMARK_SECRET_ENV_NAMES,
     BLOCKED_EXTERNAL_ENV_NAMES,
@@ -62,9 +62,11 @@ from hyperloom.inference_optimizer.grid_server_args import merge_server_args
 from hyperloom.inference_optimizer.grid_server_args import remove_moe_runner_backend_arg
 from hyperloom.inference_optimizer.grid_server_args import validate_server_args_shell_safe
 from inference_suite.argv import compact_json_server_args, remove_server_args
+from inference_suite import read_prompts
 from hyperloom.inference_optimizer import framework_registry
 from hyperloom.inference_optimizer.framework_registry import server_args_env_name
 from hyperloom.orchestrator.state.base_launch import ServerBase, session_cards, session_server_base
+from hyperloom.orchestrator.state.failure_evidence import YAML_BUILD_ERROR
 from ..gpu._gpu_pin import pin_rocr_visible_devices
 from ..serving._server_argv import add_server_arg_unless_pinned, seal_server_argv
 from .._profile_setup import _AtomTracelensCaps, _profiler_bound_holds, _profiler_flag_value, apply_atom_profile_caps
@@ -202,6 +204,12 @@ class FrameworkScriptMismatchError(ValueError):
     """
 
 
+class PromptDatasetError(ValueError):
+    """Raised when the prompts of a point's ``DATASET_PATH`` cannot be counted where the point is rendered."""
+
+    error_class = YAML_BUILD_ERROR
+
+
 def _coerce_workload_int_env(env_key: str, raw: str) -> int:
     """Coerce workload env values, accepting ``CONC`` comma ladders."""
     text = str(raw or "").strip()
@@ -233,11 +241,9 @@ def default_baseline_config() -> Path:
     return asset_root() / "assets" / "configs" / framework_registry.shipped_config_name("baseline", fw)
 
 
-def _finalize_framework_server_args(
-    bench: dict[str, Any], window: _RequestWindow, *, drop_moe_runner_backend: bool = False
-) -> None:
+def _finalize_framework_server_args(bench: dict[str, Any], window: _RequestWindow) -> None:
     """Apply the final framework server-arg guard pipeline in place
-    (context-length/watchdog/attention/MoE/dedup/compact/shell-safe); order is fixed.
+    (context-length/watchdog/attention/dedup/compact/shell-safe); order is fixed.
 
     1. --context-length cap: sglang sizes max_total_tokens off the model's
        max_position_embeddings, so a huge native window balloons the aiter
@@ -247,13 +253,8 @@ def _finalize_framework_server_args(
        first-request aiter JIT compile survives (the 300s default fires
        SIGQUIT mid-warmup on a cold aiter cache).
 
-    Steps 1-4b are sglang-scoped; steps 5 and 6 are vLLM/atom-scoped. The
-    inline comments below carry the per-step rationale.
-
-    ``drop_moe_runner_backend`` turns step 4 into a removal: the args are
-    already merged from every source (task params, ``$INFERENCE_OPTIMIZER_
-    SERVER_ARGS``, the reference recipe, the YAML base), so stripping here is
-    what guarantees a retry launches without the backend that killed it."""
+    Steps 1-3 are sglang-scoped; steps 4 and 5 are vLLM/atom-scoped. The
+    inline comments below carry the per-step rationale."""
     envs = bench["envs"]
     framework_env = server_args_env_name(bench.get("framework"))
     resolved_server_args = str(envs.get(framework_env, "")).strip()
@@ -274,20 +275,14 @@ def _finalize_framework_server_args(
         bench.get("framework"),
         bench.get("model"),
     )
-    # 4. MoE runner backend: left to sglang, whose ``--moe-runner-backend auto``
-    #    (the default) follows SGLANG_USE_AITER on current sglang/ROCm images.
-    #    A baseline retry can still ask to strip an inherited/pinned flag that
-    #    crashed the server.
-    if drop_moe_runner_backend and framework_env == "EXTRA_SGLANG_ARGS":
-        resolved_server_args = remove_moe_runner_backend_arg(resolved_server_args)
-    # 5. vLLM/atom argparse dedup: collapse repeated single-value flags to
+    # 4. vLLM/atom argparse dedup: collapse repeated single-value flags to
     #    last-wins (vLLM crashes EngineCoreProc on a duplicate); no-op for
     #    sglang.
     resolved_server_args = dedup_vllm_server_args(
         resolved_server_args,
         bench.get("framework"),
     )
-    # 6. JSON-valued flags (--speculative-config / --compilation-config /
+    # 5. JSON-valued flags (--speculative-config / --compilation-config /
     #    --hf-overrides ...): $EXTRA_VLLM_ARGS travels unquoted, so
     #    compact each JSON blob to be space-free so it survives as one shell
     #    word. No-op for arg strings with no JSON.
@@ -357,6 +352,9 @@ def _pin_workload_shape_envs(envs: dict[str, Any], *, in_session: bool) -> None:
     r_env = os.environ.get("RANDOM_RANGE_RATIO", "").strip()
     if r_env:
         envs["RANDOM_RANGE_RATIO"] = float(r_env)
+    dataset = os.environ.get(DATASET_PATH_ENV, "").strip()
+    if dataset:
+        envs[DATASET_PATH_ENV] = dataset
     tp_from_yaml = envs.get("TP")
     if tp_from_yaml:
         resolved_tp = int(tp_from_yaml)
@@ -396,6 +394,32 @@ def num_prompts_per_conc(isl: int, osl: int) -> int:
     if seq_cost <= 4096:
         return 5
     return 3 if seq_cost <= 16384 else 2
+
+
+def round_num_prompts(conc: int, isl: int, osl: int, dataset: str = "") -> int:
+    """Requests a measured round sends: every prompt of the ``dataset`` file once, whatever its concurrency, else
+    ``conc`` times :func:`num_prompts_per_conc`. The file is read here, on the host that renders the point, as the
+    round's client reads it.
+
+    Raises:
+        PromptDatasetError: If the file cannot be read or a line of it holds no prompt.
+    """
+    if not dataset:
+        return conc * num_prompts_per_conc(isl, osl)
+    try:
+        return len(read_prompts(Path(dataset)))
+    except (OSError, ValueError) as exc:
+        raise PromptDatasetError(
+            f"the prompts of {DATASET_PATH_ENV} {dataset} cannot be counted on this host, which renders the round's "
+            f"request count from the file: {exc}"
+        ) from exc
+
+
+def _sent_dataset(bench: Mapping[str, Any]) -> str:
+    """The prompt dataset the round of ``bench`` sends; empty for AgentX, which replays traces whatever is set."""
+    if is_agentx_client_script(str(bench.get("benchmark_script") or "")):
+        return ""
+    return str(bench["envs"].get(DATASET_PATH_ENV) or "").strip()
 
 
 def _shape_request_window(bench: dict[str, Any]) -> _RequestWindow:
@@ -450,7 +474,7 @@ def _shape_request_window(bench: dict[str, Any]) -> _RequestWindow:
             # window.
             envs["NUM_PROMPTS"] = profile_num_prompts
         elif "NUM_PROMPTS" not in envs:
-            envs["NUM_PROMPTS"] = conc_val * num_prompts_per_conc(isl_val, osl_val)
+            envs["NUM_PROMPTS"] = round_num_prompts(conc_val, isl_val, osl_val, _sent_dataset(bench))
         if "NUM_WARMUPS" not in envs:
             envs["NUM_WARMUPS"] = min(conc_val, 8)
     return _RequestWindow(
@@ -459,13 +483,17 @@ def _shape_request_window(bench: dict[str, Any]) -> _RequestWindow:
 
 
 def _seed_base_launch(bench: dict[str, Any], framework_env: str, base: ServerBase) -> None:
-    """Put ``base`` below the YAML and any per-task args (leftmost, so later merges win)."""
+    """Put ``base`` below the YAML and any per-task args (leftmost, so later merges win). A base flag the YAML already
+    names is not seeded again, so a materialized config re-materialized carries the base once."""
     envs = bench["envs"]
     if base.args:
-        from hyperloom.inference_optimizer.grid_server_args import compose_server_args
+        from hyperloom.inference_optimizer.grid_server_args import base_args_not_restated, compose_server_args
 
+        yaml_args = str(envs.get(framework_env, ""))
         envs[framework_env] = compose_server_args(
-            base_extra_args=base.args, variant_extra_args=str(envs.get(framework_env, "")), args_mode="replace"
+            base_extra_args=base_args_not_restated(base.args, yaml_args),
+            variant_extra_args=yaml_args,
+            args_mode="replace",
         )
     for name, value in base.env.items():
         envs.setdefault(name, value)  # never clobber YAML/CLI envs
@@ -491,8 +519,6 @@ def _merge_caller_overrides(
     # Only ``benchmark.envs`` reaches the round, so ``--extra-env`` lands there for
     # every framework: vLLM Ray workers see MTP pins only this way.
     combined_extra: dict[str, Any] = dict(_operator_extra_env())
-    from hyperloom.common.agentx_workload import is_agentx_client_script
-
     if is_agentx_client_script(str(bench.get("benchmark_script") or "")):
         # The AgentX switch already settled these from the same pins; the raw
         # pin would undo its CONC scaling of the warmup grace.
@@ -608,7 +634,7 @@ def _pin_model_launch_workarounds(bench: dict[str, Any], model_path: str | None)
         # kernel aborts during CUDA-graph capture. Disabling the fused decode
         # pipeline keeps tp8 + the clean aiter MLA path.
         envs.setdefault("SGLANG_ROCM_FUSED_DECODE_MLA", "0")
-    if "mimo-v2" in _model_basename:
+    if "mimo-v2" in _model_basename and not framework_registry.loads_model_file(bench.get("framework")):
         # MiMo-V2.x's DEFAULT aiter attention backend SIGABRTs during CUDA-graph
         # capture on gfx942. Pin the triton attention backend. sglang accepts
         # lowercase `triton`; vLLM only knows TRITON_ATTN.
@@ -678,7 +704,8 @@ def _pin_client_model_access(bench: dict[str, Any], model_path: str | None, mode
     # Qwen3.6 MoE declares an arch the SERVER must also load remote code for, or it
     # refuses the arch at boot.
     _custom_code = "qwen3.6-35b-a3b" in model_basename or "qwen3-6-35b-a3b" in model_basename
-    if _custom_code or _model_requires_remote_code(_model):
+    _hf_loader = not framework_registry.loads_model_file(bench.get("framework"))
+    if _hf_loader and (_custom_code or _model_requires_remote_code(_model)):
         add_server_arg_unless_pinned(
             envs,
             bench.get("framework"),
@@ -841,14 +868,13 @@ class BenchmarkTarget:
 class MaterializeOptions:
     """Per-run choices for a materialized config beyond its launch layer and target.
 
-    ``server_base`` is the frozen base an AgentX launch is seeded with; ``None`` reads the current session's, and a
+    ``server_base`` is the frozen base a launch is seeded with; ``None`` reads the current session's, and a
     renderer outside a session (the multibranch toolbox) names its own and reads no session state, whose directory is
-    then the workspace root and its ``state.json`` another run's: its InferenceX point gets no base, on its TP's cards.
+    then the workspace root and its ``state.json`` another run's: its point runs on that base, on its TP's cards.
     """
 
     out_name: str = "baseline_config.with_envs.yaml"
     establish_quality_ref: bool = False
-    drop_moe_runner_backend: bool = False
     flydsl_source_dirs: bool = False
     agentx_mode: bool | None = None
     grading: Mapping[str, Any] | None = None
@@ -981,12 +1007,14 @@ def materialize_config_with_envs(
     _pin_workload_shape_envs(envs, in_session=options.server_base is None)
     framework_env = server_args_env_name(bench.get("framework"))
     window = _shape_request_window(bench)
-    _seed_base_launch(bench, framework_env, ServerBase() if options.server_base is not None else session_server_base())
+    _seed_base_launch(
+        bench, framework_env, session_server_base() if options.server_base is None else options.server_base
+    )
     _merge_caller_overrides(bench, framework_env, server_args, replace_args, launch.extra_envs)
     _settle_merged_server_args(bench, framework_env)
     _publish_scriptable_wiring(bench, window, options.establish_quality_ref)
     model_basename = _pin_model_launch_workarounds(bench, target.model_path)
-    _finalize_framework_server_args(bench, window, drop_moe_runner_backend=options.drop_moe_runner_backend)
+    _finalize_framework_server_args(bench, window)
     _pin_client_model_access(bench, target.model_path, model_basename)
     _pin_accuracy_eval_envs(envs)
     _pin_runtime_build_envs(bench, target.model_path, target.gpu_type, options.flydsl_source_dirs)

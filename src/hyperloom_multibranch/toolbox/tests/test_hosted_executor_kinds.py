@@ -66,7 +66,7 @@ async def test_an_accuracy_test_whose_round_holds_no_score_is_not_a_result(tmp_p
     point = point_yaml(tmp_path, "planned.yaml", fake_accuracy="null")
     executor = HostedExecutor(rig.backend, tmp_path / "session")
     accepted = AcceptedMeasurement(None, (point,))  # type: ignore[arg-type]
-    job = TestJob(req(kind=TestKind.ACCURACY, accuracy=True).accepted("b1-000001"), 1, (), 2, 2, accepted)
+    job = TestJob(req(kind=TestKind.ACCURACY, accuracy=True).accepted("b1-000001"), 1, (), 2, accepted)
     with pytest.raises(MeasurementRefused, match="accuracy round holds no accuracy score"):
         await executor.run(job)
 
@@ -75,7 +75,7 @@ async def test_an_accuracy_request_whose_result_has_no_accuracy_round_is_not_a_r
     point = point_yaml(tmp_path, "planned.yaml", fake_rounds="true")
     executor = HostedExecutor(rig.backend, tmp_path / "session")
     accepted = AcceptedMeasurement(None, (point,))  # type: ignore[arg-type]
-    job = TestJob(req(kind=TestKind.ACCURACY, accuracy=True).accepted("b1-000001"), 1, (), 2, 2, accepted)
+    job = TestJob(req(kind=TestKind.ACCURACY, accuracy=True).accepted("b1-000001"), 1, (), 2, accepted)
     with pytest.raises(MeasurementRefused, match="has no accuracy round"):
         await executor.run(job)
 
@@ -84,7 +84,7 @@ async def test_a_plain_test_ignores_a_score_it_did_not_ask_for(tmp_path: Path, r
     point = point_yaml(tmp_path, "planned.yaml", fake_accuracy="0.64")
     executor = HostedExecutor(rig.backend, tmp_path / "session")
     accepted = AcceptedMeasurement(None, (point,))  # type: ignore[arg-type]
-    result = await executor.run(TestJob(req().accepted("b1-000001"), 1, (), 2, 2, accepted))
+    result = await executor.run(TestJob(req().accepted("b1-000001"), 1, (), 2, accepted))
     assert result.validity is Validity.SUCCEEDED and result.accuracy == ()
 
 
@@ -135,7 +135,7 @@ async def test_several_points_or_a_sweep_request_run_as_one_server_arm(tmp_path,
     backend = _Capture()
     executor = HostedExecutor(backend, tmp_path / "session")  # type: ignore[arg-type]
     accepted = AcceptedMeasurement(None, _points(tmp_path, *levels))  # type: ignore[arg-type]
-    await executor.run(TestJob(req(kind=kind).accepted("b1-000001"), 1, (), 2, 2, accepted))
+    await executor.run(TestJob(req(kind=kind).accepted("b1-000001"), 1, (), 2, accepted))
     (seen,) = backend.calls
     assert seen.prep == prep and seen.points == accepted.points and seen.kind == "test"
 

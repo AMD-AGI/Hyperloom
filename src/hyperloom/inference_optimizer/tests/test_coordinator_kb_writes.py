@@ -12,11 +12,7 @@ import pytest
 
 from hyperloom.orchestrator.knowledge.knowledge_plane import KnowledgePlane
 from hyperloom.orchestrator.roles.agent_role import default_role_registry
-from hyperloom.orchestrator.roles.mock_backend import (
-    MockBackend,
-    MockTurn,
-    ScriptedPlan,
-)
+from hyperloom.orchestrator.tests.mock_backend import MockBackend, MockTurn, ScriptedPlan
 from hyperloom.orchestrator.loop.coordinator import AdvisoryServices, Coordinator
 from hyperloom.inference_optimizer.recipe_snapshot_constants import RecipeIdentity
 from hyperloom.orchestrator.knowledge.recipe_kb import (
@@ -123,11 +119,23 @@ def test_kb_amend_recipe_is_noop_in_remote_mode(tmp_path: Path) -> None:
     coord.recipe_journal.kb_amend_recipe(append_lesson={"statement": "must not write", "measured_impact": ""})
 
 
+def _promote(coord: Coordinator, name: str, tput: float, args: str) -> None:
+    """Lift a KEEP into the session best the way the dispatcher does before the fact hook."""
+    state = coord.shared_state
+    if not state.current_best:
+        state.baseline_tput = tput / 2
+        state.current_best = {"action": "baseline", "tput": tput / 2, "extra_server_args": "", "extra_envs": {}}
+    assert coord.writeback.lift_to_current_best(
+        "explore", tput, {"name": name, "candidate_extra_server_args": args, "extra_server_args": args}
+    )
+
+
 def test_record_fact_per_variant_stamps_best_config_on_keep(tmp_path: Path) -> None:
     """KEEP with structured variant args must write best_config for warm-replay."""
     from types import SimpleNamespace
 
     coord = _make_coordinator(tmp_path)
+    _promote(coord, "disable_radix", 6700.0, "--disable-radix-cache")
     task = SimpleNamespace(
         kind="explore",
         task_id="t-keep-bc",
@@ -194,6 +202,7 @@ def test_record_fact_per_variant_does_not_clobber_better_best_config(
             best_throughput=7000.0,
         )
     )
+    _promote(coord, "small_gain", 6600.0, "--disable-radix-cache")
     task = SimpleNamespace(kind="explore", task_id="t-weaker", params={})
     coord.recipe_journal._record_fact_per_variant(
         task=task,
@@ -210,6 +219,46 @@ def test_record_fact_per_variant_does_not_clobber_better_best_config(
     bc = row.get("best_config") or {}
     assert bc.get("extra_server_args") == "--page-size 32"
     assert float(row.get("best_throughput") or 0.0) == 7000.0
+
+
+def test_a_weaker_source_patch_keep_does_not_lower_a_stronger_row_without_launch_args(tmp_path: Path) -> None:
+    from types import SimpleNamespace
+
+    from hyperloom.inference_optimizer.session.optimization_journal import Verdict
+
+    coord = _make_coordinator(tmp_path)
+    cid = _expected_cid()
+    coord.recipe_kb.put_recipe(
+        RecipeUpsert(
+            canonical_id=cid,
+            model=_MODEL,
+            hardware=_HW,
+            framework_name=_FW,
+            framework_version=_FWV,
+            precision=_PREC,
+            best_config={"extra_envs": {}, "tput": 7000.0},
+            best_throughput=7000.0,
+            what_worked=[{"name": "strong-patch", "gain_pct": 40.0}],
+        )
+    )
+    state = coord.shared_state
+    state.baseline_tput = 5000.0
+    state.current_best = {"action": "baseline", "tput": 5000.0, "extra_server_args": "", "extra_envs": {}}
+    patch_result = {"output_throughput": 6900.0, "delta_pct": 38.0, "extra_envs": {}}
+    assert coord.writeback.lift_to_current_best("integrate_patch", 6900.0, dict(patch_result))
+    assert coord.writeback.validate(6900.0, {"output_throughput": 6900.0})
+
+    coord.recipe_journal._record_fact_per_task(
+        task=SimpleNamespace(kind="integrate_patch", task_id="t-weak-patch", params={}),
+        source_session_id="sess-2",
+        result_dict=patch_result,
+        verdict=Verdict.ADOPTED,
+    )
+    assert coord.recipe_journal.finalize_recipe_and_journal()["result_type"] == "written"
+
+    row = coord.recipe_kb.get_recipe(canonical_id=cid)
+    assert row["best_throughput"] == 7000.0
+    assert "strong-patch" in [entry["name"] for entry in row["what_worked"]]
 
 
 def test_kb_amend_recipe_stamps_architecture_tags(tmp_path: Path) -> None:
@@ -492,34 +541,6 @@ def test_close_finalize_keeps_the_sessions_other_runs_recorded(tmp_path: Path) -
     assert "other-session" in [s["session_id"] for s in row["sessions"]]
 
 
-def test_best_config_reads_stack_args_from_canonical_server_key(
-    tmp_path: Path,
-) -> None:
-    """best_config reads the canonical ``extra_server_args`` stack key."""
-    coord = _make_coordinator(tmp_path)
-    ss = coord.shared_state
-    ss.current_best = {
-        "name": "tuned",
-        "extra_server_args": "--page-size 16 --page-size 16",
-        "tput": 2200.0,
-    }
-    ss.optimization_stack = [
-        {
-            "action": "explore",
-            "variant_name": "page32",
-            "candidate_extra_server_args": "--page-size 32 --schedule-policy lpm",
-            "extra_server_args": "--page-size 32 --schedule-policy lpm",
-        }
-    ]
-    ss.cumulative_gain_validated = 10.0
-    attrs = recipe_attrs_from_state(coord.shared_state, coord.session_dir.name)
-    assert attrs["best_config"]["extra_server_args"] == ("--page-size 32 --schedule-policy lpm"), (
-        "stack-layer launch args must be read from the canonical "
-        "extra_server_args key; got "
-        f"{attrs['best_config'].get('extra_server_args')!r}"
-    )
-
-
 def test_close_overwrites_best_when_validated_win(tmp_path: Path) -> None:
     """Counterpart guard: a genuine validated win DOES update best_config/best_throughput."""
     coord = _make_coordinator(tmp_path)
@@ -584,8 +605,7 @@ def test_what_worked_follows_a_best_config_the_keep_amend_stamped(tmp_path: Path
     coord.shared_state.cumulative_gain_validated_stack_len = 1
     overrides = kb_best_config_overrides_for_keep(
         live=journal.read_local_recipe_row(),
-        best_config_candidate={"name": "page32", "extra_server_args": "--page-size 32", "tput": 2200.0},
-        throughput_after=2200.0,
+        best_config={"name": "page32", "extra_server_args": "--page-size 32", "tput": 2200.0},
     )
     journal.kb_amend_recipe(
         append_lesson={"statement": "page32 helped", "measured_impact": {}}, recipe_overrides=overrides
@@ -673,6 +693,94 @@ def test_lift_then_validation_leaves_the_recipe_publishable(tmp_path: Path) -> N
 
     assert outcome["result_type"] == "written"
     assert coord.recipe_kb.get_recipe(canonical_id=_expected_cid())["best_throughput"] == 1100.0
+
+
+def test_persisted_best_config_carries_the_full_stack_not_the_last_layer_delta(tmp_path: Path) -> None:
+    coord = _make_coordinator(tmp_path)
+    state = coord.shared_state
+    state.baseline_tput = 1000.0
+    state.current_best = {"action": "baseline", "tput": 1000.0, "extra_server_args": "", "extra_envs": {}}
+    mtp = '--speculative-config {"method":"mtp","num_speculative_tokens":1} --max-model-len 13312'
+
+    assert coord.writeback.lift_to_current_best(
+        "explore", 1400.0, {"name": "mtp", "candidate_extra_server_args": mtp, "extra_server_args": mtp}
+    )
+    assert coord.writeback.lift_to_current_best(
+        "explore",
+        1480.0,
+        {
+            "name": "async-sched",
+            "candidate_extra_server_args": "--async-scheduling",
+            "extra_server_args": f"{mtp} --async-scheduling",
+        },
+    )
+    assert coord.writeback.validate(1480.0, {"output_throughput": 1480.0})
+
+    assert coord.recipe_journal.finalize_recipe_and_journal()["result_type"] == "written"
+    row = coord.recipe_kb.get_recipe(canonical_id=_expected_cid())
+    args = row["best_config"]["extra_server_args"]
+    assert row["best_throughput"] == 1480.0
+    assert '--speculative-config {"method":"mtp","num_speculative_tokens":1}' in args
+    assert "--max-model-len 13312" in args
+    assert "--async-scheduling" in args
+
+
+def test_persisted_best_config_follows_current_best_when_a_keep_reuses_a_stacked_variant_name(tmp_path: Path) -> None:
+    coord = _make_coordinator(tmp_path)
+    kv = "--kv-cache-dtype fp8_e4m3"
+    _promote(coord, "attn_backend", 1400.0, "--attention-backend ROCM_AITER_FA")
+    _promote(coord, "attn_backend", 1480.0, f"{kv} --attention-backend ROCM_AITER_UNIFIED_ATTN")
+    assert coord.writeback.validate(1480.0, {"output_throughput": 1480.0})
+
+    assert coord.recipe_journal.finalize_recipe_and_journal()["result_type"] == "written"
+
+    row = coord.recipe_kb.get_recipe(canonical_id=_expected_cid())
+    args = row["best_config"]["extra_server_args"]
+    assert row["best_throughput"] == 1480.0
+    assert args == coord.shared_state.current_best["extra_server_args"]
+    assert kv in args
+    assert "--attention-backend ROCM_AITER_UNIFIED_ATTN" in args
+    assert "ROCM_AITER_FA" not in args
+
+
+def test_close_repairs_a_row_whose_best_config_lost_a_layer_at_equal_throughput(tmp_path: Path) -> None:
+    coord = _make_coordinator(tmp_path)
+    cid = _expected_cid()
+    coord.recipe_kb.put_recipe(
+        RecipeUpsert(
+            canonical_id=cid,
+            model=_MODEL,
+            hardware=_HW,
+            framework_name=_FW,
+            framework_version=_FWV,
+            precision=_PREC,
+            best_config={"extra_server_args": "--attention-backend ROCM_AITER_UNIFIED_ATTN", "tput": 1480.0},
+            best_throughput=1480.0,
+        )
+    )
+    state = coord.shared_state
+    state.baseline_tput = 1000.0
+    state.current_best = {"action": "baseline", "tput": 1000.0, "extra_server_args": "", "extra_envs": {}}
+    kv = "--kv-cache-dtype fp8_e4m3"
+    assert coord.writeback.lift_to_current_best(
+        "explore", 1400.0, {"name": "kv", "candidate_extra_server_args": kv, "extra_server_args": kv}
+    )
+    assert coord.writeback.lift_to_current_best(
+        "explore",
+        1480.0,
+        {
+            "name": "attn",
+            "candidate_extra_server_args": "--attention-backend ROCM_AITER_UNIFIED_ATTN",
+            "extra_server_args": f"{kv} --attention-backend ROCM_AITER_UNIFIED_ATTN",
+        },
+    )
+    assert coord.writeback.validate(1480.0, {"output_throughput": 1480.0})
+
+    assert coord.recipe_journal.finalize_recipe_and_journal()["result_type"] == "written"
+
+    row = coord.recipe_kb.get_recipe(canonical_id=cid)
+    assert row["best_throughput"] == 1480.0
+    assert row["best_config"]["extra_server_args"] == f"{kv} --attention-backend ROCM_AITER_UNIFIED_ATTN"
 
 
 # sessions[] entry must carry throughput_before/after, a date, and stack actions.
@@ -773,6 +881,24 @@ def test_finalize_recipe_is_skipped_under_agentx(native_benchmark, tmp_path, mon
     out = coord.recipe_journal.finalize_recipe_and_journal(source="close")
     assert out["status"] == "skipped"
     assert out["reason"] == "agentx_local_store_unsupported"
+
+
+def test_a_prompt_dataset_session_is_kept_out_of_the_recipe_kb(tmp_path: Path, monkeypatch) -> None:
+    from hyperloom.orchestrator.knowledge.recipe_kb_t0 import T0AnchorRequest, run_t0_anchor
+
+    monkeypatch.delenv("HYPERLOOM_BENCHMARK_CONFIG", raising=False)
+    coord = _make_coordinator(tmp_path)
+    state = coord.shared_state
+    state.prompt_dataset = "/data/prompts.jsonl"
+    # The coordinator anchored when it was built, and an anchored session is not anchored again.
+    state.warm_start_ts = ""
+
+    run_t0_anchor(coord.recipe_kb, state, T0AnchorRequest(workload=_MODEL, hw=_HW), session_dir=coord.session_dir)
+    coord.recipe_journal.kb_amend_recipe(append_lesson={"statement": "learnt on real prompts"})
+    out = coord.recipe_journal.finalize_recipe_and_journal(source="close")
+
+    assert (out["status"], out["reason"]) == ("skipped", "prompt_dataset_identity_unsupported")
+    assert coord.recipe_kb.get_recipe(canonical_id=_expected_cid()) is None
 
 
 def test_finalize_recipe_reaches_agentx_remote_kb(native_benchmark, tmp_path, monkeypatch) -> None:
@@ -1130,3 +1256,40 @@ def test_fact_write_hook_files_the_pitfall_a_failure_warrants(tmp_path: Path, re
     _fact_write_for_one_task(coord, result=result, verdict=Verdict.FAILED)
     row = coord.recipe_kb.get_recipe(canonical_id=_expected_cid()) or {}
     assert [pitfall["severity"] for pitfall in row.get("pitfalls") or []] == severities
+
+
+def test_a_source_patch_keep_stamps_the_session_stack_not_its_own_empty_args(tmp_path: Path) -> None:
+    """An integrate_patch KEEP carries no launch args; the recipe must keep the stack it was measured on."""
+    from types import SimpleNamespace
+
+    from hyperloom.inference_optimizer.session.optimization_journal import Verdict
+
+    coord = _make_coordinator(tmp_path)
+    mtp = '--speculative-config {"method":"mtp","num_speculative_tokens":1} --max-model-len 13312'
+    _promote(coord, "mtp", 1460.0, mtp)
+    coord.recipe_journal._record_fact_per_variant(
+        task=SimpleNamespace(kind="explore", task_id="t-mtp", params={}),
+        source_session_id="sess-1",
+        variant_outcome={
+            "outcome": "KEEP",
+            "variant_name": "mtp",
+            "variant": {"extra_server_args": mtp},
+            "metrics": {"gain_pct": 40.0, "output_throughput": 1460.0},
+        },
+        adopted=True,
+    )
+    patch_result = {"output_throughput": 1535.0, "delta_pct": 5.1, "extra_envs": {"VLLM_ROCM_USE_AITER": "1"}}
+    assert coord.writeback.lift_to_current_best("integrate_patch", 1535.0, dict(patch_result))
+
+    coord.recipe_journal._record_fact_per_task(
+        task=SimpleNamespace(kind="integrate_patch", task_id="t-patch", params={}),
+        source_session_id="sess-1",
+        result_dict=patch_result,
+        verdict=Verdict.ADOPTED,
+    )
+
+    row = coord.recipe_kb.get_recipe(canonical_id=_expected_cid())
+    assert row["best_throughput"] == 1535.0
+    assert '--speculative-config {"method":"mtp","num_speculative_tokens":1}' in row["best_config"]["extra_server_args"]
+    assert "--max-model-len 13312" in row["best_config"]["extra_server_args"]
+    assert row["best_config"]["extra_envs"] == {"VLLM_ROCM_USE_AITER": "1"}

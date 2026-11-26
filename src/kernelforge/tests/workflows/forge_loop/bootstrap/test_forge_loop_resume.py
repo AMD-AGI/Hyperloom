@@ -20,7 +20,6 @@ import kernelforge.workflows.forge_loop.bootstrap.relay as relay_module
 import kernelforge.workflows.forge_loop.campaign.recovery as recovery_module
 import kernelforge.workflows.forge_loop.roles.agent as agent_module
 import kernelforge.workflows.forge_loop.roles.analysis as analysis_module
-import kernelforge.workflows.forge_loop.roles.orchestration as orchestration_module
 import kernelforge.workflows.forge_loop.roles.supervisor as supervisor_module
 from kernelforge.cli import main
 from kernelforge.workflows.forge_loop.bootstrap.session_budget import _forge_session_timeout_sec
@@ -48,7 +47,6 @@ from kernelforge.workflows.forge_loop.campaign.run_state import (
     WorkspaceLockError,
 )
 from kernelforge.workflows.forge_loop.iteration.runner import IterationConfig, IterationLoop
-from kernelforge.workflows.forge_loop.search.search_policy import PLANNED_ROUND_STALL, SELF_DIRECTED_STALL
 
 
 # The forge-loop CLI activates per-workspace aiter cache isolation, which writes AITER_ROOT_DIR / AITER_JIT_DIR (and
@@ -77,9 +75,8 @@ def _isolate_aiter_cache_env():
                 os.environ[key] = value
 
 
-def test_forge_loop_exposes_the_superset_of_resume_and_orchestration_options():
-    # The resume CLI is a SUPERSET: it keeps our resume/campaign options and also exposes main's orchestration options
-    # (Hyperloom shells out to this command and passes them).
+def test_forge_loop_exposes_the_resume_and_campaign_options_and_none_of_the_retired_ones():
+    # Hyperloom shells out to this command and passes these options.
     runner = CliRunner()
 
     help_result = runner.invoke(main, ["forge-loop", "--help"])
@@ -108,6 +105,9 @@ def test_forge_loop_exposes_the_superset_of_resume_and_orchestration_options():
     assert "--shapes-json" not in help_result.output
     assert "--workload-key" not in help_result.output
     assert "--max-iters" not in help_result.output
+    # The planning stage and the stacking of archived candidates are gone, and so are their switches.
+    assert "--specialist-probe" not in help_result.output
+    assert "--merge-stacking" not in help_result.output
 
 
 def _install_cli_fakes(monkeypatch, tmp_path):
@@ -266,18 +266,6 @@ def _install_cli_fakes(monkeypatch, tmp_path):
         fake_make_analysis_agent_service,
     )
     captured["analysis_service"] = analysis_service
-    orchestration_service = object()
-
-    def fake_make_orchestration_service(**kwargs):
-        captured["orchestration_service_kwargs"] = kwargs
-        return orchestration_service
-
-    monkeypatch.setattr(
-        orchestration_module,
-        "make_orchestration_service",
-        fake_make_orchestration_service,
-    )
-    captured["orchestration_service"] = orchestration_service
     monkeypatch.setattr(supervisor_module, "make_supervisor_fn", lambda **_kwargs: None)
     return captured
 
@@ -809,11 +797,9 @@ def test_forge_loop_defaults_to_fresh_and_workspace_campaign_root(tmp_path, monk
     assert len(captured["warmstarts"]) == 1
     assert captured["run_kwargs"]["workspace_lock_held"] is True
     assert captured["run_kwargs"]["usage"] is not None
-    assert captured["run_kwargs"]["agents"].orchestration_service is captured["orchestration_service"]
     assert captured["run_kwargs"]["agents"].analysis_service is captured["analysis_service"]
     assert captured["analysis_service_kwargs"]["profiling_enabled"] is False
     assert captured["agent_fn_setup"].task.profiling_enabled is False
-    assert captured["orchestration_service_kwargs"]["enable_plan_critic"] is False
     assert captured["lock_held_during_warmstart"] is True
     assert captured["lock_held_during_run"] is True
     assert captured["lock_held_during_finalization"] is True
@@ -853,7 +839,6 @@ def test_short_forge_budget_keeps_profiling_disabled(
     assert captured["analysis_service_kwargs"]["profiling_enabled"] is False
     assert captured["analysis_service_kwargs"]["timeout_sec"] == 7200
     assert captured["agent_fn_setup"].task.profiling_enabled is False
-    assert captured["orchestration_service_kwargs"]["enable_plan_critic"] is False
 
 
 def test_long_forge_budget_enables_analysis_profiling(tmp_path, monkeypatch):
@@ -867,62 +852,6 @@ def test_long_forge_budget_enables_analysis_profiling(tmp_path, monkeypatch):
     assert result.exit_code == 0, result.output
     assert captured["analysis_service_kwargs"]["profiling_enabled"] is True
     assert captured["agent_fn_setup"].task.profiling_enabled is True
-    assert captured["orchestration_service_kwargs"]["enable_plan_critic"] is True
-
-
-def test_multi_lane_long_horizon_reports_the_critic_it_enabled(
-    tmp_path,
-    monkeypatch,
-):
-    """What the banner claims has to be what the round buys."""
-    captured = _install_cli_fakes(monkeypatch, tmp_path)
-
-    result, _workspace = _invoke_forge_loop(
-        tmp_path,
-        ["--profiling", "--max-hours", "2.0001", "--lanes", "2"],
-    )
-
-    assert result.exit_code == 0, result.output
-    assert captured["analysis_service_kwargs"]["profiling_enabled"] is True
-    assert captured["agent_fn_setup"].task.profiling_enabled is True
-    assert captured["orchestration_service_kwargs"]["enable_plan_critic"] is True
-    assert (
-        "Plan Critic: enabled (long-horizon, same backend/model; skips rounds that continue a kept route)"
-        in result.output
-    )
-
-
-def test_a_single_lane_campaign_builds_no_planning_service(tmp_path, monkeypatch):
-    """One lane has nothing to divide, so no round buys a dispatch, a specialist, a synthesis or a critic."""
-    captured = _install_cli_fakes(monkeypatch, tmp_path)
-
-    result, _workspace = _invoke_forge_loop(
-        tmp_path,
-        ["--profiling", "--max-hours", "2.0001", "--lanes", "1"],
-    )
-
-    assert result.exit_code == 0, result.output
-    assert captured["run_kwargs"]["agents"].orchestration_service is None
-    assert "orchestration_service_kwargs" not in captured
-    assert captured["run_kwargs"]["agents"].analysis_service is captured["analysis_service"]
-    assert "Orchestration: off (one lane; the Implementer chooses its direction from the Analysis evidence)" in (
-        result.output
-    )
-    assert "Plan Critic" not in result.output
-
-
-@pytest.mark.parametrize(("lanes", "stall"), [("1", SELF_DIRECTED_STALL), ("2", PLANNED_ROUND_STALL)])
-def test_the_stall_counts_follow_the_sessions_lanes_and_the_campaign_records_none(tmp_path, monkeypatch, lanes, stall):
-    """One pair of counts reaches the loop, which turns the search and calls a relay blockage by them."""
-    captured = _install_cli_fakes(monkeypatch, tmp_path)
-
-    result, workspace = _invoke_forge_loop(tmp_path, ["--lanes", lanes])
-
-    assert result.exit_code == 0, result.output
-    loop_config = captured["loops"][0].ic
-    assert (loop_config.diversify_after, loop_config.supervise_after) == (stall.diversify_after, stall.supervise_after)
-    stored = json.loads(CampaignConfigStore(str(workspace)).path.read_text())
-    assert set(stored["agent_relay"]) == {"primary_profile_id", "profiles"}
 
 
 def test_the_case_aggregate_belongs_to_the_campaign_and_reaches_the_loop_its_gate_and_the_result(tmp_path, monkeypatch):
@@ -1671,24 +1600,6 @@ def test_fresh_campaign_contains_no_shape_metadata(tmp_path, monkeypatch):
     assert captured["loops"]
     assert captured["agent_fn_setup"].measurement.stage_timeout_sec == 1800
     assert captured["agent_fn_setup"].measurement.bench_timeout_sec == 300
-
-
-def test_a_retired_iteration_cap_is_rejected(tmp_path, monkeypatch):
-    """A retired option now costs an exit code instead of being absorbed."""
-    _install_cli_fakes(monkeypatch, tmp_path)
-    workspace, kernel, driver = _initialize_workspace(tmp_path)
-
-    result = CliRunner().invoke(
-        main,
-        [
-            *_fresh_command(workspace, kernel, driver),
-            "--max-iters",
-            "1",
-        ],
-    )
-
-    assert result.exit_code != 0
-    assert "No such option" in result.output
 
 
 def test_fresh_cli_rejects_existing_state_before_git_or_warmstart(tmp_path, monkeypatch):

@@ -14,8 +14,11 @@ from pathlib import Path
 
 import pytest
 
-from hyperloom.contracts.measurement import FailureClass, SandboxFacts, TestResult, Validity
+from hyperloom.common.agentx_early_stop import EarlyStopMode
+from hyperloom.contracts.measurement import AgentxCheckpointRuling, FailureClass, SandboxFacts, TestResult, Validity
 from hyperloom.measure import sandboxes
+from hyperloom.measure.boot_watch import boot_seconds
+from hyperloom.measure.checkpoint import CheckpointPlan, read_ruling
 from hyperloom.measure.hosted import HostedMeasurementBackend
 from hyperloom.measure.hosted_log import STATE_FINISHED, STATE_SENT
 from hyperloom.measure.points import AcceptedMeasurement
@@ -23,7 +26,10 @@ from hyperloom.measure.socket import TestCall, TestOutcome
 from hyperloom.measure.tests.bundle_factory import STAGING, base_launch
 from hyperloom.measure.tests.hosted_fixtures import Rig, make_rig, point_yaml
 from hyperloom.sandbox.socket import IDEMPOTENCY_KEY, CreateOptions, SandboxGone, SandboxQuotaExceeded
+from hyperloom_multibranch.contracts.blackboard.records import TestRecord
 from hyperloom_multibranch.contracts.toolbox import WorkloadKind
+from hyperloom_multibranch.rulegate.rules import stopped_at_checkpoint
+from hyperloom_multibranch.specialist.judging import _awaits_judgement
 from hyperloom_multibranch.toolbox.attempts import MeasurementRefused, TestJob
 from hyperloom_multibranch.toolbox.hosted_executor import (
     DEFAULT_TEST_TIMEOUT_SEC,
@@ -39,15 +45,15 @@ OK, NODE_FAULT, UNKNOWN, CANDIDATE = "ok", "node_fault", "fail_unknown", "fail_t
 
 
 class PointPlanner(FakePlanner):
-    """Plans every request to one point file."""
+    """Plans every request to one point file, held to ``checkpoint`` when one is given."""
 
-    def __init__(self, point: Path, environment: object = None) -> None:
+    def __init__(self, point: Path, environment: object = None, checkpoint: CheckpointPlan | None = None) -> None:
         super().__init__()
-        self.point, self.environment = point, environment
+        self.point, self.environment, self.checkpoint = point, environment, checkpoint
 
     def plan(self, request, parent) -> AcceptedMeasurement:  # type: ignore[no-untyped-def]
         super().plan(request, parent)
-        return AcceptedMeasurement(self.environment, (self.point,))  # type: ignore[arg-type]
+        return AcceptedMeasurement(self.environment, (self.point,), checkpoint=self.checkpoint)  # type: ignore[arg-type]
 
 
 @dataclass
@@ -60,6 +66,7 @@ class ScriptedBackend:
     calls: int = 0
     seen: list[TestOutcome] = field(default_factory=list)
     stamps: dict[str, str] = field(default_factory=dict)  # files the sandbox's rounds leave in the landed output
+    fake: dict[str, str] = field(default_factory=dict)  # further keys of the point that steer the fake runner
 
     name = "hosted"
 
@@ -70,7 +77,7 @@ class ScriptedBackend:
     def run_test(self, call):  # type: ignore[no-untyped-def]
         mode = self.modes[min(self.calls, len(self.modes) - 1)]
         self.calls += 1
-        point_yaml(self.point.parent, self.point.name, fake_mode=mode)
+        point_yaml(self.point.parent, self.point.name, fake_mode=mode, **self.fake)
         outcome = self.inner.run_test(call)  # type: ignore[attr-defined]
         for name, text in self.stamps.items():
             (call.output_dir / name).parent.mkdir(parents=True, exist_ok=True)
@@ -113,6 +120,19 @@ async def _run(tb: ToolboxRig) -> tuple[str, TestResult]:
     assert entry is not None and entry.outcome is not None
     outcome = entry.outcome
     return request_id, TestResult.from_document(outcome["result"])
+
+
+async def stored_and_logged(
+    tmp_path: Path, scripted: ScriptedBackend, planner: PointPlanner
+) -> tuple[TestResult, TestResult]:
+    """One AgentX test of ``scripted`` that ``planner`` plans: the result the blackboard stored and the one the
+    toolbox logged."""
+    executor = HostedExecutor(scripted, tmp_path / "session")  # type: ignore[arg-type]
+    tb = build(tmp_path, executor=executor, planner=planner, policy=POLICY, workload_kind=WorkloadKind.AGENTX)
+    request_id, logged = await _run(tb)
+    record = await tb.blackboard.record(request_id)
+    assert record.result is not None
+    return record.result, logged
 
 
 def _journal_attempts(r: Rig, request_id: str) -> dict[int, str]:
@@ -158,6 +178,43 @@ async def test_a_result_carries_the_boot_its_rounds_stamped_whether_or_not_the_t
     _, result = await _run(tb)
     assert result.cold_start_seconds == 80.5
     assert (await tb.toolbox.queue_state()).cold_start_seconds == 80.5
+
+
+async def test_an_attempt_saved_without_a_result_reports_no_cold_start(tmp_path: Path, rig) -> None:
+    r = rig()
+    tb, scripted = _toolbox(tmp_path, r, NODE_FAULT)
+    scripted.fake = {"fake_round_ready": "80.5"}
+    tb.toolbox.record_cold_start(75.0)
+    _, result = await _run(tb)
+    assert boot_seconds(tmp_path / "session" / result.output_dir) == 80.5, "the host saved the round's ready stamp"
+    assert result.validity is not Validity.SUCCEEDED and not result.manifest_sha256
+    assert result.cold_start_seconds is None
+    assert (await tb.toolbox.queue_state()).cold_start_seconds == 75.0
+
+
+async def test_an_attempt_saved_without_a_result_carries_no_ruling_the_checkpoint_left_in_its_files(
+    tmp_path: Path, rig
+) -> None:
+    """A round the checkpoint stopped, whose test then ended on a node fault before a bundle landed: the host saves
+    the ruling with the round's other files, and the failed attempt still claims none, so the rule gate judges nothing."""
+    r = rig()
+    point = point_yaml(tmp_path, "planned.yaml")
+    ruling = AgentxCheckpointRuling(1800.0, 50.0, 45.0, -10.0, 2.0, trails=True, stopped=True)
+    scripted = ScriptedBackend(
+        r.backend, point, [NODE_FAULT], fake={"fake_round_ruling": json.dumps(ruling.to_document())}
+    )
+    planner = PointPlanner(point, checkpoint=CheckpointPlan(50.0, EarlyStopMode.ENFORCE))
+    executor = HostedExecutor(scripted, tmp_path / "session")  # type: ignore[arg-type]
+    tb = build(tmp_path, executor=executor, planner=planner, policy=POLICY, workload_kind=WorkloadKind.AGENTX)
+
+    request_id, result = await _run(tb)
+
+    attempt = tmp_path / "session" / "tests" / request_id / "attempt-1"
+    assert read_ruling(attempt) == ruling, "the host saved the round's ruling where a landed bundle's would be"
+    assert result.validity is Validity.MEASUREMENT_FAILED and not result.manifest_sha256
+    assert result.agentx_checkpoint is None
+    record = TestRecord(request=req(), result=result)
+    assert not stopped_at_checkpoint(record) and not _awaits_judgement(record)
 
 
 async def test_a_result_with_no_stamp_has_no_cold_start_and_the_queue_keeps_its_last_one(tmp_path: Path, rig) -> None:
@@ -449,7 +506,6 @@ def _job(point: Path) -> TestJob:
         1,
         (),
         2,
-        2,
         AcceptedMeasurement(None, (point,)),  # type: ignore[arg-type]
     )
 
@@ -513,7 +569,7 @@ async def test_an_end_with_no_class_and_no_success_is_refused_with_its_reason(tm
 
 async def test_a_job_without_the_accepted_measurement_is_refused(tmp_path: Path) -> None:
     executor = HostedExecutor(_Stub(_outcome()), tmp_path / "session")  # type: ignore[arg-type]
-    job = TestJob(req().accepted("b1-000001"), 1, (), 2, 2, {"env": "x"})
+    job = TestJob(req().accepted("b1-000001"), 1, (), 2, {"env": "x"})
     with pytest.raises(MeasurementRefused, match="accepted measurement"):
         await executor.run(job)
 

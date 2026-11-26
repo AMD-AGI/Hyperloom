@@ -33,6 +33,8 @@ from hyperloom.sandbox.reaper import Leftovers, kill_launchers, reap_sandbox_pro
 from hyperloom.sandbox.rooted import open_rooted
 from hyperloom.sandbox.socket import (
     CommandResult,
+    DirEntry,
+    EntryKind,
     OutputSinks,
     RunSettings,
     Role,
@@ -45,7 +47,14 @@ from hyperloom.sandbox.templates import RESERVED_ENV_NAMES, LocalTemplate
 
 log = logging.getLogger(__name__)
 
-__all__ = ["WORK_DIR", "LocalSandbox", "SandboxPlan", "SandboxRuntime"]
+__all__ = [
+    "SGLANG_JIT_CACHE_ENV",
+    "SGLANG_JIT_CACHE_PREFIX",
+    "WORK_DIR",
+    "LocalSandbox",
+    "SandboxPlan",
+    "SandboxRuntime",
+]
 
 #: The working directory every sandbox starts in, under the root the file API shows (``/work``).
 WORK_DIR = "work"
@@ -53,6 +62,12 @@ WORK_DIR = "work"
 #: Parent environment names a sandbox process inherits; everything else (keys,
 #: tokens, job topology) is dropped.
 _INHERITED_ENV = ("PATH", "LANG", "LC_ALL", "PYTHONPATH", "VIRTUAL_ENV")
+#: Where SGLang's JIT kernel cache goes instead of below ``HOME`` (``fs/work``), which lies in the session directory:
+#: SGLang publishes a build by renaming its staging directory, and an NFS server refuses to rename a directory that
+#: holds an open file. ``/tmp`` is a confined sandbox's private scratch, deleted with it, and the host's otherwise,
+#: where :meth:`LocalSandbox.kill` deletes it.
+SGLANG_JIT_CACHE_ENV = "SGLANG_JIT_CACHE_DIR"
+SGLANG_JIT_CACHE_PREFIX = "/tmp/hl-sglang-jit-"
 _READER_JOIN_SEC = 2.0
 _CHUNK = 1 << 20
 
@@ -128,6 +143,7 @@ class LocalSandbox:
     def _build_base_env(self, create_envs: Mapping[str, str], platform_envs: Mapping[str, str]) -> dict[str, str]:
         env = {k: os.environ[k] for k in _INHERITED_ENV if k in os.environ}
         env["HOME"] = str(self.fs / WORK_DIR)
+        env[SGLANG_JIT_CACHE_ENV] = f"{SGLANG_JIT_CACHE_PREFIX}{self.sandbox_id}"
         env.update(self.template.envs)
         env.update(create_envs)
         env.update(platform_envs)
@@ -207,6 +223,8 @@ class LocalSandbox:
             self._leftovers = wait_exited(self._leftovers) | reaped_now
             reaped = self._leftovers.clean
             shutil.rmtree(self.directory, ignore_errors=True)
+            if self._confined is None:
+                shutil.rmtree(f"{SGLANG_JIT_CACHE_PREFIX}{self.sandbox_id}", ignore_errors=True)
             self._on_end(self, reaped)
         if not reaped:
             raise SandboxUnavailable(
@@ -320,8 +338,8 @@ class LocalSandbox:
                 total += len(chunk)
         return total
 
-    def list_dir(self, path: str) -> list[str]:
-        """List entry names of a directory, sorted.
+    def list_entries(self, path: str) -> list[DirEntry]:
+        """The entries of a directory, sorted by name, each read without following a link.
 
         Raises:
             SandboxDenied: By the sealed policy, or for a path that escapes the root.
@@ -330,7 +348,14 @@ class LocalSandbox:
         """
         fd = self._open(self._gate(path, write=False), os.O_RDONLY | os.O_DIRECTORY)
         try:
-            return sorted(os.listdir(fd))
+            entries = []
+            for name in sorted(os.listdir(fd)):
+                try:
+                    facts = os.stat(name, dir_fd=fd, follow_symlinks=False)
+                except FileNotFoundError:
+                    continue  # removed since the listing
+                entries.append(DirEntry(name, _kind(facts.st_mode), facts.st_size))
+            return entries
         finally:
             os.close(fd)
 
@@ -538,3 +563,11 @@ def _drain(stream: IO[bytes] | None, sink: list[str], callback: Callable[[str], 
         sink.append(line)
         if callback is not None:
             callback(line)
+
+
+def _kind(mode: int) -> EntryKind:
+    if stat.S_ISLNK(mode):
+        return "link"
+    if stat.S_ISDIR(mode):
+        return "dir"
+    return "file" if stat.S_ISREG(mode) else "other"

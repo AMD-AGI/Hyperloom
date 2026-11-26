@@ -11,6 +11,7 @@ is the real hosted backend over the local sandbox provider.
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 
 from hyperloom.measure import hosted
@@ -93,3 +94,33 @@ def test_a_cache_that_cannot_be_written_never_turns_an_accepted_result_into_a_fa
     _, outcome = _run(hosted_backend, tmp_path, fake_jit="true")
 
     assert outcome.returncode == 0
+
+
+def test_a_test_given_the_cache_read_only_publishes_nothing_though_files_lie_staged_and_the_entry_it_read_stays(
+    rig, tmp_path
+) -> None:
+    """A test whose patched code the key does not cover is given the cache read only: the runner signs no contribution
+    for it, and whatever its code left below ``/out/jit-cache`` never reaches the store another test's entry is in."""
+    store = DirJitStore(tmp_path / "jit-store")
+    hosted = rig(jit_store=store)
+    _run(hosted, tmp_path, "req-1", fake_jit="true")
+    stored = sorted(path.relative_to(store.root) for path in store.root.rglob("*"))
+    entry = store.root / "snapshots" / "aiter_jit" / JIT_KEY
+    os.utime(entry, (1.0, 1.0))
+
+    _, outcome = _run(hosted, tmp_path, "req-2", fake_jit="read_only")
+
+    assert outcome.returncode == 0
+    assert sorted(path.relative_to(store.root) for path in store.root.rglob("*")) == stored, "nothing was added"
+    assert _fetch(store, tmp_path / "private").snapshot is not None, "the entry the first test made is still served"
+    assert entry.stat().st_mtime > 1.0, "the key the test read is noted as in use, so pruning keeps it"
+
+
+def test_a_read_only_test_on_an_empty_store_leaves_it_empty(rig, tmp_path) -> None:
+    store = DirJitStore(tmp_path / "jit-store")
+    hosted = rig(jit_store=store)
+
+    _, outcome = _run(hosted, tmp_path, fake_jit="read_only")
+
+    assert outcome.returncode == 0
+    assert _fetch(store, tmp_path / "private").snapshot is None and not (tmp_path / "jit-store" / "blobs").exists()

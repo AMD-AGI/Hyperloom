@@ -32,6 +32,7 @@ from hyperloom.measure.points import (
     CANONICAL_FILE,
     MEASUREMENT_SEED,
     PointError,
+    ProfileUnsupported,
     accept_measurement,
     default_canonical,
     generate_points,
@@ -167,7 +168,7 @@ def test_kernel_table_reaches_the_yaml_as_an_attachment_placeholder(canonical, b
     assert value == "${HL_ATTACH:" + env.attachments[0].id + "}"
 
 
-@pytest.mark.parametrize("name", ["ISL", "HYPERLOOM_EVAL_LIMIT", "RUN_EVAL", "NUM_PROMPTS"])
+@pytest.mark.parametrize("name", ["ISL", "HYPERLOOM_EVAL_LIMIT", "RUN_EVAL", "NUM_PROMPTS", "DATASET_PATH"])
 def test_recipe_that_sets_a_workload_or_eval_variable_is_refused_before_rendering(canonical, blobs, tmp_path, name):
     delta = RecipeDelta(config=ConfigDelta(envs={name: "1"}))
     env = environment(blobs, tmp_path, delta=delta)
@@ -177,15 +178,53 @@ def test_recipe_that_sets_a_workload_or_eval_variable_is_refused_before_renderin
     assert not list((tmp_path / "points").glob("*.yaml"))
 
 
-@pytest.mark.parametrize(("name", "value"), [("ISL", "16"), ("HYPERLOOM_EVAL_LIMIT", "5"), ("OSL", "8")])
+@pytest.mark.parametrize(
+    ("name", "value"),
+    [("ISL", "16"), ("HYPERLOOM_EVAL_LIMIT", "5"), ("OSL", "8"), ("DATASET_PATH", "prompts.jsonl")],
+)
 def test_a_point_whose_surface_drifted_from_the_canonical_one_is_refused(
     canonical, blobs, tmp_path, monkeypatch, name, value
 ):
     env = environment(blobs, tmp_path)
+    if name == "DATASET_PATH":
+        (tmp_path / value).write_text('{"prompt": "a"}\n')
+        value = str(tmp_path / value)
     monkeypatch.setenv(name, value)
 
     with pytest.raises(SurfaceViolation, match="changes the measurement surface"):
         generate_points(env, canonical, tmp_path / "points")
+
+
+@pytest.fixture()
+def dataset(tmp_path, monkeypatch):
+    """A 39-prompt dataset the session's shell exports; request it before ``canonical``, which renders with it."""
+    path = tmp_path / "prompts.jsonl"
+    path.write_text("".join(json.dumps({"prompt": f"question {index}"}) + "\n" for index in range(39)))
+    monkeypatch.setenv("DATASET_PATH", str(path))
+    return path
+
+
+def _num_prompts(path: Path) -> int:
+    return load(path)["benchmark"]["envs"]["NUM_PROMPTS"]
+
+
+def test_every_point_of_a_dataset_session_sends_the_whole_file_at_any_concurrency(dataset, canonical, blobs, tmp_path):
+    paths = generate_points(environment(blobs, tmp_path), canonical, tmp_path / "points", concurrency=(1, 32, 64))
+
+    assert [_num_prompts(path) for path in (tmp_path / "canonical" / CANONICAL_FILE, *paths)] == [39] * 4
+    # A runner renders the point again where the file may not be: the point's own count stands.
+    dataset.unlink()
+    assert _num_prompts(materialize_config_with_envs(paths[0], tmp_path / "again")) == 39
+
+
+def test_a_dataset_this_host_cannot_count_refuses_the_canonical_and_the_request(dataset, canonical, blobs, tmp_path):
+    dataset.write_text('{"text": "no prompt"}\n')
+
+    with pytest.raises(PointError, match=f"{dataset} cannot be counted on this host.*{dataset}:1 holds no 'prompt'"):
+        generate_points(environment(blobs, tmp_path), canonical, tmp_path / "points")
+    with pytest.raises(PointError, match=str(dataset)):
+        default_canonical(tmp_path / "again", primary_concurrency=32, config_path=default_baseline_config())
+    assert not list((tmp_path / "points").glob("*.yaml"))
 
 
 def test_a_launch_variable_the_renderer_drops_is_refused(canonical, blobs, tmp_path):
@@ -317,6 +356,16 @@ def test_every_shipped_profile_configuration_replays_graphs_node_by_node_and_no_
     assert "DEBUG_CLR_GRAPH_PACKET_CAPTURE" not in baseline
 
 
+def test_a_framework_that_runs_no_torch_profiler_has_no_profile_point(tmp_path, model, blobs):
+    config = asset_root() / "assets" / "configs" / "baseline_llamacpp.yaml"
+    canonical = default_canonical(
+        tmp_path / "canonical", primary_concurrency=8, config_path=config, model_path=str(model)
+    )
+
+    with pytest.raises(ProfileUnsupported, match="llamacpp"):
+        generate_profile_point(environment(blobs, tmp_path), canonical, tmp_path / "profile")
+
+
 def test_a_normal_point_does_not_turn_the_profiler_on(canonical, blobs, tmp_path):
     (point,) = generate_points(environment(blobs, tmp_path), canonical, tmp_path / "points")
 
@@ -401,6 +450,24 @@ def test_an_agentx_point_is_what_the_main_flow_hands_the_round_for_the_recipe_an
     launch = rendered["benchmark"]["agentx"]["launch_overrides"]
     assert launch["append_args"] == SERVER_ARGS.split()
     assert launch["env"] == {"HSA_FORCE_FINE_GRAIN_PCIE": "1", AITER_LOG_TUNED_CONFIG_ENV: "1"}
+
+
+def test_an_inferencex_point_is_seeded_with_the_server_base_it_is_rendered_with(tmp_path, model, blobs):
+    base = replace(_agentx_base(), args=("--tp", "2", "--mem-fraction-static", "0.71"))
+    canonical = default_canonical(
+        tmp_path / "canonical",
+        primary_concurrency=32,
+        config_path=default_baseline_config(),
+        model_path=str(model),
+        server_base=server_base(base),
+    )
+    delta = RecipeDelta(config=ConfigDelta(server_args=SERVER_ARGS))
+
+    (point,) = generate_points(environment(blobs, tmp_path, delta=delta), canonical, tmp_path / "points")
+
+    args = load(point)["benchmark"]["envs"]["EXTRA_SGLANG_ARGS"].split()
+    assert args[:4] == ["--tp", "2", "--mem-fraction-static", "0.71"]
+    assert "--max-running-requests" in args
 
 
 def test_an_agentx_point_runs_on_the_sessions_frozen_base_as_the_main_flow_composes_it(

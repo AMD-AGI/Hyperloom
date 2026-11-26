@@ -30,7 +30,7 @@ from hyperloom.orchestrator.loop.coordinator import AdvisoryServices, Coordinato
 from hyperloom.orchestrator.phases.framework_records import _patch_material
 from hyperloom.orchestrator.phases.machine import Transition
 from hyperloom.orchestrator.roles.agent_role import default_role_registry
-from hyperloom.orchestrator.roles.mock_backend import MockBackend, MockTurn, ScriptedPlan
+from hyperloom.orchestrator.tests.mock_backend import MockBackend, MockTurn, ScriptedPlan
 from hyperloom_kb import (
     PACKAGED_DECLARATION,
     ExperienceHTTPService,
@@ -53,7 +53,7 @@ def session_dir(tmp_path: Path):
 
 
 def _tr(reason: str) -> Transition:
-    return Transition(from_phase="FRAMEWORK_AGENT", to_phase="SWEEP", reason=reason, evidence={})
+    return Transition(from_phase="FRAMEWORK_AGENT", to_phase="CYCLE_END", reason=reason, evidence={})
 
 
 def _coordinator(session_dir: Path) -> Coordinator:

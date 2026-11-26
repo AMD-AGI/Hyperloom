@@ -42,11 +42,9 @@ def test_the_plug_flags_default_to_nothing_selected() -> None:
 
 
 def test_the_plug_flags_parse() -> None:
-    args = _args(
-        "--plug-profile", "hosted-gpu", "--manifest", "m.json", "--plug", "events=a", "--plug-config", "events.k=1"
-    )
+    args = _args("--plug-profile", "local", "--manifest", "m.json", "--plug", "events=a", "--plug-config", "events.k=1")
     assert (args.plug_profile, args.plug_manifest, args.plug, args.plug_config) == (
-        "hosted-gpu",
+        "local",
         "m.json",
         ["events=a"],
         ["events.k=1"],
@@ -75,10 +73,11 @@ def test_a_run_that_selects_nothing_writes_and_prints_nothing(tmp_path: Path, ca
     assert list(tmp_path.iterdir()) == []
     captured = capsys.readouterr()
     assert (captured.out, captured.err) == ("", "")
-    assert {k: v["impl"] for k, v in host.describe()["sockets"].items()} == {"events": "local"}
+    selected = {k: v["impl"] for k, v in host.describe()["sockets"].items()}
+    assert selected == {"events": "local", "native_builds": "session"}
 
 
-def test_a_run_that_selects_nothing_starts_only_the_local_events_plug(tmp_path: Path) -> None:
+def test_a_run_that_selects_nothing_starts_the_local_profile_plugs_and_closes_them(tmp_path: Path) -> None:
     host = prepare_plug_host(_args(), tmp_path)
     with running_plug_host(host):
         assert active() is host
@@ -133,12 +132,13 @@ def test_a_profile_naming_an_unset_variable_is_refused(tmp_path: Path, capsys, m
     assert "environment variable HYPERLOOM_EVENTS_DIR is not set" in capsys.readouterr().err
 
 
-def test_a_profile_whose_implementations_are_not_installed_is_refused_before_anything_starts(
-    tmp_path: Path, capsys, monkeypatch
+def test_a_manifest_whose_implementations_are_not_installed_is_refused_before_anything_starts(
+    tmp_path: Path, capsys
 ) -> None:
-    monkeypatch.setenv("HYPERLOOM_EVENTS_DIR", str(tmp_path))
+    manifest = tmp_path / "m.json"
+    manifest.write_text(json.dumps({"schema": "hyperloom.plugs/v1", "sockets": {"measurement": {"impl": "hosted"}}}))
     with pytest.raises(SystemExit) as exc:
-        prepare_plug_host(_args("--plug-profile", "hosted-cpu"), tmp_path)
+        prepare_plug_host(_args("--manifest", str(manifest)), tmp_path)
     assert exc.value.code == 2
     assert (
         "plug configuration refused: socket 'measurement' has no implementation 'hosted'; available: (none)"

@@ -7,26 +7,28 @@ from __future__ import annotations
 
 import asyncio
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
 from hyperloom.contracts.measurement import Purpose, TestKind, TestRequest
-from hyperloom.contracts.recipe import ConfigDelta, RecipeDelta
 from hyperloom.measure import signing
 from hyperloom.measure.jit.native.key import BuildInputs
+from hyperloom.measure.jit.native.needs import BuildNeed
 from hyperloom.measure.jit.native.record import FAILED, READY, RECORD_FILES
 from hyperloom.measure.jit.native.store import BuildInfraError, BuildStore
 from hyperloom.measure.jit.native.trust import BuildRefused, Refusal, Signer, Trust, TrustedKey
-from hyperloom.measure.runner.native.recipes import sgl_kernel_recipe
+from hyperloom.measure.runner.native.recipes import llamacpp_recipe, sgl_kernel_recipe
 from hyperloom.measure.runner.native.service import Staged, ensure_build
-from hyperloom_multibranch.toolbox.store_builds import BuildSite, StoreBuildDriver
+from hyperloom_multibranch.toolbox.native_builds import compiled_needs
+from hyperloom_multibranch.toolbox.store_builds import StoreBuildDriver
 
 IMAGE = "sha256:" + "a" * 64
 OTHER_IMAGE = "sha256:" + "d" * 64
 BUILDER = "sha256:" + "c" * 64
 RECIPE = sgl_kernel_recipe()
 COMPONENT = RECIPE.component
-SITE = BuildSite(IMAGE, BUILDER, "gfx942", {COMPONENT: RECIPE})
+RECIPES = {COMPONENT: RECIPE}
 
 
 def _inputs(source: str, image: str = IMAGE) -> BuildInputs:
@@ -60,8 +62,8 @@ def store(tmp_path: Path, key) -> BuildStore:
     return BuildStore(tmp_path / "store", Trust((TrustedKey(signing.public_key_pem(key), 1),), 1))
 
 
-def _driver(store: BuildStore, key, runner: Runner, changed: dict[str, str] | None = None) -> StoreBuildDriver:
-    return StoreBuildDriver(store, Signer(key), SITE, lambda request, env: changed or {}, runner)
+def _driver(store: BuildStore, key, runner: Runner) -> StoreBuildDriver:
+    return StoreBuildDriver(store, Signer(key), RECIPES, lambda request, env: (), runner)
 
 
 def _publish(store: BuildStore, key, inputs: BuildInputs, wall: float, status: str = READY) -> None:
@@ -111,19 +113,6 @@ async def test_a_machine_failure_of_the_runner_is_raised_and_stores_nothing(stor
     assert driver.lookup(_inputs("1")) is None
 
 
-def test_needs_key_each_changed_component_by_the_site_and_its_recipe_version(store: BuildStore, key) -> None:
-    request = TestRequest(
-        kind=TestKind.TEST,
-        purpose=Purpose.EXPLORE,
-        branch_id="b1",
-        parent_commit="c0",
-        delta=RecipeDelta(config=ConfigDelta(server_args="--x")),
-    )
-    assert _driver(store, key, Runner(), {COMPONENT: "1" * 64}).needs(request, None) == (_inputs("1"),)
-    with pytest.raises(KeyError, match="vllm"):
-        _driver(store, key, Runner(), {"vllm": "1" * 64}).needs(request, None)
-
-
 def test_lookup_of_an_entry_that_fails_a_check_is_none_and_ensure_refuses_it(store: BuildStore, key) -> None:
     _publish(store, key, _inputs("1"), 20.0)
     manifest = store.entry_dir(_inputs("1")) / RECORD_FILES[READY][0]
@@ -134,3 +123,17 @@ def test_lookup_of_an_entry_that_fails_a_check_is_none_and_ensure_refuses_it(sto
     with pytest.raises(BuildRefused) as refused:
         asyncio.run(driver.ensure(_inputs("1")))
     assert refused.value.reason is Refusal.BAD_SIGNATURE
+
+
+def test_needs_are_the_keys_acceptance_planned_with_a_pinned_checkouts_commit_in_them(store: BuildStore, key) -> None:
+    """A pinned checkout's commit is part of its build's key (``llamacpp/3+<commit>``): the driver waits on the key the
+    planner planned and the runner builds, never one it keys again from the recipe alone."""
+    recipe = llamacpp_recipe()
+    recipes = {recipe.component: recipe}
+    planned = BuildInputs(IMAGE, BUILDER, recipe.component, "gfx942", "1" * 64, recipe.build_version("e" * 40))
+    accepted = SimpleNamespace(environment=SimpleNamespace(builds=(BuildNeed(recipe.component, planned),)))
+    request = TestRequest(kind=TestKind.TEST, purpose=Purpose.EXPLORE, branch_id="b1", parent_commit="c0")
+
+    driver = StoreBuildDriver(store, Signer(key), recipes, compiled_needs, Runner())
+
+    assert driver.needs(request, accepted) == (planned,)

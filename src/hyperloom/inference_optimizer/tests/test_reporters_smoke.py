@@ -143,7 +143,6 @@ def _fixture_breakdown(**overrides: Any) -> dict[str, Any]:
                             "proposal_msg_id": "p1",
                             "arm": "config",
                             "verdict": "approve",
-                            "effective_verdict": "approve",
                             "reasoning": "cheap to try, easy to revert",
                         }
                     ],
@@ -157,7 +156,7 @@ def _fixture_breakdown(**overrides: Any) -> dict[str, Any]:
                     "verdict": "",
                     "verdict_counts": {},
                     "summary": "ok (critic)",
-                    "phase": "SWEEP",
+                    "phase": "CYCLE_END",
                 },
             ]
         },
@@ -202,11 +201,6 @@ def test_all_renderers_register_in_stable_order() -> None:
     assert [sid for sid, _ in REGISTRY] == expected
 
 
-def test_telemetry_renderer_is_not_registered() -> None:
-    """Telemetry section is intentionally dropped from the report layout."""
-    assert "telemetry" not in [sid for sid, _ in REGISTRY]
-
-
 def test_deterministic_only_path_produces_complete_report() -> None:
     r = render_session_report(_fixture_breakdown())
     md = r.markdown
@@ -241,14 +235,6 @@ def test_section_groups_use_h2_titles_with_h3_subsections() -> None:
     assert "### Capability Summary" in md
     assert "### Kernel Lifecycle" in md
     assert "## Run Trace" not in md
-
-
-def test_telemetry_section_is_absent_from_markdown() -> None:
-    """Telemetry must not appear in the report at any level."""
-    r = render_session_report(_fixture_breakdown())
-    assert "## Telemetry" not in r.markdown
-    assert "### Telemetry" not in r.markdown
-    assert "gpu_monitor_aggregate" not in r.markdown
 
 
 def test_geak_not_attempted_never_emits_kept_decision() -> None:

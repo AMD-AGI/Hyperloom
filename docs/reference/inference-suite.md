@@ -123,6 +123,18 @@ spelled. A base whose entrypoint is not its framework's is refused
 (`config_invalid`); name another install with the server's `framework_python`
 instead.
 
+llama.cpp (`llamacpp`) is a native server: the round runs `llama-server` as the
+launch environment's `PATH` resolves it, records the version its `--version`
+prints, and holds its flags to the ones its `--help` lists, read once per binary:
+a flag it does not list, or lists as removed, is refused (`flag_unknown`) before
+the server starts. A `llama-server` missing from `PATH` or whose `--help` fails
+stops the round (`framework_version_unknown`). Its model directory holds the one `.gguf` the server loads,
+which the guard passes as `--model`, beside the
+Hugging Face tokenizer files the load client reads. No recipe source knows it, so
+its base is the operator's launch script. An eval reads the context the server
+serves from the launch's `-c` / `--ctx-size`, else from the model directory's
+`config.json`; a round with neither stops as `eval_context_too_short`.
+
 ## Launch layers
 
 A round's launch is composed in a fixed order, and `launch.json` records the layer
@@ -166,6 +178,65 @@ as `--benchmark-duration`. The harness's `agentx` scenario holds the replay to 9
 latency coverage of that duration, so no request count bounds it. Below 900 s, the
 scenario's minimum, the round adds `--unsafe-override`; use 600 s or 900 s for
 quick tests.
+
+A fixed round sends InferenceX's random prompts of `ISL` tokens, each answered to
+exactly `OSL` tokens. A point that sets `DATASET_PATH`, an absolute path to a JSONL
+file whose lines each hold a `prompt` string or a `turns` list (the first turn is
+sent), sends those prompts instead through `inference_suite.load.dataset_client`:
+one user message each to `/v1/chat/completions`, rendered by the server's chat
+template, at temperature 0 with `max_tokens` the `OSL` and EOS honoured.
+Each pass sends its prompt count from the file's lines, shuffled by its seed and
+cycled, so every arm sends the same requests. A measured round's count is the number
+of prompts in the file, so it sends the whole file once at every concurrency level;
+a point without a dataset sends its concurrency times 10, 5, 3 or 2, fewer the
+longer `ISL` + `OSL`. The count is written
+into the point as `NUM_PROMPTS` when the point is rendered, on the host that renders
+it: a file that host cannot read, or a line that holds no prompt, fails the render
+naming the file. `NUM_PROMPTS` is not read from the environment; a point's own
+`envs.NUM_PROMPTS` and `hyperloom optimize --extra-env NUM_PROMPTS=<n>` override the
+count in the baseline round and the candidate rounds, which are rendered from the
+session's baseline config. A concurrency sweep sets its own count per rung, for a
+dataset session the file's prompt count whatever is pinned. A boot round sends one
+request. A profile round keeps its own count over a point's `envs.NUM_PROMPTS`, but
+an `--extra-env NUM_PROMPTS=<n>` reaches it too. Pass a shorter file to send fewer.
+A round whose concurrency is above the file's prompt count never has
+that many requests in flight, and the client's stderr says so; at concurrency 1 the
+whole file is sent one request at a time, inside the same
+`INFERENCE_OPTIMIZER_BENCHMARK_TIMEOUT_SEC` as any round. A session
+with a dataset serves the model's own context window, as an AgentX session does, in
+place of `ISL` + `OSL` plus headroom, since the prompts carry their own lengths;
+`MAX_MODEL_LEN` still overrides it. A prompt the server answers with a 4xx status, as it
+does one longer than the window, fails the pass and so the round: the metrics would
+describe the rest of the file only. The client's stderr names each such prompt's line
+and status, and `benchmark_outcome.refused` of the result lists them. Any other failed
+request fails the pass above a 5 % failed share. Token counts are the server's `usage`;
+a request without one fails. The client saves the keys a fixed round reads in
+`client/inferencex_result.json`.
+A `hyperloom optimize` session records the dataset it was seeded with, the path as
+given, in `prompt_dataset` of its `state.json`. A resume whose `DATASET_PATH` is
+another file, or none where the session recorded one, is refused, as a resume in
+another benchmark mode is. `ISL` and `OSL` do not describe such a session's requests,
+so the stores keyed on them leave it out: it publishes and reads no Experience, and
+the Recipe KB neither warm-starts it nor takes its recipe (CLOSE records
+`prompt_dataset_identity_unsupported`). A `hyperloom-multibranch run` session records
+the `DATASET_PATH` exported when it starts in its workload, beside `ISL` and `OSL`
+(`settings.workload.inferencex.dataset` of its manifest), and in its session profile.
+Every leg exports the recorded value and removes one the session did not record, so a
+`--resume` or a `final-only` sends what the first leg sent whatever its shell exports.
+A recipe whose launch sets `DATASET_PATH` is refused, a launch that unsets it leaves
+it in place, and the dataset is part of a point's `surface_sha256` when it sends one.
+A lesson of another session that sent other prompts, a dataset against random prompts
+in either direction, is recalled less alike, with `dataset` among the conditions that
+differ; a playbook trial pairs only sessions on the same prompts; the session's Recipe
+KB warm start and write-back are skipped. Tree statistics (stall odds, pace, menu
+families) pool sessions across prompt sources, as they do across `ISL` and `OSL`.
+Exported in the environment of `hyperloom optimize` or
+`hyperloom-multibranch run`, the name reaches every rendered point. The file is read
+where the round runs, first by the round before it starts its server: a file it
+cannot read, or a line that holds no prompt, fails the round as
+`config_invalid`. A confined runner of a `hyperloom-multibranch run` test reads it
+only in a tree its sandbox shows, such as the model directory or the Hugging Face
+hub cache.
 
 ## Server lifecycle
 

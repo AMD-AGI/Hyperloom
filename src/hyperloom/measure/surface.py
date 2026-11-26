@@ -13,7 +13,8 @@ canonical measurement configuration, are hashed into ``surface_sha256``, and eve
 * a runner takes the same fields from the YAML it actually executes and signs the hash into its result.
 
 The concurrency level and ``RUN_EVAL`` are decided by the test request, so they stay out of the hash. The number of
-prompts and warmups follow from the concurrency, so they are compared per point against the canonical rule rather
+warmups follows from the concurrency, and the number of prompts from the concurrency or, for a point with a prompt
+dataset, from the number of prompts in the file, so they are compared per point against the canonical rule rather
 than hashed.
 """
 
@@ -39,6 +40,7 @@ from hyperloom.common.outside_facts import (
     ENV_RANDOM_RANGE_RATIO,
     ENV_RUN_EVAL,
 )
+from hyperloom.common.perf_metric import DATASET_PATH_ENV
 from hyperloom.contracts.recipe import RecipeError
 from hyperloom_common.fs_utils import file_sha256
 
@@ -53,7 +55,10 @@ SURFACE_ENV_KEYS: tuple[str, ...] = (
     ENV_EVAL_LIMIT,
     ENV_EVAL_TOKENIZED_REQUESTS,
 )
-#: Request counts that follow from the concurrency level; compared per point, not hashed.
+#: The surface field holding the prompt dataset a point sends. Present only on such a point: a field every surface held
+#: would move the hash of every measurement taken on random prompts.
+DATASET_FIELD = f"envs.{DATASET_PATH_ENV}"
+#: Request counts that follow from the concurrency level or the prompt dataset; compared per point, not hashed.
 POINT_ENV_KEYS: tuple[str, ...] = (ENV_NUM_PROMPTS, ENV_NUM_WARMUPS)
 #: Decided by the test request; recorded beside the hash, never part of it.
 REQUEST_ENV_KEYS: tuple[str, ...] = (ENV_CONC, ENV_RUN_EVAL)
@@ -134,6 +139,8 @@ def extract_surface(config: Mapping[str, Any]) -> MeasurementSurface:
     bench = config["benchmark"]
     fields: dict[str, str | None] = {f"benchmark.{key}": _text(bench.get(key)) for key in SURFACE_BENCH_KEYS}
     fields.update({f"envs.{key}": _text(envs.get(key)) for key in SURFACE_ENV_KEYS})
+    if dataset := _text(envs.get(DATASET_PATH_ENV)):
+        fields[DATASET_FIELD] = dataset
     script, root = _text(bench.get("benchmark_script")), _text(bench.get("inferencex_path"))
     script_path = Path(root) / "benchmarks" / script if script and root else None
     fields[SCRIPT_FIELD] = file_sha256(script_path) if script_path and script_path.is_file() else None
@@ -144,7 +151,7 @@ def extract_surface(config: Mapping[str, Any]) -> MeasurementSurface:
 
 
 def point_values(config: Mapping[str, Any]) -> dict[str, str | None]:
-    """The request counts of one point, which follow from its concurrency."""
+    """The request counts of one point, which follow from its concurrency or its prompt dataset."""
 
     envs = BenchmarkPoint.from_document(config).envs
     return {key: _text(envs.get(key)) for key in POINT_ENV_KEYS}
@@ -153,7 +160,7 @@ def point_values(config: Mapping[str, Any]) -> dict[str, str | None]:
 def measurement_envs(names: Iterable[str]) -> list[str]:
     """The names among ``names`` a launch environment may not set: workload, evaluation and request-decided ones."""
 
-    guarded = {*SURFACE_ENV_KEYS, *POINT_ENV_KEYS, *REQUEST_ENV_KEYS}
+    guarded = {*SURFACE_ENV_KEYS, DATASET_PATH_ENV, *POINT_ENV_KEYS, *REQUEST_ENV_KEYS}
     return sorted(name for name in names if name.upper() in guarded)
 
 
@@ -196,6 +203,7 @@ def check_point(
 
 
 __all__ = [
+    "DATASET_FIELD",
     "MODEL_FILE_NAMES",
     "POINT_ENV_KEYS",
     "REQUEST_ENV_KEYS",

@@ -68,7 +68,6 @@ class LoopShape:
 
     nproc_per_node: int
     lanes: int
-    merge_stacking: bool
     bench_repeat: int
     case_aggregate: str
     commit_new_paths: tuple[str, ...]
@@ -96,16 +95,6 @@ class KnowledgeOptions:
 
 
 @dataclass(frozen=True)
-class SpecialistProbeOptions:
-    """Overrides for the planning specialists' scratch-tree probes."""
-
-    specialist_probe: bool | None
-    specialist_probe_max: int | None
-    specialist_probe_budget_sec: float | None
-    specialist_probe_scratch_root: str | None
-
-
-@dataclass(frozen=True)
 class ForgeLoopRequest:
     """Every option of one forge-loop run, grouped by concern."""
 
@@ -123,7 +112,6 @@ class ForgeLoopRequest:
     prepare_task: bool
     identity: TaskIdentity
     knowledge: KnowledgeOptions
-    probe: SpecialistProbeOptions
     baseline_json: str
     resume: bool
 
@@ -160,7 +148,6 @@ __all__ = [
     "KnowledgeOptions",
     "LoopShape",
     "RunArtifacts",
-    "SpecialistProbeOptions",
     "TaskContext",
     "TaskIdentity",
     "TimeBudget",

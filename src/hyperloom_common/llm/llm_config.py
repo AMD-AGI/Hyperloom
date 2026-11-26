@@ -126,6 +126,34 @@ def with_synthesized_anthropic_keys(env: Mapping[str, str]) -> dict[str, str]:
     return source
 
 
+#: What a custom header may reference. Every child inherits the expanded header, so expanding any other name would
+#: hand a child the value of a secret its environment allowlist strips, such as ``${GITHUB_TOKEN}``.
+HEADER_REF_ALLOWLIST = frozenset({"ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "OPENAI_API_KEY"})
+
+
+def expand_custom_header_env_refs() -> None:
+    """Resolve the credential ``${VAR}`` references in the ``*_CUSTOM_HEADERS`` settings in place.
+
+    Child processes (specialists, the Critic, GEAK) forward these verbatim, and an agent CLI sends them
+    verbatim, so an unexpanded ``${ANTHROPIC_API_KEY}`` reaches the gateway as literal text and is rejected.
+    References resolve against the same view ``claude_sdk_env_options`` uses, so a key it would fill in from the
+    other Anthropic credential is not erased here. A reference outside :data:`HEADER_REF_ALLOWLIST` is left as
+    written, which is what children received before this expansion existed.
+    """
+    source = with_synthesized_anthropic_keys(os.environ)
+    for key in ("ANTHROPIC_CUSTOM_HEADERS", "OPENAI_CUSTOM_HEADERS"):
+        raw = os.environ.get(key)
+        if not raw or "${" not in raw:
+            continue
+        os.environ[key] = expand_env_refs(raw, source, only=HEADER_REF_ALLOWLIST)
+        if "${" in os.environ[key]:
+            log.warning(
+                "%s references a variable outside %s; child processes receive that reference unexpanded",
+                key,
+                ", ".join(sorted(HEADER_REF_ALLOWLIST)),
+            )
+
+
 CLAUDE_GATEWAY_SIGNAL_KEYS: tuple[str, ...] = (
     "ANTHROPIC_BASE_URL",
     "ANTHROPIC_API_KEY",
@@ -1073,52 +1101,6 @@ async def aanthropic_completion(
         )
 
 
-async def astream_chat_completion_text(
-    client: object,
-    *,
-    component: str = "",
-    operation: str = "",
-    **params: object,
-) -> "tuple[str, object | None]":
-    """Async streamed chat completion; returns ``(text, usage)``."""
-    params["stream"] = True
-    params["stream_options"] = {"include_usage": True}
-    parts: list[str] = []
-    usage_obj: object | None = None
-    with observed_request(
-        protocol=PROTOCOL_OPENAI_CHAT,
-        component=component,
-        operation=operation,
-        model=params.get("model"),
-        streamed=True,
-    ) as observation:
-        stream = await client.chat.completions.create(**_tag_request(params, component, operation))
-        async for chunk in stream:
-            _observe_stream_chunk(observation, chunk)
-            if getattr(chunk, "usage", None) is not None:
-                usage_obj = chunk.usage
-            if chunk.choices:
-                delta = chunk.choices[0].delta
-                if delta is not None and delta.content:
-                    parts.append(delta.content)
-        observation.update(usage=openai_usage_counts(usage_obj))
-    return "".join(parts), usage_obj
-
-
-def _observe_stream_chunk(observation: RequestObservation, chunk: object) -> None:
-    """Fold one streamed chunk's id, model, first content token and finish reason onto ``observation``."""
-    choices = sdk_field(chunk, "choices") or []
-    choice = choices[0] if isinstance(choices, list) and choices else None
-    delta = sdk_field(choice, "delta") if choice is not None else None
-    if delta is not None and sdk_field(delta, "content"):
-        observation.mark_first_token()
-    observation.update(
-        response_id=sdk_field(chunk, "id"),
-        model=sdk_field(chunk, "model"),
-        stop_reason=sdk_field(choice, "finish_reason") if choice is not None else None,
-    )
-
-
 __all__ = [
     "AGENT_BACKEND_CHOICES",
     "AGENT_BACKEND_CLAUDE",
@@ -1134,6 +1116,7 @@ __all__ = [
     "AnthropicMessageResult",
     "CLAUDE_GATEWAY_SIGNAL_KEYS",
     "CLAUDE_OAUTH_TOKEN_ENV",
+    "HEADER_REF_ALLOWLIST",
     "ChatCompletionResult",
     "DEFAULT_ANTHROPIC_BASE_URL",
     "DEFAULT_ANTHROPIC_VERSION",
@@ -1155,7 +1138,6 @@ __all__ = [
     "anthropic_transport",
     "anthropic_transport_ready",
     "apply_reasoning_effort",
-    "astream_chat_completion_text",
     "build_http_timeout",
     "chat_completion",
     "claude_agent_sdk_installed",
@@ -1166,6 +1148,7 @@ __all__ = [
     "derive_openai_base_url",
     "dual_protocol_endpoint_pair",
     "endpoint_default_model",
+    "expand_custom_header_env_refs",
     "get_anthropic_client",
     "get_async_anthropic_client",
     "get_async_openai_client",

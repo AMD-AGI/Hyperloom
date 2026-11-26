@@ -406,7 +406,7 @@ brief:
   domain force, predictor and general bench are skipped, and the phase hints
   `skip_to_sweep` once the custom task (or its refused admission), its grid and
   its patch reviews are done; the exit goes to KERNEL_AGENT when that phase is
-  enabled, else SWEEP, and later phases run as usual.
+  enabled, else CYCLE_END, and later phases run as usual.
 - **PrimaTune predictor rows**: with `--primatune-endpoint` and
   `--primatune-mode active`, the predictor's proposals lead the untested-proposal
   block. Orchestration copies the ones worth a slot into its next `explore` grid
@@ -747,7 +747,7 @@ when the file is absent, invalid, or stale.
 ```bash
 python3 -m hyperloom optimize \
   --model "$MODEL_PATH" \
-  --framework vllm \           # sglang (default) / vllm / atom / xdit / custom
+  --framework vllm \           # sglang (default) / vllm / atom / xdit / llamacpp / custom
   --gpu-type MI300X \          # or omit for rocm-smi auto-detect
   --model-class moe_mla \      # dense / moe_mla / moe_swa / moe_mla_nsa; categorical key for atom seed grid + framework gap token + recipe key + prompt label
   --isl 512 --osl 512 \        # workload shape — pass whatever the prompt states; omitting them uses defaults ISL=1024/OSL=1024
@@ -769,8 +769,8 @@ and the operator's stated value is lost:
 | Surface | CLI flag | Notes |
 |---|---|---|
 | Model path | `--model` | required |
-| Framework | `--framework` | `sglang` (default) / `vllm` / `atom` / `xdit` / `custom` — atom is single-node-only; xdit is scriptable diffusion (`img/s`, no serving server); `custom` is an operator-supplied workload and **additionally requires `--framework-path` and `--benchmark-scripts-dir`** (see below) |
-| Custom source tree | `--framework-path` | **Required for `--framework custom`.** The workload's own checkout; patches are authored against it. |
+| Framework | `--framework` | `sglang` (default) / `vllm` / `atom` / `xdit` / `llamacpp` / `custom` — atom is single-node-only; xdit is scriptable diffusion (`img/s`, no serving server); llamacpp builds `llama-server` from the `--framework-path` checkout, which it **requires** (as it does `HYPERLOOM_ACTIVE_IMAGE_REF` and `HYPERLOOM_ACTIVE_IMAGE_DIGEST` in the environment, see `docs/reference/environment-variables.md`), and runs that build; it takes its base launch from `--reference-script` only, and records no profile or roofline; `custom` is an operator-supplied workload and **additionally requires `--framework-path` and `--benchmark-scripts-dir`** (see below) |
+| Framework source tree | `--framework-path` | **Required for `--framework custom` and `--framework llamacpp`.** The workload's own checkout (for llamacpp, the llama.cpp checkout the server is built from); patches are authored against it. |
 | Custom bench scripts | `--benchmark-scripts-dir` | **Required for `--framework custom`.** Holds the entrypoint, looked up as `custom_<gpu-type>.sh`. Every knob it reads must be forwarded as `--extra-env`; the throughput unit is whatever its report declares. May also hold `levers.json` — the adapter's declared explore grid (see below). |
 | Declared levers (`custom`) | `<benchmark-scripts-dir>/levers.json` | Optional. A JSON **list** of explore variants the adapter declares for itself — `{"name": ..., "extra_envs": {...}}` (an object), or any of `extra_args` / `remove_args` / `unset_envs` / `args_mode: "replace"`. `custom` has no framework source to infer knobs from, so without this its seed grid is empty and EXPLORE has nothing to sweep until the model guesses. Declarations seed **ahead of** model proposals (a model variant of the same name wins) and are not re-seeded once their name appears in the explore ledger's `tested` rows. A malformed file — or one whose variant normalizes to nothing a restart could apply — fails the launch with exit 2; it never degrades to an empty grid. |
 | xDiT model name | `--xdit-model-name` | **Required for `--framework xdit`.** The xDiT model registry name (e.g., `FLUX.2-dev` or `black-forest-labs/FLUX.2-dev`). xDiT uses this to select the correct diffusion pipeline class; unlike vLLM/SGLang, it cannot infer the pipeline from the model path alone. |
@@ -778,7 +778,7 @@ and the operator's stated value is lost:
 | Model class | `--model-class` | categorical key for the deterministic consumers (atom seed grid, framework-agent gap search token, recipe key, prompt label); when unset, Coordinator boot infers and persists it from model metadata or model-path family keywords. For richer advisory model context see Step 1.5 (`model_arch.json`) |
 | Input seq length | `--isl` | Pass the prompt's ISL. Default `1024` when omitted. |
 | Output seq length | `--osl` | Pass the prompt's OSL. Default `1024` when omitted. |
-| Concurrency | `--conc` | Pass the prompt's CONC (max in-flight requests). Default `64`. SWEEP measures a ladder around it (native AgentX instead fixes CONC in its YAML); `--conc-sweep-concs` overrides the workload's default ladder. |
+| Concurrency | `--conc` | Pass the prompt's CONC (max in-flight requests). Default `64`. Native AgentX instead fixes CONC in its YAML. |
 | Tensor parallel | `--tp` | Pass the prompt's TP. Default `1`. |
 | Expert parallel | `--ep` | Pass the prompt's EP for MoE. Default `1`. |
 | Precision | `--precision` | Match the checkpoint (`bf16` default / `fp8` / ...). Keep consistent with `--quantize`. |
@@ -794,10 +794,10 @@ and the operator's stated value is lost:
 | Target advisory | `--no-target-advisory` | Disable external-target hints in prompts without disabling final-report comparison. `primary_gap` uses the existing latency/throughput categories; the interactivity axis is displayed as interactivity. |
 | Quantization prelude | `--quantize` | Optional. Natural-language quantization request. Runs the quantization-agent once before the loop and rewrites `--model` to the quantized model. See Step 2b. Never runs on a resume. |
 | Env pins | `--extra-env NAME=VALUE` | Repeatable; forward **every** one verbatim as its own flag (do not drop any or fold into the `Environment:` block). The CLI persists them in `state.json` and serializes them into `$INFERENCE_OPTIMIZER_EXTRA_ENV`; a dropped pin is lost silently — e.g. a missing `SGLANG_USE_AITER=0` leaves the explore aiter-MoE filter blind. A `--resume-from` re-exports the persisted set, so re-pass them only to change the set. |
-| Session directory | `--session-dir DIR` | Only when a launcher must know the session path before the run starts, as the hosted entry does. An absolute path below `$USER_DATA_PATH`; the new session is created in exactly that directory instead of `<model>/<UTC_ts>-<rand8>`. The CLI refuses it (exit 2) together with `--resume-from`, which names the directory it resumes. Absent, the directory is generated as before. |
+| Session directory | `--session-dir DIR` | Only when a launcher must know the session path before the run starts. An absolute path below `$USER_DATA_PATH`; the new session is created in exactly that directory instead of `<model>/<UTC_ts>-<rand8>`. The CLI refuses it (exit 2) together with `--resume-from`, which names the directory it resumes. Absent, the directory is generated as before. |
 | Operator-defined specialist | `--custom-specialist-prompt-file` + `--custom-specialist-description` | Only when the prompt asks for a specialist with its own focus. Write the operator's focus text verbatim to a file and pass its path (max 16 KiB); the description is one line (max 200 chars) describing it in its own prompt. Pass both or neither. Export `HYPERLOOM_CUSTOM_SPECIALIST_ONLY=1` before launch only when the prompt asks to run that specialist alone. The CLI refuses them (exit 2) together with `--no-framework-agent`, `--research-lane-capacity 0` or `--reset-state`. Persisted in `state.json`; a `--resume-from` keeps the stored definition, so re-pass both only to replace it, or pass `--reset-state` alone to clear it. |
 | PrimaTune predictor | `--primatune-endpoint` + `--primatune-mode` | Only when the prompt names a PrimaTune service. `active` queues its proposals for benchmarking; `shadow`, the default with an endpoint, only logs them; `off` disables an endpoint the environment exports. Not persisted: a `--resume-from` relaunch needs the flags again unless the shell exports `HYPERLOOM_PREDICTOR_ENDPOINT` / `HYPERLOOM_PREDICTOR_MODE`. See `docs/reference/primatune-predictor.md`. |
-| Plug selection | `--plug-profile` / `--manifest` / `--plug SOCKET=IMPL` / `--plug-config SOCKET.KEY=VALUE` | Only when the prompt names a plug profile, manifest or implementation; otherwise pass none and the run is a plain local run. `--plug-profile` loads a built-in profile (`local`, `hosted-gpu`, `hosted-cpu`); `--manifest` (or `$HYPERLOOM_MANIFEST`) a JSON manifest laid over it; `$HYPERLOOM_MANIFEST_OVERRIDES` a JSON file over that; `--plug` and `--plug-config` (repeatable, a JSON value is read as JSON) win over all of them. A selection is written to `$SESSION_DIR/plugs.resolved.json` and a `--resume-from` reads it back first, so re-pass the flags only to change the selection. The CLI refuses (exit 2) a socket or implementation that does not exist, a malformed manifest, an unset `${VAR}` with no default, and a damaged `plugs.resolved.json`. |
+| Plug selection | `--plug-profile` / `--manifest` / `--plug SOCKET=IMPL` / `--plug-config SOCKET.KEY=VALUE` | Only when the prompt names a plug profile, manifest or implementation; otherwise pass none and the run is a plain local run. `--plug-profile` loads a built-in profile (`local`); `--manifest` (or `$HYPERLOOM_MANIFEST`) a JSON manifest laid over it; `$HYPERLOOM_MANIFEST_OVERRIDES` a JSON file over that; `--plug` and `--plug-config` (repeatable, a JSON value is read as JSON) win over all of them. A selection is written to `$SESSION_DIR/plugs.resolved.json` and a `--resume-from` reads it back first, so re-pass the flags only to change the selection. The CLI refuses (exit 2) a socket or implementation that does not exist, a malformed manifest, an unset `${VAR}` with no default, and a damaged `plugs.resolved.json`. |
 
 ### Step 2b — Optional quantization prelude (`--quantize`)
 
@@ -1046,14 +1046,13 @@ Operator server flags have one supported CLI entry point:
 profile, explore, and sweep. Explicit `--max-model-len` / `$MAX_MODEL_LEN`
 wins over auto `ISL+OSL+headroom`. A comma `$CONC` value such as
 `4,16,128` is accepted for compatibility; baseline uses the first value.
-Use `--conc-sweep-concs` to override the synthetic ladder SWEEP measures (`256,128,64,32,16,8,4,2`). Native AgentX uses `HYPERLOOM_AGENTX=1` with the ordinary workload flags, or `--benchmark-config` for an AgentX workload YAML. Hyperloom archives the resolved workload as `benchmark.yaml`; CONC is fixed per session, so start a separate session to measure another concurrency.
+Native AgentX uses `HYPERLOOM_AGENTX=1` with the ordinary workload flags, or `--benchmark-config` for an AgentX workload YAML. Hyperloom archives the resolved workload as `benchmark.yaml`; CONC is fixed per session, so start a separate session to measure another concurrency.
 
-Concurrency sweeps apply only to serving workloads. For server-less PyTorch
-workloads (`custom` and `xdit`), SWEEP records `non_serving_workload` and proceeds
-to CLOSE. Optimize the declared forward-pass workload; do not propose request
-concurrency as an optimization for these models.
+For server-less PyTorch workloads (`custom` and `xdit`), optimize the declared
+forward-pass workload; do not propose request concurrency as an optimization
+for these models.
 
-Native AgentX supports one node and SGLang, vLLM or ATOM; an ATOM session takes its base from InferenceX's ATOM agentic entries. It rejects `--enable-conc-sweep`,
+Native AgentX supports one node and SGLang, vLLM or ATOM; an ATOM session takes its base from InferenceX's ATOM agentic entries. It rejects
 `--isl`, `--osl`, `--profile-osl`, `--max-model-len`, `--quantize` and
 `--quantize-scheme`. `--reference-script` is its base launch, ahead of the
 recipes; a session no recipe serves and given no script exits 2. Prepare quantized checkpoints before the run.
@@ -1157,7 +1156,8 @@ What this controls:
 - Which workload YAML the executors default to —
   `baseline_<framework>.yaml` and `profile_<framework>.yaml`, one pair
   per framework registered in `framework_registry`
-  (`sglang`, `vllm`, `atom`, `xdit`, `custom`).
+  (`sglang`, `vllm`, `atom`, `xdit`, `custom`); `llamacpp` ships
+  `baseline_llamacpp.yaml` alone, as its server runs under no torch profiler.
   `framework_registry.shipped_config_name()` names the file for
   `$FRAMEWORK`; an unregistered name is refused at launch and on resume.
 - Which framework-specific seed grid the `explore` action falls
@@ -1243,10 +1243,11 @@ a recipe for another board is used only when both share the gfx target and
 HBM size (`mi350x` / `mi355x` do; `mi300x` / `mi325x` do not), and its point
 is chosen for `--nodes` × `--gpus-per-node` (default 8) GPUs.
 
-`r9700` (Radeon AI PRO R9700, gfx1201), `r9600d` (Radeon AI PRO R9600D,
-gfx1201) and `w7900` / `w7900d` (Radeon PRO W7900 / W7900D, gfx1100) run with
-`--framework vllm` only: pass `--framework vllm`, since
-another framework (including the default) exits with code 2 at launch.
+`r9600d` (Radeon AI PRO R9600D, gfx1201) and `w7900` (Radeon PRO W7900, gfx1100)
+run with `--framework vllm` only, and `r9700` (Radeon AI PRO R9700, gfx1201) and
+`w7900d` (Radeon PRO W7900D, gfx1100) with `vllm` or `llamacpp`. On these boards
+pass `--framework` explicitly, since another framework (including the default)
+exits with code 2 at launch.
 
 Do not set `HIP_VISIBLE_DEVICES` on the known ROCm stack unless the user asks;
 it can make `torch.cuda.is_available()` return false. Use
@@ -1485,19 +1486,6 @@ and keep the `ps` check for the optimizer PID recorded in the pidfile.
 Health checks only observe and reconcile launch metadata; they must not kill,
 restart, or automatically resume the optimizer.
 
-## Hosted Run (`hyperloom hosted run`)
-
-Not a launch you run by hand: a hosting platform starts it. `hyperloom hosted run` takes no arguments. It reads the host's inputs
-(`HYPERLOOM_INPUT_FILE` for the campaign spec `hyperloom.campaign-spec/v1`, plus `HYPERLOOM_RUN_ID`, `HYPERLOOM_RUN_CREATED_AT`,
-`HYPERLOOM_STATE_DIR` and the rest listed in `docs/reference/environment-variables.md`), removes the host-only ones from its
-environment, and runs `optimize` in the same process: `--resume-from <dir> --plug-profile <profile>` when the run's session
-directory already holds `manifest.json` and `state.json`, otherwise the spec mapped to `optimize` flags plus
-`--plug-profile <profile> --session-dir <dir>`. The directory is derived from the run, so a restart resumes the same session.
-It records the outcome in `$HYPERLOOM_STATE_DIR/exit.json`; the host restarts the run only when `final` is not true. A spec it
-refuses ends with `final: true` and return code 2. A spec with `flow: "multibranch"` is handed to `hyperloom-multibranch hosted
-run` after the same `install.sh` run as the legacy flow, with the entry's environment plus the running interpreter's bin
-directory first on `PATH`.
-
 ## Resume Existing Session
 
 `--resume-from "$SESSION_DIR"` is the only way to resume; there is no
@@ -1566,7 +1554,7 @@ python3 -m hyperloom session state "$SESSION"
 ```
 
 It prints `stop_reason`, `baseline_tput`, `cumulative_gain_validated`, `current_best`,
-`last_trace_analyze`, `last_conc_sweep`, `explore_last_round`,
+`last_trace_analyze`, `explore_last_round`,
 `phase`, the latest orchestration and specialist Experience KB injections when
 they exist, plus the recent lifecycle events.
 
@@ -1757,3 +1745,5 @@ Report concise status:
 - last kernel optimized, correctness, micro speedup, E2E gain, decision
 - any new `experience_kb_injections` entry: each injected Experience's summary and its section of `prompt_block`
 - whether the process is still running or stopped and why
+- unless the sweep is off (`--no-enable-conc-sweep`), the sweep's `status`, points and best speedup from `reports/conc_sweep_summary.json`;
+  the sweep runs after CLOSE (`hyperloom conc-sweep SESSION_DIR` reruns the points not yet measured)

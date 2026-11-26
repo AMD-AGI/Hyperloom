@@ -102,7 +102,7 @@ def env(tmp_path, key, monkeypatch):
         IMAGE_DIGEST_VAR: SHEET_IMAGE,
         CACHE_ENV: str(stage_into(tmp_path / "runner-cache").parents[1]),
     }
-    monkeypatch.setattr(runner, "ensure_inferencex", lambda commit, cache: tmp_path / "ix")
+    monkeypatch.setattr(runner, "ensure_inferencex", lambda commit, cache, store: tmp_path / "ix")
     # this interpreter's identity of the published staging; lm-eval is not installed in CI
     monkeypatch.setattr(runner_tools, "normalised_manifest", lambda tool_cache: STAGING)
     # a machine that answers every question: the sheet's card, no errors, nothing resident
@@ -234,6 +234,31 @@ def test_a_missing_signing_key_stops_the_runner_at_start(tmp_path, env):
 
     assert _go(tmp_path, env, _sheet()) == 2
     assert _status(tmp_path)["error_class"] == "runner_start_failed"
+
+
+def test_a_base_build_the_runner_cannot_see_stops_it_at_start(tmp_path, env, monkeypatch):
+    backend = _Backend(_ok)
+    monkeypatch.setattr(runner, "LocalMeasurementBackend", backend)
+    gone = tmp_path / "base-builds" / "k" / "llamacpp" / "bin"
+    env["HYPERLOOM_BASE_BINS"] = str(gone)
+
+    assert _go(tmp_path, env, _sheet()) == 2
+    status = _status(tmp_path)
+    assert status["error_class"] == "runner_start_failed" and str(gone) in status["message"]
+    assert backend.calls == []
+
+
+def test_the_base_builds_the_session_laid_are_first_on_the_path_a_test_runs_with(tmp_path, env, monkeypatch):
+    backend = _Backend(_ok)
+    monkeypatch.setattr(runner, "LocalMeasurementBackend", backend)
+    bins = [tmp_path / "base-builds" / key / "llamacpp" / "bin" for key in ("k1", "k2")]
+    for base in bins:
+        base.mkdir(parents=True)
+    env.update({"HYPERLOOM_BASE_BINS": os.pathsep.join(map(str, bins)), "PATH": "/opt/rocm/bin:/usr/bin"})
+
+    assert _go(tmp_path, env, _sheet()) == 0
+    assert len(backend.calls) == 1
+    assert env["PATH"].split(os.pathsep) == [*map(str, bins), "/opt/rocm/bin", "/usr/bin"]
 
 
 def test_a_successful_test_leaves_a_signed_manifest_and_status_last(tmp_path, env, key, monkeypatch):

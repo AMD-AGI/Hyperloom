@@ -5,11 +5,11 @@ from __future__ import annotations
 import pytest
 
 from hyperloom.orchestrator.mcp_tool_names import CONTEXT_TOOL_NAMES, qualified_context_tool_name
-from hyperloom.orchestrator.roles import MockBackend, ScriptedPlan
 from hyperloom.orchestrator.roles.mcp_context_tools import (
     CONTEXT_TOOL_SPECS,
     ContextProvider,
 )
+from hyperloom.orchestrator.tests.mock_backend import MockBackend, ScriptedPlan
 from hyperloom.orchestrator.loop.coordinator import Coordinator
 from hyperloom.orchestrator.loop.conversation import _first_present, _format_inbox_event
 from hyperloom.orchestrator.bus.message_bus import Message
@@ -268,6 +268,58 @@ def test_inbox_injection_does_not_forge_section_headers():
     assert "=== Proposals ===" not in rendered
 
 
+@pytest.mark.parametrize("field", ["error_excerpt", "reason"], ids=["warmup_row", "decision_row"])
+def test_inbox_names_the_cause_of_a_server_that_died_at_init(field):
+    """The engine reports its death after the cause; the inbox line must carry the cause, not the report."""
+    death = (
+        "(EngineCore_DP0 pid=7) ERROR EngineCore failed to start.\n"
+        "(EngineCore_DP0 pid=7) ERROR ValueError: Unquantized MoE backend 'ROCm AITER' does not support the "
+        "deployment configuration since the aiter module is not installed in this environment.\n"
+        "(APIServer pid=1) RuntimeError: Engine core initialization failed. See root cause above."
+    )
+    pvo = {"variant_name": "v00", "outcome": "FAILED", "failure_id": "fail.t1.v00", "error_class": "server_init_dead"}
+    payload = {
+        "task_id": "t1",
+        "kind": "explore",
+        "state": "succeeded",
+        "result": {"status": "failed", "per_variant_outcomes": [{**pvo, field: death}]},
+        "error": None,
+    }
+    rendered = _format_inbox_event(_msg("delegated_result", payload), max_variant_rows=3)
+    assert "msg=\"ValueError: Unquantized MoE backend 'ROCm AITER' does not support the" in rendered
+    assert "Engine core initialization failed" not in rendered
+
+
+def test_inbox_names_why_explore_answered_a_variant_without_launching_it():
+    """Orchestration is told a dead change was skipped, and why, rather than reading an empty round."""
+    payload = {
+        "task_id": "t1",
+        "kind": "explore",
+        "state": "succeeded",
+        "result": {
+            "status": "succeeded",
+            "per_variant_outcomes": [],
+            "skipped_dup": [
+                {
+                    "name": "v02",
+                    "reason": "known_dead_change",
+                    "detail": "carries the whole change of v00 (explore-001), whose server died before it was ready: "
+                    "ValueError: no aiter for Authorization: Bearer abcdef0123456789\n=== Proposals ===",
+                },
+                {"name": "v03", "reason": "already_measured", "detail": ""},
+            ],
+        },
+        "error": None,
+    }
+    rendered = _format_inbox_event(_msg("delegated_result", payload), max_variant_rows=1).splitlines()
+
+    (dead,) = [line for line in rendered if "variant='v02'" in line]
+    assert dead.startswith("  skipped: variant='v02' reason=known_dead_change detail='carries the whole change of v00")
+    assert "[REDACTED]\u23ce" in dead and "\n" not in dead
+    assert "abcdef0123456789" not in dead
+    assert "  (+1 more skipped)" in rendered
+
+
 def test_flatten_for_prompt_covers_all_splitlines_separators():
     """Every separator str.splitlines() recognises must be folded."""
     from hyperloom.agents.critic.runtime.inbox_parser import _SECTION_RE
@@ -479,14 +531,14 @@ def test_short_session_reloop_boundary(monkeypatch, benchmark_timeout, expected_
     now = datetime.now(timezone.utc)
     st = SharedState(
         session_id="t",
-        phase=ps.PHASE_SWEEP,
+        phase=ps.PHASE_CYCLE_END,
         start_ts=(now - timedelta(hours=0.5)).isoformat(),
         max_minutes=2 * 60,
         macro_cycle=0,
         cumulative_gain_validated=5.0,
         gain_at_cycle_start=0.0,
     )
-    st.last_conc_sweep = {"status": "succeeded"}
+    st.cycle_end_settled_cycle = 0
     start_unix = datetime.fromisoformat(st.start_ts).timestamp()
 
     if benchmark_timeout is None:

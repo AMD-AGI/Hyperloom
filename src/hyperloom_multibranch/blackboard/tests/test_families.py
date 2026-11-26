@@ -99,6 +99,10 @@ def _args(server_args: str = "", **envs: str) -> RecipeDelta:
         ),
         ("aten::copy_ (sdma copies)", "remove the extra copy", SOURCE, None, ("memory", Mechanism.OVERHEAD)),
         ("tokenizer worker count", "raise it to 4", CONFIG, None, ("other runtime settings", Mechanism.TUNING)),
+        ("--hicache-ratio", "raise it to 2", CONFIG, None, ("KV cache", Mechanism.TUNING)),
+        ("KV offload to host memory", "raise it to 2", CONFIG, None, ("KV cache", Mechanism.TUNING)),
+        ("--kv-transfer-config", "raise it to 2", CONFIG, None, ("KV cache", Mechanism.TUNING)),
+        ("--cpu-offload-gb", "raise it to 2", CONFIG, None, ("memory", Mechanism.TUNING)),
         ("something new", "an idea", SOURCE, None, (OTHER_TARGET, Mechanism.OTHER)),
     ],
 )

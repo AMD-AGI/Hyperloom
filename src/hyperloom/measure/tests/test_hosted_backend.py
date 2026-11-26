@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import subprocess
 import threading
 import time
@@ -17,9 +18,10 @@ import pytest
 from hyperloom.contracts.measurement import AccuracyValue
 from hyperloom.measure import signing
 from hyperloom.measure.bundle import RejectReason, ResultRejected
-from hyperloom.measure.failures import SANDBOX_ACQUIRE_TIMEOUT
+from hyperloom.measure.failures import RESULT_DOWNLOAD_INCOMPLETE, SANDBOX_ACQUIRE_TIMEOUT
 from hyperloom.measure.hosted import STOPPED_RETURNCODE, HostedMeasurementBackend, HostedStartError
 from hyperloom.measure.hosted_log import STATE_FINISHED, STATE_SENT, STATE_SUBMITTED
+from hyperloom.measure.hosted_logs import INDEX_FILE, PREFIX
 from hyperloom.measure.manifest import encode_manifest
 from hyperloom.measure.returncodes import (
     HOSTED_INFRA_FAILURE_RC,
@@ -29,7 +31,7 @@ from hyperloom.measure.returncodes import (
 )
 from hyperloom.measure.spec import MeasurementSpec
 from hyperloom.measure.tests.bundle_factory import DEFAULT_FILES, manifest_document, spec_document
-from hyperloom.measure.tests.fake_runner import REPORT_PATH
+from hyperloom.measure.tests.fake_runner import REPORT_PATH, ROUND_DIR, ROUND_LINK, ROUND_TREE
 from hyperloom.measure.tests.hosted_fixtures import (
     HOSTNAME,
     Rig,
@@ -72,6 +74,11 @@ def rig(tmp_path: Path):
 def _run(rig_: Rig, tmp: Path, task: str = "req-1", **fake):
     call = make_call(tmp, task, point=point_yaml(tmp, f"{task}.yaml", **fake))
     return call, rig_.backend.run_test(call)
+
+
+def _landed(output_dir: Path) -> list[str]:
+    """What is in an attempt's output directory besides the runner logs a failed attempt keeps (``hosted-*``)."""
+    return sorted(x.name for x in output_dir.iterdir() if not x.name.startswith(PREFIX)) if output_dir.exists() else []
 
 
 def _spec_of(rig_: Rig, request_id: str, attempt: int = 1) -> MeasurementSpec:
@@ -277,7 +284,7 @@ def test_a_result_that_does_not_verify_is_rejected_and_lands_nowhere(rig, tmp_pa
     assert outcome.returncode == HOSTED_RESULT_REJECTED_RC
     assert outcome.failure_class is None and outcome.failure_reason == "result_rejected"
     assert f"({reject})" in outcome.stderr, outcome.stderr
-    assert not call.output_dir.exists() or not any(call.output_dir.iterdir()), "nothing was written to the output dir"
+    assert _landed(call.output_dir) == [], "no result file was written to the output dir"
     assert not (tmp_path / "archive").exists() or not any((tmp_path / "archive").iterdir()), "nothing was archived"
     record = r.backend.journal.latest("req-1")
     assert record.extra["verdict"] == "result_rejected" and record.extra["reject"] == reject
@@ -290,7 +297,7 @@ def test_a_failed_round_under_an_outcome_that_says_success_is_rejected_before_an
     call, outcome = _run(r, tmp_path, fake_accuracy=0.95, fake_accuracy_returncode=1)
     assert outcome.returncode == HOSTED_RESULT_REJECTED_RC
     assert "(manifest_invalid)" in outcome.stderr, outcome.stderr
-    assert not call.output_dir.exists() or not any(call.output_dir.iterdir()), "nothing was written to the output dir"
+    assert _landed(call.output_dir) == [], "no result file was written to the output dir"
     assert not (tmp_path / "archive").exists() or not any((tmp_path / "archive").iterdir()), "nothing was archived"
 
 
@@ -302,13 +309,150 @@ def test_nothing_is_downloaded_from_a_manifest_whose_signature_fails(rig, tmp_pa
     def spying_create(*args, **kwargs):
         sandbox = real_create(*args, **kwargs)
         original = sandbox.copy_out
-        sandbox.copy_out = lambda path, dest: (copied.append(path), original(path, dest))[1]
+
+        def copy_out(path: str, dest: Path) -> int:
+            if not _saved_log(dest):
+                copied.append(path)
+            return original(path, dest)
+
+        sandbox.copy_out = copy_out
         return sandbox
 
     r.provider.create = spying_create
     _, outcome = _run(r, tmp_path, fake_mode="wrong_key")
     assert outcome.returncode == HOSTED_RESULT_REJECTED_RC
-    assert copied == [], "the file list of an unsigned manifest is never used to fetch files"
+    assert copied == [], "the file list of an unsigned manifest is never used to fetch files (only its logs are kept)"
+
+
+def _saved_log(dest: Path) -> bool:
+    """Whether a copy is one of the runner logs a failed attempt keeps, not a file of the result being read."""
+    return any(part.startswith(PREFIX) for part in dest.parts)
+
+
+def _copying(rig_: Rig, short_copies: int) -> list[tuple[str, int]]:
+    """Make the sandboxes the rig creates copy the report short its first ``short_copies`` times, the way a transfer
+    that ends early without an error does; every copy is listed as (path, bytes received)."""
+    copied: list[tuple[str, int]] = []
+    real_create = rig_.provider.create
+
+    def create(*args, **kwargs):
+        sandbox = real_create(*args, **kwargs)
+        original = sandbox.copy_out
+
+        def copy_out(path: str, dest: Path) -> int:
+            received = original(path, dest)
+            if _saved_log(dest):
+                return received
+            if path.endswith(REPORT_PATH) and sum(p == path for p, _ in copied) < short_copies:
+                received -= 3
+                dest.write_bytes(dest.read_bytes()[:received])
+            copied.append((path, received))
+            return received
+
+        sandbox.copy_out = copy_out
+        return sandbox
+
+    rig_.provider.create = create
+    return copied
+
+
+def _report_copies(copied: list[tuple[str, int]]) -> list[int]:
+    return [received for path, received in copied if path.endswith(REPORT_PATH)]
+
+
+def test_a_file_whose_copy_comes_back_short_is_copied_again_and_the_result_lands(rig, tmp_path, caplog) -> None:
+    r = rig()
+    copied = _copying(r, short_copies=1)
+    with caplog.at_level(logging.WARNING, logger="hyperloom.measure.hosted_copy"):
+        call, outcome = _run(r, tmp_path, fake_throughput=4321.5)
+    assert outcome.returncode == 0, outcome.stderr
+    short, whole = _report_copies(copied)
+    assert short == whole - 3
+    assert json.loads((call.output_dir / REPORT_PATH).read_text())["fixed"]["output_throughput"] == 4321.5
+    said = [x.getMessage() for x in caplog.records if REPORT_PATH in x.getMessage()]
+    assert said == [f"{REPORT_PATH}: copy 1 received {short} bytes, the manifest lists {whole}; copying it again"]
+    assert r.backend.journal.latest("req-1").extra["verified"] is True
+
+
+def test_a_file_whose_every_copy_comes_back_short_is_an_incomplete_download_with_its_logs_kept(rig, tmp_path) -> None:
+    r = rig()
+    copied = _copying(r, short_copies=3)
+    call, outcome = _run(r, tmp_path)
+    assert outcome.returncode == HOSTED_INFRA_FAILURE_RC, outcome.stderr
+    assert (outcome.failure_class.value, outcome.failure_reason) == ("infra", RESULT_DOWNLOAD_INCOMPLETE)
+    received = _report_copies(copied)
+    assert len(received) == 3 and len(set(received)) == 1, "the first copy and two more, then the download gives up"
+    detail = f"{REPORT_PATH}: {received[0]} bytes received, the manifest lists {received[0] + 3}"
+    assert outcome.stderr == f"{RESULT_DOWNLOAD_INCOMPLETE}: {detail}"
+    assert outcome.sandbox.node_name is None, "no node is named, so none is held to blame"
+    record = r.backend.journal.latest("req-1")
+    assert record.extra["verdict"] == RESULT_DOWNLOAD_INCOMPLETE and record.extra["detail"] == detail
+    assert "verified" not in record.extra, "verification never ran on an incomplete download"
+    assert _landed(call.output_dir) == [], "nothing of the result lands"
+    assert not (tmp_path / "archive").exists() or not any((tmp_path / "archive").iterdir()), "nothing was archived"
+    assert (call.output_dir / "hosted-server.log").read_bytes() == b"server up\nserver down\n", "the logs are kept"
+    assert (call.output_dir / INDEX_FILE).is_file()
+    assert r.provider.find({}, role="measurement") == []
+
+
+def test_a_whole_copy_that_does_not_hash_to_the_manifest_stays_a_final_refusal(rig, tmp_path) -> None:
+    r = rig()
+    copied: list[str] = []
+    real_create = r.provider.create
+
+    def create(*args, **kwargs):
+        sandbox = real_create(*args, **kwargs)
+        original = sandbox.copy_out
+
+        def copy_out(path: str, dest: Path) -> int:
+            received = original(path, dest)
+            if path.endswith(REPORT_PATH) and not _saved_log(dest):
+                copied.append(path)
+                data = dest.read_bytes()
+                dest.write_bytes(bytes([data[0] ^ 1]) + data[1:])  # the listed size, other bytes
+            return received
+
+        sandbox.copy_out = copy_out
+        return sandbox
+
+    r.provider.create = create
+    call, outcome = _run(r, tmp_path)
+    assert outcome.returncode == HOSTED_RESULT_REJECTED_RC
+    assert outcome.failure_class is None and outcome.failure_reason == "result_rejected"
+    assert "(file_hash_mismatch)" in outcome.stderr, outcome.stderr
+    assert len(copied) == 1, "a copy of the listed size is not copied again"
+    assert r.backend.journal.latest("req-1").extra["reject"] == "file_hash_mismatch"
+    assert _landed(call.output_dir) == []
+
+
+def test_a_refusal_stays_a_refusal_when_the_logs_cannot_be_saved(rig, tmp_path) -> None:
+    r = rig()
+    real_create = r.provider.create
+
+    def create(*args, **kwargs):
+        sandbox = real_create(*args, **kwargs)
+
+        def gone(path: str):
+            raise SandboxGone("the sandbox ended")
+
+        sandbox.list_entries = gone
+        return sandbox
+
+    r.provider.create = create
+    _, outcome = _run(r, tmp_path, fake_mode="tamper")
+    assert outcome.returncode == HOSTED_RESULT_REJECTED_RC
+    assert "(file_hash_mismatch)" in outcome.stderr, outcome.stderr
+    assert r.backend.journal.latest("req-1").extra["reject"] == "file_hash_mismatch"
+
+
+def test_a_file_whose_copy_comes_back_whole_is_copied_once(rig, tmp_path) -> None:
+    r = rig()
+    copied = _copying(r, short_copies=0)
+    _, outcome = _run(r, tmp_path)
+    assert outcome.returncode == 0, outcome.stderr
+    paths = [path for path, _ in copied]
+    assert len(_report_copies(copied)) == 1
+    assert len(paths) == len(set(paths)), "no file is copied twice"
 
 
 def test_a_file_the_manifest_does_not_list_is_never_fetched_or_landed(rig, tmp_path) -> None:
@@ -396,6 +540,43 @@ def test_a_test_that_runs_past_its_timeout_raises_and_closes_the_sandbox(rig, tm
         r.backend.run_test(call)
     assert r.provider.find({}, role="measurement") == []
     assert r.backend.journal.latest("req-1").extra["verdict"] == "timeout"
+
+
+#: How far the test's clock jumps once the runner has written its round tree: past the call's 60 s cap.
+_PAST_THE_CAP_SEC = 120.0
+
+
+def test_a_test_the_host_ends_keeps_its_rounds_nested_logs_and_the_last_progress_it_read(rig, tmp_path) -> None:
+    backends: list[HostedMeasurementBackend] = []
+
+    def clock() -> float:
+        """The host's cap fires only once the application has read the runner's ``running`` phase, which the runner
+        writes after its round tree: the cap never races the runner's start on a slow host."""
+        seen = backends[0]._seen.get("req-1") if backends else None
+        running = seen is not None and seen[1].get("phase") == "running"
+        return time.time() + (_PAST_THE_CAP_SEC if running else 0.0)
+
+    r = rig(clock=clock, pre_ready_silence_sec=10 * _PAST_THE_CAP_SEC)
+    backends.append(r.backend)
+    point = point_yaml(tmp_path, fake_mode="hang", fake_round_tree="true")
+    call = make_call(tmp_path, timeout_sec=60, point=point)
+    with pytest.raises(subprocess.TimeoutExpired):
+        r.backend.run_test(call)
+    saved = call.output_dir / f"hosted-{ROUND_DIR}"
+    for relative, data in ROUND_TREE.items():
+        kept = saved / relative
+        if relative.startswith("torch_trace/"):
+            assert not kept.exists(), "a profiler trace is not a log"
+        else:
+            assert kept.read_bytes() == data, relative
+    assert not (saved / ROUND_LINK).exists(), "a link out of the sandbox is never followed"
+    index = json.loads((call.output_dir / "hosted-saved-files.json").read_text())
+    assert {"path": f"{ROUND_DIR}/{ROUND_LINK}", "reason": "a link, not followed"} in index["skipped"]
+    seen = json.loads((call.output_dir / "hosted-progress.json").read_text())
+    progress = seen["progress"]
+    assert progress["phase"] == "running" and progress["server_ready"] is False
+    assert progress["last_line"] == "Finished streaming dequant fp8 wo_a" and progress["last_log_age_sec"] >= 0
+    assert seen["read_sec_ago"] >= 0
 
 
 def test_a_stopping_run_closes_the_sandbox_and_returns_the_stop_code(rig, tmp_path) -> None:

@@ -204,12 +204,6 @@ def test_explicit_openai_side_wins_key_and_url_independently():
     assert url_only["base_url"] == "https://explicit.example.invalid/v1"
 
 
-def test_retired_gateway_key_loses_to_the_anthropic_fallback():
-    """``LLM_GATEWAY_KEY`` is no longer a credential, so the Anthropic side answers instead."""
-    env = {**_ANTHROPIC_ONLY_ENV, "LLM_GATEWAY_KEY": "gw-key"}
-    assert resolve_openai_client_config(env=env).as_kwargs()["api_key"] == "gateway-token"
-
-
 _SUBSCRIPTION_HEADER = "Ocp-Apim-Subscription-Key"
 
 
@@ -259,11 +253,6 @@ def test_shape_predicates_ignore_the_retired_deepseek_variables():
 def test_openai_agent_credential_requires_a_key_not_a_bare_base_url():
     assert not llm_config.openai_agent_credentialed({"OPENAI_BASE_URL": "https://gw/v1"})
     assert llm_config.openai_agent_credentialed({"OPENAI_API_KEY": "sk-test"})
-
-
-def test_a_retired_gateway_key_does_not_credential_the_openai_side():
-    """`_validate_credentials` admits a run on OPENAI_API_KEY alone, so the ranking names the same one name."""
-    assert not llm_config.openai_agent_credentialed({"LLM_GATEWAY_KEY": "gw-test"})
 
 
 @pytest.mark.parametrize("gateway", ["CLAUDE_CODE_USE_BEDROCK", "CLAUDE_CODE_USE_VERTEX"])
@@ -531,18 +520,6 @@ def test_deepseek_compat_env_geak_model_follows_explicit_claude_model():
     updates = deepseek_compat_env({_LEGACY_KEY: "sk-legacy", "CLAUDE_MODEL": "claude-opus-5"})
     assert "CLAUDE_MODEL" not in updates
     assert updates["GEAK_CLAUDE_MODEL"] == "claude-opus-5"
-
-
-def test_resolve_forge_llm_model_ignores_the_removed_forge_env():
-    """Forge reads the platform's model variables and has none of its own."""
-    env = {
-        "CLAUDE_MODEL": "claude-orchestration",
-        "FORGE_CLAUDE_MODEL": "claude-forge-only",
-        "CODEX_MODEL": "gpt-orchestration",
-        "FORGE_CODEX_MODEL": "gpt-forge-only",
-    }
-    assert resolve_forge_llm_model("claude", env=env) == "claude-orchestration"
-    assert resolve_forge_llm_model("codex", env=env) == "gpt-orchestration"
 
 
 def test_the_harness_model_comes_from_dsh_model_alone():
@@ -1227,7 +1204,6 @@ def test_chat_completion_does_not_request_a_stream():
 _MIGRATED_CALL_SITES = (
     "orchestrator/roles/codex.py",
     "orchestrator/roles/critic_agent.py",
-    "orchestrator/scoring/proposal_scorer.py",
 )
 
 # ``a.b.create`` attribute chains that only llm_config may call directly.

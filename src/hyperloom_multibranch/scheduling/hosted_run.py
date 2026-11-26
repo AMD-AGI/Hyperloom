@@ -10,7 +10,8 @@ the legacy entry validated, a multi-branch session needs ``multibranch.workload`
 ``multibranch.reference_script`` ``--reference-script``, ``multibranch.max_branches`` ``--max-branches``,
 ``multibranch.dev_leases`` ``--dev-leases``, each source of ``multibranch.autonomous_agents`` one
 ``--autonomous-agent``, ``multibranch.make_before_break`` (``true`` by default) ``--make-before-break`` or
-``--no-make-before-break``, ``multibranch.agentx_duration_sec`` ``--agentx-duration-sec`` and
+``--no-make-before-break``, ``multibranch.conc_sweep`` (``true`` by default) ``--no-enable-conc-sweep`` when ``false``,
+``multibranch.conc_sweep_concs`` ``--conc-sweep-concs``, ``multibranch.agentx_duration_sec`` ``--agentx-duration-sec`` and
 ``multibranch.agentx_objective`` ``--agentx-objective`` (an ``agentx`` workload only), ``multibranch.boot_budget_sec``
 ``--boot-budget-sec``, and ``placement.max_parallel_tests`` is ``--max-parallel-tests``, at most what runs at once
 where the session measures. The fields ``run`` has no option for --
@@ -52,9 +53,8 @@ The host decides from ``$HYPERLOOM_STATE_DIR/exit.json`` whether to start the ru
 directory as soon as it exists (:func:`record_session`), so a start that finds it takes that session over instead of
 starting another, once that session got through PRELUDE: resumed to its first deadline while its baseline holds, else
 finished as ``final-only`` does (:func:`hosted_restart_leg`); one that ended before its baseline was recorded is closed,
-which ends the measurement sandboxes it left, and the spec's session starts again. The two file names and their fields
-are the legacy entry's, ``hyperloom.hosted.entry``, which this package does not import: importing it loads the legacy
-flow's state.
+which ends the measurement sandboxes it left, and the spec's session starts again. ``exit.json`` is also
+the file ``hyperloom.hosted.entry`` writes when it refuses a run before the hand-over.
 """
 
 from __future__ import annotations
@@ -90,9 +90,9 @@ from hyperloom_multibranch.rulegate.agentx import AgentXObjective
 from hyperloom_multibranch.scheduling.budget import (
     MB_CLOSE_GRACE_CAP_SECONDS,
     MB_SECONDS_PER_HOUR,
-    ExploreCap,
     FinalWork,
 )
+from hyperloom_multibranch.scheduling.final import sweep_unfinished
 from hyperloom_multibranch.scheduling.launch_isolation import launch_isolation
 from hyperloom_multibranch.scheduling.layout import SessionLayout
 from hyperloom_multibranch.scheduling.manifest import read_manifest
@@ -112,7 +112,7 @@ from hyperloom_multibranch.scheduling.stops import SessionStopReason
 from hyperloom_multibranch.toolbox.hosted_leases import GrantLimits, lease_shortfall
 from hyperloom_multibranch.toolbox.resume_guard import BaselineNotReusable, check_hosted_baseline_reusable
 
-# hyperloom/hosted/entry.py EXIT_FILE and SESSION_FILE
+# EXIT_FILE: hyperloom/hosted/entry.py EXIT_FILE
 EXIT_FILE = "exit.json"
 SESSION_FILE = "session.json"
 #: Seconds between the session's hard stop and the grant's end, for the process to write ``exit.json`` and exit.
@@ -203,6 +203,7 @@ def run_argv(spec: CampaignSpec, max_hours: float, parallel_tests: int) -> list[
         "max-parallel-tests": min(spec.max_parallel_tests, parallel_tests),
         **_agentx_values(section),
         "boot-budget-sec": _whole_seconds(section, "boot_budget_sec"),
+        "conc-sweep-concs": _conc_sweep_concs(section.get("conc_sweep_concs")),
     }
     agents = [f"--autonomous-agent={source}" for source in _agent_sources(section.get("autonomous_agents"))]
     switches = _switches(section)
@@ -243,12 +244,29 @@ def _whole_seconds(section: Mapping[str, Any], field: str) -> int | None:
     return seconds
 
 
+def _conc_sweep_concs(concs: object) -> str | None:
+    """``multibranch.conc_sweep_concs``, a list of positive whole concurrencies, as ``run``'s ``C1,C2,...``."""
+
+    if concs is None:
+        return None
+    if not isinstance(concs, list) or not all(isinstance(c, int) and not isinstance(c, bool) and c > 0 for c in concs):
+        raise HostedRefused("multibranch.conc_sweep_concs must be a list of positive whole concurrencies")
+    return ",".join(map(str, concs))
+
+
 def _switches(section: Mapping[str, Any]) -> list[str]:
-    """The on/off options of ``section``: ``multibranch.make_before_break`` as ``--[no-]make-before-break``, nothing
-    when the spec leaves it to ``run``'s default (on)."""
+    """The on/off options of ``section``: ``multibranch.make_before_break`` as ``--[no-]make-before-break`` and
+    ``multibranch.conc_sweep`` as ``--[no-]enable-conc-sweep``, nothing when the spec leaves either to ``run``'s
+    default (on)."""
 
     keep = _make_before_break(section)
-    return [] if keep is None else ["--make-before-break" if keep else "--no-make-before-break"]
+    sweep = section.get("conc_sweep")
+    if sweep is not None and not isinstance(sweep, bool):
+        raise HostedRefused("multibranch.conc_sweep must be true or false")
+    return [
+        *([] if keep is None else ["--make-before-break" if keep else "--no-make-before-break"]),
+        *([] if sweep is None else ["--enable-conc-sweep" if sweep else "--no-enable-conc-sweep"]),
+    ]
 
 
 def spec_make_before_break(spec: CampaignSpec) -> bool:
@@ -539,13 +557,6 @@ def grant_tests_end_by(host: HostInfo) -> float | None:
     return None if end is None else end.tests_end_by
 
 
-def grant_explore_cap(host: HostInfo) -> ExploreCap | None:
-    """:meth:`GrantEnd.explore_cap` of ``host``'s grant, ``None`` without a grant runtime."""
-
-    end = grant_end(host)
-    return None if end is None else end.explore_cap
-
-
 def arm_grant_stop(seconds: float) -> threading.Timer:
     """Send this process SIGTERM in ``seconds``, the stop signal a session ends on; returns the started timer."""
 
@@ -631,11 +642,14 @@ class EarlierSession:
     (:func:`hosted_restart_leg`), when it got through PRELUDE; ``left``, which a restart closes before it starts the
     spec's session again, when it committed its root and ended before its baseline was recorded without closing, or was
     closed by such a restart; ``closed``, the directory of one that closed on its own before its baseline was
-    recorded, which ended the run; none of them when there was none or it committed no root, and so started no test."""
+    recorded, which ended the run; ``sweep``, one that got through PRELUDE and CLOSE and whose conc sweep did not run
+    its course, which a restart sweeps again; none of them when there was none or it committed no root, and so started
+    no test."""
 
     finish: PersistedRun | None = None
     left: PersistedRun | None = None
     closed: Path | None = None
+    sweep: SessionLayout | None = None
 
 
 def take_over_earlier_session(state_dir: Path) -> EarlierSession:
@@ -655,6 +669,9 @@ def take_over_earlier_session(state_dir: Path) -> EarlierSession:
         log.warning("removing %s, which the earlier start of this run left", lock)
         lock.unlink(missing_ok=True)
     if prelude_landed(previous):
+        layout = SessionLayout(previous)
+        if sweep_unfinished(layout, read_manifest(layout.manifest).settings):
+            return EarlierSession(sweep=layout)
         return EarlierSession(finish=persisted_run(previous))
     reported = reported_stop_reason(previous)
     if reported not in (None, SessionStopReason.KILLED.value):
@@ -697,11 +714,11 @@ def hosted_restart_leg(
     persisted: PersistedRun,
     finish: Callable[..., int],
     resume: Callable[..., int],
-    explore_cap: ExploreCap | None = None,
+    grant: GrantEnd | None = None,
 ) -> Callable[..., int]:
     """What a restart of the run runs over ``persisted``, the ``finish`` of :func:`take_over_earlier_session`:
     ``resume`` (``cli.resume``) with ``until`` bound to :func:`hosted_resume_deadline`'s, so its budget counts
-    from the run's first start, and ``cap`` to ``explore_cap`` (the grant's, :func:`grant_explore_cap`), when the
+    from the run's first start, and ``grant`` to the grant's end (:func:`grant_end`), when the
     session was measured in the grant's sandboxes and its baseline still measures what a test measured now would
     (:func:`~hyperloom_multibranch.toolbox.resume_guard.check_hosted_baseline_reusable`: the same build,
     ``MEASUREMENT_EPOCH``, image, base launch and runner template cards; not the node or the account, which a
@@ -724,7 +741,7 @@ def hosted_restart_leg(
         log.warning("hosted run: finishing %s instead of resuming it: %s", root, exc)
         return finish
     log.info("hosted run: resuming %s up to the deadline its first start set", root)
-    return partial(resume, until=deadline, cap=explore_cap)
+    return partial(resume, until=deadline, grant=grant)
 
 
 #: What reading back an earlier session fails with when this account cannot read what it left: a file an earlier leg of
@@ -815,7 +832,6 @@ __all__ = [
     "final_reserve_seconds",
     "grant_deadline",
     "grant_end",
-    "grant_explore_cap",
     "grant_tests_end_by",
     "grant_tests_that_fit",
     "hosted_restart_leg",

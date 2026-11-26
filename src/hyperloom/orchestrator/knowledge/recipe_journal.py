@@ -11,6 +11,7 @@ from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Any, Collection, Mapping, NamedTuple
 
 from hyperloom_common.coerce import first_float, recorded_float, to_float, to_int, to_mapping
+from hyperloom.common.perf_metric import prompt_dataset_session
 from hyperloom.inference_optimizer.breakdown.recorder import close_out as _close_out
 from hyperloom.inference_optimizer.breakdown.recorder.framework_event import (
     ARM_CONFIG,
@@ -34,12 +35,11 @@ from ..collaborator import CoordinatorCollaborator
 from ..state.attempt_ledger import AttemptRow, record_attempt_row
 from .config import KnowledgeStoreMode
 from ._config_timeline import _NON_ATTEMPT_OUTCOMES, _record_config_attempts
-from ._recipe_attrs import attempt_provenance, recipe_attrs_from_state, workload_kb_tags
+from ._recipe_attrs import attempt_provenance, recipe_attrs_from_state, session_best_config, workload_kb_tags
 from .recipe_amend import (
     amended_recipe_extras,
     amended_recipe_fields,
     appended,
-    extract_kept_best_config,
     kb_best_config_overrides_for_keep,
     rows_not_superseded,
 )
@@ -85,7 +85,6 @@ class FactRecord:
     change: str
     gain_pct: float | None
     throughput_after: float | None
-    best_config_candidate: dict[str, Any] | None
     evidence_refs: list[str]
     pitfall_severity_dict: dict[str, Any]
     variant_name: str | None = None
@@ -409,11 +408,9 @@ class RecipeJournalCollaborator(CoordinatorCollaborator):
 
         try:
             if lesson is not None:
-                live = self.read_local_recipe_row()
                 recipe_overrides = kb_best_config_overrides_for_keep(
-                    live=live,
-                    best_config_candidate=fact.best_config_candidate,
-                    throughput_after=fact.throughput_after,
+                    live=self.read_local_recipe_row(),
+                    best_config=session_best_config(state.current_best),
                 )
                 self.kb_amend_recipe(
                     append_lesson=lesson,
@@ -492,10 +489,6 @@ class RecipeJournalCollaborator(CoordinatorCollaborator):
                 change=change,
                 gain_pct=gain_pct,
                 throughput_after=throughput_after,
-                best_config_candidate=extract_kept_best_config(
-                    task=task,
-                    result_dict=result_dict,
-                ),
                 # evidence_refs (log:task-...) gives traceability since source_session_id lands in attrs.
                 evidence_refs=[f"log:task-{task.task_id}"],
                 pitfall_severity_dict=result_dict,
@@ -610,10 +603,6 @@ class RecipeJournalCollaborator(CoordinatorCollaborator):
                 change=change,
                 gain_pct=measurement.gain_pct,
                 throughput_after=measurement.throughput_after,
-                best_config_candidate=extract_kept_best_config(
-                    task=task,
-                    variant_attrs=change_attrs,
-                ),
                 # Workload-shape tags — see _record_fact_per_task.
                 evidence_refs=[f"log:task-{task.task_id}", f"variant:{variant_name}"],
                 pitfall_severity_dict={
@@ -776,6 +765,13 @@ class RecipeJournalCollaborator(CoordinatorCollaborator):
                 result_type=_close_out.RESULT_KB_DISABLED,
             )
 
+        if prompt_dataset_session(state):
+            return _finalize_outcome(
+                status="skipped",
+                reason="prompt_dataset_identity_unsupported",
+                backend="none",
+                result_type=_close_out.RESULT_DATASET_BLOCKED,
+            )
         from ..knowledge.config import KnowledgeConfig
 
         try:
@@ -880,11 +876,11 @@ class RecipeJournalCollaborator(CoordinatorCollaborator):
             "extras": extras,
         }
         # The row's figures, and the what_worked rows that explain its best_config, survive a session that
-        # never validated a win, or whose win does not beat what the row already advertises.
+        # never validated a win, or whose win falls below what the row already advertises.
         my_throughput = float(attrs.get("best_throughput") or 0.0)
         won = bool(state.optimization_stack or float(state.cumulative_gain_validated or 0.0) > 0.0)
         won = won or bool(str(state.current_best.get("extra_server_args") or "").strip())
-        if won and my_throughput > recorded_float(live.get("best_throughput")):
+        if won and my_throughput > 0.0 and my_throughput >= recorded_float(live.get("best_throughput")):
             overrides["best_config"] = attrs["best_config"]
             overrides["best_throughput"] = my_throughput
         return overrides
@@ -987,7 +983,7 @@ class RecipeJournalCollaborator(CoordinatorCollaborator):
         from hyperloom.common.perf_metric import agentx_active
 
         state = self.shared_state
-        if agentx_active(benchmark_mode=state.benchmark_mode):
+        if agentx_active(benchmark_mode=state.benchmark_mode) or prompt_dataset_session(state):
             return
         canonical_id = self.workload_canonical_id()
         identity = _framework_identity(state)

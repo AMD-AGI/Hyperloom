@@ -17,9 +17,7 @@ from hyperloom.orchestrator.knowledge.agent_kb import (
     OverlayProvenance,
     PatchKB,
 )
-from hyperloom.orchestrator.knowledge.remote_recipe._vendor.kb_store_client import (
-    KnowledgeSections,
-)
+from hyperloom.orchestrator.knowledge.remote_recipe.sections import KnowledgeSections
 from hyperloom.orchestrator.knowledge.remote_recipe.values import (
     CURRENT_KNOWLEDGE_SCHEMA_VERSION,
     RECORD_KIND_HYPERLOOM_RECIPE,

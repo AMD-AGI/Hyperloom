@@ -23,6 +23,9 @@ REBENCH_FAILED = "failed"
 REBENCH_FALLBACK_FAILED = "fallback_failed"
 #: The settled statuses that drop the candidate unjudged; ``no_material`` and ``no_promote`` are verdicts.
 REBENCH_FAILED_STATUSES: frozenset[str] = frozenset({REBENCH_FAILED, REBENCH_FALLBACK_FAILED})
+#: The error class of a ``failed`` revalidation that is final: the candidate's measurements ended with no verdict
+#: as many times as the session measures one candidate, so it is dropped unmeasured.
+REBENCH_UNMEASURED_GIVEN_UP = "unmeasured_attempts_exhausted"
 
 __all__ = [
     "REBENCH_FAILED",
@@ -31,5 +34,6 @@ __all__ = [
     "REBENCH_FALLBACK_FAILED",
     "REBENCH_NO_MATERIAL",
     "REBENCH_NO_PROMOTE",
+    "REBENCH_UNMEASURED_GIVEN_UP",
     "REBENCH_VALIDATED",
 ]

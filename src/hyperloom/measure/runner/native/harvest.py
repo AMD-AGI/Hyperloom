@@ -22,7 +22,7 @@ from hyperloom.measure.jit.native.record import EXECUTABLE, PLAIN, OutputFile
 from hyperloom.measure.jit.store import BLOBS_DIR
 from hyperloom.measure.runner.cache_layout import file_sha256
 
-__all__ = ["ELF_MAGIC", "HarvestError", "harvest"]
+__all__ = ["ELF_MAGIC", "HarvestError", "harvest", "require_executables"]
 
 ELF_MAGIC = b"\x7fELF"
 _BLOB_MODE = 0o600
@@ -48,6 +48,15 @@ def harvest(
     finally:
         os.close(package_fd)
     return tuple(output for output in outputs if image is None or not _same_as_image(Path(image) / output.path, output))
+
+
+def require_executables(outputs: tuple[OutputFile, ...], executables: tuple[str, ...]) -> None:
+    """Refuse ``outputs`` (:func:`harvest`'s, every one kept) unless each path of ``executables`` is among them as an
+    executable file."""
+    made = {output.path for output in outputs if output.mode == EXECUTABLE}
+    missing = [path for path in executables if path not in made]
+    if missing:
+        raise HarvestError(f"the build made no executable {', '.join(missing)}")
 
 
 def _take(package_fd: int, relative: str, max_bytes: int, blobs: Path) -> OutputFile:

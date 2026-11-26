@@ -15,7 +15,7 @@ from pathlib import Path
 from typing import Any
 
 from hyperloom_common import io as _common_io
-from inference_suite.server_log import death_excerpt
+from inference_suite.server_log import cause_line, death_excerpt
 from hyperloom.common.agent_isolation import session_isolation_lines
 from hyperloom.common.failure_signature import is_engine_capacity_error
 from hyperloom.common.gain_math import gain_pct
@@ -79,6 +79,8 @@ def _pick_failure_headline(text: str) -> str:
     for ln in lines:
         if is_engine_capacity_error(ln):
             return ln
+    if cause := cause_line(text):
+        return cause
     priority = (
         "out of memory",
         "fatal",
@@ -177,31 +179,9 @@ def _build_failure_summary(
     return summary
 
 
-def _explain_stop_reason(stop_reason, state=None):
+def _explain_stop_reason(stop_reason) -> str:
     """Return a human-readable explanation for a terminal ``stop_reason``."""
-    reason = str(stop_reason or "").strip()
-    text = STOP_REASON_EXPLANATIONS.get(reason, "")
-    if reason == "sweep_done" and text:
-        return _explain_conc_sweep_skip(state) or text
-    return text
-
-
-def _explain_conc_sweep_skip(state) -> str:
-    """Name a skipped concurrency sweep, or ``\"\"`` when one ran to a result."""
-    last = getattr(state, "last_conc_sweep", None)
-    if not isinstance(last, dict) or not last.get("was_skipped"):
-        return ""
-    # Imported here, not at module scope: ``kernel.conc_sweep`` imports the grid runner in this same package, so a
-    # top-level import is the edge CodeQL reports as a cycle.
-    from ...kernel.conc_sweep import conc_sweep_declined_to_run
-
-    detail = str(last.get("skip_reason") or "").strip() or "no reason recorded"
-    if conc_sweep_declined_to_run(last):
-        return f"Post-sweep concurrency sweep did not run ({detail}); the phase settled and the run closed."
-    return (
-        f"Post-sweep concurrency sweep exhausted its budget without a comparable "
-        f"baseline/optimized pair ({detail}); the phase settled and the run closed."
-    )
+    return STOP_REASON_EXPLANATIONS.get(str(stop_reason or "").strip(), "")
 
 
 def _platform_fingerprint(gpu_type: str | None = None) -> dict[str, Any]:
@@ -285,7 +265,7 @@ def _build_summary_dict(
         "model_class": state.model_class,
         "framework": getattr(state, "framework", "") or "",
         "stop_reason": stop_reason,
-        "stop_reason_explanation": _explain_stop_reason(stop_reason, state),
+        "stop_reason_explanation": _explain_stop_reason(stop_reason),
         "baseline_tput": state.baseline_tput,
         "baseline_perf": dict(getattr(state, "baseline_perf", None) or {}),
         # Read back by the graded-axes section: the persisted AgentX marker outlives the shell, so a report rendered
@@ -505,7 +485,6 @@ def _format_md(summary: dict[str, Any]) -> str:
     if ext:
         lines.extend(_format_external_baseline_section(ext))
 
-    lines.extend(_format_conc_sweep_curve_section(summary))
     lines.extend(_format_star_request(summary))
 
     return "\n".join(lines)
@@ -808,25 +787,6 @@ def _format_external_baseline_section(ext: dict[str, Any]) -> list[str]:
     return lines
 
 
-def _format_conc_sweep_curve_section(summary: dict[str, Any]) -> list[str]:
-    """Render the concurrency-sweep curve section in the Markdown report."""
-    png_rel = summary.get("conc_sweep_curve_png")
-    if not png_rel:
-        return []
-    # final.md and the PNG both live in reports_dir, so the embed must be relative to final.md's own directory (its
-    # basename), not the session-root-relative path stored in final.json.
-    png_md_rel = Path(str(png_rel)).name
-    lines: list[str] = []
-    lines.append("## Concurrency Sweep — Throughput vs Interactivity")
-    lines.append("")
-    # The PNG draws its own axis labels, and they differ by workload; naming them here too drifts from the chart.
-    lines.append("The post-optimization concurrency ladder.  Red = baseline, orange = optimized.")
-    lines.append("")
-    lines.append(f"![Concurrency sweep curve]({png_md_rel})")
-    lines.append("")
-    return lines
-
-
 # Not read from the package metadata: the report has to render however Hyperloom was installed.
 _STAR_REQUEST = (
     "If Hyperloom was useful, a star on https://github.com/AMD-AGI/Hyperloom helps other AMD GPU users find it."
@@ -838,35 +798,6 @@ def _format_star_request(summary: dict[str, Any]) -> list[str]:
     if summary.get("cumulative_validation_status") != "current":
         return []
     return ["", "---", "", _STAR_REQUEST, ""]
-
-
-def _render_conc_sweep_curve_for_report(
-    session_dir: Path,
-    output_dir: Path,
-    state: SharedState,
-) -> Path | None:
-    """Render the concurrency-sweep curve PNG into the reports directory."""
-    from hyperloom.inference_optimizer.session.session_paths import reports_dir as _reports_dir
-    from hyperloom.orchestrator.kernel.conc_sweep_plot import ConcCurveOptions, render_conc_sweep_curve
-
-    json_path = _reports_dir(session_dir) / "conc_sweep_summary.json"
-    try:
-        payload = json.loads(json_path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError) as exc:
-        log.debug("report_executor: cannot load conc_sweep_summary.json for plot: %s", exc)
-        return None
-
-    png_path = output_dir / "conc_sweep_curve.png"
-    tp = int(payload.get("tp") or getattr(state, "tp", 0) or 1)
-
-    model_label = str(getattr(state, "model_name", "") or "")
-    gpu_label = str(getattr(state, "gpu_type", "") or "").upper()
-    isl = int(payload.get("isl") or 0)
-    osl = int(payload.get("osl") or 0)
-
-    return render_conc_sweep_curve(
-        payload, png_path, ConcCurveOptions(model_label=model_label, gpu_label=gpu_label, tp=tp, isl=isl, osl=osl)
-    )
 
 
 def _load_external_baseline(session_dir: Path) -> dict[str, Any] | None:
@@ -907,34 +838,6 @@ def _write_kernel_opt_summary(
             exc,
         )
         return None
-
-
-def _read_conc_sweep_pointer(session_dir: Path) -> dict[str, Any] | None:
-    """Build the small ``conc_sweep_summary`` pointer for ``final.json`` (report_path + status + summary); ``None`` when conc_sweep wrote no summary."""
-    from hyperloom.inference_optimizer.session.session_paths import reports_dir as _reports_dir
-
-    json_path = _reports_dir(session_dir) / "conc_sweep_summary.json"
-    if not json_path.exists():
-        return None
-    try:
-        data = json.loads(json_path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError) as exc:
-        log.warning(
-            "report_executor: cannot read conc_sweep_summary.json: %s",
-            exc,
-        )
-        return None
-    try:
-        rel = json_path.relative_to(session_dir).as_posix()
-    except ValueError:
-        rel = json_path.as_posix()
-    return {
-        "report_path": rel,
-        "status": data.get("status"),
-        "summary": data.get("summary", {}),
-        "budget_exhausted": bool(data.get("budget_exhausted", False)),
-        "total_budget_sec": data.get("total_budget_sec"),
-    }
 
 
 def _read_ko_summary_totals(path: Path) -> dict[str, int]:
@@ -1028,27 +931,6 @@ def _companion_artifact_refs(state: SharedState, session_dir: Path, output_dir: 
                 "report_path": str(ko_summary_path),
                 "totals": _read_ko_summary_totals(ko_summary_path),
             }
-
-    # Post-sweep concurrency comparison pointer.
-    cs_pointer = _read_conc_sweep_pointer(session_dir)
-    if cs_pointer is not None:
-        refs["conc_sweep_summary"] = cs_pointer
-
-    # Best-effort InferenceX-style concurrency sweep plot.
-    conc_sweep_curve_png: Path | None = None
-    try:
-        conc_sweep_curve_png = _render_conc_sweep_curve_for_report(
-            session_dir=session_dir,
-            output_dir=output_dir,
-            state=state,
-        )
-    except (ValueError, TypeError, AttributeError, KeyError):
-        log.debug("report_executor: conc_sweep curve render failed", exc_info=True)
-    if conc_sweep_curve_png is not None:
-        try:
-            refs["conc_sweep_curve_png"] = conc_sweep_curve_png.relative_to(session_dir).as_posix()
-        except ValueError:
-            refs["conc_sweep_curve_png"] = conc_sweep_curve_png.as_posix()
     return refs
 
 

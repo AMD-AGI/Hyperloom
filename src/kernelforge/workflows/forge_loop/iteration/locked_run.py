@@ -12,12 +12,10 @@ from dataclasses import replace
 from pathlib import Path
 
 from kernelforge.workflows.forge_loop.iteration.iteration_types import (
-    HeldRound,
     IterationResult,
     LoopAgents,
     LoopCallbacks,
     _IterationFrame,
-    _IterationSupply,
     _with_search_actor,
 )
 from kernelforge.workflows.forge_loop.campaign.run_state import (
@@ -63,12 +61,10 @@ class LockedRunMixin:
         self._restore_or_begin_campaign(
             state_exists=state_exists,
             current_ruling_path=latest_supervisor_ruling_path(self.ic.workspace_dir),
-            agent_fn=actors.agent_fn,
-            orchestration_service=actors.orchestration_service,
             on_best_committed=callbacks.on_best_committed,
         )
         # Anchor the campaign clock now that the state carrying what earlier sessions spent is loaded.
-        self._campaign_started_at = self.start_time - max(0.0, float(self.run_state.round_costs.campaign_sec))
+        self._campaign_started_at = self.start_time - max(0.0, float(self.run_state.campaign_sec))
         if reconcile_stale_running_session(self.run_state):
             self.state_store.append_event(
                 make_event(
@@ -110,24 +106,10 @@ class LockedRunMixin:
         await self._establish_ceiling()
         # A crash immediately after a verified commit can leave the KEEP's archive unfinished.
         await self._finish_recovered_pending_keep()
-        self._restore_lane_queue()
-        # The previous round's verdict: a REPLACE is spent on the round after the one it judged, and the budget often
-        # ends between the two.
-        self._restore_critic_ruling()
-        # Analyze the baseline canonical commit once before any specialist or Implementer session.
+        # Analyze the baseline canonical commit once before any Implementer session.
         if actors.analysis_service is not None:
             await self._resolve_analysis_context(actors.analysis_service)
         return actors
-
-    def _fan_out_ready(self, round_lanes: int, agent_fn, agent_factory, orchestration_service) -> bool:
-        """Whether this iteration can run its round as concurrent lanes."""
-        return (
-            not self._lane_queue
-            and round_lanes > 1
-            and agent_factory is not None
-            and agent_fn is not None
-            and orchestration_service is not None
-        )
 
     async def _run_locked(
         self,
@@ -136,7 +118,7 @@ class LockedRunMixin:
         callbacks: LoopCallbacks,
         usage=None,
     ) -> list[IterationResult]:
-        """Run the autonomous iteration loop."""
+        """Run the autonomous iteration loop: one round of lanes, one measured candidate, per iteration."""
         actors = await self._begin_locked_run(agents, callbacks=callbacks, usage=usage)
         analysis_service = actors.analysis_service
         iteration = self.run_state.next_iteration - 1
@@ -149,54 +131,23 @@ class LockedRunMixin:
             if stop:
                 break
             actors = _with_search_actor(actors, self._iteration_bundle(iteration))
-            agent_fn, agent_factory, supervisor_fn = actors.agent_fn, actors.agent_factory, actors.supervisor_fn
-            orchestration_service = actors.orchestration_service
-            round_lanes = self._price_round(iteration, orchestration_service)
-            if round_lanes is None:
-                break
             await self._open_iteration(
                 iteration=iteration,
                 digest=digest,
-                supervisor_fn=supervisor_fn,
+                supervisor_fn=actors.supervisor_fn,
                 analysis_service=analysis_service,
             )
-            session_sink: dict = {}
-            # What a fan-out round leaves this iteration holding, so the single-session path below spends it instead
-            # of buying it again.
-            fan_out_plan: HeldRound | None = None
-            if hazard is None and self._fan_out_ready(round_lanes, agent_fn, agent_factory, orchestration_service):
-                fan_out_plan = await self._fan_out_round(
-                    iteration=iteration,
-                    orchestration_service=orchestration_service,
-                    agent_factory=agent_factory,
-                    lanes=round_lanes,
-                )
-                # The round's own lanes share one device with the canonical measurement, so a lane whose teardown
-                # could not clear it has just refused this iteration -- whatever its siblings produced.
-                hazard = self.device_hazard.live
-                if self._refused_round:
-                    # Planning cost more than the round had left.
-                    break
-            merge = self._stage_merge(
-                iteration=iteration,
-                hazard=hazard,
-                fan_out_plan=fan_out_plan,
-            )
-            # A fan-out round already paid for these candidates, so they are measured before anything new is planned.
-            queued_lane = None if hazard or merge.diff else self._take_lane_candidate(iteration)
-            frame = _IterationFrame(iteration, session_sink, merge)
-            attempt = await self._source_attempt(
-                frame,
-                _IterationSupply(hazard, queued_lane, fan_out_plan),
-                agents=agents,
-                digest=digest,
-                callbacks=callbacks,
-            )
-            if attempt is None:
-                if self._refused_round:
-                    break
-                continue
-            await self._settle_locked_attempt(attempt, frame, callbacks=callbacks)
+            frame = _IterationFrame(iteration, {})
+            try:
+                attempt = await self._source_attempt(frame, hazard, agents=actors, digest=digest, callbacks=callbacks)
+                if attempt is None:
+                    if self._refused_round:
+                        break
+                    continue
+                await self._settle_locked_attempt(attempt, frame, callbacks=callbacks)
+            finally:
+                # The lanes' copies outlive the verdict: each lane's session is resumed in its copy for its record.
+                self._close_lane_round()
         self._persist_terminal_state()
         self._print_final_report()
         return self.results
@@ -209,17 +160,8 @@ class LockedRunMixin:
         callbacks: LoopCallbacks,
     ) -> None:
         """Measure one sourced attempt, stamp it, rule on it, and close the iteration."""
-        (
-            unmeasured_result,
-            commit_hash,
-            rationale,
-            _attempt_source,
-            _attempt_diff,
-            reusable_benchmark,
-            optimization_plan_path,
-            optimization_plan_executable,
-            _lane_record,
-        ) = attempt
+        unmeasured_result, commit_hash, rationale = attempt.unmeasured_result, attempt.commit_hash, attempt.rationale
+        reusable_benchmark = attempt.reusable_benchmark
         # Snapshot the best-so-far BEFORE this iteration is measured, so the archive can record the true delta vs
         # the standard it had to beat (run_one_iteration mutates self.best_wall_ms on an improvement).
         frame = replace(
@@ -257,9 +199,5 @@ class LockedRunMixin:
         # run's end-reason distribution (edit cap / turn cap / converged / …) is analyzable.
         result.session_end_reason = frame.session_sink.get("end_reason", "")
         result.turns = frame.session_sink.get("turns")
-        # A session that chose its own direction published no plan, so it completes no diversification cycle.
-        self._apply_iteration_planning_state(
-            optimization_plan_created=optimization_plan_executable and bool(optimization_plan_path),
-        )
         ruling = self._rule_on_attempt(result, attempt, frame, on_best_committed=callbacks.on_best_committed)
         await self._close_iteration(result, attempt, frame, ruling=ruling, callbacks=callbacks)

@@ -16,8 +16,10 @@ from collections.abc import Mapping
 from typing import Any
 
 from inference_suite.contracts import FailedStep
+from inference_suite.server_log import cause_line
 
 from hyperloom.common.env_safety import redact_secret_values
+from hyperloom.common.prompt_safety import flatten_for_prompt
 from hyperloom.common.failure_signature import SERVE_FLAG, framework_unimportable_line, is_engine_capacity_error
 from hyperloom.inference_optimizer.breakdown.stop_reasons import ARGV_INVALID, HOST_GPUS_UNAVAILABLE
 
@@ -209,6 +211,11 @@ def with_failure_hint(error_class: str, error: str) -> str:
     return f"{error}\n{ENGINE_EXECUTE_TIMEOUT_HINT}" if error_class == ENGINE_EXECUTE_TIMEOUT else error
 
 
+def failure_text(row: Mapping[str, Any]) -> str:
+    """The log text a failed row carries: a warmup failure's ``error_excerpt``, else a decision failure's ``reason``."""
+    return str(row.get("error_excerpt") or row.get("reason") or "")
+
+
 def tail_excerpt(value: Any, *, limit: int = 1200) -> str | None:
     """Return the trailing ``limit`` characters of ``value`` after redaction."""
     if value is None:
@@ -353,10 +360,15 @@ def failure_from_variant_outcome(
     }
 
 
-def render_failure_line(fe: dict[str, Any], *, excerpt_chars: int = 160) -> str:
-    """Format one failure evidence packet as a compact single line."""
+def render_failure_line(fe: Mapping[str, Any], *, excerpt_chars: int = 160) -> str:
+    """Format one failure evidence packet as a compact single line, flattened against prompt-structure injection.
+
+    The message is the cause line cut from its head when the text names one, else the text's tail.
+    """
     error_class = str(fe.get("error_class") or "")
-    body = str(fe.get("error_excerpt") or fe.get("reason") or "")
+    text = failure_text(fe)
+    cause = cause_line(text)
+    body = flatten_for_prompt(cause)[:excerpt_chars] if cause else flatten_for_prompt(text)[-excerpt_chars:]
     parts = [
         f"fid={fe.get('failure_id') or ''}",
         f"variant={str(fe.get('variant_name') or '')!r}",
@@ -365,5 +377,5 @@ def render_failure_line(fe: dict[str, Any], *, excerpt_chars: int = 160) -> str:
     if error_class:
         parts.append(f"err={error_class}")
     if body:
-        parts.append(f"msg={body[-excerpt_chars:]!r}")
+        parts.append(f"msg={body!r}")
     return " ".join(parts)

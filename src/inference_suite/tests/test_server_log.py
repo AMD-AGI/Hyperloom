@@ -161,3 +161,57 @@ def test_a_death_excerpt_cut_anywhere_carries_no_surrounding_whitespace(tmp_path
         for max_chars in range(40, 1200, 7):
             excerpt = server_log.death_excerpt(str(path), max_chars=max_chars)
             assert excerpt is not None and excerpt == excerpt.strip(), (path.name, max_chars)
+
+
+def test_the_cause_of_an_init_death_is_its_first_exception_not_the_report_of_the_death(tmp_path):
+    """vLLM reports the death after its cause, so a reader of the excerpt's last exception sees only the report."""
+    core = "(EngineCore_DP0 pid=7) ERROR 11-18 10:00:00 [core.py:700]"
+    log_path = tmp_path / "server.log"
+    log_path.write_text(
+        "INFO loading weights\n"
+        f"{core} EngineCore failed to start.\n"
+        f"{core} Traceback (most recent call last):\n"
+        f"{core} ValueError: Unquantized MoE backend 'ROCm AITER' does not support the deployment configuration.\n"
+        "(APIServer pid=1) RuntimeError: Engine core initialization failed. See root cause above.\n"
+    )
+    excerpt = server_log.death_excerpt(str(log_path))
+    assert server_log.cause_line(excerpt) == (
+        "ValueError: Unquantized MoE backend 'ROCm AITER' does not support the deployment configuration."
+    )
+
+
+def test_a_runtime_line_that_names_the_fault_outright_is_the_cause():
+    excerpt = (
+        "[2] [FATAL ERROR]: HIP failure: 'out of memory' (in ncclCommInitRank)\n"
+        "RuntimeError: NCCL error: unhandled cuda error\n"
+        "EngineCore failed to start.\n"
+    )
+    assert server_log.cause_line(excerpt) == "[2] [FATAL ERROR]: HIP failure: 'out of memory' (in ncclCommInitRank)"
+
+
+def test_a_line_logged_below_error_level_is_not_the_cause():
+    """A fallback warning that quotes an ImportError precedes the error that stopped the engine."""
+    core = "(EngineCore_DP0 pid=7)"
+    excerpt = (
+        f"{core} WARNING 11-18 10:00:00 [utils.py:12] ImportError: flash_attn is not installed; falling back\n"
+        f"{core} INFO 11-18 10:00:01 [worker.py:40] retrying after out of memory on probe\n"
+        "DEBUG:vllm:KeyError: 'rope_scaling' ignored\n"
+        f"{core} ERROR 11-18 10:00:02 [core.py:700] ValueError: max_model_len exceeds the model's limit\n"
+    )
+    assert server_log.cause_line(excerpt) == "ValueError: max_model_len exceeds the model's limit"
+    assert server_log.cause_line(f"{core} ERROR ValueError: WARNING about INFO in the message") == (
+        "ValueError: WARNING about INFO in the message"
+    )
+
+
+def test_an_excerpt_that_only_reports_the_death_names_no_cause():
+    assert server_log.cause_line("(APIServer pid=1) RuntimeError: Engine core initialization failed.") is None
+    assert server_log.cause_line("vllm.v1.engine.exceptions.EngineDeadError: EngineCore encountered an issue") is None
+    assert server_log.cause_line(None) is None
+
+
+def test_scan_increment_detects_llama_server_ready(tmp_path):
+    log_path = tmp_path / "server.log"
+    for line in ("main: server is listening on http://127.0.0.1:8080", "srv  server_on_li: listening on http://h:1"):
+        log_path.write_text(f"{line}\n")
+        assert server_log._scan_increment(str(log_path), 0).saw_ready is True

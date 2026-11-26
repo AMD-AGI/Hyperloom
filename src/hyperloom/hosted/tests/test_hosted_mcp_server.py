@@ -19,9 +19,7 @@ from typing import Any
 
 import pytest
 
-from hyperloom.hosted.host_info import Var, take_host_info
 from hyperloom.hosted.mcp_server import (
-    HOST_KIND,
     CallContext,
     McpServer,
     McpServerConfig,
@@ -283,22 +281,6 @@ def test_tokens_are_stored_as_digests_only(server: McpServer) -> None:
     token = server.issue_token("spec-1", "b")
     assert all(token.encode() != key for key in server._tokens._by_digest)
     assert token not in repr(server.__dict__.get("_tokens").__dict__)
-
-
-def test_config_built_from_the_host_info_the_hosted_entry_takes(tmp_path) -> None:
-    (tmp_path / "campaign.json").write_text("{}")
-    environ = {
-        Var.INPUT_FILE: str(tmp_path / "campaign.json"),
-        Var.RUN_ID: "run-1",
-        Var.RUN_CREATED_AT: "2026-10-01T12:30:00Z",
-        Var.STATE_DIR: str(tmp_path),
-        Var.MCP_PORT: "8765",
-        Var.MCP_TOKEN: HOST_TOKEN,
-    }
-    info = take_host_info(environ)
-    assert Var.MCP_TOKEN not in environ
-    server = McpServer(McpServerConfig(port=info.mcp_port, host_token=info.mcp_token.reveal()), campaign="c")
-    assert server.authenticate(HOST_TOKEN).kind == HOST_KIND
 
 
 def test_config_validation() -> None:
@@ -590,42 +572,80 @@ def test_a_refused_call_has_no_result_to_carry_the_block_and_leaves_the_cursor(n
     assert _blocks(client.call(token, "whoami")[2])[1:] == ["one"]
 
 
-def test_the_cursor_moves_only_once_the_reply_was_sent(noted: McpServer, feed: Feed) -> None:
-    started, release = threading.Event(), threading.Event()
+def _hang_up_before_the_reply(server: McpServer, token: str, monkeypatch: pytest.MonkeyPatch) -> list[str]:
+    """Call ``hold`` and reset the connection while it runs. Returns once the server gave the reply up, with one
+    entry per drop of the reply."""
+    started, release, gave_up = threading.Event(), threading.Event(), threading.Event()
+    drops: list[str] = []
 
     def hold(args: dict[str, Any], ctx: CallContext) -> dict[str, Any]:
         started.set()
         release.wait(10)
         return {"ok": True}
 
-    noted.register("hold", schema={"type": "object"}, handler=hold, scopes={"specialist"})
-    token = _primed(noted)
-    feed.items.append("one")
-    finished = threading.Event()
-    answer = noted.handle_post
+    server.register("hold", schema={"type": "object"}, handler=hold, scopes={"specialist"})
+    answer = server.handle_post
 
     def watch(principal: Any, presented: str, body: bytes) -> Any:
         reply = answer(principal, presented, body)
 
         def drop() -> None:
             reply.drop()
-            finished.set()
+            drops.append("hold")
+            gave_up.set()
 
         return dataclasses.replace(reply, drop=drop)
 
-    noted.handle_post = watch  # type: ignore[method-assign]
+    server.handle_post = watch  # type: ignore[method-assign]
+    accept = socket.socket.accept
+    accepted: list[socket.socket] = []
+
+    def remember(listener: socket.socket) -> tuple[socket.socket, Any]:
+        connection = accept(listener)
+        accepted.append(connection[0])
+        return connection
+
+    monkeypatch.setattr(socket.socket, "accept", remember)
     body = json.dumps({"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {"name": "hold"}}).encode()
     head = f"POST /mcp HTTP/1.1\r\nHost: x\r\nX-Hyperloom-Token: {token}\r\nContent-Length: {len(body)}\r\n\r\n"
-    gone = socket.create_connection(("127.0.0.1", noted.port), timeout=10)
+    gone = socket.create_connection(("127.0.0.1", server.port), timeout=10)
     gone.sendall(head.encode() + body)
     assert started.wait(10)
     gone.setsockopt(socket.SOL_SOCKET, socket.SO_LINGER, struct.pack("ii", 1, 0))
     gone.close()
+    # The write fails only once the reset has reached the server's end of the connection.
+    assert select.select(accepted, [], [], 10)[0]
     release.set()
-    assert finished.wait(10)
+    assert gave_up.wait(10)
+    return drops
+
+
+def test_the_cursor_moves_only_once_the_reply_was_sent(
+    noted: McpServer, feed: Feed, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    token = _primed(noted)
+    feed.items.append("one")
+    _hang_up_before_the_reply(noted, token, monkeypatch)
     assert ("hold", "0") in feed.seen
     assert _blocks(Client(noted).call(token, "whoami")[2])[1:] == ["one"]
     assert len(_blocks(Client(noted).call(token, "whoami")[2])) == 1
+
+
+def test_a_client_that_hung_up_costs_one_dropped_reply_and_one_info_line_without_a_traceback(
+    server: McpServer,
+    caplog: pytest.LogCaptureFixture,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    token = server.issue_token("spec-1", "b")
+    with caplog.at_level(logging.INFO, logger="hyperloom.hosted.mcp_server"):
+        drops = _hang_up_before_the_reply(server, token, monkeypatch)
+        assert _text(Client(server).call(token, "whoami")[2])["kind"] == "specialist"
+    assert drops == ["hold"]
+    (record,) = [r for r in caplog.records if "closed the connection" in r.getMessage()]
+    assert record.levelno == logging.INFO and record.exc_info is None
+    assert "hold" in record.getMessage()
+    assert "Traceback" not in capsys.readouterr().err
 
 
 def test_the_calls_of_one_batch_share_the_cursor_and_it_moves_when_the_batch_is_sent(

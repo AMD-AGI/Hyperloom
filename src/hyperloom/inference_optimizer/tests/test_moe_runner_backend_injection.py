@@ -8,14 +8,16 @@ AMD: sglang's own ``auto`` resolution already follows ``SGLANG_USE_AITER``
 correctly on current sglang/ROCm images. What remains is the aiter-only quant
 scheme detection (``moe_runner_requires_aiter``), used elsewhere to strip an
 *inherited* ``--moe-runner-backend`` that would crash such a checkpoint (grid
-variants, baseline retries), and ``materialize_config_with_envs`` never adding
-the flag on its own.
+variants), ``materialize_config_with_envs`` never adding the flag on its own,
+and a baseline launching the backend it was given.
 """
 
 from __future__ import annotations
 
+import asyncio
 import json
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 import yaml
@@ -23,10 +25,10 @@ import yaml
 from hyperloom.inference_optimizer import model_config_utils
 from hyperloom.inference_optimizer import gpu_types
 from hyperloom.inference_optimizer.grid_server_args import remove_moe_runner_backend_arg
+from hyperloom.orchestrator.actions.executors.baseline import BaselineExecutor
 from hyperloom.orchestrator.actions.executors.workload._workload_envs import (
     materialize_config_with_envs,
     LaunchLayer,
-    MaterializeOptions,
 )
 
 from .conftest import write_benchmark_yaml
@@ -236,7 +238,6 @@ def _materialize_envs(
     model: str,
     framework: str = "sglang",
     extra_server_args: str = "",
-    drop_moe_runner_backend: bool = False,
 ) -> dict:
     base = tmp_path / "base.yaml"
     write_benchmark_yaml(base, model=model, framework=framework, benchmark_script=None)
@@ -246,7 +247,6 @@ def _materialize_envs(
         base,
         out,
         launch=LaunchLayer(extra_server_args=extra_server_args),
-        options=MaterializeOptions(drop_moe_runner_backend=drop_moe_runner_backend),
     )
     return yaml.safe_load(materialized.read_text())["benchmark"]["envs"]
 
@@ -271,25 +271,6 @@ def test_materialize_noop_for_quark_mxfp4_moe_on_amd(tmp_path, quark_mxfp4_moe_m
     assert "--moe-runner-backend" not in envs.get("EXTRA_SGLANG_ARGS", "")
 
 
-def test_materialize_drop_flag_is_noop_without_pin(tmp_path, moe_model, monkeypatch):
-    monkeypatch.setenv("GPU_TYPE", _AMD)
-    envs = _materialize_envs(tmp_path, model=moe_model, drop_moe_runner_backend=True)
-    assert "--moe-runner-backend" not in envs.get("EXTRA_SGLANG_ARGS", "")
-
-
-def test_materialize_drop_strips_inherited_backend(tmp_path, moe_model, monkeypatch):
-    monkeypatch.setenv("GPU_TYPE", _AMD)
-    envs = _materialize_envs(
-        tmp_path,
-        model=moe_model,
-        extra_server_args="--moe-runner-backend ck --foo 1",
-        drop_moe_runner_backend=True,
-    )
-    sglang_args = envs.get("EXTRA_SGLANG_ARGS", "")
-    assert "--moe-runner-backend" not in sglang_args
-    assert "--foo 1" in sglang_args
-
-
 def test_materialize_does_not_double_user_backend(tmp_path, moe_model, monkeypatch):
     monkeypatch.setenv("GPU_TYPE", _AMD)
     envs = _materialize_envs(
@@ -303,13 +284,45 @@ def test_materialize_does_not_double_user_backend(tmp_path, moe_model, monkeypat
     assert "triton" not in sglang_args
 
 
+_MISSING_RUNNER_TRACEBACK = (
+    'File ".../quark/schemes/quark_w4a4_mxfp4_moe.py", line 295, in apply_weights\n'
+    "    return self.runner.run(dispatch_output, quant_info)\n"
+    "AttributeError: 'QuarkW4A4MXFp4MoE' object has no attribute 'runner'\n"
+)
+
+
+def test_a_baseline_killed_by_its_pinned_backend_fails_as_launched(tmp_path, quark_mxfp4_moe_model):
+    pinned = "--moe-runner-backend triton"
+    base = tmp_path / "base.yaml"
+    write_benchmark_yaml(base, model=quark_mxfp4_moe_model, framework="sglang", benchmark_script=None)
+    executor = BaselineExecutor(default_config_path=base, session_dir=tmp_path, shared_state=None)
+    launches: list[str] = []
+
+    async def _server_dies(attempt, output_dir):
+        envs = yaml.safe_load(attempt.materialized_config_path.read_text())["benchmark"]["envs"]
+        launches.append(envs["EXTRA_SGLANG_ARGS"])
+        return {"status": "failed", "error_class": "server_init_dead", "error": _MISSING_RUNNER_TRACEBACK}
+
+    executor._run_attempt_rounds = _server_dies  # type: ignore[method-assign]
+    params = {"output_dir": str(tmp_path / "ws"), "model_path": quark_mxfp4_moe_model, "extra_server_args": pinned}
+    task = SimpleNamespace(task_id="t-moe", kind="baseline", params=params)
+
+    result = asyncio.run(executor(SimpleNamespace(task=task, extra={})))
+
+    assert [pinned in args for args in launches] == [True]
+    assert result["status"] == "failed"
+    assert result["error_class"] == "server_init_dead"
+    assert result["error"] == _MISSING_RUNNER_TRACEBACK
+    assert task.params["extra_server_args"] == pinned
+
+
 @pytest.mark.parametrize(
     "args, expected",
     [
         ("--foo 1 --moe-runner-backend triton --bar 2", "--foo 1 --bar 2"),
         ("--foo 1 --moe-runner-backend=triton", "--foo 1"),
         ("--moe-runner-backend aiter", ""),
-        # Value-less flag: strip it rather than let it survive a retry.
+        # A value-less flag is stripped too.
         ("--foo 1 --moe-runner-backend", "--foo 1"),
         ("--moe-runner-backend", ""),
         ("--moe-runner-backend --foo 1", "--foo 1"),

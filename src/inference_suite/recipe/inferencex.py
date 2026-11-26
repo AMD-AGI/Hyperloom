@@ -66,8 +66,9 @@ _BYTES_PER_MIB = 1024 * 1024
 _BYTES_PER_GB = 1_000_000_000
 _RANDOM_RANGE_RATIO = "0.8"
 _THINKING_MODE = "thinking_on"
+_FALSE = "false"
 #: InferenceX's value for a spec-decoding or KV-offloading setting the point leaves off.
-_UNSET = "none"
+UNSET = "none"
 
 #: The client environment variable naming the trace corpus an AgentX replay loads (``infx/bench/agentic/traces.py``).
 AGENTX_TRACE_ENV = "WEKA_LOADER_OVERRIDE"
@@ -97,7 +98,7 @@ class Scenario(str, Enum):
     AGENTIC = "agentic-coding"
 
 
-_SCENARIO_OF = {Workload.FIXED: Scenario.FIXED, Workload.AGENTX: Scenario.AGENTIC}
+SCENARIO_OF = {Workload.FIXED: Scenario.FIXED, Workload.AGENTX: Scenario.AGENTIC}
 
 
 @dataclass(frozen=True)
@@ -133,7 +134,8 @@ class InferencexPoint:
     kv_offloading: str | None
     kv_offload_backend: Mapping[str, Any] | None
     router: Mapping[str, Any] | None
-    total_cpu_dram_gb: int
+    #: ``None`` where InferenceX sizes the offload DRAM at launch instead.
+    total_cpu_dram_gb: int | None
     require_power: bool
 
     @property
@@ -164,13 +166,14 @@ class InferencexPoint:
             "OSL": str(self.osl or 0),
             "RANDOM_RANGE_RATIO": _RANDOM_RANGE_RATIO,
             "THINKING_MODE": _THINKING_MODE,
-            "RUN_EVAL": "false",
-            "EVAL_ONLY": "false",
+            "RUN_EVAL": _FALSE,
+            "EVAL_ONLY": _FALSE,
             "REQUIRE_POWER": "1" if self.require_power else "0",
             "ROUTER_METADATA": json.dumps(self.router) if self.router else "",
             "KV_OFFLOAD_BACKEND_METADATA": json.dumps(self.kv_offload_backend) if self.kv_offload_backend else "",
-            "TOTAL_CPU_DRAM_GB": str(self.total_cpu_dram_gb),
         }
+        if self.total_cpu_dram_gb is not None:
+            environment["TOTAL_CPU_DRAM_GB"] = str(self.total_cpu_dram_gb)
         if agentic:
             environment["KV_OFFLOADING"] = str(self.kv_offloading)
         return {
@@ -183,6 +186,7 @@ class InferencexPoint:
             "PCP_SIZE": str(self.pcp),
             "DP_ATTENTION": str(self.dp_attention).lower(),
             "GPU_COUNT": str(self.gpu_count),
+            "IS_MULTINODE": _FALSE,
         }
 
 
@@ -193,7 +197,7 @@ def _yaml_mapping(bundle: RepoBundle, path: str) -> Mapping[str, Any]:
     return document
 
 
-def _runner_board(runner: str, labels: Mapping[str, Sequence[str]]) -> str:
+def runner_board(runner: str, labels: Mapping[str, Sequence[str]]) -> str:
     """The board a runner label stands for: the label itself, or for a cluster label the one board label whose
     nodes include all of the cluster's."""
     if not runner.startswith(_CLUSTER):
@@ -209,7 +213,7 @@ def _runner_board(runner: str, labels: Mapping[str, Sequence[str]]) -> str:
     return boards[0]
 
 
-def _concurrencies(benchmark: Mapping[str, Any]) -> list[int]:
+def concurrencies(benchmark: Mapping[str, Any]) -> list[int]:
     """``conc-list``, else ``conc-start`` doubled up to ``conc-end``, the last step capped at it."""
     if benchmark.get("conc-list"):
         return list(benchmark["conc-list"])
@@ -225,8 +229,9 @@ def _concurrencies(benchmark: Mapping[str, Any]) -> list[int]:
 
 def _cpu_dram_gb(
     runner: str, block: Mapping[str, Any], benchmark: Mapping[str, Any], runners: Mapping[str, Any]
-) -> int:
-    """The CPU DRAM in GB an AgentX point offloads KV cache to: its GPUs' share of the node's DRAM, 0 without."""
+) -> int | None:
+    """The CPU DRAM in GB an AgentX point offloads KV cache to: its GPUs' share of the node's DRAM, 0 without, and
+    ``None`` when the block names no ``dram-utilization``: InferenceX then sizes it at launch."""
     if benchmark["kv-offloading"] != "dram":
         return 0
     cluster = (
@@ -234,11 +239,13 @@ def _cpu_dram_gb(
     )
     if cluster is None:
         raise RecipeSourceError(f"runner {runner} offloads to CPU DRAM but is no cluster with hardware facts")
-    available = min(cluster["available-cpu-dram-mib"], _MAX_AGENTIC_CPU_DRAM_MIB)
     per_node = cluster["gpus-per-node"]
     gpus = benchmark["tp"] * benchmark.get("pp", 1) * benchmark.get("pcp-size", 1)
     if gpus > per_node:
         raise RecipeSourceError(f"a {gpus}-GPU point of runner {runner} exceeds its {per_node} GPUs per node")
+    if "dram-utilization" not in block:
+        return None
+    available = min(cluster["available-cpu-dram-mib"], _MAX_AGENTIC_CPU_DRAM_MIB)
     share = Decimal(available) * _BYTES_PER_MIB * Decimal(str(block["dram-utilization"])) * gpus / per_node
     return int(share / _BYTES_PER_GB)
 
@@ -271,7 +278,7 @@ def _arm_points(arm: _Arm, runners: Mapping[str, Any]) -> Iterator[InferencexPoi
     fixed = arm.scenario is Scenario.FIXED
     runner = entry["runner"]
     power_from = block if fixed else benchmark
-    for conc in _concurrencies(benchmark):
+    for conc in concurrencies(benchmark):
         yield InferencexPoint(
             entry=arm.entry_name,
             scenario=arm.scenario,
@@ -284,7 +291,7 @@ def _arm_points(arm: _Arm, runners: Mapping[str, Any]) -> Iterator[InferencexPoi
             precision=entry["precision"],
             image=entry["image"],
             runner=runner,
-            board=_runner_board(runner, runners["labels"]),
+            board=runner_board(runner, runners["labels"]),
             recipe=f"{_SINGLE_NODE_RECIPES}/{entry['srt-recipe-dir']}/{benchmark['srt-recipe']}",
             tp=benchmark["tp"],
             ep=benchmark.get("ep") or 1,
@@ -292,7 +299,7 @@ def _arm_points(arm: _Arm, runners: Mapping[str, Any]) -> Iterator[InferencexPoi
             dcp=benchmark.get("dcp-size", 1),
             pcp=benchmark.get("pcp-size", 1),
             dp_attention=bool(benchmark.get("dp-attn") or False),
-            spec_decoding=benchmark.get("spec-decoding", _UNSET),
+            spec_decoding=benchmark.get("spec-decoding", UNSET),
             isl=block["isl"] if fixed else None,
             osl=block["osl"] if fixed else None,
             kv_offloading=None if fixed else benchmark["kv-offloading"],
@@ -388,7 +395,8 @@ _ENGINES = {
 }
 
 
-def _engine_type(recipe: Mapping[str, Any]) -> str:
+def engine_type(recipe: Mapping[str, Any]) -> str:
+    """The engine a srt-slurm recipe runs: its ``engine`` block's type, or ``engine`` itself."""
     engine = recipe.get("engine")
     return str(engine.get("type") if isinstance(engine, Mapping) else engine)
 
@@ -460,7 +468,7 @@ def _atom_tensor_parallel_size(gpus: int, config: Mapping[str, Any]) -> int:
 
 
 def _no_golden_reason(point: InferencexPoint, engine: str, args: Sequence[str]) -> str:
-    if point.spec_decoding == _UNSET:
+    if point.spec_decoding == UNSET:
         return "the launch drafts no tokens"
     if engine == Framework.VLLM and (
         adaptive := adaptive_verification_reason(speculative_config(argv_flag_occurrences(args)))
@@ -521,16 +529,17 @@ def _warnings(point: InferencexPoint, query: LaunchQuery, target: int) -> tuple[
 
 
 def _launch(
-    point: InferencexPoint, query: LaunchQuery, snapshot: InferencexSnapshot, target: int
+    point: InferencexPoint, query: LaunchQuery, snapshot: InferencexSnapshot, target: int, arm_concs: tuple[int, ...]
 ) -> SourceLaunch | str:
-    """The launch ``point`` binds, or why this source cannot reproduce it."""
+    """The launch ``point`` binds, carrying ``arm_concs``, the concurrencies of its arm, or why this source cannot
+    reproduce it."""
     if point.key in snapshot.rejections:
         return f"InferenceX refused it: {snapshot.rejections[point.key]}"
     selection = snapshot.selections.get(point.key)
     if selection is None:
         raise RecipeSourceError(f"the InferenceX snapshot records no selection for {point.key}")
     recipe = _with_overrides(selection.recipe, selection.golden_overrides)
-    engine = _engine_type(recipe)
+    engine = engine_type(recipe)
     unported = _unported(recipe, engine)
     if unported is not None:
         return unported
@@ -564,18 +573,19 @@ def _launch(
         },
         client_env={key: str(value) for key, value in client.items() if key not in _POINT_CLIENT_ENV},
         golden=_golden(point, selection, bundle, engine, command.args),
-        kv_offloading=point.kv_offloading or _UNSET,
+        kv_offloading=point.kv_offloading or UNSET,
         stripped=command.stripped,
         warnings=_warnings(point, query, target),
+        source_concs=arm_concs,
     )
 
 
 def _misfit(point: InferencexPoint, query: LaunchQuery) -> str | None:
     """Why ``point`` cannot serve ``query``, which it already matches on model, framework and board."""
-    if point.scenario is not _SCENARIO_OF[query.workload]:
-        return f"it runs {point.scenario.value}, not {_SCENARIO_OF[query.workload].value}"
+    if point.scenario is not SCENARIO_OF[query.workload]:
+        return f"it runs {point.scenario.value}, not {SCENARIO_OF[query.workload].value}"
     if query.workload is Workload.FIXED:
-        if point.spec_decoding != _UNSET:
+        if point.spec_decoding != UNSET:
             return f"it drafts with {point.spec_decoding}, and a fixed workload runs no speculative decoding"
         if (point.isl, point.osl) != (query.isl, query.osl):
             return f"it runs {point.isl}/{point.osl}, not {query.isl}/{query.osl}"
@@ -611,14 +621,22 @@ def inferencex_model_id(model_id: str, bundle: RepoBundle) -> str | None:
     """
     if "/" in model_id:
         return None
-    named = {
-        model
-        for entry in _yaml_mapping(bundle, MASTER).values()
-        if isinstance(model := entry.get("model"), str)
-        and "/" in model
-        and model.rpartition("/")[2].casefold() == model_id.casefold()
-    }
-    return next(iter(named)) if len(named) == 1 else None
+    named = org_models_named(model_id, [_yaml_mapping(bundle, MASTER)])
+    return named[0] if len(named) == 1 else None
+
+
+def org_models_named(name: str, masters: Sequence[Mapping[str, Any]]) -> list[str]:
+    """The ``org/repo`` models of ``masters`` whose ``repo`` is ``name``, compared without case, sorted."""
+    return sorted(
+        {
+            model
+            for master in masters
+            for entry in master.values()
+            if isinstance(model := entry.get("model"), str)
+            and "/" in model
+            and model.rpartition("/")[2].casefold() == name.casefold()
+        }
+    )
 
 
 def served_points(query: LaunchQuery, bundle: RepoBundle) -> ServedPoints:
@@ -664,7 +682,7 @@ def inferencex_launches(query: LaunchQuery, snapshot: InferencexSnapshot) -> tup
         launch = (
             f"it has no point at concurrency {target} or above"
             if point is None
-            else _launch(point, query, snapshot, target)
+            else _launch(point, query, snapshot, target, tuple(sorted({each.conc for each in points})))
         )
         if isinstance(launch, str):
             reasons[arm_key] = launch
@@ -682,13 +700,19 @@ __all__ = [
     "MASTER",
     "PROJECT",
     "RUNNERS",
+    "SCENARIO_OF",
+    "UNSET",
     "InferencexPoint",
     "Scenario",
     "ServedPoints",
     "agentx_trace",
+    "concurrencies",
+    "engine_type",
     "inferencex_launches",
     "inferencex_model_id",
     "model_prefixes",
+    "org_models_named",
+    "runner_board",
     "served_points",
     "srtctl_cli_args",
 ]

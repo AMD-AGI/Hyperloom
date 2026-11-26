@@ -3,11 +3,12 @@
 
 """Public names for main's refusals of a fake gain, so the multi-branch toolbox refuses the same requests.
 
-Main refuses three gains that a measurement can show without the candidate being better: a context-copying
-speculative draft on a synthetic benchmark, a change of a draft whose acceptance length is simulated, and an AgentX
-baseline served with the prefix cache off. Its flow does that in the explore and baseline executors, and refuses the
-context-copying draft in the integrate bench and the PRELUDE warm replay too; a test launched through
-``hyperloom.measure`` never reaches them. This module re-exports the checks without copying their logic.
+Main refuses four gains that a measurement can show without the candidate being better: a context-copying
+speculative draft on a synthetic benchmark, a simulated acceptance in place of a draft the base verifies, a change of a
+draft whose acceptance length is simulated, and an AgentX baseline served with the prefix cache off. Its flow does that
+in the explore and baseline executors, and refuses the context-copying draft in the integrate bench and the PRELUDE
+warm replay too; a test launched through ``hyperloom.measure`` never reaches them. This module re-exports the checks
+without copying their logic.
 
 ``FAKE_GAINS`` is the catalog of the known fake gains. The rule: each newly found fake gain lands as a check, a row
 here and a test together; the test sends a minimal example through the real enforcement point named in the row.
@@ -28,6 +29,7 @@ from hyperloom.orchestrator.actions.executors import (
     RoundFolder,
     SpeculativeDecodingPinnedError,
     context_copy_refusal,
+    declared_acceptance_reason,
     is_round_folder,
     refuse_cacheless_agentx_baseline,
     refuse_unpinned_speculative_change,
@@ -50,6 +52,7 @@ __all__ = [
     "RoundUnreadable",
     "SPECULATIVE_DECODING_PINNED",
     "baseline_prefix_cache_refusal",
+    "declared_acceptance_refusal",
     "launch_context_copy_refusal",
     "pinned_speculative_refusal",
 ]
@@ -62,6 +65,12 @@ def _argv(launch: LaunchConfig) -> tuple[str, dict[str, Any]]:
 def launch_context_copy_refusal(base: LaunchConfig, candidate: LaunchConfig) -> str:
     """Why ``candidate`` may not run on a synthetic (InferenceX) benchmark, or ``""``; main's #1904 check."""
     return context_copy_refusal(*_argv(base), *_argv(candidate))
+
+
+def declared_acceptance_refusal(base: LaunchConfig, candidate: LaunchConfig) -> str:
+    """Why ``candidate`` may not simulate the acceptance of a draft its base verifies, or ``""``; the half of main's
+    #1885 that holds on every workload."""
+    return declared_acceptance_reason(*_argv(base), *_argv(candidate)) or ""
 
 
 def pinned_speculative_refusal(base: LaunchConfig, candidate: LaunchConfig) -> str:
@@ -129,20 +138,29 @@ class FakeGain:
     where: str  # "acceptance" (before anything launches) or "executor" (the round that ran)
 
 
+_ACCEPTANCE = "acceptance"
+
 FAKE_GAINS = (
     FakeGain(
         name="context_copy_draft_on_synthetic",
         shows_as="A speculative draft that copies the context accepts nearly every token of a synthetic benchmark.",
         refusal_code=CONTEXT_COPY_REFUSAL,
         check=launch_context_copy_refusal,
-        where="acceptance",
+        where=_ACCEPTANCE,
+    ),
+    FakeGain(
+        name="declared_acceptance_over_verified_draft",
+        shows_as="Simulating the acceptance of a draft the parent verifies reports a declared length, not a measured one.",
+        refusal_code=SPECULATIVE_DECODING_PINNED,
+        check=declared_acceptance_refusal,
+        where=_ACCEPTANCE,
     ),
     FakeGain(
         name=SPECULATIVE_DECODING_PINNED,
         shows_as="Changing a draft whose acceptance length the parent simulates moves the number without a real draft.",
         refusal_code=SPECULATIVE_DECODING_PINNED,
         check=pinned_speculative_refusal,
-        where="acceptance",
+        where=_ACCEPTANCE,
     ),
     FakeGain(
         name="agentx_baseline_prefix_cache_off",

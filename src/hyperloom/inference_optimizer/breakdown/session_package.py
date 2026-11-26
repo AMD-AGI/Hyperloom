@@ -3,10 +3,10 @@
 
 """Bundle a session's consumer-facing artifacts into a single zip under the destination root.
 
-The root is ``HYPERLOOM_SESSION_PACKAGE_DEST``, ``/workspace`` when unset, so the Claw sandbox sync picks the zip up.  A
-hosted run (``hyperloom hosted run``) sets it to ``<session dir>/archive``, on the shared storage, whatever the host passed.
+The root is ``HYPERLOOM_SESSION_PACKAGE_DEST``, else the session's own archive (``<session dir>/archive``), on the storage
+the session is on. A deployment that collects packages elsewhere names that place in the environment.
 
-A root with the setgid bit (the hosted archive, ``2770``) is one the accounts of one group write in turn: the directories
+A root with the setgid bit (a group-shared archive, ``2770``) is one the accounts of one group write in turn: the directories
 made below it get its mode, and every file is a new one renamed into place with that mode less the execute bits, so the
 next account replaces it, never opens it (:mod:`hyperloom_common.shared_storage`).
 """
@@ -48,14 +48,12 @@ from inference_suite.contracts.layout import (
 )
 
 from ..session.optimization_journal import JOURNAL_FILENAME
-from ..session.paths import PRIVATE_SESSION_SUBDIRS, is_path_within
+from ..session.paths import PRIVATE_SESSION_SUBDIRS, archive_root, is_path_within
 from ..session.session_paths import BRINGUP_SEGMENT, ENABLEMENT_SEGMENT
 
 log = logging.getLogger(__name__)
 
-# Default destination root.
 ENV_PACKAGE_DEST_ROOT = "HYPERLOOM_SESSION_PACKAGE_DEST"
-DEFAULT_DEST_ROOT = Path("/workspace")
 
 # Also lay the curated files down loose (uncompressed, relative tree) under the dest root so a consumer can fetch one
 # file without unzipping.
@@ -154,10 +152,10 @@ _MAX_TOTAL_BYTES = 256 * 1024 * 1024  # 256 MB
 _MAX_RESERVED_BYTES = 64 * 1024 * 1024  # 64 MB
 
 
-def _dest_root() -> Path:
-    """Resolve the destination root for session packages."""
+def _dest_root(session_dir: Path) -> Path:
+    """The destination root of ``session_dir``'s package: ``HYPERLOOM_SESSION_PACKAGE_DEST``, else the session's archive."""
     override = (os.environ.get(ENV_PACKAGE_DEST_ROOT) or "").strip()
-    return Path(override) if override else DEFAULT_DEST_ROOT
+    return Path(override) if override else archive_root(session_dir)
 
 
 def _loose_enabled() -> bool:
@@ -193,7 +191,7 @@ def _exported_state_bytes(path: Path) -> bytes:
 
 
 def _group_mode(root: Path) -> int | None:
-    """The mode asked of what is made below a destination root with the setgid bit (the hosted archive is ``2770``):
+    """The mode asked of what is made below a destination root with the setgid bit (a group-shared archive, ``2770``):
     the root's own, never wider than the shared modes (``2775``, so never writable by others); ``None`` for a root
     without it, which is written as one account's. Whether a mode asked is given or masked by the umask is
     :mod:`hyperloom_common.shared_storage`'s to decide (:func:`~hyperloom_common.shared_storage.parent_is_shared`),
@@ -633,7 +631,7 @@ def package_session_artifacts(
     *,
     session_id: str = "",
 ) -> Path | None:
-    """Bundle curated artifacts of ``session_dir`` into one zip under the dest root (default ``/workspace/<PACKAGE_SUBDIR>/``)."""
+    """Bundle curated artifacts of ``session_dir`` into one zip under the dest root (default ``<session_dir>/archive``)."""
     sd = Path(session_dir).resolve()
     if not sd.is_dir():
         log.warning("session package skipped: session_dir not a dir: %s", sd)
@@ -656,7 +654,7 @@ def package_session_artifacts(
         reserved_overflow=reserved_overflow,
     )
 
-    root = _dest_root()
+    root = _dest_root(sd)
     shared = _group_mode(root)
     out_dir = root / PACKAGE_SUBDIR
     _make_dirs(out_dir, shared)

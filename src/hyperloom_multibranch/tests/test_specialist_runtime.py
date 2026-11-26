@@ -26,7 +26,7 @@ from hyperloom_multibranch.blackboard.tests.factories import delta, intent
 from hyperloom_multibranch.rulegate.baseline import write_inferencex_baseline
 from hyperloom_multibranch.rulegate.gate import RuleGate
 from hyperloom_multibranch.rulegate.rules import InferenceXRule
-from hyperloom_multibranch.specialist.directions import DIRECTIONS
+from hyperloom_multibranch.specialist.directions import CHECKOUT_DIRECTIONS, DIRECTIONS, direction_name
 from hyperloom_multibranch.contracts.blackboard.exhausted import EXHAUSTED_PREFIX
 from hyperloom_multibranch.specialist.judging import NOTICE, Judging
 import hyperloom_multibranch.specialist.runtime as runtime_module
@@ -135,7 +135,9 @@ class _Session:
         await scheduler.record_lineage(LineageEvent(LineageKind.OPEN, BRANCH, from_commit=start))
         return start
 
-    def runtime(self, runs, *, blackboard=LocalBlackboard, clock=lambda: 0.0, claim_ttl=600.0) -> SpecialistRuntime:
+    def runtime(
+        self, runs, *, blackboard=LocalBlackboard, clock=lambda: 0.0, claim_ttl=600.0, directions=DIRECTIONS
+    ) -> SpecialistRuntime:
         def blackboard_for(branch: str) -> LocalBlackboard:
             return blackboard(self.root, Writer(Role.SPECIALIST_RUNTIME, branch, branch))
 
@@ -143,7 +145,7 @@ class _Session:
             self.gate, self.toolbox, InferenceXRule(self.reader, 64), LocalBlobStore(self.root.parent / "blobs")
         )
         pacing = RuntimePacing(poll_seconds=0.01, claim_ttl_seconds=claim_ttl, clock=clock)
-        return SpecialistRuntime(blackboard_for, judging, runs, pacing=pacing)
+        return SpecialistRuntime(blackboard_for, judging, runs, pacing=pacing, directions=directions)
 
     async def claim(self, key) -> ClaimStatus:
         (found,) = [claim for claim in (await self.reader.snapshot()).claims if claim.key == key]
@@ -236,6 +238,29 @@ async def test_branches_started_with_no_direction_take_the_session_s_directions_
     directions = {run.start.branch: run.start.task.direction for run in runs.started}
     assert [directions[name] for name in handed] == [*DIRECTIONS, DIRECTIONS[0]]
     assert (directions["user"], directions["repair"], directions["agent"]) == ("the user's own", "", "")
+
+
+async def test_an_exhausted_record_naming_one_of_a_session_s_own_directions_closes_it_on_that_head(session, caplog):
+    runs = _Runs()
+    runtime = session.runtime(runs, directions=CHECKOUT_DIRECTIONS)
+    head = await session.repo.head(BRANCH)
+    named = f"{CHECKOUT_DIRECTIONS[1].split(':')[0].lower()} (every open one read)"
+    record = {"direction": named, "head": head, "tried": ["r1"], "why": "all_tested_or_claimed"}
+    record |= {"detail": "no open pull request touches a path this launch runs", "reopen_if": "the head moves"}
+    other = {**record, "direction": DIRECTIONS[1].split(":")[0]}
+
+    await runtime.start(BRANCH, head)
+    blackboard = LocalBlackboard(session.root, Writer(Role.SPECIALIST_RUNTIME, BRANCH, BRANCH))
+    for written in (record, other):
+        entry = BranchLogEntry(BRANCH, BranchLogType.RESULT, EXHAUSTED_PREFIX + json.dumps(written))
+        await blackboard.append_branch_log(entry)
+    await runtime.start("next", head)
+    await _until(lambda: _true(len(runs.started) == 2), "the specialists to start")
+    for name in (BRANCH, "next"):
+        await runtime.stop(name)
+
+    assert [run.start.task.direction for run in runs.started] == [CHECKOUT_DIRECTIONS[0], CHECKOUT_DIRECTIONS[2]]
+    assert f"names none of the session's directions: {other['direction']!r}" in caplog.text
 
 
 async def test_a_direction_no_branch_held_goes_first_even_after_earlier_branches_stopped(session):
@@ -919,3 +944,25 @@ async def test_a_refused_retest_of_a_finishing_branch_is_noted_and_its_judge_end
     notices = await judged.notices()
     assert f"{NOTICE} the retest of {first} was refused ({stopped}); nothing was judged" in notices
     assert not any("judging this branch failed" in notice for notice in notices)
+
+
+async def test_the_undealt_directions_are_those_no_branch_has_held_that_are_open_on_the_commit(session):
+    runs = _Runs()
+    runtime = session.runtime(runs)
+    head = await session.repo.head(BRANCH)
+    _, second, third, *rest = [direction_name(direction) for direction in DIRECTIONS]
+
+    await runtime.start(BRANCH, head)
+    assert await runtime.undealt_directions(head) == (second, third, *rest)
+
+    record = {"direction": third.lower(), "head": head, "tried": ["r1"], "why": "all_tested_or_claimed"}
+    record |= {"detail": "nothing of it is left on this head", "reopen_if": "the head moves"}
+    blackboard = LocalBlackboard(session.root, Writer(Role.SPECIALIST_RUNTIME, BRANCH, BRANCH))
+    entry = BranchLogEntry(BRANCH, BranchLogType.RESULT, EXHAUSTED_PREFIX + json.dumps(record))
+    await blackboard.append_branch_log(entry)
+    assert await runtime.undealt_directions(head) == (second, *rest)
+    assert await runtime.undealt_directions("a-later-head") == (second, third, *rest)
+
+    await _until(lambda: _true(len(runs.started) == 1), "the specialist to start")
+    await runtime.stop(BRANCH)
+    assert await runtime.undealt_directions(head) == (second, *rest)

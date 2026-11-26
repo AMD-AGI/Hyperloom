@@ -6,7 +6,7 @@
 from __future__ import annotations
 
 from copy import deepcopy
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 
 from pathlib import Path
 from typing import Any
@@ -48,7 +48,7 @@ def test_phase_names_are_monotonic():
         "ENABLEMENT",
         "FRAMEWORK_AGENT",
         "KERNEL_AGENT",
-        "SWEEP",
+        "CYCLE_END",
         "CLOSE",
     )
     for i, name in enumerate(phase_state.PHASE_NAMES):
@@ -74,8 +74,7 @@ def test_allowed_actions_disjoint_phases():
     for phase in phase_state.PHASE_NAMES:
         assert "kernel_opt" not in phase_state.PHASE_ALLOWED_ACTIONS[phase]
         assert "gemm_tuning" not in phase_state.PHASE_ALLOWED_ACTIONS[phase]
-    assert "conc_sweep" in phase_state.PHASE_ALLOWED_ACTIONS["SWEEP"]
-    assert "conc_sweep" not in phase_state.PHASE_ALLOWED_ACTIONS["FRAMEWORK_AGENT"]
+    assert phase_state.PHASE_ALLOWED_ACTIONS["CYCLE_END"] == frozenset()
     assert "report" in phase_state.PHASE_ALLOWED_ACTIONS["CLOSE"]
 
 
@@ -87,7 +86,7 @@ def test_stop_reason_vocab_includes_v06_and_v08():
         "baseline_failed",
         "emergency",
         "coordinator_exception",
-        "sweep_failed",
+        "cycle_end_done",
         "baseline_arg_error",
     ):
         assert is_valid_stop_reason(reason), reason
@@ -658,7 +657,7 @@ def test_compute_next_phase_no_kernel_skips_kernel_phase():
     out = phase_transitions.compute_next_phase(state, flags=phase_predicates.PhaseFlags(kernel_enabled=False))
     assert out is not None
     next_phase, reason, evidence = out
-    assert next_phase == "SWEEP"
+    assert next_phase == "CYCLE_END"
     assert reason == "optimize_no_more_leverage"
     assert evidence["kernel_skipped"] is True
 
@@ -757,7 +756,7 @@ def test_compute_next_phase_terminal_overrides_phase():
 
 
 class TestAMetTargetDoesNotOutrankTheGuards:
-    """The forward jump to SWEEP runs after the terminal checks, never before."""
+    """The forward jump to CYCLE_END runs after the terminal checks, never before."""
 
     def _state(self, phase: str, **kw) -> SharedState:
         base = dict(
@@ -797,51 +796,19 @@ class TestAMetTargetDoesNotOutrankTheGuards:
         assert out[0] == phase_state.PHASE_CLOSE and out[1] == "time_exhausted"
 
     def test_prelude_keeps_its_own_guards(self):
-        """A baseline PRELUDE has not accepted is not one SWEEP can measure."""
+        """A baseline PRELUDE has not accepted is not one CYCLE_END can validate."""
         out = phase_transitions.compute_next_phase(
             self._state(phase_state.PHASE_PRELUDE), flags=phase_predicates.PhaseFlags(kernel_enabled=True)
         )
-        assert out is None or out[0] != phase_state.PHASE_SWEEP
+        assert out is None or out[0] != phase_state.PHASE_CYCLE_END
 
     def test_a_later_phase_does_jump(self):
         out = phase_transitions.compute_next_phase(
             self._state(phase_state.PHASE_KERNEL_AGENT), flags=phase_predicates.PhaseFlags(kernel_enabled=True)
         )
         assert out is not None
-        assert out[0] == phase_state.PHASE_SWEEP and out[1] == "target_reached"
+        assert out[0] == phase_state.PHASE_CYCLE_END and out[1] == "target_reached"
         assert out[2].get("terminal") is not True
-
-
-def test_a_met_target_renames_a_budget_limited_sweep_exit():
-    """``sweep_budget_exhausted`` is outside STOP_REASON_VOCAB, so CLOSE would recover it as ``time_exhausted`` -- a met target reported as a timeout."""
-    now = 1_800_000_000.0
-    started = datetime.fromtimestamp(now, tz=timezone.utc) - timedelta(hours=2)
-    state = SharedState(
-        phase=phase_state.PHASE_SWEEP,
-        phase_started_unix=started.timestamp(),
-        start_ts=started.isoformat(),
-        max_minutes=60,
-        phase_budget_pct={phase_state.PHASE_SWEEP: 0.5},
-        stop_reason="",
-        closing_phase=False,
-        target_reached_at="2026-09-04T00:00:00+00:00",
-        last_conc_sweep={},
-        params_no_promote_streak=0,
-        explore_search={},
-        optimization_stack=[],
-        macro_cycle=0,
-        saturated_directions={},
-        cumulative_gain_validated=0.0,
-        gain_at_cycle_start=0.0,
-        no_gain_cycle_streak=0,
-        resumed_ts="",
-    )
-    out = phase_transitions.compute_next_phase(
-        state, flags=phase_predicates.PhaseFlags(kernel_enabled=True), now_unix=now
-    )
-    assert out is not None
-    assert out[0] == phase_state.PHASE_CLOSE and out[1] == "target_reached"
-    assert out[2].get("terminal") is True
 
 
 def test_shared_state_phase_fields_default_to_empty():
@@ -901,7 +868,7 @@ def test_explore_elapsed_accumulates_completed_and_live_segments():
     phase_state.record_phase_transition(
         s,
         to_phase=phase_state.PHASE_FRAMEWORK_AGENT,
-        reason="sweep_reloop",
+        reason="cycle_reloop",
         evidence={},
         at=phase_state.PhaseClock(ts="2026-05-19T00:03:00+00:00", ts_unix=280.0),
     )
@@ -952,11 +919,8 @@ def test_policy_gate_phase_strict_allows_in_phase_action():
 
 @pytest.fixture
 def coordinator_with_mocks(session_dir):
-    from hyperloom.orchestrator.roles import (
-        MockBackend,
-        MockCriticBackend,
-        ScriptedPlan,
-    )
+    from hyperloom.orchestrator.roles import MockCriticBackend
+    from hyperloom.orchestrator.tests.mock_backend import MockBackend, ScriptedPlan
     from hyperloom.orchestrator.loop.coordinator import Coordinator
 
     silent = ScriptedPlan(
@@ -1033,7 +997,8 @@ _NO_KERNEL_CLI_BUDGET_PCT = {phase_state.PHASE_FRAMEWORK_AGENT: 0.2}
 @pytest.fixture
 def no_kernel_coordinator(session_dir):
     """A real Coordinator on an unbounded ``--no-kernel`` session, so FRAMEWORK owns a flat share of the cycle."""
-    from hyperloom.orchestrator.roles import MockBackend, MockCriticBackend, ScriptedPlan
+    from hyperloom.orchestrator.roles import MockCriticBackend
+    from hyperloom.orchestrator.tests.mock_backend import MockBackend, ScriptedPlan
     from hyperloom.orchestrator.loop.coordinator import Coordinator, CoordinatorSettings
 
     SharedState(

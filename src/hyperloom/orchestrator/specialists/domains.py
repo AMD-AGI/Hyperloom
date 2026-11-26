@@ -298,7 +298,7 @@ def gap_backfilled_domain(params: Mapping[str, Any], find_gap: Callable[[str], M
     named = str(params.get("domain") or "").strip()
     if named:
         return named
-    gap_cid = str(params.get("gap_canonical_id") or "").strip() or str(params.get("gap") or "").strip()
+    gap_cid = str(params.get("gap_canonical_id") or "").strip()
     gap = find_gap(gap_cid) if gap_cid else None
     return str((gap or {}).get("domain_hint") or "").strip()
 

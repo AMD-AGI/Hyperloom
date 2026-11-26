@@ -12,7 +12,7 @@ from pathlib import Path
 import pytest
 
 import hyperloom.inference_optimizer.cli as ocli
-from hyperloom.inference_optimizer.cli import launch_shape, model_catalog, session_resume, session_setup
+from hyperloom.inference_optimizer.cli import session_setup
 from hyperloom.inference_optimizer.breakdown.recorder.assembler import assemble_parts
 from hyperloom.inference_optimizer.breakdown.recorder.outcome_stage import record_stage_reached
 from hyperloom.inference_optimizer.session.lock import SessionLock
@@ -80,17 +80,6 @@ def test_completed_close_still_gets_its_close_out_package(tmp_path: Path, monkey
     ocli._write_cli_terminal_artifacts(tmp_path, state, "signal")
 
     assert order == ["final_json", "package"]
-
-
-def test_optimize_has_no_supervisor_launcher_hooks() -> None:
-    import inspect
-
-    source = "".join(
-        inspect.getsource(module) for module in (ocli, model_catalog, launch_shape, session_setup, session_resume)
-    )
-    assert "spawn_supervisor" not in source
-    assert "stop_supervisor" not in source
-    assert "orchestrator.supervisor" not in source
 
 
 @pytest.mark.usefixtures("process_environ")

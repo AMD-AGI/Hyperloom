@@ -17,6 +17,7 @@ if TYPE_CHECKING:
 
     from ...enablement.runtime.stack_actions import EnablementStackAction, ProvisionResult
     from ...state.shared_state import SharedState
+    from .candidate_builds import TreeBuild
 
 
 @dataclass(slots=True)
@@ -25,6 +26,8 @@ class IntegrateAttempt:
 
     task_id: str
     phase_deadline: Deadline | None = None
+    #: Run inside the caller's task, so no registry row of its own ever records how this attempt ended.
+    covered_step: bool = False
     specialist_task_id: str = ""
     specialist_workspace: Path | None = None
     shared_state: SharedState | None = None
@@ -49,6 +52,8 @@ class IntegrateAttempt:
     setup_commands_applied: list[str] = field(default_factory=list)
     switch_manifest: list[dict[str, Any]] = field(default_factory=list)
     pending: dict[str, Any] = field(default_factory=dict)
+    #: The build of the framework server from the applied tree, in a session that builds it from source.
+    native_build: TreeBuild | None = None
 
     def drop_localization(self) -> None:
         """Forget the localization, so its manifest is not recorded for a change that was never applied."""
@@ -77,7 +82,8 @@ class IntegrateAttempt:
         return self.provision_result.runtime.source_root
 
     def benchmark_params(self, params: dict[str, Any]) -> dict[str, Any]:
-        """Bind the measured launch to this attempt's acquired runtime and applied source."""
+        """Bind the measured launch to this attempt's acquired runtime and applied source, and its server to the build
+        of the applied tree, first on its ``PATH``."""
         result = {
             **params,
             "source_patches": [
@@ -86,6 +92,10 @@ class IntegrateAttempt:
         }
         if self.provision_result is not None and self.provision_result.ok:
             result["runtime_override"] = self.provision_result.runtime.to_runtime_override()
+        built = self.native_build.bin if self.native_build is not None else None
+        if built is not None:
+            # A framework whose server is built from source acquires no runtime, so no ``path_prefix`` is set before.
+            result["runtime_override"] = {**(result.get("runtime_override") or {}), "path_prefix": str(built)}
         return result
 
     def accepted_runtime_records(self) -> dict[str, Any]:

@@ -106,7 +106,7 @@ def test_standard_cli_generates_native_yaml_and_candidate_controls(tmp_path, mon
     assert bench["agentx"]["mode"] == "canonical"
     assert bench["profiler"]["torch_profiler"] == {"enabled": False}
     assert "benchmark_script" not in bench
-    assert args.enable_conc_sweep is False
+    assert args.enable_conc_sweep is True
     assert agentx_enabled()
     assert default_baseline_config() == source
     candidate = materialize_benchmark_config(
@@ -218,7 +218,6 @@ def test_native_resume_does_not_regenerate_missing_snapshot(tmp_path):
         ["--nodes", "2"],
         ["--isl", "1024"],
         ["--osl", "512"],
-        ["--enable-conc-sweep"],
         ["--quantize", "fp8"],
         ["--extra-env", "AIPERF_BIN=/tmp/client"],
         ["--extra-env", "CONC=0", "--extra-env", "ISL=2048"],

@@ -20,7 +20,7 @@ from hyperloom.orchestrator.actions.executors.tests.test_suite_config import (
     _point,
     _settings,
 )
-from inference_suite import LaunchQuery, scriptable_base
+from inference_suite import LaunchQuery, SourceSnapshot, resolve_base, scriptable_base
 from inference_suite.contracts import (
     BaseLaunch,
     ConfigError,
@@ -33,6 +33,8 @@ from inference_suite.contracts import (
     WorkloadKind,
 )
 from inference_suite.frameworks import Framework, FrameworkKind, framework_facts
+from inference_suite.recipe.resolve import UnreadSource
+from inference_suite.recipe.user_file import parse_user_file
 
 
 def _script_base(framework: str, script: str | None = None) -> BaseLaunch:
@@ -119,7 +121,19 @@ def test_a_scriptable_point_on_another_framework_base_is_refused() -> None:
         suite_config(_scriptable_point("xdit"), _base("sglang"), _settings())
 
 
+def _llamacpp_base() -> BaseLaunch:
+    """No recipe source knows llama.cpp, so its base is the operator's script."""
+    user_file = parse_user_file("launch.sh", b"llama-server -ngl 99 -fa on\n", framework="llamacpp")
+    snapshot = SourceSnapshot(None, 1_793_000_000, unread=UnreadSource("InferenceX", "offline"), user_file=user_file)
+    query = LaunchQuery(_MODEL_ID, "llamacpp", "mi355x", Workload.FIXED, (64,), isl=1024, osl=1024, tp=1)
+    base = resolve_base(query, snapshot, gpus=8)
+    assert isinstance(base, BaseLaunch), base
+    return base
+
+
 def _session_point(framework: Framework, tmp_path: Path) -> tuple[dict, BaseLaunch]:
+    if framework is Framework.LLAMACPP:
+        return _point(framework.value, TP="1"), _llamacpp_base()
     if framework_facts(framework).kind is FrameworkKind.SERVING:
         return _point(framework.value), _base(framework.value)
     script = None

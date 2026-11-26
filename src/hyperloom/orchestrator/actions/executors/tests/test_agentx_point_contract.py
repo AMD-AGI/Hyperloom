@@ -58,7 +58,7 @@ def test_yaml_binds_workload_and_is_snapshotted(source, tmp_path):
     args = _build_parser().parse_args(["optimize", "--benchmark-config", str(source)])
     configure_benchmark(args)
     assert (args.framework, str(args.model), args.tp, args.ep, args.conc) == ("sglang", "Qwen/Qwen3-0.6B", 1, 1, 8)
-    assert args.enable_conc_sweep is False
+    assert args.enable_conc_sweep is True
     session = tmp_path / "session"
     session.mkdir()
     bind_benchmark(session, args)
@@ -161,10 +161,10 @@ def test_pre_baseline_candidate_carries_operator_server_args(source, tmp_path, m
     assert prepare_grid_benchmark_config(base, tmp_path / "next") == base
 
 
+@pytest.mark.parametrize("option", ["--cuda-graph-max-bs", "-tp"])
 @pytest.mark.parametrize("appended", [True, False])
-def test_grid_ablation_removes_the_option_from_its_owning_layer(source, tmp_path, appended):
+def test_grid_ablation_removes_the_option_from_its_owning_layer(source, tmp_path, appended, option):
     """An option the accepted layer appends is dropped from it; any other is left for the base to remove."""
-    option = "--cuda-graph-max-bs"
     base = materialize_benchmark_config(source, tmp_path / "base")
     candidate = _build_variant_yaml(
         GridRecipe(base_yaml_path=base, base=LaunchLayer(extra_server_args=f"{option}=256" if appended else "")),

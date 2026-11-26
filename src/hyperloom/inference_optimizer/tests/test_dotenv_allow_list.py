@@ -121,6 +121,12 @@ def test_the_shell_copy_of_what_a_shared_dotenv_lends_equals_preflights():
     assert not [value for values in lent.values() for value in values if not re.fullmatch(r"[a-z0-9-]+", value)]
 
 
+def test_a_dotenv_names_the_prompt_dataset_but_no_request_count():
+    """A round's request count follows from its dataset or its concurrency, never from the environment."""
+    assert env_safety.is_allowed_dotenv_key("DATASET_PATH")
+    assert not env_safety.is_allowed_dotenv_key("NUM_PROMPTS")
+
+
 def _candidates() -> list[str]:
     names = {
         *env_safety.DOTENV_EXACT_ALLOWLIST,

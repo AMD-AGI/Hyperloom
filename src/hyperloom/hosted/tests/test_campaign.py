@@ -11,13 +11,12 @@ import jsonschema
 import pytest
 
 from hyperloom.hosted import campaign
-from hyperloom.hosted.campaign import CampaignError, Kind, optimize_args, parse_campaign
-from hyperloom.inference_optimizer.cli.parser import _build_parser
+from hyperloom.hosted.campaign import CampaignError, Kind, parse_campaign
 
 FULL = {
     "schema": "hyperloom.campaign-spec/v1",
     "name": "qwen3-8b-mi355x",
-    "flow": "single",
+    "flow": "multibranch",
     "multibranch": {"anything": ["goes", 1, None]},
     "model": {"path": "/shared/models/Qwen3-8B"},
     "framework": {"name": "sglang", "image": "registry.example/sglang:v0.5.4-rocm"},
@@ -42,6 +41,7 @@ MINIMAL = {
     "hardware": {"gpu_type": "MI300X", "tp": 1},
     "budget": {"max_hours": 1},
     "placement": {"profile": "hosted-gpu"},
+    "multibranch": {"workload": "inferencex"},
 }
 
 
@@ -60,7 +60,7 @@ def _with(base, path, value):
 
 _DELETE = object()
 #: A multibranch spec measured on the application container's own cards.
-LOCAL_MULTIBRANCH = _with(_with(MINIMAL, "flow", "multibranch"), "placement.measurement", "local")
+LOCAL_MULTIBRANCH = _with(MINIMAL, "placement.measurement", "local")
 
 # (document, the message the refusal must carry)
 REFUSALS = [
@@ -96,12 +96,13 @@ REFUSALS = [
     (_with(MINIMAL, "options", {"enablement": "some"}), "options.enablement must be one of 'all'"),
     (_with(MINIMAL, "placement.profile", _DELETE), "placement.profile is required"),
     (_with(MINIMAL, "placement.profile", "local"), "placement.profile must be one of 'hosted-gpu', 'hosted-cpu'"),
-    (_with(MINIMAL, "placement.measurement", "hosted"), "placement.measurement must be 'local' for flow 'single'"),
     (_with(MINIMAL, "placement.max_parallel_tests", 0), "placement.max_parallel_tests must be an integer >= 1"),
-    (_with(MINIMAL, "flow", "mesh"), "flow must be one of 'single', 'multibranch'"),
+    (_with(MINIMAL, "flow", "mesh"), "flow must be one of 'multibranch', got 'mesh'"),
+    (_with(MINIMAL, "flow", "single"), "flow 'single' is retired; leave flow out or set it to 'multibranch'"),
+    (_with(MINIMAL, "multibranch", _DELETE), campaign.RETIRED_DEFAULT),
     (
         _with(LOCAL_MULTIBRANCH, "placement.profile", "hosted-cpu"),
-        "placement.measurement 'local' measures on the application container's own cards for flow 'multibranch':"
+        "placement.measurement 'local' measures on the application container's own cards:"
         " placement.profile must be 'hosted-gpu', got 'hosted-cpu'",
     ),
     (_with(MINIMAL, "source", {"kind": "bot"}), "source.kind must be one of 'user', 'ci'"),
@@ -164,16 +165,36 @@ def test_the_platform_only_placement_fields_are_not_part_of_the_spec():
     assert not {name for name in names if name.split(".")[-1] in gone}
 
 
-def test_defaults_follow_the_flow():
-    assert (parse_campaign(MINIMAL).flow, parse_campaign(MINIMAL).measurement) == ("single", "local")
-    multibranch = parse_campaign({**MINIMAL, "flow": "multibranch"})
-    assert (multibranch.measurement, multibranch.max_parallel_tests) == ("hosted", 8)
+def test_a_spec_without_a_flow_is_a_multibranch_one_measured_hosted():
+    spec = parse_campaign(MINIMAL)
+    assert (spec.measurement, spec.max_parallel_tests) == ("hosted", 8)
+    assert parse_campaign({**MINIMAL, "flow": "multibranch"}) == spec
+
+
+def test_the_retired_single_flow_is_refused_once_naming_why():
+    with pytest.raises(CampaignError) as refused:
+        parse_campaign({**MINIMAL, "flow": "single"})
+
+    assert refused.value.problems == ("flow 'single' is retired; leave flow out or set it to 'multibranch'",)
+
+
+def test_an_unchanged_single_spec_without_flow_or_multibranch_is_refused_once_naming_the_retired_flow():
+    doc = _with(MINIMAL, "multibranch", _DELETE)
+    with pytest.raises(CampaignError) as refused:
+        parse_campaign(doc)
+
+    assert refused.value.problems == (
+        "a spec with neither flow nor multibranch ran the single flow, which is retired;"
+        " set flow to 'multibranch' and add a multibranch section with workload, and give workload.conc and"
+        " workload.precision",
+    )
+    assert parse_campaign({**doc, "flow": "multibranch"}).multibranch is None
 
 
 def test_a_multibranch_spec_measures_on_the_application_containers_own_cards_when_it_has_them():
     spec = parse_campaign(LOCAL_MULTIBRANCH)
 
-    assert (spec.flow, spec.measurement, spec.profile) == ("multibranch", "local", "hosted-gpu")
+    assert (spec.measurement, spec.profile) == ("local", "hosted-gpu")
 
 
 def test_a_multibranch_spec_without_a_profile_is_refused_once_for_the_profile():
@@ -187,54 +208,9 @@ def test_an_integer_written_as_a_float_is_an_integer():
     assert parse_campaign(_with(MINIMAL, "hardware.tp", 4.0)).tp == 4
 
 
-def test_the_budget_limits_that_optimize_does_not_enforce_are_kept_not_mapped():
+def test_the_budget_limits_are_kept():
     spec = parse_campaign(FULL)
     assert (spec.max_gpu_hours, spec.max_llm_usd) == (0, 12.5)
-    assert not [arg for arg in optimize_args(spec) if "gpu-hours" in arg or "llm" in arg]
-
-
-# -- the mapping to `optimize` ------------------------------------------------------------------------------------
-def test_the_mapping_reaches_the_real_parser():
-    argv = optimize_args(parse_campaign(FULL), session_dir=None)
-    parsed = _build_parser().parse_args(argv)
-    assert (str(parsed.model), parsed.framework, parsed.gpu_type.lower(), parsed.tp, parsed.ep) == (
-        "/shared/models/Qwen3-8B",
-        "sglang",
-        "mi355x",
-        2,
-        1,
-    )
-    assert (parsed.conc, parsed.isl, parsed.osl, parsed.precision) == (64, 1024, 512, "bf16")
-    assert (parsed.target_gain, parsed.max_hours, parsed.enablement, parsed.research_lane_capacity) == (
-        10,
-        8,
-        "launch",
-        3,
-    )
-    assert parsed.server_args == "--mem-fraction-static 0.8"
-    assert parsed.extra_env == ["A=1", "B=x=y"]
-    assert (parsed.no_kernel, parsed.no_framework_agent) == (True, False)
-
-
-def test_a_value_that_looks_like_a_flag_is_bound_to_its_flag():
-    spec = parse_campaign(_with(MINIMAL, "launch", {"server_args": "--tp"}))
-    assert _build_parser().parse_args(optimize_args(spec)).server_args == "--tp"
-
-
-def test_the_minimal_spec_leaves_everything_else_to_optimize():
-    assert optimize_args(parse_campaign(MINIMAL)) == [
-        "optimize",
-        "--model=/m",
-        "--framework=vllm",
-        "--gpu-type=MI300X",
-        "--tp=1",
-        "--max-hours=1",
-    ]
-
-
-def test_the_plug_profile_and_session_dir_are_appended_when_given():
-    argv = optimize_args(parse_campaign(MINIMAL), plug_profile="hosted-gpu", session_dir="/w/m/s")
-    assert argv[-2:] == ["--plug-profile=hosted-gpu", "--session-dir=/w/m/s"]
 
 
 # -- the schema file and the validator say the same thing ---------------------------------------------------------
@@ -306,11 +282,8 @@ def test_the_schema_and_the_validator_agree_on_accepting_and_refusing(doc):
         validator_says = True
     except CampaignError:
         validator_says = False
-    # The cross-field rules (flow against measurement and profile) are not expressed in the schema; the one allowed gap.
+    # The cross-field rule (measurement against profile) is not expressed in the schema; the one allowed gap.
     cross_field = (
-        isinstance(doc, dict)
-        and doc.get("flow") in ("single", "multibranch", None)
-        and not validator_says
-        and schema_says
+        isinstance(doc, dict) and doc.get("flow") in ("multibranch", None) and not validator_says and schema_says
     )
     assert schema_says == validator_says or cross_field

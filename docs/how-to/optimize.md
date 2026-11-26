@@ -55,7 +55,7 @@ Requirements:
 | Field | Meaning | How to choose |
 |-------|---------|---------------|
 | `TP` | Tensor-parallel size — number of GPUs the model is sharded across | Must match the number of GPUs in your server node (for example, `8` for a single 8-GPU MI300X node) |
-| `CONC` | Concurrent requests — baseline benchmark concurrency (`--conc`, default `64`) | Set to your target concurrency. The SWEEP phase separately measures a ladder around it: `256,128,64,32,16,8,4,2` for a synthetic workload. An AgentX session runs one fixed concurrency. Override the ladder with `--conc-sweep-concs`. |
+| `CONC` | Concurrent requests — baseline benchmark concurrency (`--conc`, default `64`) | Set to your target concurrency. An AgentX session runs one fixed concurrency. |
 | `ISL` | Input sequence length — tokens in each request's prompt | Match your production workload; `1024` is a common starting point |
 | `OSL` | Output sequence length — tokens generated per response | Match your production workload; `1024` is a common starting point |
 
@@ -79,7 +79,7 @@ on requested status checks. Recurring checks may use the hosting platform's
 scheduled invocations; no background supervisor or automatic restart is started.
 Logs are useful evidence, but activity alone does not prove useful progress.
 Under the hood the optimizer walks the phase chain
-`PRELUDE → ENABLEMENT → FRAMEWORK_AGENT → KERNEL_AGENT → SWEEP → CLOSE`; see
+`PRELUDE → ENABLEMENT → FRAMEWORK_AGENT → KERNEL_AGENT → CYCLE_END → CLOSE`; see
 [Hyperloom optimization loop](../conceptual/optimization-loop.md) for each phase
 and [benchmark deadlines](../reference/environment-variables.md#benchmark-deadlines-and-lifecycle)
 for the independent benchmark and session limits.
@@ -109,7 +109,7 @@ session and prints nothing about plugs. To choose other implementations of a plu
 
 | Flag | Effect |
 |------|--------|
-| `--plug-profile NAME` | Load a built-in profile (`local`, `hosted-gpu`, `hosted-cpu`). Not `--profile`, which stays the abbreviation of `--profile-osl`. |
+| `--plug-profile NAME` | Load a built-in profile (`local`). Not `--profile`, which stays the abbreviation of `--profile-osl`. |
 | `--manifest PATH` | Lay a JSON manifest over the profile. `$HYPERLOOM_MANIFEST` is the same, from the environment. |
 | `--plug SOCKET=IMPL` | Pick one implementation for one socket (repeatable). |
 | `--plug-config SOCKET.KEY=VALUE` | Set one configuration key (repeatable; a JSON value is read as JSON). |
@@ -195,6 +195,31 @@ For the full schema — useful if you are building a dashboard, reporting
 pipeline, or downstream integration on top of this file — see
 [`session_breakdown.json` integration in Hyperloom](../reference/session-breakdown.md).
 
+## Sweep concurrency after the session
+
+A concurrency sweep runs once the session closes, apart from its time budget
+(on by default; `--no-enable-conc-sweep` turns it off); `hyperloom conc-sweep SESSION_DIR` runs the same sweep by
+hand on a finished session. It runs only when the session kept a validated
+gain, and measures the baseline and the optimized launch, one after the other,
+at every concurrency the session's InferenceX recipe publishes for its workload
+(its TP and EP, and its ISL/OSL or agentic scenario), with the session's own
+`--conc` among them. A base from `--reference-script` has no recipe points:
+give them with `--conc-sweep-concs C1,C2,...`. An AgentX point boots a server
+of its own; a fixed-length workload keeps one server per arm.
+
+The sweep logs its estimated length before it starts, rewrites
+`reports/conc_sweep_summary.json` and `reports/conc_sweep_raw.csv` after every
+point, carrying the summary each time as `conc_sweep_summary` in the session's
+`session_breakdown.json`, and draws `reports/conc_sweep_curve.png` (interactivity against
+throughput per GPU) at the end. Its `status` is `succeeded`, `partial`,
+`failed`, `skipped` (with `skip_reason`) or `cancelled` (SIGINT or SIGTERM;
+the measured points stay). A later run measures only the points not yet
+measured on the same launch of each arm. Multi-node and MLPerf sessions are
+skipped, and so are a session whose server is built from its checkout
+(`checkout_built_server`) and one whose retained overlay cannot load
+(`optimized_overlay_unavailable`). The session package is rebuilt after the
+sweep so it carries the report.
+
 ## Troubleshooting
 
 If a run fails on first launch, see [Troubleshooting Hyperloom](../reference/troubleshooting.md).
@@ -225,7 +250,7 @@ base, and candidate changes sit on top. A flag the installed framework does not
 know is refused, never dropped. Request lengths come from the AgentX trace corpus;
 concurrency stays fixed for the session.
 
-AgentX rejects `--enable-conc-sweep`, `--isl`, `--osl`, `--profile-osl`,
+AgentX rejects `--isl`, `--osl`, `--profile-osl`,
 `--max-model-len`, `--quantize` and `--quantize-scheme`.
 It also rejects multi-node execution and frameworks other than SGLang, vLLM and ATOM.
 An ATOM session takes its base from InferenceX's ATOM agentic entries; ATOM's own catalog serves
@@ -289,6 +314,6 @@ Profiled measurements never replace the unprofiled performance baseline.
 
 `hyperloom optimize --resume-from SESSION_DIR` reuses the archived `benchmark.yaml`
 without requiring the switch or original YAML again. Changing the workload requires
-a new session. Do not combine this entrypoint with CLI ISL/OSL, concurrency sweeps,
+a new session. Do not combine this entrypoint with CLI ISL/OSL,
 quantization or benchmark-script overrides. The independent MLPerf agentic backend
 keeps its existing entrypoint.
