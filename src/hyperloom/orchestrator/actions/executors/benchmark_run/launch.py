@@ -360,7 +360,7 @@ class _BenchmarkLaunchMixin:
                 self._observe_bringup, round_, attempt_index, layout.server_log, ran.report.failure_detail or ""
             )
         RoundFolder.read(layout.root).write_gpu_metrics(round_.output_dir)
-        measurement = extract_benchmark_measurement(None, workspace=layout.root, subprocess_started_unix=started_unix)
+        measurement = extract_benchmark_measurement(layout.root)
         finished = _BenchProcess(
             returncode=0 if ran.report.failed_step is None else 1,
             stdout="",

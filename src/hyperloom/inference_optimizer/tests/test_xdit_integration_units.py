@@ -241,20 +241,6 @@ class TestScriptableMeasurement:
         m = {"framework": "sglang", "output_throughput": 100.0, "completed_requests": None}
         assert br.is_valid_measurement(m) is False
 
-    def test_extract_carries_quality_gate(self):
-        report = {
-            "success": True,
-            "framework": "xdit",
-            "workload_kind": "scriptable",
-            "throughput_unit": "img/s",
-            "quality_gate": {"passed": True},
-            "throughput": {"output_throughput": 0.29, "completed_requests": 25},
-        }
-        m = br.extract_benchmark_measurement(report)
-        assert m["workload_kind"] == "scriptable"
-        assert m["quality_gate"] == {"passed": True}
-        assert m["valid_measurement"] is True
-
 
 class TestExploreGrid:
     @pytest.mark.parametrize(

@@ -567,7 +567,7 @@ async def _grid(run: Run, point: int, name: str, *, watch_boot: bool = True, **l
             grid=[GridVariant(name, unset_envs=run.unset_envs)],
             output_root=Path(call.output_dir),
             recipe=GridRecipe(call.points[point], base=LaunchLayer(extra_envs=envs)),
-            launch=GridLaunch(call.result_dir, **launch),
+            launch=GridLaunch(**launch),
             stop=GridStop(call.session_deadline_sec, checkpoint=call.checkpoint and call.checkpoint.on(name == _TEST)),
         )
         ended = time.time()

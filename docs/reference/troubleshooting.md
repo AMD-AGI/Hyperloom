@@ -395,29 +395,6 @@ runs against your local baseline.
 
 ---
 
-## `result.json` written outside the session dir
-
-**Symptom**: A benchmark "succeeds" but the breakdown shows
-`baseline.output_throughput = null`; logs reference a
-`result.json` written to `--result-dir /tmp/...` outside
-`$USER_DATA_PATH`.
-
-**Cause**: A model-specific InferenceX-native benchmark script
-hardcodes `--result-dir`, bypassing Hyperloom's session-dir pinning.
-
-**Fix**: Set `$INFERENCE_OPTIMIZER_RESCUE_PATHS` to the directories
-the script writes to:
-
-```bash
-export INFERENCE_OPTIMIZER_RESCUE_PATHS="/tmp/inferencex_results:/var/tmp/bench"
-```
-
-The harvest step scans these on each tick and copies any orphaned
-`result.json` into the session dir. See
-[Environment variables](environment-variables.md) — "Framework / source-tree discovery".
-
----
-
 ## How do I tell what's actually happening right now?
 
 Three commands give you a fast situation report:

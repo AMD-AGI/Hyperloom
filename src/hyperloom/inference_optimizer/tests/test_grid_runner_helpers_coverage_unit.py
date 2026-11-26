@@ -18,7 +18,6 @@ from hyperloom.inference_optimizer.grid_server_args import (
 )
 from hyperloom.orchestrator.actions.executors.grid import _grid_runner as gr
 from hyperloom.orchestrator.actions.executors.grid import _capability_probe as cp
-from hyperloom.orchestrator.actions.executors.grid import _round_report as rr
 from hyperloom.orchestrator.actions.executors.grid._grid_variant_filter import ServingStack
 from hyperloom.orchestrator.actions.executors import _benchmark_interpreter as bi
 from hyperloom.orchestrator.actions.executors.workload._benchmark_runtime import apply_runtime_benchmark_overrides
@@ -246,17 +245,6 @@ def test_runtime_overrides_env_ints_and_rocr_autofill(monkeypatch) -> None:
     assert envs["TP"] == 2
     # TP>1 with no explicit ROCR -> auto-filled device list
     assert envs["ROCR_VISIBLE_DEVICES"] == "0,1"
-
-
-# -- _parse_report ---------------------------------------------------------
-def test_parse_report_invalid_json(tmp_path: Path) -> None:
-    (tmp_path / "benchmark_report.json").write_text("{bad", encoding="utf-8")
-    assert rr._parse_report(tmp_path) is None
-
-
-def test_parse_report_non_dict(tmp_path: Path) -> None:
-    (tmp_path / "benchmark_report.json").write_text("[1,2,3]", encoding="utf-8")
-    assert rr._parse_report(tmp_path) is None
 
 
 # -- _build_variant_yaml ---------------------------------------------------

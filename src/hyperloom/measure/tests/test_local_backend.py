@@ -150,14 +150,14 @@ def _run(call: TestCall):
 
 
 def test_a_single_point_test_is_one_run_grid_call_with_one_variant(grid, unheld, tmp_path):
-    call = _call(tmp_path, result_dir="/res", session_deadline_sec=123.0)
+    call = _call(tmp_path, session_deadline_sec=123.0)
 
     outcome = _run(call)
 
     (kwargs,) = grid.calls
     assert [v.name for v in kwargs["grid"]] == ["test"]
     assert kwargs["output_root"] == tmp_path / "out"
-    assert (kwargs["launch"].result_dir, kwargs["stop"].session_deadline_sec) == ("/res", 123.0)
+    assert kwargs["stop"].session_deadline_sec == 123.0
     assert kwargs["launch"].server_lifecycle is None
     (config,) = grid.configs
     assert config == yaml.safe_load(call.points[0].read_text()), "the point is run as it is"
@@ -1315,9 +1315,7 @@ def test_a_sweep_that_restarts_per_level_runs_every_level_from_its_own_point(mon
 @pytest.mark.parametrize("levels", [(8, 4, 2), (8,)], ids=["levels", "one-level"])
 def test_a_boot_that_fails_is_the_sweeps_failed_row_and_the_launch_is_not_booted_again(grid, server, tmp_path, levels):
     """A level's CONC never reaches the server's launch: a lower level, or a server per level, boots the same one."""
-    grid.answers["c8"] = grid.result(
-        "c8", status="failed", returncode=1, error_class="no_benchmark_workspace", error="oom"
-    )
+    grid.answers["c8"] = grid.result("c8", status="failed", returncode=1, error_class="server_init_dead", error="oom")
 
     outcome = _run(_sweep_call(tmp_path, *levels))
 

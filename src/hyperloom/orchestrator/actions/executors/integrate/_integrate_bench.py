@@ -30,7 +30,6 @@ from .._accuracy_gate import (
 )
 from ..grid._grid_inputs import sanitize_result_dir, sanitize_script_name
 from ..grid._grid_runner import (
-    GridLaunch,
     GridRecipe,
     GridStop,
     GridVariant,
@@ -214,7 +213,6 @@ class BenchStageMixin:
             grid=grid,
             output_root=bench_leg.output_root,
             recipe=recipe,
-            launch=GridLaunch(result_dir=result_dir),
             stop=GridStop(
                 session_deadline_sec=bench_leg.session_deadline_sec,
                 variant_expected_sec=bench_leg.variant_expected_sec,

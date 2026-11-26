@@ -43,36 +43,6 @@ from hyperloom.orchestrator.actions.executors.workload._workload_envs import Ben
 _AGENTX_EVIDENCE = {"valid_measurement": True, "diagnostic_only": False, "workload_identity": "agentx-workload"}
 
 
-def _fake_workspace(slot: Path, *, tput: float = 800.0, perf_axes: dict[str, float] | None = None) -> Path:
-    workspace = slot / "benchmark_sglang_20260519_001122"
-    workspace.mkdir(parents=True)
-    (workspace / "benchmark_report.json").write_text(
-        json.dumps(
-            {
-                "success": True,
-                "framework": "sglang",
-                "model": "/path/models/Qwen-Qwen3-8B",
-                "throughput": {
-                    "request_throughput": tput / 256,
-                    "output_throughput": tput,
-                    "total_token_throughput": (
-                        tput * 2 if perf_axes is None else perf_axes.get("total_token_throughput")
-                    ),
-                    "completed_requests": 80,
-                    "duration_seconds": 25.0,
-                },
-                "latency": {
-                    "ttft": {"mean_ms": 140.0, "p99_ms": 160.0},
-                    "e2el": {"mean_ms": 2500.0, "p99_ms": 2560.0},
-                },
-            }
-        )
-    )
-    if perf_axes is not None:
-        (workspace / "inferencex_result.json").write_text(json.dumps({"output_throughput": tput, **perf_axes}))
-    return workspace
-
-
 @pytest.fixture
 def sub_agent_runner(tmp_path):
     db = SqliteConnection(tmp_path / "db.db")
@@ -1148,22 +1118,13 @@ def test_grid_variants_do_not_treat_provenance_as_reasoning():
 
 
 def test_on_disk_stderr_tail_reads_benchmark_stderr_log(tmp_path):
-    from hyperloom.orchestrator.actions.executors.grid._round_report import (
-        _on_disk_stderr_tail,
-        _report_errors_summary,
-    )
+    from hyperloom.orchestrator.actions.executors.grid._round_report import _on_disk_stderr_tail
 
     (tmp_path / "benchmark_stderr.log").write_text("bench_fps.py: error: unrecognized arguments: --use_cache teacache")
     tail = _on_disk_stderr_tail(tmp_path)
     assert "unrecognized arguments" in tail
     # Empty dir → empty string (caller keeps its original blank error).
     assert _on_disk_stderr_tail(tmp_path / "nope") == ""
-    assert _report_errors_summary(None) == ""
-    assert _report_errors_summary({"errors": []}) == ""
-    assert (
-        _report_errors_summary({"errors": ["scriptable benchmark script not found for custom_mi355x.sh"]})
-        == "scriptable benchmark script not found for custom_mi355x.sh"
-    )
 
 
 def test_measured_verdict_holds_only_for_the_same_workload_and_stack():

@@ -11,6 +11,7 @@ from typing import Any
 
 import pytest
 
+from hyperloom.common.round_measurement import LATENCY_SOURCE
 from hyperloom.inference_optimizer.breakdown.recorder.baseline_event import (
     PRODUCER,
     ROUND_ACCURACY,
@@ -608,7 +609,7 @@ async def test_an_executor_raise_closes_the_event_it_opened(tmp_path: Path) -> N
 # ---------------------------------------------------------------------------
 def test_the_measurement_says_where_its_latency_came_from(tmp_path: Path) -> None:
     recorder = _recorder()
-    measured = _measured(ttft_e2el_source="rescued_raw_result", tpot_source="derived_from_e2el_ttft")
+    measured = _measured(ttft_e2el_source=LATENCY_SOURCE, tpot_source=LATENCY_SOURCE)
     recorder.begin_run()
     recorder.record_round(
         round_=BaselineRound(
@@ -622,55 +623,11 @@ def test_the_measurement_says_where_its_latency_came_from(tmp_path: Path) -> Non
     recorder.finish(measured)
 
     action = _actions(tmp_path)[0]
-    assert action["measurement"]["ttft_e2el_source"] == "rescued_raw_result"
-    # Separate from the pair: TPOT is the one latency figure that can be
-    # computed rather than measured.
-    assert action["measurement"]["tpot_source"] == "derived_from_e2el_ttft"
+    assert action["measurement"]["ttft_e2el_source"] == LATENCY_SOURCE
+    assert action["measurement"]["tpot_source"] == LATENCY_SOURCE
     # On the round too, because the discarded warmup's provenance can differ
     # from the adopted pass's.
-    assert action["runs"][0]["rounds"][0]["measurement"]["ttft_e2el_source"] == "rescued_raw_result"
-
-
-def test_the_extraction_labels_the_report_it_read_the_latency_out_of() -> None:
-    from hyperloom.orchestrator.actions.executors.benchmark_result import extract_benchmark_measurement
-
-    measurement = extract_benchmark_measurement(
-        {
-            "success": True,
-            "throughput": {"output_throughput": 15630.28, "completed_requests": 64},
-            "latency": {"ttft": {"mean_ms": 138.89}, "e2el": {"mean_ms": 4185.47}, "tpot": {"mean_ms": 12.5}},
-        }
-    )
-
-    assert measurement["ttft_e2el_source"] == "benchmark_report"
-    assert measurement["tpot_source"] == "benchmark_report"
-
-
-def test_a_computed_tpot_is_not_reported_as_a_measured_one() -> None:
-    from hyperloom.orchestrator.actions.executors.benchmark_result import extract_benchmark_measurement
-
-    measurement = extract_benchmark_measurement(
-        {
-            "success": True,
-            "osl": 512,
-            "throughput": {"output_throughput": 15630.28, "completed_requests": 64},
-            "latency": {"ttft": {"mean_ms": 138.89}, "e2el": {"mean_ms": 4185.47}},
-        }
-    )
-
-    assert measurement["tpot_mean_ms"] is not None
-    assert measurement["tpot_source"] == "derived_from_e2el_ttft"
-    # The pair it was computed from still reports its own source.
-    assert measurement["ttft_e2el_source"] == "benchmark_report"
-
-
-def test_a_measurement_with_no_latency_at_all_says_so() -> None:
-    from hyperloom.orchestrator.actions.executors.benchmark_result import extract_benchmark_measurement
-
-    measurement = extract_benchmark_measurement({"success": True, "throughput": {"output_throughput": 1.0}})
-
-    assert measurement["ttft_e2el_source"] == "unavailable"
-    assert measurement["tpot_source"] == "unavailable"
+    assert action["runs"][0]["rounds"][0]["measurement"]["ttft_e2el_source"] == LATENCY_SOURCE
 
 
 # ---------------------------------------------------------------------------

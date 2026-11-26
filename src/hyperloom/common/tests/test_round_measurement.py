@@ -9,10 +9,7 @@ import pytest
 
 from hyperloom.common.gain_math import AGENTX_ERROR_RATE_THRESHOLD_PCT
 from hyperloom.common.round_measurement import AGENTX_CONTEXT_OVERFLOW_SKIPPED, LATENCY_SOURCE, round_measurement
-from hyperloom.orchestrator.actions.executors.benchmark_result import (
-    extract_benchmark_measurement,
-    is_valid_measurement,
-)
+from hyperloom.orchestrator.actions.executors.benchmark_result import is_valid_measurement
 from inference_suite.contracts import (
     FIXED_METRIC_KEYS,
     AgentxResult,
@@ -51,9 +48,38 @@ def test_a_completed_fixed_round_is_a_valid_measurement_with_every_fixed_key() -
     assert measurement["failed_step"] is None
 
 
+#: The keys an archived v1 benchmark report's measurement has.
+_V1_MEASUREMENT_KEYS = frozenset(
+    {
+        "reported_success",
+        "framework",
+        "model",
+        "workload_kind",
+        "throughput_unit",
+        "quality_gate",
+        "latency_s",
+        "request_throughput",
+        "output_throughput",
+        "total_token_throughput",
+        "completed_requests",
+        "duration_seconds",
+        "requested_requests",
+        "ttft_mean_ms",
+        "ttft_p99_ms",
+        "tpot_mean_ms",
+        "e2el_mean_ms",
+        "e2el_p99_ms",
+        "raw_result_path",
+        "nonfatal_warnings",
+        "valid_measurement",
+        "ttft_e2el_source",
+        "tpot_source",
+    }
+)
+
+
 def test_the_measurement_carries_every_key_a_v1_benchmark_report_measurement_carries() -> None:
-    v1 = extract_benchmark_measurement({"success": True, "throughput": {"output_throughput": 1.0}})
-    assert set(v1) - {"gpu_power_avg_w", "gpu_power_by_gpu_w"} <= set(round_measurement(_fixed(), None))
+    assert _V1_MEASUREMENT_KEYS <= set(round_measurement(_fixed(), None))
 
 
 @pytest.mark.parametrize(

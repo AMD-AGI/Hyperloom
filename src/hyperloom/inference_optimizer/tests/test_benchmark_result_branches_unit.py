@@ -1,59 +1,11 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Branch coverage for benchmark-result parsing: rescue-path salvage, raw-result merging, TPOT derivation, OSL resolution, and the multi-node GPU CSV fold."""
+"""Measurement validity, and the multi-node fold of the pods' GPU sampler CSVs into a round's directory."""
 
 from __future__ import annotations
 
-import json
-from pathlib import Path
-
-import pytest
-
 from hyperloom.orchestrator.actions.executors import benchmark_result as br
-
-
-def _write_json(path: Path, data: dict) -> Path:
-    path.write_text(json.dumps(data), encoding="utf-8")
-    return path
-
-
-# ---- OSL resolution, through TPOT derivation --------------------------------
-@pytest.mark.parametrize(
-    "osl_fields,expected_tpot",
-    [
-        ({"osl": 10}, 10.0),
-        ({"config": {"output_len": 10}}, 10.0),
-        ({"request": {"max_tokens": 10}}, 10.0),
-        ({"osl": 0, "output_len": -1}, None),
-    ],
-    ids=["osl", "config-output-len", "request-max-tokens", "non-positive-ignored"],
-)
-def test_tpot_is_derived_from_the_osl_wherever_the_report_records_it(osl_fields, expected_tpot):
-    report = {
-        "success": True,
-        "throughput": {"output_throughput": 100.0, "completed_requests": 50},
-        "latency": {"ttft": {"mean_ms": 10.0}, "e2el": {"mean_ms": 100.0}},
-        **osl_fields,
-    }
-    assert br.extract_benchmark_measurement(report)["tpot_mean_ms"] == expected_tpot
-
-
-# ---- _derive_tpot_if_missing ----------------------------------------------
-@pytest.mark.parametrize(
-    "measurement,report,expected",
-    [
-        ({"tpot_mean_ms": None, "e2el_mean_ms": 100.0, "ttft_mean_ms": 10.0}, {"osl": 10}, (100.0 - 10.0) / 9),
-        ({"tpot_mean_ms": 5.0}, {}, 5.0),
-        ({"tpot_mean_ms": None, "e2el_mean_ms": None, "ttft_mean_ms": None}, {}, None),
-        ({"tpot_mean_ms": None, "e2el_mean_ms": 10.0, "ttft_mean_ms": 20.0}, {"osl": 10}, None),
-        ({"tpot_mean_ms": None, "e2el_mean_ms": 100.0, "ttft_mean_ms": 10.0}, {"osl": 1}, None),
-    ],
-    ids=["derived", "already-set", "missing-latencies", "e2el-not-above-ttft", "osl-too-short"],
-)
-def test_derive_tpot_if_missing(measurement, report, expected):
-    br._derive_tpot_if_missing(measurement, report)
-    assert measurement["tpot_mean_ms"] == expected
 
 
 # ---- is_valid_measurement -------------------------------------------------
@@ -65,82 +17,16 @@ def test_is_valid_measurement():
     assert br.is_valid_measurement({"output_throughput": 10.0, "completed_requests": 0}) is False
 
 
-# ---- _materialize_rescue_into_workspace -----------------------------------
-def test_materialize_rescue_copy_error(tmp_path, monkeypatch):
-    leak_dir = tmp_path / "leak"
-    leak_dir.mkdir()
-    src = _write_json(leak_dir / "inferencex_result.json", {"x": 1})
-    monkeypatch.setattr(br.shutil, "copy2", lambda *a, **k: (_ for _ in ()).throw(OSError("ro")))
-    assert br._materialize_rescue_into_workspace(src, tmp_path / "ws") is None
-
-
-# ---- _rescue_candidate_paths ----------------------------------------------
-def test_rescue_candidate_paths_env_dir_and_file(tmp_path, monkeypatch):
-    leak = tmp_path / "leaks"
-    leak.mkdir()
-    _write_json(leak / "inferencex_result_1.json", {"x": 1})
-    standalone = _write_json(tmp_path / "extra.json", {"y": 2})
-    monkeypatch.setenv("INFERENCE_OPTIMIZER_RESCUE_PATHS", f"{leak}:{standalone}")
-    ws = tmp_path / "ws"
-    ws.mkdir()
-    cands = br._rescue_candidate_paths(ws)
-    names = {p.name for p in cands}
-    assert "inferencex_result_1.json" in names
-    assert "extra.json" in names
-
-
-# ---- extract_benchmark_measurement ----------------------------------------
-def test_extract_from_report_only():
-    report = {
-        "success": True,
-        "framework": "sglang",
-        "throughput": {
-            "output_throughput": 100.0,
-            "completed_requests": 50,
-            "request_throughput": 5.0,
-            "duration_seconds": 10.0,
-        },
-        "latency": {"ttft": {"mean_ms": 20.0}, "e2el": {"mean_ms": 200.0}},
-    }
-    m = br.extract_benchmark_measurement(report)
-    assert m["valid_measurement"] is True
-    assert m["output_throughput"] == 100.0
-
-
-def test_extract_with_workspace_raw(tmp_path):
-    ws = tmp_path / "ws"
-    ws.mkdir()
-    _write_json(
-        ws / "result.json",
+def test_unverified_submission_accepted_when_hatch_is_set(monkeypatch):
+    monkeypatch.setenv("HYPERLOOM_AGENTX", "1")
+    monkeypatch.setenv("HYPERLOOM_ALLOW_UNVERIFIED_SUBMISSION", "1")
+    assert br.is_valid_measurement(
         {
-            "output_throughput": 80.0,
-            "completed_requests": 40,
-        },
+            "output_throughput": 170.0,
+            "completed_requests": 10,
+            "submission_valid": None,
+        }
     )
-    report = {"success": False, "throughput": {}, "latency": {}}
-    m = br.extract_benchmark_measurement(report, workspace=ws)
-    assert m["valid_measurement"] is True
-    assert "raw_inferencex_result_used" in m["nonfatal_warnings"]
-    assert "benchmark_report_success_false" in m["nonfatal_warnings"]
-
-
-def test_extract_skips_raw_without_throughput(tmp_path):
-    ws = tmp_path / "ws"
-    ws.mkdir()
-    _write_json(ws / "result.json", {"completed_requests": 5})
-    m = br.extract_benchmark_measurement({"throughput": {}}, workspace=ws)
-    assert m["valid_measurement"] is False
-
-
-def test_extract_rescue_skips_no_throughput(tmp_path, monkeypatch):
-    ws = tmp_path / "ws"
-    ws.mkdir()
-    leak = _write_json(tmp_path / "inferencex_result.json", {"completed_requests": 5})
-    monkeypatch.setenv("INFERENCE_OPTIMIZER_RESCUE_PATHS", str(leak))
-    m = br.extract_benchmark_measurement(
-        {"throughput": {}}, workspace=ws, subprocess_started_unix=leak.stat().st_mtime - 100
-    )
-    assert m["valid_measurement"] is False
 
 
 # ---- harvest_mn_gpu_metrics -----------------------------------------------

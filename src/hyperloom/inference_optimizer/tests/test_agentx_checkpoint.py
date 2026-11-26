@@ -100,7 +100,7 @@ def test_an_inference_suite_agentx_round_carries_the_checkpoint_median(tmp_path)
     layout.report.write_text(json.dumps(_agentx().to_document()), encoding="utf-8")
     _write_export(layout.client_dir, [*_IN_WINDOW, _AFTER_WINDOW])
 
-    measurement = extract_benchmark_measurement(None, workspace=run_dir)
+    measurement = extract_benchmark_measurement(run_dir)
 
     assert measurement[GRADED_INTVTY_P50_CHECKPOINT] == 20.0
 
@@ -207,7 +207,7 @@ async def test_grid_records_a_stopped_round_and_moves_on(tmp_path, monkeypatch):
         judge.note_phase("measured", 0.0)
         with pytest.raises(AgentxCheckpointMissed):
             judge.tick(1_800.0)
-        return SuiteRoundExit(AGENTX_EARLY_STOP_RETURNCODE)
+        return SuiteRoundExit(AGENTX_EARLY_STOP_RETURNCODE, bench_round.output_dir / "suite_run_0")
 
     monkeypatch.setattr(gr, "suite_route", lambda session_dir: object())
     monkeypatch.setattr(gr, "run_grid_suite_round", _stopped_at_checkpoint)

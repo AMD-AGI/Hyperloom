@@ -50,7 +50,6 @@ MARKER_CODE = (
     "        _hl_f.write(__file__ + '\\n')\n"
     "del _hl_os, _hl_marker\n"
 )
-SERVER_READY_SEC = "900"
 
 
 def _point(path: Path, marker: Path) -> Path:
@@ -83,7 +82,7 @@ def _compile_with_marker(blobs: LocalBlobStore, workdir: Path):
 def test_a_patched_recipe_is_rebuilt_measured_signed_verified_and_archived(tmp_path: Path) -> None:
     template = local_runner_template(
         gpus=1,
-        envs={"INFERENCEX_REPO": INFERENCEX, "INFERENCE_OPTIMIZER_BASELINE_SERVER_READY_SEC": SERVER_READY_SEC},
+        envs={"INFERENCEX_REPO": INFERENCEX},
     )
     rig = make_rig(
         tmp_path,

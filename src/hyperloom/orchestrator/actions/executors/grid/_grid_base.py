@@ -42,13 +42,12 @@ from inference_suite.contracts import FailedStep
 from ..workload._agentx_checkpoint import AgentxCheckpoint, read_checkpoint
 from .._failed_step import failed_step_error_class
 from .._subprocess_kill import (
-    AGENTX_EARLY_STOP_ERROR_CLASS,
     AGENTX_EARLY_STOP_RETURNCODE,
     ORCHESTRATOR_CANCELLED_RETURNCODE,
     SESSION_TIME_EXHAUSTED_RETURNCODE,
     sync_agentx_phase_wait,
 )
-from .._suite.rounds import RUN_DIR_PREFIX, SuiteRound, SuiteRoundRefused, SuiteRoute, deadline_unix, point_server
+from .._suite.rounds import RUN_DIR_PREFIX, SuiteRound, SuiteRoute, deadline_unix, point_server
 from .._suite.rounds import run_suite_round
 
 log = logging.getLogger(__name__)
@@ -132,9 +131,6 @@ class GridRound:
     config_path: Path
     output_dir: Path
     timeout_sec: int
-    cwd: str
-    result_dir: str | None = None
-    silence_timeout_sec: float | None = None
     server_already_ready: bool = False
     session_deadline_sec: float | None = None
     warmup: bool = False
@@ -151,9 +147,11 @@ _STOPPED_BY_THE_RUN: Mapping[FailedStep, int] = {
 
 @dataclass(frozen=True)
 class SuiteRoundExit:
-    """How a grid round on inference_suite ended: its exit code and, when it failed, the report's failure detail."""
+    """How a grid round on inference_suite ended: its exit code, the run_dir holding its report, and, when it failed,
+    the report's failure detail."""
 
     returncode: int
+    run_dir: Path
     detail: str = ""
 
 
@@ -182,20 +180,17 @@ def run_grid_suite_round(
         checkpoint=round_.checkpoint,
     )
     try:
-        report = run_suite_round(route, request, on_poll=on_poll).report
-    except SuiteRoundRefused as exc:
-        if exc.error_class != AGENTX_EARLY_STOP_ERROR_CLASS:
-            raise
-        return SuiteRoundExit(AGENTX_EARLY_STOP_RETURNCODE, exc.detail)
+        ran = run_suite_round(route, request, on_poll=on_poll)
     finally:
         if server.stop_after is not None and (survivors := stop(server.stop_after).survivors):
             log.error("grid: pids %s outlived SIGKILL; %s keeps their record", survivors, server.stop_after)
+    report, run_dir = ran.report, ran.layout.root
     if report.failed_step is None:
-        return SuiteRoundExit(0)
+        return SuiteRoundExit(0, run_dir)
+    detail = report.failure_detail or report.failed_step.value
     if _stopped_by_checkpoint(round_):
-        return SuiteRoundExit(AGENTX_EARLY_STOP_RETURNCODE, report.failure_detail or report.failed_step.value)
-    returncode = _STOPPED_BY_THE_RUN.get(report.failed_step, _FAILED_RETURNCODE)
-    return SuiteRoundExit(returncode, report.failure_detail or report.failed_step.value)
+        return SuiteRoundExit(AGENTX_EARLY_STOP_RETURNCODE, run_dir, detail)
+    return SuiteRoundExit(_STOPPED_BY_THE_RUN.get(report.failed_step, _FAILED_RETURNCODE), run_dir, detail)
 
 
 def _stopped_by_checkpoint(round_: GridRound) -> bool:

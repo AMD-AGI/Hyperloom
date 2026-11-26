@@ -346,7 +346,6 @@ def _grid_round(point: Path, checkpoint: AgentxCheckpoint) -> GridRound:
         config_path=point,
         output_dir=point.parent,
         timeout_sec=600,
-        cwd=str(point.parent),
         checkpoint=checkpoint,
     )
 

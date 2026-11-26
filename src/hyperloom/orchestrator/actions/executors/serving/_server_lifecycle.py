@@ -6,7 +6,6 @@
 from __future__ import annotations
 
 import logging
-import os
 import time
 from collections.abc import Sequence
 from pathlib import Path
@@ -86,18 +85,12 @@ def inject_lifecycle(
     port: int,
 ) -> None:
     """Mutate ``bench`` in place to enable the server_lifecycle protocol."""
-    ready_timeout = int(
-        os.environ.get(
-            "INFERENCE_OPTIMIZER_BASELINE_SERVER_READY_SEC",
-            SERVER_READY_TIMEOUT_SEC,
-        )
-    )
     bench["server_lifecycle"] = {
         "enabled": True,
         "cleanup": bool(cleanup),
         "force_reuse": False,
         "pid_dir": str(pid_dir),
-        "server_ready_timeout_s": ready_timeout,
+        "server_ready_timeout_s": SERVER_READY_TIMEOUT_SEC,
     }
     # Pin PORT so every round of the lifecycle reaches the same server.
     envs = bench.setdefault("envs", {})

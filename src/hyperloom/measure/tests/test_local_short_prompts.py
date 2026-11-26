@@ -126,9 +126,7 @@ def test_a_planned_test_answers_on_its_own_server_after_its_measured_round_and_b
     assert (outcome.returncode, outcome.failure_class) == (0, None)
 
 
-def test_the_check_is_apart_from_the_test_its_rounds_its_files_and_its_result_directory_are_the_tests_own(
-    monkeypatch, tmp_path, cache
-):
+def test_the_check_is_apart_from_the_test_its_rounds_and_its_files_are_the_tests_own(monkeypatch, tmp_path, cache):
     plain = _grid(monkeypatch, tmp_path / "plain")
     (tmp_path / "plain").mkdir(exist_ok=True)
     baseline = LocalMeasurementBackend().run_test(_call(tmp_path / "plain"))
@@ -139,9 +137,6 @@ def test_the_check_is_apart_from_the_test_its_rounds_its_files_and_its_result_di
     assert [(r.phase, r.returncode) for r in outcome.rounds] == [(r.phase, r.returncode) for r in baseline.rounds]
     assert sorted(p.name for p in (tmp_path / "out").iterdir()) == ["server_arm", SHORT_PROMPTS_DIR]
     assert _names(grid) == ["test"] and grid.calls[0]["output_root"] == tmp_path / "out"
-    assert grid.calls[0]["launch"].result_dir == str(tmp_path / "out" / "results"), (
-        "the test's round keeps its directory"
-    )
     assert plain.calls and len(plain.calls) == 1
 
 

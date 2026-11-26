@@ -1,8 +1,8 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Benchmark result parsing shared by the round executors, plus salvage helpers and the multi-node fold of the pods'
-GPU sampler CSVs into a round's directory."""
+"""A finished round's measurement and its validity, shared by the round executors, plus the multi-node fold of the
+pods' GPU sampler CSVs into a round's directory."""
 
 from __future__ import annotations
 
@@ -11,164 +11,18 @@ import csv
 import os
 import time
 import re
-import shutil
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any
 
 from hyperloom.common.benchmark_config import read_benchmark_point
-from hyperloom_common.coerce import first_float, first_int, to_float, to_int
-from hyperloom_common.jsonio import read_json
+from hyperloom_common.coerce import to_float, to_int
 from hyperloom.common.perf_metric import GRADED_INTVTY_P50_CHECKPOINT
+from inference_suite.contracts import Report
 
 from .gpu._gpu_metrics import gpu_metrics_from_report
-from ._round_folder import RoundFolder, is_round_folder
+from ._round_folder import RoundFolder
 
 log = logging.getLogger(__name__)
-
-
-# Slack subtracted from ``subprocess_started_unix`` before comparing a leak's ``st_mtime``, to reject stale prior-run
-# leaks without false-dropping fresh ones. 1s absorbs clock-vs-mtime / FS-granularity skew.
-_MTIME_GATE_SLACK_SEC: float = 1.0
-
-
-def _candidate_raw_jsons(workspace: Path) -> list[Path]:
-    """Return likely InferenceX result files, preferring baseline over profile."""
-    paths = [p for p in workspace.rglob("*.json") if p.name != "benchmark_report.json"]
-    return sorted(
-        paths,
-        key=lambda p: (
-            "profile" in p.name.lower(),
-            "eval" in str(p).lower(),
-            str(p),
-        ),
-    )
-
-
-def _rescue_candidate_paths(
-    workspace: Path,
-    *,
-    subprocess_started_unix: float | None = None,
-) -> list[Path]:
-    """Return absolute paths to known benchmark-client leak destinations."""
-    candidates: list[Path] = []
-    seen: set[Path] = set()
-
-    def _push(path: Path) -> None:
-        """Add ``path`` to the candidate list if it passes all gates."""
-        try:
-            resolved = path.resolve()
-        except OSError:
-            return
-        if resolved in seen:
-            return
-        seen.add(resolved)
-        # Skip files already inside the workspace (handled by ``_candidate_raw_jsons``).
-        try:
-            ws_resolved = workspace.resolve()
-            resolved.relative_to(ws_resolved)
-            return
-        except (OSError, ValueError):
-            pass
-        if _is_fresh_leak_file(path, subprocess_started_unix):
-            candidates.append(path)
-
-    env_raw = os.environ.get("INFERENCE_OPTIMIZER_RESCUE_PATHS", "").strip()
-    env_entries = [part.strip() for part in env_raw.split(":") if part.strip()] if env_raw else []
-    for entry in env_entries:
-        p = Path(entry)
-        if p.is_dir():
-            _push_rescue_results(p, _push)
-        else:
-            _push(p)
-
-    # Env-derived dirs: the InferenceX checkout ($INFERENCEX_PATH), where append_lm_eval_summary's ``mv ./`` lands,
-    # plus $RESULT_DIR overrides.
-    for derived in _env_derived_leak_roots():
-        if derived.is_dir():
-            _push_rescue_results(derived, _push)
-
-    return candidates
-
-
-def _push_rescue_results(directory: Path, push: Callable[[Path], None]) -> None:
-    """Push each ``inferencex_result*.json`` of ``directory`` in name order, stopping at the first OS error."""
-    try:
-        for fp in sorted(directory.glob("inferencex_result*.json")):
-            push(fp)
-    except OSError:
-        return
-
-
-def _materialize_rescue_into_workspace(
-    rescue_path: Path,
-    workspace: Path,
-) -> Path | None:
-    """Copy a leaked InferenceX result back into the task workspace."""
-    try:
-        rescue_resolved = rescue_path.resolve()
-        ws_resolved = workspace.resolve()
-    except OSError:
-        return None
-    try:
-        rescue_resolved.relative_to(ws_resolved)
-        return None
-    except ValueError:
-        pass
-    destination = workspace / rescue_path.name
-    try:
-        workspace.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(rescue_path, destination)
-    except OSError as exc:
-        log.warning(
-            "benchmark_result: failed to copy rescued result %s -> %s: %s",
-            rescue_path,
-            destination,
-            exc,
-        )
-        return None
-    return destination
-
-
-def _env_derived_leak_roots() -> list[Path]:
-    """Leak roots derived from the runtime env: the InferenceX checkout (``$INFERENCEX_PATH``), where ``append_lm_eval_summary``'s ``mv ./`` lands, plus ``$RESULT_DIR`` when an override routed results outside the workspace."""
-    out: list[Path] = []
-    for env_key in ("INFERENCEX_PATH", "RESULT_DIR"):
-        val = (os.environ.get(env_key) or "").strip()
-        if val:
-            out.append(Path(val))
-    return out
-
-
-def _run_workspaces(root: Path) -> list[Path]:
-    """The workspaces rounds left in ``root``: ``benchmark_*`` directories and inference_suite run_dirs."""
-    if not root.is_dir():
-        return []
-    return [p for p in root.iterdir() if p.is_dir() and (p.name.startswith("benchmark_") or is_round_folder(p))]
-
-
-def snapshot_workspaces(root: Path) -> frozenset[Path]:
-    """Return the round workspaces present in ``root`` right now."""
-    return frozenset(p.resolve() for p in _run_workspaces(root))
-
-
-def select_run_workspace(root: Path, *, known_before: frozenset[Path]) -> Path | None:
-    """Return the round workspace this run created in ``root``."""
-    fresh = [p for p in _run_workspaces(root) if p.resolve() not in known_before]
-    return max(fresh, default=None)
-
-
-def _is_fresh_leak_file(match: Path, subprocess_started_unix: float | None) -> bool:
-    """Whether ``match`` is a file the round could have written (not older than its subprocess start)."""
-    if not match.is_file():
-        return False
-    if subprocess_started_unix is not None:
-        try:
-            mtime = match.stat().st_mtime
-        except OSError:
-            return False
-        if mtime + _MTIME_GATE_SLACK_SEC < float(subprocess_started_unix):
-            return False
-    return True
 
 
 # Multi-node GPU metrics: the GPU pods run a rocm-smi sampler (see launch_infera_node.py) streaming per-card samples
@@ -278,191 +132,33 @@ def harvest_mn_gpu_metrics(
     return out
 
 
-#: ``(measurement field, raw keys in preference order, coercion)`` for every field a raw InferenceX result can fill.
-#: Row order is the order these fields are created in, which is the key order of a measurement written unsorted.
-_RAW_RESULT_FIELDS: tuple[tuple[str, tuple[str, ...], Callable[..., Any]], ...] = (
-    ("output_throughput", ("output_throughput",), first_float),
-    ("request_throughput", ("request_throughput",), first_float),
-    ("total_token_throughput", ("total_token_throughput",), first_float),
-    ("completed_requests", ("completed_requests", "completed"), first_int),
-    ("duration_seconds", ("duration_seconds", "duration"), first_float),
-    ("ttft_mean_ms", ("mean_ttft_ms",), first_float),
-    ("ttft_p99_ms", ("p99_ttft_ms",), first_float),
-    ("tpot_mean_ms", ("mean_tpot_ms",), first_float),
-    ("input_throughput", ("input_throughput",), first_float),
-    ("tpot_p90_ms", ("p90_tpot_ms",), first_float),
-    ("ttft_p50_ms", ("median_ttft_ms",), first_float),
-    ("ttft_p90_ms", ("p90_ttft_ms",), first_float),
-    ("tpot_p50_ms", ("median_tpot_ms",), first_float),
-    ("e2e_norm_intvty_p90", ("e2e_norm_intvty_p90",), first_float),
-    ("e2e_norm_intvty_p50", ("e2e_norm_intvty_p50",), first_float),
-    ("request_error_rate", ("request_error_rate",), first_float),
-    ("e2el_mean_ms", ("mean_e2el_ms", "mean_latency_ms"), first_float),
-    ("e2el_p99_ms", ("p99_e2el_ms", "p99_latency_ms"), first_float),
-    ("requested_requests", ("num_prompts",), first_int),
-)
-
-
-def _merge_raw_result(
-    measurement: dict[str, Any],
-    raw: dict[str, Any],
-    *,
-    source_path: Path,
-) -> None:
-    """Fill missing measurement fields from a raw InferenceX result."""
-    for field, raw_keys, parse in _RAW_RESULT_FIELDS:
-        if measurement.get(field) is None:
-            measurement[field] = parse(*(raw.get(key) for key in raw_keys))
-    if measurement.get("raw_result_path") is None:
-        measurement["raw_result_path"] = str(source_path)
-    # AgentX scenario verdict.
-    if "submission_valid" in raw and "submission_valid" not in measurement:
-        measurement["submission_valid"] = raw.get("submission_valid")
-        reasons = raw.get("submission_invalid_reasons") or []
-        measurement["submission_invalid_reasons"] = (
-            [str(r) for r in reasons] if isinstance(reasons, list) else [str(reasons)]
-        )
-
-
-#: The latency fields whose origin is tracked. A measurement can fill each of
-#: them from a different place, and which place answered is not recoverable
-#: from the number afterwards -- every source writes the same key.
-_LATENCY_FIELDS = ("ttft_mean_ms", "e2el_mean_ms", "tpot_mean_ms")
-
-#: Stable labels naming where a latency number was read from. Reported by the
-#: extraction itself because this is the only frame that knows: by the time the
-#: measurement is on a result dict, a value the report supplied and one salvaged
-#: out of a leaked raw JSON are indistinguishable.
-LATENCY_FROM_REPORT = "benchmark_report"
-LATENCY_FROM_RAW = "raw_result"
-LATENCY_FROM_RESCUED_RAW = "rescued_raw_result"
-LATENCY_DERIVED = "derived_from_e2el_ttft"
-LATENCY_UNAVAILABLE = "unavailable"
-
-
-def _latency_snapshot(measurement: dict[str, Any]) -> dict[str, Any]:
-    """The latency fields as they stand, for comparing across a fill pass.
-
-    Args:
-        measurement: The measurement dict to read.
-
-    Returns:
-        The tracked latency fields and their current values.
-    """
-    return {field: measurement.get(field) for field in _LATENCY_FIELDS}
-
-
-def _tag_latency_origins(
-    measurement: dict[str, Any],
-    origins: dict[str, str],
-    *,
-    label: str,
-    before: dict[str, Any],
-) -> None:
-    """Attribute to ``label`` the latency fields this pass filled.
-
-    Only fields that were absent and are now present are attributed: every
-    fill pass leaves what it found intact, so a field it did not fill belongs
-    to whichever pass did.
-
-    Args:
-        measurement: The measurement dict after the pass ran.
-        origins: The origin map to record into, mutated in place.
-        label: The source label for this pass.
-        before: The :func:`_latency_snapshot` taken before the pass ran.
-    """
-    for field in _LATENCY_FIELDS:
-        if before.get(field) is None and measurement.get(field) is not None:
-            origins[field] = label
-
-
-def _round_gpu_power(report: dict[str, Any]) -> dict[str, Any]:
+def _round_gpu_power(report: Report) -> dict[str, Any]:
     """The round's measured-window power and energy: :data:`~._gpu_power.POWER_FIELDS`, ``gpu_power_by_gpu_w`` and
     ``power_valid``; only the first two without a recording.
 
-    Hyperloom's own recording wins whenever this round has one, including one whose energy is invalid: that round
-    was sampled and measured nothing trustworthy, and substituting the report's figure would replace "unmeasured" with
-    a number from a different window. The report's ``gpu_monitor`` block -- one card, whole-process window on a single
-    node -- is the fallback for the mean on rounds no recorder ran on; it reads one card, so such a round has no
-    per-card figure and any per-card or total budget treats it as unmeasured.
+    The report's ``power`` section wins whenever the round has one, including one whose energy is invalid: that round
+    was sampled and measured nothing trustworthy, and substituting the ``gpu_monitor`` figure would replace
+    "unmeasured" with a number from a different window. The ``gpu_monitor`` block is the fallback for the mean on
+    rounds no recorder ran on; such a round has no per-card figure and any per-card or total budget treats it as
+    unmeasured.
     """
-    from .gpu._gpu_power import round_power_fields, round_power_summary
+    from .gpu._gpu_power import round_power_fields
 
-    summary = round_power_summary(report)
-    if summary is not None:
-        return round_power_fields(summary)
-    return {"gpu_power_avg_w": gpu_metrics_from_report(report).get("avg_power_w"), "gpu_power_by_gpu_w": None}
+    if report.power is not None:
+        return round_power_fields(report.power)
+    monitored = gpu_metrics_from_report(report.to_document())
+    return {"gpu_power_avg_w": monitored.get("avg_power_w"), "gpu_power_by_gpu_w": None}
 
 
-def extract_benchmark_measurement(
-    report: dict[str, Any] | None,
-    *,
-    workspace: Path | None = None,
-    subprocess_started_unix: float | None = None,
-) -> dict[str, Any]:
-    """Extract a normalized measurement from an inference_suite run_dir, or from a benchmark report and InferenceX outputs.
+def extract_benchmark_measurement(run_dir: Path) -> dict[str, Any]:
+    """The normalized measurement of the inference_suite round in ``run_dir``, with the measured-window power its
+    report's ``power`` section holds.
 
-    A ``workspace`` that is an inference_suite run_dir is measured from its own report alone; ``report`` is unused.
-
-    ``subprocess_started_unix`` enables an opt-in salvage pass over the
-    benchmark-client leak destinations (see :func:`_rescue_candidate_paths`) when the
-    in-workspace search fails; only leaks written after this run are adopted.
-
-    Args:
-        report: The ``benchmark_report.json`` mapping, or ``None``.
-        workspace: Optional task workspace scanned for raw InferenceX results
-            and (as a fallback) salvageable leaks.
-        subprocess_started_unix: Optional launch time enabling the mtime-gated
-            leak salvage pass.
-
-    Returns:
-        A normalized measurement dict (including ``valid_measurement``, any
-        ``nonfatal_warnings``, and the ``ttft_e2el_source`` / ``tpot_source``
-        provenance labels).
+    Raises ``OSError``, ``ValueError`` for a report or launch off contract (:meth:`RoundFolder.read`).
     """
-    if workspace is not None and is_round_folder(workspace):
-        return _round_folder_measurement(workspace)
-    report = report or {}
-    measurement = _measurement_from_report(report)
-
-    origins: dict[str, str] = {}
-    _tag_latency_origins(
-        measurement,
-        origins,
-        label=LATENCY_FROM_REPORT,
-        before=dict.fromkeys(_LATENCY_FIELDS),
-    )
-
-    _merge_workspace_measurements(measurement, origins, workspace)
-
-    warnings = measurement["nonfatal_warnings"]
-    if report and report.get("success") is not True:
-        warnings.append("benchmark_report_success_false")
-    if workspace is not None and measurement.get("raw_result_path"):
-        warnings.append("raw_inferencex_result_used")
-
-    _settle_derived_latency(measurement, origins, report)
-
-    if not measurement["valid_measurement"] and workspace is not None:
-        _salvage_from_leaked_results(measurement, origins, report, workspace, subprocess_started_unix)
-
-    # One label for the pair, keyed on TTFT and falling back to E2EL, because
-    # that is the question a reader asks of it: the two are read from the same
-    # place in every path that supplies either, and TTFT is the one a latency
-    # reference is anchored on.
-    measurement["ttft_e2el_source"] = origins.get("ttft_mean_ms") or origins.get("e2el_mean_ms") or LATENCY_UNAVAILABLE
-    # Separate from the pair: TPOT is the one latency figure that can be
-    # computed rather than measured, and a derived value must not be read as
-    # one the benchmark reported.
-    measurement["tpot_source"] = origins.get("tpot_mean_ms") or LATENCY_UNAVAILABLE
-    return measurement
-
-
-def _round_folder_measurement(run_dir: Path) -> dict[str, Any]:
-    """An inference_suite round's measurement, with the measured-window power its report's ``power`` section holds."""
     folder = RoundFolder.read(run_dir)
     measurement = folder.measurement()
-    measurement.update(_round_gpu_power(folder.report.to_document()))
+    measurement.update(_round_gpu_power(folder.report))
     if folder.report.agentx is not None:
         _add_agentx_timeline_fields(measurement, run_dir)
     return measurement
@@ -477,120 +173,6 @@ def _add_agentx_timeline_fields(measurement: dict[str, Any], workspace: Path | N
     measurement[GRADED_INTVTY_P50_CHECKPOINT] = workspace_checkpoint_p50(workspace)
     if corpus_shape := measured_corpus_shape(workspace):
         measurement["agentx_corpus_shape"] = corpus_shape
-
-
-def _measurement_from_report(report: dict[str, Any]) -> dict[str, Any]:
-    """The normalized fields a ``benchmark_report.json`` supplies on its own."""
-    throughput = report.get("throughput") or {}
-    latency = report.get("latency") or {}
-    ttft = latency.get("ttft") or {}
-    tpot = latency.get("tpot") or {}
-    e2el = latency.get("e2el") or {}
-    return {
-        "reported_success": report.get("success") if report else None,
-        "framework": report.get("framework"),
-        "model": report.get("model"),
-        # Scriptable (server-less) workloads tag the report with workload_kind/unit and ship a quality_gate block
-        # instead of a GSM8K eval; carried through so downstream gates/reporters can branch.
-        "workload_kind": report.get("workload_kind"),
-        "throughput_unit": report.get("throughput_unit") or throughput.get("unit"),
-        "quality_gate": report.get("quality_gate"),
-        "latency_s": first_float(report.get("latency_s"), throughput.get("latency_s")),
-        "request_throughput": to_float(throughput.get("request_throughput")),
-        "output_throughput": to_float(throughput.get("output_throughput")),
-        "total_token_throughput": to_float(throughput.get("total_token_throughput")),
-        "completed_requests": first_int(
-            throughput.get("completed_requests"),
-            throughput.get("completed"),
-            # Diffusion scripts report images produced under either key.
-            throughput.get("images_generated"),
-            throughput.get("num_images"),
-        ),
-        "duration_seconds": to_float(throughput.get("duration_seconds")),
-        # What the client was asked to send, as the client recorded it. Read
-        # back rather than taken from the env stack: the env is what we asked
-        # for, this is what the run actually requested.
-        "requested_requests": first_int(throughput.get("num_prompts")),
-        "ttft_mean_ms": to_float(ttft.get("mean_ms")),
-        "ttft_p99_ms": to_float(ttft.get("p99_ms")),
-        "tpot_mean_ms": to_float(tpot.get("mean_ms")),
-        "e2el_mean_ms": to_float(e2el.get("mean_ms")),
-        "e2el_p99_ms": to_float(e2el.get("p99_ms")),
-        **_round_gpu_power(report),
-        "raw_result_path": None,
-        "nonfatal_warnings": [],
-    }
-
-
-def _salvage_from_leaked_results(
-    measurement: dict[str, Any],
-    origins: dict[str, str],
-    report: dict[str, Any],
-    workspace: Path,
-    subprocess_started_unix: float | None,
-) -> None:
-    """Adopt a benchmark-client leak written after launch as the measurement, when the in-workspace search found none."""
-    warnings = measurement["nonfatal_warnings"]
-    for rescue_path in _rescue_candidate_paths(workspace, subprocess_started_unix=subprocess_started_unix):
-        raw = read_json(rescue_path, default=None, require_dict=True)
-        if not raw or to_float(raw.get("output_throughput")) is None:
-            continue
-        # Copy the leak into the workspace BEFORE merging so the NFS clone stays self-contained.
-        materialized = _materialize_rescue_into_workspace(
-            rescue_path,
-            workspace,
-        )
-        recorded_path = materialized if materialized is not None else rescue_path
-        before = _latency_snapshot(measurement)
-        _merge_raw_result(measurement, raw, source_path=recorded_path)
-        _tag_latency_origins(measurement, origins, label=LATENCY_FROM_RESCUED_RAW, before=before)
-        if is_valid_measurement(measurement):
-            warnings.append(f"rescued_from_leaked_path:{rescue_path}")
-            if materialized is None:
-                warnings.append(f"rescued_copy_into_workspace_failed: {rescue_path}")
-            break
-    _settle_derived_latency(measurement, origins, report)
-
-
-def _settle_derived_latency(measurement: dict[str, Any], origins: dict[str, str], report: dict[str, Any]) -> None:
-    """Fill TPOT from what the report allows deriving, label the fields that came from there, and settle validity."""
-    before = _latency_snapshot(measurement)
-    _derive_tpot_if_missing(measurement, report)
-    _tag_latency_origins(measurement, origins, label=LATENCY_DERIVED, before=before)
-    measurement["valid_measurement"] = is_valid_measurement(measurement)
-
-
-def _derive_tpot_if_missing(
-    measurement: dict[str, Any],
-    report: dict[str, Any] | None,
-) -> None:
-    """Fill ``tpot_mean_ms`` from ``(e2el - ttft) / (osl - 1)`` when absent."""
-    if measurement.get("tpot_mean_ms") is not None:
-        return
-    e2el = to_float(measurement.get("e2el_mean_ms"))
-    ttft = to_float(measurement.get("ttft_mean_ms"))
-    if e2el is None or ttft is None or e2el <= ttft:
-        return
-    osl = _resolve_osl(report)
-    if osl is None or osl <= 1:
-        return
-    measurement["tpot_mean_ms"] = (e2el - ttft) / (osl - 1)
-
-
-def _resolve_osl(report: dict[str, Any] | None) -> int | None:
-    """Pull the output sequence length from common report locations."""
-    if not isinstance(report, dict):
-        return None
-    candidates: list[Any] = [report.get("osl"), report.get("output_len")]
-    for section_key in ("config", "request", "params", "workload"):
-        section = report.get(section_key)
-        if isinstance(section, dict):
-            candidates.extend(section.get(k) for k in ("osl", "output_len", "max_tokens"))
-    for value in candidates:
-        n = to_int(value)
-        if n is not None and n > 0:
-            return n
-    return None
 
 
 def _is_scriptable_measurement(result: dict[str, Any]) -> bool:
@@ -700,17 +282,3 @@ __all__ = [
     "round_succeeded",
     "served_complete_protocol",
 ]
-
-
-def _merge_workspace_measurements(measurement: dict[str, Any], origins: dict[str, str], workspace: Path | None) -> None:
-    """Fill synthetic report gaps from the current workspace's raw measurements."""
-    if workspace is not None:
-        for raw_path in _candidate_raw_jsons(workspace):
-            raw = read_json(raw_path, default=None, require_dict=True)
-            if not raw or to_float(raw.get("output_throughput")) is None:
-                continue
-            before = _latency_snapshot(measurement)
-            _merge_raw_result(measurement, raw, source_path=raw_path)
-            _tag_latency_origins(measurement, origins, label=LATENCY_FROM_RAW, before=before)
-            if is_valid_measurement(measurement):
-                break

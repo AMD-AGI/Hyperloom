@@ -385,7 +385,6 @@ class BenchmarkRunExecutor(_BaselineAccuracyMixin, _BenchmarkLaunchMixin, _Bench
             config_path=round_.config_path,
             output_dir=warm_dir,
             timeout_sec=int(round_.timeout_sec),
-            cwd=str(warm_dir),
             server_already_ready=True,
             session_deadline_sec=round_.session_deadline_sec,
             warmup=True,

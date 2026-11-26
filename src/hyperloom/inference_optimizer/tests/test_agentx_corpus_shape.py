@@ -41,7 +41,7 @@ def _workspace(tmp_path: Path, export: dict | None) -> Path:
 
 
 def _measure(workspace: Path) -> dict:
-    return extract_benchmark_measurement(None, workspace=workspace)
+    return extract_benchmark_measurement(workspace)
 
 
 def test_the_rounds_aiperf_export_gives_the_measurement_its_corpus_shape(tmp_path):

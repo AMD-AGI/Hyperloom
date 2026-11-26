@@ -137,7 +137,7 @@ def _toolbox(
         ),
         spec,
         options=LocalOptions(
-            runner_envs={"INFERENCEX_REPO": INFERENCEX, "INFERENCE_OPTIMIZER_BASELINE_SERVER_READY_SEC": "900"},
+            runner_envs={"INFERENCEX_REPO": INFERENCEX},
             timeout_sec=timeout_sec,
         ),
     )

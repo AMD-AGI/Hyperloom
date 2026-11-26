@@ -236,6 +236,17 @@ round, and that search is removed:
   multi-node it also no longer writes a merged `gpu_metrics.csv` at the top of
   those files; each round's run directory still gets its own.
 
+### Required: `INFERENCE_OPTIMIZER_RESCUE_PATHS` and `INFERENCE_OPTIMIZER_BASELINE_SERVER_READY_SEC` are no longer read
+
+Both are silently ignored, so drop them. Neither has had an effect since 1.2.0:
+a round's results are read from its run directory alone, and every round
+already held its server boot to the round's own time limit. The readers that
+went with them could not run either, so the warnings
+`rescued_from_leaked_path:<path>`, `rescued_copy_into_workspace_failed`,
+`raw_inferencex_result_used` and `benchmark_report_success_false`, and the
+error classes `no_benchmark_workspace` and `benchmark_report_invalid_metric`,
+no longer occur.
+
 ---
 
 ## Upgrading from 1.1.x
@@ -547,19 +558,6 @@ Earlier launchers might have waited for the Coordinator to emit a
 
 Bare-metal installs now default `KERNEL_OPT_BACKEND_ORDER` to `geak`. If you
 had a custom order hard-coded, confirm it is still intentional.
-
-### Recommended: set `INFERENCE_OPTIMIZER_RESCUE_PATHS` if you use model-specific benchmark scripts
-
-When the session has a GPU type (`--gpu-type`, or the label of the card
-`amd-smi` reports), Hyperloom pins
-`benchmark_script=<framework>_<gpu_type>.sh` to stop InferenceX-native
-scripts from leaking `result.json` outside the session dir. If you
-intentionally use a model-specific script (for example, `dsr1_fp8_mi300x.sh`),
-keep passing `benchmark_script=` explicitly — operator overrides
-still win against the generic-script pin. You might additionally want
-to set `$INFERENCE_OPTIMIZER_RESCUE_PATHS` so the harvest step can
-recover any leaked `result.json` files written to hardcoded
-`--result-dir` locations.
 
 ### Recommended: stop expecting `standalone_analysis.md` or `tracelens_report.md`
 

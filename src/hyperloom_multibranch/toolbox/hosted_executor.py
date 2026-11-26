@@ -894,7 +894,7 @@ def _round_measurement(round_dir: Path) -> dict[str, Any] | None:
     if not is_round_folder(round_dir):
         return None
     try:
-        return extract_benchmark_measurement(None, workspace=round_dir)
+        return extract_benchmark_measurement(round_dir)
     except (OSError, ValueError):
         return None
 

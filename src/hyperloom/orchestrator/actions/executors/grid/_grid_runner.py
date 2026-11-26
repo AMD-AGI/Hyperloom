@@ -42,12 +42,7 @@ from .._subprocess_kill import (
     SESSION_TIME_EXHAUSTED_RETURNCODE,
     resolve_benchmark_timeouts,
 )
-from ..benchmark_result import (
-    extract_benchmark_measurement,
-    round_succeeded,
-    select_run_workspace,
-    snapshot_workspaces,
-)
+from ..benchmark_result import round_succeeded
 from .._round_folder import round_report_path
 from .._suite.rounds import SuiteRoundRefused, suite_route
 from ..benchmark_config import composed_benchmark_timeout_sec
@@ -70,6 +65,7 @@ from ._grid_base import (
     GridRound,
     GridVariant,
     RoundError,
+    SuiteRoundExit,
     failed_step_class,
     run_grid_suite_round,
     VariantResult,
@@ -88,12 +84,10 @@ from hyperloom.inference_optimizer.grid_server_args import (
 from ._capability_probe import unsupported_capability_reason
 from ._grid_inputs import _resolve_session_dir
 from ._round_report import (
-    REPORT_SETTLE_SECONDS,
     _existing_log_path,
     _on_disk_stderr_tail,
-    _report_errors_summary,
-    _settled_measurement,
     measurement_server_log_path,
+    record_round,
 )
 from ._variant_rows import (
     _abort_variant,
@@ -103,7 +97,6 @@ from ._variant_rows import (
     _MeasuredVariant,
     _not_run_skip_result,
     _RoundAttempt,
-    _RoundProcess,
     _VariantAborted,
     _VariantFailure,
     _VariantOutcome,
@@ -140,9 +133,8 @@ class GridRecipe:
 
 @dataclass(frozen=True)
 class GridLaunch:
-    """How each round of a grid is launched: its result dir, and the server it runs on."""
+    """How each round of a grid is launched: the server it runs on, and what the round is for."""
 
-    result_dir: str | None = None
     server_lifecycle: dict[str, Any] | None = None
     server_already_ready: bool = False
     ready_server_log: str | None = None
@@ -216,26 +208,18 @@ def stopped_by_the_run(returncode: int | None) -> StoppedByTheRun | None:
 
 
 def _invalid_measurement_error(
-    proc: _RoundProcess,
+    proc: SuiteRoundExit,
     *,
-    report: Any,
     death_excerpt: str,
     workspace: Any,
     slot: Any,
 ) -> RoundError:
     if proc.returncode != 0:
-        error = death_excerpt or redact_secret_values((proc.stderr or proc.stdout)[-2000:])
+        error = death_excerpt or redact_secret_values(proc.detail[-2000:])
         if not error.strip():
             error = redact_secret_values(_on_disk_stderr_tail(workspace, slot))
-        if not error.strip():
-            error = redact_secret_values(_report_errors_summary(report))
         return RoundError(error, failure_evidence.ROUND_NONZERO_INVALID_MEASUREMENT)
-    if not report:
-        return RoundError(death_excerpt or "benchmark_report missing", failure_evidence.BENCHMARK_REPORT_MISSING)
-    return RoundError(
-        death_excerpt or "benchmark_report missing valid throughput/completed requests",
-        "benchmark_report_invalid_metric",
-    )
+    return RoundError(death_excerpt or "benchmark_report missing", failure_evidence.BENCHMARK_REPORT_MISSING)
 
 
 def _multi_node_warmup_rounds(variant_expected_sec: Any) -> int:
@@ -255,7 +239,6 @@ class _GridRun(NamedTuple):
     recipe: GridRecipe
     launch: GridLaunch
     stop: GridStop
-    silence_timeout_sec: float
     rounds_per_variant: int
     mn_warmup_rounds: int
     auto_warmup_requested: bool
@@ -352,7 +335,7 @@ async def _unit_started(grid: list[GridVariant], idx: int, label: str) -> None:
     )
 
 
-async def _reported_round(run: _GridRun, at: _VariantSlot, label: str, bench_round: GridRound) -> _RoundProcess:
+async def _reported_round(run: _GridRun, at: _VariantSlot, label: str, bench_round: GridRound) -> SuiteRoundExit:
     """Run one benchmark pass, announced on entry and kept alive by its progress."""
     await _unit_started(run.grid, at.idx, label)
     async with heartbeat_while_output_flows(
@@ -376,7 +359,7 @@ async def _reported_round(run: _GridRun, at: _VariantSlot, label: str, bench_rou
                 exc_info=True,
             )
             _abort_variant(at, _VariantFailure(exc.error_class, exc.detail))
-    return _RoundProcess(ended.returncode, "", ended.detail)
+    return ended
 
 
 async def _report_finished_variant(grid: list[GridVariant], results: list[VariantResult], idx: int) -> None:
@@ -513,7 +496,6 @@ async def _run_warmup_round(run: _GridRun, at: _VariantSlot, rounds: _VariantRou
         lifecycle={"cleanup": False, "pid_dir": str(at.path), "port": int(rounds.lifecycle.get("port") or 0)},
         failure_class=_WARMUP_YAML_BUILD_ERROR,
     )
-    workspaces_before = snapshot_workspaces(warmup_slot)
     started_unix = time.time()
     proc = await _reported_round(
         run,
@@ -523,9 +505,6 @@ async def _run_warmup_round(run: _GridRun, at: _VariantSlot, rounds: _VariantRou
             config_path=cfg_path,
             output_dir=warmup_slot,
             timeout_sec=rounds.benchmark_timeout_sec,
-            silence_timeout_sec=run.silence_timeout_sec,
-            cwd=str(run.output_root),
-            result_dir=run.launch.result_dir,
             session_deadline_sec=run.stop.session_deadline_sec,
             warmup=True,
         ),
@@ -535,33 +514,15 @@ async def _run_warmup_round(run: _GridRun, at: _VariantSlot, rounds: _VariantRou
         survivors = teardown_variant_server(at.path)
         attempt = _RoundAttempt(at, proc.returncode, started_unix, warmup_server_log, tuple(survivors))
         _abort_on_round_stop(run, stopped, attempt, round_label="warmup")
-    pass_ = _BenchmarkPass(proc, started_unix, workspaces_before)
-    return await _warmup_throughput(run, at, rounds, pass_)
+    return _warmup_throughput(run, at, _BenchmarkPass(proc, started_unix))
 
 
-async def _warmup_throughput(
-    run: _GridRun,
-    at: _VariantSlot,
-    rounds: _VariantRounds,
-    pass_: _BenchmarkPass,
-) -> float | None:
+def _warmup_throughput(run: _GridRun, at: _VariantSlot, pass_: _BenchmarkPass) -> float | None:
     """The throughput the warmup pass measured, or end the variant when it measured none."""
     warmup_slot = at.path / WARMUP_ROUND_DIR
-    run_ws = select_run_workspace(warmup_slot, known_before=pass_.workspaces_before)
-    workspace = run_ws if run_ws is not None else warmup_slot
+    workspace = pass_.proc.run_dir
+    measurement = record_round(workspace, started_unix=pass_.started_unix)
     returncode = pass_.proc.returncode
-    if run_ws is not None:
-        _, measurement = await _settled_measurement(
-            workspace,
-            subprocess_started_unix=pass_.started_unix,
-            settle_seconds=REPORT_SETTLE_SECONDS if returncode == 0 else 0.0,
-        )
-    else:
-        measurement = extract_benchmark_measurement(
-            None,
-            workspace=workspace,
-            subprocess_started_unix=pass_.started_unix,
-        )
     if returncode == 0 and measurement.get("valid_measurement"):
         warmup_tput = measurement.get("output_throughput")
         log.info(
@@ -574,7 +535,7 @@ async def _warmup_throughput(
     warmup_server_log = warmup_slot / "server.log"
     report_path = round_report_path(workspace)
     found = argv_refusal(measurement_server_log_path(warmup_server_log, workspace)) or RoundError(
-        death_excerpt(str(warmup_server_log)) or redact_secret_values((pass_.proc.stderr or pass_.proc.stdout)[-2000:])
+        death_excerpt(str(warmup_server_log)) or redact_secret_values(pass_.proc.detail[-2000:])
         if returncode != 0
         else "warmup benchmark_report missing valid throughput/completed requests",
         "warmup_round_failed",
@@ -589,7 +550,7 @@ async def _warmup_throughput(
     return _abort_variant(
         at,
         _VariantFailure(found.error_class, found.summary),
-        workspace=str(workspace) if run_ws is not None else None,
+        workspace=str(workspace),
         report_path=str(report_path) if report_path.exists() else None,
         raw_result_path=measurement.get("raw_result_path"),
         reported_success=measurement.get("reported_success"),
@@ -649,10 +610,7 @@ async def _run_multi_node_warmup(run: _GridRun, at: _VariantSlot, rounds: _Varia
             config_path=rounds.cfg_path,
             output_dir=warm_slot,
             timeout_sec=rounds.benchmark_timeout_sec,
-            silence_timeout_sec=run.silence_timeout_sec,
             server_already_ready=True,
-            cwd=str(run.output_root),
-            result_dir=None,
             session_deadline_sec=run.stop.session_deadline_sec,
             warmup=True,
         ),
@@ -668,7 +626,6 @@ async def _run_multi_node_warmup(run: _GridRun, at: _VariantSlot, rounds: _Varia
 async def _run_measured_round(run: _GridRun, at: _VariantSlot, rounds: _VariantRounds) -> _BenchmarkPass:
     from .._multi_node_env import is_multi_node
 
-    workspaces_before = snapshot_workspaces(at.path)
     started_unix = time.time()
     measure_cap_sec = rounds.benchmark_timeout_sec
     try:
@@ -680,9 +637,6 @@ async def _run_measured_round(run: _GridRun, at: _VariantSlot, rounds: _VariantR
                 config_path=rounds.cfg_path,
                 output_dir=at.path,
                 timeout_sec=measure_cap_sec,
-                cwd=str(run.output_root),
-                result_dir=run.launch.result_dir,
-                silence_timeout_sec=run.silence_timeout_sec,
                 server_already_ready=(run.launch.server_already_ready or rounds.auto_warmup or is_multi_node()),
                 session_deadline_sec=run.stop.session_deadline_sec,
                 warmup=run.launch.warmup_round,
@@ -692,7 +646,7 @@ async def _run_measured_round(run: _GridRun, at: _VariantSlot, rounds: _VariantR
         )
     finally:
         round_survivors = teardown_variant_server(at.path)
-    return _BenchmarkPass(proc, started_unix, workspaces_before, tuple(round_survivors))
+    return _BenchmarkPass(proc, started_unix, tuple(round_survivors))
 
 
 def _abort_on_early_stop(at: _VariantSlot, round_: _BenchmarkPass) -> NoReturn:
@@ -718,41 +672,6 @@ def _refuse_reaped_round(run: _GridRun, at: _VariantSlot, round_: _BenchmarkPass
         _abort_on_round_stop(run, stopped, attempt, round_label="measured")
 
 
-def _round_workspace(run: _GridRun, at: _VariantSlot, round_: _BenchmarkPass) -> Path:
-    workspace = select_run_workspace(at.path, known_before=round_.workspaces_before)
-    if workspace is None:
-        _abort_without_workspace(run, at, round_)
-    return workspace
-
-
-def _abort_without_workspace(run: _GridRun, at: _VariantSlot, round_: _BenchmarkPass) -> NoReturn:
-    proc = round_.proc
-    returncode = proc.returncode
-    server_log = at.path / "server.log"
-    found = RoundError(
-        death_excerpt(str(server_log))
-        or (
-            redact_secret_values((proc.stderr or proc.stdout)[-2000:])
-            if returncode != 0
-            else "the round produced no run_dir"
-        ),
-        "no_benchmark_workspace",
-    )
-    log.warning(
-        "grid_runner: variant %s aborted: %s (rc=%s)",
-        _variant_tag(run, at),
-        found.error_class,
-        returncode,
-    )
-    halt = _Halt.ON_FAILURE if returncode != 0 else _Halt.CONTINUE
-    _abort_variant(
-        at,
-        _VariantFailure(found.error_class, found.summary, halt=halt),
-        returncode=returncode,
-        server_log_path=_existing_log_path(server_log),
-    )
-
-
 def _round_warnings(measurement: dict[str, Any], measured: _MeasuredVariant) -> list[str]:
     warnings = list(measurement.pop("nonfatal_warnings", []) or [])
     if measured.warmup_tput is not None:
@@ -768,7 +687,6 @@ def _abort_on_invalid_measurement(run: _GridRun, at: _VariantSlot, outcome: _Var
     server_log = at.path / "server.log"
     found = argv_refusal(measurement_server_log_path(server_log, workspace)) or _invalid_measurement_error(
         outcome.measured.round.proc,
-        report=outcome.report,
         death_excerpt=death_excerpt(str(server_log)),
         workspace=workspace,
         slot=at.path,
@@ -799,13 +717,9 @@ def _abort_on_invalid_measurement(run: _GridRun, at: _VariantSlot, outcome: _Var
     )
 
 
-async def _variant_row(run: _GridRun, at: _VariantSlot, measured: _MeasuredVariant) -> VariantResult:
-    report, measurement = await _settled_measurement(
-        measured.workspace,
-        subprocess_started_unix=measured.round.started_unix,
-        settle_seconds=0.0 if run.launch.evaluation_only else REPORT_SETTLE_SECONDS,  # no throughput to wait for
-    )
-    outcome = _VariantOutcome(measured, report, measurement, _round_warnings(measurement, measured))
+def _variant_row(run: _GridRun, at: _VariantSlot, measured: _MeasuredVariant) -> VariantResult:
+    measurement = record_round(measured.workspace, started_unix=measured.round.started_unix)
+    outcome = _VariantOutcome(measured, measurement, _round_warnings(measurement, measured))
     # A boot round that measured a load is a measured row; one that only booted (an inference_suite round with no
     # workload completes without a measurement), or only evaluated, is an unmeasured row.
     unmeasured = run.launch.lifecycle_boot_only or run.launch.evaluation_only
@@ -855,8 +769,7 @@ async def _measure_variant(run: _GridRun, at: _VariantSlot) -> VariantResult:
     await _run_multi_node_warmup(warm_run, at, rounds)
     round_ = await _run_measured_round(run, at, rounds)
     _refuse_reaped_round(run, at, round_)
-    workspace = _round_workspace(run, at, round_)
-    return await _variant_row(run, at, _MeasuredVariant(rounds, round_, workspace, warmup_tput))
+    return _variant_row(run, at, _MeasuredVariant(rounds, round_, round_.proc.run_dir, warmup_tput))
 
 
 async def run_grid(
@@ -871,9 +784,8 @@ async def run_grid(
 
     ``launch.ready_server_log`` is the log of the caller's ready server, measured when no variant log exists.
     """
-    # Silence is a property of the invoking process, so the grid shares one; the hard cap is a property of the
-    # workload each variant's config composes, so it is resolved per slot when that config is written.
-    silence_timeout_sec = resolve_benchmark_timeouts()[0]
+    # An operator timeout that does not parse is the invocation's fault: raise before a variant is failed on it.
+    resolve_benchmark_timeouts()
     warmup_before_measure = launch.warmup_before_measure
     if warmup_before_measure is None:
         warmup_before_measure = _run_grid_warmup_enabled()
@@ -892,7 +804,6 @@ async def run_grid(
         recipe=recipe,
         launch=launch,
         stop=stop,
-        silence_timeout_sec=silence_timeout_sec,
         rounds_per_variant=1 + (1 if auto_warmup_requested else 0) + mn_warmup_rounds,
         mn_warmup_rounds=mn_warmup_rounds,
         auto_warmup_requested=auto_warmup_requested,

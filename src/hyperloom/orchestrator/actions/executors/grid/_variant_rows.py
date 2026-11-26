@@ -18,7 +18,7 @@ from hyperloom.common.perf_metric import GRADED_INTVTY_P50_CHECKPOINT, constrain
 from ...stop_attribution import StoppedByTheRun
 from .._round_folder import round_report_path
 from ..benchmark_result import served_complete_protocol
-from ._grid_base import GridVariant, VariantResult
+from ._grid_base import GridVariant, SuiteRoundExit, VariantResult
 
 log = logging.getLogger(__name__)
 
@@ -41,14 +41,6 @@ class _VariantAborted(Exception):
         self.result = result
         self.halt = halt
         self.abandoned = abandoned
-
-
-class _RoundProcess(NamedTuple):
-    """What the benchmark subprocess of one grid round returned."""
-
-    returncode: Any
-    stdout: str
-    stderr: str
 
 
 class _VariantSlot(NamedTuple):
@@ -116,14 +108,13 @@ class _BenchmarkPass(NamedTuple):
     followed it; a pass whose servers the next round still needs leaves it empty.
     """
 
-    proc: _RoundProcess
+    proc: SuiteRoundExit
     started_unix: float
-    workspaces_before: Any
     server_survivors: tuple[int, ...] = ()
 
 
 class _MeasuredVariant(NamedTuple):
-    """One variant's measured round, the workspace it left on disk, and the warmup it discarded."""
+    """One variant's measured round, the run_dir it left on disk, and the warmup it discarded."""
 
     rounds: _VariantRounds
     round: _BenchmarkPass
@@ -132,10 +123,9 @@ class _MeasuredVariant(NamedTuple):
 
 
 class _VariantOutcome(NamedTuple):
-    """A measured variant together with what its benchmark report turned out to say."""
+    """A measured variant together with what its round's report turned out to say."""
 
     measured: _MeasuredVariant
-    report: dict[str, Any] | None
     measurement: dict[str, Any]
     warnings: list[str]
 
@@ -216,8 +206,7 @@ def _kept_nonzero_exit(at: _VariantSlot, outcome: _VariantOutcome) -> str | None
     returncode = outcome.measured.round.proc.returncode
     if returncode == 0:
         return None
-    proc = outcome.measured.round.proc
-    nonzero_error = redact_secret_values((proc.stderr or proc.stdout)[-2000:])
+    nonzero_error = redact_secret_values(outcome.measured.round.proc.detail[-2000:])
     measurement = outcome.measurement
     if not served_complete_protocol(measurement):
         log.warning(

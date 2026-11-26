@@ -11,7 +11,6 @@ from hyperloom_common import gpu_telemetry
 from inference_suite.contracts import PowerSummary
 from inference_suite.contracts.layout import POWER
 from hyperloom.orchestrator.actions.executors.gpu._gpu_power import POWER_FIELDS, round_power_fields
-from hyperloom.orchestrator.actions.executors.benchmark_result import extract_benchmark_measurement
 
 
 def _power_summary(*, valid: bool = True, cards: int = 4) -> PowerSummary:
@@ -44,9 +43,6 @@ def _power_summary(*, valid: bool = True, cards: int = 4) -> PowerSummary:
     return PowerSummary.of(POWER, {"started_unix": 1000.0, "scope": scope, "energy": energy, "phases": {}})
 
 
-_V1_REPORT = {"gpu_monitor": {"sample_count": 157, "power_watts": {"min": 225.0, "max": 790.0, "avg": 313.7}}}
-
-
 def test_a_rounds_power_fields_carry_the_windows_power_energy_and_joules_per_token():
     measurement = round_power_fields(_power_summary())
     assert {key: measurement[key] for key in (*POWER_FIELDS, "power_valid")} == {
@@ -69,13 +65,6 @@ def test_a_sampled_round_whose_energy_is_invalid_stays_unmeasured():
     assert measurement["power_valid"] == 0
     assert measurement["gpu_power_avg_w"] is None and measurement["gpu_power_by_gpu_w"] is None
     assert measurement["gpu_energy_j"] is None and measurement["joules_per_output_token"] is None
-
-
-def test_the_measurement_falls_back_to_the_report_when_no_recorder_ran(tmp_path):
-    measurement = extract_benchmark_measurement(_V1_REPORT, workspace=tmp_path)
-    assert measurement["gpu_power_avg_w"] == 313.7
-    assert measurement["gpu_power_by_gpu_w"] is None, "a v1 host-wide mean cannot be split per card"
-    assert "power_valid" not in measurement and "gpu_energy_j" not in measurement
 
 
 @pytest.mark.parametrize(("value", "sampled"), [("0.2", 0.5), ("1.5", 1.5), ("1.6", None), ("3", None)])

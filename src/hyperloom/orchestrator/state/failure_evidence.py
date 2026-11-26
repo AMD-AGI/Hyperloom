@@ -121,11 +121,9 @@ _ENVIRONMENT_ERROR_CLASSES = frozenset(
 _HARNESS_ERROR_CLASSES = frozenset(
     {
         "benchmark_cap_error",
-        "benchmark_report_invalid_metric",
         BENCHMARK_REPORT_MISSING,
         "round_nonzero_after_valid_measurement",
         ROUND_NONZERO_INVALID_MEASUREMENT,
-        "no_benchmark_workspace",
         "warmup_round_failed",
         "warmup_yaml_build_error",
         YAML_BUILD_ERROR,
