@@ -52,6 +52,7 @@ __all__ = [
     "ROLE_EVAL",
     "ROLE_MEASURE",
     "ROLE_WARMUP",
+    "SERVED_PHASES",
     "BootParts",
     "Boundary",
     "RoundShape",
@@ -72,6 +73,9 @@ ROLE_BOOT = "boot"
 ROLE_WARMUP = "warmup"
 ROLE_MEASURE = "measure"
 ROLE_EVAL = "eval"
+#: The phases a round begins only at a run's ready stamp (:func:`_run_boundaries`): an attempt whose phases hold one
+#: failed after its server was ready, never while it booted.
+SERVED_PHASES: frozenset[str] = frozenset({CLIENT_START, WARMUP, MEASURED, ACCURACY_EVAL})
 _UTF8 = "utf-8"
 #: The phases ``kv_metrics.json`` records the instants of: the client's evaluation, and an AgentX client's own phases.
 _EVAL, _CLIENT_WARMUP, _CLIENT_MEASURED, _CLIENT_FINISHED = "eval", "warmup", "measured", "finished"

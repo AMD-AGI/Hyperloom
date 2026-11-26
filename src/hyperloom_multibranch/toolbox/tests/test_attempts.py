@@ -11,6 +11,7 @@ import pytest
 
 from hyperloom.contracts.measurement import (
     FailureClass,
+    PhaseTiming,
     Purpose,
     SandboxFacts,
     TestKind,
@@ -37,6 +38,7 @@ from hyperloom.measure.failures import (
     StepFailure,
     classify_test_failure,
 )
+from hyperloom.measure.phases import MEASURED, SERVER_BOOT
 from hyperloom.measure.runner.import_outcome import INERT_PATCH
 from inference_suite.contracts import FailedStep
 from hyperloom_multibranch.toolbox.attempts import (
@@ -63,6 +65,9 @@ HUNG_REASON = f"{HUNG_BEFORE_READY}: no output for 600s before the server was re
 FOREIGN_REASON = f"{FOREIGN_PROCESS_ON_CARD}: card 3 held by pid 4242 (python)"
 START_TIMEOUT_REASON = RUNNER_START_TIMEOUT
 CAPACITY_REASON = f"{CAPACITY_UNAVAILABLE}: no node with 8 free GPUs"
+#: The phases of an attempt that failed while its server booted, and of one that failed after its server was ready.
+BOOTED = (PhaseTiming(SERVER_BOOT, 1000.0, 60.0),)
+SERVED = (*BOOTED, PhaseTiming(MEASURED, 1060.0, 300.0))
 
 
 class _FakeTime:
@@ -82,14 +87,18 @@ class _FakeTime:
 
 class _ScriptedExecutor:
     """Fails every attempt with ``reason`` as an infrastructure failure, each on its own node; ``started`` is the clock
-    at each attempt. A sequence of reasons gives one per attempt, the last for every later one."""
+    at each attempt. A sequence of reasons gives one per attempt, the last for every later one. Each attempt stamps
+    ``phases``."""
 
-    def __init__(self, reason: str | tuple[str, ...], clock: _FakeTime | None = None) -> None:
+    def __init__(
+        self, reason: str | tuple[str, ...], clock: _FakeTime | None = None, phases: tuple[PhaseTiming, ...] = ()
+    ) -> None:
         self.reasons = (reason,) if isinstance(reason, str) else reason
         self.reason = self.reasons[0]
         self.jobs: list[TestJob] = []
         self.clock = clock or _FakeTime()
         self.started: list[float] = []
+        self.phases = phases
 
     async def run(self, job: TestJob) -> TestResult:
         self.jobs.append(job)
@@ -100,6 +109,8 @@ class _ScriptedExecutor:
             failure_class=FailureClass.INFRA,
             failure_reason=self.reasons[min(job.attempt, len(self.reasons)) - 1],
             sandbox=SandboxFacts(sandbox_id=f"s{job.attempt}", node_name=f"n{job.attempt}"),
+            phases=self.phases,
+            unaccounted_seconds=0.0 if self.phases else None,
         )
 
     async def reverify(self, result: TestResult) -> None:
@@ -125,9 +136,12 @@ def _backoff(time: _FakeTime, latest: float | None = None) -> InfraBackoff:
 
 
 async def _run(
-    reason: str | tuple[str, ...], latest: float | None = None
+    reason: str | tuple[str, ...],
+    latest: float | None = None,
+    kind: TestKind = TestKind.TEST,
+    phases: tuple[PhaseTiming, ...] = (),
 ) -> tuple[TestResult, _ScriptedExecutor, list[str]]:
-    executor = _ScriptedExecutor(reason)
+    executor = _ScriptedExecutor(reason, phases=phases)
     reported: list[str] = []
 
     async def on_node_failure(node: str, _reason: str, _reproduced: bool) -> None:
@@ -137,7 +151,8 @@ async def _run(
     runner = AttemptRunner(
         executor, avoid=frozenset, on_node_failure=on_node_failure, max_infra_retries=3, backoff=backoff
     )
-    return await runner.run(_job()), executor, reported
+    job = _job()
+    return await runner.run(replace(job, request=replace(job.request, kind=kind))), executor, reported
 
 
 @pytest.mark.parametrize(
@@ -533,8 +548,8 @@ class _ClassifyingExecutor(_ScriptedExecutor):
     """Ends every attempt with what :func:`classify_test_failure` makes of ``log`` and the step ``step`` names, as the
     executors record it."""
 
-    def __init__(self, log: str, step: StepFailure | None = None) -> None:
-        super().__init__("unused")
+    def __init__(self, log: str, step: StepFailure | None = None, phases: tuple[PhaseTiming, ...] = ()) -> None:
+        super().__init__("unused", phases=phases)
         self.log = log
         self.step = step
 
@@ -550,11 +565,15 @@ class _ClassifyingExecutor(_ScriptedExecutor):
             failure_class=verdict.failure_class,
             failure_reason=verdict.failure_reason,
             sandbox=SandboxFacts(sandbox_id=f"s{job.attempt}", node_name=f"n{job.attempt}"),
+            phases=self.phases,
+            unaccounted_seconds=0.0 if self.phases else None,
         )
 
 
-async def _profile(log: str, step: StepFailure | None = None) -> tuple[TestResult, _ClassifyingExecutor, list[str]]:
-    executor = _ClassifyingExecutor(log, step)
+async def _profile(
+    log: str, step: StepFailure | None = None, phases: tuple[PhaseTiming, ...] = ()
+) -> tuple[TestResult, _ClassifyingExecutor, list[str]]:
+    executor = _ClassifyingExecutor(log, step, phases)
     reported: list[str] = []
 
     async def on_node_failure(node: str, _reason: str, _reproduced: bool) -> None:
@@ -605,11 +624,13 @@ async def test_a_profile_whose_server_stalled_inside_its_window_is_not_retried_a
     assert reported == [], "the image's profiler, not the node, hung the server"
 
 
-async def test_a_profile_whose_server_stalled_outside_its_window_is_still_rerun_once() -> None:
-    result, executor, _ = await _profile("", StepFailure(FailedStep.SERVER_STALLED, _SILENT))
+async def test_a_profile_whose_server_stalled_outside_its_window_is_not_rerun_and_ends_unmeasured() -> None:
+    result, executor, reported = await _profile("", StepFailure(FailedStep.SERVER_STALLED, _SILENT), SERVED)
 
-    assert len(executor.jobs) == 2, "a stall the profiler did not start is unclear: one rerun"
+    assert len(executor.jobs) == 1, "a profile's rerun fails again for the same cause"
+    assert result.validity is Validity.MEASUREMENT_FAILED, "an unclear profile is not held against its candidate"
     assert result.failure_class is FailureClass.UNCLEAR and result.failure_reason == "server_stalled"
+    assert reported == []
 
 
 _ENGINE_DIED = "RuntimeError: Engine core process EngineCore died unexpectedly.\n"
@@ -630,11 +651,62 @@ async def test_a_profile_whose_server_died_inside_its_window_is_retried_once_els
     assert reported == [], "the image's profiler, not the node, killed the server"
 
 
-async def test_a_profile_whose_server_died_outside_its_window_is_still_rerun_once() -> None:
-    result, executor, _ = await _profile(_ENGINE_DIED, StepFailure(FailedStep.SERVER_DIED, _FATAL))
+async def test_a_profile_whose_server_died_outside_its_window_is_not_rerun_and_ends_unmeasured() -> None:
+    result, executor, reported = await _profile(_ENGINE_DIED, StepFailure(FailedStep.SERVER_DIED, _FATAL), SERVED)
 
-    assert len(executor.jobs) == 2, "a death the profiler did not cause is unclear: one rerun"
+    assert len(executor.jobs) == 1, "a profile's rerun fails again for the same cause"
+    assert result.validity is Validity.MEASUREMENT_FAILED
     assert result.failure_class is FailureClass.UNCLEAR and result.failure_reason.startswith("python_exception: ")
+    assert reported == []
+
+
+_NCCL = "RuntimeError: NCCL error: unhandled cuda error\n"
+
+
+@pytest.mark.parametrize("phases", [BOOTED, ()], ids=["booted", "no_phases"])
+async def test_a_profile_whose_server_failed_before_it_was_ready_is_still_rerun_once(phases) -> None:
+    """A boot also fails for a passing fault of its node; the rerun keeps the session's profile."""
+    exited = StepFailure(FailedStep.SERVER_EXITED_BEFORE_READY, "the server exited with code -9 before it was ready")
+
+    result, executor, _ = await _profile(_NCCL, exited, phases)
+
+    assert len(executor.jobs) == 2 and "n1" in executor.jobs[1].avoid_nodes
+    assert result.validity is Validity.CANDIDATE_FAILED and result.failure_class is FailureClass.UNCLEAR
+
+
+@pytest.mark.parametrize(
+    "reason", [DISK_FULL_REASON, f"{RUNNER_LOST}: the sandbox is gone"], ids=["disk_full", "runner_lost"]
+)
+async def test_a_profile_ends_unmeasured_when_its_retry_failed_for_the_same_reason_after_its_server_was_ready(
+    reason,
+) -> None:
+    result, executor, reported = await _run(reason, kind=TestKind.PROFILE, phases=SERVED)
+
+    assert len(executor.jobs) == 2, "a third attempt would hold cards for the cause two nodes already met"
+    assert result.validity is Validity.MEASUREMENT_FAILED and result.failure_class is FailureClass.INFRA
+    assert result.failure_reason == reason
+    assert "n2" not in reported, "a cause two nodes met is not the second node's"
+
+
+@pytest.mark.parametrize("phases", [BOOTED, ()], ids=["booted", "no_phases"])
+@pytest.mark.parametrize("reason", [PORT_REASON, HUNG_REASON], ids=["port", "hung_before_ready"])
+async def test_a_profile_retries_a_failure_before_its_server_was_ready_like_any_test(reason, phases) -> None:
+    result, executor, reported = await _run(reason, kind=TestKind.PROFILE, phases=phases)
+
+    assert len(executor.jobs) == 4
+    assert result.failure_reason == f"4 attempts failed for infrastructure reasons: {reason}"
+    assert reported == ["n1", "n2", "n3", "n4"]
+
+
+async def test_a_profile_retries_another_infrastructure_reason_after_a_first_one() -> None:
+    reasons = (DISK_FULL_REASON, f"{RUNNER_LOST}: the sandbox is gone", DISK_FULL_REASON)
+
+    result, executor, reported = await _run(reasons, kind=TestKind.PROFILE, phases=SERVED)
+
+    assert len(executor.jobs) == 3, "the third attempt meets the first one's cause again"
+    assert result.validity is Validity.MEASUREMENT_FAILED and result.failure_reason == DISK_FULL_REASON
+    assert reported == ["n1"], "a lost runner and a cause two nodes met report no node"
+    assert executor.jobs[2].avoid_nodes == ("n1", "n2")
 
 
 async def test_a_profile_whose_candidate_crashed_is_still_a_candidate_failure() -> None:

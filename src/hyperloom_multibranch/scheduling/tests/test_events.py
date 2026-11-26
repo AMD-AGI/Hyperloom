@@ -51,6 +51,7 @@ from hyperloom_multibranch.scheduling.events import (
 from hyperloom_multibranch.scheduling.integrator import MergeReport
 from hyperloom_multibranch.scheduling.requests import SessionTests, integration_test_request
 from hyperloom_multibranch.scheduling.settings import InferenceXShape, KernelOptimizer, Workload
+from hyperloom_multibranch.toolbox.acceptance import PROFILE_FAILING_CODE
 from hyperloom_multibranch.toolbox.analysis import CODE_NO_EXECUTOR, CODE_PROFILE_UNVERIFIED
 from hyperloom_multibranch.toolbox.tests.fake import FakeToolbox, FakeWiring
 from hyperloom_multibranch.toolbox.tests import fake_model
@@ -757,6 +758,34 @@ async def test_a_profile_that_failed_unexpectedly_raises_once_from_stop(log: Pat
 
     with pytest.raises(RequestRejected, match="backend gone"):
         await events.stop_profiling()
+    await events.stop_profiling()
+
+
+class _ProfilesFailingToolbox(_AnalysingToolbox):
+    """Refuses every PROFILE as a toolbox does once a profile of the session failed for the profiler."""
+
+    async def submit_test(self, request: TestRequest) -> str:
+        if request.kind is TestKind.PROFILE:
+            self.asked.append(request)
+            raise RequestRejected("profile p-1 ended profiler_hung", PROFILE_FAILING_CODE)
+        return await super().submit_test(request)
+
+
+async def test_a_toolbox_refusing_profiles_after_one_failed_switches_profiling_off_without_raising(log: Path) -> None:
+    shares = _Shares({"c-root": _op_shares("c-root", BEFORE)})
+    toolbox = _ProfilesFailingToolbox(shares)
+    events = _events(_Health(), log, toolbox, shares)
+    events.note_merges((_moved_onto("c-merged"),))
+    await events.detect()
+    events.hand_over()
+    await _until(lambda: not events.profiling)
+
+    events.note_merges((_moved_onto("c-next"),))
+    await events.detect()
+
+    assert not events.profiling and len(toolbox.asked) == 1, "no profile is asked for again"
+    [profile] = [row for row in _logged(log) if row["kind"] == "profile"]
+    assert (profile["reason"], profile["detail"]["code"]) == (PROFILE_UNAVAILABLE, PROFILE_FAILING_CODE)
     await events.stop_profiling()
 
 
