@@ -11,6 +11,7 @@ under its own reason beside a context-copying one.
 
 from __future__ import annotations
 
+import asyncio
 from collections.abc import Sequence
 from pathlib import Path
 
@@ -217,3 +218,21 @@ def test_explore_knows_which_launch_would_eval_under_a_forced_acceptance(tmp_pat
     recipe = _noop_filter_kwargs(tmp_path)["recipe"]
 
     assert launch_forces_acceptance(recipe, variant) is forces
+
+
+def test_a_stack_revalidation_is_never_refused_and_a_forcing_it_replays_has_its_eval_run_on_its_own(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from hyperloom.orchestrator.actions.executors import explore
+
+    recipe = _noop_filter_kwargs(tmp_path)["recipe"]
+    rnd = explore._ExploreRound.__new__(explore._ExploreRound)
+    rnd.synthetic, rnd.params, rnd.forcing, rnd.skipped = True, {"source": explore.STACK_REVALIDATE_SOURCE}, set(), []
+    rnd._recipe = lambda: recipe
+    monkeypatch.setattr(explore, "session_golden_lookup", lambda *_: pytest.fail("a revalidation is never looked up"))
+    forced = GridVariant("forced", extra_server_args=_SGLANG, extra_envs=_SGLANG_FORCED)
+    real = GridVariant("real", extra_server_args=_SGLANG)
+
+    assert not asyncio.run(rnd._refuses_synthetic_draft(forced))
+    assert not asyncio.run(rnd._refuses_synthetic_draft(real))
+    assert rnd.forcing == {"forced"} and rnd.skipped == []

@@ -258,9 +258,7 @@ class _ExploreRound:
         self.keep_threshold_pct = float(params["keep_threshold_pct"])
         self.accuracy_reference = AccuracyReference.of_session(self.ss, params)
         # The synthetic benchmark's repetition loops would grade a draft at an acceptance real text does not reach.
-        self.refuse_synthetic_drafts = not agentx_active(
-            benchmark_mode=getattr(self.ss, "benchmark_mode", "")
-        ) and not is_stack_revalidation(params)
+        self.synthetic = not agentx_active(benchmark_mode=getattr(self.ss, "benchmark_mode", ""))
         self.ws_sig = workload_signature()
         # Seeded by the Coordinator from the durable cursor: this executor holds no history of its own, so it
         # cannot count the rounds before this one.
@@ -622,11 +620,14 @@ class _ExploreRound:
 
     async def _refuses_synthetic_draft(self, gv: GridVariant) -> bool:
         # Whether the synthetic benchmark refuses this variant's speculative-decoding draft, recording it.
-        # Judged against the stack as it stands now: a KEEP earlier in this round may have changed it.
-        if not self.refuse_synthetic_drafts:
+        # Judged against the stack as it stands now: a KEEP earlier in this round may have changed it. A stack
+        # revalidation replays what was kept and is never refused, but a forcing it replays is still noted.
+        if not self.synthetic:
             return False
         if launch_forces_acceptance(self._recipe(), gv):
             self.forcing.add(gv.name)
+        if is_stack_revalidation(self.params):
+            return False
         lookup = session_golden_lookup(self.session_dir, self.framework)
         # The lookup runs the staged interpreter, up to its timeout: off the event loop, the verdict recorded on it.
         _, refused = await asyncio.to_thread(filter_synthetic_drafts, [gv], recipe=self._recipe(), lookup=lookup)
