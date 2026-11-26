@@ -23,7 +23,6 @@ the tool computes. Output stays small: a line is at most 160 characters, a list 
 from __future__ import annotations
 
 import json
-import re
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import PurePosixPath
@@ -72,6 +71,7 @@ from hyperloom_multibranch.contracts.blackboard.records import (
 from hyperloom_multibranch.contracts.blackboard.vocab import DedupStatus, LearningKind, UnfinishedReason
 from hyperloom_multibranch.blackboard.changes import NO_CHANGE
 from hyperloom_multibranch.blackboard.families import family_of
+from hyperloom_multibranch.blackboard.knowledge.lessons import clip
 from hyperloom_multibranch.blackboard.learning_search import LearningFinder, SessionLearnings, fit_lines
 from hyperloom_multibranch.blackboard.local.blackboard import LEARNING_MAX_CHARS, LEARNING_MIN_CHARS
 
@@ -81,8 +81,6 @@ MAX_LINES = 20
 MAX_REPLY_CHARS = 4000
 #: How much of a left-out patch one reply shows, leaving room in it for the lines around the text.
 PATCH_PAGE_CHARS = MAX_REPLY_CHARS - 300
-#: The id a line ends with, such as ``[exp-...]`` or ``[lsn-...]``: one bracketed word, which a cut must keep.
-_TRAILING_ID = re.compile(r" \[[^\s\[\]]+\]$")
 #: The brief's ceilings name every op of at least :data:`CEILING_MIN_SHARE_PCT` of GPU time, the largest first, up to
 #: this many, so that a direction on small ops can name its targets and claim several together.
 CEILING_OPS = 12
@@ -133,21 +131,10 @@ class BlackboardTool:
     handler: Handler
 
 
-def clip(text: str, limit: int = LINE_CHARS) -> str:
-    """``text`` cut to ``limit`` with an ellipsis; a line ending in an id keeps it, cut before it instead, since the
-    id is what a specialist revises, retires or cites the line by."""
-
-    if len(text) <= limit:
-        return text
-    found = _TRAILING_ID.search(text)
-    kept = found.group() if found and len(found.group()) <= limit // 2 else ""
-    return text[: limit - 3 - len(kept)] + "..." + kept
-
-
 def lines(items: Sequence[str]) -> list[str]:
     """``items`` clipped, at most :data:`MAX_LINES` of them, then how many more there were."""
 
-    shown = [clip(item) for item in items[:MAX_LINES]]
+    shown = [clip(item, LINE_CHARS) for item in items[:MAX_LINES]]
     return [*shown, f"... {len(items) - MAX_LINES} more"] if len(items) > MAX_LINES else shown
 
 
@@ -209,7 +196,8 @@ def render_claim(claim: Claim) -> str:
     intent = claim.intent
     held = clip(
         f"claimed {intent.target} / {intent.mechanism} on {claim.key.parent_commit} for {claim.holder}, "
-        f"expires in {claim.expires_at - claim.heartbeat_at:.0f}s"
+        f"expires in {claim.expires_at - claim.heartbeat_at:.0f}s",
+        LINE_CHARS,
     )
     return f"{held}\nintent fingerprint (submit tests with it): {claim.key.intent_fingerprint}"
 
@@ -218,7 +206,7 @@ def render_ops(shares: OpShares) -> str:
     largest = ", ".join(
         f"{op} {share:.1f}% (ceiling +{amdahl_ceiling_pct(share):.1f}%)" for op, share in shares.largest(LINE_OPS)
     )
-    return clip(f"largest ops on {shares.commit_id} ({shares.job_id}): {largest}")
+    return clip(f"largest ops on {shares.commit_id} ({shares.job_id}): {largest}", LINE_CHARS)
 
 
 def render_ceiling(intent: Intent, shares: OpShares | None) -> str:
@@ -244,7 +232,7 @@ def render_record(record: TestRecord) -> str:
         found.append(f"threshold {judged.threshold_pct:.2f}%, pooled {', '.join(judged.request_ids)}")
     if record.result is not None and record.result.profile_location:
         found.append(f"profile: {record.result.profile_location}")
-    return "\n".join(clip(line) for line in found)
+    return "\n".join(clip(line, LINE_CHARS) for line in found)
 
 
 def render_log(record: BranchLogRecord) -> str:
