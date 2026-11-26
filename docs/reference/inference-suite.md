@@ -15,7 +15,10 @@ and validity stay in Hyperloom.
 
 A fresh session resolves its base launch once, at launch, and freezes it as
 `<session>/base_launch.json` (schema `hyperloom-base-launch/1`). A resume reads
-that file and resolves nothing. Sources are tried in this order, and the first that
+that file and resolves nothing. An InferenceX base also records, under `point`,
+the concurrencies its arm publishes (`source_concs`) and the launch the arm binds
+at each (`source_launches`: `conc`, `args`, `env`, laid out as the base's own),
+which the concurrency sweep seeds each point with; neither enters the digest. Sources are tried in this order, and the first that
 holds a launch for the session's model, board, workload, concurrency, TP and EP
 gives the base:
 

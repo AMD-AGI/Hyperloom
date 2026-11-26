@@ -12,8 +12,8 @@ the run from that file's ``final`` field and nothing else:
   Never restarted.
 * no ``exit.json``, or ``final: false`` -- the process died.  Restarted.
 
-A spec may name its ``flow``; the only one is ``multibranch``, the default.  The retired ``single`` flow is refused, as
-is a spec with neither ``flow`` nor ``multibranch`` (written for the retired default) and any other spec the shared
+A spec may name its ``flow``: ``multibranch``, the default, or ``conc_sweep``, which the multi-branch command runs too.
+The retired ``single`` flow is refused, as is a spec with neither ``flow`` nor ``multibranch`` (written for the retired default) and any other spec the shared
 validation refuses (:func:`hyperloom.hosted.campaign.parse_campaign`).
 
 Before the hand-over, on every leg, the entry runs the packaged ``install.sh`` -- the installer the legacy launchers run

@@ -8,6 +8,7 @@ from __future__ import annotations
 import argparse
 
 from hyperloom.common import predictor_config
+from hyperloom.common.concurrencies import parse_concurrencies
 from hyperloom.common.workload_defaults import DEFAULT_PRECISION
 from hyperloom_common.gpu_identity import AMD_GPU_BOARDS
 
@@ -648,19 +649,11 @@ def add_conc_sweep_arguments(opt: argparse.ArgumentParser) -> None:
     opt.add_argument(
         "--conc-sweep-concs",
         dest="conc_sweep_concs",
-        type=_concurrencies,
+        type=parse_concurrencies,
         default=(),
-        help="Comma-separated concurrencies of the conc sweep for a base no InferenceX recipe gave "
-        "(a --reference-script); ignored for one that did. The session's --conc is always among them.",
+        help="Comma-separated concurrencies of the conc sweep, in place of those the base's InferenceX recipe "
+        "publishes; needed for a base no recipe gave (a --reference-script). The session's --conc is always among them.",
     )
-
-
-def _concurrencies(value: str) -> tuple[int, ...]:
-    """``C1,C2,...`` as the distinct concurrencies it names, ascending; each must be positive."""
-    concs = tuple(sorted({int(item) for item in value.split(",")}))
-    if concs[0] < 1:
-        raise argparse.ArgumentTypeError(f"concurrencies must be positive, got {value}")
-    return concs
 
 
 def add_plateau_arguments(opt: argparse.ArgumentParser) -> None:

@@ -206,7 +206,7 @@ def test_a_hand_written_base_with_a_model_path_and_a_client_command_reads_and_ro
             "osl": None,
         },
         "source": {**written["source"], "api": None, "path": None, "locator": None, "strategy": None, "tools": {}},
-        "point": {"conc": 12, "exact": True, "alternatives": [], "source_concs": []},
+        "point": {"conc": 12, "exact": True, "alternatives": [], "source_concs": [], "source_launches": []},
         "image": {
             **written["image"],
             "framework_version": "0.5.23",
@@ -520,3 +520,14 @@ def test_a_base_document_without_upstream_revisions_is_refused():
 def test_an_upstream_revision_of_the_wrong_form_is_refused(source, revision):
     with pytest.raises(BaseLaunchError):
         UpstreamRevision(source, "https://example/x", revision)
+
+
+@pytest.mark.parametrize(
+    ("concs", "launched"),
+    [((4, 8, 16), (4, 4)), ((4, 8), (4, 32))],
+)
+def test_a_point_whose_source_launches_repeat_or_name_another_concurrency_is_refused(concs, launched):
+    from inference_suite.contracts import LaunchPoint, SourcePointLaunch
+
+    with pytest.raises(BaseLaunchError, match="at most once"):
+        LaunchPoint(16, True, source_concs=concs, source_launches=tuple(SourcePointLaunch(c, (), {}) for c in launched))

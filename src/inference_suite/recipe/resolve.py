@@ -46,6 +46,7 @@ from inference_suite.contracts.base_launch import (
     Redacted,
     RunnerOwned,
     SourceKind,
+    SourcePointLaunch,
     Topology,
     UpstreamRevision,
     UpstreamSource,
@@ -302,6 +303,12 @@ def _layers(launch: SourceLaunch) -> _Layers:
     return _Layers(args, env, _golden_acceptance(launch, launch.golden, golden_args, golden_env))
 
 
+def _point_launches(launch: SourceLaunch) -> tuple[SourcePointLaunch, ...]:
+    """Each launch of ``launch``'s arm laid out as the base's own ``args`` and ``env`` are."""
+    laid_out = ((each.conc, _layers(each)) for each in launch.source_launches)
+    return tuple(SourcePointLaunch(conc, layers.args, _without_runner_env(layers.env)) for conc, layers in laid_out)
+
+
 def _miss_warnings(misses: Sequence[SourceMiss]) -> tuple[str, ...]:
     return tuple(f"{miss.kind.value} holds no launch: {miss.reason}" for miss in misses)
 
@@ -394,7 +401,7 @@ def _recipe_base(
     return BaseLaunch(
         query=query,
         source=launch.source,
-        point=LaunchPoint(launch.conc, launch.exact, alternatives, launch.source_concs),
+        point=LaunchPoint(launch.conc, launch.exact, alternatives, launch.source_concs, _point_launches(launch)),
         image=recipe_image_facts(launch.image, snapshot.latest_releases.get(launch.framework)),
         framework=launch.framework,
         entrypoint=launch.entrypoint,
