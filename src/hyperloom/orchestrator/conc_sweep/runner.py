@@ -24,7 +24,7 @@ from hyperloom.common.overlay import is_safe_path_entry, overlay_is_loadable
 from hyperloom.common.perf_metric import GRADED_INTVTY, GRADED_OUTPUT, agentx_replay_session, is_agentx_mode
 from hyperloom.inference_optimizer.framework_registry import is_scriptable, native_component
 from hyperloom.inference_optimizer.grading import resolved_grading
-from hyperloom.inference_optimizer.session.session_paths import reports_dir, runs_root
+from hyperloom.inference_optimizer.session.session_paths import BREAKDOWN_FILENAME, reports_dir, runs_root
 from hyperloom.orchestrator.actions.cancel_channel import current_cancel_scope
 from hyperloom.orchestrator.actions.executors._proposal_identity import controls_of, is_executable, normalize_proposal
 from hyperloom.orchestrator.actions.executors.grid._grid_runner import (
@@ -40,9 +40,10 @@ from hyperloom.orchestrator.actions.executors.workload._workload_envs import (
     BenchmarkTarget,
     FrameworkScriptMismatchError,
     MaterializeOptions,
+    PromptDatasetError,
     default_baseline_config,
-    num_prompts_per_conc,
     prepare_grid_benchmark_config,
+    round_num_prompts,
 )
 from hyperloom.orchestrator.actions.stop_attribution import ORCHESTRATOR_CANCELLED_CLASS
 from hyperloom.orchestrator.state.base_launch import frozen_base
@@ -117,6 +118,8 @@ def _prepare(state: SharedState, session_dir: Path) -> _Setup | str:
         benchmark_script=state.accepted_baseline_script(),
     )
     try:
+        # Every rung counts the session's prompt dataset, so one that cannot be counted here is found before any runs.
+        round_num_prompts(state.conc, state.isl, state.osl, state.prompt_dataset)
         materialized = prepare_grid_benchmark_config(
             base_yaml,
             workspace,
@@ -126,6 +129,9 @@ def _prepare(state: SharedState, session_dir: Path) -> _Setup | str:
     except FrameworkScriptMismatchError:
         log.warning("conc_sweep: the baseline config does not match the session's framework", exc_info=True)
         return "framework_script_mismatch"
+    except PromptDatasetError as exc:
+        log.warning("conc_sweep: %s", exc)
+        return "prompt_dataset_unreadable"
     return _Setup(workspace, materialized, target)
 
 
@@ -174,7 +180,7 @@ class _Sweep:
             "CONC": str(conc),
             "ISL": str(state.isl),
             "OSL": str(state.osl),
-            "NUM_PROMPTS": str(conc * num_prompts_per_conc(state.isl, state.osl)),
+            "NUM_PROMPTS": str(round_num_prompts(conc, state.isl, state.osl, state.prompt_dataset)),
             "RUN_EVAL": "false",
         }
         variant = GridVariant(
@@ -190,7 +196,7 @@ class _Sweep:
     def record(self, arm: Arm, result: VariantResult) -> None:
         point = point_from_variant(result, arm=arm.name)
         self.measured[arm.name][point["conc"]] = point
-        write_report(self.payload(), reports_dir(self.session_dir))
+        _write(self.session_dir, self.payload())
 
     def payload(self, *, final: bool = False) -> dict[str, Any]:
         state = self.state
@@ -234,6 +240,11 @@ class _Sweep:
         return "partial" if summary["successful_pairs"] else "failed"
 
 
+def _write(session_dir: Path, payload: dict[str, Any]) -> None:
+    """Write the report into the session's ``reports/`` and carry it in the session's breakdown."""
+    write_report(payload, reports_dir(session_dir), breakdown=session_dir / BREAKDOWN_FILENAME)
+
+
 def _header(state: SharedState, session_dir: Path) -> dict[str, Any]:
     return {
         "schema_version": SCHEMA_VERSION,
@@ -256,7 +267,7 @@ def _skipped(state: SharedState, session_dir: Path, reason: str, **detail: Any) 
         "optimized": {"points": []},
         "summary": {},
     }
-    write_report(payload, reports_dir(session_dir))
+    _write(session_dir, payload)
     log.info("conc_sweep: skipped (%s)", reason)
     return payload
 
@@ -282,7 +293,7 @@ def _resume(sweep: _Sweep) -> None:
                 sweep.measured[arm.name][point["conc"]] = point
 
 
-def _log_plan(sweep: _Sweep, per_point_sec: float, grant_end_unix: float | None) -> None:
+def _log_plan(sweep: _Sweep, per_point_sec: float) -> None:
     rungs = sum(len(sweep.pending(arm)) for arm in sweep.arms)
     log.info(
         "conc_sweep: plan source=%s concs=%s arms=baseline,optimized serial pending_points=%d "
@@ -293,12 +304,6 @@ def _log_plan(sweep: _Sweep, per_point_sec: float, grant_end_unix: float | None)
         sweep.estimated_sec / 3600.0,
         per_point_sec,
     )
-    if grant_end_unix is None:
-        return
-    left = grant_end_unix - time.time()
-    log.info("conc_sweep: the run's grant has %.1fh left", left / 3600.0)
-    if sweep.estimated_sec > left:
-        log.warning("conc_sweep: the estimate outlasts the run's grant; the platform may end the sweep early")
 
 
 async def _run_rung(sweep: _Sweep, arm: Arm, conc: int, launch: GridLaunch) -> VariantResult:
@@ -357,7 +362,7 @@ async def _run_arm(sweep: _Sweep, arm: Arm) -> None:
             log.error("conc_sweep: arm=%s pids %s outlived SIGKILL; %s keeps them", arm.name, survivors, pid_dir)
 
 
-async def run_conc_sweep(session_dir: Path, *, grant_end_unix: float | None = None) -> dict[str, Any]:
+async def run_conc_sweep(session_dir: Path) -> dict[str, Any]:
     """Sweep the finished session in ``session_dir`` and return the report it wrote to ``reports/``."""
     state = SharedState.load_or_init(session_dir)
     reason = decline_reason(state)
@@ -379,7 +384,7 @@ async def run_conc_sweep(session_dir: Path, *, grant_end_unix: float | None = No
     sweep = _Sweep(state, session_dir, setup, points, optimized, estimated_sec=0.0)
     _resume(sweep)
     sweep.estimated_sec = per_point_sec * sum(len(sweep.pending(arm)) for arm in sweep.arms)
-    _log_plan(sweep, per_point_sec, grant_end_unix)
+    _log_plan(sweep, per_point_sec)
     for arm in sweep.arms:
         if sweep.observe_cancel():
             break
@@ -394,7 +399,7 @@ async def run_conc_sweep(session_dir: Path, *, grant_end_unix: float | None = No
     )
     if ceiling is not None:
         payload["roofline_ceiling"] = ceiling
-    write_report(payload, reports_dir(session_dir))
+    _write(session_dir, payload)
     curve = ConcCurveOptions(state.model_name, state.gpu_type, state.tp, state.isl, state.osl)
     publish_curve(payload, session_dir, curve)
     log.info(

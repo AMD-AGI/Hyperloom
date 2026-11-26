@@ -1,22 +1,19 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""``optimize --session-dir``, the hosted session-directory name, and the application-private archive directory."""
+"""``optimize --session-dir``, the session skeleton, and the application-private archive directory."""
 
 from __future__ import annotations
 
 import argparse
-import json
 import os
 import stat
 import subprocess
 import sys
-from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
 
-from hyperloom_common.tests.shared_accounts import other_accounts
 from hyperloom.inference_optimizer.cli import session_resume
 from hyperloom.inference_optimizer.breakdown import session_package
 from hyperloom.inference_optimizer.cli.parser import _build_parser
@@ -103,83 +100,8 @@ def test_resume_refuses_a_session_dir_flag(workspace, capsys):
     assert "cannot be combined with --resume-from" in capsys.readouterr().err
 
 
-# -- the hosted session directory --------------------------------------------------------------------------------
-_CREATED = datetime(2026, 10, 23, 8, 30, 5, tzinfo=timezone.utc)
-
-
-def test_the_hosted_session_dir_is_a_function_of_the_run(workspace):
-    first = paths.hosted_session_dir("/shared/models/Qwen3-8B", _CREATED, "run-1")
-    assert first == paths.hosted_session_dir("/shared/models/Qwen3-8B", _CREATED, "run-1")
-    assert first.parent == workspace / "Qwen3-8B"
-    assert first.name.startswith("20261023T083005Z-") and len(first.name) == len("20261023T083005Z-") + 8
-    assert first != paths.hosted_session_dir("/shared/models/Qwen3-8B", _CREATED, "run-2")
-
-
-def test_the_hosted_session_dir_reads_the_creation_time_in_utc(workspace):
-    other_zone = _CREATED.astimezone(timezone(timedelta(hours=8)))
-    assert paths.hosted_session_dir("/m", other_zone, "r") == paths.hosted_session_dir("/m", _CREATED, "r")
-
-
-# -- the archive directory ---------------------------------------------------------------------------------------
 def _mode(path):
     return stat.S_IMODE(os.lstat(path).st_mode)
-
-
-def test_the_archive_root_is_shared_by_the_runs_group_and_closed_to_everyone_else(tmp_path):
-    tmp_path.chmod(0o2775)  # storage set up to be shared: setgid, group-writable, closed to others
-    root = paths.ensure_archive_root(tmp_path / "session")
-    assert root == paths.archive_root(tmp_path / "session") == tmp_path / "session" / "archive"
-    assert (_mode(root), _mode(tmp_path / "session")) == (0o2770, 0o2775)
-
-
-def test_an_archive_root_an_earlier_leg_made_is_taken_as_it_is(tmp_path):
-    (tmp_path / "archive").mkdir()
-    (tmp_path / "archive").chmod(0o750)
-    assert _mode(paths.ensure_archive_root(tmp_path)) == 0o750, "never chmodded"
-
-
-@pytest.mark.parametrize("mode", [0o777, 0o2775, 0o2771, 0o754])
-def test_an_archive_root_open_to_accounts_outside_its_group_is_refused_and_left_as_it_was(tmp_path, mode):
-    (tmp_path / "archive").mkdir()
-    (tmp_path / "archive").chmod(mode)
-    with pytest.raises(PermissionError, match=f"is open to accounts outside its group \\(mode {mode:04o}, not 2770\\)"):
-        paths.ensure_archive_root(tmp_path)
-    assert _mode(tmp_path / "archive") == mode
-
-
-@pytest.mark.parametrize("planted", ["link", "file"])
-def test_an_archive_root_that_is_not_a_directory_is_refused(tmp_path, planted):
-    (tmp_path / "elsewhere").mkdir()
-    archive = tmp_path / "archive"
-    archive.symlink_to(tmp_path / "elsewhere") if planted == "link" else archive.write_text("")
-    with pytest.raises(PermissionError, match="is not a directory"):
-        paths.ensure_archive_root(tmp_path)
-
-
-_LEG = """
-import json, sys
-import session_paths
-try:
-    print(json.dumps(str(session_paths.ensure_archive_root(session_paths.Path(sys.argv[1])))))
-except PermissionError as exc:
-    print(json.dumps({"refused": str(exc)}))
-"""
-
-
-def test_another_accounts_archive_root_is_taken_when_this_account_can_write_it_and_refused_naming_it_when_not():
-    with other_accounts() as accounts:
-        accounts.add_module(Path(paths.__file__), "session_paths")
-        session = accounts.shared_dir("user-data") / "session"
-        root = json.loads(accounts.run(accounts.first, f"import sys\nsys.argv[1:] = [{str(session)!r}]\n{_LEG}"))
-        assert (os.stat(root).st_uid, os.stat(root).st_gid, _mode(root)) == (accounts.first, accounts.group, 0o2770)
-
-        assert (
-            json.loads(accounts.run(accounts.second, f"import sys\nsys.argv[1:] = [{str(session)!r}]\n{_LEG}")) == root
-        )
-        refused = json.loads(accounts.run(accounts.outsider, f"import sys\nsys.argv[1:] = [{str(session)!r}]\n{_LEG}"))
-        assert refused == {
-            "refused": f"this account cannot write the archive {root}: EACCES (owner {accounts.first}:{accounts.group} 2770)"
-        }
 
 
 def test_the_session_skeleton_is_group_shared_whatever_the_umask(workspace):

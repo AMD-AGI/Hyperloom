@@ -224,7 +224,6 @@ class AuthoringDispatch:
     attempt: int
     failure_kind: str = ""
     launch_log: Any = ""
-    candidate_refs: Any = None
     mode: str = ""
     origin: str = ""
 
@@ -236,7 +235,6 @@ class AuthoringDispatch:
             "failure_kind": str(self.failure_kind or ""),
             "dispatched_at": _now(),
             "launch_log_excerpt": _tail(self.launch_log),
-            "candidate_refs": [str(ref) for ref in _as_list(self.candidate_refs)],
         }
 
 
@@ -328,7 +326,6 @@ class AuthoringRound:
             "effective_config": _config_row(res.get("enablement_effective_config")),
             "stack_action": _stack_action_row(res.get("enablement_kept_stack_action")),
             "runtime": _runtime_row(res.get("enablement_active_runtime")),
-            "localization_manifest": _as_dict(res.get("enablement_localization_manifest")) or None,
             # The next round's gap, on the round that revealed it.
             "next_launch_log_excerpt": _tail(res.get("enablement_launch_log")),
         }
@@ -825,7 +822,6 @@ def _stack_action_row(action: Any) -> dict[str, Any] | None:
     if not row:
         return None
     return {
-        "kind": str(row.get("kind") or ""),
         "framework": str(row.get("framework") or ""),
         "capability": str(row.get("capability") or ""),
         "acquisition_method": str(row.get("acquisition_method") or ""),

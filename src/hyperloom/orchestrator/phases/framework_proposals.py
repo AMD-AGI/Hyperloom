@@ -31,12 +31,9 @@ FRAMEWORK_CRITIC_DENIED_STATUS: str = "critic_denied"
 def _forward_enablement_carriers(src: dict[str, Any], dst: dict[str, Any]) -> None:
     """Copy the round's enablement context from specialist params to the integrate task.
 
-    The dispatched verdict and the pre-patch boot observation travel on every
-    enablement round; the eval-origin trigger context only on an eval-origin one.
+    The pre-patch boot observation travels on every enablement round; the
+    eval-origin trigger context only on an eval-origin one.
     """
-    signature = src.get("enablement_failure_signature")
-    if isinstance(signature, dict) and signature:
-        dst["enablement_failure_signature"] = dict(signature)
     before_path = str(src.get("enablement_before_observation_path") or "")
     if before_path:
         dst["enablement_before_observation_path"] = before_path

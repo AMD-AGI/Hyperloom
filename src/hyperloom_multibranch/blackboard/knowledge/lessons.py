@@ -17,6 +17,7 @@ is from the roofline bound of each metric PRELUDE recorded one for.
 
 from __future__ import annotations
 
+import re
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from enum import Enum
@@ -27,6 +28,8 @@ from hyperloom_multibranch.contracts.blackboard.vocab import COMMITTING, Conclus
 
 MAX_ITEMS = 20
 MAX_ITEM_CHARS = 300
+#: The id a line ends with, such as ``[exp-...]`` or ``[lsn-...]``: one bracketed word, which a cut must keep.
+_TRAILING_ID = re.compile(r" \[[^\s\[\]]+\]$")
 UNCHECKED_OUTPUTS = ", outputs not checked"
 _WORKED = COMMITTING | {Conclusion.MERGED}
 _SETTLED = frozenset({HypothesisStatus.CONFIRMED, HypothesisStatus.FALSIFIED})
@@ -183,10 +186,21 @@ def session_lessons(snapshot: BlackboardSnapshot, final_commit: str | None = Non
     )
 
 
-def clipped(text: str) -> str:
-    """``text`` cut to :data:`MAX_ITEM_CHARS`, an ellipsis marking the cut."""
+def clip(text: str, limit: int) -> str:
+    """``text`` cut to ``limit`` with an ellipsis; a line ending in an id keeps it, cut before it instead, since the
+    id is what a specialist revises, retires or cites the line by."""
 
-    return text if len(text) <= MAX_ITEM_CHARS else text[: MAX_ITEM_CHARS - 3] + "..."
+    if len(text) <= limit:
+        return text
+    found = _TRAILING_ID.search(text)
+    kept = found.group() if found and len(found.group()) <= limit // 2 else ""
+    return text[: limit - 3 - len(kept)] + "..." + kept
+
+
+def clipped(text: str) -> str:
+    """``text`` cut to :data:`MAX_ITEM_CHARS` as :func:`clip` cuts."""
+
+    return clip(text, MAX_ITEM_CHARS)
 
 
 def listed(texts: Iterable[str]) -> tuple[str, ...]:
@@ -202,6 +216,7 @@ __all__ = [
     "Lesson",
     "LessonKind",
     "SessionLessons",
+    "clip",
     "clipped",
     "direction",
     "hypotheses",

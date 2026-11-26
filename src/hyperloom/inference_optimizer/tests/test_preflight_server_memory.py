@@ -35,7 +35,7 @@ def isolated_preflight(tmp_path, monkeypatch):
     for name in ("_load_dotenv_fallback", "_load_kernel_agent_env_fallback", "_derive_runtime_paths"):
         monkeypatch.setattr(preflight, name, lambda: None)
     monkeypatch.setattr(preflight, "_normalize_legacy_deepseek_env", dict)
-    monkeypatch.setattr(preflight, "_expand_custom_header_env_refs", lambda: None)
+    monkeypatch.setattr(preflight, "expand_custom_header_env_refs", lambda: None)
     monkeypatch.setattr(preflight, "_validate_credentials", Mock(side_effect=PreflightReachedCredentials))
     monkeypatch.setattr(
         cli,

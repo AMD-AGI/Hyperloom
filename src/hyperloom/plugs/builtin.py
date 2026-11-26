@@ -42,7 +42,6 @@ _SOCKETS = (
 
 _IMPLEMENTATIONS = (
     Implementation(_EVENTS, "local", lazy("hyperloom.plugs.events_local:create")),
-    Implementation(_EVENTS, "hosted", lazy("hyperloom.hosted.events:create")),
     Implementation(NATIVE_BUILDS_SOCKET, _SESSION, lazy("hyperloom.measure.runner.native.session_plug:create")),
 )
 

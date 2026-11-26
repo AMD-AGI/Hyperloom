@@ -171,7 +171,7 @@ python3 -m sglang.launch_server --model-path /mnt/shared/models/DeepSeek-V4-Flas
 "multibranch": {"workload": "inferencex", "reference_script": "/mnt/shared/hyperloom/launch/dsv4-flash-mi355x.sh"}
 ```
 
-A multi-branch spec does not take `launch.server_args` or `launch.extra_env`, which only flow `single` reads: a spec
+A spec does not take `launch.server_args` or `launch.extra_env`, which only the retired flow `single` read: a spec
 that sets either ends the run (exit code 2), naming `multibranch.reference_script`, instead of running without them. A
 script that cannot serve as the base ends the run the same way, naming why.
 

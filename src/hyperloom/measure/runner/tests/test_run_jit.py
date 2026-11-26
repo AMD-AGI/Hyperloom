@@ -425,6 +425,20 @@ def test_a_profiles_patched_copy_of_its_framework_on_the_import_path_finds_the_s
     assert _keys(elsewhere)["aiter_jit"] != _keys(base)["aiter_jit"], "any other import path is an input"
 
 
+def test_a_profiles_shape_tool_on_the_import_path_finds_the_same_cache(rig) -> None:
+    base, _, _ = rig.run("base", _arm(rig))
+    tool = "/opt/tracelens/TraceLens/TraceUtils/kernel_shape_tool"
+    copy = "/tmp/hyperloom-tracelens/sglang-gc-0123/site"
+    discovery = {"TRACELENS_SHAPE_DISCOVERY": "1"}
+    profiled, _, _ = rig.run("profiled", _arm(rig, envs={"PYTHONPATH": tool, **discovery}))
+    patched, _, _ = rig.run("patched", _arm(rig, envs={"PYTHONPATH": f"{copy}:{tool}", **discovery}))
+    elsewhere, _, _ = rig.run("elsewhere", _arm(rig, envs={"PYTHONPATH": f"/somewhere/else:{tool}", **discovery}))
+
+    assert _keys(profiled) == _keys(base), "the shape tool changes nothing aiter builds"
+    assert _keys(patched) == _keys(base), "nor does it with TraceLens's patched copy beside it"
+    assert _keys(elsewhere)["aiter_jit"] != _keys(base)["aiter_jit"], "any other import path is still an input"
+
+
 def test_an_aiter_patch_misses_the_aiter_caches_and_still_hits_the_one_triton_keeps_content_addressed(rig) -> None:
     base, _, base_run = rig.run("base", _arm(rig))
     rig.publish(base_run, base)

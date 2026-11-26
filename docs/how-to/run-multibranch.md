@@ -258,7 +258,8 @@ measurements of the commits as they are: no accuracy and no checks.
 The sweep logs its estimated length (each point priced as the session's longest root test) and, hosted, what is
 left of the grant. It writes `MB-reports/conc_sweep_summary.json`, `conc_sweep_raw.csv` and `conc_sweep_curve.png`,
 the summary after every test, with `status` `succeeded`, `partial`, `failed`, `skipped` or `cancelled` (a stop
-signal; the measured points stay). A later run measures only the points not yet measured, and a hosted restart of a
+signal; the measured points stay), and carries the summary each time as `conc_sweep_summary` in
+`MB-reports/session_breakdown.json`. A later run measures only the points not yet measured, and a hosted restart of a
 session that closed before its sweep finished sweeps it again before it writes `exit.json`.
 
 ## Exit codes

@@ -80,7 +80,7 @@ from hyperloom.measure.round_marks import boot_parts
 from hyperloom.measure.runner.hardware import GpuFacts
 from hyperloom.measure.runner.service import RunnerFailure
 from hyperloom.measure.spec import EnvRoot, MeasurementSpec
-from hyperloom.orchestrator.actions.executors import is_patched_copy
+from hyperloom.orchestrator.actions.executors import is_kernel_shape_tool, is_patched_copy
 
 __all__ = [
     "FRAMEWORK_PYTHON_ENV",
@@ -463,10 +463,15 @@ def _touched(inputs: _Inputs, base: Path, effective: Path) -> Touched | str:
 def _build_environment(environment: Mapping[str, str], farm: Farm | None) -> dict[str, str]:
     """The server's environment with the places of the test's own farm left out, its place on ``PYTHONPATH`` and its copy
     of the meta directory: a path of this test's own is no input (the patched tree is, and the key holds that). Nor is a
-    profile's copy of its framework with TraceLens's patch laid in, which changes nothing aiter builds."""
+    profile's copy of its framework with TraceLens's patch laid in, or the TraceLens shape tool a profile puts on the path
+    instead, which change nothing aiter builds."""
     result = dict(environment)
     own = {str(farm.site)} if farm is not None else set()
-    own.update(part for part in result.get(_PYTHONPATH, "").split(os.pathsep) if is_patched_copy(part))
+    own.update(
+        part
+        for part in result.get(_PYTHONPATH, "").split(os.pathsep)
+        if is_patched_copy(part) or is_kernel_shape_tool(part)
+    )
     if own and _PYTHONPATH in result:
         parts = [part for part in result.pop(_PYTHONPATH).split(os.pathsep) if part and part not in own]
         if parts:
