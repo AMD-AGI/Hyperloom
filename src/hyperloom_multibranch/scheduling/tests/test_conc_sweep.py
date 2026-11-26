@@ -66,7 +66,9 @@ def _layout(tmp_path: Path, chosen: FinalCandidate | None = CHOSEN, gain_pct: fl
 
 @pytest.fixture
 def inferencex_base(monkeypatch: pytest.MonkeyPatch) -> None:
-    point = SimpleNamespace(source_concs=(4, 32), source_launches=())
+    from inference_suite.contracts import SourcePointLaunch
+
+    point = SimpleNamespace(source_concs=(4, 32), source_launches=tuple(SourcePointLaunch(c, (), {}) for c in (4, 32)))
     source = SimpleNamespace(kind=SourceKind.INFERENCEX, repo="InferenceX", commit="c22b4b2", entry="e", locator="l")
     image = SimpleNamespace(run="sglang:v0.5", recipe=None)
     launch = SimpleNamespace(source=source, point=point, image=image, args=(), env={}, golden_al=None, cards=2)
@@ -380,3 +382,16 @@ def test_under_a_deadline_a_test_of_several_points_runs_those_that_fit_and_skips
     assert tests.requests[0].concurrency == (16, 4), "the workload's conc first, then low to high"
     baseline = {p["conc"]: p["status"] for p in payload["baseline"]["points"]}
     assert baseline[32] == final.SKIPPED_BUDGET
+
+
+def test_an_inferencex_base_frozen_before_it_recorded_its_launches_is_not_swept(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    from hyperloom.orchestrator.conc_sweep.points import NO_SOURCE_LAUNCHES
+
+    point = SimpleNamespace(source_concs=(4, 32), source_launches=())
+    source = SimpleNamespace(kind=SourceKind.INFERENCEX, repo="InferenceX", commit="c22b4b2", entry="e", locator="l")
+    launch = SimpleNamespace(source=source, point=point, args=(), env={}, golden_al=None, cards=2)
+    monkeypatch.setattr(base_launch, "frozen_base", lambda _toolbox: SimpleNamespace(launch=launch))
+
+    assert final.sweep_plan(_layout(tmp_path), _settings()) == NO_SOURCE_LAUNCHES

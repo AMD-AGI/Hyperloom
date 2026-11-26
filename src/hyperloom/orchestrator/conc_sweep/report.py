@@ -27,6 +27,7 @@ from hyperloom.inference_optimizer.roofline_model_meta import load_model_meta
 from hyperloom.inference_optimizer.session.session_paths import reports_dir
 
 from .plot import ConcCurveOptions, render_conc_sweep_curve
+from .points import SCHEMA_VERSION, point_launches
 
 if TYPE_CHECKING:
     from hyperloom.orchestrator.actions.executors.grid._grid_runner import VariantResult
@@ -45,8 +46,9 @@ SETTLED = frozenset({"succeeded", "partial", "skipped"})
 
 def run_facts(session: Path) -> dict[str, Any]:
     """The report header's provenance: the cards, image and recipe of the base the session at ``session`` froze (none
-    where it froze none or its base fails its checks, which a skip reports), and the host and process writing the
-    report, with when -- a report still ``in_progress`` whose process is gone was cut short."""
+    where it froze none or its base fails its checks, which a skip reports), where its points' launches come from, and
+    the host and process writing the report, with when -- a report still ``in_progress`` whose
+    process is gone was cut short."""
     from hyperloom.orchestrator.state import base_launch
 
     try:
@@ -67,6 +69,7 @@ def run_facts(session: Path) -> dict[str, Any]:
     return {
         **({} if base is None else {"gpu_count": base.cards}),
         "base_image": None if base is None else base.image.run or base.image.recipe,
+        "point_launches": point_launches(base),
         "recipe": recipe,
         "host": socket.gethostname(),
         "pid": os.getpid(),
@@ -237,6 +240,16 @@ def _model_meta_record(meta: Any) -> dict[str, Any]:
         "head_dim": meta.head_dim,
         "weight_dtype_bytes": meta.weight_dtype_bytes,
     }
+
+
+def take_earlier_summary(reports: Path) -> dict[str, Any] | None:
+    """The summary an earlier run of the sweep left in ``reports`` when this schema wrote it; one of another schema is
+    set aside as ``conc_sweep_summary.<its version>.json``, since the run about to start writes over it."""
+    earlier = read_summary(reports)
+    if earlier is None or earlier.get("schema_version") == SCHEMA_VERSION:
+        return earlier
+    (reports / SUMMARY_FILE).rename(reports / f"conc_sweep_summary.{earlier.get('schema_version')}.json")
+    return None
 
 
 def read_summary(reports: Path) -> dict[str, Any] | None:

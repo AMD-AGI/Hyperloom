@@ -57,13 +57,13 @@ from inference_suite.argv import argv_flag_occurrences, canonical_flag_name, rem
 from inference_suite.contracts import BaseLaunch
 
 from .plot import ConcCurveOptions
-from .points import SCHEMA_VERSION, SweepPoints, ladder, sweep_points
+from .points import SCHEMA_VERSION, SweepPoints, ladder, launches_missing, sweep_points
 from .report import (
     ArmCurves,
     build_roofline_ceiling,
     point_from_variant,
     publish_curve,
-    read_summary,
+    take_earlier_summary,
     run_facts,
     write_report,
 )
@@ -354,8 +354,8 @@ def _skipped(state: SharedState, session_dir: Path, reason: str, **detail: Any) 
 def _resume(sweep: _Sweep) -> None:
     """Keep the points an earlier run of the same sweep measured on the same launch of each arm, so only the rest
     are run."""
-    earlier = read_summary(reports_dir(sweep.session_dir))
-    if not earlier or earlier.get("schema_version") != SCHEMA_VERSION:
+    earlier = take_earlier_summary(reports_dir(sweep.session_dir))
+    if not earlier:
         return
     for arm in sweep.arms:
         section = earlier[arm.name]
@@ -485,15 +485,17 @@ async def run_conc_sweep(session_dir: Path, *, concs: Sequence[int] = ()) -> dic
     if optimized.overlay and not (is_safe_path_entry(optimized.overlay) and overlay_is_loadable(optimized.overlay)):
         return _skipped(state, session_dir, "optimized_overlay_unavailable")
     frozen = frozen_base(session_dir)
-    points = sweep_points(None if frozen is None else frozen.launch, state.conc, concs or state.conc_sweep_concs)
+    base = None if frozen is None else frozen.launch
+    if (missing := launches_missing(base)) is not None:
+        return _skipped(state, session_dir, missing)
+    points = sweep_points(base, state.conc, concs or state.conc_sweep_concs)
     if points is None:
         return _skipped(state, session_dir, "no_sweep_points")
     setup = _prepare(state, session_dir)
     if isinstance(setup, str):
         return _skipped(state, session_dir, setup)
-    launch = None if frozen is None else frozen.launch
     per_point_sec = state.baseline_runtime_sec
-    sweep = _Sweep(state, session_dir, setup, points, optimized, launch)
+    sweep = _Sweep(state, session_dir, setup, points, optimized, base)
     _resume(sweep)
     sweep.estimated_sec = per_point_sec * sum(len(sweep.pending(arm)) for arm in sweep.arms)
     _log_plan(sweep, per_point_sec)

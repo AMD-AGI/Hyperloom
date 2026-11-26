@@ -42,6 +42,7 @@ def _base(
 ) -> SimpleNamespace:
     source = SimpleNamespace(kind=kind, repo="InferenceX", commit="c22b4b2", entry="entry", locator="recipe.yaml:c16")
     image = SimpleNamespace(run="vllm/vllm-openai-rocm:v0.32.0", recipe=None)
+    launches = launches or tuple(SourcePointLaunch(conc, tuple(args.split()), {}) for conc in concs)
     point = SimpleNamespace(source_concs=concs, source_launches=launches)
     return SimpleNamespace(
         source=source, point=point, image=image, args=tuple(args.split()), env={}, golden_al=None, cards=2
@@ -423,6 +424,8 @@ def test_a_later_run_measures_again_a_report_an_earlier_schema_wrote(session_dir
     asyncio.run(runner.run_conc_sweep(session_dir))
 
     assert len(grid.calls) == 8
+    kept = json.loads((session_dir / "reports" / "conc_sweep_summary.2.0.json").read_text())
+    assert kept["schema_version"] == "2.0", "the earlier schema's report is set aside, not written over"
 
 
 def test_cold_points_run_a_concurrencys_two_arms_together(session_dir: Path, grid: SimpleNamespace):
@@ -445,3 +448,28 @@ def test_a_later_run_over_other_points_keeps_the_points_both_runs_name(session_d
 
     assert not any(call["name"].endswith("_conc16") for call in grid.calls)
     assert {call["name"].rsplit("conc", 1)[1] for call in grid.calls} == {"4", "8", "32"}
+
+
+def test_an_inferencex_base_frozen_before_it_recorded_its_launches_is_skipped_until_backfilled(
+    session_dir: Path, grid: SimpleNamespace, monkeypatch: pytest.MonkeyPatch
+):
+    _state(session_dir)
+    frozen = SimpleNamespace(launch=_base(SourceKind.INFERENCEX, (4, 8, 32)))
+    frozen.launch.point.source_launches = ()
+    monkeypatch.setattr(runner, "frozen_base", lambda _: frozen)
+    monkeypatch.setattr(state_base_launch, "frozen_base", lambda _: frozen)
+
+    payload = asyncio.run(runner.run_conc_sweep(session_dir))
+
+    assert (payload["status"], payload["skip_reason"]) == ("skipped", points.NO_SOURCE_LAUNCHES)
+    assert grid.calls == [] and payload["point_launches"] == points.LAUNCHES_SESSION
+
+
+def test_the_report_says_its_points_take_the_sources_launch_at_each_concurrency(
+    session_dir: Path, grid: SimpleNamespace
+):
+    _state(session_dir)
+
+    payload = asyncio.run(runner.run_conc_sweep(session_dir))
+
+    assert payload["point_launches"] == points.LAUNCHES_SOURCE

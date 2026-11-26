@@ -51,8 +51,16 @@ from typing import TYPE_CHECKING, Any
 from hyperloom.common.gain_math import conc_pair_comparison, gain_pct
 from hyperloom.contracts.measurement import Purpose, TestKind, TestResult, Validity
 from hyperloom.orchestrator.conc_sweep.plot import ConcCurveOptions
-from hyperloom.orchestrator.conc_sweep.points import SCHEMA_VERSION, SweepPoints, ladder, sweep_points
-from hyperloom.orchestrator.conc_sweep.report import SETTLED, read_summary, run_facts, write_curve, write_report
+from hyperloom.measure.pins import ImagePinError, active_image
+from hyperloom.orchestrator.conc_sweep.points import SCHEMA_VERSION, SweepPoints, ladder, launches_missing, sweep_points
+from hyperloom.orchestrator.conc_sweep.report import (
+    SETTLED,
+    read_summary,
+    run_facts,
+    take_earlier_summary,
+    write_curve,
+    write_report,
+)
 from hyperloom_common.jsonio import read_json_strict
 from hyperloom_multibranch.contracts.gate import NotMeasured
 from hyperloom_multibranch.contracts.blackboard import INTEGRATION_BRANCH, Blackboard
@@ -490,7 +498,10 @@ def sweep_plan(layout: SessionLayout, settings: RunSettings) -> SweepPlan | str:
 
     frozen = frozen_base(layout.toolbox)
     workload = settings.workload
-    points = sweep_points(None if frozen is None else frozen.launch, workload.conc, settings.conc_sweep_concs)
+    base = None if frozen is None else frozen.launch
+    if (missing := launches_missing(base)) is not None:
+        return missing
+    points = sweep_points(base, workload.conc, settings.conc_sweep_concs)
     if points is None:
         return NO_SWEEP_POINTS
     if frozen is None:
@@ -536,7 +547,17 @@ def _header(layout: SessionLayout, workload: Workload) -> dict[str, Any]:
         "tp": workload.tp,
         "ep": workload.ep,
         **run_facts(layout.toolbox),
+        "run_image": _run_image(),
     }
+
+
+def _run_image() -> str | None:
+    """The image the measurement pins name, which the sweep's tests run; ``None`` where they are not set."""
+    try:
+        image = active_image()
+    except ImagePinError:
+        return None
+    return f"{image.ref}@{image.digest}"
 
 
 def write_skipped(layout: SessionLayout, workload: Workload, reason: str) -> dict[str, Any]:
@@ -682,8 +703,8 @@ class ConcSweep:
     def _resume(self) -> None:
         """Keep the points an earlier run of the same sweep measured on the same commit of each arm, so only the rest
         are run."""
-        earlier = read_summary(self.layout.reports)
-        if not earlier or earlier.get("schema_version") != SCHEMA_VERSION:
+        earlier = take_earlier_summary(self.layout.reports)
+        if not earlier:
             return
         for arm, commit in ((BASELINE, self.root), (OPTIMIZED, self.plan.chosen)):
             if earlier[arm].get("commit") != commit:
