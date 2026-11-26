@@ -5,7 +5,7 @@
 
 Every test of a session passes acceptance, and every commit is the recipe of a request it accepted, so a session whose
 acceptance refuses a recipe that holds a patch or a kernel artifact hands on server arguments and environment variables
-alone.
+alone. A setting whose value names a file of the session carries that file in by name, and is refused with them.
 """
 
 from __future__ import annotations
@@ -123,6 +123,45 @@ async def test_the_check_that_queues_nothing_refuses_as_a_submit_does(tmp_path: 
         await rig.toolbox.check_test(req(purpose=Purpose.INTEGRATION, change=WITH_PATCH))
     assert refused.value.code == LAUNCH_CONFIG_ONLY_CODE
     await rig.toolbox.check_test(req(purpose=Purpose.INTEGRATION, change=SETTINGS))
+
+
+def _naming(path: Path, where: str) -> RecipeDelta:
+    """A change to settings alone whose environment variable, or server argument, names ``path``."""
+    if where == "environment-variable":
+        return RecipeDelta(config=ConfigDelta(envs={"SGLANG_TUNED_TABLE": str(path)}))
+    return RecipeDelta(config=ConfigDelta(server_args=f"--chat-template {path}"))
+
+
+@pytest.mark.parametrize(
+    ("where", "named"),
+    [("environment-variable", "SGLANG_TUNED_TABLE"), ("server-argument", "server arguments")],
+    ids=["environment-variable", "server-argument"],
+)
+async def test_a_setting_that_names_a_file_under_the_session_directory_is_refused_naming_the_setting(
+    tmp_path: Path, where: str, named: str
+) -> None:
+    """The file a specialist wrote is what such a setting would keep; the recipe cannot hold it."""
+    session = tmp_path / "MB-session"
+    setup = AcceptanceSetup(FakeRepo(_root()), FakePlanner(), IMAGE, source_changes=False, session_dir=session)
+    written = session / "MB-branches" / "s1" / "worktree" / "scratch" / "tuned.csv"
+
+    with pytest.raises(RequestRejected) as refused:
+        await Acceptance(setup, is_accepted=lambda _: True).prepare(req(change=_naming(written, where)))
+
+    assert refused.value.code == LAUNCH_CONFIG_ONLY_CODE
+    assert f"a file of this session named by {named}" in refused.value.reason
+
+
+@pytest.mark.parametrize("where", ["environment-variable", "server-argument"])
+async def test_a_setting_that_names_a_file_is_accepted_outside_the_session_and_where_source_changes_are_kept(
+    tmp_path: Path, where: str
+) -> None:
+    session = tmp_path / "MB-session"
+    held = AcceptanceSetup(FakeRepo(_root()), FakePlanner(), IMAGE, source_changes=False, session_dir=session)
+    kept = dataclasses.replace(held, source_changes=True)
+
+    await Acceptance(held, is_accepted=lambda _: True).prepare(req(change=_naming(Path("/opt/image/table.csv"), where)))
+    await Acceptance(kept, is_accepted=lambda _: True).prepare(req(change=_naming(session / "tuned.csv", where)))
 
 
 async def test_the_recipe_is_judged_not_the_delta(tmp_path: Path) -> None:

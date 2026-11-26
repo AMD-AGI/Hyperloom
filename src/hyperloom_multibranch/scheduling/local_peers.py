@@ -543,6 +543,7 @@ def _toolbox(
         explore_accuracy=False,
         checkpoint=checkpoint,
         source_changes=setup.source_changes,
+        session_dir=setup.layout.root,
     )
     return host.backend.toolbox(setup, blackboard, acceptance, spec)
 

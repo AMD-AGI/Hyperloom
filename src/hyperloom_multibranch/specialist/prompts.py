@@ -647,7 +647,7 @@ question it asks (which operator, which path) and look for the setting that move
 - A "left out:" patch or kernel of a replayed champion stays out: read a patch for the settings it relies on, never \
 to port it.
 - A setting that names a file you wrote (a table, a module on PYTHONPATH, a template) carries that file, which the \
-recipe cannot hold: do not test it.
+recipe cannot hold: a test whose settings name a path under the session's directory is refused the same way.
 - The messages that say source work does not run out, or to test the next source change, are written for a session \
 that keeps source changes: here, test the next setting.
 - When your direction has no setting left to test on your head, take another; the one you leave, once you tested it, \

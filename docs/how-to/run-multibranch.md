@@ -213,6 +213,9 @@ no kernel file can be carried along.
   patch or a kernel artifact (a tuned table included), or a component its parent's recipe lacks. Every test of a
   session passes acceptance and every commit is the recipe of a test it accepted, so no branch, merge, replay or FINAL
   hands such a recipe on, whoever submits the test. A refused test queues nothing and holds no card.
+- **A file carried in by name:** a server argument or an environment variable whose value names a path under the
+  session's directory (a table a specialist wrote, an entry on `PYTHONPATH`, a template) is refused the same way:
+  the file is what such a setting would keep, and the recipe cannot hold it.
 - **Warm start:** a Recipe KB champion whose recipe holds patches or kernel artifacts replays its launch configuration
   alone, on the root and for the specialists, without the variables only its patches read; its lead names the files
   left out.
@@ -234,8 +237,9 @@ no kernel file can be carried along.
   `started_with_no_source_changes`. The archive's readers pool sessions by workload kind, and such a session's gains,
   stalls and stops are those of settings alone, so sessions that keep source changes would read it as a peer and a
   playbook on trial would be scored on it. The Experience KB and the Recipe KB are written as for any session.
-- **Not covered:** a setting whose value names a file (a table path, an entry on `PYTHONPATH`, a template) passes as
-  launch configuration. The specialists are told to test none that names a file of their own; nothing refuses one.
+- **Not covered:** a setting that names a file outside the session's directory passes as launch configuration:
+  the image's own files are such, and so is a file a specialist wrote elsewhere on a host that cannot confine its
+  tests.
 
 ## Resuming a stopped session
 

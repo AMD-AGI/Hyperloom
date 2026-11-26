@@ -830,20 +830,21 @@ def test_an_agentx_budget_of_half_an_hour_keeps_the_window_s_timeout_and_its_hou
 async def test_the_sessions_source_changes_setting_is_the_one_its_toolbox_accepts_tests_by(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, kept: bool
 ) -> None:
-    """``run --no-source-changes`` (``RunSettings`` and ``PeerSetup``) reaches the acceptance every test passes."""
+    """``run --no-source-changes`` (``RunSettings`` and ``PeerSetup``) reaches the acceptance every test passes, with
+    the session's directory, under which a setting may name no file."""
     accepted_by: list[object] = []
     build = local_hosted.build_local_toolbox
 
     def recorded(session: object, blackboard: object, acceptance: object, spec: object, **options: object) -> object:
-        accepted_by.append(acceptance.source_changes)  # type: ignore[attr-defined]
+        accepted_by.append((acceptance.source_changes, acceptance.session_dir))  # type: ignore[attr-defined]
         return build(session, blackboard, acceptance, spec, **options)  # type: ignore[arg-type]
 
     monkeypatch.setattr(local_hosted, "build_local_toolbox", recorded)
 
-    async with _peers(tmp_path, monkeypatch, WORKLOAD, source_changes=kept):
+    async with _peers(tmp_path, monkeypatch, WORKLOAD, source_changes=kept) as built:
         pass
 
-    assert accepted_by == [kept]
+    assert accepted_by == [(kept, built.layout.root)]
 
 
 def _serving_point(timeout_sec: int) -> BenchmarkPoint:
