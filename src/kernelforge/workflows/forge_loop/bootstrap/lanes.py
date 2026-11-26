@@ -15,7 +15,7 @@ from kernelforge.evaluation.scoring import GateScoring
 from kernelforge.utils.device_queue import RUNNER_CONFIG_NAME, hidden_device_environment
 from kernelforge.utils.git import repository_selected_by_environment
 from kernelforge.utils.import_root import import_name_of, import_path_first
-from kernelforge.workflows.forge_loop.bootstrap.errors import ForgeLoopError
+from kernelforge.workflows.forge_loop.bootstrap.errors import ForgeLoopError, ForgeLoopUsageError
 from kernelforge.workflows.forge_loop.gate.gate_settings import DeviceAccess
 from kernelforge.workflows.forge_loop.roles.agent_extras import declared_extras
 
@@ -128,16 +128,18 @@ def _require_lane_provider_capabilities(provider: str, lanes: int) -> None:
 
 
 def _require_copyable_workspace(lanes: int) -> None:
-    """Refuse side-by-side lanes on a workspace that cannot be copied, before the campaign spends anything.
+    """Refuse side-by-side lanes on a workspace that cannot be copied.
 
     Lanes that run side by side each work in a copy of the workspace. A workspace whose repository is selected
     through the environment -- a framework tree edited where it is installed, its history kept elsewhere -- has no
-    repository a copy could carry. One lane works in the workspace itself and needs none.
+    repository a copy could carry. One lane works in the workspace itself and needs none. It is the lane count the
+    caller passed that cannot be used here, whichever Agent profile would run, so the run is refused as a usage
+    error when it is asked for, not while a profile is being started.
     """
     selected = repository_selected_by_environment()
     if lanes < 2 or not selected:
         return
-    raise ForgeLoopError(
+    raise ForgeLoopUsageError(
         f"--lanes {lanes} runs lanes in copies of the workspace, and this workspace's repository is selected "
         f"through {' and '.join(selected)}, which a copy cannot carry. Re-run with --lanes 1."
     )
