@@ -14,7 +14,6 @@ from typing import Any
 
 from inference_suite.argv import SPECULATIVE_CONFIG_FLAG, flag_occurrences
 from inference_suite.golden import (
-    GOLDEN_OWNED_ENV_PREFIXES,
     GOLDEN_OWNED_FLAG_PREFIXES,
     SIMULATED_ENV_PREFIXES,
     golden_owned_settings,
@@ -58,8 +57,25 @@ def simulates_acceptance(identity: Mapping[str, Any]) -> bool:
     )
 
 
+#: The settings that turn a draft on (SGLang's algorithm, ATOM's method, the method or draft model in vLLM's
+#: speculative config, llama.cpp's draft type or draft model); the others only tune one, and an engine ignores them
+#: while none is set.
+_DRAFT_SWITCHES = frozenset(
+    {
+        "--speculative-algorithm",
+        "--method",
+        f"--{SPECULATIVE_CONFIG_FLAG}.method",
+        f"--{SPECULATIVE_CONFIG_FLAG}.model",
+        "--spec-type",
+        "--md",
+        "--model-draft",
+        "--spec-draft-model",
+    }
+)
+
+
 def configures_a_draft(identity: Mapping[str, Any]) -> bool:
-    return any(not key.startswith(GOLDEN_OWNED_ENV_PREFIXES) for key in identity)
+    return not _DRAFT_SWITCHES.isdisjoint(identity)
 
 
 def declared_acceptance_reason(

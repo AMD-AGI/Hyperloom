@@ -23,6 +23,7 @@ from inference_suite.contracts.base_launch import GoldenCurve
 from hyperloom.inference_optimizer.tests.test_explore_executor import _noop_filter_kwargs
 from hyperloom.orchestrator.actions.executors.grid._grid_runner import GridVariant
 from hyperloom.orchestrator.actions.executors.framework_change._spec_decode_context_copy import CONTEXT_COPY_REFUSAL
+from hyperloom.orchestrator.actions.executors.framework_change._spec_decode_pin import speculative_pin_reason
 from hyperloom.orchestrator.actions.executors.explore_prefilter.spec_decode_golden import (
     GOLDEN_ACCEPTANCE_REFUSAL,
     GoldenLookup,
@@ -154,6 +155,13 @@ def test_a_base_with_draft_tuning_but_no_sglang_algorithm_runs_no_draft_and_exem
 
     assert "verifies a real draft" in reason and "SGLANG_SIMULATE_ACC_LEN=2.32" in reason
     assert len(lookup.asked) == 1
+
+
+def test_on_a_base_with_draft_tuning_but_no_draft_the_golden_forced_candidate_passes_both_checks() -> None:
+    base = "--speculative-num-steps 3"
+
+    assert golden_acceptance_refusal(base, {}, _SGLANG, _SGLANG_FORCED, GoldenLookup("sglang", _Lookup())) == ""
+    assert speculative_pin_reason(base, {}, _SGLANG, _SGLANG_FORCED) is None
 
 
 def test_another_forced_value_is_refused_naming_both() -> None:

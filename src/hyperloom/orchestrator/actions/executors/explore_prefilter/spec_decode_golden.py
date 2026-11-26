@@ -26,7 +26,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from inference_suite import GoldenLookupError, SourceGolden, candidate_golden, runs_a_draft
+from inference_suite import GoldenLookupError, SourceGolden, candidate_golden
 from inference_suite.argv import tokenize_server_args_preserving_json
 
 from ....state.base_launch import frozen_base
@@ -136,7 +136,7 @@ def golden_acceptance_refusal(
     """
     base = speculative_identity(base_argv, base_envs)
     candidate = speculative_identity(argv, envs)
-    if _runs_a_draft(lookup.framework, base_argv, base) or simulates_acceptance(base):
+    if configures_a_draft(base) or simulates_acceptance(base):
         return ""
     if not configures_a_draft(candidate) or context_copy_method(argv, envs):
         return ""
@@ -152,14 +152,6 @@ def golden_acceptance_refusal(
 def _tokens(argv: str) -> list[str]:
     parsed = tokenize_server_args_preserving_json(argv)
     return list(parsed[1]) if parsed is not None else argv.split()
-
-
-def _runs_a_draft(framework: str, argv: str, identity: Mapping[str, str]) -> bool:
-    """Whether the launch ``argv`` runs a draft: read as the suite reads it on an engine whose forced acceptance this
-    module knows, by the draft settings ``identity`` carries on any other."""
-    if framework not in _FORCED_LENGTH:
-        return configures_a_draft(identity)
-    return runs_a_draft(framework, _tokens(argv))
 
 
 def session_golden_lookup(session_dir: Path | None, framework: str) -> GoldenLookup:
