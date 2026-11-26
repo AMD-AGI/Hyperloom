@@ -1,12 +1,15 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""The campaign spec a hosted run is given: validated field by field, and mapped to ``optimize`` arguments.
+"""The campaign spec a hosted run is given, validated field by field.
 
 The contract is ``contracts/campaign_spec.v1.schema.json``.  This module does not use a JSON Schema library at run
 time; :data:`FIELDS` is the same contract as a table, and a test holds the two together.  Unknown fields are ignored
 (a reader of one major version accepts what a later minor version adds).  ``multibranch`` is not looked at: it is kept
-as given for the multibranch entry.
+as given for the multibranch entry.  ``flow`` may be left out; the only flow is ``multibranch``, and the retired
+``single`` is refused, naming why.  A spec with neither ``flow`` nor ``multibranch`` is one written for the retired
+default, the single flow, and is refused the same way.  Flow ``conc_sweep`` sweeps the closed multi-branch session
+``conc_sweep.session_dir`` names and optimizes nothing.
 """
 
 from __future__ import annotations
@@ -18,25 +21,24 @@ from enum import Enum
 from typing import Any
 
 SCHEMA = "hyperloom.campaign-spec/v1"
-FLOW_SINGLE = "single"
+FLOW = "flow"
 FLOW_MULTIBRANCH = "multibranch"
-#: Sweep a closed session, of either flow, over its concurrencies; ``conc_sweep.session_dir`` names it.
+#: Sweep a closed multi-branch session over its concurrencies; ``conc_sweep.session_dir`` names it.
 FLOW_CONC_SWEEP = "conc_sweep"
-#: The attribute ``options.conc_sweep`` lands on: whether a session sweeps once it closes.
-_SWEEP_OPTION = "conc_sweep"
+MULTIBRANCH_SECTION = "multibranch"
+#: The legacy single-session flow, retired: a spec that still names it is refused with this reason.
+RETIRED_FLOWS = {"single": "flow 'single' is retired; leave flow out or set it to 'multibranch'"}
+#: A spec with neither ``flow`` nor ``multibranch`` relied on the retired default, the single flow: refused, naming it.
+RETIRED_DEFAULT = (
+    "a spec with neither flow nor multibranch ran the single flow, which is retired;"
+    " set flow to 'multibranch' and add a multibranch section with workload, and give workload.conc and"
+    " workload.precision"
+)
 MEASUREMENT_LOCAL = "local"
 MEASUREMENT_HOSTED = "hosted"
-#: The profile whose application container has cards of its own, the only one a multibranch or sweep run measures
-#: locally on.
+#: The profile whose application container has cards of its own, the only one a run measures locally on.
 PROFILE_WITH_CARDS = "hosted-gpu"
 DEFAULT_MAX_PARALLEL_TESTS = 8
-
-_FLOWS = (FLOW_SINGLE, FLOW_MULTIBRANCH, FLOW_CONC_SWEEP)
-_DEFAULT_MEASUREMENT = {
-    FLOW_SINGLE: MEASUREMENT_LOCAL,
-    FLOW_MULTIBRANCH: MEASUREMENT_HOSTED,
-    FLOW_CONC_SWEEP: MEASUREMENT_LOCAL,
-}
 
 
 class CampaignError(ValueError):
@@ -76,7 +78,7 @@ class Field:
 #: The contract as a table.  Section-level requirements follow from the ``required`` flags below.
 FIELDS: tuple[Field, ...] = (
     Field("name", "name", Kind.TEXT),
-    Field("flow", "flow", Kind.ENUM, choices=_FLOWS),
+    Field(FLOW, FLOW, Kind.ENUM, choices=(FLOW_MULTIBRANCH, FLOW_CONC_SWEEP)),
     Field("model.path", "model_path", Kind.STR, required=True),
     Field("framework.name", "framework_name", Kind.STR, required=True),
     Field("framework.image", "framework_image", Kind.STR, required=True),
@@ -96,7 +98,6 @@ FIELDS: tuple[Field, ...] = (
     Field("launch.extra_env", "extra_env", Kind.STR_MAP),
     Field("options.kernel", "kernel", Kind.BOOL),
     Field("options.framework_agent", "framework_agent", Kind.BOOL),
-    Field("options.conc_sweep", _SWEEP_OPTION, Kind.BOOL),
     Field("options.eval", "eval", Kind.ENUM, choices=(True,)),
     Field("options.enablement", "enablement", Kind.ENUM, choices=("all", "launch", "eval", "off")),
     Field("placement.profile", "profile", Kind.ENUM, required=True, choices=(PROFILE_WITH_CARDS, "hosted-cpu")),
@@ -118,7 +119,7 @@ REQUIRED_SECTIONS: tuple[str, ...] = tuple(dict.fromkeys(f.path.split(".")[0] fo
 
 @dataclass(frozen=True)
 class CampaignSpec:
-    """A validated spec.  ``None`` means the field was not given (the ``optimize`` default applies)."""
+    """A validated spec.  ``None`` means the field was not given."""
 
     flow: str
     measurement: str
@@ -144,7 +145,6 @@ class CampaignSpec:
     extra_env: Mapping[str, str] | None = None
     kernel: bool | None = None
     framework_agent: bool | None = None
-    conc_sweep: bool | None = None
     eval: bool | None = None
     enablement: str | None = None
     specialist_capacity: int | None = None
@@ -248,6 +248,8 @@ def _read_fields(doc: Mapping[str, Any], problems: list[str]) -> dict[str, Any]:
         if not present:
             if field.required:
                 problems.append(f"{field.path} is required")
+        elif field.attr == FLOW and isinstance(value, str) and value in RETIRED_FLOWS:
+            problems.append(RETIRED_FLOWS[value])
         elif not _well_typed(field, value):
             problems.append(f"{field.path} must be {_describe(field)}{_got(field, value)}")
         else:
@@ -263,8 +265,8 @@ def _read_value(field: Field, value: Any) -> Any:
     return value
 
 
-def _check_rules(values: Mapping[str, Any], problems: list[str]) -> None:
-    flow = values.get("flow", FLOW_SINGLE)
+def _check_sweep(values: Mapping[str, Any], problems: list[str]) -> None:
+    flow = values.get(FLOW, FLOW_MULTIBRANCH)
     session_dir = values.get("sweep_session_dir")
     if flow == FLOW_CONC_SWEEP and session_dir is None:
         problems.append("conc_sweep.session_dir is required for flow 'conc_sweep'")
@@ -272,13 +274,15 @@ def _check_rules(values: Mapping[str, Any], problems: list[str]) -> None:
         problems.append("conc_sweep.session_dir must be an absolute path")
     if flow != FLOW_CONC_SWEEP and any(key.startswith("sweep_") for key in values):
         problems.append(f"conc_sweep is read only for flow 'conc_sweep', got flow {flow!r}")
-    measurement = values.get("measurement", _DEFAULT_MEASUREMENT[flow])
-    if flow == FLOW_SINGLE and measurement != MEASUREMENT_LOCAL:
-        problems.append(f"placement.measurement must be 'local' for flow 'single', got {measurement!r}")
+
+
+def _check_rules(values: Mapping[str, Any], problems: list[str]) -> None:
+    _check_sweep(values, problems)
+    measurement = values.get("measurement", MEASUREMENT_HOSTED)
     profile = values.get("profile")
-    if flow != FLOW_SINGLE and measurement == MEASUREMENT_LOCAL and profile not in (None, PROFILE_WITH_CARDS):
+    if measurement == MEASUREMENT_LOCAL and profile not in (None, PROFILE_WITH_CARDS):
         problems.append(
-            f"placement.measurement 'local' measures on the application container's own cards for flow {flow!r}:"
+            f"placement.measurement 'local' measures on the application container's own cards:"
             f" placement.profile must be {PROFILE_WITH_CARDS!r}, got {profile!r}"
         )
     for key in values.get("extra_env") or {}:
@@ -293,62 +297,19 @@ def parse_campaign(doc: object) -> CampaignSpec:
     problems: list[str] = []
     if doc.get("schema") != SCHEMA:
         problems.append(f"schema must be {SCHEMA!r}, got {doc.get('schema')!r}")
+    if FLOW not in doc and MULTIBRANCH_SECTION not in doc:
+        problems.append(RETIRED_DEFAULT)
     _check_sections(doc, problems)
     values = _read_fields(doc, problems)
     _check_rules(values, problems)
     if problems:
         raise CampaignError(problems)
     values.pop("nodes", None)
-    flow = values.pop("flow", FLOW_SINGLE)
     return CampaignSpec(
-        flow=flow,
-        measurement=values.pop("measurement", _DEFAULT_MEASUREMENT[flow]),
+        flow=values.pop(FLOW, FLOW_MULTIBRANCH),
+        measurement=values.pop("measurement", MEASUREMENT_HOSTED),
         max_parallel_tests=values.pop("max_parallel_tests", DEFAULT_MAX_PARALLEL_TESTS),
-        multibranch=doc.get("multibranch"),
+        multibranch=doc.get(MULTIBRANCH_SECTION),
         name=values.pop("name", None),
         **values,
     )
-
-
-# (attribute, flag) for the values passed as ``--flag=value``.
-_VALUE_FLAGS: tuple[tuple[str, str], ...] = (
-    ("model_path", "--model"),
-    ("framework_name", "--framework"),
-    ("gpu_type", "--gpu-type"),
-    ("tp", "--tp"),
-    ("ep", "--ep"),
-    ("conc", "--conc"),
-    ("isl", "--isl"),
-    ("osl", "--osl"),
-    ("precision", "--precision"),
-    ("target_gain_pct", "--target-gain"),
-    ("max_hours", "--max-hours"),
-    ("server_args", "--server-args"),
-    ("enablement", "--enablement"),
-    ("specialist_capacity", "--research-lane-capacity"),
-)
-
-# (attribute, flag) for the phase switches: a flag is added only when the spec turns the phase off.
-_OFF_FLAGS: tuple[tuple[str, str], ...] = (
-    ("kernel", "--no-kernel"),
-    ("framework_agent", "--no-framework-agent"),
-    (_SWEEP_OPTION, "--no-enable-conc-sweep"),
-)
-
-
-def optimize_args(spec: CampaignSpec, *, plug_profile: str | None = None, session_dir: str | None = None) -> list[str]:
-    """The ``optimize`` command line for a fresh run of *spec*.
-
-    Every value is written ``--flag=value`` so one that begins with ``-`` cannot be read as another flag.
-    ``--plug-profile`` and ``--session-dir`` are added when given.  ``budget.max_gpu_hours`` and ``budget.max_llm_usd``
-    have no ``optimize`` flag: the legacy flow does not enforce them.
-    """
-    args = ["optimize"]
-    args += [f"{flag}={getattr(spec, attr)}" for attr, flag in _VALUE_FLAGS if getattr(spec, attr) is not None]
-    args += [f"--extra-env={key}={value}" for key, value in (spec.extra_env or {}).items()]
-    args += [flag for attr, flag in _OFF_FLAGS if getattr(spec, attr) is False]
-    if plug_profile is not None:
-        args.append(f"--plug-profile={plug_profile}")
-    if session_dir is not None:
-        args.append(f"--session-dir={session_dir}")
-    return args

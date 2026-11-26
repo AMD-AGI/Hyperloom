@@ -3295,7 +3295,9 @@ def test_a_local_run_ignores_a_grant_in_the_environment_and_measures_on_this_mac
 def _sweep_spec(session_dir: Path, tp: int = 2) -> CampaignSpec:
     sweep = {"session_dir": str(session_dir), "concs": [8, 2], "parallel": 4}
     hardware = {**MINIMAL["hardware"], "tp": tp}
-    return parse_campaign({**MINIMAL, "flow": "conc_sweep", "conc_sweep": sweep, "hardware": hardware})
+    placement = {**MINIMAL["placement"], "measurement": "local"}
+    doc = {**MINIMAL, "flow": "conc_sweep", "conc_sweep": sweep, "hardware": hardware, "placement": placement}
+    return parse_campaign(doc)
 
 
 def test_a_sweep_spec_sweeps_the_closed_session_it_names_on_its_points_and_tests_at_once(

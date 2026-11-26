@@ -7,8 +7,7 @@ The points are the operator's ``--conc-sweep-concs``, else the concurrencies the
 publishes, with the session's own CONC among them. Each arm runs its
 points serially, the session's CONC first and then low to high; an arm keeps one server across its points unless the
 workload is an AgentX replay, whose points each boot their own (``BenchmarkPoint.sweeps_on_cold_servers``). The report
-is rewritten after every point, and a later run measures only the points not yet measured. Given a deadline, a point
-that would end past it is not started and reads ``skipped_budget``.
+is rewritten after every point, and a later run measures only the points not yet measured.
 """
 
 from __future__ import annotations
@@ -72,7 +71,6 @@ from .report import (
 log = logging.getLogger(__name__)
 
 _SUCCEEDED = "succeeded"
-SKIPPED_BUDGET = "skipped_budget"
 
 
 @dataclass(frozen=True)
@@ -214,8 +212,6 @@ class _Sweep:
     setup: _Setup
     points: SweepPoints
     optimized: Arm
-    per_point_sec: float
-    deadline_unix: float | None
     frozen: BaseLaunch | None = None
     estimated_sec: float = 0.0
     started_at: float = field(default_factory=time.time)
@@ -230,16 +226,6 @@ class _Sweep:
         done = self.measured[arm.name]
         order = ladder(self.points.concs, self.state.conc)
         return [conc for conc in order if done.get(conc, {}).get("status") != _SUCCEEDED]
-
-    def out_of_time(self) -> bool:
-        """Whether a point started now would end past the deadline."""
-        return self.deadline_unix is not None and time.time() + self.per_point_sec > self.deadline_unix
-
-    def skip_for_budget(self, arm: Arm, concs: Sequence[int]) -> None:
-        for conc in concs:
-            self.measured[arm.name][conc] = {"arm": arm.name, "conc": conc, "status": SKIPPED_BUDGET}
-        write_report(self.payload(), reports_dir(self.session_dir))
-        log.warning("conc_sweep: arm=%s concs %s skipped: they would end past the deadline", arm.name, list(concs))
 
     def observe_cancel(self, result: VariantResult | None = None) -> bool:
         """Latch a cancel of the sweep's scope, or of a round it reaped; return whether the sweep is cancelled."""
@@ -381,7 +367,7 @@ def _resume(sweep: _Sweep) -> None:
                 sweep.measured[arm.name][point["conc"]] = point
 
 
-def _log_plan(sweep: _Sweep) -> None:
+def _log_plan(sweep: _Sweep, per_point_sec: float) -> None:
     rungs = sum(len(sweep.pending(arm)) for arm in sweep.arms)
     log.info(
         "conc_sweep: plan source=%s concs=%s arms=baseline,optimized serial pending_points=%d "
@@ -390,14 +376,8 @@ def _log_plan(sweep: _Sweep) -> None:
         list(sweep.points.concs),
         rungs,
         sweep.estimated_sec / 3600.0,
-        sweep.per_point_sec,
+        per_point_sec,
     )
-    if sweep.deadline_unix is None:
-        return
-    left = sweep.deadline_unix - time.time()
-    log.info("conc_sweep: the sweep must end within %.1fh", left / 3600.0)
-    if sweep.estimated_sec > left:
-        log.warning("conc_sweep: the estimate outlasts the deadline; the points that would end past it are skipped")
 
 
 async def _run_rung(sweep: _Sweep, arm: Arm, conc: int, launch: GridLaunch) -> VariantResult:
@@ -424,10 +404,9 @@ async def _run_rung(sweep: _Sweep, arm: Arm, conc: int, launch: GridLaunch) -> V
 
 async def _run_points(sweep: _Sweep) -> None:
     """Run both arms' pending points: arm by arm on held servers, else each point on its own server, a concurrency's
-    two arms one after the other, so a deadline leaves pairs measured rather than an arm; under a deadline no server is
-    held for that reason."""
+    two arms one after the other, so a stop leaves pairs measured rather than an arm."""
     lifecycle = resolve_lifecycle_params(sweep.setup.base_yaml_path)
-    if not lifecycle.get("eligible") or agentx_replay_session(sweep.state) or sweep.deadline_unix is not None:
+    if not lifecycle.get("eligible") or agentx_replay_session(sweep.state):
         await _run_cold(sweep)
         return
     for arm in sweep.arms:
@@ -439,13 +418,8 @@ async def _run_points(sweep: _Sweep) -> None:
 async def _run_cold(sweep: _Sweep) -> None:
     order = ladder(sweep.points.concs, sweep.state.conc)
     queue = [(conc, arm) for conc in order for arm in sweep.arms if conc in sweep.pending(arm)]
-    for idx, (conc, arm) in enumerate(queue):
+    for conc, arm in queue:
         if sweep.observe_cancel():
-            return
-        if sweep.out_of_time():
-            for each in sweep.arms:
-                if left := [c for c, a in queue[idx:] if a is each]:
-                    sweep.skip_for_budget(each, left)
             return
         result = await _run_rung(sweep, arm, conc, GridLaunch())
         sweep.record(arm, result)
@@ -464,9 +438,6 @@ async def _run_held_arm(sweep: _Sweep, arm: Arm, lifecycle: Mapping[str, Any]) -
     try:
         for idx, conc in enumerate(concs):
             if sweep.observe_cancel():
-                return
-            if sweep.out_of_time():
-                sweep.skip_for_budget(arm, concs[idx:])
                 return
             if booted and layers[idx] != layers[idx - 1]:
                 teardown_variant_server(pid_dir)
@@ -489,11 +460,9 @@ async def _run_held_arm(sweep: _Sweep, arm: Arm, lifecycle: Mapping[str, Any]) -
             log.error("conc_sweep: arm=%s pids %s outlived SIGKILL; %s keeps them", arm.name, survivors, pid_dir)
 
 
-async def run_conc_sweep(
-    session_dir: Path, *, concs: Sequence[int] = (), deadline_unix: float | None = None
-) -> dict[str, Any]:
-    """Sweep the finished session in ``session_dir`` over ``concs`` when given, starting no point that would end past
-    ``deadline_unix``, and return the report it wrote to ``reports/``."""
+async def run_conc_sweep(session_dir: Path, *, concs: Sequence[int] = ()) -> dict[str, Any]:
+    """Sweep the finished session in ``session_dir`` over ``concs`` when given, and return the report it wrote to
+    ``reports/``."""
     state = SharedState.load_or_init(session_dir)
     reason = decline_reason(state)
     if reason is not None:
@@ -511,10 +480,11 @@ async def run_conc_sweep(
     if isinstance(setup, str):
         return _skipped(state, session_dir, setup)
     launch = None if frozen is None else frozen.launch
-    sweep = _Sweep(state, session_dir, setup, points, optimized, state.baseline_runtime_sec, deadline_unix, launch)
+    per_point_sec = state.baseline_runtime_sec
+    sweep = _Sweep(state, session_dir, setup, points, optimized, launch)
     _resume(sweep)
-    sweep.estimated_sec = sweep.per_point_sec * sum(len(sweep.pending(arm)) for arm in sweep.arms)
-    _log_plan(sweep)
+    sweep.estimated_sec = per_point_sec * sum(len(sweep.pending(arm)) for arm in sweep.arms)
+    _log_plan(sweep, per_point_sec)
     await _run_points(sweep)
     payload = sweep.payload(final=True)
     ceiling = build_roofline_ceiling(
@@ -538,4 +508,4 @@ async def run_conc_sweep(
     return payload
 
 
-__all__ = ["BASELINE", "SKIPPED_BUDGET", "Arm", "decline_reason", "optimized_arm", "run_conc_sweep"]
+__all__ = ["BASELINE", "Arm", "decline_reason", "optimized_arm", "run_conc_sweep"]

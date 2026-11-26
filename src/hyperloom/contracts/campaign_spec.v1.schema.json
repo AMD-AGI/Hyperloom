@@ -5,11 +5,12 @@
   "description": "What a hosted Hyperloom run is asked to do. Unknown fields are ignored. The platform that hosts the run never reads it; resources are requested separately. 'multibranch' is opaque here: it is handed untouched to the multibranch entry.",
   "type": "object",
   "required": ["schema", "model", "framework", "hardware", "budget", "placement"],
+  "anyOf": [{"required": ["flow"]}, {"required": ["multibranch"]}],
   "properties": {
     "schema": {"const": "hyperloom.campaign-spec/v1"},
     "name": {"type": "string"},
-    "flow": {"enum": ["single", "multibranch", "conc_sweep"], "default": "single", "description": "conc_sweep sweeps the closed session conc_sweep.session_dir names, of either flow, and optimizes nothing."},
-    "multibranch": {"description": "Opaque; not validated by this schema."},
+    "flow": {"enum": ["multibranch", "conc_sweep"], "default": "multibranch", "description": "Optional; multibranch by default. conc_sweep sweeps the closed multi-branch session conc_sweep.session_dir names and optimizes nothing. The retired 'single' is refused."},
+    "multibranch": {"description": "Opaque; not validated by this schema. A spec must name flow or carry this section: one with neither was written for the retired single flow and is refused."},
     "model": {
       "type": "object",
       "required": ["path"],
@@ -67,7 +68,6 @@
       "properties": {
         "kernel": {"type": "boolean"},
         "framework_agent": {"type": "boolean"},
-        "conc_sweep": {"type": "boolean", "description": "Sweep the session over its recipe's concurrencies after it closes; on when not given."},
         "eval": {"const": true, "description": "The accuracy eval cannot be turned off; false is refused."},
         "enablement": {"enum": ["all", "launch", "eval", "off"]}
       }
@@ -77,7 +77,7 @@
       "required": ["profile"],
       "properties": {
         "profile": {"enum": ["hosted-gpu", "hosted-cpu"]},
-        "measurement": {"enum": ["local", "hosted"], "description": "Default: local for flows single and conc_sweep, hosted for flow multibranch. Flow single accepts only local; flow multibranch accepts local (measured on the application container's own cards) only with profile hosted-gpu. Flow conc_sweep measures a single-lineage session only locally; it accepts local only with profile hosted-gpu, as flow multibranch does."},
+        "measurement": {"enum": ["local", "hosted"], "default": "hosted", "description": "local (measured on the application container's own cards) is accepted only with profile hosted-gpu."},
         "max_parallel_tests": {"type": "integer", "minimum": 1, "default": 8},
         "specialist_capacity": {"type": "integer", "minimum": 0}
       }
@@ -95,9 +95,9 @@
       "type": "object",
       "description": "Read for flow conc_sweep only, and refused beside any other flow.",
       "properties": {
-        "session_dir": {"type": "string", "minLength": 1, "pattern": "^/", "description": "The closed session to sweep, an absolute path the run can read and write; the report is written back into it."},
+        "session_dir": {"type": "string", "minLength": 1, "pattern": "^/", "description": "The closed multi-branch session to sweep, an absolute path the run can read and write; the report is written back into it."},
         "concs": {"type": "array", "minItems": 1, "items": {"type": "integer", "minimum": 1}, "description": "The concurrencies to sweep, in place of those the session's InferenceX recipe publishes; the session's own is always among them."},
-        "parallel": {"type": "integer", "minimum": 1, "description": "The sweep's tests running at once, for a multi-branch session; within placement.max_parallel_tests."}
+        "parallel": {"type": "integer", "minimum": 1, "description": "The sweep's tests running at once; within placement.max_parallel_tests."}
       }
     }
   },

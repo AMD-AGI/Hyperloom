@@ -56,7 +56,6 @@ from .bootstrap import (
     _snapshot_system_prompts,
     constraint_budget_resume_conflict,
     fresh_measurement_fields,
-    hosted_grant_end_unix,
     latency_budget_scope_error,
     LaunchInfo,
     measurement_state_is_stale,
@@ -1057,7 +1056,7 @@ async def _run_optimize(args: argparse.Namespace) -> int:
     if sweeps_after_close(coordinator.shared_state, stop_reason):
         from hyperloom.orchestrator.conc_sweep.cli import sweep_session
 
-        await sweep_session(session_dir, deadline_unix=hosted_grant_end_unix())
+        await sweep_session(session_dir)
 
     _print_final_summary(coordinator.shared_state, stop_reason, session_dir)
     return _exit_code_for_stop_reason(stop_reason, coordinator.shared_state.baseline_tput)

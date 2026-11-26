@@ -280,31 +280,6 @@ def test_the_session_report_points_at_the_sweep(session_dir: Path, grid: SimpleN
     assert pointer["report_path"] == "reports/conc_sweep_summary.json" and pointer["status"] == "succeeded"
 
 
-def test_under_a_deadline_points_run_in_pairs_and_one_that_would_end_past_it_is_not_started(
-    session_dir: Path, grid: SimpleNamespace, monkeypatch: pytest.MonkeyPatch
-):
-    """Each point is priced at the session's baseline round (600 s); a deadline 1500 s out fits two points, which run
-    as a pair though the workload could hold a server per arm."""
-    _state(session_dir)
-    clock = [1000.0]
-    monkeypatch.setattr(runner.time, "time", lambda: clock[0])
-    measure = runner.run_grid
-
-    async def run_grid(**kwargs: Any) -> list[VariantResult]:
-        clock[0] += 600.0
-        return await measure(**kwargs)
-
-    monkeypatch.setattr(runner, "run_grid", run_grid)
-
-    payload = asyncio.run(runner.run_conc_sweep(session_dir, deadline_unix=2500.0))
-
-    assert [call["name"] for call in grid.calls] == ["baseline_conc16", "optimized_conc16"]
-    assert all(call["lifecycle"] is None for call in grid.calls)
-    statuses = {arm: {p["conc"]: p["status"] for p in payload[arm]["points"]} for arm in ("baseline", "optimized")}
-    expected = {4: "skipped_budget", 8: "skipped_budget", 16: "succeeded", 32: "skipped_budget"}
-    assert statuses == {"baseline": expected, "optimized": expected}
-
-
 def test_the_operators_points_are_swept_in_place_of_the_recipes(session_dir: Path, grid: SimpleNamespace):
     _state(session_dir)
 
@@ -423,34 +398,15 @@ def test_a_later_run_measures_again_a_report_an_earlier_schema_wrote(session_dir
     assert len(grid.calls) == 8
 
 
-def test_cold_points_run_in_pairs_so_a_deadline_leaves_pairs_measured(
-    session_dir: Path, grid: SimpleNamespace, monkeypatch: pytest.MonkeyPatch
-):
-    """Each point is priced at 600 s and boots its own server; a deadline 1300 s out fits one concurrency's pair."""
+def test_cold_points_run_a_concurrencys_two_arms_together(session_dir: Path, grid: SimpleNamespace):
+    """Each point boots its own server, so a stop leaves pairs measured rather than one arm."""
     _state(session_dir, benchmark_mode="agentx")
-    clock = [1000.0]
-    monkeypatch.setattr(runner.time, "time", lambda: clock[0])
-    measure = runner.run_grid
 
-    async def run_grid(**kwargs: Any) -> list[VariantResult]:
-        clock[0] += 600.0
-        return await measure(**kwargs)
+    asyncio.run(runner.run_conc_sweep(session_dir))
 
-    monkeypatch.setattr(runner, "run_grid", run_grid)
-
-    payload = asyncio.run(runner.run_conc_sweep(session_dir, deadline_unix=2300.0))
-
-    assert [call["name"] for call in grid.calls] == ["baseline_conc16", "optimized_conc16"]
-    measured = {
-        arm: [p["conc"] for p in payload[arm]["points"] if p["status"] == "succeeded"]
-        for arm in ("baseline", "optimized")
-    }
-    assert measured == {"baseline": [16], "optimized": [16]}
-    skipped = {
-        arm: sorted(p["conc"] for p in payload[arm]["points"] if p["status"] == "skipped_budget")
-        for arm in ("baseline", "optimized")
-    }
-    assert skipped == {"baseline": [4, 8, 32], "optimized": [4, 8, 32]}
+    assert [call["name"] for call in grid.calls] == [
+        f"{arm}_conc{conc}" for conc in (16, 4, 8, 32) for arm in ("baseline", "optimized")
+    ]
 
 
 def test_a_later_run_over_other_points_keeps_the_points_both_runs_name(session_dir: Path, grid: SimpleNamespace):
