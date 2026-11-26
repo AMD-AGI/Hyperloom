@@ -23,12 +23,6 @@ from hyperloom.orchestrator.actions.executors.baseline import (
 _ACCURACY_LOGGER = "hyperloom.orchestrator.actions.executors.benchmark_run.accuracy"
 
 
-@pytest.fixture(autouse=True)
-def _isolate_leak_root(tmp_path_factory, monkeypatch):
-    sandbox = tmp_path_factory.mktemp("isolated_leak_root")
-    monkeypatch.setenv("INFERENCE_OPTIMIZER_LEAK_ROOTS", str(sandbox))
-
-
 def _make_ctx(params: dict, *, enablement_mode: str = "off") -> SimpleNamespace:
     task = SimpleNamespace(task_id="t-eval-1", params=params)
     return SimpleNamespace(task=task, extra={"shared_state": SharedState(enablement_mode=enablement_mode)})

@@ -28,9 +28,7 @@ from hyperloom.orchestrator.actions.executors.workload._workload_envs import Ben
 
 
 @pytest.fixture(autouse=True)
-def _isolate_leak_root(tmp_path_factory, monkeypatch):
-    sandbox = tmp_path_factory.mktemp("isolated_leak_root_behavior_lock")
-    monkeypatch.setenv("INFERENCE_OPTIMIZER_LEAK_ROOTS", str(sandbox))
+def _no_multi_node_warmup(monkeypatch):
     # Multi-node client warmup is orthogonal noise; keep it off so the mocked ``run_with_session_kill`` call counts
     # are unambiguous.
     monkeypatch.setenv("INFERENCE_OPTIMIZER_MN_BENCH_WARMUP", "0")

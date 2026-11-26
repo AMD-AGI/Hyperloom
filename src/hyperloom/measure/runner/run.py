@@ -100,7 +100,7 @@ from hyperloom.measure.socket import RoundPlan, SessionFacts, TestCall
 from hyperloom.measure.spec import SPEC_SCHEMA, MeasurementSpec, fingerprint, spec_sha256
 from hyperloom.measure.surface import extract_surface
 from hyperloom.orchestrator.actions.cancel_channel import CancelScope
-from hyperloom.orchestrator.actions.executors import TOOL_CACHE_ENV, harvest_leaked_artifacts
+from hyperloom.orchestrator.actions.executors import TOOL_CACHE_ENV
 from hyperloom.orchestrator.actions.executors._aiter_serving_once import build_image_own_once
 from hyperloom.sandbox.card_occupancy import card_guard, own_sandbox_processes
 from inference_suite.contracts import NormalisedManifest
@@ -641,7 +641,6 @@ def _run_sheet(ctx: _Context, spec_path: Path, key, progress: Progress) -> None:
     ctx.cards.check(BEFORE_TEST)
     ctx.cards.enforce_guard()
     progress.phase("running")
-    started = time.time()
     outcome, timed_out = _execute_watched(ctx, call)
     if outcome is not None:
         ctx.notes.extend(outcome.notes)
@@ -651,7 +650,6 @@ def _run_sheet(ctx: _Context, spec_path: Path, key, progress: Progress) -> None:
         ctx.notes.append(observed)
     ctx.phases.begin(RESULT_SIGNING)
     progress.phase("collecting")
-    harvest_leaked_artifacts(ctx.files, subprocess_started_unix=started, leak_root=ctx.work)
     drop_agentx_runtime(ctx.files)
     _check_node(ctx, before, hardware.ecc_counts(visible), visible, facts)
     write_farm_inventory(ctx.files, farm)

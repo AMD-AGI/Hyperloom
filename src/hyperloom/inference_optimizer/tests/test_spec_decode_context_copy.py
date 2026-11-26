@@ -145,8 +145,7 @@ def sub_agent_runner(tmp_path):
 
 
 @pytest.fixture(autouse=True)
-def _isolate(tmp_path_factory, monkeypatch):
-    monkeypatch.setenv("INFERENCE_OPTIMIZER_LEAK_ROOTS", str(tmp_path_factory.mktemp("leak_root")))
+def _isolate(monkeypatch):
     monkeypatch.delenv("HYPERLOOM_AGENTX", raising=False)
     monkeypatch.delenv("HYPERLOOM_PERF_METRIC", raising=False)
     monkeypatch.delenv("HYPERLOOM_PERF_NOISE_PCT", raising=False)

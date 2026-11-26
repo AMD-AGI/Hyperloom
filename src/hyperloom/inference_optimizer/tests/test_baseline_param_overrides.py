@@ -35,13 +35,6 @@ _CLI_STUB = SimpleNamespace(
 )
 
 
-@pytest.fixture(autouse=True)
-def _isolate_leak_root(tmp_path_factory, monkeypatch):
-    """Pin ``INFERENCE_OPTIMIZER_LEAK_ROOTS`` to an empty sandbox so the artifact harvest does not scrape the host's ``/workspace``."""
-    sandbox = tmp_path_factory.mktemp("isolated_leak_root")
-    monkeypatch.setenv("INFERENCE_OPTIMIZER_LEAK_ROOTS", str(sandbox))
-
-
 # Sanitization
 def test_sanitize_script_name_accepts_bare_filename():
     assert sanitize_script_name("sglang_mi300x.sh") == "sglang_mi300x.sh"

@@ -173,6 +173,17 @@ it.
   `_TIMEOUT_SEC` settings are no longer read, and no variant is skipped as
   `screen_decisively_slower`. The measurement store and the InferaSim
   projection are unchanged, and so is a run that never set the switch.
+- **Files outside a round's run directory are no longer copied into it.**
+  After an explore, integrate, rebench, concurrency-sweep or multi-branch
+  round, Hyperloom copied any `server.log`, `gpu_metrics.csv`,
+  `profile_*.trace.json.gz`, `inferencex_result*.json` or `results*.json`
+  written during the round at the top of `/workspace`, `$INFERENCEX_PATH` and
+  `$RESULT_DIR` into the round's run directory, where it could replace the
+  round's own server log or be read as its accuracy result. A round on
+  InferenceSuite writes all of these inside its run directory, so the copy is
+  removed, with `INFERENCE_OPTIMIZER_LEAK_ROOTS` and the
+  `harvested_leaked_artifact:<path>` warning. See
+  [Upgrade](reference/upgrade.md).
 
 ## Hyperloom 1.2.0 release
 

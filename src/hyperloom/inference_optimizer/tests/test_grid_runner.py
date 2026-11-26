@@ -424,14 +424,7 @@ class TestGridVariantEnvSafety:
         }
 
 
-# Section 3: per-variant mtime gating + param overrides
-
-
-@pytest.fixture(autouse=True)
-def _isolate_leak_root(request, tmp_path_factory, monkeypatch):
-    """Pin ``INFERENCE_OPTIMIZER_LEAK_ROOTS`` to an empty sandbox for the grid-runner subprocess tests."""
-    sandbox = tmp_path_factory.mktemp("isolated_leak_root")
-    monkeypatch.setenv("INFERENCE_OPTIMIZER_LEAK_ROOTS", str(sandbox))
+# Section 3: param overrides
 
 
 def _write_baseline_yaml_overrides(path: Path) -> None:

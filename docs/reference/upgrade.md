@@ -172,6 +172,27 @@ report paths, and adds `partial`, `in_progress` and `cancelled` to `status`.
 Both lineages' shapes are in
 [`session_breakdown.json` integration in Hyperloom](session-breakdown.md).
 
+### Required: files outside a round's run directory are no longer copied into it
+
+Since 1.2.0 a round on InferenceSuite writes its server log, results and
+traces inside its own run directory. Hyperloom still looked for them elsewhere
+after every explore, integrate, rebench, concurrency-sweep and multi-branch
+round, and that search is removed:
+
+* `server.log`, `gpu_metrics.csv`, `profile_*.trace.json.gz`,
+  `inferencex_result*.json` and `results*.json` files written during the round
+  at the top of `/workspace`, `$INFERENCEX_PATH` and `$RESULT_DIR` are no
+  longer copied into the round's run directory, and a round's
+  `nonfatal_warnings` no longer carry `harvested_leaked_artifact:<path>`. A
+  file another process wrote under one of those names could replace the
+  round's own `server.log` or be read as its accuracy result.
+* `INFERENCE_OPTIMIZER_LEAK_ROOTS`, which named other directories to search, is
+  no longer read and is silently ignored, so drop it.
+* The multi-branch measurement runner no longer copies those names from the top
+  of its work directory into the files it signs. On a host that reports itself
+  multi-node it also no longer writes a merged `gpu_metrics.csv` at the top of
+  those files; each round's run directory still gets its own.
+
 ---
 
 ## Upgrading from 1.1.x

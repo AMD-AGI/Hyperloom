@@ -39,12 +39,6 @@ from .conftest import write_benchmark_yaml
 from hyperloom.orchestrator.actions.executors.workload._workload_envs import BenchmarkTarget, LaunchLayer
 
 
-@pytest.fixture(autouse=True)
-def _isolate_leak_root(tmp_path_factory, monkeypatch):
-    sandbox = tmp_path_factory.mktemp("isolated_leak_root_m3")
-    monkeypatch.setenv("INFERENCE_OPTIMIZER_LEAK_ROOTS", str(sandbox))
-
-
 #: What the report mapper stamps on every AgentX round it accepts as evidence.
 _AGENTX_EVIDENCE = {"valid_measurement": True, "diagnostic_only": False, "workload_identity": "agentx-workload"}
 

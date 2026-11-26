@@ -44,7 +44,6 @@ from .._subprocess_kill import (
 )
 from ..benchmark_result import (
     extract_benchmark_measurement,
-    harvest_leaked_artifacts,
     round_succeeded,
     select_run_workspace,
     snapshot_workspaces,
@@ -550,7 +549,6 @@ async def _warmup_throughput(
     warmup_slot = at.path / WARMUP_ROUND_DIR
     run_ws = select_run_workspace(warmup_slot, known_before=pass_.workspaces_before)
     workspace = run_ws if run_ws is not None else warmup_slot
-    harvested = harvest_leaked_artifacts(workspace, subprocess_started_unix=pass_.started_unix)
     returncode = pass_.proc.returncode
     if run_ws is not None:
         _, measurement = await _settled_measurement(
@@ -598,10 +596,7 @@ async def _warmup_throughput(
         returncode=returncode,
         server_log_path=_existing_log_path(warmup_server_log),
         runtime_sec=round(max(0.0, time.time() - pass_.started_unix), 2),
-        nonfatal_warnings=[
-            "run_grid_warmup_round_failed",
-            *[f"harvested_leaked_artifact:{src}" for src, _ in harvested],
-        ],
+        nonfatal_warnings=["run_grid_warmup_round_failed"],
     )
 
 
@@ -673,7 +668,6 @@ async def _run_multi_node_warmup(run: _GridRun, at: _VariantSlot, rounds: _Varia
 async def _run_measured_round(run: _GridRun, at: _VariantSlot, rounds: _VariantRounds) -> _BenchmarkPass:
     from .._multi_node_env import is_multi_node
 
-    # Snapshot wall-clock before launch so the salvage path can mtime-gate leak destinations per-variant.
     workspaces_before = snapshot_workspaces(at.path)
     started_unix = time.time()
     measure_cap_sec = rounds.benchmark_timeout_sec
@@ -724,30 +718,14 @@ def _refuse_reaped_round(run: _GridRun, at: _VariantSlot, round_: _BenchmarkPass
         _abort_on_round_stop(run, stopped, attempt, round_label="measured")
 
 
-def _harvest_round_workspace(run: _GridRun, at: _VariantSlot, round_: _BenchmarkPass) -> tuple[Path, list[Any]]:
+def _round_workspace(run: _GridRun, at: _VariantSlot, round_: _BenchmarkPass) -> Path:
     workspace = select_run_workspace(at.path, known_before=round_.workspaces_before)
-    artifacts = harvest_leaked_artifacts(
-        workspace if workspace is not None else at.path,
-        subprocess_started_unix=round_.started_unix,
-    )
-    if artifacts:
-        log.info(
-            "_grid_runner: variant=%s harvested %d leaked artifact(s): %s",
-            at.variant.name,
-            len(artifacts),
-            ", ".join(src.name for src, _ in artifacts),
-        )
     if workspace is None:
-        _abort_without_workspace(run, at, round_, artifacts)
-    return workspace, artifacts
+        _abort_without_workspace(run, at, round_)
+    return workspace
 
 
-def _abort_without_workspace(
-    run: _GridRun,
-    at: _VariantSlot,
-    round_: _BenchmarkPass,
-    artifacts: list[Any],
-) -> NoReturn:
+def _abort_without_workspace(run: _GridRun, at: _VariantSlot, round_: _BenchmarkPass) -> NoReturn:
     proc = round_.proc
     returncode = proc.returncode
     server_log = at.path / "server.log"
@@ -772,13 +750,11 @@ def _abort_without_workspace(
         _VariantFailure(found.error_class, found.summary, halt=halt),
         returncode=returncode,
         server_log_path=_existing_log_path(server_log),
-        nonfatal_warnings=[f"harvested_leaked_artifact:{src}" for src, _ in artifacts],
     )
 
 
 def _round_warnings(measurement: dict[str, Any], measured: _MeasuredVariant) -> list[str]:
     warnings = list(measurement.pop("nonfatal_warnings", []) or [])
-    warnings += [f"harvested_leaked_artifact:{src}" for src, _ in measured.artifacts]
     if measured.warmup_tput is not None:
         warnings.append("run_grid_warmup_discarded_first")
         warnings.append(f"warmup_round_tput:{float(measured.warmup_tput):.1f}")
@@ -879,8 +855,8 @@ async def _measure_variant(run: _GridRun, at: _VariantSlot) -> VariantResult:
     await _run_multi_node_warmup(warm_run, at, rounds)
     round_ = await _run_measured_round(run, at, rounds)
     _refuse_reaped_round(run, at, round_)
-    workspace, artifacts = _harvest_round_workspace(run, at, round_)
-    return await _variant_row(run, at, _MeasuredVariant(rounds, round_, workspace, artifacts, warmup_tput))
+    workspace = _round_workspace(run, at, round_)
+    return await _variant_row(run, at, _MeasuredVariant(rounds, round_, workspace, warmup_tput))
 
 
 async def run_grid(

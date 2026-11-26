@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Branch coverage for benchmark-result parsing: leak harvesting, rescue-path salvage, raw-result merging, TPOT derivation, and OSL resolution."""
+"""Branch coverage for benchmark-result parsing: rescue-path salvage, raw-result merging, TPOT derivation, OSL resolution, and the multi-node GPU CSV fold."""
 
 from __future__ import annotations
 
@@ -65,13 +65,6 @@ def test_is_valid_measurement():
     assert br.is_valid_measurement({"output_throughput": 10.0, "completed_requests": 0}) is False
 
 
-# ---- _resolve_leak_roots --------------------------------------------------
-def test_resolve_leak_roots_env(monkeypatch):
-    monkeypatch.setenv("INFERENCE_OPTIMIZER_LEAK_ROOTS", "/a:/b")
-    roots = br._resolve_leak_roots()
-    assert roots == (Path("/a"), Path("/b"))
-
-
 # ---- _materialize_rescue_into_workspace -----------------------------------
 def test_materialize_rescue_copy_error(tmp_path, monkeypatch):
     leak_dir = tmp_path / "leak"
@@ -94,42 +87,6 @@ def test_rescue_candidate_paths_env_dir_and_file(tmp_path, monkeypatch):
     names = {p.name for p in cands}
     assert "inferencex_result_1.json" in names
     assert "extra.json" in names
-
-
-# ---- harvest_leaked_artifacts ---------------------------------------------
-def test_harvest_skips_non_file(tmp_path, monkeypatch):
-    leak_root = tmp_path / "workspace"
-    leak_root.mkdir()
-    (leak_root / "server.log").mkdir()
-    dest = tmp_path / "dest"
-    monkeypatch.setenv("INFERENCE_OPTIMIZER_LEAK_ROOTS", str(leak_root))
-    out = br.harvest_leaked_artifacts(dest)
-    assert out == []
-
-
-def test_harvest_dest_mkdir_error(tmp_path, monkeypatch):
-    monkeypatch.setattr(Path, "mkdir", lambda self, *a, **k: (_ for _ in ()).throw(OSError("ro")))
-    out = br.harvest_leaked_artifacts(tmp_path / "dest")
-    assert out == []
-
-
-def test_harvest_skips_already_under_dest(tmp_path, monkeypatch):
-    dest = tmp_path / "dest"
-    dest.mkdir()
-    (dest / "server.log").write_text("log", encoding="utf-8")
-    monkeypatch.setenv("INFERENCE_OPTIMIZER_LEAK_ROOTS", str(dest))
-    out = br.harvest_leaked_artifacts(dest)
-    assert out == []
-
-
-def test_harvest_copy_error(tmp_path, monkeypatch):
-    leak_root = tmp_path / "workspace"
-    leak_root.mkdir()
-    (leak_root / "server.log").write_text("log", encoding="utf-8")
-    monkeypatch.setattr(br.shutil, "copy2", lambda *a, **k: (_ for _ in ()).throw(OSError("ro")))
-    monkeypatch.setenv("INFERENCE_OPTIMIZER_LEAK_ROOTS", str(leak_root))
-    out = br.harvest_leaked_artifacts(tmp_path / "dest")
-    assert out == []
 
 
 # ---- extract_benchmark_measurement ----------------------------------------
@@ -214,69 +171,15 @@ def test_harvest_mn_gpu_metrics_folds_pod_csvs(monkeypatch, tmp_path):
 
     dest = tmp_path / "ws"
     dest.mkdir()
-    (dest / "benchmark_report.json").write_text("{}", encoding="utf-8")
 
     out = br.harvest_mn_gpu_metrics(dest, subprocess_started_unix=900.0)
     assert out["rows"] == 3
-    assert (dest / "gpu_metrics.csv").is_file()
-    report = json.loads((dest / "benchmark_report.json").read_text(encoding="utf-8"))
-    assert "gpu_monitor" in report
-    assert report["pd"]["prefill_pod_ips"] == ["10.0.0.1"]
-    assert "prefill" in report["gpu_monitor_by_role"]
-    assert "decode" in report["gpu_monitor_by_role"]
-
-
-def test_harvest_mn_gpu_metrics_samples_name_their_metrics_and_aggregate_per_role(monkeypatch, tmp_path):
-    """Each column lands on the sample field it names, a row with no numeric metric is no sample, and only samples of
-    a pod with a role count towards that role's aggregate."""
-    import hyperloom.orchestrator.actions.executors._multi_node_env as mn
-
-    monkeypatch.setattr(mn, "is_multi_node", lambda: True)
-    monkeypatch.setattr(
-        mn,
-        "pd_topology_from_state",
-        lambda: {"prefill_pod_ips": ["10.0.0.1"], "decode_pod_ips": ["10.0.0.2"]},
-    )
-    shared = tmp_path / "server_logs"
-    shared.mkdir()
-    monkeypatch.setenv("HYPERLOOM_MN_SERVER_LOG_DIR", str(shared))
-    full = "timestamp,Temperature (Junction) (C),Average Socket Power (W),sclk clock (MHz),GPU use (%),VRAM% "
-    (shared / "gpu_metrics_10.0.0.1.csv").write_text(
-        f"{full}\n1000,50,100,1400,80,40\n1001,60,200,1500,90,50\n", encoding="utf-8"
-    )
-    (shared / "gpu_metrics_10.0.0.2.csv").write_text(
-        "timestamp,Average Socket Power (W)\n1000,150\n1001,n/a\n", encoding="utf-8"
-    )
-    (shared / "gpu_metrics_10.0.0.3.csv").write_text("timestamp,Average Socket Power (W)\n1000,300\n", encoding="utf-8")
-    dest = tmp_path / "ws"
-    dest.mkdir()
-    (dest / "benchmark_report.json").write_text("{}", encoding="utf-8")
-
-    br.harvest_mn_gpu_metrics(dest, subprocess_started_unix=900.0)
-
-    report = json.loads((dest / "benchmark_report.json").read_text(encoding="utf-8"))
-    first, second, decode, unassigned = report["gpu_monitor"]
-    assert first == {
-        "temperature_c": 50,
-        "power_w": 100,
-        "clock_mhz": 1400,
-        "gpu_util_pct": 80,
-        "vram_pct": 40,
-        "role": "prefill",
-    }
-    assert (second["power_w"], second["temperature_c"], second["role"]) == (200, 60, "prefill")
-    assert decode == {"power_w": 150, "role": "decode"}
-    assert unassigned == {"power_w": 300}
-    by_role = report["gpu_monitor_by_role"]
-    assert set(by_role) == {"prefill", "decode"}
-    assert (by_role["prefill"]["samples"], by_role["prefill"]["avg_power_w"], by_role["prefill"]["max_power_w"]) == (
-        2,
-        150.0,
-        200.0,
-    )
-    assert by_role["prefill"]["max_temp_c"] == 60.0
-    # No temperature sample for decode: the aggregate reads 0.0.
-    assert (by_role["decode"]["samples"], by_role["decode"]["avg_temp_c"]) == (1, 0.0)
+    assert (dest / "gpu_metrics.csv").read_text(encoding="utf-8").splitlines() == [
+        f"host,role,{header}",
+        "10.0.0.1,prefill,1000,55,300",
+        "10.0.0.1,prefill,1001,56,310",
+        "10.0.0.2,decode,1000,50,280",
+    ]
 
 
 def test_harvest_mn_gpu_metrics_no_csvs(monkeypatch, tmp_path):
@@ -328,28 +231,9 @@ def test_harvest_mn_gpu_metrics_window_and_malformed_rows(monkeypatch, tmp_path)
 
     dest = tmp_path / "ws"
     dest.mkdir()
-    # No benchmark_report.json → sample-inject branch is skipped, csv still written.
     out = br.harvest_mn_gpu_metrics(dest, subprocess_started_unix=900.0)
     assert out["rows"] == 1
-    assert (dest / "gpu_metrics.csv").is_file()
-
-
-def test_harvest_mn_gpu_metrics_report_not_dict(monkeypatch, tmp_path):
-    import hyperloom.orchestrator.actions.executors._multi_node_env as mn
-
-    monkeypatch.setattr(mn, "is_multi_node", lambda: True)
-    monkeypatch.setattr(mn, "pd_topology_from_state", dict)
-
-    shared = tmp_path / "server_logs"
-    shared.mkdir()
-    monkeypatch.setenv("HYPERLOOM_MN_SERVER_LOG_DIR", str(shared))
-    header = "timestamp,Temperature (Junction) (C),Average Socket Power (W)"
-    (shared / "gpu_metrics_hostA.csv").write_text(f"{header}\n1000,55,300\n", encoding="utf-8")
-
-    dest = tmp_path / "ws"
-    dest.mkdir()
-    # Non-dict report JSON → inject branch bails without raising.
-    (dest / "benchmark_report.json").write_text("[]", encoding="utf-8")
-    out = br.harvest_mn_gpu_metrics(dest, subprocess_started_unix=900.0)
-    assert out["rows"] == 1
-    assert "gpu_monitor_samples" not in out
+    assert (dest / "gpu_metrics.csv").read_text(encoding="utf-8").splitlines() == [
+        f"host,{header}",
+        "hostA,1000,55,300",
+    ]

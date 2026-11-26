@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import asyncio
+import csv
 import json
 import logging
 import time
@@ -13,7 +14,7 @@ from pathlib import Path
 from typing import Any
 
 from .._round_folder import RoundFolder, is_round_folder
-from ..benchmark_result import extract_benchmark_measurement, round_succeeded
+from ..benchmark_result import extract_benchmark_measurement, harvest_mn_gpu_metrics, round_succeeded
 from ..gpu._gpu_metrics import write_gpu_metrics_from_report
 from ._grid_base import WARMUP_ROUND_DIR
 
@@ -45,7 +46,14 @@ async def _settled_measurement(
     settle_seconds: float = REPORT_SETTLE_SECONDS,
     poll_seconds: float = REPORT_SETTLE_POLL_SECONDS,
 ) -> tuple[dict[str, Any] | None, dict[str, Any]]:
-    """Read the benchmark report, re-reading briefly while it is still settling; a finished run_dir never settles."""
+    """Read the benchmark report, re-reading briefly while it is still settling; a finished run_dir never settles.
+
+    A multi-node round's pod GPU samples are first merged into ``workspace`` as ``gpu_metrics.csv``.
+    """
+    try:
+        harvest_mn_gpu_metrics(workspace, subprocess_started_unix=subprocess_started_unix)
+    except (OSError, ValueError, csv.Error) as exc:
+        log.warning("grid_runner: MN GPU-metrics harvest failed: %s", exc)
     if is_round_folder(workspace):
         RoundFolder.read(workspace).write_gpu_metrics(workspace.parent)
         settle_seconds = 0.0
@@ -67,9 +75,6 @@ async def _settled_measurement(
                     "the report was still being written when the subprocess was reaped",
                     attempts,
                 )
-            # Harvest already tried this, but it runs before the report is guaranteed to exist: a report the round
-            # finishes writing after the subprocess is reaped would otherwise leave the round with no GPU artifact at
-            # all. Here the report is in hand, so write it from that rather than reading the file a second time.
             if report is not None:
                 write_gpu_metrics_from_report(workspace, report, source="benchmark_report.json")
             return report, measurement
