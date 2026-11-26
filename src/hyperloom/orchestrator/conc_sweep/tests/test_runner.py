@@ -365,6 +365,20 @@ def test_a_flag_the_recipe_drops_at_a_concurrency_stays_where_the_optimization_s
     assert "--cuda-graph-max-bs" in calls["baseline_conc4"]["remove"]
 
 
+def test_an_appended_flag_restating_the_sessions_value_leaves_each_point_the_recipes_own(
+    session_dir: Path, grid: SimpleNamespace, monkeypatch: pytest.MonkeyPatch
+):
+    """The optimization restated the session's cap (32 at 16) beside its change; at 32 the recipe's 64 runs."""
+    _state(session_dir, current_best={"extra_server_args": "--max-running-requests 32 --enable-x", "extra_envs": {}})
+    _per_conc_base(monkeypatch, _SLOTS[16], _SLOTS)
+
+    asyncio.run(runner.run_conc_sweep(session_dir))
+
+    calls = {call["name"]: call for call in grid.calls}
+    assert calls["optimized_conc32"]["args"] == "--max-running-requests 64 --enable-x"
+    assert calls["optimized_conc16"]["args"] == "--enable-x"
+
+
 def test_a_held_server_is_booted_again_where_the_next_point_launches_otherwise(
     session_dir: Path, grid: SimpleNamespace, monkeypatch: pytest.MonkeyPatch
 ):

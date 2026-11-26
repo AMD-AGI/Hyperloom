@@ -49,7 +49,7 @@ from hyperloom.orchestrator.actions.executors.workload._workload_envs import (
     prepare_grid_benchmark_config,
 )
 from hyperloom.orchestrator.actions.stop_attribution import ORCHESTRATOR_CANCELLED_CLASS
-from hyperloom.orchestrator.state.base_launch import frozen_base, server_base, server_base_at
+from hyperloom.orchestrator.state.base_launch import frozen_base, launch_change, server_base, server_base_at
 from hyperloom.orchestrator.state.shared_state import SharedState
 from hyperloom_common.coerce import to_str_list
 from hyperloom_common.timeutil import utc_now_compact
@@ -130,6 +130,16 @@ def _arm_layer(arm: Arm) -> _Layer:
         tuple(to_str_list(arm.controls.get("remove_args"))),
         tuple(to_str_list(arm.controls.get("unset_envs"))),
     )
+
+
+def _appended(arm: Arm, frozen: BaseLaunch | None) -> _Layer:
+    """``arm``'s appended change as what it changes of the base's own launch: a flag or variable it sets to the value
+    that launch already has is left to the source's launch at each concurrency."""
+    layer = _arm_layer(arm)
+    if frozen is None:
+        return layer
+    change = launch_change(frozen, layer.args, layer.envs)
+    return replace(layer, args=change.args, envs=dict(change.env))
 
 
 def _replacing(arm: Arm, frozen: BaseLaunch | None, conc: int, official: _Layer) -> _Layer:
@@ -246,7 +256,7 @@ class _Sweep:
         official = _conc_layer(self.frozen, conc)
         if arm.controls.get("args_mode") == "replace":
             return _replacing(arm, self.frozen, conc, official)
-        return _stacked(official, _arm_layer(arm))
+        return _stacked(official, _appended(arm, self.frozen))
 
     def variant(self, arm: Arm, conc: int) -> GridVariant:
         state = self.state

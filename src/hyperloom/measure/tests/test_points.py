@@ -440,7 +440,7 @@ def test_each_point_is_seeded_with_the_source_launch_at_its_own_concurrency(tmp_
     by_conc = {4: ("--tp", "2", "--cuda-graph-max-bs", "4"), 32: ("--tp", "2", "--cuda-graph-max-bs", "32")}
     launches = tuple(SourcePointLaunch(conc, args, {}) for conc, args in by_conc.items())
     base = _agentx_base()
-    base = replace(base, args=by_conc[32], point=replace(base.point, source_launches=launches))
+    base = replace(base, args=by_conc[32], point=replace(base.point, source_concs=(4, 32), source_launches=launches))
     canonical = default_canonical(
         tmp_path / "canonical",
         primary_concurrency=32,
@@ -457,6 +457,31 @@ def test_each_point_is_seeded_with_the_source_launch_at_its_own_concurrency(tmp_
     for point, graphs in zip(points, ("4", "32"), strict=True):
         args = load(point)["benchmark"]["envs"]["EXTRA_SGLANG_ARGS"].split()
         assert args[args.index("--cuda-graph-max-bs") + 1] == graphs
+        assert "--enable-torch-compile" in args
+
+
+def test_a_recipe_setting_restated_from_the_sessions_launch_leaves_each_point_its_own_value(tmp_path, model, blobs):
+    """The candidate wrote ``--cuda-graph-max-bs 32``, the session's own value: at 4 the source's 4 runs."""
+    by_conc = {4: ("--tp", "2", "--cuda-graph-max-bs", "4"), 32: ("--tp", "2", "--cuda-graph-max-bs", "32")}
+    launches = tuple(SourcePointLaunch(conc, args, {}) for conc, args in by_conc.items())
+    base = _agentx_base()
+    base = replace(base, args=by_conc[32], point=replace(base.point, source_concs=(4, 32), source_launches=launches))
+    canonical = default_canonical(
+        tmp_path / "canonical",
+        primary_concurrency=32,
+        config_path=default_baseline_config(),
+        model_path=str(model),
+        frozen_base=base,
+    )
+    delta = RecipeDelta(config=ConfigDelta(server_args="--cuda-graph-max-bs 32 --enable-torch-compile"))
+
+    points = generate_points(
+        environment(blobs, tmp_path, delta=delta), canonical, tmp_path / "points", concurrency=(4, 32)
+    )
+
+    for point, graphs in zip(points, ("4", "32"), strict=True):
+        args = load(point)["benchmark"]["envs"]["EXTRA_SGLANG_ARGS"].split()
+        assert [args[i + 1] for i, token in enumerate(args) if token == "--cuda-graph-max-bs"] == [graphs]
         assert "--enable-torch-compile" in args
 
 

@@ -17,6 +17,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from types import MappingProxyType
 
+from hyperloom.inference_optimizer.grid_server_args import merge_server_args, server_args_delta
 from hyperloom.inference_optimizer.session.base_launch import base_launch_path, read_base_launch, write_base_launch
 from hyperloom.inference_optimizer.session.paths import session_dir
 from inference_suite import INFERENCEX_CLIENT_COMMIT, runner_owned
@@ -62,6 +63,17 @@ def server_base_at(base: BaseLaunch, conc: int) -> ServerBase:
         return server_base(base)
     launch = next((each for each in launches if each.conc >= conc), launches[-1])
     return _seeded(base, launch.args, launch.env)
+
+
+def launch_change(base: BaseLaunch, args: str, env: Mapping[str, str]) -> ServerBase:
+    """What ``args`` and ``env``, laid over ``base``'s own launch, change of it: a flag or variable they set to the
+    value that launch already has is left out, so a point seeded at another concurrency keeps the source's value there.
+    """
+    own = server_base(base)
+    changed = server_args_delta(own.args, merge_server_args(own.args, args)).add
+    return ServerBase(
+        changed, MappingProxyType({name: value for name, value in env.items() if own.env.get(name) != value})
+    )
 
 
 def _seeded(base: BaseLaunch, args: tuple[str, ...], env: Mapping[str, object]) -> ServerBase:
@@ -157,6 +169,7 @@ __all__ = [
     "freeze_base",
     "frozen_base",
     "frozen_session_base",
+    "launch_change",
     "server_argv",
     "server_base",
     "server_base_at",

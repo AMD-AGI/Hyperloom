@@ -17,7 +17,7 @@ from __future__ import annotations
 import shutil
 import tempfile
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass, field, fields
+from dataclasses import dataclass, field, fields, replace
 from pathlib import Path
 from typing import Any
 
@@ -62,7 +62,7 @@ from hyperloom.orchestrator.actions.executors import (
     materialize_benchmark_config,
 )
 from hyperloom.orchestrator.actions.executors.agentx_point import enable_profile, native_config
-from hyperloom.orchestrator.state.base_launch import server_base, server_base_at
+from hyperloom.orchestrator.state.base_launch import launch_change, server_base, server_base_at
 from inference_suite.argv import argv_flag_occurrences, canonical_flag_name, flag_occurrences
 from inference_suite.contracts import BaseLaunch
 
@@ -297,6 +297,9 @@ def generate_points(
     if accuracy and canonical.agentx:
         raise PointError("an AgentX workload has no accuracy test: its report's valid_measurement is its check")
     launch = environment.recipe.launch
+    if canonical.frozen_base is not None:  # levels seeded with the source's launch take what the recipe restates there
+        change = launch_change(canonical.frozen_base, launch.server_args, launch.envs)
+        launch = replace(launch, server_args=change.args, envs=dict(change.env))
     check_launch_envs([*launch.envs, *environment.envs])
     out_dir.mkdir(parents=True, exist_ok=True)
     points = []
@@ -375,6 +378,9 @@ def generate_profile_point(
         enable_profile(point)
         return (point,)
     launch = environment.recipe.launch
+    if canonical.frozen_base is not None:  # levels seeded with the source's launch take what the recipe restates there
+        change = launch_change(canonical.frozen_base, launch.server_args, launch.envs)
+        launch = replace(launch, server_args=change.args, envs=dict(change.env))
     check_launch_envs([*launch.envs, *environment.envs])
     out_dir.mkdir(parents=True, exist_ok=True)
     level = canonical.primary_concurrency

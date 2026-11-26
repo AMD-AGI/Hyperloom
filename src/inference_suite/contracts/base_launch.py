@@ -393,6 +393,12 @@ class LaunchPoint:
         _FIELDS.boolean(self.exact, "the point's exact")
         for conc in self.source_concs:
             _FIELDS.integer(conc, "a source concurrency", minimum=1)
+        launched = [launch.conc for launch in self.source_launches]
+        if len(set(launched)) != len(launched) or not set(launched) <= set(self.source_concs):
+            raise BaseLaunchError(
+                f"the point's source launches {launched} must name each of its source concurrencies"
+                f" {list(self.source_concs)} at most once"
+            )
 
     def to_document(self) -> dict[str, object]:
         return {
