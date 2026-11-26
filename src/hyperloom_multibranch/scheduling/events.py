@@ -19,7 +19,10 @@ branch builds on. Nothing here scores the frontier, which logs a round every tim
 
 After the integration head moved, :class:`IntegrationProfiler` profiles it, one profile at a time, in a task of its own:
 a PROFILE test of the head, then a TraceLens analysis of that test's trace, whose op shares the bottleneck is read from.
-PRELUDE has it profile the root the same way, and waits for it. An AgentX root's analysis is submitted only once the
+PRELUDE has it profile the root the same way, and waits for the root's PROFILE test. A workload whose PRELUDE waits for
+the analysis as well (:attr:`~.settings.Workload.prelude_awaits_root_analysis`) has PRELUDE take its outcome; on any
+other the analysis, which holds no card, goes on as the running profile once EXPLORE opened, and the op shares it leaves
+are an event (``root_profiled``) for the judge. An AgentX root's analysis is submitted only once the
 baseline measurement has ended: its point names no prompt and output length, so the analysis weights its prefill and
 decode windows by the lengths the baseline measured (``toolbox/analysis.py``), and an analysis submitted before the rule
 gate wrote the baseline would stay degraded under the profile's shared key, for every branch and the judge.
@@ -39,7 +42,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 from collections.abc import Awaitable, Iterable, Mapping
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from enum import Enum
 from typing import TYPE_CHECKING
 
@@ -93,6 +96,7 @@ PROFILE_EXISTS_CODE = "profile_exists"
 class EventKind(str, Enum):
     INTEGRATION_MOVED = "integration_moved"
     BOTTLENECK_MOVED = "bottleneck_moved"
+    ROOT_PROFILED = "root_profiled"
     ENVIRONMENT_CHANGED = "environment_changed"
     NO_MEASUREMENT_CARDS = "no_measurement_cards"
 
@@ -145,6 +149,15 @@ def bottleneck_moved(before: OpShares | None, after: OpShares | None) -> Session
         "previous_share_pct": old_share,
     }
     return SessionEvent(EventKind.BOTTLENECK_MOVED, reason, detail)
+
+
+def root_profiled(shares: OpShares) -> SessionEvent:
+    """The event of the analysis of the root's profile leaving the root's op ``shares``, which have at least one op."""
+
+    [(op, share)] = shares.largest(1)
+    reason = f"the root's profile was analysed: its largest op is {op} at {share:.1f}%"
+    detail = {"commit": shares.commit_id, "largest_op": op, "share_pct": share}
+    return SessionEvent(EventKind.ROOT_PROFILED, reason, detail)
 
 
 def environment_changed(quarantine: QuarantineEvent) -> SessionEvent:
@@ -257,19 +270,31 @@ class IntegrationProfiler:
         else:
             self._task = asyncio.ensure_future(self._profile(head, moved_from))
 
-    async def profile_root(self, root: str, baseline: Awaitable[object] | None = None) -> ProfileOutcome:
-        """Profile ``root`` and wait for its analysis, for PRELUDE; a backend that cannot profile is not asked again in
-        this session either.
+    async def profile_root(
+        self, root: str, baseline: Awaitable[object] | None = None
+    ) -> asyncio.Future[ProfileOutcome]:
+        """Start profiling ``root`` as the running profile, for PRELUDE, and return it once its PROFILE test ended. Its
+        analysis goes on, holding no card; its outcome is taken with :meth:`take_outcome` as a moved head's is, its
+        event :func:`root_profiled` when it left the root's op shares, and a backend that cannot profile is not asked
+        again in this session either. Cancelled before the test ended, it stops the profile, which takes the test back;
+        a profile that raised before then raises here.
 
         With ``baseline`` (the baseline's measurement, for a point that names no prompt and output length) the analysis
         is submitted once the profile test ended and ``baseline`` has ended, however it ended: the request then carries
         the lengths the baseline measured. One that ended without writing a baseline leaves the analysis as it was
-        before, degraded with its reason; the wait adds nothing to PRELUDE, which waits for the baseline anyway.
+        before, degraded with its reason.
         """
 
-        outcome = await self._profile(root, root, baseline)
-        self._available = outcome.available
-        return outcome
+        measured: asyncio.Future[None] = asyncio.get_running_loop().create_future()
+        task = self._task = asyncio.ensure_future(self._root_profile(root, baseline, measured))
+        try:
+            await asyncio.wait([task, measured], return_when=asyncio.FIRST_COMPLETED)
+        except asyncio.CancelledError:
+            await self.stop()
+            raise
+        if task.done():
+            task.result()
+        return task
 
     def take_outcome(self) -> ProfileOutcome | None:
         """The outcome of the profile that ended since the last look, ``None`` while it runs or when none ran; a head
@@ -301,12 +326,28 @@ class IntegrationProfiler:
         with contextlib.suppress(asyncio.CancelledError):
             await task
 
-    async def _profile(self, head: str, moved_from: str, baseline: Awaitable[object] | None = None) -> ProfileOutcome:
+    async def _root_profile(
+        self, root: str, baseline: Awaitable[object] | None, measured: asyncio.Future[None]
+    ) -> ProfileOutcome:
+        outcome = await self._profile(root, root, baseline, measured)
+        # The root is the session's first profile: shares held now are its own.
+        shares = self._shares
+        return outcome if shares is None or not shares.shares else replace(outcome, event=root_profiled(shares))
+
+    async def _profile(
+        self,
+        head: str,
+        moved_from: str,
+        baseline: Awaitable[object] | None = None,
+        measured: asyncio.Future[None] | None = None,
+    ) -> ProfileOutcome:
+        """Profile ``head``; ``measured`` is resolved once its PROFILE test ended, before the analysis."""
+
         before = self._shares or await self._records.op_shares(moved_from)
         request = integration_test_request(TestKind.PROFILE, Purpose.PROFILE, head)
         try:
             return await self._tests.judged(
-                request, lambda request_id: self._analysed(head, request_id, before, baseline)
+                request, lambda request_id: self._analysed(head, request_id, before, baseline, measured)
             )
         except RequestRejected as rejected:
             if rejected.code == PROFILE_EXISTS_CODE:
@@ -345,11 +386,18 @@ class IntegrationProfiler:
         return shares if shares is not None and shares.profile_request_id == request_id else None
 
     async def _analysed(
-        self, head: str, request_id: str, before: OpShares | None, baseline: Awaitable[object] | None
+        self,
+        head: str,
+        request_id: str,
+        before: OpShares | None,
+        baseline: Awaitable[object] | None,
+        measured: asyncio.Future[None] | None,
     ) -> ProfileOutcome:
         """Analyse the trace of the PROFILE ``request_id`` once it ended, and once ``baseline`` ended when there is one."""
 
         result = await self._toolbox.outcome(request_id)
+        if measured is not None:
+            measured.set_result(None)
         detail: dict[str, object] = {"commit": head, "request_id": request_id}
         if result.validity is not Validity.SUCCEEDED:
             failed = {**detail, "validity": result.validity.value, "failure_reason": result.failure_reason}
@@ -565,4 +613,5 @@ __all__ = [
     "environment_moved",
     "integration_moved",
     "no_measurement_cards",
+    "root_profiled",
 ]

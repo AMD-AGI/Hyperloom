@@ -167,6 +167,9 @@ before stopping such a branch, whose head holds the gain the integration head la
 bottleneck_moved: the profile of the integration head taken after it moved found its largest op changed, or that op's
 share fell by more than {MB_BOTTLENECK_SHIFT_PP} percentage points: branches still speeding up the previous largest op
 have less to gain, and a branch you open now without a focus is briefed from the new profile as above.
+root_profiled: in an AgentX session the analysis of the root's profile goes on after EXPLORE opened; this event says it
+left the root's op shares, and largest_op and share_pct name its largest op. Until then the root has no op shares, as a
+head never profiled has none, and profile_running is true while that analysis runs.
 The integration branch's profile_running is true while that profile runs: its PROFILE test holds one of the
 integration branch's K slots, so merge tests wait for it while that K is 1; size the integration branch's K with it.
 The integration branch's K is bounded by max_parallel_tests, not by max_k_per_branch.
