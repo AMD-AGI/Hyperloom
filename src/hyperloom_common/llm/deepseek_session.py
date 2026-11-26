@@ -500,7 +500,6 @@ class DeepSeekSession:
 __all__ = [
     "COMPACTION_PATCH",
     "DEEPSEEK_RUNTIME_MAPPING",
-    "GATEWAY_API_KEY_ENV",
     "GATEWAY_BASE_URL_ENV",
     "GATEWAY_PROVIDER_ROUTE",
     "DeepSeekSession",

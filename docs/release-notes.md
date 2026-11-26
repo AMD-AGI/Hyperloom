@@ -20,6 +20,12 @@ Merged to `main` and not yet carried by a tagged release. Each entry moves
 into the [release](https://github.com/AMD-AGI/Hyperloom/releases) that ships
 it.
 
+- **The DeepSeek Harness reaches the gateway through the `llm-pi-ai` route.**
+  The `deepseek-official` adapter rejected the `redacted_thinking` blocks a
+  gateway returns with `UNSUPPORTED_CONTENT`; the `anthropic-messages` route
+  keeps and replays them. With `HYPERLOOM_DSH_MAX_TOKENS` unset, a request's
+  output cap is now 128000, the `llm-pi-ai` default; it was 256000.
+
 - **A hosted multi-branch run sets the AgentX window and the server boot
   budget.** The campaign spec's `multibranch` block takes
   `agentx_duration_sec` and `agentx_objective` (for `workload: agentx` only),
@@ -389,7 +395,7 @@ Session and report consumers have to follow these changes:
 
 - **KernelForge has an AveLang backend.** `--kernel-backend ave` selects it and backend inference recognises AveLang imports after the existing checks, so Hyperloom dispatches Ave tasks through its Forge path.
 
-- **`HYPERLOOM_DSH_MAX_TOKENS` caps the output tokens of each DeepSeek Harness request.** It reaches the harness orchestration role and the headless `dsh` specialists; unset, a request is capped at 128000, the `llm-pi-ai` default, where the former `deepseek-official` route sent 256000. A value that is not a positive integer fails at start.
+- **`HYPERLOOM_DSH_MAX_TOKENS` caps the output tokens of each DeepSeek Harness request.** It reaches the harness orchestration role and the headless `dsh` specialists; unset, the harness sends `max_tokens=256000` as before, which a gateway route with a lower output limit (for example 128000) rejected on every request. A value that is not a positive integer fails at start.
 
 - **TraceLens fusion findings reach forge-fuse and the specialists.** When TraceLens reports any, forge-fuse's discovery prompt and the specialist prompts include them, the fusion workspace holds `fusion_hints.json`, and the fusion result records its path as `fusion_hints`. They are advisory: which chains are fused, and whether discovery runs, is decided as before.
 
