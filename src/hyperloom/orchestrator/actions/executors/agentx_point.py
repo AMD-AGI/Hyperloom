@@ -390,6 +390,8 @@ def materialize_variant(
             does not ship.
         SpeculativeDecodingPinnedError: When the candidate changes the draft or the simulated acceptance the
             recipe and the accepted launch pin.
+        HarnessFlagChangeError: When the candidate runs a benchmark-harness flag the accepted launch does not, or
+            drops one it does.
     """
     config = yaml.safe_load(config_path.read_text(encoding=_ENCODING))
     apply_launch_changes(config["benchmark"], base, accepted=True)
