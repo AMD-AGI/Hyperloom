@@ -13,23 +13,25 @@ TraceLens-patched servers write their CUDA-graph capture sidecars into ``capture
 tells a step trace from a sidecar by its directory.
 
 Every framework captures only between ``/start_profile`` and ``/stop_profile``; each load's window sends them through
-:func:`server_request` and records what it did as ``profile/capture.json`` (:class:`WindowCapture`).
+:func:`server_request` and records what it did as ``profile/capture.json`` (:class:`WindowCapture`). A server whose
+profiler sits behind its admin routes is started with a fresh :class:`AdminKey`, which both requests carry.
 """
 
 from __future__ import annotations
 
 import http.client
 import json
+import secrets
 import urllib.error
 import urllib.request
 from collections.abc import Mapping
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
 from inference_suite.contracts.config import LaunchDelta, ProfileConfig, SuiteConfig
-from inference_suite.contracts.launch import LaunchError
+from inference_suite.contracts.launch import Launch, LaunchError
 from inference_suite.contracts.layout import CAPTURE_TRACE_DIRS, RunLayout
-from inference_suite.frameworks import Framework
+from inference_suite.frameworks import Framework, framework_facts
 
 SGLANG_PROFILER_DIR_ENV = "SGLANG_TORCH_PROFILER_DIR"
 ATOM_PROFILER_DIR_FLAG = "--torch-profiler-dir"
@@ -85,11 +87,39 @@ def start_body(profile: ProfileConfig, framework: Framework) -> dict[str, object
     return body
 
 
-def server_request(url: str, body: Mapping[str, object] | None) -> bytes:
-    """POST ``body`` as JSON to ``url`` (GET when ``body`` is ``None``) and return the answer; raises one of
-    :data:`SERVER_REQUEST_ERRORS` when the server refuses the request or does not answer."""
+@dataclass(frozen=True)
+class AdminKey:
+    """The key a profile round starts its server with, passed as ``flag`` and sent as a bearer token.
+
+    It lives in the round's process alone: it is added to the argv the server is spawned with, never to the launch the
+    round records, so neither ``launch.json`` nor the launch digest carries it.
+    """
+
+    flag: str
+    value: str = field(repr=False)
+
+    def args(self) -> tuple[str, str]:
+        return (self.flag, self.value)
+
+
+def admin_key(config: SuiteConfig, launch: Launch) -> AdminKey | None:
+    """A fresh key for the admin routes of the server ``launch`` starts; ``None`` when the round profiles nothing, or
+    the installed framework takes no admin key."""
+    flag = framework_facts(launch.framework.name).admin_key
+    if not config.profile.enabled or flag is None or not flag.taken_by(launch.framework.installed_version):
+        return None
+    return AdminKey(flag.flag, secrets.token_urlsafe(32))
+
+
+def server_request(url: str, body: Mapping[str, object] | None, key: AdminKey | None = None) -> bytes:
+    """POST ``body`` as JSON to ``url`` (GET when ``body`` is ``None``), with ``key`` as its bearer token when given,
+    and return the answer; raises one of :data:`SERVER_REQUEST_ERRORS` when the server refuses the request or does not
+    answer."""
     data = None if body is None else json.dumps(body).encode()
-    request = urllib.request.Request(url, data=data, headers={"Content-Type": "application/json"})
+    headers = {"Content-Type": "application/json"}
+    if key is not None:
+        headers["Authorization"] = f"Bearer {key.value}"
+    request = urllib.request.Request(url, data=data, headers=headers)
     with _OPENER.open(request, timeout=_CONTROL_TIMEOUT_SEC) as response:
         return response.read()
 
@@ -144,7 +174,9 @@ __all__ = [
     "SGLANG_PROFILER_DIR_ENV",
     "START_PROFILE_PATH",
     "STOP_PROFILE_PATH",
+    "AdminKey",
     "WindowCapture",
+    "admin_key",
     "make_trace_dirs",
     "profiler_layer",
     "server_request",

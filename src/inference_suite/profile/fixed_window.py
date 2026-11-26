@@ -22,6 +22,7 @@ from inference_suite.profile.inject import (
     SERVER_REQUEST_ERRORS,
     START_PROFILE_PATH,
     STOP_PROFILE_PATH,
+    AdminKey,
     WindowCapture,
     server_request,
     start_body,
@@ -32,17 +33,20 @@ from inference_suite.runtime.phases import Phase, PhaseClock
 class FixedWindow:
     """Sends the server's profiler its start and stop around the measured pass, and records when it did."""
 
-    def __init__(self, profile: ProfileConfig, framework: Framework, base_url: str, clock: PhaseClock) -> None:
+    def __init__(
+        self, profile: ProfileConfig, framework: Framework, base_url: str, clock: PhaseClock, key: AdminKey | None
+    ) -> None:
         self._body = start_body(profile, framework)
         self._base_url = base_url.rstrip("/")
         self._clock = clock
+        self._key = key
         self._opened: float | None = None
         self._closed: float | None = None
         self._error: str | None = None
 
     def open(self) -> None:
         try:
-            server_request(self._base_url + START_PROFILE_PATH, self._body)
+            server_request(self._base_url + START_PROFILE_PATH, self._body, self._key)
         except SERVER_REQUEST_ERRORS as exc:
             self._error = f"{START_PROFILE_PATH}: {exc}"
             return
@@ -55,7 +59,7 @@ class FixedWindow:
         self._closed = time.time()
         self._clock.mark(Phase.PROFILE_CLOSE)
         try:
-            server_request(self._base_url + STOP_PROFILE_PATH, {})
+            server_request(self._base_url + STOP_PROFILE_PATH, {}, self._key)
         except SERVER_REQUEST_ERRORS:  # see the module docstring: the trace dirs, not this answer, are the verdict
             pass
 

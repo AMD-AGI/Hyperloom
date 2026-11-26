@@ -79,7 +79,7 @@ def _measured(clock: PhaseClock, at: float = _START) -> PhaseClock:
 def test_the_window_opens_its_offset_after_the_measured_mark_not_after_the_warmup(engine, tmp_path) -> None:
     served, url = engine
     clock = PhaseClock()
-    window = AgentxWindow(_PROFILE, Framework.SGLANG, url, clock)
+    window = AgentxWindow(_PROFILE, Framework.SGLANG, url, clock, None)
 
     clock.mark(Phase.WARMUP, _START - 480)
     window.hear(_START + 20)
@@ -109,7 +109,7 @@ def test_the_window_opens_its_offset_after_the_measured_mark_not_after_the_warmu
 def test_the_finished_mark_closes_an_open_window_at_the_next_poll(engine, tmp_path) -> None:
     served, url = engine
     clock = _measured(PhaseClock())
-    window = AgentxWindow(_PROFILE, Framework.VLLM, url, clock)
+    window = AgentxWindow(_PROFILE, Framework.VLLM, url, clock, None)
     window.hear(_START + 30)
     clock.mark(Phase.FINISHED, _START + 44)
 
@@ -125,7 +125,7 @@ def test_a_replay_that_finishes_before_the_offset_opens_no_window(engine, tmp_pa
     served, url = engine
     clock = _measured(PhaseClock())
     clock.mark(Phase.FINISHED, _START + 10)
-    window = AgentxWindow(_PROFILE, Framework.SGLANG, url, clock)
+    window = AgentxWindow(_PROFILE, Framework.SGLANG, url, clock, None)
 
     window.hear(_START + 3600)
     capture = window.finish(RunLayout(tmp_path))
@@ -138,7 +138,7 @@ def test_a_replay_that_never_reaches_profiling_opens_no_window(engine, tmp_path)
     served, url = engine
     clock = PhaseClock()
     clock.mark(Phase.WARMUP, _START)
-    window = AgentxWindow(_PROFILE, Framework.SGLANG, url, clock)
+    window = AgentxWindow(_PROFILE, Framework.SGLANG, url, clock, None)
     window.hear(_START + 3600)
 
     capture = window.finish(RunLayout(tmp_path))
@@ -150,7 +150,7 @@ def test_a_replay_that_never_reaches_profiling_opens_no_window(engine, tmp_path)
 @pytest.mark.parametrize("engine", ["/start_profile"], indirect=True)
 def test_a_refused_start_is_recorded_and_never_retried(engine, tmp_path) -> None:
     served, url = engine
-    window = AgentxWindow(_PROFILE, Framework.SGLANG, url, _measured(PhaseClock()))
+    window = AgentxWindow(_PROFILE, Framework.SGLANG, url, _measured(PhaseClock()), None)
     for offset in (30, 31, 120):
         window.hear(_START + offset)
 
@@ -166,7 +166,7 @@ def test_sglang_carries_the_configured_start_body(engine) -> None:
     profile = ProfileConfig(
         enabled=True, start_body={"record_shapes": True}, agentx_open_after_sec=0, agentx_duration_sec=1
     )
-    AgentxWindow(profile, Framework.SGLANG, url, _measured(PhaseClock())).hear(_START)
+    AgentxWindow(profile, Framework.SGLANG, url, _measured(PhaseClock()), None).hear(_START)
 
     assert served.requests[0] == ("/start_profile", {"record_shapes": True})
 
@@ -175,4 +175,4 @@ def test_the_window_needs_both_agentx_bounds(tmp_path: Path) -> None:
     profile = ProfileConfig(enabled=True, num_prompts=8, delay_iters=1, max_iters=2)
 
     with pytest.raises(ValueError, match="agentx_open_after_sec"):
-        AgentxWindow(profile, Framework.SGLANG, "http://127.0.0.1:1", PhaseClock())
+        AgentxWindow(profile, Framework.SGLANG, "http://127.0.0.1:1", PhaseClock(), None)

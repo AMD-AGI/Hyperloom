@@ -82,7 +82,14 @@ from inference_suite.load.mlperf import MlperfRound, run_mlperf
 from inference_suite.load.scriptable import run_scriptable
 from inference_suite.profile.agentx_window import AgentxWindow
 from inference_suite.profile.fixed_window import FixedWindow
-from inference_suite.profile.inject import WindowCapture, make_trace_dirs, profiler_layer, settle_traces
+from inference_suite.profile.inject import (
+    AdminKey,
+    WindowCapture,
+    admin_key,
+    make_trace_dirs,
+    profiler_layer,
+    settle_traces,
+)
 from inference_suite.pins import LM_EVAL_DISTRIBUTION
 from inference_suite.runtime.gpus import amd_smi_cards
 from inference_suite.runtime.phases import Phase, PhaseClock, PhaseListener
@@ -276,6 +283,7 @@ class _Prepared:
     server_env: Mapping[str, str]
     client: ClientTool | AgentxTool
     eval_plan: EvalPlan | None
+    admin_key: AdminKey | None
 
 
 class _KvSampler:
@@ -422,7 +430,7 @@ class _Round:
             launch = replace(launch, eval=eval_plan.invocation(sys.executable, self._eval_request))
         if facts.profiler is not None:
             make_trace_dirs(self.layout)
-        return _Prepared(launch, server_env, client, eval_plan)
+        return _Prepared(launch, server_env, client, eval_plan, admin_key(config, launch))
 
     def _client(self) -> ClientTool | AgentxTool:
         root = staging.inferencex_root(self.tool_cache)
@@ -491,7 +499,9 @@ class _Round:
         launch = prepared.launch
         # The server's identity leaves out the load and the eval, so a reuse round finds the server a boot round left.
         server_digest = replace(launch, client=None, eval=None).digest()
-        server_launch = ServerLaunch(launch.argv, prepared.server_env, launch.framework.name, server_digest)
+        key = prepared.admin_key
+        argv = launch.argv if key is None else (*launch.argv, *key.args())
+        server_launch = ServerLaunch(argv, prepared.server_env, launch.framework.name, server_digest)
         lifecycle = ServerLifecycle(self.config, server_launch, self.clock, self.cancel)
         try:
             acquired = lifecycle.acquire()
@@ -531,7 +541,8 @@ class _Round:
         """Run the round's load on ``server``, if it has one; whether the round goes on."""
         workload = self.config.workload
         if isinstance(prepared.client, AgentxTool):
-            return self._run_agentx(server, prepared.client, Framework(prepared.launch.framework.name))
+            framework = Framework(prepared.launch.framework.name)
+            return self._run_agentx(server, prepared.client, framework, prepared.admin_key)
         if workload is WorkloadKind.MLPERF:
             outcome = run_mlperf(MlperfRound(self.config, server, self.gate, self.clock))
             return self._loaded(outcome.returncode, outcome.result, outcome.stop)
@@ -559,17 +570,19 @@ class _Round:
         if not config.profile.enabled:
             return run_fixed(FixedRound(config, prepared.client, server, self.gate, self.clock))
         framework = Framework(prepared.launch.framework.name)
-        window = FixedWindow(config.profile, framework, server.base_url, self.clock)
+        window = FixedWindow(config.profile, framework, server.base_url, self.clock, prepared.admin_key)
         measured = MeasuredWindow(window.open, window.close)
         outcome = run_fixed(FixedRound(config, prepared.client, server, self.gate, self.clock, measured))
         self.capture = window.finish(self.layout)
         return outcome
 
-    def _run_agentx(self, server: Server, harness: AgentxTool, framework: Framework) -> bool:
+    def _run_agentx(self, server: Server, harness: AgentxTool, framework: Framework, key: AdminKey | None) -> bool:
         """Replay the traces, with the profile window following the replay's phases; whether the round goes on."""
         config = self.config
         window = (
-            AgentxWindow(config.profile, framework, server.base_url, self.clock) if config.profile.enabled else None
+            AgentxWindow(config.profile, framework, server.base_url, self.clock, key)
+            if config.profile.enabled
+            else None
         )
         listeners = () if window is None else (window.hear,)
         outcome = run_agentx(AgentxRound(config, harness, server, self.gate, self.clock, listeners))

@@ -21,6 +21,7 @@ from inference_suite.profile.inject import (
     SERVER_REQUEST_ERRORS,
     START_PROFILE_PATH,
     STOP_PROFILE_PATH,
+    AdminKey,
     WindowCapture,
     server_request,
     start_body,
@@ -38,7 +39,9 @@ def _unix(mark: PhaseMark | None) -> float | None:
 class AgentxWindow:
     """Opens and closes the server's profiler as the round's phase clock goes by; fed by the load at every poll."""
 
-    def __init__(self, profile: ProfileConfig, framework: Framework, base_url: str, clock: PhaseClock) -> None:
+    def __init__(
+        self, profile: ProfileConfig, framework: Framework, base_url: str, clock: PhaseClock, key: AdminKey | None
+    ) -> None:
         if profile.agentx_open_after_sec is None or profile.agentx_duration_sec is None:
             raise ValueError("an AgentX profile window needs agentx_open_after_sec and agentx_duration_sec")
         self._open_after = profile.agentx_open_after_sec
@@ -46,6 +49,7 @@ class AgentxWindow:
         self._body = start_body(profile, framework)
         self._base_url = base_url.rstrip("/")
         self._clock = clock
+        self._key = key
         self._opened: PhaseMark | None = None
         self._closed: PhaseMark | None = None
         self._running: int | None = None
@@ -67,7 +71,7 @@ class AgentxWindow:
 
     def _open(self, now: float) -> None:
         try:
-            server_request(self._base_url + START_PROFILE_PATH, self._body)
+            server_request(self._base_url + START_PROFILE_PATH, self._body, self._key)
         except SERVER_REQUEST_ERRORS as exc:
             self._error = f"{START_PROFILE_PATH}: {exc}"
             return
@@ -85,7 +89,7 @@ class AgentxWindow:
     def _close(self, now: float) -> None:
         self._closed = self._clock.mark(Phase.PROFILE_CLOSE, now)
         try:
-            server_request(self._base_url + STOP_PROFILE_PATH, {})
+            server_request(self._base_url + STOP_PROFILE_PATH, {}, self._key)
         except SERVER_REQUEST_ERRORS as exc:
             self._error = f"{STOP_PROFILE_PATH}: {exc}"
 

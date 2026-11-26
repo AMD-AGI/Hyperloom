@@ -3,7 +3,8 @@
 
 """Contract of a round: one round per call into an empty run_dir, which does not change once the call returns, GPU
 samples from the measured window alone, KV samples tagged by phase, a fixed profile round's window around its
-measured pass, an AgentX profile round's window on the replay's phase clock, an MLPerf round's harness against the
+measured pass, the admin key a profile round starts SGLang with and records nowhere, an AgentX profile round's window
+on the replay's phase clock, an MLPerf round's harness against the
 round's server, the checks that refuse a round before its
 server starts, a reuse round on the server a boot round left, and the CLI's ``run`` and ``stop`` round trips."""
 
@@ -81,6 +82,8 @@ _SERVER = textwrap.dedent(
     """
     import http.server, json, os, sys
     port = int(sys.argv[sys.argv.index("--port") + 1])
+    # As sglang's does, a server started with an admin key serves its profiler to that key alone.
+    admin = sys.argv[sys.argv.index("--admin-api-key") + 1] if "--admin-api-key" in sys.argv else None
     print("server starting on", port, flush=True)
     metrics = b"sglang:token_usage 0.25\\nsglang:max_total_num_tokens 4096\\nsglang:num_running_reqs 8\\n"
 
@@ -95,13 +98,14 @@ _SERVER = textwrap.dedent(
             body = json.loads(self.rfile.read(int(self.headers.get("Content-Length", 0))) or b"null")
             with open(os.environ["FAKE_CLIENT_CALLS"], "a") as calls:
                 calls.write(json.dumps({"path": self.path, "body": body}) + "\\n")
-            if self.path == "/stop_profile":
+            keyed = admin is None or self.headers.get("Authorization") == "Bearer " + admin
+            if self.path == "/stop_profile" and keyed:
                 trace_dir = os.environ["SGLANG_TORCH_PROFILER_DIR"]
                 with open(os.path.join(trace_dir, "rank0.trace.json.gz"), "w") as trace:
                     trace.write("trace")
             refused = os.environ.get("FAKE_PROFILE_REFUSED") == "1"
             known = self.path in ("/start_profile", "/stop_profile")
-            self.send_response(500 if refused else 200 if known else 404)
+            self.send_response(500 if refused else 404 if not known else 200 if keyed else 403)
             self.end_headers()
 
         def log_message(self, *args):
@@ -555,6 +559,31 @@ def test_a_fixed_profile_window_the_server_refuses_leaves_no_trace_and_the_round
     assert report.profile is not None and not report.profile.has_step_traces and report.profile.trace_dirs == ()
     capture = json.loads(layout.profile_capture.read_text())
     assert capture["window_open_unix"] is None and "/start_profile" in capture["error"]
+
+
+def test_a_profile_round_starts_sglang_with_an_admin_key_that_no_file_of_the_round_holds(rig):
+    result = run.run_round(rig.config("r1", profile=_FIXED_WINDOW))
+
+    report, layout = result.report, result.layout
+    assert report.run_status is RunStatus.COMPLETED, report.failure_detail
+    assert report.profile is not None and report.profile.has_step_traces
+    served = rig.served.read_text().splitlines()
+    key = served[-1]
+    launch = Launch.from_document(json.loads(layout.launch.read_text()))
+    assert tuple(served) == (*launch.argv, "--admin-api-key", key)
+    assert [path for path in layout.root.rglob("*") if path.is_file() and key.encode() in path.read_bytes()] == []
+
+
+def test_a_profile_round_on_an_sglang_that_predates_the_admin_key_starts_it_without_one(rig):
+    _user_file_base(rig)
+    rig.installed = "0.5.8.dev3"
+
+    result = run.run_round(rig.config("r1", profile=_FIXED_WINDOW))
+
+    assert result.report.run_status is RunStatus.COMPLETED, result.report.failure_detail
+    launch = Launch.from_document(json.loads(result.layout.launch.read_text()))
+    assert tuple(rig.served.read_text().splitlines()) == launch.argv
+    assert result.report.profile is not None and result.report.profile.has_step_traces
 
 
 def _agentx_config(rig, run_id: str, workload: AgentxWorkload, profile: ProfileConfig) -> SuiteConfig:

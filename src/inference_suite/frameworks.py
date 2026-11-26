@@ -10,6 +10,8 @@ from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
 
+from packaging.version import InvalidVersion, Version
+
 from inference_suite.argv import argv_flag_occurrences, canonical_flag_name, last_alias_value
 
 
@@ -93,6 +95,24 @@ class ContextLengthFlag:
 
 
 @dataclass(frozen=True)
+class AdminKeyFlag:
+    """The server option that sets the bearer key its admin routes take, and the first release that has it.
+
+    A pre-release of that version may predate the option, so a version is held to it whole, not by its release alone.
+    """
+
+    flag: str
+    since: str
+
+    def taken_by(self, version: str) -> bool:
+        """Whether a server at ``version`` takes the option; ``False`` for a version that cannot be read."""
+        try:
+            return Version(version) >= Version(self.since)
+        except InvalidVersion:
+            return False
+
+
+@dataclass(frozen=True)
 class ServerFlags:
     """The flags that carry a round's runtime facts to the server; ``None`` when the server takes no such flag."""
 
@@ -148,6 +168,8 @@ class FrameworkFacts:
     ``None`` when it waits for its start without a limit of its own. ``model_file`` is the suffix of the one file of a
     model directory the server loads, ``None`` when it loads the directory. ``request_slots`` is the option capping
     the requests the server runs at once, ``None`` when it has none that a load past it only queues behind.
+    ``admin_key`` is the option whose key the server's admin routes, its profiler's among them, take; ``None`` when
+    its profiler takes no key.
     """
 
     kind: FrameworkKind
@@ -161,6 +183,7 @@ class FrameworkFacts:
     ready_timeout_env: str | None = None
     model_file: str | None = None
     request_slots: RequestSlotsFlag | None = None
+    admin_key: AdminKeyFlag | None = None
 
     def served_model(self, model_path: str) -> str:
         """What the server's model flag names for the model at ``model_path``: the path itself, or the one
@@ -274,6 +297,8 @@ _FACTS: dict[Framework, FrameworkFacts] = {
         # The warmup request it sends once its HTTP server is up; past it the server kills itself before it reports
         # ready. Unset (-1) means 600 s.
         ready_timeout_env="SGLANG_WARMUP_TIMEOUT",
+        # Since 2026-11 (sglang#49896) /start_profile and /stop_profile answer 403 to a server started without one.
+        admin_key=AdminKeyFlag("--admin-api-key", "0.5.8"),
     ),
     Framework.VLLM: FrameworkFacts(
         kind=FrameworkKind.SERVING,
@@ -319,6 +344,7 @@ def framework_facts(framework: Framework) -> FrameworkFacts:
 
 
 __all__ = [
+    "AdminKeyFlag",
     "ContextLengthFlag",
     "DataParallelFlag",
     "ExpertParallelFlag",
