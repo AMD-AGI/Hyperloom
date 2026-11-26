@@ -7,6 +7,7 @@
 import { SvelteSet } from "svelte/reactivity";
 import type { LatencyPick } from "./latency";
 import type { Gap, Range } from "./timeline/scale";
+import type { Group, Mode } from "./tokens";
 import type { StreamItem } from "./types";
 
 export type Layout = "layered" | "force";
@@ -18,7 +19,7 @@ export type Selection =
   | { kind: "call"; item: StreamItem }
   | { kind: "raw"; title: string; data: unknown };
 
-export const TABS = ["tasks", "artifacts", "bus", "llm", "journal"] as const;
+export const TABS = ["tasks", "artifacts", "bus", "llm", "tokens", "journal"] as const;
 export type Tab = (typeof TABS)[number];
 /** The artifact in the viewer: a file (with a JSONL page offset) or a diff of two. */
 export type ArtifactView = { kind: "file"; path: string; offset?: number } | { kind: "diff"; a: string; b: string };
@@ -73,6 +74,10 @@ export class UiState {
   artToggled = new SvelteSet<string>();
   /** The latency the throughput tab's scatter plots against tok/s. */
   latency = $state<LatencyPick>({ kind: "ttft", stat: "mean" });
+  /** The token chart: running totals or a rate, by token kind or by agent, and the series its legend hid. */
+  tokenMode = $state<Mode>("cumulative");
+  tokenGroup = $state<Group>("kind");
+  tokenHidden = new SvelteSet<string>();
 
   toggleFilter(node: string): void {
     this.filter = this.filter === node ? null : node;

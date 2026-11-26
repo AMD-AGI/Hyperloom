@@ -103,6 +103,57 @@ export interface AccuracyView {
   variants: { variant: string; value: number; t: number | null }[];
 }
 
+/** Token sums of a rollup (tokens.py); `input` is uncached, so the five kinds add up to `total`. */
+export interface TokenTotals {
+  input: number;
+  cache_write: number;
+  cache_read: number;
+  output: number;
+  reasoning: number;
+  total: number;
+  calls: number;
+  errors: number;
+  web_searches?: number;
+  /** Turns read from a specialist's log that the ledger has not got. */
+  live?: number;
+  /** Of those, a running specialist's, whose output is only known when it ends. */
+  output_pending?: number;
+  /** Of those, a specialist's that ended before reporting its output, which is unknown. */
+  output_unreported?: number;
+}
+
+/** Sparse buckets, `step` s from `start`: one `[bucket, node index, ...kinds, calls]` row per non-empty pair. */
+export interface TokenSeries {
+  start: number;
+  end: number;
+  step: number;
+  kinds: string[];
+  nodes: string[];
+  rows: number[][];
+}
+
+/** A figure's name on the Tokens tab and what it means (tokens.py `TERMS`). */
+export interface TokenTerm {
+  group: string;
+  label: string;
+  definition: string;
+}
+
+/** `view.tokens`: token consumption up to the clock. */
+export interface TokenView {
+  totals: TokenTotals;
+  by_component: Record<string, TokenTotals>;
+  by_node: Record<string, TokenTotals>;
+  by_model: Record<string, TokenTotals>;
+  pending_tasks: string[];
+  /** Specialists that ended before reporting their output. */
+  unreported_tasks?: string[];
+  recent: { window_sec: number; total: number; calls: number };
+  series: TokenSeries;
+  /** Names and definitions, keyed by field (`input`, `cache_read`, `total`, ...) or figure (`cache_hit`, ...). */
+  terms?: Record<string, TokenTerm>;
+}
+
 /** `/api/snapshot` without streams, as the SSE `view` event sends it. */
 export interface View {
   version: number;
@@ -114,6 +165,7 @@ export interface View {
   graph: { nodes: GraphNode[]; edges: GraphEdge[] };
   timeline: Timeline;
   llm: Record<string, Record<string, unknown>>;
+  tokens: TokenView;
   badges: { level: string; text: string }[];
   agents: { agent: string; age_sec: number; stale: boolean }[];
   artifact_count: number;

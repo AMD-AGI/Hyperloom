@@ -125,7 +125,31 @@ an error badge saying that the tasks cannot be read, rather than an empty task l
   a latency you pick (TTFT, TPOT or end-to-end latency; mean, median or p99), and a foldable uplift panel on the
   timeline's time axis shows each explored variant's throughput gain over the baseline, its mean TTFT and, for the
   baseline and each kept variant, the accuracy state.json records.
+- **Tokens**: a Tokens tab with every LLM call's tokens (see [Tokens](#tokens)).
 - **Replay** with a scrubber and speed control.
+
+## Tokens
+
+The Tokens tab counts every LLM call's tokens.
+
+Where it shows:
+
+- **Tokens tab**: totals by token type, cache hit rate, a token chart over the run, and totals by agent and by
+  model.
+
+What is counted:
+
+- **Calls**: the rows of `reports/trace/llm_calls.jsonl`. While a Claude CLI specialist runs, its turns are read from
+  its `process.log` and replaced by the ledger's rows once the runner writes them; nothing is counted twice.
+- **Side calls**: what a specialist's closing `result` line counts beyond its turns (WebSearch, WebFetch and the
+  like) is added when the specialist ends.
+- **Token types**: `input` (uncached), `cache_write`, `cache_read`, `output` and `reasoning`. Calls over the OpenAI
+  protocol report cached input inside input and reasoning inside output; the Inspector takes them out.
+  Which calls those are follows from what wrote the row: the proposal scorer always, the critic when it reports
+  reasoning, and roles and specialists on a Codex backend (models `gpt-`, `o1`, `o3`, `o4`, `codex`). A model such
+  as Kimi counts either way, depending on which of them called it.
+- **Model**: each call counts toward the model that answered it, so a sub-agent's turn counts toward its own model.
+- **Time**: each call is placed when its request was sent.
 
 ## Security
 

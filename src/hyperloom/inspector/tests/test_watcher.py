@@ -86,14 +86,16 @@ def test_replay_chapters_cover_the_recording_past_the_clock(session_dir):
     assert "chapters" not in _live(session_dir).snapshot()["timeline"]
 
 
-def test_a_live_run_gone_quiet_ends_the_timeline_at_its_last_activity(session_dir, monkeypatch):
+def test_a_live_run_gone_quiet_ends_the_timeline_and_token_chart_at_its_last_activity(session_dir, monkeypatch):
     w = _live(session_dir)
     snap = w.snapshot()
     end = snap["timeline"]["end"]
     assert T0 < end < w.clock.now() - 600
+    assert snap["tokens"]["series"]["end"] == end
     monkeypatch.setattr(w, "optimizer_status", lambda: {"alive": True})
     snap = w.snapshot()
     assert snap["timeline"]["end"] is None
+    assert snap["tokens"]["series"]["end"] > w.clock.now() - 5
     assert _replay_at(session_dir, T0 + 305).snapshot()["timeline"]["end"] is None
 
 

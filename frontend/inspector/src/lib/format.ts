@@ -21,6 +21,13 @@ export function fmtNum(n: number | null | undefined, digits = 1): string {
   return f.format(Number(n));
 }
 
+const compactFormat = new Intl.NumberFormat(undefined, { notation: "compact", maximumFractionDigits: 1 });
+
+/** Short counts for axes and cards: 6.9M, 657.5K. */
+export function fmtCompact(n: number | null | undefined): string {
+  return n == null || !isFinite(n) ? "–" : compactFormat.format(n);
+}
+
 /** `1,234 artifacts`; once the index stopped at its cap, `20,000+ artifacts (list cut at 20,000)`. */
 export function fmtArtifactCount(n: number, cutAt: number | null | undefined): string {
   const count = `${fmtNum(n, 0)}${cutAt != null && n >= cutAt ? "+" : ""} artifacts`;

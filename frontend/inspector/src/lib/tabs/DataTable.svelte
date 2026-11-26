@@ -40,7 +40,7 @@
 <table data-testid={testid}>
   <thead>
     <tr
-      >{#each cols as c (c.head)}<th>{c.head}</th>{/each}</tr
+      >{#each cols as c (c.head)}<th data-hint={c.hint} class:hint={!!c.hint}>{c.head}</th>{/each}</tr
     >
   </thead>
   <tbody>
@@ -78,6 +78,11 @@
     padding: 4px 8px;
     border-bottom: 1px solid var(--line);
     white-space: nowrap;
+  }
+  th.hint {
+    cursor: help;
+    text-decoration: underline dotted color-mix(in srgb, var(--muted) 60%, transparent);
+    text-underline-offset: 3px;
   }
   td {
     padding: 3px 8px;

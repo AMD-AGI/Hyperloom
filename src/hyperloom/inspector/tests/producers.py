@@ -290,6 +290,26 @@ def producer_says_failed(runner_status: str, reason: str) -> bool:
     return ftype in (kinds.TIMEOUT, kinds.STALE_HEARTBEAT, kinds.CRASH)
 
 
+def harvest_specialist_trace(process_log: Path, config_dir: Path) -> Any:
+    """What the dispatcher recovers from a Claude CLI specialist's *process_log* and the CLI's own session record
+    under *config_dir* (``trace_harvest.harvest_agent_trace``)."""
+    harvest = Upstream("hyperloom.orchestrator.specialists.trace_harvest").harvest_agent_trace
+    return harvest("claude", process_log.parent, process_log, {"CLAUDE_CONFIG_DIR": str(config_dir)})
+
+
+def specialist_turn_record(task_id: str, turn: int, usage: dict) -> Any:
+    """The ledger record the specialist runner makes for one turn of task *task_id*
+    (``SpecialistRunner._trace_specialist_llm_call``: an ``LLMCallSite`` and ``LLMCallRecord.from_metadata``)."""
+    site = _LLM_TRACE.LLMCallSite(session_id=SESSION_ID, component="specialist", task_id=task_id, turn=turn)
+    return _LLM_TRACE.LLMCallRecord.from_metadata(site, usage)
+
+
+def append_specialist_turns(session_dir: Path, task_id: str, usages: list) -> None:
+    """One ledger row per turn through ``append_llm_call``, as the specialist runner writes a recovered run."""
+    for turn, usage in enumerate(usages, start=1):
+        _LLM_TRACE.append_llm_call(session_dir=session_dir, record=specialist_turn_record(task_id, turn, dict(usage)))
+
+
 # ----- benchmark results ----------------------------------------------------------------------------------------
 
 

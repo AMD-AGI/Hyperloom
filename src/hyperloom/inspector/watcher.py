@@ -11,7 +11,8 @@ Two kinds of data come out of here:
   In replay a stream releases an item once the virtual clock passes its time,
   so a backward scrub shrinks the released prefix and the client gets a reset.
 * **Views** are recomputed at the clock on every request (run info, tasks with
-  health, the harness graph, timeline bars and phase bands, badges).
+  health, the harness graph, timeline bars and phase bands, badges, token
+  consumption).
 
 Nothing here writes into the session directory, and every payload is
 redacted before it leaves the process.
@@ -50,6 +51,7 @@ from hyperloom.inspector.collectors import (
 from hyperloom.inspector.history import MetricsHistory
 from hyperloom.inspector.redact import redact
 from hyperloom.inspector.session_layout import STATE_FILE, coordinator_db, variant_dir_name
+from hyperloom.inspector.tokens import TokenTracker
 
 log = logging.getLogger(__name__)
 
@@ -180,9 +182,11 @@ class Watcher:
         session_dir: Path,
         options: WatchOptions | None = None,
         history: MetricsHistory | None = None,
+        tokens: TokenTracker | None = None,
     ) -> None:
         options = options or WatchOptions()
         self.session_dir = Path(session_dir)
+        self.tokens = tokens if tokens is not None else TokenTracker(self.session_dir)
         self.clock = Clock(replay=options.replay, speed=options.speed)
         self.poll_sec = options.poll_sec
         self.stall_after_sec = options.stall_after_sec
@@ -238,6 +242,7 @@ class Watcher:
         with self.lock:
             changed = self._poll_files()
             changed |= self._poll_db()
+            changed |= self._poll_tokens()
             if self.sample_metrics:
                 changed |= self._sample_metrics()
             now = time.monotonic()
@@ -260,6 +265,7 @@ class Watcher:
             self.pod_history, changed = history, True
         for rec in self._llm_tail.read_new():
             self.streams["llm_call"].add(rec, item_time(rec))
+            self.tokens.add_ledger(rec)
             changed = True
         for path, rec in self._timeline_files.read_changed():
             if isinstance(rec, dict):
@@ -330,6 +336,10 @@ class Watcher:
             self.tasks, changed = tasks, True
         return changed
 
+    def _poll_tokens(self) -> bool:
+        """Running specialists' new turns."""
+        return self.tokens.poll(self.tasks, self.state.get("phase_history"))
+
     def _sample_metrics(self) -> bool:
         """Memory and GPU use of this machine, every few seconds; none while the optimizer is known to run on another
         host, whose resources they would not be."""
@@ -357,9 +367,11 @@ class Watcher:
         self.clock.set_range(start, last if last is not None else start)
 
     def _last_activity(self) -> float | None:
-        """The run's last recorded activity: its streams but resources, and its tasks' updates."""
+        """The run's last recorded activity: its streams but resources, its tasks' updates, and its token events,
+        as a specialist's log can go on after the coordinator stops."""
         ends = [s.times[-1] for name, s in self.streams.items() if s.times and name != _METRICS_STREAM]
         ends += [t for t in (parse_ts(x.get("updated_at")) for x in self.tasks) if t is not None]
+        ends += [e["t"] for e in self.tokens.events()[-1:]]
         return max(ends, default=None)
 
     # ----- views ---------------------------------------------------------------------------------------------
@@ -573,6 +585,7 @@ class Watcher:
                 "graph": graph.build_graph(tasks, events, calls, artifacts),
                 "timeline": self.timeline_view(tasks, clock),
                 "llm": derive.llm_summary(calls),
+                "tokens": self.tokens.view(clock, *self._token_window(clock)),
                 "badges": self._db_badges() + derive.health_badges(summary, tasks, memory, agents),
                 "agents": agents,
                 "artifact_count": len(artifacts),
@@ -587,12 +600,20 @@ class Watcher:
         """An error badge when the session's tasks cannot be read (its database is in a private ledger elsewhere)."""
         return [{"level": "error", "text": self.db_problem}] if self.db_problem else []
 
+    def _token_window(self, clock: float) -> tuple[float | None, float | None, float | None]:
+        """(cut-off, chart start, chart end). Replay cuts at the clock. Live shows everything from the session
+        start, up to now while the run is active, else up to its last activity."""
+        if self.clock.replay:
+            return clock, self.clock.start, clock
+        end = self._run_end(clock)
+        return None, parse_ts(self.state.get("start_ts")), clock if end is None else end
+
     def _run_end(self, clock: float) -> float | None:
         """Live, the run's last activity once it has gone quiet (its optimizer not known to be alive, and nothing new
         for ``_ACTIVE_SEC``); None while it is active, and in replay."""
         if self.clock.replay:
             return None
-        last = self._last_activity()
+        last = max((t for t in (self._last_activity(), self.tokens.latest_write()) if t is not None), default=None)
         active = self.optimizer_status().get("alive") or last is None or clock - last < _ACTIVE_SEC
         return None if active else last
 

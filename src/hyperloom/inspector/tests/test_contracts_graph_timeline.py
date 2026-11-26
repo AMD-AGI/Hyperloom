@@ -43,6 +43,7 @@ async def test_task_history_written_by_registry_spans_the_task_bar(tmp_path: Pat
 
 
 def test_state_json_written_by_shared_state_drives_phases(tmp_path: Path) -> None:
+    from hyperloom.inspector.tokens import _phase_starts
     from hyperloom.inspector.watcher import _phase_bands
 
     session = producers.new_session(tmp_path)
@@ -53,10 +54,13 @@ def test_state_json_written_by_shared_state_drives_phases(tmp_path: Path) -> Non
     state.save(session)
     summary = producers.watch(session).summary_at(0)
     history = summary["phase_history"]
-    where = "watcher.py (_phase_bands)"
+    where = "watcher.py (_phase_bands) and tokens.py (_phase_starts)"
     bands = [(b["phase"], b["start"], b["end"]) for b in _phase_bands(history, 3000.0)]
     assert bands == [("BASELINE", 1000.0, 2000.0), ("EXPLORE", 2000.0, None)], contract_message(
         "phase_chain.make_history_row / machine_state.record_phase_transition", where, history
+    )
+    assert _phase_starts(history) == [(1000.0, "BASELINE"), (2000.0, "EXPLORE")], contract_message(
+        "make_history_row", where, history
     )
     assert summary["agent_last_active"] == {"orchestration": 1500.0}, contract_message(
         "SharedState.agent_last_active", "derive.py (agent_staleness)", summary

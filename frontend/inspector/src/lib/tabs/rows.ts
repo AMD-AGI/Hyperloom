@@ -199,4 +199,6 @@ export interface Col<T> {
   head: string;
   text: (row: T) => unknown;
   cls?: string | ((row: T) => string);
+  /** The heading's hover hint (lib/hint.ts). */
+  hint?: string;
 }

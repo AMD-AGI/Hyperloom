@@ -2,12 +2,18 @@
 // SPDX-License-Identifier: MIT
 
 import { describe, expect, it } from "vitest";
-import { fmtArtifactCount, fmtBytes, fmtDur, fmtNum, fmtTime, preview } from "./format";
+import { fmtArtifactCount, fmtBytes, fmtCompact, fmtDur, fmtNum, fmtTime, preview } from "./format";
 
 describe("format", () => {
   it("formats numbers with a placeholder for missing values", () => {
     expect(fmtNum(null)).toBe("–");
     expect(fmtNum(1685.24)).toBe((1685.2).toLocaleString());
+  });
+  it("formats counts compactly", () => {
+    const compact = new Intl.NumberFormat(undefined, { notation: "compact", maximumFractionDigits: 1 });
+    expect([fmtCompact(null), fmtCompact(NaN)]).toEqual(["–", "–"]);
+    expect(fmtCompact(6888915)).toBe(compact.format(6888915));
+    expect(fmtCompact(950)).toBe(compact.format(950));
   });
   it("says when the artifact list is cut", () => {
     const n = (v: number) => v.toLocaleString();

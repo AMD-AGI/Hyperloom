@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""The page in a headless browser against the synthetic session: graph, drawer, viewer, diff, conversations.
+"""The page in a headless browser against the synthetic session: graph, drawer, viewer, diff, conversations, tokens.
 
 Every test fails on page errors, console errors, unexpected HTTP errors and Content Security Policy violations. All
 are skipped when ``frontend/inspector`` was not built into ``static/modern/``.
@@ -12,7 +12,9 @@ Optional: skipped unless the ``playwright`` package is installed and a Chromium 
 
 from __future__ import annotations
 
+import json
 import os
+import socket
 from dataclasses import dataclass
 
 import pytest
@@ -20,6 +22,8 @@ import pytest
 from hyperloom.inspector import server as server_mod
 from hyperloom.inspector.tests.conftest import FAKE_KEY
 from hyperloom.inspector.tests.test_server import _start
+from hyperloom.inspector.tests.test_tokens import TURNS, _log
+from hyperloom.inspector.token_terms import TERMS
 
 sync_api = pytest.importorskip("playwright.sync_api")
 expect = sync_api.expect
@@ -81,6 +85,32 @@ UI = Ui(
 )
 
 
+@dataclass(frozen=True)
+class TokensUi:
+    """The Tokens tab's selectors."""
+
+    chart: str
+    agents: str
+    models: str
+    rate: str
+    cache_hit: str
+    total: str
+    now: str
+    legend: str
+
+
+TOKENS = TokensUi(
+    chart="[data-testid=token-chart]",
+    agents="[data-testid=token-agents]",
+    models="[data-testid=token-models]",
+    rate="[data-testid=token-rate]",
+    cache_hit="[data-testid=token-cache-hit]",
+    total="[data-testid=token-total]",
+    now="line.now",
+    legend="[data-testid=token-legend] button.chip",
+)
+
+
 @pytest.fixture(scope="module")
 def browser():
     with sync_api.sync_playwright() as pw:
@@ -95,7 +125,23 @@ def browser():
 
 
 @pytest.fixture
-def page(browser, session_dir):
+def running():
+    return False
+
+
+@pytest.fixture
+def specialist_log():
+    return None
+
+
+@pytest.fixture
+def page(browser, session_dir, running, specialist_log):
+    if specialist_log:
+        _log(session_dir, specialist_log)
+    if running:
+        # This process on this host stands in for the session's optimizer, so the Inspector sees it alive.
+        lock = {"hostname": socket.gethostname(), "pid": os.getpid()}
+        (session_dir / "runtime" / "optimizer.lock").write_text(json.dumps(lock), encoding="utf-8")
     httpd = _start(session_dir)
     page = browser.new_page(viewport={"width": 1600, "height": 1200})
     page.add_init_script(_CSP_PROBE)
@@ -170,6 +216,123 @@ def test_llm_call_conversation_lookup(page):
         shown.append(page.text_content(UI.drawer))
     assert any("use key" in t for t in shown)
     assert not any(FAKE_KEY in t for t in shown)
+
+
+def test_token_tab_chart(page):
+    page.click(UI.tab.format("tokens"))
+    chart = page.locator(TOKENS.chart)
+    expect(chart.locator("path")).not_to_have_count(0)
+    expect(page.locator(TOKENS.agents)).to_contain_text("orchestration")
+    expect(page.locator(TOKENS.agents)).to_contain_text("critic")
+    # The server's names on the cards; what each means is a hover hint (below).
+    expect(page.locator(TOKENS.cache_hit)).to_contain_text("Input cache hit rate")
+    page.click(TOKENS.rate)
+    expect(page.locator(TOKENS.chart).locator("rect[fill^='#']")).not_to_have_count(0)
+
+
+def test_token_names_show_their_definition_on_hover(page):
+    page.click(UI.tab.format("tokens"))
+    hint = page.locator("#hint-tip")
+    expect(hint).to_be_hidden()
+    # The moment the pointer is on a name: its definition, under the exact figure on a card.
+    page.hover(TOKENS.cache_hit)
+    expect(hint).to_have_text(TERMS["cache_hit"]["definition"], timeout=1000)
+    assert page.get_attribute(TOKENS.cache_hit, "title") is None  # no native tooltip on top of it
+    page.hover(TOKENS.total)
+    expect(hint.locator("b")).to_contain_text(" tokens")
+    expect(hint).to_contain_text(TERMS["total"]["definition"])
+    # At its start: the "failed" count nested in it has a hint of its own, the innermost one shown.
+    calls = page.locator(TOKENS.total).locator("[data-hint]").first
+    calls.hover(position={"x": 2, "y": 2})
+    expect(hint).to_have_text(TERMS["calls"]["definition"])
+    calls.locator("[data-hint]").hover()
+    expect(hint).to_have_text(TERMS["errors"]["definition"])
+    # At the right edge, a short hint and then a long one (as a live figure changes it): the long one keeps its full
+    # width and stays on screen.
+    page.evaluate(
+        """() => { const e = document.createElement('span');
+                   Object.assign(e, {id: 'edge', textContent: 'e'});
+                   e.style.cssText = 'position:fixed;right:0;top:300px';
+                   e.dataset.hint = 'x';
+                   document.body.append(e); }"""
+    )
+    page.hover("#edge")
+    expect(hint).to_have_text("x")
+    long = TERMS["cache_hit"]["definition"]
+    page.evaluate("(text) => { document.getElementById('edge').dataset.hint = text; }", long)
+    expect(hint).to_have_text(long)
+    box = hint.bounding_box()
+    assert box["width"] > 250 and box["x"] >= 0 and box["x"] + box["width"] <= 1600, box
+    # Below the fold: the hover scrolls the heading in first, and the hint stays with it.
+    page.set_viewport_size({"width": 1600, "height": 500})
+    # A cost category: what it is, how it arises and how it is billed, a paragraph each.
+    billed = TERMS["cache_read"]["definition"].split("\n")
+    page.locator(TOKENS.agents).locator("th", has_text=TERMS["cache_read"]["label"]).hover()
+    expect(hint.locator("div")).to_have_text(billed)
+    page.set_viewport_size({"width": 1600, "height": 1200})
+    # On its legend chip, then what a click does.
+    page.locator(TOKENS.legend, has_text=TERMS["cache_read"]["label"]).hover()
+    expect(hint.locator("div")).to_have_text([*billed, "Click to show or hide."])
+    page.hover(TOKENS.rate)
+    expect(hint).to_have_text(TERMS["per_minute"]["definition"])
+    # A click re-renders the tab under the still pointer: the hint stays.
+    page.click(TOKENS.rate)
+    page.wait_for_timeout(100)
+    expect(hint).to_have_text(TERMS["per_minute"]["definition"])
+    page.hover(UI.tab.format("tokens"))
+    expect(hint).to_be_hidden()
+    page.focus(TOKENS.rate)
+    expect(hint).to_have_text(TERMS["per_minute"]["definition"])
+    page.keyboard.press("Escape")
+    expect(hint).to_be_hidden()
+    # The definitions are hover hints only, with no section of their own.
+    expect(page.locator("body")).not_to_contain_text("Definitions")
+
+
+_TOTAL_ENDS = """svg => {
+  const edges = [...svg.querySelectorAll('path')]
+    .filter((p) => p.classList.contains('edge') || p.getAttribute('fill') === 'none');
+  const now = svg.querySelector('line.now');
+  return {now: now && +now.getAttribute('x1'), right: svg.viewBox.baseVal.width - 8,
+          ends: edges.map((p) => +p.getAttribute('d').split('L').pop().split(',')[0])};
+}"""
+
+
+@pytest.mark.parametrize("running", [True])
+def test_while_the_run_is_running_token_charts_carry_the_moving_now_line(page):
+    page.click(UI.tab.format("tokens"))
+    for chart in (TOKENS.chart,):
+        line = page.locator(chart).locator(TOKENS.now)
+        expect(line).to_contain_text("now ")
+        first = line.text_content()
+        # It moves with the session clock, as the timeline's does.
+        expect(line).not_to_have_text(first, timeout=5000)
+        # The fixture's last call was days ago: its running total runs on flat to the line.
+        ends = page.locator(chart).evaluate(_TOTAL_ENDS)
+        assert ends["ends"] and all(abs(x - ends["now"]) < 2 for x in ends["ends"]), ends
+
+
+@pytest.mark.parametrize("specialist_log", [TURNS])
+def test_a_specialist_that_ended_without_reporting_its_output_is_told_so_not_pending(page):
+    # The fixture's t-perf succeeded, but its log has turns and no result line, so its output never came.
+    page.click(UI.tab.format("tokens"))
+    expect(page.locator("[data-testid=token-output-unreported]")).to_have_text("Output not reported: 3 turns")
+    expect(page.locator("[data-testid=token-output-pending]")).to_have_count(0)
+    expect(page.locator("body")).to_contain_text(
+        "1 specialist ended without reporting its output (cancelled, say): their turns come from the live log, and "
+        "their output is unknown and left out of the totals."
+    )
+    page.hover("[data-testid=token-output-unreported]")
+    expect(page.locator("#hint-tip")).to_have_text(TERMS["output_unreported"]["definition"])
+
+
+def test_once_the_run_has_gone_quiet_token_charts_end_at_its_last_activity(page):
+    page.click(UI.tab.format("tokens"))
+    for chart in (TOKENS.chart,):
+        expect(page.locator(chart).locator("path")).not_to_have_count(0)
+        expect(page.locator(chart).locator(TOKENS.now)).to_have_count(0)
+        ends = page.locator(chart).evaluate(_TOTAL_ENDS)
+        assert ends["ends"] and all(x >= ends["right"] - 2 for x in ends["ends"]), ends
 
 
 def test_folding_the_uplift_panel_leaves_its_summary(page):

@@ -22,7 +22,7 @@ from pathlib import Path
 
 import pytest
 
-from hyperloom.inspector import derive, graph
+from hyperloom.inspector import derive, graph, tokens
 from hyperloom.inspector.collectors import parse_ts
 from hyperloom.inspector.tests import producers
 from hyperloom.inspector.tests.conftest import FAKE_SECRET
@@ -465,9 +465,9 @@ def test_llm_components_map_to_deliberate_nodes() -> None:
 def test_llm_components_the_inspector_branches_on_are_written() -> None:
     from hyperloom.inference_optimizer.trace.llm_trace import VALID_COMPONENTS
 
-    branched = {*graph.LLM_ROLES}
-    unknown = sorted(branched - VALID_COMPONENTS)
-    assert not unknown, contract_message("llm_trace.VALID_COMPONENTS", "graph.py", unknown)
+    branched = {*graph.LLM_ROLES, tokens._SPECIALIST, *tokens._OPENAI_WRITERS, *tokens._OPENAI_WHEN_REASONING}
+    unknown = sorted(branched - VALID_COMPONENTS - _LEGACY_COMPONENTS)
+    assert not unknown, contract_message("llm_trace.VALID_COMPONENTS", "tokens.py, graph.py", unknown)
 
 
 def test_state_keys_are_shared_state_fields() -> None:
@@ -572,6 +572,19 @@ def test_journal_fields_the_inspector_reads_are_journal_entry_fields(tmp_path: P
     assert not unknown, contract_message("JournalEntry", "derive.py (throughput_series)", f"never written: {unknown}")
 
 
+_TOKENS = "tokens.py (TokenTracker)"
+
+
+# Ledger fields the Inspector reads although llm_trace._ROW_FIELDS has none of them: ``web_searches`` comes from a
+# Claude CLI specialist's process.log result line, and a ledger row only ever counts 0 of them (B14).
+_NOT_FROM_THE_LEDGER = frozenset({"web_searches"})
+
+
+# LLM components the Inspector branches on that VALID_COMPONENTS dropped: proposal_scorer left it in e9112d101 and only
+# older sessions write it (B7). Kept so their rows are still split by the OpenAI protocol.
+_LEGACY_COMPONENTS = frozenset({"proposal_scorer"})
+
+
 def _write_ledger(session: Path) -> None:
     counts = {"input_tokens": 10, "output_tokens": 5}
     producers.append_ledger_row(session, component="orchestration", call_id="c1", latency_ms=2000, **counts)
@@ -584,6 +597,15 @@ def test_ledger_rows_written_by_append_llm_call_are_counted(tmp_path: Path) -> N
     session = producers.new_session(tmp_path)
     _write_ledger(session)
     watcher = producers.watch(session)
+    view = watcher.tokens.view(float("inf"))
+    totals = {k: view["totals"][k] for k in ("calls", "errors", "input", "output", "reasoning")}
+    # The critic row that reports reasoning is counted by the OpenAI protocol: its 2 reasoning tokens are in its 5.
+    assert totals == {"calls": 4, "errors": 1, "input": 30, "output": 13, "reasoning": 2}, contract_message(
+        "llm_trace.append_llm_call / LLMCallRecord.to_row", _TOKENS, totals
+    )
+    assert set(view["by_component"]) == {"orchestration", "critic", "specialist"}, contract_message(
+        "LLMCallRecord.component", _TOKENS, sorted(view["by_component"])
+    )
     llm = derive.llm_summary(watcher.streams["llm_call"].items)
     assert llm["critic"]["errors"] == 1 and llm["orchestration"]["latency_ms_avg"] == 2000, contract_message(
         "LLMCallRecord.status / latency_ms", "derive.py (llm_summary)", llm
@@ -597,18 +619,22 @@ def test_ledger_fields_the_inspector_reads_are_in_the_closed_schema(tmp_path: Pa
     _write_ledger(session)
     path = session / "reports" / "trace" / "llm_calls.jsonl"
     rows = [producers.RecordingDict(json.loads(line)) for line in path.read_text(encoding="utf-8").splitlines()]
+    tracker = tokens.TokenTracker(session)
+    for row in rows:
+        tracker.add_ledger(row)
+    tracker.poll([])
     derive.llm_summary(rows)
     graph.build_graph([], [], rows, [])
-    read = set().union(*(r.read for r in rows))
-    unknown = sorted(read - _ROW_FIELDS)
-    assert not unknown, contract_message("llm_trace._ROW_FIELDS", "derive.py, graph.py", unknown)
+    read = set().union(*(r.read for r in rows)) | set(tokens._LEDGER_KEYS.values())
+    unknown = sorted(read - _ROW_FIELDS - _NOT_FROM_THE_LEDGER)
+    assert not unknown, contract_message("llm_trace._ROW_FIELDS", "tokens.py, derive.py, graph.py", unknown)
 
 
 def test_ledger_status_vocabulary() -> None:
     from hyperloom.inference_optimizer.trace.llm_trace import LLM_STATUS_ERROR, LLM_STATUS_OK, VALID_STATUSES
 
-    assert VALID_STATUSES == {LLM_STATUS_OK, LLM_STATUS_ERROR} == {"ok", "error"}, contract_message(
-        "llm_trace.VALID_STATUSES", "derive.py (llm_summary)", sorted(VALID_STATUSES)
+    assert VALID_STATUSES == {LLM_STATUS_OK, LLM_STATUS_ERROR} == {"ok", tokens._STATUS_ERROR}, contract_message(
+        "llm_trace.VALID_STATUSES", "tokens.py (_STATUS_ERROR), derive.py (llm_summary)", sorted(VALID_STATUSES)
     )
 
 
