@@ -39,6 +39,10 @@ A caller measuring a server outside a round as a fixed round does builds each pa
 A host reads what a native server takes from the program itself: :func:`native_help` is the ``--help`` of the one a
 launch environment resolves, :func:`native_executable` the file that runs, and :func:`help_options` that text as one
 :class:`HelpOption` per entry; :class:`FrameworkProbeError` is raised when the program is not there or prints none.
+
+A caller composing a candidate that turns speculative decoding on asks :func:`candidate_golden` for the golden
+acceptance InferenceX records for its draft, a :class:`SourceGolden` read from the staged InferenceX; a tool cache it
+cannot ask raises :class:`GoldenLookupError`.
 """
 
 from __future__ import annotations
@@ -50,7 +54,9 @@ from inference_suite.contracts.base_launch import LaunchQuery
 from inference_suite.contracts.layout import RunDirError
 from inference_suite.framework_probe import FrameworkProbeError, native_executable, native_help
 from inference_suite.parser_check import HelpOption, help_options
+from inference_suite.golden_lookup import GoldenLookupError, candidate_golden
 from inference_suite.load.fixed import ClientPass, ClientTarget, ClientTool, client_argv, fixed_client_env, warmup_pass
+from inference_suite.recipe.model import SourceGolden
 from inference_suite.recipe.resolve import Miss, SourceSnapshot, resolve_base
 from inference_suite.recipe.sources import (
     InferencexCommitRefused,
@@ -90,6 +96,7 @@ __all__ = [
     "FrameworkProbeError",
     "GPU_MASK_ENV",
     "HelpOption",
+    "GoldenLookupError",
     "INFERENCEX_CLIENT_COMMIT",
     "InferencexCommitRefused",
     "LaunchQuery",
@@ -99,11 +106,13 @@ __all__ = [
     "RoundResult",
     "RunDirError",
     "SourceFetchError",
+    "SourceGolden",
     "SourceSnapshot",
     "StagingError",
     "UserFile",
     "UserFileError",
     "WARMUP_ERROR_PREFIX",
+    "candidate_golden",
     "client_argv",
     "fixed_client_env",
     "fetch_response",

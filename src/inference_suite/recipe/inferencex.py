@@ -49,13 +49,14 @@ from inference_suite.recipe.model import (
     adaptive_verification_reason,
     boards_interchangeable,
 )
+from inference_suite.staging import GOLDEN_PACKAGE, INFERENCEX_PROJECT_DIR, MASTER_CONFIG
 
 INFERENCEX_REPO = "https://github.com/SemiAnalysisAI/InferenceX"
 #: The InferenceX project inside the repository; recipe and variant paths are relative to it.
-PROJECT = "inferencex-e2e"
-MASTER = f"{PROJECT}/configs/amd-master.yaml"
+PROJECT = INFERENCEX_PROJECT_DIR
+MASTER = f"{PROJECT}/{MASTER_CONFIG}"
 RUNNERS = f"{PROJECT}/configs/runners.yaml"
-GOLDEN_DIR = f"{PROJECT}/infx/golden_al_distribution"
+GOLDEN_DIR = f"{PROJECT}/{GOLDEN_PACKAGE}"
 
 # The values below are InferenceX's at the pinned commit: infx/matrix/validation.py (recipe directory),
 # infx/matrix/generate.py (CPU DRAM offload) and infx/srt_slurm/generate.py (the launcher's point environment).

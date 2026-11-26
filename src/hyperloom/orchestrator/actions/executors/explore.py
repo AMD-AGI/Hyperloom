@@ -74,8 +74,8 @@ from .explore_prefilter.grid_payload import (
 )
 from .explore_prefilter.launch_filters import (
     filter_baseline_noop_variants,
-    filter_context_copy_drafts,
     filter_operator_pinned_envs,
+    filter_synthetic_drafts,
     launch_identity,
     observed_launch_from_state,
 )
@@ -110,7 +110,7 @@ from .grid._grid_variant_filter import (
 )
 from hyperloom.inference_optimizer.framework_registry import is_scriptable, server_args_env_name
 from hyperloom.inference_optimizer.grid_server_args import compose_server_args
-from .framework_change._spec_decode_context_copy import CONTEXT_COPY_REFUSAL
+from .explore_prefilter.spec_decode_golden import session_golden_lookup
 
 from .workload._launch_restatement import observed_launch_after
 from .serving._server_argv import ConfigUnreadable, config_point
@@ -255,8 +255,8 @@ class _ExploreRound:
         self.running_perf: Any = None
         self.keep_threshold_pct = float(params["keep_threshold_pct"])
         self.accuracy_reference = AccuracyReference.of_session(self.ss, params)
-        # A context-copying draft is refused on the synthetic benchmark, whose repetition loops it would copy.
-        self.refuse_context_copy = not agentx_active(
+        # The synthetic benchmark's repetition loops would grade a draft at an acceptance real text does not reach.
+        self.refuse_synthetic_drafts = not agentx_active(
             benchmark_mode=getattr(self.ss, "benchmark_mode", "")
         ) and not is_stack_revalidation(params)
         self.ws_sig = workload_signature()
@@ -519,7 +519,7 @@ class _ExploreRound:
         if self._already_measured(gv):
             self.judged_without_measuring += 1
             return True
-        return self._out_of_budget(idx) or self._refuses_context_copy(gv)
+        return self._out_of_budget(idx) or self._refuses_synthetic_draft(gv)
 
     def _decided_without_measuring(
         self, gv: GridVariant, reason: str, *, detail: str = "", duplicate_of: str = ""
@@ -617,17 +617,17 @@ class _ExploreRound:
         )
         return True
 
-    def _refuses_context_copy(self, gv: GridVariant) -> bool:
+    def _refuses_synthetic_draft(self, gv: GridVariant) -> bool:
         # Whether the synthetic benchmark refuses this variant's speculative-decoding draft, recording it.
-        #
         # Judged against the stack as it stands now: a KEEP earlier in this round may have changed it.
-        if not self.refuse_context_copy:
+        if not self.refuse_synthetic_drafts:
             return False
-        _, refused = filter_context_copy_drafts([gv], recipe=self._recipe())
+        lookup = session_golden_lookup(self.session_dir, self.framework)
+        _, refused = filter_synthetic_drafts([gv], recipe=self._recipe(), lookup=lookup)
         if not refused:
             return False
-        log.warning("explore: refusing variant %s (%s)", gv.name, refused[0][1])
-        self.skipped.append({"name": gv.name, "reason": CONTEXT_COPY_REFUSAL, "detail": refused[0][1]})
+        log.warning("explore: refusing variant %s (%s)", gv.name, refused[0][2])
+        self.skipped.append({"name": gv.name, "reason": refused[0][1], "detail": refused[0][2]})
         return True
 
     def _stopped_by_the_run(self, result: Any, gv: GridVariant, idx: int, round_label: str) -> bool:

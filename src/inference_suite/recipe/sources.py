@@ -103,9 +103,23 @@ _INFERENCEX_API: Mapping[str, tuple[str, ...]] = {
     "infx.srt_slurm.workload": ("NATIVE_TELEMETRY_BLOCK", "SHARED_BLOCKS"),
 }
 
+#: InferenceX's answer to one :class:`~inference_suite.recipe.golden_curve.GoldenRequest` document, as a
+#: :class:`~inference_suite.recipe.golden_curve.GoldenLength` document; source for a child that has imported
+#: ``GOLDEN_DIR``, ``curve_name`` and ``golden_length`` from ``infx.golden_al_distribution``. A ValueError is how
+#: InferenceX refuses a draft config, so it is the answer.
+GOLDEN_ANSWER_SOURCE = """
+def golden(asked):
+    try:
+        value = golden_length(asked["model_prefix"], asked["spec"], asked["thinking"], GOLDEN_DIR, asked["verify"])
+        curve = curve_name(asked["model_prefix"], asked["spec"], GOLDEN_DIR, asked["verify"])
+    except ValueError as error:
+        return {"value": None, "curve": None, "error": str(error)}
+    return {"value": value, "curve": curve, "error": None}
+"""
+
 # Run as ``python -I -c`` in the project directory of an InferenceX checkout: reads a request on stdin and writes the
 # answers as JSON on stdout. Upstream output is sent to stderr so stdout carries the answers alone. A ValueError is
-# how InferenceX refuses a point or a draft config, so it is recorded as the answer.
+# how InferenceX refuses a point, so it is recorded as the answer.
 _INFERENCEX_CHILD = (
     """
 import hashlib
@@ -147,15 +161,9 @@ def selection(recipe_path, environment):
         "golden_curve": curve,
     }
 
-
-def golden(asked):
-    try:
-        value = golden_length(asked["model_prefix"], asked["spec"], asked["thinking"], GOLDEN_DIR, asked["verify"])
-        curve = curve_name(asked["model_prefix"], asked["spec"], GOLDEN_DIR, asked["verify"])
-    except ValueError as error:
-        return {"value": None, "curve": None, "error": str(error)}
-    return {"value": value, "curve": curve, "error": None}
-
+"""
+    + GOLDEN_ANSWER_SOURCE
+    + """
 
 selections, rejections = {}, {}
 for point in request["points"]:

@@ -33,7 +33,7 @@ class SpeculativeDecodingPinnedError(ValueError):
     error_class = SERVE_FLAG
 
 
-def _canonical(value: Any) -> str:
+def canonical_value(value: Any) -> str:
     """``value`` as text, numbers spelled one way so ``3``, ``3.0`` and ``"3"`` (or ``3.61`` and ``3.610``) agree."""
     try:
         number = float(value)
@@ -42,13 +42,13 @@ def _canonical(value: Any) -> str:
     return str(int(number)) if number.is_integer() else repr(number)
 
 
-def _speculative_identity(server_args: str, envs: Mapping[str, Any]) -> dict[str, str]:
+def speculative_identity(server_args: str, envs: Mapping[str, Any]) -> dict[str, str]:
     """The pinned settings a launch carries, canonicalized so equal values compare equal."""
     settings = golden_owned_settings(flag_occurrences(server_args), envs)
-    return {key: _canonical(value) for key, value in settings.items()}
+    return {key: canonical_value(value) for key, value in settings.items()}
 
 
-def _simulates_acceptance(identity: Mapping[str, Any]) -> bool:
+def simulates_acceptance(identity: Mapping[str, Any]) -> bool:
     return (
         bool(identity.get(_SIMULATED_LENGTH_ENV))
         or identity.get(_SYNTHETIC_REJECTION) == "synthetic"
@@ -58,7 +58,7 @@ def _simulates_acceptance(identity: Mapping[str, Any]) -> bool:
     )
 
 
-def _configures_a_draft(identity: Mapping[str, Any]) -> bool:
+def configures_a_draft(identity: Mapping[str, Any]) -> bool:
     return any(not key.startswith(GOLDEN_OWNED_ENV_PREFIXES) for key in identity)
 
 
@@ -73,9 +73,9 @@ def declared_acceptance_reason(
     A base that verifies a real draft has a measured acceptance, so a candidate that switches to a simulated one
     reports a length it was given. The part of :func:`speculative_pin_reason` that holds on every workload.
     """
-    base = _speculative_identity(base_args, base_envs)
-    candidate = _speculative_identity(candidate_args, candidate_envs)
-    if _simulates_acceptance(base) or not _configures_a_draft(base) or not _simulates_acceptance(candidate):
+    base = speculative_identity(base_args, base_envs)
+    candidate = speculative_identity(candidate_args, candidate_envs)
+    if simulates_acceptance(base) or not configures_a_draft(base) or not simulates_acceptance(candidate):
         return None
     changed = sorted(key for key in base.keys() | candidate.keys() if base.get(key) != candidate.get(key))
     return (
@@ -102,10 +102,10 @@ def speculative_pin_reason(
     This is the rule itself, so a layer that admits candidates can ask it of a proposal before a round spends a slot
     on it; :func:`refuse_unpinned_speculative_change` is the same rule stated as a refusal, for a launch being built.
     """
-    base = _speculative_identity(base_args, base_envs)
-    if not _simulates_acceptance(base):
+    base = speculative_identity(base_args, base_envs)
+    if not simulates_acceptance(base):
         return declared_acceptance_reason(base_args, base_envs, candidate_args, candidate_envs)
-    candidate = _speculative_identity(candidate_args, candidate_envs)
+    candidate = speculative_identity(candidate_args, candidate_envs)
     changed = sorted(key for key in base.keys() | candidate.keys() if base.get(key) != candidate.get(key))
     if not changed:
         return None
@@ -137,7 +137,11 @@ def refuse_unpinned_speculative_change(
 
 __all__ = [
     "SpeculativeDecodingPinnedError",
+    "canonical_value",
+    "configures_a_draft",
     "declared_acceptance_reason",
     "refuse_unpinned_speculative_change",
+    "simulates_acceptance",
+    "speculative_identity",
     "speculative_pin_reason",
 ]

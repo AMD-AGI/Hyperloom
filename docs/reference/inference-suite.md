@@ -264,7 +264,11 @@ never from a checkout's working tree: a `--source` checkout's local edits, untra
 not staged, and a checkout that lacks the pinned commit is refused. Staging patches the harness's aiperf so a reply it found no content in exports the
 server's output token count as `error_osl`, and so the warmup abort it logs carries the failed request's error; a
 harness the patch does not apply to fails the staging, and a cache
-staged before the patch is staged again. Two hosts compare stagings by their normalised
+staged before the patch is staged again. The staged InferenceX also holds its recorded acceptance lengths
+(`infx/golden_al_distribution/`, with the `infx` modules that package imports) and `configs/amd-master.yaml`: a
+candidate that turns speculative decoding on asks them for the golden acceptance of its own draft, which InferenceX's
+`golden_length` and `curve_name` select, run in the staged client's interpreter, and a cache staged without them is
+staged again. Two hosts compare stagings by their normalised
 manifest: each installed package's name, version and wheel sha256, the
 interpreter's version and build sha256, the InferenceX pin and lm-eval, with no
 path. A session's frozen base launch pins its client at that same InferenceX

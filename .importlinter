@@ -352,6 +352,7 @@ forbidden_modules =
     inference_suite.eval
     inference_suite.framework_probe
     inference_suite.framework_version
+    inference_suite.golden_lookup
     inference_suite.load
     inference_suite.multinode.inferencex
     inference_suite.multinode.query
@@ -388,7 +389,7 @@ layers =
     inference_suite.load | inference_suite.eval | inference_suite.profile
     inference_suite.runtime
     inference_suite.telemetry
-    inference_suite.compose
+    inference_suite.compose | inference_suite.golden_lookup
     inference_suite.recipe | inference_suite.parser_check | inference_suite.framework_version
     inference_suite.framework_probe | inference_suite.staging
     inference_suite.client_env

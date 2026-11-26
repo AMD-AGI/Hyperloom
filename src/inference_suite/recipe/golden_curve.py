@@ -249,20 +249,29 @@ def _force(framework: str) -> Callable[[SourceLaunch, GoldenRequest, float], Sou
     return force
 
 
-def _golden_plan(
-    launch: SourceLaunch, query: LaunchQuery, bundle: RepoBundle, base_model: str | None
+def draft_request(
+    draft: LaunchDraft, model_id: str, bundle: RepoBundle, base_model: str | None
 ) -> GoldenRequest | SourceGolden | None:
-    """What ``golden_length`` is asked for ``launch``; ``None`` when it drafts nothing, else why it is not asked."""
-    draft = launch_draft(launch.framework, launch.args, launch.env)
+    """What ``golden_length`` is asked for ``draft`` (:func:`launch_draft`); ``None`` when it drafts nothing, else why
+    it is not asked. ``bundle`` carries InferenceX's master config, which gives ``model_id`` its prefix;
+    ``base_model`` is as for :func:`golden_requests`."""
     if not draft.spec:
         return None
     adaptive = adaptive_verification_reason(draft.spec)
     if adaptive is not None:
         return SourceGolden(None, reason=adaptive)
-    prefix = _model_prefix(bundle, query.model_id, base_model)
+    prefix = _model_prefix(bundle, model_id, base_model)
     if isinstance(prefix, SourceGolden):
         return prefix
     return GoldenRequest(prefix, draft.spec, DEFAULT_THINKING_MODE, draft.verify)
+
+
+def _golden_plan(
+    launch: SourceLaunch, query: LaunchQuery, bundle: RepoBundle, base_model: str | None
+) -> GoldenRequest | SourceGolden | None:
+    """What ``golden_length`` is asked for ``launch``; ``None`` when it drafts nothing, else why it is not asked."""
+    draft = launch_draft(launch.framework, launch.args, launch.env)
+    return draft_request(draft, query.model_id, bundle, base_model)
 
 
 def golden_requests(
@@ -305,6 +314,7 @@ __all__ = [
     "GoldenRequest",
     "GoldenTable",
     "LaunchDraft",
+    "draft_request",
     "golden_requests",
     "launch_draft",
     "with_golden",

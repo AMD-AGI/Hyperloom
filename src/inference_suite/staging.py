@@ -94,17 +94,35 @@ AGENTX_RESULTS_PACKAGE = "infx/results"
 #: The interpreter of the client environment, under the staged InferenceX root, and the CLI module the AgentX load runs.
 AGENTX_PYTHON = CLIENT_PYTHON
 AGENTX_CLI_MODULE = "agentx_cli"
-#: What a round and its eval run from InferenceX, relative to its project directory.
+#: InferenceX's recorded acceptance lengths with the code that selects one for a draft, staged whole, and the master
+#: config that gives a model its prefix; the selection code imports the two ``infx`` modules beside it.
+GOLDEN_PACKAGE = "infx/golden_al_distribution"
+GOLDEN_PACKAGE_FILE = f"{GOLDEN_PACKAGE}/__init__.py"
+MASTER_CONFIG = "configs/amd-master.yaml"
+_GOLDEN_IMPORTS = ("infx/yamlio.py", "infx/fastcopy.py")
+#: What a round, its eval and a candidate's golden lookup run from InferenceX, relative to its project directory.
 INFERENCEX_SUBSET = (
     "infx/__init__.py",
     CLIENT_MODULE.rpartition(".")[0].replace(".", "/"),
     GSM8K_TASK,
     AGENTX_RESULTS_PACKAGE,
     AGENTX_REQUIREMENTS,
+    GOLDEN_PACKAGE,
+    *_GOLDEN_IMPORTS,
+    MASTER_CONFIG,
 )
 #: The files a staged InferenceX must hold for a round to run, whatever else its subset holds at the pin. The patched
-#: client files are among them, so a staging made before the patch is staged again.
-INFERENCEX_REQUIRED = (CLIENT_FILE, GSM8K_TASK, AGENTX_AGGREGATOR_FILE, AGENTX_PYTHON, *PATCHED_FILES)
+#: client files and the golden lookup's are among them, so a staging made before either is staged again.
+INFERENCEX_REQUIRED = (
+    CLIENT_FILE,
+    GSM8K_TASK,
+    AGENTX_AGGREGATOR_FILE,
+    AGENTX_PYTHON,
+    GOLDEN_PACKAGE_FILE,
+    MASTER_CONFIG,
+    *_GOLDEN_IMPORTS,
+    *PATCHED_FILES,
+)
 #: The prefix of a staging :func:`publish` has not renamed into place yet; no reader looks below one.
 PUBLISHING_PREFIX = ".staging-"
 
@@ -659,11 +677,14 @@ __all__ = [
     "AGENTX_RESULTS_PACKAGE",
     "CLIENT_FILE",
     "CLIENT_MODULE",
+    "GOLDEN_PACKAGE",
+    "GOLDEN_PACKAGE_FILE",
     "GSM8K_TASK",
     "INFERENCEX_PROJECT_DIR",
     "INFERENCEX_REQUIRED",
     "INFERENCEX_SUBSET",
     "MANIFEST_FILE",
+    "MASTER_CONFIG",
     "PUBLISHING_PREFIX",
     "STAGING_SCHEMA",
     "StagedTool",

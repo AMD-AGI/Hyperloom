@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import logging
 import tempfile
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from pathlib import Path
 from typing import Any
 
@@ -15,13 +15,14 @@ import yaml
 
 from hyperloom_common.coerce import to_str_list
 from hyperloom.common.launch_log_evidence import settings_the_engine_rewrote
-from ..framework_change._spec_decode_context_copy import context_copy_refusal
+from ..framework_change._spec_decode_context_copy import CONTEXT_COPY_REFUSAL, context_copy_refusal
 from ..grid._explore_variants import variant_fingerprint
 from ..grid._grid_base import GridVariant
 from ..grid._grid_runner import GridRecipe, _build_variant_yaml
 from ..serving._server_argv import ConfigUnreadable, config_server_argv
 from ..workload._launch_restatement import Launch, config_envs, launch_change, read_launch
 from ._remeasure import _is_config_replay_variant
+from .spec_decode_golden import GoldenLookup, synthetic_draft_refusal
 
 log = logging.getLogger(__name__)
 
@@ -71,21 +72,24 @@ def _probe_launch(recipe: GridRecipe, gv: GridVariant, output_subdir: Path) -> L
     return read_launch(out_path, [*to_str_list(recipe.base.unset_envs), *to_str_list(gv.unset_envs)])
 
 
-def filter_context_copy_drafts(
-    grid: list[GridVariant], *, recipe: GridRecipe
-) -> tuple[list[GridVariant], list[tuple[str, str]]]:
-    """Drop variants that introduce or change a context-copying speculative-decoding draft (synthetic sessions only).
+#: Why a candidate's speculative decoding is refused, as ``(reason code, detail)``, judged on its materialized launch
+#: and its base's (argv, envs each); ``None`` when it is not.
+_DraftJudge = Callable[[str, Mapping[str, Any], str, Mapping[str, Any]], tuple[str, str] | None]
+#: The variants a draft filter keeps, and ``(name, reason code, detail)`` for each it drops.
+_DraftFilter = tuple[list[GridVariant], list[tuple[str, str, str]]]
+
+
+def _filter_drafts(grid: list[GridVariant], recipe: GridRecipe, judge: _DraftJudge) -> _DraftFilter:
+    """``grid`` split into the variants ``judge`` passes and ``(name, reason code, detail)`` for each it refuses.
 
     Each variant and its base are materialized through ``_build_variant_yaml``, the way ``run_grid`` builds the round,
     so a draft reached through args, replace mode, envs or a server-args env counts. A launch that cannot be
     materialized is judged on the variant's own args and envs against an empty base.
-
-    Returns the variants still to run, plus ``(name, reason)`` for each drop.
     """
     if not grid:
         return [], []
     kept: list[GridVariant] = []
-    dropped: list[tuple[str, str]] = []
+    dropped: list[tuple[str, str, str]] = []
     with tempfile.TemporaryDirectory(prefix="explore_spec_probe_") as tmp_dir:
         tmp_root = Path(tmp_dir)
         try:
@@ -101,12 +105,44 @@ def filter_context_copy_drafts(
                 log.warning("explore: could not materialize %s to read its speculative decoding (%s)", gv.name, exc)
                 launch = (str(gv.extra_server_args or ""), {str(k): str(v) for k, v in (gv.extra_envs or {}).items()})
                 against = ("", {})
-            reason = context_copy_refusal(against[0], against[1], launch[0], launch[1])
-            if reason:
-                dropped.append((gv.name, reason))
+            refused = judge(against[0], against[1], launch[0], launch[1])
+            if refused:
+                dropped.append((gv.name, *refused))
             else:
                 kept.append(gv)
     return kept, dropped
+
+
+def _context_copy(
+    base_argv: str, base_envs: Mapping[str, Any], argv: str, envs: Mapping[str, Any]
+) -> tuple[str, str] | None:
+    reason = context_copy_refusal(base_argv, base_envs, argv, envs)
+    return (CONTEXT_COPY_REFUSAL, reason) if reason else None
+
+
+def filter_context_copy_drafts(
+    grid: list[GridVariant], *, recipe: GridRecipe
+) -> tuple[list[GridVariant], list[tuple[str, str]]]:
+    """Drop variants that introduce or change a context-copying speculative-decoding draft (synthetic sessions only).
+
+    Returns the variants still to run, plus ``(name, reason)`` for each drop.
+    """
+    kept, dropped = _filter_drafts(grid, recipe, _context_copy)
+    return kept, [(name, detail) for name, _, detail in dropped]
+
+
+def filter_synthetic_drafts(grid: list[GridVariant], *, recipe: GridRecipe, lookup: GoldenLookup) -> _DraftFilter:
+    """Drop variants whose speculative decoding the synthetic benchmark refuses (synthetic sessions only): a
+    context-copying draft they introduce or change, or a draft they turn on at another acceptance than InferenceX
+    records for it (:func:`~.spec_decode_golden.synthetic_draft_refusal`).
+
+    Returns the variants still to run, plus ``(name, reason code, detail)`` for each drop.
+    """
+    return _filter_drafts(
+        grid,
+        recipe,
+        lambda base_argv, base_envs, argv, envs: synthetic_draft_refusal(base_argv, base_envs, argv, envs, lookup),
+    )
 
 
 def filter_baseline_noop_variants(

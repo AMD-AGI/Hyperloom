@@ -50,7 +50,7 @@ from ._integrate_vocabulary import FILTERED_BEFORE_BENCH_CLASS
 from ..patching._patch_artifacts import _ArtifactSpec
 from ..framework_change._spec_decode_context_copy import CONTEXT_COPY_REFUSAL
 from ..benchmark_run.accuracy import record_accuracy_round, run_candidate_accuracy_round
-from ..explore import filter_context_copy_drafts
+from ..explore_prefilter.launch_filters import filter_context_copy_drafts
 from ..workload._workload_envs import BenchmarkTarget, LaunchLayer, MaterializeOptions, default_baseline_config
 
 

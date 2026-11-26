@@ -121,8 +121,18 @@ the draft but may not switch to simulated acceptance (adding
 not comparable with a measured one, and the variant is refused the same way.
 
 A base that runs **no speculative decoding** has no acceptance to compare
-against: a variant may enable it with a real draft, or with synthetic acceptance
-whose AL is the golden value for its own draft length per the rules above.
+against. On the synthetic benchmark (InferenceX's random prompts at temperature
+0, held to their full output length) a variant that enables it **must force the
+golden AL for its own draft** (synthetic acceptance per the rules above): the
+model falls into repetition loops there that any draft, MTP and EAGLE included,
+predicts almost perfectly, so a real draft's measured acceptance overstates its
+gain. Explore refuses before launch a variant that enables a real draft, or
+forces another value than the golden one, as
+`speculative_acceptance_not_golden_on_synthetic`; the refusal names the value
+InferenceX records for that draft and the curve it is read from, so restate the
+variant with that value. A draft InferenceX records no curve for is refused
+there too: leave speculative decoding off for that model. In an AgentX session,
+which replays real traces, a variant may enable it with a real draft too.
 
 Before proposing or marking `KEEP` on any such variant, cross-check against the
 model's golden AL curve (if one exists per the lookup above):

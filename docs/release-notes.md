@@ -50,6 +50,22 @@ it.
   `reflection.analysis_report` and the decision label `ORCHESTRATION_ERROR`,
   so Experiences collected from here on carry a new `schema_ref`; those
   already in a KB keep theirs.
+- **A synthetic session grades speculative decoding a candidate turns on at
+  the acceptance InferenceX records for its draft.** On a base launch that
+  runs no speculative decoding, explore refuses before launch a variant that
+  turns on a model-based draft (MTP, EAGLE, a draft model) unless it forces
+  the acceptance length InferenceX records for that draft
+  (`speculative_acceptance_not_golden_on_synthetic`); the refusal names the
+  value to force and the curve it comes from. A draft InferenceX records no
+  value for, Qwen3.8-27B's MTP among them, is refused until one is measured.
+  Before, such a variant was graded on the acceptance it measured, which the
+  synthetic benchmark's greedy repetition loops inflate: Qwen3.8-27B with 3
+  MTP draft tokens accepted 89% of its draft tokens there against 63–65% under
+  the model's own sampling, and 1.1.4 kept it at +82.9% where about +40–45%
+  holds. The staged InferenceX now also holds `infx/golden_al_distribution/`
+  and `configs/amd-master.yaml`, so a tool cache staged before is staged again
+  once.
+
 - **A hosted multi-branch run sets the AgentX window and the server boot
   budget.** The campaign spec's `multibranch` block takes
   `agentx_duration_sec` and `agentx_objective` (for `workload: agentx` only),

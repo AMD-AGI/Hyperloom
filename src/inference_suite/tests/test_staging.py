@@ -37,9 +37,13 @@ from inference_suite.staging import (
     AGENTX_REQUIREMENTS,
     CLIENT_FILE,
     CLIENT_MODULE,
+    GOLDEN_PACKAGE,
+    GOLDEN_PACKAGE_FILE,
     GSM8K_TASK,
     INFERENCEX_PROJECT_DIR,
+    INFERENCEX_REQUIRED,
     MANIFEST_FILE,
+    MASTER_CONFIG,
     StagedTool,
     StagingError,
     StagingManifest,
@@ -62,6 +66,15 @@ _SITE = "agentx-python/lib/python3.12/site-packages"
 _RECORDS = {f"{_SITE}/{name.replace('-', '_')}-{version}.dist-info/RECORD" for name, version in WHEELS.items()}
 _PATCHED = tuple(f"{_SITE}/{relative}" for relative, _ in aiperf_source.SOURCES)
 _REQUIREMENTS_TEXT = "agentx-harness==1.0.13\n"
+#: What a candidate's golden lookup reads from InferenceX: the curves package, the modules it imports, the master config.
+_GOLDEN_FILES = {
+    GOLDEN_PACKAGE_FILE: "",
+    f"{GOLDEN_PACKAGE}/curves.py": "GOLDEN_DIR = None\n",
+    f"{GOLDEN_PACKAGE}/m__mtp__native__default-default.yaml": "m: {}\n",
+    "infx/yamlio.py": "",
+    "infx/fastcopy.py": "",
+    MASTER_CONFIG: "{}\n",
+}
 
 
 def _git(repo: Path, *args: str) -> str:
@@ -85,6 +98,8 @@ def _checkout(tmp_path: Path, *, without: str | None = None) -> tuple[Path, str]
         AGENTX_AGGREGATOR_FILE: "print('aggregate')\n",
         AGENTX_REQUIREMENTS: _REQUIREMENTS_TEXT,
         "infx/bench/agentic/replay.py": "print('replay')\n",
+        **_GOLDEN_FILES,
+        "configs/runners.yaml": "runners: {}\n",
     }
     for relative, text in files.items():
         if without is not None and relative.startswith(without):
@@ -156,7 +171,7 @@ def test_the_stage_digest_is_the_manifest_file_sha256_and_verifies_with_the_pin_
     assert report.manifest_sha256 == digest
 
 
-def test_staging_copies_the_client_the_task_the_agentx_aggregator_and_the_client_environment_and_nothing_else(
+def test_staging_copies_the_client_the_task_the_agentx_aggregator_the_golden_curves_and_the_client_environment_only(
     staged,
 ) -> None:
     cache, commit, digest = staged
@@ -174,6 +189,7 @@ def test_staging_copies_the_client_the_task_the_agentx_aggregator_and_the_client
         "infx/results/agentic/__init__.py",
         AGENTX_AGGREGATOR_FILE,
         AGENTX_REQUIREMENTS,
+        *_GOLDEN_FILES,
         AGENTX_PYTHON,
         BUILD_FILE,
         STAGED_LOCK,
@@ -360,7 +376,19 @@ def test_the_client_file_is_the_one_the_client_module_loads() -> None:
     assert (CLIENT_MODULE, CLIENT_FILE) == ("infx.bench_serving.benchmark_serving", _CLIENT)
 
 
-@pytest.mark.parametrize("required", [_CLIENT, AGENTX_AGGREGATOR_FILE, AGENTX_PYTHON, *_PATCHED])
+def test_staging_refuses_a_checkout_without_the_golden_curves(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    repo, commit = _checkout(tmp_path, without=GOLDEN_PACKAGE)
+    monkeypatch.setattr(staging, "PINNED_TOOLS", {INFERENCEX_TOOL: commit})
+
+    with pytest.raises(StagingError, match=f"has no {re.escape(GOLDEN_PACKAGE)}"):
+        stage(repo, tmp_path / "tools")
+    assert not (tmp_path / "tools").exists()
+
+
+@pytest.mark.parametrize(
+    "required",
+    [_CLIENT, AGENTX_AGGREGATOR_FILE, AGENTX_PYTHON, *_PATCHED, GOLDEN_PACKAGE_FILE, MASTER_CONFIG, "infx/yamlio.py"],
+)
 def test_a_manifest_at_the_pin_that_does_not_stage_a_file_a_load_runs_is_staging_missing(staged, required) -> None:
     cache, commit, _ = staged
     path = cache / MANIFEST_FILE
@@ -557,6 +585,7 @@ def _cache_at_the_real_pin(cache: Path) -> str:
     files = {}
     staged = ((GSM8K_TASK, "task: gsm8k\n"), (_CLIENT, _CLIENT_TEXT), (AGENTX_AGGREGATOR_FILE, ""), (AGENTX_PYTHON, ""))
     staged += tuple((relative, "") for relative in _PATCHED)
+    staged += tuple((relative, "") for relative in INFERENCEX_REQUIRED if relative not in dict(staged))
     for relative, text in staged:
         (root / relative).parent.mkdir(parents=True, exist_ok=True)
         (root / relative).write_text(text)
