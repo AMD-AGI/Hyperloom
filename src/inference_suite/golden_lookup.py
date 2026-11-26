@@ -11,8 +11,10 @@ interpreter, so which curve a draft selects stays InferenceX's decision. Nothing
 
 The draft is read with its acceptance simulation taken out (:func:`~inference_suite.golden.real_acceptance`), as
 InferenceX reads a draft before it forces a golden length on it, so a candidate that already forces one is asked about
-the same curve as one that does not. A model's HF base model is not known here, so a model InferenceX names only
-through its base model has no prefix.
+the same curve as one that does not. vLLM's forcing replaces the draft's ``rejection_sample_method`` with the
+synthetic sampler, so a forced vLLM draft no longer shows the verifier its curve is selected by: it is asked about
+each verifier the sampler can stand in for, and answered with the one whose recorded length it forces. A model's HF
+base model is not known here, so a model InferenceX names only through its base model has no prefix.
 """
 
 from __future__ import annotations
@@ -21,8 +23,10 @@ import hashlib
 import json
 import subprocess
 from collections.abc import Sequence
+from dataclasses import replace
 from pathlib import Path
 
+from inference_suite.argv import argv_flag_occurrences, speculative_config
 from inference_suite.contracts.base_launch import GoldenCurve
 from inference_suite.golden import real_acceptance
 from inference_suite.pins import INFERENCEX_TOOL, PINNED_TOOLS
@@ -33,6 +37,8 @@ from inference_suite.recipe.sources import GOLDEN_ANSWER_SOURCE
 from inference_suite.staging import AGENTX_PYTHON, GOLDEN_PACKAGE, MASTER_CONFIG, inferencex_root
 
 _TIMEOUT_S = 120
+#: The verifiers vLLM's synthetic rejection sampler takes the place of in a forced draft, as InferenceX names them.
+_HIDDEN_VERIFIERS = ("standard", "block")
 _OUTPUT_TAIL = 2000
 # Run as ``python -I -c`` by the staged client's interpreter: reads ``{"root", "request"}`` on stdin and writes the
 # answer on stdout; InferenceX's own output goes to stderr.
@@ -88,6 +94,17 @@ def _staged_text(root: Path, relative: str) -> str:
         raise GoldenLookupError(f"the staged InferenceX at {root} has no readable {relative}: {exc}") from exc
 
 
+def _forced_vllm_length(framework: str, args: Sequence[str]) -> float | None:
+    """The length ``args`` force under vLLM's synthetic sampler, ``None`` when they force none there."""
+    spec = speculative_config(argv_flag_occurrences(args))
+    if framework != "vllm" or spec.get("rejection_sample_method") != "synthetic":
+        return None
+    try:
+        return float(spec["synthetic_acceptance_length"])
+    except (KeyError, TypeError, ValueError):
+        return None
+
+
 def candidate_golden(tool_cache: Path, framework: str, model_id: str, args: Sequence[str]) -> SourceGolden | None:
     """The golden acceptance InferenceX records for the draft ``args`` launch on ``framework`` for ``model_id``, or why
     it records none; ``None`` when ``args`` draft nothing.
@@ -106,7 +123,10 @@ def candidate_golden(tool_cache: Path, framework: str, model_id: str, args: Sequ
     request = draft_request(draft, model_id, bundle, None)
     if not isinstance(request, GoldenRequest):
         return request
-    answer = _ask(root, request)
+    forced = _forced_vllm_length(framework, args)
+    verifiers = _HIDDEN_VERIFIERS if forced is not None else (request.verify,)
+    answers = [_ask(root, replace(request, verify=verify)) for verify in verifiers]
+    answer = next((asked for asked in answers if asked.value == forced), answers[0])
     if answer.value is None or answer.curve is None:
         return SourceGolden(None, reason=f"InferenceX has no golden curve for it: {answer.error}")
     name = f"{answer.curve}.yaml"
