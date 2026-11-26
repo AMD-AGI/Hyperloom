@@ -188,7 +188,7 @@ it.
   per-board rows, so a card needs no registration. The session asks `amd-smi
   static --json` first, then `rocm-smi`, then torch's device properties
   (`gcnArchName`); the last two give only the name, arch and memory, so such a
-  card has no vendor peak, AITER CSV check or partition sizing. A multi-node
+  card has no vendor peak or AITER CSV check. A multi-node
   run asks a remote node the same way. Child processes read the card from
   `HYPERLOOM_GPU_CARD` and the manifest archives it as `gpu_card`. A host none
   of the three can describe prints `GPU card        : none read (<reasons>)`
@@ -229,8 +229,9 @@ it.
   model-config check compares CSV rows with the card's arch and compute units,
   and is skipped without a card. KernelForge GEMM tuning is given the card's
   arch (`auto` without one) instead of the GPU type. The GEAK handoff no longer
-  writes `expected_target` and `expected_gfx`. Compute partitions are sized
-  from the card; without one a declared `--compute-partition-mode` is refused.
+  writes `expected_target` and `expected_gfx`. Compute partitions are sized by
+  what `amd-smi` reports for the partitioned GPU, never by a board table; where
+  it reports no compute units a declared `--compute-partition-mode` is refused.
 - **Roofline peaks and bandwidth come from the card and TraceLens.** Bandwidth
   is the driver's `vram.max_bandwidth` (6144 GB/s on an MI325X, was 6000). The
   compute peak is the measured `max_achievable_tflops` in TraceLens'

@@ -459,7 +459,7 @@ the cluster hand-off. It asks, in turn, until one describes a card:
 1. `amd-smi static --json`: every fact.
 2. `rocm-smi --showproductname --showmeminfo vram --json`: name, arch and
    memory. No compute-unit count, bandwidth or clock, so there is no vendor
-   peak, AITER CSV check or partition sizing.
+   peak or AITER CSV check.
 3. torch's device properties (`gcnArchName`): name, arch and memory, as
    `rocm-smi`.
 

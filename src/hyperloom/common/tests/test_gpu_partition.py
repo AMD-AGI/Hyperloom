@@ -8,7 +8,6 @@ from __future__ import annotations
 import pytest
 
 from hyperloom.common import gpu_partition as gp
-from hyperloom_common.gpu_card import GpuCard
 
 
 @pytest.fixture
@@ -96,37 +95,59 @@ class TestLayoutFor:
         assert layout.partitioned is False
 
 
+def _device(gpu_id: int, compute_units: int | None, memory_mib: int) -> dict:
+    """An ``amd-smi static`` row of an MI355X device."""
+    asic = {"target_graphics_version": "gfx950", "num_compute_units": compute_units or "N/A"}
+    return {"gpu": gpu_id, "asic": asic, "vram": {"size": {"value": memory_mib, "unit": "MB"}}}
+
+
 #: One CPX partition of an MI355X, as amd-smi describes the device: 32 CUs and an eighth of 288 GiB.
-_CPX_PARTITION = GpuCard("AMD Instinct MI355X", "75a3", "gfx950", 32, 36862, 1000.0, 2400)
+_CPX_PARTITION = _device(0, 32, 36862)
 
 
 class TestObservePartition:
-    def test_the_partitions_are_sized_by_the_session_card(self, smi):
+    def test_the_partitions_are_sized_by_the_device_amd_smi_reports(self, smi):
         smi.payloads["partition"] = _partition_payload("CPX")
+        smi.payloads["static"] = {"gpu_data": [_CPX_PARTITION]}
 
-        layout = gp.observe_partition(0, card=_CPX_PARTITION)
+        layout = gp.observe_partition(0)
 
         assert layout is not None
         assert (layout.mode, layout.partitions, layout.cu_per_partition) == ("CPX", 8, 32)
         assert layout.gib_per_partition == pytest.approx(36.0, abs=0.1)
-        assert [call[0] for call in smi.calls] == ["partition"]
+        assert [call[0] for call in smi.calls] == ["partition", "static"]
 
-    @pytest.mark.parametrize("card", [None, GpuCard("", "", "gfx950", None, 294912, None, None)])
-    def test_a_card_in_a_mode_without_a_compute_unit_count_is_unsized_and_says_so(self, smi, caplog, card):
+    def test_a_gpu_in_cpx_beside_whole_cards_is_sized_by_its_own_device(self, smi):
+        smi.payloads["partition"] = {
+            "current_partition": [{"gpu_id": 0, "accelerator_type": "SPX"}, {"gpu_id": 3, "accelerator_type": "CPX"}]
+        }
+        smi.payloads["static"] = {"gpu_data": [_device(0, 256, 294912), _device(3, 32, 36862)]}
+
+        layout = gp.observe_partition(3)
+
+        assert layout is not None and (layout.mode, layout.cu_per_partition) == ("CPX", 32)
+        assert layout.gib_per_partition == pytest.approx(36.0, abs=0.1)
+
+    @pytest.mark.parametrize(
+        "static",
+        [{"gpu_data": []}, {"gpu_data": [_device(0, None, 294912)]}, gp.PartitionError("amd-smi static failed")],
+    )
+    def test_a_device_in_a_mode_without_a_compute_unit_count_is_unsized_and_says_so(self, smi, caplog, static):
         smi.payloads["partition"] = _partition_payload("DPX")
+        smi.payloads["static"] = static
         with caplog.at_level("WARNING"):
-            assert gp.observe_partition(0, card=card) is None
+            assert gp.observe_partition(0) is None
         assert "no compute-unit count" in caplog.text
 
     def test_an_unreadable_card_is_none_not_an_error(self, smi):
         """A host without amd-smi is the ordinary case, not a failure."""
         smi.payloads["partition"] = gp.PartitionError("amd-smi not found")
-        assert gp.observe_partition(0, card=_CPX_PARTITION) is None
+        assert gp.observe_partition(0) is None
 
     def test_a_mode_this_build_does_not_know_is_refused_loudly(self, smi, caplog):
         smi.payloads["partition"] = _partition_payload("OPX")
         with caplog.at_level("WARNING"):
-            assert gp.observe_partition(0, card=_CPX_PARTITION) is None
+            assert gp.observe_partition(0) is None
         assert "does not know" in caplog.text
 
 

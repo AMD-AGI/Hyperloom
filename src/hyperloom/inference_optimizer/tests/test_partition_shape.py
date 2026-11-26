@@ -9,6 +9,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from hyperloom.common import gpu_partition as gp
 from hyperloom.common.gpu_partition import PartitionModel, layout_for
 from hyperloom.orchestrator.actions.executors.gpu import _partition_shape as ps
 from hyperloom.orchestrator.tests._fixtures import MI355X_CARD, publish_card
@@ -32,7 +33,7 @@ def card(monkeypatch):
     """Present a card in a given shape, or none at all."""
 
     def present(layout):
-        monkeypatch.setattr(ps, "observe_partition", lambda gpu_id, *, card: layout)
+        monkeypatch.setattr(ps, "observe_partition", lambda gpu_id: layout)
 
     return present
 
@@ -50,14 +51,21 @@ CPX_36 = _layout("CPX", 32, 36.0)
 SPX_288 = _layout("SPX", 256, 288.0)
 
 
-@pytest.mark.parametrize("published", [MI355X_CARD, None], ids=["a_card", "no_card"])
-def test_the_shape_is_sized_by_the_session_card(monkeypatch, published):
-    sized_by = []
-    monkeypatch.setattr(ps, "observe_partition", lambda gpu_id, *, card: sized_by.append(card))
-    if published:
-        publish_card(monkeypatch, published)
-    ps.validate_session_shape()
-    assert sized_by == [published]
+def test_the_shape_is_sized_by_the_partitioned_gpu_not_by_the_session_card(monkeypatch):
+    """GPU 3 is in CPX while the session's card is a whole MI355X."""
+    publish_card(monkeypatch, MI355X_CARD)
+    monkeypatch.setenv(ps.PARTITION_GPU_ENV, "3")
+    device = {"gpu": 3, "asic": {"target_graphics_version": "gfx950", "num_compute_units": 32}, "vram": {"size": 36862}}
+    answers = {
+        "partition": {"current_partition": [{"gpu_id": 3, "accelerator_type": "CPX"}]},
+        "static": {"gpu_data": [device]},
+    }
+    monkeypatch.setattr(gp, "_amd_smi_json", lambda args: answers[args[0]])
+
+    layout = ps.validate_session_shape().layout
+
+    assert layout is not None and (layout.mode, layout.cu_per_partition) == ("CPX", 32)
+    assert layout.gib_per_partition == pytest.approx(36.0, abs=0.1)
 
 
 class TestUnreadableCard:

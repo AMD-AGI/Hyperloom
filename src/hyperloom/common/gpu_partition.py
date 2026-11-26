@@ -13,13 +13,14 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any, Sequence
 
-from hyperloom_common.gpu_card import GpuCard
+from hyperloom_common.amd_smi import AmdSmiError
+from hyperloom_common.gpu_card import GpuCard, cards_of
 
 log = logging.getLogger(__name__)
 
 #: Compute-partition mode -> partitions per card. Both gfx942 and gfx950 boards
 #: carry eight XCDs, so the ladder is the same width on each. Used to interpret a
-#: mode name; the per-partition CU count and memory are the session card's.
+#: mode name; the per-partition CU count and memory are the partitioned device's.
 MODE_PARTITION_COUNTS: dict[str, int] = {
     "SPX": 1,
     "DPX": 2,
@@ -157,8 +158,9 @@ def layout_for(mode: str, *, cu_per_partition: int, gib_per_partition: float | N
     )
 
 
-def observe_partition(gpu_id: int = 0, *, card: GpuCard | None) -> PartitionLayout | None:
-    """Read the live partition topology of one card, sized by ``card``; ``None`` when either is unknown."""
+def observe_partition(gpu_id: int = 0) -> PartitionLayout | None:
+    """Read the live partition topology of one card, sized by the device amd-smi reports as ``gpu_id``; ``None`` when
+    either is unknown."""
     try:
         mode = read_partition_mode(gpu_id)
     except PartitionError as exc:
@@ -167,12 +169,20 @@ def observe_partition(gpu_id: int = 0, *, card: GpuCard | None) -> PartitionLayo
     if mode not in MODE_PARTITION_COUNTS:
         log.warning("GPU %d reports compute-partition mode %r, which this build does not know", gpu_id, mode)
         return None
+    card = _device_card(gpu_id)
     if card is None or card.compute_units is None:
-        log.warning(
-            "GPU %d is in %s, but the session read no compute-unit count to size its partitions by", gpu_id, mode
-        )
+        log.warning("GPU %d is in %s, but amd-smi gave no compute-unit count to size its partitions by", gpu_id, mode)
         return None
     return layout_for(mode, cu_per_partition=card.compute_units, gib_per_partition=card.memory_mib / 1024)
+
+
+def _device_card(gpu_id: int) -> GpuCard | None:
+    """The device amd-smi reports as ``gpu_id``, which in a partitioned mode is one partition."""
+    try:
+        return cards_of(_amd_smi_json(["static", "-g", str(gpu_id)])).get(gpu_id)
+    except (PartitionError, AmdSmiError) as exc:
+        log.debug("amd-smi static describes no GPU %d: %s", gpu_id, exc)
+        return None
 
 
 def published_shape(env: Mapping[str, str] | None = None) -> dict[str, Any] | None:

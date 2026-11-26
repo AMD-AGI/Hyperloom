@@ -10,7 +10,6 @@ import os
 from dataclasses import dataclass, field
 from typing import Any
 
-from hyperloom_common import gpu_card
 from hyperloom.common.gpu_partition import (
     PARTITION_COUNT_ENV,
     PARTITION_CU_ENV,
@@ -151,7 +150,7 @@ def validate_session_shape(
     notes: list[str] = []
     gpu = partition_gpu_id()
 
-    layout = observe_partition(gpu, card=gpu_card.session_card())
+    layout = observe_partition(gpu)
     if layout is None:
         if declared_mode:
             return ShapeVerdict(refusal=_UNREADABLE_MODE_REFUSAL.format(declared_mode=declared_mode, gpu=gpu))

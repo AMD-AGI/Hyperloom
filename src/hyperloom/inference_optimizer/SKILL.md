@@ -1234,8 +1234,8 @@ else torch's `gcnArchName`; a multi-node session reads a remote node's the same
 way. When the cards the visible-device masks leave are not one kind (same arch,
 compute units and memory), the launch warns, listing each kind, and takes the
 first. That card's arch and facts decide everything that depends
-on the hardware: the default launch row, FP4 quantization, roofline peaks,
-partition sizing and Recipe KB arch matching. There is no list of supported
+on the hardware: the default launch row, FP4 quantization, roofline peaks
+and Recipe KB arch matching. There is no list of supported
 boards, so a GPU Hyperloom has not seen before still runs.
 
 The GPU type is the label results, recipes and benchmark scripts are filed
