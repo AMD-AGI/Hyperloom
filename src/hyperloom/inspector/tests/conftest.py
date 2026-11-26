@@ -21,6 +21,8 @@ from hyperloom.inspector.tests import producers
 
 T0 = 1_790_000_000.0
 FAKE_KEY = "sk-ant-api03-" + "x" * 40
+# Split so the secret scanner (gitleaks' generic-api-key rule) does not take the fixtures that use it for real keys.
+FAKE_SECRET = "abcd1234" + "efgh5678"
 
 
 def iso(t: float) -> str:
