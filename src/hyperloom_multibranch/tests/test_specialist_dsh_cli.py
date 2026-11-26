@@ -519,19 +519,24 @@ def test_a_reading_run_boots_the_composition_that_only_reads_and_answers_one_pro
     assert [row["type"] for row in rows] == ["system", "assistant", "result"]
     kwargs = harness.kwargs
     assert (kwargs["profile"], kwargs["env"]["DSH_PERMISSION_MODE"]) == ("sdk-minimal", "read-only")
-    assert Path(kwargs["patches"][-1]).read_text(encoding="utf-8") == READING_PATCH
+    text = Path(kwargs["patches"][-1]).read_text(encoding="utf-8")
+    assert text.startswith(READING_PATCH)
+    # The composition has no row of the gateway route's adapter, so the patch adds it and declares the route after.
+    route = _patch_rows(text[len(READING_PATCH) :])[0]
+    assert route["id"] == "llm-pi-ai" and route["config"]["providers"]["gateway"]["models"][0]["id"] == MODEL
     assert not (home / "AGENTS.md").exists() and rows[0]["mcp_servers"] == []
 
 
 def test_the_reading_composition_has_no_shell_and_no_tool_that_writes() -> None:
     rows = _patch_rows(READING_PATCH)
     by_id = {row["id"]: row for row in rows if "id" in row}
-    [inserted] = rows[-1]["insert"]
+    inserted = [row["name"] for row in rows[-1]["insert"]]
 
     assert by_id["persistent-bash"]["disabled"] is True and by_id["tool-working-directory"]["disabled"] is True
     assert by_id["tool-fs"]["config"] == {"read": True, "readImage": False, "write": False, "edit": False}
     assert by_id["sandbox-policy"]["config"]["mode"] == "read-only"
-    assert inserted["name"] == "@deepseek-ai/dsh-tool-fs-search"
+    # What is added is the tool that searches and the adapter the gateway route is declared on, and nothing else.
+    assert inserted == ["@deepseek-ai/dsh-tool-fs-search", "@deepseek-ai/dsh-llm-pi-ai"]
 
 
 def test_a_one_shot_run_whose_turn_failed_exits_non_zero_after_its_error_result(

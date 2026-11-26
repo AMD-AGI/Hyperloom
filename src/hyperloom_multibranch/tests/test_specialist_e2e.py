@@ -455,11 +455,14 @@ def test_the_deepseek_harness_goes_on_with_the_conversation_of_a_process_that_wa
 
     assert (second.returncode, unknown.returncode) == (0, 1), second.stderr + unknown.stderr
     resumed = next(line for line in second.stdout.splitlines() if '"result"' in line)
-    assert [json.loads(row)["result"] for row in (first, resumed)] == ["heard 1 messages", "heard 3 messages"]
+    # The runtime adds messages of its own to the first (workspace instructions, the session's facts), so the count
+    # is relative: the resumed process sent what the killed one had sent, its reply, and the new message.
+    before, after = (int(json.loads(row)["result"].split()[1]) for row in (first, resumed))
+    assert after == before + 2
     # The second process's model was sent what the killed one's conversation held, and its own message after it.
     told = [block.get("text", "") for message in model.bodies[-1]["messages"] for block in _blocks(message)]
-    assert any("remember the word heron" in text for text in told) and "heard 1 messages" in told
-    assert "which word was it?" in told[-1]
+    said = [next(index for index, text in enumerate(told) if words in text) for words in ("remember the word heron", f"heard {before} messages", "which word was it?")]  # fmt: skip
+    assert said == sorted(said)
     # A conversation the home does not hold ends the CLI before it says it started, as a session expects of a refusal.
     assert '"init"' not in unknown.stdout and "cannot resume conversation" in unknown.stderr
 

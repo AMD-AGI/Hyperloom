@@ -67,11 +67,14 @@ from hyperloom.orchestrator.specialists.agent_cli_config import SpecialistAgentU
 from hyperloom.orchestrator.specialists.dsh_launch import DshSessionHome, dsh_sdk_version, prepare_session_home
 from hyperloom_common.fs_utils import write_text_nofollow
 from hyperloom_common.llm.deepseek_session import (
+    GATEWAY_BASE_URL_ENV,
     DeepSeekSessionError,
     HarnessLaunch,
     child_environment,
     compaction_usage,
+    gateway_route_patch,
     load_harness_sdk,
+    max_tokens_from_env,
     normalize_run_result,
     sdk_failures,
     start_harness,
@@ -100,7 +103,8 @@ Your harness has a tool named wait_agent. It waits for a subagent you started an
 judgements, briefs and every other message of your session reach you only after your turn has ended. Never call \
 wait_agent to wait for a test or for a message of your session; end your turn instead, and what arrives wakes you."""
 #: Laid over :data:`READING_PROFILE`, whose tree is closed: its shell and its directory tool off, its file tool
-#: reading only, the search tool added, and its file sandbox read-only.
+#: reading only, the search tool added, and its file sandbox read-only. The tree has no row of the adapter the
+#: gateway route is declared on either, so the row is added here and the route declared after it (:func:`_launch`).
 READING_PATCH = """\
 - id: persistent-bash
   disabled: true
@@ -121,6 +125,8 @@ READING_PATCH = """\
       name: '@deepseek-ai/dsh-tool-fs-search'
       config:
         sampleOverCapGlobResults: false
+    - id: llm-pi-ai
+      name: '@deepseek-ai/dsh-llm-pi-ai'
 """
 READING_PATCH_NAME = "reading_patch.yml"
 #: The variable :data:`READING_PROFILE` reads its system prompt from.
@@ -453,10 +459,11 @@ def _launch(options: Options, home: Path, cwd: Path) -> HarnessLaunch:
     effort = harness_reasoning_effort(DEFAULT_REASONING_EFFORT)
     try:
         if options.reading:
-            home.mkdir(parents=True, mode=0o700, exist_ok=True)
-            patch = write_text_nofollow(home, (READING_PATCH_NAME,), READING_PATCH, mode=0o600)
             overrides = {SYSTEM_PROMPT_ENV: options.role} if options.role else {}
             env = child_environment(overrides, READ_ONLY)
+            route = gateway_route_patch(env[GATEWAY_BASE_URL_ENV], options.model, max_tokens=max_tokens_from_env(env))
+            home.mkdir(parents=True, mode=0o700, exist_ok=True)
+            patch = write_text_nofollow(home, (READING_PATCH_NAME,), READING_PATCH + route, mode=0o600)
             profile = READING_PROFILE
         else:
             env = child_environment(None, FULL_ACCESS)

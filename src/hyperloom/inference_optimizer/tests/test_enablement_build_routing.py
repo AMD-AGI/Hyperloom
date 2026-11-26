@@ -637,7 +637,6 @@ def _make_params_fake(**kw):
             kept_patches=[],
             kept_stack_action={},
             setup_commands=[],
-            localization_manifest=[],
             last_build_failure=kw.get("enablement_last_build_failure", {}),
         ),
     )
@@ -645,7 +644,6 @@ def _make_params_fake(**kw):
     fake.build_enablement_specialist_params = types.MethodType(
         EnablementParams.build_enablement_specialist_params, fake
     )
-    fake._discover_enablement_candidate_refs = lambda plan, *, deadline: []
     fake._read_enablement_source_context = lambda _sig: ""
     fake._derive_checkpoint_weight_facts = lambda _log: ""
     return fake
@@ -675,35 +673,12 @@ def test_build_params_no_injection_when_no_build_failure():
     assert "PREVIOUS TARGETED-BUILD" not in notes
 
 
-# maybe_escalate_to_targeted_build: discovery-driven ref selection
+# maybe_escalate_to_targeted_build: ref selection
 
 
 @pytest.mark.asyncio
-async def test_escalate_uses_discovery_ref_when_no_kept_ref(coord, monkeypatch):
-    """When no kept/operator ref, top matching candidate from discovery is used."""
-    from hyperloom.orchestrator.actions.executors import _multi_node_env as mne
-
-    monkeypatch.setattr(mne, "is_multi_node", lambda: False)
-
-    coord.shared_state.framework = "vllm"
-    coord.shared_state.gpu_type = "mi300x"
-    coord.shared_state.enablement.candidate_refs = [
-        "https://github.com/ROCm/aiter/pull/77",
-    ]
-
-    await coord.enablement_build.maybe_escalate_to_targeted_build("hipErrorNoBinaryForGpu")
-
-    queued = [t for t in await coord.tasks.queued() if t.kind == "targeted_build"]
-    assert len(queued) == 1
-    action = TargetedBuildAction.from_state(queued[0].params)
-    assert action.ref == "PR:77"
-    assert "aiter" in action.repo_url.lower()
-    assert action.source_pr_url == "https://github.com/ROCm/aiter/pull/77"
-
-
-@pytest.mark.asyncio
-async def test_escalate_kept_ref_short_circuits_discovery(coord, monkeypatch):
-    """When a kept stack action has a ref, discovery candidates are ignored."""
+async def test_escalate_builds_the_kept_ref(coord, monkeypatch):
+    """The kept stack action's repo and ref are the build's."""
     from hyperloom.orchestrator.actions.executors import _multi_node_env as mne
 
     monkeypatch.setattr(mne, "is_multi_node", lambda: False)
@@ -714,9 +689,6 @@ async def test_escalate_kept_ref_short_circuits_discovery(coord, monkeypatch):
         "ref": "v0.99.0",
         "repo_url": "https://github.com/ROCm/aiter",
     }
-    coord.shared_state.enablement.candidate_refs = [
-        "https://github.com/ROCm/aiter/pull/77",
-    ]
 
     await coord.enablement_build.maybe_escalate_to_targeted_build("hipErrorNoBinaryForGpu")
 
@@ -724,53 +696,26 @@ async def test_escalate_kept_ref_short_circuits_discovery(coord, monkeypatch):
     assert len(queued) == 1
     action = TargetedBuildAction.from_state(queued[0].params)
     assert action.ref == "v0.99.0"
+    assert action.repo_url == "https://github.com/ROCm/aiter"
     assert action.source_pr_url == ""
 
 
 @pytest.mark.asyncio
-async def test_escalate_skips_candidate_with_wrong_component_repo(coord, monkeypatch):
-    """aiter component only accepts candidates whose repo contains 'aiter'."""
+async def test_escalate_without_a_kept_ref_names_no_ref(coord, monkeypatch):
     from hyperloom.orchestrator.actions.executors import _multi_node_env as mne
 
     monkeypatch.setattr(mne, "is_multi_node", lambda: False)
 
     coord.shared_state.framework = "vllm"
     coord.shared_state.gpu_type = "mi300x"
-    coord.shared_state.enablement.candidate_refs = [
-        "https://github.com/sgl-project/sglang/pull/5",  # wrong repo for aiter
-    ]
 
     await coord.enablement_build.maybe_escalate_to_targeted_build("hipErrorNoBinaryForGpu")
 
     queued = [t for t in await coord.tasks.queued() if t.kind == "targeted_build"]
     assert len(queued) == 1
     action = TargetedBuildAction.from_state(queued[0].params)
-    # Falls back to empty ref (tag autoselect) since no matching candidate
     assert action.ref == ""
     assert action.source_pr_url == ""
-
-
-@pytest.mark.asyncio
-async def test_escalate_moves_past_a_candidate_whose_org_alone_names_the_component(coord, monkeypatch):
-    """The component is matched on the repo name, so an org-only hit is skipped, not escalated and then aborted."""
-    from hyperloom.orchestrator.actions.executors import _multi_node_env as mne
-
-    monkeypatch.setattr(mne, "is_multi_node", lambda: False)
-
-    coord.shared_state.framework = "vllm"
-    coord.shared_state.gpu_type = "mi300x"
-    coord.shared_state.enablement.candidate_refs = [
-        "https://github.com/aiter-fans/vllm/pull/5",
-        "https://github.com/ROCm/aiter/pull/77",
-    ]
-
-    await coord.enablement_build.maybe_escalate_to_targeted_build("hipErrorNoBinaryForGpu")
-
-    queued = [t for t in await coord.tasks.queued() if t.kind == "targeted_build"]
-    assert len(queued) == 1
-    action = TargetedBuildAction.from_state(queued[0].params)
-    assert action.ref == "PR:77"
-    assert action.repo_url == "https://github.com/ROCm/aiter"
 
 
 @pytest.mark.asyncio

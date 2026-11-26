@@ -27,6 +27,7 @@ from hyperloom.inference_optimizer.trace.conversation_trace import ConversationR
 from ..state.failure_evidence import UNMEASURED_OUTCOMES, render_failure_line
 from ..state.shared_state import KbInjection
 from hyperloom_common.coerce import to_str_list, to_unix
+from hyperloom.common.env_safety import redact_secret_values
 from hyperloom.common.prompt_safety import defang_prompt_structure as _defang_prompt_structure
 from hyperloom.common.prompt_safety import flatten_for_prompt as _flatten_for_inbox
 
@@ -63,6 +64,8 @@ _OUTCOME_TPUT_KEYS: tuple[str, ...] = (
 _OUTCOME_STATUS_KEYS: tuple[str, ...] = ("status", "verdict", "outcome", "runner_status")
 # Notes rendered per inbox line.
 _OUTCOME_NOTES_MAX: int = 3
+# A skip detail names the twin or the dead variant first and its cause after; this keeps the head of the cause.
+_SKIP_DETAIL_CHARS = 240
 # Ceilings for the prompt sections that grow with the session; uncapped, a long run outgrows the context window.
 _FINDINGS_PROMPT_CHARS = 24_000
 _QUESTIONS_PROMPT_CHARS = 6_000
@@ -144,13 +147,25 @@ def _variant_failure_rows(result: dict[str, Any], max_variant_rows: int) -> list
     failures = [v for v in pvos if isinstance(v, dict) and str(v.get("outcome") or "").upper() in UNMEASURED_OUTCOMES]
     rows: list[str] = []
     for vo in failures[:max_variant_rows]:
-        row = dict(vo)
-        row["error_excerpt"] = _flatten_for_inbox(vo.get("error_excerpt") or vo.get("reason") or "")
-        rows.append("  failure: " + render_failure_line(row, excerpt_chars=120))
+        rows.append("  failure: " + render_failure_line(vo, excerpt_chars=120))
     elided = len(failures) - max_variant_rows
     if elided > 0:
         pull = qualified_context_tool_name("get_variant_failures")
         rows.append(f"  (+{elided} more failures; pull {pull})")
+    return rows
+
+
+def _variant_skip_rows(result: dict[str, Any], max_variant_rows: int) -> list[str]:
+    """Indented rows for the variants a delegated explore result answered without launching, with why."""
+    skipped = [s for s in result.get("skipped_dup") or [] if isinstance(s, dict)]
+    rows = []
+    for entry in skipped[:max_variant_rows]:
+        detail = _flatten_for_inbox(redact_secret_values(str(entry.get("detail") or "")))[:_SKIP_DETAIL_CHARS]
+        row = f"  skipped: variant={str(entry.get('name') or '')!r} reason={entry.get('reason') or ''}"
+        rows.append(f"{row} detail={detail!r}" if detail else row)
+    elided = len(skipped) - max_variant_rows
+    if elided > 0:
+        rows.append(f"  (+{elided} more skipped)")
     return rows
 
 
@@ -190,7 +205,9 @@ def _format_delegated_result(head: str, payload: dict[str, Any], max_variant_row
     header_line = " ".join(parts)
     if max_variant_rows <= 0:
         return header_line
-    return "\n".join([header_line, *_variant_failure_rows(result, max_variant_rows)])
+    return "\n".join(
+        [header_line, *_variant_failure_rows(result, max_variant_rows), *_variant_skip_rows(result, max_variant_rows)]
+    )
 
 
 def _format_review_verdict(head: str, payload: dict[str, Any]) -> str:
@@ -898,7 +915,8 @@ class ConversationCollaborator(CoordinatorCollaborator):
         below_bar.sort(key=itemgetter(1), reverse=True)
         lines: list[str] = [
             f"Current acceptance bar (macro_cycle={cycle}): KEEP>={keep:.2f}% stack_stable>={stable:.2f}%.",
-            "Historical results are evidence only — any fingerprint may be re-proposed.",
+            "Historical results are evidence only — any fingerprint may be re-proposed, except one carrying a change "
+            "the framework refused at start on a configuration error (`known_dead_change`).",
         ]
         if above_bar:
             lines.append("Prior results above the bar (consider re-proposing if conditions changed):")
