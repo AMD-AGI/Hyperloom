@@ -24,9 +24,10 @@ REVALIDATION_UNMEASURED = "revalidation_unmeasured"
 #: server boot or a full round and holds back a fresh GEAK run.
 MAX_UNMEASURED_REVALIDATIONS = 2
 
-# Verdict annotations are not candidate identity.
+# Coordinator annotations are not candidate identity.
 _REVALIDATION_ANNOTATION_KEYS: frozenset[str] = frozenset(
     {
+        "absent_backends",
         "kernel_event_id",
         "final_validation",
         "native_source_revalidation",

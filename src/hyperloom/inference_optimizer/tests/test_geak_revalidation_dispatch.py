@@ -1608,7 +1608,8 @@ async def test_a_spent_kernel_budget_waits_for_the_rebench_and_keeps_the_win(coo
 
 
 @pytest.mark.asyncio
-async def test_crash_recovery_does_not_replay_a_refused_candidate(coordinator, tmp_path, monkeypatch) -> None:
+@pytest.mark.parametrize("mode", ["agentx", "synthetic"])
+async def test_crash_recovery_does_not_replay_a_refused_candidate(coordinator, tmp_path, monkeypatch, mode) -> None:
     """A refusal a rerun cannot change is a verdict, not a missed handback.
 
     The rebench measured the candidate's own config below ``current_best``, so
@@ -1619,7 +1620,7 @@ async def test_crash_recovery_does_not_replay_a_refused_candidate(coordinator, t
     c = coordinator
     st = c.shared_state
     _arm_kernel_to_sweep(st)
-    st.benchmark_mode = "agentx"
+    st.benchmark_mode = mode
     measured_in_suite_round(st, tmp_path / "measured")
     st.baseline_tput = 100.0
     st.current_best = {"action": "explore", "tput": 120.0, "extra_server_args": "--incumbent", "extra_envs": {}}
@@ -1628,8 +1629,8 @@ async def test_crash_recovery_does_not_replay_a_refused_candidate(coordinator, t
         "final_throughput_tok_s": 116.0,
         "accepted_config": {"flags": "--foo", "env": ""},
     }
-    # The phase stamps the runner's exit code onto state; the file does not carry it.
-    st.geak_result = {**result, "returncode": 0}
+    # The phase stamps the runner's exit code and GEAK's absent backends onto state; the file carries neither.
+    st.geak_result = {**result, "returncode": 0, "absent_backends": {"triton": "import failed"}}
 
     rebench, _ = await c.tasks.create_or_return_existing(
         TaskSpec(
