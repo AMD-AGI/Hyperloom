@@ -13,7 +13,7 @@ from __future__ import annotations
 
 import subprocess
 from collections.abc import Callable, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 from inference_suite.multinode.nodes import SshAccess
@@ -95,7 +95,7 @@ class SshClient:
 
     access: SshAccess
     known_hosts: Path
-    runner: Runner = run_process
+    runner: Runner = field(default_factory=lambda: run_process)
 
     def _argv(self, host: str) -> list[str]:
         argv = ["ssh", *ssh_options(self.known_hosts), "-o", "IdentitiesOnly=yes"]
