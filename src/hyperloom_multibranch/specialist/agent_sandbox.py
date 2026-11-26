@@ -87,6 +87,7 @@ from hyperloom.common.visible_devices import GPU_MASK_ENV_NAMES
 from hyperloom.measure.compile import COMPONENT_LAYOUTS, UnsupportedComponentError, locate_installed_package
 from hyperloom.measure.local_templates import image_env
 from hyperloom.sandbox.launcher import LAUNCHER_SOURCE, StatusPipe, launcher_argv
+from hyperloom.sandbox.local_sandbox import SGLANG_JIT_CACHE_ENV
 from hyperloom_common.bwrap import BwrapPolicy, BwrapPolicyError, Holder, Scratch
 from hyperloom_common.shared_storage import make_shared_dirs
 from hyperloom_multibranch.repo.isolated_git import AGENT_IDENTITY
@@ -131,6 +132,8 @@ LOG_DIR = "logs"
 #: Where in a sandbox's temporary directory its JIT and kernel caches go, and the same name in a confined home's tool
 #: directories.
 CACHE_DIR = "cache"
+#: SGLang's JIT kernel cache, below :attr:`LocalAgentSandbox.cache_root`.
+SGLANG_JIT_DIR = "sglang-jit"
 #: Where a sandbox's temporary files go, under the host's local temporary directory: HIP unbundles its code objects
 #: there and fails on a network file system, where the branch's directory usually is.
 TMP_PREFIX = "hyperloom-agent-"
@@ -633,6 +636,9 @@ class LocalAgentSandbox:
         if confined is None:
             self.tmp.mkdir(exist_ok=True)
         merged["TMPDIR"] = str(self.tmp)
+        # SGLang publishes a JIT build by renaming a directory, which a network file system refuses while it holds an
+        # open file, as it does below the home in the branch's directory.
+        merged[SGLANG_JIT_CACHE_ENV] = str(self.cache_root / SGLANG_JIT_DIR)
         merged.update(env)
         merged = {name: value for name, value in merged.items() if name not in GPU_MASK_ENV_NAMES}
         merged[ROCR_VISIBLE_DEVICES_ENV] = ",".join(map(str, self.cards))
