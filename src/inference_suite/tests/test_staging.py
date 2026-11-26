@@ -974,6 +974,30 @@ def test_a_change_to_any_input_gives_a_new_key(publishing, client: FakeClient, m
     moved = staging.staging_key()
     monkeypatch.setattr(staging.aiperf_patch, "PATCH_SHA256", "f" * 64)
     assert staging.staging_key() != moved, "a changed patch of the client is staged anew"
+    patched = staging.staging_key()
+    monkeypatch.setattr(staging, "INFERENCEX_REQUIRED", (*staging.INFERENCEX_REQUIRED, "infx/another.py"))
+    assert staging.staging_key() != patched, "a newly required file is staged anew"
+    required = staging.staging_key()
+    monkeypatch.setattr(staging, "INFERENCEX_SUBSET", (*staging.INFERENCEX_SUBSET, "infx/another"))
+    assert staging.staging_key() != required, "a wider subset is staged anew"
+
+
+def test_a_staging_published_before_the_golden_files_were_required_is_left_and_staged_anew(
+    publishing, monkeypatch
+) -> None:
+    repo, stagings = publishing
+    golden = (staging.GOLDEN_PACKAGE, staging.GOLDEN_PACKAGE_FILE, staging.MASTER_CONFIG, *staging._GOLDEN_IMPORTS)
+    with monkeypatch.context() as before:
+        before.setattr(staging, "INFERENCEX_SUBSET", tuple(p for p in staging.INFERENCEX_SUBSET if p not in golden))
+        before.setattr(staging, "INFERENCEX_REQUIRED", tuple(p for p in staging.INFERENCEX_REQUIRED if p not in golden))
+        older = staging.publish(stagings, repo)
+    assert not (inferencex_root(older) / staging.MASTER_CONFIG).exists()
+
+    published = staging.publish(stagings, repo)
+
+    assert published != older and older.is_dir()
+    assert verify(published, staging.manifest_sha256(published)).failed_step is None
+    assert (inferencex_root(published) / staging.MASTER_CONFIG).is_file()
 
 
 def _race(monkeypatch: pytest.MonkeyPatch, other_stager) -> None:

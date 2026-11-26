@@ -68,7 +68,8 @@ it.
   the model's own sampling, and 1.1.4 kept it at +82.9% where about +40–45%
   holds. The staged InferenceX now also holds `infx/golden_al_distribution/`
   and `configs/amd-master.yaml`, so a tool cache staged before is staged again
-  once.
+  once, and a shared runner cache publishes a new staging directory beside the
+  old one.
 
 - **A hosted multi-branch run sets the AgentX window and the server boot
   budget.** The campaign spec's `multibranch` block takes

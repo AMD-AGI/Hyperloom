@@ -517,11 +517,14 @@ def normalised_manifest(tool_cache: Path) -> NormalisedManifest:
 
 def staging_key() -> str:
     """The directory name :func:`publish` publishes the staging of the inputs in force under: the sha256 of the
-    staging schema, the InferenceX pin, the interpreter build, the client lock and the client's patch, so any changed
-    input gets a new one."""
+    staging schema, the InferenceX pin and the files staged and required from it, the interpreter build, the client
+    lock and the client's patch, so any changed input gets a new one. A published staging is never rewritten, so one
+    published before a file was required stays under its own key."""
     inputs = {
         _SCHEMA_KEY: STAGING_SCHEMA,
         INFERENCEX_TOOL: PINNED_TOOLS[INFERENCEX_TOOL],
+        "inferencex_subset": sorted(INFERENCEX_SUBSET),
+        "inferencex_required": sorted(INFERENCEX_REQUIRED),
         "python_build": AGENTX_PYTHON_BUILD.sha256,
         "client_lock": _sha256(client_env.AGENTX_LOCK.read_bytes()),
         "client_patch": aiperf_patch.PATCH_SHA256,

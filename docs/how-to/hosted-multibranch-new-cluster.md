@@ -275,8 +275,8 @@ files alone, and patches its aiperf to export `error_osl` (a client the patch do
     .staging-<staging key>-<uuid>/                         a build in progress; no reader looks inside
 ```
 
-The staging key is the sha256 of the InferenceX pin, the interpreter build, the client lock and the client's patch, so a
-change to any of them publishes a new directory beside the old one. Builders share the directory without a lock: each builds in its own
+The staging key is the sha256 of the InferenceX pin, the InferenceX files staged and required, the interpreter build, the
+client lock and the client's patch, so a change to any of them publishes a new directory beside the old one. Builders share the directory without a lock: each builds in its own
 `.staging-*` directory, syncs it and renames it to the key. A builder that loses the rename removes its own directory
 and uses the winner once the winner's normalised manifest (each package's name, version and wheel sha256, the
 interpreter and the InferenceX pin) is the one it built; one that differs is refused, naming the packages. A
