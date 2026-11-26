@@ -132,6 +132,29 @@ def test_the_client_streams_chat_requests_and_saves_the_result_a_fixed_round_rea
     assert 0 < saved["mean_ttft_ms"] < saved["mean_e2el_ms"] and saved["mean_tpot_ms"] > 0
 
 
+def test_a_measured_pass_with_fewer_prompts_than_its_concurrency_says_the_level_is_not_filled(
+    tmp_path, server, dataset, capsys
+):
+    _, base_url = server
+
+    assert _run_client(base_url, dataset, tmp_path / "result.json", prompts=1) == 0
+    assert _run_client(base_url, dataset, tmp_path / "result.json", prompts=2) == 0
+
+    (warning,) = [line for line in capsys.readouterr().err.splitlines() if line.startswith("WARNING")]
+    assert "sends 1 prompts at concurrency 2" in warning
+
+
+def test_a_warmup_pass_below_its_concurrency_warns_of_nothing(server, dataset, capsys):
+    _, base_url = server
+    argv = client_argv(
+        ClientTool(sys.executable, "/unused"), ClientTarget(base_url, "/models/m", "m"), _workload(dataset),
+        ClientPass(1, 1, None),
+    )  # fmt: skip
+
+    assert dataset_client.main(list(argv[2:])) == 0
+    assert "WARNING" not in capsys.readouterr().err
+
+
 def test_one_seed_sends_one_order_and_another_seed_another():
     pool = [dataset_client.Prompt(f"p{index}", index + 1) for index in range(10)]
     order = dataset_client.request_order(pool, 25, seed=0)

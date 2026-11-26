@@ -40,9 +40,10 @@ from hyperloom.orchestrator.actions.executors.workload._workload_envs import (
     BenchmarkTarget,
     FrameworkScriptMismatchError,
     MaterializeOptions,
+    PromptDatasetError,
     default_baseline_config,
-    num_prompts_per_conc,
     prepare_grid_benchmark_config,
+    round_num_prompts,
 )
 from hyperloom.orchestrator.actions.stop_attribution import ORCHESTRATOR_CANCELLED_CLASS
 from hyperloom.orchestrator.state.base_launch import frozen_base
@@ -117,6 +118,8 @@ def _prepare(state: SharedState, session_dir: Path) -> _Setup | str:
         benchmark_script=state.accepted_baseline_script(),
     )
     try:
+        # Every rung counts the session's prompt dataset, so one that cannot be counted here is found before any runs.
+        round_num_prompts(state.conc, state.isl, state.osl, state.prompt_dataset)
         materialized = prepare_grid_benchmark_config(
             base_yaml,
             workspace,
@@ -126,6 +129,9 @@ def _prepare(state: SharedState, session_dir: Path) -> _Setup | str:
     except FrameworkScriptMismatchError:
         log.warning("conc_sweep: the baseline config does not match the session's framework", exc_info=True)
         return "framework_script_mismatch"
+    except PromptDatasetError as exc:
+        log.warning("conc_sweep: %s", exc)
+        return "prompt_dataset_unreadable"
     return _Setup(workspace, materialized, target)
 
 
@@ -174,7 +180,7 @@ class _Sweep:
             "CONC": str(conc),
             "ISL": str(state.isl),
             "OSL": str(state.osl),
-            "NUM_PROMPTS": str(conc * num_prompts_per_conc(state.isl, state.osl)),
+            "NUM_PROMPTS": str(round_num_prompts(conc, state.isl, state.osl, state.prompt_dataset)),
             "RUN_EVAL": "false",
         }
         variant = GridVariant(
