@@ -118,10 +118,7 @@ class TestKind(str, Enum):
 
 
 class Purpose(str, Enum):
-    """Why a test is run; the toolbox takes its default priority from it.
-
-    ``PROBE`` is a specialist's ``repro`` test: its case is a script whose output is its whole result, never a verdict.
-    """
+    """Why a test is run; the toolbox takes its default priority from it. ``PROBE`` is a specialist's ``repro`` test."""
 
     BASELINE = "baseline"
     HEALTH = "health"
