@@ -1,7 +1,9 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""What each field and figure on the Tokens tab is called, and what it means: the page shows a definition on hover."""
+"""What each field and figure on the Tokens tab is called, and what it means: the page shows a definition on hover,
+and the token timeline file carries them under ``terms``.
+"""
 
 from __future__ import annotations
 
@@ -22,7 +24,7 @@ def _billed(group: str, label: str, what: str, arises: str, billed: str) -> dict
 
 _TYPES, _TOTALS, _CHARTS = "Token types", "Totals and rates", "Charts and tables"
 _RECENT_MIN = f"{RECENT_SEC / 60:g}"
-# The Tokens tab's names and definitions, which the page shows on hover. A definition
+# The Tokens tab's names and definitions, which the page shows on hover and the timeline file carries. A definition
 # is one line, but a billed category's (a token kind) is three. Keys are the field names (KINDS,
 # totals) or, for what has no field, the figure's own.
 TERMS: dict[str, dict[str, str]] = {

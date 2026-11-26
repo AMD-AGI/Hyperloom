@@ -70,6 +70,9 @@ Options:
 - `--history-dir DIR`: where memory and GPU samples are kept, so a restarted Inspector backfills its chart; never
   inside the session. Default `$XDG_STATE_HOME/hyperloom-inspector` or `~/.local/state/hyperloom-inspector`.
 - `--no-history`: keep resource samples in memory only.
+- `--token-dir DIR`: where the token timeline (every LLM call's tokens over time, as JSON) is kept; never
+  inside the session. Default `--history-dir`, else its default. `--no-token-file` keeps it in memory only. It is
+  `<session>-<hash>.tokens.json`.
 - `--verbose`, `-v`: `hyperloom inspect` only. `-v` logs INFO messages; `-vv` adds DEBUG, with a line per HTTP
   request.
 
@@ -136,6 +139,8 @@ Where it shows:
 
 - **Tokens tab**: totals by token type, cache hit rate, a token chart over the run, and totals by agent and by
   model.
+- `GET /api/tokens` and **Download receipt in JSON** serve the same data as JSON, as does the token timeline file
+  (see `--token-dir`).
 
 What is counted:
 

@@ -4,7 +4,7 @@
      split by agent and by model. Filtered to the picked graph node like the other tabs. Names and their
      definitions, shown as hover hints, come from the server (tokens.py TERMS). -->
 <script lang="ts">
-  import { fmtCompact, fmtNum } from "../format";
+  import { fmtCompact, fmtNum, fmtTime } from "../format";
   import { sessionClock } from "../now.svelte";
   import type { InspectorStore } from "../store.svelte";
   import { fitRange } from "../timeline/scale";
@@ -171,6 +171,13 @@
       data-testid="token-by-agent">{L("by_agent")}</button
     >
   </div>
+  <span class="grow"></span>
+  {#if tv.file}
+    <span class="muted file" title={tv.file}>
+      saved to <span class="mono">{tv.file}</span>{#if tv.saved_at}&nbsp;at {fmtTime(tv.saved_at)}{/if}
+    </span>
+  {/if}
+  <a class="dl" href="api/tokens?download=1" download data-testid="token-download">Download receipt in JSON</a>
 </div>
 
 <TokenChart
@@ -295,6 +302,18 @@
   .seg button.on {
     color: var(--fg);
     background: var(--panel2);
+  }
+  .grow {
+    flex: 1;
+  }
+  .file {
+    max-width: 32rem;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .dl {
+    color: var(--accent);
   }
   .legend {
     display: flex;

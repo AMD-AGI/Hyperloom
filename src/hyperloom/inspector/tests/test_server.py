@@ -13,6 +13,7 @@ import pytest
 from hyperloom.inspector import server as server_mod
 from hyperloom.inspector.server import InspectorServer, ServeOptions
 from hyperloom.inspector.tests.conftest import FAKE_KEY, T0
+from hyperloom.inspector.token_terms import TERMS
 from hyperloom.inspector.watcher import Watcher, WatchOptions
 
 
@@ -223,6 +224,23 @@ def test_artifact_index_and_conversation(server):
     assert _get(server, "/api/conversation?call_id=")[0] == 404
 
 
+def test_token_timeline_is_served_and_downloadable(server, replay_server):
+    status, body, _ = _get(server, "/api/tokens")
+    assert status == 200
+    doc = json.loads(body)
+    assert doc["schema"] == "hyperloom.inspector.token_timeline/v1"
+    assert [e["call_id"] for e in doc["events"]] == ["c1", "c2", "c3"]
+    assert doc["terms"] == TERMS
+    snapshot = json.loads(_get(server, "/api/snapshot")[1])
+    assert snapshot["tokens"]["totals"]["total"] == 2650
+    assert snapshot["tokens"]["terms"] == TERMS  # not mangled by redaction
+    status, body, resp = _get(server, "/api/tokens?download=1")
+    assert resp.getheader("Content-Disposition") == 'attachment; filename="20260925T105719Z-test.tokens.json"'
+    assert json.loads(body)["totals"]["calls"] == 3
+    _get(replay_server, f"/api/replay?t={T0 + 620}&paused=1", method="POST")
+    assert [e["call_id"] for e in json.loads(_get(replay_server, "/api/tokens")[1])["events"]] == ["c1"]
+
+
 def test_replay_control_only_in_replay(server, replay_server):
     assert _get(server, "/api/replay?t=1", method="POST")[0] == 409
     status, body, _ = _get(replay_server, f"/api/replay?t={T0 + 305}&paused=1", method="POST")
@@ -264,5 +282,5 @@ def test_serve_never_puts_its_files_in_the_session(session_dir, monkeypatch):
     monkeypatch.setattr(InspectorServer, "serve_forever", lambda self, poll_interval=0.5: None)
     before = sorted(p for p in session_dir.rglob("*"))
     inside = session_dir / "scratch"
-    server_mod.serve(session_dir, ServeOptions(port=0, history_dir=inside))
+    server_mod.serve(session_dir, ServeOptions(port=0, history_dir=inside, token_dir=inside))
     assert sorted(p for p in session_dir.rglob("*")) == before

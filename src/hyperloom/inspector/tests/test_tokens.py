@@ -6,10 +6,12 @@ from __future__ import annotations
 import json
 import re
 import sqlite3
+from datetime import datetime
 
 import pytest
 
 from hyperloom.inspector import tokens as tokens_mod
+from hyperloom.inspector.history import history_path
 from hyperloom.inspector.tests import producers
 from hyperloom.inspector.tests.conftest import T0, iso
 from hyperloom.inspector.token_terms import TERMS
@@ -238,6 +240,8 @@ def test_view_series_adds_up_and_replay_cuts_at_the_clock(session_dir):
     cut = w.snapshot()["tokens"]
     assert cut["totals"]["calls"] == 4
     assert cut["by_node"]["orchestration"]["calls"] == 1
+    assert w.token_document()["upto"] == T0 + 620
+    assert len(w.token_document()["events"]) == 4
 
 
 def test_a_replay_reaches_the_turns_an_interrupted_specialist_logged_after_the_rest(session_dir):
@@ -247,7 +251,7 @@ def test_a_replay_reaches_the_turns_an_interrupted_specialist_logged_after_the_r
     w.poll()
     assert w.clock.end == T0 + 5000
     w.clock.seek(T0 + 6000, paused=True)
-    turns = [e["turn"] for e in w.tokens.events() if e["task_id"] == "t-perf"]
+    turns = [e["turn"] for e in w.token_document()["events"] if e["task_id"] == "t-perf"]
     assert turns == [1, 2, 3, 4]
 
 
@@ -282,6 +286,42 @@ def test_every_figure_has_one_name_and_a_definition(session_dir):
     assert not re.search(r"per_web_search|price list", json.dumps(terms)), "a term names what the sheet does not have"
     assert "at the input price" in terms["cache_write"]["definition"]
     assert _live(session_dir).snapshot()["tokens"]["terms"] == TERMS
+
+
+def test_timeline_file_is_written_outside_the_session(session_dir, tmp_path):
+    _set_state(session_dir, "t-perf", "running")
+    _log(session_dir, TURNS)
+    before = sorted((p.relative_to(session_dir), p.stat().st_mtime) for p in session_dir.rglob("*") if p.is_file())
+    path = history_path(session_dir, tmp_path / "state", suffix=".tokens.json")
+    w = _live(session_dir, tokens=TokenTracker(session_dir, path))
+    doc = json.loads(path.read_text())
+    assert doc["schema"] == tokens_mod.SCHEMA
+    assert doc["session_id"] == session_dir.name
+    first = doc["events"][0]
+    assert first["ts"].endswith(".000Z")
+    assert datetime.fromisoformat(first["ts"].replace("Z", "+00:00")).timestamp() == first["t"] == T0 + 23
+    assert doc["events"][-1]["cumulative"]["total"] == doc["totals"]["total"]
+    assert doc["totals"]["output_pending"] == 3
+    assert not path.with_name(path.name + ".tmp").exists()
+    w.stop()
+    after = sorted((p.relative_to(session_dir), p.stat().st_mtime) for p in session_dir.rglob("*") if p.is_file())
+    assert after == before
+    with pytest.raises(ValueError):
+        history_path(session_dir, session_dir / "state", suffix=".tokens.json")
+
+
+def test_saves_are_throttled_and_an_empty_session_still_gets_a_file(tmp_path):
+    session = tmp_path / "s"
+    session.mkdir()
+    tracker = TokenTracker(session, tmp_path / "out" / "s.tokens.json", write_every=60)
+    assert tracker.save()
+    assert json.loads(tracker.path.read_text())["events"] == []
+    tracker.add_ledger({"component": "critic", "input_tokens": 5, "status": "ok", "ts": iso(T0)})
+    tracker.poll([])
+    assert not tracker.save()
+    assert tracker.save(force=True)
+    assert json.loads(tracker.path.read_text())["totals"]["input"] == 5
+    assert not tracker.save(force=True)
 
 
 @pytest.mark.parametrize("side_in_usage", [False, True], ids=["usage-of-the-turns", "usage-with-side-calls"])
@@ -507,3 +547,13 @@ def test_a_subagent_turn_on_another_model_counts_toward_it_though_the_ledger_nam
     _add_ledger(session_dir, _ledger_rows([None, None, 1500]))
     w.poll()
     check("ledger")
+
+
+def test_a_write_error_disables_the_file_not_the_watcher(session_dir, tmp_path, caplog):
+    blocker = tmp_path / "not-a-dir"
+    blocker.write_text("x")
+    tracker = TokenTracker(session_dir, blocker / "s.tokens.json")
+    w = _live(session_dir, tokens=tracker)
+    assert tracker.path is None
+    assert "token timeline" in caplog.text
+    assert w.snapshot()["tokens"]["totals"]["calls"] == 3

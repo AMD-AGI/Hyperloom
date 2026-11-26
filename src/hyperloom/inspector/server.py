@@ -14,6 +14,8 @@ Endpoints (all GET unless noted):
 * ``/api/artifact?path=&mode=&offset=&limit=``: one artifact's typed payload.
 * ``/api/diff?a=&b=``: side-by-side diff of two text artifacts.
 * ``/api/conversation?call_id=``: prompt/response of one LLM call.
+* ``/api/tokens?download=``: the token timeline document (replay: up to the clock); ``download=1`` as a file,
+  ``<session>.tokens.json``.
 * ``POST /api/replay?t=&speed=&paused=``: move the replay clock.
 
 The Host header must name a loopback address or the bound host, so a page on
@@ -38,6 +40,7 @@ from urllib.parse import parse_qs, urlsplit
 
 from hyperloom.inspector import artifacts
 from hyperloom.inspector.history import MetricsHistory, history_path
+from hyperloom.inspector.tokens import TokenTracker, dump
 from hyperloom.inspector.watcher import Watcher, WatchOptions
 
 if TYPE_CHECKING:
@@ -138,6 +141,15 @@ class Handler(BaseHTTPRequestHandler):
     def _error(self, status: int, message: str) -> None:
         self._json({"error": message}, status)
 
+    def _tokens(self, download: bool) -> None:
+        doc = self.server.watcher.token_document()
+        if not download:
+            self._json(doc)
+            return
+        name = re.sub(r"[^A-Za-z0-9._-]", "_", str(doc.get("session_id") or "session"))
+        disposition = {"Content-Disposition": f'attachment; filename="{name}.tokens.json"'}
+        self._send(HTTPStatus.OK, dump(doc).encode(_ENCODING), "application/json; charset=utf-8", disposition)
+
     def _query(self) -> dict[str, str]:
         return {k: v[-1] for k, v in parse_qs(urlsplit(self.path).query).items()}
 
@@ -175,6 +187,8 @@ class Handler(BaseHTTPRequestHandler):
                     if rec is not None
                     else self._error(HTTPStatus.NOT_FOUND, "no conversation recorded")
                 )
+            if route == "/api/tokens":
+                return self._tokens(q.get("download") == "1")
             return self._error(HTTPStatus.NOT_FOUND, "not found")
         except PermissionError:
             return self._error(HTTPStatus.FORBIDDEN, "path not allowed")
@@ -264,19 +278,32 @@ def _is_unspecified(host: str) -> bool:
         return False
 
 
+def _token_file(session_dir: Path, token_dir: Path | None) -> Path | None:
+    """Where the token timeline is kept, if anywhere."""
+    if token_dir is None:
+        return None
+    try:
+        return history_path(session_dir, token_dir, suffix=".tokens.json")
+    except ValueError as exc:
+        print(f"inspect: no token timeline file: {exc}", file=sys.stderr, flush=True)
+        return None
+
+
 @dataclass(frozen=True)
 class ServeOptions:
-    """What :func:`serve` listens on (*host*, *port*), where it keeps resource samples (*history_dir*), and how the
-    watcher reads the session (*watch*). A directory left ``None`` is not written."""
+    """What :func:`serve` listens on (*host*, *port*), where it keeps resource samples (*history_dir*) and the token
+    timeline (*token_dir*), and how the watcher reads the session (*watch*). A directory left ``None`` is not written."""
 
     host: str = "127.0.0.1"
     port: int = 8765
     history_dir: Path | None = None
+    token_dir: Path | None = None
     watch: WatchOptions = field(default_factory=WatchOptions)
 
 
 def serve(session_dir: Path, options: ServeOptions | None = None) -> None:
-    """Run the Inspector until interrupted; with *options.history_dir*, resource samples survive a restart."""
+    """Run the Inspector until interrupted; with *options.history_dir*, resource samples survive a restart; with
+    *options.token_dir*, the token timeline is kept there as JSON."""
     options = options or ServeOptions()
     history = None
     if options.history_dir is not None:
@@ -284,7 +311,9 @@ def serve(session_dir: Path, options: ServeOptions | None = None) -> None:
             history = MetricsHistory(history_path(Path(session_dir), options.history_dir))
         except ValueError as exc:
             print(f"inspect: no resource history: {exc}", file=sys.stderr, flush=True)
-    watcher = Watcher(Path(session_dir), options.watch, history=history)
+    token_file = _token_file(Path(session_dir), options.token_dir)
+    tokens = TokenTracker(Path(session_dir), token_file)
+    watcher = Watcher(Path(session_dir), options.watch, history=history, tokens=tokens)
     watcher.start()
     httpd = InspectorServer((options.host, options.port), watcher)
     shown = "localhost" if _is_unspecified(options.host) else options.host
@@ -294,6 +323,8 @@ def serve(session_dir: Path, options: ServeOptions | None = None) -> None:
         print("Inspector UI: not in this install; / says how to get it", file=sys.stderr, flush=True)
     if history is not None:
         print(f"Resource history: {history.path}", flush=True)
+    if token_file is not None:
+        print(f"Token timeline: {token_file}", flush=True)
     try:
         httpd.serve_forever(poll_interval=0.5)
     except KeyboardInterrupt:

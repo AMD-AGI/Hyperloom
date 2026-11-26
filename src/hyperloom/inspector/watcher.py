@@ -15,7 +15,8 @@ Two kinds of data come out of here:
   consumption).
 
 Nothing here writes into the session directory, and every payload is
-redacted before it leaves the process.
+redacted before it leaves the process. The token timeline file
+(:mod:`hyperloom.inspector.tokens`) is written outside it.
 """
 
 from __future__ import annotations
@@ -230,6 +231,8 @@ class Watcher:
 
     def stop(self) -> None:
         self._stop.set()
+        with self.lock:
+            self.tokens.save(force=True)
 
     def _run(self) -> None:
         while not self._stop.wait(self.poll_sec):
@@ -337,8 +340,10 @@ class Watcher:
         return changed
 
     def _poll_tokens(self) -> bool:
-        """Running specialists' new turns."""
-        return self.tokens.poll(self.tasks, self.state.get("phase_history"))
+        """Running specialists' new turns, then the timeline file (throttled)."""
+        changed = self.tokens.poll(self.tasks, self.state.get("phase_history"))
+        self.tokens.save()
+        return changed
 
     def _sample_metrics(self) -> bool:
         """Memory and GPU use of this machine, every few seconds; none while the optimizer is known to run on another
@@ -616,6 +621,11 @@ class Watcher:
         last = max((t for t in (self._last_activity(), self.tokens.latest_write()) if t is not None), default=None)
         active = self.optimizer_status().get("alive") or last is None or clock - last < _ACTIVE_SEC
         return None if active else last
+
+    def token_document(self) -> dict:
+        """The token timeline document (as saved to the token file), up to the clock in replay; redacted."""
+        with self.lock:
+            return redact(self.tokens.document(self._token_window(self.clock.now())[0]))
 
     def delta(self, cursors: dict[str, int]) -> dict:
         """Stream items released since *cursors*; ``reset`` when the clock moved back past one."""

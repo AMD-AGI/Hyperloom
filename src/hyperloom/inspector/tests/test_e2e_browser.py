@@ -92,6 +92,7 @@ class TokensUi:
     chart: str
     agents: str
     models: str
+    download: str
     rate: str
     cache_hit: str
     total: str
@@ -103,6 +104,7 @@ TOKENS = TokensUi(
     chart="[data-testid=token-chart]",
     agents="[data-testid=token-agents]",
     models="[data-testid=token-models]",
+    download="[data-testid=token-download]",
     rate="[data-testid=token-rate]",
     cache_hit="[data-testid=token-cache-hit]",
     total="[data-testid=token-total]",
@@ -218,12 +220,14 @@ def test_llm_call_conversation_lookup(page):
     assert not any(FAKE_KEY in t for t in shown)
 
 
-def test_token_tab_chart(page):
+def test_token_tab_chart_and_download(page):
     page.click(UI.tab.format("tokens"))
     chart = page.locator(TOKENS.chart)
     expect(chart.locator("path")).not_to_have_count(0)
     expect(page.locator(TOKENS.agents)).to_contain_text("orchestration")
     expect(page.locator(TOKENS.agents)).to_contain_text("critic")
+    assert page.locator(TOKENS.download).get_attribute("href") == "api/tokens?download=1"
+    expect(page.locator(TOKENS.download)).to_have_text("Download receipt in JSON")
     # The server's names on the cards; what each means is a hover hint (below).
     expect(page.locator(TOKENS.cache_hit)).to_contain_text("Input cache hit rate")
     page.click(TOKENS.rate)

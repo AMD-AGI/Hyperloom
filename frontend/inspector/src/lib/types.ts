@@ -152,6 +152,9 @@ export interface TokenView {
   series: TokenSeries;
   /** Names and definitions, keyed by field (`input`, `cache_read`, `total`, ...) or figure (`cache_hit`, ...). */
   terms?: Record<string, TokenTerm>;
+  /** The token timeline file the Inspector keeps, or null when it keeps none. */
+  file: string | null;
+  saved_at: number | null;
 }
 
 /** `/api/snapshot` without streams, as the SSE `view` event sends it. */

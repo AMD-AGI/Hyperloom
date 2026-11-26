@@ -87,6 +87,15 @@ def add_inspect_arguments(insp: argparse.ArgumentParser) -> None:
         "~/.local/state/hyperloom-inspector.",
     )
     insp.add_argument("--no-history", action=SWITCH, help="Keep resource samples in memory only.")
+    insp.add_argument(
+        "--token-dir",
+        type=Path,
+        default=None,
+        help="Where the token timeline (every LLM call's tokens over time, with running totals) is kept as "
+        "<session>-<hash>.tokens.json, rewritten as the run goes; never inside the session. Default: --history-dir, "
+        "else the same default.",
+    )
+    insp.add_argument("--no-token-file", action=SWITCH, help="Track tokens in memory only (no file).")
 
 
 def run_inspect(args: argparse.Namespace) -> int:
@@ -102,10 +111,12 @@ def run_inspect(args: argparse.Namespace) -> int:
         return 2
     try:
         history_dir = None if args.no_history else (args.history_dir or default_history_dir())
+        token_dir = None if args.no_token_file else (args.token_dir or args.history_dir or default_history_dir())
         options = ServeOptions(
             host=args.host,
             port=args.port,
             history_dir=history_dir,
+            token_dir=token_dir,
             watch=WatchOptions(replay=args.replay, speed=args.speed),
         )
         serve(session_dir, options)

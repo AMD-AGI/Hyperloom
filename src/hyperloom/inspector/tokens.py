@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Token consumption over time: the LLM-call ledger merged with live specialist logs.
+"""Token consumption over time: the LLM-call ledger merged with live specialist logs, kept as a local JSON timeline.
 
 ``reports/trace/llm_calls.jsonl`` is the source of truth, but a Claude CLI specialist lands there only when it ends,
 every turn stamped with the same completion time. While it runs, its stream-JSON ``process.log`` already carries each
@@ -24,12 +24,19 @@ model. OpenAI-protocol rows count cached input inside ``input_tokens`` and reaso
 ``output_tokens``; both are taken out so the five kinds add up the same way for every provider. Which rows those are
 is told by their writer (:func:`_openai_usage`), not by the model's name alone: a model such as Kimi is served over
 either protocol.
+
+The timeline file is written atomically outside the session (see :func:`hyperloom.inspector.history.history_path`);
+the session directory stays read-only.
 """
 
 from __future__ import annotations
 
 import bisect
 import json
+import logging
+import os
+import time
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, NamedTuple
 
@@ -38,6 +45,9 @@ from hyperloom.inspector.graph import agent_node, task_node
 from hyperloom.inspector.model_names import normalize
 from hyperloom.inspector.token_terms import NO_MODEL, RECENT_SEC, TERMS
 
+log = logging.getLogger(__name__)
+
+SCHEMA = "hyperloom.inspector.token_timeline/v1"
 # Anthropic semantics: ``input`` excludes the cached prefix, so the five kinds add up to what was processed.
 KINDS = ("input", "cache_write", "cache_read", "output", "reasoning")
 _INPUT, _CACHE_WRITE, _CACHE_READ, _OUTPUT, _REASONING = KINDS
@@ -70,10 +80,16 @@ _MODEL_USAGE = {
 _OPENAI_WRITERS = ("proposal_scorer",)
 _OPENAI_WHEN_REASONING = ("critic",)
 _CODEX_MODELS = ("gpt-", "o1", "o3", "o4", "codex")
+NOTES = {
+    "t": "When the request was sent: ledger ts minus latency_ms; specialist turns from their stream-JSON log.",
+    "source": "ledger = reports/trace/llm_calls.jsonl; live = a running specialist's process.log, not yet in the "
+    "ledger; result = what a Claude CLI specialist's closing result line counts beyond its turns (side calls such as "
+    "WebSearch and WebFetch, which the ledger misses).",
+    "terms": "What each field and figure is called on the Tokens tab, and what it means.",
+}
 _STEPS = (5, 10, 15, 30, 60, 120, 300, 600, 900, 1800, 3600, 7200, 10800, 21600, 43200, 86400)
 MAX_BUCKETS = 180
-# Where an event comes from: the ledger (reports/trace/llm_calls.jsonl), a running specialist's process.log not yet in
-# the ledger, or a Claude CLI specialist's closing result line beyond its turns; and the status of a call that failed.
+# Where an event comes from (see NOTES["source"]), and the status of a call that failed.
 _SOURCE_LEDGER = "ledger"
 _SOURCE_LIVE = "live"
 _SOURCE_RESULT = "result"
@@ -92,6 +108,10 @@ def _int(value: Any) -> int | None:
         return int(value)
     except (TypeError, ValueError, OverflowError):
         return None
+
+
+def _iso(t: float) -> str:
+    return datetime.fromtimestamp(t, tz=timezone.utc).isoformat(timespec="milliseconds").replace("+00:00", "Z")
 
 
 def _result_output(result: dict) -> int | None:
@@ -430,8 +450,16 @@ class TokenTracker:
     """Merges ledger rows with live specialist turns into time-ordered token events; not thread-safe on its own
     (the watcher calls it under its lock)."""
 
-    def __init__(self, session_dir: Path) -> None:
+    def __init__(
+        self,
+        session_dir: Path,
+        path: Path | None = None,
+        write_every: float = 5.0,
+    ) -> None:
         self.session_dir = Path(session_dir)
+        self.path = Path(path) if path is not None else None
+        self.write_every = write_every
+        self.saved_at: float | None = None
         self._ledger: list[dict] = []
         self._logs: dict[str, StreamTurns] = {}
         self._tasks: dict[str, tuple[str, float | None, bool]] = {}  # node, start, ended
@@ -439,6 +467,8 @@ class TokenTracker:
         self._events: list[dict] = []
         self._times: list[float] = []
         self._dirty = True
+        self._unsaved = True
+        self._last_save = 0.0
 
     # ----- inputs --------------------------------------------------------------------------------------------
 
@@ -496,7 +526,7 @@ class TokenTracker:
         events.sort(key=lambda e: e["t"])
         self._cumulate(events)
         self._events, self._times = events, [e["t"] for e in events]
-        self._dirty = False
+        self._dirty, self._unsaved = False, True
 
     def _ledger_time(self, r: _LedgerRow) -> float | None:
         """When the ledger row's request was sent: its live turn's time, the task's start for a specialist's first
@@ -654,4 +684,57 @@ class TokenTracker:
                 "rows": rows,
             },
             "terms": TERMS,
+            "file": str(self.path) if self.path is not None else None,
+            "saved_at": self.saved_at,
         }
+
+    def document(self, upto: float | None = None) -> dict:
+        """The token timeline as saved: every event with its ISO time and running totals."""
+        events = self._upto(upto)
+        session_id = next((r.get("session_id") for r in self._ledger if r.get("session_id")), None)
+        rollups = _rollups(events)
+        return {
+            "schema": SCHEMA,
+            "session_id": session_id or self.session_dir.name,
+            "session_dir": str(self.session_dir),
+            "generated_at": _iso(time.time()),
+            "upto": upto,
+            "kinds": list(KINDS),
+            "notes": NOTES,
+            "terms": TERMS,
+            **rollups,
+            "events": [{"ts": _iso(e["t"]), **e} for e in events],
+        }
+
+    # ----- file ----------------------------------------------------------------------------------------------
+
+    def save(self, force: bool = False) -> bool:
+        """Rewrite the timeline file if the events changed, at most every ``write_every`` seconds unless *force*.
+
+        Written to a temp file and renamed, so a reader never sees a torn document. A write error disables the
+        file for the rest of the run instead of failing the watcher.
+        """
+        if self.path is None:
+            return False
+        self.events()
+        now = time.monotonic()
+        if not self._unsaved or (not force and now - self._last_save < self.write_every):
+            return False
+        tmp = self.path.with_name(self.path.name + ".tmp")
+        try:
+            self.path.parent.mkdir(parents=True, exist_ok=True)
+            tmp.write_text(dump(self.document()), encoding="utf-8")
+            os.replace(tmp, self.path)
+        except OSError as exc:
+            log.warning("inspector: token timeline %s disabled: %s", self.path, exc)
+            self.path = None
+            return False
+        self._unsaved, self._last_save, self.saved_at = False, now, time.time()
+        return True
+
+
+def dump(doc: dict) -> str:
+    """Indented header, one event per line: diffable, greppable, and still a single JSON document."""
+    head = json.dumps({k: v for k, v in doc.items() if k != "events"}, indent=2)
+    body = ",\n".join("    " + json.dumps(e, separators=(",", ":")) for e in doc["events"])
+    return f'{head[:-2]},\n  "events": [\n{body}\n  ]\n}}\n'
