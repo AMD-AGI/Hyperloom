@@ -67,6 +67,7 @@ from hyperloom.measure.farm import (
     built_roots,
     inherited_environment,
     lay_profile_patch,
+    patched_sources,
     patches_aiter_sources,
     place_farm,
     place_host_copies,
@@ -441,7 +442,9 @@ def _rebuilt_call(call: TestCall, environment: CompiledEnvironment, work: Path, 
             points.append(target)
     except (AttachmentError, FarmError, NativeLayError, OSError, ValueError) as exc:
         raise TestCallRefused(f"the compiled environment cannot be rebuilt here: {exc}") from exc
-    return dataclasses.replace(call, points=tuple(points), framework_changed=farm is not None)
+    return dataclasses.replace(
+        call, points=tuple(points), framework_changed=farm is not None, patched_sources=patched_sources(farm)
+    )
 
 
 def _builds(environment: CompiledEnvironment) -> SheetBuilds | None:

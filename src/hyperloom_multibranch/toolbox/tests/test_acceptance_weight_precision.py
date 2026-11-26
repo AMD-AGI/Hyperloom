@@ -972,8 +972,8 @@ async def test_a_rerun_of_a_parent_that_adds_a_word_read_two_ways_is_refused(tmp
         # A dotted value written with ``=`` takes no other word: the composed launch gives ``bar`` after the flag.
         ("--quantization fp8", _delta("--hf-overrides.foo=bar -qfp8", remove_args=("--quantization",))),
         # A one-dash word keeps its ``=``.
-        ("--quantization fp8", _delta("-cc.custom_ops+=none -qfp8", remove_args=("--quantization",))),
-        ("", _delta("-cc.custom_ops+=none")),
+        ("--quantization fp8", _delta("-cc.cudagraph_mode=NONE -qfp8", remove_args=("--quantization",))),
+        ("", _delta("-cc.cudagraph_mode=NONE")),
         ("", _delta("-tp 8 -O3 --max-num-seqs 64")),
         ("", _delta("-O 3 --max-num-seqs 64")),
         ("", _delta("-O=3.0 --max-num-seqs 64")),

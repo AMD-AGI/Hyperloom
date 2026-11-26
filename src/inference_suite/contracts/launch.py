@@ -13,11 +13,12 @@ from __future__ import annotations
 import hashlib
 import json
 import re
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from enum import Enum
 
 from hyperloom_common.contract_fields import ContractFields, field_names
+from inference_suite.argv import is_flag, normalize_argv
 from inference_suite.contracts.base_launch import (
     _ENV_NAME,
     DIGEST_PREFIX,
@@ -87,6 +88,13 @@ def _env_value(value: object, what: str) -> EnvValue:
     if isinstance(value, str):
         return value
     return Redacted(_FIELDS.known(value, ("sha256",), what).get("sha256"))
+
+
+def unlaunchable_flags(argv: Sequence[str]) -> tuple[str, ...]:
+    """The words of ``argv`` that read as flags but are not spelled as a :class:`LaunchArg`'s flag can be, so a launch
+    that adds them cannot be composed: a flag is ``-`` or ``--``, a letter or digit, then letters, digits, ``_``, ``.``
+    and ``-``; any other character belongs in its value (``--flag=value``)."""
+    return tuple(word for word in normalize_argv(argv) if is_flag(word) and not _FLAG.fullmatch(word))
 
 
 @dataclass(frozen=True)
@@ -458,4 +466,5 @@ __all__ = [
     "Removal",
     "ToolPins",
     "VersionCheck",
+    "unlaunchable_flags",
 ]

@@ -29,6 +29,7 @@ from hyperloom.measure.failures import (
     HUB_RATE_LIMITED,
     INFRA_ERROR_CLASSES,
     JIT_BUILD_TIMEOUT,
+    OUTPUT_TOO_LARGE,
     PROFILER_DIED,
     PROFILER_HUNG,
     PROFILE_REFUSED,
@@ -405,6 +406,16 @@ async def test_a_framework_of_another_version_than_the_patch_was_compiled_agains
     assert result.failure_reason == FRAMEWORK_VERSION_MISMATCH
     assert reported == [], "the image, not the node, carries the other version"
     assert executor.clock.waits == []
+
+
+async def test_an_output_larger_than_the_result_may_carry_ends_the_test_at_once() -> None:
+    verdict = classify_test_failure(returncode=1, error_class=OUTPUT_TOO_LARGE)
+    assert (verdict.failure_class, verdict.failure_reason) == (FailureClass.INFRA, OUTPUT_TOO_LARGE)
+    result, executor, reported = await _run(OUTPUT_TOO_LARGE)
+    assert len(executor.jobs) == 1 and len(result.attempts) == 1, "the next sandbox writes the same output"
+    assert result.validity is Validity.MEASUREMENT_FAILED and result.failure_class is FailureClass.INFRA
+    assert result.failure_reason == OUTPUT_TOO_LARGE
+    assert reported == [], "the test's output, not the node, was too large"
 
 
 JIT_REASON = f"{JIT_BUILD_TIMEOUT}: [TP0] Scheduler watchdog timeout (self.watchdog_timeout=300)"
