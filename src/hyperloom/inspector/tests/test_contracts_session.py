@@ -2,8 +2,8 @@
 # SPDX-License-Identifier: MIT
 
 """Contract tests, part 1 (session reader): the session files the Inspector finds and reads are
-the ones Hyperloom's own writers produce, and the task kinds and LLM components it maps to agents are the ones
-Hyperloom uses.
+the ones Hyperloom's own writers produce, and the names it maps to agents and views (task kinds, LLM components,
+bus topics, state keys, ledger and journal fields) are the ones Hyperloom uses.
 
 Each test writes a session artifact with the real producer (see :mod:`.producers`) or compares the Inspector's
 names with the producer's constants, then reads it the way the Inspector does. A failure means a producer changed
@@ -14,11 +14,16 @@ the marker comes off.
 
 from __future__ import annotations
 
+import json
+import os
+import subprocess  # nosec B404 - runs this interpreter on a fixed argv.
+import sys
 from pathlib import Path
 
 import pytest
 
-from hyperloom.inspector import graph
+from hyperloom.inspector import derive, graph
+from hyperloom.inspector.collectors import parse_ts
 from hyperloom.inspector.tests import producers
 from hyperloom.inspector.tests.conftest import FAKE_SECRET
 from hyperloom.inspector.tests.producers import contract_message
@@ -26,10 +31,28 @@ from hyperloom.inspector.tests.producers import contract_message
 pytestmark = pytest.mark.inspector_contract
 
 
+_WATCHER = "watcher.py"
+
+
 _REDACT = "redact.py"
 
 
 _GRAPH = "graph.py"
+
+
+def test_inspector_reads_the_paths_session_paths_names(tmp_path: Path) -> None:
+    from hyperloom.inference_optimizer.session import paths, session_paths
+    from hyperloom.inspector import session_layout
+
+    session = producers.new_session(tmp_path)
+    watcher = producers.watch(session)
+    pairs = {
+        "paths.shared_db_path_for": (watcher.db.path, paths.shared_db_path_for(session)),
+        "session_paths.llm_calls_path": (watcher._llm_tail.path, session_paths.llm_calls_path(session)),
+        "session_paths.state_path": (session / session_layout.STATE_FILE, session_paths.state_path(session)),
+    }
+    for producer, (inspector, written) in pairs.items():
+        assert inspector == written, contract_message(producer, _WATCHER, f"Inspector reads {inspector}, not {written}")
 
 
 async def test_coordinator_db_written_by_bus_and_registry_is_read(tmp_path: Path) -> None:
@@ -53,6 +76,43 @@ async def test_coordinator_db_written_by_bus_and_registry_is_read(tmp_path: Path
     payload = events[0]["payload"]
     assert payload["task_id"] == task.task_id and payload["result"]["output_throughput"] == 10.0, contract_message(
         "MessageBus.append_and_seq", where, f"payload not decoded: {payload!r}"
+    )
+
+
+async def test_session_with_private_ledger_is_read_or_reported(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setenv("HYPERLOOM_LEDGER_DIR", str(tmp_path / "ledgers"))
+    session = producers.new_session(tmp_path)
+    state = producers.new_state(operator_extra_env={"HF_TOKEN": "hf_" + "a" * 30})
+    async with producers.coordinator_db(session, state) as coord:
+        state.save(session)
+        await producers.run_task(coord, producers.TaskRun(kind="baseline", states=()))
+    watcher = producers.watch(session)
+    badges = [b["text"] for b in watcher.snapshot(include_streams=False)["badges"]]
+    assert watcher.tasks or any("ledger" in b for b in badges), contract_message(
+        "state_file.database_target / paths.db_path_for", "watcher.py", f"no tasks and no badge: {badges}"
+    )
+
+
+async def test_session_with_private_ledger_is_read(tmp_path: Path, monkeypatch) -> None:
+    # As a run starts: the manifest (with the session id the ledger is keyed by) before the Coordinator opens it.
+    from hyperloom.inference_optimizer.session import paths
+
+    monkeypatch.setenv("USER_DATA_PATH", str(tmp_path))
+    monkeypatch.setenv(paths.ENV_LEDGER_DIR, str(tmp_path / "ledgers"))
+    session = producers.new_session(tmp_path)
+    producers.write_manifest(session, "/models/Qwen3-8B")
+    state = producers.new_state(operator_extra_env={"HF_TOKEN": "hf_" + "a" * 30})
+    async with producers.coordinator_db(session, state) as coord:
+        state.save(session)
+        await producers.run_task(coord, producers.TaskRun(kind="baseline", states=()))
+    db_path = coord.path
+    watcher = producers.watch(session)
+    where = "watcher.py (session_layout.coordinator_db)"
+    assert watcher.db.path == paths.db_path_for(session) == db_path, contract_message(
+        "paths.db_path_for", where, f"Inspector reads {watcher.db.path}, Hyperloom writes {db_path}"
+    )
+    assert [t["kind"] for t in watcher.tasks] == ["baseline"], contract_message(
+        "paths.db_path_for", where, watcher.tasks
     )
 
 
@@ -163,6 +223,59 @@ def test_the_inspector_s_environment_fields_are_hyperloom_s(field: str) -> None:
     assert is_env_field(field) == _is_env_field(field), contract_message(
         "env_safety._is_env_field", _REDACT, f"{field!r}: {is_env_field(field)}"
     )
+
+
+def test_conversation_rows_written_by_append_conversation_are_found(tmp_path: Path) -> None:
+    session = producers.new_session(tmp_path)
+    producers.append_conversation_row(session, component="orchestration", call_id="c1", prompt="p", response="r")
+    producers.append_conversation_row(session, component="specialist", task_id="t1", turn=1, prompt="sp")
+    watcher = producers.watch(session)
+    by_call, by_turn = watcher.conversation(call_id="c1"), watcher.conversation(task_id="t1", turn="1")
+    where = "watcher.py (Watcher.conversation)"
+    assert by_call and by_call["prompt"] == "p" and by_call["response"] == "r", contract_message(
+        "conversation_trace.append_conversation", where, f"call c1: {by_call}"
+    )
+    assert by_turn and by_turn["prompt"] == "sp", contract_message(
+        "conversation_trace.append_conversation", where, f"task t1 turn 1: {by_turn}"
+    )
+
+
+def test_lock_and_pod_history_written_by_session_lock(tmp_path: Path) -> None:
+    session = producers.new_session(tmp_path)
+    lock = producers.acquire_lock(session)
+    try:
+        watcher = producers.watch(session)
+        status, history = watcher.optimizer_status(), watcher.pod_history
+    finally:
+        lock.release()
+    assert status == {"alive": True, "pid": os.getpid()}, contract_message("SessionLock.acquire", _WATCHER, status)
+    assert [h.get("pid") for h in history] == [os.getpid()] and history[0].get("hostname"), contract_message(
+        "SessionLock._append_pod_history", _WATCHER, f"pod history: {history}"
+    )
+
+
+def test_manifest_keys_the_inspector_reads_are_written(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setenv("USER_DATA_PATH", str(tmp_path))
+    session = producers.new_session(tmp_path)
+    written = producers.write_manifest(session, "/models/Qwen3-8B")
+    watcher = producers.watch(session)
+    watcher.manifest = recording = producers.RecordingDict(watcher.manifest)
+    info = watcher.run_info()
+    assert info["model"] == "Qwen3-8B", contract_message("manifest.build_manifest", _WATCHER, info["model"])
+    unwritten = sorted(recording.read - set(written))
+    assert not unwritten, contract_message("manifest.build_manifest", _WATCHER, f"read, never written: {unwritten}")
+
+
+def test_manifest_without_a_model_name_reads_no_other_key(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setenv("USER_DATA_PATH", str(tmp_path))
+    session = producers.new_session(tmp_path)
+    written = producers.write_manifest(session, "/models/Qwen3-8B")
+    watcher = producers.watch(session)
+    watcher.manifest = recording = producers.RecordingDict({k: v for k, v in written.items() if k != "model_name"})
+    watcher.state = {}
+    assert watcher.run_info()["model"] is None
+    unwritten = sorted(recording.read - set(written))
+    assert not unwritten, contract_message("manifest.build_manifest", _WATCHER, f"read, never written: {unwritten}")
 
 
 def test_artifact_index_leaves_out_private_session_dirs(tmp_path: Path) -> None:
@@ -306,7 +419,7 @@ def test_kinds_the_inspector_special_cases_are_produced_or_legacy() -> None:
 
     special = {"kernel_opt", "kernel", "framework_agent", "framework", "specialist", "baseline"}
     unknown = sorted(special - set(ACTION_CATALOGUE) - _LEGACY_KINDS)
-    assert not unknown, contract_message("action_surfaces.ACTION_CATALOGUE", "graph.py", unknown)
+    assert not unknown, contract_message("action_surfaces.ACTION_CATALOGUE", "graph.py, watcher.py", unknown)
 
 
 def test_llm_components_map_to_deliberate_nodes() -> None:
@@ -328,3 +441,148 @@ def test_llm_components_the_inspector_branches_on_are_written() -> None:
     branched = {*graph.LLM_ROLES}
     unknown = sorted(branched - VALID_COMPONENTS)
     assert not unknown, contract_message("llm_trace.VALID_COMPONENTS", "graph.py", unknown)
+
+
+def test_state_keys_are_shared_state_fields() -> None:
+    from dataclasses import fields
+
+    from hyperloom.orchestrator.state.shared_state import SharedState
+
+    unwritten = sorted(set(derive.STATE_KEYS) - {f.name for f in fields(SharedState)})
+    assert not unwritten, contract_message("SharedState", "derive.py (STATE_KEYS)", f"never written: {unwritten}")
+
+
+def test_bus_vocabulary() -> None:
+    from hyperloom.orchestrator.bus.message_bus import ROLE_SUBSCRIPTIONS, TOPIC_ALLOWLIST
+
+    assert "delegated_result" in TOPIC_ALLOWLIST, contract_message(
+        "message_bus.TOPIC_ALLOWLIST", "watcher.py (_poll_db)", sorted(TOPIC_ALLOWLIST)
+    )
+    known = {graph.COORDINATOR, *graph.LLM_ROLES}
+    assert set(ROLE_SUBSCRIPTIONS) <= known, contract_message(
+        "message_bus.ROLE_SUBSCRIPTIONS", "graph.py (LLM_ROLES, agent_node)", sorted(set(ROLE_SUBSCRIPTIONS) - known)
+    )
+
+
+async def test_task_history_written_by_registry_drives_progress(tmp_path: Path) -> None:
+    session = producers.new_session(tmp_path)
+    notes = producers.variant_progress_notes(["a", "b"], ["succeeded", "succeeded"], [100.0, 110.0])
+    async with producers.coordinator_db(session) as coord:
+        await producers.run_task(coord, producers.TaskRun(kind="explore", progress=notes))
+    row = producers.watch(session).tasks[0]
+    progress = derive.task_progress(row["history"], parse_ts)
+    labels = [(u["label"], u["status"], u["output_throughput"]) for u in progress.get("units", [])]
+    assert labels == [("a", "succeeded", 100.0), ("b", "succeeded", 110.0)], contract_message(
+        "TaskRegistry.record_progress / _grid_runner._variant_progress_note", "derive.py (task_progress)", progress
+    )
+
+
+def test_state_json_written_by_shared_state_drives_the_summary(tmp_path: Path) -> None:
+    session = producers.new_session(tmp_path)
+    state = producers.new_state(model_name="m")
+    state.record_specialist_round({"task_id": "t1", "domain": "d", "reason": "r", "summary": "s", "proposals_total": 1})
+    state.save(session)
+    summary = producers.watch(session).summary_at()
+    rounds = summary["specialist_rounds"]
+    assert rounds[0]["task_id"] == "t1" and rounds[0]["completed_at"], contract_message(
+        "_PhaseStateMixin.record_specialist_round", "derive.py (state_summary)", rounds
+    )
+
+
+def test_journal_written_by_journal_drives_best_and_baseline(tmp_path: Path) -> None:
+    from hyperloom.inference_optimizer.session.optimization_journal import KIND_BASELINE, OUTCOME_KEEP
+
+    session = producers.new_session(tmp_path)
+    base = {"phase": "BASELINE", "iter": 0, "kind": KIND_BASELINE, "change": "baseline", "outcome": OUTCOME_KEEP}
+    keep = {"phase": "EXPLORE", "iter": 1, "kind": "param", "change": "--x 1", "outcome": OUTCOME_KEEP}
+    base.update(throughput_after=100.0, ts="2026-11-25T10:00:00Z")
+    keep.update(throughput_after=120.0, ts="2026-11-25T11:00:00Z")
+    producers.write_journal(session, [base, keep])
+    watcher = producers.watch(session)
+    where = "derive.py (throughput_series, best_throughput)"
+    series = [(e["kind"], e["throughput"]) for e in watcher.streams["journal"].items]
+    assert series == [("baseline", 100.0), ("param", 120.0)], contract_message("Journal.append_entry", where, series)
+    best = watcher._best_at({})
+    assert (best["hot_tput"], best["action"]) == (120.0, "--x 1"), contract_message("OUTCOME_KEEP", where, best)
+
+
+def test_journal_fields_the_inspector_reads_are_journal_entry_fields(tmp_path: Path) -> None:
+    from dataclasses import fields
+
+    from hyperloom.inference_optimizer.session.optimization_journal import JournalEntry
+
+    session = producers.new_session(tmp_path)
+    journal = producers.write_journal(
+        session, [{"phase": "EXPLORE", "iter": 1, "kind": "param", "change": "-x", "outcome": "KEEP"}]
+    )
+    entries = [producers.RecordingDict(e.to_dict()) for e in journal.entries]
+    derive.throughput_series({"entries": entries})
+    unknown = sorted(entries[0].read - {f.name for f in fields(JournalEntry)})
+    assert not unknown, contract_message("JournalEntry", "derive.py (throughput_series)", f"never written: {unknown}")
+
+
+def _write_ledger(session: Path) -> None:
+    counts = {"input_tokens": 10, "output_tokens": 5}
+    producers.append_ledger_row(session, component="orchestration", call_id="c1", latency_ms=2000, **counts)
+    producers.append_ledger_row(session, component="critic", model="gpt-5", reasoning_output_tokens=2, **counts)
+    producers.append_ledger_row(session, component="specialist", task_id="t-sp", turn=1, model="m", **counts)
+    producers.append_ledger_row(session, component="critic", status="error", error_type="Timeout")
+
+
+def test_ledger_rows_written_by_append_llm_call_are_counted(tmp_path: Path) -> None:
+    session = producers.new_session(tmp_path)
+    _write_ledger(session)
+    watcher = producers.watch(session)
+    llm = derive.llm_summary(watcher.streams["llm_call"].items)
+    assert llm["critic"]["errors"] == 1 and llm["orchestration"]["latency_ms_avg"] == 2000, contract_message(
+        "LLMCallRecord.status / latency_ms", "derive.py (llm_summary)", llm
+    )
+
+
+def test_ledger_fields_the_inspector_reads_are_in_the_closed_schema(tmp_path: Path) -> None:
+    from hyperloom.inference_optimizer.trace.llm_trace import _ROW_FIELDS
+
+    session = producers.new_session(tmp_path)
+    _write_ledger(session)
+    path = session / "reports" / "trace" / "llm_calls.jsonl"
+    rows = [producers.RecordingDict(json.loads(line)) for line in path.read_text(encoding="utf-8").splitlines()]
+    derive.llm_summary(rows)
+    read = set().union(*(r.read for r in rows))
+    unknown = sorted(read - _ROW_FIELDS)
+    assert not unknown, contract_message("llm_trace._ROW_FIELDS", "derive.py", unknown)
+
+
+def test_ledger_status_vocabulary() -> None:
+    from hyperloom.inference_optimizer.trace.llm_trace import LLM_STATUS_ERROR, LLM_STATUS_OK, VALID_STATUSES
+
+    assert VALID_STATUSES == {LLM_STATUS_OK, LLM_STATUS_ERROR} == {"ok", "error"}, contract_message(
+        "llm_trace.VALID_STATUSES", "derive.py (llm_summary)", sorted(VALID_STATUSES)
+    )
+
+
+_SRC = Path(__file__).resolve().parents[3]
+
+
+def _loaded_modules(*imports: str) -> list[str]:
+    """The modules a fresh interpreter has loaded after importing *imports*."""
+    probe = f"import json, sys\nimport {', '.join(imports)}\nprint(json.dumps(sorted(sys.modules)))"
+    env = {**os.environ, "PYTHONPATH": str(_SRC)}
+    out = subprocess.run([sys.executable, "-c", probe], capture_output=True, text=True, env=env, check=True).stdout
+    return json.loads(out)
+
+
+def _third_party(modules: list[str]) -> set[str]:
+    """The top-level packages of *modules* that are neither the standard library's nor this source tree's."""
+    ours = {p.name for p in _SRC.iterdir() if p.is_dir()}
+    tops = {m.split(".")[0] for m in modules}
+    return {t for t in tops if t not in sys.stdlib_module_names and t not in ours and not t.startswith("_")}
+
+
+def test_the_inspector_needs_no_package_the_hyperloom_command_does_not() -> None:
+    # The Inspector runs with the Hyperloom it ships with: it may import that, never a package beyond what the
+    # ``hyperloom`` command already needs.
+    inspector = _third_party(_loaded_modules("hyperloom.inspector.watcher"))
+    hyperloom = _third_party(_loaded_modules("hyperloom.inference_optimizer.cli"))
+    assert inspector <= hyperloom, contract_message(
+        "(the Inspector's own promise)", "watcher.py", f"needs beyond the hyperloom command: {inspector - hyperloom}"
+    )

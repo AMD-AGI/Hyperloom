@@ -4,7 +4,7 @@
 """Session artifacts written by Hyperloom's own writers, for the Inspector's contract tests.
 
 Each helper calls the producer that writes the artifact in a real ``hyperloom optimize`` session (the message bus,
-the task registry, the manifest, ``SharedState``) and never
+the task registry, the LLM-call ledger, the journal, the session lock, the manifest, ``SharedState``) and never
 spells the artifact's format itself. A contract test reads what a helper wrote with the Inspector's reader, so a
 change to a producer's format fails that test instead of passing a hand-written fixture.
 
@@ -28,7 +28,7 @@ from unittest import mock
 
 import pytest
 
-#: The session id the helpers stamp.
+#: The session id the helpers stamp on ledger and conversation rows.
 SESSION_ID = "contract-session"
 
 #: The model the helpers' sessions are made for.
@@ -69,6 +69,35 @@ def contract_message(producer: str, inspector_file: str, detail: str) -> str:
         f"{detail}\nProducer: {producer}. Inspector reader to update: src/hyperloom/inspector/{inspector_file} "
         "(then this contract test)."
     )
+
+
+def watch(session_dir: Path) -> Any:
+    """The Inspector's watcher over *session_dir*, polled once."""
+    from hyperloom.inspector.watcher import Watcher, WatchOptions
+
+    watcher = Watcher(session_dir, WatchOptions())
+    watcher.poll()
+    return watcher
+
+
+class RecordingDict(dict):
+    """A dict that records every key read from it, so a test can list the keys an Inspector reader asks for."""
+
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
+        super().__init__(*args, **kwargs)
+        self.read: set[str] = set()
+
+    def get(self, key: Any, default: Any = None) -> Any:
+        self.read.add(key)
+        return super().get(key, default)
+
+    def __getitem__(self, key: Any) -> Any:
+        self.read.add(key)
+        return super().__getitem__(key)
+
+    def __contains__(self, key: object) -> bool:
+        self.read.add(key)
+        return super().__contains__(key)
 
 
 def new_session(root: Path) -> Path:
@@ -150,6 +179,52 @@ async def announce_result(coord: Coordinator, task: Any, result: dict, error: st
     await coord.bus.append_and_seq(_MESSAGE_BUS.Message.new("coordinator", "*", "delegated_result", announcement))
 
 
+def variant_progress_notes(names: list[str], statuses: list[str], throughputs: list[float | None]) -> list[dict]:
+    """The grid runner's progress notes for variants that landed (``_grid_runner._variant_progress_note``)."""
+    grid_base = Upstream("hyperloom.orchestrator.actions.executors.grid._grid_base")
+    progress_note = Upstream("hyperloom.orchestrator.actions.executors.grid._grid_runner")._variant_progress_note
+    grid = [grid_base.GridVariant(name=n, extra_server_args="", extra_envs={}) for n in names]
+    landed = [
+        grid_base.VariantResult(name=n, extra_server_args="", extra_envs={}, status=s, output_throughput=t)
+        for n, s, t in zip(names, statuses, throughputs)
+    ]
+    return [progress_note(grid, landed, i) for i in range(len(names))]
+
+
+# ----- ledgers under reports/trace -------------------------------------------------------------------------------
+
+
+def append_ledger_row(session_dir: Path, **fields: Any) -> None:
+    """One ``reports/trace/llm_calls.jsonl`` row through ``append_llm_call`` (closed schema validated)."""
+    record = _LLM_TRACE.LLMCallRecord(session_id=SESSION_ID, **fields)
+    _LLM_TRACE.append_llm_call(session_dir=session_dir, record=record)
+
+
+def append_conversation_row(session_dir: Path, **fields: Any) -> None:
+    """One ``reports/trace/conversations.jsonl`` row through ``append_conversation`` (closed schema validated)."""
+    trace = Upstream("hyperloom.inference_optimizer.trace.conversation_trace")
+    trace.append_conversation(session_dir=session_dir, record=trace.ConversationRecord(session_id=SESSION_ID, **fields))
+
+
+# ----- session files ---------------------------------------------------------------------------------------------
+
+
+def write_journal(session_dir: Path, entries: list[dict]) -> Any:
+    """``reports/optimization_journal.json`` through ``Journal.load_or_create`` and ``append_entry``."""
+    module = Upstream("hyperloom.inference_optimizer.session.optimization_journal")
+    journal = module.Journal.load_or_create(
+        session_dir, module.Journal(session_id=SESSION_ID, model="m", hardware="MI355X")
+    )
+    for entry in entries:
+        journal.append_entry(module.JournalEntry(**entry))
+    return journal
+
+
+def acquire_lock(session_dir: Path) -> Any:
+    """``runtime/optimizer.lock`` and ``runtime/pod_history.jsonl`` through ``SessionLock.acquire``; release it."""
+    return Upstream("hyperloom.inference_optimizer.session.lock").SessionLock(session_dir).acquire()
+
+
 def write_manifest(session_dir: Path, model: str) -> dict:
     """``manifest.json`` through ``manifest.write_manifest``, for a run of *model*."""
     write = Upstream("hyperloom.inference_optimizer.session.manifest").write_manifest
@@ -160,3 +235,21 @@ def write_manifest(session_dir: Path, model: str) -> dict:
 def new_state(**fields: Any) -> Any:
     """A ``SharedState`` as the Coordinator starts one (about 8 s to import cold)."""
     return Upstream("hyperloom.orchestrator.state.shared_state").SharedState(session_id=SESSION_ID, **fields)
+
+
+# ----- specialists ------------------------------------------------------------------------------------------------
+
+
+def specialist_backend_error(**ending: Any) -> str:
+    """The failure reason the specialist runner records for a subprocess that ended as *ending*
+    (``SpecialistSubprocessResult`` fields), through ``runner._subprocess_backend_error``."""
+    result = Upstream("hyperloom.orchestrator.specialists.subprocess_types").SpecialistSubprocessResult(**ending)
+    return Upstream("hyperloom.orchestrator.specialists.runner")._subprocess_backend_error(result)
+
+
+def producer_says_failed(runner_status: str, reason: str) -> bool:
+    """Whether ``failure_class.classify_specialist_failure`` calls the specialist's ending a failure."""
+    failure_class = Upstream("hyperloom.orchestrator.specialists.failure_class")
+    ftype, _retry = failure_class.classify_specialist_failure(runner_status, reason)
+    kinds = failure_class.SpecialistFailureType
+    return ftype in (kinds.TIMEOUT, kinds.STALE_HEARTBEAT, kinds.CRASH)
