@@ -491,19 +491,39 @@ async def test_task_history_written_by_registry_drives_progress(tmp_path: Path) 
     async with producers.coordinator_db(session) as coord:
         await producers.run_task(coord, producers.TaskRun(kind="explore", progress=notes))
     row = producers.watch(session).tasks[0]
-    progress = derive.task_progress(row["history"], parse_ts)
+    progress = derive.task_progress(row["history"], None, parse_ts)
     labels = [(u["label"], u["status"], u["output_throughput"]) for u in progress.get("units", [])]
     assert labels == [("a", "succeeded", 100.0), ("b", "succeeded", 110.0)], contract_message(
         "TaskRegistry.record_progress / _grid_runner._variant_progress_note", "derive.py (task_progress)", progress
     )
 
 
+async def test_task_history_written_by_registry_drives_replay(tmp_path: Path) -> None:
+    session = producers.new_session(tmp_path)
+    async with producers.coordinator_db(session) as coord:
+        task = await producers.run_task(coord, producers.TaskRun(kind="explore"))
+    row = producers.watch(session).tasks[0]
+    created, running, ended = (parse_ts(x) for x in (row["created_at"], task.history[0]["ts"], task.updated_at))
+    where = "derive.py (task_state_at)"
+    assert derive.task_state_at(row, created - 1, parse_ts) is None, contract_message("Task.created_at", where, row)
+    states = [derive.task_state_at(row, t, parse_ts)["state"] for t in (created, running, ended)]
+    assert states == ["queued", "running", "succeeded"], contract_message("TaskRegistry.transition", where, states)
+
+
 def test_state_json_written_by_shared_state_drives_the_summary(tmp_path: Path) -> None:
+    from hyperloom.inspector.watcher import _phases_at
+
     session = producers.new_session(tmp_path)
     state = producers.new_state(model_name="m")
+    producers.record_phase(state, "BASELINE", "start", 1000.0)
+    producers.record_phase(state, "EXPLORE", "baseline measured", 2000.0)
     state.record_specialist_round({"task_id": "t1", "domain": "d", "reason": "r", "summary": "s", "proposals_total": 1})
     state.save(session)
-    summary = producers.watch(session).summary_at()
+    summary = producers.watch(session).summary_at(0)
+    history = summary["phase_history"]
+    assert _phases_at(summary, 1500.0)["phase"] == "BASELINE", contract_message(
+        "phase_chain.make_history_row / machine_state.record_phase_transition", "watcher.py (_phases_at)", history
+    )
     rounds = summary["specialist_rounds"]
     assert rounds[0]["task_id"] == "t1" and rounds[0]["completed_at"], contract_message(
         "_PhaseStateMixin.record_specialist_round", "derive.py (state_summary)", rounds
@@ -519,12 +539,16 @@ def test_journal_written_by_journal_drives_best_and_baseline(tmp_path: Path) -> 
     base.update(throughput_after=100.0, ts="2026-11-25T10:00:00Z")
     keep.update(throughput_after=120.0, ts="2026-11-25T11:00:00Z")
     producers.write_journal(session, [base, keep])
-    watcher = producers.watch(session)
-    where = "derive.py (throughput_series, best_throughput)"
+    watcher = producers.watch(session, replay=True)
+    where = "derive.py (throughput_series, best_throughput) and watcher.py (_baseline_by)"
     series = [(e["kind"], e["throughput"]) for e in watcher.streams["journal"].items]
     assert series == [("baseline", 100.0), ("param", 120.0)], contract_message("Journal.append_entry", where, series)
-    best = watcher._best_at({})
+    best = watcher._best_at({}, None)
     assert (best["hot_tput"], best["action"]) == (120.0, "--x 1"), contract_message("OUTCOME_KEEP", where, best)
+    at_base = parse_ts(base["ts"])
+    assert not watcher._baseline_by(at_base - 1) and watcher._baseline_by(at_base), contract_message(
+        "optimization_journal.KIND_BASELINE", where, series
+    )
 
 
 def test_journal_fields_the_inspector_reads_are_journal_entry_fields(tmp_path: Path) -> None:

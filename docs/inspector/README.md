@@ -2,7 +2,7 @@
 myst:
     html_meta:
         "description": "Hyperloom Inspector: a read-only web view of a live or finished Hyperloom session. How to run it locally or in a pod, and what it shows."
-        "keywords": "Hyperloom, Inspector, session, observability, Kubernetes, port-forward, AMD GPU, ROCm"
+        "keywords": "Hyperloom, Inspector, session, observability, replay, Kubernetes, port-forward, AMD GPU, ROCm"
 ---
 # Hyperloom Inspector
 
@@ -30,6 +30,7 @@ Options:
 - `--session-dir DIR`: a session directory, or a directory above sessions (`$USER_DATA_PATH/<model>`), where the
   newest session is used.
 - `--host`, `--port`: bind address and port. Default `127.0.0.1:8765`.
+- `--replay [--speed N]`: replay the session on a virtual clock from its first record. Default speed 1.0.
 - `--verbose`, `-v`: `hyperloom inspect` only. `-v` logs INFO messages; `-vv` adds DEBUG, with a line per HTTP
   request.
 
@@ -52,7 +53,9 @@ kubectl -n <namespace> port-forward deploy/<deployment> 8765:8765
 ```
 
 `src/hyperloom/common` holds the secret masking the Inspector applies before it serves anything, and
-`src/hyperloom_common` what that masking imports.
+`src/hyperloom_common` what that masking imports. For a replay
+next to the live view, start a second Inspector with `--port 8766 --replay --speed 600` and forward `8766:8766` as
+well.
 
 A session whose operator pins hold a credential keeps its coordinator database outside the session directory, in the
 running account's private ledger: below `HYPERLOOM_LEDGER_DIR`, else below `TMPDIR`. To see its tasks, run the
@@ -66,6 +69,7 @@ reports an error badge saying that the tasks cannot be read, rather than an empt
   another account's private ledger.
 - **Artifacts**: every file grouped by the node and task that produced it, read as JSON, JSONL, text and
   live-following logs, and a side-by-side diff of two text files. Profiler traces show metadata only.
+- **Replay** with speed control.
 
 ## Security
 

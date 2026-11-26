@@ -3,15 +3,16 @@
 
 """HTTP + Server-Sent Events front of the watcher. Read-only; binds to loopback by default.
 
-Endpoints (all GET):
+Endpoints (all GET unless noted):
 
 * ``/api/snapshot``: the full view at the current clock, streams included.
-* ``/api/stream``: SSE. ``hello`` first, then ``items`` (stream deltas) and ``view`` (views without
-  streams, when something changed).
-* ``/api/artifacts``: the artifact index.
+* ``/api/stream``: SSE. ``hello`` first, then ``items`` (stream deltas), ``view`` (views without
+  streams, when something changed) and ``reset`` (a replay scrub moved back; refetch the snapshot).
+* ``/api/artifacts``: the artifact index (replay: released by mtime).
 * ``/api/artifact?path=&mode=&offset=&limit=``: one artifact's typed payload.
 * ``/api/diff?a=&b=``: side-by-side diff of two text artifacts.
 * ``/api/conversation?call_id=``: prompt/response of one LLM call.
+* ``POST /api/replay?t=&speed=&paused=``: move the replay clock.
 
 The Host header must name a loopback address or the bound host, so a page on
 another origin can't reach the server through DNS rebinding.
@@ -124,6 +125,26 @@ class Handler(BaseHTTPRequestHandler):
         except ValueError as exc:
             return self._error(HTTPStatus.BAD_REQUEST, str(exc))
 
+    def do_POST(self) -> None:
+        if not self._host_ok():
+            return self._error(HTTPStatus.FORBIDDEN, "host not allowed")
+        route = urlsplit(self.path).path
+        if route != "/api/replay":
+            return self._error(HTTPStatus.NOT_FOUND, "not found")
+        clock = self.server.watcher.clock
+        if not clock.replay:
+            return self._error(HTTPStatus.CONFLICT, "not in replay mode")
+        q = self._query()
+        try:
+            t = float(q["t"]) if q.get("t") else None
+            speed = float(q["speed"]) if q.get("speed") else None
+        except ValueError:
+            return self._error(HTTPStatus.BAD_REQUEST, "t and speed must be numbers")
+        paused = {"1": True, "true": True, "0": False, "false": False}.get(q.get("paused", "").lower())
+        with self.server.watcher.lock:
+            clock.seek(t, speed=speed, paused=paused)
+        return self._json(clock.info())
+
     def _artifact(self, q: dict[str, str]) -> dict:
         try:
             offset = int(q["offset"]) if q.get("offset") else None
@@ -153,11 +174,14 @@ class Handler(BaseHTTPRequestHandler):
             while not self.server.closing:
                 time.sleep(w.poll_sec)
                 delta = w.delta(cursors)
+                if delta.get("reset"):
+                    self._event("reset", delta)
+                    return
                 sent = False
                 if delta["items"]:
                     self._event("items", delta)
                     sent = True
-                if delta["version"] != version:
+                if delta["version"] != version or w.clock.replay:
                     version = delta["version"]
                     self._event("view", w.snapshot(include_streams=False))
                     sent = True
@@ -198,7 +222,8 @@ def serve(session_dir: Path, options: ServeOptions | None = None) -> None:
     watcher.start()
     httpd = InspectorServer((options.host, options.port), watcher)
     shown = "localhost" if _is_unspecified(options.host) else options.host
-    print(f"Hyperloom Inspector (live): http://{shown}:{options.port}/api/snapshot for {session_dir}", flush=True)
+    mode = "replay" if options.watch.replay else "live"
+    print(f"Hyperloom Inspector ({mode}): http://{shown}:{options.port}/api/snapshot for {session_dir}", flush=True)
     try:
         httpd.serve_forever(poll_interval=0.5)
     except KeyboardInterrupt:

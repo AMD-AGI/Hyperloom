@@ -6,6 +6,7 @@ from __future__ import annotations
 import pytest
 
 from hyperloom.inspector import derive
+from hyperloom.inspector.collectors import parse_ts
 
 
 @pytest.mark.parametrize(
@@ -51,6 +52,21 @@ def test_task_health_running_vs_stalled():
     assert derive.task_health(running, None, None, 30, 600)["health"] == "running"
     assert derive.task_health(running, None, None, 1200, 600) == {"health": "stalled", "reason": "no output for 20 min"}
     assert derive.task_health({"state": "cancelled"}, None, None, None, 600)["health"] == "cancelled"
+
+
+def test_task_state_at_walks_history():
+    task = {
+        "created_at": "1970-01-01T00:00:10Z",
+        "history": [
+            {"to": "running", "ts": "1970-01-01T00:00:20Z"},
+            {"to": "succeeded", "ts": "1970-01-01T00:00:30Z"},
+        ],
+    }
+    assert derive.task_state_at(task, 5, parse_ts) is None
+    assert derive.task_state_at(task, 15, parse_ts)["state"] == "queued"
+    assert derive.task_state_at(task, 25, parse_ts)["state"] == "running"
+    at = derive.task_state_at(task, 30, parse_ts)
+    assert at["state"] == "succeeded" and at["updated_at"] == "1970-01-01T00:00:30Z"
 
 
 def test_llm_summary_aggregates_per_component():
@@ -120,7 +136,7 @@ def test_task_progress_units_current_step_and_failure_reason():
         note(5, unit="variant_step", label="mtp:benchmark", status="started", index=1, total=1),
     ]
     outcomes = [{"variant_name": "k7", "outcome": "FAILED", "reason": "warmup_failed", "stage": "warmup"}]
-    out = derive.task_progress(history, lambda t: t, outcomes)
+    out = derive.task_progress(history, None, lambda t: t, outcomes)
     assert out["current"] == {
         "unit": "variant_step",
         "label": "mtp:benchmark",
@@ -132,4 +148,5 @@ def test_task_progress_units_current_step_and_failure_reason():
     assert [(u["label"], u["status"]) for u in out["units"]] == [("k7", "failed"), ("q4", "succeeded")]
     assert out["units"][0]["reason"] == "warmup_failed" and out["failed"] == 1
     assert out["units"][1]["output_throughput"] == 1689.2 and out["units"][1]["earlier"] == [1052.4]
-    assert derive.task_progress([{"to": "running", "ts": 1}], lambda t: t) == {}
+    assert derive.task_progress(history, 3.5, lambda t: t)["current"]["label"] == "k7"
+    assert derive.task_progress([{"to": "running", "ts": 1}], None, lambda t: t) == {}

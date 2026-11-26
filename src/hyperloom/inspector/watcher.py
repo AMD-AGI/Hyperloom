@@ -1,13 +1,15 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Polls a session directory and keeps what a client needs.
+"""Polls a session directory and keeps what a client needs, in live or replay mode.
 
 Two kinds of data come out of here:
 
 * **Streams** are append-only and time-stamped (bus events, LLM calls, journal
   entries, critic verdicts). Each is kept sorted by time; a
   client holds a per-stream count and receives the items released since then.
+  In replay a stream releases an item once the virtual clock passes its time,
+  so a backward scrub shrinks the released prefix and the client gets a reset.
 * **Views** are recomputed at the clock on every request (run info, tasks with
   health, badges).
 
@@ -48,9 +50,10 @@ from hyperloom.inspector.session_layout import STATE_FILE, coordinator_db, varia
 log = logging.getLogger(__name__)
 
 STREAMS = ("event", "llm_call", "journal", "review")
-# Folders of a session directory and the task state the watcher looks for.
+# Folders of a session directory and the task kind and state the watcher looks for.
 _REPORTS_DIR = "reports"
 _RUNS_DIR = "runs"
+_BASELINE_KIND = "baseline"
 _RUNNING_STATE = "running"
 _TS_KEYS = ("ts_unix", "ts", "recorded_unix", "completed_at", "started_at", "start_time", "created_at")
 _INDEX_EVERY_SEC = 10.0
@@ -65,15 +68,51 @@ def item_time(rec: dict) -> float | None:
 
 
 class Clock:
-    """Wall time."""
+    """Wall time in live mode; in replay, virtual time that runs at *speed* from the session start."""
+
+    def __init__(self, replay: bool = False, speed: float = 1.0) -> None:
+        self.replay = replay
+        self.speed = speed
+        self.start: float | None = None
+        self.end: float | None = None
+        self._anchor_virtual = 0.0
+        self._anchor_wall = time.monotonic()
+        self.paused = False
 
     def now(self) -> float:
-        return time.time()
+        if not self.replay:
+            return time.time()
+        if self.start is None:
+            return 0.0
+        t = self._anchor_virtual
+        if not self.paused:
+            t += (time.monotonic() - self._anchor_wall) * self.speed
+        return min(t, self.end) if self.end is not None else t
+
+    def set_range(self, start: float | None, end: float | None) -> None:
+        if not self.replay or start is None:
+            return
+        if self.start is None:
+            self._anchor_virtual, self._anchor_wall = start, time.monotonic()
+        self.start, self.end = start, end
+
+    def seek(self, t: float | None = None, speed: float | None = None, paused: bool | None = None) -> None:
+        current = self.now()
+        if speed is not None and speed > 0:
+            self.speed = speed
+        if paused is not None:
+            self.paused = paused
+        self._anchor_virtual = current if t is None else max(self.start or t, t)
+        self._anchor_wall = time.monotonic()
 
     def info(self) -> dict:
         return {
-            "mode": "live",
+            "mode": "replay" if self.replay else "live",
             "now": self.now(),
+            "start": self.start,
+            "end": self.end,
+            "speed": self.speed,
+            "paused": self.paused,
         }
 
 
@@ -113,9 +152,12 @@ class Stream:
 
 @dataclass(frozen=True)
 class WatchOptions:
-    """How a :class:`Watcher` reads the session: it polls every *poll_sec* seconds, and a task whose log is older than
-    *stall_after_sec* seconds is stalled."""
+    """How a :class:`Watcher` reads the session: on the wall clock, or with *replay* on a virtual clock running at
+    *speed*; it polls every *poll_sec* seconds, and a task whose log is older than *stall_after_sec* seconds is
+    stalled."""
 
+    replay: bool = False
+    speed: float = 1.0
     poll_sec: float = 1.5
     stall_after_sec: float = 900.0
 
@@ -130,7 +172,7 @@ class Watcher:
     ) -> None:
         options = options or WatchOptions()
         self.session_dir = Path(session_dir)
-        self.clock = Clock()
+        self.clock = Clock(replay=options.replay, speed=options.speed)
         self.poll_sec = options.poll_sec
         self.stall_after_sec = options.stall_after_sec
         self.lock = threading.RLock()
@@ -178,6 +220,7 @@ class Watcher:
             if not self._last_index or (changed and now - self._last_index > _INDEX_EVERY_SEC):
                 self.artifact_index = artifacts_mod.index(self.session_dir, self.task_nodes())
                 self._last_index = now
+            self._update_range()
             if changed:
                 self.version += 1
 
@@ -232,6 +275,19 @@ class Watcher:
             self.tasks, changed = tasks, True
         return changed
 
+    def _update_range(self) -> None:
+        times = [s.times[0] for s in self.streams.values() if s.times]
+        times += [t for t in (parse_ts(x.get("created_at")) for x in self.tasks) if t is not None]
+        start = parse_ts(self.state.get("start_ts")) or (min(times) if times else None)
+        last = self._last_activity()
+        self.clock.set_range(start, last if last is not None else start)
+
+    def _last_activity(self) -> float | None:
+        """The run's last recorded activity: its streams, and its tasks' updates."""
+        ends = [s.times[-1] for s in self.streams.values() if s.times]
+        ends += [t for t in (parse_ts(x.get("updated_at")) for x in self.tasks) if t is not None]
+        return max(ends, default=None)
+
     # ----- views ---------------------------------------------------------------------------------------------
 
     def task_nodes(self) -> dict[str, str]:
@@ -242,20 +298,22 @@ class Watcher:
         reasons = {r.get("task_id"): r.get("reason") for r in self.state.get("specialist_rounds") or []}
         out = []
         for task in self.tasks:
-            t = dict(task)
+            t = derive.task_state_at(task, clock, parse_ts) if self.clock.replay else dict(task)
+            if t is None:
+                continue
             res = self.results.get(t["task_id"])
             result = res["result"] if res and (res["t"] is None or res["t"] <= clock) else None
-            log_age = self._log_age(t) if t.get("state") == _RUNNING_STATE else None
+            log_age = self._log_age(t) if not self.clock.replay and t.get("state") == _RUNNING_STATE else None
             reason = reasons.get(t["task_id"]) if t.get("state") == "succeeded" else None
             health = derive.task_health(t, result, reason, log_age, self.stall_after_sec)
             node = graph.task_node(t)
             label = graph.specialist_domain(t) if t.get("kind") == "specialist" else t.get("kind")
-            out.append({**t, **health, "node": node, "label": label, "progress": self._progress(t, result)})
+            out.append({**t, **health, "node": node, "label": label, "progress": self._progress(t, result, clock)})
         return out
 
-    def _progress(self, task: dict, result: Any) -> dict:
+    def _progress(self, task: dict, result: Any, clock: float) -> dict:
         outcomes = result.get("per_variant_outcomes") if isinstance(result, dict) else None
-        progress = derive.task_progress(task.get("history"), parse_ts, outcomes)
+        progress = derive.task_progress(task.get("history"), clock if self.clock.replay else None, parse_ts, outcomes)
         for unit in progress.get("units") or []:
             if unit["status"] == "failed":
                 unit["error"] = self._unit_error(task, str(unit.get("label") or ""))
@@ -308,7 +366,9 @@ class Watcher:
         }
 
     def optimizer_status(self) -> dict:
-        """Is an optimizer process alive for this session? Only answerable on the same host."""
+        """Is an optimizer process alive for this session? Only answerable in live mode on the same host."""
+        if self.clock.replay:
+            return {"alive": None, "reason": "replay"}
         owner = read_json(self.session_dir / "runtime" / "optimizer.lock")
         last = self.pod_history[-1] if self.pod_history else {}
         owner = owner if isinstance(owner, dict) else last
@@ -318,17 +378,57 @@ class Watcher:
         alive = bool(pid) and os.path.exists(f"/proc/{pid}")
         return {"alive": alive, "pid": pid}
 
-    def summary_at(self) -> dict:
-        """state.json summary."""
+    def summary_at(self, clock: float) -> dict:
+        """state.json summary; in replay, rolled back to *clock*.
+
+        state.json holds each field's last value only. In replay, phase, budget used and best throughput are
+        worked out for the clock; the baseline, the stop and the validated gain appear once the clock passes them;
+        tick and crash count, which have no history, are left out.
+        """
         summary = derive.state_summary(self.state)
-        summary["current_best"] = self._best_at(summary.get("current_best") or {})
+        if not self.clock.replay:
+            summary["current_best"] = self._best_at(summary.get("current_best") or {}, None)
+            return summary
+        return self._replay_summary(summary, clock)
+
+    def _replay_summary(self, summary: dict, clock: float) -> dict:
+        summary.update(_phases_at(summary, clock))
+        summary["current_best"] = self._best_at({}, clock)
+        summary["specialist_rounds"] = [
+            r for r in summary.get("specialist_rounds") or [] if (parse_ts(r.get("completed_at")) or 0) <= clock
+        ]
+        start, used = parse_ts(summary.get("start_ts")), summary.get("elapsed_charged_sec")
+        if start is not None and isinstance(used, (int, float)):
+            summary["elapsed_charged_sec"] = max(0.0, min(float(used), clock - start))
+        if not self._baseline_by(clock):
+            summary["baseline_tput"] = None
+        stop = parse_ts(summary.get("stop_ts"))
+        if stop is None or stop > clock:
+            summary["stop_ts"] = summary["stop_reason"] = summary["cumulative_gain_validated"] = None
+        summary["tick"] = summary["crash_count"] = None
         return summary
 
-    def _best_at(self, current: dict) -> dict:
-        """Best tok/s from *current*, else from results and journal entries."""
+    def _baseline_by(self, clock: float) -> bool:
+        """Whether the baseline is measured by *clock*: its journal entry or its task's result is released."""
+        stream = self.streams["journal"]
+        if any(j.get("kind") == _BASELINE_KIND for j in stream.upto(stream.released(clock))):
+            return True
+        kinds = {t["task_id"]: t.get("kind") for t in self.tasks}
+        return any(
+            kinds.get(task_id) == _BASELINE_KIND and (r["t"] is None or r["t"] <= clock)
+            for task_id, r in self.results.items()
+        )
+
+    def _best_at(self, current: dict, clock: float | None) -> dict:
+        """Best tok/s from *current*, else from results and journal entries released by *clock* (None: all)."""
         kinds = {t["task_id"]: t.get("kind") or "task" for t in self.tasks}
-        results = [(kinds.get(task_id, "task"), r["result"]) for task_id, r in self.results.items()]
-        series = self.streams["journal"].items
+        results = [
+            (kinds.get(task_id, "task"), r["result"])
+            for task_id, r in self.results.items()
+            if clock is None or r["t"] is None or r["t"] <= clock
+        ]
+        stream = self.streams["journal"]
+        series = stream.items if clock is None else stream.upto(stream.released(clock))
         return derive.best_throughput(current, results, series)
 
     def snapshot(self, include_streams: bool = True) -> dict:
@@ -337,9 +437,9 @@ class Watcher:
             clock = self.clock.now()
             tasks = self.tasks_at(clock)
             released = {name: s.released(clock) for name, s in self.streams.items()}
-            summary = self.summary_at()
+            summary = self.summary_at(clock)
             calls = self.streams["llm_call"].upto(released["llm_call"])
-            artifacts = self._artifacts_at()
+            artifacts = self._artifacts_at(clock)
             view = {
                 "version": self.version,
                 "clock": self.clock.info(),
@@ -362,13 +462,15 @@ class Watcher:
         return [{"level": "error", "text": self.db_problem}] if self.db_problem else []
 
     def delta(self, cursors: dict[str, int]) -> dict:
-        """Stream items released since *cursors*."""
+        """Stream items released since *cursors*; ``reset`` when the clock moved back past one."""
         with self.lock:
             clock = self.clock.now()
             out: dict[str, Any] = {"clock": self.clock.info(), "version": self.version, "items": {}}
             for name, stream in self.streams.items():
                 n = stream.released(clock)
                 have = cursors.get(name, 0)
+                if n < have:
+                    return {"reset": True, "clock": out["clock"]}
                 if n > have:
                     out["items"][name] = stream.between(have, n)
                 cursors[name] = n
@@ -376,10 +478,14 @@ class Watcher:
 
     def artifacts_at(self) -> list[dict]:
         with self.lock:
-            return self._artifacts_at()
+            return self._artifacts_at(self.clock.now())
 
-    def _artifacts_at(self) -> list[dict]:
-        return list(self.artifact_index)
+    def _artifacts_at(self, clock: float) -> list[dict]:
+        """In replay, a file appears once the clock passes its mtime; files written after the last recorded event
+        (or copied without their mtimes) all appear when the replay reaches its end."""
+        if not self.clock.replay or (self.clock.end is not None and clock >= self.clock.end):
+            return list(self.artifact_index)
+        return [a for a in self.artifact_index if a["mtime"] <= clock]
 
     def conversation(self, call_id: str = "", task_id: str = "", turn: str = "") -> dict | None:
         """The prompt/response record for one LLM call, redacted; scans conversations.jsonl.
@@ -415,6 +521,19 @@ class Watcher:
         return redact({"source": rel, "task_id": task_id, **found}) if found else None
 
 
+def _phases_at(summary: dict, clock: float) -> dict:
+    """The summary fields the clock rolls back, to update it with: its phase history as it stood at *clock*, and its
+    phase when there is a phase history to tell it."""
+    history = summary.get("phase_history") or []
+    rows = [r for r in history if (_row_time(r) or 0) <= clock]
+    out: dict = {"phase_history": rows}
+    if rows:
+        out["phase"] = rows[-1].get("to_phase") or summary.get("phase")
+    elif history:
+        out["phase"] = history[0].get("from_phase") or None
+    return out
+
+
 def _conversation_matches(rec: dict, call_id: str, task_id: str, turn: str) -> bool:
     if call_id:
         return rec.get("call_id") == call_id
@@ -425,3 +544,7 @@ def _conversation_matches(rec: dict, call_id: str, task_id: str, turn: str) -> b
 
 def _read_jsonl(path: Path) -> list[dict]:
     return JsonlTail(path).read_new()
+
+
+def _row_time(row: dict) -> float | None:
+    return parse_ts(row.get("ts_unix")) or parse_ts(row.get("ts"))

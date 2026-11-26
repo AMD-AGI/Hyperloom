@@ -249,8 +249,8 @@ ingest it whole on session end.
 
 ### Inspector
 
-The Inspector is a read-only web view of a live or finished session: run information and every artifact with a
-diff. It only reads files, so it is safe
+The Inspector is a read-only web view of a live or finished session: run information, every artifact with a
+diff, and replay. It only reads files, so it is safe
 next to a running optimizer:
 
 ```bash

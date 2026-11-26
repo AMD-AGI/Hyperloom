@@ -12,12 +12,19 @@ import time
 
 from hyperloom.inspector import artifacts, session_layout
 from hyperloom.inspector.tests.conftest import FAKE_KEY, FAKE_SECRET, T0, iso
-from hyperloom.inspector.watcher import Stream, Watcher
+from hyperloom.inspector.watcher import Clock, Stream, Watcher, WatchOptions
 
 
 def _live(session_dir):
     w = Watcher(session_dir)
     w.poll()
+    return w
+
+
+def _replay_at(session_dir, t):
+    w = Watcher(session_dir, WatchOptions(replay=True))
+    w.poll()
+    w.clock.seek(t, paused=True)
     return w
 
 
@@ -63,6 +70,64 @@ def test_an_optimizer_on_this_host_is_alive_while_its_process_runs(session_dir):
     assert _live(session_dir).optimizer_status() == {"alive": True, "pid": os.getpid()}
 
 
+def test_replay_rolls_views_back_to_the_clock(session_dir):
+    snap = _replay_at(session_dir, T0 + 305).snapshot()
+    assert snap["summary"]["phase"] == "PRELUDE"
+    states = {t["task_id"]: (t["state"], t["health"]) for t in snap["tasks"]}
+    assert states["t-scout"] == ("succeeded", "crashed")
+    assert states["t-recon"] == ("running", "running")
+    assert "t-roof" not in states
+    assert len(snap["streams"]["event"]) == 2
+    assert snap["streams"]["llm_call"] == []
+    assert all(a["mtime"] <= T0 + 305 for a in _replay_at(session_dir, T0 + 305).artifacts_at())
+
+
+def test_replay_shows_the_run_state_of_the_clock_not_of_the_end(session_dir):
+    snap = _replay_at(session_dir, T0 + 305).snapshot()
+    s = snap["summary"]
+    assert s["baseline_tput"] is None
+    assert snap["budget"]["used_sec"] == 305
+    assert (s["tick"], s["crash_count"]) == (None, None)
+    assert _replay_at(session_dir, T0 + 2).snapshot()["summary"]["phase"] is None
+    later = _replay_at(session_dir, T0 + 700).snapshot()
+    assert later["summary"]["baseline_tput"] == 1685.16
+    assert later["budget"]["used_sec"] == 700
+
+
+def test_replay_shows_the_stop_and_validated_gain_once_the_clock_passes_the_stop(session_dir):
+    path = session_dir / "state.json"
+    state = json.loads(path.read_text(encoding="utf-8"))
+    stop = {"stop_ts": iso(T0 + 650), "stop_reason": "target_reached", "cumulative_gain_validated": 12.5}
+    path.write_text(json.dumps({**state, **stop, "elapsed_charged_sec": 500}), encoding="utf-8")
+    before = _replay_at(session_dir, T0 + 640).snapshot()
+    assert [before["summary"][k] for k in stop] == [None, None, None]
+    after = _replay_at(session_dir, T0 + 700).snapshot()
+    assert [after["summary"][k] for k in stop] == list(stop.values())
+    assert after["budget"]["used_sec"] == 500
+
+
+def test_replay_delta_releases_items_and_resets_on_rewind(session_dir):
+    w = _replay_at(session_dir, T0 + 305)
+    cursors: dict[str, int] = {}
+    first = w.delta(cursors)
+    assert len(first["items"]["event"]) == 2
+    w.clock.seek(T0 + 700)
+    second = w.delta(cursors)
+    assert [c["call_id"] for c in second["items"]["llm_call"]] == ["c1", "c2"]
+    w.clock.seek(T0 + 100)
+    assert w.delta(cursors)["reset"] is True
+
+
+def test_clock_range_speed_and_pause():
+    clock = Clock(replay=True, speed=10.0)
+    clock.set_range(100.0, 200.0)
+    clock.seek(150.0, paused=True)
+    assert clock.now() == 150.0
+    clock.seek(500.0)
+    assert clock.now() == 200.0
+    assert Clock().info()["mode"] == "live"
+
+
 def test_stream_keeps_time_order_for_late_items():
     s = Stream()
     s.add({"n": 2}, 2.0)
@@ -103,6 +168,13 @@ def test_trimmed_stream_keeps_absolute_cursors():
     assert [i["n"] for i in s.upto(4)] == [3]
 
 
+def test_replay_end_shows_artifacts_written_after_the_last_event(session_dir):
+    w = _replay_at(session_dir, T0 + 10_000)
+    late = [a for a in w.artifact_index if a["mtime"] > w.clock.end]
+    assert late, "fixture should have a file newer than the last event"
+    assert {a["path"] for a in w.artifacts_at()} == {a["path"] for a in w.artifact_index}
+
+
 def test_delta_sends_each_released_item_once(session_dir):
     w = _live(session_dir)
     cursors: dict[str, int] = {}
@@ -119,6 +191,8 @@ def test_best_throughput_falls_back_to_results_when_state_has_none(session_dir):
     (session_dir / "state.json").write_text(json.dumps(state))
     best = _live(session_dir).snapshot()["summary"]["current_best"]
     assert best["hot_tput"] == 1685.16 and best["source"] == "journal"
+    assert _replay_at(session_dir, T0 + 599).snapshot()["summary"]["current_best"]["hot_tput"] is None
+    assert _replay_at(session_dir, T0 + 601).snapshot()["summary"]["current_best"]["hot_tput"] == 1685.16
 
 
 def test_running_task_shows_its_step_and_failed_variants_their_root_cause(session_dir):
@@ -138,6 +212,8 @@ def test_running_task_shows_its_step_and_failed_variants_their_root_cause(sessio
     progress = tasks["t-roof"]["progress"]
     assert progress["current"]["label"] == "q4:benchmark"
     assert progress["units"][0]["error"] == "ValueError: Mixed FP8 tensors"
+    replayed = {t["task_id"]: t for t in _replay_at(session_dir, T0 + 725).snapshot()["tasks"]}
+    assert replayed["t-roof"]["progress"]["current"]["label"] == "k7"
 
 
 def test_specialist_turns_without_a_conversation_come_from_process_log(session_dir):

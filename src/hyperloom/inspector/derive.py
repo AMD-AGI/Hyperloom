@@ -130,26 +130,44 @@ def task_health(
     return {"health": health, "reason": reason}
 
 
+def task_state_at(task: dict, clock: float, parse_ts) -> dict | None:
+    """Replay helper: the task as it looked at unix time *clock*; ``None`` if not yet created."""
+    created = parse_ts(task.get("created_at"))
+    if created is not None and created > clock:
+        return None
+    state = "queued"
+    updated = task.get("created_at")
+    for tr in task.get("history") or []:
+        ts = parse_ts(tr.get("ts"))
+        if ts is not None and ts > clock:
+            break
+        state = tr.get("to") or state
+        updated = tr.get("ts") or updated
+    return {**task, "state": state, "updated_at": updated}
+
+
 PROGRESS_UNITS = ("variant", "baseline_round")
 
 
-def _progress_notes(history: list | None, parse_ts) -> list[dict]:
+def _progress_notes(history: list | None, clock: float | None, parse_ts) -> list[dict]:
     notes = []
     for h in history or []:
         if not isinstance(h, dict) or not isinstance(h.get("progress"), dict):
             continue
         ts = parse_ts(h.get("ts"))
+        if clock is not None and ts is not None and ts > clock:
+            break
         notes.append({**h["progress"], "ts": ts})
     return notes
 
 
-def task_progress(history: list | None, parse_ts, outcomes: Any = None) -> dict:
-    """Progress notes a task recorded in its history.
+def task_progress(history: list | None, clock: float | None, parse_ts, outcomes: Any = None) -> dict:
+    """Progress notes a task recorded in its history, up to *clock* (None: all).
 
     ``current`` is the latest note; ``units`` has one row per finished variant or baseline round, with the
     failure ``reason`` and ``stage`` from the result's ``per_variant_outcomes`` when it has landed.
     """
-    notes = _progress_notes(history, parse_ts)
+    notes = _progress_notes(history, clock, parse_ts)
     if not notes:
         return {}
     why = {

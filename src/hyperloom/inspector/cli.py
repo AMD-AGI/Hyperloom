@@ -15,6 +15,8 @@ _SEARCH_DEPTH = 3
 # A session directory holds one of these once it has started: a session file, the database every account opens, or
 # the mark that the database is kept outside it.
 _SESSION_MARKS = (*SESSION_FILES, SHARED_DB, LEDGER_MARK)
+#: The argparse action of a switch, an option that takes no value and is on when given.
+SWITCH = "store_true"
 
 
 def _is_session(path: Path) -> bool:
@@ -70,11 +72,18 @@ def add_inspect_arguments(insp: argparse.ArgumentParser) -> None:
         help="Bind address. Default: 127.0.0.1; reach it from a laptop with kubectl port-forward.",
     )
     insp.add_argument("--port", type=int, default=8765, help="Port. Default: 8765.")
+    insp.add_argument(
+        "--replay",
+        action=SWITCH,
+        help="Replay the session on a virtual clock from its first record.",
+    )
+    insp.add_argument("--speed", type=float, default=1.0, help="Replay speed factor. Default: 1.0.")
 
 
 def run_inspect(args: argparse.Namespace) -> int:
     """Entry point for the ``inspect`` subcommand."""
     from hyperloom.inspector.server import ServeOptions, serve
+    from hyperloom.inspector.watcher import WatchOptions
 
     try:
         session_dir = resolve_session_dir(Path(args.session_dir))
@@ -85,6 +94,7 @@ def run_inspect(args: argparse.Namespace) -> int:
         options = ServeOptions(
             host=args.host,
             port=args.port,
+            watch=WatchOptions(replay=args.replay, speed=args.speed),
         )
         serve(session_dir, options)
     except OSError as exc:

@@ -12,12 +12,12 @@ import pytest
 
 from hyperloom.inspector import server as server_mod
 from hyperloom.inspector.server import InspectorServer, ServeOptions
-from hyperloom.inspector.tests.conftest import FAKE_KEY
+from hyperloom.inspector.tests.conftest import FAKE_KEY, T0
 from hyperloom.inspector.watcher import Watcher, WatchOptions
 
 
-def _start(session_dir):
-    watcher = Watcher(session_dir, WatchOptions(poll_sec=0.05))
+def _start(session_dir, replay=False):
+    watcher = Watcher(session_dir, WatchOptions(replay=replay, poll_sec=0.05))
     watcher.poll()
     httpd = InspectorServer(("127.0.0.1", 0), watcher)
     threading.Thread(target=httpd.serve_forever, kwargs={"poll_interval": 0.05}, daemon=True).start()
@@ -37,9 +37,16 @@ def server(session_dir):
     _stop(httpd)
 
 
-def _get(httpd, path, host=None):
+@pytest.fixture
+def replay_server(session_dir):
+    httpd = _start(session_dir, replay=True)
+    yield httpd
+    _stop(httpd)
+
+
+def _get(httpd, path, method="GET", host=None):
     conn = http.client.HTTPConnection("127.0.0.1", httpd.server_address[1], timeout=5)
-    conn.request("GET", path, headers={"Host": host or f"127.0.0.1:{httpd.server_address[1]}"})
+    conn.request(method, path, headers={"Host": host or f"127.0.0.1:{httpd.server_address[1]}"})
     resp = conn.getresponse()
     body = resp.read()
     conn.close()
@@ -131,8 +138,17 @@ def test_artifact_index_and_conversation(server):
     assert _get(server, "/api/conversation?call_id=")[0] == 404
 
 
-def test_sse_sends_hello(server):
-    conn = http.client.HTTPConnection("127.0.0.1", server.server_address[1], timeout=5)
+def test_replay_control_only_in_replay(server, replay_server):
+    assert _get(server, "/api/replay?t=1", method="POST")[0] == 409
+    status, body, _ = _get(replay_server, f"/api/replay?t={T0 + 305}&paused=1", method="POST")
+    assert status == 200 and json.loads(body)["now"] == T0 + 305
+    snap = json.loads(_get(replay_server, "/api/snapshot")[1])
+    assert snap["summary"]["phase"] == "PRELUDE"
+
+
+def test_sse_sends_hello_then_items_then_reset(replay_server):
+    _get(replay_server, f"/api/replay?t={T0 + 305}&paused=1", method="POST")
+    conn = http.client.HTTPConnection("127.0.0.1", replay_server.server_address[1], timeout=5)
     conn.request("GET", "/api/stream", headers={"Host": "localhost"})
     resp = conn.getresponse()
     assert resp.getheader("Content-Type") == "text/event-stream"
@@ -147,6 +163,15 @@ def test_sse_sends_hello(server):
                 return name, json.loads(line[6:])
 
     assert next_event()[0] == "hello"
+    _get(replay_server, f"/api/replay?t={T0 + 700}", method="POST")
+    seen = {}
+    while "items" not in seen:
+        name, data = next_event()
+        seen[name] = data
+    assert [c["call_id"] for c in seen["items"]["items"]["llm_call"]] == ["c1", "c2"]
+    _get(replay_server, f"/api/replay?t={T0 + 10}", method="POST")
+    while (event := next_event())[0] != "reset":
+        pass
     conn.close()
 
 

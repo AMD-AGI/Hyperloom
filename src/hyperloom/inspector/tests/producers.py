@@ -71,11 +71,11 @@ def contract_message(producer: str, inspector_file: str, detail: str) -> str:
     )
 
 
-def watch(session_dir: Path) -> Any:
+def watch(session_dir: Path, *, replay: bool = False) -> Any:
     """The Inspector's watcher over *session_dir*, polled once."""
     from hyperloom.inspector.watcher import Watcher, WatchOptions
 
-    watcher = Watcher(session_dir, WatchOptions())
+    watcher = Watcher(session_dir, WatchOptions(replay=replay))
     watcher.poll()
     return watcher
 
@@ -235,6 +235,16 @@ def write_manifest(session_dir: Path, model: str) -> dict:
 def new_state(**fields: Any) -> Any:
     """A ``SharedState`` as the Coordinator starts one (about 8 s to import cold)."""
     return Upstream("hyperloom.orchestrator.state.shared_state").SharedState(session_id=SESSION_ID, **fields)
+
+
+def record_phase(state: Any, to_phase: str, reason: str, ts_unix: float) -> dict:
+    """One ``phase_history`` row through ``machine_state.record_phase_transition``, stamped at *ts_unix*."""
+    from datetime import datetime, timezone
+
+    machine = Upstream("hyperloom.orchestrator.phases.machine_state")
+    ts = datetime.fromtimestamp(ts_unix, tz=timezone.utc).isoformat(timespec="seconds")
+    clock = machine.PhaseClock(ts=ts, ts_unix=ts_unix)
+    return machine.record_phase_transition(state, to_phase=to_phase, reason=reason, at=clock)
 
 
 # ----- specialists ------------------------------------------------------------------------------------------------

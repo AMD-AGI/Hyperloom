@@ -3,7 +3,8 @@
 
 """A small synthetic session directory shaped like a real v1.1.2 run.
 
-Times are fixed unix seconds from ``T0``. The layout mirrors the MiMo smoke: a baseline, a roofline that is
+Times are fixed unix seconds from ``T0`` so replay tests can place the clock
+exactly. The layout mirrors the MiMo smoke: a baseline, a roofline that is
 still running, and two specialists that crashed but landed as ``succeeded``.
 """
 
@@ -275,7 +276,7 @@ def session_dir(tmp_path: Path) -> Path:
 
 
 def _set_mtimes(root: Path) -> None:
-    """Session-time mtimes; the default is the end of the fixture run."""
+    """Session-time mtimes, so replay releases artifacts in order; the default is the end of the fixture run."""
     special = {
         "runs/baseline": T0 + 600,
         "runs/specialist": T0 + 300,
