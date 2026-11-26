@@ -1,13 +1,12 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""PD launches from InferenceX main: its master multi-node disaggregated entries, and its recipe tree by directory.
+"""PD launches from InferenceX main: its master multi-node disaggregated entries.
 
 A master entry (``multinode: true, disagg: true``) names a srt-slurm recipe per ``search-space`` row as
-``srt-recipe: <file>:<variant>``; the row states the topology and concurrencies InferenceX benchmarks it at. A recipe
-no master entry names is found by its directory, ``<model-prefix>/<engine>/<board>-<precision>/<workload>/``, and
-matched on the topology its own roles state. Variants expand as srtctl expands them: ``base`` deep-merged with an
-``override_*`` block, or with one slice of a ``zip_override_*`` block.
+``srt-recipe: <file>:<variant>``; the row states the topology and concurrencies InferenceX benchmarks it at. Variants
+expand as srtctl expands them: ``base`` deep-merged with an ``override_*`` block, or with one slice of a
+``zip_override_*`` block.
 """
 
 from __future__ import annotations
@@ -42,10 +41,8 @@ from inference_suite.recipe.model import RecipeSourceError, boards_interchangeab
 from inference_suite.recipe.sources import Checkout
 
 MULTI_NODE_RECIPES = f"{PROJECT}/benchmarks/multi_node/srt-slurm-recipes"
-NVIDIA_MASTER = f"{PROJECT}/configs/nvidia-master.yaml"
 #: What a PD resolution checks out of InferenceX.
 CHECKOUT_DIRECTORIES = (f"{PROJECT}/configs", MULTI_NODE_RECIPES)
-_AGENTX_SHAPE = "agentx"
 _ZIP_SELECTOR = re.compile(r"(zip_override_[\w-]+)\[(\d+)\]")
 
 
@@ -388,7 +385,6 @@ def _with_warning(candidate: Candidate, warning: str) -> Candidate:
 __all__ = [
     "CHECKOUT_DIRECTORIES",
     "MULTI_NODE_RECIPES",
-    "NVIDIA_MASTER",
     "Candidate",
     "Candidates",
     "RoleFit",

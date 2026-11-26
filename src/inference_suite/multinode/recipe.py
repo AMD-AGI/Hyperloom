@@ -4,8 +4,8 @@
 """Resolve a multi-node launch once per session, from the first source that serves the query.
 
 The sources of a disaggregated query, in order: the operator's per-role args (or an earlier record, replayed
-exactly); an InferenceX main master multi-node disaggregated entry; an InferenceX main recipe no master entry names,
-found by its directory; a row of the PD default table. A query none of them serves is refused, naming what each
+exactly); an InferenceX main master multi-node disaggregated entry; a row of the PD default table. A query none of
+them serves is refused, naming what each
 passed over. InferenceX that cannot be read is passed over for the table, unless the session pinned an InferenceX
 commit. An aggregated query takes an earlier record, else the operator's worker args, else the single-node base
 launch the suite resolves for the GPUs of every worker host, whose args every worker runs.
@@ -21,7 +21,6 @@ from inference_suite.argv import argv_flag_occurrences, canonical_flag_name, las
 from inference_suite.contracts.base_launch import BaseLaunch, Workload
 from inference_suite.frameworks import Framework
 from inference_suite.multinode.inferencex import (
-    NVIDIA_MASTER,
     Candidate,
     Candidates,
     RoleFit,
@@ -232,8 +231,6 @@ def _checkout_files(checkout: Checkout, candidate: Candidate) -> dict[str, str]:
     paths = [MASTER, candidate.path]
     if candidate.kind is PdSourceKind.INFERENCEX_MASTER:
         paths.append(RUNNERS)
-    elif (checkout.root / NVIDIA_MASTER).is_file():
-        paths.append(NVIDIA_MASTER)
     bundle = checkout.bundle(sorted(set(paths)))
     return {path: bundle.sha256(path) for path in bundle.files}
 
