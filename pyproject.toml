@@ -360,8 +360,10 @@ hyperloom_kb = [
     "declarations/*.yaml",
     "mappings/*.yaml",
 ]
+"hyperloom_common.llm" = [
+    "llm_prices.json",
+]
 hyperloom_multibranch = [
-    "contracts/llm_prices.json",
     "blackboard/knowledge/declarations/*.yaml",
     "blackboard/knowledge/mappings/*.yaml",
 ]

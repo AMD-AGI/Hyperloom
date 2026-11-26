@@ -12,7 +12,7 @@ from pathlib import Path
 
 import pytest
 
-from hyperloom_multibranch.contracts.llm_prices import TokenCounts
+from hyperloom_common.llm.llm_prices import TokenCounts
 from hyperloom_multibranch.contracts.lifecycle import SpecialistStatus
 from hyperloom_multibranch.contracts.blackboard import INTEGRATION_BRANCH, Role, Writer
 from hyperloom.contracts.measurement import Purpose, TestKind, TestRequest, Validity

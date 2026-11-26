@@ -25,7 +25,7 @@ from hyperloom_common.llm.llm_config import (
     resolve_forge_llm_model,
 )
 from hyperloom_multibranch.contracts.llm import Completion, CompletionFailed, CompletionReply
-from hyperloom_multibranch.contracts.llm_prices import TokenCounts, price_of
+from hyperloom_common.llm.llm_prices import TokenCounts, price_of
 from hyperloom_multibranch.contracts.blackboard.interfaces import UsageSink
 from hyperloom_multibranch.contracts.blackboard.records import LlmUsage
 from hyperloom_multibranch.contracts.blackboard.vocab import UsageSource

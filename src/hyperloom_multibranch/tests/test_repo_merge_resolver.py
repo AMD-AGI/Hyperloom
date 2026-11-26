@@ -7,7 +7,7 @@ import json
 
 from hyperloom.contracts.recipe import apply
 from hyperloom_multibranch.contracts.llm import CompletionReply
-from hyperloom_multibranch.contracts.llm_prices import TokenCounts
+from hyperloom_common.llm.llm_prices import TokenCounts
 from hyperloom_multibranch.scheduling.integrator import LlmPatchResolver
 from hyperloom_multibranch.tests.test_repo_merge import _built, _config, _on, _wide_onto
 

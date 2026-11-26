@@ -75,7 +75,7 @@ from hyperloom.orchestrator.specialists.agent_runner import (
 )
 from hyperloom.orchestrator.specialists.reap_watch import PROCESS_LOG_NAME
 from hyperloom_multibranch.contracts.branch_log import BranchLogEntry, BranchLogType
-from hyperloom_multibranch.contracts.llm_prices import TokenCounts
+from hyperloom_common.llm.llm_prices import TokenCounts
 from hyperloom_multibranch.contracts.blackboard.interfaces import (
     AgentRecords,
     BranchLogStore,

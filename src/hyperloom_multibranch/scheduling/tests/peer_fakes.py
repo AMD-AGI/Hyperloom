@@ -49,7 +49,7 @@ from hyperloom_multibranch.contracts.fork import (
     ShareRequest,
 )
 from hyperloom_multibranch.contracts.gate import RegressionOutcome
-from hyperloom_multibranch.contracts.llm_prices import TokenCounts
+from hyperloom_common.llm.llm_prices import TokenCounts
 from hyperloom_multibranch.contracts.judgement import AccuracyVerdict, Judgement, Verdict
 from hyperloom_multibranch.contracts.blackboard import Role, Writer
 from hyperloom_multibranch.contracts.blackboard.records import LeaseEnd, LeaseStart

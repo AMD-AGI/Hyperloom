@@ -64,7 +64,7 @@ from hyperloom_multibranch.specialist.autonomous_session import (
     collection_margin,
     without_file,
 )
-from hyperloom_multibranch.contracts.llm_prices import TokenCounts
+from hyperloom_common.llm.llm_prices import TokenCounts
 from hyperloom_multibranch.specialist.agent_spend import AgentSpend, transcript_dir
 from hyperloom_multibranch.specialist.judging import NOTICE
 from hyperloom_multibranch.specialist.runtime import (
