@@ -447,22 +447,8 @@ class GeakRevalidation(CoordinatorCollaborator):
 
     def _promote_validated_rebench(self, rebench: _GeakRebench, *, overlay_loaded: bool) -> bool:
         measurement, variant = rebench.measurement, rebench.variant
-        promotion_result = dict(rebench.candidate)
-        for key in (
-            "output_throughput",
-            "input_throughput",
-            "total_throughput",
-            "total_token_throughput",
-            "e2e_norm_intvty_p90",
-            "tpot_p90_ms",
-            "submission_valid",
-            "submission_invalid_reasons",
-        ):
-            promotion_result.pop(key, None)
-            if key in measurement:
-                promotion_result[key] = measurement[key]
         return self._coord.phase_kernel.promote_geak_from_candidate(
-            promotion_result,
+            dict(rebench.candidate),
             measured_tput=float(rebench.measured),
             overlay_loaded=overlay_loaded,
             measurement_provenance={**variant, **measurement},

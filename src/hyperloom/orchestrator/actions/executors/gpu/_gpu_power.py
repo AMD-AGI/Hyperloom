@@ -12,17 +12,13 @@ for the power-budget checks and the search.
 
 from __future__ import annotations
 
-import json
 import logging
-from pathlib import Path
 from typing import Any, Mapping
 
-from hyperloom_common.amd_smi import metric_value
 from hyperloom_common.env import EnvValueError, env_float
 from hyperloom_common.gpu_telemetry import DEFAULT_INTERVAL_SEC, fast_interval
 from hyperloom.common.gpu_power_settings import gpu_power_sampling_unavailable
 from inference_suite.contracts import READABLE_REPORT_SCHEMAS, GpuTelemetry, PowerSummary
-from inference_suite.contracts.layout import POWER
 
 log = logging.getLogger(__name__)
 
@@ -49,9 +45,6 @@ POWER_FIELDS = {
 
 _INTERVAL_ENV = "HYPERLOOM_GPU_POWER_INTERVAL_S"
 
-#: How far a recorder's start may precede the subprocess it is paired with and still be that round's.
-_START_SLACK_SEC = 5.0
-
 
 def _interval_sec() -> float:
     """The operator's sampling interval, as :func:`fast_interval` takes it.
@@ -76,36 +69,12 @@ def round_gpu_telemetry() -> GpuTelemetry:
     return GpuTelemetry(enabled=not gpu_power_sampling_unavailable(), interval_sec=interval_sec)
 
 
-def _read_power_json(workspace: Path, subprocess_started_unix: float | None) -> dict[str, Any] | None:
-    """This round's ``power.json``, beside the report or one level up; ``None`` when no recorder ran for it."""
-    for directory in (workspace, workspace.parent):
-        try:
-            payload = json.loads((directory / POWER).read_text(encoding="utf-8"))
-        except (OSError, ValueError):
-            continue
-        if not isinstance(payload, dict):
-            continue
-        started = metric_value(payload.get("started_unix"))
-        if subprocess_started_unix is not None and (
-            started is None or started < float(subprocess_started_unix) - _START_SLACK_SEC
-        ):
-            continue
-        return payload
-    return None
-
-
-def round_power_summary(
-    report: Mapping[str, Any] | None, workspace: Path | None, *, subprocess_started_unix: float | None = None
-) -> PowerSummary | None:
-    """The round's power: an inference_suite report's ``power`` section, else the ``power.json`` a recorder left in
-    ``workspace``; ``None`` when no recorder ran for the round."""
+def round_power_summary(report: Mapping[str, Any] | None) -> PowerSummary | None:
+    """The round's power: an inference_suite report's ``power`` section; ``None`` when no recorder ran for the round."""
     if report and report.get("schema") in READABLE_REPORT_SCHEMAS:
         section = report.get("power")
         return None if section is None else PowerSummary.from_document(section)
-    if workspace is None:
-        return None
-    document = _read_power_json(Path(workspace), subprocess_started_unix)
-    return None if document is None else PowerSummary.of(POWER, document)
+    return None
 
 
 def round_power_fields(summary: PowerSummary) -> dict[str, Any]:

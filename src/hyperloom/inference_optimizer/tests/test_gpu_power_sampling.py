@@ -5,21 +5,16 @@
 
 from __future__ import annotations
 
-import json
-import time
-
 import pytest
 
 from hyperloom_common import gpu_telemetry
+from inference_suite.contracts import PowerSummary
 from inference_suite.contracts.layout import POWER
-from hyperloom.orchestrator.actions.executors.gpu._gpu_power import (
-    POWER_FIELDS,
-    round_power_summary,
-)
+from hyperloom.orchestrator.actions.executors.gpu._gpu_power import POWER_FIELDS, round_power_fields
 from hyperloom.orchestrator.actions.executors.benchmark_result import extract_benchmark_measurement
 
 
-def _power_json(directory, *, started_unix: float, valid: bool = True, cards: int = 4) -> None:
+def _power_summary(*, valid: bool = True, cards: int = 4) -> PowerSummary:
     """A ``power.json`` whose measured window was 10 s at 700 W per card, valid or not."""
     energy = {
         "window": {"duration_s": 10.0},
@@ -46,30 +41,14 @@ def _power_json(directory, *, started_unix: float, valid: bool = True, cards: in
         figures = {key for key in energy if key.endswith(("_w", "_j", "_token", "_query"))}
         energy.update(dict.fromkeys(figures), power_valid=0, reasons=["sampling_gap_exceeded"])
     scope = {"serving_gpus": list(range(cards)), "energy_gpus": list(range(cards)), "unread_gpus": []}
-    document = {"started_unix": started_unix, "scope": scope, "energy": energy, "phases": {}}
-    (directory / POWER).write_text(json.dumps(document))
-
-
-def test_the_reader_finds_power_json_beside_the_server_log_or_one_level_up(tmp_path):
-    workspace = tmp_path / "benchmark_vllm_20260929"
-    workspace.mkdir()
-    _power_json(tmp_path, started_unix=1000.0)
-    summary = round_power_summary(None, workspace, subprocess_started_unix=999.0)
-    assert summary is not None and summary.metrics["avg_power_w"] == 700.0
-    assert summary.per_gpu_avg_power_w == {"0": 700.0, "1": 700.0, "2": 700.0, "3": 700.0}
-
-
-def test_the_reader_ignores_power_json_from_an_earlier_round(tmp_path):
-    _power_json(tmp_path, started_unix=1000.0)
-    assert round_power_summary(None, tmp_path, subprocess_started_unix=2000.0) is None
+    return PowerSummary.of(POWER, {"started_unix": 1000.0, "scope": scope, "energy": energy, "phases": {}})
 
 
 _V1_REPORT = {"gpu_monitor": {"sample_count": 157, "power_watts": {"min": 225.0, "max": 790.0, "avg": 313.7}}}
 
 
-def test_the_measurement_carries_the_windows_power_energy_and_joules_per_token(tmp_path):
-    _power_json(tmp_path, started_unix=time.time())
-    measurement = extract_benchmark_measurement(_V1_REPORT, workspace=tmp_path)
+def test_a_rounds_power_fields_carry_the_windows_power_energy_and_joules_per_token():
+    measurement = round_power_fields(_power_summary())
     assert {key: measurement[key] for key in (*POWER_FIELDS, "power_valid")} == {
         "gpu_power_avg_w": 700.0,
         "gpu_power_p75_w": 710.0,
@@ -85,9 +64,8 @@ def test_the_measurement_carries_the_windows_power_energy_and_joules_per_token(t
     assert measurement["gpu_power_by_gpu_w"] == {str(gpu): 700.0 for gpu in range(4)}
 
 
-def test_a_sampled_round_whose_energy_is_invalid_stays_unmeasured(tmp_path):
-    _power_json(tmp_path, started_unix=time.time(), valid=False)
-    measurement = extract_benchmark_measurement(_V1_REPORT, workspace=tmp_path)
+def test_a_sampled_round_whose_energy_is_invalid_stays_unmeasured():
+    measurement = round_power_fields(_power_summary(valid=False))
     assert measurement["power_valid"] == 0
     assert measurement["gpu_power_avg_w"] is None and measurement["gpu_power_by_gpu_w"] is None
     assert measurement["gpu_energy_j"] is None and measurement["joules_per_output_token"] is None
