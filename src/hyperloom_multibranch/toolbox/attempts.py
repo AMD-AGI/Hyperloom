@@ -29,8 +29,8 @@ attempts into the request's single result:
   once only.
 * ``candidate`` failure (a known failure signature): ``candidate_failed`` at once.
 * ``unclear`` failure: one rerun away from the first node. A second failure is ``candidate_failed``; a success is the
-  result, and each unclear attempt before it is re-labelled an infrastructure failure of its node and reported as a
-  failure that did not reproduce. One that ended while its server booted (:func:`_failed_booting`) is rerun up to
+  result, and each unclear attempt before it is re-labelled an infrastructure failure of its node, the first one also
+  reported as a failure that did not reproduce. One that ended while its server booted (:func:`_failed_booting`) is rerun up to
   :data:`BOOT_RERUNS` times, each rerun after a wait of the :class:`InfraBackoff`, away from every node an earlier
   attempt failed on, before it is ``candidate_failed``. A profile whose server was ready before it failed, and a sweep
   that ran out of its time (:data:`TEST_TIMEOUT_REASON`), is not rerun: ``measurement_failed`` at once
@@ -514,7 +514,8 @@ class AttemptRunner:
                 continue
             reason = f"unclear failure did not reproduce on a rerun: {attempt.failure_reason or 'no reason given'}"
             attempts[index] = replace(attempt, failure_class=FailureClass.INFRA, failure_reason=reason)
-            await self._report(attempts[index], reason, reproduced=False)
+            if index == 0:  # one report per test: a node's second one quarantines it, and a boot burst spans reruns
+                await self._report(attempts[index], reason, reproduced=False)
         return self._final(job, result, attempts, _Ending(result.validity, None, None))
 
     async def _report(self, attempt: Attempt, reason: str | None, *, reproduced: bool) -> None:

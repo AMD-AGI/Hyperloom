@@ -742,7 +742,7 @@ async def test_a_server_that_failed_to_boot_three_times_is_rerun_after_waits_and
     assert [job.avoid_nodes for job in executor.jobs] == [(), ("n1",), ("n1", "n2"), ("n1", "n2", "n3")]
     assert [a.failure_class for a in result.attempts] == [FailureClass.INFRA] * 3 + [None]
     assert all(a.failure_reason.startswith("unclear failure did not reproduce on a rerun") for a in result.attempts[:3])
-    assert reported == [("n1", False), ("n2", False), ("n3", False)], "each one a failure that did not reproduce"
+    assert reported == [("n1", False)], "only the first is reported, so a burst over the reruns quarantines no node"
 
 
 async def test_a_server_that_fails_every_boot_is_still_a_candidate_failure_after_its_last_rerun() -> None:
