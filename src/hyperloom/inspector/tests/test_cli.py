@@ -51,6 +51,7 @@ def test_no_session_is_an_error(tmp_path):
 def test_parser_defaults_and_missing_session(tmp_path, capsys):
     args = _build_parser().parse_args(["inspect", "--session-dir", str(tmp_path)])
     assert (args.command, args.host, args.port, args.replay, args.speed) == ("inspect", "127.0.0.1", 8765, False, 1.0)
+    assert (args.history_dir, args.no_history) == (None, False)
     assert run_inspect(args) == 2
     assert "no session" in capsys.readouterr().err
 

@@ -17,7 +17,7 @@ from hyperloom.inspector.watcher import Watcher, WatchOptions
 
 
 def _start(session_dir, replay=False):
-    watcher = Watcher(session_dir, WatchOptions(replay=replay, poll_sec=0.05))
+    watcher = Watcher(session_dir, WatchOptions(replay=replay, poll_sec=0.05, sample_metrics=False))
     watcher.poll()
     httpd = InspectorServer(("127.0.0.1", 0), watcher)
     threading.Thread(target=httpd.serve_forever, kwargs={"poll_interval": 0.05}, daemon=True).start()
@@ -263,5 +263,6 @@ def test_sse_sends_hello_then_items_then_reset(replay_server):
 def test_serve_never_puts_its_files_in_the_session(session_dir, monkeypatch):
     monkeypatch.setattr(InspectorServer, "serve_forever", lambda self, poll_interval=0.5: None)
     before = sorted(p for p in session_dir.rglob("*"))
-    server_mod.serve(session_dir, ServeOptions(port=0))
+    inside = session_dir / "scratch"
+    server_mod.serve(session_dir, ServeOptions(port=0, history_dir=inside))
     assert sorted(p for p in session_dir.rglob("*")) == before

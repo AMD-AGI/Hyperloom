@@ -72,10 +72,10 @@ def contract_message(producer: str, inspector_file: str, detail: str) -> str:
 
 
 def watch(session_dir: Path, *, replay: bool = False) -> Any:
-    """The Inspector's watcher over *session_dir*, polled once."""
+    """The Inspector's watcher over *session_dir*, polled once (no resource sampling)."""
     from hyperloom.inspector.watcher import Watcher, WatchOptions
 
-    watcher = Watcher(session_dir, WatchOptions(replay=replay))
+    watcher = Watcher(session_dir, WatchOptions(replay=replay, sample_metrics=False))
     watcher.poll()
     return watcher
 

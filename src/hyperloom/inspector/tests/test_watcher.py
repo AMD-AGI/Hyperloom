@@ -16,7 +16,7 @@ from hyperloom.inspector.watcher import Clock, Stream, Watcher, WatchOptions
 
 
 def _live(session_dir):
-    w = Watcher(session_dir)
+    w = Watcher(session_dir, WatchOptions(sample_metrics=False))
     w.poll()
     return w
 
@@ -38,8 +38,9 @@ def test_crashed_specialists_that_landed_as_succeeded_are_flagged(session_dir):
     assert tasks["t-recon"]["node"] == "spec:static_recon"
 
 
-def test_snapshot_graph_and_budget(session_dir):
+def test_snapshot_badges_graph_and_budget(session_dir):
     snap = _live(session_dir).snapshot()
+    assert "2 task(s) crashed" in snap["badges"][0]["text"]
     edges = {(e["source"], e["target"], e["label"]): e["count"] for e in snap["graph"]["edges"]}
     assert edges[("critic", "orchestration", "review_verdict")] == 1
     assert edges[("coordinator", "bus", "delegated_result")] == 4
@@ -94,6 +95,21 @@ def test_a_live_run_gone_quiet_ends_the_timeline_at_its_last_activity(session_di
     snap = w.snapshot()
     assert snap["timeline"]["end"] is None
     assert _replay_at(session_dir, T0 + 305).snapshot()["timeline"]["end"] is None
+
+
+def test_a_finished_live_run_s_quiet_badges_do_not_grow_with_the_clock(session_dir, monkeypatch):
+    w = _live(session_dir)
+    now = w.clock.now()
+
+    def ages_at(t):
+        monkeypatch.setattr(w.clock, "now", lambda: t)
+        return {a["agent"]: a["age_sec"] for a in w.snapshot()["agents"]}
+
+    end = w.snapshot()["timeline"]["end"]
+    quiet = {"orchestration": round(max(0.0, end - (T0 + 720))), "critic": round(max(0.0, end - (T0 + 640)))}
+    assert ages_at(now) == ages_at(now + 86_400) == quiet
+    monkeypatch.setattr(w, "optimizer_status", lambda: {"alive": True})
+    assert ages_at(now + 60)["critic"] == round(now + 60 - (T0 + 640))
 
 
 def test_an_optimizer_on_this_host_is_alive_while_its_process_runs(session_dir):
@@ -246,6 +262,46 @@ def test_running_task_shows_its_step_and_failed_variants_their_root_cause(sessio
     assert progress["units"][0]["error"] == "ValueError: Mixed FP8 tensors"
     replayed = {t["task_id"]: t for t in _replay_at(session_dir, T0 + 725).snapshot()["tasks"]}
     assert replayed["t-roof"]["progress"]["current"]["label"] == "k7"
+
+
+def test_resource_history_backfills_and_records_outside_the_session(session_dir, tmp_path, monkeypatch):
+    from hyperloom.inspector import watcher as watcher_mod
+    from hyperloom.inspector.history import MetricsHistory
+
+    monkeypatch.setattr(watcher_mod, "container_memory", lambda: {"used_bytes": 2, "limit_bytes": 4})
+    monkeypatch.setattr(watcher_mod, "gpu_metrics", lambda: [{"gfx_pct": 50.0}])
+    monkeypatch.setattr(watcher_mod.socket, "gethostname", lambda: "pod-a")  # the optimizer's host
+    path = tmp_path / "hist" / "s.jsonl"
+    path.parent.mkdir()
+    path.write_text(json.dumps({"t": T0 + 5, "memory": {"used_bytes": 1, "limit_bytes": 4}, "gpus": []}) + "\n")
+    w = Watcher(session_dir, history=MetricsHistory(path))
+    w.poll()
+    w.poll()  # within the sample interval: no second sample
+    metrics = w.streams["metrics"].items
+    assert [m["memory"]["used_bytes"] for m in metrics] == [1, 2]
+    assert metrics[1]["gpus"] == [{"gfx_pct": 50.0}]
+    assert len(path.read_text().splitlines()) == 2
+    replay = Watcher(session_dir, WatchOptions(replay=True), history=MetricsHistory(path))
+    replay.poll()
+    # History samples, including the one written just now, don't stretch the replay range.
+    assert replay.clock.end < metrics[1]["_t"]
+    assert len(path.read_text().splitlines()) == 2
+
+
+def test_no_resources_are_sampled_while_the_optimizer_runs_on_another_host(session_dir, monkeypatch):
+    from hyperloom.inspector import watcher as watcher_mod
+
+    monkeypatch.setattr(watcher_mod, "container_memory", lambda: {"used_bytes": 2, "limit_bytes": 4})
+    monkeypatch.setattr(watcher_mod, "gpu_metrics", list)
+    w = Watcher(session_dir)
+    w.poll()
+    assert w.streams["metrics"].items == []
+    assert w.snapshot()["run"]["optimizer"]["host"] == "pod-a"
+    monkeypatch.setattr(watcher_mod.socket, "gethostname", lambda: "pod-a")
+    w._last_sample = 0.0
+    w.poll()
+    assert [m["memory"]["used_bytes"] for m in w.streams["metrics"].items] == [2]
+    assert "host" not in w.snapshot()["run"]["optimizer"]
 
 
 def test_specialist_turns_without_a_conversation_come_from_process_log(session_dir):

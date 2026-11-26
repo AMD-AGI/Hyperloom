@@ -49,6 +49,7 @@ def test_state_json_written_by_shared_state_drives_phases(tmp_path: Path) -> Non
     state = producers.new_state(model_name="m")
     producers.record_phase(state, "BASELINE", "start", 1000.0)
     producers.record_phase(state, "EXPLORE", "baseline measured", 2000.0)
+    state.agent_last_active["orchestration"] = 1500.0
     state.save(session)
     summary = producers.watch(session).summary_at(0)
     history = summary["phase_history"]
@@ -56,6 +57,9 @@ def test_state_json_written_by_shared_state_drives_phases(tmp_path: Path) -> Non
     bands = [(b["phase"], b["start"], b["end"]) for b in _phase_bands(history, 3000.0)]
     assert bands == [("BASELINE", 1000.0, 2000.0), ("EXPLORE", 2000.0, None)], contract_message(
         "phase_chain.make_history_row / machine_state.record_phase_transition", where, history
+    )
+    assert summary["agent_last_active"] == {"orchestration": 1500.0}, contract_message(
+        "SharedState.agent_last_active", "derive.py (agent_staleness)", summary
     )
 
 

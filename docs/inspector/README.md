@@ -67,8 +67,14 @@ Options:
 - `--host`, `--port`: bind address and port. Default `127.0.0.1:8765`.
 - `--replay [--speed N]`: replay the session on a virtual clock from its first record, with a scrubber. Default
   speed 1.0.
+- `--history-dir DIR`: where memory and GPU samples are kept, so a restarted Inspector backfills its chart; never
+  inside the session. Default `$XDG_STATE_HOME/hyperloom-inspector` or `~/.local/state/hyperloom-inspector`.
+- `--no-history`: keep resource samples in memory only.
 - `--verbose`, `-v`: `hyperloom inspect` only. `-v` logs INFO messages; `-vv` adds DEBUG, with a line per HTTP
   request.
+
+Memory and GPU samples are taken only while an Inspector runs live, and only on the optimizer's host: when the
+session's lock names another host, the Inspector samples nothing, as its own machine's figures would not be the run's.
 
 ### In a pod
 
@@ -103,12 +109,12 @@ an error badge saying that the tasks cannot be read, rather than an empty task l
 ## Features
 
 - **Run information**: model, GPU, TP/EP, workload, framework and stack fingerprint, budget, phase, baseline and best
-  tok/s, start and resume history, and a badge when the tasks cannot be read because the coordinator database is in
-  another account's private ledger.
+  tok/s, start and resume history, and health badges, such as a task that crashed but was recorded as succeeded, or
+  tasks that cannot be read because the coordinator database is in another account's private ledger.
 - **Harness graph**: the Coordinator, the LLM roles, executors and specialists as nodes; bus traffic, dispatch and
   LLM calls as edges. A layered or force layout. Clicking a node filters the other views.
-- **Timeline**: a lane per node with task bars by health, phase bands, bus, LLM and lifecycle markers, and resumes.
-  Idle stretches are compressed.
+- **Timeline**: a lane per node with task bars by health, phase bands, bus, LLM and lifecycle markers, resumes, and a
+  memory and GPU strip. Idle stretches are compressed.
 - **Artifacts**: every file grouped by the node and task that produced it, with a viewer for JSON, JSONL, text and
   live-following logs, and a side-by-side diff of two text files. Profiler traces show metadata only. The list
   stops at 20,000 files, and the page says so when a session holds more.

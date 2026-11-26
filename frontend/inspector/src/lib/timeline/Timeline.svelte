@@ -10,6 +10,7 @@
   import type { InspectorStore } from "../store.svelte";
   import type { StreamItem, TimelineBar } from "../types";
   import type { Selection, UiState } from "../ui.svelte";
+  import ResourceStrip from "./ResourceStrip.svelte";
   import {
     activityPoints,
     AXIS,
@@ -24,6 +25,7 @@
     lanes,
     podMarkers,
     podStarts,
+    RES,
     tlScale,
     tsOf,
     zoomAbout,
@@ -70,7 +72,9 @@
   });
 
   const pods = $derived(podStarts(view.run, tick));
-  const points = $derived(activityPoints(view.timeline, pods, [store.streams.event, store.streams.llm_call]));
+  const points = $derived(
+    activityPoints(view.timeline, pods, [store.streams.event, store.streams.llm_call, store.streams.metrics]),
+  );
   const r = $derived(range.current);
   const sc = $derived(tlScale(r.t0, r.t1, W, gapsOn ? idleGaps(points, r.t0, r.t1, tick) : []));
   const ticks = $derived(axisTicks(r, W, sc));
@@ -80,7 +84,7 @@
   const ids = $derived(lanes(nodes));
   const laneY = $derived(new Map(ids.map((id, i) => [id, AXIS + i * LANE])));
   const bottom = $derived(AXIS + ids.length * LANE);
-  const H = $derived(bottom + 8 + 16);
+  const H = $derived(bottom + 8 + RES + 16);
   const clampX = (t: number) => Math.max(LABEL, Math.min(W - 8, sc.X(t)));
   const inRange = (t: number) => t >= r.t0 && t <= r.t1;
   const faded = (id: string) => !!ui.filter && ui.filter !== id;
@@ -197,7 +201,7 @@
         {/each}
         {#each ticks as t (t)}
           {@const x = sc.X(t)}
-          <line x1={x} x2={x} y1={AXIS - 4} y2={H - 16} stroke="var(--line)" />
+          <line x1={x} x2={x} y1={AXIS - 4} y2={H - RES - 16} stroke="var(--line)" />
           <text x={x + 2} y="12" class="dim">{x < W - 90 ? fmtTime(t) : ""}</text>
         {/each}
         <!-- svelte-ignore a11y_click_events_have_key_events -->
@@ -344,6 +348,14 @@
             </path>
           {/if}
         {/each}
+        <ResourceStrip
+          metrics={store.streams.metrics}
+          range={r}
+          X={sc.X}
+          y0={bottom + 8}
+          {W}
+          context={{ replay, optimizerHost: view.run.optimizer?.host, ended: view.timeline.end != null }}
+        />
         {#if inRange(now)}
           <line class="now" x1={sc.X(now)} x2={sc.X(now)} y1="0" y2={H} data-testid="tl-now">
             <title>now {fmtTime(now)}</title>

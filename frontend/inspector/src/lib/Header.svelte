@@ -36,7 +36,15 @@
     if (o.alive === false) return { text: `not running (pid ${o.pid})`, cls: "h-crashed" };
     return { text: `unknown: ${o.reason ?? ""}`, cls: "muted" };
   });
-  const badges = $derived([...(view?.badges ?? []).map((b) => ({ level: b.level || "info", text: b.text }))]);
+  const badges = $derived([
+    ...(view?.badges ?? []).map((b) => ({ level: b.level || "info", text: b.text })),
+    ...(view?.agents ?? [])
+      .filter((a) => a.stale)
+      .map((a) => ({
+        level: "warn",
+        text: `${a.agent} quiet for ${fmtDur(a.age_sec)}`,
+      })),
+  ]);
 
   // The clock line runs on its own between server updates.
   const clockNow = sessionClock(() => store);

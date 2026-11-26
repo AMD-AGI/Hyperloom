@@ -4,7 +4,7 @@
 // Shapes of the Inspector API (src/hyperloom/inspector/watcher.py). Only the fields the page reads are typed; the
 // server sends more, and every record is redacted server-side.
 
-export const STREAM_NAMES = ["event", "llm_call", "journal", "review"] as const;
+export const STREAM_NAMES = ["event", "llm_call", "journal", "review", "metrics"] as const;
 export type StreamName = (typeof STREAM_NAMES)[number];
 
 /** A stream record; `_t` is its release time in epoch seconds. */
@@ -93,7 +93,8 @@ export interface RunInfo {
   model?: string;
   manifest?: Record<string, unknown>;
   pod_history?: { acquired_at: string; hostname: string; pid: number }[];
-  optimizer?: { alive: boolean | null; reason?: string };
+  /** `host` is set when the session's lock names a host other than the Inspector's. */
+  optimizer?: { alive: boolean | null; reason?: string; host?: string };
 }
 
 /** `/api/snapshot` without streams, as the SSE `view` event sends it. */
@@ -108,6 +109,7 @@ export interface View {
   timeline: Timeline;
   llm: Record<string, Record<string, unknown>>;
   badges: { level: string; text: string }[];
+  agents: { agent: string; age_sec: number; stale: boolean }[];
   artifact_count: number;
   /** Where the artifact list stops when the session holds more files than the index lists; null when it is whole. */
   artifacts_cut_at: number | null;

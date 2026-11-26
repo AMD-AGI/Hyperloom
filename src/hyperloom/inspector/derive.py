@@ -44,6 +44,10 @@ STATE_KEYS = (
 _CRASHED = "crashed"
 _FAILED = "failed"
 _RUNNING = "running"
+# Severity levels of the top-of-page badges.
+_LEVEL_ERROR = "error"
+_LEVEL_WARN = "warn"
+_LEVEL_INFO = "info"
 
 # Runner statuses of a specialist whose subprocess ended badly. ``stale`` (nothing usable left behind) and ``partial``
 # (it died after writing specialist_done.json, or its work was salvaged from a checkpoint) are the ones the specialist
@@ -229,6 +233,16 @@ def budget(summary: dict) -> dict:
     return {"used_sec": used, "total_sec": total, "pct": round(100.0 * used / total, 1) if total else None}
 
 
+def agent_staleness(summary: dict, now: float, stale_after_sec: float) -> list[dict]:
+    """Each agent's quiet time at *now* (the clock, or the run's end once it has ended), stale past *stale_after_sec*."""
+    out = []
+    for agent, ts in (summary.get("agent_last_active") or {}).items():
+        if isinstance(ts, (int, float)):
+            age = max(0.0, now - ts)
+            out.append({"agent": agent, "age_sec": round(age), "stale": age > stale_after_sec})
+    return out
+
+
 def throughput_series(journal: dict | None) -> list[dict]:
     """The journal's entries, oldest first; ``throughput`` is what the entry measured (``throughput_after``)."""
     if not journal:
@@ -285,3 +299,37 @@ def best_throughput(current: dict, results: list[tuple[str, Any]], series: list[
         return {**current, "hot_tput": None, "source": None}
     tput, action, source = max(found)
     return {**current, "hot_tput": tput, "action": action, "source": source}
+
+
+def health_badges(summary: dict, tasks: list[dict], memory: dict, agents: list[dict]) -> list[dict]:
+    """Top-of-page warnings, most severe first."""
+    badges = []
+    crashed = [t for t in tasks if t.get("health") == _CRASHED]
+    if crashed:
+        kinds = sorted({t.get("label") or t.get("kind") for t in crashed})
+        badges.append(
+            {
+                "level": _LEVEL_ERROR,
+                "text": f"{len(crashed)} task(s) crashed but recorded as succeeded: "
+                + ", ".join(str(k) for k in kinds),
+            }
+        )
+    stalled = [t for t in tasks if t.get("health") == "stalled"]
+    if stalled:
+        badges.append({"level": _LEVEL_WARN, "text": f"{len(stalled)} running task(s) with no recent output"})
+    used, limit = memory.get("used_bytes"), memory.get("limit_bytes")
+    if used and limit and used / limit > 0.85:
+        badges.append(
+            {
+                "level": _LEVEL_ERROR if used / limit > 0.95 else _LEVEL_WARN,
+                "text": f"container memory at {100 * used / limit:.0f}% of limit (OOM risk)",
+            }
+        )
+    if summary.get("crash_count"):
+        badges.append({"level": _LEVEL_WARN, "text": f"crash_count={summary['crash_count']}"})
+    if summary.get("degraded_mode"):
+        badges.append({"level": _LEVEL_INFO, "text": "degraded mode (model warnings)"})
+    stale = [a["agent"] for a in agents if a.get("stale")]
+    if stale and not summary.get("stop_reason"):
+        badges.append({"level": _LEVEL_WARN, "text": "agents idle: " + ", ".join(stale)})
+    return badges
