@@ -1138,7 +1138,7 @@ def test_baremetal_triton_pin_is_advisory_when_installing_nothing(tmp_path: Path
         body="\n".join(
             [
                 "rocm-smi() { :; }",
-                "rocminfo() { echo gfx942; }",
+                "amd-smi() { printf 'MARKET_NAME: AMD Instinct MI300X\\nTARGET_GRAPHICS_VERSION: gfx942\\n'; }",
                 "check_torch_rocm_shared_libs() { :; }",
                 "check_rocm_toolchain_alignment() { :; }",
                 "check_torch_triton_alignment() { return 1; }",
@@ -1148,6 +1148,43 @@ def test_baremetal_triton_pin_is_advisory_when_installing_nothing(tmp_path: Path
     )
 
     assert (res.returncode != 0) is fails, res.stderr
+
+
+@pytest.mark.parametrize(
+    ("asic", "line"),
+    [
+        pytest.param(
+            "MARKET_NAME: AMD Radeon AI PRO R9700\\nTARGET_GRAPHICS_VERSION: gfx1201\\n",
+            "GPU: AMD Radeon AI PRO R9700 (gfx1201)",
+            id="named",
+        ),
+        pytest.param(
+            "MARKET_NAME: N/A\\nTARGET_GRAPHICS_VERSION: gfx1151\\n", "GPU: unnamed GPU (gfx1151)", id="unnamed"
+        ),
+        pytest.param("", "GPU: not described by amd-smi", id="undescribed"),
+    ],
+)
+def test_baremetal_preflight_names_the_gpu_as_amd_smi_describes_it(tmp_path: Path, asic: str, line: str):
+    """Every arch is named as amd-smi reports it; none is warned about as unsupported."""
+    res = _drive_installer(
+        tmp_path,
+        importable={"sglang", "triton", "aiter", "sgl_kernel"},
+        dotenv=tmp_path / ".env",
+        body="\n".join(
+            [
+                "rocm-smi() { :; }",
+                f"amd-smi() {{ printf '{asic}'; }}",
+                "check_torch_rocm_shared_libs() { :; }",
+                "check_rocm_toolchain_alignment() { :; }",
+                "check_torch_triton_alignment() { :; }",
+                "base_preflight",
+            ]
+        ),
+    )
+
+    output = res.stdout + res.stderr
+    assert line in output
+    assert "supported" not in output
 
 
 def _sourceable_installer(install_script: Path, tmp_path: Path) -> Path:

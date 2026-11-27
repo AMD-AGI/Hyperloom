@@ -11,7 +11,6 @@ from pathlib import Path
 from time import monotonic
 
 from hyperloom_common.llm.deepseek_session import DEEPSEEK_RUNTIME_MAPPING, DeepSeekSession, DeepSeekSessionError
-from hyperloom_common.llm.reasoning_effort import DEFAULT_REASONING_EFFORT, harness_reasoning_effort
 
 _LOG_PREFIX = "[deepseek-harness]"
 
@@ -19,7 +18,7 @@ _LOG_PREFIX = "[deepseek-harness]"
 TURN_TIMEOUT_SEC = 7200.0
 
 #: How many times a session that stopped short of its owed artifact is asked to continue.
-DEFAULT_MAX_CONTINUATIONS = 3
+MAX_CONTINUATIONS = 3
 
 
 @dataclass
@@ -37,7 +36,6 @@ class DeepSeekTaskRequest:
     prompt: str
     system_prompt: str
     cwd: Path
-    writable: bool = False
     child_env: Mapping[str, str] | None = None
     log: Callable[[str], None] | None = None
     timeout_sec: float | None = None
@@ -51,12 +49,11 @@ class OwedArtifact:
     The DeepSeek Harness ends a turn whenever the model replies without a tool
     call -- including when it writes one out as text -- so a session that
     stopped before ``done()`` holds is continued with ``continuation_prompt``,
-    at most ``max_continuations`` times.
+    at most :data:`MAX_CONTINUATIONS` times.
     """
 
     done: Callable[[], bool]
     continuation_prompt: str
-    max_continuations: int = DEFAULT_MAX_CONTINUATIONS
 
 
 def _note(log: Callable[[str], None] | None, text: str) -> None:
@@ -71,8 +68,7 @@ def _session_for(request: DeepSeekTaskRequest) -> DeepSeekSession:
     return DeepSeekSession(
         cwd=request.cwd,
         instructions=instructions,
-        reasoning_effort=harness_reasoning_effort(DEFAULT_REASONING_EFFORT),
-        permission_mode="danger-full-access" if request.writable else "read-only",
+        permission_mode="danger-full-access",
         env=dict(request.child_env) if request.child_env is not None else None,
         request_timeout_sec=TURN_TIMEOUT_SEC,
     )
@@ -95,7 +91,7 @@ async def _run_until_owed(
     """Run turns until the owed artifact exists; return the error that stopped them, if any."""
     deadline = monotonic() + request.timeout_sec if request.timeout_sec else None
     turn_prompt = request.prompt
-    continuations = owed.max_continuations if owed else 0
+    continuations = MAX_CONTINUATIONS if owed else 0
     for continuation in range(continuations + 1):
         if continuation:
             _note(request.log, f"continuing: the owed artifact is not written (continuation {continuation})")
@@ -129,7 +125,7 @@ async def run_deepseek_task(request: DeepSeekTaskRequest, owed: OwedArtifact | N
 
 
 __all__ = [
-    "DEFAULT_MAX_CONTINUATIONS",
+    "MAX_CONTINUATIONS",
     "TURN_TIMEOUT_SEC",
     "DeepSeekTaskRequest",
     "DeepSeekTaskResult",

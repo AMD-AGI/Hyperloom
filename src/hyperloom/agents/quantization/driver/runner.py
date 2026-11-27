@@ -233,7 +233,6 @@ async def _run_attempt_on_deepseek(
         prompt=prompt,
         system_prompt=_ATTEMPT_SYSTEM_PROMPT,
         cwd=workspace,
-        writable=True,
         child_env=_attempt_child_env(),
         log=log,
     )

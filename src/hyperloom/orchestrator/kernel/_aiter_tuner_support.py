@@ -11,7 +11,6 @@ from pathlib import Path
 from typing import Any
 
 from hyperloom_common.env import env_bool
-from hyperloom_common.gpu_identity import is_gfx_arch
 
 log = logging.getLogger(__name__)
 
@@ -135,7 +134,7 @@ def _aiter_fused_moe_dispatch_keys(server_log: str) -> list[dict[str, Any]]:
     return moe_dispatch_keys(parse_log_file(server_log))
 
 
-def _aiter_ck_moe_tuner_supports(server_log: str, gpu_type: str) -> bool:
+def _aiter_ck_moe_tuner_supports(server_log: str, gfx: str) -> bool:
     """Return whether aiter's CK MoE tuner can tune anything the server dispatched.
 
     The tuner builds its kernel candidates from the activation/weight dtype pair
@@ -154,7 +153,7 @@ def _aiter_ck_moe_tuner_supports(server_log: str, gpu_type: str) -> bool:
     keys = _aiter_fused_moe_dispatch_keys(server_log)
     if not keys:
         # Only gfx1201 needs a dtype receipt before this AITER tuner can be admitted.
-        return not is_gfx_arch(gpu_type, "gfx1201")
+        return gfx != "gfx1201"
     return any(_aiter_moe_dtype_pair_supported(key["q_dtype_a"], key["q_dtype_w"]) for key in keys)
 
 

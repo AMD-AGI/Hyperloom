@@ -267,10 +267,11 @@ the bundle rather than the lever.
 
 ## Other requirements
 
-**GPU type.** `--gpu-type` accepts `mi300x`, `mi308x`, `mi325x`, `mi355x`,
-`r9700`, `r9600d`, `w7900`, `w7900d` and `radeon8060s` (Strix Halo). The entrypoint name uses the board as
-given: `mi325x` looks for `custom_mi325x.sh`, not `custom_mi300x.sh`. Without the flag, Hyperloom auto-detects through
-`rocm-smi --showproductname`.
+**GPU type.** The board is the label of the card the machine reports: its market name reduced to the model
+designation, so an `AMD Instinct MI325X` looks for `custom_mi325x.sh`, not `custom_mi300x.sh`, and an `AMD Radeon 8060S
+Graphics` (Strix Halo) for `custom_radeon8060s.sh`. `--gpu-type` accepts any name (lower-cased) and is used when the
+card reports no model name or cannot be read; a name the card contradicts is overridden with a `WARN`. With neither a
+card nor a name the launch exits 2.
 
 **Pin GPUs with `ROCR_VISIBLE_DEVICES`, not `HIP_VISIBLE_DEVICES`.** On the known
 ROCm stack the latter can make `torch.cuda.is_available()` return false.

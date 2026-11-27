@@ -5,21 +5,24 @@
 
 Claude Code ends each query with a result row, which counts it: the messages streamed before it carry placeholder
 output counts, some gateways zero their usage, and a message without an id cannot be told apart from its streamed
-repeats. The row's ``modelUsage`` holds the running totals of the CLI process per model, Task sub-agents included, so
-the last one counts every finished query of a log, which holds one launch; a row without it counts its own ``usage``
-under the model of the query's messages. The calls of a query the launch was killed in have no result row and are
-read from their messages, each id once. Codex logs each turn's usage when the turn completes, without the model.
+repeats. The row's ``modelUsage`` holds the running totals of the conversation per model, Task sub-agents included, so
+the last one counts every finished query of a log, which holds one launch, and of the launches before it when the
+launch resumed the conversation: a resumed CLI starts from the totals the conversation had reached, which are its first
+row's less that query's own ``usage``, and a Task sub-agent that query ran is left out with them. A row without
+``modelUsage`` counts its own ``usage`` under the model of the query's messages. The calls of a query the launch was
+killed in have no result row and are read from their messages, each id once. Codex logs each turn's usage when the
+turn completes, without the model.
 """
 
 from __future__ import annotations
 
 import json
 from collections.abc import Iterator, Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
 
-from hyperloom_multibranch.contracts.llm_prices import TokenCounts, price_of
+from hyperloom_multibranch.contracts.llm_prices import TokenCounts, model_key, price_of
 
 #: The model of calls the log does not name (codex turns): the launch's own model.
 UNNAMED = ""
@@ -40,31 +43,61 @@ class LaunchUsage:
         return sum(self.tokens.values(), TokenCounts())
 
 
-def launch_usage(process_log: Path) -> LaunchUsage:
-    """Every model call a Claude or codex stream-json log records; none when the log is missing."""
+def launch_usage(process_log: Path, *, resumed: bool = False) -> LaunchUsage:
+    """Every model call a Claude or codex stream-json log records; none when the log is missing. A ``resumed`` log
+    counts only its own launch's calls, not those its conversation made before."""
     running: dict[str, TokenCounts] = {}
     tokens: dict[str, TokenCounts] = {}
     unfinished: dict[str, tuple[str, TokenCounts]] = {}
     session_id, model = "", UNNAMED
     for row in _rows(process_log):
         session_id = session_id or str(row.get("session_id") or row.get("thread_id") or "")
-        usage, per_model = row.get("usage"), row.get("modelUsage")
+        usage, totals = row.get("usage"), _model_totals(row)
         message = _model_call(row)
         if message is not None:
             model = str(message.get("model") or UNNAMED)
             key = str(message.get("id") or f"#{len(unfinished)}")
             unfinished[key] = (model, TokenCounts.from_anthropic_usage(message["usage"]))
-        elif row.get("type") == "result" and isinstance(per_model, Mapping) and per_model:
-            running = {str(name): _model_usage_tokens(counts) for name, counts in per_model.items()}
+        elif totals is not None:
+            running = totals
             unfinished.clear()
         elif row.get("type") == "result" and isinstance(usage, Mapping):
             _add(tokens, model, TokenCounts.from_anthropic_usage(usage))
             unfinished.clear()
         elif row.get("type") == "turn.completed" and isinstance(usage, Mapping):
             _add(tokens, UNNAMED, _codex_tokens(usage))
+    if resumed:
+        running = tokens_beyond(running, _carried_in(process_log))
     for named, counts in [*running.items(), *unfinished.values()]:
         _add(tokens, named, counts)
     return LaunchUsage(tokens, session_id)
+
+
+def tokens_beyond(tokens: Mapping[str, TokenCounts], earlier: Mapping[str, TokenCounts]) -> dict[str, TokenCounts]:
+    """Each model's ``tokens`` less its ``earlier`` ones, none below 0; a model with nothing beyond them is left out."""
+    beyond = {model: counts.less(earlier.get(model, TokenCounts())) for model, counts in tokens.items()}
+    return {model: counts for model, counts in beyond.items() if counts != TokenCounts()}
+
+
+def _carried_in(process_log: Path) -> dict[str, TokenCounts]:
+    """What a resumed conversation had used before its launch: the running totals of the log's first ``modelUsage``
+    row less that query's own ``usage``, under the model of its messages; nothing when the log has no such row."""
+    model = UNNAMED
+    for row in _rows(process_log):
+        message, totals = _model_call(row), _model_totals(row)
+        if message is not None:
+            model = str(message.get("model") or UNNAMED)
+        elif totals is not None:
+            own, query = _query_tokens(row.get("usage")), model_key(model)
+            return {name: counts.less(own) if model_key(name) == query else counts for name, counts in totals.items()}
+    return {}
+
+
+def _query_tokens(usage: object) -> TokenCounts:
+    """A result row's own ``usage`` as ``modelUsage`` counts it: its cache writes in one count, whatever their
+    lifetime."""
+    own = TokenCounts.from_anthropic_usage(usage) if isinstance(usage, Mapping) else TokenCounts()
+    return replace(own, cache_write=own.cache_write + own.cache_write_1h, cache_write_1h=0)
 
 
 def _model_call(row: Mapping[str, object]) -> Mapping[str, Any] | None:
@@ -116,6 +149,14 @@ def _codex_tokens(usage: Mapping[str, object]) -> TokenCounts:
     return TokenCounts(max(0, _count(usage, "input_tokens") - cached), _count(usage, "output_tokens"), cached)
 
 
+def _model_totals(row: Mapping[str, object]) -> dict[str, TokenCounts] | None:
+    """The running per-model totals of a result row's ``modelUsage``; ``None`` for any other row."""
+    per_model = row.get("modelUsage")
+    if row.get("type") != "result" or not isinstance(per_model, Mapping) or not per_model:
+        return None
+    return {str(name): _model_usage_tokens(counts) for name, counts in per_model.items()}
+
+
 def _model_usage_tokens(counts: object) -> TokenCounts:
     counts = counts if isinstance(counts, Mapping) else {}
     return TokenCounts(
@@ -131,4 +172,4 @@ def _count(usage: Mapping[str, object], key: str) -> int:
     return value if isinstance(value, int) and not isinstance(value, bool) and value > 0 else 0
 
 
-__all__ = ["UNNAMED", "LaunchUsage", "launch_cost", "launch_usage"]
+__all__ = ["UNNAMED", "LaunchUsage", "launch_cost", "launch_usage", "tokens_beyond"]

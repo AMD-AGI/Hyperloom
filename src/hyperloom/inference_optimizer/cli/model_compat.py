@@ -11,8 +11,9 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 
+from hyperloom_common import gpu_card
+
 from .. import framework_registry
-from .. import gpu_types as _gpu_types
 from ...common.model_paths import resolve_local_model_dir
 from ..model_config_utils import (
     load_model_config_dict,
@@ -445,11 +446,7 @@ _COMPAT_DETECTORS: tuple[DetectorSpec, ...] = (
 )
 
 
-def _detect_incompatible_model_config(
-    model_path: str,
-    gpu_type: str | None = None,
-    framework: str | None = None,
-) -> str | None:
+def _detect_incompatible_model_config(model_path: str, framework: str | None = None) -> str | None:
     """Detect a statically-knowable model-config incompatibility."""
     if not model_path:
         return None
@@ -471,7 +468,7 @@ def _detect_incompatible_model_config(
             f"at config load."
         )
     # The first detector in table order that returns a reason wins.
-    is_amd = bool(_gpu_types._resolve_amd_gpu_type(gpu_type))
+    is_amd = gpu_card.session_card() is not None
     loads_model_file = framework_registry.loads_model_file(framework)
     for spec in _COMPAT_DETECTORS:
         if spec.amd_only and not is_amd:

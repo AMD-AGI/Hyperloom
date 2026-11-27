@@ -60,6 +60,7 @@ from hyperloom.measure.failures import (
     PROFILER_DIED,
     PROFILER_HUNG,
     PROFILER_SNAPSHOT_FAILED,
+    PROFILE_REFUSED,
     RESULT_DOWNLOAD_INCOMPLETE,
     RUNNER_START_TIMEOUT,
     SANDBOX_ACQUIRE_TIMEOUT,
@@ -94,9 +95,11 @@ INFRA_BACKOFF_SECONDS: tuple[float, ...] = (60.0, 120.0, 240.0)
 #: whose server died in the profiler's memory-snapshot dump (``PROFILER_SNAPSHOT_FAILED``) dies there in every sandbox of
 #: the image, and says nothing of the candidate. A profile whose server went silent with its profile window open
 #: (``PROFILER_HUNG``) hangs again at the same point on the same image; a retry only holds the cards for another silence
-#: limit, or meets them still held by the hung server's ranks. The failed profile tells the session its backend cannot
-#: profile, so it asks for none again. A sandbox whose framework is another version than the one the candidate's files
-#: were compiled against (``FRAMEWORK_VERSION_MISMATCH``) runs the same image as every other sandbox of the test.
+#: limit, or meets them still held by the hung server's ranks. A profile whose server refused its ``/start_profile``
+#: (``PROFILE_REFUSED``) is refused again by every server of the image. The failed profile tells the session its
+#: backend cannot profile, so it asks for none again. A sandbox whose framework is another version than the one the
+#: candidate's files were compiled against (``FRAMEWORK_VERSION_MISMATCH``) runs the same image as every other sandbox
+#: of the test.
 UNRETRIED_INFRA_REASONS: frozenset[str] = frozenset(
     {
         INERT_PATCH,
@@ -104,6 +107,7 @@ UNRETRIED_INFRA_REASONS: frozenset[str] = frozenset(
         HF_CACHE_PERMISSION,
         PROFILER_SNAPSHOT_FAILED,
         PROFILER_HUNG,
+        PROFILE_REFUSED,
         FRAMEWORK_VERSION_MISMATCH,
     }
 )

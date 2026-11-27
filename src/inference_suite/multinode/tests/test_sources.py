@@ -253,19 +253,16 @@ def test_malformed_master_rows_miss_and_resolve_falls_to_the_table(tmp_path):
     assert resolve(query, ResolveInputs(inferencex=lambda: malformed)).source.kind is PdSourceKind.PD_TABLE
 
 
-@pytest.mark.parametrize(("tuned", "asked"), [("mi325x", "mi300x"), ("mi300x", "mi325x")])
-def test_a_pd_session_refuses_a_launch_tuned_on_the_other_gfx942_board(tmp_path, tuned, asked):
-    files = {
-        MASTER: _MASTER.replace("mi355x", tuned),
-        RUNNERS: _RUNNERS.replace("mi355x", tuned),
-        f"{MULTI_NODE_RECIPES}/m/sglang/{tuned}-fp8/1k1k/disagg.yaml": _RECIPE.replace("mi355x", tuned),
-    }
-    board_checkout = _write_checkout(tmp_path, files)
-
-    master = master_candidates(_query(board=asked), board_checkout)
-
-    assert master.found == ()
-    assert any(f"it runs on {tuned}, not {asked}" in miss for miss in master.misses)
+@pytest.mark.parametrize(("tuned", "asked"), [("mi325x", "mi300x"), ("mi300x", "mi325x"), ("mi355x", "mi350x")])
+def test_a_pd_session_refuses_a_launch_tuned_on_another_board(tmp_path, tuned, asked):
+    """A board is matched by name: one of the same architecture and memory is still another board."""
+    runners = f"labels:\n  {tuned}: [n1, n2]\n  cluster:{tuned}-amds: [n1]\n"
+    master = _MASTER.replace("cluster:mi355x-amds", f"cluster:{tuned}-amds")
+    recipe = f"{MULTI_NODE_RECIPES}/m/sglang/mi355x-fp8/1k1k/disagg.yaml"
+    checkout = _write_checkout(tmp_path, {MASTER: master, RUNNERS: runners, recipe: _RECIPE})
+    found = master_candidates(_query(board=asked), checkout)
+    assert found.found == ()
+    assert any(f"it runs on {tuned}, not {asked}" in miss for miss in found.misses)
 
 
 def test_recipe_fit_reads_each_frameworks_topology_spelling():

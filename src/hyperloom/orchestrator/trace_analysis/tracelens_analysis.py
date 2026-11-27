@@ -66,6 +66,7 @@ from ._collective_candidates_inject import _inject_collective_candidates
 from ._kernel_roofline import default_roofline_fields
 from ._kernel_search import refresh_kernel_search_roots
 from ._perf_report_analysis import analyze_perf_report
+from ._stream_overlap_repair import clamp_chunk_stream_overlaps
 from ._trace_gates import WorkloadShares, _evaluate_idle_gate_with_graph_guard, _evaluate_low_compute_gate
 from ._trace_inputs import (
     TraceInputs,
@@ -74,7 +75,14 @@ from ._trace_inputs import (
     _trace_file_size,
     discover_trace_inputs,
 )
-from ._trace_split import TraceSplitJob, _run_trace_split
+from ._trace_split import (
+    STEADY_STATE_MODES,
+    UNSPLIT_MODE,
+    TraceSplitJob,
+    default_split_num_steps,
+    run_trace_split,
+    use_unsplit_trace,
+)
 
 # trace_analyze heals a vanished checkout through this module's _ensure_tracelens_checkout.
 from ._tracelens_checkout import (
@@ -189,8 +197,8 @@ def _tracelens_knows_arch(arch_json: Path | None, platform: str, out_dir: Path) 
 
     The run config names the platform: TraceLens' analysis steps need the name, and its report refuses a job that names
     both a platform and ``gpu_arch_json_path``. TraceLens resolves a name only from its bundled arch dir and from the
-    ``TL_EXTENSION`` packages, so an arch JSON resolved anywhere else (Hyperloom's spec from
-    :data:`hyperloom_common.gpu_identity.AMD_GPU_BOARDS`, a microbenchmark) is otherwise never read and a platform
+    ``TL_EXTENSION`` packages, so an arch JSON resolved anywhere else (Hyperloom's spec from the session's card, a
+    microbenchmark) is otherwise never read and a platform
     TraceLens does not bundle fails the run config's check (both routes) and the report. The JSON is served as a ``TL_EXTENSION`` package under ``out_dir``;
     the package root is put on ``sys.path`` and ``PYTHONPATH`` (for child processes); ``sys.path``, ``PYTHONPATH`` and
     ``TL_EXTENSION`` are restored on exit.
@@ -570,7 +578,7 @@ def _add_split_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
         "--split-num-steps",
         type=int,
-        default=int(os.environ.get("TRACELENS_SPLIT_NUM_STEPS", "32") or 32),
+        default=default_split_num_steps(),
         help=(
             "Number of steady-state iterations for the splitter to extract "
             "(#127). Maps to --num-steps on TraceLens.TraceUtils.split_trace.main."
@@ -613,7 +621,7 @@ def _add_chunk_selection_args(parser: argparse.ArgumentParser) -> None:
     )
     parser.add_argument(
         "--steady-state-mode",
-        choices=("mixed", "decode_only", "prefilldecode", "generic"),
+        choices=STEADY_STATE_MODES,
         default=(os.environ.get("INFERENCE_OPTIMIZER_STEADY_STATE_MODE", "").strip() or "mixed"),
         help=(
             "Which steady-state chunk to consume for the perf report. "
@@ -634,6 +642,9 @@ def _add_chunk_selection_args(parser: argparse.ArgumentParser) -> None:
             "chunk carries the real GEMM / attention kernels. "
             "Switch to 'decode_only' when you specifically want the "
             "longest pure-decode region (decode-perf comparison runs). "
+            "'decode_only_or_generic' takes the decode-only chunk, else the "
+            "generic one (PD decode servers); 'unsplit' analyses the whole "
+            "trace without splitting it (PD prefill servers). "
             "May also be set via env "
             "INFERENCE_OPTIMIZER_STEADY_STATE_MODE so the coordinator "
             "can re-issue roofline with a different mode after a "
@@ -673,7 +684,11 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--session-id", default="")
     parser.add_argument("--model-name", default="")
     parser.add_argument("--framework", default="")
-    parser.add_argument("--target-platform", default="MI355X")
+    parser.add_argument(
+        "--target-platform",
+        required=True,
+        help="The GPU label of the cards the trace ran on (the session's --gpu-type); it names their arch JSON.",
+    )
     parser.add_argument(
         "--arch-gpus",
         type=parse_arch_gpus,
@@ -692,6 +707,11 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--trajectory-task-id", default="")
     parser.add_argument("--trajectory-parent-span-id", default="")
     parser.add_argument("--dry-run", action="store_true")
+    parser.add_argument(
+        "--clamp-stream-overlaps",
+        action=argparse.BooleanOptionalAction,
+        help="Truncate same-stream overrunning GPU events in the steady-state chunk (set for PD profiles).",
+    )
     parser.add_argument(
         "--route",
         choices=[route.value for route in AnalysisRoute],
@@ -846,9 +866,11 @@ def _preflight_trace_input(run: AnalysisRun, trace_input: Path, trace_files: lis
 
 
 def _split_steady_state(run: AnalysisRun, job: TraceSplitJob) -> Path:
-    """Split the analysed trace and return the steady-state chunk the perf report reads."""
+    """Split the analysed trace and return the steady-state chunk the perf report reads; an unsplit run reads it whole."""
     args = run.args
-    cli_trace_path, split_meta = _run_trace_split(
+    if args.steady_state_mode == UNSPLIT_MODE:
+        return use_unsplit_trace(run, job.analysis_trace_path, job.split_dir)
+    cli_trace_path, split_meta = run_trace_split(
         args,
         job,
         run.log_path,
@@ -1039,6 +1061,7 @@ def _analyse_trace(run: AnalysisRun, trace_input: Path, trace_files: list[Path])
     )
     split_dir = tracelens_dir / "trace_split"
     cli_trace_path = _split_steady_state(run, TraceSplitJob(analysis_trace_path, split_dir, tl_root))
+    clamp_chunk_stream_overlaps(run, cli_trace_path)
 
     # Graph-capture folder for TraceLens inference graph replay analysis.
     capture_folder = _resolve_capture_folder(run, trace_input, analysis_trace_path)

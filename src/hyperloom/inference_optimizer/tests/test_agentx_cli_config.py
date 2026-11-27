@@ -8,6 +8,7 @@ from pathlib import Path
 import pytest
 import yaml
 
+from hyperloom_common import gpu_card
 from hyperloom.common.benchmark_config import BENCHMARK_CONFIG_ENV, benchmark_config_path
 from hyperloom.common.perf_metric import agentx_enabled
 from hyperloom.inference_optimizer import cli
@@ -25,6 +26,7 @@ from hyperloom.orchestrator.actions.executors.workload._workload_envs import (
     LaunchLayer,
 )
 from hyperloom.orchestrator.actions.executors.agentx_point import enable_profile
+from hyperloom.orchestrator.tests._fixtures import MI355X_CARD
 
 
 def load_benchmark(path: Path) -> dict:
@@ -280,10 +282,9 @@ def test_generated_snapshot_records_the_base_topology_and_precedes_manifest(tmp_
         "_enforce_expected_framework",
         "_apply_operator_supplied_paths",
         "_require_custom_entrypoint",
-        "_check_gfx_arch_resolvable",
     ):
         monkeypatch.setattr(cli, name, lambda *a, **kw: None)
-    monkeypatch.setattr(cli, "_autodetect_gpu_type", lambda: "mi355x")
+    monkeypatch.setattr(gpu_card, "read_cards", lambda: [MI355X_CARD])
     monkeypatch.setattr(cli, "resolve_framework_version", lambda args: "test-version")
     monkeypatch.setattr(cli, "make_session_dir", lambda **kw: tmp_path)
     monkeypatch.setattr(cli, "_acquire_session_lock_or_exit", lambda path: None)

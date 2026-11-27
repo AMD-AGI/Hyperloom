@@ -10,7 +10,6 @@ import argparse
 from hyperloom.common import predictor_config
 from hyperloom.common.concurrencies import parse_concurrencies
 from hyperloom.common.workload_defaults import DEFAULT_PRECISION
-from hyperloom_common.gpu_identity import AMD_GPU_BOARDS
 
 from .. import framework_registry
 from .backends import CRITIC_PROTOCOL_CHOICES
@@ -22,15 +21,10 @@ def add_gpu_partition_arguments(opt: argparse.ArgumentParser) -> None:
     opt.add_argument(
         "--gpu-type",
         type=str.lower,
-        # Sorted for a stable --help listing, and derived so a board added to the board table is accepted here
-        # without a second edit.
-        choices=sorted(AMD_GPU_BOARDS),
         default=None,
-        help="Hint for the real target GPU. The rocm-smi probe always "
-        "wins when both are present and disagree; a WARN is "
-        "emitted to stderr so the operator sees the typo. Used "
-        "verbatim only when the probe fails (CPU sandbox / no "
-        "rocm-smi).",
+        help="The name this session's results are filed under (recipes, KB rows, reports), e.g. mi355x, for a "
+        "card that reports no model name or cannot be read. A card that names its model is filed under that "
+        "name, and a WARN is printed when the two differ.",
     )
     opt.add_argument(
         "--compute-partition-mode",

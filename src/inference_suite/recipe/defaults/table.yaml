@@ -2,6 +2,8 @@
 # SPDX-License-Identifier: MIT
 
 # The fixed-workload launch a framework gets on an architecture when no recipe serves the query.
+# A row without gfx is the framework's fallback: it runs on an architecture no row names, and when
+# the GPU's architecture is unknown.
 # Left out on purpose: TP and EP (the query's), the context length and the dual-chunk attention
 # backend (the host computes them from the model), the MoE runner (a Hyperloom guard), and the
 # runner's own environment (HSA_*, HIP renumbering, PYTORCH_ROCM_ARCH).
@@ -25,6 +27,9 @@ rows:
       - triton
       - --disable-cuda-graph
     env: {SGLANG_USE_AITER: "0"}
+  - framework: sglang
+    args: [--trust-remote-code]
+    env: {}
   - framework: vllm
     gfx: [gfx942, gfx950]
     args: [--trust-remote-code, --gpu-memory-utilization, "0.95"]
@@ -37,7 +42,13 @@ rows:
     gfx: [gfx1100, gfx1151]
     args: [--trust-remote-code, --gpu-memory-utilization, "0.95"]
     env: {VLLM_ROCM_USE_AITER: "0", VLLM_ROCM_USE_AITER_MHA: "0", VLLM_ROCM_USE_AITER_RMSNORM: "0"}
+  - framework: vllm
+    args: [--trust-remote-code]
+    env: {}
   - framework: atom
     gfx: [gfx942, gfx950]
+    args: [--trust-remote-code]
+    env: {}
+  - framework: atom
     args: [--trust-remote-code]
     env: {}
