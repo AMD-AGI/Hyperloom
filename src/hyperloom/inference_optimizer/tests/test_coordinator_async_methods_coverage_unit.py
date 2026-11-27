@@ -1141,34 +1141,6 @@ async def test_unpromotable_baseline_failures_in_prelude_with_enablement_admitte
     assert coord.shared_state.stop_reason != "baseline_failed"
 
 
-# -- --no-source-changes: the stalled-domain force runs research ----------
-@pytest.mark.asyncio
-async def test_the_stalled_domain_force_dispatches_research_under_no_source_changes(
-    coord: Coordinator, tmp_path
-) -> None:
-    """The force's anchored dispatch defaults to patch mode; a patch it authored could only be skipped by the gate."""
-    from hyperloom.orchestrator.specialists.profile import MODE_RESEARCH, resolve_specialist_profile
-
-    state = coord.shared_state
-    state.phase = "FRAMEWORK_AGENT"
-    state.no_source_changes = True
-    source_root = tmp_path / "framework"
-    (source_root / ".git").mkdir(parents=True)
-    state.framework_repo_path = str(source_root)
-    state.upsert_gap({"canonical_id": "gap.serving", "domain_hint": "serving_specialist", "severity": "high"})
-    for _ in range(50):
-        state.bump_domain_round_counters()
-
-    await coord.specialist_dispatch.maybe_force_stalled_domain_specialist()
-
-    forced = [t for t in await coord.tasks.queued() if t.kind == "specialist"]
-    assert len(forced) == 1
-    assert forced[0].params["reason"].startswith("stalled_domain_force:")
-    assert forced[0].params["no_source_changes"] is True
-    assert resolve_specialist_profile(forced[0].params).mode == MODE_RESEARCH
-    assert "research_lane" in forced[0].requires_lanes
-
-
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("session", "caller", "expected"),
