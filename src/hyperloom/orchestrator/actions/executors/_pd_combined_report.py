@@ -32,11 +32,10 @@ from hyperloom.orchestrator.trace_analysis import (
     clamp_or_skip_reason,
     copy_unsplit_trace,
     default_split_num_steps,
+    discover_capture_folder,
     run_command,
     run_trace_split,
 )
-from hyperloom.orchestrator.trace_analysis.tracelens_arch_benchmark import normalize_platform
-from hyperloom.orchestrator.trace_analysis.tracelens_skill_runner import discover_capture_folder
 from hyperloom_common.timeutil import utc_now_compact
 
 from ._pd_role_trace import ROLE_STEADY_STATE_MODE
@@ -69,9 +68,6 @@ def _split_options(steady_state_mode: str) -> SimpleNamespace:
         steady_state_mode=steady_state_mode,
         budget_minutes=_SPLIT_BUDGET_MINUTES,
         split_llm_inference=False,
-        split_conc="",
-        split_osl="",
-        split_r="",
     )
 
 
@@ -144,11 +140,11 @@ def run_pd_combined_report(node_traces: dict[str, list[str]], run: PdReportRun) 
     Never raises: a failed split or report comes back as ``status="failed"`` with the error.
     """
     output_dir = run.output_dir
-    output_dir.mkdir(parents=True, exist_ok=True)
     log_path = output_dir / "pd_report.log"
     config_path = output_dir / PD_REPORT_CONFIG_NAME
     result: dict[str, Any] = {"status": "failed", "output_dir": str(output_dir), "config": str(config_path)}
     try:
+        output_dir.mkdir(parents=True, exist_ok=True)
         jobs = _report_jobs(node_traces, run, log_path)
         if not jobs:
             raise RuntimeError("no PD node traces to report")
@@ -188,6 +184,7 @@ async def report_pd_profile(profile_result: dict[str, Any], *, framework: str, p
     """
     from hyperloom.inference_optimizer.framework_registry import tracelens_analysis_mode
     from hyperloom.inference_optimizer.session import paths
+    from hyperloom.orchestrator.trace_analysis.tracelens_arch_benchmark import normalize_platform
 
     node_traces = profile_result.get("role_node_traces") or {}
     trace_dir = str(profile_result.get("trace_dir") or "")
