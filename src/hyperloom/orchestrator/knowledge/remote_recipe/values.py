@@ -14,9 +14,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Collection, Final, Mapping
 
-from hyperloom_common.coerce import to_float
-
-from hyperloom_common.coerce import first_text, optional_positive_int
+from hyperloom_common import gpu_card
+from hyperloom_common.coerce import first_text, optional_positive_int, to_float
 from hyperloom.common.env_safety import (
     ENV_FILE_LIST_SEP,
     env_file_list_elements,
@@ -1056,8 +1055,7 @@ def build_remote_knowledge(
     KernelAgentKB(sections).stage_from_state(state, kernel_optimizer=scope.kernel_optimizer)
 
     merged = merge_staged_sections(sections, files, required=required_columns)
-    missing_columns = required_columns - merged.keys()
-    if missing_columns:
+    if missing_columns := required_columns - merged.keys():
         raise RemoteRecipeValidationError(f"required staged columns are missing: {sorted(missing_columns)!r}")
     value: dict[str, Any] = {name: merged.get(name, {}) for name in RECIPE_SECTIONS}
     # Carrying the prior record forward runs last: it unions rows and refs into the assembled columns, so it must see
@@ -1072,6 +1070,7 @@ def build_remote_knowledge(
             "record_kind": RECORD_KIND_HYPERLOOM_RECIPE,
             **profile.metrics,
             "workload_shape": workload_shape(state, scope=scope),
+            "gfx_arch": gpu_card.session_gfx(),
             "value": value,
             "what_worked": worked,
             "what_failed": _experience(state, "last_action_failures"),
@@ -1164,6 +1163,7 @@ def knowledge_to_warm_recipe(document: Mapping[str, Any]) -> dict[str, Any]:
         "pitfalls": list(knowledge.get("pitfalls") or []),
         "sessions": ([{"session_id": session_id, "gain_pct": validated_gain}] if session_id else []),
         "provenance": _mapping(knowledge.get("provenance")),
+        "gfx_arch": str(knowledge.get("gfx_arch") or ""),
         "remote_session_id": session_id,
         "remote_schema_version": int(document.get("schema_version") or 2),
         "knowledge_schema_version": CURRENT_KNOWLEDGE_SCHEMA_VERSION,

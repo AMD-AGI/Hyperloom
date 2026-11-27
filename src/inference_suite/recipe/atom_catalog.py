@@ -24,7 +24,6 @@ from dataclasses import dataclass, replace
 from typing import Any
 
 from hyperloom_common.contract_fields import ContractFields
-from hyperloom_common.gpu_identity import AMD_GPU_BOARDS
 from inference_suite.argv import argv_flag_occurrences, canonical_flag_name, last_alias_value
 from inference_suite.contracts.base_launch import LaunchQuery, LaunchSource, SourceKind, Topology, Workload
 from inference_suite.recipe.model import (
@@ -35,7 +34,6 @@ from inference_suite.recipe.model import (
     RepoBundle,
     SourceLaunch,
     SourceMiss,
-    boards_interchangeable,
 )
 from inference_suite.recipe.shell_launch import _logical_lines
 
@@ -151,10 +149,9 @@ def _server_env(env: Mapping[str, str]) -> tuple[dict[str, str], tuple[str, ...]
 
 @dataclass(frozen=True)
 class _Candidate:
-    """A launch ATOM states for the query's model, before it is held to the rest of the query."""
+    """A launch ATOM states for the query's model on its board, before it is held to the rest of the query."""
 
     source: LaunchSource
-    board: str
     conc: int
     exact: bool
     image: str | None
@@ -178,17 +175,12 @@ def _misfit(args: Sequence[str], topology: Topology, query: LaunchQuery) -> str 
 def _launch(candidate: _Candidate, query: LaunchQuery) -> SourceLaunch | str:
     """The launch ``candidate`` states for ``query``, or why it does not serve it."""
     where = f"{candidate.source.path} {candidate.source.locator}"
-    if not boards_interchangeable(query.board, candidate.board):
-        return f"{where}: it is tuned on {candidate.board}, not {query.board}"
     args, stripped = _server_args(candidate.command.argv)
     topology = ATOM_TOPOLOGY.read(args)
     misfit = _misfit(args, topology, query)
     if misfit is not None:
         return f"{where}: {misfit}"
     env, harness = _server_env(candidate.command.env)
-    warnings = candidate.warnings
-    if candidate.board != query.board:
-        warnings += (f"ATOM tuned {candidate.source.entry} on {candidate.board}, not {query.board}",)
     return SourceLaunch(
         source=candidate.source,
         framework=_FRAMEWORK,
@@ -200,13 +192,8 @@ def _launch(candidate: _Candidate, query: LaunchQuery) -> SourceLaunch | str:
         args=args,
         env=env,
         stripped=stripped + harness,
-        warnings=warnings,
+        warnings=candidate.warnings,
     )
-
-
-def _runner_board(runner: str) -> str | None:
-    """The board a catalog runner label names (``linux-atom-pitt-mi350x-8`` names mi350x), if any."""
-    return next((word for word in runner.split("-") if word in AMD_GPU_BOARDS), None)
 
 
 def _catalog_args(config: Mapping[str, Any], variant: Mapping[str, Any]) -> str:
@@ -252,15 +239,18 @@ class _Variant:
     where: str
 
 
-def _catalog_candidate(bundle: RepoBundle, catalog: Mapping[str, Any], held: _Variant, target: int) -> _Candidate | str:
+def _catalog_candidate(
+    bundle: RepoBundle, catalog: Mapping[str, Any], held: _Variant, query: LaunchQuery
+) -> _Candidate | str:
     model, variant, where = held.model, held.variant, held.where
     entry = " ".join(filter(None, (str(model.get("display")), variant.get("label"))))
+    target = max(query.concurrencies)
     fitting = [conc for conc in _variant_points(catalog, model, variant) if conc >= target]
     if not fitting:
         return f"{CATALOG} {where}: {entry} is benchmarked at no concurrency of {target} or more"
-    board = _runner_board(str(model.get("runner")))
-    if board is None:
-        return f"{CATALOG} {where}: its runner {model.get('runner')!r} names no board"
+    # A runner label is dash-separated words, one of them the board (``linux-atom-pitt-mi350x-8``).
+    if query.board not in str(model.get("runner")).split("-"):
+        return f"{CATALOG} {where}: its runner {model.get('runner')!r} is not a {query.board}"
     words = _words(_catalog_args(model.get("config") or {}, variant))
     if isinstance(words, str):
         return f"{CATALOG} {where}: its args are not literal: {words}"
@@ -276,7 +266,7 @@ def _catalog_candidate(bundle: RepoBundle, catalog: Mapping[str, Any], held: _Va
     )
     warnings = () if conc == target else (f"{entry} has no point at concurrency {target}; took {conc}",)
     command = _Command(tuple(words), _catalog_env(model, variant, where))
-    return _Candidate(source, board, conc, conc == target, None, command, warnings)
+    return _Candidate(source, conc, conc == target, None, command, warnings)
 
 
 def _catalog_candidates(query: LaunchQuery, bundle: RepoBundle) -> Iterator[_Candidate | str]:
@@ -292,7 +282,7 @@ def _catalog_candidates(query: LaunchQuery, bundle: RepoBundle) -> Iterator[_Can
             variant = _FIELDS.mapping(variant, f"ATOM catalog variant {where}")
             if variant.get("path", model.get("path")) == query.model_id:
                 held = _Variant(model, variant, where)
-                yield _catalog_candidate(bundle, catalog, held, max(query.concurrencies))
+                yield _catalog_candidate(bundle, catalog, held, query)
 
 
 @dataclass(frozen=True)
@@ -334,15 +324,13 @@ def _page_blocks(path: str, text: str) -> Iterator[_PageBlock]:
             index += 1
 
 
-def _heading_board(block: _PageBlock, query: LaunchQuery) -> str | None:
-    """The board the nearest heading naming any tunes the block for: the query's, else one interchangeable with it,
-    else the first it names; ``None`` when no heading names one."""
+def _heading_boards(block: _PageBlock) -> list[str]:
+    """The boards the nearest heading naming any tunes the block for; empty when no heading names one."""
     for heading in block.headings:
         named = [f"mi{digits}x" for digits in _BOARD_NAME.findall(heading)]
         if named:
-            fits = [board for board in named if boards_interchangeable(query.board, board)]
-            return query.board if query.board in named else (fits or named)[0]
-    return None
+            return named
+    return []
 
 
 def _page_candidate(block: _PageBlock, bundle: RepoBundle, query: LaunchQuery) -> _Candidate | str | None:
@@ -353,9 +341,11 @@ def _page_candidate(block: _PageBlock, bundle: RepoBundle, query: LaunchQuery) -
         return f"{where}: it is not a literal launch: {command}" if query.model_id in block.text else None
     if last_alias_value(argv_flag_occurrences(command.argv), _MODEL) != query.model_id:
         return None
-    board = _heading_board(block, query)
-    if board is None:
+    boards = _heading_boards(block)
+    if not boards:
         return f"{where}: no heading above it names a board"
+    if query.board not in boards:
+        return f"{where}: its heading tunes it for {', '.join(boards)}, not {query.board}"
     image = _DOCKER_PULL.search(bundle.text(block.path))
     source = LaunchSource(
         kind=SourceKind.ATOM_CATALOG,
@@ -368,7 +358,7 @@ def _page_candidate(block: _PageBlock, bundle: RepoBundle, query: LaunchQuery) -
     )
     target = max(query.concurrencies)
     warning = f"{where} names no concurrency; it is taken as tuned for {target}"
-    return _Candidate(source, board, target, True, image and image.group(1), command, (warning,))
+    return _Candidate(source, target, True, image and image.group(1), command, (warning,))
 
 
 def _page_candidates(query: LaunchQuery, bundle: RepoBundle) -> Iterator[_Candidate | str]:

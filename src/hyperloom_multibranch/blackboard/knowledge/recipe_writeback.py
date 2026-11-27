@@ -38,6 +38,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
 
+from hyperloom_common import gpu_card
 from hyperloom_common.timeutil import epoch_iso
 from hyperloom.common.perf_metric import GRADED_INTVTY_P50, GRADED_TOTAL, TOTAL_TOKEN_THROUGHPUT
 from hyperloom.contracts.recipe import Recipe, RecipeError
@@ -191,6 +192,8 @@ def knowledge_document(
             "record_kind": RECORD_KIND_HYPERLOOM_RECIPE,
             **metrics,
             "workload_shape": {key: item for key, item in scope.as_dict().items() if key != "kernel_optimizer"},
+            # A reader borrowing across GPU labels compares this; the KB Store cannot filter on it.
+            "gfx_arch": gpu_card.session_gfx(),
             "value": to_recipe_kb_value(final.recipe),
             "what_worked": list(lessons.worked),
             "what_failed": list(lessons.failed),

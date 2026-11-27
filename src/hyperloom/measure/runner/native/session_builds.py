@@ -384,7 +384,7 @@ def _gfx_arch(environ: Mapping[str, str]) -> str:
     gfx = detect_gfx_arch(environ)
     if not gfx:
         raise NativeBuildsRefused(
-            "a native build needs the GPU architecture: pass --gpu-type or set HYPERLOOM_GFX_ARCH"
+            "a native build needs the GPU architecture, and the session read no card: set HYPERLOOM_GFX_ARCH"
         )
     return gfx
 

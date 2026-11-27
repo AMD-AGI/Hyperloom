@@ -114,7 +114,7 @@ def test_bootstrap_recipe_kb_remote_stores_metadata_not_replay_payload(
                 },
             }
 
-        def search_identities(self, *, scheme, match, hardware_in=None, offset=0, limit=50):
+        def search_identities(self, *, scheme, match, offset=0, limit=50):
             return {"items": [], "next_offset": None}
 
     monkeypatch.setattr(

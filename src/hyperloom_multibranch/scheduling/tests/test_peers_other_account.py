@@ -30,6 +30,7 @@ from hyperloom.measure.runner import suite_publish
 from hyperloom.measure.tests.bundle_factory import REQUEST_ID, base_launch, make_bundle, verify_args
 from hyperloom.orchestrator.state.base_launch import freeze_base
 from hyperloom.orchestrator.state.shared_state import SharedState
+from hyperloom_common import gpu_card
 from hyperloom_common.shared_storage import SHARED_FILE_MODE
 from hyperloom_common.tests.shared_accounts import Accounts, other_accounts
 from hyperloom_multibranch.contracts.blackboard.records import BuildNotice, ToolResultPointer
@@ -41,6 +42,7 @@ from hyperloom_multibranch.scheduling.local_peers import local_peers, workload_e
 from hyperloom_multibranch.scheduling.peers import PeerSetup
 from hyperloom_multibranch.scheduling.processes import ProcessRegistry
 from hyperloom_multibranch.scheduling.roster import Roster, RosterCaps
+from hyperloom_multibranch.scheduling.tests.conftest import MACHINE_CARDS
 from hyperloom_multibranch.scheduling.tests.test_local_peers import AGENTX, HOST, WORKLOAD, _Publishes
 from hyperloom_multibranch.specialist.model_sessions import ModelSessions
 from hyperloom_multibranch.toolbox.hosted_executor import OUTPUTS_DIR
@@ -73,6 +75,7 @@ def build_peers(workspace: str, root: str | None, agentx: bool) -> dict[str, str
         os.environ.pop(name, None)
     os.environ["HL_MODEL_BASE"] = str(Path(workspace) / "models")
     suite_publish.publish_own_inference_suite = _Publishes()  # no staging is fetched here
+    gpu_card.read_cards = lambda: list(MACHINE_CARDS)  # nor are this host's cards read
     clock = Clock()
     if root is None:
         layout = create_session(Path(workspace), workload.model_basename, clock)

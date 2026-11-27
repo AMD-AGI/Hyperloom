@@ -5,9 +5,12 @@
 
 from __future__ import annotations
 
+import dataclasses
+import json
 import socket
 from pathlib import Path
 
+from hyperloom_common.gpu_card import SESSION_CARD_ENV, GpuCard
 from hyperloom.common import platform_probe as platform_probe_mod
 from hyperloom.common.platform_probe import (
     CpuPlatform,
@@ -24,6 +27,9 @@ from hyperloom.common.platform_probe import (
     socket_count,
     sysfs_available,
 )
+
+
+_MI325X = GpuCard("AMD Instinct MI325X", "74a5", "gfx942", 304, 262128, 6144.0, 2100)
 
 
 def _mk(root: Path, rel: str, text: str) -> None:
@@ -170,7 +176,7 @@ def test_a_host_without_the_amdgpu_driver_reports_nothing(tmp_path):
 
 def test_platform_fingerprint_unavailable_when_probe_returns_none(monkeypatch):
     monkeypatch.setattr(platform_probe_mod, "probe_cpu_platform", lambda: None)
-    got = platform_fingerprint(gpu_type="mi300x", multi_node=False)
+    got = platform_fingerprint(multi_node=False)
     assert got == {"status": "unavailable", "reason": "no host CPU sysfs on this machine"}
 
 
@@ -207,9 +213,10 @@ def test_platform_fingerprint_ok_record_shape_and_multi_node_none(monkeypatch):
     monkeypatch.setattr(platform_probe_mod, "read_kernel_file", lambda *_a, **_k: None)
     monkeypatch.delenv("HYPERLOOM_GFX_ARCH", raising=False)
     monkeypatch.delenv("GFX_ARCH", raising=False)
-    monkeypatch.delenv("GPU_TYPE", raising=False)
+    monkeypatch.setenv("GPU_TYPE", "mi300x")
+    monkeypatch.setenv(SESSION_CARD_ENV, json.dumps(dataclasses.asdict(_MI325X)))
 
-    got = platform_fingerprint(gpu_type="mi300x")
+    got = platform_fingerprint()
     assert got["status"] == "ok"
     assert got["host"] == socket.gethostname()
     assert got["cpu"] == "AMD EPYC"
@@ -220,9 +227,10 @@ def test_platform_fingerprint_ok_record_shape_and_multi_node_none(monkeypatch):
     assert got["gpu"]["amdgpu_driver"] == "unknown"
     assert got["stack"] == fake_stack
 
-    got_false = platform_fingerprint(gpu_type="mi300x", multi_node=False)
+    got_false = platform_fingerprint(multi_node=False)
     assert got_false["multi_node_session"] is False
 
-    # gpu_type unset + probe=False → gfx_arch falls back to "unknown".
+    # No session card: the label alone names no arch.
+    monkeypatch.delenv(SESSION_CARD_ENV)
     got_unknown = platform_fingerprint()
     assert got_unknown["gpu"]["gfx_arch"] == "unknown"

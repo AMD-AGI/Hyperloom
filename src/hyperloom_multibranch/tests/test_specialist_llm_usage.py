@@ -132,6 +132,35 @@ def test_finished_queries_count_by_the_running_per_model_totals_of_their_last_re
     assert launch_usage(path).tokens == {OPUS: TokenCounts(102, 805, 7, 3), HAIKU: TokenCounts(9500, 50)}
 
 
+def test_a_resumed_log_counts_its_own_queries_not_the_totals_its_conversation_carried_in(tmp_path):
+    split = {"ephemeral_5m_input_tokens": 30, "ephemeral_1h_input_tokens": 70}
+
+    def result(opus_in, opus_out, **usage):
+        return {
+            "type": "result",
+            "usage": usage,
+            "modelUsage": {
+                OPUS: {"inputTokens": opus_in, "outputTokens": opus_out, "cacheCreationInputTokens": 2100},
+                HAIKU: {"inputTokens": 9000, "outputTokens": 50},
+            },
+        }
+
+    path = _log(
+        tmp_path,
+        _message("m1", OPUS, input_tokens=10, output_tokens=1),
+        result(1010, 520, input_tokens=10, output_tokens=20, cache_creation_input_tokens=100, cache_creation=split),
+        _message("m2", OPUS, input_tokens=1, output_tokens=1),
+        result(1011, 522, input_tokens=1, output_tokens=2),
+        _message("m3", OPUS, input_tokens=4, output_tokens=30),
+    )
+    killed = tmp_path / "killed"
+    killed.mkdir()
+    killed_in_its_first_query = _log(killed, _message("m1", OPUS, input_tokens=7, output_tokens=3))
+
+    assert launch_usage(path, resumed=True).tokens == {OPUS: TokenCounts(15, 52, cache_write=100)}
+    assert launch_usage(killed_in_its_first_query, resumed=True).tokens == {OPUS: TokenCounts(7, 3)}
+
+
 def test_messages_without_ids_are_read_from_the_result_rows_since_their_repeats_cannot_be_told_apart(tmp_path):
     repeated = {"type": "assistant", "message": {"model": OPUS, "usage": {"input_tokens": 10, "output_tokens": 4}}}
     path = _log(tmp_path, repeated, repeated, _result(input_tokens=10, output_tokens=4))

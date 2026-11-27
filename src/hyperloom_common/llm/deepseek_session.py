@@ -29,7 +29,9 @@ from hyperloom_common.llm.reasoning_effort import DEFAULT_REASONING_EFFORT, harn
 #: the gateway returns; the route is declared by :func:`gateway_route_patch`.
 GATEWAY_PROVIDER_ROUTE = "gateway"
 
-#: Names the harness adapter reads the gateway from; :func:`gateway_env` sets them.
+#: Names the runtime reads the gateway from; :func:`gateway_env` sets them. The
+#: route patch is rendered from the base URL and names the key variable, and the
+#: harness's ``web_search`` tool derives its endpoint from the same pair.
 GATEWAY_BASE_URL_ENV = "DEEPSEEK_BASE_URL"
 GATEWAY_API_KEY_ENV = "DEEPSEEK_API_KEY"
 
@@ -53,8 +55,8 @@ checkout, stash, clean, or alter branches.
 """
 
 #: Patch rows every Hyperloom harness runtime boots with. The harness compacts a
-#: conversation once a request reaches 80% of the model's window, which is 1M
-#: tokens on every DeepSeek route. Every model step resends the whole
+#: conversation once a request reaches 80% of the model's window, which the
+#: gateway route declares as 1M tokens. Every model step resends the whole
 #: conversation, so a long session carried about 700K tokens on each request
 #: before it compacted once; a quarter of the window keeps a request near what
 #: the Claude and Codex routes carry.
@@ -141,22 +143,20 @@ def max_tokens_from_env(env: Mapping[str, str]) -> int | None:
 
 
 def gateway_env(env: Mapping[str, str]) -> dict[str, str]:
-    """The ``DEEPSEEK_*`` names the harness adapter reads, set from the gateway ``env`` configures.
+    """The ``DEEPSEEK_*`` names the harness runtime reads, set from the gateway ``env`` configures.
 
-    The harness's DeepSeek adapter authenticates from ``DEEPSEEK_*`` only, while
-    this repository configures the gateway on the OpenAI-compatible line.
+    This repository configures the gateway on the OpenAI-compatible line; the
+    harness reaches the same gateway over the Anthropic Messages protocol.
     """
     try:
         gateway = resolve_openai_client_config(env=dict(env))
     except LLMConfigError as exc:
         raise DeepSeekSessionUnavailableError(
-            f"the DeepSeek Harness speaks the OpenAI-compatible protocol and needs "
-            f"OPENAI_BASE_URL and OPENAI_API_KEY: {exc}"
+            f"the DeepSeek Harness takes its gateway from OPENAI_BASE_URL and OPENAI_API_KEY: {exc}"
         ) from exc
     if not gateway.base_url or not gateway.api_key:
         raise DeepSeekSessionUnavailableError(
-            "the DeepSeek Harness speaks the OpenAI-compatible protocol and needs "
-            "both OPENAI_BASE_URL and OPENAI_API_KEY"
+            "the DeepSeek Harness takes its gateway from OPENAI_BASE_URL and OPENAI_API_KEY, and needs both"
         )
     return {GATEWAY_BASE_URL_ENV: gateway.base_url, GATEWAY_API_KEY_ENV: gateway.api_key}
 
@@ -200,11 +200,6 @@ def gateway_route_patch(base_url: str, model: str, *, max_tokens: int | None = N
     return "\n".join(lines) + "\n"
 
 
-def with_deepseek_gateway(env: Mapping[str, str]) -> dict[str, str]:
-    """Return ``env`` with the configured gateway written onto the names the harness adapter reads."""
-    return {**env, **gateway_env(env)}
-
-
 def child_environment(overrides: Mapping[str, str] | None, permission_mode: str) -> dict[str, str]:
     """Build the environment a harness runtime subprocess is spawned with.
 
@@ -214,7 +209,7 @@ def child_environment(overrides: Mapping[str, str] | None, permission_mode: str)
     base = os.environ.copy()
     if overrides:
         base.update(overrides)
-    env = with_deepseek_gateway(base)
+    env = {**base, **gateway_env(base)}
     env["DSH_PERMISSION_MODE"] = permission_mode
     # These outrank -C and cwd, so a caller that set them to reach one
     # repository would answer every git command the session runs anywhere.
@@ -241,7 +236,9 @@ def start_harness(sdk: Any, launch: HarnessLaunch) -> Any:
 
     Construction is lazy in the SDK, so only the handshake proves the binary
     runs and the model and effort are accepted. The output-token cap comes from
-    ``launch.env``, so every caller that starts a runtime applies it.
+    ``launch.env``, so every caller that starts a runtime applies it. It rides on
+    the route patch only: the runtime takes a request's cap from the route's model
+    entry and ignores the SDK's own ``max_tokens`` once the entry names one.
     """
     max_tokens = max_tokens_from_env(launch.env)
     workspace = str(launch.cwd)
@@ -262,7 +259,6 @@ def start_harness(sdk: Any, launch: HarnessLaunch) -> Any:
         provider=GATEWAY_PROVIDER_ROUTE,
         model=launch.model,
         reasoning_effort=launch.reasoning_effort,
-        max_tokens=max_tokens,
         env=dict(launch.env),
         initialize_timeout_seconds=launch.initialize_timeout_sec,
         request_timeout_seconds=launch.request_timeout_sec,
@@ -396,12 +392,12 @@ class DeepSeekSession:
     #: system prompt through its plugin composition and its SDK exposes no
     #: per-session field for one, so there is nowhere else to put these.
     instructions: str = ""
-    dsh_home: Path | None = None
     reasoning_effort: str = ""
     permission_mode: str = "read-only"
     env: Mapping[str, str] | None = None
     request_timeout_sec: float = 300.0
 
+    dsh_home: Path = field(init=False)
     _harness: Any = field(default=None, init=False, repr=False)
     _session_id: str = field(default="", init=False, repr=False)
 
@@ -409,8 +405,7 @@ class DeepSeekSession:
         """Resolve the workspace, the model and the harness home before any turn runs."""
         self.model = self.model.strip() or resolve_forge_llm_model(AGENT_BACKEND_DEEPSEEK)
         self.cwd = Path(self.cwd).expanduser().resolve()
-        home = Path(self.dsh_home).expanduser() if self.dsh_home else Path.home() / ".cache" / "hyperloom" / "dsh_home"
-        self.dsh_home = home.resolve()
+        self.dsh_home = (Path.home() / ".cache" / "hyperloom" / "dsh_home").resolve()
 
     def _child_environment(self) -> dict[str, str]:
         """Build the environment the harness runtime subprocess is spawned with."""
@@ -421,7 +416,6 @@ class DeepSeekSession:
         if self._harness is not None:
             return
         sdk = load_harness_sdk()
-        assert self.dsh_home is not None  # set in __post_init__
         try:
             self.dsh_home.mkdir(parents=True, exist_ok=True)
         except OSError as exc:
@@ -433,7 +427,6 @@ class DeepSeekSession:
             raise DeepSeekSessionUnavailableError(f"the DeepSeek Harness runtime failed to start: {exc}") from exc
 
     def _spawn(self, sdk: Any, child_env: dict[str, str]) -> Any:
-        assert self.dsh_home is not None  # set in __post_init__
         return start_harness(
             sdk,
             HarnessLaunch(
@@ -520,5 +513,4 @@ __all__ = [
     "step_usage",
     "turn_end_failure",
     "usage_from_events",
-    "with_deepseek_gateway",
 ]

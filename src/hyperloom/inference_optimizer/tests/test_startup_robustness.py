@@ -9,6 +9,7 @@ import argparse
 import json
 import os
 import time
+from dataclasses import replace
 
 import pytest
 
@@ -16,7 +17,8 @@ from hyperloom_common.llm import llm_config
 from hyperloom.inference_optimizer import cli
 from hyperloom.inference_optimizer.cli import credentials as cli_credentials
 from hyperloom.inference_optimizer.cli import model_catalog
-from hyperloom.inference_optimizer import gpu_types
+from hyperloom.inference_optimizer.cli import session_setup
+from hyperloom.orchestrator.tests._fixtures import MI355X_CARD
 
 _OAUTH_ENV = "_".join(("CLAUDE", "CODE", "OAUTH", "TOKEN"))
 _OPENAI_KEY = "_".join(("OPENAI", "API", "KEY"))
@@ -390,31 +392,33 @@ def test_catalog_probe_keeps_anthropic_side_when_it_has_its_own_key(clean_creds_
     assert probed == ["https://api.anthropic.com"]
 
 
-# _resolve_gpu_type
+# _session_label
 @pytest.mark.parametrize(
-    ("user_specified", "probed", "gpu"),
+    ("given", "card", "label"),
     [
-        pytest.param("", "mi355x", "mi355x", id="probe-only"),
-        pytest.param("mi300x", "", "mi300x", id="user-only"),
-        pytest.param("mi355x", "mi355x", "mi355x", id="agreement-silent"),
-        pytest.param("", "", "", id="no-inputs-returns-empty"),
+        pytest.param("", MI355X_CARD, "mi355x", id="card-only"),
+        pytest.param("mi300x", None, "mi300x", id="given-only"),
+        pytest.param("", replace(MI355X_CARD, name="AMD Radeon Graphics"), "gfx950", id="no-designation-so-its-arch"),
+        pytest.param("mi355x", MI355X_CARD, "mi355x", id="given-the-cards-own"),
     ],
 )
-def test_resolve_gpu_type_without_a_disagreement_is_silent(user_specified, probed, gpu):
-    """The probe wins when it ran; a failed probe (CPU sandbox) leaves the user's --gpu-type as-is."""
-    assert gpu_types._resolve_gpu_type(user_specified=user_specified, probed=probed) == (gpu, [])
+def test_session_label_without_a_disagreement_is_silent(given, card, label, capsys):
+    """A given name is the label; without one the card's own name is."""
+    assert session_setup._session_label(given, card) == label
+    assert capsys.readouterr().err == ""
 
 
-def test_resolve_gpu_type_disagreement_probe_always_wins():
-    """On disagreement the probe wins unconditionally and warns loudly."""
-    gpu, warns = gpu_types._resolve_gpu_type(
-        user_specified="mi300x",
-        probed="mi355x",
-    )
-    assert gpu == "mi355x"
-    assert len(warns) == 1
-    assert "mi300x" in warns[0]
-    assert "mi355x" in warns[0]
+def test_session_label_is_the_cards_own_name_over_a_given_one_with_a_warn_naming_both(capsys):
+    assert session_setup._session_label("mi300x", MI355X_CARD) == "mi355x"
+    warning = capsys.readouterr().err
+    assert warning.startswith("WARN:") and "'mi300x'" in warning and "using 'mi355x'" in warning
+
+
+def test_session_label_is_the_given_name_on_a_card_without_one_with_a_warn(capsys):
+    unnamed = replace(MI355X_CARD, name="AMD Radeon Graphics", gfx="gfx1201")
+
+    assert session_setup._session_label("r9700", unnamed) == "r9700"
+    assert "reports no model name" in capsys.readouterr().err
 
 
 # _emit_launch_info

@@ -48,6 +48,10 @@ class TokenCounts:
     def __add__(self, other: TokenCounts) -> TokenCounts:
         return TokenCounts(*(getattr(self, item.name) + getattr(other, item.name) for item in fields(self)))
 
+    def less(self, other: TokenCounts) -> TokenCounts:
+        """Each of these counts less ``other``'s, none below 0."""
+        return TokenCounts(*(max(0, getattr(self, item.name) - getattr(other, item.name)) for item in fields(self)))
+
     @classmethod
     def from_anthropic_usage(cls, usage: Mapping[str, object]) -> TokenCounts:
         """The counts of an Anthropic ``usage`` block. A split ``cache_creation`` bills each cache write by its

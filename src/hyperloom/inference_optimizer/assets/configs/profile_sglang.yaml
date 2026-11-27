@@ -25,7 +25,7 @@ benchmark:
     # ROCR_VISIBLE_DEVICES is injected at materialize time as 0..TP-1 unless the operator exports it.
     # --- Profiler: shape + callstack annotations (#126) ---
     SGLANG_PROFILE_WITH_STACK: "true"
-    SGLANG_PROFILE_RECORD_SHAPE: "true"
+    SGLANG_PROFILE_RECORD_SHAPES: "true"
     SGLANG_GRAPH_BATCH_CAPTURE: "1"
     # --- Profiler: graph capture (#126; shape discovery is added only on a patched server) ---
     EXTRA_SGLANG_ARGS: "--enable-profile-cuda-graph"

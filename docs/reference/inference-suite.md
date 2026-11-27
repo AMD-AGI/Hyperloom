@@ -32,7 +32,21 @@ gives the base:
 3. the framework's cookbook: the SGLang cookbook, the vLLM recipes site, or
    ATOM's catalog (fixed workloads only);
 4. for a fixed workload only, the default table shipped in
-   `src/inference_suite/recipe/defaults/table.yaml`.
+   `src/inference_suite/recipe/defaults/table.yaml`: the framework's row for the
+   architecture the session's card reports (the query's `gfx`), else the
+   framework's fallback row (`--trust-remote-code` alone), with a warning that
+   names the architecture no row was tuned for, or that the architecture is
+   unknown when the session read no card.
+
+A recipe serves only the board it was tuned on, compared by name: an InferenceX
+point whose runner stands for that board, an SGLang cookbook cell or AgentX
+launch whose `hw` is that board, an SGLang page block whose nearest heading
+naming exactly one board (of those the cookbook's cells name, and the session's)
+names it, a whole word in any case, an ATOM catalog entry whose runner label has
+it as one of its dash-separated words, and an ATOM page block whose nearest
+heading naming an MI board names it. A recipe tuned on another board, however
+alike, is not taken; to run it, write it as a launch script and pass that as
+`--reference-script`.
 
 An AgentX session that no recipe and no `--reference-script` serves is refused.
 When a source cannot be read, a fixed session runs the default table, unless
@@ -71,9 +85,16 @@ two (`-tp 8`, `--tp 8`).
 
 A launch script, frozen base or default row that needs more GPUs than `--gpus` is
 refused, naming both counts.
-A frozen base resolved for another model, workload or framework, or for a board
-of another architecture or HBM capacity than the session's, is refused, naming both
-values.
+A frozen base resolved for another model, workload or framework is refused,
+naming both values. So is one resolved for another board, unless both its query
+and the session's record the card they ran on (`gfx` and `memory_mib`) and the two
+agree; a base frozen before queries recorded the card serves its own board alone.
+
+The query (`query` in `base_launch.json`, and `resolve --query`) names the model,
+framework, board, workload, concurrencies, TP, EP and sequence shape, and the card
+the session read: its architecture `gfx` and memory size `memory_mib`, both `null`
+when the session read no card. A query written before those two keys existed reads
+them as `null`. The query is not part of the digest.
 
 An InferenceX entry of the session's model that its config cannot place (a runner
 on no board label, a missing key) is that entry's miss; entries of other models are
@@ -437,6 +458,7 @@ A round that did not complete names one `failed_step`:
 | Server | `server_exited_before_ready`, `server_silent_before_ready`, `server_boot_timeout`, `server_stalled`, `server_died` |
 | Client | `client_failed`, `client_output_missing` |
 | Eval | `eval_failed` |
+| Profile | `profile_refused` |
 | Any | `round_timeout`, `deadline_exhausted`, `cancelled`, `teardown_incomplete` |
 
 Every metric key is fixed: a metric nobody measured is `null`, never `0`. An eval
