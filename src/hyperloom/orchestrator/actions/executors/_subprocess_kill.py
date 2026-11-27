@@ -325,13 +325,6 @@ def session_deadline_to_remaining_sec(session_deadline_sec: float | None) -> flo
     return float(session_deadline_sec) - time.monotonic()
 
 
-def session_remaining_to_deadline_sec(session_remaining_sec: float | None) -> float | None:
-    """Re-anchor a remaining session budget onto this process's monotonic clock."""
-    if session_remaining_sec is None:
-        return None
-    return time.monotonic() + float(session_remaining_sec)
-
-
 class RoundJudge(Protocol):
     """Rules on a running round at each tick, raising :class:`AgentxCheckpointMissed` to stop it."""
 
@@ -528,6 +521,5 @@ __all__ = [
     "resolve_benchmark_timeouts",
     "run_with_session_kill",
     "session_deadline_to_remaining_sec",
-    "session_remaining_to_deadline_sec",
     "sync_agentx_phase_wait",
 ]

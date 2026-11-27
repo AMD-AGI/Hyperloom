@@ -8,9 +8,9 @@ from __future__ import annotations
 import time
 from datetime import datetime, timezone
 
-from hyperloom.common.deadline import Deadline
+from hyperloom_common.coerce import recorded_float, to_unix
 
-from .elapsed import elapsed_sec_of
+from hyperloom.common.deadline import Deadline
 
 
 class _BudgetStateMixin:
@@ -61,7 +61,8 @@ class _BudgetStateMixin:
         """Minutes of budget this session has consumed, summed over every leg.
 
         The charged total plus whatever the live leg has run since the last
-        charge.
+        charge; a session with neither falls back to the time since
+        ``start_ts``.
 
         Args:
             now (datetime | None): Reference time; defaults to the current UTC
@@ -73,9 +74,15 @@ class _BudgetStateMixin:
         now_dt = now or datetime.now(timezone.utc)
         if now_dt.tzinfo is None:
             now_dt = now_dt.replace(tzinfo=timezone.utc)
-        return self.elapsed_sec_of(vars(self), now_unix=now_dt.timestamp()) / 60.0
-
-    elapsed_sec_of = staticmethod(elapsed_sec_of)
+        now_unix = now_dt.timestamp()
+        charged = max(0.0, recorded_float(self.elapsed_charged_sec))
+        anchor = recorded_float(self.leg_anchor_unix)
+        if anchor > 0.0:
+            return (charged + max(0.0, now_unix - anchor)) / 60.0
+        if charged > 0.0:
+            return charged / 60.0
+        started = to_unix(str(self.start_ts or "").strip())
+        return 0.0 if started is None else max(0.0, now_unix - started) / 60.0
 
     def extend_budget_minutes(self, minutes: float) -> float:
         """Grant more wall-clock budget to this session.

@@ -39,6 +39,7 @@ from pathlib import Path, PurePosixPath
 from typing import Any, Mapping, Sequence
 
 from hyperloom_common.bwrap import NESTED_SAFE, BwrapPolicy, BwrapPolicyError, BwrapStatus, Scratch
+from hyperloom_common.env import is_truthy
 from hyperloom_common.fs_utils import read_bytes_nofollow, read_text_nofollow, write_text_nofollow
 from hyperloom.common.agent_isolation import (
     AccountIsolation,
@@ -114,7 +115,6 @@ _BEDROCK = "CLAUDE_CODE_USE_BEDROCK"
 _BEDROCK_KEYS = ("AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY")
 #: The files a Bedrock-backed claude CLI may take its AWS credentials from; bound read-only, never masked.
 BEDROCK_FILE_VARIABLES = ("AWS_SHARED_CREDENTIALS_FILE", "AWS_CONFIG_FILE")
-_TRUE = frozenset({"1", "true", "yes", "on"})
 _CLAUDE_LOGIN_FILE = (
     "the agent's bubblewrap sandbox cannot show it its login file without showing that file to the agent"
 )
@@ -757,14 +757,10 @@ def _log_once(level: int, message: str) -> None:
     log.log(level, "%s", message)
 
 
-def _truthy(value: str | None) -> bool:
-    return (value or "").strip().lower() in _TRUE
-
-
 def bedrock_files(env: Mapping[str, str]) -> tuple[Path, ...]:
     """The AWS files a Bedrock-backed claude CLI takes its credentials from, as ``env`` names them (absolute and
     present); none unless ``CLAUDE_CODE_USE_BEDROCK`` is on. A sandbox binds them read-only and does not mask them."""
-    if not _truthy(env.get(_BEDROCK)):
+    if not is_truthy(env.get(_BEDROCK)):
         return ()
     named = (env.get(name, "") for name in BEDROCK_FILE_VARIABLES)
     return tuple(Path(value) for value in named if os.path.isabs(value) and os.path.isfile(value))
@@ -784,7 +780,7 @@ def claude_login_isolation(isolation: AgentIsolation, env: Mapping[str, str]) ->
     """
     if not isinstance(isolation, BwrapIsolation) or any(env.get(name) for name in CLAUDE_TOKEN_VARIABLES):
         return isolation
-    if _truthy(env.get(_BEDROCK)) and (all(env.get(name) for name in _BEDROCK_KEYS) or bedrock_files(env)):
+    if is_truthy(env.get(_BEDROCK)) and (all(env.get(name) for name in _BEDROCK_KEYS) or bedrock_files(env)):
         return isolation
     if isolation_required():
         raise SpecialistAgentUnavailableError(CLAUDE_LOGIN_REFUSAL)
