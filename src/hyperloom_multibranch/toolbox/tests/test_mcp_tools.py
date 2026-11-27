@@ -22,7 +22,6 @@ import pytest
 from hyperloom.contracts.measurement import Purpose, TestRequest
 from hyperloom.contracts.recipe import RecipeDelta
 from hyperloom.hosted.mcp_server import (
-    HOST_KIND,
     SPECIALIST_KIND,
     CallContext,
     InvalidParamsError,
@@ -64,7 +63,6 @@ from hyperloom_multibranch.toolbox.mcp_tools import (
     wait_budget,
 )
 
-HOST_TOKEN = "host-token-0123456789abcdef"
 CLAIM = {"parent_commit": "c1", "target": "attention", "mechanism": "flash decode", "layer": "source"}
 
 
@@ -139,7 +137,7 @@ async def seeded(tmp_path: Path) -> tuple[Path, FakeClock]:
 def _running(seeded: tuple[Path, FakeClock], options: SpecialistToolOptions) -> Iterator[Rig]:
     root, clock = seeded
     toolbox = FakeToolbox()
-    server = McpServer(McpServerConfig(host_token=HOST_TOKEN), campaign="camp")
+    server = McpServer(McpServerConfig(), campaign="camp")
 
     def blackboards(branch: str) -> LocalBlackboard:
         return LocalBlackboard(root, Writer(Role.SPECIALIST_RUNTIME, branch, branch), clock=clock)
@@ -205,12 +203,6 @@ def test_a_specialist_sees_exactly_the_specialist_tools(rig: Rig) -> None:
             "blackboard_replay",
         ]
     )
-
-
-def test_the_host_token_cannot_call_any_specialist_tool(rig: Rig) -> None:
-    for tool in ("queue_state", "blackboard_search", "test_result"):
-        status, reply = rig.call(HOST_TOKEN, tool)
-        assert (status, reply["error"]["code"]) == (200, -32001)
 
 
 def test_submit_test_takes_the_branch_from_the_token(rig: Rig) -> None:
@@ -614,7 +606,7 @@ def test_jsonable_turns_contract_objects_into_json_data() -> None:
 
 
 def test_the_grants_heartbeat_sink_beats_during_a_blocking_call_over_http(rig: Rig) -> None:
-    server = McpServer(McpServerConfig(host_token=HOST_TOKEN), campaign="camp", heartbeat_seconds=0.1)
+    server = McpServer(McpServerConfig(), campaign="camp", heartbeat_seconds=0.1)
     server.register(
         "block",
         schema={"type": "object"},
@@ -666,7 +658,7 @@ async def test_toolbox_calls_run_on_the_loop_the_toolbox_was_registered_from() -
             seen.append(asyncio.get_running_loop())
             return await super().queue_state()
 
-    server = McpServer(McpServerConfig(host_token=HOST_TOKEN), campaign="camp")
+    server = McpServer(McpServerConfig(), campaign="camp")
     toolbox = LoopRecordingToolbox()
 
     class Blackboards:
@@ -842,18 +834,6 @@ async def test_a_poll_inbox_reply_carries_no_block_and_its_items_count_as_seen(w
     assert _news(wait_rig, token) == []
 
 
-async def test_the_host_token_gets_no_block_and_leaves_the_specialists_unread(wait_rig: Rig, waiting: Writers) -> None:
-    wait_rig.server.register(
-        "host_ping", schema={"type": "object"}, handler=lambda arguments, ctx: {"ok": True}, scopes={HOST_KIND}
-    )
-    token = wait_rig.token("s1")
-    _news(wait_rig, token)
-    await _land(waiting, 1)
-    _, reply = wait_rig.call(HOST_TOKEN, "host_ping")
-    assert len(_texts(reply)) == 1
-    assert _news(wait_rig, token)[1].startswith("result x1: ")
-
-
 def _pages(rig: Rig, token: str, cursor: str = "") -> list[dict[str, Any]]:
     """Every page ``poll_inbox`` gives from ``cursor`` until it says nothing remains, each page as the reply read."""
     pages: list[dict[str, Any]] = []
@@ -982,7 +962,7 @@ class ScriptedInbox:
 
 
 def _scripted_rig(inbox: ScriptedInbox) -> Rig:
-    server = McpServer(McpServerConfig(host_token=HOST_TOKEN), campaign="camp")
+    server = McpServer(McpServerConfig(), campaign="camp")
     register_specialist_tools(server, toolbox=FakeToolbox(), blackboards=lambda branch: inbox)  # type: ignore[arg-type,return-value]
     server.start()
     return Rig(server, FakeToolbox(), Path(), FakeClock())

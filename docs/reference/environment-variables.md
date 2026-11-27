@@ -1000,9 +1000,8 @@ WARNING: nothing else such a server reads is bound unless the confinement shows 
 directory its workload's model is served from, those model directories of its base launch and that
 `server_options.json`, the files its worktree links and its branch's own dev lease area,
 `branch-sandboxes/<branch>` of a local toolbox or the branch's `dev` directory of a hosted one, so it applies a Forge
-patch from its lease's root and sees no other branch's lease); a GPU task gets `/dev/kfd` and `/dev/dri`. The paths `HYPERLOOM_STATE_DIR`,
-`HYPERLOOM_BUILD_STORE` and `HYPERLOOM_BUILD_TRUST` name are masked wherever a bind would show them (a hosted run's
-entry, which takes `HYPERLOOM_STATE_DIR` out of its environment, registers its state directory so it stays masked). The `claude` CLI
+patch from its lease's root and sees no other branch's lease); a GPU task gets `/dev/kfd` and `/dev/dri`. The paths
+`HYPERLOOM_BUILD_STORE` and `HYPERLOOM_BUILD_TRUST` name are masked wherever a bind would show them. The `claude` CLI
 runs there only with a login in its environment: `ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN` or
 `CLAUDE_CODE_OAUTH_TOKEN` (`claude setup-token` prints one), or `CLAUDE_CODE_USE_BEDROCK=1` with `AWS_ACCESS_KEY_ID`
 and `AWS_SECRET_ACCESS_KEY`, or with `AWS_SHARED_CREDENTIALS_FILE` or `AWS_CONFIG_FILE` naming a file, which is then

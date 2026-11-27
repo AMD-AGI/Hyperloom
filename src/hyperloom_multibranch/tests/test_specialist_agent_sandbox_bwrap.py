@@ -366,7 +366,6 @@ async def test_a_confined_command_reaches_its_trees_and_frameworks_and_nothing_o
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(text)
     monkeypatch.setenv("HOME", str(app_home))
-    monkeypatch.setenv("HYPERLOOM_STATE_DIR", str(state))
     first = _sandbox(area, probe, HF_HOME=str(hf), HYPERLOOM_TEST_APP_VALUE=CANARY, GH_TOKEN=CANARY)
     worktree, agent = area / "worktree", area / "agent"
     (worktree / "source.py").write_text("source")

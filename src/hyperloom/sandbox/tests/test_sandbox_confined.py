@@ -171,10 +171,9 @@ def _system_file() -> Path:
 
 @pytest.fixture(autouse=True)
 def fresh_process(monkeypatch: pytest.MonkeyPatch) -> None:
-    """A process that has not been marked hosted, has said nothing yet, and has no app state directory."""
+    """A process that has not been marked hosted and has said nothing yet."""
     monkeypatch.setattr(agent_isolation, "_STATE", agent_isolation._Process())
     monkeypatch.setattr(confined, "_said", set())
-    monkeypatch.delenv("HYPERLOOM_STATE_DIR", raising=False)
 
 
 @pytest.fixture
@@ -216,13 +215,11 @@ def test_a_runner_with_no_account_runs_in_bubblewrap_with_its_tree_and_key_writa
 ) -> None:
     fake = FakeBwrap(area)
     monkeypatch.setattr(confined, "choose_test_isolation", _given(fake.isolation()))
-    model, state = area / "model", area / "state"
-    for path in (model, state):
-        path.mkdir()
+    model = area / "model"
+    model.mkdir()
     (model / "weights").write_text("weights")
     (model / "credentials").write_text("SECRET")
     monkeypatch.setenv("AWS_SHARED_CREDENTIALS_FILE", str(model / "credentials"))
-    monkeypatch.setenv("HYPERLOOM_STATE_DIR", str(state))
     base = area / "sandboxes"
     provider = LocalSandboxProvider(
         [_runner()], gpus=(0,), base_dir=base, users=ProcessUsers(plan=RunnerPlan(readable=(model,)))
@@ -255,7 +252,7 @@ def test_a_runner_with_no_account_runs_in_bubblewrap_with_its_tree_and_key_writa
     bound = [
         pair[1] for pair in pairs if pair[0] in ("--bind", "--ro-bind-try", "--ro-bind") and pair[1] != "/dev/null"
     ]
-    assert not [path for path in bound if path in (str(base), str(state)) or path.startswith(f"{state}/")]
+    assert str(base) not in bound
     assert not [path for path in bound if path.startswith(f"{base}/") and not path.startswith(f"{directory}/")]
 
 
@@ -534,24 +531,6 @@ def test_a_plan_that_refused_a_tree_runs_the_sandbox_as_before_locally_and_is_re
         provider.create("runner", role="measurement", timeout_sec=60, metadata={})
     assert fake.launches() == []
     assert provider.pool.free_cards() == (0,), "the refused create gave its card back"
-
-
-def test_a_plan_that_would_show_the_app_s_state_runs_the_sandbox_as_before(
-    area: Path, providers: list[LocalSandboxProvider], monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
-) -> None:
-    fake = FakeBwrap(area)
-    monkeypatch.setattr(confined, "choose_test_isolation", _given(fake.isolation()))
-    app, state = area / "app", area / "app" / "state"
-    state.mkdir(parents=True)
-    monkeypatch.setenv("HYPERLOOM_STATE_DIR", str(state))
-    plan = RunnerPlan(readable=(app,))
-    provider = LocalSandboxProvider([_runner()], gpus=(0,), base_dir=area / "sandboxes", users=ProcessUsers(plan=plan))
-    providers.append(provider)
-    with caplog.at_level(logging.WARNING):
-        sandbox = provider.create("runner", role="measurement", timeout_sec=60, metadata={})
-
-    assert sandbox._confined is None and fake.launches() == []
-    assert f"{app} would expose {state}, which only the app may reach" in caplog.text
 
 
 def test_an_older_bubblewrap_gives_a_sealed_runner_below_tmp_a_fresh_tmp_and_runs_any_other_sandbox_as_before(

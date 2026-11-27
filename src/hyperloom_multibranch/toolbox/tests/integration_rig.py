@@ -12,7 +12,6 @@ from __future__ import annotations
 
 import json
 import asyncio
-import secrets
 import sys
 import urllib.request
 from collections.abc import AsyncIterator, Callable, Mapping
@@ -157,7 +156,7 @@ async def build_stack(root: Path, variant: Variant, baseline: Recipe, *, k: int 
             poll_interval_sec=variant.poll_interval_sec,
         ),
     )
-    server = McpServer(McpServerConfig(host_token=secrets.token_hex(16)), campaign="integration")
+    server = McpServer(McpServerConfig(), campaign="integration")
     register_specialist_tools(
         server,
         toolbox=toolbox,

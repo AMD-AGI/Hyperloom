@@ -48,7 +48,6 @@ os.rename(os.path.join(out, "seen.tmp"), os.path.join(out, "seen.json"))
 def fresh_process(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(agent_isolation, "_STATE", agent_isolation._Process())
     monkeypatch.setattr(confined, "_said", set())
-    monkeypatch.delenv("HYPERLOOM_STATE_DIR", raising=False)
 
 
 @pytest.fixture

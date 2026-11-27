@@ -41,7 +41,6 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
-import secrets
 import shutil
 import subprocess
 from collections.abc import Callable, Mapping
@@ -436,7 +435,7 @@ def local_peers(host: MeasurementHost, sessions: SpecialistSessions, setup: Peer
             layout.blackboard, Writer(Role.SPECIALIST_RUNTIME, branch, branch), briefs=BriefTriggers()
         )
 
-    mcp = McpServer(McpServerConfig(host_token=secrets.token_hex(32)), campaign=layout.session_id)
+    mcp = McpServer(McpServerConfig(), campaign=layout.session_id)
     briefs = _specialist_briefs(setup, repo)
     _serve_specialist_tools(mcp, toolbox, runtime_blackboard, briefs, served)
     sandboxes = branch_sandboxes(host.backend, setup, lambda branch: built.worktrees(branch))

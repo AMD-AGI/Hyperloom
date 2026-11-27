@@ -52,7 +52,7 @@ from hyperloom.contracts.measurement import (
     Validity,
 )
 from hyperloom.contracts.recipe import Recipe, RecipeDelta
-from hyperloom.hosted.mcp_server import MIN_TOKEN_LENGTH, McpServer, McpServerConfig
+from hyperloom.hosted.mcp_server import McpServer, McpServerConfig
 from hyperloom.measure.runner.native.server_options import OptionInventory, ServerOption, write_inventory
 from hyperloom.measure.versions import socket_versions
 from hyperloom.orchestrator.tests._fixtures import MI355X_CARD, publish_card
@@ -516,7 +516,7 @@ class Stage:
         runtime.refusing = self.refusing
         self.toolbox, self.repo, self.setup = toolbox, repo, setup
         self.briefs = SessionBriefs(self.handle(Role.OBSERVER), repo=repo, learnings=self.learnings)
-        mcp = McpServer(McpServerConfig(host_token="t" * MIN_TOKEN_LENGTH), campaign=setup.layout.session_id)
+        mcp = McpServer(McpServerConfig(), campaign=setup.layout.session_id)
         gate = session_gate(self.handle(Role.GATE), toolbox, rule)
         digest = toolbox.config.image_digest
         return Peers(

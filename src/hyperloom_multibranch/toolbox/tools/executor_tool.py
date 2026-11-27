@@ -39,10 +39,9 @@ def describe(result: Mapping[str, Any], *, ok_text: str) -> str:
 Handler = Callable[..., Awaitable[dict]]
 
 
-class HandlerTool:
-    """A kernel-request handler ``handler(payload, session_dir=...)`` of the orchestrator, run as one tool."""
-
-    local_scratch = False
+class ScratchHandlerTool:
+    """A kernel-request handler ``handler(payload, session_dir=...)`` of the orchestrator, run as one tool in a local
+    scratch directory, its named results copied back into the job's working directory."""
 
     def __init__(
         self,
@@ -67,9 +66,6 @@ class HandlerTool:
         return ToolOutput(result=result, summary=describe(result, ok_text=self._ok_text), ok=not result_failed(result))
 
     async def run(self, request: ToolRequest, workdir: Path) -> ToolOutput:
-        if not self.local_scratch:
-            result = await self._handler(dict(request.params), session_dir=workdir)
-            return self.output(result, request)
         scratch = Path(tempfile.mkdtemp(prefix="hl-tool-"))
         try:
             state = SharedState.state_path(workdir)
@@ -118,9 +114,3 @@ def _copy_back(result: Mapping[str, Any], scratch: Path, workdir: Path) -> dict[
             if str(sibling).startswith(str(scratch) + "/"):
                 land(str(sibling))
     return out
-
-
-class ScratchHandlerTool(HandlerTool):
-    """A handler run in a local scratch directory, its named results copied back into the job's working directory."""
-
-    local_scratch = True

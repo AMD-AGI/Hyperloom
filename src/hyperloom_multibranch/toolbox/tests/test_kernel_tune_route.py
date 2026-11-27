@@ -8,7 +8,6 @@ from __future__ import annotations
 
 import asyncio
 import json
-import secrets
 from collections.abc import AsyncIterator
 from dataclasses import dataclass
 from pathlib import Path
@@ -52,7 +51,7 @@ async def make(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> AsyncIterator
         if landed:
             rig.landed()
             await record_test(rig.blackboard)
-        server = McpServer(McpServerConfig(host_token=secrets.token_hex(16)), campaign="kernel-tune")
+        server = McpServer(McpServerConfig(), campaign="kernel-tune")
         register_specialist_tools(
             server,
             toolbox=rig.box,
