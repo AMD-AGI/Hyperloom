@@ -29,7 +29,9 @@ from hyperloom_common.llm.reasoning_effort import DEFAULT_REASONING_EFFORT, harn
 #: the gateway returns; the route is declared by :func:`gateway_route_patch`.
 GATEWAY_PROVIDER_ROUTE = "gateway"
 
-#: Names the harness adapter reads the gateway from; :func:`gateway_env` sets them.
+#: Names the runtime reads the gateway from; :func:`gateway_env` sets them. The
+#: route patch is rendered from the base URL and names the key variable, and the
+#: harness's ``web_search`` tool derives its endpoint from the same pair.
 GATEWAY_BASE_URL_ENV = "DEEPSEEK_BASE_URL"
 GATEWAY_API_KEY_ENV = "DEEPSEEK_API_KEY"
 
@@ -53,8 +55,8 @@ checkout, stash, clean, or alter branches.
 """
 
 #: Patch rows every Hyperloom harness runtime boots with. The harness compacts a
-#: conversation once a request reaches 80% of the model's window, which is 1M
-#: tokens on every DeepSeek route. Every model step resends the whole
+#: conversation once a request reaches 80% of the model's window, which the
+#: gateway route declares as 1M tokens. Every model step resends the whole
 #: conversation, so a long session carried about 700K tokens on each request
 #: before it compacted once; a quarter of the window keeps a request near what
 #: the Claude and Codex routes carry.
@@ -141,22 +143,20 @@ def max_tokens_from_env(env: Mapping[str, str]) -> int | None:
 
 
 def gateway_env(env: Mapping[str, str]) -> dict[str, str]:
-    """The ``DEEPSEEK_*`` names the harness adapter reads, set from the gateway ``env`` configures.
+    """The ``DEEPSEEK_*`` names the harness runtime reads, set from the gateway ``env`` configures.
 
-    The harness's DeepSeek adapter authenticates from ``DEEPSEEK_*`` only, while
-    this repository configures the gateway on the OpenAI-compatible line.
+    This repository configures the gateway on the OpenAI-compatible line; the
+    harness reaches the same gateway over the Anthropic Messages protocol.
     """
     try:
         gateway = resolve_openai_client_config(env=dict(env))
     except LLMConfigError as exc:
         raise DeepSeekSessionUnavailableError(
-            f"the DeepSeek Harness speaks the OpenAI-compatible protocol and needs "
-            f"OPENAI_BASE_URL and OPENAI_API_KEY: {exc}"
+            f"the DeepSeek Harness takes its gateway from OPENAI_BASE_URL and OPENAI_API_KEY: {exc}"
         ) from exc
     if not gateway.base_url or not gateway.api_key:
         raise DeepSeekSessionUnavailableError(
-            "the DeepSeek Harness speaks the OpenAI-compatible protocol and needs "
-            "both OPENAI_BASE_URL and OPENAI_API_KEY"
+            "the DeepSeek Harness takes its gateway from OPENAI_BASE_URL and OPENAI_API_KEY, and needs both"
         )
     return {GATEWAY_BASE_URL_ENV: gateway.base_url, GATEWAY_API_KEY_ENV: gateway.api_key}
 
