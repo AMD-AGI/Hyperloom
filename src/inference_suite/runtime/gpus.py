@@ -17,9 +17,12 @@ those topology nodes (the nodes whose ``gpu_id`` is not 0, by node number), whic
 ``gpus_in_rocm_order()[n]``. amd-smi's own per-process figure is not used while the kernel's is readable: for a
 process that opened several cards (a vLLM worker opens the render nodes of all eight GPUs) ``amd-smi process`` 26.2
 reports one number on every card, the tensor-parallel rank 0's resident bytes on all eight, while the kernel lists
-each rank's memory on its own GPU only. When the kernel's list cannot be read (no driver interface, a GPU node or a
-process file refused to this view, or a topology whose GPU count differs from amd-smi's) the amd-smi figure decides
-instead, as it did before.
+each rank's memory on its own GPU only. A container shown a subset of the GPUs is refused the ``gpu_id`` of the other
+GPU nodes; those nodes are left out and the GPUs are numbered among the readable ones, as the runtime numbers them
+(``hyperloom.sandbox.card_occupancy`` reads the topology the same way). When the kernel's list cannot be read (no
+driver interface, the topology or the process list refused, every GPU node refused, a process's file refused, or a
+topology whose GPU count differs from amd-smi's) the check logs why and amd-smi's figure decides instead, as it did
+before, including its rule that an entry reporting no memory holds the GPU.
 
 A GPU that is only held is read again until its holder exits or the release window passes, since the holder is most
 likely the previous round's server still exiting; a GPU no wait can free refuses at once.
@@ -27,6 +30,7 @@ likely the previous round's server still exiting; a GPU no wait can free refuses
 
 from __future__ import annotations
 
+import logging
 import time
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
@@ -37,6 +41,8 @@ from hyperloom_common.amd_smi import AmdSmiError, gpu_rows, gpus_in_rocm_order, 
 
 from inference_suite.contracts.report import FailedStep
 from inference_suite.runtime.watch import POLL_SEC, RoundGate, Stop
+
+log = logging.getLogger(__name__)
 
 #: A process that opened a card but runs nothing on it keeps 36-52 KiB of page tables there, up to 1.7 MiB once ROCr has
 #: initialised the card (recorded on MI355X); a server or a compute job holds gigabytes. 1 GiB leaves room for a runtime
@@ -57,11 +63,16 @@ _KFD_NODES = "topology/nodes"
 _KFD_NODE_GPU_ID = "gpu_id"
 _KFD_VRAM_PREFIX = "vram_"
 #: A process or node entry that went away while it was read.
-_GONE = (FileNotFoundError, ProcessLookupError)
+_GONE = (FileNotFoundError, ProcessLookupError, NotADirectoryError)
 
 
 class _KfdUnreadable(Exception):
-    """The kernel's list cannot be read in this view, so the amd-smi figure decides."""
+    """The kernel's list cannot be read in this view, so the amd-smi figure decides; the message says why, and
+    ``refused`` whether it is because this view is refused the file (permission denied)."""
+
+    def __init__(self, message: str, *, refused: bool = False) -> None:
+        super().__init__(message)
+        self.refused = refused
 
 
 @dataclass(frozen=True)
@@ -115,27 +126,42 @@ def _read_number(path: Path) -> int | None:
         return int(path.read_text(encoding="ascii").strip())
     except _GONE:
         return None
+    except PermissionError as exc:
+        raise _KfdUnreadable(f"{path} is refused to this view", refused=True) from exc
     except (OSError, ValueError) as exc:
-        raise _KfdUnreadable(f"{path}: {type(exc).__name__}") from exc
+        raise _KfdUnreadable(f"{path} does not hold a number ({type(exc).__name__})") from exc
 
 
 def _kfd_gpu_ids(kfd: Path) -> list[int]:
-    """The kernel's id of every GPU, in the order ROCm numbers them: the topology nodes that are not a CPU, by number.
+    """The kernel's id of every GPU this view can read, in the order ROCm numbers them: the topology nodes that are not
+    a CPU, by node number, leaving out the nodes whose ``gpu_id`` this view is refused (another container's GPUs).
 
     Raises:
-        _KfdUnreadable: The topology cannot be listed, or a node is refused to this view or went away.
+        _KfdUnreadable: There is no driver interface, the topology cannot be listed, a node went away or is unreadable
+            for another reason than a refusal, or every GPU node is refused.
     """
+    if not (kfd / _KFD_PROCESSES).is_dir():
+        raise _KfdUnreadable(f"{kfd / _KFD_PROCESSES} is not there: no AMD GPU driver interface in this view")
     try:
         nodes = sorted(int(entry.name) for entry in (kfd / _KFD_NODES).iterdir() if entry.name.isdigit())
     except OSError as exc:
-        raise _KfdUnreadable(f"{kfd / _KFD_NODES}: {type(exc).__name__}") from exc
+        raise _KfdUnreadable(f"the topology {kfd / _KFD_NODES} cannot be listed ({type(exc).__name__})") from exc
     gpu_ids = []
+    refused = 0
     for node in nodes:
-        gpu_id = _read_number(kfd / _KFD_NODES / str(node) / _KFD_NODE_GPU_ID)
+        try:
+            gpu_id = _read_number(kfd / _KFD_NODES / str(node) / _KFD_NODE_GPU_ID)
+        except _KfdUnreadable as exc:
+            if not exc.refused:
+                raise
+            refused += 1
+            continue
         if gpu_id is None:
             raise _KfdUnreadable(f"topology node {node} went away while it was read")
         if gpu_id:
             gpu_ids.append(gpu_id)
+    if refused and not gpu_ids:
+        raise _KfdUnreadable(f"every one of the {refused} GPU nodes of {kfd / _KFD_NODES} is refused to this view")
     return gpu_ids
 
 
@@ -149,11 +175,15 @@ def _kfd_resident(gpus: Sequence[int], card_count: int, kfd: Path) -> dict[int, 
     """
     gpu_ids = _kfd_gpu_ids(kfd)
     if len(gpu_ids) != card_count:
-        raise _KfdUnreadable(f"the kernel lists {len(gpu_ids)} GPUs and amd-smi {card_count}")
+        raise _KfdUnreadable(
+            f"this view reads {len(gpu_ids)} GPUs in the kernel's topology and amd-smi lists {card_count}"
+        )
     try:
         pids = sorted(int(entry.name) for entry in (kfd / _KFD_PROCESSES).iterdir() if entry.name.isdigit())
     except OSError as exc:
-        raise _KfdUnreadable(f"{kfd / _KFD_PROCESSES}: {type(exc).__name__}") from exc
+        raise _KfdUnreadable(
+            f"the process list {kfd / _KFD_PROCESSES} cannot be listed ({type(exc).__name__})"
+        ) from exc
     resident: dict[int, list[int]] = {gpu: [] for gpu in gpus}
     for pid in pids:
         process = kfd / _KFD_PROCESSES / str(pid)
@@ -182,9 +212,10 @@ def _refusal(
     return None
 
 
-def _refusals(gpus: Sequence[int]) -> list[_Refusal]:
+def _refusals(gpus: Sequence[int], fallbacks: set[str]) -> list[_Refusal]:
     """One reading of why each of ``gpus`` cannot take a new server; empty when all are free. The kernel's per-GPU
-    figure decides who holds a GPU; amd-smi's only when the kernel's list cannot be read."""
+    figure decides who holds a GPU; amd-smi's only when the kernel's list cannot be read, which is logged once per
+    reason in ``fallbacks`` (the reasons already logged for this check)."""
     try:
         rocm_order = gpus_in_rocm_order()
         rows = {row["gpu"]: row for row in gpu_rows(read_amd_smi_json("process"))}
@@ -193,8 +224,15 @@ def _refusals(gpus: Sequence[int]) -> list[_Refusal]:
     visible = [gpu for gpu in gpus if gpu < len(rocm_order)]
     try:
         resident: dict[int, list[int]] | None = _kfd_resident(visible, len(rocm_order), _KFD_ROOT)
-    except _KfdUnreadable:
+    except _KfdUnreadable as exc:
         resident = None
+        if str(exc) not in fallbacks:
+            fallbacks.add(str(exc))
+            log.warning(
+                "GPUs %s: the kernel's per-GPU memory list cannot be read (%s); amd-smi's figure decides who holds them",
+                ", ".join(map(str, gpus)),
+                exc,
+            )
     return [refusal for gpu in gpus if (refusal := _refusal(gpu, rocm_order, rows, resident)) is not None]
 
 
@@ -225,7 +263,8 @@ def await_free_gpus(gpus: Sequence[int], gate: RoundGate) -> Stop | None:
     ``GPUS_UNAVAILABLE`` stop naming each GPU that is held or not visible, or the stop ``gate`` trips while a held
     GPU is waited on."""
     deadline = time.monotonic() + RELEASE_WAIT_SEC
-    while refusals := _refusals(gpus):
+    fallbacks: set[str] = set()
+    while refusals := _refusals(gpus, fallbacks):
         if not all(refusal.held for refusal in refusals) or time.monotonic() >= deadline:
             return Stop(FailedStep.GPUS_UNAVAILABLE, "; ".join(refusal.reason for refusal in refusals))
         if (stop := _gated_sleep(RELEASE_STEP_SEC, gate)) is not None:
