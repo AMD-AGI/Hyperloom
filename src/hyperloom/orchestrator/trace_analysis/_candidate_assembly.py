@@ -27,10 +27,7 @@ from ._kernel_roofline import _resolve_flydsl_source_fallback
 from ._kernel_search import find_repo_root
 from ._trace_shapes import (
     _FUSED_MOE_KERNEL_MARKER,
-    resolve_fused_moe_invocation_cases_from_csv,
     resolve_fused_moe_shapes_from_csv,
-    resolve_invocation_cases_from_csv,
-    resolve_raw_arg_spec_from_csv,
     resolve_shapes_from_csv_for_op,
 )
 from ._vendor_operator_playbooks import match_vendor_operator_playbook, resolve_kernel_anchor_path
@@ -237,52 +234,25 @@ def _stamp_candidate_metadata(item: dict[str, Any], op_cat_map: dict[str, str] |
     item.setdefault("source_path", item.get("source_file", ""))
 
 
-def _recover_csv_invocations(item: dict[str, Any], perf_report_csv_dir: Path | str | None) -> None:
-    """Fill a candidate's missing shapes, invocation cases and raw arg spec from ``ops_unique_args.csv``.
+def _recover_csv_shapes(item: dict[str, Any], perf_report_csv_dir: Path | str | None) -> None:
+    """Fill a candidate's missing shapes from ``ops_unique_args.csv``.
 
     The fused-MoE expert kernel's trace event carries no Input Dims, so it takes the sidecar's fused-MoE rows
     instead of an exact-name match.
     """
-    had_observed_shapes = bool(item.get("shapes"))
-    operation = str(item.get("name") or "")
-    if _is_fused_moe_candidate(item):
-        fused_moe_shapes = resolve_fused_moe_shapes_from_csv(perf_report_csv_dir)
-        invocation_cases = resolve_fused_moe_invocation_cases_from_csv(perf_report_csv_dir)
-        if not item.get("shapes") and fused_moe_shapes:
-            item["shapes"] = fused_moe_shapes
-            item["shape_provenance"] = "torch_trace"
-    else:
-        invocation_cases = resolve_invocation_cases_from_csv(perf_report_csv_dir, operation)
     if not item.get("shapes"):
-        csv_shapes = resolve_shapes_from_csv_for_op(perf_report_csv_dir, operation)
+        fused_moe_shapes = (
+            resolve_fused_moe_shapes_from_csv(perf_report_csv_dir) if _is_fused_moe_candidate(item) else []
+        )
+        csv_shapes = fused_moe_shapes or resolve_shapes_from_csv_for_op(
+            perf_report_csv_dir, str(item.get("name") or "")
+        )
         if csv_shapes:
             item["shapes"] = csv_shapes
             item["shape_provenance"] = "torch_trace"
-    if invocation_cases:
-        if had_observed_shapes:
-            invocation_cases = [
-                {
-                    "operation": operation,
-                    "input_shapes": (item.get("input_shapes") or item.get("shapes") or []),
-                    "input_dtypes": item.get("input_dtypes") or [],
-                    "raw_arg_spec": item.get("raw_arg_spec") or {},
-                },
-                *invocation_cases,
-            ]
-        item["invocation_cases"] = invocation_cases
-    # Mark trace-extracted shapes so the dispatch-time validator knows their provenance.
+    # Shapes read from the trace say so; the collective lane copies the provenance with any shapes it borrows.
     if item.get("shapes"):
         item.setdefault("shape_provenance", "torch_trace")
-    # Forward the full ordered arg metadata so GEAK's harness builder can
-    # reconstruct the exact call signature.
-    if not item.get("raw_arg_spec"):
-        raw_spec = (
-            invocation_cases[0].get("raw_arg_spec")
-            if invocation_cases
-            else resolve_raw_arg_spec_from_csv(perf_report_csv_dir, operation)
-        )
-        if raw_spec:
-            item["raw_arg_spec"] = raw_spec
 
 
 def _finalize_candidates(
@@ -311,7 +281,7 @@ def _finalize_candidates(
         item.setdefault("source_file", "")
         item.setdefault("source_type", "unknown")
         item.setdefault("shapes", [])
-        _recover_csv_invocations(item, perf_report_csv_dir)
+        _recover_csv_shapes(item, perf_report_csv_dir)
         item["kernel_id"] = f"k{idx:03d}"
         item["duration_us"] = round(item["duration_us"], 3)
         # Keep TraceLens' authoritative pct_e2e when present, including a real

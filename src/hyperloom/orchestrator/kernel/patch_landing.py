@@ -48,15 +48,16 @@ def record_matches_task(
     record: Mapping[str, Any],
     *,
     kernel_id: str,
-    task_group_key: str,
     source_file: str,
-    task_group_aliases: set[str] | None = None,
+    task_group_key: str = "",
 ) -> bool:
-    """Match persisted integration state to the current stable task identity."""
+    """Match persisted integration state to the current stable task identity.
+
+    A trace row has no ``task_group_key``; a queued integration names the one it was recorded under.
+    """
     recorded_key = str(record.get("task_group_key") or "")
     if task_group_key and recorded_key:
-        accepted_keys = {task_group_key, *(task_group_aliases or set())}
-        return recorded_key in accepted_keys
+        return recorded_key == task_group_key
     if str(record.get("kernel_id") or "") != kernel_id:
         return False
     recorded_source = record_source_path(record)
@@ -81,26 +82,12 @@ class IntegratedStack:
         )
         return cls(entries, frozenset(path for path in map(record_source_path, entries) if path))
 
-    def covers(
-        self,
-        *,
-        kernel_ids: Iterable[str],
-        task_group_key: str,
-        source_file: str,
-        task_group_aliases: set[str] | None = None,
-    ) -> bool:
+    def covers(self, *, kernel_id: str, source_file: str, task_group_key: str = "") -> bool:
         """Whether a landed row already retired this task, by identity or by owning its source file."""
         if source_file and source_file in self._source_files:
             return True
         return any(
-            record_matches_task(
-                entry,
-                kernel_id=kernel_id,
-                task_group_key=task_group_key,
-                source_file=source_file,
-                task_group_aliases=task_group_aliases,
-            )
-            for kernel_id in kernel_ids
+            record_matches_task(entry, kernel_id=kernel_id, task_group_key=task_group_key, source_file=source_file)
             for entry in self._entries
         )
 

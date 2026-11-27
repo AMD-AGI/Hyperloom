@@ -117,18 +117,6 @@ def _stamp_round_attribution(
     row["kb_rendered_refs"] = list(attribution.kb_rendered_refs)
 
 
-def _skipped_kernels_suffix(blob: dict[str, Any]) -> str:
-    """The operators TraceLens declined to route, surfaced only when no candidate is routable."""
-    rendered = [
-        f"{s.get('kernel_id')}:{s.get('name')}:{s.get('skip_reason') or '?'}"
-        for s in blob.get("skipped_kernels_top") or []
-        if isinstance(s, dict) and s.get("kernel_id")
-    ]
-    if not rendered:
-        return ""
-    return f" skipped_kernels_top=[{'; '.join(rendered)}]"
-
-
 def _trace_health_warnings_suffix(blob: dict[str, Any]) -> str:
     """The TraceLens routing signals on this trace, inline; omitted in steady-state."""
     warnings = blob.get("trace_health_warnings") or []
@@ -747,5 +735,4 @@ class _RenderMixin:
             f"candidates_path={blob.get('candidates_path', '?')} "
             f"top={ids or []} reusable_native={reusable or []}"
         )
-        skipped = _skipped_kernels_suffix(blob) if not ids else ""
-        return f"{base}{skipped}{_trace_health_warnings_suffix(blob)}"
+        return f"{base}{_trace_health_warnings_suffix(blob)}"

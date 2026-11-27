@@ -158,20 +158,6 @@ def test_format_last_trace_analyze():
     assert "high_idle" in out
 
 
-def test_format_trace_analyze_skipped_kernels():
-    st = SharedState()
-    blob = {
-        "trace_input": "t",
-        "candidates_path": "c",
-        "hot_kernels_top15": [],
-        "skipped_kernels_top": [
-            {"kernel_id": "s1", "name": "n1", "skip_reason": "tiny"},
-        ],
-    }
-    out = st._format_trace_analyze_blob(blob)
-    assert "skipped_kernels_top" in out
-
-
 def test_format_analysis_md_pointer():
     st = SharedState()
     assert "no TraceLens snapshot" in st._format_analysis_md_pointer()

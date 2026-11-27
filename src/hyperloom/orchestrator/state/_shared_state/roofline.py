@@ -7,7 +7,6 @@ from __future__ import annotations
 
 import json
 import logging
-from collections.abc import Mapping
 from contextlib import suppress
 from pathlib import Path
 from typing import Any
@@ -29,8 +28,7 @@ def first_positive_tput(d: Any) -> float:
     return 0.0
 
 
-# How many hot / skipped kernels ``record_trace_analyze`` keeps in the trace summary (matches the ``*_top15`` field
-# names).
+# How many hot kernels ``record_trace_analyze`` keeps in the trace summary (matches the ``*_top15`` field names).
 _TRACE_HOT_KERNEL_TOP_N = 15
 
 # A projected hot-kernel row carries roofline evidence when any of these is populated.
@@ -58,25 +56,6 @@ def _saturation_delta(sat: dict[str, Any], prev_sat: dict[str, Any], key: str) -
     if current is None or previous is None:
         return None
     return round(float(current) - float(previous), 2)
-
-
-def _skipped_kernels_top(result: Mapping[str, Any]) -> list[dict[str, Any]]:
-    """The hottest skipped (non-routable) candidates, so the LLM sees the operators it cannot optimize."""
-    skipped = result.get("skipped_kernels")
-    skipped_rows = sorted(
-        (e for e in skipped if isinstance(e, dict)) if isinstance(skipped, list) else (),
-        key=lambda e: float(e.get("gpu_pct") or 0.0),
-        reverse=True,
-    )
-    return [
-        {
-            "kernel_id": e.get("kernel_id"),
-            "name": e.get("name"),
-            "skip_reason": e.get("skip_reason") or "",
-            "gpu_pct": e.get("gpu_pct"),
-        }
-        for e in skipped_rows[:_TRACE_HOT_KERNEL_TOP_N]
-    ]
 
 
 def _hot_kernel_row(entry: dict[str, Any]) -> dict[str, Any]:
@@ -171,7 +150,6 @@ class _RooflineStateMixin:
         summary, kernel_roofline, reusable_ids = self._build_hot_kernel_summaries(result)
         warning_rows = result.get("trace_health_warnings")
         warning_rows = warning_rows if isinstance(warning_rows, list) else []
-        task_groups = result.get("task_groups")
         # Monotonic snapshot counter: read previous value + 1.
         recorded = self.last_trace_analyze if isinstance(self.last_trace_analyze, dict) else {}
         analysis_md_path = result.get("trace_report_path") or ""
@@ -187,8 +165,6 @@ class _RooflineStateMixin:
             "kernel_roofline_path": str(kernel_roofline_path),
             "hot_kernels_top15": summary,
             "kernel_roofline_top15": kernel_roofline,
-            "skipped_kernels_top": _skipped_kernels_top(result),
-            "task_groups": task_groups if isinstance(task_groups, list) else [],
             "reusable_native_kernel_ids": reusable_ids,
             "trace_health_warnings": [dict(e) for e in warning_rows if isinstance(e, dict) and e.get("code")],
             "analysis_md_path": str(analysis_md_path),

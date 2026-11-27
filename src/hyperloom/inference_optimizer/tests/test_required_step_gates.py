@@ -169,11 +169,10 @@ def test_pending_keep_no_longer_blocks_other_actions(session_dir):
         )
 
 
-def _seed_trace_analyze(coord, *, hot_kernels, task_groups=None):
+def _seed_trace_analyze(coord, *, hot_kernels):
     coord.shared_state.last_trace_analyze = {
         "trace_input": "/tmp/profile.tar.gz",
         "hot_kernels": hot_kernels,
-        "task_groups": task_groups or [],
     }
 
 

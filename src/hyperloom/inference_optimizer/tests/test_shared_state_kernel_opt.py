@@ -10,7 +10,6 @@ import pytest
 from hyperloom.orchestrator.kernel import kernel_decisions as kd
 from hyperloom.orchestrator.state.shared_state import SharedState
 
-from .conftest import seed_integrate_verdict
 from .conftest import seed_kernel_keep as _seed_keep
 
 
@@ -117,11 +116,8 @@ def test_pending_keep_excludes_rejected_and_integrated(state: SharedState):
 
 
 # untried_hot_reusable_kernels report gate.
-def _set_trace(state: SharedState, *, hot_kernels, task_groups=None):
-    state.last_trace_analyze = {
-        "hot_kernels": hot_kernels,
-        "task_groups": task_groups or [],
-    }
+def _set_trace(state: SharedState, *, hot_kernels):
+    state.last_trace_analyze = {"hot_kernels": hot_kernels}
 
 
 def test_untried_hot_kernels_returns_only_reusable_above_threshold(state: SharedState):
@@ -330,25 +326,9 @@ def test_untried_hot_kernels_vendor_playbook_floor_still_applies_via_real_projec
     )
 
 
-def test_untried_hot_kernels_collapses_by_task_group(state: SharedState):
-    """task_group dedup: same AST function -> one slot."""
-    _set_trace(
-        state,
-        hot_kernels=[
-            {"kernel_id": "k001", "gpu_pct": 24.0, "reusable_native_kernel": True, "source_file": "/p/moe_op.py"},
-            {"kernel_id": "k002", "gpu_pct": 37.0, "reusable_native_kernel": True, "source_file": "/p/moe_op.py"},
-        ],
-        task_groups=[
-            {"primary_kernel_id": "k002", "kernel_ids": ["k001", "k002"]},
-        ],
-    )
-    untried = kd.untried_hot_reusable_kernels(state)
-    assert len(untried) == 1  # shared task_group -> one slot
-
-
 def test_untried_hot_kernels_rank_on_tracelens_order_via_real_projection(state: SharedState, monkeypatch):
-    """TraceLens' task priority beats a hotter kernel, its group slot goes to the highest-impact member, and an
-    unranked collective keeps a slot of its own past the cap."""
+    """TraceLens' task priority beats a hotter kernel, equal priorities order by impact, and an unranked collective
+    keeps a slot of its own past the cap."""
     hot = [
         {"kernel_id": kid, "gpu_pct": pct, "tracelens_pitem_rank": rank, "impact_score": score}
         for kid, pct, rank, score in [
@@ -365,29 +345,11 @@ def test_untried_hot_kernels_rank_on_tracelens_order_via_real_projection(state: 
         {
             "status": "ok",
             "hot_kernels": hot,
-            "task_groups": [{"primary_kernel_id": "k002", "kernel_ids": ["k002", "k003"]}],
         },
     )
-    assert kd.untried_hot_reusable_kernels(state) == ["k003", "k001", "k004"]
+    assert kd.untried_hot_reusable_kernels(state) == ["k003", "k002", "k001", "k004"]
     monkeypatch.setenv("HYPERLOOM_KERNEL_OPT_GATE_TOP_N", "1")
     assert kd.untried_hot_reusable_kernels(state) == ["k003", "k004"]
-
-
-def test_untried_hot_kernels_skips_when_any_group_member_attempted(state: SharedState):
-    """An attempted group member marks the whole task_group tried."""
-    _set_trace(
-        state,
-        hot_kernels=[
-            {"kernel_id": "k001", "gpu_pct": 24.0, "reusable_native_kernel": True, "source_file": "/p/moe_op.py"},
-            {"kernel_id": "k002", "gpu_pct": 37.0, "reusable_native_kernel": True, "source_file": "/p/moe_op.py"},
-        ],
-        task_groups=[
-            {"primary_kernel_id": "k002", "kernel_ids": ["k001", "k002"]},
-        ],
-    )
-    seed_integrate_verdict(state, "k002", source_file="/p/moe_op.py", task_group_key="k002")
-    untried = kd.untried_hot_reusable_kernels(state)
-    assert untried == []
 
 
 def test_untried_hot_kernels_skips_when_source_file_integrated(state: SharedState):

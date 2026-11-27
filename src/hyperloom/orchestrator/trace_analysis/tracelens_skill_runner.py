@@ -45,7 +45,6 @@ from ._task_group_contract import (
     build_operator_identity,
     finalize_task_groups,
     is_native_source,
-    legacy_operator_identity_keys,
     operator_identity_key,
 )
 
@@ -1058,7 +1057,6 @@ def aggregate_by_source_function(candidates: list[dict[str, Any]]) -> list[dict[
         }
         identity = build_operator_identity(**identity_args)
         key = operator_identity_key(**identity_args)
-        legacy_keys = legacy_operator_identity_keys(**identity_args)
         bucket = groups.get(key)
         if bucket is None:
             bucket = groups[key] = {
@@ -1066,7 +1064,6 @@ def aggregate_by_source_function(candidates: list[dict[str, Any]]) -> list[dict[
                 "task_group_key": key,
                 "operator_identity": identity,
                 "identity_route": "skill",
-                "legacy_task_group_keys": legacy_keys,
                 "operation": operation,
                 "operation_key": str(identity["operation"]),
                 "source_path": str(identity["source_path"]),
@@ -1080,8 +1077,6 @@ def aggregate_by_source_function(candidates: list[dict[str, Any]]) -> list[dict[
                 "aggregate_call_count": 0,
                 "aggregate_gpu_pct": 0.0,
             }
-        else:
-            bucket["legacy_task_group_keys"] = list(dict.fromkeys([*bucket["legacy_task_group_keys"], *legacy_keys]))
         kid = str(cand.get("kernel_id") or "") or cand.get("name") or ""
         if kid and kid not in bucket["kernel_ids"]:
             bucket["kernel_ids"].append(kid)

@@ -52,7 +52,6 @@ def _owe_hot_kernels(st):
             }
             for idx in range(3)
         ],
-        "task_groups": [],
     }
     assert ps.kernel_work_pending(st) is True
 

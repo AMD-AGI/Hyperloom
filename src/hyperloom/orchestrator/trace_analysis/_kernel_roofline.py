@@ -170,7 +170,6 @@ def add_framework_and_input_shapes(candidates: list[dict[str, Any]], framework: 
                 item.get("call_count"),
             )
             item["_input_shapes_synthetic"] = True
-        item.setdefault("output_shapes", [])
         # Per-arg dtypes: TraceLens records them INLINE in each ``shapes`` string
         # ("(64,5120) bf16"); surface them as a clean, positionally-aligned list.
         # Falls back to any explicit ``dtypes`` field, then ``[]``.
@@ -178,4 +177,3 @@ def add_framework_and_input_shapes(candidates: list[dict[str, Any]], framework: 
         if not existing_dtypes:
             existing_dtypes = _dtypes_from_shapes(item.get("shapes"))
         item["input_dtypes"] = existing_dtypes
-        item.setdefault("output_dtypes", [])

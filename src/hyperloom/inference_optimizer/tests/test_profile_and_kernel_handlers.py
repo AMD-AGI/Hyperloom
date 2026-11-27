@@ -18,11 +18,10 @@ import pytest
 
 from hyperloom.inference_optimizer.cli import bootstrap as cli_bootstrap
 from hyperloom.inference_optimizer.cli import parser as cli_parser
-from hyperloom.orchestrator.kernel import kernel_decisions as kd
 from hyperloom.orchestrator.tests._fixtures import MI325X_CARD, publish_card
 from hyperloom.orchestrator.kernel import request_handlers as krh
 
-from .conftest import seed_integrate_verdict, seed_kernel_keep
+from .conftest import seed_kernel_keep
 from hyperloom.inference_optimizer.session import paths as session_paths
 from hyperloom.orchestrator.actions.executors import trace_analyze as ta
 from hyperloom.orchestrator.actions.executors import VLLM_PATCH_PROFILER_FIELDS
@@ -2718,95 +2717,6 @@ def test_record_trace_analyze_defaults_warnings_to_empty_list(session_dir):
         },
     )
     assert state.last_trace_analyze["trace_health_warnings"] == []
-
-
-def test_record_trace_analyze_persists_task_groups(session_dir):
-    """``task_groups`` must flow into ``last_trace_analyze`` so the multi-KEEP queue collapses members of the same AST function into one slot."""
-    from hyperloom.orchestrator.state.shared_state import SharedState
-
-    state = SharedState.load_or_init(session_dir)
-    groups = [
-        {
-            "primary_kernel_id": "k004",
-            "kernel_ids": ["k003", "k004"],
-            "source_file": "/sgl-workspace/aiter/aiter/ops/moe_op.py",
-        },
-        {
-            "primary_kernel_id": "k002",
-            "kernel_ids": ["k001", "k002"],
-            "source_file": "/sgl-workspace/aiter/aiter/ops/moe_op.py",
-        },
-    ]
-    state.record_trace_analyze(
-        {"trace_input": "/tmp/trace"},
-        {
-            "status": "ok",
-            "hot_kernels": [
-                {
-                    "kernel_id": "k001",
-                    "gpu_pct": 8.0,
-                    "reusable_native_kernel": True,
-                    "source_file": "/sgl-workspace/aiter/aiter/ops/moe_op.py",
-                },
-                {
-                    "kernel_id": "k002",
-                    "gpu_pct": 25.0,
-                    "reusable_native_kernel": True,
-                    "source_file": "/sgl-workspace/aiter/aiter/ops/moe_op.py",
-                },
-                {
-                    "kernel_id": "k003",
-                    "gpu_pct": 12.0,
-                    "reusable_native_kernel": True,
-                    "source_file": "/sgl-workspace/aiter/aiter/ops/moe_op.py",
-                },
-                {
-                    "kernel_id": "k004",
-                    "gpu_pct": 38.0,
-                    "reusable_native_kernel": True,
-                    "source_file": "/sgl-workspace/aiter/aiter/ops/moe_op.py",
-                },
-            ],
-            "task_groups": groups,
-        },
-    )
-    assert state.last_trace_analyze.get("task_groups") == groups
-    # After k002 + k004 attempted, group-aware collapse reports no untried kernels.
-    seed_integrate_verdict(
-        state,
-        "k002",
-        source_file="/sgl-workspace/aiter/aiter/ops/moe_op.py",
-        task_group_key="k002",
-    )
-    seed_kernel_keep(
-        state,
-        "k004",
-        decision="KEEP",
-        micro=1.17,
-        source_file="/sgl-workspace/aiter/aiter/ops/moe_op.py",
-        artifact="/tmp/k004.py",
-        task_group_key="k004",
-    )
-    assert kd.untried_hot_reusable_kernels(state) == [], (
-        "k001/k003 must be filtered out because their groups have an attempted member (k002 / k004 respectively)"
-    )
-
-
-def test_record_trace_analyze_defaults_task_groups_to_empty_list(session_dir):
-    """With no ``task_groups`` field (legacy TraceLens output), the cached entry defaults to an empty list."""
-    from hyperloom.orchestrator.state.shared_state import SharedState
-
-    state = SharedState.load_or_init(session_dir)
-    state.record_trace_analyze(
-        {"trace_input": "/tmp/trace"},
-        {
-            "status": "ok",
-            "hot_kernels": [
-                {"kernel_id": "k1", "reusable_native_kernel": True},
-            ],
-        },
-    )
-    assert state.last_trace_analyze.get("task_groups") == []
 
 
 def test_record_select_kernels_filters_invalid_warning_entries(session_dir):

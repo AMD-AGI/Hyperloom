@@ -22,11 +22,11 @@ def _record(state: SharedState, trace: str) -> None:
     )
 
 
-def test_written_dict_has_seventeen_keys() -> None:
+def test_written_dict_has_fifteen_keys() -> None:
     """The canonical trace-analysis record includes the selected steady-state trace and TraceLens' findings."""
     state = SharedState()
     _record(state, "x")
-    assert len(state.last_trace_analyze) == 17
+    assert len(state.last_trace_analyze) == 15
     assert set(state.last_trace_analyze) == {
         "trace_input",
         "steady_state_trace",
@@ -34,8 +34,6 @@ def test_written_dict_has_seventeen_keys() -> None:
         "kernel_roofline_path",
         "hot_kernels_top15",
         "kernel_roofline_top15",
-        "skipped_kernels_top",
-        "task_groups",
         "reusable_native_kernel_ids",
         "trace_health_warnings",
         "analysis_md_path",

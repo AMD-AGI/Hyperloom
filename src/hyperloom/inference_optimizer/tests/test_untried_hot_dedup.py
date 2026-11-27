@@ -21,7 +21,7 @@ def _loose_gate(monkeypatch):
 
 def _state(hot, *, integrate_attempts=None, pending=None, controller=None):
     return SimpleNamespace(
-        last_trace_analyze={"hot_kernels_top15": hot, "task_groups": []},
+        last_trace_analyze={"hot_kernels_top15": hot},
         optimization_stack=[],
         kernel_integrate_attempts=dict(integrate_attempts or {}),
         pending_kernel_integrations=dict(pending or {}),

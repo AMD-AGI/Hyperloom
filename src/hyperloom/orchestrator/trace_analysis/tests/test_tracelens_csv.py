@@ -373,17 +373,6 @@ def test_resolve_fused_moe_shapes_matches_manual_harness(tmp_path):
     assert all(s and s != "()" for s in shapes)
 
 
-def test_resolve_fused_moe_preserves_invocation_boundaries(tmp_path):
-    csv_dir = _write_fused_moe_ops_unique_args(tmp_path)
-
-    cases = trace_shapes.resolve_fused_moe_invocation_cases_from_csv(csv_dir)
-
-    assert len(cases) == 2
-    assert "(15360,2048) bf16" in cases[0]["input_shapes"][0]["shape"]
-    assert "(122880,768) bf16" in cases[1]["input_shapes"][0]["shape"]
-    assert cases[0]["raw_arg_spec"]["input_dims"] != cases[1]["raw_arg_spec"]["input_dims"]
-
-
 def test_resolve_fused_moe_shapes_missing_csv_returns_empty(tmp_path):
     """Absent sidecar / no fused-MoE rows => [] so the candidate's empty shapes stay untouched."""
     assert trace_shapes.resolve_fused_moe_shapes_from_csv(tmp_path / "nope") == []
@@ -417,8 +406,6 @@ def test_finalize_grafts_fused_moe_shapes_onto_empty_candidate(tmp_path):
     assert out[0]["shapes"], "fused-MoE candidate must carry non-empty shapes"
     assert "(15360,2048) bf16" in out[0]["shapes"]
     assert out[0]["shape_provenance"] == "torch_trace"
-    assert len(out[0]["invocation_cases"]) == 2
-    assert out[0]["raw_arg_spec"] == out[0]["invocation_cases"][0]["raw_arg_spec"]
 
 
 def test_finalize_grafts_csv_shapes_for_other_bucket_attention_candidate(tmp_path):
@@ -487,7 +474,6 @@ def test_finalize_does_not_touch_non_moe_or_already_shaped(tmp_path):
     )
     assert out[0]["shapes"] == []
     assert out[1]["shapes"] == ["(99,99) bf16"]
-    assert out[1]["invocation_cases"][0]["input_shapes"] == ["(99,99) bf16"]
 
 
 def test_finalize_falls_back_to_heuristic_when_csv_missing(tmp_path):
@@ -555,9 +541,7 @@ def test_write_reports_enriches_candidates_with_runtime_metadata(tmp_path):
     assert enriched["framework"] == "sglang"
     assert enriched["backend"] == "sglang"
     assert enriched["input_shapes"] == [{"call_num": 2, "shape": [1, 32, 128]}]
-    assert enriched["output_shapes"] == []
     assert enriched["input_dtypes"] == []
-    assert enriched["output_dtypes"] == []
 
 
 # write_reports surfaces the upstream analysis.md as-is (no copies/aliases/fabrication)
@@ -2954,10 +2938,10 @@ def test_aggregate_keeps_same_operation_in_different_functions_separate(
     }
 
 
-def test_same_kernel_different_shapes_yields_one_task_with_all_shapes_as_cases(
+def test_same_kernel_different_shapes_yields_one_task_keeping_each_rows_shapes(
     tmp_path,
 ):
-    """End-to-end: same op + same source function + different shapes per row collapse to ONE task_group; each row's shapes are preserved verbatim and rendered as a distinct ``Case N:``."""
+    """End-to-end: same op + same source function + different shapes per row collapse to ONE task_group; each row's shapes are preserved verbatim."""
     src = tmp_path / "model_executor.py"
     src.write_text(
         "def x(): pass\n\n\ndef forward(x):\n    return x\n",
@@ -3009,12 +2993,6 @@ def test_same_kernel_different_shapes_yields_one_task_with_all_shapes_as_cases(
     assert set(g["kernel_ids"]) == {"k001", "k002", "k003", "k004"}
     assert g["primary_kernel_id"] == "k001"  # heaviest (12704 us)
     assert len(g["rows"]) == 4
-    assert [case["case_id"] for case in g["shape_cases"]] == [
-        "case_001",
-        "case_002",
-        "case_003",
-        "case_004",
-    ]
     # Each row preserves its own shape list verbatim — no merging, no de-duplication.
     assert g["rows"][0]["shapes"] == ["(64,2880) bf16", "(128,2880) bf16", "(128,) bf16"]
     assert g["rows"][3]["shapes"] == ["(2048,2880) bf16", "(128,2880) bf16", "(128,) bf16"]
