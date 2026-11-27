@@ -211,20 +211,21 @@ class KernelPhase(_GeakDispatchMixin, _GeakPromotionMixin, _GemmTuningMixin, Coo
 
     def _reprofile_evidence(self) -> tuple[int, str]:
         """A landed reprofile leaves a trace and adds a roofline snapshot (roofline kind) or a new trace path."""
-        state = self.shared_state
-        return len(state.roofline_snapshots or []), str(state.last_profile_trace or "")
+        return len(self.shared_state.roofline_snapshots or []), str(self.shared_state.last_profile_trace or "")
 
-    def _adopt_reprofile_snapshot(self, *, anchor_tput: float, evidence_before: tuple[int, str]) -> bool:
+    def _adopt_reprofile_snapshot(self, *, anchors: tuple[float, float], evidence_before: tuple[int, str]) -> bool:
+        """Anchor a landed reprofile at ``anchors[1]``, else restore ``anchors[0]``, which the writeback may have moved."""
         state = self.shared_state
         landed = bool(state.last_profile_trace) and self._reprofile_evidence() != evidence_before
         if not landed:
             log.warning("kernel-entry reprofile produced no new trace; the phase targets the existing trace")
-            return landed
-        # The anchor is the projection the trace was taken at, the quantity the watermark compares it with.
-        state.last_roofline_tput = anchor_tput
-        # Record the workload (incl. serving_config) that this trace reflects; _profile_config_changed derives the
-        # config signature from it, so last_profile_args stays the plain-args field it is everywhere else.
-        state.last_profile_workload = state.profile_workload_context()
+            state.last_roofline_tput = anchors[0]
+        else:
+            # The anchor is the projection the trace was taken at, the quantity the watermark compares it with.
+            state.last_roofline_tput = anchors[1]
+            # Record the workload (incl. serving_config) that this trace reflects; _profile_config_changed derives the
+            # config signature from it, so last_profile_args stays the plain-args field it is everywhere else.
+            state.last_profile_workload = state.profile_workload_context()
         state.save(self.session_dir)
         return landed
 
@@ -238,9 +239,8 @@ class KernelPhase(_GeakDispatchMixin, _GeakPromotionMixin, _GemmTuningMixin, Coo
         recorder = self.timeline()
 
         def _note_reprofile(reprofile: KernelReprofile) -> None:
-            if recorder is None:
-                return
-            recorder.record_reprofile(reprofile)
+            if recorder is not None:
+                recorder.record_reprofile(reprofile)
 
         if cur <= 0:
             _note_reprofile(KernelReprofile(ran=False, skipped_reason="no_projected_tput"))
@@ -283,7 +283,7 @@ class KernelPhase(_GeakDispatchMixin, _GeakPromotionMixin, _GemmTuningMixin, Coo
             _note_reprofile(replace(attempt, ran=True, skipped_reason="dispatch_failed"))
             return
         await self._coord.writeback.settle_covered_result(reprofile_task, result)
-        snapshot_landed = self._adopt_reprofile_snapshot(anchor_tput=cur, evidence_before=evidence_before)
+        snapshot_landed = self._adopt_reprofile_snapshot(anchors=(before, cur), evidence_before=evidence_before)
         _note_reprofile(
             replace(
                 attempt,
