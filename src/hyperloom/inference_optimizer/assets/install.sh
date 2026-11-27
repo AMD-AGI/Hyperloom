@@ -182,7 +182,7 @@ Installs:
     harness) at the pinned commit into INFERENCE_SUITE_TOOL_CACHE
   - Benchmark client deps and scriptable quality-gate deps (SSIM/LPIPS)
   - TraceLens, GEAK, and LLM gateway env for the kernel agent.
-  - src/hyperloom/agents/framework/ is part of this editable install (PR discovery, isolation helpers).
+  - src/hyperloom/agents/framework/ is part of this editable install (candidate records, pull-request search, isolation helpers).
 
 Options:
   --check-only           Verify only, do not install

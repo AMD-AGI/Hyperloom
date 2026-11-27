@@ -207,8 +207,6 @@ def _inject_execve(pid: int, argv: list[str], environ: list[str]) -> None:
 def replace_process_image(pid: int, argv: list[str], snapshot: str) -> None:
     """``execve`` ``argv`` inside ``pid``, keeping the pid, with the environment ``pid`` had before its first
     replacement. Its descendants are killed while it is stopped, so the launcher keeps waiting on the same pid."""
-    if not argv or any("\0" in part for part in argv):
-        raise ValueError("argv must be non-empty and contain no NULs")
     _ptrace(_PTRACE_ATTACH, pid)
     try:
         os.waitpid(pid, 0)
@@ -286,6 +284,11 @@ def find_server(pidfile: str, needle: str, scan: bool) -> int:
     return parked or fallback
 
 
+def _in_place() -> bool:
+    """Whether the host runs the platform's container (``HL_LAUNCH_MODE=in_place``) rather than a bare session."""
+    return os.environ["HL_LAUNCH_MODE"] == "in_place"
+
+
 def _snapshot(pidfile: str) -> str:
     """Where the server's environment before its first replacement is kept."""
     return pidfile + ".environ"
@@ -293,10 +296,10 @@ def _snapshot(pidfile: str) -> str:
 
 def _spawn_environ(pid: int, pidfile: str) -> dict[str, str]:
     """The environment a spawned server starts with: the session's on a bare host, else the server's own before its
-    first replacement, else the container's (PID 1)."""
-    if os.environ.get("HL_ENV_SOURCE") == "session":
+    first replacement, or the container's (PID 1) when there is no server."""
+    if not _in_place():
         return {key: value for key, value in os.environ.items() if not key.startswith("HL_")}
-    items = baseline_environ(pid if pid > 0 else 1, _snapshot(pidfile)) or read_environ(1)
+    items = baseline_environ(pid if pid > 0 else 1, _snapshot(pidfile))
     return dict(item.split("=", 1) for item in items if "=" in item)
 
 
@@ -330,7 +333,8 @@ def _stop(pid: int, pidfile: str) -> str:
         replace_process_image(pid, ["/bin/sleep", "infinity"], _snapshot(pidfile))
         _record(pidfile, pid)
         return "stop-exec"
-    _spawn_environ(pid, pidfile)
+    if _in_place():
+        baseline_environ(pid, _snapshot(pidfile))
     _kill([pid, *descendant_pids(pid)])
     try:
         os.remove(pidfile)
@@ -357,7 +361,7 @@ def _restart(pid: int, pidfile: str, launch: str) -> tuple[str, int]:
 def main() -> None:
     """Apply ``HL_ACTION`` (``restart`` or ``stop``) to the server of the role and print what was done."""
     pidfile = os.environ["HL_PIDFILE"]
-    pid = find_server(pidfile, os.environ["HL_NEEDLE"], os.environ.get("HL_SCAN") == "1")
+    pid = find_server(pidfile, os.environ["HL_NEEDLE"], _in_place())
     if os.environ.get("HL_ACTION") == "stop":
         print(json.dumps({"status": "ok", "action": _stop(pid, pidfile), "pid": pid}))
         return

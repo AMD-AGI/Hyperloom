@@ -202,7 +202,7 @@ def stop_cluster(state: dict[str, Any]) -> None:
     """
     with _as_session_error("the PD cluster could not be stopped"):
         session = _session_cluster(state)
-        stop(session.launch, session.cluster, LaunchOptions())
+        stop(session.launch, session.cluster)
 
 
 def session_engine_urls(state: dict[str, Any]) -> dict[str, list[str]]:

@@ -222,7 +222,7 @@ class ApplyStageMixin:
         if stash_refusal is not None:
             return stash_refusal
 
-        applied_refusal = await self._apply_deliverable(attempt, params, deliverable, framework_root)
+        applied_refusal = await self._apply_deliverable(attempt, params, deliverable)
         if applied_refusal is not None:
             return applied_refusal
 
@@ -242,13 +242,11 @@ class ApplyStageMixin:
         attempt: IntegrateAttempt,
         params: dict[str, Any],
         deliverable: _Deliverable,
-        framework_root: Path | None,
     ) -> dict[str, Any] | None:
         """Apply the deliverable's patches and artifacts inside the open mutation window; a refusal on failure."""
         shared_state = attempt.shared_state
         recovery = attempt.pending["recovery"]
         recovery_root = Path(recovery["root"])
-        patch_paths = self._admit_localization(attempt, framework_root, deliverable.patch_paths)
         recovery["phase"] = "ready"
         if shared_state is not None:
             shared_state.save(self.session_dir)
@@ -278,7 +276,7 @@ class ApplyStageMixin:
 
         series = await _apply_patch_series(
             attempt,
-            patch_paths,
+            deliverable.patch_paths,
             git_head=recovery["git_head"],
             backup_root=recovery_root / "patch_backups",
         )

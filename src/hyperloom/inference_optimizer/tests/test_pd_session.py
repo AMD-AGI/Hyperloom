@@ -258,9 +258,7 @@ def test_a_malformed_round_or_command_is_a_session_error(session: Path, monkeypa
 def test_kill_inference_stops_the_cluster(session: Path, monkeypatch) -> None:
     _adopt(session)
     stopped = []
-    monkeypatch.setattr(
-        pd_session, "stop", lambda launch, cluster, options: stopped.append(launch.role(Role.DECODE).hosts)
-    )
+    monkeypatch.setattr(pd_session, "stop", lambda launch, cluster: stopped.append(launch.role(Role.DECODE).hosts))
     assert mn_cli.cmd_kill_inference(argparse.Namespace(pid_file=None)) == 0
     assert stopped == [("d0",)]
 
@@ -348,7 +346,7 @@ def test_an_aggregated_round_restarts_the_workers(infera_session: Path, monkeypa
 def test_kill_inference_stops_the_infera_workers(infera_session: Path, monkeypatch) -> None:
     _adopt(infera_session)
     stopped = []
-    monkeypatch.setattr(pd_session, "stop", lambda launch, cluster, options: stopped.append(launch.mode.value))
+    monkeypatch.setattr(pd_session, "stop", lambda launch, cluster: stopped.append(launch.mode.value))
     assert mn_cli.cmd_kill_inference(argparse.Namespace(pid_file=None)) == 0
     assert stopped == ["aggregated"]
 

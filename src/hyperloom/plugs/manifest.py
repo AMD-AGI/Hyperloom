@@ -10,7 +10,7 @@ import hashlib
 import json
 import os
 import re
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Iterable, Mapping
 
@@ -21,9 +21,6 @@ SCHEMA = "hyperloom.plugs/v1"
 BASE_PROFILE = "local"
 CUSTOM_PROFILE = "custom"
 
-#: The sockets a hosted run locks. Nothing a session directory, the environment or the command line says reaches them.
-LOCKABLE_SOCKETS = ("measurement", "sandbox", "credentials", "events", "gpu_token")
-
 #: Layer names, in the order they are applied (4.2.2). The environment layer is added with the migration of the
 #: environment variables; it sits between ``builtin`` and ``profile``.
 LAYER_BUILTIN = "builtin"
@@ -32,7 +29,6 @@ LAYER_PROFILE = "profile"
 LAYER_MANIFEST = "manifest"
 LAYER_OVERRIDES = "overrides"
 LAYER_CLI = "cli"
-LAYER_LOCKED = "locked"
 
 _PROFILES_DIR = Path(__file__).parent / "profiles"
 _PROFILE_NAME = re.compile(r"^[a-z][a-z0-9-]*$")
@@ -50,21 +46,11 @@ class SocketSetting:
 
 
 @dataclass(frozen=True)
-class LockMismatch:
-    """A session file named another implementation than the one the hosted run locked."""
-
-    socket: str
-    file_impl: str
-    locked_impl: str
-
-
-@dataclass(frozen=True)
 class ResolvedManifest:
     """The outcome of layering: one setting per socket in use."""
 
     profile: str
     sockets: Mapping[str, SocketSetting]
-    lock_mismatches: tuple[LockMismatch, ...] = field(default=())
 
     @property
     def is_builtin_default(self) -> bool:
@@ -189,33 +175,6 @@ def _json_or_text(raw: str) -> Any:
         return raw
 
 
-def _validated_lock(locked: Mapping[str, Mapping[str, Any]]) -> dict[str, Mapping[str, Any]]:
-    for name, entry in locked.items():
-        if name not in LOCKABLE_SOCKETS:
-            raise ManifestError(f"socket {name!r} cannot be locked; lockable: {', '.join(LOCKABLE_SOCKETS)}")
-        _validate_entry(name, entry, "lock")
-        if not entry.get("impl"):
-            raise ManifestError(f"lock: socket {name!r} must name an impl")
-    return dict(locked)
-
-
-def apply_lock(
-    current: Mapping[str, SocketSetting],
-    locked: Mapping[str, Mapping[str, Any]],
-    resumed: Mapping[str, Any] | None,
-) -> tuple[dict[str, SocketSetting], tuple[LockMismatch, ...]]:
-    """Replace the locked sockets outright, and report each that ``resumed`` (a session file) chose differently."""
-    result = dict(current)
-    mismatches: list[LockMismatch] = []
-    file_sockets = (resumed or {}).get("sockets", {})
-    for name, entry in _validated_lock(locked).items():
-        file_impl = (file_sockets.get(name) or {}).get("impl")
-        if file_impl and file_impl != entry["impl"]:
-            mismatches.append(LockMismatch(name, file_impl, entry["impl"]))
-        result[name] = SocketSetting(entry["impl"], copy.deepcopy(dict(entry.get("config", {}))), LAYER_LOCKED)
-    return result, tuple(mismatches)
-
-
 @dataclass(frozen=True)
 class ManifestSources:
     """Every input to the layering, each optional."""
@@ -227,8 +186,6 @@ class ManifestSources:
     cli_configs: tuple[str, ...] = ()
     #: A previous run's resolved file, already validated; the base of the profile layer on a resume.
     resumed: Mapping[str, Any] | None = None
-    #: The hosted run's lock: ``{socket: {"impl": ..., "config": {...}}}``, applied last.
-    locked: Mapping[str, Mapping[str, Any]] = field(default_factory=dict)
 
 
 def resolve_manifest(registry: PlugRegistry, sources: ManifestSources = ManifestSources()) -> ResolvedManifest:
@@ -253,10 +210,7 @@ def resolve_manifest(registry: PlugRegistry, sources: ManifestSources = Manifest
     for layer, doc, named in stages:
         settings = apply_layer(settings, doc, layer, registry)
         profile = named or profile
-    mismatches: tuple[LockMismatch, ...] = ()
-    if sources.locked:
-        settings, mismatches = apply_lock(settings, sources.locked, sources.resumed)
-    return ResolvedManifest(profile=profile, sockets=settings, lock_mismatches=mismatches)
+    return ResolvedManifest(profile=profile, sockets=settings)
 
 
 def expand_variables(value: Any, env: Mapping[str, str], where: str) -> Any:

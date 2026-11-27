@@ -65,7 +65,8 @@ from hyperloom.measure.hosted_log import (
     where,
 )
 from hyperloom.measure.hosted_spec import SpecContext, SpecRefused, build_spec, split_result_dir
-from hyperloom.measure.jit.publish import publish_contributions
+from hyperloom.measure.jit.prune import note_used
+from hyperloom.measure.jit.publish import PublishTally, publish_contributions
 from hyperloom.measure.jit.store import DirJitStore
 from hyperloom.measure.manifest import ResultManifest
 from hyperloom.measure.phases import ACQUIRED, LANDED, RUNNER_DONE, HostTimeline
@@ -345,6 +346,7 @@ class HostedMeasurementBackend:
         self._stops = _Stops()
         self._live = LiveOutputs(clock)
         self._seen = SeenProgress()
+        self._jit_tally = PublishTally()
 
     # -- lifecycle ----------------------------------------------------------------------------------------------
 
@@ -386,6 +388,8 @@ class HostedMeasurementBackend:
         """Stop accepting tests and close every authoritative sandbox still running."""
         self._stops.close()
         self._pool.close()
+        if self._config.jit_store is not None:
+            self._jit_tally.warn_if_never_hit(self._config.jit_store)
 
     @property
     def pool(self) -> SandboxPool:
@@ -779,12 +783,16 @@ class HostedMeasurementBackend:
         store, facts = self._config.jit_store, verified.result.jit_cache
         if store is None or facts is None:
             return
+        published = 0
         try:
             scratch = staging / "jit"
             scratch.mkdir()
-            publish_contributions(store, _handle(attempt.runner), facts, scratch)
+            published = publish_contributions(store, _handle(attempt.runner), facts, scratch)
         except OSError as exc:
             log.warning("jit cache: nothing was published (%s)", type(exc).__name__)
+        self._jit_tally.note(facts, published)
+        for kind in facts.kinds:  # the keys this test read or filled are in use: pruning keeps them
+            note_used(store, kind.kind, kind.key)
 
     def _staging_dir(self, attempt: _Attempt) -> Path:
         root = self._config.staging_root or Path(tempfile.gettempdir()) / "hyperloom-staging"

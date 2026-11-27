@@ -8,22 +8,19 @@ import sys
 import time
 from pathlib import Path
 
-import pytest
-
 from inference_suite.multinode import remote_driver
 
 _DRIVER = Path(remote_driver.__file__)
 
 
-def _drive(tmp_path, action, scan=True):
+def _drive(tmp_path, action, mode="in_place"):
     env = {
         **os.environ,
         "HL_ACTION": action,
         "HL_PIDFILE": str(tmp_path / "server.pid"),
         "HL_LAUNCH_PATH": str(tmp_path / "launch.sh"),
         "HL_NEEDLE": f"sleep 37{os.getpid()}",
-        "HL_ENV_SOURCE": "session",
-        "HL_SCAN": "1" if scan else "0",
+        "HL_LAUNCH_MODE": mode,
     }
     done = subprocess.run([sys.executable, "-"], input=_DRIVER.read_text(), env=env, capture_output=True, text=True)
     assert done.returncode == 0, done.stderr
@@ -59,23 +56,12 @@ def test_direct_mode_stops_only_the_server_it_recorded(tmp_path):
     decoy = subprocess.Popen(["sleep", f"37{os.getpid()}"])
     try:
         (tmp_path / "launch.sh").write_text(f"#!/bin/bash\nexec sleep 37{os.getpid()}\n")
-        assert _drive(tmp_path, "stop", scan=False) == {"status": "ok", "action": "none", "pid": 0}
+        assert _drive(tmp_path, "stop", mode="direct") == {"status": "ok", "action": "none", "pid": 0}
         assert decoy.poll() is None
-        spawned = _drive(tmp_path, "restart", scan=False)
+        spawned = _drive(tmp_path, "restart", mode="direct")
         assert spawned["pid"] != decoy.pid
-        assert _drive(tmp_path, "stop", scan=False) == {"status": "ok", "action": "stop-kill", "pid": spawned["pid"]}
+        assert _drive(tmp_path, "stop", mode="direct") == {"status": "ok", "action": "stop-kill", "pid": spawned["pid"]}
         assert decoy.poll() is None
     finally:
         decoy.kill()
         decoy.wait()
-
-
-def test_driver_without_a_needle_adopts_no_process(tmp_path, monkeypatch):
-    monkeypatch.delenv("HL_NEEDLE", raising=False)
-    monkeypatch.setenv("HL_PIDFILE", str(tmp_path / "server.pid"))
-    monkeypatch.setenv("HL_ACTION", "stop")
-    adopted = []
-    monkeypatch.setattr(remote_driver, "_stop", lambda pid, pidfile: adopted.append(pid) or "stop-kill")
-    with pytest.raises(KeyError, match="HL_NEEDLE"):
-        remote_driver.main()
-    assert adopted == []

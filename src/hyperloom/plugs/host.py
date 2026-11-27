@@ -19,9 +19,6 @@ from hyperloom.plugs.socket import Implementation, PlugContext
 
 log = logging.getLogger(__name__)
 
-EVENT_LOCK_MISMATCH = "hyperloom.plugs_lock_mismatch"
-_EVENTS_SOCKET = "events"
-
 
 class PlugHost:
     """The implementations a manifest selects, started once and handed out by socket name."""
@@ -32,13 +29,11 @@ class PlugHost:
         registry: PlugRegistry,
         *,
         session_dir: Path | None,
-        host_info: object | None = None,
         env: Mapping[str, str] | None = None,
     ) -> None:
         self._manifest = manifest
         self._registry = registry
         self._session_dir = session_dir
-        self._host_info = host_info
         self._configs = expand_manifest(manifest, env)
         self._impls: dict[str, Implementation] = {}
         self._started: dict[str, object] = {}
@@ -72,7 +67,6 @@ class PlugHost:
                         f"{type(exc).__name__}: {exc}; plugin errors: {dict(self._registry.plugin_errors())}"
                         f"{close_failure}"
                     ) from exc
-            self._report_lock_mismatches()
 
     def _close_after_failed_start(self) -> str:
         """Close what started before a start failure; a close error is appended to that failure, not raised over it."""
@@ -89,7 +83,6 @@ class PlugHost:
             socket=socket,
             config=self._configs[socket],
             session_dir=self._session_dir,
-            host_info=self._host_info,
             get=lambda name, _impl=impl: self._dependency(_impl, name),
         )
         obj = impl.factory(context)
@@ -135,20 +128,6 @@ class PlugHost:
                         first_error = exc
         if first_error is not None:
             raise first_error
-
-    def _report_lock_mismatches(self) -> None:
-        for mismatch in self._manifest.lock_mismatches:
-            log.warning(
-                "plugs lock mismatch: session file chose %s for %s, locked to %s",
-                mismatch.file_impl,
-                mismatch.socket,
-                mismatch.locked_impl,
-            )
-            if self.has(_EVENTS_SOCKET):
-                self.get(_EVENTS_SOCKET).emit(  # type: ignore[attr-defined]
-                    EVENT_LOCK_MISMATCH,
-                    {"socket": mismatch.socket, "file_impl": mismatch.file_impl, "locked_impl": mismatch.locked_impl},
-                )
 
     def fingerprint(self) -> str:
         """Fingerprint of the selection, which covers the implementations' origins and expanded configuration."""
