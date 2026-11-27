@@ -46,19 +46,14 @@ def _install(monkeypatch: pytest.MonkeyPatch, effects: list[Any]) -> None:
     monkeypatch.setattr(deepseek_task, "DeepSeekSession", lambda **kw: _FakeSession(effects=effects, **kw))
 
 
-async def _drive(tmp_path: Path, report: Path, *, max_continuations: int = 3, timeout_sec: float | None = None) -> Any:
+async def _drive(tmp_path: Path, report: Path, *, timeout_sec: float | None = None) -> Any:
     request = deepseek_task.DeepSeekTaskRequest(
         prompt="run the skill",
         system_prompt="",
         cwd=tmp_path,
-        writable=True,
         timeout_sec=timeout_sec,
     )
-    owed = deepseek_task.OwedArtifact(
-        done=report.exists,
-        continuation_prompt=f"Write {report}.",
-        max_continuations=max_continuations,
-    )
+    owed = deepseek_task.OwedArtifact(done=report.exists, continuation_prompt=f"Write {report}.")
     return await deepseek_task.run_deepseek_task(request, owed)
 
 
@@ -81,9 +76,10 @@ async def test_a_session_that_stopped_short_is_continued_until_its_report_exists
 async def test_continuations_are_bounded(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """A rule the agent cannot satisfy must not spend the rest of the budget failing in place."""
     report = tmp_path / "analysis.md"
+    monkeypatch.setattr(deepseek_task, "MAX_CONTINUATIONS", 2)
     _install(monkeypatch, [])
 
-    result = await _drive(tmp_path, report, max_continuations=2)
+    result = await _drive(tmp_path, report)
 
     assert len(_FakeSession.instances[0].prompts) == 3
     assert "still not written after 2 continuations" in result.error
@@ -101,9 +97,10 @@ async def test_a_session_that_finished_is_not_continued(tmp_path: Path, monkeypa
 async def test_the_caller_budget_bounds_every_turn(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """A TraceLens budget of a few minutes must not leave a turn running for the harness default of two hours."""
     report = tmp_path / "analysis.md"
+    monkeypatch.setattr(deepseek_task, "MAX_CONTINUATIONS", 1)
     _install(monkeypatch, [])
 
-    await _drive(tmp_path, report, max_continuations=1, timeout_sec=30.0)
+    await _drive(tmp_path, report, timeout_sec=30.0)
 
     timeouts = _FakeSession.instances[0].turn_timeouts
     assert len(timeouts) == 2
@@ -116,7 +113,7 @@ async def test_a_spent_budget_stops_the_continuations(tmp_path: Path, monkeypatc
     monkeypatch.setattr(deepseek_task, "monotonic", lambda: next(clock))
     _install(monkeypatch, [])
 
-    result = await _drive(tmp_path, report, max_continuations=3, timeout_sec=30.0)
+    result = await _drive(tmp_path, report, timeout_sec=30.0)
 
     assert len(_FakeSession.instances[0].prompts) == 1
     assert "budget" in result.error
@@ -137,7 +134,10 @@ async def test_a_harness_session_error_is_the_result_error(tmp_path: Path, monke
 def test_the_session_carries_one_runtime_mapping_and_the_harness_model(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """One mapping section, however the caller wrote its prompt; the model is the session layer's to choose."""
+    """One mapping section, however the caller wrote its prompt; the model is the session layer's to choose.
+
+    Every task writes its artifact into its workspace, so the session may write.
+    """
     monkeypatch.setenv("DSH_MODEL", "deepseek-v4-pro")
     request = deepseek_task.DeepSeekTaskRequest(prompt="p", system_prompt="You are a runner.", cwd=tmp_path)
 
@@ -146,4 +146,4 @@ def test_the_session_carries_one_runtime_mapping_and_the_harness_model(
     assert session.instructions.count("## DeepSeek Harness runtime mapping") == 1
     assert "You are a runner." in session.instructions
     assert session.model == "deepseek-v4-pro"
-    assert session.permission_mode == "read-only"
+    assert session.permission_mode == "danger-full-access"

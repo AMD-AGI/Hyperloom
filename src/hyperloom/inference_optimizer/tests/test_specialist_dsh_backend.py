@@ -458,27 +458,21 @@ def _dsh_request(tmp_path: Path) -> dsh_launch.DshLaunchRequest:
     )
 
 
-def test_the_output_token_cap_reaches_the_dsh_specialist_patch(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+@pytest.mark.parametrize(("raw", "cap"), [("64000", 64000), (None, None)])
+def test_the_output_token_cap_reaches_the_dsh_specialist_patch(
+    raw: str | None, cap: int | None, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """A routed model whose output limit is below the harness default needs the cap on every request."""
     _pin_provider_env(monkeypatch, _OPENAI_ENV)
-    monkeypatch.setenv("HYPERLOOM_DSH_MAX_TOKENS", "64000")
+    if raw is None:
+        monkeypatch.delenv("HYPERLOOM_DSH_MAX_TOKENS", raising=False)
+    else:
+        monkeypatch.setenv("HYPERLOOM_DSH_MAX_TOKENS", raw)
 
     launch = dsh_launch.build_dsh_launch(_dsh_request(tmp_path), dict(_OPENAI_ENV))
 
     patch = Path(launch.cmd[launch.cmd.index("--patch") + 1]).read_text(encoding="utf-8")
-    assert _gateway_model(patch)["maxTokens"] == 64000
-
-
-def test_the_dsh_specialist_patch_keeps_the_harness_default_cap_when_none_is_set(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    _pin_provider_env(monkeypatch, _OPENAI_ENV)
-    monkeypatch.delenv("HYPERLOOM_DSH_MAX_TOKENS", raising=False)
-
-    launch = dsh_launch.build_dsh_launch(_dsh_request(tmp_path), dict(_OPENAI_ENV))
-
-    patch = Path(launch.cmd[launch.cmd.index("--patch") + 1]).read_text(encoding="utf-8")
-    assert "maxTokens" not in _gateway_model(patch)
+    assert _gateway_model(patch).get("maxTokens") == cap
 
 
 def test_the_dsh_specialist_reaches_the_gateway_over_the_anthropic_messages_protocol(
@@ -554,13 +548,14 @@ def test_the_harness_runtime_is_routed_to_the_gateway_over_the_anthropic_message
     assert "gateway-key" not in text
 
 
-def test_the_output_token_cap_is_passed_to_the_harness_runtime(tmp_path: Path) -> None:
+def test_the_output_token_cap_rides_on_the_route_patch_only(tmp_path: Path) -> None:
+    """The runtime caps a request at the route's ``maxTokens`` and ignores the SDK's ``max_tokens`` beside it."""
     seen, text = _start_harness(
         tmp_path, {"HYPERLOOM_DSH_MAX_TOKENS": "64000", "DEEPSEEK_BASE_URL": "https://gateway.invalid/v1"}
     )
 
-    assert seen["max_tokens"] == 64000
     assert _gateway_model(text)["maxTokens"] == 64000
+    assert "max_tokens" not in seen
 
 
 def test_a_cut_off_dsh_session_log_still_yields_its_complete_records(tmp_path: Path) -> None:

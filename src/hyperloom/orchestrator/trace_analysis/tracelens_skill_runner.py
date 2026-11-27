@@ -719,7 +719,6 @@ async def run_tracelens_skill(
             prompt=prompt,
             system_prompt=_TRACELENS_SYSTEM_PROMPT,
             cwd=tracelens_root,
-            writable=True,
             log=log,
             timeout_sec=timeout_sec,
         )

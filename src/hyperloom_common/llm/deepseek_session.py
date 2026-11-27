@@ -200,11 +200,6 @@ def gateway_route_patch(base_url: str, model: str, *, max_tokens: int | None = N
     return "\n".join(lines) + "\n"
 
 
-def with_deepseek_gateway(env: Mapping[str, str]) -> dict[str, str]:
-    """Return ``env`` with the configured gateway written onto the names the harness adapter reads."""
-    return {**env, **gateway_env(env)}
-
-
 def child_environment(overrides: Mapping[str, str] | None, permission_mode: str) -> dict[str, str]:
     """Build the environment a harness runtime subprocess is spawned with.
 
@@ -214,7 +209,7 @@ def child_environment(overrides: Mapping[str, str] | None, permission_mode: str)
     base = os.environ.copy()
     if overrides:
         base.update(overrides)
-    env = with_deepseek_gateway(base)
+    env = {**base, **gateway_env(base)}
     env["DSH_PERMISSION_MODE"] = permission_mode
     # These outrank -C and cwd, so a caller that set them to reach one
     # repository would answer every git command the session runs anywhere.
@@ -241,7 +236,9 @@ def start_harness(sdk: Any, launch: HarnessLaunch) -> Any:
 
     Construction is lazy in the SDK, so only the handshake proves the binary
     runs and the model and effort are accepted. The output-token cap comes from
-    ``launch.env``, so every caller that starts a runtime applies it.
+    ``launch.env``, so every caller that starts a runtime applies it. It rides on
+    the route patch only: the runtime takes a request's cap from the route's model
+    entry and ignores the SDK's own ``max_tokens`` once the entry names one.
     """
     max_tokens = max_tokens_from_env(launch.env)
     workspace = str(launch.cwd)
@@ -262,7 +259,6 @@ def start_harness(sdk: Any, launch: HarnessLaunch) -> Any:
         provider=GATEWAY_PROVIDER_ROUTE,
         model=launch.model,
         reasoning_effort=launch.reasoning_effort,
-        max_tokens=max_tokens,
         env=dict(launch.env),
         initialize_timeout_seconds=launch.initialize_timeout_sec,
         request_timeout_seconds=launch.request_timeout_sec,
@@ -396,12 +392,12 @@ class DeepSeekSession:
     #: system prompt through its plugin composition and its SDK exposes no
     #: per-session field for one, so there is nowhere else to put these.
     instructions: str = ""
-    dsh_home: Path | None = None
     reasoning_effort: str = ""
     permission_mode: str = "read-only"
     env: Mapping[str, str] | None = None
     request_timeout_sec: float = 300.0
 
+    dsh_home: Path = field(init=False)
     _harness: Any = field(default=None, init=False, repr=False)
     _session_id: str = field(default="", init=False, repr=False)
 
@@ -409,8 +405,7 @@ class DeepSeekSession:
         """Resolve the workspace, the model and the harness home before any turn runs."""
         self.model = self.model.strip() or resolve_forge_llm_model(AGENT_BACKEND_DEEPSEEK)
         self.cwd = Path(self.cwd).expanduser().resolve()
-        home = Path(self.dsh_home).expanduser() if self.dsh_home else Path.home() / ".cache" / "hyperloom" / "dsh_home"
-        self.dsh_home = home.resolve()
+        self.dsh_home = (Path.home() / ".cache" / "hyperloom" / "dsh_home").resolve()
 
     def _child_environment(self) -> dict[str, str]:
         """Build the environment the harness runtime subprocess is spawned with."""
@@ -421,7 +416,6 @@ class DeepSeekSession:
         if self._harness is not None:
             return
         sdk = load_harness_sdk()
-        assert self.dsh_home is not None  # set in __post_init__
         try:
             self.dsh_home.mkdir(parents=True, exist_ok=True)
         except OSError as exc:
@@ -433,7 +427,6 @@ class DeepSeekSession:
             raise DeepSeekSessionUnavailableError(f"the DeepSeek Harness runtime failed to start: {exc}") from exc
 
     def _spawn(self, sdk: Any, child_env: dict[str, str]) -> Any:
-        assert self.dsh_home is not None  # set in __post_init__
         return start_harness(
             sdk,
             HarnessLaunch(
@@ -520,5 +513,4 @@ __all__ = [
     "step_usage",
     "turn_end_failure",
     "usage_from_events",
-    "with_deepseek_gateway",
 ]
