@@ -25,7 +25,6 @@ def kernel_coordinator(session_dir):
         return None
 
     c.phase_internal.maybe_enqueue_explore_research_scout = _noop  # type: ignore[method-assign]
-    c.specialist_dispatch.maybe_force_stalled_domain_specialist = _noop  # type: ignore[method-assign]
     c.phase_internal.maybe_enqueue_trajectory_reviewer = _noop  # type: ignore[method-assign]
     c.phase_machine._on_phase_entered = _noop  # type: ignore[method-assign]
     yield c
@@ -85,7 +84,7 @@ async def test_idle_kernel_winds_down_even_while_work_pending(kernel_coordinator
     _backdate_streak(st, phase_predicates._kernel_idle_min_seconds() + 1.0)
     await c.phase_machine.advance_phase_if_needed()
 
-    assert st.phase == ps.PHASE_SWEEP
+    assert st.phase == ps.PHASE_CYCLE_END
     row = st.phase_history[-1]
     assert row["reason"] == "kernel_no_more_leverage"
     assert row["evidence"]["evidence"] == "kernel_idle_no_progress"
@@ -156,7 +155,7 @@ async def test_orphaned_inline_step_stamp_still_winds_down(kernel_coordinator):
     _backdate_streak(st, phase_predicates._kernel_idle_min_seconds() + 1.0)
     await c.phase_machine.advance_phase_if_needed()
 
-    assert st.phase == ps.PHASE_SWEEP
+    assert st.phase == ps.PHASE_CYCLE_END
 
 
 @pytest.mark.asyncio
@@ -271,26 +270,3 @@ async def test_exit_facts_report_a_queued_kernel_agent_only_inside_kernel(kernel
 
     _arm_kernel_phase(st)
     assert (await c.phase_kernel.exit_facts()).agent_in_flight is True
-
-
-@pytest.mark.asyncio
-async def test_framework_pump_drives_the_research_scout_and_the_stalled_domain_specialist(kernel_coordinator):
-    c = kernel_coordinator
-    calls: list[str] = []
-
-    async def _scout():
-        calls.append("scout")
-
-    async def _stalled():
-        calls.append("stalled")
-
-    async def _pump_phase():
-        calls.append("phase")
-
-    c.phase_internal.maybe_enqueue_explore_research_scout = _scout  # type: ignore[method-assign]
-    c.specialist_dispatch.maybe_force_stalled_domain_specialist = _stalled  # type: ignore[method-assign]
-    c.phase_framework._pump_framework_agent_phase = _pump_phase  # type: ignore[method-assign]
-
-    await c.phase_framework.pump()
-
-    assert calls == ["phase", "scout", "stalled"]

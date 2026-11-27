@@ -162,15 +162,9 @@ def test_ordinary_sessions_carry_no_ceiling() -> None:
     assert spec.resolved(runtime).reasoning_effort == "high"
 
 
-#: The places a call site is allowed to cap its own effort, and why.
-#:
-#: ``orchestration_agent`` -- the round partition divides ground the analyses already
-#: name, which is a reading task rather than the deepest reasoning the round
-#: does, while the plans behind it keep the maximum. Named here as one file
-#: rather than one call because the cap travels in the partition's ``_Turn``
-#: to the spec ``_run_spec`` builds from it; the cap is still written in
-#: exactly one place, ``ROUND_PARTITION_EFFORT_CEILING``.
-_CAPPED_CALL_SITES = {"workflows/forge_loop/roles/orchestration_agent.py"}
+#: The places a call site is allowed to cap its own effort, and why. None does today: every role runs at the effort
+#: its session was configured with.
+_CAPPED_CALL_SITES: set[str] = set()
 
 
 def test_effort_ceilings_are_confined_to_the_argued_call_sites() -> None:

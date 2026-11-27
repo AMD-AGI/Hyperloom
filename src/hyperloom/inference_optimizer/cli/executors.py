@@ -18,7 +18,6 @@ from typing import TYPE_CHECKING, Any, Awaitable, Callable
 from hyperloom.orchestrator.actions.executors import (
     TargetAnalysisExecutor,
     baseline_executor,
-    conc_sweep_executor,
     explore_executor,
     report_executor,
     session_breakdown_executor,
@@ -30,6 +29,7 @@ from hyperloom.orchestrator.actions.executors.roofline import RooflineExecutor
 from hyperloom.inference_optimizer.framework_paths import resolve_kernel_search_roots
 
 if TYPE_CHECKING:  # pragma: no cover - type-only import to avoid a runtime cycle
+    from hyperloom.orchestrator.actions.executors.candidate_builds import CandidateBuilds
     from hyperloom.orchestrator.loop.coordinator import Coordinator
 
 
@@ -38,12 +38,9 @@ _REAL_EXECUTORS_FULL: dict[str, Any] = {
     "baseline": baseline_executor,
     # replay_warm_recipe reuses BaselineExecutor, applying warm_start_recipe.best_config.
     "replay_warm_recipe": baseline_executor,
-    # profile: Coordinator-internal; PolicyGate denies LLM-proposed delegate.
+    # profile: Coordinator-internal; no phase offers it to an agent.
     "profile": profile_executor,
     "explore": explore_executor,
-    # conc_sweep: the Coordinator-internal CONC-ladder benchmark, and the only
-    # sweep there is.
-    "conc_sweep": conc_sweep_executor,
     "report": report_executor,
     "session_breakdown": session_breakdown_executor,
 }
@@ -192,6 +189,7 @@ def _register_executors(
     compare_against_gpu: str | None = None,
     session_dir: Path | None = None,
     specialist_executor: "Callable[[Any], Awaitable[dict]] | None" = None,
+    native: CandidateBuilds | None = None,
 ) -> None:
     """Wire all available action executors onto ``coordinator``: the
     _REAL_EXECUTORS_FULL set, the always-wired Coordinator-internal executors,
@@ -204,6 +202,7 @@ def _register_executors(
         compare_against_gpu: Optional GPU type for the target-analysis executor.
         session_dir: Optional session directory passed to executors.
         specialist_executor: Optional specialist executor to register.
+        native: The session's builds of its framework's server, when it is built from source.
     """
     for kind, fn in _REAL_EXECUTORS_FULL.items():
         coordinator.sub.register_executor(kind, fn)
@@ -220,7 +219,7 @@ def _register_executors(
     # decides KEEP/REVERT.
     coordinator.sub.register_executor(
         "integrate_patch",
-        IntegratePatchExecutor(session_dir=session_dir),
+        IntegratePatchExecutor(session_dir=session_dir, native=native),
     )
 
     # roofline (profile + trace_analyze): auto-enqueued at PRELUDE + each 10%

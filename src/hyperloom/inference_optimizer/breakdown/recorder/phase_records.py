@@ -267,36 +267,25 @@ class ProposalReview:
 
     proposal_msg_id: str
     verdict: str
-    effective_verdict: str = ""
     source: str = ""
     reasoning: Any = None
     confidence: Any = None
-    failure_reason_code: Any = None
     advisory: Mapping[str, Any] | None = None
-    variants: Any = None
 
     def row(self) -> dict[str, Any]:
         """The proposal row fields this ruling persists as."""
-        authored = str(self.verdict or "")
-        effective = str(self.effective_verdict or "") or authored
         advice = self.advisory or {}
         return {
             "proposal_msg_id": str(self.proposal_msg_id),
             "critic_review": {
-                "verdict": authored,
-                "effective_verdict": effective,
-                # Its own field because the two verdicts alone say that they
-                # differ, not that the envelope validator imposed it.
-                "held_to_rule": effective != authored,
+                "verdict": str(self.verdict or ""),
                 "source": str(self.source or ""),
                 "reasoning": _clip(self.reasoning, MAX_REASON_CHARS),
                 "confidence": _float_or_none(self.confidence),
-                "failure_reason_code": _text_or_none(self.failure_reason_code),
                 "required_evidence": [str(item) for item in _as_list(advice.get("required_evidence"))],
                 "risks": [dict(risk) for risk in _as_list(advice.get("risks")) if isinstance(risk, Mapping)],
                 "advice_text": _text_or_none(advice.get("advice_text")),
                 "alternative_action": _text_or_none(advice.get("alternative_action")),
-                "variants": [dict(row) for row in _as_list(self.variants) if isinstance(row, Mapping)],
                 "reviewed_at": _now(),
             },
         }

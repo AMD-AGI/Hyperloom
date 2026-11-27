@@ -37,7 +37,6 @@ _BACKEND_UNHEALTHY_STOP_SEC: float = 3600.0
 # How many turns in a row one agent may answer without an intent before the session stops.
 _NO_INTENT_STOP_TURNS: int = 50
 from ..phases import machine_state as _phase_state
-from hyperloom.inference_optimizer.session.paths import stop_request_path
 from hyperloom.inference_optimizer.session.session_binding import bind_session
 from ..roles.agent_role import AgentRole, default_role_registry
 from ..roles.base import Backend, BackendError, BackendTurnResult, LLMCallFailed
@@ -374,10 +373,10 @@ class Coordinator:
         return self._collaborator("_phase_prelude", PreludePhase)
 
     @property
-    def phase_sweep(self):
-        from ..phases.sweep import SweepPhase
+    def phase_cycle_end(self):
+        from ..phases.cycle_end import CycleEndPhase
 
-        return self._collaborator("_phase_sweep", SweepPhase)
+        return self._collaborator("_phase_cycle_end", CycleEndPhase)
 
     @property
     def phase_close(self):
@@ -739,13 +738,13 @@ class Coordinator:
     def stop_requested(self) -> bool:
         """Whether an operator has asked this run to stop.
 
-        Reads the asyncio event, the drain's threading event and the stop-request file, so the end-of-tick check
-        sees a signal that arrived during that tick and a request that came while no drain was armed.
+        Reads the asyncio event and the drain's threading event, so the end-of-tick check sees a signal that arrived
+        during that tick.
 
         Returns:
             bool: True once a stop has been asked for by either route.
         """
-        if self._stop.is_set() or stop_request_path(self.session_dir).is_file():
+        if self._stop.is_set():
             return True
         drain = self._signals
         return drain is not None and drain.requested.is_set()
@@ -802,7 +801,7 @@ class Coordinator:
 
     # Long-run interface
     async def run(self, *, objective: Objective | None = None, options: RunOptions = RunOptions()) -> str:
-        """Run reactor + dispatcher until a stop condition fires (priority order): signal, a stop_reason the phase machine recorded (a met target closes through SWEEP as one), time_exhausted (via closing phase), emergency, max_ticks. Sets + saves + returns shared_state.stop_reason.
+        """Run reactor + dispatcher until a stop condition fires (priority order): signal, a stop_reason the phase machine recorded (a met target closes through CYCLE_END as one), time_exhausted (via closing phase), emergency, max_ticks. Sets + saves + returns shared_state.stop_reason.
 
         The whole run is one ``session`` trajectory span, and every trajectory event recorded beneath it inherits this
         session dir and the live phase / tick.

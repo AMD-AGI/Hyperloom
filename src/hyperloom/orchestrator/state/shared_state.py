@@ -295,17 +295,17 @@ class SharedState(
     kernel_enabled: bool = True
     # KERNEL-phase backend, recorded once when the session is created: "geak" (default) or "forge".
     kernel_optimizer: str = "geak"
-    # Snapshot of the last GEAK e2e run (result.json + final_launch.sh / bench_e2e.sh handles the SWEEP phase reuses).
+    # The last GEAK e2e run's result.json, with the verdict the rebench settled on it.
     geak_result: dict[str, Any] = field(default_factory=dict)
     # Terminal result of the phase-level KernelForge rewrite controller.
     kernel_rewrite_controller_result: dict[str, Any] = field(default_factory=dict)
-    # SWEEP-phase concurrency sweep; ``_seed_shared_state`` resolves it at seed time from ``--enable-conc-sweep`` and the
-    # benchmark mode.
-    conc_sweep_enabled: bool = True
+    # Whether the session runs its concurrency sweep once it closes (``--enable-conc-sweep``, ``hyperloom.orchestrator.conc_sweep``).
+    conc_sweep_enabled: bool = False
     # Which benchmark workload this session measures: "agentx" (agentic trace replay) or "synthetic" (ISL/OSL).
     benchmark_mode: str = ""
     # The DATASET_PATH file the session's fixed rounds send in place of random prompts, as given; empty when none.
-    # The path and not a digest of the file: the file is read where a round runs, which need not be this host.
+    # The path and not a digest of the file: its prompts are counted where a point is rendered and sent where the round
+    # runs, which need not be this host.
     # Compared on resume, and no store keyed on ISL/OSL files a session that records one.
     prompt_dataset: str = ""
     # Generation of the measurement path this session was measured on; resume refuses one below the build's epoch.
@@ -323,10 +323,8 @@ class SharedState(
     grading: dict[str, Any] = field(default_factory=dict)
     # Stamped once when the run objective is first met.
     target_reached_at: str = ""
-    # CONC ladder for conc_sweep, seeded from the workload's own ladder by ``_parse_conc_sweep_concs``.
+    # The operator's conc-sweep points (``--conc-sweep-concs``), read only for a base no InferenceX recipe gave.
     conc_sweep_concs: list[int] = field(default_factory=list)
-    # Total wall-clock budget (s) for conc_sweep. 0 disables the gate.
-    conc_sweep_total_budget_sec: int = 9000
     baseline_tput: float = 0.0
     # Ceiling on mean end-to-end latency (ms) from ``--max-latency-ms``; 0.0 leaves KEEP behaviour unchanged. The
     # only copy of the budget: it is written once at launch and archived with the session, so a resume restores it.
@@ -494,10 +492,6 @@ class SharedState(
     # ``current_best.action`` in effect when ``last_profile_workload`` was recorded, so the backfill in
     # ``current_profile_workload_context`` can tell a same-arm reuse from a stale one.
     last_profile_workload_action: str = ""
-    # Rolling log of PolicyGate denials (newest last, cap 50).
-    policy_denial_history: list[dict[str, Any]] = field(default_factory=list)
-    # Per-(action_name, rule) consecutive denial counter.
-    policy_denial_streak: dict[str, int] = field(default_factory=dict)
     # Server EXTRA_SGLANG_ARGS in effect when last_profile_trace was captured; identical args means the same trace.
     last_profile_args: str = ""
     # Merged host-side rewrite evidence document from the most recent profile (see ``_framework_rewrite_evidence``).
@@ -572,14 +566,6 @@ class SharedState(
     )
     # Default True: Coordinator auto-analysis is ``roofline`` (profile+trace_analyze+analysis.md); False enqueues plain ``profile``.
     enable_roofline: bool = True
-    # The concurrency ladder's terminal state; SWEEP→CLOSE exits on it.
-    last_conc_sweep: dict[str, Any] = field(default_factory=dict)
-    # Durable watermark from the last real conc_sweep measurement; survives the macro-cycle reloop clearing
-    # ``last_conc_sweep`` so redundant closeout is skipped when no validated gain landed since the prior conc_sweep.
-    last_conc_sweep_watermark: dict[str, Any] = field(default_factory=dict)
-    # Wall-clock instant (unix seconds) until which the ``conc_sweep`` SWEEP enqueued is entitled to run: its granted
-    # budget plus the lease grace. SWEEP's own budget exits defer to it while no result has landed; 0 means no grant.
-    conc_sweep_granted_until_unix: float = 0.0
     # Most recent forge-fusion run result and its e2e integrate result; persisted so resume does not rerun a completed
     # fusion loop or lose the adoption audit.
     last_fusion: dict[str, Any] = field(default_factory=dict)
@@ -619,9 +605,6 @@ class SharedState(
     explore_search: dict[str, Any] = field(default_factory=dict)
     # specialist sub-agent rolling state; one entry per config-arm round (round_id, tasks, proposals_total/kept/rejected/skipped, etc.).
     specialist_rounds: list[dict[str, Any]] = field(default_factory=list)
-    # Per-kb_anchor coverage counters: config-arm rounds since a specialist was dispatched / since a KEEP landed.
-    rounds_since_last_specialist: dict[str, int] = field(default_factory=dict)
-    rounds_since_last_keep: dict[str, int] = field(default_factory=dict)
     # Patch verdict ledger keyed by review subject (a specialist task_id, or a candidate id for a PR pre-screen); Critic must approve/advise before PolicyGate allows the integrate_patch delegate.
     specialist_patch_verdicts: dict[str, str] = field(default_factory=dict)
     # Intervention-mix ledger ({change_type∈{config,code_patch,config_attempt,code_patch_attempt}}); Robustness detects config-only loops.
@@ -651,7 +634,7 @@ class SharedState(
     plateau_overrides: dict[str, Any] = field(default_factory=dict)
     # E2E integrate bookkeeping keyed by kernel_id+patch_path+args; prevents re-validating the same patch after NEEDS_REVIEW/REVERT.
     kernel_integrate_attempts: dict[str, Any] = field(default_factory=dict)
-    # Crash-safe stack-validation checkpoints (SWEEP-entry combo E2E).
+    # Crash-safe stack-validation checkpoints (CYCLE_END-entry combo E2E).
     pending_stack_validation_result: dict[str, Any] = field(default_factory=dict)
     pending_stack_validation_apply_results: list[dict[str, Any]] = field(default_factory=list)
     rejected_kernel_patches: list[dict[str, Any]] = field(default_factory=list)
@@ -671,7 +654,7 @@ class SharedState(
     tick: int = 0
 
     # Phase state machine fields ``phase`` — run-level pipeline phase
-    # (PRELUDE/FRAMEWORK_AGENT/KERNEL_AGENT/SWEEP/CLOSE); Coordinator-only writer.
+    # (PRELUDE/FRAMEWORK_AGENT/KERNEL_AGENT/CYCLE_END/CLOSE); Coordinator-only writer.
     phase: str = ""
     # Unix epoch the current phase was entered (budget judge + the prompt's ``entered`` line).
     phase_started_unix: float = 0.0
@@ -687,9 +670,11 @@ class SharedState(
     # Wall-clock budget share per phase: seeded once at phase init from CLI flags/defaults with disabled phases' shares
     # redistributed, kept on resume unless a --*-pct flag is given.
     phase_budget_pct: dict[str, float] = field(default_factory=dict)
-    # Cyclic phase machine macro-cycle counter (cycle 0 is the first pass; each SWEEP→FRAMEWORK_AGENT loopback
+    # Cyclic phase machine macro-cycle counter (cycle 0 is the first pass; each CYCLE_END→FRAMEWORK_AGENT loopback
     # increments it).
     macro_cycle: int = 0
+    # The macro_cycle whose CYCLE_END entry work finished; CYCLE_END exits only once it names the current cycle.
+    cycle_end_settled_cycle: int = -1
     # Per-cycle budget: wall-clock minutes for ONE macro-cycle.
     cycle_minutes: float = 0.0
     # Global-convergence tracking: validated cumulative gain at the current macro-cycle's start, and the consecutive
@@ -722,7 +707,7 @@ class SharedState(
     # structured gaps ledger: dedup'd unresolved bottlenecks (Coordinator-only refresh_gaps); dedup keyed by canonical_id, attempts capped 20/gap, list capped _GAPS_MAX_ENTRIES.
     gaps: list[dict[str, Any]] = field(default_factory=list)
 
-    # The SWEEP handoff turn's result: ``next_cycle_directive``, its ``for_cycle``, and ``parse_error``. Coordinator-only writer.
+    # The CYCLE_END handoff turn's result: ``next_cycle_directive``, its ``for_cycle``, and ``parse_error``. Coordinator-only writer.
     orchestration_memory: dict[str, Any] = field(default_factory=dict)
 
     # Non-field instance attr (set in load_or_init / save): session dir for breakdown instrumentation.
@@ -924,26 +909,6 @@ class SharedState(
                 decision=str(entry.get("decision") or ""),
             )
         return entry
-
-    def record_conc_sweep(self, result: dict[str, Any]) -> None:
-        """Record the concurrency sweep's completion into ``last_conc_sweep``."""
-        if not isinstance(result, dict):
-            return
-        self.last_conc_sweep = {
-            "ts": now_iso(),
-            "status": str(result.get("status") or "succeeded"),
-            "skip_reason": str(result.get("skip_reason") or ""),
-            "was_skipped": bool(result.get("was_skipped", False)),
-            "budget_exhausted": bool(result.get("budget_exhausted", False)),
-            "summary": dict(result.get("summary") or {}),
-            "workspace": str(result.get("workspace") or ""),
-        }
-        status = str(self.last_conc_sweep.get("status") or "").lower()
-        if status in ("succeeded", "partial", "completed") and not self.last_conc_sweep.get("was_skipped"):
-            self.last_conc_sweep_watermark = {
-                **self.last_conc_sweep,
-                "cumulative_gain_validated_at_record": float(getattr(self, "cumulative_gain_validated", 0.0) or 0.0),
-            }
 
     # No action-score API; ``increment_tick`` is a pure monotonic counter for plateau/phase budget math.
     def increment_tick(self) -> int:

@@ -5,6 +5,8 @@
 
 from __future__ import annotations
 
+from kernelforge.tests.workflows.forge_loop.iteration._iteration_loop import lane_agents
+
 import asyncio
 import hashlib
 import json
@@ -14,7 +16,6 @@ from pathlib import Path
 
 import pytest
 
-from kernelforge.workflows.forge_loop.iteration import runner as runner_module
 from kernelforge.workflows.forge_loop.campaign.run_state import LoopStateStore, RunState
 from kernelforge.workflows.forge_loop.iteration.runner import IterationResult
 from kernelforge.workflows.forge_loop.iteration import campaign_runtime
@@ -52,7 +53,6 @@ def test_pending_keep_publication_patch_is_cumulative(tmp_path, monkeypatch):
         bench_detail={"median_ms": 0.8},
     )
 
-    loop.run_state.diversification_cycle_completed = True
     pending = loop._build_pending_keep(
         result,
         plan="change kernel",
@@ -67,9 +67,6 @@ def test_pending_keep_publication_patch_is_cumulative(tmp_path, monkeypatch):
     assert "prior kept optimization" in pending["publication_patch"]
     assert "return 2" in pending["publication_patch"]
     assert pending["baseline_wall_ms"] == 1.0
-    assert pending["search_control"] == {
-        "diversification_cycle_completed": True,
-    }
 
 
 @pytest.mark.parametrize("assembly_source", ["s_endpgm\n", "s_endpgm\n\n", "s_endpgm"])
@@ -145,7 +142,7 @@ def test_keep_with_missing_diagnostic_wall_time_completes(
 
     monkeypatch.setattr(loop, "run_one_iteration", successful_iteration)
 
-    results = asyncio.run(loop.run(runner_module.LoopAgents(agent_fn=editing_agent)))
+    results = asyncio.run(loop.run(lane_agents(editing_agent)))
 
     assert len(results) == 1
     assert results[0].kept is True
@@ -191,7 +188,7 @@ def test_keep_archive_failure_retains_pending_journal(
     monkeypatch.setattr(loop, "run_one_iteration", successful_iteration)
     monkeypatch.setattr(campaign_runtime.CandidateArchive, "record", fail_record)
 
-    asyncio.run(loop.run(runner_module.LoopAgents(agent_fn=editing_agent)))
+    asyncio.run(loop.run(lane_agents(editing_agent)))
 
     pending_path = workspace / "forge_experiments" / "pending_keep.json"
     assert not pending_path.is_file()

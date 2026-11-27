@@ -14,12 +14,14 @@ from typing import Any, NamedTuple
 
 import pytest
 
+from hyperloom.inference_optimizer.session.geak_rebench_verdict import REBENCH_UNMEASURED_GIVEN_UP
 from hyperloom.orchestrator.actions.executors import _multi_node_env
 from hyperloom.orchestrator.actions.executors import integrate_patch as integrate_patch_module
 from hyperloom.orchestrator.actions.executors.integrate import _integrate_bench as integrate_bench
 from hyperloom.orchestrator.actions.executors.integrate_patch import IntegratePatchExecutor
 from hyperloom.orchestrator.enablement.recipe import keep_probe
 from hyperloom.orchestrator.loop._promote_outcome import IntegrateRecoveryIncomplete
+from hyperloom.orchestrator.phases.geak_rebench import REVALIDATION_UNMEASURED
 from hyperloom.orchestrator.state.shared_state import SharedState
 from hyperloom.orchestrator.tests._helpers import init_git_repo, patch_integrate_patch_roots, variant_result
 
@@ -221,6 +223,25 @@ async def test_source_measurement_that_ends_unmeasured_leaves_a_session_that_res
     assert on_disk.pending_integrate == {}
     assert on_disk.stop_reason == ""
     assert _uncommitted(session) == ""
+
+
+@pytest.mark.asyncio
+async def test_unmeasured_count_of_a_source_candidate_survives_a_resume(coordinator, bench, resume):
+    session = coordinator.session_dir
+    bench.ending = "budget_stopped"
+    await _measure(coordinator)
+    assert coordinator.shared_state.geak_result[REVALIDATION_UNMEASURED] == 1
+    coordinator.db.raw.close()
+
+    resumed = await resume(session)
+    state = resumed.coord.shared_state
+    assert state.geak_result[REVALIDATION_UNMEASURED] == 1
+    _register_executor(resumed.coord)
+    assert state.geak_result.get("revalidation_error_class") != REBENCH_UNMEASURED_GIVEN_UP
+    await _measure(resumed.coord)
+    assert state.geak_result[REVALIDATION_UNMEASURED] == 2
+    assert state.geak_result["revalidation_error_class"] == REBENCH_UNMEASURED_GIVEN_UP
+    assert SharedState.load_or_init(session).geak_result["revalidation_error_class"] == REBENCH_UNMEASURED_GIVEN_UP
 
 
 @pytest.mark.asyncio

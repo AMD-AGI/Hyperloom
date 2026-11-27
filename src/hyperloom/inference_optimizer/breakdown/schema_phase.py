@@ -53,7 +53,6 @@ class V6EnablementAttempt(TypedDict, total=False):
     failure_kind: str
     dispatched_at: str
     launch_log_excerpt: str | None
-    candidate_refs: list[str]
     settled_at: str
     status: str
     advanced: bool
@@ -71,7 +70,6 @@ class V6EnablementAttempt(TypedDict, total=False):
     effective_config: dict[str, Any] | None
     stack_action: dict[str, Any] | None
     runtime: dict[str, Any] | None
-    localization_manifest: dict[str, Any] | None
     next_launch_log_excerpt: str | None
 
 
@@ -232,17 +230,13 @@ class V6PhaseProposalReview(TypedDict, total=False):
     """The Critic's ruling on one proposal, filed on the proposal."""
 
     verdict: str
-    effective_verdict: str
-    held_to_rule: bool
     source: str
     reasoning: str
     confidence: float | None
-    failure_reason_code: str | None
     required_evidence: list[str]
     risks: list[dict[str, Any]]
     advice_text: str | None
     alternative_action: str | None
-    variants: list[dict[str, Any]]
     reviewed_at: str
 
 

@@ -215,6 +215,7 @@ def test_external_mode_signals_ignore_safe_creds(
 
 def test_provision_external_writes_state_and_skips_safe(
     _external_env: Path,
+    tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     args = argparse.Namespace(
@@ -224,7 +225,7 @@ def test_provision_external_writes_state_and_skips_safe(
         model="/models/test",
         no_kernel=True,
     )
-    _prepare_multi_node_state(args)
+    _prepare_multi_node_state(args, tmp_path)
     state_path = resolve_state_file()
     assert state_path.is_file()
     saved = json.loads(state_path.read_text(encoding="utf-8"))
@@ -235,6 +236,7 @@ def test_provision_external_writes_state_and_skips_safe(
 
 def test_provision_external_infera_requires_ssh(
     _external_env: Path,
+    tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.delenv("HYPERLOOM_MN_EXT_SSH_KEY", raising=False)
@@ -246,7 +248,7 @@ def test_provision_external_infera_requires_ssh(
         no_kernel=True,
     )
     with pytest.raises(SystemExit) as ei:
-        _prepare_multi_node_state(args)
+        _prepare_multi_node_state(args, tmp_path)
     assert ei.value.code == 2
 
 
@@ -262,6 +264,7 @@ def _adopt_rayjob(monkeypatch: pytest.MonkeyPatch) -> argparse.Namespace:
 
 def test_rayjob_with_head_ip_is_not_reported_benchmark_only(
     _external_env: Path,
+    tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
@@ -272,7 +275,7 @@ def test_rayjob_with_head_ip_is_not_reported_benchmark_only(
     monkeypatch.delenv("HYPERLOOM_MN_EXT_SSH_KEY", raising=False)
     monkeypatch.delenv("HYPERLOOM_MN_EXT_PREFILL_IPS", raising=False)
     monkeypatch.delenv("HYPERLOOM_MN_EXT_DECODE_IPS", raising=False)
-    _prepare_multi_node_state(_adopt_rayjob(monkeypatch))
+    _prepare_multi_node_state(_adopt_rayjob(monkeypatch), tmp_path)
 
     out = capsys.readouterr()
     assert "server_control=yes" in out.out
@@ -283,6 +286,7 @@ def test_rayjob_with_head_ip_is_not_reported_benchmark_only(
 
 def test_rayjob_without_head_ip_warns_results_are_meaningless(
     _external_env: Path,
+    tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
@@ -293,7 +297,7 @@ def test_rayjob_without_head_ip_warns_results_are_meaningless(
     monkeypatch.delenv("HYPERLOOM_MN_EXT_SSH_KEY", raising=False)
     monkeypatch.delenv("HYPERLOOM_MN_EXT_PREFILL_IPS", raising=False)
     monkeypatch.delenv("HYPERLOOM_MN_EXT_DECODE_IPS", raising=False)
-    _prepare_multi_node_state(_adopt_rayjob(monkeypatch))
+    _prepare_multi_node_state(_adopt_rayjob(monkeypatch), tmp_path)
 
     out = capsys.readouterr()
     assert "server_control=no (benchmark-only)" in out.out
@@ -956,6 +960,7 @@ def test_resume_needs_a_cluster_that_still_serves(
 
 def test_an_infera_handoff_left_on_the_default_backend_is_rejected(
     _external_env: Path,
+    tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
@@ -965,7 +970,7 @@ def test_an_infera_handoff_left_on_the_default_backend_is_rejected(
 
     args = argparse.Namespace(nodes=2, mn_backend="rayjob", model="/models/test", no_kernel=True)
     with pytest.raises(SystemExit) as excinfo:
-        _prepare_multi_node_state(args)
+        _prepare_multi_node_state(args, tmp_path)
 
     assert excinfo.value.code == 2
     err = capsys.readouterr().err
@@ -975,6 +980,7 @@ def test_an_infera_handoff_left_on_the_default_backend_is_rejected(
 
 def test_a_genuine_benchmark_only_handoff_still_proceeds(
     _external_env: Path,
+    tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
@@ -989,13 +995,14 @@ def test_a_genuine_benchmark_only_handoff_still_proceeds(
     monkeypatch.setattr(mncli, "install_geak_on_pods_best_effort", lambda: 0)
 
     args = argparse.Namespace(nodes=2, mn_backend="rayjob", model="/models/test", no_kernel=True)
-    _prepare_multi_node_state(args)
+    _prepare_multi_node_state(args, tmp_path)
 
     assert "benchmark-only" in capsys.readouterr().out
 
 
 def test_benchmark_only_rayjob_handoff_skips_bootstrap_instead_of_aborting(
     _external_env: Path,
+    tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
@@ -1011,7 +1018,7 @@ def test_benchmark_only_rayjob_handoff_skips_bootstrap_instead_of_aborting(
     monkeypatch.setattr(mncli, "install_geak_on_pods_best_effort", lambda: calls.append("geak") or 0)
 
     args = argparse.Namespace(nodes=2, mn_backend="rayjob", model="/models/test", no_kernel=False)
-    _prepare_multi_node_state(args)
+    _prepare_multi_node_state(args, tmp_path)
 
     assert calls == ["geak"]
     assert "skipping the head-pod bootstrap" in capsys.readouterr().err
@@ -1046,6 +1053,7 @@ def test_kill_inference_invalidates_the_launch_it_terminated(
 
 def test_adopting_a_rayjob_bootstraps_and_installs_geak(
     _external_env: Path,
+    tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Adoption still owes the cluster its session-side setup."""
@@ -1058,13 +1066,14 @@ def test_adopting_a_rayjob_bootstraps_and_installs_geak(
     monkeypatch.setattr(mncli, "install_geak_on_pods_best_effort", lambda: calls.append("geak") or 0)
 
     args = argparse.Namespace(nodes=2, mn_backend="rayjob", model="/models/test", no_kernel=False)
-    _prepare_multi_node_state(args)
+    _prepare_multi_node_state(args, tmp_path)
 
     assert calls == ["bootstrap", "geak"]
 
 
 def test_adopting_an_infera_cluster_skips_bootstrap_but_installs_geak(
     _external_env: Path,
+    tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Bootstrap is a Ray Dashboard call, so it is rayjob-only; GEAK is the infera half."""
@@ -1075,13 +1084,14 @@ def test_adopting_an_infera_cluster_skips_bootstrap_but_installs_geak(
     monkeypatch.setattr(mncli, "install_geak_on_pods_best_effort", lambda: calls.append("geak") or 0)
 
     args = argparse.Namespace(nodes=2, mn_backend="infera", model="/models/test", no_kernel=False)
-    _prepare_multi_node_state(args)
+    _prepare_multi_node_state(args, tmp_path)
 
     assert calls == ["geak"]
 
 
 def test_adopting_with_no_kernel_skips_the_geak_install(
     _external_env: Path,
+    tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """``--no-kernel`` opts out of the kernel phase, so the pods need no GEAK."""
@@ -1091,7 +1101,7 @@ def test_adopting_with_no_kernel_skips_the_geak_install(
     monkeypatch.setattr(mncli, "install_geak_on_pods_best_effort", lambda: calls.append("geak") or 0)
 
     args = argparse.Namespace(nodes=2, mn_backend="infera", model="/models/test", no_kernel=True)
-    _prepare_multi_node_state(args)
+    _prepare_multi_node_state(args, tmp_path)
 
     assert calls == []
 

@@ -26,8 +26,7 @@ The authoritative source of truth for the wire shape is
 [`src/hyperloom/inference_optimizer/breakdown/schema.py`](https://github.com/AMD-AGI/Hyperloom/blob/main/src/hyperloom/inference_optimizer/breakdown/schema.py),
 with the FRAMEWORK_AGENT and KERNEL timeline events in
 [`schema_framework.py`](https://github.com/AMD-AGI/Hyperloom/blob/main/src/hyperloom/inference_optimizer/breakdown/schema_framework.py) and
-[`schema_kernel.py`](https://github.com/AMD-AGI/Hyperloom/blob/main/src/hyperloom/inference_optimizer/breakdown/schema_kernel.py), the concurrency sweep in
-[`schema_conc_sweep.py`](https://github.com/AMD-AGI/Hyperloom/blob/main/src/hyperloom/inference_optimizer/breakdown/schema_conc_sweep.py), and the enablement, phase and stack sections in
+[`schema_kernel.py`](https://github.com/AMD-AGI/Hyperloom/blob/main/src/hyperloom/inference_optimizer/breakdown/schema_kernel.py), and the enablement, phase and stack sections in
 [`schema_phase.py`](https://github.com/AMD-AGI/Hyperloom/blob/main/src/hyperloom/inference_optimizer/breakdown/schema_phase.py) beside it.
 This page describes the contract from a consumer's perspective.
 
@@ -113,6 +112,20 @@ The value `bypass` is no longer written either: `route` is `agent` or
 entry, a trace certificate's `usable_by` names only `tracelens`, and the
 warning code `bypass_graph_under_recorded` is now `graph_under_recorded`.
 
+The loop no longer holds a Critic verdict to an advisory rule, so the keys that
+recorded the hold are removed with the disposition
+`removed in 6.1, producer removed`: `critic_review.held_to_rule`,
+`critic_review.effective_verdict` and `critic_review.failure_reason_code` on
+phase and framework proposals and on each of their `critic_review.variants[]`
+rows, and `effective_verdict` and `failure_reason_code` on
+`critic.iterations[].framework_reviews[]`. Read `verdict`: it is the verdict
+the loop acted on.
+
+A Critic ruling is one verdict on one proposal, so `critic_review.variants` on
+phase and framework proposals is removed with the same disposition: nothing
+produced a per-variant ruling, and the key was an empty list wherever it was
+written.
+
 Two figures are null instead of a fabricated default when they were not
 measured or not provided. `outcome.validation.attributed_gain_pct` and
 `unattributed_gain_pct` are null when no adoption could be measured, rather than
@@ -126,6 +139,45 @@ the gain keep their values, and `metadata.workflow.contract_digest` keeps the
 digest recorded at session creation rather than the one pinned by the packaged
 workflow-evaluation schema. The default output path overwrites the archived
 `<session_dir>/session_breakdown.json`; pass `--output` to keep it.
+
+Within 6.1 the `conc_sweep` timeline event is no longer written: the session
+runs no concurrency sweep. The phase that closes each macro-cycle is
+`CYCLE_END` rather than `SWEEP` in every `phase` value, and its predicate
+inputs are `cycle_end_result` (`settled`, `reloop`) rather than
+`sweep_result`. The SWEEP stop reasons are replaced by `cycle_end_done`, so
+`metadata.workflow.workflow_contract_version` moves to
+`hyperloom.workflow_evaluation.v4` and the contract digest changes with it. A
+session that reached the phase reports `outcome.stage_reached` `cycle_end`
+where it reported `conc_sweep`.
+
+The concurrency sweep that runs after CLOSE (`--enable-conc-sweep` or
+`hyperloom conc-sweep`) adds its report to the breakdown as the top-level
+`conc_sweep_summary`: the `reports/conc_sweep_summary.json` it writes,
+verbatim, rewritten after every point. A breakdown of a session that ran no
+sweep has no such key. The copy is best effort: a breakdown the sweep cannot
+read or replace keeps its earlier content, and the report stays in `reports/`.
+Because the sweep runs after CLOSE, the breakdown CLOSE sends to Langfuse never
+carries it, and a consumer that read the breakdown at CLOSE has to read it again
+for the sweep.
+
+The section is the schema `2.0` report, under the key breakdowns carried the
+sweep under before #1455. Its point rows, `comparison` and `summary` keep the
+fields of that earlier block; its header does not: `concs` and `concs_source`
+replace `concs_requested`, the budget keys, `was_skipped` and the report paths
+are gone, `estimated_sec` and `cancel_reason` are new, and `status` is one of
+`in_progress`, `succeeded`, `partial`, `failed`, `skipped` or `cancelled`.
+
+A multi-branch breakdown carries it the same way, from
+`MB-reports/conc_sweep_summary.json`, and its arms differ in shape: a
+single-lineage arm holds the launch settings it ran (`extra_server_args`,
+`extra_envs`, `overlay`) and fixed point fields, a multi-branch arm holds the
+`commit` it measured and points that name the test they came from in
+`request_id`: an AgentX arm runs one test per point, an InferenceX arm one test
+over all its points, which then share one `request_id`. The breakdown's own
+`schema_version` (`hyperloom.session_breakdown.v6.1` or `multibranch-2`) tells
+them apart. A later multi-branch CLOSE (a resume, a `final-only`) rebuilds the
+breakdown without the section; the sweep that runs after that CLOSE writes it
+again.
 
 V6 was the preceding cutover, for the timeline: each action records its own event
 while it runs, so an event's `start_time` is when the work began rather than
@@ -164,7 +216,9 @@ Compatibility rules:
   version's file.
 * **Missing data** is always represented as `null`, `[]`, or `{}` —
   never as a default / fabricated value. Consumers MUST treat
-  missing data as "not available".
+  missing data as "not available". The one exception is the optional
+  top-level `conc_sweep_summary`, which is absent until a concurrency sweep
+  has run.
 * All values are JSON-serializable (no dataclasses, enums, or
   Python-specific types in the wire shape).
 
@@ -188,12 +242,16 @@ The following JSON structure shows all top-level fields in `session_breakdown.js
   "outcome":            { /* terminal result — SaFE contract core */ },
   "timeline":           [ /* the run itself: one event per stage, in order */ ],
   "close":              { /* what the session settled at close */ },
-  "critic":             { /* the critic agent's own run, iteration by iteration */ }
+  "critic":             { /* the critic agent's own run, iteration by iteration */ },
+
+  "conc_sweep_summary": { /* optional: the concurrency sweep run after CLOSE */ }
 }
 ```
 
-Those eight keys are the whole of the export. Every key is always present; a
-section the run produced nothing for is `{}` or `[]` rather than absent.
+The first eight keys are always present; a section the run produced nothing for
+is `{}` or `[]` rather than absent. `conc_sweep_summary` is the exception: it
+is absent until a concurrency sweep has run after CLOSE, and then holds that
+sweep's report.
 
 Two things a reader of an older export will look for and not find. The flat
 per-topic sections (`baseline`, `final`, `phase_timeline`,
@@ -226,7 +284,8 @@ started, …).
 
 Task identity, recorded as each fact is decided rather than re-derived at
 export. Five blocks: `session`, `task_config`, `grading`, `versions` and
-`langfuse`, plus the export's own `exported_at_utc` and `warnings`.
+`langfuse`, plus the export's own `exported_at_utc` and `warnings`, and
+`base_launch` when the session froze a base.
 
 `metadata.session` — identity and lifecycle:
 
@@ -301,6 +360,28 @@ per external tool.
 `metadata.langfuse` — the live-Langfuse entrypoint: `enabled`,
 `disabled_reason`, `trace_id`, `session_id`, `trace_url` and push `counts`. The
 local trace jsonl is always written regardless.
+
+`metadata.base_launch` — the `source`, `image` and `topology` of the session's
+frozen `base_launch.json`; the base's args and env stay in the file. `source`
+says where the base was resolved from, by `kind`: for an InferenceX recipe,
+`inferencex`, the `repo` and `commit` it was read at, the recipe `path`, the
+`locator` of the variant it bound (`<recipe>:override_tp4_c32`) and the sha256 of
+every file read (`files`); a cookbook, a recipe API, the default table, a shipped
+script or an operator's `--reference-script` fills the fields it has and leaves
+the rest null. Every location in `source` (`repo`, `path`, `entry`, `locator` and
+the keys of `files`) is reported without a URL's userinfo or a recognizable
+credential value, and an operator's file (`kind` `user_file`) without a URL's
+query and fragment too, since it is recorded as given and may be a signed URL;
+a recipe source keeps its query, which names the point it read. `image.recipe`
+is the image reference the base named, with its digest, and `topology` the TP
+and EP every round runs at. A consumer can match the session against
+InferenceX's own runs of the same recipe on these. A multi-branch breakdown
+carries the same block, from `MB-toolbox/base_launch.json`. The key is absent
+for a session that froze no base, and for one whose file cannot be read, is no
+base launch or fails its digest check (single-lineage: named on
+`metadata.warnings`). That check covers what the base launches (framework,
+entrypoint, model, topology, args, env, golden acceptance and client), not
+`source` or `image`.
 
 ---
 
@@ -451,9 +532,7 @@ asked forty times and ruled on nothing reads very differently from one where
 it was never asked.
 
 `framework_reviews` holds the framework-phase rulings of that pass, each with
-both the authored `verdict` and the `effective_verdict` the loop held it to.
-Both are kept: a reject the loop downgraded to advice still ran, and
-reporting either alone misreads the round.
+the `verdict` the Critic wrote.
 
 ---
 
@@ -666,7 +745,6 @@ The following example shows a complete `session_breakdown.json` for a finished G
             "proposal_msg_id": "msg-4f21",
             "arm": "config",
             "verdict": "reject",
-            "effective_verdict": "advise",
             "reasoning": "no measurement backs the projected gain"
           }
         ]
@@ -729,5 +807,4 @@ Use the following resources for related reference information.
 * [`src/hyperloom/inference_optimizer/breakdown/schema.py`](https://github.com/AMD-AGI/Hyperloom/blob/main/src/hyperloom/inference_optimizer/breakdown/schema.py): TypedDict source of truth.
 * [`src/hyperloom/inference_optimizer/breakdown/schema_framework.py`](https://github.com/AMD-AGI/Hyperloom/blob/main/src/hyperloom/inference_optimizer/breakdown/schema_framework.py): FRAMEWORK_AGENT timeline event shapes.
 * [`src/hyperloom/inference_optimizer/breakdown/schema_kernel.py`](https://github.com/AMD-AGI/Hyperloom/blob/main/src/hyperloom/inference_optimizer/breakdown/schema_kernel.py): KERNEL timeline event shapes.
-* [`src/hyperloom/inference_optimizer/breakdown/schema_conc_sweep.py`](https://github.com/AMD-AGI/Hyperloom/blob/main/src/hyperloom/inference_optimizer/breakdown/schema_conc_sweep.py): concurrency sweep shapes.
 * [`src/hyperloom/inference_optimizer/breakdown/schema_phase.py`](https://github.com/AMD-AGI/Hyperloom/blob/main/src/hyperloom/inference_optimizer/breakdown/schema_phase.py): enablement, phase and stack shapes.

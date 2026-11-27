@@ -38,15 +38,25 @@ from hyperloom_multibranch.contracts.repo import RebasedPatch, ReplacedPatch, Re
 from hyperloom_multibranch.contracts.toolbox import QueueState
 from hyperloom_multibranch.blackboard import LocalBlackboard
 from hyperloom_multibranch.blackboard.knowledge.recipe_writeback import FinalRecipe
+from hyperloom.inference_optimizer.session.base_launch import write_base_launch
 from hyperloom_multibranch.blackboard.knowledge.tests.fakes import FakeRecipeStore
+from hyperloom_multibranch.blackboard.knowledge.tests.test_breakdown import frozen_base_launch
 from hyperloom_multibranch.blackboard.knowledge.tests.test_recipe_writeback import final
 from hyperloom_multibranch.blackboard.rsi.archive import ARCHIVE_ENV, ARCHIVED, SKIPPED
 from hyperloom_multibranch.blackboard.rsi.authoring import PLAYBOOK_SYSTEM_PROMPT
 from hyperloom_multibranch.blackboard.rsi.lesson_curation import NO_LESSONS
 from hyperloom_multibranch.blackboard.rsi.frontier import FrontierPolicy, FrontierScoring
 from hyperloom_multibranch.blackboard.knowledge.warm_start import PreparedReplay, WarmLead
-from hyperloom_multibranch.blackboard.rsi.session import DISABLED, WRITTEN, CloseStep, KnowledgeClose, close_knowledge
-from hyperloom_multibranch.scheduling import mb_fakes
+from hyperloom_multibranch.blackboard.rsi.session import (
+    DISABLED,
+    NO_KB,
+    WRITTEN,
+    CloseStep,
+    CloseTargets,
+    KnowledgeClose,
+    close_knowledge,
+)
+from hyperloom_multibranch.scheduling import exports
 from hyperloom_multibranch.blackboard.tests.factories import FakeClock
 from hyperloom_multibranch.blackboard.tests.sessions import METRIC, scripted_session
 from hyperloom_multibranch.scheduling.close import (
@@ -81,7 +91,6 @@ from hyperloom_multibranch.scheduling.layout import SessionLayout, create_sessio
 from hyperloom_multibranch.scheduling.manifest import CodeVersion, SessionManifest
 from hyperloom_multibranch.scheduling.roster import RosterCaps
 from hyperloom_multibranch.scheduling.settings import InferenceXShape, KernelOptimizer, RunSettings, Workload
-from hyperloom_multibranch.scheduling.mb_fakes import MB_FAKE_EXPERIENCE_KB
 from hyperloom_multibranch.scheduling.processes import SCHEDULER_BRANCH, ProcessRecord
 from hyperloom_multibranch.scheduling.stops import SessionStopReason, StopReport
 
@@ -270,7 +279,6 @@ async def test_close_publishes_the_final_recipe_exports_and_stops_everything(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setenv(ARCHIVE_ENV, str(tmp_path / "archive"))
-    monkeypatch.setenv(KB_URL, "http://127.0.0.1:9/kb")
     store = FakeRecipeStore(champion={"metric": "optimized_throughput", "session_id": "older", "value": 1000.0})
     stopper = _clean()
     author, curator = ScriptedCompletion(), ScriptedCompletion()
@@ -293,7 +301,7 @@ async def test_close_publishes_the_final_recipe_exports_and_stops_everything(
     assert breakdown["close"]["kb_write_back"]["status"] == "written"
     knowledge = breakdown["close"]["knowledge"]
     for step in ("experiences", "learnings"):
-        assert (knowledge[step]["status"], knowledge[step]["reason"]) == (DISABLED, MB_FAKE_EXPERIENCE_KB)
+        assert (knowledge[step]["status"], knowledge[step]["reason"]) == (DISABLED, NO_KB)
     assert knowledge["archive"]["status"] == ARCHIVED and any((tmp_path / "archive").iterdir())
     assert [system for system, _user in author.calls] == [PLAYBOOK_SYSTEM_PROMPT]
     assert knowledge["playbook"]["status"] in (WRITTEN, SKIPPED)
@@ -331,7 +339,7 @@ async def test_close_publishes_the_final_recipe_exports_and_stops_everything(
         "| waived for the root | regression cases | degraded concs | error |"
     )
     assert header in markdown
-    assert f"Experiences: {DISABLED} {MB_FAKE_EXPERIENCE_KB}" in markdown
+    assert f"Experiences: {DISABLED} {NO_KB}" in markdown
     assert f"Playbook: {knowledge['playbook']['status']}" in markdown
     assert f"Lesson curation: {SKIPPED} {NO_LESSONS}" in markdown
     assert f"Lesson standings: {knowledge['lesson_standings']['status']}" in markdown
@@ -367,6 +375,50 @@ async def test_the_breakdown_spend_includes_the_close_llm_calls(
     assert author.calls and report.exports is not None
     spend = json.loads(report.exports.breakdown.read_text())["spend"]
     assert spend["llm_usd"] == pytest.approx(before + 0.11)
+
+
+async def test_a_later_close_rebuilds_the_breakdown_without_a_skipped_sweep(
+    layout: SessionLayout,
+    blackboard: LocalBlackboard,
+    final: FinalRecipe,
+) -> None:
+    """A first FINAL that chose nothing leaves a ``skipped`` sweep in the report and the breakdown; a later CLOSE (a
+    resume, a ``final-only``) rebuilds the breakdown without it, and the sweep that follows writes it again."""
+
+    skipped = {
+        "status": "skipped",
+        "skip_reason": "no_optimization",
+        "baseline": {"points": []},
+        "optimized": {"points": []},
+    }
+    (layout.reports / "conc_sweep_summary.json").write_text(json.dumps(skipped))
+    (layout.reports / "session_breakdown.json").write_text(json.dumps({"conc_sweep_summary": skipped}))
+
+    closed = await _closer(layout, blackboard, _clean(), final, None).close(
+        SessionStopReason.TIME_EXHAUSTED, CHOICE, "", HARD_STOP
+    )
+
+    assert closed.exports is not None
+    assert "conc_sweep_summary" not in json.loads(closed.exports.breakdown.read_text())
+
+
+async def test_the_close_breakdown_reports_the_base_frozen_in_the_toolbox(
+    layout: SessionLayout,
+    blackboard: LocalBlackboard,
+    final: FinalRecipe,
+) -> None:
+    layout.toolbox.mkdir(parents=True, exist_ok=True)
+    base = frozen_base_launch()
+    write_base_launch(layout.toolbox, base)
+
+    closed = await _closer(layout, blackboard, _clean(), final, None).close(
+        SessionStopReason.TIME_EXHAUSTED, CHOICE, "", HARD_STOP
+    )
+
+    assert closed.exports is not None
+    metadata = json.loads(closed.exports.breakdown.read_text())["metadata"]
+    assert metadata["base_launch"]["source"] == base.to_document()["source"]
+    assert metadata["base_launch"]["topology"] == base.to_document()["topology"]
 
 
 async def test_a_session_stopped_before_its_baseline_asks_no_llm_and_leaves_the_archive_empty(
@@ -514,17 +566,21 @@ async def test_close_marks_the_replays_of_the_champions_prelude_prepared_from_an
     layout: SessionLayout, blackboard: LocalBlackboard, final: FinalRecipe, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     closed: list[Collection[str]] = []
+    targeted: list[CloseTargets] = []
 
-    def spied(*args: Any, cross_image: Collection[str], **kwargs: Any) -> KnowledgeClose:
+    def spied(*args: Any, cross_image: Collection[str], targets: CloseTargets, **kwargs: Any) -> KnowledgeClose:
         closed.append(cross_image)
-        return close_knowledge(*args, cross_image=cross_image, **kwargs)
+        targeted.append(targets)
+        return close_knowledge(*args, cross_image=cross_image, targets=targets, **kwargs)
 
-    monkeypatch.setattr(mb_fakes, "close_knowledge", spied)
+    monkeypatch.setattr(exports, "close_knowledge", spied)
     leads = (_lead("inference:other", "sha256:" + "b" * 64), _lead("inference:same", ""), _lead("inference:none", None))
 
     await _closer(layout, blackboard, _clean(), final, None, warm_leads=leads).close(REASON, CHOICE, "", HARD_STOP)
 
     assert closed == [frozenset({"inference:other"})]
+    # The Experiences and the learnings go to the Experience KB the environment names.
+    assert targeted == [CloseTargets(receipts=layout.reports, judge_transcript=layout.judge, blobs=layout.blobs)]
 
 
 async def test_an_unreachable_kb_is_recorded_and_close_carries_on(

@@ -75,7 +75,7 @@ def _long_horizon_header(
         outcomes,
         records=OptionalRecords(
             handoffs=bool(handoff_store and handoff_store.latest()),
-            unmeasured_lanes=ExperimentsLayout(store.root).unmeasured_lane_index.is_file(),
+            rounds=ExperimentsLayout(store.root).rounds.is_dir(),
         ),
     )
 
@@ -151,12 +151,7 @@ class CampaignReportMixin:
         print()
 
     def _print_final_report(self) -> None:
-        """Print what the campaign did, and what it cost.
-
-        The round figures are campaign totals rather than this session's, so
-        they are labelled as such and their share is taken against the campaign
-        clock rather than the session wall-clock printed above them.
-        """
+        """Print what the campaign did, and what it cost."""
         # Final report
         total_time = time.time() - self.start_time
         kept_count = sum(1 for r in self.results if r.kept)
@@ -173,19 +168,6 @@ class CampaignReportMixin:
             f"contradicts the score): {self.best_wall_ms}"
         )
         print(f"  Total time: {total_time / 60:.1f} minutes")
-        costs = self.run_state.round_costs
-        if costs.rounds:
-            # Campaign totals, not this session's, so they are labelled as such and the share is taken against the
-            # campaign clock rather than the ``total_time`` printed just above.
-            self._advance_campaign_clock()
-            share = costs.planning_share_pct()
-            share_text = f" ({share:.0f}% of campaign wall-clock)" if share is not None else ""
-            print(
-                f"  Rounds planned across the campaign: {costs.rounds}, "
-                f"planning {costs.planning_total_sec / 60:.1f} min"
-                f"{share_text}, "
-                f"round wall-clock {costs.total_sec / 60:.1f} min"
-            )
         if self._refused_round:
             print(
                 "  ROUND REFUSED FOR BUDGET: the campaign stopped because no "
@@ -197,7 +179,7 @@ class CampaignReportMixin:
                 print(line)
         print(experiment_line(self.experiment.experiment_id))
 
-    def _implementer_history(self, *, digest, optimization_plan_path) -> str:
+    def _implementer_history(self, *, digest, direction: str) -> str:
         """Assemble the cross-iteration experience the Implementer session reads.
 
         Each source carries what the others cannot: the candidate archive digest
@@ -207,9 +189,10 @@ class CampaignReportMixin:
         diff behind; the experience ledger is objective toolchain observation
         distilled from machine-verified failure signatures.
 
-        Order is the message: the long-horizon header is the compact memory
-        frame the implementer reads first, and the plan instruction sits above
-        the evidence because lesson records are evidence, not instructions.
+        Order is the message: ``direction`` -- what this session is to work on --
+        sits above the evidence, because lesson records are evidence, not
+        instructions, and the long-horizon header is the compact memory frame
+        the implementer reads next.
         """
         lh_header = _long_horizon_header(
             self.run_state,
@@ -238,9 +221,6 @@ class CampaignReportMixin:
                 f"Objective: {policy.objective_kind}",
                 "Reasons: " + ", ".join(policy.reason_codes),
             ]
-            policy_lines.append(
-                f"Mode residence remaining after this iteration: {policy.residence_iterations_remaining}"
-            )
             history = "\n".join(policy_lines) + "\n\n" + history
         # The latest free-form Supervisor Ruling is durable across KEEP and resume.
         if self._supervisor_ruling:
@@ -256,30 +236,15 @@ class CampaignReportMixin:
         # prepends, as the compact memory frame the implementer reads first.
         if lh_header:
             history = f"{lh_header}\n\n{history}"
-        return f"{self._session_direction(optimization_plan_path)}\n\n{history}"
+        return f"{direction}\n\n{history}"
 
     def _render_insights(self) -> str:
         """The campaign's insight list, or "" when this loop keeps none or it is still empty."""
         insights = getattr(self, "insights", None)
         return insights.render_for_prompt() if insights is not None else ""
 
-    def _session_direction(self, optimization_plan_path: str) -> str:
-        """What the session is to work on: the round's synthesized plan, or how to choose a direction without one."""
-        if optimization_plan_path:
-            ruling_instruction = (
-                "The plan was synthesized from current evidence and the "
-                "latest Supervisor Ruling. If any plan statement conflicts "
-                "with that ruling, follow the ruling. "
-                if self._supervisor_ruling
-                else "The plan was synthesized from current evidence. "
-            )
-            return (
-                "## Required optimization plan\n"
-                f"Read {optimization_plan_path} and execute the integrated "
-                "plan it contains. "
-                f"{ruling_instruction}"
-                "Historical lesson records are evidence, not instructions."
-            )
+    def _session_direction(self) -> str:
+        """How a session chooses what to work on, under the search mode and any Supervisor ruling in force."""
         policy = self._search_policy_decision
         if self._supervisor_ruling:
             mode_guidance = (
@@ -304,7 +269,7 @@ class CampaignReportMixin:
             )
         return (
             "## Direction (yours to choose)\n"
-            "No plan was synthesized for this session. Read the Analysis report named `analysis_summary` under "
+            "Read the Analysis report named `analysis_summary` under "
             "Analysis Evidence below, when there is one, before you choose: it says where each scored case spends "
             "its time and ranks what it expects to pay. The lesson records and the attempt history say what was "
             "already tried and what it measured; do not repeat a direction they disproved. The list of measured "

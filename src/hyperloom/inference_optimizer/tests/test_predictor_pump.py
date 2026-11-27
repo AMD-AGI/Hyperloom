@@ -475,9 +475,7 @@ async def test_the_framework_tick_steps_the_predictor(service, monkeypatch):
             maybe_enqueue_explore_research_scout=_noop,
             maybe_enqueue_config_plateau_static_recon=_noop,
         ),
-        specialist_dispatch=SimpleNamespace(
-            maybe_force_stalled_domain_specialist=_noop, ensure_custom_specialist=_noop
-        ),
+        specialist_dispatch=SimpleNamespace(ensure_custom_specialist=_noop),
         record_exception=lambda **kwargs: pytest.fail(f"the tick raised: {kwargs}"),
     )
     phase = FrameworkPhase(coord)
@@ -544,7 +542,7 @@ async def test_entry_asks_at_its_own_decision_point_after_filing_an_earlier_answ
     # Answered while FRAMEWORK was away, so nothing filed it.
     await phase._predictor._inflight
     state.macro_cycle = 1
-    await phase.on_enter_framework(SimpleNamespace(from_phase="SWEEP"))
+    await phase.on_enter_framework(SimpleNamespace(from_phase="CYCLE_END"))
 
     assert len(service.requests) == 2
     assert [(r["round_id"], r["cycle"]) for r in _predictor_rounds(state)] == [("c0-s0-r0", 0), ("c1-s0-r0", 1)]

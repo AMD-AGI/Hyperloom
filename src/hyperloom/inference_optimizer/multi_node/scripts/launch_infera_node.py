@@ -16,6 +16,7 @@ import tempfile
 import time
 from pathlib import Path
 
+from infera_engine import VLLM_ONLY_EP_SWITCH, EngineHost, sglang_argv
 from server_args_safety import find_denied_flags, find_unsafe_flag_values
 from sglang_shape_gate import activate_kernel_shape_tool
 
@@ -286,65 +287,22 @@ def _build_sglang_cmd(
     *,
     advertise_host: str,
 ) -> list[str]:
-    """infera.engine.sglang multi-node command for this pod's rank."""
-    cmd = [
-        "python3",
-        "-m",
-        "infera.engine.sglang",
-        "--model-path",
-        a.model,
-        "--tp-size",
-        str(a.tp),
-        "--trust-remote-code",
-        "--host",
-        "0.0.0.0",  # nosec B104 - Infera worker must bind for pod-to-pod traffic.
-        "--port",
-        str(_DEFAULT_ENGINE_PORT),
-        "--discovery-backend",
-        "kubernetes",
-        "--advertise-host",
-        advertise_host,
-        "--request-transport",
-        "nats",
-    ]
-    # Single-node roles: omit --nnodes/--node-rank/--dist-init-addr to mirror the SaFE native infera.engine.sglang
-    # launch.
-    if int(a.nnodes) > 1:
-        cmd.extend(
-            [
-                "--nnodes",
-                str(a.nnodes),
-                "--node-rank",
-                str(node_rank),
-                "--dist-init-addr",
-                f"{leader}:{a.dist_init_port}",
-            ]
-        )
-    if a.ep and int(a.ep) > 1:
-        cmd.extend(["--ep-size", str(a.ep)])
-    if a.extra_args:
-        extra_tokens = shlex.split(a.extra_args)
-        # infera.engine.sglang enables expert-parallel via --ep-size (added just above).
-        _ep_flag = "--enable-expert-parallel"
-        if _ep_flag in extra_tokens:
-            extra_tokens = [t for t in extra_tokens if t != _ep_flag]
-            _log(f"dropped vllm-only {_ep_flag} from sglang extra-args (EP via --ep-size)")
-        cmd.extend(extra_tokens)
-        # sglang ServerArgs.__post_init__ force-disables enable_dp_attention / enable_dp_lm_head when dp_size == 1
-        # (its default).
-        _dp_enable_flags = ("--enable-dp-attention", "--enable-dp-lm-head")
-        has_dp_enable = any(tok in _dp_enable_flags for tok in extra_tokens)
-        has_dp_size = any(tok == "--dp-size" or tok.startswith("--dp-size=") for tok in extra_tokens)
-        if has_dp_enable and not has_dp_size and int(a.tp) > 1:
-            cmd.extend(["--dp-size", str(a.tp)])
-    # Skip sglang's post-load warmup ONLY for PD-disaggregated legs.
-    _extra_for_warmup = shlex.split(a.extra_args) if a.extra_args else []
-    _is_pd_leg = "--disaggregation-mode" in _extra_for_warmup or any(
-        tok.startswith("--disaggregation-mode=") for tok in _extra_for_warmup
+    """infera.engine.sglang multi-node command for this pod's rank, built by the shared ``infera_engine`` module."""
+    extra = shlex.split(a.extra_args) if a.extra_args else []
+    if VLLM_ONLY_EP_SWITCH in extra:
+        _log(f"dropped vllm-only {VLLM_ONLY_EP_SWITCH} from sglang extra-args (EP via --ep-size)")
+    host = EngineHost(
+        model=a.model,
+        tp=int(a.tp),
+        port=_DEFAULT_ENGINE_PORT,
+        advertise_host=advertise_host,
+        nnodes=int(a.nnodes),
+        node_rank=node_rank,
+        leader=leader,
+        dist_init_port=int(a.dist_init_port),
+        ep=int(a.ep) if a.ep else 1,
     )
-    if _is_pd_leg and "--skip-server-warmup" not in _extra_for_warmup:
-        cmd.append("--skip-server-warmup")
-    return cmd
+    return sglang_argv(host, extra)
 
 
 def _build_vllm_cmd(a: argparse.Namespace, *, advertise_host: str) -> list[str]:

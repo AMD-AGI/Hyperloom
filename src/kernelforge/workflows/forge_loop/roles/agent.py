@@ -29,11 +29,13 @@ from kernelforge.utils.gpu_arch import Profiler, arch_profile
 from kernelforge.utils.session_kill import session_kill_command
 from kernelforge.knowledge.pr_knowledge.agent_tools import TOOL_NAMES as PR_TOOL_NAMES
 from kernelforge.workflows.forge_loop.gate.gate_tag import gate_outcome_tag
+from kernelforge.workflows.forge_loop.gate.gate_settings import DeviceAccess
 from kernelforge.workflows.forge_loop.gate.insession_gate import GateMeasurement, GateScope, InSessionGate
 from kernelforge.workflows.forge_loop.roles.implementer_method import (
+    MAX_COMMAND_MINUTES,
     CORRECTNESS_ONLY_WORKING_METHOD,
-    PERFORMANCE_WORKING_METHOD,
     deadline_section,
+    performance_method,
     render_method,
     session_budget_section,
 )
@@ -121,14 +123,25 @@ def _process_hygiene_rule(capabilities: AgentCapabilities) -> str:
     return ""
 
 
-_DRIVER_INTERPOSITION_SECTION = """
-## Run the driver through this command
-    python3 {driver_run}
-Never `python3 {driver_base}` directly. That wrapper passes every argument
-through to {driver_base} unchanged, writes nothing of its own and returns the
-driver's exit status — but it first takes a lock on the GPU this session shares
-with others running right now. Timing two kernels on one device at once corrupts
-both numbers, including the ones this session is judged on.
+_SHARED_DEVICE_SECTION = """
+## The GPU is shared: run every command that needs it through the device runner
+    python3 {device_runner} <command> [args...]
+Other sessions are working on this kernel right now, each in a workspace of its
+own, and they all measure on the one GPU. No device is visible to a command you
+start directly: it fails to find a GPU, or silently runs on the CPU. The runner
+waits until the GPU is free, makes it visible to your command, runs the command
+unchanged with the same input and output, and returns its exit status. Use it
+for the driver, for a benchmark script of your own and for a profiler alike.
+- It may sit silent before your command starts. That wait is another session's
+  measurement, not a hang: wait for it.
+- The other sessions wait while your command holds the GPU. Keep each command
+  under {max_command_minutes} minutes, as for every measurement, and split a
+  long sweep into several commands.
+- A command that still holds the GPU after {hold_limit_minutes} minutes is
+  taken for hung and stopped, with everything it started.
+- Do not set `HIP_VISIBLE_DEVICES` or `CUDA_VISIBLE_DEVICES` yourself: timing
+  two kernels on one device at once corrupts both numbers, including the ones
+  this session is judged on.
 """
 
 # What a profiler is pointed at is the session's to build: no driver is asked to carry a profiling mode.
@@ -233,7 +246,7 @@ explain your rationale in one sentence.
 You do NOT write a takeaway for the next iteration here. After this session ends
 you will be asked, in a separate turn, to record everything you explored — so
 keep exploring until you are done rather than reserving effort for a summary.
-{driver_interposition_section}
+{shared_device_section}
 {self_profiling_section}
 ## Tool usage — token discipline
 Every Bash invocation's stdout/stderr is billed back to you on the next turn.
@@ -276,7 +289,7 @@ judge your kernel. It is yours to READ and to RUN; it is NOT yours to change.
   driver is always allowed. What is HARD-DENIED is any EDIT or shell write to it
   (Edit/Write, `>`/`>>` redirects, `sed -i`, `rm`/`mv`/`cp`/`tee`, in-process
   `open(...,'w')`, etc.). Optimize the kernel, never the measurement.
-{driver_interposition_section}
+{shared_device_section}
 ## How to work (IMPORTANT)
 1. Use Read to inspect the target kernel (path supplied per invocation). Also
    study the "Prior experience" section: it has a trajectory table of every past
@@ -324,25 +337,44 @@ Never `cat` a whole file — use the Read tool.
 """
 
 
+def _shared_device_section(device: DeviceAccess | None) -> str:
+    """How a session whose device is shared reaches it; nothing for a session with a device of its own."""
+    if device is None:
+        return ""
+    return _SHARED_DEVICE_SECTION.format(
+        device_runner=device.runner,
+        max_command_minutes=MAX_COMMAND_MINUTES,
+        hold_limit_minutes=f"{device.hold_limit_sec / 60:g}",
+    )
+
+
 def _pr_kb_child_env() -> dict[str, str]:
     """Collect the PR KB settings that must reach the position-C server."""
     return {name: os.environ[name] for name in _PR_KB_CHILD_ENV_VARS if os.environ.get(name, "").strip()}
 
 
-def _gate_scoring_context(scoring: GateScoring, aggregate: CaseAggregate) -> str:
+def _gate_scoring_context(scoring: GateScoring, aggregate: CaseAggregate, *, gain_required: bool) -> str:
     """Tell the session the exact rule its candidate will be judged by."""
+    scored = f"Each of three independent measurements is scored as `{aggregate.formula}` with equal case weight. "
+    if gain_required:
+        bar = (
+            "The mean of those three scores must beat the "
+            "current best by at least "
+            f"{keep_t_critical(KEEP_MEASUREMENT_COUNT):g} standard "
+            "errors of that mean -- a one-sided 95% Student-t test on "
+            "the three scores -- floored at "
+            f"{KEEP_MIN_MARGIN_FRACTION:.2%} of the current best. A "
+            "quiet measurement therefore earns a small gain and a noisy "
+            "one does not; repeatability is worth as much as speed.\n"
+        )
+    else:
+        bar = (
+            "Your stop needs a correct kernel; the three scores and the per-case times behind them are recorded for "
+            "the session that merges this round's lanes, which is judged against the current best.\n"
+        )
     return (
         "\n\n## Authoritative mean case scoring state\n"
-        "Each of three independent measurements is scored as "
-        f"`{aggregate.formula}` with equal case "
-        "weight. The mean of those three scores must beat the "
-        "current best by at least "
-        f"{keep_t_critical(KEEP_MEASUREMENT_COUNT):g} standard "
-        "errors of that mean -- a one-sided 95% Student-t test on "
-        "the three scores -- floored at "
-        f"{KEEP_MIN_MARGIN_FRACTION:.2%} of the current best. A "
-        "quiet measurement therefore earns a small gain and a noisy "
-        "one does not; repeatability is worth as much as speed.\n"
+        f"{scored}{bar}"
         f"Fixed pristine per-case ms: {dict(scoring.baseline_case_times)}\n"
         f"Current best pristine-relative score: {scoring.best_mean_case_speedup}.\n"
         "Raw `mean_ms` is diagnostic and never decides KEEP/REVERT."
@@ -655,9 +687,6 @@ class SessionOptions:
     permission_mode: str | None = None
     agent_backend: str | None = None
     insession_gate: bool = False
-    # Whether an enabled gate also installs its Stop hook, which runs canonical correctness and a benchmark before the
-    # session may end.
-    insession_gate_stop_check: bool = True
 
 
 @dataclass(frozen=True)
@@ -671,8 +700,9 @@ class ImplementerSetup:
     @property
     def paced(self) -> bool:
         """Whether its sessions search for performance under their own stop check, and so work to a wrap-up minute."""
-        stop_check = self.session.insession_gate and self.measurement.driver_script
-        return bool(stop_check and self.session.insession_gate_stop_check) and not self.measurement.correctness_only
+        return bool(self.session.insession_gate and self.measurement.driver_script) and not (
+            self.measurement.correctness_only
+        )
 
 
 @dataclass(frozen=True)
@@ -777,14 +807,10 @@ def make_agent_fn(
     # Stable across every iteration of a loop — placed in system_prompt so the underlying CLI's prompt cache reuses it
     # instead of re-billing each call.
     driver_base = Path(driver_script).name if driver_script else "forge_driver.py"
-    # What the session is told to execute.
-    driver_run = measurement.interposed_driver_path or driver_base
-    # Empty unless a wrapper was interposed, so a session without one carries a byte-identical prompt.
-    driver_interposition_section = (
-        ""
-        if driver_run == driver_base
-        else _DRIVER_INTERPOSITION_SECTION.format(driver_run=driver_run, driver_base=driver_base)
-    )
+    # What the session is told to execute after ``python3``: the driver, or the device runner in front of it for a
+    # session whose device is shared. Empty section for a session with its own device, whose prompt is unchanged.
+    device = measurement.device
+    driver_run = f"{device.runner} python3 {driver_base}" if device is not None else driver_base
     profiling_dir = Path(config.local_knowledge_dir) / "common_methodology" / "profiling"
     # Suppressed when profiling is disabled so the implementer prompt carries no profiling affordance/hint at all.
     section = _SELF_PROFILING_SECTIONS[arch_profile(config.gpu_target).profiler] if task.profiling_enabled else ""
@@ -796,7 +822,7 @@ def make_agent_fn(
         "program_md": task.program_md,
         "prior_knowledge_section": prior_knowledge_section,
         "kernel_backend_section": kernel_backend_section,
-        "driver_interposition_section": driver_interposition_section,
+        "shared_device_section": _shared_device_section(device),
         "self_profiling_section": self_profiling_section,
         "workspace_hygiene_rule": _WORKSPACE_HYGIENE_RULE,
         "deliverable_hygiene_rule": _DELIVERABLE_HYGIENE_RULE,
@@ -806,9 +832,6 @@ def make_agent_fn(
 
     # In-session self-correction mode: the agent may build/test/fix itself inside ONE session.
     gate_enabled = bool(session.insession_gate and driver_script)
-    # Without the stop check the gate is protection only: its hooks deny an edit or a shell write to the measurement
-    # surface while the session runs, and nothing decides when the session may end.
-    gate_stop_check = gate_enabled and session.insession_gate_stop_check
     # A session that searches for performance under its own stop check paces itself to a wrap-up minute; every other
     # session is told only where its deadline falls.
     time_section = session_budget_section if setup.paced else deadline_section
@@ -820,7 +843,9 @@ def make_agent_fn(
         case_aggregate=measurement.case_aggregate.value,
         score_formula=measurement.case_aggregate.formula,
         working_method=render_method(
-            CORRECTNESS_ONLY_WORKING_METHOD if measurement.correctness_only else PERFORMANCE_WORKING_METHOD,
+            CORRECTNESS_ONLY_WORKING_METHOD
+            if measurement.correctness_only
+            else performance_method(gain_required=measurement.gain_required),
             driver_run=driver_run,
             max_blocks=measurement.max_blocks,
         ),
@@ -875,9 +900,11 @@ def make_agent_fn(
                     replace(gate_scope, kernel_file=kernel_path, workspace=configured_workspace),
                     baseline_case_times=gate_scoring.baseline_case_times,
                     best_mean_case_speedup=gate_scoring.best_mean_case_speedup,
+                    starts_on_measured_candidate=gate_scoring.starts_on_measured_candidate,
                 )
-                if gate_stop_check:
-                    system_prompt = gate_system_prompt + _gate_scoring_context(gate_scoring, measurement.case_aggregate)
+                system_prompt = gate_system_prompt + _gate_scoring_context(
+                    gate_scoring, measurement.case_aggregate, gain_required=measurement.gain_required
+                )
                 # Built only for a provider that runs them. A backend which ignores
                 # ``AgentRunSpec.hooks`` drops the whole group without a word, so
                 # attaching one anyway makes this call site read as protection the
@@ -886,7 +913,7 @@ def make_agent_fn(
                 # than the one that was asked for, so a provider fallback carries
                 # the decision with it.
                 if backend.capabilities.stop_hooks:
-                    hooks = gate.make_agent_hooks(stop_check=gate_stop_check)
+                    hooks = gate.make_agent_hooks()
 
             run_spec = AgentRunSpec(
                 system_prompt=system_prompt,
@@ -938,7 +965,7 @@ def make_agent_fn(
         integrity_error: BaseException | None = None
         # A backend that does not run our hooks gets the same Stop decision driven from out here, between explicit
         # resume turns.
-        uses_outer_gate = gate_stop_check and not backend.capabilities.stop_hooks
+        uses_outer_gate = gate_enabled and not backend.capabilities.stop_hooks
         if uses_outer_gate:
             run_result, num_turns, integrity_error = await _run_outer_gate_turns(
                 gate, backend, run_spec, run_result, usage

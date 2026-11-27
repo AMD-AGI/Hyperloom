@@ -8,7 +8,8 @@ and the environment of the server. This module reads those facts, asks :mod:`hyp
 each kind and hands the backend a :class:`~hyperloom.measure.jit.session.JitCacheSession`. Nothing here is a reason
 for a test to fail: a fact that cannot be read switches the kind that needs it off, with a note, and the test builds cold.
 
-``HYPERLOOM_JIT_CACHE`` names the cache's directory; the template mounts it read-only, and without it there is no cache.
+``HYPERLOOM_JIT_CACHE`` names the cache's directory, for a runner on the store's own machine (the local toolbox sets it);
+a hosted ``measurement`` template must not set it. Without it there is no cache.
 """
 
 from __future__ import annotations
@@ -63,6 +64,7 @@ from hyperloom.measure.jit.modules import (
 )
 from hyperloom.measure.jit.native.config import BuildStoreConfigError, store_from_environment
 from hyperloom.measure.jit.native.laying import NamedBuild, NativeLayError, SheetBuilds, sheet_builds
+from hyperloom.measure.jit.native.needs import PACKAGE_ROOT
 from hyperloom.measure.jit.native.record import COMPILE_ENV_PREFIX, BuildRecord
 from hyperloom.measure.jit.prewarmed import unlike_prewarmed
 from hyperloom.measure.jit.session import GivenModules, JitCacheSession, KindPlan, files_below
@@ -72,7 +74,7 @@ from hyperloom.measure.round_marks import boot_parts
 from hyperloom.measure.runner.hardware import GpuFacts
 from hyperloom.measure.runner.service import RunnerFailure
 from hyperloom.measure.spec import EnvRoot, MeasurementSpec
-from hyperloom.orchestrator.actions.executors import is_patched_copy
+from hyperloom.orchestrator.actions.executors import is_kernel_shape_tool, is_patched_copy
 
 __all__ = [
     "FRAMEWORK_PYTHON_ENV",
@@ -95,7 +97,6 @@ _DIRECTORY = "dir"
 _UTF8 = "utf-8"
 _PREFLIGHT_MISMATCH = "preflight_mismatch"
 _SPEC_REJECTED = "spec_rejected"
-_RUNTIME_KIND = "runtime"
 _MODULE_SUFFIX = ".so"
 #: Where below aiter's package the image keeps FlyDSL's compiled launches of aiter's own kernels: aiter points FlyDSL there
 #: when nothing else names a directory (``aiter/__init__.py``).
@@ -192,7 +193,7 @@ def _module_build(spec: MeasurementSpec, around: Surroundings) -> _ModuleBuild |
         RunnerFailure: ``spec_rejected`` when it names one for another package, or one this runner cannot prove.
     """
     roots = {root.id: root for root in spec.environment.roots}
-    named = [ref for ref in spec.environment.builds if roots[ref.root_id].kind != _RUNTIME_KIND]
+    named = [ref for ref in spec.environment.builds if roots[ref.root_id].kind == PACKAGE_ROOT]
     if not named:
         return None
     foreign = [ref.root_id for ref in named if roots[ref.root_id].import_name != AITER_PACKAGE]
@@ -443,10 +444,15 @@ def _touched(inputs: _Inputs, base: Path, effective: Path) -> Touched | str:
 def _build_environment(environment: Mapping[str, str], farm: Farm | None) -> dict[str, str]:
     """The server's environment with the places of the test's own farm left out, its place on ``PYTHONPATH`` and its copy
     of the meta directory: a path of this test's own is no input (the patched tree is, and the key holds that). Nor is a
-    profile's copy of its framework with TraceLens's patch laid in, which changes nothing aiter builds."""
+    profile's copy of its framework with TraceLens's patch laid in, or the TraceLens shape tool a profile puts on the path
+    instead, which change nothing aiter builds."""
     result = dict(environment)
     own = {str(farm.site)} if farm is not None else set()
-    own.update(part for part in result.get(_PYTHONPATH, "").split(os.pathsep) if is_patched_copy(part))
+    own.update(
+        part
+        for part in result.get(_PYTHONPATH, "").split(os.pathsep)
+        if is_patched_copy(part) or is_kernel_shape_tool(part)
+    )
     if own and _PYTHONPATH in result:
         parts = [part for part in result.pop(_PYTHONPATH).split(os.pathsep) if part and part not in own]
         if parts:

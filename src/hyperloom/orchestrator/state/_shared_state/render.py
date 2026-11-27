@@ -14,7 +14,10 @@ from hyperloom_common.coerce import to_float
 from hyperloom.common.prompt_safety import flatten_for_prompt as _flatten_for_prompt
 from hyperloom.inference_optimizer.breakdown.recorder.kernel_records import GEAK_DROPPED_STATUSES
 from hyperloom.inference_optimizer.grid_server_args import dedupe_extra_server_args
-from hyperloom.inference_optimizer.session.geak_rebench_verdict import REBENCH_FAILED_STATUSES
+from hyperloom.inference_optimizer.session.geak_rebench_verdict import (
+    REBENCH_FAILED_STATUSES,
+    REBENCH_UNMEASURED_GIVEN_UP,
+)
 from ...mcp_tool_names import qualified_context_tool_name
 from . import gap_rows, variant_line, warm_start
 from .attempt_audit import _AUDIT_ACTIONS
@@ -166,28 +169,6 @@ def untested_proposal_line(row: dict[str, Any], *, why_chars: int | None = 80) -
 
 
 class _RenderMixin:
-    def to_policy_denial_summary(self, *, top_k: int = 6) -> str:
-        """Render the most recent PolicyGate denials for prompt injection.
-
-        Args:
-            top_k (int): Maximum number of newest denial rows to render.
-
-        Returns:
-            str: A ``=== Recent policy denials ===`` block, or ``""`` when
-                no denials have been recorded.
-        """
-        if not self.policy_denial_history:
-            return ""
-        rows = list(self.policy_denial_history)[-top_k:]
-        lines = [f"=== Recent policy denials (newest last, total={len(self.policy_denial_history)}) ==="]
-        for r in rows:
-            lines.append(
-                f"  tick={r.get('tick')} action={r.get('action_name')!r} "
-                f"rule={r.get('rule')!r} streak={r.get('streak')} "
-                f"hint={str(r.get('hint') or '')[:140]!r}"
-            )
-        return "\n".join(lines)
-
     def to_intervention_mix_summary(self) -> str:
         """Render the intervention ledger as a one-line counts summary (``\"\"`` when empty)."""
         mix = self.intervention_mix or []
@@ -253,9 +234,13 @@ class _RenderMixin:
         elif geak_pending_status in GEAK_DROPPED_STATUSES:
             geak_pending_tag = f" ⚠ geak candidate dropped unvalidated ({geak_pending_status})"
         elif geak_revalidation_status in REBENCH_FAILED_STATUSES and not geak_in_stack:
-            # A fallback rebench that also failed is the same unjudged drop; only ``no_material`` / ``no_promote`` are
-            # verdicts and stay silent here.
-            geak_pending_tag = f" ⚠ geak candidate dropped unvalidated (rebench_{geak_revalidation_status})"
+            # A failed revalidation is the same unjudged drop; only ``no_material`` / ``no_promote`` are verdicts and
+            # stay silent here.
+            given_up = self.geak_result.get("revalidation_error_class") == REBENCH_UNMEASURED_GIVEN_UP
+            geak_pending_tag = (
+                f" ⚠ geak candidate dropped unvalidated (rebench_{geak_revalidation_status}"
+                f"{', given up unmeasured' if given_up else ''})"
+            )
         else:
             geak_pending_tag = ""
         from hyperloom.inference_optimizer import framework_registry

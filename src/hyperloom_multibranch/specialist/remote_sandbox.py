@@ -52,6 +52,7 @@ from pathlib import Path
 from hyperloom.common.visible_devices import GPU_MASK_ENV_NAMES
 from hyperloom_common.shared_storage import child_umask, create_shared_file, make_shared_dirs, write_shared_text
 from hyperloom.sandbox import RunSettings, Sandbox, SandboxGone, SandboxUnavailable
+from hyperloom.sandbox.local_sandbox import SGLANG_JIT_CACHE_ENV
 from hyperloom_multibranch.repo.isolated_git import AGENT_IDENTITY
 from hyperloom_multibranch.specialist.agent_onboarding import ENCODING, CommandResult
 from hyperloom_multibranch.specialist.agent_sandbox import TIMED_OUT, read_tail
@@ -294,6 +295,9 @@ class RemoteAgentSandbox:
             "CLAUDE_CONFIG_DIR": str(claude_config_dir(self.root)),
             "XDG_CACHE_HOME": str(self.root / CACHE_DIR),
             "TMPDIR": SANDBOX_TMP,
+            # On the sandbox's own disk, not :attr:`cache_root`: SGLang publishes a JIT build by renaming a directory,
+            # which the shared storage refuses while the directory holds an open file.
+            SGLANG_JIT_CACHE_ENV: f"{SANDBOX_TMP}/sglang-jit",
             "PYTHONDONTWRITEBYTECODE": "1",
             # Commands run as root, which the Claude CLI's --dangerously-skip-permissions refuses outside a sandbox.
             "IS_SANDBOX": "1",

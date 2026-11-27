@@ -32,7 +32,7 @@ def _tr(reason: str) -> Transition:
     """Minimal Transition for driving close_framework_timeline in tests."""
     return Transition(
         from_phase="FRAMEWORK_AGENT",
-        to_phase="SWEEP",
+        to_phase="CYCLE_END",
         reason=reason,
         evidence={},
     )
@@ -98,7 +98,7 @@ async def test_phase_transition_closes_the_event(session_dir: Path):
 
     await coord.phase_machine._on_phase_entered(
         from_phase="FRAMEWORK_AGENT",
-        to_phase="SWEEP",
+        to_phase="CYCLE_END",
         reason="optimize_no_more_leverage",
         evidence={"evidence": "both_arms_plateaued", "switch_bottleneck": True},
     )
@@ -1154,10 +1154,8 @@ def test_a_rejected_grid_is_reviewed_and_dropped(session_dir: Path):
             pending=coord.state.pending_proposals[msg_id],
             ruling=CriticRuling(
                 verdict="reject",
-                authored_verdict="reject",
                 reasoning="every variant raises the memory floor",
                 advisory=None,
-                approved_variant_names=None,
             ),
         )
     )
@@ -1222,7 +1220,6 @@ def test_a_review_records_the_grounds_the_critic_stated(session_dir: Path):
             "verdict": "advise",
             "reasoning": "the batch size is untested at this sequence length",
             "confidence": 0.4,
-            "failure_reason_code": "insufficient_evidence",
             "required_evidence": ["a short run at conc=4"],
             "risks": [{"severity": "medium", "risk": "may raise the memory floor"}],
             "advice_text": "run the shortest variant first",
@@ -1233,75 +1230,14 @@ def test_a_review_records_the_grounds_the_critic_stated(session_dir: Path):
 
     review = _events(session_dir)[0]["ext"]["proposals"][0]["critic_review"]
     assert review["verdict"] == "advise"
-    assert review["effective_verdict"] == "advise"
     assert review["reviewer"] == "critic"
     assert review["confidence"] == 0.4
-    assert review["failure_reason_code"] == "insufficient_evidence"
     assert review["required_evidence"] == ["a short run at conc=4"]
     assert review["risks"] == [{"severity": "medium", "risk": "may raise the memory floor"}]
     assert review["advice_text"] == "run the shortest variant first"
     assert review["alternative_action"] == "shrink the grid"
     assert review["outcome"]["materialized"] is True
     assert review["outcome"]["denied"] is False
-
-
-def test_a_verdict_held_to_its_rule_keeps_both_readings(session_dir: Path):
-    coord = _coordinator(session_dir)
-    coord.shared_state.phase = "FRAMEWORK_AGENT"
-    coord.phase_framework._open_framework_timeline()
-
-    msg_id = _propose_grid(coord, [{"provenance": "llm_direct"}])
-    _review(
-        coord,
-        msg_id,
-        {
-            "verdict": "reject",
-            "reasoning": "specialist_quantitative_claim_violation: the payload carries predicted_gain_pct.",
-            "failure_reason_code": "specialist_quantitative_claim_violation",
-        },
-    )
-    coord.phase_framework.close_framework_timeline(_tr("optimize_no_more_leverage"))
-
-    review = _events(session_dir)[0]["ext"]["proposals"][0]["critic_review"]
-    assert review["verdict"] == "reject"
-    assert review["effective_verdict"] == "advise"
-    assert review["held_to_rule"] == "specialist_quantitative_claim_violation"
-    # A held reject still dispatches, which is the whole point of the hold.
-    assert review["outcome"]["materialized"] is True
-
-
-def test_a_per_variant_review_records_every_variants_ruling(session_dir: Path):
-    coord = _coordinator(session_dir)
-    coord.shared_state.phase = "FRAMEWORK_AGENT"
-    coord.phase_framework._open_framework_timeline()
-
-    msg_id = _propose_grid(
-        coord,
-        [
-            {"provenance": "llm_direct", "variant_name": "chunked_prefill"},
-            {"provenance": "llm_direct", "variant_name": "cuda_graph"},
-        ],
-    )
-    _review(
-        coord,
-        msg_id,
-        {
-            "verdict_map": {
-                "chunked_prefill": {"verdict": "approve", "rationale": "cheap to test"},
-                "cuda_graph": {"verdict": "reject", "rationale": "known to hang on this build"},
-            }
-        },
-    )
-    coord.phase_framework.close_framework_timeline(_tr("optimize_no_more_leverage"))
-
-    review = _events(session_dir)[0]["ext"]["proposals"][0]["critic_review"]
-    rows = {row["variant_name"]: row for row in review["variants"]}
-    assert rows["chunked_prefill"]["verdict"] == "approve"
-    assert rows["cuda_graph"]["verdict"] == "reject"
-    assert "hang" in rows["cuda_graph"]["reason"]
-    # The grid still ran, on the subset that survived.
-    assert review["effective_verdict"] == "approve"
-    assert review["outcome"]["materialized"] is True
 
 
 def test_a_ruling_the_critic_could_not_ground_says_so(session_dir: Path):
@@ -1356,9 +1292,8 @@ def test_a_patch_review_lands_on_the_candidate_it_judged(session_dir: Path):
             pending=pending,
             ruling=CriticRuling(
                 verdict="reject",
-                authored_verdict="reject",
                 reasoning="touches the serving loop",
-                payload={"verdict": "reject", "failure_reason_code": "serving_loop_touched"},
+                payload={"verdict": "reject"},
             ),
         )
     )

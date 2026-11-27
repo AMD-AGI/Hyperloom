@@ -36,6 +36,7 @@ from functools import partial
 from pathlib import Path
 from typing import TYPE_CHECKING, ClassVar
 
+from hyperloom_common.shared_storage import make_shared_dirs
 from hyperloom.measure.runner.cache_build import CacheBuildError, WheelTarget, runner_wheel_target
 from hyperloom_multibranch.repo.isolated_git import INIT, git_argv, git_env
 from hyperloom_multibranch.scheduling.hosted_run import grant_tests_end_by
@@ -71,8 +72,7 @@ _SOURCE_MODE = 0o755
 @dataclass(frozen=True)
 class HostedSandboxes:
     """Tests run in runner sandboxes of the host's sandbox service, on the inputs ``inputs`` gives for the session's
-    ``MB-toolbox`` directory and the workload's TP; a finished test's sandbox is kept for the next test as the
-    session's ``make_before_break`` says (the operator's ``multibranch.make_before_break``)."""
+    ``MB-toolbox`` directory and the workload's TP."""
 
     inputs: ToolboxInputsFor
     on_this_machine: ClassVar[bool] = False
@@ -84,9 +84,8 @@ class HostedSandboxes:
 
         inputs = self.inputs(setup.layout, setup.workload.tp)
         options = HostedOptions(
-            timeout_sec=attempt_timeout_sec(setup.workload),
+            timeout_sec=attempt_timeout_sec(setup.workload) * setup.test_points,
             boot_budget_sec=setup.workload.boot_budget_sec,
-            make_before_break=setup.make_before_break,
             dev_leases=setup.dev_leases > 0 or bool(setup.agents),
         )
         return build_hosted_toolbox(inputs, blackboard, acceptance, spec, options=options)
@@ -200,7 +199,8 @@ class PinnedToolboxInputs:
         given["run_id"] = self.host.run_id or layout.session_id
         given["session_id"] = layout.session_id
         sha = str(given["source_sha"])
-        source = runner_source(layout.runner_source, str(self.host.source_repo), sha)
+        make_shared_dirs(layout.runner_source)
+        source = runner_source(layout.runner_source / sha, str(self.host.source_repo), sha)
         with tempfile.TemporaryDirectory(prefix="hyperloom-runner-source-") as private:
             copy = private_copy(source, Path(private), sha)
             pin = runner_cache_pin(copy, sha, self.cache_root, runner_wheel_target(os.environ))

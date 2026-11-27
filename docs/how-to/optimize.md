@@ -55,7 +55,7 @@ Requirements:
 | Field | Meaning | How to choose |
 |-------|---------|---------------|
 | `TP` | Tensor-parallel size — number of GPUs the model is sharded across | Must match the number of GPUs in your server node (for example, `8` for a single 8-GPU MI300X node) |
-| `CONC` | Concurrent requests — baseline benchmark concurrency (`--conc`, default `64`) | Set to your target concurrency. The SWEEP phase separately measures a ladder around it: `256,128,64,32,16,8,4,2` for a synthetic workload. An AgentX session runs one fixed concurrency. Override the ladder with `--conc-sweep-concs`. A server request-slot cap (llama.cpp `-np`) drops the rungs above it. |
+| `CONC` | Concurrent requests — baseline benchmark concurrency (`--conc`, default `64`) | Set to your target concurrency. An AgentX session runs one fixed concurrency. |
 | `ISL` | Input sequence length — tokens in each request's prompt | Match your production workload; `1024` is a common starting point |
 | `OSL` | Output sequence length — tokens generated per response | Match your production workload; `1024` is a common starting point |
 
@@ -79,7 +79,7 @@ on requested status checks. Recurring checks may use the hosting platform's
 scheduled invocations; no background supervisor or automatic restart is started.
 Logs are useful evidence, but activity alone does not prove useful progress.
 Under the hood the optimizer walks the phase chain
-`PRELUDE → ENABLEMENT → FRAMEWORK_AGENT → KERNEL_AGENT → SWEEP → CLOSE`; see
+`PRELUDE → ENABLEMENT → FRAMEWORK_AGENT → KERNEL_AGENT → CYCLE_END → CLOSE`; see
 [Hyperloom optimization loop](../conceptual/optimization-loop.md) for each phase
 and [benchmark deadlines](../reference/environment-variables.md#benchmark-deadlines-and-lifecycle)
 for the independent benchmark and session limits.
@@ -109,7 +109,7 @@ session and prints nothing about plugs. To choose other implementations of a plu
 
 | Flag | Effect |
 |------|--------|
-| `--plug-profile NAME` | Load a built-in profile (`local`, `hosted-gpu`, `hosted-cpu`). Not `--profile`, which stays the abbreviation of `--profile-osl`. |
+| `--plug-profile NAME` | Load a built-in profile (`local`). Not `--profile`, which stays the abbreviation of `--profile-osl`. |
 | `--manifest PATH` | Lay a JSON manifest over the profile. `$HYPERLOOM_MANIFEST` is the same, from the environment. |
 | `--plug SOCKET=IMPL` | Pick one implementation for one socket (repeatable). |
 | `--plug-config SOCKET.KEY=VALUE` | Set one configuration key (repeatable; a JSON value is read as JSON). |
@@ -195,6 +195,67 @@ For the full schema — useful if you are building a dashboard, reporting
 pipeline, or downstream integration on top of this file — see
 [`session_breakdown.json` integration in Hyperloom](../reference/session-breakdown.md).
 
+## Sweep concurrency after the session
+
+A concurrency sweep runs once the session closes, apart from its time budget
+(on by default; `--no-enable-conc-sweep` turns it off); `hyperloom conc-sweep SESSION_DIR` runs the same sweep by
+hand on a finished session. It runs only when the session kept a validated
+gain, and measures the baseline and the optimized launch at every concurrency
+the session's InferenceX recipe publishes for its workload (its TP and EP, and
+its ISL/OSL or agentic scenario), with the session's own `--conc` among them.
+`--conc-sweep-concs C1,C2,...`, on `optimize` or on `conc-sweep`, sweeps those
+concurrencies instead; a base from `--reference-script` has no recipe points and
+needs them.
+
+Each point launches as the recipe launches its own concurrency: the base the
+session froze holds the recipe's launch at every concurrency of its arm
+(`point.source_launches` in `base_launch.json`), and a point runs that launch's
+args and environment in place of the session's own, with the optimization
+stacked on top (what it changes of the session's launch wins; what it removes
+stays removed; a value it merely restates from that launch leaves each point the
+recipe's own). A concurrency
+the recipe does not publish runs the launch of the nearest higher one, else its
+highest. An AgentX point boots a server of its own; a fixed-length workload
+keeps one server across consecutive points that launch alike. A point runs the
+request cap the recipe sets at its concurrency (`--max-num-seqs`,
+`--max-running-requests`) even below that concurrency, as InferenceX measures it:
+an AgentX concurrency counts agent sessions, not requests in flight.
+
+The sweep runs one point at a time: arm by arm on held servers, the points of
+one launch together, and a concurrency's two arms one after the other where each
+point boots its own server, so a stop leaves pairs measured.
+
+The sweep logs its estimated length before it starts, rewrites
+`reports/conc_sweep_summary.json` and `reports/conc_sweep_raw.csv` after every
+point, carrying the summary each time as `conc_sweep_summary` in the session's
+`session_breakdown.json`, and draws `reports/conc_sweep_curve.png` (interactivity against
+throughput per GPU) at the end. The summary's header names the framework,
+precision, GPU type and count, TP and EP, the image and the recipe the base came
+from, where the points' launches come from (`point_launches`: `source` or
+`session`), and the host and process writing it with `updated_at`, so a summary still
+`in_progress` whose process is gone reads as cut short. Its `status` is
+`succeeded`, `partial`, `failed`, `skipped` (with `skip_reason`) or `cancelled`
+(SIGINT or SIGTERM; the measured points stay). A later run measures only the points not yet measured on the
+same launch of each arm; a report an earlier schema wrote is set aside as
+`conc_sweep_summary.<version>.json` and its points measured again. An InferenceX
+base frozen before it recorded `point.source_launches` is skipped
+(`no_source_launches`) until they are backfilled: rerun `python -m
+inference_suite resolve` with the base's own `query`, `--inferencex-commit
+<source.commit>` and its cards as `--gpus`, check the new file's `digest` is the
+base's, and copy its `point.source_concs` and `point.source_launches` into the
+base. A base so backfilled is read only by a Hyperloom that knows those fields. Multi-node and MLPerf sessions are skipped, and so are a
+session whose server is built from its checkout (`checkout_built_server`) and one
+whose retained overlay cannot load (`optimized_overlay_unavailable`).
+The session package is rebuilt after the sweep so it carries the report.
+
+The latency columns follow InferenceX's own reports: for an AgentX workload its
+client computes `itl` and `tpot` from the same per-request inter-token latency
+(`infx/results/agentic/request_metrics.py`), so `tpot_p90_ms` is the ITL p90.
+
+A multi-branch session sweeps the same way; its own guide,
+[Running a multi-branch session](run-multibranch.md), covers its sweep's parallelism,
+its deadline and the hosted sweep of a closed session.
+
 ## Troubleshooting
 
 If a run fails on first launch, see [Troubleshooting Hyperloom](../reference/troubleshooting.md).
@@ -225,7 +286,7 @@ base, and candidate changes sit on top. A flag the installed framework does not
 know is refused, never dropped. Request lengths come from the AgentX trace corpus;
 concurrency stays fixed for the session.
 
-AgentX rejects `--enable-conc-sweep`, `--isl`, `--osl`, `--profile-osl`,
+AgentX rejects `--isl`, `--osl`, `--profile-osl`,
 `--max-model-len`, `--quantize` and `--quantize-scheme`.
 It also rejects multi-node execution and frameworks other than SGLang, vLLM and ATOM.
 An ATOM session takes its base from InferenceX's ATOM agentic entries; ATOM's own catalog serves
@@ -289,6 +350,6 @@ Profiled measurements never replace the unprofiled performance baseline.
 
 `hyperloom optimize --resume-from SESSION_DIR` reuses the archived `benchmark.yaml`
 without requiring the switch or original YAML again. Changing the workload requires
-a new session. Do not combine this entrypoint with CLI ISL/OSL, concurrency sweeps,
+a new session. Do not combine this entrypoint with CLI ISL/OSL,
 quantization or benchmark-script overrides. The independent MLPerf agentic backend
 keeps its existing entrypoint.

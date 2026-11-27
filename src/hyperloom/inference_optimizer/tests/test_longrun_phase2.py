@@ -139,7 +139,7 @@ def test_redirect_advisory_renders_for_saturation_without_plateau(cyclic_coordin
 def test_redirect_advisory_empty_outside_explore(cyclic_coordinator):
     c = cyclic_coordinator
     st = c.shared_state
-    st.phase = ps.PHASE_SWEEP
+    st.phase = ps.PHASE_CYCLE_END
     st.mark_bottleneck_switch(prev_bottleneck="MoE_fused")
     assert c.conversation._bottleneck_redirect_advisory_block() == ""
 
@@ -163,6 +163,7 @@ def test_acceptance_threshold_advisory_lists_unblocked(cyclic_coordinator):
     assert "v_lo" in block  # < bar
     assert "v_keep" in block  # KEEP'd result also surfaced as evidence
     assert "Historical results are evidence only" in block
+    assert "except one carrying a change the framework refused at start" in block
 
 
 def test_acceptance_threshold_advisory_empty_first_cycle(cyclic_coordinator):

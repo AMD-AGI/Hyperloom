@@ -17,7 +17,7 @@ from hyperloom.orchestrator.phases.machine_state import (
     DEFAULT_PLATEAU_EXPLORE_EMPTY_STREAK,
     DEFAULT_PLATEAU_EXPLORE_KEEP_GAIN_PCT,
     PHASE_KERNEL_AGENT,
-    PHASE_SWEEP,
+    PHASE_CYCLE_END,
     _config_lever_evidence,
     kernel_work_pending,
 )
@@ -195,10 +195,6 @@ def test_reset_per_cycle_plateau_state_preserves_durable_ledgers():
     state.framework_agent_phase_done = True
     state.framework_agent_discover_failures = 2
     state.framework_agent_empty_discoveries = 2
-    state.rounds_since_last_specialist = {"serving_specialist": 4}
-    state.rounds_since_last_keep = {"serving_specialist": 5}
-    state.last_conc_sweep = {"status": "succeeded"}
-    state.last_conc_sweep = {"status": "succeeded"}
     state.explore_search = {"tested": {"stable": {"cycle": 0}}}
     state.kernel_integrate_attempts = {"stable": {"attempts": [{"cycle": 0}]}}
 
@@ -208,10 +204,6 @@ def test_reset_per_cycle_plateau_state_preserves_durable_ledgers():
     assert state.framework_agent_phase_done is False
     assert state.framework_agent_discover_failures == 0
     assert state.framework_agent_empty_discoveries == 0
-    assert state.rounds_since_last_specialist == {}
-    assert state.rounds_since_last_keep == {}
-    assert state.last_conc_sweep == {}
-    assert state.last_conc_sweep == {}
     assert state.explore_search["tested"]["stable"]["cycle"] == 0
     assert state.kernel_integrate_attempts["stable"]["attempts"][0]["cycle"] == 0
 
@@ -330,11 +322,11 @@ def test_compute_next_phase_skip_to_sweep_from_explore_routes_to_kernel():
     assert evidence.get("terminal") is not True
 
 
-def test_kernel_with_no_pending_work_routes_to_sweep():
+def test_kernel_with_no_pending_work_routes_to_cycle_end():
     out = compute_next_phase(_skip_to_sweep_state("KERNEL_AGENT"), flags=PhaseFlags(kernel_enabled=True))
     assert out is not None
     target, reason, _ = out
-    assert target == PHASE_SWEEP
+    assert target == PHASE_CYCLE_END
     assert reason == "kernel_no_more_leverage"
 
 
@@ -391,7 +383,7 @@ def test_geak_terminal_exits_kernel_ignoring_per_kernel_pending_work(status, mon
     out = compute_next_phase(state, flags=PhaseFlags(kernel_enabled=True))
     assert out is not None
     target, reason, _ = out
-    assert target == PHASE_SWEEP
+    assert target == PHASE_CYCLE_END
     assert reason == "kernel_no_more_leverage"
 
 
@@ -408,7 +400,7 @@ def test_a_failed_geak_run_exits_kernel_with_its_error():
     evidence.pop("predicate_inputs")
 
     assert (target, reason, evidence) == (
-        PHASE_SWEEP,
+        PHASE_CYCLE_END,
         "kernel_geak_failed",
         {"geak_status": "error", "error_class": "workflow_parse_error", "error": "connect ECONNREFUSED 127.0.0.1:4000"},
     )
@@ -426,7 +418,7 @@ def test_kernel_exits_when_every_hot_kernel_is_rejected_or_integrated():
     out = compute_next_phase(state, flags=PhaseFlags(kernel_enabled=True))
     assert out is not None
     target, reason, _ = out
-    assert target == PHASE_SWEEP
+    assert target == PHASE_CYCLE_END
     assert reason == "kernel_no_more_leverage"
 
 
@@ -534,7 +526,7 @@ def test_saving_a_stopped_session_again_does_not_move_its_stop_time(tmp_path):
 
 def test_stop_reason_vocab_has_v08_additions():
     for new in (
-        "sweep_done",
+        "cycle_end_done",
         "prelude_baseline_failed",
         "time_exhausted_during_prelude",
     ):

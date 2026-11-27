@@ -15,7 +15,6 @@ from typing import Any, NamedTuple
 from hyperloom_common.coerce import to_int
 from hyperloom.common.deadline import Deadline
 from hyperloom_common.env import is_truthy
-from hyperloom.common.framework_arm import verdict_subject
 from hyperloom_common.llm.llm_attribution import current_action_scope
 from hyperloom_common.proctree import TERM_GRACE_SEC
 from hyperloom.inference_optimizer.protocol.action_surfaces import (
@@ -30,18 +29,14 @@ from ..actions.executors._subprocess_kill import (
 )
 from ..phases import dispatch_order
 from ..bus.message_bus import Message
-from ..policy.denial import PolicyDenied
-from ..policy.gate import (
-    INTEGRATE_PATCH_PERMISSIVE_VERDICTS,
-    SPECIALIST_FROM_AGENT_PREFIX,
-)
+from ..policy.gate import SPECIALIST_FROM_AGENT_PREFIX
 from ..policy.projection import serving_tp_for_policy
 from ..bus.gpu_pool import GPU_LEASE_TTL_GRACE
 from ..bus.resource_lock import KNOWN_LANES, _expand_lanes
 from ._dead_holder import DeadHolderAccountingMixin
 from .sub_agent_runner import SubAgentResult
 from ..specialists.wall_budget import limit_wall_budget_extension
-from ..state.task_registry import Task, TaskSpec
+from ..state.task_registry import Task
 from .time_budget import (
     TIME_BUDGET_EXEMPT_ACTIONS,
     gated_phase_remaining_sec,
@@ -374,7 +369,7 @@ class DispatcherCollaborator(AdmissionMixin, DeadHolderAccountingMixin, Coordina
     async def _reclaim_stale_dispatch_state(self) -> None:
         """Free rows and leases a previous tick left stuck, before scanning the queue.
 
-        Runs every tick and is idempotent. Four independent claims a crashed or
+        Runs every tick and is idempotent. Three independent claims a crashed or
         vanished worker can leave behind, each reclaimed on its own so one
         failure does not hide the next -- and every one of them absorbs its
         store failures, because a self-heal that raises would stop the pump it
@@ -383,9 +378,7 @@ class DispatcherCollaborator(AdmissionMixin, DeadHolderAccountingMixin, Coordina
         * a running row whose holder PID is dead, so its lanes free and the task
           fails while it is still retry-eligible, this same tick;
         * the failure that reclaim implies, charged once;
-        * the lane leases that holder still held;
-        * an ``integrate_patch`` row cancelled at dispatch whose critic verdict
-          was restored afterwards by a resume.
+        * the lane leases that holder still held.
         """
         dead_tasks: list[str] = []
         try:
@@ -408,10 +401,6 @@ class DispatcherCollaborator(AdmissionMixin, DeadHolderAccountingMixin, Coordina
             await self.locks.reap_dead_holders()
         except sqlite3.Error:
             log.exception("dispatcher: dead-holder lease reap failed")
-        try:
-            await self._reconcile_cancelled_policy_denied_integrate_tasks()
-        except sqlite3.Error:
-            log.exception("dispatcher: cancelled policy-denied integrate_patch reconcile failed")
 
     async def pump_dispatcher_once(self) -> None:
         """Book finished executions and spawn the queued tasks that now fit; never waits on running work.
@@ -438,75 +427,6 @@ class DispatcherCollaborator(AdmissionMixin, DeadHolderAccountingMixin, Coordina
         running = [entry.atask for entry in self._inflight_actions.values() if not entry.atask.done()]
         if running:
             await asyncio.wait(running, timeout=timeout, return_when=asyncio.FIRST_COMPLETED)
-
-    async def _reconcile_cancelled_policy_denied_integrate_tasks(self) -> list[str]:
-        """Re-queue integrate_patch rows cancelled at dispatch when policy now passes.
-
-        Covers the resume gap where ``coordinator.db`` retained a cancelled task
-        but ``SharedState.specialist_patch_verdicts`` was restored later. The
-        row is re-keyed by its review subject, so a pre-screened upstream-PR
-        candidate reconciles the same way an authored patch does. Only
-        ``integrate_patch_requires_critic_verdict`` denials are retried; forged
-        params that still fail :meth:`PolicyGate.validate_dispatched_task` are
-        left terminal.
-
-        Returns:
-            list[str]: New queued task ids created by reconcile (may be empty).
-        """
-        gate = self.sub.policy
-        if gate is None:
-            return []
-        get_verdict = self.shared_state.get_specialist_patch_verdict
-
-        created: list[str] = []
-        for task in await self.tasks.by_state("cancelled"):
-            if task.kind != "integrate_patch":
-                continue
-            evidence = _dispatch_policy_denied_evidence(task)
-            if not evidence:
-                continue
-            if str(evidence.get("rule") or "") != "integrate_patch_requires_critic_verdict":
-                continue
-            params = dict(task.params or {})
-            sid = verdict_subject(params)
-            if not sid:
-                continue
-            verdict = str(get_verdict(sid) or "").strip().lower()
-            if verdict not in INTEGRATE_PATCH_PERMISSIVE_VERDICTS:
-                continue
-            try:
-                gate.validate_dispatched_task(task.kind, params)
-            except PolicyDenied:
-                continue
-            base_key = str(task.idempotency_key or f"integrate-{task.task_id}").strip()
-            child_key_prefix = f"{base_key}-reconcile"
-            if any(
-                child.state in ("succeeded", "queued", "running")
-                for child in await self.tasks.with_key_prefix(task.kind, child_key_prefix)
-            ):
-                continue
-            for attempt in range(1, 6):
-                new_key = f"{child_key_prefix}{attempt}"
-                new_task, was_existing = await self.tasks.create_or_return_existing(
-                    TaskSpec(
-                        kind=task.kind,
-                        params=params,
-                        idempotency_key=new_key,
-                        requires_lanes=list(task.requires_lanes or []),
-                        lease_ttl_sec=int(task.lease_ttl_sec or 0),
-                        dispatch_class="coordinator",
-                    )
-                )
-                if not was_existing:
-                    created.append(new_task.task_id)
-                    log.info(
-                        "dispatcher: reconciled cancelled integrate_patch %s -> %s (key=%s)",
-                        task.task_id,
-                        new_task.task_id,
-                        new_key,
-                    )
-                    break
-        return created
 
     async def _admit_lanes(self, task: Task, holders: dict[str, int], capacities: dict[str, int]) -> Any:
         """Take the lane lease a queued task needs, bumping ``holders`` for the rest of this pass."""
@@ -629,8 +549,6 @@ class DispatcherCollaborator(AdmissionMixin, DeadHolderAccountingMixin, Coordina
             )
             self._inflight_actions[task.task_id] = _InflightAction(task.kind, atask, cancel_scope)
             atask.add_done_callback(self._report_spawned_failure(task))
-            if task.kind == "specialist":
-                self.shared_state.note_specialist_dispatched(str(task.params.get("domain") or ""))
 
     @staticmethod
     def _report_spawned_failure(task: Task) -> "Callable[[asyncio.Task[Any]], None]":
@@ -1055,17 +973,6 @@ class DispatcherCollaborator(AdmissionMixin, DeadHolderAccountingMixin, Coordina
             if cap <= 0 or used >= cap:
                 return False
         return True
-
-
-def _dispatch_policy_denied_evidence(task: Task) -> dict[str, Any]:
-    """Return policy-denied evidence from a queued→cancelled dispatch transition."""
-    for entry in reversed(task.history or []):
-        if entry.get("from") != "queued" or entry.get("to") != "cancelled":
-            continue
-        evidence = entry.get("evidence") or {}
-        if evidence.get("reason") == "policy_denied":
-            return dict(evidence)
-    return {}
 
 
 def _promotion_payload(task: Task, result: SubAgentResult) -> dict[str, Any]:

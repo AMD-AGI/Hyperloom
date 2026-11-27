@@ -27,7 +27,7 @@ from __future__ import annotations
 
 import logging
 import time
-from collections.abc import Callable, Iterable, Mapping
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from typing import Any
 
@@ -300,17 +300,13 @@ class GateVerdict:
 
 @dataclass(frozen=True)
 class CriticReview:
-    """The Critic's ruling on one proposal, both as authored and as the loop committed it."""
+    """The Critic's ruling on one proposal."""
 
     verdict: str
-    effective_verdict: str = ""
-    held_to_rule: str = ""
     reviewer: str = REVIEWER_CRITIC
     reason: str = ""
     confidence: Any = None
-    failure_reason_code: str = ""
     advisory: Mapping[str, Any] | None = None
-    variants: Iterable[Mapping[str, Any]] | None = None
 
 
 class FrameworkEventRecorder:
@@ -504,35 +500,24 @@ class FrameworkEventRecorder:
         """Record the Critic's ruling on one proposal, inline on its row.
 
         The review lives on the proposal so that it follows the proposal
-        wherever it was raised. Both verdicts are kept: a reject the loop held
-        to a rule that only declared ``advise`` is two facts, and reporting
-        either alone misreads the round.
+        wherever it was raised.
 
         ``review.advisory`` is recorded as given, since the vocabulary is the
         Critic's own and a re-spelling here would drift from what it emitted.
-        ``review.variants`` holds the per-variant rulings for a grid reviewed by
-        ``verdict_map``; a rejected variant reaches no bench, so no attempt row
-        carries its ruling.
         """
         key = str(proposal_id or "")
         if not key:
             return
         ruling: dict[str, Any] = {
             "verdict": review.verdict,
-            "effective_verdict": review.effective_verdict or review.verdict,
-            "held_to_rule": review.held_to_rule,
             "reviewer": review.reviewer,
             "reason": review.reason,
             "confidence": _float_or_none(review.confidence),
-            "failure_reason_code": review.failure_reason_code,
             "concerns": [],
             "reviewed_at": _now(),
         }
         for name, value in _as_dict(review.advisory).items():
             ruling.setdefault(name, value)
-        variants = [dict(row) for row in review.variants or []]
-        if variants:
-            ruling["variants"] = variants
         self._sink.record(
             SECTION_PROPOSAL,
             {"proposal_id": key, "critic_review": ruling},

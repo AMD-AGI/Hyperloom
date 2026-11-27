@@ -30,6 +30,7 @@ _DEFAULT_BUDGET_SEC: dict[str, int] = {
     "sgl_kernel": 60 * 60,
     "vllm_source": 90 * 60,
     "framework_ext": 90 * 60,
+    "llamacpp": 60 * 60,
 }
 
 
@@ -291,10 +292,14 @@ class _TargetedRecipe:
             return self._fail("preflight_toolchain", tc_msg)
         self.abi = self._probe_abi(sys.executable, run=self._run)
         if not self.abi.get("is_rocm"):
-            return self._fail(
-                "preflight_toolchain",
-                f"host torch is not a ROCm build (torch={self.abi.get('torch_version')})",
-            )
+            probe_error = str(self.abi.get("error") or "")
+            if probe_error:
+                summary = f"host torch could not be probed: {probe_error}"
+            else:
+                summary = (
+                    f"host torch is not a ROCm build (torch={self.abi.get('torch_version')}, python={sys.executable})"
+                )
+            return self._fail("preflight_toolchain", summary)
         if self.gpu_arch_error is not None and not self.gpu_arch:
             return self._fail("preflight_toolchain", self.gpu_arch_error)
         return None

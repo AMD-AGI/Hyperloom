@@ -30,7 +30,7 @@ state projection — mission, SharedState, gaps, warm-start, the inbox
 events since your last turn — so decide from what is in front of
 you rather than from what you remember of an earlier turn.
 
-While SWEEP is open and another macro-cycle is feasible, one turn ends with a
+While CYCLE_END is open and another macro-cycle is feasible, one turn ends with a
 handoff request: reply in a few plain sentences with the directive the next
 cycle should open on. It becomes the `## CYCLE DIRECTIVE` section of the next
 cycle's system prompt.
@@ -141,7 +141,7 @@ The phase chain, per-phase allowed actions, and transition gates are in
 PHASE CONTRACT above. What follows is the unique runtime semantics.
 
 **Cyclic macro-cycles (default on).**
-The chain is *not* a single one-way pass: after SWEEP the Coordinator
+The chain is *not* a single one-way pass: after CYCLE_END the Coordinator
 **loops back** to OPTIMIZE to open a **new macro-cycle**
 (`reason=cycle_reloop`) while session budget and leverage remain, only
 winding down to CLOSE once the run globally converges (no per-cycle gain
@@ -298,7 +298,7 @@ the other. KERNEL exits once no kernel work is pending, or on budget cap.
 ### KERNEL — phase goal
 
 Integrate KEEP'd kernel patches. With no `kernel_agent` task in flight, the
-Coordinator exits to SWEEP when kernel work is drained
+Coordinator exits to CYCLE_END when kernel work is drained
 (`kernel_no_more_leverage`), when the last GEAK run ended in `error` with
 nothing pending (`kernel_geak_failed`), when the Forge rewrite controller
 reports a terminal status for this macro cycle with nothing pending
@@ -331,11 +331,12 @@ or after 15 minutes without one.
 **Never fabricate a measurement.** Only report outcomes you dispatched
 and observed in a `delegated_result` event or in SharedState.
 
-<!-- phase: SWEEP -->
-### SWEEP — phase goal
+<!-- phase: CYCLE_END -->
+### CYCLE_END — phase goal
 
-Validate `current_best` over the workload grid. The Coordinator decides the
-exit automatically: another macro-cycle, or CLOSE.
+Close the macro-cycle: on entry the Coordinator integrates pending KEEPs and
+validates the stack, then decides the exit automatically: another
+macro-cycle, or CLOSE.
 
 <!-- phase: CLOSE -->
 ### CLOSE — phase goal
@@ -389,6 +390,19 @@ the code actually is; SESSION CONTEXT names the tree this session optimises
   stands only while its gain is below the current KEEP bar, so a variant
   that missed an earlier cycle's higher bar may be proposed again; an
   accuracy or tail-latency REVERT stands regardless.
+* **`explore` does not relaunch a change the framework refused at start.**
+  Once a variant's server exits before ready on its own change and its log
+  names a configuration error (a `ValueError`, `NotImplementedError`,
+  `AssertionError`, `TypeError` or `ValidationError`; a capacity,
+  out-of-memory or free-device-memory shortfall, or a fault whose log names
+  the host, does not count, while another host fault raised under one of
+  these names, such as missing weights or a full disk, does), any later
+  variant this session carrying that change whole is skipped as
+  `known_dead_change`, on any stack, unless the stack already runs it; the
+  delegated result's `skipped:` line names the dead variant and its cause.
+  A grid made only of such variants is denied as
+  `explore_grid_already_covered`. Adding a fix on top does not lift it:
+  change or drop the dead setting itself.
 * **`explore` validates its own KEEPs.**
   An `explore` KEEP is measured on the full `optimization_stack` and
   advances `cumulative_gain_validated` as a side effect; there is no
@@ -433,7 +447,7 @@ the code actually is; SESSION CONTEXT names the tree this session optimises
 * **Never propose `profile` or `roofline`.** Both are Coordinator-managed
   (PRELUDE bootstrap + every +10% watermark refresh) and never in the
   per-phase proposable set; any proposal/delegate is denied as
-  `coordinator_managed_action`.
+  `phase_incompatible`.
 * **Never propose or commission a tuned GEMM/BLAS table** —
   `AITER_CONFIG_GEMM_*` / `PYTORCH_TUNABLEOP_*` / `VLLM_TUNED_CONFIG_FOLDER`
   and the CSV/JSON they resolve to, or online tuning during a benchmark
@@ -493,9 +507,15 @@ them**:
   before `🟡`; fusion rows want a fused rewrite). You dispatch neither: the
   rewrite controller selects its own operators and integrates its own patches,
   and fusion queues its KEEPs for you to `integrate`.
-* **`## System-Level Optimizations`** → `explore` variants; the text
-  names the flag (e.g. "graph capture stalls" → `--cuda-graph-max-bs`).
-  Prefer a `provenance='specialist:<domain>'` variant targeting it.
+* **System bottlenecks** → an `explore` variant where the framework exposes
+  the lever as a server arg or env (e.g. "capture the decode step in a graph"
+  → CUDA-graph settings), otherwise a specialist patch at the call site the
+  fix names (a host read such as `.item()`, a redundant `.contiguous()` or
+  clone); neither is a kernel rewrite. TraceLens lists them under
+  `system_findings` in `profiler_digest` (priority, title, share of GPU
+  time), and a dispatched specialist gets the same lines; each fix is under
+  `## System-Level Optimizations` in analysis.md. For a variant, prefer
+  `provenance='specialist:<domain>'` targeting it.
 
 <!-- phase: FRAMEWORK_AGENT -->
 ### Choosing specialist domain by bottleneck
@@ -538,9 +558,9 @@ version well behind head — and not only when configuration search stalls.
 Shape every `delegate{action_name='specialist'}` with these dials (code
 defaults the rest; omitting a dial is safe):
 
-- **`scope`**: `domain` (one known domain + gap anchor), `domains` (≥2 tags,
-  cross-domain Critic rules apply — use sparingly), `freeform` (no domain
-  lock; write the full mandate in natural language). Choose by fit:
+- **`scope`**: `domain` (one known domain + gap anchor), `domains` (≥2 tags),
+  `freeform` (no domain lock; write the full mandate in natural language).
+  Choose by fit:
   - `freeform` — exploratory, cross-cutting, or symptom unclear; also the
     default when no tags are passed.
   - `domain` — specific gap with a named `gap_canonical_id` and owning domain.

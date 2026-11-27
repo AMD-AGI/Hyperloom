@@ -31,19 +31,30 @@ the config before the round starts. :func:`inferencex_root` is the staged Infere
 on under :data:`GPU_MASK_ENV`; :func:`runner_owned` names the flags and environment a round sets itself, which no
 layer a host hands it may set. The AgentX client staging installs is patched to export the output token count of a
 reply it found nothing in under :data:`ERROR_OSL_METRIC` on that request's export line, and to log the error of a
-warmup request that aborts the replay after :data:`WARMUP_ERROR_PREFIX` on the line of its warmup abort.
+warmup request that aborts the replay after :data:`WARMUP_ERROR_PREFIX` on the line of its warmup abort. That client's
+site-packages lie at :data:`CLIENT_SITE_PACKAGES` below a staged root, and the evaluation's task is :data:`GSM8K_TASK`
+below the staged InferenceX.
 
 A caller measuring a server outside a round as a fixed round does builds each pass with :func:`client_argv` under
-:func:`fixed_client_env`, the discarded :func:`warmup_pass` before the measured one.
+:func:`fixed_client_env`, the discarded :func:`warmup_pass` before the measured one. :func:`read_prompts` is the prompts
+a fixed round's dataset client sends from a ``DATASET_PATH`` file, read as that client reads them.
+
+A host reads what a native server takes from the program itself: :func:`native_help` is the ``--help`` of the one a
+launch environment resolves, :func:`native_executable` the file that runs, and :func:`help_options` that text as one
+:class:`HelpOption` per entry; :class:`FrameworkProbeError` is raised when the program is not there or prints none.
 """
 
 from __future__ import annotations
 
 from inference_suite.aiperf_patch import ERROR_OSL_METRIC, WARMUP_ERROR_PREFIX
 from inference_suite.cli import EXIT_REFUSED
+from inference_suite.client_env import CLIENT_SITE_PACKAGES
 from inference_suite.compose import GPU_MASK_ENV, runner_owned
 from inference_suite.contracts.base_launch import LaunchQuery
 from inference_suite.contracts.layout import RunDirError
+from inference_suite.framework_probe import FrameworkProbeError, native_executable, native_help
+from inference_suite.parser_check import HelpOption, help_options
+from inference_suite.load.dataset_client import read_prompts
 from inference_suite.load.fixed import ClientPass, ClientTarget, ClientTool, client_argv, fixed_client_env, warmup_pass
 from inference_suite.recipe.resolve import Miss, SourceSnapshot, resolve_base
 from inference_suite.recipe.sources import (
@@ -55,6 +66,7 @@ from inference_suite.recipe.sources import (
 )
 from inference_suite.recipe.user_file import UserFile, UserFileError, parse_user_file
 from inference_suite.load.scriptable import scriptable_base
+from inference_suite.profile.inject import SGLANG_PROFILER_DIR_ENV
 from inference_suite.run import RoundResult, run_round
 from inference_suite.runtime.process import PidfileError
 from inference_suite.runtime.server import stop
@@ -64,6 +76,7 @@ from inference_suite.staging import (
     CLIENT_FILE,
     CLIENT_ROOT_ENV,
     CLIENT_SCRIPT,
+    GSM8K_TASK,
     StagingError,
     inferencex_root,
     manifest_sha256,
@@ -76,12 +89,16 @@ __all__ = [
     "CLIENT_FILE",
     "CLIENT_ROOT_ENV",
     "CLIENT_SCRIPT",
+    "CLIENT_SITE_PACKAGES",
     "ClientPass",
     "ClientTarget",
     "ClientTool",
     "ERROR_OSL_METRIC",
     "EXIT_REFUSED",
+    "FrameworkProbeError",
     "GPU_MASK_ENV",
+    "GSM8K_TASK",
+    "HelpOption",
     "INFERENCEX_CLIENT_COMMIT",
     "InferencexCommitRefused",
     "LaunchQuery",
@@ -90,6 +107,7 @@ __all__ = [
     "PidfileError",
     "RoundResult",
     "RunDirError",
+    "SGLANG_PROFILER_DIR_ENV",
     "SourceFetchError",
     "SourceSnapshot",
     "StagingError",
@@ -100,11 +118,15 @@ __all__ = [
     "fixed_client_env",
     "fetch_response",
     "fetch_sources",
+    "help_options",
     "inferencex_root",
     "manifest_sha256",
+    "native_executable",
+    "native_help",
     "normalised_manifest",
     "parse_inferencex_commit",
     "parse_user_file",
+    "read_prompts",
     "resolve_base",
     "run_round",
     "runner_owned",

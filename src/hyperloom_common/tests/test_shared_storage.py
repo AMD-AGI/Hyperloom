@@ -612,7 +612,7 @@ def _planted(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> tuple[Path, Pat
         "write_shared_text(target, 'theirs')",
         "copy_shared_file(source, target)",
         "os.close(open_shared_replacement(target))",
-        "os.close(create_new_shared_file(target.with_name('new.json')))",
+        "os.close(open_shared_append(target.with_name('new.json')))",
         "create_shared_file(target.with_name('new.json'))",
         "with replace_shared_file(target) as handle: handle.write(b'theirs')",
         "make_shared_dirs(target.with_name('new'))",
@@ -711,7 +711,7 @@ def test_a_new_shared_file_has_its_mode_before_it_has_its_name(tmp_path, monkeyp
 
     shared = _setgid_parent(tmp_path / "shared")
     monkeypatch.setattr(shared_storage.os, "link", watching_link)
-    os.close(shared_storage.create_new_shared_file(shared / "0000000001.jsonl"))
+    os.close(shared_storage.open_shared_append(shared / "0000000001.jsonl"))
     assert seen == [0o664]
     assert _mode(shared / "0000000001.jsonl") == 0o664
     assert [path.name for path in shared.iterdir()] == ["0000000001.jsonl"], "its own name is gone"
@@ -721,6 +721,7 @@ def test_a_new_shared_file_has_its_mode_before_it_has_its_name(tmp_path, monkeyp
 def test_a_new_shared_file_never_takes_a_name_that_is_there_and_never_writes_through_a_link(
     tmp_path, monkeypatch, links
 ):
+    """A link another process puts at the name after it was found missing is neither taken nor written through."""
     if links != "made":
 
         def no_links(*_args, **_kwargs):
@@ -731,11 +732,22 @@ def test_a_new_shared_file_never_takes_a_name_that_is_there_and_never_writes_thr
     outside = shared / "outside"
     outside.write_text("kept\n")
     taken = shared / "taken.jsonl"
-    taken.symlink_to(outside)
-    with pytest.raises(FileExistsError):
-        os.close(shared_storage.create_new_shared_file(taken))
+    real_open = os.open
+    planted = []
+
+    def planting_open(name, flags, *args, **kwargs):
+        if name == taken.name and not planted:  # found missing, then planted before it is made
+            planted.append(name)
+            taken.symlink_to(outside)
+            raise FileNotFoundError(errno.ENOENT, "No such file or directory", name)
+        return real_open(name, flags, *args, **kwargs)
+
+    monkeypatch.setattr(shared_storage.os, "open", planting_open)
+    with pytest.raises(OSError) as raised:
+        os.close(shared_storage.open_shared_append(taken))
+    assert raised.value.errno == errno.ELOOP, "made meanwhile: opened as it is, and a link is never opened"
     assert outside.read_text() == "kept\n" and taken.is_symlink()
-    descriptor = shared_storage.create_new_shared_file(shared / "free.jsonl")
+    descriptor = shared_storage.open_shared_append(shared / "free.jsonl")
     try:
         os.write(descriptor, b"x")
     finally:
@@ -778,7 +790,7 @@ s.write_shared_bytes(parent / "bytes", b"x")
 s.write_shared_bytes(parent / "credential", b"secret", mode=0o600)
 s.write_shared_text(parent / "text", "x")
 os.close(s.open_shared_replacement(parent / "replacement.log"))
-os.close(s.create_new_shared_file(parent / "segment.jsonl"))
+os.close(s.open_shared_append(parent / "segment.jsonl"))
 s.copy_shared_file(parent / "text", parent / "copy")
 with s.replace_shared_file(parent / "archive.zip") as handle:
     handle.write(b"PK")

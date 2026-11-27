@@ -628,9 +628,7 @@ def _tag_latency_origins(
             origins[field] = label
 
 
-def _round_gpu_power(
-    report: dict[str, Any], workspace: Path | None, subprocess_started_unix: float | None
-) -> dict[str, Any]:
+def _round_gpu_power(report: dict[str, Any]) -> dict[str, Any]:
     """The round's measured-window power and energy: :data:`~._gpu_power.POWER_FIELDS`, ``gpu_power_by_gpu_w`` and
     ``power_valid``; only the first two without a recording.
 
@@ -642,7 +640,7 @@ def _round_gpu_power(
     """
     from .gpu._gpu_power import round_power_fields, round_power_summary
 
-    summary = round_power_summary(report, workspace, subprocess_started_unix=subprocess_started_unix)
+    summary = round_power_summary(report)
     if summary is not None:
         return round_power_fields(summary)
     return {"gpu_power_avg_w": gpu_metrics_from_report(report).get("avg_power_w"), "gpu_power_by_gpu_w": None}
@@ -675,9 +673,9 @@ def extract_benchmark_measurement(
         provenance labels).
     """
     if workspace is not None and is_round_folder(workspace):
-        return _round_folder_measurement(workspace, subprocess_started_unix)
+        return _round_folder_measurement(workspace)
     report = report or {}
-    measurement = _measurement_from_report(report, workspace, subprocess_started_unix)
+    measurement = _measurement_from_report(report)
 
     origins: dict[str, str] = {}
     _tag_latency_origins(
@@ -712,11 +710,11 @@ def extract_benchmark_measurement(
     return measurement
 
 
-def _round_folder_measurement(run_dir: Path, subprocess_started_unix: float | None) -> dict[str, Any]:
+def _round_folder_measurement(run_dir: Path) -> dict[str, Any]:
     """An inference_suite round's measurement, with the measured-window power its report's ``power`` section holds."""
     folder = RoundFolder.read(run_dir)
     measurement = folder.measurement()
-    measurement.update(_round_gpu_power(folder.report.to_document(), run_dir, subprocess_started_unix))
+    measurement.update(_round_gpu_power(folder.report.to_document()))
     if folder.report.agentx is not None:
         _add_agentx_timeline_fields(measurement, run_dir)
     return measurement
@@ -733,9 +731,7 @@ def _add_agentx_timeline_fields(measurement: dict[str, Any], workspace: Path | N
         measurement["agentx_corpus_shape"] = corpus_shape
 
 
-def _measurement_from_report(
-    report: dict[str, Any], workspace: Path | None, subprocess_started_unix: float | None
-) -> dict[str, Any]:
+def _measurement_from_report(report: dict[str, Any]) -> dict[str, Any]:
     """The normalized fields a ``benchmark_report.json`` supplies on its own."""
     throughput = report.get("throughput") or {}
     latency = report.get("latency") or {}
@@ -772,7 +768,7 @@ def _measurement_from_report(
         "tpot_mean_ms": to_float(tpot.get("mean_ms")),
         "e2el_mean_ms": to_float(e2el.get("mean_ms")),
         "e2el_p99_ms": to_float(e2el.get("p99_ms")),
-        **_round_gpu_power(report, workspace, subprocess_started_unix),
+        **_round_gpu_power(report),
         "raw_result_path": None,
         "nonfatal_warnings": [],
     }

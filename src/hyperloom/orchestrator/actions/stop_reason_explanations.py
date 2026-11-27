@@ -82,8 +82,7 @@ STOP_REASON_EXPLANATIONS: dict[str, str] = {
         "falling back to a different tree. Only sessions from before the benchmark client was pinned end this way."
     ),
     # Search / phase plateaus and completions.
-    "sweep_done": "SWEEP finished the concurrency ladder.",
-    "sweep_failed": "The concurrency sweep reached a failed terminal result.",
+    "cycle_end_done": "CYCLE_END settled the last macro-cycle and no further cycle could run.",
     "framework_agent_phase_done": "The framework-enablement agent completed its phase.",
     "global_converged": (
         "Cyclic phases converged: repeated macro-cycles stopped yielding new validated gain, or every steering "
@@ -93,8 +92,8 @@ STOP_REASON_EXPLANATIONS: dict[str, str] = {
     "model_context_window_too_small": "Preflight gate: the model's max context window cannot hold the requested ISL + OSL.",
     "unsupported_model_arch": "Preflight gate: the model architecture (e.g. multimodal / vision) is unsupported.",
     "model_config_incompatible": (
-        "Preflight gate: config.json is corrupt or declares RoPE scaling without a max-position field, "
-        "which would crash engine init."
+        "Preflight gate: the model directory is not a loadable text-generation checkpoint "
+        "(e.g. corrupt config.json, no tokenizer files, an unsupported weight format)."
     ),
     "baseline_arg_error": "Two or more baseline attempts failed argument or configuration validation, so further baseline retries were stopped.",
     "enablement_attempts_exhausted": "The enablement loop stopped after too many consecutive rounds bought no ground. A bring-up that is still clearing new boot failures is bounded by the run's wall clock instead.",

@@ -40,6 +40,7 @@ from hyperloom.contracts.measurement import (
     AccuracyValue,
     AgentxCheckpointRuling,
     FailureClass,
+    JitCacheState,
     PhaseTiming,
     RoundValue,
     SandboxFacts,
@@ -57,6 +58,7 @@ from hyperloom.measure.boot_watch import boot_seconds
 from hyperloom.measure.checkpoint import read_ruling
 from hyperloom.measure.bundle import RecordedBundle, ResultRejected
 from hyperloom.measure.hosted import HostedMeasurementBackend, Reverified
+from hyperloom.inference_optimizer.framework_registry import native_component
 from hyperloom.measure.hosted_log import FAILURE_DETAIL_CHARS, STATE_FINISHED, STATE_SENT, STATE_SUBMITTED, Record
 from hyperloom.measure.manifest import ResultManifest
 from hyperloom.measure.phases import RESULT_READ, account
@@ -95,6 +97,7 @@ from hyperloom_multibranch.toolbox import long_context
 from hyperloom_multibranch.toolbox.merge_smoke import MERGE_SMOKE, SMOKE_NOT_RUN, MergeSmoke, SmokeNotRun
 from hyperloom_multibranch.toolbox.short_prompts import consistency_of, rederive
 from hyperloom_multibranch.toolbox.table_hits import read_table_hits, runtime_findings
+from hyperloom_multibranch.toolbox.timing_lines import read_test_timing_lines
 from inference_suite import StagingError, normalised_manifest
 
 __all__ = [
@@ -228,6 +231,7 @@ class HostedExecutor:
             return self._timed_out(request_id, started, expired)
         result = self._result(request, accepted, call, outcome, _Span(started, self._clock()))
         result = await self._with_table_hits(result, accepted, call)
+        result = await self._with_timing_lines(result, call)
         result = await self._with_short_prompts(result, accepted, call)
         result = await self._with_long_context(result, accepted, call)
         return await self._with_request_classes(result, request, outcome, call)
@@ -300,6 +304,7 @@ class HostedExecutor:
                 or _unlike_consistency(result, landed)
                 or _unlike_long_context(result, landed)
                 or _unlike_checkpoint(result, landed)
+                or _unlike_jit_cache(result, derived)
             )
 
     async def reverify(self, result: TestResult) -> None:
@@ -423,6 +428,15 @@ class HostedExecutor:
         hits = await asyncio.to_thread(read_table_hits, accepted.environment, accepted.points, Path(call.output_dir))
         return replace(result, table_hits=hits, runtime_findings=runtime_findings(hits))
 
+    async def _with_timing_lines(self, result: TestResult, call: TestCall) -> TestResult:
+        """``result`` with the last lines the test's server logs time its requests with, which its specialist cannot
+        open the logs for; a failed test has none. Read in a worker thread, as the table hits are."""
+        if result.validity is not Validity.SUCCEEDED:
+            return result
+        component = native_component(self._session_facts.base_launch.framework)
+        lines = await asyncio.to_thread(read_test_timing_lines, component, Path(call.output_dir))
+        return replace(result, timing_lines=lines)
+
     async def _with_short_prompts(
         self, result: TestResult, accepted: AcceptedMeasurement, call: TestCall
     ) -> TestResult:
@@ -525,6 +539,7 @@ class HostedExecutor:
         manifest = _archived_manifest(str(extra.get("archive") or ""), manifest_sha)
         if manifest is not None:
             fields.update(spec_fingerprint=manifest.spec_fingerprint, surface_sha256=manifest.surface_sha256)
+            fields["jit_cache"] = _jit_cache_states(manifest)
         return fields
 
 
@@ -580,6 +595,21 @@ def _unlike_checkpoint(result: TestResult, landed: Path) -> str | None:
         return None
     held = read_ruling(landed)
     return None if held == recorded else f"agentx_checkpoint: recorded {recorded}, the bundle holds {held}"
+
+
+def _unlike_jit_cache(result: TestResult, derived: Reverified) -> str | None:
+    """Why the compiled-code cache states ``result`` records are not the ones the verified bundle signs; a record that
+    holds none is not checked: it makes no claim."""
+    if not result.jit_cache:
+        return None
+    held = _jit_cache_states(derived.manifest)
+    return None if held == result.jit_cache else f"jit_cache: recorded {result.jit_cache}, the bundle signs {held}"
+
+
+def _jit_cache_states(manifest: ResultManifest) -> tuple[JitCacheState, ...]:
+    """The state of each kind of compiled-code cache the signed ``manifest`` states; none when it used none."""
+    signed = manifest.jit_cache
+    return tuple(JitCacheState(kind.kind, kind.state) for kind in signed.kinds) if signed is not None else ()
 
 
 def _ruling(request_id: str, call: TestCall, landed: Path | None) -> AgentxCheckpointRuling | None:

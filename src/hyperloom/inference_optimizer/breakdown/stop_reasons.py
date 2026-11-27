@@ -54,7 +54,7 @@ SUCCESS_STOP_REASONS: frozenset[str] = frozenset(
         "global_converged",
         "time_exhausted",
         "max_ticks",
-        "sweep_done",
+        "cycle_end_done",
     }
 )
 
@@ -116,8 +116,7 @@ STOP_REASON_VOCAB: frozenset[str] = frozenset(
         "time_exhausted_during_prelude",
         "warm_replay_rollback_failed",
         INFERENCEX_CHECKOUT_MISSING_STOP_REASON,
-        "sweep_done",
-        "sweep_failed",
+        "cycle_end_done",
         "framework_agent_phase_done",
         # R7: cyclic phase machine exhausted leverage across macro-cycles.
         "global_converged",
@@ -125,8 +124,7 @@ STOP_REASON_VOCAB: frozenset[str] = frozenset(
         "model_context_window_too_small",
         # Model-arch preflight: multimodal/vision model unsupported.
         "unsupported_model_arch",
-        # Pre-run model-config compatibility preflight: config.json is corrupt or declares RoPE scaling without a
-        # max-position field (both crash at load).
+        # Model-config preflight: the model directory is not a loadable text-generation checkpoint.
         "model_config_incompatible",
         # Two baseline attempts failed argument or configuration validation; kept for the sessions that ended on it.
         "baseline_arg_error",

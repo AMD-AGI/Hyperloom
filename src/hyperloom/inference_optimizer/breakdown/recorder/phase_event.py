@@ -280,8 +280,7 @@ def record_proposal_review(review: ProposalReview) -> None:
     The row is located by reading back which phase event holds the proposal, not
     from the phase in scope: the Critic runs on its own tick and routinely rules
     after the raising phase has exited. A ruling for a proposal with no row is
-    dropped rather than minting one. ``effective_verdict`` is what was
-    committed, which the envelope validator can change.
+    dropped rather than minting one.
     """
     if not str(review.proposal_msg_id or ""):
         return

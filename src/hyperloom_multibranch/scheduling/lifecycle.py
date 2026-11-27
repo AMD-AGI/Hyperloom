@@ -44,6 +44,7 @@ from typing import TYPE_CHECKING, Any, NamedTuple
 
 from hyperloom.common.outside_facts.rule_pack import rule_pack_identity
 from hyperloom.measure.compile import LocalBlobStore
+from hyperloom.measure.runner.native.server_options import inventory_path, read_inventory
 from hyperloom.measure.versions import socket_versions
 from hyperloom_multibranch.contracts.fork import ShareRequest
 from hyperloom_multibranch.contracts.blackboard import INTEGRATION_BRANCH, Role, Writer
@@ -67,6 +68,7 @@ from hyperloom_multibranch.blackboard.rsi.playbook import (
     drawn_challenger,
     session_playbook,
 )
+from hyperloom_multibranch.blackboard.rsi.archive import longest_root_test_seconds
 from hyperloom_multibranch.blackboard.rsi.session import FRONTIER_LOG, archived_history
 from hyperloom_multibranch.scheduling.agent_map import SharedMap
 from hyperloom_multibranch.scheduling.agent_plans import (
@@ -98,7 +100,14 @@ from hyperloom_multibranch.scheduling.events import IntegrationProfiler, Session
 from hyperloom_multibranch.scheduling.explore import Explorer, ExploreWindow, Steering
 from hyperloom_multibranch.blackboard.knowledge.breakdown import claw_session_id, leg_claw_session_id
 from hyperloom_multibranch.scheduling.exports import CloseAuthoring, ExportServices, ExportSources, SessionExports
-from hyperloom_multibranch.scheduling.final import FinalCandidates, FinalSelector, session_candidates
+from hyperloom_multibranch.scheduling.final import (
+    ConcSweep,
+    FinalCandidates,
+    FinalSelector,
+    SweepPlan,
+    session_candidates,
+    sweep_tests_at_once,
+)
 from hyperloom_multibranch.scheduling.forks import ForkDesk
 from hyperloom_multibranch.scheduling.integrator import BundlingIntegrator, Integrator, LlmPatchResolver, MergeRecords
 from hyperloom_multibranch.scheduling.judge import GRACE_KEY, Judge, session_grace
@@ -190,6 +199,7 @@ LESSONS_KEY = "lessons"
 #: Seconds in a minute, the unit of the agents' time options.
 MINUTE = 60.0
 CUT_SHORT = "CLOSE was cut short after a stop signal"
+CONC_SWEEP = "conc_sweep"
 NO_CARDS_LEFT = "the toolbox has fewer usable cards than one test needs, so FINAL could not run"
 #: Why FINAL over a session that ended before its baseline was recorded chose nothing.
 NO_BASELINE = "no candidate: the session ended before PRELUDE recorded its baseline, so FINAL had nothing to validate"
@@ -202,9 +212,16 @@ class Session:
     """Wires one session's scheduler, integrator and blackboard handles onto the peers ``peer_factory`` builds."""
 
     def __init__(
-        self, settings: RunSettings, peer_factory: PeerFactory, host: SessionHost, services: SessionServices
+        self,
+        settings: RunSettings,
+        peer_factory: PeerFactory,
+        host: SessionHost,
+        services: SessionServices,
+        *,
+        test_points: int = 1,
     ) -> None:
         self._settings = settings
+        self._test_points = test_points
         self._layout, self._processes, self._clock = host.layout, host.processes, host.clock
         self._open_records()
         desk = ForkDesk(self._roster, self._decisions, self._clock)
@@ -229,6 +246,7 @@ class Session:
         self._briefs = peers.briefs
         self._base_image_digest = peers.base_image_digest
         tests = SessionTests(peers.toolbox, self._clock)
+        self._tests = tests
         checks = SessionChecks(tests, peers.gate, peers.regression)
         self._metric = settings.workload.metric
         self._budget_seconds = budget_seconds(settings.max_hours)
@@ -288,7 +306,7 @@ class Session:
             settings.agent_share_minutes,
             settings.inferencex_commit,
             settings.agentx_early_stop,
-            make_before_break=settings.make_before_break,
+            test_points=self._test_points,
         )
 
     def _map_calls(self) -> MapCalls:
@@ -328,7 +346,8 @@ class Session:
 
     def _build_integrator(self, repo: ExperimentRepo, checks: SessionChecks, services: SessionServices) -> Integrator:
         """The integrator, writing as itself to the blackboard and the merge log, with the LLM patch resolver whose
-        spend the scheduler records."""
+        spend the scheduler records and the option inventory the peers laid in the toolbox directory, when they
+        laid one."""
 
         merger = LocalBlackboard(
             self._layout.blackboard, Writer(Role.INTEGRATOR, INTEGRATOR_WRITER), clock=self._clock.now
@@ -340,7 +359,11 @@ class Session:
         )
         records = MergeRecords(merger, DecisionLog(self._layout.merges, self._clock))
         integrator = BundlingIntegrator if self._settings.workload.bundles_merges else Integrator
-        return integrator(records, repo, checks, resolver, self._clock)
+        built = integrator(records, repo, checks, resolver, self._clock)
+        laid = inventory_path(self._layout.toolbox)
+        if laid is not None:
+            built.options = read_inventory(laid)
+        return built
 
     def _open_llm_roles(self, services: SessionServices) -> None:
         """The judge, and the playbook author and the curator CLOSE asks, each recording its spend on the blackboard."""
@@ -400,6 +423,33 @@ class Session:
         ending = SessionOutcome(ended, None, None, "")
         work = self._no_final(ended) if candidates is None else self._final_phases(candidates, ended, restart)
         return await self._run_and_close(work, ending, budget, hard_stop)
+
+    async def conc_sweep(self, plan: SweepPlan, deadline_unix: float | None = None) -> dict[str, Any]:
+        """Sweep the closed session's root and the commit FINAL chose over ``plan``'s points on this session's toolbox,
+        which takes up and withdraws what an earlier run left in its log first; a stop signal ends the sweep, and the
+        toolbox is released however it ends."""
+
+        baseline = await self._blackboard.baseline()
+        longest = longest_root_test_seconds(await self._blackboard.snapshot()) or 0.0
+        sweep = ConcSweep(
+            plan,
+            baseline.root_commit,
+            self._layout,
+            self._settings.workload,
+            self._tests,
+            sweep_tests_at_once(self._settings),
+            longest,
+            deadline_unix,
+        )
+        self._signals.install()
+        try:
+            await self._toolbox.start()
+            await self._toolbox.withdraw_all(CONC_SWEEP)
+            await self._toolbox.set_policy(final_quota(self._settings.caps))
+            return await sweep.run(self._signals.wait())
+        finally:
+            self._signals.uninstall()
+            await self._stopper.release(TOOLBOX_CLOSE_SECONDS)
 
     async def resume(
         self, ended: SessionStopReason, deadline: float, explore_cap: ExploreCap | None = None

@@ -15,7 +15,7 @@ import time
 from contextlib import contextmanager
 from dataclasses import dataclass, replace
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Iterator, Mapping
+from typing import TYPE_CHECKING, Any, Iterator
 
 from hyperloom_common.coerce import to_unix
 from hyperloom_common.env import forge_explicitly_enabled
@@ -49,12 +49,15 @@ from hyperloom.common.workload_defaults import (
 )
 from ..session.paths import _SESSION_SKELETON
 from ..session.base_launch import shared_state_fields
-from .base_launch import resolve_base_launch
+from .base_launch import resolve_base_launch, server_session_query
 from .executors import _build_specialist_executor, _register_executors
 from .model_gate import _load_model_arch, _load_model_config_tags
 from ..model_config_utils import summarize_model_config
+from ..native_builds import NativeBuildsRefused, record_server_options, start_candidate_builds
+from inference_suite import FrameworkProbeError
 
 if TYPE_CHECKING:
+    from hyperloom.orchestrator.actions.executors.candidate_builds import CandidateBuilds
     from hyperloom.orchestrator.loop.coordinator import Coordinator
     from inference_suite.contracts import BaseLaunch
 
@@ -63,23 +66,6 @@ log = logging.getLogger(__name__)
 _AGENTX_MODE = "agentx"
 _SYNTHETIC_MODE = "synthetic"
 _RESEARCH_SCOUT_INTERVAL = 3
-
-
-@dataclass(frozen=True)
-class HostedPlugInputs:
-    """What a hosted run gives the plug host: the lock layer and the host inputs."""
-
-    lock: Mapping[str, Mapping[str, str]]
-    host_info: object
-
-
-_hosted_inputs: HostedPlugInputs | None = None
-
-
-def set_hosted_plug_inputs(inputs: HostedPlugInputs | None) -> None:
-    """Called by the hosted entry before ``optimize`` starts; ``None`` clears it.  Unset, plug resolution is unchanged."""
-    global _hosted_inputs
-    _hosted_inputs = inputs
 
 
 def resolve_plug_manifest(args: argparse.Namespace) -> ResolvedManifest:
@@ -91,7 +77,6 @@ def resolve_plug_manifest(args: argparse.Namespace) -> ResolvedManifest:
     """
     resume_from = getattr(args, "resume_from", None)
     registry = builtin_registry()
-    hosted = _hosted_inputs
     try:
         sources = ManifestSources(
             profile=getattr(args, "plug_profile", None),
@@ -100,7 +85,6 @@ def resolve_plug_manifest(args: argparse.Namespace) -> ResolvedManifest:
             cli_plugs=tuple(getattr(args, "plug", None) or ()),
             cli_configs=tuple(getattr(args, "plug_config", None) or ()),
             resumed=read_resolved(Path(resume_from).expanduser().resolve()) if resume_from else None,
-            locked=hosted.lock if hosted else {},
         )
         manifest = resolve_manifest(registry, sources)
         PlugHost(manifest, registry, session_dir=None).plan()
@@ -116,13 +100,7 @@ def open_plug_host(manifest: ResolvedManifest, session_dir: Path) -> PlugHost:
     A run that selects nothing (the built-in local profile) writes nothing to the session and prints nothing. A run
     that selects something records the outcome in ``plugs.resolved.json`` and prints the ``Plugs`` line.
     """
-    hosted = _hosted_inputs
-    host = PlugHost(
-        manifest,
-        builtin_registry(),
-        session_dir=session_dir,
-        host_info=hosted.host_info if hosted else None,
-    )
+    host = PlugHost(manifest, builtin_registry(), session_dir=session_dir)
     host.plan()
     if not manifest.is_builtin_default:
         write_resolved(session_dir, manifest, host.fingerprint())
@@ -728,7 +706,22 @@ def _install_executors(
         compare_against_gpu=getattr(args, "compare_against_gpu", None),
         session_dir=session_dir,
         specialist_executor=specialist_executor,
+        native=_start_native_builds(coordinator, session_dir),
     )
+
+
+def _start_native_builds(coordinator: Coordinator, session_dir: Path) -> CandidateBuilds | None:
+    """The session's builds of its framework's server, its accepted build first on ``PATH`` before any round runs, and
+    the options that build takes kept for the session's specialists; exits naming the reason when the server is built
+    from source and that cannot be done here, or when that build cannot print its options."""
+    framework = coordinator.shared_state.framework
+    try:
+        native = start_candidate_builds(session_dir, framework)
+        record_server_options(session_dir, framework)
+    except (NativeBuildsRefused, FrameworkProbeError) as refused:
+        print(f"ERROR: {refused}", file=sys.stderr)
+        raise SystemExit(2) from None
+    return native
 
 
 @dataclass(frozen=True)
@@ -836,25 +829,32 @@ def _phase_toggle_fields(args: argparse.Namespace) -> dict[str, Any]:
     }
 
 
-def _conc_sweep_enabled(args: argparse.Namespace, benchmark_mode: str) -> bool:
-    # Off under AgentX by default: each rung is a 3600s window and the session grades at a fixed CONC.
-    return not is_agentx_mode(benchmark_mode) if args.enable_conc_sweep is None else args.enable_conc_sweep
-
-
 def _benchmark_mode() -> str:
     return _AGENTX_MODE if _agentx_enabled() else _SYNTHETIC_MODE
 
 
 def resolve_session_base(session_dir: Path, args: argparse.Namespace, *, framework: str) -> BaseLaunch:
-    """Resolve a fresh session's base launch; it settles the TP and EP the manifest and the seeded state record."""
+    """Resolve a fresh session's base launch at its CONC; it settles the TP and EP the manifest and the seeded state
+    record.
+
+    A PD session has no single-node base: it freezes its PD launch and returns the client base its rounds measure it
+    with.
+    """
+    from .multi_node import freeze_pd_session_launch, is_pd_session
+
     benchmark_mode = _benchmark_mode()
-    sweep = _parse_conc_sweep_concs(args, benchmark_mode) if _conc_sweep_enabled(args, benchmark_mode) else []
+    concurrencies = (int(args.conc),)
+    if is_pd_session(args):
+        query, inferencex_commit = server_session_query(
+            args, framework=framework, benchmark_mode=benchmark_mode, concurrencies=concurrencies
+        )
+        return freeze_pd_session_launch(session_dir, args, query, inferencex_commit)
     return resolve_base_launch(
         args,
         session_dir,
         framework=framework,
         benchmark_mode=benchmark_mode,
-        concurrencies=(int(args.conc), *sweep),
+        concurrencies=concurrencies,
     )
 
 
@@ -884,8 +884,6 @@ def _seed_shared_state(
 
         agentx_backend = agentic_backend()
     workload = _workload_fields(args)
-    conc_sweep_enabled = _conc_sweep_enabled(args, benchmark_mode)
-    conc_sweep_concs = _parse_conc_sweep_concs(args, benchmark_mode)
     state = SharedState(
         session_id=session_id,
         claw_session_id=os.environ.get("CLAW_SESSION_ID", "").strip(),
@@ -921,14 +919,13 @@ def _seed_shared_state(
         gpu_specialist_capacity=max(0, int(args.gpu_specialist_capacity)),
         plateau_overrides=plateau_overrides,
         **_phase_toggle_fields(args),
-        conc_sweep_enabled=conc_sweep_enabled,
+        conc_sweep_enabled=args.enable_conc_sweep,
         benchmark_mode=benchmark_mode,
         measurement_epoch=MEASUREMENT_EPOCH,
         agentx_backend=agentx_backend,
         agentx_accuracy=not getattr(args, "no_agentx_accuracy", False),
         grading=seed_grading(framework, benchmark_mode),
-        conc_sweep_concs=conc_sweep_concs,
-        conc_sweep_total_budget_sec=int(getattr(args, "conc_sweep_total_budget_sec", 9000)),
+        conc_sweep_concs=list(args.conc_sweep_concs),
     )
     state.save(session_dir)
     return state
@@ -1059,7 +1056,7 @@ def _begin_resume_leg(state: SharedState) -> None:
     Clears the previous leg's terminal bookkeeping: a stale ``stop_reason``
     makes Orchestration heartbeats think the work is done, a stale closing
     flag resumes straight into a wind-down already finished, and a stale
-    ``target_reached_at`` sends the leg to SWEEP against an objective the
+    ``target_reached_at`` sends the leg to CYCLE_END against an objective the
     resume may have raised. The Coordinator stamps it again on the first tick
     the restored objective holds.
 
@@ -1130,26 +1127,6 @@ def _reconcile_crash_count(state: SharedState, session_dir: Path) -> None:
         reconcile_final_crash_count(session_dir, live)
     except (OSError, ValueError, TypeError, AttributeError):
         log.exception("crash_count reconcile (final.json) failed (non-fatal)")
-
-
-def _parse_conc_sweep_concs(args: argparse.Namespace, benchmark_mode: str) -> list[int]:
-    """Parse ``--conc-sweep-concs`` into a list[int]; non-integers warned+dropped."""
-    from hyperloom.orchestrator.kernel.conc_sweep import default_concs_for_mode
-
-    fallback = default_concs_for_mode(benchmark_mode)
-    raw = str(getattr(args, "conc_sweep_concs", "") or "").strip()
-    if not raw:
-        return fallback
-    out: list[int] = []
-    for tok in raw.split(","):
-        t = tok.strip()
-        if not t:
-            continue
-        try:
-            out.append(int(t))
-        except ValueError:
-            log.warning("conc_sweep: ignoring non-integer CONC token %r", t)
-    return out or fallback
 
 
 def _read_failure_summary(session_dir: Path) -> dict | None:

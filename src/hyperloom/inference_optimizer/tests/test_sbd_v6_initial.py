@@ -892,12 +892,12 @@ def test_each_model_gate_failure_is_written_to_final_sbd(
             },
         )
     elif scenario == "config":
-        _write_model_config(
-            model,
+        _write_json(
+            model / "config.json",
             {
                 "architectures": ["LlamaForCausalLM"],
                 "model_type": "llama",
-                "rope_scaling": {"factor": 2.0},
+                "max_position_embeddings": 2048,
             },
         )
     else:

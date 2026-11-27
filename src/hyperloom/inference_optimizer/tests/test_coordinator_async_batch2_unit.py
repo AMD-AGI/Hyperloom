@@ -2025,22 +2025,6 @@ async def test_replay_for_resume_rebuilds_undecided_proposals(coord: Coordinator
     assert list(coord.state.pending_proposals) == [p1.msg_id]
 
 
-@pytest.mark.asyncio
-async def test_replay_for_resume_verdict_map_backcompat(coord: Coordinator) -> None:
-    p1 = Message.new("kernel_agent", "orchestration", "proposal", {"action_name": "explore"})
-    await coord.bus.append_and_seq(p1)
-    await coord.bus.append_and_seq(
-        Message.new(
-            "critic",
-            "orchestration",
-            "review_verdict",
-            {"target_proposal_msg_id": p1.msg_id, "verdict_map": {"x": "ok"}},
-        )
-    )
-    await coord.writeback.replay_for_resume()
-    assert p1.msg_id not in coord.state.pending_proposals
-
-
 # -- _context_analysis_reader fallback (path read) --------------------------
 def test_context_analysis_reader_strips_base64_from_the_cached_text(coord: Coordinator) -> None:
     coord.shared_state.last_trace_analyze = {
@@ -2531,7 +2515,7 @@ async def test_advance_phase_escalation_transition(coord: Coordinator, monkeypat
 async def test_advance_phase_terminal_sets_stop_reason(coord: Coordinator, monkeypatch) -> None:
     import hyperloom.orchestrator.phases.machine_state as ps
 
-    coord.shared_state.phase = "SWEEP"
+    coord.shared_state.phase = "CYCLE_END"
     coord.shared_state.stop_reason = ""
     monkeypatch.setattr(
         phase_transitions, "compute_next_phase", lambda *a, **k: (ps.PHASE_CLOSE, "target_reached", {"terminal": True})
@@ -2552,7 +2536,7 @@ async def test_advance_phase_terminal_sets_stop_reason(coord: Coordinator, monke
         # Entering the phase whose exit reads the hint is no exception: the hint was emitted for the phase it was
         # emitted in, and carrying it across would end FRAMEWORK_AGENT on arrival.
         ("PRELUDE", "FRAMEWORK_AGENT", "prelude_done"),
-        ("FRAMEWORK_AGENT", "SWEEP", "some_other_reason"),
+        ("FRAMEWORK_AGENT", "CYCLE_END", "some_other_reason"),
     ],
 )
 async def test_advance_phase_hint_discarded_on_a_transition_it_did_not_drive(
@@ -2666,32 +2650,6 @@ def test_specialist_owner_is_frozen_at_creation_outside_agent_phases(
     assert explore_params["source_phase"] == "EXPLORE"
     assert coord.router._stamp_specialist_owner(framework_params) == "FRAMEWORK_AGENT"
     assert framework_params["source_phase"] == "FRAMEWORK_AGENT"
-
-
-@pytest.mark.asyncio
-async def test_materialize_explore_filters_grid(coord: Coordinator, monkeypatch) -> None:
-    coord.shared_state.baseline_tput = 800.0
-    monkeypatch.setattr(coord.proposals, "phase_framework", coord.phase_framework, raising=False)
-    pending = _pending(
-        "explore",
-        {
-            "params": {
-                "grid": [
-                    {"name": "v0"},
-                    {"name": "v1"},
-                    "non-dict-slot",
-                ]
-            }
-        },
-    )
-    await coord.proposals.materialize_approved_proposal(
-        pending,
-        approved_variant_names={"v0"},
-    )
-    tail = await coord.bus.tail(topic="decision", n=10)
-    assert any(m.payload.get("kind") == "approved_proposal" for m in tail)
-    task = await coord.tasks.get((await coord.tasks.queued())[0].task_id)
-    assert task.params["proposal_msg_id"] == pending.proposal_msg_id
 
 
 @pytest.mark.asyncio
@@ -2969,7 +2927,7 @@ async def test_on_enter_close_runs_full_sequence(coord: Coordinator, monkeypatch
 
     coord.shared_state.set_stop_reason("target_reached")
     await coord.phase_close.on_enter_close(
-        Transition(from_phase="SWEEP", to_phase="CLOSE", reason="SWEEP", evidence={})
+        Transition(from_phase="CYCLE_END", to_phase="CLOSE", reason="CYCLE_END", evidence={})
     )
     assert coord.shared_state.close_sequence_done is True
     assert coord.shared_state.stop_reason

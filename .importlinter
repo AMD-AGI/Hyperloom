@@ -56,6 +56,7 @@ ignore_imports =
     hyperloom.inference_optimizer.cli -> hyperloom.orchestrator.actions.executors._aiter_jit
     hyperloom.inference_optimizer.cli -> hyperloom.orchestrator.actions.executors._subprocess_kill
     hyperloom.inference_optimizer.cli -> hyperloom.orchestrator.collaborator
+    hyperloom.inference_optimizer.cli -> hyperloom.orchestrator.conc_sweep.cli
     hyperloom.inference_optimizer.cli -> hyperloom.orchestrator.loop.coordinator
     hyperloom.inference_optimizer.cli -> hyperloom.orchestrator.phases.machine_state
     hyperloom.inference_optimizer.cli -> hyperloom.orchestrator.prompts.prompt_builder
@@ -64,7 +65,6 @@ ignore_imports =
     hyperloom.inference_optimizer.cli.backends -> hyperloom.orchestrator.roles
     hyperloom.inference_optimizer.cli.backends -> hyperloom.orchestrator.roles.agent_role
     hyperloom.inference_optimizer.cli.bootstrap -> hyperloom.orchestrator.actions.executors.report
-    hyperloom.inference_optimizer.cli.bootstrap -> hyperloom.orchestrator.kernel.conc_sweep
     hyperloom.inference_optimizer.cli.bootstrap -> hyperloom.orchestrator.phases.machine_state
     hyperloom.inference_optimizer.cli.bootstrap -> hyperloom.orchestrator.policy.gate
     hyperloom.inference_optimizer.cli.bootstrap -> hyperloom.orchestrator.prompts
@@ -176,7 +176,6 @@ type = forbidden
 # An agent session waits on each server's startup. A new MCP server module must be added here.
 source_modules =
     kernelforge.knowledge.pr_knowledge.mcp_server
-    kernelforge.workflows.forge_loop.roles.specialist_probe_server
 forbidden_modules =
     kernelforge.agent_backends
     kernelforge.cli
@@ -337,7 +336,8 @@ unmatched_ignore_imports_alerting = none
 [importlinter:contract:is-public-interface]
 name = hyperloom uses inference_suite only through its public modules
 type = forbidden
-# The public surface is the package root, contracts, argv, golden, server_log and frameworks.
+# The public surface is the package root, contracts, argv, golden, server_log, frameworks and the
+# multinode package root.
 # Every other module can move without breaking an importer. Plain names, not `.**`: a forbidden
 # module covers its descendants, and `.**` would leave the package module itself importable.
 source_modules =
@@ -353,6 +353,19 @@ forbidden_modules =
     inference_suite.framework_probe
     inference_suite.framework_version
     inference_suite.load
+    inference_suite.multinode.cli
+    inference_suite.multinode.commands
+    inference_suite.multinode.inferencex
+    inference_suite.multinode.launch
+    inference_suite.multinode.nodes
+    inference_suite.multinode.query
+    inference_suite.multinode.recipe
+    inference_suite.multinode.record
+    inference_suite.multinode.remote_driver
+    inference_suite.multinode.render
+    inference_suite.multinode.session
+    inference_suite.multinode.ssh
+    inference_suite.multinode.table
     inference_suite.parser_check
     inference_suite.pins
     inference_suite.profile
@@ -379,7 +392,7 @@ type = layers
 layers =
     inference_suite.__main__
     inference_suite.cli
-    inference_suite.run
+    inference_suite.run | inference_suite.multinode
     inference_suite.load | inference_suite.eval | inference_suite.profile
     inference_suite.runtime
     inference_suite.telemetry
@@ -412,6 +425,7 @@ ignore_imports =
     hyperloom.inference_optimizer.cli -> hyperloom.orchestrator.actions.executors._aiter_jit
     hyperloom.inference_optimizer.cli -> hyperloom.orchestrator.actions.executors._subprocess_kill
     hyperloom.inference_optimizer.cli -> hyperloom.orchestrator.collaborator
+    hyperloom.inference_optimizer.cli -> hyperloom.orchestrator.conc_sweep.cli
     hyperloom.inference_optimizer.cli -> hyperloom.orchestrator.loop.coordinator
     hyperloom.inference_optimizer.cli -> hyperloom.orchestrator.phases.machine_state
     hyperloom.inference_optimizer.cli -> hyperloom.orchestrator.prompts.prompt_builder
@@ -420,7 +434,6 @@ ignore_imports =
     hyperloom.inference_optimizer.cli.backends -> hyperloom.orchestrator.roles
     hyperloom.inference_optimizer.cli.backends -> hyperloom.orchestrator.roles.agent_role
     hyperloom.inference_optimizer.cli.bootstrap -> hyperloom.orchestrator.actions.executors.report
-    hyperloom.inference_optimizer.cli.bootstrap -> hyperloom.orchestrator.kernel.conc_sweep
     hyperloom.inference_optimizer.cli.bootstrap -> hyperloom.orchestrator.phases.machine_state
     hyperloom.inference_optimizer.cli.bootstrap -> hyperloom.orchestrator.policy.gate
     hyperloom.inference_optimizer.cli.bootstrap -> hyperloom.orchestrator.prompts
@@ -462,15 +475,11 @@ ignore_imports =
     hyperloom.inference_optimizer.trace.decision_trace -> hyperloom.inference_optimizer.breakdown.recorder.phase_event
     hyperloom.inference_optimizer.trace.langfuse_emitter -> hyperloom.inference_optimizer.breakdown.recorder
     hyperloom.inference_optimizer.trace.llm_trace -> hyperloom.inference_optimizer.trace.langfuse_emitter
-    hyperloom.orchestrator.actions.executors._geak_sweep -> hyperloom.orchestrator.kernel.geak_config
     hyperloom.orchestrator.actions.executors.grid._grid_inputs -> hyperloom.orchestrator.phases.machine_state
     hyperloom.orchestrator.actions.executors._kernel_agent_tool -> hyperloom.orchestrator.kernel.apply_kernel_patch
     hyperloom.orchestrator.actions.executors.baseline -> hyperloom.orchestrator.loop.sub_agent_runner
     hyperloom.orchestrator.actions.executors.baseline -> hyperloom.orchestrator.phases.machine_state
-    hyperloom.orchestrator.actions.executors.conc_sweep -> hyperloom.orchestrator.kernel.conc_sweep
     hyperloom.orchestrator.actions.executors.report -> hyperloom.orchestrator.kernel.attempt_summary
-    hyperloom.orchestrator.actions.executors.report -> hyperloom.orchestrator.kernel.conc_sweep
-    hyperloom.orchestrator.actions.executors.report -> hyperloom.orchestrator.kernel.conc_sweep_plot
     hyperloom.orchestrator.actions.executors.report -> hyperloom.orchestrator.kernel.kernel_decisions
     hyperloom.orchestrator.actions.executors.roofline -> hyperloom.orchestrator.loop.sub_agent_runner
     hyperloom.orchestrator.actions.executors.roofline -> hyperloom.orchestrator.phases.machine_state
@@ -519,7 +528,6 @@ ignore_imports =
     hyperloom.orchestrator.specialists.selfcheck -> hyperloom.orchestrator.enablement.runtime.build_utils
     hyperloom.orchestrator.specialists.subprocess_ -> hyperloom.orchestrator.actions.cancel_channel
     hyperloom.orchestrator.specialists.subprocess_ -> hyperloom.orchestrator.loop.sub_agent_runner
-    hyperloom.orchestrator.state._shared_state.phase_state -> hyperloom.orchestrator.specialists.domains
     hyperloom.orchestrator.state._shared_state.render -> hyperloom.orchestrator.actions.executors._proposal_identity
     hyperloom.orchestrator.state._shared_state.render -> hyperloom.orchestrator.kernel.kernel_decisions
     hyperloom.orchestrator.state._shared_state.action_records -> hyperloom.orchestrator.kernel.kernel_decisions
@@ -528,5 +536,4 @@ ignore_imports =
     kernelforge.workflows.gemm_tune.dense_shapes -> kernelforge.workflows.gemm_tune.tuners._aiter_dense_inputs
     kernelforge.kernel_backends.fusion.prompts -> kernelforge.workflows.forge_fusion.harness_contract
     kernelforge.kernel_backends.fusion.prompts -> kernelforge.workflows.forge_fusion.validate
-    kernelforge.workflows.forge_loop.roles.specialists -> kernelforge.workflows.forge_loop.iteration.fanout
 unmatched_ignore_imports_alerting = error

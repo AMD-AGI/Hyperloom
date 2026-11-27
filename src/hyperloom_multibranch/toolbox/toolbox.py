@@ -17,6 +17,7 @@ import time
 from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass, replace
 from pathlib import Path
+from types import MappingProxyType
 from typing import Any, Literal
 
 from hyperloom.contracts.measurement import (
@@ -159,6 +160,10 @@ class RealToolbox:
     #: Where the tests run, recorded when the first baseline test is accepted so a resume can tell whether the baseline
     #: still holds (:mod:`~hyperloom_multibranch.toolbox.resume_guard`); ``None``: nothing is recorded.
     measured_on: MeasuredOn | None = None
+    #: What a process of this machine runs the base build of the tests' server with, over its own environment: the
+    #: runner variable naming the base builds' executables and the mask of one of the session's cards. Empty for a
+    #: toolbox that lays no base build.
+    base_probe_env: Mapping[str, str] = MappingProxyType({})
 
     def __init__(
         self,
@@ -549,6 +554,12 @@ class RealToolbox:
             raise UnknownTestRequest(job_id)
         return self._tools.result(job_id)
 
+    async def analysis_result(self, branch: str, job_id: str) -> Mapping[str, Any]:
+        """The result record of the tool job ``job_id``, for a branch its result goes to (:meth:`ToolJobs.document`)."""
+        if self._tools is None:
+            raise UnknownTestRequest(job_id)
+        return self._tools.document(job_id, branch)
+
     def record_cold_start(self, seconds: float) -> None:
         self._queue.cold_start_seconds = seconds
 
@@ -686,13 +697,6 @@ class RealToolbox:
         while (item := self._queue.take(self._parallel_limit())) is not None:
             item.started_at = self._clock()
             self._tasks[item.request_id] = asyncio.create_task(self._run(item))
-        self._note_upcoming(
-            frozenset(item.request_id for item in self._queue.items() if item.state in (State.QUEUED, State.RUNNING))
-        )
-
-    def _note_upcoming(self, request_ids: frozenset[str]) -> None:
-        """Hear which tests are waiting to start or running, after every change of the queue; the hosted toolbox tells
-        its sandbox pool, which keeps a finished test's sandbox only while another test will ask for one."""
 
     async def _run(self, item: QueuedTest) -> None:
         try:

@@ -33,7 +33,7 @@ class SpecialistPromptInputs:
     # Curated recipe-site URL templates the research scout may mine for
     # verified serve flags / envs; empty falls back to the built-in defaults.
     recipe_sites: tuple[str, ...] = ()
-    # Advisory research-hint block; its presence suppresses cold-start fallback.
+    # Advisory research-hint block.
     research_hints: str = ""
     # Workload context mirrored from SharedState; renders in section 2.
     precision: str = ""
@@ -41,8 +41,7 @@ class SpecialistPromptInputs:
     isl: int = 0
     osl: int = 0
     max_model_len: int = 0
-    # ``framework`` is the active server framework (``sglang`` / ``vllm`` /
-    # ``atom``); empty falls back to the canonical sglang/vllm hint blocks.
+    # ``framework`` is the active server framework (``sglang`` / ``vllm`` / ``atom``).
     # ``framework_version`` is the precise install version (empty => no note).
     framework: str = ""
     framework_version: str = ""
@@ -78,7 +77,7 @@ class SpecialistPromptInputs:
     warm_start_lessons: list[dict[str, Any]] = field(default_factory=list)
     pr_monitor_available: bool = True
 
-    # Extra knowledge-domain tags; each contributes a focus block to Section 1.
+    # Extra knowledge-domain tags; each whose domain has a focus block contributes it to Section 1.
     extra_focus_tags: tuple[str, ...] = ()
 
     # Local source navigation hint. ``worktree_base`` is the tree the worktree
@@ -101,10 +100,9 @@ class SpecialistPromptInputs:
     # the static_recon_specialist dispatch.
     static_recon_checklist: str = ""
 
-    # Enablement dispatch evidence, folded into the §1b mandate. Empty for
-    # every non-enablement domain; the mandate omits whichever is empty.
+    # Source lines near the offending site, folded into the §1b mandate. Empty
+    # for every non-enablement domain.
     enablement_source_context: str = ""
-    enablement_candidate_refs: tuple[str, ...] = ()
     # The serialized FailureSignature the round was dispatched on; required for
     # the enablement domain, empty for every other.
     enablement_failure_signature: dict[str, Any] = field(default_factory=dict)

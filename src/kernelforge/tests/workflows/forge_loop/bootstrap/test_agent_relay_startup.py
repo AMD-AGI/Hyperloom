@@ -190,7 +190,7 @@ class _Setup:
 
 def _capture_supervisor(monkeypatch) -> dict:
     from kernelforge.workflows.forge_loop.bootstrap import lanes
-    from kernelforge.workflows.forge_loop.roles import agent, orchestration, supervisor
+    from kernelforge.workflows.forge_loop.roles import agent, supervisor
 
     captured: dict = {}
 
@@ -201,7 +201,6 @@ def _capture_supervisor(monkeypatch) -> dict:
         captured.update(kwargs)
 
     monkeypatch.setattr(agent, "make_agent_fn", make_agent_fn)
-    monkeypatch.setattr(orchestration, "make_orchestration_service", lambda **_kwargs: None)
     monkeypatch.setattr(supervisor, "make_supervisor_fn", make_supervisor_fn)
     monkeypatch.setattr(lanes, "_make_lane_agent_factory", lambda **_kwargs: None)
     monkeypatch.setattr(lanes, "_require_lane_provider_capabilities", lambda *_args: None)
@@ -226,8 +225,6 @@ def test_supervisor_backend_flag_is_honoured(monkeypatch, tmp_path, relay, super
         lane_binding=None,
         lanes=1,
         program_md="",
-        specialist_definitions={},
-        critic_enabled=False,
         supervisor_backend=supervisor_backend,
         relay=_relay_config() if relay else None,
     )

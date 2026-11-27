@@ -198,7 +198,7 @@ def test_a_patched_aiter_in_the_farm_imports_because_it_is_told_the_mirrored_met
     farm = _build(tmp_path, image)
     point = _point(tmp_path, image)
 
-    envs = place_farm(point, farm)
+    envs = place_farm(point, farm, {})
 
     assert envs["AITER_META_DIR"] == str(farm.aiter_meta)
     assert yaml.safe_load(point.read_text())["benchmark"]["envs"]["AITER_META_DIR"] == str(farm.aiter_meta)
@@ -212,7 +212,7 @@ def test_the_same_farm_without_the_variable_does_not_import_which_is_the_defect(
     ``aiter_meta``, which is the mirror, so it needs no variable)."""
     image = _make_image(tmp_path / "image", "checkout")
     farm = _build(tmp_path, image)
-    envs = dict(place_farm(_point(tmp_path, image), farm))
+    envs = dict(place_farm(_point(tmp_path, image), farm, {}))
     del envs["AITER_META_DIR"]
 
     done = _import_aiter(tmp_path, image, envs)
@@ -238,7 +238,7 @@ def test_the_unpatched_image_imports_without_the_variable_so_the_stand_in_is_fai
 def test_a_variable_the_yaml_already_names_is_not_overwritten(tmp_path, image):
     farm = _build(tmp_path, image)
 
-    envs = place_farm(_point(tmp_path, image, AITER_META_DIR=str(tmp_path)), farm)
+    envs = place_farm(_point(tmp_path, image, AITER_META_DIR=str(tmp_path)), farm, {})
 
     assert envs["AITER_META_DIR"] == str(tmp_path)
 
@@ -284,7 +284,7 @@ def test_a_wheels_aiter_meta_is_not_used_by_a_develop_install_which_aiter_does_n
 
 def test_a_rebuilt_aiter_that_is_not_told_a_meta_directory_with_csrc_is_refused(tmp_path, image):
     farm = _build(tmp_path, image)
-    envs = dict(place_farm(_point(tmp_path, image), farm))
+    envs = dict(place_farm(_point(tmp_path, image), farm, {}))
     del envs["AITER_META_DIR"]
 
     with pytest.raises(FarmError, match="AITER_META_DIR=''.*no csrc"):
@@ -300,7 +300,7 @@ def test_a_meta_directory_the_server_inherits_is_kept_so_nothing_is_pinned_and_i
     farm = _build(tmp_path, image, inherited=inherited)
     point = _point(tmp_path, image)
 
-    envs = place_farm(point, farm)
+    envs = place_farm(point, farm, {})
     verify_farm(farm, envs, python=image.python, cwd=tmp_path)
 
     assert farm.aiter_meta is None and "AITER_META_DIR" not in envs
@@ -372,7 +372,7 @@ def _serve_with_a_worker(tmp_path: Path, image: Image, envs: Mapping[str, str]) 
 
 def test_a_worker_spawned_by_the_server_imports_the_farms_aiter_and_the_check_passes(tmp_path, image):
     farm = _build(tmp_path, image)
-    envs = place_farm(_point(tmp_path, image), farm)
+    envs = place_farm(_point(tmp_path, image), farm, {})
 
     assert _serve_with_a_worker(tmp_path, image, envs) == ["patched", "patched"]
     assert refine_imports(dict(_ENDED_WELL), farm) == _ENDED_WELL
@@ -384,7 +384,7 @@ def test_told_the_images_checkout_as_meta_directory_the_worker_imports_the_image
     (which holds the image's ``aiter``) first on ``sys.path``, which the worker starts from."""
     image = _make_image(tmp_path / "image", "checkout")
     farm = _build(tmp_path, image)
-    envs = {**place_farm(_point(tmp_path, image), farm), "AITER_META_DIR": str(image.meta)}
+    envs = {**place_farm(_point(tmp_path, image), farm, {}), "AITER_META_DIR": str(image.meta)}
 
     assert _serve_with_a_worker(tmp_path, image, envs) == ["patched", "image"]
     refined = refine_imports(dict(_ENDED_WELL), farm)
@@ -398,7 +398,7 @@ def test_told_the_images_checkout_as_meta_directory_the_worker_imports_the_image
 def test_the_import_watch_and_the_merge_hook_each_run_once_whichever_is_first_and_chain_on(tmp_path, order):
     image = _make_image(tmp_path / "image", "checkout")
     farm = _build(tmp_path, image)
-    envs = dict(place_farm(_point(tmp_path, image), farm))
+    envs = dict(place_farm(_point(tmp_path, image), farm, {}))
     view = MergeView.make(tmp_path / "private")
     shadowed = tmp_path / "shadowed"
     shadowed.mkdir()

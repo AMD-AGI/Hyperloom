@@ -308,7 +308,7 @@ class RewriteRequest:
         "OPTIMIZE: passed to the nested forge-loop unchanged. 'off' (default) "
         "skips the roofline ceiling. 'on' has the loop estimate the kernel's "
         "per-shape theoretical achievable latency once its baseline is measured, "
-        "and steer its planner by the attainment against it; the estimate costs a "
+        "and show its sessions and its Supervisor the attainment against it; the estimate costs a "
         "profiler pass and an analyst session, paid out of the OPTIMIZE budget."
     ),
     click.option("--result-json", default=None, help="Write the result dict here (also printed)"),

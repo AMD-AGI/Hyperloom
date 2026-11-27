@@ -65,14 +65,12 @@ _EMBEDDED_KEY = re.compile(r"\"([A-Za-z_][A-Za-z0-9_.-]*)\"\s*:")
 _SECRET_NAME_FRAGMENTS = ("APIKEY", "API_KEY", "TOKEN", "SECRET", "PASSWORD", "CREDENTIAL")
 _SECRET_NAME_EXEMPTIONS = ("TOKENIZER",)
 
-#: The fields screened as prose: the plan and the plan file, the reasoning and the alternatives weighed, how the
-#: outcome reads, labelled notes, and the top-level raw logs that produced the Experience. A raw log is not prose,
-#: but it is full of benchmark key names, so it gets the same token-format screen; a plan file does too. Preconditions
-#: are not prose: they may restate the configuration measured against.
+#: The fields screened as prose: the reasoning and the alternatives weighed, how the outcome reads, labelled notes,
+#: and the top-level raw logs that produced the Experience. A raw log is not prose, but it is full of benchmark key
+#: names, so it gets the same token-format screen. Preconditions are not prose: they may restate the configuration
+#: measured against.
 FREE_TEXT_FIELDS = frozenset(
     {
-        "rationale.plan",
-        "rationale.plan_file",
         "rationale.reasoning",
         "rationale.alternatives",
         "reflection",

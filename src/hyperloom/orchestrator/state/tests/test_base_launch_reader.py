@@ -20,11 +20,12 @@ from hyperloom.orchestrator.state.base_launch import (
     ServerBase,
     frozen_base,
     frozen_session_base,
+    server_base_at,
     session_server_base,
 )
 from hyperloom.orchestrator.state.shared_state import SharedState
 from inference_suite import INFERENCEX_CLIENT_COMMIT
-from inference_suite.contracts import ClientLaunch, GoldenAcceptance, GoldenCurve, Redacted
+from inference_suite.contracts import ClientLaunch, GoldenAcceptance, GoldenCurve, Redacted, SourcePointLaunch
 
 from ._session_base import freeze_base, freeze_session_base, session_base
 
@@ -199,3 +200,17 @@ def test_a_base_whose_client_is_off_the_pin_is_refused_naming_both_commits(sessi
 
     with pytest.raises(BaseLaunchMismatch, match=f"{drifted}.*{INFERENCEX_CLIENT_COMMIT}.*new session"):
         frozen_base(session)
+
+
+@pytest.mark.parametrize(
+    ("conc", "launched_at"),
+    [(4, 4), (2, 4), (8, 16), (16, 16), (64, 16)],
+)
+def test_a_point_is_seeded_at_its_concurrency_else_the_nearest_higher_else_the_highest(conc: int, launched_at: int):
+    base = session_base(args=("--cap", "4"))
+    launches = tuple(SourcePointLaunch(c, ("--cap", str(c)), {}) for c in (4, 16))
+    base = dataclasses.replace(
+        base, point=dataclasses.replace(base.point, source_concs=(4, 16), source_launches=launches)
+    )
+
+    assert server_base_at(base, conc).args == f"--cap {launched_at}"

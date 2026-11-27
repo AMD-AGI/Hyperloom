@@ -22,6 +22,7 @@ _HOSTED = (
     "hyperloom.hosted",
     "hyperloom.sandbox",
     "hyperloom.measure.hosted",
+    "hyperloom.measure.hosted_copy",
     "hyperloom.measure.hosted_log",
     "hyperloom.measure.hosted_logs",
     "hyperloom.measure.jit.publish",
@@ -120,7 +121,7 @@ def test_rule_2_guard_names_the_hosted_module_a_plug_module_imports() -> None:
 
 def test_rule_2_guard_lets_the_owners_and_builtin_import_hosted_code() -> None:
     assert _hosted_import_violations("hyperloom/hosted/entry.py", "import hyperloom.sandbox.e2b") == []
-    assert _hosted_import_violations("hyperloom/plugs/builtin.py", "import hyperloom.hosted.events") == []
+    assert _hosted_import_violations("hyperloom/plugs/builtin.py", "import hyperloom.hosted.host_info") == []
 
 
 def test_rule_2_only_the_e2b_module_may_import_e2b() -> None:

@@ -8,6 +8,7 @@ from __future__ import annotations
 import argparse
 
 from hyperloom.common import predictor_config
+from hyperloom.common.concurrencies import parse_concurrencies
 from hyperloom.common.workload_defaults import DEFAULT_PRECISION
 from hyperloom_common.gpu_identity import AMD_GPU_BOARDS
 
@@ -99,7 +100,8 @@ def add_framework_arguments(opt: argparse.ArgumentParser) -> None:
         help="Checkout of the framework to optimize. Sets FRAMEWORK_REPO_PATH, "
         "which is what puts the tree on PolicyGate's patch allowlist, so a "
         "specialist may only edit source you pointed at. Required for "
-        "--framework custom; for the built-in frameworks it overrides the "
+        "--framework custom and --framework llamacpp (the checkout its server "
+        "is built from); for the other built-in frameworks it overrides the "
         "checkout they would otherwise clone.",
     )
     add_benchmark_argument(opt)
@@ -125,6 +127,8 @@ def add_framework_arguments(opt: argparse.ArgumentParser) -> None:
 
 def add_cluster_arguments(opt: argparse.ArgumentParser) -> None:
     """Add the node-count and multi-node backend flags of ``optimize``."""
+    from ..multi_node.pd_session import SSH_BACKENDS
+
     opt.add_argument(
         "--nodes",
         type=int,
@@ -139,12 +143,14 @@ def add_cluster_arguments(opt: argparse.ArgumentParser) -> None:
     )
     opt.add_argument(
         "--mn-backend",
-        choices=("rayjob", "infera"),
+        choices=("rayjob", *SSH_BACKENDS),
         default=None,
         help="Multi-node backend when --nodes>=2: 'rayjob' (default, Ray "
-        "head+workers) or 'infera' (idle InferaDeployment + SSH control "
-        "plane). Defaults to rayjob when omitted. Single-node runs ignore "
-        "this flag.",
+        "head+workers), 'infera' (idle InferaDeployment + SSH control "
+        "plane), or 'atomesh' / 'sglangrouter' (a PD-disaggregated cluster "
+        "handed over as $HYPERLOOM_MN_NODE_LIST, launched over SSH). Defaults "
+        "to the node list's frontend, else rayjob, when omitted. Single-node "
+        "runs ignore this flag.",
     )
     opt.add_argument(
         "--gpus-per-node",
@@ -367,8 +373,8 @@ def add_run_mode_arguments(opt: argparse.ArgumentParser) -> None:
         "but exposes a text-generation path, run it on the TEXT path with "
         "a degraded-mode warning instead of fail-fasting. Image/audio "
         "inputs are ignored, so numbers reflect the text decoder alone. "
-        "True VLMs with no text path (Llava / PaliGemma / Qwen-VL / "
-        "Phi3V) still fail-fast regardless of this flag. Pass "
+        "A multimodal model with no text decoder in its config still "
+        "fail-fasts regardless of this flag. Pass "
         "--no-allow-mm-text-fallback to fail-fast on text-coercible "
         "models too. Default: enabled.",
     )
@@ -637,42 +643,23 @@ def add_recon_arguments(opt: argparse.ArgumentParser) -> None:
 
 
 def add_conc_sweep_arguments(opt: argparse.ArgumentParser) -> None:
-    """Add the post-optimization concurrency-sweep flags of ``optimize``."""
-    # Post-optimization concurrency sweep: a baseline-vs-optimized grid across CONC values (see
-    # orchestrator/conc_sweep.py). Defaults to None so bootstrap can pick by benchmark mode.
+    """Add the post-session concurrency-sweep flags of ``optimize`` (``hyperloom.orchestrator.conc_sweep``)."""
     opt.add_argument(
         "--enable-conc-sweep",
         dest="enable_conc_sweep",
         action=argparse.BooleanOptionalAction,
-        default=None,
-        help="Run a post-optimization concurrency sweep (baseline vs "
-        "current_best across CONC) and write "
-        "reports/conc_sweep_summary.json + conc_sweep_raw.csv. "
-        "On by default for synthetic workloads, off by default for MLPerf. "
-        "Unavailable for native AgentX: start a separate session for each CONC.",
+        default=True,
+        help="Once the session closes, sweep its baseline and its optimized launch over the concurrencies of the "
+        "base's InferenceX recipe and write reports/conc_sweep_summary.json + conc_sweep_raw.csv; "
+        "`hyperloom conc-sweep SESSION_DIR` runs the same sweep by hand. On by default.",
     )
     opt.add_argument(
         "--conc-sweep-concs",
         dest="conc_sweep_concs",
-        type=str,
-        default=None,
-        help="Comma-separated CONC ladder for --enable-conc-sweep. Run with --conc first, then cheapest first "
-        "(low-to-high for synthetic, high-to-low for MLPerf), so the order given does not matter. "
-        "Defaults to the ladder for the workload: "
-        "256,128,64,32,16,8,4,2 for synthetic, 1,4,8,10,14,20,28 for MLPerf. "
-        "Unavailable for native AgentX.",
-    )
-    opt.add_argument(
-        "--conc-sweep-total-budget-sec",
-        dest="conc_sweep_total_budget_sec",
-        type=int,
-        default=9000,
-        help="Total wall-clock budget (seconds) for the whole conc-sweep action, independent of the per-variant "
-        "round timeout. Past its first CONC the baseline arm may spend half of it; the optimized arm runs only the CONCs the "
-        "baseline reached, so a budget that runs out drops whole pairs. Once exhausted, remaining variants are "
-        "recorded as status=skipped / error_class=budget_exhausted and the JSON envelope carries "
-        "budget_exhausted=true. Default 9000 (~2.5h); set to 0 to disable. Also bounded above by the main "
-        "session wall-clock deadline since conc_sweep runs as a SWEEP-phase action.",
+        type=parse_concurrencies,
+        default=(),
+        help="Comma-separated concurrencies of the conc sweep, in place of those the base's InferenceX recipe "
+        "publishes; needed for a base no recipe gave (a --reference-script). The session's --conc is always among them.",
     )
 
 
@@ -735,7 +722,7 @@ def add_phase_budget_arguments(opt: argparse.ArgumentParser) -> None:
         type=float,
         default=None,
         help="Wall-clock budget cap for the OPTIMIZE (FRAMEWORK_AGENT) phase, which covers both configuration search "
-        "and source landing. Default: 0.38. "
+        "and source landing. Default: 0.40. "
         "On --resume-from, any --*-pct flag resets every phase share to its default plus the given overrides; with none, the prior budget is kept.",
     )
     opt.add_argument(
@@ -743,15 +730,7 @@ def add_phase_budget_arguments(opt: argparse.ArgumentParser) -> None:
         dest="phase_budget_kernel_pct",
         type=float,
         default=None,
-        help="Wall-clock budget cap for KERNEL_AGENT. Default: 0.47. "
-        "On --resume-from, any --*-pct flag resets every phase share to its default plus the given overrides; with none, the prior budget is kept.",
-    )
-    opt.add_argument(
-        "--phase-budget-sweep-pct",
-        dest="phase_budget_sweep_pct",
-        type=float,
-        default=None,
-        help="Wall-clock budget cap for SWEEP. Default: 0.05. "
+        help="Wall-clock budget cap for KERNEL_AGENT. Default: 0.50. "
         "On --resume-from, any --*-pct flag resets every phase share to its default plus the given overrides; with none, the prior budget is kept.",
     )
     opt.add_argument(

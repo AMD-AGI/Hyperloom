@@ -17,6 +17,7 @@ if TYPE_CHECKING:
 
     from ...enablement.runtime.stack_actions import EnablementStackAction, ProvisionResult
     from ...state.shared_state import SharedState
+    from .candidate_builds import TreeBuild
 
 
 @dataclass(slots=True)
@@ -33,9 +34,6 @@ class IntegrateAttempt:
     done_payload: dict[str, Any] | None = field(default_factory=dict)
     provision_result: ProvisionResult | None = None
     stack_action: EnablementStackAction | None = None
-    localization_action: EnablementStackAction | None = None
-    localization_patches: list[Path] = field(default_factory=list)
-    localization_touched: list[str] = field(default_factory=list)
     base_sha_by_root: dict[str, str] = field(default_factory=dict)
     output_root: Path | None = None
     framework_root: Path | None = None
@@ -51,17 +49,13 @@ class IntegrateAttempt:
     setup_commands_applied: list[str] = field(default_factory=list)
     switch_manifest: list[dict[str, Any]] = field(default_factory=list)
     pending: dict[str, Any] = field(default_factory=dict)
-
-    def drop_localization(self) -> None:
-        """Forget the localization, so its manifest is not recorded for a change that was never applied."""
-        self.localization_action = None
-        self.localization_patches = []
-        self.localization_touched = []
+    #: The build of the framework server from the applied tree, in a session that builds it from source.
+    native_build: TreeBuild | None = None
 
     @property
     def changes_framework(self) -> bool:
-        """Whether this attempt put changed framework code where its server imports from: a patch (the localization
-        among them) or an artifact landed in the tree, or a setup command installed into the runtime."""
+        """Whether this attempt put changed framework code where its server imports from: a patch
+        or an artifact landed in the tree, or a setup command installed into the runtime."""
         return bool(self.applied or self.applied_artifacts or self.setup_commands_applied)
 
     @property
@@ -79,7 +73,8 @@ class IntegrateAttempt:
         return self.provision_result.runtime.source_root
 
     def benchmark_params(self, params: dict[str, Any]) -> dict[str, Any]:
-        """Bind the measured launch to this attempt's acquired runtime and applied source."""
+        """Bind the measured launch to this attempt's acquired runtime and applied source, and its server to the build
+        of the applied tree, first on its ``PATH``."""
         result = {
             **params,
             "source_patches": [
@@ -88,6 +83,10 @@ class IntegrateAttempt:
         }
         if self.provision_result is not None and self.provision_result.ok:
             result["runtime_override"] = self.provision_result.runtime.to_runtime_override()
+        built = self.native_build.bin if self.native_build is not None else None
+        if built is not None:
+            # A framework whose server is built from source acquires no runtime, so no ``path_prefix`` is set before.
+            result["runtime_override"] = {**(result.get("runtime_override") or {}), "path_prefix": str(built)}
         return result
 
     def accepted_runtime_records(self) -> dict[str, Any]:

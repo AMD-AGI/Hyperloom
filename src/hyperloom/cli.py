@@ -16,6 +16,11 @@ _COMMANDS: dict[str, tuple[str, tuple[str, ...], str]] = {
     "check": (f"{_IO}.tools.preflight_optimizer", (), "Check host readiness for a model before optimizing"),
     "optimize": (f"{_IO}.cli", ("optimize",), "Run a multi-agent optimization session"),
     "recover": (f"{_IO}.cli", ("recover",), "Rebuild a crashed session's artifacts, or confirm cleanup for a resume"),
+    "conc-sweep": (
+        "hyperloom.orchestrator.conc_sweep.cli",
+        (),
+        "Sweep a finished session's baseline and optimized launch over CONC",
+    ),
     "quantize": ("hyperloom.agents.quantization.cli", (), "Quantize a model with AMD Quark"),
     "multi-node": (f"{_IO}.multi_node.cli", (), "Operate the multi-node cluster of a session"),
     "hosted": ("hyperloom.hosted.entry", (), "Run a campaign that a hosting platform handed over ('hosted run')"),
@@ -23,7 +28,6 @@ _COMMANDS: dict[str, tuple[str, tuple[str, ...], str]] = {
 
 _SESSION_COMMANDS: dict[str, tuple[str, str]] = {
     "breakdown": (f"{_IO}.tools.dump_session_breakdown", "Write session_breakdown.json for a session"),
-    "report": (f"{_IO}.tools.dump_session_report", "Render a session breakdown as markdown"),
     "backfill": (f"{_IO}.tools.backfill_langfuse", "Replay a session's trace into Langfuse"),
     "events": (f"{_IO}.tools.event_counts", "Count coordinator events of a session"),
     "state": (f"{_IO}.tools.read_optimizer_state", "Summarize a session's state.json"),

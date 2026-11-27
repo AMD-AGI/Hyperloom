@@ -38,6 +38,8 @@ DEFAULT_AGENTX_OBJECTIVE = AgentXObjective.P50_INTERACTIVITY
 #: The round raises the serving framework's own ready timeout above the budget (``inference_suite.compose``), so the
 #: whole range buys the boot time it promises.
 MAX_BOOT_BUDGET_SEC = 6 * 3600
+#: The conc sweep's tests in flight by default: a concurrency's baseline and optimized point side by side.
+DEFAULT_CONC_SWEEP_PARALLEL = 2
 
 
 def sweep_concs(conc: int) -> tuple[int, ...]:
@@ -181,10 +183,10 @@ class RunSettings:
     which scheduling playbook the session plays. ``inferencex_commit`` is the commit a fresh session's base launch reads
     InferenceX at (``""`` for the head of its ``main``). ``agentx_early_stop`` is how the AgentX checkpoint treats an
     explore that trails its parent (``toolbox.agentx_checkpoint``): recorded only by default; the manifest keeps it,
-    so a resumed session judges as it began. ``make_before_break`` has a hosted session keep a finished test's
-    sandbox until the next test's runs, so that the cluster does not give its node to another job between two tests,
-    where the grant fits at least three tests at once; it runs one test fewer at once there. Off, every test the grant
-    fits runs at once and each sandbox is closed when its test ends. A session measured on this machine ignores it."""
+    so a resumed session judges as it began. ``conc_sweep`` runs the concurrency sweep of the closed session after CLOSE
+    (:class:`~hyperloom_multibranch.scheduling.final.ConcSweep`); ``conc_sweep_concs`` are the operator's points, in
+    place of the base's InferenceX arm's; ``conc_sweep_parallel`` is how many of the sweep's tests run at once, within
+    ``caps.max_parallel_tests``."""
 
     workload: Workload
     max_hours: float
@@ -209,7 +211,9 @@ class RunSettings:
     review_gate: bool = True
     inferencex_commit: str = ""
     agentx_early_stop: EarlyStopMode = EarlyStopMode.SHADOW
-    make_before_break: bool = True
+    conc_sweep: bool = False
+    conc_sweep_concs: tuple[int, ...] = ()
+    conc_sweep_parallel: int = DEFAULT_CONC_SWEEP_PARALLEL
 
 
 def session_early_stop(environ: Mapping[str, str]) -> EarlyStopMode:
@@ -221,6 +225,7 @@ def session_early_stop(environ: Mapping[str, str]) -> EarlyStopMode:
 __all__ = [
     "AGENT_PORT",
     "DEFAULT_AGENTX_OBJECTIVE",
+    "DEFAULT_CONC_SWEEP_PARALLEL",
     "DOSSIER_MINUTES",
     "MAX_BOOT_BUDGET_SEC",
     "SHARE_MINUTES",

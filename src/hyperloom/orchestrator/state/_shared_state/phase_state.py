@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""``_PhaseStateMixin`` — the phase ledgers :class:`..shared_state.SharedState` mutates: explore search, attempts, specialist rounds and verdicts, and per-domain counters."""
+"""``_PhaseStateMixin`` — the phase ledgers :class:`..shared_state.SharedState` mutates: explore search, attempts, specialist rounds and verdicts."""
 
 from __future__ import annotations
 
@@ -205,79 +205,6 @@ class _PhaseStateMixin:
         if len(self.attempts) > cap:
             self.attempts = self.attempts[-cap:]
 
-    def bump_domain_round_counters(self) -> None:
-        """Increment both per-anchor round counters for every knowledge-domain anchor."""
-        from ...specialists.domains import KNOWLEDGE_DOMAIN_TAGS
-
-        for anchor in KNOWLEDGE_DOMAIN_TAGS:
-            self.rounds_since_last_specialist[anchor] = int(self.rounds_since_last_specialist.get(anchor, 0) or 0) + 1
-            self.rounds_since_last_keep[anchor] = int(self.rounds_since_last_keep.get(anchor, 0) or 0) + 1
-
-    @staticmethod
-    def _anchor_for(domain_or_anchor: str) -> str:
-        """Resolve a domain key or raw tag to its canonical kb_anchor."""
-        from ...specialists.domains import domain_for_tag, get_domain
-
-        s = str(domain_or_anchor or "").strip()
-        if not s:
-            return ""
-        d = get_domain(s)
-        if d and d.kb_anchor:
-            return d.kb_anchor
-        dt = domain_for_tag(s)
-        if dt and dt.kb_anchor:
-            return dt.kb_anchor
-        return s
-
-    def note_specialist_dispatched(self, domain_or_anchor: str) -> None:
-        """Reset ``rounds_since_last_specialist`` for the dispatched anchor."""
-        anchor = self._anchor_for(domain_or_anchor)
-        if anchor:
-            self.rounds_since_last_specialist[anchor] = 0
-
-    def note_domain_keep(self, domain_or_anchor: str) -> None:
-        """Reset ``rounds_since_last_keep`` for the anchor that just KEPT."""
-        anchor = self._anchor_for(domain_or_anchor)
-        if anchor:
-            self.rounds_since_last_keep[anchor] = 0
-
-    def stalled_domains(
-        self,
-        *,
-        specialist_threshold: int,
-        keep_threshold: int,
-    ) -> list[str]:
-        """Return anchors whose ``rounds_since_last_specialist`` ≥ ``specialist_threshold`` OR ``rounds_since_last_keep`` ≥ ``keep_threshold``."""
-        anchors = set(self.rounds_since_last_specialist) | set(self.rounds_since_last_keep)
-        hits: list[tuple[int, str]] = []
-        for anchor in anchors:
-            spec = int(self.rounds_since_last_specialist.get(anchor, 0) or 0)
-            keep = int(self.rounds_since_last_keep.get(anchor, 0) or 0)
-            if spec >= specialist_threshold or keep >= keep_threshold:
-                hits.append((max(spec, keep), anchor))
-        hits.sort(key=lambda x: (-x[0], x[1]))
-        return [anchor for _, anchor in hits]
-
-    def best_gap_for_anchor(self, anchor: str) -> str:
-        """Return the canonical_id of the most actionable open gap whose ``domain_hint`` resolves to ``anchor`` (or ``""`` when none)."""
-        target = self._anchor_for(anchor)
-        if not target:
-            return ""
-        matches: list[tuple[tuple[int, int, str], str]] = []
-        for g in self.gaps:
-            if not isinstance(g, dict):
-                continue
-            cid = str(g.get("canonical_id") or "").strip()
-            if not cid:
-                continue
-            if self._anchor_for(str(g.get("domain_hint") or "")) != target:
-                continue
-            matches.append((gap_actionability_key(g), cid))
-        if not matches:
-            return ""
-        matches.sort(key=lambda m: m[0])
-        return matches[0][1]
-
     def record_intervention(self, *, change_type: str) -> None:
         """Append one intervention entry (capped to the most recent rows)."""
         self.intervention_mix.append({"change_type": str(change_type or "").strip().lower()})
@@ -307,10 +234,6 @@ class _PhaseStateMixin:
         self.framework_agent_phase_done = False
         self.framework_agent_discover_failures = 0
         self.framework_agent_empty_discoveries = 0
-        self.rounds_since_last_specialist = {}
-        self.rounds_since_last_keep = {}
-        self.last_conc_sweep = {}
-        self.conc_sweep_granted_until_unix = 0.0
 
     def open_macro_cycle(self, *, no_gain_cycle_streak: int) -> None:
         """Start the next macro-cycle and reset its per-cycle state."""

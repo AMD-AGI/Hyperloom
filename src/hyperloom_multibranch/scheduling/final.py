@@ -25,30 +25,64 @@ The primary operating point (the workload's conc) decides; a candidate
 whose other sweep points fall more than :data:`MB_SWEEP_DEGRADATION_PCT` below the other candidate's at the same conc
 is passed over while the other one does not degrade in turn. An AgentX workload defines no other operating point, so
 its candidates are measured at the primary one alone, and the choice's reason says so.
+
+After CLOSE, :class:`ConcSweep` sweeps the root and the commit FINAL chose over the concurrencies the InferenceX arm
+of the session's frozen base publishes, or the operator's ``--conc-sweep-concs`` for a base no InferenceX arm gave,
+with the workload's CONC among them. It runs only when that commit is not the root and its reproduction gained over
+the baseline. Both arms are submitted at once, so they run side by side where the session runs two tests at once. An
+AgentX point is a test of its own, booted cold as every AgentX level is; an InferenceX arm is one sweep test over all
+its points on one server, whose attempt timeout scales with them (:meth:`SweepPlan.test_points`). The report
+(``MB-reports/conc_sweep_summary.json``) is rewritten after every test, and carried each time as ``conc_sweep_summary``
+in ``MB-reports/session_breakdown.json``; a later run measures only the points not yet measured. These tests are
+session measurements with no accuracy and no checks.
 """
 
 from __future__ import annotations
 
 import asyncio
+import logging
 import statistics
+import time
 from collections import defaultdict
-from collections.abc import Mapping, Sequence
+from collections.abc import Awaitable, Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from functools import partial
+from typing import TYPE_CHECKING, Any
 
-from hyperloom.common.gain_math import gain_pct
+from hyperloom.common.gain_math import conc_pair_comparison, gain_pct
 from hyperloom.contracts.measurement import Purpose, TestKind, TestResult, Validity
+from hyperloom.orchestrator.conc_sweep.plot import ConcCurveOptions
+from hyperloom.measure.pins import ImagePinError, active_image
+from hyperloom.orchestrator.conc_sweep.points import SCHEMA_VERSION, SweepPoints, ladder, launches_missing, sweep_points
+from hyperloom.orchestrator.conc_sweep.report import (
+    SETTLED,
+    keep_measured_summary,
+    read_summary,
+    run_facts,
+    take_earlier_summary,
+    write_curve,
+    write_report,
+)
+from hyperloom_common.jsonio import read_json_strict
 from hyperloom_multibranch.contracts.gate import NotMeasured
 from hyperloom_multibranch.contracts.blackboard import INTEGRATION_BRANCH, Blackboard
 from hyperloom_multibranch.contracts.blackboard.records import BaselineRecord, BranchProgress
 from hyperloom_multibranch.contracts.repo import ExperimentRepo
 from hyperloom_multibranch.contracts.toolbox import RequestRejected, TestWithdrawn
 from hyperloom_multibranch.blackboard.changes import same_recipe
+from hyperloom_multibranch.blackboard.codec import decode
+from hyperloom_multibranch.blackboard.knowledge.breakdown import FILENAME as BREAKDOWN_FILENAME
 from hyperloom_multibranch.scheduling.budget import FinalWork
 from hyperloom_multibranch.scheduling.explore import integration_row
 from hyperloom_multibranch.scheduling.integrator import defects_beyond_gain
-from hyperloom_multibranch.scheduling.requests import SessionChecks, integration_test_request, together
-from hyperloom_multibranch.scheduling.settings import Workload
+from hyperloom_multibranch.scheduling.layout import SessionLayout
+from hyperloom_multibranch.scheduling.requests import SessionChecks, SessionTests, integration_test_request, together
+from hyperloom_multibranch.scheduling.settings import RunSettings, Workload
+
+if TYPE_CHECKING:
+    from inference_suite.contracts import BaseLaunch
+
+logger = logging.getLogger(__name__)
 
 #: How far below the other candidate a non-primary sweep point may fall before the candidate is passed over.
 MB_SWEEP_DEGRADATION_PCT = 5.0
@@ -181,6 +215,7 @@ class CandidateCheck:
     ``gain_pct`` is its reproduction's gain over the root's PRELUDE baseline and ``reproduction_pct`` how far that
     reproduction measured from the commit's record, each ``None`` when none was judged; ``refused_by`` is what kept the
     reproduction from holding, and ``waived`` the speed refusals a root's reproduction was not held to.
+    ``cache_states_differ`` is its reproduction judgement's (:attr:`~..contracts.judgement.Judgement.cache_states_differ`).
     """
 
     candidate: FinalCandidate
@@ -197,6 +232,7 @@ class CandidateCheck:
     reproduction_pct: float | None = None
     refused_by: tuple[str, ...] = ()
     waived: tuple[str, ...] = ()
+    cache_states_differ: tuple[str, ...] = ()
 
     @property
     def eligible(self) -> bool:
@@ -310,7 +346,8 @@ class _Reproduction:
     ``refused_by`` is what kept it from holding and ``reproduction_pct`` how far it measured from the record.
 
     ``value`` is what it measured of the primary metric at the operating point that decides, which is the sweep's
-    primary point: the candidate is ranked on it when the sweep gave nothing there.
+    primary point: the candidate is ranked on it when the sweep gave nothing there. ``cache_states_differ`` is the
+    judgement's flag, kept for the candidate's check.
     """
 
     reproduced: bool
@@ -319,6 +356,7 @@ class _Reproduction:
     reproduction_pct: float
     refused_by: tuple[str, ...]
     waived: tuple[str, ...]
+    cache_states_differ: tuple[str, ...] = ()
 
 
 class FinalSelector:
@@ -385,6 +423,7 @@ class FinalSelector:
             reproduction_pct=reproduction.reproduction_pct,
             refused_by=reproduction.refused_by,
             waived=reproduction.waived,
+            cache_states_differ=reproduction.cache_states_differ,
         )
         if self._workload.conc in check.curve:
             return check
@@ -425,23 +464,360 @@ class FinalSelector:
             waived = (*tolerance, *(reason for reason in judgement.refused_by if reason in speed))
             refused_by = tuple(reason for reason in defects if reason not in speed)
         value = judgement.recorded_value.get(self._metric)
-        return _Reproduction(not refused_by, accuracy, value, judgement.gain_pct, refused_by, waived)
+        differ = judgement.cache_states_differ
+        return _Reproduction(not refused_by, accuracy, value, judgement.gain_pct, refused_by, waived, differ)
+
+
+BASELINE, OPTIMIZED = "baseline", "optimized"
+NO_OPTIMIZATION = "no_optimization"
+NO_SWEEP_POINTS = "no_sweep_points"
+SKIPPED_BUDGET = "skipped_budget"
+_SUCCEEDED = "succeeded"
+
+
+@dataclass(frozen=True)
+class SweepPlan:
+    """The commit FINAL chose and the points both arms run. ``groups`` partitions the points by the source launch they
+    are seeded with, ascending; empty when every point launches alike."""
+
+    chosen: str
+    points: SweepPoints
+    groups: tuple[tuple[int, ...], ...] = ()
+
+    def launch_groups(self) -> tuple[tuple[int, ...], ...]:
+        return self.groups or (self.points.concs,)
+
+    def test_points(self, workload: Workload) -> int:
+        """How many points one test of the sweep measures: one in an AgentX test, a launch group's in an InferenceX one,
+        whose points share a server."""
+        return 1 if workload.inferencex is None else max(map(len, self.launch_groups()))
+
+
+class FrozenBaseUnusable(ValueError):
+    """The closed session's frozen base no longer loads; a sweep started again would meet the same file."""
+
+
+def sweep_plan(layout: SessionLayout, settings: RunSettings) -> SweepPlan | str:
+    """What the sweep of the closed session in ``layout`` measures, or why it measures nothing."""
+    document = read_json_strict(layout.report, require_dict=True)
+    choice = None if document["final"] is None else decode(FinalChoice, document["final"])
+    chosen = None if choice is None else choice.chosen
+    if chosen is None or chosen.root:
+        return NO_OPTIMIZATION
+    check = next(check for check in choice.checks if check.candidate == chosen)
+    if not (check.gain_pct or 0.0) > 0:
+        return NO_OPTIMIZATION
+    from hyperloom.orchestrator.state.base_launch import BaseLaunchMismatch, frozen_base
+    from inference_suite.contracts import BaseLaunchError
+
+    try:
+        frozen = frozen_base(layout.toolbox)
+    except (BaseLaunchMismatch, BaseLaunchError) as exc:
+        raise FrozenBaseUnusable(f"the session's frozen base cannot be read: {exc}") from exc
+    workload = settings.workload
+    base = None if frozen is None else frozen.launch
+    if (missing := launches_missing(base)) is not None:
+        return missing
+    points = sweep_points(base, workload.conc, settings.conc_sweep_concs)
+    if points is None:
+        return NO_SWEEP_POINTS
+    if frozen is None:
+        return SweepPlan(chosen.commit, points)
+    return _seeded_plan(chosen.commit, points, frozen.launch)
+
+
+def _seeded_plan(chosen: str, points: SweepPoints, base: BaseLaunch) -> SweepPlan:
+    """``points`` grouped by the source launch each is seeded with."""
+    from hyperloom.orchestrator.state.base_launch import server_base_at
+
+    by_launch: dict[tuple[str, tuple[tuple[str, str], ...]], list[int]] = {}
+    for conc in points.concs:
+        seed = server_base_at(base, conc)
+        by_launch.setdefault((seed.args, tuple(sorted(seed.env.items()))), []).append(conc)
+    groups = tuple(tuple(group) for group in by_launch.values()) if len(by_launch) > 1 else ()
+    return SweepPlan(chosen, points, groups)
+
+
+def sweep_tests_at_once(settings: RunSettings) -> int:
+    """How many of the sweep's tests run at once: ``--conc-sweep-parallel``, within ``--max-parallel-tests``."""
+    return min(settings.conc_sweep_parallel, settings.caps.max_parallel_tests)
+
+
+def sweep_unfinished(layout: SessionLayout, settings: RunSettings) -> bool:
+    """Whether the session in ``layout`` closed after a FINAL that chose, asked for a conc sweep, and that sweep has
+    not run its course; a session that ended before FINAL chose is finished first."""
+    if not (settings.conc_sweep and layout.report.is_file()):
+        return False
+    if not (read_json_strict(layout.report, require_dict=True).get("final") or {}).get("chosen"):
+        return False
+    summary = read_summary(layout.reports)
+    return summary is None or summary["status"] not in SETTLED
+
+
+def _header(layout: SessionLayout, workload: Workload) -> dict[str, Any]:
+    shape = workload.inferencex
+    return {
+        "schema_version": SCHEMA_VERSION,
+        "session_id": layout.session_id,
+        "benchmark_mode": "agentx" if shape is None else "synthetic",
+        "framework": workload.framework,
+        "precision": workload.precision,
+        "gpu_type": workload.gpu_type,
+        "gpu_count": workload.tp,
+        "isl": None if shape is None else shape.isl,
+        "osl": None if shape is None else shape.osl,
+        "tp": workload.tp,
+        "ep": workload.ep,
+        **run_facts(layout.toolbox),
+        "run_image": _run_image(),
+    }
+
+
+def _run_image() -> str | None:
+    """The image the measurement pins name, which the sweep's tests run; ``None`` where they are not set."""
+    try:
+        image = active_image()
+    except ImagePinError:
+        return None
+    return f"{image.ref}@{image.digest}"
+
+
+def _write(layout: SessionLayout, payload: dict[str, Any]) -> None:
+    """Write the report into ``MB-reports/`` and carry it in the session breakdown beside it."""
+    write_report(payload, layout.reports, breakdown=layout.reports / BREAKDOWN_FILENAME)
+
+
+def write_skipped(layout: SessionLayout, workload: Workload, reason: str) -> dict[str, Any]:
+    """The report of a sweep that measured nothing, written where a sweep's report goes."""
+    payload = {
+        **_header(layout, workload),
+        "status": "skipped",
+        "skip_reason": reason,
+        "baseline": {"points": []},
+        "optimized": {"points": []},
+        "summary": {},
+    }
+    keep_measured_summary(layout.reports)
+    _write(layout, payload)
+    logger.info("conc_sweep: skipped (%s)", reason)
+    return payload
+
+
+def points_of(arm: str, concs: Sequence[int], result: TestResult) -> list[dict[str, Any]]:
+    """One report row per concurrency of ``concs``: the mean of every metric over the test's measure rounds there."""
+    measured: defaultdict[int, defaultdict[str, list[float]]] = defaultdict(lambda: defaultdict(list))
+    for row in result.rounds:
+        if row.phase == MEASURE_PHASE and row.concurrency in concs:
+            for key, value in row.metrics.items():
+                measured[row.concurrency][key].append(value)
+    rows = []
+    for conc in concs:
+        metrics = {key: statistics.fmean(values) for key, values in measured[conc].items()}
+        ok = result.validity is Validity.SUCCEEDED and bool(metrics)
+        error = None if ok else result.failure_reason or "the test measured nothing at this concurrency"
+        status = _SUCCEEDED if ok else "failed"
+        rows.append({"arm": arm, "conc": conc, "status": status, "request_id": result.request_id, "error": error})
+        rows[-1].update(metrics)
+    return rows
+
+
+@dataclass
+class ConcSweep:
+    """One sweep's inputs and the points both arms have measured so far, by arm and concurrency."""
+
+    plan: SweepPlan
+    root: str
+    layout: SessionLayout
+    workload: Workload
+    tests: SessionTests
+    parallel: int
+    per_point_sec: float
+    deadline_unix: float | None = None
+    estimated_sec: float = 0.0
+    started_at: float = field(default_factory=time.time)
+    measured: dict[str, dict[int, dict[str, Any]]] = field(default_factory=lambda: {BASELINE: {}, OPTIMIZED: {}})
+    cancel_reason: str = ""
+
+    def pending(self, arm: str) -> list[int]:
+        done = self.measured[arm]
+        order = ladder(self.plan.points.concs, self.workload.conc)
+        return [conc for conc in order if done.get(conc, {}).get("status") != _SUCCEEDED]
+
+    async def run(self, stop: Awaitable[int]) -> dict[str, Any]:
+        """Run both arms' tests, ``parallel`` at a time, until they end or ``stop`` returns a signal, which takes their
+        tests back."""
+        self._resume()
+        tests = self._tests()
+        points = sum(len(concs) for _, _, concs in tests)
+        self.estimated_sec = self.per_point_sec * points / max(1, min(self.parallel, len(tests)))
+        self._log_plan()
+        slots = asyncio.Semaphore(self.parallel)
+        arms = asyncio.gather(*(self._test(arm, commit, concs, slots) for arm, commit, concs in tests))
+        stopped = asyncio.ensure_future(stop)
+        await asyncio.wait({arms, stopped}, return_when=asyncio.FIRST_COMPLETED)
+        if stopped.done():
+            self.cancel_reason = f"signal {stopped.result()}"
+            await self.tests.withdraw_integration(self.cancel_reason)
+            await arms
+        else:
+            stopped.cancel()
+        payload = self.payload(final=True)
+        _write(self.layout, payload)
+        shape = self.workload.inferencex
+        options = ConcCurveOptions(
+            self.workload.model_basename,
+            self.workload.gpu_type,
+            self.workload.tp,
+            0 if shape is None else shape.isl,
+            0 if shape is None else shape.osl,
+        )
+        write_curve(payload, self.layout.reports, options)
+        logger.info(
+            "conc_sweep: done status=%s successful_pairs=%s", payload["status"], payload["summary"]["successful_pairs"]
+        )
+        return payload
+
+    def _tests(self) -> list[tuple[str, str, tuple[int, ...]]]:
+        """The tests left to run as ``(arm, commit, concs)``: one per AgentX point, the two arms' interleaved in ladder
+        order so a concurrency's pair runs together; for an InferenceX workload one per arm and launch group, whose
+        points share a server, the group holding the session's CONC first."""
+        arms = ((BASELINE, self.root), (OPTIMIZED, self.plan.chosen))
+        order = ladder(self.plan.points.concs, self.workload.conc)
+        if self.workload.inferencex is not None:
+            groups = sorted(self.plan.launch_groups(), key=lambda group: min(map(order.index, group)))
+            return [
+                (arm, commit, concs)
+                for group in groups
+                for arm, commit in arms
+                if (concs := tuple(conc for conc in group if conc in self.pending(arm)))
+            ]
+        return [(arm, commit, (conc,)) for conc in order for arm, commit in arms if conc in self.pending(arm)]
+
+    async def _test(self, arm: str, commit: str, concs: tuple[int, ...], slots: asyncio.Semaphore) -> None:
+        async with slots:
+            if self.cancel_reason:
+                return
+            concs = tuple(ladder(concs, self.workload.conc))
+            fit = self._points_that_fit(len(concs))
+            if fit < len(concs):
+                self._record([{"arm": arm, "conc": conc, "status": SKIPPED_BUDGET} for conc in concs[fit:]])
+                logger.warning(
+                    "conc_sweep: arm=%s concs %s skipped: they would end past the deadline", arm, concs[fit:]
+                )
+                concs = concs[:fit]
+            if not concs:
+                return
+            request = integration_test_request(TestKind.SWEEP, Purpose.HEALTH, commit, concurrency=concs)
+            try:
+                result = await self.tests.result(request)
+            except TestWithdrawn:
+                return
+            except RequestRejected as exc:
+                self._record([{"arm": arm, "conc": conc, "status": "failed", "error": str(exc)} for conc in concs])
+                return
+            self._record(points_of(arm, concs, result))
+
+    def _points_that_fit(self, wanted: int) -> int:
+        """How many of ``wanted`` points, each priced at the session's longest root test, end before the deadline."""
+        if self.deadline_unix is None or self.per_point_sec <= 0:
+            return wanted
+        return max(0, min(wanted, int((self.deadline_unix - time.time()) // self.per_point_sec)))
+
+    def _record(self, rows: list[dict[str, Any]]) -> None:
+        for row in rows:
+            self.measured[row["arm"]][row["conc"]] = row
+        _write(self.layout, self.payload())
+
+    def _resume(self) -> None:
+        """Keep the points an earlier run of the same sweep measured on the same commit of each arm, so only the rest
+        are run."""
+        earlier = take_earlier_summary(self.layout.reports)
+        if not earlier:
+            return
+        for arm, commit in ((BASELINE, self.root), (OPTIMIZED, self.plan.chosen)):
+            if earlier[arm].get("commit") != commit:
+                continue
+            for point in earlier[arm]["points"]:
+                if point["status"] == _SUCCEEDED and point["conc"] in self.plan.points.concs:
+                    self.measured[arm][point["conc"]] = point
+
+    def _log_plan(self) -> None:
+        logger.info(
+            "conc_sweep: plan source=%s concs=%s arms=baseline,optimized tests_at_once=%d pending_points=%d "
+            "estimated=%.1fh (each point priced as the session's longest root test of %.0fs)",
+            self.plan.points.source,
+            list(self.plan.points.concs),
+            self.parallel,
+            len(self.pending(BASELINE)) + len(self.pending(OPTIMIZED)),
+            self.estimated_sec / 3600.0,
+            self.per_point_sec,
+        )
+        if self.deadline_unix is None:
+            return
+        left = self.deadline_unix - time.time()
+        logger.info("conc_sweep: the sweep must end within %.1fh", left / 3600.0)
+        if self.estimated_sec > left:
+            logger.warning(
+                "conc_sweep: the estimate outlasts the deadline; the points that would end past it are skipped"
+            )
+
+    def payload(self, *, final: bool = False) -> dict[str, Any]:
+        sections = {
+            arm: {"commit": commit, "points": [self.measured[arm][conc] for conc in sorted(self.measured[arm])]}
+            for arm, commit in ((BASELINE, self.root), (OPTIMIZED, self.plan.chosen))
+        }
+        comparison, summary = conc_pair_comparison(
+            sections[BASELINE]["points"], sections[OPTIMIZED]["points"], metric_key=self.workload.metric
+        )
+        return {
+            **_header(self.layout, self.workload),
+            "status": self._status(summary) if final else "in_progress",
+            "concs": list(self.plan.points.concs),
+            "concs_source": self.plan.points.source,
+            BASELINE: sections[BASELINE],
+            OPTIMIZED: sections[OPTIMIZED],
+            "comparison": comparison,
+            "summary": summary,
+            "estimated_sec": round(self.estimated_sec),
+            "elapsed_sec": round(time.time() - self.started_at, 2),
+            "cancel_reason": self.cancel_reason,
+        }
+
+    def _status(self, summary: dict[str, Any]) -> str:
+        if self.cancel_reason:
+            return "cancelled"
+        if not (self.pending(BASELINE) or self.pending(OPTIMIZED)):
+            return _SUCCEEDED
+        return "partial" if summary["successful_pairs"] else "failed"
 
 
 __all__ = [
+    "FrozenBaseUnusable",
+    "BASELINE",
     "BELOW_REPRODUCTION_TOLERANCE",
     "MB_REPRODUCTION_TOLERANCE_PCT",
     "MB_SWEEP_DEGRADATION_PCT",
     "NONE_PASSED",
+    "NO_OPTIMIZATION",
+    "NO_SWEEP_POINTS",
+    "OPTIMIZED",
+    "SKIPPED_BUDGET",
     "PRIMARY_POINT_ONLY",
     "REPRODUCTION_POINT_ONLY",
     "CandidateCheck",
+    "ConcSweep",
     "FinalCandidate",
     "FinalCandidates",
     "FinalChoice",
     "FinalSelector",
+    "SweepPlan",
     "choose_candidates",
     "pick_final",
+    "points_of",
     "session_candidates",
     "sweep_curve",
+    "sweep_plan",
+    "sweep_tests_at_once",
+    "sweep_unfinished",
+    "write_skipped",
 ]

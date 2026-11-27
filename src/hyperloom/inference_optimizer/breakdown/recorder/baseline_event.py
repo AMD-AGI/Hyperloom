@@ -56,9 +56,10 @@ ROW_ACTION = "action"
 ROW_RUN = "run"
 ROW_ROUND = "round"
 
-# Every run row names why it ran, so a baseline that measured three times reads without re-deriving the retry reason.
+# The ``attempt_reason`` every run row carries.
 RUN_INITIAL = "initial"
-RUN_AFTER_MOE_RUNNER_FAILURE = "retry_after_moe_runner_failure"
+# An action launches once, so its run row is always the first.
+_RUN_INDEX = 1
 
 #: Quality-reference statuses whose figure the session went on to use. ``degraded`` is a baseline that stands on its
 #: cold warmup round because the budget would not hold the hot pass: knowingly depressed, but it is the number every
@@ -117,7 +118,6 @@ __all__ = [
     "ROUND_MEASURE",
     "ROUND_SINGLE",
     "ROUND_WARMUP",
-    "RUN_AFTER_MOE_RUNNER_FAILURE",
     "RUN_INITIAL",
     "SECTION_ACTION",
     "SECTION_EVENT",
@@ -440,9 +440,8 @@ def anchoring_baseline_action(timeline: Sequence[Mapping[str, Any]]) -> QualityR
     """The quality-reference action the session's gains were read against, or ``None``.
 
     The latest one that produced a usable figure: a baseline re-measured after
-    an enablement fix re-anchors the session. ``outcome.baseline`` and the
-    report's baseline section both read this one choice, so they cannot name
-    different measurements.
+    an enablement fix re-anchors the session. ``outcome.baseline`` reads this
+    choice.
     """
     usable = [
         row
@@ -557,7 +556,6 @@ class BaselineEventRecorder:
         self._owns_event = bool(owns_event)
         self._sequence: int | None = None
         self._closed = False
-        self._run_index = 0
         self._rounds = 0
         params = _as_dict(request.params)
         self._task_id = str(request.task_id or "")
@@ -611,51 +609,47 @@ class BaselineEventRecorder:
             producer=PRODUCER,
         )
 
-    def begin_run(self, *, attempt_reason: str) -> int:
-        """Record that a pass through the executor's core has started."""
-        self._run_index += 1
+    def begin_run(self) -> None:
+        """Record that the action's run through the executor's core has started."""
         self._sink.record(
             SECTION_RUN,
             {
                 "task_id": self._task_id,
-                "run_index": self._run_index,
-                "attempt_reason": str(attempt_reason),
+                "run_index": _RUN_INDEX,
+                "attempt_reason": RUN_INITIAL,
                 "status": "running",
                 "start_time": _now_iso(),
             },
             row_type=ROW_RUN,
-            natural_ids=(self._action_id, str(self._run_index)),
+            natural_ids=(self._action_id, str(_RUN_INDEX)),
         )
-        self._record_action({"in_flight_run_index": self._run_index})
-        return self._run_index
+        self._record_action({"in_flight_run_index": _RUN_INDEX})
 
-    def end_run(self, *, run_index: int, result: Mapping[str, Any] | None) -> None:
-        """Record how a pass through the executor's core ended."""
+    def end_run(self, *, result: Mapping[str, Any] | None) -> None:
+        """Record how the action's run through the executor's core ended."""
         payload = _as_dict(result)
         self._sink.record(
             SECTION_RUN,
             {
                 "task_id": self._task_id,
-                "run_index": int(run_index),
+                "run_index": _RUN_INDEX,
                 "status": str(payload.get("status") or "failed"),
                 "end_time": _now_iso(),
                 "error_class": str(payload.get("error_class") or ""),
                 "warnings": _warnings(payload),
             },
             row_type=ROW_RUN,
-            natural_ids=(self._action_id, str(int(run_index))),
+            natural_ids=(self._action_id, str(_RUN_INDEX)),
         )
 
-    def record_invocation(self, *, run_index: int, invocation: BaselineInvocation) -> None:
-        """Record what this pass is about to launch the server under.
+    def record_invocation(self, *, invocation: BaselineInvocation) -> None:
+        """Record what the run is about to launch the server under.
 
         Called at the launch, by the frame that resolved the args, the only
-        place and moment they are known as a fact. Recorded on the run rather
-        than only on the action because the MoE-runner retry drops a flag and
-        re-launches, so an action-only record would publish one invocation for
-        a pass that ran under two. An empty ``framework_args`` is a real
-        answer, the framework's own defaults; ``args_mode`` (``append`` or
-        ``replace``) decides whether the string is the whole of the request.
+        place and moment they are known as a fact. An empty ``framework_args``
+        is a real answer, the framework's own defaults; ``args_mode``
+        (``append`` or ``replace``) decides whether the string is the whole of
+        the request.
         """
         block: dict[str, Any] = {
             "framework_args": str(invocation.framework_args or ""),
@@ -668,15 +662,14 @@ class BaselineEventRecorder:
         }
         self._sink.record(
             SECTION_RUN,
-            {"task_id": self._task_id, "run_index": int(run_index), "invocation": block},
+            {"task_id": self._task_id, "run_index": _RUN_INDEX, "invocation": block},
             row_type=ROW_RUN,
-            natural_ids=(self._action_id, str(int(run_index))),
+            natural_ids=(self._action_id, str(_RUN_INDEX)),
         )
-        # The action's copy is the last pass to launch, the one its adopted
-        # measurement was taken under. Repeated writes deep-merge.
+        # The action carries the launch its measurement was taken under.
         self._record_action({"invocation": block})
 
-    def record_round(self, *, run_index: int, round_: BaselineRound) -> None:
+    def record_round(self, *, round_: BaselineRound) -> None:
         """Record one benchmark round."""
         label = round_.label
         payload = _as_dict(round_.result)
@@ -685,7 +678,7 @@ class BaselineEventRecorder:
             SECTION_ROUND,
             {
                 "task_id": self._task_id,
-                "run_index": int(run_index),
+                "run_index": _RUN_INDEX,
                 # The order the rounds ran in: start stamps are ISO seconds, and a fast failure shares one with the next.
                 "ordinal": self._rounds,
                 "label": str(label),
@@ -704,7 +697,7 @@ class BaselineEventRecorder:
                 "failure": _failure(payload, stage=f"round_{label}"),
             },
             row_type=ROW_ROUND,
-            natural_ids=(self._action_id, str(int(run_index)), str(label)),
+            natural_ids=(self._action_id, str(_RUN_INDEX), str(label)),
         )
 
     def finish(self, result: Mapping[str, Any] | None) -> None:

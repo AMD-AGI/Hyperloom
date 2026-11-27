@@ -20,7 +20,6 @@ from hyperloom.common.perf_metric import (
 )
 from hyperloom.orchestrator.actions.executors import report as rp
 from hyperloom.inference_optimizer.session.session_paths import (
-    reports_dir,
     target_baseline_json,
 )
 
@@ -152,7 +151,7 @@ def test_format_md_shows_validated_gain_when_timestamp_missing():
             "session_id": "s1",
             "model_name": "m",
             "model_path": "/models/m",
-            "stop_reason": "sweep_done",
+            "stop_reason": "cycle_end_done",
             "max_minutes": 360,
             "report_generated_at": "2026-06-23T00:00:00+00:00",
             "baseline_tput": 100.0,
@@ -528,32 +527,6 @@ def test_load_external_baseline_corrupt(tmp_path):
     assert rp._load_external_baseline(tmp_path) is None
 
 
-# ---- _read_conc_sweep_pointer ----
-
-
-def test_read_conc_sweep_pointer_missing(tmp_path):
-    assert rp._read_conc_sweep_pointer(tmp_path) is None
-
-
-def test_read_conc_sweep_pointer_present(tmp_path):
-    rd = reports_dir(tmp_path)
-    rd.mkdir(parents=True, exist_ok=True)
-    (rd / "conc_sweep_summary.json").write_text(
-        json.dumps({"status": "done", "summary": {"x": 1}, "budget_exhausted": True, "total_budget_sec": 10}),
-        encoding="utf-8",
-    )
-    ptr = rp._read_conc_sweep_pointer(tmp_path)
-    assert ptr["status"] == "done"
-    assert ptr["budget_exhausted"] is True
-
-
-def test_read_conc_sweep_pointer_corrupt(tmp_path):
-    rd = reports_dir(tmp_path)
-    rd.mkdir(parents=True, exist_ok=True)
-    (rd / "conc_sweep_summary.json").write_text("{bad", encoding="utf-8")
-    assert rp._read_conc_sweep_pointer(tmp_path) is None
-
-
 # ---- _read_ko_summary_totals ----
 def test_read_ko_summary_totals(tmp_path):
     p = tmp_path / "ko.json"
@@ -628,61 +601,6 @@ def test_build_summary_keeps_explicit_stop_reason_over_closing_fallback():
     state.closing_phase = True
     summary = rp._build_summary_dict(state, {}, [])
     assert summary["stop_reason"] == "target_reached"
-
-
-# ---- _explain_stop_reason ----
-class _SweepState:
-    def __init__(self, last_conc_sweep):
-        self.last_conc_sweep = last_conc_sweep
-
-
-def test_a_skipped_sweep_is_not_described_as_a_finished_one():
-    """``sweep_done`` is also the exit for a sweep that declined to run."""
-    state = _SweepState({"status": "succeeded", "was_skipped": True, "skip_reason": "no_optimization_to_compare"})
-    msg = rp._explain_stop_reason("sweep_done", state)
-    assert "did not run" in msg
-    assert "no_optimization_to_compare" in msg
-
-
-def test_a_sweep_that_ran_keeps_the_plain_explanation():
-    state = _SweepState({"status": "succeeded", "was_skipped": False})
-    assert rp._explain_stop_reason("sweep_done", state) == rp._explain_stop_reason("sweep_done")
-
-
-def test_a_skip_with_no_recorded_reason_still_says_it_was_skipped():
-    state = _SweepState({"status": "succeeded", "was_skipped": True, "skip_reason": ""})
-    assert "did not run" in rp._explain_stop_reason("sweep_done", state)
-
-
-def test_a_session_budget_skip_is_described_as_a_sweep_that_did_not_run():
-    state = _SweepState({"status": "skipped", "was_skipped": True, "skip_reason": "session_time_budget"})
-    msg = rp._explain_stop_reason("sweep_done", state)
-    assert "did not run" in msg
-    assert "session_time_budget" in msg
-
-
-def test_a_sweep_that_spent_its_budget_is_not_reported_as_one_that_never_ran(tmp_path):
-    """The budget path records was_skipped for a sweep that ran its whole ladder."""
-    from hyperloom.orchestrator.state.shared_state import SharedState
-
-    live = SharedState()
-    live.record_conc_sweep(
-        {
-            "status": "skipped",
-            "was_skipped": True,
-            "budget_exhausted": True,
-            "skip_reason": "budget_exhausted_no_successful_pairs",
-        }
-    )
-    live.save(tmp_path)
-    # The report is written from a reloaded state, so the flag that separates the two skips has to survive the round
-    # trip to be readable at all.
-    state = SharedState.load_or_init(tmp_path)
-
-    msg = rp._explain_stop_reason("sweep_done", state)
-    assert "did not run" not in msg
-    assert "budget" in msg
-    assert "budget_exhausted_no_successful_pairs" in msg
 
 
 def test_format_md_renders_stop_explanation():

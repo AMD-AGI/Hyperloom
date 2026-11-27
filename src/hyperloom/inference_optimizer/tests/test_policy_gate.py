@@ -6,10 +6,11 @@
 The pure helpers (presence checks, GPU probing, lane ceilings, path allowlists,
 free-form descriptions) are exercised in
 ``test_policy_helpers_coverage_unit.py``; the bring-up round's own lifecycle in
-``test_policy_advisory_projection.py``. What is left here is the agent-facing
-surface: the request kinds, action names and payload paths an agent may reach
-through, and the standing agreement that the prompt never advertises a lever the
-gate then refuses.
+``test_policy_advisory_projection.py``; which action names a phase lets an agent
+propose in ``loop/tests/test_phase_admission.py``. What is left here is the
+agent-facing surface: the request kinds, the bring-up round and the message
+shapes an agent may reach through, and that a refusal is a denial which leaves
+no row in the failure ledger.
 """
 
 from __future__ import annotations
@@ -23,13 +24,15 @@ from hyperloom.inference_optimizer.protocol.action_surfaces import (
 )
 from hyperloom.inference_optimizer.protocol.intent import Intent, IntentType
 from hyperloom.orchestrator.kernel.request_handlers import KERNEL_REQUEST_HANDLERS
-from hyperloom.orchestrator.phases.machine_state import PHASE_NAMES, allowed_actions_for
+from hyperloom.orchestrator.loop.coordinator import Coordinator
 from hyperloom.orchestrator.policy.denial import PolicyDenied
 from hyperloom.orchestrator.policy.gate import PolicyGate
 from hyperloom.orchestrator.policy.projection import ResourceFacts
 from hyperloom.orchestrator.prompts.prompt_builder import _section_phase_semantics
 from hyperloom.orchestrator.roles.agent_role import default_role_registry
 from hyperloom.orchestrator.state.shared_state import SharedState
+
+from .conftest import silent_backends
 
 _PROPOSE_CHANNELS = (IntentType.DELEGATE, IntentType.PROPOSE_ACTION)
 
@@ -82,30 +85,65 @@ def test_an_unregistered_kind_reaches_the_auto_reject() -> None:
     _emit(_llm_gate(), IntentType.REQUEST, {"target_agent": "kernel_agent", "kind": "no_such_kind"})
 
 
+# -- A refusal is a denial, never a recorded failure -----------------------
+def _denied_rules(coordinator: Coordinator) -> list[str]:
+    """The rule of every ``policy_denied`` observation in the orchestration inbox."""
+    inbox = coordinator.bus.inbox_context_sync("orchestration")
+    return [m.payload["rule"] for m in inbox if m.payload.get("kind") == "policy_denied"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("kind", "rule"),
+    [("run_fusion", "request_kind"), ("gemm_tuning", "phase_incompatible"), ("WebSearch", "tool_whitelist_role")],
+)
+async def test_a_refused_request_kind_is_denied_and_leaves_no_failure_row(session_dir, kind: str, rule: str) -> None:
+    """Past the gate the router would answer with a failed reply, which becomes a gap and a ``what_failed`` prior."""
+    coordinator = Coordinator(session_dir, backends=silent_backends())
+    try:
+        await coordinator.router.handle_intent(
+            "orchestration", Intent(type=IntentType.REQUEST, payload={"target_agent": "kernel_agent", "kind": kind})
+        )
+
+        assert _denied_rules(coordinator) == [rule]
+        assert coordinator.shared_state.last_action_failures == []
+        assert await coordinator.bus.tail(topic="request") == []
+        assert await coordinator.bus.tail(topic="response") == []
+    finally:
+        await coordinator.stop()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("channel", _PROPOSE_CHANNELS, ids=lambda channel: channel.value)
+async def test_an_action_no_phase_offers_is_denied_and_leaves_no_failure_row(session_dir, channel: IntentType) -> None:
+    """Admission refuses the name before a task or a proposal exists, so nothing reaches the failure ledger."""
+    coordinator = Coordinator(session_dir, backends=silent_backends())
+    try:
+        payload = {"action_name": "profile", "predicted_gain_pct": 1.0, "params": {}}
+        await coordinator.router.handle_intent("orchestration", Intent(type=channel, payload=payload))
+
+        assert _denied_rules(coordinator) == ["phase_incompatible"]
+        assert coordinator.shared_state.last_action_failures == []
+        assert await coordinator.tasks.by_state("queued") == []
+        assert coordinator.state.pending_proposals == {}
+    finally:
+        await coordinator.stop()
+
+
 # -- Coordinator-managed actions ------------------------------------------
-def test_a_coordinator_managed_action_is_not_proposable() -> None:
-    """Each has a registered executor, so a proposal really ran a second copy."""
-    gate = _llm_gate()
-    for channel in _PROPOSE_CHANNELS:
-        for action_name in sorted(COORDINATOR_INTERNAL_ACTIONS):
-            with pytest.raises(PolicyDenied) as excinfo:
-                _emit(gate, channel, {"action_name": action_name, "predicted_gain_pct": 1.0, "params": {}})
-            assert excinfo.value.rule == "coordinator_managed_action", (channel, action_name)
-
-
 def test_the_coordinator_still_dispatches_its_own_internal_actions() -> None:
-    """The guard sits on the agent channels; dispatch replay must pass."""
+    """Dispatch replay must pass the actions only the Coordinator creates."""
     gate = _llm_gate()
     for action_name in sorted(COORDINATOR_INTERNAL_ACTIONS):
         gate.validate_dispatched_task(action_name, {})
 
 
 def test_phase_semantics_prompt_names_every_internal_action() -> None:
-    """The orchestration prompt must name the actions PolicyGate will deny.
+    """The orchestration prompt must name the actions admission will deny.
 
     Telling the model that ``framework`` is Coordinator-managed while the
     runtime denies ``framework_agent`` invites a proposal that costs a tick
-    and gets rejected as coordinator_managed_action.
+    and gets rejected as phase_incompatible.
     """
     rendered = "\n".join(_section_phase_semantics(kernel_enabled=True))
 
@@ -169,22 +207,3 @@ def test_send_message_with_a_to_naming_no_recipient_is_denied(to) -> None:
     with pytest.raises(PolicyDenied) as excinfo:
         _emit(_llm_gate(), IntentType.SEND_MESSAGE, {"to": to, "topic": "observation", "body_md": "x"})
     assert excinfo.value.rule == "payload"
-
-
-# -- The prompt and the gate agree ----------------------------------------
-def test_the_prompt_never_advertises_an_action_the_gate_denies() -> None:
-    """Ties the rendered per-phase sets to what the propose channel accepts."""
-    gate = _llm_gate()
-    denied: list[tuple[str, str, str]] = []
-    for phase in PHASE_NAMES:
-        for action_name in allowed_actions_for(phase):
-            try:
-                _emit(
-                    gate,
-                    IntentType.PROPOSE_ACTION,
-                    {"action_name": action_name, "predicted_gain_pct": 1.0, "params": {}},
-                )
-            except PolicyDenied as exc:
-                if exc.rule in {"coordinator_managed_action", "propose_action_source"}:
-                    denied.append((phase, action_name, exc.rule or ""))
-    assert not denied, f"prompt advertises actions the gate refuses: {denied}"
