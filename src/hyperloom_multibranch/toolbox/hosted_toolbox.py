@@ -18,7 +18,6 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
-import re
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -89,7 +88,6 @@ MEASUREMENT_TEMPLATES, RUNNER_TEMPLATES, DEV_TEMPLATES = "measurement", "runner"
 #: and ``MANIFEST_PIN_ENV`` (when the host has the manifest's digest) are the runner template's accepted create
 #: environment, passed on every ``measurement`` create.
 SOURCE_SHA_ENV = "HYPERLOOM_SOURCE_SHA"
-_MANIFEST_DIGEST = re.compile(r"[0-9a-f]{64}")
 #: Where the base builds of the frameworks built from a pinned checkout are laid, below the session directory the runner
 #: sandboxes read at the same path.
 _BASE_BUILDS = "base-builds"
@@ -135,9 +133,8 @@ class HostedToolboxInputs:
             leaves it ``None`` and the creates are as they were.
 
     Raises:
-        ValueError: When ``dev_key`` or ``sandbox_workspace`` is empty, ``tp`` is below one,
-            ``runner_cache_manifest_sha256`` is not a SHA-256 or the limits are not a valid grant; the message names the
-            field, never a value.
+        ValueError: When ``dev_key`` or ``sandbox_workspace`` is empty, ``tp`` is below one or the limits are not a
+            valid grant; the message names the field, never a value.
     """
 
     run_id: str
@@ -162,12 +159,6 @@ class HostedToolboxInputs:
             raise ValueError("sandbox_workspace is empty; leave it None for a key that names its own workspace")
         if self.tp < 1:
             raise ValueError("tp must be at least 1")
-        pin = self.runner_cache_manifest_sha256
-        if pin is not None and not _MANIFEST_DIGEST.fullmatch(pin):
-            raise ValueError(
-                "runner_cache_manifest_sha256 is not a 64-character lowercase hex SHA-256; leave it None to accept "
-                "the manifest of the cache entry itself"
-            )
         self.grant()
 
     def create_envs(self) -> dict[str, str]:

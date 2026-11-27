@@ -293,19 +293,10 @@ def test_the_inputs_never_print_a_key_and_a_refusal_names_the_field_not_the_valu
     assert "m-key" not in str(refused.value)
 
 
-_NOT_A_DIGEST = "runner_cache_manifest_sha256 is not a 64-character lowercase hex SHA-256"
-
-
 @pytest.mark.parametrize(
     ("changed", "message"),
     [
         ({"tp": 0}, "tp must be at least 1"),
-        ({"runner_cache_manifest_sha256": ""}, _NOT_A_DIGEST),
-        ({"runner_cache_manifest_sha256": "CD" * 32}, _NOT_A_DIGEST),
-        ({"runner_cache_manifest_sha256": "cd" * 31}, _NOT_A_DIGEST),
-        ({"runner_cache_manifest_sha256": "cd" * 33}, _NOT_A_DIGEST),
-        ({"runner_cache_manifest_sha256": "cg" * 32}, _NOT_A_DIGEST),
-        ({"runner_cache_manifest_sha256": _MANIFEST + "\n"}, _NOT_A_DIGEST),
         ({"grant_limits": {**_GRANT, "max_sandboxes": 0}}, "at least one sandbox"),
         ({"sandbox_workspace": " "}, "sandbox_workspace is empty"),
     ],
@@ -372,13 +363,6 @@ def test_the_toolbox_s_retries_wait_no_later_than_the_time_its_tests_must_end_by
     toolbox = _toolbox(None, tmp_path, tests_end_by=tests_end_by)
 
     assert toolbox._tests_end_by == tests_end_by
-
-
-def test_a_refused_manifest_digest_is_never_in_the_message(tmp_path: Path) -> None:
-    secret_looking = "XY" * 32
-    with pytest.raises(ValueError, match=_NOT_A_DIGEST) as refused:
-        _inputs(None, tmp_path, runner_cache_manifest_sha256=secret_looking)
-    assert secret_looking not in str(refused.value)
 
 
 # -- what is built from them ---------------------------------------------------------------------------------------
