@@ -192,7 +192,6 @@ def _delegate(params: dict[str, Any]) -> Intent:
     return Intent(type=IntentType.DELEGATE, payload={"action_name": "specialist", "params": params})
 
 
-@pytest.mark.parametrize("configured", [True, False])
 @pytest.mark.parametrize(
     "params",
     [
@@ -202,18 +201,14 @@ def _delegate(params: dict[str, Any]) -> Intent:
         {"scope": "freeform", "domain": "custom_specialist", "task_description": "do it"},
     ],
 )
-def test_gate_denies_every_custom_specialist_delegate(params, configured):
-    gate = PolicyGate()
-    gate.shared_state = SharedState(custom_specialist_prompt=_PROMPT if configured else "")
+def test_gate_denies_every_custom_specialist_delegate(params):
     with pytest.raises(PolicyDenied) as exc:
-        gate.validate_intent("orchestration", _delegate(params))
+        PolicyGate().validate_intent("orchestration", _delegate(params))
     assert exc.value.rule == "specialist_custom_coordinator_owned"
 
 
 def test_gate_allows_a_builtin_dispatch_with_the_generic_custom_tag():
-    gate = PolicyGate()
-    gate.shared_state = SharedState()
-    gate.validate_intent(
+    PolicyGate().validate_intent(
         "orchestration",
         _delegate({"domain": "serving_specialist", "tags": ["framework", "custom"], "gap_canonical_id": "gap.x"}),
     )

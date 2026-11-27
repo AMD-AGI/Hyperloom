@@ -938,14 +938,14 @@ async def test_extend_lease_rejects_non_running_task(coordinator_with_mocks):
 
 
 @pytest.mark.asyncio
-async def test_extend_lease_reaches_a_task_that_started_after_the_tick_read_its_resource_facts(coordinator_with_mocks):
+async def test_extend_lease_reaches_a_task_that_started_during_the_turn(coordinator_with_mocks):
     """The dispatcher starts tasks beside the LLM turn, so the task registry alone says whether a lease is live."""
     c = coordinator_with_mocks
     try:
         task, _ = await c.tasks.create_or_return_existing(
             TaskSpec(kind="specialist", params={}, idempotency_key="k-extend-late", lease_ttl_sec=1800),
         )
-        c.policy.resources.update(c.shared_state)
+        await c.reconciler.run(time.time())
         await c.tasks.transition(task.task_id, "running")
 
         await c.router.handle_intent(

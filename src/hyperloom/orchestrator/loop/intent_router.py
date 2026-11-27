@@ -17,6 +17,7 @@ from hyperloom_common.timeutil import format_exc_brief
 from hyperloom_common.coerce import to_int, to_mapping, to_unix
 from ..actions.executors.integrate._integrate_vocabulary import PATCH_SOURCE_UPSTREAM_PR, resolve_patch_source
 from ..bus.message_bus import Message
+from ..policy.bringup_round import bringup_round_denial
 from ..policy.denial import PolicyDenied
 from ..specialists.wall_budget import grant_wall_budget_extension
 from ..state.shared_state import inject_stack_base_params
@@ -218,6 +219,9 @@ class IntentRouter(CoordinatorCollaborator):
                 rule="integrate_patch_no_deliverable",
                 hint="Its specialist_done names no patch or artifact that exists in its workspace.",
             )
+        refused = self._coord.proposals.deliverable_path_denial(deliverable.params)
+        if refused is not None:
+            return refused
         params.update(deliverable.params)
         return None
 
@@ -408,7 +412,11 @@ class IntentRouter(CoordinatorCollaborator):
         action_name = intent.payload["action_name"]
         if self._is_pruned_action(action_name):
             await self._note_pruned_advisory(source, action_name)
-        denied = self._coord.dispatcher.admission_denial_for_action(action_name, params=intent.payload.get("params"))
+        denied = await bringup_round_denial(action_name, self.rounds)
+        if denied is None:
+            denied = self._coord.dispatcher.admission_denial_for_action(
+                action_name, params=intent.payload.get("params")
+            )
         if denied is not None:
             await self.record_policy_denied(source, intent, denied, action_name=action_name)
             return

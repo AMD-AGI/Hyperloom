@@ -6,11 +6,11 @@
 The pure helpers (presence checks, GPU probing, lane ceilings, path allowlists,
 free-form descriptions) are exercised in
 ``test_policy_helpers_coverage_unit.py``; the bring-up round's own lifecycle in
-``test_policy_advisory_projection.py``; which action names a phase lets an agent
+``test_policy_resource_rules.py`` and its two call sites in
+``test_dispatched_task_policy.py``; which action names a phase lets an agent
 propose in ``loop/tests/test_phase_admission.py``. What is left here is the
-agent-facing surface: the request kinds, the bring-up round and the message
-shapes an agent may reach through, and that a refusal is a denial which leaves
-no row in the failure ledger.
+agent-facing surface: the request kinds an agent may reach through, and that a
+refusal is a denial which leaves no row in the failure ledger.
 """
 
 from __future__ import annotations
@@ -27,27 +27,14 @@ from hyperloom.orchestrator.kernel.request_handlers import KERNEL_REQUEST_HANDLE
 from hyperloom.orchestrator.loop.coordinator import Coordinator
 from hyperloom.orchestrator.policy.denial import PolicyDenied
 from hyperloom.orchestrator.policy.gate import PolicyGate
-from hyperloom.orchestrator.policy.projection import ResourceFacts
 from hyperloom.orchestrator.prompts.prompt_builder import _section_phase_semantics
-from hyperloom.orchestrator.state.shared_state import SharedState
 
 from .conftest import silent_backends
 
 
-def _llm_gate(resources: ResourceFacts | None = None) -> PolicyGate:
-    """A gate an orchestration agent emits into.
-
-    Args:
-        resources: The resource facts the round rule judges against; ``None``
-            leaves that rule refusing nothing.
-
-    Returns:
-        PolicyGate: The gate under test.
-    """
-    return PolicyGate(
-        shared_state=SharedState(session_id="t", phase="KERNEL_AGENT"),
-        resources=resources or ResourceFacts(),
-    )
+def _llm_gate() -> PolicyGate:
+    """A gate an orchestration agent emits into."""
+    return PolicyGate()
 
 
 def _emit(gate: PolicyGate, intent_type: IntentType, payload: dict) -> None:
@@ -125,13 +112,6 @@ async def test_an_action_no_phase_offers_is_denied_and_leaves_no_failure_row(ses
 
 
 # -- Coordinator-managed actions ------------------------------------------
-def test_the_coordinator_still_dispatches_its_own_internal_actions() -> None:
-    """Dispatch replay must pass the actions only the Coordinator creates."""
-    gate = _llm_gate()
-    for action_name in sorted(COORDINATOR_INTERNAL_ACTIONS):
-        gate.validate_dispatched_task(action_name, {})
-
-
 def test_phase_semantics_prompt_names_every_internal_action() -> None:
     """The orchestration prompt must name the actions admission will deny.
 
@@ -143,32 +123,3 @@ def test_phase_semantics_prompt_names_every_internal_action() -> None:
 
     missing = sorted(a for a in COORDINATOR_INTERNAL_ACTIONS if a not in rendered)
     assert not missing, f"Coordinator-internal actions absent from the prompt: {missing}"
-
-
-# -- A bring-up round holds the machine -----------------------------------
-def _round_in_flight() -> ResourceFacts:
-    """Facts in which a bring-up round holds the machine."""
-    return ResourceFacts(excluding_round_id="round-1", excluding_round_holder="task-abc")
-
-
-def test_a_delegated_baseline_is_refused_while_a_round_holds_the_machine() -> None:
-    """A second bring-up fights the first for the same cards and ports."""
-    gate = _llm_gate(_round_in_flight())
-    with pytest.raises(PolicyDenied) as excinfo:
-        _emit(gate, IntentType.DELEGATE, {"action_name": "baseline", "params": {}})
-    assert excinfo.value.rule == "enablement_round_in_flight"
-
-
-def test_the_round_holders_own_bring_up_is_dispatched_and_no_other_row_is() -> None:
-    """Dispatch replay is guarded too; the holder is admitted by its own id."""
-    gate = _llm_gate(_round_in_flight())
-    gate.validate_dispatched_task("baseline", {"reason": "enablement_revalidation"}, task_id="task-abc")
-
-    with pytest.raises(PolicyDenied) as excinfo:
-        gate.validate_dispatched_task("baseline", {}, task_id="forged-row")
-    assert excinfo.value.rule == "enablement_round_in_flight"
-
-
-def test_the_round_rule_refuses_nothing_without_a_snapshot() -> None:
-    """No ledger means no resource facts, and the acquire remains the authority."""
-    _emit(_llm_gate(), IntentType.DELEGATE, {"action_name": "baseline", "params": {}})

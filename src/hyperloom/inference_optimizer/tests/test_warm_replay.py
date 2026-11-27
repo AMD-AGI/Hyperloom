@@ -1432,6 +1432,10 @@ def test_multi_file_kernel_targets_share_one_framework_root(
         "+new\n",
         encoding="utf-8",
     )
+    monkeypatch.setattr(
+        "hyperloom.inference_optimizer.framework_paths.resolve_session_framework_root",
+        lambda: str(framework_root),
+    )
 
     targets = coord.phase_prelude._resolve_kernel_target_paths(
         {
@@ -1443,27 +1447,37 @@ def test_multi_file_kernel_targets_share_one_framework_root(
     assert targets == [str(existing), str(added)]
 
 
-def test_kernel_target_uses_the_recorded_root_not_the_session_one(tmp_path, monkeypatch):
-    """The recorded checkout is where the gain was measured, so it outranks the session's."""
-    coord = _make_coord(tmp_path)
-    active_root = tmp_path / "active"
-    recorded_root = tmp_path / "recorded"
-    recorded_target = recorded_root / "src/kernel.py"
-    active_root.mkdir()
-    recorded_target.parent.mkdir(parents=True)
-    recorded_target.write_text("old\n", encoding="utf-8")
+_KERNEL_PATCH = (
+    "diff --git a/src/kernel.py b/src/kernel.py\n--- a/src/kernel.py\n+++ b/src/kernel.py\n@@ -1 +1 @@\n-old\n+new\n"
+)
+
+
+def _recorded_kernel(tmp_path, recorded_root):
+    """A one-file kernel patch and the file it rewrites under ``recorded_root``."""
+    target = recorded_root / "src/kernel.py"
+    target.parent.mkdir(parents=True)
+    target.write_text("old\n", encoding="utf-8")
     patch = tmp_path / "kernel.patch"
-    patch.write_text(
-        "diff --git a/src/kernel.py b/src/kernel.py\n"
-        "--- a/src/kernel.py\n"
-        "+++ b/src/kernel.py\n"
-        "@@ -1 +1 @@\n-old\n+new\n",
-        encoding="utf-8",
-    )
+    patch.write_text(_KERNEL_PATCH, encoding="utf-8")
+    return patch, target
+
+
+def _session_framework_root(monkeypatch, root) -> None:
     monkeypatch.setattr(
         "hyperloom.inference_optimizer.framework_paths.resolve_session_framework_root",
-        lambda: str(active_root),
+        lambda: str(root) if root else "",
     )
+
+
+def test_kernel_target_is_placed_under_the_recorded_root_not_the_session_one(tmp_path, monkeypatch):
+    """The recorded checkout is where the gain was measured: inside the session's tree it decides the file."""
+    coord = _make_coord(tmp_path)
+    active_root = tmp_path / "active"
+    recorded_root = active_root / "third_party/kernels"
+    patch, recorded_target = _recorded_kernel(tmp_path, recorded_root)
+    (active_root / "src").mkdir()
+    (active_root / "src/kernel.py").write_text("old\n", encoding="utf-8")
+    _session_framework_root(monkeypatch, active_root)
 
     entry = {
         "patch_path": str(patch),
@@ -1475,6 +1489,64 @@ def test_kernel_target_uses_the_recorded_root_not_the_session_one(tmp_path, monk
     assert coord.phase_prelude._resolve_kernel_target_paths(entry) == [str(recorded_target)]
     assert "resolution_error" not in entry
     assert "resolution_reason" not in entry
+
+
+@pytest.mark.parametrize("session_names_a_root", [True, False], ids=["another-checkout", "no-session-root"])
+def test_kernel_target_outside_the_session_framework_root_is_refused(tmp_path, monkeypatch, session_names_a_root):
+    """The recorded root is a path another session published; a target outside this session's tree is not taken."""
+    coord = _make_coord(tmp_path)
+    active_root = tmp_path / "active"
+    active_root.mkdir()
+    patch, _target = _recorded_kernel(tmp_path, tmp_path / "recorded")
+    _session_framework_root(monkeypatch, active_root if session_names_a_root else None)
+
+    entry = {"patch_path": str(patch), "apply_root": str(tmp_path / "recorded")}
+
+    assert coord.phase_prelude._resolve_kernel_target_paths(entry) == []
+    assert "outside the Session framework root" in entry["resolution_error"]
+
+
+def test_kernel_target_reached_through_a_symlink_out_of_the_recorded_root_is_refused(tmp_path, monkeypatch):
+    """A link inside the checkout does not carry the patch to a file outside it."""
+    coord = _make_coord(tmp_path)
+    recorded_root = tmp_path / "framework"
+    recorded_root.mkdir()
+    patch, _escaped_target = _recorded_kernel(tmp_path, tmp_path / "escaped")
+    (recorded_root / "src").symlink_to(tmp_path / "escaped/src", target_is_directory=True)
+    _session_framework_root(monkeypatch, recorded_root)
+
+    entry = {"patch_path": str(patch), "apply_root": str(recorded_root)}
+
+    assert coord.phase_prelude._resolve_kernel_target_paths(entry) == []
+    assert "escapes" in entry["resolution_error"]
+
+
+def test_a_kernel_item_outside_the_session_framework_root_is_deferred_before_anything_is_patched(tmp_path, monkeypatch):
+    """The check runs ahead of the snapshot and the apply, so a refused item leaves its file and the plan clean."""
+    coord = _make_coord(tmp_path)
+    active_root = tmp_path / "active"
+    active_root.mkdir()
+    patch, target = _recorded_kernel(tmp_path, tmp_path / "recorded")
+    _session_framework_root(monkeypatch, active_root)
+    plan = [
+        {
+            "column": "rewrite",
+            "meta": {"kernel_name": "k1"},
+            "recipe_row": {},
+            "patch_path": str(patch),
+            "apply_root": str(tmp_path / "recorded"),
+        }
+    ]
+
+    outcome = coord.phase_prelude._apply_warm_kernel_plan(plan)
+
+    assert target.read_text(encoding="utf-8") == "old\n"
+    assert plan[0]["decision"] == "DEFERRED"
+    assert plan[0]["apply_result"]["status"] == "skipped"
+    assert "outside the Session framework root" in plan[0]["apply_result"]["reason"]
+    assert (outcome["status"], outcome["deferred"]) == ("loaded", 1)
+    assert outcome["pending"] == outcome["applied"] == outcome["snapshots"] == []
+    assert not (coord.session_dir / "runtime" / "warm_kernel_snapshots").exists()
 
 
 def test_kernel_item_recording_no_root_is_refused(tmp_path):

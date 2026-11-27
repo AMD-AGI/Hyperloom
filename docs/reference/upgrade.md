@@ -1131,6 +1131,112 @@ The Orchestration prompt changes with it:
 
 The debug log line `gaps refresh (reason=...)` is no longer written.
 
+### Recommended: stop matching the denials PolicyGate no longer issues; the two resource rules read live state
+
+PolicyGate judged three things from a copy of the session's resources taken
+at the start of each tick, judged them again when a queued task was
+dispatched, and repeated a few checks another component owns. The copy and
+the second pass are removed. What is left is decided once, where the resource
+is held.
+
+Rules that are gone:
+
+* `specialist_gpu_request_invalid`. A `gpu_count` of `0` now means the
+  default count, as it already did for the lease. A negative count is denied
+  with `specialist_gpu_request_exceeds_capacity`.
+* `specialist_gpu_pool_disabled`. A request against an empty pool is denied
+  with `specialist_gpu_request_exceeds_capacity`; its reason reads `the
+  <pool> holds no card (configured capacity=<n>, serving_tp=<n>)` and its
+  hint says that no `gpu_count` fits.
+* `specialist_freeform_description_too_long`. A free-form `task_description`
+  longer than 8000 characters is accepted. An empty one is still denied
+  (`specialist_freeform_empty_description`).
+* The `max_turns` arm of `specialist_dispatch_source`. A `max_turns` above
+  1000 is accepted and is the turn cap of that specialist; the wall-clock
+  budget still ends it. A `max_turns` that is not a positive integer runs
+  with the default cap (`--specialist-max-turns`), as an omitted one and `0`
+  already did. 1.2.x denied a non-integer, a negative value and a value above
+  1000.
+* `warm_replay_patch_missing`, `warm_replay_patch_outside_kb_download`,
+  `warm_replay_plan_invalid`, `warm_replay_target_outside_framework_roots`
+  and `warm_replay_patch_target_mismatch`. They were only ever the
+  `error_class` of a cancelled `replay_warm_recipe` task; see the warm-replay
+  item below.
+
+Rules that stay and read live state:
+
+* `enablement_round_in_flight` asks the round store when the `baseline`
+  delegate is handled and again when a queued `baseline` is dispatched. A
+  round opened during the Orchestration turn now refuses the baseline of that
+  turn, and a round settled during the turn no longer refuses it; 1.2.x
+  answered both from the rounds open at the start of the tick.
+* `specialist_gpu_request_exceeds_capacity` compares the count the
+  dispatcher will lease with the size of the pool it will lease from. 1.2.x
+  sized the request a second time with different defaults, so a request could
+  be admitted and then wait for cards for good: a `needs_gpu` research
+  specialist with `bench=true` was judged at its own `gpu_count` and leased
+  at serving TP. The reason now reads `effective gpu_count=<n> cannot be
+  leased from the <pool> size=<n> (configured capacity=<n>, serving_tp=<n>)`
+  and the hint gives the range that fits. The rule is judged after the gate's
+  other checks; an intent that also names a path outside the session
+  directory is denied for the path.
+
+A queued task is cancelled at dispatch for one reason only. `error_class`
+`policy_enablement_round_in_flight` and terminal evidence
+`{"reason": "policy_denied", "rule": "enablement_round_in_flight"}` are still
+written for a `baseline` that was queued before a bring-up round opened. No
+task ends with `policy_path_outside_session_dir`, `policy_payload`,
+`policy_specialist_*` or `policy_warm_replay_*`: those came from running the
+intent checks a second time on the stored row.
+
+What moved in front of the work it guards:
+
+* **Warm replay.** A kernel item of the warm-start Recipe is applied only
+  when every file it patches lies inside the session's framework checkout.
+  An item that does not is left out before anything is snapshotted or
+  patched: its plan entry is `DEFERRED` with `apply_result`
+  `{"status": "skipped", "reason": "target is outside the Session framework
+  root ...: <path>"}`, the warm-replay event in `session_breakdown.json`
+  lists it as not applied with that reason, and the replay runs with the
+  remaining items. 1.2.x applied the patch first and refused the replay task
+  afterwards, which left the patch in the tree and `warm_replay_outcome` at
+  `in_flight`. In a session that names no framework checkout
+  (`--framework-path`) every kernel patch is left out this way.
+* **Specialist deliverables.** The `integrate_patch` the Coordinator queues
+  for a finished specialist is checked for paths outside the session
+  directory before its task exists. A refused deliverable is one
+  `specialist_patch_integrate_refused` observation carrying
+  `specialist_task_id`, `rule` (`path_outside_session_dir`) and `error`, and
+  a `deliverable not queued` warning in the log; an `integrate_patch`
+  delegate that names that specialist is denied with
+  `path_outside_session_dir`. 1.2.x queued the task and cancelled it at
+  dispatch.
+
+Smaller changes:
+
+* The `warm_kernel_plan` entries of a `replay_warm_recipe` task, and the
+  copies in `state.json` (`warm_kernel_kb_plan`,
+  `warm_replay_pending.kernel_plan`, `warm_replay_outcome.kernel.pending`),
+  no longer carry `resolved_patch_targets`. Nothing read it but the removed
+  dispatch check, and an intent that carries a key of that name is no longer
+  walked for it.
+* A kernel item whose recorded checkout is a directory inside the session's
+  framework checkout is replayed. 1.2.x applied it and then cancelled the
+  replay as `warm_replay_patch_target_mismatch`.
+* `serving_disjoint_gpu_pool=` and `whole_machine_gpu_pool=` in the
+  `=== Resource pools ===` block of the Orchestration prompt print the size
+  of the two pools carved at launch, which are the pools a request is
+  admitted against. 1.2.x recomputed both from the environment on every
+  turn.
+* The `specialist` line of the prompt's action list reads
+  `max_turns?=<turn cap; omit for the default>`; 1.2.x wrote
+  `max_turns?=<int<=1000 or 0=unbounded>`.
+* The log line that reports a bench specialist floored to serving TP starts
+  `specialist: bench=true with gpu_count=` (1.2.x named the task id) and is
+  also written when the delegate is admitted. `specialist dispatch
+  gpu_count=... not an integer` is no longer logged; such a value takes the
+  default count.
+
 ---
 
 ## Upgrading from 1.1.x

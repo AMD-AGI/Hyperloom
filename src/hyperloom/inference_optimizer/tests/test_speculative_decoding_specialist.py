@@ -52,7 +52,6 @@ def test_orchestration_may_delegate_to_the_domain_under_its_own_kb_anchor():
     assert domain.llm_selectable
     assert normalize_dispatch_tags({"domain": DOMAIN_KEY}) == ["speculative_decoding"]
     gate = PolicyGate()
-    gate.shared_state = SharedState()
     gate.validate_intent(
         "orchestration",
         Intent(

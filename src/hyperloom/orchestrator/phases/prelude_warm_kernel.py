@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import Any, NamedTuple
 
 from hyperloom.common.env_safety import ENV_FILE_LIST_SEP, env_file_list_elements, is_file_referencing_env_name
+from hyperloom.inference_optimizer import framework_paths
 from hyperloom.inference_optimizer.breakdown.recorder.warm_replay_event import SKIP_KERNEL_PREPARATION_FAILED
 from inference_suite.argv import tokenize_server_args_preserving_json
 
@@ -298,7 +299,11 @@ class _WarmKernelPrepMixin:
         return targets[0] if targets else ""
 
     def _resolve_kernel_target_paths(self, entry: dict[str, Any]) -> list[str]:
-        """Resolve every declared Patch target under the Session active root."""
+        """Resolve every declared Patch target under the item's recorded root, inside the Session's framework root.
+
+        The recorded root is a path another session published, so a target is taken only when it also lies in
+        the checkout this session optimizes. Nothing is snapshotted or patched for an entry rejected here.
+        """
 
         def reject(reason: str, *, code: str = "") -> list[str]:
             entry["resolution_error"] = reason
@@ -332,6 +337,7 @@ class _WarmKernelPrepMixin:
                 code="kernel_apply_root_absent",
             )
 
+        session_root = framework_paths.resolve_session_framework_root()
         resolved: list[str] = []
         for target in parsed.all:
             candidate = (root / target).resolve(strict=False)
@@ -339,6 +345,8 @@ class _WarmKernelPrepMixin:
                 candidate.relative_to(root)
             except ValueError:
                 return reject(f"target escapes active root: {target}")
+            if not session_root or not framework_paths.resolved_within(str(candidate), session_root):
+                return reject(f"target is outside the Session framework root {session_root!r}: {candidate}")
             if target in parsed.existing and not candidate.is_file():
                 return reject(f"existing target is missing: {candidate}")
             if target in parsed.created and candidate.exists():
@@ -629,7 +637,6 @@ class _WarmKernelPrepMixin:
         self, entry: dict[str, Any], targets: list[str], snapshots: list[dict[str, Any]], applied: list[dict[str, Any]]
     ) -> bool:
         state = self.shared_state
-        entry["resolved_patch_targets"] = list(targets)
         try:
             for target_path in targets:
                 snapshots.append(self._snapshot_warm_kernel_target(target_path, len(snapshots)))

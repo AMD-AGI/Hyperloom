@@ -84,14 +84,9 @@ def test_gate_allows_an_intent_the_role_owns(gate, agent, intent_type, payload):
     gate.validate_intent(agent, Intent(type=intent_type, payload=payload))
 
 
-@pytest.mark.parametrize("precision", ["bf16", "fp8"])
-@pytest.mark.parametrize("kernel_optimizer", ["geak", "forge"])
-def test_gate_refuses_a_model_requested_gemm_tuning_run(precision, kernel_optimizer):
-    """Refused by channel, not by applicability."""
-    state = SharedState(
-        phase="KERNEL_AGENT", precision=precision, framework="sglang", kernel_optimizer=kernel_optimizer
-    )
-    gate = PolicyGate(shared_state=state)
+def test_gate_refuses_a_model_requested_gemm_tuning_run():
+    """Refused by channel: the gate reads nothing of the session, so no precision or optimizer admits it."""
+    gate = PolicyGate()
     with pytest.raises(PolicyDenied) as exc:
         gate.validate_intent(
             "orchestration",
@@ -111,10 +106,9 @@ def test_a_model_requested_kernel_optimization_has_no_handler_to_reach():
     assert "run_optimization" not in COORDINATOR_OWNED_KERNEL_REQUEST_KINDS
 
 
-def test_gate_still_allows_the_model_to_drain_the_keep_queue(monkeypatch):
+def test_gate_still_allows_the_model_to_drain_the_keep_queue():
     """Closing the lanes must not close integrate; draining KEEPs stays its job."""
-    state = SharedState(phase="KERNEL_AGENT", precision="bf16", framework="sglang")
-    gate = PolicyGate(shared_state=state)
+    gate = PolicyGate()
     gate.validate_intent(
         "orchestration",
         Intent(

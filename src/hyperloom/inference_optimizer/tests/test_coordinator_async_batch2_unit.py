@@ -2675,6 +2675,46 @@ async def test_a_finished_deliverable_is_queued_for_integrate_patch_once(coord: 
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("inside", [False, True], ids=["outside-the-session", "inside-the-session"])
+async def test_a_deliverable_is_queued_only_when_its_paths_stay_inside_the_session(
+    coord: Coordinator, monkeypatch, tmp_path: Path, inside: bool
+) -> None:
+    """The path walk runs where the deliverable becomes task params, on both routes, so a refusal leaves no row."""
+    probe_config = (coord.session_dir if inside else tmp_path.parent / f"{tmp_path.name}-elsewhere") / "probe.yaml"
+    finish = await _dispatch_specialist(
+        coord,
+        monkeypatch,
+        _PATCH_DELIVERABLE,
+        params={
+            "enablement": True,
+            "source_phase": "ENABLEMENT",
+            "domain": "serving_specialist",
+            "gap_canonical_id": "gap.enablement.boot",
+            "enablement_origin": "eval",
+            "enablement_probe_config_path": str(probe_config),
+        },
+    )
+
+    await _end_specialist(coord, finish)
+    await coord.router.handle_intent("orchestration", _integrate_request())
+
+    refused_by_the_coordinator = await _observed(coord, "specialist_patch_integrate_refused", "rule")
+    refused_to_the_agent = await _observed(coord, "policy_denied", "rule")
+    tasks = await _integrate_tasks(coord)
+    if inside:
+        assert (refused_by_the_coordinator, refused_to_the_agent) == ([], ["duplicate_idempotency_key_running"])
+        assert [task.params["config_path"] for task in tasks] == [str(probe_config)]
+    else:
+        assert (refused_by_the_coordinator, refused_to_the_agent) == (
+            ["path_outside_session_dir"],
+            ["path_outside_session_dir"],
+        )
+        assert tasks == []
+        assert await _observed(coord, "specialist_patch_integrate_refused", "specialist_task_id") == ["spec-a"]
+        assert coord.shared_state.last_action_failures == []
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("delegated", [False, True], ids=["queued-by-the-coordinator", "delegate"])
 async def test_an_enablement_round_moves_onto_the_integrate_patch_of_its_config_deliverable(
     coord: Coordinator, monkeypatch, delegated: bool

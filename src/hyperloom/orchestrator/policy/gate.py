@@ -4,61 +4,37 @@
 """PolicyGate — the single chokepoint every parsed Intent passes before any side effect.
 
 The gate decides synchronously from the intent and static config, and makes no
-database call. Three rules need resources it cannot read
--- the bring-up round holding the machine, a specialist's GPU request and a
-lease extension -- and take their answer from ``policy/projection.py``. Those
-refusals are labelled advisory because they are read off a snapshot rather than
-off the resource, and they deny: the acquire at the side-effect boundary is the
-second gate, not the first one.
+database call. A rule that needs a resource -- the bring-up round holding the
+machine, the pool a specialist leases its cards from -- is judged by the
+admission step that holds that resource.
 """
 
 from __future__ import annotations
 
-import logging
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from hyperloom.inference_optimizer.framework_paths import (
-    resolve_session_framework_root,
-    resolved_within,
-)
+from hyperloom.inference_optimizer.framework_paths import resolved_within
 from hyperloom.common.visible_devices import detect_gpu_count
 from hyperloom.inference_optimizer.protocol.intent import EXTEND_LEASE_MAX_SEC, Intent, IntentType
-from hyperloom.inference_optimizer.protocol.action_surfaces import (
-    COORDINATOR_INTERNAL_ACTIONS,
-    COORDINATOR_OWNED_KERNEL_REQUEST_KINDS,
-)
+from hyperloom.inference_optimizer.protocol.action_surfaces import COORDINATOR_OWNED_KERNEL_REQUEST_KINDS
 from ..mcp_tool_names import qualified_context_tool_name
-from .projection import (
-    RULE_GPU_EXCEEDS_CAPACITY,
-    RULE_GPU_POOL_DISABLED,
-    RULE_ROUND_IN_FLIGHT,
-    ResourceFacts,
-)
 from ..specialists.domains import normalize_dispatch_tags
 from .custom_specialist import deny_coordinator_dispatched_delegate
 from .denial import PolicyDenied
 from ..specialists.profile import SCOPE_FREEFORM as SPECIALIST_SCOPE_FREEFORM
-from ..specialists.patch_safety import parse_patch_targets
 from .validators import (
-    check_freeform_task_description,
     log_specialist_dispatch_coherence,
+    validate_freeform_task_description,
     validate_gemm_tuning_request,
     validate_prune_branch,
     validate_specialist_framework,
-    validate_specialist_max_turns_raw,
 )
-
-log = logging.getLogger(__name__)
 
 
 # Specialist dispatch action name.
 SPECIALIST_ACTION_NAME: str = "specialist"
-
-# Reference measurement action; the bring-up round guard is called for every
-# action too, and answers only for this one.
-BASELINE_ACTION_NAME: str = "baseline"
 
 
 # Specialist / Explore parallelism caps — single source of truth across layers.
@@ -122,7 +98,6 @@ PATH_LIKE_FIELDS: frozenset[str] = frozenset(
         "candidates_path",
         "patch_path",
         "target_file",
-        "resolved_patch_targets",
         "config_path",
         "output_dir",
         "workspace",
@@ -140,14 +115,6 @@ PATH_LIKE_FIELDS: frozenset[str] = frozenset(
 # Exempt from path validation: where a patch may land is decided by the
 # integration step that applies it.
 SOURCE_LIKE_FIELDS: frozenset[str] = frozenset({"source_file", "framework_source_root"})
-
-# Coordinator-owned warm replay may deploy a KB patch into the active framework
-# checkout.  The exception is intentionally narrower than SOURCE_LIKE_FIELDS:
-# only target_file values paired with a patch downloaded into this session's
-# remote-recipe bundle are admitted, and only at dispatch-time for this action.
-_WARM_REPLAY_ACTION = "replay_warm_recipe"
-_REMOTE_RECIPE_FILES_PARTS = ("runtime", "remote_recipe", "files")
-_MAX_POLICY_PATCH_BYTES = 4 * 1024 * 1024
 
 
 # Multi-node profile trace dirs live outside session_dir but must be referenceable by trace_dir / main_trace_path / trace_input (runtime-resolved).
@@ -183,10 +150,6 @@ class PolicyGate:
     """
 
     session_dir: Path | None = None
-    shared_state: Any | None = None
-    # Default-constructed, the three resource rules refuse nothing and every
-    # attempt goes straight to its acquire.
-    resources: ResourceFacts = field(default_factory=ResourceFacts)
 
     # Public API
     def validate_intent(self, from_agent: str, intent: Intent) -> None:
@@ -214,69 +177,14 @@ class PolicyGate:
         # ALERT carries no structural check.
 
         # Path-containment guard for PATH_LIKE_FIELDS in the payload.
-        self._validate_payload_paths(from_agent, intent.type, payload)
-
-    def validate_dispatched_task(
-        self,
-        action_name: str,
-        params: dict[str, Any] | None,
-        *,
-        task_id: str = "",
-    ) -> None:
-        """Re-validate a persisted queued task before executor dispatch.
-
-        Defense-in-depth for forged ``coordinator.db`` rows: replays path
-        containment and structural delegate action gates. The agent-channel
-        guards are skipped because the task row does not persist the
-        originating role; they are enforced at intent ingress.
-
-        Args:
-            action_name: The task ``kind`` / delegate action name.
-            params: Task params deserialized from the DB row.
-            task_id: The persisted row's id; a bring-up dispatched as the holder
-                of an open round is not refused by that round.
-
-        Raises:
-            PolicyDenied: When the task fails path-containment or structural
-                delegate action validation.
-        """
-        kind = str(action_name or "").strip()
-        if not kind:
-            raise PolicyDenied("dispatched task missing kind", rule="payload")
-        params_dict = dict(params or {}) if isinstance(params, dict) else {}
-        payload = {"action_name": kind, "params": params_dict}
-        trusted_framework_targets: frozenset[str] = frozenset()
-        if kind == _WARM_REPLAY_ACTION:
-            trusted_framework_targets = self._validate_warm_replay_targets(params_dict)
-        self._validate_payload_paths(
-            "orchestration",
-            IntentType.DELEGATE,
-            payload,
-            trusted_framework_targets=trusted_framework_targets,
-        )
-        # Coordinator-dispatched internal actions get path checks only.
-        if kind in COORDINATOR_INTERNAL_ACTIONS:
-            return
-        self._validate_delegate(payload, check_source=False, task_id=task_id)
+        self.validate_payload_paths(from_agent, intent.type, payload)
 
     # Per-intent validators
-    def _validate_delegate(
-        self,
-        payload: dict[str, Any],
-        *,
-        check_source: bool = True,
-        task_id: str = "",
-    ) -> None:
-        """Shared delegate validation for intents and dispatched task rows.
+    def _validate_delegate(self, payload: dict[str, Any]) -> None:
+        """Validate a ``DELEGATE`` intent: it names an action, and a specialist dispatch keeps its contract.
 
         Args:
-            payload: Delegate payload with ``action_name`` and optional
-                ``params``.
-            check_source: When True, enforce the guards that only apply to an
-                agent-emitted intent. Dispatch replay passes False because the
-                task row does not persist the originating role.
-            task_id: The dispatched row's id, when there is one; a bring-up
-                that holds the open round is not refused by that round.
+            payload: Delegate payload with ``action_name`` and optional ``params``.
         """
         action_name = str(payload.get("action_name", "")).strip()
         if not action_name:
@@ -284,47 +192,9 @@ class PolicyGate:
         # ``specialist`` bypasses the catalogue; ``_validate_specialist_dispatch`` owns its contract.
         if action_name == SPECIALIST_ACTION_NAME:
             params = payload.get("params")
-            # Ingress only: the Coordinator's own rows for these specialists are replayed here at dispatch.
-            if check_source and isinstance(params, dict):
+            if isinstance(params, dict):
                 deny_coordinator_dispatched_delegate(params)
             self._validate_specialist_dispatch(payload)
-            return
-        # Outside ``check_source``: a forged row is exactly the second bring-up
-        # the round exists to keep off the machine, and the row that holds the
-        # round is admitted by its own id rather than by skipping the channel.
-        self._validate_baseline_not_mid_round(action_name, task_id=task_id)
-
-    def _validate_baseline_not_mid_round(self, action_name: str, *, task_id: str = "") -> None:
-        """Deny a baseline while a bring-up round holds the machine.
-
-        A second bring-up fights the first for the same cards and ports, and a
-        specialist rewriting the framework underneath the round leaves the
-        anchor describing neither the old stack nor the new one. The round's
-        own holder is admitted: it already won the acquire ``RoundStore.open``
-        decides.
-
-        Args:
-            action_name: The delegated or dispatched action name.
-            task_id: The dispatched row's id; empty for an agent's delegate,
-                which has no row yet.
-
-        Raises:
-            PolicyDenied: When a round was holding the machine at the last
-                update and this attempt is not its holder.
-        """
-        if action_name != BASELINE_ACTION_NAME:
-            return
-        facts = self.resources
-        if not facts.round_excludes or (task_id and task_id == facts.excluding_round_holder):
-            return
-        raise PolicyDenied(
-            (
-                f"baseline: bring-up round {facts.excluding_round_id!r} "
-                f"(holder={facts.excluding_round_holder!r}) holds the machine while its lease is live"
-            ),
-            rule=RULE_ROUND_IN_FLIGHT,
-            hint="Let the round settle; a second bring-up would fight it for the same cards and ports.",
-        )
 
     def _validate_request(self, from_agent: str, payload: dict[str, Any]) -> None:
         """Validate a ``REQUEST`` intent.
@@ -400,16 +270,16 @@ class PolicyGate:
         )
 
     def _validate_specialist_dispatch(self, payload: dict[str, Any]) -> None:
-        """Enforce the specialist-delegate contract (Inv-11.2): gap_canonical_id required, max_turns ≤ cap.
+        """Enforce the specialist-delegate contract (Inv-11.2): an anchored dispatch names its gap, a freeform one its task.
 
         Args:
             payload (dict[str, Any]): the delegate intent payload carrying
-                ``params`` (tags, scope, gap_canonical_id, max_turns, ...).
+                ``params`` (tags, scope, gap_canonical_id, task_description, ...).
 
         Raises:
             PolicyDenied: when params are malformed or name an unregistered
-                framework, the gap id is missing, or max_turns exceeds the
-                hard cap. Tag / scope incoherence is logged rather than denied.
+                framework, the gap id is missing, or a freeform dispatch has no
+                task description. Tag / scope incoherence is logged rather than denied.
         """
         params = payload.get("params") or {}
         if not isinstance(params, dict):
@@ -425,9 +295,9 @@ class PolicyGate:
         tags = normalize_dispatch_tags(params)
         # scope='freeform' has no domain anchor, and a bare dispatch (no scope, no
         # anchor) defaults to that cheap lane: both skip the tag / gap vocabulary
-        # checks for a mechanical sanity gate that still requires a task_description.
+        # checks and still require a task_description.
         if scope_raw == SPECIALIST_SCOPE_FREEFORM or not (scope_raw or tags):
-            self._validate_freeform_specialist_dispatch(params)
+            validate_freeform_task_description(params)
             return
 
         # Observed, not enforced: resolve_specialist_profile re-infers the scope
@@ -444,112 +314,6 @@ class PolicyGate:
                     "with a task_description."
                 ),
             )
-        validate_specialist_max_turns_raw(params.get("max_turns"), where="params.max_turns")
-
-        self._validate_specialist_gpu_request(params)
-
-    def _validate_specialist_gpu_request(self, params: dict[str, Any]) -> None:
-        """Validate a specialist's optional GPU request.
-
-        The request's shape is judged here: whether the dispatch needs cards at
-        all (:func:`requires_gpu`, the rule the dispatcher leases by) and whether
-        the count it names is positive.
-        The pool-size arms come off the projection;
-        ``SpecialistGpuPool.try_acquire`` hands out the cards.
-
-        Args:
-            params: The specialist dispatch ``params`` carrying ``needs_gpu``
-                and an optional ``gpu_count``.
-
-        Raises:
-            PolicyDenied: When ``gpu_count`` is not positive, or the request
-                exceeds the pool the projection last saw.
-        """
-        from ..specialists.profile import (
-            requires_gpu,
-            resolve_specialist_profile,
-            uses_whole_machine_gpu_lane,
-        )
-
-        if not requires_gpu(params):
-            return
-        reserves_bench_lane = resolve_specialist_profile(params).reserves_benchmark_lane
-        facts = self.resources
-        serving_tp = facts.serving_tp
-        whole_machine = uses_whole_machine_gpu_lane(params)
-        # Whole-machine bench specialists lease from ``framework_gpu_pool``, so
-        # their default count matches the dispatcher.
-        if whole_machine and serving_tp == 0:
-            default_gpu_count = facts.whole_machine_pool or 1
-        else:
-            default_gpu_count = serving_tp or 1
-        gpu_count_raw = params.get("gpu_count", default_gpu_count)
-        if gpu_count_raw is None or (isinstance(gpu_count_raw, str) and not gpu_count_raw.strip()):
-            gpu_count_raw = default_gpu_count
-        try:
-            gpu_count = int(gpu_count_raw)
-        except (TypeError, ValueError):
-            # The dispatcher re-parses with the same default.
-            log.info("specialist dispatch gpu_count=%r not an integer; using %d", gpu_count_raw, default_gpu_count)
-            gpu_count = int(default_gpu_count)
-        if gpu_count <= 0:
-            raise PolicyDenied(
-                "delegate{action='specialist'}: gpu_count must be > 0 when needs_gpu=true",
-                rule="specialist_gpu_request_invalid",
-            )
-        # A bench specialist gets at least serving TP whatever it asked for:
-        # it takes the serving lane with it, so a smaller lease cannot run.
-        if reserves_bench_lane and serving_tp > gpu_count:
-            gpu_count = serving_tp
-        if not facts.read:
-            # Nothing has read the pool sizes, so there is no pool size to
-            # judge against; the acquire refuses if the pool cannot fund it.
-            return
-        if facts.gpu_specialist_capacity <= 0 and not (whole_machine and facts.whole_machine_pool > 0):
-            raise PolicyDenied(
-                "delegate{action='specialist'}: needs_gpu=true but the GPU specialist pool is disabled",
-                rule=RULE_GPU_POOL_DISABLED,
-                hint=("Start the session with --gpu-specialist-capacity > 0 before dispatching GPU specialists."),
-            )
-        pool_size = facts.whole_machine_pool if whole_machine else facts.gpu_specialist_pool
-        pool_desc = "whole-machine GPU pool" if whole_machine else "serving-disjoint GPU specialist pool"
-        if gpu_count > pool_size:
-            raise PolicyDenied(
-                (
-                    f"delegate{{action='specialist'}}: effective gpu_count={gpu_count} "
-                    f"exceeds {pool_desc} size={pool_size} (configured "
-                    f"capacity={facts.gpu_specialist_capacity}, serving_tp={facts.serving_tp})"
-                ),
-                rule=RULE_GPU_EXCEEDS_CAPACITY,
-                hint=(
-                    "Lower params.gpu_count for non-bench probes, omit it for bench "
-                    "specialists only when the pool has at least serving TP free "
-                    "cards, or start a session with a larger GPU pool."
-                ),
-            )
-
-    def _validate_freeform_specialist_dispatch(
-        self,
-        params: dict[str, Any],
-    ) -> None:
-        """Lightweight mechanical sanity gate for ``scope='freeform'``
-        specialists. Free-form dispatches carry no domain/tag/gap anchor, so this
-        validates only structural shape: one non-empty, length-bounded
-        ``task_description``.
-
-        Args:
-            params (dict[str, Any]): the freeform dispatch ``params`` carrying
-                its ``task_description``.
-
-        Raises:
-            PolicyDenied: when the GPU request fails, or the task description
-                is empty / too long.
-        """
-        # Freeform applies the same max_turns contract as domain dispatches.
-        validate_specialist_max_turns_raw(params.get("max_turns"), where="params.max_turns")
-        self._validate_specialist_gpu_request(params)
-        desc = str(params.get("task_description") or "").strip()
-        check_freeform_task_description(desc)
 
     def _validate_extend_lease(self, payload: dict[str, Any]) -> None:
         """Validate an ``EXTEND_LEASE`` intent.
@@ -605,144 +369,16 @@ class PolicyGate:
         """
         return any(resolved_within(value, p) for p in _trace_path_allowlist())
 
-    def _remote_recipe_files_root(self) -> Path | None:
-        """Return the session-owned root containing downloaded KB artifacts."""
-        try:
-            return self.session_dir.resolve().joinpath(*_REMOTE_RECIPE_FILES_PARTS)
-        except (OSError, RuntimeError):
-            return None
-
-    @staticmethod
-    def _patch_declared_targets(patch_path: Path) -> frozenset[str]:
-        """Read safe relative targets from unified-diff headers."""
-        try:
-            if not patch_path.is_file() or patch_path.stat().st_size > _MAX_POLICY_PATCH_BYTES:
-                return frozenset()
-            text = patch_path.read_text(encoding="utf-8", errors="replace")
-        except OSError:
-            return frozenset()
-
-        try:
-            return frozenset(parse_patch_targets(text).all)
-        except ValueError:
-            return frozenset()
-
-    def _framework_relative_candidates(self, target_file: str) -> frozenset[str]:
-        """Return the target path relative to this Session's active root."""
-        raw_root = resolve_session_framework_root()
-        if not raw_root:
-            return frozenset()
-        try:
-            target = Path(target_file).resolve()
-            root = Path(raw_root).resolve()
-            relative = target.relative_to(root)
-        except (OSError, RuntimeError):
-            return frozenset()
-        except ValueError:
-            return frozenset()
-        relative_posix = relative.as_posix()
-        return frozenset({relative_posix}) if relative_posix and relative_posix != "." else frozenset()
-
-    def _warm_replay_patch_key(self, raw_patch: Any, raw_targets: list[str]) -> str:
-        """Return the realpath of a warm-replay patch, which must lie inside the session KB download root."""
-        if not isinstance(raw_patch, str) or not raw_patch.strip():
-            raise PolicyDenied(
-                f"replay_warm_recipe resolved_patch_targets={raw_targets!r} has no patch_path",
-                rule="warm_replay_patch_missing",
-            )
-        kb_root = self._remote_recipe_files_root()
-        if kb_root is None or not resolved_within(raw_patch, str(kb_root)):
-            raise PolicyDenied(
-                f"replay_warm_recipe patch_path={raw_patch!r} is outside the session KB download root={kb_root!s}",
-                rule="warm_replay_patch_outside_kb_download",
-            )
-        try:
-            return str(Path(raw_patch).resolve())
-        except (OSError, RuntimeError) as exc:
-            raise PolicyDenied(
-                f"replay_warm_recipe patch_path={raw_patch!r} cannot be resolved",
-                rule="warm_replay_patch_outside_kb_download",
-            ) from exc
-
-    def _validate_warm_replay_targets(
-        self,
-        params: dict[str, Any],
-    ) -> frozenset[str]:
-        """Validate the sole framework-target exception for warm replay.
-
-        Every admitted target must resolve under the Session's active framework
-        root, be paired with a patch inside the session's downloaded KB bundle,
-        and correspond to a target declared by that patch.  The returned
-        realpaths are the only out-of-session ``target_file`` values accepted by
-        the generic recursive path guard.
-        """
-        if self.session_dir is None:
-            return frozenset()
-        plan = params.get("warm_kernel_plan") or []
-        if not isinstance(plan, list):
-            raise PolicyDenied(
-                "replay_warm_recipe warm_kernel_plan must be a list",
-                rule="warm_replay_plan_invalid",
-            )
-
-        admitted: set[str] = set()
-        patch_coverage: dict[str, tuple[frozenset[str], set[str]]] = {}
-        for index, entry in enumerate(plan):
-            raw_targets = _warm_plan_entry_targets(entry, index)
-            if not raw_targets:
-                continue
-
-            patch_key = self._warm_replay_patch_key(entry.get("patch_path"), raw_targets)
-            if patch_key not in patch_coverage:
-                patch_coverage[patch_key] = (self._patch_declared_targets(Path(patch_key)), set())
-            declared_targets, covered_targets = patch_coverage[patch_key]
-            for raw_target in raw_targets:
-                active_root = resolve_session_framework_root()
-                if not active_root or not resolved_within(raw_target, active_root):
-                    raise PolicyDenied(
-                        f"replay_warm_recipe target_file={raw_target!r} is outside the Session active framework root",
-                        rule="warm_replay_target_outside_framework_roots",
-                    )
-                target_candidates = self._framework_relative_candidates(raw_target)
-                if declared_targets.isdisjoint(target_candidates):
-                    raise PolicyDenied(
-                        f"replay_warm_recipe target_file={raw_target!r} does not "
-                        f"match patch targets={sorted(declared_targets)!r}",
-                        rule="warm_replay_patch_target_mismatch",
-                    )
-                covered_targets.update(target_candidates)
-                try:
-                    admitted.add(str(Path(raw_target).resolve()))
-                except (OSError, RuntimeError) as exc:
-                    raise PolicyDenied(
-                        f"replay_warm_recipe target_file={raw_target!r} cannot be resolved",
-                        rule="warm_replay_target_outside_framework_roots",
-                    ) from exc
-        for patch_key, (declared_targets, covered_targets) in patch_coverage.items():
-            uncovered = declared_targets - covered_targets
-            if uncovered:
-                raise PolicyDenied(
-                    f"replay_warm_recipe patch_path={patch_key!r} declares "
-                    f"targets with no matching target_file={sorted(uncovered)!r}",
-                    rule="warm_replay_patch_target_mismatch",
-                )
-        return frozenset(admitted)
-
-    def _validate_payload_paths(
-        self,
-        from_agent: str,
-        intent_type: IntentType,
-        payload: dict[str, Any],
-        *,
-        trusted_framework_targets: frozenset[str] = frozenset(),
-    ) -> None:
+    def validate_payload_paths(self, from_agent: str, intent_type: IntentType, payload: dict[str, Any]) -> None:
         """Walk payload (recursively); reject path-like values escaping session_dir. No-op when session_dir is None.
 
+        Run on every intent, and on the task params the Coordinator builds from
+        what a specialist delivered.
+
         Args:
-            from_agent (str): the emitting agent, used in error messages.
+            from_agent (str): the author of the payload, used in error messages.
             intent_type (IntentType): the intent type, used in error messages.
-            payload (dict[str, Any]): the intent payload to walk for path-like
-                fields.
+            payload (dict[str, Any]): the payload to walk for path-like fields.
 
         Raises:
             PolicyDenied: when a path-like value escapes session_dir and the
@@ -783,23 +419,14 @@ class PolicyGate:
                 return
             if key not in PATH_LIKE_FIELDS:
                 return
-            self._check_payload_path(from_agent, intent_type, key, node, trusted_framework_targets)
+            self._check_payload_path(from_agent, intent_type, key, node)
 
         visit(payload, ())
 
-    def _check_payload_path(
-        self, from_agent: str, intent_type: IntentType, key: str, node: str, trusted_framework_targets: frozenset[str]
-    ) -> None:
+    def _check_payload_path(self, from_agent: str, intent_type: IntentType, key: str, node: str) -> None:
         """Reject one path-like payload value escaping session_dir and every allowlist its field may use."""
         if self._path_under_session(node):
             return
-        if key in {"target_file", "resolved_patch_targets"} and trusted_framework_targets:
-            try:
-                resolved = str(Path(node).resolve())
-            except (OSError, RuntimeError):
-                resolved = ""
-            if resolved in trusted_framework_targets:
-                return
         # Multi-node profile traces live outside session_dir; allow trace-input fields against the trace allowlist.
         if key in TRACE_PATH_LIKE_FIELDS and self._path_in_trace_allowlist(node):
             return
@@ -814,30 +441,6 @@ class PolicyGate:
                 f"{list(_trace_path_allowlist())!r}"
             ),
         )
-
-
-def _warm_plan_entry_targets(entry: Any, index: int) -> list[str]:
-    """The ``resolved_patch_targets`` of one warm-kernel plan entry, ``[]`` when it names none.
-
-    Raises:
-        PolicyDenied: When the entry is not an object or its targets are not a flat non-empty string list.
-    """
-    if not isinstance(entry, dict):
-        raise PolicyDenied(
-            f"replay_warm_recipe warm_kernel_plan[{index}] must be an object",
-            rule="warm_replay_plan_invalid",
-        )
-    raw_targets = entry.get("resolved_patch_targets")
-    if not raw_targets:
-        return []
-    if not isinstance(raw_targets, list) or not all(
-        isinstance(target, str) and target.strip() for target in raw_targets
-    ):
-        raise PolicyDenied(
-            f"replay_warm_recipe warm_kernel_plan[{index}].resolved_patch_targets must be a flat non-empty string list",
-            rule="warm_replay_plan_invalid",
-        )
-    return raw_targets
 
 
 __all__ = [

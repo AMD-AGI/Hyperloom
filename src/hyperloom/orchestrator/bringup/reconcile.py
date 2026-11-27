@@ -56,13 +56,11 @@ class ReconcileLinks:
     """The running loop's state the pass reads and writes.
 
     Attributes:
-        resources: The gate's resource facts.
         session_dir: Where SharedState is saved after a terminal is set.
         result_pending: Whether a terminal task's result is still to be
             booked by the dispatcher.
     """
 
-    resources: Any
     session_dir: Any
     result_pending: Callable[[str], bool]
 
@@ -103,7 +101,7 @@ class ReconcileReport:
 
 
 class Reconciler:
-    """The unconditional repair pass, and the projection rebuild that ends it.
+    """The unconditional repair pass.
 
     Attributes:
         last_report (ReconcileReport): What the most recent pass did; read by
@@ -122,8 +120,7 @@ class Reconciler:
 
         Args:
             stores: The durable stores the pass repairs.
-            shared_state: SharedState, read for the projection and written when
-                an unreaped round stops the session.
+            shared_state: SharedState, whose revalidation window the pass closes.
             links: The running loop's state the pass reads and writes.
         """
         self._rounds = stores.rounds
@@ -133,7 +130,6 @@ class Reconciler:
         self._tasks = stores.tasks
         self._locks = stores.locks
         self._shared_state = shared_state
-        self._resources = links.resources
         self._session_dir = links.session_dir
         self._result_pending = links.result_pending
         self.last_report = ReconcileReport()
@@ -149,7 +145,7 @@ class Reconciler:
         return taken
 
     async def run(self, now_unix: float) -> ReconcileReport:
-        """Run every rule in order, the projection rebuild last.
+        """Run every rule in order.
 
         Args:
             now_unix: Current wall time.
@@ -163,7 +159,6 @@ class Reconciler:
             self._reap_leases,
             self._resolve_open_rounds,
             self._close_stale_validation_window,
-            self._rebuild_projection,
         ):
             try:
                 await rule(now_unix, report)
@@ -293,10 +288,6 @@ class Reconciler:
             (task_id, task_id),
         )
         return row is not None
-
-    async def _rebuild_projection(self, now_unix: float, report: ReconcileReport) -> None:
-        """Re-read the facts the gate's resource rules judge against."""
-        self._resources.update(self._shared_state, rounds=await self._rounds.open_rounds())
 
     async def _task(self, task_id: str) -> Task | None:
         """Read one task, or ``None`` when the registry has no such row."""

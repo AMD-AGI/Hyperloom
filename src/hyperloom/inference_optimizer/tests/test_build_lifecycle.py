@@ -464,28 +464,6 @@ async def test_real_component_writes_plan_json_before_spawn(build_coord, tmp_pat
     assert "targeted_build" in " ".join(cmd)
 
 
-# Policy gate
-
-
-def test_targeted_build_params_pass_policy_gate(tmp_path):
-    """Build params must not be misidentified as path-like fields."""
-    from hyperloom.orchestrator.policy.gate import PolicyGate
-
-    session_dir = tmp_path / "session"
-    session_dir.mkdir()
-    gate = PolicyGate(session_dir=session_dir)
-    action = TargetedBuildAction(
-        gap_id="gap.enablement.fp4_moe",
-        framework="vllm",
-        component="aiter",
-        capability="fp4_moe",
-        repo_url="https://github.com/ROCm/aiter",
-        ref="v0.1.0",
-        gpu_arch="gfx950",
-    )
-    gate.validate_dispatched_task("targeted_build", action.to_state())
-
-
 # P1-12 regression: spawn failure lands row in failed state
 
 

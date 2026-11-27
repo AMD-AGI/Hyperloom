@@ -846,7 +846,6 @@ async def test_confirmation_leaves_round_fence_and_events_for_existing_reconcile
     from hyperloom.orchestrator.bus.resource_lock import SqliteLeaseBackend
     from hyperloom.orchestrator.bus.storage.connection import SqliteConnection
     from hyperloom.orchestrator.state.round_store import EXPIRED_REAPED, RoundStore
-    from hyperloom.orchestrator.policy.projection import ResourceFacts
     from hyperloom.orchestrator.state.shared_state import SharedState
     from hyperloom.orchestrator.state.task_registry import TaskRegistry
 
@@ -867,7 +866,6 @@ async def test_confirmation_leaves_round_fence_and_events_for_existing_reconcile
             ReconcileStores(rounds=rounds, tasks=tasks, locks=SqliteLeaseBackend(db)),
             SharedState(),
             links=ReconcileLinks(
-                resources=ResourceFacts(),
                 session_dir=tmp_path,
                 result_pending=lambda _task_id: False,
             ),

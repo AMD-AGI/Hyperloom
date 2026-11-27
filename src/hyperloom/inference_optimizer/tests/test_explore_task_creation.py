@@ -97,6 +97,7 @@ def _delegate_coord(tmp_path: Path):
     c.dispatcher.admission_denial_for_action = lambda *a, **k: None  # type: ignore[method-assign]
     c.dispatcher.registry_lanes_ttl = lambda _name: (set(), 0)  # type: ignore[method-assign]
     c.policy = None
+    c.rounds = None
     return c
 
 

@@ -888,18 +888,9 @@ def test_langfuse_status_includes_explore_runtime_and_kb_hit():
     assert "session_elapsed_s" in summary
 
 
-def test_policy_gate_phase_strict_allows_in_phase_action():
-    state = SharedState()
-    phase_state.record_phase_transition(
-        state,
-        to_phase="PRELUDE",
-        reason="phase_entered",
-        evidence={},
-        at=phase_state.PhaseClock(ts="2026-05-19T00:00:00+00:00", ts_unix=1.0),
-    )
-    gate = PolicyGate(shared_state=state)
+def test_policy_gate_admits_a_baseline_delegate():
     intent = Intent(type=IntentType.DELEGATE, payload={"action_name": "baseline"})
-    gate.validate_intent("orchestration", intent)  # no exception
+    PolicyGate().validate_intent("orchestration", intent)  # no exception
 
 
 @pytest.fixture

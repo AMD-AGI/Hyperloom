@@ -348,9 +348,6 @@ FREEFORM_DOMAIN: SpecialistDomain = SpecialistDomain(
 # Default number of LLM turns a specialist may run.
 DEFAULT_SPECIALIST_MAX_TURNS: int = 1000
 
-# Hard cap; PolicyGate denies a dispatch that asks for more turns.
-SPECIALIST_MAX_TURNS_HARD_CAP: int = 1000
-
 
 __all__ = [
     "CUSTOM_SPECIALIST_KEY",
@@ -361,7 +358,6 @@ __all__ = [
     "PR_QUERY_REPOS",
     "SPECIALIST_DOMAINS",
     "SPECIALIST_DOMAIN_KEYS",
-    "SPECIALIST_MAX_TURNS_HARD_CAP",
     "SpecialistDomain",
     "custom_specialist_key",
     "dispatch_domain",

@@ -12,9 +12,7 @@ import time
 from collections.abc import Awaitable, Callable, Collection
 from functools import partial
 from typing import Any, NamedTuple
-from hyperloom_common.coerce import to_int
 from hyperloom.common.deadline import Deadline
-from hyperloom_common.env import is_truthy
 from hyperloom_common.llm.llm_attribution import current_action_scope
 from hyperloom_common.proctree import TERM_GRACE_SEC
 from hyperloom.inference_optimizer.session.optimization_journal import Verdict
@@ -27,7 +25,6 @@ from ..actions.executors._subprocess_kill import (
 from ..phases import dispatch_order
 from ..bus.message_bus import Message
 from ..policy.gate import SPECIALIST_FROM_AGENT_PREFIX
-from ..policy.projection import serving_tp_for_policy
 from ..bus.gpu_pool import GPU_LEASE_TTL_GRACE
 from ..bus.resource_lock import KNOWN_LANES
 from ._dead_holder import DeadHolderAccountingMixin
@@ -424,34 +421,11 @@ class DispatcherCollaborator(AdmissionMixin, DeadHolderAccountingMixin, Coordina
 
     async def _admit_gpu_specialist(self, task: Task, lease: Any, extra_context: dict[str, Any]) -> HeldLeases | None:
         """Take the GPU leases a specialist needs, recording the devices it may use in ``extra_context``."""
-        from ..specialists.profile import is_authoring_specialist, requires_gpu
-        from ..specialists.profile import uses_whole_machine_gpu_lane
-
-        params = task.params
-        if not requires_gpu(params):
+        request = self.specialist_gpu_request(task.params)
+        if request is None:
             return HeldLeases(prebound_lease=lease)
-        serving_tp = serving_tp_for_policy(self.shared_state)
-        gpu_pool = self.framework_gpu_pool
-        if not uses_whole_machine_gpu_lane(params):
-            gpu_pool = self.gpu_specialist_pool
-            default_gpu_count = serving_tp or 1
-        elif is_authoring_specialist(params):
-            default_gpu_count = gpu_pool.capacity or 1
-        else:
-            # Bench specialist: size to the serving TP.
-            default_gpu_count = serving_tp or gpu_pool.capacity or 1
-        gpu_count = to_int(params.get("gpu_count")) or default_gpu_count
-        if is_truthy(params.get("bench")) and serving_tp > 0 and gpu_count < serving_tp:
-            log.info(
-                "specialist %s: bench=true with gpu_count=%d < serving TP=%d; flooring gpu_count to TP "
-                "(a bench specialist starts a real TP-sharded server and cannot run on fewer cards).",
-                task.task_id,
-                gpu_count,
-                serving_tp,
-            )
-            gpu_count = serving_tp
-        gpu_lease = await gpu_pool.try_acquire(
-            count=gpu_count,
+        gpu_lease = await request.pool.try_acquire(
+            count=request.count,
             holder_id=task.task_id,
             task_id=task.task_id,
         )

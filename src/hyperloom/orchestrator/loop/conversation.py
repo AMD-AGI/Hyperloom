@@ -624,7 +624,13 @@ class ConversationCollaborator(CoordinatorCollaborator):
         # if the session were unconstrained. Pure string assembly, no I/O.
         context.extend(self.shared_state.to_constraint_sections())
         context.append("=== Resource pools ===")
-        context.append(resource_pools_summary(self.shared_state))
+        context.append(
+            resource_pools_summary(
+                self.shared_state,
+                serving_disjoint_pool=self.gpu_specialist_pool,
+                whole_machine_pool=self.framework_gpu_pool,
+            )
+        )
         context.extend(self._orchestration_context_sections())
         # A task finishing or a plateau count lands between
         # two ticks, so these blocks follow the ledger into the turn: the cached

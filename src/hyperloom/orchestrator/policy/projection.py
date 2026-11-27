@@ -1,37 +1,19 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Resource facts ``PolicyGate`` needs but cannot read where it is asked."""
+"""The session's serving TP and configured GPU capacity, and the resource-pool block of the Orchestration prompt."""
 
 from __future__ import annotations
 
-from collections.abc import Sequence
-from dataclasses import dataclass
 from typing import Any
 
-from ..bus.gpu_pool import resolve_gpu_specialist_devices, resolve_whole_machine_devices
+from ..bus.gpu_pool import SpecialistGpuPool
 from ..bus.resource_lock import DEFAULT_LANE_CAPACITIES
-from ..state.round_store import Round
-
-#: A bring-up round holds the machine.
-RULE_ROUND_IN_FLIGHT = "enablement_round_in_flight"
-
-#: The GPU specialist pool is configured to zero cards.
-RULE_GPU_POOL_DISABLED = "specialist_gpu_pool_disabled"
-
-#: More cards were asked for than the pool holds.
-RULE_GPU_EXCEEDS_CAPACITY = "specialist_gpu_request_exceeds_capacity"
 
 __all__ = [
-    "RULE_GPU_EXCEEDS_CAPACITY",
-    "RULE_GPU_POOL_DISABLED",
-    "RULE_ROUND_IN_FLIGHT",
-    "ResourceFacts",
-    "effective_gpu_specialist_pool_size",
     "gpu_specialist_ceiling",
     "resource_pools_summary",
     "serving_tp_for_policy",
-    "whole_machine_pool_size",
 ]
 
 
@@ -55,88 +37,25 @@ def serving_tp_for_policy(shared_state: Any) -> int:
     return max(0, int(shared_state.tp or 0))
 
 
-def effective_gpu_specialist_pool_size(shared_state: Any) -> int:
-    """Size of the serving-disjoint GPU specialist pool after the serving carve.
+def resource_pools_summary(
+    shared_state: Any, *, serving_disjoint_pool: SpecialistGpuPool, whole_machine_pool: SpecialistGpuPool
+) -> str:
+    """Render the GPU pool / lane capacity block for prompt injection.
 
     Args:
-        shared_state: SharedState carrying capacity and TP.
-
-    Returns:
-        int: Number of cards a non-bench ``needs_gpu`` specialist can be given.
+        shared_state: SharedState carrying TP, the configured capacity and the research-lane capacity.
+        serving_disjoint_pool: The pool a non-bench ``needs_gpu`` specialist leases from.
+        whole_machine_pool: The pool a bench or enablement specialist leases from.
     """
-    ceiling = gpu_specialist_ceiling(shared_state)
-    if ceiling <= 0:
-        return 0
-    return len(resolve_gpu_specialist_devices(ceiling, serving_tp=serving_tp_for_policy(shared_state)))
-
-
-def whole_machine_pool_size() -> int:
-    """Size of the whole-machine (enablement / bench) GPU pool.
-
-    Returns:
-        int: Number of visible cards.
-    """
-    return len(resolve_whole_machine_devices())
-
-
-def resource_pools_summary(shared_state: Any) -> str:
-    """Render the GPU pool / lane capacity block for prompt injection."""
     lines = [
         f"serving_tp={serving_tp_for_policy(shared_state)}",
         f"gpu_specialist_capacity={gpu_specialist_ceiling(shared_state)}",
-        f"serving_disjoint_gpu_pool={effective_gpu_specialist_pool_size(shared_state)}"
+        f"serving_disjoint_gpu_pool={serving_disjoint_pool.capacity}"
         "  (non-bench needs_gpu specialists admit against this)",
-        f"whole_machine_gpu_pool={whole_machine_pool_size()}"
+        f"whole_machine_gpu_pool={whole_machine_pool.capacity}"
         "  (bench / enablement-authoring specialists admit against this)",
         f"research_lane_capacity={max(0, int(shared_state.research_lane_capacity or 0))}  (concurrent CPU specialists)",
         f"gpu_research_lane_capacity={DEFAULT_LANE_CAPACITIES['gpu_research_lane']}"
         "  (mutually exclusive with serving / benchmark / profile)",
     ]
     return "\n".join(lines)
-
-
-@dataclass
-class ResourceFacts:
-    """What the resource rules read, updated in place once per tick.
-
-    Attributes:
-        read: Whether anything has read these from their sources. False denies
-            nothing: a gate with no repair pass behind it must not refuse a
-            dispatch on a pool size nobody looked up.
-        excluding_round_id: The bring-up round denying an acquire, if any.
-        excluding_round_holder: The task holding that round.
-        serving_tp: Tensor parallelism the served model runs at.
-        gpu_specialist_capacity: Configured GPU specialist capacity.
-        gpu_specialist_pool: Cards available to a serving-disjoint specialist.
-        whole_machine_pool: Cards available to a whole-machine specialist.
-    """
-
-    read: bool = False
-    excluding_round_id: str = ""
-    excluding_round_holder: str = ""
-    serving_tp: int = 0
-    gpu_specialist_capacity: int = 0
-    gpu_specialist_pool: int = 0
-    whole_machine_pool: int = 0
-
-    @property
-    def round_excludes(self) -> bool:
-        """bool: Whether a bring-up round was holding the machine at the update."""
-        return bool(self.excluding_round_id)
-
-    def update(self, shared_state: Any, *, rounds: Sequence[Round] = ()) -> None:
-        """Re-read every fact from its source.
-
-        Args:
-            shared_state: SharedState to read the session's own facts from.
-            rounds: Rounds excluding now, from ``RoundStore.open_rounds``. The
-                first is reported.
-        """
-        self.read = True
-        excluding = rounds[0] if rounds else None
-        self.excluding_round_id = "" if excluding is None else excluding.round_id
-        self.excluding_round_holder = "" if excluding is None else excluding.holder_task_id
-        self.serving_tp = serving_tp_for_policy(shared_state)
-        self.gpu_specialist_capacity = gpu_specialist_ceiling(shared_state)
-        self.gpu_specialist_pool = effective_gpu_specialist_pool_size(shared_state)
-        self.whole_machine_pool = whole_machine_pool_size()

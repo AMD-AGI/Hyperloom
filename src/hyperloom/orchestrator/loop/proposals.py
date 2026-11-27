@@ -8,11 +8,13 @@ import hashlib
 import json
 from typing import TYPE_CHECKING, Any, Mapping
 from hyperloom_common.coerce import to_float
+from hyperloom.inference_optimizer.protocol.intent import IntentType
 from hyperloom.orchestrator.lever import LEVER_CONFIG
 from ..actions.executors.benchmark_result import is_valid_measurement
 from ..actions.executors.integrate._integrate_vocabulary import RESULT_BENCHED
 from ..phases import machine_state as _phase_state
-from ..policy.gate import SPECIALIST_ACTION_NAME
+from ..policy.denial import PolicyDenied
+from ..policy.gate import SPECIALIST_ACTION_NAME, SPECIALIST_FROM_AGENT_PREFIX
 from ..state.shared_state import inject_stack_base_params
 from ..state.task_registry import (
     TERMINAL_STATES,
@@ -156,11 +158,44 @@ class ProposalsCollaborator(CoordinatorCollaborator):
         cursor = int((self.shared_state.explore_search or {}).get("cursor") or 0)
         params.setdefault("explore_search_cursor", cursor)
 
+    def deliverable_path_denial(self, params: dict[str, Any]) -> PolicyDenied | None:
+        """Refuse a specialist deliverable whose ``integrate_patch`` params name a path outside the session directory.
+
+        Asked where the deliverable becomes task params, on every route to its task, so a refusal leaves no row.
+
+        Args:
+            params: The deliverable's ``integrate_patch`` params, carrying ``specialist_task_id``.
+        """
+        try:
+            self.policy.validate_payload_paths(
+                f"{SPECIALIST_FROM_AGENT_PREFIX}{params['specialist_task_id']}",
+                IntentType.DELEGATE,
+                {"action_name": "integrate_patch", "params": params},
+            )
+        except PolicyDenied as denied:
+            return denied
+        return None
+
     async def enqueue_integrate_patch(self, params: dict[str, Any]) -> Task | None:
         """Queue the ``integrate_patch`` that measures a finished specialist's deliverable.
 
-        ``None`` when a task under the deliverable's key already holds it or has measured it.
+        ``None`` when a task under the deliverable's key already holds it or has measured it, or when the
+        deliverable is refused for a path it carries.
         """
+        refused = self.deliverable_path_denial(params)
+        if refused is not None:
+            log.warning("specialist %s: deliverable not queued: %s", params["specialist_task_id"], refused)
+            await self.bus.record_observation(
+                "coordinator",
+                "observation",
+                {
+                    "kind": "specialist_patch_integrate_refused",
+                    "specialist_task_id": params["specialist_task_id"],
+                    "rule": refused.rule,
+                    "error": str(refused),
+                },
+            )
+            return None
         self.seed_integrate_patch_params(params)
         unspent = await self.unspent_key("integrate_patch", integrate_patch_key(params["specialist_task_id"]))
         if unspent is None or unspent.holder is not None:

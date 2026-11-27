@@ -9,10 +9,7 @@ import logging
 from typing import Any
 
 from hyperloom.inference_optimizer import framework_registry
-from ..specialists.domains import (
-    KNOWLEDGE_DOMAIN_TAG_SET,
-    SPECIALIST_MAX_TURNS_HARD_CAP,
-)
+from ..specialists.domains import KNOWLEDGE_DOMAIN_TAG_SET
 from .denial import PolicyDenied
 from ..specialists.profile import (
     SCOPE_DOMAIN as SPECIALIST_SCOPE_DOMAIN,
@@ -25,9 +22,6 @@ log = logging.getLogger(__name__)
 
 # The GEMM tuning action, refused as a REQUEST kind.
 GEMM_TUNING_ACTION_NAME: str = "gemm_tuning"
-
-# Free-form (``scope='freeform'``) sanity-gate limit.
-SPECIALIST_FREEFORM_TASK_DESC_MAX_CHARS: int = 8000
 
 
 def validate_gemm_tuning_request(kind: str) -> None:
@@ -85,53 +79,6 @@ def validate_specialist_framework(params: dict[str, Any]) -> None:
         )
 
 
-def validate_specialist_max_turns_raw(
-    max_turns_raw: Any,
-    *,
-    where: str,
-) -> None:
-    """Validate an optional specialist ``max_turns`` dial.
-
-    Args:
-        max_turns_raw: Raw ``max_turns`` value from dispatch params, or ``None``.
-        where: Label used in error messages (e.g. ``params.max_turns``).
-
-    Raises:
-        PolicyDenied: When the value is not an int, is negative, or exceeds
-            :data:`SPECIALIST_MAX_TURNS_HARD_CAP`.
-    """
-    if max_turns_raw is None:
-        return
-    try:
-        max_turns = int(max_turns_raw)
-    except (TypeError, ValueError) as exc:
-        raise PolicyDenied(
-            f"delegate{{action='specialist'}}: {where} max_turns must be int, got {max_turns_raw!r}",
-            rule="specialist_dispatch_source",
-        ) from exc
-    if max_turns < 0:
-        raise PolicyDenied(
-            f"delegate{{action='specialist'}}: {where} max_turns={max_turns} must be >= 0",
-            rule="specialist_dispatch_source",
-            hint=(
-                "Use a non-negative integer. "
-                "0 = unbounded (bounded by the wall-clock budget); "
-                "omit max_turns to use the default turn cap."
-            ),
-        )
-    if max_turns > SPECIALIST_MAX_TURNS_HARD_CAP:
-        raise PolicyDenied(
-            f"delegate{{action='specialist'}}: {where} max_turns={max_turns} "
-            f"exceeds the hard cap {SPECIALIST_MAX_TURNS_HARD_CAP}",
-            rule="specialist_dispatch_source",
-            hint=(
-                f"max_turns must be <= {SPECIALIST_MAX_TURNS_HARD_CAP} "
-                "(0 = unbounded; depth is bounded by the wall-clock "
-                "budget, so omit max_turns unless capping a probe early)."
-            ),
-        )
-
-
 def log_specialist_dispatch_coherence(scope_raw: str, tags: list[str]) -> None:
     """Log a tag / scope combination the specialist profile will re-infer."""
     if not tags:
@@ -156,25 +103,18 @@ def log_specialist_dispatch_coherence(scope_raw: str, tags: list[str]) -> None:
         log.info("specialist dispatch scope='domain' with %d tags=%r", len(tags), tags)
 
 
-def check_freeform_task_description(desc: str) -> None:
-    """Structural checks for a free-form ``params.task_description``: non-empty and length-bounded.
+def validate_freeform_task_description(params: dict[str, Any]) -> None:
+    """Refuse a free-form specialist dispatch that carries no ``task_description``: the description is its whole mandate.
 
     Args:
-        desc (str): the freeform task description to validate.
+        params: The specialist dispatch ``params``.
 
     Raises:
-        PolicyDenied: when ``desc`` is empty or exceeds the length cap.
+        PolicyDenied: When ``params.task_description`` is empty.
     """
-    if not desc:
+    if not str(params.get("task_description") or "").strip():
         raise PolicyDenied(
             "delegate{action='specialist',scope='freeform'}: params task_description must be non-empty",
             rule="specialist_freeform_empty_description",
             hint=("A freeform specialist needs a natural-language task_description (the whole mandate)."),
-        )
-    if len(desc) > SPECIALIST_FREEFORM_TASK_DESC_MAX_CHARS:
-        raise PolicyDenied(
-            f"delegate{{action='specialist',scope='freeform'}}: "
-            f"params task_description is {len(desc)} chars > cap "
-            f"{SPECIALIST_FREEFORM_TASK_DESC_MAX_CHARS}",
-            rule="specialist_freeform_description_too_long",
         )

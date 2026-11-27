@@ -283,6 +283,31 @@ it.
   `custom_specialist_refused` observation and a log line naming the rule
   instead of a `policy_denied` addressed to Orchestration. See
   [Upgrade](reference/upgrade.md).
+- **PolicyGate keeps no copy of the session's resources and is not run a
+  second time at dispatch.** The bring-up round rule
+  (`enablement_round_in_flight`) and the GPU pool rule
+  (`specialist_gpu_request_exceeds_capacity`) are answered from the round
+  store and from the pool the dispatcher leases from, when the delegate is
+  handled: a round opened during the Orchestration turn refuses that turn's
+  `baseline`, and a GPU request is judged at the count the dispatcher will
+  lease, so one it could never fund is no longer queued to wait for good. A
+  queued `baseline` is still cancelled at dispatch while another task's round
+  is open (`policy_enablement_round_in_flight`); no other
+  `policy_<rule>` cancellation remains. **Removed denial rules:**
+  `specialist_gpu_request_invalid` (`gpu_count: 0` means the default),
+  `specialist_gpu_pool_disabled` (an empty pool is
+  `specialist_gpu_request_exceeds_capacity`, with a reason that says so),
+  `specialist_freeform_description_too_long`, the `max_turns` arm of
+  `specialist_dispatch_source` (a value above 1000 is the turn cap, a value
+  that is not a positive integer runs at the default) and the five
+  `warm_replay_*` rules. Two checks run before the work instead of after it:
+  a warm-replay kernel item whose files lie outside the session's framework
+  checkout is deferred before it is patched, where 1.2.x patched it and then
+  cancelled the replay with the patch still in the tree; and a specialist
+  deliverable whose `integrate_patch` names a path outside the session
+  directory is not queued (`specialist_patch_integrate_refused`), where
+  1.2.x queued it and cancelled it at dispatch. `resolved_patch_targets` is
+  gone from warm-replay plan entries. See [Upgrade](reference/upgrade.md).
 - **The gap ledger holds no row derived from the objective, the failure log
   or the research hints, and a gap has no severity.** `gaps` in `state.json`,
   the `=== Current gaps ===` block, `get_gaps` and a published recipe's

@@ -196,15 +196,9 @@ class Coordinator:
         # Thread live SharedState into the runner so executors get it via ctx.extra.
         self.sub.shared_state = self.shared_state
         self._init_gpu_pools()
-        # The durable bring-up mutex. The gate never reads it; ``open`` decides.
+        # The durable bring-up mutex: ``open`` decides who starts a round.
         self.rounds = RoundStore(self.db)
-        self.policy = PolicyGate(
-            session_dir=self.session_dir,
-            shared_state=self.shared_state,
-            # Seeded at boot: an empty snapshot would advise against a GPU
-            # dispatch the pool can in fact satisfy.
-        )
-        self.sub.policy = self.policy
+        self.policy = PolicyGate(session_dir=self.session_dir)
         # Attach read-only context-pull MCP tools to Orchestration backend.
         self.conversation.attach_orchestration_context_tools()
         # Resume detection must run before any boot-time state.json write.
@@ -456,7 +450,6 @@ class Coordinator:
                 ReconcileStores(rounds=self.rounds, tasks=self.tasks, locks=self.locks),
                 self.shared_state,
                 links=ReconcileLinks(
-                    resources=self.policy.resources,
                     session_dir=self.session_dir,
                     # The window a revalidation holds is closed by the writeback when
                     # its result is booked; this pass only closes one nobody will.

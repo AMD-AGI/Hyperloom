@@ -21,7 +21,7 @@ from hyperloom.orchestrator.bringup.reconcile import (
 )
 from hyperloom.orchestrator.bus.resource_lock import SqliteLeaseBackend
 from hyperloom.orchestrator.bus.storage.connection import SqliteConnection
-from hyperloom.orchestrator.policy.projection import ResourceFacts
+from hyperloom.orchestrator.policy.bringup_round import bringup_round_denial
 from hyperloom.orchestrator.state.round_store import (
     OPEN,
     SETTLED,
@@ -81,9 +81,7 @@ def db(tmp_path):
     conn.close()
 
 
-def _build(
-    db, *, state=None, result_pending=None, resources=None
-) -> tuple[Reconciler, RoundStore, TaskRegistry, _State]:
+def _build(db, *, state=None, result_pending=None) -> tuple[Reconciler, RoundStore, TaskRegistry, _State]:
     """A reconciler over ``db``, with the pieces a test needs to inspect."""
     rounds = RoundStore(db)
     tasks = TaskRegistry(db)
@@ -92,7 +90,6 @@ def _build(
         ReconcileStores(rounds=rounds, tasks=tasks, locks=SqliteLeaseBackend(db)),
         shared,
         links=ReconcileLinks(
-            resources=ResourceFacts() if resources is None else resources,
             session_dir=db.db_path.parent,
             result_pending=result_pending or (lambda _task_id: False),
         ),
@@ -311,20 +308,19 @@ async def test_a_running_task_whose_process_is_gone_is_failed_and_one_unobservab
 
 
 @pytest.mark.asyncio
-async def test_the_resource_facts_are_reread_from_what_the_rules_left(db):
-    """The facts the gate reads reflect the repair, not the state before it."""
-    facts = ResourceFacts()
-    rec, rounds, tasks, _ = _build(db, resources=facts)
+async def test_a_baseline_is_admitted_once_the_pass_has_ended_an_abandoned_round(db):
+    """The baseline rule reads the round the repair left, so the pass that ends a round is what admits the baseline."""
+    rec, rounds, tasks, _ = _build(db)
     await _open_round(rounds, tasks, holder="spec-1")
     await tasks.transition("spec-1", "running")
     await tasks.transition("spec-1", "succeeded")
     await rec.run(_NOW + 10.0)
-    assert facts.excluding_round_id == "round-spec-1"
+    assert await bringup_round_denial("baseline", rounds) is not None
 
     await rec.run(_NOW + 600.0)
 
     assert (await rounds.get("round-spec-1")).state == SETTLED
-    assert not facts.round_excludes
+    assert await bringup_round_denial("baseline", rounds) is None
 
 
 @pytest.mark.asyncio
@@ -332,17 +328,18 @@ async def test_a_rule_that_raises_does_not_stop_the_rules_after_it(db):
     """Isolation, not admission: every rule is attempted on every tick."""
     rec, rounds, tasks, _ = _build(db)
     await _open_round(rounds, tasks, holder="spec-1", lease=1.0)
+    await tasks.transition("spec-1", "running")
+    await tasks.transition("spec-1", "succeeded")
 
     async def _boom(*_a, **_k):
         raise sqlite3.OperationalError("database is locked")
 
     rec._reap_leases = _boom
 
-    report = await rec.run(_NOW + 10.0)
+    report = await rec.run(_NOW + 600.0)
 
     assert report.failures == ["_boom"]
-    assert report.settled == []
-    assert rec._resources.excluding_round_id == "round-spec-1"
+    assert [round_id for round_id, _outcome in report.settled] == ["round-spec-1"]
 
 
 @pytest.mark.asyncio

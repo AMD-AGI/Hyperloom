@@ -9,9 +9,6 @@ import pytest
 
 from hyperloom.orchestrator.policy.denial import PolicyDenied
 from hyperloom.orchestrator.policy.gate import PolicyGate
-from hyperloom.orchestrator.policy.validators import (
-    SPECIALIST_FREEFORM_TASK_DESC_MAX_CHARS,
-)
 from hyperloom.orchestrator.specialists.domains import KNOWLEDGE_DOMAIN_TAG_SET, SPECIALIST_DOMAINS
 from hyperloom.orchestrator.specialists.profile import (
     DEFAULT_BENCH,
@@ -208,13 +205,9 @@ def test_a_freeform_dispatch_is_one_task_and_a_tasks_list_stands_in_for_no_descr
     assert exc.value.rule == "specialist_freeform_empty_description"
 
 
-def test_freeform_description_too_long_rejected(gate):
-    huge = "x" * (SPECIALIST_FREEFORM_TASK_DESC_MAX_CHARS + 1)
-    with pytest.raises(PolicyDenied) as exc:
-        gate._validate_specialist_dispatch(
-            _dispatch({"scope": "freeform", "task_description": huge}),
-        )
-    assert exc.value.rule == "specialist_freeform_description_too_long"
+def test_a_freeform_description_of_any_length_is_admitted(gate):
+    """The description is the whole mandate; the gate asks only that there is one."""
+    gate._validate_specialist_dispatch(_dispatch({"scope": "freeform", "task_description": "x" * 50_000}))
 
 
 @pytest.mark.parametrize("framework", ["tensorrt", "", None])
@@ -278,241 +271,37 @@ def test_single_domain_scope_with_multiple_tags_allowed(gate):
     )
 
 
-# --------------------------------------------------------------------------- # GPU request is governed by the same
-# ceiling for *every* scope — freeform is not a hole around the GPU-pool accounting.
-# --------------------------------------------------------------------------- #
-def _gate_with_gpu_capacity(capacity: int, *, tp: int = 0) -> PolicyGate:
-    from hyperloom.orchestrator.state.shared_state import SharedState
-
-    from hyperloom.orchestrator.policy.projection import ResourceFacts
-
-    state = SharedState()
-    state.gpu_specialist_capacity = capacity
-    state.tp = tp
-    facts = ResourceFacts()
-    facts.update(state)
-    return PolicyGate(
-        shared_state=state,
-        resources=facts,
-    )
-
-
-def test_freeform_gpu_request_clears_ceiling(monkeypatch):
-    for name in ("ROCR_VISIBLE_DEVICES", "HIP_VISIBLE_DEVICES", "CUDA_VISIBLE_DEVICES", "TP"):
-        monkeypatch.delenv(name, raising=False)
-    gate = _gate_with_gpu_capacity(2)
+@pytest.mark.parametrize("max_turns", [-1, 0, 1001, 50_000, "many", 2.5, None])
+def test_the_gate_does_not_judge_max_turns(gate, max_turns):
+    """The dial has one reader, which also decides what a value that names no turn count means."""
     gate._validate_specialist_dispatch(
-        _dispatch(
-            {
-                "scope": "freeform",
-                "task_description": "micro-bench the decode attention kernel",
-                "needs_gpu": True,
-                "gpu_count": 2,
-            }
-        ),
+        _dispatch({"scope": "freeform", "task_description": "probe", "max_turns": max_turns}),
     )
-
-
-def test_freeform_gpu_request_rejected_when_pool_disabled():
-    gate = _gate_with_gpu_capacity(0)
-    with pytest.raises(PolicyDenied) as exc:
-        gate._validate_specialist_dispatch(
-            _dispatch(
-                {
-                    "scope": "freeform",
-                    "task_description": "needs a GPU but pool is off",
-                    "needs_gpu": True,
-                }
-            ),
-        )
-    assert exc.value.rule == "specialist_gpu_pool_disabled"
-
-
-def test_freeform_gpu_request_exceeds_capacity_rejected():
-    gate = _gate_with_gpu_capacity(1)
-    with pytest.raises(PolicyDenied) as exc:
-        gate._validate_specialist_dispatch(
-            _dispatch(
-                {
-                    "scope": "freeform",
-                    "task_description": "asks for more GPUs than the pool has",
-                    "needs_gpu": True,
-                    "gpu_count": 4,
-                }
-            ),
-        )
-    assert exc.value.rule == "specialist_gpu_request_exceeds_capacity"
-
-
-def test_freeform_gpu_request_nonpositive_count_rejected():
-    gate = _gate_with_gpu_capacity(2)
-    with pytest.raises(PolicyDenied) as exc:
-        gate._validate_specialist_dispatch(
-            _dispatch(
-                {
-                    "scope": "freeform",
-                    "task_description": "bad gpu count",
-                    "needs_gpu": True,
-                    "gpu_count": 0,
-                }
-            ),
-        )
-    assert exc.value.rule == "specialist_gpu_request_invalid"
-
-
-def test_gate_judges_an_enablement_gpu_request_by_the_dispatcher_rule(whole_machine):
-    """Enablement needs cards exactly where the dispatcher leases them, so the gate checks the count there only."""
-    gate = _gate_with_gpu_capacity(2)
-    bad_count = {"enablement": True, "gpu_count": 0}
-    whole_machine(True)
-    with pytest.raises(PolicyDenied) as exc:
-        gate._validate_specialist_gpu_request(bad_count)
-    assert exc.value.rule == "specialist_gpu_request_invalid"
-    whole_machine(False)
-    gate._validate_specialist_gpu_request(bad_count)
-
-
-def test_domain_gpu_request_still_governed_after_refactor():
-    """Regression: the GPU check extracted into _validate_specialist_gpu_request must still fire on the domain-anchored path."""
-    gate = _gate_with_gpu_capacity(0)
-    with pytest.raises(PolicyDenied) as exc:
-        gate._validate_specialist_dispatch(
-            _dispatch(
-                {
-                    "domain": "serving_specialist",
-                    "gap_canonical_id": "gap.framework.x.session-1",
-                    "needs_gpu": True,
-                }
-            ),
-        )
-    assert exc.value.rule == "specialist_gpu_pool_disabled"
-
-
-def test_bench_specialist_without_explicit_needs_gpu_is_gated(monkeypatch):
-    """A bench-enabled (mode=patch & bench=true) specialist auto-defaults needs_gpu=True at dispatch; the gate must mirror that so it is rejected when the pool is disabled."""
-    for name in ("HIP_VISIBLE_DEVICES", "CUDA_VISIBLE_DEVICES", "TP", "INFERENCE_OPTIMIZER_GPU_SPECIALIST_DEVICES"):
-        monkeypatch.delenv(name, raising=False)
-    monkeypatch.setenv("ROCR_VISIBLE_DEVICES", "")
-    gate = _gate_with_gpu_capacity(0)
-    with pytest.raises(PolicyDenied) as exc:
-        gate._validate_specialist_dispatch(
-            _dispatch(
-                {
-                    "scope": "freeform",
-                    "task_description": "patch + bench the decode attention kernel",
-                    "mode": "patch",
-                    "bench": True,
-                    # no explicit needs_gpu — the bench profile implies it.
-                }
-            ),
-        )
-    assert exc.value.rule == "specialist_gpu_pool_disabled"
-
-
-def test_bench_specialist_whole_machine_lane_allows_full_node(monkeypatch):
-    """A bench specialist takes the whole-machine, time-shared GPU lane, so serving occupying the whole node (TP == #GPUs) does not deny it — the serving-disjoint carve does not apply to the whole-machine pool."""
-    for name in ("HIP_VISIBLE_DEVICES", "CUDA_VISIBLE_DEVICES", "TP", "INFERENCE_OPTIMIZER_GPU_SPECIALIST_DEVICES"):
-        monkeypatch.delenv(name, raising=False)
-    monkeypatch.setenv("ROCR_VISIBLE_DEVICES", "0,1,2,3")
-    gate = _gate_with_gpu_capacity(4, tp=4)
-    # gpu_count floored to serving TP=4; whole-machine pool has all 4 cards.
     gate._validate_specialist_dispatch(
-        _dispatch(
-            {
-                "scope": "freeform",
-                "task_description": "start a TP-sharded server and rebench a patch",
-                "mode": "patch",
-                "bench": True,
-                "gpu_count": 1,
-            }
-        ),
+        _dispatch({"domain": "serving_specialist", "gap_canonical_id": "gap.x", "max_turns": max_turns}),
     )
 
 
-def test_bench_specialist_denied_when_whole_machine_too_small(monkeypatch):
-    """A bench specialist is still denied when the whole node physically has fewer cards than the serving TP it must shard a server across."""
-    for name in ("HIP_VISIBLE_DEVICES", "CUDA_VISIBLE_DEVICES", "TP", "INFERENCE_OPTIMIZER_GPU_SPECIALIST_DEVICES"):
-        monkeypatch.delenv(name, raising=False)
-    monkeypatch.setenv("ROCR_VISIBLE_DEVICES", "0,1")
-    gate = _gate_with_gpu_capacity(4, tp=4)
-    with pytest.raises(PolicyDenied) as exc:
-        gate._validate_specialist_dispatch(
-            _dispatch(
-                {
-                    "scope": "freeform",
-                    "task_description": "start a TP-sharded server and rebench a patch",
-                    "mode": "patch",
-                    "bench": True,
-                }
-            ),
-        )
-    assert exc.value.rule == "specialist_gpu_request_exceeds_capacity"
-    assert "effective gpu_count=4" in str(exc.value)
-    assert "whole-machine GPU pool size=2" in str(exc.value)
-
-
-def test_bench_specialist_omitted_gpu_count_allows_whole_machine(monkeypatch):
-    """Omitting gpu_count defaults a bench specialist to serving TP and is valid when the whole-machine pool has at least that many cards."""
-    for name in ("HIP_VISIBLE_DEVICES", "CUDA_VISIBLE_DEVICES", "TP", "INFERENCE_OPTIMIZER_GPU_SPECIALIST_DEVICES"):
-        monkeypatch.delenv(name, raising=False)
-    monkeypatch.setenv("ROCR_VISIBLE_DEVICES", "0,1,2,3,4,5,6,7")
-    gate = _gate_with_gpu_capacity(8, tp=4)
-    gate._validate_specialist_dispatch(
-        _dispatch(
-            {
-                "scope": "freeform",
-                "task_description": "start a TP-sharded server and rebench a patch",
-                "mode": "patch",
-                "bench": True,
-            }
-        ),
-    )
-
-
-def test_research_specialist_without_needs_gpu_is_not_gated():
-    """A non-bench (research) specialist needs no GPU, so the pool-disabled gate must NOT fire for it even when capacity is 0."""
-    gate = _gate_with_gpu_capacity(0)
-    gate._validate_specialist_dispatch(
-        _dispatch(
-            {
-                "scope": "freeform",
-                "task_description": "read-only profile the decode path",
-                "mode": "research",
-            }
-        ),
-    )
-
-
-def test_freeform_negative_max_turns_rejected(gate):
-    with pytest.raises(PolicyDenied) as exc:
-        gate._validate_specialist_dispatch(
-            _dispatch({"scope": "freeform", "task_description": "probe", "max_turns": -1}),
-        )
-    assert "max_turns" in str(exc.value)
-
-
-def test_freeform_max_turns_above_cap_rejected(gate):
-    from hyperloom.orchestrator.specialists.domains import SPECIALIST_MAX_TURNS_HARD_CAP
-
-    with pytest.raises(PolicyDenied):
-        gate._validate_specialist_dispatch(
-            _dispatch(
-                {
-                    "scope": "freeform",
-                    "task_description": "probe",
-                    "max_turns": SPECIALIST_MAX_TURNS_HARD_CAP + 1,
-                }
-            ),
-        )
-
-
-def test_resolve_specialist_max_turns_zero_uses_default():
+@pytest.mark.parametrize(
+    ("raw", "resolved"),
+    [
+        (5, 5),
+        ("7", 7),
+        (50_000, 50_000),
+        (None, 42),
+        ("", 42),
+        (0, 42),
+        (-1, 42),
+        ("many", 42),
+        ([3], 42),
+        (True, 42),
+    ],
+)
+def test_max_turns_is_a_positive_count_or_the_default(raw, resolved):
+    """A value that names no positive turn count leaves the default; none of them fails the specialist."""
     from hyperloom.orchestrator.specialists.runner import resolve_specialist_max_turns
 
-    assert resolve_specialist_max_turns(0, default=1000) == 1000
-    assert resolve_specialist_max_turns(None, default=42) == 42
-    assert resolve_specialist_max_turns("", default=42) == 42
-    assert resolve_specialist_max_turns(5, default=1000) == 5
+    assert resolve_specialist_max_turns(raw, default=42) == resolved
 
 
 # --------------------------------------------------------------------------- # Tool surface: TaskKill and
@@ -614,30 +403,6 @@ def test_gate_denies_orchestration_naming_a_coordinator_dispatched_domain(gate):
         gate.validate_intent("orchestration", intent)
     assert exc.value.rule == "specialist_domain_coordinator_dispatched"
     assert "serving_specialist" in exc.value.hint
-
-
-# --------------------------------------------------------------------------- # gate gpu_count default aligned with
-# dispatcher at serving_tp=0 --------------------------------------------------------------------------- #
-def test_bench_specialist_no_serving_tp_defaults_to_whole_machine(monkeypatch):
-    """When serving_tp=0, a bench specialist with no explicit gpu_count must default to the whole-machine pool size in the gate, matching the dispatcher's fallback to ``gpu_pool.capacity``."""
-    for name in ("HIP_VISIBLE_DEVICES", "CUDA_VISIBLE_DEVICES", "TP", "INFERENCE_OPTIMIZER_GPU_SPECIALIST_DEVICES"):
-        monkeypatch.delenv(name, raising=False)
-    monkeypatch.setenv("ROCR_VISIBLE_DEVICES", "0,1,2,3")
-    # tp=0: no serving, gpu_specialist_capacity=4 (4-card node).
-    gate = _gate_with_gpu_capacity(4, tp=0)
-    # gate's default gpu_count must be 4 (whole-machine), agreeing with the dispatcher that leases all 4 cards.
-    gate._validate_specialist_dispatch(
-        _dispatch(
-            {
-                "scope": "freeform",
-                "task_description": "bench patch before any serving baseline exists",
-                "mode": "patch",
-                "bench": True,
-                "needs_gpu": True,
-                # gpu_count omitted → gate defaults to whole-machine size.
-            }
-        ),
-    )
 
 
 # --------------------------------------------------------------------------- # domain.default_mode
