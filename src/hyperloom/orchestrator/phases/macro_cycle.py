@@ -26,12 +26,9 @@ class MacroCycleCollaborator(CoordinatorCollaborator):
         prior_cycle: int,
         new_cycle: int,
     ) -> None:
-        """Medium-intensity soft restart at a macro-cycle boundary.
+        """Log the reconciler's last cleanup report and record it as the ``cycle_soft_restart`` observation.
 
-        Recycles transient/per-cycle resources (fresh leases, cleared
-        caches, re-scoped system prompt) without losing accumulated optimization state;
-        ``current_best`` / ``optimization_stack`` / ``explore_search`` are
-        preserved. Idempotent.
+        Runs on each loop-back into a new macro-cycle. It releases no lease and changes no state.
 
         Args:
             prior_cycle: The macro-cycle number that just finished.

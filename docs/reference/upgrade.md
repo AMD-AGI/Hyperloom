@@ -681,9 +681,9 @@ changes what the Coordinator admits or dispatches:
 
 The Coordinator no longer deletes anything from `storage/coordinator.db`.
 1.2.x deleted rows on every maintenance pass (every 30 minutes) and at the
-start of each macro-cycle: every row of `events` but the newest 5,000, and
-every `succeeded` or `cancelled` row of `tasks` but the 2,000 most recently
-updated.
+start of each macro-cycle: the rows of `events` older than the newest 5,000,
+except a `proposal` the Critic had not ruled on yet, and every `succeeded` or
+`cancelled` row of `tasks` but the 2,000 most recently updated.
 
 The 5,000 counted events of every topic, so in a session that wrote more, the
 deleted rows included `delegated_result`, the record of what each task
@@ -694,9 +694,24 @@ Deleting a finished task row also released its idempotency key, so the same
 action could have been queued a second time.
 
 * The `events` and `tasks` tables now hold the whole session, and the database
-  grows with it: a session of 3,361 events and 399 tasks left a database of
-  15.7 MB. Nothing needs to be configured: no flag or environment variable set
-  the two limits.
+  grows with it: a session of 17 hours, 3,361 events and 399 tasks left a
+  database of 15.7 MB, about 20 MB a day. Nothing needs to be configured: no
+  flag or environment variable set the two limits.
+* A session that runs for about three days or longer is packaged without its
+  database. The must-ship files of a session package share a ceiling of 64 MB,
+  and `storage/coordinator.db` is left out once it is larger than that. In
+  1.2.x the two limits kept the file under the ceiling (it levelled off near
+  54 MB at the row sizes of one recorded session); at 20 MB a day it now
+  passes 64 MB on the fourth day. The package says so: `PACKAGE_MANIFEST.json`
+  has `complete: false`, `truncated: true` and `reserved_overflow: true` and
+  names the file in `dropped_files`, `PACKAGE_MANIFEST.txt` carries the line
+  `!! RESERVED PARTITION OVERFLOWED`, and the log has an error that starts
+  `session package: MUST-SHIP artifact storage/coordinator.db`. Shortly before
+  that, a must-ship file listed after the database (`state.json`,
+  `manifest.json`, `session_breakdown.json`, `reports/final.json`) is the one
+  left out when it no longer fits under the ceiling beside it. Nothing is
+  removed from the session directory: read the database and those files there
+  when a package reports the overflow.
 * `events_pruned` and `tasks_pruned` are gone from the `maintenance tick N:
   {...}` line of the log and from the payload of the `cycle_soft_restart`
   observation. Stop parsing them; the other keys are unchanged.
@@ -704,6 +719,9 @@ action could have been queued a second time.
   `reports/final.md` are taken from the newest 10,000 events. In 1.2.x they
   covered what the last pass had left: the newest 5,000 events and those
   written since.
+* `hyperloom session events --all` counts every event of the session, where it
+  counted what the last pass had left. Without `--all` it still reads the
+  newest 500.
 * `get_inbox` called without `since_seq` returns every event of the session
   that is addressed to Orchestration or broadcast, where it returned what the
   last pass had left. Pass `since_seq` to page.

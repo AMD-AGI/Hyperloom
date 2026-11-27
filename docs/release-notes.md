@@ -192,17 +192,25 @@ it.
 - **The session database keeps every event and task.** The Coordinator no
   longer deletes rows from `storage/coordinator.db`. Every maintenance pass
   and every macro-cycle start used to delete all `events` but the newest 5,000
-  and all `succeeded` or `cancelled` `tasks` but the 2,000 most recently
-  updated. In a session that wrote more than 5,000 events this removed the
-  `delegated_result` rows that `--resume-from` replays an interrupted KEEP
-  from and that `reports/final.json` counts, and a deleted task row released
-  its idempotency key. `events_pruned` and `tasks_pruned` leave the
+  and the proposals not yet reviewed, and all `succeeded` or `cancelled`
+  `tasks` but the 2,000 most recently updated. In a session that wrote more
+  than 5,000 events this removed the `delegated_result` rows that
+  `--resume-from` replays an interrupted KEEP from and that
+  `reports/final.json` counts, and a deleted task row released its
+  idempotency key. `events_pruned` and `tasks_pruned` leave the
   `maintenance tick` log line and the `cycle_soft_restart` observation;
   `event_counts_by_topic` and the highlights of the final report cover the
   newest 10,000 events; `get_inbox` without `since_seq` returns the whole
-  session's inbox. The database now grows with the session (15.7 MB for one
-  of 3,361 events and 399 tasks). The lane warning for a holder that is not a
-  task now ends `the holder has no task row, so nothing can attest it ended`.
+  session's inbox; `hyperloom session events --all` counts the whole session.
+  The database now grows with the session (15.7 MB for one of 17 hours, 3,361
+  events and 399 tasks, about 20 MB a day). A session package leaves
+  `storage/coordinator.db` out once the file is larger than 64 MB, the ceiling
+  its must-ship files share, which the two limits used to keep it under: a
+  session of about three days or longer is packaged without its database,
+  with `reserved_overflow: true` and `complete: false` in
+  `PACKAGE_MANIFEST.json`, and the database stays in the session directory.
+  The lane warning for a holder that is not a task now ends `the holder has
+  no task row, so nothing can attest it ended`.
   See [Upgrade](reference/upgrade.md).
 - **forge-loop runs every round as lanes and has no planning stage.** Every
   iteration is one round: one lane per focus the Analysis Agent divides its

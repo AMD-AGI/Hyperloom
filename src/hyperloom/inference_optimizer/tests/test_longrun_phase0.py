@@ -20,6 +20,7 @@ from hyperloom.orchestrator.bus.message_bus import Message, MessageBus
 from hyperloom.orchestrator.state.task_registry import TaskSpec
 from hyperloom.orchestrator.bus.storage.connection import SqliteConnection
 from hyperloom.orchestrator.bus.storage.schema import ensure_schema
+from hyperloom_common.timeutil import now_iso
 
 
 @pytest.fixture
@@ -171,7 +172,7 @@ def test_retry_policy_from_env(monkeypatch):
 # coordinator maintenance tick (cadence + wiring)
 @pytest.mark.asyncio
 async def test_coordinator_maintenance_reports_leases_and_keeps_every_record(tmp_path, monkeypatch):
-    """Crash recovery and the final report read the first result of a session as much as the last."""
+    """Crash recovery and the final report read a session's first result, and its first finished task keeps its key."""
     monkeypatch.setenv("USER_DATA_PATH", str(tmp_path))
     from hyperloom.inference_optimizer.session.paths import make_session_dir
     from hyperloom.orchestrator.loop.coordinator import MAINTENANCE_INTERVAL_SEC, Coordinator
@@ -185,7 +186,7 @@ async def test_coordinator_maintenance_reports_leases_and_keeps_every_record(tmp
     }
     c = Coordinator(sd, backends=backends)
     try:
-        # Seed a GPU lease, a finished task and a long session's worth of events behind its result.
+        # Seed a GPU lease, then a long session's worth of finished tasks and events behind the first of each.
         async with c.db.transaction() as cur:
             cur.execute("INSERT INTO gpu_leases(gpu_id, holder_id, task_id) VALUES (?,?,?)", (0, "h", "t"))
         c.gpu_specialist_pool = SpecialistGpuPool(c.db, gpu_ids=[0, 1])
@@ -193,7 +194,13 @@ async def test_coordinator_maintenance_reports_leases_and_keeps_every_record(tmp
         await c.tasks.transition(task.task_id, "running")
         await c.tasks.transition(task.task_id, "succeeded")
         first = await c.bus.append_and_seq(Message.new("coordinator", "*", "delegated_result", {"task_id": "t"}))
+        later = now_iso()
         async with c.db.transaction() as cur:
+            cur.executemany(
+                "INSERT INTO tasks (task_id, kind, state, params, idempotency_key, created_at, updated_at) "
+                "VALUES (?,?,?,?,?,?,?)",
+                ((f"later-{i}", "explore", "succeeded", "{}", f"later-{i}", later, later) for i in range(2000)),
+            )
             cur.executemany(
                 "INSERT INTO events (msg_id, from_agent, to_agent, topic, payload, ts) VALUES (?,?,?,?,?,?)",
                 (Message.new("orchestration", "*", "observation", {"i": i}).to_db_row() for i in range(6000)),
@@ -205,6 +212,7 @@ async def test_coordinator_maintenance_reports_leases_and_keeps_every_record(tmp
         assert "leases_reaped" in summary and "running_tasks_reclaimed" in summary
         assert [m.seq for m in await c.bus.tail(topic="delegated_result", n=-1)] == [first]
         assert (await c.tasks.get(task.task_id)).state == "succeeded"
+        assert len(await c.tasks.by_state("succeeded")) == 2001
         rows = await c.db.fetchall("SELECT COUNT(*) AS c FROM gpu_leases")
         assert int(rows[0]["c"]) == 1
         # The wall-clock gate is seeded at construction, so tick 1 of a fresh

@@ -1222,7 +1222,11 @@ Primary switch (default **off**) for live Langfuse trace push.
   `complete` before treating a package as the whole selection; it is `false`
   whenever anything selected is absent, and the reason is itemized in
   `dropped_files` (the bundle caps at 5000 files / 256 MB and a very long
-  session can stop it short, alongside `truncated: true`), `failed_files`
+  session can stop it short, alongside `truncated: true`; the files in
+  `reserved_paths` are outside those caps and share a ceiling of 64 MB, and
+  one that does not fit is dropped with `reserved_overflow: true`, as
+  `storage/coordinator.db` is once a session of about three days has grown it
+  past that), `failed_files`
   (the write failed) or `refused_files` (the entry was not a regular file
   inside the session — see below). The zip and the loose tree are written
   independently and each carries a manifest describing its own contents.
