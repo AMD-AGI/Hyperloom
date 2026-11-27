@@ -5,6 +5,8 @@
 
 from __future__ import annotations
 
+import pytest
+
 from hyperloom.orchestrator.actions.executors import benchmark_result as br
 
 
