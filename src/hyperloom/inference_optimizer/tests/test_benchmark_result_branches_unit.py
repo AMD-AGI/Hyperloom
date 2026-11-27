@@ -237,3 +237,25 @@ def test_harvest_mn_gpu_metrics_window_and_malformed_rows(monkeypatch, tmp_path)
         f"host,{header}",
         "hostA,1000,55,300",
     ]
+
+
+@pytest.mark.parametrize(
+    "pod_rows",
+    [
+        pytest.param("5,50,280\n", id="every row outside the round's window"),
+        pytest.param("1000," + "x" * 200_000 + "\n", id="a field the csv module refuses"),
+    ],
+)
+def test_harvest_mn_gpu_metrics_writes_nothing_without_usable_rows(monkeypatch, tmp_path, pod_rows):
+    import hyperloom.orchestrator.actions.executors._multi_node_env as mn
+
+    monkeypatch.setattr(mn, "is_multi_node", lambda: True)
+    monkeypatch.setattr(mn, "pd_topology_from_state", dict)
+    shared = tmp_path / "server_logs"
+    shared.mkdir()
+    monkeypatch.setenv("HYPERLOOM_MN_SERVER_LOG_DIR", str(shared))
+    (shared / "gpu_metrics_hostA.csv").write_text(f"timestamp,temp,power\n{pod_rows}", encoding="utf-8")
+
+    dest = tmp_path / "ws"
+    assert br.harvest_mn_gpu_metrics(dest, subprocess_started_unix=900.0) == {}
+    assert not (dest / "gpu_metrics.csv").exists()
