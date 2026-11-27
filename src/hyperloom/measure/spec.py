@@ -712,20 +712,18 @@ def spec_sha256(raw: bytes) -> str:
     return hashlib.sha256(raw).hexdigest()
 
 
-def _replace_session_dir(value: Any, session_dir: str | None) -> Any:
-    """Walk a parsed YAML value: path-valued keys become placeholders, session-directory prefixes are replaced."""
+def _replace_paths(value: Any) -> Any:
+    """Walk a parsed YAML value: path-valued keys become placeholders."""
     if isinstance(value, Mapping):
         result = {}
         for key, item in value.items():
             if key in PATH_KEYS and isinstance(item, str):
                 result[key] = "${PATH}"
             else:
-                result[key] = _replace_session_dir(item, session_dir)
+                result[key] = _replace_paths(item)
         return result
     if isinstance(value, list):
-        return [_replace_session_dir(item, session_dir) for item in value]
-    if isinstance(value, str) and session_dir:
-        return value.replace(session_dir, "${SESSION_DIR}")
+        return [_replace_paths(item) for item in value]
     return value
 
 
@@ -790,13 +788,13 @@ def _refuse_deep(value: Any) -> None:
                 tallest[-1] = max(tallest[-1], heights[id(container)])
 
 
-def canonical_for_fingerprint(spec: MeasurementSpec, *, session_dir: str | None = None) -> dict[str, Any]:
+def canonical_for_fingerprint(spec: MeasurementSpec) -> dict[str, Any]:
     """The sheet with everything that is not measurement content removed or replaced.
 
     Removed: ``request_id``, ``meta``, ``procedure.deadline_unix``, ``config.sha256`` (it hashes paths), the session's
-    blob root, and the staging's normalised manifest, which its sha256 stands for. Replaced: path-valued YAML fields and session-directory prefixes become
-    placeholders, and the carried base launch its digest, which leaves out where and when it was resolved. Blobs and
-    attachments keep only their hashes.
+    blob root, and the staging's normalised manifest, which its sha256 stands for. Replaced: path-valued YAML fields
+    become placeholders, and the carried base launch its digest, which leaves out where and when it was resolved. Blobs
+    and attachments keep only their hashes.
     """
     document = spec.to_document()
     for key in ("request_id", "meta"):
@@ -807,19 +805,18 @@ def canonical_for_fingerprint(spec: MeasurementSpec, *, session_dir: str | None 
     if spec.tools.staging is not None:
         del document["tools"][_INFERENCE_SUITE][_NORMALISED]
     del document["environment"]["blob_root"]
-    session = session_dir.rstrip("/") if session_dir else None
-    document["config"] = [{"yaml": _replace_session_dir(_load_yaml(p.yaml), session)} for p in spec.config]
-    document["process_env"] = _replace_session_dir(document["process_env"], session)
+    document["config"] = [{"yaml": _replace_paths(_load_yaml(p.yaml))} for p in spec.config]
+    document["process_env"] = _replace_paths(document["process_env"])
     return document
 
 
-def fingerprint(spec: MeasurementSpec, *, hyperloom_version: str, session_dir: str | None = None) -> str:
+def fingerprint(spec: MeasurementSpec, *, hyperloom_version: str) -> str:
     """The first 16 hex digits of sha256(canonical sheet, runner Hyperloom version).
 
     The version is part of the identity: a measurement made by another runner version is not the same measurement.
     """
     if not hyperloom_version:
         raise DocumentError("the fingerprint needs the runner's Hyperloom version")
-    canonical = canonical_json(canonical_for_fingerprint(spec, session_dir=session_dir))
+    canonical = canonical_json(canonical_for_fingerprint(spec))
     digest = hashlib.sha256(canonical.encode() + b"\n" + hyperloom_version.encode())
     return digest.hexdigest()[:_FINGERPRINT_LEN]

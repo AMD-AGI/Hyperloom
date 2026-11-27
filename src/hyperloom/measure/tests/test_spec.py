@@ -319,20 +319,6 @@ def test_the_runner_version_is_part_of_the_fingerprint() -> None:
         _fp(spec_document(), version="")
 
 
-def test_session_directory_prefixes_are_replaced_so_two_sessions_agree() -> None:
-    def with_session(root: str) -> dict[str, Any]:
-        def change(d: dict[str, Any]) -> None:
-            _yaml(d, point_yaml(conc=4) + f"extra_path: {root}/kernels\n")
-            d["process_env"]["PYTHONPATH"] = f"{root}/overlay:/opt/x"
-
-        return _edit(change)
-
-    one = _fp(with_session("/shared/u1/sess-a"), session_dir="/shared/u1/sess-a")
-    two = _fp(with_session("/shared/u2/sess-b"), session_dir="/shared/u2/sess-b")
-    assert one == two
-    assert one != _fp(with_session("/shared/u1/sess-a"))  # without the session directory the paths differ
-
-
 def test_the_canonical_form_keeps_blob_and_attachment_hashes_but_no_locations() -> None:
     canonical = canonical_for_fingerprint(MeasurementSpec.from_document(spec_document()))
     text = json.dumps(canonical)
