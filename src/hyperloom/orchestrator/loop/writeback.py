@@ -173,8 +173,8 @@ class WritebackCollaborator(
         Args:
             task_kind: The settled task's kind, selecting the promote branch.
             result: The task result dict.
-            task: The originating task, used for audit fingerprints and
-                pending-roofline gating.
+            task: The originating task; the promote branches read its id and
+                params.
 
         Returns:
             The promotion outcome; its ``verdict`` is the settlement verdict.

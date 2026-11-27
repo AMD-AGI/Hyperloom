@@ -917,7 +917,7 @@ class _ExploreRound:
             self.losers.append(ledger_view(row, LOSER_FIELDS))
             if self.ss is not None and self.session_dir is not None:
                 # A preempted round keeps the verdicts it judged; a KEEP lands at settlement.
-                outcome = outcome_row(row, row["fingerprint"], str(row.get("reason") or ""), str(self.ctx.task.task_id))
+                outcome = outcome_row(row, row["fingerprint"], str(self.ctx.task.task_id))
                 attributions = framework_lever_attributions([outcome], self.lever_payload)
                 land_verdict(self.ss, self.session_dir, {"tested": {row["fingerprint"]: row}}, attributions)
             return
@@ -1021,7 +1021,7 @@ class _ExploreRound:
     def _per_variant_outcomes(self) -> list[dict[str, Any]]:
         task_id = str(self.ctx.task.task_id)
         outcomes = [
-            outcome_row(te, fingerprint, str(te.get("reason") or ""), task_id)
+            outcome_row(te, fingerprint, task_id)
             for fingerprint, te in self.tested.items()
             if te.get("outcome") in ("KEEP", "REVERT", TS_FAILED)
         ]

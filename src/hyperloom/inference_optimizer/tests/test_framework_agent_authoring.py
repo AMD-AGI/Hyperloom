@@ -509,10 +509,11 @@ async def test_recover_authored_outcome_uses_persisted_integrate_result(tmp_path
 
 @pytest.mark.asyncio
 async def test_recover_authored_outcome_ignores_an_attempt_whose_result_was_never_booked(tmp_path: Path):
-    """An attempt that was retried instead of booked has an outcome on its row and settles nothing."""
+    """An attempt that was retried instead of booked has its run error on its row and settles nothing."""
     stub = _stub(tmp_path)
     stub.shared_state.phase = "FRAMEWORK_AGENT"
-    retried = _ended_task("specialist-retried", _LOCAL_AUTHORING, _LOCAL_DELIVERABLE)
+    retried = _ended_task("specialist-retried", _LOCAL_AUTHORING, {})
+    retried.history[0]["evidence"]["outcome"]["error"] = "RuntimeError('subprocess died')"
     stub.bus.messages = []
 
     recovered = await stub.phase_framework._recover_framework_agent_authoring_outcome(specialist_task=retried)

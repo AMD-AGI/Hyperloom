@@ -271,9 +271,12 @@ in-flight launch (`MULTI_NODE_RESTART_RESUME_RUNNING=1`, default).
   platform's create-time pod env. Do not export `HYPERLOOM_MN_EXTRA_FWD_ENV`
   yourself: each restart sets or clears that variable for its own round, so a
   value exported before `optimize` does not reach a restarted server.
-* **Variant aborts with no benchmark output** → read `failed_variants` in the
-  round's `<action>_attempts.extras`, or the per-variant `abort_reason.json`
-  under `<session_dir>/runs/<action>/<task_id>/variant_<NN>_<name>/`
+* **Variant aborts with no benchmark output** → read the variant's packet
+  `<session_dir>/reports/failures/<failure_id>.json` (`error_class`,
+  `error_excerpt`, `server_log_path`; one per variant that was not measured)
+  or its row in `explore_search.tested` of `state.json`, or the per-variant
+  `abort_reason.json` under
+  `<session_dir>/runs/<action>/<task_id>/variant_<NN>_<name>/`
   (`error_class` + error tail); `session_dir` is the per-run timestamped dir
   (`$INFERENCE_OPTIMIZER_CURRENT_SESSION_DIR`), not `$USER_DATA_PATH` itself.
 * **Launcher-flag rejection** → an explore grid variant whose CLI flag isn't

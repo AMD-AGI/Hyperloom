@@ -769,8 +769,19 @@ In `storage/coordinator.db`:
   stopped while a round was open still holds such a row, and `--resume-from`
   refuses that session, naming the holder task with `lane='bringup_round'` and
   `execution owner scope or PID is unobservable`. Once you have checked that
-  the task's processes are gone, `hyperloom recover --session-dir <session>
-  --confirm-stopped <task-id> --confirmation-reason <reason>` removes the row.
+  the task's processes are gone, delete the row:
+
+  ```bash
+  sqlite3 "$SESSION_DIR/storage/coordinator.db" "DELETE FROM leases WHERE lane = 'bringup_round'"
+  ```
+
+  The task's other leases are then checked as on any resume. `hyperloom
+  recover --session-dir <session> --confirm-stopped <task-id>
+  --confirmation-reason <reason>` removes the row only when it is the only
+  lease the task holds. A session that stopped in the middle of a round
+  usually still records the task's execution lease too; `--confirm-stopped`
+  then fails with `confirmation is limited to strictly empty owner scope on
+  every target lease`, and `--confirm-scope-gone` is refused on the round row.
 
 In `state.json`:
 
@@ -809,16 +820,22 @@ In `reports/`:
   baseline attempt` section with the `last_baseline` bullet. It was `## Last
   action attempts` with three bullets.
 * A failure packet that cannot be written to `reports/failures/` is now an
-  error: the booking of that explore round stops there, and the tick records
-  the exception in `state.json` `last_tick_exception` (stage `tick_body`) and
-  counts it in `crash_count`. 1.2.x logged it at debug level and kept the copy in
-  `state.json`.
+  error, and the booking of that explore round stops there. When the tick
+  itself was booking the round, it records the exception in `state.json`
+  `last_tick_exception` (stage `tick_body`) and counts it in `crash_count`.
+  When the round was booked while an Orchestration turn was running, the
+  exception is only the log line `turn_pump: the dispatcher pump beside a
+  reactor turn raised; paused until the turn ends`, with its traceback, and
+  nothing is written to `state.json`. 1.2.x logged it at debug level and
+  kept the copy in `state.json`.
 
 In `session_breakdown.json`, `outcome.stage_reached` of a session that ended in
-PRELUDE with no typed timeline event is derived from fewer keys: a session
-whose only roofline or profile failed reports the stage before it
-(`warm_replay` or `baseline`), where 1.2.x reported `roofline` or `profile`
-from the failed attempt's row.
+PRELUDE with no typed timeline event no longer counts a `profile` task that
+failed, which PRELUDE runs in place of the roofline under
+`--no-enable-roofline`: a session whose only profile failed reports the stage
+before it (`warm_replay` or `baseline`), where 1.2.x reported `profile` from
+the failed attempt's row. A roofline that failed is still reported as
+`roofline`, from `roofline_failure_streak`.
 
 What Orchestration reads changes with them:
 
@@ -864,6 +881,17 @@ Four behaviours change on `--resume-from`:
   therefore never carries `replayed_orphaned_keep`, `orphaned_keep`,
   `orphaned_keep_discarded` or `orphaned_keep_replay_noop`, and no
   `orphaned_keep` observation is sent.
+
+  With `--reset-state` this leaves the patches the discarded state had kept
+  on the framework tree (in a git tree, as the commits whose subject starts
+  `hyperloom KEEP`), and nothing in the new state records them:
+  `optimization_stack` starts empty, no stack rebench is queued, the next
+  baseline is measured on a tree that carries them, and the recipe the
+  session publishes has no step for them. 1.2.x adopted them again from the
+  event log and queued a rebench of the stack. Put the framework tree back
+  to what it was before the session before you pass `--reset-state`; the
+  `optimization_stack` of the backup `state.json.preReset.<unix time>` lists
+  what was kept. Otherwise the new baseline includes those patches.
 * A database error while the open integrate window is read ends the start-up
   with that error, and no stop reason is set. 1.2.x ended it with `pending
   integrate recovery is incomplete; refusing resume before measurement` and

@@ -951,13 +951,23 @@ def test_a_leave_one_out_arm_that_regressed_attributes_its_lever():
     from hyperloom.orchestrator.actions.executors.grid._explore_variants import outcome_row
 
     row = outcome_row(
-        {"name": "fwlever_drop_hl_a", "outcome": "REVERT", "gain_pct": None, "graded_gain_pct": -4.0}, "fp", "", "t"
+        {"name": "fwlever_drop_hl_a", "outcome": "REVERT", "gain_pct": None, "graded_gain_pct": -4.0}, "fp", "t"
     )
     seed = {"name": "fwlever_drop_hl_a", "framework_lever": "HL_A", "framework_lever_source": "leave_one_out"}
 
     attributions = framework_lever_attributions([row], [seed])
 
     assert [(a["switch"], a["gain_pct"], a["outcome"]) for a in attributions] == [("HL_A", 4.0, "REVERT")]
+
+
+def test_a_variant_outcome_carries_the_reason_its_measured_row_recorded():
+    """The gate that refused a variant is named on its ledger row, and the round's outcome row for it says the same."""
+    from hyperloom.orchestrator.actions.executors.grid._explore_variants import outcome_row
+
+    refused = outcome_row({"name": "v1", "outcome": "REVERT", "reason": "accuracy_drop"}, "fp1", "t")
+    kept = outcome_row({"name": "v2", "outcome": "KEEP"}, "fp2", "t")
+
+    assert (refused["reason"], kept["reason"]) == ("accuracy_drop", "")
 
 
 def test_a_lever_attribution_arm_runs_after_the_candidates_that_could_keep():

@@ -291,7 +291,15 @@ def test_failure_summary_falls_back_to_last_action_failures():
         task_id="b1",
         result={"status": "failed", "error_class": "server_init_dead", "error": _SERVER_LOG_OOM},
     )
-    assert not state.last_baseline
+    state.record_baseline_attempt(
+        BaselineAttempt(
+            task_id="b2",
+            status="succeeded",
+            decision="no_promote",
+            result={"status": "succeeded", "output_throughput": 100.0},
+            extras={},
+        )
+    )
     fs = _build_failure_summary(state)
     assert fs is not None
     assert fs["root_cause_type"] == "oom"

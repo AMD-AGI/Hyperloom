@@ -237,7 +237,13 @@ it.
   adopted from the task row and the `pending_integrate` sentinel alone; the
   two searches of the event log for `kept` results are gone, and with them
   the `orphaned_keep*` reports and the retry on every start of a KEEP the
-  promotion gate had refused. The Shared session state block loses
+  promotion gate had refused. A `--reset-state` no longer adopts the
+  discarded state's kept patches again: they stay applied to the framework
+  tree with no stack row, so the next baseline is measured with them and the
+  recipe has no step for them unless the tree is restored before the reset.
+  In `session_breakdown.json`, `outcome.stage_reached` of a PRELUDE session
+  with no typed timeline event no longer counts a `profile` task that failed.
+  The Shared session state block loses
   `last_profile=`, `last_explore=`, `attempts_history=` and the `rejected=N`
   count, and the Acceptance threshold block lists each measured variant once.
   See [Upgrade](reference/upgrade.md).

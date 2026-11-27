@@ -558,7 +558,7 @@ class SharedState(
     last_action_failures: list[dict[str, Any]] = field(default_factory=list)
     # Immutable KEEP snapshots awaiting E2E integration, keyed by integration_id.
     pending_kernel_integrations: dict[str, Any] = field(default_factory=dict)
-    # Unified persistent explore-search ledger; ``tested`` keyed by canonical_fingerprint, everything graded down moves to rejected.
+    # Unified persistent explore-search ledger; ``tested`` holds every variant a round judged, keyed by canonical_fingerprint.
     explore_search: dict[str, Any] = field(default_factory=dict)
     # specialist sub-agent rolling state; one entry per config-arm round (round_id, tasks, proposals_total/kept/rejected/skipped, etc.).
     specialist_rounds: list[dict[str, Any]] = field(default_factory=list)
