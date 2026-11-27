@@ -852,9 +852,10 @@ async def test_pending_restore_never_undoes_kept_patch_outside_tail_window(
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("evidence", ["task", "stack", "neither", "failed_with_keep_result"])
-async def test_pending_restore_never_treats_pruned_keep_as_rejection(coord, pending_candidate, evidence):
-    from hyperloom.orchestrator.bus.db_maintenance import prune_events, prune_tasks
-
+async def test_pending_restore_never_treats_a_keep_whose_records_are_missing_as_rejection(
+    coord, pending_candidate, evidence
+):
+    """No KEEP event was published, and the task row says nothing of the verdict or is absent."""
     candidate = await pending_candidate(patches=True)
     await coord.tasks.transition(candidate.task.task_id, "running")
     if evidence == "failed_with_keep_result":
@@ -864,22 +865,9 @@ async def test_pending_restore_never_treats_pruned_keep_as_rejection(coord, pend
         )
     else:
         await coord.tasks.transition(candidate.task.task_id, "succeeded", evidence={"result_keys": ["status"]})
-    await coord.bus.append_and_seq(
-        Message.new(
-            "coordinator",
-            "*",
-            "delegated_result",
-            {
-                "task_id": candidate.task.task_id,
-                "kind": "integrate_patch",
-                "result": {"status": "kept"},
-            },
-        )
-    )
-    await coord.bus.append_and_seq(Message.new("coordinator", "*", "event", {"newer": True}))
-    assert await prune_events(coord.db, keep_recent=1) > 0
     if evidence not in ("task", "failed_with_keep_result"):
-        await prune_tasks(coord.db, keep_done=0)
+        async with coord.db.transaction() as cur:
+            cur.execute("DELETE FROM tasks WHERE task_id = ?", (candidate.task.task_id,))
     if evidence == "stack":
         coord.shared_state.optimization_stack = [{"task_id": candidate.task.task_id}]
     report = {"fixes": [], "warnings": []}

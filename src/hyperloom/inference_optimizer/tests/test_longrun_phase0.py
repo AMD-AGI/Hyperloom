@@ -12,13 +12,12 @@ from typing import Any
 
 import pytest
 
-from hyperloom.orchestrator.bus import db_maintenance as dbm
 from hyperloom.orchestrator.state._shared_state import phase_state as ss_mod
 from hyperloom.orchestrator.state._shared_state.phase_state import _cap_tested_ledger
 from hyperloom.orchestrator.state.shared_state import SharedState
 from hyperloom.orchestrator.bus.gpu_pool import SpecialistGpuPool
 from hyperloom.orchestrator.bus.message_bus import Message, MessageBus
-from hyperloom.orchestrator.state.task_registry import TaskRegistry, TaskSpec
+from hyperloom.orchestrator.state.task_registry import TaskSpec
 from hyperloom.orchestrator.bus.storage.connection import SqliteConnection
 from hyperloom.orchestrator.bus.storage.schema import ensure_schema
 
@@ -77,19 +76,6 @@ def test_tested_ledger_cap_applied_on_merge():
     assert len(st.explore_search["tested"]) == cap
 
 
-# DB retention (events + tasks), resume-safe
-@pytest.mark.asyncio
-async def test_prune_events_respects_recent_window(conn):
-    bus = MessageBus(conn)
-    for i in range(100):
-        await bus.append_and_seq(Message.new("orchestration", "*", "observation", {"i": i}))
-    # keep_recent=10: only the last 10 are retained.
-    deleted = await dbm.prune_events(conn, keep_recent=10)
-    assert deleted == 90
-    remaining = await conn.fetchall("SELECT seq FROM events ORDER BY seq")
-    assert [r["seq"] for r in remaining] == list(range(91, 101))
-
-
 @pytest.mark.asyncio
 async def test_append_rejects_a_non_string_recipient(conn):
     """``to_agent`` becomes a column: a list must be refused, not bound.
@@ -102,28 +88,6 @@ async def test_append_rejects_a_non_string_recipient(conn):
         await bus.append_and_seq(Message.new("orchestration", ["specialist", "kernel_agent"], "observation", {"x": 1}))
     rows = await conn.fetchall("SELECT COUNT(*) AS n FROM events")
     assert rows[0]["n"] == 0
-
-
-@pytest.mark.asyncio
-async def test_prune_tasks_keeps_recent_done_and_spares_inflight(conn):
-    reg = TaskRegistry(conn)
-    # In-flight tasks that must never be pruned.
-    q, _ = await reg.create_or_return_existing(TaskSpec(kind="explore", params={}, idempotency_key="q1"))
-    r, _ = await reg.create_or_return_existing(TaskSpec(kind="explore", params={}, idempotency_key="r1"))
-    await reg.transition(r.task_id, "running")
-    done_ids = []
-    for i in range(30):
-        t, _ = await reg.create_or_return_existing(TaskSpec(kind="explore", params={}, idempotency_key=f"d{i}"))
-        await reg.transition(t.task_id, "running")
-        await reg.transition(t.task_id, "succeeded")
-        done_ids.append(t.task_id)
-    deleted = await dbm.prune_tasks(conn, keep_done=10)
-    assert deleted == 20
-    # Queued + running survive.
-    assert (await reg.get(q.task_id)).state == "queued"
-    assert (await reg.get(r.task_id)).state == "running"
-    rows = await conn.fetchall("SELECT COUNT(*) AS c FROM tasks WHERE state='succeeded'")
-    assert int(rows[0]["c"]) == 10
 
 
 # Retained GPU ownership
@@ -206,7 +170,8 @@ def test_retry_policy_from_env(monkeypatch):
 
 # coordinator maintenance tick (cadence + wiring)
 @pytest.mark.asyncio
-async def test_coordinator_maintenance_reaps_leases_and_prunes(tmp_path, monkeypatch):
+async def test_coordinator_maintenance_reports_leases_and_keeps_every_record(tmp_path, monkeypatch):
+    """Crash recovery and the final report read the first result of a session as much as the last."""
     monkeypatch.setenv("USER_DATA_PATH", str(tmp_path))
     from hyperloom.inference_optimizer.session.paths import make_session_dir
     from hyperloom.orchestrator.loop.coordinator import MAINTENANCE_INTERVAL_SEC, Coordinator
@@ -220,18 +185,26 @@ async def test_coordinator_maintenance_reaps_leases_and_prunes(tmp_path, monkeyp
     }
     c = Coordinator(sd, backends=backends)
     try:
-        # Seed a GPU lease + some events with an advanced cursor.
+        # Seed a GPU lease, a finished task and a long session's worth of events behind its result.
         async with c.db.transaction() as cur:
             cur.execute("INSERT INTO gpu_leases(gpu_id, holder_id, task_id) VALUES (?,?,?)", (0, "h", "t"))
         c.gpu_specialist_pool = SpecialistGpuPool(c.db, gpu_ids=[0, 1])
-        for i in range(30):
-            await c.bus.append_and_seq(Message.new("orchestration", "*", "observation", {"i": i}))
+        task, _ = await c.tasks.create_or_return_existing(TaskSpec(kind="explore", params={}, idempotency_key="k1"))
+        await c.tasks.transition(task.task_id, "running")
+        await c.tasks.transition(task.task_id, "succeeded")
+        first = await c.bus.append_and_seq(Message.new("coordinator", "*", "delegated_result", {"task_id": "t"}))
+        async with c.db.transaction() as cur:
+            cur.executemany(
+                "INSERT INTO events (msg_id, from_agent, to_agent, topic, payload, ts) VALUES (?,?,?,?,?,?)",
+                (Message.new("orchestration", "*", "observation", {"i": i}).to_db_row() for i in range(6000)),
+            )
 
         summary = await c.maintenance.run(tick=10)
         assert summary is not None
         assert "gpu_leases_reaped" not in summary
         assert "leases_reaped" in summary and "running_tasks_reclaimed" in summary
-        assert "events_pruned" in summary and "tasks_pruned" in summary
+        assert [m.seq for m in await c.bus.tail(topic="delegated_result", n=-1)] == [first]
+        assert (await c.tasks.get(task.task_id)).state == "succeeded"
         rows = await c.db.fetchall("SELECT COUNT(*) AS c FROM gpu_leases")
         assert int(rows[0]["c"]) == 1
         # The wall-clock gate is seeded at construction, so tick 1 of a fresh

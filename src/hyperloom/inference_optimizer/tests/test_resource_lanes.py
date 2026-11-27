@@ -493,25 +493,21 @@ async def test_an_incident_shaped_row_stays_held_and_hands_the_operator_the_reme
 
 
 @pytest.mark.asyncio
-async def test_a_lease_that_outlived_its_pruned_task_is_still_reported(conn, locks, caplog):
-    """A holder pruned out from under its lease must not vanish from the report.
+async def test_a_lease_whose_holder_has_no_task_row_is_still_reported(locks, caplog):
+    """A lease whose holder has no task row must not vanish from the report.
 
-    ``prune_tasks`` deletes finished task rows without sparing one that still
-    holds a lease, and reclamation joins through ``tasks`` — so such a row can
-    be held with nothing able to judge it. Retaining unverifiable rows makes
-    that MORE likely, not less, because they now outlive their task on purpose.
-    Silence here would be the 2026-09-21 outcome with no log line at all.
+    A kernel request holds its lanes under its message id, which is no task,
+    and reclamation joins through ``tasks`` -- so such a row can be held with
+    nothing able to judge it. Silence here would be the 2026-09-21 outcome with
+    no log line at all.
     """
-    await locks.acquire_many(["build_lane"], holder_id="orphan", task_id="torphan", action="specialist", ttl_sec=3600)
-    _seed_task(conn, "torphan", "succeeded", evidence={resource_lock.CLEANUP_CONFIRMED_KEY: False})
-    conn.raw.execute("DELETE FROM tasks WHERE task_id=?", ("torphan",))
-    conn.raw.commit()
+    await locks.acquire_many(["build_lane"], holder_id="msg-1", task_id="msg-1", action="kernel_agent", ttl_sec=3600)
 
     caplog.clear()
     with caplog.at_level(logging.WARNING):
         stuck = await locks.diagnose_unverifiable_holders()
 
-    assert [(r["lane"], r["reason"]) for r in stuck] == [("build_lane", resource_lock.UNVERIFIABLE_HOLDER_PRUNED)]
+    assert [(r["lane"], r["reason"]) for r in stuck] == [("build_lane", resource_lock.UNVERIFIABLE_NO_TASK_ROW)]
     assert (await lane_holders(locks))["build_lane"] == 1
     assert len(_remedies(caplog)) == 1
 

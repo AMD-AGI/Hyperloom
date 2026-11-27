@@ -209,9 +209,9 @@ UNVERIFIABLE_NO_LOCAL_SCOPE = (
 #: be told, because this is the very path that wedged 2026-09-21 and the
 #: exemption is a reason not to RECLAIM, never a reason not to REPORT.
 UNVERIFIABLE_HOLDS_GPU = "the holder still owns GPU cards, so its lane is exempt from reclamation"
-#: The holder's ``tasks`` row was pruned out from under its lease. Nothing can
-#: judge it any more: the state that said it ended is gone.
-UNVERIFIABLE_HOLDER_PRUNED = "the holder's task row no longer exists, so nothing can attest it ended"
+#: The lease names a holder with no ``tasks`` row: a kernel request holds its
+#: lanes under its message id. Nothing can judge it: no state says it ended.
+UNVERIFIABLE_NO_TASK_ROW = "the holder has no task row, so nothing can attest it ended"
 
 #: ``(lane, holder_id)`` pairs whose remedy has already been printed. A sweep
 #: runs every maintenance tick and an unverifiable row stays unverifiable by
@@ -299,11 +299,10 @@ def _unverifiable_holders(cur: sqlite3.Cursor, *, scope: str) -> list[dict]:
     """
     # A LEFT JOIN, and no gpu_leases exemption: both of those filters belong to
     # reclamation, and either would silence exactly the rows an operator most
-    # needs to see. An inner join drops a row whose holder was pruned
-    # (bus/db_maintenance.py prune_tasks does not spare a task that still holds
-    # a lease), and the exemption drops the GPU path -- the one
-    # dispatcher.py's release_resources() fails on, i.e. the shape of the
-    # 2026-09-21 incident.
+    # needs to see. An inner join drops a row whose holder has no task row (a
+    # kernel request holds its lanes under its message id), and the exemption
+    # drops the GPU path -- the one dispatcher.py's release_resources() fails
+    # on.
     rows = [
         dict(r)
         for r in cur.execute(
@@ -321,8 +320,8 @@ def _unverifiable_holders(cur: sqlite3.Cursor, *, scope: str) -> list[dict]:
         holds_gpu = row.pop("holds_gpu", None)
         history = row.pop("holder_history", None)
         if state is None:
-            # The task row is gone; its lease outlived it and no pass can judge it.
-            row["reason"] = UNVERIFIABLE_HOLDER_PRUNED
+            # No task row says whether this holder ended, so no pass can judge it.
+            row["reason"] = UNVERIFIABLE_NO_TASK_ROW
             stuck.append(row)
             continue
         if str(state) not in TERMINAL_STATES:

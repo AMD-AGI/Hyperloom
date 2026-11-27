@@ -163,9 +163,9 @@ class ResumeRecoveryMixin:
         """
         state = self.shared_state
         task_id = str(pending.get("task_id") or "")
-        # Event retention can erase a KEEP. A promoted stack row is
-        # independent positive evidence; a terminal/missing task without
-        # its result is not evidence that a candidate was rejected.
+        # A promoted stack row is independent positive evidence; a
+        # terminal/missing task without its result is not evidence that a
+        # candidate was rejected.
         stack = state.optimization_stack or []
         if any(isinstance(row, dict) and row.get("task_id") == task_id for row in stack):
             state.pending_integrate = {}

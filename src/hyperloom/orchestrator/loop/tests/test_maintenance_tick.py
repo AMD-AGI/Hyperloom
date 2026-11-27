@@ -4,10 +4,10 @@
 """Unit tests for the periodic Coordinator maintenance tick.
 
 Maintenance runs on a long-horizon loop and touches the things that wedge a
-run: expired leases, tasks whose worker died holding a lane, unbounded DB
-growth, and a session partition filling up. So the property that matters is
-that no single step can end the run -- each is independently guarded, and a
-failure has to leave the others' results in the summary.
+run: expired leases, tasks whose worker died holding a lane, and a session
+partition filling up. So the property that matters is that no single step can
+end the run -- each is independently guarded, and a failure has to leave the
+others' results in the summary.
 
 The disk trim is the destructive one, so its trigger and its retention are
 pinned separately: it must do nothing while the partition is healthy, and when
@@ -27,7 +27,7 @@ import pytest
 from hyperloom.orchestrator.state._shared_state.enablement_round import EnablementRound
 from hyperloom.orchestrator.loop.maintenance import (
     MaintenanceCollaborator,
-    run_lease_and_db_reclaim,
+    report_lease_cleanup,
 )
 
 
@@ -88,39 +88,24 @@ def _host(**kw):
         locks=kw.get("locks", _Locks()),
         gpu_specialist_pool=kw.get("pool", _Pool()),
         tasks=kw.get("tasks", _Tasks()),
-        db=kw.get("db", object()),
     )
-
-
-def _patch_retention(monkeypatch: pytest.MonkeyPatch, *, events=5, tasks=2, raises=False):
-    from hyperloom.orchestrator.bus import db_maintenance as db_maint
-
-    async def _run(_db):
-        if raises:
-            raise sqlite3.OperationalError("vacuum failed")
-        return SimpleNamespace(events_deleted=events, tasks_deleted=tasks)
-
-    monkeypatch.setattr(db_maint, "run_db_retention", _run)
 
 
 class TestReclaimReportsWhatEachStepDid:
     @pytest.mark.asyncio
-    async def test_a_clean_pass_records_every_count(self, monkeypatch: pytest.MonkeyPatch):
-        _patch_retention(monkeypatch)
+    async def test_a_clean_pass_records_every_count(self):
         summary: dict = {}
 
-        await run_lease_and_db_reclaim(_host(), summary, reason="maintenance_watchdog")
+        await report_lease_cleanup(_host(), summary, reason="maintenance_watchdog")
 
         assert summary == {
             "leases_reaped": 2,
             "leases_unverifiable": 0,
             "running_tasks_reclaimed": 1,
-            "events_pruned": 5,
-            "tasks_pruned": 2,
         }
 
     @pytest.mark.asyncio
-    async def test_lanes_held_with_nothing_left_to_probe_are_counted_every_tick(self, monkeypatch: pytest.MonkeyPatch):
+    async def test_lanes_held_with_nothing_left_to_probe_are_counted_every_tick(self):
         """The starvation signal an operator reads first, because no command reports it.
 
         A lane whose ended holder left nothing verifiable is retained on
@@ -129,19 +114,17 @@ class TestReclaimReportsWhatEachStepDid:
         tick after tick while the queue does not drain; the sweep logs the
         per-row remedy once alongside it.
         """
-        _patch_retention(monkeypatch)
         summary: dict = {}
 
-        await run_lease_and_db_reclaim(_host(reconciler=_Reconciler(unverifiable=6)), summary, reason="r")
+        await report_lease_cleanup(_host(reconciler=_Reconciler(unverifiable=6)), summary, reason="r")
 
         assert summary["leases_unverifiable"] == 6
 
     @pytest.mark.asyncio
-    async def test_soft_restart_does_not_expire_running_work(self, monkeypatch: pytest.MonkeyPatch):
-        _patch_retention(monkeypatch)
+    async def test_soft_restart_does_not_expire_running_work(self):
         summary: dict = {}
 
-        await run_lease_and_db_reclaim(_host(), summary, reason="cycle_soft_restart")
+        await report_lease_cleanup(_host(), summary, reason="cycle_soft_restart")
 
         assert summary["running_tasks_reclaimed"] == 1
         assert "gpu_leases_reaped" not in summary
@@ -149,33 +132,23 @@ class TestReclaimReportsWhatEachStepDid:
 
 class TestNoSingleStepCanEndTheRun:
     @pytest.mark.asyncio
-    async def test_an_unreadable_lease_sweep_leaves_the_other_steps_intact(self, monkeypatch: pytest.MonkeyPatch):
-        _patch_retention(monkeypatch)
-        summary: dict = {}
+    async def test_an_unreadable_lease_sweep_leaves_the_other_steps_intact(self, tmp_path, monkeypatch):
+        _fake_usage(monkeypatch, free_gb=500.0, used_frac=0.10)
+        c = _maintenance(tmp_path)
+        c._coord.locks = _Locks(raises=True)
 
-        await run_lease_and_db_reclaim(_host(locks=_Locks(raises=True)), summary, reason="r")
+        got = await c.run(tick=3)
 
-        assert "cleanup_unconfirmed" not in summary
-        assert "running_tasks_reclaimed" not in summary
-        assert summary["events_pruned"] == 5
-
-    @pytest.mark.asyncio
-    async def test_a_failed_db_retention_is_survived(self, monkeypatch: pytest.MonkeyPatch):
-        _patch_retention(monkeypatch, raises=True)
-        summary: dict = {}
-
-        await run_lease_and_db_reclaim(_host(), summary, reason="r")
-
-        assert "events_pruned" not in summary
-        assert summary["running_tasks_reclaimed"] == 1
+        assert "cleanup_unconfirmed" not in got
+        assert "running_tasks_reclaimed" not in got
+        assert got["disk"]["free_gb"] == 500.0
 
     @pytest.mark.asyncio
-    async def test_a_pass_that_swept_nothing_counts_as_zero(self, monkeypatch: pytest.MonkeyPatch):
+    async def test_a_pass_that_swept_nothing_counts_as_zero(self):
         """A reconciler that ran and found nothing reports 0, not an absent key."""
-        _patch_retention(monkeypatch)
         summary: dict = {}
 
-        await run_lease_and_db_reclaim(_host(reconciler=_Reconciler(reaped=0)), summary, reason="r")
+        await report_lease_cleanup(_host(reconciler=_Reconciler(reaped=0)), summary, reason="r")
 
         assert summary["leases_reaped"] == 0
 
@@ -188,7 +161,6 @@ def _coordinator(session_dir: Path, **kw):
         locks=_Locks(),
         gpu_specialist_pool=_Pool(),
         tasks=_Tasks(),
-        db=object(),
         shared_state=SimpleNamespace(enablement=EnablementRound()),
     )
 
@@ -362,7 +334,6 @@ class TestTheDiskTrimOnlyFiresWhenItHasTo:
 class TestTheTickItself:
     @pytest.mark.asyncio
     async def test_the_summary_carries_the_tick_and_the_disk_status(self, tmp_path, monkeypatch: pytest.MonkeyPatch):
-        _patch_retention(monkeypatch)
         _fake_usage(monkeypatch, free_gb=500.0, used_frac=0.10)
         c = _maintenance(tmp_path)
 
@@ -370,14 +341,13 @@ class TestTheTickItself:
 
         assert got["tick"] == 11
         assert got["disk"]["free_gb"] == 500.0
-        assert got["events_pruned"] == 5
+        assert got["leases_reaped"] == 0
 
     @pytest.mark.asyncio
     async def test_a_low_disk_tick_spares_every_workspace_a_live_task_still_reads(
         self, tmp_path, monkeypatch: pytest.MonkeyPatch
     ):
         """A queued integrate reads its specialist's patch, and a running one its own workspace."""
-        _patch_retention(monkeypatch)
         _fake_usage(monkeypatch, free_gb=1.0, used_frac=0.99)
         for action, name, mtime in (
             ("specialist", "authored", 1_700_000_000),

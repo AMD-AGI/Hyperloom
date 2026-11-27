@@ -677,6 +677,41 @@ changes what the Coordinator admits or dispatches:
   `untried_hot_reusable_kernels`, `explore_search.winners_history`,
   `explore_search.rejected` and `<action>_attempts`.
 
+### Recommended: stop reading the pruning counts; the session database keeps every row
+
+The Coordinator no longer deletes anything from `storage/coordinator.db`.
+1.2.x deleted rows on every maintenance pass (every 30 minutes) and at the
+start of each macro-cycle: every row of `events` but the newest 5,000, and
+every `succeeded` or `cancelled` row of `tasks` but the 2,000 most recently
+updated.
+
+The 5,000 counted events of every topic, so in a session that wrote more, the
+deleted rows included `delegated_result`, the record of what each task
+returned. `--resume-from` reads those rows to replay a KEEP whose promotion a
+crash interrupted, and `reports/final.json` counts them: such a session
+resumed without its earlier results and reported only its newest events.
+Deleting a finished task row also released its idempotency key, so the same
+action could have been queued a second time.
+
+* The `events` and `tasks` tables now hold the whole session, and the database
+  grows with it: a session of 3,361 events and 399 tasks left a database of
+  15.7 MB. Nothing needs to be configured: no flag or environment variable set
+  the two limits.
+* `events_pruned` and `tasks_pruned` are gone from the `maintenance tick N:
+  {...}` line of the log and from the payload of the `cycle_soft_restart`
+  observation. Stop parsing them; the other keys are unchanged.
+* `event_counts_by_topic` and the highlights of `reports/final.json` and
+  `reports/final.md` are taken from the newest 10,000 events. In 1.2.x they
+  covered what the last pass had left: the newest 5,000 events and those
+  written since.
+* `get_inbox` called without `since_seq` returns every event of the session
+  that is addressed to Orchestration or broadcast, where it returned what the
+  last pass had left. Pass `since_seq` to page.
+* The `resource_lock` warning for a lane held under an id that is no task (a
+  kernel request holds its lanes under its message id) ends `the holder has no
+  task row, so nothing can attest it ended`. It ended `the holder's task row
+  no longer exists, ...`, which described a row the pruning had deleted.
+
 ---
 
 ## Upgrading from 1.1.x

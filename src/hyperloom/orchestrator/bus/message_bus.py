@@ -12,7 +12,6 @@ from typing import Any
 
 from hyperloom_common.timeutil import now_iso
 
-from .db_maintenance import DEFAULT_EVENTS_KEEP_RECENT
 from .storage.connection import SqliteConnection
 
 
@@ -35,6 +34,8 @@ LANES_BUSY_SOURCE = "lanes_busy"
 # An agent's inbox past a sequence id. Its own rows stay out: they would repeat in its next prompt what it just said,
 # and a turn would wake the next one.
 _INBOX_WHERE = "seq > ? AND from_agent != ?"
+# The most one inbox replay reads.
+_REPLAY_LIMIT = 5000
 
 
 @dataclass
@@ -163,7 +164,7 @@ class MessageBus:
         agent: str,
         *,
         after_seq: int,
-        limit: int = DEFAULT_EVENTS_KEEP_RECENT,
+        limit: int = _REPLAY_LIMIT,
     ) -> list[Message]:
         """Inbox for ``agent``: every message past ``after_seq`` it did not send itself.
 
