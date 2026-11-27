@@ -13,7 +13,6 @@ import pytest
 
 from hyperloom.inference_optimizer.breakdown.recorder.assembler import event_parts
 from hyperloom.inference_optimizer.breakdown.recorder.sections import STACK_EVENT_SECTIONS
-from hyperloom.inference_optimizer.breakdown.reporters._renderers.final import render as render_final
 from hyperloom.orchestrator.loop.coordinator import Coordinator
 from hyperloom.orchestrator.kernel.geak_config import (
     _geak_result_has_artifact,
@@ -233,40 +232,6 @@ async def test_agentx_2b_uses_current_canonical_measurement(
             assert state.geak_result["revalidation_status"] == "no_promote"
             assert result["status"] == "no_promote"
     assert {key: state.geak_result[key] for key in before_proposal} == before_proposal
-
-
-# ── Report renders the validated gain as recorded ─
-
-
-def _final_breakdown(*, pending: bool, gain_v: float) -> dict:
-    return {
-        "session": {"image": ""},
-        "outcome": {
-            "baseline": {"output_throughput": 2844.2},
-            "final": {
-                "output_throughput": 3236.5,
-                "gain_pct": gain_v,
-                "action_path": ["geak_e2e"],
-            },
-            "validation": {"validated_at_stack_len": 2, "validated_ts": ""},
-        },
-        # The candidate's standing is settled at close, after every kernel event
-        # has already closed, so the close event is the only place it can live.
-        "close": {"geak_candidate": {"revalidation_pending": pending}},
-    }
-
-
-def test_report_shows_validated_when_same_harness_confirmed() -> None:
-    """A same-harness validated gain renders as authoritative, no provisional tag."""
-    sec = render_final(
-        _final_breakdown(
-            pending=False,
-            gain_v=13.5,
-        )
-    )
-    facts = " ".join(sec.key_facts)
-    assert "Validated cumulative gain" in facts
-    assert "Provisional" not in facts
 
 
 # ── 2b: validated is stamped ONLY from the same-harness (orchestrator) rebench ─
@@ -546,38 +511,6 @@ def test_the_route_level_lift_is_claimed_once_from_the_anchor_it_beat(tmp_path: 
     # ...while the contribution every bucket sums shares the session baseline
     # as its denominator, which is what makes the parts add up to the chain.
     assert row["contribution_pct"] == pytest.approx((3400.0 - 3000.0) / 2844.209 * 100.0)
-
-
-def test_report_shows_pending_candidate_excluded_from_headline() -> None:
-    """A pending GEAK candidate renders as an audit note + warning; the validated gain is shown as recorded."""
-    bd = {
-        "session": {"image": ""},
-        "outcome": {
-            "baseline": {"output_throughput": 2844.2},
-            "final": {"output_throughput": 2844.2, "gain_pct": 0.0, "action_path": []},
-            "validation": {},
-        },
-        "close": {
-            "geak_candidate": {
-                "status": "awaiting_rebench",
-                "self_reported_gain_pct": 13.79,
-                "revalidation_pending": False,
-            }
-        },
-    }
-    sec = render_final(bd)
-    assert sec.key_facts == [
-        "Final: 2844.20 tok/s.",
-        "Delta vs baseline: +0.00 tok/s.",
-        "Validated cumulative gain: 0.00%.",
-        "GEAK candidate (self-reported +13.79%) is AWAITING a main-flow rebench — excluded from the headline gain "
-        "and final stack until a measured rebench validates it.",
-    ]
-    assert sec.warnings == [
-        "A GEAK(GEAK) e2e candidate self-reported a win but has NOT been confirmed by a same-harness main-flow "
-        "rebench, so it is intentionally kept out of current_best / action_path / the validated gain. Its "
-        "self-reported number is audit-only and must not be presented as the headline result."
-    ]
 
 
 # ── 2b material guard: same-config rebench noise must not stamp kernel gain ───

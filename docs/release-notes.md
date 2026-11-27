@@ -20,6 +20,14 @@ Merged to `main` and not yet carried by a tagged release. Each entry moves
 into the [release](https://github.com/AMD-AGI/Hyperloom/releases) that ships
 it.
 
+- **`hyperloom session report` is removed.** The command rendered a
+  `session_breakdown.json` as Markdown (`session_report.md`), optionally with
+  an LLM-written summary. It ran only by hand: no session wrote
+  `session_report.md` on its own. Read `reports/final.md` for a session's
+  summary and `session_breakdown.json` for the recorded facts; neither
+  changes. `HYPERLOOM_REPORT_LLM_BACKEND`, `HYPERLOOM_REPORT_MODEL` and
+  `HYPERLOOM_REPORT_MAX_TOKENS` are no longer read. See
+  [Upgrade](reference/upgrade.md).
 - **The hosted single-session flow is retired.** `hyperloom hosted run` now
   only checks the campaign spec, runs the installer and hands the run to
   `hyperloom-multibranch hosted run`. A spec must set `"flow": "multibranch"`

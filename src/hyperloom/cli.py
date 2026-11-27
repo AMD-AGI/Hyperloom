@@ -28,7 +28,6 @@ _COMMANDS: dict[str, tuple[str, tuple[str, ...], str]] = {
 
 _SESSION_COMMANDS: dict[str, tuple[str, str]] = {
     "breakdown": (f"{_IO}.tools.dump_session_breakdown", "Write session_breakdown.json for a session"),
-    "report": (f"{_IO}.tools.dump_session_report", "Render a session breakdown as markdown"),
     "backfill": (f"{_IO}.tools.backfill_langfuse", "Replay a session's trace into Langfuse"),
     "events": (f"{_IO}.tools.event_counts", "Count coordinator events of a session"),
     "state": (f"{_IO}.tools.read_optimizer_state", "Summarize a session's state.json"),
