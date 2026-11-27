@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: MIT
 
 """A test's own process tree may have one holder with memory on a card, a second in a launcher's place, and more only
-when each pairs with a DRM file of the test's own on that card's render node.
+when each pairs with a process of the test by what that process's DRM files on that card's render node say it holds.
 
 Each launcher of the test (a process of the test that holds memory and started one that holds its own) has one place,
 for a holder with no more than :data:`LAUNCHER_VRAM` on a card where the launcher holds memory on the render node.
@@ -14,6 +14,9 @@ descriptors, under the test's runner. The numbers are the ones such a pod read w
 
 The whole server (:func:`_tp4_round`) is laid out as such a pod read it with all four ranks up: each rank is listed by the
 kernel on its own card only, and reports its whole memory (about 169.5 GiB) on the render node of every card of the server.
+
+The Kimi round (:func:`_kimi_round`) is the eight-card round production refused for a rank and a spawn child of its
+server on card 0, with the numbers of that record.
 """
 
 from __future__ import annotations
@@ -342,39 +345,140 @@ def test_before_the_test_starts_the_tests_own_tree_on_its_card_is_still_named_ho
     ]
 
 
+_GIB = 1 << 30
 _SPAWN_CARD = 0
-_SERVER_VRAM = int(1.7 * (1 << 30))
-_CHILD_VRAM = int(1.2 * (1 << 30))
-_SERVER_HOST, _CHILD_HOST, _OTHER_HOST = 607948, 609774, 3700002
+#: The Kimi round the guard refused in production, eight cards, read on card 0 while its ranks were loading: the kernel
+#: listed host pids 607948 with 1.7 GiB and 609774 with 1.2 GiB there, and the pod's processes 1153 with 1.7 GiB and 1336
+#: with 1.2 GiB on its render node, both spawned by the server (``multiprocessing.spawn``). 1153 is a rank of the server.
+_KIMI_CARDS = tuple(range(8))
+_KIMI_RUNNER, _KIMI_SERVER = 1100, 1120
+_KIMI_RANKS = tuple(range(1153, 1161))
+_KIMI_RANK_HOSTS = (607948, *range(607949, 607956))  # only card 0's, 607948, is in the record
+_KIMI_CHILD, _KIMI_CHILD_HOST = 1336, 609774
+_RANK_LOADING_VRAM = int(1.7 * _GIB) >> 10 << 10  # whole KiB, as a descriptor says it
+_CHILD_VRAM = int(1.2 * _GIB) >> 10 << 10
+#: What a rank's two open DRM files said once loaded, read in production on its render nodes: 171686536 KiB and
+#: 172560516 KiB. The record does not say which is its own card's; as in the TP4 reading above, the fixture takes the
+#: larger for its own card and the other for every other card of the server.
+_RANK_OWN_KIB = 172560516
+_RANK_PEER_KIB = 171686536
+_SPAWN_COMMAND = (
+    "python3",
+    "-c",
+    "from multiprocessing.spawn import spawn_main; spawn_main()",
+    "--multiprocessing-fork",
+)
+_SOLO_HOST, _SOLO_CHILD_HOST, _OTHER_HOST = 3600001, 3600002, 3700002
 
 
-def _spawning_server(tree: KernelTree, *, child_owner: int = 1100) -> OwnProcesses:
-    """A single-card server under the test's runner that started a ``multiprocessing`` spawn child, each holding memory of
-    its own on the card through a DRM file of its own (1.7 GiB and 1.2 GiB): the kernel lists both on the card under host
-    ids. ``child_owner`` is the process the child is under: the server, or a process of another round."""
-    tree.process(1100, command=("python3", "-m", "hyperloom.measure.runner"))
-    tree.process(1153, parent=1100, command=("python3", "-m", "server"))
-    tree.process(1336, parent=child_owner, command=("python3", "-c", "from multiprocessing.spawn import spawn_main"))
-    tree.holds(_SERVER_HOST, _SPAWN_CARD, vram=_SERVER_VRAM, queues=4)
-    tree.holds(_CHILD_HOST, _SPAWN_CARD, vram=_CHILD_VRAM, queues=2)
-    tree.renders(1153, _SPAWN_CARD, kib=_SERVER_VRAM >> 10)
-    tree.renders(1336, _SPAWN_CARD, kib=_CHILD_VRAM >> 10)
-    return OwnProcesses(frozenset({1100}), procfs=tree.procfs)
+def _kimi_round(tree: KernelTree, *, loaded: bool = False) -> OwnProcesses:
+    """The production Kimi round: its runner, the server under it, the eight ranks the server spawned (1153 on card 0 to
+    1160 on card 7) and the spawn child 1336. Each rank is listed by the kernel on its own card only and has a DRM file on
+    the render node of every card of the server, each saying its memory; 1336 holds its memory on card 0 through a file
+    of its own. While loading (the record) every rank has 1.7 GiB, as rank 0 did; ``loaded``, every rank's files say the
+    production figures and the kernel lists the rank with what its own card's file says (the kernel's figure for a loaded
+    rank is not in the record). The round owns what is under its runner."""
+    tree.process(_KIMI_RUNNER, command=("python3", "-m", "hyperloom.measure.runner"))
+    tree.process(_KIMI_SERVER, parent=_KIMI_RUNNER, command=("python3", "-m", "sglang.launch_server", "--tp", "8"))
+    own_kib, peer_kib = (_RANK_OWN_KIB, _RANK_PEER_KIB) if loaded else (_RANK_LOADING_VRAM >> 10,) * 2
+    for rank, host, card in zip(_KIMI_RANKS, _KIMI_RANK_HOSTS, _KIMI_CARDS):
+        tree.process(rank, parent=_KIMI_SERVER, command=_SPAWN_COMMAND)
+        tree.holds(host, card, vram=own_kib << 10, queues=4)
+        for node in _KIMI_CARDS:
+            tree.renders(rank, node, kib=own_kib if node == card else peer_kib, descriptor=10 + node)
+    tree.process(_KIMI_CHILD, parent=_KIMI_SERVER, command=_SPAWN_COMMAND)
+    tree.holds(_KIMI_CHILD_HOST, _SPAWN_CARD, vram=_CHILD_VRAM, queues=2)
+    tree.renders(_KIMI_CHILD, _SPAWN_CARD, kib=_CHILD_VRAM >> 10)
+    return OwnProcesses(frozenset({_KIMI_RUNNER}), procfs=tree.procfs)
 
 
-def test_a_servers_spawn_child_with_more_than_a_launchers_memory_beside_it_leaves_the_card_clean(
+def _read_kimi(tree: KernelTree) -> CardReading:
+    return read_holders(list(_KIMI_CARDS), kfd=tree.kfd, procfs=tree.procfs)
+
+
+@pytest.mark.parametrize("loaded", [False, True], ids=["loading-as-recorded", "loaded"])
+def test_the_production_kimi_rounds_rank_and_spawn_child_on_card_0_leave_every_card_clean(
+    tmp_path: Path, loaded: bool
+) -> None:
+    """Card 0 has two holders, rank 0 and the 1.2 GiB spawn child, more than a launcher's memory: each pairs with what the
+    test's process holds on card 0 by its files there, rank 0's among files on all eight render nodes, so no card is
+    crowded. The other ranks' files on card 0's node are left over and do not count against it."""
+    tree = _pod(tmp_path)
+    own = _kimi_round(tree, loaded=loaded)
+
+    reading = _read_kimi(tree)
+
+    assert sorted((h.pid, h.vram) for h in reading.holders if h.card == _SPAWN_CARD) == sorted(
+        [(607948, _RANK_LOADING_VRAM if not loaded else _RANK_OWN_KIB << 10), (_KIMI_CHILD_HOST, _CHILD_VRAM)]
+    )
+    assert _CHILD_VRAM > card_occupancy.LAUNCHER_VRAM
+    assert dict(reading.unaccounted) == dict.fromkeys(_KIMI_CARDS, 0)
+    assert _keys(reading, own) == []
+
+
+@pytest.mark.parametrize("case", ["child-on-two-cards", "child-with-two-files-on-card-0"])
+def test_a_process_of_the_test_pairs_by_what_it_holds_on_each_card(tmp_path: Path, case: str) -> None:
+    """What a process holds on a card is the sum of its files on that card's render node, and it pairs on every card it
+    holds memory on: the spawn child holding 1.2 GiB on cards 0 and 1, listed by the kernel on both, pairs on each (beside
+    rank 0 on card 0 and rank 1 on card 1); the child's 1.2 GiB on card 0 split over two files of 0.7 and 0.5 GiB pairs
+    as one process with its one holder."""
+    tree = _pod(tmp_path)
+    own = _kimi_round(tree)
+    if case == "child-on-two-cards":
+        tree.holds(_KIMI_CHILD_HOST, 1, vram=_CHILD_VRAM, queues=2)
+        tree.renders(_KIMI_CHILD, 1, kib=_CHILD_VRAM >> 10, descriptor=4)
+    else:
+        (tree.procfs / str(_KIMI_CHILD) / "fd" / "3").unlink()
+        tree.renders(_KIMI_CHILD, _SPAWN_CARD, kib=int(0.7 * _GIB) >> 10, descriptor=4)
+        tree.renders(_KIMI_CHILD, _SPAWN_CARD, kib=(_CHILD_VRAM - int(0.7 * _GIB)) >> 10, descriptor=5)
+
+    assert _keys(_read_kimi(tree), own) == []
+
+
+@pytest.mark.parametrize(
+    ("loaded", "card", "vram"),
+    [(False, _SPAWN_CARD, 20 * _GIB), (False, 3, int(0.6 * _GIB)), (False, 3, int(2.8 * _GIB)), (True, 3, 20 * _GIB)],
+    ids=["loading-card-0-20GiB", "loading-card-3-0.6GiB", "loading-card-3-2.8GiB", "loaded-card-3-20GiB"],
+)
+def test_a_foreign_holder_of_other_memory_than_any_process_of_the_test_on_the_card_still_crowds_it(
+    tmp_path: Path, loaded: bool, card: int, vram: int
+) -> None:
+    """A process outside the pod on a card of the Kimi round, its memory more than the tolerance away from what every
+    process of the test holds on that card (1.2 and 1.7 GiB while loading, about 164 GiB loaded), is a holder no process
+    of the test pairs with: that card is crowded, and only that card (20 GiB beside the loading ranks is also memory no
+    process of the pod accounts for)."""
+    tree = _pod(tmp_path)
+    own = _kimi_round(tree, loaded=loaded)
+    tree.holds(_OTHER_HOST, card, vram=vram, queues=2)
+
+    assert [key for key in _keys(_read_kimi(tree), own) if key[0] == "crowded"] == [("crowded", card)]
+
+
+def test_accepted_limitation_a_foreign_holder_of_a_ranks_memory_beside_another_rank_reads_as_the_tests(
     tmp_path: Path,
 ) -> None:
-    """Both holders of the card pair one to one with the test's own files on its render node, each held on that card
-    only: they are the test's, whatever their memory, so the card is not crowded."""
+    """The bound of pairing by memory: every rank reports its memory on every card's render node, so on card 3 seven
+    ranks' 1.7 GiB stand for no holder of card 3. A process outside the pod with 1.7 GiB beside rank 3 pairs with one of
+    them and passes; one of the same memory as a process of the test cannot be told from the test's own."""
     tree = _pod(tmp_path)
-    own = _spawning_server(tree, child_owner=1153)
+    own = _kimi_round(tree)
+    tree.holds(_OTHER_HOST, 3, vram=_RANK_LOADING_VRAM, queues=2)
 
-    reading = read_holders([_SPAWN_CARD], kfd=tree.kfd, procfs=tree.procfs)
+    assert _keys(_read_kimi(tree), own) == []
 
-    assert sorted(h.vram for h in reading.holders) == [_CHILD_VRAM, _SERVER_VRAM]
-    assert _CHILD_VRAM > card_occupancy.LAUNCHER_VRAM
-    assert _keys(reading, own) == []
+
+def _solo_server(tree: KernelTree, *, child_owner: int = 2100) -> OwnProcesses:
+    """A made-up single-card server under the test's runner that started a ``multiprocessing`` spawn child, each holding
+    memory of its own on the card through a DRM file of its own (1.7 GiB and 1.2 GiB): the kernel lists both on the card.
+    ``child_owner`` is the process the child is under: the server, or a process of another round."""
+    tree.process(2100, command=("python3", "-m", "hyperloom.measure.runner"))
+    tree.process(2153, parent=2100, command=("python3", "-m", "server"))
+    tree.process(2336, parent=child_owner, command=_SPAWN_COMMAND)
+    tree.holds(_SOLO_HOST, _SPAWN_CARD, vram=_RANK_LOADING_VRAM, queues=4)
+    tree.holds(_SOLO_CHILD_HOST, _SPAWN_CARD, vram=_CHILD_VRAM, queues=2)
+    tree.renders(2153, _SPAWN_CARD, kib=_RANK_LOADING_VRAM >> 10)
+    tree.renders(2336, _SPAWN_CARD, kib=_CHILD_VRAM >> 10)
+    return OwnProcesses(frozenset({2100}), procfs=tree.procfs)
 
 
 @pytest.mark.parametrize(
@@ -384,31 +488,25 @@ def test_a_servers_spawn_child_with_more_than_a_launchers_memory_beside_it_leave
         "child-not-the-tests",
         "child-without-a-file",
         "child-file-with-less-memory",
-        "child-file-on-two-cards",
     ],
 )
 def test_a_holder_not_matched_to_the_tests_own_files_still_crowds_the_card(tmp_path: Path, case: str) -> None:
     """A 1.2 GiB holder the test's files do not account for one to one is foreign as before: a third holder beside the
     server and its child; the same child under another round's process; a child the pod has no file of (a process outside
-    the pod); a child whose file says much less than the holder's 1.2 GiB; and a child whose memory is reported on a second
-    card's render node too, which could stand for a holder of either card."""
+    the pod); and a child whose file says much less than the holder's 1.2 GiB."""
     tree = _pod(tmp_path)
     tree.process(999, command=("sleep", "infinity"))
-    own = _spawning_server(tree, child_owner=999 if case == "child-not-the-tests" else 1153)
-    cards = [_SPAWN_CARD]
+    own = _solo_server(tree, child_owner=999 if case == "child-not-the-tests" else 2153)
     if case == "third-holder":
         tree.holds(_OTHER_HOST, _SPAWN_CARD, vram=_CHILD_VRAM, queues=2)
     elif case == "child-without-a-file":
-        (tree.procfs / "1336" / "fd" / "3").unlink()
+        (tree.procfs / "2336" / "fd" / "3").unlink()
     elif case == "child-file-with-less-memory":
-        (tree.procfs / "1336" / "fdinfo" / "3").write_text(
-            f"pos:\t0\ndrm-driver:\tamdgpu\ndrm-client-id:\t1336-3\ndrm-memory-vram:\t{(512 << 20) >> 10} KiB\n"
+        (tree.procfs / "2336" / "fdinfo" / "3").write_text(
+            f"pos:\t0\ndrm-driver:\tamdgpu\ndrm-client-id:\t2336-3\ndrm-memory-vram:\t{(512 << 20) >> 10} KiB\n"
         )
-    elif case == "child-file-on-two-cards":
-        tree.renders(1336, 1, kib=_CHILD_VRAM >> 10, descriptor=4)
-        cards = [_SPAWN_CARD, 1]
 
-    reading = read_holders(cards, kfd=tree.kfd, procfs=tree.procfs)
+    reading = read_holders([_SPAWN_CARD], kfd=tree.kfd, procfs=tree.procfs)
 
     assert [i.key for i in reading.intrusions(own, before_test=False) if i.key[0] == "crowded"] == [
         ("crowded", _SPAWN_CARD)
@@ -424,14 +522,14 @@ def test_each_holder_is_paired_with_a_file_of_its_own_whichever_file_it_would_ta
     """A holder whose memory is near both files' does not keep the only file the other holder's memory is near; both have
     more than a launcher's memory, so only the pairing lets them pass."""
     tree = _pod(tmp_path)
-    tree.process(1100, command=("python3", "-m", "hyperloom.measure.runner"))
-    tree.process(1153, parent=1100, command=("python3", "-m", "server"))
-    tree.process(1336, parent=1153, command=("python3", "-c", "from multiprocessing.spawn import spawn_main"))
-    tree.holds(_SERVER_HOST, _SPAWN_CARD, vram=int(1.6 * (1 << 30)), queues=4)
-    tree.holds(_CHILD_HOST, _SPAWN_CARD, vram=int(1.1 * (1 << 30)), queues=2)
-    tree.renders(1153, _SPAWN_CARD, kib=files[0] >> 10)
-    tree.renders(1336, _SPAWN_CARD, kib=files[1] >> 10)
-    own = OwnProcesses(frozenset({1100}), procfs=tree.procfs)
+    tree.process(2100, command=("python3", "-m", "hyperloom.measure.runner"))
+    tree.process(2153, parent=2100, command=("python3", "-m", "server"))
+    tree.process(2336, parent=2153, command=_SPAWN_COMMAND)
+    tree.holds(_SOLO_HOST, _SPAWN_CARD, vram=int(1.6 * (1 << 30)), queues=4)
+    tree.holds(_SOLO_CHILD_HOST, _SPAWN_CARD, vram=int(1.1 * (1 << 30)), queues=2)
+    tree.renders(2153, _SPAWN_CARD, kib=files[0] >> 10)
+    tree.renders(2336, _SPAWN_CARD, kib=files[1] >> 10)
+    own = OwnProcesses(frozenset({2100}), procfs=tree.procfs)
 
     assert _keys(read_holders([_SPAWN_CARD], kfd=tree.kfd, procfs=tree.procfs), own) == []
 
@@ -447,26 +545,26 @@ def test_a_file_pairs_only_when_all_its_processes_are_the_tests_it_is_on_this_ca
     the test's other process holds its file on another card's render node only; or that file holds almost no memory
     (:data:`NEGLIGIBLE_VRAM`), which would otherwise pair with any holder of up to the tolerance."""
     tree = _pod(tmp_path)
-    tree.process(1100, command=("python3", "-m", "hyperloom.measure.runner"))
-    tree.process(1153, parent=1100, command=("python3", "-m", "server"))
-    tree.process(1336, parent=1100, command=("python3", "-m", "helper"))
+    tree.process(2100, command=("python3", "-m", "hyperloom.measure.runner"))
+    tree.process(2153, parent=2100, command=("python3", "-m", "server"))
+    tree.process(2336, parent=2100, command=("python3", "-m", "helper"))
     tree.process(999, command=("sleep", "infinity"))
-    tree.holds(_SERVER_HOST, _SPAWN_CARD, vram=_SERVER_VRAM, queues=4)
-    tree.renders(1153, _SPAWN_CARD, kib=_SERVER_VRAM >> 10)
+    tree.holds(_SOLO_HOST, _SPAWN_CARD, vram=_RANK_LOADING_VRAM, queues=4)
+    tree.renders(2153, _SPAWN_CARD, kib=_RANK_LOADING_VRAM >> 10)
     cards = [_SPAWN_CARD]
     if case == "file-shared-with-a-process-not-the-tests":
-        tree.holds(_CHILD_HOST, _SPAWN_CARD, vram=_CHILD_VRAM, queues=2)
-        tree.renders(1336, _SPAWN_CARD, kib=_CHILD_VRAM >> 10, client="1336-3")
-        tree.renders(999, _SPAWN_CARD, kib=_CHILD_VRAM >> 10, client="1336-3")
+        tree.holds(_SOLO_CHILD_HOST, _SPAWN_CARD, vram=_CHILD_VRAM, queues=2)
+        tree.renders(2336, _SPAWN_CARD, kib=_CHILD_VRAM >> 10, client="2336-3")
+        tree.renders(999, _SPAWN_CARD, kib=_CHILD_VRAM >> 10, client="2336-3")
     elif case == "file-on-another-cards-node":
         tree.holds(_OTHER_HOST, _SPAWN_CARD, vram=_CHILD_VRAM, queues=2)
-        tree.holds(_CHILD_HOST, 1, vram=_CHILD_VRAM, queues=2)
-        tree.renders(1336, 1, kib=_CHILD_VRAM >> 10)
+        tree.holds(_SOLO_CHILD_HOST, 1, vram=_CHILD_VRAM, queues=2)
+        tree.renders(2336, 1, kib=_CHILD_VRAM >> 10)
         cards = [_SPAWN_CARD, 1]
     else:
         tree.holds(_OTHER_HOST, _SPAWN_CARD, vram=400 << 20, queues=2)
-        tree.renders(1336, _SPAWN_CARD, kib=(4 << 20) >> 10)
-    own = OwnProcesses(frozenset({1100}), procfs=tree.procfs)
+        tree.renders(2336, _SPAWN_CARD, kib=(4 << 20) >> 10)
+    own = OwnProcesses(frozenset({2100}), procfs=tree.procfs)
 
     reading = read_holders(cards, kfd=tree.kfd, procfs=tree.procfs)
 
@@ -499,14 +597,14 @@ def test_accepted_limitation_a_foreign_holder_near_a_file_of_the_test_reads_as_t
     1.3 GiB and a foreign 2.1 GiB holder: clean. A foreign 2.8 GiB holder beside files of 1.7 and 1.2 GiB is within the
     tolerance of none of them and crowds the card."""
     tree = _pod(tmp_path)
-    tree.process(1100, command=("python3", "-m", "hyperloom.measure.runner"))
-    tree.process(1153, parent=1100, command=("python3", "-m", "server"))
-    tree.process(1336, parent=1153, command=("python3", "-c", "from multiprocessing.spawn import spawn_main"))
-    tree.renders(1153, _SPAWN_CARD, kib=files[0] >> 10)
-    tree.renders(1336, _SPAWN_CARD, kib=files[1] >> 10)
-    tree.holds(_SERVER_HOST, _SPAWN_CARD, vram=listed[0], queues=4)
+    tree.process(2100, command=("python3", "-m", "hyperloom.measure.runner"))
+    tree.process(2153, parent=2100, command=("python3", "-m", "server"))
+    tree.process(2336, parent=2153, command=_SPAWN_COMMAND)
+    tree.renders(2153, _SPAWN_CARD, kib=files[0] >> 10)
+    tree.renders(2336, _SPAWN_CARD, kib=files[1] >> 10)
+    tree.holds(_SOLO_HOST, _SPAWN_CARD, vram=listed[0], queues=4)
     tree.holds(_OTHER_HOST, _SPAWN_CARD, vram=listed[1], queues=2)
-    own = OwnProcesses(frozenset({1100}), procfs=tree.procfs)
+    own = OwnProcesses(frozenset({2100}), procfs=tree.procfs)
 
     reading = read_holders([_SPAWN_CARD], kfd=tree.kfd, procfs=tree.procfs)
 
@@ -523,11 +621,11 @@ def test_a_file_of_the_test_with_no_listed_holder_does_not_count_against_the_car
     the two listed holders (1.7 and 1.2 GiB) pair with two of the files, and the file left over does not count against
     the card, so it is clean."""
     tree = _pod(tmp_path)
-    own = _spawning_server(tree, child_owner=1153)
-    tree.process(1337, parent=1153, command=("python3", "-c", "from multiprocessing.spawn import spawn_main"))
-    tree.renders(1337, _SPAWN_CARD, kib=_gib(0.9) >> 10)
+    own = _solo_server(tree, child_owner=2153)
+    tree.process(2337, parent=2153, command=_SPAWN_COMMAND)
+    tree.renders(2337, _SPAWN_CARD, kib=_gib(0.9) >> 10)
 
     reading = read_holders([_SPAWN_CARD], kfd=tree.kfd, procfs=tree.procfs)
 
-    assert sorted(h.vram for h in reading.holders) == [_CHILD_VRAM, _SERVER_VRAM]
+    assert sorted(h.vram for h in reading.holders) == [_CHILD_VRAM, _RANK_LOADING_VRAM]
     assert _keys(reading, own) == []
