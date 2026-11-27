@@ -2513,20 +2513,21 @@ async def test_advance_phase_terminal_sets_stop_reason(coord: Coordinator, monke
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    ("prior", "target", "reason"),
+    ("prior", "target", "reason", "evidence"),
     [
+        ("FRAMEWORK_AGENT", "KERNEL_AGENT", "optimize_no_more_leverage", {"hint": "skip_to_kernel"}),
         # Entering the phase whose exit reads the hint is no exception: the hint was emitted for the phase it was
         # emitted in, and carrying it across would end FRAMEWORK_AGENT on arrival.
-        ("PRELUDE", "FRAMEWORK_AGENT", "prelude_done"),
-        ("FRAMEWORK_AGENT", "CYCLE_END", "some_other_reason"),
+        ("PRELUDE", "FRAMEWORK_AGENT", "prelude_done", {}),
+        ("FRAMEWORK_AGENT", "CYCLE_END", "some_other_reason", {}),
     ],
 )
-async def test_advance_phase_hint_discarded_on_a_transition_it_did_not_drive(
-    coord: Coordinator, monkeypatch, prior: str, target: str, reason: str
+async def test_a_phase_transition_clears_the_pending_hint_whether_or_not_the_hint_drove_it(
+    coord: Coordinator, monkeypatch, prior: str, target: str, reason: str, evidence: dict
 ) -> None:
     coord.shared_state.phase = prior
     coord.shared_state.pending_escalate_hint = "skip_to_kernel"
-    monkeypatch.setattr(phase_transitions, "compute_next_phase", lambda *a, **k: (target, reason, {}))
+    monkeypatch.setattr(phase_transitions, "compute_next_phase", lambda *a, **k: (target, reason, dict(evidence)))
 
     async def _entered(*, from_phase, to_phase, reason="", evidence=None):
         return None
@@ -2535,32 +2536,7 @@ async def test_advance_phase_hint_discarded_on_a_transition_it_did_not_drive(
     await coord.phase_machine.advance_phase_if_needed()
     assert (coord.shared_state.phase or "").upper() == target
     assert coord.shared_state.pending_escalate_hint == ""
-    assert coord.shared_state.last_discarded_escalate_hint == "skip_to_kernel"
-    assert coord.shared_state.last_discarded_escalate_hint_ts
-
-
-@pytest.mark.asyncio
-async def test_advance_phase_hint_consumed_when_it_drove_the_transition(coord: Coordinator, monkeypatch) -> None:
-    """The complementary case: a hint-driven transition must record consumption, not a discard, so the two are
-    distinguishable in the breakdown.
-    """
-
-    coord.shared_state.phase = "FRAMEWORK_AGENT"
-    coord.shared_state.pending_escalate_hint = "skip_to_kernel"
-    monkeypatch.setattr(
-        phase_transitions,
-        "compute_next_phase",
-        lambda *a, **k: ("KERNEL_AGENT", "skip_to_kernel", {"hint": "skip_to_kernel"}),
-    )
-
-    async def _entered(*, from_phase, to_phase, reason="", evidence=None):
-        return None
-
-    monkeypatch.setattr(coord.phase_machine, "_on_phase_entered", _entered)
-    await coord.phase_machine.advance_phase_if_needed()
-    assert (coord.shared_state.phase or "").upper() == "KERNEL_AGENT"
-    assert coord.shared_state.pending_escalate_hint == ""
-    assert coord.shared_state.last_discarded_escalate_hint == ""
+    assert json.loads((coord.session_dir / "state.json").read_text(encoding="utf-8"))["pending_escalate_hint"] == ""
 
 
 # -- materialize -----------------------------------------------------------

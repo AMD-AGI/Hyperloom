@@ -826,7 +826,7 @@ class IntentRouter(CoordinatorCollaborator):
             await self.record_policy_denied(source, intent, denied)
             return
         # Deferred: the next compute_next_phase acts on the hint.
-        self.shared_state.set_pending_escalate_hint(hint)
+        self.shared_state.pending_escalate_hint = hint
         self.shared_state.save(self.session_dir)
 
     async def _handle_send_message(self, source: str, intent: Intent) -> None:

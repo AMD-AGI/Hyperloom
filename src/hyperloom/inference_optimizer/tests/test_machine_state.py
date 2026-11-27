@@ -1,8 +1,8 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Coverage for machine_state pure helpers: escalate hints, budget normalization, time/budget remaining math,
-post-prelude target, and history-row builder.
+"""Coverage for machine_state pure helpers: budget normalization, time/budget remaining math, post-prelude target,
+and history-row builder.
 """
 
 from __future__ import annotations
@@ -10,15 +10,8 @@ from __future__ import annotations
 import pytest
 
 from hyperloom.orchestrator.phases import machine_state as ps
-from hyperloom.orchestrator.phases import phase_predicates, phase_transitions
-from hyperloom.orchestrator.state.shared_state import ESCALATE_HINT_VOCAB, SharedState, is_valid_escalate_hint
-
-
-def test_is_valid_escalate_hint() -> None:
-    assert is_valid_escalate_hint("not-a-real-hint") is False
-    # at least one vocab member should validate
-    some_vocab = next(iter(ESCALATE_HINT_VOCAB))
-    assert is_valid_escalate_hint(some_vocab) is True
+from hyperloom.orchestrator.phases import phase_transitions
+from hyperloom.orchestrator.state.shared_state import SharedState
 
 
 def test_normalize_budget_pct_defaults_and_filters() -> None:
@@ -49,13 +42,6 @@ def test_now_unix_injected() -> None:
 def test_phase_started_unix_bad_value() -> None:
     assert ps.phase_started_unix(SharedState(phase_started_unix="bad")) == 0.0
     assert ps.phase_started_unix(SharedState(phase_started_unix=10.0)) == 10.0
-
-
-def test_pending_escalate_hint() -> None:
-    valid = next(iter(ESCALATE_HINT_VOCAB))
-    assert phase_predicates._pending_escalate_hint(SharedState(pending_escalate_hint=valid)) == valid
-    assert phase_predicates._pending_escalate_hint(SharedState(pending_escalate_hint="garbage")) == ""
-    assert phase_predicates._pending_escalate_hint(SharedState(pending_escalate_hint="")) == ""
 
 
 def test_max_minutes_coercion() -> None:

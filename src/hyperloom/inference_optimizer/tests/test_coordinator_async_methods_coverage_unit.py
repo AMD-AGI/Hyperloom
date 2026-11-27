@@ -330,7 +330,6 @@ _ORCHESTRATION_ADVISORIES = (
     ("=== Intervention mix (telemetry) ===", "shared_state", "to_intervention_mix_summary"),
     ("=== Bottleneck redirect (advisory) ===", "conversation", "_bottleneck_redirect_advisory_block"),
     ("=== Acceptance threshold (advisory) ===", "conversation", "_acceptance_threshold_advisory_block"),
-    ("=== Discarded escalation hint (advisory) ===", "conversation", "_discarded_escalate_hint_advisory_block"),
     ("=== Plateau advisory ===", "conversation", "plateau_advisory_block"),
 )
 
@@ -505,8 +504,10 @@ def _escalate(hint: str) -> Intent:
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("hint", ["bogus", "skip_to_close"])
+@pytest.mark.parametrize("hint", ["bogus", "skip_to_close", "skip_to_sweep"])
 async def test_escalate_hint_outside_the_vocab_is_denied(coord: Coordinator, hint: str) -> None:
+    """``skip_to_kernel`` is the model's one hint; ``skip_to_sweep`` is the Coordinator's own and not the model's to send."""
+    coord.shared_state.phase = "FRAMEWORK_AGENT"
     await coord.router._handle_escalate_strategy_change("orchestration", _escalate(hint))
     assert coord.shared_state.pending_escalate_hint == ""
     denied = [

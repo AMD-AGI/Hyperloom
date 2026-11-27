@@ -126,6 +126,20 @@ it.
   nothing; and a queued task that still holds a row on its own lane is
   dispatched instead of waiting on itself. Two tasks that need the same lane
   still never run together. See [Upgrade](reference/upgrade.md).
+- **A dropped escalate hint is no longer reported back, and `skip_to_sweep`
+  is the Coordinator's alone.** `state.json` drops
+  `last_discarded_escalate_hint` and `last_discarded_escalate_hint_ts`, and
+  the Orchestration prompt has no `=== Discarded escalation hint (advisory)
+  ===` section. The section asked Orchestration to send again a hint a phase
+  transition had dropped; the session had left the phase by then, so the
+  re-sent `skip_to_kernel` was denied, and the section also reported the
+  Coordinator's own `skip_to_sweep` as Orchestration's. A phase transition
+  still clears a pending hint. `escalate_strategy_change` with
+  `next_action_hint='skip_to_sweep'` from Orchestration is now denied
+  (`escalate_hint_not_in_vocab`): it was accepted in every phase and ended
+  FRAMEWORK_AGENT with no round run. The prompt offered only `skip_to_kernel`,
+  which is unchanged, as is the `skip_to_sweep` the Coordinator sets at the
+  end of a custom-specialist-only cycle. See [Upgrade](reference/upgrade.md).
 - **forge-loop runs every round as lanes and has no planning stage.** Every
   iteration is one round: one lane per focus the Analysis Agent divides its
   evidence into (at most `--lanes`, and one lane with no focus when it divides

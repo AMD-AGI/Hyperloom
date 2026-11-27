@@ -27,30 +27,13 @@ from hyperloom.orchestrator.state._shared_state import run_signals
 from hyperloom.orchestrator.state.shared_state import (
     ESCALATE_HINT_SKIP_TO_KERNEL,
     ESCALATE_HINT_SKIP_TO_SWEEP,
-    ESCALATE_HINT_VOCAB,
     SharedState,
-    is_valid_escalate_hint,
 )
 
 
 def _config_dry(state, overrides):
     evidence = _config_lever_evidence(state, overrides)
     return framework_plateau(evidence).config_dry, evidence
-
-
-def test_escalate_hint_vocab_closed():
-    assert ESCALATE_HINT_VOCAB == frozenset(
-        {
-            "skip_to_kernel",
-            "skip_to_sweep",
-        }
-    )
-
-
-def test_is_valid_escalate_hint_accepts_vocab():
-    assert is_valid_escalate_hint("skip_to_kernel")
-    assert not is_valid_escalate_hint("garbage")
-    assert not is_valid_escalate_hint("")
 
 
 def test_config_lever_dry_empty_attempts_returns_false():
@@ -433,31 +416,6 @@ def test_a_whitespace_padded_target_file_still_matches():
     state.optimization_stack = [{"action": "integrate", "kernel_id": "k900", "target_file": "  /repo/op.py "}]
 
     assert kernel_work_pending(state) is False
-
-
-def test_set_pending_escalate_hint_accepts_vocab():
-    s = SharedState()
-    assert s.set_pending_escalate_hint(ESCALATE_HINT_SKIP_TO_KERNEL) == "skip_to_kernel"
-    assert s.pending_escalate_hint == "skip_to_kernel"
-
-
-def test_set_pending_escalate_hint_drops_unknown():
-    s = SharedState()
-    assert s.set_pending_escalate_hint("garbage") == ""
-    assert s.pending_escalate_hint == ""
-
-
-def test_consume_pending_escalate_hint_clears_and_returns_hint():
-    s = SharedState()
-    s.set_pending_escalate_hint(ESCALATE_HINT_SKIP_TO_KERNEL)
-    consumed = s.consume_pending_escalate_hint()
-    assert consumed == "skip_to_kernel"
-    assert s.pending_escalate_hint == ""
-
-
-def test_consume_pending_escalate_hint_noop_when_empty():
-    s = SharedState()
-    assert s.consume_pending_escalate_hint() == ""
 
 
 def test_set_stop_reason_accepts_vocab():

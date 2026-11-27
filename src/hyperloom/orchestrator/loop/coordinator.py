@@ -1026,9 +1026,6 @@ class Coordinator:
         elif not request:
             await self._record_no_intent_turn("the turn emitted no intents")
         await self.conversation.settle_turn()
-        state = self.shared_state
-        state.last_discarded_escalate_hint = ""
-        state.last_discarded_escalate_hint_ts = ""
 
     def _trace_reactor_llm_failure(
         self,

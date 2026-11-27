@@ -899,6 +899,8 @@ def record_phase_transition(
     state.phase_history = history
     state.phase = row["to_phase"]
     state.phase_started_unix = now_unix
+    # A hint speaks for the phase it was sent in; carried into the next FRAMEWORK_AGENT it would end that one.
+    state.pending_escalate_hint = ""
     _publish_phase_boundary(
         _PhaseBoundary(
             from_phase=from_phase,

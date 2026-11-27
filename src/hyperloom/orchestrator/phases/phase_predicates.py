@@ -10,7 +10,6 @@ from typing import Any
 
 from hyperloom_common.coerce import optional_positive_float, to_float, to_unix
 from hyperloom_common.env import env_float as _env_float, env_int as _env_int
-from ..state.shared_state import is_valid_escalate_hint
 from . import machine_state as _phase_state
 from .phase_chain import (
     PHASE_CYCLE_END,
@@ -48,16 +47,6 @@ def _kernel_idle_since_unix(state: Any) -> float:
         return max(0.0, float(raw or 0.0))
     except (TypeError, ValueError):
         return 0.0
-
-
-def _pending_escalate_hint(state: Any) -> str:
-    """Return a pending escalate hint to act on this tick (unknown hints → empty)."""
-    raw = str(state.pending_escalate_hint or "").strip()
-    if not raw:
-        return ""
-    if is_valid_escalate_hint(raw):
-        return raw
-    return ""
 
 
 def _budget_predicate_inputs(
@@ -102,7 +91,6 @@ def _base_workflow_predicate_inputs(
     flags: PhaseFlags,
     enablement_in_flight: bool,
 ) -> dict[str, Any]:
-    hint = _pending_escalate_hint(state) or None
     global_inputs: dict[str, Any] = {
         "stop_reason": str(state.stop_reason or "").strip(),
         "closing_phase": bool(state.closing_phase),
@@ -116,7 +104,7 @@ def _base_workflow_predicate_inputs(
         "pending_work": None,
         "budget": None,
         "plateau": None,
-        "hint": hint,
+        "hint": state.pending_escalate_hint or None,
         "cycle_end_result": None,
         "macro_cycle": state.macro_cycle,
         "run_flags": {

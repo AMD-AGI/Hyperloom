@@ -226,7 +226,6 @@ _ADVISORY_BLOCKS: tuple[_AdvisoryRow, ...] = (
     ("=== Intervention mix (telemetry) ===", lambda c: c.shared_state.to_intervention_mix_summary()),
     ("=== Bottleneck redirect (advisory) ===", lambda c: c._bottleneck_redirect_advisory_block()),
     ("=== Acceptance threshold (advisory) ===", lambda c: c._acceptance_threshold_advisory_block()),
-    ("=== Discarded escalation hint (advisory) ===", lambda c: c._discarded_escalate_hint_advisory_block()),
 )
 
 
@@ -924,22 +923,4 @@ class ConversationCollaborator(CoordinatorCollaborator):
             variants,
             hints,
             primary_gap=primary_gap,
-        )
-
-    def _discarded_escalate_hint_advisory_block(self) -> str:
-        """Render the advisory for an escalate_strategy_change hint that was discarded.
-
-        A phase transition the hint did not drive drops it.
-
-        Returns:
-            The advisory string, or ``""`` when no discarded hint is recorded.
-        """
-        hint = str(self.shared_state.last_discarded_escalate_hint or "")
-        ts = str(self.shared_state.last_discarded_escalate_hint_ts or "")
-        if not hint:
-            return ""
-        return (
-            f"ADVISORY: your escalate_strategy_change hint '{hint}' (at {ts}) was discarded "
-            "because a phase transition it did not drive fired before "
-            "it could be consumed. Re-emit escalate_strategy_change if still needed."
         )

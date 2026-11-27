@@ -255,23 +255,6 @@ class MachinePhase(CoordinatorCollaborator):
         )
         self._coord.dispatcher.admission_frozen = self._transition_pending(next_phase)
 
-    def settle_escalate_hint(self, move: Transition) -> None:
-        """Consume or discard the pending escalate hint, according to what drove this transition."""
-        state = self.shared_state
-        if "hint" in move.evidence:
-            state.consume_pending_escalate_hint()
-        elif state.pending_escalate_hint:
-            # A hint speaks for the phase it was emitted in; carried across a transition it did not drive, it would
-            # act on a phase it was never about.
-            discarded_hint = state.discard_pending_escalate_hint()
-            log.info(
-                "phase_machine: discarded stale pending_escalate_hint=%r on unrelated transition %s -> %s (reason=%s)",
-                discarded_hint,
-                move.from_phase,
-                move.to_phase,
-                move.reason,
-            )
-
     def _carry_cycle_facts_across(self, move: Transition) -> None:
         """Persist the cycle-level facts the entered phase, or a later resume, has to see."""
         state = self.shared_state
@@ -347,7 +330,6 @@ class MachinePhase(CoordinatorCollaborator):
     async def _commit_transition(self, move: Transition) -> None:
         """Record the phase move and run everything the boundary owes, in order."""
         state = self.shared_state
-        self.settle_escalate_hint(move)
         if move.to_phase == _phase_state.PHASE_CLOSE:
             self.set_terminal_stop_reason(move.reason)
         self._carry_cycle_facts_across(move)

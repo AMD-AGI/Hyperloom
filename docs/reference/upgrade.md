@@ -524,6 +524,39 @@ Six behaviours change:
 The log no longer prints `depth: aggregated N new research reference(s) into
 seen-set`, and `specialist findings harvested` reports `hints_added` only.
 
+### Recommended: stop reading the discarded-hint record, and stop sending `skip_to_sweep`
+
+`escalate_strategy_change` has one hint Orchestration may send,
+`next_action_hint='skip_to_kernel'`, accepted in FRAMEWORK_AGENT. The
+Orchestration prompt already offered only that one. The hint is checked once,
+when the intent arrives, and a phase transition clears a pending hint without
+keeping a record of it.
+
+* `state.json` no longer has `last_discarded_escalate_hint` or
+  `last_discarded_escalate_hint_ts`. `pending_escalate_hint` stays, and is
+  empty after every phase transition, as before.
+* The Orchestration prompt has no `=== Discarded escalation hint (advisory)
+  ===` section. 1.2.x showed it for one turn after a phase transition dropped
+  a pending hint, and asked for the hint to be sent again. By then the session
+  had left the phase the hint was about, so a re-sent `skip_to_kernel` was
+  denied (`escalate_hint_phase`); and the section also reported a
+  `skip_to_sweep` the Coordinator had set itself as Orchestration's own. The
+  Phase block and the `phase_transition` event report the transition, as
+  before.
+* `escalate_strategy_change{next_action_hint='skip_to_sweep'}` from
+  Orchestration is denied with rule `escalate_hint_not_in_vocab`. 1.2.x
+  accepted it in every phase, and in FRAMEWORK_AGENT it ended the phase with
+  no round run, which `skip_to_kernel` does not. The Coordinator still sets
+  `skip_to_sweep` itself when a custom-specialist-only cycle
+  (`HYPERLOOM_CUSTOM_SPECIALIST_ONLY=1`) has run all its work; the exit
+  evidence and the `hint` of `predicate_inputs` in `session_breakdown.json`
+  record it as before, and the values `hint` can take do not change.
+* The `hint` of an `escalate_hint_not_in_vocab` denial reads `skip_to_kernel,
+  sent in FRAMEWORK_AGENT, is the one hint; the run closes itself.` Rule ids
+  `escalate_hint_not_in_vocab` and `escalate_hint_phase` are unchanged.
+* The log no longer prints `phase_machine: discarded stale
+  pending_escalate_hint=...`.
+
 ---
 
 ## Upgrading from 1.1.x

@@ -131,7 +131,7 @@ def _arm_explore_to_cycle_end(st):
     st.start_ts = (now - timedelta(minutes=10)).isoformat()
     st.max_minutes = 96 * 60
     st.kernel_enabled = False
-    st.set_pending_escalate_hint(ESCALATE_HINT_SKIP_TO_SWEEP)
+    st.pending_escalate_hint = ESCALATE_HINT_SKIP_TO_SWEEP
 
 
 @pytest.mark.asyncio

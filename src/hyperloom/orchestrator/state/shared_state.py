@@ -45,22 +45,11 @@ from ._shared_state.roofline import _RooflineStateMixin, first_positive_tput
 log = logging.getLogger(__name__)
 
 
-# escalate_strategy_change hint vocabulary (closed enum; unknown hints are denied). ``skip_to_kernel`` is the
-# "exhausted the current lever" signal from FRAMEWORK_AGENT; it advances to KERNEL.
-# KERNEL exits automatically when settled with no pending work — the LLM does not self-set a sweep hint.
+# The two hints the FRAMEWORK_AGENT exit reads. ``skip_to_kernel`` is the model's "this lever is exhausted", sent as
+# ``escalate_strategy_change``; ``skip_to_sweep`` is the Coordinator's own, set when a custom-specialist-only cycle
+# has run all its work.
 ESCALATE_HINT_SKIP_TO_KERNEL: str = "skip_to_kernel"
 ESCALATE_HINT_SKIP_TO_SWEEP: str = "skip_to_sweep"
-ESCALATE_HINT_VOCAB: frozenset[str] = frozenset(
-    {
-        ESCALATE_HINT_SKIP_TO_KERNEL,
-        ESCALATE_HINT_SKIP_TO_SWEEP,
-    }
-)
-
-
-def is_valid_escalate_hint(hint: str) -> bool:
-    """Return True for any hint Coordinator should act on (closed vocab)."""
-    return (hint or "").strip() in ESCALATE_HINT_VOCAB
 
 
 def resolve_anchor_with_drift(snapshot_tput: float, state: Any) -> tuple[float, bool]:
@@ -605,11 +594,8 @@ class SharedState(
     research_lane_capacity: int = 1
     # GPU pool capacity for needs_gpu specialists (0 disables); locked at session start.
     gpu_specialist_capacity: int = 0
-    # escalate_strategy_change carry-over: Coordinator writes validated next_action_hint here for compute_next_phase, then clears it either by consuming it (drove a transition) or discarding it (an unrelated transition fired while it was pending).
+    # The hint the FRAMEWORK_AGENT exit reads on the next phase decision; every phase transition clears it.
     pending_escalate_hint: str = ""
-    # last hint thrown away by an unrelated transition, never acted on (audit only) for the breakdown.
-    last_discarded_escalate_hint: str = ""
-    last_discarded_escalate_hint_ts: str = ""
     # per-phase plateau threshold overrides locked at session start (CLI flags); empty => library defaults.
     plateau_overrides: dict[str, Any] = field(default_factory=dict)
     # E2E integrate bookkeeping keyed by kernel_id+patch_path+args; prevents re-validating the same patch after NEEDS_REVIEW/REVERT.
@@ -755,33 +741,6 @@ class SharedState(
     def is_pruned(self, family: str) -> bool:
         """Report whether an action family has been pruned."""
         return family in self.pruned_families
-
-    # escalate hint plumbing
-    def set_pending_escalate_hint(self, hint: str) -> str:
-        """Stash the LLM-supplied hint for the next phase compute pass; unknown hints dropped (Inv-8.2: closed vocab). Returns value written."""
-        text = str(hint or "").strip()
-        if text and not is_valid_escalate_hint(text):
-            return ""
-        self.pending_escalate_hint = text
-        return text
-
-    def consume_pending_escalate_hint(self) -> str:
-        """Pop the pending hint because it drove a phase transition; returns cleared hint."""
-        hint = (self.pending_escalate_hint or "").strip()
-        if not hint:
-            return ""
-        self.pending_escalate_hint = ""
-        return hint
-
-    def discard_pending_escalate_hint(self) -> str:
-        """Pop the pending hint because an unrelated transition fired without acting on it; returns cleared hint."""
-        hint = (self.pending_escalate_hint or "").strip()
-        if not hint:
-            return ""
-        self.pending_escalate_hint = ""
-        self.last_discarded_escalate_hint = hint
-        self.last_discarded_escalate_hint_ts = now_iso()
-        return hint
 
     def accepted_baseline_script(self) -> str | None:
         """Benchmark script belonging to the accepted baseline anchor, or None."""
