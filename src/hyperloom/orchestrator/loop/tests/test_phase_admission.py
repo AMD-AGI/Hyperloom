@@ -95,6 +95,15 @@ def test_the_prelude_baseline_is_admitted_before_any_measurement():
     assert _dispatcher("PRELUDE", baseline_tput=0.0).admission_denial_for_action("baseline") is None
 
 
+@pytest.mark.parametrize("phase", ["PRELUDE", "ENABLEMENT"])
+@pytest.mark.parametrize("action", ["explore", "integrate", "report"])
+def test_work_that_needs_a_baseline_is_refused_in_the_phases_that_have_none_yet(phase: str, action: str):
+    """A session with no baseline is still in PRELUDE or ENABLEMENT, and neither offers work that needs one."""
+    denied = _dispatcher(phase, baseline_tput=0.0).admission_denial_for_action(action)
+
+    assert denied is not None and denied.rule == "phase_incompatible"
+
+
 def test_enablement_keeps_its_baseline_for_the_coordinator():
     """ENABLEMENT runs its baseline only as the Coordinator's revalidation of a KEEP."""
     denied = _dispatcher("ENABLEMENT").admission_denial_for_action("baseline")

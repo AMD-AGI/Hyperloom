@@ -533,56 +533,26 @@ async def test_run_invalid_tool_use_input_drops_block_silently(claude_sdk):
     assert len(res.intents) == 1
 
 
+@pytest.mark.parametrize("as_tool_input", [dict, json.dumps], ids=["object", "json-string"])
 @pytest.mark.parametrize("tool_name", [EMIT_INTENT_TOOL_QUALIFIED, EMIT_INTENT_TOOL_NAME])
 @pytest.mark.asyncio
-async def test_unparsed_tool_wrapper_retries_dedupe_to_one_intent(claude_sdk, tool_name):
-    """Claude Code retries the same wrapped JSON; keep one validated intent."""
+async def test_every_unparsed_tool_wrapper_becomes_an_intent(claude_sdk, tool_name, as_tool_input):
+    """Claude Code's wrapped JSON decodes to its intent, also inside the JSON string an OpenAI-compatible proxy
+    sends, and every call is kept: a repeated one is the model's call to make, as it is for a native input."""
     raw = '{"intent_type": "send_message", "payload": {"topic": "heartbeat", "body_md": "ok"}}'
-    wrapped = {"__unparsedToolInput": {"raw": raw, "len": len(raw)}}
     other = '{"intent_type": "send_message", "payload": {"topic": "status", "body_md": "next"}}'
     msg = FakeAssistantMessage(
         content=[
-            ToolUseBlock(name=tool_name, input=dict(wrapped)),
-            ToolUseBlock(name=tool_name, input=dict(wrapped)),
             ToolUseBlock(
-                name=tool_name,
-                input={"__unparsedToolInput": {"raw": other, "len": len(other)}},
-            ),
+                name=tool_name, input=as_tool_input({"__unparsedToolInput": {"raw": wrapped, "len": len(wrapped)}})
+            )
+            for wrapped in (raw, raw, other)
         ]
     )
     claude_sdk.query = _make_query_factory([msg])
     backend = ClaudeBackend()
     res = await backend.run("p")
-    assert len(res.intents) == 2
-    assert [intent.payload["topic"] for intent in res.intents] == ["heartbeat", "status"]
-
-
-@pytest.mark.parametrize("tool_name", [EMIT_INTENT_TOOL_QUALIFIED, EMIT_INTENT_TOOL_NAME])
-@pytest.mark.asyncio
-async def test_string_wrapped_fallback_retries_dedupe_to_one_intent(claude_sdk, tool_name):
-    """A string-wrapped fallback dedupes exactly like the dict-wrapped one.
-
-    Behind an OpenAI-compatible / litellm proxy the wrapper arrives inside a
-    JSON *string*. Without wrapper detection accepting that shape, two
-    identical retries would each yield an intent and the duplicate action
-    would be dispatched twice.
-    """
-    raw = '{"intent_type": "send_message", "payload": {"topic": "heartbeat", "body_md": "ok"}}'
-    wrapped = json.dumps({"__unparsedToolInput": {"raw": raw, "len": len(raw)}})
-    other_raw = '{"intent_type": "send_message", "payload": {"topic": "status", "body_md": "next"}}'
-    other = json.dumps({"__unparsedToolInput": {"raw": other_raw, "len": len(other_raw)}})
-    msg = FakeAssistantMessage(
-        content=[
-            ToolUseBlock(name=tool_name, input=wrapped),
-            ToolUseBlock(name=tool_name, input=wrapped),
-            ToolUseBlock(name=tool_name, input=other),
-        ]
-    )
-    claude_sdk.query = _make_query_factory([msg])
-    backend = ClaudeBackend()
-    res = await backend.run("p")
-    assert len(res.intents) == 2
-    assert [intent.payload["topic"] for intent in res.intents] == ["heartbeat", "status"]
+    assert [intent.payload["topic"] for intent in res.intents] == ["heartbeat", "heartbeat", "status"]
 
 
 @pytest.mark.parametrize("tool_name", [EMIT_INTENT_TOOL_QUALIFIED, EMIT_INTENT_TOOL_NAME])

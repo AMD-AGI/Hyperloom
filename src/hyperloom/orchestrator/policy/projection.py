@@ -5,7 +5,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Iterable, Sequence
+from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Any
 
@@ -22,13 +22,9 @@ RULE_GPU_POOL_DISABLED = "specialist_gpu_pool_disabled"
 #: More cards were asked for than the pool holds.
 RULE_GPU_EXCEEDS_CAPACITY = "specialist_gpu_request_exceeds_capacity"
 
-#: The lease named by an extension is not one the pass saw running.
-RULE_LEASE_NOT_LIVE = "extend_lease_task_not_live"
-
 __all__ = [
     "RULE_GPU_EXCEEDS_CAPACITY",
     "RULE_GPU_POOL_DISABLED",
-    "RULE_LEASE_NOT_LIVE",
     "RULE_ROUND_IN_FLIGHT",
     "ResourceFacts",
     "effective_gpu_specialist_pool_size",
@@ -113,8 +109,6 @@ class ResourceFacts:
         gpu_specialist_capacity: Configured GPU specialist capacity.
         gpu_specialist_pool: Cards available to a serving-disjoint specialist.
         whole_machine_pool: Cards available to a whole-machine specialist.
-        live_task_ids: Tasks observed running, or ``None`` when nothing has
-            looked yet.
     """
 
     read: bool = False
@@ -124,28 +118,19 @@ class ResourceFacts:
     gpu_specialist_capacity: int = 0
     gpu_specialist_pool: int = 0
     whole_machine_pool: int = 0
-    live_task_ids: frozenset[str] | None = None
 
     @property
     def round_excludes(self) -> bool:
         """bool: Whether a bring-up round was holding the machine at the update."""
         return bool(self.excluding_round_id)
 
-    def update(
-        self,
-        shared_state: Any,
-        *,
-        rounds: Sequence[Round] = (),
-        live_task_ids: Iterable[str] | None = None,
-    ) -> None:
+    def update(self, shared_state: Any, *, rounds: Sequence[Round] = ()) -> None:
         """Re-read every fact from its source.
 
         Args:
             shared_state: SharedState to read the session's own facts from.
             rounds: Rounds excluding now, from ``RoundStore.open_rounds``. The
                 first is reported.
-            live_task_ids: Tasks observed running; ``None`` leaves the set
-                unknown.
         """
         self.read = True
         excluding = rounds[0] if rounds else None
@@ -155,4 +140,3 @@ class ResourceFacts:
         self.gpu_specialist_capacity = gpu_specialist_ceiling(shared_state)
         self.gpu_specialist_pool = effective_gpu_specialist_pool_size(shared_state)
         self.whole_machine_pool = whole_machine_pool_size()
-        self.live_task_ids = None if live_task_ids is None else frozenset(str(t) for t in live_task_ids)

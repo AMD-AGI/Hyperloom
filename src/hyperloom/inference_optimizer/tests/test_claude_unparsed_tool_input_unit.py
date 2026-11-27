@@ -13,13 +13,12 @@ from typing import Any
 
 import pytest
 
-from hyperloom.inference_optimizer.protocol.intent import Intent, IntentType
+from hyperloom.inference_optimizer.protocol.intent import IntentType
 from hyperloom.orchestrator.roles import claude as claude_module
-from hyperloom.orchestrator.roles.claude import ClaudeBackend, _intent_fingerprint
+from hyperloom.orchestrator.roles.claude import ClaudeBackend
 from hyperloom.orchestrator.roles.mcp_emit_intent import (
     EMIT_INTENT_TOOL_NAME,
     build_emit_intent_server,
-    is_unparsed_tool_wrapper,
 )
 
 
@@ -31,14 +30,6 @@ class _FakeToolUse:
 
 class ToolUseBlock(_FakeToolUse):
     pass
-
-
-def test_is_unparsed_wrapper_false_for_native_and_junk() -> None:
-    assert is_unparsed_tool_wrapper(None) is False
-    assert is_unparsed_tool_wrapper({"intent_type": "send_message"}) is False
-    assert is_unparsed_tool_wrapper({"__unparsedToolInput": "raw"}) is False
-    assert is_unparsed_tool_wrapper({"__unparsedToolInput": {"raw": 1}}) is False
-    assert is_unparsed_tool_wrapper({"__unparsedToolInput": {"raw": '{"intent_type": "send_message"}'}}) is True
 
 
 @pytest.mark.usefixtures("claude_sdk")
@@ -97,12 +88,6 @@ def test_parse_tool_use_block_prefers_native_intent_type() -> None:
     intent = b._parse_tool_use_block(block)
     assert intent is not None
     assert intent.payload["topic"] == "native"
-
-
-def test_intent_fingerprint_is_stable() -> None:
-    a = Intent(type=IntentType.SEND_MESSAGE, payload={"topic": "heartbeat", "body_md": "ok"})
-    b = Intent(type=IntentType.SEND_MESSAGE, payload={"body_md": "ok", "topic": "heartbeat"})
-    assert _intent_fingerprint(a) == _intent_fingerprint(b)
 
 
 _NATIVE_EMIT = {"intent_type": "send_message", "payload": {"topic": "heartbeat"}}

@@ -33,14 +33,12 @@ from ..mcp_tool_names import qualified_context_tool_name
 from .projection import (
     RULE_GPU_EXCEEDS_CAPACITY,
     RULE_GPU_POOL_DISABLED,
-    RULE_LEASE_NOT_LIVE,
     RULE_ROUND_IN_FLIGHT,
     ResourceFacts,
 )
 from ..specialists.domains import normalize_dispatch_tags
 from .custom_specialist import deny_coordinator_dispatched_delegate
 from .denial import PolicyDenied
-from .send_message import deny_malformed_send_message
 from ..specialists.profile import SCOPE_FREEFORM as SPECIALIST_SCOPE_FREEFORM
 from ..specialists.patch_safety import parse_patch_targets
 from .validators import (
@@ -210,8 +208,6 @@ class PolicyGate:
             self._validate_delegate(payload)
         elif intent.type == IntentType.PROPOSE_ACTION:
             self._validate_propose_action(payload)
-        elif intent.type == IntentType.SEND_MESSAGE:
-            deny_malformed_send_message(payload)
         elif intent.type == IntentType.REQUEST:
             self._validate_request(from_agent, payload)
         elif intent.type == IntentType.EXTEND_LEASE:
@@ -601,21 +597,17 @@ class PolicyGate:
     def _validate_extend_lease(self, payload: dict[str, Any]) -> None:
         """Validate an ``EXTEND_LEASE`` intent.
 
-        The per-step bound is static config; whether the task still holds a
-        lease comes off the projection, and ``TaskRegistry.extend_lease``
-        applies the extension.
+        The per-step bound is static config; ``TaskRegistry.extend_lease``
+        decides whether the task still holds a lease, and applies the extension.
 
         Args:
             payload: The payload carrying ``task_id``, ``extra_sec`` and an
                 optional ``reason``.
 
         Raises:
-            PolicyDenied: When ``extra_sec`` exceeds
-                :data:`EXTEND_LEASE_MAX_SEC`, or no such task was running when
-                the projection was taken.
+            PolicyDenied: When ``extra_sec`` exceeds :data:`EXTEND_LEASE_MAX_SEC`.
         """
         running_tasks = qualified_context_tool_name("get_running_tasks")
-        task_id = payload["task_id"].strip()
         extra_sec = int(payload["extra_sec"])
         if extra_sec > EXTEND_LEASE_MAX_SEC:
             raise PolicyDenied(
@@ -626,14 +618,6 @@ class PolicyGate:
                     f"further. Re-check {running_tasks} between steps."
                 ),
             )
-        live = self.resources.live_task_ids
-        if live is None or task_id in live:
-            return
-        raise PolicyDenied(
-            f"extend_lease: task {task_id!r} was not running when the resource facts were read",
-            rule=RULE_LEASE_NOT_LIVE,
-            hint=f"Re-read {running_tasks}; a finished task's lease cannot be extended.",
-        )
 
     def _path_under_session(self, value: str) -> bool:
         """Return whether a path resolves inside the active session_dir.

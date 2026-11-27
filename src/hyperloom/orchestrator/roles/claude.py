@@ -56,7 +56,6 @@ from .mcp_emit_intent import (
     build_emit_intent_tool_input_schema,
     constraints_sentence,
     decode_emit_intent_input,
-    is_unparsed_tool_wrapper,
     payload_contract,
 )
 
@@ -193,16 +192,6 @@ def _kill_turn_processes(marker: str, *, proc_root: Path = Path("/proc")) -> lis
     return killed
 
 
-def _intent_fingerprint(intent: Intent) -> str:
-    """Stable key for one validated intent used to drop fallback retries."""
-    return json.dumps(
-        {"intent_type": intent.type.value, "payload": intent.payload},
-        sort_keys=True,
-        separators=(",", ":"),
-        default=str,
-    )
-
-
 def _is_sdk_boundary_error(exc: Exception) -> bool:
     """Whether the SDK raised this to end a turn whose collected output is still usable.
 
@@ -227,8 +216,6 @@ class _StreamedTurn:
     num_turns: int = 0
     stop_reason: str | None = None
     usages: list[dict[str, Any]] = field(default_factory=list)
-    # Defense in depth: identical wrapper envelopes in one query are the parser retry storm.
-    seen_fallback_intents: set[str] = field(default_factory=set)
 
     @property
     def result_text(self) -> str:
@@ -722,18 +709,8 @@ class ClaudeBackend:
                     collected.text_chunks.append(txt)
                 continue
             intent = self._parse_tool_use_block(block)
-            if intent is None:
-                continue
-            if is_unparsed_tool_wrapper(getattr(block, "input", None)):
-                fingerprint = _intent_fingerprint(intent)
-                if fingerprint in collected.seen_fallback_intents:
-                    log.info(
-                        "claude fallback intent deduped (fingerprint=%s)",
-                        hashlib.sha256(fingerprint.encode("utf-8")).hexdigest()[:12],
-                    )
-                    continue
-                collected.seen_fallback_intents.add(fingerprint)
-            collected.intents.append(intent)
+            if intent is not None:
+                collected.intents.append(intent)
 
     def _record_sdk_boundary_error(self, exc: Exception, collected: _StreamedTurn) -> None:
         """Log that the SDK ended the stream by raising, and what survived it."""

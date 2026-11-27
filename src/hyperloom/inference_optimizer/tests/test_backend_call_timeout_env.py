@@ -5,11 +5,10 @@
 
 from __future__ import annotations
 
-import math
-
 import pytest
 
 from hyperloom.orchestrator.roles.base import parse_call_timeout_env
+from hyperloom_common.env import EnvValueError
 from hyperloom.orchestrator.roles.claude import ClaudeBackend
 
 
@@ -39,39 +38,12 @@ class TestParseCallTimeoutEnv:
         monkeypatch.setenv(PROBE_ENV, "12.5")
         assert parse_call_timeout_env(PROBE_ENV, default=120.0) == 12.5
 
-    def test_garbage_returns_default(self, monkeypatch, caplog):
-        monkeypatch.setenv(PROBE_ENV, "not-a-float")
-        with caplog.at_level("WARNING"):
-            assert parse_call_timeout_env(PROBE_ENV, default=120.0) == 120.0
-        assert any("not a float" in rec.message for rec in caplog.records)
-
-    def test_zero_returns_default(self, monkeypatch, caplog):
-        monkeypatch.setenv(PROBE_ENV, "0")
-        with caplog.at_level("WARNING"):
-            assert parse_call_timeout_env(PROBE_ENV, default=120.0) == 120.0
-
-    def test_negative_returns_default(self, monkeypatch, caplog):
-        monkeypatch.setenv(PROBE_ENV, "-30")
-        with caplog.at_level("WARNING"):
-            assert parse_call_timeout_env(PROBE_ENV, default=120.0) == 120.0
-        assert any("not a positive finite" in rec.message for rec in caplog.records)
-
-    def test_nan_returns_default(self, monkeypatch, caplog):
-        monkeypatch.setenv(PROBE_ENV, "nan")
-        with caplog.at_level("WARNING"):
-            result = parse_call_timeout_env(PROBE_ENV, default=120.0)
-        assert result == 120.0
-        assert not math.isnan(result)
-
-    @pytest.mark.parametrize("raw", ["inf", "-inf", "infinity"])
-    def test_infinity_returns_default(self, monkeypatch, caplog, raw):
-        """Both ``+inf`` and ``-inf`` fail the positive-finite guard."""
+    @pytest.mark.parametrize("raw", ["not-a-float", "0", "-30", "nan", "inf", "-inf", "infinity"])
+    def test_a_value_that_is_not_a_positive_finite_number_is_refused(self, monkeypatch, raw):
+        """A timeout nobody asked for is never substituted: a call bounded by 0 s or by ``inf`` is not a default."""
         monkeypatch.setenv(PROBE_ENV, raw)
-        with caplog.at_level("WARNING"):
-            result = parse_call_timeout_env(PROBE_ENV, default=120.0)
-        assert result == 120.0
-        assert math.isfinite(result)
-        assert any("not a positive finite" in rec.message for rec in caplog.records)
+        with pytest.raises(EnvValueError, match=PROBE_ENV):
+            parse_call_timeout_env(PROBE_ENV, default=120.0)
 
 
 @pytest.mark.usefixtures("claude_sdk")
@@ -86,10 +58,10 @@ class TestClaudeBackendHonoursEnv:
         backend = ClaudeBackend()
         assert backend.call_timeout_s == 300.0
 
-    def test_bad_env_falls_back_to_default(self, monkeypatch):
+    def test_bad_env_fails_the_construction(self, monkeypatch):
         monkeypatch.setenv(CLAUDE_ENV, "garbage")
-        backend = ClaudeBackend()
-        assert backend.call_timeout_s == 120.0
+        with pytest.raises(EnvValueError, match=CLAUDE_ENV):
+            ClaudeBackend()
 
 
 class TestCodexBackendHonoursEnv:
@@ -101,9 +73,10 @@ class TestCodexBackendHonoursEnv:
         monkeypatch.setenv(CODEX_ENV, "240")
         assert _new_codex_backend(tmp_path).call_timeout_s == 240.0
 
-    def test_bad_env_falls_back_to_default(self, monkeypatch, tmp_path):
+    def test_bad_env_fails_the_construction(self, monkeypatch, tmp_path):
         monkeypatch.setenv(CODEX_ENV, "negative-one")
-        assert _new_codex_backend(tmp_path).call_timeout_s == 300.0
+        with pytest.raises(EnvValueError, match=CODEX_ENV):
+            _new_codex_backend(tmp_path)
 
 
 def _new_codex_backend(tmp_path):

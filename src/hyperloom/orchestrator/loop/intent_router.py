@@ -24,10 +24,6 @@ from hyperloom_common.coerce import to_int, to_mapping, to_unix
 from ..actions.executors.integrate._integrate_vocabulary import PATCH_SOURCE_UPSTREAM_PR, resolve_patch_source
 from ..bus.message_bus import Message
 from ..policy.denial import PolicyDenied
-from ..policy.validators import (
-    PRUNE_BRANCH_SCOPE_FAMILY,
-    PRUNE_BRANCH_SCOPE_QUEUED,
-)
 from ..specialists.wall_budget import grant_wall_budget_extension
 from ..state.shared_state import inject_stack_base_params
 from ..state.analysis_failures import remember_trace_failure
@@ -58,6 +54,9 @@ log = __import__("logging").getLogger(__name__)
 
 #: Reply source marking an answer the Coordinator wrote itself, refusing a request before any handler ran.
 _AUTO_REJECT = "coordinator_auto_reject"
+
+#: The ``prune_branch`` scope that retires the family for the rest of the run; every other scope only drains its queue.
+_PRUNE_SCOPE_FAMILY = "family"
 
 
 class DelegateRequest(NamedTuple):
@@ -777,11 +776,11 @@ class IntentRouter(CoordinatorCollaborator):
         )
 
     async def _handle_prune_branch(self, source: str, intent: Intent) -> None:
-        """Cancel a family's queued tasks and, unless ``scope`` is ``queued``, retire the family; running tasks continue."""
+        """Cancel a family's queued tasks and, for ``scope='family'`` (the default), retire it; running tasks continue."""
         family = intent.payload["family"]
         reason = str(intent.payload.get("reason") or "prune_branch")
-        scope = str(intent.payload.get("scope") or PRUNE_BRANCH_SCOPE_FAMILY).strip()
-        drain_only = scope == PRUNE_BRANCH_SCOPE_QUEUED
+        scope = str(intent.payload.get("scope") or _PRUNE_SCOPE_FAMILY).strip()
+        drain_only = scope != _PRUNE_SCOPE_FAMILY
         if not drain_only and self.shared_state.add_pruned_family(family):
             self.shared_state.save(self.session_dir)
         # A catalogue family names its member actions; any other value names a single action kind.

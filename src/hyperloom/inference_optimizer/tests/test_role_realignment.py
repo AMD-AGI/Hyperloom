@@ -906,7 +906,7 @@ async def test_extend_lease_survives_unreadable_running_age(coordinator_with_moc
 
 @pytest.mark.asyncio
 async def test_extend_lease_rejects_non_running_task(coordinator_with_mocks):
-    """A queued task cannot be extended; the rejection is recorded, not raised."""
+    """A queued task cannot be extended; the task registry's refusal is recorded as an observation, not raised."""
     from hyperloom.inference_optimizer.protocol.intent import Intent, IntentType
 
     c = coordinator_with_mocks
@@ -928,6 +928,34 @@ async def test_extend_lease_rejects_non_running_task(coordinator_with_mocks):
         )
         updated = await c.tasks.get(task.task_id)
         assert updated.lease_ttl_sec == 1800
+        observed = {m.payload.get("kind"): m.payload for m in await c.bus.tail(topic="observation")}
+        assert "policy_denied" not in observed and "handle_intent_exception" not in observed
+        assert observed["extend_lease_rejected"]["task_id"] == task.task_id
+        assert "in state 'queued'" in observed["extend_lease_rejected"]["error"]
+        assert c.shared_state.last_action_failures == []
+    finally:
+        await c.stop()
+
+
+@pytest.mark.asyncio
+async def test_extend_lease_reaches_a_task_that_started_after_the_tick_read_its_resource_facts(coordinator_with_mocks):
+    """The dispatcher starts tasks beside the LLM turn, so the task registry alone says whether a lease is live."""
+    c = coordinator_with_mocks
+    try:
+        task, _ = await c.tasks.create_or_return_existing(
+            TaskSpec(kind="specialist", params={}, idempotency_key="k-extend-late", lease_ttl_sec=1800),
+        )
+        c.policy.resources.update(c.shared_state)
+        await c.tasks.transition(task.task_id, "running")
+
+        await c.router.handle_intent(
+            "orchestration",
+            Intent(type=IntentType.EXTEND_LEASE, payload={"task_id": task.task_id, "extra_sec": 600}),
+        )
+
+        assert (await c.tasks.get(task.task_id)).lease_ttl_sec == 2400
+        kinds = {m.payload.get("kind") for m in await c.bus.tail(topic="observation")}
+        assert "extend_lease" in kinds and "policy_denied" not in kinds
     finally:
         await c.stop()
 
@@ -978,9 +1006,13 @@ async def test_prune_branch_on_a_catalogue_family_cancels_every_member_action(co
         await c.stop()
 
 
+@pytest.mark.parametrize("scope", ["queued", "running"])
 @pytest.mark.asyncio
-async def test_prune_branch_queued_scope_on_an_action_name_drains_only_that_kind(coordinator_with_mocks):
-    """A single action name still works, and ``scope='queued'`` leaves the family usable."""
+async def test_prune_branch_queued_scope_on_an_action_name_drains_only_that_kind(coordinator_with_mocks, scope):
+    """A single action name still works, and ``scope='queued'`` leaves the family usable.
+
+    Any scope but ``family`` drains only: a misspelt ``queued`` is not treated as a full prune.
+    """
     c = coordinator_with_mocks
     try:
         target, _ = await c.tasks.create_or_return_existing(
@@ -994,13 +1026,15 @@ async def test_prune_branch_queued_scope_on_an_action_name_drains_only_that_kind
             "orchestration",
             Intent(
                 type=IntentType.PRUNE_BRANCH,
-                payload={"family": "profile", "reason": "answered", "scope": "queued"},
+                payload={"family": "profile", "reason": "answered", "scope": scope},
             ),
         )
 
         assert (await c.tasks.get(target.task_id)).state == "cancelled"
         assert (await c.tasks.get(sibling.task_id)).state == "queued"
         assert not c.shared_state.is_pruned("profile")
+        assert c.shared_state.pruned_families == []
+        assert not any(m.payload.get("kind") == "policy_denied" for m in await c.bus.tail(topic="observation"))
     finally:
         await c.stop()
 
@@ -1109,20 +1143,57 @@ async def test_send_message_to_a_list_writes_one_message_per_recipient(coordinat
         await c.stop()
 
 
+@pytest.mark.parametrize(
+    ("to", "addressed_to"),
+    [
+        ("", ["*"]),
+        ([], ["*"]),
+        (["kernel_agent", ""], ["kernel_agent", ""]),
+        (["kernel_agent", 3], ["kernel_agent", "3"]),
+        (3, ["3"]),
+        ({"agent": "kernel_agent"}, ["{'agent': 'kernel_agent'}"]),
+    ],
+    ids=["empty", "empty-list", "blank-name", "number-in-list", "number", "object"],
+)
 @pytest.mark.asyncio
-async def test_send_message_to_a_list_with_an_empty_name_is_denied_not_crashed(coordinator_with_mocks):
-    """A list holding an empty name is refused by the gate instead of faulting the phase event."""
+async def test_send_message_with_a_to_naming_no_recipient_is_delivered_as_written(
+    coordinator_with_mocks, to, addressed_to
+):
+    """A ``to`` of any shape reaches the bus as one row per name, each a string; nothing is denied or raised.
+
+    An empty ``to`` broadcasts. A raw list or number once reached the events INSERT as ``to_agent`` and faulted the
+    running phase event.
+    """
     c = coordinator_with_mocks
+    body = "addressed to nobody in particular"
     try:
         await c.router.handle_intent(
             "orchestration",
-            Intent(
-                type=IntentType.SEND_MESSAGE,
-                payload={"to": ["kernel_agent", ""], "topic": "observation", "body_md": "one name is blank"},
-            ),
+            Intent(type=IntentType.SEND_MESSAGE, payload={"to": to, "topic": "observation", "body_md": body}),
         )
-        denials = c.bus.inbox_context_sync("orchestration")
-        kinds = [m.payload.get("kind") for m in denials if m.payload.get("kind") == "policy_denied"]
-        assert kinds, "expected a policy_denied observation for the malformed recipient"
+
+        observations = await c.bus.tail(topic="observation")
+        assert sorted(m.to_agent for m in observations if m.payload.get("body_md") == body) == sorted(addressed_to)
+        kinds = {m.payload.get("kind") for m in observations}
+        assert "policy_denied" not in kinds and "handle_intent_exception" not in kinds
+        assert c.shared_state.crash_count == 0
+    finally:
+        await c.stop()
+
+
+@pytest.mark.parametrize("topic", ["", "   ", "progress_report"])
+@pytest.mark.asyncio
+async def test_send_message_with_a_blank_or_unknown_topic_is_stored_as_an_observation(coordinator_with_mocks, topic):
+    c = coordinator_with_mocks
+    body = "no topic worth the name"
+    try:
+        await c.router.handle_intent(
+            "orchestration",
+            Intent(type=IntentType.SEND_MESSAGE, payload={"topic": topic, "body_md": body}),
+        )
+
+        observations = await c.bus.tail(topic="observation")
+        assert [m.to_agent for m in observations if m.payload.get("body_md") == body] == ["*"]
+        assert not any(m.payload.get("kind") == "policy_denied" for m in observations)
     finally:
         await c.stop()

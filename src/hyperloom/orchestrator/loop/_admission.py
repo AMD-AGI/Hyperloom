@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Admission control: whether a phase, the action sequence or the time budget refuses an action or request."""
+"""Admission control: the phase and time-budget gates on an action, the baseline and time-budget gates on a kernel request."""
 
 from __future__ import annotations
 
@@ -49,39 +49,6 @@ class AdmissionMixin:
             rule="phase_incompatible",
             hint=f"{phase} proposes: {', '.join(proposable) or '(none)'}",
         )
-
-    def _sequence_denial_for_action(
-        self,
-        action_name: str,
-    ) -> PolicyDenied | None:
-        """Reject orchestration action/delegate attempts before baseline. Only invariant: nothing runs until baseline_tput > 0 (a data-dependency).
-
-        Args:
-            action_name: The proposed/delegated action name.
-
-        Returns:
-            A :class:`PolicyDenied` when the action must wait for baseline, else
-            ``None``.
-        """
-        action = str(action_name or "").strip()
-        sequence_actions = {
-            "target_analysis",
-            "baseline",
-            "report",
-            "integrate",
-            "explore",
-        }
-        if action not in sequence_actions:
-            return None
-        if self.shared_state.stop_reason:
-            return None
-        if self.shared_state.baseline_tput <= 0 and action not in {"baseline", "target_analysis"}:
-            return PolicyDenied(
-                f"action={action!r} denied: baseline must run first",
-                rule="execution_order",
-                hint="propose/delegate `baseline` until baseline_tput > 0",
-            )
-        return None
 
     def admission_cost_minutes(self, action_name: str) -> float:
         """What a catalogued action is admitted at, priced on this session's measured baseline round once one exists."""
@@ -148,7 +115,6 @@ class AdmissionMixin:
         """
         return (
             self._phase_denial_for_action(action_name)
-            or self._sequence_denial_for_action(action_name)
             or specialist_in_flight_denial(action_name, params, self.tasks, self.shared_state.find_gap)
             or self.time_budget_denial_for_action(action_name, params=params)
             or untested_backlog_denial(action_name, params, self.shared_state, self.tasks)

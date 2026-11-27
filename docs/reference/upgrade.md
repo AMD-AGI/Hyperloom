@@ -557,6 +557,64 @@ keeping a record of it.
 * The log no longer prints `phase_machine: discarded stale
   pending_escalate_hint=...`.
 
+### Required: a malformed timeout or retry variable stops the launch
+
+`INFERENCE_OPTIMIZER_CLAUDE_CALL_TIMEOUT_SEC`,
+`INFERENCE_OPTIMIZER_CLAUDE_TURN_TIMEOUT_SEC`,
+`INFERENCE_OPTIMIZER_CODEX_CALL_TIMEOUT_SEC` and
+`INFERENCE_OPTIMIZER_DEEPSEEK_CALL_TIMEOUT_SEC` must be a positive finite
+number of seconds. `INFERENCE_OPTIMIZER_LLM_RETRY_ATTEMPTS`, `_BASE_S`,
+`_MAX_S`, `_MULT` and `_JITTER_S` must be a non-negative finite number. Any
+other value ends `hyperloom optimize` with an `EnvValueError` that names the
+variable, when the Orchestration backend is built at start-up. 1.2.x logged a
+warning and ran on the default, so a session could run to its end on a
+timeout its operator had not set. Unset and blank still mean the default, and
+`INFERENCE_OPTIMIZER_LLM_RETRY_ATTEMPTS=0` still means one attempt.
+
+Check the launchers and environment files that set any of the nine, and remove
+or correct a value such as `0`, `-1`, `inf` or `30s`.
+
+### Recommended: stop matching the denials the Coordinator no longer issues
+
+Checks that refused an intent for its shape, or that repeated a decision
+another component owns, are removed. Each input is now handled by the code
+that acts on it, and none of them is recorded as a failed action.
+
+* `send_message` is never denied with rule `payload`. A blank `topic` is
+  stored under `observation`, as an unknown topic already was. A `to` that is
+  an empty string or an empty list broadcasts. Any other `to` is addressed as
+  written: one message per list entry, each name converted to a string. 1.2.x
+  denied a blank topic, and a `to` that was neither a non-empty string nor a
+  non-empty list of them.
+* `prune_branch` is never denied with rule `prune_scope`. `scope='family'`,
+  or no scope, retires the family as before. Every other value cancels the
+  family's queued tasks and leaves the family usable, as `scope='queued'`
+  does. A blank `family` is still denied (`payload`).
+* `extend_lease` is never denied with rule `extend_lease_task_not_live`. An
+  extension for a task that is not running is refused by the task registry
+  and reported as an `extend_lease_rejected` observation, with the task's
+  state in `error`; that was already the outcome when the task finished
+  between the check and the extension. It has no row in the `denials` of a
+  phase event in `session_breakdown.json`. The removed check read the running
+  tasks at the start of the tick, so it also refused a task that had started
+  during the Orchestration turn; that extension is now granted.
+  `extend_lease_bounds` is unchanged.
+* `propose_action` and `delegate` are never denied with rule
+  `execution_order`. The rule refused `explore`, `integrate` and `report`
+  before a baseline, and the phase table already does (`phase_incompatible`):
+  a session with no baseline is in PRELUDE or ENABLEMENT, which offer none of
+  the three, or in CLOSE, where the rule did not apply. A kernel `request`
+  before a baseline is still denied with `execution_order`.
+* The Coordinator no longer broadcasts the observations
+  `stale_stack_revalidation` and `current_best_drift`. A stack revalidation
+  that measured an older recipe generation is still discarded, with the same
+  `not validating` warning in the log. A current one still restamps
+  `cumulative_gain_validated`, which is where a lower re-measurement shows.
+* The Claude backend keeps every `emit_intent` call of a turn. 1.2.x dropped
+  a call whose input arrived in Claude Code's `__unparsedToolInput` wrapper
+  when the turn had already carried the same intent, and logged `claude
+  fallback intent deduped`. Both forms of the wrapper are still decoded.
+
 ---
 
 ## Upgrading from 1.1.x

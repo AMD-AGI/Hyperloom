@@ -996,18 +996,24 @@ def test_framework_isolation_helpers(tmp_path: Path, monkeypatch: pytest.MonkeyP
 def test_retry_policy_env_and_on_retry_error(monkeypatch: pytest.MonkeyPatch) -> None:
     from hyperloom.orchestrator.roles import base
     from hyperloom.orchestrator.roles.base import RetryPolicy
+    from hyperloom_common.env import EnvValueError
 
     monkeypatch.setenv("HL_RETRY_ATTEMPTS", "0")
-    monkeypatch.setenv("HL_RETRY_BASE_S", "bad")
-    monkeypatch.setenv("HL_RETRY_MAX_S", "inf")
-    monkeypatch.setenv("HL_RETRY_MULT", "-1")
+    monkeypatch.setenv("HL_RETRY_BASE_S", " ")
+    monkeypatch.setenv("HL_RETRY_MULT", "1.5")
     monkeypatch.setenv("HL_RETRY_JITTER_S", "2")
     policy = RetryPolicy.from_env("HL_RETRY")
     assert policy.max_attempts == 1
     assert policy.base_delay_s == 1.0
     assert policy.max_delay_s == 30.0
-    assert policy.multiplier == 2.0
+    assert policy.multiplier == 1.5
     assert policy.jitter_s == 2.0
+
+    for name, raw in (("HL_RETRY_BASE_S", "bad"), ("HL_RETRY_MAX_S", "inf"), ("HL_RETRY_MULT", "-1")):
+        with monkeypatch.context() as scoped:
+            scoped.setenv(name, raw)
+            with pytest.raises(EnvValueError, match=name):
+                RetryPolicy.from_env("HL_RETRY")
 
     monkeypatch.setattr(base.random, "uniform", lambda _lo, _hi: 0.25)
     assert RetryPolicy(base_delay_s=2.0, max_delay_s=3.0, multiplier=10.0, jitter_s=0.5).delay_for(2) == 3.25

@@ -373,13 +373,13 @@ def proposing_coord(coord: Coordinator) -> Coordinator:
 class TestAdmissionGateOrder:
     """``admission_denial_for_action`` chains the gates; the first one wins."""
 
-    def test_the_baseline_prerequisite_is_reported_before_the_budget(self, proposing_coord: Coordinator):
-        proposing_coord.shared_state.baseline_tput = 0.0
-        _set_budget(proposing_coord, minutes=1)
-        denied = proposing_coord.dispatcher.admission_denial_for_action(_PROPOSABLE_ACTION)
-        assert denied is not None and denied.rule == "execution_order"
+    def test_the_phase_is_reported_before_the_budget(self, coord: Coordinator):
+        coord.shared_state.phase = "PRELUDE"
+        _set_budget(coord, minutes=1)
+        denied = coord.dispatcher.admission_denial_for_action(_PROPOSABLE_ACTION)
+        assert denied is not None and denied.rule == "phase_incompatible"
 
-    def test_the_budget_gate_runs_once_the_sequence_gate_passes(self, proposing_coord: Coordinator):
+    def test_the_budget_gate_runs_once_the_phase_gate_passes(self, proposing_coord: Coordinator):
         _set_budget(proposing_coord, minutes=5)
         denied = proposing_coord.dispatcher.admission_denial_for_action(_PROPOSABLE_ACTION)
         assert denied is not None and denied.rule == "time_budget"

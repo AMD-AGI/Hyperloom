@@ -2742,25 +2742,13 @@ async def test_handle_delegate_pruned_advisory(coord: Coordinator, monkeypatch) 
     coord.shared_state.baseline_tput = 800.0
     coord.shared_state.phase = "FRAMEWORK_AGENT"
     monkeypatch.setattr(coord.shared_state, "is_pruned", lambda a: True)
-    monkeypatch.setattr(coord.dispatcher, "_sequence_denial_for_action", lambda a: None)
     await coord.router.handle_delegate("orchestration", _delegate("explore", "d-pruned"))
     assert await coord.tasks.queued()
 
 
 @pytest.mark.asyncio
-async def test_handle_delegate_sequence_denied(coord: Coordinator, monkeypatch) -> None:
-    from hyperloom.orchestrator.policy.denial import PolicyDenied
-
-    coord.shared_state.phase = "FRAMEWORK_AGENT"
-    monkeypatch.setattr(
-        coord.dispatcher,
-        "_sequence_denial_for_action",
-        lambda a: PolicyDenied(
-            "blocked",
-            rule="exec_order",
-            hint="wait",
-        ),
-    )
+async def test_handle_delegate_admission_denied(coord: Coordinator, monkeypatch) -> None:
+    coord.shared_state.phase = "PRELUDE"
     recorded: list = []
 
     async def _rec(source, intent, denied, action_name=None):
@@ -2768,12 +2756,12 @@ async def test_handle_delegate_sequence_denied(coord: Coordinator, monkeypatch) 
 
     monkeypatch.setattr(coord.router, "record_policy_denied", _rec)
     await coord.router.handle_delegate("orchestration", _delegate("explore", "d-seq"))
-    assert [d.rule for d in recorded] == ["exec_order"]
+    assert [d.rule for d in recorded] == ["phase_incompatible"]
+    assert await coord.tasks.queued() == []
 
 
 @pytest.mark.asyncio
 async def test_handle_delegate_duplicate_running_denied(coord: Coordinator, monkeypatch) -> None:
-    monkeypatch.setattr(coord.dispatcher, "_sequence_denial_for_action", lambda a: None)
     await coord.router.handle_delegate("orchestration", _delegate("baseline", "d-same", {"runs": 1}))
     recorded: list = []
 
@@ -2791,7 +2779,6 @@ async def test_a_delegate_reusing_the_key_of_a_measured_baseline_is_answered_by_
     coord: Coordinator, monkeypatch
 ) -> None:
     """The twin rule a proposed baseline is held to holds on the delegate channel too."""
-    monkeypatch.setattr(coord.dispatcher, "_sequence_denial_for_action", lambda a: None)
 
     async def _baseline(_ctx):
         return {"status": "ok", "output_throughput": 100.0, "completed_requests": 8}

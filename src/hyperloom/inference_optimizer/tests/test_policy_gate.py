@@ -176,31 +176,3 @@ def test_the_round_holders_own_bring_up_is_dispatched_and_no_other_row_is() -> N
 def test_the_round_rule_refuses_nothing_without_a_snapshot() -> None:
     """No ledger means no resource facts, and the acquire remains the authority."""
     _emit(_llm_gate(), IntentType.DELEGATE, {"action_name": "baseline", "params": {}})
-
-
-# -- send_message recipient shape -----------------------------------------
-def test_send_message_to_a_single_recipient_is_admitted() -> None:
-    """``to`` names one recipient; the inbox filter and the events row agree."""
-    _emit(_llm_gate(), IntentType.SEND_MESSAGE, {"to": "kernel_agent", "topic": "observation", "body_md": "x"})
-
-
-def test_send_message_without_to_broadcasts() -> None:
-    """An absent ``to`` is the broadcast form and stays admitted."""
-    _emit(_llm_gate(), IntentType.SEND_MESSAGE, {"topic": "observation", "body_md": "x"})
-
-
-def test_send_message_to_a_list_of_recipients_is_admitted() -> None:
-    """A JSON array is how a model addresses several agents at once; each becomes its own events row."""
-    _emit(_llm_gate(), IntentType.SEND_MESSAGE, {"to": ["kernel_agent", "specialist:t1"], "topic": "observation"})
-
-
-@pytest.mark.parametrize("to", [[], ["kernel_agent", ""], ["kernel_agent", 3], 3, {"agent": "kernel_agent"}, ""])
-def test_send_message_with_a_to_naming_no_recipient_is_denied(to) -> None:
-    """A ``to`` that is not a name or a list of names is denied, not crashed on.
-
-    Before the check a raw list reached the events INSERT as ``to_agent`` and faulted the running phase event; a
-    list is fanned out now, but one holding an empty or non-string name still names nobody.
-    """
-    with pytest.raises(PolicyDenied) as excinfo:
-        _emit(_llm_gate(), IntentType.SEND_MESSAGE, {"to": to, "topic": "observation", "body_md": "x"})
-    assert excinfo.value.rule == "payload"

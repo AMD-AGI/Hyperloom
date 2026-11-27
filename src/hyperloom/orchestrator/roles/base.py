@@ -8,39 +8,25 @@ from __future__ import annotations
 import asyncio
 import logging
 import math
-import os
 import random
 from dataclasses import dataclass, field
 from typing import Any, Awaitable, Callable, Protocol, runtime_checkable
 
 from hyperloom.inference_optimizer.protocol.intent import Intent
+from hyperloom_common.env import EnvValueError, env_float
 
 log = logging.getLogger(__name__)
 
 
 def parse_call_timeout_env(env_name: str, *, default: float) -> float:
-    """Read a per-call wall-clock timeout from ``env_name``, default on miss/error."""
-    raw = os.environ.get(env_name)
-    if raw is None or not raw.strip():
-        return default
-    try:
-        value = float(raw)
-    except ValueError:
-        log.warning(
-            "%s=%r is not a float; using default %.1fs",
-            env_name,
-            raw,
-            default,
-        )
-        return default
+    """Read a per-call wall-clock timeout in seconds from ``env_name``; ``default`` when it is unset or blank.
+
+    Raises:
+        EnvValueError: The variable is set to anything but a positive finite number.
+    """
+    value = env_float(env_name, default)
     if value <= 0 or not math.isfinite(value):
-        log.warning(
-            "%s=%r is not a positive finite number; using default %.1fs",
-            env_name,
-            raw,
-            default,
-        )
-        return default
+        raise EnvValueError(f"{env_name}={value!r} is not a positive finite number")
     return value
 
 
@@ -76,30 +62,26 @@ class RetryPolicy:
         cls,
         prefix: str = "INFERENCE_OPTIMIZER_LLM_RETRY",
     ) -> "RetryPolicy":
-        """Build a policy from ``<prefix>_{ATTEMPTS,BASE_S,MAX_S,MULT,JITTER_S}``."""
+        """Build a policy from ``<prefix>_{ATTEMPTS,BASE_S,MAX_S,MULT,JITTER_S}``.
+
+        Raises:
+            EnvValueError: One of them is set to anything but a non-negative finite number.
+        """
         d = cls()
 
-        def _num(suffix: str, default: float, *, cast: Callable[[float], Any]):
-            """Read ``<prefix>_<suffix>`` as a number, falling back to ``default``."""
-            raw = os.environ.get(f"{prefix}_{suffix}")
-            if raw is None or not raw.strip():
-                return default
-            try:
-                val = float(raw)
-            except ValueError:
-                log.warning("%s_%s=%r invalid; using %s", prefix, suffix, raw, default)
-                return default
-            if not math.isfinite(val) or val < 0:
-                log.warning("%s_%s=%r invalid; using %s", prefix, suffix, raw, default)
-                return default
-            return cast(val)
+        def _num(suffix: str, default: float) -> float:
+            name = f"{prefix}_{suffix}"
+            value = env_float(name, default)
+            if value < 0 or not math.isfinite(value):
+                raise EnvValueError(f"{name}={value!r} is not a non-negative finite number")
+            return value
 
         return cls(
-            max_attempts=max(1, int(_num("ATTEMPTS", d.max_attempts, cast=int))),
-            base_delay_s=float(_num("BASE_S", d.base_delay_s, cast=float)),
-            max_delay_s=float(_num("MAX_S", d.max_delay_s, cast=float)),
-            multiplier=float(_num("MULT", d.multiplier, cast=float)),
-            jitter_s=float(_num("JITTER_S", d.jitter_s, cast=float)),
+            max_attempts=max(1, int(_num("ATTEMPTS", d.max_attempts))),
+            base_delay_s=_num("BASE_S", d.base_delay_s),
+            max_delay_s=_num("MAX_S", d.max_delay_s),
+            multiplier=_num("MULT", d.multiplier),
+            jitter_s=_num("JITTER_S", d.jitter_s),
         )
 
     def delay_for(self, attempt: int) -> float:

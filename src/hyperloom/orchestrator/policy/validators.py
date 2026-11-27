@@ -31,17 +31,6 @@ GEMM_TUNING_ACTION_NAME: str = "gemm_tuning"
 SPECIALIST_FREEFORM_WAVE_MAX: int = 16
 SPECIALIST_FREEFORM_TASK_DESC_MAX_CHARS: int = 8000
 
-# prune_branch scopes. ``family`` retires the action for the rest of the run;
-# ``queued`` only drains the backlog and leaves the family usable.
-PRUNE_BRANCH_SCOPE_FAMILY: str = "family"
-PRUNE_BRANCH_SCOPE_QUEUED: str = "queued"
-PRUNE_BRANCH_ALLOWED_SCOPES: frozenset[str] = frozenset(
-    {
-        PRUNE_BRANCH_SCOPE_FAMILY,
-        PRUNE_BRANCH_SCOPE_QUEUED,
-    }
-)
-
 
 def validate_gemm_tuning_request(kind: str) -> None:
     """Refuse the GEMM tuning action as a REQUEST kind; the Coordinator owns the lane.
@@ -69,21 +58,10 @@ def validate_gemm_tuning_request(kind: str) -> None:
 
 
 def validate_prune_branch(payload: dict[str, Any]) -> None:
-    """Validate the family and scope of an orchestration prune request."""
+    """Refuse an orchestration prune request that names no family."""
     family = str(payload.get("family", "")).strip()
     if not family:
         raise PolicyDenied("prune_branch missing family", rule="payload")
-    scope = str(payload.get("scope") or PRUNE_BRANCH_SCOPE_FAMILY).strip()
-    if scope not in PRUNE_BRANCH_ALLOWED_SCOPES:
-        raise PolicyDenied(
-            f"prune_branch scope={scope!r} not allowed (allowed: {sorted(PRUNE_BRANCH_ALLOWED_SCOPES)!r})",
-            rule="prune_scope",
-            hint=(
-                f"{PRUNE_BRANCH_SCOPE_FAMILY!r} retires the action for "
-                f"the rest of the run; {PRUNE_BRANCH_SCOPE_QUEUED!r} "
-                f"only cancels the queued backlog."
-            ),
-        )
 
 
 def validate_specialist_framework(params: dict[str, Any]) -> None:

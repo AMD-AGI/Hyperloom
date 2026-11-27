@@ -297,11 +297,7 @@ class Reconciler:
 
     async def _rebuild_projection(self, now_unix: float, report: ReconcileReport) -> None:
         """Re-read the facts the gate's resource rules judge against."""
-        self._resources.update(
-            self._shared_state,
-            rounds=await self._rounds.open_rounds(),
-            live_task_ids=[t.task_id for t in await self._tasks.running()],
-        )
+        self._resources.update(self._shared_state, rounds=await self._rounds.open_rounds())
 
     async def _task(self, task_id: str) -> Task | None:
         """Read one task, or ``None`` when the registry has no such row."""

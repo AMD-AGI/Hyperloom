@@ -37,11 +37,6 @@ def _explore_audit_extras(result: Mapping[str, Any]) -> dict[str, Any]:
     }
 
 
-# Default resume-drift floor (%): a re-measured current_best below this fraction of its recorded tput is flagged as
-# drift.
-_DEFAULT_RESUME_DRIFT_FLOOR_PCT: float = 95.0
-
-
 class ExplorePromotionMixin:
     """Promoting an explore sweep's outcome."""
 
@@ -64,14 +59,14 @@ class ExplorePromotionMixin:
         # stack entry and re-lift current_best.
         is_revalidation_task = task is not None and is_stack_revalidation(task.params)
         if is_revalidation_task:
-            stale = await self._warn_on_stale_revalidation(task)
+            stale = self._warn_on_stale_revalidation(task)
             # A GEAK revalidation (2b) rules on its own rebench and publishes the
             # verdict itself; a native one reconciles the watermark here.
             if bool((task.params or {}).get("geak_fallback")):
                 outcome.verdict = await self._rule_on_geak_rebench(result, task=task)
                 outcome.changed = True
                 return
-            await self._reconcile_revalidated_watermark(result, stale=stale)
+            self._reconcile_revalidated_watermark(result, stale=stale)
         lift = _ExploreLift(promoted=False, last_lifted=None)
         if isinstance(winners, list) and winners and not is_revalidation_task:
             lift = self._accept_explore_winners(result, task, outcome)
@@ -104,7 +99,7 @@ class ExplorePromotionMixin:
                 gain_pct=attribution.get("gain_pct"),
             )
 
-    async def _warn_on_stale_revalidation(self, task: "Task") -> bool:
+    def _warn_on_stale_revalidation(self, task: "Task") -> bool:
         measured_generation = (task.params or {}).get("recipe_generation")
         working_generation = int(self.shared_state.working_recipe_generation or 0)
         if measured_generation is None or int(measured_generation) == working_generation:
@@ -115,43 +110,15 @@ class ExplorePromotionMixin:
             measured_generation,
             working_generation,
         )
-        await self.bus.record_observation(
-            "coordinator",
-            "observation",
-            {
-                "kind": "stale_stack_revalidation",
-                "task_id": task.task_id,
-                "measured_recipe_generation": int(measured_generation),
-                "working_recipe_generation": working_generation,
-                "geak_fallback": bool((task.params or {}).get("geak_fallback")),
-            },
-        )
         return True
 
-    async def _reconcile_revalidated_watermark(self, result: dict, *, stale: bool) -> None:
+    def _reconcile_revalidated_watermark(self, result: dict, *, stale: bool) -> None:
         measured = result.get("output_throughput")
         if stale or not isinstance(measured, (int, float)) or measured <= 0:
             return
         if self.shared_state.baseline_tput <= 0:
             return
         self.validate(measured, result, source=STACK_REVALIDATE_SOURCE)
-        recorded = self.shared_state.current_best.get("tput")
-        if not isinstance(recorded, (int, float)) or recorded <= 0:
-            return
-        floor = _DEFAULT_RESUME_DRIFT_FLOOR_PCT
-        if float(measured) >= float(recorded) * floor / 100.0:
-            return
-        await self.bus.record_observation(
-            "coordinator",
-            "observation",
-            {
-                "kind": "current_best_drift",
-                "severity": "high",
-                "measured_tput": float(measured),
-                "recorded_tput": float(recorded),
-                "floor_pct": floor,
-            },
-        )
 
     def _accept_explore_winners(
         self,

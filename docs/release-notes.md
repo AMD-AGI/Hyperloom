@@ -140,6 +140,31 @@ it.
   FRAMEWORK_AGENT with no round run. The prompt offered only `skip_to_kernel`,
   which is unchanged, as is the `skip_to_sweep` the Coordinator sets at the
   end of a custom-specialist-only cycle. See [Upgrade](reference/upgrade.md).
+- **A malformed timeout or retry variable stops the launch, and intents are
+  no longer refused for their shape.** **Breaking:**
+  `INFERENCE_OPTIMIZER_CLAUDE_CALL_TIMEOUT_SEC`,
+  `INFERENCE_OPTIMIZER_CLAUDE_TURN_TIMEOUT_SEC`,
+  `INFERENCE_OPTIMIZER_CODEX_CALL_TIMEOUT_SEC` and
+  `INFERENCE_OPTIMIZER_DEEPSEEK_CALL_TIMEOUT_SEC` must be a positive finite
+  number, and the five `INFERENCE_OPTIMIZER_LLM_RETRY_*` variables a
+  non-negative finite one; anything else ends `hyperloom optimize` at
+  start-up with an `EnvValueError` naming the variable, where it used to log
+  a warning and run on the default. The denial rules `prune_scope` and
+  `extend_lease_task_not_live` are gone, `payload` no longer fires for
+  `send_message`, and `execution_order` no longer fires for an action (it
+  still does for a kernel request before a baseline). A `send_message` with a
+  blank topic is stored as an observation, and one whose `to` names nobody is
+  broadcast or addressed as written. A `prune_branch` with an unknown scope
+  only cancels the family's queued tasks. An `extend_lease` for a task that
+  is not running is an `extend_lease_rejected` observation, and one for a
+  task that started during the Orchestration turn is granted instead of
+  refused. `explore`, `integrate` and `report` before a baseline are still
+  refused, by the phase (`phase_incompatible`). The `stale_stack_revalidation`
+  and `current_best_drift` observations are no longer sent; a stale stack
+  revalidation is still discarded. The Claude backend keeps every
+  `emit_intent` call of a turn and no longer drops a repeated one that
+  arrived in Claude Code's `__unparsedToolInput` wrapper. See
+  [Upgrade](reference/upgrade.md).
 - **forge-loop runs every round as lanes and has no planning stage.** Every
   iteration is one round: one lane per focus the Analysis Agent divides its
   evidence into (at most `--lanes`, and one lane with no focus when it divides
