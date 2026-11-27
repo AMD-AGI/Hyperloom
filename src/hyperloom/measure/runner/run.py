@@ -412,8 +412,8 @@ def _call(ctx: _Context, spec: MeasurementSpec, points: list[Path], inferencex: 
 
 
 def _less_spent(call: TestCall, spec: MeasurementSpec, spent: float) -> TestCall:
-    """``call`` with the seconds the test's own preparation took (its datasets' link tree, ``datasets_cache``) taken off
-    its timeout; a sheet's deadline counted them already."""
+    """``call`` with the seconds its datasets' link tree took (``datasets_cache``) taken off its timeout; a sheet's
+    deadline counted them already. Called only when a tree was built, so a test without one keeps its sheet's timeout."""
     return dataclasses.replace(call, timeout_sec=int(max(1, min(call.timeout_sec, spec.procedure.timeout_sec - spent))))
 
 
@@ -659,9 +659,10 @@ def _run_sheet(ctx: _Context, spec_path: Path, key, progress: Progress) -> None:
     linking = time.monotonic()
     with local_datasets_cache(
         ctx.environ, ctx.work, lambda: _datasets_needed(ctx, spec), ctx.notes, sheet_env=spec.process_env
-    ):
-        spent = time.monotonic() - linking
-        call = _less_spent(_call(ctx, spec, points, inferencex, progress), spec, spent)
+    ) as tree:
+        call = _call(ctx, spec, points, inferencex, progress)
+        if tree is not None:
+            call = _less_spent(call, spec, time.monotonic() - linking)
         call = _own_directories(ctx, call, session, farm, arch)
         clear_import_notes(farm)
         ctx.cards.check(BEFORE_TEST)

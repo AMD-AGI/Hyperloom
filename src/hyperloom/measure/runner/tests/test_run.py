@@ -1229,7 +1229,7 @@ def test_the_link_tree_is_made_before_the_tests_timeout_is_fixed(tmp_path, env, 
     made = datasets_cache._link_datasets
 
     def slow(*args):
-        time.sleep(1.5)
+        time.sleep(2.5)
         return made(*args)
 
     monkeypatch.setattr(datasets_cache, "_link_datasets", slow)
@@ -1240,7 +1240,18 @@ def test_the_link_tree_is_made_before_the_tests_timeout_is_fixed(tmp_path, env, 
 
     assert _go(tmp_path, env, sheet) == 0
     (call,) = backend.calls
-    assert call.timeout_sec <= sheet["procedure"]["timeout_sec"] - 1
+    assert call.timeout_sec <= sheet["procedure"]["timeout_sec"] - 2
+
+
+def test_a_test_without_a_link_tree_keeps_its_sheets_timeout(tmp_path, env, monkeypatch):
+    backend = _Backend(_ok)
+    monkeypatch.setattr(runner, "LocalMeasurementBackend", backend)
+    sheet = _agentx_accuracy_sheet()
+    sheet["procedure"]["deadline_unix"] = 0
+
+    assert _go(tmp_path, env, sheet) == 0
+    (call,) = backend.calls
+    assert call.timeout_sec == sheet["procedure"]["timeout_sec"]
 
 
 @pytest.mark.parametrize(("code", "error_class"), [(errno.ESTALE, "hf_cache_permission"), (errno.ENOSPC, "disk_full")])
