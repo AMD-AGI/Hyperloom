@@ -59,14 +59,11 @@ from .bootstrap import (
     latency_budget_scope_error,
     LaunchInfo,
     measurement_state_is_stale,
-    open_plug_host,
     resolve_framework_version,
     resolve_launch_gpu_power,
     resolve_model_display_name,
-    resolve_plug_manifest,
     resolve_session_base,
     resume_gpu_power_settings,
-    running_plug_host,
     SettledLaunch,
     warn_without_target_gpu,
 )
@@ -992,7 +989,6 @@ def _run_options(args: argparse.Namespace) -> RunOptions:
 
 async def _run_optimize(args: argparse.Namespace) -> int:
     """Run the ``optimize`` subcommand end to end."""
-    plug_manifest = resolve_plug_manifest(args)  # first: a refused flag must leave any session as it was
     nodes_resolved = _resolve_run_topology(args)
     _settle_custom_specialist_only(args)
     intent = await _prepare_run(args)
@@ -1007,7 +1003,6 @@ async def _run_optimize(args: argparse.Namespace) -> int:
     session_dir = session.session_dir
     session_lock = session.session_lock
     manifest = session.manifest
-    plug_host = open_plug_host(plug_manifest, session_dir)
 
     # Recipe KB T0 anchor (after seed/restore for recipe_canonical_id, before Coordinator); skipped when --degraded-kb.
     recipe_kb_client = _bootstrap_recipe_kb(
@@ -1044,11 +1039,10 @@ async def _run_optimize(args: argparse.Namespace) -> int:
 
     stop_reason: str | None = None
     try:
-        with running_plug_host(plug_host):
-            stop_reason = await coordinator.run(
-                objective=objective,
-                options=_run_options(args),
-            )
+        stop_reason = await coordinator.run(
+            objective=objective,
+            options=_run_options(args),
+        )
     finally:
         await _close_optimize_run(coordinator, session_lock, session_dir, stop_reason)
 

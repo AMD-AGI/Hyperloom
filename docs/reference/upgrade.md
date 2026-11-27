@@ -105,10 +105,12 @@ ran the single-session flow; that default is gone.
   spec is judged as a multi-branch one and refused as above, and the single
   flow's session files are ignored. Let such runs finish on 1.2.0 before
   upgrading the host.
-* The `hosted-gpu` and `hosted-cpu` plug profiles are removed:
-  `hyperloom optimize --plug-profile hosted-gpu` (or `hosted-cpu`) exits 2
-  with `ERROR: plug configuration refused: unknown profile 'hosted-gpu'; available: local`.
-  Drop the flag.
+* `optimize` no longer selects plug implementations: `--plug-profile`,
+  `--manifest`, `--plug` and `--plug-config` are removed and, like any
+  unknown argument, exit 2 with `unrecognized arguments`. Drop them.
+  `HYPERLOOM_MANIFEST` and `HYPERLOOM_MANIFEST_OVERRIDES` are no longer read,
+  and a session's `plugs.resolved.json` is no longer written or read back on
+  `--resume-from`; an old session that has one resumes and ignores it.
 * `HYPERLOOM_EVENTS_DIR`, `HYPERLOOM_MCP_HOST`, `HYPERLOOM_MCP_PORT` and
   `HYPERLOOM_MCP_TOKEN` are no longer read or checked; a host may stop
   setting them (any value is accepted and removed from the environment of
