@@ -123,11 +123,15 @@ _LITERALS: dict[str, str | list[str] | dict[str, str]] = {
     "ENV_TP": "TP",
     "FORGE_REL_NORM_ERR_COLUMN": "relNormErr",
     "HIP_ERROR_PREFIX": "hipError",
+    "DRM_CLASS_ROOT": "/sys/class/drm",
     "DRM_CLIENT_ID_KEY": "drm-client-id",
+    "DRM_DEVICE_DIR": "device",
     "DRM_FD_DIR": "fd",
     "DRM_FDINFO_DIR": "fdinfo",
     "DRM_RENDER_NODE_PREFIX": "renderD",
     "DRM_VRAM_KEY": "drm-memory-vram",
+    "DRM_VRAM_TOTAL_FILE": "mem_info_vram_total",
+    "DRM_VRAM_USED_FILE": "mem_info_vram_used",
     "HIP_GRAPH_PACKET_CAPTURE_ENV": "DEBUG_CLR_GRAPH_PACKET_CAPTURE",
     "HIP_GRAPH_PACKET_CAPTURE_NODE_BY_NODE": "0",
     "HIP_NO_BINARY_FOR_GPU": "hipErrorNoBinaryForGpu",
@@ -136,6 +140,8 @@ _LITERALS: dict[str, str | list[str] | dict[str, str]] = {
     "HSA_STATUS_ERROR": "HSA_STATUS_ERROR",
     "HUB_RATE_LIMITED": r"429 Too Many Requests(?:: you have reached your '[^']+' rate limit| for url: https://huggingface\.co/)",
     "INITIAL_PID_NAMESPACE": "pid:[4026531836]",
+    "KFD_DOMAIN_KEY": "domain",
+    "KFD_LOCATION_ID_KEY": "location_id",
     "KFD_NODES": "topology/nodes",
     "KFD_NODE_GPU_ID": "gpu_id",
     "KFD_NODE_PROPERTIES": "properties",
@@ -267,7 +273,7 @@ def test_the_reference_pack_loads_and_passes_its_own_examples() -> None:
     pack = load_pack(DEFAULT_PACK_PATH)
     assert pack.version == str(yaml.safe_load(DEFAULT_PACK_PATH.read_text(encoding="utf-8"))["version"])
     assert Counter(entry.kind for entry in pack.entries.values()) == {
-        Kind.NAMES: 19,
+        Kind.NAMES: 20,
         Kind.LOG_REGEX: 19,
         Kind.ENV_DEFAULT: 2,
         Kind.COMPONENT_LAYOUT: 10,

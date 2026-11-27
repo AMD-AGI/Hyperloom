@@ -9,7 +9,8 @@ print as well, so it is read here directly: no tool whose output changes between
 
 A card is *held* by a process that has a queue on it or memory resident on it. A process that only opened the interface
 (``rocminfo``, a monitor) holds nothing. Cards are numbered the way ``ROCR_VISIBLE_DEVICES`` numbers them, which is the
-order of the GPU nodes of the kernel's topology; the card pool hands out the same numbers.
+order of the GPU nodes of the kernel's topology (:mod:`hyperloom.common.kfd_topology`); the card pool hands out the same
+numbers.
 
 The probe says what it saw or why it cannot say: an answer of "nobody holds it" is only ever given for a list that was
 read. It cannot say where ``/proc`` hides other accounts' processes, nor where the kernel's list is not there.
@@ -44,17 +45,14 @@ from enum import Enum
 from pathlib import Path
 from typing import NamedTuple
 
+from hyperloom.common import kfd_topology
 from hyperloom.common.env_safety import redact_secret_values
+from hyperloom.common.kfd_topology import GpuNode, KfdUnreadable, list_names, read_number, render_minor, select_gpus
 from hyperloom.common.outside_facts import (
     INITIAL_PID_NAMESPACE,
-    KFD_NODE_GPU_ID,
-    KFD_NODE_PROPERTIES,
-    KFD_NODES,
     KFD_PROCESSES,
     KFD_QUEUE_GPU_ID,
     KFD_QUEUES,
-    KFD_RENDER_MINOR_KEY,
-    KFD_ROOT,
     KFD_VRAM_PREFIX,
     PID_NAMESPACE_LINK,
 )
@@ -65,7 +63,6 @@ __all__ = [
     "CARD_GUARD_ENV",
     "COMMAND_CHARS",
     "EXCESS_SETTLE_SEC",
-    "KFD_PATH",
     "LAUNCHER_VRAM",
     "METHOD_CENSUS",
     "METHOD_CENSUS_FDINFO",
@@ -86,10 +83,10 @@ __all__ = [
     "read_listed",
 ]
 
-#: The directory the kernel's list is under, and ``/proc``. :func:`read_holders` and :func:`read_listed` read these names
-#: when they are called, not when they are defined, so a test points both at a tree of its own for every reader of the
-#: machine at once (a test of the toolbox must not see the cards of the host it runs on).
-KFD_PATH = Path(KFD_ROOT)
+#: ``/proc``. :func:`read_holders` and :func:`read_listed` read it, and the kernel's list at
+#: :data:`~hyperloom.common.kfd_topology.KFD_PATH`, when they are called, not when they are defined, so a test points
+#: both at a tree of its own for every reader of the machine at once (a test of the toolbox must not see the cards of the
+#: host it runs on).
 PROC_PATH = Path("/proc")
 #: The environment variable every process of a sandbox carries, whatever it did to its parentage since.
 SANDBOX_TAG_ENV = "E2B_SANDBOX_ID"
@@ -125,8 +122,6 @@ _DETAIL_COMMAND_CHARS = 80
 _CONTROL_CHARS = re.compile(r"[\x00-\x1f\x7f]+")
 #: Text read from another process's files: what is not valid text is replaced, never raised on.
 _LOSSY_TEXT = {"encoding": "utf-8", "errors": "replace"}
-#: What a process that is gone while the list is read raises: the entry went with it, so it holds nothing.
-_GONE = (FileNotFoundError, ProcessLookupError, NotADirectoryError)
 _ZOMBIE = "Z"
 _ROOT_ACCOUNT = 0
 _HIDDEN_OPTION = "hidepid="
@@ -162,15 +157,6 @@ def card_guard(environ: Mapping[str, str]) -> CardGuard:
         return CardGuard(named)
     except ValueError:
         raise ValueError(f"{CARD_GUARD_ENV} is {named!r}, not one of {[guard.value for guard in CardGuard]}") from None
-
-
-class _Unreadable(Exception):
-    """The kernel's list cannot be read as the probe needs it; the message says why, and ``denied`` whether it is because
-    this reader's view refuses it (permission denied) rather than because it is missing or malformed."""
-
-    def __init__(self, message: str, *, denied: bool = False) -> None:
-        super().__init__(message)
-        self.denied = denied
 
 
 @dataclass(frozen=True)
@@ -471,18 +457,6 @@ def _command(procfs: Path, pid: int) -> str:
     return _CONTROL_CHARS.sub(" ", text).strip()[:COMMAND_CHARS]
 
 
-def _read_int(path: Path) -> int | None:
-    """The number in a file of the kernel's list; ``None`` when the entry went away while it was read."""
-    try:
-        return int(path.read_text(encoding="ascii").strip())
-    except _GONE:
-        return None
-    except PermissionError as exc:
-        raise _Unreadable(f"{path} cannot be read: {_PERMISSION_DENIED}", denied=True) from exc
-    except (OSError, ValueError) as exc:
-        raise _Unreadable(f"{path} does not hold a number ({type(exc).__name__})") from exc
-
-
 def _hides_processes(procfs: Path) -> bool:
     """Whether ``procfs`` is mounted so that this account does not see the processes of others."""
     if os.geteuid() == _ROOT_ACCOUNT:
@@ -524,66 +498,6 @@ def _pid_view(procfs: Path) -> _PidView:
     return _PidView.HIDDEN if _hides_processes(procfs) else _PidView.HOST
 
 
-class _GpuNode(NamedTuple):
-    """A GPU of the kernel's topology: its node number and the id the kernel's process list names it by."""
-
-    node: int
-    gpu_id: int
-
-
-class _Topology(NamedTuple):
-    """The GPUs of the topology this reader can read, in the order the runtime numbers them, and how many GPU nodes its
-    view refuses."""
-
-    gpus: list[_GpuNode]
-    denied: int
-
-
-def _gpu_nodes(kfd: Path) -> _Topology:
-    """The GPUs of the topology, in the order the runtime numbers them: the nodes that are not a CPU, by node number,
-    leaving out those this reader's view refuses (another container's GPUs), as the runtime does.
-
-    Raises:
-        _Unreadable: When the topology cannot be listed, a node goes away, or every GPU node is refused (``denied``).
-    """
-    try:
-        nodes = sorted(int(entry.name) for entry in (kfd / KFD_NODES).iterdir() if entry.name.isdigit())
-    except OSError as exc:
-        raise _Unreadable(f"the GPU topology of {kfd} cannot be listed ({type(exc).__name__})") from exc
-    found = []
-    denied = 0
-    for node in nodes:
-        try:
-            gpu_id = _read_int(kfd / KFD_NODES / str(node) / KFD_NODE_GPU_ID)
-        except _Unreadable as exc:
-            if not exc.denied:
-                raise
-            denied += 1
-            continue
-        if gpu_id is None:
-            raise _Unreadable(f"node {node} of the GPU topology went away while it was read")
-        if gpu_id:
-            found.append(_GpuNode(node, gpu_id))
-    if denied and not found:
-        raise _Unreadable(
-            f"every one of the {denied} GPU nodes of {kfd} is refused to this view: {_PERMISSION_DENIED}", denied=True
-        )
-    return _Topology(found, denied)
-
-
-def _render_minor(kfd: Path, node: int) -> int | None:
-    """The minor of the render node of a GPU's topology node, or ``None`` when its properties do not say."""
-    try:
-        text = (kfd / KFD_NODES / str(node) / KFD_NODE_PROPERTIES).read_text(**_LOSSY_TEXT)
-    except OSError:
-        return None
-    for line in text.splitlines():
-        key, _, value = line.partition(" ")
-        if key == KFD_RENDER_MINOR_KEY:
-            return int(value) if value.strip().isdigit() and int(value) > 0 else None
-    return None
-
-
 @dataclass(frozen=True)
 class _Holding:
     """What one process has on one card: the bytes resident there and the compute queues on it."""
@@ -597,12 +511,12 @@ def _holdings(process: Path, card_of: dict[int, int]) -> dict[int, _Holding]:
     is not in the answer."""
     vram: dict[int, int] = {}
     queues: dict[int, int] = {}
-    for name in _listing(process):
+    for name in list_names(process):
         suffix = name[len(KFD_VRAM_PREFIX) :]
         if name.startswith(KFD_VRAM_PREFIX) and suffix.isdigit() and int(suffix) in card_of:
-            vram[card_of[int(suffix)]] = _read_int(process / name) or 0
-    for queue in _listing(process / KFD_QUEUES):
-        gpu_id = _read_int(process / KFD_QUEUES / queue / KFD_QUEUE_GPU_ID)
+            vram[card_of[int(suffix)]] = read_number(process / name) or 0
+    for queue in list_names(process / KFD_QUEUES):
+        gpu_id = read_number(process / KFD_QUEUES / queue / KFD_QUEUE_GPU_ID)
         if gpu_id in card_of:
             queues[card_of[gpu_id]] = queues.get(card_of[gpu_id], 0) + 1
     return {
@@ -610,15 +524,6 @@ def _holdings(process: Path, card_of: dict[int, int]) -> dict[int, _Holding]:
         for card in sorted(vram.keys() | queues.keys())
         if vram.get(card, 0) > 0 or queues.get(card, 0) > 0
     }
-
-
-def _listing(directory: Path) -> list[str]:
-    try:
-        return [entry.name for entry in directory.iterdir()]
-    except _GONE:
-        return []
-    except PermissionError as exc:
-        raise _Unreadable(f"{directory} cannot be listed: {_PERMISSION_DENIED}", denied=True) from exc
 
 
 def _live(procfs: Path, pid: int) -> bool:
@@ -629,13 +534,13 @@ def _live(procfs: Path, pid: int) -> bool:
 
 def read_holders(cards: Sequence[int], *, kfd: Path | None = None, procfs: Path | None = None) -> CardReading:
     """The processes that hold any of ``cards``, or why that cannot be said; ``kfd`` and ``procfs`` are
-    :data:`KFD_PATH` and :data:`PROC_PATH` unless given.
+    :data:`~hyperloom.common.kfd_topology.KFD_PATH` and :data:`PROC_PATH` unless given.
 
     ``cards`` are numbered the way ``ROCR_VISIBLE_DEVICES`` numbers them. A card the kernel does not list as a GPU makes
     the whole reading unavailable: a card that is not there is not a card nobody holds. In a pid namespace of its own the
     holders are counted, not named (see the module's description).
     """
-    kfd = KFD_PATH if kfd is None else kfd
+    kfd = kfd_topology.KFD_PATH if kfd is None else kfd
     procfs = PROC_PATH if procfs is None else procfs
     absent = _driver_absent(kfd)
     if absent is not None:
@@ -651,13 +556,13 @@ def read_holders(cards: Sequence[int], *, kfd: Path | None = None, procfs: Path 
             unavailable=f"{procfs} hides the processes of other accounts from this one, so a process on a card may not be seen"
         )
     try:
-        selected = _selected(kfd, cards)
+        selected = select_gpus(kfd, cards)
         if view is _PidView.OWN_NAMESPACE:
             return _census(kfd, procfs, selected)
         return CardReading(
             holders=_holders(kfd, procfs, {gpu.gpu_id: card for card, gpu in selected.items()}, named=True)
         )
-    except _Unreadable as exc:
+    except KfdUnreadable as exc:
         return CardReading(unavailable=str(exc), denied=exc.denied)
     except OSError as exc:
         return CardReading(unavailable=f"the kernel's list cannot be read ({type(exc).__name__}: {exc.strerror})")
@@ -667,39 +572,19 @@ def read_listed(cards: Sequence[int], *, kfd: Path | None = None) -> CardReading
     """Every process the kernel lists with memory or a queue on any of ``cards``, running or ended, or why that cannot be
     said. A process that ended stays listed with its memory until the driver has freed it, and a card is free for the next
     holder only once nothing is listed on it. The holders are not named: ``pid`` is the kernel's id and the reading's
-    ``method`` is :data:`METHOD_CENSUS`. ``kfd`` is :data:`KFD_PATH` unless given."""
-    kfd = KFD_PATH if kfd is None else kfd
+    ``method`` is :data:`METHOD_CENSUS`. ``kfd`` is :data:`~hyperloom.common.kfd_topology.KFD_PATH` unless given."""
+    kfd = kfd_topology.KFD_PATH if kfd is None else kfd
     absent = _driver_absent(kfd)
     if absent is not None:
         return CardReading(unavailable=absent)
     try:
-        selected = _selected(kfd, cards)
+        selected = select_gpus(kfd, cards)
         card_of = {gpu.gpu_id: card for card, gpu in selected.items()}
         return CardReading(holders=_holders(kfd, PROC_PATH, card_of, named=False), method=METHOD_CENSUS)
-    except _Unreadable as exc:
+    except KfdUnreadable as exc:
         return CardReading(unavailable=str(exc), denied=exc.denied)
     except OSError as exc:
         return CardReading(unavailable=f"the kernel's list cannot be read ({type(exc).__name__}: {exc.strerror})")
-
-
-def _selected(kfd: Path, cards: Sequence[int]) -> dict[int, _GpuNode]:
-    """The GPU of the topology each of ``cards`` is.
-
-    Raises:
-        _Unreadable: When a card is not among the GPUs the kernel lists: a card that is not there is not a free one. It is
-            ``denied`` when this view is refused GPU nodes, one of which may be that card.
-    """
-    gpus, denied = _gpu_nodes(kfd)
-    missing = [card for card in cards if not 0 <= card < len(gpus)]
-    if missing and denied:
-        raise _Unreadable(
-            f"card(s) {missing} are not among the {len(gpus)} GPUs this view can read ({denied} more are refused to it: "
-            f"{_PERMISSION_DENIED})",
-            denied=True,
-        )
-    if missing:
-        raise _Unreadable(f"card(s) {missing} are not among the {len(gpus)} GPUs the kernel lists")
-    return {card: gpus[card] for card in cards}
 
 
 def _holders(kfd: Path, procfs: Path, card_of: dict[int, int], *, named: bool) -> tuple[Holder, ...]:
@@ -708,9 +593,9 @@ def _holders(kfd: Path, procfs: Path, card_of: dict[int, int], *, named: bool) -
     try:
         pids = sorted(int(entry.name) for entry in (kfd / KFD_PROCESSES).iterdir() if entry.name.isdigit())
     except PermissionError as exc:
-        raise _Unreadable(f"the process list of {kfd} cannot be read: {_PERMISSION_DENIED}", denied=True) from exc
+        raise KfdUnreadable(f"the process list of {kfd} cannot be read: {_PERMISSION_DENIED}", denied=True) from exc
     except OSError as exc:
-        raise _Unreadable(f"the process list of {kfd} cannot be read ({type(exc).__name__})") from exc
+        raise KfdUnreadable(f"the process list of {kfd} cannot be read ({type(exc).__name__})") from exc
     found = []
     for pid in pids:
         for card, holding in sorted(_holdings(kfd / KFD_PROCESSES / str(pid), card_of).items()):
@@ -721,7 +606,7 @@ def _holders(kfd: Path, procfs: Path, card_of: dict[int, int], *, named: bool) -
     return tuple(found)
 
 
-def _census(kfd: Path, procfs: Path, selected: Mapping[int, _GpuNode]) -> CardReading:
+def _census(kfd: Path, procfs: Path, selected: Mapping[int, GpuNode]) -> CardReading:
     """The holders of ``selected`` (card to GPU) counted, with the memory the kernel lists on each card set against what the
     processes this reader sees hold. A card found to hold more than the tolerance that nothing accounts for is read again
     until the excess is gone or ``EXCESS_SETTLE_SEC`` has passed, and the last reading decides: a process that ended (the
@@ -739,11 +624,11 @@ def _has_excess(reading: CardReading) -> bool:
     return any(extra > UNACCOUNTED_VRAM_TOLERANCE for extra in reading.unaccounted.values())
 
 
-def _census_once(kfd: Path, procfs: Path, selected: Mapping[int, _GpuNode]) -> CardReading:
+def _census_once(kfd: Path, procfs: Path, selected: Mapping[int, GpuNode]) -> CardReading:
     """One look. The kernel's list is read before the processes' descriptors, so memory a process takes in between shows
     in the descriptors and not as an excess."""
     holders = _holders(kfd, procfs, {gpu.gpu_id: card for card, gpu in selected.items()}, named=False)
-    minors = {card: _render_minor(kfd, gpu.node) for card, gpu in selected.items()}
+    minors = {card: render_minor(kfd, gpu.node) for card, gpu in selected.items()}
     if any(minor is None for minor in minors.values()):
         return CardReading(holders, method=METHOD_CENSUS, accounting_gap="a GPU of the topology lists no render node")
     try:

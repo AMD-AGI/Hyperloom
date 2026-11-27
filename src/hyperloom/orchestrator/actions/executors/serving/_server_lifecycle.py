@@ -14,8 +14,8 @@ from typing import Any, NamedTuple
 
 import yaml
 
-from hyperloom.common import rocm_smi
 from hyperloom.common.benchmark_config import BenchmarkPointError, read_benchmark_point
+from hyperloom.common.kfd_topology import KfdUnreadable, card_vram, vram_busy
 from hyperloom.common.ports import pick_server_port
 from hyperloom.inference_optimizer import framework_registry
 from inference_suite import PidfileError, stop
@@ -171,8 +171,8 @@ def free_gpus_for_handoff(
 
     Args:
         session_dir: The session whose ``runs/`` pidfiles name the leftovers.
-        cards: Physical card indices as rocm-smi numbers them; ``None`` when the caller could not resolve them, which
-            still reaps but verifies nothing.
+        cards: The cards, numbered the way ``ROCR_VISIBLE_DEVICES`` numbers them; ``None`` when the caller could not
+            resolve them, which still reaps but verifies nothing.
         timeout_sec: How long the cards are given to drain.
         poll_sec: How often VRAM is re-read meanwhile.
 
@@ -185,18 +185,11 @@ def free_gpus_for_handoff(
         return GpuHandoff(reaped, [], [], "the cards could not be resolved to physical GPU indices")
     deadline = time.monotonic() + max(0.0, timeout_sec)
     while True:
-        usage = rocm_smi.gpu_vram_usage()
-        if usage is None:
-            return GpuHandoff(reaped, [], [], "rocm-smi could not report VRAM")
-        if any(not 0 <= card < len(usage) for card in cards):
-            return GpuHandoff(
-                reaped, [], [], f"rocm-smi reports {len(usage)} GPU(s), which does not cover cards {list(cards)}"
-            )
-        busy = [
-            (card, gpu.used_mib, gpu.total_mib)
-            for card, gpu in enumerate(usage)
-            if card in cards and rocm_smi.vram_busy(gpu)
-        ]
+        try:
+            usage = card_vram(cards)
+        except KfdUnreadable as exc:
+            return GpuHandoff(reaped, [], [], str(exc))
+        busy = [(card, gpu.used_mib, gpu.total_mib) for card, gpu in sorted(usage.items()) if vram_busy(gpu)]
         if not busy:
             return GpuHandoff(reaped, [], [], "")
         if time.monotonic() >= deadline:

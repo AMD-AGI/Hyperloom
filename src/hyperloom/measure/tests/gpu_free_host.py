@@ -3,7 +3,7 @@
 
 """Make tests that run the shipped runner independent of the GPUs of the machine they run on.
 
-The shipped runner reads the model from ``amd-smi`` and the VRAM in use from ``rocm-smi``. On a GPU host the real
+The shipped runner reads the model and the ECC counts through ``amd-smi`` and ``rocm-smi``. On a GPU host the real
 tools answer and the runner compares them with the stand-in sheet, so a CPU test would see a hardware mismatch
 instead of the outcome it asserts. Tools that exit non-zero ahead of the real ones on ``PATH`` give every host the
 same answer: nothing readable, so no hardware check is made.
@@ -12,14 +12,15 @@ A conftest imports :func:`machine_without_readable_gpus` to apply it to a whole 
 real cards sets ``USES_REAL_GPUS = True`` and keeps the host's own tools. A test that installs its own fake tools
 prepends them to ``PATH`` inside the test, which runs after this fixture, so they come first.
 
-The runner also reads who holds its cards from the kernel's list (:mod:`hyperloom.sandbox.card_occupancy`), and the
-card guard enforces by default: on a GPU host whose cards other work holds, every test that waits for a runner's
-signed result would get ``foreign_process_on_card`` instead, and a card pool or a lease built in the test process would
-find no free card. A conftest imports :func:`idle_card_list` as well to point the test process at an idle machine of
-its own, but a runner is another process and reads the host's list. A test therefore starts its runner through
-:data:`IDLE_CARDS_PYTHON` (or :func:`idle_cards_python`, for a template that names an interpreter): this module, run as
-``python -m hyperloom.measure.tests.gpu_free_host -m <module> <args>``, points the kernel's list and ``/proc`` at an
-idle machine in a temporary directory and then runs ``<module>`` as ``python -m`` would.
+The runner also reads who holds its cards from the kernel's list (:mod:`hyperloom.sandbox.card_occupancy`) and the
+memory in use on them from the driver's counters (:mod:`hyperloom.common.kfd_topology`), and the card guard enforces
+by default: on a GPU host whose cards other work holds, every test that waits for a runner's signed result would get
+``foreign_process_on_card`` instead, and a card pool or a lease built in the test process would find no free card. A
+conftest imports :func:`idle_card_list` as well to point the test process at an idle machine of its own, but a runner
+is another process and reads the host's list. A test therefore starts its runner through :data:`IDLE_CARDS_PYTHON`
+(or :func:`idle_cards_python`, for a template that names an interpreter): this module, run as
+``python -m hyperloom.measure.tests.gpu_free_host -m <module> <args>``, points the kernel's list, the DRM class
+directory and ``/proc`` at an idle machine in a temporary directory and then runs ``<module>`` as ``python -m`` would.
 """
 
 from __future__ import annotations
@@ -34,6 +35,7 @@ from pathlib import Path
 
 import pytest
 
+from hyperloom.common import kfd_topology
 from hyperloom.sandbox import card_occupancy
 from hyperloom.sandbox.tests.kernel_tree import KernelTree
 
@@ -104,12 +106,14 @@ def machine_without_readable_gpus(
 
 @pytest.fixture(autouse=True)
 def idle_card_list(request: pytest.FixtureRequest, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """The kernel's list and ``/proc`` this process reads are those of an idle machine of the test's own (a test that
-    lists holders injects its own reader on top); a module with ``USES_REAL_GPUS = True`` reads the host's."""
+    """The kernel's list, the DRM class directory and ``/proc`` this process reads are those of an idle machine of the
+    test's own (a test that lists holders injects its own reader on top); a module with ``USES_REAL_GPUS = True`` reads
+    the host's."""
     if getattr(request.module, USES_REAL_GPUS_FLAG, False):
         return
     machine = KernelTree(tmp_path / "idle-machine")
-    monkeypatch.setattr(card_occupancy, "KFD_PATH", machine.kfd)
+    monkeypatch.setattr(kfd_topology, "KFD_PATH", machine.kfd)
+    monkeypatch.setattr(kfd_topology, "DRM_PATH", machine.drm)
     monkeypatch.setattr(card_occupancy, "PROC_PATH", machine.procfs)
 
 
@@ -123,13 +127,15 @@ def idle_cards_python(directory: Path) -> str:
 
 
 def _run_on_idle_cards(argv: list[str]) -> None:
-    """Run ``-m <module> <args>`` as ``python`` would, with the kernel's list and ``/proc`` of an idle machine."""
+    """Run ``-m <module> <args>`` as ``python`` would, with the kernel's list, the DRM class directory and ``/proc`` of
+    an idle machine."""
     if len(argv) < 2 or argv[0] != "-m":
         raise SystemExit(f"usage: python -m {_MODULE} -m <module> [args...]")
     module, args = argv[1], argv[2:]
     with tempfile.TemporaryDirectory(prefix="hl-idle-machine-", dir=scratch_root()) as root:
         machine = KernelTree(Path(root))
-        card_occupancy.KFD_PATH, card_occupancy.PROC_PATH = machine.kfd, machine.procfs
+        kfd_topology.KFD_PATH, kfd_topology.DRM_PATH = machine.kfd, machine.drm
+        card_occupancy.PROC_PATH = machine.procfs
         sys.argv = [module, *args]
         runpy.run_module(module, run_name="__main__", alter_sys=True)
 

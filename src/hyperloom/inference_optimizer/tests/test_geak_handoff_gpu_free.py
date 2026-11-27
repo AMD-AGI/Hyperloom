@@ -11,7 +11,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from hyperloom.common.rocm_smi import GpuVram
+from hyperloom.common.kfd_topology import GpuVram, KfdUnreadable
 from hyperloom.orchestrator.actions.executors.serving import _server_lifecycle as sl
 from hyperloom.orchestrator.actions.executors.gpu._gpu_pin import (
     _resolve_handoff_gpu_ids,
@@ -26,19 +26,23 @@ HELD = GpuVram(used_mib=281000.0, total_mib=288000.0)
 
 @pytest.fixture
 def host(monkeypatch):
-    """Script the VRAM readings; record the reap and the sleeps."""
+    """Script the VRAM readings (each the machine's cards in order, or why they cannot be read); record the reap and the
+    sleeps."""
     state = SimpleNamespace(readings=[], reaped=[], reap_calls=[], probes=0, sleeps=[])
 
     def _reap(session_dir):
         state.reap_calls.append(Path(session_dir))
         return list(state.reaped)
 
-    def _probe():
+    def _probe(cards):
         state.probes += 1
-        return state.readings.pop(0) if len(state.readings) > 1 else state.readings[0]
+        reading = state.readings.pop(0) if len(state.readings) > 1 else state.readings[0]
+        if isinstance(reading, KfdUnreadable):
+            raise reading
+        return {card: reading[card] for card in cards}
 
     monkeypatch.setattr(sl, "reap_orphaned_servers", _reap)
-    monkeypatch.setattr(sl.rocm_smi, "gpu_vram_usage", _probe)
+    monkeypatch.setattr(sl, "card_vram", _probe)
     monkeypatch.setattr(sl, "time", SimpleNamespace(monotonic=time.monotonic, sleep=state.sleeps.append))
     return state
 
@@ -92,11 +96,12 @@ def test_only_the_named_cards_count(host, tmp_path):
 
 
 def test_unreadable_vram_still_reaps_but_verifies_nothing(host, tmp_path):
-    host.readings = [None]
+    why = "card(s) [5] are not among the 2 GPUs the kernel lists"
+    host.readings = [KfdUnreadable(why)]
 
-    gpus = sl.free_gpus_for_handoff(tmp_path, [0, 1], timeout_sec=60)
+    gpus = sl.free_gpus_for_handoff(tmp_path, [0, 5], timeout_sec=60)
 
-    assert (gpus.busy, gpus.unverified) == ([], "rocm-smi could not report VRAM")
+    assert (gpus.busy, gpus.unverified) == ([], why)
     assert host.reap_calls == [tmp_path]
 
 
@@ -107,15 +112,6 @@ def test_unresolved_cards_still_reap_but_verify_nothing(host, tmp_path):
     assert "resolved" in gpus.unverified
     assert host.reap_calls == [tmp_path]
     assert host.probes == 0
-
-
-def test_a_card_rocm_smi_does_not_report_is_unverified(host, tmp_path):
-    host.readings = [[HELD, HELD]]
-
-    gpus = sl.free_gpus_for_handoff(tmp_path, [0, 5], timeout_sec=0)
-
-    assert gpus.busy == []
-    assert "does not cover cards [0, 5]" in gpus.unverified
 
 
 @pytest.mark.parametrize(

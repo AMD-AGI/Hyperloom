@@ -27,7 +27,7 @@
 #   kernel_table  reserved: no rule reads one yet, so a pack that holds one is refused
 # Every entry names its project, says why the fact exists and carries examples. A pack that fails its own examples, or
 # lacks an entry the code reads, is refused when it is loaded; nothing falls back to a default.
-version: "28"
+version: "29"
 facts:
   aiter_meta_dir:
     kind: names
@@ -111,7 +111,10 @@ facts:
       tools (rocm-smi --showpids, amd-smi process) read these same files, so a process that holds a card is found here with
       no tool whose output format changes between ROCm releases and without root. A container is refused (EPERM) the
       gpu_id and properties of every GPU node its device cgroup does not grant, and the runtime (libhsakmt) leaves such a
-      node out when it numbers the devices.
+      node out when it numbers the devices. A GPU node's properties file has a line per property, a key and a number: the
+      minor of the GPU's render node, and its PCI address as a domain and a location_id that packs the bus number above
+      the device and function (bus << 8 | device << 3 | function). rocm-smi and amd-smi number the cards by that address,
+      which on MI300X-class boards is not the order of the nodes.
     names:
       root: /sys/class/kfd/kfd
       processes: proc
@@ -122,9 +125,12 @@ facts:
       vram_prefix: vram_
       node_properties: properties
       render_minor_key: drm_render_minor
+      domain_key: domain
+      location_id_key: location_id
     examples:
       - "hyperloom.sandbox.card_occupancy: read_holders maps a card ordinal to the gpu_id of the n-th GPU node and lists the processes that have a queue or resident memory on it"
-      - "hyperloom.sandbox.card_occupancy: the render node of a card is the drm_render_minor line of its node's properties file, which reads 'drm_render_minor 128' for the first GPU of a machine"
+      - "hyperloom.common.kfd_topology: the render node of a card is the drm_render_minor line of its node's properties file, which reads 'drm_render_minor 128' for the first GPU of a machine"
+      - "sysfs and rocm-smi, as read in a container given 4 of an MI325X machine's 8 GPUs: card 0 is node 6 of the topology, at PCI bus f5 (rocminfo lists the same order), and rocm-smi, which lists the container's cards by PCI address (85, 95, e5, f5), numbers it 3"
       - "kernel tree, as read on a GPU node: /sys/class/kfd/kfd/proc/4242/vram_61439 holds 8589934592 and /sys/class/kfd/kfd/proc/4242/queues/0/gpuid holds 61439"
       - "hyperloom.sandbox.card_occupancy: read_holders skips a GPU node whose gpu_id reads permission denied, as a one-GPU pod read /sys/class/kfd/kfd/topology/nodes/2/gpu_id"
 
@@ -159,6 +165,26 @@ facts:
       vram_key: drm-memory-vram
     examples:
       - "hyperloom.sandbox.drm_fdinfo: /proc/4242/fdinfo/7 of a descriptor that links to /dev/dri/renderD152 reads 'drm-client-id: 17' and 'drm-memory-vram: 249506392 KiB'"
+
+  amdgpu_vram_counters:
+    kind: names
+    project: Linux kernel (the amdgpu driver)
+    reason: >-
+      The driver states the video memory of each GPU in two files of its device directory, in bytes: mem_info_vram_used,
+      what is allocated on the GPU now (by any process, and by the driver itself), and mem_info_vram_total. rocm-smi
+      --showmeminfo vram prints the same values. A GPU's device directory is the device link of its render node under
+      the DRM class directory, named by the render node prefix and the minor its node of the kernel's topology states
+      (drm_render_minor). The class directory lists every GPU of the machine, those of other containers as well, and
+      neither its order nor rocm-smi's is the one the ROCm runtime numbers devices in, so a card's counters are found
+      through its node of the topology, never by a position.
+    names:
+      root: /sys/class/drm
+      device: device
+      vram_used: mem_info_vram_used
+      vram_total: mem_info_vram_total
+    examples:
+      - "hyperloom.common.kfd_topology: card_vram reads the memory of a card in the device directory of the render node its node of the topology names"
+      - "sysfs, as read in a container given 4 of an MI325X machine's 8 GPUs: card 0 is node 6 of the topology, whose drm_render_minor 160 names /sys/class/drm/renderD160/device, where mem_info_vram_used holds 297771008 and mem_info_vram_total 274861129728 on an idle card; rocm-smi numbers that card 3"
 
   pytorch_tunableop_env:
     kind: names

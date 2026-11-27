@@ -3,8 +3,11 @@
 
 """What the machine says about its GPUs: model, power cap, partition mode, ECC counts, memory in use.
 
-Everything is read through ``amd-smi`` and ``rocm-smi`` and is ``None`` when it cannot be read; a value that could not
-be read is never filled in, and a check that needs it is not made (the runner records that it was not).
+A card is numbered as ``ROCR_VISIBLE_DEVICES`` numbers it. The memory in use is read from the driver's counters of each
+card (:mod:`hyperloom.common.kfd_topology`), the rest through ``amd-smi`` and ``rocm-smi``, which number the cards by PCI
+address instead: an amd-smi row is a card's by its KFD node (:func:`~hyperloom_common.amd_smi.gpus_in_rocm_order`), a
+rocm-smi row by the PCI address the card's node of the topology states. Each is ``None`` when it cannot be read. A value
+that could not be read is never filled in, and a check that needs it is not made (the runner records that it was not).
 """
 
 from __future__ import annotations
@@ -19,7 +22,7 @@ from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from typing import Any
 
-from hyperloom_common.amd_smi import AmdSmiError, gpu_rows, run_amd_smi
+from hyperloom_common.amd_smi import AmdSmiError, gpu_rows, gpus_in_rocm_order, run_amd_smi
 from hyperloom_common.gpu_identity import (
     AMD_GPU_BOARDS,
     gfx_arch_for_gpu_type,
@@ -27,7 +30,7 @@ from hyperloom_common.gpu_identity import (
     normalise_device_id,
 )
 from hyperloom.common.gpu_power_settings import reading_matches, socket_power_cap_w
-from hyperloom.common.rocm_smi import GpuVram, gpu_vram_usage, vram_busy
+from hyperloom.common.kfd_topology import KfdUnreadable, card_pci_addresses, card_vram, vram_busy
 
 log = logging.getLogger(__name__)
 
@@ -112,61 +115,87 @@ def _gpu_data(args: Sequence[str], run: Runner) -> list[dict[str, Any]] | None:
     return gpu_rows(data) if isinstance(data, list) else None
 
 
+def _amd_smi_cards(visible: Sequence[int]) -> dict[int, int] | None:
+    """The amd-smi index of each visible card amd-smi lists, or ``None`` when it cannot say how it numbers them."""
+    try:
+        order = gpus_in_rocm_order()
+    except AmdSmiError as exc:
+        log.warning("which amd-smi card each of GPUs %s is cannot be read: %s", list(visible), exc)
+        return None
+    return {card: order[card] for card in visible if card < len(order)}
+
+
 def read_gpu_facts(visible: Sequence[int], run: Runner = amd_smi_or_none) -> list[GpuFacts] | None:
     """Model, power cap and partition mode of each visible GPU, or ``None`` when ``amd-smi`` cannot say."""
     static = _gpu_data(["static", _JSON], run)
-    if static is None:
+    cards = None if static is None else _amd_smi_cards(visible)
+    if cards is None:
         return None
-    partitions = {
-        item.get("gpu"): item.get("partition") for item in _gpu_data(["static", "--partition", _JSON], run) or []
-    }
-    facts = []
-    for item in static:
-        index = item.get("gpu")
-        if index not in visible:
-            continue
-        partition = partitions.get(index) or {}
-        mode = "/".join(str(partition[k]) for k in ("accelerator_partition", "memory_partition") if partition.get(k))
-        asic = item.get("asic") if isinstance(item.get("asic"), dict) else {}
-        arch = asic.get("target_graphics_version")
-        facts.append(
-            GpuFacts(
-                index,
-                asic.get("market_name"),
-                socket_power_cap_w(item.get("limit")),
-                mode or None,
-                normalise_device_id(asic.get("device_id")),
-                arch.strip().lower() if isinstance(arch, str) and arch.strip() else None,
-            )
-        )
-    return facts
+    rows = {item["gpu"]: item for item in static}
+    partitions = {item["gpu"]: item.get("partition") for item in _gpu_data(["static", "--partition", _JSON], run) or []}
+    return [_facts(card, rows[index], partitions.get(index) or {}) for card, index in cards.items() if index in rows]
+
+
+def _facts(card: int, item: dict[str, Any], partition: dict[str, Any]) -> GpuFacts:
+    mode = "/".join(str(partition[k]) for k in ("accelerator_partition", "memory_partition") if partition.get(k))
+    asic = item.get("asic") if isinstance(item.get("asic"), dict) else {}
+    arch = asic.get("target_graphics_version")
+    return GpuFacts(
+        card,
+        asic.get("market_name"),
+        socket_power_cap_w(item.get("limit")),
+        mode or None,
+        normalise_device_id(asic.get("device_id")),
+        arch.strip().lower() if isinstance(arch, str) and arch.strip() else None,
+    )
+
+
+def _every_card(
+    visible: Sequence[int], cards: dict[int, int], listed: dict[int, EccCounts]
+) -> dict[int, EccCounts] | None:
+    """The counts of each visible card, from ``listed`` by the tool's index of each of ``cards``; ``None`` unless every
+    visible card has them."""
+    counts = {card: listed[index] for card, index in cards.items() if index in listed}
+    return counts if counts and set(counts) == set(visible) else None
+
+
+def _ecc(item: dict[str, Any]) -> EccCounts | None:
+    ecc = item.get("ecc") or {}
+    correctable, uncorrectable = ecc.get("total_correctable_count"), ecc.get("total_uncorrectable_count")
+    if isinstance(correctable, int) and isinstance(uncorrectable, int):
+        return EccCounts(correctable, uncorrectable)
+    return None
 
 
 def _amd_smi_ecc(visible: Sequence[int], run: Runner) -> dict[int, EccCounts] | None:
     data = _gpu_data(["metric", "--ecc", _JSON], run)
-    if data is None:
+    cards = None if data is None else _amd_smi_cards(visible)
+    if cards is None:
         return None
-    counts: dict[int, EccCounts] = {}
-    for item in data:
-        ecc = item.get("ecc") or {}
-        correctable, uncorrectable = ecc.get("total_correctable_count"), ecc.get("total_uncorrectable_count")
-        if item.get("gpu") in visible and isinstance(correctable, int) and isinstance(uncorrectable, int):
-            counts[item["gpu"]] = EccCounts(correctable, uncorrectable)
-    return counts if counts and set(counts) == set(visible) else None
+    return _every_card(visible, cards, {item["gpu"]: counts for item in data if (counts := _ecc(item)) is not None})
 
 
 _RAS_GPU = re.compile(r"^GPU\[(\d+)\]:")
 _RAS_BLOCK = re.compile(r"^\s*\w+\s+(?:ENABLED|DISABLED)\s+(\d+)\s+(\d+)\s*$")
+_BUS = re.compile(r"^GPU\[(\d+)\]\s*:\s*PCI Bus:\s*(\S+)\s*$")
 
 
-def _rocm_smi_ras(visible: Sequence[int], run: Runner) -> dict[int, EccCounts] | None:
-    """The counts ``rocm-smi --showrasinfo`` prints per block, summed per GPU; a block without counts adds nothing.
+def _rocm_smi_cards(visible: Sequence[int], run: Runner) -> dict[int, int]:
+    """The rocm-smi index of each visible card ``rocm-smi --showbus`` lists at the PCI address of the card's node of the
+    topology; none when those addresses cannot be read."""
+    try:
+        addresses = card_pci_addresses(visible)
+    except KfdUnreadable as exc:
+        log.warning("the PCI addresses of GPUs %s cannot be read: %s", list(visible), exc)
+        return {}
+    matches = map(_BUS.match, (run(["--showbus"]) or "").splitlines())
+    listed = {match[2].lower(): int(match[1]) for match in matches if match}
+    return {card: listed[address] for card, address in addresses.items() if address in listed}
 
-    A GPU whose section has no block with counts says nothing about its errors, so it is not in the result.
-    """
-    raw = run(["--showrasinfo"])
-    if raw is None:
-        return None
+
+def _ras_totals(raw: str) -> dict[int, EccCounts]:
+    """The counts ``rocm-smi --showrasinfo`` prints per block, summed per rocm-smi index; a block without counts adds
+    nothing, so a GPU whose section has none is not in the result: it says nothing about its errors."""
     totals: dict[int, list[int]] = {}
     gpu: int | None = None
     for line in raw.splitlines():
@@ -177,8 +206,12 @@ def _rocm_smi_ras(visible: Sequence[int], run: Runner) -> dict[int, EccCounts] |
             sums = totals.setdefault(gpu, [0, 0])
             sums[0] += int(block.group(1))
             sums[1] += int(block.group(2))
-    counts = {index: EccCounts(*sums) for index, sums in totals.items() if index in visible}
-    return counts if counts and set(counts) == set(visible) else None
+    return {index: EccCounts(*sums) for index, sums in totals.items()}
+
+
+def _rocm_smi_ras(visible: Sequence[int], run: Runner) -> dict[int, EccCounts] | None:
+    raw = run(["--showrasinfo"])
+    return None if raw is None else _every_card(visible, _rocm_smi_cards(visible, run), _ras_totals(raw))
 
 
 def ecc_counts(
@@ -193,10 +226,12 @@ def ecc_counts(
     return counts if counts is not None else _rocm_smi_ras(visible, ras)
 
 
-def busy_gpus(visible: Sequence[int], usage: Callable[[], list[GpuVram] | None] = gpu_vram_usage) -> list[int] | None:
+def busy_gpus(visible: Sequence[int]) -> list[int] | None:
     """The visible GPUs that have memory resident, or ``None`` when the memory use of any of them cannot be read."""
-    used = usage()
-    if used is None or any(index >= len(used) for index in visible):
+    try:
+        used = card_vram(visible)
+    except KfdUnreadable as exc:
+        log.warning("the memory use of GPUs %s cannot be read: %s", list(visible), exc)
         return None
     return [index for index in visible if vram_busy(used[index])]
 

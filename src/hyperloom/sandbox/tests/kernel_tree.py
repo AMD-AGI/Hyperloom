@@ -1,10 +1,13 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""A directory tree that looks like the kernel's list of GPU processes and like ``/proc``, for the card-occupancy tests.
+"""A directory tree that looks like the kernel's list of GPU processes, the DRM class directory and ``/proc``, for the
+tests that read who holds a card and how much of its memory is in use.
 
 The layout is the one the rule pack's ``kfd_process_listing`` describes: a topology of node directories (a CPU node
-has ``gpu_id`` 0), and a directory per process id with ``vram_<gpu id>`` files and a ``queues`` directory.
+has ``gpu_id`` 0, a GPU node's properties name its render node and PCI address), and a directory per process id with
+``vram_<gpu id>`` files and a ``queues`` directory. Every GPU of the machine has the driver's memory counters
+(``amdgpu_vram_counters``) in the device directory of its render node, as an idle card reads them.
 """
 
 from __future__ import annotations
@@ -21,10 +24,14 @@ from hyperloom.common.outside_facts import INITIAL_PID_NAMESPACE
 __all__ = ["KernelTree"]
 
 _MOUNT_LINE = "36 35 0:3 / /proc rw,nosuid,nodev,noexec,relatime shared:5 - proc proc {options}\n"
+#: What the driver's counters read on an idle MI325X card: the driver's own allocation, of the card's 256 GiB.
+_IDLE_VRAM_USED = 297771008
+_VRAM_TOTAL = 274861129728
 
 
 class KernelTree:
-    """The kernel's list and ``/proc`` of a machine with ``gpus`` GPUs (after ``cpus`` CPU nodes) under ``root``."""
+    """The kernel's list, the DRM class directory and ``/proc`` of a machine with ``gpus`` GPUs (after ``cpus`` CPU
+    nodes) under ``root``."""
 
     def __init__(
         self,
@@ -36,6 +43,7 @@ class KernelTree:
         proc_options: str = "rw",
     ) -> None:
         self.kfd = root / "kfd"
+        self.drm = root / "drm"
         self.procfs = root / "proc"
         self._gpus = gpus
         self._cpus = cpus
@@ -45,7 +53,13 @@ class KernelTree:
             directory.mkdir(parents=True)
             (directory / "gpu_id").write_text(f"{0 if node < cpus else self.gpu_id(node - cpus)}\n")
             minor = 0 if node < cpus else self.render_minor(node - cpus)
-            (directory / "properties").write_text(f"cpu_cores_count 0\ndrm_render_minor {minor}\nlocation_id 8\n")
+            location = 0 if node < cpus else self._bus(node - cpus) << 8
+            (directory / "properties").write_text(
+                f"cpu_cores_count 0\ndrm_render_minor {minor}\ndomain 0\nlocation_id {location}\n"
+            )
+        for card in range(gpus):
+            self.vram_used(card, _IDLE_VRAM_USED)
+            (self.device(card) / "mem_info_vram_total").write_text(f"{_VRAM_TOTAL}\n")
         (self.kfd / "proc").mkdir()
         (self.procfs / "self" / "ns").mkdir(parents=True)
         os.symlink(pid_namespace, self.procfs / "self" / "ns" / "pid")
@@ -60,6 +74,14 @@ class KernelTree:
     def gpu_id(card: int) -> int:
         """The kernel's id of the ``card``-th GPU: a number that is not the card's own, as on a real machine."""
         return 28851 + 17 * card
+
+    def pci_address(self, card: int) -> str:
+        """The PCI address of the ``card``-th GPU. The GPUs sit on the PCI buses in the reverse of their nodes' order, so
+        a tool that numbers the cards by PCI address (rocm-smi, amd-smi) does not number them as the runtime does."""
+        return f"0000:{self._bus(card):02x}:00.0"
+
+    def _bus(self, card: int) -> int:
+        return 0x05 + 0x10 * (self._gpus - 1 - card)
 
     def process(
         self,
@@ -101,6 +123,15 @@ class KernelTree:
     def node(self, card: int) -> Path:
         """The topology node directory of the ``card``-th GPU of the machine."""
         return self.kfd / "topology" / "nodes" / str(self._cpus + card)
+
+    def device(self, card: int) -> Path:
+        """The device directory of the ``card``-th GPU's render node, where the driver's memory counters are."""
+        return self.drm / f"renderD{self.render_minor(card)}" / "device"
+
+    def vram_used(self, card: int, used: int) -> None:
+        """The driver's counter of the ``card``-th GPU of the machine says ``used`` bytes of its memory are allocated."""
+        self.device(card).mkdir(parents=True, exist_ok=True)
+        (self.device(card) / "mem_info_vram_used").write_text(f"{used}\n")
 
     def show_only(self, *cards: int) -> None:
         """A container's view: the kernel refuses the ``gpu_id`` and ``properties`` of every GPU node but ``cards``'

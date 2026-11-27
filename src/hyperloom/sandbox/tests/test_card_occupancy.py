@@ -10,6 +10,7 @@ from pathlib import Path
 
 import pytest
 
+from hyperloom.common import kfd_topology
 from hyperloom.sandbox import card_occupancy
 from hyperloom.sandbox.card_occupancy import (
     COMMAND_CHARS,
@@ -349,7 +350,7 @@ def test_the_readers_of_the_machine_read_the_kernel_list_named_when_they_are_cal
 ) -> None:
     tree.process(100)
     tree.holds(100, 1, vram=200 << 30)
-    monkeypatch.setattr(card_occupancy, "KFD_PATH", tree.kfd)
+    monkeypatch.setattr(kfd_topology, "KFD_PATH", tree.kfd)
     monkeypatch.setattr(card_occupancy, "PROC_PATH", tree.procfs)
 
     assert [(h.card, h.pid) for h in card_occupancy.read_holders([0, 1]).holders] == [(1, 100)]
