@@ -9,34 +9,14 @@ import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 
+from inference_suite.multinode import ssh_options
+
 from .env_safety import assert_forward_env_keys
 
 # Default sshd port baked into the image's mn-sshd-init.sh.
 DEFAULT_SSH_PORT = 2233
-
-
-def _ssh_common_opts(known_hosts: Path) -> list[str]:
-    """Build hardened non-interactive SSH options using a session known_hosts file."""
-    return [
-        "-o",
-        "StrictHostKeyChecking=yes",
-        "-o",
-        f"UserKnownHostsFile={known_hosts}",
-        "-o",
-        "UpdateHostKeys=no",
-        "-o",
-        "PasswordAuthentication=no",
-        "-o",
-        "BatchMode=yes",
-        "-o",
-        "ConnectTimeout=15",
-        "-o",
-        "ServerAliveInterval=30",
-        "-o",
-        "ServerAliveCountMax=3",
-        "-o",
-        "LogLevel=ERROR",
-    ]
+#: The user every SSH target is reached as.
+SSH_USER = "root"
 
 
 def _ssh_identity(key_path: Path | str) -> str:
@@ -57,14 +37,14 @@ class SshTarget:
         """The ``ssh`` argv up to and including ``root@host``."""
         return [
             "ssh",
-            *_ssh_common_opts(self.known_hosts),
+            *ssh_options(self.known_hosts),
             "-o",
             "IdentitiesOnly=yes",
             "-i",
             _ssh_identity(self.key_path),
             "-p",
             str(self.port),
-            f"root@{self.host}",
+            f"{SSH_USER}@{self.host}",
         ]
 
 

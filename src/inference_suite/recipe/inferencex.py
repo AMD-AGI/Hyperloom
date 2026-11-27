@@ -14,7 +14,7 @@ from __future__ import annotations
 import copy
 import json
 from collections.abc import Iterator, Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from decimal import Decimal
 from enum import Enum
 from typing import Any
@@ -68,7 +68,7 @@ _RANDOM_RANGE_RATIO = "0.8"
 _THINKING_MODE = "thinking_on"
 _FALSE = "false"
 #: InferenceX's value for a spec-decoding or KV-offloading setting the point leaves off.
-_UNSET = "none"
+UNSET = "none"
 
 #: The client environment variable naming the trace corpus an AgentX replay loads (``infx/bench/agentic/traces.py``).
 AGENTX_TRACE_ENV = "WEKA_LOADER_OVERRIDE"
@@ -98,7 +98,7 @@ class Scenario(str, Enum):
     AGENTIC = "agentic-coding"
 
 
-_SCENARIO_OF = {Workload.FIXED: Scenario.FIXED, Workload.AGENTX: Scenario.AGENTIC}
+SCENARIO_OF = {Workload.FIXED: Scenario.FIXED, Workload.AGENTX: Scenario.AGENTIC}
 
 
 @dataclass(frozen=True)
@@ -141,6 +141,14 @@ class InferencexPoint:
     @property
     def arm_key(self) -> str:
         return f"{self.entry}/{self.scenario.value}[{self.group}]/search-space[{self.arm}]"
+
+    @property
+    def series_key(self) -> str:
+        """The point without its concurrency and the recipe override InferenceX picks for it: the rows of one entry that
+        share it sweep one launch over concurrency, as one row listing several concurrencies does."""
+        launch = (self.recipe.partition(":")[0], self.tp, self.ep, self.pp, self.dcp, self.pcp, self.dp_attention)
+        workload = (self.spec_decoding, self.isl, self.osl, self.kv_offloading, self.kv_offload_backend, self.router)
+        return json.dumps([self.entry, self.scenario.value, self.group, *launch, *workload], sort_keys=True)
 
     @property
     def key(self) -> str:
@@ -197,7 +205,7 @@ def _yaml_mapping(bundle: RepoBundle, path: str) -> Mapping[str, Any]:
     return document
 
 
-def _runner_board(runner: str, labels: Mapping[str, Sequence[str]]) -> str:
+def runner_board(runner: str, labels: Mapping[str, Sequence[str]]) -> str:
     """The board a runner label stands for: the label itself, or for a cluster label the one board label whose
     nodes include all of the cluster's."""
     if not runner.startswith(_CLUSTER):
@@ -213,7 +221,7 @@ def _runner_board(runner: str, labels: Mapping[str, Sequence[str]]) -> str:
     return boards[0]
 
 
-def _concurrencies(benchmark: Mapping[str, Any]) -> list[int]:
+def concurrencies(benchmark: Mapping[str, Any]) -> list[int]:
     """``conc-list``, else ``conc-start`` doubled up to ``conc-end``, the last step capped at it."""
     if benchmark.get("conc-list"):
         return list(benchmark["conc-list"])
@@ -278,7 +286,7 @@ def _arm_points(arm: _Arm, runners: Mapping[str, Any]) -> Iterator[InferencexPoi
     fixed = arm.scenario is Scenario.FIXED
     runner = entry["runner"]
     power_from = block if fixed else benchmark
-    for conc in _concurrencies(benchmark):
+    for conc in concurrencies(benchmark):
         yield InferencexPoint(
             entry=arm.entry_name,
             scenario=arm.scenario,
@@ -291,7 +299,7 @@ def _arm_points(arm: _Arm, runners: Mapping[str, Any]) -> Iterator[InferencexPoi
             precision=entry["precision"],
             image=entry["image"],
             runner=runner,
-            board=_runner_board(runner, runners["labels"]),
+            board=runner_board(runner, runners["labels"]),
             recipe=f"{_SINGLE_NODE_RECIPES}/{entry['srt-recipe-dir']}/{benchmark['srt-recipe']}",
             tp=benchmark["tp"],
             ep=benchmark.get("ep") or 1,
@@ -299,7 +307,7 @@ def _arm_points(arm: _Arm, runners: Mapping[str, Any]) -> Iterator[InferencexPoi
             dcp=benchmark.get("dcp-size", 1),
             pcp=benchmark.get("pcp-size", 1),
             dp_attention=bool(benchmark.get("dp-attn") or False),
-            spec_decoding=benchmark.get("spec-decoding", _UNSET),
+            spec_decoding=benchmark.get("spec-decoding", UNSET),
             isl=block["isl"] if fixed else None,
             osl=block["osl"] if fixed else None,
             kv_offloading=None if fixed else benchmark["kv-offloading"],
@@ -395,7 +403,8 @@ _ENGINES = {
 }
 
 
-def _engine_type(recipe: Mapping[str, Any]) -> str:
+def engine_type(recipe: Mapping[str, Any]) -> str:
+    """The engine a srt-slurm recipe runs: its ``engine`` block's type, or ``engine`` itself."""
     engine = recipe.get("engine")
     return str(engine.get("type") if isinstance(engine, Mapping) else engine)
 
@@ -467,7 +476,7 @@ def _atom_tensor_parallel_size(gpus: int, config: Mapping[str, Any]) -> int:
 
 
 def _no_golden_reason(point: InferencexPoint, engine: str, args: Sequence[str]) -> str:
-    if point.spec_decoding == _UNSET:
+    if point.spec_decoding == UNSET:
         return "the launch drafts no tokens"
     if engine == Framework.VLLM and (
         adaptive := adaptive_verification_reason(speculative_config(argv_flag_occurrences(args)))
@@ -538,7 +547,7 @@ def _launch(
     if selection is None:
         raise RecipeSourceError(f"the InferenceX snapshot records no selection for {point.key}")
     recipe = _with_overrides(selection.recipe, selection.golden_overrides)
-    engine = _engine_type(recipe)
+    engine = engine_type(recipe)
     unported = _unported(recipe, engine)
     if unported is not None:
         return unported
@@ -572,19 +581,29 @@ def _launch(
         },
         client_env={key: str(value) for key, value in client.items() if key not in _POINT_CLIENT_ENV},
         golden=_golden(point, selection, bundle, engine, command.args),
-        kv_offloading=point.kv_offloading or _UNSET,
+        kv_offloading=point.kv_offloading or UNSET,
         stripped=command.stripped,
         warnings=_warnings(point, query, target),
         source_concs=arm_concs,
     )
 
 
+def _arm_launches(
+    points: Sequence[InferencexPoint], query: LaunchQuery, snapshot: InferencexSnapshot, concs: tuple[int, ...]
+) -> tuple[SourceLaunch, ...]:
+    """The launch every point of an arm binds at its own concurrency, ascending, one per concurrency an arm lists more
+    than once; a point InferenceX refused or this source cannot reproduce is left out."""
+    by_conc = {point.conc: point for point in points}
+    launches = (_launch(by_conc[conc], query, snapshot, conc, concs) for conc in sorted(by_conc))
+    return tuple(launch for launch in launches if not isinstance(launch, str))
+
+
 def _misfit(point: InferencexPoint, query: LaunchQuery) -> str | None:
     """Why ``point`` cannot serve ``query``, which it already matches on model, framework and board."""
-    if point.scenario is not _SCENARIO_OF[query.workload]:
-        return f"it runs {point.scenario.value}, not {_SCENARIO_OF[query.workload].value}"
+    if point.scenario is not SCENARIO_OF[query.workload]:
+        return f"it runs {point.scenario.value}, not {SCENARIO_OF[query.workload].value}"
     if query.workload is Workload.FIXED:
-        if point.spec_decoding != _UNSET:
+        if point.spec_decoding != UNSET:
             return f"it drafts with {point.spec_decoding}, and a fixed workload runs no speculative decoding"
         if (point.isl, point.osl) != (query.isl, query.osl):
             return f"it runs {point.isl}/{point.osl}, not {query.isl}/{query.osl}"
@@ -594,6 +613,22 @@ def _misfit(point: InferencexPoint, query: LaunchQuery) -> str | None:
         if asked is not None and asked != getattr(point, name):
             return f"it runs {name} {getattr(point, name)}, not {asked}"
     return None
+
+
+def _series(points: Sequence[InferencexPoint]) -> dict[str, list[InferencexPoint]]:
+    """``points`` by the arm each sweeps in, named by its first row: the rows of a series, one per concurrency, are one
+    arm; a series that would launch one concurrency twice keeps its rows apart."""
+    by_series: dict[str, list[InferencexPoint]] = {}
+    for point in points:
+        by_series.setdefault(point.series_key, []).append(point)
+    arms: dict[str, list[InferencexPoint]] = {}
+    for members in by_series.values():
+        if len({point.conc for point in members}) == len(members):
+            arms[members[0].arm_key] = members
+            continue
+        for point in members:
+            arms.setdefault(point.arm_key, []).append(point)
+    return arms
 
 
 def _arm_point(points: Sequence[InferencexPoint], target: int) -> InferencexPoint | None:
@@ -620,14 +655,22 @@ def inferencex_model_id(model_id: str, bundle: RepoBundle) -> str | None:
     """
     if "/" in model_id:
         return None
-    named = {
-        model
-        for entry in _yaml_mapping(bundle, MASTER).values()
-        if isinstance(model := entry.get("model"), str)
-        and "/" in model
-        and model.rpartition("/")[2].casefold() == model_id.casefold()
-    }
-    return next(iter(named)) if len(named) == 1 else None
+    named = org_models_named(model_id, [_yaml_mapping(bundle, MASTER)])
+    return named[0] if len(named) == 1 else None
+
+
+def org_models_named(name: str, masters: Sequence[Mapping[str, Any]]) -> list[str]:
+    """The ``org/repo`` models of ``masters`` whose ``repo`` is ``name``, compared without case, sorted."""
+    return sorted(
+        {
+            model
+            for master in masters
+            for entry in master.values()
+            if isinstance(model := entry.get("model"), str)
+            and "/" in model
+            and model.rpartition("/")[2].casefold() == name.casefold()
+        }
+    )
 
 
 def served_points(query: LaunchQuery, bundle: RepoBundle) -> ServedPoints:
@@ -659,26 +702,27 @@ def inferencex_launches(query: LaunchQuery, snapshot: InferencexSnapshot) -> tup
             SourceKind.INFERENCEX, f"no entry serves {query.model_id} with {query.framework} on a {query.board}"
         )
     target = max(query.concurrencies)
-    arms: dict[str, list[InferencexPoint]] = {}
+    fitting: list[InferencexPoint] = []
     reasons = dict(served.unread)
     for point in served.points:
         misfit = _misfit(point, query)
         if misfit is None:
-            arms.setdefault(point.arm_key, []).append(point)
+            fitting.append(point)
         else:
             reasons.setdefault(point.arm_key, misfit)
     launches = []
-    for arm_key, points in arms.items():
+    for arm_key, points in _series(fitting).items():
         point = _arm_point(points, target)
+        concs = tuple(sorted({each.conc for each in points}))
         launch = (
             f"it has no point at concurrency {target} or above"
             if point is None
-            else _launch(point, query, snapshot, target, tuple(sorted({each.conc for each in points})))
+            else _launch(point, query, snapshot, target, concs)
         )
         if isinstance(launch, str):
             reasons[arm_key] = launch
         else:
-            launches.append(launch)
+            launches.append(replace(launch, source_launches=_arm_launches(points, query, snapshot, concs)))
     if launches:
         return tuple(launches)
     return SourceMiss(SourceKind.INFERENCEX, "; ".join(f"{arm}: {reason}" for arm, reason in sorted(reasons.items())))
@@ -691,13 +735,19 @@ __all__ = [
     "MASTER",
     "PROJECT",
     "RUNNERS",
+    "SCENARIO_OF",
+    "UNSET",
     "InferencexPoint",
     "Scenario",
     "ServedPoints",
     "agentx_trace",
+    "concurrencies",
+    "engine_type",
     "inferencex_launches",
     "inferencex_model_id",
     "model_prefixes",
+    "org_models_named",
+    "runner_board",
     "served_points",
     "srtctl_cli_args",
 ]

@@ -227,7 +227,7 @@ class MachinePhase(CoordinatorCollaborator):
         """Run the current phase's pump, unless the machine is leaving the phase.
 
         While a transition waits for running work, what FRAMEWORK_AGENT's pump queues -- candidate discovery and
-        authoring, forced and scout specialists, explore grids -- is work no phase it moves to admits:
+        authoring, scout specialists, explore grids -- is work no phase it moves to admits:
         :meth:`_drain_for_transition` cancels it on the same tick, and the pump would queue it again on the next.
         """
         if not self.pump_table:

@@ -9,7 +9,6 @@ import pytest
 
 from hyperloom.orchestrator.kernel.geak_config import (
     _accepted_config_as_variant,
-    _geak_sweep_measured_tput,
     _split_env_and_flags,
 )
 
@@ -115,36 +114,3 @@ def test_legacy_flags_keep_values_and_literal_json(mapped):
     flags, envs = _accepted_config_as_variant(config)
     assert shlex.split(flags) == ["--limit", "64", "--config", value]
     assert envs == ({} if mapped else {"SGLANG_USE_AITER": "1"})
-
-
-# ── _geak_sweep_measured_tput ─────────────────────────────────────────────
-
-
-def test_geak_sweep_measured_tput_prefers_the_promotion_measurement() -> None:
-    res = {
-        "promotion_measurement": {"output_throughput": 150.0},
-        "points": [{"status": "succeeded", "output_throughput": 999.0}],
-    }
-    assert _geak_sweep_measured_tput(res) == 150.0
-
-
-def test_geak_sweep_measured_tput_reads_the_axis_neutral_field_first() -> None:
-    """Off the output axis the replay leaves ``output_throughput`` unset; the neutral field still reads."""
-    res = {"promotion_measurement": {"measured_value": 151.85, "metric_basis": "e2e_norm_intvty_p50"}}
-    assert _geak_sweep_measured_tput(res) == 151.85
-    both = {"promotion_measurement": {"measured_value": 150.0, "output_throughput": 999.0}}
-    assert _geak_sweep_measured_tput(both) == 150.0
-
-
-def test_geak_sweep_measured_tput_none_when_not_dict() -> None:
-    assert _geak_sweep_measured_tput(None) is None
-    assert _geak_sweep_measured_tput([]) is None  # type: ignore[arg-type]
-
-
-def test_geak_sweep_measured_tput_none_when_no_positive_throughput() -> None:
-    res = {
-        "promotion_measurement": {"output_throughput": 0},
-        "points": [{"status": "succeeded", "output_throughput": -1}],
-    }
-    assert _geak_sweep_measured_tput(res) is None
-    assert _geak_sweep_measured_tput({"promotion_measurement": {"measured_value": 0.0}}) is None

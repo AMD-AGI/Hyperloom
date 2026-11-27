@@ -89,6 +89,28 @@ async def test_a_jobs_result_is_read_from_the_runner_once_it_ended(tmp_path: Pat
         runner.result("no-such-job")
 
 
+async def test_a_job_s_record_is_read_by_the_branches_its_result_goes_to_also_after_a_restart(tmp_path: Path) -> None:
+    tool = ScriptedTool()
+    tool.block = asyncio.Event()
+    runner = jobs(tmp_path, tool, RecordingSink())
+    job_id = runner.submit(request("s1"))
+    await runner.join(job_id, "s2")
+    assert runner.document(job_id, "s2") == {"job_id": job_id, "status": "running"}
+    tool.block.set()
+    await runner.wait(job_id)
+
+    record = runner.document(job_id, "s2")
+    assert (record["status"], record["summary"], record["result"]) == ("succeeded", "done", {"n": 1})
+    assert jobs(tmp_path, tool, RecordingSink()).document(job_id, "s1") == record
+    for restarted in (False, True):
+        reader = jobs(tmp_path, tool, RecordingSink()) if restarted else runner
+        with pytest.raises(PermissionError):
+            reader.document(job_id, "s3")
+        for unknown in ("no-such-job", "../results"):
+            with pytest.raises(LookupError):
+                reader.document(unknown, "s1")
+
+
 async def test_cancelling_a_running_job_still_tells_the_branch(tmp_path: Path) -> None:
     sink, tool = RecordingSink(), ScriptedTool()
     tool.block = asyncio.Event()

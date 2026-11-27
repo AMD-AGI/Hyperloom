@@ -37,6 +37,7 @@ These are set in the app container's environment.
 | `HYPERLOOM_SOURCE_REPO` | yes | Where the run's Hyperloom source is fetched from: `OWNER/NAME` on GitHub, any git URL, or a local path (for example a mirror on shared storage when the app host has no GitHub egress). |
 | `HYPERLOOM_SOURCE_SHA` | yes | The full 40-hex commit the run executes. |
 | `HYPERLOOM_RSI_ARCHIVE` | yes, for the hosted multi-branch entry | Writable directory where sessions archive their search trees for later sessions to learn from. Point every session of a deployment at the same directory to share what they learn; a private directory keeps a session's tree out of the shared archive. There is no default. When the sessions may be different host accounts of one group, make it a directory of that group with the setgid bit (`chmod 2775`). |
+| `HYPERLOOM_JIT_STORE` | no | Absolute directory of the shared compiled-code cache, on the app host's own disk (for example a `0700` directory below its temporary directory). What the session does with it depends on where its tests run. **Where tests run in the grant's measurement sandboxes, it has no effect yet:** runners there are not given a cache, so every test builds its kernels cold and stages nothing, and the app publishes nothing into the store; the store is made, checked and pruned as a session starts, and stays empty. Serving the store to those runners and publishing what they compiled come in a later release. No measurement sandbox reads or mounts it. Unset, no store is made or pruned. **With `placement.measurement: local`** (see "One node" below) the session uses the store as `hyperloom-multibranch run` does: its runners, in the app container, read it, the app publishes into it what each accepted test compiled, and it is checked and pruned as a session starts. Unset, the store is `hyperloom-jit-store-<uid>` below the app container's temporary directory, with the same fixed bounds. **Do not put the store on storage any sandbox can write** (such as the shared tree the `dev` and `measurement` templates mount): code a candidate runs there, as root, could put snapshots into it that later tests load, and no check on the app can tell them apart. As a session starts it prunes keys no test has used for 14 days, or the least recently used ones while what the live keys list comes to more than 200 GiB; a pruned key's files are removed two days later, so a running test never loses what it is reading. The bound is on the live keys only: pruned keys and blobs no key lists wait out their two days uncounted, so the directory can hold more than 200 GiB meanwhile. A prune takes at most 60 s of a session's start: it first removes pruned keys past their two days, and where it stopped is kept in the store (`prune-cursor.json`), so later starts go on from there and cover the whole store. The size bound needs every key read within one start; a store whose keys take longer than 60 s to read is never bounded by size, and each such start logs a warning saying so. These bounds (14 days unused, 200 GiB of live keys, two days before removal, 60 s per start) are fixed, not set by the deployment: put the store, or with `placement.measurement: local` and the variable unset the temporary directory, on a disk with room for more than 200 GiB. It must be a directory of the account the app runs as that only it can write (made `0700` when missing), with no directory above it that another account can change unless it is sticky. A store the app refuses, or cannot make or check, is not used: the session logs one warning naming the store and why, and records the same in `jit_store.json` of its session directory, and the run goes on without it. Where tests run in the grant's sandboxes that changes nothing yet (every test builds cold; a candidate that patches aiter's `csrc` or `hsa` is refused by its runner); with `placement.measurement: local` its runners are told no cache, nothing is published, every test builds cold, and candidates that patch aiter's `csrc` or `hsa` are refused for the whole session. |
 | `INFERENCE_SUITE_TOOL_CACHE` | no | The tool cache `install.sh` staged the pinned InferenceX client in. Default `inference-suite-tools` under the dependency cache. Without a staging there that verifies, the session refuses to start, naming `python -m inference_suite stage --tool-cache <dir>`. |
 | `HYPERLOOM_HOST_LAYER` | yes, unless `HYPERLOOM_SPECIALIST_USER` names an account the app can run agents as | The hosting layer's directory. A hosted run launches an agent under bubblewrap only with the layer's `bin/bwrap`, never one on `PATH` (the framework image may carry its own). Where the container's root mount is unbindable (apptainer), bubblewrap runs only under the layer's `bin/unshare`, never one on `PATH`; the layer image does not build it, so a deployment there adds a static util-linux `unshare` whose `--help` lists `--user`, `--map-current-user`, `--mount` and `--propagation` (2.37.2 does) to the layer directory. |
 
@@ -72,22 +73,18 @@ template's values to the paths inside the sandbox.
 | `HYPERLOOM_FRAMEWORK_SNAPSHOT`, `HYPERLOOM_FRAMEWORK_SESSION_SHA256` | set by the hosted multi-branch entry | When the app host has the image's aiter tables, the hosted multi-branch entry snapshots them below `<session_dir>/framework` and passes both on every create; the template must list them in its accepted create environment, and the sandbox must see the session directory at the same path. Without the snapshot, a test that adds tuned rows to a default table is refused as `spec_rejected`. |
 | `HYPERLOOM_BASE_BINS` | set by the hosted multi-branch entry | Only for a session whose framework's server is built from its pinned checkout (`--framework llamacpp`): the entry lays that base build below `<session_dir>` and passes the directories of its executables on every create, and the runner puts them first on its `PATH`, so a test that does not rebuild the framework runs that build. The template must list it in its accepted create environment, and the sandbox must see the session directory at the same path. |
 | `INFERENCEX_REPO` | no | Where InferenceX is fetched from (default: upstream on GitHub): on the app host by `cache_build`, which fills `tools/InferenceX.git` from it (see `HYPERLOOM_RUNNER_CACHE` above), and in the sandbox by a test whose commit that repository lacks, as a fallback only. When the app host fills the repository, a sandbox without egress needs no mirror; set it on the host, to a mirror the host can read, where the host has no egress. A path or `file://` URL may name a mirror another account owns: the runner fetches from its resolved path, and that fetch alone runs with a global git config of its own whose `safe.directory` names that path and its `.git`, so no system-wide `safe.directory` is needed. |
-| `HYPERLOOM_JIT_CACHE` | no | A read-only directory of compiled kernels shared between tests. Unset: every test builds its kernels cold, which is slower but measures the same. A test that patches aiter's `csrc` or `hsa` is refused without it, because it needs its own JIT directory. |
+| `HYPERLOOM_JIT_CACHE` | no | Leave it unset in the `measurement` template, and mount no directory of the app's `HYPERLOOM_JIT_STORE` there: code a candidate runs could put snapshots into a store a sandbox can reach that later tests load. Runners in the grant's sandboxes have no compiled-code cache yet, so every test there builds its kernels cold (slower, measures the same), and a test that patches aiter's `csrc` or `hsa` is refused because it needs its own JIT directory. The variable is for a runner on the store's own machine (the local toolbox sets it for its own runners, as in a run with `placement.measurement: local`). |
 | `HYPERLOOM_WEIGHT_PREFETCH` | no | `1` reads the model's checkpoint into the page cache while each server boots, for a model on a network file system. Unset, it is off. With it on, the round that boots the server leaves `weight_prefetch.json` in its run_dir. See [Checkpoint prefetch](../reference/environment-variables.md#checkpoint-prefetch). |
 
 The sandbox serves the model at the path the campaign spec names, so the template must mount the model storage at
 that same path.
 
-### Keeping a sandbox for the next test
+### One sandbox per test
 
-On a cluster that queues sandboxes, a measurement sandbox that ends gives its node back to the queue, and the next
-test's sandbox asks again behind every other job of its priority. By default the session therefore keeps a finished
-test's sandbox until the next test's sandbox runs (make-before-break), for at most 1800 s. The grant charges the kept
-sandbox like any other, so the session runs one test fewer at once to leave it room, and it does so only where the grant
-fits at least three tests at the session's TP; a grant that fits one or two, such as 3 sandboxes and 2 GPUs, keeps no
-sandbox and runs every test it fits. A dev sandbox a branch is promised takes the kept sandbox's room first. Set
-`multibranch.make_before_break: false` in the campaign spec (`--no-make-before-break` on `run --measurement hosted`) to
-run every test the grant fits and close each sandbox when its test ends.
+Every test runs in a measurement sandbox of its own, closed when the test ends, and the session runs as many tests at
+once as the grant fits at the session's TP: `min(max_gpus // tp, max_sandboxes)`. On a cluster that queues sandboxes,
+each test's sandbox therefore queues for a node. `multibranch.make_before_break` in a campaign spec is accepted and
+ignored, with a warning in the log.
 
 ### AgentX window and boot budget
 
@@ -170,7 +167,7 @@ python3 -m sglang.launch_server --model-path /mnt/shared/models/DeepSeek-V4-Flas
 "multibranch": {"workload": "inferencex", "reference_script": "/mnt/shared/hyperloom/launch/dsv4-flash-mi355x.sh"}
 ```
 
-A multi-branch spec does not take `launch.server_args` or `launch.extra_env`, which only flow `single` reads: a spec
+A spec does not take `launch.server_args` or `launch.extra_env`, which only the retired flow `single` read: a spec
 that sets either ends the run (exit code 2), naming `multibranch.reference_script`, instead of running without them. A
 script that cannot serve as the base ends the run the same way, naming why.
 
@@ -208,6 +205,11 @@ run in the app container, so the run needs no measurement or `dev` template, no 
   `max_runtime_sec`, the earlier of the two does. Its other totals are not read.
 - `HYPERLOOM_RUNNER_CACHE` is still required: the session stages its prompt sets and the inference_suite staging
   every test runs there.
+- `HYPERLOOM_JIT_STORE` is used as `hyperloom-multibranch run` uses it: the tests in this container read the store,
+  the app publishes into it what each accepted test compiled, and it is checked and pruned as a session starts. Unset,
+  the store is `hyperloom-jit-store-<uid>` below the container's temporary directory, pruned with the same fixed bounds
+  (200 GiB of live keys), so that directory needs the room. A store the app refuses leaves the run without it, and
+  candidates that patch aiter's `csrc` or `hsa` are then refused for the whole session (see the table above).
 - The agent and dev sandboxes and the tests run in this container, beside the run's credentials, so the run starts only
   where they run isolated, as the specialists must: under the layer's bubblewrap (`HYPERLOOM_HOST_LAYER`). Where it
   cannot sandbox them, the run ends before anything starts, naming them and why (exit code 1). Their commands join a

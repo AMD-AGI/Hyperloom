@@ -23,7 +23,6 @@ def _shared_state():
         to_gaps_summary=lambda max_attempts=0: "gaps",
         to_warm_start_summary=lambda: "warm",
         to_intervention_mix_summary=lambda: "mix",
-        to_policy_denial_summary=lambda top_k=6: f"denials({top_k})",
         failures=[],
         find_failure=lambda fid: None,
         failures_for_task=lambda tid: [],
@@ -100,14 +99,18 @@ async def test_make_handler_success():
 @pytest.mark.parametrize(
     ("method_name", "args", "expected"),
     [
-        ("why_denied", {"top_k": 2}, "denials(2)"),
+        ("recent_outcomes", {"top_k": 2}, "outcomes(2)"),
         ("inbox", {"since_seq": 9}, "inbox(9)"),
         ("get_failure", {"failure_id": "fail.t1.abc"}, "fail.t1.abc"),
     ],
     ids=["top_k", "since_seq", "failure_id"],
 )
 async def test_make_handler_forwards_kwargs(method_name, args, expected):
-    p = _provider(shared_state=_shared_state(), inbox_reader=lambda s: f"inbox({s})")
+    p = _provider(
+        shared_state=_shared_state(),
+        inbox_reader=lambda s: f"inbox({s})",
+        recent_outcomes_reader=lambda k: f"outcomes({k})",
+    )
     out = await mct._make_handler(p, method_name)(args)
     assert expected in out["content"][0]["text"]
 

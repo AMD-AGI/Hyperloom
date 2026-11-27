@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import dataclasses
 import json
+import logging
 import os
 from pathlib import Path
 
@@ -275,6 +276,31 @@ def test_the_runner_runs_the_launch_preflight_with_the_prewarm_before_its_test_i
     _run(image, monkeypatch, "preflight", _deliver(image, _by_variable(TEST_TABLE)))
 
     assert calls == [(preflight_build, [])], "once, with the prewarm, before any compile directory"
+
+
+@pytest.mark.parametrize(
+    ("outcome", "level", "said"),
+    [
+        ({"action": "skip", "targets": ["gfx950"]}, logging.INFO, "covers the CSVs this boot loads for gfx950"),
+        (
+            {"action": "noop", "reason": "no aiter JIT directory"},
+            logging.INFO,
+            "nothing checked: no aiter JIT directory",
+        ),
+        ({"action": "invalidate", "targets": ["gfx950"], "removed": []}, logging.WARNING, "outran the serving .so"),
+    ],
+    ids=["skip", "noop", "invalidate"],
+)
+def test_the_runner_logs_one_line_on_what_the_preflight_decided(monkeypatch, caplog, outcome, level, said) -> None:
+    """A preflight that moved and built nothing still says so, so a test's log shows the preflight ran."""
+    monkeypatch.setattr(run_module, "build_image_own_once", lambda build: ServingPreflight(outcome))
+
+    with caplog.at_level(logging.INFO, logger=run_module.log.name):
+        run_module._build_image_own_once()
+
+    lines = [r for r in caplog.records if "aiter serving preflight" in r.getMessage()]
+    assert [r.levelno for r in lines] == [level]
+    assert said in lines[0].getMessage()
 
 
 #: A candidate's table for the serving image's GEMM module (``test_aiter_serving_once``): a kernel of the card's rows that

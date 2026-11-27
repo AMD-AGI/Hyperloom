@@ -7,6 +7,7 @@ llama.cpp compile: the server every round runs is the build of the checkout's tr
 from __future__ import annotations
 
 import os
+import shutil
 from functools import partial
 from pathlib import Path
 
@@ -146,3 +147,46 @@ def test_a_checkout_with_changed_tracked_files_is_refused(tmp_path: Path, checko
 
     with pytest.raises(NativeBuildsRefused, match="changes to tracked files"):
         open_native_builds(tmp_path, "llamacpp", _environ(checkout))
+
+
+def test_a_sweep_builds_patches_over_the_recorded_base_into_a_store_of_its_own(tmp_path: Path, checkout: Path) -> None:
+    native = start_native_builds(tmp_path / "session", "llamacpp", _environ(checkout))
+    base_source = git(checkout, "show", f"HEAD:{SOURCE}") + "\n"
+    (checkout / SOURCE).write_text("int a = 9;\n")
+
+    tunes = session_builds.tune_native_builds(tmp_path / "session")
+    patch = native.build_tree([SOURCE])
+    changed = tunes.build_patch(
+        f"diff --git a/{SOURCE} b/{SOURCE}\n--- a/{SOURCE}\n+++ b/{SOURCE}\n@@ -1 +1 @@\n-{base_source}+int a = 7;\n".encode()
+    )
+    base = tunes.build_patch(b"")
+
+    assert tunes.read_upstream(SOURCE) == base_source
+    assert tunes.root == tmp_path / "session" / "native" / "tunes"
+    assert base.status is changed.status is TreeBuildStatus.BUILT
+    assert _server(base.bin) == _server(native.current)
+    assert _server(changed.bin) not in (_server(base.bin), _server(patch.bin))
+
+
+def test_a_build_another_caller_laid_while_this_one_staged_it_is_that_copy_and_the_staged_one_is_gone(
+    tmp_path: Path, checkout: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    start_native_builds(tmp_path / "session", "llamacpp", _environ(checkout))
+    tunes = session_builds.tune_native_builds(tmp_path / "session")
+    farms = tunes.root / "farms"
+    key = tunes.build_patch(b"").key
+    shutil.rmtree(farms / key)
+    build_farm = session_builds.build_farm
+
+    def staged_after_another_laid(roots, staged: Path, **how):
+        farm = build_farm(roots, staged, **how)
+        shutil.copytree(staged, farms / key)
+        return farm
+
+    monkeypatch.setattr(session_builds, "build_farm", staged_after_another_laid)
+
+    base = tunes.build_patch(b"")
+
+    assert base.status is TreeBuildStatus.BUILT
+    assert base.bin == farms / key / "llamacpp" / "bin" and os.access(base.bin / "llama-server", os.X_OK)
+    assert [entry.name for entry in farms.iterdir()] == [key]

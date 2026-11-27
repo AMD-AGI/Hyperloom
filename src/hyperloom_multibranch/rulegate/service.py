@@ -13,13 +13,15 @@ from collections.abc import Iterator, Sequence
 from contextlib import contextmanager
 from typing import Protocol
 
-from hyperloom.contracts.measurement import Validity
+from hyperloom.contracts.measurement import TestResult, Validity
 from hyperloom_multibranch.contracts.gate import NotMeasured, ResultVerifier
 from hyperloom_multibranch.contracts.judgement import Judgement, Verdict
 from hyperloom_multibranch.contracts.blackboard.interfaces import CommitQuery, GateRecords, RecordSearch, SnapshotQuery
-from hyperloom_multibranch.contracts.blackboard.records import BaselineRecord, TestRecord
+from hyperloom_multibranch.contracts.blackboard.interfaces import BlackboardError
+from hyperloom_multibranch.contracts.blackboard.records import BaselineRecord, RecordedValue, TestRecord
 from hyperloom_multibranch.contracts.toolbox import Toolbox
 from hyperloom_multibranch.rulegate.accuracy import BaselineAccuracyError
+from hyperloom_multibranch.rulegate.cache_states import with_cache_states
 from hyperloom_multibranch.rulegate.readings import UnreadableResult
 from hyperloom_multibranch.rulegate.regression import ended
 from hyperloom_multibranch.rulegate.rules import Rule, repeats, retest_request
@@ -58,14 +60,32 @@ class GateService:
 
     async def compare(self, request_id: str) -> Judgement:
         first = await self._measured(request_id)
-        parent = (await self._blackboard.recorded_value(first.request.parent_commit)).values
+        recorded = await self._blackboard.recorded_value(first.request.parent_commit)
+        parent = recorded.values
         with _judgeable():
             judgement = await self._rule.first(first, parent)
-        if judgement.verdict is not Verdict.NEEDS_CONFIRM:
-            return judgement
-        retest = await self._measured(await self._retest_of(first))
-        with _judgeable():
-            return await self._rule.retest(judgement, retest, parent)
+        if judgement.verdict is Verdict.NEEDS_CONFIRM:
+            retest = await self._measured(await self._retest_of(first))
+            with _judgeable():
+                judgement = await self._rule.retest(judgement, retest, parent)
+        return await self._flagged(judgement, recorded)
+
+    async def _flagged(self, judgement: Judgement, recorded: RecordedValue) -> Judgement:
+        """``judgement`` with the kinds of compiled-code cache its tests met in another state than the tests behind the
+        parent's value (:func:`~.cache_states.with_cache_states`); a test that cannot be read back is left out."""
+        candidates = await self._results(judgement.request_ids)
+        return with_cache_states(judgement, candidates, await self._results(recorded.request_ids))
+
+    async def _results(self, request_ids: Sequence[str]) -> list[TestResult]:
+        found = []
+        for request_id in request_ids:
+            try:
+                record = await self._blackboard.record(request_id)
+            except (LookupError, BlackboardError):
+                continue
+            if record.result is not None:
+                found.append(record.result)
+        return found
 
     async def request_confirm(self, request_id: str) -> str:
         if not self._rule.confirms_ahead:

@@ -365,6 +365,32 @@ def test_an_inferencex_base_records_every_concurrency_of_its_arm():
     assert _base(_fixed(concurrencies=(min(concs),))).point.source_concs == concs
 
 
+def test_an_inferencex_base_records_the_launch_of_every_concurrency_of_its_arm_its_own_as_it_launches():
+    base = _base(_fixed())
+    launches = {launch.conc: launch for launch in base.point.source_launches}
+
+    assert tuple(launches) == base.point.source_concs
+    own = launches[base.point.conc]
+    assert own.args == base.args and dict(own.env) == {k: v for k, v in base.env.items() if isinstance(v, str)}
+
+
+def test_an_entry_listing_each_concurrency_as_its_own_row_records_them_as_one_arm():
+    """GLM-5.3-Flash on MI300X names one override per concurrency; the rows that also offload KV are another arm."""
+    base = _base(_agentx("zai-org/GLM-5.3-Flash", board="mi300x", concurrencies=(16,), tp=4, ep=4), gpus=4)
+    launches = {launch.conc: launch for launch in base.point.source_launches}
+
+    assert base.point.source_concs == (1, 2, 4, 8, 12, 16) and tuple(launches) == base.point.source_concs
+    caps = {conc: _flag_value(launch.args, "--max-running-requests") for conc, launch in launches.items()}
+    assert caps[1] != caps[16]
+    assert [alternative.locator.rsplit(":", 1)[1] for alternative in base.point.alternatives] == [
+        "override_tp4_ep4_c24_hicache"
+    ]
+
+
+def _flag_value(args: tuple[str, ...], flag: str) -> str:
+    return args[args.index(flag) + 1]
+
+
 def test_tp_ambiguity_takes_the_largest_tp_the_gpus_fit_and_records_the_rest():
     eight = _base(_fixed(), gpus=8)
     assert eight.topology == Topology(8)

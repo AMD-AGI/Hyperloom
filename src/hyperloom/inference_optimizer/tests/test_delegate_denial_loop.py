@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Delegate idempotency + policy-denial ladder tests."""
+"""Delegate idempotency, the denial's breakdown row and explore-grid admission."""
 
 from __future__ import annotations
 
@@ -176,113 +176,6 @@ async def test_policy_denial_records_target_proposal_message_id(session_dir):
     denial = event["ext"]["denials"]["rows"][0]
     assert denial["proposal_msg_id"] == "proposal-42"
     assert denial["rule"] == "phase_action_not_allowed"
-
-
-@pytest.mark.asyncio
-async def test_policy_denial_streak_records_streak_at_two(session_dir):
-    """The denial streak is tracked via ``SharedState.policy_denial_streak`` as a count, not a priority lock."""
-    c = _silent_coordinator(session_dir)
-    try:
-        from hyperloom.orchestrator.policy.denial import PolicyDenied
-
-        intent = _delegate(action="backends", key="k1")
-        pd = PolicyDenied("denied", rule="duplicate_idempotency_key", hint="wait")
-        await c.router.record_policy_denied(
-            "orchestration",
-            intent,
-            pd,
-            action_name="backends",
-        )
-        await c.router.record_policy_denied(
-            "orchestration",
-            intent,
-            pd,
-            action_name="backends",
-        )
-        streak = c.shared_state.policy_denial_streak.get(
-            "backends:duplicate_idempotency_key",
-            0,
-        )
-        assert streak >= 2
-    finally:
-        await c.stop()
-
-
-@pytest.mark.asyncio
-async def test_policy_denial_streak_no_longer_prunes_family_at_five(session_dir):
-    """Long-run continuity: the streak >= 5 auto-prune_family reaction was removed; the family is NOT pruned."""
-    c = _silent_coordinator(session_dir)
-    try:
-        from hyperloom.orchestrator.policy.denial import PolicyDenied
-
-        intent = _delegate(action="params", key="k1")
-        pd = PolicyDenied("denied", rule="duplicate_idempotency_key", hint="wait")
-        for _ in range(5):
-            await c.router.record_policy_denied(
-                "orchestration",
-                intent,
-                pd,
-                action_name="params",
-            )
-        assert "params" not in c.shared_state.pruned_families
-        assert (
-            c.shared_state.policy_denial_streak.get(
-                "params:duplicate_idempotency_key",
-                0,
-            )
-            == 5
-        )
-    finally:
-        await c.stop()
-
-
-@pytest.mark.asyncio
-async def test_policy_denial_streak_no_longer_stops_run_at_ten(session_dir):
-    """Long-run continuity: the streak >= 10 ``policy_loop`` stop was removed; stop_reason stays unset."""
-    c = _silent_coordinator(session_dir)
-    try:
-        from hyperloom.orchestrator.policy.denial import PolicyDenied
-
-        intent = _delegate(action="backends", key="k1")
-        pd = PolicyDenied("denied", rule="duplicate_idempotency_key", hint="wait")
-        for _ in range(10):
-            await c.router.record_policy_denied(
-                "orchestration",
-                intent,
-                pd,
-                action_name="backends",
-            )
-        assert not (c.shared_state.stop_reason or "").strip()
-        assert (
-            c.shared_state.policy_denial_streak.get(
-                "backends:duplicate_idempotency_key",
-                0,
-            )
-            == 10
-        )
-    finally:
-        await c.stop()
-
-
-@pytest.mark.asyncio
-async def test_successful_delegate_resets_policy_denial_streak(session_dir):
-    c = _silent_coordinator(session_dir)
-    try:
-        from hyperloom.orchestrator.policy.denial import PolicyDenied
-
-        intent = _delegate(key="k-reset")
-        pd = PolicyDenied("denied", rule="duplicate_idempotency_key", hint="wait")
-        await c.router.record_policy_denied(
-            "orchestration",
-            intent,
-            pd,
-            action_name="target_analysis",
-        )
-        assert c.shared_state.policy_denial_streak.get("target_analysis:duplicate_idempotency_key") == 1
-        await c.router.handle_delegate("orchestration", _delegate(key="fresh-key"))
-        assert not any(k.startswith("target_analysis:") for k in c.shared_state.policy_denial_streak)
-    finally:
-        await c.stop()
 
 
 # Mission summary: the stack-changed warning
@@ -528,3 +421,42 @@ def test_explore_grid_coverage_tells_a_variant_removal_from_the_base_one():
     queued = [SimpleNamespace(kind="explore", params={**base, "grid": [kept]})]
     assert explore_grid_already_covered({**base, "grid": [removes]}, queued, {}) is None
     assert explore_grid_already_covered({**base, "grid": [dict(kept, name="again")]}, queued, {}) is not None
+
+
+def test_explore_grid_coverage_refuses_a_grid_made_only_of_known_dead_changes():
+    """A grid whose every variant carries a change the framework refused at start launches nothing; it is refused."""
+    from types import SimpleNamespace
+
+    from hyperloom.inference_optimizer.canonical_fingerprint import workload_signature
+    from hyperloom.orchestrator.actions.executors.explore_prefilter.measured_variants import (
+        explore_grid_already_covered,
+    )
+
+    aiter_on = {"VLLM_ROCM_USE_AITER": "1", "VLLM_ROCM_USE_AITER_MOE": "1"}
+    death = {
+        "name": "v00",
+        "outcome": "FAILED",
+        "workload_signature": workload_signature(),
+        "extra_server_args": "",
+        "extra_envs": dict(aiter_on),
+        "error_class": "server_init_dead",
+        "error_excerpt": "ValueError: Unquantized MoE backend 'ROCm AITER' is unsupported",
+    }
+    ledger = {"tested": {"fp-v00": death}}
+    base = {"base_tput": 800.0}
+    sibling = {"name": "v02", "extra_envs": {**aiter_on, "HL_KNOB": "1"}}
+    new = {"name": "v01", "extra_envs": {"HL_KNOB": "1"}}
+
+    denied = explore_grid_already_covered({**base, "grid": [sibling]}, [], ledger)
+    assert denied is not None and denied.rule == "explore_grid_already_covered"
+    assert str(denied) == (
+        "delegate{action_name='explore'} adds nothing new: v02 carrying a change the framework refused at start"
+    )
+    queued = [SimpleNamespace(kind="explore", params={**base, "grid": [new]})]
+    mixed = explore_grid_already_covered({**base, "grid": [new, sibling]}, queued, ledger)
+    assert str(mixed) == (
+        "delegate{action_name='explore'} adds nothing new: v01 already measured, queued or running on the current "
+        "stack; v02 carrying a change the framework refused at start"
+    )
+    assert explore_grid_already_covered({**base, "grid": [sibling, new]}, [], ledger) is None
+    assert explore_grid_already_covered({**base, "source": "stack_revalidate", "grid": [sibling]}, [], ledger) is None

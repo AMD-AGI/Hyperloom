@@ -71,6 +71,7 @@ from hyperloom_multibranch.contracts.blackboard.records import (
 from hyperloom_multibranch.contracts.blackboard.vocab import DedupStatus, LearningKind, UnfinishedReason
 from hyperloom_multibranch.blackboard.changes import NO_CHANGE
 from hyperloom_multibranch.blackboard.families import family_of
+from hyperloom_multibranch.blackboard.knowledge.lessons import clip
 from hyperloom_multibranch.blackboard.learning_search import LearningFinder, SessionLearnings, fit_lines
 from hyperloom_multibranch.blackboard.local.blackboard import LEARNING_MAX_CHARS, LEARNING_MIN_CHARS
 
@@ -130,14 +131,10 @@ class BlackboardTool:
     handler: Handler
 
 
-def clip(text: str, limit: int = LINE_CHARS) -> str:
-    return text if len(text) <= limit else text[: limit - 3] + "..."
-
-
 def lines(items: Sequence[str]) -> list[str]:
     """``items`` clipped, at most :data:`MAX_LINES` of them, then how many more there were."""
 
-    shown = [clip(item) for item in items[:MAX_LINES]]
+    shown = [clip(item, LINE_CHARS) for item in items[:MAX_LINES]]
     return [*shown, f"... {len(items) - MAX_LINES} more"] if len(items) > MAX_LINES else shown
 
 
@@ -199,7 +196,8 @@ def render_claim(claim: Claim) -> str:
     intent = claim.intent
     held = clip(
         f"claimed {intent.target} / {intent.mechanism} on {claim.key.parent_commit} for {claim.holder}, "
-        f"expires in {claim.expires_at - claim.heartbeat_at:.0f}s"
+        f"expires in {claim.expires_at - claim.heartbeat_at:.0f}s",
+        LINE_CHARS,
     )
     return f"{held}\nintent fingerprint (submit tests with it): {claim.key.intent_fingerprint}"
 
@@ -208,7 +206,7 @@ def render_ops(shares: OpShares) -> str:
     largest = ", ".join(
         f"{op} {share:.1f}% (ceiling +{amdahl_ceiling_pct(share):.1f}%)" for op, share in shares.largest(LINE_OPS)
     )
-    return clip(f"largest ops on {shares.commit_id} ({shares.job_id}): {largest}")
+    return clip(f"largest ops on {shares.commit_id} ({shares.job_id}): {largest}", LINE_CHARS)
 
 
 def render_ceiling(intent: Intent, shares: OpShares | None) -> str:
@@ -234,7 +232,7 @@ def render_record(record: TestRecord) -> str:
         found.append(f"threshold {judged.threshold_pct:.2f}%, pooled {', '.join(judged.request_ids)}")
     if record.result is not None and record.result.profile_location:
         found.append(f"profile: {record.result.profile_location}")
-    return "\n".join(clip(line) for line in found)
+    return "\n".join(clip(line, LINE_CHARS) for line in found)
 
 
 def render_log(record: BranchLogRecord) -> str:

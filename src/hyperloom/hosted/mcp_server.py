@@ -19,9 +19,8 @@ A reply annotator (:meth:`McpServer.attach_reply_annotator`) adds one text block
 tokens. The service keeps one opaque cursor per token for it, starts it empty, and moves it only when the reply
 that carries the block has been written to the client.
 
-Authentication: ``X-Hyperloom-Token`` or ``Authorization: Bearer``. The host token is the campaign's
-MCP token, which the caller reads from :class:`~hyperloom.hosted.host_info.HostInfo` and passes in
-:class:`McpServerConfig`; every other token was issued by this server to one specialist and dies with
+Authentication: ``X-Hyperloom-Token`` or ``Authorization: Bearer``. The host token is the one the caller
+passes in :class:`McpServerConfig`; every other token was issued by this server to one specialist and dies with
 :meth:`McpServer.revoke_specialist`. Issued tokens are kept as digests only, compared in constant time, and a token
 is never written to a log or an error message.
 """
@@ -134,7 +133,7 @@ class RegisteredTool:
 
 @dataclass(frozen=True)
 class McpServerConfig:
-    """Plain values from the caller; a hosted run takes ``port`` and ``host_token`` from its ``HostInfo``."""
+    """Plain values from the caller."""
 
     host: str = "127.0.0.1"
     port: int = 0

@@ -20,6 +20,23 @@ Merged to `main` and not yet carried by a tagged release. Each entry moves
 into the [release](https://github.com/AMD-AGI/Hyperloom/releases) that ships
 it.
 
+- **The hosted single-session flow is retired.** `hyperloom hosted run` now
+  only checks the campaign spec, runs the installer and hands the run to
+  `hyperloom-multibranch hosted run`. A spec must set `"flow": "multibranch"`
+  or carry a `multibranch` section; an unchanged 1.2.0 single spec (neither,
+  which ran the single-session flow, measured locally) and a spec that still
+  says `"flow": "single"` end the run with a final `exit.json` (return code 2)
+  naming the retired flow and what to add. `placement.measurement` now
+  defaults to `hosted`, and a single run in flight does not resume. See
+  [Upgrade](reference/upgrade.md). The single flow's MCP host tools
+  (status, stop request), its progress events and its `hosted-gpu` /
+  `hosted-cpu` plug profiles are removed, and with them the
+  `hosted/control/stop.json` stop request the Coordinator read.
+  `HYPERLOOM_EVENTS_DIR` and `HYPERLOOM_MCP_HOST` / `_PORT` / `_TOKEN` are no
+  longer read or checked, and are still removed from the environment of every
+  child. `optimize --session-dir` stays. `options.conc_sweep` is no longer
+  part of the spec (it is ignored like any unknown field); a multi-branch run
+  takes its sweep switch from `multibranch.conc_sweep`.
 - **forge-loop runs every round as lanes and has no planning stage.** Every
   iteration is one round: one lane per focus the Analysis Agent divides its
   evidence into (at most `--lanes`, and one lane with no focus when it divides
@@ -50,6 +67,19 @@ it.
   `reflection.analysis_report` and the decision label `ORCHESTRATION_ERROR`,
   so Experiences collected from here on carry a new `schema_ref`; those
   already in a KB keep theirs.
+- **The DeepSeek Harness reaches the gateway through the `llm-pi-ai` route.**
+  The `deepseek-official` adapter rejected the `redacted_thinking` blocks a
+  gateway returns with `UNSUPPORTED_CONTENT`; the `anthropic-messages` route
+  keeps and replays them. With `HYPERLOOM_DSH_MAX_TOKENS` unset, a request's
+  output cap is now 128000, the `llm-pi-ai` default; it was 256000.
+- **A hosted multi-branch test closes its sandbox when it ends.**
+  Make-before-break, which kept a finished test's sandbox until the next
+  test's ran where the grant fit at least three tests, is removed. A hosted
+  session now runs `min(max_gpus // tp, max_sandboxes)` tests at once, one
+  more than before on such a grant, and each test's sandbox queues for a
+  node. `hyperloom-multibranch run` no longer takes
+  `--[no-]make-before-break`. `multibranch.make_before_break` in a campaign
+  spec is accepted and ignored, with a warning in the log.
 - **A hosted multi-branch run sets the AgentX window and the server boot
   budget.** The campaign spec's `multibranch` block takes
   `agentx_duration_sec` and `agentx_objective` (for `workload: agentx` only),

@@ -12,32 +12,6 @@ from hyperloom.common.framework_arm import review_row_id, verdict_subject
 from .verdicts import CriticRuling
 
 
-def variant_review_rows(payload: Mapping[str, Any] | None) -> list[dict[str, Any]]:
-    """Return one row per named variant, in the order the Critic wrote them.
-
-    A variant the Critic rejected never reaches a bench, so the map is the only
-    record that it was judged at all; a collapsed verdict says nothing about
-    which variants a grid proceeded on.
-    """
-    entries = (payload or {}).get("verdict_map")
-    if not isinstance(entries, Mapping):
-        return []
-    rows: list[dict[str, Any]] = []
-    for name, entry in entries.items():
-        variant = str(name or "")
-        if not variant:
-            continue
-        fields = entry if isinstance(entry, Mapping) else {}
-        rows.append(
-            {
-                "variant_name": variant,
-                "verdict": str(fields.get("verdict") or ""),
-                "reason": str(fields.get("rationale") or fields.get("reasoning") or ""),
-            }
-        )
-    return rows
-
-
 def _record_phase_proposal_review(pending: Any, ruling: CriticRuling) -> None:
     """File the Critic's ruling on the proposal row the phase event holds.
 
@@ -60,7 +34,6 @@ def _record_phase_proposal_review(pending: Any, ruling: CriticRuling) -> None:
             reasoning=str(ruling.reasoning or ""),
             confidence=fields.get("confidence"),
             advisory=ruling.advisory,
-            variants=ruling.variant_verdicts,
         )
     )
 
@@ -114,7 +87,6 @@ def record_critic_review(router: Any, pending: Any, ruling: CriticRuling) -> Non
             reason=reason,
             confidence=fields.get("confidence"),
             advisory=ruling.advisory,
-            variants=ruling.variant_verdicts,
         ),
     )
     recorder.record_proposal_step(

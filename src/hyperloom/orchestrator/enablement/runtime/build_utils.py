@@ -242,16 +242,46 @@ print("vllm_rocm_ok")
 
 # Torch ABI probe
 
+#: The prefix of the one stdout line the ABI probe's facts are read from. Anything else on stdout (a banner, a
+#: warning a package prints while torch imports) is ignored.
+ABI_PROBE_MARKER = "HYPERLOOM_TORCH_ABI="
 _ABI_PROBE = (
-    "import sys, json, importlib.metadata, torch; "
-    "hip=getattr(torch.version,'hip',None); "
-    "print(json.dumps({"
-    "'torch_version': torch.__version__, "
-    "'hip_version': hip or '', "
+    "import sys, json, torch; "
+    "hip=getattr(getattr(torch, 'version', None), 'hip', None); "
+    "print(" + repr(ABI_PROBE_MARKER) + " + json.dumps({"
+    "'torch_version': str(getattr(torch, '__version__', '') or ''), "
+    "'hip_version': str(hip or ''), "
     "'python_version': sys.version.split()[0], "
     "'is_rocm': bool(hip)"
-    "}))"
+    "}), flush=True)"
 )
+_ABI_PROBE_TIMEOUT_SEC = 30
+_ABI_PROBE_TAIL = 800
+
+
+def _empty_abi(error: str) -> dict[str, Any]:
+    return {"torch_version": "", "hip_version": "", "python_version": "", "is_rocm": False, "error": error}
+
+
+def _tail(text: str) -> str:
+    text = (text or "").strip()
+    return text[-_ABI_PROBE_TAIL:]
+
+
+def _abi_line(stdout: str) -> dict[str, Any] | None:
+    """The facts of the last marked line of ``stdout``."""
+    import json
+
+    lines = [line.strip() for line in (stdout or "").splitlines() if line.strip()]
+    marked = [line[len(ABI_PROBE_MARKER) :] for line in lines if line.startswith(ABI_PROBE_MARKER)]
+    for candidate in reversed(marked):
+        try:
+            facts = json.loads(candidate)
+        except ValueError:
+            continue
+        if isinstance(facts, dict):
+            return facts
+    return None
 
 
 def probe_torch_abi(
@@ -259,17 +289,31 @@ def probe_torch_abi(
     *,
     run: _RunCallable = subprocess.run,
 ) -> dict[str, Any]:
-    """Return torch/Python ABI facts from the given interpreter."""
-    import json
+    """Return torch/Python ABI facts from the given interpreter.
 
-    res = run([python_exe, "-c", _ABI_PROBE], capture_output=True, text=True, timeout=30)
-    out = (getattr(res, "stdout", "") or "").strip()
-    if not out or getattr(res, "returncode", 1) != 0:
-        return {"torch_version": "", "hip_version": "", "python_version": "", "is_rocm": False}
+    The facts are read from the probe's marked stdout line only, so other output cannot break the parse. torch is a
+    ROCm build when ``torch.version.hip`` is set. When the probe fails the result's ``error`` names the return code and
+    the tail of its stderr; ``torch_version`` is then empty.
+    """
     try:
-        return json.loads(out)
-    except ValueError:
-        return {"torch_version": "", "hip_version": "", "python_version": "", "is_rocm": False}
+        res = run([python_exe, "-c", _ABI_PROBE], capture_output=True, text=True, timeout=_ABI_PROBE_TIMEOUT_SEC)
+    except subprocess.TimeoutExpired:
+        return _empty_abi(f"the torch probe of {python_exe} timed out after {_ABI_PROBE_TIMEOUT_SEC}s")
+    except OSError as exc:
+        return _empty_abi(f"the torch probe of {python_exe} could not start: {exc}")
+    rc = int(getattr(res, "returncode", 1))
+    stdout = getattr(res, "stdout", "") or ""
+    stderr = getattr(res, "stderr", "") or ""
+    facts = _abi_line(stdout) if rc == 0 else None
+    if facts is None:
+        detail = _tail(stderr) or _tail(stdout) or "no output"
+        return _empty_abi(f"the torch probe of {python_exe} failed (rc={rc}): {detail}")
+    return {
+        "torch_version": str(facts.get("torch_version") or ""),
+        "hip_version": str(facts.get("hip_version") or ""),
+        "python_version": str(facts.get("python_version") or ""),
+        "is_rocm": bool(facts.get("is_rocm")),
+    }
 
 
 # Version-sorted tag list (sort -V -r equivalent for autoselect)

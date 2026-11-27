@@ -477,19 +477,25 @@ async def test_a_measured_rebench_waits_for_its_gpus_and_runs_even_when_they_sta
     asked = _gpu_checks(
         monkeypatch, [GpuHandoff(reaped=[], busy=[(6, 120000.0, 288000.0)], holders=[holder], unverified="")]
     )
-    coord.writeback.geak_rebench_params = lambda *, reason: {"skipped": True, "reason": "geak_overlay_unloadable"}
-    replays: list[tuple[str, int]] = []
+    coord.writeback.geak_rebench_params = lambda *, reason: {"grid": []}
+    measured: list[tuple[str, int]] = []
 
-    async def _replay(*, decline_reason: str) -> None:
-        replays.append((decline_reason, len(asked)))
+    async def _measure(task) -> dict:
+        measured.append((task.kind, len(asked)))
+        return {"status": "failed"}
 
-    coord.phase_kernel._revalidate_on_geak_harness = _replay
+    async def _settle(_task, _result) -> None:
+        return None
+
+    coord.sub = Mock(execute_covered=_measure)
+    coord.writeback.is_promotable_result = lambda _kind, _result: False
+    coord.writeback.handle_unpromotable_result = _settle
 
     with caplog.at_level("ERROR", logger="hyperloom.orchestrator.phases.kernel_geak_dispatch"):
         await coord.phase_kernel._revalidate_geak_candidate(reason="geak_e2e_win", handoff_cards=[6, 7])
 
     assert asked == [[6, 7]]
-    assert replays == [("geak_overlay_unloadable", 1)]
+    assert measured == [("explore", 1)]
     assert "geak rebench: GPUs still hold VRAM after GEAK returned: GPU6 120000/288000 MiB" in caplog.text
     assert holder in caplog.text
 

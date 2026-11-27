@@ -17,7 +17,7 @@ from __future__ import annotations
 import shutil
 import tempfile
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass, field, fields
+from dataclasses import dataclass, field, fields, replace
 from pathlib import Path
 from typing import Any
 
@@ -58,11 +58,14 @@ from hyperloom.orchestrator.actions.executors import (
     BenchmarkTarget,
     LaunchLayer,
     MaterializeOptions,
+    PromptDatasetError,
     default_baseline_config,
     materialize_benchmark_config,
 )
 from hyperloom.orchestrator.actions.executors.agentx_point import enable_profile, native_config
+from hyperloom.orchestrator.state.base_launch import launch_change, server_base, server_base_at
 from inference_suite.argv import argv_flag_occurrences, canonical_flag_name, flag_occurrences
+from inference_suite.contracts import BaseLaunch
 
 _UTF8 = "utf-8"
 
@@ -80,13 +83,21 @@ class CanonicalMeasurement:
     """The active canonical measurement configuration: a base YAML, how it is rendered, and its surface.
 
     ``materialize`` holds the keyword arguments the base is rendered with (model path, GPU type, InferenceX path,
-    benchmark script), the same for every test of the session.
+    benchmark script), the same for every test of the session. ``frozen_base`` is the session's frozen base launch,
+    whose source launch at a level a point at that level is seeded with; ``None`` seeds every level alike.
     """
 
     config_path: Path
     surface: MeasurementSurface
     primary_concurrency: int
     materialize: Mapping[str, Any] = field(default_factory=dict)
+    frozen_base: BaseLaunch | None = None
+
+    def seed_at(self, level: int) -> dict[str, Any]:
+        """The rendering options that seed a point at ``level`` with the source's own launch there."""
+        if self.frozen_base is None:
+            return {}
+        return {"server_base": server_base_at(self.frozen_base, level)}
 
     @property
     def agentx(self) -> bool:
@@ -112,7 +123,10 @@ def _render(canonical: CanonicalMeasurement, out_dir: Path, name: str, **overrid
         pins = dict(options.get("extra_envs") or {})
         concurrency = pins.pop(ENV_CONC)
         options["extra_envs"], _ = filter_untrusted_env_mapping(pins, allow_predicate=is_allowed_variant_env_key)
-    path = materialize_benchmark_config(canonical.config_path, out_dir, **_materialize_args(options))
+    try:
+        path = materialize_benchmark_config(canonical.config_path, out_dir, **_materialize_args(options))
+    except PromptDatasetError as exc:
+        raise PointError(str(exc)) from exc
     with path.open(encoding=_UTF8) as handle:
         config = yaml.safe_load(handle) or {}
     if concurrency is not None:
@@ -137,12 +151,12 @@ def _materialize_args(options: Mapping[str, Any]) -> dict[str, Any]:
     return split
 
 
-def _reference(canonical: CanonicalMeasurement, pins: Mapping[str, str]) -> dict[str, Any]:
-    """The canonical configuration rendered with ``pins``, which a generated point is compared with."""
+def _reference(canonical: CanonicalMeasurement, pins: Mapping[str, str], seed: Mapping[str, Any]) -> dict[str, Any]:
+    """The canonical configuration rendered with ``pins`` on ``seed``, which a generated point is compared with."""
 
     scratch = Path(tempfile.mkdtemp(prefix="hl-ref-"))
     try:
-        return _render(canonical, scratch, "reference.yaml", extra_envs=pins)
+        return _render(canonical, scratch, "reference.yaml", extra_envs=pins, **seed)
     finally:
         shutil.rmtree(scratch, ignore_errors=True)
 
@@ -155,7 +169,12 @@ AMBIENT_SHAPE_ENVS = (ENV_ISL, ENV_OSL, ENV_MAX_MODEL_LEN, ENV_TP, ENV_CONC)
 
 
 def default_canonical(
-    out_dir: Path, *, primary_concurrency: int, config_path: Path | None = None, **materialize: Any
+    out_dir: Path,
+    *,
+    primary_concurrency: int,
+    config_path: Path | None = None,
+    frozen_base: BaseLaunch | None = None,
+    **materialize: Any,
 ) -> CanonicalMeasurement:
     """Render the shipped baseline configuration at the primary operating point and take its surface.
 
@@ -164,11 +183,13 @@ def default_canonical(
     """
 
     base = config_path or default_baseline_config()
-    canonical = CanonicalMeasurement(base, MeasurementSurface({}), primary_concurrency, materialize)
+    if frozen_base is not None:
+        materialize = {"server_base": server_base(frozen_base), **materialize}
+    canonical = CanonicalMeasurement(base, MeasurementSurface({}), primary_concurrency, materialize, frozen_base)
     evaluation = {} if canonical.agentx else {ENV_RUN_EVAL: "true"}
     config = _render(canonical, out_dir, CANONICAL_FILE, extra_envs={ENV_CONC: str(primary_concurrency), **evaluation})
     surface = extract_surface(config)
-    return CanonicalMeasurement(base, surface, primary_concurrency, materialize)
+    return CanonicalMeasurement(base, surface, primary_concurrency, materialize, frozen_base)
 
 
 def _concurrencies(requested: Sequence[int], canonical: CanonicalMeasurement) -> tuple[int, ...]:
@@ -280,13 +301,17 @@ def generate_points(
     if accuracy and canonical.agentx:
         raise PointError("an AgentX workload has no accuracy test: its report's valid_measurement is its check")
     launch = environment.recipe.launch
+    if canonical.frozen_base is not None:  # levels seeded with the source's launch take what the recipe restates there
+        change = launch_change(canonical.frozen_base, launch.server_args, launch.envs, launch.remove_args)
+        launch = replace(launch, server_args=change.args, envs=dict(change.env))
     check_launch_envs([*launch.envs, *environment.envs])
     out_dir.mkdir(parents=True, exist_ok=True)
     points = []
     for index, level in enumerate(_concurrencies(concurrency, canonical)):
         run_eval = "true" if accuracy else "false"
         pins = {ENV_CONC: str(level), ENV_RUN_EVAL: run_eval}
-        reference = _reference(canonical, pins)
+        seed = canonical.seed_at(level)
+        reference = _reference(canonical, pins, seed)
         name = f"point-{index}-c{level}.yaml"
         config = _render(
             canonical,
@@ -295,6 +320,7 @@ def generate_points(
             extra_server_args=_seeded(launch.server_args, reference),
             extra_envs={**launch.envs, **environment.envs, **pins},
             remove_args=launch.remove_args,
+            **seed,
         )
         check_surface(config, canonical.surface)
         check_point(config, concurrency=level, accuracy=accuracy, reference=point_values(reference))
@@ -356,11 +382,14 @@ def generate_profile_point(
         enable_profile(point)
         return (point,)
     launch = environment.recipe.launch
+    if canonical.frozen_base is not None:  # levels seeded with the source's launch take what the recipe restates there
+        change = launch_change(canonical.frozen_base, launch.server_args, launch.envs, launch.remove_args)
+        launch = replace(launch, server_args=change.args, envs=dict(change.env))
     check_launch_envs([*launch.envs, *environment.envs])
     out_dir.mkdir(parents=True, exist_ok=True)
     level = canonical.primary_concurrency
     pins = {ENV_CONC: str(level), ENV_RUN_EVAL: "false"}
-    rendered = _reference(canonical, pins)
+    rendered = _reference(canonical, pins, canonical.seed_at(level))
     reference = BenchmarkPoint.from_document(rendered).envs
     workload = {name: str(reference[name]) for name in _PROFILE_PINNED if reference.get(name) is not None}
     config = _render(

@@ -402,8 +402,8 @@ brief:
   denies any delegate naming it as domain or tag. With `HYPERLOOM_CUSTOM_SPECIALIST_ONLY=1`
   FRAMEWORK_AGENT runs nothing else: Orchestration takes no turn there (its
   specialists, grids and patches would be denied), the custom task may run to
-  the phase end with no lease extension, the Coordinator's own discovery, scout, stalled-
-  domain force, predictor and general bench are skipped, and the phase hints
+  the phase end with no lease extension, the Coordinator's own discovery, scout,
+  predictor and general bench are skipped, and the phase hints
   `skip_to_sweep` once the custom task (or its refused admission), its grid and
   its patch reviews are done; the exit goes to KERNEL_AGENT when that phase is
   enabled, else CYCLE_END, and later phases run as usual.
@@ -794,10 +794,10 @@ and the operator's stated value is lost:
 | Target advisory | `--no-target-advisory` | Disable external-target hints in prompts without disabling final-report comparison. `primary_gap` uses the existing latency/throughput categories; the interactivity axis is displayed as interactivity. |
 | Quantization prelude | `--quantize` | Optional. Natural-language quantization request. Runs the quantization-agent once before the loop and rewrites `--model` to the quantized model. See Step 2b. Never runs on a resume. |
 | Env pins | `--extra-env NAME=VALUE` | Repeatable; forward **every** one verbatim as its own flag (do not drop any or fold into the `Environment:` block). The CLI persists them in `state.json` and serializes them into `$INFERENCE_OPTIMIZER_EXTRA_ENV`; a dropped pin is lost silently — e.g. a missing `SGLANG_USE_AITER=0` leaves the explore aiter-MoE filter blind. A `--resume-from` re-exports the persisted set, so re-pass them only to change the set. |
-| Session directory | `--session-dir DIR` | Only when a launcher must know the session path before the run starts, as the hosted entry does. An absolute path below `$USER_DATA_PATH`; the new session is created in exactly that directory instead of `<model>/<UTC_ts>-<rand8>`. The CLI refuses it (exit 2) together with `--resume-from`, which names the directory it resumes. Absent, the directory is generated as before. |
+| Session directory | `--session-dir DIR` | Only when a launcher must know the session path before the run starts. An absolute path below `$USER_DATA_PATH`; the new session is created in exactly that directory instead of `<model>/<UTC_ts>-<rand8>`. The CLI refuses it (exit 2) together with `--resume-from`, which names the directory it resumes. Absent, the directory is generated as before. |
 | Operator-defined specialist | `--custom-specialist-prompt-file` + `--custom-specialist-description` | Only when the prompt asks for a specialist with its own focus. Write the operator's focus text verbatim to a file and pass its path (max 16 KiB); the description is one line (max 200 chars) describing it in its own prompt. Pass both or neither. Export `HYPERLOOM_CUSTOM_SPECIALIST_ONLY=1` before launch only when the prompt asks to run that specialist alone. The CLI refuses them (exit 2) together with `--no-framework-agent`, `--research-lane-capacity 0` or `--reset-state`. Persisted in `state.json`; a `--resume-from` keeps the stored definition, so re-pass both only to replace it, or pass `--reset-state` alone to clear it. |
 | PrimaTune predictor | `--primatune-endpoint` + `--primatune-mode` | Only when the prompt names a PrimaTune service. `active` queues its proposals for benchmarking; `shadow`, the default with an endpoint, only logs them; `off` disables an endpoint the environment exports. Not persisted: a `--resume-from` relaunch needs the flags again unless the shell exports `HYPERLOOM_PREDICTOR_ENDPOINT` / `HYPERLOOM_PREDICTOR_MODE`. See `docs/reference/primatune-predictor.md`. |
-| Plug selection | `--plug-profile` / `--manifest` / `--plug SOCKET=IMPL` / `--plug-config SOCKET.KEY=VALUE` | Only when the prompt names a plug profile, manifest or implementation; otherwise pass none and the run is a plain local run. `--plug-profile` loads a built-in profile (`local`, `hosted-gpu`, `hosted-cpu`); `--manifest` (or `$HYPERLOOM_MANIFEST`) a JSON manifest laid over it; `$HYPERLOOM_MANIFEST_OVERRIDES` a JSON file over that; `--plug` and `--plug-config` (repeatable, a JSON value is read as JSON) win over all of them. A selection is written to `$SESSION_DIR/plugs.resolved.json` and a `--resume-from` reads it back first, so re-pass the flags only to change the selection. The CLI refuses (exit 2) a socket or implementation that does not exist, a malformed manifest, an unset `${VAR}` with no default, and a damaged `plugs.resolved.json`. |
+| Plug selection | `--plug-profile` / `--manifest` / `--plug SOCKET=IMPL` / `--plug-config SOCKET.KEY=VALUE` | Only when the prompt names a plug profile, manifest or implementation; otherwise pass none and the run is a plain local run. `--plug-profile` loads a built-in profile (`local`); `--manifest` (or `$HYPERLOOM_MANIFEST`) a JSON manifest laid over it; `$HYPERLOOM_MANIFEST_OVERRIDES` a JSON file over that; `--plug` and `--plug-config` (repeatable, a JSON value is read as JSON) win over all of them. A selection is written to `$SESSION_DIR/plugs.resolved.json` and a `--resume-from` reads it back first, so re-pass the flags only to change the selection. The CLI refuses (exit 2) a socket or implementation that does not exist, a malformed manifest, an unset `${VAR}` with no default, and a damaged `plugs.resolved.json`. |
 
 ### Step 2b — Optional quantization prelude (`--quantize`)
 
@@ -1486,19 +1486,6 @@ and keep the `ps` check for the optimizer PID recorded in the pidfile.
 Health checks only observe and reconcile launch metadata; they must not kill,
 restart, or automatically resume the optimizer.
 
-## Hosted Run (`hyperloom hosted run`)
-
-Not a launch you run by hand: a hosting platform starts it. `hyperloom hosted run` takes no arguments. It reads the host's inputs
-(`HYPERLOOM_INPUT_FILE` for the campaign spec `hyperloom.campaign-spec/v1`, plus `HYPERLOOM_RUN_ID`, `HYPERLOOM_RUN_CREATED_AT`,
-`HYPERLOOM_STATE_DIR` and the rest listed in `docs/reference/environment-variables.md`), removes the host-only ones from its
-environment, and runs `optimize` in the same process: `--resume-from <dir> --plug-profile <profile>` when the run's session
-directory already holds `manifest.json` and `state.json`, otherwise the spec mapped to `optimize` flags plus
-`--plug-profile <profile> --session-dir <dir>`. The directory is derived from the run, so a restart resumes the same session.
-It records the outcome in `$HYPERLOOM_STATE_DIR/exit.json`; the host restarts the run only when `final` is not true. A spec it
-refuses ends with `final: true` and return code 2. A spec with `flow: "multibranch"` is handed to `hyperloom-multibranch hosted
-run` after the same `install.sh` run as the legacy flow, with the entry's environment plus the running interpreter's bin
-directory first on `PATH`.
-
 ## Resume Existing Session
 
 `--resume-from "$SESSION_DIR"` is the only way to resume; there is no
@@ -1593,7 +1580,7 @@ The optimizer should:
   `roofline` (profile + trace_analyze + analysis.md); `--no-enable-roofline`
   switches to plain `profile`. The LLM cannot propose either —
   both names are Coordinator-managed and a proposal for either is denied with
-  `rule="coordinator_managed_action"`. Concurrent GPU work is
+  `rule="phase_incompatible"`. Concurrent GPU work is
   serialised by the lane / GPU lease rather than a policy deny, so
   explore / kernel dispatches keep flowing while analysis refreshes.
   Each analysis also stamps a decode roofline ceiling
@@ -1745,7 +1732,7 @@ Bypass with `--critic-mock` for offline / smoke runs. See
 - Repeated `trace_analyze` with unchanged trace/config: bug — reuse `last_trace_analyze`.
 - `correctness_passed=false`: do not integrate; the kernel-agent report must contain explicit correctness evidence.
 - `stop_reason=no_more_leverage`: stop and report; only resume if the user changes workload / search space / model / strategy.
-- `policy_denied` streaks (not a stop reason — nothing in the runtime stops a run over them): repeated denial of the same (action, rule) pair is advisory only — there is no auto-prune at streak ≥5 and no stop at streak ≥10. Inspect `SharedState.policy_denial_history` via the `why_denied` tool or the `=== Recent policy denials ===` block, then change something substantive (a new `params.grid` variant or a sibling action family). Do not hand-edit `state.json`.
+- Repeated `policy_denied` events (not a stop reason — nothing in the runtime reacts to them): each denial is a `policy_denied` observation in the denied agent's inbox and a `denials` row on the phase event in `session_breakdown.json`; read the rule and hint there, then change something substantive (a new `params.grid` variant or a sibling action family). Do not hand-edit `state.json`.
 - `stop_reason=time_exhausted`: resume same session (`--resume-from`); do not start fresh.
 
 ## Report Back To User

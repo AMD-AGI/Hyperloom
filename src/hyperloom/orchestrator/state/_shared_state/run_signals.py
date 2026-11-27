@@ -1,85 +1,16 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Policy denials and the session's stop reason."""
+"""The session's stop reason."""
 
 from __future__ import annotations
 
-from typing import Any
 from hyperloom_common.env import env_bool
 from hyperloom_common.timeutil import now_iso
 
 
 class _RunSignalsMixin:
-    """Records policy denials and their streak, and commits the session's stop reason."""
-
-    _POLICY_DENIAL_HISTORY_CAP = 50
-
-    def record_policy_denial(
-        self,
-        *,
-        action_name: str,
-        rule: str,
-        hint: str,
-        intent_type: str,
-        intent_payload: dict[str, Any] | None = None,
-    ) -> int:
-        """Append a PolicyGate denial row, stamped with the current tick, and bump the per-(action, rule) streak.
-
-        Records a capped rolling history entry and increments the
-        consecutive-denial counter keyed by ``"<action_name>:<rule>"``.
-
-        Args:
-            action_name (str): The action the denied intent targeted (empty
-                is normalized to ``"*"`` in the streak key).
-            rule (str): The PolicyGate rule id that fired.
-            hint (str): Human-readable remediation hint surfaced to the LLM.
-            intent_type (str): The denied intent's type.
-            intent_payload (dict[str, Any] | None): Optional intent payload;
-                when present, its sorted keys are recorded for context.
-
-        Returns:
-            int: The new consecutive-denial streak value for this
-                (action, rule) pair.
-        """
-        key = f"{action_name or '*'}:{rule}"
-        streak = int(self.policy_denial_streak.get(key, 0)) + 1
-        self.policy_denial_streak[key] = streak
-        entry = {
-            "tick": int(self.tick or 0),
-            "action_name": action_name or "",
-            "rule": rule,
-            "hint": hint or "",
-            "intent_type": intent_type,
-            "streak": streak,
-            "ts": now_iso(),
-        }
-        if intent_payload:
-            entry["intent_payload_keys"] = sorted(intent_payload.keys())
-        history = list(self.policy_denial_history or [])
-        history.append(entry)
-        if len(history) > self._POLICY_DENIAL_HISTORY_CAP:
-            history = history[-self._POLICY_DENIAL_HISTORY_CAP :]
-        self.policy_denial_history = history
-        return streak
-
-    def reset_policy_denial_streak(self, action_name: str) -> None:
-        """Clear all consecutive-denial streaks for a given action.
-
-        Drops every ``policy_denial_streak`` entry whose key begins with
-        ``"<action_name>:"`` — called when the action finally succeeds so a
-        later denial starts a fresh streak.
-
-        Args:
-            action_name (str): The action whose streaks should be reset; a
-                falsy value is a no-op.
-        """
-        if not action_name:
-            return
-        prefix = f"{action_name}:"
-        self.policy_denial_streak = {
-            k: v for k, v in (self.policy_denial_streak or {}).items() if not k.startswith(prefix)
-        }
+    """Commits the session's stop reason."""
 
     # stop_reason ENUM validator
     def set_stop_reason(

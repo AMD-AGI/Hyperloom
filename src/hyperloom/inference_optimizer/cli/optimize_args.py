@@ -8,6 +8,7 @@ from __future__ import annotations
 import argparse
 
 from hyperloom.common import predictor_config
+from hyperloom.common.concurrencies import parse_concurrencies
 from hyperloom.common.workload_defaults import DEFAULT_PRECISION
 from hyperloom_common.gpu_identity import AMD_GPU_BOARDS
 
@@ -123,6 +124,8 @@ def add_framework_arguments(opt: argparse.ArgumentParser) -> None:
 
 def add_cluster_arguments(opt: argparse.ArgumentParser) -> None:
     """Add the node-count and multi-node backend flags of ``optimize``."""
+    from ..multi_node.pd_session import SSH_BACKENDS
+
     opt.add_argument(
         "--nodes",
         type=int,
@@ -137,12 +140,14 @@ def add_cluster_arguments(opt: argparse.ArgumentParser) -> None:
     )
     opt.add_argument(
         "--mn-backend",
-        choices=("rayjob", "infera"),
+        choices=("rayjob", *SSH_BACKENDS),
         default=None,
         help="Multi-node backend when --nodes>=2: 'rayjob' (default, Ray "
-        "head+workers) or 'infera' (idle InferaDeployment + SSH control "
-        "plane). Defaults to rayjob when omitted. Single-node runs ignore "
-        "this flag.",
+        "head+workers), 'infera' (idle InferaDeployment + SSH control "
+        "plane), or 'atomesh' / 'sglangrouter' (a PD-disaggregated cluster "
+        "handed over as $HYPERLOOM_MN_NODE_LIST, launched over SSH). Defaults "
+        "to the node list's frontend, else rayjob, when omitted. Single-node "
+        "runs ignore this flag.",
     )
     opt.add_argument(
         "--gpus-per-node",
@@ -365,8 +370,8 @@ def add_run_mode_arguments(opt: argparse.ArgumentParser) -> None:
         "but exposes a text-generation path, run it on the TEXT path with "
         "a degraded-mode warning instead of fail-fasting. Image/audio "
         "inputs are ignored, so numbers reflect the text decoder alone. "
-        "True VLMs with no text path (Llava / PaliGemma / Qwen-VL / "
-        "Phi3V) still fail-fast regardless of this flag. Pass "
+        "A multimodal model with no text decoder in its config still "
+        "fail-fasts regardless of this flag. Pass "
         "--no-allow-mm-text-fallback to fail-fast on text-coercible "
         "models too. Default: enabled.",
     )
@@ -648,19 +653,11 @@ def add_conc_sweep_arguments(opt: argparse.ArgumentParser) -> None:
     opt.add_argument(
         "--conc-sweep-concs",
         dest="conc_sweep_concs",
-        type=_concurrencies,
+        type=parse_concurrencies,
         default=(),
-        help="Comma-separated concurrencies of the conc sweep for a base no InferenceX recipe gave "
-        "(a --reference-script); ignored for one that did. The session's --conc is always among them.",
+        help="Comma-separated concurrencies of the conc sweep, in place of those the base's InferenceX recipe "
+        "publishes; needed for a base no recipe gave (a --reference-script). The session's --conc is always among them.",
     )
-
-
-def _concurrencies(value: str) -> tuple[int, ...]:
-    """``C1,C2,...`` as the distinct concurrencies it names, ascending; each must be positive."""
-    concs = tuple(sorted({int(item) for item in value.split(",")}))
-    if concs[0] < 1:
-        raise argparse.ArgumentTypeError(f"concurrencies must be positive, got {value}")
-    return concs
 
 
 def add_plateau_arguments(opt: argparse.ArgumentParser) -> None:
