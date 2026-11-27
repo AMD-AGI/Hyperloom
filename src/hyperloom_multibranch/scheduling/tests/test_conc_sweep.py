@@ -38,9 +38,20 @@ AGENTX = replace(WORKLOAD, inferencex=None)
 CHOSEN = FinalCandidate("integration", "integration", "c0ffee", 130.0)
 
 
-def _settings(workload: Workload = WORKLOAD, *, parallel: int = 2, concs: tuple[int, ...] = ()) -> RunSettings:
+def _settings(
+    workload: Workload = WORKLOAD, *, parallel: int = 2, concs: tuple[int, ...] = (), sweep_parallel: int = 2
+) -> RunSettings:
+    caps = RosterCaps(4, 2, parallel)
     return RunSettings(
-        workload, 3.0, 0.0, 0.0, RosterCaps(4, 2, parallel), 60.0, conc_sweep=True, conc_sweep_concs=concs
+        workload,
+        3.0,
+        0.0,
+        0.0,
+        caps,
+        60.0,
+        conc_sweep=True,
+        conc_sweep_concs=concs,
+        conc_sweep_parallel=sweep_parallel,
     )
 
 
@@ -55,8 +66,12 @@ def _layout(tmp_path: Path, chosen: FinalCandidate | None = CHOSEN, gain_pct: fl
 
 @pytest.fixture
 def inferencex_base(monkeypatch: pytest.MonkeyPatch) -> None:
-    point = SimpleNamespace(source_concs=(4, 32))
-    launch = SimpleNamespace(source=SimpleNamespace(kind=SourceKind.INFERENCEX), point=point)
+    from inference_suite.contracts import SourcePointLaunch
+
+    point = SimpleNamespace(source_concs=(4, 32), source_launches=tuple(SourcePointLaunch(c, (), {}) for c in (4, 32)))
+    source = SimpleNamespace(kind=SourceKind.INFERENCEX, repo="InferenceX", commit="c22b4b2", entry="e", locator="l")
+    image = SimpleNamespace(run="sglang:v0.5", recipe=None)
+    launch = SimpleNamespace(source=source, point=point, image=image, args=(), env={}, golden_al=None, cards=2)
     monkeypatch.setattr(base_launch, "frozen_base", lambda _toolbox: SimpleNamespace(launch=launch))
 
 
@@ -90,11 +105,13 @@ class _Tests:
         return ()
 
 
-def _sweep(layout: SessionLayout, settings: RunSettings, tests: _Tests) -> final.ConcSweep:
+def _sweep(
+    layout: SessionLayout, settings: RunSettings, tests: _Tests, deadline_unix: float | None = None
+) -> final.ConcSweep:
     plan = final.sweep_plan(layout, settings)
     assert isinstance(plan, final.SweepPlan)
-    caps = settings.caps
-    return final.ConcSweep(plan, "root", layout, settings.workload, tests, caps.max_parallel_tests, 600.0)
+    parallel = final.sweep_tests_at_once(settings)
+    return final.ConcSweep(plan, "root", layout, settings.workload, tests, parallel, 600.0, deadline_unix)
 
 
 async def _never() -> int:
@@ -119,10 +136,16 @@ def test_a_final_that_chose_no_gaining_commit_beside_the_root_gets_no_sweep(
 def test_the_plan_sweeps_the_chosen_commit_over_the_recipes_points_with_the_workloads_conc(
     tmp_path: Path, inferencex_base: None
 ):
-    plan = final.sweep_plan(_layout(tmp_path), _settings(concs=(2,)))
+    plan = final.sweep_plan(_layout(tmp_path), _settings())
 
     assert plan == final.SweepPlan("c0ffee", SweepPoints((4, 16, 32), "inferencex"))
     assert (plan.test_points(WORKLOAD), plan.test_points(AGENTX)) == (3, 1)
+
+
+def test_the_operators_points_replace_the_recipes(tmp_path: Path, inferencex_base: None):
+    plan = final.sweep_plan(_layout(tmp_path), _settings(concs=(2,)))
+
+    assert plan == final.SweepPlan("c0ffee", SweepPoints((2, 16), "operator"))
 
 
 def test_an_inferencex_arm_is_one_sweep_test_and_both_arms_run_at_once(tmp_path: Path, inferencex_base: None):
@@ -131,9 +154,9 @@ def test_an_inferencex_arm_is_one_sweep_test_and_both_arms_run_at_once(tmp_path:
     payload = asyncio.run(_sweep(layout, _settings(), tests).run(_never()))
 
     assert sorted((r.parent_commit, r.concurrency) for r in tests.requests) == [
-        ("c0ffee", (4, 16, 32)),
-        ("root", (4, 16, 32)),
-    ]
+        ("c0ffee", (16, 4, 32)),
+        ("root", (16, 4, 32)),
+    ], "one test per arm, the workload's conc first"
     assert {r.purpose.value for r in tests.requests} == {"health"} and not any(r.accuracy for r in tests.requests)
     assert payload["status"] == "succeeded" and payload["summary"]["successful_pairs"] == 3
     assert _summary(layout)["optimized"]["commit"] == "c0ffee"
@@ -230,6 +253,7 @@ def test_a_stop_signal_takes_the_tests_back_and_keeps_what_landed(tmp_path: Path
 
     assert (payload["status"], payload["cancel_reason"]) == ("cancelled", "signal 15")
     assert tests.withdrawn == ["signal 15"]
+    assert len(tests.requests) == 2, "a test still queued for a slot is not submitted once the stop came"
     measured = [p["conc"] for arm in ("baseline", "optimized") for p in _summary(layout)[arm]["points"]]
     assert measured == [WORKLOAD.conc]
 
@@ -287,3 +311,142 @@ def test_a_new_session_sweeps_once_closed_unless_a_signal_stopped_it_or_another_
 
     assert sweeps == (roots if swept else [])
     assert SessionLayout(roots[0]).final_only_lock.is_file() is held
+
+
+class _Counting(_Tests):
+    """Records how many tests run at once, each taking one 600 s step of ``clock``."""
+
+    def __init__(self, clock: list[float] | None = None) -> None:
+        super().__init__()
+        self.running = self.peak = 0
+        self.clock = clock
+
+    async def result(self, request: TestRequest) -> TestResult:
+        self.running += 1
+        self.peak = max(self.peak, self.running)
+        await asyncio.sleep(0)
+        if self.clock is not None:
+            self.clock[0] += 600.0
+        try:
+            return await super().result(request)
+        finally:
+            self.running -= 1
+
+
+@pytest.mark.parametrize(("sweep_parallel", "parallel", "peak"), [(1, 8, 1), (2, 8, 2), (4, 8, 4), (4, 2, 2)])
+def test_the_sweep_runs_as_many_tests_at_once_as_asked_within_the_tests_allowed_pairing_each_concurrency(
+    tmp_path: Path, inferencex_base: None, sweep_parallel: int, parallel: int, peak: int
+):
+    tests = _Counting()
+    settings = _settings(AGENTX, parallel=parallel, sweep_parallel=sweep_parallel)
+
+    asyncio.run(_sweep(_layout(tmp_path), settings, tests).run(_never()))
+
+    assert tests.peak == peak
+    assert [(r.parent_commit, r.concurrency) for r in tests.requests][:2] == [("root", (16,)), ("c0ffee", (16,))]
+
+
+def test_a_point_that_would_end_past_the_deadline_is_skipped_and_not_started(
+    tmp_path: Path, inferencex_base: None, monkeypatch: pytest.MonkeyPatch
+):
+    """Each point is priced at 600 s; one test at a time, a deadline 1900 s out fits three."""
+    clock = [1000.0]
+    monkeypatch.setattr(final.time, "time", lambda: clock[0])
+    tests = _Counting(clock)
+    sweep = _sweep(_layout(tmp_path), _settings(AGENTX, sweep_parallel=1), tests, deadline_unix=2900.0)
+
+    payload = asyncio.run(sweep.run(_never()))
+
+    assert [(r.parent_commit, r.concurrency) for r in tests.requests] == [
+        ("root", (16,)),
+        ("c0ffee", (16,)),
+        ("root", (4,)),
+    ]
+    statuses = {(p["arm"], p["conc"]): p["status"] for arm in ("baseline", "optimized") for p in payload[arm]["points"]}
+    assert [key for key, status in statuses.items() if status == final.SKIPPED_BUDGET] == [
+        ("baseline", 32),
+        ("optimized", 4),
+        ("optimized", 32),
+    ]
+
+
+def _per_conc_base(monkeypatch: pytest.MonkeyPatch, by_conc: dict[int, str]) -> None:
+    from inference_suite.contracts import SourcePointLaunch
+
+    launches = tuple(SourcePointLaunch(conc, tuple(args.split()), {}) for conc, args in by_conc.items())
+    point = SimpleNamespace(source_concs=tuple(by_conc), source_launches=launches)
+    source = SimpleNamespace(kind=SourceKind.INFERENCEX, repo="InferenceX", commit="c22b4b2", entry="e", locator="l")
+    image = SimpleNamespace(run="sglang:v0.5", recipe=None)
+    args = tuple(by_conc[WORKLOAD.conc].split())
+    launch = SimpleNamespace(source=source, point=point, image=image, args=args, env={}, golden_al=None, cards=2)
+    monkeypatch.setattr(base_launch, "frozen_base", lambda _toolbox: SimpleNamespace(launch=launch))
+
+
+def test_an_inferencex_sweep_runs_one_test_per_launch_its_recipe_caps_requests_with_included(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """The recipe caps requests below the concurrency at 32 (as InferenceX's AgentX recipes do); the point still runs."""
+    by_conc = {4: "--max-running-requests 8", 16: "--max-running-requests 32", 32: "--max-running-requests 16"}
+    _per_conc_base(monkeypatch, by_conc)
+    layout, tests = _layout(tmp_path), _Tests()
+
+    plan = final.sweep_plan(layout, _settings())
+    payload = asyncio.run(_sweep(layout, _settings(), tests).run(_never()))
+
+    assert plan == final.SweepPlan("c0ffee", SweepPoints((4, 16, 32), "inferencex"), ((4,), (16,), (32,)))
+    assert sorted((r.parent_commit, r.concurrency) for r in tests.requests) == sorted(
+        (commit, (conc,)) for commit in ("root", "c0ffee") for conc in (4, 16, 32)
+    )
+    assert payload["status"] == "succeeded"
+
+
+def test_an_inferencex_sweep_tests_the_launch_group_of_the_sessions_conc_first(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    _per_conc_base(monkeypatch, {4: "--a 4", 16: "--a 16", 32: "--a 32"})
+    tests = _Tests()
+
+    asyncio.run(_sweep(_layout(tmp_path), _settings(parallel=1, sweep_parallel=1), tests).run(_never()))
+
+    assert [r.concurrency for r in tests.requests][:2] == [(16,), (16,)]
+
+
+def test_under_a_deadline_a_test_of_several_points_runs_those_that_fit_and_skips_the_rest(
+    tmp_path: Path, inferencex_base: None, monkeypatch: pytest.MonkeyPatch
+):
+    """One launch serves 4, 16 and 32; each point is priced at 600 s, and a deadline 1300 s out fits two of them."""
+    clock = [1000.0]
+    monkeypatch.setattr(final.time, "time", lambda: clock[0])
+    tests = _Tests()
+    sweep = _sweep(_layout(tmp_path), _settings(sweep_parallel=1), tests, deadline_unix=2300.0)
+
+    payload = asyncio.run(sweep.run(_never()))
+
+    assert tests.requests[0].concurrency == (16, 4), "the workload's conc first, then low to high"
+    baseline = {p["conc"]: p["status"] for p in payload["baseline"]["points"]}
+    assert baseline[32] == final.SKIPPED_BUDGET
+
+
+def test_an_inferencex_base_frozen_before_it_recorded_its_launches_is_not_swept(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    from hyperloom.orchestrator.conc_sweep.points import NO_SOURCE_LAUNCHES
+
+    point = SimpleNamespace(source_concs=(4, 32), source_launches=())
+    source = SimpleNamespace(kind=SourceKind.INFERENCEX, repo="InferenceX", commit="c22b4b2", entry="e", locator="l")
+    launch = SimpleNamespace(source=source, point=point, args=(), env={}, golden_al=None, cards=2)
+    monkeypatch.setattr(base_launch, "frozen_base", lambda _toolbox: SimpleNamespace(launch=launch))
+
+    assert final.sweep_plan(_layout(tmp_path), _settings()) == NO_SOURCE_LAUNCHES
+
+
+def test_a_frozen_base_that_no_longer_loads_refuses_the_sweep(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    from hyperloom.orchestrator.state.base_launch import BaseLaunchMismatch
+
+    def mismatch(_toolbox: Path) -> None:
+        raise BaseLaunchMismatch("digest differs")
+
+    monkeypatch.setattr(base_launch, "frozen_base", mismatch)
+
+    with pytest.raises(final.FrozenBaseUnusable, match="digest differs"):
+        final.sweep_plan(_layout(tmp_path), _settings())

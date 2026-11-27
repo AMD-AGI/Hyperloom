@@ -549,8 +549,6 @@ class DispatcherCollaborator(AdmissionMixin, DeadHolderAccountingMixin, Coordina
             )
             self._inflight_actions[task.task_id] = _InflightAction(task.kind, atask, cancel_scope)
             atask.add_done_callback(self._report_spawned_failure(task))
-            if task.kind == "specialist":
-                self.shared_state.note_specialist_dispatched(str(task.params.get("domain") or ""))
 
     @staticmethod
     def _report_spawned_failure(task: Task) -> "Callable[[asyncio.Task[Any]], None]":

@@ -221,14 +221,6 @@ def test_gate_allows_a_builtin_dispatch_with_the_generic_custom_tag():
     )
 
 
-def test_the_custom_specialist_gets_no_round_counters():
-    """Operator-defined domains are per session, so the stalled-domain bookkeeping never counts them."""
-    state = SharedState()
-    state.bump_domain_round_counters()
-    assert "custom_specialist" not in state.rounds_since_last_specialist
-    assert "custom_specialist" not in state.rounds_since_last_keep
-
-
 # CLI
 def _ns(**kw: Any) -> argparse.Namespace:
     base = {
@@ -356,19 +348,13 @@ def custom_coord(tmp_path: Path, monkeypatch):
     source_root = tmp_path / "framework"
     (source_root / ".git").mkdir(parents=True)
     c.shared_state.framework_repo_path = str(source_root)
-    c.tasks = SimpleNamespace(
-        queued=AsyncMock(return_value=[]),
-        running=AsyncMock(return_value=[]),
-        find_by_idempotency_key=AsyncMock(return_value=None),
-    )
+    c.tasks = SimpleNamespace(find_by_idempotency_key=AsyncMock(return_value=None))
     c.bus = SimpleNamespace(record_observation=AsyncMock())
     monkeypatch.setattr(
         SpecialistDispatchCollaborator,
         "warm_specialist_params",
         AsyncMock(side_effect=lambda params: params.setdefault("framework", "sglang")),
     )
-    # The stand-in admits; the admission gates are driven in test_stalled_domain_force_admission.py.
-    c.dispatcher.admission_denial_for_action = lambda *_args, **_kwargs: None  # type: ignore[method-assign]
     c.router.handle_delegate = AsyncMock()  # type: ignore[assignment]
     c.router.handle_intent = AsyncMock()  # type: ignore[assignment]
     return c
@@ -424,17 +410,6 @@ async def test_dispatch_key_names_the_cycle_and_the_definition(custom_coord):
 
     _, key = _dispatched(custom_coord)
     assert key == _custom_key(2, "other focus")
-
-
-async def test_a_task_that_only_borrows_the_custom_tag_does_not_hold_the_dispatch_back(custom_coord):
-    custom_coord.tasks.queued.return_value = [
-        SimpleNamespace(kind="specialist", params={"domain": "serving_specialist", "tags": ["custom_specialist"]})
-    ]
-
-    await custom_coord.specialist_dispatch.ensure_custom_specialist()
-
-    _, key = _dispatched(custom_coord)
-    assert key == _custom_key()
 
 
 @pytest.mark.parametrize(("prompt", "phase"), [("", "FRAMEWORK_AGENT"), (_PROMPT, "ENABLEMENT")])
@@ -534,25 +509,6 @@ async def test_a_refused_custom_dispatch_is_requested_once_per_cycle(tmp_path, m
     assert [cycle for cycle, _ in denials] == [0, 1]
     assert await coord.tasks.queued() == []
     assert coord.specialist_dispatch.refused_custom_key == _custom_key(1)
-
-
-async def test_stalled_domain_force_ignores_a_custom_hinted_gap_when_not_configured(custom_coord):
-    state = custom_coord.shared_state
-    state.custom_specialist_prompt = ""
-    state.upsert_gap({"canonical_id": "gap.hint", "domain_hint": "custom", "severity": "high"})
-    state.upsert_gap({"canonical_id": "gap.serving", "domain_hint": "serving_specialist", "severity": "low"})
-    for _ in range(50):
-        state.bump_domain_round_counters()
-
-    await custom_coord.specialist_dispatch.maybe_force_stalled_domain_specialist()
-
-    custom_coord.router.handle_intent.assert_awaited_once()
-    params = custom_coord.router.handle_intent.call_args.args[1].payload["params"]
-    assert (params["domain"], params["tags"], params["gap_canonical_id"]) == (
-        "serving_specialist",
-        ["framework"],
-        "gap.serving",
-    )
 
 
 # Dispatch order
@@ -911,7 +867,7 @@ def _recorder(calls: list[str]):
     ("only", "expected"),
     [
         (True, ["custom", "bench", "finish"]),
-        (False, ["framework", "bench", "scout", "recon", "stalled", "custom", "predictor"]),
+        (False, ["framework", "bench", "scout", "recon", "custom", "predictor"]),
     ],
 )
 async def test_only_mode_tick_runs_the_custom_work_alone(monkeypatch, only, expected):
@@ -931,9 +887,7 @@ async def test_only_mode_tick_runs_the_custom_work_alone(monkeypatch, only, expe
             maybe_enqueue_explore_research_scout=_rec("scout"),
             maybe_enqueue_config_plateau_static_recon=_rec("recon"),
         ),
-        specialist_dispatch=SimpleNamespace(
-            maybe_force_stalled_domain_specialist=_rec("stalled"), ensure_custom_specialist=_rec("custom")
-        ),
+        specialist_dispatch=SimpleNamespace(ensure_custom_specialist=_rec("custom")),
         record_exception=lambda **kwargs: pytest.fail(f"the tick raised: {kwargs}"),
     )
 

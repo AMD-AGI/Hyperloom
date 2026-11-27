@@ -34,9 +34,6 @@ class IntegrateAttempt:
     done_payload: dict[str, Any] | None = field(default_factory=dict)
     provision_result: ProvisionResult | None = None
     stack_action: EnablementStackAction | None = None
-    localization_action: EnablementStackAction | None = None
-    localization_patches: list[Path] = field(default_factory=list)
-    localization_touched: list[str] = field(default_factory=list)
     base_sha_by_root: dict[str, str] = field(default_factory=dict)
     output_root: Path | None = None
     framework_root: Path | None = None
@@ -55,16 +52,10 @@ class IntegrateAttempt:
     #: The build of the framework server from the applied tree, in a session that builds it from source.
     native_build: TreeBuild | None = None
 
-    def drop_localization(self) -> None:
-        """Forget the localization, so its manifest is not recorded for a change that was never applied."""
-        self.localization_action = None
-        self.localization_patches = []
-        self.localization_touched = []
-
     @property
     def changes_framework(self) -> bool:
-        """Whether this attempt put changed framework code where its server imports from: a patch (the localization
-        among them) or an artifact landed in the tree, or a setup command installed into the runtime."""
+        """Whether this attempt put changed framework code where its server imports from: a patch
+        or an artifact landed in the tree, or a setup command installed into the runtime."""
         return bool(self.applied or self.applied_artifacts or self.setup_commands_applied)
 
     @property

@@ -121,7 +121,6 @@ async def _noop_phase_side_effects(c):
         return None
 
     c.phase_internal.maybe_enqueue_explore_research_scout = _noop  # type: ignore[method-assign]
-    c.specialist_dispatch.maybe_force_stalled_domain_specialist = _noop  # type: ignore[method-assign]
     c.phase_internal.maybe_enqueue_trajectory_reviewer = _noop  # type: ignore[method-assign]
 
 

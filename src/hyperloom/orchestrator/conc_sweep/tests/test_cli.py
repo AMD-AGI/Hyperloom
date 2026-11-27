@@ -33,7 +33,7 @@ def test_a_standalone_sweep_resolves_its_rounds_to_its_own_session(
 ) -> None:
     resolved: list[Path] = []
 
-    async def run_conc_sweep(path: Path) -> dict[str, Any]:
+    async def run_conc_sweep(path: Path, **_: Any) -> dict[str, Any]:
         resolved.append(_resolve_session_dir())
         return {"status": "succeeded"}
 
@@ -48,7 +48,7 @@ def test_a_standalone_sweep_resolves_its_rounds_to_its_own_session(
 def test_a_relative_session_dir_is_pinned_as_an_absolute_one(
     session_dir: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    async def run_conc_sweep(path: Path) -> dict[str, Any]:
+    async def run_conc_sweep(path: Path, **_: Any) -> dict[str, Any]:
         return {"status": "succeeded"}
 
     monkeypatch.setattr(cli, "run_conc_sweep", run_conc_sweep)
@@ -65,7 +65,7 @@ def test_the_session_is_packaged_again_once_the_report_is_written(
 ) -> None:
     events: list[tuple[str, ...]] = []
 
-    async def run_conc_sweep(path: Path) -> dict[str, Any]:
+    async def run_conc_sweep(path: Path, **_: Any) -> dict[str, Any]:
         events.append(("sweep",))
         return {"status": "succeeded"}
 
@@ -79,3 +79,18 @@ def test_the_session_is_packaged_again_once_the_report_is_written(
     asyncio.run(cli.sweep_session(session_dir))
 
     assert events == [("sweep",), ("package", str(session_dir), "abcd1234")]
+
+
+def test_the_command_sweeps_the_operators_points(session_dir: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    calls: list[dict[str, Any]] = []
+
+    async def run_conc_sweep(path: Path, **kwargs: Any) -> dict[str, Any]:
+        calls.append(kwargs)
+        return {"status": "succeeded"}
+
+    monkeypatch.setattr(cli, "run_conc_sweep", run_conc_sweep)
+    monkeypatch.setattr(cli, "package_session_artifacts", lambda *_, **__: None)
+
+    assert cli.main([str(session_dir), "--conc-sweep-concs", "8,2"]) == 0
+
+    assert calls == [{"concs": (2, 8)}]

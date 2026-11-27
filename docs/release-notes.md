@@ -67,6 +67,11 @@ it.
   `reflection.analysis_report` and the decision label `ORCHESTRATION_ERROR`,
   so Experiences collected from here on carry a new `schema_ref`; those
   already in a KB keep theirs.
+- **The DeepSeek Harness reaches the gateway through the `llm-pi-ai` route.**
+  The `deepseek-official` adapter rejected the `redacted_thinking` blocks a
+  gateway returns with `UNSUPPORTED_CONTENT`; the `anthropic-messages` route
+  keeps and replays them. With `HYPERLOOM_DSH_MAX_TOKENS` unset, a request's
+  output cap is now 128000, the `llm-pi-ai` default; it was 256000.
 - **A hosted multi-branch run sets the AgentX window and the server boot
   budget.** The campaign spec's `multibranch` block takes
   `agentx_duration_sec` and `agentx_objective` (for `workload: agentx` only),

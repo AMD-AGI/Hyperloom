@@ -154,7 +154,6 @@ def test_an_interpreter_without_torch_fails_before_pip(tmp_path):
 
 def _wheel_action() -> EnablementStackAction:
     return EnablementStackAction(
-        kind="runtime_candidate",
         framework="vllm",
         gap_id="gap.enablement.missing_model_arch",
         capability="deepseek_v4",
@@ -333,3 +332,18 @@ def test_an_expected_probe_or_venv_failure_is_absorbed(tmp_path, monkeypatch, si
 def test_an_unexpected_probe_or_venv_failure_propagates(tmp_path, monkeypatch, site):
     with pytest.raises(TypeError, match="unexpected failure"):
         _outcome(site, TypeError("unexpected failure"), tmp_path, monkeypatch)
+
+
+@pytest.mark.parametrize(
+    ("framework", "layout", "import_root"),
+    [
+        ("sglang", "python/sglang", "python"),
+        ("vllm", "vllm", ""),
+        ("atom", "atom", ""),
+    ],
+)
+def test_the_import_root_is_the_directory_above_the_package(tmp_path, framework, layout, import_root):
+    adapter = get_adapter(framework)
+    assert adapter.source_import_root(str(tmp_path)) == ""
+    (tmp_path / layout).mkdir(parents=True)
+    assert adapter.source_import_root(str(tmp_path)) == import_root
