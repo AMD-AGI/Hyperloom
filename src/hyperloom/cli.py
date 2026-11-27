@@ -21,6 +21,7 @@ _COMMANDS: dict[str, tuple[str, tuple[str, ...], str]] = {
         (),
         "Sweep a finished session's baseline and optimized launch over CONC",
     ),
+    "inspect": (f"{_IO}.cli", ("inspect",), "Serve a read-only web view of a live or finished session"),
     "quantize": ("hyperloom.agents.quantization.cli", (), "Quantize a model with AMD Quark"),
     "multi-node": (f"{_IO}.multi_node.cli", (), "Operate the multi-node cluster of a session"),
     "hosted": ("hyperloom.hosted.entry", (), "Run a campaign that a hosting platform handed over ('hosted run')"),

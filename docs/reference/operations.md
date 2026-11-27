@@ -231,7 +231,8 @@ with `QUANTIZATION_SKIPPED:`.
 ## Observability
 
 Hyperloom does not ship a metrics endpoint of its own; observability
-is JSONL-on-disk + (optional) downstream collectors.
+is JSONL-on-disk + (optional) downstream collectors, plus the read-only
+[Inspector](#inspector) web view for a live or finished session.
 
 | Signal                         | File / location                                                                  | Format          |
 |--------------------------------|----------------------------------------------------------------------------------|-----------------|
@@ -245,6 +246,18 @@ Recommended pipeline: `vector` / `fluentbit` tailing the JSONL files
 and forwarding to your observability stack of choice (Datadog, Loki,
 Elastic, …). `session_breakdown.json` is the highest-signal artefact —
 ingest it whole on session end.
+
+### Inspector
+
+The Inspector is a read-only web view of a live or finished session: run information, every artifact with a
+diff, and replay. It only reads files, so it is safe
+next to a running optimizer:
+
+```bash
+python3 -m hyperloom inspect --session-dir "$SESSION_DIR"
+```
+
+How to run it (in a pod too) and what it shows is in the [Inspector](../inspector/README.md) reference.
 
 ---
 

@@ -49,6 +49,7 @@ from hyperloom_common.llm.llm_config import (
     DEFAULT_CLAUDE_MODEL,
     DEFAULT_CODEX_MODEL,
 )
+from hyperloom.inspector.cli import add_inspect_arguments
 
 #: Fallback wall-clock budget. Named because ``--resume-from`` reads it back as
 #: the "operator did not set this" signal: unlike the target flags, this one has
@@ -513,5 +514,13 @@ def _build_parser() -> argparse.ArgumentParser:
 
     add_session_dir_argument(opt)
     add_recover_subparser(sub, common)
+
+    insp = sub.add_parser(
+        "inspect",
+        parents=[common],
+        help="Serve a read-only web view (run info, artifacts) of a live or "
+        "finished session. Never writes into the session directory.",
+    )
+    add_inspect_arguments(insp)
 
     return p
