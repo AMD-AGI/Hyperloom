@@ -41,8 +41,8 @@ __all__ = [
     "SandboxUnavailable",
 ]
 
-#: Which key a caller uses: a measurement runner, a sub-run, or a dev sandbox.
-Role = Literal["measurement", "subrun", "dev"]
+#: Which key a caller uses: a measurement runner or a dev sandbox.
+Role = Literal["measurement", "dev"]
 
 #: Metadata the caller writes.
 IDEMPOTENCY_KEY = "agent-sandbox.io/idempotency-key"

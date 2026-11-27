@@ -53,6 +53,11 @@ it.
   refuses the run; they are still removed from the environment before any
   child process starts. Results are archived on the shared storage, as
   before: archiving to `s3://` was never implemented.
+- **The sandbox socket's `Role` is `measurement` or `dev`.** The `subrun`
+  role is gone from `hyperloom.sandbox.socket.Role`, so a local template
+  declared with it is refused. No Hyperloom code ever created a sub-run
+  sandbox; a host may still list a `subrun` role in
+  `HYPERLOOM_SANDBOX_TEMPLATES`, which a hosted run ignores as before.
 - **`hyperloom session report` is removed.** The command rendered a
   `session_breakdown.json` as Markdown (`session_report.md`), optionally with
   an LLM-written summary. It ran only by hand: no session wrote

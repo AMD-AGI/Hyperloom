@@ -29,7 +29,6 @@ def standin(e2b_envd: Path, tmp_path_factory: pytest.TempPathFactory) -> Iterato
     """One stand-in for the whole session, with a template per role and one that starts a command."""
     templates = [
         StandInTemplate("dev", "dev"),
-        StandInTemplate("sub", "subrun"),
         StandInTemplate(
             "sealed", "measurement", sealed=True, start=("/bin/sh", "-c", "echo ready > /out/started; sleep 600")
         ),

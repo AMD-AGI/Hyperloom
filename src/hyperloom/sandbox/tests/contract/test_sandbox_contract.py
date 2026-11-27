@@ -123,9 +123,9 @@ def test_a_key_only_sees_its_own_sandboxes(harness) -> None:
     sb = _create(harness, harness.dev_template, "dev", metadata={"hyperloom.purpose": "p"})
     assert harness.provider.connect(sb.sandbox_id, role="dev").sandbox_id == sb.sandbox_id
     with pytest.raises(SandboxGone):
-        harness.provider.connect(sb.sandbox_id, role="subrun")
+        harness.provider.connect(sb.sandbox_id, role="measurement")
     assert [i.sandbox_id for i in harness.provider.find({"hyperloom.purpose": "p"}, role="dev")] == [sb.sandbox_id]
-    assert harness.provider.find({"hyperloom.purpose": "p"}, role="subrun") == []
+    assert harness.provider.find({"hyperloom.purpose": "p"}, role="measurement") == []
     assert harness.provider.find({"hyperloom.purpose": "other"}, role="dev") == []
 
 

@@ -79,8 +79,8 @@ class ProcessUsers:
     processes of a kind no account is named for.
 
     ``launcher_python`` must be executable by ``sealed_user`` / ``unsealed_user`` when those are set. ``sealed_user``
-    is the optional ``(uid, gid)`` that sealed sandboxes' processes run as, ``unsealed_user`` the one for dev and
-    sub-run sandboxes. ``plan`` is what those of a kind with neither read when they are confined
+    is the optional ``(uid, gid)`` that sealed sandboxes' processes run as, ``unsealed_user`` the one for dev
+    sandboxes. ``plan`` is what those of a kind with neither read when they are confined
     (:class:`~hyperloom.sandbox.confined.RunnerPlan`); without one nothing is confined.
     """
 

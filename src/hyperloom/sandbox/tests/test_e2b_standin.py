@@ -138,9 +138,9 @@ def test_keys_templates_and_sealed_environment_are_enforced(standin: StandIn) ->
     sandbox = provider.create("dev", role="dev", timeout_sec=60, metadata={"who": "dev"})
     assert provider.connect(sandbox.sandbox_id, role="dev").sandbox_id == sandbox.sandbox_id
     with pytest.raises(SandboxGone):
-        provider.connect(sandbox.sandbox_id, role="subrun")
-    assert provider.find({"who": "dev"}, role="subrun") == []
-    for template, role in (("sub", "dev"), ("dev", "measurement"), ("nope", "dev")):
+        provider.connect(sandbox.sandbox_id, role="measurement")
+    assert provider.find({"who": "dev"}, role="measurement") == []
+    for template, role in (("sealed", "dev"), ("dev", "measurement"), ("nope", "dev")):
         with pytest.raises(SandboxDenied):
             provider.create(template, role=role, timeout_sec=60, metadata={})
     with pytest.raises(SandboxDenied):

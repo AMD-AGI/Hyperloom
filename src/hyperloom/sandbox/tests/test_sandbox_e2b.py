@@ -587,11 +587,12 @@ def test_find_pages_through_the_listing_and_filters_running_sandboxes(
     assert second.query["nextToken"] == ["t2"]
 
 
-def test_a_role_without_a_key_is_denied_before_any_request(service: _Service, provider: E2BSandboxProvider) -> None:
-    with pytest.raises(SandboxDenied, match="subrun"):
-        provider.create("dev", role="subrun", timeout_sec=60, metadata={})
+def test_a_role_without_a_key_is_denied_before_any_request(service: _Service) -> None:
+    provider = E2BSandboxProvider({"dev": KEY_DEV}, api_url=service.url, sandbox_url=service.url, retry=FAST)
+    with pytest.raises(SandboxDenied, match="measurement"):
+        provider.create("dev", role="measurement", timeout_sec=60, metadata={})
     with pytest.raises(SandboxDenied):
-        provider.find({}, role="subrun")
+        provider.find({}, role="measurement")
     assert service.seen == []
 
 
