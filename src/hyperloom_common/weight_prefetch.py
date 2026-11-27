@@ -95,8 +95,6 @@ _POLL_INTERVAL_SEC = 1.0
 #: second (measured on DeepSeek V4: half of one 94.6 GiB file of 230 GiB read, over about a minute), never most of it.
 _COLLAPSE_SHARE = 0.75
 _COLLAPSE_WINDOW_SEC = 10.0
-#: Below this much cached, a loss is not looked at: too little for a drop to matter, or to tell it from reclaim.
-_MIN_COLLAPSE = 16 * _GIB
 #: How long after a drop the next pass starts: every rank drops the cache, each a moment after the other.
 _COLLAPSE_PAUSE_SEC = 5.0
 #: How many times the checkpoint is read again after a drop. SGLang's engram host table drops it once before it
@@ -116,6 +114,8 @@ _MARGIN_FLOOR = 16 * _GIB
 _MARGIN_SHARE = 10
 #: Below this much headroom the reads would not cover enough of a checkpoint to matter.
 _MIN_BUDGET = _MARGIN_FLOOR // 2  # 8 GiB
+#: Below this much cached, a loss is not looked at: too little for a drop to matter, or to tell it from reclaim.
+_MIN_COLLAPSE = _MARGIN_FLOOR  # 16 GiB
 #: How much of a file one ``mincore`` call maps, so its page vector stays small.
 _RESIDENCY_WINDOW = _GIB
 #: How long :meth:`WeightPrefetch.stop` waits for the reads to end.
