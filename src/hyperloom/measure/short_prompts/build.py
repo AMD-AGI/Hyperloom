@@ -29,9 +29,8 @@ _TOKENIZER_FILES = (
     "merges.txt",
     "special_tokens_map.json",
 )
-_DEFAULT_SEED = 20261024
 #: The seed a set is built with when none is given: the set a host finds for a model without being told its key.
-DEFAULT_SEED = _DEFAULT_SEED
+DEFAULT_SEED = 20261024
 _CHUNK = 1 << 20
 
 
@@ -51,7 +50,8 @@ def tokenizer_hashes(model_dir: Path) -> dict[str, str]:
     return found
 
 
-def _huggingface_encoder(model_dir: Path) -> Callable[[str], Sequence[int]]:
+def huggingface_encoder(model_dir: Path) -> Callable[[str], Sequence[int]]:
+    """The encoder of a model directory's tokenizer, for the builders of every prompt set."""
     try:
         from transformers import AutoTokenizer  # a builder-host dependency; the sandbox never imports this module
     except ImportError as exc:
@@ -60,21 +60,17 @@ def _huggingface_encoder(model_dir: Path) -> Callable[[str], Sequence[int]]:
     return lambda text: tokenizer.encode(text, add_special_tokens=False)
 
 
-#: The encoder of a model directory's tokenizer, for the builders of other prompt sets.
-huggingface_encoder = _huggingface_encoder
-
-
 def build_entry(
     model_dir: Path,
     cache: Path,
     *,
-    seed: int = _DEFAULT_SEED,
+    seed: int = DEFAULT_SEED,
     encode: Callable[[str], Sequence[int]] | None = None,
 ) -> StagedEntry:
     """Build the prompts for the tokenizer in ``model_dir`` and stage them in ``cache``; ``encode`` replaces the
     Hugging Face tokenizer (a test's)."""
     inputs = {"seed": seed, "tokenizer": tokenizer_hashes(model_dir)}
-    prompts = build_prompts(encode or _huggingface_encoder(model_dir), seed=seed)
+    prompts = build_prompts(encode or huggingface_encoder(model_dir), seed=seed)
     return stage_entry(cache, prompts, inputs)
 
 
@@ -82,7 +78,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="python -m hyperloom.measure.short_prompts.build", description=__doc__)
     parser.add_argument("--model", type=Path, required=True, help="the model directory (its tokenizer files)")
     parser.add_argument("--cache", type=Path, required=True, help="the runner cache directory to stage into")
-    parser.add_argument("--seed", type=int, default=_DEFAULT_SEED)
+    parser.add_argument("--seed", type=int, default=DEFAULT_SEED)
     arguments = parser.parse_args(argv)
     try:
         entry = build_entry(arguments.model, arguments.cache, seed=arguments.seed)

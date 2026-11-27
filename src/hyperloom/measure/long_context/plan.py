@@ -15,7 +15,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from hyperloom.measure.docs import SHA256_RE, DocumentError, Reader
-from hyperloom.measure.short_prompts.plan import KEY_RE
+from hyperloom.measure.short_prompts.plan import KEY_RE, MAX_TRIGGER_LINES, trigger_line
 
 __all__ = [
     "DEFAULT_CONCURRENCY",
@@ -46,14 +46,6 @@ MAX_LENGTH = 1 << 21
 #: change to it is another set (it is in the entry's key) and the check's record states it.
 LENGTH_BOUND = 131072
 _MAX_CONCURRENCY = 64
-_MAX_TRIGGER_LINES = 32
-_MAX_TRIGGER_CHARS = 200
-
-
-def _trigger_line(value: Any, path: str) -> str:
-    if not isinstance(value, str) or not value.strip() or len(value) > _MAX_TRIGGER_CHARS:
-        raise DocumentError(f"{path}: expected a non-empty string of at most {_MAX_TRIGGER_CHARS} characters")
-    return value
 
 
 def _in_range(value: object, low: int, high: int) -> bool:
@@ -91,10 +83,10 @@ class LongContextPlan:
             raise DocumentError(f"long context: concurrency must be 1 to {_MAX_CONCURRENCY}")
         if not math.isfinite(self.phase_cap_sec) or self.phase_cap_sec < 1:  # what :meth:`parse` reads back
             raise DocumentError("long context: phase_cap_sec must be a number of at least 1")
-        if len(self.trigger) > _MAX_TRIGGER_LINES:
-            raise DocumentError(f"long context: at most {_MAX_TRIGGER_LINES} trigger lines")
+        if len(self.trigger) > MAX_TRIGGER_LINES:
+            raise DocumentError(f"long context: at most {MAX_TRIGGER_LINES} trigger lines")
         for index, line in enumerate(self.trigger):
-            _trigger_line(line, f"long context: trigger[{index}]")
+            trigger_line(line, f"long context: trigger[{index}]")
         if self.bound is not None and not _in_range(self.bound, MIN_LENGTH, MAX_LENGTH):
             raise DocumentError(f"long context: bound must be {MIN_LENGTH} to {MAX_LENGTH}, got {self.bound!r}")
 
@@ -124,7 +116,7 @@ class LongContextPlan:
             max_new_tokens=r.integer("max_new_tokens", minimum=1) or 1,
             concurrency=r.integer("concurrency", minimum=1) or 1,
             phase_cap_sec=r.number("phase_cap_sec", minimum=1) or 1.0,
-            trigger=r.sequence("trigger", _trigger_line),
+            trigger=r.sequence("trigger", trigger_line),
         )
         r.done()
         return plan

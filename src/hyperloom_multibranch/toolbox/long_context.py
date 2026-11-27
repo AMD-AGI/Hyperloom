@@ -58,7 +58,8 @@ from hyperloom.inference_optimizer.model_config_utils import load_model_max_posi
 from hyperloom.measure.long_context.build import build_entry, entry_inputs, set_length
 from hyperloom.measure.long_context.grade import passes
 from hyperloom.measure.long_context.held import served_by
-from hyperloom.measure.long_context.outputs import OutputsError, OutputsFile, PromptEntry, clean_reason, read_outputs
+from hyperloom.measure.long_context.outputs import OutputsError, OutputsFile, PromptEntry, read_outputs
+from hyperloom.measure.short_prompts.outputs import clean_reason
 from hyperloom.measure.long_context.plan import LONG_CONTEXT_DIR, OUTPUTS_FILE, LongContextPlan
 from hyperloom.measure.long_context.prompts import GENERATOR, PromptSetError
 from hyperloom.measure.long_context.resolve import StagedSet, staged_set

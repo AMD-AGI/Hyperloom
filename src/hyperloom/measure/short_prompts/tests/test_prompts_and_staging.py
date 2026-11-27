@@ -255,7 +255,7 @@ def test_the_builder_command_prints_the_two_values_a_plan_names(tmp_path, monkey
     model = tmp_path / "model"
     model.mkdir()
     (model / "tokenizer.json").write_text("{}")
-    monkeypatch.setattr(build, "_huggingface_encoder", lambda directory: encode)
+    monkeypatch.setattr(build, "huggingface_encoder", lambda directory: encode)
 
     code = build.main(["--model", str(model), "--cache", str(tmp_path / "cache")])
 
