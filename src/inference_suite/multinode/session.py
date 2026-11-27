@@ -20,21 +20,19 @@ from inference_suite.contracts.base_launch import (
     SourceKind,
     Topology,
 )
-from inference_suite.frameworks import Framework
+from inference_suite.frameworks import framework_facts
 from inference_suite.multinode.inferencex import CHECKOUT_DIRECTORIES
 from inference_suite.multinode.launch import Cluster
 from inference_suite.multinode.nodes import NodeList, NodeListError, RoleTopology
 from inference_suite.multinode.recipe import ResolveInputs, resolve
-from inference_suite.multinode.record import PdLaunch, PdMode, PdSourceKind, Role, read_record
+from inference_suite.multinode.record import PdLaunch, PdMode, PdSourceKind, Role
 from inference_suite.multinode.ssh import SshClient
 from inference_suite.pins import INFERENCEX_CLIENT_COMMIT, INFERENCEX_TOOL
 from inference_suite.recipe.image_version import NO_RECIPE_IMAGE
 from inference_suite.recipe.inferencex import INFERENCEX_REPO
-from inference_suite.recipe.model import ATOM_ENTRYPOINT, SGLANG_ENTRYPOINT, VLLM_ENTRYPOINT
 from inference_suite.recipe.resolve import Miss, resolve_base
 from inference_suite.recipe.sources import Checkout, checkout_commit, checkout_main, fetch_sources
 
-_ENTRYPOINTS = {Framework.SGLANG: SGLANG_ENTRYPOINT, Framework.VLLM: VLLM_ENTRYPOINT, Framework.ATOM: ATOM_ENTRYPOINT}
 #: The PD sources an operator wrote; every other one is read from a table or recipe tree.
 _OPERATOR_SOURCES = frozenset({PdSourceKind.OPERATOR, PdSourceKind.REPLAY})
 
@@ -88,7 +86,7 @@ def client_base(launch: PdLaunch, session: LaunchQuery) -> BaseLaunch:
         point=LaunchPoint(conc=session.concurrencies[0], exact=True),
         image=NO_RECIPE_IMAGE,
         framework=launch.framework.value,
-        entrypoint=_ENTRYPOINTS[launch.framework],
+        entrypoint=framework_facts(launch.framework).server_command.entrypoint,
         model=LaunchModel(session.model_id, launch.model),
         topology=Topology(tp=role.tp, ep=role.ep),
         args=(),
@@ -110,15 +108,14 @@ def cluster_of(nodes: NodeList, record: Path) -> Cluster:
     return Cluster(nodes=nodes, client=SshClient(nodes.ssh, known))
 
 
-def placed_launch(nodes: NodeList, record: Path) -> PdLaunch:
-    """The launch at ``record`` on the node list's hosts.
+def placed_launch(nodes: NodeList, launch: PdLaunch) -> PdLaunch:
+    """``launch`` on the node list's hosts.
 
     Raises:
         NodeListError: the launch is of another mode than the node list's cluster.
     """
-    launch = read_record(record)
     if launch.mode is not nodes.mode:
-        raise NodeListError(f"the launch at {record} is {launch.mode.value}, the node list {nodes.mode.value}")
+        raise NodeListError(f"the launch {launch.digest()} is {launch.mode.value}, the node list {nodes.mode.value}")
     return launch.with_hosts(nodes.role_hosts(), nodes.router)
 
 

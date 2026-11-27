@@ -72,23 +72,19 @@ def test_start_runs_on_the_node_list_hosts_and_records_what_ran(record, monkeypa
     assert capsys.readouterr().out.strip() == ran.digest()
 
 
-def test_restart_passes_role_overrides(record, monkeypatch):
-    seen = {}
-    monkeypatch.setattr(cli, "restart", lambda launch, overrides, cluster, options: seen.update(o=overrides) or launch)
-    assert main(["multinode", "restart", "--record", str(record), "--decode-args", "--b '2 3'"]) == 0
-    assert seen["o"] == {"decode": ["--b", "2 3"]}
-
-
-def test_restart_keeps_the_frozen_record_and_writes_what_ran_beside_it(record, monkeypatch):
+def test_restart_passes_role_overrides_and_writes_what_ran_beside_the_frozen_record(record, monkeypatch):
     frozen = record.read_bytes()
+    seen = {}
 
     def fake_restart(launch, overrides, cluster, options):
-        return launch.with_roles({Role.DECODE: replace(launch.role(Role.DECODE), args=("--b", "2"))})
+        seen.update(o=overrides)
+        return launch.with_roles({Role.DECODE: replace(launch.role(Role.DECODE), args=("--b", "2 3"))})
 
     monkeypatch.setattr(cli, "restart", fake_restart)
-    assert main(["multinode", "restart", "--record", str(record), "--decode-args", "--b 2"]) == 0
+    assert main(["multinode", "restart", "--record", str(record), "--decode-args", "--b '2 3'"]) == 0
+    assert seen["o"] == {"decode": ["--b", "2 3"]}
     assert record.read_bytes() == frozen
-    assert read_record(record.with_name(RAN_RECORD_NAME)).role(Role.DECODE).args == ("--b", "2")
+    assert read_record(record.with_name(RAN_RECORD_NAME)).role(Role.DECODE).args == ("--b", "2 3")
 
 
 def test_a_cluster_that_does_not_come_up_exits_1(record, monkeypatch):

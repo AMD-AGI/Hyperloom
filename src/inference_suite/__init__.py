@@ -63,6 +63,7 @@ from inference_suite.recipe.sources import (
 )
 from inference_suite.recipe.user_file import UserFile, UserFileError, parse_user_file
 from inference_suite.load.scriptable import scriptable_base
+from inference_suite.profile.inject import SGLANG_PROFILER_DIR_ENV
 from inference_suite.run import RoundResult, run_round
 from inference_suite.runtime.process import PidfileError
 from inference_suite.runtime.server import stop
@@ -100,6 +101,7 @@ __all__ = [
     "PidfileError",
     "RoundResult",
     "RunDirError",
+    "SGLANG_PROFILER_DIR_ENV",
     "SourceFetchError",
     "SourceSnapshot",
     "StagingError",
