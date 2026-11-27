@@ -156,6 +156,39 @@ async def test_phase_transition_cancels_queued_specialist(cyclic_coordinator):
 
 
 @pytest.mark.asyncio
+async def test_a_phase_transition_reaches_the_agent_through_the_phase_block_not_the_bus(cyclic_coordinator):
+    """The boundary is state the next prompt renders: the bus keeps only the tasks the transition dropped."""
+    from hyperloom.orchestrator.phases import phase_transitions
+
+    c = cyclic_coordinator
+    await _noop_phase_side_effects(c)
+    _arm_explore_to_cycle_end(c.shared_state)
+    queued, _ = await c.tasks.create_or_return_existing(
+        TaskSpec(kind="specialist", params={"needs_gpu": True}, idempotency_key="queued-specialist"),
+    )
+
+    await c.phase_machine.advance_phase_if_needed()
+
+    reason = c.shared_state.phase_history[-1]["reason"]
+    assert reason
+    rows = [(m.topic, m.payload.get("kind")) for m in await c.bus.tail(n=50)]
+    assert ("event", "phase_transition") not in rows
+    dropped = [m.payload for m in await c.bus.tail(topic="observation") if m.payload.get("kind")]
+    assert [(p["kind"], p["cancelled_task_ids"]) for p in dropped if "cancelled_task_ids" in p] == [
+        ("tasks_cancelled_on_phase_transition", [queued.task_id])
+    ]
+    entered = next(
+        line
+        for line in phase_transitions.phase_status_summary(c.shared_state).splitlines()
+        if line.startswith("entered")
+    )
+    assert entered.endswith(f" reason={reason}")
+    # A marker row written inside the phase does not replace the reason the phase was entered for.
+    ps.append_phase_history_event(c.shared_state, reason="in_phase_marker")
+    assert f" reason={reason}" in phase_transitions.phase_status_summary(c.shared_state)
+
+
+@pytest.mark.asyncio
 async def test_phase_transition_waits_for_a_running_specialist(cyclic_coordinator):
     c = cyclic_coordinator
     await _noop_phase_side_effects(c)

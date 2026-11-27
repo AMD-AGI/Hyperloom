@@ -284,6 +284,14 @@ def phase_started_unix(state: Any) -> float:
         return 0.0
 
 
+def phase_entry_reason(state: Any) -> str:
+    """Why the session entered its current phase: the reason on the newest ``phase_history`` row that changed phase."""
+    for row in reversed(state.phase_history or []):
+        if row.get("to_phase") != row.get("from_phase"):
+            return str(row.get("reason") or "")
+    return ""
+
+
 def _resume_boundary_unix(state: Any) -> float:
     """Return when the current run leg began, i.e. the most recent ``--resume``."""
     return max(0.0, to_unix(state.resumed_ts, 0.0) or 0.0)
@@ -1021,6 +1029,7 @@ __all__ = [
     "phase_budget_remaining_seconds",
     "phase_cumulative_seconds",
     "phase_elapsed_seconds",
+    "phase_entry_reason",
     "phase_index",
     "session_remaining_seconds",
     "warm_replay_in_flight",

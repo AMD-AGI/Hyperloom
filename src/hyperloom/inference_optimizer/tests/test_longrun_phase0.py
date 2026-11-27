@@ -223,12 +223,6 @@ async def test_coordinator_maintenance_reports_leases_and_keeps_every_record(tmp
 
 
 # ClaudeBackend retries a transient SDK failure end-to-end
-class ToolUseBlock:  # the backend dispatches on the type name, so do not rename
-    def __init__(self, name: str, inp: dict[str, Any]):
-        self.name = name
-        self.input = inp
-
-
 @dataclass
 class _Msg:
     content: list[Any] = field(default_factory=list)
@@ -240,9 +234,8 @@ class _Msg:
 async def test_claude_backend_retries_transient_then_succeeds(claude_sdk):
     from hyperloom.orchestrator.roles.claude import ClaudeBackend
     from hyperloom.orchestrator.roles.base import RetryPolicy
-    from hyperloom.orchestrator.roles.mcp_emit_intent import (
-        EMIT_INTENT_TOOL_QUALIFIED,
-    )
+
+    from .conftest import call_emit_intent
 
     state = {"n": 0}
 
@@ -253,11 +246,10 @@ async def test_claude_backend_retries_transient_then_succeeds(claude_sdk):
         async def _gen():
             if attempt == 1:
                 raise asyncio.TimeoutError("proxy stall")
-            block = ToolUseBlock(
-                EMIT_INTENT_TOOL_QUALIFIED,
-                {"intent_type": "send_message", "payload": {"topic": "observation", "body_md": "ok"}},
+            await call_emit_intent(
+                options, {"intent_type": "send_message", "payload": {"topic": "observation", "body_md": "ok"}}
             )
-            yield _Msg(content=[block])
+            yield _Msg()
 
         return _gen()
 

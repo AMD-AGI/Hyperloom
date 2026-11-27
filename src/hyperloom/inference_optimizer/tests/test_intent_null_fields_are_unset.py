@@ -11,10 +11,7 @@ from hyperloom.inference_optimizer.protocol.intent import (
     IntentValidationError,
     validate_envelope,
 )
-from hyperloom.orchestrator.roles.mcp_emit_intent import (
-    _emit_intent_handler,
-    validate_emit_intent_input,
-)
+from hyperloom.orchestrator.roles.mcp_emit_intent import build_emit_intent_server, validate_emit_intent_input
 
 
 def _delegate(params: dict) -> dict:
@@ -70,30 +67,35 @@ def test_a_null_nested_deeper_than_params_is_left_alone():
     assert intent.payload["params"]["grid"] == [{"extra_args": "--x", "note": None}]
 
 
-@pytest.mark.asyncio
-async def test_the_tool_ack_agrees_with_the_harvest_on_a_null_required_field():
-    """The ack is what the agent retries on, so it may not be more permissive than the harvest.
+async def _emit(claude_sdk, tool_input: dict) -> tuple[dict, list]:
+    """Answer one ``emit_intent`` call; the tool's reply and the intents it kept."""
+    kept: list = []
+    server = build_emit_intent_server(claude_sdk, kept)
+    return await server["tools"][0].handler(tool_input), kept
 
-    ``_emit_intent_handler`` acked ``ok`` for ``action_name: null`` while
-    ``validate_envelope`` dropped the intent, leaving the agent told it had
-    succeeded with nothing to correct.
-    """
-    result = await _emit_intent_handler({"intent_type": "delegate", "payload": {"action_name": None}})
+
+@pytest.mark.asyncio
+async def test_the_tool_refuses_a_null_required_field_and_keeps_no_intent(claude_sdk):
+    """The ack is what the agent retries on: a null required field is an error it can correct, never an ``ok``."""
+    result, kept = await _emit(claude_sdk, {"intent_type": "delegate", "payload": {"action_name": None}})
 
     assert result["is_error"] is True
     assert "action_name" in result["content"][0]["text"]
+    assert kept == []
 
 
 @pytest.mark.asyncio
-async def test_the_tool_ack_reaches_the_value_checks_the_harvest_applies():
-    """The eager path stopped at presence, so a bad severity or verdict was acked and then lost."""
-    result = await _emit_intent_handler(
-        {"intent_type": "alert", "payload": {"severity": "catastrophic", "summary": "s"}}
+async def test_the_tool_refuses_a_value_outside_its_set_and_keeps_no_intent(claude_sdk):
+    result, kept = await _emit(
+        claude_sdk, {"intent_type": "alert", "payload": {"severity": "catastrophic", "summary": "s"}}
     )
 
     assert result["is_error"] is True
     assert "severity" in result["content"][0]["text"]
+    assert kept == []
 
 
-def test_the_eager_validator_still_accepts_what_the_harvest_accepts():
-    validate_emit_intent_input({"intent_type": "send_message", "payload": {"topic": "heartbeat"}})
+def test_the_tool_validator_returns_the_intent_the_envelope_rule_builds():
+    tool_input = {"intent_type": "send_message", "payload": {"topic": "heartbeat", "body_md": None}}
+
+    assert validate_emit_intent_input(tool_input) == validate_envelope({"intents": [tool_input]})[0]

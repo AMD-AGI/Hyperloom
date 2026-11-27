@@ -9,7 +9,7 @@ from typing import Any
 
 import pytest
 
-from hyperloom.orchestrator.roles.mcp_context_tools import CONTEXT_TOOL_SPECS
+from hyperloom.orchestrator.roles.mcp_context_tools import CONTEXT_TOOLS
 from hyperloom.orchestrator.roles.mcp_emit_intent import EMIT_INTENT_TOOL_NAME, build_emit_intent_tool_input_schema
 
 
@@ -17,7 +17,7 @@ from hyperloom.orchestrator.roles.mcp_emit_intent import EMIT_INTENT_TOOL_NAME, 
     "schema",
     [
         pytest.param(build_emit_intent_tool_input_schema(), id=EMIT_INTENT_TOOL_NAME),
-        *(pytest.param(schema, id=name) for name, _description, schema, _method in CONTEXT_TOOL_SPECS),
+        *(pytest.param(tool.input_schema, id=name) for name, tool in CONTEXT_TOOLS.items()),
     ],
 )
 def test_tool_schema_has_no_top_level_combinator(schema: dict[str, Any]) -> None:

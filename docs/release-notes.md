@@ -337,6 +337,33 @@ it.
   research scout that returns more than 50 hints no longer pushes the gaps
   that carry explore and specialist outcomes off the 50-row ledger. See
   [Upgrade](reference/upgrade.md).
+- **The Coordinator stops writing bus rows for its own agent to read back,
+  and an `emit_intent` call is decided once.** The `backend_error`,
+  `backend_unhealthy` and `reactor_exception` observations, the
+  `phase_transition` event and the `baseline_not_promoted` event are no
+  longer written to `storage/coordinator.db`. Each restated something the
+  Coordinator already held, as an inbox line for the one agent, and the
+  first three woke that agent with the news that its own call had failed. A
+  failed call is read from the `failed` `llm.call` rows of
+  `reports/trace/trajectory/*.jsonl` (`error_message`) and, for a provider
+  failure, the `status=error` rows of `reports/trace/llm_calls.jsonl`; the
+  retry back-off and the `backend_unhealthy` stop after an hour are
+  unchanged. The `entered` line of the `=== Phase ===` block carries
+  `reason=<reason>` of the transition, and the session-state block carries a
+  failed baseline as before. `INFERENCE_OPTIMIZER_BACKEND_ERROR_STREAK_THRESHOLD`
+  is no longer read. A `send_message` is always stored under the topic
+  `observation` with the topic it named in its payload, so a message can no
+  longer be read back as a `delegated_result` or a `response`; the bus has no
+  `decision` topic, and `event_counts_by_topic` and `highlights` in
+  `reports/final.json` follow. Inbox lines no longer print `msg_id=`.
+  **Fixed:** on the Claude backend an `emit_intent` call that was answered
+  with an error (a `payload` or a whole input sent as a JSON string, or an
+  extra top-level key) was routed anyway, so the re-sent intent ran twice;
+  an intent is now routed only when its call was answered `ok`. A gateway
+  that delivers every tool input as a string now gets no intent through and
+  the session stops after 50 intent-less turns, where it used to run every
+  intent while reporting each as failed. See
+  [Upgrade](reference/upgrade.md).
 - **forge-loop runs every round as lanes and has no planning stage.** Every
   iteration is one round: one lane per focus the Analysis Agent divides its
   evidence into (at most `--lanes`, and one lane with no focus when it divides

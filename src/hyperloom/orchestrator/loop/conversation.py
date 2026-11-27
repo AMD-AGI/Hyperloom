@@ -199,9 +199,7 @@ def _format_inbox_event(m: "Message", outcomes: dict[str, TaskOutcome], *, max_v
     """
     topic = (m.topic or "").strip()
     payload = m.payload if isinstance(m.payload, dict) else {}
-    # Canonical inbox header ordering that downstream parsers anchor on.
-    msg_id = f"msg_id={m.msg_id} " if getattr(m, "msg_id", None) else ""
-    head = f"seq={m.seq} {msg_id}from={m.from_agent} topic={topic}"
+    head = f"seq={m.seq} from={m.from_agent} topic={topic}"
 
     if topic == "delegated_result":
         outcome = outcomes.get(str(payload.get("task_id") or ""))

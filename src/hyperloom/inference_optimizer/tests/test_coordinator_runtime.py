@@ -604,41 +604,38 @@ class _AlwaysCrashingBackend(Backend):
         raise RuntimeError(f"simulated {self.name} unexpected crash #{self.calls}")
 
 
+_LOOP_FAILURE_KINDS = {"backend_error", "backend_unhealthy", "reactor_exception"}
+
+
+async def _loop_failure_observations(c: Coordinator) -> list[str]:
+    observations = await c.bus.tail(n=200, topic="observation")
+    return [o.payload["kind"] for o in observations if (o.payload or {}).get("kind") in _LOOP_FAILURE_KINDS]
+
+
 @pytest.mark.asyncio
-async def test_backend_error_streak_fires_backend_unhealthy_once_at_threshold(
-    session_dir,
-    monkeypatch,
-):
-    """A consecutive BackendError streak promotes per-call ``backend_error`` events into a single ``backend_unhealthy`` observation, fired once."""
-    monkeypatch.setenv(
-        "INFERENCE_OPTIMIZER_BACKEND_ERROR_STREAK_THRESHOLD",
-        "3",
-    )
+async def test_a_failed_backend_call_is_on_the_trajectory_and_not_in_the_agents_inbox(session_dir, monkeypatch):
+    """The loop's own failure is not news for the agent whose call failed: nothing is written to its inbox, the
+    turn is asked again because it never settled, and the error text is on the call's trajectory row."""
+    from hyperloom.inference_optimizer.trace import trajectory_trace as tt
+
     monkeypatch.setattr("hyperloom.orchestrator.loop.coordinator._BACKEND_RETRY_BASE_SEC", 0)
-    c = Coordinator(session_dir, backends={"orchestration": _AlwaysFailingBackend("orchestration")})
+    failing = _AlwaysFailingBackend("orchestration")
+    c = Coordinator(session_dir, backends={"orchestration": failing})
     c.orch_prompt.set("orchestration", "SYSTEM PROMPT")
     try:
-        await c.tick(4)
-        observations = await c.bus.tail(n=50, topic="observation")
-        backend_errors = [
-            o
-            for o in observations
-            if (o.payload or {}).get("kind") == "backend_error" and (o.payload or {}).get("agent") == "orchestration"
+        assert await c.run(options=RunOptions(tick_interval_sec=0.0, max_ticks=6)) == "max_ticks"
+
+        assert failing.calls == 6
+        assert c._backend_error_streak == 6
+        assert await _loop_failure_observations(c) == []
+        assert not await c.bus.has_actionable_inbox("orchestration", after_seq=0)
+        calls = [
+            row
+            for row in tt.load_events(session_dir)
+            if row["event_type"] == tt.EVENT_LLM_CALL and row["status"] == tt.STATUS_FAILED
         ]
-        backend_unhealthy = [
-            o
-            for o in observations
-            if (o.payload or {}).get("kind") == "backend_unhealthy"
-            and (o.payload or {}).get("agent") == "orchestration"
-        ]
-        assert len(backend_errors) == 4
-        assert len(backend_unhealthy) == 1
-        promoted = backend_unhealthy[0].payload
-        assert promoted["consecutive_errors"] == 3
-        assert promoted["threshold"] == 3
-        assert promoted["severity"] == "high"
-        assert promoted["agent"] == "orchestration"
-        assert "backend has failed" in promoted["hint"]
+        assert [row["attributes"]["error_type"] for row in calls] == ["BackendError"] * 6
+        assert calls[0]["attributes"]["error_message"] == "simulated orchestration subprocess crash #1"
     finally:
         await c.stop()
 
@@ -659,6 +656,7 @@ async def test_unexpected_backend_exception_records_last_tick_exception(session_
 
         persisted = SharedState.load_or_init(session_dir)
         assert persisted.last_tick_exception == c.shared_state.last_tick_exception
+        assert await _loop_failure_observations(c) == []
     finally:
         await c.stop()
 
@@ -668,11 +666,7 @@ async def test_backend_error_streak_resets_after_successful_turn(
     session_dir,
     monkeypatch,
 ):
-    """A successful turn resets the streak counter and re-arms the alarm."""
-    monkeypatch.setenv(
-        "INFERENCE_OPTIMIZER_BACKEND_ERROR_STREAK_THRESHOLD",
-        "2",
-    )
+    """A successful turn resets the streak the back-off grows with."""
     monkeypatch.setattr("hyperloom.orchestrator.loop.coordinator._BACKEND_RETRY_BASE_SEC", 0)
     # Orchestration takes a turn in every tick, as it does once its heartbeat elapses.
     monkeypatch.setattr("hyperloom.orchestrator.loop.conversation._ORCHESTRATION_HEARTBEAT_SEC", 0)
@@ -682,21 +676,16 @@ async def test_backend_error_streak_resets_after_successful_turn(
     try:
         await c.tick(2)
         assert c._backend_error_streak == 2
-        assert c._backend_error_alarm_armed is False
 
         # Healthy backend → reset.
         c.backends.update(_build_backends({}))
         await c.tick(1)
         assert c._backend_error_streak == 0
-        assert c._backend_error_alarm_armed is True
+        assert c._backend_retry_at == 0.0
 
-        # Re-arm: failing backend back in → alarm fires again.
         c.backends["orchestration"] = failing
         await c.tick(2)
-        observations = await c.bus.tail(n=50, topic="observation")
-        backend_unhealthy = [o for o in observations if (o.payload or {}).get("kind") == "backend_unhealthy"]
-        assert len(backend_unhealthy) == 2
-        assert backend_unhealthy[-1].payload["consecutive_errors"] == 2
+        assert c._backend_error_streak == 2
     finally:
         await c.stop()
 
@@ -1370,6 +1359,11 @@ async def test_handle_unpromotable_baseline_records_failure(session_dir):
         assert fail["error_class"] == "no_report"
         assert c.shared_state.baseline_failure_streak == 1
         assert c.shared_state.stop_reason in ("", None)
+        # The state summary of every turn carries the failure; the bus is told nothing more about it.
+        summary = c.shared_state.to_prompt_summary()
+        assert "baseline_failure_streak=1" in summary
+        assert "no_report" in summary
+        assert await c.bus.tail(n=20) == []
     finally:
         await c.stop()
 

@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""MessageBus — the ``events`` table is the source of truth; ``seq`` (AUTOINCREMENT) gives a monotonic id. Topics validated against an allowlist."""
+"""MessageBus — the ``events`` table is the source of truth; ``seq`` (AUTOINCREMENT) gives a monotonic id. A row's topic is one the Coordinator's own code names."""
 
 from __future__ import annotations
 
@@ -15,11 +15,12 @@ from hyperloom_common.timeutil import now_iso
 from .storage.connection import SqliteConnection
 
 
+# Every topic a row is written under. Each is a literal in the Coordinator's code: an agent's free-form message is
+# always an ``observation``, whatever topic the agent names.
 TOPIC_ALLOWLIST = frozenset(
     {
         "observation",
         "event",
-        "decision",
         "alert",
         "delegated_result",
         "request",

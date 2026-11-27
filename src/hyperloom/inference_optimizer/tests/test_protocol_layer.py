@@ -79,6 +79,19 @@ def test_topic_allowlist_v06_changes():
     assert "parliament_open" not in TOPIC_ALLOWLIST
 
 
+def test_topic_allowlist_holds_only_topics_the_coordinator_writes():
+    """``decision`` was only ever an agent's own choice of topic, and an agent's message is an ``observation``."""
+    assert TOPIC_ALLOWLIST == {
+        "observation",
+        "event",
+        "alert",
+        "delegated_result",
+        "request",
+        "response",
+        "strategy_change",
+    }
+
+
 @pytest.mark.asyncio
 async def test_message_bus_append_assigns_seq(db):
     bus = MessageBus(db)
@@ -99,9 +112,9 @@ async def test_message_bus_unknown_topic_rejected(db):
 @pytest.mark.asyncio
 async def test_message_bus_tail_filters_by_to_agent_with_broadcast(db):
     bus = MessageBus(db)
-    await bus.append_and_seq(Message.new("Coordinator", "Orchestration", "decision", {"kind": "phase_advance"}))
+    await bus.append_and_seq(Message.new("Coordinator", "Orchestration", "event", {"kind": "phase_advance"}))
     await bus.append_and_seq(Message.new("Robustness", "*", "alert", {"severity": "high", "summary": "stall"}))
-    await bus.append_and_seq(Message.new("Coordinator", "Kernel", "decision", {"kind": "phase_advance"}))
+    await bus.append_and_seq(Message.new("Coordinator", "Kernel", "event", {"kind": "phase_advance"}))
     msgs = await bus.tail(to_agent="Orchestration")
     topics = {(m.from_agent, m.to_agent) for m in msgs}
     assert ("Coordinator", "Orchestration") in topics
@@ -113,7 +126,7 @@ async def test_message_bus_tail_filters_by_to_agent_with_broadcast(db):
 async def test_message_bus_replay_for_returns_ascending(db):
     bus = MessageBus(db)
     seqs = []
-    for topic in ("observation", "event", "decision"):
+    for topic in ("observation", "event", "alert"):
         s = await bus.append_and_seq(Message.new("kernel_agent", "orchestration", topic, {}))
         seqs.append(s)
     msgs = await bus.replay_for("orchestration", after_seq=0)

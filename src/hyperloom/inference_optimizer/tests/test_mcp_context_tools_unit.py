@@ -74,45 +74,40 @@ def test_runtime_findings_reads_current_best_slot(tmp_path):
 
 async def test_make_handler_success():
     p = _provider(shared_state=_shared_state())
-    handler = mct._make_handler(p, "gaps")
+    handler = mct._make_handler(p, "get_gaps")
     out = await handler({})
     assert out["content"][0]["text"] == "gaps(max_attempts=5)"
 
 
 @pytest.mark.parametrize(
-    ("method_name", "args", "expected"),
+    ("tool_name", "args", "expected"),
     [
-        ("recent_outcomes", {"top_k": 2}, "outcomes(2)"),
-        ("inbox", {"since_seq": 9}, "inbox(9)"),
+        ("get_recent_outcomes", {"top_k": 2}, "outcomes(2)"),
+        ("get_inbox", {"since_seq": 9}, "inbox(9)"),
+        ("read_reference", {"name": "failure_recovery"}, "reference(failure_recovery)"),
         ("get_failure", {"failure_id": "fail.t1.abc"}, "fail.t1.abc"),
     ],
-    ids=["top_k", "since_seq", "failure_id"],
+    ids=["top_k", "since_seq", "name", "failure_id"],
 )
-async def test_make_handler_forwards_kwargs(method_name, args, expected):
+async def test_make_handler_passes_the_validated_arguments_to_the_reader(tool_name, args, expected):
     p = _provider(
         shared_state=_shared_state(),
         inbox_reader=lambda s: f"inbox({s})",
         recent_outcomes_reader=lambda k: f"outcomes({k})",
+        reference_reader=lambda name: f"reference({name})",
     )
-    out = await mct._make_handler(p, method_name)(args)
+    out = await mct._make_handler(p, tool_name)(args)
     assert expected in out["content"][0]["text"]
 
 
-async def test_make_handler_non_str_result():
-    provider = SimpleNamespace(foo=lambda **k: {"a": 1})
-    handler = mct._make_handler(provider, "foo")
-    out = await handler({})
-    assert json.loads(out["content"][0]["text"]) == {"a": 1}
-
-
 async def test_make_handler_exception():
-    def boom(**k):
+    def boom(_since_seq):
         raise RuntimeError("nope")
 
-    provider = SimpleNamespace(foo=boom)
-    handler = mct._make_handler(provider, "foo")
+    handler = mct._make_handler(_provider(shared_state=_shared_state(), inbox_reader=boom), "get_inbox")
     out = await handler({})
     assert out["is_error"] is True
+    assert "nope" in out["content"][0]["text"]
 
 
 async def test_read_projection_stays_on_the_calling_thread():
@@ -124,7 +119,7 @@ async def test_read_projection_stays_on_the_calling_thread():
         return "gaps"
 
     p = _provider(shared_state=SimpleNamespace(to_gaps_summary=read))
-    out = await mct._make_handler(p, "gaps")({})
+    out = await mct._make_handler(p, "get_gaps")({})
     assert seen == [owner_thread]
     assert out == {"content": [{"type": "text", "text": "gaps"}]}
 
@@ -150,7 +145,7 @@ def test_build_server_registers_every_context_tool_with_the_sdk():
     out = mct.build_context_tools_server(SimpleNamespace(tool=tool, create_sdk_mcp_server=create_sdk_mcp_server), p)
     assert out == "SERVER"
     assert created["name"] == mct.MCP_SERVER_NAME
-    assert len(created["tools"]) == len(mct.CONTEXT_TOOL_SPECS)
+    assert [name for name, _handler in created["tools"]] == list(mct.CONTEXT_TOOL_NAMES)
 
 
 def _mounted_handlers():
@@ -186,12 +181,15 @@ def test_the_mounted_tools_are_the_ones_the_prompt_does_not_push():
     }
 
 
-def test_spec_methods_all_exist_on_provider():
-    """Every CONTEXT_TOOL_SPECS entry must name a real ContextProvider method."""
-    for _, _, _, method_name in mct.CONTEXT_TOOL_SPECS:
-        assert callable(getattr(mct.ContextProvider, method_name, None)), (
-            f"ContextProvider missing method {method_name!r}"
-        )
+def test_the_mounted_names_and_the_tool_rows_are_one_set():
+    """The server mounts ``CONTEXT_TOOL_NAMES``; a row no name mounts would be a tool nothing can call."""
+    assert set(mct.CONTEXT_TOOLS) == set(mct.CONTEXT_TOOL_NAMES)
+
+
+def test_a_mounted_name_without_a_tool_row_fails_the_server_build(monkeypatch):
+    monkeypatch.setattr(mct, "CONTEXT_TOOL_NAMES", (*mct.CONTEXT_TOOL_NAMES, "get_unlisted"))
+    with pytest.raises(KeyError, match="get_unlisted"):
+        _mounted_handlers()
 
 
 def _failed_variant(session_dir: Path, failure_id: str, task_id: str, **fields) -> None:

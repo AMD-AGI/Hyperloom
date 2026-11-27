@@ -928,7 +928,6 @@ class ReportExecutor:
     """ActionRunner for the ``report`` action."""
 
     DEFAULT_HIGHLIGHT_TOPICS = (
-        "decision",
         "delegated_result",
         "response",
         "alert",

@@ -89,7 +89,7 @@ def test_shared_state_phase_status_summary_renders_compact_block():
     s.phase_budget_pct = {phase: 0.5}
     out = phase_transitions.phase_status_summary(s, now_unix=1_000_120.0)
     assert f"phase     : {phase}" in out
-    assert "entered   : 1970-01-12T13:46:40Z" in out
+    assert "entered   : 1970-01-12T13:46:40Z reason=prelude_done" in out
     assert "elapsed_sec=120" in out
     # Wiring: the rendered remaining must match the budget helper it delegates to.
     expected_rem = int(_ps.phase_budget_remaining_seconds(s, now_unix=1_000_120.0))
@@ -1179,19 +1179,24 @@ async def test_send_message_with_a_to_naming_no_recipient_is_delivered_as_writte
         await c.stop()
 
 
-@pytest.mark.parametrize("topic", ["", "   ", "progress_report"])
+@pytest.mark.parametrize("topic", ["", "   ", "progress_report", "decision", "event", "delegated_result", "response"])
 @pytest.mark.asyncio
-async def test_send_message_with_a_blank_or_unknown_topic_is_stored_as_an_observation(coordinator_with_mocks, topic):
+async def test_send_message_is_stored_as_an_observation_whatever_topic_it_names(coordinator_with_mocks, topic):
+    """An agent's message keeps the topic it named in its payload and never becomes a row of that topic.
+
+    ``delegated_result`` and ``response`` rows are the Coordinator's own record of what was booked and answered, so
+    a message that named one of them must not read back as one.
+    """
     c = coordinator_with_mocks
-    body = "no topic worth the name"
+    body = "whatever the topic says"
     try:
         await c.router.handle_intent(
             "orchestration",
             Intent(type=IntentType.SEND_MESSAGE, payload={"topic": topic, "body_md": body}),
         )
 
-        observations = await c.bus.tail(topic="observation")
-        assert [m.to_agent for m in observations if m.payload.get("body_md") == body] == ["*"]
-        assert not any(m.payload.get("kind") == "policy_denied" for m in observations)
+        sent = [m for m in await c.bus.tail(n=50) if m.payload.get("body_md") == body]
+        assert [(m.topic, m.to_agent, m.payload["topic"]) for m in sent] == [("observation", "*", topic)]
+        assert not any(m.payload.get("kind") == "policy_denied" for m in await c.bus.tail(topic="observation"))
     finally:
         await c.stop()

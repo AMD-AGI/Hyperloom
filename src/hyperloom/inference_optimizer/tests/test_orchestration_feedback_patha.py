@@ -9,7 +9,7 @@ import pytest
 
 from hyperloom.orchestrator.mcp_tool_names import CONTEXT_TOOL_NAMES, qualified_context_tool_name
 from hyperloom.orchestrator.roles.mcp_context_tools import (
-    CONTEXT_TOOL_SPECS,
+    CONTEXT_TOOLS,
     ContextProvider,
 )
 from hyperloom.orchestrator.tests.mock_backend import MockBackend, ScriptedPlan
@@ -86,13 +86,7 @@ def session_dir(tmp_path, monkeypatch):
 def test_get_recent_outcomes_tool_is_registered():
     assert "get_recent_outcomes" in CONTEXT_TOOL_NAMES
     assert "run_action_now" not in CONTEXT_TOOL_NAMES
-    spec_methods = {spec[0]: spec[3] for spec in CONTEXT_TOOL_SPECS}
-    assert spec_methods["get_recent_outcomes"] == "recent_outcomes"
-
-
-def test_context_tool_names_match_the_mounted_specs():
-    """The names other modules read must stay the names this server mounts."""
-    assert tuple(spec[0] for spec in CONTEXT_TOOL_SPECS) == CONTEXT_TOOL_NAMES
+    assert CONTEXT_TOOLS["get_recent_outcomes"].read is ContextProvider.recent_outcomes
 
 
 def test_context_provider_recent_outcomes_delegates_to_reader():

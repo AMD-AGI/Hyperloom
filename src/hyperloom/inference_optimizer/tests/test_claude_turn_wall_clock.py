@@ -18,6 +18,8 @@ from typing import Any
 
 import pytest
 
+from hyperloom_common.jsonio import read_jsonl
+from hyperloom.inference_optimizer.session.session_paths import llm_calls_path
 from hyperloom.orchestrator.loop.coordinator import Coordinator, RunOptions
 from hyperloom.orchestrator.loop.reactor_turn import DEFAULT_REACTOR_TURN_TIMEOUT_SEC
 from hyperloom.orchestrator.roles import ClaudeBackend
@@ -293,8 +295,8 @@ async def test_a_cancelled_caller_whose_close_never_finishes_still_gets_its_cli_
 
 def test_each_turn_tags_its_cli_with_its_own_marker(claude_sdk):
     backend = _backend(claude_sdk, _StallingSdk("silent"), turn_timeout_s=1.0)
-    env_a = backend._build_options(tools=[], system_prompt=None, turn_marker="a").kwargs["env"]
-    env_b = backend._build_options(tools=[], system_prompt=None, turn_marker="b").kwargs["env"]
+    env_a = backend._option_kwargs(tools=[], system_prompt=None, turn_marker="a")["env"]
+    env_b = backend._option_kwargs(tools=[], system_prompt=None, turn_marker="b")["env"]
     assert env_a["HYPERLOOM_CLAUDE_TURN_ID"] == "a"
     assert env_b["HYPERLOOM_CLAUDE_TURN_ID"] == "b"
 
@@ -323,14 +325,6 @@ async def test_the_tick_loop_keeps_ticking_past_a_hung_orchestration_turn(
     coord.shared_state.baseline_tput = 800.0
     # Only the backend's own bound may end the turn here.
     coord.reactor_turn_timeout_sec = 600.0
-    observations: list[dict[str, Any]] = []
-    record = coord.bus.record_observation
-
-    async def _capture(sender: str, kind: str, payload: dict[str, Any], *args: Any, **kwargs: Any) -> Any:
-        observations.append(payload)
-        return await record(sender, kind, payload, *args, **kwargs)
-
-    coord.bus.record_observation = _capture  # type: ignore[method-assign]
     try:
         reason = await asyncio.wait_for(coord.run(options=RunOptions(tick_interval_sec=0.0, max_ticks=2)), timeout=30.0)
     finally:
@@ -338,6 +332,6 @@ async def test_the_tick_loop_keeps_ticking_past_a_hung_orchestration_turn(
 
     assert reason == "max_ticks"
     assert (sdk.started, sdk.closed) == (2, 2)
-    errors = [o for o in observations if o.get("kind") == "backend_error" and o.get("agent") == "orchestration"]
+    errors = [row["error_message"] for row in read_jsonl(llm_calls_path(session_dir)) if row["status"] == "error"]
     assert len(errors) == 2
-    assert all("wall-clock bound" in o["error"] and "SDK closed the CLI" in o["error"] for o in errors)
+    assert all("wall-clock bound" in error and "SDK closed the CLI" in error for error in errors)

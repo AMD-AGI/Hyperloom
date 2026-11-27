@@ -542,8 +542,7 @@ keeping a record of it.
   had left the phase the hint was about, so a re-sent `skip_to_kernel` was
   denied (`escalate_hint_phase`); and the section also reported a
   `skip_to_sweep` the Coordinator had set itself as Orchestration's own. The
-  Phase block and the `phase_transition` event report the transition, as
-  before.
+  Phase block reports the transition.
 * `escalate_strategy_change{next_action_hint='skip_to_sweep'}` from
   Orchestration is denied with rule `escalate_hint_not_in_vocab`. 1.2.x
   accepted it in every phase, and in FRAMEWORK_AGENT it ended the phase with
@@ -1254,6 +1253,83 @@ Smaller changes:
   also written when the delegate is admitted. `specialist dispatch
   gpu_count=... not an integer` is no longer logged; such a value takes the
   default count.
+
+### Recommended: stop reading the bus rows the Coordinator wrote for its own agent; a refused `emit_intent` call is not routed
+
+The Coordinator told Orchestration several things it already held as state by
+writing a row to the `events` table of `storage/coordinator.db`, which the
+next turn's inbox rendered: a failed LLM call, a phase boundary, a failed
+baseline. Those rows are gone, and an `emit_intent` call is decided once.
+
+Rows that are no longer written:
+
+* `backend_error` (one per failed Orchestration call), `backend_unhealthy`
+  (once, when a run of failed calls reached a threshold) and
+  `reactor_exception`, all `observation` rows. 1.2.x put them in the inbox of
+  the agent whose call had failed, where each counted as something for it to
+  act on. A failed call is the `failed` `llm.call` row of
+  `reports/trace/trajectory/*.jsonl`; its `error_type` and `error_message`
+  carry the error the observation's `error` held, cut at 500 characters. A
+  provider failure is also a `status=error` row of
+  `reports/trace/llm_calls.jsonl`, and an unexpected exception is
+  `last_tick_exception` (stage `reactor_pass`) in `state.json` and counts in
+  `crash_count`, both as before. The call is asked again exactly as it was:
+  after a back-off of 2 s doubling to 5 minutes, and the session still stops
+  with `stop_reason=backend_unhealthy` after an hour without a successful
+  turn. `stop_reason_explanation` in `reports/final.json` names the two
+  files instead of the observations.
+* `INFERENCE_OPTIMIZER_BACKEND_ERROR_STREAK_THRESHOLD` is no longer read. It
+  only set after how many failed calls the `backend_unhealthy` row was
+  written.
+* `phase_transition`, an `event` row written at every phase change with the
+  transition's whole evidence. The `entered` line of the `=== Phase ===`
+  block now ends with ` reason=<reason>`, the reason of the transition into
+  the phase. `phase_history` in `state.json` and the phase rows of
+  `session_breakdown.json`, `predicate_inputs` included, are unchanged, and
+  the `tasks_cancelled_on_phase_transition` observation is still written
+  when the transition dropped queued or running work.
+* `baseline_not_promoted`, an `event` row written after a failed baseline was
+  charged. `baseline_failure_streak=`, `last_baseline=`,
+  `last_action_failures=` and `stop_reason=` of the session-state block
+  carry the same facts on every turn, as before.
+
+Rows that change:
+
+* A `send_message` from Orchestration is always stored under the topic
+  `observation`, and the topic it named stays in the row's payload as
+  `topic`. 1.2.x stored it under the named topic when that was a bus topic
+  (`event`, `decision`, `alert`, `delegated_result`, `request`, `response`,
+  `strategy_change`), so a message that named `delegated_result` or
+  `response` was read back as a booked result or a kernel reply by
+  everything that reads those rows, `hyperloom session events` and the
+  final report among them. `event_counts_by_topic` in `reports/final.json`
+  counts every such message under `observation`, `highlights` no longer
+  lists a message that named `decision`, and no row has the topic
+  `decision`: only Orchestration's own choice of topic ever produced one.
+* An inbox line (the `=== Inbox for orchestration ===` block, `get_inbox`,
+  `get_recent_outcomes`) starts `seq=<n> from=<agent> topic=<topic>`. 1.2.x
+  printed `msg_id=<32 hex>` after `seq`, an id nothing Orchestration can send
+  refers to.
+
+`emit_intent` on the Claude backend:
+
+* An intent is routed when, and only when, its `emit_intent` call was
+  answered `ok`. 1.2.x answered the call from the tool's handler and then
+  read the intent a second time out of the message stream with a looser
+  rule, so three inputs were answered with an error and routed anyway: a
+  `payload` sent as a JSON string, a whole input sent as a JSON string, and
+  an input with a key beside `intent_type` and `payload`. Orchestration,
+  told the call had failed, sent the intent again and both copies ran. Such
+  a call now leaves no intent. A deployment whose gateway delivers every
+  tool input as a string therefore gets no intent through and stops after
+  50 turns without one (`stop_reason=backend_unhealthy`, after a
+  `no_intent_streak` observation), where 1.2.x ran each intent while telling
+  the model it had failed. Claude Code's `__unparsedToolInput` wrapper is
+  still accepted, as the tool schema says.
+* Intents are still routed after the turn has ended, and an attempt of a
+  turn that fails still takes the intents it had acknowledged with it.
+* The log lines `context_tool pull:` and `context tool handler ... raised`
+  name the tool (`get_inbox`) where they named an internal method (`inbox`).
 
 ---
 

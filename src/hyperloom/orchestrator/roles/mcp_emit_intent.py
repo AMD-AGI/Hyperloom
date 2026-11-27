@@ -12,6 +12,7 @@ from typing import Any
 from hyperloom.inference_optimizer.protocol.intent import (
     EXTEND_LEASE_MAX_SEC,
     PAYLOAD_REQUIRED,
+    Intent,
     IntentType,
     IntentValidationError,
     validate_envelope,
@@ -187,14 +188,14 @@ def decode_emit_intent_input(raw_input: Any) -> tuple[dict[str, Any], str | None
     return parsed, None
 
 
-def validate_emit_intent_input(payload: dict[str, Any]) -> None:
-    """Eager single-intent validation, by the same rule the harvest will apply.
+def validate_emit_intent_input(payload: dict[str, Any]) -> Intent:
+    """Validate one ``emit_intent`` tool input and return the intent it asks for.
 
-    The eager path decides only the tool ack; :func:`validate_envelope` decides
-    whether the intent survives. A rule written twice here drifts — a null
-    required field was acked ``ok`` and then dropped by the harvest, leaving the
-    agent told it succeeded with nothing to retry on — so the eager path builds
-    the one-intent envelope and defers to that function.
+    The intent is built by :func:`validate_envelope`, the rule every transport's intents pass, from the one-intent
+    envelope of this call.
+
+    Raises:
+        IntentValidationError: The input is not one well-formed intent.
     """
     if not isinstance(payload, dict):
         raise IntentValidationError(f"emit_intent input must be an object, got {type(payload).__name__}")
@@ -217,29 +218,41 @@ def validate_emit_intent_input(payload: dict[str, Any]) -> None:
         raise IntentValidationError(
             f"emit_intent: 'payload' must be an object, got {type(coerced['payload']).__name__}"
         )
-    validate_envelope({"intents": [{"intent_type": coerced["intent_type"], "payload": coerced["payload"]}]})
+    return validate_envelope({"intents": [{"intent_type": coerced["intent_type"], "payload": coerced["payload"]}]})[0]
 
 
-async def _emit_intent_handler(args: dict[str, Any]) -> dict[str, Any]:
-    """Default handler — validate then ack; errors return is_error=True."""
-    try:
-        validate_emit_intent_input(args)
-    except IntentValidationError as exc:
-        log.info("emit_intent rejected: %s", exc)
-        return {
-            "content": [{"type": "text", "text": f"validation_error: {exc}"}],
-            "is_error": True,
-        }
-    return {"content": [{"type": "text", "text": "ok"}]}
+def build_emit_intent_server(sdk: Any, accepted: list[Intent]) -> Any:
+    """Build the in-process MCP server exposing ``emit_intent`` for one attempt of a turn.
 
+    The tool's answer and the intent's fate are one decision: a call answered ``ok`` has appended its intent to
+    ``accepted``, and a call answered with an error has appended nothing. The Coordinator routes ``accepted`` once
+    the turn has ended.
 
-def build_emit_intent_server(sdk: Any) -> Any:
-    """Build the in-process MCP server config exposing ``emit_intent`` with the imported ``claude_agent_sdk``."""
+    Args:
+        sdk: The imported ``claude_agent_sdk`` module.
+        accepted: The attempt's intents, in the order the calls were answered.
+
+    Returns:
+        The SDK's server config, for ``ClaudeAgentOptions.mcp_servers``.
+    """
+
+    async def _emit_intent(args: dict[str, Any]) -> dict[str, Any]:
+        try:
+            intent = validate_emit_intent_input(args)
+        except IntentValidationError as exc:
+            log.info("emit_intent rejected: %s", exc)
+            return {
+                "content": [{"type": "text", "text": f"validation_error: {exc}"}],
+                "is_error": True,
+            }
+        accepted.append(intent)
+        return {"content": [{"type": "text", "text": "ok"}]}
+
     tool = (
         EMIT_INTENT_TOOL_NAME,
         EMIT_INTENT_TOOL_DESCRIPTION,
         build_emit_intent_tool_input_schema(),
-        _emit_intent_handler,
+        _emit_intent,
     )
     return build_sdk_mcp_server(sdk, MCP_SERVER_NAME, [tool])
 

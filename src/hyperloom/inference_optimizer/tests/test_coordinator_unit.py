@@ -31,21 +31,18 @@ def test_lifecycle_paths_filters_and_types():
     }
 
 
-def test_format_inbox_delegated_result_with_msg_id():
-    """delegated_result lines carry the outcome keys of the result on the announced task's row."""
+def test_format_inbox_delegated_result_names_its_seq_and_the_outcome():
+    """delegated_result lines carry the outcome keys of the result on the announced task's row.
+
+    The line names the row by ``seq``, which the held-after line and ``get_inbox(since_seq)`` take; the row's
+    ``msg_id`` is an id nothing the agent can send refers to, so it is not printed.
+    """
     m, outcomes = announced({"task_id": "t1", "kind": "integrate", "state": "done"}, {"status": "ok", "gain_pct": 3.5})
     m.msg_id = "mid"
     line = _format_inbox_event(m, outcomes)
-    assert "msg_id=mid" in line and "seq=7" in line
+    assert line.startswith("seq=7 from=")
+    assert "msg_id" not in line
     assert "status='ok'" in line and "gain=3.5" in line
-
-
-def test_format_inbox_delegated_result_no_msg_id():
-    """Header omits ``msg_id=`` when the field is unset."""
-    m, outcomes = announced({"task_id": "t1", "kind": "k", "state": "s"}, {"status": "x"}, seq=2)
-    m.msg_id = ""
-    line = _format_inbox_event(m, outcomes)
-    assert "seq=2" in line and "msg_id=" not in line
 
 
 def test_format_inbox_delegated_result_of_a_task_with_no_recorded_outcome():
@@ -59,7 +56,7 @@ def test_format_inbox_delegated_result_of_a_task_with_no_recorded_outcome():
         seq=1,
     )
     line = _format_inbox_event(m, {})
-    assert line == "seq=1 msg_id=1 from=a topic=delegated_result kind='k' state='s'"
+    assert line == "seq=1 from=a topic=delegated_result kind='k' state='s'"
 
 
 def test_format_inbox_delegated_result_with_error():

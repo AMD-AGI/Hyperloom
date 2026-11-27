@@ -303,7 +303,10 @@ async def test_backend_error_turn_does_not_advance_cursor(session_dir):
 
 @pytest.mark.asyncio
 async def test_failing_backend_keeps_each_inbox_page_within_budget(session_dir, monkeypatch):
-    """Every failed turn adds to the unread inbox, yet each prompt renders one budgeted page of it."""
+    """Each prompt renders one budgeted page of the unread inbox, and a failed turn adds nothing to it.
+
+    A turn that failed on its prompt's length used to be told so in its own inbox, which made the next prompt longer.
+    """
     monkeypatch.setattr(conversation, "_INBOX_PROMPT_CHARS", 1_000)
     failing = ScriptedPlan(turns=[MockTurn(raise_error=BackendError("Prompt is too long"))], loop_last=True)
     backends = silent_backends()
@@ -311,13 +314,17 @@ async def test_failing_backend_keeps_each_inbox_page_within_budget(session_dir, 
     c = Coordinator(session_dir, backends=backends)
     c.orch_prompt.set("orchestration", "SYSTEM PROMPT")
     try:
-        await c.bus.append_and_seq(Message.new("robustness", "*", "alert", {"kind": "stall_warning"}))
+        for i in range(8):
+            await c.bus.append_and_seq(
+                Message.new("robustness", "*", "alert", {"kind": f"stall_warning_{i}", "note": "x" * 300})
+            )
         for _ in range(20):
             await c.reactor_pass()
 
-        inbox = backends["orchestration"].calls[-1]["prompt"].split("=== Inbox for orchestration")[1]
+        assert c.bus.count_sync() == 8
+        inbox = backends["orchestration"].calls[-1]["prompt"].split("=== Inbox for orchestration")[1].split("\n===")[0]
         assert len(inbox) < 1_200
-        assert "stall_warning" in inbox
+        assert "stall_warning_0" in inbox
         assert "held for the next turn" in inbox
     finally:
         await c.stop()

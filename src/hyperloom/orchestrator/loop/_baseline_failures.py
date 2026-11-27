@@ -28,7 +28,6 @@ from ..actions.executors import failed_step_error_class
 from ..actions.executors._subprocess_kill import AGENTX_PREFLIGHT_ERROR_CLASS
 from ..actions.stop_attribution import stopped_by_the_run_class
 from ..bringup import ARGV_INVALID
-from ..bus.message_bus import Message
 from ..phases.machine_state import PHASE_ENABLEMENT, PHASE_PRELUDE
 from ..state.failure_evidence import ROUND_NONZERO_INVALID_MEASUREMENT
 from ..state.shared_state import BaselineAttempt
@@ -284,11 +283,10 @@ class BaselineFailureMixin:
         # the promote branch that writes the terminal progress row; stamp
         # no_result_failed so the pump does not re-select it every tick.
         self._coord.phase_framework.record_unpromoted_candidate(task, result_payload)
-        baseline_event_payload: dict[str, Any] | None = None
         err_class = result_payload.get("error_class", "")
         # Only arm the streaks and stop gates while no baseline has succeeded yet.
         if task.kind == "baseline" and self._arms_baseline_failure_gates(err_class):
-            baseline_event_payload = await self._charge_baseline_failure(task, result_payload, err_class)
+            await self._charge_baseline_failure(task, result_payload, err_class)
         # A failed roofline is charged here and nowhere else: bump streak, clear gate, warn.
         if task.kind == "roofline":
             self.shared_state.roofline_failure_streak += 1
@@ -308,15 +306,6 @@ class BaselineFailureMixin:
             # With enable_roofline off the initial analysis is a profile; leaving its id set would hold PRELUDE.
             self.shared_state.auto_roofline_pending_task_id = ""
         self.shared_state.save(self.session_dir)
-        if baseline_event_payload is not None:
-            await self.bus.append_and_seq(
-                Message.new(
-                    "coordinator",
-                    "*",
-                    "event",
-                    baseline_event_payload,
-                )
-            )
 
     def _tracks_open_revalidation(self, task: Task) -> bool:
         enablement = self.shared_state.enablement
@@ -332,7 +321,7 @@ class BaselineFailureMixin:
         task: Task,
         result_payload: dict[str, Any],
         err_class: str,
-    ) -> dict[str, Any]:
+    ) -> None:
         from ..actions.executors._accuracy_gate import eval_enablement_allowed
         from ..actions.executors._multi_node_env import is_multi_node
 
@@ -372,16 +361,6 @@ class BaselineFailureMixin:
         ):
             self.shared_state.set_stop_reason(_BASELINE_FAILED_STOP_REASON)
         self._stash_enablement_launch_log(result_payload, err_class)
-        return {
-            "kind": "baseline_not_promoted",
-            "task_id": task.task_id,
-            "failure_streak": self.shared_state.baseline_failure_streak,
-            "arg_error_streak": self.shared_state.baseline_arg_error_streak,
-            "stop_reason": self.shared_state.stop_reason,
-            "result_status": result_payload.get("status"),
-            "error_class": err_class,
-            "baseline_eval_failed": eval_failed,
-        }
 
     def _stop_the_run_on_baseline_failure(
         self,

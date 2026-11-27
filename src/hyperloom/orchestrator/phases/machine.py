@@ -13,7 +13,6 @@ from typing import Any
 
 from . import machine_state as _phase_state
 from . import phase_predicates, phase_transitions
-from ..bus.message_bus import Message
 from ..prompts import write_prompt_snapshot as _write_prompt_snapshot
 from ..collaborator import CoordinatorCollaborator
 from hyperloom.plugs import progress as _progress
@@ -290,26 +289,6 @@ class MachinePhase(CoordinatorCollaborator):
             state.gain_at_cycle_start,
         )
 
-    async def _announce_transition(self, move: Transition) -> None:
-        """Publish the phase boundary on the bus for the roles that follow it."""
-        try:
-            await self.bus.append_and_seq(
-                Message.new(
-                    "coordinator",
-                    "*",
-                    "event",
-                    {
-                        "kind": "phase_transition",
-                        "from_phase": move.from_phase,
-                        "to_phase": move.to_phase,
-                        "reason": move.reason,
-                        "evidence": move.evidence,
-                    },
-                )
-            )
-        except sqlite3.Error:
-            log.exception("Coordinator: phase_transition event bus write failed")
-
     async def _fire_phase_entry(self, move: Transition) -> None:
         """Run the entered phase's side effects, recording rather than raising a hook's storage failure."""
         # Phase-entry side effects are additive; storage failures are logged only. They run on the transition itself,
@@ -369,7 +348,6 @@ class MachinePhase(CoordinatorCollaborator):
             move.to_phase,
             move.reason,
         )
-        await self._announce_transition(move)
         await self._fire_phase_entry(move)
         if is_loopback:
             await self._coord.phase_macro_cycle.run_cycle_soft_restart(

@@ -93,7 +93,6 @@ class ContextProvider:
         return self._safe(_read, "get_variant_failures")
 
 
-# Tool descriptors: (tool_name, description, input_schema, provider-method).
 _NO_ARGS_SCHEMA: dict[str, Any] = {
     "type": "object",
     "properties": {},
@@ -129,63 +128,69 @@ _VARIANT_FAILURES_SCHEMA: dict[str, Any] = {
     },
     "additionalProperties": False,
 }
-CONTEXT_TOOL_SPECS: tuple[tuple[str, str, dict[str, Any], str], ...] = (
-    (
-        "get_gaps",
+
+
+@dataclass(frozen=True)
+class ContextTool:
+    """One context tool: what the model is told about it, the input it takes, and the provider method that answers it."""
+
+    description: str
+    input_schema: dict[str, Any]
+    read: Callable[..., str]
+
+
+#: The tools by name. :data:`CONTEXT_TOOL_NAMES` is the list that is mounted, so a name without a row here fails the
+#: server build and a row without a name there is never offered.
+CONTEXT_TOOLS: dict[str, ContextTool] = {
+    "get_gaps": ContextTool(
         "Return the structured gaps[] ledger: canonical_id / layer / "
         "symptom / attempt count and up to 5 recent attempts "
         "(each with action, outcome, error_class, and failure_id when present).",
         _NO_ARGS_SCHEMA,
-        "gaps",
+        ContextProvider.gaps,
     ),
-    (
-        "get_runtime_findings",
+    "get_runtime_findings": ContextTool(
         "Return what the current best's server.log shows the server actually "
         "did: unknown env vars, features the framework disabled, capability "
         "fallbacks, settings the engine adjusted, AITER tuned-config misses, "
         "tracebacks. Each rule is detected / not_detected / unknown(reason).",
         _NO_ARGS_SCHEMA,
-        "runtime_findings",
+        ContextProvider.runtime_findings,
     ),
-    (
-        "get_inbox",
+    "get_inbox": ContextTool(
         "Return inbox events addressed to orchestration. Pass since_seq to "
         "page from a given sequence; omit for the full history.",
         _SINCE_SCHEMA,
-        "inbox",
+        ContextProvider.inbox,
     ),
-    (
-        "get_recent_outcomes",
+    "get_recent_outcomes": ContextTool(
         "Return the most recent action outcomes — the async results of "
         "prior delegate/request work (delegated_result: kind / state / "
         "status / gain / error) — so "
         "you can close the act->observe loop within this turn instead of "
         "waiting for the next-tick delta. Pass top_k to widen the window.",
         _TOPK_SCHEMA,
-        "recent_outcomes",
+        ContextProvider.recent_outcomes,
     ),
-    (
-        "get_running_tasks",
+    "get_running_tasks": ContextTool(
         "Re-read the turn's Tasks in flight block: each running task and "
         "queued explore round with its elapsed seconds, specialist domain / "
         "gap, idempotency key, lease TTL and remaining time, held lanes, "
         "leased GPU ids, heartbeat age and explore grid. Use it when a "
         "decision later in the turn depends on whether that work has moved.",
         _NO_ARGS_SCHEMA,
-        "running_tasks",
+        ContextProvider.running_tasks,
     ),
-    (
-        "read_reference",
+    "read_reference": ContextTool(
         "Return the full text of a named on-demand reference document "
         "listed in the ON-DEMAND REFERENCE INDEX section of this prompt. "
         "Pass the bare stem from that index (e.g. name='failure_recovery'). "
         "Use when an action has just failed or you need the detailed "
         "decision rules for a situation flagged in the index.",
         _REFERENCE_SCHEMA,
-        "read_reference",
+        ContextProvider.read_reference,
     ),
-    (
-        "get_failure",
+    "get_failure": ContextTool(
         "Return the full structured failure evidence packet for a single "
         "failure_id (from a delegated_result failure line or gap attempt). "
         "Carries variant args, stage, error_class, error_excerpt, "
@@ -193,58 +198,35 @@ CONTEXT_TOOL_SPECS: tuple[tuple[str, str, dict[str, Any], str], ...] = (
         "log file.  The packet is the file "
         "`$SESSION_DIR/reports/failures/<failure_id>.json`.",
         _FAILURE_ID_SCHEMA,
-        "get_failure",
+        ContextProvider.get_failure,
     ),
-    (
-        "get_variant_failures",
+    "get_variant_failures": ContextTool(
         "Return the most recent failure evidence entries across the session, "
         "optionally filtered to a single task_id.  Each entry is a JSON "
         "object with failure_id, variant_name, stage, error_class, "
         "error_excerpt, server_log_path, and workspace.  Use this to find "
         f"failure_ids you can then inspect with {qualified_context_tool_name('get_failure')}.",
         _VARIANT_FAILURES_SCHEMA,
-        "get_variant_failures",
+        ContextProvider.get_variant_failures,
     ),
-)
+}
 
 
-def _make_handler(
-    provider: ContextProvider,
-    method_name: str,
-) -> Callable[[dict[str, Any]], Any]:
-    """Build an async MCP handler returning the provider method's string."""
+def _make_handler(provider: ContextProvider, name: str) -> Callable[[dict[str, Any]], Any]:
+    """Build the async MCP handler of the context tool ``name``, answered by ``provider``."""
+    read = CONTEXT_TOOLS[name].read
 
     async def _handler(args: dict[str, Any]) -> dict[str, Any]:
-        """Invoke the bound provider method and wrap its string result."""
-        method = getattr(provider, method_name)
-        kwargs: dict[str, Any] = {}
-        if isinstance(args, dict):
-            if "top_k" in args:
-                kwargs["top_k"] = int(args["top_k"])
-            if "since_seq" in args:
-                kwargs["since_seq"] = int(args["since_seq"])
-            if "name" in args:
-                kwargs["name"] = str(args["name"])
-            if "failure_id" in args:
-                kwargs["failure_id"] = str(args["failure_id"])
-            if "task_id" in args:
-                kwargs["task_id"] = str(args["task_id"])
+        """Answer one call; ``args`` has passed the tool's input schema."""
         try:
-            text = method(**kwargs)
+            text = read(provider, **args)
         except Exception as exc:
-            log.exception("context tool handler %s raised", method_name)
+            log.exception("context tool handler %s raised", name)
             return {
                 "content": [{"type": "text", "text": f"error: {exc!r}"}],
                 "is_error": True,
             }
-        if not isinstance(text, str):
-            text = json.dumps(text, default=str)
-        log.info(
-            "context_tool pull: %s args=%s -> %d chars",
-            method_name,
-            kwargs or {},
-            len(text),
-        )
+        log.info("context_tool pull: %s args=%s -> %d chars", name, args, len(text))
         return {"content": [{"type": "text", "text": text}]}
 
     return _handler
@@ -256,8 +238,8 @@ def build_context_tools_server(sdk: Any, provider: ContextProvider) -> Any:
         sdk,
         MCP_SERVER_NAME,
         [
-            (tool_name, description, schema, _make_handler(provider, method_name))
-            for tool_name, description, schema, method_name in CONTEXT_TOOL_SPECS
+            (name, CONTEXT_TOOLS[name].description, CONTEXT_TOOLS[name].input_schema, _make_handler(provider, name))
+            for name in CONTEXT_TOOL_NAMES
         ],
     )
 
@@ -265,8 +247,9 @@ def build_context_tools_server(sdk: Any, provider: ContextProvider) -> Any:
 __all__ = [
     "CONTEXT_TOOL_NAMES",
     "CONTEXT_TOOL_QUALIFIED_NAMES",
-    "CONTEXT_TOOL_SPECS",
+    "CONTEXT_TOOLS",
     "ContextProvider",
+    "ContextTool",
     "MCP_SERVER_NAME",
     "build_context_tools_server",
     "qualified_context_tool_name",

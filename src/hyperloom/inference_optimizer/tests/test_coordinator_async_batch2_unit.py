@@ -206,9 +206,9 @@ async def test_context_inbox_reader_survives_scalar_specialist_findings(coord: C
 @pytest.mark.parametrize(
     ("owner", "source", "tool"),
     [
-        ("bus", "inbox_context_sync", "inbox"),
-        ("bus", "recent_outcomes_context_sync", "recent_outcomes"),
-        ("tasks", "running_context_sync", "running_tasks"),
+        ("bus", "inbox_context_sync", "get_inbox"),
+        ("bus", "recent_outcomes_context_sync", "get_recent_outcomes"),
+        ("tasks", "running_context_sync", "get_running_tasks"),
     ],
 )
 async def test_context_reader_failure_carries_traceback_to_the_log(

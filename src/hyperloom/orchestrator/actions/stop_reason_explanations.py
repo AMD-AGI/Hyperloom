@@ -117,8 +117,9 @@ STOP_REASON_EXPLANATIONS: dict[str, str] = {
         "on it; the best validated result was kept. A no_intent_streak observation naming the agent means it kept "
         "answering without emitting an intent; for the orchestration agent, agents/orchestration/mcp_setup.json "
         "records whether Claude Code offered it the emit_intent tool. Without one, its LLM backend kept failing for "
-        "an hour without one successful turn, and the backend_error observations name the agent and carry the error "
-        "each call returned: repair the backend (credentials, endpoint, quota, or a prompt the model rejects). "
-        "Resume once the cause is fixed."
+        "an hour without one successful turn; each failed call is a failed llm.call row in "
+        "reports/trace/trajectory/*.jsonl whose error_message is what the call returned, and a provider failure is "
+        "also a status=error row in reports/trace/llm_calls.jsonl: repair the backend (credentials, endpoint, quota, "
+        "or a prompt the model rejects). Resume once the cause is fixed."
     ),
 }

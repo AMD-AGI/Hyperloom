@@ -14,7 +14,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, AbstractSet, Any, Awaitable, Callable
 
-from hyperloom_common.env import env_float, env_int
+from hyperloom_common.env import env_float
 from hyperloom_common.timeutil import now_iso
 from hyperloom.orchestrator.knowledge.config import KnowledgeConfig, KnowledgeStoreMode
 from hyperloom.orchestrator.knowledge.recipe_kb import RecipeKB
@@ -81,7 +81,6 @@ from hyperloom.inference_optimizer.trace.trajectory_trace import (
     trajectory_span,
 )
 from hyperloom.common.deadline import Deadline, seconds_until
-from hyperloom_common.timeutil import format_exc_brief
 
 
 log = logging.getLogger(__name__)
@@ -225,17 +224,11 @@ class Coordinator:
 
         self._prompt_snapshots = PromptSnapshotTracker()
 
-        # Consecutive BackendErrors, the back-off exponent; crossing the threshold records one backend_unhealthy, which
-        # re-arms after a successful turn.
+        # Consecutive BackendErrors, the back-off exponent.
         self._backend_error_streak: int = 0
-        self._backend_error_alarm_armed: bool = True
         # Monotonic time the streak began, and before which the tick loop does not call the backend again.
         self._backend_error_since: float | None = None
         self._backend_retry_at: float = 0.0
-        self._backend_error_streak_threshold: int = max(
-            1,
-            env_int("INFERENCE_OPTIMIZER_BACKEND_ERROR_STREAK_THRESHOLD", default=5),
-        )
         # Run of consecutive turns that emitted no intent; a turn with an intent ends it.
         self._no_intent_streak: int = 0
 
@@ -958,12 +951,7 @@ class Coordinator:
                     latency_ms=int((time.perf_counter() - _t0) * 1000),
                     call_id=call_id,
                 )
-            await self.bus.record_observation(
-                "coordinator",
-                "observation",
-                {"kind": "backend_error", "agent": ORCHESTRATION_AGENT, "error": repr(exc)},
-            )
-            await self._track_backend_error_streak(exc)
+            self._track_backend_error_streak(exc)
             return None
         except NoIntentEmitted as exc:
             # No parseable intents; surface as observation so the next tick self-corrects.
@@ -972,7 +960,7 @@ class Coordinator:
             return None
         except Exception as exc:  # isolation boundary: one reactor turn
             log.exception("reactor pass for %s raised", ORCHESTRATION_AGENT)
-            await self._record_reactor_exception(exc)
+            self.record_exception(stage="reactor_pass", agent=ORCHESTRATION_AGENT, exc=exc)
             return None
         finally:
             trace_mcp_setup(self.session_dir, backend)
@@ -988,23 +976,9 @@ class Coordinator:
         await self._settle_routed_turn(result, request=request)
         return result
 
-    async def _record_reactor_exception(self, exc: Exception) -> None:
-        """Record an unexpected reactor-turn failure as an observation and a session exception."""
-        await self.bus.record_observation(
-            "coordinator",
-            "observation",
-            {"kind": "reactor_exception", "agent": ORCHESTRATION_AGENT, "error": format_exc_brief(exc, limit=500)},
-        )
-        self.record_exception(
-            stage="reactor_pass",
-            agent=ORCHESTRATION_AGENT,
-            exc=exc,
-        )
-
     def _reset_backend_error_streak(self) -> None:
-        """Clear the backend-error streak and re-arm its alarm: a successful turn proves the backend is alive again."""
+        """Clear the backend-error streak: a successful turn proves the backend is alive again."""
         self._backend_error_streak = 0
-        self._backend_error_alarm_armed = True
         self._backend_error_since = None
         self._backend_retry_at = 0.0
 
@@ -1038,11 +1012,12 @@ class Coordinator:
         except LLMTraceRowError:
             log.debug("full-trace: reactor llm_call failure append failed", exc_info=True)
 
-    async def _track_backend_error_streak(self, exc: BackendError) -> None:
+    def _track_backend_error_streak(self, exc: BackendError) -> None:
         """Extend the ``BackendError`` streak and back the next turn off.
 
         A streak that has lasted ``_BACKEND_UNHEALTHY_STOP_SEC`` stops the session unless something else already has.
-        Crossing the threshold emits one backend_unhealthy event, which re-arms only after a successful turn.
+        The failed call is not told to the agent: its turn never settled, so what admitted it still does, and the
+        error is on the call's ``llm.call`` trajectory row.
         """
         from hyperloom.inference_optimizer.breakdown.stop_reasons import BACKEND_UNHEALTHY_STOP_REASON
 
@@ -1061,22 +1036,6 @@ class Coordinator:
                 failing_sec,
             )
             self.shared_state.set_stop_reason(BACKEND_UNHEALTHY_STOP_REASON)
-        threshold = self._backend_error_streak_threshold
-        if streak >= threshold and self._backend_error_alarm_armed:
-            self._backend_error_alarm_armed = False
-            await self.bus.record_observation(
-                "coordinator",
-                "observation",
-                {
-                    "kind": "backend_unhealthy",
-                    "agent": ORCHESTRATION_AGENT,
-                    "consecutive_errors": streak,
-                    "threshold": threshold,
-                    "latest_error": repr(exc)[:500],
-                    "severity": "high",
-                    "hint": "the backend has failed >= threshold times consecutively; repair its transport",
-                },
-            )
 
     async def _record_no_intent_turn(self, error: str) -> None:
         """Record a turn that emitted no intent and extend the no-intent streak.
