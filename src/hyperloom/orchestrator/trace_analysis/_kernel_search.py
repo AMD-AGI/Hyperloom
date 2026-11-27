@@ -10,7 +10,6 @@ import logging
 import os
 import re
 from functools import lru_cache
-from pathlib import Path
 
 from hyperloom.inference_optimizer.framework_paths import (
     FRAMEWORK_SOURCE_PACKAGES as _FRAMEWORK_SOURCE_PACKAGES,
@@ -123,27 +122,6 @@ def refresh_kernel_search_roots() -> tuple[str, ...]:
     """
     kernel_search_roots.cache_clear()
     return kernel_search_roots()
-
-
-def find_repo_root(source_file: str) -> str:
-    """Walk upward from source_file until we find a .git/ dir; return the dir.
-
-    Returns "" when no git repo root is found.
-
-    Args:
-        source_file (str): Path to a file inside a (possibly) git repo.
-
-    Returns:
-        str: The directory containing the nearest ``.git`` ancestor, or
-            ``""`` when none is found.
-    """
-    if not source_file:
-        return ""
-    p = Path(source_file).expanduser().resolve()
-    for parent in [p] + list(p.parents):
-        if (parent / ".git").exists():
-            return str(parent)
-    return ""
 
 
 _NAMESPACE_BLOCKLIST = {

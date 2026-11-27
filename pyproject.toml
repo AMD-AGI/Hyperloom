@@ -319,11 +319,6 @@ hyperloom = [
     "SKILL.md",
     "README.md",
 ]
-# Vendor-operator-playbook registry (see trace_analysis/_vendor_operator_playbooks.py):
-# read at runtime by classify_patchability(), so it must ship.
-"hyperloom.orchestrator.trace_analysis" = [
-    "vendor_operator_playbooks.json",
-]
 # Breakdown skill assets; the only SKILL.md under src/ that did not ship.
 "hyperloom.inference_optimizer.breakdown" = [
     "*.md",

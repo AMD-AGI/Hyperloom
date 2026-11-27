@@ -30,8 +30,6 @@ from ..state.kernel_decision_settings import (
     _DEFAULT_HOT_KERNEL_GATE_TOP_N,
     _MAX_INTEGRATE_E2E_ATTEMPTS,
     _MAX_INTEGRATE_FAULT_ATTEMPTS,
-    effective_hot_kernel_gpu_pct,
-    effective_hot_kernel_min_gpu_pct,
     resolve_hot_kernel_min_gpu_pct,
 )
 
@@ -551,14 +549,12 @@ def _hot_rows(hot: list[Any], min_gpu_pct: float) -> list[_HotRow]:
     for k in hot:
         if not isinstance(k, dict) or k.get("reusable_native_kernel") is not True:
             continue
-        # Vendor-playbook groups (mori's dispatch+combine) are gated on the sum of the group's members, not each
-        # member's own share, and may pin a per-playbook floor -- see effective_hot_kernel_gpu_pct's docstring.
-        if effective_hot_kernel_gpu_pct(k) < effective_hot_kernel_min_gpu_pct(k, min_gpu_pct):
+        gpu_pct = to_float(k.get("gpu_pct"), 0.0)
+        if gpu_pct < min_gpu_pct:
             continue
         kid = str(k.get("kernel_id") or "")
         if not kid:
             continue
-        gpu_pct = to_float(k.get("gpu_pct"), 0.0)
         src = str(k.get("source_file") or "")
         rank = int(k.get("tracelens_pitem_rank") or 0)
         rows.append(

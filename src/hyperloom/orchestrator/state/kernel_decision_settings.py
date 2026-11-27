@@ -31,32 +31,6 @@ def resolve_hot_kernel_min_gpu_pct() -> float:
         return _DEFAULT_HOT_KERNEL_MIN_GPU_PCT
 
 
-def effective_hot_kernel_gpu_pct(candidate: dict) -> float:
-    """GPU-time share used for the hot-kernel gate."""
-    try:
-        row_pct = float(candidate.get("gpu_pct") or 0.0)
-    except (TypeError, ValueError):
-        row_pct = 0.0
-    aggregate = candidate.get("vendor_playbook_aggregate_gpu_pct")
-    if aggregate is None:
-        return row_pct
-    try:
-        return max(row_pct, float(aggregate))
-    except (TypeError, ValueError):
-        return row_pct
-
-
-def effective_hot_kernel_min_gpu_pct(candidate: dict, min_gpu_pct: float) -> float:
-    """Threshold ``candidate`` must clear, honoring a playbook's own floor."""
-    floor = candidate.get("vendor_playbook_min_gpu_pct_floor")
-    if floor is None:
-        return min_gpu_pct
-    try:
-        return max(min_gpu_pct, float(floor))
-    except (TypeError, ValueError):
-        return min_gpu_pct
-
-
 # Only the top-N reusable hot kernels are enforced.
 _DEFAULT_HOT_KERNEL_GATE_TOP_N = 5
 

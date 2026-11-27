@@ -92,11 +92,6 @@ def _hot_kernel_row(entry: dict[str, Any]) -> dict[str, Any]:
         "candidate_source": entry.get("candidate_source") or "",
         "recommended_backends": entry.get("recommended_backends") or [],
         "recommended_actions": entry.get("recommended_actions") or [],
-        # Vendor-playbook fields; see _vendor_operator_playbooks.py.
-        "patch_strategy": entry.get("patch_strategy") or "",
-        "vendor_playbook_group_id": entry.get("vendor_playbook_group_id") or "",
-        "vendor_playbook_aggregate_gpu_pct": entry.get("vendor_playbook_aggregate_gpu_pct"),
-        "vendor_playbook_min_gpu_pct_floor": entry.get("vendor_playbook_min_gpu_pct_floor"),
     }
 
 

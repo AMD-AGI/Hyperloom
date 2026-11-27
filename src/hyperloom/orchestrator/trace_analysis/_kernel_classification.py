@@ -21,11 +21,6 @@ from hyperloom.inference_optimizer.framework_paths import (
 
 from ._kernel_search import _candidate_keywords, is_runtime_api_name
 
-# Vendor-operator-playbook registry: routes a closed-source vendor op (no
-# rewritable device source) to a validated KernelForge task bundle instead of
-# a source rewrite -- see KernelForge PR #88's mori dispatch/combine gap.
-from ._vendor_operator_playbooks import match_vendor_operator_playbook
-
 # source_type_for asks TraceLens whether a ``.py`` defines the traced Triton kernel.
 try:
     from TraceLens.TraceUtils.kernel_source.triton_pin import triton_def_line as _triton_def_line
@@ -380,10 +375,6 @@ def classify_patchability(candidate: dict[str, Any]) -> tuple[bool, str]:
     verdict = _resolver_verdict(candidate, source_file)
     if verdict is not None:
         return verdict
-    # A vendor operator with a validated KernelForge task bundle is tuned through launch knobs, never rewritten,
-    # so it passes before the source-file and vendor-binary rejections below.
-    if match_vendor_operator_playbook(candidate) is not None:
-        return True, ""
     if not source_file:
         # A bare launch API has no kernel body to rewrite, which is a different
         # situation from a kernel whose source we merely failed to locate. Say
