@@ -128,7 +128,9 @@ class Bench:
         blobs = LocalBlobStore(tmp_path / "blobs")
         self.repo = GitExperimentRepo(self.repo_path, blobs)
         self.toolbox = RecordingToolbox(
-            LocalBlackboard(tmp_path / "nb", Writer(Role.TOOLBOX, "toolbox"), clock=clock.now), repo=self.repo
+            LocalBlackboard(tmp_path / "nb", Writer(Role.TOOLBOX, "toolbox"), clock=clock.now),
+            repo=self.repo,
+            clock=clock.now,
         )
         self.sessions = RecordedSessions(self.toolbox, self.repo, self.blackboard, steps=steps)
         self.runtime = specialist_runtime(

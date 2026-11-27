@@ -288,7 +288,8 @@ arrived, judgements and briefs. A test in state pending_build waits for a native
 says such a build is ready and the test queues for cards, or that it failed on the machine and is retried; neither \
 asks anything of you. A test whose build your change broke ends candidate_failed with a compile_error and the compiler's \
 excerpt: fix the change. A submission refused as build_after_deadline would end past your branch's deadline: do not \
-resubmit it; test a change that needs no new build instead. A tool reply can end with a block headed "New for your branch since your last call:": \
+resubmit it; test a change that needs no new build instead. A test refused or withdrawn as test_after_deadline would \
+end past your deadline: submit no more tests of that kind; a shorter kind may still fit; wrap up when none does. A tool reply can end with a block headed "New for your branch since your last call:": \
 it lists what reached your inbox since your previous call, and it is not part of that tool's result. A "brief" item means the session moved under your branch: call blackboard_brief with the head it names and \
 reconsider your direction before your next claim. A "merge" item says how the integrator's merge of commits of yours \
 onto the integration head ended: merged, not stackable there, conflicted or already on it.

@@ -16,6 +16,7 @@ import pytest
 
 from hyperloom_multibranch.scheduling import budget
 from hyperloom_multibranch.scheduling.budget import ExploreCap, FinalWork, SessionBudget
+from hyperloom_multibranch.scheduling.explore import EXPLORE_TICK_SECONDS
 from hyperloom_multibranch.scheduling.resumption import deadline_after_downtime, resumable_run
 from hyperloom_multibranch.scheduling.session_types import SessionOutcome
 from hyperloom_multibranch.scheduling.stops import SessionStopReason
@@ -116,6 +117,28 @@ async def test_explore_s_end_is_asked_again_while_it_runs_and_ends_explore_once_
     assert final < opened + SETTINGS.judge_interval_seconds, "the end is asked every tick, not every judge interval"
     assert works[0].parallel == SETTINGS.caps.max_parallel_tests and works[0].test_seconds > 0
     assert outcome.final is not None and outcome.final.chosen is not None
+
+
+async def test_explore_s_end_pulled_earlier_becomes_the_running_branches_deadline_in_the_toolbox_s_policy(
+    tmp_path: Path,
+) -> None:
+    stage = _stage(tmp_path)
+    pulled: list[float] = []
+
+    def cap(_work: FinalWork) -> float:
+        if not stage.toolbox.policies or not stage.toolbox.policies[-1].branch_deadline:
+            return math.inf
+        if not pulled:
+            pulled.append(stage.time.now() + 10 * EXPLORE_TICK_SECONDS)
+        return pulled[0]
+
+    outcome = await _run(stage, cap)
+
+    assert outcome.stop_reason is SessionStopReason.TIME_EXHAUSTED and pulled
+    deadlines = [set(policy.branch_deadline.values()) for policy in stage.toolbox.policies if policy.branch_deadline]
+    explore_end = float(str(_phase(stage, "explore")["detail"]["explore_end"]))  # type: ignore[index]
+    assert deadlines[0] == {explore_end} and pulled[0] < explore_end
+    assert deadlines[-1] == {pulled[0]}, "the running branches' deadline is EXPLORE's end as it was pulled earlier"
 
 
 async def test_a_resumed_session_ends_explore_at_the_cap_it_is_given_and_final_still_runs(tmp_path: Path) -> None:

@@ -23,6 +23,7 @@ from hyperloom.contracts.recipe import ConfigDelta, RecipeDelta
 from hyperloom_multibranch.contracts.blackboard.records import BuildNotice
 from hyperloom_multibranch.contracts.blackboard.vocab import BuildOutcome
 from hyperloom_multibranch.contracts.toolbox import (
+    REJECTION_CODES,
     Backpressure,
     BuildState,
     BuildStatus,
@@ -33,7 +34,7 @@ from hyperloom_multibranch.contracts.toolbox import (
 from hyperloom_multibranch.toolbox.tests.fake import FakeToolbox, FakeWiring, MemoryBlackboard
 from hyperloom_multibranch.toolbox.tests.fake_builds import FakeBuild, FakeBuildDriver, FakeBuildEnd
 from hyperloom_multibranch.toolbox.tests.fake_model import FakeToolboxConfig
-from hyperloom_multibranch.toolbox.pending_builds import BUILD_AFTER_DEADLINE
+from hyperloom_multibranch.toolbox.pending_builds import BUILD_AFTER_DEADLINE, TEST_AFTER_DEADLINE
 from hyperloom_multibranch.toolbox.queue import QueuePolicy
 
 KERNEL = "sgl_kernel"
@@ -243,14 +244,90 @@ async def test_the_deadline_counts_the_median_test_of_the_kind_after_the_build()
     await box.drain()
 
 
-async def test_a_deadline_does_not_refuse_a_test_whose_builds_are_ready() -> None:
-    box, driver, _ = _rig()
+async def test_a_deadline_does_not_count_the_eta_of_builds_that_are_ready() -> None:
+    box, driver, _ = _rig(attempt_seconds=600.0)
     await box.submit_test(_request("b2", server_args="--native a"))
     await box.drain()
-    await box.set_policy(_deadline(box, 1.0))
+    await box.set_policy(_deadline(box, 600 + ETA - 1))
     request_id = await box.submit_test(_request(server_args="--native a"))
     await box.drain()
     assert box.results[request_id].builds[0].payment is BuildPayment.REUSED
+
+
+async def test_a_test_without_builds_that_would_end_past_the_deadline_is_refused_and_nothing_is_written() -> None:
+    box, _, blackboard = _rig(attempt_seconds=1800.0)
+    await box.submit_test(_request(branch="b2"))
+    await box.drain()
+    written = list(blackboard.log)
+    await box.set_policy(_deadline(box, 300))
+    with pytest.raises(RequestRejected) as refused:
+        await box.submit_test(_request())
+    assert refused.value.code == TEST_AFTER_DEADLINE and "one test (1800 s)" in refused.value.reason
+    assert TEST_AFTER_DEADLINE in REJECTION_CODES
+    assert blackboard.log == written and len(box.requests) == 1
+
+
+async def test_a_test_without_builds_is_admitted_when_one_test_ends_before_the_deadline() -> None:
+    box, _, _ = _rig(attempt_seconds=1800.0)
+    await box.submit_test(_request(branch="b2"))
+    await box.drain()
+    await box.set_policy(_deadline(box, 1900))
+    request_id = await box.submit_test(_request())
+    await box.drain()
+    assert box.results[request_id].validity is Validity.SUCCEEDED
+
+
+async def test_a_test_without_builds_is_admitted_while_no_test_of_its_kind_has_finished() -> None:
+    box, _, _ = _rig()
+    await box.set_policy(_deadline(box, 1.0))
+    request_id = await box.submit_test(_request())
+    await box.drain()
+    assert box.results[request_id].validity is Validity.SUCCEEDED
+
+
+async def _queued_behind_a_running_test(seconds_to_deadline: float) -> tuple[FakeToolbox, MemoryBlackboard, str]:
+    """A test of b1 admitted with its deadline ``seconds_to_deadline`` away, queued behind a test of b2 that holds the
+    only card; a test takes 1800 s."""
+    box, _, blackboard = _rig(autorun=False, attempt_seconds=1800.0, max_parallel_tests=1)
+    box.executor.gate.set()
+    await box.submit_test(_request(branch="b2"))
+    await box.drain()
+    box.executor.gate.clear()
+    await box.submit_test(_request(branch="b2"))
+    await box.set_policy(_deadline(box, seconds_to_deadline))
+    request_id = await box.submit_test(_request())
+    assert (await box.progress(request_id)).state == "queued"  # type: ignore[union-attr]
+    return box, blackboard, request_id
+
+
+def _withdrawals(blackboard: MemoryBlackboard) -> dict[str, str]:
+    return {item.request_id: item.reason for kind, item in blackboard.log if kind == "withdrawal"}  # type: ignore[union-attr]
+
+
+async def test_a_test_queued_until_it_would_end_past_the_deadline_is_withdrawn_unstarted_and_the_next_runs() -> None:
+    box, blackboard, request_id = await _queued_behind_a_running_test(1900)
+    behind = await box.submit_test(_request(branch="b3"))
+    box.executor.gate.set()
+    await box.drain()
+    assert _withdrawals(blackboard)[request_id].startswith(f"{TEST_AFTER_DEADLINE}: one test (1800 s)")
+    assert request_id not in box.results
+    assert box.results[behind].validity is Validity.SUCCEEDED and box.now == START + 3 * 1800
+
+
+async def test_a_queued_test_whose_deadline_comes_forward_is_withdrawn_unstarted_when_it_no_longer_fits() -> None:
+    box, blackboard, request_id = await _queued_behind_a_running_test(10_000)
+    await box.set_policy(_deadline(box, 3000))
+    box.executor.gate.set()
+    await box.drain()
+    assert _withdrawals(blackboard)[request_id].startswith(TEST_AFTER_DEADLINE)
+    assert request_id not in box.results and box.now == START + 2 * 1800
+
+
+async def test_a_queued_test_that_still_fits_when_its_turn_comes_starts() -> None:
+    box, blackboard, request_id = await _queued_behind_a_running_test(3700)
+    box.executor.gate.set()
+    await box.drain()
+    assert box.results[request_id].validity is Validity.SUCCEEDED and _withdrawals(blackboard) == {}
 
 
 # --- a restart while a test waits for its build ------------------------------------------------------------------------

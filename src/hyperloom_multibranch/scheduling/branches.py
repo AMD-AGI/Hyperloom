@@ -416,6 +416,11 @@ class BranchControl:
                 failures.extend(await self.stop_branch(entry.branch, BranchStop(stop.cause, reason, stop.at)))
         return failures
 
+    def bring_deadlines_forward(self, end: float) -> None:
+        """EXPLORE now ends at ``end``: no branch's deadline lies past it. The toolbox gets them with the next quota."""
+
+        self._deadlines = {branch: min(deadline, end) for branch, deadline in self._deadlines.items()}
+
     async def push_quota(self) -> None:
         await self._toolbox.set_policy(self._roster.quota_policy(await self._busy_branches(), self._deadlines))
 

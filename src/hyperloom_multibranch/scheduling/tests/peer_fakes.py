@@ -22,7 +22,6 @@ import itertools
 import json
 import os
 import subprocess
-import time
 from collections.abc import AsyncIterator, Awaitable, Callable, Mapping, Sequence
 from concurrent.futures import Future, InvalidStateError, ThreadPoolExecutor
 from dataclasses import dataclass, field, replace
@@ -557,7 +556,8 @@ class RecordingToolbox(FakeToolbox):
     session directory, so a second toolbox over that directory hands out request ids where the first one left off;
     without one it goes with the toolbox. ``repo`` is the bench's experiment repository, which acceptance reads each
     parent's recipe from as the real toolbox does, so a delta onto a head that already pins a component is accepted
-    without naming its upstream again.
+    without naming its upstream again. ``clock`` is the session's clock, which the toolbox reads (see
+    :class:`~hyperloom_multibranch.toolbox.tests.fake.FakeWiring`).
     """
 
     def __init__(
@@ -569,6 +569,7 @@ class RecordingToolbox(FakeToolbox):
         log: Path | None = None,
         *,
         repo: ExperimentRepo,
+        clock: Callable[[], float] | None = None,
     ):
         quiet = NoiseModel(node_bias_median=0.0, node_bias_p90=0.0, test_noise_sigma=0.0)
         config = FakeToolboxConfig(
@@ -578,7 +579,9 @@ class RecordingToolbox(FakeToolbox):
             main_concurrency=(conc,),
             image_digest=BASE_IMAGE_DIGEST,
         )
-        super().__init__(config, blackboard=blackboard, wiring=FakeWiring(records=blackboard, log_path=log, repo=repo))
+        super().__init__(
+            config, blackboard=blackboard, wiring=FakeWiring(records=blackboard, log_path=log, repo=repo, clock=clock)
+        )
         self.serving = False
         self.policies: list[QueuePolicy] = []
         self.cancelled: list[str] = []
@@ -635,7 +638,6 @@ class LeasingToolbox(RecordingToolbox):
         self.released: list[str] = []
         self.beside_a_lease: list[tuple[Purpose, bool]] = []
         self.lease_refusal: RequestRejected | None = None
-        self.clock: Callable[[], float] = time.time
 
     async def lease_branch_sandbox(
         self, branch_id: str, cards: int, *, wait_sec: float | None = None, charge: LeaseCharge | None = None
