@@ -88,7 +88,7 @@ def _run(args: argparse.Namespace) -> int:
         cluster = cluster_of(nodes, args.record)
         launch = placed_launch(nodes, args.record)
         if args.action == "stop":
-            stop(launch, cluster, _options(args))
+            stop(launch, cluster)
             return EXIT_OK
         if args.action == "restart":
             ran = restart(launch, _overrides(args), cluster, _options(args))
