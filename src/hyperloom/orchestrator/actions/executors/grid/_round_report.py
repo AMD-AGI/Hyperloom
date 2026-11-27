@@ -5,16 +5,12 @@
 
 from __future__ import annotations
 
-import csv
-import logging
 from pathlib import Path
 from typing import Any
 
 from .._round_folder import RoundFolder
 from ..benchmark_result import extract_benchmark_measurement, harvest_mn_gpu_metrics
 from ._grid_base import WARMUP_ROUND_DIR
-
-log = logging.getLogger(__name__)
 
 
 def record_round(run_dir: Path, *, started_unix: float) -> dict[str, Any]:
@@ -23,10 +19,7 @@ def record_round(run_dir: Path, *, started_unix: float) -> dict[str, Any]:
     A multi-node round's pod GPU samples are merged into the run_dir as ``gpu_metrics.csv``; ``gpu_metrics.json`` goes
     into the round directory holding the run_dir.
     """
-    try:
-        harvest_mn_gpu_metrics(run_dir, subprocess_started_unix=started_unix)
-    except (OSError, ValueError, csv.Error) as exc:
-        log.warning("grid_runner: MN GPU-metrics harvest failed: %s", exc)
+    harvest_mn_gpu_metrics(run_dir, subprocess_started_unix=started_unix)
     RoundFolder.read(run_dir).write_gpu_metrics(run_dir.parent)
     return extract_benchmark_measurement(run_dir)
 

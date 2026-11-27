@@ -3,16 +3,15 @@
 
 """Per-round GPU telemetry, normalised out of the round's own benchmark report.
 
-The numbers are already collected -- a single-node GPU monitor, the pod-side ``rocm-smi`` sampler on several -- and
-land in ``benchmark_report.json`` under ``gpu_monitor``. What was missing is a reading of them that a
-consumer can trust, per round, without knowing which producer wrote the block.
+The numbers are already collected by the round's GPU monitor and land in its report under ``gpu_monitor``. What was
+missing is a reading of them that a consumer can trust, per round, without knowing which producer wrote the block.
 
 Two things make that non-trivial, and both have burned this data before:
 
 * **The producers disagree on names and on shape.** The single-node monitor writes ``power_watts`` as a pre-aggregated
-  ``{min, max, avg}`` block; an archived multi-node report carries ``power_w`` as a flat scalar per sample. Reading only the
-  short spelling is what left every single-node session's GPU numbers reading 0.0 -- not absent, *zero*, which is a
-  plausible-looking lie.
+  ``{min, max, avg}`` block; an archived multi-node report carries ``power_w`` as a flat scalar per sample. Reading
+  only the short spelling is what left every single-node session's GPU numbers reading 0.0 -- not absent, *zero*,
+  which is a plausible-looking lie.
 * **Absent and zero are different findings.** A card that drew no power and a card nobody sampled must not produce the
   same number. Every metric here is ``float | None`` and is never coerced.
 
