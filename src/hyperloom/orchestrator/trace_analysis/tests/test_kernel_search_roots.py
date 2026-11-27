@@ -12,7 +12,6 @@ from __future__ import annotations
 import logging
 from pathlib import Path
 
-from hyperloom.orchestrator.trace_analysis import _harness_discovery as harness_discovery
 from hyperloom.orchestrator.trace_analysis import _kernel_search as kernel_search
 
 
@@ -130,19 +129,5 @@ class TestRefreshKernelSearchRoots:
         assert kernel_search.refresh_kernel_search_roots() == (str(appears),)
         assert kernel_search.kernel_search_roots() == (str(appears),)
 
-    def test_everything_derived_from_the_roots_is_dropped_with_them(self, monkeypatch, tmp_path):
-        """A stale derived cache reproduces the bug one step further on."""
-        checkout = tmp_path / "sgl-workspace" / "aiter"
-        monkeypatch.setattr(kernel_search, "_resolve_kernel_search_roots", lambda: (str(checkout),))
-        kernel_search.kernel_search_roots.cache_clear()
-        harness_discovery._harness_search_bases.cache_clear()
-        assert harness_discovery._harness_search_bases() == ()
-
-        checkout.mkdir(parents=True)
-        kernel_search.refresh_kernel_search_roots()
-
-        assert harness_discovery._harness_search_bases() == (str(checkout.parent), str(checkout))
-
     def teardown_method(self):
         kernel_search.kernel_search_roots.cache_clear()
-        harness_discovery._harness_search_bases.cache_clear()

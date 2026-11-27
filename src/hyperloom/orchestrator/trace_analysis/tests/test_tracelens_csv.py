@@ -19,7 +19,6 @@ import yaml
 from hyperloom.orchestrator.trace_analysis import tracelens_analysis as tla
 from hyperloom.orchestrator.trace_analysis import _analysis_reports as analysis_reports
 from hyperloom.orchestrator.trace_analysis import _candidate_assembly as candidate_assembly
-from hyperloom.orchestrator.trace_analysis import _harness_discovery as harness_discovery
 from hyperloom.orchestrator.trace_analysis import _kernel_classification as kernel_classification
 from hyperloom.orchestrator.trace_analysis import _kernel_roofline as kernel_roofline
 from hyperloom.orchestrator.trace_analysis import _kernel_search as kernel_search
@@ -227,33 +226,6 @@ def test_unknown_source_root_is_not_reusable_native():
     assert candidate["source_type"] == "hip_cpp"
     assert kernel_classification.classify_patchability(candidate)[0] is False
     assert candidate_assembly.recommend_backends(candidate) == []
-
-
-def test_known_rmsnorm_harness_is_registered_without_repo_root(monkeypatch, tmp_path):
-    """A curated harness is found from the kernel name alone, with no repo root."""
-    harness = tmp_path / "aiter" / "op_tests" / "test_rmsnorm2d.py"
-    harness.parent.mkdir(parents=True)
-    harness.write_text("def test_rmsnorm2d(): pass\n", encoding="utf-8")
-    monkeypatch.setattr(kernel_search, "kernel_search_roots", lambda: (str(tmp_path / "aiter"),))
-    harness_discovery._harness_search_bases.cache_clear()
-
-    files = harness_discovery.find_benchmark_files(
-        "_ZN5aiter24add_rmsnorm_quant_kernelIDF16bDF16bLi256EEEv",
-        "",
-        "/sgl-workspace/aiter/csrc/kernels/rmsnorm_quant_kernels.cu",
-    )
-    harness_discovery._harness_search_bases.cache_clear()
-
-    assert files == [str(harness)]
-
-
-def test_absent_curated_harness_is_not_reported(monkeypatch, tmp_path):
-    """A hint that resolves nowhere yields nothing, not an unopenable path."""
-    monkeypatch.setattr(kernel_search, "kernel_search_roots", lambda: (str(tmp_path / "aiter"),))
-    harness_discovery._harness_search_bases.cache_clear()
-    files = harness_discovery.find_benchmark_files("kernel_paged_attention_2d", "", "/pkg/attention.py")
-    harness_discovery._harness_search_bases.cache_clear()
-    assert files == []
 
 
 def test_125_derive_category_explicit_wins_over_heuristic():
@@ -2776,19 +2748,6 @@ def test_classify_patchability_rejects_cpp_itfs_py_host_launcher(monkeypatch):
     )
     assert reusable is False
     assert "cpp_itfs host launcher" in reason
-
-
-def test_library_token_pairing():
-    """Library detection keeps kernel<->benchmark same-lib."""
-    assert harness_discovery._library_token("/sgl-workspace/aiter/op_tests/test_activation.py") == "aiter"
-    # sgl-kernel / sgl_kernel normalize to sglang.
-    assert harness_discovery._library_token("/sgl-workspace/sglang/sgl-kernel/include/hip/x.cuh") == "sglang"
-    assert harness_discovery._library_token("/sgl-workspace/sglang/python/sglang/srt/x.py") == "sglang"
-    assert harness_discovery._library_token("/random/path/foo.py") == ""
-    # A sglang kernel and an aiter test are different libraries -> must not pair.
-    src = "/sgl-workspace/sglang/sgl-kernel/include/hip/hip_act_and_mul.cuh"
-    test = "/sgl-workspace/aiter/op_tests/test_activation.py"
-    assert harness_discovery._library_token(src) != harness_discovery._library_token(test)
 
 
 def test_classify_patchability_allows_aiter_device_source_unknown_type(monkeypatch):

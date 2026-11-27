@@ -15,7 +15,6 @@ from hyperloom.common import kernel_source_contract as _KSC
 from hyperloom_common.io import JsonFormat, atomic_write_json
 from hyperloom_common.kernel_names import without_model_names
 
-from ._harness_discovery import find_benchmark_files, find_repo_root
 from ._io_utils import append_log
 from ._kernel_category import canonical_category
 from ._kernel_classification import (
@@ -25,6 +24,7 @@ from ._kernel_classification import (
     source_type_for,
 )
 from ._kernel_roofline import _resolve_flydsl_source_fallback
+from ._kernel_search import find_repo_root
 from ._trace_shapes import (
     _FUSED_MOE_KERNEL_MARKER,
     resolve_fused_moe_invocation_cases_from_csv,
@@ -220,9 +220,6 @@ def _stamp_candidate_metadata(item: dict[str, Any], op_cat_map: dict[str, str] |
             # only auditable if the value it replaced is still recorded.
             item["source_file_superseded_by_playbook"] = source_file
         item["source_file"] = anchor
-    item["benchmark_files"] = find_benchmark_files(
-        item["name"], item.get("kernel_repo", ""), item.get("source_file", "")
-    )
     # The nccl-summary lane identifies collectives from TraceLens' own nccl_summary table plus a resolved device
     # symbol, which outranks a name guess. Re-deriving over it unresolves rows the lane already resolved:
     # small_collective, EpDispatchIntraNodeKernel_bf16 and ncclDevKernel_Generic_1 all carry is_multigpu=True from

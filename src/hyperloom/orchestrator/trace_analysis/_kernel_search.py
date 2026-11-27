@@ -10,6 +10,7 @@ import logging
 import os
 import re
 from functools import lru_cache
+from pathlib import Path
 
 from hyperloom.inference_optimizer.framework_paths import (
     FRAMEWORK_SOURCE_PACKAGES as _FRAMEWORK_SOURCE_PACKAGES,
@@ -114,48 +115,35 @@ def kernel_search_roots() -> tuple[str, ...]:
     return tuple(roots)
 
 
-@lru_cache(maxsize=1)
-def _harness_search_bases() -> tuple[str, ...]:
-    """Directories a checkout-relative harness path may be joined onto.
-
-    A hint reads ``aiter/op_tests/...``, so the base is whatever holds the
-    ``aiter`` checkout. Each resolved search root contributes both itself and
-    its parent, because a root is the package directory on a wheel install
-    (``.../dist-packages/aiter``) and the checkout itself in a serving image
-    (``/sgl-workspace/aiter``); one join is the right one and the other simply
-    does not exist.
-
-    Returns:
-        tuple[str, ...]: Existing base directories, de-duplicated.
-    """
-    bases: list[str] = []
-    seen: set[str] = set()
-    for root in kernel_search_roots():
-        trimmed = root.rstrip("/")
-        for base in (os.path.dirname(trimmed), trimmed):
-            if base and base not in seen and os.path.isdir(base):
-                seen.add(base)
-                bases.append(base)
-    return tuple(bases)
-
-
 def refresh_kernel_search_roots() -> tuple[str, ...]:
-    """Re-run root discovery, dropping every answer derived from the old roots.
-
-    :func:`_harness_search_bases` is cached for the same run and derived from
-    these roots, so clearing one without the other reproduces the bug this
-    function exists to fix, one step further on: the second analysis in a
-    long-lived orchestrator would grep the freshly installed framework and still
-    resolve its harnesses against the bases discovered when it was absent, so
-    ``benchmark_files`` comes back empty and the invocation spec reaches the
-    backend with no benchmark to run.
+    """Re-run root discovery, dropping the roots cached for the previous run.
 
     Returns:
         tuple[str, ...]: The freshly discovered roots.
     """
     kernel_search_roots.cache_clear()
-    _harness_search_bases.cache_clear()
     return kernel_search_roots()
+
+
+def find_repo_root(source_file: str) -> str:
+    """Walk upward from source_file until we find a .git/ dir; return the dir.
+
+    Returns "" when no git repo root is found.
+
+    Args:
+        source_file (str): Path to a file inside a (possibly) git repo.
+
+    Returns:
+        str: The directory containing the nearest ``.git`` ancestor, or
+            ``""`` when none is found.
+    """
+    if not source_file:
+        return ""
+    p = Path(source_file).expanduser().resolve()
+    for parent in [p] + list(p.parents):
+        if (parent / ".git").exists():
+            return str(parent)
+    return ""
 
 
 _NAMESPACE_BLOCKLIST = {
