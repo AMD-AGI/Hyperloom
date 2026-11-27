@@ -155,6 +155,46 @@ async def test_codex_relaunch_in_the_same_workspace_does_not_duplicate_tables(tm
     assert text.count("[mcp_servers.tools]") == 1
 
 
+DUMP_HARNESS = (
+    "import json, os, pathlib, sys\n"
+    "seen = {'argv': sys.argv[1:], 'home': os.environ.get('DSH_HOME'), 'claude': os.environ.get('CLAUDE_CONFIG_DIR')}\n"
+    "pathlib.Path('seen_harness.json').write_text(json.dumps(seen))\n"
+    "pathlib.Path('specialist_done.json').write_text('{}')\n"
+)
+
+
+async def test_the_deepseek_harness_gets_a_home_in_its_workspace_and_the_mcp_config_on_its_command_line(
+    tmp_path: Path,
+) -> None:
+    ws = tmp_path / "w"
+    spec = make_spec(ws, code=DUMP_HARNESS, backend="deepseek", env={"CLAUDE_CONFIG_DIR": str(tmp_path / "user")})
+    await run_to_end(tmp_path, spec)
+
+    seen = json.loads((ws / "seen_harness.json").read_text(encoding="utf-8"))
+    assert seen["home"] == str(ws / ".dsh")
+    assert seen["argv"] == ["--mcp-config", str(ws / "runtime" / "specialist_mcp.json")]
+    # A Claude CLI's private config dir is a Claude launch's: the harness is given none.
+    assert seen["claude"] == str(tmp_path / "user") and not (ws / ".claude-config").exists()
+    runtime = json.loads((ws / "agent_runtime.json").read_text(encoding="utf-8"))
+    assert (runtime["backend"], runtime["config_dir_mode"]) == ("deepseek", None)
+    # The version is the installed harness SDK's, never what `python --version` prints.
+    assert runtime["version"] != "test-1.0"
+
+
+async def test_the_deepseek_harness_without_mcp_servers_gets_no_mcp_config(tmp_path: Path) -> None:
+    ws = tmp_path / "w"
+    await run_to_end(tmp_path, make_spec(ws, code=DUMP_HARNESS, backend="deepseek", mcp=False))
+
+    seen = json.loads((ws / "seen_harness.json").read_text(encoding="utf-8"))
+    assert (seen["argv"], seen["home"]) == ([], str(ws / ".dsh"))
+
+
+async def test_a_deepseek_argv_that_already_carries_mcp_config_is_refused(tmp_path: Path) -> None:
+    spec = make_spec(tmp_path / "w", argv=("python", "--mcp-config", "/x.json"), backend="deepseek")
+    with pytest.raises(AgentConfigError, match="already carries --mcp-config"):
+        await make_runner(tmp_path / "session").launch(spec)
+
+
 async def test_codex_refuses_a_server_the_config_already_defines(tmp_path: Path) -> None:
     ws = tmp_path / "w"
     (ws / ".codex").mkdir(parents=True)
@@ -170,7 +210,7 @@ async def test_codex_refuses_a_server_the_config_already_defines(tmp_path: Path)
         ({"env": {TOKEN_ENV: "tok\nen"}}, "holds a line break"),
         ({"deadline_unix": 1.0}, "already in the past"),
         ({"argv": ()}, "argv is empty"),
-        ({"backend": "gemini"}, "is not claude or codex"),
+        ({"backend": "gemini"}, "is not claude, codex or deepseek"),
         (
             {"mcp_servers": (McpEndpoint("bad name", "http://x", TOKEN_ENV),)},
             "is not a letter followed by",

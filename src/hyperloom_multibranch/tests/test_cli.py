@@ -47,9 +47,11 @@ from hyperloom_common.bwrap import BwrapProbe
 from hyperloom_common.shared_storage import current_umask
 from hyperloom.common import agent_isolation, visible_devices
 from hyperloom.common.env_safety import RunAs
+from hyperloom_common.llm import llm_config
 from hyperloom_common.llm.llm_config import (
     AGENT_BACKEND_CLAUDE,
     AGENT_BACKEND_CODEX,
+    AGENT_BACKEND_ENV,
     ANTHROPIC_CREDENTIAL_ENV_ORDER,
     DEFAULT_CLAUDE_MODEL,
     DEFAULT_CODEX_MODEL,
@@ -927,7 +929,7 @@ def ready_environment(monkeypatch: pytest.MonkeyPatch, tmp_path_factory: pytest.
     tool cache, a model the price sheet lists, a writable RSI archive outside the test's workspace, the framework's
     package installed in the image, and the workloads' checkpoints under ``HL_MODEL_BASE``."""
 
-    for name in ("HYPERLOOM_KB_URL", "HYPERLOOM_KB_TOKEN"):
+    for name in ("HYPERLOOM_KB_URL", "HYPERLOOM_KB_TOKEN", AGENT_BACKEND_ENV):
         monkeypatch.delenv(name, raising=False)
     for name, value in zip(IMAGE_VARS, IMAGE):
         monkeypatch.setenv(name, value)
@@ -1236,6 +1238,81 @@ def test_a_dollar_cap_over_a_model_without_a_price_exits_two_before_creating_any
     assert captured.out == ""
     assert agent_cli == []
     assert not any(tmp_path.iterdir())
+
+
+@pytest.mark.parametrize(
+    ("backend", "sdk_installed", "said"),
+    [
+        ("gemini", True, "INFERENCE_OPTIMIZER_AGENT_BACKEND='gemini' not in"),
+        ("deepseek", False, "INFERENCE_OPTIMIZER_AGENT_BACKEND=deepseek requires the DeepSeek Harness SDK"),
+    ],
+    ids=["no-such-backend", "the-harness-without-its-sdk"],
+)
+@pytest.mark.usefixtures("ready_environment")
+def test_an_agent_backend_the_specialists_cannot_run_exits_two_before_creating_anything(
+    backend: str,
+    sdk_installed: bool,
+    said: str,
+    agent_cli: list[RunSettings],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    monkeypatch.setenv("USER_DATA_PATH", str(tmp_path))
+    monkeypatch.setenv(AGENT_BACKEND_ENV, backend)
+    monkeypatch.setattr(llm_config, "deepseek_harness_sdk_installed", lambda: sdk_installed)
+
+    with pytest.raises(SystemExit) as exc:
+        cli.main(["run", *WORKLOAD_ARGS])
+
+    assert exc.value.code == cli.EXIT_USAGE
+    assert said in capsys.readouterr().err
+    assert agent_cli == [] and not any(tmp_path.iterdir())
+
+
+@pytest.mark.usefixtures("ready_environment")
+def test_a_session_whose_operator_names_the_deepseek_harness_runs_its_specialists_on_it(
+    agent_cli: list[RunSettings], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    commands: list[object] = []
+    sessions = local_peers.model_backed_sessions
+    monkeypatch.setattr(
+        local_peers, "model_backed_sessions", lambda command: commands.append(command) or sessions(command)
+    )
+    monkeypatch.setenv("USER_DATA_PATH", str(tmp_path))
+    monkeypatch.setenv(AGENT_BACKEND_ENV, "deepseek")
+    monkeypatch.setattr(llm_config, "deepseek_harness_sdk_installed", lambda: True)
+    monkeypatch.setenv("OPENAI_BASE_URL", "https://gateway.invalid/v1")
+    monkeypatch.setenv("OPENAI_API_KEY", "dummy")
+    monkeypatch.delenv("DSH_MODEL", raising=False)
+
+    # The dollar cap is counted at the harness model's rates, which the price sheet lists.
+    assert cli.main(["run", *WORKLOAD_ARGS, "--max-llm-usd", "5"]) == 0
+
+    assert len(agent_cli) == 1
+    [command] = commands
+    assert (command.backend, command.executable, command.model) == ("deepseek", sys.executable, "deepseek-v4-flash")
+
+
+@pytest.mark.usefixtures("ready_environment")
+def test_a_deepseek_harness_without_a_gateway_fails_like_the_other_start_up_refusals(
+    agent_cli: list[RunSettings],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    monkeypatch.setenv("USER_DATA_PATH", str(tmp_path))
+    monkeypatch.setenv(AGENT_BACKEND_ENV, "deepseek")
+    monkeypatch.setattr(llm_config, "deepseek_harness_sdk_installed", lambda: True)
+    for name in ("OPENAI_BASE_URL", "OPENAI_API_KEY", "ANTHROPIC_BASE_URL", "LLM_GATEWAY_KEY"):
+        monkeypatch.delenv(name, raising=False)
+
+    assert cli.main(["run", *WORKLOAD_ARGS]) == cli.EXIT_FAILED
+
+    assert (
+        "cannot run a session, the DeepSeek Harness the specialists run cannot reach a model" in capsys.readouterr().err
+    )
+    assert agent_cli == []
 
 
 @pytest.mark.usefixtures("ready_environment")

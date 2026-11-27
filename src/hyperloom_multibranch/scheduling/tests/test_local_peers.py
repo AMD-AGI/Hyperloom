@@ -14,6 +14,7 @@ import logging
 import os
 import sys
 import subprocess
+import sys
 import urllib.request
 from collections.abc import AsyncIterator, Mapping
 from contextlib import asynccontextmanager
@@ -36,6 +37,8 @@ from hyperloom.contracts.recipe import Recipe, RecipeDelta
 from hyperloom_common import bwrap as bwrap_module
 from hyperloom_common.bwrap import BwrapProbe
 from hyperloom_common.env import forge_explicitly_enabled
+from hyperloom_common.llm import llm_config
+from hyperloom_common.llm.llm_config import DEFAULT_DEEPSEEK_HARNESS_MODEL
 from hyperloom.common.perf_metric import agentx_enabled
 from hyperloom.common import visible_devices
 from hyperloom.common.visible_devices import COUNTING_VISIBLE_DEVICE_VARS
@@ -51,6 +54,7 @@ from hyperloom.measure.hosted_spec import SpecContext
 from hyperloom.measure.pins import ActiveImage
 from hyperloom.orchestrator.actions.executors import TOOL_CACHE_ENV
 from hyperloom_multibranch.contracts.gate import RegressionOutcome
+from hyperloom_multibranch.contracts.llm_prices import price_of
 from hyperloom_multibranch.contracts.blackboard import INTEGRATION_BRANCH, Role, Writer
 from hyperloom_multibranch.contracts.blackboard.records import BlackboardSnapshot, JudgementWrite, LineageEvent
 from hyperloom_multibranch.contracts.blackboard.vocab import Conclusion, InboxKind, LearningKind, LeaseKind, LineageKind
@@ -117,6 +121,7 @@ from hyperloom_multibranch.scheduling.local_peers import (
     render_nodes,
     require_framework_package,
     specialist_command,
+    specialist_model,
     specialist_recall,
     workload_environment,
     workload_rule,
@@ -437,6 +442,84 @@ def test_a_specialist_model_the_price_sheet_lacks_runs_on_its_tokens_and_says_so
 
     assert command.model == "glm-5-3"
     assert "the specialists run on glm-5-3, which the price sheet does not list" in caplog.text
+
+
+HARNESS_ENV = {
+    "INFERENCE_OPTIMIZER_AGENT_BACKEND": "deepseek",
+    "OPENAI_BASE_URL": "https://gateway.invalid/v1",
+    "OPENAI_API_KEY": "dummy",
+}
+
+
+@pytest.fixture
+def harness_sdk(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The DeepSeek Harness SDK counts as installed, whatever this environment holds."""
+    monkeypatch.setattr(llm_config, "deepseek_harness_sdk_installed", lambda: True)
+
+
+@pytest.mark.usefixtures("harness_sdk")
+def test_the_specialists_run_the_deepseek_harness_when_the_operator_names_it(tmp_path: Path) -> None:
+    # The Anthropic credential would otherwise pick claude; the harness is run only when named, on this Python.
+    env = {**HARNESS_ENV, "PATH": str(tmp_path), "ANTHROPIC_API_KEY": "dummy", "DSH_MODEL": "deepseek-v4-pro"}
+
+    command = specialist_command(env)
+
+    assert (command.backend, command.executable, command.model) == ("deepseek", sys.executable, "deepseek-v4-pro")
+    assert command.interactive
+    assert specialist_command({**HARNESS_ENV, "PATH": str(tmp_path)}).model == DEFAULT_DEEPSEEK_HARNESS_MODEL
+
+
+@pytest.mark.usefixtures("harness_sdk")
+def test_a_deepseek_harness_without_a_gateway_refuses_the_peers(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    for name in ("OPENAI_BASE_URL", "OPENAI_API_KEY", "ANTHROPIC_BASE_URL", "ANTHROPIC_API_KEY", "LLM_GATEWAY_KEY"):
+        monkeypatch.delenv(name, raising=False)
+    env = {"PATH": str(tmp_path), "INFERENCE_OPTIMIZER_AGENT_BACKEND": "deepseek"}
+
+    with pytest.raises(PeersUnavailable, match="DeepSeek Harness the specialists run cannot reach a model.*OPENAI_"):
+        specialist_command(env)
+
+
+def test_a_deepseek_harness_named_without_its_sdk_is_a_usage_error(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(llm_config, "deepseek_harness_sdk_installed", lambda: False)
+
+    with pytest.raises(ValueError, match="requires the DeepSeek Harness SDK"):
+        specialist_command({**HARNESS_ENV, "PATH": str(tmp_path)})
+    with pytest.raises(ValueError, match="requires the DeepSeek Harness SDK"):
+        specialist_model(HARNESS_ENV)
+
+
+def test_a_backend_nobody_knows_is_a_usage_error(tmp_path: Path) -> None:
+    with pytest.raises(ValueError, match="INFERENCE_OPTIMIZER_AGENT_BACKEND='gemini'"):
+        specialist_command({"PATH": str(tmp_path), "INFERENCE_OPTIMIZER_AGENT_BACKEND": "gemini"})
+
+
+def test_a_backend_the_operator_names_wins_over_the_one_the_credentials_pick(tmp_path: Path) -> None:
+    cli = tmp_path / "codex"
+    cli.write_text("#!/bin/sh\nexit 0\n")
+    cli.chmod(0o755)
+    env = {
+        "PATH": str(tmp_path),
+        "ANTHROPIC_API_KEY": "dummy",
+        "OPENAI_API_KEY": "dummy",
+        "INFERENCE_OPTIMIZER_AGENT_BACKEND": "codex",
+        "CODEX_MODEL": "gpt-6-astra",
+    }
+
+    command = specialist_command(env)
+
+    assert (command.backend, command.executable, command.model) == ("codex", str(cli), "gpt-6-astra")
+
+
+@pytest.mark.usefixtures("harness_sdk")
+def test_the_dollar_cap_is_counted_at_the_harness_model_s_rates_when_the_harness_is_named() -> None:
+    assert specialist_model({**HARNESS_ENV, "ANTHROPIC_API_KEY": "dummy", "CLAUDE_MODEL": "claude-sonnet-5-5"}) == (
+        DEFAULT_DEEPSEEK_HARNESS_MODEL
+    )
+    assert price_of(DEFAULT_DEEPSEEK_HARNESS_MODEL) is not None
 
 
 @pytest.fixture
@@ -1598,6 +1681,20 @@ def test_the_operator_s_prompt_cache_ttl_reaches_the_specialist_on_either_worklo
     env = _specialist_setup(tmp_path, monkeypatch, workload).env
 
     assert (env.get("CLAUDE_CODE_PROMPT_CACHE_TTL"), env.get("CLAUDE_CODE_SUBAGENT_PROMPT_CACHE_TTL")) == ("5m", "1h")
+
+
+@pytest.mark.parametrize("cap", ["64000", None])
+def test_the_operator_s_cap_on_the_harness_s_output_tokens_reaches_the_specialist(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, cap: str | None
+) -> None:
+    # The harness's runtime starts below the specialist's CLI, so it reads the cap from the specialist's environment.
+    monkeypatch.delenv("HYPERLOOM_DSH_MAX_TOKENS", raising=False)
+    if cap is not None:
+        monkeypatch.setenv("HYPERLOOM_DSH_MAX_TOKENS", cap)
+
+    env = _specialist_setup(tmp_path, monkeypatch, WORKLOAD).env
+
+    assert env.get("HYPERLOOM_DSH_MAX_TOKENS") == cap
 
 
 async def test_the_specialists_are_told_of_and_give_back_the_dev_sandboxes_the_session_lends(

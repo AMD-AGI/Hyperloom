@@ -20,6 +20,19 @@ Merged to `main` and not yet carried by a tagged release. Each entry moves
 into the [release](https://github.com/AMD-AGI/Hyperloom/releases) that ships
 it.
 
+- **A multi-branch session's specialists can run on the DeepSeek Harness.**
+  `hyperloom-multibranch` now reads `INFERENCE_OPTIMIZER_AGENT_BACKEND`, which
+  it ignored: `claude` or `codex` pins the specialists' CLI instead of the
+  credential-ranked choice, and `deepseek` runs them, and the onboarding of an
+  autonomous branch's agent, on the harness (the `deepseek` extra, the
+  `OPENAI_BASE_URL` / `OPENAI_API_KEY` gateway, the model `DSH_MODEL` names;
+  `HYPERLOOM_DSH_MAX_TOKENS` applies). A harness specialist keeps one
+  conversation across turns, is woken with what arrives for its branch, and is
+  resumed after a crash or an idle end, as a `claude` one is; its session log
+  is in the branch's `session/.dsh`. A value that names no backend, or
+  `deepseek` without the extra, is refused before the session is created.
+  Without the variable nothing changes. See
+  [Run a multi-branch session](how-to/run-multibranch.md).
 - **The hosted single-session flow is retired.** `hyperloom hosted run` now
   only checks the campaign spec, runs the installer and hands the run to
   `hyperloom-multibranch hosted run`. A spec must set `"flow": "multibranch"`

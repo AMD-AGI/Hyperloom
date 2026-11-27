@@ -64,6 +64,18 @@ agent CLI the specialists run must be installed: on `PATH`, or, for `claude`, in
 puts it (only a shell that sourced the kernel-agent env file has that on `PATH`). `--measurement hosted` also needs the grant variables its help lists
 (see [Hosted run inputs](../reference/environment-variables.md#hosted-run-inputs)).
 
+The specialists run on `claude` or `codex`, whichever the credentials pick, unless `INFERENCE_OPTIMIZER_AGENT_BACKEND`
+names one, as it does for `hyperloom optimize`. `INFERENCE_OPTIMIZER_AGENT_BACKEND=deepseek` runs them, and the
+onboarding of an autonomous branch's agent, on the DeepSeek Harness: it needs the `deepseek` extra and the
+`OPENAI_BASE_URL` / `OPENAI_API_KEY` gateway, runs the model `DSH_MODEL` names, and needs no `dsh` on `PATH`, since a
+specialist's harness runtime is the one the extra installs. A harness specialist works as a `claude` one does: one
+conversation across turns, woken with what arrives for its branch, resumed after a crash or an idle end from the
+session log its runtime keeps in the branch's `session/.dsh`, with the session's tools as its MCP server and its token
+spend priced at the harness model's rates. It runs with the harness's own sandbox off, in the sandbox its launch is
+given, and without the harness tools that ask a person, install plugins or schedule reminders. Onboarding reads the
+agent's checkout with file reading and search only: no shell at all, and no instructions or skills taken from the
+checkout.
+
 Before a test that carries patches is given a sandbox or cards, its toolbox byte-compiles every Python file the patch
 stack changes and imports each patched component on CPU, with no GPU visible (the merge smoke). A file that does not
 compile, or an import that fails on a name or attribute a patched module lacks (one patch removing a name another

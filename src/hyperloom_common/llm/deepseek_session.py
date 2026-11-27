@@ -234,6 +234,10 @@ class HarnessLaunch:
     env: Mapping[str, str]
     request_timeout_sec: float
     initialize_timeout_sec: float = _INITIALIZE_TIMEOUT_SEC
+    #: The profile the runtime boots, and the patch files laid over it after the compaction and gateway patches, in
+    #: order.
+    profile: str = "sdk"
+    patches: tuple[Path, ...] = ()
 
 
 def start_harness(sdk: Any, launch: HarnessLaunch) -> Any:
@@ -266,7 +270,8 @@ def start_harness(sdk: Any, launch: HarnessLaunch) -> Any:
         env=dict(launch.env),
         initialize_timeout_seconds=launch.initialize_timeout_sec,
         request_timeout_seconds=launch.request_timeout_sec,
-        patches=(str(compaction_patch), str(gateway_patch)),
+        profile=launch.profile,
+        patches=(str(compaction_patch), str(gateway_patch), *map(str, launch.patches)),
     )
     try:
         harness.start()
@@ -283,7 +288,21 @@ def step_usage(event: Mapping[str, Any]) -> dict[str, int] | None:
     One implementation for every reader of the harness's records: the live
     events of a turn and the records of a session log share this shape.
     """
-    if event.get("type") != "assistant/message":
+    return _reported_usage(event, "assistant/message")
+
+
+def compaction_usage(event: Mapping[str, Any]) -> dict[str, int] | None:
+    """The token counts one ``compaction/summary`` event reports, or ``None`` for any other event and for a
+    compaction that called no model.
+
+    The runtime summarizes the messages it drops from a long conversation with a model call of its own, which no
+    ``assistant/message`` reports.
+    """
+    return _reported_usage(event, "compaction/summary")
+
+
+def _reported_usage(event: Mapping[str, Any], kind: str) -> dict[str, int] | None:
+    if event.get("type") != kind:
         return None
     data = event.get("data")
     usage = data.get("usage") if isinstance(data, dict) else None
@@ -510,6 +529,7 @@ __all__ = [
     "HarnessLaunch",
     "MAX_TOKENS_ENV",
     "child_environment",
+    "compaction_usage",
     "gateway_env",
     "gateway_route_patch",
     "load_harness_sdk",

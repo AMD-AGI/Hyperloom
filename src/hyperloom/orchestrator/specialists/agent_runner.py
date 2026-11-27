@@ -63,10 +63,16 @@ from hyperloom_common.fs_utils import (
     rewrite_lines_nofollow,
     write_text_nofollow,
 )
-from hyperloom_common.llm.llm_config import AGENT_BACKEND_CLAUDE, AGENT_BACKEND_CODEX
+from hyperloom_common.llm.llm_config import (
+    AGENT_BACKEND_CHOICES,
+    AGENT_BACKEND_CLAUDE,
+    AGENT_BACKEND_CODEX,
+    AGENT_BACKEND_DEEPSEEK,
+)
 
 from .agent_cli_config import _build_specialist_env as build_specialist_env
 from .agent_cli_config import SpecialistAgentUnavailableError
+from .dsh_launch import dsh_home, dsh_sdk_version
 from .launch_env import (
     LaunchPlace,
     PreparedLaunch,
@@ -136,6 +142,7 @@ AGENT_RUNTIME_FILENAME = "agent_runtime.json"
 _PLUGIN_ENV_PREFIXES = ("CLAUDE_CODE_PLUGIN", "CLAUDE_PLUGIN")
 _MCP_BLOCK_BEGIN = "# >>> hyperloom agent_runner mcp"
 _MCP_BLOCK_END = "# <<< hyperloom agent_runner mcp"
+_MCP_CONFIG_FLAG = "--mcp-config"
 _SERVER_NAME_RE = re.compile(r"^[A-Za-z][A-Za-z0-9_-]*$")
 _ENV_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
@@ -183,7 +190,7 @@ class AgentLaunchSpec:
     mcp_servers: tuple[McpEndpoint, ...] = ()
     claude_config_dir: Literal["isolated", "inherit"] = ISOLATED
     backend: str = ""
-    """``claude`` or ``codex``; empty infers it from ``argv[0]``."""
+    """``claude``, ``codex`` or ``deepseek``; empty infers ``claude`` or ``codex`` from ``argv[0]``."""
     heartbeat_sink: HeartbeatSink | None = None
     """Called once at launch with the session's ``beat`` function; an error it raises fails the launch."""
     stdin_open: bool = False
@@ -252,8 +259,8 @@ def _infer_backend(spec: AgentLaunchSpec) -> str:
     backend = spec.backend.strip().lower()
     if not backend:
         backend = AGENT_BACKEND_CODEX if "codex" in Path(spec.argv[0]).name.lower() else AGENT_BACKEND_CLAUDE
-    if backend not in (AGENT_BACKEND_CLAUDE, AGENT_BACKEND_CODEX):
-        raise AgentConfigError(f"backend {backend!r} is not claude or codex")
+    if backend not in AGENT_BACKEND_CHOICES:
+        raise AgentConfigError(f"backend {backend!r} is not claude, codex or deepseek")
     return backend
 
 
@@ -336,11 +343,16 @@ def _wire_codex(spec: AgentLaunchSpec, env: dict[str, str], mcp_json: Path) -> N
     env.update(additions)
 
 
-def _wire_claude(spec: AgentLaunchSpec, env: dict[str, str], argv: list[str], mcp_json: Path | None) -> None:
+def _name_mcp_config(argv: list[str], mcp_json: Path | None) -> None:
+    """Name the MCP config written for the launch on the command line of a CLI that reads ``--mcp-config``."""
     if mcp_json is not None:
-        if "--mcp-config" in argv:
+        if _MCP_CONFIG_FLAG in argv:
             raise AgentConfigError("argv already carries --mcp-config; pass the servers through spec.mcp_servers")
-        argv.extend(["--mcp-config", str(mcp_json)])
+        argv.extend([_MCP_CONFIG_FLAG, str(mcp_json)])
+
+
+def _wire_claude(spec: AgentLaunchSpec, env: dict[str, str], argv: list[str], mcp_json: Path | None) -> None:
+    _name_mcp_config(argv, mcp_json)
     for name in [key for key in env if key.startswith(_PLUGIN_ENV_PREFIXES)]:
         del env[name]
     if spec.claude_config_dir == ISOLATED:
@@ -350,6 +362,13 @@ def _wire_claude(spec: AgentLaunchSpec, env: dict[str, str], argv: list[str], mc
         if not settings.exists():
             write_text_nofollow(config_dir, (settings.name,), json.dumps({"enabledPlugins": {}}) + "\n")
         env["CLAUDE_CONFIG_DIR"] = str(config_dir)
+
+
+def _wire_dsh(spec: AgentLaunchSpec, env: dict[str, str], argv: list[str], mcp_json: Path | None) -> None:
+    """Name the task's private harness home, where the runtime keeps the conversation a later launch resumes, and
+    hand the harness's bridge the MCP config, which it turns into rows of the runtime's own configuration."""
+    env["DSH_HOME"] = str(dsh_home(spec.workspace))
+    _name_mcp_config(argv, mcp_json)
 
 
 def _read_init_message(process_log: Path) -> dict[str, Any] | None:
@@ -525,7 +544,7 @@ class LocalAgentRunner:
             isolation = _claude_isolation(isolation, env)
         claim = self._prepare(spec, backend, env, argv, isolation)
         try:
-            spawned = await self._spawned(spec, argv, env, isolation)
+            spawned = await self._spawned(spec, backend, argv, env, isolation)
         except BaseException:
             self._release(claim)
             raise
@@ -543,14 +562,18 @@ class LocalAgentRunner:
         )
 
     async def _spawned(
-        self, spec: AgentLaunchSpec, argv: list[str], env: dict[str, str], isolation: AgentIsolation
+        self, spec: AgentLaunchSpec, backend: str, argv: list[str], env: dict[str, str], isolation: AgentIsolation
     ) -> _Spawned:
         spec.workspace.mkdir(parents=True, exist_ok=True)
         tokens = tuple(env[e.token_env] for e in spec.mcp_servers)
         reap_mark = stamp_reap_mark(env)  # after the caller's env, so a mark it carried cannot join two launches
-        version = await asyncio.to_thread(
-            self._version_probe, spec.argv[0], {k: v for k, v in env.items() if v not in tokens}
-        )
+        if backend == AGENT_BACKEND_DEEPSEEK:
+            # ``argv[0]`` is the Python that runs the harness's bridge; the runtime it boots is the installed SDK's.
+            version = dsh_sdk_version() or UNKNOWN
+        else:
+            version = await asyncio.to_thread(
+                self._version_probe, spec.argv[0], {k: v for k, v in env.items() if v not in tokens}
+            )
         private = (spec.workspace / PROMPT_FILE, spec.workspace / PROCESS_LOG_NAME)
         # The child works in ``cwd``, so that is the tree it must be able to write. The MCP config written for it
         # names the servers its network reaches, for either backend: codex takes them from its private config.toml,
@@ -705,6 +728,8 @@ class LocalAgentRunner:
                     _wire_codex(spec, env, mcp_json)
                 if codex_sandbox_off(isolation):
                     argv[:] = without_codex_sandbox(argv)
+            elif backend == AGENT_BACKEND_DEEPSEEK:
+                _wire_dsh(spec, env, argv, mcp_json)
             else:
                 _wire_claude(spec, env, argv, mcp_json)
             stage_mcp_config(isolation, spec.workspace, argv)

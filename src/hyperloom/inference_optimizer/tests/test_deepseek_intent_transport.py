@@ -18,6 +18,7 @@ from hyperloom_common.llm.deepseek_session import (
     DeepSeekSessionError,
     DeepSeekSessionResult,
     DeepSeekSessionUnavailableError,
+    compaction_usage,
     normalize_run_result,
     usage_from_events,
 )
@@ -704,3 +705,18 @@ async def test_an_open_trajectory_span_owns_the_call_id(
 def test_a_turn_reporting_no_usage_reports_no_fields() -> None:
     """Zeroed counts would be indistinguishable from a turn that really cost nothing."""
     assert usage_from_events([{"type": "tool/call", "data": {"name": "read"}}]) == {}
+
+
+def test_a_compaction_s_summary_reports_the_tokens_of_its_own_model_call() -> None:
+    spent = {"inputTokens": 4, "outputTokens": 1837, "cacheReadTokens": 17535, "cacheWriteTokens": 11864}
+    summary = {"type": "compaction/summary", "data": {"model": "m", "usage": {**spent, "totalTokens": 31240}}}
+
+    assert compaction_usage(summary) == {
+        "input_tokens": 4,
+        "output_tokens": 1837,
+        "cache_read_input_tokens": 17535,
+        "cache_creation_input_tokens": 11864,
+    }
+    # A compaction that only pruned called no model, and a step's reply is not a compaction's.
+    assert compaction_usage({"type": "compaction/summary", "data": {"summary": []}}) is None
+    assert compaction_usage({"type": "assistant/message", "data": {"usage": spent}}) is None

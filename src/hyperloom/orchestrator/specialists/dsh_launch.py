@@ -11,12 +11,14 @@ the run's record is the session log the harness writes under that home.
 
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 import re
 import shutil
-from collections.abc import Mapping
+from collections.abc import Iterator, Mapping
 from dataclasses import dataclass
+from importlib import metadata
 from pathlib import Path
 
 from hyperloom_common.llm.deepseek_session import (
@@ -116,6 +118,14 @@ def resolve_dsh_executable(explicit: str = "") -> str:
     return launch[0] if len(launch) == 1 and Path(launch[0]).exists() else ""
 
 
+def dsh_sdk_version() -> str:
+    """The version of the installed DeepSeek Harness SDK, whose bundled runtime it starts; ``""`` without one."""
+    try:
+        return metadata.version("deepseek-harness-sdk")
+    except metadata.PackageNotFoundError:
+        return ""
+
+
 def _yaml_string(value: str) -> str:
     """Encode a string as a YAML double-quoted scalar (JSON strings are a subset)."""
     return json.dumps(str(value), ensure_ascii=False)
@@ -199,7 +209,7 @@ def _mcp_rows(config_path: str | None, *, source: Mapping[str, str], protected_e
 def _render_patch(
     *, model: str, base_url: str, instruction_bytes: int, mcp_rows: list[str], max_tokens: int | None = None
 ) -> str:
-    """The patch overlay a specialist's headless ``dsh`` run boots with."""
+    """The patch overlay a specialist's ``dsh`` runtime boots with."""
     lines = [
         # The shipped headless profile enables a session-title plugin whose
         # implementation package (@deepseek-ai/dsh-session-title-llm) the
@@ -235,9 +245,10 @@ def _write_private_text(path: Path, text: str) -> None:
     write_text_nofollow(path.parent, (path.name,), text, mode=_PRIVATE_FILE_MODE)
 
 
-def _prepare_home(home: Path, *, instructions: str, patch: str) -> Path:
-    """Write the task's private ``DSH_HOME``; return its patch file."""
-    patch_path = home / "specialist_patch.yml"
+@contextlib.contextmanager
+def _private_home(home: Path) -> Iterator[None]:
+    """Make ``home`` a directory only its owner reads, for the block that writes it; an OS failure while it is made
+    or written is a specialist that cannot be launched."""
     try:
         home.mkdir(parents=True, mode=_PRIVATE_DIR_MODE, exist_ok=True)
         # A previous run's account could have replaced the directory with a link.
@@ -246,13 +257,83 @@ def _prepare_home(home: Path, *, instructions: str, patch: str) -> Path:
             os.fchmod(dir_fd, _PRIVATE_DIR_MODE)
         finally:
             os.close(dir_fd)
-        # The harvest reads every session under DSH_HOME; a rerun of this task id must not count the last one.
-        shutil.rmtree(home / "sessions", ignore_errors=True)
-        _write_private_text(home / "AGENTS.md", instructions)
-        _write_private_text(patch_path, patch)
+        yield
     except OSError as exc:
         raise SpecialistAgentUnavailableError(f"cannot prepare private dsh home under {home}: {exc}") from exc
+
+
+def _write_home(home: Path, *, instructions: str, patch: str) -> Path:
+    """Write the instructions and the patch of a private ``DSH_HOME``; return its patch file."""
+    patch_path = home / "specialist_patch.yml"
+    _write_private_text(home / "AGENTS.md", instructions)
+    _write_private_text(patch_path, patch)
     return patch_path
+
+
+def _prepare_home(home: Path, *, instructions: str, patch: str) -> Path:
+    """Write the task's private ``DSH_HOME``; return its patch file."""
+    with _private_home(home):
+        # The harvest reads every session under DSH_HOME; a rerun of this task id must not count the last one.
+        shutil.rmtree(home / "sessions", ignore_errors=True)
+        return _write_home(home, instructions=instructions, patch=patch)
+
+
+@dataclass(frozen=True)
+class DshSessionBoot:
+    """What the runtime of a conversation boots with: its patch file, and the env values only that runtime sees."""
+
+    patch: Path
+    env_additions: dict[str, str]
+
+
+@dataclass(frozen=True)
+class DshSessionHome:
+    """What the ``DSH_HOME`` of a conversation that outlives one ``dsh`` process is written with.
+
+    Attributes:
+        home: The conversation's private ``DSH_HOME``.
+        model: Harness model id.
+        instructions: Sent as the conversation's baseline instructions.
+        mcp_config_path: Claude-style MCP config to translate, if any.
+        disabled: Rows of the booted profile the conversation runs without.
+    """
+
+    home: Path
+    model: str
+    instructions: str = ""
+    mcp_config_path: str | None = None
+    disabled: tuple[str, ...] = ()
+
+
+def prepare_session_home(request: DshSessionHome, env: Mapping[str, str]) -> DshSessionBoot:
+    """Write the private ``DSH_HOME`` of a conversation a later ``dsh`` process may resume.
+
+    The sessions an earlier process left there are kept: a resume reads them. They are written uncompressed, which
+    a killed runtime leaves readable up to its last flushed record.
+
+    Args:
+        request: The home and what its patch names.
+        env: The environment the runtime starts with; ``${NAME}`` references of the MCP config are read from it.
+
+    Raises:
+        SpecialistAgentUnavailableError: When the MCP config or the private home cannot be prepared.
+    """
+    mcp = _mcp_rows(request.mcp_config_path, source=env, protected_env_names=frozenset())
+    try:
+        gateway, max_tokens = gateway_env(env), max_tokens_from_env(env)
+    except DeepSeekSessionUnavailableError as exc:
+        raise SpecialistAgentUnavailableError(str(exc)) from exc
+    patch = _render_patch(
+        model=request.model,
+        base_url=gateway[GATEWAY_BASE_URL_ENV],
+        instruction_bytes=len(request.instructions.encode(_ENCODING)),
+        mcp_rows=mcp.rows,
+        max_tokens=max_tokens,
+    )
+    patch += "".join(f"- id: {row}\n  disabled: true\n" for row in request.disabled)
+    with _private_home(request.home):
+        patch_path = _write_home(request.home, instructions=request.instructions, patch=patch)
+    return DshSessionBoot(patch_path, mcp.env_additions)
 
 
 def build_dsh_launch(request: DshLaunchRequest, base_env: Mapping[str, str]) -> DshLaunch:

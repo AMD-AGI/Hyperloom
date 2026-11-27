@@ -38,6 +38,11 @@ refused as too long, and a resumed CLI that crashes again before finishing a tur
 resume the CLI refuses at once is followed by a fresh session in the same run, with a notice and no crash. A
 conversation record that cannot be read means a fresh session and a warning.
 
+The DeepSeek Harness runs behind :mod:`~hyperloom_multibranch.specialist.dsh_cli`, which reads and writes what a
+Claude CLI does, so all that is said here of a Claude CLI holds for it: it lives across turns, logs each model call as
+it ends and a model call in flight every minute, and resumes a conversation from the log its runtime keeps in the
+workspace.
+
 A launch, and the message that wakes a CLI once the integration head moved, say what the integration head holds and
 what of it the branch head lacks (:mod:`~hyperloom_multibranch.specialist.following`). A branch whose specialist asked
 to follow the integration head is moved onto the one the blackboard recorded between turns, once no candidate test of
@@ -60,7 +65,7 @@ from typing import Protocol
 
 from hyperloom_common.fs_utils import read_text_nofollow, write_text_nofollow
 from hyperloom_common.shared_storage import make_shared_dirs
-from hyperloom_common.llm.llm_config import AGENT_BACKEND_CLAUDE, AGENT_BACKEND_CODEX
+from hyperloom_common.llm.llm_config import AGENT_BACKEND_CHOICES, AGENT_BACKEND_CODEX, AGENT_BACKEND_DEEPSEEK
 from hyperloom.contracts.measurement import Purpose, TestKind, Validity
 from hyperloom.orchestrator.specialists.agent_runner import (
     STATE_LOST,
@@ -95,6 +100,8 @@ from hyperloom_multibranch.contracts.blackboard.exhausted import exhausted_refus
 from hyperloom_multibranch.contracts.blackboard.vocab import InboxKind, UsageSource
 from hyperloom_multibranch.contracts.repo import ExperimentRepo
 from hyperloom_multibranch.contracts.toolbox import SCOPE_SPECIALIST, SpecialistGrant, SpecialistTokens
+from hyperloom_multibranch.specialist.dsh_cli import MODULE as DSH_CLI
+from hyperloom_multibranch.specialist.dsh_cli import bridge_env
 from hyperloom_multibranch.specialist.following import (
     REROOT,
     Followed,
@@ -197,7 +204,8 @@ class DevLeaseHolder(Protocol):
 
 @dataclass(frozen=True)
 class AgentCommand:
-    """The agent CLI a specialist runs."""
+    """The agent CLI a specialist runs: ``claude``, ``codex``, or the DeepSeek Harness, whose ``executable`` is the
+    Python that runs its bridge (:mod:`~hyperloom_multibranch.specialist.dsh_cli`)."""
 
     backend: str
     executable: str
@@ -205,17 +213,22 @@ class AgentCommand:
     extra_args: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
-        if self.backend not in (AGENT_BACKEND_CLAUDE, AGENT_BACKEND_CODEX):
-            raise ValueError(f"a specialist runs claude or codex, not {self.backend!r}")
+        if self.backend not in AGENT_BACKEND_CHOICES:
+            raise ValueError(f"a specialist runs claude, codex or deepseek, not {self.backend!r}")
 
     @property
     def interactive(self) -> bool:
         """Whether one CLI takes message after message on its stdin; codex exec reads one prompt and ends."""
-        return self.backend == AGENT_BACKEND_CLAUDE
+        return self.backend != AGENT_BACKEND_CODEX
+
+    def env(self, env: Mapping[str, str]) -> dict[str, str]:
+        """``env`` as the CLI is launched with it: the DeepSeek Harness's bridge is a module of this app, so its
+        Python is told where this app's packages are (:func:`~hyperloom_multibranch.specialist.dsh_cli.bridge_env`)."""
+        return bridge_env(env) if self.backend == AGENT_BACKEND_DEEPSEEK else dict(env)
 
     def argv(self, role_file: Path, worktree: Path, *, session_id: str = "", resume_id: str = "") -> tuple[str, ...]:
-        """The command line; the socket adds the MCP configuration. A Claude CLI starts the conversation
-        ``session_id``, or goes on with ``resume_id``; codex takes neither."""
+        """The command line; the socket adds the MCP configuration. A Claude CLI and the DeepSeek Harness start the
+        conversation ``session_id``, or go on with ``resume_id``; codex takes neither."""
         if self.backend == AGENT_BACKEND_CODEX:
             model = ("-m", self.model) if self.model else ()
             bypass = "--dangerously-bypass-approvals-and-sandbox"
@@ -234,6 +247,9 @@ class AgentCommand:
         model = ("--model", self.model) if self.model else ()
         role = ("--system-prompt-file", str(role_file))
         conversation = ("--resume", resume_id) if resume_id else ("--session-id", session_id) if session_id else ()
+        if self.backend == AGENT_BACKEND_DEEPSEEK:
+            # The harness works in the directory it is started in, which the socket makes the worktree.
+            return (self.executable, "-m", DSH_CLI, *role, *model, *conversation, *self.extra_args)
         return (
             self.executable,
             "--print",
@@ -811,7 +827,7 @@ class AgentSession:
             task_id=self._start.branch,
             workspace=workspace,
             argv=setup.command.argv(role_file, worktree, **conversation),
-            env={**setup.env, grant.token_env: grant.token},
+            env={**setup.command.env(setup.env), grant.token_env: grant.token},
             cwd=worktree,
             gpus=0,
             deadline_unix=setup.clock() + setup.session_seconds,
@@ -898,7 +914,7 @@ class _Seen:
 
 @dataclass(frozen=True)
 class _CliState:
-    """A Claude CLI's conversation as ``cli_session.json`` keeps it: its id; the turns it finished without an error,
+    """A CLI's conversation as ``cli_session.json`` keeps it: its id; the turns it finished without an error,
     and the tokens its last call read; the resumes since it last finished one; the branch and integration heads and
     the inbox cursor and branch-log entries it had seen at its last finished turn; and whether the next run resumes
     it, with why it stopped and whether that was an idle end. ``resumable`` is set only when a launch crashed or ended

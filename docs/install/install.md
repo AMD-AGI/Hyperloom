@@ -431,6 +431,8 @@ on it:
 
 The backend then runs orchestration, specialists, Forge, TraceLens and
 quantization. Specialists run on the `dsh` CLI without a sandbox of their own.
+A `hyperloom-multibranch` session runs its specialists on the harness the same
+way; see [Run a multi-branch session](../how-to/run-multibranch.md).
 See [environment variables](../reference/environment-variables.md) for
 `INFERENCE_OPTIMIZER_AGENT_BACKEND`, `DSH_MODEL` and `HYPERLOOM_DSH_MAX_TOKENS`.
 

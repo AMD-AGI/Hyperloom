@@ -514,8 +514,9 @@ def test_an_invalid_output_token_cap_fails_the_dsh_task(
         dsh_launch.build_dsh_launch(_dsh_request(tmp_path), dict(_OPENAI_ENV))
 
 
-def _start_harness(tmp_path: Path, env: dict[str, str]) -> tuple[dict[str, Any], str]:
-    """Start a harness runtime on a fake SDK; return what it was constructed with and its gateway route patch."""
+def _start_harness(tmp_path: Path, env: dict[str, str], **launch: Any) -> tuple[dict[str, Any], str]:
+    """Start a harness runtime on a fake SDK, its launch naming ``launch`` beside the defaults; return what it was
+    constructed with and its gateway route patch."""
     from hyperloom_common.llm import deepseek_session
 
     seen: dict[str, Any] = {}
@@ -536,6 +537,7 @@ def _start_harness(tmp_path: Path, env: dict[str, str]) -> tuple[dict[str, Any],
             reasoning_effort="high",
             env=env,
             request_timeout_sec=30.0,
+            **launch,
         ),
     )
     route_patch = next(Path(p) for p in seen["patches"] if Path(p).name == "hyperloom-gateway-route.yml")
@@ -561,6 +563,67 @@ def test_the_output_token_cap_is_passed_to_the_harness_runtime(tmp_path: Path) -
 
     assert seen["max_tokens"] == 64000
     assert _gateway_model(text)["maxTokens"] == 64000
+
+
+def test_a_runtime_boots_the_profile_and_the_patches_its_launch_names_over_its_own_two(
+    tmp_path: Path,
+) -> None:
+    env = {"DEEPSEEK_BASE_URL": "https://gateway.invalid/v1"}
+    own = ["hyperloom-compaction.yml", "hyperloom-gateway-route.yml"]
+
+    seen, _ = _start_harness(tmp_path, env)
+    assert seen["profile"] == "sdk" and [Path(patch).name for patch in seen["patches"]] == own
+
+    extra = tmp_path / "extra.yml"
+    seen, _ = _start_harness(tmp_path, env, profile="sdk-minimal", patches=(extra,))
+    assert seen["profile"] == "sdk-minimal"
+    assert seen["patches"] == (*(str(tmp_path / "home" / name) for name in own), str(extra))
+
+
+#: The gateway a conversation's runtime is started with, as the environment of its launcher names it.
+_SESSION_GATEWAY = {"OPENAI_BASE_URL": "https://gateway.invalid/v1", "OPENAI_API_KEY": "gateway-key"}
+
+
+def test_a_conversation_s_home_keeps_the_sessions_a_later_process_resumes(tmp_path: Path) -> None:
+    home = tmp_path / "workspace" / ".dsh"
+    kept = home / "sessions" / "ws" / "session-0" / "session.v4.jsonl"
+    kept.parent.mkdir(parents=True)
+    kept.write_text('{"type": "session"}\n', encoding="utf-8")
+    request = dsh_launch.DshSessionHome(home, "deepseek-v4-flash", "be careful", disabled=("tool-ask-user",))
+
+    boot = dsh_launch.prepare_session_home(request, {**_SESSION_GATEWAY, "HYPERLOOM_DSH_MAX_TOKENS": "64000"})
+
+    assert kept.read_text(encoding="utf-8") == '{"type": "session"}\n' and boot.env_additions == {}
+    assert (home / "AGENTS.md").read_text(encoding="utf-8") == "be careful"
+    assert oct(home.stat().st_mode & 0o777) == "0o700" and oct(boot.patch.stat().st_mode & 0o777) == "0o600"
+    text = boot.patch.read_text(encoding="utf-8")
+    rows = _patch_rows(text)
+    assert rows["session-persistence-jsonl"]["config"]["compression"] == "none"
+    assert rows["agent-default-model"]["config"]["model"] == "deepseek-v4-flash"
+    assert rows["agent-instructions"]["config"]["maxBytes"] > len("be careful")
+    assert rows["tool-ask-user"]["disabled"] is True
+    # The patch is laid over the runtime's own, so it declares the gateway route again, with the same cap.
+    assert _gateway_model(text)["maxTokens"] == 64000
+    with pytest.raises(SpecialistAgentUnavailableError, match="OPENAI_BASE_URL"):
+        dsh_launch.prepare_session_home(request, {})
+
+
+def test_a_conversation_s_mcp_servers_read_their_headers_from_variables_only_the_runtime_sees(
+    tmp_path: Path,
+) -> None:
+    server = {"type": "http", "url": "http://127.0.0.1:9/mcp", "headers": {"Authorization": "Bearer ${MCP_TOKEN}"}}
+    config = tmp_path / "mcp.json"
+    config.write_text(json.dumps({"mcpServers": {"hyperloom": server}}), encoding="utf-8")
+    request = dsh_launch.DshSessionHome(tmp_path / ".dsh", "deepseek-v4-flash", mcp_config_path=str(config))
+
+    boot = dsh_launch.prepare_session_home(request, {**_SESSION_GATEWAY, "MCP_TOKEN": "s3cret"})
+
+    text = boot.patch.read_text(encoding="utf-8")
+    assert boot.env_additions == {"HYPERLOOM_DSH_MCP_ENV_0": "Bearer s3cret"} and "s3cret" not in text
+    row = _patch_rows(text)["mcp-hyperloom"]
+    assert (row["config"]["serverName"], row["config"]["url"]) == ("hyperloom", "http://127.0.0.1:9/mcp")
+    with pytest.raises(SpecialistAgentUnavailableError, match="unset environment variable 'MCP_TOKEN'"):
+        dsh_launch.prepare_session_home(request, _SESSION_GATEWAY)
 
 
 def test_a_cut_off_dsh_session_log_still_yields_its_complete_records(tmp_path: Path) -> None:

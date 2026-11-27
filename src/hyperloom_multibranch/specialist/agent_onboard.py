@@ -1,13 +1,17 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""The onboarding model of an autonomous branch's preflight: one headless run of the specialist's Claude CLI.
+"""The onboarding model of an autonomous branch's preflight: one headless run of the specialist's Claude CLI, or of
+the DeepSeek Harness.
 
 The CLI reads the agent's checkout and answers; it gets no MCP server and only the tools that read: the file tools and a
 few shell commands that print. A third-party checkout is untrusted, so nothing the CLI runs may write or execute what
-the checkout holds, nor read its settings, whose hooks would run its code. Each run streams to a log of its own beside
-the checkout, which is what its spend is read from (:mod:`llm_usage`, as a specialist launch's is) and what a reader
-goes to when onboarding failed. A run that exits non-zero, outlives its timeout or answers with an error raises
+the checkout holds, nor read its settings, whose hooks would run its code. The DeepSeek Harness runs behind its bridge
+(:mod:`~hyperloom_multibranch.specialist.dsh_cli`) in the composition whose only tools read files, with no shell at
+all and no instructions or skills taken from the checkout, on a home of the run's own that is removed with it.
+
+Each run streams to a log of its own beside the checkout, which is what its spend is read from (:mod:`llm_usage`, as
+a specialist launch's is) and what a reader goes to when onboarding failed. A run that exits non-zero, outlives its timeout or answers with an error raises
 :class:`~hyperloom_multibranch.specialist.agent_onboarding.AttemptFailed`, so it fails that attempt and the next one
 asks again; one whose model call the gateway refused says so with the gateway's words, and raises
 :class:`~hyperloom_multibranch.specialist.agent_onboarding.ModelRefused` when asking again cannot help. One whose call
@@ -20,14 +24,16 @@ refused.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import os
 import re
+import shutil
 import signal
 from collections.abc import Iterator, Mapping
 from pathlib import Path
 
-from hyperloom_common.llm.llm_config import AGENT_BACKEND_CLAUDE
+from hyperloom_common.llm.llm_config import AGENT_BACKEND_CLAUDE, AGENT_BACKEND_DEEPSEEK
 from hyperloom_multibranch.contracts.blackboard.interfaces import UsageSink
 from hyperloom_multibranch.contracts.blackboard.records import LlmUsage
 from hyperloom_multibranch.contracts.blackboard.vocab import UsageSource
@@ -41,6 +47,8 @@ from hyperloom_multibranch.specialist.agent_onboarding import (
 )
 from hyperloom_multibranch.specialist.agent_watch import MARKER, marked_pids
 from hyperloom_multibranch.specialist.agent_session import AgentCommand
+from hyperloom_multibranch.specialist.dsh_cli import HOME_ENV as HARNESS_HOME_ENV
+from hyperloom_multibranch.specialist.dsh_cli import MODULE as DSH_CLI
 from hyperloom_multibranch.specialist.llm_usage import launch_cost, launch_usage
 
 ONBOARD_SECONDS = 900.0
@@ -49,10 +57,10 @@ PASSING_CLIENT_ERRORS = frozenset({408, 409, 429})
 #: What the CLI answers when it is too old for the model, whatever status the gateway gave.
 TOO_OLD = "does not support this model"
 _API_ERROR = re.compile(r"^API Error: (\d{3})")
-#: How the CLI words a model call that never reached the gateway.
+#: How the CLI words a model call that never reached the gateway; the DeepSeek Harness names one by its failure code.
 _UNREACHABLE = re.compile(
     r"ERR_PROXY_TUNNEL|ECONNRESET|ECONNREFUSED|ETIMEDOUT|EAI_AGAIN|socket hang up|Connection error|Unable to connect|"
-    r"fetch failed|Request timed out"
+    r"fetch failed|Request timed out|^TRANSPORT: |^TIMEOUT: "
 )
 #: The model of the assistant turn the CLI makes up for a failed call; a turn of any other came from the model.
 SYNTHETIC_MODEL = "<synthetic>"
@@ -77,9 +85,11 @@ ALLOWED_TOOLS = (
 def onboard_argv(command: AgentCommand) -> tuple[str, ...]:
     """The command line of one headless, read-only run; the prompt goes on stdin."""
 
-    if command.backend != AGENT_BACKEND_CLAUDE:
-        raise ValueError(f"onboarding runs the claude CLI headless and read-only, not {command.backend!r}")
     model = ("--model", command.model) if command.model else ()
+    if command.backend == AGENT_BACKEND_DEEPSEEK:
+        return (command.executable, "-m", DSH_CLI, "--print", "--read-only", *model)
+    if command.backend != AGENT_BACKEND_CLAUDE:
+        raise ValueError(f"onboarding runs the claude CLI or the DeepSeek Harness read-only, not {command.backend!r}")
     return (
         command.executable,
         "--print",
@@ -113,7 +123,9 @@ def cli_onboard(
     async def onboard(checkout: Path, prompt: str) -> str:
         log = _next_log(checkout.parent)
         try:
-            returncode = await asyncio.wait_for(_run(argv, checkout, env, prompt, log), seconds)
+            with _harness_home(command, log) as home:
+                launched = {**command.env(env), **home}
+                returncode = await asyncio.wait_for(_run(argv, checkout, launched, prompt, log), seconds)
         except asyncio.TimeoutError as error:
             raise _failed(log, f"the onboarding CLI did not answer within {seconds:.0f} s") from error
         finally:
@@ -130,6 +142,21 @@ def cli_onboard(
         return str(result.get("result") or "")
 
     return onboard
+
+
+@contextlib.contextmanager
+def _harness_home(command: AgentCommand, log: Path) -> Iterator[Mapping[str, str]]:
+    """The variable that gives a DeepSeek Harness run a home of its own beside ``log``, removed once the run ended, so
+    the conversation it keeps there does not persist; nothing for a Claude CLI, which is told to keep none."""
+
+    if command.backend != AGENT_BACKEND_DEEPSEEK:
+        yield {}
+        return
+    home = log.with_suffix(".dsh")
+    try:
+        yield {HARNESS_HOME_ENV: str(home)}
+    finally:
+        shutil.rmtree(home, ignore_errors=True)
 
 
 def final_result(log: Path) -> Mapping[str, object] | None:

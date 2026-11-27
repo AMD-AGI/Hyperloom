@@ -40,6 +40,8 @@ from hyperloom_multibranch.specialist.agent_session import (
     BranchPlace,
 )
 from hyperloom_multibranch.specialist.dev_sandbox import DevLeases, DevLimits, LeaseTerm
+from hyperloom_multibranch.specialist.dsh_cli import MODULE as DSH_CLI
+from hyperloom_multibranch.specialist.dsh_cli import PACKAGES as APP_PACKAGES
 from hyperloom_multibranch.specialist.judging import NOTICE
 from hyperloom_multibranch.specialist.runtime import SessionCrashed, SessionIdle, SessionStart, restart_notice
 from hyperloom_multibranch.tests.branch_rig import branch_rig
@@ -763,8 +765,33 @@ def test_codex_reads_its_role_with_the_prompt(tmp_path):
 
     assert codex.stdin("ROLE", "PROMPT") == "ROLE\n\nPROMPT"
     assert codex.argv(tmp_path / "role.md", tmp_path / "wt")[-3:] == ("-m", "gpt-5", "-")
-    with pytest.raises(ValueError, match="claude or codex"):
+    with pytest.raises(ValueError, match="claude, codex or deepseek"):
         AgentCommand("gemini", "gemini")
+
+
+def test_the_deepseek_harness_is_run_as_a_cli_that_takes_message_after_message(tmp_path):
+    harness = AgentCommand("deepseek", sys.executable, model="deepseek-v4-flash")
+    role, worktree = tmp_path / "role.md", tmp_path / "wt"
+
+    fresh = harness.argv(role, worktree, session_id="a1")
+    resumed = harness.argv(role, worktree, resume_id="a1")
+
+    bridge = (sys.executable, "-m", DSH_CLI, "--system-prompt-file", str(role), "--model", "deepseek-v4-flash")
+    assert fresh == (*bridge, "--session-id", "a1") and resumed == (*bridge, "--resume", "a1")
+    assert harness.interactive
+    assert _text(harness.stdin("ROLE", "PROMPT")) == "PROMPT" == _text(harness.message("PROMPT"))
+
+
+def test_the_deepseek_harness_s_bridge_is_told_where_the_app_it_is_a_module_of_is_imported_from():
+    harness = AgentCommand("deepseek", sys.executable)
+    elsewhere = os.pathsep.join(["/opt/other", str(APP_PACKAGES)])
+
+    # An allowlisted environment names no import path, and one that does keeps its own entries after the app's.
+    assert harness.env({"HOME": "/h"}) == {"HOME": "/h", "PYTHONPATH": str(APP_PACKAGES)}
+    assert harness.env({"PYTHONPATH": elsewhere})["PYTHONPATH"] == os.pathsep.join([str(APP_PACKAGES), "/opt/other"])
+    assert (APP_PACKAGES / DSH_CLI.replace(".", os.sep)).with_suffix(".py").is_file()
+    # A CLI that is a program of its own imports nothing of the app.
+    assert AgentCommand("claude", "claude").env({"HOME": "/h"}) == {"HOME": "/h"}
 
 
 _STAND_IN = """#!/usr/bin/env python3
@@ -775,6 +802,8 @@ seen = {
     "prompt": first["message"]["content"][0]["text"],
     "mcp_config": "--mcp-config" in sys.argv,
     "token": os.environ.get("HYPERLOOM_SPECIALIST_MCP_TOKEN"),
+    "harness_home": os.environ.get("DSH_HOME"),
+    "imports": os.environ.get("PYTHONPATH"),
 }
 (role.parent / "seen.json").write_text(json.dumps(seen))
 sys.stdin.read()
@@ -782,14 +811,15 @@ sys.stdin.read()
 
 
 @pytest.mark.skipif(sys.platform == "win32", reason="the AI work socket starts the CLI as a POSIX process group")
-async def test_a_real_session_feeds_its_cli_the_prompt_and_the_mcp_service(tmp_path, rig):
-    cli = tmp_path / "fake-claude"
+@pytest.mark.parametrize("backend", ["claude", "deepseek"])
+async def test_a_real_session_feeds_its_cli_the_prompt_and_the_mcp_service(tmp_path, rig, backend):
+    cli = tmp_path / f"fake-{backend}"
     cli.write_text(_STAND_IN)
     cli.chmod(0o755)
     runner = LocalAgentRunner(
         session_dir=tmp_path / "agents", poll_interval_seconds=0.05, version_probe=lambda a, e: "x"
     )
-    session = rig.session(command=AgentCommand("claude", str(cli)), runner=runner, min_session_seconds=0.0)
+    session = rig.session(command=AgentCommand(backend, str(cli)), runner=runner, min_session_seconds=0.0)
     running = asyncio.create_task(session.run())
 
     await _until(lambda: (rig.workspace / "seen.json").exists(), "the stand-in CLI to run")
@@ -799,6 +829,10 @@ async def test_a_real_session_feeds_its_cli_the_prompt_and_the_mcp_service(tmp_p
     seen = json.loads((rig.workspace / "seen.json").read_text())
     assert seen["prompt"].startswith("Startup brief:\nleads: fp8 KV cache")
     assert (seen["mcp_config"], seen["token"]) == (True, "token-of-s1")
+    # The harness keeps its conversation in a home of the branch's workspace, where a later launch resumes it.
+    assert seen["harness_home"] == (str(rig.workspace / ".dsh") if backend == "deepseek" else None)
+    # Its bridge is a module of this app, which the session's own environment does not say where to import from.
+    assert seen["imports"] == (str(APP_PACKAGES) if backend == "deepseek" else None)
 
 
 _INIT = {"type": "system", "subtype": "init", "session_id": "from-the-cli"}
@@ -1117,6 +1151,20 @@ async def test_a_conversation_state_that_cannot_be_read_starts_fresh_with_a_warn
 
     assert "--session-id" in rig.runner.specs[0].argv and "--resume" not in rig.runner.specs[0].argv
     assert "a fresh session starts" in caplog.text
+
+
+async def test_a_deepseek_harness_conversation_is_named_at_launch_and_resumed_after_a_crash(rig):
+    harness = AgentCommand("deepseek", sys.executable, model="deepseek-v4-flash")
+    crashed = await _crash_after_a_turn(rig, rig.session(command=harness), 1)
+
+    session, running = await _next_launch(rig, 2, command=harness)
+    await session.stop()
+    await asyncio.wait_for(running, 1)
+
+    first, second = (spec.argv for spec in rig.runner.specs)
+    assert crashed.resumable and rig.runner.specs[0].stdin_open and rig.runner.specs[0].backend == "deepseek"
+    assert _flag(second, "--resume") == _flag(first, "--session-id") == rig.runner.states[1]["session_id"]
+    assert "--session-id" not in second and "exited 1" in rig.runner.prompts[1]
 
 
 async def test_codex_never_resumes(rig):

@@ -14,6 +14,8 @@ from hyperloom_multibranch.contracts.blackboard.vocab import UsageSource
 from hyperloom_multibranch.specialist.agent_onboard import ALLOWED_TOOLS, TOOLS, cli_onboard, onboard_argv
 from hyperloom_multibranch.specialist.agent_onboarding import AttemptFailed, GatewayDown, ModelRefused
 from hyperloom_multibranch.specialist.agent_session import AgentCommand
+from hyperloom_multibranch.specialist.dsh_cli import MODULE as DSH_CLI
+from hyperloom_multibranch.specialist.dsh_cli import PACKAGES as APP_PACKAGES
 
 MODEL = "claude-sonnet-5-5"
 SUB_MODEL = "claude-haiku-5-5"
@@ -94,18 +96,22 @@ class _Usage:
         self.recorded.append(usage)
 
 
-def _setup(tmp_path: Path, mode: str = "ok") -> tuple[AgentCommand, dict[str, str], Path, Path]:
-    cli = tmp_path / "claude"
-    cli.write_text(
-        FAKE_CLI.format(python=sys.executable, model=MODEL, sub_model=SUB_MODEL, api_errors=API_ERRORS),
-        encoding="utf-8",
-    )
+def _stand_in(tmp_path: Path, script: str, command: AgentCommand, mode: str):
+    """The stand-in ``script`` as ``command``'s CLI, the environment that runs it in ``mode``, the checkout it reads
+    and where it records how it was run."""
+    cli = Path(command.executable)
+    cli.write_text(script, encoding="utf-8")
     cli.chmod(0o755)
     checkout = tmp_path / "agent" / "src"
     checkout.mkdir(parents=True)
     record = tmp_path / "record.json"
     env = {"PATH": os.environ.get("PATH", ""), "FAKE_MODE": mode, "FAKE_RECORD": str(record)}
-    return AgentCommand("claude", str(cli), MODEL), env, checkout, record
+    return command, env, checkout, record
+
+
+def _setup(tmp_path: Path, mode: str = "ok") -> tuple[AgentCommand, dict[str, str], Path, Path]:
+    script = FAKE_CLI.format(python=sys.executable, model=MODEL, sub_model=SUB_MODEL, api_errors=API_ERRORS)
+    return _stand_in(tmp_path, script, AgentCommand("claude", str(tmp_path / "claude"), MODEL), mode)
 
 
 async def test_an_answer_is_the_run_s_result_and_its_calls_are_the_branch_s_spend(tmp_path: Path) -> None:
@@ -144,6 +150,88 @@ def test_a_run_reads_and_nothing_else() -> None:
 def test_codex_is_refused() -> None:
     with pytest.raises(ValueError, match="codex"):
         cli_onboard(AgentCommand("codex", "codex"), {}, "b07", _Usage())
+
+
+def test_a_deepseek_harness_run_is_its_bridge_s_one_shot_in_the_composition_that_only_reads() -> None:
+    argv = onboard_argv(AgentCommand("deepseek", sys.executable, HARNESS_MODEL))
+
+    assert argv == (sys.executable, "-m", DSH_CLI, "--print", "--read-only", "--model", HARNESS_MODEL)
+    assert "--mcp-config" not in argv and "--system-prompt-file" not in argv
+
+
+# Stands in for the harness's bridge run as `python -m ... --print --read-only`: records how it was run, the home it
+# was given and that it could write there, then streams what the bridge streams for FAKE_MODE.
+FAKE_BRIDGE = """#!{python}
+import json, os, pathlib, sys
+
+home = pathlib.Path(os.environ["DSH_HOME"])
+(home / "sessions").mkdir(parents=True)
+record = {{"argv": sys.argv[1:], "cwd": os.getcwd(), "stdin": sys.stdin.read(), "home": str(home)}}
+record["imports"] = os.environ.get("PYTHONPATH")
+with open(os.environ["FAKE_RECORD"], "w") as handle:
+    json.dump(record, handle)
+mode = os.environ.get("FAKE_MODE", "ok")
+usage = {{"input_tokens": 10, "output_tokens": 40, "cache_read_input_tokens": 30, "cache_creation_input_tokens": 0}}
+print(json.dumps({{"type": "system", "subtype": "init", "session_id": "s-1", "harness": "dsh"}}))
+if mode == "ok":
+    message = {{"id": "m0", "model": "{model}", "usage": usage, "content": []}}
+    print(json.dumps({{"type": "assistant", "message": message, "session_id": "s-1"}}))
+    result = {{"type": "result", "is_error": False, "result": '{{"source": "agent"}}', "usage": usage}}
+    print(json.dumps({{**result, "session_id": "s-1"}}))
+    sys.exit(0)
+if mode == "unreachable":
+    for attempt in range(1, 6):
+        print(json.dumps({{"type": "system", "subtype": "api_retry", "attempt": attempt, "max_retries": 5}}))
+    failed = {{"result": "TRANSPORT: DeepSeek Messages transport failed"}}
+else:
+    failed = {{"result": "AUTH: invalid key", "api_error_status": 401}}
+print(json.dumps({{"type": "result", "is_error": True, "num_turns": 1, "session_id": "s-1", **failed}}))
+sys.exit(1)
+"""
+HARNESS_MODEL = "deepseek-v4-flash"
+
+
+def _harness(tmp_path: Path, mode: str = "ok") -> tuple[AgentCommand, dict[str, str], Path, Path]:
+    script = FAKE_BRIDGE.format(python=sys.executable, model=HARNESS_MODEL)
+    return _stand_in(tmp_path, script, AgentCommand("deepseek", str(tmp_path / "python"), HARNESS_MODEL), mode)
+
+
+async def test_a_deepseek_harness_answers_from_a_home_of_the_run_s_own_that_goes_with_it(tmp_path: Path) -> None:
+    command, env, checkout, record = _harness(tmp_path)
+    usage = _Usage()
+
+    answer = await cli_onboard(command, env, "b07", usage)(checkout, "read the checkout")
+
+    assert answer == '{"source": "agent"}'
+    ran = json.loads(record.read_text(encoding="utf-8"))
+    assert (ran["cwd"], ran["stdin"]) == (str(checkout), "read the checkout")
+    assert ran["argv"] == ["-m", DSH_CLI, "--print", "--read-only", "--model", HARNESS_MODEL]
+    # The home is beside the log, never in the checkout, and nothing of the conversation is left once the run ended.
+    assert ran["home"] == str(tmp_path / "agent" / "onboard-1.dsh") and not Path(ran["home"]).exists()
+    # The bridge is a module of this app, which the environment the run was given does not say where to import from.
+    assert ran["imports"] == str(APP_PACKAGES)
+    [recorded] = usage.recorded
+    assert (recorded.branch, recorded.tokens, recorded.launch) == ("b07", TokenCounts(10, 40, 30), "s-1")
+    assert recorded.cost_usd == pytest.approx(price_of(HARNESS_MODEL).cost_usd(TokenCounts(10, 40, 30)))
+
+
+async def test_a_deepseek_harness_that_could_not_reach_the_gateway_is_the_gateway_s_failure(tmp_path: Path) -> None:
+    command, env, checkout, record = _harness(tmp_path, "unreachable")
+
+    with pytest.raises(GatewayDown) as failed:
+        await cli_onboard(command, env, "b07", _Usage())(checkout, "p")
+
+    assert str(failed.value) == "the onboarding model's call failed: TRANSPORT: DeepSeek Messages transport failed"
+    assert not Path(json.loads(record.read_text(encoding="utf-8"))["home"]).exists()
+
+
+async def test_a_deepseek_harness_the_gateway_refused_ends_the_preflight_naming_the_refusal(tmp_path: Path) -> None:
+    command, env, checkout, _ = _harness(tmp_path, "refused")
+
+    with pytest.raises(ModelRefused) as refused:
+        await cli_onboard(command, env, "b07", _Usage())(checkout, "p")
+
+    assert str(refused.value) == "the onboarding model's call failed: AUTH: invalid key"
 
 
 async def test_a_run_that_exits_non_zero_fails_the_attempt_with_its_tail(tmp_path: Path) -> None:
