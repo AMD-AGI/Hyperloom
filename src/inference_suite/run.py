@@ -5,7 +5,8 @@
 
 Before anything starts the round checks what it runs on: the staged tools, the source files, the frozen base, the
 installed framework's version (D6) and its parser (D7) unless the server is external, and the eval's served context.
-It then acquires the server, runs the load and the eval on it, and releases it. The power recorder samples the node for
+It then acquires the server, runs the load and the eval on it, and releases it; an AgentX round that boots its server
+builds the replay's dataset while it boots. The power recorder samples the node for
 the whole round and bounds each phase by the instant its mark carries; once the round ends, ``power.json`` is written
 with the load's token counts and the report carries its summary. The KV sampler scrapes the ready server and tags each
 reading with its phase. An AgentX profile round opens the server's capture window on the replay's phase clock, a fixed
@@ -22,6 +23,7 @@ import json
 import logging
 import math
 import os
+import shutil
 import sys
 import threading
 import time
@@ -67,7 +69,7 @@ from inference_suite.framework_probe import FrameworkProbeError, probe_install
 from inference_suite.framework_version import VersionRefusal
 from inference_suite.frameworks import Framework, FrameworkKind, framework_facts
 from inference_suite.load import agentx, inherited_env, mlperf
-from inference_suite.load.agentx import AgentxRound, AgentxTool, run_agentx
+from inference_suite.load.agentx import AgentxRound, AgentxTool, DatasetPrep, run_agentx
 from inference_suite.load.fixed import (
     ClientTool,
     FixedOutcome,
@@ -507,12 +509,14 @@ class _Round:
         server_launch = ServerLaunch(launch.argv, prepared.server_env, launch.framework.name, server_digest)
         lifecycle = ServerLifecycle(self.config, server_launch, self.clock, self.cancel)
         try:
-            acquired = lifecycle.acquire()
+            acquired = self._acquire(lifecycle, prepared.client)
             if isinstance(acquired, Stop):
                 self.fail(acquired)
             else:
                 self._sampled(acquired, prepared)
         finally:
+            # The AgentX dataset cache is gigabytes, and the run_dir is signed whole against a size cap.
+            shutil.rmtree(self.layout.aiperf_dataset_cache, ignore_errors=True)
             released = lifecycle.release()
             server = self.config.server
             reused = self.config.lifecycle.mode.finds_server
@@ -522,6 +526,16 @@ class _Round:
                 self.fail(released.teardown)
             if self.capture is not None:
                 self.sections["profile"] = _profile_result(self.layout, self.capture)
+
+    def _acquire(self, lifecycle: ServerLifecycle, client: ClientTool | AgentxTool) -> Server | Stop:
+        """The round's server; an AgentX round that boots one builds its replay's dataset while it does."""
+        if self.config.lifecycle.mode.finds_server or not isinstance(client, AgentxTool):
+            return lifecycle.acquire()
+        prep = DatasetPrep.start(self.config, client)
+        try:
+            return lifecycle.acquire()
+        finally:
+            prep.stop()
 
     def _sampled(self, server: Server, prepared: _Prepared) -> None:
         if self.config.telemetry.kv:

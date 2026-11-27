@@ -3,7 +3,8 @@
 
 """Contract of a round: one round per call into an empty run_dir, which does not change once the call returns, GPU
 samples from the measured window alone, KV samples tagged by phase, a fixed profile round's window around its
-measured pass, an AgentX profile round's window on the replay's phase clock, an MLPerf round's harness against the
+measured pass, an AgentX profile round's window on the replay's phase clock, an AgentX round's dataset cache gone
+however the round ends, an MLPerf round's harness against the
 round's server, the checks that refuse a round before its
 server starts, a reuse round on the server a boot round left, and the CLI's ``run`` and ``stop`` round trips."""
 
@@ -59,6 +60,7 @@ from inference_suite.contracts.launch import Launch, LayerSource, VersionCheck
 from inference_suite.contracts.report import Report
 from inference_suite.eval.definition import EvalPlan
 from inference_suite.framework_probe import FrameworkInstall, FrameworkProbeError
+from inference_suite.load import agentx as agentx_load
 from inference_suite.load.scriptable import scriptable_base
 from inference_suite.parser_check import FlagRefusal, RefusedFlag
 from inference_suite.pins import INFERENCEX_TOOL, PINNED_TOOLS
@@ -164,6 +166,14 @@ _HARNESS = textwrap.dedent(
     import http.server, json, os, sys, threading, time
     argv = sys.argv[1:]
     value = lambda flag: argv[argv.index(flag) + 1]
+    cache = os.environ.get("AIPERF_DATASET_MMAP_CACHE_DIR", "")
+    if "--no-server-metrics" in argv:
+        if not os.path.exists(os.path.join(os.path.dirname(__file__), "prep_builds")):
+            sys.exit("no dataset to build")
+        os.makedirs(os.path.join(cache, "key"))
+        open(os.path.join(cache, "key", "dataset.dat"), "w").close()
+        open(os.path.join(cache, "key", "manifest.json"), "w").close()
+        time.sleep(60)
     if "agentx_cli" not in argv:
         result = {"num_requests_successful": 2,
                   "request_accounting": {"records_total": 4, "records_warmup_dropped": 2, "records_error_dropped": 0,
@@ -174,6 +184,8 @@ _HARNESS = textwrap.dedent(
         sys.exit(0)
     with open(os.environ["FAKE_CLIENT_CALLS"], "a") as calls:
         calls.write(json.dumps(argv) + "\\n")
+    if os.path.exists(os.path.join(cache, "key", "manifest.json")):
+        print("Memory-mapped dataset cache HIT", flush=True)
     begun = time.time_ns()
     phases = {"warmup": {"start_ns": begun}}
 
@@ -611,6 +623,8 @@ def test_an_agentx_profile_round_replays_and_opens_its_window_from_the_first_pro
     assert launch.client is not None and list(launch.client.argv[1:]) == replay
     assert launch.client.seed == launch.client.warmup_seed == _AGENTX.seed
     assert report.agentx is not None and report.agentx.counts["successful"] == 2 and report.codes.client == 0
+    assert layout.agentx_prep_log.is_file(), "the dataset prep started with the server"
+    assert report.agentx.dataset_cache_hit is False, "a failed prep leaves the replay to build its dataset"
     marks = _marks(layout)
     assert marks[Phase.WARMUP.value] < marks[Phase.MEASURED.value] < marks[Phase.FINISHED.value]
     capture = json.loads(layout.profile_capture.read_text())
@@ -649,6 +663,49 @@ def test_an_agentx_window_longer_than_the_replay_closes_when_the_profiling_reque
     # phase_marks.json holds milliseconds; rounding the close the same way keeps the order the run recorded.
     closed = round(capture["window_close_unix"], 3)
     assert finished <= closed < finished + 0.15, "closed at the next poll, not after the tail"
+
+
+_AWAIT_PREP_ENTRY = """
+import glob, os, time
+while not glob.glob(os.path.join(os.path.dirname(__file__), "*", "client", "aiperf_dataset_cache", "*", "manifest.json")):
+    time.sleep(0.05)
+"""
+
+
+def _prep_builds_before_the_server(rig, then: str) -> SuiteConfig:
+    """An AgentX round whose prep commits a cache entry before the server goes on with ``then``."""
+    (rig.tmp / "prep_builds").touch()
+    (rig.tmp / "fake_server.py").write_text(_AWAIT_PREP_ENTRY + then)
+    return _agentx_config(rig, "r1", replace(_AGENTX, warmup_seed=_AGENTX.seed), ProfileConfig(enabled=False))
+
+
+def test_an_agentx_round_replays_from_the_dataset_its_prep_built_and_leaves_no_cache(rig):
+    result = run.run_round(_prep_builds_before_the_server(rig, _SERVER))
+
+    report = result.report
+    assert report.run_status is RunStatus.COMPLETED, report.failure_detail
+    assert report.agentx is not None and report.agentx.dataset_cache_hit is True
+    assert not result.layout.aiperf_dataset_cache.exists()
+
+
+def test_a_server_that_exits_after_the_prep_built_its_dataset_leaves_no_cache(rig):
+    result = run.run_round(_prep_builds_before_the_server(rig, "raise SystemExit(1)\n"))
+
+    assert result.report.failed_step is FailedStep.SERVER_EXITED_BEFORE_READY
+    assert not result.layout.aiperf_dataset_cache.exists()
+
+
+def test_a_replay_that_raises_leaves_no_cache(rig, monkeypatch):
+    def crash(*_args):
+        raise RuntimeError("replay crashed")
+
+    monkeypatch.setattr(agentx_load, "_replay", crash)
+    config = _prep_builds_before_the_server(rig, _SERVER)
+
+    with pytest.raises(RuntimeError, match="replay crashed"):
+        run.run_round(config)
+
+    assert not RunLayout(Path(config.paths.run_dir)).aiperf_dataset_cache.exists()
 
 
 @pytest.mark.parametrize(

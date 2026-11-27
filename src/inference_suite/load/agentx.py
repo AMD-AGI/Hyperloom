@@ -19,12 +19,18 @@ aggregated. After the replay InferenceX's ``process_agentic_result`` aggregates 
 ``profile_export.jsonl`` and a disagreement with the aggregate's accounting fails the round's output. The requests aiperf
 skipped as longer than the context the server serves are in neither, only in aiperf's summary, so their count is read
 from there.
+
+Building the replay's dataset (tokenizer, trace corpus, mmap files) takes the client minutes. While the round's server
+boots, :class:`DatasetPrep` runs the same client against no server to build it into aiperf's dataset cache in the
+run_dir, which the replay reads; the report records whether it did. The round removes the cache however it ends.
 """
 
 from __future__ import annotations
 
 import http.client
 import json
+import shutil
+import threading
 import time
 import urllib.error
 from collections.abc import Callable, Iterator, Mapping
@@ -40,9 +46,9 @@ from inference_suite.contracts.report import AGENTX_CONTEXT_OVERFLOW, AgentxResu
 from inference_suite.load import exit_stop, inherited_env, read_result, server_tp
 from inference_suite.load.fixed import OutputActivity
 from inference_suite.runtime.phases import Phase, PhaseClock
-from inference_suite.runtime.process import spawn
+from inference_suite.runtime.process import Spawned, spawn
 from inference_suite.runtime.server import Server, server_url
-from inference_suite.runtime.watch import RoundGate, Stop, wait_child
+from inference_suite.runtime.watch import POLL_SEC, RoundGate, Stop, wait_child
 from inference_suite.staging import AGENTX_AGGREGATOR_MODULE, AGENTX_CLI_MODULE, AGENTX_PYTHON
 from inference_suite.telemetry.kv_poll import json_number, read_aiperf_phases
 
@@ -60,6 +66,18 @@ _AIPERF_SUMMARY = "profile_export_aiperf.json"
 _SKIPPED_OVERFLOW = "skipped_context_overflow_count"
 #: The line the harness logs when the failed-request threshold stops the replay.
 THRESHOLD_STOP_MARKER = "--failed-request-threshold exceeded"
+#: aiperf's content-addressed dataset cache (agentx-harness 1.0.13, ``aiperf/dataset/mmap_cache.py``). The key is the
+#: dataset, tokenizer, seed and dataset settings, never the URL, the server metrics or the progress API, so a run
+#: against no server fills the entry the replay reads. An entry's ``manifest.json`` is written last, before the whole
+#: entry is renamed into place.
+_DATASET_CACHE_ENV = "AIPERF_DATASET_MMAP_CACHE_DIR"
+_CACHE_ENTRY_MANIFEST = "*/manifest.json"
+#: Where aiperf writes a run's own mmap files; the system temp dir by default, where a reaped prep would leave them.
+_MMAP_SCRATCH_ENV = "AIPERF_DATASET_MMAP_BASE_PATH"
+#: What aiperf logs when it restores the dataset from the cache (``aiperf/dataset/dataset_manager.py``).
+_CACHE_HIT_MARKER = "Memory-mapped dataset cache HIT"
+#: The discard port: the prep's requests are refused, and it is reaped once its dataset is built.
+_NO_SERVER_URL = "http://127.0.0.1:9"
 WARMUP_PHASE = "warmup"
 PROFILING_PHASE = "profiling"
 #: The agentx scenario's ``min_benchmark_duration_seconds`` (agentx-harness 1.0.13); a shorter replay needs
@@ -135,12 +153,9 @@ def refusal(workload: AgentxWorkload) -> Stop | None:
     return None
 
 
-def client_argv(tool: AgentxTool, config: SuiteConfig) -> tuple[str, ...]:
-    """The ``agentx profile`` argv: every replay knob explicit, the tokenizer read from the served model's path."""
+def _profile_argv(tool: AgentxTool, config: SuiteConfig, url: str, outputs: tuple[str, ...]) -> tuple[str, ...]:
     workload = _workload(config)
     server = config.server
-    base_url = server_url(server)
-    artifacts = RunLayout(Path(config.paths.run_dir)).aiperf_artifacts
     return (
         tool.python,
         "-I",
@@ -150,7 +165,7 @@ def client_argv(tool: AgentxTool, config: SuiteConfig) -> tuple[str, ...]:
         "--scenario",
         AGENTX_SCENARIO,
         "--url",
-        base_url,
+        url,
         "--model",
         server.served_model_name,
         "--tokenizer",
@@ -168,27 +183,82 @@ def client_argv(tool: AgentxTool, config: SuiteConfig) -> tuple[str, ...]:
         str(workload.warmup_requests_per_lane),
         "--failed-request-threshold",
         str(workload.failed_request_threshold),
+        *outputs,
+        *(("--unsafe-override",) if workload.duration_sec < _SCENARIO_MIN_DURATION_SEC else ()),
+    )
+
+
+def client_argv(tool: AgentxTool, config: SuiteConfig) -> tuple[str, ...]:
+    """The ``agentx profile`` argv: every replay knob explicit, the tokenizer read from the served model's path."""
+    base_url = server_url(config.server)
+    outputs = (
         "--server-metrics",
         f"{base_url}/metrics",
         "--output-artifact-dir",
-        str(artifacts),
+        str(RunLayout(Path(config.paths.run_dir)).aiperf_artifacts),
         "--api-host",
         PROGRESS_API_HOST,
         "--api-port",
-        str(progress_api_port(server)),
-        *(("--unsafe-override",) if workload.duration_sec < _SCENARIO_MIN_DURATION_SEC else ()),
+        str(progress_api_port(config.server)),
     )
+    return _profile_argv(tool, config, base_url, outputs)
 
 
 def measured_invocation(config: SuiteConfig, tool: AgentxTool) -> ClientInvocation:
     """The replay as ``launch.json`` records it, before the round's server is up."""
     workload = _workload(config)
+    cache = RunLayout(Path(config.paths.run_dir)).aiperf_dataset_cache
     return ClientInvocation(
         argv=client_argv(tool, config),
-        env=dict(workload.client_env),
+        env={**workload.client_env, _DATASET_CACHE_ENV: str(cache)},
         seed=workload.seed,
         warmup_seed=workload.warmup_seed,
     )
+
+
+class DatasetPrep:
+    """The replay's dataset, built into aiperf's cache by the replay's own client against no server.
+
+    The prep is reaped once the cache holds an entry, or when :meth:`stop` is called, whichever comes first. A prep
+    that failed or was stopped before its entry was whole leaves no cache, so the replay builds the dataset itself and
+    meets no populate lock the reaped prep held.
+    """
+
+    def __init__(self, layout: RunLayout, child: Spawned) -> None:
+        self._layout = layout
+        self._child = child
+        self._stopped = threading.Event()
+        self._watcher = threading.Thread(target=self._watch, name="agentx-dataset-prep", daemon=True)
+        self._watcher.start()
+
+    @classmethod
+    def start(cls, config: SuiteConfig, tool: AgentxTool) -> DatasetPrep:
+        layout = RunLayout(Path(config.paths.run_dir))
+        env = {
+            **inherited_env(config.server),
+            **measured_invocation(config, tool).env,
+            _MMAP_SCRATCH_ENV: str(layout.agentx_prep_scratch / "mmap"),
+        }
+        outputs = ("--no-server-metrics", "--output-artifact-dir", str(layout.agentx_prep_scratch / "artifacts"))
+        argv = _profile_argv(tool, config, _NO_SERVER_URL, outputs)
+        return cls(layout, spawn(argv, env, layout.agentx_prep_log))
+
+    def _built(self) -> bool:
+        return any(self._layout.aiperf_dataset_cache.glob(_CACHE_ENTRY_MANIFEST))
+
+    def _watch(self) -> None:
+        while self._child.proc.poll() is None and not self._built():
+            if self._stopped.wait(POLL_SEC):
+                break
+        self._child.reap()
+
+    def stop(self) -> None:
+        """Reap the prep if it still runs, keeping the cache only if it holds a whole entry."""
+        self._stopped.set()
+        self._watcher.join()
+        if not self._built():
+            shutil.rmtree(self._layout.aiperf_dataset_cache, ignore_errors=True)
+        shutil.rmtree(self._layout.agentx_prep_scratch, ignore_errors=True)
 
 
 def _ns_to_mono(start_ns: float) -> float:
@@ -320,6 +390,7 @@ class ReplayFacts:
     stopped_by_threshold: bool
     fast_mode: bool
     request_export: str
+    dataset_cache_hit: bool
 
 
 def agentx_result(aggregate: Mapping[str, Any], facts: ReplayFacts) -> AgentxResult:
@@ -341,12 +412,13 @@ def agentx_result(aggregate: Mapping[str, Any], facts: ReplayFacts) -> AgentxRes
         stopped_by_threshold=facts.stopped_by_threshold,
         fast_mode=facts.fast_mode,
         request_export=facts.request_export,
+        dataset_cache_hit=facts.dataset_cache_hit,
     )
 
 
-def _stopped_by_threshold(layout: RunLayout) -> bool:
+def _client_logged(layout: RunLayout, marker: str) -> bool:
     for log in (layout.agentx_client_log, layout.aiperf_log):
-        if log.is_file() and THRESHOLD_STOP_MARKER in log.read_text(encoding=_UTF8, errors="replace"):
+        if log.is_file() and marker in log.read_text(encoding=_UTF8, errors="replace"):
             return True
     return False
 
@@ -449,9 +521,10 @@ def _result(agentx_round: AgentxRound, layout: RunLayout) -> AgentxResult | Stop
         return Stop(FailedStep.CLIENT_OUTPUT_MISSING, f"the AgentX summary cannot be read: {exc}")
     facts = ReplayFacts(
         counts=counts,
-        stopped_by_threshold=_stopped_by_threshold(layout),
+        stopped_by_threshold=_client_logged(layout, THRESHOLD_STOP_MARKER),
         fast_mode=_workload(agentx_round.config).client_env[AGENTX_FAST_MODE_ENV] != "0",
         request_export=layout.aiperf_request_export.relative_to(layout.root).as_posix(),
+        dataset_cache_hit=_client_logged(layout, _CACHE_HIT_MARKER),
     )
     try:
         return agentx_result(aggregate, facts)
@@ -478,6 +551,7 @@ __all__ = [
     "AgentxOutcome",
     "AgentxRound",
     "AgentxTool",
+    "DatasetPrep",
     "ProgressFollower",
     "ReplayListener",
     "ReplayFacts",

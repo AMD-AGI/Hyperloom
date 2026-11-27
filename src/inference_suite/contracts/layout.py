@@ -179,6 +179,20 @@ class RunLayout:
         return self.client_dir / "agentx_client.log"
 
     @property
+    def agentx_prep_log(self) -> Path:
+        return self.client_dir / "agentx_prep.log"
+
+    @property
+    def agentx_prep_scratch(self) -> Path:
+        """The dataset prep's own artifacts and mmap files; removed once the prep stops."""
+        return self.client_dir / "agentx_prep"
+
+    @property
+    def aiperf_dataset_cache(self) -> Path:
+        """aiperf's dataset cache the prep fills and the replay reads; removed however the round ends."""
+        return self.client_dir / "aiperf_dataset_cache"
+
+    @property
     def inferencex_result(self) -> Path:
         return self.client_dir / "inferencex_result.json"
 

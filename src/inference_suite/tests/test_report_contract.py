@@ -252,10 +252,12 @@ def test_agentx_section_round_trips_with_its_error_rate_definition() -> None:
         stopped_by_threshold=False,
         fast_mode=False,
         request_export="client/aiperf_artifacts/profile_export.jsonl",
+        dataset_cache_hit=True,
     )
     report = _report(workload_kind=WorkloadKind.AGENTX, fixed=None, agentx=agentx)
     document = _document(report)
     assert document["agentx"]["error_rate_definition"] == "inferencex-agentx/1"
+    assert document["agentx"]["dataset_cache_hit"] is True
     assert Report.from_document(document) == report
     document["agentx"]["error_rate_definition"] = "elsewhere/1"
     with pytest.raises(ReportError, match="error rate definition"):
@@ -270,6 +272,7 @@ def _agentx_document(**counts: int | None) -> dict[str, object]:
         e2e_norm_intvty={"p50": 30.0, "p90": None},
         stopped_by_threshold=False,
         fast_mode=False,
+        dataset_cache_hit=False,
     )
     return _document(_report(workload_kind=WorkloadKind.AGENTX, fixed=None, agentx=agentx))
 
@@ -277,11 +280,31 @@ def _agentx_document(**counts: int | None) -> dict[str, object]:
 def test_a_report_of_the_first_schema_reads_with_its_overflow_count_unknown() -> None:
     document = _agentx_document()
     del document["agentx"]["counts"][AGENTX_CONTEXT_OVERFLOW]
+    del document["agentx"]["dataset_cache_hit"]
     document["schema"] = "inference-suite-report/1"
 
     assert Report.from_document(document).agentx.counts[AGENTX_CONTEXT_OVERFLOW] is None
     assert Report.from_document({**_document(_report()), "schema": "inference-suite-report/1"}) == _report()
     assert "inference-suite-report/1" in READABLE_REPORT_SCHEMAS
+
+
+def test_a_report_of_the_second_schema_reads_with_its_dataset_cache_hit_unknown() -> None:
+    document = _agentx_document()
+    del document["agentx"]["dataset_cache_hit"]
+    document["schema"] = "inference-suite-report/2"
+
+    assert Report.from_document(document).agentx.dataset_cache_hit is None
+    assert Report.from_document({**_document(_report()), "schema": "inference-suite-report/2"}) == _report()
+    assert "inference-suite-report/2" in READABLE_REPORT_SCHEMAS
+
+
+def test_a_report_of_the_current_schema_states_whether_the_replay_read_its_dataset_from_the_cache() -> None:
+    document = _agentx_document()
+    assert document["schema"] == REPORT_SCHEMA == "inference-suite-report/3"
+    assert Report.from_document(document).agentx.dataset_cache_hit is False
+    del document["agentx"]["dataset_cache_hit"]
+    with pytest.raises(ReportError, match="missing dataset_cache_hit"):
+        Report.from_document(document)
 
 
 def test_a_report_of_the_current_schema_states_its_overflow_count() -> None:
