@@ -12,7 +12,7 @@ This document describes the conventions contributors should follow when changing
 [AGENTS.md](../../AGENTS.md) (authoring rules), [CONTRIBUTING.md](../../CONTRIBUTING.md)
 (workflow and checks), and the machine-readable settings in `pyproject.toml`.
 
-When this guide and tooling disagree, **tooling wins** — update the guide if you change
+When this guide and tooling disagree, tooling wins — update the guide if you change
 `pyproject.toml`, `.pre-commit-config.yaml`, or CI workflows.
 
 ## Principles
@@ -50,9 +50,9 @@ ruff check .
 ruff format --check .   # or `ruff format .` to apply
 ```
 
-**Do not** add `# noqa` or per-file ignores unless there is a documented reason (import cycles, test patterns). Existing per-file ignores live in `[tool.ruff.lint.per-file-ignores]` — extend that table instead of inline suppressions.
+Do not add `# noqa` or per-file ignores unless there is a documented reason (import cycles, test patterns). Existing per-file ignores live in `[tool.ruff.lint.per-file-ignores]` — extend that table instead of inline suppressions.
 
-**Principle rules** are hard gates (`extend-select` in `pyproject.toml`): the tree is at zero and any new finding fails CI.
+Principle rules are hard gates (`extend-select` in `pyproject.toml`): the tree is at zero and any new finding fails CI.
 
 | Rules | What they hold |
 |-------|----------------|
@@ -72,7 +72,7 @@ Where existing code needs the old shape for a behavioural reason — persisted n
 
 ### Size and complexity
 
-Two layers. The **gate** is the `code-metrics` CI job (`scripts/code_metrics.py`): it measures the white-box metrics below on every PR and fails the PR when a file the PR touches gets worse. The **review triggers** under it are the softer numbers a reviewer asks about.
+Two layers. The gate is the `code-metrics` CI job (`scripts/code_metrics.py`): it measures the white-box metrics below on every PR and fails the PR when a file the PR touches gets worse. The review triggers under it are the softer numbers a reviewer asks about.
 
 | Gated dimension | Fails when | Why this number | Tool |
 |-----------------|-----------|-----------------|------|
@@ -90,10 +90,10 @@ The thresholds, the reason for each and the exact tool versions live in `pyproje
 
 Nothing is recorded in the repository: the reference is the base itself. In the same run the gate measures the tree at the merge base (for a push to `main`, the commit it replaced) with the same tools and this tree's config, and compares each unit with it, so the units already over a threshold on `main` are its backlog and a unit a merged PR improved is the next PR's limit.
 
-**Only the files a PR touches are judged** (the diff against the merge base). A file the PR does not touch never fails it, whatever is found there; the report lists such findings as information. In a touched file:
+Only the files a PR touches are judged (the diff against the merge base). A file the PR does not touch never fails it, whatever is found there; the report lists such findings as information. In a touched file:
 
 - a unit over a threshold that the base did not have over it fails — new code meets the limits;
-- a unit worse than at the base fails — **do not grow the backlog**: adding branches or lines to a unit, or lines to a module, that is already over is a failure, not a judgement call;
+- a unit worse than at the base fails — do not grow the backlog: adding branches or lines to a unit, or lines to a module, that is already over is a failure, not a judgement call;
 - a unit the base already had at that value or worse passes — backlog, not this PR's debt, the comparison the [Complexity ceiling](#complexity-ceiling) defines; one the PR improved is listed, and there is nothing to update.
 
 The config may not loosen relative to the base branch (no raised limit, no new exclusion, no file the base's scope measured left unmeasured).
@@ -228,7 +228,7 @@ PYTHONPATH=src lint-imports --no-cache
 
 ### Type checking (mypy)
 
-mypy is **recommended locally**, not yet a CI gate:
+mypy is recommended locally, not yet a CI gate:
 
 ```bash
 pip install mypy
@@ -269,9 +269,9 @@ CI runs `pylint --errors-only` on core packages (fatal/error severity only). Fix
 
 **What to test:** Pin the **exported surface** — CLI flags, public functions, persisted schemas, artifact layouts — with tests that state the contract *and* its failure modes; those are what callers outside this repo depend on. Pick the boundary by what is being protected: a focused unit test for deterministic logic, or a CLI/filesystem/serialization integration test where that pins the contract more directly. Internal functions that only thread a business flow together do not each need one: per-function tests there assert the current implementation and break on the next refactor. Prefer covering those flows through their entry point, and unit-test an internal helper when it carries real logic of its own.
 
-**When you replace a test,** carry its contract and failure-mode assertions across, and keep them in the default CI selection — the `*_e2e` markers above are excluded from it, so they supplement that baseline rather than stand in for it. The 90% line-coverage floor cannot show that a specific assertion survived.
+When you replace a test, carry its contract and failure-mode assertions across, and keep them in the default CI selection — the `*_e2e` markers above are excluded from it, so they supplement that baseline rather than stand in for it. The 90% line-coverage floor cannot show that a specific assertion survived.
 
-**Coverage:** CI enforces **90% line coverage** on measured trees (`[tool.coverage.report] fail_under`). CLI drivers, subprocess wrappers, and hardware-only paths are omitted from the denominator — see `[tool.coverage.run] omit`. Cover the logic you introduce as described under *What to test*; do not chase coverage on omitted paths, and do not pad internal plumbing with per-function tests to move the number.
+**Coverage:** CI enforces 90% line coverage on measured trees (`[tool.coverage.report] fail_under`). CLI drivers, subprocess wrappers, and hardware-only paths are omitted from the denominator — see `[tool.coverage.run] omit`. Cover the logic you introduce as described under *What to test*; do not chase coverage on omitted paths, and do not pad internal plumbing with per-function tests to move the number.
 
 **Naming:** `test_<behavior>.py`, functions `test_<scenario>`, classes `Test<Component>`.
 
@@ -279,10 +279,10 @@ CI runs `pylint --errors-only` on core packages (fatal/error severity only). Fix
 
 Shell scripts live under `scripts/`, `src/hyperloom/**/assets/`, and agent tool directories.
 
-- Target **bash** unless the shebang says otherwise.
+- Target bash unless the shebang says otherwise.
 - **Quote variable expansions** — most ShellCheck findings are `SC2086` (unquoted `$var`).
 - Use `set -euo pipefail` in new scripts when safe (existing scripts may omit it for compatibility — match neighbors).
-- Run **ShellCheck** locally: pre-commit includes `shellcheck-py`.
+- Run ShellCheck locally: pre-commit includes `shellcheck-py`.
 
 ## YAML and GitHub Actions
 

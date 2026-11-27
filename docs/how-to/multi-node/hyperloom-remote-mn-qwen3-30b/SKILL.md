@@ -8,7 +8,7 @@ description: |
 
 # Hyperloom Remote Multi-Node — Qwen3-30B-A3B
 
-Pinned workload for a remote multi-node `optimize` run. Pick **one** backend
+Pinned workload for a remote multi-node `optimize` run. Pick one backend
 below and pass its `FLAGS` + `Environment` block to `inference_optimizer
 optimize`; the agent launches it in the background and monitors `state.json`
 until a terminal `stop_reason` — success (`target_reached`, `global_converged`,
@@ -19,7 +19,7 @@ until a terminal `stop_reason` — success (`target_reached`, `global_converged`
 
 ## Prerequisites
 
-- **`NFS_SHARED_ROOT`**: cluster-wide shared mount at the **same absolute path**
+- **`NFS_SHARED_ROOT`**: cluster-wide shared mount at the same absolute path
   on the sandbox and every GPU pod (model, tool checkouts, session artifacts).
   Required; local-only paths break multi-node restart and benchmarks.
 - **A provisioned cluster**: the platform creates the GPU pods and hands them
@@ -31,8 +31,8 @@ until a terminal `stop_reason` — success (`target_reached`, `global_converged`
 
 The blocks below are written for Primus-Claw *and* `optimize`: Claw parses them to
 size and build the cluster, then the agent runs `optimize` with the same block.
-Four flags configure the cluster Claw provisions and **can be dropped when
-composing the `optimize` command**. `optimize` accepts them so a real platform
+Four flags configure the cluster Claw provisions and can be dropped when
+composing the `optimize` command. `optimize` accepts them so a real platform
 prompt parses, but nothing reads them once the cluster exists:
 
 | Claw-only flag | What Claw does with it |
@@ -172,7 +172,7 @@ KernelForge ships inside Hyperloom. Select it with `KERNEL_OPT_BACKEND_ORDER=for
 
 - Session lands in `$USER_DATA_PATH/<model_basename>/<UTC_ts>/`; `USER_DATA_PATH`
   is platform-injected and kept unchanged.
-- Crash recovery: `optimize --resume-from "$SESSION_DIR"` on the **same** session
+- Crash recovery: `optimize --resume-from "$SESSION_DIR"` on the same session
   dir (never a second `optimize`; resume past a terminal `stop_reason` needs
   `--force-resume`).
 - Releasing the cluster is the platform's job, not the optimizer's — it happens

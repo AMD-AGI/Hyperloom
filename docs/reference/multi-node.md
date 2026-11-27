@@ -5,7 +5,7 @@ myst:
         "keywords": "Hyperloom, multi-node, cluster, infera, rayjob, AMD GPU, ROCm, MI300X, MI325X, SGLang, PD disaggregation, NFS, Primus-Claw, inference optimization"
 ---
 
-# Multi-node inference optimization
+# Hyperloom multi-node inference optimization
 
 This page is the reference for running Hyperloom across a multi-node GPU cluster
 (`--nodes >= 2`). It covers both supported backends, the cluster hand-off
@@ -55,8 +55,8 @@ The following table lists all hand-off variables.
 
 | Variable | Backend | Required | Meaning |
 |----------|---------|----------|---------|
-| `HYPERLOOM_MN_EXT_SERVICE_URL` | both | **yes** | Benchmark frontend URL (`http(s)://…`). Use the port the platform assigns — it is not always `:8000`. |
-| `HYPERLOOM_MN_EXT_SSH_KEY` | infera | **yes** | Path to a private key authorized on the pods. |
+| `HYPERLOOM_MN_EXT_SERVICE_URL` | both | yes | Benchmark frontend URL (`http(s)://…`). Use the port the platform assigns — it is not always `:8000`. |
+| `HYPERLOOM_MN_EXT_SSH_KEY` | infera | yes | Path to a private key authorized on the pods. |
 | `HYPERLOOM_MN_EXT_PREFILL_IPS` | infera | PD only | Prefill pod IPs, comma-separated, in rank order. |
 | `HYPERLOOM_MN_EXT_DECODE_IPS` | infera | PD only | Decode pod IPs, comma-separated, in rank order. |
 | `HYPERLOOM_MN_EXT_WORKER_IPS` | infera | aggregated | Worker pod IPs, comma-separated, leader first. At least one of `_PREFILL_IPS`, `_DECODE_IPS`, or `_WORKER_IPS` is required for infera. |
@@ -118,8 +118,8 @@ to `tail -f /dev/null` so the cluster stays up between rounds.
 
 ## Shared filesystem
 
-A cluster-wide shared mount is required. It must be visible at the **same
-absolute path** on the sandbox and every GPU pod. `USER_DATA_PATH` must also live
+A cluster-wide shared mount is required. It must be visible at the same
+absolute path on the sandbox and every GPU pod. `USER_DATA_PATH` must also live
 under it so both the sandbox and the pods read and write the same session
 artifacts.
 
@@ -152,8 +152,8 @@ full schema.
 
 The pinned workload skill at
 [`docs/how-to/multi-node/hyperloom-remote-mn-qwen3-30b/SKILL.md`](https://github.com/AMD-AGI/Hyperloom/blob/main/docs/how-to/multi-node/hyperloom-remote-mn-qwen3-30b/SKILL.md)
-contains two ready-to-run blocks — **Workload A (infera + PD)** and **Workload B
-(rayjob)** — each a `FLAGS` list and an `Environment` block. The agent runs
+contains two ready-to-run blocks — Workload A (infera + PD) and Workload B
+(rayjob) — each a `FLAGS` list and an `Environment` block. The agent runs
 `hyperloom optimize` with those blocks and monitors `state.json` until a
 terminal `stop_reason`.
 

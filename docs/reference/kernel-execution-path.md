@@ -5,7 +5,7 @@ myst:
         "keywords": "Hyperloom, kernel optimization, GEAK, Forge, request dispatch, kernel execution, AMD GPU, ROCm, KERNEL phase, TraceLens, rewrite controller, multi-node"
 ---
 
-# Kernel optimization execution path
+# Hyperloom kernel optimization execution path
 
 Kernel work in Hyperloom is not handled by an LLM agent. Every kernel
 `REQUEST` emitted by orchestration is intercepted inline by the Coordinator
@@ -235,7 +235,7 @@ Required env vars:
 | `TRACELENS_ROOT` | `install.sh` (operator can override) | TraceLens checkout; installer clones to `.cache/TraceLens` by default |
 | `KERNEL_OPT_BACKEND_ORDER` | Unset/blank resolves to `geak` for every framework, ATOM included; the CLI fills in nothing. Bare-metal setup only persists nonempty choices; Slurm launchers still export `${KERNEL_OPT_BACKEND_ORDER:-geak}` | Exact, case-insensitive `forge` enables per-kernel Forge; existing `.env` choices are retained |
 
-Forge needs **no path variable**. It ships inside the Hyperloom wheel, so the
+Forge needs no path variable. It ships inside the Hyperloom wheel, so the
 `FORGE_PATH` that used to be required here is removed and nothing reads it. The
 optional dev override is `KERNELFORGE_PROJECT_ROOT` (a writable root whose
 resource subtrees take precedence over the packaged copies); see

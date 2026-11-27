@@ -12,7 +12,7 @@ ROCm Hyperloom is an autonomous agentic system designed to optimize end-to-end i
 Hyperloom analyzes your workload, identifies performance bottlenecks, implements targeted optimizations,
 and validates the performance and correctness of the optimizations without requiring manual intervention.
 
-The system operates through a sophisticated multi-stage pipeline. First TraceLens, the profiling brain of
+The system operates through a multi-stage pipeline. First TraceLens, the profiling brain of
 the workload understanding stage, consumes traces collected by InferenceSuite profile rounds, captures
 bottlenecks, and derives the roofline targets that seed the optimization search tree.
 

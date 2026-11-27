@@ -5,7 +5,7 @@ myst:
         "keywords": "Hyperloom, PrimaTune, predictor, first-pass tuner, FRAMEWORK_AGENT, untested proposals, explore, vLLM, SGLang, AMD GPU, ROCm, inference optimization"
 ---
 
-# PrimaTune predictor
+# Hyperloom PrimaTune predictor
 
 PrimaTune is a fine-tuned model that reads a session's state and proposes launch
 configurations: server flags, environment variables, and occasionally a source

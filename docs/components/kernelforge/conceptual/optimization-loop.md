@@ -1,0 +1,66 @@
+---
+myst:
+  html_meta:
+    "description": "The KernelForge enforced development loop: build, SNR correctness gate, benchmark, register check, and a measured keep-or-revert decision."
+    "keywords": "KernelForge, optimization loop, PMC, wait/MFMA ratio, SNR gate, occupancy, VGPR, roofline, measurement-driven"
+---
+
+# KernelForge optimization loop
+
+Every kernel backend follows the same enforced development loop. Skipping a step is
+blocked by the system, so no change is ever accepted without measured evidence.
+
+## The enforced loop
+
+Each step runs in fixed order; the system blocks any attempt to skip one.
+
+1. **Build** — compile the kernel; stale artifacts are auto-cleaned so an edit
+   cannot be silently benchmarked against old code.
+2. **SNR pre-filter** — run the correctness driver; a change must clear the
+   signal-to-noise ratio (SNR) threshold (default 30 dB) before it can be benchmarked.
+3. **Benchmark** — measure wall-clock and kernel time (median over iterations).
+4. **Register check** — read the candidate's VGPR (vector general-purpose register) usage from the build and record
+   it with the measurements. Hardware counters are not read per candidate: the
+   Analysis Agent profiles the current best, and planning reads that evidence.
+5. **Accept** (assembly only) — run the task's own `compile_command`, then its
+   `correctness_command`, stopping at the first failure, and judge the
+   `numerical_validation` evidence the assembly backend's contract requires.
+   Keep the change only if all pass, otherwise revert. The compile step matters
+   on its own — the task often builds a smaller shape than the one the loop
+   measures. Every other backend was judged by the driver in step 2 and has been
+   measured through it since, so its keep rests on that verdict and nothing
+   re-reads the task's configuration.
+
+## PMC-guided optimization
+
+Decisions are grounded in performance monitoring counters (PMC) rather than guesswork. The
+wait/MFMA ratio is a primary signal:
+
+| wait/MFMA ratio | Diagnosis | Action |
+|-----------------|:----------|:-------|
+| < 5 | Compute-bound | Reduce MFMA count (tile shape, warp config) |
+| 5–10 | Balanced | Profile deeper — check for local data share (LDS) or vector memory (VMEM) stalls |
+| > 10 | Memory-bound | Reduce HBM (high-bandwidth memory) traffic (occupancy, prefetch) |
+
+The `registers` tool predicts vector and scalar general-purpose register (VGPR/SGPR) usage and occupancy before building,
+so an occupancy cliff (for example VGPR crossing 256) is caught before it costs
+a build-bench cycle.
+
+## Correctness and pitfall gates
+
+Each validation gate exists because of a real incident. Examples enforced by the
+knowledge base and tooling:
+
+- Stale `.so` artifacts — the build tool auto-cleans and verifies deployment.
+- A `BLOCK_M=64` sparse-attention configuration that silently corrupts data —
+  a hard constraint in the knowledge base.
+- An AGPR (accumulator general-purpose register) inline-asm register drop that produces silently wrong output — blocked
+  by the SNR pre-filter below 30 dB.
+
+## Autonomous loop
+
+The autonomous loop wraps this cycle for overnight, unattended optimization:
+Analysis and Orchestration produce one plan, the Implementer edits the working
+tree, the driver-owned complete correctness suite validates it, and three
+independent benchmarks decide whether to commit or restore the candidate.
+See {doc}`Autonomous overnight loop </components/kernelforge/how-to/autonomous-loop>`.

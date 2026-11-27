@@ -92,7 +92,7 @@ is not allowed to propose them.
 Every phase transition is a GPU barrier: the Coordinator stops admitting new
 work, drops queued work the next phase does not support, and commits the
 transition only once the actions already running have finished and been
-booked. A phase budget never cancels running work -- the last action in
+booked. A phase budget never cancels running work: the last action in
 flight, such as a GEAK rebench, completes and settles its result. Running
 work is cancelled only when the run is already over: a terminal transition to
 CLOSE (a recorded stop reason such as an unhealthy backend, a failed baseline,
@@ -161,11 +161,11 @@ rather than opening an authoring loop.
 
 When the admitted lane fires — a `(model, backend)` combination cannot launch, or
 it launches but fails its accuracy eval (`accuracy_below_floor` /
-`eval_runtime_failure`) — enablement repairs it along two axes. **Diagnosis (once):** work out which capability layer is
+`eval_runtime_failure`) — enablement repairs it along two axes. Diagnosis (once): work out which capability layer is
 missing — read the failure signature, the model's `config.json` architecture,
 the framework's supported-architecture registry and installed version, and
 upstream (whether the capability already exists and in which version/PR). That
-picks the entry rung. **Climb (as needed):** start at the lowest plausible rung
+picks the entry rung. Climb (as needed): start at the lowest plausible rung
 and go up only when the current rung cannot make it boot; after each cleared
 boot failure, re-diagnose the new (deeper) failure and pick a rung again
 (serial enablement — each round's fix is cumulative). A model whose architecture is
@@ -220,12 +220,12 @@ authoring specialist's prompt. The rungs, in increasing complexity:
    the same ROCm pins as Rung 3, minus the component it builds. Auto-escalation into
    Rung 5 can be disabled with the `HYPERLOOM_ENABLEMENT_DISABLE_TARGETED_BUILD`
    environment variable (see
-   [Targeted builds (Rung 5)](../reference/environment-variables.md#targeted-builds-rung-5)).
+   [Targeted builds (Rung 5)](../reference/environment-variables/env-vars-targeted-builds.md)).
 
 ### Latency budget (constraint on KEEP)
 
-`--max-latency-ms` sets a ceiling on mean end-to-end latency, for **scriptable
-workloads only** (`xdit`, `custom`); the CLI refuses it for a serving framework.
+`--max-latency-ms` sets a ceiling on mean end-to-end latency, for scriptable
+workloads only (`xdit`, `custom`); the CLI refuses it for a serving framework.
 A scriptable workload grades on output throughput alone, and it is the only
 kind compute partitioning places work for, so it is where a throughput-only
 gate can buy throughput with per-request latency. An AgentX serving session
@@ -515,7 +515,7 @@ breakdown's `installed_versions` map (`source_pr_url`); see the
   so a crash or resume reclaims the running build or cleans up the orphaned
   one rather than leaking it.
 
-## FRAMEWORK_AGENT — the optimisation phase
+## FRAMEWORK_AGENT: the optimization phase
 
 One phase, two levers worked in parallel:
 
@@ -561,7 +561,7 @@ wait, a new specialist delegate is refused (`specialist_untested_backlog_full`),
 so dispatch cannot outrun the benchmark lane; a specialist already queued or
 running still records every proposal it returns.
 
-The phase advances to KERNEL_AGENT only when **both** levers are dry
+The phase advances to KERNEL_AGENT only when both levers are dry
 (`optimize_no_more_leverage`). Either arm going quiet raises
 `switch_bottleneck` so the next macro-cycle steers off this bottleneck,
 without abandoning the lever that is still paying. It also exits when its

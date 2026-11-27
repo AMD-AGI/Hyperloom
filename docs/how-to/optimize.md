@@ -14,17 +14,14 @@ Open the Hyperloom workspace in Claude Code or Codex, then paste the following
 prompt into the agent chat, filling in your workload details:
 
 ```{note}
-The prompt includes `install.sh`. This is intentional: the agent runs in its own
-shell process, which does not inherit the environment you sourced during
-installation. The agent must re-source the env files and re-run `install.sh` in
-its own context before launching the optimizer. Because `install.sh` is
-idempotent, the second run is fast and safe.
-```
-
-```{note}
-Paths in the prompts on this page follow the recommended `pip install --target .`
-layout. In a source checkout, replace the `hyperloom/` prefix with
-`src/hyperloom/`.
+- The prompt includes `install.sh`. This is intentional: the agent runs in its own
+  shell process, which does not inherit the environment you sourced during
+  installation. The agent must re-source the env files and re-run `install.sh` in
+  its own context before launching the optimizer. Because `install.sh` is
+  idempotent, the second run is fast and safe.
+- Paths in the prompts on this page follow the recommended `pip install --target .`
+  layout. In a source checkout, replace the `hyperloom/` prefix with
+  `src/hyperloom/`.
 ```
 
 ```text
@@ -81,7 +78,7 @@ Logs are useful evidence, but activity alone does not prove useful progress.
 Under the hood the optimizer walks the phase chain
 `PRELUDE → ENABLEMENT → FRAMEWORK_AGENT → KERNEL_AGENT → SWEEP → CLOSE`; see
 [Hyperloom optimization loop](../conceptual/optimization-loop.md) for each phase
-and [benchmark deadlines](../reference/environment-variables.md#benchmark-deadlines-and-lifecycle)
+and [benchmark deadlines](../reference/environment-variables/env-vars-benchmark-deadlines.md)
 for the independent benchmark and session limits.
 
 ## Resume an interrupted session
@@ -115,7 +112,7 @@ session and prints nothing about plugs. To choose other implementations of a plu
 | `--plug-config SOCKET.KEY=VALUE` | Set one configuration key (repeatable; a JSON value is read as JSON). |
 
 Later layers win: profile, manifest, `$HYPERLOOM_MANIFEST_OVERRIDES`, then `--plug` and `--plug-config`. See
-[Plug selection](../reference/environment-variables.md#plug-selection) for the two variables.
+[Plug selection](../reference/environment-variables/env-vars-plug-selection.md) for the two variables.
 
 A run that selects anything prints one `Plugs : profile=... fingerprint=...` line and records the outcome in
 `$SESSION_DIR/plugs.resolved.json`. `--resume-from` reads that file back before applying flags, so the resumed run keeps
@@ -212,7 +209,7 @@ HYPERLOOM_AGENTX=1 hyperloom optimize \
   --max-hours 12
 ```
 
-This path is **single-node** SGLang or vLLM: run Hyperloom inside your serving
+This path is single-node SGLang or vLLM: run Hyperloom inside your serving
 image. `--docker-image IMAGE` records that runtime image; it does not launch a
 container. Custom models require an explicit `--docker-image`.
 

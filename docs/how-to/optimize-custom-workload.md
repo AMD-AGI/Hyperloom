@@ -9,7 +9,7 @@ myst:
 Every other framework in the registry describes a workload Hyperloom knows: its
 upstream, its entrypoint, the knobs worth exploring. `--framework custom`
 describes none of that, because the workload is yours. It runs on the
-**scriptable** (server-less) path: there is no OpenAI-compatible server, no
+scriptable (server-less) path: there is no OpenAI-compatible server, no
 `benchmark_serving.py` client, and every measurement is one command.
 
 You supply three things; Hyperloom takes over from there.
@@ -42,7 +42,7 @@ than at the first benchmark.
 
 ## The code checkout
 
-`--framework-path` is the **code** checkout, which is not the same thing as the
+`--framework-path` is the code checkout, which is not the same thing as the
 weights under `--model`. It does more than tell your script where the code
 lives: it registers the tree as the framework source root a session searches and
 patches. The source probe discovers pip-installed packages on its own but never
@@ -55,7 +55,7 @@ generic `FRAMEWORK_REPO_PATH`: a session is single-framework by construction
 collision and only forces you to rename variables when you switch frameworks.
 
 ```{warning}
-Hyperloom **commits into this tree**. Each accepted candidate lands as a commit
+Hyperloom commits into this tree. Each accepted candidate lands as a commit
 whose message looks like `hyperloom KEEP <id> (+12.34%)`. Point the flag at a
 checkout dedicated to the run, not at a tree you rely on as a measurement
 reference.
@@ -68,7 +68,7 @@ order:
 
 1. `custom_<gpu-type>.sh`, named after the board itself — with `--gpu-type mi325x`,
    that is `custom_mi325x.sh`.
-2. Failing that, the **single** `.sh` file in the directory, which is what an
+2. Failing that, the single `.sh` file in the directory, which is what an
    operator who wrote one script for one machine actually has.
 3. If neither applies, the launch exits 2: there is no script to run.
 
@@ -104,7 +104,7 @@ A scriptable workload has no server, and therefore no accuracy benchmark. The
 fail-closed:
 
 ```{important}
-A baseline whose report carries no `quality_gate` **stops the run at once** with
+A baseline whose report carries no `quality_gate` stops the run at once with
 `stop_reason: baseline_accuracy_failed`; the log line names the report it read.
 A candidate whose report has no gate scores 0.0 accuracy and is rejected.
 ```
@@ -130,7 +130,7 @@ margin, then require later legs to stay inside it) is the pattern that holds up.
 environment variable for the session, so it also sets a Hyperloom control
 variable of the same name. Their semantics matter:
 
-> Whatever you pin becomes part of the **measurement contract**. A variant can
+> Whatever you pin becomes part of the measurement contract. A variant can
 > add keys but must not overwrite a pinned one, because the baseline number was
 > measured with it.
 
@@ -148,21 +148,21 @@ resume can tell which names the previous launch set.
 On a fresh launch a pin and an `export` of the same name are equivalent: no name
 is withheld. For a knob Hyperloom resolves itself — `ISL`, `OSL`, `CONC`, `TP`,
 `EP`, `PRECISION`, `MAX_MODEL_LEN`, `FRAMEWORK` — the environment is one rung of
-that knob's ladder: **an explicit flag wins, then the environment (where your
-pin lands), then the default**. So `--extra-env ISL=4096` sets the ISL, and
+that knob's ladder: an explicit flag wins, then the environment (where your
+pin lands), then the default. So `--extra-env ISL=4096` sets the ISL, and
 `--isl 2048 --extra-env ISL=4096` runs at 2048. On a resume the two stop being
 equivalent for `ISL`, `OSL`, `CONC`, `TP`, `EP` and — when the session recorded
 one — `MAX_MODEL_LEN`: the pin is still honoured, but a bare `export` is
-overwritten by the session's recorded value, so the ladder reads **flag, then the
+overwritten by the session's recorded value, so the ladder reads flag, then the
 pins in effect for this resume (its own `--extra-env`, or the launch's persisted
 pins when it passes none), then the recorded value, then the environment, then
-the default**. `PRECISION` keeps the fresh-launch ladder on a resume too, with
+the default. `PRECISION` keeps the fresh-launch ladder on a resume too, with
 the recorded value and the checkpoint's dtype below the environment. `FRAMEWORK`
 belongs to the session: a resume re-exports the recorded framework and reads
 `$FRAMEWORK` only when the session recorded none, so neither a pin nor a flag
 changes it.
 Everything else a pin names is set directly and is not interpreted.
-**Forward every pin as its own `--extra-env` flag** — a dropped pin is lost
+Forward every pin as its own `--extra-env` flag — a dropped pin is lost
 silently. On `--resume` the persisted pins are re-exported, so they only need
 re-passing when you want to change them.
 
@@ -185,7 +185,7 @@ Declare the knob space instead, in `levers.json` beside your benchmark script
 ```
 
 Each entry is an explore variant: a `name` plus at least one thing a restart can
-apply (`extra_envs` as an **object**, `extra_args`, `remove_args`, `unset_envs`,
+apply (`extra_envs` as an object, `extra_args`, `remove_args`, `unset_envs`,
 or `args_mode: "replace"`). Each entry is judged by the same rule the executor
 applies when it builds the grid, so a shape that normalizes away — `extra_envs`
 given as a string or a list, say — is rejected at launch rather than quietly
@@ -219,7 +219,7 @@ catalog in
 ### Evidence: the host probe
 
 A `profile` leg arms a host-side probe that is injected through a `PYTHONPATH`
-prefix, so **your entrypoint is untouched**. It writes
+prefix, so your entrypoint is untouched. It writes
 `framework_rewrite_evidence.json` beside the workspace and measures what a GPU
 kernel breakdown structurally cannot: object collectives round-tripping through
 the host, device-to-host syncs, and repeated host-to-device copies.
@@ -233,22 +233,22 @@ the host, device-to-host syncs, and repeated host-to-device copies.
 Tier 2 is what separates a memoization candidate from a loop-hoist enabler —
 whether a value should be cached or lifted out of the loop is exactly what the
 argument-repeat rate tells you. It inflates host time enough to skew a
-co-collected torch trace, so **give it its own leg**.
+co-collected torch trace, so give it its own leg.
 
 ### Every rewrite ships behind a switch that defaults off
 
 This is a mechanism, not a style preference. Each rewrite must sit behind its own
-environment switch that defaults **off**, declared in a `framework_switches`
+environment switch that defaults off, declared in a `framework_switches`
 manifest with `category`, `target`, `depends_on` and `enables`. That discipline
 buys three things:
 
-- A **switch-off parity leg** runs with every switch unset and must reproduce the
+- A switch-off parity leg runs with every switch unset and must reproduce the
   base within ±2%. A patch that is not genuinely inert when disabled is reverted
   rather than silently poisoning every later measurement.
-- A bundle that passes correctness but misses the throughput threshold is **kept
-  inert** instead of reverted. Default-off code costs nothing, and reverting
+- A bundle that passes correctness but misses the throughput threshold is kept
+  inert instead of reverted. Default-off code costs nothing, and reverting
   would discard the rewrites that do pay along with the one that does not.
-- Accepted switches are registered as **search levers**, so `explore` measures
+- Accepted switches are registered as search levers, so `explore` measures
   each rewrite's own contribution (additive while the levers are dormant,
   leave-one-out once they are on) and searches combinations along the declared
   dependency closure, so an enabler is never judged alone.

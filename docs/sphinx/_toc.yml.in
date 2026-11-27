@@ -7,8 +7,6 @@ subtrees:
 - entries:
   - file: what-is-hyperloom.md
     title: What is Hyperloom?
-  - file: upstream-results.md
-    title: Upstream optimizations merged into vLLM and SGLang
   - file: release-notes.md
     title: Release notes
   - file: compatibility.rst
@@ -27,14 +25,46 @@ subtrees:
     title: Components
     subtrees:
     - entries:
-      - url: https://rocm.docs.amd.com/projects/intellikit/en/latest/
-        title: IntelliKit
       - url: https://rocm.docs.amd.com/projects/tracelens/en/latest/
         title: TraceLens
       - url: https://rocm.docs.amd.com/projects/geak/en/latest/
         title: GEAK
-      - url: https://rocm.docs.amd.com/projects/agent-kernel-arena/en/latest/
-        title: AgentKernelArena
+      - file: components/kernelforge/what-is-kernelforge.md
+        title: KernelForge
+        entries:
+        - file: components/kernelforge/quickstart.md
+          title: Quickstart
+        - file: components/kernelforge/conceptual/architecture.md
+          title: Architecture
+          entries:
+          - file: components/kernelforge/conceptual/optimization-loop.md
+            title: Optimization loop
+        - file: components/kernelforge/how-to/run-a-campaign.md
+          title: Run a campaign
+          entries:
+          - file: components/kernelforge/how-to/autonomous-loop.md
+            title: Autonomous overnight loop
+          - file: components/kernelforge/how-to/kernel-fusion.md
+            title: Fuse a launch-bound decode path
+          - file: components/kernelforge/how-to/assembly.md
+            title: Assembly candidates
+          - file: components/kernelforge/how-to/debug-task-preparation.md
+            title: Debug task preparation
+          - file: components/kernelforge/how-to/radeon-w7900.md
+            title: Run on a Radeon PRO W7900
+          - file: components/kernelforge/how-to/extending.md
+            title: Add a kernel backend, tool, or knowledge
+        - file: components/kernelforge/reference/cli.md
+          title: CLI reference
+          entries:
+          - file: components/kernelforge/reference/experience-store.md
+            title: Experience store
+          - file: components/kernelforge/reference/deployment-modes.md
+            title: Deployment modes
+          - file: components/kernelforge/reference/measured-results.md
+            title: Measured results
+          - file: components/kernelforge/reference/api-reference.rst
+            title: API reference
   - file: conceptual/optimization-loop.md
     title: Hyperloom optimization loop
 
@@ -59,6 +89,82 @@ subtrees:
     title: API reference
   - file: reference/environment-variables.md
     title: Environment variables
+    subtrees:
+    - entries:
+      - file: reference/environment-variables/env-vars-credentials.md
+        title: Credentials
+      - file: reference/environment-variables/env-vars-paths.md
+        title: Paths
+      - file: reference/environment-variables/env-vars-workload.md
+        title: Workload configuration
+      - file: reference/environment-variables/env-vars-accuracy-gates.md
+        title: Accuracy gates
+      - file: reference/environment-variables/env-vars-experience-kb.md
+        title: Experience KB
+      - file: reference/environment-variables/env-vars-rsi-archive.md
+        title: Multi-branch RSI archive
+      - file: reference/environment-variables/env-vars-prompt-cache-ttl.md
+        title: Multi-branch prompt-cache TTL
+      - file: reference/environment-variables/env-vars-primatune.md
+        title: PrimaTune predictor
+      - file: reference/environment-variables/env-vars-kernel-backend.md
+        title: Kernel-opt backend selection
+      - file: reference/environment-variables/env-vars-fusion-lane.md
+        title: Fusion lane
+      - file: reference/environment-variables/env-vars-kernel-lane.md
+        title: KERNEL lane behaviour
+      - file: reference/environment-variables/env-vars-collective-extraction.md
+        title: Collective candidate extraction
+      - file: reference/environment-variables/env-vars-kernel-source-resolution.md
+        title: Kernel source resolution
+      - file: reference/environment-variables/env-vars-ray-execution.md
+        title: Single-node Ray execution
+      - file: reference/environment-variables/env-vars-codex-sandbox.md
+        title: Codex (OpenAI) agent sandbox
+      - file: reference/environment-variables/env-vars-ray-gpu-scheduling.md
+        title: Single-node Ray GPU scheduling
+      - file: reference/environment-variables/env-vars-compute-partitioning.md
+        title: Compute partitioning
+      - file: reference/environment-variables/env-vars-multinode-pd.md
+        title: Multi-node / prefill-decode
+      - file: reference/environment-variables/env-vars-quantization.md
+        title: Quantization prelude
+      - file: reference/environment-variables/env-vars-enablement.md
+        title: Enablement admission
+      - file: reference/environment-variables/env-vars-benchmark-deadlines.md
+        title: Benchmark deadlines
+      - file: reference/environment-variables/env-vars-explore-prefilters.md
+        title: EXPLORE pre-filters
+      - file: reference/environment-variables/env-vars-reactor-budgets.md
+        title: Reactor budgets
+      - file: reference/environment-variables/env-vars-tracelens-route.md
+        title: TraceLens analysis route
+      - file: reference/environment-variables/env-vars-tracelens-budgets.md
+        title: TraceLens analysis budgets
+      - file: reference/environment-variables/env-vars-framework-discovery.md
+        title: Framework / source-tree discovery
+      - file: reference/environment-variables/env-vars-targeted-builds.md
+        title: Targeted builds (Rung 5)
+      - file: reference/environment-variables/env-vars-security.md
+        title: Security compatibility switches
+      - file: reference/environment-variables/env-vars-critic-kb.md
+        title: Critic / knowledge base
+      - file: reference/environment-variables/env-vars-session-handoff.md
+        title: Session / observability hand-off
+      - file: reference/environment-variables/env-vars-agentx-performance.md
+        title: AgentX performance metric
+      - file: reference/environment-variables/env-vars-phase-tuning.md
+        title: Phase tuning
+      - file: reference/environment-variables/env-vars-plug-selection.md
+        title: Plug selection
+      - file: reference/environment-variables/env-vars-hosted-inputs.md
+        title: Hosted run inputs
+      - file: reference/environment-variables/env-vars-measurement-guard.md
+        title: Measurement card guard
+      - file: reference/environment-variables/env-vars-merge-smoke.md
+        title: Merge smoke
+      - file: reference/environment-variables/env-vars-not-exposed.md
+        title: Variables intentionally not exposed
   - file: reference/authentication.md
     title: Authentication and credentials
   - file: reference/kernel-execution-path.md
@@ -87,47 +193,6 @@ subtrees:
     title: PrimaTune predictor
   - file: reference/troubleshooting.md
     title: Troubleshooting
-
-- caption: KernelForge (built-in kernel-opt agent)
-  entries:
-  - file: kernelforge/index
-    title: KernelForge
-  - file: kernelforge/what-is-kernelforge.md
-    title: What is KernelForge?
-  - file: kernelforge/install/quickstart.md
-    title: Quickstart
-  - file: kernelforge/quickstart.md
-    title: Campaign quickstart
-  - file: kernelforge/conceptual/architecture.md
-    title: Architecture
-  - file: kernelforge/conceptual/optimization-loop.md
-    title: Optimization loop
-  - file: kernelforge/how-to/run-a-campaign.md
-    title: Run a campaign
-  - file: kernelforge/how-to/assembly.md
-    title: Assembly candidates
-  - file: kernelforge/how-to/autonomous-loop.md
-    title: Autonomous overnight loop
-  - file: kernelforge/how-to/kernel-fusion.md
-    title: Fuse a launch-bound decode path
-  - file: kernelforge/how-to/debug-task-preparation.md
-    title: Debug task preparation
-  - file: kernelforge/how-to/radeon-w7900.md
-    title: Run on a Radeon PRO W7900 (gfx1100)
-  - file: kernelforge/how-to/extending.md
-    title: Add a kernel backend, tool, or knowledge
-  - file: kernelforge/reference/cli.md
-    title: CLI reference
-  - file: kernelforge/reference/deployment-modes.md
-    title: Deployment modes
-  - file: kernelforge/reference/experience-store.md
-    title: Experience store
-  - file: kernelforge/reference/api-reference.rst
-    title: API reference
-  - file: kernelforge/reference/measured-results.md
-    title: Measured results
-  - file: kernelforge/forge_long_horizon_state.md
-    title: Long-horizon loop state
 
 - caption: About
   entries:

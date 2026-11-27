@@ -5,7 +5,7 @@ myst:
         "keywords": "Hyperloom, Experience KB, experience schema, declaration, schema_ref, field kinds, field roles, files, identity, immutability"
 ---
 
-# Experience schema
+# Hyperloom experience schema
 
 An Experience is the canonical record of one attempt and what came of it. The
 KB defines the frame every record shares: its categories, the kinds a field

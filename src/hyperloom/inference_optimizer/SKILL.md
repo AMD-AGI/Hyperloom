@@ -1210,7 +1210,7 @@ below describe the runtime behavior operators observe.
 - **Build budget.** Each build runs under its component's fixed wall-clock
   budget.
 
-See `docs/reference/environment-variables.md` "Targeted builds (Rung 5)" for the
+See `docs/reference/environment-variables/env-vars-targeted-builds.md` for the
 full env-var set, and `docs/reference/session-breakdown.md` for the emitted
 `enablement` / `build_attempts[]` fields.
 
@@ -1478,7 +1478,7 @@ restart, or automatically resume the optimizer.
 
 Not a launch you run by hand: a hosting platform starts it. `hyperloom hosted run` takes no arguments. It reads the host's inputs
 (`HYPERLOOM_INPUT_FILE` for the campaign spec `hyperloom.campaign-spec/v1`, plus `HYPERLOOM_RUN_ID`, `HYPERLOOM_RUN_CREATED_AT`,
-`HYPERLOOM_STATE_DIR` and the rest listed in `docs/reference/environment-variables.md`), removes the host-only ones from its
+`HYPERLOOM_STATE_DIR` and the rest listed in `docs/reference/environment-variables/env-vars-hosted-inputs.md`), removes the host-only ones from its
 environment, and runs `optimize` in the same process: `--resume-from <dir> --plug-profile <profile>` when the run's session
 directory already holds `manifest.json` and `state.json`, otherwise the spec mapped to `optimize` flags plus
 `--plug-profile <profile> --session-dir <dir>`. The directory is derived from the run, so a restart resumes the same session.
