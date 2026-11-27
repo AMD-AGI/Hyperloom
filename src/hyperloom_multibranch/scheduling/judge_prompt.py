@@ -222,8 +222,9 @@ tests of a new branch. pending_confirm: A branch with a pending candidate cannot
 confirm is judged. A branch whose specialist gave up, and one stopped for a failed judging, is held by neither its grace
 nor its repair period; a repair branch runs at most {REPAIR_BRANCH_SECONDS / 3600:g} hours whatever you decide.
 unsteered: a branch whose steered is false, which runs a third-party agent the user named, by the agent's own logic, one
-test at a time: no stop or K you give it is applied, unless its judging failed: stop it then, as any branch whose
-judging failed. Otherwise weigh the slot it holds as given.
+test at a time at the max_k_per_branch it opened at, so that its test takes the turns a specialist's take: no stop or K
+you give it is applied, unless its judging failed: stop it then, as any branch whose judging failed. Otherwise weigh
+the slot it holds as given.
 dev_wait: a branch whose specialist waits in line for a dev sandbox, while it waits: you may lower its K, not stop it,
 since its tests judged meanwhile count toward its stall.{{envelope}}
 A branch's pending_candidates are its measured candidates that beat its head by at least the bar while their confirm

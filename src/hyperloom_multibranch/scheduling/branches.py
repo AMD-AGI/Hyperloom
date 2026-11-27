@@ -74,8 +74,6 @@ logger = logging.getLogger(__name__)
 SPECIALIST_CALL_SECONDS = 60.0
 #: Clock seconds a branch gets to open, its specialist's start included, before the branch counts as not started.
 SPECIALIST_START_SECONDS = 300.0
-#: The K of an agent's branch: its agent tests one keep at a time.
-AGENT_K = 1
 #: Clock seconds a repair branch may hold its slot, from its entry into the roster, before it is stopped: two hours.
 #: A repair that waited in the fork desk's queue counts from leaving it.
 REPAIR_BRANCH_SECONDS = 2 * 3600.0
@@ -192,7 +190,7 @@ class BranchControl:
         self, agents: tuple[str, ...], start_commit: str, deadline: float, plans: tuple[str, ...] = ()
     ) -> tuple[BranchEntry, ...]:
         """Open one :attr:`BranchOrigin.AGENT` branch at ``start_commit`` for each agent source the user named, as
-        :meth:`open_user_branches` opens the user's directions; no judge changes its K of :data:`AGENT_K`. ``plans``
+        :meth:`open_user_branches` opens the user's directions; no judge changes its K. ``plans``
         gives each agent, in order, its share of the session's directions (``""``, or none given, for no share)."""
 
         shares = plans + ("",) * (len(agents) - len(plans))
@@ -227,13 +225,13 @@ class BranchControl:
 
     def _issue(self, start: BatchStart) -> BranchEntry | None:
         """A new branch on the roster as ``start`` says, or ``None`` when the roster refuses one; a refused branch
-        takes no id. A specialist's branch opens at the highest K the caps allow, which the judge lowers from there;
-        an agent's at :data:`AGENT_K`."""
+        takes no id. Every branch opens at the highest K the caps allow, and the judge lowers a specialist's from there.
+        An agent tests one keep at a time whatever its K; its K gives that test the queue turns a specialist's get."""
 
         if self._roster.open_refusal():
             return None
         branch = self._roster.next_branch_id()
-        k = self._roster.caps.max_k_per_branch if start.origin.steered_by_judge else AGENT_K
+        k = self._roster.caps.max_k_per_branch
         return self._roster.open(branch, origin=start.origin, start_commit=start.start_commit, k=k)
 
     async def start_admitted(self, admitted: AdmittedBranch, deadline: float) -> None:

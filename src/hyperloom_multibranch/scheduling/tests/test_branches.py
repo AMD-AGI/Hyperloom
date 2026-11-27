@@ -253,7 +253,7 @@ async def test_user_branches_open_at_the_root_at_the_highest_k_on_their_directio
     assert json.loads((tmp_path / "MB-roster.json").read_text())["issued_branch_ids"] == 3
 
 
-async def test_agent_branches_open_at_the_root_at_k_one_after_the_user_branches_each_on_its_agent(
+async def test_agent_branches_open_at_the_root_at_the_highest_k_after_the_user_branches_each_on_its_agent(
     tmp_path: Path,
 ) -> None:
     bench = await Bench(tmp_path).rooted()
@@ -262,7 +262,7 @@ async def test_agent_branches_open_at_the_root_at_k_one_after_the_user_branches_
     opened = await bench.control.open_agent_branches(("https://github.com/acme/agent@v1",), bench.root, OPEN_BY)
     await _runs_started()
 
-    assert [(entry.branch, entry.origin, entry.k) for entry in opened] == [("b02", BranchOrigin.AGENT, 1)]
+    assert [(entry.branch, entry.origin, entry.k) for entry in opened] == [("b02", BranchOrigin.AGENT, 2)]
     assert bench.sessions.agents == {"b02": "https://github.com/acme/agent@v1"}
     assert bench.sessions.deadlines["b02"] == OPEN_BY
     assert bench.sessions.started["b02"] == bench.root
