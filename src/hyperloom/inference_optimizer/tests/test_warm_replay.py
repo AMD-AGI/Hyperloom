@@ -1315,6 +1315,51 @@ def test_promote_warm_replay_adopts_on_any_positive_gain(tmp_path):
     assert coord.shared_state.current_best["action"] == "replay_warm_recipe"
 
 
+def _settle_replay_measuring(tmp_path, *, expected_gain_pct: float, tput: float):
+    coord = _make_coord(tmp_path, warm_start_recipe=_warm_recipe_t1())
+    coord.shared_state.warm_replay_outcome = {
+        "status": "in_flight",
+        "expected_gain_pct": expected_gain_pct,
+        "warm_recipe_tier": "exact",
+    }
+    task = _StubTask(params={"extra_server_args": "--attention-backend AITER", "baseline_tput_anchor": 600.0})
+    coord.phase_prelude.promote_warm_replay({"status": "succeeded", "output_throughput": tput}, task=task)
+    return coord
+
+
+def test_a_replay_far_below_the_expected_gain_is_adopted_and_flagged(tmp_path, caplog):
+    """+10% against an expected +25% still seeds the stack, and the shortfall is on the outcome and in the log."""
+    with caplog.at_level("WARNING"):
+        coord = _settle_replay_measuring(tmp_path, expected_gain_pct=25.0, tput=660.0)
+
+    outcome = coord.shared_state.warm_replay_outcome
+    assert outcome["status"] == "reproduced"
+    assert outcome["gain_vs_expected"] == 0.4
+    assert outcome["below_expected_gain"] is True
+    assert len(coord.shared_state.optimization_stack) == 1
+    assert any("below the expected gain" in record.getMessage() for record in caplog.records)
+
+
+def test_a_replay_near_the_expected_gain_is_not_flagged(tmp_path, caplog):
+    with caplog.at_level("WARNING"):
+        coord = _settle_replay_measuring(tmp_path, expected_gain_pct=25.0, tput=738.0)
+
+    outcome = coord.shared_state.warm_replay_outcome
+    assert outcome["status"] == "reproduced"
+    assert outcome["gain_vs_expected"] == 0.92
+    assert "below_expected_gain" not in outcome
+    assert not any("below the expected gain" in record.getMessage() for record in caplog.records)
+
+
+def test_a_replay_without_an_expected_gain_is_not_flagged(tmp_path):
+    coord = _settle_replay_measuring(tmp_path, expected_gain_pct=0.0, tput=660.0)
+
+    outcome = coord.shared_state.warm_replay_outcome
+    assert outcome["status"] == "reproduced"
+    assert "gain_vs_expected" not in outcome
+    assert "below_expected_gain" not in outcome
+
+
 def test_promote_warm_replay_no_gain_is_drift(tmp_path):
     """Zero or negative measured gain → ``drift``, no stack push."""
     coord = _make_coord(tmp_path, warm_start_recipe=_warm_recipe_t1())
