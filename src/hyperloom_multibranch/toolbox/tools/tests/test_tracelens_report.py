@@ -207,7 +207,7 @@ async def test_the_mixed_window_the_perf_report_runs_on_is_not_where_the_shares_
     """The GEMM-led prefill step the fake splitter writes as the mixed window has its GEMMs at 80% and no paged
     attention."""
     probe.install_capture(rig.trace_input / "torch_trace" / "graph_capture_profile")
-    _, pointer, _ = await _run(tmp_path, {**probe.GRADED, "steady_state_mode": "mixed"}, rig)
+    _, pointer, _ = await _run(tmp_path, probe.GRADED, rig)
 
     assert max(pointer.op_shares, key=pointer.op_shares.get) == PAGED_ATTENTION
     assert pointer.op_shares[PAGED_ATTENTION] > 20 and CK_GEMM not in pointer.op_shares  # the GEMMs are split by module
@@ -540,7 +540,6 @@ async def test_a_perf_report_without_the_tables_the_coverage_check_reads_fails_t
 @pytest.mark.parametrize(
     ("params", "shell", "error_class"),
     [
-        ({"steady_state_mode": "everything"}, Shell(), "invalid_steady_state_mode"),
         ({"split_conc": "many"}, Shell(), "invalid_split_hint"),
         ({"split_conc": "4.5"}, Shell(), "invalid_split_hint"),
         ({"split_osl": "0"}, Shell(), "invalid_split_hint"),

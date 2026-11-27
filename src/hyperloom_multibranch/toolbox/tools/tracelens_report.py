@@ -10,8 +10,8 @@ fallback ``analysis.md`` and ``analysis.json``, which is how
 :func:`~hyperloom_multibranch.toolbox.tools.op_shares.degraded_reason` knows to withhold its shares. Without a model it
 finishes far sooner.
 
-The splitter's workload hints (``--CONC``, ``--OSL``, ``--R``), the prompt length the op shares are weighted by (``ISL``) and
-the steady-state mode come from the request alone. A specialist's request gets the hints from the profile test's own point
+The splitter's workload hints (``--CONC``, ``--OSL``, ``--R``) and the prompt length the op shares are weighted by (``ISL``)
+come from the request alone. A specialist's request gets the hints from the profile test's own point
 (``toolbox/analysis.py``), not from anything the caller or the toolbox process says; the splitter picks its window without a
 hint the request lacks.
 
@@ -23,7 +23,7 @@ the shares come from GPU events, per kernel, summing to 100% of the kernel time 
 its kernels are missing from the trace (they fill under :data:`~.kernel_shares.MIN_GPU_BUSY_PERCENT` of its GPU span) or
 the excluded events could change the ranking.
 
-They are not the perf report's window's either. That window (``steady_state_mode``, ``mixed`` unless asked otherwise) is
+They are not the perf report's window's either. That window (``steady_state_mode``, always ``mixed``) is
 weighted by whatever steps it holds, and a graded wave is mostly decode, so the shares are those of the trace's decode window
 and its prefill window, weighted by the time each phase takes in a wave of the profile point's workload (:mod:`~.phase_mix`:
 ``phase_fractions``, ``phase_windows``). TraceLens' report is still run on the perf report's window, and its own check on the
@@ -85,13 +85,14 @@ REPORT_ROUTE = "report"
 _SPLITTER = "TraceLens.TraceUtils.split_trace.main"
 _PERF_REPORT = "TraceLens.Reporting.generate_perf_report_pytorch_inference"
 _SPLIT_NUM_STEPS = 32
+#: How long each TraceLens command may run.
+_TIMEOUT_SEC = 3600
 _DEFAULT_MODE = "mixed"
 #: Steady-state mode -> the file name prefix the splitter writes its window under.
 _CHUNK_PREFIX = {
     "mixed": "mixed_steady_state",
     "decode_only": "decode_only_steady_state",
     "prefilldecode": "prefilldecode_steady_state",
-    "generic": "steady_state",
 }
 _CHUNK_SUFFIXES = ("trace.json.gz", "json.gz", "trace.json", "json")
 #: Trace candidates opened looking for GPU kernels; the likeliest one is first, so more than a few is a real problem.
@@ -109,7 +110,6 @@ WORKLOAD_HINTS = (*SPLIT_HINTS, ("--ISL", "split_isl", ENV_ISL))
 _ENCODING = "utf-8"
 #: The error class of a perf report that lacks a table the route reads.
 _INCOMPLETE = "perf_report_incomplete"
-_CAPTURE_KEYS = ("capture_folder", "graph_capture_path", "capture_folder_path")
 #: How far above the trace input its ``profile`` directory may be (a trace file sits a level or two below it).
 _PROFILE_DEPTH = 3
 _OPS_SUMMARY = "ops_summary.csv"
@@ -147,13 +147,10 @@ class _Run:
         return self.out_dir / "trace_split"
 
 
-def _text(payload: Mapping[str, Any], *keys: str) -> str:
-    """The first of ``keys`` the payload sets, as stripped text; empty when none is."""
-    for key in keys:
-        value = payload.get(key)
-        if value not in (None, ""):
-            return str(value).strip()
-    return ""
+def _text(payload: Mapping[str, Any], key: str) -> str:
+    """``key`` of the payload as stripped text; empty when it is not set."""
+    value = payload.get(key)
+    return "" if value in (None, "") else str(value).strip()
 
 
 def target_platform(payload: Mapping[str, Any]) -> str:
@@ -334,14 +331,11 @@ def _write_degraded_report(run: _Run, coverage: GraphReplayCoverage) -> None:
 def _analyse(payload: Mapping[str, Any], session_dir: Path) -> dict[str, Any]:
     started = time.monotonic()
     trace_input = Path(str(payload["trace_input"])).expanduser().resolve()
-    mode = _text(payload, "steady_state_mode") or _DEFAULT_MODE
-    if mode not in _CHUNK_PREFIX:
-        raise _Refused("invalid_steady_state_mode", f"steady_state_mode {mode!r} is not one of {sorted(_CHUNK_PREFIX)}")
+    mode = _DEFAULT_MODE
     root = session_paths.tracelens_root()
     if not root.is_dir():
         raise _Refused("tracelens_root_missing", f"TraceLens root not found: {root}; set TRACELENS_ROOT to a checkout")
-    budget = _text(payload, "budget_minutes")
-    run = _Run(root, session_dir / "tracelens", int(float(budget or 60) * 60))
+    run = _Run(root, session_dir / "tracelens", _TIMEOUT_SEC)
     run.out_dir.mkdir(parents=True, exist_ok=True)
 
     hints = _split_hints(payload)
@@ -349,10 +343,7 @@ def _analyse(payload: Mapping[str, Any], session_dir: Path) -> dict[str, Any]:
     trace = _analysed_trace(trace_input)
     _sh(run, "split", _split_command(trace, run.split_dir, hints))
     chunk = _steady_state_chunk(run.split_dir, mode)
-    capture_text = _text(payload, *_CAPTURE_KEYS)
-    capture = (
-        Path(capture_text).expanduser().resolve() if capture_text else discover_capture_folder(trace_input, [trace])
-    )
+    capture = discover_capture_folder(trace_input, [trace])
     arch = resolve_arch_json_path(target_platform(payload))
     _sh(run, "perf report", _perf_report_command(chunk, run, arch, capture))
     coverage = _graph_replay_coverage(run)
