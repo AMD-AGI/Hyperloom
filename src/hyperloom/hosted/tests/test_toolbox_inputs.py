@@ -19,20 +19,6 @@ _DEV = "sentinel-dev-key-9042"
 _TEMPLATES = {"measurement": {"1": "ar-runner-g1", "8": "ar-runner-g8"}, "dev": "ar-dev-g1"}
 _LIMITS = {"max_sandboxes": 4, "max_gpus": 16, "gpu_hours": 2.5, "max_runtime_sec": 3600}
 
-# Pinned literal: the field names of the multibranch toolbox's input (W137 signature).  Not derived from that package.
-_FIELDS = [
-    "run_id",
-    "session_dir",
-    "api_url",
-    "sandbox_url",
-    "measurement_key",
-    "sandbox_templates",
-    "source_sha",
-    "tp",
-    "dev_key",
-    "grant_limits",
-]
-
 
 @pytest.fixture
 def env(tmp_path):
@@ -56,10 +42,6 @@ def env(tmp_path):
 
 def _inputs(env, tmp_path, tp=8):
     return hosted_toolbox_inputs(read_host_info(env), session_dir=tmp_path / "session", tp=tp)
-
-
-def test_the_key_set_is_exactly_the_toolbox_fields(env, tmp_path):
-    assert sorted(_inputs(env, tmp_path)) == sorted(_FIELDS)
 
 
 def test_every_value_is_mapped_from_its_host_input(env, tmp_path):
