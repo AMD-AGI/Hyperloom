@@ -552,6 +552,25 @@ async def test_a_cold_start_that_dropped_requests_is_not_reproduced(tmp_path: Pa
     assert choice.chosen is None
 
 
+class ColdCacheGate(GateService):
+    """The rule gate's session service, whose every comparison found the candidate met the compiled-code cache cold
+    where its record's tests met it warm; the comparison is otherwise the real one."""
+
+    async def compare(self, request_id: str) -> Judgement:
+        return replace(await super().compare(request_id), cache_states_differ=("aiter_jit: miss vs hit",))
+
+
+async def test_a_reproduction_whose_judgement_is_flagged_keeps_the_flag_on_its_candidates_check(tmp_path: Path) -> None:
+    bench = await Bench(tmp_path).build({frozenset({"i1"}): {MAIN_POINT: 1040.0, CONC: 1040.0}})
+    gate = bench.handle(Role.GATE)
+    bench.gate = ColdCacheGate(gate, bench.toolbox, InferenceXRule(gate, CONC), bench.toolbox)
+
+    choice = await bench.selector().select(bench.candidates(both=False))
+
+    (check,) = choice.checks
+    assert check.reproduced and check.cache_states_differ == ("aiter_jit: miss vs hit",)
+
+
 class CrashedSweepTests(SessionTests):
     """Session tests whose sweeps all end ``candidate_failed`` after measuring every conc; a failure double, not a
     placeholder."""

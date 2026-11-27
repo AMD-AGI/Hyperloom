@@ -38,7 +38,6 @@ def coord(session_dir):
         return None
 
     c.phase_internal.maybe_enqueue_explore_research_scout = _noop  # type: ignore[method-assign]
-    c.specialist_dispatch.maybe_force_stalled_domain_specialist = _noop  # type: ignore[method-assign]
     c.phase_internal.maybe_enqueue_trajectory_reviewer = _noop  # type: ignore[method-assign]
     c.shared_state.kernel_enabled = True
     yield c
@@ -203,7 +202,6 @@ async def _next_leg(coord):
         return None
 
     leg.phase_internal.maybe_enqueue_explore_research_scout = _noop  # type: ignore[method-assign]
-    leg.specialist_dispatch.maybe_force_stalled_domain_specialist = _noop  # type: ignore[method-assign]
     leg.phase_internal.maybe_enqueue_trajectory_reviewer = _noop  # type: ignore[method-assign]
     return leg
 

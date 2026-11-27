@@ -130,8 +130,9 @@ from functools import partial
 from pathlib import Path
 from typing import Any
 
+from hyperloom_common.llm.llm_config import expand_custom_header_env_refs
 from hyperloom_common.shared_storage import open_shared_append
-from hyperloom.hosted.campaign import MEASUREMENT_LOCAL, CampaignSpec
+from hyperloom.hosted.campaign import FLOW_CONC_SWEEP, MEASUREMENT_LOCAL, CampaignSpec
 from hyperloom.hosted.host_info import HostGroup, HostInfo, take_host_info
 from hyperloom.hosted.toolbox_inputs import ToolboxInputsError
 from hyperloom.inference_optimizer.session.paths import workspace_root
@@ -151,7 +152,7 @@ from hyperloom_multibranch.cli_options import (
 from hyperloom_multibranch.rulegate.critic import LlmCritic, anthropic_critic
 from hyperloom_multibranch.scheduling.clock import Clock
 from hyperloom.orchestrator.conc_sweep.report import SETTLED
-from hyperloom_multibranch.scheduling.final import sweep_plan, write_skipped
+from hyperloom_multibranch.scheduling.final import FrozenBaseUnusable, sweep_plan, write_skipped
 from hyperloom_multibranch.scheduling.hosted_peers import PinnedToolboxInputs, load_hosted_peers, local_grant_peers
 from hyperloom_multibranch.scheduling.hosted_run import (
     GrantDeadline,
@@ -170,12 +171,15 @@ from hyperloom_multibranch.scheduling.hosted_run import (
     reported_stop_reason,
     require_hosted_isolation,
     require_local_image,
+    require_spec_matches,
     run_argv,
     share_with_the_group,
-    spec_make_before_break,
     started_session,
     stop_before_grant_ends,
+    sweep_stop_reason,
+    swept_session,
     take_over_earlier_session,
+    take_over_swept_session,
     write_final_exit,
 )
 from hyperloom_multibranch.scheduling import review
@@ -257,7 +261,8 @@ def run_session(
     """Create the session directory, hand it to ``report_root`` -- by default printed on one stdout line -- before
     anything else is built in it, run the session (:meth:`Session.run`, given ``grant``'s explore cap) and, when the
     settings ask for one and no signal stopped the session, its conc sweep under the session's lock file
-    (:func:`sweep_closed`, warned at ``grant``'s tests end), and return the session's exit code.
+    (:func:`sweep_closed`, which starts no test that would end past ``grant``'s tests end), and return the session's
+    exit code.
     A session whose specialists run as an account that cannot reach its directory is refused before it runs
     (:func:`~hyperloom_multibranch.scheduling.specialist_reach.require_specialist_reach`, raising
     :class:`EnvironmentIncomplete`), unless it stops once its map is made: that session starts no specialist.
@@ -294,6 +299,13 @@ async def _run_session(
     return outcome.exit_code
 
 
+def _with_sweep_options(settings: RunSettings, concs: tuple[int, ...] | None, parallel: int | None) -> RunSettings:
+    """The closed session's settings with the sweep's points and tests at once, where given, in place of its own."""
+
+    given = {"conc_sweep_concs": concs, "conc_sweep_parallel": parallel}
+    return replace(settings, **{name: value for name, value in given.items() if value is not None})
+
+
 def _sweeps_after(settings: RunSettings, outcome: SessionOutcome) -> bool:
     """Whether the session's conc sweep runs once it closed: asked for, and the session was not stopped by a signal."""
 
@@ -305,7 +317,7 @@ async def sweep_closed(
     settings: RunSettings,
     peer_factory: PeerFactory,
     services: SessionServices,
-    grant_end_unix: float | None = None,
+    deadline_unix: float | None = None,
 ) -> dict[str, Any]:
     """The concurrency sweep of the closed session in ``layout``, on a session built over it whose tests may run as
     long as its plan's points need; returns the report it wrote."""
@@ -316,7 +328,7 @@ async def sweep_closed(
     clock = Clock()
     host = SessionHost(layout, ProcessRegistry(layout.pids, clock), clock)
     session = Session(settings, peer_factory, host, services, test_points=plan.test_points(settings.workload))
-    return await session.conc_sweep(plan, grant_end_unix)
+    return await session.conc_sweep(plan, deadline_unix)
 
 
 def conc_sweep(
@@ -324,7 +336,7 @@ def conc_sweep(
     settings: RunSettings,
     peer_factory: PeerFactory,
     services: SessionServices,
-    grant_end_unix: float | None = None,
+    deadline_unix: float | None = None,
 ) -> int:
     """``conc-sweep SESSION_DIR``: :func:`sweep_closed` under the session's lock file; 0 once the sweep settled."""
 
@@ -332,7 +344,7 @@ def conc_sweep(
         if not held:
             return EXIT_USAGE
         with adopting_orphans():
-            payload = asyncio.run(sweep_closed(layout, settings, peer_factory, services, grant_end_unix))
+            payload = asyncio.run(sweep_closed(layout, settings, peer_factory, services, deadline_unix))
     print(f"{PROG}: conc sweep {payload['status']} {payload.get('skip_reason', '')}".rstrip(), flush=True)
     return 0 if payload["status"] in SETTLED else EXIT_FAILED
 
@@ -347,7 +359,7 @@ def final_only(
 ) -> int:
     """Run FINAL and CLOSE over the session directory ``persisted`` was read from, print it on one stdout line and
     return the session's exit code. No session directory is created, which is why this cannot start one. For
-    ``restart``, a hosted run's, see :meth:`Session.finish`; its conc sweep is warned at ``grant``'s tests end."""
+    ``restart``, a hosted run's, see :meth:`Session.finish`; its conc sweep starts no test that would end past ``grant``'s tests end."""
 
     end = None if grant is None else grant.tests_end_by
     return _over_session(persisted, peer_factory, services, partial(Session.finish, restart=restart), end)
@@ -357,7 +369,7 @@ def resume(
     persisted: PersistedRun, peer_factory: PeerFactory, services: SessionServices, until: float, grant: GrantEnd | None
 ) -> int:
     """:func:`final_only` running :meth:`Session.resume` up to the deadline ``until`` with EXPLORE capped by ``grant``'s
-    explore cap, and its conc sweep warned at ``grant``'s tests end."""
+    explore cap, and its conc sweep starting no test that would end past ``grant``'s tests end."""
 
     cap, end = (None, None) if grant is None else (grant.explore_cap, grant.tests_end_by)
     return _over_session(
@@ -374,7 +386,7 @@ def _over_session(
     peer_factory: PeerFactory,
     services: SessionServices,
     leg: SessionLeg,
-    grant_end_unix: float | None = None,
+    deadline_unix: float | None = None,
 ) -> int:
     """Run ``leg`` over the session directory ``persisted`` was read from, holding the session's lock file while it
     works; a second run over the same directory is refused rather than left to write over the first one's report."""
@@ -383,7 +395,7 @@ def _over_session(
         if not held:
             return EXIT_USAGE
         with adopting_orphans():
-            return asyncio.run(_run_leg(persisted, peer_factory, services, leg, grant_end_unix))
+            return asyncio.run(_run_leg(persisted, peer_factory, services, leg, deadline_unix))
 
 
 @contextlib.contextmanager
@@ -410,7 +422,7 @@ async def _run_leg(
     peer_factory: PeerFactory,
     services: SessionServices,
     leg: SessionLeg,
-    grant_end_unix: float | None = None,
+    deadline_unix: float | None = None,
 ) -> int:
     clock = Clock()
     layout = persisted.layout
@@ -422,7 +434,7 @@ async def _run_leg(
         session = Session(persisted.settings, peer_factory, host, services)
         outcome = await leg(session, persisted.ended)
         if _sweeps_after(persisted.settings, outcome):
-            await sweep_closed(layout, persisted.settings, peer_factory, services, grant_end_unix)
+            await sweep_closed(layout, persisted.settings, peer_factory, services, deadline_unix)
         return outcome.exit_code
     finally:
         logging.getLogger().removeHandler(handler)
@@ -457,8 +469,11 @@ def hosted_ready_session(host: HostInfo, workload: Workload, *, local: bool = Fa
 def ready_session(workload: Workload, load: Callable[[Workload], PeerFactory], **storage: Path) -> ReadySession:
     """The peers ``load`` has for ``workload`` and the services, the Recipe KB, the RSI archive and the directories of
     ``storage`` checked and the Experience KB service started first; raises :class:`EnvironmentIncomplete` or
-    :class:`PeersUnavailable` naming the problem."""
+    :class:`PeersUnavailable` naming the problem. The credential references of the gateway headers are expanded before
+    anything starts, as ``hyperloom optimize``'s preflight does: the specialists' agent CLI sends the headers it
+    inherits as written."""
 
+    expand_custom_header_env_refs()
     recipe_kb = recipe_kb_from_env()
     require_writable_storage(os.environ, storage)
     start_experience_kb()
@@ -467,9 +482,10 @@ def ready_session(workload: Workload, load: Callable[[Workload], PeerFactory], *
 
 @dataclass(frozen=True)
 class HostedStart:
-    """What ``hosted run`` runs."""
+    """What ``hosted run`` runs, and the stop reason its ``exit.json`` carries when not the session's own."""
 
     run: Callable[[], int]
+    stop_reason: Callable[[], str | None] | None = None
 
 
 def hosted_run() -> int:
@@ -492,8 +508,13 @@ def hosted_run() -> int:
         returncode = start.run()
     except (EnvironmentIncomplete, PeersUnavailable, CacheBuildError, ToolboxInputsError, PermissionError) as exc:
         return _not_run(host.state_dir, EXIT_FAILED, exc)
+    except FrozenBaseUnusable as exc:  # a frozen base that does not load stays so on a restart
+        return _not_run(host.state_dir, EXIT_USAGE, exc)
     root = recorded_session(host.state_dir)
-    stop_reason = None if root is None else reported_stop_reason(root)
+    if start.stop_reason is not None:
+        stop_reason = start.stop_reason()
+    else:
+        stop_reason = None if root is None else reported_stop_reason(root)
     write_final_exit(host.state_dir, HostedExit(returncode, stop_reason=stop_reason))
     return returncode
 
@@ -508,6 +529,8 @@ def _hosted_start(host: HostInfo) -> HostedStart:
     spec = campaign_spec(host)
     require_hosted_isolation(spec, os.environ)
     require_local_image(spec, os.environ)
+    if spec.flow == FLOW_CONC_SWEEP:
+        return _hosted_sweep(host, spec)
     earlier = take_over_earlier_session(host.state_dir)
     if earlier.closed is not None:  # it closed with no baseline, which ended the run, and was killed before exit.json
         return HostedStart(lambda: EXIT_FAILED)
@@ -515,7 +538,7 @@ def _hosted_start(host: HostInfo) -> HostedStart:
         settings = read_manifest(earlier.sweep.manifest).settings
         ready = hosted_ready_session(host, settings.workload, local=spec.measurement == MEASUREMENT_LOCAL)
         sweep = partial(conc_sweep, earlier.sweep, settings, ready.peer_factory, ready.services)
-        return HostedStart(partial(sweep, grant_end_unix=grant_tests_end_by(host)))
+        return HostedStart(partial(sweep, deadline_unix=grant_tests_end_by(host)))
     persisted = earlier.finish
     if (taken := persisted or earlier.left) is not None:
         share_with_the_group(taken.layout.root)
@@ -532,6 +555,25 @@ def _hosted_start(host: HostInfo) -> HostedStart:
     return HostedStart(partial(close_then_start, earlier.left, close, start))
 
 
+def _hosted_sweep(host: HostInfo, spec: CampaignSpec) -> HostedStart:
+    """The conc sweep of the closed session ``conc_sweep.session_dir`` names, over the spec's points and as many tests
+    at once as it asks, measured where it says and written back into the session, taken over from an earlier start of
+    the run; raises ValueError when the spec does not name a closed multi-branch session it describes
+    (:func:`swept_session`, :func:`require_spec_matches`)."""
+
+    layout = swept_session(spec)
+    settings = _with_sweep_options(read_manifest(layout.manifest).settings, spec.sweep_concs, spec.sweep_parallel)
+    require_spec_matches(spec, settings.workload)
+    local = spec.measurement == MEASUREMENT_LOCAL
+    fit = machine_parallel_tests if local else grant_tests_that_fit(host)
+    tests = min(spec.max_parallel_tests, fit(settings.workload.tp))
+    settings = replace(settings, caps=replace(settings.caps, max_parallel_tests=tests))
+    ready = hosted_ready_session(host, settings.workload, local=local)
+    take_over_swept_session(host.state_dir, layout)
+    sweep = partial(conc_sweep, layout, settings, ready.peer_factory, ready.services)
+    return HostedStart(partial(sweep, deadline_unix=grant_tests_end_by(host)), partial(sweep_stop_reason, layout))
+
+
 def _stop_before_grant_ends(host: HostInfo) -> None:
     """Arm this process's stop one CLOSE grace before ``host``'s grant ends (at once if passed; never untimed). What is
     left of the grant is read now, as the timer starts, not when the start was prepared: that took time of its own."""
@@ -541,7 +583,7 @@ def _stop_before_grant_ends(host: HostInfo) -> None:
 
 def _hosted_settings(host: HostInfo, spec: CampaignSpec, session_hours: Callable[[float], float]) -> RunSettings:
     local = spec.measurement == MEASUREMENT_LOCAL
-    tests_that_fit = machine_parallel_tests if local else grant_tests_that_fit(host, spec_make_before_break(spec))
+    tests_that_fit = machine_parallel_tests if local else grant_tests_that_fit(host)
     argv = run_argv(spec, session_hours(spec.max_hours), tests_that_fit(spec.tp))
     settings = settings_from(_parsed_run(argv), tests_that_fit)
     if not local:
@@ -592,7 +634,7 @@ def _handed_grant(args: argparse.Namespace) -> HandedGrant:
 def _run_settings(args: argparse.Namespace, grant: HandedGrant | None) -> RunSettings:
     if grant is None:
         return settings_from(args)
-    fits = grant_tests_that_fit(grant.host, args.make_before_break)
+    fits = grant_tests_that_fit(grant.host)
     settings = replace(settings_from(args, fits), max_hours=grant.max_hours)
     refuse_unhosted_branches(settings, grant.host, os.environ)
     return settings
@@ -619,7 +661,9 @@ def main(argv: list[str] | None = None) -> int:
     try:
         if args.command == CONC_SWEEP_COMMAND:
             swept = SessionLayout(args.session_dir)
-            settings = read_manifest(swept.manifest).settings
+            settings = _with_sweep_options(
+                read_manifest(swept.manifest).settings, args.conc_sweep_concs, args.conc_sweep_parallel
+            )
         elif args.command == FINAL_ONLY_COMMAND:
             persisted = persisted_run(args.session_dir)
             settings = persisted.settings

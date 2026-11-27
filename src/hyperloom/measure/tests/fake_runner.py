@@ -53,7 +53,9 @@ server booted in that many seconds.
 round's slot (the directory above :data:`ROUND_DIR`), where a round the checkpoint ruled on leaves it.
 ``fake_jit: true`` stages a contribution to the shared compiled-code cache (one aiter module, below ``/out/jit-cache``) and
 signs it into the manifest as a test that compiled it would; ``fake_jit_swap: true`` changes the staged list after the
-signing, as something that can write ``/out`` could.
+signing, as something that can write ``/out`` could. ``fake_jit: read_only`` signs the kind as a test given the cache
+read only does (a hit, no contribution) while the same files lie staged, as the code of a test the key does not cover
+could leave them there.
 """
 
 from __future__ import annotations
@@ -254,8 +256,9 @@ JIT_KEY = "a" * 64
 JIT_MODULE = b"\x7fELF the module a fake test compiled"
 
 
-def _stage_jit(out: Path) -> dict[str, Any]:
-    """Stage one aiter module as a runner does and give the ``jit_cache`` block that signs it."""
+def _stage_jit(out: Path, read_only: bool = False) -> dict[str, Any]:
+    """Stage one aiter module as a runner does and give the ``jit_cache`` block that signs it; ``read_only`` signs no
+    contribution of it, as a runner that gave the kind read only does."""
     staged = out / "jit-cache" / AITER_JIT.name
     sha = hashlib.sha256(JIT_MODULE).hexdigest()
     _atomic(staged / "blobs" / sha, JIT_MODULE)
@@ -265,11 +268,11 @@ def _stage_jit(out: Path) -> dict[str, Any]:
     kind = {
         "kind": AITER_JIT.name,
         "key": JIT_KEY,
-        "state": "miss",
+        "state": "hit" if read_only else "miss",
         "seed_files": 0,
         "seed_bytes": 0,
         "seed_snapshot": None,
-        "contribution": contribution,
+        "contribution": None if read_only else contribution,
     }
     return {"kinds": [kind], "builds_seen": 1, "jit_compile_sec": 3.0}
 
@@ -405,7 +408,7 @@ def _publish(
         files.update(_attached_env_files(spec, sandbox_root, out, config["fake_attached_env"]))
     manifest = _manifest(spec, raw, key, files, mode, config)
     if config.get("fake_jit"):
-        manifest["jit_cache"] = _stage_jit(out)
+        manifest["jit_cache"] = _stage_jit(out, read_only=config["fake_jit"] == "read_only")
     manifest_raw = encode_manifest(manifest)
     signer = signing.generate_private_key() if mode == "wrong_key" else key
     if mode == "tamper":

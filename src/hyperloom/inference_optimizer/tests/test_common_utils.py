@@ -1047,21 +1047,6 @@ def test_validate_envelope_structural_errors() -> None:
         validate_envelope({"intents": [{"intent_type": "bad_type", "payload": {}}]})
 
 
-def test_validate_envelope_review_verdict_map_keys() -> None:
-    from hyperloom.inference_optimizer.protocol.intent import IntentValidationError, validate_envelope
-
-    bad = {
-        "intents": [
-            {
-                "intent_type": "review_verdict",
-                "payload": {"target_proposal_msg_id": "m1", "verdict_map": {"": {"verdict": "approve"}}},
-            }
-        ]
-    }
-    with pytest.raises(IntentValidationError):
-        validate_envelope(bad)
-
-
 # inference_optimizer.session.paths
 
 

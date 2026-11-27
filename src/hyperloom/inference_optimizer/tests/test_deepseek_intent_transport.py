@@ -384,7 +384,7 @@ async def test_the_runtime_compacts_at_a_quarter_of_the_model_window(
     captured = _capture_harness_kwargs(monkeypatch)
     await DeepSeekSession(cwd=tmp_path, model="deepseek-v4-flash", dsh_home=tmp_path / "home").start()
 
-    (patch,) = captured["patches"]
+    patch = next(p for p in captured["patches"] if Path(p).name == "hyperloom-compaction.yml")
     rows = {row["id"]: row for row in yaml.safe_load(Path(patch).read_text(encoding="utf-8"))}
     assert rows["compaction-basic"]["config"] == {"thresholdRatio": 0.25}
 

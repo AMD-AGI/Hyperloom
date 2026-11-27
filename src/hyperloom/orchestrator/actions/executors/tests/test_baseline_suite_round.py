@@ -194,6 +194,19 @@ def test_a_round_refused_before_it_ran_fails_as_staging_missing(monkeypatch, sui
     assert not rounds.calls
 
 
+def test_a_dataset_whose_prompts_cannot_be_counted_fails_the_attempt_before_any_round(monkeypatch, suite, tmp_path):
+    point = yaml.safe_load(suite.point.read_text(encoding="utf-8"))
+    del point["benchmark"]["envs"]["NUM_PROMPTS"]
+    point["benchmark"]["envs"]["DATASET_PATH"] = str(tmp_path / "gone.jsonl")
+    suite.point.write_text(yaml.safe_dump(point), encoding="utf-8")
+
+    result, rounds = _play(monkeypatch, suite, LaunchAttempt(outcome=READY, metrics=_HOT))
+
+    assert (result["status"], result["error_class"]) == ("failed", "yaml_build_error")
+    assert f"DATASET_PATH {tmp_path / 'gone.jsonl'} cannot be counted on this host" in result["error"]
+    assert not rounds.calls
+
+
 def test_an_eval_failure_of_a_suite_round_is_eval_rooted() -> None:
     assert BaselineExecutor._is_eval_rooted_failure({"error_class": FailedStep.EVAL_FAILED.value})
 

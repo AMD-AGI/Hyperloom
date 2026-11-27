@@ -6,15 +6,12 @@
 from __future__ import annotations
 
 import glob
-import http.client
 import json
 import re
 from collections.abc import Iterable
 from pathlib import Path
 from typing import Any
 
-from hyperloom.agents.framework.sources.pr_monitor import PRMonitorError
-from hyperloom.common.deadline import Deadline
 from hyperloom.common.model_paths import resolve_local_model_dir
 from hyperloom.orchestrator.lever import LEVER_ENABLEMENT
 
@@ -25,12 +22,8 @@ import logging as _logging
 
 log = _logging.getLogger(__name__)
 
-#: How long a round may spend discovering bridging candidates before the tick
-#: stops waiting; discovery then degrades to repos-only.
+#: How long a round may spend building its specialist params before the tick stops waiting.
 ENABLEMENT_PARAMS_BUDGET_SEC: float = 45.0
-
-#: How many ranked bridging candidates a round asks each repo for and keeps.
-_MAX_CANDIDATE_REFS = 5
 
 
 def _enablement_carrier_params(state: Any) -> dict[str, Any]:
@@ -163,7 +156,7 @@ def _mandate_notes(enablement: Any, *, attempt: int) -> str:
         blocks.append(
             f"RETRY ({attempt} prior round(s) cleared nothing): the last enablement "
             f"patch for this failure never made the combo runnable \u2014 it failed to apply "
-            f"or did not advance the boot. Try a DIFFERENT bridging approach / candidate than before."
+            f"or did not advance the boot. Try a DIFFERENT bridging approach than before."
         )
     blocks.append(_prior_progress_note(enablement))
     return "\n\n".join(block for block in blocks if block)
@@ -219,10 +212,8 @@ class EnablementParams(CoordinatorCollaborator):
     def build_enablement_specialist_params(self, launch_log: str, *, attempt: int = 0) -> dict[str, Any] | None:
         """Build enablement-specialist params from a captured launch failure.
 
-        Classifies the failure (advisory ``kind`` only — see Q1 hardening),
-        plans bridging discovery, and runs a **best-effort** candidate-PR
-        enumeration (network; fully exception-guarded, degrades to repos-only).
-        The mandate itself is rendered downstream by
+        Classifies the failure (advisory ``kind`` only — see Q1 hardening) and
+        reads the source near the offending site. The mandate itself is rendered downstream by
         ``_section_enablement_playbook`` from the structured ``enablement_*``
         params emitted here, so the prompt text is built once, at the point of
         use. Returns ``None`` **only** when the launch log is blank (nothing to
@@ -230,14 +221,13 @@ class EnablementParams(CoordinatorCollaborator):
         as ``UNKNOWN`` — the LLM specialist repairs from the raw log so a
         brand-new gap type never wedges the run.
 
-        After a round that bought no ground (``attempt > 0``) the ranked
-        candidate list is *rotated* so a different bridging PR leads, and the
-        notes flag the revert — steering the sub-agent toward a different bridge.
+        After a round that bought no ground (``attempt > 0``) the notes flag
+        the revert, steering the sub-agent toward a different approach.
 
         Args:
             launch_log: Captured launch / traceback text.
-            attempt: Consecutive rounds that cleared nothing; drives candidate
-                rotation and a retry hint in the mandate. Zero after an advance,
+            attempt: Consecutive rounds that cleared nothing; drives a retry
+                hint in the mandate. Zero after an advance,
                 so a progressing bring-up is never told to change approach.
 
         Returns:
@@ -246,17 +236,13 @@ class EnablementParams(CoordinatorCollaborator):
         text = (launch_log or "").strip()
         if not text:
             return None
-        from .mandate import build_search_plan
-        from hyperloom.inference_optimizer import framework_registry
-
         state = self.shared_state
         framework = (getattr(state, "framework", "") or "").strip().lower()
         model = (getattr(state, "model_name", "") or "").strip()
-        repo_url = framework_registry.repo_url(framework)
 
         # Dispatch a specialist for ANY non-blank launch log, even one that
-        # classifies as ``UNKNOWN``: ``kind`` is advisory (routes bridge-repo
-        # hints and labels the mandate), not a gate.
+        # classifies as ``UNKNOWN``: ``kind`` is advisory (it labels the
+        # mandate), not a gate.
         verdict, loaded = recorded_verdict(
             state.enablement.launch_observation_path,
             wrapper_text=text,
@@ -268,18 +254,6 @@ class EnablementParams(CoordinatorCollaborator):
                 "ENABLEMENT: routing on a re-derived signature (%s); no boot observation was recorded",
                 loaded.degraded,
             )
-        plan = build_search_plan(signature, framework_repo_url=repo_url, model=model)
-        candidate_refs = self._discover_enablement_candidate_refs(
-            plan, deadline=Deadline.after(ENABLEMENT_PARAMS_BUDGET_SEC)
-        )
-        # Lead with a different candidate each stalled round (deterministic left-rotation).
-        if candidate_refs and attempt:
-            n = len(candidate_refs)
-            k = attempt % n
-            candidate_refs = candidate_refs[k:] + candidate_refs[:k]
-        # Nothing here writes session state: this runs on a worker thread the
-        # tick may already have stopped waiting on. The refs travel back in the
-        # returned params for the lane to record.
         source_context = self._read_enablement_source_context(signature)
         # For a weight-init failure, fold the checkpoint's ground-truth per-layer
         # weight inventory into the mandate so the loop self-corrects each retry.
@@ -301,7 +275,6 @@ class EnablementParams(CoordinatorCollaborator):
             "framework": framework,
             "lever_kind": LEVER_ENABLEMENT,
             "enablement_failure_kind": signature.kind,
-            "enablement_candidate_refs": list(candidate_refs),
             # Source lines near the offending site, plus (on a weight-init
             # failure) the checkpoint's per-layer weight inventory. Rendered
             # into the mandate by _section_enablement_playbook.
@@ -426,82 +399,3 @@ class EnablementParams(CoordinatorCollaborator):
             "never executed and the SAME weights stayed uninitialized."
         )
         return header + "\n" + "\n".join(lines) + "\n" + footer
-
-    def _discover_enablement_candidate_refs(self, plan: Any, *, deadline: Deadline) -> tuple[str, ...]:
-        """Best-effort enumerate + rank bridging PRs for an enablement failure.
-
-        Enumerates candidate PRs across every repo in ``plan.repos`` (framework
-        + opted-in ROCm/HIP/aiter bridge repos) via the ``sources`` layer, then
-        ranks each :class:`hyperloom.agents.framework.models.Candidate` with
-        ``score_enablement_title`` (per-Candidate so the ref/html_url is
-        preserved) and returns the top ``_MAX_CANDIDATE_REFS`` refs
-        (``html_url`` preferred).
-
-        Network + git. Enumeration is guarded per repo, so a repo that fails is
-        skipped and the rest are still ranked; a run that collects nothing
-        returns an empty tuple and the mandate falls back to repos-only.
-
-        ``deadline`` bounds the worker thread, not the caller: enumeration stops
-        between repos and ranks whatever was collected.
-
-        Args:
-            plan: The :class:`hyperloom.orchestrator.enablement.mandate.EnablementSearchPlan`.
-            deadline: When to stop enumerating further repos.
-
-        Returns:
-            tuple[str, ...]: Ranked candidate refs (best first; possibly empty).
-        """
-        from .mandate import score_enablement_title
-        from hyperloom.agents.framework.models import Candidate, CandidateSearchRequest, PRMonitorConfig
-        from hyperloom.agents.framework.sources import enumerate_candidates
-        from hyperloom_common.pr_monitor_urls import pr_monitor_base_url
-
-        # The PR query service is co-hosted by KB Store.
-        plane = self.knowledge_plane
-        pr_enabled = bool(plane is not None and getattr(plane, "pr_monitor_enabled", False))
-        pr_monitor_url = pr_monitor_base_url() if pr_enabled else ""
-        pr_monitor = PRMonitorConfig(base_url=pr_monitor_url) if pr_monitor_url else None
-        search_modes = ("pr_monitor", "github") if pr_monitor else ("github",)
-
-        collected: list[Candidate] = []
-        for repo in plan.repos:
-            if deadline.expired():
-                log.info(
-                    "enablement: candidate discovery stopped at its deadline with %d collected",
-                    len(collected),
-                )
-                break
-            try:
-                search = CandidateSearchRequest(
-                    repo_url=repo,
-                    search_modes=search_modes,
-                    keywords=tuple(plan.keywords),
-                    max_search_candidates=_MAX_CANDIDATE_REFS,
-                    pr_monitor=pr_monitor,
-                )
-                collected.extend(enumerate_candidates(search))
-            except (PRMonitorError, http.client.HTTPException):
-                log.debug(
-                    "enablement: candidate discovery failed for repo=%s",
-                    repo,
-                    exc_info=True,
-                )
-                continue
-
-        if not collected:
-            return ()
-        ranked = sorted(
-            collected,
-            key=lambda c: score_enablement_title(getattr(c, "title", "") or "", plan),
-            reverse=True,
-        )
-        refs: list[str] = []
-        seen: set[str] = set()
-        for cand in ranked:
-            ref = str(getattr(cand, "html_url", "") or getattr(cand, "ref", "") or "").strip()
-            if ref and ref not in seen:
-                seen.add(ref)
-                refs.append(ref)
-            if len(refs) >= _MAX_CANDIDATE_REFS:
-                break
-        return tuple(refs)

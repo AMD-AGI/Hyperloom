@@ -83,8 +83,7 @@ def disk_preflight(
             f"required={required_gb:.1f}GB "
             f"(n_candidates={n_candidates}, per_cand={per_candidate_gb}GB, "
             f"floor={floor_gb}GB). "
-            f"Free space or lower max_search_candidates / set "
-            f"{_DISK_MIN_GB_ENV} to a smaller value."
+            f"Free space or set {_DISK_MIN_GB_ENV} to a smaller value."
         )
 
 

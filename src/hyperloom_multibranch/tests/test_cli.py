@@ -36,6 +36,7 @@ from collections.abc import Callable
 from dataclasses import asdict, dataclass, replace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from types import SimpleNamespace
 from typing import NoReturn
 
 import pytest
@@ -55,6 +56,8 @@ from hyperloom_common.llm.llm_config import (
 )
 from hyperloom.common.owner_scope import local_owner_scope
 from hyperloom.common.perf_metric import GRADED_INTVTY_P50, TOTAL_TOKEN_THROUGHPUT
+from hyperloom.hosted.campaign import CampaignSpec, parse_campaign
+from hyperloom.hosted.tests.test_campaign import MINIMAL
 from hyperloom.common.outside_facts.rule_pack import rule_pack_identity
 from hyperloom.measure import compile as compile_module
 from hyperloom.measure import points
@@ -771,12 +774,6 @@ def test_an_agent_directions_map_without_an_agent_or_directions_is_a_usage_error
         _settings(*agents, "--agent-directions", str(path))
 
 
-def test_make_before_break_is_on_unless_the_command_line_turns_it_off() -> None:
-    assert _settings().make_before_break is True
-    assert _settings("--make-before-break").make_before_break is True
-    assert _settings("--no-make-before-break").make_before_break is False
-
-
 def test_dev_leases_lend_specialists_dev_sandboxes_and_default_to_none() -> None:
     assert _settings().dev_leases == 0
     assert _settings("--dev-leases", "2").dev_leases == 2
@@ -1026,6 +1023,22 @@ def test_a_ready_environment_without_an_experience_kb_runs_the_session_on_the_mo
     assert cli.main(["run", *WORKLOAD_ARGS]) == 0
 
     assert agent_cli == [_settings()]
+
+
+@pytest.mark.usefixtures("ready_environment", "agent_cli")
+def test_the_specialists_inherit_gateway_headers_with_their_credential_references_expanded(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The agent CLI sends ``ANTHROPIC_CUSTOM_HEADERS`` as written, so a ``${VAR}`` it inherits reaches the gateway as
+    literal text and every specialist turn is refused."""
+    key_var = "_".join(("ANTHROPIC", "API", "KEY"))
+    monkeypatch.setenv("USER_DATA_PATH", str(tmp_path))
+    monkeypatch.setenv(key_var, "ak-gateway-token")
+    monkeypatch.setenv("ANTHROPIC_CUSTOM_HEADERS", f"Ocp-Apim-Subscription-Key: ${{{key_var}}}")
+
+    assert cli.main(["run", *WORKLOAD_ARGS]) == 0
+
+    assert os.environ["ANTHROPIC_CUSTOM_HEADERS"] == "Ocp-Apim-Subscription-Key: ak-gateway-token"
 
 
 @pytest.mark.usefixtures("ready_environment")
@@ -1473,7 +1486,7 @@ def test_a_final_only_holds_the_session_against_a_second_one_and_releases_it(
     persisted = persisted_run(layout.root)
 
     async def while_it_runs(
-        run: PersistedRun, peer_factory: object, services: object, leg: object, grant_end_unix: float | None
+        run: PersistedRun, peer_factory: object, services: object, leg: object, deadline_unix: float | None
     ) -> int:
         assert layout.final_only_lock.read_text(encoding="utf-8") == f"{os.getpid()}\n"
         assert cli.final_only(run, peer_factory, services) == cli.EXIT_USAGE
@@ -1626,9 +1639,9 @@ def test_a_restart_leg_warns_its_conc_sweep_at_the_grants_tests_end(
     ends: list[float | None] = []
 
     async def run_leg(
-        run: PersistedRun, peer_factory: object, services: object, leg: object, grant_end_unix: float | None
+        run: PersistedRun, peer_factory: object, services: object, leg: object, deadline_unix: float | None
     ) -> int:
-        ends.append(grant_end_unix)
+        ends.append(deadline_unix)
         return 0
 
     monkeypatch.setattr(cli, "_run_leg", run_leg)
@@ -2068,7 +2081,7 @@ def _no_local_cards() -> tuple[int, ...]:
     raise AssertionError("a hosted run measures on the grant's cards, not this container's")
 
 
-@pytest.mark.parametrize(("max_sandboxes", "tests"), [(8, 3), (3, 2)])
+@pytest.mark.parametrize(("max_sandboxes", "tests"), [(8, 4), (3, 3)])
 @pytest.mark.usefixtures("ready_environment")
 def test_a_hosted_session_runs_as_many_tests_at_once_as_the_grant_has_cards_and_sandboxes_for(
     max_sandboxes: int, tests: int, host: Host, agent_cli: list[RunSettings], monkeypatch: pytest.MonkeyPatch
@@ -2080,30 +2093,7 @@ def test_a_hosted_session_runs_as_many_tests_at_once_as_the_grant_has_cards_and_
     assert cli.main(["hosted", "run"]) == 0
 
     [settings] = agent_cli
-    assert settings.caps.max_parallel_tests == tests, (
-        "TP=2 on 8 GPUs, at most one test per sandbox, and one test's room kept for the sandbox handed to the next test"
-    )
-
-
-@pytest.mark.parametrize(("given", "keep", "tests"), [({}, True, 3), ({"make_before_break": False}, False, 4)])
-@pytest.mark.usefixtures("ready_environment")
-def test_the_spec_turns_make_before_break_off_and_the_session_runs_every_test_the_grant_fits(
-    given: dict[str, bool],
-    keep: bool,
-    tests: int,
-    host: Host,
-    agent_cli: list[RunSettings],
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    monkeypatch.setattr(local_peers, "machine_cards", _no_local_cards)
-    monkeypatch.setenv("HYPERLOOM_GRANT_LIMITS", json.dumps({**GRANT, "max_gpus": 8, "max_sandboxes": 8}))
-    host.spec(placement={"profile": "hosted-gpu"}, multibranch={**SPEC["multibranch"], **given})
-
-    assert cli.main(["hosted", "run"]) == 0
-
-    [settings] = agent_cli
-    assert settings.make_before_break is keep
-    assert settings.caps.max_parallel_tests == tests, "TP=2 on 8 GPUs: four fit, one's room kept only when it is on"
+    assert settings.caps.max_parallel_tests == tests, "TP=2 on 8 GPUs, at most one test per sandbox"
 
 
 @pytest.mark.usefixtures("ready_environment")
@@ -2629,7 +2619,7 @@ def test_a_restart_that_cannot_read_the_session_before_its_baseline_leaves_it_an
     left = {path: path.read_bytes() for path in layout.root.rglob("*") if path.is_file() and path != state}
 
     async def closing(
-        persisted: PersistedRun, peer_factory: PeerFactory, services: object, leg: object, grant_end_unix: float | None
+        persisted: PersistedRun, peer_factory: PeerFactory, services: object, leg: object, deadline_unix: float | None
     ) -> int:
         frozen_base(persisted.layout.toolbox)  # what building the close's peers reads first
         raise AssertionError("the session could be read")
@@ -2671,7 +2661,7 @@ def test_a_restart_refused_a_file_outside_the_session_it_closes_ends_the_run(
     outside = tmp_path / "workspace-cache" / "index.json"
 
     async def closing(
-        persisted: PersistedRun, peer_factory: PeerFactory, services: object, leg: object, grant_end_unix: float | None
+        persisted: PersistedRun, peer_factory: PeerFactory, services: object, leg: object, deadline_unix: float | None
     ) -> int:
         raise PermissionError(errno.EACCES, "Permission denied", str(outside))
 
@@ -3065,21 +3055,12 @@ def test_a_hosted_run_measures_in_the_sandboxes_of_the_grant_handed_to_it(handed
         None,
     )
     assert host.sandbox_keys.measurement.reveal() == HANDED["HYPERLOOM_SANDBOX_KEY_MEASUREMENT"]
-    assert settings.caps.max_parallel_tests == 2, "TP=2 on 8 GPUs and 3 sandboxes, one test's room kept for a handover"
-    on_two_tests = cli_options.settings_from(
-        cli_options.build_parser().parse_args(["run", *WORKLOAD_ARGS]), lambda tp: 2
+    assert settings.caps.max_parallel_tests == 3, "TP=2 on 8 GPUs and 3 sandboxes"
+    on_three_tests = cli_options.settings_from(
+        cli_options.build_parser().parse_args(["run", *WORKLOAD_ARGS]), lambda tp: 3
     )
-    assert settings == replace(on_two_tests, max_hours=settings.max_hours), "the flags give the workload"
+    assert settings == replace(on_three_tests, max_hours=settings.max_hours), "the flags give the workload"
     assert "HYPERLOOM_SANDBOX_KEY_MEASUREMENT" not in os.environ, "no child process inherits a grant key"
-
-
-@pytest.mark.usefixtures("ready_environment")
-def test_a_hosted_run_without_make_before_break_runs_every_test_the_handed_grant_fits(handed: Started) -> None:
-    assert cli.main(["run", *WORKLOAD_ARGS, "--measurement", "hosted", "--no-make-before-break"]) == 0
-
-    [(settings, _)] = handed.sessions
-    assert settings.make_before_break is False
-    assert settings.caps.max_parallel_tests == 3, "TP=2 on 8 GPUs and 3 sandboxes, no room kept"
 
 
 @pytest.mark.usefixtures("ready_environment")
@@ -3287,3 +3268,99 @@ def test_a_local_run_ignores_a_grant_in_the_environment_and_measures_on_this_mac
     assert peer_factory.args[0].backend == local_peers.LocalCards((0, 1))
     assert settings == _settings() and handed.stops == []
     assert os.environ["HYPERLOOM_SANDBOX_KEY_MEASUREMENT"] == HANDED["HYPERLOOM_SANDBOX_KEY_MEASUREMENT"]
+
+
+def _sweep_spec(session_dir: Path, tp: int = 2) -> CampaignSpec:
+    sweep = {"session_dir": str(session_dir), "concs": [8, 2], "parallel": 4}
+    hardware = {**MINIMAL["hardware"], "tp": tp}
+    placement = {**MINIMAL["placement"], "measurement": "local"}
+    doc = {**MINIMAL, "flow": "conc_sweep", "conc_sweep": sweep, "hardware": hardware, "placement": placement}
+    return parse_campaign(doc)
+
+
+def _sweep_host(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> SimpleNamespace:
+    """A host whose run keeps its user data in ``tmp_path``, where the swept sessions are."""
+    monkeypatch.setenv("USER_DATA_PATH", str(tmp_path))
+    (tmp_path / "state").mkdir(exist_ok=True)
+    return SimpleNamespace(grant_limits=None, state_dir=tmp_path / "state")
+
+
+def test_a_sweep_spec_sweeps_the_closed_session_it_names_on_its_points_and_tests_at_once(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    layout = _ended_before_final(tmp_path / "session")
+    host = _sweep_host(tmp_path, monkeypatch)
+    swept: list[tuple[Path, RunSettings, float | None]] = []
+    ready = SimpleNamespace(peer_factory="peers", services="services")
+    monkeypatch.setattr(cli, "hosted_ready_session", lambda host, workload, *, local: ready)
+    monkeypatch.setattr(cli, "machine_parallel_tests", lambda tp: 2)
+    monkeypatch.setattr(
+        cli,
+        "conc_sweep",
+        lambda swept_layout, settings, peers, services, deadline_unix: (
+            swept.append((swept_layout.root, settings, deadline_unix)) or 0
+        ),
+    )
+
+    start = cli._hosted_sweep(host, _sweep_spec(layout.root))  # type: ignore[arg-type]
+
+    assert start.run() == 0
+    assert hosted_run_module.recorded_session(host.state_dir) == layout.root
+    [(root, settings, deadline)] = swept
+    assert root == layout.root and deadline is None
+    assert (settings.conc_sweep_concs, settings.conc_sweep_parallel) == ((2, 8), 4)
+    assert settings.caps.max_parallel_tests == 2, "what fits on this run's cards, not what the session ran with"
+    expected = replace(_settings(), conc_sweep_concs=(2, 8), conc_sweep_parallel=4)
+    assert settings == replace(expected, caps=replace(expected.caps, max_parallel_tests=2))
+
+
+def test_a_sweep_spec_naming_no_closed_multibranch_session_is_refused(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    host = _sweep_host(tmp_path, monkeypatch)
+    with pytest.raises(ValueError, match="holds no closed multi-branch session"):
+        cli._hosted_sweep(host, _sweep_spec(tmp_path / "nothing"))  # type: ignore[arg-type]
+
+
+def test_a_sweep_spec_whose_tp_is_not_the_sessions_is_refused(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    layout = _ended_before_final(tmp_path / "session")
+    host = _sweep_host(tmp_path, monkeypatch)
+
+    with pytest.raises(ValueError, match="hardware.tp 8 is not the swept session's 2"):
+        cli._hosted_sweep(host, _sweep_spec(layout.root, tp=8))  # type: ignore[arg-type]
+
+
+def test_a_hosted_sweep_ends_with_its_status_as_the_stop_reason(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    host = _sweep_host(tmp_path, monkeypatch)
+    start = cli.HostedStart(lambda: 0, lambda: "conc_sweep_skipped:no_optimization")
+    monkeypatch.setattr(cli, "take_host_info", lambda env, require: host)
+    monkeypatch.setattr(cli, "_hosted_start", lambda _host: start)
+    monkeypatch.setattr(cli, "_stop_before_grant_ends", lambda _host: None)
+
+    assert cli.hosted_run() == 0
+
+    document = json.loads((host.state_dir / hosted_run_module.EXIT_FILE).read_text())
+    assert document == {"final": True, "returncode": 0, "stop_reason": "conc_sweep_skipped:no_optimization"}
+
+
+def test_a_frozen_base_that_no_longer_loads_ends_the_run_for_good(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from hyperloom_multibranch.scheduling.final import FrozenBaseUnusable
+
+    host = _sweep_host(tmp_path, monkeypatch)
+
+    def run() -> int:
+        raise FrozenBaseUnusable("the session's frozen base cannot be read: it no longer matches its digest")
+
+    monkeypatch.setattr(cli, "take_host_info", lambda env, require: host)
+    monkeypatch.setattr(cli, "_hosted_start", lambda _host: cli.HostedStart(run))
+    monkeypatch.setattr(cli, "_stop_before_grant_ends", lambda _host: None)
+
+    assert cli.hosted_run() == cli.EXIT_USAGE
+
+    document = json.loads((host.state_dir / hosted_run_module.EXIT_FILE).read_text())
+    assert (document["final"], document["returncode"]) == (True, cli.EXIT_USAGE)
+    assert "no longer matches" in document["error"]

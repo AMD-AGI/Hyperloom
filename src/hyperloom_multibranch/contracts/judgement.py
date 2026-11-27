@@ -55,7 +55,9 @@ class Judgement:
     committed. On InferenceX it holds the eval score under ``ACCURACY_SCORE`` too when the eval ran, on AgentX the request
     error rate. ``accuracy`` is ``FAILED`` when a measurement behind the judgement failed the accuracy gate, ``PASSED``
     when every one that ran its eval passed it, and ``NOT_MEASURED`` when none ran it; ``refused_by`` names the
-    performance gates that kept it from ``IMPROVED``.
+    performance gates that kept it from ``IMPROVED``. ``cache_states_differ`` names each kind of shared compiled-code
+    cache the candidate's tests met in another state than the tests behind its parent's value (``"aiter_jit: miss vs
+    hit"``): a flag for the reader, which changes no verdict.
     """
 
     verdict: Verdict
@@ -67,6 +69,7 @@ class Judgement:
     refused_by: tuple[str, ...] = ()
     fixes_correctness: bool = False
     foundation_fix: bool = False
+    cache_states_differ: tuple[str, ...] = ()
 
 
 __all__ = ["ACCURACY_SCORE", "AccuracyVerdict", "Judgement", "Verdict"]

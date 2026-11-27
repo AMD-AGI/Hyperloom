@@ -179,6 +179,18 @@ def test_remove_server_args_accepts_multi_flag_string() -> None:
     assert out == "--keep 4"
 
 
+def test_a_flag_removed_by_name_goes_with_every_value_after_it() -> None:
+    out = remove_server_args("--tp 8 --cuda-graph-bs 1 2 4 8 --mem-fraction-static 0.9", ["--cuda-graph-bs"])
+
+    assert out == "--tp 8 --mem-fraction-static 0.9"
+
+
+def test_a_flag_removed_with_a_value_keeps_another_value() -> None:
+    assert remove_server_args("--chunked-prefill-size 4096", ["--chunked-prefill-size 8192"]) == (
+        "--chunked-prefill-size 4096"
+    )
+
+
 def test_remove_server_args_keeps_a_sibling_json_value_parseable() -> None:
     """Removing one flag must not corrupt a JSON-valued sibling."""
     args = (

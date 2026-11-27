@@ -30,8 +30,6 @@ class PlugContext:
     socket: str
     config: Mapping[str, Any]
     session_dir: "Path | None"
-    #: Injected by the hosted entry; its type belongs to that entry, which the kernel must not import.
-    host_info: object | None
     #: Fetch a socket this implementation declared in ``requires``; it is already started.
     get: Callable[[str], object]
 

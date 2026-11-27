@@ -53,7 +53,6 @@ class V6EnablementAttempt(TypedDict, total=False):
     failure_kind: str
     dispatched_at: str
     launch_log_excerpt: str | None
-    candidate_refs: list[str]
     settled_at: str
     status: str
     advanced: bool
@@ -71,7 +70,6 @@ class V6EnablementAttempt(TypedDict, total=False):
     effective_config: dict[str, Any] | None
     stack_action: dict[str, Any] | None
     runtime: dict[str, Any] | None
-    localization_manifest: dict[str, Any] | None
     next_launch_log_excerpt: str | None
 
 
@@ -239,7 +237,6 @@ class V6PhaseProposalReview(TypedDict, total=False):
     risks: list[dict[str, Any]]
     advice_text: str | None
     alternative_action: str | None
-    variants: list[dict[str, Any]]
     reviewed_at: str
 
 

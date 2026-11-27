@@ -14,7 +14,7 @@ from __future__ import annotations
 import copy
 import json
 from collections.abc import Iterator, Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from decimal import Decimal
 from enum import Enum
 from typing import Any
@@ -141,6 +141,14 @@ class InferencexPoint:
     @property
     def arm_key(self) -> str:
         return f"{self.entry}/{self.scenario.value}[{self.group}]/search-space[{self.arm}]"
+
+    @property
+    def series_key(self) -> str:
+        """The point without its concurrency and the recipe override InferenceX picks for it: the rows of one entry that
+        share it sweep one launch over concurrency, as one row listing several concurrencies does."""
+        launch = (self.recipe.partition(":")[0], self.tp, self.ep, self.pp, self.dcp, self.pcp, self.dp_attention)
+        workload = (self.spec_decoding, self.isl, self.osl, self.kv_offloading, self.kv_offload_backend, self.router)
+        return json.dumps([self.entry, self.scenario.value, self.group, *launch, *workload], sort_keys=True)
 
     @property
     def key(self) -> str:
@@ -580,6 +588,16 @@ def _launch(
     )
 
 
+def _arm_launches(
+    points: Sequence[InferencexPoint], query: LaunchQuery, snapshot: InferencexSnapshot, concs: tuple[int, ...]
+) -> tuple[SourceLaunch, ...]:
+    """The launch every point of an arm binds at its own concurrency, ascending, one per concurrency an arm lists more
+    than once; a point InferenceX refused or this source cannot reproduce is left out."""
+    by_conc = {point.conc: point for point in points}
+    launches = (_launch(by_conc[conc], query, snapshot, conc, concs) for conc in sorted(by_conc))
+    return tuple(launch for launch in launches if not isinstance(launch, str))
+
+
 def _misfit(point: InferencexPoint, query: LaunchQuery) -> str | None:
     """Why ``point`` cannot serve ``query``, which it already matches on model, framework and board."""
     if point.scenario is not SCENARIO_OF[query.workload]:
@@ -595,6 +613,22 @@ def _misfit(point: InferencexPoint, query: LaunchQuery) -> str | None:
         if asked is not None and asked != getattr(point, name):
             return f"it runs {name} {getattr(point, name)}, not {asked}"
     return None
+
+
+def _series(points: Sequence[InferencexPoint]) -> dict[str, list[InferencexPoint]]:
+    """``points`` by the arm each sweeps in, named by its first row: the rows of a series, one per concurrency, are one
+    arm; a series that would launch one concurrency twice keeps its rows apart."""
+    by_series: dict[str, list[InferencexPoint]] = {}
+    for point in points:
+        by_series.setdefault(point.series_key, []).append(point)
+    arms: dict[str, list[InferencexPoint]] = {}
+    for members in by_series.values():
+        if len({point.conc for point in members}) == len(members):
+            arms[members[0].arm_key] = members
+            continue
+        for point in members:
+            arms.setdefault(point.arm_key, []).append(point)
+    return arms
 
 
 def _arm_point(points: Sequence[InferencexPoint], target: int) -> InferencexPoint | None:
@@ -668,26 +702,27 @@ def inferencex_launches(query: LaunchQuery, snapshot: InferencexSnapshot) -> tup
             SourceKind.INFERENCEX, f"no entry serves {query.model_id} with {query.framework} on a {query.board}"
         )
     target = max(query.concurrencies)
-    arms: dict[str, list[InferencexPoint]] = {}
+    fitting: list[InferencexPoint] = []
     reasons = dict(served.unread)
     for point in served.points:
         misfit = _misfit(point, query)
         if misfit is None:
-            arms.setdefault(point.arm_key, []).append(point)
+            fitting.append(point)
         else:
             reasons.setdefault(point.arm_key, misfit)
     launches = []
-    for arm_key, points in arms.items():
+    for arm_key, points in _series(fitting).items():
         point = _arm_point(points, target)
+        concs = tuple(sorted({each.conc for each in points}))
         launch = (
             f"it has no point at concurrency {target} or above"
             if point is None
-            else _launch(point, query, snapshot, target, tuple(sorted({each.conc for each in points})))
+            else _launch(point, query, snapshot, target, concs)
         )
         if isinstance(launch, str):
             reasons[arm_key] = launch
         else:
-            launches.append(launch)
+            launches.append(replace(launch, source_launches=_arm_launches(points, query, snapshot, concs)))
     if launches:
         return tuple(launches)
     return SourceMiss(SourceKind.INFERENCEX, "; ".join(f"{arm}: {reason}" for arm, reason in sorted(reasons.items())))

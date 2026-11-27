@@ -38,7 +38,9 @@ from hyperloom_multibranch.contracts.repo import RebasedPatch, ReplacedPatch, Re
 from hyperloom_multibranch.contracts.toolbox import QueueState
 from hyperloom_multibranch.blackboard import LocalBlackboard
 from hyperloom_multibranch.blackboard.knowledge.recipe_writeback import FinalRecipe
+from hyperloom.inference_optimizer.session.base_launch import write_base_launch
 from hyperloom_multibranch.blackboard.knowledge.tests.fakes import FakeRecipeStore
+from hyperloom_multibranch.blackboard.knowledge.tests.test_breakdown import frozen_base_launch
 from hyperloom_multibranch.blackboard.knowledge.tests.test_recipe_writeback import final
 from hyperloom_multibranch.blackboard.rsi.archive import ARCHIVE_ENV, ARCHIVED, SKIPPED
 from hyperloom_multibranch.blackboard.rsi.authoring import PLAYBOOK_SYSTEM_PROMPT
@@ -373,6 +375,50 @@ async def test_the_breakdown_spend_includes_the_close_llm_calls(
     assert author.calls and report.exports is not None
     spend = json.loads(report.exports.breakdown.read_text())["spend"]
     assert spend["llm_usd"] == pytest.approx(before + 0.11)
+
+
+async def test_a_later_close_rebuilds_the_breakdown_without_a_skipped_sweep(
+    layout: SessionLayout,
+    blackboard: LocalBlackboard,
+    final: FinalRecipe,
+) -> None:
+    """A first FINAL that chose nothing leaves a ``skipped`` sweep in the report and the breakdown; a later CLOSE (a
+    resume, a ``final-only``) rebuilds the breakdown without it, and the sweep that follows writes it again."""
+
+    skipped = {
+        "status": "skipped",
+        "skip_reason": "no_optimization",
+        "baseline": {"points": []},
+        "optimized": {"points": []},
+    }
+    (layout.reports / "conc_sweep_summary.json").write_text(json.dumps(skipped))
+    (layout.reports / "session_breakdown.json").write_text(json.dumps({"conc_sweep_summary": skipped}))
+
+    closed = await _closer(layout, blackboard, _clean(), final, None).close(
+        SessionStopReason.TIME_EXHAUSTED, CHOICE, "", HARD_STOP
+    )
+
+    assert closed.exports is not None
+    assert "conc_sweep_summary" not in json.loads(closed.exports.breakdown.read_text())
+
+
+async def test_the_close_breakdown_reports_the_base_frozen_in_the_toolbox(
+    layout: SessionLayout,
+    blackboard: LocalBlackboard,
+    final: FinalRecipe,
+) -> None:
+    layout.toolbox.mkdir(parents=True, exist_ok=True)
+    base = frozen_base_launch()
+    write_base_launch(layout.toolbox, base)
+
+    closed = await _closer(layout, blackboard, _clean(), final, None).close(
+        SessionStopReason.TIME_EXHAUSTED, CHOICE, "", HARD_STOP
+    )
+
+    assert closed.exports is not None
+    metadata = json.loads(closed.exports.breakdown.read_text())["metadata"]
+    assert metadata["base_launch"]["source"] == base.to_document()["source"]
+    assert metadata["base_launch"]["topology"] == base.to_document()["topology"]
 
 
 async def test_a_session_stopped_before_its_baseline_asks_no_llm_and_leaves_the_archive_empty(

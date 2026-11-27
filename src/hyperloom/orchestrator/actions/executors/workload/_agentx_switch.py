@@ -76,9 +76,7 @@ def geak_metric_axis(
     wins. Every other session is graded on output.
 
     A GEAK build that cannot measure ``e2e_norm_intvty_p50`` refuses it, or, predating
-    that check, falls back to output and records that in ``metric_basis``;
-    ``sweep_via_geak`` rejects a replay recorded on any basis but the one
-    requested.
+    that check, falls back to output and records that in ``metric_basis``.
 
     Args:
         benchmark_mode: The session's persisted mode, when the caller holds one.

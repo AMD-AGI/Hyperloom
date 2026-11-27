@@ -27,6 +27,7 @@ from ..workload._workload_envs import (
     FrameworkScriptMismatchError,
     LaunchLayer,
     MaterializeOptions,
+    PromptDatasetError,
     materialize_benchmark_config,
 )
 from ..benchmark_result import (
@@ -233,7 +234,7 @@ class _BenchmarkLaunchMixin:
                 target=_attempt_target(params, resolved_model, override_script),
                 options=_attempt_options(ctx, shared_state),
             )
-        except (FrameworkScriptMismatchError, ServerArgvInvalidError) as exc:
+        except (FrameworkScriptMismatchError, PromptDatasetError, ServerArgvInvalidError) as exc:
             return _attempt_failure(getattr(exc, "error_class", "framework_script_mismatch"), exc, output_dir)
         from ..agentx_point import activate_runtime
 

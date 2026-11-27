@@ -15,6 +15,7 @@ from hyperloom.contracts.measurement import (
     NOT_REPRODUCED,
     REPRODUCED,
     AttachmentRef,
+    JitCacheState,
     Purpose,
     TestKind,
     TestRequest,
@@ -103,7 +104,7 @@ class _Checked(LocalBlackboard):
 class _Session:
     """PRELUDE done and s1 open at the root: the fake toolbox measures, the real gate settles, s1's judge acts."""
 
-    def __init__(self, root, driver=BranchDriver.SPECIALIST, checked=False, **config):
+    def __init__(self, root, driver=BranchDriver.SPECIALIST, checked=False, board=None, **config):
         self.driver = driver
         toolbox_writer = Writer(Role.TOOLBOX, "toolbox")
         self.toolbox = FakeToolbox(
@@ -114,7 +115,7 @@ class _Session:
                 accuracy_scores={WRONG.fingerprint(): 0.80},
                 **config,
             ),
-            blackboard=(_Checked if checked else LocalBlackboard)(root, toolbox_writer),
+            blackboard=(board or (_Checked if checked else LocalBlackboard))(root, toolbox_writer),
             autorun=False,
         )
         self.scheduler = LocalBlackboard(root, Writer(Role.SCHEDULER, "scheduler"))
@@ -824,3 +825,57 @@ async def test_a_flat_fix_measured_without_an_eval_is_not_checked_as_a_fix(skipp
     record = await skipping.runtime.record(first)
     assert (record.conclusion, record.judgement.fixes_correctness) == (Conclusion.RECORDED_ONLY, False)
     assert await skipping.repo.head(BRANCH) == ROOT
+
+
+class _ColdCandidates(LocalBlackboard):
+    """The toolbox's blackboard, whose results state the compiled-code cache as hosted results do: the tests named in
+    :attr:`cold` met it ``miss``, every other ``hit``."""
+
+    cold: set[str] = set()
+
+    async def write_result(self, result):
+        state = JitCacheState("aiter_jit", "miss" if result.request_id in self.cold else "hit")
+        return await super().write_result(replace(result, jit_cache=(state,)))
+
+
+@pytest.fixture
+async def cold_session(tmp_path):
+    _ColdCandidates.cold = set()
+    session = _Session(tmp_path / "blackboard", board=_ColdCandidates)
+    await session.prelude()
+    return session
+
+
+async def test_a_candidate_that_met_the_cache_cold_while_its_parents_tests_met_it_warm_is_flagged_as_judged(
+    cold_session,
+):
+    """A specialist's candidate is judged by its branch judge, not the gate's compare: the flag is set there too."""
+    first = await cold_session.explore(FLAT)
+    _ColdCandidates.cold.add(first)
+    await cold_session.step()
+
+    record = await cold_session.runtime.record(first)
+    assert record.judgement.verdict is Verdict.FLAT, "the flag changes no verdict"
+    assert record.judgement.cache_states_differ == ("aiter_jit: miss vs hit",)
+
+
+async def test_a_gain_and_its_retest_that_met_the_cache_as_the_parents_tests_did_are_not_flagged(cold_session):
+    first = await cold_session.explore(FAST)
+    await cold_session.step()
+    await cold_session.step()
+
+    record = await cold_session.runtime.record(first)
+    assert record.judgement.verdict is Verdict.IMPROVED and len(record.judgement.request_ids) == 2
+    assert record.judgement.cache_states_differ == ()
+
+
+async def test_a_retest_that_met_the_cache_cold_flags_the_gain_it_confirms(cold_session):
+    first = await cold_session.explore(FAST)
+    await cold_session.step()
+    (retest,) = cold_session.retests()
+    _ColdCandidates.cold.add(retest.request_id)
+    await cold_session.step()
+
+    record = await cold_session.runtime.record(first)
+    assert record.judgement.verdict is Verdict.IMPROVED
+    assert record.judgement.cache_states_differ == ("aiter_jit: hit/miss vs hit",)

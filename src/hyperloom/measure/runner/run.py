@@ -589,7 +589,8 @@ def _build_image_own_once() -> None:
     their own, so a module only they built would be built again by every later test. The test's directories, made after
     this, link what was built. The test's own tables and build variables are not what is checked: the test is not given
     a module they make stale (``own_jit``), and a module moved aside for them would stay out of the image for every later
-    test. A check that cannot run is logged and the servers build what they lack, as they would without it."""
+    test. A check that cannot run is logged and the servers build what they lack, as they would without it. One line
+    per test says what the preflight decided, so a log shows it ran even when it moved and built nothing."""
     try:
         preflight = build_image_own_once(preflight_build)
     except OSError as exc:
@@ -597,6 +598,8 @@ def _build_image_own_once() -> None:
         return
     if preflight.outcome.get("action") == "invalidate":
         log.warning("aiter serving preflight before the test: %s", preflight.summary())
+    else:
+        log.info("aiter serving preflight before the test: %s", preflight.summary())
 
 
 def _jit_session(

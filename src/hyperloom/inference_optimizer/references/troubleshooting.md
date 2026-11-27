@@ -93,12 +93,12 @@ Bypass with `--critic-mock` for offline / smoke runs. See
   (Leverage exhaustion *within* a single phase is now the non-terminal
   phase-exit reason `optimize_no_more_leverage` / `kernel_no_more_leverage`,
   which switches lever rather than ending the run.)
-- `policy_denied` streaks (not a stop reason — nothing in the runtime stops a run
-  over them): repeated denial of the same (action, rule) pair is advisory only —
-  there is no auto-prune at streak ≥5 and no stop at streak ≥10. Inspect
-  `SharedState.policy_denial_history` via the `why_denied` tool or the
-  `=== Recent policy denials ===` block, then change something substantive (a new
-  `params.grid` variant or a sibling action family). Do not hand-edit `state.json`.
+- Repeated `policy_denied` events (not a stop reason — nothing in the runtime
+  reacts to them): each denial is a `policy_denied` observation in the denied
+  agent's inbox and a `denials` row on the phase event in
+  `session_breakdown.json`; read the rule and hint there, then change something
+  substantive (a new `params.grid` variant or a sibling action family). Do not
+  hand-edit `state.json`.
 - `stop_reason=time_exhausted`: resume same session (`--resume-from`); do not
   start fresh.
 - `dead_holder_reaped` (lease reclaimed because the holder pid vanished): the

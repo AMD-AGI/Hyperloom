@@ -36,7 +36,8 @@ site-packages lie at :data:`CLIENT_SITE_PACKAGES` below a staged root, and the e
 below the staged InferenceX.
 
 A caller measuring a server outside a round as a fixed round does builds each pass with :func:`client_argv` under
-:func:`fixed_client_env`, the discarded :func:`warmup_pass` before the measured one.
+:func:`fixed_client_env`, the discarded :func:`warmup_pass` before the measured one. :func:`read_prompts` is the prompts
+a fixed round's dataset client sends from a ``DATASET_PATH`` file, read as that client reads them.
 
 A host reads what a native server takes from the program itself: :func:`native_help` is the ``--help`` of the one a
 launch environment resolves, :func:`native_executable` the file that runs, and :func:`help_options` that text as one
@@ -53,6 +54,7 @@ from inference_suite.contracts.base_launch import LaunchQuery
 from inference_suite.contracts.layout import RunDirError
 from inference_suite.framework_probe import FrameworkProbeError, native_executable, native_help
 from inference_suite.parser_check import HelpOption, help_options
+from inference_suite.load.dataset_client import read_prompts
 from inference_suite.load.fixed import ClientPass, ClientTarget, ClientTool, client_argv, fixed_client_env, warmup_pass
 from inference_suite.recipe.resolve import Miss, SourceSnapshot, resolve_base
 from inference_suite.recipe.sources import (
@@ -64,6 +66,7 @@ from inference_suite.recipe.sources import (
 )
 from inference_suite.recipe.user_file import UserFile, UserFileError, parse_user_file
 from inference_suite.load.scriptable import scriptable_base
+from inference_suite.profile.inject import SGLANG_PROFILER_DIR_ENV
 from inference_suite.run import RoundResult, run_round
 from inference_suite.runtime.process import PidfileError
 from inference_suite.runtime.server import stop
@@ -104,6 +107,7 @@ __all__ = [
     "PidfileError",
     "RoundResult",
     "RunDirError",
+    "SGLANG_PROFILER_DIR_ENV",
     "SourceFetchError",
     "SourceSnapshot",
     "StagingError",
@@ -122,6 +126,7 @@ __all__ = [
     "normalised_manifest",
     "parse_inferencex_commit",
     "parse_user_file",
+    "read_prompts",
     "resolve_base",
     "run_round",
     "runner_owned",

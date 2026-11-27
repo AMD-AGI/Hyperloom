@@ -12,14 +12,16 @@ measured with one client and signed with the other.
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 from types import MappingProxyType
 
+from hyperloom.inference_optimizer.grid_server_args import server_arg_groups
 from hyperloom.inference_optimizer.session.base_launch import base_launch_path, read_base_launch, write_base_launch
 from hyperloom.inference_optimizer.session.paths import session_dir
 from inference_suite import INFERENCEX_CLIENT_COMMIT, runner_owned
+from inference_suite.argv import canonical_flag_name
 from inference_suite.contracts import BaseLaunch, RunnerOwned
 
 from .shared_state import SharedState
@@ -49,11 +51,46 @@ def server_argv(base: BaseLaunch) -> tuple[str, ...]:
 
 def server_base(base: BaseLaunch) -> ServerBase:
     """The server half of ``base`` as a launch is seeded with: its argv and its environment but the redacted values."""
+    return _seeded(base, base.args, base.env)
+
+
+def server_base_at(base: BaseLaunch, conc: int) -> ServerBase:
+    """The server half a point of ``base``'s arm at ``conc`` is seeded with: the source's own launch at ``conc``, else
+    at the nearest higher concurrency it publishes (a launch tuned for more concurrency serves less), else at its
+    highest, under ``base``'s golden layer; ``base``'s own for a base whose source publishes no launch per concurrency.
+    """
+    launches = sorted(base.point.source_launches, key=lambda launch: launch.conc)
+    if not launches:
+        return server_base(base)
+    launch = next((each for each in launches if each.conc >= conc), launches[-1])
+    return _seeded(base, launch.args, launch.env)
+
+
+def launch_change(base: BaseLaunch, args: str, env: Mapping[str, str], removes: Sequence[str]) -> ServerBase:
+    """What ``args`` and ``env``, laid over ``base``'s own launch after ``removes``, change of it: a flag or variable
+    they set to the value that launch already has is left out, so a point seeded at another concurrency keeps the
+    source's value there; a flag ``removes`` names stays, as it is what puts the flag back. Args that do not open with
+    a flag are taken whole."""
+    own = server_base(base)
+    changed_env = MappingProxyType({name: value for name, value in env.items() if own.env.get(name) != value})
+    if args.split() and not args.split()[0].startswith("-"):
+        return ServerBase(args, changed_env)
+    had = server_arg_groups(own.args)
+    removed = {canonical_flag_name(spec.split()[0].partition("=")[0]) for spec in removes if spec.split()}
+    kept = [
+        " ".join(tokens)
+        for name, tokens in server_arg_groups(args).items()
+        if name in removed or had.get(name) != tokens
+    ]
+    return ServerBase(" ".join(kept), changed_env)
+
+
+def _seeded(base: BaseLaunch, args: tuple[str, ...], env: Mapping[str, object]) -> ServerBase:
     golden = base.golden_al
-    args = server_argv(base)
-    layers = {**base.env, **golden.env} if golden is not None else base.env
-    env = {name: value for name, value in layers.items() if isinstance(value, str)}
-    return ServerBase(args=" ".join(args), env=MappingProxyType(env))
+    argv = (*args, *golden.args) if golden is not None else args
+    layers = {**env, **golden.env} if golden is not None else env
+    kept = {name: value for name, value in layers.items() if isinstance(value, str)}
+    return ServerBase(args=" ".join(argv), env=MappingProxyType(kept))
 
 
 @dataclass(frozen=True)
@@ -141,8 +178,10 @@ __all__ = [
     "freeze_base",
     "frozen_base",
     "frozen_session_base",
+    "launch_change",
     "server_argv",
     "server_base",
+    "server_base_at",
     "session_cards",
     "session_runner_owned",
     "session_server_base",
