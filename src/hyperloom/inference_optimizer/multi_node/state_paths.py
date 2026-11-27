@@ -15,7 +15,7 @@ _RUNTIME_REL = Path("runtime") / "multi_node_state.json"
 
 def resolve_state_file() -> Path:
     """Return the multi-node CLI state file path for the current process."""
-    explicit = os.environ.get("MULTI_NODE_STATE_FILE", "").strip()
+    explicit = os.environ.get("MULTI_NODE_STATE_FILE", "").strip() or os.environ.get("MULTI_NODE_STATE", "").strip()
     if explicit:
         return Path(explicit)
     pinned = os.environ.get(ENV_CURRENT_SESSION_DIR, "").strip()
@@ -25,6 +25,17 @@ def resolve_state_file() -> Path:
         "cannot resolve multi-node state file: set $MULTI_NODE_STATE_FILE explicitly "
         "or call bind_state_file_to_session() to pin it under the active session dir"
     )
+
+
+def multi_node_state_env() -> dict[str, str]:
+    """``MULTI_NODE_STATE`` and ``MULTI_NODE_STATE_FILE`` for a child process, or empty when no state file exists."""
+    try:
+        path = resolve_state_file()
+    except RuntimeError:
+        return {}
+    if not path.is_file():
+        return {}
+    return {"MULTI_NODE_STATE": str(path), "MULTI_NODE_STATE_FILE": str(path)}
 
 
 def state_file_safe_to_read(path: Path) -> bool:

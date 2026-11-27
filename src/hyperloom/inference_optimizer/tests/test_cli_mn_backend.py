@@ -52,6 +52,20 @@ def test_mn_backend_env_used_when_flag_absent(monkeypatch):
     assert _resolve_mn_backend(ns) == "infera"
 
 
+@pytest.mark.parametrize("value", ["atom", "atomesh", "ATOMESH"])
+def test_mn_backend_flag_names_atomesh(value):
+    ns = _build_parser().parse_args(_args("--mn-backend", value))
+    assert ns.mn_backend == "atomesh"
+    assert _resolve_mn_backend(ns) == "atomesh"
+
+
+@pytest.mark.parametrize("value", ["atom", "atomesh"])
+def test_mn_backend_env_names_atomesh(monkeypatch, value):
+    monkeypatch.setenv("INFERENCE_OPTIMIZER_MN_BACKEND", value)
+    ns = _build_parser().parse_args(_args())
+    assert _resolve_mn_backend(ns) == "atomesh"
+
+
 def test_mn_backend_rejects_invalid_choice():
     parser = _build_parser()
     with pytest.raises(SystemExit) as ei:

@@ -164,6 +164,14 @@ def test_infera_file_fields_land_in_state(monkeypatch: pytest.MonkeyPatch, tmp_p
     assert ext.external_has_ssh_control() is True
 
 
+def test_infera_file_router_ips_land_in_state(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    doc = _infera_doc(tmp_path, prefill=[], decode=[], worker=["10.0.1.4"])
+    doc["infera"]["router_ips"] = ["10.0.1.9"]
+    state = _state_from_file(monkeypatch, _write(tmp_path / "t.json", doc))
+    assert state["router_pod_ips"] == ["10.0.1.9"]
+    assert state["router_pods"][0]["sshPort"] == 2264
+
+
 def test_file_ignores_legacy_variables_it_does_not_set(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     """A stale legacy variable must not leak into a cluster the file describes."""
     monkeypatch.setenv("HYPERLOOM_MN_EXT_SSH_KEY", "/stale/key")

@@ -20,13 +20,15 @@ import logging
 import os
 import re
 import shlex
+import shutil
 import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Awaitable, Callable, Iterable
 
 import yaml
-from TraceLens.Agent.Analysis.utils.config_utils import check_config
+from TraceLens.Agent.Analysis.utils.config_utils import SCOPE_MULTI_TRACE, SCOPE_STANDALONE, check_config
+from TraceLens.Reporting.aggregate_perf_reports import POLICY_BY_NODE
 
 from hyperloom.common.codex_session import (
     CodexSessionConfig,
@@ -257,6 +259,47 @@ def write_local_cmd_prefix(output_dir: Path, tracelens_root: Path) -> Path:
     return prefix_path
 
 
+_TRACE_TP_RANK_RE = re.compile(r"-TP-(\d+)(?:\D|$)")
+_CAPTURE_RANK_RE = re.compile(r"_rank(\d+)\.json(?:\.gz)?$")
+
+
+def _rank_scoped_capture_folder(output_dir: Path, trace_path: Path, capture_folder: Path, label: str) -> Path:
+    """Narrow ``capture_folder`` to the graph captures of the TP rank an SGLang trace names (``-TP-<n>``).
+
+    TraceLens picks a replay's captures by the ``rank_<n>`` of its file name only, so a ``-TP-<n>`` trace is matched
+    against every rank's captures. The narrowed folder is ``output_dir/cache/<label>_rank<n>``, symlinks to that rank's
+    capture files.
+
+    Args:
+        output_dir: The TraceLens output directory the narrowed folder is created under.
+        trace_path: The replay trace the captures are merged into.
+        capture_folder: The graph-capture folder of the trace's engine.
+        label: Names the narrowed folder, distinct per job of one config.
+
+    Returns:
+        Path: The narrowed folder; ``capture_folder`` itself when the trace names no TP rank, or the folder holds
+            captures of fewer than two ranks or none of the trace's.
+    """
+    match = _TRACE_TP_RANK_RE.search(trace_path.name)
+    if match is None or not capture_folder.is_dir():
+        return capture_folder
+    by_rank: dict[int, list[Path]] = {}
+    for entry in capture_folder.iterdir():
+        rank_match = _CAPTURE_RANK_RE.search(entry.name)
+        if rank_match and entry.is_file():
+            by_rank.setdefault(int(rank_match.group(1)), []).append(entry)
+    rank = int(match.group(1))
+    if len(by_rank) < 2 or rank not in by_rank:
+        return capture_folder
+    scoped = output_dir / "cache" / f"{label}_rank{rank}"
+    if scoped.exists():
+        shutil.rmtree(scoped)
+    scoped.mkdir(parents=True)
+    for entry in by_rank[rank]:
+        (scoped / entry.name).symlink_to(entry.resolve())
+    return scoped
+
+
 def write_run_config(
     *,
     output_dir: Path,
@@ -290,6 +333,33 @@ def write_run_config(
         job["capture_folder"] = str(capture_folder.resolve())
     config = {"analysis_mode": analysis_mode, "output_dir": str(output_dir.resolve()), "jobs": [job]}
     check_config(config, "standalone")
+    config_path = output_dir / RUN_CONFIG_NAME
+    config_path.write_text(yaml.safe_dump(config, sort_keys=False), encoding="utf-8")
+    return config_path
+
+
+def write_multi_trace_run_config(*, output_dir: Path, jobs: list[dict[str, Any]], analysis_mode: str) -> Path:
+    """Write the ``combine_by_node`` multi-trace run config for ``jobs``, the first job being the focus.
+
+    Checked with TraceLens's ``check_config`` under the ``multi_trace`` scope; job paths are made absolute. A rejected
+    config raises ``ConfigError``.
+    """
+    resolved = []
+    for index, job in enumerate(jobs):
+        entry = {**job, "trace_path": str(Path(job["trace_path"]).resolve())}
+        if job.get("capture_folder"):
+            scoped = _rank_scoped_capture_folder(
+                output_dir, Path(job["trace_path"]), Path(job["capture_folder"]).resolve(), f"capture_{index}"
+            )
+            entry["capture_folder"] = str(scoped.resolve())
+        resolved.append(entry)
+    config = {
+        "analysis_mode": analysis_mode,
+        "output_dir": str(output_dir.resolve()),
+        "aggregation": {"policy": POLICY_BY_NODE},
+        "jobs": resolved,
+    }
+    check_config(config, SCOPE_MULTI_TRACE)
     config_path = output_dir / RUN_CONFIG_NAME
     config_path.write_text(yaml.safe_dump(config, sort_keys=False), encoding="utf-8")
     return config_path
@@ -360,6 +430,7 @@ class TraceLensSkillRequest:
         tracelens_internal_root: The TraceLens-internal root, ``None`` in OSS-only mode.
         capture_folder: Graph-capture folder, read only as the Codex runner's
             write scope; the run config already names it.
+        scope: The TraceLens scope the skill runs the config under.
     """
 
     skill_path: Path
@@ -367,6 +438,7 @@ class TraceLensSkillRequest:
     tracelens_root: Path
     tracelens_internal_root: Path | None
     capture_folder: Path | None
+    scope: str = SCOPE_STANDALONE
 
 
 @dataclass(frozen=True)
@@ -396,7 +468,7 @@ class _StreamIdleBounds:
 
 
 def build_orchestrator_prompt(request: TraceLensSkillRequest) -> str:
-    """Prompt an agent to run the TraceLens standalone skill from ``run.yaml``.
+    """Prompt an agent to run the TraceLens skill from ``run.yaml`` under ``request.scope``.
 
     Provider-neutral: the same prompt drives the Claude SDK runner and the
     Codex SDK runner. The trace, platform, analysis mode and capture folder
@@ -416,12 +488,12 @@ def build_orchestrator_prompt(request: TraceLensSkillRequest) -> str:
         str(request.tracelens_internal_root) if request.tracelens_internal_root else "(not installed; OSS-only mode)"
     )
     tl_extension_text = "TraceLens_internal" if request.tracelens_internal_root else "(unset)"
-    return f"""You are running TraceLens standalone analysis for Hyperloom.
+    return f"""You are running TraceLens {request.scope} analysis for Hyperloom.
 
 Read and follow the FULL instructions in this skill file:
 {request.skill_path}
 
-Run it from config {run_config}, standalone.
+Run it from config {run_config}, {request.scope}.
 The execution context below answers the remaining Step 0 questions.
 Do not ask the user any questions; proceed with the analysis.
 
@@ -1163,5 +1235,6 @@ __all__ = [
     "extract_idle_pct_from_analysis_md",
     "run_tracelens_skill",
     "write_local_cmd_prefix",
+    "write_multi_trace_run_config",
     "write_run_config",
 ]

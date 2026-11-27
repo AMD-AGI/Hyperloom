@@ -21,6 +21,7 @@ from ...loop.sub_agent_runner import RunnerContext
 from ...state.analysis_failures import remember_roofline_failure, remember_trace_failure
 from hyperloom.inference_optimizer.trace.task_progress import report_progress
 from ._multi_node_env import is_multi_node
+from ._pd_role_trace import ROLE_STEADY_STATE_MODE, node_trace_summaries
 from .profile import profile_trace_path
 from .serving._profile_evidence import (
     drain_instrumentation,
@@ -614,6 +615,52 @@ def _analysis_payload(task_params: dict[str, Any], *, trace_path: str, framework
     return payload
 
 
+def _pd_main_role(profiled: _ProfileOutcome) -> str:
+    """The PD role whose trace the profile adopted as its main trace, or '' outside a PD cluster."""
+    role_traces = profiled.result.get("role_traces") if isinstance(profiled.result, dict) else None
+    if not isinstance(role_traces, dict):
+        return ""
+    return next((role for role, path in role_traces.items() if path and path == profiled.trace_path), "")
+
+
+def _pd_multi_trace_input(profile_result: dict[str, Any]) -> dict[str, Any] | None:
+    """The multi-trace analysis input of a PD profile with decode nodes and two or more nodes in all, else ``None``."""
+    node_traces = profile_result.get("role_node_traces")
+    trace_dir = str(profile_result.get("trace_dir") or "")
+    if not isinstance(node_traces, dict) or not trace_dir or not node_traces.get("decode"):
+        return None
+    if sum(len(paths or []) for paths in node_traces.values()) < 2:
+        return None
+    return {"role_node_traces": node_traces, "trace_dir": trace_dir}
+
+
+def _pd_node_summaries(profile_result: dict[str, Any], main_role: str, analysis: _AnalysisOutcome) -> dict[str, Any]:
+    """Each PD node's top kernels from the analysis's ``analysis.json``, the focus node carrying its warning codes.
+
+    A multi-trace analysis names its nodes ``<role>_<n>``; a single-trace analysis is summarised under ``main_role``.
+    """
+    report = str(analysis.result.get("trace_report_path") or "")
+    if not report:
+        return {}
+    report_path = Path(report)
+    analysis_json = report_path if report_path.suffix == ".json" else report_path.with_name("analysis.json")
+    pd_input = analysis.payload.get("pd_node_traces")
+    if pd_input:
+        node_traces = {
+            f"{role}_{node}": str(trace)
+            for role in ("decode", "prefill")
+            for node, trace in enumerate((pd_input.get("role_node_traces") or {}).get(role) or [])
+        }
+    else:
+        node_traces = {main_role: str((profile_result.get("role_traces") or {}).get(main_role) or "")}
+    warnings = [
+        w
+        for w in analysis.result.get("trace_health_warnings") or []
+        if isinstance(w, dict) and w.get("code") and w.get("severity") != "info"
+    ]
+    return node_trace_summaries(analysis_json, node_traces, warnings)
+
+
 def _hot_kernels(ta_result: dict[str, Any]) -> list[Any]:
     """The hot kernels an analysis surfaced."""
     return ta_result.get("hot_kernels_top15") or ta_result.get("hot_kernels") or []
@@ -737,11 +784,21 @@ class RooflineExecutor:
             return profiled
         self._record_profile_findings(profiled)
         payload = _analysis_payload(ctx.task.params or {}, trace_path=profiled.trace_path, framework=arm.framework)
+        main_role = _pd_main_role(profiled)
+        if main_role:
+            payload.setdefault("steady_state_mode", ROLE_STEADY_STATE_MODE[main_role])
+            payload.setdefault("split_llm_inference", False)
+            payload["clamp_stream_overlaps"] = True
+            pd_input = _pd_multi_trace_input(profiled.result)
+            if pd_input:
+                payload["pd_node_traces"] = pd_input
 
         analysis = await self._analyze(ctx, recorder, payload)
         if not isinstance(analysis, _AnalysisOutcome):
             remember_trace_failure(self.shared_state, payload, analysis)
             return analysis
+        if main_role:
+            self.shared_state.last_trace_analyze_by_role = _pd_node_summaries(profiled.result, main_role, analysis)
         attribution_degraded = _flag_attribution_degraded(analysis.result, profiled.result)
         analysed = _AnalysedProfile(profiled, analysis)
         if _wants_compute_bound_reprofile(analysis.result):
@@ -755,7 +812,7 @@ class RooflineExecutor:
 
         A failed profile is not re-run: the same configuration fails the same way, and the session degrades instead.
         """
-        from .profile import profile_executor
+        from .profile import PROFILE_TRACE_NOT_SHARED, profile_executor
 
         session_dir = Path(ctx.extra["session_dir"])
         run = recorder.begin_profile_run(attempt_reason=PROFILE_ATTEMPT_INITIAL) if recorder is not None else 0
@@ -773,6 +830,8 @@ class RooflineExecutor:
                 recorder, run, session_dir, arm, _ProfileOutcome.of(returned, dict(profile_ctx.task.params or {}))
             )
         log.warning("roofline profile failed (%s): %s", unusable.error_class, unusable.message)
+        if unusable.error_class == PROFILE_TRACE_NOT_SHARED and not self.shared_state.gpu_trace_unsupported_reason:
+            self.shared_state.gpu_trace_unsupported_reason = unusable.message
         await _end_profile_run(recorder, run, session_dir, arm, _RunEnd("failed", unusable.result, unusable.failure))
         captured = await _fail_on_capture(recorder, ctx.task, session_dir, arm, unusable)
         if captured is not None:
@@ -1001,12 +1060,23 @@ class RooflineExecutor:
             detail=f"hot_kernels={len(hot)}",
             duration_s=time.monotonic() - started,
         )
+        steady = str(cached.get("steady_state_trace") or "")
+        try:
+            from hyperloom.inference_optimizer.multi_node import record_profile_paths
+
+            profile_dir = os.environ.get("HYPERLOOM_MN_PROFILE_TRACE_DIR", "").strip() or str(Path(trace_path).parent)
+            record_profile_paths(
+                profile_trace=profile_dir,
+                steady_state_trace=steady or trace_path,
+            )
+        except (OSError, RuntimeError, ValueError, TypeError):
+            log.debug("roofline: could not record profile paths into multi-node state", exc_info=True)
         result = {
             "status": status,
             "executed_at_iso": _now_iso(),
             "snapshot_id": cached.get("roofline_snapshot_id"),
             "last_profile_trace": trace_path,
-            "steady_state_trace": cached.get("steady_state_trace", ""),
+            "steady_state_trace": steady,
             "analysis_md_path": cached.get("analysis_md_path", ""),
             "kernel_roofline_path": cached.get("kernel_roofline_path", ""),
             "profile_workspace": profile.result.get("workspace"),

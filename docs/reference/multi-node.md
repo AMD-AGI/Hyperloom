@@ -17,13 +17,15 @@ For the corresponding single-node flow, see
 
 ## Backends
 
-Hyperloom supports two multi-node control planes. Both serve the same model and
+Hyperloom supports four multi-node control planes. All serve the same model and
 differ only in how Hyperloom restarts the inference server each optimization round.
 
 | Backend | Control plane | Notes |
 |---------|--------------|-------|
 | `infera` | SSH | Hyperloom SSHes into each pod to launch or restart SGLang. Supports prefill/decode (PD) disaggregation. |
 | `rayjob` | Ray Dashboard REST API | Pods form a KubeRay cluster. Restarts go through the Ray Dashboard; no SSH required. |
+| `atomesh` | SSH | PD-disaggregated SGLang prefill and decode engines behind an atomesh router. `atom` is accepted as the same backend. |
+| `sglangrouter` | SSH | The same PD engines behind `sglang_router`. |
 
 ## Cluster hand-off
 
@@ -64,6 +66,15 @@ The following table lists all hand-off variables.
 | `HYPERLOOM_MN_EXT_SSH_KNOWN_HOSTS` | infera | no | `known_hosts` path. Omit to use a relaxed host-key check. |
 | `HYPERLOOM_MN_EXT_HEAD_IP` | rayjob | no | Ray head IP — Dashboard on `:8265`, GCS on `:6379` (KubeRay's `<rayCluster>-head-svc`). Omit for benchmark-only mode with no per-round restarts. |
 | `HYPERLOOM_MN_EXT_RAY_DASHBOARD_TOKEN` | rayjob | no | Ray Dashboard auth token, if the dashboard requires authentication. |
+| `HYPERLOOM_MN_EXT_ROUTER_IPS` | atomesh, sglangrouter | no | Router pod IPs, comma-separated. Omit when the platform runs the router; it is then recorded from `HYPERLOOM_MN_EXT_SERVICE_URL`. |
+| `HYPERLOOM_MN_EXT_PREFILL_URL`, `HYPERLOOM_MN_EXT_DECODE_URL` | atomesh, sglangrouter | no | Engine URL of each role (default `http://<first role IP>:8000`). The engine listens on the URL's port. |
+
+For atomesh and sglangrouter, `HYPERLOOM_MN_EXT_SSH_KEY`, `HYPERLOOM_MN_EXT_SSH_PORT`,
+`HYPERLOOM_MN_EXT_PREFILL_IPS`, and `HYPERLOOM_MN_EXT_DECODE_IPS` are required for
+per-round restarts. `HYPERLOOM_MN_EXT_SSH_PORT` is the SSH port on every pod, with no
+per-role offset. A TopologyHandoff file for these backends carries the same fields in an
+optional `cluster` block (`ssh_key_file`, `ssh_port`, `known_hosts_file`, `router_ips`,
+`prefill_ips`, `decode_ips`) and no `ray` or `infera` block.
 
 The container image and per-pod CPU or memory are the provisioning platform's
 inputs, not `optimize` flags.
@@ -157,7 +168,7 @@ The following flags are used in multi-node workload skill blocks.
 |------|---------|
 | `--model` | Model path under `${NFS_SHARED_ROOT}/models/...` or a HuggingFace repo ID |
 | `--nodes` | Node count; must be `>= 2` and match the cluster handed over |
-| `--mn-backend` | `infera` or `rayjob` |
+| `--mn-backend` | `infera`, `rayjob`, `atomesh` (alias `atom`), or `sglangrouter` |
 | `--gpus-per-node` | GPUs per pod (default 8); feeds the TP feasibility check |
 | `--tp` | Tensor parallelism degree |
 | `--ep` | Expert parallelism degree (MoE; often `ep == tp`) |
@@ -168,7 +179,7 @@ The following flags are used in multi-node workload skill blocks.
 | `--pd-mode disaggregated` | Enable PD disaggregation (infera and rayjob) |
 | `--pd-prefill-nodes`, `--pd-prefill-tp` | Prefill topology |
 | `--pd-decode-nodes`, `--pd-decode-tp` | Decode topology |
-| `--pd-prefill-ep`, `--pd-prefill-extra-args`, `--pd-decode-ep`, `--pd-decode-extra-args` | Per-role EP and server args (infera only; rayjob rejects them) |
+| `--pd-prefill-ep`, `--pd-prefill-extra-args`, `--pd-decode-ep`, `--pd-decode-extra-args` | Per-role EP and server args (infera, atomesh, and sglangrouter; rayjob rejects them) |
 | `--pd-transfer-backend` | KV transfer plane for PD. Use `mooncake`; `nixl` can produce 0 output tokens |
 | `--server-args "..."` | Extra sglang args applied on every server restart |
 | `--no-framework-agent` | Skip the framework-tuning agent phase |
@@ -182,7 +193,26 @@ The following variables are exported on the sandbox side before calling `optimiz
 | `RANDOM_RANGE_RATIO` | Sequence-length jitter for the benchmark |
 | `INFERENCE_SUITE_TOOL_CACHE` | InferenceSuite tool cache under `${NFS_SHARED_ROOT}`, staged by `install.sh` |
 | `TRACELENS_ROOT` | TraceLens checkout path under `${NFS_SHARED_ROOT}` |
-| `SGLANG_DISAGGREGATION_*_TIMEOUT` | PD bootstrap and wait timeouts (Workload A only) |
+| `SGLANG_DISAGGREGATION_*_TIMEOUT` | PD bootstrap and wait timeouts. atomesh and sglangrouter engines default both to `100000` when unset |
+| `MC_*` | Mooncake transfer settings, forwarded to the engine pods |
+
+### PD cluster variables
+
+The following variables apply to atomesh and sglangrouter sessions.
+
+| Variable | Meaning |
+|----------|---------|
+| `INFERENCEX_PATH` | InferenceX checkout whose `benchmarks/multi_node/amd_utils/models.yaml` supplies the baseline per-role args when no `--server-args` / `--pd-*-extra-args` are given. An agentic run looks up `<model>-AgentX`, then `<model>`, then `<model>-DI`; other runs look up `<model>`, then `<model>-DI` |
+| `HYPERLOOM_MN_SGLANG_ROUTER_ARGS` | sglang_router health, circuit-breaker, and request-timeout args. Unset uses `--disable-circuit-breaker --health-failure-threshold 100 --health-check-timeout-secs 600 --health-check-interval-secs 30 --request-timeout-secs 14400` |
+| `HYPERLOOM_MN_PD_PROFILE_MODE` | Engine profiling window: `steps` (default) records a fixed step count per role; `time` records between one start and stop |
+| `HYPERLOOM_MN_PD_PREFILL_PROFILE_STEPS`, `HYPERLOOM_MN_PD_DECODE_PROFILE_STEPS` | Step count per role in `steps` mode (defaults `8` and `256`) |
+| `HYPERLOOM_MN_PROFILE_WITH_STACK` | `1`, `true`, `yes`, or `on` records Python stacks in engine traces (default off) |
+| `HYPERLOOM_MN_PD_GATE_POLICY` | Trace-analysis gates over PD nodes: `worst` (default) gates on the worst node; `per_node` gates each node |
+
+A PD profiling round starts its engines with graph-capture profiling
+(`--enable-profile-cuda-graph` and the profile config's graph-capture env), and its
+trace analysis truncates same-stream overlapping GPU events before TraceLens reads
+the trace. infera and rayjob rounds keep their own profiling path.
 
 Forge is not in that list and does not need to be: it ships inside the Hyperloom
 wheel, so there is no checkout to export. `FORGE_PATH` is removed. Set

@@ -135,6 +135,21 @@ def test_external_pod_ssh_ports_follow_the_lws_ordinal(
     ]
 
 
+def test_infera_router_ips_are_frontend_ssh_targets(
+    _external_env: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The frontend's sshd sits past the decode stride, so it never shares a port with a GPU role."""
+    monkeypatch.setenv("HYPERLOOM_MN_EXT_SSH_PORT", "2222")
+    monkeypatch.setenv("HYPERLOOM_MN_EXT_ROUTER_IPS", "10.0.0.9")
+
+    state = ext.build_external_state_from_env()
+
+    assert state["router_pod_ips"] == ["10.0.0.9"]
+    assert [(p["role"], p["podIP"], p["sshPort"]) for p in state["router_pods"]] == [("router", "10.0.0.9", 2242)]
+    assert state["nodes"] == 2
+
+
 def test_external_aggregated_worker_ports_follow_the_lws_ordinal(
     _external_env: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -156,6 +171,23 @@ def test_load_multi_node_state_falls_back_to_env(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     assert ext.load_multi_node_state()["service_url"] == "http://frontend:8000"
+
+
+def test_repeated_pd_router_state_loads_resolve_the_service_host_once(
+    _external_env: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    from hyperloom.inference_optimizer.multi_node._internal import pd_cluster
+
+    lookups: list[str] = []
+    monkeypatch.setenv("INFERENCE_OPTIMIZER_MN_BACKEND", "sglangrouter")
+    monkeypatch.setenv("HYPERLOOM_MN_PROFILE_TRACE_DIR", str(tmp_path / "torch_trace"))
+    monkeypatch.setattr(pd_cluster.socket, "gethostbyname", lambda host: lookups.append(host) or "192.168.0.5")
+    pd_cluster._resolve_host.cache_clear()
+
+    states = [ext.load_multi_node_state() for _ in range(5)]
+
+    assert [state["router_pod_ips"] for state in states] == [["192.168.0.5"]] * 5
+    assert lookups == ["frontend"]
 
 
 def test_load_multi_node_state_prefers_env_over_stale_disk(
@@ -370,6 +402,44 @@ def test_pd_leg_urls_carry_over_within_the_same_handoff(_external_env: Path) -> 
 
     assert state["pd_prefill_url"] == "http://10.32.17.187:30000"
     assert state["pd_decode_url"] == "http://10.32.17.185:30001"
+
+
+def test_baseline_record_and_engine_flags_carry_over_within_the_same_handoff(_external_env: Path) -> None:
+    """The restart path reads the session baseline and the probed engine flags back from disk."""
+    _write_disk_state(
+        baseline_args_source="inferencex",
+        baseline_prefill_args="--load-balance-method round_robin",
+        baseline_decode_args="--prefill-round-robin-balance",
+        baseline_transfer_backend="mori",
+        engine_cli_flags=["--load-balance-method"],
+    )
+
+    state = ext.load_multi_node_state()
+
+    assert state["baseline_args_source"] == "inferencex"
+    assert state["baseline_prefill_args"] == "--load-balance-method round_robin"
+    assert state["baseline_decode_args"] == "--prefill-round-robin-balance"
+    assert state["baseline_transfer_backend"] == "mori"
+    assert state["engine_cli_flags"] == ["--load-balance-method"]
+
+
+def test_profile_trace_paths_carry_over_within_the_same_handoff(_external_env: Path) -> None:
+    """Profile stamps ``profile_trace`` / ``*_trace``; a same-hand-off reload must keep them."""
+    _write_disk_state(
+        profile_trace="/shared/profile-traces/default-1/torch_trace",
+        steady_state_trace="/shared/profile-traces/default-1/torch_trace/decode/rank0.trace.json.gz",
+        decode_trace="/shared/profile-traces/default-1/torch_trace/decode/rank0.trace.json.gz",
+        prefill_trace="/shared/profile-traces/default-1/torch_trace/prefill/rank0.trace.json.gz",
+        profile_trace_shared=True,
+    )
+
+    state = ext.load_multi_node_state()
+
+    assert state["profile_trace"] == "/shared/profile-traces/default-1/torch_trace"
+    assert state["steady_state_trace"].endswith("decode/rank0.trace.json.gz")
+    assert state["decode_trace"].endswith("decode/rank0.trace.json.gz")
+    assert state["prefill_trace"].endswith("prefill/rank0.trace.json.gz")
+    assert state["profile_trace_shared"] is True
 
 
 def test_pd_leg_urls_are_dropped_when_the_cluster_was_replaced(_external_env: Path) -> None:

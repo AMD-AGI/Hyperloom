@@ -435,16 +435,22 @@ def _build_trace_analyze_cmd(
     if scriptable:
         steady_state_mode = "generic"
     else:
-        cmd += _split_llm_flags(payload, workload)
+        if payload.get("split_llm_inference", True):
+            cmd += _split_llm_flags(payload, workload)
         steady_state_mode = str(
             payload.get("steady_state_mode") or os.environ.get("INFERENCE_OPTIMIZER_STEADY_STATE_MODE", "")
         ).strip()
     roofline_output_name = str(payload.get("roofline_output_name") or "").strip()
+    # A PD profile is analysed as one multi-trace run on the agent route; the non-llm route reads the main trace.
+    pd_node_traces = payload.get("pd_node_traces") if run.route is AnalysisRoute.AGENT and not scriptable else None
     cmd += _optional_flags(
         ("--capture-folder", capture_folder),
         ("--steady-state-mode", steady_state_mode),
         ("--roofline-output-name", roofline_output_name),
+        ("--pd-node-traces", json.dumps(pd_node_traces, sort_keys=True) if pd_node_traces else ""),
     )
+    if payload.get("clamp_stream_overlaps"):
+        cmd += ["--clamp-stream-overlaps"]
     if payload.get("dry_run"):
         cmd += ["--dry-run"]
     return cmd, steady_state_mode

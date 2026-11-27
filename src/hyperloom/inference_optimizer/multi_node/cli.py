@@ -59,6 +59,7 @@ from .pod_entrypoints import (
 from .restart_pd_args import add_restart_pd_role_arguments, add_restart_pd_shape_arguments
 from ._internal.env_safety import filter_forward_env
 from ._internal.serving_probe import cluster_is_serving
+from ._internal.topology_file import PD_ROUTER_BACKENDS
 
 
 # Overall budget for the HTTP serving probe, spanning every request it makes: one /health per leg, /v1/models, then a
@@ -382,8 +383,13 @@ def cmd_finalize_patch(args: argparse.Namespace) -> int:
 
 def cmd_apply_tracelens_patch(args: argparse.Namespace) -> int:
     """Fan out the TraceLens SGLang patch set to every pod via apply_tracelens_patch_multinode.py; multi-node only."""
-    if _load_state().get("backend") == "infera":
+    backend = _load_state().get("backend")
+    if backend == "infera":
         return _infera_apply_tracelens_patch(args)
+    if backend in PD_ROUTER_BACKENDS:
+        from .commands.pd_cluster import apply_tracelens_patch
+
+        return apply_tracelens_patch(args)
     state = _load_state()
     head_ip = (state.get("head_pod_ip") or "").strip()
     if not head_ip:
@@ -729,8 +735,13 @@ def _restart_single_node(args: argparse.Namespace, state: dict) -> int:
 
 def cmd_restart_server(args: argparse.Namespace) -> int:
     """Kill any prior vllm/sglang server and launch a new one."""
-    if _load_state().get("backend") == "infera":
+    backend = _load_state().get("backend")
+    if backend == "infera":
         return _infera_restart_server(args)
+    if backend in PD_ROUTER_BACKENDS:
+        from .commands.pd_cluster import restart_pd_cluster
+
+        return restart_pd_cluster(args)
     rejected = _reject_unsupported_restart_args(args)
     if rejected:
         return rejected
@@ -749,8 +760,13 @@ def _record_kill_and_invalidate_launch(state: dict) -> None:
 
 def cmd_kill_inference(args: argparse.Namespace) -> int:
     """Kill vllm/sglang on the RayJob without starting replacements."""
-    if _load_state().get("backend") == "infera":
+    backend = _load_state().get("backend")
+    if backend == "infera":
         return _infera_kill_inference(args)
+    if backend in PD_ROUTER_BACKENDS:
+        from .commands.pd_cluster import kill_pd_cluster
+
+        return kill_pd_cluster(args)
     state = _require_state("head_pod_ip")
     nnodes = int(state.get("nodes") or 1)
 
