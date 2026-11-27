@@ -5,6 +5,8 @@
 
 from __future__ import annotations
 
+import csv
+
 import pytest
 
 from hyperloom.orchestrator.actions.executors import benchmark_result as br
@@ -115,11 +117,20 @@ def test_harvest_mn_gpu_metrics_window_and_malformed_rows(monkeypatch, tmp_path)
     ]
 
 
+@pytest.fixture
+def small_csv_fields():
+    # The field limit is one value per process, and another test or import may have raised it.
+    previous = csv.field_size_limit(1_000)
+    yield
+    csv.field_size_limit(previous)
+
+
+@pytest.mark.usefixtures("small_csv_fields")
 @pytest.mark.parametrize(
     "pod_rows",
     [
         pytest.param("5,50,280\n", id="every row outside the round's window"),
-        pytest.param("1000," + "x" * 200_000 + "\n", id="a field the csv module refuses"),
+        pytest.param("1000," + "x" * 2_000 + "\n", id="a field the csv module refuses"),
     ],
 )
 def test_harvest_mn_gpu_metrics_writes_nothing_without_usable_rows(monkeypatch, tmp_path, pod_rows):
