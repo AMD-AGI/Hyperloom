@@ -5,7 +5,6 @@
 from __future__ import annotations
 
 import json
-from copy import deepcopy
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
@@ -18,7 +17,7 @@ from hyperloom.inference_optimizer.breakdown.reporters._renderers.final import r
 from hyperloom.orchestrator.loop.coordinator import Coordinator
 from hyperloom.orchestrator.kernel.geak_config import (
     _geak_result_has_artifact,
-    _geak_revalidation_decision,
+    _geak_rebench_confirms,
     _normalize_geak_overlay_dir,
 )
 from hyperloom.inference_optimizer.session.session_binding import session_scope
@@ -36,39 +35,31 @@ _AGENTX_EVIDENCE = {"valid_measurement": True, "diagnostic_only": False, "worklo
 
 
 @pytest.mark.parametrize(
-    ("measured", "baseline", "got_hash", "expected_hash", "current_best", "decision"),
+    ("measured", "baseline", "got_hash", "expected_hash", "current_best", "confirmed"),
     [
-        pytest.param(115.0, 100.0, "abc", "abc", None, "validated", id="identity-and-engagement-hold"),
-        pytest.param(115.0, 100.0, "WRONG", "abc", None, "fallback", id="config-identity-mismatch"),
-        pytest.param(101.0, 100.0, "abc", "abc", None, "fallback", id="win-collapsed-to-baseline"),
-        pytest.param(115.0, 100.0, "", "", None, "validated", id="no-expected-hash-skips-identity"),
-        pytest.param(9623.0, 7380.7, "abc", "abc", 10067.9, "no_promote", id="not-beating-current-best"),
-        pytest.param(10500.0, 7380.7, "abc", "abc", 10067.9, "validated", id="beating-current-best"),
+        pytest.param(115.0, 100.0, "abc", "abc", None, True, id="identity-and-engagement-hold"),
+        pytest.param(115.0, 100.0, "WRONG", "abc", None, False, id="config-identity-mismatch"),
+        pytest.param(101.0, 100.0, "abc", "abc", None, False, id="win-collapsed-to-baseline"),
+        pytest.param(115.0, 100.0, "", "", None, True, id="no-expected-hash-skips-identity"),
+        pytest.param(9623.0, 7380.7, "abc", "abc", 10067.9, False, id="not-beating-current-best"),
+        pytest.param(10500.0, 7380.7, "abc", "abc", 10067.9, True, id="beating-current-best"),
+        pytest.param(0.0, 100.0, "abc", "abc", None, False, id="no-measurement"),
+        pytest.param(115.0, 0.0, "abc", "abc", None, False, id="no-baseline"),
+        pytest.param(None, 100.0, "abc", "abc", None, False, id="unmeasured-axis"),
     ],
 )
-def test_revalidation_decision(measured, baseline, got_hash, expected_hash, current_best, decision) -> None:
+def test_a_rebench_confirms_only_its_own_engaged_config(
+    measured, baseline, got_hash, expected_hash, current_best, confirmed
+) -> None:
     assert (
-        _geak_revalidation_decision(
+        _geak_rebench_confirms(
             measured=measured,
             baseline=baseline,
             got_hash=got_hash,
             expected_hash=expected_hash,
             current_best=current_best,
         )
-        == decision
-    )
-
-
-@pytest.mark.parametrize("measured,baseline", [(0.0, 100.0), (115.0, 0.0), (None, 100.0)])
-def test_revalidation_fallback_on_bad_measurement(measured, baseline) -> None:
-    assert (
-        _geak_revalidation_decision(
-            measured=measured,
-            baseline=baseline,
-            got_hash="abc",
-            expected_hash="abc",
-        )
-        == "fallback"
+        is confirmed
     )
 
 
@@ -101,83 +92,6 @@ def _coord(tmp_path: Path, *, baseline: float, best_tput: float) -> Coordinator:
         conc=64,
     )
     return coord
-
-
-# ── 2a: GEAK-harness fallback validates on the replayed measurement ──
-
-
-@pytest.mark.asyncio
-async def test_geak_harness_fallback_writes_measured_headline(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """Rebench-first 2a: the headline is written from the GEAK-harness MEASURED throughput (not a self-reported speedup), and it lifts current_best + optimization_stack the same way the orchestrator (2b) path does."""
-    base = 2844.209
-    measured = base * 1.088  # what the GEAK-harness replay actually measured
-    coord = _coord(tmp_path, baseline=base, best_tput=3042.941)
-    coord.shared_state.geak_result = {
-        "status": "ok",
-        "throughput_speedup": 1.088,
-        "final_throughput_basis": "cold",
-        "accepted_config": {"flags": "--max-num-batched-tokens 24576", "env": "VLLM_ROCM_USE_AITER=0"},
-        "final_overlay": "",
-        "validated_regimes": [{"isl": 1024, "osl": 1024, "conc": 64}],
-        "alignment_metrics": {
-            "hot_geak_speedup": 1.1329,  # the INFLATED number we must NOT use
-            "cold_geak_speedup": 1.088,
-            "final_basis": "cold",
-        },
-    }
-
-    async def _fake_sweep(**_kwargs):
-        # bench-e2e replay measured this throughput at the validated regime.
-        return {"status": "succeeded", "promotion_measurement": {"conc": 64, "output_throughput": measured}}
-
-    monkeypatch.setattr(
-        "hyperloom.orchestrator.actions.executors._geak_sweep.sweep_via_geak",
-        _fake_sweep,
-    )
-
-    out = await coord.writeback.validate_geak_via_geak_harness(reason="unit")
-
-    assert out["validated"] is True
-    ss = coord.shared_state
-    expected_pct = (measured - base) / base * 100.0
-    # Validated == the MEASURED same-harness total (≈+8.8%), NOT the hot A/B (+13.29%).
-    assert ss.cumulative_gain_validated == pytest.approx(expected_pct, abs=1e-6)
-    assert ss.cumulative_gain_validated != pytest.approx(13.29, abs=0.05)
-    assert resume_pending(ss) is False
-    # Rebench-first writes the headline HERE: current_best.tput == measured, and the geak_e2e stack entry now exists.
-    assert ss.current_best["tput"] == pytest.approx(measured)
-    assert any(e.get("action") == "geak_e2e" for e in ss.optimization_stack)
-    assert not ss.geak_pending  # candidate cleared on promote
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize(
-    ("self_reported", "replayed", "validated"),
-    [(0.95, 120.0, True), (2.0, 105.0, False)],
-    ids=["claims-loss-measures-win", "claims-win-measures-loss"],
-)
-async def test_geak_harness_verdict_rests_on_the_replay_measurement(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, self_reported: float, replayed: float, validated: bool
-) -> None:
-    """GEAK's own speedup is never read: only the replayed throughput against current_best decides."""
-    coord = _coord(tmp_path, baseline=100.0, best_tput=110.0)
-    coord.shared_state.geak_result = {
-        "status": "ok",
-        "throughput_speedup": self_reported,
-        "accepted_config": {"flags": "--block-size 32"},
-    }
-
-    async def _replay(**_kwargs):
-        return {"status": "succeeded", "promotion_measurement": {"output_throughput": replayed}}
-
-    monkeypatch.setattr("hyperloom.orchestrator.actions.executors._geak_sweep.sweep_via_geak", _replay)
-    out = await coord.writeback.validate_geak_via_geak_harness(reason="unit")
-
-    assert out["validated"] is validated
-    assert coord.shared_state.current_best["tput"] == pytest.approx(replayed if validated else 110.0)
-    if not validated:
-        assert out["status"] == "no_promote"
-        assert coord.shared_state.geak_result["revalidation_status"] == "no_promote"
 
 
 def _agentx_rebench_coord(tmp_path: Path) -> Coordinator:
@@ -230,74 +144,6 @@ def _agentx_rebench_coord(tmp_path: Path) -> Coordinator:
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("persisted_mode,ambient", [("agentx", ""), ("agentx", "0"), ("", "1")])
-@pytest.mark.parametrize("bench_client", ["auto", "native", "inferencex"])
-async def test_agentx_2a_refuses_before_launch(
-    native_benchmark,
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    persisted_mode: str,
-    ambient: str,
-    bench_client: str,
-) -> None:
-    if ambient == "1":
-        monkeypatch.setenv("HYPERLOOM_BENCHMARK_CONFIG", str(native_benchmark))
-    monkeypatch.setenv("HYPERLOOM_PERF_METRIC", "output")
-    coord = _agentx_rebench_coord(tmp_path)
-    state = coord.shared_state
-    state.benchmark_mode = persisted_mode
-    state.geak_result["bench_client"] = bench_client
-    before_best = dict(state.current_best)
-    before_pending = dict(state.geak_pending)
-
-    async def _must_not_launch(**_kwargs):
-        raise AssertionError("GEAK cannot replay the canonical AgentX workload")
-
-    monkeypatch.setattr("hyperloom.orchestrator.actions.executors._geak_sweep.sweep_via_geak", _must_not_launch)
-    outcome = await coord.writeback.validate_geak_via_geak_harness(reason="unit")
-
-    assert outcome == {
-        "validated": False,
-        "status": "incomparable",
-        "reason": "geak_harness_unsupported_canonical_workload",
-    }
-    assert state.current_best == before_best
-    assert state.geak_pending == before_pending
-    assert resume_pending(state) is True
-    assert state.cumulative_gain_validated == 20.0
-    assert state.cumulative_gain_validated_ts == "2026-09-08T00:00:00Z"
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize("bench_client", ["auto", "native", "inferencex"])
-async def test_persisted_legacy_mode_allows_existing_geak_replay(
-    native_benchmark, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, bench_client: str
-) -> None:
-    monkeypatch.setenv("HYPERLOOM_BENCHMARK_CONFIG", str(native_benchmark))
-    monkeypatch.setenv("HYPERLOOM_PERF_METRIC", "output")
-    coord = _coord(tmp_path, baseline=100.0, best_tput=150.0)
-    coord.shared_state.benchmark_mode = "synthetic"
-    coord.shared_state.geak_result = {
-        "status": "ok",
-        "bench_client": bench_client,
-        "throughput_speedup": 2.0,
-        "accepted_config": {"flags": "--candidate", "env": ""},
-    }
-    calls = []
-
-    async def _replay(**kwargs):
-        calls.append(kwargs)
-        return {"status": "succeeded", "promotion_measurement": {"output_throughput": 200.0}}
-
-    monkeypatch.setattr("hyperloom.orchestrator.actions.executors._geak_sweep.sweep_via_geak", _replay)
-    outcome = await coord.writeback.validate_geak_via_geak_harness(reason="unit")
-
-    assert outcome["validated"] is True
-    assert len(calls) == 1
-    assert calls[0]["result"]["bench_client"] == bench_client
-
-
-@pytest.mark.asyncio
 @pytest.mark.parametrize("measurement_location", ["flat", "bench_result", "measurement"])
 @pytest.mark.parametrize(
     "case",
@@ -340,10 +186,6 @@ async def test_agentx_2b_uses_current_canonical_measurement(
     elif case == "lift_refused":
         monkeypatch.setattr(coord.phase_kernel, "promote_geak_from_candidate", lambda *_args, **_kwargs: False)
 
-    async def _must_not_launch(**_kwargs):
-        raise AssertionError("Inconclusive AgentX 2b must not launch GEAK 2a")
-
-    monkeypatch.setattr("hyperloom.orchestrator.actions.executors._geak_sweep.sweep_via_geak", _must_not_launch)
     variant = measurement
     if measurement_location != "flat":
         variant = {
@@ -380,97 +222,17 @@ async def test_agentx_2b_uses_current_canonical_measurement(
         assert state.cumulative_gain_validated_stack_len == 1
         assert state.cumulative_gain_validated_ts == "2026-09-08T00:00:00Z"
         assert resume_pending(state) is True
-        if case in {"lift_refused", "missing_axes"}:
+        if case == "missing_output":
+            assert attempt["status"] == "failed"
+            assert state.geak_result["revalidation_status"] == "failed"
+            assert state.geak_result["revalidation_error_class"] == "rebench_no_measurement"
+            assert result["status"] == "failed"
+        else:
             assert attempt["decision"] == "no_promote"
             assert attempt["status"] == "no_promote"
             assert state.geak_result["revalidation_status"] == "no_promote"
             assert result["status"] == "no_promote"
-        else:
-            assert attempt["status"] == "incomparable"
-            assert state.geak_result["revalidation_status"] == "fallback_failed"
-            assert state.geak_result["revalidation_error"] == "geak_harness_unsupported_canonical_workload"
-            assert result["status"] == "incomparable"
     assert {key: state.geak_result[key] for key in before_proposal} == before_proposal
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize(
-    "fresh_accuracy,expected_reason",
-    [
-        (None, "accuracy_unavailable"),
-        (True, "accuracy_unavailable"),
-        ("0.99", "accuracy_unavailable"),
-        (float("nan"), "accuracy_unavailable"),
-        (float("inf"), "accuracy_unavailable"),
-        (-0.1, "accuracy_unavailable"),
-        (1.1, "accuracy_unavailable"),
-        (0.0, "accuracy_drop"),
-        (0.7, "accuracy_drop"),
-    ],
-)
-async def test_geak_harness_rejects_missing_or_failed_fresh_accuracy(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, fresh_accuracy, expected_reason: str
-) -> None:
-    coord = _coord(tmp_path, baseline=100.0, best_tput=110.0)
-    ss = coord.shared_state
-    ss.baseline_accuracy = 0.8
-    ss.optimization_stack = [{"action": "explore", "tput": 110.0}]
-    ss.cumulative_gain_validated = 10.0
-    ss.geak_result = {
-        "status": "ok",
-        "throughput_speedup": 1.2,
-        "accuracy": 0.99,
-        "accepted_config": {"flags": "--block-size 32"},
-    }
-    before = deepcopy((ss.current_best, ss.optimization_stack, ss.cumulative_gain_validated))
-
-    async def _fake_sweep(**_kwargs):
-        return {
-            "status": "succeeded",
-            "promotion_measurement": {"output_throughput": 120.0, "accuracy": fresh_accuracy},
-        }
-
-    monkeypatch.setattr("hyperloom.orchestrator.actions.executors._geak_sweep.sweep_via_geak", _fake_sweep)
-    out = await coord.writeback.validate_geak_via_geak_harness(reason="inconclusive_orchestrator_rebench")
-
-    assert out == {"validated": False, "status": "no_promote", "reason": expected_reason}
-    assert (ss.current_best, ss.optimization_stack, ss.cumulative_gain_validated) == before
-    assert ss.geak_result["revalidation_status"] == "no_promote"
-    assert ss.geak_result["failure_reason"] == expected_reason
-    assert ss.geak_result["baseline_accuracy"] == 0.8
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize("fresh_accuracy", [0.79, 0.8])
-async def test_geak_harness_accepts_fresh_accuracy_within_native_tolerance(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, fresh_accuracy: float
-) -> None:
-    coord = _coord(tmp_path, baseline=100.0, best_tput=110.0)
-    coord.shared_state.baseline_accuracy = 0.8
-    coord.shared_state.geak_result = {
-        "status": "ok",
-        "throughput_speedup": 1.2,
-        "accuracy": 0.0,
-        "accepted_config": {"flags": "--block-size 32"},
-    }
-
-    async def _fake_sweep(**_kwargs):
-        return {
-            "status": "succeeded",
-            "promotion_measurement": {
-                "output_throughput": 120.0,
-                "accuracy": fresh_accuracy,
-                "accuracy_source": "/fresh/bench_summary.json",
-            },
-        }
-
-    monkeypatch.setattr("hyperloom.orchestrator.actions.executors._geak_sweep.sweep_via_geak", _fake_sweep)
-    out = await coord.writeback.validate_geak_via_geak_harness(reason="unit")
-    assert out["validated"] is True
-    assert coord.shared_state.current_best["tput"] == 120.0
-    assert coord.shared_state.cumulative_gain_validated == 20.0
-    entry = next(entry for entry in coord.shared_state.optimization_stack if entry.get("action") == "geak_e2e")
-    assert entry["accuracy"] == fresh_accuracy
 
 
 # ── Report renders the validated gain as recorded ─
@@ -535,12 +297,6 @@ async def test_2b_stamps_validated_from_orchestrator_rebench(tmp_path: Path) -> 
     coord.shared_state.optimization_stack = [{"action": "geak_e2e", "variant_name": "geak_e2e", "tput": 3236.489}]
     set_resume_pending(coord.shared_state, True)
 
-    # Guard: the GEAK-harness fallback must NOT be taken on the validated path.
-    async def _must_not_fallback(**_kwargs):
-        raise AssertionError("2a fallback must not run when 2b validates")
-
-    coord.writeback.validate_geak_via_geak_harness = _must_not_fallback  # type: ignore[assignment]
-
     result = {
         "output_throughput": measured,
         "best_variant": {
@@ -572,42 +328,6 @@ async def test_2b_stamps_validated_from_orchestrator_rebench(tmp_path: Path) -> 
 
 
 @pytest.mark.asyncio
-async def test_2b_identity_mismatch_defers_to_geak_harness(tmp_path: Path) -> None:
-    """decision==fallback (config drift) → NO validated stamp; 2a is invoked."""
-    base, measured = 2844.209, 3270.0  # engaged, but fingerprint won't match
-    coord = _coord(tmp_path, baseline=base, best_tput=3236.489)
-    coord.shared_state.optimization_stack = [{"action": "geak_e2e", "variant_name": "geak_e2e", "tput": 3236.489}]
-    set_resume_pending(coord.shared_state, True)
-    coord.shared_state.geak_pending = {
-        "status": "awaiting_rebench",
-        "revalidation_task_id": "reval-1",
-    }
-
-    called = {"n": 0}
-
-    async def _fallback(**_kwargs):
-        called["n"] += 1
-        return {"validated": False}
-
-    coord.writeback.validate_geak_via_geak_harness = _fallback  # type: ignore[assignment]
-
-    result = {
-        "output_throughput": measured,
-        "best_variant": {"fingerprint": "DRIFTED"},  # != expected "abc"
-        "winners": [],
-    }
-    await coord.writeback.promote_to_shared_state("explore", result, task=_revalidate_task(expected_hash="abc"))
-
-    ss = coord.shared_state
-    # 2b did NOT stamp validated (still 0); it deferred to the GEAK harness (2a).
-    assert called["n"] == 1
-    assert ss.cumulative_gain_validated == pytest.approx(0.0)
-    assert not ss.geak_pending
-    assert resume_pending(ss) is True
-    assert ss.geak_result["revalidation_status"] == "fallback_failed"
-
-
-@pytest.mark.asyncio
 async def test_2b_no_promote_when_rebench_loses_to_current_best(tmp_path: Path) -> None:
     """A GEAK rebench that beats baseline but loses to current_best is measured, not a KEEP."""
     base, current_best, measured = 7380.7, 10067.9, 9623.0
@@ -617,11 +337,6 @@ async def test_2b_no_promote_when_rebench_loses_to_current_best(tmp_path: Path) 
     ]
     set_resume_pending(coord.shared_state, True)
     coord.shared_state.geak_pending = {"status": "awaiting_rebench"}
-
-    async def _must_not_fallback(**_kwargs):
-        raise AssertionError("2a fallback must not run for a measured no-promote")
-
-    coord.writeback.validate_geak_via_geak_harness = _must_not_fallback  # type: ignore[assignment]
 
     result = {
         "output_throughput": measured,
@@ -653,10 +368,6 @@ async def test_2b_native_revert_is_conclusive(tmp_path: Path, reason: str, expec
     }
     set_resume_pending(coord.shared_state, True)
 
-    async def _must_not_fallback(**_kwargs):
-        pytest.fail("native REVERT must not fall back to another harness")
-
-    coord.writeback.validate_geak_via_geak_harness = _must_not_fallback
     result = {
         "status": "succeeded",
         "output_throughput": None,
@@ -675,66 +386,20 @@ async def test_2b_native_revert_is_conclusive(tmp_path: Path, reason: str, expec
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("reason", ["both_axes_regressed (intvty 100.0->50.0 tput 1000.0->900.0)", "new gate wording"])
-async def test_structured_native_rejection_prevents_fresh_fallback(tmp_path, reason):
+async def test_2b_revert_of_another_config_is_refused(tmp_path: Path) -> None:
     coord = _coord(tmp_path, baseline=100.0, best_tput=110.0)
-    coord.shared_state.geak_result = _ok_result(final=150.0)
     set_resume_pending(coord.shared_state, True)
-    coord.shared_state.geak_pending = {"status": "awaiting_rebench", "revalidation_task_id": "reval-1"}
-
-    async def must_not_replay(**_kwargs):
-        pytest.fail("a conclusive native graded-axis rejection must not invoke fallback")
-
-    coord.writeback.validate_geak_via_geak_harness = must_not_replay
     await coord.writeback.promote_to_shared_state(
         "explore",
         {
-            "status": "succeeded",
             "output_throughput": None,
             "winners": [],
-            "per_variant_outcomes": [
-                {
-                    "outcome": "REVERT",
-                    "reason": reason,
-                    "fingerprint": "abc",
-                    "gates": [{"gate": "graded_axes", "passed": False, "reason": reason}],
-                }
-            ],
+            "per_variant_outcomes": [{"outcome": "REVERT", "reason": "accuracy_drop", "fingerprint": "different"}],
         },
         task=_revalidate_task(expected_hash="abc"),
     )
     assert coord.shared_state.current_best["tput"] == 110.0
     assert coord.shared_state.geak_result["revalidation_status"] == "no_promote"
-    assert coord.shared_state.geak_result["revalidation_error"] == reason
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize(
-    "outcome,reason,fingerprint",
-    [("FAILED", "no_measurement", "abc"), ("REVERT", "accuracy_drop", "different")],
-)
-async def test_2b_inconclusive_replay_still_allows_fallback(
-    tmp_path: Path, outcome: str, reason: str, fingerprint: str
-) -> None:
-    coord = _coord(tmp_path, baseline=100.0, best_tput=110.0)
-    set_resume_pending(coord.shared_state, True)
-    calls = []
-
-    async def _fallback(**kwargs):
-        calls.append(kwargs)
-        return {"validated": False, "reason": "no_fresh_accuracy"}
-
-    coord.writeback.validate_geak_via_geak_harness = _fallback
-    await coord.writeback.promote_to_shared_state(
-        "explore",
-        {
-            "output_throughput": None,
-            "winners": [],
-            "per_variant_outcomes": [{"outcome": outcome, "reason": reason, "fingerprint": fingerprint}],
-        },
-        task=_revalidate_task(expected_hash="abc"),
-    )
-    assert calls == [{"reason": "2b_inconclusive"}]
 
 
 def _ok_result(*, final: float, base_for_gain: float | None = None) -> dict:
@@ -783,8 +448,7 @@ def test_promote_from_candidate_writes_measured_headline(tmp_path: Path) -> None
     coord.phase_kernel._record_geak_candidate(result)
     assert coord.shared_state.geak_pending.get("status") == "awaiting_rebench"
     coord.phase_kernel.promote_geak_from_candidate(
-        result,
-        measured_tput=measured,
+        result, measured_tput=measured, measurement_provenance={"tput": measured}, overlay_loaded=False
     )
     ss = coord.shared_state
     expected_pct = (measured - base) / base * 100.0
@@ -809,7 +473,9 @@ def test_promote_with_a_proven_overlay_stamps_the_kernel_lever(tmp_path: Path) -
     result = _ok_result(final=3236.489)
     result["accepted_kernels"] = ["fused_moe"]
     coord.shared_state.geak_result = result
-    coord.phase_kernel.promote_geak_from_candidate(result, measured_tput=3270.0, overlay_loaded=True)
+    coord.phase_kernel.promote_geak_from_candidate(
+        result, measured_tput=3270.0, measurement_provenance={"tput": 3270.0}, overlay_loaded=True
+    )
 
     entry = next(e for e in coord.shared_state.optimization_stack if e.get("action") == "geak_e2e")
     assert entry["lever_kind"] == "kernel"
@@ -861,7 +527,9 @@ def test_the_route_level_lift_is_claimed_once_from_the_anchor_it_beat(tmp_path: 
     result["kernel_journey_path"] = _journey_with_validated_keeps(tmp_path, [1.05])
 
     with session_scope(tmp_path):
-        coord.phase_kernel.promote_geak_from_candidate(result, measured_tput=3400.0, overlay_loaded=True)
+        coord.phase_kernel.promote_geak_from_candidate(
+            result, measured_tput=3400.0, measurement_provenance={"tput": 3400.0}, overlay_loaded=True
+        )
         rows = [
             r
             for r in event_parts(STACK_EVENT_SECTIONS).get("stack_adoption") or []
@@ -952,11 +620,6 @@ async def test_2b_config_delta_candidate_still_promotes(tmp_path: Path) -> None:
     coord.shared_state.geak_result = result_blob
     coord.phase_kernel._record_geak_candidate(result_blob)
 
-    async def _must_not_fallback(**_kwargs):
-        raise AssertionError("2a fallback must not run when 2b validates a real delta")
-
-    coord.writeback.validate_geak_via_geak_harness = _must_not_fallback  # type: ignore[assignment]
-
     result = {
         "output_throughput": measured,
         "best_variant": {"fingerprint": "abc"},
@@ -1007,7 +670,9 @@ def test_promote_with_dead_overlay_leaves_no_kernel_names_in_stack_entry(tmp_pat
     result["accepted_kernels"] = ["c0_triton"]
     result["accepted_heads"] = ["fused_moe_kernel"]
 
-    coord.phase_kernel.promote_geak_from_candidate(result, measured_tput=measured, overlay_loaded=False)
+    coord.phase_kernel.promote_geak_from_candidate(
+        result, measured_tput=measured, measurement_provenance={"tput": measured}, overlay_loaded=False
+    )
 
     entry = next(e for e in coord.shared_state.optimization_stack if e.get("action") == "geak_e2e")
     # ``lift_to_current_best`` drops empty values, so "no proof" reads as no lane at all rather than an empty one --
@@ -1023,7 +688,9 @@ def test_promote_with_loaded_overlay_keeps_kernel_names_in_stack_entry(tmp_path:
     result = _ok_result(final=3236.489)
     result["accepted_kernels"] = ["c0_triton"]
 
-    coord.phase_kernel.promote_geak_from_candidate(result, measured_tput=3270.0, overlay_loaded=True)
+    coord.phase_kernel.promote_geak_from_candidate(
+        result, measured_tput=3270.0, measurement_provenance={"tput": 3270.0}, overlay_loaded=True
+    )
 
     entry = next(e for e in coord.shared_state.optimization_stack if e.get("action") == "geak_e2e")
     assert entry["accepted_kernels"] == ["c0_triton"]

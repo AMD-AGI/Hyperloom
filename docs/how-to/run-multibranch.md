@@ -183,10 +183,7 @@ host has no token. The session logs one WARNING when its toolbox is built. Every
   `--max-branches` (default 4). A negative or non-finite limit is a usage error.
 - **Concurrency:** `--max-parallel-tests` (default: as many as fit at TP), `--max-k-per-branch` (default 2; a
   specialist's branch only, the integration branch's K is bounded by `--max-parallel-tests`),
-  `--dev-leases`, `--judge-interval-sec` (default 600, must be positive), `--measurement local|hosted`,
-  `--[no-]make-before-break` (hosted only, default on: where the grant fits at least three tests at TP, a finished
-  test's sandbox is kept until the next test's runs, so that the cluster does not give its node to another job, and one
-  test fewer runs at once; off runs every test the grant fits).
+  `--dev-leases`, `--judge-interval-sec` (default 600, must be positive), `--measurement local|hosted`.
 - **Concurrency sweep:** `--[no-]enable-conc-sweep` (on by default), `--conc-sweep-concs C1,C2,...` and
   `--conc-sweep-parallel N` (see [Concurrency sweep after CLOSE](#concurrency-sweep-after-close)).
 - **Directions:** `--specialist-prompt FILE` and `--reference NAME=DIR`, each repeatable.

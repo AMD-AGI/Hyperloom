@@ -56,11 +56,15 @@ def node_list_backend(nodes: NodeList) -> str:
     return _FRAMEWORK_BACKEND[nodes.framework.value]
 
 
+def is_pd_backend(backend: str, *, node_list: bool) -> bool:
+    """Whether ``backend`` serves a node-list cluster the suite launches: atomesh or sglangrouter, or Infera when the
+    cluster is handed over as a node list."""
+    return backend in PD_BACKENDS or (backend == INFERA and node_list)
+
+
 def is_pd_state(state: dict[str, Any]) -> bool:
-    """Whether a multi-node state describes a node-list cluster the suite launches: an atomesh or sglangrouter one,
-    or an Infera one handed over as a node list."""
-    backend = str(state.get("backend") or "")
-    return backend in PD_BACKENDS or (backend == INFERA and state.get(NODE_LIST_KEY) is True)
+    """Whether a multi-node state describes a node-list cluster the suite launches."""
+    return is_pd_backend(str(state.get("backend") or ""), node_list=state.get(NODE_LIST_KEY) is True)
 
 
 def is_ssh_backed(state: dict[str, Any]) -> bool:
@@ -120,6 +124,7 @@ __all__ = [
     "PD_BACKENDS",
     "SSH_BACKENDS",
     "handed_node_list",
+    "is_pd_backend",
     "is_pd_state",
     "is_ssh_backed",
     "node_list_backend",

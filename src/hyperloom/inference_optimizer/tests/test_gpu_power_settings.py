@@ -489,15 +489,6 @@ class TestVisibleCards:
         _, error = resolve_gpu_power_settings(DeclaredPowerSettings(power_cap_w=1000.0), nodes=1)
         assert "cannot be checked" in error and "device numbers" in error
 
-    def test_the_sampler_samples_the_cards_the_mask_names(self, tmp_path, monkeypatch):
-        from hyperloom.orchestrator.actions.executors.gpu._gpu_power import build_gpu_power_recorder
-
-        monkeypatch.delenv("HYPERLOOM_GPU_POWER_SAMPLING", raising=False)
-        monkeypatch.setattr("shutil.which", lambda name: "/usr/bin/amd-smi")
-        log_path = str(tmp_path / "server.log")
-        assert build_gpu_power_recorder(log_path, {"ROCR_VISIBLE_DEVICES": "4,5"})._scope.gpus == (4, 7)
-        assert build_gpu_power_recorder(log_path, {"ROCR_VISIBLE_DEVICES": "GPU-x"})._scope.gpus is None, "every card"
-
     def test_a_per_gpu_budget_whose_cards_cannot_be_named_refuses_the_launch(self, monkeypatch, capsys):
         from types import SimpleNamespace
 

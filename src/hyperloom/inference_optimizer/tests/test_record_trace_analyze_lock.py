@@ -1,8 +1,8 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Behavior-lock tests for ``SharedState.record_trace_analyze``: 15-key dict, snapshot_id wrap-on-clear, capped history
-with anchor, and history failures that reach the caller.
+"""Behavior-lock tests for ``SharedState.record_trace_analyze``: the canonical key set, snapshot_id wrap-on-clear, capped
+history with anchor, and history failures that reach the caller.
 """
 
 from __future__ import annotations
@@ -22,11 +22,11 @@ def _record(state: SharedState, trace: str) -> None:
     )
 
 
-def test_written_dict_has_sixteen_keys() -> None:
-    """The canonical trace-analysis record includes the selected steady-state trace."""
+def test_written_dict_has_seventeen_keys() -> None:
+    """The canonical trace-analysis record includes the selected steady-state trace and TraceLens' findings."""
     state = SharedState()
     _record(state, "x")
-    assert len(state.last_trace_analyze) == 16
+    assert len(state.last_trace_analyze) == 17
     assert set(state.last_trace_analyze) == {
         "trace_input",
         "steady_state_trace",
@@ -41,6 +41,7 @@ def test_written_dict_has_sixteen_keys() -> None:
         "analysis_md_path",
         "analysis_md_text",
         "fusion_findings",
+        "system_findings",
         "roofline_snapshot_id",
         "roofline_baseline_gain_at_snapshot",
         "ts",

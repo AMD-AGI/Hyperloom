@@ -15,7 +15,7 @@ import pytest
 from hyperloom.inference_optimizer.breakdown.recorder.assembler import assemble_parts, event_parts
 from hyperloom.inference_optimizer.breakdown.recorder.sections import KERNEL_EVENT_SECTIONS
 from hyperloom.inference_optimizer.session.geak_rebench_verdict import (
-    REBENCH_FALLBACK,
+    REBENCH_FAILED,
     REBENCH_NO_PROMOTE,
     REBENCH_VALIDATED,
 )
@@ -1362,12 +1362,12 @@ def test_a_failed_attempt_is_not_read_as_a_rejection(tmp_path):
     assert rows["attempt-8"]["outcome"] == "rejected"
 
 
-def test_a_fallback_verdict_is_inconclusive_rather_than_a_rejection(tmp_path):
+def test_a_failed_verdict_is_inconclusive_rather_than_a_rejection(tmp_path):
     recorder = _geak_with_one_acceptance()
     _geak_rebench(
         recorder,
         "geak-rb-1",
-        REBENCH_FALLBACK,
+        REBENCH_FAILED,
         measured_tput=None,
         engagement={"config_matched": True, "overlay_loaded": False},
     )

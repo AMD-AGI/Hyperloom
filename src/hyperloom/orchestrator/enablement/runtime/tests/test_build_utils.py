@@ -14,6 +14,7 @@ from typing import Any
 import pytest
 
 from hyperloom.orchestrator.enablement.runtime.build_utils import (
+    ABI_PROBE_MARKER,
     VLLM_ROCM_PROBE,
     AbiMismatchError,
     check_rocm_toolchain_alignment,
@@ -202,7 +203,7 @@ def test_probe_torch_abi_rocm():
     )
 
     def _run(argv, **kw):
-        return _completed(stdout=payload + "\n")
+        return _completed(stdout=ABI_PROBE_MARKER + payload + "\n")
 
     info = probe_torch_abi("python3", run=_run)
     assert info["is_rocm"] is True
@@ -215,6 +216,132 @@ def test_probe_torch_abi_failure():
 
     info = probe_torch_abi("python3", run=_run)
     assert info["is_rocm"] is False
+
+
+def _torch_211_rocm10(hip="10.0.0"):
+    import json
+
+    facts = {"torch_version": "2.11.0+rocm10.0.0", "hip_version": hip, "python_version": "3.12.3", "is_rocm": bool(hip)}
+    return ABI_PROBE_MARKER + json.dumps(facts)
+
+
+def test_probe_torch_abi_reads_the_marked_line_among_stray_stdout():
+    stdout = "\n".join(
+        [
+            "WARNING: ROCm 10 preview build, some features are experimental",
+            '{"not": "the facts"}',
+            _torch_211_rocm10(),
+            "[aiter] import hook loaded",
+        ]
+    )
+
+    def _run(argv, **kw):
+        return _completed(stdout=stdout + "\n", stderr="UserWarning: something\n")
+
+    info = probe_torch_abi("/opt/venv/bin/python3", run=_run)
+    assert info == {
+        "torch_version": "2.11.0+rocm10.0.0",
+        "hip_version": "10.0.0",
+        "python_version": "3.12.3",
+        "is_rocm": True,
+    }
+
+
+def test_probe_torch_abi_decides_rocm_by_torch_version_hip_not_by_a_version_label():
+    def _run(argv, **kw):
+        return _completed(stdout=_torch_211_rocm10(hip="") + "\n")
+
+    info = probe_torch_abi("python3", run=_run)
+    assert info["is_rocm"] is False
+    assert info["torch_version"] == "2.11.0+rocm10.0.0"
+
+
+def test_probe_torch_abi_reads_no_facts_of_a_failed_probe():
+    """A probe that printed its facts and then failed (torch imported, a later step crashed) is a failure."""
+
+    def _run(argv, **kw):
+        return _completed(returncode=1, stdout=_torch_211_rocm10() + "\n", stderr="Segmentation fault\n")
+
+    info = probe_torch_abi("python3", run=_run)
+    assert info["is_rocm"] is False
+    assert info["torch_version"] == ""
+    assert "rc=1" in info["error"] and "Segmentation fault" in info["error"]
+
+
+def test_probe_torch_abi_cuda_torch_is_not_rocm():
+    import json
+
+    line = ABI_PROBE_MARKER + json.dumps(
+        {"torch_version": "2.11.0+cu130", "hip_version": "", "python_version": "3.12.3", "is_rocm": False}
+    )
+
+    def _run(argv, **kw):
+        return _completed(stdout=line + "\n")
+
+    info = probe_torch_abi("python3", run=_run)
+    assert info["is_rocm"] is False
+    assert info["torch_version"] == "2.11.0+cu130"
+    assert "error" not in info
+
+
+def test_probe_torch_abi_failure_carries_the_stderr_tail():
+    stderr = (
+        "Traceback (most recent call last):\n"
+        + "x\n" * 2000
+        + ("ImportError: libamdhip64.so.10: cannot open shared object file: No such file or directory\n")
+    )
+
+    def _run(argv, **kw):
+        return _completed(returncode=1, stdout="", stderr=stderr)
+
+    info = probe_torch_abi("/scratch/hl-venv/bin/python", run=_run)
+    assert info["is_rocm"] is False
+    assert info["torch_version"] == ""
+    assert "rc=1" in info["error"]
+    assert "/scratch/hl-venv/bin/python" in info["error"]
+    assert "libamdhip64.so.10: cannot open shared object file" in info["error"]
+    assert len(info["error"]) < 1000
+
+
+def test_probe_torch_abi_unmarked_garbage_is_a_failure_with_its_output():
+    def _run(argv, **kw):
+        return _completed(stdout="torch banner\n", stderr="")
+
+    info = probe_torch_abi("python3", run=_run)
+    assert info["is_rocm"] is False
+    assert "torch banner" in info["error"]
+
+
+def test_probe_torch_abi_reads_no_unmarked_json_line():
+    def _run(argv, **kw):
+        return _completed(stdout='{"torch_version": "2.11.0", "hip_version": "7.2", "is_rocm": true}\n')
+
+    info = probe_torch_abi("python3", run=_run)
+    assert info["is_rocm"] is False
+    assert "rc=0" in info["error"]
+
+
+def test_probe_torch_abi_timeout_and_missing_interpreter_are_reported():
+    def _timeout(argv, **kw):
+        raise subprocess.TimeoutExpired(cmd=argv, timeout=kw["timeout"])
+
+    def _missing(argv, **kw):
+        raise FileNotFoundError(2, "No such file or directory", argv[0])
+
+    assert "timed out" in probe_torch_abi("python3", run=_timeout)["error"]
+    assert "could not start" in probe_torch_abi("/nope/python", run=_missing)["error"]
+
+
+def test_probe_torch_abi_marks_its_output_and_inherits_this_process_environment():
+    seen = {}
+
+    def _run(argv, **kw):
+        seen.update(kw, argv=argv)
+        return _completed(stdout=_torch_211_rocm10() + "\n")
+
+    probe_torch_abi("python3", run=_run)
+    assert "env" not in seen
+    assert ABI_PROBE_MARKER in seen["argv"][2]
 
 
 # sort_tags_desc
@@ -294,3 +421,28 @@ def test_the_vllm_rocm_probe_fails_when_the_platform_check_raises(tmp_path):
     assert probe.returncode == 1
     assert probe.stdout == ""
     assert probe.stderr.splitlines()[-1] == "RuntimeError: platform check broke"
+
+
+def test_probe_torch_abi_runs_against_a_torch_that_prints_on_import(tmp_path, monkeypatch):
+    torch_pkg = tmp_path / "torch"
+    torch_pkg.mkdir()
+    (torch_pkg / "__init__.py").write_text(
+        "print('torch: ROCm 10 runtime loaded')\nfrom . import version\n__version__ = '2.11.0+rocm10.0.0'\n",
+        encoding="utf-8",
+    )
+    (torch_pkg / "version.py").write_text("__version__ = '2.11.0+rocm10.0.0'\nhip = '10.0.25301'\n", encoding="utf-8")
+
+    monkeypatch.setenv("PYTHONPATH", str(tmp_path))
+    info = probe_torch_abi(sys.executable)
+    assert info["torch_version"] == "2.11.0+rocm10.0.0"
+    assert info["hip_version"] == "10.0.25301"
+    assert info["is_rocm"] is True
+
+
+def test_probe_torch_abi_runs_against_a_missing_torch_and_names_why(tmp_path, monkeypatch):
+    monkeypatch.setenv("PYTHONPATH", str(tmp_path))
+    monkeypatch.setenv("PYTHONNOUSERSITE", "1")
+    info = probe_torch_abi(sys.executable)
+    if info["is_rocm"] or info["torch_version"]:
+        pytest.skip("this interpreter has a torch of its own")
+    assert "torch" in info["error"]
