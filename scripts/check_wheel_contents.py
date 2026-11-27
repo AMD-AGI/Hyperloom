@@ -13,6 +13,7 @@ Usage: python scripts/check_wheel_contents.py dist/*.whl
 from __future__ import annotations
 
 import argparse
+import re
 import sys
 import zipfile
 from fnmatch import fnmatchcase
@@ -24,6 +25,7 @@ except ModuleNotFoundError:  # pragma: no cover - py3.10 fallback
     import tomli as tomllib  # type: ignore[no-redef]
 
 _REPO_ROOT = Path(__file__).resolve().parent.parent
+_ENCODING = "utf-8"
 
 
 def _excluded_package_patterns(cfg: dict) -> list[str]:
@@ -129,6 +131,18 @@ _NON_EMPTY_TREES = {
     "kernelforge/roofline_ceiling/resources/": 1,
 }
 
+_INSPECTOR_PAGE = "hyperloom/inspector/static/modern/index.html"
+
+#: Individual resources whose absence is a packaging bug rather than a smaller
+#: tree. A count floor cannot express "this specific file".
+_REQUIRED_FILES = (
+    # The Inspector UI, built by the in-tree backend; its package-data glob is checked only against what the
+    # checkout happens to hold, so this names the page the wheel must carry either way.
+    _INSPECTOR_PAGE,
+)
+_EXTERNAL_REF = re.compile(r"""(?<![\w-])(?:src|href)\s*=\s*["']?(?:[a-z][a-z0-9+.-]*:)?//""", re.IGNORECASE)
+_INLINE_SCRIPT = re.compile(r"<script\b(?![^>]*(?<![\w-])src\s*=)[^>]*>", re.IGNORECASE)
+
 
 def _check_resource_trees_are_populated(names: list[str]) -> list[str]:
     errors = []
@@ -136,6 +150,25 @@ def _check_resource_trees_are_populated(names: list[str]) -> list[str]:
         count = sum(1 for n in names if n.startswith(prefix) and not n.endswith("/"))
         if count < floor:
             errors.append(f"{prefix} ships {count} files, below the floor of {floor}")
+    if not any(n.startswith("hyperloom/inspector/static/modern/assets/") and n.endswith(".js") for n in names):
+        errors.append("hyperloom/inspector/static/modern/assets/ ships no script: the Inspector UI build is incomplete")
+    present = set(names)
+    errors.extend(
+        f"{required} is declared but missing from the wheel" for required in _REQUIRED_FILES if required not in present
+    )
+    return errors
+
+
+def _check_inspector_page_is_self_contained(zf: zipfile.ZipFile, names: list[str]) -> list[str]:
+    """The Inspector page must load in an air-gapped pod behind a port-forward, under a CSP without inline scripts."""
+    if _INSPECTOR_PAGE not in names:
+        return []  # reported as a missing required file
+    page = zf.read(_INSPECTOR_PAGE).decode(_ENCODING)
+    errors = []
+    if _EXTERNAL_REF.search(page):
+        errors.append(f"{_INSPECTOR_PAGE} loads a resource from another host; the page must be self-contained")
+    if _INLINE_SCRIPT.search(page):
+        errors.append(f"{_INSPECTOR_PAGE} has an inline <script>, which the Inspector's CSP (script-src 'self') blocks")
     return errors
 
 
@@ -143,7 +176,7 @@ def _check_license_metadata(zf: zipfile.ZipFile, names: list[str]) -> list[str]:
     metadata_name = next((n for n in names if n.endswith(".dist-info/METADATA")), None)
     if metadata_name is None:
         return ["wheel has no dist-info/METADATA"]
-    metadata = zf.read(metadata_name).decode("utf-8")
+    metadata = zf.read(metadata_name).decode(_ENCODING)
     if "License-Expression:" not in metadata:
         return ["METADATA lacks License-Expression (PEP 639 license form regressed)"]
     return []
@@ -154,7 +187,7 @@ def main() -> int:
     parser.add_argument("wheel", type=Path, help="path to the built .whl")
     args = parser.parse_args()
 
-    cfg = tomllib.loads((_REPO_ROOT / "pyproject.toml").read_text(encoding="utf-8"))
+    cfg = tomllib.loads((_REPO_ROOT / "pyproject.toml").read_text(encoding=_ENCODING))
     with zipfile.ZipFile(args.wheel) as zf:
         names = zf.namelist()
         errors = [
@@ -162,6 +195,7 @@ def main() -> int:
             *_check_declared_package_data_is_present(cfg, names),
             *_check_data_files_are_present(cfg, names),
             *_check_resource_trees_are_populated(names),
+            *_check_inspector_page_is_self_contained(zf, names),
             *_check_license_metadata(zf, names),
         ]
 

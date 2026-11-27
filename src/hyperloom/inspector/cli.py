@@ -75,7 +75,7 @@ def add_inspect_arguments(insp: argparse.ArgumentParser) -> None:
     insp.add_argument(
         "--replay",
         action=SWITCH,
-        help="Replay the session on a virtual clock from its first record.",
+        help="Replay the session on a virtual clock from its first record, with a scrubber in the page.",
     )
     insp.add_argument("--speed", type=float, default=1.0, help="Replay speed factor. Default: 1.0.")
 

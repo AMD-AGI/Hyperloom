@@ -24,6 +24,25 @@ def _start(session_dir, replay=False):
     return httpd
 
 
+@pytest.fixture(autouse=True)
+def modern_root(tmp_path, monkeypatch):
+    """Where the modern build lives for this test; empty unless a test writes one, whatever the dev tree holds."""
+    root = tmp_path / "modern"
+    monkeypatch.setattr(server_mod, "_modern_root", lambda: root)
+    return root
+
+
+def _build_modern(root):
+    (root / "assets").mkdir(parents=True)
+    (root / "index.html").write_text(
+        '<!doctype html><title>modern</title><script type="module" src="./assets/index-Ab_1.js">'
+    )
+    (root / "assets" / "index-Ab_1.js").write_text("console.log(1)")
+    (root / "assets" / "logo-x9.svg").write_text("<svg/>")
+    (root / "assets" / "index-Ab_1.js.map").write_text("{}")
+    (root / "secret.js").write_text("no")
+
+
 def _stop(httpd):
     httpd.closing = True
     httpd.shutdown()
@@ -60,6 +79,72 @@ def test_snapshot_is_served_redacted(server):
     snap = json.loads(body)
     assert {t["task_id"] for t in snap["tasks"] if t["health"] == "crashed"} == {"t-scout", "t-recon"}
     assert FAKE_KEY.encode() not in body
+
+
+@pytest.mark.parametrize("route", ["/", "/index.html"])
+def test_the_build_is_served_at_root(server, modern_root, route):
+    _build_modern(modern_root)
+    status, body, resp = _get(server, route)
+    assert status == 200
+    assert resp.getheader("Content-Type").startswith("text/html")
+    assert b"<title>modern</title>" in body
+    # Scripts run only from files (the CSP has no 'unsafe-inline' for scripts).
+    assert "script-src 'self';" in resp.getheader("Content-Security-Policy")
+
+
+def test_without_a_build_root_says_how_to_build_it(server):
+    status, body, resp = _get(server, "/")
+    assert status == 503
+    assert resp.getheader("Content-Type").startswith("text/plain")
+    assert b"npm run build" in body
+    assert b'"In a pod"' in body
+    # An install pip built without Node has no frontend/ to build in, and neither has an sdist built that way: only
+    # a source checkout with Node, or the release, brings the UI back.
+    assert b"install it again from a source checkout" in body
+    assert b"sdist" in body
+    assert _get(server, "/assets/index-Ab_1.js")[0] == 404
+
+
+def test_build_assets_are_served_immutable(server, modern_root):
+    _build_modern(modern_root)
+    status, body, resp = _get(server, "/assets/index-Ab_1.js")
+    assert (status, body) == (200, b"console.log(1)")
+    assert resp.getheader("Content-Type").startswith("text/javascript")
+    assert "immutable" in resp.getheader("Cache-Control")
+    assert resp.getheader("X-Content-Type-Options") == "nosniff"
+    status, _, resp = _get(server, "/assets/logo-x9.svg")
+    assert (status, resp.getheader("Content-Type")) == (200, "image/svg+xml")
+
+
+@pytest.mark.parametrize(
+    "route",
+    [
+        "/assets/missing.js",
+        "/assets/index-Ab_1.js.map",
+        "/assets/../secret.js",
+        "/assets/%2e%2e/secret.js",
+        "/assets/sub/index-Ab_1.js",
+        "/assets/.hidden.js",
+        "/assets/index.html",
+        "/secret.js",
+        "/modern/index.html",
+        "/static/modern/assets/index-Ab_1.js",
+        "/classic",
+        "/app.js",
+        "/static/app.js",
+        "/index.py",
+        "/../server.py",
+    ],
+)
+def test_only_files_of_the_build_are_served(server, modern_root, route):
+    _build_modern(modern_root)
+    assert _get(server, route)[0] == 404
+
+
+def test_favicon_is_empty_not_missing(server):
+    status, body, _ = _get(server, "/favicon.ico")
+    assert status == 204
+    assert body == b""
 
 
 @pytest.mark.parametrize("path", ["../../etc/passwd", ".env", "/etc/passwd", "runs/../.env"])

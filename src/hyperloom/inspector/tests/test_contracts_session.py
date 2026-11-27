@@ -49,10 +49,15 @@ def test_inspector_reads_the_paths_session_paths_names(tmp_path: Path) -> None:
     pairs = {
         "paths.shared_db_path_for": (watcher.db.path, paths.shared_db_path_for(session)),
         "session_paths.llm_calls_path": (watcher._llm_tail.path, session_paths.llm_calls_path(session)),
+        "session_paths.sbd_v6_timeline_dir": (watcher._timeline_files.root, session_paths.sbd_v6_timeline_dir(session)),
         "session_paths.state_path": (session / session_layout.STATE_FILE, session_paths.state_path(session)),
     }
     for producer, (inspector, written) in pairs.items():
         assert inspector == written, contract_message(producer, _WATCHER, f"Inspector reads {inspector}, not {written}")
+    event = session_paths.sbd_v6_timeline_event_path(session, 1, "baseline")
+    assert event.match(watcher._timeline_files.pattern), contract_message(
+        "session_paths.sbd_v6_timeline_event_path", _WATCHER, f"{event.name} is outside the Inspector's glob"
+    )
 
 
 async def test_coordinator_db_written_by_bus_and_registry_is_read(tmp_path: Path) -> None:
@@ -363,7 +368,7 @@ def test_variant_dir_names_are_the_grid_runner_s(name: str) -> None:
     )
 
 
-# The node each task kind of ACTION_CATALOGUE maps to; a kind the catalogue gains fails until it is placed here.
+# The node each task kind of ACTION_CATALOGUE is drawn as; a kind the catalogue gains fails until it is placed here.
 _NODE_OF_KIND = {
     "baseline": "exec:baseline",
     "explore": "exec:explore",
@@ -383,11 +388,11 @@ _NODE_OF_KIND = {
 
 # Task kinds graph.task_node special-cases that Hyperloom no longer creates. kernel_opt was retired with the kernel
 # harness (d501561ef) and framework_agent with its action (636f3ae0f); no producer of ``kernel`` or ``framework`` as a task
-# kind was found. Kept so older sessions map the same.
+# kind was found. Kept so older sessions draw the same.
 _LEGACY_KINDS = frozenset({"kernel_opt", "kernel", "framework_agent", "framework"})
 
 
-# The node each LLM component of the ledger's closed vocabulary (llm_trace.VALID_COMPONENTS) belongs to when its row
+# The node each LLM component of the ledger's closed vocabulary (llm_trace.VALID_COMPONENTS) is drawn on when its row
 # names no task; a component the vocabulary gains fails until it is placed here.
 _NODE_OF_COMPONENT = {
     "orchestration": "orchestration",
@@ -592,9 +597,10 @@ def test_ledger_fields_the_inspector_reads_are_in_the_closed_schema(tmp_path: Pa
     path = session / "reports" / "trace" / "llm_calls.jsonl"
     rows = [producers.RecordingDict(json.loads(line)) for line in path.read_text(encoding="utf-8").splitlines()]
     derive.llm_summary(rows)
+    graph.build_graph([], [], rows, [])
     read = set().union(*(r.read for r in rows))
     unknown = sorted(read - _ROW_FIELDS)
-    assert not unknown, contract_message("llm_trace._ROW_FIELDS", "derive.py", unknown)
+    assert not unknown, contract_message("llm_trace._ROW_FIELDS", "derive.py, graph.py", unknown)
 
 
 def test_ledger_status_vocabulary() -> None:

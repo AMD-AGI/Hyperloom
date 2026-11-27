@@ -249,15 +249,15 @@ ingest it whole on session end.
 
 ### Inspector
 
-The Inspector is a read-only web view of a live or finished session: run information, every artifact with a
-diff, and replay. It only reads files, so it is safe
+The Inspector is a read-only web page for a live or finished session: run information, a harness graph, a
+timeline, every artifact with a viewer and diff, and replay. It only reads files, so it is safe
 next to a running optimizer:
 
 ```bash
 python3 -m hyperloom inspect --session-dir "$SESSION_DIR"
 ```
 
-How to run it (in a pod too) and what it shows is in the [Inspector](../inspector/README.md) reference.
+How to build it, run it (in a pod too) and what it shows is in the [Inspector](../inspector/README.md) reference.
 
 ---
 

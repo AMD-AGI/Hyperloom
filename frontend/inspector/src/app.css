@@ -1,0 +1,97 @@
+/* SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc. */
+/* SPDX-License-Identifier: MIT */
+
+/* Each colour is light-dark(light, dark): the system picks one, and the header's theme toggle forces it with
+   data-theme. */
+:root {
+  --bg: light-dark(#f5f7fa, #0f1216);
+  --panel: light-dark(#ffffff, #171b21);
+  --panel2: light-dark(#eef1f5, #1d232b);
+  --line: light-dark(#d5dbe3, #2b323c);
+  --fg: light-dark(#1d2530, #d8dee6);
+  --muted: light-dark(#5d6876, #8994a3);
+  --accent: #5aa9ff;
+  --ok: #3fb96b;
+  --running: #5aa9ff;
+  --crashed: #ff5a5a;
+  --failed: #ff8c42;
+  --stalled: #f2c94c;
+  --cancelled: #8994a3;
+  --queued: #a58bff;
+  --idle: light-dark(#b8c1cc, #4a5462);
+  /* Session phases (phase.ts); none is the accent, so the replay thumb stands out on every one. */
+  --phase-prelude: light-dark(#7b6cf0, #9d92ff);
+  --phase-enablement: light-dark(#1f9fb0, #36c5d6);
+  --phase-framework-agent: light-dark(#2f9e57, #3fb96b);
+  --phase-kernel-agent: light-dark(#b25be6, #c77dff);
+  --phase-cycle-end: light-dark(#e2741f, #ff8c42);
+  --phase-sweep: var(--phase-cycle-end);
+  --phase-close: light-dark(#b8961a, #e7c54a);
+  --phase-other: var(--idle);
+  --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font:
+    13px/1.4 system-ui,
+    sans-serif;
+  color-scheme: light dark;
+}
+:root[data-theme="light"] {
+  color-scheme: light;
+}
+:root[data-theme="dark"] {
+  color-scheme: dark;
+}
+/* For every CSS transition and animation on the page, so no component turns its own off. */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  ::before,
+  ::after {
+    transition: none !important;
+    animation: none !important;
+    scroll-behavior: auto !important;
+  }
+}
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--fg);
+}
+a {
+  color: var(--accent);
+  text-decoration: none;
+}
+.muted {
+  color: var(--muted);
+}
+.mono {
+  font-family: var(--mono);
+}
+.h-ok {
+  color: var(--ok);
+}
+.h-running {
+  color: var(--running);
+}
+.h-crashed {
+  color: var(--crashed);
+}
+.h-failed {
+  color: var(--failed);
+}
+.h-stalled {
+  color: var(--stalled);
+}
+.h-cancelled {
+  color: var(--cancelled);
+}
+.h-queued {
+  color: var(--queued);
+}
+button.link {
+  font: inherit;
+  color: var(--accent);
+  background: none;
+  border: 0;
+  padding: 0;
+  cursor: pointer;
+  text-align: left;
+}

@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Polls a session directory and keeps what a client needs, in live or replay mode.
+"""Polls a session directory and keeps what the page needs, in live or replay mode.
 
 Two kinds of data come out of here:
 
@@ -11,7 +11,7 @@ Two kinds of data come out of here:
   In replay a stream releases an item once the virtual clock passes its time,
   so a backward scrub shrinks the released prefix and the client gets a reset.
 * **Views** are recomputed at the clock on every request (run info, tasks with
-  health, badges).
+  health, the harness graph, timeline bars and phase bands, badges).
 
 Nothing here writes into the session directory, and every payload is
 redacted before it leaves the process.
@@ -34,6 +34,7 @@ from typing import Any
 from hyperloom.inspector import artifacts as artifacts_mod
 from hyperloom.inspector import derive, graph
 from hyperloom.inspector.collectors import (
+    ENDED_STATES,
     ChangedFiles,
     CoordinatorDb,
     JsonlTail,
@@ -57,6 +58,7 @@ _BASELINE_KIND = "baseline"
 _RUNNING_STATE = "running"
 _TS_KEYS = ("ts_unix", "ts", "recorded_unix", "completed_at", "started_at", "start_time", "created_at")
 _INDEX_EVERY_SEC = 10.0
+_ACTIVE_SEC = 600.0
 
 
 def item_time(rec: dict) -> float | None:
@@ -182,6 +184,7 @@ class Watcher:
         self.db = CoordinatorDb(db_path)
         reports = self.session_dir / _REPORTS_DIR
         self._llm_tail = JsonlTail(reports / "trace" / "llm_calls.jsonl")
+        self._timeline_files = ChangedFiles(reports / "sbd_v6" / "timeline", "*.json")
         self._reviews = ChangedFiles(self.session_dir / "critic-workdir", "*/review.json")
         self.state: dict = {}
         self.manifest: dict = {}
@@ -189,6 +192,7 @@ class Watcher:
         self.tasks: list[dict] = []
         self.results: dict[str, Any] = {}
         self.unit_errors: dict[tuple[str, str], str | None] = {}
+        self.timeline: dict[str, dict] = {}
         self.journal_seen = 0
         self.artifact_index = artifacts_mod.ArtifactIndex()
         self._last_index = 0.0
@@ -237,6 +241,10 @@ class Watcher:
         for rec in self._llm_tail.read_new():
             self.streams["llm_call"].add(rec, item_time(rec))
             changed = True
+        for path, rec in self._timeline_files.read_changed():
+            if isinstance(rec, dict):
+                self.timeline[path.name] = rec
+                changed = True
         for path, rec in self._reviews.read_changed():
             for verdict in (rec or {}).get("review_verdicts") or []:
                 t = newest_mtime(path)
@@ -431,13 +439,54 @@ class Watcher:
         series = stream.items if clock is None else stream.upto(stream.released(clock))
         return derive.best_throughput(current, results, series)
 
+    def timeline_view(self, tasks: list[dict], clock: float) -> dict:
+        bars = []
+        for t in tasks:
+            start, end = _task_span(t, clock)
+            current = (t.get("progress") or {}).get("current") or {}
+            bars.append(
+                {
+                    "task_id": t["task_id"],
+                    "node": t["node"],
+                    "label": t.get("label"),
+                    "start": start,
+                    "end": end,
+                    "state": t.get("state"),
+                    "health": t.get("health"),
+                    "step": current.get("label") if t.get("state") == _RUNNING_STATE else None,
+                }
+            )
+        history = self.state.get("phase_history") or []
+        phases = _phase_bands(history, clock)
+        steps = []
+        for name, rec in sorted(self.timeline.items()):
+            start = parse_ts(rec.get("start_time"))
+            if start is None or start > clock:
+                continue
+            end = parse_ts(rec.get("end_time"))
+            steps.append(
+                {
+                    "id": rec.get("id") or name,
+                    "kind": rec.get("kind"),
+                    "status": rec.get("status"),
+                    "start": start,
+                    "end": end if end is not None and end <= clock else None,
+                }
+            )
+        out = {"bars": bars, "phases": phases, "steps": steps, "end": self._run_end(clock)}
+        # The scrubber's chapters span the whole recording, so unlike the bands they aren't cut at the clock.
+        if self.clock.replay and self.clock.end is not None:
+            out["chapters"] = _phase_bands(history, self.clock.end)
+        return out
+
     def snapshot(self, include_streams: bool = True) -> dict:
-        """Everything a client needs, at the current clock; redacted. Streams are optional (SSE view ticks)."""
+        """Everything the page needs, at the current clock; redacted. Streams are optional (SSE view ticks)."""
         with self.lock:
             clock = self.clock.now()
             tasks = self.tasks_at(clock)
             released = {name: s.released(clock) for name, s in self.streams.items()}
             summary = self.summary_at(clock)
+            events = self.streams["event"].upto(released["event"])
             calls = self.streams["llm_call"].upto(released["llm_call"])
             artifacts = self._artifacts_at(clock)
             view = {
@@ -447,6 +496,8 @@ class Watcher:
                 "summary": summary,
                 "budget": derive.budget(summary),
                 "tasks": tasks,
+                "graph": graph.build_graph(tasks, events, calls, artifacts),
+                "timeline": self.timeline_view(tasks, clock),
                 "llm": derive.llm_summary(calls),
                 "badges": self._db_badges(),
                 "artifact_count": len(artifacts),
@@ -460,6 +511,15 @@ class Watcher:
     def _db_badges(self) -> list[dict]:
         """An error badge when the session's tasks cannot be read (its database is in a private ledger elsewhere)."""
         return [{"level": "error", "text": self.db_problem}] if self.db_problem else []
+
+    def _run_end(self, clock: float) -> float | None:
+        """Live, the run's last activity once it has gone quiet (its optimizer not known to be alive, and nothing new
+        for ``_ACTIVE_SEC``); None while it is active, and in replay."""
+        if self.clock.replay:
+            return None
+        last = self._last_activity()
+        active = self.optimizer_status().get("alive") or last is None or clock - last < _ACTIVE_SEC
+        return None if active else last
 
     def delta(self, cursors: dict[str, int]) -> dict:
         """Stream items released since *cursors*; ``reset`` when the clock moved back past one."""
@@ -548,3 +608,29 @@ def _read_jsonl(path: Path) -> list[dict]:
 
 def _row_time(row: dict) -> float | None:
     return parse_ts(row.get("ts_unix")) or parse_ts(row.get("ts"))
+
+
+def _task_span(task: dict, clock: float) -> tuple[float | None, float | None]:
+    """(start, end) of a task bar: first ``running`` transition (else creation) to its terminal transition."""
+    start = parse_ts(task.get("created_at"))
+    end = None
+    for tr in task.get("history") or []:
+        ts = parse_ts(tr.get("ts"))
+        if ts is None or ts > clock:
+            continue
+        if tr.get("to") == _RUNNING_STATE and (start is None or ts >= start):
+            start = ts
+        if tr.get("to") in ENDED_STATES:
+            end = ts
+    return start, end
+
+
+def _phase_bands(history: list[dict], clock: float) -> list[dict]:
+    """Background bands, one per phase transition up to *clock*."""
+    rows = [(t, r) for r in history if (t := _row_time(r)) is not None and t <= clock]
+    rows = [(t, r) for t, r in rows if r.get("from_phase") != r.get("to_phase")]
+    bands = []
+    for i, (t, r) in enumerate(rows):
+        stop = rows[i + 1][0] if i + 1 < len(rows) else None
+        bands.append({"phase": r.get("to_phase"), "start": t, "end": stop, "reason": r.get("reason")})
+    return bands

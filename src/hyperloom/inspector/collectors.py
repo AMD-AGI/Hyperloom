@@ -22,6 +22,9 @@ from typing import Any
 
 from hyperloom.inspector.session_layout import PRIVATE_SESSION_SUBDIRS
 
+# A task's states with no way out, the orchestrator's TERMINAL_STATES: spelled here, as the Inspector runs without
+# the orchestrator; a test keeps them equal.
+ENDED_STATES = frozenset({"succeeded", "failed", "cancelled"})
 _KIB = 1024
 _MIB = _KIB * _KIB
 _ENCODING = "utf-8"

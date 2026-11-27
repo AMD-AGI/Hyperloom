@@ -2,7 +2,9 @@
 # setuptools>=77 is the floor for the PEP 639 ``license``/``license-files``
 # form used below (the deprecated TOML-table form breaks on 2027-Feb-18).
 requires = ["setuptools>=77", "wheel"]
-build-backend = "setuptools.build_meta"
+# setuptools plus the Inspector UI (npm build before sdist/wheel); see build_backend/hyperloom_build.py.
+build-backend = "hyperloom_build"
+backend-path = ["build_backend"]
 
 [project]
 name = "hyperloom-inference_optimizer"
@@ -336,6 +338,11 @@ hyperloom = [
 "hyperloom.inference_optimizer.multi_node.scripts" = [
     "*.sh",
 ]
+# The Inspector UI, which the build backend builds into static/modern/ with npm. The tree is gitignored, so the glob
+# matches nothing until it is built; scripts/check_wheel_contents.py checks that the wheel has it.
+"hyperloom.inspector" = [
+    "static/modern/**/*",
+]
 # KernelForge's read-only resources live with their owning features and are
 # resolved through ``kernelforge.config.resources.resource_path``. The globs are
 # deliberately type-agnostic because the trees hold several asset types.
@@ -393,6 +400,7 @@ markers = [
     "upstream_sources: runs a recipe source's own code at a pinned commit fetched over the network; skip with '-m \"not upstream_sources\"' in CI.",
     "claw_policy: a sandbox contract test of the Claw sandbox service's own policy (sealed paths, signing identity, platform metadata, avoid-nodes); it runs against the local provider and a real Claw service, not against the E2B stand-in.",
     "agent_isolation: launches a real bubblewrap sandbox; skipped where the host has no bubblewrap or no user namespace for it, failed instead where HYPERLOOM_REQUIRE_ISOLATION_TESTS=1.",
+    "inspector_e2e: the Inspector page in a headless browser; skipped unless playwright and a Chromium are available.",
     "inspector_contract: the Inspector's reading of a session artifact or a Hyperloom API, tied to the Hyperloom code that produces it; a failure names the producer that changed and the Inspector file to update.",
 ]
 

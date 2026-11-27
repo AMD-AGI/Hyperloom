@@ -5,7 +5,7 @@
 
 It opens the coordinator database with ``mode=ro``, tails the
 session's JSON/JSONL artefacts by cursor, redacts secrets before anything
-leaves the process, and serves a JSON API plus a Server-Sent Events
+leaves the process, and serves a single static page plus a Server-Sent Events
 stream. It never writes into the session directory.
 """
 

@@ -5,6 +5,8 @@
 
 Endpoints (all GET unless noted):
 
+* ``/``: the UI (``static/modern/``, built from ``frontend/inspector``), or a 503 that says how to get it when
+  this install has none; ``/assets/<name>``: the build's hashed scripts, styles, icons and fonts.
 * ``/api/snapshot``: the full view at the current clock, streams included.
 * ``/api/stream``: SSE. ``hello`` first, then ``items`` (stream deltas), ``view`` (views without
   streams, when something changed) and ``reset`` (a replay scrub moved back; refetch the snapshot).
@@ -23,16 +25,22 @@ from __future__ import annotations
 import ipaddress
 import json
 import logging
+import re
+import sys
 import time
 from dataclasses import dataclass, field
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from importlib import resources
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 from urllib.parse import parse_qs, urlsplit
 
 from hyperloom.inspector import artifacts
 from hyperloom.inspector.watcher import Watcher, WatchOptions
+
+if TYPE_CHECKING:
+    from importlib.resources.abc import Traversable
 
 log = logging.getLogger(__name__)
 
@@ -46,6 +54,47 @@ _SECURITY_HEADERS = {
 }
 _HEARTBEAT_SEC = 15.0
 _ENCODING = "utf-8"
+
+
+_ASSET_TYPES = {
+    ".js": "text/javascript; charset=utf-8",
+    ".css": "text/css; charset=utf-8",
+    ".svg": "image/svg+xml",
+    ".woff2": "font/woff2",
+}
+_ASSET_NAME = re.compile(r"^/assets/([A-Za-z0-9][A-Za-z0-9_-]*)(\.js|\.css|\.svg|\.woff2)$")
+# Vite puts a content hash in every asset name, so a cached copy can never go stale.
+_IMMUTABLE = {"Cache-Control": "public, max-age=31536000, immutable"}
+_NO_BUILD = (
+    b"The Inspector UI is not in this install.\n\n"
+    b"In a source tree, build it with `npm ci && npm run build` in frontend/inspector.\n"
+    b"A package built from source without Node has no UI: install it again from a source checkout (a git clone)\n"
+    b"with Node 18.19 or later on PATH, or install the release from PyPI, which carries the UI. An sdist built\n"
+    b"without Node cannot be fixed this way: it has no frontend/inspector to build the UI from.\n"
+    b"To run the Inspector in a pod, build it on your machine and copy the tree in, as docs/inspector/README.md\n"
+    b'("In a pod") describes.\n'
+)
+
+
+def _modern_root() -> Traversable:
+    """Where ``npm run build`` in frontend/inspector writes the UI; absent in a tree where it never ran."""
+    return resources.files("hyperloom.inspector").joinpath("static", "modern")
+
+
+def _modern_page() -> bytes | None:
+    res = _modern_root().joinpath("index.html")
+    return res.read_bytes() if res.is_file() else None
+
+
+def _modern_asset(route: str) -> tuple[bytes, str] | None:
+    """A file of the build under ``assets/``, by bare name; nested paths and other suffixes are not assets."""
+    m = _ASSET_NAME.match(route)
+    if not m:
+        return None
+    res = _modern_root().joinpath("assets", m[1] + m[2])
+    if not res.is_file():
+        return None
+    return res.read_bytes(), _ASSET_TYPES[m[2]]
 
 
 class InspectorServer(ThreadingHTTPServer):
@@ -72,11 +121,11 @@ class Handler(BaseHTTPRequestHandler):
         name = host.rsplit(":", 1)[0] if not host.startswith("[") else host.split("]")[0] + "]"
         return name in self.server.allowed_hosts
 
-    def _send(self, status: int, body: bytes, ctype: str) -> None:
+    def _send(self, status: int, body: bytes, ctype: str, extra: dict | None = None) -> None:
         self.send_response(status)
         self.send_header("Content-Type", ctype)
         self.send_header("Content-Length", str(len(body)))
-        for k, v in {"Cache-Control": "no-store", **_SECURITY_HEADERS}.items():
+        for k, v in {"Cache-Control": "no-store", **_SECURITY_HEADERS, **(extra or {})}.items():
             self.send_header(k, v)
         self.end_headers()
         if self.command != "HEAD":
@@ -100,6 +149,14 @@ class Handler(BaseHTTPRequestHandler):
         q = self._query()
         w = self.server.watcher
         try:
+            if route in ("/", "/index.html"):
+                if (page := _modern_page()) is None:
+                    return self._send(HTTPStatus.SERVICE_UNAVAILABLE, _NO_BUILD, "text/plain; charset=utf-8")
+                return self._send(HTTPStatus.OK, page, "text/html; charset=utf-8")
+            if (asset := _modern_asset(route)) is not None:
+                return self._send(HTTPStatus.OK, *asset, _IMMUTABLE)
+            if route == "/favicon.ico":
+                return self._send(HTTPStatus.NO_CONTENT, b"", "image/x-icon")
             if route == "/api/snapshot":
                 return self._json(w.snapshot())
             if route == "/api/stream":
@@ -223,7 +280,9 @@ def serve(session_dir: Path, options: ServeOptions | None = None) -> None:
     httpd = InspectorServer((options.host, options.port), watcher)
     shown = "localhost" if _is_unspecified(options.host) else options.host
     mode = "replay" if options.watch.replay else "live"
-    print(f"Hyperloom Inspector ({mode}): http://{shown}:{options.port}/api/snapshot for {session_dir}", flush=True)
+    print(f"Hyperloom Inspector ({mode}): http://{shown}:{options.port}/ for {session_dir}", flush=True)
+    if _modern_page() is None:
+        print("Inspector UI: not in this install; / says how to get it", file=sys.stderr, flush=True)
     try:
         httpd.serve_forever(poll_interval=0.5)
     except KeyboardInterrupt:

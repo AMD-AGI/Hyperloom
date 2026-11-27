@@ -555,7 +555,7 @@ def _build_parser() -> argparse.ArgumentParser:
     insp = sub.add_parser(
         "inspect",
         parents=[common],
-        help="Serve a read-only web view (run info, artifacts) of a live or "
+        help="Serve a read-only web view (run info, harness graph, timeline, artifacts) of a live or "
         "finished session. Never writes into the session directory.",
     )
     add_inspect_arguments(insp)

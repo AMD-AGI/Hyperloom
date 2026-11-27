@@ -5,7 +5,7 @@ from __future__ import annotations
 
 import pytest
 
-from hyperloom.inspector.graph import agent_node, producer_for, task_node
+from hyperloom.inspector.graph import agent_node, build_graph, producer_for, task_node
 
 TASK_NODES = {"t-1": "spec:research_scout", "t-2": "exec:baseline"}
 
@@ -86,3 +86,39 @@ RETRY_TASK_NODES = {"t": "exec:a", "t-2": "exec:b"}
 )
 def test_producer_for_run_dir_of_a_retried_task(path, producer):
     assert producer_for(path, RETRY_TASK_NODES) == producer
+
+
+def test_build_graph_edges_counts_and_health():
+    tasks = [
+        {"task_id": "t1", "node": "spec:research_scout", "health": "crashed"},
+        {"node": "exec:baseline", "health": "ok"},
+        {"node": "exec:baseline", "health": "running"},
+    ]
+    events = [
+        {"from_agent": "orchestration", "to_agent": "critic", "topic": "proposal"},
+        {"from_agent": "critic", "to_agent": "orchestration", "topic": "review_verdict"},
+        {"from_agent": "critic", "to_agent": "orchestration", "topic": "review_verdict"},
+        {"from_agent": "coordinator", "to_agent": "*", "topic": "observation"},
+    ]
+    calls = [
+        {"component": "critic", "input_tokens": 3, "output_tokens": 1},
+        {"component": "specialist", "task_id": "t1"},
+        {"component": "specialist", "task_id": "gone"},
+    ]
+    artifacts = [{"producer": "exec:baseline"}, {"producer": "session"}]
+    artifacts += [{"producer": "exec:baseline", "bulk": "runs/baseline/t1/tree"}] * 3
+    g = build_graph(tasks, events, calls, artifacts)
+    nodes = {n["id"]: n for n in g["nodes"]}
+    edges = {(e["source"], e["target"], e["label"]): e["count"] for e in g["edges"]}
+    assert nodes["spec:research_scout"]["health"] == "crashed"
+    assert nodes["exec:baseline"]["health"] == "running" and nodes["exec:baseline"]["tasks"] == {"ok": 1, "running": 1}
+    assert nodes["exec:baseline"]["artifacts"] == 1 and nodes["session"]["artifacts"] == 1
+    assert nodes["exec:baseline"]["trees"] == {"runs/baseline/t1/tree": 3}
+    assert nodes["critic"]["llm_calls"] == 1 and nodes["critic"]["llm_tokens"] == 4
+    assert nodes["spec:research_scout"]["llm_calls"] == 1 and nodes["specialist"]["llm_calls"] == 1
+    assert nodes["coordinator"]["health"] == "idle"
+    assert edges[("coordinator", "exec:baseline", "dispatch")] == 2
+    assert edges[("critic", "orchestration", "review_verdict")] == 2
+    assert edges[("coordinator", "bus", "observation")] == 1
+    layers = [n["layer"] for n in g["nodes"]]
+    assert layers == sorted(layers)

@@ -109,6 +109,41 @@ jobs:
           PYTHONPATH: src
         run: lint-imports --no-cache
 
+  frontend:
+    name: inspector frontend (format, check, test, build)
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
+    runs-on: ubuntu-latest
+    # The Inspector's modern UI (frontend/inspector, Svelte + Vite). Every dependency is pinned exactly in
+    # package.json and the lockfile, so `npm ci` is reproducible.
+    defaults:
+      run:
+        working-directory: frontend/inspector
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: frontend/inspector/package-lock.json
+
+      - name: Install
+        run: npm ci
+
+      - name: Prettier (check only)
+        run: npm run format:check
+
+      - name: svelte-check
+        run: npm run check
+
+      - name: Vitest
+        run: npm test
+
+      - name: Build
+        # Also runs the licence plugin, which fails on a bundled package without an allowed licence.
+        run: npm run build
+
   compile:
     name: byte-compile (syntax check)
     needs: changes

@@ -1,0 +1,5 @@
+# SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
+# SPDX-License-Identifier: MIT
+#
+# The in-tree PEP 517 backend (pyproject backend-path), so a wheel builds from the sdist.
+include build_backend/hyperloom_build.py
