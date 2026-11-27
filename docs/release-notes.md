@@ -58,6 +58,12 @@ it.
   declared with it is refused. No Hyperloom code ever created a sub-run
   sandbox; a host may still list a `subrun` role in
   `HYPERLOOM_SANDBOX_TEMPLATES`, which a hosted run ignores as before.
+- **`campaign_spec.v1` drops fields nothing read.**
+  `objective.target_gain_pct`, `options.kernel`, `options.framework_agent`,
+  `options.enablement` and `placement.specialist_capacity` are gone from the
+  schema and the validator. A spec that still sets them parses as before,
+  since unknown fields are ignored, but a malformed value in one of them is no
+  longer refused. `options.eval` stays and still refuses `false`.
 - **`hyperloom session report` is removed.** The command rendered a
   `session_breakdown.json` as Markdown (`session_report.md`), optionally with
   an LLM-written summary. It ran only by hand: no session wrote

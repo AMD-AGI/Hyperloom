@@ -23,16 +23,10 @@ FULL = {
     "framework": {"name": "sglang", "image": "registry.example/sglang:v0.5.4-rocm"},
     "hardware": {"gpu_type": "MI355X", "tp": 2, "ep": 1, "nodes": 1},
     "workload": {"conc": 64, "isl": 1024, "osl": 512, "precision": "bf16"},
-    "objective": {"target_gain_pct": 10},
     "budget": {"max_hours": 8, "max_gpu_hours": 0, "max_llm_usd": 12.5},
     "launch": {"server_args": "--mem-fraction-static 0.8", "extra_env": {"A": "1", "B": "x=y"}},
-    "options": {"kernel": False, "framework_agent": True, "eval": True, "enablement": "launch"},
-    "placement": {
-        "profile": "hosted-gpu",
-        "measurement": "local",
-        "max_parallel_tests": 4,
-        "specialist_capacity": 3,
-    },
+    "options": {"eval": True},
+    "placement": {"profile": "hosted-gpu", "measurement": "local", "max_parallel_tests": 4},
     "source": {"repo": "AMD-AGI/Hyperloom", "sha": "abc123", "kind": "ci", "task_id": "run-123"},
 }
 MINIMAL = {
@@ -90,7 +84,6 @@ REFUSALS = [
     (_with(MINIMAL, "hardware.nodes", 2), "hardware.nodes must be one of 1"),
     (_with(MINIMAL, "workload", {"conc": -1}), "workload.conc must be an integer >= 1"),
     (_with(MINIMAL, "workload", {"precision": ""}), "workload.precision must be a non-empty string"),
-    (_with(MINIMAL, "objective", {"target_gain_pct": 0}), "objective.target_gain_pct must be a number > 0"),
     (_with(MINIMAL, "budget.max_hours", _DELETE), "budget.max_hours is required"),
     (_with(MINIMAL, "budget.max_hours", 0), "budget.max_hours must be a number > 0, got 0"),
     (_with(MINIMAL, "budget.max_hours", "8"), "budget.max_hours must be a number > 0, got '8'"),
@@ -99,9 +92,7 @@ REFUSALS = [
     (_with(MINIMAL, "launch", {"extra_env": {"A": 1}}), "launch.extra_env must be an object of string values"),
     (_with(MINIMAL, "launch", {"extra_env": {"A=B": "1"}}), "launch.extra_env has the invalid name 'A=B'"),
     (_with(MINIMAL, "launch", {"server_args": ["x"]}), "launch.server_args must be a string"),
-    (_with(MINIMAL, "options", {"kernel": "yes"}), "options.kernel must be true or false"),
     (_with(MINIMAL, "options", {"eval": False}), "options.eval must be one of True, got False"),
-    (_with(MINIMAL, "options", {"enablement": "some"}), "options.enablement must be one of 'all'"),
     (_with(MINIMAL, "placement.profile", _DELETE), "placement.profile is required"),
     (_with(MINIMAL, "placement.profile", "local"), "placement.profile must be one of 'hosted-gpu', 'hosted-cpu'"),
     (_with(MINIMAL, "placement.max_parallel_tests", 0), "placement.max_parallel_tests must be an integer >= 1"),
@@ -114,10 +105,6 @@ REFUSALS = [
         " placement.profile must be 'hosted-gpu', got 'hosted-cpu'",
     ),
     (_with(MINIMAL, "source", {"kind": "bot"}), "source.kind must be one of 'user', 'ci'"),
-    (
-        _with(MINIMAL, "placement", {"profile": "hosted-gpu", "specialist_capacity": -1}),
-        "specialist_capacity must be an integer >= 0",
-    ),
 ]
 
 
@@ -158,6 +145,17 @@ def test_the_multibranch_section_is_not_validated_and_is_kept_as_given(multibran
 def test_unknown_fields_are_ignored():
     doc = {**MINIMAL, "future": {"x": 1}, "model": {"path": "/m", "revision": "r"}}
     assert parse_campaign(doc).model_path == "/m"
+
+
+def test_a_spec_with_the_fields_nothing_read_still_parses_whatever_their_values():
+    doc = {
+        **MINIMAL,
+        "objective": {"target_gain_pct": 0},
+        "options": {"kernel": "yes", "framework_agent": 1, "enablement": "some", "eval": True},
+        "placement": {"profile": "hosted-gpu", "specialist_capacity": -1},
+    }
+    assert parse_campaign(doc).eval is True
+    assert jsonschema.Draft202012Validator(_schema()).is_valid(doc)
 
 
 def test_the_platform_only_placement_fields_are_not_part_of_the_spec():
