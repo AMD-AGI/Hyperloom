@@ -612,9 +612,9 @@ def _slow_source(tmp_path):
 
 def _fill_at_once(cache, commits, env):
     import hyperloom
-    import inference_suite
+    from inference_suite import __file__ as inference_suite_file
 
-    paths = {os.path.dirname(os.path.dirname(module.__file__)) for module in (hyperloom, inference_suite)}
+    paths = {os.path.dirname(os.path.dirname(path)) for path in (hyperloom.__file__, inference_suite_file)}
     env = {**env, "PYTHONPATH": os.pathsep.join([*paths, env.get("PYTHONPATH", "")])}
     start = str(time.time() + 3)
     fills = [

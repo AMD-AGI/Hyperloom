@@ -368,7 +368,7 @@ def _remove_stale_lock(lock: Path) -> None:
             try:
                 os.link(aside, lock)
             except FileExistsError:
-                pass
+                pass  # a third fill took the lock meanwhile; it is that fill's now
         else:
             log.warning("removed %s, which a killed fill left", lock)
     finally:
