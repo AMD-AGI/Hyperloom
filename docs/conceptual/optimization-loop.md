@@ -745,8 +745,8 @@ The loop adapts through facts, not through retired score tables:
   for every patch and framework candidate.
 - PolicyGate blocks unsafe paths, invalid envelopes, and actions whose
   structural requirements are not met before they mutate runtime state.
-  Phase fit is enforced at admission: a proposal or delegate whose action
-  the current phase does not offer is refused (`phase_incompatible`)
+  Phase fit is enforced at admission: a delegate whose action the current
+  phase does not offer is refused (`phase_incompatible`)
   before a task exists, and the phase transition drops incompatible tasks
   still queued from the previous phase.
 - The baseline anchor every gain is measured against moves only to a

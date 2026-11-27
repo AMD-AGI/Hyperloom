@@ -3,7 +3,7 @@
 
 """The phase contract the admission gate holds an agent-proposed action to.
 
-An agent may propose or delegate only what its phase lists as proposable; the
+An agent may delegate only what its phase lists as proposable; the
 phase barrier only sweeps queued work at a transition, so anything admitted here
 runs.
 """
@@ -125,7 +125,7 @@ def test_no_phase_entered_yet_proposes_nothing():
     [*sorted(COORDINATOR_INTERNAL_ACTIONS), "gemm_tuning", "WebSearch", "mcp__pr_monitor__pr_list"],
 )
 def test_no_phase_offers_a_coordinator_run_action_or_a_tool_name(phase: str, action: str):
-    """The phase table is the one list of what an agent may propose or delegate: a Coordinator-managed action, the
+    """The phase table is the one list of what an agent may delegate: a Coordinator-managed action, the
     GEMM tuning lane and a tool name are in none of its rows."""
     denied = _dispatcher(phase).admission_denial_for_action(action)
 

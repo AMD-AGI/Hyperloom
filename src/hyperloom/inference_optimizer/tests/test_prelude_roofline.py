@@ -44,6 +44,9 @@ class _StubTaskRegistry:
         self._tasks: dict[str, Any] = {}
         self._by_idem: dict[str, Any] = {}
 
+    async def find_by_idempotency_key(self, idempotency_key: str):
+        return self._by_idem.get(idempotency_key)
+
     async def create_or_return_existing(self, spec):
         existing = self._by_idem.get(spec.idempotency_key)
         if existing is not None:

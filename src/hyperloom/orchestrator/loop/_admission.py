@@ -34,7 +34,7 @@ class AdmissionMixin:
         """Refuse an action the current phase does not let an agent propose.
 
         Args:
-            action_name: The proposed/delegated action name.
+            action_name: The delegated action name.
 
         Returns:
             A :class:`PolicyDenied` when the phase does not offer the action, else ``None``.
@@ -73,7 +73,7 @@ class AdmissionMixin:
         What the action costs is :meth:`admission_cost_minutes`.
 
         Args:
-            action_name: The proposed/delegated action name.
+            action_name: The delegated action name.
             fallback_cost_minutes: What to price the action at when the
                 catalogue does not carry it. Without it, a kind deliberately
                 kept out of the catalogue is admitted at any remaining budget.
@@ -107,7 +107,7 @@ class AdmissionMixin:
         reaches all paths at once.
 
         Args:
-            action_name: The proposed/delegated action name.
+            action_name: The delegated action name.
             params: The proposal's parameters: a specialist's price, an explore's grid.
 
         Returns:
@@ -212,6 +212,6 @@ class AdmissionMixin:
             return PolicyDenied(
                 f"request kind={req_kind!r} denied: baseline must run first",
                 rule="execution_order",
-                hint="propose/delegate `baseline` before kernel requests",
+                hint="delegate `baseline` before kernel requests",
             )
         return self.time_budget_denial_for_action(REQUEST_KIND_TO_OWNED_ACTION.get(req_kind, req_kind))

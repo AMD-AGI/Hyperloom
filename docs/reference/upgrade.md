@@ -917,9 +917,18 @@ Do these first:
   `emit_intent: unknown intent_type 'propose_action'`, a JSON envelope fails
   with `intents[<i>].intent_type 'propose_action' not in allowed set`, and
   the tool's schema no longer lists the type.
-* Drop the top-level `predicted_gain_pct`: no intent requires it and nothing
-  reads it there. An estimate written as `params.predicted_gain_pct` is still
-  recorded as the action's predicted gain in the recipe's journal.
+* Move the estimate from the top-level `predicted_gain_pct` to
+  `params.predicted_gain_pct`: no intent requires the top-level field and
+  nothing reads it there. The action catalogue asks for the estimate on an
+  `explore` delegate only. From `params` it is recorded as before: as
+  `predicted_gain_pct` on each row the task writes to
+  `optimization_journal.json`, on the KEEP and REVERT decisions of
+  `reports/trace/decision_trace.jsonl`, and as the Langfuse score
+  `predicted_gain_pct`. 1.2.x required the estimate on every `propose_action`,
+  so the rows of a proposed `baseline` or `target_analysis` carried one too;
+  those rows now carry none, and neither do an `explore` round's when its
+  delegate sends no estimate. A prompt that wants it on another action asks
+  Orchestration for `params.predicted_gain_pct` on that delegate.
 * Stop sending `idempotency_key`, at the top level or under `params`: both
   are ignored, and the one under `params` is removed before the task is
   created. To run identical work again, send it again after its task ended.
@@ -927,7 +936,10 @@ Do these first:
   per task; a turn carries as many intents as you emit. A `scope=freeform`
   delegate that carries `tasks` and no `task_description` is denied with rule
   `specialist_freeform_empty_description`; beside a `task_description` the
-  list is not read.
+  list is not read. A delegate that names a `domain` and a
+  `gap_canonical_id` and carries `tasks` was a wave of freeform tasks in
+  1.2.x too: it is now one specialist of that domain on that gap, the list
+  is not read, and nothing is denied.
 
 The key of a task (`tasks.idempotency_key` in `storage/coordinator.db`, shown
 in the `=== Tasks in flight ===` block of the prompt) is now always derived by
@@ -949,7 +961,9 @@ that changes:
 * A `delegate` that repeats work whose task is still queued or running is
   denied with rule `duplicate_idempotency_key_running`. In 1.2.x a `baseline`
   delegated again on a later tick was a second bring-up, and a specialist
-  delegated again with the same params was a second task.
+  delegated again with the same params was a second task. A refused
+  specialist is not warmed: it reads no Experience KB and adds no row to
+  `experience_kb_injections` in `state.json`.
 * A `delegate` that repeats a `baseline` that measured, or an
   `integrate_patch` that benchmarked its deliverable, is denied with rule
   `duplicate_idempotency_key`; the hint names the task that holds the answer.

@@ -352,28 +352,49 @@ def create_in_cursor(cur: Any, spec: TaskSpec) -> tuple[Task, bool]:
     return _insert_queued_task(cur, spec), False
 
 
-#: Keys :func:`create_on_free_key` tries: the spec's own, then ``-retry1`` onwards.
+#: Keys :func:`first_unspent_key` tries: the given one, then ``-retry1`` onwards.
 RETRY_KEY_ATTEMPTS: int = 6
 
 
-async def create_on_free_key(tasks: Any, spec: TaskSpec, *, spent: Callable[[Task], bool]) -> tuple[Task, bool] | None:
-    """Create ``spec``, stepping its key to ``<key>-retry<n>`` past every existing task ``spent`` accepts.
+@dataclass(frozen=True)
+class UnspentKey:
+    """The first key of a retry series that is not spent, and the task already under it, if any."""
+
+    key: str
+    holder: Task | None
+
+
+async def first_unspent_key(tasks: Any, key: str, *, spent: Callable[[Task], bool]) -> UnspentKey | None:
+    """Step ``key`` to ``<key>-retry<n>`` past every existing task ``spent`` accepts.
 
     Args:
-        tasks: The registry the task is created in.
-        spec: The task to create under its own key first.
+        tasks: The registry the keys are looked up in.
+        key: The first key of the series.
         spent: Whether an existing task leaves its key to the next attempt.
 
     Returns:
-        ``(task, was_existing)`` for the first key not spent, or ``None`` once
-        :data:`RETRY_KEY_ATTEMPTS` keys are.
+        The first key not spent, free or held, or ``None`` once :data:`RETRY_KEY_ATTEMPTS` keys are.
     """
     for attempt in range(RETRY_KEY_ATTEMPTS):
-        key = spec.idempotency_key if attempt == 0 else f"{spec.idempotency_key}-retry{attempt}"
-        task, was_existing = await tasks.create_or_return_existing(replace(spec, idempotency_key=key))
-        if not (was_existing and spent(task)):
-            return task, was_existing
+        candidate = key if attempt == 0 else f"{key}-retry{attempt}"
+        holder = await tasks.find_by_idempotency_key(candidate)
+        if holder is None or not spent(holder):
+            return UnspentKey(candidate, holder)
     return None
+
+
+async def create_on_free_key(tasks: Any, spec: TaskSpec, *, spent: Callable[[Task], bool]) -> tuple[Task, bool] | None:
+    """Create ``spec`` under the :func:`first_unspent_key` of its own key, or return the task that holds that key.
+
+    Returns:
+        ``(task, was_existing)``, or ``None`` once every retry key is spent.
+    """
+    unspent = await first_unspent_key(tasks, spec.idempotency_key, spent=spent)
+    if unspent is None:
+        return None
+    if unspent.holder is not None:
+        return unspent.holder, True
+    return await tasks.create_or_return_existing(replace(spec, idempotency_key=unspent.key))
 
 
 def _is_progress_note(entry: Any) -> bool:
@@ -708,8 +729,10 @@ __all__ = [
     "TaskOutcome",
     "TaskRegistry",
     "TaskSpec",
+    "UnspentKey",
     "confirmed_result",
     "create_in_cursor",
     "create_on_free_key",
+    "first_unspent_key",
     "recorded_outcome",
 ]

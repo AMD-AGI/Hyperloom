@@ -113,6 +113,9 @@ async def test_delegate_explore_with_grid_creates_task_directly(tmp_path: Path):
         async def running(self) -> list:
             return []
 
+        async def find_by_idempotency_key(self, _idempotency_key: str) -> None:
+            return None
+
         async def create_or_return_existing(self, spec):
             create_calls.append(dict(vars(spec)))
             from hyperloom.orchestrator.state.task_registry import Task
@@ -164,6 +167,9 @@ async def test_delegate_explore_seeds_the_stack_with_the_anchor(tmp_path: Path):
 
         async def running(self) -> list:
             return []
+
+        async def find_by_idempotency_key(self, _idempotency_key: str) -> None:
+            return None
 
         async def create_or_return_existing(self, spec):
             created.append(dict(spec.params))

@@ -25,7 +25,7 @@ objective progress.
 
 The CLI starts a Python Coordinator that coordinates:
 
-- Orchestration: decides next actions (`baseline`, `explore`, `specialist`, `integrate_patch`, `sweep`, Kernel requests). Each is one `delegate` intent. In CLOSE, the Coordinator auto-enqueues `report` at session end; Orchestration may also delegate it.
+- Orchestration: decides next actions (`baseline`, `explore`, `specialist`, `integrate_patch`, `sweep`), each one `delegate` intent, and Kernel requests, each one `request` intent. In CLOSE, the Coordinator auto-enqueues `report` at session end; Orchestration may also delegate it.
 - Kernel (programmatic, not LLM): the Coordinator dispatches `trace_analyze`, `integrate`, and related request kinds directly to Python handlers without an LLM turn. The `run_gemm_tuning` and `run_fusion` lanes are Coordinator-owned: they run inside the `kernel_agent` task at KERNEL entry and PolicyGate rejects an agent request for either.
 
 State lives under a **session directory** (per optimization run).

@@ -256,7 +256,11 @@ it.
   beside a serving benchmark. `delegate` is now the only one. A
   `propose_action` is refused in the turn that sends it
   (`unknown intent_type 'propose_action'`), `predicted_gain_pct` is no longer
-  a payload field, and an `idempotency_key` Orchestration sends is ignored:
+  a payload field (the catalogue asks for it as `params.predicted_gain_pct`
+  on `explore` only; the journal rows of that round, their decision-trace
+  rows and the Langfuse score still carry it, a `baseline` or
+  `target_analysis` journal row no longer does), and an `idempotency_key`
+  Orchestration sends is ignored:
   the Coordinator keys every task by its work
   (`integrate_patch:<specialist_task_id>`, a `baseline` by its seven launch
   fields, anything else by its params). A `baseline` delegated again on a
@@ -270,7 +274,9 @@ it.
   `proposal_rejected` observations and the `submitted` outcome of a proposal
   row are no longer written. The specialist wave (`params.tasks`) is removed
   with its rules `specialist_freeform_wave_too_large` and
-  `specialist_freeform_wave_invalid_task`: send one `delegate` per task. The
+  `specialist_freeform_wave_invalid_task`: send one `delegate` per task; a
+  `tasks` list beside a `task_description`, or beside a `domain` and a
+  `gap_canonical_id`, is not read. The
   operator-defined specialist is created by the Coordinator itself, so its
   dispatch row has `dispatch_class` `coordinator` instead of `llm`, it writes
   no `task_queued` event, and a refused admission is a

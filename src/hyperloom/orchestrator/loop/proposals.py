@@ -14,7 +14,14 @@ from ..actions.executors.integrate._integrate_vocabulary import RESULT_BENCHED
 from ..phases import machine_state as _phase_state
 from ..policy.gate import SPECIALIST_ACTION_NAME
 from ..state.shared_state import inject_stack_base_params
-from ..state.task_registry import TERMINAL_STATES, Task, TaskSpec, confirmed_result, create_on_free_key
+from ..state.task_registry import (
+    TERMINAL_STATES,
+    Task,
+    TaskSpec,
+    UnspentKey,
+    confirmed_result,
+    first_unspent_key,
+)
 from ..collaborator import CoordinatorCollaborator
 
 if TYPE_CHECKING:
@@ -155,26 +162,32 @@ class ProposalsCollaborator(CoordinatorCollaborator):
         ``None`` when a task under the deliverable's key already holds it or has measured it.
         """
         self.seed_integrate_patch_params(params)
-        created = await self.create_task("integrate_patch", params, integrate_patch_key(params["specialist_task_id"]))
-        if created is None or created[1]:
+        unspent = await self.unspent_key("integrate_patch", integrate_patch_key(params["specialist_task_id"]))
+        if unspent is None or unspent.holder is not None:
             return None
-        task = created[0]
+        task = await self.create_task("integrate_patch", params, unspent.key)
         # The round the authoring specialist opened runs on under this task id.
         await self._coord.enablement_lane.handoff_enablement_round(task)
         return task
 
-    async def create_task(self, action_name: str, params: dict[str, Any], key: str) -> tuple[Task, bool] | None:
-        """Create the task under ``key``, or return the twin that answers it.
+    async def unspent_key(self, action_name: str, key: str) -> UnspentKey | None:
+        """Where the work under ``key`` stands: the free key its task takes, or the twin that answers it.
 
         Requests that would launch identical work collapse to one task. An ended twin leaves a fresh key to a
         retry, unless it measured what is asked for; ``None`` once every retry key is spent.
+        """
+        return await first_unspent_key(self.tasks, key, spent=lambda twin: not twin_answers(action_name, twin))
+
+    async def create_task(self, action_name: str, params: dict[str, Any], key: str) -> Task:
+        """Create the task under ``key``, a free key of :meth:`unspent_key`.
+
+        Intents are routed and completions booked one after the other, so nothing takes the key between the two.
         """
         if action_name == SPECIALIST_ACTION_NAME:
             lanes, ttl = self._coord.specialist_dispatch.lanes_ttl(params)
         else:
             lanes, ttl = self._coord.dispatcher.registry_lanes_ttl(action_name)
-        return await create_on_free_key(
-            self.tasks,
+        task, _existing = await self.tasks.create_or_return_existing(
             TaskSpec(
                 kind=action_name,
                 params=params,
@@ -183,9 +196,9 @@ class ProposalsCollaborator(CoordinatorCollaborator):
                 lease_ttl_sec=ttl,
                 # One class for every route to a key: a key holds one class.
                 dispatch_class="llm",
-            ),
-            spent=lambda twin: not twin_answers(action_name, twin),
+            )
         )
+        return task
 
     def seed_integrate_patch_params(self, params: dict[str, Any]) -> None:
         """Default an integrate_patch's grading context and its patched-eval server."""

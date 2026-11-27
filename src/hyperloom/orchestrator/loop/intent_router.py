@@ -348,30 +348,30 @@ class IntentRouter(CoordinatorCollaborator):
         await dispatch.warm_specialist_params(request.params)
         return not dispatch.refuse_patch_without_source(request.params)
 
-    async def _create_delegated_task(self, request: DelegateRequest, key: str) -> Any | None:
-        """Register the delegate as a task, stepping its idempotency key past ended twins that measured nothing.
+    async def _admit_under_free_key(self, request: DelegateRequest, key: str) -> str | None:
+        """Admit the delegate under the key its task takes: ``key`` stepped past ended twins that measured nothing.
 
-        Returns None once a live twin, a twin that measured it, or an exhausted retry budget policy-denied the delegate.
+        None once a live twin, a twin that measured it, or an exhausted retry budget policy-denied the delegate.
         """
-        created = await self._coord.proposals.create_task(request.action_name, request.params, key)
-        if created is not None and not created[1]:
-            return created[0]
+        unspent = await self._coord.proposals.unspent_key(request.action_name, key)
+        if unspent is not None and unspent.holder is None:
+            return unspent.key
         action = f"delegate{{action_name={request.action_name!r}}} duplicate"
-        if created is None:
+        if unspent is None:
             denied = PolicyDenied(
                 f"{action} idempotency_key exhausted retries for {key!r}",
                 rule="duplicate_idempotency_key",
                 hint=f"every retry key of {key!r} names a terminated task; send new content",
             )
-        elif created[0].state in TERMINAL_STATES:
-            task = created[0]
+        elif unspent.holder.state in TERMINAL_STATES:
+            task = unspent.holder
             denied = PolicyDenied(
                 f"{action} idempotency_key={task.idempotency_key!r}",
                 rule="duplicate_idempotency_key",
                 hint=f"task {task.task_id} already measured this; read its delegated_result event.",
             )
         else:
-            task = created[0]
+            task = unspent.holder
             denied = PolicyDenied(
                 f"{action} idempotency_key={task.idempotency_key!r}",
                 rule="duplicate_idempotency_key_running",
@@ -428,17 +428,19 @@ class IntentRouter(CoordinatorCollaborator):
         # Read before a specialist is warmed with this dispatch's context and before a grid's join id goes in,
         # so an identical re-emit lands on the task that already holds the work.
         key = self._coord.proposals.action_key(action_name, params)
-        if not await self._prepare_specialist_dispatch(request):
-            return
         if await self._explore_grid_covered(action_name, source, intent, params):
+            return
+        free_key = await self._admit_under_free_key(request, key)
+        if free_key is None:
+            return
+        # Past the duplicate check: the warm-up reads the Experience KB and records the injection it carries.
+        if not await self._prepare_specialist_dispatch(request):
             return
         # The grid's attempts join its proposal row through this id.
         proposal_id = uuid.uuid4().hex if action_name == "explore" else ""
         if proposal_id:
             params["proposal_msg_id"] = proposal_id
-        task = await self._create_delegated_task(request, key)
-        if task is None:
-            return
+        task = await self._coord.proposals.create_task(action_name, params, free_key)
         # Every task that takes over an open enablement round comes through the hand-off.
         await self._coord.enablement_lane.handoff_enablement_round(task)
         # Only once a task exists, so a dispatch that bailed out above leaves the mandate on offer.

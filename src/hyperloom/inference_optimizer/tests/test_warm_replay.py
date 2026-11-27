@@ -73,6 +73,9 @@ class _StubTaskRegistry:
     def __init__(self):
         self.calls: list[dict] = []
 
+    async def find_by_idempotency_key(self, _idempotency_key: str) -> None:
+        return None
+
     async def create_or_return_existing(self, spec):
         self.calls.append(
             {

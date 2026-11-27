@@ -186,6 +186,53 @@ async def test_an_identical_specialist_delegate_is_the_task_already_in_flight(se
 
 
 @pytest.mark.asyncio
+async def test_a_refused_identical_specialist_delegate_reads_no_experience_and_records_no_injection(session_dir):
+    """Only the dispatch that becomes a task is warmed: a repeat refused as a duplicate costs no KB read."""
+    from types import SimpleNamespace
+
+    c = _silent_coordinator(session_dir)
+    reads: list[str] = []
+
+    def read_for_specialist(_state, _params):
+        reads.append(f"read-{len(reads) + 1}")
+        return SimpleNamespace(
+            read_id=reads[-1],
+            rendered_refs=({"id": "exp-1"},),
+            status="completed",
+            prompt_block="Experience exp-1",
+            experiences=({"id": "exp-1"},),
+        )
+
+    c.__dict__["_experience_kb"] = SimpleNamespace(read_for_specialist=read_for_specialist)
+    try:
+        state = c.shared_state
+        state.phase, state.framework, state.baseline_tput = "FRAMEWORK_AGENT", "sglang", 800.0
+        ask = {"scope": "freeform", "task_description": "find why prefill blocks decode"}
+        await c.router.handle_intent("orchestration", _delegate(action="specialist", params=dict(ask)))
+        (first,) = await c.tasks.by_state("queued")
+        assert first.params["kb_read_id"] == "read-1"
+        assert [row["read_id"] for row in state.experience_kb_injections] == ["read-1"]
+
+        for _ in range(2):
+            state.tick = int(state.tick or 0) + 1
+            await c.router.handle_intent("orchestration", _delegate(action="specialist", params=dict(ask)))
+
+        assert await _denied_rules(c) == ["duplicate_idempotency_key_running"] * 2
+        assert reads == ["read-1"]
+        assert [row["read_id"] for row in state.experience_kb_injections] == ["read-1"]
+
+        await c.tasks.transition(first.task_id, "running", evidence={})
+        await c.tasks.transition(first.task_id, "failed", evidence={})
+        await c.router.handle_intent("orchestration", _delegate(action="specialist", params=dict(ask)))
+
+        (retried,) = await c.tasks.by_state("queued")
+        assert retried.params["kb_read_id"] == "read-2"
+        assert [row["read_id"] for row in state.experience_kb_injections] == ["read-1", "read-2"]
+    finally:
+        await c.stop()
+
+
+@pytest.mark.asyncio
 async def test_a_policy_denial_is_a_row_of_the_open_phase_event(session_dir):
     from hyperloom.inference_optimizer.breakdown.exporter import build
     from hyperloom.inference_optimizer.breakdown.recorder import phase_event
@@ -452,6 +499,43 @@ async def test_delegate_explore_grid_is_admitted_while_rewrite_levers_await_attr
         assert [m.payload.get("rule") for m in obs if m.payload.get("kind") == "policy_denied"] == [
             "duplicate_idempotency_key_running"
         ]
+    finally:
+        await c.stop()
+
+
+@pytest.mark.asyncio
+async def test_an_explore_delegates_predicted_gain_is_journalled_beside_each_measured_variant(session_dir):
+    """The catalogue asks for the estimate in the grid's params, and the journal reads it off the task."""
+    from hyperloom.inference_optimizer.session.optimization_journal import Verdict
+    from hyperloom.orchestrator.prompts.prompt_builder import _format_grid_injection_hint
+
+    assert "predicted_gain_pct?" in _format_grid_injection_hint("explore")
+
+    c = _silent_coordinator(session_dir)
+    try:
+        c.shared_state.phase = "FRAMEWORK_AGENT"  # the phase that proposes explore
+        c.shared_state.baseline_tput = 800.0
+        grid = [{"name": "folded", "extra_args": "--folded 2"}]
+        await c.router.handle_intent(
+            "orchestration", _delegate(action="explore", params={"grid": grid, "predicted_gain_pct": 7.5})
+        )
+        (task,) = await c.tasks.by_state("queued")
+
+        measured = {
+            "variant_name": "folded",
+            "outcome": "REVERT",
+            "fingerprint": "fp-folded",
+            "variant": {"extra_server_args": "--folded 2"},
+            "metrics": {"base_tput": 800.0, "tput": 790.0, "gain_pct": -1.25},
+        }
+        await c.recipe_journal.fact_write_hook(
+            task=task,
+            result={"round_id": "explore-001", "per_variant_outcomes": [measured]},
+            verdict=Verdict.REVERTED,
+        )
+
+        (entry,) = c.recipe_journal.ensure_journal().entries
+        assert (entry.variant_name, entry.gain_pct, entry.predicted_gain_pct) == ("folded", -1.25, 7.5)
     finally:
         await c.stop()
 
