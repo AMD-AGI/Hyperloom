@@ -394,7 +394,7 @@ def _section_mandate(inp: SpecialistPromptInputs) -> list[str]:
     """Render §0: deliverable contract, run status, and task-kind brief."""
     # Deliverable line based on scope × mode.
     if inp.scope == "freeform":
-        anchor = inp.task_description.split("\n")[0].strip()[:120]
+        anchor = ""
         deliverable = "freeform investigation — see task description"
     else:
         anchor = inp.gap_canonical_id

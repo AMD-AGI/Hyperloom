@@ -90,7 +90,7 @@ def test_freeform_patch_prompt_carries_mandate_and_patch_protocol():
     """A freeform specialist dispatched with ``mode=patch`` still gets the free-form mandate AND the worktree patch-authoring protocol."""
     system, user = build_specialist_prompts(_freeform_inputs(mode="patch"))
     assert "Free-form mandate (scope = freeform)" in system
-    assert "prefill blocks decode" in user
+    assert "> Read the scheduler and find why prefill blocks decode." in user
     # Patch-authoring protocol (iron rules + output protocol) is present.
     assert "patches_written" in system
     assert "worktree" in system.lower()
