@@ -8,7 +8,11 @@ from __future__ import annotations
 import csv
 import json
 import logging
+import os
+import socket
+from collections.abc import Mapping
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -25,6 +29,7 @@ from hyperloom.inference_optimizer.roofline_model_meta import load_model_meta
 from hyperloom.inference_optimizer.session.session_paths import CONC_SWEEP_SUMMARY_FILENAME, reports_dir
 
 from .plot import ConcCurveOptions, render_conc_sweep_curve
+from .points import SCHEMA_VERSION, point_launches
 
 if TYPE_CHECKING:
     from hyperloom.orchestrator.actions.executors.grid._grid_runner import VariantResult
@@ -39,6 +44,39 @@ FINAL_FILE = "final.json"
 _ENCODING = "utf-8"
 #: The statuses of a sweep that ran its course, whatever it measured.
 SETTLED = frozenset({"succeeded", "partial", "skipped"})
+
+
+def run_facts(session: Path) -> dict[str, Any]:
+    """The report header's provenance: the cards, image and recipe of the base the session at ``session`` froze (none
+    where it froze none or its base fails its checks, which a skip reports), where its points' launches come from, and
+    the host and process writing the report, with when -- a report still ``in_progress`` whose
+    process is gone was cut short."""
+    from hyperloom.orchestrator.state import base_launch
+
+    try:
+        frozen = base_launch.frozen_base(session)
+    except base_launch.BaseLaunchMismatch:
+        frozen = None
+    base = None if frozen is None else frozen.launch
+    source = None if base is None else base.source
+    recipe = None
+    if source is not None:
+        recipe = {
+            "kind": source.kind.value,
+            "repo": source.repo,
+            "commit": source.commit,
+            "entry": source.entry,
+            "locator": source.locator,
+        }
+    return {
+        **({} if base is None else {"gpu_count": base.cards}),
+        "base_image": None if base is None else base.image.run or base.image.recipe,
+        "point_launches": point_launches(base),
+        "recipe": recipe,
+        "host": socket.gethostname(),
+        "pid": os.getpid(),
+        "updated_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+    }
 
 
 def point_from_variant(v: VariantResult, *, arm: str) -> dict[str, Any]:
@@ -61,6 +99,7 @@ def point_from_variant(v: VariantResult, *, arm: str) -> dict[str, Any]:
         "request_throughput": v.request_throughput,
         "total_token_throughput": total,
         "input_throughput": v.input_throughput,
+        "e2e_norm_intvty_p50": v.intvty_p50,
         "e2e_norm_intvty_p90": v.intvty_p90,
         "tpot_p90_ms": v.tpot_p90_ms,
         "ttft_mean_ms": v.ttft_mean_ms,
@@ -94,6 +133,7 @@ def _write_csv(csv_path: Path, points: list[dict[str, Any]]) -> None:
         "completed_requests",
         "error_class",
         "error",
+        "e2e_norm_intvty_p50",
     ]
     csv_path.parent.mkdir(parents=True, exist_ok=True)
     with csv_path.open("w", newline="", encoding=_ENCODING) as fp:
@@ -204,6 +244,28 @@ def _model_meta_record(meta: Any) -> dict[str, Any]:
     }
 
 
+def take_earlier_summary(reports: Path) -> dict[str, Any] | None:
+    """The summary an earlier run of the sweep left in ``reports`` when this schema wrote it; one of another schema is
+    set aside (:func:`_set_aside`), since the run about to start writes over it."""
+    earlier = read_summary(reports)
+    if earlier is None or earlier.get("schema_version") == SCHEMA_VERSION:
+        return earlier
+    _set_aside(reports, earlier)
+    return None
+
+
+def keep_measured_summary(reports: Path) -> None:
+    """Set aside the summary an earlier run left in ``reports`` when it holds measured points, before a skip's report
+    is written where it was: a sweep that measures nothing never takes the place of one that measured."""
+    earlier = read_summary(reports)
+    if earlier is not None and any(earlier.get(arm, {}).get("points") for arm in ("baseline", "optimized")):
+        _set_aside(reports, earlier)
+
+
+def _set_aside(reports: Path, earlier: Mapping[str, Any]) -> None:
+    (reports / SUMMARY_FILE).rename(reports / f"conc_sweep_summary.{earlier.get('schema_version')}.json")
+
+
 def read_summary(reports: Path) -> dict[str, Any] | None:
     """The summary an earlier run of the sweep left in ``reports``, or ``None``."""
     path = reports / SUMMARY_FILE
@@ -244,7 +306,12 @@ def write_curve(payload: dict[str, Any], reports: Path, options: ConcCurveOption
 def publish_curve(payload: dict[str, Any], session_dir: Path, options: ConcCurveOptions) -> None:
     """Draw the sweep's curve and point the session's ``final.json`` at the summary and the curve."""
     reports = reports_dir(session_dir)
-    curve = write_curve(payload, reports, options)
+    point_final_at(payload, session_dir, write_curve(payload, reports, options))
+
+
+def point_final_at(payload: dict[str, Any], session_dir: Path, curve: Path | None = None) -> None:
+    """Point the session's ``final.json``, when it has one, at the summary ``payload`` is and at its ``curve``."""
+    reports = reports_dir(session_dir)
     final = reports / FINAL_FILE
     if not final.is_file():
         return

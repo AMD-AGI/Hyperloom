@@ -130,6 +130,12 @@ def test_a_spec_naming_the_multibranch_flow_is_handed_over_with_its_section_unre
     assert len(run.handed.calls) == 1
 
 
+def test_a_sweep_spec_is_handed_over_like_any_other(run):
+    _break_spec(run, {**MINIMAL, "flow": "conc_sweep", "conc_sweep": {"session_dir": "/nfs/s"}})
+    assert entry.main(["run"]) == 0
+    assert len(run.handed.calls) == 1
+
+
 def test_a_spec_naming_the_retired_single_flow_is_refused_finally_naming_why(run):
     _break_spec(run, {**MINIMAL, "flow": "single"})
     assert entry.main(["run"]) == 2

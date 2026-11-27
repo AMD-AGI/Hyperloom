@@ -6,15 +6,16 @@
 The contract is ``contracts/campaign_spec.v1.schema.json``.  This module does not use a JSON Schema library at run
 time; :data:`FIELDS` is the same contract as a table, and a test holds the two together.  Unknown fields are ignored
 (a reader of one major version accepts what a later minor version adds).  ``multibranch`` is not looked at: it is kept
-as given for the multibranch entry.  ``flow`` may be left out; the only flow is ``multibranch``, and the retired
+as given for the multibranch entry.  ``flow`` may be left out for ``multibranch``, the default; the retired
 ``single`` is refused, naming why.  A spec with neither ``flow`` nor ``multibranch`` is one written for the retired
-default, the single flow, and is refused the same way.
+default, the single flow, and is refused the same way.  Flow ``conc_sweep`` sweeps the closed multi-branch session
+``conc_sweep.session_dir`` names and optimizes nothing.
 """
 
 from __future__ import annotations
 
 import math
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from enum import Enum
 from typing import Any
@@ -22,6 +23,8 @@ from typing import Any
 SCHEMA = "hyperloom.campaign-spec/v1"
 FLOW = "flow"
 FLOW_MULTIBRANCH = "multibranch"
+#: Sweep a closed multi-branch session over its concurrencies; ``conc_sweep.session_dir`` names it.
+FLOW_CONC_SWEEP = "conc_sweep"
 MULTIBRANCH_SECTION = "multibranch"
 #: The legacy single-session flow, retired: a spec that still names it is refused with this reason.
 RETIRED_FLOWS = {"single": "flow 'single' is retired; leave flow out or set it to 'multibranch'"}
@@ -33,7 +36,7 @@ RETIRED_DEFAULT = (
 )
 MEASUREMENT_LOCAL = "local"
 MEASUREMENT_HOSTED = "hosted"
-#: The profile whose application container has cards of its own, the only one a multibranch run measures locally on.
+#: The profile whose application container has cards of its own, the only one a run measures locally on.
 PROFILE_WITH_CARDS = "hosted-gpu"
 DEFAULT_MAX_PARALLEL_TESTS = 8
 
@@ -56,6 +59,7 @@ class Kind(str, Enum):
     BOOL = "boolean"
     STR_MAP = "object of strings"
     ENUM = "one of a fixed set"
+    INT_LIST = "non-empty list of positive integers"
 
 
 @dataclass(frozen=True)
@@ -74,7 +78,7 @@ class Field:
 #: The contract as a table.  Section-level requirements follow from the ``required`` flags below.
 FIELDS: tuple[Field, ...] = (
     Field("name", "name", Kind.TEXT),
-    Field(FLOW, FLOW, Kind.ENUM, choices=(FLOW_MULTIBRANCH,)),
+    Field(FLOW, FLOW, Kind.ENUM, choices=(FLOW_MULTIBRANCH, FLOW_CONC_SWEEP)),
     Field("model.path", "model_path", Kind.STR, required=True),
     Field("framework.name", "framework_name", Kind.STR, required=True),
     Field("framework.image", "framework_image", Kind.STR, required=True),
@@ -104,6 +108,9 @@ FIELDS: tuple[Field, ...] = (
     Field("source.sha", "source_sha", Kind.STR),
     Field("source.kind", "source_kind", Kind.ENUM, choices=("user", "ci")),
     Field("source.task_id", "source_task_id", Kind.TEXT),
+    Field("conc_sweep.session_dir", "sweep_session_dir", Kind.STR),
+    Field("conc_sweep.concs", "sweep_concs", Kind.INT_LIST),
+    Field("conc_sweep.parallel", "sweep_parallel", Kind.INT, minimum=1),
 )
 
 #: Sections that must be present because one of their fields is required.
@@ -114,6 +121,7 @@ REQUIRED_SECTIONS: tuple[str, ...] = tuple(dict.fromkeys(f.path.split(".")[0] fo
 class CampaignSpec:
     """A validated spec.  ``None`` means the field was not given."""
 
+    flow: str
     measurement: str
     max_parallel_tests: int
     multibranch: Any
@@ -144,6 +152,9 @@ class CampaignSpec:
     source_sha: str | None = None
     source_kind: str | None = None
     source_task_id: str | None = None
+    sweep_session_dir: str | None = None
+    sweep_concs: tuple[int, ...] | None = None
+    sweep_parallel: int | None = None
 
 
 def _is_num(value: object) -> bool:
@@ -164,6 +175,7 @@ _DESCRIPTIONS = {
     Kind.TEXT: "a string",
     Kind.BOOL: "true or false",
     Kind.STR_MAP: "an object of string values",
+    Kind.INT_LIST: "a non-empty list of positive integers",
 }
 
 
@@ -178,18 +190,24 @@ def _describe(field: Field) -> str:
     return _DESCRIPTIONS[field.kind]
 
 
+#: The kinds whose check reads the value alone, not the field's choices or bounds.
+_VALUE_CHECKS: dict[Kind, Callable[[object], bool]] = {
+    Kind.STR: lambda value: isinstance(value, str) and bool(value.strip()),
+    Kind.TEXT: lambda value: isinstance(value, str),
+    Kind.BOOL: lambda value: isinstance(value, bool),
+    Kind.STR_MAP: lambda value: (
+        isinstance(value, dict) and all(isinstance(k, str) and isinstance(v, str) for k, v in value.items())
+    ),
+    Kind.INT_LIST: lambda value: isinstance(value, list) and bool(value) and all(_is_int(v) and v >= 1 for v in value),
+}
+
+
 def _well_typed(field: Field, value: object) -> bool:
     kind = field.kind
-    if kind == Kind.STR:
-        return isinstance(value, str) and bool(value.strip())
-    if kind == Kind.TEXT:
-        return isinstance(value, str)
-    if kind == Kind.BOOL:
-        return isinstance(value, bool)
+    if kind in _VALUE_CHECKS:
+        return _VALUE_CHECKS[kind](value)
     if kind == Kind.ENUM:
         return any(value == c and type(value) is type(c) for c in field.choices)
-    if kind == Kind.STR_MAP:
-        return isinstance(value, dict) and all(isinstance(k, str) and isinstance(v, str) for k, v in value.items())
     if not (_is_int(value) if kind == Kind.INT else _is_num(value)):
         return False
     if field.minimum is not None and value < field.minimum:
@@ -235,11 +253,31 @@ def _read_fields(doc: Mapping[str, Any], problems: list[str]) -> dict[str, Any]:
         elif not _well_typed(field, value):
             problems.append(f"{field.path} must be {_describe(field)}{_got(field, value)}")
         else:
-            values[field.attr] = int(value) if field.kind == Kind.INT else value
+            values[field.attr] = _read_value(field, value)
     return values
 
 
+def _read_value(field: Field, value: Any) -> Any:
+    if field.kind == Kind.INT:
+        return int(value)
+    if field.kind == Kind.INT_LIST:
+        return tuple(sorted({int(v) for v in value}))
+    return value
+
+
+def _check_sweep(values: Mapping[str, Any], problems: list[str]) -> None:
+    flow = values.get(FLOW, FLOW_MULTIBRANCH)
+    session_dir = values.get("sweep_session_dir")
+    if flow == FLOW_CONC_SWEEP and session_dir is None:
+        problems.append("conc_sweep.session_dir is required for flow 'conc_sweep'")
+    if session_dir is not None and not session_dir.startswith("/"):
+        problems.append("conc_sweep.session_dir must be an absolute path")
+    if flow != FLOW_CONC_SWEEP and any(key.startswith("sweep_") for key in values):
+        problems.append(f"conc_sweep is read only for flow 'conc_sweep', got flow {flow!r}")
+
+
 def _check_rules(values: Mapping[str, Any], problems: list[str]) -> None:
+    _check_sweep(values, problems)
     measurement = values.get("measurement", MEASUREMENT_HOSTED)
     profile = values.get("profile")
     if measurement == MEASUREMENT_LOCAL and profile not in (None, PROFILE_WITH_CARDS):
@@ -267,8 +305,8 @@ def parse_campaign(doc: object) -> CampaignSpec:
     if problems:
         raise CampaignError(problems)
     values.pop("nodes", None)
-    values.pop(FLOW, None)  # the only flow
     return CampaignSpec(
+        flow=values.pop(FLOW, FLOW_MULTIBRANCH),
         measurement=values.pop("measurement", MEASUREMENT_HOSTED),
         max_parallel_tests=values.pop("max_parallel_tests", DEFAULT_MAX_PARALLEL_TESTS),
         multibranch=doc.get(MULTIBRANCH_SECTION),

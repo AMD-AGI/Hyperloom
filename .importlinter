@@ -354,9 +354,12 @@ forbidden_modules =
     inference_suite.framework_version
     inference_suite.load
     inference_suite.multinode.inferencex
+    inference_suite.multinode.nodes
     inference_suite.multinode.query
+    inference_suite.multinode.recipe
     inference_suite.multinode.record
     inference_suite.multinode.render
+    inference_suite.multinode.ssh
     inference_suite.multinode.table
     inference_suite.parser_check
     inference_suite.pins
@@ -521,7 +524,6 @@ ignore_imports =
     hyperloom.orchestrator.specialists.selfcheck -> hyperloom.orchestrator.enablement.runtime.build_utils
     hyperloom.orchestrator.specialists.subprocess_ -> hyperloom.orchestrator.actions.cancel_channel
     hyperloom.orchestrator.specialists.subprocess_ -> hyperloom.orchestrator.loop.sub_agent_runner
-    hyperloom.orchestrator.state._shared_state.phase_state -> hyperloom.orchestrator.specialists.domains
     hyperloom.orchestrator.state._shared_state.render -> hyperloom.orchestrator.actions.executors._proposal_identity
     hyperloom.orchestrator.state._shared_state.render -> hyperloom.orchestrator.kernel.kernel_decisions
     hyperloom.orchestrator.state._shared_state.action_records -> hyperloom.orchestrator.kernel.kernel_decisions

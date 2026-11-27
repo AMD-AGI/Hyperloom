@@ -11,7 +11,8 @@ the legacy entry validated, a multi-branch session needs ``multibranch.workload`
 ``multibranch.dev_leases`` ``--dev-leases``, each source of ``multibranch.autonomous_agents`` one
 ``--autonomous-agent``, ``multibranch.make_before_break`` (``true`` by default) ``--make-before-break`` or
 ``--no-make-before-break``, ``multibranch.conc_sweep`` (``true`` by default) ``--no-enable-conc-sweep`` when ``false``,
-``multibranch.conc_sweep_concs`` ``--conc-sweep-concs``, ``multibranch.agentx_duration_sec`` ``--agentx-duration-sec`` and
+``multibranch.conc_sweep_concs`` ``--conc-sweep-concs``, ``multibranch.conc_sweep_parallel``
+``--conc-sweep-parallel``, ``multibranch.agentx_duration_sec`` ``--agentx-duration-sec`` and
 ``multibranch.agentx_objective`` ``--agentx-objective`` (an ``agentx`` workload only), ``multibranch.boot_budget_sec``
 ``--boot-budget-sec``, and ``placement.max_parallel_tests`` is ``--max-parallel-tests``, at most what runs at once
 where the session measures. The fields ``run`` has no option for --
@@ -82,7 +83,7 @@ from hyperloom.hosted.host_info import GrantLimits as HostGrantLimits
 from hyperloom.hosted.host_info import HostInfo, Var
 from hyperloom.measure.pins import ImagePinError, active_image
 from hyperloom.measure.short_prompts.staging import CACHE_ENV as RUNNER_CACHE_ENV
-from hyperloom.inference_optimizer.session.paths import ENV_USER_DATA_PATH
+from hyperloom.inference_optimizer.session.paths import ENV_USER_DATA_PATH, workspace_root
 from hyperloom_multibranch.blackboard import LocalBlackboard
 from hyperloom_multibranch.contracts.blackboard import Role, Writer
 from hyperloom_multibranch.contracts.toolbox import WorkloadKind
@@ -93,6 +94,7 @@ from hyperloom_multibranch.scheduling.budget import (
     FinalWork,
 )
 from hyperloom_multibranch.scheduling.final import sweep_unfinished
+from hyperloom.orchestrator.conc_sweep.report import read_summary
 from hyperloom_multibranch.scheduling.launch_isolation import launch_isolation
 from hyperloom_multibranch.scheduling.layout import SessionLayout
 from hyperloom_multibranch.scheduling.manifest import read_manifest
@@ -106,7 +108,7 @@ from hyperloom_multibranch.scheduling.resumption import (
     require_resumable,
 )
 from hyperloom_multibranch.scheduling.session_environment import EnvironmentIncomplete
-from hyperloom_multibranch.scheduling.settings import RunSettings
+from hyperloom_multibranch.scheduling.settings import RunSettings, Workload
 from hyperloom_multibranch.scheduling.specialist_reach import require_specialist_reach
 from hyperloom_multibranch.scheduling.stops import SessionStopReason
 from hyperloom_multibranch.toolbox.hosted_leases import GrantLimits, lease_shortfall
@@ -204,6 +206,7 @@ def run_argv(spec: CampaignSpec, max_hours: float, parallel_tests: int) -> list[
         **_agentx_values(section),
         "boot-budget-sec": _whole_seconds(section, "boot_budget_sec"),
         "conc-sweep-concs": _conc_sweep_concs(section.get("conc_sweep_concs")),
+        "conc-sweep-parallel": section.get("conc_sweep_parallel"),
     }
     agents = [f"--autonomous-agent={source}" for source in _agent_sources(section.get("autonomous_agents"))]
     switches = _switches(section)
@@ -652,6 +655,16 @@ class EarlierSession:
     sweep: SessionLayout | None = None
 
 
+def release_earlier_lock(layout: SessionLayout) -> None:
+    """Remove the ``final-only`` lock an earlier start of this run left in ``layout``: the host starts a run again only
+    once its earlier start has ended, so the pid the lock names is of a process that is gone."""
+
+    lock = layout.final_only_lock
+    if lock.is_file():
+        log.warning("removing %s, which the earlier start of this run left", lock)
+        lock.unlink(missing_ok=True)
+
+
 def take_over_earlier_session(state_dir: Path) -> EarlierSession:
     """The session ``session.json`` names, read back and taken over from the earlier start; raises what :func:`recorded_session` and
     :func:`~hyperloom_multibranch.scheduling.resumption.persisted_run` raise. Blocks.
@@ -664,10 +677,7 @@ def take_over_earlier_session(state_dir: Path) -> EarlierSession:
     previous = recorded_session(state_dir)
     if previous is None or not SessionLayout(previous).root_recipe.is_file():
         return EarlierSession()
-    lock = SessionLayout(previous).final_only_lock
-    if lock.is_file():
-        log.warning("removing %s, which the earlier start of this run left", lock)
-        lock.unlink(missing_ok=True)
+    release_earlier_lock(SessionLayout(previous))
     if prelude_landed(previous):
         layout = SessionLayout(previous)
         if sweep_unfinished(layout, read_manifest(layout.manifest).settings):
@@ -811,6 +821,70 @@ def reported_stop_reason(root: Path) -> str | None:
     return json.loads(text)["stop_reason"]
 
 
+# -- a hosted conc_sweep run: the closed session it sweeps, the earlier start it takes it over from, and its ending --
+
+#: The prefix of the stop reason a hosted sweep's ``exit.json`` carries, before the sweep's status.
+SWEEP_STOP_PREFIX = "conc_sweep_"
+
+
+def swept_session(spec: CampaignSpec) -> SessionLayout:
+    """The closed multi-branch session ``conc_sweep.session_dir`` names, by the directory it resolves to: the run
+    reads and writes there through no link.
+
+    Raises:
+        HostedRefused: When it resolves to no directory below the resolved workspace root sessions are made in
+            (``USER_DATA_PATH``, :func:`~hyperloom.inference_optimizer.session.paths.workspace_root`), or holds no
+            closed multi-branch session.
+    """
+
+    named = Path(str(spec.sweep_session_dir))
+    resolved = named.resolve()
+    root = workspace_root().resolve()
+    if not resolved.is_relative_to(root) or resolved == root:
+        raise HostedRefused(f"conc_sweep.session_dir {named} is not below the run's workspace {root}")
+    layout = SessionLayout(resolved)
+    if not (layout.manifest.is_file() and layout.report.is_file()):
+        raise HostedRefused(f"conc_sweep.session_dir {named} holds no closed multi-branch session")
+    return layout
+
+
+def require_spec_matches(spec: CampaignSpec, workload: Workload) -> None:
+    """Refuse a spec that describes another workload than the swept session's: its TP, GPU type and framework.
+
+    Raises:
+        HostedRefused: Naming the first field that differs.
+    """
+
+    for field, asked, swept in (
+        ("hardware.tp", spec.tp, workload.tp),
+        ("hardware.gpu_type", spec.gpu_type.lower(), workload.gpu_type.lower()),
+        ("framework.name", spec.framework_name.lower(), workload.framework.lower()),
+    ):
+        if asked != swept:
+            raise HostedRefused(f"{field} {asked} is not the swept session's {swept}")
+
+
+def take_over_swept_session(state_dir: Path, layout: SessionLayout) -> None:
+    """Take ``layout`` as the run's session: the lock an earlier start of this run left in it is released, the rest of
+    the process writes under the group's umask, and ``session.json`` names it. A lock of another run stays."""
+
+    if recorded_session(state_dir) == layout.root:
+        release_earlier_lock(layout)
+    share_with_the_group(layout.root)
+    record_session(state_dir, layout.root)
+
+
+def sweep_stop_reason(layout: SessionLayout) -> str | None:
+    """``conc_sweep_<status>``, with ``:<skip_reason>`` for a skipped sweep, as the report this process wrote in
+    ``layout`` says; ``None`` when it wrote none, as when another run held the session."""
+
+    summary = read_summary(layout.reports)
+    if summary is None or summary.get("pid") != os.getpid():
+        return None
+    reason = f"{SWEEP_STOP_PREFIX}{summary['status']}"
+    return f"{reason}:{summary['skip_reason']}" if summary.get("skip_reason") else reason
+
+
 __all__ = [
     "CANNOT_READ_SESSION",
     "EXIT_FILE",
@@ -820,6 +894,7 @@ __all__ = [
     "FINAL_WIND_DOWN_SECONDS",
     "GRANT_MARGIN_SECONDS",
     "SESSION_FILE",
+    "SWEEP_STOP_PREFIX",
     "EarlierSession",
     "GrantDeadline",
     "GrantEnd",
@@ -841,15 +916,20 @@ __all__ = [
     "record_session",
     "recorded_session",
     "refuse_unhosted_branches",
+    "release_earlier_lock",
     "reported_stop_reason",
     "require_hosted_isolation",
     "require_local_image",
+    "require_spec_matches",
     "run_argv",
     "share_with_the_group",
     "spec_make_before_break",
     "started_session",
     "stop_before_grant_ends",
+    "sweep_stop_reason",
+    "swept_session",
     "take_over_earlier_session",
+    "take_over_swept_session",
     "toolbox_grant",
     "write_final_exit",
 ]
