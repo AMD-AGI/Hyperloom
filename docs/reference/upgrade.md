@@ -615,6 +615,56 @@ that acts on it, and none of them is recorded as a failed action.
   when the turn had already carried the same intent, and logged `claude
   fallback intent deduped`. Both forms of the wrapper are still decoded.
 
+### Required: five Orchestration context tools are removed
+
+Orchestration's read-only context server no longer mounts five tools. Four
+returned a block every turn's prompt already carries, and the fifth returned a
+file the prompt now names. A model that calls one gets a tool error inside its
+turn; no session state changes.
+
+| Removed tool (`mcp__inference_optimizer_context__...`) | Where the same content is |
+|---|---|
+| `get_mission_status` | The `=== Mission progress ===` block of every turn. |
+| `get_shared_state` | The `=== Shared session state ===` block of every turn. |
+| `get_warm_start` | The `=== Warm start (Recipe KB T0) ===` block of the session context. |
+| `get_intervention_mix` | The `=== Intervention mix (telemetry) ===` block of the session context. |
+| `show_analysis_md` | The file on the `analysis_md=` line of the session-state block, which is `last_trace_analyze.analysis_md_path` in `state.json`. |
+
+* If you pass your own Orchestration prompt with `--orch-prompt` and it names
+  one of the five, remove the name: the tool is neither mounted nor allowed.
+* `agents/orchestration/mcp_setup.json` lists eight context tools in
+  `allowed_tools` and `mcp_tools`: `get_gaps`, `get_runtime_findings`,
+  `get_inbox`, `get_recent_outcomes`, `get_running_tasks`, `read_reference`,
+  `get_failure` and `get_variant_failures`. Those eight, their arguments and
+  their answers are unchanged.
+* `show_analysis_md` replaced each embedded base64 image of `analysis.md` with
+  a placeholder. The file itself holds the images as TraceLens wrote them.
+* In the session-state block, the `analysis_md=` line of a session with a
+  TraceLens snapshot ends `Report file: <path>` where it named the tool.
+  Before the first snapshot the line said that `roofline` and `profile` could
+  also be proposed directly; no phase admits that proposal
+  (`phase_incompatible`), and the line now says it is denied.
+
+The built-in Orchestration system prompt changes with them. None of this
+changes what the Coordinator admits or dispatches:
+
+* The `## 3. PIPELINE & TIME BUDGET` section is gone, and `## 3a. PHASE
+  CONTRACT` is `## 3. PHASE CONTRACT`. The section summed a typical runtime per
+  action group against `--max-minutes` and advised skipping analysis or adding
+  an explore round before the report, both of which the Coordinator schedules.
+  The Phase block of every turn carries the remaining budget, and each
+  catalogue entry its own typical cost.
+* The catalogue entry of `roofline` shows no proposal template; it showed
+  `propose_action{action_name='roofline', ...}` beside the rule that forbids
+  proposing it.
+* The prompt no longer says that the session-state block carries the full
+  `analysis.md`, that dispatches are deferred while a roofline refresh runs,
+  or that a `=== Phase-allowed actions ===` block, a working-memory block or a
+  `KB hints` block exists. It names `untried_hot_kernels` and the `tested:`
+  rows of `explore_search`, which are what a turn shows, where it named
+  `untried_hot_reusable_kernels`, `explore_search.winners_history`,
+  `explore_search.rejected` and `<action>_attempts`.
+
 ---
 
 ## Upgrading from 1.1.x

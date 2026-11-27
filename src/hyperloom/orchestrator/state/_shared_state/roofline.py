@@ -178,7 +178,6 @@ class _RooflineStateMixin:
         analysis_md_path = result.get("trace_report_path") or ""
         analysis_md_text = ""
         if analysis_md_path:
-            # Stored verbatim; the prompt path strips base64 data-URLs.
             with suppress(OSError, ValueError):
                 analysis_md_text = Path(analysis_md_path).read_text(encoding="utf-8", errors="replace")
         self.last_trace_analyze = {

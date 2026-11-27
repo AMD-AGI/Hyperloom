@@ -28,7 +28,6 @@ class ContextProvider:
 
     shared_state: Any
     inbox_reader: Callable[[int], str]
-    analysis_reader: Callable[[], str]
     recent_outcomes_reader: Callable[[int], str]
     running_tasks_reader: Callable[[], str]
     reference_reader: Callable[[str], str]
@@ -38,29 +37,9 @@ class ContextProvider:
         out = fn()
         return out if isinstance(out, str) and out else f"({label}: empty)"
 
-    def mission_status(self) -> str:
-        """Return the mission-status summary projection."""
-        return self._safe(self.shared_state.to_mission_summary, "mission_status")
-
-    def shared_state_summary(self) -> str:
-        """Return the prompt-oriented shared-state summary projection."""
-        return self._safe(self.shared_state.to_prompt_summary, "shared_state")
-
     def gaps(self) -> str:
         """Return the open-gaps summary projection."""
         return self._safe(lambda: self.shared_state.to_gaps_summary(max_attempts=5), "gaps")
-
-    def warm_start(self) -> str:
-        """Return the warm-start summary projection."""
-        return self._safe(self.shared_state.to_warm_start_summary, "warm_start")
-
-    def intervention_mix(self) -> str:
-        """Return the intervention-mix summary projection."""
-        return self._safe(self.shared_state.to_intervention_mix_summary, "intervention_mix")
-
-    def analysis_md(self) -> str:
-        """Return the current ``analysis.md`` contents."""
-        return self._safe(self.analysis_reader, "analysis_md")
 
     def runtime_findings(self) -> str:
         """Return the runtime findings scanned from the current best's server log."""
@@ -155,48 +134,12 @@ _VARIANT_FAILURES_SCHEMA: dict[str, Any] = {
 }
 CONTEXT_TOOL_SPECS: tuple[tuple[str, str, dict[str, Any], str], ...] = (
     (
-        "get_mission_status",
-        "Return the mission-progress snapshot: baseline, current best, "
-        "raw vs validated cumulative gain, optimization-stack freshness, "
-        "untried hot kernels, and time budget.",
-        _NO_ARGS_SCHEMA,
-        "mission_status",
-    ),
-    (
-        "get_shared_state",
-        "Return the full shared session-state summary (the verbose "
-        "execution detail: best config, stack entries, per-action attempt "
-        "history, discovered flags, warnings).",
-        _NO_ARGS_SCHEMA,
-        "shared_state_summary",
-    ),
-    (
         "get_gaps",
         "Return the structured gaps[] ledger: canonical_id / layer / "
         "severity / symptom / attempt count and up to 5 recent attempts "
         "(each with action, outcome, error_class, and failure_id when present).",
         _NO_ARGS_SCHEMA,
         "gaps",
-    ),
-    (
-        "get_warm_start",
-        "Return the Recipe KB T0 warm-start snapshot (cross-session priors: "
-        "what worked / failed in prior runs on a similar stack).",
-        _NO_ARGS_SCHEMA,
-        "warm_start",
-    ),
-    (
-        "get_intervention_mix",
-        "Return the config-vs-code_patch intervention-mix telemetry "
-        "(how many config keeps vs source-patch keeps so far).",
-        _NO_ARGS_SCHEMA,
-        "intervention_mix",
-    ),
-    (
-        "show_analysis_md",
-        "Return the latest TraceLens report snapshot (analysis.md, or analysis.json on the non-llm route).",
-        _NO_ARGS_SCHEMA,
-        "analysis_md",
     ),
     (
         "get_runtime_findings",

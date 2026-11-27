@@ -17,7 +17,6 @@ from hyperloom.inference_optimizer.session.geak_rebench_verdict import (
     REBENCH_FAILED_STATUSES,
     REBENCH_UNMEASURED_GIVEN_UP,
 )
-from ...mcp_tool_names import qualified_context_tool_name
 from . import gap_rows, variant_line, warm_start
 from .attempt_audit import _AUDIT_ACTIONS
 from .phase_state import GAP_SEVERITY_RANK
@@ -500,7 +499,6 @@ class _RenderMixin:
             f"last_profile_args='{self.last_profile_args}'",
             f"last_trace_analyze={self._format_trace_analyze_blob(self.last_trace_analyze)}",
             f"profiler_digest={self._format_profiler_digest()}",
-            # Full TraceLens analysis.md.
             f"analysis_md={self._format_analysis_md_pointer()}",
             f"explore_search={self._format_search_state(self.explore_search)}",
             # Pending KEEPs the integrate gate will drain.
@@ -581,7 +579,7 @@ class _RenderMixin:
         suffix = f"\n[+{earlier} earlier failures]" if earlier > 0 else ""
         return "\n".join(rows) + suffix if rows else "(none)"
 
-    def _format_rejected_kernel_patches(self) -> str:
+    def _format_rejected_kernel_patches(self) -> list[str] | str:
         """Render the most recent rejected kernel patches for the prompt."""
         from ...kernel import kernel_decisions
 
@@ -648,7 +646,7 @@ class _RenderMixin:
         flags = str(evidence.get("requested_server_args") or "") if isinstance(evidence, dict) else ""
         return _flatten_for_prompt(dedupe_extra_server_args(flags.strip())) or "(unknown)"
 
-    def _format_optimization_stack(self) -> str:
+    def _format_optimization_stack(self) -> list[str] | str:
         """Render the optimization stack as ``action:variant`` parts."""
         if not self.optimization_stack:
             return "(none)"
@@ -660,7 +658,7 @@ class _RenderMixin:
         return parts or "(none)"
 
     def _format_analysis_md_pointer(self) -> str:
-        """Point the prompt at the ``show_analysis_md`` tool once a TraceLens snapshot exists. Empty cache → one-line hint to propose ``roofline``."""
+        """Name the TraceLens report's file once a snapshot exists; before that, say the Coordinator owns the analysis."""
         cached = self.last_trace_analyze or {}
         if not cached.get("analysis_md_text"):
             return (
@@ -669,17 +667,16 @@ class _RenderMixin:
                 "+10% validated-gain crossing; wait for the pending "
                 "task to land, or continue with specialist / explore "
                 "work that does not need analysis.md. `roofline` and "
-                "`profile` are Coordinator-managed; you may also propose "
-                "them directly if the situation warrants it.)"
+                "`profile` are Coordinator-managed; a proposal for either "
+                "is denied.)"
             )
         snap = cached.get("roofline_snapshot_id", "?")
         gain = to_float(cached.get("roofline_baseline_gain_at_snapshot", 0.0))
         gain_str = "?" if gain is None else f"{gain:.2f}"
-        show_analysis_md = qualified_context_tool_name("show_analysis_md")
         return (
             f"(TraceLens snapshot #{snap}, gain at snapshot = {gain_str}% — "
-            "full report not inlined; see profiler_digest above or call the "
-            f"{show_analysis_md} context tool for the TraceLens report.)"
+            "full report not inlined; see profiler_digest above. "
+            f"Report file: {cached.get('analysis_md_path')})"
         )
 
     def _format_profiler_digest(self) -> str:

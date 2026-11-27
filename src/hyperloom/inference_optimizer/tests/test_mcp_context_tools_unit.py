@@ -15,13 +15,9 @@ from hyperloom.orchestrator.roles import mcp_context_tools as mct
 
 
 def _shared_state():
-    """Build a fake SharedState exposing the to_*_summary projections."""
+    """Build a fake SharedState exposing the gaps projection and the failure ledger."""
     return SimpleNamespace(
-        to_mission_summary=lambda: "mission",
-        to_prompt_summary=lambda: "prompt",
-        to_gaps_summary=lambda max_attempts=0: "gaps",
-        to_warm_start_summary=lambda: "warm",
-        to_intervention_mix_summary=lambda: "mix",
+        to_gaps_summary=lambda max_attempts=0: f"gaps(max_attempts={max_attempts})",
         failures=[],
         find_failure=lambda fid: None,
         failures_for_task=lambda tid: [],
@@ -32,7 +28,6 @@ def _provider(shared_state, **readers):
     """Build a ContextProvider whose readers are empty stubs unless overridden."""
     stubs = {
         "inbox_reader": lambda since_seq: "",
-        "analysis_reader": lambda: "",
         "recent_outcomes_reader": lambda top_k: "",
         "running_tasks_reader": lambda: "",
         "reference_reader": lambda name: "",
@@ -56,9 +51,9 @@ def test_safe_handles_exception():
 
 
 def test_an_empty_projection_reads_as_empty():
-    p = _provider(shared_state=SimpleNamespace(to_mission_summary=lambda: ""), analysis_reader=lambda: None)
-    assert p.mission_status() == "(mission_status: empty)"
-    assert p.analysis_md() == "(analysis_md: empty)"
+    p = _provider(shared_state=SimpleNamespace(to_gaps_summary=lambda max_attempts=0: ""), inbox_reader=lambda s: None)
+    assert p.gaps() == "(gaps: empty)"
+    assert p.inbox() == "(inbox: empty)"
 
 
 def test_runtime_findings_reads_current_best_slot(tmp_path):
@@ -79,9 +74,9 @@ def test_runtime_findings_reads_current_best_slot(tmp_path):
 
 async def test_make_handler_success():
     p = _provider(shared_state=_shared_state())
-    handler = mct._make_handler(p, "mission_status")
+    handler = mct._make_handler(p, "gaps")
     out = await handler({})
-    assert out["content"][0]["text"] == "mission"
+    assert out["content"][0]["text"] == "gaps(max_attempts=5)"
 
 
 @pytest.mark.parametrize(
@@ -124,14 +119,14 @@ async def test_read_projection_stays_on_the_calling_thread():
     owner_thread = threading.get_ident()
     seen = []
 
-    def read():
+    def read(max_attempts=0):
         seen.append(threading.get_ident())
-        return "mission"
+        return "gaps"
 
-    p = _provider(shared_state=SimpleNamespace(to_mission_summary=read))
-    out = await mct._make_handler(p, "mission_status")({})
+    p = _provider(shared_state=SimpleNamespace(to_gaps_summary=read))
+    out = await mct._make_handler(p, "gaps")({})
     assert seen == [owner_thread]
-    assert out == {"content": [{"type": "text", "text": "mission"}]}
+    assert out == {"content": [{"type": "text", "text": "gaps"}]}
 
 
 # ---- build_context_tools_server ----
@@ -158,28 +153,37 @@ def test_build_server_registers_every_context_tool_with_the_sdk():
     assert len(created["tools"]) == len(mct.CONTEXT_TOOL_SPECS)
 
 
-@pytest.mark.parametrize(
-    ("tool_name", "text"),
-    [
-        ("get_mission_status", "mission"),
-        ("get_shared_state", "prompt"),
-        ("get_gaps", "gaps"),
-        ("get_warm_start", "warm"),
-        ("get_intervention_mix", "mix"),
-        ("show_analysis_md", "md"),
-    ],
-)
-async def test_a_mounted_tool_returns_the_projection_it_names(tool_name, text):
+def _mounted_handlers():
+    """The handlers ``build_context_tools_server`` registers with the SDK, by tool name."""
     handlers = {}
     mct.build_context_tools_server(
         SimpleNamespace(
             tool=lambda name, _description, _schema: lambda handler: handlers.setdefault(name, handler),
             create_sdk_mcp_server=lambda _name, _version, tools: tools,
         ),
-        _provider(shared_state=_shared_state(), analysis_reader=lambda: "md"),
+        _provider(shared_state=_shared_state()),
     )
-    out = await handlers[tool_name]({})
-    assert out["content"][0]["text"] == text
+    return handlers
+
+
+async def test_get_gaps_returns_the_gaps_ledger_with_attempt_rows():
+    """The pushed gaps block carries no attempt rows; the tool asks for five per gap."""
+    out = await _mounted_handlers()["get_gaps"]({})
+    assert out["content"][0]["text"] == "gaps(max_attempts=5)"
+
+
+def test_the_mounted_tools_are_the_ones_the_prompt_does_not_push():
+    """A block every turn already carries has no pull twin: the turn's prompt is its one copy."""
+    assert set(_mounted_handlers()) == {
+        "get_gaps",
+        "get_runtime_findings",
+        "get_inbox",
+        "get_recent_outcomes",
+        "get_running_tasks",
+        "read_reference",
+        "get_failure",
+        "get_variant_failures",
+    }
 
 
 def test_spec_methods_all_exist_on_provider():

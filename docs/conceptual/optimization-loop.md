@@ -122,8 +122,8 @@ PRELUDE establishes the session baseline:
 The `roofline` executor makes no LLM call of its own. It runs the profile and
 the TraceLens analysis, and stores TraceLens's report (`analysis.md`, or
 `analysis.json` when the session analyses traces without an LLM) verbatim with
-the snapshot; Orchestration reads that report through the `show_analysis_md`
-context tool.
+the snapshot. Orchestration's prompt carries a digest of the snapshot
+(`profiler_digest`) and names the report's file on its `analysis_md=` line.
 
 `model_class` is supplied by the launcher or derived once from model
 metadata at boot. There is no separate live `classify` action.
@@ -713,8 +713,7 @@ what an earlier turn happened to remember.
 - **Context tools**: A read-only MCP surface lets the agent pull what the
   projection leaves out — finished outcomes (`get_recent_outcomes`),
   a mid-turn re-read of in-flight work (`get_running_tasks`), failure packets (`get_failure` /
-  `get_variant_failures`), reference docs (`read_reference`) and the raw
-  `analysis.md` (`show_analysis_md`).
+  `get_variant_failures`) and reference docs (`read_reference`).
   Transports without MCP tools get the projection only.
 - **Resume**: On resume the projection is rebuilt from
   `orchestration_memory` plus the authoritative `SharedState` facts —

@@ -22,7 +22,6 @@ from ..specialists.in_flight import in_flight_domains
 from ..specialists.reap_watch import newest_activity, specialist_activity_paths
 from ..roles.base import BackendTurnResult
 from ..bus.message_bus import Message
-from hyperloom.inference_optimizer.tracelens_md import strip_base64_data_urls
 from hyperloom.inference_optimizer.trace.conversation_trace import ConversationRecord, append_conversation
 from ..state.failure_evidence import UNMEASURED_OUTCOMES, render_failure_line
 from ..state.shared_state import KbInjection
@@ -343,7 +342,6 @@ class ConversationCollaborator(CoordinatorCollaborator):
         provider = ContextProvider(
             shared_state=self.shared_state,
             inbox_reader=self._context_inbox_reader,
-            analysis_reader=self._context_analysis_reader,
             recent_outcomes_reader=self._context_recent_outcomes_reader,
             running_tasks_reader=self._context_running_tasks_reader,
             reference_reader=self._context_reference_reader,
@@ -487,22 +485,6 @@ class ConversationCollaborator(CoordinatorCollaborator):
         if newest is None:
             return None
         return max(0.0, now_unix - newest)
-
-    def _context_analysis_reader(self) -> str:
-        """Return the latest TraceLens analysis.md snapshot text."""
-        lta = self.shared_state.last_trace_analyze or {}
-        text = lta.get("analysis_md_text") or ""
-        if text:
-            return strip_base64_data_urls(text)
-        path = str(lta.get("analysis_md_path") or "")
-        if path:
-            try:
-                from pathlib import Path as _Path
-
-                return strip_base64_data_urls(_Path(path).read_text(encoding="utf-8"))
-            except OSError as exc:
-                return f"(analysis.md unreadable at {path}: {exc!r})"
-        return "(no analysis.md snapshot yet)"
 
     def record_reactor_conversation(self, result: BackendTurnResult, *, context: str = "") -> None:
         """Append one ``conversations.jsonl`` row for a reactor turn, with ``context`` ahead of the backend's prompt."""

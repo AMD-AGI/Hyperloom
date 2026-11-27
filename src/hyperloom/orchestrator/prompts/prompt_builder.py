@@ -4,7 +4,7 @@
 """Compose the Orchestration agent's system prompt from typed inputs.
 
 Wraps the ``orchestration.md`` rules fragment with generated sections
-(mission, session context, pipeline/budget, phase contract, action catalogue,
+(mission, session context, phase contract, action catalogue,
 decision framework, cycle directive, optional kernel-opt reference, rules).
 Deterministic for given inputs; the only IO is reading the rules fragment.
 
@@ -45,14 +45,6 @@ _PHASE_ORDER: tuple[str, ...] = (
     "deep",
     "finalize",
 )
-_PHASE_HEADERS: dict[str, str] = {
-    "prep": "Prep — initialise session metadata. Always finishes first.",
-    "measure": "Measure — establish baseline_tput. Gate for everything else.",
-    "analysis": "Analysis — read-only; produces traces / candidate kernels.",
-    "explore": "Explore — propose modifications; one round produces a candidate, not yet validated.",
-    "deep": "Deep — kernel_agent-owned. Emit via REQUEST(target_agent='kernel_agent', kind=...).",
-    "finalize": "Finalize — write the final report.",
-}
 
 
 # Phases each scoped prompt module belongs to.
@@ -207,10 +199,12 @@ def _section_session_context(session: SessionContext, *, kernel_enabled: bool) -
         lines += agentx_session_lines(session.agentx_corpus_shape, session.agentx_grading, session.agentx_backend)
     lines += [
         "",
-        "The Coordinator supplies the session context (resource pools,",
-        "constraints, advisories) first, then the per-tick blocks (Phase,",
-        "Mission progress, Time budget, Tick, Shared session state,",
-        "Untested proposals, KB hints, Plateau advisory, inbox tail) every tick.",
+        "The Coordinator supplies the session context (constraints, resource",
+        "pools, warm start, current gaps, specialist findings, advisories)",
+        "first, then the per-tick blocks (Phase, Mission progress, Time budget,",
+        "Tick, Shared session state, Tasks in flight, Untested proposals,",
+        "Experience KB warm-start evidence, Plateau advisory, Trajectory",
+        "review, inbox tail) every tick.",
         "The Time-budget block carries `remaining=X.Xmin`.",
         "See PHASE CONTRACT below for the phase chain, per-phase allowed",
         "actions, and phase-transition rules.",
@@ -248,7 +242,7 @@ def _section_phase_semantics(
         disabled_suffix["KERNEL_AGENT"] = "--no-kernel"
 
     lines: list[str] = [
-        "## 3a. PHASE CONTRACT",
+        "## 3. PHASE CONTRACT",
         "",
         "The Coordinator runs the optimization as a linear pipeline.",
         "Each tick it injects a `=== Phase ===` block with the current",
@@ -316,14 +310,14 @@ def _filter_actions(
     return out
 
 
-def _phase_eta_summary(actions: list[ActionMetadata]) -> list[tuple[str, float, list[str]]]:
-    """Group actions by phase in _PHASE_ORDER; return (phase, eta_min_sum, names).
+def _actions_by_phase(actions: list[ActionMetadata]) -> list[tuple[str, list[ActionMetadata]]]:
+    """Group actions by pipeline phase, phases in ``_PHASE_ORDER``.
 
     Args:
         actions: The enabled actions to group by pipeline phase.
 
     Returns:
-        A list of ``(phase, eta_min_sum, names)`` tuples ordered by ``_PHASE_ORDER``.
+        A list of ``(phase, actions)`` pairs ordered by ``_PHASE_ORDER``.
 
     Raises:
         ValueError: When an action's ``pipeline_phase`` is not in ``_PHASE_ORDER``.
@@ -331,52 +325,7 @@ def _phase_eta_summary(actions: list[ActionMetadata]) -> list[tuple[str, float, 
     bucket: dict[str, list[ActionMetadata]] = {}
     for a in actions:
         bucket.setdefault(a.pipeline_phase, []).append(a)
-    return [
-        (phase, sum(max(0.0, a.typical_runtime_min) for a in bucket[phase]), [a.name for a in bucket[phase]])
-        for phase in sorted(bucket, key=_PHASE_ORDER.index)
-    ]
-
-
-def _section_pipeline_and_budget(
-    actions: list[ActionMetadata],
-    *,
-    max_minutes: int,
-) -> list[str]:
-    """Build the PIPELINE & TIME BUDGET section lines.
-
-    Args:
-        actions (list[ActionMetadata]): The enabled actions, summarised by
-            phase ETA.
-        max_minutes (int): Wall-clock budget for the run, compared against the
-            summed phase ETAs.
-
-    Returns:
-        list[str]: Markdown lines describing per-phase ETAs and budget guidance.
-    """
-    lines: list[str] = [
-        "## 3. PIPELINE & TIME BUDGET",
-        "",
-        "Run roughly in phase order; you may revisit a phase, but never skip prep / measure.",
-        "Per-phase typical wall-clock (sum of typical_runtime_min over enabled actions):",
-        "",
-    ]
-    eta_total = 0.0
-    for phase, eta, names in _phase_eta_summary(actions):
-        header = _PHASE_HEADERS.get(phase, phase)
-        eta_total += eta
-        joined = ", ".join(names) or "(none enabled)"
-        lines.append(f"- **{phase}** (~{eta:.0f} min) — {header}")
-        lines.append(f"    actions: {joined}")
-    lines.extend(
-        [
-            "",
-            f"Sum of typical phase ETAs: ~{eta_total:.0f} min vs max_minutes={max_minutes}.",
-            "If sum >> budget, prefer high-gain/low-cost actions and skip optional",
-            "phases (analysis). If sum << budget, do an extra explore round",
-            "before report.",
-        ]
-    )
-    return lines
+    return [(phase, bucket[phase]) for phase in sorted(bucket, key=_PHASE_ORDER.index)]
 
 
 def _format_gain_pair(meta: ActionMetadata) -> str:
@@ -407,8 +356,9 @@ def _format_emit_hint(meta: ActionMetadata) -> str:
 
     Kernel-owned actions render a ``REQUEST{...}`` template; ``specialist`` /
     ``integrate_patch`` render their closed ``delegate`` payload contracts;
-    ``report`` renders a fixed zero-gain propose_action; everything else
-    renders a ``propose_action`` template.
+    ``report`` renders a fixed zero-gain propose_action; an action the
+    Coordinator dispatches itself renders no template; everything else renders
+    a ``propose_action`` template.
 
     Args:
         meta (ActionMetadata): The action to build an emit hint for.
@@ -425,6 +375,8 @@ def _format_emit_hint(meta: ActionMetadata) -> str:
             # gate then denies.
             return f"(no emit — Coordinator dispatches `{kind_hint}` at KERNEL entry)"
         return f"REQUEST{{target_agent='kernel_agent', kind='{kind_hint}', params={{...}}}}"
+    if meta.name in COORDINATOR_INTERNAL_ACTIONS:
+        return "(no emit — the Coordinator dispatches it; a proposal is denied as `phase_incompatible`)"
     if meta.name == "report":
         return "propose_action{action_name='report', predicted_gain_pct=0.0}"
     if meta.name == "specialist":
@@ -510,13 +462,11 @@ def _section_action_catalogue(actions: list[ActionMetadata]) -> list[str]:
         "crash_risk / one-line description / how to emit it in its own phase.",
         "",
     ]
-    by_phase = _phase_eta_summary(actions)
-    name_to_meta = {a.name: a for a in actions}
-    for action_phase, _eta, names in by_phase:
+    for action_phase, phase_actions in _actions_by_phase(actions):
         lines.append(f"### {action_phase}")
         lines.append("")
-        for name in names:
-            meta = name_to_meta[name]
+        for meta in phase_actions:
+            name = meta.name
             tag_parts: list[str] = []
             if name in KERNEL_AGENT_OWNED_ACTIONS:
                 tag_parts.append("KERNEL_AGENT-OWNED")
@@ -551,9 +501,9 @@ _PHASE_AWARE_SELECTION_LINES: tuple[str, ...] = (
     "5. **Phase-aware action selection**. There is no system-side",
     "   priority list. Pick the next action by reading FACTS in this order:",
     "",
-    "   a. **Phase + allowed actions** (the `=== Phase ===` /",
-    "      `=== Phase-allowed actions ===` blocks). PolicyGate denies",
-    "      anything outside the allowed set.",
+    "   a. **Phase + allowed actions** (the `=== Phase ===` block and",
+    "      its `allowed` line). PolicyGate denies anything outside the",
+    "      allowed set.",
     "   b. **Current gaps** (the `=== Current gaps ===` block, sourced",
     "      from `SharedState.gaps[]`). Each row shows canonical_id /",
     "      layer / severity / symptom / attempts count + last attempt.",
@@ -562,7 +512,7 @@ _PHASE_AWARE_SELECTION_LINES: tuple[str, ...] = (
     "      and whether the attempts history shows the gap is still",
     "      worth pushing on. When the section is missing it means",
     "      baseline hasn't completed yet — fall back to",
-    "      `last_action_failures` + `explore_search.winners_history`.",
+    "      `last_action_failures` + the `tested:` rows of `explore_search`.",
     "   c. **KB sub-graphs + warm-start recipe** when present —",
     "      cross-session priors carry " + "*qualitative* hints (what worked / what failed last time).",
     "   d. **`=== Untested proposals (current cycle) ===`** — the",
@@ -640,9 +590,7 @@ def _section_decision_framework(*, phase: str = "", transport: str = "") -> list
         "4. **Analysis is auto-managed**. Roofline/profile is enqueued by "
         "the Coordinator at PRELUDE and at every +10% validated-gain "
         "watermark crossing. Never propose ``profile`` or ``roofline`` "
-        "(see Hard rules). While a refresh is in flight, specialist / "
-        "explore / kernel_agent-owned dispatches are deferred until "
-        "``analysis.md`` / ``last_profile_trace`` refreshes.",
+        "(see Hard rules).",
     )
     lines.extend(_PHASE_AWARE_SELECTION_LINES)
     lines.extend(_failure_recovery_lines(phase=phase, transport=transport))
@@ -683,7 +631,7 @@ def _failure_recovery_lines(*, phase: str, transport: str = "") -> list[str]:
         "",
         "When the inbox carries a fresh `delegated_result{state!='succeeded'}`",
         "or `last_action_failures[-1].action == <X>`, do NOT re-propose the same",
-        "action with the same params. Consult `last_<action>` / `<action>_attempts`",
+        "action with the same params. Consult `last_<action>`",
         detail,
         "",
         "Rules (apply in order):",
@@ -721,16 +669,15 @@ def _idea_generation_lines() -> list[str]:
         "",
         "### IDEA GENERATION (apply after EVERY explore round)",
         "",
-        "Compose the next `explore` grid from `explore_search` (winners +",
-        "rejected, each with `±x.xx% gain_pct`):",
+        "Compose the next `explore` grid from the `tested:` rows of",
+        "`explore_search` (each with its outcome and `±x.xx%` gain):",
         "",
         "1. **Sibling values** — if `--max-num-seqs 256` won, try 128 / 512;",
         "   sweep a winning boolean's related `*_AITER_*` family.",
         "2. **Synergy** — combine last round's winners into one variant. Check",
-        "   `explore_search.winners_history` / `.rejected` first: a combination",
-        "   already measured there carries its result, so re-running it buys a",
-        "   number you already have.",
-        "3. **Re-examine rejects** — per `explore_search.rejected` variant, judge",
+        "   the `tested:` rows first: a combination already measured there",
+        "   carries its result, so re-running it buys a number you already have.",
+        "3. **Re-examine rejects** — per `tested:` row that is not a KEEP, judge",
         "   whether the failure is stale, fixable, or ruled out; re-propose the",
         "   same config to revalidate or change the value (a `-2%` reject is a",
         "   dead flag; `-0.3%` may clear the bar once patched). A config the",
@@ -801,7 +748,7 @@ allowed action until the patch lands on `optimization_stack`:
 
   **Multi-KEEP queue:** `pending_keep_kernels` (sorted strongest-first)
   lists queued KEEPs; integrate `[0]` each tick. Do NOT propose `report`
-  while it is non-empty. `untried_hot_reusable_kernels` may list kernels the
+  while it is non-empty. `untried_hot_kernels` may list kernels the
   Coordinator's nomination pass declined; those are not yours to drain.
 
 ### KERNEL TARGETING
@@ -1038,7 +985,6 @@ def build_orchestration_prompt(
     sections: list[list[str]] = [
         _section_mission(),
         _section_session_context(replace(session, framework=framework_norm), kernel_enabled=kernel_enabled),
-        _section_pipeline_and_budget(actions, max_minutes=session.max_minutes),
         _section_phase_semantics(
             kernel_enabled=kernel_enabled,
             framework_agent_phase_enabled=session.framework_agent_phase_enabled,

@@ -964,7 +964,7 @@ async def test_promote_roofline_does_not_remutate_state(session_dir):
     assert s.last_profile_status == "succeeded"
 
 
-def test_format_analysis_md_pointer_points_at_the_tool_instead_of_inlining():
+def test_the_session_state_block_names_the_report_file_instead_of_inlining_it():
     s = SharedState()
     s.last_trace_analyze = {
         "roofline_snapshot_id": 7,
@@ -972,10 +972,11 @@ def test_format_analysis_md_pointer_points_at_the_tool_instead_of_inlining():
         "analysis_md_text": "# Report\nverbatim body text\n",
         "analysis_md_path": "/p/analysis.md",
     }
-    rendered = s._format_analysis_md_pointer()
-    assert "verbatim body text" not in rendered
-    assert "show_analysis_md" in rendered
-    assert "snapshot #7" in rendered
+    [pointer] = [line for line in s.to_prompt_summary().splitlines() if line.startswith("analysis_md=")]
+    assert "verbatim body text" not in pointer
+    assert "Report file: /p/analysis.md" in pointer
+    assert "snapshot #7" in pointer
+    assert "mcp__" not in pointer
 
 
 # N26: RooflineExecutor auto-retries trace_analyze on steady_state_chunk_{empty,missing} with an alternate mode.

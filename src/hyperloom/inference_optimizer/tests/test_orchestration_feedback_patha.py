@@ -108,7 +108,6 @@ def test_context_provider_recent_outcomes_delegates_to_reader():
     provider = ContextProvider(
         shared_state=object(),
         inbox_reader=lambda since_seq: "",
-        analysis_reader=lambda: "",
         recent_outcomes_reader=lambda k: f"outcomes(top_k={k})",
         running_tasks_reader=lambda: "",
         reference_reader=lambda name: "",

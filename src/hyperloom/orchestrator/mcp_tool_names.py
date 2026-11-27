@@ -29,12 +29,7 @@ EMIT_INTENT_TOOL_QUALIFIED = qualified_tool_name(MCP_SERVER_NAME, EMIT_INTENT_TO
 
 # The context tools, in the order ``roles.mcp_context_tools`` mounts them.
 CONTEXT_TOOL_NAMES: tuple[str, ...] = (
-    "get_mission_status",
-    "get_shared_state",
     "get_gaps",
-    "get_warm_start",
-    "get_intervention_mix",
-    "show_analysis_md",
     "get_runtime_findings",
     "get_inbox",
     "get_recent_outcomes",

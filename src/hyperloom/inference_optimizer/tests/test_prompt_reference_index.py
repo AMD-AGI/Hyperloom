@@ -50,7 +50,6 @@ def file_reader(refs_dir):
     return ContextProvider(
         shared_state=None,
         inbox_reader=lambda since_seq: "",
-        analysis_reader=lambda: "",
         recent_outcomes_reader=lambda top_k: "",
         running_tasks_reader=lambda: "",
         reference_reader=_read,

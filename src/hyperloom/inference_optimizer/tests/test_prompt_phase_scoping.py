@@ -10,7 +10,7 @@ from datetime import datetime, timezone
 import pytest
 
 from hyperloom.inference_optimizer.session.paths import asset_system_prompts_dir
-from hyperloom.inference_optimizer.protocol.action_surfaces import ACTION_CATALOGUE
+from hyperloom.inference_optimizer.protocol.action_surfaces import ACTION_CATALOGUE, COORDINATOR_INTERNAL_ACTIONS
 from hyperloom.orchestrator.phases import machine_state as _ps
 from hyperloom.orchestrator.phases import phase_predicates, phase_transitions
 from hyperloom.orchestrator.prompts.prompt_builder import (
@@ -71,6 +71,18 @@ def test_the_report_catalogue_entry_names_the_only_phase_that_admits_it(registry
     """The catalogue entry renders in every phase, so it must not invite a ``report`` the phase refuses."""
     assert [phase for phase in _ps.PHASE_NAMES if "report" in _ps.allowed_actions_for(phase)] == [_ps.PHASE_CLOSE]
     assert "only in CLOSE" in registry["report"].description
+
+
+def test_an_action_the_coordinator_dispatches_has_no_proposal_template(registry):
+    """No phase admits a proposal for it, so its catalogue entry must not show how to send one."""
+    prompt = _build(registry, "")
+    assert "- **roofline**" in prompt
+    for name in COORDINATOR_INTERNAL_ACTIONS:
+        assert all(name not in _ps.allowed_actions_for(phase) for phase in _ps.PHASE_NAMES)
+        assert f"action_name='{name}'" not in prompt
+    lines = prompt.splitlines()
+    entry = next(i for i, line in enumerate(lines) if line.startswith("- **roofline**"))
+    assert lines[entry + 2].strip().startswith("EMIT: (no emit")
 
 
 @pytest.mark.parametrize(

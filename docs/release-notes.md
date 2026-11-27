@@ -165,6 +165,26 @@ it.
   `emit_intent` call of a turn and no longer drops a repeated one that
   arrived in Claude Code's `__unparsedToolInput` wrapper. See
   [Upgrade](reference/upgrade.md).
+- **Five Orchestration context tools are removed, and the prompt stops
+  describing what a turn does not carry.** **Breaking** for an `--orch-prompt`
+  that names one: `get_mission_status`, `get_shared_state`, `get_warm_start`
+  and `get_intervention_mix` returned the Mission progress, Shared session
+  state, Warm start and Intervention mix blocks that every turn's prompt
+  already holds, and `show_analysis_md` returned TraceLens's `analysis.md`,
+  whose path the `analysis_md=` line of the session-state block now names.
+  `agents/orchestration/mcp_setup.json` lists the eight context tools that
+  remain. The system prompt loses its `PIPELINE & TIME BUDGET` section, which
+  advised skipping analysis and adding an explore round before the report
+  (the Coordinator schedules both); `PHASE CONTRACT` is section 3. The
+  catalogue entry of `roofline` no longer shows a proposal template, and the
+  session-state block no longer says `roofline` or `profile` may be proposed
+  directly: every phase denies that proposal, as before. Sentences that named
+  a block or a key no turn shows (a full inlined `analysis.md`, `=== Phase-allowed
+  actions ===`, a working-memory block, `KB hints`,
+  `explore_search.winners_history`, `<action>_attempts`,
+  `untried_hot_reusable_kernels`) now name what a turn does show, and the
+  statement that dispatches wait for a roofline refresh is gone, since they
+  do not. See [Upgrade](reference/upgrade.md).
 - **forge-loop runs every round as lanes and has no planning stage.** Every
   iteration is one round: one lane per focus the Analysis Agent divides its
   evidence into (at most `--lanes`, and one lane with no focus when it divides

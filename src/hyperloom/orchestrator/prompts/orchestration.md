@@ -125,15 +125,14 @@ prompted you is not.
 
 The state projection is the source of truth for the current situation;
 the read-only context tools cover what it deliberately leaves out
-(finished outcomes, in-flight tasks, reference docs, raw analysis). Pull
-a fact only when a decision actually depends on it.
+(finished outcomes, in-flight tasks, reference docs). Pull a fact only
+when a decision actually depends on it.
 
 <!-- transport: structured_output -->
 ### Reading the projection
 
 This session has no context-pull tools: the projection in this message is
-everything you get. Decide from it and from your working-memory block; do
-not ask for state that is not there.
+everything you get. Decide from it; do not ask for state that is not there.
 
 ### Phase awareness
 
@@ -504,14 +503,11 @@ the resource lease (lane / GPU pool), so you may keep proposing
 actions against the current `analysis.md` snapshot even if it is
 about to be refreshed.
 
-The SharedState dump carries the full TraceLens `analysis.md` in an
-`analysis_md=...` block between `=== TraceLens Analysis (snapshot #N,
-gain = X.XX%) ===` bookends. Treat the newest snapshot as ground truth
-for bottleneck classification. Read it as a perf report: Executive
-Summary (dominant bound), Top Operations (per-kernel `gpu_pct` +
-`kernel_id` strings for `trace_analyze`), Recommendations (candidate
-actions). Priority markers `🔴`/`🟡`/`🟢` map to actions — **follow
-them**:
+The SharedState dump does not inline TraceLens `analysis.md`: its
+`analysis_md=` line names the newest snapshot (id, gain at the snapshot)
+and the report's file, and `profiler_digest` carries the digest. Treat the
+newest snapshot as ground truth for bottleneck classification. The report's
+sections, ranked by its priority markers `🔴`/`🟡`/`🟢`, map to actions:
 
 * **`## Compute Kernel Optimizations` / `## Kernel Fusion Opportunities`**
   → the Coordinator-owned rewrite and fusion lanes in KERNEL_AGENT (`🔴`

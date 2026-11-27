@@ -171,9 +171,12 @@ def test_format_trace_analyze_skipped_kernels():
 
 def test_format_analysis_md_pointer():
     st = SharedState()
-    assert "no TraceLens snapshot" in st._format_analysis_md_pointer()
+    before_a_snapshot = st._format_analysis_md_pointer()
+    assert "no TraceLens snapshot" in before_a_snapshot
+    assert "a proposal for either is denied" in before_a_snapshot
     st.last_trace_analyze = {
         "analysis_md_text": "# Analysis\nbody",
+        "analysis_md_path": "/s/analysis.md",
         "roofline_snapshot_id": 5,
         "roofline_baseline_gain_at_snapshot": 12.5,
     }

@@ -53,7 +53,6 @@
 /src/hyperloom/orchestrator/trace_analysis/tracelens_skill_runner.py    @tsrikris @devalshahamd @AMD-AGI/SaFE
 /src/hyperloom/orchestrator/trace_analysis/_idle_gate.py                @tsrikris @devalshahamd @AMD-AGI/SaFE
 /src/hyperloom/orchestrator/trace_analysis/tracelens_arch_benchmark.py  @devalshahamd @AMD-AGI/SaFE
-/src/hyperloom/inference_optimizer/tracelens_md.py                      @tsrikris @devalshahamd @AMD-AGI/SaFE
 /docs/components/tracelens.md                                           @tsrikris @devalshahamd @AMD-AGI/SaFE
 
 # Profile and roofline executors
