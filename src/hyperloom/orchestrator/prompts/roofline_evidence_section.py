@@ -120,6 +120,17 @@ def _fusion_findings_rows(findings: Any) -> list[str]:
     return rows
 
 
+_SYSTEM_FINDINGS_GUIDE = (
+    "Each one's fix, which names its lever, is under `## System-Level Optimizations` in the report below: read it "
+    "before acting on one. Idle points at CUDA-graph capture, batch size and async scheduling; exposed "
+    "communication at parallel layout and compute/communication overlap; memory copies at pinned memory, "
+    "non-blocking copies and keeping tensors on device. A lever the framework exposes as a server arg or env is an "
+    "`explore` variant; a fix naming a source change at a call site (a host read such as `.item()`, a redundant "
+    "`.contiguous()`) is a patch there; neither is a kernel rewrite. A family not listed is one TraceLens did not "
+    "flag on this trace."
+)
+
+
 def _system_findings_rows(findings: Any) -> list[str]:
     """List TraceLens' system bottlenecks one line each and point at their fixes; empty when the report has none."""
     if not findings:
@@ -129,13 +140,7 @@ def _system_findings_rows(findings: Any) -> list[str]:
         "",
         *(f"- {system_finding_summary(finding)}" for finding in findings),
         "",
-        "Each one's fix, which names its lever, is under `## System-Level Optimizations` in the report below: read it "
-        "before acting on one. Idle points at CUDA-graph capture, batch size and async scheduling; exposed "
-        "communication at parallel layout and compute/communication overlap; memory copies at pinned memory, "
-        "non-blocking copies and keeping tensors on device. A lever the framework exposes as a server arg or env is an "
-        "`explore` variant; a fix naming a source change at a call site (a host read such as `.item()`, a redundant "
-        "`.contiguous()`) is a patch there; neither is a kernel rewrite. A family not listed is one TraceLens did not "
-        "flag on this trace.",
+        _SYSTEM_FINDINGS_GUIDE,
         "",
     ]
 

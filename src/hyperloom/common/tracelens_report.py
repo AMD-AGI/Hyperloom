@@ -79,11 +79,16 @@ def fusion_findings(report_path: str | Path) -> list[dict[str, Any]]:
 
 
 def system_finding_summary(finding: Mapping[str, Any]) -> str:
-    """A system finding on one line: priority, title, node and its share, the first ``%`` row TraceLens ranks it by."""
-    share = next(m for m in finding["metrics"] if m["unit"] == "%")
-    value = "n/a" if share["value"] is None else f"{share['value']:g}%"
+    """A system finding on one line: priority, title, node and its share, the first ``%`` row TraceLens ranks it by.
+
+    The report is parsed back from model-written markdown, so a block whose table is off-contract has no ``%`` row; its
+    share reads ``n/a`` like an unreadable value, and the finding stays listed.
+    """
+    share = next((m for m in finding["metrics"] if m["unit"] == "%"), None)
+    label = share["metric"] if share else "share"
+    value = "n/a" if share is None or share["value"] is None else f"{share['value']:g}%"
     node = f" [{finding['node']}]" if finding["node"] else ""
-    return f"P{finding['priority']} {finding['operation']}{node}  {share['metric']}: {value}"
+    return f"P{finding['priority']} {finding['operation']}{node}  {label}: {value}"
 
 
 def system_findings(report_path: str | Path) -> list[dict[str, Any]]:
