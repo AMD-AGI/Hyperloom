@@ -439,7 +439,7 @@ async def test_enable_roofline_false_picks_profile_kind(coord: Coordinator):
 
 
 class _StubSub:
-    """Records tasks handed to ``execute_covered``; optionally lands a fresh snapshot to simulate a completed reprofile."""
+    """Records tasks handed to ``execute_covered``; optionally lands a roofline as its executor does (snapshot + trace)."""
 
     def __init__(self, state: Any = None, landed_tput: float | None = None) -> None:
         self.tasks_run: list[Any] = []
@@ -448,11 +448,11 @@ class _StubSub:
 
     async def execute_covered(self, task: Any) -> dict[str, Any]:
         self.tasks_run.append(task)
-        if self._state is not None and self._landed_tput is not None:
-            self._state.roofline_snapshots.append(
-                {"achieved_tok_per_sec": self._landed_tput},
-            )
-        return {}
+        if self._state is None or self._landed_tput is None:
+            return {}
+        self._state.roofline_snapshots.append({"achieved_tok_per_sec": self._landed_tput})
+        self._state.last_profile_trace = f"/runs/roofline/{task.task_id}/torch_trace"
+        return {"status": "succeeded", "last_profile_trace": self._state.last_profile_trace}
 
 
 def _kernel_agent_ctx() -> Any:
@@ -467,6 +467,7 @@ async def test_kernel_agent_reprofiles_on_change(coord: Coordinator, monkeypatch
     coord.sub = _StubSub(coord.shared_state, landed_tput=120.0)
     monkeypatch.setattr(coord.phase_kernel, "geak_enabled", lambda: False)
     monkeypatch.setattr(coord.phase_kernel, "_gemm_tuning_required_before_kernel_opt", lambda: False)
+    monkeypatch.setattr(coord.phase_kernel, "_fusion_required_before_kernel_opt", lambda: False)
     coord.shared_state.cumulative_gain_validated = 20.0  # cur = 100 * 1.20 = 120
 
     await coord.phase_kernel.run_agent(_kernel_agent_ctx())
@@ -838,22 +839,42 @@ async def test_kernel_entry_plain_profile_adopts_its_fresh_trace_at_unchanged_tp
     assert state.last_profile_workload == state.profile_workload_context()
 
 
+_OLD_TRACE = "/runs/profile/old/rank0.pt.trace.json.gz"
+
+
 @pytest.mark.asyncio
-async def test_kernel_entry_failed_plain_profile_keeps_the_trace_and_records_the_failure(coord: Coordinator):
-    """A failed plain-profile reprofile settles as a failed profile and leaves the existing trace in place."""
+@pytest.mark.parametrize(
+    ("result", "trace_after"),
+    [
+        # The round measured, but ProfileExecutor found no trace files: settled as a failed profile, which a queued
+        # profile also records by dropping the trace it could not certify.
+        (
+            {"status": "failed", "error_class": "no_trace_files", "output_throughput": 100.0, "completed_requests": 8},
+            "",
+        ),
+        # The round measured nothing: unpromotable, the trace stays.
+        ({"status": "failed", "error_class": "server_start_failed"}, _OLD_TRACE),
+    ],
+    ids=["no-trace-files", "no-measurement"],
+)
+async def test_kernel_entry_failed_plain_profile_does_not_land(
+    coord: Coordinator, result: dict[str, Any], trace_after: str
+):
+    """A plain-profile reprofile without a trace is recorded as failed and never re-anchors on the trace it lacks."""
     state = coord.shared_state
     state.enable_roofline = False
     state.roofline_snapshots = [{"achieved_tok_per_sec": 100.0}]
     state.last_roofline_tput = 100.0
-    old = "/runs/profile/old/rank0.pt.trace.json.gz"
-    state.last_profile_trace = old
+    state.last_profile_trace = _OLD_TRACE
     state.last_profile_workload = {}
-    coord.sub = _ProfileSub({"status": "failed", "measurement_status": "failed", "error_class": "no_trace_files"})
+    state.cumulative_gain_validated = 20.0  # cur = 120: a landed reprofile would re-anchor there
+    coord.sub = _ProfileSub(result)
 
     await coord.phase_kernel._maybe_reprofile_for_kernel()
 
-    assert state.last_profile_trace == old
+    assert state.last_profile_trace == trace_after
     assert state.last_roofline_tput == 100.0
+    assert not state.last_profile_workload
     assert [f.get("action") for f in state.last_action_failures][-1:] == ["profile"]
 
 

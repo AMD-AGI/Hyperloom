@@ -210,13 +210,13 @@ class KernelPhase(_GeakDispatchMixin, _GeakPromotionMixin, _GemmTuningMixin, Coo
         return f"kernel_entry_g{stack_len}_{hashlib.sha256(identity).hexdigest()[:12]}"
 
     def _reprofile_evidence(self) -> tuple[int, str]:
-        """A landed reprofile adds a roofline snapshot (roofline kind) or adopts a new trace (either kind)."""
+        """A landed reprofile leaves a trace and adds a roofline snapshot (roofline kind) or a new trace path."""
         state = self.shared_state
         return len(state.roofline_snapshots or []), str(state.last_profile_trace or "")
 
     def _adopt_reprofile_snapshot(self, *, anchor_tput: float, evidence_before: tuple[int, str]) -> bool:
         state = self.shared_state
-        landed = self._reprofile_evidence() != evidence_before
+        landed = bool(state.last_profile_trace) and self._reprofile_evidence() != evidence_before
         if not landed:
             log.warning("kernel-entry reprofile produced no new trace; the phase targets the existing trace")
             return landed
