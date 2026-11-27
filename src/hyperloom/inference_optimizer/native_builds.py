@@ -5,14 +5,15 @@
 to integration, and the option list of the server so built, for the session's specialists.
 
 The builds are the hosted native-build engine's (:mod:`hyperloom.measure.runner.native.session_builds`), which builds on
-this layer and which only its owners may import (the plug architecture guard), so this layer asks the ``native_builds``
-socket of the process's plug host for them (:mod:`hyperloom.plugs.native_builds`); a framework whose server is the
-image's never asks it. The option list is the same engine's (:mod:`hyperloom.measure.runner.native.session_options`),
-asked of the same socket.
+this layer and which only its owners may import (the hosted-import guard), so this layer imports the engine's entry
+(:mod:`hyperloom.measure.runner.native.session_engine`) by its path, on the first call that needs it; a framework whose
+server is the image's never loads it. The option list is the same engine's
+(:mod:`hyperloom.measure.runner.native.session_options`), asked of the same entry.
 """
 
 from __future__ import annotations
 
+import importlib
 from collections.abc import Iterable
 from dataclasses import dataclass
 from enum import Enum
@@ -20,8 +21,6 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Protocol, cast
 
 from hyperloom.inference_optimizer import framework_registry
-from hyperloom.plugs import active
-from hyperloom.plugs.native_builds import NATIVE_BUILDS_SOCKET, NativeBuilds
 
 if TYPE_CHECKING:
     from hyperloom.orchestrator.actions.executors.candidate_builds import CandidateBuilds
@@ -73,9 +72,32 @@ class ServerOptions(Protocol):
         """How far ``reviewed``, the spellings a review gives a verdict on, covers the options the base leaves unset."""
 
 
+class NativeBuilds(Protocol):
+    """Builds the server of a session's framework from its checkout.
+
+    What a caller asks of the builds and of the option list is declared by the layer that uses them, which this module
+    must not import, so they come back as ``object``.
+    """
+
+    def open_builds(self, session_dir: Path, framework: str) -> object | None:
+        """The builds of ``framework``'s server in the session at ``session_dir``, the accepted one first on this
+        process's ``PATH``; ``None`` when ``framework`` builds none."""
+
+    def record_options(self, session_dir: Path, framework: str) -> Path | None:
+        """Keep the options the server first on this process's ``PATH`` takes in the session at ``session_dir``,
+        unless it keeps them already; the file, or ``None`` when ``framework`` builds no server."""
+
+    def options(self, session_dir: Path) -> object | None:
+        """The option list the session at ``session_dir`` keeps; ``None`` when it keeps none."""
+
+
+#: The engine's entry, by import path (see the module docstring).
+_ENGINE_MODULE = "hyperloom.measure.runner.native.session_engine"
+
+
 def _engine() -> NativeBuilds:
-    """What fills the ``native_builds`` socket of the process's current plug host."""
-    return cast(NativeBuilds, active().get(NATIVE_BUILDS_SOCKET))
+    """The native-build engine, imported on first use."""
+    return cast(NativeBuilds, importlib.import_module(_ENGINE_MODULE).SessionNativeEngine())
 
 
 def start_candidate_builds(session_dir: Path, framework: str) -> CandidateBuilds | None:

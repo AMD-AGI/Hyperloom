@@ -37,7 +37,7 @@ from inference_suite.recipe.inferencex import (
     org_models_named,
     runner_board,
 )
-from inference_suite.recipe.model import RecipeSourceError, boards_interchangeable
+from inference_suite.recipe.model import RecipeSourceError
 from inference_suite.recipe.sources import Checkout
 
 MULTI_NODE_RECIPES = f"{PROJECT}/benchmarks/multi_node/srt-slurm-recipes"
@@ -333,7 +333,7 @@ def _row_candidate(query: PdQuery, checkout: Checkout, master_row: _MasterRow) -
 
 
 def master_candidates(query: PdQuery, checkout: Checkout) -> Candidates:
-    """The master rows that serve ``query``, in entry then row order, on a board interchangeable with its own."""
+    """The master rows that serve ``query``, in entry then row order, on its board."""
     master = _yaml(checkout, MASTER)
     labels = _yaml(checkout, RUNNERS).get("labels") or {}
     _, note = _master_model(query.model_id, [master])
@@ -353,7 +353,7 @@ def master_candidates(query: PdQuery, checkout: Checkout) -> Candidates:
         except RecipeSourceError as error:
             misses.append(f"{arm}: {error}")
             continue
-        if not boards_interchangeable(query.board, board):
+        if board != query.board:
             misses.append(f"{arm}: it runs on {board}, not {query.board}")
             continue
         try:
@@ -366,8 +366,6 @@ def master_candidates(query: PdQuery, checkout: Checkout) -> Candidates:
         if isinstance(candidate, str):
             misses.append(f"{arm}: {candidate}")
             continue
-        if board != query.board:
-            candidate = _with_warning(candidate, f"InferenceX tuned {arm} on {board}, not {query.board}")
         found.append(_with_warning(candidate, note) if note else candidate)
     return Candidates(tuple(found), tuple(misses))
 

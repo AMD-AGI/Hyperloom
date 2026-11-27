@@ -35,7 +35,6 @@ from ..kernel.lane_budget import INSUFFICIENT_BUDGET
 from ..actions.executors.gpu._gpu_pin import (
     coerce_tp,
     resolve_gpu_pin,
-    _resolve_handoff_gpu_identity,
     _resolve_handoff_gpu_ids,
     _resolve_handoff_gpu_ids_space,
     _resolve_handoff_physical_gpus,
@@ -432,7 +431,7 @@ class _GeakDispatchMixin:
             "schema_version": 3,
             "model_path": str(state.model_path or os.environ.get("MODEL_PATH", "")),
             "framework": str(state.framework or os.environ.get("FRAMEWORK", "") or "sglang"),
-            **_resolve_handoff_gpu_identity(state.gpu_type or os.environ.get("GPU_TYPE", "")),
+            "gpu_type": str(state.gpu_type or os.environ.get("GPU_TYPE", "")),
             "workload": {"isl": int(state.isl), "osl": int(state.osl), "conc": int(state.conc or 64)},
             # AgentX canonical throughput is not a reference for GEAK's proxy workload.
             "raw_baseline_tput": 0.0 if agentx else float(state.baseline_tput or 0.0),

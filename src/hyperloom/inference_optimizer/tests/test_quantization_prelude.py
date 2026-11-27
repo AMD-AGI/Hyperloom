@@ -15,6 +15,7 @@ from hyperloom.inference_optimizer.cli import bootstrap as cli_bootstrap
 from hyperloom.inference_optimizer.cli import quantization as cli_quantization
 from hyperloom.orchestrator.phases import quantization_request_handlers as qrh
 from hyperloom.orchestrator.phases import quantization_schemes as qs
+from hyperloom.orchestrator.tests._fixtures import MI325X_CARD, MI355X_CARD, publish_card
 
 
 @pytest.fixture(autouse=True)
@@ -87,52 +88,54 @@ def test_resolve_scheme_none_returns_none():
     assert qs.resolve_scheme_prompt("none") is None
 
 
-# Group A3 — GPU-constrained schemes
+# Group A3 — arch-constrained schemes
 
 
-def test_supported_schemes_mi355x_includes_mxfp4():
-    s = qs.supported_schemes("mi355x")
-    assert "mxfp4" in s and "mxfp4_fp8" in s and "fp8" in s and "ptpc_fp8" in s
+def test_an_arch_with_an_fp4_rate_offers_every_scheme():
+    """gfx950 is every board of that die, the MI350X as much as the MI355X."""
+    assert qs.supported_schemes("gfx950") == list(qs.SUPPORTED_SCHEMES)
 
 
-def test_supported_schemes_dcgpu_excludes_mxfp4():
-    for gpu in ("mi300x", "mi325x", "", None):
-        s = qs.supported_schemes(gpu)
-        assert "fp8" in s and "ptpc_fp8" in s
-        assert "mxfp4" not in s and "mxfp4_fp8" not in s
+@pytest.mark.parametrize("gfx", ["gfx942", "gfx1201", "gfx1100", "gfx1151", "gfx9999"])
+def test_an_arch_without_an_fp4_rate_offers_no_fp4_scheme(gfx):
+    s = qs.supported_schemes(gfx)
+    assert "fp8" in s and "ptpc_fp8" in s
+    assert not qs.FP4_SCHEMES & set(s)
 
 
-def test_validate_scheme_mxfp4_on_mi300x_raises():
-    with pytest.raises(qs.SchemeNotSupportedError):
-        qs.validate_scheme("mxfp4", "mi300x")
+@pytest.mark.parametrize("scheme", sorted(qs.FP4_SCHEMES))
+def test_validate_scheme_fp4_on_gfx942_raises_naming_the_arch(scheme):
+    with pytest.raises(qs.SchemeNotSupportedError, match="gfx942"):
+        qs.validate_scheme(scheme, "gfx942")
 
 
 @pytest.mark.parametrize(
-    ("scheme", "gpu_type"),
+    ("scheme", "gfx"),
     [
-        pytest.param("mxfp4", "mi355x", id="mxfp4-on-mi355x"),
-        pytest.param("fp8", "mi300x", id="fp8-on-mi300x"),
-        pytest.param("fp8", "mi325x", id="fp8-on-mi325x"),
-        pytest.param("fp8", "mi355x", id="fp8-on-mi355x"),
-        pytest.param("fp8", "", id="fp8-on-empty-gpu"),
-        pytest.param("fp8", None, id="fp8-on-no-gpu"),
-        pytest.param(None, "mi300x", id="no-scheme"),
-        pytest.param("none", "mi300x", id="none-scheme"),
+        pytest.param("mxfp4", "gfx950", id="mxfp4-on-gfx950"),
+        pytest.param("mxfp4_fp8", "gfx950", id="mxfp4_fp8-on-gfx950"),
+        pytest.param("fp8", "gfx942", id="fp8-on-gfx942"),
+        pytest.param("fp8", "gfx950", id="fp8-on-gfx950"),
+        pytest.param("fp8", "", id="fp8-on-empty-arch"),
+        pytest.param("fp8", None, id="fp8-on-no-arch"),
+        pytest.param(None, "gfx942", id="no-scheme"),
+        pytest.param("none", "gfx942", id="none-scheme"),
     ],
 )
-def test_validate_scheme_accepts(scheme, gpu_type):
-    qs.validate_scheme(scheme, gpu_type)
+def test_validate_scheme_accepts(scheme, gfx):
+    qs.validate_scheme(scheme, gfx)
 
 
-def test_validate_scheme_mxfp4_unknown_gpu_not_enforced():
-    # GPU resolved later via probe; not enforceable without a concrete target.
-    qs.validate_scheme("mxfp4", "")
-    qs.validate_scheme("mxfp4", None)
+@pytest.mark.parametrize("gfx", ["", None])
+def test_an_unknown_arch_constrains_nothing(gfx):
+    """A session that read no card cannot know the scheme is unsupported, so it does not refuse it."""
+    qs.validate_scheme("mxfp4", gfx)
+    assert qs.supported_schemes(gfx) == list(qs.SUPPORTED_SCHEMES)
 
 
 def test_validate_scheme_unknown_raises_valueerror():
     with pytest.raises(ValueError):
-        qs.validate_scheme("bogus", "mi355x")
+        qs.validate_scheme("bogus", "gfx950")
 
 
 # Group B — adapter status mapping
@@ -180,11 +183,10 @@ def test_adapter_failed_exits_4(tmp_path, monkeypatch, capsys):
 
 
 class _Args:
-    def __init__(self, *, model, quantize=None, quantize_scheme=None, gpu_type=None):
+    def __init__(self, *, model, quantize=None, quantize_scheme=None):
         self.model = Path(model)
         self.quantize = quantize
         self.quantize_scheme = quantize_scheme
-        self.gpu_type = gpu_type
 
 
 def test_prelude_noop_without_flag(monkeypatch):
@@ -252,7 +254,7 @@ def test_prelude_uses_scheme_enum_when_no_freetext(tmp_path, monkeypatch):
 
 
 def test_prelude_skips_on_gpu_scheme_mismatch(tmp_path, monkeypatch, capsys):
-    # mxfp4 on mi300x is unsupported: report, skip quantization, continue.
+    # mxfp4 on the session's gfx942 card is unsupported: report, skip quantization, continue.
     called = {"n": 0}
 
     async def _should_not_run(**kwargs):  # pragma: no cover - asserts non-call
@@ -260,25 +262,28 @@ def test_prelude_skips_on_gpu_scheme_mismatch(tmp_path, monkeypatch, capsys):
         return "x"
 
     monkeypatch.setattr(qrh, "run_quantization_prelude_async", _should_not_run)
-    monkeypatch.delenv("GPU_TYPE", raising=False)
+    # The label is a name; the card decides.
+    monkeypatch.setenv("GPU_TYPE", "mi355x")
+    publish_card(monkeypatch, MI325X_CARD)
     # Register the key so the marker the prelude writes does not leak into other tests.
     monkeypatch.setenv("HYPERLOOM_QUANTIZATION_SKIPPED", "")
-    args = _Args(model="/models/src", quantize_scheme="mxfp4", gpu_type="mi300x")
+    args = _Args(model="/models/src", quantize_scheme="mxfp4")
     asyncio.run(cli_quantization._run_quantization_prelude(args))
     assert called["n"] == 0
     assert str(args.model) == "/models/src"  # unchanged -> downstream un-quantized
     captured = capsys.readouterr()
     # Skip is detectable via stdout marker + env var.
     assert "QUANTIZATION_SKIPPED" in captured.out
-    assert "MI355X" in (captured.out + captured.err)
+    assert "gfx942" in (captured.out + captured.err)
     assert os.environ.get("HYPERLOOM_QUANTIZATION_SKIPPED")
 
 
-def test_prelude_runs_mxfp4_on_mi355x(tmp_path, monkeypatch):
+def test_prelude_runs_mxfp4_on_a_gfx950_card(tmp_path, monkeypatch):
     import hyperloom.inference_optimizer.session.paths as paths
 
     monkeypatch.setattr(paths, "workspace_root", lambda: tmp_path)
     monkeypatch.delenv("GPU_TYPE", raising=False)
+    publish_card(monkeypatch, MI355X_CARD)
     seen = {}
 
     async def _fake_async(*, prompt, source_model, workspace):
@@ -286,7 +291,7 @@ def test_prelude_runs_mxfp4_on_mi355x(tmp_path, monkeypatch):
         return str(tmp_path / "q")
 
     monkeypatch.setattr(qrh, "run_quantization_prelude_async", _fake_async)
-    args = _Args(model="/models/src", quantize_scheme="mxfp4", gpu_type="mi355x")
+    args = _Args(model="/models/src", quantize_scheme="mxfp4")
     asyncio.run(cli_quantization._run_quantization_prelude(args))
     assert "mxfp4" in seen["prompt"]
     assert str(args.model) == str(tmp_path / "q")

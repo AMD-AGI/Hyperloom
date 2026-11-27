@@ -11,9 +11,10 @@ that layer. What the YAML does
 not hold -- where the round writes, its interpreter, lifecycle and telemetry -- comes in :class:`RoundSettings`.
 
 An AgentX point runs the agentx-harness replay on the launch its ``agentx.launch_overrides`` composed on the session
-base, above the base's golden layer; a profile point turns the torch profiler on for the window it asks for. An MLPerf
-point (``benchmark_script`` names the MLPerf agentic client) runs the MLPerf harness against the round's own server,
-which serves under the model name the harness requests.
+base, above the base's golden layer; a profile point turns the torch profiler on for the window it asks for, its
+environment over the server environment of the framework's shipped profile configuration, as a fixed-sequence profile
+point's is. An MLPerf point (``benchmark_script`` names the MLPerf agentic client) runs the MLPerf harness against the
+round's own server, which serves under the model name the harness requests.
 
 A scriptable point (xDiT, or a custom session's own benchmark and eval scripts) runs its session base's script once
 with the point's environment (:func:`scriptable_workload`); the quality gate the script writes is its eval, so it
@@ -33,9 +34,13 @@ from dataclasses import dataclass, replace
 from types import MappingProxyType
 from typing import Any
 
+import yaml
+
 from hyperloom_common.env import is_truthy
 from hyperloom.common.agentx_workload import (
+    AGENTX_TRACE_ENV,
     CANON_WARMUP_PER_LANE,
+    agentx_trace,
     is_agentx_client_key,
     is_agentx_client_script,
 )
@@ -58,7 +63,8 @@ from hyperloom.common.outside_facts import (
     ENV_TP,
 )
 from hyperloom.inference_optimizer.framework_paths import KERNEL_LIBRARY_PACKAGES
-from hyperloom.inference_optimizer.framework_registry import extra_args_env
+from hyperloom.inference_optimizer.framework_registry import extra_args_env, shipped_config_name
+from hyperloom.inference_optimizer.session.paths import asset_root
 from inference_suite.argv import argv_flag_occurrences, canonical_flag_name, normalize_argv, remove_server_args
 from inference_suite.contracts import (
     AGENTX_CLIENT_ENV_PREFIX,
@@ -344,10 +350,22 @@ def _user_layer(point: _Point, base: BaseLaunch) -> LaunchDelta:
     args_add = _user_args(point)
     ran = {name for name, _ in argv_flag_occurrences(args_add)}
     dropped = tuple(f"--{name}" for name in _flag_groups(base.args) if name not in ran)
+    unset = tuple(sorted(name for name, value in base.env.items() if isinstance(value, str) and name not in point.envs))
+    return LaunchDelta(args_add=args_add, args_remove=dropped, env_set=_server_env(point), env_unset=unset)
+
+
+def _server_env(point: _Point) -> dict[str, str]:
+    """The point's environment its server sees: less the knobs the config carries as fields and its server args."""
     env = {name: value for name, value in point.envs.items() if name not in _CONSUMED_ENV}
     env.pop(extra_args_env(point.framework.value), None)
-    unset = tuple(sorted(name for name, value in base.env.items() if isinstance(value, str) and name not in point.envs))
-    return LaunchDelta(args_add=args_add, args_remove=dropped, env_set=env, env_unset=unset)
+    return env
+
+
+def _shipped_profile_env(framework: Framework) -> dict[str, str]:
+    """The server environment of ``framework``'s shipped profile configuration, which a fixed-sequence profile point is
+    rendered from."""
+    path = asset_root() / "assets" / "configs" / shipped_config_name("profile", framework.value)
+    return _server_env(_point_of(_bench(yaml.safe_load(path.read_text(encoding=_UTF8))), 0.0, 0.0))
 
 
 def _server(
@@ -466,7 +484,7 @@ _AGENTX_LAUNCH_KEYS = frozenset(
 )
 _AGENTX_CANONICAL = "canonical"
 _AGENTX_THRESHOLD = AGENTX_ERROR_RATE_THRESHOLD_PCT / 100
-_TRACE_ENV = "WEKA_LOADER_OVERRIDE"
+_TRACE_ENV = AGENTX_TRACE_ENV
 _DURATION_ENV = "DURATION"
 _EP_SIZE_ENV = "EP_SIZE"
 _WARMUP_PER_LANE_ENV = "AIPERF_WARMUP_REQUESTS_PER_LANE"
@@ -521,7 +539,7 @@ def _lane_warmup(client_env: Mapping[str, str]) -> int:
 
 
 def _agentx_trace(point: _Point, base: BaseLaunch) -> str:
-    trace = point.text(_TRACE_ENV) or base.client.env.get(_TRACE_ENV)
+    trace = agentx_trace(point.envs, base.client.env)
     if trace is None:
         raise ConfigError(f"neither the AgentX point nor its base's client env names the trace corpus ({_TRACE_ENV})")
     return trace
@@ -575,6 +593,8 @@ def _agentx_config(
     _check_agentx_envs(point, base)
     point = replace(point, model=point.text(_MODEL_PATH_ENV) or point.model)
     measures = not boot_only
+    if measures and torch_profiler(bench).get("enabled"):
+        point = replace(point, envs={**_shipped_profile_env(point.framework), **point.envs})
     if settings.server_url is not None:
         settings = _measuring_external(settings)
     server = _agentx_server(point, bench, base, settings)

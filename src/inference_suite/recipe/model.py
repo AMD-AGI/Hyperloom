@@ -23,7 +23,6 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from hyperloom_common.contract_fields import ContractFields
-from hyperloom_common.gpu_identity import AMD_GPU_BOARDS
 from inference_suite.argv import argv_flag_occurrences, canonical_flag_name, last_alias_value
 from inference_suite.contracts.base_launch import GoldenCurve, LaunchSource, SourceApi, SourceKind, Topology
 from inference_suite.frameworks import Framework, framework_facts
@@ -121,14 +120,6 @@ LLAMACPP_ENTRYPOINT = _entrypoint(Framework.LLAMACPP)
 LLAMACPP_RUNNER_OWNED = _runner_owned(Framework.LLAMACPP)
 #: llama-server spreads one replica's layers over every card it sees and has no TP size, so every launch reads tp 1.
 LLAMACPP_TOPOLOGY = TopologySpelling(tp=())
-
-
-def boards_interchangeable(board: str, other: str) -> bool:
-    """Whether a launch tuned on ``other`` runs as tuned on ``board``: the same architecture and HBM capacity."""
-    first, second = AMD_GPU_BOARDS.get(board), AMD_GPU_BOARDS.get(other)
-    if first is None or second is None:
-        return board == other
-    return (first.gfx, first.hbm_gb) == (second.gfx, second.hbm_gb)
 
 
 @dataclass(frozen=True)
@@ -382,5 +373,4 @@ __all__ = [
     "VLLM_RUNNER_OWNED",
     "VLLM_TOPOLOGY",
     "adaptive_verification_reason",
-    "boards_interchangeable",
 ]

@@ -169,7 +169,7 @@ The following flags are used in multi-node workload skill blocks.
 | `--tp` | Tensor parallelism degree |
 | `--ep` | Expert parallelism degree (MoE; often `ep == tp`) |
 | `--isl`, `--osl`, `--conc` | Benchmark input length, output length, and concurrency. The flag wins; on a fresh launch the corresponding env var is next, then the default. On a resume it is the pins in effect for this resume (its own `--extra-env`, or the launch's persisted pins when it passes none), then the session's recorded value, then the env var, then the default |
-| `--gpu-type`, `--precision` | Target GPU (for example `mi325x`) and dtype (`bf16`). `--precision` has its own ladder on both branches: the flag, then `$PRECISION`, then the session's recorded value, then the checkpoint's dtype, then the default. `--gpu-type` is a hint: on a fresh launch the hardware probe wins and a disagreeing flag only warns; a resume takes the GPU type from the session and ignores the flag |
+| `--gpu-type`, `--precision` | Target GPU (for example `mi325x`) and dtype (`bf16`). `--precision` has its own ladder on both branches: the flag, then `$PRECISION`, then the session's recorded value, then the checkpoint's dtype, then the default. The GPU type is the market name a remote node reports (through `amd-smi`, else `rocm-smi`, else torch), reduced to its model designation; `--gpu-type` (any name) is used when the node reports none, and a flag the card contradicts is overridden with a warning. A resume takes the GPU type from the session and ignores the flag, and reads the remote card again |
 | `--framework` | `sglang` |
 | `--target-gain`, `--max-hours` | Optimization goal and time budget |
 | `--pd-mode disaggregated` | Enable PD disaggregation (infera and rayjob) |

@@ -77,8 +77,8 @@ hyperloom-multibranch run --model /models/my-model-gguf --framework llamacpp --g
   --reference-script ref.sh --max-hours 8
 ```
 
-`--image-root` is the image's `site-packages`, and `--gfx` the architecture of the board `--gpu-type` names: the builds
-are compiled for it, and the session does not check it against the board. `build_setup` adds the checkout's `HEAD` to
+`--image-root` is the image's `site-packages`, and `--gfx` the architecture of the session's cards: the builds
+are compiled for it, and the session does not check it against the cards. `build_setup` adds the checkout's `HEAD` to
 the store's sources as a detached worktree of the clone, reports what the session's check at start would refuse, and
 exits 1 if there is anything. Keep `FRAMEWORK_REPO_PATH` exported for the session, which reads it again; without the
 sourced `build.env` the session is refused, naming `HYPERLOOM_BUILD_STORE`. The rest of the environment and the options

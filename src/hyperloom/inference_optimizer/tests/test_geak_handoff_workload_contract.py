@@ -248,6 +248,18 @@ async def test_native_handoff_keeps_supported_schema_and_seeds_geaks_own_launche
 
 
 @pytest.mark.asyncio
+async def test_the_handoff_names_the_gpu_by_the_session_label_alone(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    """GEAK reads the card itself; a product/ISA pin beside the label would be a second, stale description of it."""
+    coord = _coord(tmp_path)
+    coord.shared_state.gpu_type = "r9700"
+
+    handoff = await _handoff(coord, monkeypatch)
+
+    assert handoff["gpu_type"] == "r9700"
+    assert not {"expected_target", "expected_gfx"} & set(handoff)
+
+
+@pytest.mark.asyncio
 async def test_an_agentx_handoff_declares_the_trace_the_accepted_round_replayed(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

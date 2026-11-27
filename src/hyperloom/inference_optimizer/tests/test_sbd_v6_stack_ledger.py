@@ -470,11 +470,10 @@ def test_outcome_gain_figures_are_null_without_a_ledger():
     assert validation["unattributed_gain_pct"] is None
 
 
-def test_a_session_that_kept_nothing_renders_no_contribution_sum(tmp_path):
-    from hyperloom.inference_optimizer.breakdown.reporters._renderers import optimizations
-
+def test_a_session_that_kept_nothing_publishes_no_contribution_sum(tmp_path):
     validation = _outcome(tmp_path)
 
-    assert optimizations.render({"outcome": {"validation": validation}}).key_facts == [
-        "0 adoption(s) recorded in the stack ledger."
-    ]
+    assert validation["attribution"]["available"] is True
+    assert validation["adoption_count"] == 0
+    assert validation["attributed_gain_pct"] is None
+    assert validation["validated_at_stack_len"] is None
