@@ -158,6 +158,8 @@ _HARNESS = textwrap.dedent(
     import http.server, json, os, sys, threading, time
     argv = sys.argv[1:]
     value = lambda flag: argv[argv.index(flag) + 1]
+    if "--no-server-metrics" in argv:
+        sys.exit("no dataset to build")
     if "agentx_cli" not in argv:
         result = {"num_requests_successful": 2,
                   "request_accounting": {"records_total": 4, "records_warmup_dropped": 2, "records_error_dropped": 0,
@@ -586,6 +588,8 @@ def test_an_agentx_profile_round_replays_and_opens_its_window_from_the_first_pro
     assert launch.client is not None and list(launch.client.argv[1:]) == replay
     assert launch.client.seed == launch.client.warmup_seed == _AGENTX.seed
     assert report.agentx is not None and report.agentx.counts["successful"] == 2 and report.codes.client == 0
+    assert layout.agentx_prep_log.is_file(), "the dataset prep started with the server"
+    assert report.agentx.dataset_cache_hit is False, "a failed prep leaves the replay to build its dataset"
     marks = _marks(layout)
     assert marks[Phase.WARMUP.value] < marks[Phase.MEASURED.value] < marks[Phase.FINISHED.value]
     capture = json.loads(layout.profile_capture.read_text())

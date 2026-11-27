@@ -182,6 +182,19 @@ latency coverage of that duration, so no request count bounds it. Below 900 s, t
 scenario's minimum, the round adds `--unsafe-override`; use 600 s or 900 s for
 quick tests.
 
+Building the replay's dataset (tokenizer, trace corpus, aiperf's mmap files)
+takes the client minutes. While the round boots its server, it runs the same
+client against no server to build the dataset into aiperf's dataset cache,
+`client/aiperf_dataset_cache/` (`AIPERF_DATASET_MMAP_CACHE_DIR`, recorded in the
+client env of `launch.json`), and stops it once the cache holds the dataset or the
+server is ready. The replay then restores the dataset from the cache instead of
+building it while the GPUs wait, and the report's `agentx.dataset_cache_hit` says
+whether it did. A prep that fails or is stopped first leaves no cache, and the
+replay builds the dataset itself as before; the round never fails for it. The
+prep logs to `client/agentx_prep.log`; its scratch directory,
+`client/agentx_prep/`, is removed once it stops, and the cache once the replay
+ends. A `reuse` or `external` round, which boots no server, runs no prep.
+
 A fixed round sends InferenceX's random prompts of `ISL` tokens, each answered to
 exactly `OSL` tokens. A point that sets `DATASET_PATH`, an absolute path to a JSONL
 file whose lines each hold a `prompt` string or a `turns` list (the first turn is
@@ -334,7 +347,7 @@ One round writes one run directory and leaves it unchanged once the round ends.
 |---|---|
 | `config.yaml` | The round's config (`inference-suite-config/1`), stored verbatim. |
 | `launch.json` | The exact launch (`inference-suite-launch/1`), with the base it was composed on. |
-| `report.json` | What the round measured, or the step it failed at (`inference-suite-report/2`). Written last. |
+| `report.json` | What the round measured, or the step it failed at (`inference-suite-report/3`). Written last. |
 | `server.log` | The server's log. A `boot` or `reuse` round copies the bytes logged during the round and records their range. |
 | `server_ready_at` | `<ready unix time> <boot seconds>`; `0` boot seconds for a reused server. |
 | `server_boot_active_at` | `<unix time>`: the last time the booting server was seen working without a log line: its processes used at least a quarter of a CPU, or grew their resident memory (`VmRSS`) or the bytes they read (`rchar` + `read_bytes`) by at least 64 MiB per 10 s. The round rewrites it on each such sighting, so a watcher of the run directory sees the boot write. Memory or read growth is progress: it restarts the silence like a log line, and only the boot budget bounds it (memory is read because pre-faulting a file mapped from a network filesystem grows neither IO counter). A boot that neither logs, grows nor uses a quarter of a CPU for `pre_ready_silence_sec` ends as `server_silent_before_ready`; so does one that neither logs nor grows for 3600 s however busy its processes are, as a spinning collective is busy too. A reading that cannot be taken never counts. |
@@ -343,7 +356,7 @@ One round writes one run directory and leaves it unchanged once the round ends.
 | `kv_metrics.json`, `agentx_timeline.jsonl` | KV-cache samples and the AgentX request timeline. |
 | `power.json` | Every power reading the node gave over the whole round; see [Power](#power). |
 | `weight_prefetch.json` | What the checkpoint prefetch did while the server booted, only when `HYPERLOOM_WEIGHT_PREFETCH=1` turned it on: the chosen files, the skip reason, the totals, the bytes read and the unreadable file count. See [Checkpoint prefetch](environment-variables.md#checkpoint-prefetch). |
-| `client/` | `stdout.log`, `stderr.log`, `agentx_client.log`, `inferencex_result.json`, `aiperf_artifacts/` (`profile_export.jsonl`, `profile_export_aiperf.json`, `logs/aiperf.log`) and, on an MLPerf round, `mlperf_artifacts/` (the harness's `result_summary.json` and `scores.json`). |
+| `client/` | `stdout.log`, `stderr.log`, `agentx_client.log`, `agentx_prep.log` (and, only while the AgentX dataset prep and replay run, `agentx_prep/` and `aiperf_dataset_cache/`), `inferencex_result.json`, `aiperf_artifacts/` (`profile_export.jsonl`, `profile_export_aiperf.json`, `logs/aiperf.log`) and, on an MLPerf round, `mlperf_artifacts/` (the harness's `result_summary.json` and `scores.json`). |
 | `eval/` | `stdout.log`, `stderr.log`, lm-eval's `results_<time>.json`, `hyperloom_eval_probe.json` and `definition.json`. |
 | `profile/` | `torch_trace/`, `capture_traces/`, `graph_capture_profile/` and `capture.json`. |
 
@@ -445,6 +458,7 @@ An AgentX round's counts are recounted from `profile_export.jsonl`, except
 `context_overflow`: the profiling requests aiperf skipped because the server
 refused them as longer than the context it serves. aiperf keeps those out of the
 export and every metric, so the count is read from its summary,
-`profile_export_aiperf.json`. A report of the previous schema,
-`inference-suite-report/1`, still reads, with `context_overflow` `null`.
+`profile_export_aiperf.json`. A report of the first schema,
+`inference-suite-report/1`, still reads, with `context_overflow` `null`; a report
+of it or of `inference-suite-report/2` reads with `dataset_cache_hit` `null`.
 

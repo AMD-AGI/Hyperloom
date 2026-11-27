@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""``report.json`` (``inference-suite-report/2``): what one round measured, or the one step it failed at.
+"""``report.json`` (``inference-suite-report/3``): what one round measured, or the one step it failed at.
 
 Every key table here is fixed: a metric nobody measured is written ``null``, never 0, and a reader never meets a
 key it was not told about. ``gpu_monitor`` blocks use the names Hyperloom's ``gpu_metrics_from_report`` reads, so
@@ -20,13 +20,15 @@ from hyperloom_common.contract_fields import ContractFields, field_names
 from inference_suite.contracts.base_launch import DIGEST_PREFIX
 from inference_suite.contracts.config import ConfigError, EvalProbe, WorkloadKind
 
-REPORT_SCHEMA = "inference-suite-report/2"
+REPORT_SCHEMA = "inference-suite-report/3"
 #: The schema before the AgentX counts carried ``context_overflow``; such a report reads with that count ``null``. Only
 #: a session started on main before ``/2`` holds one, and no release wrote it: retired once the next release, which
 #: resumes no session an earlier one started, ships.
 _REPORT_SCHEMA_V1 = "inference-suite-report/1"
+#: The schema before the AgentX section carried ``dataset_cache_hit``; such a report reads with it ``null``.
+_REPORT_SCHEMA_V2 = "inference-suite-report/2"
 #: Every schema :meth:`Report.from_document` reads.
-READABLE_REPORT_SCHEMAS = (_REPORT_SCHEMA_V1, REPORT_SCHEMA)
+READABLE_REPORT_SCHEMAS = (_REPORT_SCHEMA_V1, _REPORT_SCHEMA_V2, REPORT_SCHEMA)
 AGENTX_ERROR_RATE_DEFINITION = "inferencex-agentx/1"
 
 _DIGEST = re.compile(re.escape(DIGEST_PREFIX) + r"[0-9a-f]{64}")
@@ -467,7 +469,11 @@ AGENTX_INTVTY_KEYS = ("p50", "p90")
 
 @dataclass(frozen=True)
 class AgentxResult:
-    """The AgentX client's raw counts and timings; validity and the error rate are the mapper's (D2)."""
+    """The AgentX client's raw counts and timings; validity and the error rate are the mapper's (D2).
+
+    ``dataset_cache_hit`` is whether the replay read its dataset from aiperf's cache rather than building it; ``None``
+    only in a report written before it was recorded (:data:`_REPORT_SCHEMA_V2`).
+    """
 
     counts: Mapping[str, int | None]
     throughput: Mapping[str, float | None]
@@ -477,6 +483,7 @@ class AgentxResult:
     fast_mode: bool
     request_export: str | None = None
     pairing_key: str | None = None
+    dataset_cache_hit: bool | None = None
 
     def __post_init__(self) -> None:
         _measured(self.counts, AGENTX_COUNT_KEYS, frozenset(AGENTX_COUNT_KEYS), "the AgentX counts")
@@ -489,6 +496,7 @@ class AgentxResult:
         _FIELDS.boolean(self.fast_mode, "the AgentX fast_mode")
         _FIELDS.optional_text(self.request_export, "the AgentX request export")
         _FIELDS.optional_text(self.pairing_key, "the AgentX pairing key")
+        _FIELDS.optional_boolean(self.dataset_cache_hit, "the AgentX dataset_cache_hit")
 
     def to_document(self) -> dict[str, object]:
         return {
@@ -501,6 +509,7 @@ class AgentxResult:
             "e2e_norm_intvty": _ordered(self.e2e_norm_intvty, AGENTX_INTVTY_KEYS),
             "request_export": self.request_export,
             "pairing_key": self.pairing_key,
+            "dataset_cache_hit": self.dataset_cache_hit,
         }
 
     @classmethod
@@ -515,6 +524,7 @@ class AgentxResult:
             "e2e_norm_intvty",
             "request_export",
             "pairing_key",
+            "dataset_cache_hit",
         )
         fields = _complete(document, keys, "the AgentX result")
         if fields["error_rate_definition"] != AGENTX_ERROR_RATE_DEFINITION:
@@ -531,6 +541,7 @@ class AgentxResult:
             fast_mode=fields["fast_mode"],
             request_export=fields["request_export"],
             pairing_key=fields["pairing_key"],
+            dataset_cache_hit=fields["dataset_cache_hit"],
         )
 
 
@@ -836,6 +847,11 @@ def _agentx_v1(section: object) -> object:
     return {**section, "counts": {**section["counts"], AGENTX_CONTEXT_OVERFLOW: None}}
 
 
+def _agentx_v2(section: object) -> object:
+    """A ``/1`` or ``/2`` report's AgentX section with the ``dataset_cache_hit`` it did not keep, ``null``."""
+    return {**section, "dataset_cache_hit": None} if isinstance(section, Mapping) else section
+
+
 REPORT_KEYS = (
     "schema",
     "run_status",
@@ -977,6 +993,8 @@ class Report:
             raise ReportError(f"round report schema {fields['schema']!r} is not {REPORT_SCHEMA}")
         if fields["schema"] == _REPORT_SCHEMA_V1:
             fields = {**fields, "agentx": _agentx_v1(fields["agentx"])}
+        if fields["schema"] != REPORT_SCHEMA:
+            fields = {**fields, "agentx": _agentx_v2(fields["agentx"])}
         monitor = _FIELDS.items(fields["gpu_monitor"], "gpu_monitor")
         sections = {
             name: None if fields[name] is None else kind_type.from_document(fields[name])

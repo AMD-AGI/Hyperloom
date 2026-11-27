@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import json
+import os
 import stat
 import sys
 import textwrap
@@ -20,9 +21,11 @@ from inference_suite.load import agentx
 from inference_suite.load.agentx import (
     AgentxRound,
     AgentxTool,
+    DatasetPrep,
     ProgressFollower,
     client_argv,
     export_counts,
+    measured_invocation,
     progress_api_port,
     refusal,
     run_agentx,
@@ -35,14 +38,32 @@ from inference_suite.tests.test_config_contract import _AGENTX
 from inference_suite.tests.test_load import _DEADLINES, _flag, _round_config
 
 _WORKLOAD = replace(_AGENTX, warmup_seed=_AGENTX.seed)
-_FAKE_ENV = ("FAKE_CALLS", "FAKE_EXIT", "FAKE_EXPORT", "FAKE_SUMMARY", "FAKE_AGGREGATE", "FAKE_LOG", "FAKE_PACE")
+_FAKE_ENV = (
+    *("FAKE_CALLS", "FAKE_EXIT", "FAKE_EXPORT", "FAKE_SUMMARY", "FAKE_AGGREGATE", "FAKE_LOG", "FAKE_PACE"),
+    "FAKE_PREP",
+)
 _FAKE_HARNESS = textwrap.dedent(
     """
     import json, os, shutil, sys, time
     argv = sys.argv[1:]
+    cache = os.environ.get("AIPERF_DATASET_MMAP_CACHE_DIR")
+    if "--no-server-metrics" in argv:
+        with open(os.environ["FAKE_CALLS"] + ".prep", "w") as prep:
+            prep.write(json.dumps({"argv": argv, "pid": os.getpid(), "cache": cache}))
+        os.makedirs(os.path.join(cache, ".key.tmp.1"))
+        open(os.path.join(cache, "key.lock"), "w").close()
+        os.makedirs(os.environ["AIPERF_DATASET_MMAP_BASE_PATH"])
+        os.makedirs(argv[argv.index("--output-artifact-dir") + 1])
+        if os.environ.get("FAKE_PREP") == "fails":
+            sys.exit(1)
+        if os.environ.get("FAKE_PREP") == "builds":
+            os.makedirs(os.path.join(cache, "key"))
+            open(os.path.join(cache, "key", "manifest.json"), "w").close()
+        time.sleep(600)
     with open(os.environ["FAKE_CALLS"], "a") as calls:
         calls.write(json.dumps(argv) + "\\n")
     if "agentx_cli" in argv:
+        os.makedirs(os.path.join(cache, "key"), exist_ok=True)
         artifacts = argv[argv.index("--output-artifact-dir") + 1]
         os.makedirs(artifacts, exist_ok=True)
         shutil.copy(os.environ["FAKE_EXPORT"], os.path.join(artifacts, "profile_export.jsonl"))
@@ -223,7 +244,8 @@ def test_run_replays_then_aggregates_and_keeps_counts_that_agree(tmp_path, harne
     assert tuple(replay) == outcome.invocation.argv[1:]
     assert aggregator == ["-s", "-P", "-m", "infx.results.agentic.process_agentic_result"]
     assert outcome.invocation.seed == outcome.invocation.warmup_seed == 42
-    assert outcome.invocation.env == {"AIPERF_EXPERIMENTAL_FAST": "0"}
+    cache = str(RunLayout(tmp_path / "run").aiperf_dataset_cache)
+    assert outcome.invocation.env == {"AIPERF_EXPERIMENTAL_FAST": "0", "AIPERF_DATASET_MMAP_CACHE_DIR": cache}
     result = outcome.result
     assert dict(result.counts) == {**_COUNTS, "context_overflow": 0}, "aiperf writes no overflow count when none was"
     assert result.throughput["request_throughput"] == 1.5 and result.throughput["input_tokens_per_second"] is None
@@ -280,6 +302,81 @@ def test_a_summary_that_gives_no_overflow_count_fails_the_output(tmp_path, harne
     outcome = run_agentx(_round(tmp_path, harness))
     assert outcome.result is None and outcome.stop.step is FailedStep.CLIENT_OUTPUT_MISSING
     assert "the AgentX summary cannot be read" in outcome.stop.detail
+
+
+def _prep_seen(tmp_path: Path) -> dict[str, object]:
+    """What the fake prep recorded of itself once it started: its argv, pid and cache dir."""
+    path = tmp_path / "calls.jsonl.prep"
+    deadline = time.monotonic() + 10
+    while True:
+        try:
+            return json.loads(path.read_text())
+        except (OSError, ValueError):
+            assert time.monotonic() < deadline, "the dataset prep never started"
+            time.sleep(0.05)
+
+
+def _gone(pid: int) -> bool:
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return True
+    return False
+
+
+def test_the_dataset_prep_builds_the_replays_dataset_into_its_cache_without_a_server(tmp_path, harness):
+    config = _config(tmp_path)
+    prep = DatasetPrep.start(config, harness)
+    seen = _prep_seen(tmp_path)
+    prep.stop()
+    replay = client_argv(harness, config)
+    dataset = ("--scenario", "--model", "--tokenizer", "--public-dataset", "--concurrency", "--benchmark-duration")
+    dataset += ("--random-seed", "--warmup-requests-per-lane", "--failed-request-threshold")
+    assert {flag: _flag(seen["argv"], flag) for flag in dataset} == {flag: _flag(replay, flag) for flag in dataset}
+    assert "--tokenizer-trust-remote-code" in seen["argv"]
+    assert _flag(seen["argv"], "--url") != _flag(replay, "--url")
+    assert not {"--server-metrics", "--api-host", "--api-port"} & set(seen["argv"])
+    cache = str(RunLayout(tmp_path / "run").aiperf_dataset_cache)
+    assert seen["cache"] == measured_invocation(config, harness).env["AIPERF_DATASET_MMAP_CACHE_DIR"] == cache
+
+
+def test_the_prep_stops_once_the_cache_holds_the_dataset_and_leaves_it_for_the_replay(tmp_path, harness, monkeypatch):
+    monkeypatch.setenv("FAKE_PREP", "builds")
+    layout = RunLayout(tmp_path / "run")
+    prep = DatasetPrep.start(_config(tmp_path), harness)
+    pid = _prep_seen(tmp_path)["pid"]
+    deadline = time.monotonic() + 30
+    while not _gone(pid):
+        assert time.monotonic() < deadline, "the prep outlived the manifest"
+        time.sleep(0.1)
+    prep.stop()
+    assert (layout.aiperf_dataset_cache / "key" / "manifest.json").is_file()
+    assert not layout.agentx_prep_scratch.exists()
+
+
+@pytest.mark.parametrize("prep", ["fails", "outrun"])
+def test_a_prep_that_built_no_dataset_leaves_no_cache_and_the_replay_runs_cold(tmp_path, harness, monkeypatch, prep):
+    monkeypatch.setenv("FAKE_PREP", prep)
+    layout = RunLayout(tmp_path / "run")
+    dataset_prep = DatasetPrep.start(_config(tmp_path), harness)
+    pid = _prep_seen(tmp_path)["pid"]
+    dataset_prep.stop()
+    assert _gone(pid)
+    assert not layout.aiperf_dataset_cache.exists(), "no half-built entry or populate lock is left to the replay"
+    assert not layout.agentx_prep_scratch.exists()
+    outcome = run_agentx(_round(tmp_path, harness))
+    assert outcome.stop is None and outcome.result.dataset_cache_hit is False
+
+
+@pytest.mark.parametrize(
+    ("log", "hit"),
+    [("Memory-mapped dataset cache HIT (key=key); skipping tokenizer + composer.", True), ("replayed", False)],
+)
+def test_the_result_records_whether_the_replay_read_the_cached_dataset(tmp_path, harness, monkeypatch, log, hit):
+    monkeypatch.setenv("FAKE_LOG", log)
+    outcome = run_agentx(_round(tmp_path, harness))
+    assert outcome.result.dataset_cache_hit is hit
+    assert not RunLayout(tmp_path / "run").aiperf_dataset_cache.exists(), "the run_dir keeps no copy of the dataset"
 
 
 def test_a_missing_aggregate_fails_the_output(tmp_path, harness, monkeypatch):
