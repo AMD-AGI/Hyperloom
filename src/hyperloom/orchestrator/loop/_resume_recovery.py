@@ -83,16 +83,6 @@ class ResumeRecoveryMixin:
         shutil.rmtree(path, ignore_errors=True)
         return True
 
-    async def _resume_recover_interrupted_stack(self, report: dict[str, Any]) -> None:
-        """Settle a stack attempt a crash or halt left behind, before anything here can benchmark.
-
-        The recovery halts the session if the tree cannot be settled, which is
-        the point: the alternative is measuring a tree whose contents no resume
-        can account for.
-        """
-        if await self._coord.phase_kernel_stack.recover_interrupted_stack_validation():
-            report["fixes"].append({"kind": "interrupted_stack_validation_recovered"})
-
     def _clear_pending_integrate(self, pending: dict[str, Any], *, gc_runtime: bool) -> None:
         """Drop a discharged sentinel, and its attempt runtime once nothing runs from it."""
         self.shared_state.pending_integrate = {}

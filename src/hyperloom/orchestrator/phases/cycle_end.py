@@ -65,14 +65,9 @@ class CycleEndPhase(CoordinatorCollaborator):
         await self.pump()
 
     async def _settle_stack(self) -> None:
-        """Recover an interrupted stack attempt, drain pending KEEP integrates, and validate the stack."""
-        stack = self._coord.phase_kernel_stack
-        # A stack attempt an earlier entry or leg left behind may still have its members on the tree, so settle it
-        # before the drain below applies anything on top; the recovery halts the session if it cannot.
-        await stack.recover_interrupted_stack_validation()
+        """Integrate the kernel KEEPs this cycle left queued."""
         if kernel_decisions.has_keep_pending_integrate(self.shared_state):
-            await stack.drain_pending_keep_integrates()
-        await stack.maybe_validate_positive_needs_review_stack()
+            await self._coord.phase_kernel_stack.drain_pending_keep_integrates()
 
     async def resume_unsettled_cycle_end(self) -> None:
         """Re-fire the CYCLE_END entry hook, once per resumed process, when this cycle's end never settled.

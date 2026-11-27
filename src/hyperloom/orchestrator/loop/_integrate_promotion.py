@@ -102,20 +102,6 @@ def _task_recorded_a_result(task: Task) -> bool:
     )
 
 
-def _integrate_stack_fields(result: Mapping[str, Any]) -> dict[str, Any]:
-    """Return the members a KEEP promotes.
-
-    Only the kernel-stack lane produces multi-member results, and it binds them to their ledger rows before
-    promoting, so the members are read off the result rather than bound again here.
-    """
-    from ..phases.kernel_stack import resolve_stack_members
-
-    raw_members = result.get("stack_kernel_ids")
-    membership = {"stack_validation": isinstance(raw_members, list) and len(raw_members) > 1, **result}
-    members = resolve_stack_members(membership)
-    return {"stack_kernel_ids": list(members), "stack_validation": membership["stack_validation"]}
-
-
 def _integrate_keep_tput(result: Mapping[str, Any], measurement: Mapping[str, Any]) -> float | None:
     if measurement is not result and "output_throughput" in measurement:
         measured = measurement["output_throughput"]
@@ -235,7 +221,6 @@ class IntegratePromotionMixin:
         new_tput = _integrate_keep_tput(result, measurement)
         if new_tput is None:
             return
-        stack_fields = _integrate_stack_fields(result)
         # A fusion sibling drained through the shared integrate lane must still
         # land on the stack as ``action="fusion"``: the idempotency short-circuit
         # (``_active_forge_fusion_env_flags``) and the remote-recipe fusion export
@@ -268,7 +253,6 @@ class IntegratePromotionMixin:
                 "patch_path": result.get("patch_path"),
                 "target_file": result.get("target_file"),
                 "gain_pct": result.get("gain_pct"),
-                **stack_fields,
                 "backend": result.get("backend"),
                 "engine": result.get("engine"),
                 # Provenance for a fusion sibling; readers key the stack row on

@@ -248,6 +248,41 @@ def require_own_ledger(session_dir: Path, state: Mapping[str, Any]) -> None:
     )
 
 
+#: The checkpoints an earlier release wrote around the kernel stack validation it ran at CYCLE_END entry.
+_STACK_VALIDATION_CHECKPOINTS = ("pending_stack_validation_result", "pending_stack_validation_apply_results")
+
+
+def _stack_validation_unfinished(state: Mapping[str, Any]) -> bool:
+    """Whether the session stopped inside a kernel stack validation: a checkpoint is set, or a ledger row's guard is."""
+    if any(state.get(key) for key in _STACK_VALIDATION_CHECKPOINTS):
+        return True
+    ledger = state.get("kernel_integrate_attempts")
+    rows = ledger.values() if isinstance(ledger, dict) else ()
+    return any(isinstance(row, dict) and row.get("stack_validation_in_progress") for row in rows)
+
+
+def require_no_unfinished_stack_validation(state: Mapping[str, Any]) -> None:
+    """Refuse the resume of a session an earlier release left inside a kernel stack validation.
+
+    That release applied the stack's patches to the framework tree and recorded them in ``state.json`` for its own
+    resume to revert. Nothing here runs or recovers a stack validation, so a resume would measure a tree that may still
+    hold those patches.
+
+    ``state`` is a mapping with the fields of ``state.json``.
+
+    Raises:
+        ResumeBlocked: Naming the two ways to restore the tree.
+    """
+    if not _stack_validation_unfinished(state):
+        return
+    raise ResumeBlocked(
+        "this session stopped inside a kernel stack validation, which this release neither runs nor recovers: the "
+        "patches that validation applied may still be on the framework tree. Resume the session once with the release "
+        "that wrote it, which reverts them and clears the checkpoint, then resume it here; or restore the tree from "
+        "the backup manifests the session recorded and start a new session."
+    )
+
+
 def recorded_state(session_dir: Path) -> Mapping[str, Any]:
     """The fields of ``state.json`` as recorded; empty when there is none (``_require_readable`` has said so when it
     exists and cannot be read)."""
@@ -263,9 +298,13 @@ def ensure_resume_safe(session_dir: Path, *, owner_scope: str) -> None:
 
     Observable local owners are left to the coordinator's existing reaper. An
     empty ledger does not prove a recorded running or cancelled execution exited.
+    A kernel stack validation an earlier release left unfinished is residual work
+    nothing here can settle, so it is rejected too.
     """
     _require_readable(session_dir)
-    require_own_ledger(session_dir, recorded_state(session_dir))
+    state = recorded_state(session_dir)
+    require_own_ledger(session_dir, state)
+    require_no_unfinished_stack_validation(state)
     path = db_path_for(session_dir)
     try:
         if not path.exists():
