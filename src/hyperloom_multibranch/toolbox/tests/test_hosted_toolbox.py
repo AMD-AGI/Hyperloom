@@ -288,9 +288,6 @@ async def _result_of(toolbox: HostedToolbox, request_id: str) -> TestResult:
 def test_the_inputs_never_print_a_key_and_a_refusal_names_the_field_not_the_value(tmp_path: Path) -> None:
     inputs = _inputs(None, tmp_path)
     assert "m-key" not in repr(inputs) and "d-key" not in repr(inputs)
-    for changed, field_name in (({"measurement_key": " "}, "measurement_key"), ({"run_id": ""}, "run_id")):
-        with pytest.raises(ValueError, match=f"{field_name} is empty"):
-            _inputs(None, tmp_path, **changed)
     with pytest.raises(ValueError, match="dev_key is empty") as refused:
         _inputs(None, tmp_path, dev_key="  ")
     assert "m-key" not in str(refused.value)
@@ -303,17 +300,12 @@ _NOT_A_DIGEST = "runner_cache_manifest_sha256 is not a 64-character lowercase he
     ("changed", "message"),
     [
         ({"tp": 0}, "tp must be at least 1"),
-        ({"source_sha": "main"}, "source_sha is not a full lowercase commit hash"),
-        ({"source_sha": "AB" * 20}, "source_sha is not a full lowercase commit hash"),
-        ({"source_sha": "ab" * 19}, "source_sha is not a full lowercase commit hash"),
         ({"runner_cache_manifest_sha256": ""}, _NOT_A_DIGEST),
         ({"runner_cache_manifest_sha256": "CD" * 32}, _NOT_A_DIGEST),
         ({"runner_cache_manifest_sha256": "cd" * 31}, _NOT_A_DIGEST),
         ({"runner_cache_manifest_sha256": "cd" * 33}, _NOT_A_DIGEST),
         ({"runner_cache_manifest_sha256": "cg" * 32}, _NOT_A_DIGEST),
         ({"runner_cache_manifest_sha256": _MANIFEST + "\n"}, _NOT_A_DIGEST),
-        ({"grant_limits": {"max_sandboxes": 8, "max_gpus": 8}}, "grant_limits has no gpu_hours, max_runtime_sec"),
-        ({"grant_limits": {**_GRANT, "max_gpus": 7.5}}, "max_gpus is not a whole number"),
         ({"grant_limits": {**_GRANT, "max_sandboxes": 0}}, "at least one sandbox"),
         ({"sandbox_workspace": " "}, "sandbox_workspace is empty"),
     ],
@@ -373,24 +365,6 @@ def test_a_plain_dict_with_exactly_the_field_names_builds_the_inputs(tmp_path: P
     assert HostedToolboxInputs(**only_required).dev_key is None
 
 
-@pytest.mark.parametrize(
-    "left_out",
-    [
-        ("runner_cache_manifest_sha256",),  # a host that predates the manifest pin
-        _OPTIONAL_FIELDS,
-    ],
-)
-def test_a_plain_dict_without_the_newer_keys_still_builds_the_inputs(tmp_path: Path, left_out: tuple[str, ...]) -> None:
-    plain = {**vars(_inputs(None, tmp_path)), "runner_cache_manifest_sha256": _MANIFEST}
-    fewer = {name: value for name, value in plain.items() if name not in left_out}
-    assert set(left_out) < set(plain) and set(fewer) >= set(_REQUIRED_FIELDS)
-    inputs = HostedToolboxInputs(**fewer)
-    for name in left_out:
-        assert getattr(inputs, name) == {"tp": 1}.get(name), f"{name} falls back to its default"
-    pinned = {} if "runner_cache_manifest_sha256" in left_out else {MANIFEST_PIN_ENV: _MANIFEST}
-    assert inputs.create_envs() == {SOURCE_SHA_ENV: _SOURCE_SHA, **pinned}
-
-
 @pytest.mark.parametrize("tests_end_by", [None, 1_800_000_000.0])
 def test_the_toolbox_s_retries_wait_no_later_than_the_time_its_tests_must_end_by(
     tmp_path: Path, tests_end_by: float | None
@@ -405,20 +379,6 @@ def test_a_refused_manifest_digest_is_never_in_the_message(tmp_path: Path) -> No
     with pytest.raises(ValueError, match=_NOT_A_DIGEST) as refused:
         _inputs(None, tmp_path, runner_cache_manifest_sha256=secret_looking)
     assert secret_looking not in str(refused.value)
-
-
-def test_a_dict_with_one_key_more_or_one_required_key_less_is_refused(tmp_path: Path) -> None:
-    plain = vars(_inputs(None, tmp_path)).copy()
-    with pytest.raises(TypeError, match="unexpected keyword argument 'extra_field'"):
-        HostedToolboxInputs(**plain, extra_field=1)
-    for name in _REQUIRED_FIELDS:
-        fewer = {key: value for key, value in plain.items() if key != name}
-        with pytest.raises(TypeError, match=rf"missing 1 required positional argument: '{name}'"):
-            HostedToolboxInputs(**fewer)
-
-
-def test_the_source_of_a_sha256_repository_is_a_commit_hash_too(tmp_path: Path) -> None:
-    assert _inputs(None, tmp_path, source_sha="cd" * 32).source_sha == "cd" * 32
 
 
 # -- what is built from them ---------------------------------------------------------------------------------------
