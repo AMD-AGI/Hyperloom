@@ -58,6 +58,12 @@ GFX_PLACEHOLDER = "{gfx}"
 JOBS_PLACEHOLDER = "{jobs}"
 #: The upstream commit the tree is a checkout of: the build is told it, never reads it from a ``.git`` it may not have.
 COMMIT_PLACEHOLDER = "{commit}"
+#: The variables of the build service, besides ``PATH``, that reach the isolated build child
+#: (:mod:`~hyperloom.measure.runner.native.isolated`) and its compile where they are set: the library search path the
+#: image's torch may need (a ROCm SDK's ``libamd_smi.so``); nothing a candidate sets. The list is the isolation's own,
+#: so a variable added to another runner's pass list never reaches the child. It lives here, not in ``isolated``, as
+#: ``isolated`` imports this module.
+CHILD_PASSED_ENV_NAMES = ("LD_LIBRARY_PATH",)
 _SGL_KERNEL = "sgl_kernel"
 _SGL_KERNEL_RECIPE_VERSION = "sgl_kernel/1"
 _VLLM = "vllm"
@@ -173,12 +179,14 @@ class NativeRecipe:
         return [[_filled(part, values) for part in step] for step in self.steps]
 
     def environment(self, gfx_arch: str, scratch: Path) -> dict[str, str]:
-        """The compile's whole environment: no variable of the service (none of its credentials) reaches it."""
+        """The compile's whole environment: no variable of the service (none of its credentials) reaches it but
+        ``PATH`` and :data:`CHILD_PASSED_ENV_NAMES` where they are set, which the image's torch may need to load."""
         return {
             "PATH": os.environ.get("PATH", os.defpath),
             "HOME": str(scratch),
             "TMPDIR": str(scratch),
             "LC_ALL": "C.UTF-8",
+            **{name: os.environ[name] for name in CHILD_PASSED_ENV_NAMES if os.environ.get(name)},
             "MAX_JOBS": str(self.max_jobs),
             **self.variables(),
             self.gfx_variable: gfx_arch,

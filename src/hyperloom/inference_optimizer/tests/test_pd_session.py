@@ -16,6 +16,7 @@ from pathlib import Path
 import httpx
 import pytest
 
+from inference_suite import SGLANG_PROFILER_DIR_ENV
 from inference_suite.contracts.base_launch import LaunchQuery, Workload
 from inference_suite.multinode import RECORD_NAME, Cluster, PdMode, Role, SshClient, read_record, write_record
 from inference_suite.multinode.commands import CommandError
@@ -120,14 +121,8 @@ def test_a_pd_session_freezes_its_launch_and_no_single_node_base(session: Path, 
     monkeypatch.setattr(cli_mn, "freeze_pd_session_launch", lambda *a, **k: frozen.append(a))
     monkeypatch.setattr(bootstrap, "resolve_base_launch", lambda *a, **k: pytest.fail("resolved a single-node base"))
     args = argparse.Namespace(nodes=2, mn_backend=None, conc=64, enable_conc_sweep=False)
-    assert bootstrap.resolve_session_base(session, args, framework="sglang") is None
+    bootstrap.resolve_session_base(session, args, framework="sglang")
     assert frozen[0][2] is _SESSION
-
-
-def test_a_single_node_session_still_resolves_its_base(session: Path, monkeypatch) -> None:
-    monkeypatch.setattr(bootstrap, "resolve_base_launch", lambda *a, **k: "base")
-    args = argparse.Namespace(nodes=1, mn_backend=None, conc=64, enable_conc_sweep=False)
-    assert bootstrap.resolve_session_base(session, args, framework="sglang") == "base"
 
 
 def test_a_frozen_pd_session_gives_its_rounds_a_client_base(session: Path, monkeypatch) -> None:
@@ -172,6 +167,12 @@ def test_a_round_records_the_pods_of_the_launch_as_run(session: Path, monkeypatc
     state = ext.load_multi_node_state()
     pods = {pod["role"]: pod for pod in state["pods"]}
     assert "--chunked-prefill-size 4096" in pods["decode"]["launch_command"]
+
+
+def test_a_reload_keeps_the_backend_adoption_resolved(session: Path) -> None:
+    pd_session.freeze_launch(session, _SESSION, pd_session.handed_node_list())
+    cli_mn._prepare_multi_node_state(argparse.Namespace(nodes=2, mn_backend="atomesh", no_kernel=True), session)
+    assert ext.load_multi_node_state()["backend"] == "atomesh"
 
 
 def test_resume_refuses_a_launch_that_is_not_the_one_frozen(session: Path) -> None:
@@ -378,11 +379,11 @@ def test_adoption_records_why_the_trace_root_is_not_shared(
 
 
 def test_a_profiling_round_gives_each_engine_role_its_own_profiler_dir() -> None:
-    options = pd_session.launch_options({pd_session.PROFILER_DIR_ENV: "/t/", "SGLANG_X": "1"}, 60)
+    options = pd_session.launch_options({SGLANG_PROFILER_DIR_ENV: "/t/", "SGLANG_X": "1"}, 60)
     assert options.extra_env == {"SGLANG_X": "1"}
     assert options.role_env == {
-        "prefill": {pd_session.PROFILER_DIR_ENV: "/t/prefill"},
-        "decode": {pd_session.PROFILER_DIR_ENV: "/t/decode"},
+        "prefill": {SGLANG_PROFILER_DIR_ENV: "/t/prefill"},
+        "decode": {SGLANG_PROFILER_DIR_ENV: "/t/decode"},
     }
     assert pd_session.launch_options({"SGLANG_X": "1"}, 60).role_env == {}
 

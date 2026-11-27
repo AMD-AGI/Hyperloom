@@ -313,6 +313,5 @@ __all__ = [
     "SessionLaunch",
     "resolve_base_launch",
     "resolve_server_base",
-    "server_session",
     "server_session_query",
 ]

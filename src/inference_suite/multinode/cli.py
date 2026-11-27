@@ -86,7 +86,7 @@ def _run(args: argparse.Namespace) -> int:
     try:
         nodes = read_node_list(os.environ)
         cluster = cluster_of(nodes, args.record)
-        launch = placed_launch(nodes, args.record)
+        launch = placed_launch(nodes, read_record(args.record))
         if args.action == "stop":
             stop(launch, cluster)
             return EXIT_OK
@@ -132,4 +132,4 @@ def add_commands(commands: Any) -> None:
     _cluster_parser(actions, "stop", "stop the router and every engine", record)
 
 
-__all__ = ["EXIT_NOT_UP", "EXIT_OK", "EXIT_REFUSED", "SESSION_DIR_ENV", "add_commands", "default_record"]
+__all__ = ["add_commands"]

@@ -737,11 +737,10 @@ def restart_pd_round(shared_args: str, ready_timeout_s: int) -> Any:
         PdSessionError: the launch cannot be verified, a host refused, or the cluster did not come up.
     """
     from .commands.infera import _collect_forward_env
-    from .pd_session import launch_options, restart_round, stamp_launch_pods
+    from .pd_session import launch_options, restart_round
 
     state = _load_state()
     ran = restart_round(state, shared_args, launch_options(_collect_forward_env(), ready_timeout_s))
-    stamp_launch_pods(state, ran)
     _save_state(state)
     return ran
 

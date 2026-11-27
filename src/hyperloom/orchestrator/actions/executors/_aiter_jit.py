@@ -385,6 +385,13 @@ COMPILED_REGISTRY_MARKER = "not present in the compiled registry"
 # kernelName values with these libtypes are not linked into serving ``module_*.so``.
 NON_JIT_SO_LIBTYPES = frozenset({"asm", "triton", "gluon", "opus", "flydsl"})
 
+#: Name prefixes of a libtype-less row's kernel that another backend runs: the a4w4 tables mix ASM (mangled ``_ZN``),
+#: Triton and FlyDSL kernels with CK ones and name no libtype, and aiter's CK codegen drops these rows by the same
+#: prefixes (``get_tune_dict``, ``csrc/ck_gemm_a4w4_blockscale/gen_instances.py``), so no module holds their names.
+FOREIGN_KERNEL_PREFIXES = ("_ZN", "triton_", "flydsl_")
+#: The column a foreign row names the CK kernel it falls back to in; aiter's CK codegen builds that kernel too.
+_FALLBACK_KERNEL = "fallbackKernelName"
+
 _BLOCKSCALE_CKTILE = "module_gemm_a8w8_blockscale_cktile"
 _BLOCKSCALE_BPRESHUFFLE_CKTILE = "module_gemm_a8w8_blockscale_bpreshuffle_cktile"
 
@@ -648,7 +655,9 @@ def _dispatch_key(row: dict[str, Any], libtype: str, index: int) -> tuple[str, .
 
 def csv_jit_kernel_rows(csv_path: Path, targets: BuildTargets | None = None) -> list[tuple[str, str]]:
     """Each ``(kernelName, libtype)`` pair linked into a serving ``module_*.so``, once, in first-seen order; only the
-    rows aiter compiles for ``targets`` when they are given, and of the rows sharing a dispatch key only the last.
+    rows aiter compiles for ``targets`` when they are given, and of the rows sharing a dispatch key only the last. A
+    libtype-less row of another backend (:data:`FOREIGN_KERNEL_PREFIXES`) gives its CK ``fallbackKernelName`` instead,
+    when it names one: aiter builds that kernel into the module and not the row's own.
 
     The tables this reads ship with aiter, so their encoding and field sizes are not
     ours to assume: a BOM raises ``UnicodeDecodeError`` and an overlong field raises
@@ -662,12 +671,14 @@ def csv_jit_kernel_rows(csv_path: Path, targets: BuildTargets | None = None) -> 
                 if not name:
                     continue
                 libtype = str(row.get("libtype") or "").strip().lower()
-                if libtype in NON_JIT_SO_LIBTYPES:
+                if libtype in NON_JIT_SO_LIBTYPES or not _compiled_for(row, targets):
                     continue
-                if not libtype and name.startswith("_ZN"):
-                    continue
-                if _compiled_for(row, targets):
+                if libtype or not name.startswith(FOREIGN_KERNEL_PREFIXES):
                     by_key[_dispatch_key(row, libtype, index)] = (name, libtype)
+                    continue
+                fallback = str(row.get(_FALLBACK_KERNEL) or "").strip()
+                if fallback and fallback != "0" and not fallback.startswith(FOREIGN_KERNEL_PREFIXES):
+                    by_key[(_FALLBACK_KERNEL, *_dispatch_key(row, libtype, index))] = (fallback, libtype)
     except (OSError, UnicodeDecodeError, csv.Error) as exc:
         log.warning("aiter_jit: cannot read tuned CSV %s (%s); treating it as covered", csv_path, exc)
         return []

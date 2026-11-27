@@ -9,13 +9,13 @@ the legacy entry validated, a multi-branch session needs ``multibranch.workload`
 ``workload.conc`` and ``workload.precision``; ``multibranch.inferencex_commit`` is ``--inferencex-commit``,
 ``multibranch.reference_script`` ``--reference-script``, ``multibranch.max_branches`` ``--max-branches``,
 ``multibranch.dev_leases`` ``--dev-leases``, each source of ``multibranch.autonomous_agents`` one
-``--autonomous-agent``, ``multibranch.make_before_break`` (``true`` by default) ``--make-before-break`` or
-``--no-make-before-break``, ``multibranch.conc_sweep`` (``true`` by default) ``--no-enable-conc-sweep`` when ``false``,
+``--autonomous-agent``, ``multibranch.conc_sweep`` (``true`` by default) ``--no-enable-conc-sweep`` when ``false``,
 ``multibranch.conc_sweep_concs`` ``--conc-sweep-concs``, ``multibranch.conc_sweep_parallel``
 ``--conc-sweep-parallel``, ``multibranch.agentx_duration_sec`` ``--agentx-duration-sec`` and
 ``multibranch.agentx_objective`` ``--agentx-objective`` (an ``agentx`` workload only), ``multibranch.boot_budget_sec``
 ``--boot-budget-sec``, and ``placement.max_parallel_tests`` is ``--max-parallel-tests``, at most what runs at once
-where the session measures. The fields ``run`` has no option for --
+where the session measures. ``multibranch.make_before_break`` is accepted and ignored with a warning, so a spec
+written for a build that read it still starts. The fields ``run`` has no option for --
 ``objective``, ``options``, ``placement.profile`` and ``placement.specialist_capacity`` -- are not read. A spec that
 sets ``launch.server_args`` or ``launch.extra_env`` is refused rather than run without them: a multi-branch session's
 base launch, its flags and its environment, is the shell script ``multibranch.reference_script`` names.
@@ -178,6 +178,8 @@ def run_argv(spec: CampaignSpec, max_hours: float, parallel_tests: int) -> list[
 
     section = _multibranch_section(spec.multibranch)
     _refuse_launch_fields(spec)
+    if "make_before_break" in section:
+        log.warning("multibranch.make_before_break is ignored: a test's sandbox is closed when the test ends")
     values: dict[str, Any] = {
         "model": spec.model_path,
         "framework": spec.framework_name,
@@ -258,33 +260,13 @@ def _conc_sweep_concs(concs: object) -> str | None:
 
 
 def _switches(section: Mapping[str, Any]) -> list[str]:
-    """The on/off options of ``section``: ``multibranch.make_before_break`` as ``--[no-]make-before-break`` and
-    ``multibranch.conc_sweep`` as ``--[no-]enable-conc-sweep``, nothing when the spec leaves either to ``run``'s
-    default (on)."""
+    """The on/off options of ``section``: ``multibranch.conc_sweep`` as ``--[no-]enable-conc-sweep``, nothing when the
+    spec leaves it to ``run``'s default (on)."""
 
-    keep = _make_before_break(section)
     sweep = section.get("conc_sweep")
     if sweep is not None and not isinstance(sweep, bool):
         raise HostedRefused("multibranch.conc_sweep must be true or false")
-    return [
-        *([] if keep is None else ["--make-before-break" if keep else "--no-make-before-break"]),
-        *([] if sweep is None else ["--enable-conc-sweep" if sweep else "--no-enable-conc-sweep"]),
-    ]
-
-
-def spec_make_before_break(spec: CampaignSpec) -> bool:
-    """The operator's ``multibranch.make_before_break`` of ``spec``, on when it is not given; raises
-    :class:`HostedRefused` when it is neither true nor false."""
-
-    keep = _make_before_break(_multibranch_section(spec.multibranch))
-    return True if keep is None else keep
-
-
-def _make_before_break(section: Mapping[str, Any]) -> bool | None:
-    keep = section.get("make_before_break")
-    if keep is not None and not isinstance(keep, bool):
-        raise HostedRefused("multibranch.make_before_break must be true or false")
-    return keep
+    return [] if sweep is None else ["--enable-conc-sweep" if sweep else "--no-enable-conc-sweep"]
 
 
 def _inferencex_commit(commit: object) -> str | None:
@@ -426,17 +408,17 @@ def _multibranch_section(section: object) -> dict[str, Any]:
     return section
 
 
-def grant_tests_that_fit(host: HostInfo, make_before_break: bool = True) -> Callable[[int], int]:
-    """How many tests of a TP the grant ``host`` holds runs at once, as the hosted toolbox runs them (``handover_for``
-    with ``make_before_break``); raises ValueError when one does not fit, ImportError without the ``hosted`` extra."""
+def grant_tests_that_fit(host: HostInfo) -> Callable[[int], int]:
+    """How many tests of a TP the grant ``host`` holds runs at once, as the hosted toolbox runs them; raises ValueError
+    when one does not fit, ImportError without the ``hosted`` extra."""
 
     # hosted_toolbox loads the sandbox SDK, which only the hosted extra installs.
-    from hyperloom_multibranch.toolbox.hosted_toolbox import handover_for, parallel_tests_for
+    from hyperloom_multibranch.toolbox.hosted_toolbox import parallel_tests_for
 
     grant = toolbox_grant(host.grant_limits)
 
     def tests_that_fit(tp: int) -> int:
-        return parallel_tests_for(grant, tp, handover_for(grant, tp) if make_before_break else None)
+        return parallel_tests_for(grant, tp)
 
     return tests_that_fit
 
@@ -923,7 +905,6 @@ __all__ = [
     "require_spec_matches",
     "run_argv",
     "share_with_the_group",
-    "spec_make_before_break",
     "started_session",
     "stop_before_grant_ends",
     "sweep_stop_reason",

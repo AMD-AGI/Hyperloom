@@ -10,7 +10,7 @@ import os
 import sys
 from collections.abc import Callable
 from pathlib import Path
-from typing import Any, TypeVar
+from typing import Any, NoReturn, TypeVar
 
 from inference_suite.contracts.base_launch import BaseLaunch, LaunchQuery
 
@@ -87,12 +87,11 @@ def _resolve_mn_backend(args: argparse.Namespace) -> str:
 def is_pd_session(args: argparse.Namespace) -> bool:
     """Whether a ``--nodes >= 2`` run serves a node-list cluster the suite launches: an atomesh or sglangrouter one,
     or an Infera one handed over as a node list."""
-    from ..multi_node.pd_session import INFERA, PD_BACKENDS
+    from ..multi_node.pd_session import is_pd_backend
 
     if int(getattr(args, "nodes", 1) or 1) < 2:
         return False
-    backend = _resolve_mn_backend(args)
-    return backend in PD_BACKENDS or (backend == INFERA and _hand_off_node_list() is not None)
+    return is_pd_backend(_resolve_mn_backend(args), node_list=_hand_off_node_list() is not None)
 
 
 def freeze_pd_session_launch(
@@ -128,7 +127,7 @@ def freeze_pd_session_launch(
     return base
 
 
-def _exit_refused(problem: str) -> None:
+def _exit_refused(problem: str) -> NoReturn:
     """Print ``problem`` and exit 2."""
     print(f"ERROR: {problem}", file=sys.stderr)
     sys.exit(2)
@@ -147,27 +146,16 @@ def refuse_pd_resume_server_args(session_dir: Path, server_args: str) -> None:
         _exit_refused(PD_SERVER_ARGS_REFUSAL)
 
 
-def _bind_pd_launch(ext_state: dict[str, Any], session_dir: Path | None) -> None:
+def _bind_pd_launch(ext_state: dict[str, Any], session_dir: Path) -> None:
     """Record the session's frozen PD launch in ``ext_state``; exits 2 when it is missing or not the one frozen."""
     from inference_suite.multinode import RECORD_NAME
 
     from ..multi_node._internal.external_state import load_multi_node_state
-    from ..multi_node.pd_session import (
-        PD_DIGEST_KEY,
-        PD_LAUNCH_KEY,
-        PdSessionError,
-        stamp_launch_pods,
-        verified_launch,
-    )
+    from ..multi_node.pd_session import PD_DIGEST_KEY, PdSessionError, bind_launch
 
-    if session_dir is None:
-        _exit_refused("a PD session binds its frozen launch to a session directory, and none is open")
     frozen = str(load_multi_node_state().get(PD_DIGEST_KEY) or "")
     try:
-        launch = verified_launch(session_dir / RECORD_NAME, frozen)
-        ext_state[PD_LAUNCH_KEY] = str(session_dir / RECORD_NAME)
-        ext_state[PD_DIGEST_KEY] = launch.digest()
-        stamp_launch_pods(ext_state)
+        bind_launch(ext_state, session_dir / RECORD_NAME, frozen)
     except PdSessionError as exc:
         _exit_refused(str(exc))
 
@@ -189,7 +177,7 @@ def _record_trace_share(ext_state: dict[str, Any]) -> None:
         )
 
 
-def _prepare_multi_node_state(args: argparse.Namespace, session_dir: Path | None = None) -> None:
+def _prepare_multi_node_state(args: argparse.Namespace, session_dir: Path) -> None:
     """Adopt the platform-provisioned cluster for a ``--nodes >= 2`` run."""
     nodes = max(1, int(args.nodes))
     if nodes < 2:

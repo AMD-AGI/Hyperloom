@@ -15,6 +15,7 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, NamedTuple
 
+from inference_suite import SGLANG_PROFILER_DIR_ENV
 from inference_suite.contracts.base_launch import LaunchQuery
 from inference_suite.multinode import (
     Cluster,
@@ -53,6 +54,7 @@ from ._internal.pd_handoff import (
     PODS_KEY,
     SSH_BACKENDS,
     handed_node_list,
+    is_pd_backend,
     is_pd_state,
     node_list_backend,
     pod,
@@ -65,7 +67,6 @@ PD_DIGEST_KEY = "pd_launch_digest"
 PREFILL_EXTRA_ENV = "PD_PREFILL_EXTRA_ARGS"
 DECODE_EXTRA_ENV = "PD_DECODE_EXTRA_ARGS"
 SERVER_LOG_DIR_ENV = "HYPERLOOM_MN_SERVER_LOG_DIR"
-PROFILER_DIR_ENV = "SGLANG_TORCH_PROFILER_DIR"
 TRACE_SHARED_KEY = "profile_trace_shared"
 TRACE_SHARE_ERROR_KEY = "profile_trace_share_error"
 TRACE_SHARE_PROBE_TIMEOUT_S = 30
@@ -98,7 +99,7 @@ def freeze_launch(session_dir: Path, session: LaunchQuery, nodes: NodeList, infe
     return launch
 
 
-def verified_launch(record: Path, digest: str) -> PdLaunch:
+def _verified_launch(record: Path, digest: str) -> PdLaunch:
     """The frozen launch at ``record``, refused when it is not the one whose digest the session recorded.
 
     Raises:
@@ -132,9 +133,9 @@ def launch_options(forward_env: Mapping[str, str], ready_timeout_s: int) -> Laun
     ``<dir>/<role>`` for each engine role (the router gets none)."""
     env = {key: value for key, value in forward_env.items() if exportable_env_key(key)}
     log_dir = env.pop(SERVER_LOG_DIR_ENV, "")
-    profiler_dir = env.pop(PROFILER_DIR_ENV, "").rstrip("/")
+    profiler_dir = env.pop(SGLANG_PROFILER_DIR_ENV, "").rstrip("/")
     roles = (Role.PREFILL.value, Role.DECODE.value)
-    role_env = {role: {PROFILER_DIR_ENV: f"{profiler_dir}/{role}"} for role in roles} if profiler_dir else {}
+    role_env = {role: {SGLANG_PROFILER_DIR_ENV: f"{profiler_dir}/{role}"} for role in roles} if profiler_dir else {}
     return LaunchOptions(extra_env=env, role_env=role_env, log_dir=log_dir, ready_timeout_s=ready_timeout_s)
 
 
@@ -156,12 +157,27 @@ def _session_cluster(state: dict[str, Any]) -> _SessionCluster:
     if nodes is None:
         raise PdSessionError(f"a node-list session needs {NODE_LIST_ENV}, which is unset")
     record = Path(str(state.get(PD_LAUNCH_KEY) or ""))
-    verified_launch(record, str(state.get(PD_DIGEST_KEY) or ""))
-    return _SessionCluster(record, placed_launch(nodes, record), cluster_of(nodes, record))
+    launch = _verified_launch(record, str(state.get(PD_DIGEST_KEY) or ""))
+    return _SessionCluster(record, placed_launch(nodes, launch), cluster_of(nodes, record))
+
+
+def bind_launch(state: dict[str, Any], record: Path, digest: str) -> None:
+    """Record the launch frozen at ``record`` in ``state``: its path, its digest and the pod of every host it serves
+    on; refused when ``digest`` is set and names another launch.
+
+    Raises:
+        PdSessionError: no node list is handed over, or the launch cannot be read, verified or placed.
+    """
+    state[PD_LAUNCH_KEY], state[PD_DIGEST_KEY] = str(record), digest
+    with _as_session_error("the PD launch cannot be placed"):
+        session = _session_cluster(state)
+    state[PD_DIGEST_KEY] = session.launch.digest()
+    _stamp_launch_pods(state, session.launch, session.cluster.nodes)
 
 
 def restart_round(state: dict[str, Any], shared_args: str, options: LaunchOptions) -> PdLaunch:
-    """Restart the session's cluster with one round's args over the frozen launch; returns the launch as run.
+    """Restart the session's cluster with one round's args over the frozen launch, record the pods of the launch as
+    run in ``state``, and return it.
 
     ``shared_args`` apply to every engine; ``$PD_PREFILL_EXTRA_ARGS`` and ``$PD_DECODE_EXTRA_ARGS`` to their own PD
     role.
@@ -179,6 +195,7 @@ def restart_round(state: dict[str, Any], shared_args: str, options: LaunchOption
         )
         ran = restart(session.launch, _without_launcher_flags(session.launch, overrides), session.cluster, options)
         write_record(ran, session.record.with_name(RAN_RECORD_NAME))
+    _stamp_launch_pods(state, ran, session.cluster.nodes)
     return ran
 
 
@@ -228,17 +245,15 @@ def session_worker_hosts(state: dict[str, Any]) -> dict[str, list[tuple[str, ...
         return {role.value: worker_hosts(launch.role(role)) for role in launch.served_roles}
 
 
-def stamp_launch_pods(state: dict[str, Any], launch: PdLaunch | None = None) -> None:
-    """Record every host of ``launch`` (the session's frozen launch by default) in ``state``'s ``pods`` as a pod with
-    the command it serves, the shape readers of the multi-node state such as GEAK take a cluster in.
+def _stamp_launch_pods(state: dict[str, Any], launch: PdLaunch, nodes: NodeList) -> None:
+    """Record every host of ``launch``, placed on ``nodes``, in ``state``'s ``pods`` as a pod with the command it
+    serves, the shape readers of the multi-node state such as GEAK take a cluster in.
 
     Raises:
-        PdSessionError: no node list is handed over, or the frozen launch cannot be verified or placed.
+        PdSessionError: a host's command cannot be built.
     """
     with _as_session_error("the PD launch cannot be placed"):
-        session = _session_cluster(state)
-        nodes = session.cluster.nodes
-        commands = cluster_commands(launch or session.launch, nodes)
+        commands = cluster_commands(launch, nodes)
     indices: dict[str, int] = {}
     pods: list[dict[str, Any]] = []
     for command in commands:
@@ -305,9 +320,11 @@ __all__ = [
     "TRACE_SHARED_KEY",
     "TRACE_SHARE_ERROR_KEY",
     "PdSessionError",
+    "bind_launch",
     "engines_lost",
     "freeze_launch",
     "handed_node_list",
+    "is_pd_backend",
     "is_pd_state",
     "launch_options",
     "node_list_backend",
@@ -315,7 +332,5 @@ __all__ = [
     "restart_round",
     "session_engine_urls",
     "session_worker_hosts",
-    "stamp_launch_pods",
     "stop_cluster",
-    "verified_launch",
 ]

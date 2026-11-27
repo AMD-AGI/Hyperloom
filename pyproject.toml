@@ -756,7 +756,6 @@ ignorelist = ["aiter"]
 # what an unconfigured process prints.
 "src/hyperloom/inference_optimizer/cli/model_gate.py" = ["LOG015"]
 "src/hyperloom/inference_optimizer/model_config_utils.py" = ["LOG015"]
-"src/hyperloom/orchestrator/actions/executors/_geak_sweep.py" = ["LOG015"]
 
 # Markdown formatting in Ruff is still preview/experimental; keep ``ruff format``
 # scoped to Python so CI ``ruff format --check`` does not rewrite docs/skills.

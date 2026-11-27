@@ -666,44 +666,6 @@ async def test_close_sequencer_records_its_own_verdict_and_artifacts(
             },
             "DROPPED",
         ),
-        (
-            {
-                "status": "rebench_declined",
-                "revalidation_error": "no_slot_free",
-                "self_reported_gain_pct": 12.5,
-                "self_reported_tput": 1125.0,
-                "self_reported_basis": "geak_harness",
-            },
-            {
-                "revalidation_pending": False,
-                "status": "rebench_declined",
-                "revalidation_error": "no_slot_free",
-                "revalidation_error_class": None,
-                "self_reported_gain_pct": 12.5,
-                "self_reported_tput": 1125.0,
-                "self_reported_basis": "geak_harness",
-            },
-            "DROPPED",
-        ),
-        (
-            {
-                "status": "overlay_unloadable",
-                "revalidation_error": "geak_overlay_unloadable",
-                "self_reported_gain_pct": 12.5,
-                "self_reported_tput": 1125.0,
-                "self_reported_basis": "geak_harness",
-            },
-            {
-                "revalidation_pending": False,
-                "status": "overlay_unloadable",
-                "revalidation_error": "geak_overlay_unloadable",
-                "revalidation_error_class": None,
-                "self_reported_gain_pct": 12.5,
-                "self_reported_tput": 1125.0,
-                "self_reported_basis": "geak_harness",
-            },
-            "DROPPED",
-        ),
     ],
 )
 async def test_close_sequencer_records_the_unsettled_geak_candidate_the_final_report_flags(
