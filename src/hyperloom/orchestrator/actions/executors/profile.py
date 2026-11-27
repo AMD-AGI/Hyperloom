@@ -715,9 +715,14 @@ async def _trigger_engine_profiles(action: str, body: dict[str, Any] | None = No
     await (trigger_pd_engine_profile if is_pd_session() else trigger_infera_engine_profile)(action, body)
 
 
-# Runs the body with a warmup-then-bounded Infera engine profiling window around it.
 @contextlib.asynccontextmanager
-async def _infera_profile_window(round_trace_root: str):
+async def _engine_profile_window(round_trace_root: str):
+    """Run the body with a warmup-then-bounded profiling window on the multi-node engines (the PD engines of a
+    node-list session, else the Infera workers).
+
+    Raises:
+        Exception: what a profiling call of the window raised, once the body has run.
+    """
     import asyncio as _asyncio
 
     prof_body: dict[str, Any] = {}
@@ -742,6 +747,7 @@ async def _infera_profile_window(round_trace_root: str):
         started["v"] = False
 
     prof_task = _asyncio.create_task(_bounded_profile_window())
+    failure: BaseException | None = None
     try:
         yield
     finally:
@@ -751,8 +757,12 @@ async def _infera_profile_window(round_trace_root: str):
                 await prof_task
             except (_asyncio.CancelledError, OSError, RuntimeError, ValueError) as exc:
                 log.debug("profile_executor: bounded profile task ended during cleanup: %r", exc)
+        elif not prof_task.cancelled():
+            failure = prof_task.exception()
         if started.get("v"):
             await _trigger_engine_profiles("stop")
+    if failure is not None:
+        raise failure
 
 
 # Attaches this round's multi-node trace files: a PD cluster's per-role traces (decode's main), else the heaviest file.
@@ -1132,7 +1142,7 @@ class ProfileExecutor(BenchmarkRunExecutor):
             if refusal is not None:
                 return refusal
             extra["mn_round_restarted"] = True
-        async with _infera_profile_window(round_trace_root):
+        async with _engine_profile_window(round_trace_root):
             result = await super().__call__(ctx)
         self._collect_rewrite_evidence(result)
         workspace_str = result.get("workspace")

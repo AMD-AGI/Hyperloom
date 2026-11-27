@@ -20,14 +20,14 @@ from inference_suite import SGLANG_PROFILER_DIR_ENV
 from inference_suite.contracts.base_launch import LaunchQuery, Workload
 from inference_suite.multinode import RECORD_NAME, Cluster, PdMode, Role, SshClient, read_record, write_record
 from inference_suite.multinode.commands import CommandError
-from inference_suite.multinode.ssh import SshResult
+from inference_suite.multinode.ssh import SshError, SshResult
 from hyperloom.inference_optimizer.cli import bootstrap
 from hyperloom.inference_optimizer.cli import multi_node as cli_mn
 from hyperloom.inference_optimizer.multi_node import TopologyHandoffError
 from hyperloom.inference_optimizer.multi_node import cli as mn_cli
 from hyperloom.inference_optimizer.multi_node import pd_session
 from hyperloom.inference_optimizer.multi_node._internal import external_state as ext
-from hyperloom.orchestrator.actions.executors import profile
+from hyperloom.orchestrator.actions.executors import _pd_profile_round, profile
 from hyperloom.orchestrator.actions.executors.benchmark_run.launch import _BenchmarkLaunchMixin
 from hyperloom.orchestrator.actions.executors.serving import _multi_node_server_lifecycle as lifecycle
 from hyperloom.orchestrator.actions.executors.serving import _pd_round_server as pd_round
@@ -265,6 +265,68 @@ def test_a_gone_engine_is_named(session: Path, monkeypatch) -> None:
     assert asyncio.run(_BenchmarkLaunchMixin._multi_node_engines_lost()) == "decode engine on d0 is gone"
 
 
+def test_an_engine_check_that_cannot_run_is_a_lost_engine(session: Path, monkeypatch) -> None:
+    _adopt(session)
+
+    def unreachable(launch, cluster):
+        raise SshError("d0: connection timed out")
+
+    monkeypatch.setattr(pd_session, "engines_gone", unreachable)
+    lost = asyncio.run(_BenchmarkLaunchMixin._multi_node_engines_lost())
+    assert "cannot be checked" in lost and "d0: connection timed out" in lost
+
+
+def test_a_launch_the_profile_round_cannot_place_fails_it(session: Path, monkeypatch) -> None:
+    _adopt(session)
+
+    def unplaceable(_state):
+        raise pd_session.PdSessionError("the frozen launch is not the one recorded")
+
+    monkeypatch.setattr(pd_session, "session_engine_urls", unplaceable)
+    monkeypatch.setattr(pd_session, "session_worker_hosts", unplaceable)
+    with pytest.raises(pd_session.PdSessionError):
+        asyncio.run(pd_round.trigger_pd_engine_profile("start"))
+    with pytest.raises(pd_session.PdSessionError):
+        pd_round.select_pd_node_traces(str(session), 0.0)
+
+
+def test_an_engine_trace_dir_that_cannot_be_made_fails_the_profile_start(
+    session: Path, tmp_path: Path, monkeypatch
+) -> None:
+    _adopt(session)
+    seen = _record_posts(monkeypatch)
+    blocker = tmp_path / "file"
+    blocker.write_text("x")
+    with pytest.raises(OSError):
+        asyncio.run(pd_round.trigger_pd_engine_profile("start", {"output_dir": str(blocker / "round")}))
+    assert seen == []
+
+
+def test_a_profile_round_without_its_trace_dir_or_profile_config_fails(session: Path, tmp_path: Path) -> None:
+    _adopt(session)
+    blocker = tmp_path / "file"
+    blocker.write_text("x")
+    with pytest.raises(OSError):
+        _pd_profile_round.trace_fs_round_start(str(blocker / "torch_trace"), 0.0)
+    with pytest.raises(OSError):
+        _pd_profile_round.graph_capture_round("", tmp_path / "missing.yaml")
+
+
+def test_an_engine_profile_call_that_fails_fails_the_window(monkeypatch) -> None:
+    async def refuse(action, body=None):
+        raise pd_session.PdSessionError("the PD engines cannot be placed")
+
+    monkeypatch.setattr(profile, "_trigger_engine_profiles", refuse)
+    monkeypatch.setenv("HYPERLOOM_MN_PROFILE_WARMUP_S", "0")
+
+    async def run_window() -> None:
+        async with profile._engine_profile_window(""):
+            await asyncio.sleep(0.05)
+
+    with pytest.raises(pd_session.PdSessionError):
+        asyncio.run(run_window())
+
+
 _INFERA_NODES = {
     "framework": "sglang",
     "model": "/models/M",
@@ -467,12 +529,3 @@ def test_pd_engine_profile_with_stack_follows_env(session: Path, monkeypatch: py
         ("http://p0:8000/start_profile", {"with_stack": True}),
         ("http://d0:8000/start_profile", {"with_stack": True}),
     ]
-
-
-def test_a_node_list_infera_session_skips_the_frontend_profile_fan_out(
-    infera_session: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    _adopt(infera_session)
-    seen = _record_posts(monkeypatch)
-    asyncio.run(profile._trigger_engine_profiles("start"))
-    assert seen == []

@@ -9,7 +9,7 @@ import asyncio
 import logging
 import re
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any
 
 from hyperloom_common.env import env_flag
 from hyperloom_common.io import safe_mtime, safe_size
@@ -73,24 +73,13 @@ def _first_gpu_traces(paths: list[Path], role: str, nodes: int) -> list[str]:
     return picks
 
 
-def _place_engines(place: Callable[[dict[str, Any]], dict[str, list[Any]]], state: dict[str, Any]) -> dict[str, Any]:
-    """``place(state)`` over a PD session's frozen launch, per role; empty when the launch cannot be placed."""
-    from hyperloom.inference_optimizer.multi_node.pd_session import PdSessionError
-
-    try:
-        return place(state)
-    except PdSessionError as exc:
-        log.warning("pd profile: cannot place the engines of the frozen launch: %s", exc)
-        return {}
-
-
 def select_pd_node_traces(root: str, since_unix: float) -> dict[str, list[str]]:
     """Return, per PD role, the first GPU's trace of each node written since ``since_unix``, worker by worker under
     ``<root>/<role>/<worker>``; nodes are numbered across the role's workers in order."""
     from hyperloom.inference_optimizer.multi_node.pd_session import is_pd_state, session_worker_hosts
 
     state = _read_state()
-    workers = _place_engines(session_worker_hosts, state) if is_pd_state(state) else {}
+    workers = session_worker_hosts(state) if is_pd_state(state) else {}
     selected: dict[str, list[str]] = {}
     for role in PD_PROFILE_ROLES:
         picks: list[str] = []
@@ -116,7 +105,7 @@ async def trigger_pd_engine_profile(action: str, body: dict | None = None) -> No
     """
     from hyperloom.inference_optimizer.multi_node.pd_session import session_engine_urls
 
-    urls = _place_engines(session_engine_urls, _read_state())
+    urls = session_engine_urls(_read_state())
     targets = [(role, worker, url) for role in PD_PROFILE_ROLES for worker, url in enumerate(urls.get(role, []))]
     if not targets:
         log.warning("trigger_pd_engine_profile(%s): no prefill/decode engines to profile", action)
@@ -134,10 +123,7 @@ async def trigger_pd_engine_profile(action: str, body: dict | None = None) -> No
         payload: dict = {}
         if output_dir:
             worker_dir = pd_worker_trace_dir(output_dir, role, worker)
-            try:
-                Path(worker_dir).mkdir(parents=True, exist_ok=True)
-            except OSError as exc:
-                log.debug("pd profile: cannot mkdir %s: %s", worker_dir, exc)
+            Path(worker_dir).mkdir(parents=True, exist_ok=True)
             payload["output_dir"] = worker_dir
         if starting:
             payload["with_stack"] = with_stack

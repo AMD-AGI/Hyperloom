@@ -6,7 +6,6 @@ engines, and the client-side profiler left to the engines."""
 
 from __future__ import annotations
 
-import logging
 from pathlib import Path
 import yaml
 
@@ -14,8 +13,6 @@ from hyperloom.common.benchmark_config import read_benchmark_point
 
 from ._multi_node_env import is_pd_session
 from .workload._workload_envs import _SGLANG_PROFILE_CUDA_GRAPH_FLAG, without_dead_cuda_graph_profile
-
-log = logging.getLogger(__name__)
 
 _ENCODING = "utf-8"
 
@@ -27,36 +24,31 @@ _GRAPH_CAPTURE_PROFILE_ENV_KEYS = (
 )
 
 
-def trace_fs_round_start(round_trace_root: str, fallback_unix: float) -> float:
+def trace_fs_round_start(round_trace_root: str, client_unix: float) -> float:
     """Return the round start on the trace filesystem's clock, read from a marker file's mtime.
 
-    Trace mtimes are stamped by the filesystem that stores them, so this round's
-    traces are compared against a time from that same clock; ``fallback_unix``
-    is returned when the marker cannot be written.
+    Trace mtimes are stamped by the filesystem that stores them, so this round's traces are compared against a time
+    from that same clock; ``client_unix`` is the marker's content.
+
+    Raises:
+        OSError: the marker cannot be written under ``round_trace_root``, where the engines write their traces too.
     """
     marker = Path(round_trace_root) / ".round_start"
-    try:
-        marker.parent.mkdir(parents=True, exist_ok=True)
-        marker.write_text(f"{fallback_unix:.3f}\n", encoding=_ENCODING)
-        return marker.stat().st_mtime
-    except OSError as exc:
-        log.warning(
-            "profile_executor: cannot stamp round start under %s (%s); using the local clock", round_trace_root, exc
-        )
-        return fallback_unix
+    marker.parent.mkdir(parents=True, exist_ok=True)
+    marker.write_text(f"{client_unix:.3f}\n", encoding=_ENCODING)
+    return marker.stat().st_mtime
 
 
 def graph_capture_round(extra_server_args: str, config_path: Path) -> tuple[str, dict[str, str]]:
     """Return the round's server args and extra env with graph-capture profiling on, as the profile YAML at
-    ``config_path`` sets it, in a PD node-list session; the args unchanged and no env elsewhere, or when the YAML
-    cannot be read."""
+    ``config_path`` sets it, in a PD node-list session; the args unchanged and no env elsewhere.
+
+    Raises:
+        OSError, ValueError, yaml.YAMLError: the shipped profile YAML cannot be read.
+    """
     if not is_pd_session():
         return extra_server_args, {}
-    try:
-        envs = read_benchmark_point(config_path).envs
-    except (OSError, ValueError, yaml.YAMLError) as exc:
-        log.warning("profile_executor: cannot read %s for graph-capture profiling settings: %s", config_path, exc)
-        return extra_server_args, {}
+    envs = read_benchmark_point(config_path).envs
     env = {key: str(envs[key]) for key in _GRAPH_CAPTURE_PROFILE_ENV_KEYS if key in envs}
     tokens = extra_server_args.split()
     if _SGLANG_PROFILE_CUDA_GRAPH_FLAG in str(envs.get("EXTRA_SGLANG_ARGS") or "").split():

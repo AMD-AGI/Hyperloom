@@ -291,7 +291,7 @@ class _BenchmarkLaunchMixin:
         server_args: str,
         resolved_model: str,
     ) -> dict[str, Any] | None:
-        from .._multi_node_env import is_pd_session, round_server_env
+        from .._multi_node_env import round_server_env
         from ..serving._multi_node_server_lifecycle import RoundServer, ServerRestartFailed, restart_server_for_round
 
         if round_.ctx_extra.get("mn_round_restarted"):
@@ -304,8 +304,7 @@ class _BenchmarkLaunchMixin:
 
             server_base = session_server_base()
             # Fold in the operator ``--server-args`` (``INFERENCE_OPTIMIZER_SERVER_ARGS``).
-            # A node-list PD session refuses ``--server-args`` at adoption and on resume, so its rounds carry only their own args.
-            operator_args = "" if is_pd_session() else os.environ.get("INFERENCE_OPTIMIZER_SERVER_ARGS", "").strip()
+            operator_args = os.environ.get("INFERENCE_OPTIMIZER_SERVER_ARGS", "").strip()
             base = server_base.args
             if operator_args:
                 base = merge_server_args(base, operator_args) if base else operator_args
@@ -392,7 +391,8 @@ class _BenchmarkLaunchMixin:
 
     @staticmethod
     async def _multi_node_engines_lost() -> str:
-        """Why a PD session's engines are gone (replaced or exited), or ``""`` when they run or the session is not PD."""
+        """Why a PD session's engines are gone (replaced or exited) or cannot be checked, or ``""`` when they run or
+        the session is not PD."""
         from hyperloom.inference_optimizer.multi_node.pd_session import engines_lost
 
         from .._multi_node_env import _read_state, is_pd_session

@@ -304,12 +304,12 @@ def _record_trace_share(state: dict[str, Any], session: _SessionCluster, trace_r
 
 
 def engines_lost(state: dict[str, Any]) -> str:
-    """Why the session's engines are no longer served (``""`` when every one still runs, or none can be checked)."""
+    """Why the session's engines are no longer served, or cannot be checked (``""`` when every one still runs)."""
     try:
         session = _session_cluster(state)
         gone = engines_gone(session.launch, session.cluster)
-    except (*_SUITE_ERRORS, PdSessionError):
-        return ""
+    except (*_SUITE_ERRORS, PdSessionError) as exc:
+        return f"the PD engines cannot be checked: {exc}"
     return ", ".join(f"{command.role} engine on {command.host} is gone" for command in gone)
 
 
