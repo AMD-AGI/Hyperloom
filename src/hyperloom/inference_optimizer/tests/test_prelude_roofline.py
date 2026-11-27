@@ -827,7 +827,7 @@ async def test_kernel_entry_plain_profile_adopts_its_fresh_trace_at_unchanged_tp
     state.last_profile_workload = {}  # the old trace predates the active workload
     fresh = "/runs/profile/new/rank0.pt.trace.json.gz"
     coord.sub = _ProfileSub(
-        {"status": "succeeded", "measurement_status": "succeeded", "round_succeeded": True, "main_trace_path": fresh}
+        {"status": "succeeded", "output_throughput": 100.0, "completed_requests": 8, "main_trace_path": fresh}
     )
 
     await coord.phase_kernel._maybe_reprofile_for_kernel()
@@ -844,23 +844,30 @@ _OLD_TRACE = "/runs/profile/old/rank0.pt.trace.json.gz"
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    ("result", "trace_after"),
+    ("result", "trace_after", "failures"),
     [
         # The round measured, but ProfileExecutor found no trace files: settled as a failed profile, which a queued
         # profile also records by dropping the trace it could not certify.
         (
             {"status": "failed", "error_class": "no_trace_files", "output_throughput": 100.0, "completed_requests": 8},
             "",
+            ["profile"],
         ),
         # The round measured nothing: unpromotable, the trace stays.
-        ({"status": "failed", "error_class": "server_start_failed"}, _OLD_TRACE),
+        ({"status": "failed", "error_class": "server_start_failed"}, _OLD_TRACE, ["profile"]),
+        # A multi-node round that measured but whose trace dir held no fresh trace: succeeded, nothing to adopt.
+        (
+            {"status": "succeeded", "output_throughput": 120.0, "completed_requests": 8, "trace_files": []},
+            _OLD_TRACE,
+            [],
+        ),
     ],
-    ids=["no-trace-files", "no-measurement"],
+    ids=["no-trace-files", "no-measurement", "measured-without-trace"],
 )
 async def test_kernel_entry_failed_plain_profile_does_not_land(
-    coord: Coordinator, result: dict[str, Any], trace_after: str
+    coord: Coordinator, result: dict[str, Any], trace_after: str, failures: list[str]
 ):
-    """A plain-profile reprofile without a trace is recorded as failed and never re-anchors on the trace it lacks."""
+    """A plain-profile reprofile that yields no trace never re-anchors on the trace it lacks."""
     state = coord.shared_state
     state.enable_roofline = False
     state.roofline_snapshots = [{"achieved_tok_per_sec": 100.0}]
@@ -875,7 +882,7 @@ async def test_kernel_entry_failed_plain_profile_does_not_land(
     assert state.last_profile_trace == trace_after
     assert state.last_roofline_tput == 100.0
     assert not state.last_profile_workload
-    assert [f.get("action") for f in state.last_action_failures][-1:] == ["profile"]
+    assert [f.get("action") for f in state.last_action_failures] == failures
 
 
 @pytest.mark.asyncio

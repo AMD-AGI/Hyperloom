@@ -97,6 +97,10 @@ class ProfileRooflineMixin:
         elif trace_path:
             audit_extras["trace_path"] = trace_path
             audit_extras["profile_args"] = self._adopt_profile_trace(result, task, trace_path)
+            # The anchor is the projection a trace was taken at, so only an adopted trace moves it.
+            anchor_tput = self._coord.phase_kernel.current_tput_from_validated_gain()
+            if measurement_status == "succeeded" and anchor_tput > 0:
+                self.shared_state.last_roofline_tput = float(anchor_tput)
         # Host-side rewrite evidence is independent of the trace: it answers
         # "which host-side work is redundant", which no kernel timeline can, and
         # a run whose trace was unusable can still have produced good evidence.
@@ -107,11 +111,6 @@ class ProfileRooflineMixin:
         if evidence_path:
             audit_extras["framework_rewrite_evidence"] = evidence_path
             audit_extras["framework_rewrite_candidate_count"] = result.get("framework_rewrite_candidate_count")
-        # On a successful profile, re-anchor last_roofline_tput and clear the pending field.
-        if measurement_status == "succeeded":
-            anchor_tput = self._coord.phase_kernel.current_tput_from_validated_gain()
-            if anchor_tput > 0:
-                self.shared_state.last_roofline_tput = float(anchor_tput)
         if task is not None and self.shared_state.auto_roofline_pending_task_id == task.task_id:
             self.shared_state.auto_roofline_pending_task_id = ""
         outcome.audit_decision = audit_decision
