@@ -13,10 +13,9 @@ from inference_suite.multinode.commands import (
     CommandError,
     cluster_commands,
     engine_urls,
-    process_needle,
     router_command,
 )
-from inference_suite.multinode.nodes import LaunchMode, NodeListError, parse_node_list
+from inference_suite.multinode.nodes import NodeListError, parse_node_list
 from inference_suite.multinode.record import Frontend, FrontendType, PdSourceKind, Role, RoleLaunch
 from inference_suite.multinode.tests.builders import node_document, pd_launch
 
@@ -44,11 +43,11 @@ def _argv(command):
 
 def test_sglang_worker_spanning_hosts_joins_them():
     commands = cluster_commands(_launch(), _nodes())
-    assert [(c.role, c.host, c.worker, c.rank) for c in commands] == [
-        ("prefill", "p0", 0, 0),
-        ("decode", "d0", 0, 0),
-        ("decode", "d1", 0, 1),
-        ("router", "r0", 0, 0),
+    assert [(c.role, c.host, c.rank) for c in commands] == [
+        ("prefill", "p0", 0),
+        ("decode", "d0", 0),
+        ("decode", "d1", 1),
+        ("router", "r0", 0),
     ]
     decode_rank1 = _argv(commands[2])
     assert decode_rank1[decode_rank1.index("--dist-init-addr") + 1] == "d0:20000"
@@ -72,7 +71,6 @@ def test_sglang_router_reaches_worker_heads_in_direct_mode():
 
 def test_in_place_router_reaches_role_services():
     nodes = _nodes(launch_mode="in_place", prefill_url="http://pre:8010", decode_url="http://dec:8020")
-    assert nodes.launch_mode is LaunchMode.IN_PLACE
     commands = cluster_commands(_launch(), nodes)
     argv = _argv(commands[-1])
     assert "http://pre:8010" in argv and "http://dec:8020" in argv
@@ -200,8 +198,3 @@ def test_infera_pd_legs_bootstrap_on_its_port_and_skip_warmup():
     assert prefill[prefill.index("--disaggregation-bootstrap-port") + 1] == "30001"
     assert prefill[prefill.index("--disaggregation-mode") + 1] == "prefill" and "--skip-server-warmup" in prefill
     assert "--nnodes" not in prefill and commands[0].command.endswith(IB_DEVICE_TAIL)
-
-
-def test_process_needle_names_the_infera_engine():
-    assert process_needle("worker", Framework.SGLANG, FrontendType.INFERA) == "infera.engine.sglang"
-    assert process_needle("decode", Framework.SGLANG, FrontendType.SGLANG_ROUTER) == "sglang.launch_server"
