@@ -480,11 +480,10 @@ class Stage:
             conc=CONC,
             log=setup.layout.toolbox / SUBMISSIONS,
             repo=repo,
+            clock=self.time.now,
         )
         if isinstance(toolbox, StuckToolbox) and self.stuck:
             toolbox.stuck = self.stuck
-        if isinstance(toolbox, LeasingToolbox):
-            toolbox.clock = self.time.now
         rule = workload_rule(setup.workload, self.handle(Role.GATE))
         self.sessions = RecordedSessions(
             toolbox,

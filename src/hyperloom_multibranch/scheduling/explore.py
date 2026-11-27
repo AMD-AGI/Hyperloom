@@ -381,12 +381,14 @@ class Explorer:
         return SessionStopReason.TIME_EXHAUSTED
 
     async def _capped(self, window: ExploreWindow) -> ExploreWindow:
-        """``window``, ending no later than its :attr:`~ExploreWindow.final_cap` now says, which is kept."""
+        """``window``, ending no later than its :attr:`~ExploreWindow.final_cap` now says, which is kept; the branches'
+        deadlines come forward with it."""
 
         cap = self._cap = await window.final_cap()
         if cap >= window.explore_end:
             return window
         logger.info("EXPLORE ends sooner, at %.0f: the validation FINAL would run grew", cap)
+        self._branches.bring_deadlines_forward(cap)
         return replace(window, explore_end=cap)
 
     async def _budget_spent(self, window: ExploreWindow) -> SessionStopReason | None:

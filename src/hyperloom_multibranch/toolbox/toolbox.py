@@ -257,8 +257,7 @@ class RealToolbox:
             self._queue.check_branch_listed(request)
             self._queue.check_backpressure(request)
             needs = self._builds.plan(request, prepared.environment)
-            if needs:
-                self._check_build_deadline(request, needs)
+            self._check_deadline(request, needs)
             if request.purpose is Purpose.BASELINE:
                 await self._record_measured_on()
             priority = self._queue.policy.priority_of(request)
@@ -300,7 +299,7 @@ class RealToolbox:
             return None
         return min(ends) - median_test_seconds(self._log.entries(), request.kind)
 
-    def _check_build_deadline(self, request: TestRequest, needs: tuple[BuildNeed, ...]) -> None:
+    def _check_deadline(self, request: TestRequest, needs: tuple[BuildNeed, ...]) -> None:
         deadline = self._queue.policy.branch_deadline.get(request.branch_id, 0.0)
         if deadline:
             test_seconds = median_test_seconds(self._log.entries(), request.kind)

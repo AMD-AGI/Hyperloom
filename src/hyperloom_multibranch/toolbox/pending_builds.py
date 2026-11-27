@@ -51,6 +51,7 @@ from hyperloom_multibranch.toolbox.submission_log import LogEntry
 logger = logging.getLogger(__name__)
 
 BUILD_AFTER_DEADLINE = "build_after_deadline"
+TEST_AFTER_DEADLINE = "test_after_deadline"
 _RESULT = "result"
 
 
@@ -159,19 +160,24 @@ class PendingBuilds:
         return tuple(BuildNeed(inputs, driver.lookup(inputs)) for inputs in driver.needs(request, environment))
 
     def check_deadline(self, needs: tuple[BuildNeed, ...], deadline: float, test_seconds: float, now: float) -> None:
-        """Refuse with ``build_after_deadline`` when the slowest build not ready, then one test, ends past ``deadline``
-        (0: no deadline)."""
+        """Refuse when the slowest build not ready, if any, then one test, ends past ``deadline`` (0: no deadline): with
+        ``build_after_deadline`` when it waits for a build, else with ``test_after_deadline``. A test that waits for no
+        build and has no ``test_seconds`` (no test of its kind has finished) is not checked."""
 
         unready = [(self._eta(need), need.inputs.component) for need in needs if self._must_build(need)]
-        if not deadline or not unready:
+        if not deadline or not (unready or test_seconds):
             return
-        eta, component = max(unready)
-        if now + eta + test_seconds > deadline:
+        eta, component = max(unready, default=(0.0, ""))
+        late = now + eta + test_seconds - deadline
+        if late <= 0:
+            return
+        past = f"would end {late:.0f} s after the branch's deadline {deadline:.0f}"
+        if unready:
             raise RequestRejected(
-                f"the {component} build (eta {eta:.0f} s) and one test ({test_seconds:.0f} s) would end "
-                f"{now + eta + test_seconds - deadline:.0f} s after the branch's deadline {deadline:.0f}",
+                f"the {component} build (eta {eta:.0f} s) and one test ({test_seconds:.0f} s) {past}",
                 BUILD_AFTER_DEADLINE,
             )
+        raise RequestRejected(f"one test ({test_seconds:.0f} s) {past}", TEST_AFTER_DEADLINE)
 
     def wait(self, request_id: str, needs: tuple[BuildNeed, ...]) -> bool:
         """Start or join the builds ``request_id`` needs; whether it must wait for any (False: all ready now)."""
@@ -387,6 +393,7 @@ __all__ = [
     "BuildHooks",
     "BuildNeed",
     "PendingBuilds",
+    "TEST_AFTER_DEADLINE",
     "build_failure_result",
     "median_test_seconds",
 ]

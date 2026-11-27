@@ -260,7 +260,8 @@ class FakeWiring:
     parent commit is known, ``log_path`` places the submit log, ``claims`` and ``records`` are the blackboard's claim and
     record ports and ``workload_kind`` is the campaign's workload. ``builds`` drives the native builds a test waits
     for (a :class:`~hyperloom_multibranch.toolbox.tests.fake_builds.FakeBuildDriver`); without one
-    no test needs any.
+    no test needs any. ``clock`` is the clock the toolbox reads, the session's when a session drives it, so the branch
+    deadlines it is given are on its base; without one it reads the executor's virtual clock.
     """
 
     parent_exists: Callable[[str], bool] | None = None
@@ -270,6 +271,7 @@ class FakeWiring:
     workload_kind: WorkloadKind = WorkloadKind.INFERENCEX
     repo: ExperimentRepo | None = None
     builds: BuildDriver | None = None
+    clock: Callable[[], float] | None = None
 
 
 class FakeToolbox(RealToolbox):
@@ -294,6 +296,7 @@ class FakeToolbox(RealToolbox):
         log_path = wiring.log_path
         self.config = config or FakeToolboxConfig()
         self.executor = FakeExecutor(self.config, autorun=autorun, workload=wiring.workload_kind)
+        self.clock = wiring.clock or (lambda: self.executor.now)
         self.blackboard = blackboard if blackboard is not None else MemoryBlackboard()
         scratch = required_scratch_root(type(self).__name__)
         self._scratch = None if log_path else tempfile.TemporaryDirectory(prefix="fake-toolbox-", dir=scratch)
@@ -320,7 +323,7 @@ class FakeToolbox(RealToolbox):
             policy=self._policy(self.config.default_k),
             max_infra_retries=self.config.max_infra_retries,
             tick_seconds=self.config.tick_seconds,
-            clock=lambda: self.executor.now,
+            clock=self.clock,
             build_retry_seconds=0.0,
             infra_backoff_seconds=(),
         )
