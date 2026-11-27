@@ -61,6 +61,22 @@ The following table lists the minimum requirements for running Hyperloom.
 | Kernel Languages    | HIP, Triton, FlyDSL                                    |
 +---------------------+--------------------------------------------------------+
 
+MI300A device identification
+---------------------------
+
+The CLI accepts ``--gpu-type mi300a`` and records its dispatch identity as
+``gfx942`` with 228 compute units. Product names from ROCm SMI or PyTorch
+distinguish it from MI300X, which shares the ISA but has 304 compute units.
+For an operator-supplied workload, use ``--framework custom`` with a
+``custom_mi300a.sh`` entrypoint in ``--benchmark-scripts-dir`` and an explicit
+correctness gate. MI300A retains its own benchmark and recipe identity.
+
+Device identification does not establish end-to-end platform validation.
+MI300A framework images, kernel backends, and hardware roofline assumptions
+still require validation through their owning components before MI300A is
+added to the validated matrices below. The MI300X serving runners are not
+automatically selected for MI300A.
+
 Component support matrix
 ========================
 
