@@ -6,10 +6,14 @@ resident on them beyond the 1 GiB a process that merely opened the card may keep
 memory is a holder), and a refusal names each GPU and why.
 
 A round's GPUs are ``ROCR_VISIBLE_DEVICES`` numbers, which ROCm assigns in KFD node order while ``amd-smi`` indexes
-cards in PCI order, so the check must translate one into the other.
+cards in PCI order, so the check must translate one into the other. Who holds a GPU is read from the kernel's
+per-process, per-GPU figure (``/sys/class/kfd/kfd/proc/<pid>/vram_<gpu_id>``), and from amd-smi's only when this view
+cannot read the kernel's.
 """
 
 from __future__ import annotations
+
+from pathlib import Path
 
 import pytest
 
@@ -44,6 +48,13 @@ def clock(monkeypatch) -> _Clock:
     fake = _Clock()
     monkeypatch.setattr(gpus, "time", fake)
     return fake
+
+
+@pytest.fixture(autouse=True)
+def no_kfd(monkeypatch, tmp_path) -> Path:
+    """A host whose kernel list is not there, so amd-smi's figure decides unless a test builds one."""
+    monkeypatch.setattr(gpus, "_KFD_ROOT", tmp_path / "no-kfd")
+    return tmp_path / "no-kfd"
 
 
 def _gate(cancel=lambda: "") -> RoundGate:
@@ -241,3 +252,100 @@ def test_a_cancel_during_the_wait_stops_it_at_the_next_poll(monkeypatch, clock):
 
     assert stop == Stop(FailedStep.CANCELLED, "received SIGTERM")
     assert clock.now - cancel_at <= gpus.POLL_SEC
+
+
+_GIB = 1 << 30
+#: The kernel's id of each GPU, in ROCm order (the GPU topology nodes 2-9 after the CPU nodes 0 and 1).
+_GPU_IDS = [41_000 + gpu for gpu in range(8)]
+#: A DeepSeek V4.1 vLLM server at TP4 on ROCm GPUs 0-3 (recorded on MI355X, 2026-11-12): each worker has 264 GiB
+#: resident on its own GPU and none on GPUs 4-7, while amd-smi process lists every worker on all eight cards with the
+#: same figure on each: TP0's 283,944,206,336 B, and 2 MiB for TP1-3.
+_TP_WORKERS = {283_952 + rank: rank for rank in range(4)}
+_TP0_VRAM_BYTES = 283_944_206_336
+
+
+def _kfd(root: Path, resident: dict[int, dict[int, int]], *, gpu_ids: list[int] = _GPU_IDS) -> Path:
+    """A fake ``/sys/class/kfd/kfd``: two CPU nodes then a node per GPU, and ``resident[pid][rocm gpu]`` bytes."""
+    for node, gpu_id in enumerate([0, 0, *gpu_ids]):
+        (root / "topology" / "nodes" / str(node)).mkdir(parents=True)
+        (root / "topology" / "nodes" / str(node) / "gpu_id").write_text(f"{gpu_id}\n", encoding="ascii")
+    (root / "proc").mkdir(parents=True)
+    for pid, per_gpu in resident.items():
+        (root / "proc" / str(pid)).mkdir()
+        for gpu, vram in per_gpu.items():
+            if gpu >= len(gpu_ids):  # a GPU this topology leaves out has no file
+                continue
+            (root / "proc" / str(pid) / f"vram_{gpu_ids[gpu]}").write_text(f"{vram}\n", encoding="ascii")
+    return root
+
+
+def _vllm_tp4_on_gpus_0_to_3(monkeypatch) -> None:
+    """amd-smi's view of :data:`_TP_WORKERS`: every worker on every card, with TP0's figure on all of them."""
+    rows = {
+        card: [_opened(pid, _TP0_VRAM_BYTES if rank == 0 else 2 << 20) for pid, rank in _TP_WORKERS.items()]
+        for card in range(8)
+    }
+    _answer(monkeypatch, _host(rows), _MI355X_ROCM_ORDER)
+
+
+def _kernel_view_of_tp4() -> dict[int, dict[int, int]]:
+    return {pid: {gpu: 264 * _GIB if gpu == rank else 0 for gpu in range(8)} for pid, rank in _TP_WORKERS.items()}
+
+
+def test_the_kernels_per_gpu_figure_frees_the_gpus_a_multi_card_server_only_opened(monkeypatch, no_kfd):
+    _vllm_tp4_on_gpus_0_to_3(monkeypatch)
+    _kfd(no_kfd, _kernel_view_of_tp4())
+
+    assert _refused((4, 5, 6, 7)) is None
+    assert _refused((0, 1)) == (
+        "GPU 0 (amd-smi card 3): held by pid 283952 (python3); GPU 1 (amd-smi card 0): held by pid 283953 (python3)"
+    )
+
+
+def test_a_process_the_kernel_lists_but_amd_smi_does_not_is_still_a_holder(monkeypatch, no_kfd):
+    _answer(monkeypatch, _host({}), _MI355X_ROCM_ORDER)
+    _kfd(no_kfd, {5150: {6: 8 * _GIB}, 5151: {6: _GIB}})
+
+    assert _refused((6,)) == "GPU 6 (amd-smi card 6): held by pid 5150 (unnamed)"
+
+
+def test_without_the_kernels_list_amd_smis_figure_decides(monkeypatch):
+    _vllm_tp4_on_gpus_0_to_3(monkeypatch)
+
+    # TP0's figure on every card refuses GPUs the server never used: the reason the kernel's figure comes first.
+    assert _refused((4,)) == "GPU 4 (amd-smi card 7): held by pid 283952 (python3)"
+
+
+@pytest.mark.parametrize("damage", ["refused-vram", "refused-node", "fewer-gpus"])
+def test_a_kernel_list_this_view_cannot_fully_read_falls_back_to_amd_smi(monkeypatch, no_kfd, damage):
+    _vllm_tp4_on_gpus_0_to_3(monkeypatch)
+    if damage == "fewer-gpus":
+        _kfd(no_kfd, _kernel_view_of_tp4(), gpu_ids=_GPU_IDS[:7])
+    else:
+        _kfd(no_kfd, _kernel_view_of_tp4())
+    if damage == "refused-vram":
+        _refuse(monkeypatch, no_kfd / "proc" / "283953" / f"vram_{_GPU_IDS[5]}")
+    if damage == "refused-node":
+        _refuse(monkeypatch, no_kfd / "topology" / "nodes" / "9" / "gpu_id")
+
+    assert _refused((5,)) == "GPU 5 (amd-smi card 4): held by pid 283952 (python3)"
+
+
+def _refuse(monkeypatch, refused: Path) -> None:
+    """Make reading ``refused`` fail as the kernel fails it for a file this view's device cgroup does not grant."""
+    read_text = Path.read_text
+
+    def read(path: Path, *args, **kwargs) -> str:
+        if path == refused:
+            raise PermissionError(1, "Operation not permitted", str(path))
+        return read_text(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "read_text", read)
+
+
+def test_a_process_that_ended_before_its_files_were_read_holds_nothing(monkeypatch, no_kfd):
+    _answer(monkeypatch, _host({}))
+    _kfd(no_kfd, {})
+    (no_kfd / "proc" / "777").mkdir()  # listed, but its vram files were gone by the time they were read
+
+    assert _refused((0, 1, 2)) is None
