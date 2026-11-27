@@ -736,6 +736,18 @@ def test_a_restarted_application_reattaches_instead_of_measuring_twice(rig, tmp_
     assert json.loads(report.read_text())["fixed"]["output_throughput"] == 1234.0
 
 
+def test_a_restart_closes_the_runs_sandboxes_that_no_unfinished_attempt_names(rig, tmp_path) -> None:
+    """A dead process left a sandbox it never journalled: the next start closes it, and leaves the one an unfinished
+    attempt (``sent``) names for its test to re-attach."""
+    r = rig()
+    call = make_call(tmp_path, point=point_yaml(tmp_path, fake_mode="hang"))
+    _crash_mid_wait(r, call)
+    unfinished = r.backend.journal.latest("req-1").sandbox_id
+    stray = r.provider.create("runner-1", role="measurement", timeout_sec=600, metadata={"hyperloom.run-id": "run-1"})
+    assert r.another_backend().end_leftovers() == [stray.sandbox_id]
+    assert [info.sandbox_id for info in r.provider.find({}, role="measurement")] == [unfinished]
+
+
 @pytest.mark.parametrize("when", ["before it runs", "while it measures"])
 def test_a_restarted_application_that_withdraws_the_test_a_dead_one_left_ends_its_sandbox(rig, tmp_path, when) -> None:
     """A session taken up again after its process died withdraws the tests it left: the sandbox still measuring is

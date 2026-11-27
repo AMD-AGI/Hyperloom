@@ -14,10 +14,8 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
-from . import geak_rebench as _geak_rebench
 from hyperloom_common.coerce import first_str, to_float
 from hyperloom.common import gain_math
-from hyperloom.inference_optimizer.session.geak_rebench_verdict import REBENCH_FALLBACK_FAILED, REBENCH_NO_PROMOTE
 from hyperloom.common.perf_metric import axis_of, graded_axes_of
 from hyperloom.orchestrator.lever import LEVER_CONFIG, LEVER_KERNEL
 from hyperloom.inference_optimizer.breakdown.recorder import tool_versions
@@ -53,12 +51,6 @@ _GEAK_MEASUREMENT_DIVERGENCE_WARN_PCT: float = 3.0
 def _covered_step(kind: str, params: dict[str, Any], *, idempotency_key: str) -> Task:
     """An unpersisted task for a step run under the ``kernel_agent`` task's lanes."""
     return Task(task_id=uuid.uuid4().hex, kind=kind, state="running", params=params, idempotency_key=idempotency_key)
-
-
-def _geak_decline_status(decline_reason: Any) -> str:
-    """Map a 2b decline reason to the status left on ``geak_pending``."""
-    reason = str(decline_reason or "").strip().lower()
-    return "overlay_unloadable" if reason == "geak_overlay_unloadable" else "rebench_declined"
 
 
 def _record_geak_integration(entry: dict[str, Any], *, kernel_id: str, macro_cycle: int) -> None:
@@ -144,8 +136,8 @@ class _GeakPromotionMixin:
 
         The 2b rebench runs as a step of the ``kernel_agent`` task, under the
         lanes it holds, and its result goes through the same promotion a
-        dispatched explore would. A candidate the grid cannot carry goes to the
-        GEAK-harness replay (2a) instead. ``handoff_cards`` are drained only
+        dispatched explore would. A candidate that launches nothing beyond
+        ``current_best`` settles unmeasured. ``handoff_cards`` are drained only
         when a measurement follows.
         """
         state = self.shared_state
@@ -166,9 +158,6 @@ class _GeakPromotionMixin:
         if params.get("origin") == ORIGIN:
             await revalidate_source(self._coord, params)
             return
-        if skip_reason is not None:
-            await self._revalidate_on_geak_harness(decline_reason=str(skip_reason))
-            return
         task = _covered_step("explore", params, idempotency_key=f"geak-revalidate-c{int(state.macro_cycle or 0)}")
         try:
             result = await self.sub.execute_covered(task)
@@ -184,34 +173,6 @@ class _GeakPromotionMixin:
             await self._coord.writeback.promote_to_shared_state("explore", result, task=task)
         else:
             await self._coord.writeback.handle_unpromotable_result(task, result)
-
-    async def _revalidate_on_geak_harness(self, *, decline_reason: str) -> None:
-        """Replay the candidate through GEAK's own harness (2a); record the decline when it does not validate."""
-        state = self.shared_state
-        log.warning("geak: 2b declined (%s); validating through the GEAK harness instead", decline_reason)
-        fb = await self._coord.writeback.validate_geak_via_geak_harness(reason=decline_reason)
-        # Both are verdicts 2a has already recorded.
-        if fb.get("validated") or fb.get("status") == REBENCH_NO_PROMOTE:
-            return
-        error = str(fb.get("reason") or decline_reason)[:500]
-        state.geak_pending = {
-            **(state.geak_pending or {}),
-            "status": _geak_decline_status(decline_reason),
-            "revalidation_error": error,
-        }
-        if (
-            not _geak_rebench.geak_harness_replays_workload(state)
-            and fb.get("status") == _geak_rebench.INCOMPARABLE_REVALIDATION
-        ):
-            state.geak_result = {
-                **state.geak_result,
-                "revalidation_status": REBENCH_FALLBACK_FAILED,
-                "revalidation_error_class": _geak_rebench.INCOMPARABLE_REVALIDATION,
-                "revalidation_error": error,
-                # This refusal is reusable only while its overlay remains unloadable.
-                "revalidation_blocked_overlay": str(state.geak_result.get("final_overlay") or ""),
-            }
-        state.save(self.session_dir)
 
     def _geak_win_already_recorded(self) -> bool:
         """Whether a GEAK e2e win is already in this session's state."""
@@ -318,8 +279,6 @@ class _GeakPromotionMixin:
             "geak_status": str(result.get("status") or ""),
             "baseline_alignment_status": str((result.get("baseline_alignment") or {}).get("status") or ""),
             "final_overlay": result.get("final_overlay") or "",
-            "final_launch_script": result.get("final_launch_script"),
-            "bench_script": result.get("bench_script"),
             "eval_dir": result.get("eval_dir"),
             # GEAK's own within-harness speedups, for the report's audit cross-check.
             "alignment": {
@@ -365,13 +324,9 @@ class _GeakPromotionMixin:
             "final_overlay": result.get("final_overlay") or "",
             "source_phase": "KERNEL_AGENT",
             "lever_kind": LEVER_KERNEL if kernel_proven else LEVER_CONFIG,
-            "ttft_mean_ms": result.get("ttft_ms"),
-            "tpot_mean_ms": result.get("tpot_ms"),
             **graded_axes_of(graded_measurement),
             "workspace": result.get("eval_dir"),
         }
-        if graded_measurement is result:
-            return measurement
         for key in (
             "extra_server_args",
             "effective_extra_server_args",
@@ -400,61 +355,6 @@ class _GeakPromotionMixin:
             if value not in (None, "", {}):
                 measurement[key] = value
         return measurement
-
-    def _compose_geak_launch_delta(
-        self,
-        measurement: dict[str, Any],
-        accepted_config: Mapping[str, Any],
-        *,
-        accepted_flags: str,
-        parsed_envs: dict[str, str],
-    ) -> None:
-        """Write GEAK's accepted launch onto ``measurement`` as a delta over the session's base launch.
-
-        The delta stays in append mode unless the prior stack or GEAK's own return is a complete snapshot, so the
-        base launch's arguments are applied by whoever materializes the round, not copied into the delta.
-        """
-        from hyperloom_common.coerce import to_str_list
-        from hyperloom.inference_optimizer.canonical_fingerprint import canonical_fingerprint
-        from hyperloom.inference_optimizer.grid_server_args import compose_server_args
-        from inference_suite.argv import remove_server_args
-
-        cb_now = self.shared_state.current_best
-        accepted_controls = _accepted_config_controls(accepted_config)
-        prior_controls = _accepted_config_controls(cb_now)
-        launch_controls = {**prior_controls, **accepted_controls}
-        for key in ("remove_args", "unset_envs"):
-            values = list(dict.fromkeys(to_str_list(prior_controls.get(key)) + to_str_list(accepted_controls.get(key))))
-            if values:
-                launch_controls[key] = values
-        complete = accepted_controls.get("args_mode") == "replace"
-        if complete and "remove_args" in accepted_config:
-            launch_controls["remove_args"] = to_str_list(accepted_config["remove_args"])
-        if not launch_controls:
-            return
-        measurement["extra_server_args"] = compose_server_args(
-            base_extra_args="" if complete else cb_now.get("extra_server_args"),
-            variant_extra_args=accepted_flags,
-            remove_args=launch_controls.get("remove_args"),
-            args_mode="replace" if complete else "append",
-        )
-        if not complete and launch_controls.get("remove_args"):
-            # A legacy delta can re-enable a removed flag; a removal kept beside it would prune it again when the
-            # delta is applied.
-            accepted_identity = canonical_fingerprint(accepted_flags, {})
-            launch_controls["remove_args"] = [
-                spec
-                for spec in launch_controls["remove_args"]
-                if canonical_fingerprint(remove_server_args(accepted_flags, [spec]), {}) == accepted_identity
-            ]
-        launch_envs = dict(cb_now.get("extra_envs") or {})
-        for key in accepted_controls.get("unset_envs", []):
-            launch_envs.pop(key, None)
-        launch_envs.update(parsed_envs)
-        measurement["extra_envs"] = launch_envs
-        measurement.update(launch_controls)
-        snapshot = complete or prior_controls.get("args_mode") == "replace"
-        measurement["args_mode"] = "replace" if snapshot else "append"
 
     def _record_geak_lift_attribution(
         self,
@@ -492,11 +392,13 @@ class _GeakPromotionMixin:
         result: dict[str, Any],
         *,
         measured_tput: float,
-        provenance: str = "geak_e2e_promote",
-        overlay_loaded: bool | None = None,
-        measurement_provenance: Mapping[str, Any] | None = None,
+        measurement_provenance: Mapping[str, Any],
+        overlay_loaded: bool,
     ) -> bool:
-        """Promote a measured GEAK candidate and return whether the lift succeeded."""
+        """Promote a GEAK candidate on the rebench round that measured it and return whether the lift succeeded.
+
+        ``measurement_provenance`` is that round's winner row: the launch it ran and the axes it was graded on.
+        """
         if not isinstance(result, dict):
             return False
         measured = to_float(measured_tput, 0.0)
@@ -515,21 +417,13 @@ class _GeakPromotionMixin:
         # The lever is stamped here, not guessed from the task kind: GEAK promotes on a proven kernel overlay OR on a
         # config/env-only win, and only this site holds the overlay proof.
         entry_extra = self._geak_stack_entry_extra(result, overlay_loaded=overlay_loaded)
-        graded_measurement = measurement_provenance if isinstance(measurement_provenance, Mapping) else result
         promotion_measurement = self._geak_promotion_measurement(
             result,
-            graded_measurement,
+            measurement_provenance,
             accepted_flags=accepted_flags,
             parsed_envs=parsed_envs,
             kernel_proven=bool(entry_extra.get("accepted_kernels") or entry_extra.get("accepted_heads")),
         )
-        if graded_measurement is result or "extra_server_args" not in graded_measurement:
-            self._compose_geak_launch_delta(
-                promotion_measurement,
-                result.get("accepted_config") or {},
-                accepted_flags=accepted_flags,
-                parsed_envs=parsed_envs,
-            )
         if not self._coord.writeback.lift_to_current_best(
             "geak_e2e", measured, promotion_measurement, entry_extra=entry_extra
         ):
@@ -543,11 +437,11 @@ class _GeakPromotionMixin:
         self._record_geak_lift_attribution(
             result,
             measured=measured,
-            provenance=provenance,
+            provenance="geak_orch_harness_validated",
             overlay_loaded=overlay_loaded,
             pre_geak_tput=pre_geak_tput,
         )
-        self._coord.writeback.validate(measured, graded_measurement, source="geak_e2e_promote")
+        self._coord.writeback.validate(measured, measurement_provenance, source="geak_e2e_promote")
         self.shared_state.geak_pending = {}
         return True
 

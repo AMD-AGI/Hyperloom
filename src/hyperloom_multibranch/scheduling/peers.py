@@ -91,9 +91,8 @@ class PeerSetup:
     ``agent_share_minutes`` the least an agent must have left to run for its branch to wait for cards its lease was
     refused. ``inferencex_commit`` is the commit a fresh session's base launch reads InferenceX at (``""`` for the
     head of its ``main``). ``agentx_early_stop`` is the session's AgentX checkpoint mode (``RunSettings``).
-    ``make_before_break`` is the session's ``RunSettings.make_before_break``: whether a hosted toolbox keeps a
-    finished test's sandbox until the next test's runs (``HostedOptions.make_before_break``). ``test_points`` is how
-    many points one test measures one after the other; one attempt of a test may run that many times as long.
+    ``test_points`` is how many points one test measures one after the other; one attempt of a test may run that many
+    times as long.
     """
 
     layout: SessionLayout
@@ -115,7 +114,6 @@ class PeerSetup:
     agent_share_minutes: float = SHARE_MINUTES
     inferencex_commit: str = ""
     agentx_early_stop: EarlyStopMode = EarlyStopMode.SHADOW
-    make_before_break: bool = True
     test_points: int = 1
 
 

@@ -52,6 +52,12 @@ These flags are rejected with `unrecognized arguments`:
 * `--proposal-scoring`, `--no-proposal-scoring` and `--proposal-scorer-models`
   (the advisory proposal scorer is removed; while it was off they changed
   nothing): drop them.
+* `hyperloom-multibranch run --make-before-break` and `--no-make-before-break`
+  (a hosted test now closes its sandbox when it ends): drop them.
+
+A campaign spec may keep `multibranch.make_before_break`, which is ignored with a
+warning. Where the grant fits three or more tests, a hosted session now runs one more
+test at once than the default did, and each test's sandbox queues for a node.
 
 `INFERENCE_OPTIMIZER_PROPOSAL_SCORER_TIMEOUT_SEC` is no longer read and is
 silently ignored, so drop it.

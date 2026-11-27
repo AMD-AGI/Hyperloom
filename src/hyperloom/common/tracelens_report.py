@@ -9,7 +9,7 @@ from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
-from hyperloom_common.coerce import first_str, to_float
+from hyperloom_common.coerce import first_str, to_float, to_int
 from hyperloom_common.jsonio import read_json
 
 __all__ = [
@@ -17,6 +17,8 @@ __all__ = [
     "fusion_findings",
     "member_kernel_names",
     "member_name",
+    "system_finding_summary",
+    "system_findings",
     "task_operation",
 ]
 
@@ -71,6 +73,51 @@ def fusion_findings(report_path: str | Path) -> list[dict[str, Any]]:
                 "operation": task_operation(task),
                 "projected_e2e_pct": to_float(impact.get("mid")),
                 "members": members,
+            }
+        )
+    return findings
+
+
+def system_finding_summary(finding: Mapping[str, Any]) -> str:
+    """A system finding on one line: priority, title, node and its share, the first ``%`` row TraceLens ranks it by.
+
+    The report is parsed back from model-written markdown, so a block whose table is off-contract has no ``%`` row; its
+    share reads ``n/a`` like an unreadable value, and the finding stays listed.
+    """
+    share = next((m for m in finding["metrics"] if m["unit"] == "%"), None)
+    label = share["metric"] if share else "share"
+    value = "n/a" if share is None or share["value"] is None else f"{share['value']:g}%"
+    node = f" [{finding['node']}]" if finding["node"] else ""
+    return f"P{finding['priority']} {finding['operation']}{node}  {label}: {value}"
+
+
+def system_findings(report_path: str | Path) -> list[dict[str, Any]]:
+    """The report's ``system_optimizations[]`` in TraceLens' order (report priority, largest share of GPU time first).
+
+    Each finding keeps its fixed ``operation`` title, the ``node`` of a multi-node report (empty otherwise), the report
+    ``priority`` and its metric rows (``value`` is None when unreadable). Its ``resolution`` is left in the report, where
+    the agents read it. A missing report or key reads as no findings.
+    """
+    report = read_json(analysis_json_path(report_path), default={}, require_dict=True)
+    findings: list[dict[str, Any]] = []
+    for task in report.get("system_optimizations") or []:
+        if not isinstance(task, dict):
+            continue
+        metrics = [
+            {
+                "metric": first_str(row.get("metric")),
+                "value": to_float(row.get("value")),
+                "unit": first_str(row.get("unit")),
+            }
+            for row in task.get("members") or []
+            if isinstance(row, dict) and row.get("metric")
+        ]
+        findings.append(
+            {
+                "operation": task_operation(task),
+                "node": first_str(task.get("node")),
+                "priority": to_int(task.get("priority")),
+                "metrics": metrics,
             }
         )
     return findings

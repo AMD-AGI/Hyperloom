@@ -195,8 +195,6 @@ def test_reset_per_cycle_plateau_state_preserves_durable_ledgers():
     state.framework_agent_phase_done = True
     state.framework_agent_discover_failures = 2
     state.framework_agent_empty_discoveries = 2
-    state.rounds_since_last_specialist = {"serving_specialist": 4}
-    state.rounds_since_last_keep = {"serving_specialist": 5}
     state.explore_search = {"tested": {"stable": {"cycle": 0}}}
     state.kernel_integrate_attempts = {"stable": {"attempts": [{"cycle": 0}]}}
 
@@ -206,8 +204,6 @@ def test_reset_per_cycle_plateau_state_preserves_durable_ledgers():
     assert state.framework_agent_phase_done is False
     assert state.framework_agent_discover_failures == 0
     assert state.framework_agent_empty_discoveries == 0
-    assert state.rounds_since_last_specialist == {}
-    assert state.rounds_since_last_keep == {}
     assert state.explore_search["tested"]["stable"]["cycle"] == 0
     assert state.kernel_integrate_attempts["stable"]["attempts"][0]["cycle"] == 0
 
