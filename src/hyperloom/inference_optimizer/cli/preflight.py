@@ -54,6 +54,8 @@ from .framework_probe import (
 )
 from .geak_binaries import check_geak_binaries
 from .install_event import InstallStep, _begin_install_event, _record_install_step, _run_install_step
+from .launch_gpu import check_gpu_launch
+from .resumed_session import _resumed_session_state
 from .ir3_probe import run_ir3_probe_script
 from .preflight_env import (
     _ANTHROPIC_FALLBACK_KEYS,
@@ -225,23 +227,6 @@ def _check_serving_framework(args, benchmark_python: str) -> dict[str, Any]:
         os.environ[RESOLVED_FRAMEWORK_PYTHON_ENV] = found
         os.environ[RESOLVED_FRAMEWORK_ENV] = framework
     return _report_framework_probe(framework, found, probe, interpreters)
-
-
-def _resumed_session_state(args: argparse.Namespace) -> dict[str, Any] | None:
-    """The persisted ``state.json`` of the session ``--resume-from`` names, or ``None``.
-
-    Preflight and the launch-shape export run before the resume block loads the session, so anything they decide from
-    a session-pinned setting has to read it here. ``None`` (no session named, or no readable state) leaves the decision
-    to the flags; the resume block reports a missing or unreadable state itself.
-    """
-    raw = str(getattr(args, "resume_from", "") or "").strip()
-    if not raw:
-        return None
-    try:
-        state = json.loads((Path(raw).expanduser() / "state.json").read_text(encoding="utf-8"))
-    except (OSError, ValueError):
-        return None
-    return state if isinstance(state, dict) else None
 
 
 def _supported_framework_names() -> tuple[str, ...]:
@@ -416,9 +401,12 @@ def _check_shm_disk() -> dict[str, Any]:
     }
 
 
-def _check_gfx_arch_resolvable(gpu_type: str | None = None) -> None:
-    """Warn when the GPU architecture cannot be resolved for provenance."""
-    if detect_gfx_arch(os.environ, gpu_type=gpu_type):
+def _check_gfx_arch_resolvable(gpu_type: str | None = None, *, observed_gfx: str | None = None) -> None:
+    """Warn when the GPU architecture cannot be resolved for provenance.
+
+    ``observed_gfx`` is the ISA the launch's rocminfo run read, so this runs no rocminfo of its own.
+    """
+    if observed_gfx or detect_gfx_arch(os.environ, gpu_type=gpu_type, probe=False):
         return
     boards = "/".join(sorted(AMD_GPU_BOARDS))
     print(
@@ -802,6 +790,7 @@ def _normalize_preflight_env(args: argparse.Namespace, install_event: dict[str, 
         action=lambda: _validate_explicit_server_limits(args),
     )
     _derive_runtime_paths()
+    check_gpu_launch(args, install_event, run_step=_run_install_step)
     _restore_provider_only_mode(provider_mode, provider_snapshot)
     _run_install_step(
         install_event,

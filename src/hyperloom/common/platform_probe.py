@@ -14,7 +14,7 @@ from pathlib import Path
 from typing import Any
 
 from hyperloom.common.gpu_partition import published_shape
-from hyperloom.common.provenance import detect_gfx_arch, detect_stack_fingerprint
+from hyperloom.common.provenance import GPU_IDENTITY_ENV, detect_gfx_arch, detect_stack_fingerprint
 
 log = logging.getLogger(__name__)
 
@@ -181,6 +181,13 @@ def platform_fingerprint(
             power = {}
         if power:
             record["gpu"]["power_settings"] = power
+        # The nameplate and PCI ID the session's rocminfo reported, when the CLI published them.
+        try:
+            identity = json.loads(os.environ.get(GPU_IDENTITY_ENV) or "{}")
+        except ValueError:
+            identity = {}
+        if isinstance(identity, dict) and identity:
+            record["gpu"]["identity"] = identity
         record["stack"] = detect_stack_fingerprint(os.environ)
         return record
     except (OSError, ValueError) as exc:

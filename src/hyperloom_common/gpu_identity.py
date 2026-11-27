@@ -34,7 +34,8 @@ class GpuBoard:
     #: listed under their board. 0x74a2 and 0x74b6 are left out on purpose: the same id is both an MI308X and, at
     #: revision A1, an MI300X, so it names no single board and the caller falls back to the name. So is 0x7551, the
     #: R9700 at revisions C0 and C1 (R9700S) and the R9600D at C8: neither lists an id and each is known by its name alone.
-    #: The Radeon 8060S lists none either and is known by its name.
+    #: The Radeon 8060S lists none either and is known by its name. rocminfo prints the same id as its ``Chip ID``
+    #: (``0x744a``), which names a card whose rocminfo Marketing Name is empty.
     device_ids: frozenset[str] = frozenset()
 
     def named_in(self, text: str) -> bool:
@@ -192,13 +193,79 @@ def is_gfx_arch(gpu_type: str | None, arch: str) -> bool:
     return bool(key) and (key == arch or gfx_arch_for_gpu_type(key) == arch)
 
 
+@dataclass(frozen=True)
+class GpuAgent:
+    """One GPU agent as rocminfo lists it."""
+
+    gfx: str
+    #: rocminfo ``Marketing Name``, spaces collapsed; empty when rocminfo prints none.
+    marketing_name: str = ""
+    #: PCI device ID from rocminfo ``Chip ID`` (``0x744a``); empty when unreadable.
+    chip_id: str = ""
+    compute_units: int | None = None
+
+    @property
+    def pci_device_id(self) -> str:
+        """``vendor:device`` (``1002:744a``), or empty when the chip ID is unknown."""
+        return f"1002:{self.chip_id.removeprefix('0x')}" if self.chip_id else ""
+
+
+def board_of_agent(agent: GpuAgent) -> GpuBoard | None:
+    """The board an agent's Marketing Name names, else the board its chip ID (PCI device ID) belongs to."""
+    named = board_named_in(agent.marketing_name) if agent.marketing_name else None
+    if named or not agent.chip_id:
+        return named
+    return gpu_board(gpu_type_for_device_id(agent.chip_id))
+
+
+_AGENT_HEADER = re.compile(r"^\s*Agent\s+\d+\s*$")
+_AGENT_FIELD = re.compile(r"^\s*([^:]+?)\s*:\s*(.*?)\s*$")
+_AGENT_GFX = re.compile(r"gfx[0-9a-f]+")
+_CHIP_ID = re.compile(r"\(0x([0-9a-f]+)\)", re.IGNORECASE)
+
+
+def rocminfo_gpu_agents(text: str | None) -> list[GpuAgent]:
+    """The GPU agents in rocminfo output, in its order; CPU agents and ``gfx000`` are left out.
+
+    An agent's own fields come first in its block, ahead of its nested ISA and cache sections, so the first value of
+    each field is the agent's.
+    """
+    blocks: list[dict[str, str]] = []
+    for line in str(text or "").splitlines():
+        if _AGENT_HEADER.match(line):
+            blocks.append({})
+            continue
+        match = _AGENT_FIELD.match(line)
+        if blocks and match:
+            blocks[-1].setdefault(match.group(1).lower(), match.group(2))
+    agents: list[GpuAgent] = []
+    for fields in blocks:
+        gfx = fields.get("name", "").lower()
+        if not _AGENT_GFX.fullmatch(gfx) or gfx == "gfx000":
+            continue
+        chip = _CHIP_ID.search(fields.get("chip id", ""))
+        cus = fields.get("compute unit", "")
+        agents.append(
+            GpuAgent(
+                gfx=gfx,
+                marketing_name=" ".join(fields.get("marketing name", "").split()),
+                chip_id=f"0x{chip.group(1).lower()}" if chip else "",
+                compute_units=int(cus) if cus.isdigit() else None,
+            )
+        )
+    return agents
+
+
 __all__ = [
     "AMD_GPU_BOARDS",
+    "GpuAgent",
     "GpuBoard",
     "board_named_in",
+    "board_of_agent",
     "gfx_arch_for_gpu_type",
     "gpu_board",
     "gpu_type_for_device_id",
     "is_gfx_arch",
     "normalise_device_id",
+    "rocminfo_gpu_agents",
 ]

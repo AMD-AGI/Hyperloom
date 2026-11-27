@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -129,6 +130,33 @@ def test_build_manifest_shared_provenance_fields(monkeypatch):
     assert m["server_args"] == ["--tp", "1"]
     assert m["server_args_hash"] == "abc123"
     assert (m["code_revision"], m["image"]) == ("rev1", "img:tag")
+
+
+def test_the_manifest_records_the_gpu_identity_the_launch_published(monkeypatch):
+    from hyperloom.common.provenance import GPU_IDENTITY_ENV
+
+    monkeypatch.setattr(mf, "_build_dependencies", dict)
+    identity = {
+        "product": "w7900",
+        "marketing_name": "AMD Radeon Pro W7900 Dual Slot",
+        "pci_device_id": "1002:744a",
+        "gfx_arch": "gfx1100",
+        "visible_gpus": 1,
+    }
+    monkeypatch.setenv(GPU_IDENTITY_ENV, json.dumps(identity))
+    assert mf.build_manifest(Path("/tmp/sd"))["gpu_identity"] == identity
+
+
+@pytest.mark.parametrize("published", [None, "", "{}", "not json", "[1]"])
+def test_a_launch_that_published_no_identity_records_none(monkeypatch, published):
+    from hyperloom.common.provenance import GPU_IDENTITY_ENV
+
+    monkeypatch.setattr(mf, "_build_dependencies", dict)
+    if published is None:
+        monkeypatch.delenv(GPU_IDENTITY_ENV, raising=False)
+    else:
+        monkeypatch.setenv(GPU_IDENTITY_ENV, published)
+    assert mf.build_manifest(Path("/tmp/sd"))["gpu_identity"] is None
 
 
 def test_manifest_versions_a_framework_installed_in_its_own_venv(monkeypatch, tmp_path):

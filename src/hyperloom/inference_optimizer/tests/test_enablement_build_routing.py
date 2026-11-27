@@ -137,8 +137,9 @@ async def test_escalate_skipped_for_pure_python_gap(coord, monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_escalate_skipped_for_r9700(coord, monkeypatch, caplog):
-    coord.shared_state.gpu_type = "r9700"
+@pytest.mark.parametrize("product", ["r9700", "w7900"])
+async def test_escalate_skipped_for_unvalidated_radeon(coord, monkeypatch, caplog, product):
+    coord.shared_state.gpu_type = product
     coord.shared_state.framework = "vllm"
 
     from hyperloom.orchestrator.actions.executors import _multi_node_env as mne
@@ -150,9 +151,9 @@ async def test_escalate_skipped_for_r9700(coord, monkeypatch, caplog):
             "hipErrorNoBinaryForGpu: no kernel image is available"
         )
     assert len([t for t in await coord.tasks.queued() if t.kind == "targeted_build"]) == 0
-    assert "targeted_build skipped" in caplog.text and "gpu_type=r9700" in caplog.text
+    assert "targeted_build skipped" in caplog.text and f"gpu_type={product}" in caplog.text
     assert coord.shared_state.enablement.last_build_failure["failure_class"] == "preflight_toolchain"
-    assert "r9700" in coord.shared_state.enablement.last_build_failure["failure_summary"]
+    assert product in coord.shared_state.enablement.last_build_failure["failure_summary"]
 
 
 @pytest.mark.asyncio
@@ -279,15 +280,16 @@ async def test_specialist_requested_build_enqueued(coord, monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_specialist_requested_build_skipped_for_r9700(coord, monkeypatch):
+@pytest.mark.parametrize("product", ["r9700", "w7900"])
+async def test_specialist_requested_build_skipped_for_unvalidated_radeon(coord, monkeypatch, product):
     coord.shared_state.framework = "vllm"
-    coord.shared_state.gpu_type = "r9700"
+    coord.shared_state.gpu_type = product
 
     from hyperloom.orchestrator.actions.executors import _multi_node_env as mne
 
     monkeypatch.setattr(mne, "is_multi_node", lambda: False)
 
-    tid = "spec-r9700"
+    tid = f"spec-{product}"
     coord.shared_state.enablement.last_specialist_task_id = tid
 
     await coord.enablement_build.maybe_enqueue_specialist_requested_build(

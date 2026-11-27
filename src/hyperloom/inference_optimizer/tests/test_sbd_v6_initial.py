@@ -786,6 +786,7 @@ def test_preflight_records_install_steps_in_execution_order(tmp_path, monkeypatc
         "load_dotenv",
         "load_kernel_agent_env",
         "validate_server_args",
+        "check_gpu_product",
         "normalize_legacy_deepseek_env",
         "validate_credentials",
         "ensure_python_sdks",

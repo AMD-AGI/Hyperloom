@@ -10,7 +10,7 @@ import yaml
 
 from hyperloom.common.benchmark_config import BENCHMARK_CONFIG_ENV, benchmark_config_path
 from hyperloom.common.perf_metric import agentx_enabled
-from hyperloom.inference_optimizer import cli
+from hyperloom.inference_optimizer import cli, gpu_types
 from hyperloom.inference_optimizer.cli import launch_shape
 from hyperloom.inference_optimizer.cli.benchmark_config import (
     AgentXWorkload,
@@ -283,7 +283,7 @@ def test_generated_snapshot_records_the_base_topology_and_precedes_manifest(tmp_
         "_check_gfx_arch_resolvable",
     ):
         monkeypatch.setattr(cli, name, lambda *a, **kw: None)
-    monkeypatch.setattr(cli, "_autodetect_gpu_type", lambda: "mi355x")
+    monkeypatch.setattr(gpu_types, "_autodetect_gpu_type", lambda agents=None: "mi355x")
     monkeypatch.setattr(cli, "resolve_framework_version", lambda args: "test-version")
     monkeypatch.setattr(cli, "make_session_dir", lambda **kw: tmp_path)
     monkeypatch.setattr(cli, "_acquire_session_lock_or_exit", lambda path: None)

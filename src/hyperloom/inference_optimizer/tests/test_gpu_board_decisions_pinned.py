@@ -57,11 +57,18 @@ def test_llamacpp_is_validated_on_r9700_and_w7900d_only():
     ]
 
 
-def test_only_the_gfx1201_radeon_boards_pin_their_geak_identity():
+def test_only_the_gfx1201_radeon_boards_and_the_w7900_pin_their_geak_identity():
     assert gpu_types.geak_identity_pin("r9700") == {"expected_target": "r9700", "expected_gfx": "gfx1201"}
     assert gpu_types.geak_identity_pin("r9600d") == {"expected_target": "r9600d", "expected_gfx": "gfx1201"}
-    for product in ("mi300x", "mi308x", "mi325x", "mi350x", "mi355x", "radeon8060s", "unknown_gpu", ""):
+    assert gpu_types.geak_identity_pin("w7900") == {"expected_target": "w7900", "expected_gfx": "gfx1100"}
+    for product in ("mi300x", "mi308x", "mi325x", "mi350x", "mi355x", "radeon8060s", "w7900d", "unknown_gpu", ""):
         assert gpu_types.geak_identity_pin(product) == {}, product
+
+
+@pytest.mark.parametrize("product", [*(board[0] for board in _BOARDS), "radeon8060s"])
+def test_only_the_w7900_is_confirmed_at_launch(product):
+    assert gpu_types.BOARDS_CONFIRMED_AT_LAUNCH == ("w7900",)
+    assert gpu_types.geak_checks_the_card(product) is (product == "w7900")
 
 
 @pytest.mark.parametrize(
@@ -79,6 +86,14 @@ def test_only_the_gfx1201_radeon_boards_pin_their_geak_identity():
         ("Card Series: AMD Radeon AI PRO R9600D", "r9600d"),
         ("Card Series: AMD Radeon PRO W7900", "w7900"),
         ("Card Series: AMD Radeon PRO W7900D", "w7900d"),
+        ("Card Series: AMD Radeon Pro W7900 Dual Slot", "w7900"),
+        ("GPU[0]\t\t: Card Series: \t\tAMD Radeon Pro W7900 Dual Slot", "w7900"),
+        ("Marketing Name:          AMD Radeon Pro W7900 Dual Slot     ", "w7900"),
+        ("Card Series: AMD Radeon PRO W7800", None),
+        ("Card Series: AMD Radeon PRO W7800 48GB", None),
+        ("Card Series: AMD Radeon RX 7900 XTX", None),
+        ("Card Series: AMD Radeon RX 7900 GRE", None),
+        ("Card Series: N/A", None),
         ("Card Series: AMD Instinct MI300XL", None),
         ("Card Series: AMD Radeon AI PRO R9700S", None),
         ("Card Series: AMD Radeon AI PRO XR9700", None),
@@ -96,3 +111,10 @@ def test_only_the_gfx1201_radeon_boards_pin_their_geak_identity():
 def test_probe_output_resolves_to_the_same_board(text, product):
     """A longer product name that contains a tag (``MI300XL``, ``R9700S``) is a different product."""
     assert gpu_types.parse_gpu_type(text) == product
+
+
+def test_the_validation_hosts_rocm_smi_output_names_w7900():
+    from pathlib import Path
+
+    fixture = Path(__file__).parent / "fixtures" / "rocm_smi_showproductname_w7900.txt"
+    assert gpu_types.parse_gpu_type(fixture.read_text(encoding="utf-8")) == "w7900"

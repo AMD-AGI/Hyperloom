@@ -18,6 +18,8 @@ from hyperloom.orchestrator.state.shared_state import SharedState
     ("gpu_type", "expected"),
     [
         ("r9700", {"gpu_type": "r9700", "expected_target": "r9700", "expected_gfx": "gfx1201"}),
+        ("w7900", {"gpu_type": "w7900", "expected_target": "w7900", "expected_gfx": "gfx1100"}),
+        ("w7900d", {"gpu_type": "w7900d"}),
         ("mi300x", {"gpu_type": "mi300x"}),
         ("mi355x", {"gpu_type": "mi355x"}),
         ("gfx1201", {"gpu_type": "gfx1201"}),
@@ -46,8 +48,31 @@ async def _write_handoff(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, state:
 
 
 @pytest.mark.asyncio
-async def test_r9700_handoff_carries_product_and_isa(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    handoff = await _write_handoff(tmp_path, monkeypatch, SharedState(model_path="/models/m", gpu_type="r9700"))
-    assert handoff["gpu_type"] == "r9700"
-    assert handoff["expected_target"] == "r9700"
-    assert handoff["expected_gfx"] == "gfx1201"
+@pytest.mark.parametrize(("product", "gfx"), [("r9700", "gfx1201"), ("w7900", "gfx1100")])
+async def test_radeon_handoff_carries_product_and_isa(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, product: str, gfx: str
+) -> None:
+    handoff = await _write_handoff(tmp_path, monkeypatch, SharedState(model_path="/models/m", gpu_type=product))
+    assert handoff["gpu_type"] == product
+    assert handoff["expected_target"] == product
+    assert handoff["expected_gfx"] == gfx
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("level", ["stable_std", "auto"])
+async def test_handoff_carries_the_declared_perf_level(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, level) -> None:
+    state = SharedState(
+        model_path="/models/m",
+        gpu_type="w7900",
+        gpu_power_settings={"declared": {"perf_level": level}, "observed": {"0": {"perf_level": level}}},
+    )
+    handoff = await _write_handoff(tmp_path, monkeypatch, state)
+    assert handoff["gpu_perf_level"] == level
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("power", [{}, {"declared": {}}, {"declared": {"power_cap_w": 200.0}}])
+async def test_handoff_leaves_an_undeclared_perf_level_out(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, power):
+    state = SharedState(model_path="/models/m", gpu_type="w7900", gpu_power_settings=power)
+    handoff = await _write_handoff(tmp_path, monkeypatch, state)
+    assert "gpu_perf_level" not in handoff

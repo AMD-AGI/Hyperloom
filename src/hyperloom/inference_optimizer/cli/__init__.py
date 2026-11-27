@@ -20,6 +20,13 @@ from hyperloom_common.llm import llm_config
 from hyperloom_common.env import EnvValueError, env_bool
 from hyperloom.common import agent_isolation
 from hyperloom.common.gpu_partition import PartitionModel
+from .launch_gpu import (
+    launch_board,
+    launch_gpu_identity,
+    launch_gpu_probe,
+    publish_gpu_identity,
+    publish_gpu_power_settings,
+)
 from .lineup_banners import print_lineup_banners
 from .kb import (
     _bootstrap_recipe_kb,
@@ -44,6 +51,7 @@ from ..gpu_types import (
     _autodetect_gpu_type,
     _resolve_amd_gpu_type,
     _resolve_gpu_type,
+    require_gpu_type_agreement,
 )
 from .benchmark_config import bind_benchmark, configure_benchmark
 from .bootstrap import (
@@ -154,7 +162,6 @@ from .session_setup import (
     _apply_operator_supplied_paths,
     _enforce_expected_framework,
     _export_partition_shape,
-    _publish_gpu_power_settings,
     _registered_framework_or_exit,
     _require_custom_entrypoint,
     _restore_partition_shape_from_state,
@@ -444,15 +451,21 @@ def _start_experience_kb() -> None:
 def _resolve_target_gpu(args: argparse.Namespace, framework: str) -> None:
     """Settle ``args.gpu_type``, then refuse a board this session cannot serve."""
     # Resolve real target GPU: probe > --gpu-type hint; probe wins to catch wrong-host typos that corrupt KB.
-    user_specified = _resolve_amd_gpu_type(args.gpu_type) or ""
+    user_specified = _resolve_amd_gpu_type(args.gpu_type, probe=False) or ""
     if int(args.nodes) >= 2:
         from ..multi_node._internal.gpu_probe import remote_autodetect_gpu_type
 
         probed = remote_autodetect_gpu_type() or ""
         if probed:
             print(f"GPU probe       : {probed} (remote {_resolve_mn_backend(args)})")
+        elif not user_specified:
+            # With no flag and no remote answer, the head node's own GPU is the only evidence left.
+            probed = _autodetect_gpu_type() or ""
+            if probed:
+                print(f"GPU probe       : {probed} (head node; the remote probe named no board)")
     else:
-        probed = _autodetect_gpu_type() or ""
+        probed = launch_board(args)
+    require_gpu_type_agreement(user_specified, probed)
     gpu_type, gpu_warnings = _resolve_gpu_type(user_specified=user_specified, probed=probed)
     for line in gpu_warnings:
         print(line, file=sys.stderr)
@@ -470,7 +483,8 @@ def _resolve_target_gpu(args: argparse.Namespace, framework: str) -> None:
 
     # Runs here, not in _preflight, because the question it asks -- will provenance be able to name the ISA? -- is
     # unanswerable until args.gpu_type is final.
-    _check_gfx_arch_resolvable(args.gpu_type)
+    probe = launch_gpu_probe(args)
+    _check_gfx_arch_resolvable(args.gpu_type, observed_gfx=probe.agents[0].gfx if probe and probe.agents else None)
 
 
 def _create_fresh_session(args: argparse.Namespace, *, framework: str, nodes_resolved: int) -> _SessionStart:
@@ -484,6 +498,7 @@ def _create_fresh_session(args: argparse.Namespace, *, framework: str, nodes_res
     # The base settles an open TP and EP, which the bound AgentX workload YAML records.
     base = resolve_session_base(session_dir, args, framework=framework)
     bind_benchmark(session_dir, args)
+    publish_gpu_identity(launch_gpu_identity(args))
     manifest = write_manifest(session_dir, args=args)
     _persist_install_event(args, session_dir)
     # One-shot Langfuse startup marker so a run killed before a breakdown still leaves a correlatable trace.
@@ -517,7 +532,7 @@ def _create_fresh_session(args: argparse.Namespace, *, framework: str, nodes_res
         model=PartitionModel(str(args.model), getattr(args, "precision", None)),
     )
     gpu_power = resolve_launch_gpu_power(args, nodes=nodes_resolved, owner=str(manifest["session_id"]))
-    _publish_gpu_power_settings(gpu_power)
+    publish_gpu_power_settings(gpu_power)
     _seed_shared_state(
         session_dir,
         args,
@@ -546,7 +561,7 @@ def _restore_platform_state(args: argparse.Namespace, state: SharedState, sessio
         session_lock.release()
         print(f"ERROR: cannot resume this session -- {_gpu_power_error}.", file=sys.stderr)
         sys.exit(2)
-    _publish_gpu_power_settings(gpu_power)
+    publish_gpu_power_settings(gpu_power)
     state.gpu_power_settings = gpu_power
     state.compute_partition = _export_partition_shape(
         PartitionRequest(getattr(args, "compute_partition_mode", None), getattr(args, "streams_per_partition", None)),
@@ -619,6 +634,7 @@ async def _resume_session(args: argparse.Namespace) -> _SessionStart:
     )
     # After the re-export, not before: both read the GPU_TYPE and the framework it put back.
     _restore_platform_state(args, state, session.session_lock)
+    publish_gpu_identity(launch_gpu_identity(args, gpu_type=state.gpu_type))
     _restore_phase_toggles(args, state, session_dir)
     _open_next_leg(args, state, session)
     return session

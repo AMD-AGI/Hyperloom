@@ -412,9 +412,11 @@ def _format_run_summary_section(summary: dict[str, Any]) -> list[str]:
         f"{_q(plat.get('sockets'))} sockets), governor {_q(plat.get('governor'))}, "
         f"boost {_q(plat.get('boost'))}"
     )
+    identity = gpu.get("identity") or {}
+    board = ", ".join(str(identity[key]) for key in ("product", "marketing_name", "pci_device_id") if identity.get(key))
     lines.append(
         f"- accelerators   : {gpu.get('host_count') or '?'}× {gpu.get('gfx_arch', 'unknown')} "
-        f"on the host, amdgpu {gpu.get('amdgpu_driver', 'unknown')}"
+        f"on the host, amdgpu {gpu.get('amdgpu_driver', 'unknown')}{f'; run on {board}' if board else ''}"
     )
     lines.append(
         "- stack          : "

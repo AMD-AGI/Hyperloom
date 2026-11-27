@@ -9,6 +9,7 @@ import pytest
 
 from hyperloom_common.gpu_identity import (
     AMD_GPU_BOARDS,
+    GpuAgent,
     gfx_arch_for_gpu_type,
     is_gfx_arch,
 )
@@ -16,19 +17,24 @@ from hyperloom.inference_optimizer import gpu_types
 from hyperloom.inference_optimizer.gpu_types import amd_gpu_board
 
 
-def _gpu_type_choices(parser) -> list | None:
-    """Find ``--gpu-type``'s choices, which are defined on a subcommand."""
+def _gpu_type_option(parser):
+    """Find the ``--gpu-type`` option, which is defined on a subcommand."""
     for action in parser._actions:
         if "--gpu-type" in (action.option_strings or []):
-            return list(action.choices or [])
+            return action
         # Only a subparsers action carries a dict of parsers here; an ordinary option's ``choices`` is a plain
         # sequence of values.
         if isinstance(getattr(action, "choices", None), dict):
             for sub in action.choices.values():
-                found = _gpu_type_choices(sub)
+                found = _gpu_type_option(sub)
                 if found is not None:
                     return found
     return None
+
+
+def _gpu_type_choices(parser) -> list | None:
+    option = _gpu_type_option(parser)
+    return list(option.choices or []) if option is not None else None
 
 
 def test_every_board_has_exactly_one_policy_row():
@@ -44,6 +50,15 @@ def test_cli_accepts_exactly_the_boards_that_resolve():
     assert sorted(choices) == sorted(AMD_GPU_BOARDS)
 
 
+def test_the_gpu_type_help_names_every_board_a_launch_confirms_on_the_card():
+    from hyperloom.inference_optimizer.cli.parser import _build_parser
+
+    option = _gpu_type_option(_build_parser())
+    assert option is not None
+    assert gpu_types.BOARDS_CONFIRMED_AT_LAUNCH == ("w7900",)
+    assert "a board a launch confirms on the card (w7900): " in option.help
+
+
 def test_every_listed_board_actually_resolves():
     """The failure the copies produced: a known board answering ``None``."""
     for product, board in AMD_GPU_BOARDS.items():
@@ -53,6 +68,73 @@ def test_every_listed_board_actually_resolves():
 def test_r9700_has_explicit_gfx1201_dispatch_identity():
     board = AMD_GPU_BOARDS["r9700"]
     assert (board.gfx, board.compute_units) == ("gfx1201", 64)
+
+
+def test_w7900_has_explicit_gfx1100_dispatch_identity_and_both_pci_ids():
+    board = AMD_GPU_BOARDS["w7900"]
+    assert (board.gfx, board.compute_units) == ("gfx1100", 96)
+    assert sorted(board.device_ids) == ["7448", "744a"]
+
+
+@pytest.mark.parametrize("card_series", ["AMD Radeon Pro W7900", "AMD Radeon Pro W7900 Dual Slot"])
+def test_w7900_product_probe(monkeypatch, card_series):
+    from types import SimpleNamespace
+
+    from hyperloom.inference_optimizer.gpu_types import _autodetect_gpu_type
+
+    monkeypatch.setattr("subprocess.run", lambda *args, **kwargs: SimpleNamespace(stdout=f"Card Series: {card_series}"))
+    assert _autodetect_gpu_type() == "w7900"
+
+
+@pytest.mark.parametrize(
+    ("agent", "product"),
+    [
+        (GpuAgent("gfx1100", "AMD Radeon Pro W7900 Dual Slot", "0x744a", 96), "w7900"),
+        (GpuAgent("gfx1100", "", "0x7448", 96), "w7900"),
+        (GpuAgent("gfx1100", "AMD Radeon PRO W7900D", "0x744b", 96), "w7900d"),
+    ],
+    ids=["nameplate", "chip-id", "w7900d"],
+)
+def test_a_radeon_pro_board_is_probed_from_the_launchs_rocminfo_agents_when_rocm_smi_cannot_name_it(
+    monkeypatch, agent, product
+):
+    import sys
+    from types import SimpleNamespace
+
+    from hyperloom.inference_optimizer.gpu_types import _autodetect_gpu_type
+
+    runs: list[list[str]] = []
+    monkeypatch.setattr(
+        "subprocess.run",
+        lambda argv, **kwargs: runs.append(argv) or SimpleNamespace(stdout="GPU[0] : Card Series: N/A"),
+    )
+    monkeypatch.setitem(sys.modules, "torch", None)
+    assert _autodetect_gpu_type(agents=[agent]) == product
+    assert _autodetect_gpu_type() is None
+    assert runs == [["rocm-smi", "--showproductname"]] * 2
+
+
+@pytest.mark.parametrize(
+    "agent",
+    [
+        GpuAgent("gfx1100", "AMD Radeon PRO W7800", "0x745e"),
+        GpuAgent("gfx1100", "AMD Radeon RX 7900 XTX", "0x744c"),
+        GpuAgent("gfx1100", ""),
+    ],
+    ids=["w7800", "rx7900", "bare"],
+)
+def test_a_bare_gfx1100_is_not_product_evidence(monkeypatch, agent):
+    import sys
+    from types import SimpleNamespace
+
+    from hyperloom.inference_optimizer.gpu_types import _autodetect_gpu_type
+
+    monkeypatch.setattr("subprocess.run", lambda *args, **kwargs: SimpleNamespace(stdout="AMD Radeon Graphics"))
+    fake_torch = SimpleNamespace(
+        cuda=SimpleNamespace(get_device_properties=lambda index: SimpleNamespace(gcnArchName="gfx1100"))
+    )
+    monkeypatch.setitem(sys.modules, "torch", fake_torch)
+    assert _autodetect_gpu_type(agents=[agent]) is None
 
 
 def test_the_preflight_warning_names_the_boards_the_cli_accepts(capsys, monkeypatch):

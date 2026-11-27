@@ -13,6 +13,7 @@ from hyperloom.common.workload_defaults import DEFAULT_PRECISION
 from hyperloom_common.gpu_identity import AMD_GPU_BOARDS
 
 from .. import framework_registry
+from ..gpu_types import BOARDS_CONFIRMED_AT_LAUNCH
 from .backends import CRITIC_PROTOCOL_CHOICES
 from .benchmark_config import add_benchmark_argument
 
@@ -30,7 +31,9 @@ def add_gpu_partition_arguments(opt: argparse.ArgumentParser) -> None:
         "wins when both are present and disagree; a WARN is "
         "emitted to stderr so the operator sees the typo. Used "
         "verbatim only when the probe fails (CPU sandbox / no "
-        "rocm-smi).",
+        f"rocm-smi). The exception is a board a launch confirms on the card ({', '.join(BOARDS_CONFIRMED_AT_LAUNCH)}): "
+        "every GPU rocminfo shows must report its ISA and its product name or PCI ID, so a disagreement either way "
+        "exits with code 2, and so does a local launch where rocminfo shows no GPU.",
     )
     opt.add_argument(
         "--compute-partition-mode",

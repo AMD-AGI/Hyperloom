@@ -210,6 +210,37 @@ def test_report_gives_the_reason_the_platform_is_missing_when_it_has_one():
     assert "not recorded — no host CPU sysfs" in md
 
 
+def test_report_names_the_board_the_run_was_on():
+    identity = {
+        "product": "w7900",
+        "marketing_name": "AMD Radeon Pro W7900 Dual Slot",
+        "pci_device_id": "1002:744a",
+        "gfx_arch": "gfx1100",
+        "visible_gpus": 1,
+    }
+    platform = {
+        "status": "ok",
+        "host": "gpu-host-01",
+        "gpu": {"host_count": 4, "gfx_arch": "gfx1100", "amdgpu_driver": "6.16.13", "identity": identity},
+    }
+    md = rp._format_md(_summary_without_platform(platform=platform))
+    assert (
+        "- accelerators   : 4× gfx1100 on the host, amdgpu 6.16.13; "
+        "run on w7900, AMD Radeon Pro W7900 Dual Slot, 1002:744a"
+    ) in md
+
+
+def test_report_names_only_what_the_identity_recorded():
+    platform = {
+        "status": "ok",
+        "host": "h",
+        "gpu": {"host_count": 8, "gfx_arch": "gfx942", "identity": {"product": "mi300x", "marketing_name": None}},
+    }
+    assert "- accelerators   : 8× gfx942 on the host, amdgpu unknown; run on mi300x\n" in rp._format_md(
+        _summary_without_platform(platform=platform)
+    )
+
+
 def test_platform_fingerprint_propagates_a_node_scope_failure(monkeypatch):
     def _boom():
         raise RuntimeError("node scope unreadable")

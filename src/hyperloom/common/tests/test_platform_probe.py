@@ -5,10 +5,14 @@
 
 from __future__ import annotations
 
+import json
 import socket
 from pathlib import Path
 
+import pytest
+
 from hyperloom.common import platform_probe as platform_probe_mod
+from hyperloom.common.provenance import GPU_IDENTITY_ENV
 from hyperloom.common.platform_probe import (
     CpuPlatform,
     amdgpu_device_count,
@@ -226,3 +230,29 @@ def test_platform_fingerprint_ok_record_shape_and_multi_node_none(monkeypatch):
     # gpu_type unset + probe=False → gfx_arch falls back to "unknown".
     got_unknown = platform_fingerprint()
     assert got_unknown["gpu"]["gfx_arch"] == "unknown"
+
+
+def _healthy_host(monkeypatch):
+    monkeypatch.setattr(platform_probe_mod, "probe_cpu_platform", _make_plat)
+    monkeypatch.setattr(platform_probe_mod, "amdgpu_device_count", lambda: 4)
+    monkeypatch.setattr(platform_probe_mod, "detect_stack_fingerprint", lambda _env: {})
+    monkeypatch.setattr(platform_probe_mod, "read_kernel_file", lambda *_a, **_k: None)
+
+
+def test_platform_fingerprint_carries_the_published_gpu_identity(monkeypatch):
+    _healthy_host(monkeypatch)
+    identity = {"product": "w7900", "marketing_name": "AMD Radeon Pro W7900 Dual Slot", "pci_device_id": "1002:744a"}
+    monkeypatch.setenv(GPU_IDENTITY_ENV, json.dumps(identity))
+    got = platform_fingerprint(gpu_type="w7900")
+    assert got["gpu"]["identity"] == identity
+    assert got["gpu"]["gfx_arch"] == "gfx1100"
+
+
+@pytest.mark.parametrize("published", [None, "{}", "not json", '"w7900"'])
+def test_platform_fingerprint_without_an_identity_leaves_it_out(monkeypatch, published):
+    _healthy_host(monkeypatch)
+    if published is None:
+        monkeypatch.delenv(GPU_IDENTITY_ENV, raising=False)
+    else:
+        monkeypatch.setenv(GPU_IDENTITY_ENV, published)
+    assert "identity" not in platform_fingerprint(gpu_type="w7900")["gpu"]
