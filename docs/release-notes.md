@@ -90,6 +90,9 @@ it.
   gateway reports no window for (for example `deepseek-v4.1-flash` or
   `glm-5.3-flash` today), or a gateway whose model table cannot be read,
   refuses to launch until `HYPERLOOM_DSH_CONTEXT_WINDOW` is set.
+- **The DeepSeek Harness runs `claude-sonnet-5-5` when `DSH_MODEL` is unset.**
+  The former default, `deepseek-v4-flash`, is answered with a 404 by the
+  gateway. Set `DSH_MODEL` to keep another model.
 - **A hosted multi-branch test closes its sandbox when it ends.**
   Make-before-break, which kept a finished test's sandbox until the next
   test's ran where the grant fit at least three tests, is removed. A hosted
