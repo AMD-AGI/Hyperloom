@@ -562,18 +562,21 @@ class WeightPrefetch:
     def _end_pass(
         self, record: dict[str, object], tally: _PassTally, files: int, elapsed: float, *, dropped: bool
     ) -> None:
-        """Add what a pass over ``files`` files read to :attr:`outcome` and its ``record``, and log it."""
+        """Add what a pass over ``files`` files read to :attr:`outcome`, its ``record`` (the last of ``pass_log``) completed
+        in a new entry, and log it."""
         elapsed = max(elapsed, 1e-9)
         self.outcome.read_bytes += tally.read
         self.outcome.unreadable += tally.unreadable
         self.outcome.out_of_room = self.outcome.out_of_room or tally.out_of_room
-        record.update(
-            end=_stamp(),
-            read_bytes=tally.read,
-            files_read=len(tally.files),
-            out_of_room=tally.out_of_room,
-            ended_by_drop=dropped,
-        )
+        # A new entry in place of the old, never the old one changed: write_outcome may copy the record meanwhile.
+        self.outcome.pass_log[-1] = {
+            **record,
+            "end": _stamp(),
+            "read_bytes": tally.read,
+            "files_read": len(tally.files),
+            "out_of_room": tally.out_of_room,
+            "ended_by_drop": dropped,
+        }
         log.info(
             "weight prefetch pass %d: read %.1f GiB from %d of %d files in %.1f s, %.0f MB/s, %d unreadable%s%s",
             record["pass"],
