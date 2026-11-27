@@ -9,7 +9,12 @@ from enum import Enum
 
 
 class AnalysisRoute(Enum):
-    """How a trace is analysed: ``agent`` runs the TraceLens skill under a model, ``non-llm`` runs TraceLens alone."""
+    """How a trace is analysed: ``agent`` runs the TraceLens skill under a model, ``non-llm`` runs TraceLens alone.
+
+    ``primus`` analyses no trace: Primus' simulate-mode projection of the training config reports the kernels
+    instead (:mod:`hyperloom.orchestrator.trace_analysis.primus_targets`).
+    """
 
     AGENT = "agent"
     NON_LLM = "non-llm"
+    PRIMUS = "primus"
