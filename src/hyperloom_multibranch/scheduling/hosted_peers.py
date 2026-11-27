@@ -36,6 +36,7 @@ from functools import partial
 from pathlib import Path
 from typing import TYPE_CHECKING, ClassVar
 
+from hyperloom_common.shared_storage import make_shared_dirs
 from hyperloom.measure.runner.cache_build import CacheBuildError, WheelTarget, runner_wheel_target
 from hyperloom_multibranch.repo.isolated_git import INIT, git_argv, git_env
 from hyperloom_multibranch.scheduling.hosted_run import grant_tests_end_by
@@ -200,7 +201,8 @@ class PinnedToolboxInputs:
         given["run_id"] = self.host.run_id or layout.session_id
         given["session_id"] = layout.session_id
         sha = str(given["source_sha"])
-        source = runner_source(layout.runner_source, str(self.host.source_repo), sha)
+        make_shared_dirs(layout.runner_source)
+        source = runner_source(layout.runner_source / sha, str(self.host.source_repo), sha)
         with tempfile.TemporaryDirectory(prefix="hyperloom-runner-source-") as private:
             copy = private_copy(source, Path(private), sha)
             pin = runner_cache_pin(copy, sha, self.cache_root, runner_wheel_target(os.environ))

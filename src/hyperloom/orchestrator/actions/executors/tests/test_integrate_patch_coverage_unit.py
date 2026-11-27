@@ -958,7 +958,6 @@ async def test_a_runtime_only_round_is_benched_and_its_verdict_decides_the_runti
     """The acquired runtime is the round's whole change; the gate, not the apply stage, decides its fate."""
     from types import SimpleNamespace
     from hyperloom.agents.framework import isolation
-    from hyperloom.common.failure_signature import classify_failure
     from hyperloom.orchestrator.enablement.runtime import adapters
     from hyperloom.orchestrator.enablement.runtime.stack_actions import (
         EnablementStackAction,
@@ -980,7 +979,6 @@ async def test_a_runtime_only_round_is_benched_and_its_verdict_decides_the_runti
         "get_adapter",
         lambda _fw: SimpleNamespace(
             build_stack_action=lambda _request: EnablementStackAction(
-                kind="runtime_candidate",
                 framework="vllm",
                 gap_id="gap.enablement.missing_model_arch",
                 capability="missing_model_arch",
@@ -1003,9 +1001,6 @@ async def test_a_runtime_only_round_is_benched_and_its_verdict_decides_the_runti
             {
                 "specialist_task_id": "spec",
                 "enablement": True,
-                "enablement_failure_signature": classify_failure(
-                    "ValueError: Model architectures ['DeepseekV4ForCausalLM'] are not supported for now."
-                ).to_dict(),
             },
         )
     )

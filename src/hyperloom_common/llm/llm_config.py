@@ -126,6 +126,34 @@ def with_synthesized_anthropic_keys(env: Mapping[str, str]) -> dict[str, str]:
     return source
 
 
+#: What a custom header may reference. Every child inherits the expanded header, so expanding any other name would
+#: hand a child the value of a secret its environment allowlist strips, such as ``${GITHUB_TOKEN}``.
+HEADER_REF_ALLOWLIST = frozenset({"ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "OPENAI_API_KEY"})
+
+
+def expand_custom_header_env_refs() -> None:
+    """Resolve the credential ``${VAR}`` references in the ``*_CUSTOM_HEADERS`` settings in place.
+
+    Child processes (specialists, the Critic, GEAK) forward these verbatim, and an agent CLI sends them
+    verbatim, so an unexpanded ``${ANTHROPIC_API_KEY}`` reaches the gateway as literal text and is rejected.
+    References resolve against the same view ``claude_sdk_env_options`` uses, so a key it would fill in from the
+    other Anthropic credential is not erased here. A reference outside :data:`HEADER_REF_ALLOWLIST` is left as
+    written, which is what children received before this expansion existed.
+    """
+    source = with_synthesized_anthropic_keys(os.environ)
+    for key in ("ANTHROPIC_CUSTOM_HEADERS", "OPENAI_CUSTOM_HEADERS"):
+        raw = os.environ.get(key)
+        if not raw or "${" not in raw:
+            continue
+        os.environ[key] = expand_env_refs(raw, source, only=HEADER_REF_ALLOWLIST)
+        if "${" in os.environ[key]:
+            log.warning(
+                "%s references a variable outside %s; child processes receive that reference unexpanded",
+                key,
+                ", ".join(sorted(HEADER_REF_ALLOWLIST)),
+            )
+
+
 CLAUDE_GATEWAY_SIGNAL_KEYS: tuple[str, ...] = (
     "ANTHROPIC_BASE_URL",
     "ANTHROPIC_API_KEY",
@@ -1088,6 +1116,7 @@ __all__ = [
     "AnthropicMessageResult",
     "CLAUDE_GATEWAY_SIGNAL_KEYS",
     "CLAUDE_OAUTH_TOKEN_ENV",
+    "HEADER_REF_ALLOWLIST",
     "ChatCompletionResult",
     "DEFAULT_ANTHROPIC_BASE_URL",
     "DEFAULT_ANTHROPIC_VERSION",
@@ -1119,6 +1148,7 @@ __all__ = [
     "derive_openai_base_url",
     "dual_protocol_endpoint_pair",
     "endpoint_default_model",
+    "expand_custom_header_env_refs",
     "get_anthropic_client",
     "get_async_anthropic_client",
     "get_async_openai_client",

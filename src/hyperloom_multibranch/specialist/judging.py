@@ -20,7 +20,7 @@ from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass, replace
 from typing import Protocol
 
-from hyperloom.contracts.measurement import Purpose, TestRequest, Validity
+from hyperloom.contracts.measurement import Purpose, TestRequest, TestResult, Validity
 from hyperloom.measure.compile import BlobStore
 from hyperloom_multibranch.contracts.branch_log import BranchLogEntry, BranchLogType
 from hyperloom_multibranch.contracts.fork import AdmissionStatus
@@ -34,9 +34,10 @@ from hyperloom_multibranch.contracts.blackboard.interfaces import (
     RecordSearch,
     SnapshotQuery,
 )
-from hyperloom_multibranch.contracts.blackboard.records import RetractionRef, TestRecord
+from hyperloom_multibranch.contracts.blackboard.records import RecordedValue, RetractionRef, TestRecord
 from hyperloom_multibranch.contracts.blackboard.vocab import BranchDriver, Conclusion, InboxKind
 from hyperloom_multibranch.contracts.toolbox import RequestRejected, Toolbox
+from hyperloom_multibranch.rulegate.cache_states import with_cache_states
 from hyperloom_multibranch.rulegate.decision import Action, decide
 from hyperloom_multibranch.rulegate.gate import RuleGate
 from hyperloom_multibranch.rulegate.readings import UnreadableResult
@@ -91,6 +92,7 @@ class BranchJudge:
         self._finished = False
         self._submitted = False
         self._autonomous = False
+        self._results: dict[str, TestResult] = {}
 
     async def run(self, poll_seconds: float, sleep: Callable[[float], Awaitable[None]] = asyncio.sleep) -> None:
         """Judge what waits, then again whenever the inbox brings a result, until cancelled or, once :meth:`finish`
@@ -116,6 +118,7 @@ class BranchJudge:
         self._autonomous = any(
             node.branch == self._branch and node.driver is BranchDriver.AUTONOMOUS for node in snapshot.lineage.branches
         )
+        self._results = {record.request_id: record.result for record in snapshot.records if record.result is not None}
         records = [record for record in snapshot.records if record.request.branch_id == self._branch]
         logged = {record.entry for record in snapshot.branch_logs.get(self._branch, ())}
         closed = _closed_unjudged(logged)
@@ -133,7 +136,8 @@ class BranchJudge:
     async def _judge(self, first: TestRecord, retests: Sequence[TestRecord], logged: set[BranchLogEntry]) -> None:
         retests = [retest for retest in retests if repeats(retest, first, self._rule)]
         try:
-            parent = (await self._blackboard.recorded_value(first.request.parent_commit)).values
+            recorded = await self._blackboard.recorded_value(first.request.parent_commit)
+            parent = recorded.values
             judgement = await self._rule.first(first, parent)
             if judgement.verdict is Verdict.NEEDS_CONFIRM and retests:
                 measured = [retest for retest in retests if _succeeded(retest)]
@@ -147,14 +151,22 @@ class BranchJudge:
                         return
                     content = f"the retest of {first.request_id} {_ended(last)}; recorded as regressed"
                     await self._notice(logged, content, first.request_id, last.request_id)
-                    await self._gate.settle(first.request, _failed_retest(judgement, last))
+                    await self._gate.settle(first.request, self._flagged(_failed_retest(judgement, last), recorded))
                     return
                 latest = max(measured, key=lambda retest: retest.requested_at)
                 judgement = await self._rule.retest(judgement, latest, parent)
         except (UnreadableResult, NotRecorded) as error:
             await self._notice(logged, f"{first.request_id} {_CANNOT_BE_JUDGED} {error}", first.request_id)
             return
-        await self._settle(first, judgement, logged)
+        await self._settle(first, self._flagged(judgement, recorded), logged)
+
+    def _flagged(self, judgement: Judgement, recorded: RecordedValue) -> Judgement:
+        """``judgement`` flagged as the gate's ``compare`` flags it (:func:`~..rulegate.cache_states.with_cache_states`),
+        from the results of the snapshot this step read."""
+        results = self._results
+        candidates = [results[request_id] for request_id in judgement.request_ids if request_id in results]
+        parents = [results[request_id] for request_id in recorded.request_ids if request_id in results]
+        return with_cache_states(judgement, candidates, parents)
 
     async def _settle(self, first: TestRecord, judgement: Judgement, logged: set[BranchLogEntry]) -> None:
         if self._autonomous and retracts(first, self._rule) and lands_as_retraction(first, judgement, self._rule):
