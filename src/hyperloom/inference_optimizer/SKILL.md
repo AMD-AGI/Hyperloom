@@ -748,7 +748,7 @@ when the file is absent, invalid, or stale.
 python3 -m hyperloom optimize \
   --model "$MODEL_PATH" \
   --framework vllm \           # sglang (default) / vllm / atom / xdit / llamacpp / custom
-  --gpu-type MI300X \          # or omit for rocm-smi auto-detect
+  --gpu-type mi300x \          # or omit to take the label of the card amd-smi reports
   --model-class moe_mla \      # dense / moe_mla / moe_swa / moe_mla_nsa; categorical key for atom seed grid + framework gap token + recipe key + prompt label
   --isl 512 --osl 512 \        # workload shape — pass whatever the prompt states; omitting them uses defaults ISL=1024/OSL=1024
   --conc 64 \                  # client concurrency — pass the prompt's value; default 64
@@ -774,7 +774,7 @@ and the operator's stated value is lost:
 | Custom bench scripts | `--benchmark-scripts-dir` | **Required for `--framework custom`.** Holds the entrypoint, looked up as `custom_<gpu-type>.sh`. Every knob it reads must be forwarded as `--extra-env`; the throughput unit is whatever its report declares. May also hold `levers.json` — the adapter's declared explore grid (see below). |
 | Declared levers (`custom`) | `<benchmark-scripts-dir>/levers.json` | Optional. A JSON **list** of explore variants the adapter declares for itself — `{"name": ..., "extra_envs": {...}}` (an object), or any of `extra_args` / `remove_args` / `unset_envs` / `args_mode: "replace"`. `custom` has no framework source to infer knobs from, so without this its seed grid is empty and EXPLORE has nothing to sweep until the model guesses. Declarations seed **ahead of** model proposals (a model variant of the same name wins) and are not re-seeded once their name appears in the explore ledger's `tested` rows. A malformed file — or one whose variant normalizes to nothing a restart could apply — fails the launch with exit 2; it never degrades to an empty grid. |
 | xDiT model name | `--xdit-model-name` | **Required for `--framework xdit`.** The xDiT model registry name (e.g., `FLUX.2-dev` or `black-forest-labs/FLUX.2-dev`). xDiT uses this to select the correct diffusion pipeline class; unlike vLLM/SGLang, it cannot infer the pipeline from the model path alone. |
-| GPU type | `--gpu-type` | rocm-smi auto-detect when unset |
+| GPU type | `--gpu-type` | The label of the card the machine reports. Pass only a GPU the prompt names, as a label such as `mi355x`; it is used when the card reports no model name (see `## GPU Type`). |
 | Model class | `--model-class` | categorical key for the deterministic consumers (atom seed grid, framework-agent gap search token, recipe key, prompt label); when unset, Coordinator boot infers and persists it from model metadata or model-path family keywords. For richer advisory model context see Step 1.5 (`model_arch.json`) |
 | Input seq length | `--isl` | Pass the prompt's ISL. Default `1024` when omitted. |
 | Output seq length | `--osl` | Pass the prompt's OSL. Default `1024` when omitted. |
@@ -824,7 +824,8 @@ python3 -m hyperloom optimize \
   session is serving.
 - **Structured path for UI/backends**: instead of free text, pass
   `--quantize-scheme <enum>` (one of `none` / `fp8` / `ptpc_fp8` / `mxfp4` /
-  `mxfp4_fp8`); `mxfp4` / `mxfp4_fp8` are **MI355X-only**. It resolves to a
+  `mxfp4_fp8`); `mxfp4` / `mxfp4_fp8` need a **gfx950** card (MI350X / MI355X),
+  and are not checked when the session read no card. It resolves to a
   curated prompt internally (`src/hyperloom/orchestrator/phases/quantization_schemes.py`). `none` or
   omit = no quantization. Free-text `--quantize` takes priority when both given.
 - **Keep `--precision` consistent with the quantization.** When a quantization
@@ -844,7 +845,7 @@ python3 -m hyperloom optimize \
   quantization the run **hard-stops (`SystemExit(4)`)** — it never silently
   optimizes the un-quantized source after an explicit `--quantize`.
   With the switch on, the one exception is a **pre-flight scheme/GPU mismatch** via
-  `--quantize-scheme` (e.g. `mxfp4` on a non-MI355X target): this is **skipped**
+  `--quantize-scheme` (e.g. `mxfp4` on a gfx942 card): this is **skipped**
   (not a hard stop) and continues on the un-quantized model, emitting a
   `QUANTIZATION_SKIPPED:` line on stdout and setting
   `$HYPERLOOM_QUANTIZATION_SKIPPED` so the caller can detect it.
@@ -884,7 +885,7 @@ Quirks: with `set -u`, assign dependent vars on separate lines (chained
 `_preflight()` runs every launch as the in-loop counterpart of IR-2 and
 **owns** the things the launcher must NOT do by hand: re-export auth
 aliases (LLM) from `OPENAI_API_KEY`,
-auto-`pip install` the SDKs, ROCm hygiene, `--gpu-type` auto-detect, and it emits the
+auto-`pip install` the SDKs, ROCm hygiene, reading the GPU card, and it emits the
 canonical `Preflight diagnostics:` block (paste verbatim into status
 reports). Two checks **abort** the run on failure: the model gate
 (probed against `<OPENAI_BASE_URL>/models`; the allowlist
@@ -1227,26 +1228,39 @@ full env-var set, and `docs/reference/session-breakdown.md` for the emitted
 
 ## GPU Type
 
-Pick the GPU explicitly with `--gpu-type` or `$GPU_TYPE`; without
-either, the optimizer auto-detects via `rocm-smi --showproductname`
-(falling back to `torch.cuda.get_device_properties(0).gcnArchName`).
+Every start and resume reads the GPUs with `amd-smi static`, else `rocm-smi`,
+else torch's `gcnArchName`; a multi-node session reads a remote node's the same
+way. When the cards the visible-device masks leave are not one kind (same arch,
+compute units and memory), the launch warns, listing each kind, and takes the
+first. That card's arch and facts decide everything that depends
+on the hardware: the default launch row, FP4 quantization, roofline peaks
+and Recipe KB arch matching. There is no list of supported
+boards, so a GPU Hyperloom has not seen before still runs.
+
+The GPU type is the label results, recipes and benchmark scripts are filed
+under: the card's market name reduced to its model designation (`AMD Instinct
+MI355X` → `mi355x`, `AMD Radeon AI PRO R9700` → `r9700`). Pass `--gpu-type` or
+`$GPU_TYPE` only when the prompt names the GPU; the name is used when the
+driver gives the card no model name or no card was read, and without one such
+a card is filed under its arch.
 
 ```bash
 python3 -m hyperloom optimize --gpu-type mi355x --model "$MODEL_PATH" --max-hours 2
 GPU_TYPE=mi300x python3 -m hyperloom optimize --model "$MODEL_PATH" --max-hours 2
 ```
 
-Accepted values: `mi300x`, `mi308x`, `mi325x`, `mi355x`, `r9700`, `r9600d`,
-`w7900`, `w7900d`, `radeon8060s`. The GPU type is the board the base launch is resolved for:
-a recipe for another board is used only when both share the gfx target and
-HBM size (`mi350x` / `mi355x` do; `mi300x` / `mi325x` do not), and its point
-is chosen for `--nodes` × `--gpus-per-node` (default 8) GPUs.
+The card's own name wins over a given one, so that recipes and KB rows match
+the hardware: the launch prints a `WARN` naming both. A resume keeps the label the session
+recorded and reads the card again. With no card read and no name given, the
+session has no label and its base launch is refused: pass `--gpu-type`.
 
-`r9600d` (Radeon AI PRO R9600D, gfx1201) and `w7900` (Radeon PRO W7900, gfx1100)
-run with `--framework vllm` only, and `r9700` (Radeon AI PRO R9700, gfx1201) and
-`w7900d` (Radeon PRO W7900D, gfx1100) with `vllm` or `llamacpp`. On these boards
-pass `--framework` explicitly, since another framework (including the default)
-exits with code 2 at launch.
+The base launch is resolved for the label: a recipe serves only the board it
+was tuned on (an `mi350x` launch does not serve an `mi355x`); to borrow one,
+write it as a launch script and pass `--reference-script`. Its point is chosen
+for `--nodes` × `--gpus-per-node` (default 8) GPUs. Every framework launches on
+every board; where no recipe serves, the default table's row for the card's
+arch runs, or the framework's fallback row (`--trust-remote-code` only, with a
+warning) for an arch the table has no row for.
 
 Do not set `HIP_VISIBLE_DEVICES` on the known ROCm stack unless the user asks;
 it can make `torch.cuda.is_available()` return false. Use

@@ -61,9 +61,9 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from hyperloom_common import gpu_card
 from hyperloom.common.benchmark_config import BenchmarkPoint
 from hyperloom.inference_optimizer.framework_registry import server_args_env_name
-from hyperloom.inference_optimizer.roofline_ceiling import HW_SPECS
 
 from . import _reuse as reuse
 
@@ -73,7 +73,7 @@ ENV_ROOT = "HYPERLOOM_INFERASIM_ROOT"  # path to the Infera checkout (added to s
 ENV_WORKLOAD = "HYPERLOOM_INFERASIM_WORKLOAD"  # explicit InferaSim workload YAML
 ENV_MODEL = "HYPERLOOM_INFERASIM_MODEL"  # InferaSim model preset name (e.g. gpt_oss_120B)
 ENV_GPU_ARCH = "HYPERLOOM_INFERASIM_GPU_ARCH"  # part to price when the session GPU is unknown
-ENV_HBM_GB = "HYPERLOOM_INFERASIM_HBM_GB"  # per-GPU HBM capacity, GB
+ENV_HBM_GB = "HYPERLOOM_INFERASIM_HBM_GB"  # per-GPU HBM capacity, GB; default: the session card's memory
 ENV_ANCHOR = "HYPERLOOM_INFERASIM_ANCHOR"  # single GPU anchor JSON (calibration)
 ENV_ANCHOR_SCALING = "HYPERLOOM_INFERASIM_ANCHOR_SCALING"  # comma-sep TP-scaling anchors
 ENV_ANCHOR_STORE = "HYPERLOOM_INFERASIM_ANCHOR_STORE"  # dir of warmup anchors (auto-select)
@@ -96,7 +96,6 @@ ESTIMATOR_DES = "des"
 ESTIMATOR_ANALYTICAL = "analytical"
 _ESTIMATORS = (ESTIMATOR_DES, ESTIMATOR_ANALYTICAL)
 
-_DEFAULT_GPU_ARCH = "mi355x"
 DTYPE_BF16 = "bf16"
 DTYPE_FP8 = "fp8"
 _DEFAULT_CONC = 64
@@ -188,7 +187,7 @@ class ServingSpec:
     # Image digest / engine version of the deployment, when known. A measured
     # anchor that recorded a different one is not used.
     runtime: dict[str, str] = field(default_factory=dict)
-    # The session's GPU. Empty falls back to HYPERLOOM_INFERASIM_GPU_ARCH, then mi355x.
+    # The session's GPU. Empty falls back to HYPERLOOM_INFERASIM_GPU_ARCH.
     gpu: str = ""
     # Digest of the launch levers the projection does not price (envs, kernel
     # overlays). A measured anchor recorded under another digest is not used.
@@ -493,8 +492,8 @@ def recipe_from_spec(spec: ServingSpec) -> dict[str, Any]:
 
 
 def gpu_arch(name: str | None = None) -> str:
-    """Canonical part name (``mi355x``) for ``name``, else the projected arch."""
-    raw = str(name or os.environ.get(ENV_GPU_ARCH) or _DEFAULT_GPU_ARCH).strip().lower()
+    """Canonical part name (``mi355x``) for ``name``, else the projected arch; empty when neither names one."""
+    raw = str(name or os.environ.get(ENV_GPU_ARCH) or "").strip().lower()
     match = re.search(r"mi\d{3}x", raw)
     return match.group(0) if match else raw
 
@@ -630,6 +629,11 @@ def _des_argv(spec: ServingSpec) -> list[str]:
     return argv
 
 
+def _session_hbm_gb() -> float | None:
+    card = gpu_card.session_card()
+    return round(card.memory_mib / 1024, 1) if card else None
+
+
 def _build_argv(
     spec: ServingSpec,
     workload: str,
@@ -641,7 +645,11 @@ def _build_argv(
     """Build the ``inferasim inference`` argv for this serving spec."""
     mode = mode or projection_mode()
     arch = gpu_arch(spec.gpu)
-    hbm_gb = os.environ.get(ENV_HBM_GB) or (HW_SPECS.get(arch) or {}).get("hbm_gb")
+    if not arch:
+        raise InferasimBridgeError(
+            f"no GPU to price the projection for: the session names none and {ENV_GPU_ARCH} is unset"
+        )
+    hbm_gb = os.environ.get(ENV_HBM_GB) or _session_hbm_gb()
     serving_model = str(os.environ.get(ENV_SERVING_MODEL) or "continuous").lower()
 
     argv: list[str] = [

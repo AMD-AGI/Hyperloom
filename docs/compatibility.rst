@@ -61,6 +61,14 @@ The following table lists the minimum requirements for running Hyperloom.
 | Kernel Languages    | HIP, Triton, FlyDSL                                    |
 +---------------------+--------------------------------------------------------+
 
+.. note::
+
+  Hyperloom keeps no list of supported GPUs. It reads each card's architecture,
+  compute units, memory and clocks from ``amd-smi static`` at session start, so
+  a GPU outside this table runs too, untested: with no recipe tuned for it and
+  no default launch row for its architecture, the framework starts from its
+  untuned fallback launch.
+
 Component support matrix
 ========================
 

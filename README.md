@@ -123,7 +123,7 @@ the knowledge base are described further in
 | Feature | Options |
 |------|-------|
 | Workload | Text generation, image generation, and custom / scriptable pipelines |
-| Platform | MI300X, MI325X, MI355X |
+| Platform | MI300X, MI325X, MI355X validated; any AMD GPU `amd-smi` describes runs (see [compatibility](docs/compatibility.rst)) |
 | Framework | SGLang, vLLM, xDiT |
 | Kernel language | HIP, Triton, FlyDSL |
 | Kernel backends | GEAK, KernelForge |

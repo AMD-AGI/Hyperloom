@@ -23,25 +23,21 @@ import pytest
 import yaml
 
 from hyperloom.inference_optimizer import model_config_utils
-from hyperloom.inference_optimizer import gpu_types
 from hyperloom.inference_optimizer.grid_server_args import remove_moe_runner_backend_arg
 from hyperloom.orchestrator.actions.executors.baseline import BaselineExecutor
 from hyperloom.orchestrator.actions.executors.workload._workload_envs import (
     materialize_config_with_envs,
     LaunchLayer,
 )
+from hyperloom.orchestrator.tests._fixtures import MI325X_CARD, publish_card
 
 from .conftest import write_benchmark_yaml
-
-_AMD = "mi300x"
 
 
 @pytest.fixture(autouse=True)
 def _hermetic_env(monkeypatch):
-    """Neutralise host GPU autodetect + env so AMD-gating is deterministic."""
+    """No ambient GPU label or workload env, so a test that wants a GPU publishes its card."""
     monkeypatch.delenv("GPU_TYPE", raising=False)
-    # Pin autodetect OFF so non-AMD test cases never see real hardware.
-    monkeypatch.setattr(gpu_types, "_autodetect_gpu_type", lambda: None)
     for key in (
         "CONC",
         "ISL",
@@ -254,25 +250,25 @@ def _materialize_envs(
 def test_materialize_never_injects_moe_runner_backend_on_amd(tmp_path, moe_model, monkeypatch):
     # sglang's own --moe-runner-backend auto already picks the right backend;
     # Hyperloom leaves it alone even for a MoE model on AMD/ROCm.
-    monkeypatch.setenv("GPU_TYPE", _AMD)
+    publish_card(monkeypatch, MI325X_CARD)
     envs = _materialize_envs(tmp_path, model=moe_model)
     assert "--moe-runner-backend" not in envs.get("EXTRA_SGLANG_ARGS", "")
 
 
 def test_materialize_noop_for_dense_model_on_amd(tmp_path, dense_model, monkeypatch):
-    monkeypatch.setenv("GPU_TYPE", _AMD)
+    publish_card(monkeypatch, MI325X_CARD)
     envs = _materialize_envs(tmp_path, model=dense_model)
     assert "--moe-runner-backend" not in envs.get("EXTRA_SGLANG_ARGS", "")
 
 
 def test_materialize_noop_for_quark_mxfp4_moe_on_amd(tmp_path, quark_mxfp4_moe_model, monkeypatch):
-    monkeypatch.setenv("GPU_TYPE", _AMD)
+    publish_card(monkeypatch, MI325X_CARD)
     envs = _materialize_envs(tmp_path, model=quark_mxfp4_moe_model)
     assert "--moe-runner-backend" not in envs.get("EXTRA_SGLANG_ARGS", "")
 
 
 def test_materialize_does_not_double_user_backend(tmp_path, moe_model, monkeypatch):
-    monkeypatch.setenv("GPU_TYPE", _AMD)
+    publish_card(monkeypatch, MI325X_CARD)
     envs = _materialize_envs(
         tmp_path,
         model=moe_model,

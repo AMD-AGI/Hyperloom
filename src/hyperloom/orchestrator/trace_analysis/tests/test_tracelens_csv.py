@@ -71,6 +71,8 @@ def test_dry_run_writes_the_source_resolution_artifact(
             str(trace),
             "--workspace-path",
             str(tmp_path / "workspace"),
+            "--target-platform",
+            "MI355X",
             "--dry-run",
         ],
     )
@@ -81,6 +83,19 @@ def test_dry_run_writes_the_source_resolution_artifact(
     resolution_path = Path(result["artifact_paths"]["kernel_source_resolution"])
     assert resolution_path.is_file()
     assert _json.loads(resolution_path.read_text(encoding="utf-8"))["entries"] == []
+
+
+def test_the_target_platform_is_required(tmp_path, monkeypatch, capsys):
+    """No GPU is assumed: a run that names no platform is refused before it starts."""
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        ["tracelens_analysis.py", "--trace-input", str(tmp_path / "t.json"), "--workspace-path", str(tmp_path)],
+    )
+    with pytest.raises(SystemExit) as exc:
+        tla.main()
+    assert exc.value.code == 2
+    assert "--target-platform" in capsys.readouterr().err
 
 
 # A path — is_kernel_event strict cat == 'kernel'
@@ -1015,6 +1030,8 @@ def _run_agent_route_to_a_skill_error(tmp_path, monkeypatch, capsys, skill_error
             str(trace),
             "--workspace-path",
             str(tmp_path / "workspace"),
+            "--target-platform",
+            "MI355X",
             "--route",
             "agent",
         ],

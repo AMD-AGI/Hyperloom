@@ -23,6 +23,7 @@ from hyperloom.measure.tests.bundle_factory import (
 )
 from jsonschema import Draft202012Validator
 
+from hyperloom_common.gpu_card import GpuCard
 from hyperloom.measure import spec as spec_module
 from hyperloom.measure.docs import DocumentError
 from hyperloom.measure.long_context.plan import LongContextPlan
@@ -625,6 +626,43 @@ def test_a_sheet_that_gives_the_boot_a_budget_carries_it_and_the_schema_allows_i
     assert spec.procedure.boot_budget_sec == 5400
     assert list(VALIDATOR.iter_errors(document)) == []
     assert MeasurementSpec.from_bytes(spec.to_bytes()) == spec
+
+
+CARD = GpuCard("AMD Instinct MI355X", "75a3", "gfx950", 256, 294912, 8000.0, 2400)
+
+
+def _with_card(**changes: Any) -> dict[str, Any]:
+    return _edit(lambda d: d["hardware"].update(card={**dataclasses.asdict(CARD), **changes}))
+
+
+def test_a_sheet_carries_the_session_s_card_as_its_reader_reads_it_and_the_schema_allows_it() -> None:
+    document = _with_card()
+
+    spec = MeasurementSpec.from_document(document)
+
+    assert spec.hardware.card == CARD
+    assert list(VALIDATOR.iter_errors(document)) == []
+    assert MeasurementSpec.from_bytes(spec.to_bytes()) == spec
+
+
+@pytest.mark.parametrize(
+    ("change", "message"),
+    [
+        ({"gfx": ""}, "gfx: expected a non-empty string"),
+        ({"compute_units": 0}, "compute_units: must be at least 1"),
+        ({"memory_mib": "294912"}, "memory_mib: expected an integer"),
+        ({"engine_clock_mhz": 0}, "engine_clock_mhz: must be at least 1"),
+        ({"memory_bandwidth_gbps": -1}, "memory_bandwidth_gbps: must be at least 0"),
+        ({"name": None}, "name: expected a string"),
+        ({"revision": "c1"}, "unknown key 'revision'"),
+    ],
+)
+def test_a_card_that_breaks_its_contract_is_refused_by_the_reader_and_the_schema(change, message) -> None:
+    document = _with_card(**change)
+
+    with pytest.raises(DocumentError, match=message):
+        MeasurementSpec.from_document(document)
+    assert list(VALIDATOR.iter_errors(document)) != []
 
 
 def test_a_sheet_that_asks_for_none_has_no_such_key_so_its_bytes_and_hash_are_unchanged() -> None:

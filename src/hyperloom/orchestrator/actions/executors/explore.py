@@ -14,6 +14,7 @@ from typing import Any
 
 import yaml
 
+from hyperloom_common import gpu_card
 from hyperloom_common.coerce import to_float, to_int, to_str_list
 from hyperloom.common.gain_math import accuracy_passed, gain_pct, graded_gate_row
 from hyperloom.common.model_paths import resolve_session_model_path
@@ -427,7 +428,7 @@ class _ExploreRound:
             serving=ServingStack.of_recipe(
                 self.bench,
                 model_path=self.target.model_path,
-                gpu_type=self.target.gpu_type or str(getattr(self.ss, "gpu_type", "") or ""),
+                gfx=gpu_card.session_gfx(),
                 stack_fingerprint=getattr(self.ss, "stack_fingerprint_meta", None),
             ),
             base_server_args=self._composed_args(self.base_args, self.base_remove_args),
