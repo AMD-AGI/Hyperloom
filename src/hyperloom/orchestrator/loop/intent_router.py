@@ -566,7 +566,11 @@ class IntentRouter(CoordinatorCollaborator):
         # Only once a task exists, so a dispatch that bailed out above leaves the mandate on offer.
         self._consume_primatune_mandate(action_name, params, task.task_id)
         record_config_proposal(
-            self._coord, proposal_id, action_name, {**payload, "params": params}, outcome="delegated"
+            self._coord.phase_framework.timeline(),
+            proposal_id,
+            action_name,
+            {**payload, "params": params},
+            outcome="delegated",
         )
         await self.bus.append_and_seq(
             Message.new(

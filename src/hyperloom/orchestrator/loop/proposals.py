@@ -23,7 +23,7 @@ from ..collaborator import CoordinatorCollaborator
 from ._integrate_promotion import _confirmed_task_outcome
 
 if TYPE_CHECKING:
-    from .coordinator import Coordinator
+    from hyperloom.inference_optimizer.breakdown.recorder.framework_event import FrameworkEventRecorder
 
 import logging as _logging
 
@@ -40,22 +40,20 @@ class ProposedAction:
 
 
 def record_config_proposal(
-    coord: "Coordinator",
+    recorder: FrameworkEventRecorder | None,
     proposal_id: str,
     action_name: str,
     payload: Mapping[str, Any],
     *,
     outcome: str = "submitted",
 ) -> None:
-    """Record one config-arm grid on the framework event, as its task is queued.
+    """Record one config-arm grid on the framework event ``recorder`` writes, as its task is queued; ``None`` when no
+    FRAMEWORK entry is open.
 
     One row per grid, not per variant: the measured attempts point back at the grid
     through their ``proposal_ref``.
     """
-    if not proposal_id:
-        return
-    recorder = coord.phase_framework.timeline()
-    if recorder is None:
+    if not proposal_id or recorder is None:
         return
     kb_read_id = str(payload.get("kb_read_id") or "")
     rendered_refs = payload.get("kb_rendered_refs") or []
@@ -196,7 +194,9 @@ class ProposalsCollaborator(CoordinatorCollaborator):
             return
         # The round the authoring specialist opened runs on under this task id.
         await self._coord.enablement_lane.handoff_enablement_round(task)
-        record_config_proposal(self._coord, proposal_id, action, {**proposal.payload, "params": params})
+        record_config_proposal(
+            self._coord.phase_framework.timeline(), proposal_id, action, {**proposal.payload, "params": params}
+        )
         await self.bus.append_and_seq(
             Message.new(
                 "coordinator",

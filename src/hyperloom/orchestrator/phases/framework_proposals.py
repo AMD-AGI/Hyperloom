@@ -224,6 +224,10 @@ class _FrameworkProposalsMixin:
             return False
         log.info("auto_bench: enqueued explore task_id=%s (variants=%d)", etask.task_id, len(grid))
         record_config_proposal(
-            self._coord, proposal_id, "explore", {"params": params, **kb_exposure_of(rows)}, outcome="auto_bench"
+            self._coord.phase_framework.timeline(),
+            proposal_id,
+            "explore",
+            {"params": params, **kb_exposure_of(rows)},
+            outcome="auto_bench",
         )
         return True
