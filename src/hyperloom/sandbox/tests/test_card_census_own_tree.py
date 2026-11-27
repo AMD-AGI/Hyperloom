@@ -416,23 +416,29 @@ def test_the_production_kimi_rounds_rank_and_spawn_child_on_card_0_leave_every_c
     assert _keys(reading, own) == []
 
 
-@pytest.mark.parametrize("case", ["child-on-two-cards", "child-with-two-files-on-card-0"])
-def test_a_process_of_the_test_pairs_by_what_it_holds_on_each_card(tmp_path: Path, case: str) -> None:
-    """What a process holds on a card is the sum of its files on that card's render node, and it pairs on every card it
-    holds memory on: the spawn child holding 1.2 GiB on cards 0 and 1, listed by the kernel on both, pairs on each (beside
-    rank 0 on card 0 and rank 1 on card 1); the child's 1.2 GiB on card 0 split over two files of 0.7 and 0.5 GiB pairs
-    as one process with its one holder."""
+def test_a_process_of_the_test_pairs_with_one_holder_by_the_sum_of_its_files_on_the_card(tmp_path: Path) -> None:
+    """What a process holds on a card is the sum of its files on that card's render node: the spawn child's 1.2 GiB on
+    card 0 split over two files of 0.7 and 0.5 GiB pairs as one process with its one holder."""
     tree = _pod(tmp_path)
     own = _kimi_round(tree)
-    if case == "child-on-two-cards":
-        tree.holds(_KIMI_CHILD_HOST, 1, vram=_CHILD_VRAM, queues=2)
-        tree.renders(_KIMI_CHILD, 1, kib=_CHILD_VRAM >> 10, descriptor=4)
-    else:
-        (tree.procfs / str(_KIMI_CHILD) / "fd" / "3").unlink()
-        tree.renders(_KIMI_CHILD, _SPAWN_CARD, kib=int(0.7 * _GIB) >> 10, descriptor=4)
-        tree.renders(_KIMI_CHILD, _SPAWN_CARD, kib=(_CHILD_VRAM - int(0.7 * _GIB)) >> 10, descriptor=5)
+    (tree.procfs / str(_KIMI_CHILD) / "fd" / "3").unlink()
+    tree.renders(_KIMI_CHILD, _SPAWN_CARD, kib=int(0.7 * _GIB) >> 10, descriptor=4)
+    tree.renders(_KIMI_CHILD, _SPAWN_CARD, kib=(_CHILD_VRAM - int(0.7 * _GIB)) >> 10, descriptor=5)
 
     assert _keys(_read_kimi(tree), own) == []
+
+
+def test_a_process_of_the_test_pairs_with_one_holder_across_all_cards(tmp_path: Path) -> None:
+    """Each process of the test pairs with one holder across the cards, as the kernel lists a rank on its own card only
+    while it reports its memory on every card: a second holder of the spawn child's memory on card 1, beside rank 1, has
+    no process of the test left to pair with (the ranks pair with the lone holders of cards 2 to 7 and with card 0's), so
+    card 1 is crowded, as it was before pairing, even were it the child's own memory on a second card."""
+    tree = _pod(tmp_path)
+    own = _kimi_round(tree)
+    tree.holds(_KIMI_CHILD_HOST, 1, vram=_CHILD_VRAM, queues=2)
+    tree.renders(_KIMI_CHILD, 1, kib=_CHILD_VRAM >> 10, descriptor=4)
+
+    assert [key for key in _keys(_read_kimi(tree), own) if key[0] == "crowded"] == [("crowded", 1)]
 
 
 @pytest.mark.parametrize(
@@ -454,17 +460,35 @@ def test_a_foreign_holder_of_other_memory_than_any_process_of_the_test_on_the_ca
     assert [key for key in _keys(_read_kimi(tree), own) if key[0] == "crowded"] == [("crowded", card)]
 
 
-def test_accepted_limitation_a_foreign_holder_of_a_ranks_memory_beside_another_rank_reads_as_the_tests(
-    tmp_path: Path,
-) -> None:
-    """The bound of pairing by memory: every rank reports its memory on every card's render node, so on card 3 seven
-    ranks' 1.7 GiB stand for no holder of card 3. A process outside the pod with 1.7 GiB beside rank 3 pairs with one of
-    them and passes; one of the same memory as a process of the test cannot be told from the test's own."""
+@pytest.mark.parametrize("card", [_SPAWN_CARD, 3], ids=["card-0", "card-3"])
+def test_a_foreign_holder_of_a_ranks_memory_is_not_absorbed_by_another_cards_rank(tmp_path: Path, card: int) -> None:
+    """Every rank reports its memory on every card's render node, so on each card seven ranks' 1.7 GiB stand for no
+    holder of it. A process outside the pod with a rank's 1.7 GiB beside rank 3, or as a third holder on card 0, would pair
+    with one of them card by card; each rank pairs with one holder across the cards, and every rank is taken by its own
+    card's holder, so that card is crowded."""
     tree = _pod(tmp_path)
     own = _kimi_round(tree)
-    tree.holds(_OTHER_HOST, 3, vram=_RANK_LOADING_VRAM, queues=2)
+    tree.holds(_OTHER_HOST, card, vram=_RANK_LOADING_VRAM, queues=2)
 
-    assert _keys(_read_kimi(tree), own) == []
+    assert [key for key in _keys(_read_kimi(tree), own) if key[0] == "crowded"] == [("crowded", card)]
+
+
+def test_without_memory_in_the_descriptors_a_second_holder_crowds_the_card_as_before(tmp_path: Path) -> None:
+    """A kernel whose fdinfo has no ``drm-memory-vram`` says nothing a holder can pair with: the production Kimi round's
+    card 0, with rank 0 and the 1.2 GiB spawn child, is crowded by the rule without pairing."""
+    tree = _pod(tmp_path)
+    own = _kimi_round(tree)
+    for info in tree.procfs.glob("*/fdinfo/*"):
+        info.write_text(
+            "\n".join(line for line in info.read_text().splitlines() if "drm-memory-vram" not in line) + "\n"
+        )
+
+    reading = _read_kimi(tree)
+
+    assert reading.method == METHOD_CENSUS_FDINFO
+    assert [i.key for i in reading.intrusions(own, before_test=False) if i.key[0] == "crowded"] == [
+        ("crowded", _SPAWN_CARD)
+    ]
 
 
 def _solo_server(tree: KernelTree, *, child_owner: int = 2100) -> OwnProcesses:

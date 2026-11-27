@@ -33,10 +33,10 @@ each, and beside it, on the one card where a launcher of the test's server holds
 launcher's memory, not counting one with a few MiB and no queue; more than that only when every holder of the card pairs
 one to one, by memory within 512 MiB, with a process of the test by what its open DRM files on that card's render node
 say it holds there, such as a server and the processes it spawned, a rank of a server with several on each of its cards,
-memory being the only evidence: a holder that is not the test's passes when it is within 512 MiB of a process of the test
-on the card that the test's listed holders leave over (one not yet listed, or another card's rank, which reports its memory
-on every render node of its server), so a foreign holder of about the memory of a process of the test on the card cannot
-be told from the test's own; and no memory may be held that no process of this container
+each process of the test pairing with one holder across all the cards (a rank reports its memory on every render node
+of its server), memory being the only evidence: a holder that is not the test's passes when it is within 512 MiB of a
+process of the test on the card that no holder of any card pairs with (one not yet listed), so a foreign holder of about
+the memory of such a process cannot be told from the test's own; and no memory may be held that no process of this container
 accounts for): the result says so in its ``method``.
 """
 
