@@ -5,7 +5,6 @@
 
 from __future__ import annotations
 
-import time
 from collections.abc import Collection
 from datetime import datetime
 from typing import Any, NamedTuple
@@ -503,7 +502,6 @@ class _RenderMixin:
             f"profiler_digest={self._format_profiler_digest()}",
             # Full TraceLens analysis.md.
             f"analysis_md={self._format_analysis_md_pointer()}",
-            f"params_no_promote_streak={self.params_no_promote_streak}",
             f"explore_search={self._format_search_state(self.explore_search)}",
             # Pending KEEPs the integrate gate will drain.
             (f"pending_keep_kernels={kernel_decisions.pending_keep_kernel_ids(self) or '(none)'}"),
@@ -516,7 +514,6 @@ class _RenderMixin:
             f"last_explore={self._format_attempt(self.last_explore)}",
             f"attempts_history={self._format_attempts_history()}",
             f"last_action_failures={self._format_last_action_failures()}",
-            f"gain_gated_action_count={int(self.gain_gated_action_count or 0)}",
             f"macro_cycle={int(self.macro_cycle or 0)}",
             f"stop_reason={self.stop_reason or '(none)'}",
             f"closing_phase={self.closing_phase}  "
@@ -524,25 +521,6 @@ class _RenderMixin:
             f"closing_report_task_id={self.closing_report_task_id or '(none)'}",
         ]
         return "\n".join(lines)
-
-    def to_tick_summary(self) -> str:
-        """The per-tick counters of the prompt summary: the tick number and each agent's last pass."""
-        return f"tick={int(self.tick or 0)}\nagent_last_active={self._format_agent_last_active()}"
-
-    def _format_agent_last_active(self) -> str:
-        """Render each agent's last completed reactor pass as a relative age.
-
-        Returns:
-            str: ``orchestration=2s ago``, or ``(none)`` when no
-                agent has run yet.
-        """
-        now = time.time()
-        parts = [
-            f"{agent}={int(max(0.0, now - ts))}s ago"
-            for agent, ts in sorted((self.agent_last_active or {}).items())
-            if isinstance(ts, (int, float)) and ts > 0
-        ]
-        return ", ".join(parts) or "(none)"
 
     # Audit-trail renderers (per-action attempts + global failure log).
     @staticmethod
@@ -605,15 +583,14 @@ class _RenderMixin:
 
     def _format_rejected_kernel_patches(self) -> str:
         """Render the most recent rejected kernel patches for the prompt."""
-        if not self.rejected_kernel_patches:
-            return "(none)"
+        from ...kernel import kernel_decisions
+
         return [
             (
                 f"{r.get('kernel_id', '?')}: attempts={r.get('attempt_count', '?')} "
                 f"best_gain={r.get('best_gain_pct', '?')} reason={r.get('reason', '?')}"
             )
-            for r in self.rejected_kernel_patches[-5:]
-            if isinstance(r, dict)
+            for r in kernel_decisions.rejected_kernel_patches(self)[-5:]
         ] or "(none)"
 
     @staticmethod
@@ -645,10 +622,7 @@ class _RenderMixin:
             return "(none)"
         tested: dict[str, Any] = search.get("tested") or {}
         head = (
-            f"    cursor={search.get('cursor', 0)}"
-            f"  accepted={len(search.get('accepted') or [])}"
-            f"  rejected={len(search.get('rejected') or [])}"
-            f"  tested={len(tested)}"
+            f"    cursor={search.get('cursor', 0)}  rejected={len(search.get('rejected') or [])}  tested={len(tested)}"
         )
         out: list[str] = ["", head]
         rows = [(fp, e) for fp, e in tested.items() if isinstance(e, dict)]
@@ -662,14 +636,10 @@ class _RenderMixin:
         return "\n".join(out)
 
     def _format_current_best(self) -> str:
-        """Render ``current_best`` without its ``optimization_stack`` and ``measurement``.
-
-        The stack, which grows with every stacked KEEP, has its own line; the
-        measurement is launch evidence (paths, identity hashes) no decision reads.
-        """
+        """Render ``current_best`` without its ``measurement``: launch evidence (paths, identity hashes) no decision reads."""
         if not self.current_best:
             return "(none)"
-        return str({k: v for k, v in self.current_best.items() if k not in ("optimization_stack", "measurement")})
+        return str({k: v for k, v in self.current_best.items() if k != "measurement"})
 
     def _format_current_launch_flags(self) -> str:
         """The server flags ``current_best`` launched with, as its measurement recorded them."""

@@ -141,6 +141,50 @@ async def test_gpu_specialist_stays_exclusive_with_a_running_explore_across_pump
     assert specialist.calls
 
 
+@pytest.mark.parametrize("second_lanes", [["benchmark_lane"], ["profile_lane"]], ids=["same-lane", "conflicting-lane"])
+async def test_two_queued_tasks_that_want_one_lane_never_run_together(coord, second_lanes):
+    """The lease store alone decides admission: one pass over two queued rivals starts exactly one of them."""
+    first, second = _Gated(), _Gated()
+    coord.sub.register_executor("first_action", first)
+    coord.sub.register_executor("second_action", second)
+    await _enqueue(coord, "first_action", "first", ["benchmark_lane"])
+    await _enqueue(coord, "second_action", "second", second_lanes)
+
+    await asyncio.wait_for(coord.dispatcher.pump_dispatcher_once(), timeout=5)
+    await asyncio.wait_for(first.entered.wait(), timeout=5)
+    await asyncio.wait_for(coord.dispatcher.pump_dispatcher_once(), timeout=5)
+
+    assert _in_flight_kinds(coord) == ["first_action"]
+    assert not second.calls
+    assert [task.kind for task in await coord.tasks.queued()] == ["second_action"]
+    leases = coord.locks.lanes_by_task_sync()
+    assert list(leases) == first.calls
+    assert await coord.locks.lane_holders() == dict.fromkeys(leases[first.calls[0]][0], 1)
+
+    first.gate.set()
+    await _settle(coord)
+    await asyncio.wait_for(coord.dispatcher.pump_dispatcher_once(), timeout=5)
+    await asyncio.wait_for(second.entered.wait(), timeout=5)
+    assert list(coord.locks.lanes_by_task_sync()) == second.calls
+    second.gate.set()
+    await _settle(coord)
+
+
+async def test_a_queued_task_naming_an_unknown_lane_is_skipped_and_the_pass_goes_on(coord, caplog):
+    stuck, fast = _Instant(), _Instant()
+    coord.sub.register_executor("stuck_action", stuck)
+    coord.sub.register_executor("fast_action", fast)
+    await _enqueue(coord, "stuck_action", "stuck", ["no_such_lane"])
+    await _enqueue(coord, "fast_action", "fast", ["benchmark_lane"])
+
+    await asyncio.wait_for(coord.dispatcher.pump_dispatcher_once(), timeout=5)
+    await _settle(coord)
+
+    assert fast.calls and not stuck.calls
+    assert [task.kind for task in await coord.tasks.queued()] == ["stuck_action"]
+    assert "has unknown lane in ['no_such_lane']" in caplog.text
+
+
 async def test_frozen_admission_spawns_nothing(coord):
     fast = _Instant()
     coord.sub.register_executor("fast_action", fast)
@@ -364,6 +408,19 @@ def _stall_orchestration(coord) -> _StalledTurn:
     return stalled
 
 
+def _settled_turns(coord) -> list[bool]:
+    """Grows by one each time a routed turn is settled."""
+    settled: list[bool] = []
+    real_settle = coord.conversation.settle_turn
+
+    async def settle_turn() -> None:
+        settled.append(True)
+        await real_settle()
+
+    coord.conversation.settle_turn = settle_turn
+    return settled
+
+
 async def _until(condition, *, timeout: float = 5.0) -> None:
     async def _poll() -> None:
         while not condition():
@@ -400,6 +457,7 @@ async def test_a_stalled_turn_does_not_hold_back_booking_or_dispatch(coord):
 
 async def test_the_turn_routes_only_after_the_pump_beside_it_finishes(coord):
     stalled = _stall_orchestration(coord)
+    settled = _settled_turns(coord)
     real_pump = coord.dispatcher.pump_dispatcher_once
     pumping, pump_gate = asyncio.Event(), asyncio.Event()
 
@@ -414,14 +472,15 @@ async def test_the_turn_routes_only_after_the_pump_beside_it_finishes(coord):
     stalled.release.set()
     await asyncio.sleep(0.05)
 
-    assert "orchestration" not in coord.shared_state.agent_last_active
+    assert not settled
     pump_gate.set()
     await asyncio.wait_for(tick, timeout=5)
-    assert "orchestration" in coord.shared_state.agent_last_active
+    assert settled
 
 
 async def test_a_pump_that_raises_beside_a_turn_pauses_without_failing_the_turn(coord):
     stalled = _stall_orchestration(coord)
+    settled = _settled_turns(coord)
     real_pump = coord.dispatcher.pump_dispatcher_once
     calls: list[str] = []
 
@@ -439,7 +498,7 @@ async def test_a_pump_that_raises_beside_a_turn_pauses_without_failing_the_turn(
     assert calls == ["pump"]
     stalled.release.set()
     await asyncio.wait_for(tick, timeout=5)
-    assert "orchestration" in coord.shared_state.agent_last_active
+    assert settled
 
 
 async def test_the_closing_transition_releases_a_held_barrier(coord):

@@ -238,18 +238,11 @@ def test_extract_gaps_from_attempts(coord: Coordinator) -> None:
         {"action": "kernel_opt", "error_class": "oom", "variant_name": "v1"},
         {"action": "kernel_opt", "error_class": "oom", "variant_name": "v2"},
     ]
-    ss.params_no_promote_streak = 6
-    ss.explore_search = {"winners_history": []}
     gaps = coord.gap_refresh._extract_gaps_from_attempts(coord.recipe_journal.workload_canonical_id())
-    cids = {g["canonical_id"] for g in gaps}
     # distinct variant_names produce separate gaps; each has one attempt
     fail_gaps = [g for g in gaps if "fail:kernel_opt:oom" in g["canonical_id"]]
     assert len(fail_gaps) == 2
     assert all(len(g["attempts"]) == 1 for g in fail_gaps)
-    # explore plateau gap fires at streak >= 3; >= 6 escalates it to high
-    plateau = [g for g in gaps if g["canonical_id"].endswith("explore_plateau")][0]
-    assert plateau["severity"] == "high"
-    assert cids
 
 
 def test_extract_gaps_symptom_uses_excerpt(coord: Coordinator) -> None:
@@ -264,8 +257,6 @@ def test_extract_gaps_symptom_uses_excerpt(coord: Coordinator) -> None:
             "error_excerpt": "mla_gluon[bh16bn128] requires batch_size=1, got 512",
         },
     ]
-    ss.params_no_promote_streak = 0
-    ss.explore_search = {}
     gaps = coord.gap_refresh._extract_gaps_from_attempts(coord.recipe_journal.workload_canonical_id())
     fail_gaps = [g for g in gaps if "fail:explore:server_init_dead" in g["canonical_id"]]
     assert fail_gaps
@@ -550,15 +541,14 @@ def test_gemm_tuning_required_before_kernel_opt(coord: Coordinator, monkeypatch)
 
 
 # -- framework candidate selection -------------------------------------
-def test_discovery_drops_prs_already_batched_or_mined_by_the_scout(coord: Coordinator) -> None:
+def test_discovery_drops_prs_already_batched(coord: Coordinator) -> None:
     from types import SimpleNamespace
 
     ss = coord.shared_state
     ss.framework_agent_batches = [{"candidates": [{"candidate_id": "https://x/pr/1"}, {"pr_url": "https://x/pr/2"}]}]
-    ss.research_scout_seen_pr_ids = ["https://x/pr/3"]
     discovery = SimpleNamespace(task_id="disc-1", params={"candidate_discovery": True})
-    proposals = [{"pr_url": f"https://x/pr/{n}", "verdict": "worth_a_bench"} for n in (1, 2, 3, 4)]
+    proposals = [{"pr_url": f"https://x/pr/{n}", "verdict": "worth_a_bench"} for n in (1, 2, 3)]
 
     coord.phase_framework.on_specialist_settled(discovery, {"proposal_set": proposals}, run_error="")
 
-    assert [c["pr_url"] for c in ss.framework_agent_batches[-1]["candidates"]] == ["https://x/pr/4"]
+    assert [c["pr_url"] for c in ss.framework_agent_batches[-1]["candidates"]] == ["https://x/pr/3"]

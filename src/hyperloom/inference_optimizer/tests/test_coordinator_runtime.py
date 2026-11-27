@@ -1577,7 +1577,6 @@ async def test_handle_unpromotable_baseline_eval_pending_suppresses_stop_single_
         assert c.shared_state.enablement.pending is True
         assert c.shared_state.enablement.accuracy_floor == 0.2
         assert c.shared_state.enablement.probe_config_path == "/runs/baseline/materialized.yaml"
-        assert c.shared_state.enablement.eval_definition_digest == "sha256:abc123"
         assert c.shared_state.enablement.baseline_eval_kind == "eval_runtime_failure"
         assert c.shared_state.enablement.launch_log
     finally:
@@ -1716,22 +1715,18 @@ async def test_eval_less_baseline_does_not_downgrade_measured_trigger(session_di
     try:
         st = c.shared_state
         st.enablement.baseline_eval_kind = "accuracy_below_floor"
-        st.enablement.observed_accuracy = 0.0
-        st.enablement.observed_task = "gsm8k"
-        st.enablement.observed_metric = "exact_match,strict-match"
-        st.enablement.baseline_eval_evidence = "measured: accuracy=0.0 task=gsm8k source=/runs/.../results.json"
         st.enablement.probe_config_path = "/runs/baseline/measured.yaml"
-        st.enablement.eval_definition_digest = "sha256:measured"
+        st.enablement.record_launch_observation(
+            log="measured: accuracy=0.0 task=gsm8k source=/runs/.../results.json", observation_path="/obs/measured.json"
+        )
 
         await c.writeback.handle_unpromotable_result(_mk_task("baseline", "t-noeval"), _eval_unavailable_result())
 
         # The measured characterization survives...
         assert st.enablement.baseline_eval_kind == "accuracy_below_floor"
-        assert st.enablement.observed_task == "gsm8k"
-        assert st.enablement.observed_metric == "exact_match,strict-match"
-        assert "accuracy=0.0" in st.enablement.baseline_eval_evidence
         assert st.enablement.probe_config_path == "/runs/baseline/measured.yaml"
-        assert st.enablement.eval_definition_digest == "sha256:measured"
+        assert "accuracy=0.0" in st.enablement.launch_log
+        assert st.enablement.launch_observation_path == "/obs/measured.json"
         # ...while the round still registers as an eval-rooted failure.
         assert st.enablement.origin == "eval"
         assert st.enablement.pending is True
@@ -1748,7 +1743,7 @@ async def test_measured_trigger_overwrites_earlier_unavailable(session_dir, monk
     try:
         st = c.shared_state
         st.enablement.baseline_eval_kind = "accuracy_unavailable"
-        st.enablement.baseline_eval_evidence = "accuracy=None"
+        st.enablement.record_launch_observation(log="accuracy=None", observation_path="")
 
         measured = _eval_unavailable_result()
         measured["baseline_eval_failure_kind"] = "accuracy_below_floor"
@@ -1759,8 +1754,8 @@ async def test_measured_trigger_overwrites_earlier_unavailable(session_dir, monk
         await c.writeback.handle_unpromotable_result(_mk_task("baseline", "t-measured"), measured)
 
         assert st.enablement.baseline_eval_kind == "accuracy_below_floor"
-        assert st.enablement.observed_task == "gsm8k"
-        assert "measured" in st.enablement.baseline_eval_evidence
+        assert st.enablement.probe_config_path == "/runs/baseline/noeval.yaml"
+        assert "measured" in st.enablement.launch_log
     finally:
         await c.stop()
 
@@ -1774,7 +1769,6 @@ async def test_revalidation_boot_failure_clears_pending_and_rearmes(session_dir,
     try:
         c.shared_state.enablement.validation_pending = True
         c.shared_state.enablement.revalidation_task_id = "t-reval-boot"
-        c.shared_state.enablement.eval_definition_digest = "sha256:frozen"
         c.shared_state.enablement.accuracy_floor = 0.5
         await c.writeback.handle_unpromotable_result(
             _mk_task("baseline", "t-reval-boot"),
@@ -1782,8 +1776,7 @@ async def test_revalidation_boot_failure_clears_pending_and_rearmes(session_dir,
         )
         assert c.shared_state.enablement.validation_pending is False
         assert c.shared_state.enablement.revalidation_task_id == ""
-        # Frozen trigger identity must be preserved.
-        assert c.shared_state.enablement.eval_definition_digest == "sha256:frozen"
+        # The frozen trigger floor must be preserved.
         assert c.shared_state.enablement.accuracy_floor == 0.5
     finally:
         await c.stop()

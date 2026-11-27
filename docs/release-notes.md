@@ -99,6 +99,33 @@ it.
   without `tool` or `create_sdk_mcp_server` now fails at start-up instead of
   running a session that has no `emit_intent` tool. See
   [Upgrade](reference/upgrade.md).
+- **`state.json` keeps one copy of each record. Breaking** for anything that
+  read the removed keys: `current_best.optimization_stack` (read the top-level
+  `optimization_stack`; `reports/final.json`'s `current_best` loses it too),
+  `explore_search.accepted` (read the `explore` rows of `optimization_stack`
+  or `explore_search.winners_history`), `rejected_kernel_patches` (read
+  `kernel_integrate_attempts.<key>.rejected`), five keys of `enablement` that
+  only staged the `trigger` block of the enablement event
+  (`observed_accuracy`, `observed_task`, `observed_metric`,
+  `eval_definition_digest`, `baseline_eval_evidence`),
+  `research_scout_seen_pr_ids`, `params_no_promote_streak`,
+  `gain_gated_action_count` and `agent_last_active`.
+  `storage/coordinator.db` has no `lane_capacity` table: `research_lane` takes
+  its capacity from `--research-lane-capacity` and every other lane admits one
+  holder, so editing the table mid-session no longer changes a capacity. In
+  the Orchestration prompt the Tick block is `tick=N`, `elapsed=` in the Time
+  budget block now counts every run of a resumed session (it counted the
+  current process only, beside a `remaining` that counted them all), and the
+  session-state block loses `params_no_promote_streak=`,
+  `gain_gated_action_count=` and the `accepted=N` count. The
+  `#explore_plateau` gap is no longer created; FRAMEWORK discovery no longer
+  drops a pull request because a research hint or a specialist's evidence
+  cited it; a research-scout task carries no `seen_pr_ids` and lists as
+  already proven the explore variants on the stack; the enablement trigger
+  reports `observed_accuracy: null`, not `0.0`, when the failed eval scored
+  nothing; and a queued task that still holds a row on its own lane is
+  dispatched instead of waiting on itself. Two tasks that need the same lane
+  still never run together. See [Upgrade](reference/upgrade.md).
 - **forge-loop runs every round as lanes and has no planning stage.** Every
   iteration is one round: one lane per focus the Analysis Agent divides its
   evidence into (at most `--lanes`, and one lane with no focus when it divides

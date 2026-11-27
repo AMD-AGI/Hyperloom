@@ -121,15 +121,6 @@ def remembered_outcome(router: Any, request: KernelRequest) -> KernelRequestOutc
     return KernelRequestOutcome(result, "shared_state_kernel_rejection", True)
 
 
-def seed_integrate_base_tput(router: Any, request: KernelRequest) -> None:
-    """Fill in the baseline throughput an integrate request left out, from the session's current best."""
-    if request.kind != "integrate" or request.payload.get("base_tput"):
-        return
-    cb_tput = (router.shared_state.current_best or {}).get("tput")
-    if isinstance(cb_tput, (int, float)) and cb_tput > 0:
-        request.payload["base_tput"] = float(cb_tput)
-
-
 @asynccontextmanager
 async def kernel_step_heartbeat(router: Any):
     """Keep the inline step's liveness stamp fresh while the step runs."""
@@ -184,7 +175,6 @@ async def run_kernel_handler(router: Any, request: KernelRequest, handler: Any) 
     Returns ``None`` once the lanes the handler needs were busy and the request has been
     answered with a deferral instead.
     """
-    seed_integrate_base_tput(router, request)
     # A handler that benchmarks runs under its action's catalogue lanes, so it waits out the
     # kernel_agent task instead of sharing the GPUs with it.
     action = REQUEST_KIND_TO_OWNED_ACTION.get(request.kind, request.kind)

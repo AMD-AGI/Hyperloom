@@ -10,18 +10,6 @@ import sqlite3
 from hyperloom.inference_optimizer.session.coordinator_db import SCHEMA_VERSION, refuse_older_schema
 
 
-# Default lane capacities; ``--research-lane-capacity`` overrides research_lane at boot.
-DEFAULT_LANE_CAPACITIES: dict[str, int] = {
-    "server_lifecycle": 1,
-    "workspace_mutation": 1,
-    "benchmark_lane": 1,
-    "profile_lane": 1,
-    "research_lane": 1,
-    "gpu_research_lane": 1,
-    "build_lane": 1,
-}
-
-
 _DDL = [
     # leases — lane ownership. Composite PK (lane, holder_id).
     """
@@ -35,13 +23,6 @@ _DDL = [
         acquired_at   TEXT    NOT NULL,
         expires_at    TEXT    NOT NULL,
         PRIMARY KEY (lane, holder_id)
-    )
-    """,
-    # lane_capacity — per-lane concurrency cap
-    """
-    CREATE TABLE IF NOT EXISTS lane_capacity (
-        lane     TEXT PRIMARY KEY,
-        capacity INTEGER NOT NULL
     )
     """,
     # events — A2A message bus
@@ -117,46 +98,14 @@ _DDL = [
 ]
 
 
-def _seed_default_lane_capacity(cur: sqlite3.Cursor) -> None:
-    """Idempotently insert default capacity rows; existing rows are left alone so a resume preserves the operator's choice."""
-    for lane, capacity in DEFAULT_LANE_CAPACITIES.items():
-        cur.execute(
-            "INSERT OR IGNORE INTO lane_capacity(lane, capacity) VALUES (?, ?)",
-            (lane, int(capacity)),
-        )
-
-
-def set_lane_capacity(
-    conn: sqlite3.Connection,
-    lane: str,
-    capacity: int,
-) -> None:
-    """Upsert one ``lane_capacity`` row."""
-    cur = conn.cursor()
-    try:
-        cur.execute("BEGIN IMMEDIATE")
-        cur.execute(
-            "INSERT INTO lane_capacity(lane, capacity) VALUES (?, ?) "
-            "ON CONFLICT(lane) DO UPDATE SET capacity = excluded.capacity",
-            (str(lane), int(capacity)),
-        )
-        conn.commit()
-    except Exception:
-        conn.rollback()
-        raise
-    finally:
-        cur.close()
-
-
 def ensure_schema(conn: sqlite3.Connection) -> None:
-    """Idempotently create all tables, seed lane_capacity defaults, and record the schema version."""
+    """Idempotently create all tables and record the schema version."""
     cur = conn.cursor()
     try:
         cur.execute("BEGIN IMMEDIATE")
         refuse_older_schema(cur)
         for stmt in _DDL:
             cur.execute(stmt)
-        _seed_default_lane_capacity(cur)
         cur.execute(
             "INSERT OR IGNORE INTO schema_version(version, applied_at) VALUES (?, datetime('now'))",
             (SCHEMA_VERSION,),

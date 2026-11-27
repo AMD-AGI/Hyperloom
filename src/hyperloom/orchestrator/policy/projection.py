@@ -10,6 +10,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from ..bus.gpu_pool import resolve_gpu_specialist_devices, resolve_whole_machine_devices
+from ..bus.resource_lock import DEFAULT_LANE_CAPACITIES
 from ..state.round_store import Round
 
 #: A bring-up round holds the machine.
@@ -84,8 +85,6 @@ def whole_machine_pool_size() -> int:
 
 def resource_pools_summary(shared_state: Any) -> str:
     """Render the GPU pool / lane capacity block for prompt injection."""
-    from ..bus.storage.schema import DEFAULT_LANE_CAPACITIES
-
     lines = [
         f"serving_tp={serving_tp_for_policy(shared_state)}",
         f"gpu_specialist_capacity={gpu_specialist_ceiling(shared_state)}",

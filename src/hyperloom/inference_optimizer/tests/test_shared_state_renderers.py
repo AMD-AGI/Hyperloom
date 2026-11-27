@@ -93,12 +93,11 @@ def test_format_search_state():
     assert SharedState._format_search_state({"tested": {}}).strip().startswith("cursor=0")
     search = {
         "cursor": 3,
-        "accepted": [{"name": "a", "fingerprint": "f1"}],
         "rejected": [{"name": "r", "gain_pct": -1.0}],
         "tested": {"f1": {"outcome": "KEEP", "name": "a", "gain_pct": 4.0}},
     }
     out = SharedState._format_search_state(search)
-    assert "cursor=3  accepted=1  rejected=1  tested=1" in out
+    assert "cursor=3  rejected=1  tested=1" in out
     assert "f1" in out and "KEEP" in out
 
 
@@ -110,17 +109,16 @@ def test_format_optimization_stack():
     assert "explore:v1" in parts
 
 
-def test_prompt_summary_renders_current_best_without_stack_or_measurement():
+def test_prompt_summary_renders_current_best_without_measurement():
     st = SharedState()
     st.current_best = {
         "variant_name": "k23",
         "tput": 2049.9,
-        "optimization_stack": [{"action": "explore", "variant_name": "stacked"}],
         "measurement": {"launch_evidence_path": "/runs/launch_evidence.json"},
     }
     line = next(ln for ln in st.to_prompt_summary().splitlines() if ln.startswith("current_best="))
     assert "k23" in line and "2049.9" in line
-    assert "stacked" not in line and "launch_evidence" not in line
+    assert "launch_evidence" not in line
 
 
 def _launch_flags_line(state: SharedState) -> str:

@@ -42,7 +42,6 @@ def _verified_current_best(tmp_path: Path) -> SharedState:
             "tput": 1403.43,
             "extra_server_args": "--dsa-prefill-backend aiter --dsa-decode-backend tilelang",
             "extra_envs": {"SGLANG_USE_AITER": "1"},
-            "optimization_stack": [],
         },
         current_best_measurement={
             "tput": 1403.43,
@@ -56,29 +55,27 @@ def _verified_current_best(tmp_path: Path) -> SharedState:
     return state
 
 
-def test_env_spec_uses_embedded_current_best_stack_not_global_stack(tmp_path: Path) -> None:
+def test_env_spec_names_the_source_patches_on_the_stack(tmp_path: Path) -> None:
     state = _verified_current_best(tmp_path)
-    state.current_best["optimization_stack"] = [
-        {
-            "scope": "source_patch",
-            "variant_name": "current",
-            "source_snapshot": str(tmp_path / "current"),
-            "source_snapshot_complete": True,
-        }
-    ]
     state.optimization_stack = [
-        *state.current_best["optimization_stack"],
+        {"action": "explore", "variant_name": "flags-only"},
         {
             "scope": "source_patch",
-            "variant_name": "stale",
-            "source_snapshot": str(tmp_path / "stale"),
+            "variant_name": "first",
+            "source_snapshot": str(tmp_path / "first"),
+            "source_snapshot_complete": True,
+        },
+        {
+            "scope": "source_patch",
+            "variant_name": "second",
+            "source_snapshot": str(tmp_path / "second"),
             "source_snapshot_complete": True,
         },
     ]
 
     spec = _writeback(tmp_path, state).build_env_spec()
 
-    assert [entry["id"] for entry in spec["source_snapshots"]] == ["current"]
+    assert [entry["id"] for entry in spec["source_snapshots"]] == ["first", "second"]
 
 
 def test_env_spec_never_recovers_server_flags_from_unrelated_history(
@@ -158,7 +155,6 @@ def test_measurement_identity_invalidates_when_current_best_config_changes(tmp_p
             "tput": 100.0,
             "extra_server_args": "--block-size 32",
             "extra_envs": {"A": "1"},
-            "optimization_stack": [],
         },
     )
     writer = _writeback(tmp_path, state)
@@ -181,7 +177,7 @@ def test_measurement_identity_invalidates_when_current_best_config_changes(tmp_p
     ids=["unset_env", "remove_arg", "empty_replacement"],
 )
 def test_measurement_identity_invalidates_when_launch_controls_change(tmp_path: Path, control: dict) -> None:
-    state = SharedState(current_best={"tput": 100.0, "extra_server_args": "", "optimization_stack": []})
+    state = SharedState(current_best={"tput": 100.0, "extra_server_args": ""})
     writer = _writeback(tmp_path, state)
     writer._stamp_current_best_measurement()
     identity = state.current_best_measurement["declared_launch_identity"]
@@ -207,7 +203,7 @@ def test_the_same_current_best_delta_over_another_base_launch_has_another_identi
     for digest in ("sha256:" + "1" * 64, "sha256:" + "2" * 64):
         state = SharedState(
             base_launch_digest=digest,
-            current_best={"tput": 100.0, "extra_server_args": "--block-size 32", "optimization_stack": []},
+            current_best={"tput": 100.0, "extra_server_args": "--block-size 32"},
         )
         writer = _writeback(tmp_path, state)
         writer._stamp_current_best_measurement()
@@ -229,7 +225,7 @@ def _measured_in(tmp_path: Path, state: SharedState, launch: Launch) -> Path:
 
 def test_env_spec_reproduces_the_measured_launch_without_the_rounds_own_layers(tmp_path: Path) -> None:
     launch = _compose_launch(user=LaunchDelta(env_unset=("SGLANG_USE_AITER",), env_set={"ATOM_FORCE_ATTN_TRITON": "1"}))
-    state = SharedState(current_best={"tput": 100.0, "extra_envs": {"ACCEPTED": "1"}, "optimization_stack": []})
+    state = SharedState(current_best={"tput": 100.0, "extra_envs": {"ACCEPTED": "1"}})
     launch_json = _measured_in(tmp_path, state, launch)
 
     spec = _writeback(tmp_path, state).build_env_spec()
@@ -254,7 +250,7 @@ def test_env_spec_hands_on_no_structured_flag_and_no_credential_or_loader_env(tm
     )
     assert any(arg.flag == "--json-model-override-args" for arg in launch.args)
     assert isinstance(launch.env["HF_TOKEN"], Redacted)
-    state = SharedState(current_best={"tput": 100.0, "optimization_stack": []})
+    state = SharedState(current_best={"tput": 100.0})
     _measured_in(tmp_path, state, launch)
 
     config = _writeback(tmp_path, state).build_env_spec()["config"]
@@ -273,7 +269,7 @@ def test_env_spec_keeps_token_named_knobs_and_no_credential_in_the_clear(tmp_pat
     launch = _compose_launch(
         _base(golden_al=_golden(env=golden_env)), user=LaunchDelta(env_set={**knobs, **credentials})
     )
-    state = SharedState(current_best={"tput": 100.0, "optimization_stack": []})
+    state = SharedState(current_best={"tput": 100.0})
     _measured_in(tmp_path, state, launch)
 
     spec = _writeback(tmp_path, state).build_env_spec()
@@ -290,7 +286,7 @@ def test_a_round_without_launch_json_hands_on_no_launch_record(tmp_path: Path) -
 
 
 def test_measurement_identity_invalidates_when_the_measured_launch_changes(tmp_path: Path) -> None:
-    state = SharedState(current_best={"tput": 100.0, "optimization_stack": []})
+    state = SharedState(current_best={"tput": 100.0})
     launch_json = _measured_in(tmp_path, state, _compose_launch())
     writer = _writeback(tmp_path, state)
     writer._stamp_current_best_measurement()
@@ -304,9 +300,7 @@ def test_measurement_identity_invalidates_when_the_measured_launch_changes(tmp_p
 
 
 def test_measurement_identity_ignores_the_point_yaml(tmp_path: Path) -> None:
-    state = SharedState(
-        baseline_config_path=str(tmp_path / "baseline.yaml"), current_best={"tput": 100.0, "optimization_stack": []}
-    )
+    state = SharedState(baseline_config_path=str(tmp_path / "baseline.yaml"), current_best={"tput": 100.0})
     _measured_in(tmp_path, state, _compose_launch())
     writer = _writeback(tmp_path, state)
     writer._stamp_current_best_measurement()
@@ -330,7 +324,6 @@ async def test_handoff_rejects_stale_tput_without_matching_measurement(
             "tput": 20845.60,
             "extra_server_args": "--kv-cache-dtype fp8",
             "extra_envs": {"VLLM_ROCM_USE_AITER": "1"},
-            "optimization_stack": [],
         },
         model_path="/models/qwen",
         gpu_type="mi355x",

@@ -262,7 +262,6 @@ async def test_compose_prompt_keeps_per_tick_values_out_of_the_context(coordinat
     try:
         before = await c.conversation.compose_prompt()
         c.shared_state.tick = int(c.shared_state.tick or 0) + 7
-        c.shared_state.agent_last_active["orchestration"] = 1.0
         c.shared_state.phase_started_unix = 1_767_225_600.0
         after = await c.conversation.compose_prompt()
 

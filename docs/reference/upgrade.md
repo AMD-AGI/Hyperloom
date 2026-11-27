@@ -447,6 +447,83 @@ Five behaviours change at the edges:
   later on turns that emitted no intent. Every SDK the `llm` extra allows
   (`>=0.2.110`) has both.
 
+### Required: `state.json` drops its second copies and its prompt-only counters
+
+`hyperloom optimize` kept several facts twice, and a few counters only to
+print one line of the Orchestration prompt. Each fact now has one copy.
+Anything that reads the removed copy reads the one that stays.
+
+In `state.json`:
+
+| Removed key | Read instead |
+|---|---|
+| `current_best.optimization_stack` | `optimization_stack` at the top level. Every KEEP appended to it and rewrote `current_best` in the same step, so the two were equal. |
+| `explore_search.accepted` | The rows of `optimization_stack` with `action` `explore` for the variants the session adopted; `explore_search.winners_history` for every variant a round measured KEEP. The removed list also held winners the KEEP gate went on to refuse. |
+| `rejected_kernel_patches` | `kernel_integrate_attempts.<key>.rejected`, the same record under the patch's key. |
+| `enablement.observed_accuracy`, `observed_task`, `observed_metric`, `eval_definition_digest`, `baseline_eval_evidence` | The `trigger` block of the enablement event in `session_breakdown.json`, which is where they were copied to. `enablement.baseline_eval_kind`, `probe_config_path` and `accuracy_floor` stay. |
+| `research_scout_seen_pr_ids` | Nothing; see the discovery change below. |
+| `params_no_promote_streak` | `explore_search.winners_history` and `attempts`. |
+| `gain_gated_action_count` | Nothing read it. |
+| `agent_last_active` | Nothing read it. |
+
+`reports/final.json` copies `current_best` from `state.json`, so its
+`current_best` no longer carries `optimization_stack` either, in the full
+report and in the crash-safe one. `optimization_stack_len` stays.
+
+`storage/coordinator.db` no longer has a `lane_capacity` table. The capacity of
+`research_lane` is the session's `--research-lane-capacity`, held in
+`state.json` as `research_lane_capacity`; every other lane admits one holder.
+Editing the table during a session, which 1.2.x read on every lease, no longer
+changes a capacity. A database written by 1.2.x keeps the table; this release
+neither reads nor writes it.
+
+The Orchestration prompt changes with them:
+
+* The `=== Tick ===` block is `tick=N`. The `agent_last_active=` line under it
+  is gone.
+* `elapsed=` in the `=== Time budget ===` block is the time the session has
+  been charged across every run of it, so `elapsed` plus `remaining` is the
+  budget on a resumed session. 1.2.x printed the time since the current
+  process started next to a `remaining` that already counted earlier runs.
+* The `=== Shared session state ===` block has no `params_no_promote_streak=`
+  or `gain_gated_action_count=` line, and the first line under
+  `explore_search=` has no `accepted=N`. `rejected_kernel_patches=` prints the
+  same five most recent rejections as before.
+
+Six behaviours change:
+
+* No `<workload>#explore_plateau` gap is created. 1.2.x added it to
+  `state.json` `gaps`, the `=== Current gaps ===` block, `get_gaps` and the
+  `remaining_gaps` of a published recipe after three explore tasks in a row
+  set no new `current_best` and none of the last five recorded winners had a
+  gain. Whether the configuration search has run dry is still judged from
+  `attempts`, and the plateau advisory still reports it.
+* A research-scout task's `params` have no `seen_pr_ids`; the specialist was
+  never shown them. Its `already_proven` list names the warm recipe's proven
+  items and the explore variants on `optimization_stack`; 1.2.x listed every
+  winner an explore round reported, adopted or not.
+* FRAMEWORK candidate discovery drops a proposed pull request as already known
+  only when an earlier discovery batch holds it. 1.2.x also dropped one whose
+  URL a research hint gave as its `source`, a specialist proposal cited in
+  `pr_evidence` or `source_evidence`, or a specialist listed in the `research`
+  block of its result (`prs_fetched`, `pr_diffs_read`, `nvidia_refs`), so a
+  pull request a specialist had only read could never become a candidate. The
+  `research` block is no longer read, and the research scout's prompt no
+  longer says the Coordinator de-duplicates by pull-request id.
+* The `trigger` block of the enablement event in `session_breakdown.json`
+  reports `observed_accuracy: null` when the failed baseline eval scored
+  nothing (an `eval_runtime_failure`, for example). 1.2.x reported `0.0`.
+* A queued task that still holds a row on a lane it needs is dispatched; the
+  lease refreshes its row. 1.2.x counted the task's own row against the lane
+  and left it queued on every pass. Two tasks that need the same lane, or
+  lanes that exclude each other, still never run together.
+* A variant leaves `explore_search.rejected` when a round measures it KEEP,
+  including a stack-revalidation round. 1.2.x removed it when the winner was
+  recorded in `explore_search.accepted`, which a revalidation round skipped.
+
+The log no longer prints `depth: aggregated N new research reference(s) into
+seen-set`, and `specialist findings harvested` reports `hints_added` only.
+
 ---
 
 ## Upgrading from 1.1.x

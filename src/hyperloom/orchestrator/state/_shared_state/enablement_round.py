@@ -48,13 +48,7 @@ class EnablementRound:
     origin: str = ""
     accuracy_floor: float = 0.0
     probe_config_path: str = ""
-    # The eval definition digest the failed baseline eval ran under, "" outside an inference_suite round.
-    eval_definition_digest: str = ""
-    baseline_eval_evidence: str = ""
     baseline_eval_kind: str = ""
-    observed_accuracy: float = 0.0
-    observed_task: str = ""
-    observed_metric: str = ""
     pending: bool = False
     # Set on an eval-origin KEEP: the patch passed the gate but a genuine baseline must revalidate accuracy before the
     # run is considered enabled.

@@ -354,12 +354,7 @@ class TestKernelPatchIdentity:
         from hyperloom.orchestrator.kernel.kernel_decisions import find_rejected_kernel_patch
 
         s = SharedState()
-        s.rejected_kernel_patches.append(
-            {
-                "key": "k1|/srv/k1.py|--a 1",
-                "reason": "no_e2e_gain",
-            }
-        )
+        s.kernel_integrate_attempts["k1|/srv/k1.py|--a 1"] = {"rejected": {"reason": "no_e2e_gain"}}
         hit = find_rejected_kernel_patch(
             s,
             {

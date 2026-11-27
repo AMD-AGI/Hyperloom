@@ -133,7 +133,6 @@ def _coord(
             "remove_args": ["--obsolete-flag"],
             "unset_envs": ["OBSOLETE_SETTING"],
             "args_mode": "replace",
-            "optimization_stack": [],
         },
         current_best_measurement={
             "tput": 140.0,

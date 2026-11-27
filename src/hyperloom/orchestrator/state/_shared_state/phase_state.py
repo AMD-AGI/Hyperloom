@@ -14,7 +14,6 @@ from hyperloom_common.timeutil import now_iso
 # Long-run bounded-growth caps for append-only telemetry ledgers (tail-trim).
 _INTERVENTION_MIX_CAP = 500
 _SPECIALIST_ROUNDS_CAP = 200
-_SEEN_PR_IDS_CAP = 2000
 _WINNERS_HISTORY_CAP = 200
 # Negative ledger (explore_search["tested"]); oldest insertion-order keys evicted first.
 _EXPLORE_TESTED_CAP = 5000
@@ -81,15 +80,6 @@ def _merge_winners_history(prior: Any, update: Any, cycle: int) -> list[dict[str
     return merged[-_WINNERS_HISTORY_CAP:]
 
 
-class _AcceptedConfig(NamedTuple):
-    """The configuration a promoted variant is replayed by, and the fingerprint it is keyed on."""
-
-    args: str
-    envs: dict[str, Any]
-    control_fields: dict[str, Any]
-    fingerprint: str
-
-
 def _control_fields(variant: dict[str, Any]) -> dict[str, Any]:
     """The arg/env removal and replacement controls a variant carries, omitting the ones left at their default."""
     fields: dict[str, Any] = {}
@@ -102,39 +92,6 @@ def _control_fields(variant: dict[str, Any]) -> dict[str, Any]:
     if str(variant.get("args_mode") or "append").strip().lower() == "replace":
         fields["args_mode"] = "replace"
     return fields
-
-
-def _accepted_config(variant: dict[str, Any]) -> _AcceptedConfig:
-    """Read the config a promoted variant replays and the fingerprint it carries."""
-    return _AcceptedConfig(
-        args=str(variant.get("candidate_extra_server_args") or variant.get("extra_server_args") or ""),
-        envs=dict(variant.get("extra_envs") or {}),
-        control_fields=_control_fields(variant),
-        fingerprint=str(variant["fingerprint"]),
-    )
-
-
-def _accepted_entry(variant: dict[str, Any], config: _AcceptedConfig, cycle: int) -> dict[str, Any]:
-    """The ``explore_search.accepted`` row recording one promoted variant."""
-    return {
-        "fingerprint": config.fingerprint,
-        "name": str(variant.get("name") or ""),
-        "extra_server_args": config.args,
-        "extra_envs": config.envs,
-        **config.control_fields,
-        "note": str(variant.get("note") or ""),
-        "tput": variant.get("output_throughput") or variant.get("tput"),
-        "gain_pct": variant.get("gain_pct"),
-        # Carried through so the ledger records what the KEEP was judged on; ``None`` means the variant was never
-        # gated, not that it scored 0.
-        "accuracy": variant.get("accuracy"),
-        "stack_index": variant.get("stack_index"),
-        "accepted_at_round": str(variant.get("accepted_at_round") or ""),
-        "ts": str(variant.get("ts") or now_iso()),
-        "provenance": str(variant.get("provenance") or "llm_direct"),
-        # Attribute the win to the macro-cycle it landed in.
-        "cycle": cycle,
-    }
 
 
 def _lever_row(entry: dict[str, Any], default_on: bool) -> dict[str, Any]:
@@ -211,26 +168,8 @@ class _PhaseStateMixin:
         if len(self.intervention_mix) > _INTERVENTION_MIX_CAP:
             self.intervention_mix = self.intervention_mix[-_INTERVENTION_MIX_CAP:]
 
-    def register_seen_pr_ids(self, pr_ids: Any) -> int:
-        """Add PR ids to the shared seen-set (scout + FRAMEWORK dedup); returns count newly added."""
-        seen = set(self.research_scout_seen_pr_ids or [])
-        added = 0
-        for raw in pr_ids or []:
-            pid = str(raw or "").strip()
-            if not pid or pid in seen:
-                continue
-            seen.add(pid)
-            self.research_scout_seen_pr_ids.append(pid)
-            added += 1
-        cap = _SEEN_PR_IDS_CAP
-        if len(self.research_scout_seen_pr_ids) > cap:
-            # FIFO eviction of oldest-seen ids.
-            self.research_scout_seen_pr_ids = self.research_scout_seen_pr_ids[-cap:]
-        return added
-
     def reset_per_cycle_plateau_state(self) -> None:
         """Reset transient plateau and dispatch state for a macro-cycle."""
-        self.params_no_promote_streak = 0
         self.framework_agent_phase_done = False
         self.framework_agent_discover_failures = 0
         self.framework_agent_empty_discoveries = 0
@@ -242,15 +181,8 @@ class _PhaseStateMixin:
         self.gain_at_cycle_start = self.cumulative_gain_validated
         self.reset_per_cycle_plateau_state()
 
-    def note_explore_outcome(self, *, promoted: bool) -> None:
-        """Update the plateau proxy after one explore task (KEEP resets, no-promote increments)."""
-        if promoted:
-            self.params_no_promote_streak = 0
-        else:
-            self.params_no_promote_streak += 1
-
     def apply_explore_search_update(self, update: dict[str, Any], *, advance_round: bool = True) -> None:
-        """Merge an ExploreExecutor search update into persistent state; :meth:`record_explore_accepted` is the single writer for the ``accepted`` bucket.
+        """Merge an ExploreExecutor search update into persistent state.
 
         ``advance_round=False`` merges verdicts landed while their round still runs, leaving the round ordinal and
         ``last_round`` to the round's settlement; rows merge by fingerprint, so settling a landed row rewrites nothing.
@@ -266,7 +198,13 @@ class _PhaseStateMixin:
         tested = {**(prior.get("tested") or {}), **(update.get("tested") or {})}
         _stamp_cycle(tested.values(), cur_cycle)
         merged["tested"] = _cap_tested_ledger(tested)
-        rejected = _merge_rejected(prior.get("rejected"), update.get("rejected"))
+        # A fingerprint this update measured KEEP leaves ``rejected``: its earlier verdict no longer describes it.
+        kept = {fp for fp, row in (update.get("tested") or {}).items() if row.get("outcome") == "KEEP"}
+        rejected = [
+            row
+            for row in _merge_rejected(prior.get("rejected"), update.get("rejected"))
+            if row["fingerprint"] not in kept
+        ]
         _stamp_cycle(rejected, cur_cycle)
         merged["rejected"] = rejected
         # The round ordinal, not the ledger's size: consumers key idempotency and
@@ -281,27 +219,7 @@ class _PhaseStateMixin:
             update.get("winners_history"),
             cur_cycle,
         )
-        # Preserve accepted bucket from prior runs (record_explore_accepted is its writer).
-        merged["accepted"] = list(prior.get("accepted") or [])
         self.explore_search = merged
-
-    def record_explore_accepted(self, variant: dict[str, Any]) -> None:
-        """Append one promoted variant to ``explore_search.accepted``; dedupes by ``fingerprint`` and removes any matching ``rejected`` entry."""
-        if not isinstance(variant, dict) or not variant:
-            return
-        config = _accepted_config(variant)
-        fp = config.fingerprint
-        entry = _accepted_entry(variant, config, int(getattr(self, "macro_cycle", 0) or 0))
-        search = dict(self.explore_search or {})
-        accepted = [
-            v for v in (search.get("accepted") or []) if not (isinstance(v, dict) and v.get("fingerprint") == fp)
-        ]
-        accepted.append(entry)
-        search["accepted"] = accepted
-        search["rejected"] = [
-            v for v in (search.get("rejected") or []) if not (isinstance(v, dict) and v.get("fingerprint") == fp)
-        ]
-        self.explore_search = search
 
     def record_authored_framework_levers(
         self,

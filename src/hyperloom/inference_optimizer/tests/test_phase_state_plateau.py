@@ -191,7 +191,6 @@ def test_config_lever_dry_supports_threshold_overrides():
 
 def test_reset_per_cycle_plateau_state_preserves_durable_ledgers():
     state = SharedState(session_id="t")
-    state.params_no_promote_streak = 4
     state.framework_agent_phase_done = True
     state.framework_agent_discover_failures = 2
     state.framework_agent_empty_discoveries = 2
@@ -200,7 +199,6 @@ def test_reset_per_cycle_plateau_state_preserves_durable_ledgers():
 
     state.reset_per_cycle_plateau_state()
 
-    assert state.params_no_promote_streak == 0
     assert state.framework_agent_phase_done is False
     assert state.framework_agent_discover_failures == 0
     assert state.framework_agent_empty_discoveries == 0
@@ -292,7 +290,6 @@ def _skip_to_sweep_state(phase: str) -> SharedState:
         macro_cycle=0,
         attempts=[],
         specialist_rounds=[],
-        params_no_promote_streak=0,
         rejected_kernel_ids=[],
         optimization_stack=[],
         pending_escalate_hint=ESCALATE_HINT_SKIP_TO_SWEEP,
@@ -548,7 +545,6 @@ def test_compute_next_phase_advances_on_plateau():
             for _ in range(DEFAULT_PLATEAU_EXPLORE_EMPTY_STREAK)
         ],
         specialist_rounds=[],
-        params_no_promote_streak=0,
         optimization_stack=[],
         pending_escalate_hint="",
         stop_reason="",
@@ -577,7 +573,6 @@ def test_compute_next_phase_honors_explore_plateau_overrides():
             {"lever_kind": LEVER_CONFIG, "outcome": "REVERT", "adopted": False, "cycle": 0},
         ],
         specialist_rounds=[],
-        params_no_promote_streak=0,
         optimization_stack=[],
         pending_escalate_hint="",
         stop_reason="",

@@ -15,7 +15,9 @@ from hyperloom.inference_optimizer.breakdown.recorder import enablement_event
 from hyperloom.inference_optimizer.breakdown.stop_reasons import AGENTX_PREFLIGHT_STOP_REASON, HOST_GPUS_UNAVAILABLE
 
 from ..actions.executors._accuracy_gate import (
+    ACCURACY_DEFINITION_DIGEST_KEY,
     BASELINE_EVAL_ACCURACY_FLOOR_KEY,
+    BASELINE_EVAL_EVIDENCE_KEY,
     BASELINE_EVAL_FAILED_KEY,
     BASELINE_EVAL_FAILURE_KIND_KEY,
     BASELINE_EVAL_OBSERVED_ACCURACY_KEY,
@@ -127,37 +129,25 @@ class BaselineFailureMixin:
             state.enablement.accuracy_floor = float(floor)
         if preserve_measured_trigger:
             log.info(
-                "enablement: keeping measured trigger kind=%s (accuracy=%s task=%s); "
-                "an eval-less baseline reported accuracy_unavailable and must not "
-                "overwrite it",
+                "enablement: keeping measured trigger kind=%s; an eval-less baseline reported "
+                "accuracy_unavailable and must not overwrite it",
                 stored_kind,
-                state.enablement.observed_accuracy,
-                state.enablement.observed_task,
             )
         else:
             _adopt_eval_trigger(state, result_payload)
-        self._record_enablement_eval_trigger()
-
-    def _record_enablement_eval_trigger(self) -> None:
-        """Open the enablement lane's event on the eval failure that triggered it.
-
-        Recorded here rather than derived at export: ``origin`` is cleared when
-        the lane succeeds, so the fields it reads do not all survive the run.
-        Only the first trigger is kept, which is what stops an eval-less
-        re-baseline downgrading a measured trigger to an empty one.
-        """
-        state = self.shared_state
+        # Recorded here rather than derived at export: ``origin`` is cleared when the lane succeeds. The recorder
+        # keeps the first trigger, which is what stops an eval-less re-baseline downgrading a measured one.
         enablement_event.record_trigger(
             enablement_event.LaneTrigger(
                 origin=enablement_event.ORIGIN_EVAL,
                 mode=str(state.enablement_mode or ""),
-                kind=str(state.enablement.baseline_eval_kind or ""),
-                evidence=str(state.enablement.baseline_eval_evidence or ""),
-                observed_accuracy=state.enablement.observed_accuracy,
+                kind=result_payload.get(BASELINE_EVAL_FAILURE_KIND_KEY),
+                evidence=result_payload.get(BASELINE_EVAL_EVIDENCE_KEY),
+                observed_accuracy=result_payload.get(BASELINE_EVAL_OBSERVED_ACCURACY_KEY),
                 accuracy_floor=state.enablement.accuracy_floor,
-                observed_task=state.enablement.observed_task,
-                observed_metric=state.enablement.observed_metric,
-                eval_definition_digest=state.enablement.eval_definition_digest,
+                observed_task=result_payload.get("accuracy_task"),
+                observed_metric=result_payload.get("accuracy_metric"),
+                eval_definition_digest=result_payload.get(ACCURACY_DEFINITION_DIGEST_KEY),
                 probe_config_path=state.enablement.probe_config_path,
             ),
         )

@@ -249,7 +249,6 @@ class Coordinator:
 
         # Wall-clock budget tracking for per-tick Time-budget prompt injection.
         self._run_deadline: Deadline | None = None
-        self._run_started_monotonic: float | None = None
         # Closing-grace bound; used only while ``closing_phase`` is set so CLOSE
         # work is not skipped just because the session deadline has passed.
         self._closing_deadline: Deadline | None = None
@@ -271,7 +270,7 @@ class Coordinator:
         self.db = SqliteConnection(db_path, file_mode=file_mode)
 
         self.bus = MessageBus(self.db)
-        self.locks = SqliteLeaseBackend(self.db)
+        self.locks = SqliteLeaseBackend(self.db, research_lane_capacity=self.shared_state.research_lane_capacity)
         self.tasks = TaskRegistry(
             self.db,
             dispatch_origin_provider=lambda: task_dispatch_origin(self.shared_state),
@@ -284,7 +283,7 @@ class Coordinator:
         )
 
     def _init_gpu_pools(self) -> None:
-        """Carve the specialist and whole-node GPU pools and sync the research lane's capacity."""
+        """Carve the specialist and whole-node GPU pools."""
         # Serving-disjoint invariant: the live serving process holds the first ``serving_tp`` cards, carved off the
         # specialist pool.
         self.gpu_specialist_pool = SpecialistGpuPool(
@@ -299,12 +298,6 @@ class Coordinator:
             self.db,
             gpu_ids=resolve_whole_machine_devices(),
         )
-        # Sync research_lane capacity into lane_capacity so acquire_many honours the cap.
-        from ..bus.storage.schema import set_lane_capacity as _set_lane_capacity
-
-        cap = int(self.shared_state.research_lane_capacity or 0)
-        if cap >= 0:
-            _set_lane_capacity(self.db.raw, "research_lane", cap)
         # gpu_research_lane stays capacity-1 (strictly serial GPU specialists);
         # the GPU pool partitions physical cards within that one lease.
 
@@ -327,11 +320,6 @@ class Coordinator:
     def run_deadline(self) -> Deadline | None:
         """Wall-clock deadline of the current run leg; None outside a run."""
         return self._run_deadline
-
-    @property
-    def run_started_monotonic(self) -> float | None:
-        """Monotonic start of the current run leg; None outside a run."""
-        return self._run_started_monotonic
 
     def target_gap_pct(self) -> float:
         """Percent improvement still needed to reach the run objective; 0.0 outside a run."""
@@ -592,7 +580,6 @@ class Coordinator:
                 self.shared_state.max_minutes = int(max_minutes)
             self.shared_state.save(self.session_dir)
             deadline = Deadline.after(_phase_state.DEFAULT_LONGRUN_MAX_MINUTES * 60.0)
-        self._run_started_monotonic = time.monotonic()
         self._run_deadline = deadline
         return grace_sec, deadline, float(max_minutes_value)
 
@@ -1033,7 +1020,7 @@ class Coordinator:
         self._backend_retry_at = 0.0
 
     async def _settle_routed_turn(self, result: BackendTurnResult, *, request: str) -> None:
-        """Book a turn whose intents were routed: its no-intent streak, rendered cursor and last-active stamp."""
+        """Book a turn whose intents were routed: its no-intent streak and rendered cursor."""
         if result.intents:
             self._no_intent_streak = 0
         elif not request:
@@ -1042,7 +1029,6 @@ class Coordinator:
         state = self.shared_state
         state.last_discarded_escalate_hint = ""
         state.last_discarded_escalate_hint_ts = ""
-        state.agent_last_active[ORCHESTRATION_AGENT] = time.time()
 
     def _trace_reactor_llm_failure(
         self,

@@ -105,18 +105,11 @@ def _adopt_eval_trigger(state: Any, result_payload: Mapping[str, Any]) -> None:
     cfg = result_payload.get("materialized_config")
     if isinstance(cfg, str) and cfg:
         enablement.probe_config_path = cfg
-    enablement.eval_definition_digest = str(result_payload.get(ACCURACY_DEFINITION_DIGEST_KEY) or "")
     incoming_kind = result_payload.get(BASELINE_EVAL_FAILURE_KIND_KEY)
     if isinstance(incoming_kind, str) and incoming_kind:
         enablement.baseline_eval_kind = incoming_kind
-    observed = to_float(result_payload.get(BASELINE_EVAL_OBSERVED_ACCURACY_KEY))
-    if observed is not None:
-        enablement.observed_accuracy = float(observed)
-    enablement.observed_task = str(result_payload.get("accuracy_task") or "")
-    enablement.observed_metric = str(result_payload.get("accuracy_metric") or "")
     evidence = str(result_payload.get(BASELINE_EVAL_EVIDENCE_KEY) or "")
     if evidence:
-        enablement.baseline_eval_evidence = evidence[:4000]
         enablement.record_launch_observation(
             log=evidence, observation_path=str(result_payload.get("boot_observation_path") or "")
         )

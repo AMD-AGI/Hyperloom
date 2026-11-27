@@ -339,9 +339,6 @@ class IntegratePromotionMixin:
             self.shared_state.pending_integrate = {}
             changed = True
         outcome.verdict = _integrate_verdict(status, lifted=lifted, kept=kept_flag)
-        # A measured integrate counts either way; KEEP/REVERT is a later judgement.
-        if new_tput is not None:
-            self.shared_state.gain_gated_action_count += 1
         if (
             lifted
             and not enablement_landing

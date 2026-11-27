@@ -19,12 +19,7 @@ from hyperloom.orchestrator.bus import resource_lock
 from hyperloom.orchestrator.bus.gpu_pool import SpecialistGpuPool
 from hyperloom.orchestrator.bus.resource_lock import SqliteLeaseBackend
 from hyperloom.orchestrator.bus.storage.connection import SqliteConnection
-from hyperloom.orchestrator.bus.storage.schema import (
-    DEFAULT_LANE_CAPACITIES,
-    SCHEMA_VERSION,
-    ensure_schema,
-    set_lane_capacity,
-)
+from hyperloom.orchestrator.bus.storage.schema import SCHEMA_VERSION, ensure_schema
 
 
 @pytest.fixture
@@ -55,29 +50,10 @@ def test_fresh_db_has_composite_pk(conn):
     assert pk_cols == ["holder_id", "lane"]
 
 
-def test_fresh_db_seeds_default_lane_capacity(conn):
-    cur = conn.raw.execute(
-        "SELECT lane, capacity FROM lane_capacity ORDER BY lane",
-    )
-    rows = {r["lane"]: int(r["capacity"]) for r in cur.fetchall()}
-    for lane, cap in DEFAULT_LANE_CAPACITIES.items():
-        assert rows[lane] == cap
-
-
 def test_fresh_db_has_gpu_leases_table(conn):
     cur = conn.raw.execute("PRAGMA table_info(gpu_leases)")
     cols = {row["name"] for row in cur.fetchall()}
     assert {"gpu_id", "holder_id", "task_id"} <= cols
-
-
-def test_set_lane_capacity_upserts(conn):
-    def _stored() -> int:
-        return conn.raw.execute("SELECT capacity FROM lane_capacity WHERE lane = 'research_lane'").fetchone()[0]
-
-    set_lane_capacity(conn.raw, "research_lane", 6)
-    assert _stored() == 6
-    set_lane_capacity(conn.raw, "research_lane", 1)
-    assert _stored() == 1
 
 
 def test_v2_ensure_schema_is_idempotent(conn):
@@ -123,8 +99,8 @@ async def test_serving_lane_capacity_1_refuses_second_holder(locks):
 
 
 @pytest.mark.asyncio
-async def test_research_lane_capacity_admits_multiple_holders(conn, locks):
-    set_lane_capacity(conn.raw, "research_lane", 3)
+async def test_research_lane_capacity_admits_multiple_holders(conn):
+    locks = SqliteLeaseBackend(conn, research_lane_capacity=3)
     leases = []
     for i in range(3):
         l = await locks.acquire_many(
@@ -142,8 +118,8 @@ async def test_research_lane_capacity_admits_multiple_holders(conn, locks):
 
 
 @pytest.mark.asyncio
-async def test_research_lane_overflow_is_refused(conn, locks):
-    set_lane_capacity(conn.raw, "research_lane", 2)
+async def test_research_lane_overflow_is_refused(conn):
+    locks = SqliteLeaseBackend(conn, research_lane_capacity=2)
     leases = [
         await locks.acquire_many(
             ["research_lane"],
@@ -217,9 +193,9 @@ async def test_specialist_gpu_pool_rejects_oversized_request(conn):
 
 
 @pytest.mark.asyncio
-async def test_capacity_zero_means_lane_disabled(conn, locks):
+async def test_capacity_zero_means_lane_disabled(conn):
     """``--research-lane-capacity 0`` disables the research lane."""
-    set_lane_capacity(conn.raw, "research_lane", 0)
+    locks = SqliteLeaseBackend(conn, research_lane_capacity=0)
     assert (
         await locks.acquire_many(
             ["research_lane"],
@@ -233,8 +209,8 @@ async def test_capacity_zero_means_lane_disabled(conn, locks):
 
 
 @pytest.mark.asyncio
-async def test_same_holder_retry_is_idempotent(conn, locks):
-    set_lane_capacity(conn.raw, "research_lane", 1)
+async def test_same_holder_retry_is_idempotent(conn):
+    locks = SqliteLeaseBackend(conn, research_lane_capacity=1)
     a = await locks.acquire_many(
         ["research_lane"],
         holder_id="s0",
@@ -256,9 +232,9 @@ async def test_same_holder_retry_is_idempotent(conn, locks):
 
 
 @pytest.mark.asyncio
-async def test_research_lane_independent_of_benchmark_lane(conn, locks):
+async def test_research_lane_independent_of_benchmark_lane(conn):
     """Inv-7.2: research_lane has no LANE_CONFLICTS, so a benchmark task and a specialist coexist."""
-    set_lane_capacity(conn.raw, "research_lane", 6)
+    locks = SqliteLeaseBackend(conn, research_lane_capacity=6)
     bench = await locks.acquire_many(
         ["benchmark_lane"],
         holder_id="hb",
@@ -300,8 +276,8 @@ async def test_acquire_many_returns_none_on_conflict(conn, locks):
 
 
 @pytest.mark.asyncio
-async def test_release_only_drops_own_holder_row(conn, locks):
-    set_lane_capacity(conn.raw, "research_lane", 2)
+async def test_release_only_drops_own_holder_row(conn):
+    locks = SqliteLeaseBackend(conn, research_lane_capacity=2)
     a = await locks.acquire_many(
         ["research_lane"],
         holder_id="s0",
@@ -323,9 +299,9 @@ async def test_release_only_drops_own_holder_row(conn, locks):
 
 
 @pytest.mark.asyncio
-async def test_old_rows_still_count_toward_lane_capacity(conn, locks):
+async def test_old_rows_still_count_toward_lane_capacity(conn):
     """Old timestamps cannot release an owner whose completion is unknown."""
-    set_lane_capacity(conn.raw, "research_lane", 2)
+    locks = SqliteLeaseBackend(conn, research_lane_capacity=2)
     # Insert one expired and one live holder directly to bypass acquire_many's reap pass.
     conn.raw.execute(
         "INSERT INTO leases(lane, holder_id, task_id, action, pid, acquired_at, expires_at) VALUES (?,?,?,?,?,?,?)",
@@ -630,7 +606,6 @@ async def test_reap_dead_holders_releases_crashed_pid(conn, locks, monkeypatch, 
     assert dead_pid != os.getpid()
     monkeypatch.setattr(SqliteLeaseBackend, "_pid_alive", staticmethod(lambda pid: pid != dead_pid))
     monkeypatch.setattr("hyperloom.orchestrator.bus.resource_lock.local_owner_scope", lambda: "test-node")
-    set_lane_capacity(conn.raw, "benchmark_lane", 1)
     # Long-lived (not expired) lease held by a dead PID.
     conn.raw.execute(
         "INSERT INTO leases(lane, holder_id, task_id, action, pid, acquired_at, expires_at) VALUES (?,?,?,?,?,?,?)",
@@ -690,8 +665,8 @@ async def test_reap_dead_holders_skips_null_pid(conn, locks):
 
 
 @pytest.mark.asyncio
-async def test_lane_holders_distinct(conn, locks):
-    set_lane_capacity(conn.raw, "research_lane", 3)
+async def test_lane_holders_distinct(conn):
+    locks = SqliteLeaseBackend(conn, research_lane_capacity=3)
     leases = [
         await locks.acquire_many(
             ["research_lane"],
@@ -717,9 +692,9 @@ def _make_session_with_db(tmp_path: Path) -> tuple[Path, SqliteConnection]:
 
 
 @pytest.mark.asyncio
-async def test_concurrent_acquires_respect_capacity(conn, locks):
+async def test_concurrent_acquires_respect_capacity(conn):
     """Three async acquires racing for capacity=2; exactly one fails."""
-    set_lane_capacity(conn.raw, "research_lane", 2)
+    locks = SqliteLeaseBackend(conn, research_lane_capacity=2)
 
     async def grab(holder: str):
         return await locks.acquire_many(

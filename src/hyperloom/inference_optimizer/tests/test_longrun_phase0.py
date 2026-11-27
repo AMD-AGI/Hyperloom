@@ -51,15 +51,6 @@ def test_specialist_rounds_capped():
     assert st.specialist_rounds[-1]["round_id"] == f"r{cap + 80 - 1}"
 
 
-def test_seen_pr_ids_capped():
-    st = SharedState()
-    cap = ss_mod._SEEN_PR_IDS_CAP
-    st.register_seen_pr_ids([f"pr{i}" for i in range(cap + 500)])
-    assert len(st.research_scout_seen_pr_ids) == cap
-    # Newest kept, oldest evicted.
-    assert f"pr{cap + 500 - 1}" in st.research_scout_seen_pr_ids
-
-
 def test_winners_history_capped_via_explore_update():
     st = SharedState()
     cap = ss_mod._WINNERS_HISTORY_CAP

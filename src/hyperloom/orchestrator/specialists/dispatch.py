@@ -845,7 +845,7 @@ class SpecialistDispatchCollaborator(CoordinatorCollaborator):
     ) -> None:
         """Hand a recorded specialist round to the gap ledger and the phases that consume what it produced."""
         domain = round_entry["domain"].strip()
-        # Harvest specialist findings (hints, gap seeds, PR dedup) from any domain.
+        # Harvest specialist findings (hints, gap seeds) from any domain.
         if done_payload.get("new_findings"):
             await self._harvest_specialist_findings(done_payload)
 
@@ -853,12 +853,6 @@ class SpecialistDispatchCollaborator(CoordinatorCollaborator):
         # freeform specialist picks them up with a precise mandate.
         if domain == "static_recon_specialist":
             self._coord.phase_internal.consume_static_recon(done_payload)
-
-        # Aggregate research evidence from any research domain that
-        # self-reports a ``research`` block, so FRAMEWORK / explore lanes
-        # reuse the session-wide seen-set. Idempotent for research_scout
-        # (already harvested above).
-        self._aggregate_research_evidence(done_payload)
 
         # Refresh the gaps ledger after a specialist round closes; record the verdict as a gap attempt.
         gap_cid = str(done_payload.get("gap_canonical_id") or "").strip()
@@ -881,31 +875,6 @@ class SpecialistDispatchCollaborator(CoordinatorCollaborator):
                 payload=done_payload,
             )
         await self._coord.phase_framework.integrate_specialist_deliverable(task=task, done_payload=done_payload)
-
-    def _aggregate_research_evidence(self, done_payload: dict[str, Any]) -> None:
-        """Aggregate research evidence (PR ids / diffs / NVIDIA refs) into the
-        session-wide seen-set, de-duped across the session.
-
-        Applies to every domain that self-reports a ``research`` block
-        (candidate discovery + research_scout), so FRAMEWORK / explore lanes
-        do not re-fetch the same references.
-        """
-        block = done_payload.get("research")
-        if not isinstance(block, dict):
-            return
-        pr_ids: list[Any] = []
-        for key in ("prs_fetched", "pr_diffs_read", "nvidia_refs"):
-            vals = block.get(key)
-            if isinstance(vals, list):
-                pr_ids.extend(vals)
-        if not pr_ids:
-            return
-        added = self.shared_state.register_seen_pr_ids(pr_ids)
-        if added:
-            log.info(
-                "depth: aggregated %d new research reference(s) into seen-set",
-                added,
-            )
 
     async def _harvest_specialist_findings(self, done_payload: dict[str, Any]) -> None:
         """Persist top-level specialist findings and re-seed Orchestration.
@@ -932,25 +901,6 @@ class SpecialistDispatchCollaborator(CoordinatorCollaborator):
                 "research-scout: dropped %d sourceless hint(s)",
                 dropped,
             )
-        # Share inspected PR ids with the FRAMEWORK dedup set.
-        pr_ids: list[Any] = []
-        for hint in hints:
-            if isinstance(hint, dict) and hint.get("source"):
-                pr_ids.append(hint["source"])
-        proposals = done_payload.get("proposal_set") or []
-        if isinstance(proposals, list):
-            for proposal in proposals:
-                if not isinstance(proposal, dict):
-                    continue
-                for key in ("pr_evidence", "source_evidence"):
-                    refs = proposal.get(key)
-                    if isinstance(refs, list):
-                        pr_ids.extend(refs)
-        self.shared_state.register_seen_pr_ids(pr_ids)
         # Seed high-priority hints as gaps[] so the config arm tries them early.
         self._coord.gap_refresh.seed_gaps_from_research_hints()
-        log.info(
-            "specialist findings harvested: hints_added=%d seen_pr_ids=%d",
-            added,
-            len(self.shared_state.research_scout_seen_pr_ids or []),
-        )
+        log.info("specialist findings harvested: hints_added=%d", added)

@@ -78,7 +78,6 @@ def coord(tmp_path: Path, monkeypatch) -> Coordinator:
     c.tasks = _StubTaskRegistry()
     c.knowledge_plane = None
     c._run_deadline = None
-    c._run_started_monotonic = None
 
     # KERNEL entry ends by handing rewrite control to a controller subprocess.
     async def _skip_controller(

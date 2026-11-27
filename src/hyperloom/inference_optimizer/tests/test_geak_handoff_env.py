@@ -27,7 +27,7 @@ async def test_handoff_preserves_environment_values(
     coord.session_dir = tmp_path
     coord.shared_state = SharedState(
         model_path="/models/example",
-        current_best={"extra_envs": expected, "optimization_stack": []},
+        current_best={"extra_envs": expected},
     )
     coord._record_geak_kernel_journey = lambda _result: None
     monkeypatch.setenv("FRAMEWORK", "sglang")

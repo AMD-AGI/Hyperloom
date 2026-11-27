@@ -3353,64 +3353,11 @@ async def test_coordinator_request_handler_exception_recorded(session_dir):
             await c.stop()
 
 
-# Multi-KEEP integrate queue: streaming record_partial, batch_mode dedup, base_tput auto-injection.
 @pytest.mark.asyncio
-async def test_coordinator_streams_batch_results_and_dedups_final_record(
+async def test_an_integrate_request_reaches_its_handler_with_the_base_tput_it_named(
     session_dir,
 ):
-    """End-to-end: record_partial records each sub-attempt in flight, and the post-gather record_kernel_opt(best) is skipped in batch_mode (no double-counting)."""
-    c = Coordinator(session_dir, backends=_backends_silent())
-    c.shared_state.baseline_tput = 1234.5
-    c.shared_state.last_profile_trace = "/path/trace/x.json.gz"
-    c.shared_state.last_trace_analyze = {
-        "trace_input": "/path/trace/x.json.gz",
-        "candidates_path": "/path/cached/candidates.json",
-    }
-    # The sequence gate also consults ``last_select_kernels``.
-    c.shared_state.last_select_kernels = dict(c.shared_state.last_trace_analyze)
-    c.shared_state.current_best = {
-        "action": "integrate",
-        "tput": 4500.0,
-        "kernel_id": "k009",
-    }
-
-    captured: dict = {}
-
-    async def fake_handler(payload, *, session_dir, **kwargs):
-        captured["payload"] = dict(payload)
-        return {"status": "ok", "decision": "KEEP", "new_tput": 4620.0, "gain_pct": 2.7, "kernel_id": "k001"}
-
-    with patch.dict(krh.KERNEL_REQUEST_HANDLERS, {"integrate": fake_handler}):
-        try:
-            await c.router.handle_intent(
-                "orchestration",
-                Intent(
-                    type=IntentType.REQUEST,
-                    payload={
-                        "target_agent": "kernel_agent",
-                        "kind": "integrate",
-                        "params": {
-                            "kernel_id": "k001",
-                            "patch_path": str(session_dir / "k001.py"),
-                            "target_file": str(session_dir / "moe_op.py"),
-                            # no base_tput intentionally
-                        },
-                    },
-                ),
-            )
-        finally:
-            await c.stop()
-
-    assert captured["payload"].get("base_tput") == 4500.0, (
-        "Coordinator must auto-inject base_tput from current_best.tput"
-    )
-
-
-@pytest.mark.asyncio
-async def test_coordinator_does_not_overwrite_explicit_base_tput_on_integrate(
-    session_dir,
-):
-    """Explicit operator-supplied ``base_tput`` must NOT be clobbered by the auto-injection."""
+    """The router hands the request's ``base_tput`` to the handler, which defaults one only when none was given."""
     c = Coordinator(session_dir, backends=_backends_silent())
     c.shared_state.baseline_tput = 4319.5
     c.shared_state.last_profile_trace = "/path/trace/x.json.gz"
@@ -3448,9 +3395,7 @@ async def test_coordinator_does_not_overwrite_explicit_base_tput_on_integrate(
         finally:
             await c.stop()
 
-    assert captured["payload"].get("base_tput") == 4200.0, (
-        "Explicit base_tput must take precedence over current_best.tput"
-    )
+    assert captured["payload"]["base_tput"] == 4200.0
 
 
 @pytest.fixture

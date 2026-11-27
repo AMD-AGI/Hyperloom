@@ -29,7 +29,7 @@ from ..bus.message_bus import Message
 from ..policy.gate import SPECIALIST_FROM_AGENT_PREFIX
 from ..policy.projection import serving_tp_for_policy
 from ..bus.gpu_pool import GPU_LEASE_TTL_GRACE
-from ..bus.resource_lock import KNOWN_LANES, _expand_lanes
+from ..bus.resource_lock import KNOWN_LANES
 from ._dead_holder import DeadHolderAccountingMixin
 from .sub_agent_runner import SubAgentResult
 from ..specialists.wall_budget import limit_wall_budget_extension
@@ -401,13 +401,19 @@ class DispatcherCollaborator(AdmissionMixin, DeadHolderAccountingMixin, Coordina
         if running:
             await asyncio.wait(running, timeout=timeout, return_when=asyncio.FIRST_COMPLETED)
 
-    async def _admit_lanes(self, task: Task, holders: dict[str, int], capacities: dict[str, int]) -> Any:
-        """Take the lane lease a queued task needs, bumping ``holders`` for the rest of this pass."""
+    async def _admit_lanes(self, task: Task) -> Any:
+        """Take the lane lease a queued task needs; ``None`` when it needs none or a lane it needs is at capacity."""
         lanes_needed = task.requires_lanes
         if not lanes_needed:
             return None
         try:
-            expanded = _expand_lanes(lanes_needed)
+            return await self.locks.acquire_many(
+                lanes_needed,
+                holder_id=task.task_id,
+                task_id=task.task_id,
+                action=task.kind,
+                ttl_sec=task.lease_ttl_sec or 60,
+            )
         except ValueError:
             log.warning(
                 "dispatcher: task %s has unknown lane in %r; skipping until resolved",
@@ -415,21 +421,6 @@ class DispatcherCollaborator(AdmissionMixin, DeadHolderAccountingMixin, Coordina
                 lanes_needed,
             )
             return None
-        if not self._lanes_fit(expanded, holders, capacities):
-            return None
-        # ``None`` here is a race: another holder grabbed the lane; leave queued.
-        lease = await self.locks.acquire_many(
-            lanes_needed,
-            holder_id=task.task_id,
-            task_id=task.task_id,
-            action=task.kind,
-            ttl_sec=task.lease_ttl_sec or 60,
-        )
-        if lease is None:
-            return None
-        for lane in lease.lanes:
-            holders[lane] = holders.get(lane, 0) + 1
-        return lease
 
     async def _admit_gpu_specialist(self, task: Task, lease: Any, extra_context: dict[str, Any]) -> HeldLeases | None:
         """Take the GPU leases a specialist needs, recording the devices it may use in ``extra_context``."""
@@ -481,15 +472,13 @@ class DispatcherCollaborator(AdmissionMixin, DeadHolderAccountingMixin, Coordina
         queued = dispatch_order.in_dispatch_order(await self.tasks.queued(), self.shared_state.phase)
         if not queued:
             return
-        holders = await self.locks.lane_holders()
-        capacities = await self.locks.lane_capacities()
         for task in queued:
             if task.task_id in self._inflight_actions:
                 continue
             if await self._cancel_queued_task_over_budget(task):
                 continue
             # No lease means refused, unless the task asked for no lanes in the first place.
-            lease = await self._admit_lanes(task, holders, capacities)
+            lease = await self._admit_lanes(task)
             if lease is None and task.requires_lanes:
                 continue
             extra_context = self._dispatch_context(task)
@@ -499,8 +488,6 @@ class DispatcherCollaborator(AdmissionMixin, DeadHolderAccountingMixin, Coordina
             if held is None:
                 if lease is not None:
                     await self.locks.release(lease)
-                    for lane in lease.lanes:
-                        holders[lane] = max(0, holders.get(lane, 0) - 1)
                 continue
             cancel_scope = CancelScope()
             atask = asyncio.create_task(
@@ -913,30 +900,6 @@ class DispatcherCollaborator(AdmissionMixin, DeadHolderAccountingMixin, Coordina
             self._coord.record_exception(stage="dispatcher_promote", exc=exc)
             return None
         return Verdict.FAILED, ()
-
-    @staticmethod
-    def _lanes_fit(
-        expanded_lanes: list[str],
-        holders: dict[str, int],
-        capacities: dict[str, int],
-    ) -> bool:
-        """Local-view headroom hint for the concurrent dispatcher (authoritative gate is acquire_many).
-
-        Args:
-            expanded_lanes: The fully-expanded lanes the task requires.
-            holders: Current per-lane holder counts (local view).
-            capacities: Per-lane capacities.
-
-        Returns:
-            ``True`` when every requested lane has local headroom, else
-            ``False``.
-        """
-        for lane in expanded_lanes:
-            cap = int(capacities.get(lane, 1))
-            used = int(holders.get(lane, 0))
-            if cap <= 0 or used >= cap:
-                return False
-        return True
 
 
 def _promotion_payload(task: Task, result: SubAgentResult) -> dict[str, Any]:

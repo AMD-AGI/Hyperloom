@@ -18,7 +18,6 @@ from hyperloom_common.timeutil import now_iso
 from hyperloom.orchestrator.state.task_states import TERMINAL_STATES
 
 from .storage.connection import SqliteConnection
-from .storage.schema import DEFAULT_LANE_CAPACITIES
 
 
 log = logging.getLogger(__name__)
@@ -38,6 +37,10 @@ KNOWN_LANES = (
     # no GPU/server).
     "build_lane",
 )
+
+#: Holders a lane admits at once: every lane is serial. A session gives ``research_lane`` its own capacity on the
+#: backend it opens.
+DEFAULT_LANE_CAPACITIES: dict[str, int] = dict.fromkeys(KNOWN_LANES, 1)
 
 # Lane → lanes that must *also* be free or co-acquired.
 LANE_CONFLICTS: dict[str, frozenset[str]] = {
@@ -417,9 +420,10 @@ class Lease:
 class SqliteLeaseBackend:
     """Lane lease store; ``BEGIN IMMEDIATE`` + PK uniqueness gives atomic acquire-many."""
 
-    def __init__(self, db: SqliteConnection):
-        """Bind the backend to a SQLite connection."""
+    def __init__(self, db: SqliteConnection, *, research_lane_capacity: int = 1):
+        """Bind the backend to a SQLite connection and to the session's research-lane capacity."""
         self.db = db
+        self._capacities = {**DEFAULT_LANE_CAPACITIES, "research_lane": research_lane_capacity}
 
     async def acquire_many(
         self,
@@ -444,21 +448,7 @@ class SqliteLeaseBackend:
         expires_iso = _lease_iso(expires_ts)
 
         async with self.db.transaction() as cur:
-            # Resolve capacity per lane (fallback for unseeded DBs).
-            capacity_by_lane: dict[str, int] = {}
             placeholders = ",".join("?" * len(expanded))
-            cur.execute(
-                f"SELECT lane, capacity FROM lane_capacity WHERE lane IN ({placeholders})",  # nosec B608 - generated placeholders only.
-                expanded,
-            )
-            for row in cur.fetchall():
-                capacity_by_lane[row["lane"]] = int(row["capacity"])
-            for lane in expanded:
-                capacity_by_lane.setdefault(
-                    lane,
-                    int(DEFAULT_LANE_CAPACITIES.get(lane, 1)),
-                )
-
             cur.execute(
                 f"SELECT lane, holder_id FROM leases WHERE lane IN ({placeholders})",  # nosec B608 - generated placeholders only.
                 expanded,
@@ -469,7 +459,7 @@ class SqliteLeaseBackend:
 
             # A holder already on a lane refreshes it; a lane at capacity (0 disables it) refuses the batch.
             if any(
-                holder_id not in holders_per_lane[lane] and len(holders_per_lane[lane]) >= capacity_by_lane[lane]
+                holder_id not in holders_per_lane[lane] and len(holders_per_lane[lane]) >= self._capacities[lane]
                 for lane in expanded
             ):
                 return None
@@ -610,19 +600,12 @@ class SqliteLeaseBackend:
             by_task[task_id] = (lanes, expires if not soonest or expires < soonest else soonest)
         return by_task
 
-    async def lane_capacities(self) -> dict[str, int]:
-        """Return ``{lane: capacity}`` for every row in ``lane_capacity``."""
-        rows = await self.db.fetchall("SELECT lane, capacity FROM lane_capacity")
-        out: dict[str, int] = dict(DEFAULT_LANE_CAPACITIES)
-        for r in rows:
-            out[r["lane"]] = int(r["capacity"])
-        return out
-
 
 __all__ = [
     "BRINGUP_ROUND_LANE",
     "CLEANUP_CONFIRMED_KEY",
     "CLEANUP_TREE_PGID_KEY",
+    "DEFAULT_LANE_CAPACITIES",
     "KNOWN_LANES",
     "LANE_CONFLICTS",
     "ROUND_LEASE_PID",

@@ -339,25 +339,6 @@ def test_upsert_gap_collapses_repeated_attempts_already_on_the_row():
 
 
 @pytest.mark.asyncio
-async def test_refresh_gaps_emits_explore_plateau_after_streak(coord):
-    s = coord.shared_state
-    s.baseline_tput = 1000.0
-    s.params_no_promote_streak = 4
-    s.explore_search = {
-        "winners_history": [
-            {"variant_name": "v1", "gain_pct": 0.0},
-            {"variant_name": "v2", "gain_pct": 0.0},
-        ]
-    }
-    await coord.gap_refresh.refresh_gaps(
-        reason="explore_round", workload_id=coord.recipe_journal.workload_canonical_id()
-    )
-    plateau = [g for g in s.gaps if g["canonical_id"].endswith("#explore_plateau")]
-    assert plateau, "explore_plateau gap missing"
-    assert plateau[0]["domain_hint"] == "serving_specialist"
-
-
-@pytest.mark.asyncio
 async def test_record_explore_round_gaps_appends_attempts(coord):
     s = coord.shared_state
     s.baseline_tput = 900.0

@@ -471,7 +471,7 @@ def test_integrate_fault_does_not_consume_revert_quota(state: SharedState):
     assert entry["verdict_attempt_count"] == 0
     assert entry.get("retryable") is True
     assert "rejected" not in entry
-    assert state.rejected_kernel_patches == []
+    assert kd.rejected_kernel_patches(state) == []
     assert "k001" not in state.rejected_kernel_ids
 
 
@@ -489,7 +489,7 @@ def test_a_run_stopped_integrate_does_not_consume_revert_quota(state: SharedStat
     assert entry is not None
     assert entry["verdict_attempt_count"] == 0
     assert entry.get("retryable") is True
-    assert state.rejected_kernel_patches == []
+    assert kd.rejected_kernel_patches(state) == []
 
 
 def test_integrate_attempt_is_stamped_with_macro_cycle(state: SharedState):
@@ -544,6 +544,23 @@ def test_integrate_genuine_revert_rejects_immediately(state: SharedState):
     assert "k001" in state.rejected_kernel_ids
 
 
+def test_a_rejected_patch_is_looked_up_and_listed_from_its_attempts_entry(state: SharedState):
+    """The attempts ledger is the one record of a rejection: the re-validation gate and the prompt both read it."""
+    first = _integrate_result("k001", decision="REVERT", status="ok", gain_pct=-3.0)
+    second = _integrate_result("k002", decision="REVERT", status="ok", gain_pct=-1.0)
+    kept = _integrate_result("k003", decision="KEEP", status="ok", gain_pct=4.0)
+    for result in (first, kept, second):
+        state.record_kernel_integrate_result(result)
+
+    assert [row["kernel_id"] for row in kd.rejected_kernel_patches(state)] == ["k001", "k002"]
+    assert kd.find_rejected_kernel_patch(state, first)["reason"] == "revert_decision"
+    assert kd.find_rejected_kernel_patch(state, kept) is None
+    assert kd.find_rejected_kernel_patch(state, {"kernel_id": "k001"}) is None
+    line = next(ln for ln in state.to_prompt_summary().splitlines() if ln.startswith("rejected_kernel_patches="))
+    assert "k001: attempts=1 best_gain=-3.0 reason=revert_decision" in line
+    assert line.index("k001") < line.index("k002")
+
+
 def test_integrate_bare_apply_fault_is_retryable_without_error_class(
     state: SharedState,
 ):
@@ -557,7 +574,7 @@ def test_integrate_bare_apply_fault_is_retryable_without_error_class(
     assert entry["verdict_attempt_count"] == 0
     assert entry.get("retryable") is True
     assert "rejected" not in entry
-    assert state.rejected_kernel_patches == []
+    assert kd.rejected_kernel_patches(state) == []
     assert "k001" not in state.rejected_kernel_ids
 
 
@@ -574,7 +591,7 @@ def test_integrate_keep_is_terminal_and_not_rejected(state: SharedState):
     )
     assert "rejected" not in entry
     assert entry.get("retryable") is not True
-    assert state.rejected_kernel_patches == []
+    assert kd.rejected_kernel_patches(state) == []
 
 
 def test_pending_keep_includes_kernel_with_unexhausted_fault(state: SharedState):

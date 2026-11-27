@@ -57,7 +57,6 @@ class _PersistenceMixin:
         existing = existing if isinstance(existing, dict) else {}
         out: dict[str, Any] = dict(existing)
         out.setdefault("tested", {})
-        out.setdefault("accepted", [])
         out.setdefault("rejected", [])
         out.setdefault("cursor", len(out.get("tested") or {}))
         out.setdefault("last_round", {})

@@ -296,17 +296,19 @@ async def test_compose_prompt_tells_orchestration_its_session_dir(coord: Coordin
 @pytest.mark.asyncio
 async def test_compose_prompt_orchestration_with_time_budget(coord: Coordinator) -> None:
     """The per-tick Time budget block the orchestration system prompt promises, carrying ``remaining=``."""
-    coord._run_started_monotonic = time.monotonic() - 60.0
     coord._run_deadline = Deadline.after(600.0)
     coord.shared_state.max_minutes = 60
+    # Twenty minutes charged by earlier legs and five by this one: the block reports the session's total.
+    coord.shared_state.elapsed_charged_sec = 1200.0
+    coord.shared_state.begin_leg(now_unix=time.time() - 300.0)
     lines = (await coord.conversation.compose_prompt()).text.splitlines()
     assert "=== Time budget ===" in lines
-    assert "remaining=" in lines[lines.index("=== Time budget ===") + 1]
+    budget = lines[lines.index("=== Time budget ===") + 1]
+    assert budget.startswith("elapsed=25.0min  remaining=10.0min  budget=60min")
 
 
 @pytest.mark.asyncio
 async def test_compose_prompt_orchestration_deadline_imminent_warning(coord: Coordinator) -> None:
-    coord._run_started_monotonic = time.monotonic() - 60.0
     coord._run_deadline = Deadline.after(60.0)
     coord.shared_state.max_minutes = 60
     coord.shared_state.closing_phase = False

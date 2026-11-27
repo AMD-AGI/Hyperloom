@@ -92,11 +92,10 @@ class GapRefreshCollaborator(CoordinatorCollaborator):
         return gaps
 
     def _extract_gaps_from_attempts(self, workload_id: str) -> list[dict[str, Any]]:
-        """Derive gaps from rolling failures + winners history (recurring (action, error_class[, variant]) + explore plateau).
+        """Derive gaps from the rolling failure log: one per recurring (action, error_class[, variant]).
 
         Returns:
-            A list of gap row dicts derived from recurring action failures and
-            an explore-plateau signal.
+            A list of gap row dicts derived from recurring action failures.
         """
         state = self.shared_state
         gaps: list[dict[str, Any]] = []
@@ -141,30 +140,7 @@ class GapRefreshCollaborator(CoordinatorCollaborator):
                     "attempts": [attempt],
                 }
         gaps.extend(seen_failures.values())
-        gaps.extend(self._explore_plateau_gaps(workload_id))
         return gaps
-
-    def _explore_plateau_gaps(self, workload_id: str) -> list[dict[str, Any]]:
-        """The explore-plateau gap when grid rounds stopped promoting, else none."""
-        state = self.shared_state
-        no_promote = int(state.params_no_promote_streak or 0)
-        # Every writer of explore_search stores a dict, and a loaded state rebuilds it as one.
-        winners_hist = list(state.explore_search.get("winners_history") or [])
-        recent_promotions = sum(
-            1 for w in winners_hist[-5:] if isinstance(w, dict) and float(w.get("gain_pct") or 0.0) > 0.0
-        )
-        if no_promote < 3 or recent_promotions != 0:
-            return []
-        return [
-            {
-                "canonical_id": f"{workload_id}#explore_plateau",
-                "symptom": (f"{no_promote} consecutive grid rounds without a new current_best"),
-                "layer": "framework",
-                "severity": "high" if no_promote >= 6 else "medium",
-                "domain_hint": self._framework_authoring_domain(),
-                "source": "attempts",
-            }
-        ]
 
     def seed_gaps_from_research_hints(self) -> None:
         """Inject research hints as advisory gaps[] seeds (idempotent)."""

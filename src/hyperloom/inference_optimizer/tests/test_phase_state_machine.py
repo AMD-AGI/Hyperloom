@@ -629,7 +629,6 @@ def test_optimize_phase_budget_exhaustion_advances():
         phase_started_unix=1.0,
         max_minutes=10,  # 600s total; 60% explore budget = 360s
         phase_budget_pct=normalize_budget_pct(None),
-        params_no_promote_streak=0,
         explore_search={},
         optimization_stack=[{"action": "explore"}],
         resumed_ts="",
@@ -745,7 +744,6 @@ def test_compute_next_phase_terminal_overrides_phase():
         max_minutes=0,
         phase_budget_pct={},
         stop_reason="target_reached",
-        params_no_promote_streak=0,
         explore_search={},
         optimization_stack=[],
     )
@@ -767,7 +765,6 @@ class TestAMetTargetDoesNotOutrankTheGuards:
             stop_reason="",
             closing_phase=False,
             target_reached_at="2026-09-04T00:00:00+00:00",
-            params_no_promote_streak=0,
             explore_search={},
             optimization_stack=[],
             resumed_ts="",

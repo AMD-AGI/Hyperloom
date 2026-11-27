@@ -364,9 +364,4 @@ class _CandidateDiscoveryMixin:
                 cid = self._framework_candidate_key(cand) or f"{cand.get('repo', '')}-{cand.get('pr_number', '')}"
                 if cid:
                     ids.add(cid)
-        # Fold in PR ids the research scout already mined so the two mechanisms never re-process a PR.
-        for pid in state.research_scout_seen_pr_ids or []:
-            pid = str(pid or "").strip()
-            if pid:
-                ids.add(pid)
         return ids

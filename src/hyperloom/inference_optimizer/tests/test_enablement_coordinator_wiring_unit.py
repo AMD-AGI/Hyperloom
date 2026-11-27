@@ -111,7 +111,6 @@ def test_build_params_threads_eval_origin_carriers(tmp_path):
     fake.shared_state.enablement.origin = "eval"
     fake.shared_state.enablement.accuracy_floor = 0.3
     fake.shared_state.enablement.probe_config_path = "/runs/baseline/materialized.yaml"
-    fake.shared_state.enablement.eval_definition_digest = "sha256:abc123"
     params = fake.enablement_params.build_enablement_specialist_params(_MISSING_ARCH_LOG)
     assert params is not None
     assert params["enablement_origin"] == "eval"
@@ -214,7 +213,6 @@ def _enqueue_self(tmp_path, **state_kw):
             accepted_config_path=state_kw.get("enablement_accepted_config_path", ""),
             accepted_config=state_kw.get("enablement_accepted_config", {}),
             accuracy_floor=state_kw.get("enablement_accuracy_floor", 0.0),
-            eval_definition_digest=state_kw.get("enablement_eval_definition_digest", ""),
             active_runtime=state_kw.get("enablement_active_runtime", {}),
             revalidation_task_id=state_kw.get("enablement_revalidation_task_id", ""),
             revalidation_generation=state_kw.get("enablement_revalidation_generation", 0),

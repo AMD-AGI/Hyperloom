@@ -612,12 +612,11 @@ class ConversationCollaborator(CoordinatorCollaborator):
         turn.append("=== Mission progress ===")
         turn.append(self.shared_state.to_mission_summary())
         deadline = self._coord.run_deadline
-        started = self._coord.run_started_monotonic
-        if deadline is not None and started is not None:
+        if deadline is not None:
             remaining_min = max(0.0, deadline.remaining() / 60.0)
             turn.append("=== Time budget ===")
             turn.append(
-                f"elapsed={(time.monotonic() - started) / 60.0:.1f}min  remaining={remaining_min:.1f}min  "
+                f"elapsed={self.shared_state.elapsed_minutes():.1f}min  remaining={remaining_min:.1f}min  "
                 f"budget={self.shared_state.max_minutes or 0}min  "
                 f"closing_phase={self.shared_state.closing_phase}"
             )
@@ -629,7 +628,7 @@ class ConversationCollaborator(CoordinatorCollaborator):
                     "auto-enqueue `report` when the session closes."
                 )
         turn.append("=== Tick ===")
-        turn.append(self.shared_state.to_tick_summary())
+        turn.append(f"tick={int(self.shared_state.tick or 0)}")
         # The session ledger moves with every action that lands, so it belongs to
         # the turn: carried in ``context`` it would rewrite the cached prefix the
         # stable blocks below sit in, on nearly every tick.

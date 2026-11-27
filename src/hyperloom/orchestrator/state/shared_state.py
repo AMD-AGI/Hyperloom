@@ -423,8 +423,6 @@ class SharedState(
     compute_partition: dict[str, Any] = field(default_factory=dict)
     # ``--nodes``, feeding the IR-8 check.
     nodes: int = 1
-    # Per-agent Unix timestamp of the most recent completed reactor pass.
-    agent_last_active: dict[str, float] = field(default_factory=dict)
     # Warm-recipe replay gates (``--no-warm-replay`` / ``--warm-replay-min-confidence``).
     warm_replay_enabled: bool = True
     warm_replay_min_confidence: float = 0.7
@@ -586,24 +584,19 @@ class SharedState(
     failures: list[dict[str, Any]] = field(default_factory=list)
     # Immutable KEEP snapshots awaiting E2E integration, keyed by integration_id.
     pending_kernel_integrations: dict[str, Any] = field(default_factory=dict)
-    # Consecutive grid-runner tasks with no new current_best; Robustness nudges Orch off the plateau. Reset on advance.
-    params_no_promote_streak: int = 0
-    # Cumulative count of explore/integrate_patch rounds that produced at least one valid throughput measurement.
-    gain_gated_action_count: int = 0
-    # Unified persistent explore-search ledger; ``tested`` keyed by canonical_fingerprint, ``accepted`` holds the round's KEEPs, everything graded down moves to rejected.
+    # Unified persistent explore-search ledger; ``tested`` keyed by canonical_fingerprint, everything graded down moves to rejected.
     explore_search: dict[str, Any] = field(default_factory=dict)
     # specialist sub-agent rolling state; one entry per config-arm round (round_id, tasks, proposals_total/kept/rejected/skipped, etc.).
     specialist_rounds: list[dict[str, Any]] = field(default_factory=list)
     # Intervention-mix ledger ({change_type∈{config,code_patch,config_attempt,code_patch_attempt}}); Robustness detects config-only loops.
     intervention_mix: list[dict[str, Any]] = field(default_factory=list)
-    # Research scout bookkeeping; master switch ``--no-research-scout``; seen_pr_ids shared with FRAMEWORK to avoid re-mining.
+    # Research scout bookkeeping; master switch ``--no-research-scout``.
     research_scout_enabled: bool = True
     research_scout_interval: int = 3
     # Master switch for advisory "External target gap" prompt block (``--no-target-advisory``); never gates Objective.
     target_advisory_enabled: bool = True
     # Master switch for sedimenting KEEP/REVERT provenance into the persistent recipe; off => recipe stays ephemeral.
     recipe_sediment_enabled: bool = True
-    research_scout_seen_pr_ids: list[str] = field(default_factory=list)
     # Round id of last scout dispatch so K-round re-dispatch fires once per qualifying round.
     research_scout_last_round: int = -1
     # Static-recon specialist bookkeeping (explore-opt-5 capability A); master switch ``--no-static-recon``.
@@ -624,7 +617,6 @@ class SharedState(
     # Crash-safe stack-validation checkpoints (CYCLE_END-entry combo E2E).
     pending_stack_validation_result: dict[str, Any] = field(default_factory=dict)
     pending_stack_validation_apply_results: list[dict[str, Any]] = field(default_factory=list)
-    rejected_kernel_patches: list[dict[str, Any]] = field(default_factory=list)
     # Kernel ids with no remaining automated path (from REVERTs + exhausted integrate attempts).
     rejected_kernel_ids: list[str] = field(default_factory=list)
     # Consecutive KERNEL_AGENT ticks that observed no forward motion AND no kernel-lane task in flight.

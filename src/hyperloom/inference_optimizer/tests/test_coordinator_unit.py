@@ -6,7 +6,6 @@
 from __future__ import annotations
 
 
-from hyperloom.orchestrator.loop.dispatcher import DispatcherCollaborator
 from hyperloom.orchestrator.loop.conversation import _first_present, _format_inbox_event
 from hyperloom.orchestrator.loop.kernel_request import lifecycle_paths
 from hyperloom.orchestrator.bus.message_bus import Message
@@ -163,9 +162,3 @@ def test_gap_layer_for_action_follows_framework_kind():
     # Kernel and system rows are framework-independent.
     assert GapRefreshCollaborator._gap_layer_for_action("kernel_opt", "custom")[1] == "kernel_switch_specialist"
     assert GapRefreshCollaborator._gap_layer_for_action("baseline", "custom")[1] == "system_specialist"
-
-
-def test_lanes_fit_headroom():
-    assert DispatcherCollaborator._lanes_fit(["lane_a"], {"lane_a": 0}, {"lane_a": 2}) is True
-    assert DispatcherCollaborator._lanes_fit(["lane_a"], {"lane_a": 2}, {"lane_a": 2}) is False
-    assert DispatcherCollaborator._lanes_fit(["lane_a"], {"lane_a": 0}, {"lane_a": 0}) is False

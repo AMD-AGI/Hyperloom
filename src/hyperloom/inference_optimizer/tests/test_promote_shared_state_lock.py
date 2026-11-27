@@ -240,8 +240,7 @@ async def test_promote_explore_promoted_writes_state_and_audit(session_dir):
 
     assert s.current_best["action"] == "explore"
     assert s.current_best["tput"] == 130.0
-    accepted = s.explore_search.get("accepted") if isinstance(s.explore_search, dict) else None
-    assert isinstance(accepted, list) and len(accepted) == 1
+    assert [(entry["action"], entry["variant_name"]) for entry in s.optimization_stack] == [("explore", "v1")]
     # Audit row: promoted; extras carry the round + winner stats.
     assert s.last_explore["decision"] == "promoted"
     assert s.last_explore["status"] == "succeeded"
@@ -927,7 +926,7 @@ async def test_prebaseline_enablement_patch_is_config_only_not_gain(session_dir,
     assert entry["recipe_publishable"] is False
     assert s.current_best["action"] == "integrate_patch"
     assert s.current_best["extra_server_args"] == "--mem-fraction-static 0.95"
-    assert s.current_best["optimization_stack"] == s.optimization_stack
+    assert "optimization_stack" not in s.current_best
     assert s.current_best_measurement["tput"] == 140.0
     assert s.baseline_tput == 0.0
     assert s.gain_per_stack_entry == [None]

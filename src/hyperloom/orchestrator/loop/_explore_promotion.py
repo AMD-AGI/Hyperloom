@@ -52,8 +52,7 @@ class ExplorePromotionMixin:
         outcome: _PromoteOutcome,
     ) -> None:
         """Promote an explore result: ledger increment, winners, current_best lift, resume revalidation."""
-        # The Coordinator is single-writer for explore_search.accepted,
-        # current_best and optimization_stack.
+        # The Coordinator is single-writer for current_best and optimization_stack.
         update = result.get("explore_search_update")
         if isinstance(update, dict):
             self.shared_state.apply_explore_search_update(update)
@@ -76,10 +75,6 @@ class ExplorePromotionMixin:
         lift = _ExploreLift(promoted=False, last_lifted=None)
         if isinstance(winners, list) and winners and not is_revalidation_task:
             lift = self._accept_explore_winners(result, task, outcome)
-        self.shared_state.note_explore_outcome(promoted=lift.promoted)
-        # A round with no measured variant is not a data point for the plateau window.
-        if not is_revalidation_task and (winners or result.get("losers")):
-            self.shared_state.gain_gated_action_count += 1
         if lift.last_lifted is not None:
             # The last successful lift owns every axis of the validated measurement.
             await self._validate_and_watermark(
@@ -158,14 +153,6 @@ class ExplorePromotionMixin:
             },
         )
 
-    def _record_accepted_winners(self, result: Mapping[str, Any], winners: list[dict[str, Any]]) -> None:
-        round_id = str(result.get("round_id") or "")
-        for winner in winners:
-            accepted = dict(winner)
-            accepted.setdefault("accepted_at_round", round_id)
-            accepted.setdefault("provenance", winner.get("provenance") or "llm_direct")
-            self.shared_state.record_explore_accepted(accepted)
-
     def _accept_explore_winners(
         self,
         result: dict,
@@ -173,7 +160,6 @@ class ExplorePromotionMixin:
         outcome: _PromoteOutcome,
     ) -> _ExploreLift:
         winners = [winner for winner in result.get("winners") or [] if isinstance(winner, dict)]
-        self._record_accepted_winners(result, winners)
         gap_canonical_id = str((task.params or {}).get("gap_canonical_id") or "").strip() if task is not None else ""
         promoted = False
         last_lifted: dict[str, Any] | None = None

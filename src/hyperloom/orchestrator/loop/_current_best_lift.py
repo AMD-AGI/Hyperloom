@@ -448,7 +448,6 @@ class CurrentBestLiftMixin:
             "extra_server_args": launch.full_args,
             "extra_envs": envs,
             "final_overlay": launch.overlay,
-            "optimization_stack": list(self.shared_state.optimization_stack),
             "ttft_mean_ms": bv.get("ttft_mean_ms"),
             **constraint_fields(bv),
             "tpot_mean_ms": bv.get("tpot_mean_ms"),
