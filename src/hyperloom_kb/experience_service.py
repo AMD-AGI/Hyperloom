@@ -31,28 +31,11 @@ from hyperloom_kb.observability import (
     event,
 )
 from hyperloom_kb.local_state import LABEL_BEFORE_PULL, LABEL_MANUAL, LocalState, UnknownStateItem
-from hyperloom_kb.knowledge_read import (
-    KnowledgeReadService,
-    LLMQueryPlanner,
-    QueryExecutor,
-    ReadResult,
-    ReadStatus,
-    ReadTrace,
-)
-from hyperloom_kb.query_view import (
-    InMemoryQueryViewStore,
-    QueryView,
-    QueryViewBuilder,
-    RetrievalCapability,
-)
-from hyperloom_kb.remote import ReadQuery, RemoteClient
+from hyperloom_kb.knowledge_read import QueryExecutor, ReadStatus, WeightedQueryExecution, prompt_block
+from hyperloom_kb.query_view import QueryView, QueryViewBuilder
+from hyperloom_kb.remote import QuerySignal, ReadQuery, RemoteClient
 from hyperloom_kb.retrieval import LocalRetrievalService, render_complete_experience
-from hyperloom_kb.retrieval_policy import (
-    LEXICAL_FUZZY_PROVIDER_REF,
-    LexicalFuzzyProvider,
-    ResultShape,
-    RetrievalConfiguration,
-)
+from hyperloom_kb.retrieval_policy import LexicalFuzzyProvider, ResultShape
 from hyperloom_kb.records import RecordFiles
 from hyperloom_kb.schema import (
     MAX_FILE_BYTES,
@@ -78,10 +61,10 @@ log = logging.getLogger(__name__)
 MIXED_OUTCOME = "mixed"
 DEFAULT_READ_LIMIT = 10
 MAX_READ_LIMIT = 100
+MAX_READ_SIGNALS = 32
 MAX_LIST_LIMIT = 500
 # Complete records carry patch content, so an export page stays far smaller than a summary page.
 MAX_EXPORT_LIMIT = 100
-READ_POLICY_VERSION = "shared-experience-read@v1"
 _CONFLICT = "conflict"
 _MISSING_FILES = "missing_files"
 _AUDIT = "audit"
@@ -205,7 +188,6 @@ class ExperienceHTTPService:
         self,
         config: HTTPServiceConfig,
         declaration: ExperienceDeclaration,
-        planner: LLMQueryPlanner | None,
         *,
         database: Database,
         global_kb: RemoteClient | None = None,
@@ -222,7 +204,6 @@ class ExperienceHTTPService:
         self._files = FileStore(config.home, self.kb_id)
         self._state = LocalState(self.kb_id)
         self._ledger = SyncLedger(database, self.kb_id)
-        self._planner = planner
         self._declarations: dict[str, ExperienceDeclaration] = {}
         self._views: dict[str, _ReadView] = {}
         self.metrics = Metrics()
@@ -359,6 +340,21 @@ class ExperienceHTTPService:
         if outcome not in allowed:
             raise HTTPServiceError(f"outcome must be one of: {', '.join(allowed)}")
         return outcome
+
+    @staticmethod
+    def _signals(signals: tuple[QuerySignal, ...], declaration: ExperienceDeclaration) -> tuple[QuerySignal, ...]:
+        """``signals`` once every exact one names a field ``declaration`` indexes; a read needs at least one and
+        takes at most ``MAX_READ_SIGNALS``."""
+
+        if not signals:
+            raise HTTPServiceError("signals must name at least one signal")
+        if len(signals) > MAX_READ_SIGNALS:
+            raise HTTPServiceError(f"signals must name at most {MAX_READ_SIGNALS} signals")
+        indexed = declaration.lookup_fields()
+        unknown = sorted({signal.field for signal in signals if signal.field and signal.field not in indexed})
+        if unknown:
+            raise HTTPServiceError(f"signal fields the schema does not index: {', '.join(unknown)}")
+        return signals
 
     def _missing_files_of(self, connection: Connection, refs: Iterable[FileRef]) -> tuple[str, ...]:
         """The sha256 of each of ``refs`` this KB does not hold; a ref of another size than the one held is invalid."""
@@ -528,7 +524,7 @@ class ExperienceHTTPService:
         built = _ReadView(
             version,
             store,
-            QueryViewBuilder().build(declaration, store.list_experiences(schema_ref), fuzzy_ready=True),
+            QueryViewBuilder().build(declaration, store.list_experiences(schema_ref)),
         )
         self._views[schema_ref] = built
         return built
@@ -548,50 +544,43 @@ class ExperienceHTTPService:
         )
 
     def _completed_fields(
-        self,
-        declaration: ExperienceDeclaration,
-        store: InMemoryExperienceStore,
-        result: ReadResult,
-        traces: list[ReadTrace],
+        self, declaration: ExperienceDeclaration, store: InMemoryExperienceStore, execution: WeightedQueryExecution
     ) -> dict[str, JsonValue]:
         """The response fields of a completed read, each rendered Experience summarized with its score."""
 
-        groups = {
-            experience_id: group
-            for group in (traces[-1].execution.groups if traces else ())
-            for experience_id in group.representative_ids
-        }
+        groups = {experience_id: group for group in execution.groups for experience_id in group.representative_ids}
+        rendered_refs = execution.rendered.rendered_refs
         experiences: list[JsonValue] = []
-        for reference in result.rendered_refs:
+        for reference in rendered_refs:
             stored = store.get_experience(reference.id)
             item = _summary(declaration, stored.experience if stored is not None else self.held(reference.id))
-            group = groups.get(reference.id)
-            item["score"] = group.score if group is not None else 0.0
+            group = groups[reference.id]
+            item["score"] = group.score
             item["why_matched"] = [
                 contribution.to_dict()
-                for contribution in (group.contributions if group is not None else ())
+                for contribution in group.contributions
                 if contribution.experience_id == reference.id
             ]
             experiences.append(item)
         return {
-            "status": result.status.value,
-            "prompt_block": result.prompt_block,
-            "rendered_refs": [reference.to_dict() for reference in result.rendered_refs],
+            "prompt_block": prompt_block(execution),
+            "rendered_refs": [reference.to_dict() for reference in rendered_refs],
             "experiences": experiences,
-            "rendered_count": len(result.rendered_refs),
-            "warnings": list(result.warnings),
+            "rendered_count": len(rendered_refs),
+            "warnings": ["render_budget_reached"] if execution.rendered.truncated else [],
         }
 
     def read(self, query: ReadQuery) -> dict[str, JsonValue]:
         """Search one schema's Experiences, this service's default schema unless ``query.schema_ref`` names another.
 
-        Each record renders whole; a file field renders as the path on this host its file is read from. With
+        An Experience is recalled by any of ``query.signals`` and ranked by the summed weight of those it matches. Each
+        record renders whole; a file field renders as the path on this host its file is read from. With
         ``query.render_budget_chars``, the block carries whole records while they fit and names only those in
         ``rendered_refs``.
         """
 
-        decision = _required_text(query.decision, "decision")
         declaration = self.declaration_for(query.schema_ref or self.declaration.schema_ref)
+        signals = self._signals(query.signals, declaration)
         selected_outcome = self._outcome(query.outcome, declaration)
         limit = _bounded_int(
             DEFAULT_READ_LIMIT if query.limit is None else query.limit, "limit", minimum=1, maximum=MAX_READ_LIMIT
@@ -619,34 +608,18 @@ class ExperienceHTTPService:
         if eligible_count == 0:
             return response
 
-        views = InMemoryQueryViewStore()
-        views.publish_view(view)
-        provider_refs = {RetrievalCapability.FUZZY: LEXICAL_FUZZY_PROVIDER_REF}
-        configuration = RetrievalConfiguration.create(
-            declaration.schema_ref,
-            READ_POLICY_VERSION,
-            limits=dict.fromkeys(RetrievalCapability, eligible_count),
-            provider_refs=provider_refs,
-            shape=ResultShape("weighted-signal-sum@v1", max_groups=limit, render_budget_chars=render_budget_chars),
-        )
         executor = QueryExecutor(
-            LocalRetrievalService(
-                store,
-                views,
-                providers=(LexicalFuzzyProvider(store, declaration),),
-                renderer=partial(render_complete_experience, file_path=self.file_path),
-            ),
-            provider_refs=provider_refs,
+            LocalRetrievalService(store, view, renderer=partial(render_complete_experience, file_path=self.file_path)),
+            LexicalFuzzyProvider(store, declaration),
         )
-        traces: list[ReadTrace] = []
-        result = KnowledgeReadService(
-            declaration,
-            executor,
-            configuration,
-            planner=self._planner,
-            trace_sink=traces.append,
-        ).read(decision, query.context)
-        response.update(self._completed_fields(declaration, store, result, traces))
+        try:
+            execution = executor.execute(
+                signals, ResultShape(max_groups=limit, render_budget_chars=render_budget_chars)
+            )
+        except (RuntimeError, ValueError) as exc:
+            response.update(status=ReadStatus.FAILED.value, warnings=[f"{type(exc).__name__}:{exc}"])
+            return response
+        response.update(self._completed_fields(declaration, store, execution))
         return response
 
     def _listed(self, experience: Experience, include_excluded: bool) -> bool:
@@ -976,6 +949,7 @@ __all__ = [
     "DEFAULT_READ_LIMIT",
     "MAX_EXPORT_LIMIT",
     "MAX_READ_LIMIT",
+    "MAX_READ_SIGNALS",
     "MIXED_OUTCOME",
     "ExperienceHTTPService",
     "HTTPServiceConfig",

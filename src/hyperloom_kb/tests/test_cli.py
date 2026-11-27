@@ -60,9 +60,7 @@ def _experience(seq: int, run_id: str = "cli-run") -> Experience:
 @contextmanager
 def _serving(home: Path, global_url: str | None = None) -> Iterator[RemoteClient]:
     global_kb = None if global_url is None else RemoteClient(RemoteConfig(global_url, TOKEN))
-    app = ExperienceHTTPService(
-        HTTPServiceConfig(home, TOKEN), SCHEMA, None, database=fresh_database(), global_kb=global_kb
-    )
+    app = ExperienceHTTPService(HTTPServiceConfig(home, TOKEN), SCHEMA, database=fresh_database(), global_kb=global_kb)
     server = create_http_server(app, "127.0.0.1", 0)
     thread = threading.Thread(target=server.serve_forever, kwargs={"poll_interval": 0.05})
     thread.start()

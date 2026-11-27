@@ -20,10 +20,8 @@ from hyperloom_kb import (
     FieldDeclaration,
     FileRef,
     HTTPServiceConfig,
-    LLMQueryPlanner,
     NoOpExperienceKB,
     ObjectiveDeclaration,
-    PlannerConfiguration,
     RemoteClient,
     RemoteConfig,
     RemoteExperienceKB,
@@ -412,19 +410,11 @@ def test_evaluation_errors_skip_only_the_unit() -> None:
     assert set(_collected(report)) == {"good"}
 
 
-class _UnusedPlanner:
-    model = "unused-planner"
-
-    def complete(self, **_kwargs: Any) -> str:
-        raise AssertionError("collection never plans a read")
-
-
 def test_publish_to_the_experience_service(tmp_path: Path) -> None:
     declaration = load_mapping(MAPPING).declaration
     app = ExperienceHTTPService(
         HTTPServiceConfig(tmp_path / "service", TOKEN),
         declaration,
-        LLMQueryPlanner(_UnusedPlanner(), PlannerConfiguration.create("unused-planner")),
         database=fresh_database(),
     )
     server = create_http_server(app, "127.0.0.1", 0)
@@ -626,7 +616,7 @@ def test_a_file_field_reads_its_file_beside_the_document_and_publishing_sends_it
 
     [dry] = collect(mapping, document, dry_run=True).collected
     app = ExperienceHTTPService(
-        HTTPServiceConfig(tmp_path / "service", TOKEN), mapping.declaration, None, database=fresh_database()
+        HTTPServiceConfig(tmp_path / "service", TOKEN), mapping.declaration, database=fresh_database()
     )
     server = create_http_server(app, "127.0.0.1", 0)
     thread = threading.Thread(target=server.serve_forever, kwargs={"poll_interval": 0.05})

@@ -268,7 +268,7 @@ async def test_the_brief_and_the_learnings_tool_fill_the_slots_left_with_the_kbs
     assert told == [NOTES_HEADING, f"- [past-1, same conditions, measured] {CORRECTION} [{graph}]", f"- {kb}"]
     assert f"learnt before: {kb}" in brief.lessons
     assert (asked["past"], claim["past"]) == ([graph, "exp-kb"], [graph])
-    assert [context["observations"]["query"] for _, context, _ in reader.calls] == ["cuda graph"]
+    assert [[signal.text for signal in signals if signal.text] for signals, _ in reader.calls] == [["cuda graph"]]
 
 
 def test_a_kb_learning_that_says_what_a_pool_lesson_says_or_said_is_left_to_the_pool(

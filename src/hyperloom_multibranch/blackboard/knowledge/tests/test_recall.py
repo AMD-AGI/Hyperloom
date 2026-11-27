@@ -15,7 +15,6 @@ from hyperloom.common.perf_metric import TOTAL_TOKEN_THROUGHPUT
 from hyperloom_multibranch.contracts.blackboard.peers import IntentLayer
 from hyperloom_multibranch.contracts.blackboard.records import SessionProfile
 from hyperloom_multibranch.blackboard.knowledge.recall import (
-    DECISION,
     INTERACTIVITY_OBJECTIVE,
     RECALL_LIMIT,
     THROUGHPUT_OBJECTIVE,
@@ -59,7 +58,7 @@ def test_an_experience_measured_under_every_queried_condition_is_a_prior_and_oth
         )
     )
 
-    recall = recall_experiences(reader, profile(), 1000.0, RecallQuery("attention", "s1"))
+    recall = recall_experiences(reader, profile(), ATTENTION)
 
     tiers = {item.experience_id: (item.tier, item.differing) for item in recall.experiences}
     assert tiers == {
@@ -76,7 +75,7 @@ def test_a_summary_without_an_identity_is_one_to_reverify_never_a_prior() -> Non
     bare = {key: value for key, value in experience_summary("exp-bare", SAME).items() if key != "identity"}
     reader = FakeExperienceReader(completed_read(bare))
 
-    (item,) = recall_experiences(reader, profile(), 1000.0, ATTENTION).experiences
+    (item,) = recall_experiences(reader, profile(), ATTENTION).experiences
 
     assert (item.tier, item.differing) == (RecallTier.REVERIFY, tuple(SAME))
 
@@ -92,7 +91,7 @@ def test_another_model_tp_or_concurrency_makes_an_experience_one_to_reverify() -
 
     tiers = {
         item.experience_id: (item.tier, item.differing)
-        for item in recall_experiences(reader, profile(), 1000.0, ATTENTION).experiences
+        for item in recall_experiences(reader, profile(), ATTENTION).experiences
     }
 
     assert tiers == {
@@ -112,7 +111,7 @@ def test_a_prompt_dataset_is_a_condition_and_so_is_sending_none() -> None:
     )
 
     def differing(session: SessionProfile) -> dict[str, tuple[str, ...]]:
-        recall = recall_experiences(reader, session, 1000.0, ATTENTION)
+        recall = recall_experiences(reader, session, ATTENTION)
         return {item.experience_id: item.differing for item in recall.experiences}
 
     assert differing(profile(dataset=dataset)) == {"exp-random": ("dataset",), "exp-dataset": ()}
@@ -134,10 +133,10 @@ def test_a_summary_without_an_identity_is_sorted_by_the_identity_the_export_hold
     index = IdentityIndex(export, "schema:sha256:" + "0" * 64)
     reader = FakeExperienceReader(completed_read(_bare("exp-a"), _bare("exp-b")))
 
-    first = recall_experiences(reader, profile(), 1000.0, ATTENTION, identities=index)
+    first = recall_experiences(reader, profile(), ATTENTION, identities=index)
     export.records.append({"id": "exp-d", "identity": SAME, "objective": THROUGHPUT_OBJECTIVE})
     reader.result = completed_read(_bare("exp-c"), _bare("exp-d"))
-    later = recall_experiences(reader, profile(), 1000.0, ATTENTION, identities=index)
+    later = recall_experiences(reader, profile(), ATTENTION, identities=index)
 
     assert [(item.experience_id, item.tier, item.differing) for item in first.experiences] == [
         ("exp-a", RecallTier.PRIOR, ()),
@@ -168,7 +167,7 @@ def test_a_recalled_experience_names_the_layer_of_its_change_family_from_the_sum
         )
     )
 
-    recall = recall_experiences(reader, profile(), 1000.0, ATTENTION, identities=IdentityIndex(export))
+    recall = recall_experiences(reader, profile(), ATTENTION, identities=IdentityIndex(export))
 
     assert {item.experience_id: item.layer for item in recall.experiences} == {
         "exp-config": IntentLayer.CONFIG,
@@ -184,7 +183,7 @@ def test_an_export_that_fails_leaves_the_experience_one_to_reverify(caplog: pyte
     reader = FakeExperienceReader(completed_read(_bare("exp-a")))
 
     with caplog.at_level(logging.WARNING, logger="hyperloom_multibranch.blackboard.knowledge.recall"):
-        (item,) = recall_experiences(reader, profile(), 1000.0, ATTENTION, identities=index).experiences
+        (item,) = recall_experiences(reader, profile(), ATTENTION, identities=index).experiences
 
     assert (item.tier, item.differing) == (RecallTier.REVERIFY, (*SAME, "objective"))
     assert "unreachable" in caplog.text
@@ -200,8 +199,8 @@ def test_an_experience_on_another_objective_is_to_reverify_after_the_rest_and_na
     names = ("exp-throughput", "exp-interactivity", "exp-elsewhere")
     reader = FakeExperienceReader(completed_read(*(experience_summary(name, SAME) for name in names)))
 
-    inferencex = recall_experiences(reader, profile(), 1000.0, ATTENTION, identities=IdentityIndex(export))
-    agentx = recall_experiences(reader, profile(isl=None, osl=None), 4.5, ATTENTION, identities=IdentityIndex(export))
+    inferencex = recall_experiences(reader, profile(), ATTENTION, identities=IdentityIndex(export))
+    agentx = recall_experiences(reader, profile(isl=None, osl=None), ATTENTION, identities=IdentityIndex(export))
 
     assert [(item.experience_id, item.tier, item.differing) for item in inferencex.experiences] == [
         ("exp-throughput", RecallTier.PRIOR, ()),
@@ -232,7 +231,7 @@ def test_a_read_over_two_schemas_lists_both_schemas_experiences_and_keeps_every_
         RemoteReadResult("read-2", "completed", "", (), ("slow",), (experience_summary("exp-kernel", SAME),))
     )
 
-    recall = recall_experiences(SchemaReaders((shared, own)), profile(), 1000.0, ATTENTION)
+    recall = recall_experiences(SchemaReaders((shared, own)), profile(), ATTENTION)
 
     assert recall.available and recall.read_id == "read-1, read-2"
     assert [item.experience_id for item in recall.experiences] == ["exp-config", "exp-kernel"]
@@ -243,13 +242,13 @@ def test_a_read_over_two_schemas_takes_turns_by_schema_up_to_the_recall_limit() 
     shared = FakeExperienceReader(completed_read(*(experience_summary(f"cfg-{n}", SAME) for n in range(8))))
     own = FakeExperienceReader(completed_read(*(experience_summary(f"krn-{n}", SAME) for n in range(3))))
 
-    recall = recall_experiences(SchemaReaders((shared, own)), profile(), 1000.0, ATTENTION)
+    recall = recall_experiences(SchemaReaders((shared, own)), profile(), ATTENTION)
 
     assert [item.experience_id for item in recall.experiences] == [
         "cfg-0", "krn-0", "cfg-1", "krn-1", "cfg-2", "krn-2", "cfg-3", "cfg-4", "cfg-5", "cfg-6",
     ]  # fmt: skip
     assert sorted(recall.rendered_refs) == sorted(item.experience_id for item in recall.experiences)
-    assert [limit for _, _, limit in (*shared.calls, *own.calls)] == [RECALL_LIMIT, RECALL_LIMIT]
+    assert [limit for _, limit in (*shared.calls, *own.calls)] == [RECALL_LIMIT, RECALL_LIMIT]
 
 
 def test_a_schema_the_service_does_not_know_yet_leaves_the_others_experiences() -> None:
@@ -257,8 +256,8 @@ def test_a_schema_the_service_does_not_know_yet_leaves_the_others_experiences() 
     known = FakeExperienceReader(completed_read(experience_summary("exp-kernel", SAME)))
     failing = FakeExperienceReader(RemoteReadResult("", "failed", "", (), ("refused",)))
 
-    some = recall_experiences(SchemaReaders((unknown, known)), profile(), 1000.0, ATTENTION)
-    none = recall_experiences(SchemaReaders((unknown, failing)), profile(), 1000.0, ATTENTION)
+    some = recall_experiences(SchemaReaders((unknown, known)), profile(), ATTENTION)
+    none = recall_experiences(SchemaReaders((unknown, failing)), profile(), ATTENTION)
 
     assert some.available and [item.experience_id for item in some.experiences] == ["exp-kernel"]
     assert some.warnings == ("unknown schema",)
@@ -279,49 +278,63 @@ def test_an_index_over_two_schemas_pages_each_schemas_export() -> None:
     assert IdentityIndex.of(SchemaReaders((FakeExperienceReader(completed_read()),))) is None
 
 
-def test_the_read_carries_the_sessions_identity_workload_baseline_and_bottleneck() -> None:
+def _sent(reader: FakeExperienceReader) -> list[dict[str, object]]:
+    """What each read asked for: the value of every exact signal by its field, and the texts."""
+
+    return [
+        {
+            **{signal.field: signal.value for signal in signals if signal.field},
+            "text": [s.text for s in signals if s.text],
+        }
+        for signals, _ in reader.calls
+    ]
+
+
+def test_the_read_carries_the_sessions_conditions_objective_and_bottleneck_weighed_as_the_framework_phase() -> None:
     reader = FakeExperienceReader(completed_read())
 
-    recall_experiences(reader, profile(), 1000.0, RecallQuery("attention", "s1"))
+    recall_experiences(reader, profile(), ATTENTION)
 
-    ((decision, context, limit),) = reader.calls
-    assert (decision, limit) == (DECISION, RECALL_LIMIT)
-    assert context["identity"]["gpu"] == "MI355X" and "isl" not in context["identity"]
-    assert context["workload"] == {"tp": 8, "conc": 64, "isl": 1024, "osl": 1024}
-    assert context["benchmark_baseline"]["throughput"] == 1000.0
-    assert context["observations"] == {"bottleneck": "attention", "branch": "s1"}
+    ((signals, limit),) = reader.calls
+    (sent,) = _sent(reader)
+    assert limit == RECALL_LIMIT
+    assert sent["identity.gpu"] == "MI355X" and sent["objective"] == THROUGHPUT_OBJECTIVE
+    assert {field: sent[field] for field in ("identity.tp", "identity.conc", "identity.isl", "identity.osl")} == {
+        "identity.tp": 8,
+        "identity.conc": 64,
+        "identity.isl": 1024,
+        "identity.osl": 1024,
+    }
+    assert sent["text"] == ["attention"]
+    weights = {signal.field or signal.text: signal.weight for signal in signals}
+    assert (weights["identity.model"], weights["identity.tp"], weights["attention"]) == (1.0, 0.4, 0.6)
 
 
 def test_an_agentx_session_asks_for_the_objective_it_is_graded_on() -> None:
     reader = FakeExperienceReader(completed_read())
 
-    recall_experiences(reader, profile(isl=None, osl=None), 4.5, ATTENTION)
-    recall_experiences(
-        reader, profile(isl=None, osl=None), 9000.0, RecallQuery("attention", metric=TOTAL_TOKEN_THROUGHPUT)
-    )
-    recall_experiences(reader, profile(), 1000.0, ATTENTION)
+    recall_experiences(reader, profile(isl=None, osl=None), ATTENTION)
+    recall_experiences(reader, profile(isl=None, osl=None), RecallQuery("attention", metric=TOTAL_TOKEN_THROUGHPUT))
+    recall_experiences(reader, profile(), ATTENTION)
 
-    agentx, total, inferencex = (context for _, context, _ in reader.calls)
-    assert (agentx["objective"]["id"], agentx["benchmark_baseline"]["interactivity"]) == (INTERACTIVITY_OBJECTIVE, 4.5)
-    assert (total["objective"]["id"], total["benchmark_baseline"]["total_throughput"]) == (
+    assert [sent["objective"] for sent in _sent(reader)] == [
+        INTERACTIVITY_OBJECTIVE,
         TOTAL_THROUGHPUT_OBJECTIVE,
-        9000.0,
-    )
-    assert inferencex["objective"]["id"] == THROUGHPUT_OBJECTIVE
+        THROUGHPUT_OBJECTIVE,
+    ]
 
 
 def test_without_a_kb_or_with_a_failed_read_the_recall_says_so_and_still_renders() -> None:
-    disabled = recall_experiences(None, profile(), None, ATTENTION)
+    disabled = recall_experiences(None, profile(), ATTENTION)
     failed = recall_experiences(
-        FakeExperienceReader(RemoteReadResult("", "unavailable", "", (), ("planner_timeout",))),
+        FakeExperienceReader(RemoteReadResult("", "unavailable", "", (), ("timed out",))),
         profile(),
-        None,
         RecallQuery("x"),
     )
-    nothing = recall_experiences(FakeExperienceReader(completed_read()), profile(), None, RecallQuery("x"))
+    nothing = recall_experiences(FakeExperienceReader(completed_read()), profile(), RecallQuery("x"))
 
     assert disabled.render() == ["- unavailable (disabled)"]
-    assert failed.render() == ["- unavailable (unavailable: planner_timeout)"]
+    assert failed.render() == ["- unavailable (unavailable: timed out)"]
     assert nothing.render()[-1] == "- nothing matched"
 
 
@@ -329,7 +342,7 @@ def test_the_rendering_groups_the_tiers_and_names_what_differs() -> None:
     no_values = {**experience_summary("exp-bare", {**SAME, "gpu": "mi300x"}), "baseline_value": None}
     reader = FakeExperienceReader(completed_read(experience_summary("exp-same", SAME), no_values))
 
-    lines = recall_experiences(reader, profile(hardware="mi355x"), 1000.0, ATTENTION).render()
+    lines = recall_experiences(reader, profile(hardware="mi355x"), ATTENTION).render()
 
     assert lines[1:] == [
         "priors, measured under this session's conditions:",

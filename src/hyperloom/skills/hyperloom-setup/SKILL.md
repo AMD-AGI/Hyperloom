@@ -534,9 +534,9 @@ If it fails, report its message; when another process already serves that port
 with a different token, ask the user to set another port in `HYPERLOOM_KB_URL`
 and rerun this step. Do not continue to a demo until it succeeds.
 
-When the `.env` settings the service uses change (the Anthropic gateway or
-model), or Hyperloom is upgraded, the next run of this step or of an optimize
-launch restarts it with them.
+When the `.env` settings the service uses change (the global KB's URL and
+token, or the database URL), or Hyperloom is upgraded, the next run of this
+step or of an optimize launch restarts it with them.
 
 The same entry point also runs the `hyperloom-kb` skill's commands on the
 workspace's service, such as

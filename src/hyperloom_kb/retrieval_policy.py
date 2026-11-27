@@ -1,20 +1,15 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Versioned retrieval policy execution over policy-neutral primitives."""
+"""How a read shapes its result, and lexical fuzzy recall over a Query View."""
 
 from __future__ import annotations
 
-import hashlib
-import json
 import math
 import re
-from collections.abc import Mapping
 from collections.abc import Set as AbstractSet
 from dataclasses import dataclass
 from difflib import SequenceMatcher
-from enum import Enum
-from typing import Any, cast
 
 from hyperloom_kb.query_view import QueryView, RetrievalCapability
 from hyperloom_kb.retrieval import (
@@ -26,253 +21,28 @@ from hyperloom_kb.schema import (
     FieldRole,
     FieldValue,
     FileRef,
-    JsonValue,
     default_search_weight,
 )
 from hyperloom_kb.storage import ExperienceStore
 
-RETRIEVAL_POLICY_VERSION = 1
-LEXICAL_FUZZY_PROVIDER_REF = "hyperloom-kb.lexical-fuzzy@v3"
-_POLICY_ID_PREFIX = "retrieval-config:sha256:"
-_SCHEMA_REF_PREFIX = "schema:sha256:"
-_RANKING_POLICIES = frozenset(
-    {
-        "capability-priority@v1",
-        "group-key@v1",
-        "max-hit-score@v1",
-        "weighted-signal-sum@v1",
-    }
-)
-
-
-class RetrievalPolicyError(ValueError):
-    """Raised when a versioned retrieval policy cannot be executed faithfully."""
-
-
-class RepresentativePolicy(str, Enum):
-    MATCHED_FIRST = "matched_first"
-    FIRST_MEMBER = "first_member"
-
-
-def _canonical(value: Any) -> str:
-    return json.dumps(
-        value,
-        ensure_ascii=False,
-        allow_nan=False,
-        sort_keys=True,
-        separators=(",", ":"),
-    )
-
-
-def _config_id(manifest: Mapping[str, JsonValue]) -> str:
-    digest = hashlib.sha256(f"retrieval-config\0{_canonical(manifest)}".encode()).hexdigest()
-    return f"{_POLICY_ID_PREFIX}{digest}"
-
-
-def _required_text(value: Any, name: str) -> str:
-    text = str(value or "").strip()
-    if not text:
-        raise RetrievalPolicyError(f"{name} must be non-empty")
-    return text
-
-
-def _schema_ref(value: Any) -> str:
-    text = _required_text(value, "schema_ref")
-    if not text.startswith(_SCHEMA_REF_PREFIX) or len(text) != len(_SCHEMA_REF_PREFIX) + 64:
-        raise RetrievalPolicyError("schema_ref is invalid")
-    return text
-
 
 @dataclass(frozen=True)
 class ResultShape:
-    """How a read ranks the groups it recalled, which member stands for each, and how many and how much it renders."""
+    """How many of the groups a read ranked it renders, and within how many characters."""
 
-    ranking_policy_ref: str = "group-key@v1"
-    representative_policy: RepresentativePolicy = RepresentativePolicy.MATCHED_FIRST
     max_groups: int = 20
     render_budget_chars: int | None = 4_000
-
-
-@dataclass(frozen=True)
-class RetrievalConfiguration:
-    configuration_id: str
-    schema_ref: str
-    policy_version: str
-    capabilities: tuple[RetrievalCapability, ...]
-    limits: dict[RetrievalCapability, int]
-    provider_refs: dict[RetrievalCapability, str]
-    ranking_policy_ref: str
-    representative_policy: RepresentativePolicy
-    max_groups: int
-    render_budget_chars: int | None
-    version: int = RETRIEVAL_POLICY_VERSION
-
-    def __post_init__(self) -> None:
-        object.__setattr__(self, "schema_ref", _schema_ref(self.schema_ref))
-        object.__setattr__(
-            self,
-            "policy_version",
-            _required_text(self.policy_version, "policy_version"),
-        )
-        capabilities = tuple(self.capabilities)
-        if set(capabilities) != set(RetrievalCapability) or len(capabilities) != len(RetrievalCapability):
-            raise RetrievalPolicyError("capabilities must enumerate exact, filter, fuzzy, and semantic once")
-        object.__setattr__(self, "capabilities", capabilities)
-        limits = dict(self.limits)
-        if set(limits) != set(RetrievalCapability):
-            raise RetrievalPolicyError("limits must cover every retrieval capability")
-        if any(isinstance(limit, bool) or not isinstance(limit, int) or limit < 1 for limit in limits.values()):
-            raise RetrievalPolicyError("retrieval limits must be positive integers")
-        object.__setattr__(self, "limits", limits)
-        provider_refs = dict(self.provider_refs)
-        if any(
-            capability not in {RetrievalCapability.FUZZY, RetrievalCapability.SEMANTIC} for capability in provider_refs
-        ):
-            raise RetrievalPolicyError("provider_refs may pin only fuzzy or semantic providers")
-        for ref in provider_refs.values():
-            _required_text(ref, "provider_refs")
-        object.__setattr__(self, "provider_refs", provider_refs)
-        if self.ranking_policy_ref not in _RANKING_POLICIES:
-            raise RetrievalPolicyError("ranking_policy_ref is not implemented")
-        if not isinstance(self.representative_policy, RepresentativePolicy):
-            raise RetrievalPolicyError("representative_policy is invalid")
-        if isinstance(self.max_groups, bool) or self.max_groups < 1:
-            raise RetrievalPolicyError("max_groups must be positive")
-        if self.render_budget_chars is not None and (
-            isinstance(self.render_budget_chars, bool) or self.render_budget_chars < 1
-        ):
-            raise RetrievalPolicyError("render_budget_chars must be positive or None")
-        if self.version != RETRIEVAL_POLICY_VERSION:
-            raise RetrievalPolicyError("unsupported RetrievalConfiguration version")
-        if self.configuration_id != _config_id(self.to_manifest()):
-            raise RetrievalPolicyError("configuration_id does not match manifest content")
-
-    @classmethod
-    def create(
-        cls,
-        schema_ref: str,
-        policy_version: str,
-        *,
-        limits: Mapping[RetrievalCapability, int] | None = None,
-        provider_refs: Mapping[RetrievalCapability, str] | None = None,
-        shape: ResultShape = ResultShape(),
-    ) -> RetrievalConfiguration:
-        capabilities = tuple(RetrievalCapability)
-        normalized_limits = dict(limits or dict.fromkeys(RetrievalCapability, 20))
-        normalized_providers = dict(provider_refs or {})
-        manifest: dict[str, JsonValue] = {
-            "version": RETRIEVAL_POLICY_VERSION,
-            "schema_ref": schema_ref,
-            "policy_version": policy_version,
-            "capabilities": [capability.value for capability in capabilities],
-            "limits": {
-                capability.value: limit
-                for capability, limit in sorted(
-                    normalized_limits.items(),
-                    key=lambda item: item[0].value,
-                )
-            },
-            "provider_refs": {
-                capability.value: ref
-                for capability, ref in sorted(
-                    normalized_providers.items(),
-                    key=lambda item: item[0].value,
-                )
-            },
-            "ranking_policy_ref": shape.ranking_policy_ref,
-            "representative_policy": shape.representative_policy.value,
-            "max_groups": shape.max_groups,
-            "render_budget_chars": shape.render_budget_chars,
-        }
-        return cls(
-            configuration_id=_config_id(manifest),
-            schema_ref=schema_ref,
-            policy_version=policy_version,
-            capabilities=capabilities,
-            limits=normalized_limits,
-            provider_refs=normalized_providers,
-            ranking_policy_ref=shape.ranking_policy_ref,
-            representative_policy=shape.representative_policy,
-            max_groups=shape.max_groups,
-            render_budget_chars=shape.render_budget_chars,
-        )
-
-    def to_manifest(self) -> dict[str, JsonValue]:
-        return {
-            "version": self.version,
-            "schema_ref": self.schema_ref,
-            "policy_version": self.policy_version,
-            "capabilities": [capability.value for capability in self.capabilities],
-            "limits": {
-                capability.value: limit
-                for capability, limit in sorted(
-                    self.limits.items(),
-                    key=lambda item: item[0].value,
-                )
-            },
-            "provider_refs": {
-                capability.value: ref
-                for capability, ref in sorted(
-                    self.provider_refs.items(),
-                    key=lambda item: item[0].value,
-                )
-            },
-            "ranking_policy_ref": self.ranking_policy_ref,
-            "representative_policy": self.representative_policy.value,
-            "max_groups": self.max_groups,
-            "render_budget_chars": self.render_budget_chars,
-        }
-
-    def to_dict(self) -> dict[str, JsonValue]:
-        return {"configuration_id": self.configuration_id, **self.to_manifest()}
-
-    @classmethod
-    def from_dict(cls, value: Any) -> RetrievalConfiguration:
-        if not isinstance(value, dict):
-            raise RetrievalPolicyError("RetrievalConfiguration must be an object")
-        raw_capabilities = value.get("capabilities")
-        raw_limits = value.get("limits")
-        raw_providers = value.get("provider_refs")
-        if (
-            not isinstance(raw_capabilities, list)
-            or not isinstance(raw_limits, dict)
-            or not isinstance(raw_providers, dict)
-        ):
-            raise RetrievalPolicyError("RetrievalConfiguration structures are invalid")
-        raw_budget = value.get("render_budget_chars", 0)
-        return cls(
-            configuration_id=str(value.get("configuration_id") or ""),
-            schema_ref=str(value.get("schema_ref") or ""),
-            policy_version=str(value.get("policy_version") or ""),
-            capabilities=tuple(RetrievalCapability(str(item)) for item in raw_capabilities),
-            limits={RetrievalCapability(str(capability)): int(limit) for capability, limit in raw_limits.items()},
-            provider_refs={RetrievalCapability(str(capability)): str(ref) for capability, ref in raw_providers.items()},
-            ranking_policy_ref=str(value.get("ranking_policy_ref") or ""),
-            representative_policy=RepresentativePolicy(str(value.get("representative_policy") or "")),
-            max_groups=int(value.get("max_groups", 0)),
-            render_budget_chars=None if raw_budget is None else int(raw_budget),
-            version=int(value.get("version", 0)),
-        )
 
 
 class LexicalFuzzyProvider:
     """Deterministic dependency-free fuzzy recall over pinned Experiences."""
 
-    capability = RetrievalCapability.FUZZY
-    provider_ref = LEXICAL_FUZZY_PROVIDER_REF
-
     def __init__(self, experiences: ExperienceStore, declaration: ExperienceDeclaration) -> None:
         self._experiences = experiences
         self._declaration = declaration
 
-    def recall(
-        self,
-        request: dict[str, JsonValue],
-        view: QueryView,
-        *,
-        limit: int,
-    ) -> tuple[CandidateHit, ...]:
-        query = _normalized_text(str(request.get("text") or ""))
+    def recall(self, text: str, view: QueryView) -> tuple[CandidateHit, ...]:
+        query = _normalized_text(text)
         query_tokens = _tokens(query)
         if not query_tokens:
             return ()
@@ -292,7 +62,6 @@ class LexicalFuzzyProvider:
         hits: list[CandidateHit] = []
         max_field_weight = max((weight for _, document in documents for weight, _ in document.fields), default=1.0)
         for experience_id, document in documents:
-            matched: list[str] = []
             weighted_match = 0.0
             for token in query_tokens:
                 token_field_weight = max(
@@ -300,7 +69,6 @@ class LexicalFuzzyProvider:
                     default=0.0,
                 )
                 if token_field_weight:
-                    matched.append(token)
                     weighted_match += _idf(token, visible_count, document_frequency) * token_field_weight
             coverage = weighted_match / (query_weight * max_field_weight) if query_weight else 0.0
             summary_similarity = SequenceMatcher(None, query, document.summary).ratio()
@@ -308,25 +76,8 @@ class LexicalFuzzyProvider:
             score = (0.9 * coverage + 0.1 * summary_similarity) * identity_compatibility
             if score <= 0:
                 continue
-            hits.append(
-                CandidateHit(
-                    experience_id,
-                    self.capability,
-                    score,
-                    {
-                        "provider_ref": self.provider_ref,
-                        "query_view_id": view.ref.view_id,
-                        "identity_compatibility": identity_compatibility,
-                        "matched_tokens": cast(list[JsonValue], sorted(matched)),
-                    },
-                )
-            )
-        return tuple(
-            sorted(
-                hits,
-                key=lambda hit: (-(hit.score or 0.0), hit.experience_id),
-            )[:limit]
-        )
+            hits.append(CandidateHit(experience_id, RetrievalCapability.FUZZY, score))
+        return tuple(sorted(hits, key=lambda hit: (-(hit.score or 0.0), hit.experience_id)))
 
 
 def _normalized_text(value: str) -> str:
@@ -447,11 +198,6 @@ def _identity_compatibility(
 
 
 __all__ = [
-    "LEXICAL_FUZZY_PROVIDER_REF",
-    "RETRIEVAL_POLICY_VERSION",
     "LexicalFuzzyProvider",
-    "RepresentativePolicy",
     "ResultShape",
-    "RetrievalConfiguration",
-    "RetrievalPolicyError",
 ]

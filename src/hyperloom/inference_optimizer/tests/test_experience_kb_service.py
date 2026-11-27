@@ -111,13 +111,12 @@ def test_init_env_keeps_configured_values_and_replaces_placeholders(tmp_path: Pa
 def started(monkeypatch) -> list[dict[str, Any]]:
     calls: list[dict[str, Any]] = []
 
-    def ensure_local_service(config, home, *, env, restart):
-        calls.append({"url": config.base_url, "home": home, "env": env, "restart": restart})
+    def ensure_local_service(config, home, *, restart):
+        calls.append({"url": config.base_url, "home": home, "restart": restart})
         return LocalService({"status": "ok", "experience_count": 3})
 
     monkeypatch.setattr(experience_kb_service, "ensure_local_service", ensure_local_service)
-    for key in ("HYPERLOOM_KB_URL", "LOCAL_KB_PLANNER_MODEL", "CLAUDE_MODEL", "ANTHROPIC_MODEL"):
-        monkeypatch.delenv(key, raising=False)
+    monkeypatch.delenv("HYPERLOOM_KB_URL", raising=False)
     monkeypatch.setenv("HYPERLOOM_KB_TOKEN", "workspace-token")
     return calls
 
@@ -136,7 +135,6 @@ def test_the_service_keeps_its_data_under_user_data_path(monkeypatch, tmp_path: 
     experience_kb_service.ensure_service()
 
     assert [call["home"] for call in started] == [tmp_path / "experience-kb"]
-    assert "LOCAL_KB_PLANNER_MODEL" not in started[0]["env"], "the service resolves its planner model itself"
 
 
 def test_ensure_reports_a_service_that_cannot_serve(monkeypatch, capsys) -> None:

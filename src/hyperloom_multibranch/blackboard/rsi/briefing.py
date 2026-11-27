@@ -36,7 +36,7 @@ At the root before anything was tried, the brief is the first batch's: cross-ses
 together stay under :data:`MAX_BRIEF_CHARS`, the most specific first.
 
 :class:`SessionBriefs` is the session's one source of briefs, so a branch's brief can be rebuilt at every launch of its
-specialist, on its head then: the Experience KB is read once per focus and branch, and only the blackboard's part is read
+specialist, on its head then: the Experience KB is read once per focus, and only the blackboard's part is read
 again. It keeps the focus each branch was given, and each head ``blackboard_replay`` refused to replay an unfinished lead
 on, because its change no longer applies there or the head has it already: the lead leaves the briefs from that head
 and from every commit that builds on it, for the rest of the session.
@@ -246,21 +246,21 @@ def _learnt_lines(notes: Notes) -> list[str]:
 
 
 class RecallCache:
-    """The completed Experience KB reads of one session, by focus, branch and baseline; a read that did not complete
-    is not kept, so the next brief tries again."""
+    """The completed Experience KB reads of one session, by focus; a read that did not complete is not kept, so the
+    next brief tries again."""
 
     def __init__(self) -> None:
-        self._reads: dict[tuple[str, str, float | None], Recall] = {}
+        self._reads: dict[str, Recall] = {}
         self._lock = threading.Lock()
 
-    def get(self, key: tuple[str, str, float | None]) -> Recall | None:
+    def get(self, focus: str) -> Recall | None:
         with self._lock:
-            return self._reads.get(key)
+            return self._reads.get(focus)
 
-    def keep(self, key: tuple[str, str, float | None], recall: Recall) -> None:
+    def keep(self, focus: str, recall: Recall) -> None:
         if recall.available:
             with self._lock:
-                self._reads[key] = recall
+                self._reads[focus] = recall
 
 
 @dataclass(frozen=True)
@@ -268,9 +268,8 @@ class CrossSessionBriefing(StartupBriefProvider):
     """A startup brief with this session's lessons and what other sessions left.
 
     ``warm`` are the leads PRELUDE read; ``references`` the reference launches the run was given, listed after them and
-    never replayed; ``experiences`` the Experience KB, read for ``focus`` (the bottleneck the specialist attacks) on
-    ``branch``; ``metric`` the metric the session is graded on, whose baseline the read carries and whose objective
-    an AgentX session's read asks for.
+    never replayed; ``experiences`` the Experience KB, read for ``focus`` (the bottleneck the specialist attacks);
+    ``metric`` the metric the session is graded on, whose objective an AgentX session's read asks for.
     ``identities`` looks up the conditions a read's summaries leave out; by default one is built on ``experiences``,
     and passing one index to every briefing of a session reads the export once. ``learnings`` is the session's one
     recall of the specialists' learnings; without it the brief holds this session's only. ``recalls`` keeps the
@@ -437,19 +436,16 @@ class CrossSessionBriefing(StartupBriefProvider):
     async def _recall(self, snapshot: BlackboardSnapshot) -> Recall | None:
         if self.experiences is None or snapshot.profile is None:
             return None
-        baseline = snapshot.baseline.values.get(self.metric) if snapshot.baseline is not None else None
-        key = (self.focus, self.branch, baseline)
-        if (kept := self.recalls.get(key)) is not None:
+        if (kept := self.recalls.get(self.focus)) is not None:
             return kept
         recall = await asyncio.to_thread(
             recall_experiences,
             self.experiences,
             snapshot.profile,
-            baseline,
-            RecallQuery(self.focus, self.branch, self.metric),
+            RecallQuery(self.focus, self.metric),
             identities=self.identities,
         )
-        self.recalls.keep(key, recall)
+        self.recalls.keep(self.focus, recall)
         return recall
 
     async def _learnt(self, snapshot: BlackboardSnapshot) -> Notes:
