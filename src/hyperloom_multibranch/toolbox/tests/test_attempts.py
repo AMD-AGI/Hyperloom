@@ -41,7 +41,6 @@ from hyperloom.measure.failures import (
 from hyperloom.measure.runner.import_outcome import INERT_PATCH
 from inference_suite.contracts import FailedStep
 from hyperloom_multibranch.toolbox.attempts import (
-    CAPACITY_UNAVAILABLE,
     NODE_BLAMELESS_INFRA_REASONS,
     RUNNER_START_TIMEOUT,
     WAITED_INFRA_REASONS,
@@ -63,7 +62,6 @@ HUNG_REASON = f"{HUNG_BEFORE_READY}: no output for 600s before the server was re
 #: Failures that are not the node's: cards a process outside the test held, no sandbox from the platform in time.
 FOREIGN_REASON = f"{FOREIGN_PROCESS_ON_CARD}: card 3 held by pid 4242 (python)"
 START_TIMEOUT_REASON = RUNNER_START_TIMEOUT
-CAPACITY_REASON = f"{CAPACITY_UNAVAILABLE}: no node with 8 free GPUs"
 
 
 class _FakeTime:
@@ -143,8 +141,8 @@ async def _run(
 
 @pytest.mark.parametrize(
     "reason",
-    [FOREIGN_REASON, START_TIMEOUT_REASON, CAPACITY_REASON, f"{RUNNER_LOST}: the sandbox is gone"],
-    ids=["busy_cards", "no_sandbox_in_time", "no_capacity", "node_blameless"],
+    [FOREIGN_REASON, START_TIMEOUT_REASON, f"{RUNNER_LOST}: the sandbox is gone"],
+    ids=["busy_cards", "no_sandbox_in_time", "node_blameless"],
 )
 async def test_retries_after_a_failure_that_is_not_the_node_s_wait_longer_each_time_before_they_start(reason) -> None:
     result, executor, _ = await _run(reason)
@@ -167,7 +165,7 @@ async def test_a_retry_after_a_failure_held_against_its_node_goes_at_once_elsewh
 
 
 async def test_in_a_mixed_run_only_the_retries_after_a_failure_that_is_not_the_node_s_wait() -> None:
-    result, executor, reported = await _run((FOREIGN_REASON, PORT_REASON, CAPACITY_REASON, PORT_REASON))
+    result, executor, reported = await _run((FOREIGN_REASON, PORT_REASON, START_TIMEOUT_REASON, PORT_REASON))
     assert len(executor.jobs) == 4 and result.validity is Validity.MEASUREMENT_FAILED
     assert executor.clock.waits == [60.0, 120.0], "the waits count the waiting retries only"
     assert executor.started == [1000.0, 1060.0, 1060.0, 1180.0]
@@ -235,7 +233,7 @@ async def test_two_node_held_failures_in_a_row_avoid_only_the_second_node() -> N
 async def test_a_waited_failure_after_a_node_held_one_leaves_the_next_attempt_no_node_to_avoid() -> None:
     """The attempt just before the third failed for a reason that is not its node's, so the third avoids nothing: the
     first node's failure is not carried past the attempt right after it (its report quarantines it instead)."""
-    result, executor, reported = await _run((PORT_REASON, FOREIGN_REASON, PORT_REASON, CAPACITY_REASON))
+    result, executor, reported = await _run((PORT_REASON, FOREIGN_REASON, PORT_REASON, START_TIMEOUT_REASON))
     assert [job.avoid_nodes for job in executor.jobs] == [(), ("n1",), (), ("n3",)]
     assert reported == ["n1", "n3", "n4"], "the busy cards of n2 do not report their node"
 
@@ -274,10 +272,10 @@ async def test_a_failure_that_says_nothing_about_the_node_puts_no_node_in_the_av
 
 @pytest.mark.parametrize(
     "reason",
-    [CAPACITY_REASON, f"{RUNNER_LOST}: the sandbox is gone", f"{RUNNER_START_FAILED}: exec format error"],
-    ids=["no_capacity", "runner_lost", "runner_start_failed"],
+    [f"{RUNNER_LOST}: the sandbox is gone", f"{RUNNER_START_FAILED}: exec format error"],
+    ids=["runner_lost", "runner_start_failed"],
 )
-async def test_a_lost_or_unstarted_runner_and_no_capacity_still_avoid_their_node(reason) -> None:
+async def test_a_lost_or_unstarted_runner_still_avoids_its_node(reason) -> None:
     _, executor, _ = await _run(reason)
     assert [job.avoid_nodes for job in executor.jobs][1:] == [("n1",), ("n2",), ("n3",)]
 
@@ -437,7 +435,6 @@ def test_the_unavoided_names_are_the_busy_cards_and_the_blameless_ones_less_a_lo
     }
     assert WAITED_INFRA_REASONS - UNAVOIDED_INFRA_REASONS == {
         "runner_start_timeout",
-        "capacity_unavailable",
         "runner_lost",
         "runner_start_failed",
     }
@@ -521,9 +518,8 @@ def test_the_waited_names_are_the_blameless_ones_and_the_busy_cards_and_no_sandb
     assert WAITED_INFRA_REASONS == NODE_BLAMELESS_INFRA_REASONS | {
         "foreign_process_on_card",
         "runner_start_timeout",
-        "capacity_unavailable",
     }
-    assert {FOREIGN_PROCESS_ON_CARD, RUNNER_START_TIMEOUT, CAPACITY_UNAVAILABLE} <= INFRA_ERROR_CLASSES
+    assert {FOREIGN_PROCESS_ON_CARD, RUNNER_START_TIMEOUT} <= INFRA_ERROR_CLASSES
 
 
 #: Reasons a hosted runner can report on a failed start.

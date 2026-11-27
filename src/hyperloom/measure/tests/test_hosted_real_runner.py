@@ -17,6 +17,7 @@ from typing import Any
 import pytest
 
 from hyperloom.contracts.measurement import FailureClass
+from hyperloom.measure import hosted
 from hyperloom.measure.failures import FRAMEWORK_VERSION_MISMATCH
 from hyperloom.measure.hosted_log import STATE_FINISHED
 from hyperloom.measure.local_templates import image_env
@@ -25,6 +26,7 @@ from hyperloom.measure.runner.tools import INFERENCEX_STORE, TOOL_CHECKOUTS_DIR
 from hyperloom.measure.tests.bundle_factory import STAGING, base_launch, stage_into
 from hyperloom.measure.returncodes import HOSTED_SPEC_REJECTED_RC
 from hyperloom.measure.socket import SessionFacts
+from hyperloom.measure.spec import MeasurementSpec
 from hyperloom.measure.tests.gpu_free_host import IDLE_CARDS_PYTHON
 from hyperloom.measure.tests.hosted_fixtures import Rig, make_call, make_rig
 from hyperloom.sandbox.local import LocalTemplate
@@ -211,8 +213,18 @@ def test_files_compiled_against_another_framework_version_are_refused_as_infra_b
 
 
 @pytest.mark.parametrize("fixture", ["real", "real_cli"])
-def test_a_sheet_the_real_runner_refuses_is_a_refused_sheet_not_a_failed_candidate(fixture, request, tmp_path) -> None:
-    r = request.getfixturevalue(fixture)(model_hashes={"config.json": "00" * 32})
+def test_a_sheet_the_real_runner_refuses_is_a_refused_sheet_not_a_failed_candidate(
+    fixture, request, tmp_path, monkeypatch
+) -> None:
+    r = request.getfixturevalue(fixture)()
+    built = hosted.build_spec
+
+    def hashing_a_model_file(*args: Any, **kwargs: Any) -> MeasurementSpec:
+        """The sheet the backend writes names a model file the runner cannot match."""
+        document = built(*args, **kwargs).to_document()
+        return MeasurementSpec.from_document({**document, "model_hashes": {"config.json": "00" * 32}})
+
+    monkeypatch.setattr(hosted, "build_spec", hashing_a_model_file)
     call = _call(tmp_path, point=_point(tmp_path), timeout_sec=120)
     outcome = r.backend.run_test(call)
     assert outcome.returncode == HOSTED_SPEC_REJECTED_RC

@@ -207,15 +207,14 @@ class SandboxPool:
         tag: AttemptTag,
         *,
         timeout_sec: float,
-        remaining_sec: float | None = None,
         stop: threading.Event | None = None,
     ) -> RunnerSandbox:
         """Create the authoritative sandbox of one test attempt, after a slot is free.
 
-        ``tag`` names the attempt; ``timeout_sec`` is the test's own timeout; the sandbox lives that long plus the slack, but never past
-        ``remaining_sec`` (what is left of the run). ``stop`` ends the wait for a slot with :class:`PoolClosed`. The
-        waits for a slot, for room in the quota and for the sandbox to run share one deadline, ``timeout_sec`` (or
-        ``remaining_sec`` when less) from the call, and each logs when it begins and while it lasts.
+        ``tag`` names the attempt; ``timeout_sec`` is the test's own timeout; the sandbox lives that long plus the slack.
+        ``stop`` ends the wait for a slot with :class:`PoolClosed`. The waits for a slot, for room in the quota and for
+        the sandbox to run share one deadline, ``timeout_sec`` from the call, and each logs when it begins and while it
+        lasts.
 
         Raises:
             NoRunnerTemplate: No template serves ``gpu_count`` (checked before any slot is taken).
@@ -232,10 +231,8 @@ class SandboxPool:
         """
         template = self.template_for(gpu_count)
         lifetime = int(timeout_sec + self._slack)
-        if remaining_sec is not None:
-            lifetime = min(lifetime, max(1, int(remaining_sec)))
         metadata = self._metadata(tag.request_id, tag.attempt, tag.avoid_nodes, tag.meta or {})
-        wait = _Wait(f"test {tag.request_id} attempt {tag.attempt}", _wait_budget(timeout_sec, remaining_sec))
+        wait = _Wait(f"test {tag.request_id} attempt {tag.attempt}", max(0.0, float(timeout_sec)))
         self._take_slot(stop, wait=wait)
         try:
             sandbox = self._create(template, lifetime, metadata, stop, wait)
@@ -521,12 +518,6 @@ class SandboxPool:
             sandbox.kill()
         except SandboxError:
             log.exception("sandbox %s could not be closed", sandbox.sandbox_id)
-
-
-def _wait_budget(timeout_sec: float, remaining_sec: float | None) -> float:
-    """How long an attempt may wait for its sandbox: the test's own timeout, never past what is left of the run."""
-    budget = max(0.0, float(timeout_sec))
-    return budget if remaining_sec is None else min(budget, max(0.0, float(remaining_sec)))
 
 
 def _one_line(text: str, limit: int = 300) -> str:

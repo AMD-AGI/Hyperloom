@@ -39,7 +39,7 @@ from hyperloom.measure.framework.base import (
 from hyperloom.measure.framework.copies import private_framework
 from hyperloom.measure.framework.rows import DEFAULT_TABLE_PLACEHOLDER
 from hyperloom.measure.local import LocalMeasurementBackend, TestCallRefused
-from hyperloom.measure.socket import SessionFacts, TestCall
+from hyperloom.measure.socket import TestCall
 from hyperloom.measure.tests.aiter_excerpts import A8W8_HEADER, A8W8_ROWS, A8W8_UNTUNED, csv_text
 from hyperloom.measure.tests.framework_fixtures import (
     DAMAGED,
@@ -278,8 +278,7 @@ def test_a_variable_the_process_carries_is_copied_like_one_the_point_names(
 def test_unsetting_a_table_variable_means_its_defaults_and_the_defaults_are_private(
     tmp_path: Path, configs: Path, session: Path, server: _Server
 ) -> None:
-    facts = SessionFacts(reference_unset_envs=("AITER_CONFIG_MOE",))
-    _run(tmp_path, "t", session_facts=facts, unset_envs=("AITER_CONFIG_GEMM", "STALE_PIN"))
+    _run(tmp_path, "t", unset_envs=("AITER_CONFIG_GEMM", "AITER_CONFIG_MOE", "STALE_PIN"))
 
     env = server.envs[0]
     assert server.unset[0] == ["STALE_PIN"]

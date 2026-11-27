@@ -402,7 +402,7 @@ def _call(ctx: _Context, spec: MeasurementSpec, points: list[Path], inferencex: 
         on_output=progress.touch,
         env_overrides=dict(spec.process_env),
         unset_envs=spec.unset_envs,
-        session_facts=SessionFacts((), str(inferencex), ctx.staging, p.base_launch),
+        session_facts=SessionFacts(inferencex_path=str(inferencex), staging=ctx.staging, base_launch=p.base_launch),
         attachments=_case_attachments(spec),
         phases=ctx.phases,
         short_prompts=p.short_prompts,

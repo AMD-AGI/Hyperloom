@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""The measurement socket: one complete test, and the backend protocol that runs it.
+"""The measurement socket: one complete test, what a backend is handed to run it and what it gives back.
 
 A test is every measurement that shares one inference server: the server start, the optional warmup round, the
 measured round(s), an accuracy round when the caller asked for one, and the teardown. A backend's ``run_test`` blocks;
@@ -14,7 +14,7 @@ import subprocess
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Literal, Protocol
+from typing import Literal
 
 from hyperloom.contracts.measurement import AccuracyValue, AttachmentRef, FailureClass, PhaseTiming, SandboxFacts
 from hyperloom.measure.checkpoint import CheckpointPlan
@@ -27,7 +27,6 @@ from inference_suite.contracts import BaseLaunch, NormalisedManifest
 
 __all__ = [
     "EnvironmentRef",
-    "MeasurementBackend",
     "MeasurementTimeout",
     "RoundOutcome",
     "RoundPlan",
@@ -86,7 +85,6 @@ class EnvironmentRef:
     """Identifies the software stack a test is meant to run on; empty fields mean 'whatever is installed here'."""
 
     image_digest: str | None = None
-    runtime_manifest_sha256: str | None = None
 
     @classmethod
     def current_stack(cls) -> EnvironmentRef:
@@ -101,7 +99,6 @@ class SessionFacts:
     session's frozen base, which the test's own session directory is given so its rounds run on inference_suite.
     """
 
-    reference_unset_envs: tuple[str, ...] = ()
     inferencex_path: str | None = None
     staging: NormalisedManifest | None = None
     base_launch: BaseLaunch | None = None
@@ -123,11 +120,9 @@ class TestCall:
     rounds: RoundPlan = field(default_factory=RoundPlan.from_env)
     accuracy: bool = False
     meta: TestMeta = field(default_factory=TestMeta)
-    server_log_path: str | None = None
     result_dir: str | None = None
     silence_timeout_sec: float | None = None
     on_output: Callable[[], None] | None = None
-    session_deadline_sec: float | None = None
     unset_envs: tuple[str, ...] = ()
     env_overrides: Mapping[str, str] = field(default_factory=dict)
     environment: EnvironmentRef = field(default_factory=EnvironmentRef.current_stack)
@@ -218,12 +213,3 @@ class MeasurementTimeout(subprocess.TimeoutExpired):
     ) -> None:
         super().__init__(cmd, timeout, output=output)
         self.phases = phases
-
-
-class MeasurementBackend(Protocol):
-    """What a measurement implementation provides."""
-
-    name: str
-
-    def run_test(self, call: TestCall) -> TestOutcome:
-        """Run the test ``call`` describes and return what it produced."""

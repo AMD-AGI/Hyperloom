@@ -1,14 +1,12 @@
 """The image the current machine runs.
 
 The image digest has no file or environment variable the platform fills in, so it comes
-from the caller (the pod status read through the Kubernetes API) or from two environment
-variables the operator sets.
+from two environment variables the operator or the hosting layer sets.
 """
 
 from __future__ import annotations
 
 import os
-import re
 from dataclasses import dataclass
 from typing import Mapping
 
@@ -18,15 +16,12 @@ __all__ = [
     "ActiveImage",
     "ImagePinError",
     "active_image",
-    "image_from_pod_status",
 ]
 
 IMAGE_REF_VAR = "HYPERLOOM_ACTIVE_IMAGE_REF"
 IMAGE_DIGEST_VAR = "HYPERLOOM_ACTIVE_IMAGE_DIGEST"
 
 _ZERO_DIGEST = "sha256:" + "0" * 64
-_DIGEST_IN_ID_RE = re.compile(r"@(sha256:[0-9a-f]{64})$")
-_ID_SCHEMES = ("docker-pullable://", "docker://", "containerd://")
 
 
 class ImagePinError(ValueError):
@@ -52,8 +47,8 @@ def _image(ref: str, digest: str) -> ActiveImage:
 def active_image(env: Mapping[str, str] | None = None) -> ActiveImage:
     """The image from ``HYPERLOOM_ACTIVE_IMAGE_REF`` and ``HYPERLOOM_ACTIVE_IMAGE_DIGEST``.
 
-    Nothing inside a SaFE container states its own image digest, so the operator (or the
-    launcher, from ``image_from_pod_status``) sets both. Missing or malformed values raise.
+    Nothing inside a SaFE container states its own image digest, so the operator or the
+    hosting layer sets both. Missing or malformed values raise.
     """
 
     env = os.environ if env is None else env
@@ -62,27 +57,3 @@ def active_image(env: Mapping[str, str] | None = None) -> ActiveImage:
         raise ImagePinError(f"cannot name the active image: {', '.join(missing)} not set")
     return _image(env[IMAGE_REF_VAR], env[IMAGE_DIGEST_VAR])
 
-
-def image_from_pod_status(pod: Mapping[str, object], container: str) -> ActiveImage:
-    """The image a container runs, from a pod object read through the Kubernetes API.
-
-    Uses ``status.containerStatuses[].imageID``, the digest the runtime resolved; the
-    spec's tag is not enough.
-    """
-
-    status = pod.get("status")
-    statuses = status.get("containerStatuses") if isinstance(status, Mapping) else None
-    for entry in statuses if isinstance(statuses, list) else []:
-        if isinstance(entry, Mapping) and entry.get("name") == container:
-            return _image_from_status(entry, container)
-    raise ImagePinError(f"the pod status has no container {container!r}: the pod is not running yet")
-
-
-def _image_from_status(entry: Mapping[str, object], container: str) -> ActiveImage:
-    image_id = str(entry.get("imageID") or "")
-    for scheme in _ID_SCHEMES:
-        image_id = image_id.removeprefix(scheme)
-    match = _DIGEST_IN_ID_RE.search(image_id)
-    if match is None:
-        raise ImagePinError(f"the imageID of container {container!r} carries no sha256 digest")
-    return _image(str(entry.get("image") or image_id.rsplit("@", 1)[0]), match.group(1))

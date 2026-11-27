@@ -607,12 +607,6 @@ def test_the_create_environment_reaches_every_create_of_the_pool() -> None:
     ] * 3
 
 
-def test_the_sandbox_never_outlives_the_run() -> None:
-    provider = _Provider()
-    _acquire(_pool(provider), timeout_sec=600, remaining_sec=120.7)
-    assert provider.calls[0]["timeout_sec"] == 120
-
-
 def test_the_template_follows_the_card_count_and_an_unserved_count_takes_no_slot() -> None:
     provider = _Provider()
     pool = _pool(provider, max_parallel_tests=1)

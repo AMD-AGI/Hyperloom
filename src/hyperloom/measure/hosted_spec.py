@@ -3,9 +3,9 @@
 
 """Turn a :class:`~hyperloom.measure.socket.TestCall` into the instruction sheet a runner executes.
 
-The sheet carries everything the runner needs and nothing it should not have: the materialised YAML with shared-storage
-paths replaced by attachment placeholders, a whitelist of process variables (never a credential), the platform variables
-of this process, the environment overlay, and the facts the application knows about the session. Anything the sheet
+The sheet carries everything the runner needs and nothing it should not have: the materialised YAML, the attachments the
+call ships, a whitelist of process variables (never a credential), the platform variables of this process, the
+environment overlay, and the facts the application knows about the session. Anything the sheet
 cannot say exactly is refused with :class:`SpecRefused`, never approximated.
 """
 
@@ -17,7 +17,7 @@ import os
 import re
 import tarfile
 from collections.abc import Iterable, Mapping
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
 
@@ -82,9 +82,8 @@ class SpecRefused(ValueError):
 class SpecContext:
     """What the application knows about the session that a single call does not carry.
 
-    ``blobs`` is the session's content-addressed blob store (``put``/``get``); attachments are written to it.
-    ``shared_roots`` are the directories on shared storage whose files a runner cannot read: a path below one of them
-    (the model directory excepted) in the YAML becomes an attachment. A runner holds its cards to ``card``.
+    ``blobs`` is the session's content-addressed blob store (``put``/``get``); attachments are read from it. A runner
+    holds its cards to ``card``.
     """
 
     image_ref: str
@@ -92,10 +91,6 @@ class SpecContext:
     gpu_type: str
     blobs: Any
     card: GpuCard | None = None
-    power_cap_w: float | None = None
-    partition_mode: str | None = None
-    model_hashes: Mapping[str, str] = field(default_factory=dict)
-    shared_roots: tuple[Path, ...] = ()
     model_dir: Path | None = None
     max_total_bytes: int | None = None
     platform_env: Mapping[str, str] | None = None
@@ -153,8 +148,7 @@ def _platform_env(ctx: SpecContext) -> dict[str, str]:
 
 
 def _unset_envs(call: TestCall) -> tuple[str, ...]:
-    facts = call.session_facts
-    return tuple(dict.fromkeys([*(facts.reference_unset_envs if facts else ()), *call.unset_envs]))
+    return tuple(dict.fromkeys(call.unset_envs))
 
 
 def _warmup_rounds(call: TestCall, first: BenchmarkPoint) -> int:
@@ -172,73 +166,6 @@ def _warmup_rounds(call: TestCall, first: BenchmarkPoint) -> int:
 def dir_manifest_sha256(entries: list[tuple[str, int, str]]) -> str:
     """The hash of a directory attachment's file list: sorted ``(relative path, size, sha256)`` triples as canonical JSON."""
     return hashlib.sha256(canonical_json([list(entry) for entry in sorted(entries)]).encode()).hexdigest()
-
-
-def _pack_dir(directory: Path) -> tuple[bytes, str]:
-    entries: list[tuple[str, int, str]] = []
-    buffer = io.BytesIO()
-    with tarfile.open(fileobj=buffer, mode="w") as tar:
-        for path in sorted(p for p in directory.rglob("*") if p.is_file() and not p.is_symlink()):
-            relative = path.relative_to(directory).as_posix()
-            data = path.read_bytes()
-            entries.append((relative, len(data), hashlib.sha256(data).hexdigest()))
-            info = tarfile.TarInfo(relative)
-            info.size, info.mode, info.mtime = len(data), 0o644, 0
-            tar.addfile(info, io.BytesIO(data))
-        if any(p.is_symlink() for p in directory.rglob("*")):
-            raise SpecRefused("attachment_unsafe", f"{directory} holds a symbolic link")
-    return buffer.getvalue(), dir_manifest_sha256(entries)
-
-
-def _attachment_from_path(path: Path, ctx: SpecContext) -> dict[str, str]:
-    if path.is_symlink():
-        raise SpecRefused("attachment_unsafe", f"{path} is a symbolic link")
-    if path.is_dir():
-        data, manifest = _pack_dir(path)
-        kind = "dir"
-    else:
-        data = path.read_bytes()
-        manifest, kind = hashlib.sha256(data).hexdigest(), "file"
-    blob = ctx.blobs.put(data)
-    return {"id": f"a-{blob[:16]}", "kind": kind, "blob": f"sha256:{blob}", "manifest_sha256": manifest}
-
-
-def _under(path: Path, roots: tuple[Path, ...]) -> bool:
-    return any(path == root or root in path.parents for root in roots)
-
-
-def _candidate_paths(value: Any) -> list[str]:
-    if isinstance(value, Mapping):
-        return [p for item in value.values() for p in _candidate_paths(item)]
-    if isinstance(value, list):
-        return [p for item in value for p in _candidate_paths(item)]
-    if isinstance(value, str):
-        return [part for part in value.split(":") if part.startswith("/")]
-    return []
-
-
-def _scan_attachments(document: Mapping[str, Any], ctx: SpecContext) -> dict[str, dict[str, str]]:
-    """Shared-storage paths under ``benchmark``, keyed by the path text they appear as in the YAML."""
-    found: dict[str, dict[str, str]] = {}
-    model = ctx.model_dir.resolve() if ctx.model_dir else None
-    roots = tuple(root.resolve() for root in ctx.shared_roots)
-    for text in _candidate_paths(document.get("benchmark") or {}):
-        path = Path(text)
-        if text in found or not path.exists():
-            continue
-        real = path.resolve()
-        if model is not None and _under(real, (model,)):
-            continue
-        if _under(real, roots):
-            found[text] = _attachment_from_path(path, ctx)
-    return found
-
-
-def _replace_paths(yaml_text: str, found: Mapping[str, Mapping[str, str]]) -> str:
-    # Longest first, so a path that is a prefix of another is not replaced inside it.
-    for text in sorted(found, key=len, reverse=True):
-        yaml_text = yaml_text.replace(text, "${HL_ATTACH:%s}" % found[text]["id"])
-    return yaml_text
 
 
 def _member_sha256(tar: tarfile.TarFile, member: tarfile.TarInfo) -> str:
@@ -321,20 +248,10 @@ def _call_attachments(call: TestCall, ctx: SpecContext) -> dict[str, dict[str, s
     return attachments
 
 
-def _point_configs(
-    call: TestCall, ctx: SpecContext, attachments: dict[str, dict[str, str]]
-) -> tuple[list[str], BenchmarkPoint]:
-    """Each point's YAML with its shared-storage paths replaced by placeholders, and the first point.
-
-    Every attachment a point's paths name joins ``attachments``.
-    """
+def _point_configs(call: TestCall) -> tuple[list[str], BenchmarkPoint]:
+    """Each point's YAML text, and the first point."""
     loaded = [_load_yaml(point) for point in call.points]
-    configs: list[str] = []
-    for text, document in loaded:
-        found = _scan_attachments(document, ctx)
-        attachments.update({a["id"]: a for a in found.values()})
-        configs.append(_replace_paths(text, found))
-    return configs, _read_point(loaded[0][1], call.points[0])
+    return [text for text, _ in loaded], _read_point(loaded[0][1], call.points[0])
 
 
 def _refuse_unknown_placeholders(configs: list[str], attachments: Mapping[str, object]) -> None:
@@ -358,8 +275,8 @@ def _hardware_section(ctx: SpecContext, gpus: int) -> dict[str, Any]:
     return {
         "gpu_type": ctx.gpu_type,
         "gpu_count": gpus,
-        "power_cap_w": ctx.power_cap_w,
-        "partition_mode": ctx.partition_mode,
+        "power_cap_w": None,
+        "partition_mode": None,
         "card": None if ctx.card is None else asdict(ctx.card),
     }
 
@@ -420,7 +337,7 @@ def build_spec(call: TestCall, *, request_id: str, ctx: SpecContext, deadline_un
     if not call.points:
         raise SpecRefused("no_points", "a test needs at least one measurement point")
     attachments = _call_attachments(call, ctx)
-    configs, first = _point_configs(call, ctx, attachments)
+    configs, first = _point_configs(call)
     _refuse_unknown_placeholders(configs, attachments)
     gpus = gpu_count_of(first)
     sheet = {
@@ -437,7 +354,7 @@ def build_spec(call: TestCall, *, request_id: str, ctx: SpecContext, deadline_un
         "unset_envs": list(_unset_envs(call)),
         "tools": _tools_section(call),
         "environment": _environment_document(call.environment, ctx),
-        "model_hashes": dict(ctx.model_hashes),
+        "model_hashes": {},
         "procedure": _procedure_section(call, first, deadline_unix),
         "outputs": {"result_dir": split_result_dir(call)[0], **_max_bytes(ctx)},
     }

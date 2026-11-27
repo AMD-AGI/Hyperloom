@@ -491,7 +491,7 @@ def _test_environment(call: TestCall) -> Iterator[list[str]]:
     try:
         if facts is not None and facts.base_launch is not None:
             freeze_base(session, facts.base_launch)
-        yield list(dict.fromkeys([*(facts.reference_unset_envs if facts else ()), *call.unset_envs]))
+        yield list(dict.fromkeys(call.unset_envs))
     finally:
         os.environ.update({key: value for key, value in saved.items() if value is not None})
         for key in [key for key, value in saved.items() if value is None]:
@@ -569,7 +569,7 @@ async def _grid(run: Run, point: int, name: str, *, watch_boot: bool = True, **l
             output_root=Path(call.output_dir),
             recipe=GridRecipe(call.points[point], base=LaunchLayer(extra_envs=envs)),
             launch=GridLaunch(call.result_dir, **launch),
-            stop=GridStop(call.session_deadline_sec, checkpoint=call.checkpoint and call.checkpoint.on(name == _TEST)),
+            stop=GridStop(checkpoint=call.checkpoint and call.checkpoint.on(name == _TEST)),
         )
         ended = time.time()
     _stamp_round(run, point, _round_shape(run, point, name, launch, results[0]), (started, ended))
