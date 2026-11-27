@@ -1499,6 +1499,8 @@ def test_kernel_target_outside_the_session_framework_root_is_refused(tmp_path, m
     active_root.mkdir()
     patch, _target = _recorded_kernel(tmp_path, tmp_path / "recorded")
     _session_framework_root(monkeypatch, active_root if session_names_a_root else None)
+    # A root that names nothing resolves to the working directory, which here holds the recorded checkout.
+    monkeypatch.chdir(tmp_path)
 
     entry = {"patch_path": str(patch), "apply_root": str(tmp_path / "recorded")}
 

@@ -31,6 +31,7 @@ from hyperloom.orchestrator.actions.executors.framework_change._spec_decode_cont
 from hyperloom.orchestrator.bus.resource_lock import SqliteLeaseBackend
 from hyperloom.orchestrator.bus.storage.connection import SqliteConnection
 from hyperloom.orchestrator.loop.sub_agent_runner import RunnerContext, SubAgentRunner
+from hyperloom.orchestrator.state.round_store import RoundStore
 from hyperloom.orchestrator.state.shared_state import EnablementRound, SharedState
 from hyperloom.orchestrator.state.task_registry import Task, TaskRegistry, TaskSpec
 from hyperloom.orchestrator.tests._helpers import integrate_extra
@@ -139,7 +140,7 @@ def test_a_copying_draft_switched_through_llama_server_s_environment_is_a_change
 @pytest.fixture
 def sub_agent_runner(tmp_path):
     db = SqliteConnection(tmp_path / "db.db")
-    runner = SubAgentRunner(SqliteLeaseBackend(db), TaskRegistry(db))
+    runner = SubAgentRunner(SqliteLeaseBackend(db), TaskRegistry(db), RoundStore(db))
     yield runner, TaskRegistry(db)
     db.close()
 

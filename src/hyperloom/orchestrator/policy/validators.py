@@ -79,6 +79,36 @@ def validate_specialist_framework(params: dict[str, Any]) -> None:
         )
 
 
+def validate_specialist_max_turns_raw(max_turns_raw: Any) -> None:
+    """Validate an optional specialist ``max_turns`` dial.
+
+    Args:
+        max_turns_raw: Raw ``max_turns`` value from dispatch params, or ``None``.
+
+    Raises:
+        PolicyDenied: When the value is not an int or is negative.
+    """
+    if max_turns_raw is None:
+        return
+    try:
+        max_turns = int(max_turns_raw)
+    except (TypeError, ValueError) as exc:
+        raise PolicyDenied(
+            f"delegate{{action='specialist'}}: params.max_turns max_turns must be int, got {max_turns_raw!r}",
+            rule="specialist_dispatch_source",
+        ) from exc
+    if max_turns < 0:
+        raise PolicyDenied(
+            f"delegate{{action='specialist'}}: params.max_turns max_turns={max_turns} must be >= 0",
+            rule="specialist_dispatch_source",
+            hint=(
+                "Use a non-negative integer. "
+                "0 = unbounded (bounded by the wall-clock budget); "
+                "omit max_turns to use the default turn cap."
+            ),
+        )
+
+
 def log_specialist_dispatch_coherence(scope_raw: str, tags: list[str]) -> None:
     """Log a tag / scope combination the specialist profile will re-infer."""
     if not tags:

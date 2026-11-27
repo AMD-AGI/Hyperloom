@@ -297,11 +297,13 @@ it.
   `specialist_gpu_request_invalid` (`gpu_count: 0` means the default),
   `specialist_gpu_pool_disabled` (an empty pool is
   `specialist_gpu_request_exceeds_capacity`, with a reason that says so),
-  `specialist_freeform_description_too_long`, the `max_turns` arm of
-  `specialist_dispatch_source` (a value above 1000 is the turn cap, a value
-  that is not a positive integer runs at the default) and the five
-  `warm_replay_*` rules. Two checks run before the work instead of after it:
-  a warm-replay kernel item whose files lie outside the session's framework
+  `specialist_freeform_description_too_long`, the ceiling of 1000 on
+  `max_turns` (a larger value is the turn cap; a non-integer or negative one
+  is still denied with `specialist_dispatch_source`) and the five
+  `warm_replay_*` rules. The trajectory `intent` event of a delegate refused
+  by either resource rule now carries `admitted: true`, because both are
+  answered after PolicyGate. Two checks run before the work instead of after
+  it: a warm-replay kernel item whose files lie outside the session's framework
   checkout is deferred before it is patched, where 1.2.x patched it and then
   cancelled the replay with the patch still in the tree; and a specialist
   deliverable whose `integrate_patch` names a path outside the session

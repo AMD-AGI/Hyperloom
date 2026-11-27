@@ -271,37 +271,38 @@ def test_single_domain_scope_with_multiple_tags_allowed(gate):
     )
 
 
-@pytest.mark.parametrize("max_turns", [-1, 0, 1001, 50_000, "many", 2.5, None])
-def test_the_gate_does_not_judge_max_turns(gate, max_turns):
-    """The dial has one reader, which also decides what a value that names no turn count means."""
-    gate._validate_specialist_dispatch(
-        _dispatch({"scope": "freeform", "task_description": "probe", "max_turns": max_turns}),
-    )
-    gate._validate_specialist_dispatch(
-        _dispatch({"domain": "serving_specialist", "gap_canonical_id": "gap.x", "max_turns": max_turns}),
-    )
+_MAX_TURNS_DISPATCHES = [
+    pytest.param({"scope": "freeform", "task_description": "probe"}, id="freeform"),
+    pytest.param({"domain": "serving_specialist", "gap_canonical_id": "gap.x"}, id="anchored"),
+]
 
 
-@pytest.mark.parametrize(
-    ("raw", "resolved"),
-    [
-        (5, 5),
-        ("7", 7),
-        (50_000, 50_000),
-        (None, 42),
-        ("", 42),
-        (0, 42),
-        (-1, 42),
-        ("many", 42),
-        ([3], 42),
-        (True, 42),
-    ],
-)
-def test_max_turns_is_a_positive_count_or_the_default(raw, resolved):
-    """A value that names no positive turn count leaves the default; none of them fails the specialist."""
+@pytest.mark.parametrize("params", _MAX_TURNS_DISPATCHES)
+@pytest.mark.parametrize("max_turns", [None, 0, 1, "7", 1001, 50_000])
+def test_a_max_turns_that_is_a_count_is_admitted_whatever_its_size(gate, params, max_turns):
+    """The wall-clock budget bounds a specialist, so the dial has no ceiling."""
+    gate._validate_specialist_dispatch(_dispatch({**params, "max_turns": max_turns}))
+
+
+@pytest.mark.parametrize("params", _MAX_TURNS_DISPATCHES)
+@pytest.mark.parametrize("max_turns", [-1, "many", "", [3]])
+def test_a_max_turns_that_is_not_a_count_is_denied(gate, params, max_turns):
+    """Refused at the intent, so the value never reaches the executor to fail a specialist that ran nothing."""
+    with pytest.raises(PolicyDenied) as exc:
+        gate._validate_specialist_dispatch(_dispatch({**params, "max_turns": max_turns}))
+
+    assert exc.value.rule == "specialist_dispatch_source"
+    assert "params.max_turns" in str(exc.value)
+
+
+def test_resolve_specialist_max_turns_zero_uses_default():
     from hyperloom.orchestrator.specialists.runner import resolve_specialist_max_turns
 
-    assert resolve_specialist_max_turns(raw, default=42) == resolved
+    assert resolve_specialist_max_turns(0, default=1000) == 1000
+    assert resolve_specialist_max_turns(None, default=42) == 42
+    assert resolve_specialist_max_turns("", default=42) == 42
+    assert resolve_specialist_max_turns(5, default=1000) == 5
+    assert resolve_specialist_max_turns(50_000, default=1000) == 50_000
 
 
 # --------------------------------------------------------------------------- # Tool surface: TaskKill and
@@ -389,6 +390,7 @@ def test_specialist_emit_hint_lists_every_llm_selectable_domain():
         assert key in hint, key
     for key in (d.key for d in SPECIALIST_DOMAINS if not d.llm_selectable):
         assert key not in hint, key
+    assert "max_turns?=<int turn cap; omit or 0 for the default>" in hint
 
 
 def test_gate_denies_orchestration_naming_a_coordinator_dispatched_domain(gate):

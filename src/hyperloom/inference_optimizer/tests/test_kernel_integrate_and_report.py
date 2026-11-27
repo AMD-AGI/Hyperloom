@@ -21,6 +21,7 @@ from hyperloom.orchestrator.actions.executors.report import ReportExecutor
 from hyperloom.orchestrator.tests.mock_backend import MockBackend, ScriptedPlan
 from hyperloom.orchestrator.loop.coordinator import Coordinator
 from hyperloom.inference_optimizer.protocol.intent import Intent, IntentType
+from hyperloom.orchestrator.state.round_store import RoundStore
 from hyperloom.orchestrator.state.shared_state import SharedState
 from hyperloom.orchestrator.state.tests._session_base import freeze_session_base
 from hyperloom.orchestrator.loop.sub_agent_runner import (
@@ -1080,7 +1081,7 @@ async def test_report_executor_writes_md_and_json(session_dir, record_alert):
     db = SqliteConnection(tmp_path_helper(session_dir))
     locks = SqliteLeaseBackend(db)
     tr = TaskRegistry(db)
-    sub = SubAgentRunner(locks, tr, session_dir=session_dir)
+    sub = SubAgentRunner(locks, tr, RoundStore(db), session_dir=session_dir)
     sub.register_executor("report", ReportExecutor())
 
     task, _ = await tr.create_or_return_existing(

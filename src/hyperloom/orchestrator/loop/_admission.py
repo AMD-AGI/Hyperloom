@@ -41,12 +41,12 @@ class GpuRequest(NamedTuple):
     Attributes:
         pool: The pool they come from.
         count: How many it takes.
-        whole_machine: Whether ``pool`` is the whole-machine pool rather than the serving-disjoint one.
+        least: The fewest it is leased whatever count it names: serving TP for a bench specialist, else one.
     """
 
     pool: SpecialistGpuPool
     count: int
-    whole_machine: bool
+    least: int
 
 
 class AdmissionMixin:
@@ -73,15 +73,16 @@ class AdmissionMixin:
             # Bench specialist: size to the serving TP.
             default_count = serving_tp or pool.capacity or 1
         count = to_int(params.get("gpu_count")) or default_count
-        if is_truthy(params.get("bench")) and serving_tp > 0 and count < serving_tp:
+        bench_floor = serving_tp if is_truthy(params.get("bench")) else 0
+        if bench_floor and count < bench_floor:
             log.info(
                 "specialist: bench=true with gpu_count=%d < serving TP=%d; flooring gpu_count to TP "
                 "(a bench specialist starts a real TP-sharded server and cannot run on fewer cards).",
                 count,
-                serving_tp,
+                bench_floor,
             )
-            count = serving_tp
-        return GpuRequest(pool, count, whole_machine)
+            count = bench_floor
+        return GpuRequest(pool, count, max(1, bench_floor))
 
     def _gpu_denial_for_action(self, action_name: str, params: dict[str, Any] | None) -> PolicyDenied | None:
         """Refuse a GPU specialist whose request its pool can never fund.
@@ -101,12 +102,14 @@ class AdmissionMixin:
         request = self.specialist_gpu_request(dict(params or {}))
         if request is None or request.pool.can_fund(request.count):
             return None
-        pool_name = "whole-machine GPU pool" if request.whole_machine else "serving-disjoint GPU specialist pool"
+        capacity = request.pool.capacity
+        whole_machine = request.pool is self.framework_gpu_pool
+        pool_name = "whole-machine GPU pool" if whole_machine else "serving-disjoint GPU specialist pool"
         sizes = (
             f"(configured capacity={gpu_specialist_ceiling(self.shared_state)}, "
             f"serving_tp={serving_tp_for_policy(self.shared_state)})"
         )
-        if request.pool.capacity == 0:
+        if capacity == 0:
             return PolicyDenied(
                 f"delegate{{action='specialist'}}: the {pool_name} holds no card {sizes}",
                 rule=SPECIALIST_GPU_REQUEST_EXCEEDS_CAPACITY,
@@ -115,14 +118,18 @@ class AdmissionMixin:
                     "'=== Resource pools ===' block shows which pool holds cards."
                 ),
             )
+        if request.least > capacity:
+            hint = (
+                f"No gpu_count fits: a bench specialist takes at least serving TP cards ({request.least}) "
+                f"and the pool holds {capacity}. Dispatch the work without bench=true."
+            )
+        else:
+            hint = f"Pass a gpu_count between {request.least} and {capacity}."
         return PolicyDenied(
             f"delegate{{action='specialist'}}: effective gpu_count={request.count} cannot be leased from the "
-            f"{pool_name} size={request.pool.capacity} {sizes}",
+            f"{pool_name} size={capacity} {sizes}",
             rule=SPECIALIST_GPU_REQUEST_EXCEEDS_CAPACITY,
-            hint=(
-                f"Pass a gpu_count between 1 and {request.pool.capacity}; a bench specialist takes at least "
-                "serving TP cards whatever it asks for."
-            ),
+            hint=hint,
         )
 
     def _phase_denial_for_action(self, action_name: str) -> PolicyDenied | None:

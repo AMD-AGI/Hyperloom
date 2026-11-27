@@ -46,6 +46,7 @@ from inference_suite.contracts import RunLayout
 from hyperloom.orchestrator.tests.mock_backend import MockBackend, ScriptedPlan
 from hyperloom.orchestrator.loop.coordinator import Coordinator
 from hyperloom.inference_optimizer.protocol.intent import Intent, IntentType
+from hyperloom.orchestrator.state.round_store import RoundStore
 from hyperloom.orchestrator.state.task_registry import TaskRegistry, TaskSpec
 from hyperloom.orchestrator.bus.resource_lock import (
     SqliteLeaseBackend,
@@ -1797,7 +1798,7 @@ async def test_profile_executor_extracts_trace_dir(tmp_path):
     db = SqliteConnection(tmp_path / "x.db")
     locks = SqliteLeaseBackend(db)
     tr = TaskRegistry(db)
-    sub = SubAgentRunner(locks, tr)
+    sub = SubAgentRunner(locks, tr, RoundStore(db))
 
     output_dir = tmp_path / "out"
     output_dir.mkdir(parents=True)

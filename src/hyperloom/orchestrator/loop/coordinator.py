@@ -196,8 +196,6 @@ class Coordinator:
         # Thread live SharedState into the runner so executors get it via ctx.extra.
         self.sub.shared_state = self.shared_state
         self._init_gpu_pools()
-        # The durable bring-up mutex: ``open`` decides who starts a round.
-        self.rounds = RoundStore(self.db)
         self.policy = PolicyGate(session_dir=self.session_dir)
         # Attach read-only context-pull MCP tools to Orchestration backend.
         self.conversation.attach_orchestration_context_tools()
@@ -256,7 +254,7 @@ class Coordinator:
         self.phase_machine.ensure_recipe_kb_t0_anchored()
 
     def _open_persistence(self) -> None:
-        """Open the session database and the bus, lease, task, cursor and sub-agent layers over it."""
+        """Open the session database and the bus, lease, task, cursor, round and sub-agent layers over it."""
         db_path, file_mode = database_target(self.session_dir, self.shared_state)
         # The session directory can sit on a networked filesystem where WAL's
         # shared-memory mapping corrupts the database, so the mode is resolved
@@ -270,11 +268,9 @@ class Coordinator:
             dispatch_origin_provider=lambda: task_dispatch_origin(self.shared_state),
         )
         self.cursors = CursorStore(self.db)
-        self.sub = SubAgentRunner(
-            self.locks,
-            self.tasks,
-            session_dir=self.session_dir,
-        )
+        # The durable bring-up mutex: ``open`` decides who starts a round.
+        self.rounds = RoundStore(self.db)
+        self.sub = SubAgentRunner(self.locks, self.tasks, self.rounds, session_dir=self.session_dir)
 
     def _init_gpu_pools(self) -> None:
         """Carve the specialist and whole-node GPU pools."""

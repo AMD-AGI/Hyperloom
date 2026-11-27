@@ -25,6 +25,7 @@ from hyperloom.orchestrator.loop.writeback import WritebackCollaborator
 from hyperloom.orchestrator.loop.proposals import ProposalsCollaborator
 from hyperloom.inference_optimizer.protocol.intent import Intent, IntentType, NoIntentEmitted
 from hyperloom.orchestrator.state.objective import TargetGainObjective
+from hyperloom.orchestrator.state.round_store import RoundStore
 from hyperloom.orchestrator.state.shared_state import SharedState
 from hyperloom.orchestrator.loop.sub_agent_runner import (
     SubAgentRunner,
@@ -319,7 +320,7 @@ async def test_sub_agent_runner_succeeds(tmp_path):
     db = SqliteConnection(tmp_path / "x.db")
     locks = SqliteLeaseBackend(db)
     tr = TaskRegistry(db)
-    sub = SubAgentRunner(locks, tr)
+    sub = SubAgentRunner(locks, tr, RoundStore(db))
     sub.register_executor("baseline", lambda ctx: _async_return({"tput": 1840}))
     task, _ = await tr.create_or_return_existing(TaskSpec(kind="baseline", params={}, idempotency_key="k-baseline-1"))
     res = await sub.run_task(task)
@@ -339,7 +340,7 @@ async def test_sub_agent_runner_no_executor_fails(tmp_path):
     db = SqliteConnection(tmp_path / "x.db")
     locks = SqliteLeaseBackend(db)
     tr = TaskRegistry(db)
-    sub = SubAgentRunner(locks, tr)
+    sub = SubAgentRunner(locks, tr, RoundStore(db))
     task, _ = await tr.create_or_return_existing(TaskSpec(kind="never_registered", params={}, idempotency_key="k-x"))
     res = await sub.run_task(task)
     assert res.state == "failed"
@@ -354,7 +355,7 @@ async def test_sub_agent_runner_executor_exception_sets_error_class(tmp_path):
     db = SqliteConnection(tmp_path / "x.db")
     locks = SqliteLeaseBackend(db)
     tr = TaskRegistry(db)
-    sub = SubAgentRunner(locks, tr)
+    sub = SubAgentRunner(locks, tr, RoundStore(db))
 
     async def exe(ctx):
         raise TimeoutError("benchmark server never came up")
@@ -373,7 +374,7 @@ async def test_sub_agent_runner_hands_its_lease_to_the_executor_and_gives_it_bac
     db = SqliteConnection(tmp_path / "x.db")
     locks = SqliteLeaseBackend(db)
     tr = TaskRegistry(db)
-    sub = SubAgentRunner(locks, tr)
+    sub = SubAgentRunner(locks, tr, RoundStore(db))
     seen_lease = {}
 
     async def exe(ctx):
@@ -412,7 +413,7 @@ async def test_sub_agent_runner_refuses_a_lane_holding_task_with_no_lease(tmp_pa
     db = SqliteConnection(tmp_path / "x.db")
     locks = SqliteLeaseBackend(db)
     tr = TaskRegistry(db)
-    sub = SubAgentRunner(locks, tr)
+    sub = SubAgentRunner(locks, tr, RoundStore(db))
     ran = {"called": False}
 
     async def exe(_ctx):
@@ -2180,7 +2181,7 @@ async def test_sub_agent_runner_hands_back_lanes_when_the_claim_is_rejected(
     db = SqliteConnection(tmp_path / "x.db")
     locks = SqliteLeaseBackend(db)
     tr = TaskRegistry(db)
-    sub = SubAgentRunner(locks, tr)
+    sub = SubAgentRunner(locks, tr, RoundStore(db))
     sub.register_executor("explore", lambda _ctx: _immediately({}))
 
     task, _ = await tr.create_or_return_existing(
@@ -2216,7 +2217,7 @@ async def test_a_registered_run_leaves_a_row_queued_when_its_lanes_are_busy(
     db = SqliteConnection(tmp_path / "x.db")
     locks = SqliteLeaseBackend(db)
     tr = TaskRegistry(db)
-    sub = SubAgentRunner(locks, tr)
+    sub = SubAgentRunner(locks, tr, RoundStore(db))
 
     ran = {"called": False}
 
@@ -2256,7 +2257,7 @@ async def test_a_registered_run_is_reachable_by_the_wall_clock_defences(tmp_path
     db = SqliteConnection(tmp_path / "x.db")
     locks = SqliteLeaseBackend(db)
     tr = TaskRegistry(db)
-    sub = SubAgentRunner(locks, tr)
+    sub = SubAgentRunner(locks, tr, RoundStore(db))
     disp = DispatcherCollaborator(SimpleNamespace(locks=locks, sub=sub))
     registered: list[str] = []
 
@@ -2283,7 +2284,7 @@ async def test_a_registered_run_labels_its_llm_calls_with_the_action(tmp_path):
     db = SqliteConnection(tmp_path / "x.db")
     locks = SqliteLeaseBackend(db)
     tr = TaskRegistry(db)
-    sub = SubAgentRunner(locks, tr)
+    sub = SubAgentRunner(locks, tr, RoundStore(db))
     disp = DispatcherCollaborator(SimpleNamespace(locks=locks, sub=sub))
     seen: list[str] = []
 
@@ -2309,7 +2310,7 @@ async def test_sub_agent_runner_fails_a_row_whose_workspace_cannot_be_made(
     db = SqliteConnection(tmp_path / "x.db")
     locks = SqliteLeaseBackend(db)
     tr = TaskRegistry(db)
-    sub = SubAgentRunner(locks, tr)
+    sub = SubAgentRunner(locks, tr, RoundStore(db))
     sub.register_executor("explore", lambda _ctx: _immediately({}))
 
     def _no_space(_task):
@@ -2332,7 +2333,7 @@ async def test_sub_agent_runner_normal_path_still_records_transitions(
     db = SqliteConnection(tmp_path / "x.db")
     locks = SqliteLeaseBackend(db)
     tr = TaskRegistry(db)
-    sub = SubAgentRunner(locks, tr)
+    sub = SubAgentRunner(locks, tr, RoundStore(db))
     sub.register_executor("baseline", lambda ctx: _async_return({"tput": 1.0}))
     task, _ = await tr.create_or_return_existing(TaskSpec(kind="baseline", params={}, idempotency_key="k-ok"))
     res = await sub.run_task(task)

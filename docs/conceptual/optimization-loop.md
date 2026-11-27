@@ -719,9 +719,10 @@ what an earlier turn happened to remember.
   `orchestration_memory` plus the authoritative `SharedState` facts —
   not by replaying a non-deterministic transcript.
 - **Write path**: All write actions flow through `emit_intent` → the
-  Coordinator's intent handler, so the accuracy gate and PolicyGate's
-  invariants (path sandbox, resource leases, data dependencies,
-  single-writer rules) apply to every turn. `delegate` is the one intent
+  Coordinator's intent handler, so the accuracy gate, PolicyGate's
+  invariants (path sandbox, data dependencies, single-writer rules) and the
+  admission rules that read the session's resources (the bring-up round, the
+  GPU pools, the time budget) apply to every turn. `delegate` is the one intent
   that queues an action, and an admitted one is queued in the same step.
   Repetition is checked against state — the tested-variant ledger and
   the action-failure log — not against agent recall.

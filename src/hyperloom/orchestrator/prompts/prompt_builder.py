@@ -383,7 +383,7 @@ def _format_emit_hint(meta: ActionMetadata) -> str:
             "gap_canonical_id=<stable gap id>, "
             "gap_symptom?=<str>, gap_layer?=<str>, "
             "gap_evidence?={profile_trace:..., ...}, "
-            "max_turns?=<turn cap; omit for the default>}}"
+            "max_turns?=<int turn cap; omit or 0 for the default>}}"
         )
     if meta.name == "integrate_patch":
         return (

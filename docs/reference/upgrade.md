@@ -1151,12 +1151,14 @@ Rules that are gone:
 * `specialist_freeform_description_too_long`. A free-form `task_description`
   longer than 8000 characters is accepted. An empty one is still denied
   (`specialist_freeform_empty_description`).
-* The `max_turns` arm of `specialist_dispatch_source`. A `max_turns` above
-  1000 is accepted and is the turn cap of that specialist; the wall-clock
-  budget still ends it. A `max_turns` that is not a positive integer runs
-  with the default cap (`--specialist-max-turns`), as an omitted one and `0`
-  already did. 1.2.x denied a non-integer, a negative value and a value above
-  1000.
+* The ceiling of 1000 on `max_turns`, one arm of
+  `specialist_dispatch_source`. A `max_turns` above 1000 is accepted and is
+  the turn cap of that specialist; the wall-clock budget still ends it.
+  `--specialist-max-turns` is the cap of a dispatch that names none, as it
+  was: a dispatch's own `max_turns` replaces it, in either direction, and
+  the flag's help now says so. A `max_turns` that is not an integer, or is
+  negative, is still denied with `specialist_dispatch_source`, and an
+  omitted one or `0` still runs with the default cap.
 * `warm_replay_patch_missing`, `warm_replay_patch_outside_kb_download`,
   `warm_replay_plan_invalid`, `warm_replay_target_outside_framework_roots`
   and `warm_replay_patch_target_mismatch`. They were only ever the
@@ -1176,18 +1178,34 @@ Rules that stay and read live state:
   be admitted and then wait for cards for good: a `needs_gpu` research
   specialist with `bench=true` was judged at its own `gpu_count` and leased
   at serving TP. The reason now reads `effective gpu_count=<n> cannot be
-  leased from the <pool> size=<n> (configured capacity=<n>, serving_tp=<n>)`
-  and the hint gives the range that fits. The rule is judged after the gate's
-  other checks; an intent that also names a path outside the session
-  directory is denied for the path.
+  leased from the <pool> size=<n> (configured capacity=<n>, serving_tp=<n>)`.
+  The hint is `Pass a gpu_count between <least> and <pool size>.`, where
+  `<least>` is serving TP for a dispatch with `bench=true` and `1` for any
+  other. When serving TP is itself larger than the pool the hint says so
+  instead of giving a range: `No gpu_count fits: a bench specialist takes at
+  least serving TP cards (<n>) and the pool holds <n>. Dispatch the work
+  without bench=true.` The rule is judged after the gate's other checks; an
+  intent that also names a path outside the session directory is denied for
+  the path.
 
-A queued task is cancelled at dispatch for one reason only. `error_class`
+Both rules are now answered after PolicyGate has admitted the intent, as the
+phase and time-budget rules already were. The `policy_denied` observation
+and the denial row in `session_breakdown.json` are unchanged, but the
+`intent` event in the trajectory ledger (`trajectory/*.jsonl`) of a `baseline`
+refused by `enablement_round_in_flight`, or of a `specialist` refused by
+`specialist_gpu_request_exceeds_capacity`, now carries `admitted: true` and
+no `denied` attribute; 1.2.x wrote `admitted: false` with the reason.
+`admitted` on that event says only that PolicyGate passed the intent.
+
+One `policy_<rule>` cancellation remains at dispatch. `error_class`
 `policy_enablement_round_in_flight` and terminal evidence
 `{"reason": "policy_denied", "rule": "enablement_round_in_flight"}` are still
 written for a `baseline` that was queued before a bring-up round opened. No
 task ends with `policy_path_outside_session_dir`, `policy_payload`,
 `policy_specialist_*` or `policy_warm_replay_*`: those came from running the
-intent checks a second time on the stored row.
+intent checks a second time on the stored row. A queued task the remaining
+time budget no longer covers is still cancelled at dispatch as before, with
+the time-budget rule as its evidence `reason`.
 
 What moved in front of the work it guards:
 
@@ -1229,7 +1247,7 @@ Smaller changes:
   admitted against. 1.2.x recomputed both from the environment on every
   turn.
 * The `specialist` line of the prompt's action list reads
-  `max_turns?=<turn cap; omit for the default>`; 1.2.x wrote
+  `max_turns?=<int turn cap; omit or 0 for the default>`; 1.2.x wrote
   `max_turns?=<int<=1000 or 0=unbounded>`.
 * The log line that reports a bench specialist floored to serving TP starts
   `specialist: bench=true with gpu_count=` (1.2.x named the task id) and is

@@ -30,6 +30,7 @@ from .validators import (
     validate_gemm_tuning_request,
     validate_prune_branch,
     validate_specialist_framework,
+    validate_specialist_max_turns_raw,
 )
 
 
@@ -274,12 +275,13 @@ class PolicyGate:
 
         Args:
             payload (dict[str, Any]): the delegate intent payload carrying
-                ``params`` (tags, scope, gap_canonical_id, task_description, ...).
+                ``params`` (tags, scope, gap_canonical_id, task_description, max_turns, ...).
 
         Raises:
             PolicyDenied: when params are malformed or name an unregistered
-                framework, the gap id is missing, or a freeform dispatch has no
-                task description. Tag / scope incoherence is logged rather than denied.
+                framework, ``max_turns`` is not a non-negative integer, the gap
+                id is missing, or a freeform dispatch has no task description.
+                Tag / scope incoherence is logged rather than denied.
         """
         params = payload.get("params") or {}
         if not isinstance(params, dict):
@@ -289,6 +291,7 @@ class PolicyGate:
                 hint="pass params={tags, gap_canonical_id, ...} per §3.5 §6",
             )
         validate_specialist_framework(params)
+        validate_specialist_max_turns_raw(params.get("max_turns"))
 
         scope_raw = str(params.get("scope") or "").strip().lower()
         # ``params.tags`` is canonical; ``params.domain`` is accepted as a single-tag alias.

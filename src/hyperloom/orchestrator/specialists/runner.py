@@ -21,7 +21,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, TypeVar
 
-from hyperloom_common.coerce import first_str, first_text, to_int
+from hyperloom_common.coerce import first_str, first_text
 from hyperloom.common.deadline import Deadline, seconds_until
 from hyperloom_common.timeutil import now_iso
 
@@ -156,19 +156,22 @@ def _ctx_deadline(ctx: RunnerContext) -> Deadline | None:
 def resolve_specialist_max_turns(raw: Any, *, default: int) -> int:
     """Resolve the specialist turn budget from dispatch params.
 
-    The dial is optional and the wall-clock budget is what bounds a specialist,
-    so a value that names no positive turn count -- omitted, ``0``, negative,
-    not an integer -- leaves the configured default cap.
+    ``None`` and ``0`` both mean unbounded depth bounded by the wall-clock
+    budget, implemented as the configured default cap.
 
     Args:
         raw: The ``max_turns`` value from dispatch params, or ``None``.
-        default: The runner default.
+        default: The runner default when ``raw`` is omitted or zero.
 
     Returns:
-        The resolved positive turn budget.
+        The resolved non-negative turn budget.
     """
-    max_turns = to_int(raw)
-    return max_turns if max_turns is not None and max_turns > 0 else int(default)
+    if raw in (None, ""):
+        return int(default)
+    max_turns = int(raw)
+    if max_turns == 0:
+        return int(default)
+    return max_turns
 
 
 def _extra_focus_tags(

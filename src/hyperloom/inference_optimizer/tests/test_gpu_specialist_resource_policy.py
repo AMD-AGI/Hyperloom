@@ -174,6 +174,72 @@ def test_a_specialist_that_needs_no_card_is_not_sized(coord):
     assert coord.dispatcher.admission_denial_for_action("specialist", params=_specialist(mode="research")) is None
 
 
+def test_only_a_specialist_is_sized(coord):
+    """Another action can carry the keys a specialist's request is read from; it leases no card from these pools."""
+    _pools(coord)
+    params = {"enablement": True, "needs_gpu": True}
+    assert coord.dispatcher.specialist_gpu_request(params) is not None
+
+    assert coord.dispatcher.admission_denial_for_action("integrate_patch", params=params) is None
+
+
+_NO_COUNT_FITS = (
+    "No gpu_count fits: a bench specialist takes at least serving TP cards (4) and the pool holds 2. "
+    "Dispatch the work without bench=true."
+)
+
+
+@pytest.mark.parametrize(
+    ("params", "pools", "hint", "admitted_counts"),
+    [
+        pytest.param(
+            {**_FREEFORM, "needs_gpu": True, "gpu_count": 4},
+            {"serving_disjoint": 2},
+            "Pass a gpu_count between 1 and 2.",
+            [1, 2],
+            id="above-the-pool",
+        ),
+        pytest.param(
+            {**_FREEFORM, "needs_gpu": True},
+            {"serving_disjoint": 2, "serving_tp": 4},
+            "Pass a gpu_count between 1 and 2.",
+            [1, 2],
+            id="default-count-above-the-pool",
+        ),
+        pytest.param(
+            {**_BENCH, "gpu_count": 16},
+            {"whole_machine": 8, "serving_tp": 4},
+            "Pass a gpu_count between 4 and 8.",
+            # A count below serving TP is admitted too, and leased at TP.
+            [1, 2, 3, 4, 5, 6, 7, 8],
+            id="bench-above-the-pool",
+        ),
+        pytest.param(
+            {**_BENCH, "gpu_count": 1}, {"whole_machine": 2, "serving_tp": 4}, _NO_COUNT_FITS, [], id="bench-floor"
+        ),
+        pytest.param(
+            {**_FREEFORM, "needs_gpu": True, "bench": True, "gpu_count": 1},
+            {"serving_disjoint": 2, "serving_tp": 4},
+            _NO_COUNT_FITS,
+            [],
+            id="research-bench-floor",
+        ),
+    ],
+)
+def test_the_hint_names_a_count_only_when_one_would_be_admitted(coord, params, pools, hint, admitted_counts):
+    """A range the bench floor overrides sends the model back with a smaller count that is refused again."""
+    _pools(coord, **pools)
+
+    def denial(request: dict):
+        return coord.dispatcher.admission_denial_for_action("specialist", params=request)
+
+    denied = denial(params)
+
+    assert denied is not None and denied.rule == SPECIALIST_GPU_REQUEST_EXCEEDS_CAPACITY
+    assert denied.hint == hint
+    assert [count for count in range(1, 17) if denial({**params, "gpu_count": count}) is None] == admitted_counts
+
+
 @pytest.mark.parametrize(
     ("params", "pools", "expected_pool", "expected_count"),
     [
@@ -208,7 +274,6 @@ def test_the_request_names_the_pool_and_count_the_dispatcher_leases(
 
     expected = coord.framework_gpu_pool if expected_pool == "whole_machine" else coord.gpu_specialist_pool
     assert request.pool is expected
-    assert request.whole_machine is (expected_pool == "whole_machine")
     assert request.count == expected_count
 
 

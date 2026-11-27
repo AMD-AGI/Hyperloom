@@ -380,12 +380,13 @@ async def test_a_fresh_report_that_never_lands_is_not_awaited_forever(coord):
     from hyperloom.orchestrator.bus.resource_lock import SqliteLeaseBackend
     from hyperloom.orchestrator.bus.storage.connection import SqliteConnection
     from hyperloom.orchestrator.loop.sub_agent_runner import SubAgentRunner
+    from hyperloom.orchestrator.state.round_store import RoundStore
     from hyperloom.orchestrator.state.task_registry import TaskRegistry
 
     db = SqliteConnection(coord.session_dir / "close-task.db")
     coord.tasks = TaskRegistry(db)
     coord.locks = SqliteLeaseBackend(db)
-    coord.sub = SubAgentRunner(coord.locks, coord.tasks)
+    coord.sub = SubAgentRunner(coord.locks, coord.tasks, RoundStore(db))
     coord.shared_state.max_minutes = 60
     coord.phase_close._close_step_wait_sec = lambda _task: 0.05  # type: ignore[method-assign]
     finish = asyncio.Event()

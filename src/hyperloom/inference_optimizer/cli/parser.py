@@ -493,9 +493,10 @@ def _add_specialist_arguments(opt: argparse.ArgumentParser) -> None:
         dest="specialist_max_turns",
         type=int,
         default=_DEFAULT_SPECIALIST_MAX_TURNS,
-        help="Hard cap on LLM turns per specialist task (KB_design "
-        "§3.5 §6). On exhaustion the runner synthesises an empty "
-        "specialist_done (Inv-5.3).",
+        help="Default cap on LLM turns per specialist task (KB_design "
+        "§3.5 §6); a dispatch that names its own max_turns runs with "
+        "that cap instead. On exhaustion the runner synthesises an "
+        "empty specialist_done (Inv-5.3).",
     )
     opt.add_argument(
         "--specialist-mcp-config",

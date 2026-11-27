@@ -427,6 +427,26 @@ def test_R2_max_turns_zero_allowed_unbounded(gate):
     )
 
 
+def test_R2_max_turns_negative_denied(gate):
+    with pytest.raises(PolicyDenied) as exc:
+        gate.validate_intent(
+            "orchestration",
+            Intent(
+                type=IntentType.DELEGATE,
+                payload={
+                    "action_name": "specialist",
+                    "params": {
+                        "domain": "serving_specialist",
+                        "gap_canonical_id": "gap.x",
+                        "max_turns": -1,
+                    },
+                },
+            ),
+        )
+    assert exc.value.rule == "specialist_dispatch_source"
+    assert "max_turns" in str(exc.value)
+
+
 # 6. specialist_prompt_builder — PR monitor section
 def _build_serving_prompt(**kwargs: Any) -> tuple[str, str]:
     domain = get_domain("serving_specialist")

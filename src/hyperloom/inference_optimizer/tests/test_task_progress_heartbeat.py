@@ -23,6 +23,7 @@ from hyperloom.orchestrator.loop.sub_agent_runner import (
     ExecutionCleanupUnconfirmed,
     SubAgentRunner,
 )
+from hyperloom.orchestrator.state.round_store import RoundStore
 from hyperloom.orchestrator.state.task_registry import TaskRegistry, TaskSpec
 from hyperloom.inference_optimizer.trace import task_progress
 from hyperloom.inference_optimizer.trace.task_progress import (
@@ -38,7 +39,7 @@ def _runner(tmp_path: Path, monkeypatch) -> SubAgentRunner:
     monkeypatch.setenv(paths.ENV_USER_DATA_PATH, str(tmp_path))
     sd = paths.make_session_dir()
     db = SqliteConnection(tmp_path / "coord.db")
-    return SubAgentRunner(SqliteLeaseBackend(db), TaskRegistry(db), session_dir=sd)
+    return SubAgentRunner(SqliteLeaseBackend(db), TaskRegistry(db), RoundStore(db), session_dir=sd)
 
 
 def _progress_notes(task) -> list[dict]:

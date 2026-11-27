@@ -147,23 +147,25 @@ class SubAgentRunner:
         self,
         locks: SqliteLeaseBackend,
         tasks: TaskRegistry,
+        rounds: RoundStore,
         *,
         session_dir: Path | None = None,
     ):
-        """Initialise the runner with its lease store + task registry.
+        """Initialise the runner with the session's lease store, task registry and round store.
 
         Args:
             locks (SqliteLeaseBackend): Lane lease store used to gate
                 task execution.
             tasks (TaskRegistry): Registry the runner transitions task
                 state through.
+            rounds (RoundStore): The session's bring-up round store, asked
+                before a queued baseline is claimed.
             session_dir (Path | None): Session root used to pre-create
                 per-action workspaces; None disables workspace pre-mkdir.
         """
         self.locks = locks
         self.tasks = tasks
-        # The round store over the session database the task registry writes.
-        self.rounds = RoundStore(tasks.db)
+        self.rounds = rounds
         self.executor_registry: dict[str, ExecutorFn] = {}
         self.session_dir = Path(session_dir) if session_dir else None
         # Live SharedState threaded into each executor's ctx.extra so gain-computing

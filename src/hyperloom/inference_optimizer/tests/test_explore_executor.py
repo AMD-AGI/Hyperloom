@@ -27,6 +27,7 @@ from hyperloom.orchestrator.actions.executors.explore_prefilter.launch_filters i
     restates_the_baseline_launch,
 )
 from hyperloom.orchestrator.actions.executors.workload._launch_restatement import Launch, launch_change, named_settings
+from hyperloom.orchestrator.state.round_store import RoundStore
 from hyperloom.orchestrator.state.shared_state import SharedState
 from hyperloom.orchestrator.bus.resource_lock import (
     SqliteLeaseBackend,
@@ -84,7 +85,7 @@ def sub_agent_runner(tmp_path):
     db = SqliteConnection(tmp_path / "db.db")
     locks = SqliteLeaseBackend(db)
     tr = TaskRegistry(db)
-    runner = SubAgentRunner(locks, tr)
+    runner = SubAgentRunner(locks, tr, RoundStore(db))
     yield runner, tr, tmp_path
     db.close()
 

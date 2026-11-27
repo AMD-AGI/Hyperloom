@@ -16,7 +16,7 @@ from hyperloom.orchestrator.bus.resource_lock import SqliteLeaseBackend
 from hyperloom.orchestrator.bus.storage.connection import SqliteConnection
 from hyperloom.orchestrator.loop.coordinator import Coordinator
 from hyperloom.orchestrator.loop.sub_agent_runner import SubAgentRunner
-from hyperloom.orchestrator.state.round_store import BOOTED
+from hyperloom.orchestrator.state.round_store import BOOTED, RoundStore
 from hyperloom.orchestrator.state.shared_state import SharedState
 from hyperloom.orchestrator.state.task_registry import TaskRegistry, TaskSpec
 
@@ -31,7 +31,10 @@ def _runner(tmp_path: Path, monkeypatch) -> SubAgentRunner:
     sd = paths.make_session_dir()
     db = SqliteConnection(tmp_path / "coord.db")
     sub = SubAgentRunner(
-        SqliteLeaseBackend(db), TaskRegistry(db, dispatch_origin_provider=lambda: _ORIGIN), session_dir=sd
+        SqliteLeaseBackend(db),
+        TaskRegistry(db, dispatch_origin_provider=lambda: _ORIGIN),
+        RoundStore(db),
+        session_dir=sd,
     )
     sub.shared_state = SharedState.load_or_init(sd)
     return sub

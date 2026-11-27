@@ -56,7 +56,7 @@ async def _enqueue_and_run(build_coord, executor, *, action, session_dir) -> tup
 
     tid = await build_coord.build_lifecycle.enqueue_targeted_build(action)
     task_obj = await build_coord.tasks.get(tid)
-    runner = SubAgentRunner(locks=build_coord.locks, tasks=build_coord.tasks, session_dir=Path(session_dir))
+    runner = SubAgentRunner(build_coord.locks, build_coord.tasks, build_coord.rounds, session_dir=Path(session_dir))
     runner.shared_state = build_coord.shared_state
     runner.register_executor("targeted_build", executor)
     lease = await build_coord.locks.acquire_many(
@@ -477,7 +477,7 @@ async def test_spawn_failure_marks_row_failed(build_coord, tmp_path, monkeypatch
     action = _action()
     tid = await build_coord.build_lifecycle.enqueue_targeted_build(action)
     task_obj = await build_coord.tasks.get(tid)
-    runner = SubAgentRunner(locks=build_coord.locks, tasks=build_coord.tasks, session_dir=tmp_path)
+    runner = SubAgentRunner(build_coord.locks, build_coord.tasks, build_coord.rounds, session_dir=tmp_path)
     runner.shared_state = build_coord.shared_state
     runner.register_executor("targeted_build", TargetedBuildExecutor())
     lease = await build_coord.locks.acquire_many(
