@@ -67,10 +67,12 @@ _SHALLOW_FETCH = ("fetch", "-q", "--depth", "1")
 _SHALLOW_LOCK = "shallow.lock"
 #: What git's message says when a lock file it takes is there already (another fill holds it, or a killed one left
 #: it), in the wordings of the git releases in use; the error keeps only the end of the message, so each is matched.
+#: The last is a shallow fetch's when another fill committed the shallow file after this one read it.
 _LOCK_HELD = (
     ".lock': File exists",
     "Another git process seems to be running in this repository",
     "remove the file manually to continue",
+    "shallow file has changed since we read it",
 )
 #: How old a lock file of the store is before a fill takes it for one a killed fill left and removes it: a live fill's
 #: fetch holds it at most :data:`_FETCH_TIMEOUT_SEC`, and is killed then.
@@ -298,7 +300,8 @@ def fill_inferencex_store(runner_cache: Path, commit: str) -> Path:
     """
     if not _COMMIT.fullmatch(commit):
         raise ToolError(f"InferenceX: {commit!r} is not a full commit hash")
-    store = runner_cache / TOOL_CHECKOUTS_DIR / INFERENCEX_STORE
+    # Absolute: the host's git commands run in a directory of their own, naming the store by --git-dir.
+    store = Path(os.path.abspath(runner_cache / TOOL_CHECKOUTS_DIR / INFERENCEX_STORE))
     repo = os.environ.get("INFERENCEX_REPO") or INFERENCEX_REPO
     resolved = _local_directory(repo)
     try:

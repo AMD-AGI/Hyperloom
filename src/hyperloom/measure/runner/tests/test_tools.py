@@ -12,6 +12,7 @@ import threading
 import time
 import zlib
 from dataclasses import replace
+from pathlib import Path
 
 import pytest
 
@@ -446,6 +447,17 @@ def test_the_host_fills_the_store_with_the_commit_and_a_test_then_reads_it_read_
     assert caplog.records == []
 
 
+def test_the_host_fills_a_runner_cache_named_by_a_relative_path(upstream, tmp_path, monkeypatch):
+    repo, commit = upstream
+    monkeypatch.setenv("INFERENCEX_REPO", str(repo))
+    monkeypatch.chdir(tmp_path)
+
+    store = tools.fill_inferencex_store(Path("runner-cache"), commit)
+
+    assert store == tmp_path / "runner-cache" / tools.TOOL_CHECKOUTS_DIR / tools.INFERENCEX_STORE
+    assert _git(store, "rev-parse", f"refs/tools/{commit}") == commit
+
+
 def test_the_host_adds_a_new_pin_to_a_store_that_holds_an_older_one(upstream, tmp_path, monkeypatch):
     repo, old = upstream
     cache = tmp_path / "runner-cache"
@@ -706,6 +718,7 @@ def test_a_fresh_lock_held_past_the_wait_is_a_tool_error_and_left_in_place(upstr
         "fatal: Unable to create '/s/shallow.lock': File exists.",
         "Another git process seems to be running in this repository, or the lock file may be stale",
         "may have crashed in this repository earlier:\nremove the file manually to continue.",
+        "fatal: shallow file has changed since we read it",
     ],
 )
 def test_a_lock_already_released_when_the_fetch_failed_on_it_is_tried_again(upstream, tmp_path, monkeypatch, message):
