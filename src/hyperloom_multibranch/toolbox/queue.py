@@ -264,15 +264,18 @@ class WorkQueue:
             if item.state is State.RUNNING and item.branch == branch and not exempt_from_k(item.request)
         )
 
-    def take(self, parallel_limit: int | None = None) -> QueuedTest | None:
-        """Mark and return the next test to run, or ``None`` when none may start now.
+    def running_limit(self, parallel_limit: int | None = None) -> int:
+        """How many tests may run at once: the policy's global concurrency, lowered to ``parallel_limit``, what the
+        toolbox's cards run at once."""
 
-        ``parallel_limit`` is what the toolbox's cards run at once; it lowers the policy's global concurrency.
-        """
+        cap = self.policy.global_concurrency
+        return cap if parallel_limit is None else min(cap, parallel_limit)
+
+    def take(self, parallel_limit: int | None = None) -> QueuedTest | None:
+        """Mark and return the next test to run, or ``None`` when none may start now (:meth:`running_limit`)."""
 
         running = sum(1 for item in self._items.values() if item.state is State.RUNNING)
-        cap = self.policy.global_concurrency
-        if running >= (cap if parallel_limit is None else min(cap, parallel_limit)):
+        if running >= self.running_limit(parallel_limit):
             return None
         ready = [
             item
@@ -309,7 +312,9 @@ class WorkQueue:
             if item.state in WAITING_STATES and item.request.priority is None:
                 item.priority = self.policy.priority_of(item.request)
 
-    def state(self) -> QueueState:
+    def state(self, parallel_limit: int | None = None) -> QueueState:
+        """The queue's counts, with the :meth:`running_limit` that ``parallel_limit`` leaves."""
+
         by_priority = dict.fromkeys(range(PRIORITY_HIGHEST, PRIORITY_LOWEST + 1), 0)
         counts: dict[State, dict[str, int]] = {state: {} for state in State}
         for item in self._items.values():
@@ -323,4 +328,5 @@ class WorkQueue:
             counts[State.QUEUED],
             self.cold_start_seconds,
             pending_build_by_branch=counts[State.PENDING_BUILD],
+            running_limit=self.running_limit(parallel_limit),
         )

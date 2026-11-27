@@ -18,10 +18,9 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 
 from hyperloom_multibranch.contracts.blackboard.records import OpShares
-from hyperloom_multibranch.contracts.toolbox import MeasurementCapacity, QueueState, Toolbox
+from hyperloom_multibranch.contracts.toolbox import QueueState, Toolbox
 from hyperloom_multibranch.blackboard.rsi.frontier import FrontierPolicy
 from hyperloom_multibranch.scheduling.branches import SPECIALIST_START_SECONDS, BranchFocus
-from hyperloom_multibranch.scheduling.roster import Roster, RosterCaps
 
 #: Sandbox cold starts a new branch waits through before its tests start paying off: its first test's, and one more.
 MB_MIN_USEFUL_COLD_STARTS = 2
@@ -52,19 +51,11 @@ def min_useful_seconds(frontier: FrontierPolicy, queue_state: QueueState) -> flo
     return max(frontier.window_seconds, start_up)
 
 
-def idle_test_slots(
-    caps: RosterCaps, queue_state: QueueState, capacity: MeasurementCapacity, cards_per_test: int
-) -> int:
-    """Tests the toolbox would still start at once beside those running: under the session's global cap, and under
-    the tests the measurement cards allow at once, since a branch sandbox's lease holds cards no test runs on; 0 while
-    a lease holds cards the running tests were started under. A toolbox with no card pool of its own reads under the
-    cap alone.
-    """
+def idle_test_slots(queue_state: QueueState) -> int:
+    """Tests the toolbox would still start at once beside those running, under the limit its queue starts tests
+    under; 0 while a lease holds cards the running tests were started under."""
 
-    allowed = caps.max_parallel_tests
-    if capacity.known:
-        allowed = min(allowed, capacity.measurement_cards // cards_per_test)
-    return max(allowed - queue_state.running, 0)
+    return max(queue_state.running_limit - queue_state.running, 0)
 
 
 def refill_focus(
@@ -105,24 +96,21 @@ def _named(text: str, op: str) -> re.Match[str] | None:
 
 
 class Widening:
-    """Reads the signals off the toolbox's queue, the roster's caps and the frontier policy the session scores with.
+    """Reads the signals off the toolbox's queue and the frontier policy the session scores with.
 
     ``frontier`` is the scoring's own policy, so the trend window here is the one the judge's expected gains rest on.
     """
 
-    def __init__(self, toolbox: Toolbox, roster: Roster, frontier: FrontierPolicy, cards_per_test: int) -> None:
+    def __init__(self, toolbox: Toolbox, frontier: FrontierPolicy) -> None:
         self._toolbox = toolbox
-        self._roster = roster
         self._frontier = frontier
-        self._cards_per_test = cards_per_test
 
     async def signals(self) -> WideningSignals:
         state = await self._toolbox.queue_state()
-        capacity = await self._toolbox.measurement_capacity()
         return WideningSignals(
             min_useful_seconds=min_useful_seconds(self._frontier, state),
             cold_start_seconds=state.cold_start_seconds,
-            idle_test_slots=idle_test_slots(self._roster.caps, state, capacity, self._cards_per_test),
+            idle_test_slots=idle_test_slots(state),
             queued_tests=state.queued,
             running_by_branch=state.running_by_branch,
             queued_by_branch=state.queued_by_branch,

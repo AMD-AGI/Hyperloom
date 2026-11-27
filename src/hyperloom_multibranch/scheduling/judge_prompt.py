@@ -180,9 +180,9 @@ starts its first tests wait through, when that is longer. cold_start is the rece
 "unknown" until the session's first test has waited through one, and min_useful_seconds is then the trend window
 alone. When explore_remaining_seconds is below min_useful_seconds, a branch opened now is unlikely to show anything.
 idle_test_slots is how many more tests the toolbox would start at once beside those running: under the
-max_parallel_tests cap, and under the tests the measurement cards leave room for, which the sandbox an autonomous
-branch holds takes cards away from. queued_tests is how many tests wait for a card, and a branch's tests_running and
-tests_queued count its own. Tests that wait while slots are idle belong to branches at their K.
+max_parallel_tests cap, and under the tests the measurement cards and sandboxes leave room for, which the sandbox an
+autonomous branch holds takes away from. queued_tests is how many tests wait for a card, and a branch's tests_running
+and tests_queued count its own. Tests that wait while slots are idle belong to branches at their K.
 The queue starts confirm, reproduction and merge tests before explore tests, and among explore tests the branches take
 turns, K turns each: a branch opened now takes its turn however many tests the other branches have queued, so queued
 tests are no reason to leave a branch slot free. They say how long a test submitted now waits, not whether a branch

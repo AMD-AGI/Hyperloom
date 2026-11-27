@@ -314,7 +314,7 @@ class RealToolbox:
         return CancelOutcome.WITHDRAWN if "withdrawal" in (entry.outcome or {}) else CancelOutcome.FINISHED
 
     async def queue_state(self) -> QueueState:
-        return replace(self._queue.state(), builds=self._builds.ledger())
+        return replace(self._queue.state(self._parallel_limit()), builds=self._builds.ledger())
 
     async def progress(self, request_id: str) -> TestProgress | None:
         item = self._queue.get(request_id)

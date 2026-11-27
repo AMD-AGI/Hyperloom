@@ -610,6 +610,7 @@ def test_jsonable_turns_contract_objects_into_json_data() -> None:
         "builds": [
             {"key": "k1", "component": "sgl_kernel", "state": "building", "eta_seconds": 34.0, "build_seconds": 0.0}
         ],
+        "running_limit": 0,
     }
 
 
