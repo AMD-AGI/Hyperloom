@@ -64,6 +64,11 @@ it.
   schema and the validator. A spec that still sets them parses as before,
   since unknown fields are ignored, but a malformed value in one of them is no
   longer refused. `options.eval` stays and still refuses `false`.
+- **`hyperloom hosted run` no longer checks `HYPERLOOM_LEDGER_DIR`.** A
+  hosted run hands the session to `hyperloom-multibranch`, which opens no
+  coordinator database, so a relative value no longer ends the run with
+  return code 2. `hyperloom optimize`, `recover` and `session events` still
+  refuse one.
 - **`hyperloom session report` is removed.** The command rendered a
   `session_breakdown.json` as Markdown (`session_report.md`), optionally with
   an LLM-written summary. It ran only by hand: no session wrote

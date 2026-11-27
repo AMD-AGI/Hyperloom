@@ -195,10 +195,6 @@ def test_a_command_that_cannot_start_is_final_with_return_code_2(run, monkeypatc
         (lambda r, m: m.delenv(Var.RUN_ID), Var.RUN_ID),
         (lambda r, m: m.setenv(Var.E2B_API_URL, "not a url"), Var.E2B_API_URL),
         (lambda r, m: m.setenv("USER_DATA_PATH", "relative"), "USER_DATA_PATH must be set to an absolute path"),
-        (
-            lambda r, m: m.setenv("HYPERLOOM_LEDGER_DIR", "relative/ledgers"),
-            "HYPERLOOM_LEDGER_DIR must be an absolute path",
-        ),
     ],
 )
 def test_a_refused_request_is_final_with_return_code_2_and_is_never_handed_over(run, monkeypatch, mutate, message):

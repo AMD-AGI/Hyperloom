@@ -44,7 +44,7 @@ from hyperloom_common.shared_storage import (
 )
 from hyperloom.hosted.campaign import CampaignError, parse_campaign
 from hyperloom.hosted.host_info import HOST_ONLY_VARS, HostInfo, HostInfoError, Var, read_host_info
-from hyperloom.inference_optimizer.session.paths import ENV_USER_DATA_PATH, named_ledger_dir
+from hyperloom.inference_optimizer.session.paths import ENV_USER_DATA_PATH
 
 EXIT_FILE = "exit.json"
 MULTIBRANCH_COMMAND = "hyperloom-multibranch"
@@ -89,10 +89,6 @@ def _run() -> int:
     user_data = Path(os.environ.get(ENV_USER_DATA_PATH, ""))
     if not user_data.is_absolute():
         raise Refused(f"{ENV_USER_DATA_PATH} must be set to an absolute path")
-    try:
-        named_ledger_dir()
-    except ValueError as exc:
-        raise Refused(str(exc)) from None
     _check_shared_storage(info.state_dir, user_data)
     _default_runtime_dir()
     # install.sh's ``ensure_hosted_extra`` step installs the wheel's ``hosted`` extra into this interpreter before the command starts.
