@@ -115,7 +115,8 @@ HUB_RATE_LIMITED = "hub_rate_limited"
 #: A Hugging Face cache (the ``datasets`` lock of the evaluation's dataset, say) refused the test with ``[Errno 13]
 #: Permission denied``; the reason is ``<this>: <the path refused>``. The cache is a volume every sandbox of the platform
 #: mounts alike, so no candidate causes it and a fresh sandbox meets it again: ``hyperloom_multibranch.toolbox.attempts``
-#: ends the test with it at once and does not hold it against the node.
+#: ends the test with it at once and does not hold it against the node. A runner that could not link the datasets of an
+#: unwritable ``datasets`` cache (``hyperloom.measure.runner.datasets_cache``) reports it as its ``error_class``.
 HF_CACHE_PERMISSION = "hf_cache_permission"
 #: The test's own timeout passed while its attempt waited for a slot of the sandbox pool or for room in the grant's
 #: quota, before any sandbox was made (``hyperloom.measure.sandboxes.AcquireTimedOut``); the reason is ``<this>: <what it
@@ -170,6 +171,7 @@ INFRA_ERROR_CLASSES: frozenset[str] = frozenset(
         FOREIGN_PROCESS_ON_CARD,
         DISK_FULL,
         FRAMEWORK_VERSION_MISMATCH,
+        HF_CACHE_PERMISSION,
         "node_fault",
         "no_spec",
         "sandbox_create_failed",
