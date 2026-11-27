@@ -4,13 +4,13 @@
 """Compose a round's launch from its frozen base and the config's layers.
 
 The order is fixed: base, user removals, user additions, candidate removals, candidate additions, the golden layer (when
-the round applies it, or applies it less its acceptance simulation: ``real_acceptance``), the guard (the round's model path, address, GPU mask and the framework's own ready timeout), the runner's layer (with the
-framework's metrics flag when the round scrapes ``/metrics``), then the profiler layer of a profile round. A layer's
-flag beats every earlier group of the same flag; a later alias of it wins only because the engine applies the last
-one. Neither the user nor the candidate may set what the guard or the runner owns, nor, under a golden layer, what
+the round applies it, or applies it less its acceptance simulation: ``real_acceptance``), the guard (the round's model path, address, GPU mask, the framework's own ready timeout and its crash-dump switch), the runner's layer
+(with the framework's metrics flag when the round scrapes ``/metrics``), then the profiler layer of a profile round. A
+layer's flag beats every earlier group of the same flag; a later alias of it wins only because the engine applies the
+last one. Neither the user nor the candidate may set what the guard or the runner owns, nor, under a golden layer, what
 golden owns; such a layer is refused, not overridden, so the refusal names whose layer it was. The framework's own
-ready timeout is the exception: recipes raise it for a slow start, and a round's user layer re-states its base's
-environment, so the guard's value replaces whatever a layer below set.
+ready timeout and crash-dump switch are the exception: recipes raise the timeout for a slow start, and a round's user
+layer re-states its base's environment, so the guard's value replaces whatever a layer below set.
 
 The server runs as the framework's server module under ``server.framework_python``, the interpreter the version probe
 and the parser check run, never the base's entrypoint through ``PATH``; a native server (llama.cpp's) runs as its
