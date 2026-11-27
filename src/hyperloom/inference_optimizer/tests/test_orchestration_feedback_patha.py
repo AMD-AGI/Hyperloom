@@ -65,7 +65,7 @@ def test_format_delegated_result_with_error_is_truncated():
     assert len(line) < 600
 
 
-def test_format_review_verdict_and_denial():
+def test_format_review_verdict():
     verdict = _format_inbox_event(
         _msg(
             "review_verdict",
@@ -74,15 +74,6 @@ def test_format_review_verdict_and_denial():
     )
     assert "verdict='approve'" in verdict
     assert "target='p9'" in verdict
-
-    denial = _format_inbox_event(
-        _msg(
-            "policy_denial",
-            {"action_name": "kernel_opt", "rule": "phase_incompatible", "hint": "not allowed here"},
-        )
-    )
-    assert "action='kernel_opt'" in denial
-    assert "rule='phase_incompatible'" in denial
 
 
 def test_format_unknown_topic_falls_back_to_payload_dump():

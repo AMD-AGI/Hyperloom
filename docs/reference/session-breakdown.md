@@ -121,6 +121,11 @@ rows, and `effective_verdict` and `failure_reason_code` on
 `critic.iterations[].framework_reviews[]`. Read `verdict`: it is the verdict
 the loop acted on.
 
+A Critic ruling is one verdict on one proposal, so `critic_review.variants` on
+phase and framework proposals is removed with the same disposition: nothing
+produced a per-variant ruling, and the key was an empty list wherever it was
+written.
+
 Two figures are null instead of a fabricated default when they were not
 measured or not provided. `outcome.validation.attributed_gain_pct` and
 `unattributed_gain_pct` are null when no adoption could be measured, rather than

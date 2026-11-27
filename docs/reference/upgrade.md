@@ -133,6 +133,26 @@ or `failure_reason_code`. Consumers that read `effective_verdict` read
 `verdict` instead: the loop no longer downgrades a ruling, so `verdict` is the
 one it acted on.
 
+### Required: `session_breakdown.json` drops `critic_review.variants`
+
+The schema stays `v6.1`, but `critic_review` on a phase or framework proposal
+no longer carries `variants`. A `review_verdict` rules on a proposal with one
+`verdict`; its per-variant `verdict_map` form had no producer and is now
+rejected as a `review_verdict` with no `verdict`. 1.2.x wrote `variants` as an
+empty list on every reviewed phase proposal. Consumers that read it should stop.
+
+### Required: `state.json` drops the policy denial log
+
+`state.json` no longer carries `policy_denial_history` or
+`policy_denial_streak`, the Orchestration prompt no longer has a
+`=== Recent policy denials ===` block, and the `why_denied` context tool is
+removed. A session written by an earlier release still resumes: the two keys
+are dropped on load. A denial is still recorded where it was read from before:
+as a `policy_denied` observation in the denied agent's inbox, as a `denials`
+row on the phase event in `session_breakdown.json`, and as a
+`PolicyGate denied intent` warning in the log. Anything that read the two
+`state.json` keys reads the `denials` rows instead.
+
 ### Required: `SWEEP` is renamed `CYCLE_END` and runs no concurrency sweep
 
 The phase between `KERNEL_AGENT` and `CLOSE` is now `CYCLE_END`. It integrates

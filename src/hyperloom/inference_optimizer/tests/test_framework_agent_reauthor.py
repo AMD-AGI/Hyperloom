@@ -233,7 +233,7 @@ async def test_advise_verdict_does_not_reauthor(coord: Coordinator) -> None:
     calls = _record_reauthor_calls(coord)
     materialized: list[Any] = []
 
-    async def _fake_materialize(pending: Any, *, approved_variant_names: set[str] | None = None) -> None:
+    async def _fake_materialize(pending: Any) -> None:
         materialized.append(pending)
 
     coord.proposals.materialize_approved_proposal = _fake_materialize  # type: ignore[method-assign]
