@@ -192,8 +192,9 @@ building it while the GPUs wait, and the report's `agentx.dataset_cache_hit` say
 whether it did. A prep that fails or is stopped first leaves no cache, and the
 replay builds the dataset itself as before; the round never fails for it. The
 prep logs to `client/agentx_prep.log`; its scratch directory,
-`client/agentx_prep/`, is removed once it stops, and the cache once the replay
-ends. A `reuse` or `external` round, which boots no server, runs no prep.
+`client/agentx_prep/`, is removed once it stops. The round removes the cache
+however it ends, completed, failed or cancelled, before or after its server is
+ready, so the run directory it leaves never holds the dataset. A `reuse` or `external` round, which boots no server, runs no prep.
 
 A fixed round sends InferenceX's random prompts of `ISL` tokens, each answered to
 exactly `OSL` tokens. A point that sets `DATASET_PATH`, an absolute path to a JSONL
@@ -356,7 +357,7 @@ One round writes one run directory and leaves it unchanged once the round ends.
 | `kv_metrics.json`, `agentx_timeline.jsonl` | KV-cache samples and the AgentX request timeline. |
 | `power.json` | Every power reading the node gave over the whole round; see [Power](#power). |
 | `weight_prefetch.json` | What the checkpoint prefetch did while the server booted, only when `HYPERLOOM_WEIGHT_PREFETCH=1` turned it on: the chosen files, the skip reason, the totals, the bytes read and the unreadable file count. See [Checkpoint prefetch](environment-variables.md#checkpoint-prefetch). |
-| `client/` | `stdout.log`, `stderr.log`, `agentx_client.log`, `agentx_prep.log` (and, only while the AgentX dataset prep and replay run, `agentx_prep/` and `aiperf_dataset_cache/`), `inferencex_result.json`, `aiperf_artifacts/` (`profile_export.jsonl`, `profile_export_aiperf.json`, `logs/aiperf.log`) and, on an MLPerf round, `mlperf_artifacts/` (the harness's `result_summary.json` and `scores.json`). |
+| `client/` | `stdout.log`, `stderr.log`, `agentx_client.log`, `agentx_prep.log` (and, only while the round runs, `agentx_prep/` and `aiperf_dataset_cache/`), `inferencex_result.json`, `aiperf_artifacts/` (`profile_export.jsonl`, `profile_export_aiperf.json`, `logs/aiperf.log`) and, on an MLPerf round, `mlperf_artifacts/` (the harness's `result_summary.json` and `scores.json`). |
 | `eval/` | `stdout.log`, `stderr.log`, lm-eval's `results_<time>.json`, `hyperloom_eval_probe.json` and `definition.json`. |
 | `profile/` | `torch_trace/`, `capture_traces/`, `graph_capture_profile/` and `capture.json`. |
 

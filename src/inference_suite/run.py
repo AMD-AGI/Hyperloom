@@ -23,6 +23,7 @@ import json
 import logging
 import math
 import os
+import shutil
 import sys
 import threading
 import time
@@ -501,6 +502,8 @@ class _Round:
             else:
                 self._sampled(acquired, prepared)
         finally:
+            # The AgentX dataset cache is gigabytes, and the run_dir is signed whole against a size cap.
+            shutil.rmtree(self.layout.aiperf_dataset_cache, ignore_errors=True)
             released = lifecycle.release()
             server = self.config.server
             reused = self.config.lifecycle.mode.finds_server

@@ -180,7 +180,7 @@ class RunLayout:
 
     @property
     def aiperf_dataset_cache(self) -> Path:
-        """aiperf's dataset cache the prep fills and the replay reads; removed once the replay ends."""
+        """aiperf's dataset cache the prep fills and the replay reads; removed however the round ends."""
         return self.client_dir / "aiperf_dataset_cache"
 
     @property

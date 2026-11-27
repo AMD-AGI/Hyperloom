@@ -22,7 +22,7 @@ from there.
 
 Building the replay's dataset (tokenizer, trace corpus, mmap files) takes the client minutes. While the round's server
 boots, :class:`DatasetPrep` runs the same client against no server to build it into aiperf's dataset cache in the
-run_dir, which the replay reads; the report records whether it did. The cache is removed once the replay ends.
+run_dir, which the replay reads; the report records whether it did. The round removes the cache however it ends.
 """
 
 from __future__ import annotations
@@ -537,7 +537,6 @@ def run_agentx(agentx_round: AgentxRound) -> AgentxOutcome:
     layout = RunLayout(Path(config.paths.run_dir))
     invocation = measured_invocation(config, agentx_round.tool)
     returncode, stop = _replay(agentx_round, invocation, layout)
-    shutil.rmtree(layout.aiperf_dataset_cache, ignore_errors=True)
     if stop is not None and stop.step is not FailedStep.CLIENT_FAILED:
         return AgentxOutcome(invocation, returncode, None, stop)
     result = _result(agentx_round, layout)

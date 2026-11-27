@@ -376,7 +376,6 @@ def test_the_result_records_whether_the_replay_read_the_cached_dataset(tmp_path,
     monkeypatch.setenv("FAKE_LOG", log)
     outcome = run_agentx(_round(tmp_path, harness))
     assert outcome.result.dataset_cache_hit is hit
-    assert not RunLayout(tmp_path / "run").aiperf_dataset_cache.exists(), "the run_dir keeps no copy of the dataset"
 
 
 def test_a_missing_aggregate_fails_the_output(tmp_path, harness, monkeypatch):
