@@ -556,7 +556,14 @@ class WeightPrefetch:
         except BaseException:
             self._interrupt.set()  # a look at the cache that fails ends the reads with it
             raise
-        elapsed = max(time.monotonic() - started, 1e-9)
+        self._end_pass(record, tally, len(chosen), time.monotonic() - started, dropped=rule is not None)
+        return rule
+
+    def _end_pass(
+        self, record: dict[str, object], tally: _PassTally, files: int, elapsed: float, *, dropped: bool
+    ) -> None:
+        """Add what a pass over ``files`` files read to :attr:`outcome` and its ``record``, and log it."""
+        elapsed = max(elapsed, 1e-9)
         self.outcome.read_bytes += tally.read
         self.outcome.unreadable += tally.unreadable
         self.outcome.out_of_room = self.outcome.out_of_room or tally.out_of_room
@@ -565,21 +572,20 @@ class WeightPrefetch:
             read_bytes=tally.read,
             files_read=len(tally.files),
             out_of_room=tally.out_of_room,
-            ended_by_drop=rule is not None,
+            ended_by_drop=dropped,
         )
         log.info(
             "weight prefetch pass %d: read %.1f GiB from %d of %d files in %.1f s, %.0f MB/s, %d unreadable%s%s",
-            self.outcome.passes,
+            record["pass"],
             tally.read / _GIB,
             len(tally.files),
-            len(chosen),
+            files,
             elapsed,
             tally.read / elapsed / 1e6,
             tally.unreadable,
             "; stopped: the memory headroom ran out" if tally.out_of_room else "",
-            "; ended early: the checkpoint's page cache was dropped" if rule else "",
+            "; ended early: the checkpoint's page cache was dropped" if dropped else "",
         )
-        return rule
 
     def _stream(self, work: queue.SimpleQueue[tuple[_Chosen, Span]], tally: _PassTally) -> None:
         try:
