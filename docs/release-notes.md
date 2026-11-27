@@ -33,6 +33,12 @@ it.
   `deepseek` without the extra, is refused before the session is created.
   Without the variable nothing changes. See
   [Run a multi-branch session](how-to/run-multibranch.md).
+- **A multi-branch harness specialist compacts at 60% of the model's window
+  and keeps no tail.** It kept a tail of about 16% of the window; a cut never
+  falls between a tool call and its result, and a background job's result
+  arrives many steps after its call, so each compaction summarized only the
+  previous summary and rewrote the cached conversation on every step. A
+  compaction now summarizes everything after the system prompt.
 - **The hosted single-session flow is retired.** `hyperloom hosted run` now
   only checks the campaign spec, runs the installer and hands the run to
   `hyperloom-multibranch hosted run`. A spec must set `"flow": "multibranch"`
