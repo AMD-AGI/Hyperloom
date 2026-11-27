@@ -48,6 +48,7 @@ from hyperloom_multibranch.toolbox.short_prompts import (
     no_patch_files,
 )
 from hyperloom_multibranch.toolbox.weight_precision import ambiguous_words, weight_precision_changes
+from inference_suite.argv import tokenize_server_args_preserving_json
 from inference_suite.contracts.launch import unlaunchable_flags
 
 
@@ -138,9 +139,11 @@ def _check_online_tuning(candidate: Recipe) -> None:
 
 def _check_launch_flags(candidate: Recipe) -> None:
     """Refuse a candidate whose server arguments hold a word the runner's launch cannot carry as a flag, which it would
-    refuse only after the test's cards were taken. The arguments are split on whitespace, as the launcher splits them.
-    Whether the framework's parser takes each flag is checked in the sandbox, where the framework is installed."""
-    malformed = unlaunchable_flags(candidate.launch.server_args.split())
+    refuse only after the test's cards were taken. Whether the framework's parser takes each flag is checked in the
+    sandbox, where the framework is installed."""
+    # ``LaunchConfig`` takes no server arguments this tokenizer cannot split.
+    _, argv = tokenize_server_args_preserving_json(candidate.launch.server_args)
+    malformed = unlaunchable_flags(argv)
     if malformed:
         raise RequestRejected(
             f"the candidate's server arguments hold {', '.join(map(repr, malformed))}, which no launch can carry as a "

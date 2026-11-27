@@ -13,6 +13,9 @@ Before the inventory, the traces are made to fit, in two steps, each only when t
 
 What was done is recorded in ``trace_fit.json`` beside the traces' directory and in the result's notes. An output still
 over the cap after both is left to the inventory, which refuses it.
+
+A failed test's output is fitted too (:func:`fit_failed_output`): its verdict is decided before the inventory, and its
+files are only the diagnosis of it, so its largest are left out rather than the whole result with its verdict.
 """
 
 from __future__ import annotations
@@ -26,7 +29,7 @@ from pathlib import Path
 
 from hyperloom.measure.profile_traces import PROFILE_DIR, is_trace_file
 
-__all__ = ["TRACE_FIT_FILE", "fit_traces"]
+__all__ = ["TRACE_FIT_FILE", "fit_failed_output", "fit_traces"]
 
 #: The record of what was done to fit the traces, below the output directory (not a trace: its name ends otherwise).
 TRACE_FIT_FILE = "trace_fit.record"
@@ -55,6 +58,23 @@ def fit_traces(files_dir: Path, max_total_bytes: int) -> str | None:
         f"the profile's output was {before} bytes, over the cap of {max_total_bytes}: {len(record['compressed'])} "
         f"trace(s) compressed, {dropped} trace(s) of secondary ranks dropped, {after} bytes now ({fits}; {TRACE_FIT_FILE})"
     )
+
+
+def fit_failed_output(files_dir: Path, max_total_bytes: int) -> str | None:
+    """Remove the largest files below ``files_dir``, one at a time, until the rest add up to at most
+    ``max_total_bytes``; a note naming those removed, ``None`` when nothing was needed."""
+    sized = sorted(((path.stat().st_size, path) for path in _regular_files(files_dir)), reverse=True)
+    total = sum(size for size, _ in sized)
+    if total <= max_total_bytes:
+        return None
+    removed = []
+    for size, path in sized:
+        path.unlink()
+        removed.append(f"{path.relative_to(files_dir)} ({size} bytes)")
+        total -= size
+        if total <= max_total_bytes:
+            break
+    return f"the failed test's output was over the cap of {max_total_bytes} bytes; left out: {', '.join(removed)}"
 
 
 def _regular_files(root: Path) -> list[Path]:

@@ -156,7 +156,9 @@ that set each flag and environment variable and what it overrode:
    A round whose test has a boot budget (`deadlines.boot_budget_sec`, from a
    run's `--boot-budget-sec`) sets it to the budget plus 3600 s when that is
    longer, the same headroom over the boot limit, so the 10800 s is not above
-   such a round's boot;
+   such a round's boot; and, for SGLang, `SGLANG_CUDA_COREDUMP_BEFORE_CRASH=0`:
+   a round's processes write no core dump, so the 60 s a crashing server
+   otherwise waits for its workers' GPU core dumps would only hold the cards;
 6. the runner's layer: the environment and floors a host needs, and the
    framework's metrics switch (`--enable-metrics` for SGLang; vLLM and ATOM need none)
    when the round samples KV telemetry;
@@ -165,9 +167,10 @@ that set each flag and environment variable and what it overrode:
 Neither the operator's nor the candidate's layer may set what the guard or the
 runner owns, nor, under a golden layer, what golden owns
 (`golden_owned_touched`); such a layer is refused, not overridden. The ready
-timeout is the exception: recipes raise it for a slow start and a round's
-operator layer re-states its base's environment, so whatever a layer sets, the
-guard's value replaces it and `launch.json` records whose value it replaced.
+timeout and the core-dump switch are the exception: recipes raise the timeout
+for a slow start and a round's operator layer re-states its base's environment,
+so whatever a layer sets, the guard's value replaces it and `launch.json`
+records whose value it replaced.
 
 The golden layer carries a base's golden acceptance length (speculative decoding
 draft and simulation settings) as its own record. An AgentX session runs a GSM8K

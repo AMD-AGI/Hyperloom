@@ -112,21 +112,23 @@ def run_generated_tuner(
     timed_out = False
     rc: int | None = None
     try:
-        with log_path.open("w", encoding="utf-8") as sink:
-            proc = subprocess.run(
+        with (
+            log_path.open("w", encoding="utf-8") as sink,
+            subprocess.Popen(
                 [sys.executable or "python3", str(script)],
                 cwd=str(work_dir),
                 env=env,
                 stdout=sink,
                 stderr=subprocess.STDOUT,
-                timeout=limits.timeout_s,
-                check=False,
-                preexec_fn=forbid_core_dumps,
-            )
-        rc = proc.returncode
-    except subprocess.TimeoutExpired:
-        timed_out = True
-        log.warning("tier3: generated tuner exceeded %ds; keeping what it wrote", limits.timeout_s)
+            ) as proc,
+        ):
+            forbid_core_dumps(proc.pid)
+            try:
+                rc = proc.wait(timeout=limits.timeout_s)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+                timed_out = True
+                log.warning("tier3: generated tuner exceeded %ds; keeping what it wrote", limits.timeout_s)
     except OSError as exc:
         return SandboxResult(
             False, None, time.perf_counter() - started, stderr_tail=f"could not start the script: {exc}"

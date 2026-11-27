@@ -33,6 +33,7 @@ from hyperloom.measure.failures import (
     DISK_FULL,
     FOREIGN_PROCESS_ON_CARD,
     FRAMEWORK_VERSION_MISMATCH,
+    RUNNER_ERROR,
     Disposition,
     FailureClassification,
     FailureEvidence,
@@ -80,7 +81,7 @@ from hyperloom.measure.runner.jit_outcome import refine_outcome
 from hyperloom.measure.runner.native.prewarm import preflight_build
 from hyperloom.measure.runner.own_jit import OWN_AITER_JIT_DIR, own_aiter_jit
 from hyperloom.measure.runner.rebuild_watchdog import raise_rebuild_watchdog
-from hyperloom.measure.runner.trace_fit import fit_traces
+from hyperloom.measure.runner.trace_fit import fit_failed_output, fit_traces
 from hyperloom.measure.runner.own_tmp import own_tmpdir
 from hyperloom.measure.runner.inventory import OutputRejected, drop_agentx_runtime, inventory, write_farm_inventory
 from hyperloom.measure.runner.platform_env import align_platform_env, take_topology
@@ -661,7 +662,8 @@ def _run_sheet(ctx: _Context, spec_path: Path, key, progress: Progress) -> None:
     _check_node(ctx, before, hardware.ecc_counts(visible), visible, facts)
     write_farm_inventory(ctx.files, farm)
     write_rounds(ctx.files, outcome)
-    files = _inventory(ctx, spec)
+    document = _outcome_document(outcome, timed_out)
+    files = _inventory(ctx, spec, document)
     cold = cold_start(ctx.files)
     report = None if session is None else session.report(cold.builds)
     if report is not None:
@@ -670,18 +672,21 @@ def _run_sheet(ctx: _Context, spec_path: Path, key, progress: Progress) -> None:
     _write_bundle(
         ctx,
         _Signed(spec, raw, key),
-        refine_imports(refine_outcome(_outcome_document(outcome, timed_out), session, cold.builds), farm),
+        refine_imports(refine_outcome(document, session, cold.builds), farm),
         _Findings(files, facts, changed, timing, visible, surface, None if report is None else report.document()),
     )
 
 
-def _inventory(ctx: _Context, spec: MeasurementSpec) -> tuple[ManifestFile, ...]:
-    """The output's files, a profile's traces first fitted under the size cap as far as they can be (``trace_fit``)."""
-    fitted = fit_traces(ctx.files, spec.outputs.max_total_bytes)
-    if fitted is not None:
-        ctx.notes.append(fitted)
+def _inventory(ctx: _Context, spec: MeasurementSpec, outcome: dict) -> tuple[ManifestFile, ...]:
+    """The output's files, first fitted under the size cap as far as they can be (``trace_fit``): a profile's traces,
+    then, when ``outcome`` says the test failed, its largest files."""
+    cap = spec.outputs.max_total_bytes
+    fitted = [fit_traces(ctx.files, cap)]
+    if outcome["failure_class"] or outcome["error_class"]:
+        fitted.append(fit_failed_output(ctx.files, cap))
+    ctx.notes.extend(note for note in fitted if note)
     try:
-        return inventory(ctx.files, max_total_bytes=spec.outputs.max_total_bytes)
+        return inventory(ctx.files, max_total_bytes=cap)
     except OutputRejected as exc:
         raise RunnerFailure(exc.error_class, str(exc)) from exc
 
@@ -758,7 +763,7 @@ def run(
             return failure.exit_code
         except Exception as exc:  # the application reads status.json, not a traceback
             log.exception("the runner failed; status.json says how")
-            error_class = DISK_FULL if is_disk_full(exc) else "runner_error"
+            error_class = DISK_FULL if is_disk_full(exc) else RUNNER_ERROR
             message = f"{type(exc).__name__}: {exc} (at {_raised_at(exc)})"
             write_status(out_dir, state=_FAILED, error_class=error_class, message=message)
             return 1

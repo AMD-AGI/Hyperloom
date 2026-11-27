@@ -13,7 +13,7 @@ from pathlib import Path
 import pytest
 
 from hyperloom.measure.runner.inventory import OutputRejected, inventory
-from hyperloom.measure.runner.trace_fit import TRACE_FIT_FILE, fit_traces
+from hyperloom.measure.runner.trace_fit import TRACE_FIT_FILE, fit_failed_output, fit_traces
 
 _RANKS = 4
 _EVENT = b'{"ph": "X", "name": "gemm_a8w8_blockscale_bpreshuffle", "ts": 1, "dur": 2},\n'
@@ -86,3 +86,16 @@ def test_an_output_that_still_does_not_fit_is_left_for_the_inventory_to_refuse(t
     with pytest.raises(OutputRejected) as refused:
         inventory(tmp_path, max_total_bytes=150_000)
     assert refused.value.error_class == "output_too_large"
+
+
+def test_a_failed_tests_largest_files_are_left_out_until_the_rest_fit(tmp_path: Path) -> None:
+    sizes = {"server.log": 3_000, "gpucore.1.gpu": 50_000, "gpucore.2.gpu": 40_000, "rounds.json": 100}
+    for name, size in sizes.items():
+        (tmp_path / name).write_bytes(b"x" * size)
+
+    assert fit_failed_output(tmp_path, 100_000) is None
+    note = fit_failed_output(tmp_path, 45_000)
+
+    assert note is not None and "gpucore.1.gpu (50000 bytes)" in note and "gpucore.2.gpu" not in note
+    assert sorted(p.name for p in tmp_path.iterdir()) == ["gpucore.2.gpu", "rounds.json", "server.log"]
+    inventory(tmp_path, max_total_bytes=45_000)

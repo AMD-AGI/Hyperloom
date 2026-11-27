@@ -148,6 +148,8 @@ class FrameworkFacts:
     ``None`` when it waits for its start without a limit of its own. ``model_file`` is the suffix of the one file of a
     model directory the server loads, ``None`` when it loads the directory. ``request_slots`` is the option capping
     the requests the server runs at once, ``None`` when it has none that a load past it only queues behind.
+    ``crash_dump_env`` is the switch, on unless set to ``0``, with which a crashing server has its workers write GPU
+    core dumps and waits for them before it exits; ``None`` when it has none.
     """
 
     kind: FrameworkKind
@@ -161,6 +163,7 @@ class FrameworkFacts:
     ready_timeout_env: str | None = None
     model_file: str | None = None
     request_slots: RequestSlotsFlag | None = None
+    crash_dump_env: str | None = None
 
     def served_model(self, model_path: str) -> str:
         """What the server's model flag names for the model at ``model_path``: the path itself, or the one
@@ -274,6 +277,8 @@ _FACTS: dict[Framework, FrameworkFacts] = {
         # The warmup request it sends once its HTTP server is up; past it the server kills itself before it reports
         # ready. Unset (-1) means 600 s.
         ready_timeout_env="SGLANG_WARMUP_TIMEOUT",
+        # Its crash handler waits 60 s for the dumps (``SGLANG_CUDA_COREDUMP_BEFORE_CRASH_WAIT_SECS``).
+        crash_dump_env="SGLANG_CUDA_COREDUMP_BEFORE_CRASH",
     ),
     Framework.VLLM: FrameworkFacts(
         kind=FrameworkKind.SERVING,

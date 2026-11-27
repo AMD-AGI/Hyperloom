@@ -101,11 +101,16 @@ RESULT_DOWNLOAD_INCOMPLETE = "result_download_incomplete"
 #: instead of polling until the test's timeout. Retried like any infrastructure failure.
 RUNNER_EXITED = "runner_exited"
 
-#: The files the test left add up to more than its result may carry (``hyperloom.measure.runner.inventory``), so the
-#: runner signs no result and nothing about the candidate was learned. A fresh sandbox runs the same test and writes the
-#: same output: an infrastructure failure that is not retried (``hyperloom_multibranch.toolbox.attempts``) and not held
-#: against the node.
+#: The files a test that succeeded left add up to more than its result may carry (``hyperloom.measure.runner.inventory``;
+#: a failed test's largest files are left out instead, ``runner.trace_fit``), so the runner signs no result and nothing
+#: about the candidate was learned. A fresh sandbox runs the same test and writes the same output: an infrastructure
+#: failure that is not retried (``hyperloom_multibranch.toolbox.attempts``) and not held against the node.
 OUTPUT_TOO_LARGE = "output_too_large"
+#: The output holds a link, a special file or a name the result bundle owns (``hyperloom.measure.runner.inventory``),
+#: so the runner signs no result of it: a program error.
+UNSAFE_OUTPUT = "unsafe_output"
+#: The runner raised an error it has no class for; its message names where. A defect of the runner: a program error.
+RUNNER_ERROR = "runner_error"
 
 #: The server's scheduler watchdog fired while a rank was still building an aiter JIT module (a tuned table named
 #: kernel instances the image's prebuilt module lacks, so aiter rebuilt it at the first prefill). Nothing about the
@@ -214,7 +219,9 @@ INFRA_ERROR_CLASSES: frozenset[str] = frozenset(
     }
 )
 #: ``error_class`` values that mean the framework or the result is wrong, not the measurement or the candidate.
-PROGRAM_ERROR_CLASSES: frozenset[str] = frozenset({"spec_rejected", "result_rejected", CARDS_UNOBSERVABLE})
+PROGRAM_ERROR_CLASSES: frozenset[str] = frozenset(
+    {"spec_rejected", "result_rejected", CARDS_UNOBSERVABLE, UNSAFE_OUTPUT, RUNNER_ERROR}
+)
 
 #: The test ran past its own timeout: unclear, since a hung server and a test longer than its timeout end alike.
 #: ``hyperloom_multibranch.toolbox.attempts`` does not rerun a sweep that ends so.

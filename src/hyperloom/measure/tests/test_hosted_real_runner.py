@@ -213,7 +213,7 @@ def test_files_compiled_against_another_framework_version_are_refused_as_infra_b
 def test_an_output_larger_than_the_result_may_carry_is_an_infrastructure_failure_not_a_refused_result(
     real, tmp_path
 ) -> None:
-    """A server that dumped its GPU memory left terabytes this way; the runner signs no result of it."""
+    """The test succeeded, so none of its files is left out to fit: the runner signs no result of it."""
     r = real(max_total_bytes=1)
     call = _call(tmp_path, point=_point(tmp_path), timeout_sec=120)
     outcome = r.backend.run_test(call)
