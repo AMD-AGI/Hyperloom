@@ -178,6 +178,21 @@ report paths, and adds `partial`, `in_progress` and `cancelled` to `status`.
 Both lineages' shapes are in
 [`session_breakdown.json` integration in Hyperloom](session-breakdown.md).
 
+### Required: `hyperloom session report` is removed
+
+`hyperloom session report` (and `python -m
+hyperloom.inference_optimizer.tools.dump_session_report`) no longer exists:
+the command prints the `hyperloom` usage and exits 2, and the module fails
+with `No module named`. Nothing writes `session_report.md`,
+`session_report_prompt.json` or `session_report_llm_raw.txt` any more; a
+session never wrote them on its own, only this command did. Drop the command
+from scripts, and read `reports/final.md` for the session's own summary and
+`session_breakdown.json` for the recorded facts. Neither file changes.
+
+`HYPERLOOM_REPORT_LLM_BACKEND`, `HYPERLOOM_REPORT_MODEL` and
+`HYPERLOOM_REPORT_MAX_TOKENS` are no longer read and are silently ignored, so
+drop them.
+
 ---
 
 ## Upgrading from 1.1.x
@@ -197,7 +212,7 @@ launchers, skills and scripts:
 | `quantization-agent ...` | `hyperloom quantize ...` |
 | `python -m hyperloom.inference_optimizer.multi_node SUB ...` | `hyperloom multi-node SUB ...` |
 | `python -m hyperloom.inference_optimizer.tools.dump_session_breakdown` | `hyperloom session breakdown` |
-| `python -m hyperloom.inference_optimizer.tools.dump_session_report` | `hyperloom session report` |
+| `python -m hyperloom.inference_optimizer.tools.dump_session_report` | removed; see *Upgrading from 1.2.x* above |
 | `python -m hyperloom.inference_optimizer.tools.backfill_langfuse` | `hyperloom session backfill` |
 | `.../tools/event_counts.py` | `hyperloom session events` |
 | `.../tools/read_optimizer_state.py` | `hyperloom session state` |
@@ -388,7 +403,7 @@ Multi-node runs (RayJob through the Ray Dashboard) are unchanged.
 ### Recommended: commands that stay outside `hyperloom.cli`
 
 `hyperloom <command>` covers setup, check, optimize, recover, quantize,
-multi-node, and `session {breakdown,report,backfill,events,state}`. These
+multi-node, and `session {breakdown,backfill,events,state}`. These
 entry points are **intentionally separate** (same as before the unification,
 only the optimizer-family commands moved under `hyperloom`):
 
