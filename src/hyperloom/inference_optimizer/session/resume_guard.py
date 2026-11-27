@@ -298,6 +298,8 @@ def ensure_resume_safe(session_dir: Path, *, owner_scope: str) -> None:
 
     Observable local owners are left to the coordinator's existing reaper. An
     empty ledger does not prove a recorded running or cancelled execution exited.
+    A kernel stack validation an earlier release left unfinished is residual work
+    nothing here can settle, so it is rejected too.
     """
     _require_readable(session_dir)
     state = recorded_state(session_dir)
