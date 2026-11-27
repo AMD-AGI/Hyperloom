@@ -1490,7 +1490,7 @@ bounds the session together with the spec's `budget.max_hours`; see
 | `HYPERLOOM_RUN_CREATED_AT` | Always | Run creation time, ISO 8601 with a UTC offset or `Z`. |
 | `HYPERLOOM_STATE_DIR` | Always | Absolute path of the run's state directory on shared storage; must exist. |
 | `HYPERLOOM_MCP_PUBLIC_URL` | When sub-runs call back into the run | `http(s)` URL under which sub-runs reach the run's MCP server. No credentials, query or fragment. |
-| `HYPERLOOM_SANDBOX_TEMPLATES` | When a sandbox is hosted | JSON object of each role's templates by card count (a decimal key; the name is opaque), for example `{"measurement": {"1": "t1", "8": "t8"}, "dev": {"1": "d1", "8": "d8"}}`. `runner` is accepted as the older name of `measurement`. |
+| `HYPERLOOM_SANDBOX_TEMPLATES` | When a sandbox is hosted | JSON object of each role's templates by card count (a decimal key; the name is opaque), for example `{"measurement": {"1": "t1", "8": "t8"}, "dev": {"1": "d1", "8": "d8"}}`. |
 | `E2B_API_URL`<br>`E2B_SANDBOX_URL` | When a sandbox is hosted | Control-plane and data-plane `http(s)` URLs of the sandbox service, without credentials, query or fragment. |
 | `HYPERLOOM_SANDBOX_KEY_MEASUREMENT`<br>`HYPERLOOM_SANDBOX_KEY_SUBRUN`<br>`HYPERLOOM_SANDBOX_KEY_DEV` | Per hosted role | The sandbox API key of each role. Credentials. |
 | `HYPERLOOM_RESULT_ARCHIVE` | No | Unset means results are archived on the shared storage, in a directory the application chooses. Otherwise `s3://<bucket>/<prefix>`; the prefix may be empty and has no empty, `.` or `..` segment. A local path (`/x`, `file://...`) is refused: local means unset. |

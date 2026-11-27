@@ -41,6 +41,10 @@ it.
   snapshot, and the runner no longer checks one: no producer, inside
   Hyperloom or out, ever wrote a non-null value. The key stays in every sheet
   as `null`, so spec fingerprints and JIT cache keys are unchanged.
+- **`HYPERLOOM_SANDBOX_TEMPLATES` no longer accepts `runner` for the
+  `measurement` role.** A hosted run reads only `measurement` and `dev`; a
+  list that gives only `runner` is refused as having no `measurement` role.
+  No host sends `runner`. See [Upgrade](reference/upgrade.md).
 - **`hyperloom session report` is removed.** The command rendered a
   `session_breakdown.json` as Markdown (`session_report.md`), optionally with
   an LLM-written summary. It ran only by hand: no session wrote

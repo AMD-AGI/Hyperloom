@@ -66,6 +66,13 @@ test at once than the default did, and each test's sandbox queues for a node.
 `INFERENCE_OPTIMIZER_PROPOSAL_SCORER_TIMEOUT_SEC` is no longer read and is
 silently ignored, so drop it.
 
+### Required: `HYPERLOOM_SANDBOX_TEMPLATES` names the `measurement` role
+
+A hosted run no longer reads `runner` as the older name of the `measurement`
+role. A template list that gives only `runner` is refused with "the template
+list has no 'measurement' role": rename the key to `measurement`. Hosts that
+build the list from the grant's roles already send `measurement`.
+
 ### Required: `session_breakdown.json` drops `ensemble_scores`
 
 The schema stays `v6.1`, but neither a specialist round's action row nor a

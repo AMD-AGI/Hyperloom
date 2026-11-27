@@ -49,7 +49,7 @@ def run(tmp_path, monkeypatch):
         Var.RUN_CREATED_AT: "2026-10-23T08:30:05Z",
         Var.STATE_DIR: str(state),
         Var.GRANT_LIMITS: json.dumps({"max_gpus": 8, "gpu_hours": 12}),
-        Var.SANDBOX_TEMPLATES: json.dumps({"runner": {"1": "r1"}}),
+        Var.SANDBOX_TEMPLATES: json.dumps({"measurement": {"1": "r1"}}),
         Var.E2B_API_URL: "https://api.sandbox.example.test",
         HOST_LAYER_ENV: str(tmp_path / "layer"),
         "USER_DATA_PATH": str(work),

@@ -34,7 +34,7 @@ def env(tmp_path):
         Var.MCP_HOST: "0.0.0.0",
         Var.MCP_PORT: "8765",
         Var.MCP_PUBLIC_URL: "https://app.example.test:8765",
-        Var.SANDBOX_TEMPLATES: json.dumps({"runner": {"1": "r1", "8": "r8"}, "dev": "d"}),
+        Var.SANDBOX_TEMPLATES: json.dumps({"measurement": {"1": "r1", "8": "r8"}, "dev": "d"}),
         Var.E2B_API_URL: "https://api.sandbox.example.test",
         Var.E2B_SANDBOX_URL: "https://sbx.example.test",
         Var.RESULT_ARCHIVE: "s3://results-bucket/hl/runs",
@@ -56,7 +56,7 @@ def test_a_complete_environment_reads_into_typed_fields(env, tmp_path):
     assert info.input_file == tmp_path / "campaign.json"
     assert info.run_id == "run-1"
     assert info.run_created_at == datetime(2026, 10, 1, 12, 30, tzinfo=timezone.utc)
-    assert info.sandbox_templates == {"runner": {"1": "r1", "8": "r8"}, "dev": "d"}
+    assert info.sandbox_templates == {"measurement": {"1": "r1", "8": "r8"}, "dev": "d"}
     assert (info.result_archive.bucket, info.result_archive.prefix) == ("results-bucket", "hl/runs")
     assert info.sandbox_keys.subrun.reveal() == _SECRETS[Var.SANDBOX_KEY_SUBRUN]
     assert info.archive_credentials.session_token.reveal() == _SECRETS[Var.AWS_SESSION_TOKEN]
@@ -174,8 +174,8 @@ def test_missing_and_malformed_inputs_are_reported_together(env):
         (Var.SANDBOX_TEMPLATES, "{not json", "is not valid JSON"),
         (Var.SANDBOX_TEMPLATES, "[]", "must be a non-empty JSON object"),
         (Var.SANDBOX_TEMPLATES, "{}", "must be a non-empty JSON object"),
-        (Var.SANDBOX_TEMPLATES, '{"runner": 8}', "every entry must be a template name"),
-        (Var.SANDBOX_TEMPLATES, '{"runner": {"1": ""}}', "every entry must be a template name"),
+        (Var.SANDBOX_TEMPLATES, '{"measurement": 8}', "every entry must be a template name"),
+        (Var.SANDBOX_TEMPLATES, '{"measurement": {"1": ""}}', "every entry must be a template name"),
         (Var.RESULT_ARCHIVE, "https://b/p", "only s3://<bucket>/<prefix> or unset"),
         (Var.RESULT_ARCHIVE, "s3://", "bucket is not a valid"),
         (Var.RESULT_ARCHIVE, "s3://UPPER_bucket/p", "bucket is not a valid"),

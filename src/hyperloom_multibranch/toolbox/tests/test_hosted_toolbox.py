@@ -598,18 +598,11 @@ async def test_a_toolbox_that_lends_nothing_refuses_a_lease_as_unsupported(tmp_p
             r"templates serve \[1, 2\]",
         ),
         (
-            {"runner": {"8": "r8"}, "dev": _DEV_MAP},
-            1,
-            r"no 'measurement' template has the session's 1 cards; "
-            r"templates serve \[8\]",
-        ),
-        (
             {"measurement": _RUNNER_MAP, "dev": {"1": _DEVS[0]}},
             2,
             r"no dev template has the session's 2 cards; "
             r"templates serve \[1\]",
         ),
-        ({"measurement": _RUNNER_MAP, "runner": _RUNNER_MAP, "dev": _DEV_MAP}, 1, "both 'measurement' and its older"),
         ({"measurement": "opaque-name", "dev": _DEV_MAP}, 1, "'measurement' templates must map card counts to names"),
         ({"measurement": list(_RUNNERS), "dev": _DEV_MAP}, 1, "'measurement' templates must map card counts"),
         ({"measurement": _RUNNER_MAP, "dev": _DEVS[0]}, 1, "'dev' templates must map card counts to names"),
@@ -706,12 +699,6 @@ def test_the_hosts_workspace_goes_with_every_create_of_the_toolbox(
         with pytest.raises(_Sent):
             toolbox.provider.create("t", role=role, timeout_sec=60, metadata={"k": "v"})
     assert seen == [{"k": "v", **sent, PENDING_TIMEOUT_KEY: "60"}] * 2
-
-
-def test_runner_is_the_older_name_of_the_measurement_role(tmp_path: Path) -> None:
-    inputs = _inputs(None, tmp_path, sandbox_templates={"runner": {"1": "r1", "8": "r8"}, "dev": _DEV_MAP})
-    assert hosted_toolbox._runner_template(inputs) == "r1"
-    assert hosted_toolbox._runner_template(dataclasses.replace(inputs, tp=8)) == "r8"
 
 
 # -- through the stand-in ------------------------------------------------------------------------------------------

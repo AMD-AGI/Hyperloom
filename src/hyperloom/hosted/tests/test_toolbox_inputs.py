@@ -16,7 +16,7 @@ from hyperloom.hosted.toolbox_inputs import ToolboxInputsError, grant_limits_tot
 _SHA = "0123456789abcdef0123456789abcdef01234567"
 _MEASUREMENT = "sentinel-measurement-key-7731"
 _DEV = "sentinel-dev-key-9042"
-_TEMPLATES = {"runner": {"1": "ar-runner-g1", "8": "ar-runner-g8"}, "dev": "ar-dev-g1"}
+_TEMPLATES = {"measurement": {"1": "ar-runner-g1", "8": "ar-runner-g8"}, "dev": "ar-dev-g1"}
 _LIMITS = {"max_sandboxes": 4, "max_gpus": 16, "gpu_hours": 2.5, "max_runtime_sec": 3600}
 
 # Pinned literal: the field names of the multibranch toolbox's input (W137 signature).  Not derived from that package.

@@ -72,7 +72,6 @@ from hyperloom_multibranch.toolbox.toolbox import AcceptanceSetup, ToolboxTuning
 __all__ = [
     "DEV_TEMPLATES",
     "MEASUREMENT_TEMPLATES",
-    "RUNNER_TEMPLATES",
     "SOURCE_SHA_ENV",
     "HostedOptions",
     "HostedToolbox",
@@ -83,8 +82,8 @@ __all__ = [
 ]
 
 #: The roles of the template list (``HYPERLOOM_SANDBOX_TEMPLATES``) the toolbox reads, named as the grant names them;
-#: the others are the sub-runs'. ``runner`` is the older name of ``measurement``, read when ``measurement`` is absent.
-MEASUREMENT_TEMPLATES, RUNNER_TEMPLATES, DEV_TEMPLATES = "measurement", "runner", "dev"
+#: the others are the sub-runs'.
+MEASUREMENT_TEMPLATES, DEV_TEMPLATES = "measurement", "dev"
 #: What the runner's start-up script installs from: the full commit hash that names its entry of the runner cache. It
 #: and ``MANIFEST_PIN_ENV`` (when the host has the manifest's digest) are the runner template's accepted create
 #: environment, passed on every ``measurement`` create.
@@ -111,7 +110,7 @@ class HostedToolboxInputs:
         sandbox_url: Its data plane (``E2B_SANDBOX_URL``).
         measurement_key: The API key of the ``measurement`` role, as the string itself. Never in ``repr`` or a log.
         sandbox_templates: The template list as the host gave it (``HYPERLOOM_SANDBOX_TEMPLATES``, parsed). The toolbox
-            reads the roles ``measurement`` (or its older name ``runner``, never both) and ``dev``; a role's value maps
+            reads the roles ``measurement`` and ``dev``; a role's value maps
             a card count, a decimal string, to the template name the grant issued for it
             (``{"measurement": {"1": "<name>", "8": "<name>"}}``). A name is opaque: its cards are its key, never read
             from the name, so a role given as a bare name or a list says no card count and is refused.
@@ -402,18 +401,12 @@ def _cards(key: object) -> int | None:
 
 
 def _measurement_templates(templates: Mapping[str, object]) -> dict[int, str]:
-    """The ``measurement`` role's templates, read from ``runner`` when only that older name is given.
+    """The ``measurement`` role's templates.
 
     Raises:
-        ValueError: When both names are given, or neither.
+        ValueError: When the role is missing.
     """
-    if MEASUREMENT_TEMPLATES in templates and RUNNER_TEMPLATES in templates:
-        raise ValueError(
-            f"the template list gives both {MEASUREMENT_TEMPLATES!r} and its older name {RUNNER_TEMPLATES!r}; "
-            "which one the tests run on is ambiguous"
-        )
-    role = RUNNER_TEMPLATES if RUNNER_TEMPLATES in templates else MEASUREMENT_TEMPLATES
-    by_cards = _role_templates(templates, role)
+    by_cards = _role_templates(templates, MEASUREMENT_TEMPLATES)
     if not by_cards:
         raise ValueError(f"the template list has no {MEASUREMENT_TEMPLATES!r} role")
     return by_cards
