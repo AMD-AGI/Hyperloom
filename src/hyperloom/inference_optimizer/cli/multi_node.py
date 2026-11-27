@@ -147,28 +147,21 @@ def refuse_pd_resume_server_args(session_dir: Path, server_args: str) -> None:
 
 
 def _bind_pd_launch(ext_state: dict[str, Any], session_dir: Path) -> None:
-    """Record the session's frozen PD launch in ``ext_state``; exits 2 when it is missing or not the one frozen."""
+    """Record the session's frozen PD launch in ``ext_state`` and whether the engine hosts share the multi-node
+    profile trace root; exits 2 when the launch is missing or not the one frozen, and warns when the root is not
+    shared."""
     from inference_suite.multinode import RECORD_NAME
 
     from ..multi_node._internal.external_state import load_multi_node_state
     from ..multi_node.pd_session import PD_DIGEST_KEY, PdSessionError, bind_launch
+    from ..session.paths import mn_profile_trace_root, mn_provisioned_trace_dir
 
     frozen = str(load_multi_node_state().get(PD_DIGEST_KEY) or "")
+    root = mn_provisioned_trace_dir() or str(mn_profile_trace_root())
     try:
-        bind_launch(ext_state, session_dir / RECORD_NAME, frozen)
+        reason = bind_launch(ext_state, session_dir / RECORD_NAME, frozen, Path(root))
     except PdSessionError as exc:
         _exit_refused(str(exc))
-
-
-def _record_trace_share(ext_state: dict[str, Any]) -> None:
-    """Record whether the engine hosts share the multi-node profile trace root; warn when they do not."""
-    from ..multi_node.pd_session import record_trace_share
-    from ..session.paths import mn_profile_trace_root
-
-    root = os.path.expandvars(os.environ.get("HYPERLOOM_MN_PROFILE_TRACE_DIR", "").strip()) or str(
-        mn_profile_trace_root()
-    )
-    reason = record_trace_share(ext_state, Path(root))
     if reason:
         print(
             f"WARNING: profile trace dir {root} is not shared with the engine hosts ({reason}); "
@@ -207,7 +200,6 @@ def _prepare_multi_node_state(args: argparse.Namespace, session_dir: Path) -> No
     _reject_unusable_backend(ext_state)
     if is_pd_state(ext_state):
         _bind_pd_launch(ext_state, session_dir)
-        _record_trace_share(ext_state)
     try:
         _save_state(ext_state)
     except OSError as exc:

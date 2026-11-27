@@ -53,6 +53,8 @@ from ._internal.pd_handoff import (
     PD_BACKENDS,
     PODS_KEY,
     SSH_BACKENDS,
+    TRACE_SHARE_ERROR_KEY,
+    TRACE_SHARED_KEY,
     handed_node_list,
     is_pd_backend,
     is_pd_state,
@@ -67,8 +69,6 @@ PD_DIGEST_KEY = "pd_launch_digest"
 PREFILL_EXTRA_ENV = "PD_PREFILL_EXTRA_ARGS"
 DECODE_EXTRA_ENV = "PD_DECODE_EXTRA_ARGS"
 SERVER_LOG_DIR_ENV = "HYPERLOOM_MN_SERVER_LOG_DIR"
-TRACE_SHARED_KEY = "profile_trace_shared"
-TRACE_SHARE_ERROR_KEY = "profile_trace_share_error"
 TRACE_SHARE_PROBE_TIMEOUT_S = 30
 
 _SUITE_ERRORS = (LaunchError, NodeListError, PdRecordError, PdResolveError, SshError, OSError, ValueError)
@@ -161,9 +161,11 @@ def _session_cluster(state: dict[str, Any]) -> _SessionCluster:
     return _SessionCluster(record, placed_launch(nodes, launch), cluster_of(nodes, record))
 
 
-def bind_launch(state: dict[str, Any], record: Path, digest: str) -> None:
-    """Record the launch frozen at ``record`` in ``state``: its path, its digest and the pod of every host it serves
-    on; refused when ``digest`` is set and names another launch.
+def bind_launch(state: dict[str, Any], record: Path, digest: str, trace_root: Path) -> str:
+    """Record the launch frozen at ``record`` in ``state``: its path, its digest, the pod of every host it serves on
+    and whether every engine host reads ``trace_root``; refused when ``digest`` is set and names another launch.
+
+    Returns why the engine hosts do not share ``trace_root`` (``""`` when they do).
 
     Raises:
         PdSessionError: no node list is handed over, or the launch cannot be read, verified or placed.
@@ -173,6 +175,7 @@ def bind_launch(state: dict[str, Any], record: Path, digest: str) -> None:
         session = _session_cluster(state)
     state[PD_DIGEST_KEY] = session.launch.digest()
     _stamp_launch_pods(state, session.launch, session.cluster.nodes)
+    return _record_trace_share(state, session, trace_root)
 
 
 def restart_round(state: dict[str, Any], shared_args: str, options: LaunchOptions) -> PdLaunch:
@@ -273,9 +276,9 @@ def _host_reads_marker(cluster: Cluster, host: str, marker: Path, token: str) ->
     return ""
 
 
-def record_trace_share(state: dict[str, Any], trace_root: Path) -> str:
-    """Record on ``state`` whether every engine host reads a marker written here under ``trace_root``; returns why
-    not (``""`` when shared)."""
+def _record_trace_share(state: dict[str, Any], session: _SessionCluster, trace_root: Path) -> str:
+    """Record on ``state`` whether every engine host of ``session`` reads a marker written here under
+    ``trace_root``; returns why not (``""`` when shared)."""
     token = uuid.uuid4().hex
     marker = trace_root / f".share_probe-{token}"
     try:
@@ -285,11 +288,10 @@ def record_trace_share(state: dict[str, Any], trace_root: Path) -> str:
         reason = f"cannot write {marker}: {exc}"
     else:
         try:
-            session = _session_cluster(state)
             launch = session.launch
             hosts = dict.fromkeys(host for role in launch.served_roles for host in launch.role(role).hosts)
             reason = next(filter(None, (_host_reads_marker(session.cluster, h, marker, token) for h in hosts)), "")
-        except (*_SUITE_ERRORS, PdSessionError) as exc:
+        except _SUITE_ERRORS as exc:
             reason = f"the engine hosts cannot be probed: {exc}"
         finally:
             marker.unlink(missing_ok=True)
@@ -328,7 +330,6 @@ __all__ = [
     "is_pd_state",
     "launch_options",
     "node_list_backend",
-    "record_trace_share",
     "restart_round",
     "session_engine_urls",
     "session_worker_hosts",

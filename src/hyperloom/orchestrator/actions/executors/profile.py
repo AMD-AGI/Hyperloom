@@ -18,10 +18,10 @@ import yaml
 
 from hyperloom.common.benchmark_config import read_benchmark_point
 from hyperloom.orchestrator.trace_analysis._capture_shapes import is_capture_fragment
-from hyperloom_common.io import atomic_write_json, safe_mtime
+from hyperloom_common.io import atomic_write_json, safe_mtime, safe_size
 from hyperloom.common.profile_args import sanitize_profile_server_args as _sanitize_profile_server_args
 from hyperloom_common.timeutil import now_iso
-from hyperloom.inference_optimizer.session.paths import asset_root, mn_profile_trace_root
+from hyperloom.inference_optimizer.session.paths import asset_root, mn_profile_trace_root, mn_provisioned_trace_dir
 from hyperloom.inference_optimizer import framework_registry
 from .benchmark_result import round_succeeded
 from inference_suite.contracts import RunLayout
@@ -639,7 +639,7 @@ def _mn_round_trace_root() -> str:
 
     if not is_multi_node():
         return ""
-    provisioned = os.environ.get("HYPERLOOM_MN_PROFILE_TRACE_DIR", "").strip()
+    provisioned = mn_provisioned_trace_dir()
     if provisioned:
         return provisioned
     scoped = mn_profile_trace_root() / f"default-{os.getpid()}" / "torch_trace"
@@ -683,7 +683,7 @@ async def _restart_round_server(params: dict[str, Any], round_trace_root: str) -
     from .serving._multi_node_server_lifecycle import RoundServer, ServerRestartFailed, restart_server_for_round
 
     extra_server_args, extra_env = graph_capture_round(
-        str(params.get("extra_server_args") or ""), _default_profile_config
+        str(params.get("extra_server_args") or ""), _default_profile_config()
     )
     unset_envs = list(params.get("unset_envs") or ())
     try:
@@ -780,7 +780,7 @@ def _record_mn_round_traces(result: dict[str, Any], round_trace_root: str, task_
         result["main_trace_path"] = role_traces.get("decode") or role_traces["prefill"]
         log.info("profile_executor: multi-node role traces selected: %s", role_traces)
     elif trace_files:
-        main_trace = max(trace_files, key=_trace_size_bytes)
+        main_trace = max(trace_files, key=safe_size)
         result["main_trace_path"] = str(main_trace)
         log.info(
             "profile_executor: multi-node main trace selected: %s (%d candidate traces this round)",
@@ -896,14 +896,6 @@ def profile_trace_path(result: Any) -> str:
 PROFILE_DEFAULT_TIMEOUT_SEC = 14400  # 4 h wall cap
 
 
-def _trace_size_bytes(path: Path) -> int:
-    """Size in bytes, or 0 when it cannot be read."""
-    try:
-        return path.stat().st_size
-    except OSError:
-        return 0
-
-
 def _is_split_chunk(path: Path, root: Path) -> bool:
     """True when ``path`` is steady-state splitter output below ``root``."""
     try:
@@ -920,7 +912,7 @@ def _trace_files_for_dir(trace_dir: Path) -> list[Path]:
         for p in trace_dir.rglob("*.trace.json.gz")
         if not is_capture_fragment(p, trace_dir) and not _is_split_chunk(p, trace_dir)
     ]
-    return sorted(candidates, key=lambda p: (-_trace_size_bytes(p), str(p)))
+    return sorted(candidates, key=lambda p: (-safe_size(p), str(p)))
 
 
 def _capture_sidecar_traces_for_dir(trace_dir: Path) -> list[Path]:

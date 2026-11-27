@@ -12,34 +12,29 @@ from pathlib import Path
 from typing import Any, Callable
 
 from hyperloom_common.env import env_flag
-from hyperloom_common.io import safe_mtime
-from inference_suite.multinode import Role
+from hyperloom_common.io import safe_mtime, safe_size
+from inference_suite.multinode import PD_ROLES
 
-from .._multi_node_env import _read_state, is_multi_node
+from .._multi_node_env import _read_state
 from ._multi_node_restart_settings import PROFILE_START_TIMEOUT_S, ServerRestartFailed, profile_stop_timeout
 
 log = logging.getLogger(__name__)
 
-PD_PROFILE_ROLES = (Role.PREFILL.value, Role.DECODE.value)
+PD_PROFILE_ROLES = tuple(role.value for role in PD_ROLES)
 
 _RANK_TRACE_RE = re.compile(r"\A(?P<batch>.+)-TP-(?P<rank>\d+)(?:-(?P<stage>[A-Z]+))?\.trace\.json\.gz\Z")
 _ROLE_STAGE = {"prefill": "EXTEND", "decode": "DECODE"}
 
 
-async def restart_pd_round(extra_server_args: str, torch_profiler_dir: str, poll_timeout_s: int) -> None:
+async def restart_pd_round(extra_server_args: str, poll_timeout_s: int) -> None:
     """Restart a PD session's cluster with the round's args over its frozen launch; both roles get them.
 
-    The caller has validated the args and holds the restart lock and the round's forwarded env.
+    The caller has validated the args and holds the restart lock, the round's forwarded env and its trace dir.
     """
     from hyperloom.inference_optimizer.multi_node.cli import restart_pd_round as restart_cluster
     from hyperloom.inference_optimizer.multi_node.pd_session import PdSessionError
 
     log.info("restart_server_for_round: PD cluster, round args=%r", extra_server_args)
-    if torch_profiler_dir:
-        try:
-            Path(torch_profiler_dir).mkdir(parents=True, exist_ok=True)
-        except OSError as exc:
-            raise ServerRestartFailed(f"cannot mkdir torch_profiler_dir {torch_profiler_dir!r}: {exc}") from exc
     try:
         await asyncio.to_thread(restart_cluster, extra_server_args, poll_timeout_s)
     except PdSessionError as exc:
@@ -67,7 +62,7 @@ def _first_gpu_traces(paths: list[Path], role: str, nodes: int) -> list[str]:
         batches.setdefault(batch, {}).setdefault(int(match["rank"]), {})[match["stage"] or ""] = path
         newest[batch] = max(newest.get(batch, 0.0), safe_mtime(path))
     if not batches:
-        return [str(max(paths, key=lambda p: (p.stat().st_size, p.name)))] if paths else []
+        return [str(max(paths, key=lambda p: (safe_size(p), p.name)))] if paths else []
     ranks = batches[max(newest, key=lambda batch: newest[batch])]
     per_node = -(-(max(ranks) + 1) // nodes)
     picks: list[str] = []
@@ -119,14 +114,9 @@ async def trigger_pd_engine_profile(action: str, body: dict | None = None) -> No
     ``<output_dir>/<role>/<worker>`` and ``with_stack`` (``HYPERLOOM_MN_PROFILE_WITH_STACK``, default off); step-window
     fields crash disaggregated SGLang.
     """
-    if not is_multi_node():
-        return
-    from hyperloom.inference_optimizer.multi_node.pd_session import is_pd_state, session_engine_urls
+    from hyperloom.inference_optimizer.multi_node.pd_session import session_engine_urls
 
-    state = _read_state()
-    if not is_pd_state(state):
-        return
-    urls = _place_engines(session_engine_urls, state)
+    urls = _place_engines(session_engine_urls, _read_state())
     targets = [(role, worker, url) for role in PD_PROFILE_ROLES for worker, url in enumerate(urls.get(role, []))]
     if not targets:
         log.warning("trigger_pd_engine_profile(%s): no prefill/decode engines to profile", action)

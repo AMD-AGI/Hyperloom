@@ -8,14 +8,12 @@ from __future__ import annotations
 
 import logging
 from pathlib import Path
-from typing import Callable
-
 import yaml
 
 from hyperloom.common.benchmark_config import read_benchmark_point
 
 from ._multi_node_env import is_pd_session
-from .workload._workload_envs import _SGLANG_DISABLE_CUDA_GRAPH_FLAG, _SGLANG_PROFILE_CUDA_GRAPH_FLAG
+from .workload._workload_envs import _SGLANG_PROFILE_CUDA_GRAPH_FLAG, without_dead_cuda_graph_profile
 
 log = logging.getLogger(__name__)
 
@@ -48,13 +46,12 @@ def trace_fs_round_start(round_trace_root: str, fallback_unix: float) -> float:
         return fallback_unix
 
 
-def graph_capture_round(extra_server_args: str, profile_config: Callable[[], Path]) -> tuple[str, dict[str, str]]:
+def graph_capture_round(extra_server_args: str, config_path: Path) -> tuple[str, dict[str, str]]:
     """Return the round's server args and extra env with graph-capture profiling on, as the profile YAML at
-    ``profile_config()`` sets it, in a PD node-list session; the args unchanged and no env elsewhere, or when the YAML
+    ``config_path`` sets it, in a PD node-list session; the args unchanged and no env elsewhere, or when the YAML
     cannot be read."""
     if not is_pd_session():
         return extra_server_args, {}
-    config_path = profile_config()
     try:
         envs = read_benchmark_point(config_path).envs
     except (OSError, ValueError, yaml.YAMLError) as exc:
@@ -62,10 +59,10 @@ def graph_capture_round(extra_server_args: str, profile_config: Callable[[], Pat
         return extra_server_args, {}
     env = {key: str(envs[key]) for key in _GRAPH_CAPTURE_PROFILE_ENV_KEYS if key in envs}
     tokens = extra_server_args.split()
-    if _SGLANG_PROFILE_CUDA_GRAPH_FLAG in str(envs.get("EXTRA_SGLANG_ARGS") or "").split() and not (
-        {_SGLANG_PROFILE_CUDA_GRAPH_FLAG, _SGLANG_DISABLE_CUDA_GRAPH_FLAG} & set(tokens)
-    ):
-        extra_server_args = f"{extra_server_args} {_SGLANG_PROFILE_CUDA_GRAPH_FLAG}".strip()
+    if _SGLANG_PROFILE_CUDA_GRAPH_FLAG in str(envs.get("EXTRA_SGLANG_ARGS") or "").split():
+        if _SGLANG_PROFILE_CUDA_GRAPH_FLAG not in tokens:
+            tokens.append(_SGLANG_PROFILE_CUDA_GRAPH_FLAG)
+        extra_server_args = " ".join(without_dead_cuda_graph_profile(tokens))
     return extra_server_args, env
 
 

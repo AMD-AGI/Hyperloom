@@ -399,6 +399,20 @@ def _restart_namespace(
     )
 
 
+def _make_profiler_dir(torch_profiler_dir: str) -> None:
+    """Create the round's torch profiler dir when one is set.
+
+    Raises:
+        ServerRestartFailed: the dir cannot be created.
+    """
+    if not torch_profiler_dir:
+        return
+    try:
+        Path(torch_profiler_dir).mkdir(parents=True, exist_ok=True)
+    except OSError as exc:
+        raise ServerRestartFailed(f"cannot mkdir torch_profiler_dir {torch_profiler_dir!r}: {exc}") from exc
+
+
 async def restart_server_for_round(
     server: RoundServer,
     *,
@@ -428,8 +442,9 @@ async def restart_server_for_round(
 
         settings = _read_restart_settings(server.extra_server_args)
         async with _get_restart_lock():
+            _make_profiler_dir(torch_profiler_dir)
             with _restart_env_scope(extra_env, unset_env, torch_profiler_dir):
-                await restart_pd_round(server.extra_server_args, torch_profiler_dir, settings.poll_timeout_s)
+                await restart_pd_round(server.extra_server_args, settings.poll_timeout_s)
         return
 
     round_args = _resolve_round_args(server)
@@ -463,11 +478,7 @@ async def restart_server_for_round(
     settings = _read_restart_settings(extra_server_args)
 
     async with _get_restart_lock():
-        if torch_profiler_dir:
-            try:
-                Path(torch_profiler_dir).mkdir(parents=True, exist_ok=True)
-            except OSError as exc:
-                raise ServerRestartFailed(f"cannot mkdir torch_profiler_dir {torch_profiler_dir!r}: {exc}") from exc
+        _make_profiler_dir(torch_profiler_dir)
         with _restart_env_scope(extra_env, unset_env, torch_profiler_dir):
             from .._server_patcher import resolve_sglang_patch_set
 

@@ -12,7 +12,7 @@ from unittest.mock import patch
 import pytest
 
 from hyperloom.orchestrator.actions.executors import roofline as roofline_mod
-from hyperloom.orchestrator.actions.executors.profile import profile_trace_path
+from hyperloom.orchestrator.actions.executors.profile import PROFILE_TRACE_NOT_SHARED, profile_trace_path
 from hyperloom.orchestrator.actions.executors.roofline import (
     RooflineExecutor,
     _gpu_trace_unsupported_reason,
@@ -367,7 +367,7 @@ async def test_unshared_trace_dir_stops_later_automatic_profiles(tmp_path):
     state = _state()
     unshared = {
         "status": "failed",
-        "error_class": "profile_trace_not_shared",
+        "error_class": PROFILE_TRACE_NOT_SHARED,
         "error": "multi-node profile trace dir /t is not shared with the engine pods: decode pod 10.0.0.2: ssh failed",
     }
 

@@ -160,15 +160,6 @@ def test_adoption_gives_every_host_a_pod_with_the_command_it_serves(session: Pat
     assert state["user_data_path"]
 
 
-def test_a_round_records_the_pods_of_the_launch_as_run(session: Path, monkeypatch) -> None:
-    _adopt(session)
-    monkeypatch.setattr(pd_session, "restart", _fake_restart({}))
-    asyncio.run(lifecycle.restart_server_for_round(lifecycle.RoundServer("--chunked-prefill-size 4096")))
-    state = ext.load_multi_node_state()
-    pods = {pod["role"]: pod for pod in state["pods"]}
-    assert "--chunked-prefill-size 4096" in pods["decode"]["launch_command"]
-
-
 def test_a_reload_keeps_the_backend_adoption_resolved(session: Path) -> None:
     pd_session.freeze_launch(session, _SESSION, pd_session.handed_node_list())
     cli_mn._prepare_multi_node_state(argparse.Namespace(nodes=2, mn_backend="atomesh", no_kernel=True), session)
@@ -215,7 +206,10 @@ def test_a_round_restarts_over_the_frozen_launch_and_decode_keeps_its_mem_fracti
     decode, prefill = ran.role(Role.DECODE).args, ran.role(Role.PREFILL).args
     assert "0.85" in decode and "0.75" not in decode
     assert "4096" in prefill and "0.7" in prefill
-    assert read_record(session / RECORD_NAME).digest() == ext.load_multi_node_state()[pd_session.PD_DIGEST_KEY]
+    state = ext.load_multi_node_state()
+    assert read_record(session / RECORD_NAME).digest() == state[pd_session.PD_DIGEST_KEY]
+    pods = {pod["role"]: pod for pod in state["pods"]}
+    assert "--chunked-prefill-size 4096" in pods["decode"]["launch_command"]
 
 
 def test_a_round_drops_the_flags_the_launcher_owns(session: Path, monkeypatch) -> None:
@@ -359,6 +353,23 @@ def test_adoption_records_that_the_engine_hosts_share_the_trace_root(session: Pa
     assert list((tmp_path / "traces").iterdir()) == []
 
 
+def test_a_profile_round_writes_under_the_trace_root_adoption_probed(
+    session: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("HL_TRACE_BASE", str(tmp_path))
+    monkeypatch.setenv("HYPERLOOM_MN_PROFILE_TRACE_DIR", "$HL_TRACE_BASE/traces")
+    probed: list[Path] = []
+    real_probe = pd_session._record_trace_share
+    monkeypatch.setattr(
+        pd_session,
+        "_record_trace_share",
+        lambda state, cluster, root: probed.append(root) or real_probe(state, cluster, root),
+    )
+    _adopt(session)
+    assert probed == [tmp_path / "traces"]
+    assert profile._mn_round_trace_root() == str(tmp_path / "traces")
+
+
 @pytest.mark.parametrize(
     "reply",
     [
@@ -456,13 +467,6 @@ def test_pd_engine_profile_with_stack_follows_env(session: Path, monkeypatch: py
         ("http://p0:8000/start_profile", {"with_stack": True}),
         ("http://d0:8000/start_profile", {"with_stack": True}),
     ]
-
-
-def test_pd_engine_profile_leaves_other_backends_alone(session: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(pd_round, "_read_state", lambda: {"backend": "infera"})
-    seen = _record_posts(monkeypatch)
-    asyncio.run(pd_round.trigger_pd_engine_profile("start"))
-    assert seen == []
 
 
 def test_a_node_list_infera_session_skips_the_frontend_profile_fan_out(
