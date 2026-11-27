@@ -1175,3 +1175,20 @@ def test_preflight_failure_breakdown_error_reaches_the_caller(monkeypatch, tmp_p
 
     with pytest.raises(RuntimeError, match="breakdown writer bug"):
         optimizer_cli._persist_preflight_failure_artifacts(argparse.Namespace(), RuntimeError("preflight"))
+
+
+@pytest.mark.parametrize(
+    ("left_in_state", "stage"),
+    [
+        ({"roofline_snapshots": [{"snapshot_id": 1}], "last_baseline": {"status": "succeeded"}}, "roofline"),
+        ({"last_profile_trace": "/runs/profile/trace.json.gz", "baseline_tput": 100.0}, "profile"),
+        ({"last_baseline": {"status": "failed"}, "roofline_failure_streak": 1}, "baseline"),
+        ({"warm_start_ts": "2026-01-01T00:00:00Z"}, "warm_start"),
+        ({}, "install"),
+    ],
+)
+def test_a_prelude_session_with_no_typed_event_names_the_last_stage_that_left_something_in_state(left_in_state, stage):
+    """A stage counts when it left its product behind: a failed roofline or profile leaves none."""
+    from hyperloom.inference_optimizer.breakdown.collectors.v6 import _stage_reached
+
+    assert _stage_reached({"phase": "PRELUDE", **left_in_state}, "", []) == stage

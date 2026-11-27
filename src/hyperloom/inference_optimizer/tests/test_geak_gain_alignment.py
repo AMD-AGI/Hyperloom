@@ -201,10 +201,8 @@ async def test_agentx_2b_uses_current_canonical_measurement(
     await coord.writeback.promote_to_shared_state("explore", result, task=_revalidate_task(expected_hash="accepted"))
 
     assert not state.geak_pending
-    attempt = state.explore_attempts[-1]
     # Output throughput guards nothing, so ``output_drop`` promotes like ``positive``.
     if case in {"positive", "output_drop"}:
-        assert attempt["decision"] == "promoted"
         assert state.current_best["tput"] == measured
         assert state.current_best["input_throughput"] == 800.0 - measured
         assert state.current_best["total_throughput"] == 800.0
@@ -222,13 +220,10 @@ async def test_agentx_2b_uses_current_canonical_measurement(
         assert state.cumulative_gain_validated_ts == "2026-09-08T00:00:00Z"
         assert resume_pending(state) is True
         if case == "missing_output":
-            assert attempt["status"] == "failed"
             assert state.geak_result["revalidation_status"] == "failed"
             assert state.geak_result["revalidation_error_class"] == "rebench_no_measurement"
             assert result["status"] == "failed"
         else:
-            assert attempt["decision"] == "no_promote"
-            assert attempt["status"] == "no_promote"
             assert state.geak_result["revalidation_status"] == "no_promote"
             assert result["status"] == "no_promote"
     assert {key: state.geak_result[key] for key in before_proposal} == before_proposal

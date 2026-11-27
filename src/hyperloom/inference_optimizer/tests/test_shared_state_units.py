@@ -10,9 +10,8 @@ from datetime import datetime, timezone
 
 import pytest
 
-from hyperloom.orchestrator.state.kernel_decision_settings import _DEFAULT_ATTEMPTS_HISTORY
 from hyperloom.orchestrator.state.shared_state import (
-    ActionAttempt,
+    BaselineAttempt,
     SharedState,
     inject_stack_base_params,
     resolve_grading_anchor_tput,
@@ -395,59 +394,48 @@ class TestPersistence:
         assert not hasattr(s, "unknown_field")
 
 
-@pytest.mark.parametrize(
-    "action,metric_key,metric_kind",
-    [
-        ("baseline", "output_throughput", "output_throughput"),
-        ("profile", "output_throughput", "output_throughput"),
-        ("explore", "best_gain_pct", "gain_pct"),
-    ],
-)
-def test_record_action_attempt_succeeded_populates_last_and_history(
-    action,
-    metric_key,
-    metric_kind,
-):
+def _baseline_attempt(task_id: str, status: str, decision: str, result: dict, extras: dict | None = None):
+    return BaselineAttempt(task_id=task_id, status=status, decision=decision, result=result, extras=extras or {})
+
+
+def test_record_baseline_attempt_succeeded_replaces_last_baseline():
     s = SharedState()
-    entry = s.record_action_attempt(
-        action=action,
-        attempt=ActionAttempt(
-            task_id="t-1",
-            status="succeeded",
-            decision="promoted",
-            result={metric_key: 1234.5, "workspace": "/runs/" + action},
-            extras={"variant_name": "vA"},
-        ),
+    s.record_baseline_attempt(_baseline_attempt("t-0", "failed", "no_promote", {"error_class": "no_report"}))
+    s.record_baseline_attempt(
+        _baseline_attempt(
+            "t-1",
+            "succeeded",
+            "promoted",
+            {"output_throughput": 1234.5, "workspace": "/runs/baseline"},
+            {"variant_name": "vA"},
+        )
     )
-    assert entry is not None
-    last = getattr(s, f"last_{action}")
-    history = getattr(s, f"{action}_attempts")
+    last = s.last_baseline
     assert last["task_id"] == "t-1"
     assert last["status"] == "succeeded"
     assert last["decision"] == "promoted"
     assert last["key_metric"] == pytest.approx(1234.5)
-    assert last["key_metric_kind"] == metric_kind
-    assert last["workspace"] == "/runs/" + action
+    assert last["key_metric_kind"] == "output_throughput"
+    assert last["workspace"] == "/runs/baseline"
+    assert last["error_class"] is None
     assert last["extras"] == {"variant_name": "vA"}
-    assert history[-1] == last
 
 
-def test_record_action_attempt_failed_truncates_error_excerpt():
+def test_record_baseline_attempt_failed_truncates_error_excerpt():
     s = SharedState()
     long_err = "boom! " * 400
-    s.record_action_attempt(
-        action="baseline",
-        attempt=ActionAttempt(
-            task_id="t-2",
-            status="failed",
-            decision="no_promote",
-            result={
+    s.record_baseline_attempt(
+        _baseline_attempt(
+            "t-2",
+            "failed",
+            "no_promote",
+            {
                 "error_class": "no_report",
                 "error": long_err,
                 "workspace": "/ws/baseline-2",
                 "reported_success": False,
             },
-        ),
+        )
     )
     last = s.last_baseline
     assert last["status"] == "failed"
@@ -465,25 +453,24 @@ def test_record_action_attempt_failed_truncates_error_excerpt():
     assert "boom!" in last["stderr_tail"]
 
 
-def test_record_action_attempt_subprocess_failure_captures_stderr_tail():
-    """A subprocess_nonzero baseline attempt records stderr_tail into the attempts history so the breakdown exporter can surface the raw crash."""
+def test_record_baseline_attempt_subprocess_failure_captures_stderr_tail():
+    """A subprocess_nonzero baseline attempt records stderr_tail so the breakdown exporter can surface the raw crash."""
     s = SharedState()
     big_err = "x" * 2000 + "torch.OutOfMemoryError: HIP out of memory"
-    s.record_action_attempt(
-        action="baseline",
-        attempt=ActionAttempt(
-            task_id="t-oom",
-            status="failed",
-            decision="no_promote",
-            result={
+    s.record_baseline_attempt(
+        _baseline_attempt(
+            "t-oom",
+            "failed",
+            "no_promote",
+            {
                 "error_class": "subprocess_nonzero",
                 "error": big_err,
                 "reported_success": False,
                 "stderr_log_path": "/runs/baseline/t-oom/baseline_stderr.log",
             },
-        ),
+        )
     )
-    attempt = s.baseline_attempts[-1]
+    attempt = s.last_baseline
     assert attempt["error_class"] == "subprocess_nonzero"
     assert attempt["stderr_tail"] is not None
     assert len(attempt["stderr_tail"]) == 1000
@@ -491,102 +478,50 @@ def test_record_action_attempt_subprocess_failure_captures_stderr_tail():
     assert attempt["stderr_log_path"] == "/runs/baseline/t-oom/baseline_stderr.log"
 
 
-def test_record_action_attempt_redacts_secrets_from_persisted_errors():
+def test_record_baseline_attempt_redacts_secrets_from_persisted_errors():
     s = SharedState()
     # Named for what it is -- a value planted to be found missing -- rather than for what it imitates.
     planted = "ak-sensitive-value"
-    s.record_action_attempt(
-        action="baseline",
-        attempt=ActionAttempt(
-            task_id="t-secret",
-            status="failed",
-            decision="no_promote",
-            result={
+    s.record_baseline_attempt(
+        _baseline_attempt(
+            "t-secret",
+            "failed",
+            "no_promote",
+            {
                 "error_class": "subprocess_nonzero",
                 "error": f"OPENAI_API_KEY={planted} Authorization: Bearer {planted}",
             },
-        ),
+        )
     )
 
-    attempt = s.baseline_attempts[-1]
+    attempt = s.last_baseline
     assert planted not in attempt["error_excerpt"]
     assert planted not in attempt["stderr_tail"]
     assert "[REDACTED]" in attempt["error_excerpt"]
     assert "[REDACTED]" in attempt["stderr_tail"]
 
 
-def test_attempts_history_caps_at_default():
+def test_to_prompt_summary_renders_the_last_baseline_and_its_decision():
     s = SharedState()
-    for i in range(_DEFAULT_ATTEMPTS_HISTORY + 5):
-        s.record_action_attempt(
-            action="explore",
-            attempt=ActionAttempt(
-                task_id=f"t-{i}", status="succeeded", decision="discarded", result={"best_gain_pct": float(i)}
-            ),
-        )
-    history = s.explore_attempts
-    assert len(history) == _DEFAULT_ATTEMPTS_HISTORY
-    assert history[-1]["task_id"] == f"t-{_DEFAULT_ATTEMPTS_HISTORY + 4}"
-    assert history[0]["task_id"] == "t-5"
-
-
-def test_record_action_attempt_skips_non_audit_kinds():
-    s = SharedState()
-    out = s.record_action_attempt(
-        action="kernel_opt",
-        attempt=ActionAttempt(
-            task_id="t-99", status="succeeded", decision="promoted", result={"output_throughput": 1.0}
-        ),
-    )
-    assert out is None
-    assert not hasattr(s, "kernel_opt_attempts_list")
-
-
-def test_to_prompt_summary_renders_attempt_lines():
-    s = SharedState()
-    s.record_action_attempt(
-        action="baseline",
-        attempt=ActionAttempt(
-            task_id="t-1",
-            status="succeeded",
-            decision="promoted",
-            result={"output_throughput": 1761.6, "workspace": "/ws"},
-        ),
-    )
-    s.record_action_attempt(
-        action="explore",
-        attempt=ActionAttempt(
-            task_id="t-2",
-            status="failed",
-            decision="no_promote",
-            result={"error_class": "subprocess_nonzero", "error": "rc=1"},
-        ),
+    s.record_baseline_attempt(
+        _baseline_attempt("t-1", "succeeded", "no_promote", {"output_throughput": 1761.6, "workspace": "/ws"})
     )
     txt = s.to_prompt_summary()
-    assert "last_baseline=" in txt
-    assert "last_profile=" in txt
-    assert "last_explore=" in txt
-    assert "attempts_history=" in txt
-    assert "baseline:1(s1,f0)" in txt
-    assert "explore:1(s0,f1)" in txt
+    assert (
+        "last_baseline=status=succeeded decision=no_promote output_throughput=1761.60 err=- ws=/ws task_id=t-1" in txt
+    )
 
 
-def test_save_load_round_trips_attempt_fields(tmp_path):
+def test_save_load_round_trips_the_last_baseline(tmp_path):
     s = SharedState()
-    s.record_action_attempt(
-        action="profile",
-        attempt=ActionAttempt(
-            task_id="p-1",
-            status="succeeded",
-            decision="promoted",
-            result={"output_throughput": 100.0},
-            extras={"trace_path": "/tmp/trace.json"},
-        ),
+    held = {"reason": "anchor_load_bearing", "prior": 120.0, "measured": 100.0}
+    s.record_baseline_attempt(
+        _baseline_attempt("b-1", "succeeded", "no_promote", {"output_throughput": 100.0}, {"anchor_held": held})
     )
     s.save(tmp_path)
     s2 = SharedState.load_or_init(tmp_path)
-    assert s2.last_profile["task_id"] == "p-1"
-    assert s2.profile_attempts[-1]["extras"]["trace_path"] == "/tmp/trace.json"
+    assert s2.last_baseline["task_id"] == "b-1"
+    assert s2.last_baseline["extras"]["anchor_held"] == held
 
 
 def test_profile_workload_context_normalizes_path_and_runtime_controls(tmp_path):
@@ -880,23 +815,21 @@ def test_record_action_failure_captures_stderr_tail_for_kv_cache_oom():
     assert "no GPU memory for the KV cache" in entry["stderr_tail"]
 
 
-def test_record_action_attempt_kv_cache_oom_captures_stderr_tail():
-    # record_action_attempt captures kv_cache_oom stderr_tail into <action>_attempts.
+def test_record_baseline_attempt_kv_cache_oom_captures_stderr_tail():
     s = SharedState()
-    s.record_action_attempt(
-        action="baseline",
-        attempt=ActionAttempt(
-            task_id="t-kvoom",
-            status="failed",
-            decision="no_promote",
-            result={
+    s.record_baseline_attempt(
+        _baseline_attempt(
+            "t-kvoom",
+            "failed",
+            "no_promote",
+            {
                 "error_class": "kv_cache_oom",
                 "error": "Loaded weights leave no GPU memory for the KV cache",
                 "reported_success": False,
             },
-        ),
+        )
     )
-    attempt = s.baseline_attempts[-1]
+    attempt = s.last_baseline
     assert attempt["error_class"] == "kv_cache_oom"
     assert attempt["stderr_tail"] is not None
     assert "no GPU memory for the KV cache" in attempt["stderr_tail"]
@@ -914,75 +847,6 @@ def test_record_action_failure_stores_variant_name():
         },
     )
     assert entry["variant_name"] == "fp8_kv"
-
-
-# ---- failure evidence ledger ----
-
-
-def test_record_failure_evidence_stores_packet():
-    s = SharedState()
-    fe = {"failure_id": "fail.t1.abc", "task_id": "t1", "variant_name": "v"}
-    s.record_failure_evidence(fe)
-    assert len(s.failures) == 1
-    assert s.failures[0]["failure_id"] == "fail.t1.abc"
-
-
-def test_record_failure_evidence_is_idempotent_last_wins():
-    s = SharedState()
-    fe1 = {"failure_id": "fail.t1.abc", "task_id": "t1", "error_class": "a"}
-    fe2 = {"failure_id": "fail.t1.abc", "task_id": "t1", "error_class": "b"}
-    s.record_failure_evidence(fe1)
-    s.record_failure_evidence(fe2)
-    assert len(s.failures) == 1
-    assert s.failures[0]["error_class"] == "b"
-
-
-def test_record_failure_evidence_caps_at_default():
-    from hyperloom.orchestrator.state._shared_state.action_records import _DEFAULT_LAST_FAILURES
-
-    s = SharedState()
-    for i in range(_DEFAULT_LAST_FAILURES + 5):
-        s.record_failure_evidence({"failure_id": f"fail.t.{i:04d}", "task_id": "t"})
-    assert len(s.failures) == _DEFAULT_LAST_FAILURES
-
-
-def test_find_failure_returns_matching_entry():
-    s = SharedState()
-    s.record_failure_evidence({"failure_id": "fail.t1.abc", "task_id": "t1"})
-    s.record_failure_evidence({"failure_id": "fail.t1.def", "task_id": "t1"})
-    result = s.find_failure("fail.t1.abc")
-    assert result is not None
-    assert result["failure_id"] == "fail.t1.abc"
-
-
-def test_find_failure_returns_none_when_missing():
-    s = SharedState()
-    assert s.find_failure("fail.t1.xyz") is None
-
-
-def test_failures_for_task_returns_correct_entries():
-    s = SharedState()
-    s.record_failure_evidence({"failure_id": "fail.t1.a", "task_id": "t1"})
-    s.record_failure_evidence({"failure_id": "fail.t2.a", "task_id": "t2"})
-    s.record_failure_evidence({"failure_id": "fail.t1.b", "task_id": "t1"})
-    result = s.failures_for_task("t1")
-    assert len(result) == 2
-    ids = {e["failure_id"] for e in result}
-    assert ids == {"fail.t1.a", "fail.t1.b"}
-
-
-def test_record_failure_evidence_writes_json(tmp_path):
-    s = SharedState()
-    s._session_dir = tmp_path
-    fe = {"failure_id": "fail.t1.abc123456789", "task_id": "t1"}
-    s.record_failure_evidence(fe)
-    from hyperloom.inference_optimizer.session.session_paths import failure_evidence_path
-    import json
-
-    path = failure_evidence_path(tmp_path, "fail.t1.abc123456789")
-    assert path.exists()
-    data = json.loads(path.read_text())
-    assert data["failure_id"] == "fail.t1.abc123456789"
 
 
 @pytest.mark.parametrize(

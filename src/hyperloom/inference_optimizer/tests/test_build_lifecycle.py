@@ -622,18 +622,19 @@ def _revalidation_row_unreadable(coord, monkeypatch, tmp_path):
     return coord.writeback._resume_recover_pending_revalidation, sqlite3.OperationalError, "database is locked"
 
 
-def _keep_log_unreadable(coord, monkeypatch, tmp_path):
+def _integrate_row_unreadable(coord, monkeypatch, tmp_path):
     import sqlite3
 
-    async def _locked(**_kwargs):
+    async def _locked(_task_id, **_kwargs):
         raise sqlite3.OperationalError("database is locked")
 
-    monkeypatch.setattr(coord.bus, "tail", _locked)
-    return coord.writeback._resume_recover_orphaned_keeps, sqlite3.OperationalError, "database is locked"
+    monkeypatch.setattr(coord.tasks, "find", _locked)
+    coord.shared_state.pending_integrate = {"task_id": "t-integrate"}
+    return coord.writeback._resume_recover_pending_integrate, sqlite3.OperationalError, "database is locked"
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("broken", [_jit_sweep_bug, _revalidation_row_unreadable, _keep_log_unreadable])
+@pytest.mark.parametrize("broken", [_jit_sweep_bug, _revalidation_row_unreadable, _integrate_row_unreadable])
 async def test_a_failed_resume_recovery_step_is_not_skipped_silently(resume_coord, monkeypatch, tmp_path, broken):
     recover, error_type, message = broken(resume_coord, monkeypatch, tmp_path)
     with pytest.raises(error_type, match=message):

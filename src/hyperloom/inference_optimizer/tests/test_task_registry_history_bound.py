@@ -13,9 +13,12 @@ from hyperloom.orchestrator.bus.storage.connection import SqliteConnection
 from hyperloom.orchestrator.state.task_registry import (
     _MAX_PROGRESS_NOTES,
     Task,
+    TaskOutcome,
     TaskRegistry,
     TaskSpec,
+    confirmed_result,
     create_in_cursor,
+    recorded_outcome,
     task_dispatch_class,
     task_dispatch_evidence,
     task_dispatch_record,
@@ -257,6 +260,26 @@ async def test_with_key_prefix_matches_the_prefix_literally(tmp_path, sync):
         assert await with_key_prefix("integrate_patch", "a%b-reconcile") == []
         assert await with_key_prefix("integrate_patch", "AAB-reconcile") == []
         assert await with_key_prefix("explore", "aab-reconcile") == []
+    finally:
+        registry.db.close()
+
+
+@pytest.mark.asyncio
+async def test_outcomes_reads_what_the_executor_recorded_whoever_ended_the_row(tmp_path):
+    """A row another writer ended first still gets the executor's outcome appended; until then it has none."""
+    registry, reclaimed = await _running_task(tmp_path, "outcomes")
+    try:
+        await registry.transition(reclaimed, "failed", evidence={"reason": "dead_holder"})
+        assert await registry.outcomes([reclaimed]) == {}
+
+        returned = {"task_id": reclaimed, "state": "succeeded", "result": {"status": "ok"}, "error": None}
+        await registry.append_completion_evidence(reclaimed, {"outcome": returned, "cleanup_confirmed": False})
+
+        outcome = TaskOutcome(result={"status": "ok"}, error=None, cleanup_confirmed=False)
+        assert await registry.outcomes([reclaimed]) == {reclaimed: outcome}
+        row = await registry.get(reclaimed)
+        assert (row.state, recorded_outcome(row)) == ("failed", outcome)
+        assert confirmed_result(row) is None, "an unconfirmed cleanup makes the result diagnostic only"
     finally:
         registry.db.close()
 

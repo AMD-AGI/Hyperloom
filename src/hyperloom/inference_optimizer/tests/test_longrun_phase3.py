@@ -87,7 +87,6 @@ async def test_soft_restart_preserves_best_and_ledger(cyclic_coordinator):
         {
             "schema_version": 1,
             "tested": {"fp_a": {"name": "a", "fingerprint": "fp_a"}},
-            "rejected": [{"name": "a", "fingerprint": "fp_a"}],
         }
     )
 

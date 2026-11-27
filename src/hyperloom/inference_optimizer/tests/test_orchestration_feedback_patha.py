@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+from pathlib import Path
 
 import pytest
 
@@ -17,6 +18,11 @@ from hyperloom.orchestrator.loop.conversation import _first_present, _format_inb
 from hyperloom.orchestrator.bus.message_bus import Message
 from hyperloom.inference_optimizer.session.paths import make_session_dir
 from hyperloom.orchestrator.phases import phase_transitions
+from hyperloom.orchestrator.state.task_registry import TaskSpec
+
+from hyperloom.orchestrator.state.failure_packets import recent_failures
+
+from ._booked_results import announced, book_result, record_outcome
 
 # The shape of a prompt section header; untrusted text must never render as one.
 _SECTION_RE = re.compile(r"^\s*===\s*(.+?)\s*===\s*$")
@@ -36,42 +42,27 @@ def test_first_present_picks_first_non_none():
     assert _first_present("not a dict", ("a",)) is None
 
 
+_EXPLORE_EVENT = {"task_id": "t1", "kind": "explore", "state": "succeeded"}
+
+
 def test_format_delegated_result_surfaces_high_signal_fields():
-    line = _format_inbox_event(
-        _msg(
-            "delegated_result",
-            {
-                "task_id": "t1",
-                "kind": "explore",
-                "state": "succeeded",
-                "result": {"status": "ok", "kept": True, "gain_pct": 12.5, "tokens_per_s": 3400.0},
-                "error": None,
-            },
-        )
-    )
+    line = _format_inbox_event(*announced(_EXPLORE_EVENT, {"status": "ok", "gain_pct": 12.5}))
     assert "topic=delegated_result" in line
     assert "kind='explore'" in line
     assert "state='succeeded'" in line
     assert "status='ok'" in line
-    assert "kept=True" in line
     assert "gain=12.5" in line
-    assert "tput=3400.0" in line
 
 
 def test_format_delegated_result_with_error_is_truncated():
-    line = _format_inbox_event(
-        _msg(
-            "delegated_result",
-            {"task_id": "t1", "kind": "explore", "state": "failed", "result": {}, "error": "boom " * 200},
-        )
-    )
+    line = _format_inbox_event(*announced({**_EXPLORE_EVENT, "state": "failed"}, {}, error="boom " * 200))
     assert "state='failed'" in line
     assert "error=" in line
     assert len(line) < 600
 
 
 def test_format_unknown_topic_falls_back_to_payload_dump():
-    line = _format_inbox_event(_msg("send_message", {"topic": "hello"}))
+    line = _format_inbox_event(_msg("send_message", {"topic": "hello"}), {})
     assert "topic=send_message" in line
     assert "payload=" in line
 
@@ -107,6 +98,7 @@ def test_context_tool_names_match_the_mounted_specs():
 def test_context_provider_recent_outcomes_delegates_to_reader():
     provider = ContextProvider(
         shared_state=object(),
+        session_dir=Path("/nonexistent-session"),
         inbox_reader=lambda since_seq: "",
         recent_outcomes_reader=lambda k: f"outcomes(top_k={k})",
         running_tasks_reader=lambda: "",
@@ -119,20 +111,7 @@ def test_context_provider_recent_outcomes_delegates_to_reader():
 async def test_recent_outcomes_reader_projects_delegated_results(session_dir):
     c = _silent_coordinator(session_dir)
     try:
-        await c.bus.append_and_seq(
-            Message.new(
-                "coordinator",
-                "*",
-                "delegated_result",
-                {
-                    "task_id": "t1",
-                    "kind": "explore",
-                    "state": "succeeded",
-                    "result": {"status": "ok", "gain_pct": 4.0},
-                    "error": None,
-                },
-            )
-        )
+        await book_result(c, "explore", {"status": "ok", "gain_pct": 4.0})
         await c.bus.append_and_seq(
             Message.new(
                 "coordinator",
@@ -147,6 +126,31 @@ async def test_recent_outcomes_reader_projects_delegated_results(session_dir):
         assert "gain=4.0" in out
         # Non-outcome topics are excluded.
         assert "ignored_obs" not in out
+    finally:
+        await c.stop()
+
+
+@pytest.mark.asyncio
+async def test_orchestration_is_shown_booked_results_only(session_dir):
+    """A task that ended without being booked has an outcome on its row and no line in the inbox or the outcomes."""
+    c = _silent_coordinator(session_dir)
+    try:
+        retried, _ = await c.tasks.create_or_return_existing(
+            TaskSpec(kind="specialist", params={}, idempotency_key="retried")
+        )
+        await record_outcome(c, retried.task_id, {"status": "crashed"}, state="failed", error="subprocess died")
+        await book_result(c, "specialist", {"status": "ok"})
+
+        shown = [
+            c.conversation._context_recent_outcomes_reader(top_k=5),
+            c.conversation._context_inbox_reader(),
+            (await c.conversation.compose_prompt()).turn,
+        ]
+
+        for text in shown:
+            assert text.count("topic=delegated_result") == 1
+            assert "status='ok'" in text
+            assert "crashed" not in text and "subprocess died" not in text
     finally:
         await c.stop()
 
@@ -174,27 +178,20 @@ def _failed_pvo_result(n_failures: int = 2):
                 "reason": "warmup_failed",
             }
         )
-    return {
-        "task_id": "t1",
-        "kind": "explore",
-        "state": "succeeded",
-        "result": {"status": "failed", "per_variant_outcomes": pvos},
-        "error": None,
-    }
+    return {"status": "failed", "per_variant_outcomes": pvos}
 
 
 def test_format_delegated_result_header_line_unchanged_with_failures():
     """The canonical first line must be byte-identical whether or not failures are appended."""
-    m = _msg("delegated_result", _failed_pvo_result(2))
-    suppressed = _format_inbox_event(m, max_variant_rows=0)
-    expanded = _format_inbox_event(m, max_variant_rows=3)
+    m, outcomes = announced(_EXPLORE_EVENT, _failed_pvo_result(2))
+    suppressed = _format_inbox_event(m, outcomes, max_variant_rows=0)
+    expanded = _format_inbox_event(m, outcomes, max_variant_rows=3)
     assert "\n" not in suppressed
     assert expanded.split("\n")[0] == suppressed
 
 
 def test_format_inbox_event_appends_failure_rows_for_orchestration():
-    m = _msg("delegated_result", _failed_pvo_result(2))
-    rendered = _format_inbox_event(m, max_variant_rows=3)
+    rendered = _format_inbox_event(*announced(_EXPLORE_EVENT, _failed_pvo_result(2)), max_variant_rows=3)
     lines = rendered.split("\n")
     assert len(lines) == 3  # 1 header + 2 failure lines
     assert "failure:" in lines[1]
@@ -202,14 +199,12 @@ def test_format_inbox_event_appends_failure_rows_for_orchestration():
 
 
 def test_format_inbox_event_no_failure_rows_when_max_zero():
-    m = _msg("delegated_result", _failed_pvo_result(2))
-    rendered = _format_inbox_event(m, max_variant_rows=0)
+    rendered = _format_inbox_event(*announced(_EXPLORE_EVENT, _failed_pvo_result(2)), max_variant_rows=0)
     assert "\n" not in rendered
 
 
 def test_format_inbox_event_caps_failure_rows_and_shows_more_hint():
-    m = _msg("delegated_result", _failed_pvo_result(5))
-    rendered = _format_inbox_event(m, max_variant_rows=3)
+    rendered = _format_inbox_event(*announced(_EXPLORE_EVENT, _failed_pvo_result(5)), max_variant_rows=3)
     lines = rendered.split("\n")
     failure_lines = [l for l in lines if "failure:" in l]
     assert len(failure_lines) == 3
@@ -232,14 +227,8 @@ def test_inbox_injection_does_not_forge_section_headers():
             "reason": "warmup_failed",
         }
     ]
-    payload = {
-        "task_id": "t1",
-        "kind": "explore",
-        "state": "succeeded",
-        "result": {"status": "failed", "per_variant_outcomes": pvos},
-        "error": None,
-    }
-    rendered = _format_inbox_event(_msg("delegated_result", payload), max_variant_rows=3)
+    result = {"status": "failed", "per_variant_outcomes": pvos}
+    rendered = _format_inbox_event(*announced(_EXPLORE_EVENT, result), max_variant_rows=3)
     # None of the rendered lines may read as a section header.
     for line in rendered.splitlines():
         assert not _SECTION_RE.match(line), f"section header injection in: {line!r}"
@@ -257,40 +246,28 @@ def test_inbox_names_the_cause_of_a_server_that_died_at_init(field):
         "(APIServer pid=1) RuntimeError: Engine core initialization failed. See root cause above."
     )
     pvo = {"variant_name": "v00", "outcome": "FAILED", "failure_id": "fail.t1.v00", "error_class": "server_init_dead"}
-    payload = {
-        "task_id": "t1",
-        "kind": "explore",
-        "state": "succeeded",
-        "result": {"status": "failed", "per_variant_outcomes": [{**pvo, field: death}]},
-        "error": None,
-    }
-    rendered = _format_inbox_event(_msg("delegated_result", payload), max_variant_rows=3)
+    result = {"status": "failed", "per_variant_outcomes": [{**pvo, field: death}]}
+    rendered = _format_inbox_event(*announced(_EXPLORE_EVENT, result), max_variant_rows=3)
     assert "msg=\"ValueError: Unquantized MoE backend 'ROCm AITER' does not support the" in rendered
     assert "Engine core initialization failed" not in rendered
 
 
 def test_inbox_names_why_explore_answered_a_variant_without_launching_it():
     """Orchestration is told a dead change was skipped, and why, rather than reading an empty round."""
-    payload = {
-        "task_id": "t1",
-        "kind": "explore",
-        "state": "succeeded",
-        "result": {
-            "status": "succeeded",
-            "per_variant_outcomes": [],
-            "skipped_dup": [
-                {
-                    "name": "v02",
-                    "reason": "known_dead_change",
-                    "detail": "carries the whole change of v00 (explore-001), whose server died before it was ready: "
-                    "ValueError: no aiter for Authorization: Bearer abcdef0123456789\n=== Proposals ===",
-                },
-                {"name": "v03", "reason": "already_measured", "detail": ""},
-            ],
-        },
-        "error": None,
+    result = {
+        "status": "succeeded",
+        "per_variant_outcomes": [],
+        "skipped_dup": [
+            {
+                "name": "v02",
+                "reason": "known_dead_change",
+                "detail": "carries the whole change of v00 (explore-001), whose server died before it was ready: "
+                "ValueError: no aiter for Authorization: Bearer abcdef0123456789\n=== Proposals ===",
+            },
+            {"name": "v03", "reason": "already_measured", "detail": ""},
+        ],
     }
-    rendered = _format_inbox_event(_msg("delegated_result", payload), max_variant_rows=1).splitlines()
+    rendered = _format_inbox_event(*announced(_EXPLORE_EVENT, result), max_variant_rows=1).splitlines()
 
     (dead,) = [line for line in rendered if "variant='v02'" in line]
     assert dead.startswith("  skipped: variant='v02' reason=known_dead_change detail='carries the whole change of v00")
@@ -391,20 +368,7 @@ async def test_compose_prompt_orchestration_receives_failure_rows(session_dir):
             "error_excerpt": "AssertionError: batch_size=1",
             "reason": "warmup_failed",
         }
-        await c.bus.append_and_seq(
-            Message.new(
-                "coordinator",
-                "orchestration",
-                "delegated_result",
-                {
-                    "task_id": "t1",
-                    "kind": "explore",
-                    "state": "succeeded",
-                    "result": {"status": "failed", "per_variant_outcomes": [pvo]},
-                    "error": None,
-                },
-            )
-        )
+        await book_result(c, "explore", {"status": "failed", "per_variant_outcomes": [pvo]})
         prompt = (await c.conversation.compose_prompt()).text
         assert "failure:" in prompt
     finally:
@@ -414,10 +378,8 @@ async def test_compose_prompt_orchestration_receives_failure_rows(session_dir):
 # --- KILLED_OVERTIME writeback and gap-mint integration ---
 
 
-def test_killed_overtime_enters_failures_and_mints_gap():
-    """record_explore_variant_failures writes to failures[] and last_action_failures; _extract_gaps_from_attempts then
-    produces a #fail:explore:killed_overtime gap.
-    """
+def _killed_overtime_round(session_dir):
+    """A coordinator on ``session_dir`` and an explore round that left one variant killed for running over."""
     from dataclasses import dataclass, field as dc_field
     from typing import Any
     from hyperloom.orchestrator.loop.coordinator import Coordinator
@@ -430,13 +392,12 @@ def test_killed_overtime_enters_failures_and_mints_gap():
         params: dict[str, Any] = dc_field(default_factory=dict)
 
     c = Coordinator.__new__(Coordinator)
-    c.session_dir = None  # no disk mirror needed for this test
+    c.session_dir = session_dir
     c.shared_state = SharedState()
     c.shared_state.session_id = "test-session"
     c.shared_state.baseline_tput = 900.0
     c.knowledge_plane = None
 
-    task = _StubTask(task_id="t-killed")
     result = {
         "round_id": "r1",
         "per_variant_outcomes": [
@@ -451,11 +412,18 @@ def test_killed_overtime_enters_failures_and_mints_gap():
             }
         ],
     }
+    return c, _StubTask(task_id="t-killed"), result
+
+
+def test_killed_overtime_enters_failures_and_mints_gap(tmp_path):
+    """record_explore_variant_failures writes the evidence packet and last_action_failures; _extract_gaps_from_attempts
+    then produces a #fail:explore:killed_overtime gap.
+    """
+    c, task, result = _killed_overtime_round(tmp_path)
     c.gap_refresh.record_explore_variant_failures(task=task, result=result)
 
     # 1. Failure evidence was recorded.
-    assert len(c.shared_state.failures) == 1
-    fe = c.shared_state.failures[0]
+    (fe,) = recent_failures(tmp_path)
     assert fe["outcome"] == "KILLED_OVERTIME"
     assert fe["failure_id"].startswith("fail.t-killed.")
 
@@ -468,6 +436,17 @@ def test_killed_overtime_enters_failures_and_mints_gap():
     gaps = c.gap_refresh._extract_gaps_from_attempts(c.recipe_journal.workload_canonical_id())
     cids = [g["canonical_id"] for g in gaps]
     assert any("killed_overtime" in cid for cid in cids), f"Expected a killed_overtime gap, got: {cids}"
+
+
+def test_failure_evidence_that_cannot_be_written_is_an_error(tmp_path):
+    """The packet file is the only copy of the evidence, so a write that fails is not passed over."""
+    (tmp_path / "reports").write_text("in the way of the failures directory")
+    c, task, result = _killed_overtime_round(tmp_path)
+
+    with pytest.raises(OSError):
+        c.gap_refresh.record_explore_variant_failures(task=task, result=result)
+
+    assert c.shared_state.last_action_failures == []
 
 
 # --- short-session reloop boundary ---

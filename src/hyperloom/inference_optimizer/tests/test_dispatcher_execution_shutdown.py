@@ -26,7 +26,7 @@ from hyperloom.orchestrator.bus.storage.connection import SqliteConnection
 from hyperloom.orchestrator.loop import dispatcher as dispatcher_module
 from hyperloom.orchestrator.loop.dispatcher import DispatcherCollaborator
 from hyperloom.orchestrator.loop.sub_agent_runner import SubAgentRunner
-from hyperloom.orchestrator.state.task_registry import TaskRegistry, TaskSpec
+from hyperloom.orchestrator.state.task_registry import TaskOutcome, TaskRegistry, TaskSpec
 
 from ._dispatch_helpers import pump_until_settled, stub_gpu_pool
 from ._lease_helpers import lane_holders
@@ -180,6 +180,57 @@ def test_normal_pump_completion_is_not_reaped_twice(tmp_path, monkeypatch):
         assert len(events) == 1
         assert dispatcher._coord.writeback.promote_to_shared_state.await_count == 1
         assert not dispatcher._executions
+        await _close(dispatcher)
+
+    try:
+        asyncio.run(run())
+    finally:
+        dispatcher.db.close()
+
+
+def test_a_booked_result_is_announced_by_name_and_read_from_its_task_row(tmp_path):
+    """The event says which task was booked; what the task returned is on its row, for whoever reads it."""
+    dispatcher = _dispatcher(tmp_path)
+    returned = {"status": "ok", "gain_pct": 2.5}
+
+    async def run():
+        dispatcher.sub.register_executor("shutdown_test", AsyncMock(return_value=returned))
+        booked, _ = await dispatcher.tasks.create_or_return_existing(
+            TaskSpec(kind="shutdown_test", params={}, idempotency_key="announced")
+        )
+        await pump_until_settled(dispatcher)
+        queued, _ = await dispatcher.tasks.create_or_return_existing(
+            TaskSpec(kind="shutdown_test", params={}, idempotency_key="still-queued")
+        )
+        (event,) = await dispatcher.bus.tail(topic="delegated_result")
+        assert event.payload == {"task_id": booked.task_id, "kind": "shutdown_test", "state": "succeeded"}
+        asked = [booked.task_id, queued.task_id, "no-such-task"]
+        outcome = TaskOutcome(result=returned, error=None, cleanup_confirmed=True)
+        assert await dispatcher.tasks.outcomes(asked) == {booked.task_id: outcome}
+        assert dispatcher.tasks.outcomes_sync(asked) == {booked.task_id: outcome}
+        await _close(dispatcher)
+
+    try:
+        asyncio.run(run())
+    finally:
+        dispatcher.db.close()
+
+
+def test_an_attempt_that_is_retried_instead_of_booked_is_not_announced(tmp_path):
+    """Its row holds what it returned, like any ended task; only a booked result gets the event readers follow."""
+    dispatcher = _dispatcher(tmp_path)
+
+    async def run():
+        dispatcher.sub.register_executor("specialist", AsyncMock(side_effect=RuntimeError("subprocess died")))
+        retried, _ = await dispatcher.tasks.create_or_return_existing(
+            TaskSpec(kind="specialist", params={}, idempotency_key="retried", requires_lanes=["research_lane"])
+        )
+        booking = partial(dispatcher.reap_dispatched_task, retried)
+        assert (await dispatcher.run_task_registered(retried, on_complete=booking)).state == "failed"
+        assert dispatcher._coord.specialist_dispatch.maybe_auto_retry_specialist.await_count == 1
+        assert await dispatcher.bus.tail(topic="delegated_result") == []
+        (outcome,) = (await dispatcher.tasks.outcomes([retried.task_id])).values()
+        assert outcome.error == "RuntimeError('subprocess died')"
         await _close(dispatcher)
 
     try:

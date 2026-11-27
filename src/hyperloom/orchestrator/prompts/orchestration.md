@@ -71,7 +71,7 @@ registered name, prefix included — the names below are literal:
 
 - **`mcp__inference_optimizer_context__get_recent_outcomes`** — pull the
   most recent `delegated_result`
-  outcomes (kind / state / status / kept / gain / tput / error, plus
+  outcomes (kind / state / status / gain / error, plus
   per-variant failure lines for FAILED/KILLED_OVERTIME rows). Use this to
   check how your prior delegated work landed before
   deciding the next move, instead of re-emitting blindly.

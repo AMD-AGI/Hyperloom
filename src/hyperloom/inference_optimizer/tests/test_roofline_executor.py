@@ -18,7 +18,7 @@ from hyperloom.orchestrator.actions.executors.roofline import (
     _gpu_trace_unsupported_reason,
 )
 from hyperloom.inference_optimizer.trace.task_progress import progress_scope
-from hyperloom.orchestrator.state.shared_state import ActionAttempt, SharedState
+from hyperloom.orchestrator.state.shared_state import SharedState
 from hyperloom.orchestrator.loop.sub_agent_runner import RunnerContext
 from hyperloom.orchestrator.state.task_registry import Task
 
@@ -848,38 +848,6 @@ def _roofline_result(snapshot_id: int = 1) -> dict:
     }
 
 
-def test_record_action_attempt_populates_last_roofline_and_history():
-    s = SharedState()
-    s.record_action_attempt(
-        action="roofline",
-        attempt=ActionAttempt(
-            task_id="t-rf-1",
-            status="succeeded",
-            decision="promoted",
-            result={"snapshot_id": 3},
-            extras={"analysis_md_path": "/p/analysis.md"},
-        ),
-    )
-    assert s.last_roofline
-    assert s.last_roofline.get("status") == "succeeded"
-    assert s.last_roofline.get("decision") == "promoted"
-    assert s.last_roofline.get("key_metric") == 3
-    assert s.last_roofline.get("key_metric_kind") == "snapshot_id"
-    assert s.last_roofline.get("extras", {}).get("analysis_md_path") == "/p/analysis.md"
-    assert len(s.roofline_attempts) == 1
-
-
-def test_record_action_attempt_caps_roofline_history():
-    s = SharedState()
-    for i in range(25):
-        s.record_action_attempt(
-            action="roofline",
-            attempt=ActionAttempt(task_id=f"t-{i}", status="succeeded", decision="promoted", result={"snapshot_id": i}),
-        )
-    assert len(s.roofline_attempts) == 20
-    assert s.roofline_attempts[-1].get("task_id") == "t-24"
-
-
 @pytest.mark.asyncio
 async def test_promote_roofline_flips_changed_and_saves(session_dir):
     coord = Coordinator(session_dir, backends=_silent_backends())
@@ -912,34 +880,6 @@ async def test_promote_roofline_flips_changed_and_saves(session_dir):
         "the tail-save; otherwise the post-promote state.json would "
         "still show the pre-mutate trace path"
     )
-    assert post["last_roofline"]["decision"] == "promoted"
-    assert [attempt["task_id"] for attempt in post["roofline_attempts"]] == ["t-rf-1"]
-
-
-@pytest.mark.asyncio
-async def test_promote_roofline_records_audit_attempt(session_dir):
-    coord = Coordinator(session_dir, backends=_silent_backends())
-    s = coord.shared_state
-    s.last_trace_analyze = {
-        "analysis_md_path": "/p/analysis.md",
-        "roofline_snapshot_id": 1,
-    }
-    s.last_profile_trace = "/t/trace.gz"
-
-    assert s.roofline_attempts == []
-    await coord.writeback.promote_to_shared_state(
-        "roofline",
-        _roofline_result(snapshot_id=1),
-        task=_roofline_task(),
-    )
-    assert len(s.roofline_attempts) == 1, "roofline must enter _AUDIT_ACTIONS so record_action_attempt fires"
-    attempt = s.roofline_attempts[-1]
-    assert attempt.get("status") == "succeeded"
-    assert attempt.get("decision") == "promoted"
-    assert attempt.get("task_id") == "t-rf-1"
-    extras = attempt.get("extras") or {}
-    assert extras.get("snapshot_id") == 1
-    assert extras.get("analysis_md_path") == "/p/analysis.md"
 
 
 @pytest.mark.asyncio

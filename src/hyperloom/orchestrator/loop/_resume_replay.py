@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Rebuilding in-memory state from the event log when a session resumes."""
+"""Rebuilding in-memory state from the session's records when a session resumes."""
 
 from __future__ import annotations
 
@@ -15,13 +15,6 @@ from ..state.shared_state import SharedState
 from ._integrate_promotion import _integrate_keep_variant
 
 log = logging.getLogger(__name__)
-
-
-def _replayed_explore_variant(result: Mapping[str, Any]) -> dict[str, Any] | None:
-    best = result.get("best_variant")
-    if not isinstance(best, dict) or not best.get("name"):
-        return None
-    return dict(best)
 
 
 def _replayed_integrate_variant(result: Mapping[str, Any], tput: float) -> dict[str, Any] | None:
@@ -72,39 +65,28 @@ class ResumeReplayMixin:
         else:
             report["fixes"].append({"kind": "reconciled_kb_stage_outbox", "count": pending_before})
 
-    def _replay_keep_from_result(self, kind: str, result: dict[str, Any]) -> bool:
-        """Replay a recorded KEEP delegated-result into current_best/stack.
+    def _replay_keep_from_result(self, result: dict[str, Any]) -> bool:
+        """Replay an integrate KEEP its task row recorded into current_best/stack.
 
-        Reconstructs the winning-variant dict from a persisted ``delegated_result``
-        and routes it through :meth:`lift_to_current_best`, which dedupes by
-        ``(action, variant_name)`` — so replay is idempotent. Used by both the
-        pending-integrate (Gap C) and orphaned-KEEP (Gap B) resume recovery
-        paths. Returns ``True`` only when a new stack entry was appended.
+        Reconstructs the winning-variant dict from the recorded result and routes
+        it through :meth:`lift_to_current_best`, which dedupes by
+        ``(action, variant_name)`` — so replay is idempotent.
 
         Args:
-            kind: The originating action kind (``integrate_patch`` / ``explore``
-                / ``framework``).
-            result: The recorded delegated result payload for that KEEP.
+            result: The result the ``integrate_patch`` task recorded for that KEEP.
 
         Returns:
             ``True`` when the replay appended a new stack entry, else ``False``.
         """
-        if not isinstance(result, dict):
-            return False
         tput = result.get("output_throughput")
         if not (isinstance(tput, (int, float)) and float(tput) > 0):
             return False
-        if kind == "explore":
-            bv = _replayed_explore_variant(result)
-        elif kind == "integrate_patch":
-            bv = _replayed_integrate_variant(result, float(tput))
-        else:
-            return False
+        bv = _replayed_integrate_variant(result, float(tput))
         if bv is None:
             return False
         before = len(self.shared_state.optimization_stack or [])
         if not self.lift_to_current_best(
-            kind,
+            "integrate_patch",
             float(tput),
             bv,
             gap_canonical_id=str(result.get("gap_canonical_id") or ""),

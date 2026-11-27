@@ -28,7 +28,14 @@ from ..specialists.wall_budget import grant_wall_budget_extension
 from ..state.shared_state import inject_stack_base_params
 from ..state.analysis_failures import remember_trace_failure
 from ..state.experience_citations import merge_citations, normalize_citations, shown_ids
-from ..state.task_registry import TERMINAL_STATES, IllegalTransition, TaskNotFound, TaskSpec, create_on_free_key
+from ..state.task_registry import (
+    TERMINAL_STATES,
+    IllegalTransition,
+    TaskNotFound,
+    TaskSpec,
+    confirmed_result,
+    create_on_free_key,
+)
 from hyperloom.inference_optimizer.trace.trajectory_trace import (
     EVENT_INTENT,
     record_event,
@@ -43,7 +50,6 @@ from .kernel_request import (
     run_kernel_handler,
 )
 from ._escalate_hint import escalate_hint_denial
-from ._integrate_promotion import _confirmed_task_outcome
 from .message_delivery import publish_send_message
 from .proposals import ProposedAction, integrate_patch_key, record_config_proposal, twin_answers
 
@@ -249,7 +255,7 @@ class IntentRouter(CoordinatorCollaborator):
             specialist = await self.tasks.get(specialist_task_id)
         except TaskNotFound:
             return unfinished
-        outcome = _confirmed_task_outcome(specialist) if specialist.state in TERMINAL_STATES else None
+        outcome = confirmed_result(specialist) if specialist.state in TERMINAL_STATES else None
         if outcome is None:
             return unfinished
         deliverable = self._coord.phase_framework.specialist_deliverable(

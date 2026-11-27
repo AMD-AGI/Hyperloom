@@ -36,8 +36,6 @@ from hyperloom_common.jsonio import read_json_strict
 from hyperloom.inference_optimizer.grading import resolved_grading
 from hyperloom.inference_optimizer.grid_server_args import strip_benchmark_harness_flags
 
-from .kernel_decision_settings import _DEFAULT_ATTEMPTS_HISTORY
-from ._shared_state.attempt_audit import _AUDIT_ACTIONS, _KEY_METRIC_MAP
 from ._shared_state.budget import _BudgetStateMixin
 from ._shared_state.enablement_round import EnablementRound
 from ._shared_state.roofline import _RooflineStateMixin, first_positive_tput
@@ -198,14 +196,14 @@ class KbInjection:
 
 
 @dataclass(frozen=True)
-class ActionAttempt:
-    """One settled attempt of an audited action, as ``record_action_attempt`` ledgers it."""
+class BaselineAttempt:
+    """One settled baseline and what the write-back decided about it, as ``record_baseline_attempt`` keeps it."""
 
     task_id: str
     status: str
     decision: str
-    result: dict[str, Any] | None
-    extras: dict[str, Any] | None = None
+    result: dict[str, Any]
+    extras: dict[str, Any]
 
 
 #: top-level state.json schema version, stamped on every save.
@@ -356,8 +354,6 @@ class SharedState(
     baseline_workload_extra: dict = field(default_factory=dict)
     # One-shot guard for PRELUDE warm-recipe replay (resume can't re-enqueue).
     warm_replay_attempted: bool = False
-    # One-shot guard for injecting warm-recipe history into explore ledger.
-    warm_history_injected: bool = False
     # Structured warm-replay outcome for reports/prompts (status reproduced|drift|failed|skipped, etc.).
     warm_replay_outcome: dict = field(default_factory=dict)
     # Crash-safe rollback/bookkeeping state for the combined Recipe + Kernel PRELUDE validation.
@@ -552,25 +548,14 @@ class SharedState(
     # How many times a fusion round left targets its lane ceiling never funded, counted here for the same reason as
     # the aborts above.
     fusion_withheld_retries: int = 0
-    # Per-action audit (kernel parity): each ``last_<action>`` is the most recent attempt snapshot; ``<action>_attempts`` is a capped list.
+    # The latest baseline attempt, failed or measured, with the write-back's decision on it. A result is announced
+    # before it is promoted, so this is the only record of a re-baseline the anchor was held against.
     last_baseline: dict[str, Any] = field(default_factory=dict)
-    last_profile: dict[str, Any] = field(default_factory=dict)
     # GEAK FP8 GEMM tuning snapshot (kernel_agent-owned): aiter A8W8 tuned CSV + SGLang dispatch patch before kernel_opt.
     last_gemm_tuning: dict[str, Any] = field(default_factory=dict)
-    # merged explore action snapshot (same schema as other ``last_<action>`` mirrors).
-    last_explore: dict[str, Any] = field(default_factory=dict)
-    last_roofline: dict[str, Any] = field(default_factory=dict)
-    baseline_attempts: list[dict[str, Any]] = field(default_factory=list)
-    profile_attempts: list[dict[str, Any]] = field(default_factory=list)
     gemm_tuning_attempts: list[dict[str, Any]] = field(default_factory=list)
-    # explore audit log (capped per _DEFAULT_ATTEMPTS_HISTORY).
-    explore_attempts: list[dict[str, Any]] = field(default_factory=list)
-    # Capped roofline audit log with snapshot ids and analysis paths.
-    roofline_attempts: list[dict[str, Any]] = field(default_factory=list)
     # Global rolling log of unpromotable task results (cap _DEFAULT_LAST_FAILURES); rich failure context for self-correction. Covers every task kind.
     last_action_failures: list[dict[str, Any]] = field(default_factory=list)
-    # Structured per-variant failure evidence, capped and keyed by failure_id (last-wins).
-    failures: list[dict[str, Any]] = field(default_factory=list)
     # Immutable KEEP snapshots awaiting E2E integration, keyed by integration_id.
     pending_kernel_integrations: dict[str, Any] = field(default_factory=dict)
     # Unified persistent explore-search ledger; ``tested`` keyed by canonical_fingerprint, everything graded down moves to rejected.
@@ -806,45 +791,27 @@ class SharedState(
             row["seq"] = index
         self.lifecycle = merged
 
-    def record_action_attempt(self, action: str, attempt: ActionAttempt) -> dict[str, Any] | None:
-        """Append one attempt to ``<action>_attempts`` and refresh ``last_<action>``. Entry schema {ts, task_id, status, decision, key_metric, key_metric_kind, workspace, error_class, error_excerpt, stderr_tail, stderr_log_path, raw_result_path, reported_success, variant_name, extras}. Returns the entry, or None when ``action`` not in the audit set (kernel_agent-owned actions use bespoke recorders). Does NOT call :meth:`save`."""
-        if action not in _AUDIT_ACTIONS:
-            return None
-        attempts_attr = f"{action}_attempts"
-        last_attr = f"last_{action}"
-        result = attempt.result or {}
-        metric_key, metric_kind = _KEY_METRIC_MAP[action]
-        raw_metric = result.get(metric_key)
-        try:
-            key_metric: float | None = float(raw_metric) if isinstance(raw_metric, (int, float)) else None
-        except (TypeError, ValueError):
-            key_metric = None
-        entry: dict[str, Any] = {
+    def record_baseline_attempt(self, attempt: BaselineAttempt) -> None:
+        """Replace ``last_baseline`` with ``attempt`` and tell the breakdown its decision. Does NOT call :meth:`save`."""
+        measured = attempt.result.get("output_throughput")
+        self.last_baseline = {
             "ts": now_iso(),
-            "task_id": str(attempt.task_id or ""),
-            "status": str(attempt.status or ""),
-            "decision": str(attempt.decision or ""),
-            "key_metric": key_metric,
-            "key_metric_kind": metric_kind,
-            **self._common_result_fields(result),
-            "extras": dict(attempt.extras or {}),
+            "task_id": attempt.task_id,
+            "status": attempt.status,
+            "decision": attempt.decision,
+            "key_metric": float(measured) if isinstance(measured, (int, float)) else None,
+            "key_metric_kind": "output_throughput",
+            **self._common_result_fields(attempt.result),
+            "extras": dict(attempt.extras),
         }
-        history: list[dict[str, Any]] = list(getattr(self, attempts_attr) or [])
-        history.append(entry)
-        if len(history) > _DEFAULT_ATTEMPTS_HISTORY:
-            history = history[-_DEFAULT_ATTEMPTS_HISTORY:]
-        setattr(self, attempts_attr, history)
-        setattr(self, last_attr, dict(entry))
-        if action == "baseline":
-            from hyperloom.inference_optimizer.breakdown.recorder.baseline_event import record_action_decision
+        from hyperloom.inference_optimizer.breakdown.recorder.baseline_event import record_action_decision
 
-            record_action_decision(
-                phase=str(getattr(self, "phase", "") or "unphased"),
-                macro_cycle=int(getattr(self, "macro_cycle", 0) or 0),
-                task_id=str(entry.get("task_id") or ""),
-                decision=str(entry.get("decision") or ""),
-            )
-        return entry
+        record_action_decision(
+            phase=str(getattr(self, "phase", "") or "unphased"),
+            macro_cycle=int(getattr(self, "macro_cycle", 0) or 0),
+            task_id=attempt.task_id,
+            decision=attempt.decision,
+        )
 
     # No action-score API; ``increment_tick`` is a pure monotonic counter for plateau/phase budget math.
     def increment_tick(self) -> int:

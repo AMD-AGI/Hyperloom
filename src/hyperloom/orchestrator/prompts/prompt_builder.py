@@ -631,7 +631,7 @@ def _failure_recovery_lines(*, phase: str, transport: str = "") -> list[str]:
         "",
         "When the inbox carries a fresh `delegated_result{state!='succeeded'}`",
         "or `last_action_failures[-1].action == <X>`, do NOT re-propose the same",
-        "action with the same params. Consult `last_<action>`",
+        "action with the same params. Consult `last_baseline` (a baseline)",
         detail,
         "",
         "Rules (apply in order):",

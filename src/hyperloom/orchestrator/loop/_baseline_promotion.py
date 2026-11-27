@@ -30,6 +30,7 @@ from ..actions.executors._accuracy_gate import (
 )
 from ..state.round_store import FAILED
 from ._promote_outcome import _PromoteOutcome
+from ..state.shared_state import BaselineAttempt
 from ..state.task_registry import Task
 
 log = logging.getLogger(__name__)
@@ -221,11 +222,15 @@ class BaselinePromotionMixin:
             if not (self.shared_state.optimization_stack or []):
                 self._anchor_current_best(result)
             outcome.verdict = Verdict.ADOPTED
-            outcome.audit_decision = "promoted"
         else:
             outcome.verdict = Verdict.REVERTED
-            outcome.audit_decision = "no_promote"
-        audit_extras = self._baseline_audit_extras(result, task_params, held_reason, prior_anchor)
+        attempt = BaselineAttempt(
+            task_id=promoting_tid,
+            status="succeeded",
+            decision="no_promote" if held_reason else "promoted",
+            result=result,
+            extras=self._baseline_attempt_extras(result, task_params, held_reason, prior_anchor),
+        )
         # seed the gaps[] ledger from baseline.
         await self._coord.gap_refresh.refresh_gaps(
             reason="baseline_done", workload_id=self._coord.recipe_journal.workload_canonical_id()
@@ -236,7 +241,8 @@ class BaselinePromotionMixin:
         # re-baseline must not re-fire replay, scout or recon.
         if prior_anchor <= 0.0 and self._should_run_prelude_bootstrap():
             await self._bootstrap_prelude_after_baseline(tput)
-        outcome.audit_extras = audit_extras
+        self.shared_state.record_baseline_attempt(attempt)
+        outcome.changed = True
 
     def _anchor_baseline_tput(
         self,
@@ -410,7 +416,7 @@ class BaselinePromotionMixin:
         if stop_reason := baseline_budget_stop_reason(self.shared_state, result):
             self.shared_state.set_stop_reason(stop_reason)
 
-    def _baseline_audit_extras(
+    def _baseline_attempt_extras(
         self,
         result: dict,
         task_params: Mapping[str, Any],
@@ -437,8 +443,6 @@ class BaselinePromotionMixin:
         return extras
 
     async def _bootstrap_prelude_after_baseline(self, tput: Any) -> None:
-        # History injection fires regardless of --no-warm-replay.
-        self._coord.phase_prelude.inject_warm_recipe_history_into_ledger()
         # Warm-recipe replay, anchored on the hot baseline_tput contract.
         await self._coord.phase_prelude.maybe_enqueue_warm_replay(
             baseline_tput=float(self.shared_state.baseline_tput or tput),

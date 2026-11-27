@@ -11,6 +11,8 @@ from hyperloom.orchestrator.loop.kernel_request import lifecycle_paths
 from hyperloom.orchestrator.bus.message_bus import Message
 from hyperloom.orchestrator.loop.gap_refresh import GapRefreshCollaborator
 
+from ._booked_results import announced
+
 
 def test_first_present_non_dict_and_branches():
     """``_first_present`` ignores non-dicts and skips None values."""
@@ -31,66 +33,39 @@ def test_lifecycle_paths_filters_and_types():
 
 
 def test_format_inbox_delegated_result_with_msg_id():
-    """delegated_result lines include outcome keys when ``result`` is a dict."""
-    m = Message(
-        msg_id="mid",
-        from_agent="kernel_agent",
-        to_agent="orch",
-        topic="delegated_result",
-        payload={
-            "kind": "integrate",
-            "state": "done",
-            "result": {
-                "status": "ok",
-                "kept": True,
-                "gain_pct": 3.5,
-                "tokens_per_s": 900,
-            },
-        },
-        seq=7,
-    )
-    line = _format_inbox_event(m)
+    """delegated_result lines carry the outcome keys of the result on the announced task's row."""
+    m, outcomes = announced({"task_id": "t1", "kind": "integrate", "state": "done"}, {"status": "ok", "gain_pct": 3.5})
+    m.msg_id = "mid"
+    line = _format_inbox_event(m, outcomes)
     assert "msg_id=mid" in line and "seq=7" in line
-    assert "gain=3.5" in line and "tput=900" in line
+    assert "status='ok'" in line and "gain=3.5" in line
 
 
 def test_format_inbox_delegated_result_no_msg_id():
     """Header omits ``msg_id=`` when the field is unset."""
-    m = Message(
-        msg_id="",
-        from_agent="k",
-        to_agent="o",
-        topic="delegated_result",
-        payload={"kind": "k", "state": "s", "result": {"verdict": "x"}},
-        seq=2,
-    )
-    line = _format_inbox_event(m)
+    m, outcomes = announced({"task_id": "t1", "kind": "k", "state": "s"}, {"status": "x"}, seq=2)
+    m.msg_id = ""
+    line = _format_inbox_event(m, outcomes)
     assert "seq=2" in line and "msg_id=" not in line
 
 
-def test_format_inbox_delegated_result_non_dict_result():
+def test_format_inbox_delegated_result_of_a_task_with_no_recorded_outcome():
+    """An event whose task recorded nothing renders what the event itself says, and nothing the event carries beside it."""
     m = Message(
         msg_id="1",
         from_agent="a",
         to_agent="b",
         topic="delegated_result",
-        payload={"kind": "k", "state": "s", "result": "raw"},
+        payload={"task_id": "gone", "kind": "k", "state": "s", "result": {"status": "raw"}, "error": "raw"},
         seq=1,
     )
-    line = _format_inbox_event(m)
-    assert "kind='k'" in line and "state='s'" in line and "raw" not in line
+    line = _format_inbox_event(m, {})
+    assert line == "seq=1 msg_id=1 from=a topic=delegated_result kind='k' state='s'"
 
 
 def test_format_inbox_delegated_result_with_error():
-    m = Message(
-        msg_id="e",
-        from_agent="a",
-        to_agent="b",
-        topic="delegated_result",
-        payload={"kind": "k", "state": "failed", "error": "boom" * 50, "result": {}},
-        seq=1,
-    )
-    line = _format_inbox_event(m)
+    m, outcomes = announced({"task_id": "t1", "kind": "k", "state": "failed"}, {}, error="boom" * 50)
+    line = _format_inbox_event(m, outcomes)
     assert "error=" in line
 
 
@@ -109,7 +84,7 @@ def test_format_inbox_policy_denied_observation_shows_the_rule_and_hint():
         },
         seq=3,
     )
-    line = _format_inbox_event(denied)
+    line = _format_inbox_event(denied, {})
     assert "topic=observation" in line and "kind='policy_denied'" in line
     assert "phase_incompatible" in line and "KERNEL_AGENT proposes: integrate" in line
 
@@ -123,7 +98,7 @@ def test_format_inbox_observation_generic():
         payload={"kind": "metric", "v": 1},
         seq=1,
     )
-    assert "kind='metric'" in _format_inbox_event(m)
+    assert "kind='metric'" in _format_inbox_event(m, {})
 
 
 def test_format_inbox_fallback():
@@ -135,7 +110,7 @@ def test_format_inbox_fallback():
         payload={"z": 1},
         seq=0,
     )
-    assert "topic=other" in _format_inbox_event(m) and "payload=" in _format_inbox_event(m)
+    assert "topic=other" in _format_inbox_event(m, {}) and "payload=" in _format_inbox_event(m, {})
 
 
 def test_gap_layer_for_action_mapping():

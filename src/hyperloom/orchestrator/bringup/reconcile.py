@@ -12,7 +12,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any
 
-from ..bus.resource_lock import BRINGUP_ROUND_LANE, SqliteLeaseBackend
+from ..bus.resource_lock import SqliteLeaseBackend
 from ..state.round_store import (
     EXPIRED_REAPED,
     Round,
@@ -289,9 +289,8 @@ class Reconciler:
     async def _holder_has_resources(self, task_id: str) -> bool:
         """Keep round ownership while execution or GPU cleanup still owns rows."""
         row = await self._db.fetchone(
-            "SELECT 1 FROM leases WHERE task_id=? AND lane != ? "
-            "UNION ALL SELECT 1 FROM gpu_leases WHERE task_id=? LIMIT 1",
-            (task_id, BRINGUP_ROUND_LANE, task_id),
+            "SELECT 1 FROM leases WHERE task_id=? UNION ALL SELECT 1 FROM gpu_leases WHERE task_id=? LIMIT 1",
+            (task_id, task_id),
         )
         return row is not None
 

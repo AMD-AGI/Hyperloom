@@ -107,7 +107,6 @@ def test_shared_state_normalizes_explore_search_tested() -> None:
     ss = SharedState.from_dict(raw)
     es = ss.explore_search
     assert es["tested"][fp_a]["name"] == "A"
-    assert es["rejected"] == []
     assert "winners_history" in es
 
 

@@ -100,9 +100,6 @@ _LEVER_BY_TASK_KIND = {
     "gemm_tuning": LEVER_KERNEL,
     "fusion": LEVER_KERNEL,
     "integrate": LEVER_KERNEL,
-    # Reachable when a session recorded before the action was retired is
-    # resumed and its orphaned KEEPs are reconciled against the stack.
-    "framework_agent": LEVER_UPSTREAM_PR,
     FRAMEWORK_STACK_ACTION: LEVER_UPSTREAM_PR,
 }
 

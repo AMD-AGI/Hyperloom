@@ -18,7 +18,6 @@ from hyperloom.inference_optimizer.session.geak_rebench_verdict import (
     REBENCH_UNMEASURED_GIVEN_UP,
 )
 from . import gap_rows, variant_line, warm_start
-from .attempt_audit import _AUDIT_ACTIONS
 from .phase_state import GAP_SEVERITY_RANK
 
 # Failure rows rendered into the prompt, and per-row excerpt budget.
@@ -507,10 +506,7 @@ class _RenderMixin:
             f"rejected_kernel_patches={self._format_rejected_kernel_patches()}",
             f"rejected_kernel_ids={self.rejected_kernel_ids or '(none)'}",
             f"last_baseline={self._format_attempt(self.last_baseline)}",
-            f"last_profile={self._format_attempt(self.last_profile)}",
             f"last_gemm_tuning={self._format_attempt(self.last_gemm_tuning)}",
-            f"last_explore={self._format_attempt(self.last_explore)}",
-            f"attempts_history={self._format_attempts_history()}",
             f"last_action_failures={self._format_last_action_failures()}",
             f"macro_cycle={int(self.macro_cycle or 0)}",
             f"stop_reason={self.stop_reason or '(none)'}",
@@ -520,10 +516,10 @@ class _RenderMixin:
         ]
         return "\n".join(lines)
 
-    # Audit-trail renderers (per-action attempts + global failure log).
+    # Renderers of the latest-attempt snapshots and the global failure log.
     @staticmethod
     def _format_attempt(entry: dict[str, Any] | None) -> str:
-        """Render one ``last_<action>`` snapshot or ``attempts[-1]`` entry."""
+        """Render ``last_baseline`` or ``last_gemm_tuning``."""
         if not isinstance(entry, dict) or not entry:
             return "(none)"
         metric = entry.get("key_metric")
@@ -537,20 +533,6 @@ class _RenderMixin:
             f"{metric_str} err={err} ws={ws} "
             f"task_id={entry.get('task_id', '?')} ts={entry.get('ts', '?')}"
         )
-
-    def _format_attempts_history(self) -> str:
-        """One-line summary across the audit actions (``baseline:total(s<succ>,f<fail>) ...``)."""
-        parts: list[str] = []
-        for action in sorted(_AUDIT_ACTIONS):
-            attempts_attr = f"{action}_attempts"
-            history = getattr(self, attempts_attr, None) or []
-            if not history:
-                continue
-            total = len(history)
-            succ = sum(1 for e in history if isinstance(e, dict) and e.get("status") == "succeeded")
-            fail = sum(1 for e in history if isinstance(e, dict) and e.get("status") == "failed")
-            parts.append(f"{action}:{total}(s{succ},f{fail})")
-        return " ".join(parts) if parts else "(no attempts recorded)"
 
     def _format_last_action_failures(self) -> str:
         """Render the most-recent global failures, each with its excerpt tail and log path."""
@@ -619,9 +601,7 @@ class _RenderMixin:
         if not search:
             return "(none)"
         tested: dict[str, Any] = search.get("tested") or {}
-        head = (
-            f"    cursor={search.get('cursor', 0)}  rejected={len(search.get('rejected') or [])}  tested={len(tested)}"
-        )
+        head = f"    cursor={search.get('cursor', 0)}  tested={len(tested)}"
         out: list[str] = ["", head]
         rows = [(fp, e) for fp, e in tested.items() if isinstance(e, dict)]
         if not rows:

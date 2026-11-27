@@ -6,7 +6,6 @@
 from __future__ import annotations
 
 import logging
-from typing import Any
 
 from hyperloom.inference_optimizer.session.optimization_journal import Verdict
 
@@ -40,7 +39,7 @@ class ProfileRooflineMixin:
         self.shared_state.last_profile_args = ""
         self.shared_state.last_profile_workload_action = ""
 
-    def _adopt_profile_trace(self, result: dict, task: "Task | None", trace_path: str) -> str:
+    def _adopt_profile_trace(self, result: dict, task: "Task | None", trace_path: str) -> None:
         self.shared_state.last_profile_trace = trace_path
         self.shared_state.last_profile_launch_evidence_path = str(result.get("launch_evidence_path") or "")
         self.shared_state.last_profile_status = "succeeded"
@@ -62,7 +61,6 @@ class ProfileRooflineMixin:
             self.shared_state.last_profile_workload.get("server_args") or profile_args
         )
         self.shared_state.last_trace_analyze = {}
-        return profile_args
 
     async def _promote_profile(
         self,
@@ -71,31 +69,21 @@ class ProfileRooflineMixin:
         outcome: _PromoteOutcome,
     ) -> None:
         """Promote a profile result: trace path / status, optional current_best, roofline anchor."""
-        audit_extras: dict[str, Any] = {
-            "trace_path": None,
-            "profile_args": None,
-            "output_throughput": result.get("output_throughput"),
-        }
         trace_path = profile_trace_path(result)
         profile_status = str(result.get("status") or "")
         measurement_status = str(result.get("measurement_status") or profile_status)
-        audit_extras["measurement_status"] = measurement_status
         if profile_status == "failed" or result.get("error_class") == "no_trace_files":
             outcome.verdict = Verdict.FAILED
             self._record_failed_profile(trace_path)
         elif trace_path:
-            audit_extras["trace_path"] = trace_path
-            audit_extras["profile_args"] = self._adopt_profile_trace(result, task, trace_path)
+            self._adopt_profile_trace(result, task, trace_path)
         # Host-side rewrite evidence is independent of the trace: it answers
         # "which host-side work is redundant", which no kernel timeline can, and
         # a run whose trace was unusable can still have produced good evidence.
         # So promote it on its own, outside the trace_path branch.
         from ..actions.executors.framework_change._framework_rewrite_evidence import promote_evidence_path
 
-        evidence_path = promote_evidence_path(self.shared_state, result)
-        if evidence_path:
-            audit_extras["framework_rewrite_evidence"] = evidence_path
-            audit_extras["framework_rewrite_candidate_count"] = result.get("framework_rewrite_candidate_count")
+        promote_evidence_path(self.shared_state, result)
         # On a successful profile, re-anchor last_roofline_tput and clear the pending field.
         if measurement_status == "succeeded":
             anchor_tput = self._coord.phase_kernel.current_tput_from_validated_gain()
@@ -103,10 +91,9 @@ class ProfileRooflineMixin:
                 self.shared_state.last_roofline_tput = float(anchor_tput)
         if task is not None and self.shared_state.auto_roofline_pending_task_id == task.task_id:
             self.shared_state.auto_roofline_pending_task_id = ""
-        outcome.audit_decision = "promoted"
-        outcome.audit_extras = audit_extras
+        outcome.changed = True
 
-    def _anchor_watermark_on_roofline(self, result: dict, task: "Task | None") -> dict[str, Any]:
+    def _anchor_watermark_on_roofline(self, task: "Task | None") -> None:
         # Prefer the executor's last_trace_analyze snapshot over the result dict.
         last_ta = self.shared_state.last_trace_analyze or {}
         self.shared_state.roofline_failure_streak = 0
@@ -120,14 +107,6 @@ class ProfileRooflineMixin:
                 task.task_id if task else "?",
                 float(self.shared_state.last_roofline_tput or 0.0),
             )
-        snapshot_id = last_ta.get("roofline_snapshot_id")
-        return {
-            "snapshot_id": result.get("snapshot_id") if snapshot_id is None else snapshot_id,
-            "last_profile_trace": (self.shared_state.last_profile_trace or result.get("last_profile_trace")),
-            "analysis_md_path": (last_ta.get("analysis_md_path") or result.get("analysis_md_path")),
-            "profile_workspace": result.get("profile_workspace"),
-            "degraded": bool(result.get("degraded", False)),
-        }
 
     async def _promote_roofline(
         self,
@@ -135,15 +114,15 @@ class ProfileRooflineMixin:
         task: "Task | None",
         outcome: _PromoteOutcome,
     ) -> None:
-        """Promote a roofline result: audit row, failure streak reset and roofline anchor (reads last_trace_analyze).
+        """Promote a roofline result: failure streak reset and roofline anchor (reads last_trace_analyze).
 
         The roofline executor settles ``succeeded`` or ``recovered`` here; a ``failed`` roofline is never promoted and
         is charged on the unpromotable path.
         """
         # The composite roofline action runs profile + trace_analyze atomically;
-        # its executor writes last_profile_* + last_trace_analyze, so here we just record the audit row.
-        outcome.audit_decision = "promoted"
-        outcome.audit_extras = self._anchor_watermark_on_roofline(result, task)
+        # its executor writes last_profile_* + last_trace_analyze, so there is only the anchor to move here.
+        self._anchor_watermark_on_roofline(task)
+        outcome.changed = True
         # Clear the pending pointer (matched by task id).
         if task is not None and self.shared_state.auto_roofline_pending_task_id == task.task_id:
             self.shared_state.auto_roofline_pending_task_id = ""

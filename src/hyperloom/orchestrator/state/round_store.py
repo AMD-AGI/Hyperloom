@@ -10,7 +10,6 @@ from collections.abc import Callable
 from dataclasses import dataclass, replace
 from typing import Any
 
-from hyperloom.orchestrator.bus.resource_lock import drop_round_lane, hold_round_lane
 from hyperloom.orchestrator.bus.storage.connection import SqliteConnection
 
 #: Round states.
@@ -71,8 +70,7 @@ class Round:
         fence: Monotone token; only :meth:`RoundStore.handoff` advances it.
         opened_unix: When the round was acquired.
         renewed_unix: When its lease was last extended.
-        expires_unix: When its lease runs out; the same instant the round's
-            lane row carries.
+        expires_unix: When its lease runs out.
         settled_unix: When it was settled, or ``None``.
     """
 
@@ -196,7 +194,6 @@ class RoundStore:
             if cur.rowcount != 1:
                 cur.execute("SELECT 1 FROM bringup_rounds WHERE round_id = ?", (round_id,))
                 return RoundResult(ok=False, reason=ALREADY_EXISTS if cur.fetchone() is not None else EXCLUDED)
-            _place_lane(cur, opened)
             if join is not None:
                 join(cur)
             return RoundResult(ok=True)
@@ -325,7 +322,6 @@ class RoundStore:
                     after.round_id,
                 ),
             )
-            _place_lane(cur, after)
             return RoundResult(ok=True)
 
     async def held(self) -> Round | None:
@@ -400,17 +396,3 @@ def _cas_reason(current: Round, held: Round) -> str:
     if current.fence != held.fence:
         return STALE_FENCE
     return ""
-
-
-def _place_lane(cur: sqlite3.Cursor, after: Round) -> None:
-    """Make the round's lane row match ``after``: held to its lease while open, gone once settled."""
-    if after.state == OPEN:
-        hold_round_lane(
-            cur,
-            round_id=after.round_id,
-            holder_task_id=after.holder_task_id,
-            expires_unix=after.expires_unix,
-            now_unix=after.renewed_unix,
-        )
-    else:
-        drop_round_lane(cur, round_id=after.round_id)

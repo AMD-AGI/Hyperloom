@@ -82,7 +82,6 @@ from .explore_prefilter.launch_filters import (
 )
 from .grid._explore_variants import (
     LOSER_FIELDS,
-    REJECTED_FIELDS,
     decision_fields,
     outcome_row,
     staged_variant,
@@ -276,7 +275,6 @@ class _ExploreRound:
         self.skipped: list[dict[str, Any]] = []
         self.winners: list[dict[str, Any]] = []
         self.losers: list[dict[str, Any]] = []
-        self.rejected: list[dict[str, Any]] = []
         self.winners_history: list[dict[str, Any]] = []
         self.tested: dict[str, dict[str, Any]] = {}
         # Servers this round launched, and the variants that reached the measured check and were answered by the
@@ -916,19 +914,12 @@ class _ExploreRound:
     def _record(self, gv: GridVariant, row: dict[str, Any]) -> None:
         self.tested[row["fingerprint"]] = row
         if row["outcome"] != "KEEP":
-            rejected = {**ledger_view(row, REJECTED_FIELDS), **decision_fields(gv)}
-            self.rejected.append(rejected)
             self.losers.append(ledger_view(row, LOSER_FIELDS))
             if self.ss is not None and self.session_dir is not None:
                 # A preempted round keeps the verdicts it judged; a KEEP lands at settlement.
                 outcome = outcome_row(row, row["fingerprint"], str(row.get("reason") or ""), str(self.ctx.task.task_id))
                 attributions = framework_lever_attributions([outcome], self.lever_payload)
-                land_verdict(
-                    self.ss,
-                    self.session_dir,
-                    {"tested": {row["fingerprint"]: row}, "rejected": [rejected]},
-                    attributions,
-                )
+                land_verdict(self.ss, self.session_dir, {"tested": {row["fingerprint"]: row}}, attributions)
             return
         self.winners_history.append(
             {
@@ -1027,10 +1018,10 @@ class _ExploreRound:
             "ts": _now_iso(),
         }
 
-    def _per_variant_outcomes(self, reasons: dict[str, str]) -> list[dict[str, Any]]:
+    def _per_variant_outcomes(self) -> list[dict[str, Any]]:
         task_id = str(self.ctx.task.task_id)
         outcomes = [
-            outcome_row(te, fingerprint, reasons.get(fingerprint, ""), task_id)
+            outcome_row(te, fingerprint, str(te.get("reason") or ""), task_id)
             for fingerprint, te in self.tested.items()
             if te.get("outcome") in ("KEEP", "REVERT", TS_FAILED)
         ]
@@ -1048,8 +1039,7 @@ class _ExploreRound:
         return outcomes
 
     def _result(self) -> dict[str, Any]:
-        rejected = {row["fingerprint"]: row for row in self.rejected if row["fingerprint"]}
-        outcomes = self._per_variant_outcomes({fp: str(row.get("reason") or "") for fp, row in rejected.items()})
+        outcomes = self._per_variant_outcomes()
         levers = framework_lever_attributions(outcomes, self.lever_payload)
         if levers:
             log.info(
@@ -1083,7 +1073,6 @@ class _ExploreRound:
             "framework_lever_attributions": levers,
             "explore_search_update": {
                 "tested": self.tested,
-                "rejected": list(rejected.values()),
                 "winners_history": self.winners_history,
                 "last_round": self._last_round_summary(),
             },

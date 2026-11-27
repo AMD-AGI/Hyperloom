@@ -27,7 +27,6 @@ from hyperloom.orchestrator.actions.executors.explore import STACK_REVALIDATE_SO
 from hyperloom.orchestrator.loop.coordinator import Coordinator
 from hyperloom.orchestrator.loop.proposals import ProposedAction
 from hyperloom.orchestrator.loop.reactor_turn import trace_mcp_setup
-from hyperloom.orchestrator.bus.message_bus import Message
 from hyperloom.inference_optimizer.breakdown.stop_reasons import PATCH_RECOVERY_INCOMPLETE_STOP_REASON
 from hyperloom.orchestrator.loop._promote_outcome import IntegrateRecoveryIncomplete
 from hyperloom.orchestrator.state.task_registry import Task, TaskSpec
@@ -36,6 +35,8 @@ from hyperloom.orchestrator.actions.executors.patching import _patch_artifacts a
 from hyperloom.orchestrator.actions.executors.patching import _patch_sources as patch_sources
 from hyperloom.orchestrator.phases import phase_transitions
 from hyperloom.orchestrator.phases.machine_state import resolve_keep_threshold
+
+from ._booked_results import book_result, record_outcome
 
 
 def _idle_intent() -> Intent:
@@ -187,41 +188,15 @@ async def test_context_inbox_reader_survives_scalar_specialist_findings(coord: C
     the character count of a string as a finding count.
     """
     for findings, questions in ((5, 3), ("one finding", "is the tokenizer the bound?")):
-        await coord.bus.append_and_seq(
-            Message.new(
-                "kernel_agent",
-                "orchestration",
-                "delegated_result",
-                {
-                    "kind": "specialist",
-                    "state": "done",
-                    "result": {
-                        "specialist_done": {
-                            "summary": "fp8 kv cache holds",
-                            "new_findings": findings,
-                            "residual_questions": questions,
-                        }
-                    },
-                },
-            )
-        )
+        done = {"summary": "fp8 kv cache holds", "new_findings": findings, "residual_questions": questions}
+        await book_result(coord, "specialist", {"specialist_done": done})
         out = coord.conversation._context_inbox_reader()
         assert "fp8 kv cache holds" in out
         assert "findings=1" in out
         assert "questions=1" in out
 
-    await coord.bus.append_and_seq(
-        Message.new(
-            "kernel_agent",
-            "orchestration",
-            "delegated_result",
-            {
-                "kind": "specialist",
-                "state": "done",
-                "result": {"specialist_done": {"new_findings": ["a", "b"], "residual_questions": ["q"]}},
-            },
-        )
-    )
+    done = {"new_findings": ["a", "b"], "residual_questions": ["q"]}
+    await book_result(coord, "specialist", {"specialist_done": done})
     out = coord.conversation._context_inbox_reader()
     assert "findings=2" in out
     assert "questions=1" in out
@@ -251,6 +226,7 @@ async def test_context_reader_failure_carries_traceback_to_the_log(
     monkeypatch.setattr(getattr(coord, owner), source, _boom)
     provider = ContextProvider(
         shared_state=coord.shared_state,
+        session_dir=coord.session_dir,
         inbox_reader=coord.conversation._context_inbox_reader,
         recent_outcomes_reader=coord.conversation._context_recent_outcomes_reader,
         running_tasks_reader=coord.conversation._context_running_tasks_reader,
@@ -809,48 +785,6 @@ async def test_pending_restore_failure_keeps_sentinel_backup_and_runtime(coord: 
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("newer_results", [0, 10_001])
-async def test_pending_restore_never_undoes_kept_patch_outside_tail_window(
-    coord: Coordinator, pending_candidate, newer_results: int
-):
-    candidate = await pending_candidate(patches=True)
-    kept = Message.new(
-        "coordinator",
-        "*",
-        "delegated_result",
-        {
-            "task_id": candidate.task.task_id,
-            "kind": "integrate_patch",
-            "state": "succeeded",
-            "result": {
-                "status": "kept",
-                "specialist_task_id": "spec-restore",
-                "output_throughput": 125.0,
-                "patches_applied": candidate.result["patches_applied"],
-                "workspace": str(candidate.output),
-            },
-        },
-    )
-    await coord.bus.append_and_seq(kept)
-    if newer_results:
-        async with coord.db.transaction() as cur:
-            cur.executemany(
-                "INSERT INTO events (msg_id, from_agent, to_agent, topic, payload, ts) VALUES (?,?,?,?,?,?)",
-                (
-                    Message.new("coordinator", "*", "delegated_result", {"task_id": f"unrelated-{index}"}).to_db_row()
-                    for index in range(newer_results)
-                ),
-            )
-    report = {"fixes": [], "warnings": []}
-
-    await coord.writeback._resume_recover_pending_integrate(report)
-
-    assert (candidate.root / "cfg.json").read_text(encoding="utf-8") == "C\n"
-    assert coord.shared_state.pending_integrate == {}
-    assert any(entry.get("kind") == "replayed_pending_integrate" for entry in report["fixes"])
-
-
-@pytest.mark.asyncio
 @pytest.mark.parametrize("evidence", ["task", "stack", "neither", "failed_with_keep_result"])
 async def test_pending_restore_never_treats_a_keep_whose_records_are_missing_as_rejection(
     coord, pending_candidate, evidence
@@ -1097,6 +1031,82 @@ async def test_resume_clears_a_restored_marker_whose_runner_never_finished(coord
     assert (candidate.root / "cfg.json").read_text(encoding="utf-8") == "A\n"
     assert not coord.shared_state.stop_reason
     assert any(isinstance(f, dict) and f.get("kind") == "cleared_stale_pending_integrate" for f in report["fixes"])
+
+
+class _CoordinatorDied(BaseException):
+    """Stands for the process ending inside the dispatcher's booking."""
+
+
+def _resumed_state(coord, candidate, report) -> dict:
+    """What a resume pass leaves: the tree, the sentinel, the stack, the current best and what the pass reported."""
+    return {
+        "tree": (candidate.root / "cfg.json").read_text(encoding="utf-8"),
+        "pending_integrate": coord.shared_state.pending_integrate,
+        "stack": [(row["action"], row["variant_name"], row["tput"]) for row in coord.shared_state.optimization_stack],
+        "current_best_tput": (coord.shared_state.current_best or {}).get("tput"),
+        "stop_reason": coord.shared_state.stop_reason,
+        "fixes": sorted(
+            (fix["kind"], fix.get("appended")) for fix in report["fixes"] if "pending_integrate" in fix["kind"]
+        ),
+        "warnings": sorted(warning["kind"] for warning in report["warnings"]),
+    }
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("booked", [False, True], ids=["before_the_result_was_booked", "after_it_was_booked"])
+async def test_resume_adopts_a_keep_whose_promotion_the_crash_cut_off(
+    coord, crashed_integrate_window, monkeypatch, booked
+):
+    """The KEEP is on the task row before the dispatcher books it, so resume adopts it from there either way."""
+    from hyperloom.orchestrator.loop.sub_agent_runner import SubAgentResult
+
+    candidate = await crashed_integrate_window(keep=True, outcome_status="kept")
+    coord.shared_state.baseline_tput = 100.0
+    if booked:
+        row = await coord.tasks.get(candidate.task.task_id)
+        kept = row.history[-1]["evidence"]["outcome"]
+
+        async def _dies(*_args, **_kwargs):
+            raise _CoordinatorDied
+
+        monkeypatch.setattr(coord.dispatcher, "_promote_settled_result", _dies)
+        with pytest.raises(_CoordinatorDied):
+            await coord.dispatcher.reap_dispatched_task(
+                row, SubAgentResult(task_id=row.task_id, state="succeeded", result=kept["result"])
+            )
+        assert [m.payload["task_id"] for m in await coord.bus.tail(topic="delegated_result")] == [row.task_id]
+
+    report = await coord.writeback._resume_consistency_pass()
+
+    assert _resumed_state(coord, candidate, report) == {
+        "tree": "C\n",
+        "pending_integrate": {},
+        "stack": [("integrate_patch", "spec-restore", 130.0)],
+        "current_best_tput": 130.0,
+        "stop_reason": "",
+        "fixes": [("replayed_pending_integrate", True)],
+        "warnings": ["resume_unvalidated_keeps", "source_layer_not_reproducible"],
+    }
+
+
+@pytest.mark.asyncio
+async def test_resume_rolls_back_an_integrate_that_died_between_apply_and_bench(coord, pending_candidate):
+    """The candidate is on the tree, the row reads running and nothing was measured: resume takes the candidate out."""
+    candidate = await pending_candidate(patches=True)
+    await coord.tasks.transition(candidate.task.task_id, "running")
+    coord.writeback._resumed_from["is_resume"] = True
+
+    report = await coord.writeback._resume_consistency_pass()
+
+    assert _resumed_state(coord, candidate, report) == {
+        "tree": "A\n",
+        "pending_integrate": {},
+        "stack": [],
+        "current_best_tput": None,
+        "stop_reason": "",
+        "fixes": [("rolled_back_pending_integrate", None)],
+        "warnings": [],
+    }
 
 
 @pytest.fixture
@@ -1413,44 +1423,48 @@ async def test_ordinary_integrate_completion_does_not_clear_unidentified_or_othe
     assert candidate.backup.exists()
 
 
-@pytest.mark.asyncio
-async def test_resume_consistency_replays_orphaned_integrate_keep(coord: Coordinator) -> None:
+async def _accepted_integrate(coord: Coordinator, key: str, result: dict) -> Task:
+    """An integrate whose executor kept its candidate and whose runner recorded ``result``, with nothing promoted yet."""
+    task, _ = await coord.tasks.create_or_return_existing(
+        TaskSpec(kind="integrate_patch", params={}, idempotency_key=key)
+    )
+    await record_outcome(coord, task.task_id, result)
+    coord.shared_state.pending_integrate = {
+        "task_id": task.task_id,
+        "specialist_task_id": result["specialist_task_id"],
+        "recovery": {"phase": "accepted"},
+    }
     coord.writeback._resumed_from["is_resume"] = True
-    await coord.bus.append_and_seq(
-        Message.new(
-            "coordinator",
-            "*",
-            "delegated_result",
-            {
-                "task_id": "ti-orphan",
-                "kind": "integrate_patch",
-                "state": "succeeded",
-                "result": {
-                    "status": "kept",
-                    "specialist_task_id": "spec-orphan",
-                    "output_throughput": 123.0,
-                    "source_phase": "FRAMEWORK_AGENT",
-                    "domain": "serving_specialist",
-                    "provenance": "specialist:serving_specialist",
-                    "framework_agent_authoring": True,
-                    "source_manifest": ("/session/optimization_stack/src/spec-orphan/manifest.json"),
-                    "target_files": ["vllm/model.py"],
-                },
-            },
-        )
+    return task
+
+
+@pytest.mark.asyncio
+async def test_resume_replay_carries_what_the_keep_recorded_about_its_patch(coord: Coordinator) -> None:
+    await _accepted_integrate(
+        coord,
+        "ti-owned",
+        {
+            "status": "kept",
+            "specialist_task_id": "spec-owned",
+            "output_throughput": 123.0,
+            "source_phase": "FRAMEWORK_AGENT",
+            "domain": "serving_specialist",
+            "provenance": "specialist:serving_specialist",
+            "framework_agent_authoring": True,
+            "source_manifest": ("/session/optimization_stack/src/spec-owned/manifest.json"),
+            "target_files": ["vllm/model.py"],
+        },
     )
 
     report = await coord.writeback._resume_consistency_pass()
 
-    replay = next(f for f in report["fixes"] if isinstance(f, dict) and f["kind"] == "replayed_orphaned_keep")
-    assert replay["orphan_kind"] == "integrate_patch"
-    assert replay["variant"] == "spec-orphan"
+    assert any(f["kind"] == "replayed_pending_integrate" and f["appended"] is True for f in report["fixes"])
     assert coord.shared_state.optimization_stack[-1]["action"] == "integrate_patch"
-    assert coord.shared_state.optimization_stack[-1]["variant_name"] == "spec-orphan"
+    assert coord.shared_state.optimization_stack[-1]["variant_name"] == "spec-owned"
     assert coord.shared_state.optimization_stack[-1]["source_phase"] == "FRAMEWORK_AGENT"
     assert coord.shared_state.optimization_stack[-1]["provenance"] == ("specialist:serving_specialist")
     assert coord.shared_state.optimization_stack[-1]["source_manifest"] == (
-        "/session/optimization_stack/src/spec-orphan/manifest.json"
+        "/session/optimization_stack/src/spec-owned/manifest.json"
     )
     assert coord.shared_state.optimization_stack[-1]["target_files"] == ["vllm/model.py"]
     assert coord.shared_state.optimization_stack_has_unvalidated_keeps()
@@ -1458,30 +1472,14 @@ async def test_resume_consistency_replays_orphaned_integrate_keep(coord: Coordin
 
 @pytest.mark.asyncio
 async def test_resume_consistency_replays_pending_integrate_keep(coord: Coordinator) -> None:
-    coord.writeback._resumed_from["is_resume"] = True
-    coord.shared_state.pending_integrate = {"task_id": "ti-pending", "specialist_task_id": "spec-pending"}
-    await coord.bus.append_and_seq(
-        Message.new(
-            "coordinator",
-            "*",
-            "delegated_result",
-            {
-                "task_id": "ti-pending",
-                "kind": "integrate_patch",
-                "state": "succeeded",
-                "result": {
-                    "status": "kept",
-                    "specialist_task_id": "spec-pending",
-                    "output_throughput": 125.0,
-                },
-            },
-        )
+    task = await _accepted_integrate(
+        coord, "ti-pending", {"status": "kept", "specialist_task_id": "spec-pending", "output_throughput": 125.0}
     )
 
     report = await coord.writeback._resume_consistency_pass()
 
     replay = next(f for f in report["fixes"] if isinstance(f, dict) and f["kind"] == "replayed_pending_integrate")
-    assert replay["task_id"] == "ti-pending"
+    assert replay["task_id"] == task.task_id
     assert replay["appended"] is True
     assert coord.shared_state.pending_integrate == {}
     assert coord.shared_state.optimization_stack[-1]["variant_name"] == "spec-pending"
@@ -1635,11 +1633,11 @@ async def test_resume_settles_an_env_only_integrate_from_its_task_row(
 
 
 @pytest.mark.asyncio
-async def test_resume_consistency_keeps_sentinel_when_event_scan_fails(
+async def test_resume_consistency_keeps_sentinel_when_the_task_row_cannot_be_read(
     coord: Coordinator,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """An unreadable event log must not be treated as 'no KEEP exists'."""
+    """An unreadable task registry must not be treated as 'no KEEP exists'."""
     coord.writeback._resumed_from["is_resume"] = True
     sentinel = {
         "task_id": "ti-unreadable",
@@ -1651,7 +1649,7 @@ async def test_resume_consistency_keeps_sentinel_when_event_scan_fails(
     async def _boom(*_args, **_kwargs):
         raise sqlite3.DatabaseError("database disk image is malformed")
 
-    monkeypatch.setattr(coord.bus, "tail", _boom)
+    monkeypatch.setattr(coord.tasks, "find", _boom)
 
     rolled_back: list[dict] = []
     monkeypatch.setattr(
@@ -1660,204 +1658,11 @@ async def test_resume_consistency_keeps_sentinel_when_event_scan_fails(
         lambda pending, _gone_scope=None: rolled_back.append(pending) or {"reversed": [], "failed": []},
     )
 
-    with pytest.raises(RuntimeError, match="refusing resume before measurement"):
+    with pytest.raises(sqlite3.DatabaseError, match="malformed"):
         await coord.writeback._resume_consistency_pass()
 
     assert rolled_back == []
     assert coord.shared_state.pending_integrate == sentinel
-
-
-@pytest.mark.asyncio
-async def test_resume_consistency_discards_orphaned_integrate_keep_missing_workspace(
-    coord: Coordinator,
-    tmp_path: Path,
-) -> None:
-    coord.writeback._resumed_from["is_resume"] = True
-    missing_workspace = tmp_path / "missing-workspace"
-    await coord.bus.append_and_seq(
-        Message.new(
-            "coordinator",
-            "*",
-            "delegated_result",
-            {
-                "task_id": "ti-missing",
-                "kind": "integrate_patch",
-                "state": "succeeded",
-                "result": {
-                    "status": "kept",
-                    "specialist_task_id": "spec-missing",
-                    "output_throughput": 125.0,
-                    "workspace": str(missing_workspace),
-                },
-            },
-        )
-    )
-
-    report = await coord.writeback._resume_consistency_pass()
-
-    discarded = next(w for w in report["warnings"] if w["kind"] == "orphaned_keep_discarded")
-    assert discarded["orphan_kind"] == "integrate_patch"
-    assert discarded["variant"] == "spec-missing"
-    assert coord.shared_state.optimization_stack == []
-
-
-@pytest.mark.asyncio
-async def test_resume_consistency_discards_orphan_when_workspace_missing(coord: Coordinator) -> None:
-    coord.writeback._resumed_from["is_resume"] = True
-    await coord.bus.append_and_seq(
-        Message.new(
-            "coordinator",
-            "*",
-            "delegated_result",
-            {
-                "task_id": "ti-gone",
-                "kind": "integrate_patch",
-                "state": "succeeded",
-                "result": {
-                    "status": "kept",
-                    "specialist_task_id": "spec-gone",
-                    "output_throughput": 123.0,
-                    "workspace": "/nonexistent/path/spec-gone",
-                },
-            },
-        )
-    )
-
-    report = await coord.writeback._resume_consistency_pass()
-
-    assert any(w.get("kind") == "orphaned_keep_discarded" for w in report["warnings"])
-    assert not any(
-        isinstance(e, dict) and e.get("variant_name") == "spec-gone" for e in coord.shared_state.optimization_stack
-    )
-
-
-@pytest.mark.asyncio
-async def test_resume_consistency_explore_orphan_alerts_not_replayed(coord: Coordinator) -> None:
-    coord.writeback._resumed_from["is_resume"] = True
-    await coord.bus.append_and_seq(
-        Message.new(
-            "coordinator",
-            "*",
-            "delegated_result",
-            {
-                "task_id": "te-orphan",
-                "kind": "explore",
-                "state": "succeeded",
-                "result": {
-                    "status": "kept",
-                    "best_variant": {"name": "ev-1", "extra_envs": {"A": "1"}},
-                    "output_throughput": 123.0,
-                },
-            },
-        )
-    )
-
-    report = await coord.writeback._resume_consistency_pass()
-
-    assert any(w.get("kind") == "orphaned_keep" and w.get("orphan_kind") == "explore" for w in report["warnings"])
-    assert not any(
-        isinstance(e, dict) and e.get("variant_name") == "ev-1" for e in coord.shared_state.optimization_stack
-    )
-
-
-@pytest.mark.asyncio
-async def test_resume_consistency_framework_keep_in_stack_is_not_orphaned(coord: Coordinator) -> None:
-    """A landed framework KEEP reconciles against its own stack entry."""
-    coord.writeback._resumed_from["is_resume"] = True
-    coord.shared_state.optimization_stack = [
-        {
-            "action": "framework",
-            "variant_name": "https://example.com/pull/7",
-            "candidate_extra_server_args": "",
-            "extra_envs": {},
-            "tput": 130.0,
-        }
-    ]
-    await coord.bus.append_and_seq(
-        Message.new(
-            "coordinator",
-            "*",
-            "delegated_result",
-            {
-                "task_id": "tf-landed",
-                "kind": "framework_agent",
-                "state": "succeeded",
-                "result": {
-                    "status": "kept",
-                    "candidate": {"pr_url": "https://example.com/pull/7", "ref": "PR:7"},
-                    "output_throughput": 130.0,
-                },
-            },
-        )
-    )
-
-    report = await coord.writeback._resume_consistency_pass()
-
-    assert not [
-        w for w in report["warnings"] if w.get("kind") == "orphaned_keep" and w.get("orphan_kind") == "framework_agent"
-    ]
-
-
-@pytest.mark.asyncio
-async def test_resume_consistency_framework_keep_absent_from_stack_still_alerts(coord: Coordinator) -> None:
-    """The reconciliation fix must not suppress a genuinely missing framework KEEP."""
-    coord.writeback._resumed_from["is_resume"] = True
-    await coord.bus.append_and_seq(
-        Message.new(
-            "coordinator",
-            "*",
-            "delegated_result",
-            {
-                "task_id": "tf-orphan",
-                "kind": "framework_agent",
-                "state": "succeeded",
-                "result": {
-                    "status": "kept",
-                    "candidate": {"pr_url": "https://example.com/pull/8", "ref": "PR:8"},
-                    "output_throughput": 140.0,
-                },
-            },
-        )
-    )
-
-    report = await coord.writeback._resume_consistency_pass()
-
-    orphan = next(
-        w for w in report["warnings"] if w.get("kind") == "orphaned_keep" and w.get("orphan_kind") == "framework_agent"
-    )
-    assert orphan["variant"] == "https://example.com/pull/8"
-
-
-@pytest.mark.asyncio
-async def test_resume_consistency_replays_pending_integrate_with_kept_result(coord: Coordinator) -> None:
-    coord.writeback._resumed_from["is_resume"] = True
-    coord.shared_state.baseline_tput = 100.0
-    coord.shared_state.pending_integrate = {"task_id": "ti-half", "specialist_task_id": "spec-half"}
-    await coord.bus.append_and_seq(
-        Message.new(
-            "coordinator",
-            "*",
-            "delegated_result",
-            {
-                "task_id": "ti-half",
-                "kind": "integrate_patch",
-                "state": "succeeded",
-                "result": {
-                    "status": "kept",
-                    "specialist_task_id": "spec-half",
-                    "output_throughput": 130.0,
-                },
-            },
-        )
-    )
-
-    report = await coord.writeback._resume_consistency_pass()
-
-    assert any(isinstance(f, dict) and f.get("kind") == "replayed_pending_integrate" for f in report["fixes"])
-    assert coord.shared_state.pending_integrate == {}
-    assert any(
-        isinstance(e, dict) and e.get("variant_name") == "spec-half" for e in coord.shared_state.optimization_stack
-    )
 
 
 @pytest.mark.asyncio

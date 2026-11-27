@@ -1137,7 +1137,6 @@ async def test_promote_baseline_records_success_attempt(session_dir):
         assert last["key_metric"] == pytest.approx(1500.0)
         assert last["key_metric_kind"] == "output_throughput"
         assert last["extras"]["accuracy"] == 0.81
-        assert len(c.shared_state.baseline_attempts) == 1
     finally:
         await c.stop()
 
@@ -1290,66 +1289,6 @@ async def test_promote_baseline_revalidation_reanchors_below_prior(session_dir):
 
 
 @pytest.mark.asyncio
-async def test_promote_profile_records_success_attempt(session_dir):
-    c = Coordinator(session_dir, backends=_silent_backends())
-    _mute_action_scoring(c)
-    try:
-        task = _mk_task("profile", "t-prof-1")
-        result = {
-            "main_trace_path": "/tmp/trace.json",
-            "output_throughput": 1234.5,
-            "workspace": "/runs/profile/t-prof-1",
-        }
-        await c.writeback.promote_to_shared_state("profile", result, task=task)
-        last = c.shared_state.last_profile
-        assert last["status"] == "succeeded"
-        assert last["decision"] == "promoted"
-        assert last["extras"]["trace_path"] == "/tmp/trace.json"
-    finally:
-        await c.stop()
-
-
-@pytest.mark.asyncio
-async def test_promote_explore_records_success_attempt(session_dir):
-    c = Coordinator(session_dir, backends=_silent_backends())
-    _mute_action_scoring(c)
-    try:
-        c.shared_state.baseline_tput = 800.0
-        c.shared_state.current_best = {"action": "baseline", "tput": 800.0}
-        task = _mk_task("explore", "t-ex-1")
-        result = {
-            "status": "succeeded",
-            "winners": [
-                {
-                    "name": "v1",
-                    "fingerprint": "fp-v1",
-                    "extra_server_args": "--foo",
-                    "extra_envs": {"K": "1"},
-                    "tput": 900.0,
-                }
-            ],
-            "best_variant": {
-                "name": "v1",
-                "extra_server_args": "--foo",
-                "extra_envs": {"K": "1"},
-                "tput": 900.0,
-            },
-            "output_throughput": 900.0,
-            "best_gain_pct": 12.5,
-            "base_tput": 800.0,
-            "round_id": "round-1",
-        }
-        await c.writeback.promote_to_shared_state("explore", result, task=task)
-        last = c.shared_state.last_explore
-        assert last["status"] == "succeeded"
-        assert last["decision"] == "promoted"
-        assert last["extras"]["best_variant_name"] == "v1"
-        assert last["extras"]["winners_count"] == 1
-    finally:
-        await c.stop()
-
-
-@pytest.mark.asyncio
 async def test_promote_explore_updates_validated_gain(session_dir):
     c = Coordinator(session_dir, backends=_silent_backends())
     _mute_action_scoring(c)
@@ -1438,8 +1377,7 @@ async def test_handle_unpromotable_baseline_records_failure(session_dir):
             "reported_success": False,
         }
         await c.writeback.handle_unpromotable_result(task, result)
-        assert len(c.shared_state.baseline_attempts) == 1
-        attempt = c.shared_state.baseline_attempts[-1]
+        attempt = c.shared_state.last_baseline
         assert attempt["status"] == "failed"
         assert attempt["decision"] == "no_promote"
         assert attempt["error_class"] == "no_report"
@@ -1904,8 +1842,7 @@ async def test_handle_unpromotable_records_for_non_baseline_kinds(session_dir):
         )
         assert c.shared_state.baseline_failure_streak == 0
         assert c.shared_state.stop_reason in ("", None)
-        assert len(c.shared_state.explore_attempts) == 1
-        assert c.shared_state.explore_attempts[-1]["status"] == "failed"
+        assert c.shared_state.last_baseline == {}
         assert len(c.shared_state.last_action_failures) == 1
         fail = c.shared_state.last_action_failures[-1]
         assert fail["action"] == "explore"
@@ -1963,11 +1900,8 @@ async def test_handle_unpromotable_roofline_increments_failure_streak(
                 _mk_task("roofline", task_id),
                 result,
             )
-        # (a) audit entry exists.
-        assert len(c.shared_state.roofline_attempts) == 1
-        attempt = c.shared_state.roofline_attempts[-1]
-        assert attempt["status"] == "failed"
-        assert attempt["decision"] == "no_promote"
+        # (a) the failure is on the global log.
+        assert [row["action"] for row in c.shared_state.last_action_failures] == ["roofline"]
         # (b) failure streak +1.
         assert c.shared_state.roofline_failure_streak == streak_before + 1, (
             "roofline_failure_streak silently stays at 0; LLM + operators have "
@@ -2216,30 +2150,10 @@ async def test_handle_unpromotable_baseline_records_fingerprint(session_dir):
             "error": "benchmark_report.json missing",
         }
         await c.writeback.handle_unpromotable_result(task, result)
-        attempt = c.shared_state.baseline_attempts[-1]
+        attempt = c.shared_state.last_baseline
         assert attempt["status"] == "failed"
         fp = attempt["extras"]["fingerprint"]
         assert fp["benchmark_script"] == "dsr1_fp8_mi300x.sh"
-    finally:
-        await c.stop()
-
-
-@pytest.mark.asyncio
-async def test_handle_unpromotable_non_baseline_omits_fingerprint(session_dir):
-    c = Coordinator(session_dir, backends=_silent_backends())
-    _mute_action_scoring(c)
-    try:
-        task = Task(
-            task_id="t-ex-fail",
-            kind="explore",
-            state="queued",
-            params={"benchmark_script": "sglang_mi300x.sh"},
-            idempotency_key="idem-ex",
-        )
-        await c.writeback.handle_unpromotable_result(task, {"status": "failed"})
-        attempt = c.shared_state.explore_attempts[-1]
-        assert attempt["status"] == "failed"
-        assert "fingerprint" not in attempt["extras"]
     finally:
         await c.stop()
 

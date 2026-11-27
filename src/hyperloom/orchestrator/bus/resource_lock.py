@@ -57,28 +57,6 @@ LANE_CONFLICTS: dict[str, frozenset[str]] = {
 }
 
 
-#: The lane an open bring-up round holds for as long as it is open.
-#:
-#: Deliberately absent from :data:`KNOWN_LANES`, because no task may request it.
-#: A round is held by a task that still has to be dispatchable while the round
-#: stands, and every serving lane mutexes against ``gpu_research_lane``, so a
-#: round holding a serving lane under a holder id of its own would deny its own
-#: holder the dispatch the round exists to cover. ``RoundStore`` writes and
-#: drops this row inside the transaction that opens, renews and settles the
-#: round; capacity readers and the breakdown lane timeline read it like any
-#: other ownership row.
-BRINGUP_ROUND_LANE = "bringup_round"
-
-#: Recorded on a round's lane row in place of a pid. The round's holder is a
-#: task, not this process, and only the task registry can prove a task's process
-#: dead. The dead-holder pass skips non-positive pids, leaving these rows to
-#: explicit round settlement.
-ROUND_LEASE_PID = 0
-
-#: Recorded in the lane row's ``action`` column.
-_ROUND_LEASE_ACTION = "bringup_round"
-
-
 def _lease_iso(unix_ts: float) -> str:
     """Render unix seconds the way the lease table's timestamps compare.
 
@@ -91,61 +69,6 @@ def _lease_iso(unix_ts: float) -> str:
         str: A fixed-width UTC ISO-8601 timestamp.
     """
     return datetime.fromtimestamp(float(unix_ts), tz=timezone.utc).isoformat(timespec="microseconds")
-
-
-def hold_round_lane(
-    cur: sqlite3.Cursor,
-    *,
-    round_id: str,
-    holder_task_id: str,
-    expires_unix: float,
-    now_unix: float,
-) -> None:
-    """Write the lane row an open round holds, inside the caller's transaction.
-
-    Keyed on ``(BRINGUP_ROUND_LANE, round_id)`` and idempotent, so the one call
-    serves the acquire, every renewal, and a handoff that moves the round to a
-    new holder. ``acquired_at`` survives a renewal; only the holder and the
-    expiry move.
-
-    Args:
-        cur: Cursor of the transaction writing the round row, so the round and
-            its lane land together or not at all.
-        round_id: The round holding the lane; also the lease's holder id.
-        holder_task_id: The task the round is held by right now.
-        expires_unix: When the round's lease runs out.
-        now_unix: Current wall time.
-    """
-    stamp = _lease_iso(now_unix)
-    cur.execute(
-        "INSERT INTO leases(lane, holder_id, task_id, action, pid,"
-        "  acquired_at, expires_at) VALUES (?,?,?,?,?,?,?)"
-        " ON CONFLICT(lane, holder_id) DO UPDATE SET"
-        "  task_id = excluded.task_id,"
-        "  expires_at = excluded.expires_at",
-        (
-            BRINGUP_ROUND_LANE,
-            round_id,
-            holder_task_id,
-            _ROUND_LEASE_ACTION,
-            ROUND_LEASE_PID,
-            stamp,
-            _lease_iso(expires_unix),
-        ),
-    )
-
-
-def drop_round_lane(cur: sqlite3.Cursor, *, round_id: str) -> None:
-    """Release the lane row a round held, inside the caller's transaction.
-
-    Args:
-        cur: Cursor of the transaction settling the round.
-        round_id: The round whose lane is released.
-    """
-    cur.execute(
-        "DELETE FROM leases WHERE lane = ? AND holder_id = ?",
-        (BRINGUP_ROUND_LANE, round_id),
-    )
 
 
 def _expand_lanes(lanes: list[str]) -> list[str]:
@@ -309,9 +232,7 @@ def _unverifiable_holders(cur: sqlite3.Cursor, *, scope: str) -> list[dict]:
             "SELECT leases.lane AS lane, leases.holder_id AS holder_id, leases.task_id AS task_id, "
             "leases.owner_scope AS owner_scope, tasks.state AS holder_state, tasks.history AS holder_history, "
             "(SELECT 1 FROM gpu_leases WHERE gpu_leases.task_id = leases.task_id LIMIT 1) AS holds_gpu "
-            "FROM leases LEFT JOIN tasks ON tasks.task_id = leases.task_id "
-            "WHERE leases.lane != ?",
-            (BRINGUP_ROUND_LANE,),
+            "FROM leases LEFT JOIN tasks ON tasks.task_id = leases.task_id"
         )
     ]
     stuck: list[dict] = []
@@ -596,18 +517,14 @@ class SqliteLeaseBackend:
 
 
 __all__ = [
-    "BRINGUP_ROUND_LANE",
     "CLEANUP_CONFIRMED_KEY",
     "CLEANUP_TREE_PGID_KEY",
     "DEFAULT_LANE_CAPACITIES",
     "KNOWN_LANES",
     "LANE_CONFLICTS",
-    "ROUND_LEASE_PID",
     "UNVERIFIABLE_FOREIGN_SCOPE",
     "UNVERIFIABLE_CONFIRMED_BUT_HELD",
     "UNVERIFIABLE_CLEANUP_UNCONFIRMED",
     "Lease",
     "SqliteLeaseBackend",
-    "drop_round_lane",
-    "hold_round_lane",
 ]

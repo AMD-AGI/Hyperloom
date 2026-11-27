@@ -22,21 +22,6 @@ class _ExploreLift(NamedTuple):
     last_lifted: dict[str, Any] | None
 
 
-def _explore_audit_extras(result: Mapping[str, Any]) -> dict[str, Any]:
-    winners = result.get("winners") or []
-    best_winner = result.get("best_variant")
-    return {
-        "round_id": str(result.get("round_id") or ""),
-        "winners_count": (len(winners) if isinstance(winners, list) else 0),
-        "losers_count": len(result.get("losers") or []),
-        "skipped_dup_count": len(result.get("skipped_dup") or []),
-        "best_variant_name": (best_winner.get("name") if isinstance(best_winner, dict) else None),
-        "best_gain_pct_vs_base": result.get("best_gain_pct"),
-        "output_throughput": result.get("output_throughput"),
-        "explore_grid_exhausted": bool(result.get("explore_grid_exhausted")),
-    }
-
-
 class ExplorePromotionMixin:
     """Promoting an explore sweep's outcome."""
 
@@ -80,15 +65,12 @@ class ExplorePromotionMixin:
                 watermark_reason="explore_keep_watermark",
             )
         if lift.promoted:
-            outcome.audit_decision = "promoted"
             outcome.verdict = Verdict.ADOPTED
         elif winners and not is_revalidation_task:
-            outcome.audit_decision = "no_promote"
             outcome.verdict = Verdict.REFUSED
         else:
-            outcome.audit_decision = "discarded"
             outcome.verdict = Verdict.RECORDED if is_revalidation_task else Verdict.REVERTED
-        outcome.audit_extras = _explore_audit_extras(result)
+        outcome.changed = True
 
     def _record_framework_lever_attributions(self, result: Mapping[str, Any]) -> None:
         for attribution in result.get("framework_lever_attributions") or []:

@@ -30,9 +30,8 @@ from ..actions.stop_attribution import stopped_by_the_run_class
 from ..bringup import ARGV_INVALID
 from ..bus.message_bus import Message
 from ..phases.machine_state import PHASE_ENABLEMENT, PHASE_PRELUDE
-from ..state._shared_state.attempt_audit import _AUDIT_ACTIONS
 from ..state.failure_evidence import ROUND_NONZERO_INVALID_MEASUREMENT
-from ..state.shared_state import ActionAttempt
+from ..state.shared_state import BaselineAttempt
 from ..state.round_store import ABANDONED, FAILED
 from ..state.task_registry import Task
 from ._baseline_promotion import _adopt_eval_trigger, _preserves_measured_eval_trigger
@@ -255,7 +254,7 @@ class BaselineFailureMixin:
         task: Task,
         result: dict[str, Any] | None,
     ) -> None:
-        """Record a failed / unpromotable task result into SharedState: append to last_action_failures (+ a failed attempts row for _AUDIT_ACTIONS) and apply the baseline failure_streak/stop_reason gates.
+        """Record a failed / unpromotable task result into SharedState: append to last_action_failures (and, for a baseline, replace last_baseline) and apply the baseline failure_streak/stop_reason gates.
 
         Args:
             task: The failed/unpromotable task.
@@ -265,21 +264,15 @@ class BaselineFailureMixin:
         result_payload = dict(result or {})
         if task.kind == "explore" and bool((task.params or {}).get("geak_fallback")):
             self._close_failed_geak_revalidation(result_payload)
-        # Per-action audit (failed attempt) for the in-scope kinds.
-        if task.kind in _AUDIT_ACTIONS:
-            audit_extras: dict[str, Any] = {}
-            # Stamp baseline-params fingerprint for the self-loop denial helper.
-            if task.kind == "baseline":
-                audit_extras["fingerprint"] = self.baseline_params_fingerprint(task.params)
-            self.shared_state.record_action_attempt(
-                action=task.kind,
-                attempt=ActionAttempt(
+        if task.kind == "baseline":
+            self.shared_state.record_baseline_attempt(
+                BaselineAttempt(
                     task_id=task.task_id,
                     status="failed",
                     decision="no_promote",
                     result=result_payload,
-                    extras=audit_extras,
-                ),
+                    extras={"fingerprint": self.baseline_params_fingerprint(task.params)},
+                )
             )
         # Global rolling failure log (every kind, including kernel_agent-owned).
         self.shared_state.record_action_failure(

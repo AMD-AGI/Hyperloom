@@ -19,11 +19,7 @@ from hyperloom.orchestrator.bringup.reconcile import (
     Reconciler,
     ReconcileStores,
 )
-from hyperloom.orchestrator.bus.resource_lock import (
-    BRINGUP_ROUND_LANE,
-    SqliteLeaseBackend,
-    drop_round_lane,
-)
+from hyperloom.orchestrator.bus.resource_lock import SqliteLeaseBackend
 from hyperloom.orchestrator.bus.storage.connection import SqliteConnection
 from hyperloom.orchestrator.policy.projection import ResourceFacts
 from hyperloom.orchestrator.state.round_store import (
@@ -364,22 +360,6 @@ async def test_a_rule_that_raises_a_bug_fails_the_pass(db):
 
 
 @pytest.mark.asyncio
-async def test_a_round_whose_lane_another_pass_took_is_settled_here(db):
-    """Whoever swept the lease, the round it belonged to still ends."""
-    rec, rounds, tasks, _ = _build(db)
-    await _open_round(rounds, tasks, holder="spec-1", lease=_LEASE)
-    async with db.transaction() as cur:
-        drop_round_lane(cur, round_id="round-spec-1")
-
-    report = await rec.run(_NOW + 1.0)
-
-    assert report.settled == []
-    settled = await rounds.get("round-spec-1")
-    assert settled.state == OPEN
-    assert settled.expires_unix > _NOW + 1.0, "the round's own column never said it had run out"
-
-
-@pytest.mark.asyncio
 async def test_a_revalidation_window_whose_task_is_terminal_is_closed(db):
     """A window nobody will close holds the guard on the phase exit."""
     state = _State()
@@ -432,13 +412,10 @@ async def test_the_pass_sweeps_the_leases_and_reports_what_it_swept(db):
 
     assert (report.leases_reaped, report.settled) == (0, [])
     assert rec.last_report is report
-    # The round is still inside its lease, so it still holds its lane and the
-    # sweep left it alone.
     lanes = await db.fetchall("SELECT lane, holder_id FROM leases")
-    assert {(r["lane"], r["holder_id"]) for r in lanes} == {
-        (BRINGUP_ROUND_LANE, "round-spec-1"),
-        ("server_lifecycle", "h1"),
-    }
+    assert {(r["lane"], r["holder_id"]) for r in lanes} == {("server_lifecycle", "h1")}
+    # The round is still inside its lease, so the sweep left it alone.
+    assert (await rounds.get("round-spec-1")).state == OPEN
 
 
 async def _wedge_round_with_lane_rows(db, rounds, tasks, *, cleanup_confirmed: bool) -> str:
@@ -496,7 +473,6 @@ async def test_a_round_whose_holder_left_cleanup_unconfirmed_keeps_everything(db
     assert report.leases_reaped == 0
     assert (report.handed_off, report.settled) == ([], [])
     assert {r["lane"] for r in await db.fetchall("SELECT lane FROM leases")} == {
-        BRINGUP_ROUND_LANE,
         "server_lifecycle",
         "benchmark_lane",
         "profile_lane",

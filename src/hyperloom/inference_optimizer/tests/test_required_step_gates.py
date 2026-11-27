@@ -158,7 +158,6 @@ def test_report_allowed_when_hot_reusable_kernels_untried(session_dir):
         ],
     )
     coord.shared_state.last_trace_analyze["roofline_snapshot_id"] = 1
-    coord.shared_state.explore_attempts = [{"variant_name": "x"}]
     coord.shared_state.phase = "CLOSE"
     assert coord.dispatcher.admission_denial_for_action("report") is None
     assert kd.untried_hot_reusable_kernels(coord.shared_state)

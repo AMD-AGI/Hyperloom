@@ -5,6 +5,8 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
 
 from hyperloom.inference_optimizer.session.paths import asset_prompt_references_dir
@@ -49,6 +51,7 @@ def file_reader(refs_dir):
 
     return ContextProvider(
         shared_state=None,
+        session_dir=Path("/nonexistent-session"),
         inbox_reader=lambda since_seq: "",
         recent_outcomes_reader=lambda top_k: "",
         running_tasks_reader=lambda: "",

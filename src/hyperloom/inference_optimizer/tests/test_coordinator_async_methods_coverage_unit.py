@@ -283,7 +283,6 @@ async def test_promote_roofline_clears_the_failure_streak(coord: Coordinator) ->
     for status in ("succeeded", "recovered"):
         await coord.writeback.promote_to_shared_state("roofline", {"status": status})
         assert coord.shared_state.roofline_failure_streak == 0
-        assert coord.shared_state.last_roofline["decision"] == "promoted"
 
 
 @pytest.mark.asyncio

@@ -14,6 +14,7 @@ from hyperloom_common.coerce import first_text
 
 from ..collaborator import CoordinatorCollaborator
 from ..state.failure_evidence import UNMEASURED_OUTCOMES, failure_from_variant_outcome
+from ..state.failure_packets import write_failure
 
 if TYPE_CHECKING:
     from ..state.task_registry import Task
@@ -291,7 +292,7 @@ class GapRefreshCollaborator(CoordinatorCollaborator):
             if str(vo.get("outcome") or "").upper() not in UNMEASURED_OUTCOMES:
                 continue
             fe = failure_from_variant_outcome(task_id=task_id, round_id=round_id, vo=vo)
-            self.shared_state.record_failure_evidence(fe)
+            write_failure(self.session_dir, fe)
             self.shared_state.record_action_failure(
                 action="explore",
                 task_id=task_id,

@@ -538,7 +538,6 @@ def _round_update(round_no: int, fingerprint: str, name: str) -> dict:
     """One round's worth of executor ledger writes."""
     return {
         "tested": {fingerprint: {"name": name, "outcome": "REVERT"}},
-        "rejected": [{"fingerprint": fingerprint, "name": name, "reason": "not_keep"}],
         "last_round": {"round_id": f"explore-{round_no:03d}"},
     }
 
@@ -551,7 +550,6 @@ def test_apply_explore_search_update_accumulates_across_rounds():
 
     search = state.explore_search
     assert set(search["tested"]) == {"aa" * 8, "bb" * 8}
-    assert {r["fingerprint"] for r in search["rejected"]} == {"aa" * 8, "bb" * 8}
 
 
 def test_apply_explore_search_update_remeasured_fingerprint_replaces_its_row():
@@ -559,27 +557,24 @@ def test_apply_explore_search_update_remeasured_fingerprint_replaces_its_row():
     state.apply_explore_search_update(_round_update(1, "aa" * 8, "a"))
     state.apply_explore_search_update(_round_update(2, "aa" * 8, "a"))
 
-    assert state.explore_search["tested"]["aa" * 8]["outcome"] == "REVERT"
-    assert len(state.explore_search["rejected"]) == 1
+    assert state.explore_search["tested"] == {"aa" * 8: {"name": "a", "outcome": "REVERT", "cycle": 0}}
 
 
-def test_a_fingerprint_measured_keep_leaves_rejected():
+def test_a_fingerprint_measured_keep_replaces_its_earlier_verdict():
     """A re-proposed variant that KEEPs is no longer a rejection; the rows of other fingerprints stay."""
     state = SharedState()
-    state.explore_search = {
-        "rejected": [{"fingerprint": "ee" * 8, "name": "warm", "reason": "warm_recipe_what_failed"}]
-    }
     state.apply_explore_search_update(_round_update(1, "aa" * 8, "a"))
     state.apply_explore_search_update(
         {
             "tested": {"aa" * 8: {"name": "a", "outcome": "KEEP"}, "bb" * 8: {"name": "b", "outcome": "REVERT"}},
-            "rejected": [{"fingerprint": "bb" * 8, "name": "b", "reason": "not_keep"}],
             "last_round": {"round_id": "explore-002"},
         }
     )
 
-    assert state.explore_search["tested"]["aa" * 8]["outcome"] == "KEEP"
-    assert {r["fingerprint"] for r in state.explore_search["rejected"]} == {"ee" * 8, "bb" * 8}
+    assert {fp: row["outcome"] for fp, row in state.explore_search["tested"].items()} == {
+        "aa" * 8: "KEEP",
+        "bb" * 8: "REVERT",
+    }
 
 
 def test_apply_explore_search_update_advances_the_cursor_per_round():
@@ -592,16 +587,6 @@ def test_apply_explore_search_update_advances_the_cursor_per_round():
     third["tested"].update({"cc" * 8: {"name": "c"}, "dd" * 8: {"name": "d"}})
     state.apply_explore_search_update(third)
     assert state.explore_search["cursor"] == 2
-
-
-def test_warm_history_rejected_rows_survive_the_first_round():
-    """Warm-start pre-fills ``rejected`` so the dedup gate denies re-tests; a round must not wipe it."""
-    state = SharedState()
-    state.explore_search = {
-        "rejected": [{"fingerprint": "ee" * 8, "name": "warm", "reason": "warm_recipe_what_failed"}]
-    }
-    state.apply_explore_search_update(_round_update(1, "aa" * 8, "a"))
-    assert {r["fingerprint"] for r in state.explore_search["rejected"]} == {"ee" * 8, "aa" * 8}
 
 
 def test_observed_launch_after_drops_only_what_the_stack_changed():

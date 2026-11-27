@@ -29,7 +29,7 @@ from hyperloom_common.coerce import to_str_list, to_unix
 from hyperloom.common.env_safety import redact_secret_values
 from hyperloom.common.prompt_safety import flatten_for_prompt as _flatten_for_inbox
 
-from ..state.task_registry import Task
+from ..state.task_registry import Task, TaskOutcome
 from hyperloom.inference_optimizer.session.session_paths import runs_dir
 from ..collaborator import ORCHESTRATION_AGENT, CoordinatorCollaborator
 import logging as _logging
@@ -46,19 +46,8 @@ _RECENT_OUTCOMES_VARIANT_ROWS = 12
 _RECENT_OUTCOMES_LINE_CAP = 120
 
 # Result keys surfaced in delegated_result inbox line; first match wins per group.
-_OUTCOME_GAIN_KEYS: tuple[str, ...] = (
-    "validated_gain_pct",
-    "gain_pct",
-    "predicted_gain_pct",
-    "delta_pct",
-)
-_OUTCOME_TPUT_KEYS: tuple[str, ...] = (
-    "tokens_per_s",
-    "tput",
-    "throughput",
-    "tput_tok_s",
-)
-_OUTCOME_STATUS_KEYS: tuple[str, ...] = ("status", "verdict", "outcome", "runner_status")
+_OUTCOME_GAIN_KEYS: tuple[str, ...] = ("gain_pct", "delta_pct")
+_OUTCOME_STATUS_KEYS: tuple[str, ...] = ("status", "runner_status")
 # Notes rendered per inbox line.
 _OUTCOME_NOTES_MAX: int = 3
 # A skip detail names the twin or the dead variant first and its cause after; this keeps the head of the cause.
@@ -155,21 +144,28 @@ def _variant_skip_rows(result: dict[str, Any], max_variant_rows: int) -> list[st
     return rows
 
 
-def _format_delegated_result(head: str, payload: dict[str, Any], max_variant_rows: int) -> str:
-    """Render a delegated_result entry: one header line plus a row per unmeasured variant."""
-    raw_result = payload.get("result")
-    result: dict[str, Any] = raw_result if isinstance(raw_result, dict) else {}
+def _announced_task_ids(messages: list["Message"]) -> list[str]:
+    """The tasks whose results ``messages`` announce."""
+    return [str(m.payload.get("task_id") or "") for m in messages if m.topic == "delegated_result"]
+
+
+def _format_delegated_result(
+    head: str, payload: dict[str, Any], outcome: TaskOutcome | None, max_variant_rows: int
+) -> str:
+    """Render a delegated_result entry: one header line plus a row per unmeasured variant.
+
+    The event names the task; what the task returned is ``outcome``, read from its row.
+    """
+    result: dict[str, Any] = outcome.result if outcome is not None else {}
     # Only a specialist result carries this key, so its presence is the test.
     done: dict[str, Any] = result.get("specialist_done") or {}
     parts = [head, f"kind={payload.get('kind')!r}", f"state={payload.get('state')!r}"]
-    for label, value, quoted in (
-        ("status", _first_present(result, _OUTCOME_STATUS_KEYS), True),
-        ("kept", result.get("kept"), True),
-        ("gain", _first_present(result, _OUTCOME_GAIN_KEYS), False),
-        ("tput", _first_present(result, _OUTCOME_TPUT_KEYS), False),
-    ):
-        if value is not None:
-            parts.append(f"{label}={value!r}" if quoted else f"{label}={value}")
+    status = _first_present(result, _OUTCOME_STATUS_KEYS)
+    if status is not None:
+        parts.append(f"status={status!r}")
+    gain = _first_present(result, _OUTCOME_GAIN_KEYS)
+    if gain is not None:
+        parts.append(f"gain={gain}")
     summary = str(done.get("summary") or "").strip()
     if summary:
         parts.append(f"summary={summary[:400]!r}")
@@ -181,7 +177,7 @@ def _format_delegated_result(head: str, payload: dict[str, Any], max_variant_row
         if items:
             parts.append(f"{label}={len(items)}")
     # Executors that never raise report the failure inside the result envelope, leaving the top-level error None.
-    error = payload.get("error") or result.get("error")
+    error = (outcome.error if outcome is not None else None) or result.get("error")
     if error:
         parts.append(f"error={str(error)[:200]!r}")
     notes = [str(n) for n in result.get("notes") or () if n]
@@ -196,8 +192,11 @@ def _format_delegated_result(head: str, payload: dict[str, Any], max_variant_row
     )
 
 
-def _format_inbox_event(m: "Message", *, max_variant_rows: int = 3) -> str:
-    """Render one inbox ``Message`` as a compact, high-signal line."""
+def _format_inbox_event(m: "Message", outcomes: dict[str, TaskOutcome], *, max_variant_rows: int = 3) -> str:
+    """Render one inbox ``Message`` as a compact, high-signal line.
+
+    ``outcomes`` holds what each task the messages announce returned, by task id.
+    """
     topic = (m.topic or "").strip()
     payload = m.payload if isinstance(m.payload, dict) else {}
     # Canonical inbox header ordering that downstream parsers anchor on.
@@ -205,7 +204,8 @@ def _format_inbox_event(m: "Message", *, max_variant_rows: int = 3) -> str:
     head = f"seq={m.seq} {msg_id}from={m.from_agent} topic={topic}"
 
     if topic == "delegated_result":
-        return _format_delegated_result(head, payload, max_variant_rows)
+        outcome = outcomes.get(str(payload.get("task_id") or ""))
+        return _format_delegated_result(head, payload, outcome, max_variant_rows)
     if topic == "observation" and payload.get("kind") is not None:
         return f"{head} kind={payload.get('kind')!r} payload={payload}"
     return f"{head} payload={payload}"
@@ -341,6 +341,7 @@ class ConversationCollaborator(CoordinatorCollaborator):
 
         provider = ContextProvider(
             shared_state=self.shared_state,
+            session_dir=self.session_dir,
             inbox_reader=self._context_inbox_reader,
             recent_outcomes_reader=self._context_recent_outcomes_reader,
             running_tasks_reader=self._context_running_tasks_reader,
@@ -371,8 +372,8 @@ class ConversationCollaborator(CoordinatorCollaborator):
         if not msgs:
             return "(no inbox events)"
 
-        lines = [_format_inbox_event(m) for m in msgs]
-        return "\n".join(lines)
+        outcomes = self.tasks.outcomes_sync(_announced_task_ids(msgs))
+        return "\n".join(_format_inbox_event(m, outcomes) for m in msgs)
 
     def _context_recent_outcomes_reader(self, top_k: int = 8) -> str:
         """Synchronous projection of recent action outcomes."""
@@ -384,8 +385,8 @@ class ConversationCollaborator(CoordinatorCollaborator):
         msgs = newest_first[::-1]
 
         header = "=== Recent action outcomes (newest last) ==="
-        body_lines: list[str] = []
-        body_lines.extend(_format_inbox_event(m, max_variant_rows=_RECENT_OUTCOMES_VARIANT_ROWS) for m in msgs)
+        outcomes = self.tasks.outcomes_sync(_announced_task_ids(msgs))
+        body_lines = [_format_inbox_event(m, outcomes, max_variant_rows=_RECENT_OUTCOMES_VARIANT_ROWS) for m in msgs]
         rendered = "\n".join(body_lines).splitlines()
         if len(rendered) > _RECENT_OUTCOMES_LINE_CAP:
             rendered = rendered[-_RECENT_OUTCOMES_LINE_CAP:]
@@ -565,7 +566,8 @@ class ConversationCollaborator(CoordinatorCollaborator):
         """
         cursor = await self.cursors.load(ORCHESTRATION_AGENT)
         unread = await self.bus.replay_for(ORCHESTRATION_AGENT, after_seq=cursor.last_processed_seq)
-        inbox_lines = _fit_to_budget([f"  {_format_inbox_event(m)}" for m in unread], _INBOX_PROMPT_CHARS)
+        outcomes = await self.tasks.outcomes(_announced_task_ids(unread))
+        inbox_lines = _fit_to_budget([f"  {_format_inbox_event(m, outcomes)}" for m in unread], _INBOX_PROMPT_CHARS)
         read = unread[: len(inbox_lines)]
         last_seq = cursor.last_processed_seq
         if read:
@@ -776,8 +778,7 @@ class ConversationCollaborator(CoordinatorCollaborator):
         if cycle < 1:
             return ""
         stable = keep / 2.0
-        search = state.explore_search
-        entries = [*(search.get("tested") or {}).values(), *(search.get("rejected") or [])]
+        entries = list((state.explore_search.get("tested") or {}).values())
         above_bar: list[tuple[str, float]] = []
         below_bar: list[tuple[str, float]] = []
         for e in entries:

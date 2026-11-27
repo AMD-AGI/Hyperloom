@@ -17,7 +17,7 @@ from hyperloom.orchestrator.actions.executors.report import (
     _partition_benign_lines,
 )
 from hyperloom.orchestrator.state.failure_evidence import classify_root_cause_type
-from hyperloom.orchestrator.state.shared_state import ActionAttempt, SharedState
+from hyperloom.orchestrator.state.shared_state import BaselineAttempt, SharedState
 
 _BENIGN_WARN = (
     "[WARN] Error: [Errno 2] No such file or directory: '/app/.../transformers/models/cohere2/modeling_cohere2.py'"
@@ -58,8 +58,8 @@ def _failed_state(
     }
     if workspace is not None:
         result["workspace"] = workspace
-    state.record_action_attempt(
-        action="baseline", attempt=ActionAttempt(task_id=task_id, status="failed", decision="no_promote", result=result)
+    state.record_baseline_attempt(
+        BaselineAttempt(task_id=task_id, status="failed", decision="no_promote", result=result, extras={})
     )
     state.record_action_failure(
         action="baseline",
@@ -266,14 +266,14 @@ def test_failure_summary_picks_latest_failed_attempt():
         task_id="attempt-old",
     )
     # A later, more severe attempt.
-    state.record_action_attempt(
-        action="baseline",
-        attempt=ActionAttempt(
+    state.record_baseline_attempt(
+        BaselineAttempt(
             task_id="attempt-new",
             status="failed",
             decision="no_promote",
             result={"status": "failed", "error_class": "server_init_dead", "error": _SERVER_LOG_OOM},
-        ),
+            extras={},
+        )
     )
     fs = _build_failure_summary(state)
     assert fs is not None
@@ -282,7 +282,7 @@ def test_failure_summary_picks_latest_failed_attempt():
 
 
 def test_failure_summary_falls_back_to_last_action_failures():
-    """When no baseline audit row exists, use the global failure log row."""
+    """When the latest baseline record is not a failure, use the global failure log row."""
 
     state = SharedState()
     state.set_stop_reason("baseline_failed")
@@ -291,7 +291,7 @@ def test_failure_summary_falls_back_to_last_action_failures():
         task_id="b1",
         result={"status": "failed", "error_class": "server_init_dead", "error": _SERVER_LOG_OOM},
     )
-    assert not state.baseline_attempts
+    assert not state.last_baseline
     fs = _build_failure_summary(state)
     assert fs is not None
     assert fs["root_cause_type"] == "oom"

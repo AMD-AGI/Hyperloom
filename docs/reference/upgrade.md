@@ -384,13 +384,12 @@ In `state.json`:
   `include_patches`; it was `true` on every row. A row names a realized diff
   by its canonical path, as it already named a delivered patch, and the
   `host_origin.sources` of the staged provenance row carries the same path.
-* The audit rows (`last_roofline`, `last_profile`, `last_baseline` and their
-  `*_attempts` lists) no longer use the decisions `skipped` (roofline,
-  profile) or `discarded` (roofline, baseline), and a baseline row's
-  `anchor_held.reason` is never `no_measurement`. None could be written: a
-  roofline settles `succeeded`, `recovered` or `failed`, a failed one is not
-  promoted, and a baseline is promoted only with a positive throughput. A
-  failed roofline is still counted in `roofline_failure_streak`.
+* `last_baseline` never has the decision `discarded`, and its
+  `anchor_held.reason` is never `no_measurement`. Neither could be written: a
+  baseline is promoted only with a positive throughput. (The roofline and
+  profile rows that could not be `skipped` or `discarded` either are removed
+  altogether; see the section on a task's result below.) A failed roofline is
+  still counted in `roofline_failure_streak`.
 
 In `storage/coordinator.db`:
 
@@ -521,9 +520,10 @@ Six behaviours change:
   lease refreshes its row. 1.2.x counted the task's own row against the lane
   and left it queued on every pass. Two tasks that need the same lane, or
   lanes that exclude each other, still never run together.
-* A variant leaves `explore_search.rejected` when a round measures it KEEP,
-  including a stack-revalidation round. 1.2.x removed it when the winner was
-  recorded in `explore_search.accepted`, which a revalidation round skipped.
+* `explore_search.rejected` is removed as well (see the section on a task's
+  result below), so a variant that a later round measures KEEP has one row,
+  its `tested` row, and that row says KEEP. In 1.2.x its `rejected` row
+  stayed behind whenever the KEEP came from a stack-revalidation round.
 
 The log no longer prints `depth: aggregated N new research reference(s) into
 seen-set`, and `specialist findings harvested` reports `hints_added` only.
@@ -639,8 +639,9 @@ turn; no session state changes.
 * `agents/orchestration/mcp_setup.json` lists eight context tools in
   `allowed_tools` and `mcp_tools`: `get_gaps`, `get_runtime_findings`,
   `get_inbox`, `get_recent_outcomes`, `get_running_tasks`, `read_reference`,
-  `get_failure` and `get_variant_failures`. Those eight, their arguments and
-  their answers are unchanged.
+  `get_failure` and `get_variant_failures`. Those eight and their arguments
+  are unchanged; the section on a task's result below lists what four of them
+  answer differently.
 * `show_analysis_md` replaced each embedded base64 image of `analysis.md` with
   a placeholder. The file itself holds the images as TraceLens wrote them.
 * `last_trace_analyze` in `state.json` no longer has `analysis_md_text`, the
@@ -687,9 +688,10 @@ except a `proposal` the Critic had not ruled on yet, and every `succeeded` or
 
 The 5,000 counted events of every topic, so in a session that wrote more, the
 deleted rows included `delegated_result`, the record of what each task
-returned. `--resume-from` reads those rows to replay a KEEP whose promotion a
-crash interrupted, and `reports/final.json` counts them: such a session
-resumed without its earlier results and reported only its newest events.
+returned. In 1.2.x `--resume-from` read those rows to replay a KEEP whose
+promotion a crash interrupted, and `reports/final.json` counts them: such a
+session resumed without its earlier results and reported only its newest
+events.
 Deleting a finished task row also released its idempotency key, so the same
 action could have been queued a second time.
 
@@ -729,6 +731,147 @@ action could have been queued a second time.
   kernel request holds its lanes under its message id) ends `the holder has no
   task row, so nothing can attest it ended`. It ended `the holder's task row
   no longer exists, ...`, which described a row the pruning had deleted.
+
+### Required: a task's result is kept once, on its task row
+
+`hyperloom optimize` wrote what a finished task returned to several places:
+the task's row, the `delegated_result` event that announces it, and for some
+actions one or two lists in `state.json`. It now writes it to the task row,
+and each of the other places either goes or keeps only what the row does not
+hold. Anything that read a removed copy reads the row.
+
+In `storage/coordinator.db`:
+
+* The payload of a `delegated_result` row of `events` is
+  `{"task_id", "kind", "state"}`. It no longer carries `result` or `error`.
+  Both are in the task's row, in the newest entry of `tasks.history` that has
+  `evidence.outcome`: `outcome.result`, `outcome.error` and
+  `outcome.error_class`, written before the event:
+
+  ```bash
+  sqlite3 "$SESSION_DIR/storage/coordinator.db" "
+    SELECT e.seq, json_extract(e.payload, '\$.kind'), json_extract(h.value, '\$.evidence.outcome.result')
+    FROM events e JOIN tasks t ON t.task_id = json_extract(e.payload, '\$.task_id'), json_each(t.history) h
+    WHERE e.topic = 'delegated_result' AND json_extract(h.value, '\$.evidence.outcome') IS NOT NULL
+    ORDER BY e.seq"
+  ```
+
+  The event is still written once per booked result, in the same order, and a
+  task whose attempt was retried instead of booked still has no event.
+  `hyperloom session events` prints the same `delegated:<kind>:<state>` counts.
+* The event's copy of an authored patch's result carried `reauthor_attempt`.
+  Read `params.reauthor_attempt` of the task row.
+* The database grows more slowly: in one recorded session of 21 hours the
+  result copies were 3.5 MB of a 19.2 MB database.
+* An open bring-up round no longer holds a row of `leases` under the lane
+  `bringup_round`. The round, its holder and its expiry are in
+  `bringup_rounds`, as before. A database written by 1.2.x for a session that
+  stopped while a round was open still holds such a row, and `--resume-from`
+  refuses that session, naming the holder task with `lane='bringup_round'` and
+  `execution owner scope or PID is unobservable`. Once you have checked that
+  the task's processes are gone, `hyperloom recover --session-dir <session>
+  --confirm-stopped <task-id> --confirmation-reason <reason>` removes the row.
+
+In `state.json`:
+
+| Removed key | Read instead |
+|---|---|
+| `baseline_attempts` | `last_baseline` for the latest attempt and the decision on it; the rows of `tasks` with `kind = 'baseline'` for every attempt and what it returned; the baseline rows of `session_breakdown.json` for each attempt's decision. |
+| `last_profile`, `profile_attempts` | `last_profile_trace`, `last_profile_status` and `last_profile_args` for what the latest profile left; the `profile` rows of `tasks` for every attempt. |
+| `last_roofline`, `roofline_attempts` | `last_trace_analyze` and `roofline_snapshots` for what each roofline produced, `roofline_failure_streak` for failures in a row; the `roofline` rows of `tasks`. |
+| `last_explore`, `explore_attempts` | `explore_search.last_round` and `explore_search.tested` for what the rounds measured; the `explore` rows of `tasks`. |
+| `explore_search.rejected` | The rows of `explore_search.tested` whose `outcome` is not `KEEP`. Each rejected row was a shorter copy of its `tested` row. |
+| `warm_history_injected` | Nothing read it but the copy below. |
+| `failures` | The files `reports/failures/<failure_id>.json`, one per failed explore variant, which were written beside it. |
+
+`last_baseline` stays as it was, `extras.anchor_held` included: a result is
+announced before the write-back decides on it, so this is the only record of a
+re-baseline that measured and did not move the anchor. `last_action_failures`,
+`explore_search.last_round`, `gain_per_stack_entry`, `last_gemm_tuning` and
+`gemm_tuning_attempts` stay too.
+
+The rows of a warm recipe's `what_failed` are no longer copied into
+`explore_search.rejected` after the first baseline. They are still in
+`warm_start_context.do_not_repeat` and in the `avoid` line of the warm-start
+block. No check read the copies: a variant is answered without a launch from
+its `tested` row only.
+
+In `reports/`:
+
+* Each `delegated_result` entry of `highlights` in `final.json` has the
+  three-key payload above, and its `summary` is `kind=<kind> state=<state>`.
+  1.2.x embedded the whole result in `payload` and ended the summary with
+  `tput=` and `decision=`.
+* The stop report of a `baseline_failed` session (`failure_summary` in
+  `final.json`) is built from `last_baseline`, which holds the same fields as
+  the last row of the removed list.
+* The emergency `final.md`, written when CLOSE did not finish, has a `## Last
+  baseline attempt` section with the `last_baseline` bullet. It was `## Last
+  action attempts` with three bullets.
+* A failure packet that cannot be written to `reports/failures/` is now an
+  error: the booking of that explore round stops there, and the tick records
+  the exception in `state.json` `last_tick_exception` (stage `tick_body`) and
+  counts it in `crash_count`. 1.2.x logged it at debug level and kept the copy in
+  `state.json`.
+
+In `session_breakdown.json`, `outcome.stage_reached` of a session that ended in
+PRELUDE with no typed timeline event is derived from fewer keys: a session
+whose only roofline or profile failed reports the stage before it
+(`warm_replay` or `baseline`), where 1.2.x reported `roofline` or `profile`
+from the failed attempt's row.
+
+What Orchestration reads changes with them:
+
+* A `delegated_result` line of the inbox, of `get_inbox` and of
+  `get_recent_outcomes` no longer prints `kept=` or `tput=`, and `status=` and
+  `gain=` are taken from `status` / `runner_status` and `gain_pct` /
+  `delta_pct` only. No executor writes the other names the line looked for
+  (`verdict`, `outcome`, `validated_gain_pct`, `predicted_gain_pct`,
+  `tokens_per_s`, `tput`, `throughput`, `tput_tok_s`, `kept`), so no recorded
+  line carried them. The rest of the line, and the failure and skip rows
+  under it, are the same text, read from the task row.
+* The `=== Shared session state ===` block has no `last_profile=`,
+  `last_explore=` or `attempts_history=` line. `last_baseline=` and
+  `last_gemm_tuning=` stay. The first line under `explore_search=` has no
+  `rejected=N`.
+* The `=== Acceptance threshold (advisory) ===` block lists each measured
+  variant once. 1.2.x listed every variant that was not a KEEP twice, and
+  listed the warm recipe's failed rows that carried a gain.
+* `get_failure` returns any packet of the session. 1.2.x answered `not in
+  memory` for all but the 30 newest and named the file to read.
+  `get_variant_failures` lists from the same files, newest first, up to
+  `top_k` (50 at most), so it also reaches past the 30 newest.
+* In a `=== Tasks in flight ===` line, `lanes=[...]` no longer lists
+  `bringup_round` for the task that holds an open round, and
+  `lease_expires_in_sec` counts down to the expiry of the task's own lanes.
+  The lanes an `extend_lease` observation reports as refreshed no longer
+  include it.
+* The failure-recovery reference (`read_reference('failure_recovery')`) and
+  the FAILURE RECOVERY block name `last_baseline` and `last_action_failures`,
+  where they named `last_<action>` and `<action>_attempts`.
+
+Four behaviours change on `--resume-from`:
+
+* A KEEP whose promotion a crash interrupted is adopted from the task row and
+  the `pending_integrate` sentinel alone. This is where 1.2.x looked second;
+  it first searched every `delegated_result` event for a `kept` result. The
+  row is written before the event and holds the same result, so the same
+  KEEPs are adopted, and one whose event was never written is too.
+* The resume no longer searches the events for a `kept` result that is not on
+  `optimization_stack`. That search re-tried on every start a KEEP the
+  promotion gate had refused, and after `--reset-state` replayed the KEEPs of
+  the discarded state onto the new one. The `resume_consistency` observation
+  therefore never carries `replayed_orphaned_keep`, `orphaned_keep`,
+  `orphaned_keep_discarded` or `orphaned_keep_replay_noop`, and no
+  `orphaned_keep` observation is sent.
+* A database error while the open integrate window is read ends the start-up
+  with that error, and no stop reason is set. 1.2.x ended it with `pending
+  integrate recovery is incomplete; refusing resume before measurement` and
+  `stop_reason=patch_recovery_incomplete`. Either way the window is left as
+  it was.
+* An authored patch whose outcome was booked while its phase had moved on is
+  recovered from the task rows of the booked results, not from the events'
+  copies; the same rows are recovered.
 
 ---
 

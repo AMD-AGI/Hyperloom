@@ -803,16 +803,8 @@ class DispatcherCollaborator(AdmissionMixin, DeadHolderAccountingMixin, Coordina
         if task.kind == "specialist" and result.state != "cancelled":
             if await self._coord.specialist_dispatch.maybe_auto_retry_specialist(task, result):
                 return
-        reauthor_attempt = task.params.get("reauthor_attempt")
-        if reauthor_attempt not in (None, ""):
-            result.result.setdefault("reauthor_attempt", reauthor_attempt)
-        announcement = {
-            "task_id": task.task_id,
-            "kind": task.kind,
-            "state": result.state,
-            "result": result.result,
-            "error": result.error,
-        }
+        # What the task returned is on its row, written before this; the event says it was booked.
+        announcement = {"task_id": task.task_id, "kind": task.kind, "state": result.state}
         try:
             await self.bus.append_and_seq(Message.new("coordinator", "*", "delegated_result", announcement))
         except sqlite3.Error as exc:

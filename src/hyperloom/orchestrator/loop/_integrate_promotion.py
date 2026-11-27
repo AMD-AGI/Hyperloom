@@ -16,7 +16,7 @@ from ..actions.executors.integrate._integrate_vocabulary import KEEP_STATUSES
 from ..launch_controls import LAUNCH_CONTROL_KEYS
 from ..measurement.integrate_performance import integrate_measurement_fields
 from ..measurement.runtime_findings import KEEP_REASON_CORRECTNESS_FIX
-from ..state.task_registry import Task
+from ..state.task_registry import Task, confirmed_result
 from ._keep_patch_column import _is_patch_column_keep, _lever_for_keep, _source_layer_handles
 from ._promote_outcome import IntegrateRecoveryIncomplete, _PromoteOutcome
 
@@ -50,31 +50,6 @@ def _integrate_marker_verdict(status: str, phase: str) -> str:
     return "incomplete"
 
 
-def _confirmed_task_outcome(task: Task) -> dict[str, Any] | None:
-    """Read a task's own record of the result its executor produced.
-
-    ``SubAgentRunner`` writes the full outcome onto the task row before the
-    ``delegated_result`` reaches the bus, so a crash inside that window leaves
-    the verdict durable here and nowhere else. An unconfirmed physical cleanup
-    makes that outcome diagnostic only — the work it describes may still hold
-    resources — so it is not returned.
-
-    TODO: ``bringup.reconcile._terminal_by_observation`` reads the same evidence
-    shape under slightly different rules; the two want one reader.
-    """
-    for entry in reversed(getattr(task, "history", None) or []):
-        if not isinstance(entry, dict):
-            continue
-        evidence = entry.get("evidence")
-        if not isinstance(evidence, dict) or not isinstance(evidence.get("outcome"), dict):
-            continue
-        if evidence.get("cleanup_confirmed") is not True:
-            return None
-        result = evidence["outcome"].get("result")
-        return result if isinstance(result, dict) else None
-    return None
-
-
 class _IntegrateMarker(NamedTuple):
     phase: str
     outcome: dict[str, Any] | None
@@ -84,14 +59,9 @@ class _IntegrateMarker(NamedTuple):
 def _integrate_marker_of(pending: Mapping[str, Any], task: Task | None) -> _IntegrateMarker:
     recovery = pending.get("recovery")
     phase = str(recovery.get("phase") or "") if isinstance(recovery, dict) else ""
-    outcome = _confirmed_task_outcome(task) if task is not None else None
+    outcome = confirmed_result(task) if task is not None else None
     verdict = _integrate_marker_verdict(str((outcome or {}).get("status") or ""), phase) if outcome else ""
     return _IntegrateMarker(phase=phase, outcome=outcome, verdict=verdict)
-
-
-class _KeptResultScan(NamedTuple):
-    scanned: bool
-    kept: dict[str, Any] | None
 
 
 def _task_recorded_a_result(task: Task) -> bool:

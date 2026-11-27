@@ -18,7 +18,7 @@ from ..actions.executors.integrate import _integrate_vocabulary
 from ..actions.executors import is_executable, normalize_proposal
 from ..state.attempt_ledger import AttemptRow, record_attempt_row
 from ..state.failure_evidence import UNMEASURED_OUTCOMES, classify_failure_attribution
-from ..state.task_registry import TaskNotFound
+from ..state.task_registry import TaskNotFound, recorded_outcome
 from .config_levers import config_lever_from_proposal
 
 if TYPE_CHECKING:
@@ -563,7 +563,7 @@ class _AuthoredOutcomeMixin:
                     "accuracy_pass": res.get("accuracy_pass"),
                     "specialist_task_id": spec_tid,
                     "integrate_task_id": first_str(getattr(task, "task_id", "")),
-                    "reauthor_attempt": res.get("reauthor_attempt", params.get("reauthor_attempt")),
+                    "reauthor_attempt": params.get("reauthor_attempt"),
                 },
             )
         )
@@ -621,44 +621,47 @@ class _AuthoredOutcomeMixin:
         *,
         specialist_task: "Task",
     ) -> bool:
-        """Recover a missed authoring outcome from persisted delegated results."""
+        """Recover a missed authoring outcome from the results this session booked."""
         specialist_task_id = first_str(getattr(specialist_task, "task_id", ""))
         cand_id = first_str(to_mapping(getattr(specialist_task, "params", None)).get("framework_agent_candidate_id"))
         if not specialist_task_id or not cand_id:
             return False
-        messages = await self.bus.tail(n=10000, topic="delegated_result")
-        if self._replay_specialist_deliverable(specialist_task, specialist_task_id, messages):
+        # A booked result is announced once; an attempt that was retried instead is not, and settles nothing.
+        booked = [to_mapping(message.payload) for message in await self.bus.tail(n=10000, topic="delegated_result")]
+        if self._replay_specialist_deliverable(specialist_task, specialist_task_id, booked):
             if cand_id in self._framework_processed_candidate_keys():
                 return True
-        return await self._replay_authored_integrates(specialist_task_id, cand_id, messages)
+        return await self._replay_authored_integrates(specialist_task_id, cand_id, booked)
 
-    def _replay_specialist_deliverable(self, specialist_task: "Task", specialist_task_id: str, messages: Any) -> bool:
-        """Re-record the deliverable the specialist's own bus entry carries; False when the bus holds none."""
-        for message in messages:
-            payload = to_mapping(getattr(message, "payload", None))
-            if (
-                first_str(payload.get("task_id")) != specialist_task_id
-                or first_str(payload.get("kind")) != "specialist"
-            ):
-                continue
-            done_payload = to_mapping(payload.get("result")).get("specialist_done")
-            # A run that failed before delivering carries its error on the bus entry rather than in the result, and
-            # must reach the recorder for the same reason it does on the live path.
-            run_error = first_str(payload.get("error"))
-            if not isinstance(done_payload, dict) and not run_error:
-                return False
-            self._record_framework_agent_authoring_empty_outcome(
-                task=specialist_task, done_payload=to_mapping(done_payload), run_error=run_error
-            )
-            return True
-        return False
+    def _replay_specialist_deliverable(
+        self, specialist_task: "Task", specialist_task_id: str, booked: list[Mapping[str, Any]]
+    ) -> bool:
+        """Re-record the deliverable the specialist's booked result carries; False when it was not booked or has none."""
+        was_booked = any(
+            first_str(event.get("task_id")) == specialist_task_id and first_str(event.get("kind")) == "specialist"
+            for event in booked
+        )
+        outcome = recorded_outcome(specialist_task) if was_booked else None
+        if outcome is None:
+            return False
+        done_payload = outcome.result.get("specialist_done")
+        # A run that failed before delivering carries its error beside the result rather than in it, and must reach
+        # the recorder for the same reason it does on the live path.
+        run_error = first_str(outcome.error)
+        if not isinstance(done_payload, dict) and not run_error:
+            return False
+        self._record_framework_agent_authoring_empty_outcome(
+            task=specialist_task, done_payload=to_mapping(done_payload), run_error=run_error
+        )
+        return True
 
-    async def _replay_authored_integrates(self, specialist_task_id: str, cand_id: str, messages: Any) -> bool:
+    async def _replay_authored_integrates(
+        self, specialist_task_id: str, cand_id: str, booked: list[Mapping[str, Any]]
+    ) -> bool:
         """Re-record every integrate_patch outcome the specialist's patches reached; True once ``cand_id`` is settled."""
-        for message in messages:
-            payload = to_mapping(getattr(message, "payload", None))
-            task_id = first_str(payload.get("task_id"))
-            if first_str(payload.get("kind")) != "integrate_patch" or not task_id:
+        for event in booked:
+            task_id = first_str(event.get("task_id"))
+            if first_str(event.get("kind")) != "integrate_patch" or not task_id:
                 continue
             try:
                 integrate_task = await self.tasks.get(task_id)
@@ -669,11 +672,14 @@ class _AuthoredOutcomeMixin:
                 "framework_agent_authoring"
             ):
                 continue
-            # The bus carries the executor's result, not the settlement verdict; the stack entry the
+            outcome = recorded_outcome(integrate_task)
+            if outcome is None:
+                continue
+            # The row carries the executor's result, not the settlement verdict; the stack entry the
             # lift wrote for this task is the durable record of the adoption.
             self._record_framework_agent_authored_outcome(
                 task=integrate_task,
-                result=to_mapping(payload.get("result")),
+                result=outcome.result,
                 adopted=any(
                     first_str(to_mapping(entry).get("task_id")) == task_id
                     for entry in to_list(self.shared_state.optimization_stack)

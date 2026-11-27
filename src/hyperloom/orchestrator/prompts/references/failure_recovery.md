@@ -4,9 +4,8 @@
 
 Consult these SharedState surfaces in order before re-proposing:
 
-1. **`last_<action>`** (snapshot of the latest attempt) and
-   **`<action>_attempts`** (capped per-action history, newest last).
-   Each entry carries `status` / `decision` / `error_class` /
+1. **`last_baseline`** (the latest baseline attempt, failed or
+   measured). It carries `status` / `decision` / `error_class` /
    `error_excerpt` / `workspace` / `raw_result_path` /
    `extras.fingerprint`. The fingerprint is the canonical hash of the
    params fields that determine the action's behaviour, and Coordinator
@@ -17,19 +16,17 @@ Consult these SharedState surfaces in order before re-proposing:
    NOT make the proposal distinct.
 2. **`last_action_failures`** (global rolling log capped at the last
    30 unpromotable results across ALL kinds, including kernel_agent-owned).
-   Use this when the per-action history doesn't carry the kind you
-   need (e.g. `integrate` failure visible here but `<action>_attempts`
-   only covers the six explore/validate kinds).
+   This is where a failure of any other kind is recorded.
    Each entry now carries `failure_id` when the failure has a structured
    evidence packet; use
    `mcp__inference_optimizer_context__get_failure(failure_id)` to retrieve
    the full packet and `Read` to open the raw crash log.
 3. **Structured failure evidence** — explore variant crashes write a
-   full evidence packet to `failures[]` (accessible via
-   `mcp__inference_optimizer_context__get_variant_failures` /
-   `mcp__inference_optimizer_context__get_failure`), mirrored to
-   `<session_dir>/reports/failures/<failure_id>.json` so a packet
-   evicted from `failures[]` is still readable with `Read`.  The packet
+   full evidence packet to
+   `<session_dir>/reports/failures/<failure_id>.json` (listed by
+   `mcp__inference_optimizer_context__get_variant_failures`, returned by
+   `mcp__inference_optimizer_context__get_failure`, readable with
+   `Read`).  The packet
    carries: `failure_id`, `stage` (warmup or decision), `error_class`,
    `error_excerpt` (tail of the error blob), `server_log_path`,
    `workspace`, and the variant knobs that produced the failure.

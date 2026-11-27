@@ -1,20 +1,16 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Action failures, failure evidence, kernel integrate verdicts, tick exceptions and crash counts."""
+"""Action failures, kernel integrate verdicts, tick exceptions and crash counts."""
 
 from __future__ import annotations
 
-import logging
 import time
 import traceback
 from typing import Any
 from hyperloom.common.env_safety import redact_secret_values
-from hyperloom_common.io import atomic_write_json
 from hyperloom_common.timeutil import now_iso
 from ..failure_evidence import tail_excerpt
-
-log = logging.getLogger(__name__)
 
 
 # Upper bound on retained crash timestamps (trailing-window rate needs only the recent tail).
@@ -148,7 +144,6 @@ class _ActionRecordsMixin:
             macro_cycle=cycle, integration_id=integration_id, graded_objective=str(last.get("graded_objective") or "")
         )
 
-    # Per-action audit (kernel parity for non-kernel actions)
     @staticmethod
     def _truncate_excerpt(value: Any, *, limit: int = 1200) -> str | None:
         """Coerce ``value`` to str and trim to ``limit`` chars; None for falsy inputs (renderer shows ``err=(none)``)."""
@@ -162,7 +157,7 @@ class _ActionRecordsMixin:
         return text[:limit]
 
     def _common_result_fields(self, result: dict[str, Any]) -> dict[str, Any]:
-        """Build the failure/diagnostic fields shared by the attempt + failure logs."""
+        """Build the failure/diagnostic fields ``last_baseline`` and the failure log share."""
         return {
             "error_class": (str(result.get("error_class")) if result.get("error_class") else None),
             "error_excerpt": self._truncate_excerpt(result.get("error")),
@@ -183,7 +178,7 @@ class _ActionRecordsMixin:
         result: dict[str, Any] | None,
         max_history: int = _DEFAULT_LAST_FAILURES,
     ) -> dict[str, Any]:
-        """Append one rich failure record to :attr:`last_action_failures` for self-correction; invoked for EVERY unpromotable task kind, unlike :meth:`record_action_attempt`."""
+        """Append one rich failure record to :attr:`last_action_failures` for self-correction; invoked for EVERY unpromotable task kind."""
         result = result or {}
         entry: dict[str, Any] = {
             "ts": now_iso(),
@@ -197,32 +192,3 @@ class _ActionRecordsMixin:
             history = history[-max_history:]
         self.last_action_failures = history
         return entry
-
-    def record_failure_evidence(self, fe: "dict[str, Any]") -> None:
-        """Append one structured failure packet to :attr:`failures` (last-wins on ``failure_id``); mirrored to ``<session_dir>/reports/failures/`` so it survives the bounded list."""
-        fid = str(fe.get("failure_id") or "")
-        history = [e for e in (self.failures or []) if e.get("failure_id") != fid]
-        history.append(fe)
-        self.failures = history[-_DEFAULT_LAST_FAILURES:]
-
-        session_dir = getattr(self, "_session_dir", None)
-        if session_dir:
-            from hyperloom.inference_optimizer.session.session_paths import failure_evidence_path
-
-            try:
-                atomic_write_json(failure_evidence_path(session_dir, fid), fe)
-            except OSError:
-                log.debug("failure evidence mirror failed for %s", fid, exc_info=True)
-
-    def find_failure(self, failure_id: str) -> "dict[str, Any] | None":
-        """Return the :attr:`failures` entry for ``failure_id``, else ``None``."""
-        fid = str(failure_id or "").strip()
-        for entry in reversed(self.failures or []):
-            if entry.get("failure_id") == fid:
-                return entry
-        return None
-
-    def failures_for_task(self, task_id: str) -> "list[dict[str, Any]]":
-        """Return the ``task_id`` entries from :attr:`failures`, newest first."""
-        tid = str(task_id or "").strip()
-        return [e for e in reversed(self.failures or []) if e.get("task_id") == tid]

@@ -18,9 +18,8 @@ from ..bus.message_bus import Message
 from ..policy.gate import SPECIALIST_ACTION_NAME
 from ..specialists.domains import gap_backfilled_domain
 from ..state.shared_state import inject_stack_base_params
-from ..state.task_registry import TERMINAL_STATES, Task, TaskSpec, create_on_free_key
+from ..state.task_registry import TERMINAL_STATES, Task, TaskSpec, confirmed_result, create_on_free_key
 from ..collaborator import CoordinatorCollaborator
-from ._integrate_promotion import _confirmed_task_outcome
 
 if TYPE_CHECKING:
     from hyperloom.inference_optimizer.breakdown.recorder.framework_event import FrameworkEventRecorder
@@ -102,7 +101,7 @@ def twin_answers(action_name: str, twin: Task) -> bool:
     if twin.state not in TERMINAL_STATES:
         return True
     # A twin that measured answers a repeat; the row state is ``succeeded`` for any result.
-    outcome = _confirmed_task_outcome(twin)
+    outcome = confirmed_result(twin)
     if action_name == "baseline":
         return is_valid_measurement(outcome)
     return action_name == "integrate_patch" and bool((outcome or {}).get(RESULT_BENCHED))

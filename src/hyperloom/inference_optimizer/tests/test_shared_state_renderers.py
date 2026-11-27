@@ -93,11 +93,10 @@ def test_format_search_state():
     assert SharedState._format_search_state({"tested": {}}).strip().startswith("cursor=0")
     search = {
         "cursor": 3,
-        "rejected": [{"name": "r", "gain_pct": -1.0}],
         "tested": {"f1": {"outcome": "KEEP", "name": "a", "gain_pct": 4.0}},
     }
     out = SharedState._format_search_state(search)
-    assert "cursor=3  rejected=1  tested=1" in out
+    assert "cursor=3  tested=1" in out
     assert "f1" in out and "KEEP" in out
 
 

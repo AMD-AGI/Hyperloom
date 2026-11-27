@@ -510,10 +510,13 @@ def test_read_ko_summary_totals_missing(tmp_path):
 
 # ---- _highlight ----
 def test_highlight_topics():
-    dr = rp._highlight(
-        {"kind": "k", "state": "s", "result": {"output_throughput": 1, "decision": "keep"}}, "delegated_result", "a"
-    )
-    assert "tput=1" in dr["summary"]
+    booked = {"task_id": "t", "kind": "k", "state": "s"}
+    assert rp._highlight(booked, "delegated_result", "a") == {
+        "topic": "delegated_result",
+        "from_agent": "a",
+        "summary": "kind=k state=s",
+        "payload": booked,
+    }
     assert "status" in rp._highlight({"kind": "k", "status": "ok"}, "response", "a")["summary"]
     assert "sev" in rp._highlight({"severity": "high", "summary": "boom"}, "alert", "a")["summary"]
     # fallback branch

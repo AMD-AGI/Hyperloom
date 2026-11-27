@@ -5,9 +5,12 @@ from __future__ import annotations
 import json
 import logging
 from dataclasses import dataclass
+from itertools import islice
+from pathlib import Path
 from typing import Any, Callable
 
 from hyperloom.orchestrator.measurement.runtime_findings import render_runtime_findings
+from hyperloom.orchestrator.state.failure_packets import read_failure, recent_failures
 from hyperloom.orchestrator.mcp_tool_names import (
     CONTEXT_MCP_SERVER_NAME as MCP_SERVER_NAME,
 )
@@ -27,6 +30,7 @@ class ContextProvider:
     """Read-only accessor over live session context for the pull tools."""
 
     shared_state: Any
+    session_dir: Path
     inbox_reader: Callable[[int], str]
     recent_outcomes_reader: Callable[[int], str]
     running_tasks_reader: Callable[[], str]
@@ -71,12 +75,10 @@ class ContextProvider:
             return "(get_failure: failure_id is required)"
 
         def _read() -> str:
-            fe = self.shared_state.find_failure(fid)
-            if fe is None:
-                # Evicted from the in-memory cap, or never existed; the mirror under reports/failures/ answers both
-                # cases.
-                return f"(get_failure: {fid!r} not in memory; Read $SESSION_DIR/reports/failures/{fid}.json)"
-            return json.dumps(fe, default=str, indent=2)
+            packet = read_failure(self.session_dir, fid)
+            if packet is None:
+                return f"(get_failure: no failure evidence was written as {fid!r})"
+            return json.dumps(packet, default=str, indent=2)
 
         return self._safe(_read, "get_failure")
 
@@ -85,13 +87,8 @@ class ContextProvider:
         k = max(1, min(top_k, 50))
 
         def _read() -> str:
-            if task_id:
-                entries = self.shared_state.failures_for_task(task_id)
-            else:
-                entries = list(reversed(self.shared_state.failures or []))
-            if not entries:
-                return "(no failure entries)"
-            return "\n".join(json.dumps(e, default=str) for e in entries[:k])
+            packets = islice(recent_failures(self.session_dir, task_id=task_id), k)
+            return "\n".join(json.dumps(packet, default=str) for packet in packets) or "(no failure entries)"
 
         return self._safe(_read, "get_variant_failures")
 
@@ -161,7 +158,7 @@ CONTEXT_TOOL_SPECS: tuple[tuple[str, str, dict[str, Any], str], ...] = (
         "get_recent_outcomes",
         "Return the most recent action outcomes — the async results of "
         "prior delegate/request work (delegated_result: kind / state / "
-        "status / kept / gain / tput / error) — so "
+        "status / gain / error) — so "
         "you can close the act->observe loop within this turn instead of "
         "waiting for the next-tick delta. Pass top_k to widen the window.",
         _TOPK_SCHEMA,
@@ -193,9 +190,8 @@ CONTEXT_TOOL_SPECS: tuple[tuple[str, str, dict[str, Any], str], ...] = (
         "failure_id (from a delegated_result failure line or gap attempt). "
         "Carries variant args, stage, error_class, error_excerpt, "
         "server_log_path, and workspace so you can then `Read` the actual "
-        "log file.  Only the most recent packets stay in memory; an older "
-        "failure_id is still readable with "
-        "`Read($SESSION_DIR/reports/failures/<failure_id>.json)`.",
+        "log file.  The packet is the file "
+        "`$SESSION_DIR/reports/failures/<failure_id>.json`.",
         _FAILURE_ID_SCHEMA,
         "get_failure",
     ),

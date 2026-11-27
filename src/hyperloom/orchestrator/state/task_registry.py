@@ -13,7 +13,7 @@ from dataclasses import dataclass, field, replace
 from typing import Any
 
 from hyperloom_common.timeutil import now_iso
-from hyperloom.orchestrator.bus.resource_lock import SqliteLeaseBackend
+from hyperloom.orchestrator.bus.resource_lock import CLEANUP_CONFIRMED_KEY, SqliteLeaseBackend
 from hyperloom.orchestrator.bus.storage.connection import SqliteConnection
 from hyperloom.orchestrator.state.task_states import TERMINAL_STATES, TRANSITIONS
 from hyperloom.inference_optimizer.trace.trajectory_trace import (
@@ -45,6 +45,7 @@ _DISPATCH_CLASSES = frozenset({"llm", "coordinator", "inline"})
 _QUEUED_SQL = "SELECT * FROM tasks WHERE state='queued' ORDER BY created_at ASC"
 _RUNNING_SQL = "SELECT * FROM tasks WHERE state='running' ORDER BY updated_at ASC"
 _KEY_PREFIX_SQL = "SELECT * FROM tasks WHERE kind=? AND substr(idempotency_key, 1, ?)=? ORDER BY created_at ASC"
+_OUTCOMES_SQL = "SELECT task_id, history FROM tasks WHERE task_id IN (SELECT value FROM json_each(?))"
 
 
 @dataclass(frozen=True)
@@ -91,6 +92,51 @@ class Task:
             created_at=row["created_at"],
             updated_at=row["updated_at"],
         )
+
+
+@dataclass(frozen=True)
+class TaskOutcome:
+    """What a task's executor returned, as its runner recorded it on the row before anything was told about it."""
+
+    result: dict[str, Any]
+    error: str | None
+    cleanup_confirmed: bool
+
+
+def _outcome_in(history: list[Any]) -> TaskOutcome | None:
+    for entry in reversed(history):
+        evidence = entry.get("evidence") if isinstance(entry, dict) else None
+        if isinstance(evidence, dict) and isinstance(evidence.get("outcome"), dict):
+            outcome = evidence["outcome"]
+            return TaskOutcome(
+                result=outcome["result"],
+                error=outcome.get("error"),
+                cleanup_confirmed=evidence.get(CLEANUP_CONFIRMED_KEY) is True,
+            )
+    return None
+
+
+def recorded_outcome(task: Task) -> TaskOutcome | None:
+    """The outcome on ``task``'s row, or ``None`` while its executor has not ended."""
+    return _outcome_in(task.history)
+
+
+def confirmed_result(task: Task) -> dict[str, Any] | None:
+    """The result ``task``'s executor produced, once its physical cleanup confirmed.
+
+    An unconfirmed cleanup makes the outcome diagnostic only -- the work it describes may still hold resources -- so
+    it is not returned.
+
+    TODO: ``bringup.reconcile._terminal_by_observation`` reads the same evidence under slightly different rules; the
+    two want one reader.
+    """
+    outcome = recorded_outcome(task)
+    return outcome.result if outcome is not None and outcome.cleanup_confirmed else None
+
+
+def _outcomes_by_task(rows: Iterable[Any]) -> dict[str, TaskOutcome]:
+    found = ((str(row["task_id"]), _outcome_in(json.loads(row["history"]))) for row in rows)
+    return {task_id: outcome for task_id, outcome in found if outcome is not None}
 
 
 def _validate_dispatch_class(dispatch_class: str | None) -> None:
@@ -481,6 +527,14 @@ class TaskRegistry:
             history.append({"ts": now_iso(), "evidence": evidence or {}})
             cur.execute("UPDATE tasks SET history=? WHERE task_id=?", (json.dumps(history), task_id))
 
+    async def outcomes(self, task_ids: Iterable[str]) -> dict[str, TaskOutcome]:
+        """The recorded outcome of each of ``task_ids`` whose executor ended; the others are absent."""
+        return _outcomes_by_task(await self.db.fetchall(_OUTCOMES_SQL, (json.dumps(list(task_ids)),)))
+
+    def outcomes_sync(self, task_ids: Iterable[str]) -> dict[str, TaskOutcome]:
+        """:meth:`outcomes` off the sync path."""
+        return _outcomes_by_task(self.db.fetchall_sync(_OUTCOMES_SQL, (json.dumps(list(task_ids)),)))
+
     async def with_key_prefix(self, kind: str, key_prefix: str) -> list[Task]:
         """Return every task of ``kind`` whose idempotency key starts with ``key_prefix``, oldest first."""
         rows = await self.db.fetchall(_KEY_PREFIX_SQL, (kind, len(key_prefix), key_prefix))
@@ -667,9 +721,12 @@ __all__ = [
     "TERMINAL_STATES",
     "Task",
     "TaskNotFound",
+    "TaskOutcome",
     "TaskRegistry",
     "TaskSpec",
     "TerminalTaskReuse",
+    "confirmed_result",
     "create_in_cursor",
     "create_on_free_key",
+    "recorded_outcome",
 ]

@@ -7,7 +7,6 @@ from __future__ import annotations
 
 import pytest
 
-from hyperloom.orchestrator.bus.resource_lock import BRINGUP_ROUND_LANE, ROUND_LEASE_PID
 from hyperloom.orchestrator.bus.storage.connection import SqliteConnection
 from hyperloom.orchestrator.state import round_store as rs
 from hyperloom.orchestrator.state.round_store import (
@@ -275,62 +274,14 @@ async def test_a_non_owner_cannot_settle_a_round_it_does_not_hold(store, virtual
     assert (await store.get("r")).state == rs.OPEN
 
 
-async def _lane_row(store, round_id: str):
-    """The lane row an open round holds, or ``None`` once it has let go."""
-    return await store.db.fetchone(
-        "SELECT * FROM leases WHERE lane = ? AND holder_id = ?",
-        (BRINGUP_ROUND_LANE, round_id),
-    )
-
-
-@pytest.mark.asyncio
-async def test_an_open_round_holds_the_lane_and_a_settled_one_does_not(store, virtual_clock):
-    """The round and its lease are one write, so the lease reaper sees the round."""
-    clock = virtual_clock
-    opened_at = clock.wall()
-    opened = await store.open("r", now_unix=opened_at, holder_task_id="t-1", lease_sec=_LEASE)
-    assert opened.ok
-
-    row = await _lane_row(store, "r")
-    assert row is not None
-    assert row["task_id"] == "t-1"
-    # No pid: the holder is a task, and only the task registry can prove a
-    # task's process dead, so the dead-holder sweep must skip this row.
-    assert int(row["pid"]) == ROUND_LEASE_PID
-    acquired = row["acquired_at"]
-
-    clock.advance(60.0)
-    renewed_at = clock.wall()
-    renewed = await store.renew(_claim("r", "t-1", 1), now_unix=renewed_at, lease_sec=_LEASE)
-    assert renewed.ok
-    row = await _lane_row(store, "r")
-    assert row["acquired_at"] == acquired, "a renewal moves the lease, not the acquire"
-    assert row["expires_at"] > acquired
-
-    clock.advance(60.0)
-    moved = await store.handoff(
-        _claim("r", "t-1", 1),
-        now_unix=clock.wall(),
-        new_holder_task_id="t-2",
-        lease_sec=_LEASE,
-    )
-    assert moved.ok
-    assert (await _lane_row(store, "r"))["task_id"] == "t-2", "the round stays open, so it keeps the lane"
-
-    clock.advance(60.0)
-    settled = await store.settle(_claim("r", "t-2", 2), now_unix=clock.wall(), outcome=BOOTED)
-    assert settled.ok
-    assert await _lane_row(store, "r") is None
-
-
 @pytest.mark.asyncio
 async def test_every_path_gives_the_same_answer_and_leaves_the_same_rows(store):
-    """Each attempt's ``RoundResult`` and the round and lane rows it leaves, column for column."""
+    """Each attempt's ``RoundResult`` and the round rows it leaves, column for column; the lease table stays empty."""
 
     async def snapshot():
         rounds = await store.db.fetchall("SELECT * FROM bringup_rounds ORDER BY round_id")
-        lanes = await store.db.fetchall("SELECT * FROM leases WHERE lane = ? ORDER BY holder_id", (BRINGUP_ROUND_LANE,))
-        return repr([tuple(r) for r in rounds]), repr([tuple(r) for r in lanes])
+        assert await store.db.fetchall("SELECT * FROM leases") == []
+        return [tuple(r) for r in rounds]
 
     results = [
         await store.open(
@@ -430,65 +381,9 @@ async def test_every_path_gives_the_same_answer_and_leaves_the_same_rows(store):
             ok,
         ]
     )
-    lane_a = (BRINGUP_ROUND_LANE, "a")
-    lane_b = (BRINGUP_ROUND_LANE, "b")
-    round_lease = (BRINGUP_ROUND_LANE, ROUND_LEASE_PID, "")
-    assert after_renew == (
-        repr([("a", "open", "", "t-1", 1, 1000.0, 1010.0, 1610.0, None)]),
-        repr(
-            [
-                (
-                    *lane_a,
-                    "t-1",
-                    *round_lease,
-                    "1970-01-01T00:16:40.000000+00:00",
-                    "1970-01-01T00:26:50.000000+00:00",
-                )
-            ]
-        ),
-    )
-    assert after_handoff == (
-        repr([("a", "open", "", "t-2", 2, 1000.0, 1020.0, 1320.0, None)]),
-        repr(
-            [
-                (
-                    *lane_a,
-                    "t-2",
-                    *round_lease,
-                    "1970-01-01T00:16:40.000000+00:00",
-                    "1970-01-01T00:22:00.000000+00:00",
-                )
-            ]
-        ),
-    )
-    assert await snapshot() == (
-        repr(
-            [
-                ("a", "settled", "booted", "t-2", 2, 1000.0, 1020.0, 1320.0, 1030.0),
-                ("b", "open", "", "t-5", 1, 1051.0, 1051.0, 1651.0, None),
-            ]
-        ),
-        repr(
-            [
-                (
-                    *lane_b,
-                    "t-5",
-                    *round_lease,
-                    "1970-01-01T00:17:31.000000+00:00",
-                    "1970-01-01T00:27:31.000000+00:00",
-                )
-            ]
-        ),
-    )
-
-
-@pytest.mark.asyncio
-async def test_a_refused_acquire_leaves_no_lane_behind(store, virtual_clock):
-    """A round that was never opened holds nothing; the two roll back together."""
-    clock = virtual_clock
-    opened = await store.open("r1", now_unix=clock.wall(), holder_task_id="t-1", lease_sec=_LEASE)
-    assert opened.ok
-    refused = await store.open("r2", now_unix=clock.wall(), holder_task_id="t-2", lease_sec=_LEASE)
-    assert refused.ok is False and refused.reason == rs.EXCLUDED
-    assert await _lane_row(store, "r2") is None
-    assert await _lane_row(store, "r1") is not None
+    assert after_renew == [("a", "open", "", "t-1", 1, 1000.0, 1010.0, 1610.0, None)]
+    assert after_handoff == [("a", "open", "", "t-2", 2, 1000.0, 1020.0, 1320.0, None)]
+    assert await snapshot() == [
+        ("a", "settled", "booted", "t-2", 2, 1000.0, 1020.0, 1320.0, 1030.0),
+        ("b", "open", "", "t-5", 1, 1051.0, 1051.0, 1651.0, None),
+    ]

@@ -195,7 +195,7 @@ it.
   and the proposals not yet reviewed, and all `succeeded` or `cancelled`
   `tasks` but the 2,000 most recently updated. In a session that wrote more
   than 5,000 events this removed the `delegated_result` rows that
-  `--resume-from` replays an interrupted KEEP from and that
+  `--resume-from` replayed an interrupted KEEP from and that
   `reports/final.json` counts, and a deleted task row released its
   idempotency key. `events_pruned` and `tasks_pruned` leave the
   `maintenance tick` log line and the `cycle_soft_restart` observation;
@@ -211,6 +211,35 @@ it.
   `PACKAGE_MANIFEST.json`, and the database stays in the session directory.
   The lane warning for a holder that is not a task now ends `the holder has
   no task row, so nothing can attest it ended`.
+  See [Upgrade](reference/upgrade.md).
+- **A task's result is kept once, on its task row.** The `delegated_result`
+  event that announces a finished task now carries `{task_id, kind, state}`;
+  `result` and `error` are read from the task's row in `storage/coordinator.db`
+  (`tasks.history[].evidence.outcome`), where the runner writes them before
+  the event. The inbox, `get_inbox` and `get_recent_outcomes` print the same
+  line from the row, without the `kept=` and `tput=` fields no executor ever
+  filled. **Breaking** for anything that parsed the event's payload, the
+  `payload` of a `delegated_result` highlight in `reports/final.json` (now the
+  three keys, with the summary `kind=... state=...`), or one of these
+  `state.json` keys, which are removed: `baseline_attempts`,
+  `profile_attempts`, `explore_attempts`, `roofline_attempts`, `last_profile`,
+  `last_explore`, `last_roofline`, `explore_search.rejected`,
+  `warm_history_injected` and `failures`. `last_baseline` stays as the record
+  of the latest baseline and the decision on it (`anchor_held` included), and
+  so do `last_action_failures` and `explore_search.last_round`. Failure
+  packets live only in `reports/failures/<failure_id>.json`: `get_failure` and
+  `get_variant_failures` read those files, so they reach every packet of the
+  session and not only the 30 newest, and a packet that cannot be written is
+  an error where it was a debug line. An open bring-up round no longer writes
+  a `bringup_round` row to `leases`; `bringup_rounds` is its only record, and
+  the in-flight line of the task holding it no longer lists that lane. On
+  `--resume-from`, an integrate KEEP whose promotion a crash cut off is
+  adopted from the task row and the `pending_integrate` sentinel alone; the
+  two searches of the event log for `kept` results are gone, and with them
+  the `orphaned_keep*` reports and the retry on every start of a KEEP the
+  promotion gate had refused. The Shared session state block loses
+  `last_profile=`, `last_explore=`, `attempts_history=` and the `rejected=N`
+  count, and the Acceptance threshold block lists each measured variant once.
   See [Upgrade](reference/upgrade.md).
 - **forge-loop runs every round as lanes and has no planning stage.** Every
   iteration is one round: one lane per focus the Analysis Agent divides its

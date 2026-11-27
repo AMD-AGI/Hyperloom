@@ -34,18 +34,6 @@ def _stamp_cycle(rows: Iterable[Any], cycle: int) -> None:
             row.setdefault("cycle", int(cycle))
 
 
-def _merge_rejected(prior: Any, update: Any) -> list[dict[str, Any]]:
-    """Merge rejected rows by fingerprint, newest wins. Rows without one are dropped: the fingerprint is what the dedup gate matches on."""
-    merged: dict[str, dict[str, Any]] = {}
-    for entry in [*(prior or []), *(update or [])]:
-        if not isinstance(entry, dict):
-            continue
-        fingerprint = str(entry.get("fingerprint") or "")
-        if fingerprint:
-            merged[fingerprint] = entry
-    return list(merged.values())
-
-
 class _WinnerKey(NamedTuple):
     """What makes a ``winners_history`` row distinct: the round, the variant, and when it landed."""
 
@@ -198,15 +186,6 @@ class _PhaseStateMixin:
         tested = {**(prior.get("tested") or {}), **(update.get("tested") or {})}
         _stamp_cycle(tested.values(), cur_cycle)
         merged["tested"] = _cap_tested_ledger(tested)
-        # A fingerprint this update measured KEEP leaves ``rejected``: its earlier verdict no longer describes it.
-        kept = {fp for fp, row in (update.get("tested") or {}).items() if row.get("outcome") == "KEEP"}
-        rejected = [
-            row
-            for row in _merge_rejected(prior.get("rejected"), update.get("rejected"))
-            if row["fingerprint"] not in kept
-        ]
-        _stamp_cycle(rejected, cur_cycle)
-        merged["rejected"] = rejected
         # The round ordinal, not the ledger's size: consumers key idempotency and
         # round ids on it, so it has to advance once per benched round. It is always
         # written, since a load without one derives it from the ledger's size.
