@@ -83,6 +83,7 @@ def _heartbeat() -> Intent:
 async def test_each_reactor_call_records_its_prompt_snapshot_under_the_call(session_dir):
     silent = ScriptedPlan(turns=[], default_intent=_heartbeat())
     c = Coordinator(session_dir, backends={"orchestration": MockBackend(silent, name="o")})
+    c.orch_prompt.set("orchestration", "SYSTEM PROMPT")
     try:
         with tt.trajectory_scope(session_dir=session_dir, component="coordinator"):
             await c.tick(1)

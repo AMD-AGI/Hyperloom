@@ -371,7 +371,7 @@ def test_priors_match_advisory_reads_the_proposals_of_both_recent_rounds(coord: 
         {"proposal_set": [{"name": "graph_b", "description": "cudagraph decode"}, "not-a-dict"]},
     ]
 
-    prompt = asyncio.run(coord.conversation.compose_prompt("orchestration")).text
+    prompt = asyncio.run(coord.conversation.compose_prompt()).text
 
     assert "- graph_a: hint:cudagraph decode capture" in prompt
     assert "- graph_b: hint:cudagraph decode capture" in prompt

@@ -9,7 +9,6 @@ from pathlib import Path
 
 import pytest
 
-from hyperloom.orchestrator.roles.agent_role import default_role_registry
 from hyperloom.orchestrator.tests.mock_backend import MockBackend, MockTurn, ScriptedPlan
 from hyperloom.orchestrator.loop.coordinator import AdvisoryServices, Coordinator
 from hyperloom.orchestrator.knowledge.recipe_kb import LocalRecipeStore, RecipeKB, RecipeUpsert
@@ -32,7 +31,6 @@ def _make_coordinator(tmp_path: Path) -> Coordinator:
     return Coordinator(
         session_dir=session_dir,
         backends=backends,
-        role_registry=default_role_registry(),
         advisory=AdvisoryServices(knowledge_plane=SimpleNamespace(recipe_kb=kb)),
     )
 

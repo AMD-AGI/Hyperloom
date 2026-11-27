@@ -15,7 +15,6 @@ from hyperloom.inference_optimizer.protocol.intent import Intent, IntentType
 
 
 def _build_coord(tmp_path: Path, *, gpu_capacity: int) -> Coordinator:
-    from hyperloom.orchestrator.roles.agent_role import default_role_registry
     from hyperloom.orchestrator.state.shared_state import SharedState
     from hyperloom.orchestrator.tests.mock_backend import MockBackend, MockTurn, ScriptedPlan
 
@@ -29,7 +28,6 @@ def _build_coord(tmp_path: Path, *, gpu_capacity: int) -> Coordinator:
     return Coordinator(
         session_dir=tmp_path,
         backends=backends,
-        role_registry=default_role_registry(),
         advisory=AdvisoryServices(knowledge_plane=None),
     )
 

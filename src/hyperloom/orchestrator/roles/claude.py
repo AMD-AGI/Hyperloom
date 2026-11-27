@@ -79,11 +79,10 @@ def _context_tokens_estimate(usage: dict[str, Any], *, num_turns: int) -> int:
     return total // num_turns if num_turns > 1 else total
 
 
-def _build_output_instructions(allowed_intents: frozenset[IntentType]) -> str:
-    """Render the output-format suffix for a role's allowed intent set."""
-    contract = payload_contract(allowed_intents)
-    constraints = constraints_sentence(allowed_intents)
-    constraints_line = f"\n-{constraints}" if constraints else ""
+def _build_output_instructions() -> str:
+    """Render the output-format suffix."""
+    contract = payload_contract()
+    constraints_line = f"\n-{constraints_sentence()}"
     return f"""
 ==== OUTPUT FORMAT (REQUIRED) ====
 You MUST communicate with the system by calling the
@@ -95,7 +94,7 @@ turn. Free-text replies are dropped.
 Tool input shape — these two keys only, nothing beside them:
 
   {{
-    "intent_type": "<one of {", ".join(sorted(t.value for t in allowed_intents))}>",
+    "intent_type": "<one of {", ".join(sorted(t.value for t in IntentType))}>",
     "payload": {{ /* per-intent fields — see tool description */ }}
   }}
 
@@ -299,8 +298,6 @@ class ClaudeBackend:
 
     model: str | None = None
     max_turns_default: int = 32
-    # Role's allowed intent set for the emit_intent tool and the output-format suffix. None = all IntentType values.
-    allowed_intents: frozenset[IntentType] | None = None
     # Idle timeout for one ``run()`` call: max wall-clock gap allowed BETWEEN streamed SDK messages before the turn is
     # aborted.
     call_timeout_s: float = field(
@@ -358,7 +355,6 @@ class ClaudeBackend:
             sdk_module=self.sdk_module,
             tool_factory=self.mcp_tool_factory,
             server_factory=self.mcp_server_factory,
-            allowed_intents=self._offered_intents,
         )
 
     # Backend protocol
@@ -371,7 +367,7 @@ class ClaudeBackend:
         max_turns: int = 1,
     ) -> BackendTurnResult:
         """Run a single backend turn against Claude and parse the result."""
-        full_prompt = f"{prompt}\n\n{_build_output_instructions(self._offered_intents)}"
+        full_prompt = f"{prompt}\n\n{_build_output_instructions()}"
         max_turns_use = max(max_turns or self.max_turns_default, _MIN_MAX_TURNS)
         turn_marker = uuid.uuid4().hex
         turn_stop = _TurnStop()
@@ -466,11 +462,6 @@ class ClaudeBackend:
             },
         )
 
-    @property
-    def _offered_intents(self) -> frozenset[IntentType]:
-        """The intent types the agent is offered: the role's set, or every type when none is given."""
-        return self.allowed_intents if self.allowed_intents is not None else frozenset(IntentType)
-
     def set_context_provider(self, provider: ContextProvider | None) -> None:
         """Attach (or clear) the read-only context-pull MCP server."""
         if provider is None:
@@ -485,9 +476,7 @@ class ClaudeBackend:
 
     def get_mcp_setup_diagnostic(self) -> dict[str, Any]:
         """Return the current MCP setup snapshot: what Hyperloom configured and what the CLI offered the model."""
-        schema = json.dumps(
-            build_emit_intent_tool_input_schema(self._offered_intents), sort_keys=True, separators=(",", ":")
-        )
+        schema = json.dumps(build_emit_intent_tool_input_schema(), sort_keys=True, separators=(",", ":"))
         mcp_tools = self._cli_init.get("mcp_tools")
         return {
             "backend": type(self).__name__,

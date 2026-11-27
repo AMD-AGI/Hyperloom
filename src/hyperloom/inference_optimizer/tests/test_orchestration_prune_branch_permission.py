@@ -7,7 +7,6 @@ from __future__ import annotations
 
 import pytest
 
-from hyperloom.orchestrator.roles.agent_role import default_role_registry
 from hyperloom.inference_optimizer.protocol.intent import Intent, IntentType
 from hyperloom.orchestrator.policy.denial import PolicyDenied
 from hyperloom.orchestrator.policy.gate import PolicyGate
@@ -15,7 +14,7 @@ from hyperloom.orchestrator.policy.gate import PolicyGate
 
 @pytest.fixture
 def gate() -> PolicyGate:
-    return PolicyGate(role_registry=default_role_registry())
+    return PolicyGate()
 
 
 # Orchestration (new permission) — happy path + payload-shape guard
@@ -83,30 +82,3 @@ def test_orchestration_can_emit_escalate_strategy_change(gate):
             payload={"next_action_hint": "skip_to_kernel"},
         ),
     )
-
-
-def test_kernel_cannot_emit_escalate_strategy_change(gate):
-    """Kernel responder-only — no scheduling-police intents."""
-    with pytest.raises(PolicyDenied) as exc:
-        gate.validate_intent(
-            "kernel_agent",
-            Intent(
-                type=IntentType.ESCALATE_STRATEGY_CHANGE,
-                payload={"next_action_hint": "skip_to_kernel"},
-            ),
-        )
-    assert exc.value.rule == "role"
-
-
-# Kernel — not in the PRUNE_BRANCH source allowlist either
-def test_kernel_cannot_emit_prune_branch(gate):
-    """Kernel is responder-only."""
-    with pytest.raises(PolicyDenied) as exc:
-        gate.validate_intent(
-            "kernel_agent",
-            Intent(
-                type=IntentType.PRUNE_BRANCH,
-                payload={"family": "params", "reason": "x"},
-            ),
-        )
-    assert exc.value.rule == "role"

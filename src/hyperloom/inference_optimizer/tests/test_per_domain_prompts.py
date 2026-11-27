@@ -284,7 +284,6 @@ from typing import Any
 import pytest
 
 from hyperloom.inference_optimizer.protocol.intent import Intent, IntentType
-from hyperloom.orchestrator.roles.agent_role import default_role_registry
 from hyperloom.orchestrator.policy.denial import PolicyDenied
 from hyperloom.orchestrator.policy.gate import (
     PolicyGate,
@@ -310,7 +309,7 @@ from .conftest import init_git_repo, make_fake_claude
 # Test fixtures
 @pytest.fixture
 def gate() -> PolicyGate:
-    return PolicyGate(role_registry=default_role_registry())
+    return PolicyGate()
 
 
 @dataclass
@@ -401,7 +400,7 @@ def test_R2_missing_gap_denied_and_params_left_untouched():
     state.upsert_gap(
         {"canonical_id": "gap.framework.scheduler", "domain_hint": "serving_specialist", "severity": "high"}
     )
-    gate = PolicyGate(role_registry=default_role_registry(), shared_state=state)
+    gate = PolicyGate(shared_state=state)
     params = {"domain": "serving_specialist"}
     with pytest.raises(PolicyDenied) as exc:
         gate.validate_intent(

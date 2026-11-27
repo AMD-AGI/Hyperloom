@@ -19,7 +19,6 @@ from hyperloom.inference_optimizer.session.manifest import (
     load_manifest,
     write_manifest,
 )
-from hyperloom.orchestrator.roles.agent_role import default_role_registry
 from hyperloom.inference_optimizer.protocol.intent import Intent, IntentType
 from hyperloom.orchestrator.policy.denial import PolicyDenied
 from hyperloom.orchestrator.policy.gate import PolicyGate
@@ -444,7 +443,7 @@ async def test_sub_agent_runner_skips_unknown_action(tmp_path, monkeypatch):
 
 
 def _gate(tmp_path: Path) -> PolicyGate:
-    return PolicyGate(role_registry=default_role_registry(), session_dir=tmp_path)
+    return PolicyGate(session_dir=tmp_path)
 
 
 def test_policy_path_inside_session_dir_passes(tmp_path):

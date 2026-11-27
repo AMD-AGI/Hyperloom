@@ -469,19 +469,10 @@ async def test_real_component_writes_plan_json_before_spawn(build_coord, tmp_pat
 def test_targeted_build_params_pass_policy_gate(tmp_path):
     """Build params must not be misidentified as path-like fields."""
     from hyperloom.orchestrator.policy.gate import PolicyGate
-    from hyperloom.orchestrator.roles.agent_role import AgentRole
-    from hyperloom.inference_optimizer.protocol.intent import IntentType
 
     session_dir = tmp_path / "session"
     session_dir.mkdir()
-    orch_role = AgentRole(
-        name="orchestration",
-        allowed_intents=frozenset(IntentType),
-    )
-    gate = PolicyGate(
-        role_registry={"orchestration": orch_role},
-        session_dir=session_dir,
-    )
+    gate = PolicyGate(session_dir=session_dir)
     action = TargetedBuildAction(
         gap_id="gap.enablement.fp4_moe",
         framework="vllm",

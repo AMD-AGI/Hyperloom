@@ -112,7 +112,6 @@ def test_seen_pr_ids_roundtrip():
 
 @pytest.mark.asyncio
 async def test_internal_research_scout_task_is_readonly(tmp_path: Path):
-    from hyperloom.orchestrator.roles.agent_role import default_role_registry
     from hyperloom.orchestrator.tests.mock_backend import MockBackend, MockTurn, ScriptedPlan
     from hyperloom.orchestrator.loop.coordinator import AdvisoryServices, Coordinator
 
@@ -140,7 +139,6 @@ async def test_internal_research_scout_task_is_readonly(tmp_path: Path):
     coord = Coordinator(
         session_dir=tmp_path,
         backends=backends,
-        role_registry=default_role_registry(),
         advisory=AdvisoryServices(knowledge_plane=None),
     )
 

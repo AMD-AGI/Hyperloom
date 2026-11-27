@@ -398,6 +398,7 @@ async def test_run_does_not_emergency_below_default_threshold(session_dir):
 @pytest.mark.asyncio
 async def test_run_records_tick_exception_and_continues(session_dir, monkeypatch):
     c = Coordinator(session_dir, backends=_backends_silent())
+    c.orch_prompt.set("orchestration", "SYSTEM PROMPT")
     calls = {"n": 0}
 
     async def flaky_dispatcher_once() -> None:
@@ -424,6 +425,7 @@ async def test_run_repeated_tick_exceptions_stop_as_emergency(
     monkeypatch,
 ):
     c = Coordinator(session_dir, backends=_backends_silent())
+    c.orch_prompt.set("orchestration", "SYSTEM PROMPT")
 
     async def broken_dispatcher_once() -> None:
         raise RuntimeError("persistent dispatcher boom")
@@ -446,6 +448,7 @@ async def test_run_finally_labels_residual_escape_as_coordinator_exception(
     monkeypatch,
 ):
     c = Coordinator(session_dir, backends=_backends_silent())
+    c.orch_prompt.set("orchestration", "SYSTEM PROMPT")
 
     async def broken_dispatcher_once() -> None:
         raise RuntimeError("recorded tick failure")

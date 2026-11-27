@@ -48,7 +48,9 @@ def cyclic_coordinator(session_dir):
     backends = {
         "orchestration": MockBackend(ScriptedPlan(turns=[]), name="orchestration"),
     }
-    return Coordinator(session_dir, backends=backends)
+    coordinator = Coordinator(session_dir, backends=backends)
+    coordinator.orch_prompt.set("orchestration", "SYSTEM PROMPT")
+    return coordinator
 
 
 def _arm_cycle_end_loopback(st):
@@ -226,14 +228,12 @@ async def _build_minimal_coord(tmp_path: Path, monkeypatch):
 
     idle_plan = ScriptedPlan(turns=[])
     backends = {"orchestration": MockBackend(idle_plan)}
-    from hyperloom.orchestrator.roles.agent_role import default_role_registry
     from .conftest import seed_target_analysis_marker
 
     seed_target_analysis_marker(sd)
     return Coordinator(
         session_dir=sd,
         backends=backends,
-        role_registry=default_role_registry(),
         advisory=AdvisoryServices(knowledge_plane=None),
     )
 

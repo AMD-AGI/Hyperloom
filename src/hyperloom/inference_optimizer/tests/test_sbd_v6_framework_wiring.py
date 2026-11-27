@@ -22,7 +22,6 @@ from hyperloom.inference_optimizer.session.session_binding import session_scope
 from hyperloom.orchestrator.actions.executors.integrate._integrate_vocabulary import RESULT_BENCHED
 from hyperloom.orchestrator.loop.coordinator import AdvisoryServices, Coordinator
 from hyperloom.orchestrator.phases.machine import Transition
-from hyperloom.orchestrator.roles.agent_role import default_role_registry
 from hyperloom.orchestrator.tests.mock_backend import MockBackend, MockTurn, ScriptedPlan
 from hyperloom.orchestrator.phases.framework_records import ProgressStamp
 
@@ -40,12 +39,13 @@ def _tr(reason: str) -> Transition:
 def _coordinator(session_dir: Path) -> Coordinator:
     """Build a real Coordinator with idle agents."""
     idle = ScriptedPlan(turns=[MockTurn(intents=[])])
-    return Coordinator(
+    coordinator = Coordinator(
         session_dir=session_dir,
         backends={"orchestration": MockBackend(idle)},
-        role_registry=default_role_registry(),
         advisory=AdvisoryServices(knowledge_plane=None),
     )
+    coordinator.orch_prompt.set("orchestration", "SYSTEM PROMPT")
+    return coordinator
 
 
 def _events(session_dir: Path) -> list[dict[str, Any]]:

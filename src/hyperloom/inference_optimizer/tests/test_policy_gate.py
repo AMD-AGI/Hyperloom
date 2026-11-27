@@ -29,7 +29,6 @@ from hyperloom.orchestrator.policy.denial import PolicyDenied
 from hyperloom.orchestrator.policy.gate import PolicyGate
 from hyperloom.orchestrator.policy.projection import ResourceFacts
 from hyperloom.orchestrator.prompts.prompt_builder import _section_phase_semantics
-from hyperloom.orchestrator.roles.agent_role import default_role_registry
 from hyperloom.orchestrator.state.shared_state import SharedState
 
 from .conftest import silent_backends
@@ -48,7 +47,6 @@ def _llm_gate(resources: ResourceFacts | None = None) -> PolicyGate:
         PolicyGate: The gate under test.
     """
     return PolicyGate(
-        role_registry=default_role_registry(),
         shared_state=SharedState(session_id="t", phase="KERNEL_AGENT"),
         resources=resources or ResourceFacts(),
     )

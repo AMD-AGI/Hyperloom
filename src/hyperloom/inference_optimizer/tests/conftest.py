@@ -183,7 +183,6 @@ def make_coordinator(session_dir: Path, *, shared_state_overrides: dict[str, Any
     by assigning to the returned instance directly after construction.
     """
     from hyperloom.orchestrator.loop.coordinator import Coordinator
-    from hyperloom.orchestrator.roles.agent_role import default_role_registry
     from hyperloom.orchestrator.tests.mock_backend import MockBackend, ScriptedPlan
     from hyperloom.inference_optimizer.protocol.intent import Intent, IntentType
 
@@ -199,9 +198,9 @@ def make_coordinator(session_dir: Path, *, shared_state_overrides: dict[str, Any
     coord = Coordinator(
         session_dir=session_dir,
         backends=backends,
-        role_registry=coord_kwargs.pop("role_registry", None) or default_role_registry(),
         **coord_kwargs,
     )
+    coord.orch_prompt.set("orchestration", "SYSTEM PROMPT")
     if shared_state_overrides:
         for k, v in shared_state_overrides.items():
             setattr(coord.shared_state, k, v)
@@ -620,7 +619,9 @@ def make_idle_coordinator(session_dir: Path):
     backends = {
         "orchestration": MockBackend(ScriptedPlan(turns=[]), name="orchestration"),
     }
-    return Coordinator(session_dir, backends=backends)
+    coordinator = Coordinator(session_dir, backends=backends)
+    coordinator.orch_prompt.set("orchestration", "SYSTEM PROMPT")
+    return coordinator
 
 
 def silent_backends() -> dict[str, object]:

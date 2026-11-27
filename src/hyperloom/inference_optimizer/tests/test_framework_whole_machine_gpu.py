@@ -22,7 +22,6 @@ def _build_coord(
     tp: int = 0,
 ):
     """Build a minimal Coordinator with a deterministic GPU env."""
-    from hyperloom.orchestrator.roles.agent_role import default_role_registry
     from hyperloom.orchestrator.tests.mock_backend import MockBackend, MockTurn, ScriptedPlan
     from hyperloom.orchestrator.loop.coordinator import AdvisoryServices, Coordinator
     from hyperloom.orchestrator.state.shared_state import SharedState
@@ -52,7 +51,6 @@ def _build_coord(
     return Coordinator(
         session_dir=tmp_path,
         backends=backends,
-        role_registry=default_role_registry(),
         advisory=AdvisoryServices(knowledge_plane=None),
     )
 

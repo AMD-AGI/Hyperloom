@@ -32,20 +32,9 @@ TOPIC_ALLOWLIST = frozenset(
 # The ``source`` of the reply to a request deferred because the bench lanes are busy. The reply asks nothing of its
 # reader: the same request is deferred the same way until the lanes free.
 LANES_BUSY_SOURCE = "lanes_busy"
-# Per-role inbox subscriptions; a role absent from this map receives nothing.
-ROLE_SUBSCRIPTIONS: dict[str, frozenset[str]] = {
-    "orchestration": frozenset(
-        {
-            "delegated_result",
-            "observation",
-            "event",
-            "decision",
-            "alert",
-            "strategy_change",
-            "response",
-        }
-    ),
-}
+# An agent's inbox past a sequence id. Its own rows stay out: they would repeat in its next prompt what it just said,
+# and a turn would wake the next one.
+_INBOX_WHERE = "seq > ? AND from_agent != ?"
 
 
 @dataclass
@@ -178,47 +167,29 @@ class MessageBus:
 
     async def replay_for(
         self,
-        to_agent: str,
+        agent: str,
         *,
         after_seq: int,
         limit: int = DEFAULT_EVENTS_KEEP_RECENT,
     ) -> list[Message]:
-        """Inbox for one agent: subscribed topics only, never its own messages.
+        """Inbox for ``agent``: every message past ``after_seq`` it did not send itself.
 
-        Raw-DB readers (``tail``, ``inbox_context_sync``, ``recent_outcomes_context_sync``) bypass both rules.
+        Raw-DB readers (``tail``, ``inbox_context_sync``, ``recent_outcomes_context_sync``) show its own rows too.
         """
-        inbox = _inbox_filter(to_agent, after_seq)
-        if inbox is None:
-            return []
-        where, params = inbox
         rows = await self.db.fetchall(
-            f"SELECT * FROM events WHERE {where} ORDER BY seq ASC LIMIT ?",  # nosec B608 - fixed templates.
-            (*params, limit),
+            f"SELECT * FROM events WHERE {_INBOX_WHERE} ORDER BY seq ASC LIMIT ?",  # nosec B608 - fixed template.
+            (after_seq, agent, limit),
         )
         return [Message.from_row(r) for r in rows]
 
-    async def has_actionable_inbox(self, to_agent: str, *, after_seq: int) -> bool:
-        """Whether ``to_agent``'s inbox past ``after_seq`` holds a message that asks something of it."""
-        inbox = _inbox_filter(to_agent, after_seq)
-        if inbox is None:
-            return False
-        where, params = inbox
+    async def has_actionable_inbox(self, agent: str, *, after_seq: int) -> bool:
+        """Whether ``agent``'s inbox past ``after_seq`` holds a message that asks something of it."""
         row = await self.db.fetchone(
-            f"SELECT EXISTS(SELECT 1 FROM events WHERE {where}"  # nosec B608 - fixed templates.
+            f"SELECT EXISTS(SELECT 1 FROM events WHERE {_INBOX_WHERE}"  # nosec B608 - fixed template.
             " AND NOT (topic = 'response' AND json_extract(payload, '$.source') IS ?)) AS found",
-            (*params, LANES_BUSY_SOURCE),
+            (after_seq, agent, LANES_BUSY_SOURCE),
         )
         return bool(row and row["found"])
 
 
-def _inbox_filter(to_agent: str, after_seq: int) -> tuple[str, tuple[Any, ...]] | None:
-    """The WHERE clause and its parameters selecting ``to_agent``'s inbox past ``after_seq``; None when it has none."""
-    subscribed = ROLE_SUBSCRIPTIONS.get(to_agent, frozenset())
-    if not subscribed:
-        return None
-    placeholders = ",".join("?" * len(subscribed))
-    where = f"seq > ? AND (to_agent = ? OR to_agent = '*') AND from_agent != ? AND topic IN ({placeholders})"
-    return where, (after_seq, to_agent, to_agent, *subscribed)
-
-
-__all__ = ["LANES_BUSY_SOURCE", "Message", "MessageBus", "ROLE_SUBSCRIPTIONS", "TOPIC_ALLOWLIST"]
+__all__ = ["LANES_BUSY_SOURCE", "Message", "MessageBus", "TOPIC_ALLOWLIST"]

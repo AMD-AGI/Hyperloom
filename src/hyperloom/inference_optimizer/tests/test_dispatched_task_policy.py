@@ -18,7 +18,6 @@ from hyperloom.orchestrator.loop.sub_agent_runner import SubAgentRunner
 from hyperloom.orchestrator.policy.denial import PolicyDenied
 from hyperloom.orchestrator.policy.gate import PolicyGate
 from hyperloom.orchestrator.policy.projection import ResourceFacts
-from hyperloom.orchestrator.roles.agent_role import default_role_registry
 from hyperloom.orchestrator.state.shared_state import SharedState
 from hyperloom.orchestrator.state.task_registry import TaskRegistry, TaskSpec
 from hyperloom.orchestrator.tests.mock_backend import MockBackend, ScriptedPlan
@@ -71,7 +70,6 @@ def _gate(tmp_path: Path, monkeypatch) -> tuple[PolicyGate, Path]:
     sd = paths.make_session_dir()
     state = SharedState.load_or_init(sd)
     gate = PolicyGate(
-        role_registry=default_role_registry(),
         session_dir=sd,
         shared_state=state,
         resources=ResourceFacts(),
@@ -103,7 +101,6 @@ def _runner_with_policy(tmp_path: Path, monkeypatch, *, shared_state: object | N
     tasks = TaskRegistry(db, dispatch_origin_provider=lambda: _ORIGIN)
     state = shared_state if shared_state is not None else SharedState.load_or_init(sd)
     gate = PolicyGate(
-        role_registry=default_role_registry(),
         session_dir=sd,
         shared_state=state,
         resources=ResourceFacts(),

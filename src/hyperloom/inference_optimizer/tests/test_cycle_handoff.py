@@ -76,12 +76,12 @@ async def test_the_handoff_turn_is_billed_like_any_reactor_turn(session_dir, mon
     billed: list[str] = []
     monkeypatch.setattr(
         "hyperloom.orchestrator.loop.coordinator.trace_reactor_llm_call",
-        lambda _session_dir, _state, agent, result, **_: billed.append(agent),
+        lambda _session_dir, _state, result, **_: billed.append(result.raw_text),
     )
 
     await coord.phase_cycle_end.pump()
 
-    assert billed == ["orchestration"]
+    assert billed == [_DIRECTIVE]
 
 
 @pytest.mark.asyncio

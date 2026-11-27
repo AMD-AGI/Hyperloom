@@ -16,7 +16,6 @@ from hyperloom.orchestrator.policy.gate import PolicyGate
 from hyperloom.orchestrator.prompts.speculative_decoding_focus import speculative_decoding_focus
 from hyperloom.orchestrator.specialists.prompt_inputs import SpecialistPromptInputs
 from hyperloom.orchestrator.prompts.specialist_prompt_builder import build_specialist_prompts
-from hyperloom.orchestrator.roles.agent_role import default_role_registry
 from hyperloom.orchestrator.specialists.domains import get_domain, normalize_dispatch_tags
 from hyperloom.orchestrator.specialists.runner import SpecialistRunner, SpecialistSubprocessConfig
 from hyperloom.orchestrator.state.shared_state import SharedState
@@ -52,7 +51,7 @@ def test_orchestration_may_delegate_to_the_domain_under_its_own_kb_anchor():
     assert domain is not None
     assert domain.llm_selectable
     assert normalize_dispatch_tags({"domain": DOMAIN_KEY}) == ["speculative_decoding"]
-    gate = PolicyGate(role_registry=default_role_registry())
+    gate = PolicyGate()
     gate.shared_state = SharedState()
     gate.validate_intent(
         "orchestration",
@@ -149,7 +148,6 @@ async def test_dispatch_tells_the_specialist_the_session_model(tmp_path, payload
     coord = Coordinator(
         session_dir=tmp_path,
         backends={"orchestration": MockBackend(idle)},
-        role_registry=default_role_registry(),
         advisory=AdvisoryServices(knowledge_plane=None),
     )
     params = {**payload, "mode": "research"}

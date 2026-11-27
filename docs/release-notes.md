@@ -61,6 +61,22 @@ it.
   `critic` section of `session_breakdown.json` and its `critic_review` rows
   are no longer written; and resuming a session started before this change
   is not supported. See [Upgrade](reference/upgrade.md).
+- **Two policy denials that could not fire are removed.** With Orchestration
+  the only agent that takes turns, the optimizer no longer keeps a registry of
+  agent roles or narrows the intent vocabulary to one. What Orchestration is
+  offered is unchanged: the `emit_intent` schema, the output-format block and
+  its tool list are what they were, because its set was every intent type. A
+  `policy_denied` observation no longer carries rule `role` (an unknown
+  agent, or an intent type outside the agent's set) or rule
+  `custom_specialist_only` (a `specialist`, `explore` or `integrate_patch`
+  from Orchestration in FRAMEWORK_AGENT under
+  `HYPERLOOM_CUSTOM_SPECIALIST_ONLY=1`): no second agent exists to refuse, and
+  Orchestration takes no turn in that mode and phase, so neither rule had an
+  intent to deny. `emit_intent` no longer answers `this role cannot emit`; a
+  type outside the vocabulary is still refused in the same turn as
+  `unknown intent_type`. The hint of rule `tool_whitelist_role` now says
+  Orchestration holds WebSearch and WebFetch `directly as tools`. See
+  [Upgrade](reference/upgrade.md).
 - **forge-loop runs every round as lanes and has no planning stage.** Every
   iteration is one round: one lane per focus the Analysis Agent divides its
   evidence into (at most `--lanes`, and one lane with no focus when it divides

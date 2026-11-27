@@ -224,7 +224,7 @@ async def test_the_reseeded_override_is_what_the_orchestration_turn_loads(tmp_pa
 
     assert handler._reseed_orch_prompt_for_phase("EXPLORE") is True
 
-    assert await coord.conversation.load_system_prompt("orchestration") == "PROMPT[phase=EXPLORE]"
+    assert coord.orch_prompt.get("orchestration") == "PROMPT[phase=EXPLORE]"
 
 
 @pytest.mark.parametrize(
@@ -365,13 +365,12 @@ def test_reloop_infeasible_when_the_target_phase_is_disabled():
 
 def test_the_payload_contract_lists_only_required_keys():
     """Required keys and value constraints are different claims."""
-    from hyperloom.inference_optimizer.protocol.intent import IntentType
     from hyperloom.orchestrator.roles.mcp_emit_intent import (
         PAYLOAD_REQUIRED,
         payload_contract,
     )
 
-    rendered = payload_contract(IntentType)
+    rendered = payload_contract()
 
     assert "alert:{severity,summary}" in rendered
     assert "severity ∈" not in rendered
@@ -382,10 +381,9 @@ def test_the_payload_contract_lists_only_required_keys():
 
 def test_the_payload_constraints_are_rendered_separately():
     """State the closed value sets and the optional dials as what they are."""
-    from hyperloom.inference_optimizer.protocol.intent import IntentType
     from hyperloom.orchestrator.roles.mcp_emit_intent import payload_constraints
 
-    rendered = payload_constraints(IntentType)
+    rendered = payload_constraints()
 
     assert "alert.severity ∈ low|medium|high" in rendered
     assert "prune_branch.scope ∈ family|queued" in rendered
@@ -394,10 +392,10 @@ def test_the_payload_constraints_are_rendered_separately():
 
 def test_the_payload_constraints_state_the_extend_lease_step_cap():
     """An agent asking for more than one step at a time is told the cap before the gate denies it."""
-    from hyperloom.inference_optimizer.protocol.intent import EXTEND_LEASE_MAX_SEC, IntentType
+    from hyperloom.inference_optimizer.protocol.intent import EXTEND_LEASE_MAX_SEC
     from hyperloom.orchestrator.roles.mcp_emit_intent import payload_constraints
 
-    rendered = payload_constraints(IntentType)
+    rendered = payload_constraints()
 
     assert f"extend_lease.extra_sec ≤ {EXTEND_LEASE_MAX_SEC} per call" in rendered
     assert "while the task runs" in rendered
@@ -405,16 +403,15 @@ def test_the_payload_constraints_state_the_extend_lease_step_cap():
 
 def test_both_provider_descriptions_carry_the_constraints():
     """Claude's tool description and Codex's output block say the same thing."""
-    from hyperloom.inference_optimizer.protocol.intent import IntentType
     from hyperloom.orchestrator.roles.codex import build_output_instructions
     from hyperloom.orchestrator.roles.mcp_emit_intent import (
         build_emit_intent_tool_input_schema,
         payload_constraints,
     )
 
-    constraints = payload_constraints(IntentType)
-    claude_description = build_emit_intent_tool_input_schema(IntentType)["properties"]["payload"]["description"]
-    codex_block = build_output_instructions(frozenset(IntentType))
+    constraints = payload_constraints()
+    claude_description = build_emit_intent_tool_input_schema()["properties"]["payload"]["description"]
+    codex_block = build_output_instructions()
 
     assert constraints in claude_description
     assert constraints in codex_block
@@ -460,20 +457,3 @@ def test_every_declared_transport_still_renders(registry, transport):
     )
 
     assert "Output protocol" in prompt
-
-
-def test_a_role_with_no_constraints_gets_no_constraints_line():
-    """Say nothing rather than an empty clause."""
-    from hyperloom.inference_optimizer.protocol.intent import IntentType
-    from hyperloom.orchestrator.roles.codex import build_output_instructions
-    from hyperloom.orchestrator.roles.mcp_emit_intent import build_intent_envelope_schema
-
-    only_send = frozenset({IntentType.SEND_MESSAGE})
-
-    block = build_output_instructions(only_send)
-    schema = build_intent_envelope_schema(only_send)
-    payload_description = schema["properties"]["intents"]["items"]["properties"]["payload"]["description"]
-
-    assert "Constraints" not in block
-    assert "Constraints" not in payload_description
-    assert "send_message:{topic}" in block

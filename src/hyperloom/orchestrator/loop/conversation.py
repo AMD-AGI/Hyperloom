@@ -33,7 +33,7 @@ from hyperloom.common.prompt_safety import flatten_for_prompt as _flatten_for_in
 
 from ..state.task_registry import Task
 from hyperloom.inference_optimizer.session.session_paths import runs_dir
-from ..collaborator import CoordinatorCollaborator
+from ..collaborator import ORCHESTRATION_AGENT, CoordinatorCollaborator
 import logging as _logging
 
 if TYPE_CHECKING:
@@ -309,8 +309,8 @@ class ConversationCollaborator(CoordinatorCollaborator):
         super().__init__(coordinator)
         # The Experience KB read rendered into the latest orchestration prompt; proposals emitted on that tick cite it.
         self.kb_last_read: ExperienceKBEvidence | None = None
-        # Per-agent seq of the last message its prompt rendered.
-        self._rendered_cursor: dict[str, int] = {}
+        # Seq of the last message the latest prompt rendered; None until one renders a message.
+        self._rendered_cursor: int | None = None
         # The phase and the queued and running task ids Orchestration's last settled turn left, and when it settled.
         self._settled_view: tuple[str, frozenset[str]] | None = None
         self._settled_at = 0.0
@@ -352,7 +352,7 @@ class ConversationCollaborator(CoordinatorCollaborator):
 
     def attach_orchestration_context_tools(self) -> None:
         """Bind a read-only ContextProvider to the orchestration backend (no-op without setter)."""
-        backend = self.backends.get("orchestration")
+        backend = self.backends[ORCHESTRATION_AGENT]
         setter = getattr(backend, "set_context_provider", None)
         if setter is None:
             return
@@ -387,7 +387,7 @@ class ConversationCollaborator(CoordinatorCollaborator):
 
     def _context_inbox_reader(self, since_seq: int = 0) -> str:
         """Synchronous projection of the orchestration inbox tail (sync SQLite path)."""
-        msgs = self.bus.inbox_context_sync("orchestration", after_seq=int(since_seq or 0))
+        msgs = self.bus.inbox_context_sync(ORCHESTRATION_AGENT, after_seq=int(since_seq or 0))
         if not msgs:
             return "(no inbox events)"
 
@@ -522,13 +522,7 @@ class ConversationCollaborator(CoordinatorCollaborator):
                 return f"(analysis.md unreadable at {path}: {exc!r})"
         return "(no analysis.md snapshot yet)"
 
-    def record_reactor_conversation(
-        self,
-        agent_name: str,
-        result: BackendTurnResult,
-        *,
-        context: str = "",
-    ) -> None:
+    def record_reactor_conversation(self, result: BackendTurnResult, *, context: str = "") -> None:
         """Append one ``conversations.jsonl`` row for a reactor turn, with ``context`` ahead of the backend's prompt."""
         metadata = result.metadata or {}
         prompt = metadata.get("prompt")
@@ -537,11 +531,11 @@ class ConversationCollaborator(CoordinatorCollaborator):
             return
         record = ConversationRecord(
             session_id=self.session_dir.name,
-            component=agent_name,
+            component=ORCHESTRATION_AGENT,
             # Same turn metadata the token row is built from, so both halves carry the backend's call_id when it
             # stamped one.
             call_id=metadata.get("call_id"),
-            role=agent_name,
+            role=ORCHESTRATION_AGENT,
             tick=int(self.shared_state.tick or 0),
             phase=(self.shared_state.phase or "") or None,
             model=metadata.get("model"),
@@ -600,30 +594,30 @@ class ConversationCollaborator(CoordinatorCollaborator):
                 sections.append(trajectory_block)
         return sections
 
-    async def _render_inbox_sections(self, agent_name: str) -> list[str]:
-        """Render the inbox tail since this agent's cursor, oldest first, and note what it showed.
+    async def _render_inbox_sections(self) -> list[str]:
+        """Render the inbox tail since the read cursor, oldest first, and note what it showed.
 
         What the character budget leaves out waits for the next turn.
         """
-        cursor = await self.cursors.load(agent_name)
-        unread = await self.bus.replay_for(agent_name, after_seq=cursor.last_processed_seq)
+        cursor = await self.cursors.load(ORCHESTRATION_AGENT)
+        unread = await self.bus.replay_for(ORCHESTRATION_AGENT, after_seq=cursor.last_processed_seq)
         inbox_lines = _fit_to_budget([f"  {_format_inbox_event(m)}" for m in unread], _INBOX_PROMPT_CHARS)
         read = unread[: len(inbox_lines)]
         last_seq = cursor.last_processed_seq
         if read:
             last_seq = int(read[-1].seq)
-            self._rendered_cursor[agent_name] = last_seq
+            self._rendered_cursor = last_seq
         if not inbox_lines:
-            return [f"=== Inbox for {agent_name} ===", "(no new messages)"]
-        sections = [f"=== Inbox for {agent_name} (newest last) ===", *inbox_lines]
+            return [f"=== Inbox for {ORCHESTRATION_AGENT} ===", "(no new messages)"]
+        sections = [f"=== Inbox for {ORCHESTRATION_AGENT} (newest last) ===", *inbox_lines]
         if len(read) < len(unread):
             sections.append(
                 f"  (+{len(unread) - len(read)} newer messages after seq={last_seq} held for the next turn)"
             )
         return sections
 
-    async def compose_prompt(self, agent_name: str) -> ComposedPrompt:
-        """Compose the prompt for *agent_name*: the session context, and the per-tick blocks ending with the inbox tail."""
+    async def compose_prompt(self) -> ComposedPrompt:
+        """Compose Orchestration's prompt: the session context, and the per-tick blocks ending with the inbox tail."""
         context: list[str] = [f"SESSION_DIR={self.session_dir}"]
         turn: list[str] = []
 
@@ -632,26 +626,25 @@ class ConversationCollaborator(CoordinatorCollaborator):
             turn.append("=== Phase ===")
             turn.append(phase_block)
 
-        if agent_name == "orchestration":
-            turn.append("=== Mission progress ===")
-            turn.append(self.shared_state.to_mission_summary())
-            deadline = self._coord.run_deadline
-            started = self._coord.run_started_monotonic
-            if deadline is not None and started is not None:
-                remaining_min = max(0.0, deadline.remaining() / 60.0)
-                turn.append("=== Time budget ===")
+        turn.append("=== Mission progress ===")
+        turn.append(self.shared_state.to_mission_summary())
+        deadline = self._coord.run_deadline
+        started = self._coord.run_started_monotonic
+        if deadline is not None and started is not None:
+            remaining_min = max(0.0, deadline.remaining() / 60.0)
+            turn.append("=== Time budget ===")
+            turn.append(
+                f"elapsed={(time.monotonic() - started) / 60.0:.1f}min  remaining={remaining_min:.1f}min  "
+                f"budget={self.shared_state.max_minutes or 0}min  "
+                f"closing_phase={self.shared_state.closing_phase}"
+            )
+            if remaining_min <= 5.0 and not self.shared_state.closing_phase:
                 turn.append(
-                    f"elapsed={(time.monotonic() - started) / 60.0:.1f}min  remaining={remaining_min:.1f}min  "
-                    f"budget={self.shared_state.max_minutes or 0}min  "
-                    f"closing_phase={self.shared_state.closing_phase}"
+                    "WARNING: < 5 min remaining. Avoid new `explore` rounds "
+                    "(which bench every variant on the stack) — they will "
+                    "likely be cut by the deadline. The Coordinator will "
+                    "auto-enqueue `report` when the session closes."
                 )
-                if remaining_min <= 5.0 and not self.shared_state.closing_phase:
-                    turn.append(
-                        "WARNING: < 5 min remaining. Avoid new `explore` rounds "
-                        "(which bench every variant on the stack) — they will "
-                        "likely be cut by the deadline. The Coordinator will "
-                        "auto-enqueue `report` when the session closes."
-                    )
         turn.append("=== Tick ===")
         turn.append(self.shared_state.to_tick_summary())
         # The session ledger moves with every action that lands, so it belongs to
@@ -667,65 +660,49 @@ class ConversationCollaborator(CoordinatorCollaborator):
         context.extend(self.shared_state.to_constraint_sections())
         context.append("=== Resource pools ===")
         context.append(resource_pools_summary(self.shared_state))
-        if agent_name == "orchestration":
-            context.extend(self._orchestration_context_sections())
-            # A task finishing or a plateau count lands between
-            # two ticks, so these blocks follow the ledger into the turn: the cached
-            # prefix ends above them and holds for the session.
-            turn.extend(await self._orchestration_turn_sections())
+        context.extend(self._orchestration_context_sections())
+        # A task finishing or a plateau count lands between
+        # two ticks, so these blocks follow the ledger into the turn: the cached
+        # prefix ends above them and holds for the session.
+        turn.extend(await self._orchestration_turn_sections())
 
-        turn.extend(await self._render_inbox_sections(agent_name))
+        turn.extend(await self._render_inbox_sections())
 
         return ComposedPrompt(context="\n".join(context), turn="\n".join(turn))
 
-    async def admit_turn(self, agent_name: str, now_unix: float) -> bool:
-        """Whether ``agent_name`` takes a turn this tick.
+    async def admit_turn(self, now_unix: float) -> bool:
+        """Whether Orchestration takes a turn this tick.
 
-        Orchestration sits out custom-only FRAMEWORK_AGENT, where all it may emit is denied. Elsewhere it takes a turn
-        when the phase or the queued and running tasks differ from what its last settled turn left, when its inbox holds
-        a message that asks something of it, or once the heartbeat elapses.
+        It sits out custom-only FRAMEWORK_AGENT, which the Coordinator runs on the custom specialist alone. Elsewhere it
+        takes a turn when the phase or the queued and running tasks differ from what its last settled turn left, when
+        its inbox holds a message that asks something of it, or once the heartbeat elapses.
         """
-        if agent_name != "orchestration":
-            return True
         if custom_only_framework(self.shared_state):
             return False
         if now_unix - self._settled_at >= _ORCHESTRATION_HEARTBEAT_SEC:
             return True
         if await self._orchestration_view() != self._settled_view:
             return True
-        cursor = await self.cursors.load(agent_name)
-        return await self.bus.has_actionable_inbox(agent_name, after_seq=cursor.last_processed_seq)
+        cursor = await self.cursors.load(ORCHESTRATION_AGENT)
+        return await self.bus.has_actionable_inbox(ORCHESTRATION_AGENT, after_seq=cursor.last_processed_seq)
 
     async def _orchestration_view(self) -> tuple[str, frozenset[str]]:
         return (self.shared_state.phase or "").upper(), await self.tasks.active_task_ids()
 
-    async def compose_turn(self, agent_name: str, backend: Any) -> TurnPrompt:
+    async def compose_turn(self, backend: Any) -> TurnPrompt:
         """The system prompt and prompt for one turn; a backend that caches its system prompt gets the session context in it."""
-        system_prompt = await self.load_system_prompt(agent_name)
-        composed = await self.compose_prompt(agent_name)
+        system_prompt = self.orch_prompt.get(ORCHESTRATION_AGENT)
+        composed = await self.compose_prompt()
         if getattr(backend, "system_prompt_cached", False):
             return TurnPrompt(f"{system_prompt}\n\n{composed.context}", composed.turn, composed.context)
         return TurnPrompt(system_prompt, composed.text, "")
 
-    async def settle_turn(self, agent_name: str) -> None:
-        """Advance the agent's read cursor to the last message its prompt rendered; for Orchestration, note what it left."""
-        seq = self._rendered_cursor.get(agent_name)
-        if seq is not None:
-            await self.cursors.advance(agent_name, seq=seq)
-        if agent_name == "orchestration":
-            self._settled_view = await self._orchestration_view()
-            self._settled_at = time.time()
-
-    async def load_system_prompt(self, agent_name: str) -> str:
-        """Load the system prompt for an agent, honoring overrides."""
-        override = self.orch_prompt.get(agent_name)
-        if override is not None:
-            return override
-        role = self.role_registry[agent_name]
-        try:
-            return role.load_system_prompt()
-        except FileNotFoundError:
-            return f"(no system prompt for {agent_name})"
+    async def settle_turn(self) -> None:
+        """Advance the read cursor to the last message the prompt rendered, and note what the turn left."""
+        if self._rendered_cursor is not None:
+            await self.cursors.advance(ORCHESTRATION_AGENT, seq=self._rendered_cursor)
+        self._settled_view = await self._orchestration_view()
+        self._settled_at = time.time()
 
     # Advisory prompt blocks (folded in from the former AdvisoryCollaborator).
     def plateau_advisory_block(self) -> str:

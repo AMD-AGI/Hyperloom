@@ -3,8 +3,8 @@
 
 """PolicyGate — the single chokepoint every parsed Intent passes before any side effect.
 
-The gate decides synchronously from the intent, the role registry and static
-config, and makes no database call. Three rules need resources it cannot read
+The gate decides synchronously from the intent and static config, and makes no
+database call. Three rules need resources it cannot read
 -- the bring-up round holding the machine, a specialist's GPU request and a
 lease extension -- and take their answer from ``policy/projection.py``. Those
 refusals are labelled advisory because they are read off a snapshot rather than
@@ -17,7 +17,7 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import Any
 
 from hyperloom.inference_optimizer.framework_paths import (
     resolve_session_framework_root,
@@ -29,7 +29,7 @@ from hyperloom.inference_optimizer.protocol.action_surfaces import (
     COORDINATOR_INTERNAL_ACTIONS,
     COORDINATOR_OWNED_KERNEL_REQUEST_KINDS,
 )
-from ..mcp_tool_names import agent_tool_grant, qualified_context_tool_name
+from ..mcp_tool_names import qualified_context_tool_name
 from .projection import (
     RULE_GPU_EXCEEDS_CAPACITY,
     RULE_GPU_POOL_DISABLED,
@@ -38,7 +38,7 @@ from .projection import (
     ResourceFacts,
 )
 from ..specialists.domains import normalize_dispatch_tags
-from .custom_specialist import deny_coordinator_dispatched_delegate, deny_search_under_custom_only
+from .custom_specialist import deny_coordinator_dispatched_delegate
 from .denial import PolicyDenied
 from .send_message import deny_malformed_send_message
 from ..specialists.profile import SCOPE_FREEFORM as SPECIALIST_SCOPE_FREEFORM
@@ -52,10 +52,6 @@ from .validators import (
     validate_specialist_framework,
     validate_specialist_max_turns_raw,
 )
-
-if TYPE_CHECKING:  # pragma: no cover — type-only
-    from ..roles.agent_role import AgentRole
-
 
 log = logging.getLogger(__name__)
 
@@ -112,8 +108,7 @@ PR_MONITOR_TOOL_NAMES: frozenset[str] = frozenset(
     }
 )
 
-#: Web tools. :meth:`PolicyGate.allowed_tools_for_agent` grants them to the
-#: orchestration agent as tools, never as action names.
+#: Web tools. The orchestration agent holds them as tools, never as action names.
 WEB_TOOL_NAMES: frozenset[str] = frozenset({"WebSearch", "WebFetch"})
 
 
@@ -190,7 +185,6 @@ class PolicyGate:
     With a ``session_dir``, PATH_LIKE_FIELDS must resolve under it.
     """
 
-    role_registry: dict[str, "AgentRole"]
     session_dir: Path | None = None
     shared_state: Any | None = None
     # Default-constructed, the three resource rules refuse nothing and every
@@ -199,7 +193,7 @@ class PolicyGate:
 
     # Public API
     def validate_intent(self, from_agent: str, intent: Intent) -> None:
-        """Raise :class:`PolicyDenied` if the intent is not allowed (cheapest checks first: role → allowed_intents → structural → paths).
+        """Raise :class:`PolicyDenied` if the intent is not allowed (structural checks first, then paths).
 
         Args:
             from_agent (str): the identity of the emitting agent.
@@ -209,17 +203,6 @@ class PolicyGate:
             PolicyDenied: when the intent is not permitted; the ``rule``
                 attribute identifies which guard fired.
         """
-        role = self.role_registry.get(from_agent)
-        if role is None:
-            raise PolicyDenied(f"unknown agent {from_agent!r}", rule="role")
-
-        if intent.type not in role.allowed_intents:
-            raise PolicyDenied(
-                f"role={role.name!r} cannot emit intent_type={intent.type.value!r}",
-                rule="role",
-                hint=f"role {role.name!r} may emit: {', '.join(t.value for t in IntentType if t in role.allowed_intents)}.",
-            )
-
         payload = intent.payload or {}
 
         # Per-intent structural validators
@@ -230,15 +213,15 @@ class PolicyGate:
         elif intent.type == IntentType.SEND_MESSAGE:
             deny_malformed_send_message(payload)
         elif intent.type == IntentType.REQUEST:
-            self._validate_request(role, payload)
+            self._validate_request(from_agent, payload)
         elif intent.type == IntentType.EXTEND_LEASE:
             self._validate_extend_lease(payload)
         elif intent.type == IntentType.PRUNE_BRANCH:
             validate_prune_branch(payload)
-        # ALERT carries no extra checks beyond the role gate.
+        # ALERT carries no structural check.
 
         # Path-containment guard for PATH_LIKE_FIELDS in the payload.
-        self._validate_payload_paths(role, intent.type, payload)
+        self._validate_payload_paths(from_agent, intent.type, payload)
 
     def validate_dispatched_task(
         self,
@@ -269,14 +252,11 @@ class PolicyGate:
             raise PolicyDenied("dispatched task missing kind", rule="payload")
         params_dict = dict(params or {}) if isinstance(params, dict) else {}
         payload = {"action_name": kind, "params": params_dict}
-        role = self.role_registry.get("orchestration")
-        if role is None:
-            raise PolicyDenied("unknown agent 'orchestration'", rule="role")
         trusted_framework_targets: frozenset[str] = frozenset()
         if kind == _WARM_REPLAY_ACTION:
             trusted_framework_targets = self._validate_warm_replay_targets(params_dict)
         self._validate_payload_paths(
-            role,
+            "orchestration",
             IntentType.DELEGATE,
             payload,
             trusted_framework_targets=trusted_framework_targets,
@@ -285,24 +265,6 @@ class PolicyGate:
         if kind in COORDINATOR_INTERNAL_ACTIONS:
             return
         self._validate_delegate(payload, check_source=False, task_id=task_id)
-
-    def allowed_tools_for_agent(self, agent_name: str) -> list[str]:
-        """Return the Claude tool list a reactor may use (Codex → []; Claude → emit_intent; orchestration also gets context-pull tools + sandboxed Read + web search).
-
-        The names come from :func:`agent_tool_grant`, so MCP tools carry the
-        ``mcp__<server>__<tool>`` prefix the runtime registers them under (as
-        :data:`PR_MONITOR_TOOL_NAMES` already does).
-
-        Args:
-            agent_name (str): the name of the agent whose tool list is
-                requested.
-
-        Returns:
-            list[str]: the allowed tool names (empty for an unknown role).
-        """
-        if agent_name not in self.role_registry:
-            return []
-        return agent_tool_grant(agent_name)
 
     # Per-intent validators
     def _validate_delegate(
@@ -326,8 +288,6 @@ class PolicyGate:
         action_name = str(payload.get("action_name", "")).strip()
         if not action_name:
             raise PolicyDenied("delegate intent missing action_name", rule="payload")
-        if check_source:
-            deny_search_under_custom_only(self.shared_state, action_name)
         # ``specialist`` bypasses the catalogue; ``_validate_specialist_dispatch`` owns its contract.
         if action_name == SPECIALIST_ACTION_NAME:
             params = payload.get("params")
@@ -344,22 +304,20 @@ class PolicyGate:
     def _validate_propose_action(self, payload: dict[str, Any]) -> None:
         """Validate a ``PROPOSE_ACTION`` intent.
 
-        Requires ``action_name``, then applies the custom-only and bring-up
-        round rules the delegate channel applies. Which actions the phase lets
-        an agent name is the admission chain's rule, not this one's.
+        Requires ``action_name``, then applies the bring-up round rule the
+        delegate channel applies. Which actions the phase lets an agent name is
+        the admission chain's rule, not this one's.
 
         Args:
             payload (dict[str, Any]): the propose_action payload, expected
                 to carry ``action_name`` and optional ``params``.
 
         Raises:
-            PolicyDenied: if ``action_name`` is missing or one of those rules
-                refuses it.
+            PolicyDenied: if ``action_name`` is missing or that rule refuses it.
         """
         action_name = str(payload.get("action_name", "")).strip()
         if not action_name:
             raise PolicyDenied("propose_action missing action_name", rule="payload")
-        deny_search_under_custom_only(self.shared_state, action_name)
         self._validate_baseline_not_mid_round(action_name)
 
     def _validate_baseline_not_mid_round(self, action_name: str, *, task_id: str = "") -> None:
@@ -394,7 +352,7 @@ class PolicyGate:
             hint="Let the round settle; a second bring-up would fight it for the same cards and ports.",
         )
 
-    def _validate_request(self, role: "AgentRole", payload: dict[str, Any]) -> None:
+    def _validate_request(self, from_agent: str, payload: dict[str, Any]) -> None:
         """Validate a ``REQUEST`` intent.
 
         Checks that ``target_agent`` is in :data:`REQUEST_TARGETS`, that
@@ -405,7 +363,7 @@ class PolicyGate:
         and the recipe's ``what_failed`` record.
 
         Args:
-            role (AgentRole): the resolved role of the emitting agent.
+            from_agent (str): the emitting agent, named in the denial.
             payload (dict[str, Any]): the request payload, expected to
                 carry ``target_agent`` and ``kind``.
 
@@ -421,7 +379,7 @@ class PolicyGate:
             raise PolicyDenied("request missing target_agent", rule="payload")
         if target not in REQUEST_TARGETS:
             raise PolicyDenied(
-                f"role={role.name!r} cannot request target_agent={target!r} (allowed: {sorted(REQUEST_TARGETS)!r})",
+                f"role={from_agent!r} cannot request target_agent={target!r} (allowed: {sorted(REQUEST_TARGETS)!r})",
                 rule="request_target",
             )
         kind = str(payload.get("kind", "")).strip()
@@ -439,7 +397,7 @@ class PolicyGate:
                 ),
             )
         validate_gemm_tuning_request(kind)
-        self._validate_tool_whitelist_collision(role.name, kind)
+        self._validate_tool_whitelist_collision(from_agent, kind)
 
     # R5 — tool_whitelist_role
     def _validate_tool_whitelist_collision(self, role_name: str, kind: str) -> None:
@@ -463,7 +421,7 @@ class PolicyGate:
                 f"orchestration agent reaches KB / PR Monitor through the "
                 f"Coordinator-mediated KnowledgePlane facade instead, and "
                 f"additionally holds WebSearch / WebFetch "
-                f"directly via allowed_tools_for_agent."
+                f"directly as tools."
             ),
         )
 
@@ -831,7 +789,7 @@ class PolicyGate:
 
     def _validate_payload_paths(
         self,
-        role: "AgentRole",
+        from_agent: str,
         intent_type: IntentType,
         payload: dict[str, Any],
         *,
@@ -840,8 +798,7 @@ class PolicyGate:
         """Walk payload (recursively); reject path-like values escaping session_dir. No-op when session_dir is None.
 
         Args:
-            role (AgentRole): the resolved role of the emitting agent, used in
-                error messages.
+            from_agent (str): the emitting agent, used in error messages.
             intent_type (IntentType): the intent type, used in error messages.
             payload (dict[str, Any]): the intent payload to walk for path-like
                 fields.
@@ -885,12 +842,12 @@ class PolicyGate:
                 return
             if key not in PATH_LIKE_FIELDS:
                 return
-            self._check_payload_path(role, intent_type, key, node, trusted_framework_targets)
+            self._check_payload_path(from_agent, intent_type, key, node, trusted_framework_targets)
 
         visit(payload, ())
 
     def _check_payload_path(
-        self, role: "AgentRole", intent_type: IntentType, key: str, node: str, trusted_framework_targets: frozenset[str]
+        self, from_agent: str, intent_type: IntentType, key: str, node: str, trusted_framework_targets: frozenset[str]
     ) -> None:
         """Reject one path-like payload value escaping session_dir and every allowlist its field may use."""
         if self._path_under_session(node):
@@ -906,7 +863,7 @@ class PolicyGate:
         if key in TRACE_PATH_LIKE_FIELDS and self._path_in_trace_allowlist(node):
             return
         raise PolicyDenied(
-            f"role={role.name!r} {intent_type.value} payload field "
+            f"role={from_agent!r} {intent_type.value} payload field "
             f"{key!r}={node!r} escapes session_dir={self.session_dir!s}",
             rule="path_outside_session_dir",
             hint=(

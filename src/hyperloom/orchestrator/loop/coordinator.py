@@ -28,17 +28,16 @@ DEFAULT_CYCLE_HOURS: float = 24.0
 _CRASH_EMERGENCY_WINDOW_SEC: float = 24.0 * 3600.0
 # Coordinator exceptions within the trailing window that end the run as ``emergency``.
 _CRASH_EMERGENCY_THRESHOLD: int = 25
-# Retry delay for an agent whose LLM backend keeps failing, doubling from the base to the ceiling, in seconds. Ints, so
-# the doubling cannot overflow a float however long a streak runs.
+# Retry delay while the LLM backend keeps failing, doubling from the base to the ceiling, in seconds. Ints, so the
+# doubling cannot overflow a float however long a streak runs.
 _BACKEND_RETRY_BASE_SEC: int = 2
 _BACKEND_RETRY_MAX_SEC: int = 300
-# How long one agent's backend may fail without a successful turn before the session stops, in seconds.
+# How long the backend may fail without a successful turn before the session stops, in seconds.
 _BACKEND_UNHEALTHY_STOP_SEC: float = 3600.0
-# How many turns in a row one agent may answer without an intent before the session stops.
+# How many turns in a row may be answered without an intent before the session stops.
 _NO_INTENT_STOP_TURNS: int = 50
 from ..phases import machine_state as _phase_state
 from hyperloom.inference_optimizer.session.session_binding import bind_session
-from ..roles.agent_role import AgentRole, default_role_registry
 from ..roles.base import Backend, BackendError, BackendTurnResult, LLMCallFailed
 from ..bus.cursor_store import CursorStore
 from ..bus.storage.connection import SqliteConnection
@@ -57,7 +56,6 @@ from .intent_router import IntentRouter
 from .reactor_turn import (
     close_backends,
     resolve_reactor_turn_timeout_sec,
-    stamp_trace_context,
     trace_mcp_setup,
     trace_reactor_llm_call,
 )
@@ -65,7 +63,8 @@ from hyperloom.inference_optimizer.model_config_utils import infer_model_class
 from .sub_agent_runner import SubAgentRunner
 from .turn_pump import PumpBesideTurn
 from ..state.task_registry import TaskRegistry, task_dispatch_origin
-from ..collaborator import OrchestrationPrompt
+from ..collaborator import ORCHESTRATION_AGENT, OrchestrationPrompt
+from ..mcp_tool_names import ORCHESTRATION_TOOL_GRANT
 from hyperloom.inference_optimizer.trace.llm_trace import (
     LLMCallRecord,
     LLMCallSite,
@@ -169,7 +168,6 @@ class Coordinator:
         session_dir: Path,
         *,
         backends: dict[str, Backend],
-        role_registry: dict[str, AgentRole] | None = None,
         settings: CoordinatorSettings = CoordinatorSettings(),
         advisory: AdvisoryServices = AdvisoryServices(),
     ):
@@ -178,17 +176,17 @@ class Coordinator:
         # Bind the session for the SBD V6 recorders once, here, so no recorder entry point below has to be handed a
         # path.
         bind_session(self.session_dir)
-        self.role_registry = role_registry or default_role_registry()
-        # Orchestration prompt overrides, rebuild closure, and snapshot writes.
+        # Orchestration prompt overrides, rebuild closure, and snapshot writes. Empty until the launcher installs the
+        # system prompt; a turn taken before that raises.
         self.orch_prompt = OrchestrationPrompt(overrides={})
         # KnowledgePlane facade; pre-warms PR feed + advisory context.
         self.knowledge_plane: Any = advisory.knowledge_plane
         self._model_class_override: str = (settings.model_class or "").strip()
 
-        # Validate every reactor has a backend wired.
-        for name in self.role_registry:
-            if name not in backends:
-                raise ValueError(f"missing backend for role {name!r} (provide via Coordinator(backends={{...}}))")
+        if ORCHESTRATION_AGENT not in backends:
+            raise ValueError(
+                f"missing backend for role {ORCHESTRATION_AGENT!r} (provide via Coordinator(backends={{...}}))"
+            )
         self.backends = dict(backends)
         self.reactor_turn_timeout_sec = resolve_reactor_turn_timeout_sec()
 
@@ -201,7 +199,6 @@ class Coordinator:
         # The durable bring-up mutex. The gate never reads it; ``open`` decides.
         self.rounds = RoundStore(self.db)
         self.policy = PolicyGate(
-            role_registry=self.role_registry,
             session_dir=self.session_dir,
             shared_state=self.shared_state,
             # Seeded at boot: an empty snapshot would advise against a GPU
@@ -236,20 +233,19 @@ class Coordinator:
 
         self._prompt_snapshots = PromptSnapshotTracker()
 
-        # Per-agent BackendError streak; crossing threshold records one backend_unhealthy, then re-arms.
-        self._backend_error_streak: dict[str, int] = dict.fromkeys(self.role_registry, 0)
-        self._backend_error_alarm_armed: dict[str, bool] = dict.fromkeys(self.role_registry, True)
-        # Monotonic time each failing agent's streak began, and before which the tick loop does not call it again.
-        self._backend_error_since: dict[str, float] = {}
-        self._backend_retry_at: dict[str, float] = {}
+        # Consecutive BackendErrors, the back-off exponent; crossing the threshold records one backend_unhealthy, which
+        # re-arms after a successful turn.
+        self._backend_error_streak: int = 0
+        self._backend_error_alarm_armed: bool = True
+        # Monotonic time the streak began, and before which the tick loop does not call the backend again.
+        self._backend_error_since: float | None = None
+        self._backend_retry_at: float = 0.0
         self._backend_error_streak_threshold: int = max(
             1,
             env_int("INFERENCE_OPTIMIZER_BACKEND_ERROR_STREAK_THRESHOLD", default=5),
         )
-        # Per-agent run of consecutive turns that emitted no intent; a turn with an intent ends it.
-        self._no_intent_streak: dict[str, int] = {}
-
-        self._tick_roles: tuple[str, ...] = tuple(self.role_registry)
+        # Run of consecutive turns that emitted no intent; a turn with an intent ends it.
+        self._no_intent_streak: int = 0
 
         # Wall-clock budget tracking for per-tick Time-budget prompt injection.
         self._run_deadline: Deadline | None = None
@@ -638,14 +634,12 @@ class Coordinator:
         in_closing = bool(self.shared_state.closing_phase)
         # One reactor + dispatcher pass; during closing skip LLM passes, and any turn that would only hold dispatch back.
         if not in_closing:
-            for name in self._tick_roles:
-                if self.stop_requested():
-                    break
-                if time.monotonic() < self._backend_retry_at.get(name, 0.0):
-                    continue
-                if not await self.conversation.admit_turn(name, time.time()):
-                    continue
-                await self.await_within_session_bound(lambda n=name: self.reactor_pass(n), stage=f"reactor:{name}")
+            if (
+                not self.stop_requested()
+                and time.monotonic() >= self._backend_retry_at
+                and await self.conversation.admit_turn(time.time())
+            ):
+                await self.await_within_session_bound(self.reactor_pass, stage=f"reactor:{ORCHESTRATION_AGENT}")
             await self.phase_machine.refresh_admission_freeze()
         if not self.stop_requested():
             await self.dispatcher.pump_dispatcher_once()
@@ -713,9 +707,8 @@ class Coordinator:
         return bound.remaining()
 
     def _backend_retry_wait_sec(self) -> float:
-        """Seconds until the first reactor agent is due while every one is backing off, capped at the session bound."""
-        now = time.monotonic()
-        wait = min((self._backend_retry_at.get(name, 0.0) - now for name in self._tick_roles), default=0.0)
+        """Seconds until the backend's back-off ends, capped at the session bound."""
+        wait = self._backend_retry_at - time.monotonic()
         bound = self._seconds_until_session_bound()
         if bound is not None:
             wait = min(wait, bound)
@@ -948,24 +941,22 @@ class Coordinator:
         return stop_reason or self.shared_state.stop_reason
 
     # Reactor
-    async def reactor_pass(self, agent_name: str, *, request: str = "") -> BackendTurnResult | None:
-        """Run one reactor turn for ``agent_name``, route its intents, and return the turn's result.
+    async def reactor_pass(self, *, request: str = "") -> BackendTurnResult | None:
+        """Run one Orchestration turn, route its intents, and return the turn's result.
 
         ``request`` is appended to the composed prompt; a turn that carries one may legitimately reply without
-        intents. The turn is scoped as that agent on the trajectory, and the dispatcher pumps beside its LLM call.
+        intents. The turn is scoped as the agent on the trajectory, and the dispatcher pumps beside its LLM call.
         """
         pump = PumpBesideTurn(self.dispatcher, self.stop_requested)
-        with trajectory_scope(component=agent_name, agent=agent_name):
-            return await self._reactor_turn(agent_name, request=request, pump=pump)
+        with trajectory_scope(component=ORCHESTRATION_AGENT, agent=ORCHESTRATION_AGENT):
+            return await self._reactor_turn(request=request, pump=pump)
 
-    async def _reactor_turn(self, agent_name: str, *, request: str, pump: PumpBesideTurn) -> BackendTurnResult | None:
+    async def _reactor_turn(self, *, request: str, pump: PumpBesideTurn) -> BackendTurnResult | None:
         """Body of :meth:`reactor_pass`."""
-        backend = self.backends[agent_name]
-        turn = await self.conversation.compose_turn(agent_name, backend)
+        backend = self.backends[ORCHESTRATION_AGENT]
+        turn = await self.conversation.compose_turn(backend)
         prompt = f"{turn.prompt}\n\n{request}" if request else turn.prompt
-        tools = self.policy.allowed_tools_for_agent(agent_name)
-        # Stamp timeline keys onto backends that self-write their trace row.
-        backend_self_traces = stamp_trace_context(backend, self.shared_state)
+        tools = list(ORCHESTRATION_TOOL_GRANT)
         # max_turns=0 → backend default.
         _t0 = time.perf_counter()
         call_id = new_call_id()
@@ -973,11 +964,11 @@ class Coordinator:
             with trajectory_span(
                 EVENT_LLM_CALL,
                 call_id=call_id,
-                attributes={"name": agent_name, "model": getattr(backend, "model", None)},
+                attributes={"name": ORCHESTRATION_AGENT, "model": getattr(backend, "model", None)},
             ) as call_span:
                 record_prompt_snapshot(
                     self._prompt_snapshots.observe(
-                        agent_name, prompt=prompt, system_prompt=turn.system_prompt, tools=tools
+                        ORCHESTRATION_AGENT, prompt=prompt, system_prompt=turn.system_prompt, tools=tools
                     )
                 )
                 async with pump:
@@ -986,9 +977,8 @@ class Coordinator:
                     )
                 call_span.finish(**llm_call_summary(result.metadata))
         except BackendError as exc:
-            if isinstance(exc, LLMCallFailed) and not backend_self_traces:
+            if isinstance(exc, LLMCallFailed):
                 self._trace_reactor_llm_failure(
-                    agent_name,
                     exc,
                     latency_ms=int((time.perf_counter() - _t0) * 1000),
                     call_id=call_id,
@@ -996,71 +986,67 @@ class Coordinator:
             await self.bus.record_observation(
                 "coordinator",
                 "observation",
-                {"kind": "backend_error", "agent": agent_name, "error": repr(exc)},
+                {"kind": "backend_error", "agent": ORCHESTRATION_AGENT, "error": repr(exc)},
             )
-            await self._track_backend_error_streak(agent_name, exc)
+            await self._track_backend_error_streak(exc)
             return None
         except NoIntentEmitted as exc:
             # No parseable intents; surface as observation so the next tick self-corrects.
-            await self._record_no_intent_turn(agent_name, str(exc)[:500])
-            await self.conversation.settle_turn(agent_name)
+            await self._record_no_intent_turn(str(exc)[:500])
+            await self.conversation.settle_turn()
             return None
-        except Exception as exc:  # isolation boundary: one agent's reactor turn
-            log.exception("reactor pass for %s raised", agent_name)
-            await self._record_reactor_exception(agent_name, exc)
+        except Exception as exc:  # isolation boundary: one reactor turn
+            log.exception("reactor pass for %s raised", ORCHESTRATION_AGENT)
+            await self._record_reactor_exception(exc)
             return None
         finally:
-            trace_mcp_setup(self.session_dir, agent_name=agent_name, backend=backend)
-        self._reset_backend_error_streak(agent_name)
+            trace_mcp_setup(self.session_dir, backend)
+        self._reset_backend_error_streak()
         # Record this reactor turn's token spend on the unified ledger.
         latency_ms = int((time.perf_counter() - _t0) * 1000)
-        trace_reactor_llm_call(self.session_dir, self.shared_state, agent_name, result, latency_ms=latency_ms)
+        trace_reactor_llm_call(self.session_dir, self.shared_state, result, latency_ms=latency_ms)
         # Full-trace: persist the redacted prompt+response for this turn.
-        self.conversation.record_reactor_conversation(agent_name, result, context=turn.context)
+        self.conversation.record_reactor_conversation(result, context=turn.context)
         with trajectory_scope(call_id=call_id, parent_span_id=call_span.span_id):
             for intent in result.intents:
-                await self.router.handle_intent(agent_name, intent)
-        await self._settle_routed_turn(agent_name, result, request=request)
+                await self.router.handle_intent(ORCHESTRATION_AGENT, intent)
+        await self._settle_routed_turn(result, request=request)
         return result
 
-    async def _record_reactor_exception(self, agent_name: str, exc: Exception) -> None:
+    async def _record_reactor_exception(self, exc: Exception) -> None:
         """Record an unexpected reactor-turn failure as an observation and a session exception."""
         await self.bus.record_observation(
             "coordinator",
             "observation",
-            {"kind": "reactor_exception", "agent": agent_name, "error": format_exc_brief(exc, limit=500)},
+            {"kind": "reactor_exception", "agent": ORCHESTRATION_AGENT, "error": format_exc_brief(exc, limit=500)},
         )
         self.record_exception(
             stage="reactor_pass",
-            agent=agent_name,
+            agent=ORCHESTRATION_AGENT,
             exc=exc,
         )
 
-    def _reset_backend_error_streak(self, agent_name: str) -> None:
-        """Clear the agent's backend-error streak and re-arm its alarm."""
-        # Reset the streak — a successful turn proves the backend is alive again.
-        if self._backend_error_streak.get(agent_name):
-            self._backend_error_streak[agent_name] = 0
-            self._backend_error_alarm_armed[agent_name] = True
-            self._backend_error_since.pop(agent_name, None)
-            self._backend_retry_at.pop(agent_name, None)
+    def _reset_backend_error_streak(self) -> None:
+        """Clear the backend-error streak and re-arm its alarm: a successful turn proves the backend is alive again."""
+        self._backend_error_streak = 0
+        self._backend_error_alarm_armed = True
+        self._backend_error_since = None
+        self._backend_retry_at = 0.0
 
-    async def _settle_routed_turn(self, agent_name: str, result: BackendTurnResult, *, request: str) -> None:
+    async def _settle_routed_turn(self, result: BackendTurnResult, *, request: str) -> None:
         """Book a turn whose intents were routed: its no-intent streak, rendered cursor and last-active stamp."""
         if result.intents:
-            self._no_intent_streak.pop(agent_name, None)
+            self._no_intent_streak = 0
         elif not request:
-            await self._record_no_intent_turn(agent_name, "the turn emitted no intents")
-        await self.conversation.settle_turn(agent_name)
-        if agent_name == "orchestration":
-            state = self.shared_state
-            state.last_discarded_escalate_hint = ""
-            state.last_discarded_escalate_hint_ts = ""
-        self.shared_state.agent_last_active[agent_name] = time.time()
+            await self._record_no_intent_turn("the turn emitted no intents")
+        await self.conversation.settle_turn()
+        state = self.shared_state
+        state.last_discarded_escalate_hint = ""
+        state.last_discarded_escalate_hint_ts = ""
+        state.agent_last_active[ORCHESTRATION_AGENT] = time.time()
 
     def _trace_reactor_llm_failure(
         self,
-        agent_name: str,
         error: LLMCallFailed,
         *,
         latency_ms: int | None = None,
@@ -1070,23 +1056,19 @@ class Coordinator:
         try:
             site = LLMCallSite(
                 session_id=self.session_dir.name,
-                component=agent_name,
-                role=agent_name,
+                component=ORCHESTRATION_AGENT,
+                role=ORCHESTRATION_AGENT,
                 tick=int(self.shared_state.tick or 0),
                 phase=(self.shared_state.phase or "") or None,
             )
-            model = getattr(self.backends.get(agent_name), "model", None)
+            model = getattr(self.backends[ORCHESTRATION_AGENT], "model", None)
             record = LLMCallRecord.for_failure(site, error, model=model, call_id=call_id, latency_ms=latency_ms)
             append_llm_call(session_dir=self.session_dir, record=record)
         except LLMTraceRowError:
-            log.debug(
-                "full-trace: reactor llm_call failure append failed for %s",
-                agent_name,
-                exc_info=True,
-            )
+            log.debug("full-trace: reactor llm_call failure append failed", exc_info=True)
 
-    async def _track_backend_error_streak(self, agent_name: str, exc: BackendError) -> None:
-        """Extend the per-agent ``BackendError`` streak and back the agent off.
+    async def _track_backend_error_streak(self, exc: BackendError) -> None:
+        """Extend the ``BackendError`` streak and back the next turn off.
 
         A streak that has lasted ``_BACKEND_UNHEALTHY_STOP_SEC`` stops the session unless something else already has.
         Crossing the threshold emits one backend_unhealthy event, which re-arms only after a successful turn.
@@ -1094,28 +1076,30 @@ class Coordinator:
         from hyperloom.inference_optimizer.breakdown.stop_reasons import BACKEND_UNHEALTHY_STOP_REASON
 
         now = time.monotonic()
-        new_value = self._backend_error_streak.get(agent_name, 0) + 1
-        self._backend_error_streak[agent_name] = new_value
-        log.warning("Coordinator: %s backend turn failed (%d in a row): %s", agent_name, new_value, exc)
-        failing_sec = now - self._backend_error_since.setdefault(agent_name, now)
-        self._backend_retry_at[agent_name] = now + min(
-            _BACKEND_RETRY_MAX_SEC, _BACKEND_RETRY_BASE_SEC * 2 ** (new_value - 1)
-        )
+        self._backend_error_streak += 1
+        streak = self._backend_error_streak
+        log.warning("Coordinator: %s backend turn failed (%d in a row): %s", ORCHESTRATION_AGENT, streak, exc)
+        if self._backend_error_since is None:
+            self._backend_error_since = now
+        failing_sec = now - self._backend_error_since
+        self._backend_retry_at = now + min(_BACKEND_RETRY_MAX_SEC, _BACKEND_RETRY_BASE_SEC * 2 ** (streak - 1))
         if failing_sec >= _BACKEND_UNHEALTHY_STOP_SEC and not self.shared_state.stop_reason:
             log.error(
-                "Coordinator: the %s backend has failed for %.0fs without a successful turn", agent_name, failing_sec
+                "Coordinator: the %s backend has failed for %.0fs without a successful turn",
+                ORCHESTRATION_AGENT,
+                failing_sec,
             )
             self.shared_state.set_stop_reason(BACKEND_UNHEALTHY_STOP_REASON)
         threshold = self._backend_error_streak_threshold
-        if new_value >= threshold and self._backend_error_alarm_armed.get(agent_name, True):
-            self._backend_error_alarm_armed[agent_name] = False
+        if streak >= threshold and self._backend_error_alarm_armed:
+            self._backend_error_alarm_armed = False
             await self.bus.record_observation(
                 "coordinator",
                 "observation",
                 {
                     "kind": "backend_unhealthy",
-                    "agent": agent_name,
-                    "consecutive_errors": new_value,
+                    "agent": ORCHESTRATION_AGENT,
+                    "consecutive_errors": streak,
                     "threshold": threshold,
                     "latest_error": repr(exc)[:500],
                     "severity": "high",
@@ -1123,8 +1107,8 @@ class Coordinator:
                 },
             )
 
-    async def _record_no_intent_turn(self, agent_name: str, error: str) -> None:
-        """Record a turn that emitted no intent and extend the agent's no-intent streak.
+    async def _record_no_intent_turn(self, error: str) -> None:
+        """Record a turn that emitted no intent and extend the no-intent streak.
 
         The ``_NO_INTENT_STOP_TURNS``-th such turn in a row records one high-severity no_intent_streak observation and
         stops the session unless something else already has.
@@ -1134,19 +1118,19 @@ class Coordinator:
         await self.bus.record_observation(
             "coordinator",
             "observation",
-            {"kind": "no_intent_emitted", "agent": agent_name, "error": error},
+            {"kind": "no_intent_emitted", "agent": ORCHESTRATION_AGENT, "error": error},
         )
-        streak = self._no_intent_streak.get(agent_name, 0) + 1
-        self._no_intent_streak[agent_name] = streak
+        self._no_intent_streak += 1
+        streak = self._no_intent_streak
         if streak != _NO_INTENT_STOP_TURNS:
             return
-        log.error("Coordinator: the %s agent answered %d turns in a row without an intent", agent_name, streak)
+        log.error("Coordinator: the %s agent answered %d turns in a row without an intent", ORCHESTRATION_AGENT, streak)
         await self.bus.record_observation(
             "coordinator",
             "observation",
             {
                 "kind": "no_intent_streak",
-                "agent": agent_name,
+                "agent": ORCHESTRATION_AGENT,
                 "consecutive_turns": streak,
                 "severity": "high",
                 "hint": (

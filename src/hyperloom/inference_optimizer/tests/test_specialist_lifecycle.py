@@ -296,7 +296,6 @@ async def test_dispatcher_hook_calls_bookkeeping_on_specialist_task(
 
     from hyperloom.inference_optimizer.cli.executors import _build_specialist_executor
     from hyperloom.orchestrator.loop.coordinator import AdvisoryServices, Coordinator
-    from hyperloom.orchestrator.roles.agent_role import default_role_registry
     from hyperloom.orchestrator.state.task_registry import Task
     from hyperloom.orchestrator.tests.mock_backend import MockBackend as MockOrchBackend, MockTurn, ScriptedPlan
 
@@ -328,9 +327,9 @@ async def test_dispatcher_hook_calls_bookkeeping_on_specialist_task(
     coord = Coordinator(
         session_dir=session_dir,
         backends=backends,
-        role_registry=default_role_registry(),
         advisory=AdvisoryServices(knowledge_plane=None),
     )
+    coord.orch_prompt.set("orchestration", "SYSTEM PROMPT")
     executor = _build_specialist_executor(
         spec_args,
         session_dir=session_dir,

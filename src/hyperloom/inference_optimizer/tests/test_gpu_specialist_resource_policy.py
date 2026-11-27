@@ -7,7 +7,6 @@ from __future__ import annotations
 
 import pytest
 
-from hyperloom.orchestrator.roles.agent_role import default_role_registry
 from hyperloom.inference_optimizer.protocol.intent import Intent, IntentType
 from hyperloom.orchestrator.policy.denial import PolicyDenied
 from hyperloom.orchestrator.policy.gate import (
@@ -22,7 +21,6 @@ def _policy(state: SharedState) -> PolicyGate:
     facts = ResourceFacts()
     facts.update(state)
     return PolicyGate(
-        role_registry=default_role_registry(),
         shared_state=state,
         resources=facts,
     )

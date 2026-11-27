@@ -185,8 +185,8 @@ async def test_a_failed_pre_reactor_phase_advance_fails_the_tick(session_dir, mo
     async def _advance():
         raise RuntimeError("phase entry hook broke")
 
-    async def _turn(name, **kwargs):
-        turns.append(name)
+    async def _turn(**kwargs):
+        turns.append("orchestration")
 
     monkeypatch.setattr(c.reconciler, "run", _noop)
     monkeypatch.setattr(c.phase_machine, "advance_phase_if_needed", _advance)
@@ -441,11 +441,29 @@ async def test_sub_agent_runner_refuses_a_lane_holding_task_with_no_lease(tmp_pa
 @pytest.mark.asyncio
 async def test_coordinator_starts_with_silent_backends(session_dir):
     c = Coordinator(session_dir, backends=_build_backends({}))
+    c.orch_prompt.set("orchestration", "SYSTEM PROMPT")
     try:
         await c.tick(2)
         msgs = await c.bus.tail(n=20, topic="observation")
         assert len(msgs) == 1
         assert msgs[0].from_agent == "orchestration"
+    finally:
+        await c.stop()
+
+
+def test_a_coordinator_without_the_orchestration_backend_is_refused(session_dir):
+    with pytest.raises(ValueError, match="missing backend for role 'orchestration'"):
+        Coordinator(session_dir, backends={})
+
+
+@pytest.mark.asyncio
+async def test_a_turn_without_an_installed_system_prompt_raises_before_the_backend_is_called(session_dir):
+    backends = _build_backends({})
+    c = Coordinator(session_dir, backends=backends)
+    try:
+        with pytest.raises(KeyError, match="orchestration"):
+            await c.reactor_pass()
+        assert backends["orchestration"].calls == []
     finally:
         await c.stop()
 
@@ -465,6 +483,7 @@ async def test_a_tick_while_closing_runs_no_reactor_turn(session_dir):
 @pytest.mark.asyncio
 async def test_a_phase_advance_that_raises_is_recorded_at_the_session_tick(session_dir, monkeypatch):
     c = Coordinator(session_dir, backends=_build_backends({}))
+    c.orch_prompt.set("orchestration", "SYSTEM PROMPT")
     calls = 0
 
     async def _raise() -> None:
@@ -541,6 +560,7 @@ def _llm_error_rows(session_dir: Path) -> list[dict]:
 async def test_plain_backend_error_records_no_llm_error_row(session_dir):
     """A deterministic local fault must not be counted as a provider failure."""
     c = Coordinator(session_dir, backends={"orchestration": _AlwaysFailingBackend("orchestration")})
+    c.orch_prompt.set("orchestration", "SYSTEM PROMPT")
     try:
         await c.tick(2)
         assert _llm_error_rows(session_dir) == []
@@ -552,6 +572,7 @@ async def test_plain_backend_error_records_no_llm_error_row(session_dir):
 async def test_llm_call_failed_records_one_error_row_per_turn(session_dir, monkeypatch):
     monkeypatch.setattr("hyperloom.orchestrator.loop.coordinator._BACKEND_RETRY_BASE_SEC", 0)
     c = Coordinator(session_dir, backends={"orchestration": _LLMFailingBackend("orchestration")})
+    c.orch_prompt.set("orchestration", "SYSTEM PROMPT")
     try:
         await c.tick(2)
         rows = _llm_error_rows(session_dir)
@@ -561,67 +582,6 @@ async def test_llm_call_failed_records_one_error_row_per_turn(session_dir, monke
         assert row["error_type"] == "LLMCallFailed"
         assert "gateway 400" in row["error_message"]
         assert row["input_tokens"] is None and row["output_tokens"] is None
-    finally:
-        await c.stop()
-
-
-class _SelfTracingLLMFailingBackend(_LLMFailingBackend):
-    """A self-tracing backend: writes its own row, then raises."""
-
-    def __init__(self, name: str, session_dir: Path) -> None:
-        super().__init__(name)
-        self._session_dir = session_dir
-        self.trace_ctx_calls = 0
-        self.trace_contexts: list[dict[str, object]] = []
-
-    def set_trace_context(
-        self,
-        *,
-        tick: int | None = None,
-        phase: str | None = None,
-        macro_cycle: int | None = None,
-    ) -> None:
-        self.trace_ctx_calls += 1
-        self.trace_contexts.append({"tick": tick, "phase": phase, "macro_cycle": macro_cycle})
-
-    async def run(
-        self,
-        prompt: str,
-        *,
-        system_prompt: str | None = None,
-        tools: list[str] | None = None,
-        max_turns: int = 1,
-    ) -> "BackendTurnResult":  # noqa: F821 — protocol return type, raises before returning
-        from hyperloom.orchestrator.roles.base import LLMCallFailed
-        from hyperloom.inference_optimizer.trace.llm_trace import LLMCallRecord, LLMCallSite, append_llm_call
-
-        self.calls += 1
-        error = LLMCallFailed(f"simulated {self.name} gateway 400 #{self.calls}")
-        append_llm_call(
-            session_dir=self._session_dir,
-            record=LLMCallRecord.for_failure(
-                LLMCallSite(session_id=self._session_dir.name, component=self.name, role=self.name),
-                error,
-                model="claude-opus-4-7",
-            ),
-        )
-        raise error
-
-
-@pytest.mark.asyncio
-async def test_self_tracing_backend_failure_is_recorded_exactly_once(session_dir):
-    """One provider failure must produce one row, not one per writer."""
-    backend = _SelfTracingLLMFailingBackend("orchestration", session_dir)
-    c = Coordinator(session_dir, backends={"orchestration": backend})
-    try:
-        await c.tick(2)
-        rows = _llm_error_rows(session_dir)
-        assert len(rows) == backend.calls
-        # The surviving row is the backend's richer one (it names the model).
-        assert {r["model"] for r in rows} == {"claude-opus-4-7"}
-        assert {r["component"] for r in rows} == {"orchestration"}
-        assert backend.trace_contexts
-        assert all("macro_cycle" in context for context in backend.trace_contexts)
     finally:
         await c.stop()
 
@@ -657,6 +617,7 @@ async def test_backend_error_streak_fires_backend_unhealthy_once_at_threshold(
     )
     monkeypatch.setattr("hyperloom.orchestrator.loop.coordinator._BACKEND_RETRY_BASE_SEC", 0)
     c = Coordinator(session_dir, backends={"orchestration": _AlwaysFailingBackend("orchestration")})
+    c.orch_prompt.set("orchestration", "SYSTEM PROMPT")
     try:
         await c.tick(4)
         observations = await c.bus.tail(n=50, topic="observation")
@@ -688,6 +649,7 @@ async def test_unexpected_backend_exception_records_last_tick_exception(session_
     backends = _build_backends({})
     backends["orchestration"] = _AlwaysCrashingBackend("orchestration")
     c = Coordinator(session_dir, backends=backends)
+    c.orch_prompt.set("orchestration", "SYSTEM PROMPT")
     try:
         await c.tick(1)
         assert c.shared_state.crash_count == 1
@@ -717,16 +679,17 @@ async def test_backend_error_streak_resets_after_successful_turn(
     monkeypatch.setattr("hyperloom.orchestrator.loop.conversation._ORCHESTRATION_HEARTBEAT_SEC", 0)
     failing = _AlwaysFailingBackend("orchestration")
     c = Coordinator(session_dir, backends={"orchestration": failing})
+    c.orch_prompt.set("orchestration", "SYSTEM PROMPT")
     try:
         await c.tick(2)
-        assert c._backend_error_streak["orchestration"] == 2
-        assert c._backend_error_alarm_armed["orchestration"] is False
+        assert c._backend_error_streak == 2
+        assert c._backend_error_alarm_armed is False
 
         # Healthy backend → reset.
         c.backends.update(_build_backends({}))
         await c.tick(1)
-        assert c._backend_error_streak["orchestration"] == 0
-        assert c._backend_error_alarm_armed["orchestration"] is True
+        assert c._backend_error_streak == 0
+        assert c._backend_error_alarm_armed is True
 
         # Re-arm: failing backend back in → alarm fires again.
         c.backends["orchestration"] = failing
@@ -744,6 +707,7 @@ async def test_a_tick_does_not_call_a_failing_backend_before_its_retry(session_d
     monkeypatch.setattr("hyperloom.orchestrator.loop.coordinator._BACKEND_RETRY_BASE_SEC", 3600)
     failing = _AlwaysFailingBackend("orchestration")
     c = Coordinator(session_dir, backends={"orchestration": failing})
+    c.orch_prompt.set("orchestration", "SYSTEM PROMPT")
     try:
         await c.tick(3)
         assert failing.calls == 1
@@ -756,6 +720,7 @@ async def test_run_waits_for_a_retry_when_every_backend_is_failing(session_dir, 
     monkeypatch.setattr("hyperloom.orchestrator.loop.coordinator._BACKEND_RETRY_BASE_SEC", 0.2)
     failing = _AlwaysFailingBackend("orchestration")
     c = Coordinator(session_dir, backends={"orchestration": failing})
+    c.orch_prompt.set("orchestration", "SYSTEM PROMPT")
     try:
         assert await c.run(options=RunOptions(tick_interval_sec=0.0, max_ticks=3)) == "max_ticks"
         assert failing.calls >= 2
@@ -769,6 +734,7 @@ async def test_run_dispatches_and_books_a_task_before_a_failing_backend_is_retri
     monkeypatch.setattr("hyperloom.orchestrator.loop.coordinator._BACKEND_RETRY_BASE_SEC", 3600)
     failing = _AlwaysFailingBackend("orchestration")
     c = Coordinator(session_dir, backends={"orchestration": failing})
+    c.orch_prompt.set("orchestration", "SYSTEM PROMPT")
     c.dispatcher.poll_sec = 0.01
 
     async def _profile(_ctx):
@@ -799,6 +765,7 @@ async def test_run_dispatches_and_books_a_task_before_a_failing_backend_is_retri
 async def test_run_stops_once_a_backend_has_failed_for_the_unhealthy_window(session_dir, monkeypatch):
     monkeypatch.setattr("hyperloom.orchestrator.loop.coordinator._BACKEND_UNHEALTHY_STOP_SEC", 0.0)
     c = Coordinator(session_dir, backends={"orchestration": _AlwaysFailingBackend("orchestration")})
+    c.orch_prompt.set("orchestration", "SYSTEM PROMPT")
     try:
         assert await c.run(options=RunOptions(tick_interval_sec=0.0, max_ticks=5)) == "backend_unhealthy"
         assert c.shared_state.stop_reason == "backend_unhealthy"
@@ -815,12 +782,13 @@ async def test_a_no_intent_streak_stops_the_session_once(session_dir, monkeypatc
         loop_last=True,
     )
     c = Coordinator(session_dir, backends=_build_backends({"orchestration": plan}))
+    c.orch_prompt.set("orchestration", "SYSTEM PROMPT")
     try:
         for _ in range(2):
-            await c.reactor_pass("orchestration")
+            await c.reactor_pass()
         assert not c.shared_state.stop_reason
         for _ in range(2):
-            await c.reactor_pass("orchestration")
+            await c.reactor_pass()
         assert c.shared_state.stop_reason == "backend_unhealthy"
         observations = await c.bus.tail(n=50, topic="observation")
         streaks = [o.payload for o in observations if (o.payload or {}).get("kind") == "no_intent_streak"]
@@ -838,9 +806,10 @@ async def test_a_turn_with_an_intent_ends_the_no_intent_streak(session_dir, monk
     silent = MockTurn(raw_text="thinking out loud")
     plan = ScriptedPlan(turns=[silent, silent, MockTurn(intents=[_heartbeat()]), silent, silent])
     c = Coordinator(session_dir, backends=_build_backends({"orchestration": plan}))
+    c.orch_prompt.set("orchestration", "SYSTEM PROMPT")
     try:
         for _ in range(5):
-            await c.reactor_pass("orchestration")
+            await c.reactor_pass()
         assert not c.shared_state.stop_reason
     finally:
         await c.stop()
@@ -877,6 +846,7 @@ async def test_coordinator_delegate_task_run_via_dispatcher(session_dir):
     plans = {"orchestration": ScriptedPlan(turns=[MockTurn(intents=[delegate])])}
 
     c = Coordinator(session_dir, backends=_build_backends(plans))
+    c.orch_prompt.set("orchestration", "SYSTEM PROMPT")
     c.sub.register_executor("baseline", lambda ctx: _async_return({"tput": 1840}))
     try:
         await c.tick(1)
@@ -896,6 +866,7 @@ async def test_delegate_accepts_nested_params_idempotency_key(session_dir):
     )
     plans = {"orchestration": ScriptedPlan(turns=[MockTurn(intents=[delegate])])}
     c = Coordinator(session_dir, backends=_build_backends(plans))
+    c.orch_prompt.set("orchestration", "SYSTEM PROMPT")
     captured: dict[str, object] = {}
 
     async def _runner(ctx):
@@ -927,6 +898,7 @@ async def test_coordinator_request_routes_to_kernel(session_dir):
     )
     plans = {"orchestration": ScriptedPlan(turns=[MockTurn(intents=[req])])}
     c = Coordinator(session_dir, backends=_build_backends(plans))
+    c.orch_prompt.set("orchestration", "SYSTEM PROMPT")
     try:
         c.shared_state.baseline_tput = 100.0
         c.shared_state.last_profile_trace = "/tmp/trace.json.gz"
@@ -954,6 +926,7 @@ async def test_coordinator_response_routes_back_to_requester(session_dir):
     )
     plans = {"orchestration": ScriptedPlan(turns=[MockTurn(intents=[req])])}
     c = Coordinator(session_dir, backends=_build_backends(plans))
+    c.orch_prompt.set("orchestration", "SYSTEM PROMPT")
 
     async def _fake_handler(payload, *, session_dir, **_kw):
         return {"status": "ok", "hot_kernels": [], "candidates_path": ""}
@@ -987,6 +960,7 @@ async def test_explore_not_denied_before_profile(session_dir):
     )
     plans = {"orchestration": ScriptedPlan(turns=[MockTurn(intents=[propose])])}
     c = Coordinator(session_dir, backends=_build_backends(plans))
+    c.orch_prompt.set("orchestration", "SYSTEM PROMPT")
     try:
         c.shared_state.baseline_tput = 100.0
         c.shared_state.last_profile_trace = ""
@@ -1019,6 +993,7 @@ async def test_execution_order_does_not_deny_backends_when_trace_analyze_stale(
     )
     plans = {"orchestration": ScriptedPlan(turns=[MockTurn(intents=[propose])])}
     c = Coordinator(session_dir, backends=_build_backends(plans))
+    c.orch_prompt.set("orchestration", "SYSTEM PROMPT")
     try:
         c.shared_state.baseline_tput = 100.0
         c.shared_state.last_profile_trace = "/tmp/trace-a.json.gz"
@@ -1112,6 +1087,7 @@ async def test_coordinator_policy_denied_surfaces_as_observation(session_dir):
     bad = Intent(type=IntentType.DELEGATE, payload={"params": {"runs": 1}})
     plans = {"orchestration": ScriptedPlan(turns=[MockTurn(intents=[bad])])}
     c = Coordinator(session_dir, backends=_build_backends(plans))
+    c.orch_prompt.set("orchestration", "SYSTEM PROMPT")
     try:
         await c.tick(1)
         denied = await c.bus.tail(topic="observation")

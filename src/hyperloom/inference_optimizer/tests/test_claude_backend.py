@@ -15,7 +15,6 @@ from typing import Any
 import pytest
 
 from hyperloom.orchestrator.roles import ClaudeBackend
-from hyperloom.orchestrator.roles.agent_role import default_role_registry
 from hyperloom.orchestrator.roles.base import BackendError, LLMCallFailed, RetryPolicy
 from hyperloom.orchestrator.roles.mcp_emit_intent import (
     EMIT_INTENT_TOOL_NAME,
@@ -206,8 +205,6 @@ def test_build_emit_intent_server_returns_none_without_factories():
     assert cfg is None
 
 
-_ORCHESTRATION_INTENTS = default_role_registry()["orchestration"].allowed_intents
-_MESSAGING_INTENTS = frozenset({IntentType.SEND_MESSAGE, IntentType.ALERT})
 _DELEGATE_EMIT = {"intent_type": "delegate", "payload": {"action_name": "baseline"}}
 
 
@@ -224,13 +221,12 @@ def _capturing_tool_factory(captured: dict[str, Any]):
     return fake_tool
 
 
-def _registered_emit_intent(**kwargs: Any) -> dict[str, Any]:
+def _registered_emit_intent() -> dict[str, Any]:
     """The schema and handler ``build_emit_intent_server`` registers."""
     captured: dict[str, Any] = {}
     build_emit_intent_server(
         tool_factory=_capturing_tool_factory(captured),
         server_factory=lambda name, version, tools: {"server": name},
-        **kwargs,
     )
     return captured
 
@@ -239,52 +235,40 @@ def _offered_intent_types(schema: dict[str, Any]) -> set[str]:
     return set(schema["properties"]["intent_type"]["enum"])
 
 
-def test_emit_intent_schema_offers_only_the_roles_intents():
-    """A role is offered only the intent types the PolicyGate lets it emit."""
-    orchestration = _registered_emit_intent(allowed_intents=_ORCHESTRATION_INTENTS)["schema"]
-    messaging = _registered_emit_intent(allowed_intents=_MESSAGING_INTENTS)["schema"]
-
-    assert _offered_intent_types(orchestration) == {t.value for t in _ORCHESTRATION_INTENTS}
-    assert _offered_intent_types(messaging) == {t.value for t in _MESSAGING_INTENTS}
-    assert "delegate" in orchestration["properties"]["payload"]["description"]
-    assert "delegate" not in messaging["properties"]["payload"]["description"]
-    assert "__unparsedToolInput" in orchestration["properties"]
-
-
-def test_emit_intent_schema_without_a_role_offers_every_intent():
+def test_emit_intent_schema_offers_every_intent():
     schema = _registered_emit_intent()["schema"]
 
-    assert schema == build_emit_intent_tool_input_schema(IntentType)
+    assert schema == build_emit_intent_tool_input_schema()
     assert _offered_intent_types(schema) == {t.value for t in IntentType}
+    assert "delegate" in schema["properties"]["payload"]["description"]
+    assert "__unparsedToolInput" in schema["properties"]
 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("wrapped", [False, True], ids=["native-if-schema-bypassed", "unparsed-wrapper"])
-async def test_the_emit_intent_handler_refuses_an_intent_outside_the_role(wrapped):
-    """The handler refuses by the decoded type and names the types the role may emit.
+async def test_the_emit_intent_handler_refuses_an_intent_type_outside_the_enum(wrapped):
+    """The handler refuses by the decoded type.
 
-    Under the real SDK only the wrapped form reaches the handler: the schema's enum refuses a native out-of-role
-    call first (pinned in test_claude_unparsed_tool_input_unit). The native case pins the handler's own check.
+    Under the real SDK only the wrapped form reaches the handler: the schema's enum refuses a native call first
+    (pinned in test_claude_unparsed_tool_input_unit). The native case pins the handler's own check.
     """
-    handler = _registered_emit_intent(allowed_intents=_MESSAGING_INTENTS)["handler"]
-    arguments: dict[str, Any] = _DELEGATE_EMIT
+    handler = _registered_emit_intent()["handler"]
+    emitted = {"intent_type": "review_verdict", "payload": {"verdict": "approve"}}
+    arguments: dict[str, Any] = emitted
     if wrapped:
-        raw = json.dumps(_DELEGATE_EMIT)
+        raw = json.dumps(emitted)
         arguments = {"__unparsedToolInput": {"raw": raw, "len": len(raw)}}
 
     result = await handler(arguments)
 
     assert result["is_error"] is True
-    text = result["content"][0]["text"]
-    assert "'delegate'" in text
-    for intent_type in _MESSAGING_INTENTS:
-        assert intent_type.value in text
+    assert "unknown intent_type 'review_verdict'" in result["content"][0]["text"]
 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("wrapped", [False, True], ids=["native", "unparsed-wrapper"])
-async def test_the_emit_intent_tool_acks_an_intent_the_role_may_emit(wrapped):
-    handler = _registered_emit_intent(allowed_intents=_ORCHESTRATION_INTENTS)["handler"]
+async def test_the_emit_intent_tool_acks_a_valid_intent(wrapped):
+    handler = _registered_emit_intent()["handler"]
     arguments: dict[str, Any] = _DELEGATE_EMIT
     if wrapped:
         raw = json.dumps(_DELEGATE_EMIT)
@@ -296,17 +280,16 @@ async def test_the_emit_intent_tool_acks_an_intent_the_role_may_emit(wrapped):
     assert result["content"][0]["text"] == "ok"
 
 
-def test_claude_backend_registers_emit_intent_for_its_role():
+def test_claude_backend_registers_emit_intent_with_every_intent_type():
     captured: dict[str, Any] = {}
     ClaudeBackend(
         sdk_query_factory=_make_query_factory([]),
         sdk_options_cls=FakeOptions,
         mcp_tool_factory=_capturing_tool_factory(captured),
         mcp_server_factory=lambda name, version, tools: {"server": name},
-        allowed_intents=_ORCHESTRATION_INTENTS,
     )
 
-    assert _offered_intent_types(captured["schema"]) == {t.value for t in _ORCHESTRATION_INTENTS}
+    assert _offered_intent_types(captured["schema"]) == {t.value for t in IntentType}
 
 
 def test_claude_backend_raises_without_sdk_or_seams(monkeypatch):
@@ -557,20 +540,16 @@ async def test_mcp_setup_diagnostic_reports_what_the_cli_offered(offered_tools, 
     assert setup["emit_intent"]["offered"] is offered
 
 
-def test_mcp_setup_diagnostic_hashes_the_role_scoped_schema():
-    """The recorded schema hash identifies the schema this role registers, not the full intent contract."""
+def test_mcp_setup_diagnostic_hashes_the_registered_schema():
+    """The recorded schema hash identifies the schema the backend registers."""
     import hashlib
 
-    backend = ClaudeBackend(mcp_server_factory=lambda *a, **k: None, allowed_intents=_MESSAGING_INTENTS)
-    expected = json.dumps(
-        build_emit_intent_tool_input_schema(_MESSAGING_INTENTS), sort_keys=True, separators=(",", ":")
-    )
+    backend = ClaudeBackend(mcp_server_factory=lambda *a, **k: None)
+    expected = json.dumps(build_emit_intent_tool_input_schema(), sort_keys=True, separators=(",", ":"))
 
     recorded = backend.get_mcp_setup_diagnostic()["emit_intent"]["schema_sha256"]
 
     assert recorded == hashlib.sha256(expected.encode("utf-8")).hexdigest()
-    full = json.dumps(build_emit_intent_tool_input_schema(IntentType), sort_keys=True, separators=(",", ":"))
-    assert recorded != hashlib.sha256(full.encode("utf-8")).hexdigest()
 
 
 @pytest.mark.asyncio

@@ -318,6 +318,7 @@ async def test_the_tick_loop_keeps_ticking_past_a_hung_orchestration_turn(mode: 
     sdk = _StallingSdk(mode)
     orchestration = _backend(sdk, turn_timeout_s=0.3)
     coord = Coordinator(session_dir, backends={"orchestration": orchestration})
+    coord.orch_prompt.set("orchestration", "SYSTEM PROMPT")
     coord.shared_state.baseline_tput = 800.0
     # Only the backend's own bound may end the turn here.
     coord.reactor_turn_timeout_sec = 600.0

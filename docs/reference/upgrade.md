@@ -349,6 +349,23 @@ from scripts, and read `reports/final.md` for the session's own summary and
 `HYPERLOOM_REPORT_MAX_TOKENS` are no longer read and are silently ignored, so
 drop them.
 
+### Recommended: stop matching the `role` and `custom_specialist_only` denial rules
+
+A `policy_denied` observation, and the `denials` row it becomes on a phase
+event in `session_breakdown.json`, no longer carries rule `role` or rule
+`custom_specialist_only`. Neither could fire in 1.2.x once Orchestration was
+the only agent taking turns: `role` refused an unknown agent or an intent type
+outside an agent's set, and Orchestration's set was every intent type;
+`custom_specialist_only` refused Orchestration's `specialist`, `explore` and
+`integrate_patch` in FRAMEWORK_AGENT under `HYPERLOOM_CUSTOM_SPECIALIST_ONLY=1`,
+where Orchestration takes no turn. Anything that counts or alerts on those two
+rule ids can drop them; every other rule id is unchanged.
+
+The `emit_intent` tool no longer refuses a call with `this role cannot emit`.
+An intent type outside the vocabulary is refused as before, by the tool schema
+and with `unknown intent_type`. The tool's schema, the output-format block and
+Orchestration's tool list do not change.
+
 ---
 
 ## Upgrading from 1.1.x

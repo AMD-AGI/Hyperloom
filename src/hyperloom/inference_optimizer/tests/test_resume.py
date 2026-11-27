@@ -158,6 +158,7 @@ class TestAClosedSessionIsReopenedOnResume:
 @pytest.mark.asyncio
 async def test_existing_events_triggers_resume(session_dir):
     c1 = Coordinator(session_dir, backends=_backends_full())
+    c1.orch_prompt.set("orchestration", "SYSTEM PROMPT")
     try:
         await c1.tick(1)
     finally:
@@ -197,6 +198,7 @@ async def test_tick_lazily_runs_replay_on_resume(session_dir):
     await c1.stop()
 
     c2 = Coordinator(session_dir, backends=_backends_full())
+    c2.orch_prompt.set("orchestration", "SYSTEM PROMPT")
     try:
         assert c2.writeback.resumed_from["rebuilt"] is False
         await c2.tick(1)

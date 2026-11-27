@@ -9,6 +9,9 @@ from typing import TYPE_CHECKING, Any, Callable, cast
 
 from hyperloom.inference_optimizer.protocol.action_surfaces import ACTION_CATALOGUE
 
+#: The one LLM agent that takes turns: the key of its backend, bus rows, read cursor and trace rows.
+ORCHESTRATION_AGENT = "orchestration"
+
 if TYPE_CHECKING:
     from hyperloom.orchestrator.bus.message_bus import MessageBus
     from hyperloom.orchestrator.bus.resource_lock import SqliteLeaseBackend
@@ -35,9 +38,9 @@ class OrchestrationPrompt:
         self.is_user_supplied: bool = is_user_supplied
         self.rebuild: Callable[..., str] | None = rebuild
 
-    def get(self, agent_name: str) -> str | None:
-        """Return the override for *agent_name*, or None when absent."""
-        return self.overrides.get(agent_name)
+    def get(self, agent_name: str) -> str:
+        """Return the prompt installed for *agent_name*."""
+        return self.overrides[agent_name]
 
     def set(self, agent_name: str, prompt: str) -> None:
         """Install a new prompt for *agent_name*."""
@@ -117,10 +120,6 @@ class CoordinatorCollaborator:
     @property
     def recipe_kb(self):
         return self._coord.recipe_kb
-
-    @property
-    def role_registry(self):
-        return self._coord.role_registry
 
     @property
     def action_registry(self):

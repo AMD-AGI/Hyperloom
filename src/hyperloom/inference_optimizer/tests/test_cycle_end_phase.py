@@ -21,7 +21,7 @@ from hyperloom.orchestrator.phases.machine import Transition
 from hyperloom.common.perf_metric import GRADED_INTVTY, GRADED_INTVTY_P50
 from hyperloom.inference_optimizer.breakdown.recorder.event_ids import INLINE_EVENT_PARAM
 from hyperloom.inference_optimizer.breakdown.recorder.kernel_event import kernel_event_id
-from hyperloom.orchestrator.roles.agent_role import default_role_registry
+from hyperloom.orchestrator.collaborator import OrchestrationPrompt
 from hyperloom.orchestrator.tests.mock_backend import MockBackend, MockTurn, ScriptedPlan
 from hyperloom.orchestrator.loop.coordinator import AdvisoryServices, Coordinator
 from hyperloom.orchestrator.kernel.patch_lifecycle import lifecycle_complete
@@ -726,7 +726,7 @@ async def test_on_enter_cycle_end_triggers_stack_validation_without_pending_keep
 
     c.phase_kernel_stack._run_kernel_stack_validation_e2e = _fake_stack_validation
     c.phase_kernel.maybe_enqueue_watermark_roofline = _noop_roofline
-    c.backends = {}
+    c.orch_prompt = OrchestrationPrompt({}, is_user_supplied=True)
 
     await c.phase_cycle_end.on_enter_cycle_end(
         Transition(from_phase="KERNEL_AGENT", to_phase="CYCLE_END", reason="test", evidence={})
@@ -789,12 +789,13 @@ def _real_coordinator(tmp_path: Path) -> Coordinator:
     session_dir = tmp_path / "session"
     session_dir.mkdir()
     idle_plan = ScriptedPlan(turns=[MockTurn(intents=[])])
-    return Coordinator(
+    coordinator = Coordinator(
         session_dir=session_dir,
         backends={"orchestration": MockBackend(idle_plan)},
-        role_registry=default_role_registry(),
         advisory=AdvisoryServices(knowledge_plane=None),
     )
+    coordinator.orch_prompt.set("orchestration", "SYSTEM PROMPT")
+    return coordinator
 
 
 @pytest.mark.asyncio
@@ -1536,7 +1537,7 @@ async def test_a_cycle_end_entry_that_settles_an_owed_unwind_still_validates(tmp
     del c.phase_kernel_stack._run_kernel_stack_validation_e2e
     c.tasks = _StubTaskRegistry()
     c.knowledge_plane = None
-    c.backends = {}
+    c.orch_prompt = OrchestrationPrompt({}, is_user_supplied=True)
     _stub_stack_benchmark(monkeypatch, new_tput=105.0)
 
     with session_scope(tmp_path):

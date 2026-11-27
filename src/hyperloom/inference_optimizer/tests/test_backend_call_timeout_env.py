@@ -117,13 +117,9 @@ def _new_claude_backend_with_seams():
 
 def _new_codex_backend(tmp_path):
     """Build a CodexBackend against a throwaway session-private cwd."""
-    from hyperloom.orchestrator.roles.agent_role import default_role_registry
     from hyperloom.orchestrator.roles.codex import CodexBackend
 
-    return CodexBackend(
-        allowed_intents=default_role_registry()["orchestration"].allowed_intents,
-        cwd=tmp_path / "codex",
-    )
+    return CodexBackend(cwd=tmp_path / "codex")
 
 
 @pytest.fixture(autouse=True)

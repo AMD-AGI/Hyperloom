@@ -406,7 +406,7 @@ async def test_compose_prompt_orchestration_receives_failure_rows(session_dir):
                 },
             )
         )
-        prompt = (await c.conversation.compose_prompt("orchestration")).text
+        prompt = (await c.conversation.compose_prompt()).text
         assert "failure:" in prompt
     finally:
         await c.stop()

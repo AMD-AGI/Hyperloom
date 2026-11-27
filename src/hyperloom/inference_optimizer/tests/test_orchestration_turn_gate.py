@@ -24,15 +24,16 @@ _ONE_TURN_THEN_HOLD = ["orchestration"]
 async def ticking(session_dir, monkeypatch):
     """A Coordinator with silent backends whose ticks run only the reactor turns, and the turns they ran."""
     c = Coordinator(session_dir, backends=silent_backends())
+    c.orch_prompt.set("orchestration", "SYSTEM PROMPT")
     turns: list[str] = []
     reactor_pass = c.reactor_pass
 
     async def _noop(*_args, **_kwargs):
         return None
 
-    async def _turn(name, **kwargs):
-        turns.append(name)
-        return await reactor_pass(name, **kwargs)
+    async def _turn(**kwargs):
+        turns.append("orchestration")
+        return await reactor_pass(**kwargs)
 
     monkeypatch.setattr(c, "reactor_pass", _turn)
     monkeypatch.setattr(c.reconciler, "run", _noop)
@@ -115,8 +116,8 @@ async def test_the_heartbeat_admits_an_orchestration_turn_when_nothing_changed(t
     await c.tick(1)
     now = time.time()
 
-    assert not await c.conversation.admit_turn("orchestration", now + 10.0)
-    assert await c.conversation.admit_turn("orchestration", now + 901.0)
+    assert not await c.conversation.admit_turn(now + 10.0)
+    assert await c.conversation.admit_turn(now + 901.0)
 
 
 async def test_a_turn_that_fails_is_taken_again_on_the_next_tick(ticking, monkeypatch):
@@ -136,7 +137,7 @@ async def test_a_turn_that_fails_is_taken_again_on_the_next_tick(ticking, monkey
     monkeypatch.setattr(backend, "run", _fails_once)
     await _queue_a_task(c)
     await c.tick(1)
-    c._backend_retry_at.clear()
+    c._backend_retry_at = 0.0
     await c.tick(2)
 
     assert turns == ["orchestration", "orchestration", "orchestration"]

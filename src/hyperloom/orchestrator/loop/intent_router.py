@@ -299,7 +299,6 @@ class IntentRouter(CoordinatorCollaborator):
     async def _route_intent(self, source: str, intent: Intent) -> None:
         """Run the handler for an admitted intent; a handler failure is recorded, never raised."""
         try:
-            it = intent.type
             handlers: dict[IntentType, Any] = {
                 IntentType.PROPOSE_ACTION: self._handle_propose_action,
                 IntentType.DELEGATE: self.handle_delegate,
@@ -310,16 +309,7 @@ class IntentRouter(CoordinatorCollaborator):
                 IntentType.SEND_MESSAGE: self._handle_send_message,
                 IntentType.ALERT: self._handle_alert,
             }
-            handler = handlers.get(it)
-            if handler is not None:
-                await handler(source, intent)
-            else:
-                # Unknown / unhandled intent — record for replay.
-                await self.bus.record_observation(
-                    source,
-                    "observation",
-                    {"intent": it.value, "payload": intent.payload},
-                )
+            await handlers[intent.type](source, intent)
         except (asyncio.CancelledError, KeyboardInterrupt):
             raise
         except Exception as exc:  # isolation boundary: one routed intent

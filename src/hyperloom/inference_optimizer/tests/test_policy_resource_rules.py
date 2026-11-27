@@ -23,7 +23,6 @@ from hyperloom.orchestrator.policy.projection import (
     ResourceFacts,
 )
 from hyperloom.orchestrator.rehearsal import VirtualClock
-from hyperloom.orchestrator.roles.agent_role import default_role_registry
 from hyperloom.orchestrator.state.round_store import (
     BOOTED,
     EXCLUDED,
@@ -51,7 +50,7 @@ def clock():
 
 def _gate(facts: ResourceFacts | None = None) -> PolicyGate:
     """A gate with no session facts of its own beyond the resource facts."""
-    return PolicyGate(role_registry=default_role_registry(), resources=facts or ResourceFacts())
+    return PolicyGate(resources=facts or ResourceFacts())
 
 
 def _baseline() -> Intent:
@@ -278,7 +277,7 @@ def _reachable_code(*entries: object) -> list:
 
 def test_no_validator_on_the_intent_path_reaches_a_database_call():
     """The chokepoint runs on every intent; a lock taken here stalls the loop."""
-    gate = PolicyGate(role_registry=default_role_registry())
+    gate = PolicyGate()
     validators = [
         getattr(type(gate), name)
         for name in dir(type(gate))

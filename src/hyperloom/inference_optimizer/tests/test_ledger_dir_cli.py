@@ -120,10 +120,10 @@ def test_a_refusal_from_deep_in_a_run_is_ended_at_the_entry_the_same_way(tmp_pat
     refuses the same resume itself; ``hyperloom optimize`` turns that into the same line and exit code 2."""
     import types
 
-    from hyperloom.orchestrator.loop.coordinator import Coordinator, default_role_registry
+    from hyperloom.orchestrator.loop.coordinator import Coordinator
 
     session = _in_a_new_container(tmp_path, monkeypatch, tmp_path / "workspace")
-    backends = {name: object() for name in default_role_registry()}
+    backends = {"orchestration": object()}
 
     def run(argv):
         Coordinator(session, backends=backends)

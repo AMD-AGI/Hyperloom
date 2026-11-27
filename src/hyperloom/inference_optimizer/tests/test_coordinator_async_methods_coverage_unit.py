@@ -295,7 +295,7 @@ async def test_promote_roofline_succeeded_and_skipped_and_failed(coord: Coordina
 @pytest.mark.asyncio
 async def test_compose_prompt_tells_orchestration_its_session_dir(coord: Coordinator) -> None:
     """The orchestration system prompt's SESSION_DIR contract: artefact paths it emits are rooted here."""
-    prompt = await coord.conversation.compose_prompt("orchestration")
+    prompt = await coord.conversation.compose_prompt()
     assert f"SESSION_DIR={coord.session_dir}" in prompt.text.splitlines()
 
 
@@ -305,7 +305,7 @@ async def test_compose_prompt_orchestration_with_time_budget(coord: Coordinator)
     coord._run_started_monotonic = time.monotonic() - 60.0
     coord._run_deadline = Deadline.after(600.0)
     coord.shared_state.max_minutes = 60
-    lines = (await coord.conversation.compose_prompt("orchestration")).text.splitlines()
+    lines = (await coord.conversation.compose_prompt()).text.splitlines()
     assert "=== Time budget ===" in lines
     assert "remaining=" in lines[lines.index("=== Time budget ===") + 1]
 
@@ -316,7 +316,7 @@ async def test_compose_prompt_orchestration_deadline_imminent_warning(coord: Coo
     coord._run_deadline = Deadline.after(60.0)
     coord.shared_state.max_minutes = 60
     coord.shared_state.closing_phase = False
-    out = (await coord.conversation.compose_prompt("orchestration")).text
+    out = (await coord.conversation.compose_prompt()).text
     assert "< 5 min remaining" in out
 
 
@@ -354,7 +354,7 @@ def _stub_advisories(coord: Coordinator, monkeypatch) -> list[str]:
 async def test_compose_prompt_keeps_the_orchestration_advisory_order(coord: Coordinator, monkeypatch) -> None:
     markers = _stub_advisories(coord, monkeypatch)
 
-    prompt = (await coord.conversation.compose_prompt("orchestration")).text
+    prompt = (await coord.conversation.compose_prompt()).text
 
     for (heading, _owner, _producer), marker in zip(_ORCHESTRATION_ADVISORIES, markers):
         assert (marker if heading is None else f"{heading}\n{marker}") in prompt
@@ -370,7 +370,7 @@ async def test_compose_prompt_drops_the_heading_of_an_advisory_that_produced_not
     _stub_advisories(coord, monkeypatch)
     monkeypatch.setattr(coord.conversation, "plateau_advisory_block", lambda: "")
 
-    prompt = (await coord.conversation.compose_prompt("orchestration")).text
+    prompt = (await coord.conversation.compose_prompt()).text
 
     assert "=== Plateau advisory ===" not in prompt
     # The trajectory digest is shown only on a plateau, so it goes with it.
@@ -388,7 +388,7 @@ async def test_compose_prompt_puts_the_trajectory_review_under_the_plateau_advis
     _stub_advisories(coord, monkeypatch)
     monkeypatch.setattr(trajectory_reviewer, "build_trajectory_digest", lambda *_a, **_k: "<trajectory>")
 
-    prompt = (await coord.conversation.compose_prompt("orchestration")).text
+    prompt = (await coord.conversation.compose_prompt()).text
 
     assert (
         "=== Plateau advisory ===\n<plateau_advisory_block>\n=== Trajectory review (advisory) ===\n<trajectory>"
@@ -806,7 +806,7 @@ def test_is_promotable_result_unchanged_for_reverted_integrate_patch(coord: Coor
 async def test_compose_prompt_renders_the_gap_to_the_gain_objective(coord: Coordinator) -> None:
     coord._current_objective = TargetGainObjective(target_gain_pct=20.0)
     coord.shared_state.cumulative_gain_validated = 5.0
-    text = (await coord.conversation.compose_prompt("orchestration")).text
+    text = (await coord.conversation.compose_prompt()).text
     assert "target_gap_pct=15.00" in text
 
 
@@ -814,7 +814,7 @@ async def test_compose_prompt_renders_the_gap_to_the_gain_objective(coord: Coord
 async def test_compose_prompt_time_only_objective_leaves_no_gap(coord: Coordinator) -> None:
     coord._current_objective = TimeOnlyObjective()
     coord.shared_state.cumulative_gain_validated = 5.0
-    text = (await coord.conversation.compose_prompt("orchestration")).text
+    text = (await coord.conversation.compose_prompt()).text
     assert "target_gap_pct=0.00" in text
 
 

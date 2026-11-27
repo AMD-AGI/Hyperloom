@@ -251,18 +251,20 @@ def coordinator_with_mocks(session_dir):
     backends = {
         "orchestration": MockBackend(silent, name="orch"),
     }
-    return Coordinator(session_dir, backends=backends)
+    coordinator = Coordinator(session_dir, backends=backends)
+    coordinator.orch_prompt.set("orchestration", "SYSTEM PROMPT")
+    return coordinator
 
 
 @pytest.mark.asyncio
 async def test_compose_prompt_keeps_per_tick_values_out_of_the_context(coordinator_with_mocks):
     c = coordinator_with_mocks
     try:
-        before = await c.conversation.compose_prompt("orchestration")
+        before = await c.conversation.compose_prompt()
         c.shared_state.tick = int(c.shared_state.tick or 0) + 7
         c.shared_state.agent_last_active["orchestration"] = 1.0
         c.shared_state.phase_started_unix = 1_767_225_600.0
-        after = await c.conversation.compose_prompt("orchestration")
+        after = await c.conversation.compose_prompt()
 
         assert after.context == before.context
         assert f"tick={c.shared_state.tick}" in after.turn
@@ -277,9 +279,9 @@ async def test_compose_prompt_keeps_the_session_ledger_out_of_the_context(coordi
     """The ledger moves whenever an action lands, so it must not sit in the cached prefix."""
     c = coordinator_with_mocks
     try:
-        before = await c.conversation.compose_prompt("orchestration")
+        before = await c.conversation.compose_prompt()
         c.shared_state.crash_count = int(c.shared_state.crash_count or 0) + 1
-        after = await c.conversation.compose_prompt("orchestration")
+        after = await c.conversation.compose_prompt()
 
         assert after.context == before.context
         assert after.turn != before.turn
@@ -308,7 +310,7 @@ async def test_compose_prompt_keeps_the_proposal_block_out_of_the_context(coordi
         c.shared_state.specialist_rounds = [
             {"cycle": 0, "domain": "serving_specialist", "gap_canonical_id": "", "proposal_set": [tried, waiting]}
         ]
-        first = await c.conversation.compose_prompt("orchestration")
+        first = await c.conversation.compose_prompt()
         assert "=== Untested proposals (current cycle) ===" in first.turn
         assert tried["name"] in first.turn
 
@@ -320,7 +322,7 @@ async def test_compose_prompt_keeps_the_proposal_block_out_of_the_context(coordi
         }
         c.shared_state.explore_search = {"tested": {"explore-1": dict(tested_row, outcome="REVERT")}}
         c.shared_state.tick = int(c.shared_state.tick or 0) + 1
-        second = await c.conversation.compose_prompt("orchestration")
+        second = await c.conversation.compose_prompt()
 
         assert second.context == first.context
         assert "=== Untested proposals (current cycle) ===" not in second.context
@@ -339,8 +341,8 @@ async def test_reactor_turn_hands_a_caching_backend_the_context_as_its_system_pr
     backend = c.backends["orchestration"]
     backend.system_prompt_cached = cached
     try:
-        composed = await c.conversation.compose_prompt("orchestration")
-        await c.reactor_pass("orchestration", request="ASK")
+        composed = await c.conversation.compose_prompt()
+        await c.reactor_pass(request="ASK")
         (call,) = backend.calls
 
         assert (composed.context in call["system_prompt"]) is cached
@@ -363,7 +365,7 @@ async def test_conversation_row_joins_the_context_to_the_backend_prompt(coordina
     c = coordinator_with_mocks
     try:
         result = BackendTurnResult(intents=[], raw_text="", metadata={"prompt": "TURN", "response": "R"})
-        c.conversation.record_reactor_conversation("orchestration", result, context="CONTEXT")
+        c.conversation.record_reactor_conversation(result, context="CONTEXT")
         (row,) = [json.loads(line) for line in conversations_path(c.session_dir).read_text().splitlines()]
         assert row["prompt"] == "CONTEXT\nTURN"
     finally:
@@ -387,7 +389,7 @@ async def test_compose_prompt_orchestration_renders_warm_start_when_set(
             },
         }
         c.shared_state.save(session_dir)
-        prompt = (await c.conversation.compose_prompt("orchestration")).text
+        prompt = (await c.conversation.compose_prompt()).text
         assert "=== Warm start (Recipe KB T0) ===" in prompt
         assert "tier=exact" in prompt
         assert "best_throughput=2100" in prompt
@@ -401,7 +403,7 @@ async def test_compose_prompt_orchestration_omits_warm_start_when_empty(
 ):
     c = coordinator_with_mocks
     try:
-        prompt = (await c.conversation.compose_prompt("orchestration")).text
+        prompt = (await c.conversation.compose_prompt()).text
         assert "=== Warm start" not in prompt
     finally:
         await c.stop()

@@ -180,6 +180,7 @@ async def test_each_reactor_turn_is_an_llm_call_span_under_the_session(session_d
         session_dir,
         backends={"orchestration": MockBackend(silent, name="o")},
     )
+    c.orch_prompt.set("orchestration", "SYSTEM PROMPT")
     try:
         await c.run(options=RunOptions(max_ticks=1))
     finally:

@@ -171,7 +171,7 @@ def test_trace_mcp_setup_persists_diagnostics(coord: Coordinator) -> None:
         },
     )
 
-    trace_mcp_setup(coord.session_dir, agent_name="orchestration", backend=backend)
+    trace_mcp_setup(coord.session_dir, backend)
 
     setup = json.loads((coord.session_dir / "agents" / "orchestration" / "mcp_setup.json").read_text())
     assert setup["emit_intent"]["registered"] is True

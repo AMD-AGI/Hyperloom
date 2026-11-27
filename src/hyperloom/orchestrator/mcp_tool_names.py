@@ -63,18 +63,13 @@ def qualified_context_tool_name(tool_name: str) -> str:
 ORCHESTRATION_BUILTIN_TOOL_NAMES: tuple[str, ...] = ("Read", "WebSearch", "WebFetch")
 
 
-def agent_tool_grant(agent_name: str) -> list[str]:
-    """Return the registered tool names an agent with tools may call.
-
-    Every reactor gets ``emit_intent``; orchestration also gets the read-only
-    context pulls and the built-in tools. The caller decides whether the role
-    has tools at all; this is only what the names are.
-    """
-    tools = [EMIT_INTENT_TOOL_QUALIFIED]
-    if agent_name == "orchestration":
-        tools.extend(CONTEXT_TOOL_QUALIFIED_NAMES)
-        tools.extend(ORCHESTRATION_BUILTIN_TOOL_NAMES)
-    return tools
+# Every tool orchestration may call, under the name the runtime registers it: ``emit_intent``, the read-only context
+# pulls, and the built-in tools.
+ORCHESTRATION_TOOL_GRANT: tuple[str, ...] = (
+    EMIT_INTENT_TOOL_QUALIFIED,
+    *CONTEXT_TOOL_QUALIFIED_NAMES,
+    *ORCHESTRATION_BUILTIN_TOOL_NAMES,
+)
 
 
 __all__ = [
@@ -85,7 +80,7 @@ __all__ = [
     "EMIT_INTENT_TOOL_QUALIFIED",
     "MCP_SERVER_NAME",
     "ORCHESTRATION_BUILTIN_TOOL_NAMES",
-    "agent_tool_grant",
+    "ORCHESTRATION_TOOL_GRANT",
     "qualified_context_tool_name",
     "qualified_tool_name",
 ]

@@ -7,7 +7,6 @@ from __future__ import annotations
 
 import pytest
 
-from hyperloom.orchestrator.roles.agent_role import default_role_registry
 from hyperloom.orchestrator.policy.denial import PolicyDenied
 from hyperloom.orchestrator.policy.gate import PolicyGate
 from hyperloom.orchestrator.policy.validators import (
@@ -171,7 +170,7 @@ def test_wall_budget_base_min_by_mode():
 # --------------------------------------------------------------------------- #
 @pytest.fixture
 def gate():
-    return PolicyGate(role_registry=default_role_registry())
+    return PolicyGate()
 
 
 def _dispatch(params: dict) -> dict:
@@ -341,7 +340,6 @@ def _gate_with_gpu_capacity(capacity: int, *, tp: int = 0) -> PolicyGate:
     facts = ResourceFacts()
     facts.update(state)
     return PolicyGate(
-        role_registry=default_role_registry(),
         shared_state=state,
         resources=facts,
     )

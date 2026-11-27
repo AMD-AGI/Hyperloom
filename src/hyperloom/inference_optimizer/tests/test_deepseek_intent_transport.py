@@ -23,7 +23,6 @@ from hyperloom_common.llm.deepseek_session import (
 )
 from hyperloom.inference_optimizer.protocol.intent import IntentType, NoIntentEmitted
 from hyperloom.orchestrator.roles import deepseek as deepseek_module
-from hyperloom.orchestrator.roles.agent_role import _ORCHESTRATION_INTENTS
 from hyperloom.orchestrator.roles.base import LLMCallFailed
 from hyperloom.orchestrator.roles.deepseek import DeepSeekBackend, decode_intent_envelope
 
@@ -42,7 +41,6 @@ def _reply(intent_type: str, payload: dict[str, Any]) -> str:
 
 def _backend(tmp_path: Path) -> DeepSeekBackend:
     return DeepSeekBackend(
-        allowed_intents=_ORCHESTRATION_INTENTS,
         model="deepseek-v4-flash",
         cwd=tmp_path / "orchestration",
     )
@@ -236,7 +234,7 @@ async def test_instructions_and_every_turn_carry_the_whole_envelope_contract(
     await _backend(tmp_path).run("status?", system_prompt="You are the Coordinator.")
 
     instructions = captured["instructions"]
-    legal = ", ".join(sorted(t.value for t in _ORCHESTRATION_INTENTS))
+    legal = ", ".join(sorted(t.value for t in IntentType))
     # Carried on the first message: the runtime mapping, the system prompt, the output format, the exact legal names
     # (a live run emitted 'send_message:kernel'), and a payload written inline (a serialized one broke on 1 tick in 5).
     assert deepseek_session.DEEPSEEK_RUNTIME_MAPPING.strip() in instructions

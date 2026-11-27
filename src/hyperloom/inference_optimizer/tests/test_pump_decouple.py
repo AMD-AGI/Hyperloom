@@ -41,7 +41,6 @@ class _Instant(_Gated):
 @pytest.fixture
 def coord(tmp_path: Path):
     from hyperloom.orchestrator.loop.coordinator import AdvisoryServices, Coordinator
-    from hyperloom.orchestrator.roles.agent_role import default_role_registry
     from hyperloom.orchestrator.state.shared_state import SharedState
     from hyperloom.orchestrator.tests.mock_backend import MockBackend, MockTurn, ScriptedPlan
 
@@ -50,12 +49,13 @@ def coord(tmp_path: Path):
     state.max_minutes = 120
     state.save(tmp_path)
     idle = ScriptedPlan(turns=[MockTurn(intents=[])])
-    return Coordinator(
+    coordinator = Coordinator(
         session_dir=tmp_path,
         backends={"orchestration": MockBackend(idle)},
-        role_registry=default_role_registry(),
         advisory=AdvisoryServices(knowledge_plane=None),
     )
+    coordinator.orch_prompt.set("orchestration", "SYSTEM PROMPT")
+    return coordinator
 
 
 async def _enqueue(coord, kind: str, key: str, lanes: list[str] | None = None, params: dict | None = None):
@@ -258,10 +258,10 @@ async def test_work_queued_while_the_exit_hold_lifts_is_not_spawned_by_the_same_
     roofline = await _prelude_held_by_a_running_roofline(coord)
     fired: list[str] = []
 
-    async def reactor_pass_that_outlasts_the_hold(name: str) -> None:
+    async def reactor_pass_that_outlasts_the_hold() -> None:
         if fired:
             return
-        fired.append(name)
+        fired.append("orchestration")
         await _enqueue(coord, "baseline", "baseline-retry")
         await coord.tasks.transition(roofline.task_id, "succeeded")
 
@@ -292,7 +292,7 @@ async def test_a_roofline_finished_but_not_booked_does_not_let_the_same_tick_spa
     await _settle(coord)
     assert coord.dispatcher.owes_result(roofline.task_id) and coord.dispatcher.has_unbooked_completions()
 
-    async def idle_reactor_pass(name: str) -> None:
+    async def idle_reactor_pass() -> None:
         return None
 
     coord.reactor_pass = idle_reactor_pass
@@ -326,7 +326,7 @@ async def test_work_queued_while_the_exit_hold_still_holds_is_spawned(coord):
     coord.sub.register_executor("baseline", baseline)
     await _prelude_held_by_a_running_roofline(coord)
 
-    async def reactor_pass(name: str) -> None:
+    async def reactor_pass() -> None:
         if not baseline.calls:
             await _enqueue(coord, "baseline", "baseline-retry")
 

@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Codex intent transport: one schema, derived from the role's own intent set."""
+"""Codex intent transport: one schema, derived from the intent vocabulary."""
 
 from __future__ import annotations
 
@@ -23,11 +23,6 @@ from hyperloom.common.codex_session import (
 )
 from hyperloom.inference_optimizer.protocol.intent import IntentType, NoIntentEmitted
 from hyperloom.orchestrator.roles import codex as codex_module
-from hyperloom.orchestrator.roles.agent_role import (
-    _BASE_INTENTS,
-    _ORCHESTRATION_INTENTS,
-    default_role_registry,
-)
 from hyperloom.orchestrator.roles.base import LLMCallFailed, RetryPolicy
 from hyperloom.orchestrator.roles.codex import CodexBackend
 from hyperloom.orchestrator.roles.mcp_emit_intent import build_intent_envelope_schema
@@ -52,46 +47,17 @@ def _object_nodes(node: Any) -> list[dict[str, Any]]:
     return found
 
 
-# Drift guard: the enum is the role's intent set, never a hand-written literal.
+# Drift guard: the enum is the intent vocabulary, never a hand-written literal.
 
 
-def test_orchestration_schema_offers_every_intent_the_role_may_emit() -> None:
-    """The Coordinator can only emit what the schema lists, so it must list all."""
-    schema = build_intent_envelope_schema(_ORCHESTRATION_INTENTS)
-    assert set(_intent_type_enum(schema)) == {t.value for t in _ORCHESTRATION_INTENTS}
+def test_schema_offers_every_intent_type_in_declaration_order() -> None:
+    """The Coordinator can only emit what the schema lists, so it must list all, in a stable order."""
+    assert _intent_type_enum(build_intent_envelope_schema()) == [t.value for t in IntentType]
 
 
-def test_request_is_reachable_from_the_orchestration_schema() -> None:
+def test_request_is_reachable_from_the_schema() -> None:
     """``request`` is the only legal route to the kernel agent; it must be offered."""
-    assert "request" in _intent_type_enum(build_intent_envelope_schema(_ORCHESTRATION_INTENTS))
-
-
-@pytest.mark.parametrize(
-    ("role_name", "expected"),
-    [
-        ("orchestration", _ORCHESTRATION_INTENTS),
-    ],
-)
-def test_every_role_schema_matches_its_registry_record(role_name: str, expected: frozenset[IntentType]) -> None:
-    """Adding an IntentType or widening a role must regenerate, never diverge."""
-    role = default_role_registry()[role_name]
-    assert role.allowed_intents == expected
-    schema = build_intent_envelope_schema(role.allowed_intents)
-    assert set(_intent_type_enum(schema)) == {t.value for t in expected}
-
-
-def test_schema_enum_is_ordered_and_deduplicated() -> None:
-    """A frozenset has no order; the wire schema must still be stable."""
-    first = _intent_type_enum(build_intent_envelope_schema(_ORCHESTRATION_INTENTS))
-    second = _intent_type_enum(build_intent_envelope_schema(frozenset(reversed(list(_ORCHESTRATION_INTENTS)))))
-    assert first == second
-    assert len(first) == len(set(first))
-
-
-def test_empty_intent_set_is_rejected() -> None:
-    """An empty enum would be a schema the model can never satisfy."""
-    with pytest.raises(ValueError, match="at least one"):
-        build_intent_envelope_schema(frozenset())
+    assert "request" in _intent_type_enum(build_intent_envelope_schema())
 
 
 # Provider constraint: OpenAI strict structured outputs.
@@ -99,7 +65,7 @@ def test_empty_intent_set_is_rejected() -> None:
 
 def test_generated_schema_satisfies_strict_structured_outputs() -> None:
     """Azure rejects any object that omits additionalProperties or a required key."""
-    schema = build_intent_envelope_schema(_ORCHESTRATION_INTENTS)
+    schema = build_intent_envelope_schema()
     nodes = _object_nodes(schema)
     assert nodes, "the envelope schema must contain object nodes"
     for node in nodes:
@@ -109,33 +75,25 @@ def test_generated_schema_satisfies_strict_structured_outputs() -> None:
 
 def test_payload_is_carried_as_a_json_string() -> None:
     """A free-form ``{"type": "object"}`` payload is rejected in strict mode."""
-    schema = build_intent_envelope_schema(_ORCHESTRATION_INTENTS)
+    schema = build_intent_envelope_schema()
     payload = schema["properties"]["intents"]["items"]["properties"]["payload"]
     assert payload["type"] == "string"
 
 
 def test_schema_is_json_serializable() -> None:
     """It travels to the provider as JSON, so it must survive a round trip."""
-    schema = build_intent_envelope_schema(_ORCHESTRATION_INTENTS)
+    schema = build_intent_envelope_schema()
     assert json.loads(json.dumps(schema)) == schema
 
 
-# No cross-role contamination in the shared transport text.
+# The shared transport text.
 
 
-def test_transport_contract_names_every_allowed_intent() -> None:
+def test_transport_contract_names_every_intent_type() -> None:
     """The model needs the vocabulary in prose as well as in the enforced schema."""
-    instructions = codex_module.build_output_instructions(_ORCHESTRATION_INTENTS)
-    for intent_type in _ORCHESTRATION_INTENTS:
+    instructions = codex_module.build_output_instructions()
+    for intent_type in IntentType:
         assert intent_type.value in instructions
-
-
-def test_transport_contract_carries_no_text_about_an_intent_outside_the_set() -> None:
-    """One role's payload contract must not leak into the turns of a role that cannot emit it."""
-    instructions = codex_module.build_output_instructions(_BASE_INTENTS).lower()
-    blob = f"{instructions}\n{json.dumps(build_intent_envelope_schema(_BASE_INTENTS))}".lower()
-    for token in ("delegate", "propose_action", "prune_branch", "extend_lease", "extra_sec"):
-        assert token not in blob
 
 
 # End-to-end round trip through the backend with a mocked Codex SDK.
@@ -156,7 +114,6 @@ def _schema_enforced_reply(intent_type: str, payload: dict[str, Any]) -> str:
 
 def _backend(tmp_path: Path) -> CodexBackend:
     return CodexBackend(
-        allowed_intents=_ORCHESTRATION_INTENTS,
         model="gpt-5.6-sol",
         cwd=tmp_path / "orchestration",
     )
@@ -200,7 +157,7 @@ async def test_request_intent_round_trips_through_the_backend(
     )
     result = await _backend(tmp_path).run("kernel k001 needs optimization", system_prompt="You are the Coordinator.")
 
-    assert set(_intent_type_enum(captured["output_schema"])) == {t.value for t in _ORCHESTRATION_INTENTS}
+    assert set(_intent_type_enum(captured["output_schema"])) == {t.value for t in IntentType}
     assert len(result.intents) == 1
     intent = result.intents[0]
     assert intent.type is IntentType.REQUEST
@@ -329,7 +286,6 @@ async def test_a_timed_out_turn_is_not_retried(
     monkeypatch.setattr(CodexSession, "start", _start)
     monkeypatch.setattr(CodexSession, "turn", _turn)
     backend = CodexBackend(
-        allowed_intents=_ORCHESTRATION_INTENTS,
         model="gpt-5.6-sol",
         cwd=tmp_path / "orchestration",
         retry_policy=RetryPolicy(max_attempts=3, base_delay_s=0.0, jitter_s=0.0),
@@ -359,7 +315,6 @@ async def test_other_session_errors_are_still_retried(
     monkeypatch.setattr(CodexSession, "start", _start)
     monkeypatch.setattr(CodexSession, "turn", _turn)
     backend = CodexBackend(
-        allowed_intents=_ORCHESTRATION_INTENTS,
         model="gpt-5.6-sol",
         cwd=tmp_path / "orchestration",
         retry_policy=RetryPolicy(max_attempts=3, base_delay_s=0.0, jitter_s=0.0),
@@ -434,7 +389,7 @@ def test_run_codex_turn_forwards_the_output_schema_to_the_sdk(
     """``output_schema`` is what makes the enum binding enforceable."""
     recorder: dict[str, Any] = {"reply": '{"intents": []}'}
     monkeypatch.setattr(codex_session, "load_codex_sdk", lambda: _fake_sdk(recorder))
-    schema = build_intent_envelope_schema(_ORCHESTRATION_INTENTS)
+    schema = build_intent_envelope_schema()
 
     for _key, _value in {
         "OPENAI_API_KEY": "key",

@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Reactor-turn helpers: the turn's wall-clock timeout, backend trace context, LLM call and MCP setup records."""
+"""Reactor-turn helpers: the turn's wall-clock timeout, LLM call and MCP setup records."""
 
 from __future__ import annotations
 
@@ -13,6 +13,7 @@ from pathlib import Path
 from hyperloom_common.env import env_float
 from hyperloom.inference_optimizer.trace.llm_trace import LLMCallRecord, LLMCallSite, LLMTraceRowError, append_llm_call
 from hyperloom.inference_optimizer.trace.orchestration_trace import write_mcp_setup_once
+from ..collaborator import ORCHESTRATION_AGENT
 from ..roles.base import Backend, BackendTurnResult
 from ..state.shared_state import SharedState
 
@@ -36,23 +37,9 @@ def resolve_reactor_turn_timeout_sec() -> float:
     return DEFAULT_REACTOR_TURN_TIMEOUT_SEC
 
 
-def stamp_trace_context(backend: Backend, shared_state: SharedState) -> bool:
-    """Set the tick, phase and macro cycle on a backend that accepts them; return whether it does."""
-    _set_trace_ctx = getattr(backend, "set_trace_context", None)
-    backend_self_traces = callable(_set_trace_ctx)
-    if backend_self_traces:
-        _set_trace_ctx(
-            tick=int(shared_state.tick or 0),
-            phase=(shared_state.phase or "") or None,
-            macro_cycle=int(shared_state.macro_cycle or 0),
-        )
-    return backend_self_traces
-
-
 def trace_reactor_llm_call(
     session_dir: Path,
     shared_state: SharedState,
-    agent_name: str,
     result: BackendTurnResult,
     *,
     latency_ms: int | None = None,
@@ -73,25 +60,19 @@ def trace_reactor_llm_call(
             return
         site = LLMCallSite(
             session_id=session_dir.name,
-            component=agent_name,
-            role=agent_name,
+            component=ORCHESTRATION_AGENT,
+            role=ORCHESTRATION_AGENT,
             tick=int(shared_state.tick or 0),
             phase=(shared_state.phase or "") or None,
         )
         record = LLMCallRecord.from_metadata(site, metadata, latency_ms=latency_ms)
         append_llm_call(session_dir=session_dir, record=record)
     except LLMTraceRowError:
-        log.debug(
-            "full-trace: reactor llm_call append failed for %s",
-            agent_name,
-            exc_info=True,
-        )
+        log.debug("full-trace: reactor llm_call append failed", exc_info=True)
 
 
-def trace_mcp_setup(session_dir: Path, *, agent_name: str, backend: Backend) -> None:
+def trace_mcp_setup(session_dir: Path, backend: Backend) -> None:
     """Persist orchestration MCP setup once per session."""
-    if agent_name != "orchestration":
-        return
     setup_getter = getattr(backend, "get_mcp_setup_diagnostic", None)
     if callable(setup_getter):
         setup = setup_getter()
