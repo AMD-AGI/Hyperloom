@@ -1482,9 +1482,9 @@ def test_the_visits_own_measurements_are_held_by_the_event_that_asked_for_them(t
 
 
 def test_a_measurement_that_lands_after_the_visit_closed_is_still_published(tmp_path):
-    """Stack validation and the integrate drain both measure on CYCLE_END entry, after the visit closed.
+    """The integrate drain measures on CYCLE_END entry, after the visit closed.
 
-    The verdict they settle republishes the event, and that is what carries the measurement in.
+    The verdict it settles republishes the event, and that is what carries the measurement in.
     """
     from hyperloom.inference_optimizer.breakdown.recorder.baseline_event import BaselineRequest, make_baseline_recorder
     from hyperloom.inference_optimizer.breakdown.recorder.event_sink import EventSink
@@ -1497,7 +1497,7 @@ def test_a_measurement_that_lands_after_the_visit_closed_is_still_published(tmp_
     guest = make_baseline_recorder(
         EventSink(recorder.event_id, producer="orchestrator"),
         BaselineRequest(
-            task_id="integrate-stack-k001+k004",
+            task_id="integrate-k004",
             task_kind="baseline",
         ),
         owns_event=False,
@@ -1506,12 +1506,14 @@ def test_a_measurement_that_lands_after_the_visit_closed_is_still_published(tmp_
     guest.finish({"status": "succeeded", "output_throughput": 1100.0})
     record_integrate_verdict(
         macro_cycle=3,
-        verdict=IntegrateVerdict(integration_id="stack-k001+k004", kernel_id="k001+k004", decision="KEEP", status="ok"),
+        verdict=IntegrateVerdict(
+            integration_id="kernel-integration:k004", kernel_id="k004", decision="KEEP", status="ok"
+        ),
     )
 
     event = _kernel_events(tmp_path)[0]
-    assert [row["task_id"] for row in event["ext"]["measurements"]] == ["integrate-stack-k001+k004"]
-    assert [row["integration_id"] for row in event["ext"]["integrate"]] == ["stack-k001+k004"]
+    assert [row["task_id"] for row in event["ext"]["measurements"]] == ["integrate-k004"]
+    assert [row["integration_id"] for row in event["ext"]["integrate"]] == ["kernel-integration:k004"]
 
 
 def test_discovered_kernels_carry_profiling_fields(tmp_path):

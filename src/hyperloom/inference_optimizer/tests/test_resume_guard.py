@@ -20,6 +20,7 @@ import pytest
 
 from hyperloom.inference_optimizer.session.paths import db_path_for
 from hyperloom.inference_optimizer.session.resume_guard import ResumeBlocked, ensure_resume_safe
+from hyperloom.orchestrator.state.shared_state import SharedState
 from hyperloom.orchestrator.state.task_registry import TaskSpec
 
 
@@ -95,6 +96,47 @@ def test_absent_database_is_not_created(tmp_path):
     ensure_resume_safe(tmp_path, owner_scope="local")
     assert not db_path_for(tmp_path).exists()
     assert not db_path_for(tmp_path).parent.exists()
+
+
+@pytest.mark.parametrize(
+    "state",
+    [
+        {"pending_stack_validation_result": {"kernel_id": "k001+k004", "stack_validation": True}},
+        {"pending_stack_validation_apply_results": [{"status": "ok", "kernel_id": "k001"}]},
+        {"kernel_integrate_attempts": {"k001|/p.cu|": {"kernel_id": "k001", "stack_validation_in_progress": True}}},
+    ],
+    ids=["result_checkpoint", "apply_checkpoint", "ledger_guard"],
+)
+def test_a_session_left_inside_a_kernel_stack_validation_does_not_resume(tmp_path, state):
+    """Its patches may still be on the framework tree, and nothing here reverts them."""
+    state_path = tmp_path / "state.json"
+    state_path.write_text(json.dumps(state), encoding="utf-8")
+
+    with pytest.raises(ResumeBlocked, match="kernel stack validation"):
+        ensure_resume_safe(tmp_path, owner_scope="local")
+
+    assert json.loads(state_path.read_text(encoding="utf-8")) == state
+
+
+def test_a_settled_kernel_stack_validation_resumes_and_keeps_its_stack_row(tmp_path):
+    """What an earlier release's finished stack validation left in state.json is no reason to refuse."""
+    kept_stack = {
+        "action": "integrate",
+        "kernel_id": "k001+k004",
+        "stack_kernel_ids": ["k001", "k004"],
+        "stack_validation": True,
+    }
+    state = {
+        "pending_stack_validation_result": {},
+        "pending_stack_validation_apply_results": [],
+        "kernel_integrate_attempts": {"k001|/p.cu|": {"kernel_id": "k001", "stack_resolved": True}},
+        "optimization_stack": [kept_stack],
+    }
+    (tmp_path / "state.json").write_text(json.dumps(state), encoding="utf-8")
+
+    ensure_resume_safe(tmp_path, owner_scope="local")
+
+    assert SharedState.load_or_init(tmp_path).optimization_stack == [kept_stack]
 
 
 @pytest.mark.parametrize("schema", [True, False], ids=["empty", "no-schema"])

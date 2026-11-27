@@ -38,20 +38,6 @@ class ResumeConsistencyMixin:
             "fixes": [],
             "warnings": [],
         }
-        # Loading the state file is the one boundary the persisted
-        # ``optimization_stack`` crosses, so bind its rows to their members here:
-        # a row that cannot name what it integrated makes every later read of the
-        # stack a guess, and every reader below inherits that guess.
-        stack_phase = self._coord.phase_kernel_stack
-        try:
-            stack_phase.stack_resolved_kernel_ids()
-        except ValueError as exc:
-            stack_phase.halt_stack_recovery(exc)
-        # (0) Interrupted stack attempt: its members may still be applied to the
-        # framework tree, and everything this pass or the leg benchmarks before
-        # CYCLE_END entry would measure them. CYCLE_END entry settles through the same
-        # recovery.
-        await self._resume_recover_interrupted_stack(report)
         # (1) Half-applied integrate window: replay the
         # missing stack append or roll back the partial patch BEFORE anything
         # reads the stack, so the rest of the pass sees the recovered truth.

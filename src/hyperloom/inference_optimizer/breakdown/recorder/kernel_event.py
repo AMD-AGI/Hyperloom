@@ -886,7 +886,7 @@ def assemble_kernel_ext(
         # patch from GEAK and one from forge go through the same one.
         "integrate": wire_rows(rows[SECTION_INTEGRATE], drop=("event_id",)),
         # The end-to-end measurements the visit ran as sub-steps -- candidate
-        # A/B, stack validation, vLLM shape capture. Each went through the
+        # A/B, vLLM shape capture. Each went through the
         # baseline executor inline, so its rows are in this event, and its task
         # id names what it measured. Without them the gate rows above state a
         # verdict whose measurement is nowhere in the breakdown.

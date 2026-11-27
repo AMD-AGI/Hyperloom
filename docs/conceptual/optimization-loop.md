@@ -660,10 +660,8 @@ be attempted or explicitly rejected before report can close the run.
 
 ## CYCLE_END
 
-CYCLE_END closes each macro-cycle. On entry it settles any stack attempt an
-earlier leg left behind, integrates pending kernel KEEPs, and validates the
-stack for positive `NEEDS_REVIEW` kernels, then records the cycle as settled
-(`cycle_end_settled_cycle`). A settled CYCLE_END exits on the next phase
+CYCLE_END closes each macro-cycle. On entry it integrates pending kernel KEEPs,
+then records the cycle as settled (`cycle_end_settled_cycle`). A settled CYCLE_END exits on the next phase
 decision (`cycle_end_done`), either looping back or closing on the reason
 below. CYCLE_END has no phase budget of its own: the session budget alone
 gates its entry work. A resumed session that stopped inside the entry work

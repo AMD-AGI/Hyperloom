@@ -33,12 +33,9 @@ INFERENCEX_CHECKOUT_MISSING_STOP_REASON = "active_inferencex_checkout_missing"
 AGENTX_PREFLIGHT_STOP_REASON: str = "agentx_client_unavailable"
 
 #: A patch lifecycle owed the framework tree a revert and could not complete it,
-#: so the tree still holds patches the session never measured against. Two
-#: independent recoveries -- the integrate sentinel and the kernel stack
-#: checkpoint -- halt on this, and both refuse to continue rather than measure a
-#: tree whose contents they cannot account for. The stack checkpoint also halts
-#: when it cannot bind itself to the ledger rows it was written from, which says
-#: the same thing about a tree whose members are no longer identifiable.
+#: so the tree still holds patches the session never measured against. The
+#: recovery that finds this halts on it rather than measure a tree whose
+#: contents it cannot account for.
 PATCH_RECOVERY_INCOMPLETE_STOP_REASON: str = "patch_recovery_incomplete"
 
 #: A reactor agent's LLM backend kept failing for an hour without one

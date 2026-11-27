@@ -156,8 +156,8 @@ row on the phase event in `session_breakdown.json`, and as a
 ### Required: `SWEEP` is renamed `CYCLE_END` and runs no concurrency sweep
 
 The phase between `KERNEL_AGENT` and `CLOSE` is now `CYCLE_END`. It integrates
-pending KEEPs and validates the stack, then loops back or closes; it no longer
-dispatches a `conc_sweep` task. Update anything that matches on the old names:
+pending KEEPs, then loops back or closes; it no longer dispatches a `conc_sweep`
+task. Update anything that matches on the old names:
 
 * The phase is `CYCLE_END` in `state.json`, `phase_history` and
   `session_breakdown.json`.
@@ -197,6 +197,35 @@ header names the ladder `concs`, drops the budget keys, `was_skipped` and the
 report paths, and adds `partial`, `in_progress` and `cancelled` to `status`.
 Both lineages' shapes are in
 [`session_breakdown.json` integration in Hyperloom](session-breakdown.md).
+
+### Required: CYCLE_END no longer validates a stack of `NEEDS_REVIEW` kernels
+
+CYCLE_END entry integrates the pending kernel KEEPs and nothing else. 1.2.x
+followed that with one more benchmark when two or more integrated patches had
+each measured a positive gain below the KEEP threshold (`NEEDS_REVIEW`): it
+applied them together and kept the stack when it gained 1% over the current
+best. That validation and its crash recovery are removed.
+
+* A patch whose integrate round ends `NEEDS_REVIEW` stays reverted; nothing
+  measures it again in combination with another.
+* `state.json` no longer carries `pending_stack_validation_result` or
+  `pending_stack_validation_apply_results`. Rows of `kernel_integrate_attempts`
+  no longer gain `stack_validation_in_progress`, `stack_resolved`,
+  `stack_decision` or `stack_resolved_at`, and an `integrate` row of
+  `optimization_stack` no longer carries `stack_kernel_ids` or
+  `stack_validation`. A session written by an earlier release still resumes;
+  what its rows already hold of these is left as it is and not read.
+* The exception is a session that stopped inside a stack validation: either
+  checkpoint is non-empty, or a `kernel_integrate_attempts` row has
+  `stack_validation_in_progress`. `--resume-from` refuses it, because the
+  patches that validation applied may still be on the framework tree and this
+  release cannot revert them. Resume it once with the release that wrote it,
+  which reverts them and clears the checkpoint, then resume it here.
+* A resumed session is no longer stopped with `patch_recovery_incomplete`
+  because an `integrate` row of `optimization_stack` names no member kernel.
+* `session_breakdown.json`: a `kernel_agent` event's `ext.measurements` has no
+  `integrate-stack-<kernel ids>` row and its `ext.integrate` no row for a
+  `<kernel id>+<kernel id>` stack.
 
 ---
 

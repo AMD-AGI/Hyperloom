@@ -419,7 +419,7 @@ def quality_ref_actions(timeline: Sequence[Mapping[str, Any]]) -> list[QualityRe
 
     Two dispatches land an action on a ``baseline`` event: the genuine baseline
     and ``replay_warm_recipe``. The kernel lane's throughput-only probes --
-    integrate re-baseline, stack validation, shape capture -- go through the
+    integrate re-baseline, shape capture -- go through the
     same executor but record into the kernel event that asked for them. Only
     the genuine baseline is a quality reference, so the selection reads the
     action's own ``establishes_quality_ref``, the flag the executor set from
