@@ -27,6 +27,8 @@ _COMMIT = "b90ae9990abd42ed0424c0255a34a74ef464a060"
 _AGENTIC_CATALOG = ".github/benchmark/models_agentic.json"
 _DSV4_PRO = "deepseek-ai/DeepSeek-V4-Pro"
 _DSV4_PRO_BASE = ("--kv_cache_dtype", "fp8", "-tp", "8", "--index_cache_dtype", "fp4", "--no-enable_prefix_caching")
+#: The board every catalog entry of the snapshot runs on (``linux-atom-pitt-mi350x-8``); its recipe pages name others.
+_CATALOG_BOARD = "mi350x"
 
 
 @cache
@@ -41,6 +43,10 @@ def _with(files: dict[str, str | None]) -> RepoBundle:
 
 def _fixed(model: str, *, board: str = "mi355x", concurrencies=(64,), framework: str = "atom", **topology):
     return LaunchQuery(model, framework, board, Workload.FIXED, tuple(concurrencies), isl=8192, osl=1024, **topology)
+
+
+def _catalog(model: str, **changes) -> LaunchQuery:
+    return _fixed(model, board=_CATALOG_BOARD, **changes)
 
 
 def _launches(query: LaunchQuery, bundle: RepoBundle | None = None) -> tuple[SourceLaunch, ...]:
@@ -61,9 +67,9 @@ def _by_locator(launches: tuple[SourceLaunch, ...]) -> dict[str, SourceLaunch]:
 
 
 def test_catalog_args_compose_in_catalog_order():
-    (kimi,) = _launches(_fixed("moonshotai/Kimi-K3"))
-    (gpt_oss,) = _launches(_fixed("openai/gpt-oss-120b"))
-    dpa_tbo = _by_locator(_launches(_fixed(_DSV4_PRO, concurrencies=(1024,))))["models[0].variants[3]"]
+    (kimi,) = _launches(_catalog("moonshotai/Kimi-K3"))
+    (gpt_oss,) = _launches(_catalog("openai/gpt-oss-120b"))
+    dpa_tbo = _by_locator(_launches(_catalog(_DSV4_PRO, concurrencies=(1024,))))["models[0].variants[3]"]
 
     assert kimi.args == (
         *("--kv_cache_dtype", "fp8", "-tp", "8", "--trust-remote-code"),
@@ -80,8 +86,8 @@ def test_catalog_args_compose_in_catalog_order():
     }
 
 
-def test_catalog_launch_names_its_source_and_tuned_board():
-    (kimi,) = _launches(_fixed("moonshotai/Kimi-K3"))
+def test_catalog_launch_names_its_source():
+    (kimi,) = _launches(_catalog("moonshotai/Kimi-K3"))
 
     assert kimi.source.kind is SourceKind.ATOM_CATALOG
     assert (kimi.source.repo, kimi.source.commit, kimi.source.path) == (ATOM_REPO, _COMMIT, CATALOG)
@@ -89,18 +95,18 @@ def test_catalog_launch_names_its_source_and_tuned_board():
     assert kimi.source.files == {CATALOG: hashlib.sha256(_main().text(CATALOG).encode()).hexdigest()}
     assert (kimi.framework, kimi.entrypoint, kimi.image) == ("atom", ATOM_ENTRYPOINT, None)
     assert (kimi.conc, kimi.exact) == (64, True)
-    assert kimi.warnings == ("ATOM tuned Kimi-K3 on mi350x, not mi355x",)
-    assert _launches(_fixed("moonshotai/Kimi-K3", board="mi350x"))[0].warnings == ()
+    assert kimi.warnings == ()
 
 
-def test_catalog_refuses_a_board_of_another_architecture():
-    reason = _miss(_fixed("moonshotai/Kimi-K3", board="mi300x"))
+@pytest.mark.parametrize("board", ["mi355x", "mi300x", "mi350"])
+def test_catalog_serves_only_the_board_its_runner_label_names(board):
+    reason = _miss(_fixed("moonshotai/Kimi-K3", board=board))
 
-    assert "it is tuned on mi350x, not mi300x" in reason
+    assert f"{CATALOG} models[5].variants[0]: its runner 'linux-atom-pitt-mi350x-8' is not a {board}" in reason
 
 
 def test_several_fitting_variants_warn_and_name_each_other():
-    launches = _launches(_fixed(_DSV4_PRO, concurrencies=(256,)))
+    launches = _launches(_catalog(_DSV4_PRO, concurrencies=(256,)))
 
     locators = [launch.source.locator for launch in launches]
     assert locators == [
@@ -121,7 +127,7 @@ def test_several_fitting_variants_warn_and_name_each_other():
 
 
 def test_harness_env_is_taken_out_of_the_server_env():
-    (eplb,) = _launches(_fixed(_DSV4_PRO, concurrencies=(4096,)))
+    (eplb,) = _launches(_catalog(_DSV4_PRO, concurrencies=(4096,)))
 
     assert eplb.env == {
         "AITER_BF16_FP8_MOE_BOUND": "0",
@@ -137,14 +143,14 @@ def test_harness_env_names_are_all_filtered():
     catalog = json.loads(_main().text(CATALOG))
     catalog["models"][5]["env_vars"] = "HIP_VISIBLE_DEVICES=0,1\nPRECISION=fp8\nAIPERF_X=1\nBENCHMARK_Y=2\nKEEP=1"
 
-    (kimi,) = _launches(_fixed("moonshotai/Kimi-K3"), _with({CATALOG: json.dumps(catalog)}))
+    (kimi,) = _launches(_catalog("moonshotai/Kimi-K3"), _with({CATALOG: json.dumps(catalog)}))
 
     assert kimi.env == {"KEEP": "1"}
     assert kimi.stripped == ("HIP_VISIBLE_DEVICES", "PRECISION", "AIPERF_X", "BENCHMARK_Y")
 
 
 def test_fixed_skips_variants_that_draft_tokens():
-    reason = _miss(_fixed("deepseek-ai/DeepSeek-V4.1-Flash", concurrencies=(8,)))
+    reason = _miss(_catalog("deepseek-ai/DeepSeek-V4.1-Flash", concurrencies=(8,)))
 
     assert (
         reason
@@ -153,13 +159,13 @@ def test_fixed_skips_variants_that_draft_tokens():
 
 
 def test_a_concurrency_past_every_band_misses():
-    reason = _miss(_fixed("moonshotai/Kimi-K3", concurrencies=(512,)))
+    reason = _miss(_catalog("moonshotai/Kimi-K3", concurrencies=(512,)))
 
     assert "Kimi-K3 is benchmarked at no concurrency of 512 or more" in reason
 
 
 def test_operator_topology_must_match():
-    assert "it runs tp 8, not 4" in _miss(_fixed("moonshotai/Kimi-K3", tp=4))
+    assert "it runs tp 8, not 4" in _miss(_catalog("moonshotai/Kimi-K3", tp=4))
 
 
 def test_agentx_is_refused_without_reading_the_agentic_catalog():
@@ -170,7 +176,7 @@ def test_agentx_is_refused_without_reading_the_agentic_catalog():
 
 
 def test_the_agentic_catalog_never_feeds_a_fixed_launch():
-    query = _fixed(_DSV4_PRO, concurrencies=(256,))
+    query = _catalog(_DSV4_PRO, concurrencies=(256,))
 
     assert _launches(query, _with({_AGENTIC_CATALOG: "not json"})) == _launches(query)
     assert _launches(query, _with({_AGENTIC_CATALOG: None})) == _launches(query)
@@ -217,11 +223,18 @@ def test_page_inline_assignments_become_env():
     assert first.env == {"AITER_BF16_FP8_MOE_BOUND": "0", "ATOM_MOE_GU_ITLV": "1", "AITER_LOG_LEVEL": "WARNING"}
 
 
-def test_page_board_from_a_heading_naming_several():
-    (launch,) = _launches(_fixed("deepseek-ai/DeepSeek-R1-0528", board="mi300x", concurrencies=(8,)))
+@pytest.mark.parametrize("board", ["mi300x", "mi355x"])
+def test_a_page_block_serves_each_board_its_heading_names(board):
+    (launch,) = _launches(_fixed("deepseek-ai/DeepSeek-R1-0528", board=board, concurrencies=(8,)))
 
     assert launch.source.entry == "FP8 on 8xMI300X/MI355X GPUs (TP8 + FP8 KV Cache)"
-    assert not any(warning.startswith("ATOM tuned") for warning in launch.warnings)
+
+
+@pytest.mark.parametrize("board", ["mi325x", "mi350x"])
+def test_a_page_block_serves_no_board_its_heading_does_not_name(board):
+    reason = _miss(_fixed("deepseek-ai/DeepSeek-R1-0528", board=board, concurrencies=(8,)))
+
+    assert f"recipes/DeepSeek-R1.md block 0: its heading tunes it for mi300x, mi355x, not {board}" in reason
 
 
 def test_dynamic_page_blocks_are_refused():
@@ -274,7 +287,7 @@ def test_pages_are_read_only_when_the_catalog_gives_nothing():
     page = "## On 8xMI355X\n\n```bash\npython -m atom.entrypoints.openai_server --model moonshotai/Kimi-K3 -tp 8\n```\n"
     bundle = _with({"recipes/Kimi-K3.md": page, "recipes/sub/Kimi-K3.md": page})
 
-    assert [launch.source.path for launch in _launches(_fixed("moonshotai/Kimi-K3"), bundle)] == [CATALOG]
+    assert [launch.source.path for launch in _launches(_catalog("moonshotai/Kimi-K3"), bundle)] == [CATALOG]
     bundle = _with({CATALOG: '{"models": []}', "recipes/sub/Kimi-K3.md": page})
     assert "hold no launch of moonshotai/Kimi-K3" in _miss(_fixed("moonshotai/Kimi-K3"), bundle)
 

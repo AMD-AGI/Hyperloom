@@ -167,14 +167,12 @@ def test_a_round_is_recorded_with_what_it_was_pointed_at(_bound_session):
             attempt=1,
             failure_kind="missing_fused_moe",
             launch_log="ImportError: cannot import name 'fused_moe'",
-            candidate_refs=["v0.4.1", "v0.4.2"],
         )
     )
 
     rows = _ext(_bound_session)["attempts"]["rows"]
     assert len(rows) == 1
     assert rows[0]["failure_kind"] == "missing_fused_moe"
-    assert rows[0]["candidate_refs"] == ["v0.4.1", "v0.4.2"]
     assert "fused_moe" in rows[0]["launch_log_excerpt"]
 
 
@@ -312,7 +310,6 @@ def test_a_round_records_the_products_it_contributed(_bound_session):
                     "acquisition_method": "wheel",
                 },
                 enablement_active_runtime={"venv_root": "/venv/a", "installed_versions": {"sglang": "0.4.2"}},
-                enablement_localization_manifest={"files": 3},
             ),
             stall_streak=0,
             succeeded=True,
@@ -323,7 +320,6 @@ def test_a_round_records_the_products_it_contributed(_bound_session):
     assert row["patches_applied"] == ["/s/patches/moe.diff"]
     assert row["stack_action"]["capability"] == "fused_moe"
     assert row["runtime"]["venv_root"] == "/venv/a"
-    assert row["localization_manifest"] == {"files": 3}
     assert row["effective_config"]["extra_server_args"] == "--tp 8"
     # The backup bookkeeping made the install reversible; it is not a fact about the repair.
     assert row["artifacts_applied"] == [
@@ -1043,27 +1039,3 @@ def test_no_surface_of_the_recipe_names_the_authoring_host(_bound_session):
     # The linkage itself must survive: normalizing must not mean discarding.
     assert "a.patch" in blob and "_C.so" in blob
     assert "r1" in blob, "the portable root identifier must remain"
-
-
-def _rendered_facts(**attempts: int) -> list[str]:
-    from hyperloom.inference_optimizer.breakdown.reporters._renderers.enablement import render
-
-    ext = {"mode": "all", "origin": "eval", "attempts": {"count": 1, **attempts}}
-    return render({"timeline": [{"type": "enablement", "status": "running", "ext": ext}]}).key_facts
-
-
-def test_the_report_separates_landed_rounds_from_kept_rounds_awaiting_revalidation():
-    assert _rendered_facts(landed=1, validation_pending=1) == [
-        "Enablement ran 1 authoring round(s) (mode=all, origin=eval).",
-        "1 round(s) landed a fix.",
-        "1 kept round(s) awaiting revalidation.",
-        "Lane outcome: running.",
-    ]
-
-
-def test_the_report_wording_is_unchanged_without_a_pending_keep():
-    assert _rendered_facts(landed=1, validation_pending=0) == [
-        "Enablement ran 1 authoring round(s) (mode=all, origin=eval).",
-        "1 round(s) landed a fix.",
-        "Lane outcome: running.",
-    ]

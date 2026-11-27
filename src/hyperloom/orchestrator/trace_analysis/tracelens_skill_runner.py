@@ -38,7 +38,7 @@ from hyperloom.common.codex_session import (
 from hyperloom_common.llm import llm_config
 from hyperloom.common.deepseek_task import DeepSeekTaskRequest
 from hyperloom_common.llm.llm_config import DEFAULT_CLAUDE_MODEL, DEFAULT_CODEX_MODEL, claude_sdk_env_options
-from ._capture_shapes import is_capture_dir_name
+from ._capture_shapes import discover_capture_folder
 from ._literal_utils import LITERAL_EVAL_ERRORS as _LITERAL_EVAL_ERRORS
 from ._literal_utils import safe_literal_eval as _safe_literal_eval
 from ._task_group_contract import (
@@ -293,60 +293,6 @@ def write_run_config(
     config_path = output_dir / RUN_CONFIG_NAME
     config_path.write_text(yaml.safe_dump(config, sort_keys=False), encoding="utf-8")
     return config_path
-
-
-def _holds_capture_traces(folder: Path) -> bool:
-    # TraceLens reads every .json / .json.gz in the capture folder as a capture trace, and when there is none it
-    # exits 0 without writing any report.
-    try:
-        return any(child.is_file() and child.name.endswith((".json", ".json.gz")) for child in folder.iterdir())
-    except OSError:
-        return False
-
-
-def discover_capture_folder(trace_input: Path, trace_files: list[Path]) -> Path | None:
-    """Find a graph-capture folder near a torch_trace input.
-
-    Scans the trace input directory and the first trace file's neighbourhood for
-    a subdirectory whose name matches the shared capture-directory shape, so a
-    layout that ranking already demotes is also a layout discovery can find.
-    Matching by shape rather than by two hard-coded names is what lets an
-    unpatched SGLang's ``graph_capture_profile/`` through, so the capture folder
-    is passed on whenever the workload trace was picked. A folder with no capture
-    trace in it is passed over: the capture path fired but wrote nothing, and
-    the workload trace is still analysable without one.
-
-    Args:
-        trace_input (Path): The trace input path (file or directory).
-        trace_files (list[Path]): Discovered trace files; only the first is used.
-
-    Returns:
-        Path | None: The capture folder if one holding a capture trace exists nearby, else ``None``.
-    """
-
-    capture_dir_priority = ("capture_traces", "graph_capture_profile", "graph_capture")
-    search_roots: list[Path] = []
-    if trace_input.is_dir():
-        search_roots.append(trace_input)
-    for trace_file in trace_files[:1]:
-        search_roots.extend([trace_file.parent, trace_file.parent.parent])
-    seen: set[Path] = set()
-    for root in search_roots:
-        if root in seen or not root.is_dir():
-            continue
-        seen.add(root)
-        try:
-            children = [child for child in root.iterdir() if child.is_dir() and _holds_capture_traces(child)]
-        except OSError:
-            continue
-        children_by_name = {child.name.lower(): child for child in children}
-        for name in capture_dir_priority:
-            if child := children_by_name.get(name):
-                return child
-        for child in sorted(children):
-            if is_capture_dir_name(child.name):
-                return child
-    return None
 
 
 @dataclass(frozen=True)
@@ -773,7 +719,6 @@ async def run_tracelens_skill(
             prompt=prompt,
             system_prompt=_TRACELENS_SYSTEM_PROMPT,
             cwd=tracelens_root,
-            writable=True,
             log=log,
             timeout_sec=timeout_sec,
         )

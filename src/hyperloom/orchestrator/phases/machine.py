@@ -16,7 +16,6 @@ from . import phase_predicates, phase_transitions
 from ..bus.message_bus import Message
 from ..prompts import write_prompt_snapshot as _write_prompt_snapshot
 from ..collaborator import CoordinatorCollaborator
-from hyperloom.plugs import progress as _progress
 
 log = _logging.getLogger(__name__)
 
@@ -227,7 +226,7 @@ class MachinePhase(CoordinatorCollaborator):
         """Run the current phase's pump, unless the machine is leaving the phase.
 
         While a transition waits for running work, what FRAMEWORK_AGENT's pump queues -- candidate discovery and
-        authoring, forced and scout specialists, explore grids -- is work no phase it moves to admits:
+        authoring, scout specialists, explore grids -- is work no phase it moves to admits:
         :meth:`_drain_for_transition` cancels it on the same tick, and the pump would queue it again on the next.
         """
         if not self.pump_table:
@@ -377,10 +376,6 @@ class MachinePhase(CoordinatorCollaborator):
             state.save(self.session_dir)
         except OSError as exc:
             save_error = exc
-            _progress.warn(
-                "state_save_failed", f"state.json could not be written at the {move.to_phase} boundary: {exc}"
-            )
-        _progress.phase_changed(move.from_phase, move.to_phase, state.macro_cycle)
         log.info(
             "Coordinator.phase: %s → %s (reason=%s)",
             move.from_phase or "<unset>",

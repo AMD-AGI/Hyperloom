@@ -85,17 +85,6 @@ class V6FrameworkRun(TypedDict, total=False):
     produced_ids: list[str]
 
 
-class V6FrameworkCriticVariantRuling(TypedDict, total=False):
-    """The Critic's ruling on one variant of a grid reviewed as a whole.
-
-    A rejected variant reaches no bench, so no attempt row carries its
-    ruling and this is the only place it is readable."""
-
-    variant_name: str
-    verdict: str
-    reason: str
-
-
 class V6FrameworkCriticReviewOutcome(TypedDict, total=False):
     """What the loop did with a ruling.
 
@@ -123,7 +112,6 @@ class V6FrameworkCriticReview(TypedDict, total=False):
     confidence: float | None
     concerns: list[str]
     reviewed_at: str
-    variants: list[V6FrameworkCriticVariantRuling]
     outcome: V6FrameworkCriticReviewOutcome
     artifacts: dict[str, Any]
 
@@ -397,7 +385,6 @@ __all__ = [
     "V6FrameworkConfigDelta",
     "V6FrameworkCriticReview",
     "V6FrameworkCriticReviewOutcome",
-    "V6FrameworkCriticVariantRuling",
     "V6FrameworkExit",
     "V6FrameworkExt",
     "V6FrameworkGate",

@@ -10,6 +10,7 @@ masked; and a compile bubblewrap cannot sandbox fails as the machine's, running 
 from __future__ import annotations
 
 import os
+import subprocess
 import sys
 from dataclasses import replace
 from pathlib import Path
@@ -30,8 +31,10 @@ from hyperloom.measure.runner.native.isolated import (
     ChildInterpreter,
     IsolatedBuilds,
     Isolation,
+    _child_environment,
     compile_policy,
 )
+from hyperloom.orchestrator.enablement.runtime.build_utils import probe_torch_abi
 from hyperloom.measure.runner.native.tests._native import BUILDER_IMAGE, CountingPreflight, fake_recipe
 from hyperloom.measure.tests._recipes import IMAGE
 
@@ -254,6 +257,7 @@ def test_under_bubblewrap_the_compile_is_given_only_its_own_environment(
     """Under bubblewrap the compile is this process's own user: none of this process's variables may reach it."""
     laid = _laid(tmp_path)
     monkeypatch.setenv("HYPERLOOM_TEST_SERVICE_TOKEN", "SECRET")
+    monkeypatch.delenv("LD_LIBRARY_PATH", raising=False)
     seen: list[dict[str, str]] = []
 
     def run(command, **kwargs):
@@ -280,3 +284,84 @@ def test_under_bubblewrap_the_compile_is_given_only_its_own_environment(
         "TMPDIR": str(work),
         "LC_ALL": "C.UTF-8",
     }
+
+
+def test_the_child_is_given_the_images_library_search_path_and_no_other_variable(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The image's torch may load a library only its ``LD_LIBRARY_PATH`` names: the child's preflight imports it. A
+    preload, credentials, proxies and an import path stay out."""
+    for name, value in {
+        "PATH": "/usr/bin",
+        "LD_LIBRARY_PATH": "/opt/venv/lib/python3.12/site-packages/_rocm_sdk_devel/lib",
+        "LD_PRELOAD": "/tmp/hook.so",
+        "HF_TOKEN": "SECRET",
+        "HTTPS_PROXY": "http://proxy",
+        "PYTHONPATH": "/elsewhere",
+    }.items():
+        monkeypatch.setenv(name, value)
+
+    given = _child_environment(tmp_path)
+
+    assert given == {
+        "PATH": "/usr/bin",
+        "HOME": str(tmp_path),
+        "TMPDIR": str(tmp_path),
+        "LC_ALL": "C.UTF-8",
+        "LD_LIBRARY_PATH": "/opt/venv/lib/python3.12/site-packages/_rocm_sdk_devel/lib",
+    }
+    assert isolated.CHILD_PASSED_ENV_NAMES == ("LD_LIBRARY_PATH",)
+    monkeypatch.setenv("LD_LIBRARY_PATH", "")
+    assert "LD_LIBRARY_PATH" not in _child_environment(tmp_path)
+
+
+def test_under_bubblewrap_the_images_library_search_path_is_bound_for_the_child(
+    tmp_path: Path, registered: PrivatePaths, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    laid = _laid(tmp_path)
+    library = tmp_path / "image-sdk" / "lib"
+    library.mkdir(parents=True)
+    monkeypatch.setenv("LD_LIBRARY_PATH", str(library))
+    work = tmp_path / "scratch" / "work"
+    work.mkdir(parents=True)
+
+    environ = _child_environment(work)
+    policy = compile_policy(work, ChildInterpreter(), laid, environ)
+
+    assert environ["LD_LIBRARY_PATH"] == str(library)
+    assert str(library) in policy.read_only
+
+
+def test_a_torch_that_needs_the_images_library_path_imports_only_in_the_childs_environment(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A stand-in for the image's torch, which loads ``libamd_smi.so`` from a directory only ``LD_LIBRARY_PATH`` names:
+    the probe fails without that path and passes in the environment the child is given."""
+    library = tmp_path / "sdk" / "lib"
+    library.mkdir(parents=True)
+    package = tmp_path / "site" / "torch"
+    package.mkdir(parents=True)
+    (package / "__init__.py").write_text(
+        "import os\n"
+        f"if {str(library)!r} not in os.environ.get('LD_LIBRARY_PATH', '').split(os.pathsep):\n"
+        "    raise ImportError('libamd_smi.so: cannot open shared object file: No such file or directory')\n"
+        "__version__ = '2.11.0+rocm10.0.0'\n"
+        "class version:\n"
+        "    hip = '7.15.26333'\n",
+        encoding="utf-8",
+    )
+    work = tmp_path / "work"
+    work.mkdir()
+    site = {"PYTHONPATH": str(package.parent)}
+
+    def in_child(environment: dict[str, str]):
+        return lambda argv, **kwargs: subprocess.run(argv, env={**environment, **site}, **kwargs)
+
+    monkeypatch.setenv("PATH", os.defpath)
+    monkeypatch.delenv("LD_LIBRARY_PATH", raising=False)
+    reduced = probe_torch_abi(sys.executable, run=in_child(_child_environment(work)))
+    monkeypatch.setenv("LD_LIBRARY_PATH", str(library))
+    probed = probe_torch_abi(sys.executable, run=in_child(_child_environment(work)))
+
+    assert not reduced["is_rocm"] and "libamd_smi.so" in reduced["error"]
+    assert probed["is_rocm"] and probed["torch_version"] == "2.11.0+rocm10.0.0" and "error" not in probed

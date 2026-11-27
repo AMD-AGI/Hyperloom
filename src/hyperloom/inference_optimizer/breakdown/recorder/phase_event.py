@@ -28,7 +28,6 @@ from collections.abc import Mapping, Sequence
 from typing import Any
 
 from hyperloom_common.coerce import to_float as _float_or_none, to_int as _int_or_none, to_mapping as _as_dict
-from hyperloom.plugs import progress as _progress
 
 from .event_fields import now_iso_seconds as _now, text as _text
 from .event_ids import event_id
@@ -320,9 +319,6 @@ def record_settle(settlement: ActionSettlement) -> None:
     if not str(settlement.task_id or ""):
         return
     row = _action_row(str(settlement.task_id))
-    _progress.candidate_settled(
-        str(settlement.task_id), str((row or {}).get("action") or ""), str(settlement.decision or "")
-    )
     event = str(row["event_id"]) if row else None
     if event is None:
         return

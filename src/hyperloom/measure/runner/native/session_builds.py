@@ -29,6 +29,7 @@ import functools
 import json
 import logging
 import os
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -68,6 +69,7 @@ __all__ = [
     "lay_executables",
     "open_native_builds",
     "start_native_builds",
+    "tune_native_builds",
 ]
 
 logger = logging.getLogger(__name__)
@@ -78,6 +80,7 @@ _TRUST_FILE = "trust.json"
 _CURRENT = "current"
 _SOURCES = "sources"
 _CHECKS = "checks"
+_TUNES = "tunes"
 _KEY_EPOCH = 1
 _GIT_TIMEOUT_SEC = 120
 _UTF8 = "utf-8"
@@ -104,6 +107,17 @@ class SessionNativeBuilds:
         them, over the base commit, its executables laid. A tree git cannot read, and a build whose executables cannot
         be laid, are the machine's failure."""
         return self._laid(*self._compiled(paths))
+
+    def build_patch(self, patch: bytes) -> TreeBuild:
+        """The build of ``patch``, a git patch over the base commit (empty for the base as it is), its executables laid
+        as :meth:`build_tree` lays them."""
+        stack = self._stack(patch)
+        return self._laid(self._build(stack), stack)
+
+    def read_upstream(self, path: str) -> str:
+        """The text of ``path`` (a path in the upstream tree) at the base commit."""
+        sources = self.session.planner.site.sources
+        return (sources / self.component / self.base_commit / path).read_text(encoding=_UTF8)
 
     def _laid(self, found: TreeBuild, stack: ComponentPatches) -> TreeBuild:
         if found.status is not TreeBuildStatus.BUILT:
@@ -177,7 +191,13 @@ def lay_executables(
     farm = build_farm(built_roots(roots, builds), staged, python=sys.executable, read_blob=_no_blob)
     if farm is None or farm.bin != (staged / component / "bin",):
         raise FarmError(f"the {component} build {key} laid no executables of its own")
-    staged.rename(farm_dir)
+    try:
+        staged.rename(farm_dir)
+    except OSError:
+        # Another caller laid the same key since the check above: its copy is this build's.
+        if not laid.is_dir():
+            raise
+        shutil.rmtree(staged)
     return laid
 
 
@@ -266,16 +286,33 @@ def check_native_tree(session_dir: Path, tree: Path, paths: Sequence[str] = ()) 
     Raises:
         NativeBuildsRefused: The session builds no framework server from source.
     """
-    root = Path(session_dir) / _NATIVE_DIR
+    return _recorded(Path(session_dir), _CHECKS, Path(tree)).check_tree(paths)
+
+
+def tune_native_builds(session_dir: Path) -> SessionNativeBuilds:
+    """The builds of patches over the base of the session at ``session_dir`` (:meth:`SessionNativeBuilds.build_patch`)
+    that a sweep of a kernel knob times, on the build site the session recorded, into a store of the session's sweeps
+    (``native/tunes``), apart from the one its integration reads.
+
+    Raises:
+        NativeBuildsRefused: The session builds no framework server from source.
+    """
+    return _recorded(Path(session_dir), _TUNES, None)
+
+
+def _recorded(session_dir: Path, own: str, tree: Path | None) -> SessionNativeBuilds:
+    """The builds of the session's recorded base and build site into the store below ``native/<own>``, of ``tree`` (the
+    pinned upstream tree when ``None``)."""
+    root = session_dir / _NATIVE_DIR
     path = root / _BASE_FILE
     if not path.is_file():
         raise NativeBuildsRefused(f"the session at {session_dir} builds no framework server from source: no {path}")
     base = json.loads(path.read_text(encoding=_UTF8))
     component, commit = str(base["component"]), str(base["commit"])
     machine = BuildMachine(base["image_digest"], base["image_digest"], base["gfx_arch"], base["python"])
-    checks = _directory(root / _CHECKS)
-    session = _site_session(root, checks, {component: commit}, machine, str(base["build_cpus"]))
-    return SessionNativeBuilds(checks, component, Path(tree), session).check_tree(paths)
+    stored = _directory(root / own)
+    session = _site_session(root, stored, {component: commit}, machine, str(base["build_cpus"]))
+    return SessionNativeBuilds(stored, component, tree or root / _SOURCES / component / commit, session)
 
 
 def _site_session(
@@ -347,7 +384,7 @@ def _gfx_arch(environ: Mapping[str, str]) -> str:
     gfx = detect_gfx_arch(environ)
     if not gfx:
         raise NativeBuildsRefused(
-            "a native build needs the GPU architecture: pass --gpu-type or set HYPERLOOM_GFX_ARCH"
+            "a native build needs the GPU architecture, and the session read no card: set HYPERLOOM_GFX_ARCH"
         )
     return gfx
 

@@ -14,6 +14,7 @@ from typing import Any
 
 import yaml
 
+from hyperloom_common import gpu_card
 from hyperloom_common.coerce import to_float, to_int, to_str_list
 from hyperloom.common.gain_math import accuracy_passed, gain_pct, graded_gate_row
 from hyperloom.common.model_paths import resolve_session_model_path
@@ -57,6 +58,7 @@ from ._proposal_identity import (
     effective_fingerprint,
     keeps_effective_args,
 )
+from .explore_prefilter.dead_changes import KNOWN_DEAD_CHANGE, carried_dead_change, dead_changes
 from .explore_prefilter.measured_variants import GAIN_BELOW_THRESHOLD, MeasuredOn, measured_verdict, stack_of_measured
 from .grid._grid_base import DEFAULT_KEEP_THRESHOLD_PCT, TS_FAILED, TS_SKIPPED_DEDUP
 from .grid._grid_base import _safe, variant_config_of
@@ -426,7 +428,7 @@ class _ExploreRound:
             serving=ServingStack.of_recipe(
                 self.bench,
                 model_path=self.target.model_path,
-                gpu_type=self.target.gpu_type or str(getattr(self.ss, "gpu_type", "") or ""),
+                gfx=gpu_card.session_gfx(),
                 stack_fingerprint=getattr(self.ss, "stack_fingerprint_meta", None),
             ),
             base_server_args=self._composed_args(self.base_args, self.base_remove_args),
@@ -516,7 +518,7 @@ class _ExploreRound:
             self._decided_without_measuring(gv, BASELINE_NOOP, detail=restated)
             self.judged_without_measuring += 1
             return True
-        if self._already_measured(gv):
+        if self._already_measured(gv) or self._carries_dead_change(gv):
             self.judged_without_measuring += 1
             return True
         return self._out_of_budget(idx) or self._refuses_context_copy(gv)
@@ -534,7 +536,7 @@ class _ExploreRound:
         self.skipped.append(
             {"name": gv.name, "fingerprint": fingerprint, "reason": reason, "detail": detail or duplicate_of}
         )
-        known = (getattr(self.ss, "explore_search", None) or {}).get("tested") or {}
+        known = self._session_ledger().get("tested") or {}
         if not fingerprint or fingerprint in self.tested or fingerprint in known:
             return
         self.tested[fingerprint] = {
@@ -571,11 +573,11 @@ class _ExploreRound:
         round. A stack revalidation exists to re-measure, and a kernel overlay changes the launch without changing
         the fingerprint, so neither is ever skipped.
         """
-        if self.ss is None or is_stack_revalidation(self.params) or getattr(gv, "overlay_pythonpath", ""):
+        if is_stack_revalidation(self.params) or getattr(gv, "overlay_pythonpath", ""):
             return False
         fingerprint = variant_fingerprint(gv)
         prior = measured_verdict(
-            getattr(self.ss, "explore_search", None),
+            self._session_ledger(),
             fingerprint,
             variant={"extra_args": gv.extra_server_args, "extra_envs": gv.extra_envs, **controls_of(vars(gv))},
             now=MeasuredOn(stack_of_measured(self.measured_against()), self.ws_sig, self.keep_threshold_pct),
@@ -588,6 +590,28 @@ class _ExploreRound:
         )
         log.info("explore: skipping already-measured variant %s (%s)", gv.name, detail)
         self.skipped.append({"name": gv.name, "fingerprint": fingerprint, "reason": ALREADY_MEASURED, "detail": detail})
+        return True
+
+    def _session_ledger(self) -> dict[str, Any]:
+        """The session's explore ledger; empty for a round run without a session."""
+        return getattr(self.ss, "explore_search", None) or {}
+
+    def _carries_dead_change(self, gv: GridVariant) -> bool:
+        """Whether ``gv`` carries whole a change this session saw kill a server before it was ready, recording it.
+
+        Judged per variant against this round's rows too, so a death earlier in the round stops its siblings.
+        """
+        if is_stack_revalidation(self.params) or getattr(gv, "overlay_pythonpath", ""):
+            return False
+        known = self._session_ledger().get("tested") or {}
+        dead = carried_dead_change(
+            {"extra_server_args": gv.extra_server_args, "extra_envs": gv.extra_envs, **controls_of(vars(gv))},
+            dead_changes({**known, **self.tested}.values(), workload_signature=self.ws_sig),
+            stack=self.measured_against(),
+        )
+        if dead is None:
+            return False
+        self._decided_without_measuring(gv, KNOWN_DEAD_CHANGE, detail=dead.detail())
         return True
 
     def _out_of_budget(self, idx: int) -> bool:

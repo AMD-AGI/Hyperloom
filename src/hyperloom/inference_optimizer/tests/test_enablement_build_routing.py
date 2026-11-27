@@ -11,15 +11,17 @@ from pathlib import Path
 
 import pytest
 
-from hyperloom_common.gpu_identity import AMD_GPU_BOARDS
+from hyperloom_common.gpu_card import GpuCard
 from hyperloom.orchestrator.actions.executors.targeted_build_executor import TargetedBuildExecutor
 from hyperloom.orchestrator.enablement.runtime.build_actions import TargetedBuildAction, BuildResult, FrameworkRuntime
 from hyperloom.orchestrator.loop.build_lifecycle import BuildLifecycleCollaborator
 from hyperloom.orchestrator.enablement.recipe.steps import select_linked_build
 from hyperloom.orchestrator.enablement.build import _repo_matches_targeted_build_component
-from hyperloom.inference_optimizer.gpu_types import targeted_build_validated
 from hyperloom.orchestrator.state._shared_state.enablement_round import EnablementRound
 from hyperloom.orchestrator.enablement.params import EnablementParams
+from hyperloom.orchestrator.tests._fixtures import MI325X_CARD, MI355X_CARD, publish_card
+
+_R9700_CARD = GpuCard("AMD Radeon AI PRO R9700", "7551", "gfx1201", 64, 32624, 640.0, 2920)
 
 
 # Fixture: extend the shared build_coord with framework-phase routing methods
@@ -74,13 +76,10 @@ def test_targeted_build_repo_match_reads_the_repo_name_not_its_origin(repo_url, 
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize(
-    ("gpu_type", "arch"),
-    sorted((product, board.gfx) for product, board in AMD_GPU_BOARDS.items() if targeted_build_validated(product)),
-)
-async def test_escalate_enqueues_for_compiled_gap(coord, monkeypatch, gpu_type, arch):
-    """A build with no arch is refused at preflight, so every accepted board has to carry one."""
-    coord.shared_state.gpu_type = gpu_type
+@pytest.mark.parametrize("card", [MI325X_CARD, MI355X_CARD, _R9700_CARD], ids=lambda card: card.gfx)
+async def test_escalate_enqueues_for_compiled_gap(coord, monkeypatch, card):
+    """Every arch is offered a build, and a build with no arch is refused at preflight, so it carries the card's."""
+    publish_card(monkeypatch, card)
     coord.shared_state.framework = "vllm"
 
     from hyperloom.orchestrator.actions.executors import _multi_node_env as mne
@@ -94,7 +93,7 @@ async def test_escalate_enqueues_for_compiled_gap(coord, monkeypatch, gpu_type, 
     assert len(queued) == 1
     action = TargetedBuildAction.from_state(queued[0].params)
     assert action.component == "aiter"
-    assert action.gpu_arch == arch
+    assert action.gpu_arch == card.gfx
 
 
 @pytest.mark.asyncio
@@ -137,25 +136,6 @@ async def test_escalate_skipped_for_pure_python_gap(coord, monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_escalate_skipped_for_r9700(coord, monkeypatch, caplog):
-    coord.shared_state.gpu_type = "r9700"
-    coord.shared_state.framework = "vllm"
-
-    from hyperloom.orchestrator.actions.executors import _multi_node_env as mne
-
-    monkeypatch.setattr(mne, "is_multi_node", lambda: False)
-
-    with caplog.at_level("WARNING", logger="hyperloom.orchestrator.enablement.build"):
-        await coord.enablement_build.maybe_escalate_to_targeted_build(
-            "hipErrorNoBinaryForGpu: no kernel image is available"
-        )
-    assert len([t for t in await coord.tasks.queued() if t.kind == "targeted_build"]) == 0
-    assert "targeted_build skipped" in caplog.text and "gpu_type=r9700" in caplog.text
-    assert coord.shared_state.enablement.last_build_failure["failure_class"] == "preflight_toolchain"
-    assert "r9700" in coord.shared_state.enablement.last_build_failure["failure_summary"]
-
-
-@pytest.mark.asyncio
 async def test_escalate_skipped_on_multi_node(coord, monkeypatch):
     coord.shared_state.framework = "vllm"
 
@@ -171,7 +151,6 @@ async def test_escalate_skipped_on_multi_node(coord, monkeypatch):
 @pytest.mark.asyncio
 async def test_escalate_idempotent_same_gap(coord, monkeypatch):
     coord.shared_state.framework = "vllm"
-    coord.shared_state.gpu_type = "mi300x"
 
     from hyperloom.orchestrator.actions.executors import _multi_node_env as mne
 
@@ -201,7 +180,7 @@ async def test_escalate_disabled_by_env(coord, monkeypatch):
 @pytest.mark.asyncio
 async def test_arch_stall_escalates_to_vllm_source_after_attempts(coord, monkeypatch):
     coord.shared_state.framework = "vllm"
-    coord.shared_state.gpu_type = "mi355x"
+    publish_card(monkeypatch, MI355X_CARD)
 
     from hyperloom.orchestrator.actions.executors import _multi_node_env as mne
 
@@ -241,7 +220,7 @@ async def test_arch_stall_not_escalated_on_non_vllm(coord, monkeypatch):
 @pytest.mark.asyncio
 async def test_specialist_requested_build_enqueued(coord, monkeypatch):
     coord.shared_state.framework = "vllm"
-    coord.shared_state.gpu_type = "mi355x"
+    publish_card(monkeypatch, MI355X_CARD)
 
     from hyperloom.orchestrator.actions.executors import _multi_node_env as mne
 
@@ -279,39 +258,8 @@ async def test_specialist_requested_build_enqueued(coord, monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_specialist_requested_build_skipped_for_r9700(coord, monkeypatch):
-    coord.shared_state.framework = "vllm"
-    coord.shared_state.gpu_type = "r9700"
-
-    from hyperloom.orchestrator.actions.executors import _multi_node_env as mne
-
-    monkeypatch.setattr(mne, "is_multi_node", lambda: False)
-
-    tid = "spec-r9700"
-    coord.shared_state.enablement.last_specialist_task_id = tid
-
-    await coord.enablement_build.maybe_enqueue_specialist_requested_build(
-        task_id=tid,
-        payload={
-            "needs_targeted_build": {
-                "component": "aiter",
-                "capability": "deepseek_v4_nsa",
-                "repo_url": "https://github.com/ROCm/aiter",
-                "ref": "PR:1234",
-            }
-        },
-    )
-
-    assert len([t for t in await coord.tasks.queued() if t.kind == "targeted_build"]) == 0
-    # The request is consumed so the next tick does not retry it.
-    assert coord.shared_state.enablement.last_specialist_task_id == ""
-    assert coord.shared_state.enablement.last_build_failure["failure_class"] == "preflight_toolchain"
-
-
-@pytest.mark.asyncio
 async def test_specialist_requested_build_enqueued_from_payload(coord, monkeypatch):
     coord.shared_state.framework = "vllm"
-    coord.shared_state.gpu_type = "mi355x"
 
     from hyperloom.orchestrator.actions.executors import _multi_node_env as mne
 
@@ -338,7 +286,6 @@ async def test_specialist_requested_build_enqueued_from_payload(coord, monkeypat
 @pytest.mark.asyncio
 async def test_specialist_requested_build_rejects_repo_component_mismatch(coord, monkeypatch):
     coord.shared_state.framework = "vllm"
-    coord.shared_state.gpu_type = "mi355x"
 
     from hyperloom.orchestrator.actions.executors import _multi_node_env as mne
 
@@ -367,7 +314,6 @@ async def test_specialist_requested_build_rejects_repo_component_mismatch(coord,
 @pytest.mark.asyncio
 async def test_specialist_requested_build_defaults_component_to_vllm_source(coord, monkeypatch):
     coord.shared_state.framework = "vllm"
-    coord.shared_state.gpu_type = "mi300x"
 
     from hyperloom.orchestrator.actions.executors import _multi_node_env as mne
 
@@ -637,7 +583,6 @@ def _make_params_fake(**kw):
             kept_patches=[],
             kept_stack_action={},
             setup_commands=[],
-            localization_manifest=[],
             last_build_failure=kw.get("enablement_last_build_failure", {}),
         ),
     )
@@ -645,7 +590,6 @@ def _make_params_fake(**kw):
     fake.build_enablement_specialist_params = types.MethodType(
         EnablementParams.build_enablement_specialist_params, fake
     )
-    fake._discover_enablement_candidate_refs = lambda plan, *, deadline: []
     fake._read_enablement_source_context = lambda _sig: ""
     fake._derive_checkpoint_weight_facts = lambda _log: ""
     return fake
@@ -675,48 +619,21 @@ def test_build_params_no_injection_when_no_build_failure():
     assert "PREVIOUS TARGETED-BUILD" not in notes
 
 
-# maybe_escalate_to_targeted_build: discovery-driven ref selection
+# maybe_escalate_to_targeted_build: ref selection
 
 
 @pytest.mark.asyncio
-async def test_escalate_uses_discovery_ref_when_no_kept_ref(coord, monkeypatch):
-    """When no kept/operator ref, top matching candidate from discovery is used."""
+async def test_escalate_builds_the_kept_ref(coord, monkeypatch):
+    """The kept stack action's repo and ref are the build's."""
     from hyperloom.orchestrator.actions.executors import _multi_node_env as mne
 
     monkeypatch.setattr(mne, "is_multi_node", lambda: False)
 
     coord.shared_state.framework = "vllm"
-    coord.shared_state.gpu_type = "mi300x"
-    coord.shared_state.enablement.candidate_refs = [
-        "https://github.com/ROCm/aiter/pull/77",
-    ]
-
-    await coord.enablement_build.maybe_escalate_to_targeted_build("hipErrorNoBinaryForGpu")
-
-    queued = [t for t in await coord.tasks.queued() if t.kind == "targeted_build"]
-    assert len(queued) == 1
-    action = TargetedBuildAction.from_state(queued[0].params)
-    assert action.ref == "PR:77"
-    assert "aiter" in action.repo_url.lower()
-    assert action.source_pr_url == "https://github.com/ROCm/aiter/pull/77"
-
-
-@pytest.mark.asyncio
-async def test_escalate_kept_ref_short_circuits_discovery(coord, monkeypatch):
-    """When a kept stack action has a ref, discovery candidates are ignored."""
-    from hyperloom.orchestrator.actions.executors import _multi_node_env as mne
-
-    monkeypatch.setattr(mne, "is_multi_node", lambda: False)
-
-    coord.shared_state.framework = "vllm"
-    coord.shared_state.gpu_type = "mi300x"
     coord.shared_state.enablement.kept_stack_action = {
         "ref": "v0.99.0",
         "repo_url": "https://github.com/ROCm/aiter",
     }
-    coord.shared_state.enablement.candidate_refs = [
-        "https://github.com/ROCm/aiter/pull/77",
-    ]
 
     await coord.enablement_build.maybe_escalate_to_targeted_build("hipErrorNoBinaryForGpu")
 
@@ -724,53 +641,25 @@ async def test_escalate_kept_ref_short_circuits_discovery(coord, monkeypatch):
     assert len(queued) == 1
     action = TargetedBuildAction.from_state(queued[0].params)
     assert action.ref == "v0.99.0"
+    assert action.repo_url == "https://github.com/ROCm/aiter"
     assert action.source_pr_url == ""
 
 
 @pytest.mark.asyncio
-async def test_escalate_skips_candidate_with_wrong_component_repo(coord, monkeypatch):
-    """aiter component only accepts candidates whose repo contains 'aiter'."""
+async def test_escalate_without_a_kept_ref_names_no_ref(coord, monkeypatch):
     from hyperloom.orchestrator.actions.executors import _multi_node_env as mne
 
     monkeypatch.setattr(mne, "is_multi_node", lambda: False)
 
     coord.shared_state.framework = "vllm"
-    coord.shared_state.gpu_type = "mi300x"
-    coord.shared_state.enablement.candidate_refs = [
-        "https://github.com/sgl-project/sglang/pull/5",  # wrong repo for aiter
-    ]
 
     await coord.enablement_build.maybe_escalate_to_targeted_build("hipErrorNoBinaryForGpu")
 
     queued = [t for t in await coord.tasks.queued() if t.kind == "targeted_build"]
     assert len(queued) == 1
     action = TargetedBuildAction.from_state(queued[0].params)
-    # Falls back to empty ref (tag autoselect) since no matching candidate
     assert action.ref == ""
     assert action.source_pr_url == ""
-
-
-@pytest.mark.asyncio
-async def test_escalate_moves_past_a_candidate_whose_org_alone_names_the_component(coord, monkeypatch):
-    """The component is matched on the repo name, so an org-only hit is skipped, not escalated and then aborted."""
-    from hyperloom.orchestrator.actions.executors import _multi_node_env as mne
-
-    monkeypatch.setattr(mne, "is_multi_node", lambda: False)
-
-    coord.shared_state.framework = "vllm"
-    coord.shared_state.gpu_type = "mi300x"
-    coord.shared_state.enablement.candidate_refs = [
-        "https://github.com/aiter-fans/vllm/pull/5",
-        "https://github.com/ROCm/aiter/pull/77",
-    ]
-
-    await coord.enablement_build.maybe_escalate_to_targeted_build("hipErrorNoBinaryForGpu")
-
-    queued = [t for t in await coord.tasks.queued() if t.kind == "targeted_build"]
-    assert len(queued) == 1
-    action = TargetedBuildAction.from_state(queued[0].params)
-    assert action.ref == "PR:77"
-    assert action.repo_url == "https://github.com/ROCm/aiter"
 
 
 @pytest.mark.asyncio

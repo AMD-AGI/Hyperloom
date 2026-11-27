@@ -8,8 +8,12 @@ from __future__ import annotations
 from pathlib import PurePosixPath
 from typing import Any
 
+from inference_suite.server_log import cause_line
+
 from hyperloom.common.perf_metric import GRADED_OUTPUT
 from hyperloom.common.prompt_safety import flatten_for_prompt as _flatten_for_prompt
+
+from ..failure_evidence import failure_text
 
 # Width budget for artifact anchors.
 _ANCHOR_MAX_CHARS = 100
@@ -17,7 +21,7 @@ _ANCHOR_MAX_CHARS = 100
 # Anchors are dropped in this order while the set is over the width budget.
 _ANCHOR_DROP_ORDER = ("log=", "ws=")
 
-# A rejection reason, truncated to its actionable tail.
+# A rejection reason, truncated to its cause line's head, else to its actionable tail.
 _REASON_CHARS = 120
 
 # Reasons the gain column already conveys.
@@ -74,11 +78,35 @@ def format_diagnosis(entry: dict[str, Any]) -> str:
         parts.append(f"err={error_class}")
     reason = str(entry.get("reason") or "").strip()
     if reason and reason not in _REASONS_IMPLIED_BY_GAIN:
-        # error_excerpt on variant rows is tail-1200 (boot assertion at end); flatten+defang prevents
-        # section-header injection from untrusted log text.
-        body = _flatten_for_prompt(str(entry.get("error_excerpt") or reason))
-        parts.append(f"reason={body[-_REASON_CHARS:]}")
+        # flatten+defang prevents section-header injection from untrusted log text.
+        text = failure_text(entry)
+        cause = cause_line(text)
+        body = _flatten_for_prompt(cause or text)
+        parts.append(f"reason={body[:_REASON_CHARS] if cause else body[-_REASON_CHARS:]}")
     return "  " + " ".join(parts) if parts else ""
+
+
+def role_trace_text(role_trace: dict[str, Any]) -> str:
+    """Render a ``{role: summary}`` PD TraceLens map: top kernels with GPU share, and trace warnings."""
+    parts: list[str] = []
+    for role in ("prefill", "decode"):
+        summary = role_trace.get(role)
+        if not isinstance(summary, dict):
+            continue
+        if summary.get("status") != "ok":
+            parts.append(f"{role}: analysis_failed({_flatten_for_prompt(str(summary.get('error') or ''))[:60]})")
+            continue
+        kernels = []
+        for kernel in summary.get("top") or []:
+            pct = kernel.get("gpu_pct")
+            pct_s = f" {pct:.1f}%" if _is_measurement(pct) else ""
+            category = f"/{kernel['category']}" if kernel.get("category") else ""
+            bound = f"/{kernel['bound']}" if kernel.get("bound") else ""
+            kernels.append(f"{_flatten_for_prompt(str(kernel.get('name') or '?'))[:48]}{category}{bound}{pct_s}")
+        warnings = summary.get("warnings") or []
+        warn_s = f" warn={','.join(str(w) for w in warnings)}" if warnings else ""
+        parts.append(f"{role}: {'; '.join(kernels) or '(no hot kernels)'}{warn_s}")
+    return " | ".join(parts)
 
 
 def format_anchors(entry: dict[str, Any]) -> str:

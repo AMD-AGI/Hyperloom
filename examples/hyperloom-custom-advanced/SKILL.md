@@ -187,8 +187,9 @@ Guardrails:
 
 - Do not rely on `.env` alone for `TP`, `CONC`, `ISL`, `OSL`, or `PRECISION`;
   pass explicit CLI flags in the optimize command.
-- Omit `--gpu-type` unless the user explicitly chooses a hint; otherwise let
-  Hyperloom auto-detect from ROCm/system info.
+- Omit `--gpu-type` unless the user names the GPU; Hyperloom takes the label
+  of the card the machine reports, and uses a given name only when the card
+  reports no model name.
 - `--no-framework-agent` skips the entire OPTIMIZE phase (PRELUDE goes straight
   to KERNEL_AGENT), dropping both of its arms: upstream-PR landing and local
   source authoring. Warn before applying it; combined with `--no-kernel` it

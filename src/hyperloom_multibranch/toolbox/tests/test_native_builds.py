@@ -389,7 +389,8 @@ async def test_the_build_runners_child_is_given_none_of_this_processs_variables(
 
     seen = rig.store.read(compiled.builds[0].inputs).toolchain["variables"].split()
     assert "HYPERLOOM_BUILD_SIGNING_KEY" not in seen and "HTTPS_PROXY" not in seen
-    assert set(seen) <= {"PATH", "HOME", "TMPDIR", "LC_ALL", "LC_CTYPE"}
+    # The image's library search path is the one variable of this process the child is given, where it is set.
+    assert set(seen) <= {"PATH", "HOME", "TMPDIR", "LC_ALL", "LC_CTYPE", "LD_LIBRARY_PATH"}
 
 
 def _staged_from(tmp_path: Path, write) -> Path:

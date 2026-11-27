@@ -100,9 +100,8 @@ _THIS_PATH = ("hyperloom.sandbox", "hyperloom.common", "hyperloom_common")
 
 
 def _warnings_of_this_path(caplog: pytest.LogCaptureFixture) -> list[str]:
-    """The warnings :data:`_THIS_PATH` logged during the test. A timer another test on this worker left running (a
-    measurement pool's kept sandbox, closed on its own thread when its keep window passes) logs into whichever test
-    runs then; its warning is not this one's."""
+    """The warnings :data:`_THIS_PATH` logged during the test. A thread another test on this worker left running logs
+    into whichever test runs then; its warning is not this one's."""
     return [
         record.getMessage()
         for record in caplog.records

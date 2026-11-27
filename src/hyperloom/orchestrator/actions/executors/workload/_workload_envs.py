@@ -30,13 +30,13 @@ import yaml
 
 from hyperloom.common.benchmark_config import BenchmarkPoint, read_benchmark_point
 from hyperloom.common.outside_facts import ENV_EVAL_LIMIT, ENV_EVAL_TASKS, ENV_EVAL_TOKENIZED_REQUESTS
-from hyperloom.common.agentx_workload import is_agentx_client_key
+from hyperloom.common.agentx_workload import is_agentx_client_key, is_agentx_client_script
 from hyperloom.common.visible_devices import mask_tokens
 from hyperloom.common.session_files import shared_options
 from hyperloom_common.coerce import to_str_list
 from hyperloom_common.io import atomic_write_text
 from hyperloom.inference_optimizer.runtime_environment import prepend_launch_path
-from hyperloom_common.gpu_identity import AMD_GPU_BOARDS
+from hyperloom_common import gpu_card
 from hyperloom.common.perf_metric import DATASET_PATH_ENV, agentx_enabled
 from hyperloom.common.env_safety import (
     BENCHMARK_SECRET_ENV_NAMES,
@@ -62,9 +62,11 @@ from hyperloom.inference_optimizer.grid_server_args import merge_server_args
 from hyperloom.inference_optimizer.grid_server_args import remove_moe_runner_backend_arg
 from hyperloom.inference_optimizer.grid_server_args import validate_server_args_shell_safe
 from inference_suite.argv import compact_json_server_args, remove_server_args
+from inference_suite import read_prompts
 from hyperloom.inference_optimizer import framework_registry
 from hyperloom.inference_optimizer.framework_registry import server_args_env_name
 from hyperloom.orchestrator.state.base_launch import ServerBase, session_cards, session_server_base
+from hyperloom.orchestrator.state.failure_evidence import YAML_BUILD_ERROR
 from ..gpu._gpu_pin import pin_rocr_visible_devices
 from ..serving._server_argv import add_server_arg_unless_pinned, seal_server_argv
 from .._profile_setup import _AtomTracelensCaps, _profiler_bound_holds, _profiler_flag_value, apply_atom_profile_caps
@@ -86,12 +88,6 @@ from hyperloom.inference_optimizer.model_config_utils import (
 log = logging.getLogger(__name__)
 
 _XDIT_EXTRA_ARGS_ENV = framework_registry.extra_args_env("xdit")
-
-# The aiter CK gemm_a8w8_bpreshuffle kernel ships for gfx942 / CDNA3 only; gfx950
-# has no such kernel. The gate is the arch, so the board list is read off the
-# board table rather than typed out beside it.
-_GFX942_GPU_TYPES = frozenset(product for product, board in AMD_GPU_BOARDS.items() if board.gfx == "gfx942")
-
 
 # SGLang graph-capture profiling flag shipped by the profile YAML, and the
 # eager flag that makes it a no-op. Literals rather than an import from
@@ -200,6 +196,12 @@ class FrameworkScriptMismatchError(ValueError):
     Subclasses ValueError so callers can catch it specifically and turn it
     into a structured action failure instead of an uncaught exception.
     """
+
+
+class PromptDatasetError(ValueError):
+    """Raised when the prompts of a point's ``DATASET_PATH`` cannot be counted where the point is rendered."""
+
+    error_class = YAML_BUILD_ERROR
 
 
 def _coerce_workload_int_env(env_key: str, raw: str) -> int:
@@ -388,6 +390,32 @@ def num_prompts_per_conc(isl: int, osl: int) -> int:
     return 3 if seq_cost <= 16384 else 2
 
 
+def round_num_prompts(conc: int, isl: int, osl: int, dataset: str = "") -> int:
+    """Requests a measured round sends: every prompt of the ``dataset`` file once, whatever its concurrency, else
+    ``conc`` times :func:`num_prompts_per_conc`. The file is read here, on the host that renders the point, as the
+    round's client reads it.
+
+    Raises:
+        PromptDatasetError: If the file cannot be read or a line of it holds no prompt.
+    """
+    if not dataset:
+        return conc * num_prompts_per_conc(isl, osl)
+    try:
+        return len(read_prompts(Path(dataset)))
+    except (OSError, ValueError) as exc:
+        raise PromptDatasetError(
+            f"the prompts of {DATASET_PATH_ENV} {dataset} cannot be counted on this host, which renders the round's "
+            f"request count from the file: {exc}"
+        ) from exc
+
+
+def _sent_dataset(bench: Mapping[str, Any]) -> str:
+    """The prompt dataset the round of ``bench`` sends; empty for AgentX, which replays traces whatever is set."""
+    if is_agentx_client_script(str(bench.get("benchmark_script") or "")):
+        return ""
+    return str(bench["envs"].get(DATASET_PATH_ENV) or "").strip()
+
+
 def _shape_request_window(bench: dict[str, Any]) -> _RequestWindow:
     from hyperloom.inference_optimizer import framework_registry
 
@@ -440,7 +468,7 @@ def _shape_request_window(bench: dict[str, Any]) -> _RequestWindow:
             # window.
             envs["NUM_PROMPTS"] = profile_num_prompts
         elif "NUM_PROMPTS" not in envs:
-            envs["NUM_PROMPTS"] = conc_val * num_prompts_per_conc(isl_val, osl_val)
+            envs["NUM_PROMPTS"] = round_num_prompts(conc_val, isl_val, osl_val, _sent_dataset(bench))
         if "NUM_WARMUPS" not in envs:
             envs["NUM_WARMUPS"] = min(conc_val, 8)
     return _RequestWindow(
@@ -485,8 +513,6 @@ def _merge_caller_overrides(
     # Only ``benchmark.envs`` reaches the round, so ``--extra-env`` lands there for
     # every framework: vLLM Ray workers see MTP pins only this way.
     combined_extra: dict[str, Any] = dict(_operator_extra_env())
-    from hyperloom.common.agentx_workload import is_agentx_client_script
-
     if is_agentx_client_script(str(bench.get("benchmark_script") or "")):
         # The AgentX switch already settled these from the same pins; the raw
         # pin would undo its CONC scaling of the warmup grace.
@@ -706,9 +732,7 @@ def _pin_accuracy_eval_envs(envs: dict[str, Any]) -> None:
         envs[ENV_EVAL_TOKENIZED_REQUESTS] = _eval_tok_env
 
 
-def _pin_runtime_build_envs(
-    bench: dict[str, Any], model_path: str | None, gpu_type: str | None, flydsl_source_dirs: bool
-) -> None:
+def _pin_runtime_build_envs(bench: dict[str, Any], model_path: str | None, flydsl_source_dirs: bool) -> None:
     envs = bench["envs"]
     # FlyDSL folds only same-directory helpers into its JIT cache key, so a patched
     # helper one directory over is served from a stale binary. Naming the roots
@@ -722,14 +746,15 @@ def _pin_runtime_build_envs(
     # unless SGLANG_USE_AITER_FP8_PER_TOKEN=1 flips use_per_token_if_dynamic on
     # and routes the GEMM to aiter's CK gemm_a8w8_bpreshuffle. Inject it from
     # Hyperloom, strictly scoped to sglang + fp8 + gfx942 + that exact quant
-    # scheme so per-tensor and block-scale FP8 are never touched. setdefault so
-    # an operator-set value (YAML / extra_envs) always wins.
-    from hyperloom.inference_optimizer.gpu_types import _resolve_amd_gpu_type
-
+    # scheme so per-tensor and block-scale FP8 are never touched: that CK kernel
+    # ships for gfx942 only. setdefault so an operator-set value (YAML /
+    # extra_envs) always wins.
+    card = gpu_card.session_card()
     if (
         "sglang" in str(bench.get("framework") or "").lower()
         and str(bench.get("precision") or "").strip().lower() == "fp8"
-        and _resolve_amd_gpu_type(gpu_type) in _GFX942_GPU_TYPES
+        and card is not None
+        and card.gfx == "gfx942"
         and _fp8_is_per_channel_per_token(str(model_path or os.environ.get("MODEL_PATH", "")))
     ):
         envs.setdefault("SGLANG_USE_AITER_FP8_PER_TOKEN", "1")
@@ -985,7 +1010,7 @@ def materialize_config_with_envs(
     _finalize_framework_server_args(bench, window)
     _pin_client_model_access(bench, target.model_path, model_basename)
     _pin_accuracy_eval_envs(envs)
-    _pin_runtime_build_envs(bench, target.model_path, target.gpu_type, options.flydsl_source_dirs)
+    _pin_runtime_build_envs(bench, target.model_path, options.flydsl_source_dirs)
     _apply_caller_removals(envs, framework_env, launch.remove_args, launch.unset_envs)
     _restate_profile_capture(envs, framework_env, window, replace_args)
     _apply_vllm_source_runtime(bench, envs)

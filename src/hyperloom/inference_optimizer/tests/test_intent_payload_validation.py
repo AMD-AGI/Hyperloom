@@ -56,14 +56,9 @@ def test_review_verdict_rejects_invalid_verdict(verdict) -> None:
         validate_envelope(_envelope("review_verdict", {"target_proposal_msg_id": "m", "verdict": verdict}))
 
 
-def test_review_verdict_rejects_invalid_verdict_in_map() -> None:
-    with pytest.raises(IntentValidationError, match="verdict"):
-        validate_envelope(
-            _envelope(
-                "review_verdict",
-                {"target_proposal_msg_id": "m", "verdict_map": {"vA": {"verdict": "banana"}}},
-            )
-        )
+def test_review_verdict_requires_a_verdict() -> None:
+    with pytest.raises(IntentValidationError, match="missing required payload field: 'verdict'"):
+        validate_envelope(_envelope("review_verdict", {"target_proposal_msg_id": "m"}))
 
 
 def test_review_verdict_accepts_valid_payload() -> None:

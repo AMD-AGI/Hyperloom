@@ -295,7 +295,7 @@ class SharedState(
     kernel_enabled: bool = True
     # KERNEL-phase backend, recorded once when the session is created: "geak" (default) or "forge".
     kernel_optimizer: str = "geak"
-    # Snapshot of the last GEAK e2e run (result.json + final_launch.sh / bench_e2e.sh handles).
+    # The last GEAK e2e run's result.json, with the verdict the rebench settled on it.
     geak_result: dict[str, Any] = field(default_factory=dict)
     # Terminal result of the phase-level KernelForge rewrite controller.
     kernel_rewrite_controller_result: dict[str, Any] = field(default_factory=dict)
@@ -304,7 +304,8 @@ class SharedState(
     # Which benchmark workload this session measures: "agentx" (agentic trace replay) or "synthetic" (ISL/OSL).
     benchmark_mode: str = ""
     # The DATASET_PATH file the session's fixed rounds send in place of random prompts, as given; empty when none.
-    # The path and not a digest of the file: the file is read where a round runs, which need not be this host.
+    # The path and not a digest of the file: its prompts are counted where a point is rendered and sent where the round
+    # runs, which need not be this host.
     # Compared on resume, and no store keyed on ISL/OSL files a session that records one.
     prompt_dataset: str = ""
     # Generation of the measurement path this session was measured on; resume refuses one below the build's epoch.
@@ -491,10 +492,6 @@ class SharedState(
     # ``current_best.action`` in effect when ``last_profile_workload`` was recorded, so the backfill in
     # ``current_profile_workload_context`` can tell a same-arm reuse from a stale one.
     last_profile_workload_action: str = ""
-    # Rolling log of PolicyGate denials (newest last, cap 50).
-    policy_denial_history: list[dict[str, Any]] = field(default_factory=list)
-    # Per-(action_name, rule) consecutive denial counter.
-    policy_denial_streak: dict[str, int] = field(default_factory=dict)
     # Server EXTRA_SGLANG_ARGS in effect when last_profile_trace was captured; identical args means the same trace.
     last_profile_args: str = ""
     # Merged host-side rewrite evidence document from the most recent profile (see ``_framework_rewrite_evidence``).
@@ -509,6 +506,8 @@ class SharedState(
     # Roofline-v2 trace-analyze cache written by record_trace_analyze. roofline_snapshot_id is a property derived from
     # this dict.
     last_trace_analyze: dict[str, Any] = field(default_factory=dict)
+    # PD cluster only: compact TraceLens summary per role ("prefill" / "decode") from the latest roofline.
+    last_trace_analyze_by_role: dict[str, Any] = field(default_factory=dict)
     # Append-only compact roofline snapshots for report.py; capped at ``_ROOFLINE_SNAPSHOTS_CAP`` (snapshot #1 always retained as the report's baseline anchor).
     roofline_snapshots: list[dict[str, Any]] = field(default_factory=list)
     # Outer roofline failure counter; bumped on fail, reset on success.
@@ -608,9 +607,6 @@ class SharedState(
     explore_search: dict[str, Any] = field(default_factory=dict)
     # specialist sub-agent rolling state; one entry per config-arm round (round_id, tasks, proposals_total/kept/rejected/skipped, etc.).
     specialist_rounds: list[dict[str, Any]] = field(default_factory=list)
-    # Per-kb_anchor coverage counters: config-arm rounds since a specialist was dispatched / since a KEEP landed.
-    rounds_since_last_specialist: dict[str, int] = field(default_factory=dict)
-    rounds_since_last_keep: dict[str, int] = field(default_factory=dict)
     # Patch verdict ledger keyed by review subject (a specialist task_id, or a candidate id for a PR pre-screen); Critic must approve/advise before PolicyGate allows the integrate_patch delegate.
     specialist_patch_verdicts: dict[str, str] = field(default_factory=dict)
     # Intervention-mix ledger ({change_type∈{config,code_patch,config_attempt,code_patch_attempt}}); Robustness detects config-only loops.

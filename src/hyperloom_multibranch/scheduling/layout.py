@@ -142,7 +142,8 @@ class SessionLayout:
 
     @property
     def runner_source(self) -> Path:
-        """A hosted session's clone of the commit the run executes, which its runner cache entry is built from."""
+        """A hosted session's clones of the commits its runs execute, one directory per commit, which their runner cache
+        entries are built from: a later run of other code, such as a sweep of the closed session, clones its own."""
         return self.root / RUNNER_SOURCE_DIR
 
     @property

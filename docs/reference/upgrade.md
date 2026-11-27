@@ -52,6 +52,12 @@ These flags are rejected with `unrecognized arguments`:
 * `--proposal-scoring`, `--no-proposal-scoring` and `--proposal-scorer-models`
   (the advisory proposal scorer is removed; while it was off they changed
   nothing): drop them.
+* `hyperloom-multibranch run --make-before-break` and `--no-make-before-break`
+  (a hosted test now closes its sandbox when it ends): drop them.
+
+A campaign spec may keep `multibranch.make_before_break`, which is ignored with a
+warning. Where the grant fits three or more tests, a hosted session now runs one more
+test at once than the default did, and each test's sandbox queues for a node.
 
 `INFERENCE_OPTIMIZER_PROPOSAL_SCORER_TIMEOUT_SEC` is no longer read and is
 silently ignored, so drop it.
@@ -77,6 +83,48 @@ A launch that pins `--moe-runner-backend` on a checkpoint that has no runner
 for that backend now fails its round with the server's error, where the round
 was relaunched without the flag. Fix the pin where it was set.
 
+### Required: the hosted single-session flow is retired
+
+`hyperloom hosted run` now only runs the multi-branch flow, handing every run
+to `hyperloom-multibranch hosted run`. In 1.2.0 a campaign spec with no `flow`
+ran the single-session flow; that default is gone.
+
+* A spec must now set `"flow": "multibranch"` or carry a `multibranch`
+  section, and a multi-branch run needs `multibranch.workload`,
+  `workload.conc` and `workload.precision`. An unchanged 1.2.0 single spec
+  (neither `flow` nor `multibranch`) ends the run with a final `exit.json`
+  (`"final": true`, return code 2) and the error
+  `campaign spec refused: a spec with neither flow nor multibranch ran the single flow, which is retired; set flow to 'multibranch' and add a multibranch section with workload, and give workload.conc and workload.precision`.
+* A spec that still says `"flow": "single"` ends the same way with
+  `campaign spec refused: flow 'single' is retired; leave flow out or set it to 'multibranch'`.
+* `placement.measurement` now defaults to `hosted` for every spec; the single
+  flow defaulted it to `local`. Set `"measurement": "local"` (with
+  `placement.profile` `hosted-gpu`) to measure on the application container's
+  own cards.
+* A single-flow run in flight does not resume on this release: restarted, its
+  spec is judged as a multi-branch one and refused as above, and the single
+  flow's session files are ignored. Let such runs finish on 1.2.0 before
+  upgrading the host.
+* `optimize` no longer selects plug implementations: `--plug-profile`,
+  `--manifest`, `--plug` and `--plug-config` are removed and, like any
+  unknown argument, exit 2 with `unrecognized arguments`. Drop them.
+  `HYPERLOOM_MANIFEST` and `HYPERLOOM_MANIFEST_OVERRIDES` are no longer read,
+  and a session's `plugs.resolved.json` is no longer written or read back on
+  `--resume-from`; an old session that has one resumes and ignores it.
+* `HYPERLOOM_EVENTS_DIR`, `HYPERLOOM_MCP_HOST`, `HYPERLOOM_MCP_PORT` and
+  `HYPERLOOM_MCP_TOKEN` are no longer read or checked; a host may stop
+  setting them (any value is accepted and removed from the environment of
+  every child). The single flow's MCP host tools and progress events are gone,
+  and the Coordinator no longer reads `hosted/control/stop.json`; stop a run
+  with a signal.
+* `options.conc_sweep` is no longer part of the spec: it switched the single
+  flow's sweep, and like any unknown field it is now accepted and ignored.
+  Turn a multi-branch run's sweep off with `"multibranch": {"conc_sweep": false}`.
+  The single flow's two other sweep behaviours go with it: restarted, the
+  hosted entry no longer runs the unfinished sweep of a closed single-flow
+  session, and that sweep no longer warns when its estimate outlasts the
+  hosted grant.
+
 ### Required: `session_breakdown.json` drops the held Critic verdict
 
 The schema stays `v6.1`, but a Critic ruling no longer carries `held_to_rule`,
@@ -86,6 +134,86 @@ or framework proposal, not on its `critic_review.variants[]` rows, and
 or `failure_reason_code`. Consumers that read `effective_verdict` read
 `verdict` instead: the loop no longer downgrades a ruling, so `verdict` is the
 one it acted on.
+
+### Required: `session_breakdown.json` drops `critic_review.variants`
+
+The schema stays `v6.1`, but `critic_review` on a phase or framework proposal
+no longer carries `variants`. A `review_verdict` rules on a proposal with one
+`verdict`; its per-variant `verdict_map` form had no producer and is now
+rejected as a `review_verdict` with no `verdict`. 1.2.x wrote `variants` as an
+empty list on every reviewed phase proposal. Consumers that read it should stop.
+
+### Required: `state.json` drops the policy denial log
+
+`state.json` no longer carries `policy_denial_history` or
+`policy_denial_streak`, the Orchestration prompt no longer has a
+`=== Recent policy denials ===` block, and the `why_denied` context tool is
+removed. A session written by an earlier release still resumes: the two keys
+are dropped on load. A denial is still recorded where it was read from before:
+as a `policy_denied` observation in the denied agent's inbox, as a `denials`
+row on the phase event in `session_breakdown.json`, and as a
+`PolicyGate denied intent` warning in the log. Anything that read the two
+`state.json` keys reads the `denials` rows instead.
+
+### Required: `SWEEP` is renamed `CYCLE_END` and runs no concurrency sweep
+
+The phase between `KERNEL_AGENT` and `CLOSE` is now `CYCLE_END`. It integrates
+pending KEEPs and validates the stack, then loops back or closes; it no longer
+dispatches a `conc_sweep` task. Update anything that matches on the old names:
+
+* The phase is `CYCLE_END` in `state.json`, `phase_history` and
+  `session_breakdown.json`.
+* It has no phase budget and no budget flag: the session budget alone gates it.
+  The SWEEP budget flag is rejected with `unrecognized arguments`, and so is
+  `--conc-sweep-total-budget-sec`. The share SWEEP held moves to the
+  optimisation phases: `FRAMEWORK_AGENT` defaults to 0.40 and `KERNEL_AGENT` to
+  0.50, what a session with the sweep off already ran with.
+* Its exit is `cycle_end_done` (also the stop reason when no further cycle
+  runs); the SWEEP stop reasons no longer occur.
+* Its predicate input is `cycle_end_result` (`settled`, `reloop`) instead of
+  `sweep_result`.
+* A session that reached it reports `outcome.stage_reached` `cycle_end` where it
+  reported `conc_sweep`.
+* The workflow-evaluation contract is `hyperloom.workflow_evaluation.v4`
+  (`workflow_contract.v4.json`); a consumer that matches the version string or
+  the SWEEP vocabulary moves to it.
+
+The concurrency sweep runs after CLOSE instead of inside the session.
+`--enable-conc-sweep` is on by default (`--no-enable-conc-sweep` turns it off),
+and `hyperloom conc-sweep SESSION_DIR` runs it by hand. It writes the same files:
+`reports/conc_sweep_summary.json`, `reports/conc_sweep_raw.csv`,
+`reports/conc_sweep_curve.png` and the `conc_sweep_summary` /
+`conc_sweep_curve_png` keys of `final.json`, and packages the session again so
+the package carries them. The `conc_sweep` timeline event of
+`session_breakdown.json` and the sweep's result in `state.json` are gone. A
+session recorded in `SWEEP` does not resume: finish it under the build that
+started it.
+
+The sweep also adds its report to `session_breakdown.json` as the top-level
+`conc_sweep_summary`, rewritten after every point. A consumer that read the
+sweep from the `conc_sweep` timeline event reads it there instead, and has to
+read the breakdown again after CLOSE to see it. The key is the one breakdowns
+carried the sweep under before #1455, but the section is the schema `2.0`
+report: its point rows, `comparison` and `summary` keep their fields, while its
+header names the ladder `concs`, drops the budget keys, `was_skipped` and the
+report paths, and adds `partial`, `in_progress` and `cancelled` to `status`.
+Both lineages' shapes are in
+[`session_breakdown.json` integration in Hyperloom](session-breakdown.md).
+
+### Required: `hyperloom session report` is removed
+
+`hyperloom session report` (and `python -m
+hyperloom.inference_optimizer.tools.dump_session_report`) no longer exists:
+the command prints the `hyperloom` usage and exits 2, and the module fails
+with `No module named`. Nothing writes `session_report.md`,
+`session_report_prompt.json` or `session_report_llm_raw.txt` any more; a
+session never wrote them on its own, only this command did. Drop the command
+from scripts, and read `reports/final.md` for the session's own summary and
+`session_breakdown.json` for the recorded facts. Neither file changes.
+
+`HYPERLOOM_REPORT_LLM_BACKEND`, `HYPERLOOM_REPORT_MODEL` and
+`HYPERLOOM_REPORT_MAX_TOKENS` are no longer read and are silently ignored, so
+drop them.
 
 ---
 
@@ -106,7 +234,7 @@ launchers, skills and scripts:
 | `quantization-agent ...` | `hyperloom quantize ...` |
 | `python -m hyperloom.inference_optimizer.multi_node SUB ...` | `hyperloom multi-node SUB ...` |
 | `python -m hyperloom.inference_optimizer.tools.dump_session_breakdown` | `hyperloom session breakdown` |
-| `python -m hyperloom.inference_optimizer.tools.dump_session_report` | `hyperloom session report` |
+| `python -m hyperloom.inference_optimizer.tools.dump_session_report` | removed; see *Upgrading from 1.2.x* above |
 | `python -m hyperloom.inference_optimizer.tools.backfill_langfuse` | `hyperloom session backfill` |
 | `.../tools/event_counts.py` | `hyperloom session events` |
 | `.../tools/read_optimizer_state.py` | `hyperloom session state` |
@@ -294,44 +422,10 @@ removed from `.env` and launchers: `INFERENCE_OPTIMIZER_RAY_EXEC`,
 conc-sweep arm strategy `serving_lease_held` or the `ensure_ray` install step.
 Multi-node runs (RayJob through the Ray Dashboard) are unchanged.
 
-### Required: `SWEEP` is renamed `CYCLE_END` and runs no concurrency sweep
-
-The phase between `KERNEL_AGENT` and `CLOSE` is now `CYCLE_END`. It integrates
-pending KEEPs and validates the stack, then loops back or closes; it no longer
-dispatches a `conc_sweep` task. Update anything that matches on the old names:
-
-* The phase is `CYCLE_END` in `state.json`, `phase_history` and
-  `session_breakdown.json`.
-* It has no phase budget and no budget flag: the session budget alone gates it.
-  The SWEEP budget flag is rejected with `unrecognized arguments`, and so is
-  `--conc-sweep-total-budget-sec`. The share SWEEP held moves to the
-  optimisation phases: `FRAMEWORK_AGENT` defaults to 0.40 and `KERNEL_AGENT` to
-  0.50, what a session with the sweep off already ran with.
-* Its exit is `cycle_end_done` (also the stop reason when no further cycle
-  runs); the SWEEP stop reasons no longer occur.
-* Its predicate input is `cycle_end_result` (`settled`, `reloop`) instead of
-  `sweep_result`.
-* A session that reached it reports `outcome.stage_reached` `cycle_end` where it
-  reported `conc_sweep`.
-* The workflow-evaluation contract is `hyperloom.workflow_evaluation.v4`
-  (`workflow_contract.v4.json`); a consumer that matches the version string or
-  the SWEEP vocabulary moves to it.
-
-The concurrency sweep runs after CLOSE instead of inside the session.
-`--enable-conc-sweep` is on by default (`--no-enable-conc-sweep` turns it off),
-and `hyperloom conc-sweep SESSION_DIR` runs it by hand. It writes the same files:
-`reports/conc_sweep_summary.json`, `reports/conc_sweep_raw.csv`,
-`reports/conc_sweep_curve.png` and the `conc_sweep_summary` /
-`conc_sweep_curve_png` keys of `final.json`, and packages the session again so
-the package carries them. The `conc_sweep` timeline event of
-`session_breakdown.json` and the sweep's result in `state.json` are gone. A
-session recorded in `SWEEP` does not resume: finish it under the build that
-started it.
-
 ### Recommended: commands that stay outside `hyperloom.cli`
 
 `hyperloom <command>` covers setup, check, optimize, recover, quantize,
-multi-node, and `session {breakdown,report,backfill,events,state}`. These
+multi-node, and `session {breakdown,backfill,events,state}`. These
 entry points are **intentionally separate** (same as before the unification,
 only the optimizer-family commands moved under `hyperloom`):
 
@@ -435,7 +529,8 @@ had a custom order hard-coded, confirm it is still intentional.
 
 ### Recommended: set `INFERENCE_OPTIMIZER_RESCUE_PATHS` if you use model-specific benchmark scripts
 
-When `--gpu-type` is set, Hyperloom pins
+When the session has a GPU type (`--gpu-type`, or the label of the card
+`amd-smi` reports), Hyperloom pins
 `benchmark_script=<framework>_<gpu_type>.sh` to stop InferenceX-native
 scripts from leaking `result.json` outside the session dir. If you
 intentionally use a model-specific script (for example, `dsr1_fp8_mi300x.sh`),

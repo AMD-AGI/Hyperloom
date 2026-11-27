@@ -55,6 +55,7 @@ from hyperloom.contracts.recipe import Recipe, RecipeDelta
 from hyperloom.hosted.mcp_server import MIN_TOKEN_LENGTH, McpServer, McpServerConfig
 from hyperloom.measure.runner.native.server_options import OptionInventory, ServerOption, write_inventory
 from hyperloom.measure.versions import socket_versions
+from hyperloom.orchestrator.tests._fixtures import MI355X_CARD, publish_card
 from hyperloom_multibranch.contracts.fork import AdmissionStatus, ForkAdmission, ForkRequest, RepairRequest
 from hyperloom_multibranch.contracts.gate import RegressionOutcome
 from hyperloom_multibranch.contracts.intent import Intent, IntentLayer
@@ -900,7 +901,12 @@ async def test_a_session_scores_its_frontier_with_the_defaults_for_its_budget(tm
     assert all(line["window_seconds"] >= defaults.window_seconds for line in lines)
 
 
-async def test_the_judge_reads_the_headroom_to_the_ceiling_prelude_modelled_for_the_workload(tmp_path: Path) -> None:
+async def test_the_judge_reads_the_headroom_to_the_ceiling_prelude_modelled_for_the_workload(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The ceiling rests on the session's card alone: no arch spec TraceLens measured on this host.
+    publish_card(monkeypatch, MI355X_CARD)
+    monkeypatch.setenv("TRACELENS_ROOT", str(tmp_path / "TraceLens"))
     stage = _stage(tmp_path)
     workload = replace(WORKLOAD, model=str(model_checkout(tmp_path)))
     stage.settings = replace(SETTINGS, workload=workload)
@@ -986,16 +992,22 @@ async def test_a_manifest_an_earlier_build_wrote_reads_with_the_agents_isolation
     assert read_manifest(stage.layout.manifest).agent_isolation is None
 
 
-async def test_a_manifest_written_with_the_removed_reuse_prelude_setting_still_reads(tmp_path: Path) -> None:
+@pytest.mark.parametrize(
+    ("name", "value"),
+    [
+        ("reuse_prelude", {"session": "/old", "child_session": "/old/child", "root_recipe_digest": "d"}),
+        ("make_before_break", False),
+    ],
+    ids=["reuse-prelude", "make-before-break"],
+)
+async def test_a_manifest_written_with_a_setting_the_session_no_longer_has_still_reads(
+    tmp_path: Path, name: str, value: object
+) -> None:
     stage = _stage(tmp_path)
     _script(stage)
     await stage.run()
     manifest = json.loads(stage.layout.manifest.read_text())
-    manifest["settings"]["reuse_prelude"] = {
-        "session": "/old",
-        "child_session": "/old/child",
-        "root_recipe_digest": "d",
-    }
+    manifest["settings"][name] = value
     stage.layout.manifest.write_text(json.dumps(manifest))
 
     assert read_manifest(stage.layout.manifest).settings == stage.settings
@@ -1046,12 +1058,10 @@ async def test_a_run_given_the_inferencex_checkout_briefs_its_launches_for_the_s
     ("name", "value"),
     [
         ("dev_leases", 2),
-        ("make_before_break", True),
-        ("make_before_break", False),
         ("agent_port", 32100),
         ("inferencex_commit", "8a76a78e41"),
     ],
-    ids=["dev-leases", "make-before-break-on", "make-before-break-off", "agent-port", "inferencex-commit"],
+    ids=["dev-leases", "agent-port", "inferencex-commit"],
 )
 async def test_a_setting_of_the_run_reaches_the_peers(tmp_path: Path, name: str, value: object) -> None:
     stage = _stage(tmp_path)

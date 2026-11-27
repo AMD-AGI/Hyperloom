@@ -8,7 +8,8 @@ and the environment of the server. This module reads those facts, asks :mod:`hyp
 each kind and hands the backend a :class:`~hyperloom.measure.jit.session.JitCacheSession`. Nothing here is a reason
 for a test to fail: a fact that cannot be read switches the kind that needs it off, with a note, and the test builds cold.
 
-``HYPERLOOM_JIT_CACHE`` names the cache's directory; the template mounts it read-only, and without it there is no cache.
+``HYPERLOOM_JIT_CACHE`` names the cache's directory, for a runner on the store's own machine (the local toolbox sets it);
+a hosted ``measurement`` template must not set it. Without it there is no cache.
 """
 
 from __future__ import annotations
@@ -23,7 +24,6 @@ from pathlib import Path, PurePosixPath
 import yaml
 
 from hyperloom.common.aiter_layout import image_aiter_meta
-from hyperloom_common.gpu_identity import gfx_arch_for_gpu_type
 from hyperloom.common.outside_facts import AITER_META_DIR_ENV, AITER_META_WHEEL_DIR
 from hyperloom.measure.farm import (
     Farm,
@@ -73,7 +73,7 @@ from hyperloom.measure.round_marks import boot_parts
 from hyperloom.measure.runner.hardware import GpuFacts
 from hyperloom.measure.runner.service import RunnerFailure
 from hyperloom.measure.spec import EnvRoot, MeasurementSpec
-from hyperloom.orchestrator.actions.executors import is_patched_copy
+from hyperloom.orchestrator.actions.executors import is_kernel_shape_tool, is_patched_copy
 
 __all__ = [
     "FRAMEWORK_PYTHON_ENV",
@@ -145,8 +145,10 @@ class _ModuleBuild:
 
 
 def card_arch(spec: MeasurementSpec, gpu: GpuFacts | None) -> str | None:
-    """The architecture of the card the test runs on: the one the card reports, else the sheet's GPU type's."""
-    return (gpu.gfx_arch if gpu else None) or gfx_arch_for_gpu_type(spec.hardware.gpu_type)
+    """The architecture of the card the test runs on: the one the card reports, else that of the sheet's card."""
+    if gpu is not None:
+        return gpu.card.gfx
+    return spec.hardware.card.gfx if spec.hardware.card is not None else None
 
 
 def build_session(
@@ -443,10 +445,15 @@ def _touched(inputs: _Inputs, base: Path, effective: Path) -> Touched | str:
 def _build_environment(environment: Mapping[str, str], farm: Farm | None) -> dict[str, str]:
     """The server's environment with the places of the test's own farm left out, its place on ``PYTHONPATH`` and its copy
     of the meta directory: a path of this test's own is no input (the patched tree is, and the key holds that). Nor is a
-    profile's copy of its framework with TraceLens's patch laid in, which changes nothing aiter builds."""
+    profile's copy of its framework with TraceLens's patch laid in, or the TraceLens shape tool a profile puts on the path
+    instead, which change nothing aiter builds."""
     result = dict(environment)
     own = {str(farm.site)} if farm is not None else set()
-    own.update(part for part in result.get(_PYTHONPATH, "").split(os.pathsep) if is_patched_copy(part))
+    own.update(
+        part
+        for part in result.get(_PYTHONPATH, "").split(os.pathsep)
+        if is_patched_copy(part) or is_kernel_shape_tool(part)
+    )
     if own and _PYTHONPATH in result:
         parts = [part for part in result.pop(_PYTHONPATH).split(os.pathsep) if part and part not in own]
         if parts:

@@ -134,7 +134,7 @@ async def test_an_attempt_runs_on_the_harness_when_the_platform_names_it(
     )
 
     request = seen["request"]
-    assert request.cwd == tmp_path / "ws" and request.writable
+    assert request.cwd == tmp_path / "ws"
     assert request.child_env is not None
     assert seen["owed"] is not None
     assert result.sdk_error == ""

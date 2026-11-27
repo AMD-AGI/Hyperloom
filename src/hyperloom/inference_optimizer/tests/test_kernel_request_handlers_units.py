@@ -44,6 +44,7 @@ from hyperloom.orchestrator.kernel import serving_log_evidence as serving_log_ev
 from hyperloom.orchestrator.kernel import _shape_capture as shape_capture
 from hyperloom.orchestrator.kernel import _untuned_gemm_csv as untuned_gemm_csv
 from hyperloom.orchestrator.actions.executors.workload._workload_envs import LaunchLayer
+from hyperloom.orchestrator.tests._fixtures import MI325X_CARD, MI355X_CARD, publish_card
 
 
 _FUSION_PROVIDER_ENV_KEYS = (
@@ -197,6 +198,25 @@ class TestForgeGemmHelperCoverage:
         # Unreadable / missing config -> auto.
         assert untuned_gemm_csv._resolve_fp8_quant_type(str(tmp_path / "missing")) == "auto"
         assert untuned_gemm_csv._resolve_fp8_quant_type("") == "auto"
+
+    @pytest.mark.parametrize(
+        ("card", "framework", "expected"),
+        [
+            (MI355X_CARD, "sglang", "blockscale_bpreshuffle"),
+            (MI355X_CARD, "vllm", "blockscale"),
+            (MI325X_CARD, "sglang", "blockscale"),
+            (None, "sglang", "blockscale"),
+        ],
+    )
+    def test_a_block_fp8_checkpoint_takes_the_preshuffled_path_on_the_session_gfx950(
+        self, tmp_path, monkeypatch, card, framework, expected
+    ):
+        if card is not None:
+            publish_card(monkeypatch, card)
+        model = self._write_cfg(tmp_path / "block", {"quantization_config": {"weight_block_size": [128, 128]}})
+        state = SharedState(precision="fp8", model_path=model, framework=framework)
+
+        assert forge_gemm_probe._resolve_forge_precision_and_quant(state) == ("fp8", expected)
 
     def test_resolve_fp8_quant_type_logs_malformed_config(self, tmp_path, caplog):
         model_dir = tmp_path / "broken"
@@ -1264,6 +1284,15 @@ class TestForgeGemmHelperCoverage:
         payload = await self._gemm_input_payload(tmp_path, monkeypatch, max_minutes=0)
 
         assert "max_tuners" not in payload
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(("card", "gpu_type"), [(MI325X_CARD, "gfx942"), (None, "auto")])
+    async def test_forge_tunes_for_the_session_arch_or_detects_one(self, tmp_path, monkeypatch, card, gpu_type):
+        if card is not None:
+            publish_card(monkeypatch, card)
+        payload = await self._gemm_input_payload(tmp_path, monkeypatch, max_minutes=0)
+
+        assert payload["gpu_type"] == gpu_type
 
     @pytest.mark.asyncio
     async def test_run_forge_gemm_tuning_rejects_uncached_hf_repo(
@@ -3739,7 +3768,8 @@ class TestTracelensRootResolution:
         monkeypatch.setattr(ta, "_maybe_selfheal_tracelens_root", _fake_heal)
         out = asyncio.run(
             ta.trace_analyze_handler(
-                {"trace_input": str(tmp_path / "trace"), "analysis_route": route}, session_dir=tmp_path
+                {"trace_input": str(tmp_path / "trace"), "analysis_route": route, "target_platform": "MI355X"},
+                session_dir=tmp_path,
             )
         )
         assert called["n"] == 1  # self-heal was attempted
@@ -3764,7 +3794,8 @@ class TestTracelensRootResolution:
         monkeypatch.setattr(ta, "_maybe_selfheal_tracelens_root", _fake_heal)
         out = asyncio.run(
             ta.trace_analyze_handler(
-                {"trace_input": str(tmp_path / "trace"), "analysis_route": "agent"}, session_dir=tmp_path
+                {"trace_input": str(tmp_path / "trace"), "analysis_route": "agent", "target_platform": "MI355X"},
+                session_dir=tmp_path,
             )
         )
         assert called["n"] == 1  # self-heal attempted despite the dir existing
@@ -3782,7 +3813,8 @@ class TestTracelensRootResolution:
 
         out = asyncio.run(
             ta.trace_analyze_handler(
-                {"trace_input": str(tmp_path / "trace"), "analysis_route": "agent"}, session_dir=tmp_path
+                {"trace_input": str(tmp_path / "trace"), "analysis_route": "agent", "target_platform": "MI355X"},
+                session_dir=tmp_path,
             )
         )
 
@@ -3808,7 +3840,8 @@ class TestTracelensRootResolution:
         )
         out = asyncio.run(
             ta.trace_analyze_handler(
-                {"trace_input": str(tmp_path / "trace"), "analysis_route": "agent"}, session_dir=tmp_path
+                {"trace_input": str(tmp_path / "trace"), "analysis_route": "agent", "target_platform": "MI355X"},
+                session_dir=tmp_path,
             )
         )
         assert out["status"] == "failed"
@@ -3877,7 +3910,8 @@ class TestTracelensRootResolution:
         _stub_tracelens_analysis(monkeypatch, _fail)
         out = asyncio.run(
             ta.trace_analyze_handler(
-                {"trace_input": str(tmp_path / "trace"), "analysis_route": "agent"}, session_dir=tmp_path
+                {"trace_input": str(tmp_path / "trace"), "analysis_route": "agent", "target_platform": "MI355X"},
+                session_dir=tmp_path,
             )
         )
 
@@ -3897,6 +3931,12 @@ class TestTracelensRootResolution:
 
         with pytest.raises(RuntimeError, match="heal bug"):
             ta._maybe_selfheal_tracelens_root(tmp_path / "podlocal" / "TraceLens")
+
+    def test_trace_analyze_handler_fails_without_a_gpu_label(self, tmp_path):
+        """Neither the payload nor the session names the GPU: the analysis is not started on a guessed one."""
+        out = asyncio.run(ta.trace_analyze_handler({"trace_input": str(tmp_path / "trace")}, session_dir=tmp_path))
+        assert (out["status"], out["error_class"]) == ("failed", "gpu_label_missing")
+        assert "no GPU label" in out["error"]
 
 
 class TestBuildTraceAnalyzeCmd:
@@ -3937,12 +3977,12 @@ class TestBuildTraceAnalyzeCmd:
             "agent",
             "--tracelens-root",
             "/tl",
+            "--target-platform",
+            "MI300X",
             "--model-name",
             "Qwen",
             "--framework",
             "sglang",
-            "--target-platform",
-            "MI300X",
             # LLM inference flag + splitter hints: payload override wins over workload metadata.
             "--split-llm-inference",
             "--split-conc",

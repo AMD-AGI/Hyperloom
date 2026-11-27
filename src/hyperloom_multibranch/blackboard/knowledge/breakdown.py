@@ -9,9 +9,11 @@ export has its own schema version and its own sections:
 * ``metadata``: the session profile, the manifest fingerprint of each activity, and ``session``, the block Pulse reads
   for both flows (the session id, the source revision the session ran on, and the Claw session, framework image and
   node a hosted run is given). In a hosted run it also holds, as written, what the run leaves in the session directory:
-  ``plugs`` and ``hosted_measurement``, and the records ``measurement_sandboxes`` (one per test, keyed by
+  ``hosted_measurement``, and the records ``measurement_sandboxes`` (one per test, keyed by
   ``request_id`` as ``tests`` are). From the agent runner's samples it holds ``specialist_resources``, one record per
-  specialist, and ``container_resources``, the container's last reading.
+  specialist, and ``container_resources``, the container's last reading. ``base_launch`` is where the session's frozen
+  base was resolved from, its image and its topology, from ``MB-toolbox/base_launch.json``, with the locations in
+  ``source`` stripped of credentials as the single-lineage breakdown's are.
 * ``baseline``: the root's recorded values, dispersion and thresholds.
 * ``lineage``: every commit and branch, with when each was made, opened or stopped, and a commit's recipe digest when
   its writer named it.
@@ -30,10 +32,14 @@ export has its own schema version and its own sections:
   did (``knowledge``: the Experiences, the learnings and the archived search tree) and how the session's merges went
   (``merges``: the integrator's conflict statistics); given the session's metric, each branch whose lead over
   integration was stranded, for how many minutes and at what peak (``stranded``).
+* ``conc_sweep_summary``: the concurrency sweep's ``MB-reports/conc_sweep_summary.json``, verbatim. Not built here:
+  the sweep runs after CLOSE and adds it each time it rewrites its report; a later CLOSE rebuilds the breakdown
+  without it, and the sweep that follows writes it again.
 """
 
 from __future__ import annotations
 
+import logging
 import os
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
@@ -44,6 +50,7 @@ from hyperloom_common.jsonio import read_json, read_jsonl
 from hyperloom_common.timeutil import epoch_iso
 from hyperloom.contracts.measurement import BuildPayment
 from hyperloom.orchestrator.knowledge.remote_recipe.models import RemoteWriteResult
+from hyperloom.inference_optimizer.session.base_launch import base_launch_metadata
 from hyperloom.inference_optimizer.session.session_paths import (
     CONTAINER_RECORD_KIND,
     RESOURCES_RELATIVE_PATH,
@@ -54,6 +61,8 @@ from hyperloom_multibranch.contracts.blackboard.records import SECONDS_PER_HOUR,
 from hyperloom_multibranch.blackboard.codec import encode
 from hyperloom_multibranch.blackboard.knowledge.recipe_writeback import FinalRecipe
 from hyperloom_multibranch.blackboard.knowledge.stranded_spans import stranded_spans
+
+log = logging.getLogger(__name__)
 
 SCHEMA_VERSION = "multibranch-2"
 EXPORTER_VERSION = "hyperloom-multibranch-breakdown-2"
@@ -71,7 +80,6 @@ CLAW_SESSION_KEY = "claw_session_id"
 HOSTED_RECORDS = {"measurement_sandboxes": Path("hosted/measurement_sandboxes.jsonl")}
 #: The documents a hosted run writes in the session directory, by the ``metadata`` key the breakdown copies them under.
 HOSTED_DOCUMENTS = {
-    "plugs": Path("plugs.resolved.json"),
     "hosted_measurement": Path("hosted/measurement_stats.json"),
 }
 _ABSENT = object()
@@ -224,6 +232,21 @@ def agent_resources(runner_dir: Path | None) -> dict[str, object]:
     return found
 
 
+def base_launch_record(toolbox_dir: Path | None) -> dict[str, object]:
+    """The base the session froze in ``toolbox_dir`` as ``base_launch``: where it was resolved from, its image and its
+    topology. No file gives no key; neither does one that cannot be read, is no base launch or fails its digest check,
+    which is logged."""
+
+    if toolbox_dir is None:
+        return {}
+    try:
+        found = base_launch_metadata(toolbox_dir)
+    except (OSError, ValueError):
+        log.warning("breakdown: the base launch in %s cannot be read; no base_launch", toolbox_dir, exc_info=True)
+        return {}
+    return {} if found is None else {"base_launch": found}
+
+
 def _final(final: FinalRecipe | None) -> dict[str, object] | None:
     if final is None:
         return None
@@ -257,12 +280,14 @@ class SessionPlace:
     directory; ``code_revision`` is the source revision the session's manifest recorded at start, which a process that
     exports another run's session, such as ``final-only``, does not have in its environment, and ``claw_session_id``
     the Claw session the manifest records, which the breakdown names when the exporting process is given none.
+    ``toolbox_dir`` is the directory the session froze its base launch in.
     """
 
     session_dir: Path | None = None
     runner_dir: Path | None = None
     code_revision: str | None = None
     claw_session_id: str | None = None
+    toolbox_dir: Path | None = None
 
 
 def build_breakdown(
@@ -293,6 +318,7 @@ def build_breakdown(
             "session": session_metadata(snapshot, os.environ, place.code_revision, place.claw_session_id),
             **hosted_records(place.session_dir),
             **agent_resources(place.runner_dir),
+            **base_launch_record(place.toolbox_dir),
         },
         "baseline": encode(snapshot.baseline),
         "lineage": encode(snapshot.lineage),

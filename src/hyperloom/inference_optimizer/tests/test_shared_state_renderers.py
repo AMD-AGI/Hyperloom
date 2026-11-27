@@ -5,6 +5,9 @@
 
 from __future__ import annotations
 
+import pytest
+
+from hyperloom.orchestrator.state._shared_state.variant_line import role_trace_text
 from hyperloom.orchestrator.state.shared_state import SharedState
 
 
@@ -219,6 +222,25 @@ def test_format_variant_line_shows_error_class_and_reason():
     assert "reason=mla_gluon" in line
 
 
+_INIT_DEATH = (
+    "(EngineCore pid=7) ERROR ValueError: Unquantized MoE backend 'ROCm AITER' is unsupported here\n"
+    "(APIServer pid=1) RuntimeError: Engine core initialization failed. See root cause above."
+)
+
+
+@pytest.mark.parametrize(
+    "row",
+    [
+        pytest.param({"reason": "warmup_failed", "error_excerpt": _INIT_DEATH}, id="warmup_row"),
+        pytest.param({"reason": _INIT_DEATH}, id="decision_row"),
+    ],
+)
+def test_format_variant_line_names_the_cause_of_a_server_that_died_at_init(row):
+    """The proposer reads this line; the report of the death alone does not say which change to stop proposing."""
+    line = SharedState._format_variant_line({"name": "v00", "gain_pct": None, "error_class": "server_init_dead", **row})
+    assert "reason=ValueError: Unquantized MoE backend 'ROCm AITER' is unsupported here" in line
+
+
 def test_format_last_action_failures_suffix_when_over_window():
     st = SharedState()
     for i in range(12):
@@ -229,3 +251,18 @@ def test_format_last_action_failures_suffix_when_over_window():
         )
     out = st._format_last_action_failures()
     assert "[+2 earlier failures]" in out
+
+
+def test_role_trace_text_summarises_each_pd_role():
+    text = role_trace_text(
+        {
+            "prefill": {
+                "status": "ok",
+                "top": [{"name": "gemm", "gpu_pct": 41.25, "category": "gemm", "bound": "compute"}, {"name": "copy"}],
+                "warnings": ["clock_lag"],
+            },
+            "decode": {"status": "failed", "error": "no trace"},
+        }
+    )
+    assert text == "prefill: gemm/gemm/compute 41.2%; copy warn=clock_lag | decode: analysis_failed(no trace)"
+    assert role_trace_text({"prefill": {"status": "ok"}}) == "prefill: (no hot kernels)"

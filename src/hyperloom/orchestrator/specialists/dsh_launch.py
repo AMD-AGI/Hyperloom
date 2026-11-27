@@ -21,9 +21,11 @@ from pathlib import Path
 
 from hyperloom_common.llm.deepseek_session import (
     COMPACTION_PATCH,
-    DEEPSEEK_PROVIDER_ROUTE,
+    GATEWAY_BASE_URL_ENV,
+    GATEWAY_PROVIDER_ROUTE,
     DeepSeekSessionUnavailableError,
     gateway_env,
+    gateway_route_patch,
     max_tokens_from_env,
 )
 from hyperloom_common.fs_utils import write_text_nofollow
@@ -194,7 +196,9 @@ def _mcp_rows(config_path: str | None, *, source: Mapping[str, str], protected_e
     return rows
 
 
-def _render_patch(*, model: str, instruction_bytes: int, mcp_rows: list[str], max_tokens: int | None = None) -> str:
+def _render_patch(
+    *, model: str, base_url: str, instruction_bytes: int, mcp_rows: list[str], max_tokens: int | None = None
+) -> str:
     """The patch overlay a specialist's headless ``dsh`` run boots with."""
     lines = [
         # The shipped headless profile enables a session-title plugin whose
@@ -211,16 +215,15 @@ def _render_patch(*, model: str, instruction_bytes: int, mcp_rows: list[str], ma
         "    compression: none",
         "- id: agent-default-model",
         _PATCH_CONFIG,
-        f"    provider: {DEEPSEEK_PROVIDER_ROUTE}",
+        f"    provider: {GATEWAY_PROVIDER_ROUTE}",
         f"    model: {_yaml_string(model)}",
         # ``$DSH_HOME/AGENTS.md`` carries the system prompt; never clip it.
         "- id: agent-instructions",
         _PATCH_CONFIG,
         f"    maxBytes: {instruction_bytes + _DEFAULT_INSTRUCTION_BYTES}",
         *COMPACTION_PATCH.splitlines(),
+        *gateway_route_patch(base_url, model, max_tokens=max_tokens).splitlines(),
     ]
-    if max_tokens is not None:
-        lines.extend(["- id: llm-deepseek", _PATCH_CONFIG, f"    maxTokens: {max_tokens}"])
     if mcp_rows:
         lines.append("- insert:")
         lines.extend(mcp_rows)
@@ -292,6 +295,7 @@ def build_dsh_launch(request: DshLaunchRequest, base_env: Mapping[str, str]) -> 
         instructions=instructions,
         patch=_render_patch(
             model=request.model,
+            base_url=gateway[GATEWAY_BASE_URL_ENV],
             instruction_bytes=len(instructions.encode(_ENCODING)),
             mcp_rows=mcp.rows,
             max_tokens=max_tokens,

@@ -10,17 +10,24 @@ from pathlib import Path
 from typing import Any
 
 from hyperloom.inference_optimizer.session.geak_rebench_verdict import (
-    REBENCH_FALLBACK_FAILED,
+    REBENCH_FAILED,
     REBENCH_NO_MATERIAL,
     REBENCH_NO_PROMOTE,
+    REBENCH_UNMEASURED_GIVEN_UP,
     REBENCH_VALIDATED,
 )
 
-INCOMPARABLE_REVALIDATION = "incomparable"
+#: Beside a candidate's settled status: how many of its measurements ended with no verdict.
+REVALIDATION_UNMEASURED = "revalidation_unmeasured"
+#: How many measurements of one candidate may end with no verdict before it is given up. Two: one repeat
+#: separates a passing disturbance from a product that cannot be measured, and each further one costs a
+#: server boot or a full round and holds back a fresh GEAK run.
+MAX_UNMEASURED_REVALIDATIONS = 2
 
-# Verdict annotations are not candidate identity.
+# Coordinator annotations are not candidate identity.
 _REVALIDATION_ANNOTATION_KEYS: frozenset[str] = frozenset(
     {
+        "absent_backends",
         "kernel_event_id",
         "final_validation",
         "native_source_revalidation",
@@ -29,65 +36,53 @@ _REVALIDATION_ANNOTATION_KEYS: frozenset[str] = frozenset(
         "revalidation_error",
         "revalidation_error_class",
         "revalidation_blocked_overlay",
+        REVALIDATION_UNMEASURED,
     }
 )
 
-# Failed measurements remain retryable.
+# Failed measurements remain retryable until the candidate is given up.
 _TERMINAL_REVALIDATION_STATUSES: frozenset[str] = frozenset({REBENCH_NO_MATERIAL, REBENCH_NO_PROMOTE})
 
 
-def geak_harness_replays_workload(state: Any) -> bool:
-    """Whether GEAK's own harness can replay this session's workload.
-
-    The canonical AgentX workload it cannot: ``validate_geak_via_geak_harness``
-    refuses before launch, which is what makes a refusal there structural rather
-    than a run that might land next time. Persisted mode wins over the ambient
-    switch, matching that refusal, so a session recorded as synthetic keeps
-    replaying.
-    """
+def geak_session_is_agentx(state: Any) -> bool:
+    """Whether the session GEAK is handed runs the AgentX workload; the persisted mode wins over the ambient switch."""
     from hyperloom.common.perf_metric import agentx_enabled, is_agentx_mode
 
     mode = str(state.benchmark_mode or "").strip()
-    return not (is_agentx_mode(mode) if mode else agentx_enabled())
+    return is_agentx_mode(mode) if mode else agentx_enabled()
 
 
 def geak_verdict_is_terminal(persisted: Any) -> bool:
-    """True when a replay of the same candidate could not change the verdict.
+    """True when the session does not measure the same candidate again.
 
-    A refusal counts only with its typed class (:data:`INCOMPARABLE_REVALIDATION`),
-    so state written before the class was recorded stays retryable instead of
-    being read out of a reason string.
+    A failed measurement counts only once it was given up (``REBENCH_UNMEASURED_GIVEN_UP``).
     """
     prev = persisted if isinstance(persisted, dict) else {}
     status = str(prev.get("revalidation_status") or "")
+    error_class = str(prev.get("revalidation_error_class") or "")
     return status in _TERMINAL_REVALIDATION_STATUSES or (
-        status == REBENCH_FALLBACK_FAILED
-        and str(prev.get("revalidation_error_class") or "") == INCOMPARABLE_REVALIDATION
+        status == REBENCH_FAILED and error_class == REBENCH_UNMEASURED_GIVEN_UP
     )
 
 
-def geak_candidate_is_adjudicated(persisted: Any, recovered: Any, *, harness_can_replay: bool) -> bool:
+def geak_candidate_is_adjudicated(persisted: Any, recovered: Any) -> bool:
     """True when ``persisted``'s verdict already settles the ``recovered`` result.
 
     Guards KERNEL crash-recovery, whose job is to promote a ``result.json`` whose
-    handback was lost. Where the harness can replay the workload the verdict
-    alone decides, as it always has. Where it cannot, the verdict must also have
-    been reached on the result now on disk: identity is the runner's own result
-    content minus this module's verdict stamps, so any field a rerun moves reads
-    as new evidence. A pre-dispatch overlay refusal also checks whether the
-    blocked overlay has become loadable; other artifact contents are not read.
+    handback was lost. The verdict must have been reached on the result now on
+    disk: identity is the runner's own result content minus this module's verdict
+    stamps, so any field a rerun moves reads as new evidence. A settlement that
+    named an unloadable overlay also checks whether that overlay has become
+    loadable; other artifact contents are not read.
 
     Args:
         persisted: ``shared_state.geak_result`` — the last adjudicated result.
         recovered: The result parsed from ``result.json``.
-        harness_can_replay: See :func:`geak_harness_replays_workload`.
 
     Returns:
         Whether recovery must leave the recovered result alone.
     """
     prev = persisted if isinstance(persisted, dict) else {}
-    if harness_can_replay:
-        return str(prev.get("revalidation_status") or "") in _TERMINAL_REVALIDATION_STATUSES
     if prev.get("native_source_revalidation"):
         return geak_candidate_matches(prev, recovered) and source_verdict_matches(prev)
     if not geak_verdict_is_terminal(prev):
@@ -115,6 +110,13 @@ def geak_candidate_matches(persisted: Any, recovered: Any) -> bool:
     return _geak_candidate_identity(prev, stamped) == _geak_candidate_identity(raw, stamped)
 
 
+def keep_unmeasured_count(persisted: dict[str, Any], recovered: dict[str, Any]) -> None:
+    """Carry onto a raw GEAK result the unmeasured count the session holds for the same product."""
+    count = persisted.get(REVALIDATION_UNMEASURED)
+    if count and geak_candidate_matches(persisted, recovered):
+        recovered[REVALIDATION_UNMEASURED] = count
+
+
 def _geak_candidate_identity(result: Any, stamped: frozenset[str]) -> dict[str, Any]:
     """The GEAK result content that identifies a candidate, ``stamped`` keys aside."""
     payload = result if isinstance(result, dict) else {}
@@ -122,11 +124,13 @@ def _geak_candidate_identity(result: Any, stamped: frozenset[str]) -> dict[str, 
 
 
 __all__ = [
-    "INCOMPARABLE_REVALIDATION",
+    "MAX_UNMEASURED_REVALIDATIONS",
+    "REVALIDATION_UNMEASURED",
     "geak_candidate_is_adjudicated",
     "geak_candidate_matches",
-    "geak_harness_replays_workload",
+    "geak_session_is_agentx",
     "geak_verdict_is_terminal",
+    "keep_unmeasured_count",
 ]
 
 
@@ -158,9 +162,9 @@ def verify_source_artifacts(params: dict[str, Any]) -> None:
 
 
 def source_verdict_matches(result: dict[str, Any]) -> bool:
-    """A canonical verdict settles only the source bytes that were measured."""
+    """A canonical verdict, or a measurement given up unmeasured, settles only the source bytes it was for."""
     settled = result["native_source_revalidation"]
-    if settled.get("status") not in {REBENCH_VALIDATED, REBENCH_NO_PROMOTE}:
+    if settled.get("status") not in {REBENCH_VALIDATED, REBENCH_NO_PROMOTE} and not geak_verdict_is_terminal(result):
         return False
     params = settled["params"]
     try:

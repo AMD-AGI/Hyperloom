@@ -217,42 +217,6 @@ def _add_resume_arguments(opt: argparse.ArgumentParser) -> None:
     )
 
 
-def _add_plug_arguments(opt: argparse.ArgumentParser) -> None:
-    """Add the flags that select which implementation fills each plug socket; absent, every socket stays local."""
-    opt.add_argument(
-        "--plug-profile",
-        dest="plug_profile",
-        default=None,
-        metavar="NAME",
-        help="Built-in plug profile to load (local, hosted-gpu, hosted-cpu). Without it, and without the other plug "
-        "flags, nothing changes from a plain local run.",
-    )
-    opt.add_argument(
-        "--manifest",
-        dest="plug_manifest",
-        default=None,
-        metavar="PATH",
-        help="Custom plug manifest (JSON) laid over the profile. Falls back to $HYPERLOOM_MANIFEST.",
-    )
-    for flag, dest, metavar, text in (
-        (
-            "--plug",
-            "plug",
-            "SOCKET=IMPL",
-            "Choose the implementation of one socket; repeatable. The last layer, over profile, manifest and "
-            "$HYPERLOOM_MANIFEST_OVERRIDES.",
-        ),
-        (
-            "--plug-config",
-            "plug_config",
-            "SOCKET.KEY=VALUE",
-            "Set one configuration key of a socket's implementation; repeatable. VALUE is read as JSON when it "
-            "parses as JSON, as text otherwise.",
-        ),
-    ):
-        opt.add_argument(flag, dest=dest, action="append", default=[], metavar=metavar, help=text)
-
-
 def _add_model_arguments(opt: argparse.ArgumentParser) -> None:
     """Add the model path and quantization-prelude flags of ``optimize``."""
     opt.add_argument(
@@ -532,7 +496,6 @@ def _build_parser() -> argparse.ArgumentParser:
     add_constraint_arguments(opt)
     add_gpu_power_arguments(opt)
     _add_resume_arguments(opt)
-    _add_plug_arguments(opt)
     _add_model_context_arguments(opt)
     add_run_mode_arguments(opt)
     add_framework_agent_arguments(opt)

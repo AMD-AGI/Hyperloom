@@ -70,44 +70,6 @@ def _record_revalidations(coordinator) -> list[str]:
 
 
 @pytest.mark.asyncio
-async def test_agentx_direct_dispatch_fallback_refuses_geak_replay(coordinator, tmp_path, monkeypatch) -> None:
-    c = coordinator
-    st = c.shared_state
-    _arm_kernel_to_sweep(st)
-    st.benchmark_mode = "agentx"
-    st.agentx_backend = "mlperf"
-    measured_in_suite_round(st, tmp_path / "measured")
-    st.baseline_tput = 100.0
-    st.current_best = {"action": "explore", "tput": 120.0}
-    st.cumulative_gain_validated = 20.0
-    st.geak_result = {
-        "status": "ok",
-        "throughput_speedup": 2.0,
-        "accepted_config": {},
-        "final_overlay": str(tmp_path / "missing-overlay"),
-    }
-    geak_dir = c.session_dir / "geak"
-    geak_dir.mkdir()
-    (geak_dir / "result.json").write_text(json.dumps(st.geak_result), encoding="utf-8")
-    before_best = dict(st.current_best)
-
-    async def _must_not_launch(**_kwargs):
-        raise AssertionError("Direct dispatch fallback must refuse canonical AgentX replay")
-
-    monkeypatch.setattr("hyperloom.orchestrator.actions.executors._geak_sweep.sweep_via_geak", _must_not_launch)
-    c.phase_kernel._record_geak_kernel_journey = lambda _result: None
-    summary = c.writeback.geak_rebench_params(reason="unit")
-    assert summary["fallback"] == "geak_harness"
-    await c.phase_kernel._run_geak_kernel_phase(from_phase="KERNEL")
-
-    assert st.current_best == before_best
-    assert st.cumulative_gain_validated == 20.0
-    assert "revalidation_task_id" not in st.geak_pending
-    assert st.geak_pending["revalidation_error"] == "geak_harness_unsupported_canonical_workload"
-    assert not any(entry.get("action") == "geak_e2e" for entry in st.optimization_stack)
-
-
-@pytest.mark.asyncio
 @pytest.mark.parametrize("bench_client", ["auto", "native", "inferencex"])
 @pytest.mark.asyncio
 async def test_agentx_2b_dispatch_uses_canonical_recipe_not_geak_client(coordinator, bench_client) -> None:
@@ -298,7 +260,13 @@ async def test_geak_launch_controls_reach_materialized_rebench(
     state.baseline_config_path = str(baseline)
     state.baseline_tput = 100.0
     state.current_best = {"tput": 110.0, **current}
-    state.geak_result = {"schema_version": 2, "status": "ok", "accepted_config": accepted}
+    state.geak_result = {
+        "schema_version": 2,
+        "status": "ok",
+        "accepted_config": accepted,
+        "ttft_ms": 12.0,
+        "tpot_ms": 3.0,
+    }
     enqueued = coordinator.writeback.geak_rebench_params(reason="launch_controls_regression")
     task, _ = await coordinator.tasks.create_or_return_existing(
         TaskSpec(kind="explore", params=enqueued, idempotency_key="geak-revalidate-c0")
@@ -362,6 +330,8 @@ async def test_geak_launch_controls_reach_materialized_rebench(
     assert coordinator.phase_kernel.promote_geak_from_candidate(
         state.geak_result, measured_tput=120.0, measurement_provenance=result["best_variant"], overlay_loaded=False
     )
+    # GEAK's own latencies are another harness's; the executor's winner row carries no means of the round.
+    assert (state.current_best["ttft_mean_ms"], state.current_best["tpot_mean_ms"]) == (None, None)
     state.geak_result = {}
     state.save(coordinator.session_dir)
     coordinator.shared_state = SharedState.load_or_init(coordinator.session_dir)
@@ -377,6 +347,72 @@ async def test_geak_launch_controls_reach_materialized_rebench(
         del resume_flags[position : position + 2]
     assert resume_flags == flags
     assert calls[1].get("SGLANG_AITER_MLA_PERSIST") == expected_env
+
+
+@pytest.mark.asyncio
+async def test_a_rebench_the_executor_reverts_on_the_keep_threshold_refuses_the_candidate(
+    coordinator, tmp_path, monkeypatch
+) -> None:
+    """The executor's REVERT has no winner and no round throughput; it is a ruling on the candidate, not a failure."""
+    import yaml
+
+    from hyperloom.orchestrator.actions.executors import explore
+    from hyperloom.orchestrator.actions.executors.explore import ExploreExecutor
+    from hyperloom.orchestrator.actions.executors.grid._grid_runner import VariantResult
+
+    baseline = tmp_path / "baseline.yaml"
+    baseline.write_text(
+        yaml.safe_dump(
+            {
+                "benchmark": {
+                    "framework": "sglang",
+                    "model": "/models/test",
+                    "run_mode": "local",
+                    "benchmark_script": "sglang_custom.sh",
+                    "envs": {"TP": "1", "CONC": "8", "ISL": "256", "OSL": "256"},
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    state = coordinator.shared_state
+    state.baseline_config_path = str(baseline)
+    state.baseline_tput = 100.0
+    state.current_best = {"action": "explore", "tput": 110.0}
+    state.geak_result = {"schema_version": 2, "status": "ok", "accepted_config": {"flags": "--candidate"}}
+    state.geak_pending = {"status": "awaiting_rebench"}
+    params = coordinator.writeback.geak_rebench_params(reason="geak_e2e_win")
+    task, _ = await coordinator.tasks.create_or_return_existing(
+        TaskSpec(kind="explore", params=params, idempotency_key="geak-revalidate-c0")
+    )
+
+    async def below_the_keep_threshold(**kwargs):
+        variant = kwargs["grid"][0]
+        return [
+            VariantResult(
+                name=variant.name,
+                extra_server_args=variant.extra_server_args,
+                extra_envs=dict(variant.extra_envs),
+                status="succeeded",
+                output_throughput=100.5,
+            )
+        ]
+
+    monkeypatch.setattr(explore, "run_grid", below_the_keep_threshold)
+    monkeypatch.setattr(explore, "teardown_variant_server", lambda *_args: [])
+    monkeypatch.setattr(explore, "resolve_lifecycle_params", lambda _path: {"eligible": False})
+    result = await ExploreExecutor(session_dir=coordinator.session_dir)(
+        SimpleNamespace(task=task, extra={"shared_state": state})
+    )
+    assert result["output_throughput"] is None and not result["winners"]
+
+    assert coordinator.writeback.is_promotable_result("explore", result)
+    await coordinator.writeback.promote_to_shared_state("explore", result, task=task)
+
+    assert state.current_best == {"action": "explore", "tput": 110.0}
+    assert not any(entry.get("action") == "geak_e2e" for entry in state.optimization_stack)
+    assert state.geak_result["revalidation_status"] == "no_promote"
+    assert state.geak_pending == {}
 
 
 @pytest.mark.asyncio
@@ -471,17 +507,38 @@ async def test_malformed_structured_environment_does_not_dispatch(coordinator, e
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     "material",
-    [{"final_patch": "/geak/final.patch"}, {"accepted_kernels": ["gemm"]}, {"accepted_heads": ["attention"]}],
+    [
+        {"final_patch": "/geak/final.patch"},
+        {"accepted_kernels": ["gemm"]},
+        {"accepted_heads": ["attention"]},
+        {"final_overlay": "/geak/overlay-that-never-loaded"},
+    ],
 )
-async def test_artifact_only_result_requires_its_own_harness(coordinator, material) -> None:
-    coordinator.shared_state.geak_result = {"status": "ok", **material}
-    enqueued = coordinator.writeback.geak_rebench_params(reason="geak_e2e_win")
-    assert enqueued == {"skipped": True, "reason": "geak_material_requires_harness", "fallback": "geak_harness"}
+async def test_artifact_without_a_loadable_overlay_settles_unpromoted(coordinator, monkeypatch, material) -> None:
+    """A product the rebench cannot launch is never credited: nothing differs from ``current_best`` to measure."""
+    st = coordinator.shared_state
+    st.baseline_tput = 100.0
+    st.current_best = {"action": "explore", "tput": 110.0}
+    st.geak_result = {"status": "ok", **material}
+    st.geak_pending = {"status": "awaiting_rebench"}
+    before_best = dict(st.current_best)
+    _forbid_rebench(coordinator, monkeypatch)
+
+    assert coordinator.writeback.geak_rebench_params(reason="geak_e2e_win") == {
+        "skipped": True,
+        "reason": "geak_no_material",
+    }
+    await coordinator.phase_kernel._revalidate_geak_candidate(reason="geak_e2e_win", handoff_cards=None)
+
+    assert st.current_best == before_best
+    assert not any(entry.get("action") == "geak_e2e" for entry in st.optimization_stack)
+    assert st.geak_result["revalidation_status"] == "no_material"
+    assert st.geak_pending == {}
     assert not await coordinator.tasks.queued()
 
 
 @pytest.mark.asyncio
-async def test_recovered_empty_map_closes_without_fallback(coordinator, tmp_path, monkeypatch) -> None:
+async def test_recovered_empty_map_closes_unmeasured(coordinator, tmp_path) -> None:
     c = coordinator
     _arm_kernel_to_sweep(c.shared_state)
     geak_dir = tmp_path / "geak"
@@ -489,11 +546,6 @@ async def test_recovered_empty_map_closes_without_fallback(coordinator, tmp_path
     result = {"status": "ok", "final_throughput_tok_s": 116.0, "accepted_config": {"env_map": {}}}
     (geak_dir / "result.json").write_text(json.dumps(result), encoding="utf-8")
     c.shared_state.geak_result = {}
-
-    async def _must_not_fallback(**_kwargs):
-        pytest.fail("empty optimization must not launch a fallback")
-
-    monkeypatch.setattr(c.writeback, "validate_geak_via_geak_harness", _must_not_fallback)
     await c.phase_kernel._run_geak_kernel_phase(from_phase="KERNEL")
 
     assert c.shared_state.geak_result["revalidation_status"] == "no_material"
@@ -634,11 +686,7 @@ def _forbid_rebench(coordinator, monkeypatch) -> None:
     async def _must_not_measure(_task):
         pytest.fail("a GEAK config that restates current_best must not be benchmarked")
 
-    async def _must_not_replay(**_kwargs):
-        pytest.fail("a GEAK config that restates current_best must not be replayed")
-
     monkeypatch.setattr(coordinator.sub, "execute_covered", _must_not_measure)
-    monkeypatch.setattr(coordinator.writeback, "validate_geak_via_geak_harness", _must_not_replay)
 
 
 @pytest.mark.asyncio
@@ -793,176 +841,29 @@ async def test_no_material_drop_does_not_claim_the_stack_was_revalidated(coordin
     ), "no_material cleared the revalidation flag without reconciling the validation watermark"
 
 
-def _render_final(
-    geak_candidate: dict, *, rebench: dict | None = None, claim: dict | None = None
-) -> tuple[list[str], list[str]]:
-    from hyperloom.inference_optimizer.breakdown.reporters._renderers.final import render
-
-    timeline = []
-    if rebench is not None or claim is not None:
-        timeline.append({"type": "kernel", "ext": {"geak": {"rebench": rebench or {}, "claim": claim or {}}}})
-    section = render(
-        {
-            "outcome": {
-                "final": {"output_throughput": 140.0, "gain_pct": 0.0},
-                "baseline": {"output_throughput": 100.0},
-                "validation": {},
-            },
-            "close": {"geak_candidate": geak_candidate},
-            "timeline": timeline,
-        }
-    )
-    return list(section.key_facts), list(section.warnings)
-
-
-def test_final_report_surfaces_cancelled_geak_revalidation() -> None:
-    """A measured candidate dropped for a missed rebench must be visible."""
-    facts, warnings = _render_final(
-        {
-            "status": "rebench_cancelled",
-            "revalidation_error": "close_sequence",
-            "self_reported_gain_pct": 12.5,
-        }
-    )
-
-    blob = " ".join(facts + warnings).lower()
-    assert "rebench" in blob
-    assert any("close_sequence" in w or "could not" in w.lower() for w in warnings)
-    # The dropped candidate must not be presented as awaiting anything.
-    assert not any("awaiting" in f.lower() for f in facts)
-
-
-def test_final_report_surfaces_failed_geak_revalidation() -> None:
-    facts, warnings = _render_final(
-        {},
-        rebench={"final_status": "failed", "final_error": "subprocess_nonzero"},
-        claim={"self_reported_gain_pct": 3.2},
-    )
-
-    blob = " ".join(facts + warnings).lower()
-    assert "dropped" in blob
-    assert "subprocess_nonzero" in blob
-
-
-def test_final_report_reads_the_last_geak_visit_not_an_earlier_failure() -> None:
-    """A terminal status outlives the visit that stamped it.
-
-    An earlier cycle's ``failed`` must not outrank a later cycle's rebench
-    that concluded nothing about a candidate still in play.
-    """
-    from hyperloom.inference_optimizer.breakdown.reporters._renderers.final import render
-
-    section = render(
-        {
-            "outcome": {
-                "final": {"output_throughput": 140.0, "gain_pct": 0.0},
-                "baseline": {"output_throughput": 100.0},
-                "validation": {},
-            },
-            "close": {"geak_candidate": {}},
-            "timeline": [
-                {"type": "kernel", "ext": {"geak": {"rebench": {"final_status": "failed"}}}},
-                {"type": "kernel", "ext": {"geak": {"rebench": {"final_status": "validated"}}}},
-            ],
-        }
-    )
-
-    assert not any("DROPPED" in fact for fact in section.key_facts)
-
-
-_AWAITING_FACT = (
-    "GEAK candidate (self-reported +12.50%) is AWAITING a main-flow rebench — excluded from the headline gain "
-    "and final stack until a measured rebench validates it."
-)
-_AWAITING_WARNING = (
-    "A GEAK(GEAK) e2e candidate self-reported a win but has NOT been confirmed by a same-harness main-flow "
-    "rebench, so it is intentionally kept out of current_best / action_path / the validated gain. Its "
-    "self-reported number is audit-only and must not be presented as the headline result."
-)
-_NO_VALIDATION_WARNING = (
-    "No validated gain is recorded while baseline/final throughput are set — no validation run completed."
-)
-
-
 @pytest.mark.parametrize(
-    ("gain", "gain_fact", "decision", "extra_warnings"),
+    ("pending", "settled", "tag"),
     [
-        (-1.5, "Validated cumulative gain: -1.50%.", ("attempted", -1.5), []),
-        (0.0, "Validated cumulative gain: 0.00%.", ("attempted", 0.0), []),
-        (None, None, None, [_NO_VALIDATION_WARNING]),
-        (3.0, "Validated cumulative gain: +3.00%.", ("kept", 3.0), []),
+        ({"status": "rebench_cancelled"}, {}, "rebench_cancelled"),
+        ({}, {"revalidation_status": "failed"}, "rebench_failed"),
+        ({}, {"revalidation_status": "fallback_failed"}, "rebench_fallback_failed"),
+        ({}, {"revalidation_status": "no_promote"}, None),
+        ({}, {"revalidation_status": "no_material"}, None),
     ],
 )
-def test_an_awaiting_geak_candidate_adds_only_its_own_lines(gain, gain_fact, decision, extra_warnings) -> None:
-    from hyperloom.inference_optimizer.breakdown.reporters._renderers.final import render
+def test_mission_summary_flags_a_candidate_dropped_without_a_verdict(pending, settled, tag) -> None:
+    from hyperloom.orchestrator.state.shared_state import SharedState
 
-    section = render(
-        {
-            "outcome": {
-                "final": {"output_throughput": 140.0, "gain_pct": gain},
-                "baseline": {"output_throughput": 100.0},
-                "validation": {},
-            },
-            "close": {
-                "geak_candidate": {
-                    "status": "awaiting_rebench",
-                    "revalidation_pending": True,
-                    "self_reported_gain_pct": 12.5,
-                }
-            },
-            "timeline": [],
-        }
-    )
+    summary = SharedState(baseline_tput=100.0, geak_pending=pending, geak_result=settled).to_mission_summary()
 
-    expected = ["Final: 140.00 tok/s.", "Delta vs baseline: +40.00 tok/s."]
-    if gain_fact:
-        expected.append(gain_fact)
-    assert list(section.key_facts) == [*expected, _AWAITING_FACT]
-    assert [(d.kind, d.subject, d.metric_pct) for d in section.decisions] == (
-        [(decision[0], "final", decision[1])] if decision else []
-    )
-    assert list(section.warnings) == [_AWAITING_WARNING, *extra_warnings]
-
-
-def test_final_report_still_flags_awaiting_geak_revalidation() -> None:
-    facts, warnings = _render_final({"status": "awaiting_rebench", "self_reported_gain_pct": 12.5})
-
-    assert facts == [
-        "Final: 140.00 tok/s.",
-        "Delta vs baseline: +40.00 tok/s.",
-        "Validated cumulative gain: 0.00%.",
-        _AWAITING_FACT,
-    ]
-    assert warnings == [_AWAITING_WARNING]
-
-
-@pytest.mark.asyncio
-async def test_crash_recovery_tombstones_no_promote_result(coordinator, tmp_path, monkeypatch) -> None:
-    """An adjudicated no_promote result must not be recovered and re-enqueued."""
-    c = coordinator
-    st = c.shared_state
-    _arm_kernel_to_sweep(st)
-    geak_dir = tmp_path / "geak"
-    geak_dir.mkdir()
-    result = {
-        "status": "ok",
-        "final_throughput_tok_s": 116.0,
-        "accepted_config": {"flags": "--foo", "env": ""},
-    }
-    (geak_dir / "result.json").write_text(json.dumps(result), encoding="utf-8")
-    st.geak_result = {**result, "revalidation_status": "no_promote"}
-    st.geak_pending = {}
-    revalidations = _record_revalidations(c)
-
-    c.phase_kernel._record_geak_kernel_journey = lambda _result: None
-    stop_geak_before_launch(monkeypatch)
-    await c.phase_kernel._run_geak_kernel_phase(from_phase="KERNEL")
-
-    assert revalidations == []
+    if tag is None:
+        assert "dropped unvalidated" not in summary
+    else:
+        assert f"geak candidate dropped unvalidated ({tag})" in summary
 
 
 def _arm_settled_candidate(coordinator, tmp_path) -> dict:
-    """A session whose only GEAK product was already settled as incomparable."""
+    """A session whose only GEAK product the rebench already refused."""
     st = coordinator.shared_state
     _arm_kernel_to_sweep(st)
     st.benchmark_mode = "agentx"
@@ -979,9 +880,8 @@ def _arm_settled_candidate(coordinator, tmp_path) -> dict:
     st.geak_result = {
         **settled,
         "returncode": 0,
-        "revalidation_status": "fallback_failed",
-        "revalidation_error_class": "incomparable",
-        "revalidation_error": "geak_harness_unsupported_canonical_workload",
+        "revalidation_status": "no_promote",
+        "revalidation_error": "graded_comparison_rejected",
     }
     st.geak_pending = {}
     coordinator.phase_kernel._record_geak_kernel_journey = lambda _result: None
@@ -991,7 +891,7 @@ def _arm_settled_candidate(coordinator, tmp_path) -> dict:
 def _assert_settled_candidate_survived(coordinator, tmp_path, revalidations: list[str]) -> None:
     st = coordinator.shared_state
     assert revalidations == []
-    assert st.geak_result["revalidation_error_class"] == "incomparable"
+    assert st.geak_result["revalidation_status"] == "no_promote"
     assert st.geak_pending.get("status") != "awaiting_rebench"
     # The runner's file is left for the next run to overwrite.
     assert (tmp_path / "geak" / "result.json").is_file()
@@ -1573,18 +1473,19 @@ async def test_a_spent_kernel_budget_waits_for_the_rebench_and_keeps_the_win(coo
 
 
 @pytest.mark.asyncio
-async def test_crash_recovery_does_not_replay_a_refused_candidate(coordinator, tmp_path, monkeypatch) -> None:
-    """A refusal the replay cannot change is a verdict, not a missed handback.
+@pytest.mark.parametrize("mode", ["agentx", "synthetic"])
+async def test_crash_recovery_does_not_replay_a_refused_candidate(coordinator, tmp_path, monkeypatch, mode) -> None:
+    """A refusal a rerun cannot change is a verdict, not a missed handback.
 
-    Under AgentX the GEAK harness declines the canonical workload outright, so
+    The rebench measured the candidate's own config below ``current_best``, so
     re-recovering the same ``result.json`` would re-run a revalidation whose
-    outcome is already known. The refusal is produced by the 2b -> 2a path
+    outcome is already known. The refusal is produced by the rebench ruling
     rather than hand-written.
     """
     c = coordinator
     st = c.shared_state
     _arm_kernel_to_sweep(st)
-    st.benchmark_mode = "agentx"
+    st.benchmark_mode = mode
     measured_in_suite_round(st, tmp_path / "measured")
     st.baseline_tput = 100.0
     st.current_best = {"action": "explore", "tput": 120.0, "extra_server_args": "--incumbent", "extra_envs": {}}
@@ -1593,11 +1494,9 @@ async def test_crash_recovery_does_not_replay_a_refused_candidate(coordinator, t
         "final_throughput_tok_s": 116.0,
         "accepted_config": {"flags": "--foo", "env": ""},
     }
-    # The phase stamps the runner's exit code onto state; the file does not carry it.
-    st.geak_result = {**result, "returncode": 0}
+    # The phase stamps the runner's exit code and GEAK's absent backends onto state; the file carries neither.
+    st.geak_result = {**result, "returncode": 0, "absent_backends": {"triton": "import failed"}}
 
-    # A config-identity miss makes 2b inconclusive, which hands the candidate to
-    # the GEAK harness (2a), and that refuses the canonical AgentX workload.
     rebench, _ = await c.tasks.create_or_return_existing(
         TaskSpec(
             kind="explore",
@@ -1608,11 +1507,10 @@ async def test_crash_recovery_does_not_replay_a_refused_candidate(coordinator, t
     )
     await c.writeback.promote_to_shared_state(
         rebench.kind,
-        {"output_throughput": 150.0, "best_variant": {"fingerprint": "mismatched-hash"}, "winners": []},
+        {"output_throughput": 110.0, "best_variant": {"fingerprint": "expected-hash"}, "winners": []},
         task=rebench,
     )
-    assert st.geak_result["revalidation_status"] == "fallback_failed"
-    assert st.geak_result["revalidation_error_class"] == "incomparable"
+    assert st.geak_result["revalidation_status"] == "no_promote"
 
     geak_dir = tmp_path / "geak"
     geak_dir.mkdir(exist_ok=True)
@@ -1626,7 +1524,7 @@ async def test_crash_recovery_does_not_replay_a_refused_candidate(coordinator, t
     await c.phase_kernel._run_geak_kernel_phase(from_phase="KERNEL")
 
     assert revalidations == []
-    assert st.geak_result["revalidation_error_class"] == "incomparable"
+    assert st.geak_result["revalidation_status"] == "no_promote"
 
 
 @pytest.mark.asyncio

@@ -853,6 +853,107 @@ async def test_explore_executor_atom_empty_grid_seeds_default_grid(
     assert "atom_dp_attn" in flat_names
 
 
+_AITER_ON = {"VLLM_ROCM_USE_AITER": "1", "VLLM_ROCM_USE_AITER_MOE": "1"}
+_MOE_INIT_DEATH = (
+    "(EngineCore_DP0 pid=7) ERROR ValueError: Unquantized MoE backend 'ROCm AITER' is unsupported\n"
+    "(APIServer pid=1) RuntimeError: Engine core initialization failed. See root cause above."
+)
+
+
+async def _explore_after_a_dead_change(runner, tmp_path, monkeypatch, *, died, grid, **params):
+    """Run an explore task whose session saw v00's AITER pair stop a server before ready; the launched names and result."""
+    from hyperloom.inference_optimizer.canonical_fingerprint import workload_signature
+    from hyperloom.orchestrator.actions.executors import explore as explore_mod
+    from hyperloom.orchestrator.actions.executors.grid._grid_base import VariantResult
+
+    sub, tr, _ = runner
+    base = tmp_path / "base.yaml"
+    write_benchmark_yaml(base)
+    v00 = {"name": "v00_enable_aiter_moe", "extra_envs": dict(_AITER_ON)}
+    state = SharedState()
+    if died == "an_earlier_round":
+        row = {
+            **v00,
+            "round_id": "explore-001",
+            "outcome": "FAILED",
+            "workload_signature": workload_signature(),
+            "extra_server_args": "",
+            "error_class": "server_init_dead",
+            "error_excerpt": _MOE_INIT_DEATH,
+        }
+        state.explore_search = {"tested": {"fp-v00": row}}
+    launched: list[str] = []
+
+    async def _capture_run_grid(**kwargs):
+        grid = kwargs.get("grid") or []
+        launched.extend(v.name for v in grid)
+        if grid and grid[0].name == v00["name"]:
+            return [VariantResult(v00["name"], "", {}, "failed", error=_MOE_INIT_DEATH, error_class="server_init_dead")]
+        return []
+
+    monkeypatch.setattr(explore_mod, "run_grid", _capture_run_grid)
+    task, _ = await tr.create_or_return_existing(
+        TaskSpec(
+            kind="explore",
+            params={
+                "config_path": str(base),
+                "base_tput": 800.0,
+                "grid": grid if died == "an_earlier_round" else [v00, *grid],
+                **params,
+            },
+            idempotency_key=f"ex-known-dead-change-{died}-{sorted(params)}",
+        ),
+    )
+    sub.register_executor("explore", ExploreExecutor(session_dir=tmp_path))
+    res = await sub.run_task(task, extra_context={"shared_state": state})
+    return launched, res.result
+
+
+_SIBLING = {"name": "v02_aiter_moe_plus_knob", "extra_envs": {**_AITER_ON, "HL_KNOB": "1"}}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("died", ["an_earlier_round", "this_round"])
+async def test_explore_executor_never_launches_a_variant_carrying_a_change_that_died_at_init(
+    sub_agent_runner,
+    tmp_path,
+    monkeypatch,
+    died,
+):
+    """#2751: once v00's AITER pair stopped its server before ready, a variant carrying that pair is not launched."""
+    grid = [dict(_SIBLING), {"name": "v01_knob_only", "extra_envs": {"HL_KNOB": "1"}}]
+    launched, result = await _explore_after_a_dead_change(sub_agent_runner, tmp_path, monkeypatch, died=died, grid=grid)
+
+    assert "v02_aiter_moe_plus_knob" not in launched
+    assert "v01_knob_only" in launched
+    skipped = {s["name"]: s for s in result["skipped_dup"]}
+    assert skipped["v02_aiter_moe_plus_knob"]["reason"] == "known_dead_change"
+    assert "v00_enable_aiter_moe" in skipped["v02_aiter_moe_plus_knob"]["detail"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("exempt", ["stack_revalidation", "kernel_overlay"])
+async def test_explore_executor_still_launches_a_revalidation_or_an_overlay_that_carries_a_dead_change(
+    sub_agent_runner,
+    tmp_path,
+    monkeypatch,
+    exempt,
+):
+    """A revalidation re-measures the stack on purpose, and an overlay changes the code the death was seen on."""
+    sibling = dict(_SIBLING)
+    params: dict[str, str] = {}
+    if exempt == "stack_revalidation":
+        params["source"] = "stack_revalidate"
+    else:
+        sibling["overlay_pythonpath"] = str(tmp_path)
+    launched, result = await _explore_after_a_dead_change(
+        sub_agent_runner, tmp_path, monkeypatch, died="an_earlier_round", grid=[sibling], **params
+    )
+
+    assert "v02_aiter_moe_plus_knob" in launched
+    assert all(s.get("reason") != "known_dead_change" for s in result.get("skipped_dup") or [])
+
+
 @pytest.mark.asyncio
 async def test_explore_executor_sglang_empty_grid_still_fails_with_empty_grid(
     sub_agent_runner,
@@ -949,7 +1050,7 @@ def test_unified_attn_filter_matches_aiter_dist_version_short_sha(tmp_path):
         serving=ServingStack(
             "sglang",
             str(model),
-            gpu_type="mi355x",
+            gfx="gfx950",
             stack_fingerprint={
                 "sglang": "0.5.20.dev20260920+gc610c40399",
                 # The dist version install_baremetal.sh falls back to; embeds the short sha of the pinned commit.

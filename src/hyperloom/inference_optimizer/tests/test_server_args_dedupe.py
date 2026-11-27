@@ -5,7 +5,12 @@
 
 from __future__ import annotations
 
-from hyperloom.inference_optimizer.grid_server_args import dedupe_extra_server_args, merge_cumulative_extra_server_args
+from hyperloom.inference_optimizer.grid_server_args import (
+    ServerArgsDelta,
+    dedupe_extra_server_args,
+    merge_cumulative_extra_server_args,
+    server_args_delta,
+)
 
 
 def test_dedupe_empty():
@@ -127,3 +132,14 @@ def test_merge_preserves_json_while_deduping_other_flags():
     assert _merge("", args, "") == (
         '--json-model-override-args {"rope_scaling":null} --attention-backend ROCM_AITER_FA'
     )
+
+
+def test_the_delta_between_two_argvs_sets_what_changed_or_is_new_and_removes_what_is_gone():
+    before = "--tp 2 --max-num-seqs 8 --enforce-eager --cuda-graph-sizes 1 2 4"
+    after = "--tp 2 --max-num-seqs 64 --cuda-graph-sizes 1 2 4 8 --max-model-len 4096"
+
+    assert server_args_delta(before, after) == ServerArgsDelta(
+        "--max-num-seqs 64 --cuda-graph-sizes 1 2 4 8 --max-model-len 4096", ("--enforce-eager",)
+    )
+    assert server_args_delta(after, after) == ServerArgsDelta()
+    assert server_args_delta("--max-num-seqs 8 --max-num-seqs 16", "--max-num-seqs 16") == ServerArgsDelta()

@@ -15,7 +15,10 @@ and validity stay in Hyperloom.
 
 A fresh session resolves its base launch once, at launch, and freezes it as
 `<session>/base_launch.json` (schema `hyperloom-base-launch/1`). A resume reads
-that file and resolves nothing. Sources are tried in this order, and the first that
+that file and resolves nothing. An InferenceX base also records, under `point`,
+the concurrencies its arm publishes (`source_concs`) and the launch the arm binds
+at each (`source_launches`: `conc`, `args`, `env`, laid out as the base's own),
+which the concurrency sweep seeds each point with; neither enters the digest. Sources are tried in this order, and the first that
 holds a launch for the session's model, board, workload, concurrency, TP and EP
 gives the base:
 
@@ -29,7 +32,21 @@ gives the base:
 3. the framework's cookbook: the SGLang cookbook, the vLLM recipes site, or
    ATOM's catalog (fixed workloads only);
 4. for a fixed workload only, the default table shipped in
-   `src/inference_suite/recipe/defaults/table.yaml`.
+   `src/inference_suite/recipe/defaults/table.yaml`: the framework's row for the
+   architecture the session's card reports (the query's `gfx`), else the
+   framework's fallback row (`--trust-remote-code` alone), with a warning that
+   names the architecture no row was tuned for, or that the architecture is
+   unknown when the session read no card.
+
+A recipe serves only the board it was tuned on, compared by name: an InferenceX
+point whose runner stands for that board, an SGLang cookbook cell or AgentX
+launch whose `hw` is that board, an SGLang page block whose nearest heading
+naming exactly one board (of those the cookbook's cells name, and the session's)
+names it, a whole word in any case, an ATOM catalog entry whose runner label has
+it as one of its dash-separated words, and an ATOM page block whose nearest
+heading naming an MI board names it. A recipe tuned on another board, however
+alike, is not taken; to run it, write it as a launch script and pass that as
+`--reference-script`.
 
 An AgentX session that no recipe and no `--reference-script` serves is refused.
 When a source cannot be read, a fixed session runs the default table, unless
@@ -68,9 +85,16 @@ two (`-tp 8`, `--tp 8`).
 
 A launch script, frozen base or default row that needs more GPUs than `--gpus` is
 refused, naming both counts.
-A frozen base resolved for another model, workload or framework, or for a board
-of another architecture or HBM capacity than the session's, is refused, naming both
-values.
+A frozen base resolved for another model, workload or framework is refused,
+naming both values. So is one resolved for another board, unless both its query
+and the session's record the card they ran on (`gfx` and `memory_mib`) and the two
+agree; a base frozen before queries recorded the card serves its own board alone.
+
+The query (`query` in `base_launch.json`, and `resolve --query`) names the model,
+framework, board, workload, concurrencies, TP, EP and sequence shape, and the card
+the session read: its architecture `gfx` and memory size `memory_mib`, both `null`
+when the session read no card. A query written before those two keys existed reads
+them as `null`. The query is not part of the digest.
 
 An InferenceX entry of the session's model that its config cannot place (a runner
 on no board label, a missing key) is that entry's miss; entries of other models are
@@ -186,10 +210,23 @@ sent), sends those prompts instead through `inference_suite.load.dataset_client`
 one user message each to `/v1/chat/completions`, rendered by the server's chat
 template, at temperature 0 with `max_tokens` the `OSL` and EOS honoured.
 Each pass sends its prompt count from the file's lines, shuffled by its seed and
-cycled, so every arm sends the same requests. That count is `NUM_PROMPTS`; a point
-that sets none sends the round's per-concurrency default, which can cover only part
-of the file: set `NUM_PROMPTS` to the file's line count to send all of it, and pass a
-shorter file to send fewer. A concurrency sweep sets its own count per rung. A session
+cycled, so every arm sends the same requests. A measured round's count is the number
+of prompts in the file, so it sends the whole file once at every concurrency level;
+a point without a dataset sends its concurrency times 10, 5, 3 or 2, fewer the
+longer `ISL` + `OSL`. The count is written
+into the point as `NUM_PROMPTS` when the point is rendered, on the host that renders
+it: a file that host cannot read, or a line that holds no prompt, fails the render
+naming the file. `NUM_PROMPTS` is not read from the environment; a point's own
+`envs.NUM_PROMPTS` and `hyperloom optimize --extra-env NUM_PROMPTS=<n>` override the
+count in the baseline round and the candidate rounds, which are rendered from the
+session's baseline config. A concurrency sweep sets its own count per rung, for a
+dataset session the file's prompt count whatever is pinned. A boot round sends one
+request. A profile round keeps its own count over a point's `envs.NUM_PROMPTS`, but
+an `--extra-env NUM_PROMPTS=<n>` reaches it too. Pass a shorter file to send fewer.
+A round whose concurrency is above the file's prompt count never has
+that many requests in flight, and the client's stderr says so; at concurrency 1 the
+whole file is sent one request at a time, inside the same
+`INFERENCE_OPTIMIZER_BENCHMARK_TIMEOUT_SEC` as any round. A session
 with a dataset serves the model's own context window, as an AgentX session does, in
 place of `ISL` + `OSL` plus headroom, since the prompts carry their own lengths;
 `MAX_MODEL_LEN` still overrides it. A prompt the server answers with a 4xx status, as it
@@ -292,7 +329,7 @@ python -m inference_suite.staging check --tool-cache <dir>
 
 ## Command line
 
-`python -m inference_suite` has five commands:
+`python -m inference_suite` has six commands:
 
 | Command | Behavior |
 |---|---|
@@ -301,14 +338,15 @@ python -m inference_suite.staging check --tool-cache <dir>
 | `resolve --query <query.json> --gpus <n> --out <base_launch.json> [--user-file <file>] [--inferencex-commit <sha>]` | Reads the sources once and writes the base they give, printing its digest. With `--inferencex-commit`, InferenceX is read at that commit instead of the head of its `main`. |
 | `stage --tool-cache <dir> [--source <InferenceX repository>]` | Stages the pinned tools into the tool cache unless it holds them intact, fetching InferenceX at its pin without `--source`, and prints the manifest's sha256. |
 | `publish --stagings <dir> [--source <InferenceX repository>]` | Publishes the staging of the pins in force as `<dir>/<staging key>`, staging it there when absent, and prints its path. |
+| `multinode resolve`, `start`, `restart`, `stop` | Resolves the PD launch of the node list's cluster (`HYPERLOOM_MN_NODE_LIST`) and writes `pd_launch.json`; `start`, `restart` and `stop` act on that frozen launch on the node list's hosts. `restart` takes per-role `--<role>-args` overrides. |
 
 Exit codes: `0` when the round completed (or nothing survived `stop`, a base was
-written, or a staging is in place); `1` when the round did not complete, or a
-process outlived `stop`; `2` when the config, query or pidfile breaks its contract,
+written, or a staging is in place); `1` when the round did not complete, a
+process outlived `stop`, or a `multinode` cluster did not come up; `2` when the config, query or pidfile breaks its contract,
 the run directory is not empty, no source holds a base, in which case each
 source's reason is printed to stderr, `--inferencex-commit` is refused, a source
 answers in a form resolve cannot read (an HTML page where JSON was asked), or a staging cannot be built or verified,
-printed as `staging_missing: <reason>`.
+printed as `staging_missing: <reason>`, or a `multinode` input is refused.
 
 ## Run directory
 
@@ -420,6 +458,7 @@ A round that did not complete names one `failed_step`:
 | Server | `server_exited_before_ready`, `server_silent_before_ready`, `server_boot_timeout`, `server_stalled`, `server_died` |
 | Client | `client_failed`, `client_output_missing` |
 | Eval | `eval_failed` |
+| Profile | `profile_refused` |
 | Any | `round_timeout`, `deadline_exhausted`, `cancelled`, `teardown_incomplete` |
 
 Every metric key is fixed: a metric nobody measured is `null`, never `0`. An eval

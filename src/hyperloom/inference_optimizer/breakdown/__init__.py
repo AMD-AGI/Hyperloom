@@ -8,6 +8,7 @@ from __future__ import annotations
 from .exporter import (
     build,
     patch_breakdown_close,
+    patch_breakdown_conc_sweep,
     patch_breakdown_langfuse,
     write_breakdown_json,
     write_minimal_final_json,
@@ -19,6 +20,7 @@ __all__ = [
     "build",
     "package_session_artifacts",
     "patch_breakdown_close",
+    "patch_breakdown_conc_sweep",
     "patch_breakdown_langfuse",
     "write_breakdown_json",
     "write_minimal_final_json",

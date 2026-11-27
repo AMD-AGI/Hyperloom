@@ -5,12 +5,9 @@
 
 from __future__ import annotations
 
-import functools
 import logging
-import subprocess
 from pathlib import Path
 
-from hyperloom_common.gpu_identity import is_gfx_arch
 from hyperloom.inference_optimizer.model_config_utils import config_scopes, load_model_config_dict
 
 log = logging.getLogger(__name__)
@@ -104,19 +101,19 @@ def _model_hidden_size(model_path: str) -> int | None:
     return None
 
 
-def _resolve_fp8_quant_type(model_path: str, gpu_type: str = "", framework: str = "") -> str:
+def _resolve_fp8_quant_type(model_path: str, gfx: str = "", framework: str = "") -> str:
     """Pick the fp8 dense tuner quant_type from the checkpoint's static format.
 
     forge accepts an explicit ``quant_type``; rather than letting it fall back to
     its internal blockscale default, hand it the path the model actually runs:
 
     - ``blockscale_bpreshuffle`` when the checkpoint uses block-quantized
-      weights AND the target GPU is gfx950 (MI355X) AND framework is sglang --
+      weights AND ``gfx`` is gfx950 AND framework is sglang --
       sglang/aiter automatically upgrades blockscale to the bpreshuffle kernel
       on CDNA4. vLLM does NOT use this path (it reads
       AITER_CONFIG_GEMM_A8W8_BLOCKSCALE).
     - ``blockscale`` when the checkpoint uses block-quantized weights on gfx942,
-      on vllm, or when GPU type is unknown.
+      on vllm, or when the arch is unknown.
     - ``per_token`` for a plain fp16/bf16 checkpoint served under dynamic
       ``--quantization fp8`` (the a8w8 per-token path).
     - ``auto`` when ``config.json`` cannot be read, so forge sniffs the
@@ -138,36 +135,10 @@ def _resolve_fp8_quant_type(model_path: str, gpu_type: str = "", framework: str 
                 is_blockscale = True
                 break
     if is_blockscale:
-        if _is_gfx950(gpu_type) and framework.lower() == "sglang":
+        if gfx == "gfx950" and framework.lower() == "sglang":
             return "blockscale_bpreshuffle"
         return "blockscale"
     return "per_token"
-
-
-def _is_gfx950(gpu_type: str) -> bool:
-    """True when gpu_type resolves to gfx950 (CDNA4 / MI355X)."""
-    key = (gpu_type or "").strip().lower()
-    if is_gfx_arch(key, "gfx950"):
-        return True
-    if not key or key == "auto":
-        return _is_gfx950_rocminfo()
-    return False
-
-
-@functools.lru_cache(maxsize=1)
-def _is_gfx950_rocminfo() -> bool:
-    """Cached rocminfo probe for gfx950 arch."""
-    try:
-        out = subprocess.run(
-            ["rocminfo"],
-            capture_output=True,
-            text=True,
-            timeout=15,
-            check=False,
-        ).stdout
-        return "gfx950" in out.lower()
-    except (OSError, subprocess.SubprocessError):
-        return False
 
 
 def _csv_matches_model(csv_path: Path, model_path: str) -> bool:

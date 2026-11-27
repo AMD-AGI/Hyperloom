@@ -35,7 +35,6 @@ from ..kernel.lane_budget import INSUFFICIENT_BUDGET
 from ..actions.executors.gpu._gpu_pin import (
     coerce_tp,
     resolve_gpu_pin,
-    _resolve_handoff_gpu_identity,
     _resolve_handoff_gpu_ids,
     _resolve_handoff_gpu_ids_space,
     _resolve_handoff_physical_gpus,
@@ -432,7 +431,7 @@ class _GeakDispatchMixin:
             "schema_version": 3,
             "model_path": str(state.model_path or os.environ.get("MODEL_PATH", "")),
             "framework": str(state.framework or os.environ.get("FRAMEWORK", "") or "sglang"),
-            **_resolve_handoff_gpu_identity(state.gpu_type or os.environ.get("GPU_TYPE", "")),
+            "gpu_type": str(state.gpu_type or os.environ.get("GPU_TYPE", "")),
             "workload": {"isl": int(state.isl), "osl": int(state.osl), "conc": int(state.conc or 64)},
             # AgentX canonical throughput is not a reference for GEAK's proxy workload.
             "raw_baseline_tput": 0.0 if agentx else float(state.baseline_tput or 0.0),
@@ -481,11 +480,9 @@ class _GeakDispatchMixin:
     def _geak_result_path(self) -> Path:
         return self.session_dir / "geak" / "result.json"
 
-    def _geak_settled_replay(self, candidate: dict[str, Any], *, agentx: bool) -> bool:
+    def _geak_settled_replay(self, candidate: dict[str, Any]) -> bool:
         """Whether ``candidate`` is a result this session already settled."""
-        return _geak_rebench.geak_candidate_is_adjudicated(
-            self.shared_state.geak_result, candidate, harness_can_replay=not agentx
-        )
+        return _geak_rebench.geak_candidate_is_adjudicated(self.shared_state.geak_result, candidate)
 
     def _settle_geak_skip(self, result: dict[str, Any]) -> None:
         # A settled verdict is left standing: a later failure records itself without
@@ -521,6 +518,7 @@ class _GeakDispatchMixin:
         previous = state.geak_result or {}
         if previous.get("kernel_event_id") and _geak_rebench.geak_candidate_matches(previous, result):
             result["kernel_event_id"] = previous["kernel_event_id"]
+        _geak_rebench.keep_unmeasured_count(previous, result)
         state.geak_result = result
         self._record_geak_measurement(result)
         # Rebench-first: record the recovered win as an UNVALIDATED candidate;
@@ -601,7 +599,7 @@ class _GeakDispatchMixin:
         return record
 
     def _settle_geak_runner_exit(
-        self, proc: subprocess.CompletedProcess, *, handoff: dict[str, Any], agentx: bool, facts: GeakRunnerFacts
+        self, proc: subprocess.CompletedProcess, *, handoff: dict[str, Any], facts: GeakRunnerFacts
     ) -> dict[str, Any] | None:
         result_path = self._geak_result_path()
         stderr_tail = (proc.stderr or "")[-2000:]
@@ -627,7 +625,7 @@ class _GeakDispatchMixin:
                 facts=facts,
             )
             return None
-        if agentx and self._geak_settled_replay(result, agentx=agentx):
+        if self._geak_settled_replay(result):
             # The runner left the candidate this session already settled, so it shipped no product: recording it
             # would retire the verdict and re-enqueue the revalidation that produced it. The file stays for the
             # next run to overwrite.
@@ -641,14 +639,13 @@ class _GeakDispatchMixin:
                 handoff=handoff,
             )
             return None
-        # Carry the actual exit code so the breakdown can audit a nonzero rc. Nothing else is added: the persisted
-        # record stays the product GEAK wrote, so the next KERNEL entry recognizes its own settled candidate.
+        _geak_rebench.keep_unmeasured_count(self.shared_state.geak_result, result)
+        # Carry the actual exit code so the breakdown can audit a nonzero rc. Nothing else of the runner's is added:
+        # the persisted record stays the product GEAK wrote, so the next KERNEL entry recognizes its own candidate.
         result.setdefault("returncode", proc.returncode)
         return result
 
-    async def _dispatch_geak_runner(
-        self, handoff: dict[str, Any], *, from_phase: str, agentx: bool
-    ) -> GeakRunnerOutcome:
+    async def _dispatch_geak_runner(self, handoff: dict[str, Any], *, from_phase: str) -> GeakRunnerOutcome:
         out_dir = self.session_dir / "geak"
         # Budget-aware timeouts: shrink to the remaining run deadline and always reserve the closing-grace window.
         runner_timeout, kill_timeout, budget_known = self._geak_timeouts()
@@ -683,7 +680,7 @@ class _GeakDispatchMixin:
             # the phase as a timeout.
             facts = _facts()
             flushed = read_json(self._geak_result_path(), {}, require_dict=True)
-            settled = bool(flushed) and agentx and self._geak_settled_replay(flushed, agentx=agentx)
+            settled = bool(flushed) and self._geak_settled_replay(flushed)
             if flushed.get("status") == "ok" and not settled:
                 log.info(
                     "GEAK flushed an OK result.json under SIGTERM grace; promoting the recovered win despite the cap."
@@ -717,9 +714,7 @@ class _GeakDispatchMixin:
             )
             return GeakRunnerOutcome()
         facts = _facts()
-        return GeakRunnerOutcome(
-            self._settle_geak_runner_exit(proc, handoff=handoff, agentx=agentx, facts=facts), facts
-        )
+        return GeakRunnerOutcome(self._settle_geak_runner_exit(proc, handoff=handoff, facts=facts), facts)
 
     def _open_geak_handoff(self, *, agentx: bool) -> dict[str, Any] | None:
         try:
@@ -740,18 +735,12 @@ class _GeakDispatchMixin:
             recorder.record_geak_handoff(handoff)
         return handoff
 
-    async def _promote_crashed_geak_result(
-        self, handoff: dict[str, Any], *, agentx: bool, cards: list[int] | None
-    ) -> bool:
+    async def _promote_crashed_geak_result(self, handoff: dict[str, Any], *, cards: list[int] | None) -> bool:
         # A validated result.json written before a coordinator crash is promoted on resume, guarded by
         # ``_geak_win_already_recorded`` so a prior cycle's result.json does not short-circuit a fresh entry. A
         # result this session already settled is not recovered; new candidate evidence remains eligible.
         recovered = read_json(self._geak_result_path(), {}, require_dict=True)
-        if (
-            recovered.get("status") != "ok"
-            or self._geak_win_already_recorded()
-            or self._geak_settled_replay(recovered, agentx=agentx)
-        ):
+        if recovered.get("status") != "ok" or self._geak_win_already_recorded() or self._geak_settled_replay(recovered):
             return False
         log.info(
             "GEAK result.json exists but state has no recorded win (crash before handback); promoting recovered result."
@@ -812,14 +801,14 @@ class _GeakDispatchMixin:
     async def _run_geak_kernel_phase(self, *, from_phase: str) -> None:
         """Delegate the KERNEL_AGENT phase to GEAK (one whole-pipeline e2e run)."""
         state = self.shared_state
-        agentx = not _geak_rebench.geak_harness_replays_workload(state)
+        agentx = _geak_rebench.geak_session_is_agentx(state)
         handoff = self._open_geak_handoff(agentx=agentx)
         if handoff is None:
             return
         cards = _resolve_handoff_physical_gpus(
             gpu_ids=handoff["gpu_ids"], gpu_ids_space=handoff["gpu_ids_space"], gpu_pin=handoff.get("gpu_pin") or {}
         )
-        if await self._promote_crashed_geak_result(handoff, agentx=agentx, cards=cards):
+        if await self._promote_crashed_geak_result(handoff, cards=cards):
             return
 
         still_busy = await self._free_gpus_for_geak(cards)
@@ -829,7 +818,7 @@ class _GeakDispatchMixin:
             )
             return
 
-        outcome = await self._dispatch_geak_runner(handoff, from_phase=from_phase, agentx=agentx)
+        outcome = await self._dispatch_geak_runner(handoff, from_phase=from_phase)
         result, facts = outcome.result, outcome.facts
         if result is None:
             return

@@ -12,7 +12,8 @@ wherever it is read. The classes drive different follow-ups in the tool layer:
 * ``unclear``: non-zero with no known signature, a stalled server, or a timeout; rerun once in a fresh sandbox. The
   reason still names what the log says (a refused evaluation request, a Python exception) when it says anything. A
   profile's server that stalled with its profile window open is no candidate's doing: :data:`PROFILER_HUNG`, ``infra``;
-  nor is one that died with it open and left no failure a candidate is known to cause: :data:`PROFILER_DIED`, ``infra``.
+  nor is one that died with it open and left no failure a candidate is known to cause: :data:`PROFILER_DIED`, ``infra``;
+  nor one that refused to open it: :data:`PROFILE_REFUSED`, ``infra``.
 
 A refused instruction sheet or a rejected result bundle is none of these. It is a program error (or a tampered result),
 so it gets no failure class at all: calling it ``candidate`` would write a false negative, and calling it ``unclear`` or
@@ -115,7 +116,8 @@ HUB_RATE_LIMITED = "hub_rate_limited"
 #: A Hugging Face cache (the ``datasets`` lock of the evaluation's dataset, say) refused the test with ``[Errno 13]
 #: Permission denied``; the reason is ``<this>: <the path refused>``. The cache is a volume every sandbox of the platform
 #: mounts alike, so no candidate causes it and a fresh sandbox meets it again: ``hyperloom_multibranch.toolbox.attempts``
-#: ends the test with it at once and does not hold it against the node.
+#: ends the test with it at once and does not hold it against the node. A runner that could not link the datasets of an
+#: unwritable ``datasets`` cache (``hyperloom.measure.runner.datasets_cache``) reports it as its ``error_class``.
 HF_CACHE_PERMISSION = "hf_cache_permission"
 #: The test's own timeout passed while its attempt waited for a slot of the sandbox pool or for room in the grant's
 #: quota, before any sandbox was made (``hyperloom.measure.sandboxes.AcquireTimedOut``); the reason is ``<this>: <what it
@@ -159,6 +161,12 @@ PROFILER_HUNG = "profiler_hung"
 #: round's ``finished`` mark, after that close (``round_marks.died_in_profile_window``).
 PROFILER_DIED = "profiler_died"
 
+#: The server of a profile round answered its ``/start_profile`` with an error status, and the round ended there
+#: (``FailedStep.PROFILE_REFUSED``): the image's server will not profile as the round asks, which is no candidate's
+#: doing, and every sandbox of the image refuses it the same way (``hyperloom_multibranch.toolbox.attempts`` ends the
+#: test with it at once). The reason is ``<this>: <the refused request and the status>``.
+PROFILE_REFUSED = FailedStep.PROFILE_REFUSED.value
+
 #: ``error_class`` values a runner, the hosted backend or the platform reports that are not about the candidate.
 INFRA_ERROR_CLASSES: frozenset[str] = frozenset(
     {
@@ -170,6 +178,7 @@ INFRA_ERROR_CLASSES: frozenset[str] = frozenset(
         FOREIGN_PROCESS_ON_CARD,
         DISK_FULL,
         FRAMEWORK_VERSION_MISMATCH,
+        HF_CACHE_PERMISSION,
         "node_fault",
         "no_spec",
         "sandbox_create_failed",
@@ -213,9 +222,10 @@ _FAILED_STEP_VERDICTS: dict[FailedStep, tuple[FailureClass, str]] = {
     FailedStep.SERVER_SILENT_BEFORE_READY: (FailureClass.INFRA, HUNG_BEFORE_READY),
     FailedStep.TEARDOWN_INCOMPLETE: (FailureClass.INFRA, FailedStep.TEARDOWN_INCOMPLETE.value),
     FailedStep.SERVER_STALLED: (FailureClass.UNCLEAR, SERVER_STALLED_REASON),
+    FailedStep.PROFILE_REFUSED: (FailureClass.INFRA, PROFILE_REFUSED),
 }
 #: The steps whose reason quotes the report's ``failure_detail``, as ``<reason>: <detail>``.
-_DETAILED_STEPS = frozenset({FailedStep.FLAG_UNKNOWN, FailedStep.GOLDEN_OWNED_TOUCHED})
+_DETAILED_STEPS = frozenset({FailedStep.FLAG_UNKNOWN, FailedStep.GOLDEN_OWNED_TOUCHED, FailedStep.PROFILE_REFUSED})
 #: The two causes an unclear failure names when its log carries them; the reason is ``<prefix>: <the log's line>``.
 #: A failure the log only calls a crashed evaluation names the refused request too, when the log carries one.
 LM_EVAL_BAD_REQUEST_REASON = "lm_eval_http_400"

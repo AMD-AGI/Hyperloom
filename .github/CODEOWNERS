@@ -89,4 +89,3 @@
 
 # GEAK integration
 /src/hyperloom/orchestrator/kernel/geak_runner.py               @iraj465 @yueliu14 @chao-xu-spec @AMD-AGI/SaFE
-/src/hyperloom/orchestrator/actions/executors/_geak_sweep.py    @iraj465 @yueliu14 @chao-xu-spec @AMD-AGI/SaFE

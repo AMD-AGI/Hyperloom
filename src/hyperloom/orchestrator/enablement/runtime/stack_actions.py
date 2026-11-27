@@ -134,7 +134,6 @@ class RuntimeRequest:
 class EnablementStackAction:
     """A candidate attempt-runtime acquisition the enablement loop may run."""
 
-    kind: str
     framework: str
     gap_id: str
     capability: str
@@ -145,12 +144,10 @@ class EnablementStackAction:
     index_url: str = ""
     packages: tuple[str, ...] = ()
     attempt_venv_root: str = ""
-    pr_number: int = 0
 
     def to_state(self) -> dict[str, Any]:
         """Serialize to a plain dict for task params / shared state."""
         return {
-            "kind": self.kind,
             "framework": self.framework,
             "gap_id": self.gap_id,
             "capability": self.capability,
@@ -161,7 +158,6 @@ class EnablementStackAction:
             "index_url": self.index_url,
             "packages": list(self.packages),
             "attempt_venv_root": self.attempt_venv_root,
-            "pr_number": self.pr_number,
         }
 
     @classmethod
@@ -173,12 +169,7 @@ class EnablementStackAction:
         method = str(d.get("acquisition_method") or "none")
         if method not in _ACQUISITION_METHODS:
             method = "none"
-        try:
-            pr_number = int(d.get("pr_number") or 0)
-        except (TypeError, ValueError):
-            pr_number = 0
         return cls(
-            kind=str(d.get("kind") or "runtime_candidate"),
             framework=str(d.get("framework") or "").strip().lower(),
             gap_id=str(d.get("gap_id") or ""),
             capability=str(d.get("capability") or ""),
@@ -189,7 +180,6 @@ class EnablementStackAction:
             index_url=str(d.get("index_url") or ""),
             packages=packages,
             attempt_venv_root=str(d.get("attempt_venv_root") or ""),
-            pr_number=pr_number,
         )
 
 

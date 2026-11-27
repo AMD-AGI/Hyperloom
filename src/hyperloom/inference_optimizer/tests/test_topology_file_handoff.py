@@ -345,7 +345,7 @@ def test_the_files_backend_is_the_launch_backend_when_no_flag_or_variable_says_o
     assert _resolve_mn_backend(_optimize_args(mn_backend="rayjob")) == "rayjob"  # an explicit flag still wins
 
     _session(monkeypatch, tmp_path)
-    _prepare_multi_node_state(_optimize_args())
+    _prepare_multi_node_state(_optimize_args(), tmp_path)
     saved = json.loads(resolve_state_file().read_text(encoding="utf-8"))
     assert (saved["backend"], saved["worker_pod_ips"], saved["external"]) == ("infera", ["10.0.1.4", "10.0.1.5"], True)
 
@@ -359,7 +359,7 @@ def test_launch_with_an_unusable_topology_file_exits_2_naming_the_file(
     bad.write_text("{", encoding="utf-8")
     monkeypatch.setenv(topo.TOPOLOGY_FILE_ENV, str(bad))
     with pytest.raises(SystemExit) as caught:
-        _prepare_multi_node_state(_optimize_args())
+        _prepare_multi_node_state(_optimize_args(), tmp_path)
     assert caught.value.code == 2
     err = capsys.readouterr().err
     assert str(bad) in err
@@ -408,7 +408,7 @@ def test_the_nodes_flag_is_what_state_stores_not_the_files_count(monkeypatch, tm
     doc = _infera_doc(tmp_path, prefill=[], decode=[], worker=["10.0.1.4", "10.0.1.5"])  # the file says nodes=2
     args = _launch(monkeypatch, tmp_path, doc, "--nodes", "3")
     assert args.nodes_resolved == 3
-    _prepare_multi_node_state(args)
+    _prepare_multi_node_state(args, tmp_path)
     saved = json.loads(resolve_state_file().read_text(encoding="utf-8"))
     assert saved["nodes"] == 3
 
@@ -418,7 +418,7 @@ def test_without_the_gpus_flag_the_file_fills_it_in_and_the_gates_and_state_agre
     doc = _infera_doc(tmp_path, prefill=[], decode=[], worker=["10.0.1.4", "10.0.1.5"])  # gpus_per_node = 4
     args = _launch(monkeypatch, tmp_path, doc, "--nodes", "2")
     assert os.environ["INFERENCE_OPTIMIZER_GPUS_PER_NODE"] == "4"
-    _prepare_multi_node_state(args)
+    _prepare_multi_node_state(args, tmp_path)
     saved = json.loads(resolve_state_file().read_text(encoding="utf-8"))
     assert saved["gpus_per_node"] == 4
 
@@ -427,7 +427,7 @@ def test_without_the_gpus_flag_the_file_fills_it_in_and_the_gates_and_state_agre
 def test_the_gpus_flag_wins_over_the_file(monkeypatch, tmp_path: Path) -> None:
     doc = _infera_doc(tmp_path, prefill=[], decode=[], worker=["10.0.1.4", "10.0.1.5"])  # gpus_per_node = 4
     args = _launch(monkeypatch, tmp_path, doc, "--nodes", "2", "--gpus-per-node", "2")
-    _prepare_multi_node_state(args)
+    _prepare_multi_node_state(args, tmp_path)
     saved = json.loads(resolve_state_file().read_text(encoding="utf-8"))
     assert saved["gpus_per_node"] == 2
 
@@ -438,7 +438,7 @@ def test_a_launch_does_not_warn_about_the_counts_it_exported_itself(monkeypatch,
     args = _launch(monkeypatch, tmp_path, doc, "--nodes", "3", "--gpus-per-node", "2")
     topo._WARNED.clear()
     with caplog.at_level(logging.WARNING):
-        _prepare_multi_node_state(args)
+        _prepare_multi_node_state(args, tmp_path)
     assert "overrides the legacy hand-off variables" not in caplog.text
 
 

@@ -15,7 +15,7 @@ from pathlib import Path
 from hyperloom.common.perf_metric import DATASET_PATH_ENV
 from hyperloom.common.url_userinfo import CREDENTIALED_URL_RE
 from hyperloom.common.workload_defaults import DEFAULT_EP
-from hyperloom.inference_optimizer.framework_registry import native_component
+from hyperloom.common.concurrencies import parse_concurrencies
 from hyperloom_multibranch.blackboard.knowledge.reference_leads import INFERENCEX_REFERENCE
 from hyperloom_multibranch.contracts.toolbox import WorkloadKind
 from hyperloom_multibranch.rulegate.agentx import AgentXObjective
@@ -27,6 +27,7 @@ from hyperloom_multibranch.scheduling.roster import RosterCaps
 from hyperloom_multibranch.scheduling.settings import (
     AGENT_PORT,
     DEFAULT_AGENTX_OBJECTIVE,
+    DEFAULT_CONC_SWEEP_PARALLEL,
     DOSSIER_MINUTES,
     MAX_BOOT_BUDGET_SEC,
     SHARE_MINUTES,
@@ -48,11 +49,6 @@ DEFAULT_MAX_K_PER_BRANCH = 2
 DEFAULT_JUDGE_INTERVAL_SECONDS = 600.0
 ENCODING = "utf-8"
 FILE_METAVAR = "FILE"
-#: The GPU types a session runs on; the toolbox's environment exports the board itself as ``GPU_TYPE``.
-SESSION_GPU_TYPES = ("mi300x", "mi325x", "mi350x", "mi355x", "r9700", "w7900d")
-#: Those of them a session runs on only when its framework builds its server from a checkout.
-NATIVE_SERVER_GPU_TYPES = ("r9700", "w7900d")
-_GPU_TYPE_HELP = "GPU type, in any case; r9700 and w7900d only with --framework llamacpp."
 #: The options ``run`` requires unless it is given ``--resume``, by their argparse names.
 RUN_REQUIRED = ("model", "framework", "gpu_type", "workload", "tp", "conc", "precision")
 #: The options an inferencex workload requires and an agentx one refuses.
@@ -95,6 +91,7 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     conc_sweep.add_argument("session_dir", type=Path, help="The session directory of a closed run.")
+    _add_conc_sweep_options(conc_sweep, concs=None, parallel=None)
     _add_verbose_option(conc_sweep)
     hosted = commands.add_parser(HOSTED_COMMAND, help="Run under a host that injects the campaign spec and its inputs.")
     hosted_commands = hosted.add_subparsers(dest="hosted_command", required=True)
@@ -147,7 +144,7 @@ def _add_workload_options(run: argparse.ArgumentParser) -> None:
 
     run.add_argument("--model", help="Model path, or an id found under HL_MODEL_BASE or in the Hugging Face cache.")
     run.add_argument("--framework", help="Inference framework, e.g. vllm or sglang.")
-    run.add_argument("--gpu-type", type=str.lower, choices=SESSION_GPU_TYPES, help=_GPU_TYPE_HELP)
+    run.add_argument("--gpu-type", type=str.lower, help="The label results are filed under, e.g. mi355x, in any case.")
     run.add_argument("--workload", choices=[kind.value for kind in WorkloadKind], help="Workload kind.")
     run.add_argument("--tp", type=int, help="Tensor-parallel size; must fit the machine's cards.")
     run.add_argument(
@@ -252,24 +249,12 @@ def _add_concurrency_options(run: argparse.ArgumentParser) -> None:
         help="Dev sandboxes lent to the specialists at once, from the cards tests are measured on; 0 = none.",
     )
     run.add_argument(
-        "--make-before-break",
-        action=argparse.BooleanOptionalAction,
-        default=True,
-        help="Hosted: keep a finished test's sandbox until the next one runs, where 3+ tests fit (one fewer runs).",
-    )
-    run.add_argument(
         "--enable-conc-sweep",
         action=argparse.BooleanOptionalAction,
         default=True,
         help="After CLOSE, sweep the root and the commit FINAL chose over the base's InferenceX recipe concurrencies.",
     )
-    run.add_argument(
-        "--conc-sweep-concs",
-        type=_concurrencies,
-        default=(),
-        metavar="C1,C2,...",
-        help="The conc sweep's concurrencies for a base no InferenceX recipe gave; ignored for one that did.",
-    )
+    _add_conc_sweep_options(run, concs=(), parallel=DEFAULT_CONC_SWEEP_PARALLEL)
     run.add_argument(
         "--measurement",
         choices=(LOCAL_MEASUREMENT, HOSTED_MEASUREMENT),
@@ -661,7 +646,7 @@ def settings_from(
         raise ValueError(f"the following arguments are required: {', '.join(missing)}")
     sizes = tuple(name for name in ("tp", "ep", "conc") if getattr(args, name) is not None)
     errors = _shape_errors(args) + _agentx_only_errors(args) + _positive(args, sizes)
-    errors += _limit_errors(args) + _board_errors(args)
+    errors += _limit_errors(args)
     if errors:
         raise ValueError("; ".join(errors))
     parallel = _parallel_tests(args, tests_that_fit)
@@ -694,7 +679,6 @@ def settings_from(
         reference_script=_reference_script(args.reference_script, args.framework),
         dev_leases=args.dev_leases,
         playbook=PlaybookMode(args.playbook),
-        make_before_break=args.make_before_break,
         agent_directions=_agent_directions(args.agent_directions, agents),
         agent_pack=_agent_pack(args.agent_pack, agents),
         agent_launch=_agent_launch(args.agent_launch, agents, args.reference_script),
@@ -708,15 +692,38 @@ def settings_from(
         agentx_early_stop=session_early_stop(os.environ),
         conc_sweep=args.enable_conc_sweep,
         conc_sweep_concs=args.conc_sweep_concs,
+        conc_sweep_parallel=args.conc_sweep_parallel,
     )
 
 
-def _concurrencies(value: str) -> tuple[int, ...]:
-    """``C1,C2,...`` as the distinct concurrencies it names, ascending; each must be positive."""
-    concs = tuple(sorted({int(item) for item in value.split(",")}))
-    if concs[0] < 1:
-        raise argparse.ArgumentTypeError(f"concurrencies must be positive, got {value}")
-    return concs
+def _add_conc_sweep_options(
+    parser: argparse.ArgumentParser, *, concs: tuple[int, ...] | None, parallel: int | None
+) -> None:
+    """The sweep's points and how many of its tests run at once, defaulting to ``concs`` and ``parallel``; ``None``
+    keeps what the session ran with."""
+    parser.add_argument(
+        "--conc-sweep-concs",
+        type=parse_concurrencies,
+        default=concs,
+        metavar="C1,C2,...",
+        help="The conc sweep's concurrencies, in place of those the base's InferenceX recipe publishes; needed for a"
+        " base no recipe gave. The session's CONC is always among them.",
+    )
+    parser.add_argument(
+        "--conc-sweep-parallel",
+        type=_positive_int,
+        default=parallel,
+        metavar="N",
+        help=f"The conc sweep's tests running at once, within --max-parallel-tests; {DEFAULT_CONC_SWEEP_PARALLEL} runs"
+        " the baseline and the optimized point of a concurrency side by side, 1 runs one test at a time.",
+    )
+
+
+def _positive_int(value: str) -> int:
+    number = int(value)
+    if number < 1:
+        raise argparse.ArgumentTypeError(f"expected a positive integer, got {value}")
+    return number
 
 
 def _limit_errors(args: argparse.Namespace) -> list[str]:
@@ -735,14 +742,6 @@ def _limit_errors(args: argparse.Namespace) -> list[str]:
         *_limit_error("--dev-leases", args.dev_leases, args.dev_leases >= 0, "0 (none) or a positive number"),
         *_boot_budget_errors(args.boot_budget_sec),
     ]
-
-
-def _board_errors(args: argparse.Namespace) -> list[str]:
-    """What is wrong with the session's board: one of :data:`NATIVE_SERVER_GPU_TYPES` under a framework that builds no
-    server from a checkout."""
-    if args.gpu_type not in NATIVE_SERVER_GPU_TYPES or native_component(args.framework) is not None:
-        return []
-    return [f"--gpu-type {args.gpu_type} is taken only with --framework llamacpp"]
 
 
 def _boot_budget_errors(budget: int | None) -> list[str]:
@@ -791,7 +790,6 @@ __all__ = [
     "HOSTED_MEASUREMENT",
     "PROG",
     "SEQUENCE_LENGTHS",
-    "SESSION_GPU_TYPES",
     "build_parser",
     "refuse_options_beside_resume",
     "settings_from",

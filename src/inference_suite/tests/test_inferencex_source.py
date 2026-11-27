@@ -24,13 +24,13 @@ from pathlib import Path
 import pytest
 import yaml
 
-from hyperloom_common.gpu_identity import AMD_GPU_BOARDS
 from inference_suite.contracts import LaunchQuery, SourceKind, Workload
 from inference_suite.pins import INFERENCEX_CLIENT_COMMIT, INFERENCEX_REPO_URL
 from inference_suite.recipe import inferencex
 from inference_suite.recipe.inferencex import (
     MASTER,
     PROJECT,
+    RUNNERS,
     agentx_trace,
     InferencexPoint,
     inferencex_launches,
@@ -46,7 +46,6 @@ from inference_suite.recipe.model import (
     RecipeSourceError,
     SourceLaunch,
     SourceMiss,
-    boards_interchangeable,
 )
 
 _FIXTURES = Path(__file__).parent / "fixtures" / "inferencex"
@@ -81,11 +80,13 @@ def _agentx(model: str, *, concurrencies, framework: str = "sglang", board: str 
 
 
 def every_point(bundle: RepoBundle) -> tuple[InferencexPoint, ...]:
-    """Every point of ``bundle``, as the queries for each model, framework and board its master config names see them."""
+    """Every point of ``bundle``, as the queries for each model and framework its master config names see them on each
+    board its runner config labels."""
     master = yaml.safe_load(bundle.text(MASTER))
+    boards = [label for label in yaml.safe_load(bundle.text(RUNNERS))["labels"] if ":" not in label]
     served: dict[str, InferencexPoint] = {}
     for model, framework in sorted({(entry["model"], entry["framework"]) for entry in master.values()}):
-        for board in AMD_GPU_BOARDS:
+        for board in boards:
             query = _fixed(model, framework=framework, board=board)
             served.update((point.key, point) for point in served_points(query, bundle).points)
     return tuple(served.values())
@@ -200,6 +201,13 @@ def test_dsr1_fixed_launch_is_the_selected_variant_without_runner_owned_flags():
     assert tp8.warnings == ()
 
 
+def test_a_bare_repo_name_is_read_as_given_by_the_single_node_source():
+    bundle = _main().bundle
+
+    assert served_points(_fixed("DeepSeek-R1-0528", tp=8), bundle).points == ()
+    assert agentx_trace(bundle, ("DeepSeek-R1-0528",)) == _FULL_CORPUS
+
+
 def test_dsr1_c64_is_served_by_both_tp_arms():
     launches = _launches(_fixed())
 
@@ -298,16 +306,16 @@ def test_pr4593_snapshot_serves_glm53_agentx_c8_with_golden_3_48():
     assert c8.env["SGLANG_SIMULATE_ACC_LEN"] == "3.48"
 
 
-def test_a_cluster_runner_stands_for_its_board_and_like_boards_share_launches():
+def test_a_cluster_runner_stands_for_its_board_and_a_point_serves_that_board_alone():
     points = {point.runner: point.board for point in every_point(_main().bundle)}
     assert points["cluster:mi355x-amds"] == "mi355x"
     assert points["cluster:mi325x-amd"] == "mi325x"
     assert points["cluster:mi300x-amd"] == "mi300x"
 
-    [mi350x] = _launches(_fixed(board="mi350x", tp=8))
-    assert mi350x.warnings == ("InferenceX tuned dsr1-fp8-mi355x-sglang on mi355x, not mi350x",)
-    assert boards_interchangeable("mi350x", "mi355x")
-    assert not boards_interchangeable("mi325x", "mi300x")
+    [mi355x] = _launches(_fixed(board="mi355x", tp=8))
+    assert mi355x.warnings == ()
+    twin = inferencex_launches(_fixed(board="mi350x", tp=8), _main())
+    assert twin == SourceMiss(SourceKind.INFERENCEX, f"no entry serves {_DSR1} with sglang on a mi350x")
 
 
 def test_a_snapshot_without_the_point_selection_is_refused():
