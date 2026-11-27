@@ -27,7 +27,9 @@ import asyncio
 from pathlib import Path
 
 import pytest
+from click.testing import CliRunner
 
+import kernelforge.workflows.forge_loop.bootstrap.run as forge_run
 import kernelforge.workflows.forge_loop.gate.insession_gate as gate_module
 import kernelforge.workflows.forge_loop.roles.agent as agent_module
 from kernelforge.agent_backends.base import (
@@ -36,8 +38,9 @@ from kernelforge.agent_backends.base import (
     AgentRunSpec,
 )
 from kernelforge.agent_backends.registry import AgentProvider, register_agent_provider
+from kernelforge.cli import main
 from kernelforge.workflows.forge_loop.bootstrap import lanes as cli_lanes
-from kernelforge.workflows.forge_loop.bootstrap.errors import ForgeLoopError
+from kernelforge.workflows.forge_loop.bootstrap.errors import ForgeLoopError, ForgeLoopUsageError
 from kernelforge.config import Config
 from kernelforge.utils.device_queue import RUNNER_CONFIG_NAME, RUNNER_NAME
 from kernelforge.workflows.forge_loop.iteration.fanout import LaneAssignment, LaneSeat
@@ -534,21 +537,60 @@ def test_a_lane_refusal_names_every_missing_guarantee(capsys):
 
 
 @pytest.mark.parametrize("variables", [("GIT_DIR", "GIT_WORK_TREE"), ("GIT_DIR",)], ids=["both", "the repository"])
-def test_lanes_side_by_side_are_refused_at_startup_on_a_workspace_that_cannot_be_copied(monkeypatch, variables):
-    """Before the baseline and the Analysis are paid for, not at the first round that would copy the workspace."""
+def test_lanes_side_by_side_are_refused_on_a_workspace_that_cannot_be_copied(monkeypatch, variables):
+    """The lane count is what cannot be used there, so the refusal is a usage error naming the count that can."""
     for name in ("GIT_DIR", "GIT_WORK_TREE"):
         monkeypatch.delenv(name, raising=False)
     cli_lanes._require_copyable_workspace(3)
     for name in variables:
         monkeypatch.setenv(name, "/elsewhere")
 
-    with pytest.raises(ForgeLoopError) as refusal:
+    with pytest.raises(ForgeLoopUsageError) as refusal:
         cli_lanes._require_copyable_workspace(2)
 
     assert " and ".join(variables) in str(refusal.value)
     assert "Re-run with --lanes 1" in str(refusal.value)
     # One lane works in the workspace itself, which is how such a workspace is run.
     cli_lanes._require_copyable_workspace(1)
+
+
+def test_the_refusal_comes_before_anything_is_set_up(tmp_path, monkeypatch):
+    """Refused when the run is asked for: no workspace lock, no baseline, no Agent profile started.
+
+    Raised while a profile's services were being built, it was reported as that profile being unavailable, after
+    every other profile had been probed.
+    """
+    monkeypatch.setenv("GIT_DIR", str(tmp_path / "shadow.git"))
+    monkeypatch.setenv("GIT_WORK_TREE", str(tmp_path))
+    started: list[str] = []
+    monkeypatch.setattr(forge_run, "_run_campaign", lambda _inputs: started.append("campaign"))
+
+    result = CliRunner().invoke(
+        main,
+        ["forge-loop", "--kernel", "k.py", "--driver", "d.py", "--workspace", str(tmp_path), "--lanes", "3"],
+    )
+
+    assert result.exit_code == 2
+    assert "selected through GIT_DIR and GIT_WORK_TREE" in result.output
+    assert "Re-run with --lanes 1" in result.output
+    assert "Agent" not in result.output
+    assert started == []
+    assert not (tmp_path / "forge_experiments").exists()
+
+
+def test_one_lane_is_not_refused_on_such_a_workspace(tmp_path, monkeypatch):
+    """One lane works in the workspace itself, so the same command with ``--lanes 1`` reaches the campaign."""
+    monkeypatch.setenv("GIT_DIR", str(tmp_path / "shadow.git"))
+    monkeypatch.setenv("GIT_WORK_TREE", str(tmp_path))
+    started: list[str] = []
+    monkeypatch.setattr(forge_run, "_run_campaign", lambda _inputs: started.append("campaign") or {})
+
+    CliRunner().invoke(
+        main,
+        ["forge-loop", "--kernel", "k.py", "--driver", "d.py", "--workspace", str(tmp_path), "--lanes", "1"],
+    )
+
+    assert started == ["campaign"]
 
 
 def test_lanes_are_refused_rather_than_quietly_reduced():

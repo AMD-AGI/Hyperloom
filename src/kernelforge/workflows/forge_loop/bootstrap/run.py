@@ -16,7 +16,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Sequence
 
 from kernelforge.workflows.forge_loop.bootstrap.errors import ForgeLoopError, ForgeLoopUsageError, InvalidOptionValue
-from kernelforge.workflows.forge_loop.bootstrap.lanes import LaneBinding
+from kernelforge.workflows.forge_loop.bootstrap.lanes import LaneBinding, _require_copyable_workspace
 from kernelforge.workflows.forge_loop.bootstrap.pr_references import _collect_pr_kb_context, _write_pr_provenance
 from kernelforge.workflows.forge_loop.bootstrap.preparation import (
     _AssemblyPreparation,
@@ -148,8 +148,9 @@ def _profile_timeout_override(env_timeout, profile_timeout_sec: int) -> int:
     return override
 
 
-def _reject_incompatible_loop_options(*, producer: str) -> None:
+def _reject_incompatible_loop_options(*, producer: str, lanes: int) -> None:
     """Refuse an option combination the loop cannot honour, before anything is set up."""
+    _require_copyable_workspace(lanes)
     if producer:
         from kernelforge.knowledge.kb_store.identity.kernel_recipe import KERNEL_RECIPE_PRODUCERS
 
@@ -471,7 +472,7 @@ def run_forge_loop(request: ForgeLoopRequest, *, publish_result: Callable[[dict]
     except ValueError as exc:
         raise ForgeLoopError(str(exc)) from exc
 
-    _reject_incompatible_loop_options(producer=request.knowledge.producer)
+    _reject_incompatible_loop_options(producer=request.knowledge.producer, lanes=request.loop_shape.lanes)
 
     from kernelforge.workflows.forge_loop.campaign.run_state import WorkspaceLock, WorkspaceLockError
 
