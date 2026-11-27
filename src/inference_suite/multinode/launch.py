@@ -67,6 +67,11 @@ class LaunchError(RuntimeError):
     """A host refused the launch, or the cluster did not come up."""
 
 
+class OverrideRefused(LaunchError, ValueError):
+    """An override the launch refuses as input, before a host runs it: the launcher owns the flag, it names no role, or
+    the engine does not list it."""
+
+
 def http_ok(url: str) -> bool:
     """Whether ``url`` answers 200, bypassing any proxy."""
     try:
@@ -291,7 +296,7 @@ def _refuse_untaken_overrides(launch: PdLaunch, overrides: Mapping[str, Sequence
     """Refuse engine overrides that :func:`fit_to_engine` would drop from ``launch`` on an engine listing ``flags``.
 
     Raises:
-        LaunchError: an override sets a flag the role's engine does not take: any unlisted flag of a non-operator
+        OverrideRefused: an override sets a flag the role's engine does not take: any unlisted flag of a non-operator
             launch, or a prefill split flag the engine lists only in its decode spelling.
     """
     if not flags:
@@ -304,7 +309,7 @@ def _refuse_untaken_overrides(launch: PdLaunch, overrides: Mapping[str, Sequence
         if name and not _engine_takes(role, name, flags) and (not operator or name in SPLIT_ROLE_FLAGS)
     ]
     if untaken:
-        raise LaunchError(f"the engine does not list the round's flags {untaken}")
+        raise OverrideRefused(f"the engine does not list the round's flags {untaken}")
 
 
 def replace_flags(args: Sequence[str], overrides: Sequence[str]) -> tuple[str, ...]:
@@ -325,17 +330,17 @@ def with_overrides(launch: PdLaunch, overrides: Mapping[str, Sequence[str]]) -> 
     ``router``.
 
     Raises:
-        LaunchError: an override sets a flag the launcher owns, or names no role of the launch.
+        OverrideRefused: an override sets a flag the launcher owns, or names no role of the launch.
     """
     unknown = set(overrides) - {*(role.value for role in launch.served_roles), ROUTER}
     if unknown:
-        raise LaunchError(f"overrides name no role: {sorted(unknown)}")
+        raise OverrideRefused(f"overrides name no role: {sorted(unknown)}")
     roles = {}
     for role in launch.served_roles:
         given = list(overrides.get(role.value, ()))
         owned = render_role(launch.framework, given, {}).stripped
         if owned:
-            raise LaunchError(f"the launcher sets {list(owned)}; they cannot be overridden on {role.value}")
+            raise OverrideRefused(f"the launcher sets {list(owned)}; they cannot be overridden on {role.value}")
         roles[role] = replace(launch.role(role), args=replace_flags(launch.role(role).args, given))
     frontend = replace(launch.frontend, args=replace_flags(launch.frontend.args, list(overrides.get(ROUTER, ()))))
     return replace(launch.with_roles(roles), frontend=frontend)
@@ -457,6 +462,7 @@ __all__ = [
     "Cluster",
     "LaunchError",
     "LaunchOptions",
+    "OverrideRefused",
     "check_env",
     "engines_gone",
     "exportable_env_key",

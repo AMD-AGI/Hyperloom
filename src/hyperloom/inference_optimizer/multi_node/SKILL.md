@@ -39,8 +39,8 @@ service URL every benchmark round measures.
 
 ## Backends
 
-Select via `optimize --mn-backend {infera|rayjob}` (default `rayjob`) or
-`$INFERENCE_OPTIMIZER_MN_BACKEND`. Only active when `--nodes >= 2`; single-node
+Select via `optimize --mn-backend {infera|rayjob|atomesh|sglangrouter}` (default `rayjob`) or
+`$INFERENCE_OPTIMIZER_MN_BACKEND`. `atomesh` and `sglangrouter` take the node list in `HYPERLOOM_MN_NODE_LIST`. Only active when `--nodes >= 2`; single-node
 runs are unaffected. `restart-server` / `kill-inference` auto-route by
 `state.backend`.
 
