@@ -429,13 +429,12 @@ def _close_stdin(session: _Session) -> None:
 
 @dataclass(frozen=True)
 class RunnerHost:
-    """The clocks, the process launcher and the kernel file trees a runner reads; every field is a test seam."""
+    """The clocks, the process launcher and the cgroup tree a runner reads; every field is a test seam."""
 
     monotonic: Callable[[], float] = time.monotonic
     wall: Callable[[], float] = time.time
     popen: Callable[..., Any] = subprocess.Popen
     cgroup_root: Path = Path("/sys/fs/cgroup")
-    proc_root: Path = Path("/proc")
     sleep: Callable[[float], Awaitable[None]] = asyncio.sleep
 
 
@@ -499,7 +498,6 @@ class LocalAgentRunner:
         self._wall = host.wall
         self._popen = host.popen
         self._cgroup_root = host.cgroup_root
-        self._proc_root = host.proc_root
         self._version_probe = version_probe
         self._dispatcher = SpecialistSubprocessDispatcher(
             SpecialistSubprocessConfig(
@@ -583,7 +581,7 @@ class LocalAgentRunner:
             backend=backend,
             proc=proc,
             env_tokens=spawned.tokens,
-            sampler=ProcessTreeSampler(proc.pid, proc_root=self._proc_root),
+            sampler=ProcessTreeSampler(proc.pid),
             started_mono=started_mono,
             started_unix=started_unix,
             deadline=Deadline.after(spec.deadline_unix - started_unix, now=started_mono),

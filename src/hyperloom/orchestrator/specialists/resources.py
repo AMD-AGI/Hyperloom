@@ -21,43 +21,23 @@ from dataclasses import dataclass
 from pathlib import Path
 from stat import S_ISDIR
 
-from hyperloom_common.proctree import descendants
+from hyperloom_common.proctree import cpu_ticks, descendants, rss_bytes
 
 __all__ = [
     "ContainerSnapshot",
     "ProcessTreeSampler",
-    "TreeSample",
     "dir_usage_bytes",
     "read_container_cgroup",
 ]
 
 UTF8 = "utf-8"
-DECODE_ERRORS = "replace"
-
-
-@dataclass(frozen=True)
-class TreeSample:
-    """One reading of a process tree."""
-
-    rss_bytes: int
-    """Resident memory summed over the live processes of the tree."""
-    cpu_seconds: float
-    """The tree's CPU seconds so far: the largest sum yet read of its live processes' and their reaped children's."""
-    live_pids: int
-
-
-def _clock_ticks() -> int:
-    try:
-        return int(os.sysconf("SC_CLK_TCK"))
-    except (ValueError, OSError, AttributeError):
-        return 100
 
 
 class ProcessTreeSampler:
     """Track the memory peak and CPU time of one process tree.
 
     The tree is the root and its descendants as :func:`hyperloom_common.proctree.descendants`
-    finds them in ``/proc``; ``proc_root`` is where each member's readings are read.
+    finds them in ``/proc``.
 
     A process that exits stops counting towards memory the moment it is gone. Its CPU
     seconds reach the total through its parent: the kernel adds a child's user and
@@ -68,10 +48,9 @@ class ProcessTreeSampler:
     a process leaves the tree without a member of it waiting for it.
     """
 
-    def __init__(self, root_pid: int, *, proc_root: Path = Path("/proc"), clock_ticks: int | None = None) -> None:
+    def __init__(self, root_pid: int, *, clock_ticks: int | None = None) -> None:
         self._root = int(root_pid)
-        self._proc = Path(proc_root)
-        self._ticks = clock_ticks or _clock_ticks()
+        self._ticks = clock_ticks or os.sysconf("SC_CLK_TCK")
         self._cpu_seconds = 0.0
         self._peak_rss = 0
 
@@ -83,42 +62,21 @@ class ProcessTreeSampler:
     def cpu_seconds(self) -> float:
         return self._cpu_seconds
 
-    def sample(self) -> TreeSample:
-        """Read the tree once and fold the reading into the peak and the CPU total."""
-        rss = 0
-        cpu = 0.0
-        live = 0
-        for pid, start_time in self._tree():
-            reading = self._read_process(pid, start_time)
-            if reading is None:
-                continue
-            live += 1
-            rss += reading[0]
-            cpu += reading[1]
-        self._peak_rss = max(self._peak_rss, rss)
-        self._cpu_seconds = max(self._cpu_seconds, cpu)
-        return TreeSample(rss_bytes=rss, cpu_seconds=self.cpu_seconds, live_pids=live)
+    def sample(self) -> None:
+        """Read the tree once and fold the reading into the peak and the CPU total.
 
-    def _read_process(self, pid: int, start_time: int | None) -> tuple[int, float] | None:
-        """Read one process; ``None`` when it is gone or ``pid`` now names a process started at another time."""
-        try:
-            status = (self._proc / str(pid) / "status").read_text(encoding=UTF8, errors=DECODE_ERRORS)
-            stat = (self._proc / str(pid) / "stat").read_text(encoding=UTF8, errors=DECODE_ERRORS)
-            fields = stat.rsplit(")", 1)[-1].split()
-            if start_time is not None and int(fields[19]) != start_time:
-                return None
-            utime, stime, cutime, cstime = (int(value) for value in fields[11:15])
-            cpu = (utime + stime + cutime + cstime) / self._ticks
-        except (OSError, ValueError, IndexError):
-            return None
+        A member that is gone, or whose pid now names a process started at another time, is skipped.
+        """
         rss = 0
-        for line in status.splitlines():
-            if line.startswith("VmRSS:"):
-                parts = line.split()
-                if len(parts) >= 2 and parts[1].isdigit():
-                    rss = int(parts[1]) * 1024
-                break
-        return rss, cpu
+        ticks = 0
+        for pid, start_time in self._tree():
+            own = cpu_ticks(pid, start_time)
+            if own is None:
+                continue
+            ticks += own
+            rss += rss_bytes(pid) or 0
+        self._peak_rss = max(self._peak_rss, rss)
+        self._cpu_seconds = max(self._cpu_seconds, ticks / self._ticks)
 
     def _tree(self) -> list[tuple[int, int | None]]:
         """The root, then its descendants with every parent before its children, each with its start time.
