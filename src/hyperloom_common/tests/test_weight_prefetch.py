@@ -23,7 +23,6 @@ from hyperloom_common.weight_prefetch import (
     Memory,
     WeightPrefetch,
     checkpoint_files,
-    prefetch_order,
     start_weight_prefetch,
 )
 
@@ -128,13 +127,23 @@ def _model(tmp_path: Path, sizes: dict[str, int], index: bool = True) -> Path:
 @pytest.fixture
 def machine(monkeypatch):
     """Make ``host`` the machine every :class:`WeightPrefetch` built after it reads, as ``start_weight_prefetch`` builds
-    it, with one stream and no refill unless the test says otherwise."""
+    it, with one stream and no refill unless the test says otherwise, a short pause after a drop, and a drop seen from
+    1 GiB cached (the files of most tests are small)."""
 
-    def install(host, *, streams: int = 1, max_refills: int = 0, poll_interval_sec: float = 0.01) -> None:
+    def install(
+        host,
+        *,
+        streams: int = 1,
+        max_refills: int = 0,
+        poll_interval_sec: float = 0.01,
+        min_collapse: int = GIB,
+    ) -> None:
         monkeypatch.setattr(wp, "LinuxHost", lambda: host)
         monkeypatch.setattr(wp, "_STREAMS", streams)
         monkeypatch.setattr(wp, "_MAX_REFILLS", max_refills)
         monkeypatch.setattr(wp, "_POLL_INTERVAL_SEC", poll_interval_sec)
+        monkeypatch.setattr(wp, "_COLLAPSE_PAUSE_SEC", 0.01)
+        monkeypatch.setattr(wp, "_MIN_COLLAPSE", min_collapse)
 
     return install
 
@@ -194,27 +203,13 @@ def test_files_of_one_size_are_read_in_the_loaders_order_while_they_fit_the_head
     assert prefetch.outcome.read_bytes == 120 * GIB and prefetch.outcome.passes == 1
 
 
-def test_the_largest_files_come_first_and_files_of_one_size_keep_the_loaders_order() -> None:
-    sized = [(Path(f"model-{n}.safetensors"), size) for n, size in enumerate([5, 7, 101, 5, 101, 2], start=1)]
-    assert [path.name for path, _ in prefetch_order(sized)] == [
-        "model-3.safetensors",
-        "model-5.safetensors",
-        "model-2.safetensors",
-        "model-1.safetensors",
-        "model-4.safetensors",
-        "model-6.safetensors",
-    ]
-
-
-def test_a_large_file_last_in_the_loaders_order_is_read_first_and_one_that_does_not_fit_is_left_out(
-    tmp_path, run
-) -> None:
+def test_a_file_that_does_not_fit_is_left_out_and_a_later_one_that_fits_is_read(tmp_path, run) -> None:
     sizes = {"model-1.safetensors": 30 * GIB, "model-2.safetensors": 200 * GIB, "model-3.safetensors": 120 * GIB}
-    host = FakeHost(sizes)  # 170 GiB of headroom: the 200 GiB file never fits, the 120 GiB one goes first
+    host = FakeHost(sizes)  # 170 GiB of headroom: the 200 GiB file never fits, the 120 GiB one after it does
     prefetch = run(_model(tmp_path, sizes), host)
 
-    assert host.read_bytes() == {"model-3.safetensors": 120 * GIB, "model-1.safetensors": 30 * GIB}
-    assert [item["name"] for item in prefetch.outcome.chosen] == ["model-3.safetensors", "model-1.safetensors"]
+    assert host.read_bytes() == {"model-1.safetensors": 30 * GIB, "model-3.safetensors": 120 * GIB}
+    assert [item["name"] for item in prefetch.outcome.chosen] == ["model-1.safetensors", "model-3.safetensors"]
 
 
 def test_the_headroom_at_the_start_bounds_the_reads_even_when_use_does_not_grow(tmp_path, run) -> None:
@@ -283,35 +278,41 @@ def test_it_stops_when_the_server_takes_the_headroom_and_does_not_read_again(tmp
     assert "headroom ran out" in caplog.text
 
 
-def test_what_the_loader_drops_from_the_cache_is_read_again_a_bounded_number_of_times(tmp_path, run) -> None:
-    sizes = _names(2, 4 * GIB)
+def test_after_each_drop_the_whole_checkpoint_is_read_again_a_bounded_number_of_times(tmp_path, run) -> None:
+    sizes = _names(4)  # 240 GiB against 170 GiB of headroom: the first pass reads two files, each refill all four
     host = FakeHost(sizes)
     original = host.read
-    last = (list(sizes)[-1], (3 * GIB, 4 * GIB))
 
     def read(path, span, stop):
         got = original(path, span, stop)
-        if (path.name, span) == last:
-            host.drop_cache()  # the loader drops the checkpoint's page cache right after each pass
+        with host.lock:
+            whole = sum(1 for spans in host.uncached_spans.values() if not spans)
+        if whole == (2 if len(host.reads) == 120 else 4):
+            threading.Timer(0.1, host.drop_cache).start()  # the loader drops the page cache a moment after each pass
         return got
 
     host.read = read  # type: ignore[method-assign]
     prefetch = run(_model(tmp_path, sizes), host, max_refills=2, watch_sec=10.0)
 
+    names = list(sizes)
     assert prefetch.outcome.passes == 3, "it ends on its own once the refills are spent"
-    assert [name for name, _ in host.reads] == ([list(sizes)[0]] * 4 + [list(sizes)[1]] * 4) * 3
+    assert [name for name, _ in host.reads] == [n for n in names[:2] for _ in range(60)] + [
+        n for n in names for _ in range(60)
+    ] * 2, "a refill reads every file in the loader's order, past the headroom the first pass kept to"
 
 
-def test_a_drop_seen_while_a_pass_reads_ends_it_and_reads_the_largest_file_again_first(tmp_path, run) -> None:
-    sizes = {"model-1.safetensors": 2 * GIB, "model-2.safetensors": 8 * GIB}
+def test_a_drop_seen_while_a_pass_reads_ends_it_and_reads_the_checkpoint_again_from_its_first_file(
+    tmp_path, run
+) -> None:
+    sizes = {"model-1.safetensors": 8 * GIB, "model-2.safetensors": 2 * GIB}
     host = FakeHost(sizes)
     original = host.read
     interrupted = threading.Event()
 
     def read(path, span, stop):
-        if path.name == "model-1.safetensors" and not interrupted.is_set():
-            stop.wait(0.2)  # long enough for a look at the cache to see the large file whole
-            host.drop_cache()  # the loader drops the cache while the small file is read
+        if path.name == "model-2.safetensors" and not interrupted.is_set():
+            stop.wait(0.2)  # long enough for a look at the cache to see the first file whole
+            host.drop_cache()  # the loader drops the cache while the second file is read
             if stop.wait(10.0):
                 interrupted.set()
             return 0
@@ -323,73 +324,145 @@ def test_a_drop_seen_while_a_pass_reads_ends_it_and_reads_the_largest_file_again
     assert interrupted.is_set(), "the drop ended the read in progress"
     assert prefetch.outcome.passes == 2
     reads = [name for name, _ in host.reads]
-    assert reads == ["model-2.safetensors"] * 8 + ["model-2.safetensors"] * 8 + ["model-1.safetensors"] * 2
+    assert reads == ["model-1.safetensors"] * 8 + ["model-1.safetensors"] * 8 + ["model-2.safetensors"] * 2
     assert host.cached("model-1.safetensors") and host.cached("model-2.safetensors")
 
 
-def test_a_small_or_partial_loss_from_the_cache_is_not_a_drop(tmp_path, run) -> None:
-    sizes = _names(2, 4 * GIB)
+def test_reclaim_of_the_oldest_pages_mid_pass_neither_ends_the_pass_nor_is_read_again(tmp_path, run) -> None:
+    """As measured on DeepSeek V4 (two servers on one host): 111 GiB read, then half of the first file, 47.3 GiB, gone
+    between two looks. That is the kernel reclaiming the oldest pages, not a loader's drop."""
+    sizes = _names(3, 50 * GIB)
     host = FakeHost(sizes)
     names = list(sizes)
     original = host.read
+    reclaimed = threading.Event()
 
     def read(path, span, stop):
         got = original(path, span, stop)
-        if path.name == names[1] and span[1] == 4 * GIB:
-            with host.lock:  # a third of one file reclaimed: under half of it, so not a drop
-                host.uncached_spans[names[0]] = [(0, GIB + GIB // 3)]
+        if path.name == names[2] and span[0] == 0:
+            with host.lock:  # the first half of the first file, the oldest pages, reclaimed at once
+                host.uncached_spans[names[0]] = [(0, 25 * GIB)]
+                host.used -= 25 * GIB
+            reclaimed.set()
+            stop.wait(0.2)  # several looks at the cache see the loss while the pass reads on
         return got
 
     host.read = read  # type: ignore[method-assign]
-    prefetch = run(_model(tmp_path, sizes), host, max_refills=3)
-    assert prefetch.outcome.passes == 1
+    prefetch = run(_model(tmp_path, sizes), host, max_refills=3, watch_sec=0.5)
+
+    assert reclaimed.is_set()
+    assert prefetch.outcome.passes == 1, "neither ended early nor refilled"
+    assert host.read_bytes() == dict.fromkeys(names, 50 * GIB)
+    assert not host.cached(names[0]), "what reclaim took is left to the loader"
 
 
-def test_after_the_servers_anonymous_memory_the_engram_tables_of_deepseek_v4_still_fit(tmp_path, run) -> None:
-    """DeepSeek V4.1 Flash on a 448 GiB sandbox: 46 shards of 286.1 GiB, then two engram embedding files of 101.54 GB
-    each. The loader drops the cache when it allocates ~200 GiB of anonymous memory for its host tables; the headroom
-    left, 448 - 200 - 44.8 = 203.2 GiB, holds both engram files (189.1 GiB), which the refill reads first."""
+def _deepseek_v4(used: int) -> FakeHost:
+    """DeepSeek V4.1 Flash on a 448 GiB sandbox: 46 shards of 286.1 GiB, then two engram files of 101.54 GB each."""
     engram = 101_540_000_000
     shards = {f"model-{n:05d}-of-00048.safetensors": int(286.1 * GIB) // 46 for n in range(1, 47)}
-    sizes = {**shards, "model-00047-of-00048.safetensors": engram, "model-00048-of-00048.safetensors": engram}
-    host = FakeHost(sizes, used=4 * GIB)
+    host = FakeHost(
+        {**shards, "model-00047-of-00048.safetensors": engram, "model-00048-of-00048.safetensors": engram}, used=used
+    )
     host.limit = 448 * GIB
-    anon = 200 * GIB
-    assert Memory(host.limit, anon).headroom() > 2 * engram > 189 * GIB
+    return host
+
+
+def test_deepseek_v4_reclaim_before_the_engram_drop_is_ignored_and_the_drop_rereads_everything_in_order(
+    tmp_path, run
+) -> None:
+    """The measured timeline of one DeepSeek V4 server: the first pass reads (in the loader's order here) while the
+    server allocates; reclaim takes ~50 GiB of the oldest pages ~90 s in; ~180 s in, the engram host table drops the
+    cache of all 48 files and allocates ~200 GiB of huge pages. The reclaim is no drop; the drop ends the pass, and
+    the pass after it reads every file in the loader's order, the engram files last, past the headroom."""
+    host = _deepseek_v4(used=GIB)
+    names = list(host.sizes)
     original = host.read
-    dropped, seen = threading.Event(), threading.Event()
-    started = iter(range(10**6))
-    refill_order: list[str] = []
+    reclaimed, dropped, seen = threading.Event(), threading.Event(), threading.Event()
+    lock = threading.Lock()
+    count = iter(range(10**6))
+    after_drop: list[str] = []
 
     def read(path, span, stop):
         if stop.is_set():
             return 0  # a read the drop interrupted
         if seen.is_set():
-            refill_order.append(path.name)
+            after_drop.append(path.name)
             return original(path, span, stop)
-        n = next(started)
-        if n < 250:  # the first pass is well on its way, the engram files read whole
+        with lock:
+            n = next(count)
+        if n == 100:
+            with host.lock:  # the oldest 50 GiB reclaimed while the server allocates
+                for name in names[:8]:
+                    host.uncached_spans[name] = [(0, host.sizes[name])]
+                host.used += 30 * GIB
+            reclaimed.set()
+            stop.wait(0.2)
+        if n < 250:
             return original(path, span, stop)
         if n == 250:
-            stop.wait(0.2)  # a look at the cache sees them whole
-            host.drop_cache()  # the loader drops the cache and allocates its host tables
+            stop.wait(0.2)  # a look at the cache sees what is there
+            host.drop_cache()
             with host.lock:
-                host.used += anon
+                host.used += 200 * GIB
             dropped.set()
         if stop.wait(5.0):  # the first pass reads on, slowly, until the drop is seen
             seen.set()
         return 0
 
     host.read = read  # type: ignore[method-assign]
-    prefetch = run(_model(tmp_path, sizes), host, streams=8, max_refills=3, watch_sec=2.0)
+    prefetch = run(_model(tmp_path, host.sizes), host, streams=8, max_refills=2, watch_sec=3.0, min_collapse=16 * GIB)
 
-    engram_files = list(sizes)[-2:]
-    assert dropped.is_set() and prefetch.outcome.passes >= 2
-    assert all(host.cached(name) for name in engram_files), "both engram files are whole in the cache"
-    first_refill = refill_order[: 2 * 95]
-    assert set(first_refill) == set(engram_files), "the refill reads the engram files before any shard"
-    assert prefetch.outcome.out_of_room, "the shards fill what is left"
-    assert host.used <= host.limit - 44.8 * GIB + 8 * GIB, "never past the margin (less the pieces in flight)"
+    assert reclaimed.is_set() and dropped.is_set(), "the reclaim did not end the first pass"
+    assert [item["name"] for item in prefetch.outcome.chosen] == names[:47], "the loader's order, as far as it fits"
+    assert prefetch.outcome.passes == 2
+    assert list(dict.fromkeys(after_drop)) == names, "after the drop, every file in the loader's order"
+    assert all(host.cached(name) for name in names), "the engram files too, past the headroom"
+
+
+def test_only_a_collapse_of_the_cached_total_is_a_drop() -> None:
+    """The sampled total against the most of the last 10 s, replaying the measured DeepSeek V4 timelines."""
+    host = _deepseek_v4(used=GIB)
+    names = list(host.sizes)
+    items = [wp._Chosen(Path(name), size, True) for name, size in host.sizes.items()]
+    now = [0.0]
+    watch = wp._Watch(host, items, clock=lambda: now[0])
+
+    def look(seconds: float = 1.0) -> int:
+        now[0] += seconds
+        return watch.collapsed()
+
+    def cache(name: str, start: int = 0, end: int | None = None) -> None:
+        end = host.sizes[name] if end is None else end
+        host.uncached_spans[name] = _subtract(host.uncached_spans[name], (start, end))
+
+    for name in names[:30]:  # ~186 GiB read over a minute and a half
+        cache(name)
+        assert look(3.0) == 0
+    for name in names[:8]:  # reclaim takes the oldest ~50 GiB in one look: no drop
+        host.uncached_spans[name] = [(0, host.sizes[name])]
+    assert look() == 0
+    for _ in range(10):  # then a shard a second for ten seconds, 62 GiB of 136: no drop either
+        name = next(n for n in names if not host.uncached_spans[n])
+        host.uncached_spans[name] = [(0, host.sizes[name])]
+        assert look() == 0
+    for name in names[8:]:
+        cache(name)
+    assert look() == 0
+    cached = watch.cached()
+    host.drop_cache()  # the engram host table drops every file
+    assert look() == cached
+    assert look() == 0, "the same drop is not found twice"
+
+
+def test_a_small_cache_that_empties_is_not_a_drop() -> None:
+    sizes = _names(2, 4 * GIB)
+    host = FakeHost(sizes)
+    items = [wp._Chosen(Path(name), size, True) for name, size in sizes.items()]
+    host.uncached_spans = {name: [] for name in sizes}
+    watch = wp._Watch(host, items, clock=lambda: 0.0)
+    assert watch.collapsed() == 0
+    host.drop_cache()
+    assert watch.collapsed() == 0, "8 GiB is under the 16 GiB a drop is looked for in"
 
 
 def test_a_cache_that_stays_warm_is_not_read_again(tmp_path, machine) -> None:
