@@ -357,9 +357,12 @@ Globally, on every backend including the default `geak`:
 
 - **`kernel_opt` and `gemm_tuning` are no longer model-issued.** Orchestration
   can neither propose either action nor request `run_optimization` /
-  `run_gemm_tuning` of the kernel agent; both are refused as
-  `phase_incompatible`. The Coordinator dispatches each lane once at KERNEL
-  entry from a lane budget, the way the fusion lane already worked. `integrate` stays proposable, so draining the KEEP queue is still the
+  `run_gemm_tuning` of the kernel agent: a proposal of either action is refused
+  as `phase_incompatible`, a request for `run_gemm_tuning` as `request_kind`,
+  and `run_optimization` has no handler, so a request for it is answered with a
+  failed `unknown_kernel_kind` response. The Coordinator dispatches each lane
+  once at KERNEL entry from a lane budget, the way the fusion lane already
+  worked. `integrate` stays proposable, so draining the KEEP queue is still the
   model's job.
 
 On the `forge` KERNEL path only (`KERNEL_OPT_BACKEND_ORDER=forge`; the default
@@ -703,9 +706,14 @@ network file system run at tens of MB/s per rank. With this switch on, the
 process that boots a measured server also reads the checkpoint into the page
 cache with 8 sequential streams from the spawn until the server is ready
 (`hyperloom_common.weight_prefetch`): only a checkpoint on a network or FUSE
-file system, only as much as the memory headroom allows
-(`memory.max - memory.current` less a tenth of the limit, at least 16 GiB),
-and again for what the loader drops from the cache, at most three times. A
+file system, the largest files first (a loader faults a very large file in one
+stream per rank, and often reads it last), only as much as the memory headroom
+allows (`memory.max - memory.current` less a tenth of the limit, at least
+16 GiB, looked at again before each 1 GiB it reads). Until the server is ready
+it samples every second how much of each chosen file is still cached, and when
+files it had cached lost at least half of their pages (a loader that drops the
+checkpoint's page cache, such as SGLang's engram host table), it reads them
+again at once, largest first, at most eight times. A
 checkpoint the round's account neither owns nor may write is read once and not
 refilled: Linux does not tell such an account which of its pages are cached, so
 each file is read whole by its size within the same headroom, and what the

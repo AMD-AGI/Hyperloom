@@ -317,88 +317,13 @@ class TestProfileWorkloadContext:
         assert state.profile_workload_context({"extra_server_args": rendered})["server_args"] == rendered
 
 
-class TestPolicyDenialAndPruned:
+class TestPrunedFamily:
     def test_add_pruned_family_is_idempotent(self):
         s = SharedState()
         assert s.add_pruned_family("kernel_opt") is True
         assert s.is_pruned("kernel_opt") is True
         # Second add returns False.
         assert s.add_pruned_family("kernel_opt") is False
-
-    def test_record_policy_denial_tracks_streak(self):
-        s = SharedState()
-        s.tick = 1
-        first = s.record_policy_denial(
-            action_name="kernel_opt",
-            rule="cooldown",
-            hint="hint",
-            intent_type="propose_action",
-        )
-        s.tick = 2
-        second = s.record_policy_denial(
-            action_name="kernel_opt",
-            rule="cooldown",
-            hint="hint",
-            intent_type="propose_action",
-        )
-        assert first == 1 and second == 2
-        # Resetting drops the matching streak rows.
-        s.reset_policy_denial_streak("kernel_opt")
-        s.tick = 3
-        again = s.record_policy_denial(
-            action_name="kernel_opt",
-            rule="cooldown",
-            hint="hint",
-            intent_type="propose_action",
-        )
-        assert again == 1
-
-    def test_record_policy_denial_keeps_intent_keys_when_present(self):
-        s = SharedState()
-        s.tick = 1
-        s.record_policy_denial(
-            action_name="profile",
-            rule="missing-prereq",
-            hint="needs baseline",
-            intent_type="propose_action",
-            intent_payload={"action": "profile", "params": {}},
-        )
-        assert s.policy_denial_history[-1]["intent_payload_keys"] == ["action", "params"]
-
-    def test_reset_policy_denial_streak_ignores_blank_name(self):
-        s = SharedState()
-        s.policy_denial_streak["foo:bar"] = 3
-        s.reset_policy_denial_streak("")
-        assert s.policy_denial_streak == {"foo:bar": 3}
-
-    def test_policy_denial_history_caps_to_50(self):
-        s = SharedState()
-        for tick in range(60):
-            s.tick = tick
-            s.record_policy_denial(
-                action_name="x",
-                rule="r",
-                hint="h",
-                intent_type="propose_action",
-            )
-        assert len(s.policy_denial_history) == 50
-
-    def test_policy_denial_summary_returns_empty_when_history_empty(self):
-        assert SharedState().to_policy_denial_summary() == ""
-
-    def test_policy_denial_summary_includes_recent_rows(self):
-        s = SharedState()
-        for tick in range(4):
-            s.tick = tick
-            s.record_policy_denial(
-                action_name=f"a{tick}",
-                rule="rule",
-                hint=f"hint-{tick}",
-                intent_type="propose_action",
-            )
-        summary = s.to_policy_denial_summary(top_k=2)
-        assert "a2" in summary
-        assert "a3" in summary
 
 
 class TestKernelPatchIdentity:

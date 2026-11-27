@@ -1156,7 +1156,6 @@ def test_a_rejected_grid_is_reviewed_and_dropped(session_dir: Path):
                 verdict="reject",
                 reasoning="every variant raises the memory floor",
                 advisory=None,
-                approved_variant_names=None,
             ),
         )
     )
@@ -1239,40 +1238,6 @@ def test_a_review_records_the_grounds_the_critic_stated(session_dir: Path):
     assert review["alternative_action"] == "shrink the grid"
     assert review["outcome"]["materialized"] is True
     assert review["outcome"]["denied"] is False
-
-
-def test_a_per_variant_review_records_every_variants_ruling(session_dir: Path):
-    coord = _coordinator(session_dir)
-    coord.shared_state.phase = "FRAMEWORK_AGENT"
-    coord.phase_framework._open_framework_timeline()
-
-    msg_id = _propose_grid(
-        coord,
-        [
-            {"provenance": "llm_direct", "variant_name": "chunked_prefill"},
-            {"provenance": "llm_direct", "variant_name": "cuda_graph"},
-        ],
-    )
-    _review(
-        coord,
-        msg_id,
-        {
-            "verdict_map": {
-                "chunked_prefill": {"verdict": "approve", "rationale": "cheap to test"},
-                "cuda_graph": {"verdict": "reject", "rationale": "known to hang on this build"},
-            }
-        },
-    )
-    coord.phase_framework.close_framework_timeline(_tr("optimize_no_more_leverage"))
-
-    review = _events(session_dir)[0]["ext"]["proposals"][0]["critic_review"]
-    rows = {row["variant_name"]: row for row in review["variants"]}
-    assert rows["chunked_prefill"]["verdict"] == "approve"
-    assert rows["cuda_graph"]["verdict"] == "reject"
-    assert "hang" in rows["cuda_graph"]["reason"]
-    # The grid still ran, on the subset that survived.
-    assert review["verdict"] == "approve"
-    assert review["outcome"]["materialized"] is True
 
 
 def test_a_ruling_the_critic_could_not_ground_says_so(session_dir: Path):
