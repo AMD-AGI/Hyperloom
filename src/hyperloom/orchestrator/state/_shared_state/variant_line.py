@@ -86,10 +86,8 @@ def format_diagnosis(entry: dict[str, Any]) -> str:
     return "  " + " ".join(parts) if parts else ""
 
 
-def role_trace_text(role_trace: Any) -> str:
+def role_trace_text(role_trace: dict[str, Any]) -> str:
     """Render a ``{role: summary}`` PD TraceLens map: top kernels with GPU share, and trace warnings."""
-    if not isinstance(role_trace, dict) or not role_trace:
-        return ""
     parts: list[str] = []
     for role in ("prefill", "decode"):
         summary = role_trace.get(role)

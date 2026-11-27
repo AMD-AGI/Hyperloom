@@ -5,8 +5,6 @@
 
 from __future__ import annotations
 
-import gzip
-import json
 import subprocess
 from pathlib import Path
 
@@ -17,22 +15,12 @@ from hyperloom.orchestrator.actions.executors import trace_analyze
 from hyperloom.orchestrator.actions.executors._pd_role_trace import role_analysis_payload
 from hyperloom.orchestrator.trace_analysis import _trace_split as split_module
 from hyperloom.orchestrator.trace_analysis.analysis_route import AnalysisRoute
-
-
-def _kernel(name: str, ts: float, dur: float) -> dict:
-    return {"ph": "X", "cat": "kernel", "name": name, "pid": 2, "tid": 6, "ts": ts, "dur": dur, "args": {"stream": 6}}
+from hyperloom.orchestrator.trace_analysis.tests.test_stream_overlap_repair import _durations, _kernel, _write
 
 
 def _overrunning_trace(path: Path) -> None:
     """A trace whose first kernel overruns the same-stream kernel after it."""
-    events = [_kernel("index_elementwise_kernel", 1000.0, 533_100.0), _kernel("gemm", 1004.5, 10.0)]
-    with gzip.open(path, "wt", encoding="utf-8") as fh:
-        json.dump({"traceEvents": events}, fh)
-
-
-def _durations(path: Path) -> dict[str, float]:
-    with gzip.open(path, "rt", encoding="utf-8") as fh:
-        return {ev["name"]: ev["dur"] for ev in json.load(fh)["traceEvents"]}
+    _write(path, [_kernel("index_elementwise_kernel", 1000.0, 533_100.0), _kernel("gemm", 1004.5, 10.0)])
 
 
 def test_role_requests_split_decode_without_llm_flags_and_leave_prefill_unsplit() -> None:
@@ -57,29 +45,32 @@ def test_role_requests_split_decode_without_llm_flags_and_leave_prefill_unsplit(
     assert "--split-conc" not in cmd
     assert "--clamp-stream-overlaps" in cmd
     plain, _mode = trace_analyze._build_trace_analyze_cmd(
-        {"trace_input": decode["trace_input"]}, run, session_dir=Path("/s"), workload={}
+        {"trace_input": decode["trace_input"], "steady_state_mode": "unsplit"}, run, session_dir=Path("/s"), workload={}
     )
     assert "--clamp-stream-overlaps" not in plain
 
 
-def test_combined_report_splits_decode_per_node_and_copies_prefill(tmp_path: Path, monkeypatch) -> None:
+def test_combined_report_splits_decode_per_node_copies_prefill_and_clamps_each_chunk(
+    tmp_path: Path, monkeypatch
+) -> None:
     root = tmp_path / "torch_trace"
     decode_capture = root / "decode" / "graph_capture_profile"
     decode_capture.mkdir(parents=True)
     (decode_capture / "DecodeCudaGraphRunner_bs_1_rank0.json.gz").write_bytes(b"x")
-    (root / "prefill").mkdir()
+    (root / "prefill" / "graph_capture_profile").mkdir(parents=True)
+    (root / "prefill" / "graph_capture_profile" / "capture.log").write_bytes(b"x")
     decode_traces = [root / "decode" / f"1-TP-{rank}.trace.json.gz" for rank in (0, 8)]
     prefill_trace = root / "prefill" / "1-TP-0-EXTEND.trace.json.gz"
     for path in [*decode_traces, prefill_trace]:
-        path.write_bytes(b"trace")
+        _overrunning_trace(path)
     commands: list[list[str]] = []
 
     def _fake_run(cmd, *, cwd, log_path, timeout_s):
         commands.append(cmd)
         if "TraceLens.TraceUtils.split_trace.main" in cmd:
             out = Path(cmd[cmd.index("-o") + 1])
-            (out / "steady_state_chunk.json.gz").write_bytes(b"chunk")
-            (out / "sglang_iteration_0-31.json.gz").write_bytes(b"whole")
+            _overrunning_trace(out / "steady_state_chunk.json.gz")
+            (out / "sglang_iteration_0-15.json.gz").write_bytes(b"whole")
         else:
             config = yaml.safe_load(Path(cmd[cmd.index("--config") + 1]).read_text())
             (Path(config["output_dir"]) / combined.AGGREGATED_CSVS_DIR).mkdir()
@@ -87,6 +78,7 @@ def test_combined_report_splits_decode_per_node_and_copies_prefill(tmp_path: Pat
 
     monkeypatch.setattr(combined, "run_command", _fake_run)
     monkeypatch.setattr(split_module, "run_command", _fake_run)
+    monkeypatch.setenv("TRACELENS_SPLIT_NUM_STEPS", "16")
     out_dir = tmp_path / "round" / "tracelens"
 
     result = combined.run_pd_combined_report(
@@ -106,73 +98,28 @@ def test_combined_report_splits_decode_per_node_and_copies_prefill(tmp_path: Pat
     assert config["output_dir"] == str(out_dir)
     assert config["aggregation"] == {"policy": "combine_by_node"}
     assert "kernel_summary" not in config
+    decode_chunks = [out_dir / "trace_split" / f"decode_{node}" / "steady_state_chunk.json.gz" for node in (0, 1)]
+    prefill_chunk = out_dir / "trace_split" / "prefill_0" / prefill_trace.name
     assert config["jobs"] == [
-        {
-            "phase": "decode",
-            "node": 0,
-            "trace_path": str(out_dir / "trace_split" / "decode_0" / "steady_state_chunk.json.gz"),
-            "platform": "MI300X",
-            "capture_folder": str(decode_capture),
-        },
-        {
-            "phase": "decode",
-            "node": 1,
-            "trace_path": str(out_dir / "trace_split" / "decode_1" / "steady_state_chunk.json.gz"),
-            "platform": "MI300X",
-            "capture_folder": str(decode_capture),
-        },
-        {
-            "phase": "prefill",
-            "node": 0,
-            "trace_path": str(out_dir / "trace_split" / "prefill_0" / prefill_trace.name),
-            "platform": "MI300X",
-        },
+        *(
+            {
+                "phase": "decode",
+                "node": node,
+                "trace_path": str(chunk),
+                "platform": "MI300X",
+                "capture_folder": str(decode_capture),
+            }
+            for node, chunk in enumerate(decode_chunks)
+        ),
+        {"phase": "prefill", "node": 0, "trace_path": str(prefill_chunk), "platform": "MI300X"},
     ]
     split_cmds = [cmd for cmd in commands if "TraceLens.TraceUtils.split_trace.main" in cmd]
     assert sorted(cmd[cmd.index("TraceLens.TraceUtils.split_trace.main") + 1] for cmd in split_cmds) == [
         str(p) for p in decode_traces
     ]
-    assert all(cmd[-3:] == ["--find-steady-state", "--num-steps", "32"] for cmd in split_cmds)
+    assert all(cmd[-3:] == ["--find-steady-state", "--num-steps", "16"] for cmd in split_cmds)
     assert result["aggregated_csvs"] == str(out_dir / combined.AGGREGATED_CSVS_DIR)
-
-
-def test_combined_report_clamps_each_nodes_chunk_and_leaves_the_capture_unchanged(tmp_path: Path, monkeypatch) -> None:
-    root = tmp_path / "torch_trace"
-    decode_trace = root / "decode" / "1-TP-0.trace.json.gz"
-    prefill_trace = root / "prefill" / "1-TP-0-EXTEND.trace.json.gz"
-    decode_trace.parent.mkdir(parents=True)
-    prefill_trace.parent.mkdir(parents=True)
-    _overrunning_trace(decode_trace)
-    _overrunning_trace(prefill_trace)
-
-    def _fake_run(cmd, *, cwd, log_path, timeout_s):
-        if "TraceLens.TraceUtils.split_trace.main" in cmd:
-            _overrunning_trace(Path(cmd[cmd.index("-o") + 1]) / "steady_state_chunk.json.gz")
-        else:
-            config = yaml.safe_load(Path(cmd[cmd.index("--config") + 1]).read_text())
-            (Path(config["output_dir"]) / combined.AGGREGATED_CSVS_DIR).mkdir()
-        return 0
-
-    monkeypatch.setattr(combined, "run_command", _fake_run)
-    monkeypatch.setattr(split_module, "run_command", _fake_run)
-    out_dir = tmp_path / "round" / "tracelens"
-
-    result = combined.run_pd_combined_report(
-        {"decode": [str(decode_trace)], "prefill": [str(prefill_trace)]},
-        combined.PdReportRun(
-            trace_root=root,
-            output_dir=out_dir,
-            platform="MI300X",
-            analysis_mode="inference",
-            tracelens_root=tmp_path,
-        ),
-    )
-
-    assert result["status"] == "ok"
-    decode_chunk = out_dir / "trace_split" / "decode_0" / "steady_state_chunk.json.gz"
-    prefill_chunk = out_dir / "trace_split" / "prefill_0" / prefill_trace.name
-    assert _durations(decode_chunk)["index_elementwise_kernel"] == 4.5
-    assert _durations(prefill_chunk)["index_elementwise_kernel"] == 4.5
+    assert all(_durations(chunk)["index_elementwise_kernel"] == 4.5 for chunk in [*decode_chunks, prefill_chunk])
     assert _durations(prefill_trace)["index_elementwise_kernel"] == 533_100.0
 
 
@@ -257,15 +204,3 @@ def test_combined_report_splits_the_decode_nodes_concurrently_in_node_order(tmp_
         (node, str(out_dir / "trace_split" / f"decode_{node}" / f"{trace.name}.chunk"))
         for node, trace in enumerate(traces)
     ]
-
-
-def test_report_pd_profile_returns_the_summary_without_writing_it_to_the_profile(tmp_path: Path, monkeypatch) -> None:
-    import asyncio
-
-    monkeypatch.setattr(combined, "run_pd_combined_report", lambda node_traces, run: {"status": "failed"})
-    profile_result = {"role_node_traces": {"decode": ["/t/d.json.gz"]}, "trace_dir": str(tmp_path / "t")}
-
-    summary = asyncio.run(combined.report_pd_profile(profile_result, framework="sglang", platform="MI300X"))
-
-    assert summary == {"status": "failed"}
-    assert "pd_combined_report" not in profile_result

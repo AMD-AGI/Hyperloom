@@ -9,31 +9,40 @@ import logging
 from pathlib import Path
 from typing import Any
 
+from hyperloom.orchestrator.trace_analysis import DECODE_ONLY_OR_GENERIC_MODE, UNSPLIT_MODE
+from hyperloom.orchestrator.trace_analysis.analysis_route import AnalysisRoute
+
+from .trace_analyze import PD_ROLE_TRACE_KEY
+
 log = logging.getLogger(__name__)
 
 # The TraceLens input each PD role's trace yields: a decode engine's trace holds decode steps only, so its steady-state
 # chunk is taken with or without the decode-only label; a prefill engine's few steps are analysed whole.
-ROLE_STEADY_STATE_MODE = {"prefill": "unsplit", "decode": "decode_only_or_generic"}
+ROLE_STEADY_STATE_MODE = {"prefill": UNSPLIT_MODE, "decode": DECODE_ONLY_OR_GENERIC_MODE}
 
 _TOP_KERNELS = 5
 
 
+def hot_kernels(ta_result: dict[str, Any]) -> list[Any]:
+    """The hot kernels an analysis surfaced."""
+    return ta_result.get("hot_kernels_top15") or ta_result.get("hot_kernels") or []
+
+
 def role_analysis_payload(role: str, trace_path: str, framework: str) -> dict[str, Any]:
-    """Build the non-LLM trace_analyze request for one role's trace; its PD steady-state mode runs the splitter without
-    LLM phase hints and clamps same-stream overlaps."""
+    """Build the non-LLM trace_analyze request for one role's trace."""
     return {
         "trace_input": trace_path,
         "framework": framework,
-        "analysis_route": "non-llm",
+        "analysis_route": AnalysisRoute.NON_LLM.value,
         "steady_state_mode": ROLE_STEADY_STATE_MODE[role],
         "roofline_output_name": f"kernel_roofline_{role}.json",
+        PD_ROLE_TRACE_KEY: True,
     }
 
 
-def role_trace_summary(trace_path: str, result: dict[str, Any] | None) -> dict[str, Any]:
+def _role_trace_summary(trace_path: str, result: dict[str, Any]) -> dict[str, Any]:
     """Compact one role's trace_analyze result into the fields the orchestration prompt renders."""
-    result = result if isinstance(result, dict) else {}
-    hot = result.get("hot_kernels_top15") or result.get("hot_kernels") or []
+    hot = hot_kernels(result)
     top = [
         {
             "name": str(entry.get("name") or entry.get("kernel_id") or "?"),
@@ -76,7 +85,7 @@ async def analyze_role_traces(
         if not trace_path:
             continue
         if role in known:
-            summaries[role] = role_trace_summary(trace_path, known[role])
+            summaries[role] = _role_trace_summary(trace_path, known[role])
             continue
         payload = role_analysis_payload(role, trace_path, framework)
         try:
@@ -84,5 +93,5 @@ async def analyze_role_traces(
         except Exception as exc:  # isolation boundary: one role's analysis must not fail the round
             log.warning("pd role trace: %s analysis raised: %r", role, exc, exc_info=True)
             result = {"status": "failed", "error_class": type(exc).__name__, "error": str(exc)}
-        summaries[role] = role_trace_summary(trace_path, result)
+        summaries[role] = _role_trace_summary(trace_path, result)
     return summaries

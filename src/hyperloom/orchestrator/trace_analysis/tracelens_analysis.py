@@ -75,7 +75,14 @@ from ._trace_inputs import (
     _trace_file_size,
     discover_trace_inputs,
 )
-from ._trace_split import STEADY_STATE_MODES, UNSPLIT_MODE, TraceSplitJob, run_trace_split, use_unsplit_trace
+from ._trace_split import (
+    STEADY_STATE_MODES,
+    UNSPLIT_MODE,
+    TraceSplitJob,
+    default_split_num_steps,
+    run_trace_split,
+    use_unsplit_trace,
+)
 
 # trace_analyze heals a vanished checkout through this module's _ensure_tracelens_checkout.
 from ._tracelens_checkout import (
@@ -571,7 +578,7 @@ def _add_split_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
         "--split-num-steps",
         type=int,
-        default=int(os.environ.get("TRACELENS_SPLIT_NUM_STEPS", "32") or 32),
+        default=default_split_num_steps(),
         help=(
             "Number of steady-state iterations for the splitter to extract "
             "(#127). Maps to --num-steps on TraceLens.TraceUtils.split_trace.main."

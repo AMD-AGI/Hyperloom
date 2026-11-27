@@ -266,4 +266,3 @@ def test_role_trace_text_summarises_each_pd_role():
     )
     assert text == "prefill: gemm/gemm/compute 41.2%; copy warn=clock_lag | decode: analysis_failed(no trace)"
     assert role_trace_text({"prefill": {"status": "ok"}}) == "prefill: (no hot kernels)"
-    assert role_trace_text({}) == "" and role_trace_text(None) == ""
