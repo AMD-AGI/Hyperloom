@@ -70,12 +70,17 @@ def test_a_manifest_of_another_version_is_refused_naming_the_one_the_reader_read
         ResultManifest.from_document(_edit(lambda d: d.update(schema=schema)))
 
 
-def test_a_manifest_states_the_rule_pack_its_runner_read_and_one_from_an_older_runner_states_none() -> None:
+def test_a_manifest_states_the_rule_pack_its_runner_read_and_one_that_states_none_is_refused() -> None:
     stated = _edit(lambda d: d["runner"].update(rule_pack={"version": "2-test", "digest": PACK_DIGEST}))
     assert list(VALIDATOR.iter_errors(stated)) == []
     assert ResultManifest.from_document(stated).runner.rule_pack == RulePackFacts("2-test", PACK_DIGEST)
-    assert "rule_pack" not in _document()["runner"]
-    assert ResultManifest.from_document(_document()).runner.rule_pack is None
+    for unstated in (
+        _edit(lambda d: d["runner"].pop("rule_pack")),
+        _edit(lambda d: d["runner"].update(rule_pack=None)),
+    ):
+        assert list(VALIDATOR.iter_errors(unstated)) != []
+        with pytest.raises(DocumentError, match="rule_pack"):
+            ResultManifest.from_document(unstated)
 
 
 @pytest.mark.parametrize(
@@ -114,7 +119,7 @@ def test_a_manifest_states_whether_its_cards_were_free_of_other_processes_and_wh
     assert ResultManifest.from_document(document).runner.card_occupancy == expected
 
 
-def test_a_manifest_of_an_older_runner_or_of_a_runner_with_no_card_states_no_occupancy() -> None:
+def test_a_manifest_of_a_runner_with_no_card_states_no_occupancy() -> None:
     assert "card_occupancy" not in _document()["runner"]
     assert ResultManifest.from_document(_document()).runner.card_occupancy is None
     null = _edit(lambda d: d["runner"].update(card_occupancy=None))
@@ -126,7 +131,7 @@ def _timed(phases: list[dict[str, Any]]) -> dict[str, Any]:
     return _edit(lambda d: d["timing"].update(phases=phases))
 
 
-def test_a_manifest_states_the_phases_its_runner_went_through_and_one_from_an_older_runner_states_none() -> None:
+def test_a_manifest_states_the_phases_its_runner_went_through_and_one_that_states_none_is_refused() -> None:
     recorder = PhaseRecorder(iter([10.0, 14.0, 20.0]).__next__)
     recorder.begin("sheet_wait")
     recorder.begin("server_boot", point=0)
@@ -134,8 +139,10 @@ def test_a_manifest_states_the_phases_its_runner_went_through_and_one_from_an_ol
     assert list(VALIDATOR.iter_errors(stated)) == []
     phases = ResultManifest.from_bytes(encode_manifest(stated)).timing.phases
     assert phases == (PhaseTiming("sheet_wait", 10.0, 4.0), PhaseTiming("server_boot", 14.0, 6.0, point=0))
-    assert "phases" not in _document()["timing"]
-    assert ResultManifest.from_document(_document()).timing.phases == ()
+    unstated = _edit(lambda d: d["timing"].pop("phases"))
+    assert list(VALIDATOR.iter_errors(unstated)) != []
+    with pytest.raises(DocumentError, match="phases"):
+        ResultManifest.from_document(unstated)
 
 
 PHASE = {"name": "warmup", "started_unix": 1.0, "seconds": 2.0, "point": 0}
@@ -161,11 +168,12 @@ def test_a_manifest_whose_phases_add_up_to_more_than_a_year_is_refused_by_the_re
         ResultManifest.from_document(document)
 
 
-def test_a_manifest_may_state_its_phases_as_null_as_it_may_its_other_optional_timing() -> None:
+def test_a_manifest_that_states_its_phases_as_null_is_refused_by_the_reader_and_the_schema() -> None:
     document = _edit(lambda d: d["timing"].update(phases=None))
 
-    assert list(VALIDATOR.iter_errors(document)) == []
-    assert ResultManifest.from_document(document).timing.phases == ()
+    assert list(VALIDATOR.iter_errors(document)) != []
+    with pytest.raises(DocumentError, match="phases"):
+        ResultManifest.from_document(document)
 
 
 @pytest.mark.parametrize("name", sorted(BAD_PHASES))

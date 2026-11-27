@@ -784,13 +784,6 @@ def test_a_result_whose_runner_read_another_rule_pack_is_rejected_naming_both(bu
     assert session in raised.value.detail
 
 
-def test_a_result_whose_runner_states_no_rule_pack_is_rejected_when_the_session_names_one(bundle) -> None:
-    with pytest.raises(ResultRejected) as raised:
-        verify_bundle(bundle.staging, replace(verify_args(bundle), rule_pack_digest=PACK["digest"]))
-    assert raised.value.reason is RejectReason.RULE_PACK_MISMATCH
-    assert "states no rule pack" in raised.value.detail
-
-
 @pytest.mark.parametrize("umask", [0, 0o022, 0o077])
 def test_files_landed_on_shared_storage_are_the_groups_to_read_and_the_output_directory_the_groups_to_write(
     bundle, tmp_path: Path, umask: int

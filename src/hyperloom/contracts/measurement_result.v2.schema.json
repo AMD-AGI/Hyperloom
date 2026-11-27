@@ -53,7 +53,8 @@
         "hyperloom_version",
         "inference_suite_staging",
         "inferencex_commit",
-        "gpu_ids"
+        "gpu_ids",
+        "rule_pack"
       ],
       "properties": {
         "sandbox_id": {
@@ -145,29 +146,22 @@
           ]
         },
         "rule_pack": {
-          "oneOf": [
-            {
-              "type": "null"
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "version",
+            "digest"
+          ],
+          "properties": {
+            "version": {
+              "type": "string",
+              "minLength": 1
             },
-            {
-              "type": "object",
-              "additionalProperties": false,
-              "required": [
-                "version",
-                "digest"
-              ],
-              "properties": {
-                "version": {
-                  "type": "string",
-                  "minLength": 1
-                },
-                "digest": {
-                  "type": "string",
-                  "pattern": "^sha256:[0-9a-f]{64}$"
-                }
-              }
+            "digest": {
+              "type": "string",
+              "pattern": "^sha256:[0-9a-f]{64}$"
             }
-          ]
+          }
         },
         "card_occupancy": {
           "oneOf": [
@@ -284,7 +278,8 @@
       "required": [
         "runner_started_unix",
         "spec_received_unix",
-        "finished_unix"
+        "finished_unix",
+        "phases"
       ],
       "properties": {
         "runner_started_unix": {
@@ -321,10 +316,7 @@
           "minimum": 0
         },
         "phases": {
-          "type": [
-            "array",
-            "null"
-          ],
+          "type": "array",
           "maxItems": 4096,
           "items": {
             "type": "object",

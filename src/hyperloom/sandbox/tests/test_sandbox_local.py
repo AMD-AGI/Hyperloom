@@ -128,19 +128,6 @@ def test_template_validation_rejects_unsafe_combinations() -> None:
         LocalTemplate("t", "root")  # type: ignore[arg-type]
 
 
-def test_template_from_mapping_is_strict() -> None:
-    tpl = LocalTemplate.from_mapping(
-        "r", {"role": "measurement", "sealed": True, "signing": True, "gpus": 2, "command": ["x"]}
-    )
-    assert (tpl.gpus, tpl.command, tpl.signing) == (2, ("x",), True)
-    with pytest.raises(ValueError, match="unknown keys"):
-        LocalTemplate.from_mapping("r", {"role": "dev", "sudo": True})
-    with pytest.raises(ValueError, match="role is required"):
-        LocalTemplate.from_mapping("r", {})
-    with pytest.raises(ValueError, match="argv list"):
-        LocalTemplate.from_mapping("r", {"role": "dev", "command": "echo hi"})
-
-
 # -- signing identity and the runner's environment ------------------------------
 
 

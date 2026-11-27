@@ -5,9 +5,9 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping, Sequence
+from collections.abc import Mapping
 from dataclasses import dataclass, field
-from typing import Any, get_args
+from typing import get_args
 
 from hyperloom.common.outside_facts import ROCR_VISIBLE_DEVICES_ENV
 from hyperloom.sandbox.card_occupancy import SANDBOX_TAG_ENV
@@ -25,8 +25,6 @@ RESERVED_ENV_NAMES = frozenset(
         "HYPERLOOM_SANDBOX_ROOT",
     }
 )
-
-_CONFIG_KEYS = frozenset({"role", "command", "gpus", "sealed", "signing", "envs"})
 
 
 @dataclass(frozen=True)
@@ -64,36 +62,3 @@ class LocalTemplate:
         reserved = RESERVED_ENV_NAMES & set(self.envs)
         if reserved:
             raise ValueError(f"template {self.name!r}: envs name platform variables {sorted(reserved)}")
-
-    @classmethod
-    def from_mapping(cls, name: str, config: Mapping[str, Any]) -> LocalTemplate:
-        """Build a template from its entry in the socket's ``config.templates``.
-
-        Args:
-            name: The template name.
-            config: Keys ``role`` (required), ``command``, ``gpus``, ``sealed``,
-                ``signing``, ``envs``.
-
-        Returns:
-            LocalTemplate: The validated template.
-
-        Raises:
-            ValueError: On an unknown key, a missing role or an invalid combination.
-        """
-        unknown = set(config) - _CONFIG_KEYS
-        if unknown:
-            raise ValueError(f"template {name!r}: unknown keys {sorted(unknown)}")
-        if "role" not in config:
-            raise ValueError(f"template {name!r}: role is required")
-        command: Sequence[str] = config.get("command", ())
-        if isinstance(command, str):
-            raise ValueError(f"template {name!r}: command is an argv list, not a string")
-        return cls(
-            name=name,
-            role=config["role"],
-            command=tuple(command),
-            gpus=int(config.get("gpus", 0)),
-            sealed=bool(config.get("sealed", False)),
-            signing=bool(config.get("signing", False)),
-            envs=dict(config.get("envs", {})),
-        )

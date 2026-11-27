@@ -289,8 +289,7 @@ def _timing(config: dict[str, Any]) -> dict[str, Any]:
     for name, seconds in config.get("fake_phases") or []:
         phases.append({"name": name, "started_unix": at, "seconds": float(seconds), "point": None})
         at += float(seconds)
-    if phases:
-        timing["phases"] = phases
+    timing["phases"] = phases
     return timing
 
 

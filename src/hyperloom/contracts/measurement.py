@@ -935,8 +935,6 @@ class TestResult:
     ``timing_lines`` are the last lines each server log of the test timed its requests with, each led by the log's path
     below ``output_dir``, for a specialist that cannot open the logs; none for a test whose server logs no such lines,
     and none in a document written before they existed.
-    A document written while the greedy decode pass existed may carry ``decode_outputs`` and ``decode_identity``; they
-    mean nothing now and ``from_document`` leaves them out, so such a document still loads.
     """
 
     __test__ = False
