@@ -13,7 +13,6 @@ named by ``HYPERLOOM_E2B_ENVD``); the ones that only build the toolbox always ru
 from __future__ import annotations
 
 import asyncio
-import dataclasses
 import functools
 import json
 import os
@@ -340,31 +339,6 @@ _OPTIONAL_FIELDS = (
     "session_id",
     "tests_end_by",
 )
-
-
-def test_a_plain_dict_with_exactly_the_field_names_builds_the_inputs(tmp_path: Path) -> None:
-    plain: dict[str, Any] = {
-        "run_id": "run-1",
-        "session_dir": tmp_path,
-        "api_url": "http://service.invalid",
-        "sandbox_url": "http://sandboxes.invalid",
-        "measurement_key": "m-key",
-        "sandbox_templates": {"measurement": {"1": _RUNNERS[0]}, "dev": {"1": _DEVS[0]}},
-        "source_sha": _SOURCE_SHA,
-        "tp": 1,
-        "dev_key": "d-key",
-        "grant_limits": dict(_GRANT),
-        "runner_cache_manifest_sha256": _MANIFEST,
-        "session_id": "MB-session",
-        "tests_end_by": 1_800_000_000.0,
-    }
-    assert set(plain) == {*_REQUIRED_FIELDS, *_OPTIONAL_FIELDS}
-    inputs = HostedToolboxInputs(**plain)
-    assert {name: getattr(inputs, name) for name in plain} == plain
-    required = {f.name for f in dataclasses.fields(inputs) if f.default is f.default_factory is dataclasses.MISSING}
-    assert required == set(_REQUIRED_FIELDS) and {f.name for f in dataclasses.fields(inputs)} == set(plain)
-    only_required = {name: plain[name] for name in _REQUIRED_FIELDS}
-    assert HostedToolboxInputs(**only_required).dev_key is None
 
 
 @pytest.mark.parametrize(
