@@ -101,6 +101,10 @@ class MemoryBlackboard:
     async def quarantined(self) -> list[QuarantineEvent]:
         return []
 
+    def of(self, kind: str) -> list:
+        """What was written of ``kind`` (``request``, ``result``, ``withdrawal``, ``build``, ``quarantine``), in order."""
+        return [item for name, item in self.log if name == kind]
+
 
 #: The root commit of a fake toolbox given no repository.
 _ROOT = "root"

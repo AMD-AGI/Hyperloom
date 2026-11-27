@@ -34,10 +34,12 @@ from hyperloom.measure.tests.bundle_factory import DEFAULT_FILES, manifest_docum
 from hyperloom.measure.tests.fake_runner import REPORT_PATH, ROUND_DIR, ROUND_LINK, ROUND_TREE
 from hyperloom.measure.tests.hosted_fixtures import (
     HOSTNAME,
+    Crash,
     Rig,
     make_call,
     make_rig,
     point_yaml,
+    rigs,
     runner_template,
 )
 from hyperloom.sandbox.e2b import E2BSandboxProvider
@@ -58,17 +60,7 @@ REPORT_DIR = REPORT_PATH.split("/")[0]
 
 @pytest.fixture
 def rig(tmp_path: Path):
-    made: list[Rig] = []
-
-    def build(**kwargs) -> Rig:
-        built = make_rig(tmp_path, **kwargs)
-        made.append(built)
-        return built
-
-    yield build
-    for built in made:
-        built.backend.close()
-        built.provider.close()
+    yield from rigs(tmp_path)
 
 
 def _run(rig_: Rig, tmp: Path, task: str = "req-1", **fake):
@@ -663,19 +655,15 @@ def test_a_card_count_without_a_runner_template_is_a_refused_sheet(rig, tmp_path
 # -- resume ---------------------------------------------------------------------------------------------------------
 
 
-class _Crash(BaseException):
-    """What a killed application process looks like to the code under test: it unwinds without cleaning up."""
-
-
 def _crash_mid_wait(rig_: Rig, call):
     backend = rig_.another_backend()
     backend._pool.release = lambda runner: None  # a dead process closes nothing
 
     def die(attempt):
-        raise _Crash
+        raise Crash
 
     backend._wait = die
-    with pytest.raises(_Crash):
+    with pytest.raises(Crash):
         backend.run_test(call)
     return backend
 
@@ -768,10 +756,10 @@ def test_a_restart_before_the_sheet_was_sent_sends_it_to_the_sandbox_that_waits(
     dying._pool.release = lambda runner: None
 
     def die(handle, spec):
-        raise _Crash
+        raise Crash
 
     dying._upload_blobs = die
-    with pytest.raises(_Crash):
+    with pytest.raises(Crash):
         dying.run_test(call)
     assert r.backend.journal.latest("req-1").state == STATE_SUBMITTED
     created: list[str] = []
@@ -823,10 +811,10 @@ def test_a_resumed_landing_that_already_happened_is_not_a_conflict(rig, tmp_path
     real_decided = crashed._decided
 
     def die_after_landing(*args):
-        raise _Crash
+        raise Crash
 
     crashed._decided = die_after_landing
-    with pytest.raises(_Crash):
+    with pytest.raises(Crash):
         crashed.run_test(call)
     assert (call.output_dir / "server.log").exists(), "the files landed before the crash"
     assert real_decided is not None

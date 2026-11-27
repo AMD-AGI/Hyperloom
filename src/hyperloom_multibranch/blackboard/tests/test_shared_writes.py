@@ -19,6 +19,7 @@ from pathlib import Path
 
 import pytest
 
+from hyperloom_common.shared_storage import current_umask
 from hyperloom_multibranch.contracts.blackboard import Role
 from hyperloom_multibranch.contracts.blackboard.records import BlackboardSnapshot
 from hyperloom_multibranch.blackboard.learning_search import Retrieval, RetrievalLog, RetrievalSource
@@ -33,14 +34,9 @@ from hyperloom_multibranch.blackboard.rsi.playbook import PlaybookPool, Retired
 WRITER = "a.h.1.0000"
 
 
-def _umask() -> int:
-    with open("/proc/self/status", encoding="ascii") as status:
-        return next(int(line.split()[1], 8) for line in status if line.startswith("Umask:"))
-
-
 @pytest.fixture(autouse=True)
 def _a_umask_that_keeps_group_write_off() -> None:
-    assert _umask() & 0o020, "the test needs a umask that keeps group write off what a plain create makes"
+    assert current_umask() & 0o020, "the test needs a umask that keeps group write off what a plain create makes"
 
 
 def _mode(path: Path) -> int:
@@ -134,7 +130,7 @@ def test_outside_shared_storage_every_writer_keeps_what_it_makes_as_private_as_b
 
     made = _every_writer(root, snapshot)
 
-    umask = _umask()
+    umask = current_umask()
     owner_only = {root / name for name in _OWNER_ONLY_ELSEWHERE}
     assert owner_only <= made.keys()
     for path, shared_mode in made.items():

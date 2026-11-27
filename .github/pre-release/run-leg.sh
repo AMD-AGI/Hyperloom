@@ -11,8 +11,7 @@
 # waits for the optimizer's state.json to reach a terminal stop_reason.
 #
 # HYPERLOOM_RUN_MODE is always baremetal here: a `docker-*` leg means "the
-# framework image is the container", not docker-in-docker. The DinD prompts
-# (setup-docker-*.md) belong to bootstrap-pre-release.sh, not to this runner.
+# framework image is the container", not docker-in-docker.
 #
 # Usage:
 #   run-leg.sh <leg-id>              run the leg; exit 0 = pass, 1 = fail, 2 = bad input

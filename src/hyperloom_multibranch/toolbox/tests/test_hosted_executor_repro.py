@@ -12,20 +12,12 @@ import pytest
 
 from hyperloom.contracts.measurement import Purpose, RoundValue, TestKind, TestResult, Validity
 from hyperloom.measure.points import AcceptedMeasurement
-from hyperloom.measure.tests.hosted_fixtures import Rig, make_rig, point_yaml
+from hyperloom.measure.tests.hosted_fixtures import Rig, point_yaml
 from hyperloom.measure.tests.repro_fixtures import case_attachment
 from hyperloom_multibranch.contracts.gate import ResultUnverified
 from hyperloom_multibranch.toolbox.attempts import MeasurementRefused, TestJob
 from hyperloom_multibranch.toolbox.hosted_executor import HostedExecutor
 from hyperloom_multibranch.toolbox.tests.helpers import BackendSpy, req
-
-
-@pytest.fixture
-def rig(tmp_path: Path):
-    made: Rig = make_rig(tmp_path)
-    yield made
-    made.backend.close()
-    made.provider.close()
 
 
 def _job(tmp_path: Path, rig: Rig, script: str, *, kind: TestKind = TestKind.REPRO, **fake: object) -> TestJob:

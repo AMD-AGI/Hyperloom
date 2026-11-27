@@ -9,10 +9,9 @@ import asyncio
 import json
 from pathlib import Path
 
-import pytest
 
 from hyperloom.contracts.measurement import FailureClass, Purpose, TestResult, Validity
-from hyperloom.measure.tests.hosted_fixtures import Rig, make_rig
+from hyperloom.measure.tests.hosted_fixtures import Rig
 from hyperloom_multibranch.contracts.toolbox import WorkloadKind
 from hyperloom_multibranch.toolbox.hosted_executor import HostedExecutor
 from hyperloom_multibranch.toolbox.queue import QueuePolicy
@@ -47,14 +46,6 @@ class _LoggingBackend:
             if self.report is not None:
                 layout.report.write_text(self.report, encoding="utf-8")
         return outcome
-
-
-@pytest.fixture
-def rig(tmp_path: Path):
-    made = make_rig(tmp_path)
-    yield made
-    made.backend.close()
-    made.provider.close()
 
 
 async def _run(

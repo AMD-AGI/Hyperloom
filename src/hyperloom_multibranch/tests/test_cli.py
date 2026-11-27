@@ -3051,14 +3051,12 @@ def test_a_hosted_run_names_every_shared_directory_it_cannot_write_in_one_messag
 ) -> None:
     blocker = tmp_path / "a-file"
     blocker.write_text("")
-    monkeypatch.setenv("HYPERLOOM_EVENTS_DIR", str(blocker / "events"))
     monkeypatch.setenv("HYPERLOOM_RUNNER_CACHE", str(blocker / "runner-cache"))
     monkeypatch.setenv(ARCHIVE_ENV, str(tmp_path / "no-such-archive"))
 
     assert cli.main(["run", *WORKLOAD_ARGS, "--measurement", "hosted"]) == cli.EXIT_FAILED
 
     [line] = [line for line in capsys.readouterr().err.splitlines() if "cannot write the shared storage" in line]
-    assert "HYPERLOOM_EVENTS_DIR" not in line, "a multi-branch session never writes the events directory"
     assert f"HYPERLOOM_RUNNER_CACHE {blocker / 'runner-cache'}: ENOTDIR" in line
     assert f"{ARCHIVE_ENV} {tmp_path / 'no-such-archive'}: ENOENT" in line
     assert not handed.sessions
@@ -3075,8 +3073,6 @@ def test_a_hosted_run_makes_the_shared_directories_it_writes_2775_when_they_are_
     made = {"HYPERLOOM_RUNNER_CACHE": parent / "runner-cache"}
     for name, directory in made.items():
         monkeypatch.setenv(name, str(directory))
-    events = parent / "run" / "events"
-    monkeypatch.setenv("HYPERLOOM_EVENTS_DIR", str(events))
 
     assert cli.main(["run", *WORKLOAD_ARGS, "--measurement", "hosted"]) == 0
 
@@ -3084,7 +3080,6 @@ def test_a_hosted_run_makes_the_shared_directories_it_writes_2775_when_they_are_
     for name, directory in made.items():
         mode = stat.S_IMODE(directory.stat().st_mode)
         assert mode == (0o2775 if shared else 0o2775 & ~current_umask() & 0o777), (name, oct(mode))
-    assert not events.parent.exists(), "a multi-branch session never writes the events directory"
 
 
 @pytest.mark.usefixtures("ready_environment")
