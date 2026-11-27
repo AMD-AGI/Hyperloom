@@ -260,7 +260,7 @@ def spec_document() -> dict[str, Any]:
                     ],
                 }
             ],
-            "runtime": {"snapshot": "/shared/u1/sess-a/hosted/runtimes/rt-1", "manifest_sha256": "66" * 32},
+            "runtime": None,
             "blob_root": "/shared/u1/sess-a/hosted/blobs",
         },
         "model_hashes": {"config.json": "77" * 32},

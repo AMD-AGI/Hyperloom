@@ -26,7 +26,6 @@ from hyperloom.contracts.recipe import RecipeDelta
 from hyperloom.measure import signing
 from hyperloom.measure.bundle import BundleExpectation, verify_bundle
 from hyperloom.measure.compile import LocalBlobStore, PackageBase, compile_environment
-from hyperloom.measure.hosted_spec import dir_manifest_sha256
 from hyperloom.measure.manifest import ResultManifest
 from hyperloom.measure.pins import IMAGE_DIGEST_VAR
 from hyperloom.measure.points import default_canonical, generate_points
@@ -859,52 +858,6 @@ def test_framework_files_compiled_against_another_version_are_refused_as_a_versi
     assert status["error_class"] == "framework_version_mismatch", status
     assert "PyYAML 0.0.1" in status["message"] and f"has PyYAML {installed}" in status["message"], status
     assert backend.calls == [] and not (tmp_path / "out" / "manifest.json").exists()
-
-
-def _snapshot(tmp_path) -> tuple[str, str]:
-    """A snapshot directory of two files and the manifest hash a sheet would name for it."""
-    root = tmp_path / "snapshot"
-    (root / "lib").mkdir(parents=True)
-    (root / "lib" / "a.py").write_text("a = 1\n")
-    (root / "b.cfg").write_text("b\n")
-    entries = [
-        (rel, (root / rel).stat().st_size, hashlib.sha256((root / rel).read_bytes()).hexdigest())
-        for rel in ("b.cfg", "lib/a.py")
-    ]
-    return str(root), dir_manifest_sha256(entries)
-
-
-def _with_snapshot(snapshot: str, manifest: str) -> dict:
-    return _sheet(
-        environment={"roots": [], "runtime": {"snapshot": snapshot, "manifest_sha256": manifest}, "blob_root": "/b"}
-    )
-
-
-def test_a_runtime_snapshot_that_is_its_manifest_lets_the_test_run(tmp_path, env, monkeypatch):
-    backend = _Backend(_ok)
-    monkeypatch.setattr(runner, "LocalMeasurementBackend", backend)
-
-    assert _go(tmp_path, env, _with_snapshot(*_snapshot(tmp_path))) == 0
-
-    assert len(backend.calls) == 1
-
-
-@pytest.mark.parametrize(
-    ("damage", "message"),
-    [
-        (lambda root: (root / "lib" / "a.py").write_text("a = 2\n"), "does not match its manifest hash"),
-        (lambda root: (root / "extra.py").write_text("x\n"), "does not match its manifest hash"),
-        (lambda root: (root / "b.cfg").unlink(), "does not match its manifest hash"),
-        (lambda root: (root / "link").symlink_to("/etc/passwd"), "holds a symbolic link"),
-        (shutil.rmtree, "is not a directory"),
-    ],
-    ids=["changed", "added", "removed", "link", "gone"],
-)
-def test_a_runtime_snapshot_that_is_not_its_manifest_is_spec_rejected(tmp_path, env, monkeypatch, damage, message):
-    snapshot, manifest = _snapshot(tmp_path)
-    damage(tmp_path / "snapshot")
-
-    _refused(tmp_path, env, monkeypatch, _with_snapshot(snapshot, manifest), message)
 
 
 def test_a_model_file_that_is_not_its_recorded_hash_is_spec_rejected(tmp_path, env, monkeypatch):

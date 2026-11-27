@@ -48,7 +48,6 @@ from hyperloom.measure.runner.tests.test_run import (  # noqa: F401 - fixtures
     _blob,
     _go,
     _sheet,
-    _snapshot,
     env,
     key,
     runner,
@@ -198,7 +197,6 @@ class Rig:
         envs: dict | None = None,
         roots: list | None = None,
         benchmark: dict | None = None,
-        runtime: dict | None = None,
         **changes,
     ) -> dict:
         point = {
@@ -209,7 +207,7 @@ class Rig:
             }
         }
         text = yaml.safe_dump(point)
-        environment = {"roots": roots or [], "runtime": runtime, "blob_root": "/b"}
+        environment = {"roots": roots or [], "runtime": None, "blob_root": "/b"}
         return _sheet(
             config=[{"yaml": text, "sha256": hashlib.sha256(text.encode()).hexdigest()}],
             environment=environment,
@@ -478,18 +476,6 @@ def test_a_meta_directory_the_server_inherits_is_kept_and_one_the_test_unsets_is
     assert _pinned_meta_directory(rig) is None, "the test's own process variables name one"
     rig.run("unset", _arm(rig, roots=_aiter_patch(rig), unset_envs=["AITER_META_DIR"]), extra_env=inherited)
     assert str(_pinned_meta_directory(rig)).endswith(_FARM_META), "the test removes it, so the server would find none"
-
-
-def test_a_runtime_snapshot_is_part_of_the_aiter_key_because_the_sources_outside_the_package_are_in_it(rig) -> None:
-    base, _, _ = rig.run("base", _arm(rig))
-
-    def with_snapshot(run: Path) -> dict:
-        snapshot, manifest = _snapshot(run)
-        return rig.sheet(run, runtime={"snapshot": snapshot, "manifest_sha256": manifest})
-
-    snapped, _, _ = rig.run("snapped", with_snapshot)
-
-    assert _keys(snapped)["aiter_jit"] != _keys(base)["aiter_jit"] and _keys(snapped)["triton"] == _keys(base)["triton"]
 
 
 def test_a_tuned_table_is_keyed_by_its_content_not_by_where_it_is(rig) -> None:

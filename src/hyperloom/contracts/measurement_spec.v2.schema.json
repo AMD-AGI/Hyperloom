@@ -512,29 +512,7 @@
           }
         },
         "runtime": {
-          "oneOf": [
-            {
-              "type": "null"
-            },
-            {
-              "type": "object",
-              "additionalProperties": false,
-              "required": [
-                "snapshot",
-                "manifest_sha256"
-              ],
-              "properties": {
-                "snapshot": {
-                  "type": "string",
-                  "minLength": 1
-                },
-                "manifest_sha256": {
-                  "type": "string",
-                  "pattern": "^[0-9a-f]{64}$"
-                }
-              }
-            }
-          ]
+          "type": "null"
         },
         "blob_root": {
           "type": "string",

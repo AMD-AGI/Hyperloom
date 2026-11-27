@@ -96,4 +96,4 @@ def native_digest(entries: Iterable[ChangedFile], base: Path) -> str:
     files = (
         (entry.path, file_sha256(base / entry.path) or "", entry.blob or "", entry.mode or "") for entry in entries
     )
-    return tree_identity(files, None, ())
+    return tree_identity(files, ())

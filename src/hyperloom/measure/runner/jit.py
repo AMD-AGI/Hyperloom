@@ -297,8 +297,7 @@ def _flydsl_plan(inputs: _Inputs) -> KindPlan | str:
         for e in root.entries
         if flydsl_covers(root.import_name, e.path)
     ]
-    runtime = environment.runtime.manifest_sha256 if environment.runtime is not None else None
-    key = flydsl_key(inputs.machine, tree_identity(covered, runtime, ()), inputs.servers or (inputs.environment,))
+    key = flydsl_key(inputs.machine, tree_identity(covered, ()), inputs.servers or (inputs.environment,))
     return KindPlan(FLYDSL, key, prebuilt, _patched_read_only(inputs, "FlyDSL's"))
 
 
@@ -486,10 +485,9 @@ def _tree(inputs: _Inputs, names: frozenset[str]) -> _Tree:
     meta_roots = [root for root in environment.roots if root.import_name == AITER_META_WHEEL_DIR]
     overlay = [(e.path, e.op, e.blob or "", e.mode or "") for root in aiter_roots for e in root.entries]
     overlay += [(root.id, e.path, e.op, e.blob or "", e.mode or "") for root in meta_roots for e in root.entries]
-    runtime = environment.runtime.manifest_sha256 if environment.runtime is not None else None
     others = [root for root in environment.roots if root.import_name not in (AITER_PACKAGE, AITER_META_WHEEL_DIR)]
     touching, uncovered = _framework_patches(others, names, inputs.around.read_blob)
-    return _Tree(tree_identity(overlay, runtime, touching), uncovered)
+    return _Tree(tree_identity(overlay, touching), uncovered)
 
 
 def _framework_patches(

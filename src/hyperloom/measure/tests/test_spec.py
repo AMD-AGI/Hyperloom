@@ -140,7 +140,6 @@ _KEY, _MANIFEST = "1" * 64, "2" * 64
 
 def _built(d: dict[str, Any]) -> None:
     d["environment"]["roots"][0]["kind"] = "runtime"
-    d["environment"]["runtime"] = None
     d["environment"]["builds"] = [
         {"root_id": d["environment"]["roots"][0]["id"], "key": _KEY, "manifest_sha256": _MANIFEST}
     ]
@@ -262,12 +261,21 @@ def test_the_fingerprint_is_sixteen_hex_digits_and_stable() -> None:
         lambda d: d["procedure"].update(deadline_unix=1.0),
         lambda d: _yaml(d, d["config"][0]["yaml"].replace("/shared/u1/sess-a/pids", "/shared/u2/sess-b/pids")),
         lambda d: d["environment"].update(blob_root="/shared/u2/other/blobs"),
-        lambda d: d["environment"]["runtime"].update(snapshot="/shared/u2/other/rt"),
     ],
-    ids=["request_id", "meta", "deadline", "yaml path field", "blob_root", "snapshot location"],
+    ids=["request_id", "meta", "deadline", "yaml path field", "blob_root"],
 )
 def test_the_fingerprint_ignores_what_is_not_measurement_content(change) -> None:
     assert _fp(_edit(change)) == _fp(spec_document())
+
+
+def test_a_sheet_naming_a_runtime_snapshot_is_refused_and_the_fingerprint_keeps_a_null_runtime() -> None:
+    document = _edit(lambda d: d["environment"].update(runtime={"snapshot": "/s", "manifest_sha256": "66" * 32}))
+    assert list(VALIDATOR.iter_errors(document)), "the schema allows only null"
+    with pytest.raises(DocumentError, match="runtime: must be null"):
+        MeasurementSpec.from_document(document)
+
+    canonical = spec_module.canonical_for_fingerprint(MeasurementSpec.from_document(spec_document()))
+    assert "runtime" in canonical["environment"] and canonical["environment"]["runtime"] is None
 
 
 @pytest.mark.parametrize(

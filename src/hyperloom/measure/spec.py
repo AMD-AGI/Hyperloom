@@ -376,24 +376,6 @@ class EnvRoot:
 
 
 @dataclass(frozen=True)
-class RuntimeSnapshot:
-    snapshot: str
-    manifest_sha256: str
-
-    @classmethod
-    def parse(cls, value: Any, path: str) -> "RuntimeSnapshot":
-        r = Reader(value, path)
-        runtime = cls(
-            snapshot=r.text("snapshot") or "", manifest_sha256=r.text(_MANIFEST_SHA256, pattern=SHA256_RE) or ""
-        )
-        r.done()
-        return runtime
-
-    def to_document(self) -> dict[str, Any]:
-        return {"snapshot": self.snapshot, _MANIFEST_SHA256: self.manifest_sha256}
-
-
-@dataclass(frozen=True)
 class BuildRef:
     """The ready native build a ``runtime`` root's outputs come from: its key in the build store and the SHA-256 of the
     signed manifest it was built to."""
@@ -424,18 +406,17 @@ class Environment:
     so a runner that does not know it reads every other sheet as before and refuses one that has builds."""
 
     roots: tuple[EnvRoot, ...] = ()
-    runtime: RuntimeSnapshot | None = None
     blob_root: str = ""
     builds: tuple[BuildRef, ...] = ()
 
     @classmethod
     def parse(cls, value: Any, path: str) -> "Environment":
         r = Reader(value, path)
-        runtime_raw = r.optional(_RUNTIME)
+        if r.optional(_RUNTIME) is not None:
+            raise DocumentError(f"{path}.runtime: must be null; no runtime snapshot is read")
         builds_raw = r.optional(_BUILDS)
         environment = cls(
             roots=r.sequence("roots", EnvRoot.parse),
-            runtime=None if runtime_raw is None else RuntimeSnapshot.parse(runtime_raw, r.at(_RUNTIME)),
             blob_root=r.text("blob_root") or "",
             builds=() if builds_raw is None else r.sequence(_BUILDS, BuildRef.parse),
         )
@@ -458,7 +439,7 @@ class Environment:
     def to_document(self) -> dict[str, Any]:
         document: dict[str, Any] = {
             "roots": [root.to_document() for root in self.roots],
-            _RUNTIME: None if self.runtime is None else self.runtime.to_document(),
+            _RUNTIME: None,
             "blob_root": self.blob_root,
         }
         if self.builds:
@@ -813,7 +794,7 @@ def canonical_for_fingerprint(spec: MeasurementSpec, *, session_dir: str | None 
     """The sheet with everything that is not measurement content removed or replaced.
 
     Removed: ``request_id``, ``meta``, ``procedure.deadline_unix``, ``config.sha256`` (it hashes paths), the session's
-    blob root and runtime snapshot location, and the staging's normalised manifest, which its sha256 stands for. Replaced: path-valued YAML fields and session-directory prefixes become
+    blob root, and the staging's normalised manifest, which its sha256 stands for. Replaced: path-valued YAML fields and session-directory prefixes become
     placeholders, and the carried base launch its digest, which leaves out where and when it was resolved. Blobs and
     attachments keep only their hashes.
     """
@@ -826,8 +807,6 @@ def canonical_for_fingerprint(spec: MeasurementSpec, *, session_dir: str | None 
     if spec.tools.staging is not None:
         del document["tools"][_INFERENCE_SUITE][_NORMALISED]
     del document["environment"]["blob_root"]
-    if document["environment"][_RUNTIME] is not None:
-        del document["environment"][_RUNTIME]["snapshot"]
     session = session_dir.rstrip("/") if session_dir else None
     document["config"] = [{"yaml": _replace_session_dir(_load_yaml(p.yaml), session)} for p in spec.config]
     document["process_env"] = _replace_session_dir(document["process_env"], session)

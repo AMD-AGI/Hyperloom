@@ -87,7 +87,6 @@ from hyperloom.measure.runner.platform_env import align_platform_env, take_topol
 from hyperloom.measure.runner.rewrite import Placement, rewrite_config
 from hyperloom.measure.runner.rounds import write_rounds
 from hyperloom.measure.runner.service import Progress, RunnerFailure, join_notes, wait_for_file, write_status
-from hyperloom.measure.runner.snapshot import SnapshotError, check_snapshot
 from hyperloom.measure.runner.cache_layout import CACHE_ENV, DEFAULT_CACHE_DIR
 from hyperloom.measure.runner.tools import (
     INFERENCEX_STORE,
@@ -226,16 +225,6 @@ def _check_runs_on_inference_suite(spec: MeasurementSpec) -> None:
             raise RunnerFailure(
                 _SPEC_REJECTED, f"point {index}: {framework!r} serves nothing; a {SPEC_SCHEMA} sheet measures a server"
             )
-
-
-def _check_runtime(spec: MeasurementSpec) -> None:
-    runtime = spec.environment.runtime
-    if runtime is None:
-        return
-    try:
-        check_snapshot(Path(runtime.snapshot), runtime.manifest_sha256)
-    except SnapshotError as exc:
-        raise RunnerFailure(_SPEC_REJECTED, str(exc)) from exc
 
 
 def _check_cards_free(ctx: _Context, visible: list[int]) -> None:
@@ -648,7 +637,6 @@ def _run_sheet(ctx: _Context, spec_path: Path, key, progress: Progress) -> None:
     visible = _visible(ctx.environ)
     _check_model(spec.config[0].yaml, dict(spec.model_hashes))
     _check_runs_on_inference_suite(spec)
-    _check_runtime(spec)
     facts = _preflight(ctx, spec, visible)
     before = hardware.ecc_counts(visible)
     changed = align_platform_env(ctx.environ, spec.platform_env)

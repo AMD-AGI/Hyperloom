@@ -31,7 +31,7 @@ from hyperloom.measure.jit.key import (
 )
 
 MACHINE = Machine("sha256:" + "1" * 64, "gfx950", "MI355X", "SPX/NPS1")
-TREE = tree_identity([], None, [])
+TREE = tree_identity([], [])
 SURFACE = BuildSurface({"AITER_CONFIG_GEMM_A8W8": "sha256:aa"}, {"ENABLE_CK": "1"})
 
 
@@ -191,18 +191,26 @@ def test_the_key_changes_with_every_input_the_build_context_has() -> None:
     ]
 
     keys = {aiter_key(m, TREE, SURFACE) for m in other_machine}
-    keys.add(aiter_key(MACHINE, tree_identity([("jit/core.py", "upsert", "sha256:x", "0644")], None, []), SURFACE))
-    keys.add(aiter_key(MACHINE, tree_identity([], "9" * 64, []), SURFACE))
-    keys.add(aiter_key(MACHINE, tree_identity([], None, [("sglang", "a.py", "sha256:x")]), SURFACE))
+    keys.add(aiter_key(MACHINE, tree_identity([("jit/core.py", "upsert", "sha256:x", "0644")], []), SURFACE))
+    keys.add(aiter_key(MACHINE, tree_identity([], [("sglang", "a.py", "sha256:x")]), SURFACE))
     keys.add(aiter_key(MACHINE, TREE, BuildSurface({"AITER_CONFIG_GEMM_A8W8": "sha256:bb"}, {"ENABLE_CK": "1"})))
     keys.add(aiter_key(MACHINE, TREE, BuildSurface({"AITER_CONFIG_GEMM_A8W8": "sha256:aa"}, {"ENABLE_CK": "0"})))
 
-    assert base not in keys and len(keys) == 9, "nine different inputs, nine different keys, none the base"
+    assert base not in keys and len(keys) == 8, "eight different inputs, eight different keys, none the base"
+
+
+def test_a_tree_identity_is_the_one_earlier_releases_computed() -> None:
+    """The hashed document still carries a null ``runtime``, so stored keys stay valid."""
+    assert TREE == "40b1a9234ac883f182ff4fd062a0f619ff02c94d8a5caeefe58f7a0fe9015df4"
+    assert (
+        tree_identity([("jit/core.py", "upsert", "sha256:x", "0644")], [("sglang", "a.py", "sha256:x")])
+        == "5b1f5539a4785a14d4cfc4f227e1840ad8b50cdb2b139223b6c8bad8838b490d"
+    )
 
 
 def test_the_same_inputs_give_the_same_key_whatever_order_they_were_found_in() -> None:
-    a = tree_identity([("b", "upsert", "x", "0644"), ("a", "delete", "", "")], None, [("p", "1", "x"), ("p", "0", "y")])
-    b = tree_identity([("a", "delete", "", ""), ("b", "upsert", "x", "0644")], None, [("p", "0", "y"), ("p", "1", "x")])
+    a = tree_identity([("b", "upsert", "x", "0644"), ("a", "delete", "", "")], [("p", "1", "x"), ("p", "0", "y")])
+    b = tree_identity([("a", "delete", "", ""), ("b", "upsert", "x", "0644")], [("p", "0", "y"), ("p", "1", "x")])
 
     assert a == b
     first = BuildSurface({"X": "1", "Y": "2"}, {"A": "1", "B": "2"})
@@ -399,9 +407,9 @@ FLYDSL_ENV = {"SGLANG_AMD_MONO_K31_WIDE": "1", "FLYDSL_COMPILE_OPT_LEVEL": "3", 
 def test_a_patch_to_any_source_a_flydsl_launch_is_built_from_is_covered_and_changes_the_key(package, path) -> None:
     assert flydsl_covers(package, path)
     base = flydsl_key(MACHINE, TREE, [FLYDSL_ENV])
-    one = flydsl_key(MACHINE, tree_identity([(package, path, "upsert", "sha256:1", "0644")], None, ()), [FLYDSL_ENV])
-    two = flydsl_key(MACHINE, tree_identity([(package, path, "upsert", "sha256:2", "0644")], None, ()), [FLYDSL_ENV])
-    gone = flydsl_key(MACHINE, tree_identity([(package, path, "delete", "", "")], None, ()), [FLYDSL_ENV])
+    one = flydsl_key(MACHINE, tree_identity([(package, path, "upsert", "sha256:1", "0644")], ()), [FLYDSL_ENV])
+    two = flydsl_key(MACHINE, tree_identity([(package, path, "upsert", "sha256:2", "0644")], ()), [FLYDSL_ENV])
+    gone = flydsl_key(MACHINE, tree_identity([(package, path, "delete", "", "")], ()), [FLYDSL_ENV])
 
     assert len({base, one, two, gone}) == 4, "every change of a covered file is a key of its own"
 

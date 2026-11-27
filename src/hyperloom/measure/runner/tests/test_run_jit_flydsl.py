@@ -22,7 +22,7 @@ from hyperloom.measure.runner.jit import JIT_CACHE_ENV, Surroundings
 from hyperloom.measure.spec import MeasurementSpec
 from hyperloom.measure.runner.tests import test_run_jit as base
 from hyperloom.measure.runner.tests.test_run_jit import FLYDSL_LAUNCH, Rig, _arm, _keys, _kind, _states
-from hyperloom.measure.runner.tests.test_run import _snapshot, env, key  # noqa: F401 - fixtures
+from hyperloom.measure.runner.tests.test_run import env, key  # noqa: F401 - fixtures
 
 VARIABLE = "FLYDSL_RUNTIME_CACHE_DIR"
 #: A launch aiter ships in the image, in the layout of FlyDSL 0.4.x (the Kimi image carries 0.4.2) and of 0.5.x.
@@ -185,18 +185,6 @@ def test_an_empty_prebuilt_directory_hides_nothing_and_the_kind_is_used(rig) -> 
     manifest, _, _ = rig.run("empty", _arm(rig))
 
     assert _states(manifest)["flydsl"] == "miss" and _SeeingGrid.seen[0]["where"] is not None
-
-
-def test_a_runtime_root_gets_a_key_of_its_own(rig) -> None:
-    baseline, _, _ = rig.run("base", _arm(rig))
-
-    def with_snapshot(run: Path) -> dict:
-        snapshot, manifest = _snapshot(run)
-        return rig.sheet(run, runtime={"snapshot": snapshot, "manifest_sha256": manifest})
-
-    snapped, _, _ = rig.run("snapped", with_snapshot)
-
-    assert _keys(snapped)["flydsl"] != _keys(baseline)["flydsl"], "the runtime's native build is outside FlyDSL's key"
 
 
 def _key_of_points(rig: Rig, run: Path, second: dict) -> str:

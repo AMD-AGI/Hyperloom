@@ -36,6 +36,11 @@ it.
   `timing.phases` an array (`[]` for none). Every runner that writes a v2
   manifest has written both; a manifest without them is refused as invalid
   instead of being read as one an older runner signed.
+- **A measurement sheet's `environment.runtime` must be null.** The
+  `measurement_spec.v2` schema and the reader no longer accept a runtime
+  snapshot, and the runner no longer checks one: no producer, inside
+  Hyperloom or out, ever wrote a non-null value. The key stays in every sheet
+  as `null`, so spec fingerprints and JIT cache keys are unchanged.
 - **`hyperloom session report` is removed.** The command rendered a
   `session_breakdown.json` as Markdown (`session_report.md`), optionally with
   an LLM-written summary. It ran only by hand: no session wrote
