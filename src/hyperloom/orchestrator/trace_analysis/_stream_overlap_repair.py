@@ -20,12 +20,12 @@ from typing import Any
 from ._analysis_run import AnalysisRun
 from ._io_utils import append_log
 from ._run_status import note_step
-from ._trace_reader import _GPU_CATS, _STREAM_OVERLAP_EPS_US
+from ._trace_reader import _GPU_CATS, _stream_overruns
 
 
 def clamp_stream_overlaps(trace_path: Path) -> dict[str, Any]:
     """Clamp each GPU event to end at the next event's start on its (pid, tid) stream; rewrite the trace if changed."""
-    opener: Callable[..., Any] = gzip.open if trace_path.name.endswith(".gz") else open
+    opener: Callable[..., Any] = gzip.open if trace_path.name.lower().endswith(".gz") else open
     with opener(trace_path, "rt", encoding="utf-8") as fh:
         trace = json.load(fh)
     events = trace.get("traceEvents", []) if isinstance(trace, dict) else trace
@@ -47,12 +47,9 @@ def clamp_stream_overlaps(trace_path: Path) -> dict[str, Any]:
     worst_us = 0.0
     for stream in streams.values():
         stream.sort(key=lambda ev: ev["ts"])
-        for cur, nxt in zip(stream, stream[1:]):
-            gap = nxt["ts"] - cur["ts"]
-            over = cur["dur"] - gap
-            if gap <= 0 or over <= _STREAM_OVERLAP_EPS_US:
-                continue
-            cur["dur"] = gap
+        for i, over in _stream_overruns([(ev["ts"], ev["ts"] + ev["dur"], ev) for ev in stream]):
+            cur = stream[i]
+            cur["dur"] -= over
             clamped += 1
             removed_us += over
             if over > worst_us:
@@ -72,15 +69,23 @@ def clamp_stream_overlaps(trace_path: Path) -> dict[str, Any]:
     }
 
 
+def clamp_or_skip_reason(trace_path: Path) -> dict[str, Any] | str:
+    """The summary of :func:`clamp_stream_overlaps` on ``trace_path``, or why a trace it cannot read or rewrite is kept
+    as it is."""
+    try:
+        return clamp_stream_overlaps(trace_path)
+    except (OSError, ValueError) as exc:
+        return str(exc)
+
+
 def clamp_chunk_stream_overlaps(run: AnalysisRun, chunk_path: Path) -> None:
     """Truncate same-stream overrunning GPU events in the steady-state chunk when ``--clamp-stream-overlaps`` is set."""
     if not run.args.clamp_stream_overlaps:
         return
-    try:
-        summary = clamp_stream_overlaps(chunk_path)
-    except (OSError, ValueError) as exc:
-        append_log(run.log_path, f"stream overlap clamp skipped for {chunk_path.name}: {exc}")
-        note_step(run.run_meta, "clamp_stream_overlaps", category="split", status="skipped", skip_reason=str(exc))
+    summary = clamp_or_skip_reason(chunk_path)
+    if isinstance(summary, str):
+        append_log(run.log_path, f"stream overlap clamp skipped for {chunk_path.name}: {summary}")
+        note_step(run.run_meta, "clamp_stream_overlaps", category="split", status="skipped", skip_reason=summary)
         return
     append_log(
         run.log_path,

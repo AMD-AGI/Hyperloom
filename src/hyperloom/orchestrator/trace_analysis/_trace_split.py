@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import json
+import os
 import sys
 from dataclasses import dataclass
 from pathlib import Path
@@ -23,6 +24,11 @@ DECODE_ONLY_OR_GENERIC_MODE = "decode_only_or_generic"
 #: Steady-state mode that analyses the trace as captured, without splitting it.
 UNSPLIT_MODE = "unsplit"
 STEADY_STATE_MODES = ("mixed", "decode_only", "prefilldecode", "generic", DECODE_ONLY_OR_GENERIC_MODE, UNSPLIT_MODE)
+
+
+def default_split_num_steps() -> int:
+    """The steady-state iterations the splitter extracts by default: ``$TRACELENS_SPLIT_NUM_STEPS``, else 32."""
+    return int(os.environ.get("TRACELENS_SPLIT_NUM_STEPS", "32") or 32)
 
 
 def copy_unsplit_trace(trace_path: Path, split_dir: Path) -> Path:
@@ -123,7 +129,7 @@ def _refuse_missing_steady_state_mode(
     )
 
 
-def collect_split_chunks(
+def _collect_split_chunks(
     split_dir: "Path",
     steady_state_mode: str,
     analysis_trace_path: "Path",
@@ -332,7 +338,7 @@ def run_trace_split(
             f"trace_split_failed: TraceLens splitter exited with code {split_rc}; see {log_path} for subprocess output."
         )
 
-    selected_chunk, split_meta, mode_to_chunks = collect_split_chunks(
+    selected_chunk, split_meta, mode_to_chunks = _collect_split_chunks(
         split_dir,
         args.steady_state_mode,
         analysis_trace_path,

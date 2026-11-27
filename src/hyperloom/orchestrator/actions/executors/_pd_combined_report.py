@@ -7,7 +7,7 @@ Each server contributes the first GPU's trace of each node. Each node's trace is
 prepares it: decode traces go through the TraceLens splitter and the decode-only steady-state chunk (else the generic
 one) is reported; prefill traces are reported whole, as a copy. Every node's chunk is then clamped of same-stream
 overlapping GPU events, one node per thread. Every job uses its own server's graph-capture folder when that folder holds
-files. The config is written to ``pd-run.yaml`` and run once with ``TraceLens.Reporting.generate_perf_report_from_config``,
+a capture trace. The config is written to ``pd-run.yaml`` and run once with ``TraceLens.Reporting.generate_perf_report_from_config``,
 which writes one report per job and ``perf_report_aggregated_csvs/``.
 """
 
@@ -16,34 +16,36 @@ from __future__ import annotations
 import asyncio
 import functools
 import logging
-import os
 import subprocess
 import sys
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from types import SimpleNamespace
-from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
 import yaml
 
 from hyperloom.orchestrator.trace_analysis import (
-    DECODE_ONLY_OR_GENERIC_MODE,
+    UNSPLIT_MODE,
     TraceSplitJob,
-    clamp_stream_overlaps,
+    clamp_or_skip_reason,
     copy_unsplit_trace,
+    default_split_num_steps,
     run_command,
     run_trace_split,
 )
+from hyperloom.orchestrator.trace_analysis.tracelens_arch_benchmark import normalize_platform
+from hyperloom.orchestrator.trace_analysis.tracelens_skill_runner import discover_capture_folder
+from hyperloom_common.timeutil import utc_now_compact
+
+from ._pd_role_trace import ROLE_STEADY_STATE_MODE
 
 log = logging.getLogger(__name__)
 
 PD_REPORT_CONFIG_NAME = "pd-run.yaml"
 AGGREGATED_CSVS_DIR = "perf_report_aggregated_csvs"
-AGGREGATION_POLICY = "combine_by_node"
-SPLIT_NUM_STEPS = 32
-_CAPTURE_DIR_NAMES = ("capture_traces", "graph_capture_profile", "graph_capture")
+_AGGREGATION_POLICY = "combine_by_node"
 _PHASE_ORDER = ("decode", "prefill")
 _SPLIT_BUDGET_MINUTES = 30
 _REPORT_TIMEOUT_S = 3600
@@ -60,20 +62,11 @@ class PdReportRun:
     tracelens_root: Path
 
 
-def role_capture_folder(trace_root: Path, role: str) -> str:
-    """The graph-capture folder ``role``'s server wrote under ``trace_root``; '' when none holds files."""
-    for name in _CAPTURE_DIR_NAMES:
-        folder = trace_root / role / name
-        if folder.is_dir() and any(path.is_file() for path in folder.iterdir()):
-            return str(folder)
-    return ""
-
-
-def _split_options() -> SimpleNamespace:
-    """The splitter options of a decode node: the decode-only or generic steady state, without LLM phase hints."""
+def _split_options(steady_state_mode: str) -> SimpleNamespace:
+    """The splitter options of a PD node: its role's steady state, without LLM phase hints."""
     return SimpleNamespace(
-        split_num_steps=SPLIT_NUM_STEPS,
-        steady_state_mode=DECODE_ONLY_OR_GENERIC_MODE,
+        split_num_steps=default_split_num_steps(),
+        steady_state_mode=steady_state_mode,
         budget_minutes=_SPLIT_BUDGET_MINUTES,
         split_llm_inference=False,
         split_conc="",
@@ -84,35 +77,40 @@ def _split_options() -> SimpleNamespace:
 
 def _clamp_chunk(chunk: Path) -> None:
     """Truncate the same-stream overrunning GPU events of ``chunk``; a chunk the clamp cannot read is kept as it is."""
-    try:
-        summary = clamp_stream_overlaps(chunk)
-    except (OSError, ValueError) as exc:
-        log.warning("pd combined report: stream overlap clamp skipped for %s: %s", chunk, exc)
+    summary = clamp_or_skip_reason(chunk)
+    if isinstance(summary, str):
+        log.warning("pd combined report: stream overlap clamp skipped for %s: %s", chunk, summary)
         return
     log.info("pd combined report: clamped %d event(s) in %s", summary["clamped_events"], chunk)
 
 
 def _node_chunk(trace_path: Path, split_dir: Path, phase: str, *, tracelens_root: Path, log_path: Path) -> Path:
-    """The steady-state chunk one node's trace contributes: a decode trace's split chunk, a prefill trace's copy,
-    clamped of same-stream overlaps."""
-    split_dir.mkdir(parents=True, exist_ok=True)
-    if phase == "prefill":
+    """The steady-state chunk one node's trace contributes as its role's mode prepares it: a split chunk, or a copy
+    of an unsplit trace, clamped of same-stream overlaps."""
+    mode = ROLE_STEADY_STATE_MODE[phase]
+    if mode == UNSPLIT_MODE:
         chunk = copy_unsplit_trace(trace_path, split_dir)
     else:
         job = TraceSplitJob(analysis_trace_path=trace_path, split_dir=split_dir, tl_root=tracelens_root)
-        chunk, _meta = run_trace_split(_split_options(), job, log_path, [])
+        chunk, _meta = run_trace_split(_split_options(mode), job, log_path, [])
     _clamp_chunk(chunk)
     return chunk
 
 
-def pd_report_config(jobs: list[dict[str, Any]], *, output_dir: Path, analysis_mode: str) -> dict[str, Any]:
+def _pd_report_config(jobs: list[dict[str, Any]], *, output_dir: Path, analysis_mode: str) -> dict[str, Any]:
     """The ``combine_by_node`` run config for ``jobs``."""
     return {
         "analysis_mode": analysis_mode,
         "output_dir": str(output_dir),
-        "aggregation": {"policy": AGGREGATION_POLICY},
+        "aggregation": {"policy": _AGGREGATION_POLICY},
         "jobs": jobs,
     }
+
+
+def _capture_folder(trace_root: Path, role: str) -> str:
+    """The graph-capture folder holding a capture trace that ``role``'s server wrote under ``trace_root``, or ''."""
+    folder = discover_capture_folder(trace_root / role, [])
+    return str(folder) if folder is not None else ""
 
 
 def _report_jobs(node_traces: dict[str, list[str]], run: PdReportRun, log_path: Path) -> list[dict[str, Any]]:
@@ -123,7 +121,7 @@ def _report_jobs(node_traces: dict[str, list[str]], run: PdReportRun, log_path: 
     prepare = functools.partial(_prepare_node, run=run, log_path=log_path)
     with ThreadPoolExecutor(max_workers=max(1, len(nodes))) as pool:
         chunks = list(pool.map(prepare, nodes))
-    captures = {phase: role_capture_folder(run.trace_root, phase) for phase in _PHASE_ORDER}
+    captures = {phase: _capture_folder(run.trace_root, phase) for phase in _PHASE_ORDER}
     jobs: list[dict[str, Any]] = []
     for (phase, node, _trace), chunk in zip(nodes, chunks):
         job: dict[str, Any] = {"phase": phase, "node": node, "trace_path": str(chunk), "platform": run.platform}
@@ -156,7 +154,7 @@ def run_pd_combined_report(node_traces: dict[str, list[str]], run: PdReportRun) 
             raise RuntimeError("no PD node traces to report")
         config_path.write_text(
             yaml.safe_dump(
-                pd_report_config(jobs, output_dir=output_dir, analysis_mode=run.analysis_mode), sort_keys=False
+                _pd_report_config(jobs, output_dir=output_dir, analysis_mode=run.analysis_mode), sort_keys=False
             ),
             encoding="utf-8",
         )
@@ -195,14 +193,14 @@ async def report_pd_profile(profile_result: dict[str, Any], *, framework: str, p
     trace_dir = str(profile_result.get("trace_dir") or "")
     if not node_traces or not trace_dir:
         return {}
-    stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    stamp = utc_now_compact()
     summary = await asyncio.to_thread(
         run_pd_combined_report,
         node_traces,
         PdReportRun(
             trace_root=Path(trace_dir),
             output_dir=Path(trace_dir).parent / "tracelens" / stamp,
-            platform=(platform or os.environ.get("GPU_TYPE", "")).strip().upper(),
+            platform=normalize_platform(platform),
             analysis_mode=tracelens_analysis_mode(framework),
             tracelens_root=paths.tracelens_root(),
         ),
