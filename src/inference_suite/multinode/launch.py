@@ -182,10 +182,11 @@ def launch_script(command: HostCommand, env: Mapping[str, str], framework: Frame
     return "\n".join([*lines, f"exec {command.command}"]) + "\n"
 
 
-def _driver_payload(role: str, pidfile: str, script: str, needle: str, mode: LaunchMode, action: str) -> str:
-    """Bash that writes the launch script of ``role`` and runs the driver ``action`` on it (``restart`` with
-    ``script``, or ``stop``)."""
+def _driver_payload(role: str, script: str, mode: LaunchMode, inputs: Mapping[str, str]) -> str:
+    """Bash that writes the launch script of ``role`` and runs the driver on it, ``inputs`` and the launch mode
+    exported as its ``HL_*`` environment."""
     marker = uuid.uuid4().hex
+    exported = {"HL_LAUNCH_PATH": _launch_path(role), **inputs, "HL_LAUNCH_MODE": mode.value}
     return "\n".join(
         [
             f"cat > {_launch_path(role)} << 'HL_LAUNCH_{marker}'",
@@ -193,8 +194,7 @@ def _driver_payload(role: str, pidfile: str, script: str, needle: str, mode: Lau
             f"HL_LAUNCH_{marker}",
             f"chmod +x {_launch_path(role)}",
             *_container_env_lines(mode),
-            f"export HL_LAUNCH_PATH={_launch_path(role)} HL_PIDFILE={pidfile} HL_ACTION={action}",
-            f"export HL_NEEDLE={shlex.quote(needle)} HL_LAUNCH_MODE={mode.value}",
+            "export " + " ".join(f"{key}={shlex.quote(value)}" for key, value in exported.items()),
             f"python3 - << 'HL_PY_{marker}'",
             _DRIVER.read_text(encoding="utf-8").rstrip("\n"),
             f"HL_PY_{marker}",
@@ -210,9 +210,12 @@ def _drive(cluster: Cluster, command: HostCommand, script: str, launch: PdLaunch
         LaunchError: the host did not report success.
     """
     action = "restart" if script else "stop"
-    needle = process_needle(command.role, launch.framework, launch.frontend.type)
-    pidfile = _pidfile(command.role, key)
-    payload = _driver_payload(command.role, pidfile, script, needle, cluster.nodes.launch_mode, action)
+    inputs = {
+        "HL_PIDFILE": _pidfile(command.role, key),
+        "HL_ACTION": action,
+        "HL_NEEDLE": process_needle(command.role, launch.framework, launch.frontend.type),
+    }
+    payload = _driver_payload(command.role, script, cluster.nodes.launch_mode, inputs)
     result = cluster.client.run(command.host, payload, _SSH_TIMEOUT_S)
     lines = [line for line in result.stdout.splitlines() if line.startswith("{")]
     report = json.loads(lines[-1]) if lines else {}
