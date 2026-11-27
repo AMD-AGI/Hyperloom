@@ -59,7 +59,6 @@ KERNEL_EVENT_SECTIONS: tuple[str, ...] = (
     "kernel_event",
     "kernel_lane_run",
     "kernel_rebench_attempt",
-    "kernel_trace_analyze",
     "kernel_geak_attempt",
     "kernel_geak_discovery",
     "kernel_geak_acceptance",

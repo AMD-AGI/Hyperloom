@@ -31,7 +31,6 @@ from ..policy.validators import (
 )
 from ..specialists.wall_budget import grant_wall_budget_extension
 from ..state.shared_state import inject_stack_base_params
-from ..state.analysis_failures import remember_trace_failure
 from ..state.experience_citations import merge_citations, normalize_citations, shown_ids
 from ..state.task_registry import TERMINAL_STATES, IllegalTransition, TaskNotFound, TaskSpec, create_on_free_key
 from hyperloom.inference_optimizer.trace.trajectory_trace import (
@@ -45,12 +44,7 @@ from hyperloom.inference_optimizer.trace.trajectory_trace import (
 )
 from ..kernel.request_handlers import KERNEL_REQUEST_HANDLERS
 from ..collaborator import CoordinatorCollaborator
-from .kernel_request import (
-    KernelRequest,
-    KernelRequestOutcome,
-    remembered_outcome,
-    run_kernel_handler,
-)
+from .kernel_request import KernelRequest, remembered_outcome, run_kernel_handler
 from ._escalate_hint import escalate_hint_denial
 from .message_delivery import publish_send_message
 from .intent_review import patch_verdict_subject, record_critic_review, record_review_outcome
@@ -697,46 +691,6 @@ class IntentRouter(CoordinatorCollaborator):
         self.shared_state.record_action_failure(action=kind, task_id=request_msg_id, result=result)
         self.shared_state.save(self.session_dir)
 
-    def _record_trace_analyze_outcome(self, payload: dict[str, Any], result: dict[str, Any]) -> None:
-        """Cache a successful analysis of a trace, or remember a failure the same trace reproduces."""
-        if result.get("status") in ("ok", "succeeded"):
-            self.shared_state.record_trace_analyze(payload, result)
-        else:
-            remember_trace_failure(self.shared_state, payload, result)
-
-    def _record_trace_analyze_on_timeline(
-        self,
-        *,
-        request_msg: Any,
-        source: str,
-        payload: dict[str, Any],
-        result: dict[str, Any],
-        cache_hit: bool,
-    ) -> None:
-        """Mirror a bus-requested analysis onto the visit that was running.
-
-        An analysis dispatched this way opens no roofline event of its own, so
-        without this the snapshot counter it advanced has nothing on the
-        timeline to account for it.
-        """
-        from hyperloom.inference_optimizer.breakdown.recorder.kernel_event_rows import record_trace_analyze_request
-        from hyperloom.inference_optimizer.breakdown.recorder.kernel_records import TraceAnalyzeRun
-
-        record_trace_analyze_request(
-            macro_cycle=int(self.shared_state.macro_cycle or 0),
-            run=TraceAnalyzeRun(
-                run_id=str(getattr(request_msg, "msg_id", "") or ""),
-                status=str(result.get("status") or ""),
-                result=result,
-                requested_by=source,
-                request_msg_id=str(getattr(request_msg, "msg_id", "") or ""),
-                trace_input=str(payload.get("trace_path") or payload.get("trace_input") or ""),
-                top_k=payload.get("top_k"),
-                snapshot=self.shared_state.last_trace_analyze,
-                cache_hit=cache_hit,
-            ),
-        )
-
     async def _reply(self, request_msg: Message, result: dict[str, Any], *, source: str) -> None:
         """Answer a request on the bus with *result*, logging it for FAILURE RECOVERY when it failed.
 
@@ -822,24 +776,10 @@ class IntentRouter(CoordinatorCollaborator):
             if outcome is None:
                 return
         await self._reply(request_msg, outcome.result, source=outcome.reply_source)
-        await self._record_kernel_outcome(request, outcome, requested_by=source)
+        await self._record_kernel_outcome(request, outcome.result)
 
-    async def _record_kernel_outcome(
-        self, request: KernelRequest, outcome: KernelRequestOutcome, *, requested_by: str
-    ) -> None:
-        """Fold what a kernel request produced back into shared state and onto the trajectory timeline."""
-        result = outcome.result
-        if request.kind == "trace_analyze":
-            if not outcome.from_cache:
-                self._record_trace_analyze_outcome(request.payload, result)
-                self.shared_state.save(self.session_dir)
-            self._record_trace_analyze_on_timeline(
-                request_msg=request.message,
-                source=requested_by,
-                payload=request.payload,
-                result=result,
-                cache_hit=outcome.from_cache,
-            )
+    async def _record_kernel_outcome(self, request: KernelRequest, result: dict[str, Any]) -> None:
+        """Fold what a kernel request produced back into shared state."""
         if request.kind != "integrate":
             return
         if result.get("status") != "skipped":

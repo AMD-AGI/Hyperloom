@@ -193,9 +193,9 @@ class KernelEventRecorder:
 
         The hot-kernel summary on a roofline event is intentionally thin; the
         KERNEL visit needs the per-kernel profiling fields that decide which
-        targets are worth rewriting. This is recorded as its own table rather
-        than folded into ``trace_analyze_runs`` so a reader does not have to
-        join against a capped top-15 summary missing ``kernel_id``.
+        targets are worth rewriting. This is recorded as its own table so a
+        reader does not have to join against a capped top-15 summary missing
+        ``kernel_id``.
 
         Args:
             snapshot (Mapping[str, Any] | None): A ``last_trace_analyze``-shaped

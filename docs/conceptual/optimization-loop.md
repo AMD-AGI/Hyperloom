@@ -649,8 +649,8 @@ are:
 `kernel_agent` is Coordinator-internal; admission rejects it with
 `rule="phase_incompatible"` if an LLM proposes it.
 
-Within the kernel-agent request channel, the handler dispatches request kinds
-such as `trace_analyze` and `integrate`
+Within the kernel-agent request channel, the handler dispatches the request
+kinds `integrate` and `apply_patch`
 (`request_handlers.py`); these are handler kinds, not phase actions.
 
 Kernel-owned results are recorded separately from non-kernel action

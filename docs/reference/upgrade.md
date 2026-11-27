@@ -215,6 +215,31 @@ from scripts, and read `reports/final.md` for the session's own summary and
 `HYPERLOOM_REPORT_MAX_TOKENS` are no longer read and are silently ignored, so
 drop them.
 
+### Required: the `trace_analyze` kernel request is removed
+
+Orchestration can no longer ask the kernel agent to analyse a trace. A
+`request` with `kind: trace_analyze` is answered like any kind with no handler:
+a failed `unknown_kernel_kind` response and a `last_action_failures` row. The
+analysis is produced only by the roofline executor: by the Coordinator's
+`roofline` action at PRELUDE, at each +10% watermark and on the KERNEL entry
+re-profile, and by the Forge GEMM lane's vLLM block-FP8 shape capture, which
+runs the same executor inline whatever `--enable-roofline` says. Read it in
+`last_trace_analyze`.
+
+* A session run with `--no-enable-roofline` profiles but gets no analysis
+  unless the block-FP8 GEMM shape capture runs one: without it there is no
+  `last_trace_analyze`, no `analysis.md` and no hot-kernel list. Drop the flag
+  if the session needs them.
+* `session_breakdown.json`: a `kernel_agent` event's `ext.forge` no longer has
+  `trace_analyze_runs`, and no `discovered_kernels` row has the provenance
+  `trace_analyze_run`. The schema stays `v6.1`. Read an analysis on the
+  `roofline` event of the action that ran it, or under `ext.forge.reprofile.run`
+  when the KERNEL entry re-profile ran it.
+* `state.json`: `analysis_failures` gains no `trace:<trace_input>` records;
+  the ones an earlier release wrote are ignored.
+* The `trace_analyze_done` response, its `cache_hit` lifecycle line and the
+  failure class `trace_analysis_failure_remembered` no longer occur.
+
 ---
 
 ## Upgrading from 1.1.x

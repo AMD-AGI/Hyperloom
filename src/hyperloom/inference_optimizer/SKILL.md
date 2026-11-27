@@ -26,7 +26,7 @@ objective progress.
 The CLI starts a Python Coordinator that coordinates:
 
 - Orchestration: decides next actions (`baseline`, `explore`, `specialist`, `integrate_patch`, `sweep`, Kernel requests). In CLOSE, the Coordinator auto-enqueues `report` at session end; Orchestration may also propose it.
-- Kernel (programmatic, not LLM): the Coordinator dispatches `trace_analyze`, `integrate`, and related request kinds directly to Python handlers without an LLM turn. The `run_gemm_tuning` and `run_fusion` lanes are Coordinator-owned: they run inside the `kernel_agent` task at KERNEL entry and PolicyGate rejects an agent request for either.
+- Kernel (programmatic, not LLM): the Coordinator dispatches the `integrate` request kind and its `apply_patch` alias directly to a Python handler without an LLM turn. The `run_gemm_tuning` and `run_fusion` lanes are Coordinator-owned: they run inside the `kernel_agent` task at KERNEL entry and PolicyGate rejects an agent request for either.
 - Critic: proposal review (default `--critic-agent`; see
   [Critic Backend Selection](#critic-backend-selection) for modes).
 
@@ -490,13 +490,6 @@ Rules that look reasonable but break the current flow:
   `patch_source='upstream_pr'`; there is no separate
   `framework_agent` action for the LLM to propose or be denied.
   Use `--no-framework-agent` to skip the phase entirely.
-- **`kernel_opt` sequencing** is no longer gated by an
-  explore-minimum check (the
-  `explore_attempts_minimum_before_kernel_opt` rule was retired
-  in loosen_plan P1_06). KERNEL_AGENT phase may propose `kernel_opt`
-  directly; the `trace_analyze → run_optimization` data
-  dependency (P2_11 handler-level check) and the reusable
-  `kernel_id` validation still keep the inputs valid.
 
 ## Setup
 
@@ -1599,19 +1592,20 @@ The optimizer should:
   Each analysis also stamps a decode roofline ceiling
   (`src/hyperloom/inference_optimizer/roofline_ceiling.py`) for the report's
   `## Roofline Comparison` section.
-3. Run `trace_analyze` once per trace/config and cache the result in
-  `last_trace_analyze`.
-4. Pick only `reusable_native_kernel_ids` for `run_optimization`.
-5. Require compile + correctness + microbench/E2E evidence before KEEP.
-6. Use `explore_search` to test parameters incrementally and remember
+3. Read the trace analysis from `last_trace_analyze`. It is not requestable:
+  the `roofline` of step 2 produces it (with `--no-enable-roofline`, only the
+  block-FP8 GEMM shape capture does), and the kernel lanes pick their own
+  targets from it.
+4. Require compile + correctness + microbench/E2E evidence before KEEP.
+5. Use `explore_search` to test parameters incrementally and remember
   rejected candidates across resume. The ledger keys entries by
   **content fingerprint** (a sha1 hash of sorted `extra_server_args` +
   sorted `extra_envs`), so renaming an already-tested variant does not
   bypass dedup — LLM-supplied `params.grid` is filtered through the same
   ledger as the default seed grid.
-7. Use `optimization_stack` so backend + params + kernel changes do not
+6. Use `optimization_stack` so backend + params + kernel changes do not
   overwrite each other.
-8. Use `sweep` to understand workload-specific results beyond the smoke
+7. Use `sweep` to understand workload-specific results beyond the smoke
   workload.
 
 ## Cache Topology & Cold-start Discipline
@@ -1687,7 +1681,7 @@ apply/rebuild and ask. Dry-run and analysis are safe.
 
 ## Kernel E2E Retry Discipline
 
-Microbench speedups are not enough. After `run_optimization` returns a candidate
+Microbench speedups are not enough. After a kernel lane returns a candidate
 kernel patch, `integrate` must validate the patch with E2E throughput and
 record every attempt in `state.json`.
 
@@ -1742,7 +1736,6 @@ Bypass with `--critic-mock` for offline / smoke runs. See
 ### Run-time signals
 
 - `No accelerator`: pin GPUs with `ROCR_VISIBLE_DEVICES`, not `HIP_VISIBLE_DEVICES`.
-- Repeated `trace_analyze` with unchanged trace/config: bug — reuse `last_trace_analyze`.
 - `correctness_passed=false`: do not integrate; the kernel-agent report must contain explicit correctness evidence.
 - `stop_reason=no_more_leverage`: stop and report; only resume if the user changes workload / search space / model / strategy.
 - Repeated `policy_denied` events (not a stop reason — nothing in the runtime reacts to them): each denial is a `policy_denied` observation in the denied agent's inbox and a `denials` row on the phase event in `session_breakdown.json`; read the rule and hint there, then change something substantive (a new `params.grid` variant or a sibling action family). Do not hand-edit `state.json`.

@@ -19,7 +19,7 @@ before any agent backend runs:
 
 1. `admission_denial_for_request` checks the baseline prerequisite and the
    time budget, and a request that fails either is policy-denied immediately
-   (no bus record): any registered kind but `trace_analyze` while
+   (no bus record): any registered kind while
    `baseline_tput == 0`, or an `integrate` / `apply_patch` whose expected
    cost — the `integrate` action's estimate, or one measured baseline round
    when longer — does not fit the time left in the session
@@ -43,7 +43,6 @@ No PolicyGate path runs for the RESPONSE because it's written directly through
 
 | Request kind | Handler | Entry point |
 |---|---|---|
-| `trace_analyze` | `trace_analyze_handler` | TraceLens `tracelens_analysis.py` |
 | `integrate` | `integrate_handler` | patch → re-baseline → KEEP/REVERT |
 | `apply_patch` | `integrate_handler` (alias) | same as `integrate` |
 

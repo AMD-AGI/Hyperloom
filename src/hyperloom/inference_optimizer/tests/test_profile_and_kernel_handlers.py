@@ -2977,49 +2977,21 @@ async def test_trace_analyze_handler_t4_failure_appends_to_existing_warnings(
     assert warnings[1]["code"] == "tracelens_analysis_failed"
 
 
-@pytest.mark.asyncio
-async def test_coordinator_answers_trace_analyze_with_the_registered_handler(session_dir, monkeypatch):
-    """With the dispatch table as shipped, trace_analyze reaches its handler instead of the unknown-kind reject."""
-
-    async def fake_run_subprocess(cmd, *, timeout_sec, **_kwargs):
-        return 0, json.dumps({"status": "ok", "hot_kernels": ["kernel_a"]}), ""
-
-    monkeypatch.setattr(ta, "_run_subprocess", fake_run_subprocess)
-    c = Coordinator(session_dir, backends=_backends_silent())
-    try:
-        await c.router.handle_intent(
-            "orchestration",
-            Intent(
-                type=IntentType.REQUEST,
-                payload={
-                    "target_agent": "kernel_agent",
-                    "kind": "trace_analyze",
-                    "params": {"trace_input": str(session_dir), "dry_run": True},
-                },
-            ),
-        )
-        (reply,) = await c.bus.tail(topic="response", to_agent="orchestration")
-        assert reply.payload["source"] == "programmatic_handler"
-        assert reply.payload["kind"] == "trace_analyze_done"
-        assert reply.payload["result"]["hot_kernels"] == ["kernel_a"]
-    finally:
-        await c.stop()
-
-
 # Coordinator — REQUEST programmatic handler integration
 @pytest.mark.asyncio
-async def test_coordinator_request_trace_analyze_uses_handler(session_dir):
-    """REQUEST{kind=trace_analyze} runs the registered handler programmatically and emits RESPONSE without the Kernel LLM."""
+async def test_coordinator_request_integrate_uses_handler(session_dir):
+    """REQUEST{kind=integrate} runs the registered handler programmatically and emits RESPONSE without the Kernel LLM."""
     c = Coordinator(session_dir, backends=_backends_silent())
+    c.shared_state.baseline_tput = 1234.5
 
     captured: dict = {}
 
     async def fake_handler(payload, *, session_dir):
         captured["payload"] = payload
         captured["session_dir"] = session_dir
-        return {"status": "ok", "hot_kernels": ["kernel_a", "kernel_b"]}
+        return {"status": "ok", "decision": "NEEDS_REVIEW", "kernel_id": "k009"}
 
-    with patch.dict(krh.KERNEL_REQUEST_HANDLERS, {"trace_analyze": fake_handler}):
+    with patch.dict(krh.KERNEL_REQUEST_HANDLERS, {"integrate": fake_handler}):
         try:
             await c.router.handle_intent(
                 "orchestration",
@@ -3027,8 +2999,8 @@ async def test_coordinator_request_trace_analyze_uses_handler(session_dir):
                     type=IntentType.REQUEST,
                     payload={
                         "target_agent": "kernel_agent",
-                        "kind": "trace_analyze",
-                        "params": {"trace_input": str(session_dir / "fake-trace.json.gz")},
+                        "kind": "integrate",
+                        "params": {"kernel_id": "k009", "patch_path": str(session_dir / "k009.py")},
                     },
                 ),
             )
@@ -3040,14 +3012,14 @@ async def test_coordinator_request_trace_analyze_uses_handler(session_dir):
             assert resp_msgs, "handler must emit RESPONSE without LLM"
             r = resp_msgs[0]
             assert r.from_agent == "kernel_agent"
-            assert r.payload["kind"] == "trace_analyze_done"
+            assert r.payload["kind"] == "integrate_done"
             assert r.payload["status"] == "ok"
-            assert r.payload["result"]["hot_kernels"] == ["kernel_a", "kernel_b"]
+            assert r.payload["result"]["kernel_id"] == "k009"
             assert r.payload["in_reply_to"] == req_id
             assert r.payload["source"] == "programmatic_handler"
 
             # And the handler did receive merged payload (params flattened in).
-            assert captured["payload"].get("trace_input") == str(session_dir / "fake-trace.json.gz")
+            assert captured["payload"].get("patch_path") == str(session_dir / "k009.py")
             assert captured["session_dir"] == session_dir
         finally:
             await c.stop()
@@ -3057,7 +3029,7 @@ async def test_coordinator_request_trace_analyze_uses_handler(session_dir):
 @pytest.mark.parametrize(
     ("payload", "kernel_enabled", "error_class", "result_keys"),
     [
-        ({"target_agent": "kernel_agent", "kind": "trace_analyze"}, False, "agent_disabled", ()),
+        ({"target_agent": "kernel_agent", "kind": "integrate"}, False, "agent_disabled", ()),
         (
             {"target_agent": "kernel_agent", "kind": "invent_brand_new_kind"},
             True,
@@ -3077,6 +3049,7 @@ async def test_coordinator_auto_reject_answers_in_one_envelope(
     c = Coordinator(session_dir, backends=_backends_silent())
     try:
         c.shared_state.kernel_enabled = kernel_enabled
+        c.shared_state.baseline_tput = 1234.5
         await c.router.handle_intent("orchestration", Intent(type=IntentType.REQUEST, payload=dict(payload)))
 
         requests = await c.bus.tail(topic="request", to_agent=payload["target_agent"])
@@ -3125,17 +3098,18 @@ async def test_a_padded_target_agent_reaches_its_handler(session_dir):
 async def test_coordinator_request_handler_exception_recorded(session_dir):
     """Handler crashes → RESPONSE.status='failed' + error_class set."""
     c = Coordinator(session_dir, backends=_backends_silent())
+    c.shared_state.baseline_tput = 1234.5
 
     async def bad_handler(payload, *, session_dir):
         raise RuntimeError("boom")
 
-    with patch.dict(krh.KERNEL_REQUEST_HANDLERS, {"trace_analyze": bad_handler}):
+    with patch.dict(krh.KERNEL_REQUEST_HANDLERS, {"integrate": bad_handler}):
         try:
             await c.router.handle_intent(
                 "orchestration",
                 Intent(
                     type=IntentType.REQUEST,
-                    payload={"target_agent": "kernel_agent", "kind": "trace_analyze"},
+                    payload={"target_agent": "kernel_agent", "kind": "integrate"},
                 ),
             )
             resp_msgs = await c.bus.tail(topic="response", to_agent="orchestration")

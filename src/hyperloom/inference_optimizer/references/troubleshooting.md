@@ -81,8 +81,6 @@ Bypass with `--critic-mock` for offline / smoke runs. See
 
 - `No accelerator`: pin GPUs with `ROCR_VISIBLE_DEVICES`, not
   `HIP_VISIBLE_DEVICES`.
-- Repeated `trace_analyze` with unchanged trace/config: bug — reuse
-  `last_trace_analyze`.
 - `correctness_passed=false`: do not integrate; the kernel-agent report must
   contain explicit correctness evidence.
 - `stop_reason=global_converged`: the cyclic phase machine exhausted leverage

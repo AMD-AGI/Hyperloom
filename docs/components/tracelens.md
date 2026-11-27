@@ -20,20 +20,19 @@ optimization search tree.
 
 ## Role in Hyperloom
 
-The orchestration runtime enters TraceLens through two paths:
-
-- The kernel request path:
-  `src/hyperloom/orchestrator/kernel/request_handlers.py` dispatches
-  `trace_analyze` requests to
-  `src/hyperloom/orchestrator/actions/executors/trace_analyze.py`, which runs
-  `python -m hyperloom.orchestrator.trace_analysis.tracelens_analysis` as a subprocess.
-  That module itself imports and calls `run_tracelens_skill` (the skill runner)
-  internally under the agent route — the runner is not a separate subprocess
-  dispatched by the orchestrator.
-- The composite roofline action: `RooflineExecutor`
-  (`src/hyperloom/orchestrator/actions/executors/roofline.py`) is an atomic
-  `profile` + `trace_analyze` pipeline that first profiles the workload in an
-  InferenceSuite profile round, then calls `trace_analyze_handler()` directly on the trace.
+The orchestration runtime enters TraceLens through the composite roofline
+action: `RooflineExecutor`
+(`src/hyperloom/orchestrator/actions/executors/roofline.py`) first profiles the
+workload in an InferenceSuite profile round, then calls
+`trace_analyze_handler()`
+(`src/hyperloom/orchestrator/actions/executors/trace_analyze.py`) on the trace.
+The handler runs
+`python -m hyperloom.orchestrator.trace_analysis.tracelens_analysis` as a subprocess.
+That module itself imports and calls `run_tracelens_skill` (the skill runner)
+internally under the agent route — the runner is not a separate subprocess
+dispatched by the orchestrator. The Coordinator runs the executor as the
+`roofline` action, and the Forge GEMM lane runs it inline for its vLLM
+block-FP8 shape capture; the Orchestration agent cannot request an analysis.
 
 Before profiling, Hyperloom lays TraceLens's runtime patch for vLLM/SGLang in a
 copy of the installed package on the host's local disk and puts that copy first

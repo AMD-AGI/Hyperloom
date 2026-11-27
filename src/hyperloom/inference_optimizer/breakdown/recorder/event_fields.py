@@ -207,7 +207,7 @@ def failure_row(
 
 
 def analysis_artifacts(result: dict[str, Any]) -> dict[str, Any]:
-    """Project the artifact paths a ``trace_analyze`` result surfaces, absent ones as ``""``."""
+    """Project the artifact paths a trace analysis result surfaces, absent ones as ``""``."""
     return {
         "trace_report_path": str(result.get("trace_report_path") or ""),
         "analysis_report_path": str(result.get("analysis_report_path") or ""),
@@ -219,7 +219,7 @@ def analysis_artifacts(result: dict[str, Any]) -> dict[str, Any]:
 
 
 def analysis_detail(result: Any) -> dict[str, Any]:
-    """Project one ``trace_analyze`` result into the shared detail block.
+    """Project one trace analysis result into the roofline event's detail block.
 
     ``route`` and ``tool`` both come from ``_build_analysis_meta`` -- the agent
     route reports ``agent`` / ``tracelens``, the no-LLM route ``non-llm`` /

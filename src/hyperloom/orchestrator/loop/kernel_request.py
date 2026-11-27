@@ -25,10 +25,6 @@ log = logging.getLogger(__name__)
 
 # Path-like keys surfaced from a kernel handler payload/result so operators can see where a step's artifacts went.
 _LIFECYCLE_PATH_KEYS: tuple[str, ...] = (
-    "trace_input",
-    "trace_dir",
-    "candidates_path",
-    "analysis_md_path",
     "kernel_candidates",
     "best_artifact_path",
     "patch_path",
@@ -41,13 +37,6 @@ _LIFECYCLE_PATH_KEYS: tuple[str, ...] = (
     "report_path",
     "json_path",
     "md_path",
-    "tracelens_agent_report",
-    # TraceLens analysis outputs surfaced by trace_analyze_handler.
-    "trace_report_path",
-    "analysis_report_path",
-    "tracelens_summary_path",
-    "kernel_roofline_path",
-    "cli_log_path",
 )
 
 
@@ -76,23 +65,10 @@ class KernelRequestOutcome(NamedTuple):
 
     result: dict[str, Any]
     reply_source: str
-    from_cache: bool
 
 
 def remembered_outcome(router: Any, request: KernelRequest) -> KernelRequestOutcome | None:
     """The outcome shared state already holds for *request*, or ``None`` when its handler must run."""
-    # Roofline data is read from the last_trace_analyze cache rather than auto-injected here.
-    cached = router._coord.phase_kernel.cached_kernel_request(request.kind, request.payload)
-    if cached is not None:
-        # A cache hit never runs the handler; emit a single END (detail=cache_hit) so the lifecycle log
-        # records the step.
-        router._coord.writeback.emit_lifecycle(
-            step=request.kind,
-            status="END",
-            artifacts=lifecycle_paths(cached),
-            detail="cache_hit",
-        )
-        return KernelRequestOutcome(cached, "shared_state_cache", True)
     if request.kind != "integrate":
         return None
     rejected = kernel_decisions.find_rejected_kernel_patch(router.shared_state, request.payload)
@@ -118,7 +94,7 @@ def remembered_outcome(router: Any, request: KernelRequest) -> KernelRequestOutc
         artifacts=lifecycle_paths(result),
         detail="rejected",
     )
-    return KernelRequestOutcome(result, "shared_state_kernel_rejection", True)
+    return KernelRequestOutcome(result, "shared_state_kernel_rejection")
 
 
 def seed_integrate_base_tput(router: Any, request: KernelRequest) -> None:
@@ -242,4 +218,4 @@ async def run_kernel_handler(router: Any, request: KernelRequest, handler: Any) 
         if handler_lease is not None:
             await router.locks.release(handler_lease)
     close_kernel_step(router, request.kind, result, started)
-    return KernelRequestOutcome(result, "programmatic_handler", False)
+    return KernelRequestOutcome(result, "programmatic_handler")

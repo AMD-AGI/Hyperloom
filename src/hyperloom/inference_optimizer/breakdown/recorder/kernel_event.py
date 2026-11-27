@@ -102,7 +102,6 @@ PRODUCER_GEAK = "geak_replay"
 SECTION_EVENT = "kernel_event"
 SECTION_LANE_RUN = "kernel_lane_run"
 SECTION_REBENCH = "kernel_rebench_attempt"
-SECTION_TRACE_ANALYZE = "kernel_trace_analyze"
 SECTION_GEAK_ATTEMPT = "kernel_geak_attempt"
 SECTION_GEAK_DISCOVERY = "kernel_geak_discovery"
 SECTION_GEAK_ACCEPTANCE = "kernel_geak_acceptance"
@@ -124,11 +123,6 @@ SECTION_INTEGRATE = "kernel_integrate"
 
 ROW_LANE_RUN = "lane_run"
 ROW_REBENCH = "rebench"
-ROW_TRACE_ANALYZE = "trace_analyze"
-
-#: What asked for an analysis. The bus request is its own trigger because it
-#: is the one path with no roofline event of its own to account for it.
-TRACE_ANALYZE_TRIGGER_BUS_REQUEST = "bus_request"
 
 ROW_GEAK_ATTEMPT = "geak_attempt"
 ROW_GEAK_DISCOVERY = "geak_discovery"
@@ -207,7 +201,6 @@ __all__ = [
     "SECTION_INTEGRATE",
     "SECTION_LANE_RUN",
     "SECTION_REBENCH",
-    "SECTION_TRACE_ANALYZE",
     "SETTLED_BY_INTEGRATE",
     "SETTLED_BY_LANE",
     "SETTLED_BY_REBENCH",
@@ -216,7 +209,6 @@ __all__ = [
     "SOURCE_GEAK_ENV_SELECTION",
     "SOURCE_GEMM_TUNING",
     "SOURCE_KERNEL_REWRITE",
-    "TRACE_ANALYZE_TRIGGER_BUS_REQUEST",
     "VERDICT_FAILED",
     "VERDICT_IMPROVED",
     "VERDICT_NO_IMPROVEMENT",
@@ -756,14 +748,12 @@ def _forge(
             **reprofile,
             "run": assemble_roofline_action(parts, event=event, task_id=str(reprofile.get("task_id") or "")),
         }
-    trace_runs = wire_rows(rows[SECTION_TRACE_ANALYZE])
     discovered = wire_rows(rows[SECTION_DISCOVERED], drop=("event_id", "rank"))
-    if not (reprofile or trace_runs or rows[SECTION_LANE_RUN] or discovered):
+    if not (reprofile or rows[SECTION_LANE_RUN] or discovered):
         return None
     return {
         "engaged": True,
         "reprofile": reprofile,
-        "trace_analyze_runs": trace_runs,
         "discovered_kernels": discovered,
         "recommended_kernels": [row for row in discovered if row.get("selected")],
     }
@@ -828,7 +818,6 @@ def _outcome(header: Mapping[str, Any], attempts: list[dict[str, Any]]) -> dict[
 
 #: The fields one event's rows are ordered by, per section.
 _ROW_ORDER: dict[str, tuple[str, ...]] = {
-    SECTION_TRACE_ANALYZE: ("ts", "run_id"),
     SECTION_LANE_RUN: ("started_at", "run_id"),
     SECTION_REBENCH: ("attempt_id",),
     SECTION_GEAK_DISCOVERY: ("ordinal", "source"),

@@ -458,10 +458,11 @@ the code actually is; SESSION CONTEXT names the tree this session optimises
 <!-- phase: KERNEL_AGENT -->
 ### Kernel request kinds
 
-* `kind` MUST be EXACTLY one of `trace_analyze` / `integrate` /
-  `apply_patch` — the kinds you may request. `kernel_opt` and `gemm_tuning`
-  are action names, NOT recognised request kinds — never use either as a
-  request kind. Use `trace_analyze` for candidate analysis.
+* `kind` MUST be EXACTLY `integrate` or `apply_patch` — the kinds you may
+  request. `kernel_opt` and `gemm_tuning` are action names, NOT recognised
+  request kinds — never use either as a request kind. Candidate analysis is
+  not requestable either: read the one the session holds in
+  `last_trace_analyze`.
 * Source-level kernel rewrite has no request kind at all. The phase-level
   KernelForge rewrite controller owns operator discovery, selection and
   dispatch: it reads the trace and source evidence itself and returns patch
@@ -479,8 +480,6 @@ the code actually is; SESSION CONTEXT names the tree this session optimises
   `fusion:forge_fusion` entry. Read them as
   progress; to act on a source-level kernel yourself, `integrate` the KEEPs
   the optimization lane queues in `pending_keep_kernels`.
-* Never invent a `trace_input` path. ONLY use `SharedState.last_profile_trace`
-  verbatim.
 
 <!-- phase: PRELUDE, ENABLEMENT, FRAMEWORK_AGENT, KERNEL_AGENT -->
 ### Roofline / profile analysis (auto-managed — you cannot propose it)
@@ -498,7 +497,7 @@ The SharedState dump carries the full TraceLens `analysis.md` in an
 gain = X.XX%) ===` bookends. Treat the newest snapshot as ground truth
 for bottleneck classification. Read it as a perf report: Executive
 Summary (dominant bound), Top Operations (per-kernel `gpu_pct` +
-`kernel_id` strings for `trace_analyze`), Recommendations (candidate
+`kernel_id` strings), Recommendations (candidate
 actions). Priority markers `🔴`/`🟡`/`🟢` map to actions — **follow
 them**:
 

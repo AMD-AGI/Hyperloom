@@ -474,7 +474,7 @@ async def trace_analyze_handler(
     trace_input = payload.get("trace_input") or payload.get("trace_dir")
     if not trace_input:
         return {"status": "failed", "error": "missing 'trace_input' in payload"}
-    # Backfill workload context from SharedState when Orchestration omits it.
+    # Whatever the caller's payload leaves out of the workload context comes from SharedState.
     from ...state.shared_state import SharedState
 
     state = SharedState.load_or_init(session_dir)

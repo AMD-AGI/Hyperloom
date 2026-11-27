@@ -116,6 +116,13 @@ The value `bypass` is no longer written either: `route` is `agent` or
 entry, a trace certificate's `usable_by` names only `tracelens`, and the
 warning code `bypass_graph_under_recorded` is now `graph_under_recorded`.
 
+Orchestration can no longer request a trace analysis of the kernel agent, so
+`kernel_agent` `ext.forge.trace_analyze_runs` is removed with the disposition
+`removed in 6.1, producer removed`, and no `ext.forge.discovered_kernels[]` row
+carries the provenance `trace_analyze_run`. An analysis is recorded by the
+roofline action that ran it: on a `roofline` event, or under
+`ext.forge.reprofile.run` when the KERNEL entry re-profile ran it.
+
 The loop no longer holds a Critic verdict to an advisory rule, so the keys that
 recorded the hold are removed with the disposition
 `removed in 6.1, producer removed`: `critic_review.held_to_rule`,

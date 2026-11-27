@@ -60,75 +60,6 @@ async def test_report_prefers_ctx_extra_over_env(tmp_path, monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_trace_analyze_caches_result_to_shared_state(session_dir, monkeypatch, tmp_path):
-    """Successful trace_analyze caches; an identical request short-circuits the handler."""
-    c = Coordinator(session_dir, backends=silent_backends())
-    try:
-        from hyperloom.orchestrator.kernel import request_handlers as kernel_request_handlers
-
-        candidates_path = tmp_path / "kernel_candidates.json"
-        candidates_path.write_text("{}", encoding="utf-8")
-        call_count = {"n": 0}
-
-        async def fake_handler(payload, *, session_dir):
-            call_count["n"] += 1
-            return {
-                "status": "ok",
-                "candidates_path": str(candidates_path),
-                "hot_kernels": [
-                    {
-                        "kernel_id": "k001",
-                        "name": "kA",
-                        "gpu_pct": 30.0,
-                        "source_file": "/sgl-workspace/aiter/csrc/x.cu",
-                        "reusable_native_kernel": True,
-                    },
-                ],
-            }
-
-        monkeypatch.setitem(
-            kernel_request_handlers.KERNEL_REQUEST_HANDLERS,
-            "trace_analyze",
-            fake_handler,
-        )
-
-        intent = Intent(
-            type=IntentType.REQUEST,
-            payload={
-                "target_agent": "kernel_agent",
-                "kind": "trace_analyze",
-                "params": {"trace_input": str(session_dir / "trace-A.json.gz")},
-            },
-        )
-        await c.router.handle_intent("orchestration", intent)
-        await c.router.handle_intent("orchestration", intent)
-
-        assert call_count["n"] == 1, "second identical request must hit the cache"
-        cached = c.shared_state.last_trace_analyze
-        assert cached["trace_input"] == str(session_dir / "trace-A.json.gz")
-        assert cached["candidates_path"] == str(candidates_path)
-        assert cached["hot_kernels_top15"][0]["kernel_id"] == "k001"
-        assert "k001" in cached["reusable_native_kernel_ids"]
-
-        await c.router.handle_intent(
-            "orchestration",
-            Intent(
-                type=IntentType.REQUEST,
-                payload={
-                    "target_agent": "kernel_agent",
-                    "kind": "trace_analyze",
-                    "params": {"trace_input": str(session_dir / "trace-B.json.gz")},
-                },
-            ),
-        )
-        assert call_count["n"] == 2
-
-        assert "last_trace_analyze=" in c.shared_state.to_prompt_summary()
-    finally:
-        await c.stop()
-
-
-@pytest.mark.asyncio
 async def test_profile_promotion_records_args_and_clears_select_cache(session_dir):
     """A new profile clears the trace_analyze cache and stamps the server config."""
     c = Coordinator(session_dir, backends=silent_backends())
@@ -233,21 +164,22 @@ async def test_request_response_visible_in_next_prompt(session_dir, monkeypatch)
     from hyperloom.orchestrator.kernel import request_handlers as krh
 
     async def fake_handler(payload, *, session_dir):
-        return {"status": "ok", "selected_kernels": [{"rank": 1, "name": "x"}]}
+        return {"status": "ok", "decision": "NEEDS_REVIEW", "kernel_id": "k001"}
 
-    monkeypatch.setitem(krh.KERNEL_REQUEST_HANDLERS, "trace_analyze", fake_handler)
+    monkeypatch.setitem(krh.KERNEL_REQUEST_HANDLERS, "integrate", fake_handler)
     request = Intent(
         type=IntentType.REQUEST,
         payload={
             "target_agent": "kernel_agent",
-            "kind": "trace_analyze",
-            "params": {"trace_input": str(session_dir / "t.json")},
+            "kind": "integrate",
+            "params": {"kernel_id": "k001", "patch_path": str(session_dir / "k001.py")},
         },
     )
     c = Coordinator(session_dir, backends=_orchestration_turn(MockTurn(intents=[request])))
+    c.shared_state.baseline_tput = 100.0
     try:
         await c.reactor_pass("orchestration")
-        assert "trace_analyze_done" in (await c.conversation.compose_prompt("orchestration")).text
+        assert "integrate_done" in (await c.conversation.compose_prompt("orchestration")).text
     finally:
         await c.stop()
 

@@ -227,8 +227,7 @@ class AdmissionMixin:
         Args:
             target_agent: The request's target agent; only ``"kernel_agent"`` is
                 gated.
-            kind: The kernel request kind; ``trace_analyze`` and unknown kinds
-                are exempt.
+            kind: The kernel request kind; unknown kinds are exempt.
 
         Returns:
             A :class:`PolicyDenied` when the kernel request must wait for
@@ -237,8 +236,6 @@ class AdmissionMixin:
         target = str(target_agent or "").strip()
         req_kind = str(kind or "").strip()
         if target != "kernel_agent" or self.shared_state.stop_reason:
-            return None
-        if req_kind == "trace_analyze":
             return None
         if req_kind not in KERNEL_REQUEST_HANDLERS:
             return None

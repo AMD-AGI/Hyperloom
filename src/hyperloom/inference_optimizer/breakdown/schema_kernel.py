@@ -35,53 +35,6 @@ class V6KernelReprofile(TypedDict, total=False):
     snapshot_id_after: int | None
 
 
-class V6KernelAnalysisArtifacts(TypedDict, total=False):
-    """Paths one trace-analysis run produced."""
-
-    trace_report_path: str
-    analysis_report_path: str
-    candidates_path: str
-    kernel_roofline_path: str
-    tracelens_summary_path: str
-    cli_log_path: str
-
-
-class V6KernelAnalysisDetail(TypedDict, total=False):
-    """Trace-analysis metadata shared by the roofline and kernel events."""
-
-    route: str
-    tool: str
-    tool_run_id: str
-    steady_state: dict[str, Any]
-    preflight: dict[str, Any]
-    split: dict[str, Any]
-    selection: dict[str, Any]
-    steps: Any
-    route_ext: dict[str, Any]
-    hot_kernels: dict[str, Any]
-    warnings: list[dict[str, Any]]
-    artifacts: V6KernelAnalysisArtifacts
-
-
-class V6KernelTraceAnalyzeRun(V6KernelAnalysisDetail, total=False):
-    """One analysis the KERNEL phase requested for itself."""
-
-    run_id: str
-    trigger: str | None
-    requested_by: str | None
-    request_msg_id: str | None
-    ts: str
-    status: str
-    cache_hit: bool
-    trace_input: str | None
-    top_k: int | None
-    roofline_snapshot_id: int | None
-    roofline_baseline_gain_at_snapshot: float | None
-    steady_state_trace: str | None
-    analysis_md_path: str | None
-    reusable_native_kernel_ids: list[str]
-
-
 class V6KernelRewriteE2E(TypedDict, total=False):
     """End-to-end integration sub-result of one kernel rewrite.
 
@@ -157,12 +110,11 @@ class V6KernelForge(TypedDict, total=False):
 
     The candidates forge produced are not here: they are on ``ext.attempts``
     beside GEAK's, under one set of names. What remains is the work only forge
-    does -- the re-profile it can run on entry, and the trace analysis that
-    nominates its targets."""
+    does -- the re-profile it can run on entry, and the kernels the trace
+    analysis found for it."""
 
     engaged: bool
     reprofile: V6KernelReprofile | None
-    trace_analyze_runs: list[V6KernelTraceAnalyzeRun]
     discovered_kernels: list[V6KernelDiscoveredKernel]
     recommended_kernels: list[V6KernelDiscoveredKernel]
 
@@ -588,8 +540,6 @@ class V6KernelExt(TypedDict, total=False):
 
 
 __all__ = [
-    "V6KernelAnalysisArtifacts",
-    "V6KernelAnalysisDetail",
     "V6KernelAttempt",
     "V6KernelDeliveredRow",
     "V6KernelDiscoveredKernel",
@@ -614,6 +564,5 @@ __all__ = [
     "V6KernelReprofile",
     "V6KernelRewriteE2E",
     "V6KernelStackDelta",
-    "V6KernelTraceAnalyzeRun",
     "V6Throughput",
 ]

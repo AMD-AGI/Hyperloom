@@ -453,8 +453,8 @@ def test_policy_path_inside_session_dir_passes(tmp_path):
         type=IntentType.REQUEST,
         payload={
             "target_agent": "kernel_agent",
-            "kind": "trace_analyze",
-            "params": {"trace_input": str(tmp_path / "runs" / "profile" / "x.json.gz")},
+            "kind": "integrate",
+            "params": {"patch_path": str(tmp_path / "runs" / "kernel" / "k001.patch")},
         },
     )
     gate.validate_intent("orchestration", intent)
@@ -466,8 +466,8 @@ def test_policy_path_outside_session_dir_denied(tmp_path):
         type=IntentType.REQUEST,
         payload={
             "target_agent": "kernel_agent",
-            "kind": "trace_analyze",
-            "params": {"trace_input": "/tmp/some-trace.json.gz"},
+            "kind": "integrate",
+            "params": {"patch_path": "/tmp/k001.patch"},
         },
     )
     with pytest.raises(PolicyDenied) as exc:

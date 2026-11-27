@@ -231,14 +231,3 @@ def test_run_optimization_request_no_longer_blocked_by_stale_trace_analyze(
     s.last_profile_trace = "/tmp/profile.tar.gz"
     s.last_trace_analyze = {}
     assert coord.dispatcher.admission_denial_for_request("kernel_agent", "run_optimization") is None
-
-
-def test_trace_analyze_request_itself_passes(session_dir):
-    """A ``trace_analyze`` REQUEST bypasses its own prerequisite check; baseline still applies."""
-    coord = Coordinator(session_dir, backends=_backends_full())
-    _write_baseline_json(session_dir)
-    s = coord.shared_state
-    s.baseline_tput = 100.0
-    s.last_profile_trace = "/tmp/profile.tar.gz"
-    s.last_trace_analyze = {}
-    assert coord.dispatcher.admission_denial_for_request("kernel_agent", "trace_analyze") is None
