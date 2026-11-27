@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import subprocess
+import sys
 from pathlib import Path
 
 import yaml
@@ -216,3 +217,26 @@ def test_combined_report_splits_the_decode_nodes_concurrently_in_node_order(tmp_
         (node, str(out_dir / "trace_split" / f"decode_{node}" / f"{trace.name}.chunk"))
         for node, trace in enumerate(traces)
     ]
+
+
+def test_the_cli_imports_without_tracelens() -> None:
+    probe = "import sys; sys.modules['TraceLens'] = None; import hyperloom.inference_optimizer.cli.executors"
+    done = subprocess.run([sys.executable, "-c", probe], capture_output=True, text=True, check=False)
+    assert done.returncode == 0, done.stderr[-2000:]
+
+
+def test_combined_report_fails_soft_when_its_output_dir_cannot_be_made(tmp_path: Path) -> None:
+    blocker = tmp_path / "file"
+    blocker.write_text("x")
+    result = combined.run_pd_combined_report(
+        {"decode": ["/t/1-TP-0.trace.json.gz"]},
+        combined.PdReportRun(
+            trace_root=tmp_path,
+            output_dir=blocker / "tracelens",
+            platform="MI300X",
+            analysis_mode="inference",
+            tracelens_root=tmp_path,
+        ),
+    )
+    assert result["status"] == "failed"
+    assert "file" in result["error"]

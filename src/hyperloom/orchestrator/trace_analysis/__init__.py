@@ -5,7 +5,7 @@
 
 from __future__ import annotations
 
-from ._capture_shapes import is_capture_fragment
+from ._capture_shapes import discover_capture_folder, is_capture_fragment
 from ._stream_overlap_repair import clamp_or_skip_reason
 from ._trace_inputs import count_gpu_kernel_events, discover_trace_inputs
 from ._trace_split import (
@@ -26,6 +26,7 @@ __all__ = [
     "copy_unsplit_trace",
     "count_gpu_kernel_events",
     "default_split_num_steps",
+    "discover_capture_folder",
     "discover_trace_inputs",
     "is_capture_fragment",
     "run_command",
