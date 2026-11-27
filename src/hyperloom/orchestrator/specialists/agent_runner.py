@@ -218,8 +218,6 @@ class AgentHandle:
 class AgentRunner(Protocol):
     """Launches, polls, cancels and collects agent CLI sessions."""
 
-    name: str
-
     def launch(self, spec: AgentLaunchSpec) -> Awaitable[AgentHandle]:
         """Start the CLI ``spec`` describes and return the handle of its session. A launch that fails once the CLI has
         started ends it, and what it started, before the error is raised."""
@@ -479,8 +477,6 @@ def _refuse_stale_done_paths(spec: AgentLaunchSpec) -> None:
 
 class LocalAgentRunner:
     """Run agent CLIs as local subprocesses of this process (the default implementation)."""
-
-    name = "local"
 
     def __init__(
         self,
