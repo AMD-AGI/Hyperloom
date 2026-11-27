@@ -1046,21 +1046,6 @@ def test_validate_envelope_structural_errors() -> None:
         validate_envelope({"intents": [{"intent_type": "bad_type", "payload": {}}]})
 
 
-def test_validate_envelope_review_verdict_map_keys() -> None:
-    from hyperloom.inference_optimizer.protocol.intent import IntentValidationError, validate_envelope
-
-    bad = {
-        "intents": [
-            {
-                "intent_type": "review_verdict",
-                "payload": {"target_proposal_msg_id": "m1", "verdict_map": {"": {"verdict": "approve"}}},
-            }
-        ]
-    }
-    with pytest.raises(IntentValidationError):
-        validate_envelope(bad)
-
-
 # inference_optimizer.session.paths
 
 
@@ -1129,48 +1114,6 @@ def test_multi_node_state_paths_warn_on_permission_failures(monkeypatch: pytest.
     state_paths._ensure_runtime_dir(runtime_dir)
     assert runtime_dir.is_dir()
     assert "could not chmod runtime dir" in messages[-1]
-
-
-# Tests for breakdown.reporters
-
-
-def test_roofline_and_workload_render_minimal_inputs() -> None:
-    from hyperloom.inference_optimizer.breakdown.reporters._renderers import roofline, workload
-
-    roof = roofline.render(
-        {
-            "timeline": [
-                {
-                    "type": "roofline",
-                    "ext": {
-                        "actions": [
-                            {"outcome": {"snapshot": {"snapshot_id": 1, "top_kernel": {"name": "k1", "gpu_pct": 12.3}}}}
-                        ]
-                    },
-                }
-            ]
-        }
-    )
-    assert not roof.skipped
-    assert "k1" in roof.markdown_block
-
-    wk = workload.render({"metadata": {"task_config": {"model_name": "m", "framework_name": "sglang"}}})
-    assert not wk.skipped
-    assert "sglang" in wk.markdown_block
-
-
-def test_llm_prompt_parse_response_edges() -> None:
-    from hyperloom.inference_optimizer.breakdown.reporters.llm_prompt import parse_llm_response
-
-    fenced = """```json
-{"executive_summary": "  ok  ", "section_narratives": {"a": "  first  ", "2": "two"}}
-```"""
-    parsed = parse_llm_response(fenced)
-    assert parsed["executive_summary"] == "ok"
-    assert parsed["section_narratives"] == {"a": "first", "2": "two"}
-
-    assert parse_llm_response("not json") == {"executive_summary": "", "section_narratives": {}}
-    assert parse_llm_response("[]") == {"executive_summary": "", "section_narratives": {}}
 
 
 # orchestrator.specialists.profile

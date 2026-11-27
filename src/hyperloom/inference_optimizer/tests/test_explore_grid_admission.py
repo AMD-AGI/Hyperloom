@@ -185,7 +185,7 @@ class TestBothWaysAnExploreReachesTheRegistry:
 
 
 class TestTheApprovedProposalIsJudgedAgain:
-    """Admission judged the grid the proposal carried; the Critic filter and the seed sources move under it."""
+    """Admission judged the grid the proposal carried; the seed sources move under it."""
 
     async def test_an_approved_explore_that_names_no_grid_is_not_materialized(self, coord: Coordinator):
         await coord.proposals.materialize_approved_proposal(_approved_explore("p1"))

@@ -47,7 +47,6 @@ class AgentRole:
 
     name: str
     allowed_intents: frozenset[IntentType]
-    can_delegate_side_effects: bool = False
     no_tools: bool = False
 
     @property
@@ -66,12 +65,10 @@ def default_role_registry() -> dict[str, AgentRole]:
         "orchestration": AgentRole(
             name="orchestration",
             allowed_intents=_ORCHESTRATION_INTENTS,
-            can_delegate_side_effects=True,
         ),
         "critic": AgentRole(
             name="critic",
             allowed_intents=_CRITIC_INTENTS,
-            can_delegate_side_effects=False,
             no_tools=True,
         ),
     }

@@ -31,6 +31,8 @@ AGENTX_CLIENT_SCRIPTS = frozenset({MLPERF_CLIENT_SCRIPT})
 AIPERF_ARTIFACT_DIRS = (AIPERF_EXPORT_DIR, f"*/{AIPERF_EXPORT_DIR}")
 
 BACKEND_ENV = "HYPERLOOM_AGENTIC_BACKEND"
+#: The client environment variable naming the trace corpus a canonical AgentX replay loads.
+AGENTX_TRACE_ENV = "WEKA_LOADER_OVERRIDE"
 
 # The MLPerf agentic v6 corpus and the two flows ``run_agentic.sh`` accepts.
 MLPERF_CORPUS = "agentic_combined_v6"
@@ -165,6 +167,12 @@ def agentx_concurrency(env: Mapping[str, str] | None = None) -> int:
     runtime = os.environ if env is None else env
     raw = str(runtime.get(ENV_CONC) or "").strip()
     return int(raw) if raw.isdigit() and int(raw) > 0 else 0
+
+
+def agentx_trace(point_envs: Mapping[str, str], base_client_env: Mapping[str, str]) -> str | None:
+    """The trace corpus an AgentX point replays: the point's own :data:`AGENTX_TRACE_ENV`, else its base launch's client
+    env's; ``None`` when neither names one."""
+    return point_envs.get(AGENTX_TRACE_ENV, "").strip() or base_client_env.get(AGENTX_TRACE_ENV)
 
 
 def agentx_warmup_requests(conc: int) -> int:

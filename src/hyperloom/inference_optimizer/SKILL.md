@@ -1594,7 +1594,7 @@ The optimizer should:
   `roofline` (profile + trace_analyze + analysis.md); `--no-enable-roofline`
   switches to plain `profile`. The LLM cannot propose either —
   both names are Coordinator-managed and a proposal for either is denied with
-  `rule="coordinator_managed_action"`. Concurrent GPU work is
+  `rule="phase_incompatible"`. Concurrent GPU work is
   serialised by the lane / GPU lease rather than a policy deny, so
   explore / kernel dispatches keep flowing while analysis refreshes.
   Each analysis also stamps a decode roofline ceiling
@@ -1746,7 +1746,7 @@ Bypass with `--critic-mock` for offline / smoke runs. See
 - Repeated `trace_analyze` with unchanged trace/config: bug — reuse `last_trace_analyze`.
 - `correctness_passed=false`: do not integrate; the kernel-agent report must contain explicit correctness evidence.
 - `stop_reason=no_more_leverage`: stop and report; only resume if the user changes workload / search space / model / strategy.
-- `policy_denied` streaks (not a stop reason — nothing in the runtime stops a run over them): repeated denial of the same (action, rule) pair is advisory only — there is no auto-prune at streak ≥5 and no stop at streak ≥10. Inspect `SharedState.policy_denial_history` via the `why_denied` tool or the `=== Recent policy denials ===` block, then change something substantive (a new `params.grid` variant or a sibling action family). Do not hand-edit `state.json`.
+- Repeated `policy_denied` events (not a stop reason — nothing in the runtime reacts to them): each denial is a `policy_denied` observation in the denied agent's inbox and a `denials` row on the phase event in `session_breakdown.json`; read the rule and hint there, then change something substantive (a new `params.grid` variant or a sibling action family). Do not hand-edit `state.json`.
 - `stop_reason=time_exhausted`: resume same session (`--resume-from`); do not start fresh.
 
 ## Report Back To User

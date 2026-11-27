@@ -492,10 +492,6 @@ class SharedState(
     # ``current_best.action`` in effect when ``last_profile_workload`` was recorded, so the backfill in
     # ``current_profile_workload_context`` can tell a same-arm reuse from a stale one.
     last_profile_workload_action: str = ""
-    # Rolling log of PolicyGate denials (newest last, cap 50).
-    policy_denial_history: list[dict[str, Any]] = field(default_factory=list)
-    # Per-(action_name, rule) consecutive denial counter.
-    policy_denial_streak: dict[str, int] = field(default_factory=dict)
     # Server EXTRA_SGLANG_ARGS in effect when last_profile_trace was captured; identical args means the same trace.
     last_profile_args: str = ""
     # Merged host-side rewrite evidence document from the most recent profile (see ``_framework_rewrite_evidence``).

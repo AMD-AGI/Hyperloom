@@ -138,7 +138,7 @@ label of the card the session reads when the card names its model; otherwise
   out is refused; `--allow-shared-npm-node` (on every launch and resume)
   measures anyway and records the cards left out.
 - **Cluster topology & multi-node backend:** `--nodes`, `--gpus-per-node`,
-  `--gpu-type`, `--mn-backend` (`rayjob` / `infera`), `--server-args` (rayjob).
+  `--gpu-type`, `--mn-backend` (`rayjob` / `infera` / `atomesh` / `sglangrouter`), `--server-args` (rayjob).
   Per-pod sizing, the pod image and pod-side env are the provisioning
   platform's inputs, not `optimize` flags — the cluster already exists by the
   time the optimizer runs.
@@ -359,9 +359,12 @@ Globally, on every backend including the default `geak`:
 
 - **`kernel_opt` and `gemm_tuning` are no longer model-issued.** Orchestration
   can neither propose either action nor request `run_optimization` /
-  `run_gemm_tuning` of the kernel agent; both are refused as
-  `phase_incompatible`. The Coordinator dispatches each lane once at KERNEL
-  entry from a lane budget, the way the fusion lane already worked. `integrate` stays proposable, so draining the KEEP queue is still the
+  `run_gemm_tuning` of the kernel agent: a proposal of either action is refused
+  as `phase_incompatible`, a request for `run_gemm_tuning` as `request_kind`,
+  and `run_optimization` has no handler, so a request for it is answered with a
+  failed `unknown_kernel_kind` response. The Coordinator dispatches each lane
+  once at KERNEL entry from a lane budget, the way the fusion lane already
+  worked. `integrate` stays proposable, so draining the KEEP queue is still the
   model's job.
 
 On the `forge` KERNEL path only (`KERNEL_OPT_BACKEND_ORDER=forge`; the default
@@ -653,6 +656,7 @@ that tells the optimizer a cluster is ready; the rest describe how to reach it.
 | Variable | Backend | Required | Description |
 |----------|---------|----------|-------------|
 | `TOPOLOGY_HANDOFF_FILE` | both | No | Path to a TopologyHandoff v1 JSON file (`"schema": "topology-handoff/v1"`) the platform wrote. When set (non-empty) it is the hand-off and the `HYPERLOOM_MN_EXT_*` and `INFERENCE_OPTIMIZER_MN_BACKEND` variables are not read for the fields it carries. The launch flags win over it: `--mn-backend` over `backend`, `--gpus-per-node` over `gpus_per_node`, and `--nodes` over `nodes` (`optimize` exports `INFERENCE_OPTIMIZER_NODES` and `INFERENCE_OPTIMIZER_GPUS_PER_NODE` from the flags, and a value set there is never replaced by the file's); the file fills in `backend` and `gpus_per_node` when their flag is omitted. When unset, the variables below apply unchanged. |
+| `HYPERLOOM_MN_NODE_LIST` | atomesh, sglangrouter, infera | atomesh and sglangrouter | JSON node list the platform hands over: the framework, model, service URL, router, each role's hosts, GPUs per node and SSH access. See [Multi-node](multi-node.md). |
 | `HYPERLOOM_MN_EXT_SERVICE_URL` | both | **yes** | Benchmark frontend URL (`http(s)://…`; infera frontend typically `:8000`). Its presence triggers external mode. |
 | `HYPERLOOM_MN_EXT_SSH_KEY` | infera | **yes** | Private SSH key already authorized on the pods (the platform installs the public half at create time). |
 | `HYPERLOOM_MN_EXT_PREFILL_IPS` / `_DECODE_IPS` | infera | PD | Prefill / decode pod IPs (comma-separated) for PD-disaggregated runs. |
@@ -743,9 +747,14 @@ network file system run at tens of MB/s per rank. With this switch on, the
 process that boots a measured server also reads the checkpoint into the page
 cache with 8 sequential streams from the spawn until the server is ready
 (`hyperloom_common.weight_prefetch`): only a checkpoint on a network or FUSE
-file system, only as much as the memory headroom allows
-(`memory.max - memory.current` less a tenth of the limit, at least 16 GiB),
-and again for what the loader drops from the cache, at most three times. A
+file system, the largest files first (a loader faults a very large file in one
+stream per rank, and often reads it last), only as much as the memory headroom
+allows (`memory.max - memory.current` less a tenth of the limit, at least
+16 GiB, looked at again before each 1 GiB it reads). Until the server is ready
+it samples every second how much of each chosen file is still cached, and when
+files it had cached lost at least half of their pages (a loader that drops the
+checkpoint's page cache, such as SGLang's engram host table), it reads them
+again at once, largest first, at most eight times. A
 checkpoint the round's account neither owns nor may write is read once and not
 refilled: Linux does not tell such an account which of its pages are cached, so
 each file is read whole by its size within the same headroom, and what the

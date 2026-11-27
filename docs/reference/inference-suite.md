@@ -329,7 +329,7 @@ python -m inference_suite.staging check --tool-cache <dir>
 
 ## Command line
 
-`python -m inference_suite` has five commands:
+`python -m inference_suite` has six commands:
 
 | Command | Behavior |
 |---|---|
@@ -338,14 +338,15 @@ python -m inference_suite.staging check --tool-cache <dir>
 | `resolve --query <query.json> --gpus <n> --out <base_launch.json> [--user-file <file>] [--inferencex-commit <sha>]` | Reads the sources once and writes the base they give, printing its digest. With `--inferencex-commit`, InferenceX is read at that commit instead of the head of its `main`. |
 | `stage --tool-cache <dir> [--source <InferenceX repository>]` | Stages the pinned tools into the tool cache unless it holds them intact, fetching InferenceX at its pin without `--source`, and prints the manifest's sha256. |
 | `publish --stagings <dir> [--source <InferenceX repository>]` | Publishes the staging of the pins in force as `<dir>/<staging key>`, staging it there when absent, and prints its path. |
+| `multinode resolve`, `start`, `restart`, `stop` | Resolves the PD launch of the node list's cluster (`HYPERLOOM_MN_NODE_LIST`) and writes `pd_launch.json`; `start`, `restart` and `stop` act on that frozen launch on the node list's hosts. `restart` takes per-role `--<role>-args` overrides. |
 
 Exit codes: `0` when the round completed (or nothing survived `stop`, a base was
-written, or a staging is in place); `1` when the round did not complete, or a
-process outlived `stop`; `2` when the config, query or pidfile breaks its contract,
+written, or a staging is in place); `1` when the round did not complete, a
+process outlived `stop`, or a `multinode` cluster did not come up; `2` when the config, query or pidfile breaks its contract,
 the run directory is not empty, no source holds a base, in which case each
 source's reason is printed to stderr, `--inferencex-commit` is refused, a source
 answers in a form resolve cannot read (an HTML page where JSON was asked), or a staging cannot be built or verified,
-printed as `staging_missing: <reason>`.
+printed as `staging_missing: <reason>`, or a `multinode` input is refused.
 
 ## Run directory
 

@@ -21,8 +21,15 @@ from inference_suite import LaunchQuery, SourceSnapshot, resolve_base, staging_k
 from inference_suite.contracts import BaseLaunch, NormalisedManifest, PackageIdentity, Workload
 from inference_suite.pins import INFERENCEX_CLIENT_COMMIT, INFERENCEX_TOOL, LM_EVAL_VERSION, LM_EVAL_WHEEL_SHA256
 from inference_suite.recipe.resolve import UnreadSource
-from inference_suite.client_env import BUILD_FILE, CLIENT_DIR, STAGED_LOCK
-from inference_suite.staging import INFERENCEX_REQUIRED, MANIFEST_FILE, StagedTool, StagingManifest, tool_root
+from inference_suite.client_env import BUILD_FILE, CLIENT_DIR, CLIENT_SITE_PACKAGES, STAGED_LOCK
+from inference_suite.staging import (
+    GSM8K_TASK,
+    INFERENCEX_REQUIRED,
+    MANIFEST_FILE,
+    StagedTool,
+    StagingManifest,
+    tool_root,
+)
 
 REQUEST_ID = "6c0e0000-0000-5000-8000-000000000001"
 SPEC_FINGERPRINT = "a1b2c3d4e5f60718"
@@ -141,8 +148,16 @@ def point_document(yaml_text: str) -> dict[str, Any]:
 #: What :func:`stage_into` stages below the staged InferenceX root, by relative path: the files a load runs, and a
 #: client environment whose build record, lock and one installed distribution give :data:`STAGING`.
 _HARNESS_SHA256 = "c" * 64
+#: A public dataset loader of the staged client and the Hub repository its registry names for it.
+STAGED_TRACE_LOADER = "semianalysis_cc_traces_weka_062126"
+STAGED_TRACE_REPO = "semianalysisai/cc-traces-weka-062126"
 _STAGED_FILES = {
     **dict.fromkeys(INFERENCEX_REQUIRED, b"staged\n"),
+    GSM8K_TASK: b"task: gsm8k\ndataset_path: openai/gsm8k\ndataset_name: main\n",
+    f"{CLIENT_SITE_PACKAGES}/aiperf/plugin/plugins.yaml": (
+        f"public_dataset_loader:\n  {STAGED_TRACE_LOADER}:\n    class: aiperf.dataset:Loader\n"
+        f"    metadata:\n      hf_dataset_name: {STAGED_TRACE_REPO}\n"
+    ).encode(),
     BUILD_FILE: json.dumps({"version": "3.12.15", "sha256": "b" * 64, "bundled": ["pip"]}).encode(),
     STAGED_LOCK: f"agentx-harness==1.0.13 --hash=sha256:{_HARNESS_SHA256}\n".encode(),
     f"{CLIENT_DIR}/lib/python3.12/site-packages/agentx_harness-1.0.13.dist-info/RECORD": b"agentx_cli.py,,\n",

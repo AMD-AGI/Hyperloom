@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Delegate idempotency + policy-denial ladder tests."""
+"""Delegate idempotency, the denial's breakdown row and explore-grid admission."""
 
 from __future__ import annotations
 
@@ -176,113 +176,6 @@ async def test_policy_denial_records_target_proposal_message_id(session_dir):
     denial = event["ext"]["denials"]["rows"][0]
     assert denial["proposal_msg_id"] == "proposal-42"
     assert denial["rule"] == "phase_action_not_allowed"
-
-
-@pytest.mark.asyncio
-async def test_policy_denial_streak_records_streak_at_two(session_dir):
-    """The denial streak is tracked via ``SharedState.policy_denial_streak`` as a count, not a priority lock."""
-    c = _silent_coordinator(session_dir)
-    try:
-        from hyperloom.orchestrator.policy.denial import PolicyDenied
-
-        intent = _delegate(action="backends", key="k1")
-        pd = PolicyDenied("denied", rule="duplicate_idempotency_key", hint="wait")
-        await c.router.record_policy_denied(
-            "orchestration",
-            intent,
-            pd,
-            action_name="backends",
-        )
-        await c.router.record_policy_denied(
-            "orchestration",
-            intent,
-            pd,
-            action_name="backends",
-        )
-        streak = c.shared_state.policy_denial_streak.get(
-            "backends:duplicate_idempotency_key",
-            0,
-        )
-        assert streak >= 2
-    finally:
-        await c.stop()
-
-
-@pytest.mark.asyncio
-async def test_policy_denial_streak_no_longer_prunes_family_at_five(session_dir):
-    """Long-run continuity: the streak >= 5 auto-prune_family reaction was removed; the family is NOT pruned."""
-    c = _silent_coordinator(session_dir)
-    try:
-        from hyperloom.orchestrator.policy.denial import PolicyDenied
-
-        intent = _delegate(action="params", key="k1")
-        pd = PolicyDenied("denied", rule="duplicate_idempotency_key", hint="wait")
-        for _ in range(5):
-            await c.router.record_policy_denied(
-                "orchestration",
-                intent,
-                pd,
-                action_name="params",
-            )
-        assert "params" not in c.shared_state.pruned_families
-        assert (
-            c.shared_state.policy_denial_streak.get(
-                "params:duplicate_idempotency_key",
-                0,
-            )
-            == 5
-        )
-    finally:
-        await c.stop()
-
-
-@pytest.mark.asyncio
-async def test_policy_denial_streak_no_longer_stops_run_at_ten(session_dir):
-    """Long-run continuity: the streak >= 10 ``policy_loop`` stop was removed; stop_reason stays unset."""
-    c = _silent_coordinator(session_dir)
-    try:
-        from hyperloom.orchestrator.policy.denial import PolicyDenied
-
-        intent = _delegate(action="backends", key="k1")
-        pd = PolicyDenied("denied", rule="duplicate_idempotency_key", hint="wait")
-        for _ in range(10):
-            await c.router.record_policy_denied(
-                "orchestration",
-                intent,
-                pd,
-                action_name="backends",
-            )
-        assert not (c.shared_state.stop_reason or "").strip()
-        assert (
-            c.shared_state.policy_denial_streak.get(
-                "backends:duplicate_idempotency_key",
-                0,
-            )
-            == 10
-        )
-    finally:
-        await c.stop()
-
-
-@pytest.mark.asyncio
-async def test_successful_delegate_resets_policy_denial_streak(session_dir):
-    c = _silent_coordinator(session_dir)
-    try:
-        from hyperloom.orchestrator.policy.denial import PolicyDenied
-
-        intent = _delegate(key="k-reset")
-        pd = PolicyDenied("denied", rule="duplicate_idempotency_key", hint="wait")
-        await c.router.record_policy_denied(
-            "orchestration",
-            intent,
-            pd,
-            action_name="target_analysis",
-        )
-        assert c.shared_state.policy_denial_streak.get("target_analysis:duplicate_idempotency_key") == 1
-        await c.router.handle_delegate("orchestration", _delegate(key="fresh-key"))
-        assert not any(k.startswith("target_analysis:") for k in c.shared_state.policy_denial_streak)
-    finally:
-        await c.stop()
 
 
 # Mission summary: the stack-changed warning

@@ -522,7 +522,10 @@ def _escalate(hint: str) -> Intent:
 async def test_escalate_hint_outside_the_vocab_is_denied(coord: Coordinator, hint: str) -> None:
     await coord.router._handle_escalate_strategy_change("orchestration", _escalate(hint))
     assert coord.shared_state.pending_escalate_hint == ""
-    assert coord.shared_state.policy_denial_history[-1]["rule"] == "escalate_hint_not_in_vocab"
+    denied = [
+        m.payload for m in coord.bus.inbox_context_sync("orchestration") if m.payload.get("kind") == "policy_denied"
+    ]
+    assert [row["rule"] for row in denied] == ["escalate_hint_not_in_vocab"]
 
 
 @pytest.mark.asyncio

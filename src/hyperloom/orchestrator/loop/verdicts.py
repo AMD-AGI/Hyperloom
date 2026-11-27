@@ -1,11 +1,11 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Verdict helpers: collapsing and serialising Critic review results."""
+"""Verdict helpers: the Critic's ruling on a proposal and its advisory fields."""
 
 from __future__ import annotations
 
-from collections.abc import Iterable, Mapping
+from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any
 
@@ -26,14 +26,12 @@ _VERDICT_ADVISORY_TEXT_KEYS: tuple[str, ...] = (
 
 @dataclass(frozen=True)
 class CriticRuling:
-    """The Critic's collapsed ruling on one proposal, with what it wrote alongside."""
+    """The Critic's ruling on one proposal, with what it wrote alongside."""
 
     verdict: str
     reasoning: str
     advisory: dict[str, Any] | None = None
-    approved_variant_names: set[str] | None = None
     payload: Mapping[str, Any] | None = None
-    variant_verdicts: list[dict[str, Any]] | None = None
 
 
 def serialize_verdict_advisory(payload: dict[str, Any]) -> dict[str, Any]:
@@ -56,32 +54,3 @@ def serialize_verdict_advisory(payload: dict[str, Any]) -> dict[str, Any]:
         if isinstance(raw, str) and raw.strip():
             out[key] = raw
     return out
-
-
-# Priority a batch of per-variant verdicts collapses by: one approved variant carries the proposal, otherwise one
-# reject sinks it, and advice outranks a request for more review. :func:`collapse_verdict_map` applies this to the
-# proceedable subset first so a genuine reject cannot sink siblings that may still run.
-_VERDICT_COLLAPSE_ORDER: tuple[str, ...] = ("approve", "reject", "advise", "needs_review")
-_PROCEEDABLE_VERDICTS: frozenset[str] = frozenset({"approve", "advise"})
-
-
-def collapse_verdicts(verdicts: Iterable[str]) -> str:
-    """Collapse per-variant verdicts into the one the proposal is decided on."""
-    present = set(verdicts)
-    for candidate in _VERDICT_COLLAPSE_ORDER:
-        if candidate in present:
-            return candidate
-    return "needs_review"
-
-
-def proceedable_variant_names(verdict_by_name: Mapping[str, str]) -> set[str]:
-    """Return variant names whose verdict lets them reach a benchmark."""
-    return {name for name, verdict in verdict_by_name.items() if verdict in _PROCEEDABLE_VERDICTS and str(name).strip()}
-
-
-def collapse_verdict_map(verdict_by_name: Mapping[str, str]) -> tuple[str, set[str] | None]:
-    """Collapse a ``verdict_map`` and name the variants that may run."""
-    proceedable = proceedable_variant_names(verdict_by_name)
-    if proceedable:
-        return collapse_verdicts(verdict_by_name[name] for name in proceedable), proceedable
-    return collapse_verdicts(verdict_by_name.values()), None

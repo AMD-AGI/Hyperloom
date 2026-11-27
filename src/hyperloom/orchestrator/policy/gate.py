@@ -48,8 +48,7 @@ from .validators import (
     SPECIALIST_FREEFORM_WAVE_MAX,
     check_freeform_task_description,
     log_specialist_dispatch_coherence,
-    validate_coordinator_managed_action,
-    validate_gemm_tuning_action,
+    validate_gemm_tuning_request,
     validate_prune_branch,
     validate_review_verdict,
     validate_specialist_framework,
@@ -101,16 +100,13 @@ INTEGRATE_PATCH_PERMISSIVE_VERDICTS: frozenset[str] = frozenset(
 )
 
 
-# Source roles allowed to dispatch a specialist via ``delegate{action='specialist'}``.
-SPECIALIST_DISPATCH_SOURCE_ALLOWLIST: frozenset[str] = frozenset({"orchestration"})
-
 # Specialist task identity prefix: the dispatcher stamps ``specialist:<task_id>`` as the
 # source of a specialist result (explore parses the task_id back out), and a send_message
 # addressed to ``specialist:<task_id>`` is delivered to that specialist's inbox.
 SPECIALIST_FROM_AGENT_PREFIX: str = "specialist:"
 
 
-# R5 — external tool names no gated role may invoke as an action name.
+# R5 — external tool names a REQUEST may not carry as its kind.
 
 #: PR Monitor *readonly* surfaces.
 PR_MONITOR_TOOL_NAMES: frozenset[str] = frozenset(
@@ -135,10 +131,8 @@ PR_MONITOR_TOOL_NAMES: frozenset[str] = frozenset(
 WEB_TOOL_NAMES: frozenset[str] = frozenset({"WebSearch", "WebFetch"})
 
 
-# REQUEST routing matrix: source role → allowed target_agents (only orchestration→kernel).
-REQUEST_ROUTING: dict[str, frozenset[str]] = {
-    "orchestration": frozenset({"kernel_agent"}),
-}
+# The agents a REQUEST may name as its ``target_agent``.
+REQUEST_TARGETS: frozenset[str] = frozenset({"kernel_agent"})
 
 
 # SESSION_DIR path containment: PATH_LIKE_FIELDS must point inside session_dir
@@ -219,7 +213,7 @@ class PolicyGate:
 
     # Public API
     def validate_intent(self, from_agent: str, intent: Intent) -> None:
-        """Raise :class:`PolicyDenied` if the intent is not allowed (cheapest checks first: role → allowed_intents → structural → cross-source).
+        """Raise :class:`PolicyDenied` if the intent is not allowed (cheapest checks first: role → allowed_intents → structural → paths).
 
         Args:
             from_agent (str): the identity of the emitting agent.
@@ -244,15 +238,15 @@ class PolicyGate:
 
         # Per-intent structural validators
         if intent.type == IntentType.DELEGATE:
-            self._validate_delegate(role, payload)
+            self._validate_delegate(payload)
         elif intent.type == IntentType.PROPOSE_ACTION:
-            self._validate_propose_action(role, payload)
+            self._validate_propose_action(payload)
         elif intent.type == IntentType.SEND_MESSAGE:
             deny_malformed_send_message(payload)
         elif intent.type == IntentType.REQUEST:
             self._validate_request(role, payload)
         elif intent.type == IntentType.REVIEW_VERDICT:
-            validate_review_verdict(role, payload)
+            validate_review_verdict(payload)
         elif intent.type == IntentType.EXTEND_LEASE:
             self._validate_extend_lease(payload)
         elif intent.type == IntentType.PRUNE_BRANCH:
@@ -306,7 +300,7 @@ class PolicyGate:
         # Coordinator-dispatched internal actions get path checks only.
         if kind in COORDINATOR_INTERNAL_ACTIONS:
             return
-        self._validate_delegate(role, payload, check_source=False, task_id=task_id)
+        self._validate_delegate(payload, check_source=False, task_id=task_id)
 
     def allowed_tools_for_agent(self, agent_name: str) -> list[str]:
         """Return the Claude tool list a reactor may use (Codex → []; Claude → emit_intent; orchestration also gets context-pull tools + sandboxed Read + web search).
@@ -333,7 +327,6 @@ class PolicyGate:
     # Per-intent validators
     def _validate_delegate(
         self,
-        role: "AgentRole",
         payload: dict[str, Any],
         *,
         check_source: bool = True,
@@ -342,7 +335,6 @@ class PolicyGate:
         """Shared delegate validation for intents and dispatched task rows.
 
         Args:
-            role: The resolved role of the emitting agent.
             payload: Delegate payload with ``action_name`` and optional
                 ``params``.
             check_source: When True, enforce the guards that only apply to an
@@ -351,11 +343,6 @@ class PolicyGate:
             task_id: The dispatched row's id, when there is one; a bring-up
                 that holds the open round is not refused by that round.
         """
-        if not role.can_delegate_side_effects:
-            raise PolicyDenied(
-                f"role={role.name!r} cannot delegate side-effecting actions",
-                rule="role",
-            )
         action_name = str(payload.get("action_name", "")).strip()
         if not action_name:
             raise PolicyDenied("delegate intent missing action_name", rule="payload")
@@ -367,7 +354,7 @@ class PolicyGate:
             # Ingress only: the Coordinator's own rows for these specialists are replayed here at dispatch.
             if check_source and isinstance(params, dict):
                 deny_coordinator_dispatched_delegate(params)
-            self._validate_specialist_dispatch(role, payload)
+            self._validate_specialist_dispatch(payload)
             return
         # ``integrate_patch`` requires a non-reject Critic verdict.
         if action_name == INTEGRATE_PATCH_ACTION_NAME:
@@ -376,41 +363,27 @@ class PolicyGate:
         # the round exists to keep off the machine, and the row that holds the
         # round is admitted by its own id rather than by skipping the channel.
         self._validate_baseline_not_mid_round(action_name, task_id=task_id)
-        validate_gemm_tuning_action(action_name, intent_kind="delegate")
-        if check_source:
-            validate_coordinator_managed_action(action_name, intent_kind="delegate")
-        # R5 — block a delegate whose action_name invokes an external tool.
-        self._validate_tool_whitelist_collision(role.name, action_name)
 
-    def _validate_propose_action(self, role: "AgentRole", payload: dict[str, Any]) -> None:
+    def _validate_propose_action(self, payload: dict[str, Any]) -> None:
         """Validate a ``PROPOSE_ACTION`` intent (the advisory channel).
 
-        Requires ``action_name``, then mirrors the delegate channel's
-        per-action source, GEMM-tuning ownership and external-tool collision
-        gates so an LLM cannot sidestep them by proposing instead of
-        delegating.
+        Requires ``action_name``, then applies the custom-only and bring-up
+        round rules the delegate channel applies. Which actions the phase lets
+        an agent name is the admission chain's rule, not this one's.
 
         Args:
-            role (AgentRole): the resolved role of the emitting agent.
             payload (dict[str, Any]): the propose_action payload, expected
                 to carry ``action_name`` and optional ``params``.
 
-        Returns:
-            None: returns silently when the proposal is permitted.
-
         Raises:
-            PolicyDenied: if ``action_name`` is missing or fails one of the
-                mirrored action gates.
+            PolicyDenied: if ``action_name`` is missing or one of those rules
+                refuses it.
         """
         action_name = str(payload.get("action_name", "")).strip()
         if not action_name:
             raise PolicyDenied("propose_action missing action_name", rule="payload")
         deny_search_under_custom_only(self.shared_state, action_name)
-        validate_coordinator_managed_action(action_name, intent_kind="propose_action")
         self._validate_baseline_not_mid_round(action_name)
-        validate_gemm_tuning_action(action_name, intent_kind="propose_action")
-        # R5 — defense in depth on propose_action.
-        self._validate_tool_whitelist_collision(role.name, action_name)
 
     def _validate_baseline_not_mid_round(self, action_name: str, *, task_id: str = "") -> None:
         """Deny a baseline while a bring-up round holds the machine.
@@ -445,13 +418,14 @@ class PolicyGate:
         )
 
     def _validate_request(self, role: "AgentRole", payload: dict[str, Any]) -> None:
-        """Validate a ``REQUEST`` intent against the routing matrix.
+        """Validate a ``REQUEST`` intent.
 
-        Checks that the role may emit a REQUEST at all (per
-        :data:`REQUEST_ROUTING`), that ``target_agent`` is in the role's
-        allowed-target set, that ``kind`` is present and is not a
-        Coordinator-owned lane. GEMM-tuning ownership and external-tool
-        collision guards are applied to the kind as defense in depth.
+        Checks that ``target_agent`` is in :data:`REQUEST_TARGETS`, that
+        ``kind`` is present and is not a Coordinator-owned lane. GEMM-tuning
+        ownership and external-tool collision guards are applied to the kind
+        as well. Refused here, such a request is a denial; past the gate the
+        router would answer it with a failed reply, which the failure ledger
+        and the recipe's ``what_failed`` record.
 
         Args:
             role (AgentRole): the resolved role of the emitting agent.
@@ -462,22 +436,15 @@ class PolicyGate:
             None: returns silently when the request is permitted.
 
         Raises:
-            PolicyDenied: if the role cannot emit REQUEST, the target is
-                missing/disallowed, ``kind`` is missing, or one of the
-                applied action guards fires.
+            PolicyDenied: if the target is missing/disallowed, ``kind`` is
+                missing, or one of the applied action guards fires.
         """
-        targets = REQUEST_ROUTING.get(role.name)
-        if not targets:
-            raise PolicyDenied(
-                f"role={role.name!r} cannot emit REQUEST",
-                rule="request_role",
-            )
         target = str(payload.get("target_agent", "")).strip()
         if not target:
             raise PolicyDenied("request missing target_agent", rule="payload")
-        if target not in targets:
+        if target not in REQUEST_TARGETS:
             raise PolicyDenied(
-                f"role={role.name!r} cannot request target_agent={target!r} (allowed: {sorted(targets)!r})",
+                f"role={role.name!r} cannot request target_agent={target!r} (allowed: {sorted(REQUEST_TARGETS)!r})",
                 rule="request_target",
             )
         kind = str(payload.get("kind", "")).strip()
@@ -494,29 +461,27 @@ class PolicyGate:
                     "`integrate` the KEEPs it queues."
                 ),
             )
-        validate_gemm_tuning_action(kind, intent_kind="request")
-        # R5 — a REQUEST.kind cannot smuggle an external tool either.
+        validate_gemm_tuning_request(kind)
         self._validate_tool_whitelist_collision(role.name, kind)
 
     # R5 — tool_whitelist_role
-    def _validate_tool_whitelist_collision(self, role_name: str, action_name: str) -> None:
-        """Reject an action name that names an external tool; no gated role may invoke one as an action.
+    def _validate_tool_whitelist_collision(self, role_name: str, kind: str) -> None:
+        """Reject a REQUEST kind that names an external tool.
 
         Args:
             role_name (str): the name of the emitting role.
-            action_name (str): the action name (or REQUEST ``kind``) being
-                checked.
+            kind (str): the request kind being checked.
 
         Raises:
-            PolicyDenied: when the name is a PR Monitor or web tool.
+            PolicyDenied: when the kind is a PR Monitor or web tool.
         """
-        if action_name not in PR_MONITOR_TOOL_NAMES | WEB_TOOL_NAMES:
+        if kind not in PR_MONITOR_TOOL_NAMES | WEB_TOOL_NAMES:
             return
         raise PolicyDenied(
-            f"role={role_name!r} cannot invoke tool {action_name!r}",
+            f"role={role_name!r} cannot invoke tool {kind!r}",
             rule="tool_whitelist_role",
             hint=(
-                f"Tool {action_name!r} is restricted to "
+                f"Tool {kind!r} is restricted to "
                 f"specialist sub-agents as an action name. The "
                 f"primary agents (orchestration / critic) reach KB / PR Monitor through the "
                 f"Coordinator-mediated KnowledgePlane facade instead; "
@@ -597,31 +562,18 @@ class PolicyGate:
                 ),
             )
 
-    def _validate_specialist_dispatch(
-        self,
-        role: "AgentRole",
-        payload: dict[str, Any],
-    ) -> None:
-        """Enforce the specialist-delegate contract (Inv-11.2): orchestration-only, gap_canonical_id required, max_turns ≤ cap.
+    def _validate_specialist_dispatch(self, payload: dict[str, Any]) -> None:
+        """Enforce the specialist-delegate contract (Inv-11.2): gap_canonical_id required, max_turns ≤ cap.
 
         Args:
-            role (AgentRole): the resolved role of the emitting agent.
             payload (dict[str, Any]): the delegate intent payload carrying
                 ``params`` (tags, scope, gap_canonical_id, max_turns, ...).
 
         Raises:
-            PolicyDenied: when the role may not dispatch, params are malformed
-                or name an unregistered framework, the gap id is missing, or
-                max_turns exceeds the hard cap. Tag /
-                scope incoherence is logged rather than denied.
+            PolicyDenied: when params are malformed or name an unregistered
+                framework, the gap id is missing, or max_turns exceeds the
+                hard cap. Tag / scope incoherence is logged rather than denied.
         """
-        if role.name not in SPECIALIST_DISPATCH_SOURCE_ALLOWLIST:
-            raise PolicyDenied(
-                f"role={role.name!r} cannot dispatch specialists "
-                f"(allowed: {sorted(SPECIALIST_DISPATCH_SOURCE_ALLOWLIST)!r})",
-                rule="specialist_dispatch_source",
-                hint="Only the Orchestration role may dispatch specialists.",
-            )
         params = payload.get("params") or {}
         if not isinstance(params, dict):
             raise PolicyDenied(
@@ -795,22 +747,14 @@ class PolicyGate:
                 optional ``reason``.
 
         Raises:
-            PolicyDenied: When ``task_id`` is missing, ``extra_sec`` is not a
-                positive integer within :data:`EXTEND_LEASE_MAX_SEC`, or no
-                such task was running when the projection was taken.
+            PolicyDenied: When ``extra_sec`` exceeds
+                :data:`EXTEND_LEASE_MAX_SEC`, or no such task was running when
+                the projection was taken.
         """
         running_tasks = qualified_context_tool_name("get_running_tasks")
-        task_id = str(payload.get("task_id", "")).strip()
-        if not task_id:
-            raise PolicyDenied("extend_lease missing task_id", rule="payload")
-        try:
-            extra_sec = int(payload.get("extra_sec") or 0)
-        except (TypeError, ValueError) as exc:
-            raise PolicyDenied(
-                f"extend_lease extra_sec must be an integer, got {payload.get('extra_sec')!r}",
-                rule="payload",
-            ) from exc
-        if extra_sec <= 0 or extra_sec > EXTEND_LEASE_MAX_SEC:
+        task_id = payload["task_id"].strip()
+        extra_sec = int(payload["extra_sec"])
+        if extra_sec > EXTEND_LEASE_MAX_SEC:
             raise PolicyDenied(
                 f"extend_lease extra_sec={extra_sec} outside (0, {EXTEND_LEASE_MAX_SEC}]",
                 rule="extend_lease_bounds",
@@ -1124,7 +1068,6 @@ __all__ = [
     "PolicyDenied",
     "PolicyGate",
     "validate_freeform_wave_task",
-    "REQUEST_ROUTING",
     "TRACE_PATH_LIKE_FIELDS",
     "SOURCE_LIKE_FIELDS",
 ]
