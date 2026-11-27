@@ -73,7 +73,7 @@ __all__ = [
 WEIGHT_PREFETCH_ENV = "HYPERLOOM_WEIGHT_PREFETCH"
 
 _GIB = 1 << 30
-#: How many files are read at once. The field measurement this rests on read ~0.5 GB/s with one stream and ~2.3 GB/s
+#: How many pieces are read at once. The field measurement this rests on read ~0.5 GB/s with one stream and ~2.3 GB/s
 #: with four, still close to linear, so four had not reached what the storage serves; eight keeps going up that line at
 #: a cost of eight 16 MiB buffers. Not an operator setting: a hosted round that shows otherwise changes it here.
 _STREAMS = 8
