@@ -99,3 +99,18 @@ def test_a_failed_tests_largest_files_are_left_out_until_the_rest_fit(tmp_path: 
     assert note is not None and "gpucore.1.gpu (50000 bytes)" in note and "gpucore.2.gpu" not in note
     assert sorted(p.name for p in tmp_path.iterdir()) == ["gpucore.2.gpu", "rounds.json", "server.log"]
     inventory(tmp_path, max_total_bytes=45_000)
+
+
+def test_the_logs_a_failure_is_read_from_are_kept_and_cut_to_their_end_when_they_alone_are_over(tmp_path: Path) -> None:
+    """A crashed server's log can be the largest file: the dump goes, the log keeps its end, where the crash is."""
+    (tmp_path / "server.log").write_bytes(b"booting\n" * 7_500 + b"RuntimeError: HSA_STATUS_ERROR_EXCEPTION\n")
+    (tmp_path / "corepipe.cuda.node.7").write_bytes(b"x" * 30_000)
+    (tmp_path / "report.json").write_text('{"failed_step": "server_died"}', encoding="utf-8")
+
+    note = fit_failed_output(tmp_path, 40_000)
+
+    assert note is not None and "left out corepipe.cuda.node.7 (30000 bytes)" in note and "cut server.log" in note
+    assert sorted(p.name for p in tmp_path.iterdir()) == ["report.json", "server.log"]
+    log = (tmp_path / "server.log").read_bytes()
+    assert log.endswith(b"RuntimeError: HSA_STATUS_ERROR_EXCEPTION\n") and len(log) < 60_041
+    inventory(tmp_path, max_total_bytes=40_000)

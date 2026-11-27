@@ -15,7 +15,8 @@ What was done is recorded in ``trace_fit.json`` beside the traces' directory and
 over the cap after both is left to the inventory, which refuses it.
 
 A failed test's output is fitted too (:func:`fit_failed_output`): its verdict is decided before the inventory, and its
-files are only the diagnosis of it, so its largest are left out rather than the whole result with its verdict.
+files are only the diagnosis of it, so its largest are left out rather than the whole result with its verdict; the logs
+and records the failure is read from are kept, cut to their end if they alone are over the cap.
 """
 
 from __future__ import annotations
@@ -27,10 +28,19 @@ import re
 import shutil
 from pathlib import Path
 
+from hyperloom.measure.live_log import LIVE_LOGS
 from hyperloom.measure.profile_traces import PROFILE_DIR, is_trace_file
+from hyperloom.measure.runner.rounds import ROUNDS_FILE
+from inference_suite.contracts.layout import REPORT_FILE, SERVER_LOG, RunLayout
 
 __all__ = ["TRACE_FIT_FILE", "fit_failed_output", "fit_traces"]
 
+#: The logs a failed test is classified and diagnosed from (``log_causes.failure_logs``, ``live_log``): cut to their
+#: end when they alone are over the cap, never left out.
+_LAYOUT = RunLayout(Path())
+_FAILURE_LOGS = frozenset({SERVER_LOG, *LIVE_LOGS, _LAYOUT.client_stderr.name, _LAYOUT.eval_stderr.name})
+#: The records the host reads a result's rounds and failed step from (``hosted``): small, and kept whole.
+_FAILURE_RECORDS = frozenset({REPORT_FILE, ROUNDS_FILE})
 #: The record of what was done to fit the traces, below the output directory (not a trace: its name ends otherwise).
 TRACE_FIT_FILE = "trace_fit.record"
 _GZIP_SUFFIX = ".gz"
@@ -61,20 +71,40 @@ def fit_traces(files_dir: Path, max_total_bytes: int) -> str | None:
 
 
 def fit_failed_output(files_dir: Path, max_total_bytes: int) -> str | None:
-    """Remove the largest files below ``files_dir``, one at a time, until the rest add up to at most
-    ``max_total_bytes``; a note naming those removed, ``None`` when nothing was needed."""
+    """Fit a failed test's output under ``max_total_bytes``: remove its largest files, one at a time, but never one the
+    failure is read from (:data:`_FAILURE_LOGS`, :data:`_FAILURE_RECORDS`); then, while still over, cut the largest of
+    those logs to its end, where the crash is. A note of what was done, ``None`` when nothing was needed."""
     sized = sorted(((path.stat().st_size, path) for path in _regular_files(files_dir)), reverse=True)
-    total = sum(size for size, _ in sized)
-    if total <= max_total_bytes:
-        return None
-    removed = []
+    excess = sum(size for size, _ in sized) - max_total_bytes
+    done = []
     for size, path in sized:
-        path.unlink()
-        removed.append(f"{path.relative_to(files_dir)} ({size} bytes)")
-        total -= size
-        if total <= max_total_bytes:
+        if excess <= 0:
             break
-    return f"the failed test's output was over the cap of {max_total_bytes} bytes; left out: {', '.join(removed)}"
+        if path.name in _FAILURE_LOGS | _FAILURE_RECORDS:
+            continue
+        path.unlink()
+        done.append(f"left out {path.relative_to(files_dir)} ({size} bytes)")
+        excess -= size
+    for size, path in sized:
+        if excess <= 0:
+            break
+        if path.name in _FAILURE_LOGS:
+            kept = max(size - excess, 0)
+            _keep_tail(path, kept)
+            done.append(f"cut {path.relative_to(files_dir)} to its last {kept} of {size} bytes")
+            excess -= size - kept
+    if not done:
+        return None
+    return f"the failed test's output was over the cap of {max_total_bytes} bytes: {'; '.join(done)}"
+
+
+def _keep_tail(path: Path, kept: int) -> None:
+    """Replace ``path`` with its last ``kept`` bytes, copied in pieces: the log can be larger than memory."""
+    scratch = path.with_name(path.name + ".tail")
+    with path.open("rb") as source, scratch.open("wb") as sink:
+        source.seek(-kept, os.SEEK_END)
+        shutil.copyfileobj(source, sink, length=1 << 20)
+    os.replace(scratch, path)
 
 
 def _regular_files(root: Path) -> list[Path]:
