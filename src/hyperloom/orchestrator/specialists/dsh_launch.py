@@ -24,9 +24,10 @@ from hyperloom_common.llm.deepseek_session import (
     GATEWAY_BASE_URL_ENV,
     GATEWAY_PROVIDER_ROUTE,
     DeepSeekSessionUnavailableError,
+    ModelLimits,
     gateway_env,
     gateway_route_patch,
-    max_tokens_from_env,
+    model_limits,
 )
 from hyperloom_common.fs_utils import write_text_nofollow
 from hyperloom.inference_optimizer.trace.agent_trace import AgentTrace
@@ -197,7 +198,7 @@ def _mcp_rows(config_path: str | None, *, source: Mapping[str, str], protected_e
 
 
 def _render_patch(
-    *, model: str, base_url: str, instruction_bytes: int, mcp_rows: list[str], max_tokens: int | None = None
+    *, model: str, base_url: str, instruction_bytes: int, mcp_rows: list[str], limits: ModelLimits
 ) -> str:
     """The patch overlay a specialist's headless ``dsh`` run boots with."""
     lines = [
@@ -222,7 +223,7 @@ def _render_patch(
         _PATCH_CONFIG,
         f"    maxBytes: {instruction_bytes + _DEFAULT_INSTRUCTION_BYTES}",
         *COMPACTION_PATCH.splitlines(),
-        *gateway_route_patch(base_url, model, max_tokens=max_tokens).splitlines(),
+        *gateway_route_patch(base_url, model, limits).splitlines(),
     ]
     if mcp_rows:
         lines.append("- insert:")
@@ -260,8 +261,9 @@ def build_dsh_launch(request: DshLaunchRequest, base_env: Mapping[str, str]) -> 
 
     Raises:
         SpecialistAgentUnavailableError: When no ``dsh`` exists, the gateway is
-            unset, the user prompt cannot travel as one argument, or the MCP
-            config or the private home cannot be prepared.
+            unset, the model's context window is unknown, the user prompt cannot
+            travel as one argument, or the MCP config or the private home cannot
+            be prepared.
     """
     executable = request.executable
     if not executable:
@@ -277,7 +279,7 @@ def build_dsh_launch(request: DshLaunchRequest, base_env: Mapping[str, str]) -> 
         )
     try:
         gateway = gateway_env(_codex_provider_resolver_overlay(base_env))
-        max_tokens = max_tokens_from_env({**os.environ, **base_env})
+        limits = model_limits({**os.environ, **base_env, **gateway}, request.model)
     except DeepSeekSessionUnavailableError as exc:
         raise SpecialistAgentUnavailableError(str(exc)) from exc
     env_additions = {
@@ -298,7 +300,7 @@ def build_dsh_launch(request: DshLaunchRequest, base_env: Mapping[str, str]) -> 
             base_url=gateway[GATEWAY_BASE_URL_ENV],
             instruction_bytes=len(instructions.encode(_ENCODING)),
             mcp_rows=mcp.rows,
-            max_tokens=max_tokens,
+            limits=limits,
         ),
     )
     env_additions["DSH_HOME"] = str(home)

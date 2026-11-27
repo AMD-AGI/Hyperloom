@@ -80,6 +80,16 @@ it.
   gateway returns with `UNSUPPORTED_CONTENT`; the `anthropic-messages` route
   keeps and replays them. With `HYPERLOOM_DSH_MAX_TOKENS` unset, a request's
   output cap is now 128000, the `llm-pi-ai` default; it was 256000.
+- **The DeepSeek Harness declares the model's own context window.** Every
+  model was declared with a 1M-token window, so a 200K model such as
+  `claude-sonnet-5.5` compacted only after its requests overflowed. The
+  window and the output cap now come from the gateway's `/model/info`
+  (`max_input_tokens`, `max_output_tokens`) for `DSH_MODEL`.
+  `HYPERLOOM_DSH_CONTEXT_WINDOW` states the window instead, and
+  `HYPERLOOM_DSH_MAX_TOKENS` still states the cap. **Breaking:** a model the
+  gateway reports no window for (for example `deepseek-v4.1-flash` or
+  `glm-5.3-flash` today), or a gateway whose model table cannot be read,
+  refuses to launch until `HYPERLOOM_DSH_CONTEXT_WINDOW` is set.
 - **A hosted multi-branch test closes its sandbox when it ends.**
   Make-before-break, which kept a finished test's sandbox until the next
   test's ran where the grant fit at least three tests, is removed. A hosted

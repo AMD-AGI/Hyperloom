@@ -7,8 +7,10 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import functools
 import json
 import os
+import urllib.request
 import uuid
 from collections.abc import Mapping
 from dataclasses import dataclass, field
@@ -33,9 +35,6 @@ GATEWAY_PROVIDER_ROUTE = "gateway"
 GATEWAY_BASE_URL_ENV = "DEEPSEEK_BASE_URL"
 GATEWAY_API_KEY_ENV = "DEEPSEEK_API_KEY"
 
-#: Context window declared for the gateway model. Compaction triggers on a
-#: fraction of it, so it fixes the size of a request when the harness compacts.
-_GATEWAY_CONTEXT_WINDOW = 1_000_000
 _GATEWAY_REASONING_LEVELS = ("low", "high", "max")
 _GATEWAY_PATCH_NAME = "hyperloom-gateway-route.yml"
 
@@ -53,11 +52,11 @@ checkout, stash, clean, or alter branches.
 """
 
 #: Patch rows every Hyperloom harness runtime boots with. The harness compacts a
-#: conversation once a request reaches 80% of the model's window, which is 1M
-#: tokens on every DeepSeek route. Every model step resends the whole
-#: conversation, so a long session carried about 700K tokens on each request
-#: before it compacted once; a quarter of the window keeps a request near what
-#: the Claude and Codex routes carry.
+#: conversation once a request reaches 80% of the model's window. Every model
+#: step resends the whole conversation, so on a 1M-token model a long session
+#: carried about 700K tokens on each request before it compacted once; a
+#: quarter of the window keeps a request near what the Claude and Codex routes
+#: carry.
 COMPACTION_PATCH = """\
 - id: compaction-basic
   config:
@@ -70,8 +69,16 @@ _COMPACTION_PATCH_NAME = "hyperloom-compaction.yml"
 _INITIALIZE_TIMEOUT_SEC = 120.0
 
 #: Environment variable that caps the output tokens of each model request. Unset
-#: keeps the ``llm-pi-ai`` default of 128000.
+#: takes the cap the gateway reports for the model, or the ``llm-pi-ai`` default
+#: of 128000 when it reports none.
 MAX_TOKENS_ENV = "HYPERLOOM_DSH_MAX_TOKENS"
+
+#: Environment variable that states the model's context window in tokens. Unset
+#: takes the window the gateway reports for the model.
+CONTEXT_WINDOW_ENV = "HYPERLOOM_DSH_CONTEXT_WINDOW"
+
+#: Budget of one read of the gateway's model table.
+_MODEL_INFO_TIMEOUT_SEC = 30.0
 
 #: Harness token fields, in their wire spelling, mapped onto the shared names.
 #: ``totalTokens`` is deliberately absent: the harness reports it as a running
@@ -126,9 +133,9 @@ def sdk_failures() -> tuple[type[BaseException], ...]:
     return (errors.HarnessError, asyncio.TimeoutError, TimeoutError, OSError)
 
 
-def max_tokens_from_env(env: Mapping[str, str]) -> int | None:
-    """The per-request output-token cap ``MAX_TOKENS_ENV`` sets, or ``None`` when it is unset."""
-    raw = env.get(MAX_TOKENS_ENV, "").strip()
+def _positive_int_from_env(env: Mapping[str, str], name: str) -> int | None:
+    """The positive integer ``name`` sets in ``env``, or ``None`` when it is unset."""
+    raw = env.get(name, "").strip()
     if not raw:
         return None
     try:
@@ -136,8 +143,91 @@ def max_tokens_from_env(env: Mapping[str, str]) -> int | None:
     except ValueError:
         value = 0
     if value <= 0:
-        raise DeepSeekSessionUnavailableError(f"{MAX_TOKENS_ENV} must be a positive integer, got {raw!r}")
+        raise DeepSeekSessionUnavailableError(f"{name} must be a positive integer, got {raw!r}")
     return value
+
+
+def max_tokens_from_env(env: Mapping[str, str]) -> int | None:
+    """The per-request output-token cap ``MAX_TOKENS_ENV`` sets, or ``None`` when it is unset."""
+    return _positive_int_from_env(env, MAX_TOKENS_ENV)
+
+
+@dataclass(frozen=True)
+class ModelLimits:
+    """The capacity the gateway route declares for one model."""
+
+    context_window: int
+    #: ``None`` keeps the ``llm-pi-ai`` default.
+    max_tokens: int | None
+
+
+def _gateway_root(base_url: str) -> str:
+    """The gateway root of an OpenAI-compatible ``base_url``, without its trailing ``/v1``."""
+    return base_url.strip().rstrip("/").removesuffix("/v1")
+
+
+@functools.lru_cache(maxsize=8)
+def _gateway_model_info(url: str, api_key: str) -> tuple[dict[str, Any], ...]:
+    """The rows of the gateway's model table at ``url``, read once per process."""
+    request = urllib.request.Request(url, headers={"Authorization": f"Bearer {api_key}", "Accept": "application/json"})
+    with urllib.request.urlopen(request, timeout=_MODEL_INFO_TIMEOUT_SEC) as response:
+        body = json.loads(response.read().decode("utf-8"))
+    rows = body.get("data") if isinstance(body, dict) else None
+    if not isinstance(rows, list):
+        raise ValueError("the response has no 'data' list")
+    return tuple(row for row in rows if isinstance(row, dict))
+
+
+def _reported_tokens(infos: list[dict[str, Any]], field_name: str) -> int | None:
+    """The smallest positive ``field_name`` among the gateway's deployments of one model."""
+    values = [
+        info[field_name]
+        for info in infos
+        if isinstance(info.get(field_name), int) and not isinstance(info[field_name], bool) and info[field_name] > 0
+    ]
+    return min(values) if values else None
+
+
+def model_limits(env: Mapping[str, str], model: str) -> ModelLimits:
+    """The context window and output-token cap the gateway route declares for ``model``.
+
+    ``CONTEXT_WINDOW_ENV`` and ``MAX_TOKENS_ENV`` state them directly. When the
+    window is not stated, the gateway's ``/model/info`` table is read for both:
+    ``max_input_tokens`` is the window and ``max_output_tokens`` the cap, which
+    a stated cap overrides. A deployment that reports less wins when the gateway
+    serves the model from several.
+
+    Args:
+        env: Carries ``GATEWAY_BASE_URL_ENV`` and ``GATEWAY_API_KEY_ENV``, and the overrides.
+        model: The model id the gateway serves.
+
+    Raises:
+        DeepSeekSessionUnavailableError: When an override is not a positive
+            integer, or no window is stated and the gateway reports none for ``model``.
+    """
+    max_tokens = max_tokens_from_env(env)
+    window = _positive_int_from_env(env, CONTEXT_WINDOW_ENV)
+    if window is not None:
+        return ModelLimits(context_window=window, max_tokens=max_tokens)
+    url = f"{_gateway_root(env[GATEWAY_BASE_URL_ENV])}/model/info"
+    remedy = f"set {CONTEXT_WINDOW_ENV} to the model's context window in tokens"
+    try:
+        rows = _gateway_model_info(url, env[GATEWAY_API_KEY_ENV])
+    except (OSError, ValueError) as exc:
+        raise DeepSeekSessionUnavailableError(
+            f"cannot read the context window of {model!r} from the gateway's {url}: {exc}; {remedy}"
+        ) from exc
+    infos = [
+        row["model_info"] for row in rows if row.get("model_name") == model and isinstance(row.get("model_info"), dict)
+    ]
+    window = _reported_tokens(infos, "max_input_tokens")
+    if window is None:
+        raise DeepSeekSessionUnavailableError(
+            f"the gateway's {url} reports no context window (max_input_tokens) for {model!r}; {remedy}"
+        )
+    if max_tokens is None:
+        max_tokens = _reported_tokens(infos, "max_output_tokens")
+    return ModelLimits(context_window=window, max_tokens=max_tokens)
 
 
 def gateway_env(env: Mapping[str, str]) -> dict[str, str]:
@@ -161,7 +251,7 @@ def gateway_env(env: Mapping[str, str]) -> dict[str, str]:
     return {GATEWAY_BASE_URL_ENV: gateway.base_url, GATEWAY_API_KEY_ENV: gateway.api_key}
 
 
-def gateway_route_patch(base_url: str, model: str, *, max_tokens: int | None = None) -> str:
+def gateway_route_patch(base_url: str, model: str, limits: ModelLimits) -> str:
     """The ``llm-pi-ai`` patch row that declares the gateway route serving ``model``.
 
     ``base_url`` is the OpenAI-compatible gateway root, which ends in ``/v1``; the
@@ -172,16 +262,15 @@ def gateway_route_patch(base_url: str, model: str, *, max_tokens: int | None = N
     Args:
         base_url: The gateway root as configured for the OpenAI-compatible line.
         model: The model id the gateway serves.
-        max_tokens: Per-request output-token cap, or ``None`` for the ``llm-pi-ai`` default.
+        limits: The model's context window, on which compaction triggers, and output-token cap.
     """
-    root = base_url.strip().rstrip("/")
-    root = root.removesuffix("/v1")
+    root = _gateway_root(base_url)
     model_lines = [
         f"          - id: {json.dumps(model, ensure_ascii=False)}",
-        f"            contextWindow: {_GATEWAY_CONTEXT_WINDOW}",
+        f"            contextWindow: {limits.context_window}",
     ]
-    if max_tokens is not None:
-        model_lines.append(f"            maxTokens: {max_tokens}")
+    if limits.max_tokens is not None:
+        model_lines.append(f"            maxTokens: {limits.max_tokens}")
     model_lines.append("            reasoningEfforts:")
     model_lines.append("              off:")
     model_lines.extend(f"              {level}: {level}" for level in _GATEWAY_REASONING_LEVELS)
@@ -240,17 +329,19 @@ def start_harness(sdk: Any, launch: HarnessLaunch) -> Any:
     """Construct a harness and run its handshake, stopping the runtime if the handshake fails.
 
     Construction is lazy in the SDK, so only the handshake proves the binary
-    runs and the model and effort are accepted. The output-token cap comes from
-    ``launch.env``, so every caller that starts a runtime applies it.
+    runs and the model and effort are accepted. The model's context window and
+    output-token cap are resolved from ``launch.env``, so every caller that
+    starts a runtime applies them.
     """
-    max_tokens = max_tokens_from_env(launch.env)
+    limits = model_limits(launch.env, launch.model)
+    max_tokens = limits.max_tokens
     workspace = str(launch.cwd)
     launch.dsh_home.mkdir(parents=True, exist_ok=True)
     compaction_patch = launch.dsh_home / _COMPACTION_PATCH_NAME
     compaction_patch.write_text(COMPACTION_PATCH, encoding="utf-8")
     gateway_patch = launch.dsh_home / _GATEWAY_PATCH_NAME
     gateway_patch.write_text(
-        gateway_route_patch(launch.env[GATEWAY_BASE_URL_ENV], launch.model, max_tokens=max_tokens), encoding="utf-8"
+        gateway_route_patch(launch.env[GATEWAY_BASE_URL_ENV], launch.model, limits), encoding="utf-8"
     )
     harness = sdk.DeepSeekHarness(
         dsh_home=str(launch.dsh_home),
@@ -499,6 +590,7 @@ class DeepSeekSession:
 
 __all__ = [
     "COMPACTION_PATCH",
+    "CONTEXT_WINDOW_ENV",
     "DEEPSEEK_RUNTIME_MAPPING",
     "GATEWAY_BASE_URL_ENV",
     "GATEWAY_PROVIDER_ROUTE",
@@ -509,11 +601,13 @@ __all__ = [
     "DeepSeekSessionUnavailableError",
     "HarnessLaunch",
     "MAX_TOKENS_ENV",
+    "ModelLimits",
     "child_environment",
     "gateway_env",
     "gateway_route_patch",
     "load_harness_sdk",
     "max_tokens_from_env",
+    "model_limits",
     "normalize_run_result",
     "sdk_failures",
     "start_harness",

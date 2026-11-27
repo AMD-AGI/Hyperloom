@@ -25,6 +25,12 @@ def _pin_child_processes_to_this_tree() -> None:
 _pin_child_processes_to_this_tree()
 
 
+@pytest.fixture(autouse=True)
+def _dsh_context_window_stated(monkeypatch):
+    """State the DeepSeek Harness model window, so a test that starts a harness never reads the gateway's model table."""
+    monkeypatch.setenv("HYPERLOOM_DSH_CONTEXT_WINDOW", "1000000")
+
+
 @pytest.fixture
 def native_benchmark(tmp_path):
     """A canonical AgentX point; individual tests choose whether to activate it."""

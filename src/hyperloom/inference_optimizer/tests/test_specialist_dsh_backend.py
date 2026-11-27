@@ -514,7 +514,9 @@ def test_an_invalid_output_token_cap_fails_the_dsh_task(
         dsh_launch.build_dsh_launch(_dsh_request(tmp_path), dict(_OPENAI_ENV))
 
 
-def _start_harness(tmp_path: Path, env: dict[str, str]) -> tuple[dict[str, Any], str]:
+def _start_harness(
+    tmp_path: Path, env: dict[str, str], *, model: str = "claude-opus-5.5"
+) -> tuple[dict[str, Any], str]:
     """Start a harness runtime on a fake SDK; return what it was constructed with and its gateway route patch."""
     from hyperloom_common.llm import deepseek_session
 
@@ -532,7 +534,7 @@ def _start_harness(tmp_path: Path, env: dict[str, str]) -> tuple[dict[str, Any],
         deepseek_session.HarnessLaunch(
             dsh_home=tmp_path / "home",
             cwd=tmp_path,
-            model="claude-opus-5.5",
+            model=model,
             reasoning_effort="high",
             env=env,
             request_timeout_sec=30.0,
@@ -542,10 +544,40 @@ def _start_harness(tmp_path: Path, env: dict[str, str]) -> tuple[dict[str, Any],
     return seen, route_patch.read_text(encoding="utf-8")
 
 
-def test_the_harness_runtime_is_routed_to_the_gateway_over_the_anthropic_messages_protocol(tmp_path: Path) -> None:
-    seen, text = _start_harness(
-        tmp_path, {"DEEPSEEK_BASE_URL": "https://gateway.invalid/Unified/v1", "DEEPSEEK_API_KEY": "gateway-key"}
+_GATEWAY = {"DEEPSEEK_BASE_URL": "https://gateway.invalid/Unified/v1", "DEEPSEEK_API_KEY": "gateway-key"}
+
+# Rows of a LiteLLM-style ``/model/info`` table, trimmed to the fields read; the gateway serves sonnet from two
+# deployments that report different limits.
+_MODEL_TABLE: tuple[dict[str, Any], ...] = tuple(
+    {"model_name": name, "model_info": info}
+    for name, info in (
+        ("claude-opus-5.5", {"max_input_tokens": 1_000_000, "max_output_tokens": 128_000}),
+        ("claude-sonnet-5.5", {"max_input_tokens": 1_000_000, "max_output_tokens": 128_000}),
+        ("claude-sonnet-5.5", {"max_input_tokens": 200_000, "max_output_tokens": 64_000}),
+        ("glm-5.3-flash", {"max_input_tokens": None, "max_output_tokens": None}),
     )
+)
+
+
+@pytest.fixture
+def gateway_reads(monkeypatch: pytest.MonkeyPatch) -> list[tuple[str, str]]:
+    """Serve ``_MODEL_TABLE`` as the gateway's model table, with no window or cap stated; return the reads made."""
+    from hyperloom_common.llm import deepseek_session
+
+    monkeypatch.delenv("HYPERLOOM_DSH_CONTEXT_WINDOW", raising=False)
+    monkeypatch.delenv("HYPERLOOM_DSH_MAX_TOKENS", raising=False)
+    reads: list[tuple[str, str]] = []
+
+    def _read(url: str, api_key: str) -> tuple[dict[str, Any], ...]:
+        reads.append((url, api_key))
+        return _MODEL_TABLE
+
+    monkeypatch.setattr(deepseek_session, "_gateway_model_info", _read)
+    return reads
+
+
+def test_the_harness_runtime_is_routed_to_the_gateway_over_the_anthropic_messages_protocol(tmp_path: Path) -> None:
+    seen, text = _start_harness(tmp_path, {**_GATEWAY, "HYPERLOOM_DSH_CONTEXT_WINDOW": "1000000"})
 
     assert seen["provider"] == "gateway"
     route = _patch_rows(text)["llm-pi-ai"]["config"]["providers"]["gateway"]
@@ -556,11 +588,142 @@ def test_the_harness_runtime_is_routed_to_the_gateway_over_the_anthropic_message
 
 def test_the_output_token_cap_is_passed_to_the_harness_runtime(tmp_path: Path) -> None:
     seen, text = _start_harness(
-        tmp_path, {"HYPERLOOM_DSH_MAX_TOKENS": "64000", "DEEPSEEK_BASE_URL": "https://gateway.invalid/v1"}
+        tmp_path, {**_GATEWAY, "HYPERLOOM_DSH_MAX_TOKENS": "64000", "HYPERLOOM_DSH_CONTEXT_WINDOW": "1000000"}
     )
 
     assert seen["max_tokens"] == 64000
     assert _gateway_model(text)["maxTokens"] == 64000
+
+
+def test_the_harness_route_declares_the_window_and_cap_the_gateway_reports_for_the_model(
+    tmp_path: Path, gateway_reads: list[tuple[str, str]]
+) -> None:
+    """Compaction triggers on the declared window, so a 200K model must not be declared with 1M."""
+    seen, text = _start_harness(tmp_path, dict(_GATEWAY), model="claude-sonnet-5.5")
+
+    model = _gateway_model(text)
+    # The deployment that reports less wins.
+    assert (model["contextWindow"], model["maxTokens"], seen["max_tokens"]) == (200_000, 64_000, 64_000)
+    assert gateway_reads == [("https://gateway.invalid/Unified/model/info", "gateway-key")]
+
+
+def test_a_stated_window_and_cap_are_declared_without_reading_the_gateway(
+    tmp_path: Path, gateway_reads: list[tuple[str, str]]
+) -> None:
+    _, text = _start_harness(
+        tmp_path,
+        {**_GATEWAY, "HYPERLOOM_DSH_CONTEXT_WINDOW": "300000", "HYPERLOOM_DSH_MAX_TOKENS": "32000"},
+        model="glm-5.3-flash",
+    )
+
+    model = _gateway_model(text)
+    assert (model["contextWindow"], model["maxTokens"]) == (300_000, 32_000)
+    assert gateway_reads == []
+
+
+def test_a_stated_cap_wins_over_the_cap_the_gateway_reports(
+    tmp_path: Path, gateway_reads: list[tuple[str, str]]
+) -> None:
+    seen, text = _start_harness(tmp_path, {**_GATEWAY, "HYPERLOOM_DSH_MAX_TOKENS": "32000"}, model="claude-sonnet-5.5")
+
+    model = _gateway_model(text)
+    assert (model["contextWindow"], model["maxTokens"], seen["max_tokens"]) == (200_000, 32_000, 32_000)
+
+
+@pytest.mark.parametrize("model", ["glm-5.3-flash", "not-served"])
+def test_a_model_the_gateway_reports_no_window_for_refuses_the_harness(
+    model: str, tmp_path: Path, gateway_reads: list[tuple[str, str]]
+) -> None:
+    from hyperloom_common.llm.deepseek_session import DeepSeekSessionUnavailableError
+
+    with pytest.raises(DeepSeekSessionUnavailableError, match="no context window.*set HYPERLOOM_DSH_CONTEXT_WINDOW"):
+        _start_harness(tmp_path, dict(_GATEWAY), model=model)
+
+
+def test_an_unreadable_gateway_model_table_refuses_the_harness(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from hyperloom_common.llm import deepseek_session
+
+    monkeypatch.delenv("HYPERLOOM_DSH_CONTEXT_WINDOW", raising=False)
+
+    def _refuse(url: str, api_key: str) -> tuple[dict[str, Any], ...]:
+        raise OSError("connection refused")
+
+    monkeypatch.setattr(deepseek_session, "_gateway_model_info", _refuse)
+
+    with pytest.raises(
+        deepseek_session.DeepSeekSessionUnavailableError, match="connection refused; set HYPERLOOM_DSH_CONTEXT_WINDOW"
+    ):
+        _start_harness(tmp_path, dict(_GATEWAY))
+
+
+@pytest.mark.parametrize("raw", ["0", "-5", "many"])
+def test_an_invalid_stated_window_refuses_the_harness(raw: str, tmp_path: Path) -> None:
+    from hyperloom_common.llm.deepseek_session import DeepSeekSessionUnavailableError
+
+    with pytest.raises(
+        DeepSeekSessionUnavailableError, match="HYPERLOOM_DSH_CONTEXT_WINDOW must be a positive integer"
+    ):
+        _start_harness(tmp_path, {**_GATEWAY, "HYPERLOOM_DSH_CONTEXT_WINDOW": raw})
+
+
+def test_the_gateway_model_table_is_read_once_with_the_gateway_key(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Every specialist launch resolves the window, so the table is fetched once per process, not per launch."""
+    from hyperloom_common.llm import deepseek_session
+
+    monkeypatch.delenv("HYPERLOOM_DSH_CONTEXT_WINDOW", raising=False)
+    requests: list[Any] = []
+
+    class _Response:
+        def __enter__(self) -> _Response:
+            return self
+
+        def __exit__(self, *exc: object) -> None:
+            return None
+
+        def read(self) -> bytes:
+            return json.dumps({"data": list(_MODEL_TABLE)}).encode("utf-8")
+
+    def _urlopen(request: Any, timeout: float) -> _Response:
+        requests.append(request)
+        return _Response()
+
+    deepseek_session._gateway_model_info.cache_clear()
+    monkeypatch.setattr(deepseek_session.urllib.request, "urlopen", _urlopen)
+    try:
+        first = deepseek_session.model_limits(_GATEWAY, "claude-opus-5.5")
+        second = deepseek_session.model_limits(_GATEWAY, "claude-sonnet-5.5")
+    finally:
+        deepseek_session._gateway_model_info.cache_clear()
+
+    assert (first.context_window, first.max_tokens) == (1_000_000, 128_000)
+    assert (second.context_window, second.max_tokens) == (200_000, 64_000)
+    (request,) = requests
+    assert request.full_url == "https://gateway.invalid/Unified/model/info"
+    assert request.get_header("Authorization") == "Bearer gateway-key"
+
+
+def test_the_dsh_specialist_patch_declares_the_window_the_gateway_reports(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, gateway_reads: list[tuple[str, str]]
+) -> None:
+    _pin_provider_env(monkeypatch, _OPENAI_ENV)
+    request = dsh_launch.DshLaunchRequest("/usr/bin/dsh", "claude-sonnet-5.5", None, tmp_path / "ws", "sys", "usr")
+
+    launch = dsh_launch.build_dsh_launch(request, dict(_OPENAI_ENV))
+
+    patch = Path(launch.cmd[launch.cmd.index("--patch") + 1]).read_text(encoding="utf-8")
+    model = _gateway_model(patch)
+    assert (model["contextWindow"], model["maxTokens"]) == (200_000, 64_000)
+    assert gateway_reads == [("https://gateway.invalid/Unified/model/info", "openai-side-key")]
+
+
+def test_a_dsh_specialist_on_a_model_the_gateway_reports_no_window_for_is_refused(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, gateway_reads: list[tuple[str, str]]
+) -> None:
+    _pin_provider_env(monkeypatch, _OPENAI_ENV)
+    request = dsh_launch.DshLaunchRequest("/usr/bin/dsh", "glm-5.3-flash", None, tmp_path / "ws", "sys", "usr")
+
+    with pytest.raises(SpecialistAgentUnavailableError, match="HYPERLOOM_DSH_CONTEXT_WINDOW"):
+        dsh_launch.build_dsh_launch(request, dict(_OPENAI_ENV))
 
 
 def test_a_cut_off_dsh_session_log_still_yields_its_complete_records(tmp_path: Path) -> None:
