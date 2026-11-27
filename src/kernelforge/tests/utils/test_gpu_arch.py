@@ -176,7 +176,7 @@ def test_gfx1151_has_the_rdna35_profile(gpu_target):
 
     assert profile.family == "RDNA3.5"
     assert profile.hardware_knowledge == "hardware/rdna3"
-    assert profile.profiler is Profiler.ROCPROFV3
+    assert profile.profiler is Profiler.ROCPROF_COMPUTE
     assert {backend for backend in KERNEL_BACKENDS if profile.supports_kernel_backend(backend)} == {
         "triton",
         "hip",
@@ -192,6 +192,15 @@ def test_the_rdna35_note_names_exactly_the_backends_its_profile_admits():
 
     assert "The kernel backends that build here are hip, hipblaslt, triton." in note
     assert "{" not in note
+
+
+def test_the_rdna35_note_keeps_rocprof_compute_and_gives_its_own_ridge():
+    note = " ".join(arch_profile("gfx1151").rendered_prompt_note().split())
+
+    assert "rocprof-compute supports gfx1151" in note
+    assert "rocprofv3" not in note
+    assert "roofline-ridge figures are the W7900's" in note
+    assert "a ridge near 234 FLOP/byte" in note
 
 
 @pytest.mark.parametrize("gpu_target", ["gfx1201", "GFX1201", "gfx1201:sramecc-:xnack-"])
