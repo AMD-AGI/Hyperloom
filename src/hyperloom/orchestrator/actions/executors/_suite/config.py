@@ -35,7 +35,9 @@ from typing import Any
 
 from hyperloom_common.env import is_truthy
 from hyperloom.common.agentx_workload import (
+    AGENTX_TRACE_ENV,
     CANON_WARMUP_PER_LANE,
+    agentx_trace,
     is_agentx_client_key,
     is_agentx_client_script,
 )
@@ -466,7 +468,7 @@ _AGENTX_LAUNCH_KEYS = frozenset(
 )
 _AGENTX_CANONICAL = "canonical"
 _AGENTX_THRESHOLD = AGENTX_ERROR_RATE_THRESHOLD_PCT / 100
-_TRACE_ENV = "WEKA_LOADER_OVERRIDE"
+_TRACE_ENV = AGENTX_TRACE_ENV
 _DURATION_ENV = "DURATION"
 _EP_SIZE_ENV = "EP_SIZE"
 _WARMUP_PER_LANE_ENV = "AIPERF_WARMUP_REQUESTS_PER_LANE"
@@ -521,7 +523,7 @@ def _lane_warmup(client_env: Mapping[str, str]) -> int:
 
 
 def _agentx_trace(point: _Point, base: BaseLaunch) -> str:
-    trace = point.text(_TRACE_ENV) or base.client.env.get(_TRACE_ENV)
+    trace = agentx_trace(point.envs, base.client.env)
     if trace is None:
         raise ConfigError(f"neither the AgentX point nor its base's client env names the trace corpus ({_TRACE_ENV})")
     return trace
