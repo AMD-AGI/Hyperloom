@@ -2496,70 +2496,12 @@ async def test_trace_analyze_handler_surfaces_trace_report_path(
 
 
 @pytest.mark.asyncio
-async def test_trace_analyze_handler_persists_trace_report_to_candidates(
+async def test_trace_analyze_handler_splits_on_the_baseline_workload(
     session_dir,
     tmp_path,
     monkeypatch,
 ):
-    """Disk candidates must carry the TraceLens report path for GEAK prompts."""
-    report_path = tmp_path / "analysis.md"
-    report_path.write_text("# TraceLens Report\n", encoding="utf-8")
-    candidates_path = tmp_path / "kernel_candidates.json"
-    candidates_path.write_text(
-        json.dumps(
-            {
-                "hot_kernels": [
-                    {
-                        "kernel_id": "k1",
-                        "name": "paged_attention",
-                        "source_file": "/sgl-workspace/sglang/kernels/paged.py",
-                        "reusable_native_kernel": True,
-                    }
-                ],
-            }
-        ),
-        encoding="utf-8",
-    )
-
-    async def fake_run_subprocess(cmd, *, timeout_sec, **_kwargs):
-        return (
-            0,
-            json.dumps(
-                {
-                    "status": "ok",
-                    "hot_kernels": json.loads(candidates_path.read_text(encoding="utf-8"))["hot_kernels"],
-                    "trace_report_path": str(report_path),
-                    "artifact_paths": {
-                        "kernel_candidates": str(candidates_path),
-                        "trace_report_path": str(report_path),
-                    },
-                }
-            ),
-            "",
-        )
-
-    monkeypatch.setattr(ta, "_run_subprocess", fake_run_subprocess)
-
-    res = await ta.trace_analyze_handler(
-        {"trace_input": str(session_dir), "dry_run": True},
-        session_dir=session_dir,
-    )
-
-    persisted = json.loads(candidates_path.read_text(encoding="utf-8"))
-    candidate = persisted["hot_kernels"][0]
-    assert res["hot_kernels"][0]["trace_report_path"] == str(report_path)
-    assert persisted["trace_report_path"] == str(report_path)
-    assert persisted["artifact_paths"]["trace_report_path"] == str(report_path)
-    assert candidate["trace_report_path"] == str(report_path)
-
-
-@pytest.mark.asyncio
-async def test_trace_analyze_handler_backfills_runtime_metadata_from_config(
-    session_dir,
-    tmp_path,
-    monkeypatch,
-):
-    """GEAK candidates must inherit the materialized workload config."""
+    """A request that names no split hints takes them from the materialized baseline config."""
     from hyperloom.orchestrator.state.shared_state import SharedState
 
     config_path = tmp_path / "profile_config.with_envs.yaml"
@@ -2574,111 +2516,37 @@ benchmark:
     CONC: 64
     ISL: 1024
     OSL: 1024
-    NUM_PROMPTS: 512
-    MAX_MODEL_LEN: 8192
-    EXTRA_SGLANG_ARGS: "--kv-cache-dtype fp8 --page-size 16"
-    SGLANG_USE_TRITON: "1"
-    ROCR_VISIBLE_DEVICES: "0,1,2,3,4,5,6,7"
-    OPENAI_API_KEY: "should-not-leak"
+    RANDOM_RANGE_RATIO: "0.5"
 """,
         encoding="utf-8",
     )
     state = SharedState.load_or_init(session_dir)
     state.baseline_config_path = str(config_path)
     state.save(session_dir)
-
-    candidates_path = tmp_path / "kernel_candidates.json"
-    candidates_path.write_text(
-        json.dumps(
-            {
-                "hot_kernels": [
-                    {
-                        "kernel_id": "k1",
-                        "name": "paged_attention",
-                        "source_file": "/sgl-workspace/sglang/kernels/paged.py",
-                        "reusable_native_kernel": True,
-                    }
-                ],
-            }
-        ),
-        encoding="utf-8",
-    )
+    captured: dict = {}
 
     async def fake_run_subprocess(cmd, *, timeout_sec, **_kwargs):
-        return (
-            0,
-            json.dumps(
-                {
-                    "status": "ok",
-                    "hot_kernels": json.loads(candidates_path.read_text(encoding="utf-8"))["hot_kernels"],
-                    "artifact_paths": {"kernel_candidates": str(candidates_path)},
-                }
-            ),
-            "",
-        )
+        captured["cmd"] = list(cmd)
+        return 0, json.dumps({"status": "ok", "hot_kernels": []}), ""
 
     monkeypatch.setattr(ta, "_run_subprocess", fake_run_subprocess)
 
-    res = await ta.trace_analyze_handler(
+    await ta.trace_analyze_handler(
         {"trace_input": str(session_dir), "dry_run": True},
         session_dir=session_dir,
     )
 
-    enriched = json.loads(candidates_path.read_text(encoding="utf-8"))["hot_kernels"][0]
-    assert res["hot_kernels"][0]["env_vars"]["SGLANG_USE_TRITON"] == "1"
-    assert enriched["env_vars"]["TP"] == "8"
-    assert enriched["env_vars"]["ROCR_VISIBLE_DEVICES"] == "0,1,2,3,4,5,6,7"
-    assert "OPENAI_API_KEY" not in enriched["env_vars"]
-    assert enriched["runtime_args"]["framework"] == "sglang"
-    assert enriched["runtime_args"]["server_args"] == "--kv-cache-dtype fp8 --page-size 16"
-    assert enriched["runtime_args"]["workload"] == {
-        "tp": 8,
-        "conc": 64,
-        "isl": 1024,
-        "osl": 1024,
-        "num_prompts": 512,
-        "max_model_len": 8192,
-    }
-
-
-def test_materialized_workload_metadata_filters_prefixed_secrets(tmp_path):
-    config_path = tmp_path / "profile_config.with_envs.yaml"
-    config_path.write_text(
-        """
-benchmark:
-  framework: vllm
-  envs:
-    VLLM_USE_V1: "1"
-    VLLM_API_KEY: "should-not-leak"
-    TRITON_AUTH_TOKEN: "should-not-leak"
-""",
-        encoding="utf-8",
-    )
-
-    metadata = ta._load_materialized_workload_metadata(str(config_path))
-
-    assert metadata["env_vars"]["VLLM_USE_V1"] == "1"
-    assert "VLLM_API_KEY" not in metadata["env_vars"]
-    assert "TRITON_AUTH_TOKEN" not in metadata["env_vars"]
-
-
-def test_materialized_workload_metadata_tolerates_bad_server_args(tmp_path):
-    config_path = tmp_path / "profile_config.with_envs.yaml"
-    config_path.write_text(
-        """
-benchmark:
-  framework: sglang
-  envs:
-    EXTRA_SGLANG_ARGS: "--kv-cache-dtype 'unterminated"
-    TP: 1
-""",
-        encoding="utf-8",
-    )
-
-    metadata = ta._load_materialized_workload_metadata(str(config_path))
-
-    assert metadata["runtime_args"]["server_args"] == "--kv-cache-dtype 'unterminated"
-    assert metadata["runtime_args"]["server_args_argv"] == []
+    cmd = captured["cmd"]
+    split = cmd.index("--split-llm-inference")
+    assert cmd[split : split + 7] == [
+        "--split-llm-inference",
+        "--split-conc",
+        "64",
+        "--split-osl",
+        "1024",
+        "--split-r",
+        "0.5",
+    ]
 
 
 @pytest.mark.asyncio

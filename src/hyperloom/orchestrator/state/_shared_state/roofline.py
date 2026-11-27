@@ -108,7 +108,6 @@ def _hot_kernel_row(entry: dict[str, Any]) -> dict[str, Any]:
         "roofline_name": entry.get("roofline_name"),
         "source_file": entry.get("source_file"),
         "reusable_native_kernel": bool(entry.get("reusable_native_kernel")),
-        "kernel_contract": entry.get("kernel_contract"),
         "is_multigpu": entry.get("is_multigpu") is True,
         # Names the deterministic extractor the row came from.
         "candidate_source": entry.get("candidate_source") or "",

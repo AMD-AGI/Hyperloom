@@ -223,13 +223,10 @@ def _stamp_candidate_metadata(item: dict[str, Any], op_cat_map: dict[str, str] |
     # The nccl-summary lane identifies collectives from TraceLens' own nccl_summary table plus a resolved device
     # symbol, which outranks a name guess. Re-deriving over it unresolves rows the lane already resolved:
     # small_collective, EpDispatchIntraNodeKernel_bf16 and ncclDevKernel_Generic_1 all carry is_multigpu=True from
-    # _nccl_summary_candidates and all read False by name. That flip reaches the invocation contract built below,
-    # which gates kind == "collective" and world_size on this flag -- so the rows that most need a rank count would
-    # be published as ordinary single-rank work.
+    # _nccl_summary_candidates and all read False by name.
     authoritative = bool(item.get("is_multigpu")) and str(item.get("candidate_source") or "") == "nccl_summary"
     if not authoritative:
         item["is_multigpu"] = is_multigpu_kernel(item["name"], item.get("source_file", ""))
-    item["num_gpus_recommended"] = 2 if item["is_multigpu"] else 1
     item["recommended_backends"] = recommend_backends(item)
     item["optimization_notes"] = build_notes(item)
     if op_cat_map and not str(item.get("tracelens_category") or "").strip():

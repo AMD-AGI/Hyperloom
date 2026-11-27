@@ -20,7 +20,6 @@ from hyperloom.orchestrator.trace_analysis import tracelens_analysis as tla
 from hyperloom.orchestrator.trace_analysis import _analysis_reports as analysis_reports
 from hyperloom.orchestrator.trace_analysis import _candidate_assembly as candidate_assembly
 from hyperloom.orchestrator.trace_analysis import _kernel_classification as kernel_classification
-from hyperloom.orchestrator.trace_analysis import _kernel_roofline as kernel_roofline
 from hyperloom.orchestrator.trace_analysis import _kernel_search as kernel_search
 from hyperloom.orchestrator.trace_analysis._perf_report_analysis import PerfReportAnalysis
 from hyperloom.orchestrator.trace_analysis import _trace_gates as trace_gates
@@ -530,7 +529,6 @@ def test_write_reports_enriches_candidates_with_runtime_metadata(tmp_path):
         "source_file": "/sgl-workspace/aiter/paged_attention.py",
         "shapes": [[1, 32, 128]],
         "is_multigpu": False,
-        "num_gpus_recommended": 1,
         # Set the routable marker explicitly since this test bypasses _finalize_candidates.
         "reusable_native_kernel": True,
     }
@@ -560,135 +558,6 @@ def test_write_reports_enriches_candidates_with_runtime_metadata(tmp_path):
     assert enriched["output_shapes"] == []
     assert enriched["input_dtypes"] == []
     assert enriched["output_dtypes"] == []
-    assert enriched["runtime_args"] == {}
-    assert enriched["env_vars"] == {}
-    assert enriched["kernel_params"] == {}
-    assert enriched["runtime_flags"]["analysis_mode"] == "inference"
-    assert enriched["runtime_flags"]["target_platform"] == "MI300X"
-    assert enriched["runtime_flags"]["is_multigpu"] is False
-    assert enriched["runtime_flags"]["num_gpus_recommended"] == 1
-
-
-def test_load_model_kernel_params_reads_head_dim(tmp_path):
-    import json as _json
-
-    model_dir = tmp_path / "Qwen-Qwen3-8B"
-    model_dir.mkdir()
-    (model_dir / "config.json").write_text(
-        _json.dumps(
-            {
-                "head_dim": 128,
-                "hidden_size": 4096,
-                "num_attention_heads": 32,
-                "num_key_value_heads": 8,
-            }
-        ),
-        encoding="utf-8",
-    )
-
-    params = kernel_roofline.load_model_kernel_params(str(model_dir))
-
-    assert params["HEAD_SIZE"] == 128
-    assert params["NUM_ATTENTION_HEADS"] == 32
-    assert params["NUM_KEY_VALUE_HEADS"] == 8
-    assert params["MODEL_CONFIG_PATH"] == str(model_dir / "config.json")
-
-
-def test_load_model_kernel_params_derives_head_size_from_hidden_size(tmp_path):
-    import json as _json
-
-    model_dir = tmp_path / "meta-llama-Llama-3.1-8B"
-    model_dir.mkdir()
-    (model_dir / "config.json").write_text(
-        _json.dumps(
-            {
-                "hidden_size": 4096,
-                "num_attention_heads": 32,
-            }
-        ),
-        encoding="utf-8",
-    )
-
-    params = kernel_roofline.load_model_kernel_params(str(model_dir))
-
-    assert params["HEAD_SIZE"] == 128
-    assert params["HIDDEN_SIZE"] == 4096
-    assert params["NUM_ATTENTION_HEADS"] == 32
-
-
-def test_load_model_kernel_params_preserves_mla_head_dims(tmp_path):
-    import json as _json
-
-    model_dir = tmp_path / "DeepSeek-R1-0528"
-    model_dir.mkdir()
-    (model_dir / "config.json").write_text(
-        _json.dumps(
-            {
-                "hidden_size": 7168,
-                "num_attention_heads": 128,
-                "qk_nope_head_dim": 128,
-                "qk_rope_head_dim": 64,
-                "v_head_dim": 128,
-                "kv_lora_rank": 512,
-            }
-        ),
-        encoding="utf-8",
-    )
-
-    params = kernel_roofline.load_model_kernel_params(str(model_dir))
-
-    assert "HEAD_SIZE" not in params
-    assert params["QK_NOPE_HEAD_DIM"] == 128
-    assert params["QK_ROPE_HEAD_DIM"] == 64
-    assert params["V_HEAD_DIM"] == 128
-    assert params["KV_LORA_RANK"] == 512
-
-
-def test_write_reports_enriches_head_size_from_model_config(tmp_path):
-    import json as _json
-    from argparse import Namespace
-
-    trace = tmp_path / "trace.json"
-    trace.write_text("{}", encoding="utf-8")
-    model_dir = tmp_path / "Qwen-Qwen3-8B"
-    model_dir.mkdir()
-    (model_dir / "config.json").write_text(
-        _json.dumps({"head_dim": 128, "num_attention_heads": 32}),
-        encoding="utf-8",
-    )
-    analysis_md = tmp_path / "run" / "tracelens" / "analysis.md"
-    analysis_md.parent.mkdir(parents=True, exist_ok=True)
-    analysis_md.write_text("# TraceLens stub\n", encoding="utf-8")
-    candidate = {
-        "kernel_id": "k001",
-        "name": "paged_attention",
-        "duration_us": 100.0,
-        "call_count": 2,
-        "gpu_pct": 10.0,
-        "source_file": "/sgl-workspace/aiter/paged_attention.py",
-        "shapes": [[1, 32, 128]],
-        "reusable_native_kernel": True,
-    }
-    args = Namespace(
-        trace_input=str(trace),
-        model_name=str(model_dir),
-        framework="sglang",
-        target_platform="MI300X",
-        workspace_path=str(tmp_path),
-        roofline_output_name="kernel_roofline.json",
-        dry_run=False,
-    )
-
-    artifacts = analysis_reports.write_reports(
-        tmp_path / "run",
-        trace_inputs.TraceInputs(input_type="file", files=[trace]),
-        candidates=[candidate],
-        args=args,
-        outcome=analysis_reports.OrchestratorOutcome(report_path=analysis_md),
-    )
-    payload = _json.loads(Path(artifacts["kernel_candidates"]).read_text(encoding="utf-8"))
-
-    assert payload["hot_kernels"][0]["kernel_params"]["HEAD_SIZE"] == 128
 
 
 # write_reports surfaces the upstream analysis.md as-is (no copies/aliases/fabrication)

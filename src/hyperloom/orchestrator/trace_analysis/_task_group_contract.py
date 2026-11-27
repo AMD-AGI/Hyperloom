@@ -286,14 +286,7 @@ def _is_attention_workload(row: dict[str, Any]) -> bool:
             "tracelens_category",
         )
     ).lower()
-    contract = row.get("kernel_contract")
-    contract_kind = str(contract.get("kind") or "").lower() if isinstance(contract, dict) else ""
-    return (
-        "attention" in labels
-        or "attn" in labels
-        or contract_kind == "attention"
-        or str(row.get("kernel_category") or "").strip().lower() == "sdpa"
-    )
+    return "attention" in labels or "attn" in labels or str(row.get("kernel_category") or "").strip().lower() == "sdpa"
 
 
 def _attention_dimensions(shapes: list[list[int]]) -> dict[str, int]:

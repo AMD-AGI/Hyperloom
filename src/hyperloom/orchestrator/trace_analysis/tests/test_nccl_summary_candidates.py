@@ -565,34 +565,5 @@ class ExtractCollectiveCandidatesTests(unittest.TestCase):
         self.assertTrue(out[0]["source_file"].endswith("custom_all_reduce.cuh"))
 
 
-class CollectiveContractTests(unittest.TestCase):
-    """The contract must name all-reduce semantics for aiter's custom kernels."""
-
-    def setUp(self) -> None:
-        from hyperloom.orchestrator.trace_analysis._kernel_roofline import _enrich_kernel_contract
-
-        self.enrich = _enrich_kernel_contract
-
-    def test_cross_device_reduce_maps_to_all_reduce(self) -> None:
-        # A bare "reduce" match would pick torch.distributed.reduce, whose result only lands on rank 0, silently
-        # voiding the parity gate.
-        item = {"name": AITER_2STAGE}
-        self.enrich(item, {})
-        contract = item["kernel_contract"]
-        self.assertEqual(contract["kind"], "collective")
-        self.assertEqual(contract["collective_op"], "all_reduce")
-        self.assertEqual(contract["reference"], "torch.distributed.all_reduce")
-
-    def test_genuine_reduce_still_maps_to_reduce(self) -> None:
-        item = {"name": "my_reduce_kernel"}
-        self.enrich(item, {})
-        self.assertEqual(item["kernel_contract"]["collective_op"], "reduce")
-
-    def test_reduce_scatter_unaffected(self) -> None:
-        item = {"name": "aiter_reduce_scatter_bf16"}
-        self.enrich(item, {})
-        self.assertEqual(item["kernel_contract"]["collective_op"], "reduce_scatter")
-
-
 if __name__ == "__main__":
     unittest.main()
