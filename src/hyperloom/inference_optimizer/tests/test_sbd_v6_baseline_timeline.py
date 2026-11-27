@@ -11,7 +11,6 @@ from typing import Any
 
 import pytest
 
-from hyperloom.common.round_measurement import LATENCY_SOURCE
 from hyperloom.inference_optimizer.breakdown.recorder.baseline_event import (
     PRODUCER,
     ROUND_ACCURACY,
@@ -609,7 +608,7 @@ async def test_an_executor_raise_closes_the_event_it_opened(tmp_path: Path) -> N
 # ---------------------------------------------------------------------------
 def test_the_measurement_says_where_its_latency_came_from(tmp_path: Path) -> None:
     recorder = _recorder()
-    measured = _measured(ttft_e2el_source=LATENCY_SOURCE, tpot_source=LATENCY_SOURCE)
+    measured = _measured(ttft_e2el_source="pair-source", tpot_source="tpot-source")
     recorder.begin_run()
     recorder.record_round(
         round_=BaselineRound(
@@ -623,11 +622,9 @@ def test_the_measurement_says_where_its_latency_came_from(tmp_path: Path) -> Non
     recorder.finish(measured)
 
     action = _actions(tmp_path)[0]
-    assert action["measurement"]["ttft_e2el_source"] == LATENCY_SOURCE
-    assert action["measurement"]["tpot_source"] == LATENCY_SOURCE
-    # On the round too, because the discarded warmup's provenance can differ
-    # from the adopted pass's.
-    assert action["runs"][0]["rounds"][0]["measurement"]["ttft_e2el_source"] == LATENCY_SOURCE
+    assert action["measurement"]["ttft_e2el_source"] == "pair-source"
+    assert action["measurement"]["tpot_source"] == "tpot-source"
+    assert action["runs"][0]["rounds"][0]["measurement"]["ttft_e2el_source"] == "pair-source"
 
 
 # ---------------------------------------------------------------------------

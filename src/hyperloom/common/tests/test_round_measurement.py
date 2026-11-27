@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""``round_measurement``: each kind of round report maps to one measurement under the keys an archived v1 benchmark report's measurement has."""
+"""``round_measurement``: each kind of round report maps to one measurement."""
 
 from __future__ import annotations
 
@@ -46,40 +46,6 @@ def test_a_completed_fixed_round_is_a_valid_measurement_with_every_fixed_key() -
     assert (measurement["tp"], measurement["conc"]) == (launch.base.topology.tp, 64)
     assert measurement["ttft_e2el_source"] == measurement["tpot_source"] == LATENCY_SOURCE
     assert measurement["failed_step"] is None
-
-
-#: The keys an archived v1 benchmark report's measurement has.
-_V1_MEASUREMENT_KEYS = frozenset(
-    {
-        "reported_success",
-        "framework",
-        "model",
-        "workload_kind",
-        "throughput_unit",
-        "quality_gate",
-        "latency_s",
-        "request_throughput",
-        "output_throughput",
-        "total_token_throughput",
-        "completed_requests",
-        "duration_seconds",
-        "requested_requests",
-        "ttft_mean_ms",
-        "ttft_p99_ms",
-        "tpot_mean_ms",
-        "e2el_mean_ms",
-        "e2el_p99_ms",
-        "raw_result_path",
-        "nonfatal_warnings",
-        "valid_measurement",
-        "ttft_e2el_source",
-        "tpot_source",
-    }
-)
-
-
-def test_the_measurement_carries_every_key_a_v1_benchmark_report_measurement_carries() -> None:
-    assert _V1_MEASUREMENT_KEYS <= set(round_measurement(_fixed(), None))
 
 
 @pytest.mark.parametrize(

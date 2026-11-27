@@ -101,7 +101,7 @@ def _grid(monkeypatch, tmp_path: Path, **servers: Any) -> _CheckGrid:
 
 
 def _run(tmp_path: Path, cache: Path, **plan: Any):
-    call = _call(tmp_path, short_prompts=staged_plan(cache, **plan), result_dir=str(tmp_path / "out" / "results"))
+    call = _call(tmp_path, short_prompts=staged_plan(cache, **plan))
     return LocalMeasurementBackend().run_test(call)
 
 
@@ -175,7 +175,6 @@ def test_a_graded_test_answers_after_its_evaluation_on_the_server_its_warmup_boo
             point,
             accuracy=True,
             short_prompts=staged_plan(cache),
-            result_dir=str(tmp_path / "res"),
             rounds=RoundPlan(warmup_rounds=1),
         )
     )
@@ -216,7 +215,6 @@ def test_a_test_whose_evaluation_failed_runs_no_check(monkeypatch, tmp_path, cac
         accuracy=True,
         kind="accuracy",
         short_prompts=staged_plan(cache),
-        result_dir=str(tmp_path / "out" / "results"),
         rounds=RoundPlan(warmup_rounds=0),
     )
 

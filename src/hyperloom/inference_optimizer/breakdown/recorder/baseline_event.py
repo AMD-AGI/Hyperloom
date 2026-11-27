@@ -226,12 +226,8 @@ def _measurement(result: Mapping[str, Any], framework: str) -> dict[str, Any]:
         "ttft_mean_ms": _float_or_none(result.get("ttft_mean_ms")),
         "e2el_mean_ms": _float_or_none(result.get("e2el_mean_ms")),
         "tpot_mean_ms": _float_or_none(result.get("tpot_mean_ms")),
-        # Which source supplied the latency. A benchmark report, a raw
-        # InferenceX JSON and one salvaged from a leaked path write the same
-        # keys but are not equally trustworthy, so the executor labels them.
+        # Where the measurement read its latency from.
         "ttft_e2el_source": str(result.get("ttft_e2el_source") or ""),
-        # Separate because TPOT alone can be computed from the other two, and
-        # a computed figure must not be read as a measured one.
         "tpot_source": str(result.get("tpot_source") or ""),
         # The graded axes this round measured. Recorded here rather than read off ``state.baseline_perf`` at export
         # because this block is already where ``outcome.baseline`` comes from, and a second source for one baseline

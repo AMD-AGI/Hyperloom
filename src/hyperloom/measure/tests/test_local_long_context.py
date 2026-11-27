@@ -70,7 +70,7 @@ def _grid(monkeypatch, tmp_path: Path, **servers: Any) -> _ShortGrid:
 def _run(tmp_path: Path, cache: Path, *, served: int = 4096, **call: Any):
     point = _point(tmp_path, "served", MAX_MODEL_LEN=served)
     plan = call.pop("long_context", None) or staged_plan(cache)
-    call = {"long_context": plan, "result_dir": str(tmp_path / "out" / "results"), **call}
+    call = {"long_context": plan, **call}
     return LocalMeasurementBackend().run_test(_call(tmp_path, point, **call))
 
 
@@ -149,7 +149,7 @@ def test_a_launch_that_serves_too_little_context_sends_no_prompt_and_the_test_st
 def test_a_context_flag_in_the_server_arguments_wins_over_the_points_max_model_len(monkeypatch, tmp_path, cache):
     grid = _grid(monkeypatch, tmp_path)
     point = _point(tmp_path, "flagged", MAX_MODEL_LEN=100000, **{CONTEXT_FLAG_ENV: "--context-length 1500"})
-    call = _call(tmp_path, point, long_context=staged_plan(cache), result_dir=str(tmp_path / "out" / "results"))
+    call = _call(tmp_path, point, long_context=staged_plan(cache))
 
     LocalMeasurementBackend().run_test(call)
 
@@ -195,7 +195,6 @@ def _agentx_run(monkeypatch, tmp_path: Path, cache: Path, *, golden: bool, answe
         _agentx_point(tmp_path, monkeypatch),
         long_context=staged_plan(cache),
         short_prompts=short_plan(cache),
-        result_dir=str(tmp_path / "out" / "results"),
         session_facts=SessionFacts(base_launch=base),
     )
     outcome = LocalMeasurementBackend().run_test(call)
@@ -286,7 +285,6 @@ def test_an_agentx_test_that_plans_no_long_context_check_holds_no_server_past_it
         tmp_path,
         _agentx_point(tmp_path, monkeypatch),
         short_prompts=short_plan(cache),
-        result_dir=str(tmp_path / "out" / "results"),
         session_facts=SessionFacts(base_launch=_base(golden_al=None)),
     )
 

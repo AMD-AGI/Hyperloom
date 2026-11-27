@@ -40,7 +40,6 @@ from .._subprocess_kill import (
     AGENTX_EARLY_STOP_RETURNCODE,
     ORCHESTRATOR_CANCELLED_RETURNCODE,
     SESSION_TIME_EXHAUSTED_RETURNCODE,
-    resolve_benchmark_timeouts,
 )
 from ..benchmark_result import round_succeeded
 from .._round_folder import round_report_path
@@ -682,7 +681,7 @@ def _round_warnings(measurement: dict[str, Any], measured: _MeasuredVariant) -> 
 
 def _abort_on_invalid_measurement(run: _GridRun, at: _VariantSlot, outcome: _VariantOutcome) -> NoReturn:
     returncode = outcome.measured.round.proc.returncode
-    workspace = outcome.measured.workspace
+    workspace = outcome.measured.round.proc.run_dir
     report_path = round_report_path(workspace)
     server_log = at.path / "server.log"
     found = argv_refusal(measurement_server_log_path(server_log, workspace)) or _invalid_measurement_error(
@@ -718,7 +717,7 @@ def _abort_on_invalid_measurement(run: _GridRun, at: _VariantSlot, outcome: _Var
 
 
 def _variant_row(run: _GridRun, at: _VariantSlot, measured: _MeasuredVariant) -> VariantResult:
-    measurement = record_round(measured.workspace, started_unix=measured.round.started_unix)
+    measurement = record_round(measured.round.proc.run_dir, started_unix=measured.round.started_unix)
     outcome = _VariantOutcome(measured, measurement, _round_warnings(measurement, measured))
     # A boot round that measured a load is a measured row; one that only booted (an inference_suite round with no
     # workload completes without a measurement), or only evaluated, is an unmeasured row.
@@ -731,7 +730,7 @@ def _variant_row(run: _GridRun, at: _VariantSlot, measured: _MeasuredVariant) ->
 
 
 def _unmeasured_row(at: _VariantSlot, outcome: _VariantOutcome, launch: GridLaunch) -> VariantResult:
-    workspace = outcome.measured.workspace
+    workspace = outcome.measured.round.proc.run_dir
     report_path = round_report_path(workspace)
     return VariantResult(
         name=at.variant.name,
@@ -769,7 +768,7 @@ async def _measure_variant(run: _GridRun, at: _VariantSlot) -> VariantResult:
     await _run_multi_node_warmup(warm_run, at, rounds)
     round_ = await _run_measured_round(run, at, rounds)
     _refuse_reaped_round(run, at, round_)
-    return _variant_row(run, at, _MeasuredVariant(rounds, round_, round_.proc.run_dir, warmup_tput))
+    return _variant_row(run, at, _MeasuredVariant(rounds, round_, warmup_tput))
 
 
 async def run_grid(
@@ -784,8 +783,6 @@ async def run_grid(
 
     ``launch.ready_server_log`` is the log of the caller's ready server, measured when no variant log exists.
     """
-    # An operator timeout that does not parse is the invocation's fault: raise before a variant is failed on it.
-    resolve_benchmark_timeouts()
     warmup_before_measure = launch.warmup_before_measure
     if warmup_before_measure is None:
         warmup_before_measure = _run_grid_warmup_enabled()

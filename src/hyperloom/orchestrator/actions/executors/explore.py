@@ -203,11 +203,14 @@ def _anchor_the_params(params: dict[str, Any], ss: Any) -> None:
         params.update(stack_base_params(cb))
 
 
-def _sanitized_overrides(params: dict[str, Any]) -> tuple[str | None, str | None]:
+def _sanitized_script(params: dict[str, Any]) -> str | None:
+    """The ``benchmark_script`` override; a malformed one, or a malformed ``result_dir``, refuses the round."""
     try:
-        return sanitize_script_name(params.get("benchmark_script")), sanitize_result_dir(params.get("result_dir"))
+        script = sanitize_script_name(params.get("benchmark_script"))
+        sanitize_result_dir(params.get("result_dir"))
     except ValueError as exc:
         raise _RoundRefused("bad_param", str(exc)) from exc
+    return script
 
 
 class _ExploreRound:
@@ -223,7 +226,7 @@ class _ExploreRound:
         self.output_root = output_root
         self.ss = extra.get("shared_state")
         self.phase_deadline = extra.get("phase_deadline")
-        script, _ = _sanitized_overrides(params)
+        script = _sanitized_script(params)
         self.target = BenchmarkTarget(
             model_path=resolve_session_model_path(
                 params=params,

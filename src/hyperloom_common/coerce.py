@@ -57,15 +57,6 @@ def first_float(*values: Any, default: _T | None = None) -> float | _T | None:
     return default
 
 
-def first_int(*values: Any, default: _T | None = None) -> int | _T | None:
-    """Return the first value that :func:`to_int`-parses, else *default*."""
-    for value in values:
-        parsed = to_int(value)
-        if parsed is not None:
-            return parsed
-    return default
-
-
 def first_text(*values: Any) -> str:
     return str(next((value for value in values if value), "")).strip()
 
@@ -152,7 +143,6 @@ __all__ = [
     "recorded_float",
     "to_int",
     "first_float",
-    "first_int",
     "first_str",
     "optional_positive_int",
     "text_or_none",

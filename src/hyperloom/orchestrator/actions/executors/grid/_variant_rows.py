@@ -114,11 +114,10 @@ class _BenchmarkPass(NamedTuple):
 
 
 class _MeasuredVariant(NamedTuple):
-    """One variant's measured round, the run_dir it left on disk, and the warmup it discarded."""
+    """One variant's measured round and the warmup it discarded."""
 
     rounds: _VariantRounds
     round: _BenchmarkPass
-    workspace: Path
     warmup_tput: float | None
 
 
@@ -216,7 +215,7 @@ def _kept_nonzero_exit(at: _VariantSlot, outcome: _VariantOutcome) -> str | None
             measurement.get("completed_requests"),
             measurement.get("requested_requests"),
         )
-        workspace = outcome.measured.workspace
+        workspace = outcome.measured.round.proc.run_dir
         report_path = round_report_path(workspace)
         _abort_variant(
             at,
@@ -248,7 +247,7 @@ def _kept_nonzero_exit(at: _VariantSlot, outcome: _VariantOutcome) -> str | None
 def _measured_row(at: _VariantSlot, outcome: _VariantOutcome) -> VariantResult:
     nonzero_kept_error = _kept_nonzero_exit(at, outcome)
     measurement = outcome.measurement
-    workspace = outcome.measured.workspace
+    workspace = outcome.measured.round.proc.run_dir
     report_path = round_report_path(workspace)
     row = VariantResult(
         name=at.variant.name,

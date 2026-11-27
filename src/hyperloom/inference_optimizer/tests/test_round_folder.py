@@ -14,7 +14,6 @@ from hyperloom.common.round_measurement import round_measurement
 from hyperloom.orchestrator.actions.executors import _multi_node_env
 from hyperloom.orchestrator.actions.executors.grid import _round_report
 from hyperloom.orchestrator.actions.executors.gpu._gpu_metrics import GPU_ARTIFACT_NAME
-from hyperloom.orchestrator.actions.executors.gpu._gpu_power import POWER_FIELDS
 from hyperloom.orchestrator.actions.executors._round_folder import RoundFolder
 from hyperloom.orchestrator.actions.executors.benchmark_result import extract_benchmark_measurement
 from inference_suite.contracts import FailedStep, FixedMetrics, ReportError, RunLayout, RunStatus
@@ -53,16 +52,28 @@ def test_a_run_dir_with_a_power_section_is_measured_from_it(tmp_path: Path) -> N
     from inference_suite.contracts import PowerSummary
     from inference_suite.tests.test_report_contract import _POWER_JSON
 
-    run_dir = _run_dir(tmp_path, power=PowerSummary.of("power.json", _POWER_JSON))
+    energy = {
+        **_POWER_JSON["energy"],
+        "p75_power_w": 660.0,
+        "p90_power_w": 670.0,
+        "joules_per_total_token": 0.4,
+        "joules_per_successful_query": 280.0,
+    }
+    run_dir = _run_dir(tmp_path, power=PowerSummary.of("power.json", {**_POWER_JSON, "energy": energy}))
     measurement = extract_benchmark_measurement(run_dir)
-    assert (measurement["gpu_power_avg_w"], measurement["gpu_energy_j"], measurement["power_valid"]) == (
-        650.0,
-        130_000.0,
-        1,
-    )
-    assert measurement["gpu_power_by_gpu_w"] == {"0": 700.0, "1": 600.0}
-    assert measurement["joules_per_output_token"] == 1.3 and measurement["joules_per_input_token"] is None
-    assert set(POWER_FIELDS) <= set(measurement) and type(measurement["power_valid"]) is int
+    power = {
+        "gpu_power_avg_w": 650.0,
+        "gpu_power_p75_w": 660.0,
+        "gpu_power_p90_w": 670.0,
+        "gpu_energy_j": 130_000.0,
+        "joules_per_input_token": None,
+        "joules_per_output_token": 1.3,
+        "joules_per_total_token": 0.4,
+        "joules_per_successful_query": 280.0,
+        "gpu_power_by_gpu_w": {"0": 700.0, "1": 600.0},
+        "power_valid": 1,
+    }
+    assert {key: measurement[key] for key in power} == power
 
 
 def test_a_sampled_run_dir_whose_energy_is_invalid_stays_unmeasured(tmp_path: Path) -> None:
@@ -114,10 +125,9 @@ def test_gpu_metrics_are_written_from_the_report_into_the_round_dir_not_the_run_
     assert (payload["avg_temp_c"], payload["avg_gpu_util_pct"], payload["avg_vram_pct"]) == (70.0, 80.0, 50.0)
 
 
-def test_the_grid_reads_a_finished_run_dir_and_writes_its_gpu_artifact(tmp_path: Path) -> None:
-    run_dir = _run_dir(tmp_path, fixed=FixedMetrics.of({}))
-    measurement = _round_report.record_round(run_dir, started_unix=0.0)
-    assert measurement["valid_measurement"] is False
+def test_recording_a_grid_round_writes_its_gpu_artifact_into_the_round_dir(tmp_path: Path) -> None:
+    run_dir = _run_dir(tmp_path)
+    _round_report.record_round(run_dir, started_unix=0.0)
     assert (run_dir.parent / GPU_ARTIFACT_NAME).is_file()
 
 

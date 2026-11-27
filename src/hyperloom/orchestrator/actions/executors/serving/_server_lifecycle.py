@@ -31,9 +31,6 @@ _GPU_FREE_POLL_SECONDS = 5.0
 # point naming no ``PORT`` gets a free one where its round reads it (``_suite.rounds._round_point``).
 REUSE_PORT_DEFAULT = 8888
 
-# Server-boot budget for the persistent server phase.
-SERVER_READY_TIMEOUT_SEC = 7200
-
 
 def resolve_lifecycle_params(materialized_config_path: Path) -> dict[str, Any]:
     """Inspect the materialized YAML for server_lifecycle eligibility."""
@@ -90,7 +87,6 @@ def inject_lifecycle(
         "cleanup": bool(cleanup),
         "force_reuse": False,
         "pid_dir": str(pid_dir),
-        "server_ready_timeout_s": SERVER_READY_TIMEOUT_SEC,
     }
     # Pin PORT so every round of the lifecycle reaches the same server.
     envs = bench.setdefault("envs", {})

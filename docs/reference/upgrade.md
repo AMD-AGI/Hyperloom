@@ -236,9 +236,9 @@ round, and that search is removed:
   multi-node it also no longer writes a merged `gpu_metrics.csv` at the top of
   those files; each round's run directory still gets its own.
 
-### Required: `INFERENCE_OPTIMIZER_RESCUE_PATHS` and `INFERENCE_OPTIMIZER_BASELINE_SERVER_READY_SEC` are no longer read
+### Recommended: drop `INFERENCE_OPTIMIZER_RESCUE_PATHS` and `INFERENCE_OPTIMIZER_BASELINE_SERVER_READY_SEC`
 
-Both are silently ignored, so drop them. Neither has had an effect since 1.2.0:
+Both are no longer read and are silently ignored. Neither has had an effect since 1.2.0:
 a round's results are read from its run directory alone, and every round
 already held its server boot to the round's own time limit. The readers that
 went with them could not run either, so the warnings
