@@ -418,7 +418,7 @@ def _killed_overtime_round(session_dir):
 def test_killed_overtime_enters_failures(tmp_path):
     """record_explore_variant_failures writes the evidence packet and the last_action_failures row."""
     c, task, result = _killed_overtime_round(tmp_path)
-    c.gap_refresh.record_explore_variant_failures(task=task, result=result)
+    c.explore_outcomes.record_explore_variant_failures(task=task, result=result)
 
     # 1. Failure evidence was recorded.
     (fe,) = recent_failures(tmp_path)
@@ -437,7 +437,7 @@ def test_failure_evidence_that_cannot_be_written_is_an_error(tmp_path):
     c, task, result = _killed_overtime_round(tmp_path)
 
     with pytest.raises(OSError):
-        c.gap_refresh.record_explore_variant_failures(task=task, result=result)
+        c.explore_outcomes.record_explore_variant_failures(task=task, result=result)
 
     assert c.shared_state.last_action_failures == []
 

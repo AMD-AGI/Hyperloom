@@ -133,7 +133,7 @@ CONTEXT_TOOL_SPECS: tuple[tuple[str, str, dict[str, Any], str], ...] = (
     (
         "get_gaps",
         "Return the structured gaps[] ledger: canonical_id / layer / "
-        "severity / symptom / attempt count and up to 5 recent attempts "
+        "symptom / attempt count and up to 5 recent attempts "
         "(each with action, outcome, error_class, and failure_id when present).",
         _NO_ARGS_SCHEMA,
         "gaps",

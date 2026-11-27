@@ -395,10 +395,10 @@ class Coordinator:
         return self._collaborator("_specialist_dispatch", SpecialistDispatchCollaborator)
 
     @property
-    def gap_refresh(self):
-        from .gap_refresh import GapRefreshCollaborator
+    def explore_outcomes(self):
+        from .explore_outcomes import ExploreOutcomesCollaborator
 
-        return self._collaborator("_gap_refresh", GapRefreshCollaborator)
+        return self._collaborator("_explore_outcomes", ExploreOutcomesCollaborator)
 
     @property
     def phase_framework(self):

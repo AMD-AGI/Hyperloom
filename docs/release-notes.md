@@ -283,25 +283,32 @@ it.
   `custom_specialist_refused` observation and a log line naming the rule
   instead of a `policy_denied` addressed to Orchestration. See
   [Upgrade](reference/upgrade.md).
-- **The gap ledger holds no row derived from the objective or the failure
-  log.** `gaps` in `state.json`, the `=== Current gaps ===` block, `get_gaps`
-  and a published recipe's `remaining_gaps` lose the
-  `<workload>#throughput_below_target`, `#baseline_unstable` and
-  `#fail:<action>:<error_class>[:<variant>]` rows, which the Coordinator
-  re-derived after every baseline, explore round and specialist round. The
-  same facts stay in the prompt as `target_gap_pct=`,
-  `baseline_failure_streak=` and `last_action_failures=`. **Breaking** for a
-  specialist delegate that cited one of those rows and named no domain: it
-  took the row's domain, symptom and recent attempts, and now has to name
-  `domain` or `tags` itself. A gap id is still required and any non-empty id
-  is still accepted. Proposals of a round that cited the high-severity target
-  row no longer rank first among the untested proposals, and the
-  operator-defined specialist is sent at the least-attempted gap. Two defects
-  go with it: a variant that failed before it measured anything is no longer
-  published into the recipe's `what_failed` as `reverted` (it stays there
-  under its action and error class), and a research scout that returns more
-  than 50 hints no longer pushes the gaps that carry explore and specialist
-  outcomes off the 50-row ledger, which now drops untried rows first. See
+- **The gap ledger holds no row derived from the objective, the failure log
+  or the research hints, and a gap has no severity.** `gaps` in `state.json`,
+  the `=== Current gaps ===` block, `get_gaps` and a published recipe's
+  `remaining_gaps` lose the `<workload>#throughput_below_target`,
+  `#baseline_unstable` and `#fail:<action>:<error_class>[:<variant>]` rows,
+  which the Coordinator re-derived after every baseline, explore round and
+  specialist round, and the `gap.research_hint.*` rows it upserted after
+  every specialist round that returned findings. The same facts stay in the
+  prompt as `target_gap_pct=`, `baseline_failure_streak=`,
+  `last_action_failures=` and the `=== Specialist findings ===` block.
+  **Breaking** for a specialist delegate that cited one of those rows and
+  named no domain: it took the row's domain, symptom and recent attempts,
+  and now has to name `domain` or `tags` itself. A gap id is still required
+  and any non-empty id is still accepted. The rows that remain carry no
+  `severity`, which was `medium` on every one of them: gap rows read
+  `[<layer>]`, untested-proposal rows `[<domain>]`, and the untested
+  proposals are ordered predictor rows first, then the most recent
+  specialist round first, where 1.2.x put a round that cited a
+  higher-severity gap ahead and a round whose gap id the ledger did not hold
+  last. The operator-defined specialist is sent at the least-attempted gap,
+  and a recipe's `what_worked` row no longer takes a research hint's
+  `source`. Two defects go with it: a variant that failed before it measured
+  anything is no longer published into the recipe's `what_failed` as
+  `reverted` (it stays there under its action and error class), and a
+  research scout that returns more than 50 hints no longer pushes the gaps
+  that carry explore and specialist outcomes off the 50-row ledger. See
   [Upgrade](reference/upgrade.md).
 - **forge-loop runs every round as lanes and has no planning stage.** Every
   iteration is one round: one lane per focus the Analysis Agent divides its

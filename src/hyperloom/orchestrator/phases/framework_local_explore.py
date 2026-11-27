@@ -36,7 +36,6 @@ def _local_explore_gap(gap_cid: str, gap: str, domain: str) -> dict[str, Any]:
         "canonical_id": gap_cid,
         "symptom": gap or "Author a throughput patch from live source + profiling evidence",
         "layer": "framework",
-        "severity": "medium",
         "domain_hint": domain,
         "source": "coordinator_internal",
     }

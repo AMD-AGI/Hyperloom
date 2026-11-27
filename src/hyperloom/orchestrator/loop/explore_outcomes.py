@@ -1,12 +1,11 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Gap refresh: the Coordinator collaborator that files research hints and explore outcomes on ``SharedState.gaps``."""
+"""Explore outcomes: the Coordinator collaborator that records what each variant of an explore round ended as."""
 
 from __future__ import annotations
 
 import logging as _logging
-from hashlib import sha1
 from typing import TYPE_CHECKING, Any
 
 from ..collaborator import CoordinatorCollaborator
@@ -18,7 +17,7 @@ if TYPE_CHECKING:
 
 log = _logging.getLogger(__name__)
 
-__all__ = ["GapRefreshCollaborator"]
+__all__ = ["ExploreOutcomesCollaborator"]
 
 
 # Artifact references copied from a per-variant outcome onto its gap attempt.
@@ -31,33 +30,8 @@ _GAP_ATTEMPT_ARTIFACT_KEYS: tuple[str, ...] = (
 )
 
 
-class GapRefreshCollaborator(CoordinatorCollaborator):
-    """Seeds a gap per research hint and records each explore round's per-variant outcomes."""
-
-    def seed_gaps_from_research_hints(self) -> None:
-        """Inject research hints as advisory gaps[] seeds (idempotent)."""
-        from hyperloom.inference_optimizer.baseline_comparison import research_hints as _research_hints
-
-        hints = _research_hints.load_hints(self.session_dir)
-        for hint in hints:
-            what = str(hint.get("what") or "").strip()
-            source = str(hint.get("source") or "").strip()
-            if not what or not source:
-                continue
-            tags = hint.get("domain_tags") or []
-            key = f"{what.lower()}::{source.lower()}"
-            cid = f"gap.research_hint.{sha1(key.encode()).hexdigest()[:16]}"
-            self.shared_state.upsert_gap(
-                {
-                    "canonical_id": cid,
-                    "symptom": what,
-                    "layer": "research_hint",
-                    "severity": "medium",
-                    "domain_hint": str(tags[0]) if tags else "",
-                    "source": "research_scout",
-                    "provenance": str(hint.get("source") or ""),
-                }
-            )
+class ExploreOutcomesCollaborator(CoordinatorCollaborator):
+    """Files an explore round's per-variant outcomes as gap attempts, and its unmeasured variants as failures."""
 
     def _framework_authoring_domain(self) -> str:
         """Return the authoring domain matching this session's framework kind.
@@ -101,7 +75,6 @@ class GapRefreshCollaborator(CoordinatorCollaborator):
                     "canonical_id": canonical,
                     "symptom": "explore round outcomes",
                     "layer": "framework",
-                    "severity": "medium",
                     "domain_hint": self._framework_authoring_domain(),
                     "source": "attempts",
                 }

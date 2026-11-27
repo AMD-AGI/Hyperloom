@@ -177,34 +177,18 @@ def test_a_removal_only_proposal_does_not_render_as_a_no_op():
     assert "+args=" not in line
 
 
-def test_ranking_is_gap_severity_then_recency():
+def test_ranking_is_most_recent_round_first_whether_or_not_the_ledger_holds_its_gap():
     state = _state(
         [
-            _round([{"name": "low-old", "extra_args": "--1"}], gap="gap.low"),
-            _round([{"name": "high", "extra_args": "--2"}], gap="gap.high"),
-            _round([{"name": "low-new", "extra_args": "--3"}], gap="gap.low"),
+            _round([{"name": "oldest", "extra_args": "--1"}], gap="gap.on.ledger"),
+            _round([{"name": "middle", "extra_args": "--2"}], gap="gap.on.ledger"),
+            _round([{"name": "newest", "extra_args": "--3"}], gap="gap.of.the.models.own"),
         ],
-        gaps=[
-            {"canonical_id": "gap.high", "severity": "high"},
-            {"canonical_id": "gap.low", "severity": "low"},
-        ],
+        gaps=[{"canonical_id": "gap.on.ledger"}],
     )
-    names = [line.split()[1] for line in state.to_untested_proposals_summary().splitlines() if line.startswith("•")]
-    assert names == ["high", "low-new", "low-old"]
-
-
-def test_a_pruned_gap_sorts_last_but_is_not_dropped():
-    state = _state(
-        [
-            _round([{"name": "orphan", "extra_args": "--1"}], gap="gap.gone"),
-            _round([{"name": "known", "extra_args": "--2"}], gap="gap.low"),
-        ],
-        gaps=[{"canonical_id": "gap.low", "severity": "low"}],
-    )
-    out = state.to_untested_proposals_summary()
-    names = [line.split()[1] for line in out.splitlines() if line.startswith("•")]
-    assert names == ["known", "orphan"]
-    assert "sev?" in out
+    rows = [line for line in state.to_untested_proposals_summary().splitlines() if line.startswith("•")]
+    assert [line.split()[1] for line in rows] == ["newest", "middle", "oldest"]
+    assert rows[0].startswith("• newest [serving] ")
 
 
 def test_overflow_is_truncated_and_counted():

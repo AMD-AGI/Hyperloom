@@ -18,7 +18,6 @@ from hyperloom.inference_optimizer.session.geak_rebench_verdict import (
     REBENCH_UNMEASURED_GIVEN_UP,
 )
 from . import gap_rows, variant_line, warm_start
-from .phase_state import GAP_SEVERITY_RANK
 
 # Failure rows rendered into the prompt, and per-row excerpt budget.
 _FAILURES_RENDERED = 10
@@ -73,7 +72,6 @@ class _ProposalRound(NamedTuple):
     """The attribution a specialist round stamps onto every proposal it produced."""
 
     domain: str
-    severity: str
     priority: int
     task_id: str
     provenance: str
@@ -81,14 +79,13 @@ class _ProposalRound(NamedTuple):
     kb_rendered_refs: list[str]
 
 
-def _round_attribution(entry: dict[str, Any], severity_of: dict[str, str]) -> _ProposalRound:
+def _round_attribution(entry: dict[str, Any]) -> _ProposalRound:
     """Read one specialist round's attribution. ``provenance`` defaults to its domain: a proposal cannot choose it."""
     from hyperloom_common.coerce import to_int
 
     domain = str(entry.get("domain") or "?").removesuffix("_specialist")
     return _ProposalRound(
         domain=domain,
-        severity=severity_of.get(str(entry.get("gap_canonical_id") or ""), ""),
         priority=to_int(entry.get("priority"), default=0),
         task_id=str(entry.get("task_id") or "")[:8],
         provenance=str(entry.get("provenance") or f"specialist:{domain}"),
@@ -106,7 +103,6 @@ def _stamp_round_attribution(
     """Stamp a normalized proposal with the identity its round gives it, naming it when it named itself nothing."""
     row["name"] = row["name"] or f"{attribution.domain or 'specialist'}-{attribution.task_id}-{index}"
     row["domain"] = attribution.domain
-    row["severity"] = attribution.severity
     row["provenance"] = attribution.provenance
     # Already checked against the read this round's dispatch was shown, which travels with them.
     row["experience_citations"] = list(proposal.get("experience_citations") or [])
@@ -146,7 +142,7 @@ def untested_proposal_line(row: dict[str, Any], *, why_chars: int | None = 80) -
 
     ``why_chars`` bounds the reason; ``None`` shows a reason its producer has already bounded in full.
     """
-    parts = [f"• {row['name']} [{row['domain']}·{row['severity'] or 'sev?'}]"]
+    parts = [f"• {row['name']} [{row['domain']}]"]
     if row["atomic"]:
         parts.append("ATOMIC")
     if row["extra_args"]:
@@ -380,7 +376,7 @@ class _RenderMixin:
         """Executable proposals from this cycle that no explore round has benched.
 
         Ordered by round ``priority`` (predictor rounds set one, specialist rounds
-        do not), then gap severity, then most recent. A row's ``provenance`` is its
+        do not), then most recent. A row's ``provenance`` is its
         round's, ``specialist:<domain>`` unless the round's recorder set one; a
         proposal cannot choose it, since a specialist writes its own proposals.
         """
@@ -390,17 +386,12 @@ class _RenderMixin:
 
         cycle = to_int(self.macro_cycle, default=0)
         benched = self.benched_fingerprints()
-        severity_of = {
-            str(g.get("canonical_id") or ""): str(g.get("severity") or "").strip().lower()
-            for g in (self.gaps or [])
-            if isinstance(g, dict)
-        }
-        ranked: list[tuple[int, int, int, dict[str, Any]]] = []
+        ranked: list[tuple[int, int, dict[str, Any]]] = []
         seen: set[str] = set()
         for order, entry in enumerate(self.specialist_rounds or []):
             if not isinstance(entry, dict) or to_int(entry.get("cycle"), default=0) != cycle:
                 continue
-            attribution = _round_attribution(entry, severity_of)
+            attribution = _round_attribution(entry)
             for index, proposal in enumerate(entry.get("proposal_set") or []):
                 if not isinstance(proposal, dict):
                     continue
@@ -413,9 +404,9 @@ class _RenderMixin:
                 seen.add(fingerprint)
                 row["fingerprint"] = fingerprint
                 _stamp_round_attribution(row, proposal, index, attribution)
-                ranked.append((attribution.priority, GAP_SEVERITY_RANK.get(attribution.severity, 0), order, row))
-        ranked.sort(key=lambda r: (-r[0], -r[1], -r[2]))
-        return [row for _, _, _, row in ranked]
+                ranked.append((attribution.priority, order, row))
+        ranked.sort(key=lambda r: (-r[0], -r[1]))
+        return [row for _, _, row in ranked]
 
     def to_untested_proposals_summary(
         self, *, skip_provenance: str = "", in_grids: Collection[str] = (), carried: Collection[str] = ()
@@ -440,7 +431,7 @@ class _RenderMixin:
             out.extend(
                 [
                     "Executable specialist proposals from this cycle that no explore round has benched or has in its grid.",
-                    "Ranked by gap severity, then most recent. Once no explore is queued or running, the Coordinator",
+                    "Most recent round first. Once no explore is queued or running, the Coordinator",
                     "benches the head of this list; dispatch `explore` only for variants not listed here.",
                     "",
                 ]

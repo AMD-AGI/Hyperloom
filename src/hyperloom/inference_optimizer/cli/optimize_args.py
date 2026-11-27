@@ -547,9 +547,8 @@ def add_research_arguments(opt: argparse.ArgumentParser) -> None:
         "every --research-scout-interval optimisation rounds) that "
         "collects proven priors — reference launch scripts, model "
         "config.json architecture features, and cross-framework / "
-        "NVIDIA research — into ``research_hints.md`` and seeds "
-        "high-priority gaps. Default on; pass ``--no-research-scout`` "
-        "to disable the whole feature.",
+        "NVIDIA research — into ``research_hints.md``. Default on; "
+        "pass ``--no-research-scout`` to disable the whole feature.",
     )
     opt.add_argument(
         "--research-scout-interval",
@@ -583,11 +582,11 @@ def add_recon_arguments(opt: argparse.ArgumentParser) -> None:
         action=argparse.BooleanOptionalAction,
         default=True,
         help="Sediment KEEP/REVERT provenance into the persistent recipe: "
-        "KEEP optimizations traceable to a research hint carry their "
-        "source + measured gain into ``what_worked``; REVERTs land in "
-        "``what_failed`` so the next warm-start avoids re-testing them. "
-        "Default on; pass ``--no-recipe-sediment`` to keep the recipe "
-        "purely ephemeral.",
+        "KEEP optimizations traceable to a static-recon bridge candidate "
+        "carry its predicate file + measured gain into ``what_worked``; "
+        "REVERTs land in ``what_failed`` so the next warm-start avoids "
+        "re-testing them. Default on; pass ``--no-recipe-sediment`` to "
+        "keep the recipe purely ephemeral.",
     )
     opt.add_argument(
         "--target-advisory",

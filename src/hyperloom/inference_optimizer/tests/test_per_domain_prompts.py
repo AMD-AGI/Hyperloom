@@ -397,9 +397,7 @@ def test_R2_unknown_domain_allowed(gate):
 
 def test_R2_missing_gap_denied_and_params_left_untouched():
     state = SharedState()
-    state.upsert_gap(
-        {"canonical_id": "gap.framework.scheduler", "domain_hint": "serving_specialist", "severity": "high"}
-    )
+    state.upsert_gap({"canonical_id": "gap.framework.scheduler", "domain_hint": "serving_specialist"})
     gate = PolicyGate(shared_state=state)
     params = {"domain": "serving_specialist"}
     with pytest.raises(PolicyDenied) as exc:

@@ -1928,7 +1928,6 @@ async def test_warm_specialist_params_rich_context(coord: Coordinator, monkeypat
             "symptom": "mem bound",
             "layer": "attention",
             "domain_hint": "kernel_agent",
-            "severity": "high",
             "attempts": [{"r": 1}],
         },
     )

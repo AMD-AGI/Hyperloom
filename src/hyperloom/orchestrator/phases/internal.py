@@ -46,7 +46,6 @@ def _bridge_candidate_gap(cand: dict[str, Any], idx: int) -> dict[str, Any] | No
         "canonical_id": f"gap.static_recon.{slug}",
         "symptom": _bridge_symptom(cand, predicate_file, why),
         "layer": "static_recon",
-        "severity": "medium",
         "domain_hint": str(cand.get("domain_hint") or "freeform").strip() or "freeform",
         "source": "static_recon",
         "provenance": predicate_file,

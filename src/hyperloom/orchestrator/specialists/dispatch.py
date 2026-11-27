@@ -393,10 +393,7 @@ class SpecialistDispatchCollaborator(CoordinatorCollaborator):
                 if not isinstance(evidence, dict) or not evidence:
                     attempts = list(gap.get("attempts") or [])[-5:]
                     if attempts:
-                        params["gap_evidence"] = {
-                            "recent_attempts": attempts,
-                            "severity": str(gap.get("severity") or ""),
-                        }
+                        params["gap_evidence"] = {"recent_attempts": attempts}
 
     def _warm_progress(self, params: dict[str, Any]) -> None:
         """Warm the session's current throughput, keep threshold and applied stack."""
@@ -839,7 +836,7 @@ class SpecialistDispatchCollaborator(CoordinatorCollaborator):
     ) -> None:
         """Hand a recorded specialist round to the gap ledger and the phases that consume what it produced."""
         domain = round_entry["domain"].strip()
-        # Harvest specialist findings (hints, gap seeds) from any domain.
+        # Harvest specialist findings (research hints) from any domain.
         if done_payload.get("new_findings"):
             await self._harvest_specialist_findings(done_payload)
 
@@ -867,7 +864,7 @@ class SpecialistDispatchCollaborator(CoordinatorCollaborator):
         await self._coord.phase_framework.integrate_specialist_deliverable(task=task, done_payload=done_payload)
 
     async def _harvest_specialist_findings(self, done_payload: dict[str, Any]) -> None:
-        """Persist top-level specialist findings and re-seed Orchestration.
+        """Persist a specialist round's sourced findings as research hints.
 
         Any ``competitor_target`` numbers emitted are intentionally ignored here:
         measured competitor baselines are sourced from InferenceX, not authored
@@ -891,6 +888,4 @@ class SpecialistDispatchCollaborator(CoordinatorCollaborator):
                 "research-scout: dropped %d sourceless hint(s)",
                 dropped,
             )
-        # Seed high-priority hints as gaps[] so the config arm tries them early.
-        self._coord.gap_refresh.seed_gaps_from_research_hints()
         log.info("specialist findings harvested: hints_added=%d", added)

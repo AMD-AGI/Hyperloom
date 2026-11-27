@@ -106,7 +106,7 @@ async def _auto_bench_grid(state: SharedState) -> list[dict[str, Any]]:
 async def test_an_active_answer_is_queued_ahead_of_specialists_and_benched_as_primatune(service):
     specialist = {"task_id": "s1", "domain": "serving_specialist", "gap_canonical_id": "g1", "cycle": 0,
                   "proposal_set": [{"name": "spec", "extra_args": "--enable-chunked-prefill"}]}  # fmt: skip
-    state = _state(specialist_rounds=[specialist], gaps=[{"canonical_id": "g1", "severity": "high"}])
+    state = _state(specialist_rounds=[specialist], gaps=[{"canonical_id": "g1"}])
     service.answer = _answer(
         Action(server_args={"--kv-cache-dtype": "fp8", "--max-num-seqs": 256}, envs={"VLLM_A": "1", "SGLANG_B": "1"})
     )

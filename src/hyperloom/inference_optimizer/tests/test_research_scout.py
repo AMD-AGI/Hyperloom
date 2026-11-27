@@ -136,16 +136,3 @@ async def test_internal_research_scout_task_is_readonly(tmp_path: Path):
     assert task.params["source_phase"] == "PRELUDE"
     assert "Does this vLLM version support the backend?" in task.params["notes"]
     assert task.params["already_proven"] == [{"name": "kept-variant", "source": ""}]
-
-    research_hints.append_hints(
-        tmp_path,
-        [{"what": "enable aiter", "source": "https://example.test/aiter"}],
-    )
-    coord.gap_refresh.seed_gaps_from_research_hints()
-    first_id = next(row["canonical_id"] for row in coord.shared_state.gaps if row.get("symptom") == "enable aiter")
-    research_hints.append_hints(
-        tmp_path,
-        [{"what": "use hipblaslt", "source": "https://example.test/hipblaslt"}],
-    )
-    coord.gap_refresh.seed_gaps_from_research_hints()
-    assert any(row.get("canonical_id") == first_id for row in coord.shared_state.gaps)

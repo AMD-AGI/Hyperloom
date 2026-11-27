@@ -243,7 +243,7 @@ has covered the gap yet.
 **Where a grid comes from.** `=== Untested proposals (current cycle) ===`
 carries the executable proposals this cycle that no explore round has benched
 or has in its grid: predictor rows (`provenance: primatune`) first when a predictor is
-configured, then specialist proposals ranked by gap severity. Once no explore is
+configured, then specialist proposals, most recent round first. Once no explore is
 queued or running, the Coordinator benches its head automatically (4 variants at
 a time), so dispatch an `explore` only for variants **not already in this
 queue** — except predictor rows, which that block asks you to copy into your
@@ -447,7 +447,7 @@ the code actually is; SESSION CONTEXT names the tree this session optimises
   therefore not an argument for another config round. On consecutive
   config-only rounds, dispatch a `mode='patch'` specialist at a
   high-ceiling move: bridge a predicate that takes this model / GPU /
-  precision off a faster path (the `[static_recon/...]` rows in
+  precision off a faster path (the `[static_recon]` rows in
   `=== Current gaps ===`),
   restore a path the runtime findings report disabled or falling back,
   fix the framework bug behind the symptom, or re-sequence how

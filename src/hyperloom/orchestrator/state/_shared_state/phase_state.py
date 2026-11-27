@@ -97,14 +97,9 @@ def _lever_row(entry: dict[str, Any], default_on: bool) -> dict[str, Any]:
     }
 
 
-# Gap ``severity`` by urgency; an unknown severity ranks below ``low``.
-GAP_SEVERITY_RANK: dict[str, int] = {"high": 3, "medium": 2, "low": 1}
-
-
-def gap_actionability_key(gap: dict[str, Any]) -> tuple[int, int, str]:
-    """Sort key putting the highest-severity, then least-attempted, then oldest gap first."""
-    severity = GAP_SEVERITY_RANK.get(str(gap.get("severity") or "").lower(), 0)
-    return (-severity, len(gap.get("attempts") or []), str(gap.get("first_seen_ts") or ""))
+def gap_actionability_key(gap: dict[str, Any]) -> tuple[int, str]:
+    """Sort key putting the least-attempted, then oldest gap first."""
+    return (len(gap.get("attempts") or []), str(gap.get("first_seen_ts") or ""))
 
 
 class _PhaseStateMixin:

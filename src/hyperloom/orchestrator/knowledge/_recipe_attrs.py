@@ -20,7 +20,7 @@ class AttemptProvenance(NamedTuple):
     """Where a session's proven optimizations came from, and what it reverted.
 
     Keepers are indexed twice because a stack layer may identify itself either
-    by name or by the research gap it closed.
+    by name or by the gap it closed.
     """
 
     kept_by_name: dict[str, str]
@@ -121,7 +121,7 @@ def _gap_attempt_provenance(gap: Mapping[str, Any]) -> AttemptProvenance:
 
 
 def attempt_provenance(state: Any) -> AttemptProvenance:
-    """Trace each proven optimization back to the research hint it came from."""
+    """Trace each proven optimization back to the origin its gap names, and list the measured losers."""
     kept_by_name: dict[str, str] = {}
     kept_by_gap: dict[str, str] = {}
     reverted: list[dict[str, Any]] = []

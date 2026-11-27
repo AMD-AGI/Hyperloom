@@ -1029,26 +1029,37 @@ Two smaller changes:
   `A freeform specialist needs a natural-language task_description (the whole
   mandate).`
 
-### Required: the gap ledger holds no row derived from the objective or the failure log
+### Required: the gap ledger holds no row derived from the objective, the failure log or the research hints
 
 The gap ledger (`gaps` in `state.json`, the `=== Current gaps ===` block of
 the Orchestration prompt, the `get_gaps` tool, and `remaining_gaps` of a
-published recipe) restated three facts the prompt already shows. After every
-baseline, explore round and specialist round, 1.2.x re-derived these rows; it
-no longer does:
+published recipe) restated four facts the prompt already shows. 1.2.x
+re-derived the first three rows below after every baseline, explore round and
+specialist round, and upserted one row per research hint after every
+specialist round that returned findings; it no longer does either:
 
 | Removed row (`canonical_id`) | Read instead |
 |---|---|
 | `<workload>#throughput_below_target` | `target_gap_pct=` under `=== Shared session state ===`. |
 | `<workload>#baseline_unstable` | `baseline_failure_streak=` in the same block. |
 | `<workload>#fail:<action>:<error_class>[:<variant>]` | The `last_action_failures=` rows in the same block (`last_action_failures` in `state.json`). |
+| `gap.research_hint.<hash>` | The finding in the `=== Specialist findings ===` block (`research_hints.json` and `research_hints.md` in the session directory). |
 
-The ledger keeps the rows that say something new: one per research hint
-(`gap.research_hint.*`), one per static-recon bridge candidate
+The ledger keeps one row per static-recon bridge candidate
 (`gap.static_recon.*`), one per FRAMEWORK local-exploration candidate, and
-the row named after the workload that collects each explore round's
-per-variant outcomes. No row has `layer` `kernel_agent` or `system` any more,
-and every row's `severity` is `medium`.
+the row that collects each explore round's per-variant outcomes (named after
+the workload, or after the gap the explore delegate names). No row has
+`layer` `kernel_agent`, `system` or `research_hint` any more.
+
+A gap row has no `severity`. The removed objective and failure rows were the
+only ones that set anything but `medium`, so the field said nothing. It is
+gone from the rows of `gaps` in `state.json`; from the rows of the
+`=== Current gaps ===` block and of `get_gaps`, which read
+`<canonical_id> [<layer>] <symptom>` where 1.2.x wrote
+`[<layer>/<severity>]`; from the `gap_evidence` the Coordinator fills for a
+specialist from a ledger row, which is `{"recent_attempts": [...]}`; and
+from the rows of `=== Untested proposals (current cycle) ===`, which start
+`• <name> [<domain>]` where 1.2.x wrote `[<domain>·<severity>]`.
 
 What changes for a session:
 
@@ -1060,19 +1071,24 @@ What changes for a session:
   that cited one of the removed rows and no domain took the row's domain
   (`system_specialist` for `#baseline_unstable` and a failed baseline,
   `kernel_switch_specialist` for a failed kernel, profile or roofline action,
-  the framework's authoring specialist otherwise), its symptom and its last
-  five attempts. Now such a delegate with `scope='domain'` ends
-  `empty_synthesised` with `unknown_domain`, and one with no `scope` runs as
-  a freeform specialist on its `task_description`. The round's outcome is
-  recorded as a gap attempt only when the ledger holds the id.
-* In `=== Untested proposals (current cycle) ===`, the proposals of a
-  specialist round that cited the `high`-severity
-  `#throughput_below_target` row (an objective shortfall of 10% or more) are
-  no longer ranked ahead of the others.
+  a research hint's first domain tag, the framework's authoring specialist
+  otherwise), its symptom and its last five attempts. Now such a delegate
+  with `scope='domain'` ends `empty_synthesised` with `unknown_domain`, and
+  one with no `scope` runs as a freeform specialist on its
+  `task_description`. The round's outcome is recorded as a gap attempt only
+  when the ledger holds the id.
+* `=== Untested proposals (current cycle) ===` lists predictor rows first,
+  then the proposals of the most recent specialist round first. 1.2.x ranked
+  specialist rounds by the severity of the gap each cited before it looked
+  at recency: a round that cited the `high` `#throughput_below_target` row
+  first, a round whose gap id the ledger did not hold last. The Coordinator
+  benches the head of this list, so the order it benches specialist
+  proposals in changes with it.
 * The operator-defined specialist (`--custom-specialist-prompt-file`) is sent
-  at the least-attempted, then oldest, gap on the ledger; 1.2.x sent it at the
-  `high`-severity target row when there was one. With an empty ledger it
-  still takes the session gap.
+  at the least-attempted, then oldest, gap on the ledger; 1.2.x put the
+  highest severity first, so it went to the `high` target row when there was
+  one. With an empty ledger it still takes the session gap, which is now
+  also the case for a session whose ledger held research-hint rows only.
 * A published recipe's `what_failed` no longer lists a variant as
   `{"name": "<variant>", "reason": "reverted"}` when it failed before it
   measured anything. 1.2.x labelled every `last_action_failures` row
@@ -1082,19 +1098,30 @@ What changes for a session:
   `last_action_failures` rows, and a variant an explore round measured below
   the KEEP bar is still listed as `reverted`. The next session's warm start
   counts fewer `avoid` rows.
-* When the ledger is over its 50 rows, the row it drops is the least recently
-  updated one that nothing was tried against; a row that holds attempts is
-  dropped only when every other row holds attempts too. 1.2.x dropped the
-  least recently updated row whatever it held, so a research scout that
-  returned more than 50 hints pushed out the gaps carrying explore and
-  specialist outcomes.
+* A published recipe's `what_worked` row no longer takes a research hint's
+  `source`. 1.2.x copied it from the hint's gap row when a KEEP was recorded
+  against that row. A KEEP recorded against a static-recon gap still gives
+  the row that gap's predicate file as its `source`. The help of
+  `--recipe-sediment` says so, and the help of `--research-scout` no longer
+  says the scout seeds gaps.
+* The ledger still holds at most 50 rows and still drops the least recently
+  updated one. In 1.2.x a research scout that returned more than 50 hints
+  filled it and pushed out the rows carrying explore and specialist
+  outcomes, because every harvest re-stamped every hint as the newest row;
+  with no hint rows that no longer happens.
 
 The Orchestration prompt changes with it:
 
 * Step 5b of the decision framework says what the block lists, points at
-  `target_gap_pct=` and `last_action_failures` for the two facts that left
-  it, and no longer says that a missing block means the baseline has not
-  completed.
+  `target_gap_pct=`, `last_action_failures` and
+  `=== Specialist findings ===` for the facts that left it, no longer lists
+  `severity` as a column, and no longer says that a missing block means the
+  baseline has not completed.
+* Step 5d, the `=== Untested proposals (current cycle) ===` header and the
+  OPTIMIZE phase goal say specialist proposals come most recent round first
+  where they said `ranked by gap severity`, and the phase goal names the
+  static-recon rows `[static_recon]` where it said `[static_recon/...]`.
+* The description of `get_gaps` no longer lists `severity`.
 * The kernel request reference no longer says that a `layer='kernel_agent'`
   gap names the target.
 * The hint of rule `specialist_dispatch_source` reads `Pass the canonical_id

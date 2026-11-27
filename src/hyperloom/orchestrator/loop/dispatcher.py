@@ -843,11 +843,11 @@ class DispatcherCollaborator(AdmissionMixin, DeadHolderAccountingMixin, Coordina
                 log.exception("dispatcher: fact-write hook failed for task=%s", task.task_id)
                 self._coord.record_exception(stage="dispatcher_fact_write", exc=exc)
         if task.kind == "explore":
-            gap_refresh = self._coord.gap_refresh
-            gap_refresh.record_explore_round_gaps(
+            explore_outcomes = self._coord.explore_outcomes
+            explore_outcomes.record_explore_round_gaps(
                 task=task, result=result.result, workload_id=self._coord.recipe_journal.workload_canonical_id()
             )
-            gap_refresh.record_explore_variant_failures(task=task, result=result.result)
+            explore_outcomes.record_explore_variant_failures(task=task, result=result.result)
 
     async def _record_specialist_settlement(self, task: Task, result: SubAgentResult) -> None:
         """Record an ended specialist round once; the FRAMEWORK pump keys its next discovery round on this settle."""

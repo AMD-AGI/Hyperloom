@@ -41,7 +41,6 @@ def test_gaps_field_roundtrip_through_state_json(tmp_path):
             "canonical_id": "issue.moe.routing",
             "symptom": "MoE routing overhead dominates",
             "layer": "kernel_agent",
-            "severity": "high",
             "domain_hint": "kernel_switch_specialist",
             "source": "baseline",
             "first_seen_ts": "2025-01-01T00:00:00+00:00",
@@ -64,10 +63,20 @@ def test_upsert_gap_inserts_then_merges_by_canonical_id():
             "canonical_id": "issue.attn.headdim",
             "symptom": "attention head dim mismatch",
             "layer": "kernel_agent",
-            "severity": "medium",
         }
     )
     assert len(s.gaps) == 1
+    assert set(e1) == {
+        "canonical_id",
+        "symptom",
+        "layer",
+        "domain_hint",
+        "source",
+        "provenance",
+        "first_seen_ts",
+        "last_updated_ts",
+        "attempts",
+    }
     assert e1["canonical_id"] == "issue.attn.headdim"
     assert e1["first_seen_ts"]
     assert e1["last_updated_ts"]
@@ -76,11 +85,11 @@ def test_upsert_gap_inserts_then_merges_by_canonical_id():
         {
             "canonical_id": "issue.attn.headdim",
             "symptom": "(refined) attention head dim mismatch on prefill",
-            "severity": "high",  # override
+            "layer": "framework",  # override
         }
     )
     assert len(s.gaps) == 1
-    assert e2["severity"] == "high"
+    assert e2["layer"] == "framework"
     assert "prefill" in e2["symptom"]
     # ``first_seen_ts`` preserved.
     assert e2["first_seen_ts"] == e1["first_seen_ts"]
@@ -138,21 +147,6 @@ def test_upsert_gap_enforces_global_entries_cap():
     assert s.find_gap(f"issue.cap.{_GAPS_MAX_ENTRIES + 4}") is not None
 
 
-def test_the_cap_drops_an_untried_gap_before_one_that_holds_attempts():
-    """The oldest row survives a flood of newer ones when it is the one something was tried against."""
-    s = SharedState()
-    s.upsert_gap({"canonical_id": "issue.tried", "symptom": "measured"})
-    s.append_gap_attempt("issue.tried", {"action": "explore", "variant_name": "v1", "outcome": "REVERT"})
-    s.upsert_gap({"canonical_id": "issue.untried", "symptom": "never attempted"})
-    for i in range(_GAPS_MAX_ENTRIES):
-        s.upsert_gap({"canonical_id": f"issue.flood.{i}", "symptom": f"gap {i}"})
-
-    assert len(s.gaps) == _GAPS_MAX_ENTRIES
-    assert [a["variant_name"] for a in s.find_gap("issue.tried")["attempts"]] == ["v1"]
-    assert s.find_gap("issue.untried") is None
-    assert s.find_gap(f"issue.flood.{_GAPS_MAX_ENTRIES - 1}") is not None
-
-
 def test_upsert_gap_does_not_write_attempts():
     """Attempts reach a row through ``append_gap_attempt``; an upsert neither seeds nor replaces them."""
     s = SharedState()
@@ -177,7 +171,6 @@ def test_to_gaps_summary_renders_canonical_id_and_layer():
             "canonical_id": "issue.moe.routing",
             "symptom": "MoE routing dominates",
             "layer": "kernel_agent",
-            "severity": "high",
         }
     )
     s.append_gap_attempt(
@@ -189,9 +182,7 @@ def test_to_gaps_summary_renders_canonical_id_and_layer():
         },
     )
     out = s.to_gaps_summary()
-    assert "issue.moe.routing" in out
-    assert "kernel_agent/high" in out
-    assert "MoE routing dominates" in out
+    assert "issue.moe.routing [kernel_agent] MoE routing dominates" in out
     assert "attempts=1" in out
     assert "last=explore:REVERT" in out
 
@@ -215,7 +206,7 @@ def test_to_gaps_summary_caps_entries_at_max():
 
 def test_to_gaps_summary_lists_attempt_rows_only_when_asked():
     s = SharedState()
-    s.upsert_gap({"canonical_id": "g1", "symptom": "test", "layer": "framework", "severity": "medium"})
+    s.upsert_gap({"canonical_id": "g1", "symptom": "test", "layer": "framework"})
     s.append_gap_attempt("g1", {"action": "explore", "outcome": "FAILED", "error_class": "x", "failure_id": "fid1"})
 
     count_only = s.to_gaps_summary(max_attempts=0)
@@ -259,7 +250,7 @@ async def test_record_explore_round_gaps_appends_attempts(coord):
         kind="explore",
         params={"gap_canonical_id": "issue.fp8.kv"},
     )
-    coord.gap_refresh.record_explore_round_gaps(
+    coord.explore_outcomes.record_explore_round_gaps(
         workload_id=coord.recipe_journal.workload_canonical_id(),
         task=task,
         result={
@@ -287,7 +278,7 @@ async def test_record_explore_round_gaps_falls_back_to_anchor(coord):
         kind="explore",
         params={},
     )
-    coord.gap_refresh.record_explore_round_gaps(
+    coord.explore_outcomes.record_explore_round_gaps(
         workload_id=coord.recipe_journal.workload_canonical_id(),
         task=task,
         result={
@@ -310,7 +301,7 @@ def test_the_explore_anchor_gap_names_the_authoring_domain_of_the_framework(coor
     """A scriptable workload's framework-layer gap routes to the rewrite specialist, not back to the serving surface."""
     coord.shared_state.framework = framework
     anchor = coord.recipe_journal.workload_canonical_id()
-    coord.gap_refresh.record_explore_round_gaps(
+    coord.explore_outcomes.record_explore_round_gaps(
         workload_id=anchor,
         task=_StubTask(task_id="explore-anchor"),
         result={"per_variant_outcomes": [{"variant_name": "v1", "outcome": "REVERT"}]},
@@ -319,28 +310,8 @@ def test_the_explore_anchor_gap_names_the_authoring_domain_of_the_framework(coor
     assert (gap["layer"], gap["domain_hint"]) == ("framework", domain)
 
 
-def test_seeding_more_hints_than_the_ledger_holds_keeps_the_gap_with_measured_attempts(coord, tmp_path):
-    """Research hints fill the ledger to its cap and still leave the explore outcomes already on record."""
-    anchor = coord.recipe_journal.workload_canonical_id()
-    coord.gap_refresh.record_explore_round_gaps(
-        workload_id=anchor,
-        task=_StubTask(task_id="explore-measured"),
-        result={"per_variant_outcomes": [{"variant_name": "kv_b", "outcome": "REVERT"}]},
-    )
-    research_hints.append_hints(
-        tmp_path,
-        [{"what": f"prior {i}", "source": f"https://example.test/{i}"} for i in range(_GAPS_MAX_ENTRIES + 10)],
-    )
-
-    for _ in range(2):
-        coord.gap_refresh.seed_gaps_from_research_hints()
-        assert len(coord.shared_state.gaps) == _GAPS_MAX_ENTRIES
-        assert [a["variant_name"] for a in coord.shared_state.find_gap(anchor)["attempts"]] == ["kv_b"]
-    assert sum(g["layer"] == "research_hint" for g in coord.shared_state.gaps) == _GAPS_MAX_ENTRIES - 1
-
-
-async def test_a_closed_specialist_round_derives_no_gap_from_the_objective_or_the_failure_log(coord):
-    """The objective shortfall, a baseline crash streak and a failed action are shown elsewhere, not as gap rows."""
+async def test_a_closed_specialist_round_derives_no_gap_from_the_objective_the_failure_log_or_its_findings(coord):
+    """The objective shortfall, a baseline crash streak, a failed action and a research hint are shown elsewhere."""
     s = coord.shared_state
     s.baseline_tput = 1000.0
     s.baseline_failure_streak = 2
@@ -349,12 +320,21 @@ async def test_a_closed_specialist_round_derives_no_gap_from_the_objective_or_th
 
     await coord.specialist_dispatch.record_specialist_result(
         task=_StubTask(task_id="spec-1", kind="specialist"),
-        done_payload={"domain": "serving_specialist", "gap_canonical_id": "gap.own.idea", "proposal_set": []},
+        done_payload={
+            "domain": "serving_specialist",
+            "gap_canonical_id": "gap.own.idea",
+            "proposal_set": [],
+            "new_findings": [
+                {"what": "enable aiter", "source": "https://example.test/aiter", "domain_tags": ["serving"]}
+            ],
+        },
         source="specialist:spec-1",
     )
 
     assert coord.target_gap_pct() > 0
     assert [row["task_id"] for row in s.specialist_rounds] == ["spec-1"]
+    assert [hint["what"] for hint in research_hints.load_hints(coord.session_dir)] == ["enable aiter"]
+    assert "enable aiter" in (await coord.conversation.compose_prompt()).text.split("=== Specialist findings ===")[1]
     assert s.gaps == []
 
 
@@ -404,7 +384,6 @@ async def test_warm_specialist_params_pulls_gap_symptom_and_layer(coord):
             "canonical_id": "issue.moe.routing",
             "symptom": "MoE routing overhead",
             "layer": "kernel_agent",
-            "severity": "high",
             "domain_hint": "kernel_switch_specialist",
         }
     )
@@ -423,10 +402,9 @@ async def test_warm_specialist_params_pulls_gap_symptom_and_layer(coord):
     await coord.specialist_dispatch.warm_specialist_params(params)
     assert params["gap_symptom"] == "MoE routing overhead"
     assert params["gap_layer"] == "kernel_agent"
-    evidence = params["gap_evidence"]
-    assert isinstance(evidence, dict)
-    assert evidence["severity"] == "high"
-    assert len(evidence["recent_attempts"]) == 1
+    (attempt,) = params["gap_evidence"].pop("recent_attempts")
+    assert (attempt["variant_name"], attempt["outcome"]) == ("moe_x", "REVERT")
+    assert params["gap_evidence"] == {}
 
 
 @pytest.mark.asyncio
@@ -477,7 +455,7 @@ async def test_record_explore_round_gaps_carries_failure_artifacts(coord):
         kind="explore",
         params={"gap_canonical_id": "issue.fp8.kv2"},
     )
-    coord.gap_refresh.record_explore_round_gaps(
+    coord.explore_outcomes.record_explore_round_gaps(
         workload_id=coord.recipe_journal.workload_canonical_id(),
         task=task,
         result={

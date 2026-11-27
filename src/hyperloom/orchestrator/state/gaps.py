@@ -17,13 +17,8 @@ __all__ = ["GapsStateMixin"]
 _GAPS_MAX_ENTRIES = 50
 _GAPS_ATTEMPTS_HISTORY = 20
 
-# Free-text gap fields an incoming row may restate; ``severity`` defaults to "medium" rather than "".
-_GAP_TEXT_FIELDS: tuple[str, ...] = ("symptom", "layer", "severity", "domain_hint", "source", "provenance")
-
-
-def _retention_key(gap: dict[str, Any]) -> tuple[bool, str]:
-    """Sort key putting first the gap the cap drops first: one nothing was tried against, then the least recent."""
-    return (bool(gap.get("attempts")), gap_rows.recency_key(gap))
+# Free-text gap fields an incoming row may restate.
+_GAP_TEXT_FIELDS: tuple[str, ...] = ("symptom", "layer", "domain_hint", "source", "provenance")
 
 
 class GapsStateMixin:
@@ -56,7 +51,6 @@ class GapsStateMixin:
                 "canonical_id": cid,
                 # ``provenance`` is an optional origin reference (PR/blog URL).
                 **{key: str(entry.get(key) or "") for key in _GAP_TEXT_FIELDS},
-                "severity": str(entry.get("severity") or "medium"),
                 "first_seen_ts": str(entry.get("first_seen_ts") or now),
                 "last_updated_ts": now,
                 "attempts": [],
@@ -71,9 +65,9 @@ class GapsStateMixin:
             existing.setdefault("first_seen_ts", str(entry.get("first_seen_ts") or now))
             existing["last_updated_ts"] = now
             merged = existing
-        # Enforce the global cap after the upsert, so the just-touched gap is retained.
+        # Enforce global cap, trimming oldest after the upsert so the just-touched gap is retained.
         if len(self.gaps) > _GAPS_MAX_ENTRIES:
-            others = sorted((g for g in self.gaps if g is not merged), key=_retention_key)
+            others = sorted((g for g in self.gaps if g is not merged), key=gap_rows.recency_key)
             self.gaps = others[-(_GAPS_MAX_ENTRIES - 1) :] + [merged]
         return merged
 

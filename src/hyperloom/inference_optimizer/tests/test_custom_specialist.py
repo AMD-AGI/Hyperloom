@@ -377,13 +377,14 @@ _BASE_PARAMS = {
 
 async def test_dispatch_targets_the_most_actionable_gap(custom_coord):
     state = custom_coord.shared_state
-    state.upsert_gap({"canonical_id": "gap.low", "severity": "low"})
-    state.upsert_gap({"canonical_id": "gap.high", "severity": "high"})
+    state.upsert_gap({"canonical_id": "gap.tried"})
+    state.upsert_gap({"canonical_id": "gap.untried"})
+    state.append_gap_attempt("gap.tried", {"action": "explore", "variant_name": "v1", "outcome": "REVERT"})
 
     await custom_coord.specialist_dispatch.ensure_custom_specialist()
 
     params, key = await _dispatched(custom_coord)
-    assert params == {**_BASE_PARAMS, "gap_canonical_id": "gap.high"}
+    assert params == {**_BASE_PARAMS, "gap_canonical_id": "gap.untried"}
     assert key == _custom_key()
     assert await _custom_observations(custom_coord) == []
     # Orchestration sent nothing, so nothing is announced to it or charged to it.
