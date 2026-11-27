@@ -104,15 +104,6 @@ class ContainerSnapshot:
     cpu_quota_us: int | None = None
     cpu_period_us: int | None = None
 
-    def as_fields(self) -> dict[str, int | None]:
-        return {
-            "memory_max_bytes": self.memory_max_bytes,
-            "memory_peak_bytes": self.memory_peak_bytes,
-            "oom_kill": self.oom_kill,
-            "cpu_quota_us": self.cpu_quota_us,
-            "cpu_period_us": self.cpu_period_us,
-        }
-
 
 def _read_int(path: Path) -> int | None:
     try:

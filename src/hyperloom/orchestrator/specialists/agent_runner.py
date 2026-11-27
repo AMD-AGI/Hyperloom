@@ -42,7 +42,7 @@ import subprocess
 import tempfile
 import time
 from concurrent.futures import CancelledError as ScopeCancelled
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any, Awaitable, Callable, Literal, Mapping, Protocol
 
@@ -83,7 +83,7 @@ from .launch_env import (
 )
 from .mcp_config import SPECIALIST_MCP_CONFIG_FILENAME
 from .reap_watch import PROCESS_LOG_NAME, cli_alive, newest_activity
-from .resources import ContainerSnapshot, ProcessTreeSampler, dir_usage_bytes, read_container_cgroup
+from .resources import ProcessTreeSampler, dir_usage_bytes, read_container_cgroup
 from .subprocess_ import (
     ReapKillUnconfirmed,
     ReapWatch,
@@ -932,10 +932,9 @@ class LocalAgentRunner:
         append_text_nofollow(self._session_dir, RESOURCES_RELATIVE_PATH.parts, line)
 
     def _container_record(self) -> dict[str, Any]:
-        snapshot: ContainerSnapshot = read_container_cgroup(self._cgroup_root)
         return {
             "kind": CONTAINER_RECORD_KIND,
-            **snapshot.as_fields(),
+            **asdict(read_container_cgroup(self._cgroup_root)),
             "max_concurrent_specialists": self._max_concurrent,
             "ts_unix": self._wall(),
         }

@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import os
 import shutil
+from dataclasses import asdict
 from pathlib import Path
 from typing import Any
 
@@ -203,8 +204,8 @@ def test_cgroup_without_cpu_max_leaves_both_cpu_fields_null(tmp_path: Path) -> N
 def test_cgroup_v1_or_unmounted_is_all_null(tmp_path: Path) -> None:
     (tmp_path / "memory").mkdir()  # a v1 hierarchy has controller subdirectories and no cgroup.controllers
     (tmp_path / "memory" / "memory.limit_in_bytes").write_text("123\n", encoding="utf-8")
-    assert set(read_container_cgroup(tmp_path).as_fields().values()) == {None}
-    assert set(read_container_cgroup(tmp_path / "missing").as_fields().values()) == {None}
+    assert set(asdict(read_container_cgroup(tmp_path)).values()) == {None}
+    assert set(asdict(read_container_cgroup(tmp_path / "missing")).values()) == {None}
 
 
 def test_dir_usage_counts_files_and_reports_missing_as_null(tmp_path: Path) -> None:
