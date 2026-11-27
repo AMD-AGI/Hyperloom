@@ -415,10 +415,8 @@ def _killed_overtime_round(session_dir):
     return c, _StubTask(task_id="t-killed"), result
 
 
-def test_killed_overtime_enters_failures_and_mints_gap(tmp_path):
-    """record_explore_variant_failures writes the evidence packet and last_action_failures; _extract_gaps_from_attempts
-    then produces a #fail:explore:killed_overtime gap.
-    """
+def test_killed_overtime_enters_failures(tmp_path):
+    """record_explore_variant_failures writes the evidence packet and the last_action_failures row."""
     c, task, result = _killed_overtime_round(tmp_path)
     c.gap_refresh.record_explore_variant_failures(task=task, result=result)
 
@@ -431,11 +429,6 @@ def test_killed_overtime_enters_failures_and_mints_gap(tmp_path):
     assert len(c.shared_state.last_action_failures) == 1
     laf = c.shared_state.last_action_failures[0]
     assert laf["error_class"] == "killed_overtime"
-
-    # 3. _extract_gaps_from_attempts mints a gap with the expected canonical_id.
-    gaps = c.gap_refresh._extract_gaps_from_attempts(c.recipe_journal.workload_canonical_id())
-    cids = [g["canonical_id"] for g in gaps]
-    assert any("killed_overtime" in cid for cid in cids), f"Expected a killed_overtime gap, got: {cids}"
 
 
 def test_failure_evidence_that_cannot_be_written_is_an_error(tmp_path):

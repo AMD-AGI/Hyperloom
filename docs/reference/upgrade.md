@@ -1029,6 +1029,81 @@ Two smaller changes:
   `A freeform specialist needs a natural-language task_description (the whole
   mandate).`
 
+### Required: the gap ledger holds no row derived from the objective or the failure log
+
+The gap ledger (`gaps` in `state.json`, the `=== Current gaps ===` block of
+the Orchestration prompt, the `get_gaps` tool, and `remaining_gaps` of a
+published recipe) restated three facts the prompt already shows. After every
+baseline, explore round and specialist round, 1.2.x re-derived these rows; it
+no longer does:
+
+| Removed row (`canonical_id`) | Read instead |
+|---|---|
+| `<workload>#throughput_below_target` | `target_gap_pct=` under `=== Shared session state ===`. |
+| `<workload>#baseline_unstable` | `baseline_failure_streak=` in the same block. |
+| `<workload>#fail:<action>:<error_class>[:<variant>]` | The `last_action_failures=` rows in the same block (`last_action_failures` in `state.json`). |
+
+The ledger keeps the rows that say something new: one per research hint
+(`gap.research_hint.*`), one per static-recon bridge candidate
+(`gap.static_recon.*`), one per FRAMEWORK local-exploration candidate, and
+the row named after the workload that collects each explore round's
+per-variant outcomes. No row has `layer` `kernel_agent` or `system` any more,
+and every row's `severity` is `medium`.
+
+What changes for a session:
+
+* A specialist `delegate` still needs a `gap_canonical_id`
+  (rule `specialist_dispatch_source`), and any non-empty id is accepted, as
+  before. An id the ledger does not hold gives the dispatch nothing: name the
+  `domain` (or `tags`) on the delegate, and pass `gap_symptom`, `gap_layer`
+  and `gap_evidence` when the specialist should see them. In 1.2.x a delegate
+  that cited one of the removed rows and no domain took the row's domain
+  (`system_specialist` for `#baseline_unstable` and a failed baseline,
+  `kernel_switch_specialist` for a failed kernel, profile or roofline action,
+  the framework's authoring specialist otherwise), its symptom and its last
+  five attempts. Now such a delegate with `scope='domain'` ends
+  `empty_synthesised` with `unknown_domain`, and one with no `scope` runs as
+  a freeform specialist on its `task_description`. The round's outcome is
+  recorded as a gap attempt only when the ledger holds the id.
+* In `=== Untested proposals (current cycle) ===`, the proposals of a
+  specialist round that cited the `high`-severity
+  `#throughput_below_target` row (an objective shortfall of 10% or more) are
+  no longer ranked ahead of the others.
+* The operator-defined specialist (`--custom-specialist-prompt-file`) is sent
+  at the least-attempted, then oldest, gap on the ledger; 1.2.x sent it at the
+  `high`-severity target row when there was one. With an empty ledger it
+  still takes the session gap.
+* A published recipe's `what_failed` no longer lists a variant as
+  `{"name": "<variant>", "reason": "reverted"}` when it failed before it
+  measured anything. 1.2.x labelled every `last_action_failures` row
+  `REVERT` on its `#fail:` gap and published each one that named a variant
+  that way. The failure still reaches `what_failed` as
+  `{"name": "<action>", "reason": "<error_class>"}` from the ten most recent
+  `last_action_failures` rows, and a variant an explore round measured below
+  the KEEP bar is still listed as `reverted`. The next session's warm start
+  counts fewer `avoid` rows.
+* When the ledger is over its 50 rows, the row it drops is the least recently
+  updated one that nothing was tried against; a row that holds attempts is
+  dropped only when every other row holds attempts too. 1.2.x dropped the
+  least recently updated row whatever it held, so a research scout that
+  returned more than 50 hints pushed out the gaps carrying explore and
+  specialist outcomes.
+
+The Orchestration prompt changes with it:
+
+* Step 5b of the decision framework says what the block lists, points at
+  `target_gap_pct=` and `last_action_failures` for the two facts that left
+  it, and no longer says that a missing block means the baseline has not
+  completed.
+* The kernel request reference no longer says that a `layer='kernel_agent'`
+  gap names the target.
+* The hint of rule `specialist_dispatch_source` reads `Pass the canonical_id
+  of the gap to work on: one the '=== Current gaps ===' block lists, or a
+  stable id of your own for a problem it does not list. Or dispatch
+  scope='freeform' with a task_description.`
+
+The debug log line `gaps refresh (reason=...)` is no longer written.
+
 ---
 
 ## Upgrading from 1.1.x

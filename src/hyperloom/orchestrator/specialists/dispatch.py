@@ -848,7 +848,6 @@ class SpecialistDispatchCollaborator(CoordinatorCollaborator):
         if domain == "static_recon_specialist":
             self._coord.phase_internal.consume_static_recon(done_payload)
 
-        # Refresh the gaps ledger after a specialist round closes; record the verdict as a gap attempt.
         gap_cid = str(done_payload.get("gap_canonical_id") or "").strip()
         if gap_cid:
             self.shared_state.append_gap_attempt(
@@ -860,9 +859,6 @@ class SpecialistDispatchCollaborator(CoordinatorCollaborator):
                     "proposals_total": round_entry["proposals_total"],
                 },
             )
-        await self._coord.gap_refresh.refresh_gaps(
-            reason="specialist_done", workload_id=self._coord.recipe_journal.workload_canonical_id()
-        )
         if bool((task.params or {}).get("enablement")) and isinstance(done_payload.get("needs_targeted_build"), dict):
             await self._coord.enablement_build.maybe_enqueue_specialist_requested_build(
                 task_id=str(task.task_id or ""),

@@ -1,16 +1,13 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Gap refresh: the Coordinator collaborator that derives ``SharedState.gaps`` from baselines, attempts and hints."""
+"""Gap refresh: the Coordinator collaborator that files research hints and explore outcomes on ``SharedState.gaps``."""
 
 from __future__ import annotations
 
 import logging as _logging
-from datetime import datetime, timezone
 from hashlib import sha1
 from typing import TYPE_CHECKING, Any
-
-from hyperloom_common.coerce import first_text
 
 from ..collaborator import CoordinatorCollaborator
 from ..state.failure_evidence import UNMEASURED_OUTCOMES, failure_from_variant_outcome
@@ -35,113 +32,7 @@ _GAP_ATTEMPT_ARTIFACT_KEYS: tuple[str, ...] = (
 
 
 class GapRefreshCollaborator(CoordinatorCollaborator):
-    """Gap-signal extraction from baselines, attempt history, and research hints."""
-
-    async def refresh_gaps(self, *, reason: str, workload_id: str) -> None:
-        """Refresh :attr:`SharedState.gaps` from observable signals. Additive upsert deduped by canonical_id.
-
-        Args:
-            reason: Tag describing the refresh trigger, used only in logging.
-            workload_id: The workload's canonical Recipe id that the derived gap rows are keyed on.
-        """
-        state = self.shared_state
-        for entry in self._extract_gaps_from_baseline(workload_id):
-            state.upsert_gap(entry)
-        for entry in self._extract_gaps_from_attempts(workload_id):
-            state.upsert_gap(entry)
-        log.debug(
-            "gaps refresh (reason=%s): %d gaps after merge",
-            reason,
-            len(state.gaps),
-        )
-
-    def _extract_gaps_from_baseline(self, workload_id: str) -> list[dict[str, Any]]:
-        """Derive initial gap rows from the baseline snapshot (throughput_below_target, baseline_unstable); key the rows on ``workload_id`` (matching ``recipe_kb_t0.run_t0_anchor``) so traverse rows align.
-
-        Returns:
-            A list of gap row dicts derived from the baseline; empty when no
-            baseline throughput is recorded.
-        """
-        state = self.shared_state
-        gaps: list[dict[str, Any]] = []
-        if state.baseline_tput <= 0:
-            return gaps
-        target_gap = self._coord.target_gap_pct()
-        if target_gap > 0.0:
-            severity = "high" if target_gap >= 10.0 else "medium" if target_gap >= 3.0 else "low"
-            gaps.append(
-                {
-                    "canonical_id": f"{workload_id}#throughput_below_target",
-                    "symptom": (f"current_best is {target_gap:.1f}% short of the run objective target"),
-                    "layer": "framework",
-                    "severity": severity,
-                    "domain_hint": self._framework_authoring_domain(),
-                    "source": "baseline",
-                }
-            )
-        if state.baseline_failure_streak > 0:
-            gaps.append(
-                {
-                    "canonical_id": f"{workload_id}#baseline_unstable",
-                    "symptom": (f"baseline crashed {state.baseline_failure_streak} consecutive time(s)"),
-                    "layer": "system",
-                    "severity": ("high" if state.baseline_failure_streak >= 2 else "medium"),
-                    "domain_hint": "system_specialist",
-                    "source": "baseline",
-                }
-            )
-        return gaps
-
-    def _extract_gaps_from_attempts(self, workload_id: str) -> list[dict[str, Any]]:
-        """Derive gaps from the rolling failure log: one per recurring (action, error_class[, variant]).
-
-        Returns:
-            A list of gap row dicts derived from recurring action failures.
-        """
-        state = self.shared_state
-        gaps: list[dict[str, Any]] = []
-
-        # Already capped by ``record_action_failure``; read the whole log.
-        seen_failures: dict[str, dict[str, Any]] = {}
-        for row in state.last_action_failures or []:
-            if not isinstance(row, dict):
-                continue
-            action = first_text(row.get("action")) or "unknown"
-            err = first_text(row.get("error_class")) or "unknown_error"
-            variant = first_text(row.get("variant_name"))
-            layer, domain = self._gap_layer_for_action(action, str(getattr(self.shared_state, "framework", "") or ""))
-            excerpt = str(row.get("error_excerpt") or "")
-            detail = next((ln.strip() for ln in excerpt.splitlines() if ln.strip()), err)[:200]
-            # Variant discriminator keeps distinct crash causes in distinct gaps.
-            if variant:
-                key = f"{action}::{err}::{variant}"
-                symptom = f"{action}/{variant} fails: {detail}"
-                cid_variant = f":{variant}"
-            else:
-                key = f"{action}::{err}"
-                symptom = f"{action} repeatedly fails with {detail}"
-                cid_variant = ""
-            attempt = {
-                "action": action,
-                "variant_name": variant,
-                "outcome": "REVERT",
-                "error_class": err,
-                "ts": str(row.get("ts") or datetime.now(timezone.utc).isoformat()),
-            }
-            if key in seen_failures:
-                seen_failures[key]["attempts"].append(attempt)
-            else:
-                seen_failures[key] = {
-                    "canonical_id": f"{workload_id}#fail:{action}:{err}{cid_variant}",
-                    "symptom": symptom,
-                    "layer": layer,
-                    "severity": "medium",
-                    "domain_hint": domain,
-                    "source": "attempts",
-                    "attempts": [attempt],
-                }
-        gaps.extend(seen_failures.values())
-        return gaps
+    """Seeds a gap per research hint and records each explore round's per-variant outcomes."""
 
     def seed_gaps_from_research_hints(self) -> None:
         """Inject research hints as advisory gaps[] seeds (idempotent)."""
@@ -178,38 +69,6 @@ class GapRefreshCollaborator(CoordinatorCollaborator):
         from ..specialists.domains import authoring_domain_for_framework
 
         return authoring_domain_for_framework(getattr(self.shared_state, "framework", ""))
-
-    @staticmethod
-    def _gap_layer_for_action(action: str, framework: str = "") -> tuple[str, str]:
-        """Map an action name → (layer, domain_hint) for gap rows.
-
-        Args:
-            action: The action name to classify.
-            framework: The session's framework, which decides the authoring
-                domain for framework-layer rows. Defaults to the serving domain
-                so a caller with no framework in hand keeps the old mapping.
-
-        Returns:
-            A ``(layer, domain_hint)`` tuple for the action.
-        """
-        from ..specialists.domains import authoring_domain_for_framework
-
-        a = str(action or "").strip().lower()
-        if a in {
-            # ``kernel_opt`` names the lane, not a request kind: it is still what
-            # a gap row calls kernel work, so it keeps classifying to the kernel layer.
-            "kernel_opt",
-            "kernel_agent",
-            "integrate",
-            "trace_analyze",
-            "run_gemm_tuning",
-            "profile",
-            "roofline",
-        }:
-            return ("kernel_agent", "kernel_switch_specialist")
-        if a in {"baseline"}:
-            return ("system", "system_specialist")
-        return ("framework", authoring_domain_for_framework(framework))
 
     def record_explore_round_gaps(
         self,

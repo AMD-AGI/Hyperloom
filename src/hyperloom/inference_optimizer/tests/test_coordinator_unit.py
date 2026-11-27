@@ -9,7 +9,6 @@ from __future__ import annotations
 from hyperloom.orchestrator.loop.conversation import _first_present, _format_inbox_event
 from hyperloom.orchestrator.loop.kernel_request import lifecycle_paths
 from hyperloom.orchestrator.bus.message_bus import Message
-from hyperloom.orchestrator.loop.gap_refresh import GapRefreshCollaborator
 
 from ._booked_results import announced
 
@@ -111,29 +110,3 @@ def test_format_inbox_fallback():
         seq=0,
     )
     assert "topic=other" in _format_inbox_event(m, {}) and "payload=" in _format_inbox_event(m, {})
-
-
-def test_gap_layer_for_action_mapping():
-    assert GapRefreshCollaborator._gap_layer_for_action("kernel_opt") == (
-        "kernel_agent",
-        "kernel_switch_specialist",
-    )
-    assert GapRefreshCollaborator._gap_layer_for_action("PROFILE")[0] == "kernel_agent"
-    assert GapRefreshCollaborator._gap_layer_for_action("sweep")[0] == "framework"
-    assert GapRefreshCollaborator._gap_layer_for_action("baseline")[0] == "system"
-    assert GapRefreshCollaborator._gap_layer_for_action("  ") == ("framework", "serving_specialist")
-
-
-def test_gap_layer_for_action_follows_framework_kind():
-    # A framework-layer gap on a scriptable workload must name the rewrite specialist: seeding it with
-    # serving_specialist is what steered a custom workload back onto the serving surface once EXPLORE picked the gap
-    # up.
-    assert GapRefreshCollaborator._gap_layer_for_action("sweep", "custom") == (
-        "framework",
-        "framework_rewrite_specialist",
-    )
-    assert GapRefreshCollaborator._gap_layer_for_action("sweep", "xdit")[1] == "framework_rewrite_specialist"
-    assert GapRefreshCollaborator._gap_layer_for_action("sweep", "sglang")[1] == "serving_specialist"
-    # Kernel and system rows are framework-independent.
-    assert GapRefreshCollaborator._gap_layer_for_action("kernel_opt", "custom")[1] == "kernel_switch_specialist"
-    assert GapRefreshCollaborator._gap_layer_for_action("baseline", "custom")[1] == "system_specialist"

@@ -654,7 +654,7 @@ class SharedState(
     # Model-facing advisory context built by ``recipe_kb_t0``.
     warm_start_context: dict[str, Any] = field(default_factory=dict)
 
-    # structured gaps ledger: dedup'd unresolved bottlenecks (Coordinator-only refresh_gaps); dedup keyed by canonical_id, attempts capped 20/gap, list capped _GAPS_MAX_ENTRIES.
+    # structured gaps ledger: dedup'd unresolved bottlenecks (Coordinator-only writer); dedup keyed by canonical_id, attempts capped 20/gap, list capped _GAPS_MAX_ENTRIES.
     gaps: list[dict[str, Any]] = field(default_factory=list)
 
     # The CYCLE_END handoff turn's result: ``next_cycle_directive``, its ``for_cycle``, and ``parse_error``. Coordinator-only writer.

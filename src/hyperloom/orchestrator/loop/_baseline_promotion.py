@@ -231,10 +231,6 @@ class BaselinePromotionMixin:
             result=result,
             extras=self._baseline_attempt_extras(result, task_params, held_reason, prior_anchor),
         )
-        # seed the gaps[] ledger from baseline.
-        await self._coord.gap_refresh.refresh_gaps(
-            reason="baseline_done", workload_id=self._coord.recipe_journal.workload_canonical_id()
-        )
         if self.shared_state.baseline_tput > 0:
             await self.drain_queued_baselines(reason="baseline_established")
         # Only the run that first establishes the anchor bootstraps; a later

@@ -230,39 +230,6 @@ def test_current_tput_from_validated_gain(coord: Coordinator) -> None:
     assert coord.phase_kernel.current_tput_from_validated_gain() == pytest.approx(110.0)
 
 
-# -- gap extraction --------------------------------------------------------
-def test_extract_gaps_from_attempts(coord: Coordinator) -> None:
-    ss = coord.shared_state
-    ss.baseline_tput = 100.0
-    ss.last_action_failures = [
-        {"action": "kernel_opt", "error_class": "oom", "variant_name": "v1"},
-        {"action": "kernel_opt", "error_class": "oom", "variant_name": "v2"},
-    ]
-    gaps = coord.gap_refresh._extract_gaps_from_attempts(coord.recipe_journal.workload_canonical_id())
-    # distinct variant_names produce separate gaps; each has one attempt
-    fail_gaps = [g for g in gaps if "fail:kernel_opt:oom" in g["canonical_id"]]
-    assert len(fail_gaps) == 2
-    assert all(len(g["attempts"]) == 1 for g in fail_gaps)
-
-
-def test_extract_gaps_symptom_uses_excerpt(coord: Coordinator) -> None:
-    """Symptom is built from the first non-empty excerpt line when available."""
-    ss = coord.shared_state
-    ss.baseline_tput = 100.0
-    ss.last_action_failures = [
-        {
-            "action": "explore",
-            "error_class": "server_init_dead",
-            "variant_name": "fp8_kv",
-            "error_excerpt": "mla_gluon[bh16bn128] requires batch_size=1, got 512",
-        },
-    ]
-    gaps = coord.gap_refresh._extract_gaps_from_attempts(coord.recipe_journal.workload_canonical_id())
-    fail_gaps = [g for g in gaps if "fail:explore:server_init_dead" in g["canonical_id"]]
-    assert fail_gaps
-    assert "mla_gluon" in fail_gaps[0]["symptom"]
-
-
 # -- advisory blocks (empty-guard paths) ----------------------------------
 def test_no_plateau_advisory_outside_framework_agent(coord: Coordinator) -> None:
     assert coord.conversation.plateau_advisory_block() == ""

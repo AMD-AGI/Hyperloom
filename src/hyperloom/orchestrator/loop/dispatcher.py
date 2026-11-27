@@ -789,7 +789,7 @@ class DispatcherCollaborator(AdmissionMixin, DeadHolderAccountingMixin, Coordina
 
         Performs post-completion bookkeeping: specialist auto-retry,
         ``delegated_result`` emission, ledgers, shared-state promotion,
-        fact-write and explore-gap refresh. Execution owns resource cleanup.
+        fact-write and an explore round's gap attempts. Execution owns resource cleanup.
         A promoted result's verdict comes from its promoter; cancelled and
         unpromotable results settle FAILED (including cancelled tasks).
         """
@@ -843,12 +843,11 @@ class DispatcherCollaborator(AdmissionMixin, DeadHolderAccountingMixin, Coordina
                 log.exception("dispatcher: fact-write hook failed for task=%s", task.task_id)
                 self._coord.record_exception(stage="dispatcher_fact_write", exc=exc)
         if task.kind == "explore":
-            # Append this explore round's per-variant KEEP/REVERT, then re-run the global gap refresh.
-            workload_id = self._coord.recipe_journal.workload_canonical_id()
             gap_refresh = self._coord.gap_refresh
-            gap_refresh.record_explore_round_gaps(task=task, result=result.result, workload_id=workload_id)
+            gap_refresh.record_explore_round_gaps(
+                task=task, result=result.result, workload_id=self._coord.recipe_journal.workload_canonical_id()
+            )
             gap_refresh.record_explore_variant_failures(task=task, result=result.result)
-            await gap_refresh.refresh_gaps(reason="explore_round", workload_id=workload_id)
 
     async def _record_specialist_settlement(self, task: Task, result: SubAgentResult) -> None:
         """Record an ended specialist round once; the FRAMEWORK pump keys its next discovery round on this settle."""

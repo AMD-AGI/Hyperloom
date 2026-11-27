@@ -439,8 +439,9 @@ class PolicyGate:
                 "delegate{action='specialist'}: params.gap_canonical_id required",
                 rule="specialist_dispatch_source",
                 hint=(
-                    "Pass the canonical_id of the gap to work on (the '=== Current gaps ===' block "
-                    "lists the known ones), or dispatch scope='freeform' with a task_description."
+                    "Pass the canonical_id of the gap to work on: one the '=== Current gaps ===' block lists, "
+                    "or a stable id of your own for a problem it does not list. Or dispatch scope='freeform' "
+                    "with a task_description."
                 ),
             )
         validate_specialist_max_turns_raw(params.get("max_turns"), where="params.max_turns")

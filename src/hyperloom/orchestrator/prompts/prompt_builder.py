@@ -505,12 +505,14 @@ _PHASE_AWARE_SELECTION_LINES: tuple[str, ...] = (
     "   b. **Current gaps** (the `=== Current gaps ===` block, sourced",
     "      from `SharedState.gaps[]`). Each row shows canonical_id /",
     "      layer / severity / symptom / attempts count + last attempt.",
-    "      The LLM picks the next gap to tackle based on layer (which",
-    "      routes the specialist domain), severity (high vs medium),",
-    "      and whether the attempts history shows the gap is still",
-    "      worth pushing on. When the section is missing it means",
-    "      baseline hasn't completed yet — fall back to",
-    "      `last_action_failures` + the `tested:` rows of `explore_search`.",
+    "      It lists what specialist rounds and explore rounds put on",
+    "      record; pick the next gap by its symptom and by whether its",
+    "      attempts history shows it is still worth pushing on. The",
+    "      shortfall against the run objective is the `target_gap_pct=`",
+    "      line and a failed action is a `last_action_failures` row:",
+    "      neither has a row here. When the section is missing nothing",
+    "      is on record yet — work from those two and the `tested:` rows",
+    "      of `explore_search`.",
     "   c. **KB sub-graphs + warm-start recipe** when present —",
     "      cross-session priors carry " + "*qualitative* hints (what worked / what failed last time).",
     "   d. **`=== Untested proposals (current cycle) ===`** — the",
@@ -705,10 +707,10 @@ _KERNEL_OPT_PIPELINE_BODY: str = """\
 The request kinds you may emit here are `trace_analyze`, `integrate`, and
 `integrate`'s `apply_patch` alias; they are picked per the DECISION FRAMEWORK
 (phase allowed-set + gaps + KB priors), with no system-side priority ranking.
-Read the optimization lane's outcome before you act: a `state.gaps[]`
-`layer='kernel_agent'` gap names the target, `pending_keep_kernels` lists the
-KEEPs awaiting integrate, `rejected_kernel_ids` lists the ids already written
-off, and `last_action_failures` explains a request of your own that failed.
+Read the optimization lane's outcome before you act: `pending_keep_kernels`
+lists the KEEPs awaiting integrate, `rejected_kernel_ids` lists the ids already
+written off, and `last_action_failures` explains a request of your own that
+failed.
 KERNEL_AGENT → CYCLE_END advance is driven by the phase budget, idle-no-progress,
 agent settled with no pending kernel work, or a terminal stop_reason.
 
