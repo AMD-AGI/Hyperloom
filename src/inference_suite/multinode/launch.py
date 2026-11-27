@@ -34,7 +34,6 @@ from pathlib import Path
 from inference_suite.frameworks import Framework
 from inference_suite.multinode.commands import (
     ROUTER,
-    ROUTER_PORT,
     HostCommand,
     cluster_commands,
     engine_urls,
@@ -42,7 +41,7 @@ from inference_suite.multinode.commands import (
     router_command,
     runs_router,
 )
-from inference_suite.multinode.nodes import LaunchMode, NodeList
+from inference_suite.multinode.nodes import ROUTER_PORT, LaunchMode, NodeList
 from inference_suite.multinode.record import PdLaunch, PdSourceKind, Role, RoleLaunch
 from inference_suite.multinode.render import flag_groups, group_flag, render_role
 from inference_suite.multinode.ssh import SshClient
@@ -59,6 +58,7 @@ _HEALTH_TIMEOUT_S = 5
 _HTTP_OK = 200
 _LOG_TAIL_LINES = 40
 _SSH_TIMEOUT_S = 180
+_ALIVE_CHECK_TIMEOUT_S = 30
 _POLL_INTERVAL_S = 10.0
 _OPENER = urllib.request.build_opener(urllib.request.ProxyHandler({}))
 
@@ -187,12 +187,10 @@ def launch_script(command: HostCommand, env: Mapping[str, str], framework: Frame
     return "\n".join([*lines, f"exec {command.command}"]) + "\n"
 
 
-def _driver_payload(role: str, pidfile: str, script: str, needle: str, mode: LaunchMode) -> str:
-    """Bash that writes the launch script of ``role`` and runs the driver on it: a restart with ``script``, or a stop
-    when there is none."""
+def _driver_payload(role: str, pidfile: str, script: str, needle: str, mode: LaunchMode, action: str) -> str:
+    """Bash that writes the launch script of ``role`` and runs the driver ``action`` on it (``restart`` with
+    ``script``, or ``stop``)."""
     marker = uuid.uuid4().hex
-    action = "restart" if script else "stop"
-    scan = "1" if mode is LaunchMode.IN_PLACE else "0"
     return "\n".join(
         [
             f"cat > {_launch_path(role)} << 'HL_LAUNCH_{marker}'",
@@ -200,8 +198,8 @@ def _driver_payload(role: str, pidfile: str, script: str, needle: str, mode: Lau
             f"HL_LAUNCH_{marker}",
             f"chmod +x {_launch_path(role)}",
             *_container_env_lines(mode),
-            f"export HL_LAUNCH_PATH={_launch_path(role)} HL_PIDFILE={pidfile} HL_ACTION={action} HL_SCAN={scan}",
-            f"export HL_NEEDLE={shlex.quote(needle)} HL_ENV_SOURCE={'session' if mode is LaunchMode.DIRECT else 'container'}",
+            f"export HL_LAUNCH_PATH={_launch_path(role)} HL_PIDFILE={pidfile} HL_ACTION={action}",
+            f"export HL_NEEDLE={shlex.quote(needle)} HL_LAUNCH_MODE={mode.value}",
             f"python3 - << 'HL_PY_{marker}'",
             _DRIVER.read_text(encoding="utf-8").rstrip("\n"),
             f"HL_PY_{marker}",
@@ -219,7 +217,7 @@ def _drive(cluster: Cluster, command: HostCommand, script: str, launch: PdLaunch
     action = "restart" if script else "stop"
     needle = process_needle(command.role, launch.framework, launch.frontend.type)
     pidfile = _pidfile(command.role, key)
-    payload = _driver_payload(command.role, pidfile, script, needle, cluster.nodes.launch_mode)
+    payload = _driver_payload(command.role, pidfile, script, needle, cluster.nodes.launch_mode, action)
     result = cluster.client.run(command.host, payload, _SSH_TIMEOUT_S)
     lines = [line for line in result.stdout.splitlines() if line.startswith("{")]
     report = json.loads(lines[-1]) if lines else {}
@@ -367,7 +365,7 @@ def engines_gone(launch: PdLaunch, cluster: Cluster) -> list[HostCommand]:
     return _engines_gone(launch, cluster, _launch_key(launch))
 
 
-def _engines_gone(launch: PdLaunch, cluster: Cluster, key: str, timeout: int = 30) -> list[HostCommand]:
+def _engines_gone(launch: PdLaunch, cluster: Cluster, key: str) -> list[HostCommand]:
     """:func:`engines_gone` under the pidfiles of ``key``, the frozen launch's key."""
     gone = []
     for command in _engine_commands(launch, cluster.nodes):
@@ -378,7 +376,7 @@ def _engines_gone(launch: PdLaunch, cluster: Cluster, key: str, timeout: int = 3
             f'pid=$(cat {_pidfile(command.role, key)} 2>/dev/null) && kill -0 "$pid" 2>/dev/null && tr "\\0" " " '
             f'< /proc/"$pid"/cmdline | grep -qF {patterns} && echo HL_ALIVE || echo HL_GONE'
         )
-        if "HL_GONE" in cluster.client.run(command.host, script, timeout).stdout:
+        if "HL_GONE" in cluster.client.run(command.host, script, _ALIVE_CHECK_TIMEOUT_S).stdout:
             gone.append(command)
     return gone
 
@@ -449,7 +447,7 @@ def restart(
     return _run_fitted(fit_to_engine(overridden, flags), cluster, options, _launch_key(launch))
 
 
-def stop(launch: PdLaunch, cluster: Cluster, options: LaunchOptions) -> None:
+def stop(launch: PdLaunch, cluster: Cluster) -> None:
     """Stop the router, then every engine; a server the container launcher waits on is parked, not killed."""
     routers = [router_command(launch, cluster.nodes)] if runs_router(launch) else []
     key = _launch_key(launch)
@@ -458,8 +456,6 @@ def stop(launch: PdLaunch, cluster: Cluster, options: LaunchOptions) -> None:
 
 
 __all__ = [
-    "GPU_RELEASE_WAIT_S",
-    "SPLIT_ROLE_FLAGS",
     "Cluster",
     "LaunchError",
     "LaunchOptions",

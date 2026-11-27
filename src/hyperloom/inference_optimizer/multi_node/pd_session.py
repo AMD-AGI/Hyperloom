@@ -195,7 +195,7 @@ def stop_cluster(state: dict[str, Any]) -> None:
     """
     with _as_session_error("the PD cluster could not be stopped"):
         session = _session_cluster(state)
-        stop(session.launch, session.cluster, LaunchOptions())
+        stop(session.launch, session.cluster)
 
 
 def stamp_launch_pods(state: dict[str, Any], launch: PdLaunch | None = None) -> None:

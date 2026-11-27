@@ -19,7 +19,7 @@ import shlex
 from collections.abc import Sequence
 from dataclasses import dataclass
 
-from inference_suite.frameworks import Framework, ServerCommand, ServerFlags, framework_facts
+from inference_suite.frameworks import Framework, framework_facts
 from inference_suite.multinode.infera_engine import INFERA_ENGINE, EngineHost, sglang_argv
 from inference_suite.multinode.nodes import ROUTER_PORT, LaunchMode, NodeList, engine_port, role_url
 from inference_suite.multinode.record import PD_ROLES, FrontendType, PdLaunch, PdMode, Role, RoleLaunch
@@ -53,41 +53,16 @@ class CommandError(ValueError):
 
 @dataclass(frozen=True)
 class HostCommand:
-    """What one host runs: its role, host, the worker and the host's rank in it, and the command line."""
+    """What one host runs: its role, host, the host's rank in its worker, and the command line."""
 
     role: str
     host: str
-    worker: int
     rank: int
     command: str
 
 
 def _join(argv: Sequence[str]) -> str:
     return " ".join(shlex.quote(part) for part in argv)
-
-
-def _server_flags(framework: Framework) -> ServerFlags:
-    """The flags ``framework``'s server takes for the launch's facts.
-
-    Raises:
-        CommandError: the framework's server takes none.
-    """
-    flags = framework_facts(framework).server_flags
-    if flags is None:
-        raise CommandError(f"{framework.value} has no server flags")
-    return flags
-
-
-def _server_command(framework: Framework) -> ServerCommand:
-    """How ``framework``'s server runs as a module of the serving interpreter.
-
-    Raises:
-        CommandError: the framework's server is a native program.
-    """
-    command = framework_facts(framework).server_command
-    if command is None or command.module is None:
-        raise CommandError(f"{framework.value} has no python server module")
-    return command
 
 
 def worker_hosts(role: RoleLaunch) -> list[tuple[str, ...]]:
@@ -113,7 +88,7 @@ def engine_urls(launch: PdLaunch, nodes: NodeList) -> dict[str, list[str]]:
 def _context_args(framework: Framework, context_length: int | None) -> list[str]:
     if context_length is None:
         return []
-    return [_server_flags(framework).context_length.aliases[0], str(context_length)]
+    return [framework_facts(framework).server_flags.context_length.aliases[0], str(context_length)]
 
 
 def _disaggregation_args(launch: PdLaunch, role: Role, bootstrap_port: int) -> list[str]:
@@ -139,9 +114,10 @@ def _with_ib_device(command: str, role: Role) -> str:
 def _sglang_engine(launch: PdLaunch, nodes: NodeList, role: Role, hosts: tuple[str, ...], rank: int) -> str:
     """``sglang.launch_server`` for host ``rank`` of a worker on ``hosts``."""
     launched = launch.role(role)
-    flags = _server_flags(Framework.SGLANG)
-    argv = [*_server_command(Framework.SGLANG).argv(_PYTHON), flags.model, launch.model]
-    argv += [flags.served_model_name or "", launch.served_model_name, flags.host, _BIND_ADDRESS]
+    facts = framework_facts(Framework.SGLANG)
+    flags = facts.server_flags
+    argv = [*facts.server_command.argv(_PYTHON), flags.model, launch.model]
+    argv += [flags.served_model_name, launch.served_model_name, flags.host, _BIND_ADDRESS]
     argv += [flags.port, str(engine_port(nodes, role)), "--tp-size", str(launched.tp)]
     argv += _disaggregation_args(launch, role, _BOOTSTRAP.get(role, 0))
     argv += _rendezvous_args(hosts, rank, DIST_INIT_PORT)
@@ -179,8 +155,9 @@ def _atom_engine(launch: PdLaunch, nodes: NodeList, role: Role, hosts: tuple[str
         CommandError: a worker spans hosts with a TP above one host's GPUs.
     """
     launched = launch.role(role)
-    flags = _server_flags(Framework.ATOM)
-    argv = [*_server_command(Framework.ATOM).argv(_PYTHON), flags.model, launch.model]
+    facts = framework_facts(Framework.ATOM)
+    flags = facts.server_flags
+    argv = [*facts.server_command.argv(_PYTHON), flags.model, launch.model]
     argv += [flags.host, _BIND_ADDRESS, flags.port, str(engine_port(nodes, role)), "-tp", str(launched.tp)]
     if role in PD_ROLES:
         kv = {
@@ -208,8 +185,8 @@ def engine_commands(launch: PdLaunch, nodes: NodeList, role: Role) -> list[HostC
     if launch.frontend.type is FrontendType.INFERA:
         compose = _infera_engine
     return [
-        HostCommand(role.value, host, worker, rank, compose(launch, nodes, role, hosts, rank))
-        for worker, hosts in enumerate(worker_hosts(launch.role(role)))
+        HostCommand(role.value, host, rank, compose(launch, nodes, role, hosts, rank))
+        for hosts in worker_hosts(launch.role(role))
         for rank, host in enumerate(hosts)
     ]
 
@@ -254,7 +231,7 @@ def router_command(launch: PdLaunch, nodes: NodeList) -> HostCommand:
     else:
         argv += ["--worker-urls", *_worker_urls(launch, nodes, Role.WORKER)]
     argv += [*_BIND_ALL, _PORT, str(ROUTER_PORT), *launch.frontend.args]
-    return HostCommand(ROUTER, nodes.router, 0, 0, _join(argv))
+    return HostCommand(ROUTER, nodes.router, 0, _join(argv))
 
 
 def runs_router(launch: PdLaunch) -> bool:
@@ -274,20 +251,16 @@ def process_needle(role: str, framework: Framework, frontend: FrontendType) -> s
         return "sglang_router.launch_router|sglang::router" if frontend is FrontendType.SGLANG_ROUTER else "atomesh"
     if frontend is FrontendType.INFERA:
         return INFERA_ENGINE
-    return _server_command(framework).module[-1]
+    return framework_facts(framework).server_command.module[-1]
 
 
 __all__ = [
-    "INFERA_BOOTSTRAP_PORT",
-    "INFERA_DIST_INIT_PORT",
     "INFERA_ENGINE",
     "ROUTER",
-    "ROUTER_PORT",
     "CommandError",
     "HostCommand",
     "cluster_commands",
     "engine_commands",
-    "engine_port",
     "engine_urls",
     "process_needle",
     "router_command",

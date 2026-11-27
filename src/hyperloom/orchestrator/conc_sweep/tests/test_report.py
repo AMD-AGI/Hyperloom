@@ -273,7 +273,11 @@ class TestTheCurveCarriesBothAxisPairs:
     def test_the_csv_carries_the_agentic_axes_too(self, tmp_path: Path):
         """The CSV is the download button; it has to draw the same chart."""
         point = point_from_variant(_variant(total_token_throughput=25984.8, intvty_p90=447.2), arm="optimized")
-        write_report({"baseline": {"points": []}, "optimized": {"points": [point]}}, tmp_path)
+        write_report(
+            {"baseline": {"points": []}, "optimized": {"points": [point]}},
+            tmp_path,
+            breakdown=tmp_path / "session_breakdown.json",
+        )
 
         with (tmp_path / RAW_FILE).open(newline="") as fp:
             rows = list(csv.DictReader(fp))

@@ -325,24 +325,41 @@ def test_a_runner_cache_without_the_commit_fails_the_session_before_it_measures(
     assert not (tmp_path / "runner-cache" / ("f" * 40)).exists()
 
 
+@pytest.mark.usefixtures("wheelhouse_index")
+def test_a_later_run_of_other_code_clones_its_own_commit_beside_the_sessions_earlier_clone(
+    rig: Rig, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A sweep run on a closed session executes newer code than the run that measured it."""
+    monkeypatch.setenv(RUNNER_TARGET_ENV, RUNNER_TAG)
+    layout = SessionLayout(tmp_path / "MB-session")
+    earlier = layout.runner_source / ("0" * 40)
+    earlier.mkdir(parents=True)
+
+    inputs = PinnedToolboxInputs(_host(tmp_path, rig.repo, rig.cache.sha), tmp_path / "runner-cache")(layout, 2)
+
+    assert inputs.source_sha == rig.cache.sha
+    assert sorted(path.name for path in layout.runner_source.iterdir()) == sorted([earlier.name, rig.cache.sha])
+
+
 def test_a_clone_put_in_place_by_another_account_starts_no_program_of_its_config(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setenv(RUNNER_TARGET_ENV, RUNNER_TAG)
     layout = SessionLayout(tmp_path / "MB-session")
-    layout.root.mkdir()
-    sha = _origin(layout.runner_source)
+    layout.runner_source.mkdir(parents=True)
+    sha = _origin(tmp_path / "planted")
+    clone = (tmp_path / "planted").rename(layout.runner_source / sha)
     ran, transport = tmp_path / "ran", tmp_path / "transport"
     transport.write_text(f"#!/bin/sh\necho ran >> {ran}\nexit 1\n")
     transport.chmod(0o755)
     # A partial clone whose promisor remote's transport is a program, missing the commit, so the first read fetches.
-    with (layout.runner_source / ".git" / "config").open("a") as config:
+    with (clone / ".git" / "config").open("a") as config:
         config.write(
             f"[core]\n\trepositoryformatversion = 1\n\tsshCommand = {transport}\n"
             '[extensions]\n\tpartialClone = promisor\n[remote "promisor"]\n\turl = ssh://example.invalid/r\n'
             "\tpromisor = true\n"
         )
-    (layout.runner_source / ".git" / "objects" / sha[:2] / sha[2:]).unlink()
+    (clone / ".git" / "objects" / sha[:2] / sha[2:]).unlink()
 
     with pytest.raises(CacheBuildError, match=sha):
         PinnedToolboxInputs(_host(tmp_path, tmp_path / "origin", sha), tmp_path / "runner-cache")(layout, 2)
@@ -358,16 +375,17 @@ def test_an_object_planted_in_the_clone_under_the_id_of_one_of_the_commits_fails
     layout = SessionLayout(tmp_path / "MB-session")
     layout.root.mkdir()
     sha = rig.cache.sha
-    runner_source(layout.runner_source, str(rig.repo), sha)
+    layout.runner_source.mkdir()
+    clone = runner_source(layout.runner_source / sha, str(rig.repo), sha)
     # Another account of the group rewrites the runner's entry point in the clone under the id git named it by.
     shown = subprocess.run(
-        ["git", "-C", str(layout.runner_source), "rev-parse", f"{sha}:src/hyperloom/measure/runner/__main__.py"],
+        ["git", "-C", str(clone), "rev-parse", f"{sha}:src/hyperloom/measure/runner/__main__.py"],
         check=True,
         capture_output=True,
         text=True,
     )
     blob = shown.stdout.strip()
-    loose = layout.runner_source / ".git" / "objects" / blob[:2] / blob[2:]
+    loose = clone / ".git" / "objects" / blob[:2] / blob[2:]
     assert loose.is_file(), "the clone keeps the commit's objects loose"
     planted = b"import os\nos.system('echo planted')\n"
     loose.chmod(0o644)

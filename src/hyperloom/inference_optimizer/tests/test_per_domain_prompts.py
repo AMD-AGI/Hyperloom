@@ -141,7 +141,7 @@ def test_enablement_book_lives_in_user_not_system_prompt():
 
 
 def test_enablement_mandate_carries_the_dispatch_evidence():
-    """Source context and ranked refs discovered by the Coordinator reach the mandate."""
+    """The source context read by the Coordinator reaches the mandate."""
     domain = get_domain("enablement_specialist")
     assert domain is not None
     weights = "CHECKPOINT WEIGHTS: model.layers.0.mlp.gate_up_proj.weight [8192, 4096]"
@@ -154,15 +154,11 @@ def test_enablement_mandate_carries_the_dispatch_evidence():
         gap_evidence={"model": "Qwen/Qwen3-8B"},
         framework="vllm",
         enablement_source_context=weights,
-        enablement_candidate_refs=("ROCm/vllm#123", "vllm-project/vllm#456"),
         enablement_failure_signature=_DISPATCHED,
     )
     _system, user = build_specialist_prompts(inp)
     assert "SOURCE CONTEXT" in user
     assert weights in user
-    assert "CANDIDATE BRIDGING" in user
-    assert "ROCm/vllm#123" in user
-    assert "vllm-project/vllm#456" in user
 
 
 def test_enablement_mandate_renders_the_dispatched_signature():

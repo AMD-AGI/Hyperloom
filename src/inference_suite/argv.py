@@ -86,7 +86,11 @@ def removal_option_names(remove_args: Any) -> list[str]:
 
 
 def _removed_token_count(tokens: list[str], index: int, removals: set[tuple[str, str | None]]) -> int:
-    """Count the tokens at *index* that *removals* deletes; 0 when the token survives."""
+    """Count the tokens at *index* that *removals* deletes; 0 when the token survives.
+
+    A flag removed by name goes with every value after it, as the launch composer groups them (``--cuda-graph-bs 1 2 4``);
+    one removed with a value goes only where that value follows it.
+    """
     tok = tokens[index]
     if not is_flag(tok):
         return 0
@@ -94,10 +98,14 @@ def _removed_token_count(tokens: list[str], index: int, removals: set[tuple[str,
     drops_flag = (flag, None) in removals
     if sep and (drops_flag or (flag, value) in removals):
         return 1
-    if index + 1 < len(tokens) and is_flag_value(flag, tokens[index + 1]):
-        if drops_flag or (flag, tokens[index + 1]) in removals:
-            return 2
-    return 1 if drops_flag else 0
+    if drops_flag:
+        end = index + 1
+        while end < len(tokens) and is_flag_value(flag, tokens[end]):
+            end += 1
+        return end - index
+    if index + 1 < len(tokens) and (flag, tokens[index + 1]) in removals:
+        return 2
+    return 0
 
 
 def remove_server_args(server_args: str | None, remove_args: Any) -> str:

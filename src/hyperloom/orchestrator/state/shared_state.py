@@ -304,7 +304,8 @@ class SharedState(
     # Which benchmark workload this session measures: "agentx" (agentic trace replay) or "synthetic" (ISL/OSL).
     benchmark_mode: str = ""
     # The DATASET_PATH file the session's fixed rounds send in place of random prompts, as given; empty when none.
-    # The path and not a digest of the file: the file is read where a round runs, which need not be this host.
+    # The path and not a digest of the file: its prompts are counted where a point is rendered and sent where the round
+    # runs, which need not be this host.
     # Compared on resume, and no store keyed on ISL/OSL files a session that records one.
     prompt_dataset: str = ""
     # Generation of the measurement path this session was measured on; resume refuses one below the build's epoch.

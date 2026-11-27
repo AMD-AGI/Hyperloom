@@ -14,7 +14,11 @@ import pytest
 from hyperloom_common.timeutil import iso_z
 from hyperloom.inference_optimizer.breakdown import exporter as ex
 from hyperloom.inference_optimizer.breakdown.collectors import sessions
+from hyperloom.inference_optimizer.session.base_launch import write_base_launch
 from hyperloom.inference_optimizer.trace import decision_trace
+from inference_suite import LaunchQuery, SourceSnapshot, resolve_base
+from inference_suite.contracts import BaseLaunch, Workload
+from inference_suite.recipe.resolve import UnreadSource
 
 # ---- _load_session_json ----
 
@@ -301,6 +305,201 @@ def test_write_minimal_final_json_fields(tmp_path):
     assert data["stop_reason"] == "time_exhausted"
     assert data["baseline_tput"] == 35.83
     assert data["current_best"] == {"action": "baseline", "tput": 35.83}
+
+
+# ---- the concurrency sweep's report ----
+
+_SWEEP = {
+    "status": "in_progress",
+    "concs": [4, 16],
+    "baseline": {"points": [{"conc": 16}]},
+    "optimized": {"points": []},
+}
+
+
+def _write_sweep_report(session_dir: Path) -> None:
+    reports = session_dir / "reports"
+    reports.mkdir(parents=True, exist_ok=True)
+    (reports / "conc_sweep_summary.json").write_text(json.dumps(_SWEEP), encoding="utf-8")
+
+
+def _frozen_base() -> BaseLaunch:
+    """A base resolved offline from the default table, as a session without InferenceX access freezes one."""
+    snapshot = SourceSnapshot(None, 1_793_000_000, unread=UnreadSource("InferenceX", "offline"))
+    query = LaunchQuery(
+        "meta-llama/Llama-3.1-8B-Instruct", "sglang", "mi355x", Workload.FIXED, (64,), isl=1024, osl=1024, tp=1
+    )
+    base = resolve_base(query, snapshot, gpus=8)
+    assert isinstance(base, BaseLaunch), base
+    return base
+
+
+def test_a_breakdown_reports_where_the_frozen_base_came_from_its_image_and_topology(tmp_path):
+    base = _frozen_base()
+    write_base_launch(tmp_path, base)
+    document = base.to_document()
+
+    reported = ex.build(tmp_path)["metadata"]["base_launch"]
+
+    assert reported == {key: document[key] for key in ("source", "image", "topology")}
+    assert not {"args", "env", "client"} & set(reported)
+
+
+def test_a_session_that_froze_no_base_has_no_base_launch(tmp_path):
+    out = ex.build(tmp_path)
+    assert "base_launch" not in out["metadata"]
+    assert not any("base_launch" in w for w in out["metadata"]["warnings"])
+
+
+def test_a_base_launch_that_no_longer_matches_its_digest_is_a_warning_not_a_block(tmp_path):
+    path = write_base_launch(tmp_path, _frozen_base())
+    tampered = json.loads(path.read_text(encoding="utf-8"))
+    tampered["digest"] = tampered["digest"][:-8] + "00000000"
+    path.write_text(json.dumps(tampered), encoding="utf-8")
+
+    out = ex.build(tmp_path)
+
+    assert "base_launch" not in out["metadata"]
+    assert any(w.startswith("base_launch: ") for w in out["metadata"]["warnings"])
+
+
+_IX_RECIPE = "inferencex-e2e/benchmarks/single_node/srt-slurm-recipes/dsv41flash/vllm/mi300x-fp4-mtp/agentic.yaml"
+_IX_SOURCE = {
+    "kind": "inferencex",
+    "repo": "https://github.com/SemiAnalysisAI/InferenceX",
+    "commit": "c22b4b25a04932dca1b69bfc2cad70e1d098c5aa",
+    "api": None,
+    "path": _IX_RECIPE,
+    "entry": "dsv41flash-fp4-mi300x-vllm-agentic-dspark",
+    "locator": "benchmarks/single_node/srt-slurm-recipes/dsv41flash/vllm/mi300x-fp4-mtp/agentic.yaml:override_tp4_c32",
+    "strategy": None,
+    "files": {_IX_RECIPE: "6b" * 32},
+    "tools": {"srt-slurm": "acfb4dcc3bd48fd6a1e7b615e849e7954c0c3852"},
+}
+_IX_IMAGE = {
+    "assumed_release": None,
+    "framework_version": "0.5.6",
+    "recipe": "lmsysorg/sglang:v0.5.6@sha256:" + "14" * 32,
+    "run": None,
+    "version_basis": "tag",
+}
+
+
+def _frozen_with(session_dir, **parts) -> None:
+    """Freeze a base whose ``source`` and ``image`` read as ``parts`` say; neither is under the base's digest."""
+    path = write_base_launch(session_dir, _frozen_base())
+    document = json.loads(path.read_text(encoding="utf-8"))
+    path.write_text(json.dumps({**document, **parts}), encoding="utf-8")
+
+
+def test_an_inferencex_base_reports_its_recipe_commit_variant_files_and_image(tmp_path):
+    _frozen_with(tmp_path, source=_IX_SOURCE, image=_IX_IMAGE)
+
+    reported = ex.build(tmp_path)["metadata"]["base_launch"]
+
+    assert (reported["source"], reported["image"]) == (_IX_SOURCE, _IX_IMAGE)
+
+
+def test_a_reference_script_url_is_reported_without_its_credentials(tmp_path):
+    planted, signature = "x" * 12, "y" * 12
+    url = f"https://bob:hunter2@example.com/launch.sh?token={planted}&sig={signature}#top"
+    source = {**_frozen_base().to_document()["source"], "kind": "user_file", "path": url, "files": {url: "ab" * 32}}
+    _frozen_with(tmp_path, source=source)
+
+    reported = ex.build(tmp_path)["metadata"]["base_launch"]["source"]
+
+    # A signed URL's signature has no credential-like name, so an operator's file loses its whole query.
+    text = json.dumps(reported)
+    assert not any(word in text for word in ("bob", "hunter2", planted, signature))
+    assert reported["path"] == "https://example.com/launch.sh"
+    assert list(reported["files"]) == [reported["path"]]
+
+
+def test_a_recipe_source_keeps_the_query_that_names_its_point(tmp_path):
+    locator = "https://recipes.vllm.ai/deepseek-ai/DeepSeek-V4.1-Flash.json?hardware=mi300x&point=tp4_c32"
+    source = {**_IX_SOURCE, "kind": "vllm_recipes", "locator": locator}
+    _frozen_with(tmp_path, source=source, image=_IX_IMAGE)
+
+    assert ex.build(tmp_path)["metadata"]["base_launch"]["source"]["locator"] == locator
+
+
+def test_a_base_launch_that_cannot_be_read_is_a_warning_not_a_block(tmp_path):
+    (tmp_path / "base_launch.json").mkdir()
+
+    out = ex.build(tmp_path)
+
+    assert "base_launch" not in out["metadata"]
+    assert any(w.startswith("base_launch: ") for w in out["metadata"]["warnings"])
+
+
+def test_a_breakdown_of_a_session_no_sweep_ran_for_has_no_sweep_section(tmp_path):
+    assert ex.CONC_SWEEP_SECTION not in ex.build(tmp_path)
+
+
+def test_a_rebuilt_breakdown_keeps_the_sweep_report_on_disk(tmp_path):
+    _write_sweep_report(tmp_path)
+
+    assert ex.build(tmp_path)[ex.CONC_SWEEP_SECTION] == _SWEEP
+
+
+def test_an_unreadable_sweep_report_is_a_warning_not_a_section(tmp_path):
+    (tmp_path / "reports").mkdir()
+    (tmp_path / "reports" / "conc_sweep_summary.json").write_text("{bad", encoding="utf-8")
+
+    out = ex.build(tmp_path)
+
+    assert ex.CONC_SWEEP_SECTION not in out
+    assert any("conc_sweep_summary.json" in w for w in out["metadata"]["warnings"])
+
+
+def test_patch_breakdown_conc_sweep_needs_a_breakdown(tmp_path):
+    target = tmp_path / ex.BREAKDOWN_FILENAME
+
+    assert ex.patch_breakdown_conc_sweep(target, _SWEEP) is False
+    assert not target.exists()
+
+
+def test_patch_breakdown_conc_sweep_carries_the_report_and_keeps_the_rest(tmp_path):
+    target = ex.write_breakdown_json(tmp_path)
+    before = json.loads(target.read_text())
+
+    assert ex.patch_breakdown_conc_sweep(target, _SWEEP) is True
+    after = json.loads(target.read_text())
+    carried = after.pop(ex.CONC_SWEEP_SECTION)
+    assert carried == _SWEEP
+    assert after == before
+    assert ex.patch_breakdown_conc_sweep(target, _SWEEP) is False
+
+
+def test_the_carried_section_holds_what_the_report_file_holds(tmp_path):
+    """The report is written with ``default=str``; the section is serialised the same way, so a Path or a set in the
+    report lands in both as the same string."""
+    target = tmp_path / ex.BREAKDOWN_FILENAME
+    target.write_text("{}", encoding="utf-8")
+    report = {**_SWEEP, "workspace": tmp_path / "runs", "tags": {"a"}}
+
+    assert ex.patch_breakdown_conc_sweep(target, report) is True
+
+    on_file = json.loads(json.dumps(report, default=str))
+    assert json.loads(target.read_text())[ex.CONC_SWEEP_SECTION] == on_file
+
+
+def test_a_breakdown_that_is_not_an_object_is_left_alone_and_said_so(tmp_path, caplog):
+    target = tmp_path / ex.BREAKDOWN_FILENAME
+    target.write_text("[]", encoding="utf-8")
+
+    assert ex.patch_breakdown_conc_sweep(target, _SWEEP) is False
+    assert target.read_text(encoding="utf-8") == "[]"
+    assert "is not a JSON object" in caplog.text
+
+
+def test_patch_breakdown_conc_sweep_writes_a_breakdown_kept_elsewhere(tmp_path):
+    target = tmp_path / "MB-reports" / ex.BREAKDOWN_FILENAME
+    target.parent.mkdir()
+    target.write_text(json.dumps({"schema_version": "multibranch-2"}), encoding="utf-8")
+
+    assert ex.patch_breakdown_conc_sweep(target, {**_SWEEP, "concs": (4, 16)}) is True
+    assert json.loads(target.read_text())[ex.CONC_SWEEP_SECTION]["concs"] == [4, 16]
 
 
 def test_patch_breakdown_langfuse_success(tmp_path):

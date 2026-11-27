@@ -89,11 +89,9 @@ class EnablementRound:
     active_runtime: dict = field(default_factory=dict)
     attempt_runtimes: list = field(default_factory=list)
     kept_stack_action: dict = field(default_factory=dict)
-    localization_manifest: list = field(default_factory=list)
     # Off-loop targeted-build state.
     build_manifest: list = field(default_factory=list)
     last_build_failure: dict = field(default_factory=dict)
-    candidate_refs: list = field(default_factory=list)
     # Why the last round's patches were all dropped for absent targets; injected into the next round's mandate so it
     # stops writing diffs that cannot apply.
     last_grounding_drop_reason: list = field(default_factory=list)

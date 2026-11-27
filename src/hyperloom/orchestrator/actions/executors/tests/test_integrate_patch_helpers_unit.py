@@ -76,15 +76,15 @@ def test_resolve_framework_root_explicit_dir(tmp_path):
     assert patch_sources._resolve_framework_root(str(tmp_path)) == tmp_path
 
 
-def test_recorded_roots_with_external_localization_require_full_resolution(tmp_path):
+def test_recorded_roots_with_a_patch_outside_the_workspace_require_full_resolution(tmp_path):
     workspace = tmp_path / "specialist"
     workspace.mkdir()
     authored = workspace / "authored.patch"
     authored.touch()
-    localization = tmp_path / "localization.patch"
-    localization.touch()
-    payload = {"patch_roots": {str(authored): "/aiter", str(localization): "/aiter"}}
-    assert patch_sources._sole_patch_root(payload, [authored, localization], specialist_workspace=workspace) is None
+    outside = tmp_path / "outside.patch"
+    outside.touch()
+    payload = {"patch_roots": {str(authored): "/aiter", str(outside): "/aiter"}}
+    assert patch_sources._sole_patch_root(payload, [authored, outside], specialist_workspace=workspace) is None
 
 
 def test_recorded_root_with_nul_declines_fast_path(tmp_path):

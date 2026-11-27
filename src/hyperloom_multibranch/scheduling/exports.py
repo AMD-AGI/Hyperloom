@@ -270,6 +270,7 @@ class SessionExports:
                 runner_dir=self._layout.logs,
                 code_revision=manifest.code_version.git_sha or None,
                 claw_session_id=manifest.claw_session_id,
+                toolbox_dir=self._layout.toolbox,
             ),
         )
         breakdown = write_breakdown(self._layout.reports, document)

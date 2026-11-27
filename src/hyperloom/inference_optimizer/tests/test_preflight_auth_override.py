@@ -22,7 +22,12 @@ import pytest
 
 from hyperloom_common.llm import claude_oneshot
 from hyperloom_common.env import EnvValueError
-from hyperloom_common.llm.llm_config import AGENT_BACKEND_CHOICES, deepseek_compat_env, resolve_forge_llm_model
+from hyperloom_common.llm.llm_config import (
+    AGENT_BACKEND_CHOICES,
+    deepseek_compat_env,
+    expand_custom_header_env_refs,
+    resolve_forge_llm_model,
+)
 from hyperloom_common.llm.llm_headers import parse_custom_headers
 from hyperloom.inference_optimizer import cli
 from hyperloom.inference_optimizer.cli import credentials as cli_credentials
@@ -481,7 +486,7 @@ def test_custom_header_env_refs_are_expanded_for_child_processes(monkeypatch):
     monkeypatch.setenv("ANTHROPIC_CUSTOM_HEADERS", f"Ocp-Apim-Subscription-Key: ${{{anthropic_key_var}}}")
     monkeypatch.setenv("OPENAI_CUSTOM_HEADERS", "X-Tenant: acme")
 
-    cli_preflight._expand_custom_header_env_refs()
+    expand_custom_header_env_refs()
 
     assert os.environ["ANTHROPIC_CUSTOM_HEADERS"] == "Ocp-Apim-Subscription-Key: ak-gateway-token"
     assert os.environ["OPENAI_CUSTOM_HEADERS"] == "X-Tenant: acme"
@@ -498,8 +503,8 @@ def test_a_header_ref_outside_the_credentials_does_not_reach_children(monkeypatc
         f"Ocp-Apim-Subscription-Key: ${{{anthropic_key_var}}}\nX-Leaked: ${{{other_secret_var}}}",
     )
 
-    with caplog.at_level(logging.WARNING, logger="hyperloom.inference_optimizer.cli"):
-        cli_preflight._expand_custom_header_env_refs()
+    with caplog.at_level(logging.WARNING, logger="hyperloom_common.llm.llm_config"):
+        expand_custom_header_env_refs()
 
     assert os.environ["ANTHROPIC_CUSTOM_HEADERS"] == (
         f"Ocp-Apim-Subscription-Key: ak-gateway-token\nX-Leaked: ${{{other_secret_var}}}"
@@ -522,7 +527,7 @@ def test_custom_header_ref_to_the_other_anthropic_credential_is_filled_in(monkey
     monkeypatch.setenv(set_var, "gw-token")
     monkeypatch.setenv("ANTHROPIC_CUSTOM_HEADERS", f"Ocp-Apim-Subscription-Key: ${{{referenced_var}}}")
 
-    cli_preflight._expand_custom_header_env_refs()
+    expand_custom_header_env_refs()
 
     assert os.environ["ANTHROPIC_CUSTOM_HEADERS"] == "Ocp-Apim-Subscription-Key: gw-token"
     assert referenced_var not in os.environ

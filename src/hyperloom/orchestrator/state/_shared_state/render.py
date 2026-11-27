@@ -14,7 +14,10 @@ from hyperloom_common.coerce import to_float
 from hyperloom.common.prompt_safety import flatten_for_prompt as _flatten_for_prompt
 from hyperloom.inference_optimizer.breakdown.recorder.kernel_records import GEAK_DROPPED_STATUSES
 from hyperloom.inference_optimizer.grid_server_args import dedupe_extra_server_args
-from hyperloom.inference_optimizer.session.geak_rebench_verdict import REBENCH_FAILED_STATUSES
+from hyperloom.inference_optimizer.session.geak_rebench_verdict import (
+    REBENCH_FAILED_STATUSES,
+    REBENCH_UNMEASURED_GIVEN_UP,
+)
 from ...mcp_tool_names import qualified_context_tool_name
 from . import gap_rows, variant_line, warm_start
 from .attempt_audit import _AUDIT_ACTIONS
@@ -255,7 +258,11 @@ class _RenderMixin:
         elif geak_revalidation_status in REBENCH_FAILED_STATUSES and not geak_in_stack:
             # A fallback rebench that also failed is the same unjudged drop; only ``no_material`` / ``no_promote`` are
             # verdicts and stay silent here.
-            geak_pending_tag = f" ⚠ geak candidate dropped unvalidated (rebench_{geak_revalidation_status})"
+            given_up = self.geak_result.get("revalidation_error_class") == REBENCH_UNMEASURED_GIVEN_UP
+            geak_pending_tag = (
+                f" ⚠ geak candidate dropped unvalidated (rebench_{geak_revalidation_status}"
+                f"{', given up unmeasured' if given_up else ''})"
+            )
         else:
             geak_pending_tag = ""
         from hyperloom.inference_optimizer import framework_registry

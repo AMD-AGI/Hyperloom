@@ -206,7 +206,7 @@ def test_a_changed_host_key_is_refused_and_a_pinned_host_is_not_rescanned(tmp_pa
 
 def test_stop_parks_the_router_first(tmp_path):
     hosts = FakeHosts()
-    stop(_launch(), _cluster(tmp_path, hosts), _OPTIONS)
+    stop(_launch(), _cluster(tmp_path, hosts))
     assert hosts.driven("stop") == ["r0", "p0", "d0"]
 
 
@@ -235,9 +235,6 @@ def test_restart_refuses_a_round_flag_the_engine_does_not_list(tmp_path):
     with pytest.raises(LaunchError, match="--foo"):
         restart(_launch(), {"decode": ["--foo", "1"]}, _cluster(tmp_path, hosts), _OPTIONS)
     assert hosts.driven("restart") == []
-    ran = restart(_launch(), {"decode": ["--cuda-graph-bs", "4"]}, _cluster(tmp_path, hosts), _OPTIONS)
-    assert ran.role(Role.DECODE).args == ("--cuda-graph-bs-decode", "4")
-    assert ran.role(Role.DECODE).stripped == ("unsupported --retired-flag",)
 
 
 def test_restart_refuses_a_prefill_override_of_a_decode_only_flag(tmp_path):
@@ -266,7 +263,7 @@ def test_env_keys_must_be_shell_names():
 
 
 def test_engine_script_waits_for_released_gpus_and_runs_under_bash():
-    command = HostCommand("decode", "d0", 0, 0, "echo $HL_IB_DEVICE")
+    command = HostCommand("decode", "d0", 0, "echo $HL_IB_DEVICE")
     script = launch_script(command, {"K": "a b"}, Framework.SGLANG, "/logs")
     assert "export K='a b'" in script and "hl_gpu_holders" in script and "/logs/pd_decode_d0.log" in script
     assert script.rstrip().endswith("exec echo $HL_IB_DEVICE")
@@ -283,7 +280,7 @@ def test_engine_script_waits_for_released_gpus_and_runs_under_bash():
 
 
 def test_router_script_skips_engine_steps():
-    script = launch_script(HostCommand("router", "r0", 0, 0, "atomesh launch"), {}, Framework.SGLANG, "/logs")
+    script = launch_script(HostCommand("router", "r0", 0, "atomesh launch"), {}, Framework.SGLANG, "/logs")
     assert "hl_gpu_holders" not in script and "HL_IB_DEVICE" not in script
 
 
@@ -310,7 +307,7 @@ def test_an_infera_launch_starts_no_router_and_waits_for_the_service(tmp_path, m
     assert probed == ["http://w0:30000/health", "http://svc:8000/health"]
     assert ran.role(Role.WORKER).args == ("--mem-fraction-static", "0.8")
     assert any("infera.engine.sglang" in stdin for _kind, _host, stdin in hosts.calls)
-    stop(launch, cluster, _OPTIONS)
+    stop(launch, cluster)
     assert hosts.driven("stop") == ["w0", "w1"]
 
 

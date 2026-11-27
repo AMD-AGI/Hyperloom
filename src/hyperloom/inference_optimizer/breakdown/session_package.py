@@ -4,10 +4,9 @@
 """Bundle a session's consumer-facing artifacts into a single zip under the destination root.
 
 The root is ``HYPERLOOM_SESSION_PACKAGE_DEST``, else the session's own archive (``<session dir>/archive``), on the storage
-the session is on. A deployment that collects packages elsewhere names that place in the environment; a hosted run
-(``hyperloom hosted run``) names the archive, made shared by the run's accounts, whatever the host passed.
+the session is on. A deployment that collects packages elsewhere names that place in the environment.
 
-A root with the setgid bit (the hosted archive, ``2770``) is one the accounts of one group write in turn: the directories
+A root with the setgid bit (a group-shared archive, ``2770``) is one the accounts of one group write in turn: the directories
 made below it get its mode, and every file is a new one renamed into place with that mode less the execute bits, so the
 next account replaces it, never opens it (:mod:`hyperloom_common.shared_storage`).
 """
@@ -192,7 +191,7 @@ def _exported_state_bytes(path: Path) -> bytes:
 
 
 def _group_mode(root: Path) -> int | None:
-    """The mode asked of what is made below a destination root with the setgid bit (the hosted archive is ``2770``):
+    """The mode asked of what is made below a destination root with the setgid bit (a group-shared archive, ``2770``):
     the root's own, never wider than the shared modes (``2775``, so never writable by others); ``None`` for a root
     without it, which is written as one account's. Whether a mode asked is given or masked by the umask is
     :mod:`hyperloom_common.shared_storage`'s to decide (:func:`~hyperloom_common.shared_storage.parent_is_shared`),
