@@ -14,6 +14,7 @@ from typing import Any
 from hyperloom.common.benchmark_config import read_benchmark_point
 from hyperloom.common.deadline import Deadline
 from hyperloom.common.env_safety import filter_untrusted_env_mapping, is_allowed_variant_env_key
+from hyperloom_common import gpu_card
 from hyperloom_common.coerce import to_str_list
 from hyperloom_common.timeutil import now_iso
 
@@ -150,12 +151,6 @@ class _Deliverable:
             done_payload=done_payload,
         )
         raw_args = params.get("extra_server_args")
-        gpu_type = str(
-            getattr(attempt.shared_state, "gpu_type", "")
-            or params.get("gpu_type")
-            or params.get("target_platform")
-            or ""
-        ).strip()
         return cls(
             patch_paths=patch_paths,
             config_changes=config_changes,
@@ -166,7 +161,7 @@ class _Deliverable:
             switch_manifest=switch_manifest,
             artifact_specs=artifact_specs,
             artifact_resolve_errors=artifact_resolve_errors,
-            artifact_runtime_errors=_validate_aiter_gemm_artifacts(artifact_specs, gpu_type=gpu_type),
+            artifact_runtime_errors=_validate_aiter_gemm_artifacts(artifact_specs, card=gpu_card.session_card()),
         )
 
 

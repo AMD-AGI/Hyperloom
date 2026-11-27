@@ -451,6 +451,20 @@ class TestCardTotalGib:
         assert pms.card_total_gib(bad, "SPX") is None
 
 
+class TestReadDeviceGib:
+    _STATIC = [
+        {
+            "gpu": 3,
+            "asic": {"target_graphics_version": "gfx950", "num_compute_units": 32},
+            "vram": {"size": {"value": 36862, "unit": "MB"}},
+        }
+    ]
+
+    def test_the_device_memory_is_read_from_amd_smi_static(self, monkeypatch):
+        monkeypatch.setattr(pms, "_amd_smi_json", lambda args, *a, **k: self._STATIC if args == ["static"] else None)
+        assert pms.read_device_gib(3) == pytest.approx(36.0, abs=0.01)
+
+
 # ----------------------------------------------------------- mode resolution
 
 

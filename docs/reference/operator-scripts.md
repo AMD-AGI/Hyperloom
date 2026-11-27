@@ -1,8 +1,8 @@
 ---
 myst:
     html_meta:
-        "description": "Reference for Hyperloom operator scripts: dump_session_breakdown, dump_session_report, and event_counts. Use these utilities to inspect, export, and report on session data."
-        "keywords": "Hyperloom, operator scripts, session breakdown, session report, event counts, LLM inference, AMD GPU, ROCm, debugging, observability, operator tools"
+        "description": "Reference for Hyperloom operator scripts: dump_session_breakdown and event_counts. Use these utilities to inspect and export session data."
+        "keywords": "Hyperloom, operator scripts, session breakdown, event counts, LLM inference, AMD GPU, ROCm, debugging, observability, operator tools"
 ---
 # Hyperloom operator scripts
 
@@ -69,57 +69,6 @@ artifacts).
 [`session_breakdown.json` integration in Hyperloom](session-breakdown.md).
 The script exits 0 on success, prints a one-line summary, and writes
 collector warnings to the `warnings[]` field rather than failing.
-
----
-
-## `dump_session_report.py`
-
-Render a markdown session report from a `session_breakdown.json`.
-Deterministic by default; optionally large language model (LLM)-polished when an
-OpenAI-compatible endpoint is configured.
-
-Use this when:
-
-* You want a human-readable summary to paste into a PR, Slack, or
-  email.
-* You want to generate the same report for many sessions in bulk.
-
-### Usage
-
-Use the following commands to render a session report.
-
-```bash
-# Deterministic only (no LLM):
-python -m hyperloom session report \
-    --input  /shared/hyperloom-sessions/<user>/<sid>/session_breakdown.json \
-    --output /shared/hyperloom-sessions/<user>/<sid>/session_report.md
-
-# With LLM-polished prose (OpenAI-compatible endpoint):
-HYPERLOOM_REPORT_LLM_BACKEND=openai \
-OPENAI_BASE_URL=https://your-openai-compatible-endpoint/v1 \
-OPENAI_API_KEY=... \
-python -m hyperloom session report \
-    --input  /shared/hyperloom-sessions/<user>/<sid>/session_breakdown.json \
-    --output /shared/hyperloom-sessions/<user>/<sid>/session_report.md
-```
-
-When `--output` is omitted the report is written to
-`<session_dir>/session_report.md` next to the input file. The LLM
-user prompt and raw response (when used) are persisted alongside as
-`session_report_prompt.json` / `session_report_llm_raw.txt` so
-hallucinations can be audited after the fact.
-
-### LLM hardening
-
-The script applies the following safeguards when LLM polishing is enabled.
-
-* The deterministic skeleton (headline numbers, action_path,
-  kernel_lifecycle counts) is generated *without* the LLM; the LLM
-  only rewrites prose.
-* If the LLM call fails (timeout, 5xx, malformed response), the
-  script falls back to the deterministic report and exits 0.
-* If you do not want any LLM call, leave
-  `HYPERLOOM_REPORT_LLM_BACKEND` unset.
 
 ---
 

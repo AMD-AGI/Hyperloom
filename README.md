@@ -123,7 +123,7 @@ the knowledge base are described further in
 | Feature | Options |
 |------|-------|
 | Workload | Text generation, image generation, and custom / scriptable pipelines |
-| Platform | MI300X, MI325X, MI355X |
+| Platform | MI300X, MI325X, MI355X validated; any AMD GPU `amd-smi` describes runs (see [compatibility](docs/compatibility.rst)) |
 | Framework | SGLang, vLLM, xDiT |
 | Kernel language | HIP, Triton, FlyDSL |
 | Kernel backends | GEAK, KernelForge |
@@ -169,7 +169,7 @@ feedback through the
 - Contributor & AI authoring contract: [`AGENTS.md`](https://github.com/AMD-AGI/Hyperloom/blob/main/AGENTS.md)
 - Main agent instructions: [`src/hyperloom/inference_optimizer/SKILL.md`](https://github.com/AMD-AGI/Hyperloom/blob/main/src/hyperloom/inference_optimizer/SKILL.md)
 - CLI entry point: `hyperloom <command>` (or `python -m hyperloom <command>`)
-- Operator tools: `python -m hyperloom session <breakdown|report|backfill|events|state>`
+- Operator tools: `python -m hyperloom session <breakdown|backfill|events|state>`
 - Compute-partition sweep: `python3 scripts/partition_mode_sweep.py` — sets each
   AMD partition mode (`SPX`/`DPX`/`QPX`/`CPX`) on one card in turn, runs the same
   benchmark on every partition that mode creates, sums the throughput and restores

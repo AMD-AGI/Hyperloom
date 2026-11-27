@@ -12,6 +12,14 @@ import pytest
 
 from hyperloom.inference_optimizer import roofline_ceiling as rc
 from hyperloom.inference_optimizer import roofline_snapshot as rs
+from hyperloom.orchestrator.tests._fixtures import MI325X_CARD, publish_card
+
+
+@pytest.fixture(autouse=True)
+def _session_card(monkeypatch, tmp_path_factory):
+    """The session's card is an MI325X that TraceLens has measured no peak for."""
+    publish_card(monkeypatch, MI325X_CARD)
+    monkeypatch.setenv("TRACELENS_ROOT", str(tmp_path_factory.mktemp("tracelens")))
 
 
 def _model(tmp_path: Path, *, transformer: dict | None = None, vae: dict | None = None) -> str:
@@ -142,13 +150,13 @@ def test_dit_meta_declines_an_unusable_transformer(tmp_path):
 
 def test_diffusion_memory_ceiling_reads_the_weights_once_per_step():
     gb = 1024**3
-    img_s = rc.compute_diffusion_mem_img_per_sec(gpu_type="mi300x", num_gpus=1, weight_bytes=10 * gb, num_steps=25)
-    bw = rc.HW_SPECS["mi300x"]["hbm_bw_gbps"] * 1e9
+    img_s = rc.compute_diffusion_mem_img_per_sec(card=MI325X_CARD, num_gpus=1, weight_bytes=10 * gb, num_steps=25)
+    bw = MI325X_CARD.memory_bandwidth_gbps * 1e9
     assert img_s == pytest.approx(1.0 / (25 * (10 * gb / bw)))
 
 
 def test_diffusion_memory_ceiling_scales_with_the_gpu_count():
-    kw = dict(gpu_type="mi300x", weight_bytes=1024**3, num_steps=10)
+    kw = dict(card=MI325X_CARD, weight_bytes=1024**3, num_steps=10)
     assert rc.compute_diffusion_mem_img_per_sec(num_gpus=4, **kw) == pytest.approx(
         4 * rc.compute_diffusion_mem_img_per_sec(num_gpus=1, **kw)
     )
@@ -157,22 +165,22 @@ def test_diffusion_memory_ceiling_scales_with_the_gpu_count():
 @pytest.mark.parametrize(
     "over",
     [
-        {"gpu_type": "not-a-gpu"},
+        {"card": None},
         {"weight_bytes": 0},
         {"num_steps": 0},
     ],
 )
 def test_diffusion_memory_ceiling_declines_degenerate_input(over):
-    kw = dict(gpu_type="mi300x", num_gpus=1, weight_bytes=1024**3, num_steps=10)
+    kw = dict(card=MI325X_CARD, num_gpus=1, weight_bytes=1024**3, num_steps=10)
     kw.update(over)
     assert rc.compute_diffusion_mem_img_per_sec(**kw) == 0.0
 
 
 def _diffusion_compute_img_per_sec(
-    *, gpu_type, num_gpus, precision_tag, dit_params, latent_tokens, num_layers, hidden_size, num_steps
+    *, card, num_gpus, precision_tag, dit_params, latent_tokens, num_layers, hidden_size, num_steps
 ):
     return rc.compute_diffusion_compute_img_per_sec(
-        rc.ComputeTarget(gpu_type=gpu_type, num_gpus=num_gpus, precision_tag=precision_tag),
+        rc.ComputeTarget(card=card, platform="mi325x", num_gpus=num_gpus, precision_tag=precision_tag),
         rc.DitGeometry(params=dit_params, latent_tokens=latent_tokens, num_layers=num_layers, hidden_size=hidden_size),
         num_steps=num_steps,
     )
@@ -180,7 +188,7 @@ def _diffusion_compute_img_per_sec(
 
 def test_diffusion_compute_ceiling_sums_linear_and_attention_flops():
     kw = dict(
-        gpu_type="mi300x",
+        card=MI325X_CARD,
         num_gpus=1,
         precision_tag="bf16",
         dit_params=1_000_000,
@@ -191,13 +199,13 @@ def test_diffusion_compute_ceiling_sums_linear_and_attention_flops():
     )
     linear = 2.0 * kw["dit_params"] * kw["latent_tokens"]
     attn = 4.0 * kw["num_layers"] * kw["latent_tokens"] ** 2 * kw["hidden_size"]
-    peak = rc._compute_peak("mi300x", "bf16")[0] * 1e12
+    peak = MI325X_CARD.peak_tflops("bf16") * 1e12
     assert _diffusion_compute_img_per_sec(**kw) == pytest.approx(peak / (kw["num_steps"] * (linear + attn)))
 
 
 def test_diffusion_compute_ceiling_scales_with_the_gpu_count():
     kw = dict(
-        gpu_type="mi300x",
+        card=MI325X_CARD,
         precision_tag="bf16",
         dit_params=1_000_000,
         latent_tokens=512,
@@ -210,10 +218,10 @@ def test_diffusion_compute_ceiling_scales_with_the_gpu_count():
     )
 
 
-@pytest.mark.parametrize("over", [{"dit_params": 0}, {"latent_tokens": 0}, {"num_steps": 0}, {"gpu_type": "xpu"}])
+@pytest.mark.parametrize("over", [{"dit_params": 0}, {"latent_tokens": 0}, {"num_steps": 0}, {"card": None}])
 def test_diffusion_compute_ceiling_declines_degenerate_input(over):
     kw = dict(
-        gpu_type="mi300x",
+        card=MI325X_CARD,
         num_gpus=1,
         precision_tag="bf16",
         dit_params=1_000,
@@ -243,7 +251,7 @@ def _xdit_state(tmp_path: Path, model_dir: str, **envs):
     )
     return SimpleNamespace(
         baseline_config_path=str(cfg),
-        gpu_type="mi300x",
+        gpu_type="mi325x",
         model_path=model_dir,
         precision="bf16",
         framework="xdit",

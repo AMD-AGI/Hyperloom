@@ -52,6 +52,12 @@ These flags are rejected with `unrecognized arguments`:
 * `--proposal-scoring`, `--no-proposal-scoring` and `--proposal-scorer-models`
   (the advisory proposal scorer is removed; while it was off they changed
   nothing): drop them.
+* `hyperloom-multibranch run --make-before-break` and `--no-make-before-break`
+  (a hosted test now closes its sandbox when it ends): drop them.
+
+A campaign spec may keep `multibranch.make_before_break`, which is ignored with a
+warning. Where the grant fits three or more tests, a hosted session now runs one more
+test at once than the default did, and each test's sandbox queues for a node.
 
 `INFERENCE_OPTIMIZER_PROPOSAL_SCORER_TIMEOUT_SEC` is no longer read and is
 silently ignored, so drop it.
@@ -99,10 +105,12 @@ ran the single-session flow; that default is gone.
   spec is judged as a multi-branch one and refused as above, and the single
   flow's session files are ignored. Let such runs finish on 1.2.0 before
   upgrading the host.
-* The `hosted-gpu` and `hosted-cpu` plug profiles are removed:
-  `hyperloom optimize --plug-profile hosted-gpu` (or `hosted-cpu`) exits 2
-  with `ERROR: plug configuration refused: unknown profile 'hosted-gpu'; available: local`.
-  Drop the flag.
+* `optimize` no longer selects plug implementations: `--plug-profile`,
+  `--manifest`, `--plug` and `--plug-config` are removed and, like any
+  unknown argument, exit 2 with `unrecognized arguments`. Drop them.
+  `HYPERLOOM_MANIFEST` and `HYPERLOOM_MANIFEST_OVERRIDES` are no longer read,
+  and a session's `plugs.resolved.json` is no longer written or read back on
+  `--resume-from`; an old session that has one resumes and ignores it.
 * `HYPERLOOM_EVENTS_DIR`, `HYPERLOOM_MCP_HOST`, `HYPERLOOM_MCP_PORT` and
   `HYPERLOOM_MCP_TOKEN` are no longer read or checked; a host may stop
   setting them (any value is accepted and removed from the environment of
@@ -126,6 +134,26 @@ or framework proposal, not on its `critic_review.variants[]` rows, and
 or `failure_reason_code`. Consumers that read `effective_verdict` read
 `verdict` instead: the loop no longer downgrades a ruling, so `verdict` is the
 one it acted on.
+
+### Required: `session_breakdown.json` drops `critic_review.variants`
+
+The schema stays `v6.1`, but `critic_review` on a phase or framework proposal
+no longer carries `variants`. A `review_verdict` rules on a proposal with one
+`verdict`; its per-variant `verdict_map` form had no producer and is now
+rejected as a `review_verdict` with no `verdict`. 1.2.x wrote `variants` as an
+empty list on every reviewed phase proposal. Consumers that read it should stop.
+
+### Required: `state.json` drops the policy denial log
+
+`state.json` no longer carries `policy_denial_history` or
+`policy_denial_streak`, the Orchestration prompt no longer has a
+`=== Recent policy denials ===` block, and the `why_denied` context tool is
+removed. A session written by an earlier release still resumes: the two keys
+are dropped on load. A denial is still recorded where it was read from before:
+as a `policy_denied` observation in the denied agent's inbox, as a `denials`
+row on the phase event in `session_breakdown.json`, and as a
+`PolicyGate denied intent` warning in the log. Anything that read the two
+`state.json` keys reads the `denials` rows instead.
 
 ### Required: `SWEEP` is renamed `CYCLE_END` and runs no concurrency sweep
 
@@ -172,6 +200,21 @@ report paths, and adds `partial`, `in_progress` and `cancelled` to `status`.
 Both lineages' shapes are in
 [`session_breakdown.json` integration in Hyperloom](session-breakdown.md).
 
+### Required: `hyperloom session report` is removed
+
+`hyperloom session report` (and `python -m
+hyperloom.inference_optimizer.tools.dump_session_report`) no longer exists:
+the command prints the `hyperloom` usage and exits 2, and the module fails
+with `No module named`. Nothing writes `session_report.md`,
+`session_report_prompt.json` or `session_report_llm_raw.txt` any more; a
+session never wrote them on its own, only this command did. Drop the command
+from scripts, and read `reports/final.md` for the session's own summary and
+`session_breakdown.json` for the recorded facts. Neither file changes.
+
+`HYPERLOOM_REPORT_LLM_BACKEND`, `HYPERLOOM_REPORT_MODEL` and
+`HYPERLOOM_REPORT_MAX_TOKENS` are no longer read and are silently ignored, so
+drop them.
+
 ---
 
 ## Upgrading from 1.1.x
@@ -191,7 +234,7 @@ launchers, skills and scripts:
 | `quantization-agent ...` | `hyperloom quantize ...` |
 | `python -m hyperloom.inference_optimizer.multi_node SUB ...` | `hyperloom multi-node SUB ...` |
 | `python -m hyperloom.inference_optimizer.tools.dump_session_breakdown` | `hyperloom session breakdown` |
-| `python -m hyperloom.inference_optimizer.tools.dump_session_report` | `hyperloom session report` |
+| `python -m hyperloom.inference_optimizer.tools.dump_session_report` | removed; see *Upgrading from 1.2.x* above |
 | `python -m hyperloom.inference_optimizer.tools.backfill_langfuse` | `hyperloom session backfill` |
 | `.../tools/event_counts.py` | `hyperloom session events` |
 | `.../tools/read_optimizer_state.py` | `hyperloom session state` |
@@ -382,7 +425,7 @@ Multi-node runs (RayJob through the Ray Dashboard) are unchanged.
 ### Recommended: commands that stay outside `hyperloom.cli`
 
 `hyperloom <command>` covers setup, check, optimize, recover, quantize,
-multi-node, and `session {breakdown,report,backfill,events,state}`. These
+multi-node, and `session {breakdown,backfill,events,state}`. These
 entry points are **intentionally separate** (same as before the unification,
 only the optimizer-family commands moved under `hyperloom`):
 
@@ -486,7 +529,8 @@ had a custom order hard-coded, confirm it is still intentional.
 
 ### Recommended: set `INFERENCE_OPTIMIZER_RESCUE_PATHS` if you use model-specific benchmark scripts
 
-When `--gpu-type` is set, Hyperloom pins
+When the session has a GPU type (`--gpu-type`, or the label of the card
+`amd-smi` reports), Hyperloom pins
 `benchmark_script=<framework>_<gpu_type>.sh` to stop InferenceX-native
 scripts from leaking `result.json` outside the session dir. If you
 intentionally use a model-specific script (for example, `dsr1_fp8_mi300x.sh`),

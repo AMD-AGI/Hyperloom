@@ -27,7 +27,7 @@ from __future__ import annotations
 
 import logging
 import time
-from collections.abc import Callable, Iterable, Mapping
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from typing import Any
 
@@ -307,7 +307,6 @@ class CriticReview:
     reason: str = ""
     confidence: Any = None
     advisory: Mapping[str, Any] | None = None
-    variants: Iterable[Mapping[str, Any]] | None = None
 
 
 class FrameworkEventRecorder:
@@ -505,9 +504,6 @@ class FrameworkEventRecorder:
 
         ``review.advisory`` is recorded as given, since the vocabulary is the
         Critic's own and a re-spelling here would drift from what it emitted.
-        ``review.variants`` holds the per-variant rulings for a grid reviewed by
-        ``verdict_map``; a rejected variant reaches no bench, so no attempt row
-        carries its ruling.
         """
         key = str(proposal_id or "")
         if not key:
@@ -522,9 +518,6 @@ class FrameworkEventRecorder:
         }
         for name, value in _as_dict(review.advisory).items():
             ruling.setdefault(name, value)
-        variants = [dict(row) for row in review.variants or []]
-        if variants:
-            ruling["variants"] = variants
         self._sink.record(
             SECTION_PROPOSAL,
             {"proposal_id": key, "critic_review": ruling},

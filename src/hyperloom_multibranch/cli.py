@@ -174,7 +174,6 @@ from hyperloom_multibranch.scheduling.hosted_run import (
     require_spec_matches,
     run_argv,
     share_with_the_group,
-    spec_make_before_break,
     started_session,
     stop_before_grant_ends,
     sweep_stop_reason,
@@ -566,7 +565,7 @@ def _hosted_sweep(host: HostInfo, spec: CampaignSpec) -> HostedStart:
     settings = _with_sweep_options(read_manifest(layout.manifest).settings, spec.sweep_concs, spec.sweep_parallel)
     require_spec_matches(spec, settings.workload)
     local = spec.measurement == MEASUREMENT_LOCAL
-    fit = machine_parallel_tests if local else grant_tests_that_fit(host, spec_make_before_break(spec))
+    fit = machine_parallel_tests if local else grant_tests_that_fit(host)
     tests = min(spec.max_parallel_tests, fit(settings.workload.tp))
     settings = replace(settings, caps=replace(settings.caps, max_parallel_tests=tests))
     ready = hosted_ready_session(host, settings.workload, local=local)
@@ -584,7 +583,7 @@ def _stop_before_grant_ends(host: HostInfo) -> None:
 
 def _hosted_settings(host: HostInfo, spec: CampaignSpec, session_hours: Callable[[float], float]) -> RunSettings:
     local = spec.measurement == MEASUREMENT_LOCAL
-    tests_that_fit = machine_parallel_tests if local else grant_tests_that_fit(host, spec_make_before_break(spec))
+    tests_that_fit = machine_parallel_tests if local else grant_tests_that_fit(host)
     argv = run_argv(spec, session_hours(spec.max_hours), tests_that_fit(spec.tp))
     settings = settings_from(_parsed_run(argv), tests_that_fit)
     if not local:
@@ -635,7 +634,7 @@ def _handed_grant(args: argparse.Namespace) -> HandedGrant:
 def _run_settings(args: argparse.Namespace, grant: HandedGrant | None) -> RunSettings:
     if grant is None:
         return settings_from(args)
-    fits = grant_tests_that_fit(grant.host, args.make_before_break)
+    fits = grant_tests_that_fit(grant.host)
     settings = replace(settings_from(args, fits), max_hours=grant.max_hours)
     refuse_unhosted_branches(settings, grant.host, os.environ)
     return settings

@@ -1,0 +1,217 @@
+# SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
+# SPDX-License-Identifier: MIT
+
+"""A session's GPU on both CLI entry paths: the card it reads and publishes, and the label it files results under."""
+
+import argparse
+import asyncio
+import os
+from dataclasses import replace
+from types import SimpleNamespace
+
+import pytest
+
+from hyperloom_common import gpu_card
+from hyperloom.common.benchmark_config import BENCHMARK_CONFIG_ENV
+from hyperloom.common.visible_devices import VISIBLE_DEVICE_VARS
+from hyperloom.inference_optimizer import cli
+from hyperloom.inference_optimizer.cli import launch_shape, session_resume
+from hyperloom.inference_optimizer.cli.benchmark_config import configure_benchmark
+from hyperloom.inference_optimizer.cli.parser import _build_parser
+from hyperloom.inference_optimizer.multi_node._internal import gpu_probe
+from hyperloom.orchestrator.tests._fixtures import MI325X_CARD, MI355X_CARD
+
+
+@pytest.fixture(autouse=True)
+def isolated_env(monkeypatch):
+    for key in (
+        BENCHMARK_CONFIG_ENV,
+        "FRAMEWORK",
+        "FRAMEWORK_VERSION",
+        "GPU_TYPE",
+        "TARGET_GPU_TYPE",
+        "MODEL_PATH",
+        "TP",
+        "EP",
+        "CONC",
+        "ISL",
+        "OSL",
+        "PRECISION",
+        "MAX_MODEL_LEN",
+        "INFERENCE_OPTIMIZER_EXTRA_ENV",
+        "INFERENCE_OPTIMIZER_SERVER_ARGS",
+        "INFERENCE_OPTIMIZER_NODES",
+    ):
+        monkeypatch.setenv(key, "")
+    for mask in VISIBLE_DEVICE_VARS:
+        monkeypatch.delenv(mask, raising=False)
+
+
+def _host(monkeypatch, *cards: gpu_card.GpuCard) -> None:
+    monkeypatch.setattr(gpu_card, "read_cards", lambda: list(cards))
+
+
+def _args(*flags: str) -> argparse.Namespace:
+    return argparse.Namespace(gpu_type=dict(zip(flags[::2], flags[1::2])).get("--gpu-type"))
+
+
+def _seed(tmp_path, monkeypatch, *flags: str) -> list:
+    """Start a fresh session up to its manifest; returns the card the quantization prelude saw."""
+    args = _build_parser().parse_args(["optimize", "--model", "/model", *flags])
+    configure_benchmark(args)
+    launch_shape._resolve_run_topology(args)
+    for name in ("_enforce_expected_framework", "_apply_operator_supplied_paths"):
+        monkeypatch.setattr(cli, name, lambda *a, **kw: None)
+    monkeypatch.setattr(cli, "resolve_framework_version", lambda args: "test-version")
+    monkeypatch.setattr(cli, "make_session_dir", lambda **kw: tmp_path)
+    monkeypatch.setattr(cli, "_acquire_session_lock_or_exit", lambda path: None)
+    prelude_saw = []
+
+    async def prelude(args):
+        prelude_saw.append(gpu_card.session_card())
+
+    monkeypatch.setattr(cli, "_run_quantization_prelude", prelude)
+
+    class ManifestReached(Exception):
+        pass
+
+    def manifest(session_dir, *, args):
+        raise ManifestReached
+
+    monkeypatch.setattr(cli, "write_manifest", manifest)
+    with pytest.raises(ManifestReached):
+        asyncio.run(cli._seed_fresh_session(args, nodes_resolved=1))
+    return prelude_saw
+
+
+def test_a_fresh_session_publishes_its_card_before_the_quantization_prelude(tmp_path, monkeypatch):
+    _host(monkeypatch, MI355X_CARD, MI355X_CARD)
+
+    assert _seed(tmp_path, monkeypatch, "--framework", "vllm") == [MI355X_CARD]
+    assert gpu_card.session_card() == MI355X_CARD
+    assert os.environ["GPU_TYPE"] == os.environ["TARGET_GPU_TYPE"] == "mi355x"
+
+
+def test_any_name_is_accepted_as_the_gpu_type():
+    args = _build_parser().parse_args(["optimize", "--model", "/model", "--gpu-type", "MI300A"])
+    assert args.gpu_type == "mi300a"
+
+
+def test_the_cards_own_name_wins_over_a_given_gpu_type_and_says_so(monkeypatch, capsys):
+    """Recipes and KB rows must match the hardware, so a wrong name, or one left in the environment, does not stick."""
+    _host(monkeypatch, MI355X_CARD)
+    args = _args("--gpu-type", "mi350x")
+
+    cli._resolve_target_gpu(args, nodes=1)
+
+    assert args.gpu_type == os.environ["GPU_TYPE"] == os.environ["TARGET_GPU_TYPE"] == "mi355x"
+    warning = capsys.readouterr().err
+    assert warning.startswith("WARN:") and "'mi350x'" in warning and "using 'mi355x'" in warning
+
+
+def test_without_a_readable_card_the_flag_then_the_environment_names_the_gpu_type(monkeypatch):
+    monkeypatch.setenv("TARGET_GPU_TYPE", "MI350X")
+    monkeypatch.setenv("GPU_TYPE", "mi300x")
+
+    cli._resolve_target_gpu(args := _args(), nodes=1)
+    assert args.gpu_type == "mi350x"
+
+    cli._resolve_target_gpu(args := _args("--gpu-type", "mi325x"), nodes=1)
+    assert args.gpu_type == "mi325x"
+
+
+def test_a_host_whose_cards_cannot_be_read_runs_without_a_card(monkeypatch, capsys):
+    """Not a refusal: the first round stops a host without GPUs, and a given name still labels the session."""
+    gpu_card.publish_session_card(MI355X_CARD)
+
+    cli._resolve_target_gpu(args := _args("--gpu-type", "mi300x"), nodes=1)
+
+    assert gpu_card.session_card() is None
+    assert args.gpu_type == "mi300x"
+    assert "none read (amd-smi static could not run (test))" in capsys.readouterr().out
+
+
+def test_cards_of_two_kinds_warn_listing_each_and_the_session_takes_the_first(monkeypatch, capsys):
+    _host(monkeypatch, MI325X_CARD, MI355X_CARD)
+
+    cli._resolve_target_gpu(_args(), nodes=1)
+
+    assert gpu_card.session_card() == MI325X_CARD
+    err = capsys.readouterr().err
+    assert err.startswith("WARN:") and "AMD Instinct MI325X" in err and "AMD Instinct MI355X" in err
+
+
+@pytest.mark.parametrize(
+    ("masks", "card"),
+    [
+        ({"ROCR_VISIBLE_DEVICES": "GPU-BBBB"}, MI355X_CARD),
+        ({"ROCR_VISIBLE_DEVICES": "1,0", "HIP_VISIBLE_DEVICES": "1"}, MI325X_CARD),
+        ({"HIP_VISIBLE_DEVICES": "1"}, MI355X_CARD),
+    ],
+    ids=["uuid", "hip-within-rocr", "hip-alone"],
+)
+def test_a_device_mask_names_cards_by_uuid_and_a_hip_mask_picks_among_those_rocr_left(monkeypatch, masks, card):
+    _host(monkeypatch, MI325X_CARD, MI355X_CARD)
+    monkeypatch.setattr(gpu_card, "rocr_uuids", lambda: ["gpu-aaaa", "gpu-bbbb"])
+    for name, value in masks.items():
+        monkeypatch.setenv(name, value)
+
+    cli._resolve_target_gpu(_args(), nodes=1)
+
+    assert gpu_card.session_card() == card
+
+
+@pytest.mark.parametrize("mask", ["5", "GPU-CCCC"])
+def test_a_mask_naming_a_card_the_machine_does_not_have_exits_two(monkeypatch, capsys, mask):
+    _host(monkeypatch, MI325X_CARD, MI355X_CARD)
+    monkeypatch.setattr(gpu_card, "rocr_uuids", lambda: ["gpu-aaaa", "gpu-bbbb"])
+    monkeypatch.setenv("ROCR_VISIBLE_DEVICES", mask)
+
+    with pytest.raises(SystemExit) as exc:
+        cli._resolve_target_gpu(_args(), nodes=1)
+
+    assert exc.value.code == 2
+    assert f"the visible-device mask {mask!r} names a GPU this machine does not have" in capsys.readouterr().err
+
+
+def test_a_card_without_a_model_designation_takes_the_given_name_else_its_arch(monkeypatch, capsys):
+    _host(monkeypatch, replace(MI355X_CARD, name="AMD Radeon Graphics", gfx="gfx1201"))
+
+    cli._resolve_target_gpu(args := _args(), nodes=1)
+    assert args.gpu_type == os.environ["GPU_TYPE"] == "gfx1201"
+
+    cli._resolve_target_gpu(args := _args("--gpu-type", "r9700"), nodes=1)
+    assert args.gpu_type == "r9700"
+    assert "reports no model name" in capsys.readouterr().err
+
+
+def test_the_visible_device_mask_picks_the_cards_by_rocm_number(monkeypatch):
+    _host(monkeypatch, MI325X_CARD, MI355X_CARD)
+    monkeypatch.setenv("ROCR_VISIBLE_DEVICES", "1")
+
+    cli._resolve_target_gpu(_args(), nodes=1)
+
+    assert gpu_card.session_card() == MI355X_CARD
+
+
+def test_a_multi_node_session_reads_a_remote_nodes_cards(monkeypatch):
+    """This host's cards are not the ones the benchmark runs on."""
+    _host(monkeypatch, MI325X_CARD)
+    monkeypatch.setattr(gpu_probe, "remote_cards", lambda: [MI355X_CARD] * 8)
+
+    cli._resolve_target_gpu(args := _args(), nodes=2)
+
+    assert gpu_card.session_card() == MI355X_CARD
+    assert args.gpu_type == "mi355x"
+
+
+def test_a_resume_restores_the_label_and_reads_the_card_again(tmp_path, monkeypatch):
+    """The label is the session's; the facts are the machine's this leg runs on."""
+    _host(monkeypatch, MI355X_CARD)
+    gpu_card.publish_session_card(MI325X_CARD)
+    state = SimpleNamespace(model_path="", framework="vllm", gpu_type="mi350x", nodes=1)
+
+    session_resume._reexport_session_identity(argparse.Namespace(nodes=1), state, tmp_path)
+
+    assert os.environ["GPU_TYPE"] == "mi350x"
+    assert gpu_card.session_card() == MI355X_CARD

@@ -877,7 +877,6 @@ class FrameworkPhase(
             await self._maybe_bench_untested_proposals()
             await self._coord.phase_internal.maybe_enqueue_explore_research_scout()
             await self._coord.phase_internal.maybe_enqueue_config_plateau_static_recon()
-            await self._coord.specialist_dispatch.maybe_force_stalled_domain_specialist()
             await self._coord.specialist_dispatch.ensure_custom_specialist()
             self._record_advisory_plateau()
             # Last, as at entry, so a predictor fault is filed here after the phase's own work has run.

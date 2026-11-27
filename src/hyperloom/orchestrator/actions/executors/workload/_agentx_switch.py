@@ -76,9 +76,7 @@ def geak_metric_axis(
     wins. Every other session is graded on output.
 
     A GEAK build that cannot measure ``e2e_norm_intvty_p50`` refuses it, or, predating
-    that check, falls back to output and records that in ``metric_basis``;
-    ``sweep_via_geak`` rejects a replay recorded on any basis but the one
-    requested.
+    that check, falls back to output and records that in ``metric_basis``.
 
     Args:
         benchmark_mode: The session's persisted mode, when the caller holds one.
@@ -267,7 +265,9 @@ def apply_agentx_switch(
     envs["MLPERF_AGENTIC_FLOW"] = mlperf_flow(envs)
     envs["AGENTIC_NUM_TRAJECTORIES"] = str(mlperf_trajectories(envs))
     envs.setdefault("MLPERF_ENDPOINTS_DIR", os.environ.get("MLPERF_ENDPOINTS_DIR") or "/opt/mlperf-endpoints")
-    envs.setdefault("MLPERF_AGENTIC_HARDWARE", os.environ.get("MLPERF_AGENTIC_HARDWARE") or "mi355x")
+    envs.setdefault(
+        "MLPERF_AGENTIC_HARDWARE", os.environ.get("MLPERF_AGENTIC_HARDWARE") or os.environ.get("GPU_TYPE", "")
+    )
     # The round's CONC is what the measurement is recorded under. A baseline
     # YAML that already carries AGENTIC_CONCURRENCY must not freeze it.
     envs["CONC"] = str(conc or envs.get("CONC") or os.environ.get("CONC") or 16)

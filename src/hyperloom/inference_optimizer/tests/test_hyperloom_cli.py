@@ -47,10 +47,6 @@ def calls(monkeypatch: pytest.MonkeyPatch) -> list[tuple[str, list[str]]]:
             ("hyperloom.inference_optimizer.tools.dump_session_breakdown", ["--session-dir", "s"]),
         ),
         (
-            ["session", "report", "-i", "b.json"],
-            ("hyperloom.inference_optimizer.tools.dump_session_report", ["-i", "b.json"]),
-        ),
-        (
             ["session", "backfill", "--session-dir", "s"],
             ("hyperloom.inference_optimizer.tools.backfill_langfuse", ["--session-dir", "s"]),
         ),

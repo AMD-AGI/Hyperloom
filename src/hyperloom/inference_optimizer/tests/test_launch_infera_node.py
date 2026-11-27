@@ -5,14 +5,21 @@
 
 from __future__ import annotations
 
+import argparse
 import contextlib
+import shlex
 import subprocess
 import sys
 import types
+from dataclasses import replace
 
 import pytest
 
 from hyperloom.inference_optimizer.multi_node import pod_entrypoints
+from inference_suite.multinode.commands import engine_commands
+from inference_suite.multinode.nodes import parse_node_list
+from inference_suite.multinode.record import Frontend, FrontendType, PdSourceKind, Role, RoleLaunch
+from inference_suite.multinode.tests.builders import node_document, pd_launch
 
 
 def _bundle() -> str:
@@ -50,6 +57,22 @@ def test_build_sglang_cmd_uses_infera_engine():
     assert cmd[0:3] == ["python3", "-m", "infera.engine.sglang"]
     assert "--discovery-backend" in cmd and "kubernetes" in cmd
     assert "--advertise-host" in cmd and "10.0.0.2" in cmd
+
+
+def test_pod_launcher_and_pd_launch_build_the_same_infera_engine_command():
+    worker = RoleLaunch(("w0", "w1"), 1, 8, args=("--mem-fraction-static", "0.8", "--enable-dp-attention"))
+    launch = pd_launch({Role.WORKER: worker}, PdSourceKind.OPERATOR, frontend=Frontend(FrontendType.INFERA))
+    nodes = parse_node_list(
+        node_document(mode="aggregated", prefill=None, decode=None, worker=[{"host": "w0"}, {"host": "w1"}])
+    )
+    nodes = replace(nodes, frontend=FrontendType.INFERA, router="")
+    mod = _load_module()
+    args = argparse.Namespace(
+        model=launch.model, tp=8, ep=1, nnodes=2, dist_init_port=5000, extra_args=shlex.join(worker.args)
+    )
+    for command in engine_commands(launch, nodes, Role.WORKER):
+        pod = mod._build_sglang_cmd(args, node_rank=command.rank, leader="w0", advertise_host=command.host)
+        assert shlex.split(command.command) == pod
 
 
 def test_build_vllm_cmd_uses_infera_engine():

@@ -63,7 +63,7 @@ def _knob_tune_block(inp: SpecialistPromptInputs) -> list[str]:
     # Its result is a patch, which a ``--no-source-changes`` session never applies.
     if inp.no_source_changes:
         return []
-    gfx = detect_gfx_arch(os.environ, gpu_type=inp.gpu_type or None, probe=False)
+    gfx = detect_gfx_arch(os.environ)
     declared = any(knob.component == component and gfx in knob.archs for knob in kernel_knobs().values())
     if not declared or not inp.allocated_gpu_ids or inp.mode != MODE_PATCH or not inp.worktree_base:
         return []

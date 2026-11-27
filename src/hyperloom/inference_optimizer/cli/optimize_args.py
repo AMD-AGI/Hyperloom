@@ -10,7 +10,6 @@ import argparse
 from hyperloom.common import predictor_config
 from hyperloom.common.concurrencies import parse_concurrencies
 from hyperloom.common.workload_defaults import DEFAULT_PRECISION
-from hyperloom_common.gpu_identity import AMD_GPU_BOARDS
 
 from .. import framework_registry
 from .backends import CRITIC_PROTOCOL_CHOICES
@@ -22,15 +21,10 @@ def add_gpu_partition_arguments(opt: argparse.ArgumentParser) -> None:
     opt.add_argument(
         "--gpu-type",
         type=str.lower,
-        # Sorted for a stable --help listing, and derived so a board added to the board table is accepted here
-        # without a second edit.
-        choices=sorted(AMD_GPU_BOARDS),
         default=None,
-        help="Hint for the real target GPU. The rocm-smi probe always "
-        "wins when both are present and disagree; a WARN is "
-        "emitted to stderr so the operator sees the typo. Used "
-        "verbatim only when the probe fails (CPU sandbox / no "
-        "rocm-smi).",
+        help="The name this session's results are filed under (recipes, KB rows, reports), e.g. mi355x, for a "
+        "card that reports no model name or cannot be read. A card that names its model is filed under that "
+        "name, and a WARN is printed when the two differ.",
     )
     opt.add_argument(
         "--compute-partition-mode",
@@ -124,6 +118,8 @@ def add_framework_arguments(opt: argparse.ArgumentParser) -> None:
 
 def add_cluster_arguments(opt: argparse.ArgumentParser) -> None:
     """Add the node-count and multi-node backend flags of ``optimize``."""
+    from ..multi_node.pd_session import SSH_BACKENDS
+
     opt.add_argument(
         "--nodes",
         type=int,
@@ -138,12 +134,14 @@ def add_cluster_arguments(opt: argparse.ArgumentParser) -> None:
     )
     opt.add_argument(
         "--mn-backend",
-        choices=("rayjob", "infera"),
+        choices=("rayjob", *SSH_BACKENDS),
         default=None,
         help="Multi-node backend when --nodes>=2: 'rayjob' (default, Ray "
-        "head+workers) or 'infera' (idle InferaDeployment + SSH control "
-        "plane). Defaults to rayjob when omitted. Single-node runs ignore "
-        "this flag.",
+        "head+workers), 'infera' (idle InferaDeployment + SSH control "
+        "plane), or 'atomesh' / 'sglangrouter' (a PD-disaggregated cluster "
+        "handed over as $HYPERLOOM_MN_NODE_LIST, launched over SSH). Defaults "
+        "to the node list's frontend, else rayjob, when omitted. Single-node "
+        "runs ignore this flag.",
     )
     opt.add_argument(
         "--gpus-per-node",

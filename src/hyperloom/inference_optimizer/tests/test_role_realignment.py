@@ -308,8 +308,8 @@ async def test_compose_prompt_keeps_the_session_ledger_out_of_the_context(coordi
 
 
 @pytest.mark.asyncio
-async def test_compose_prompt_keeps_the_denial_and_proposal_blocks_out_of_the_context(coordinator_with_mocks):
-    """A denial lands and a proposal is benched between two ticks; the cached prefix has to survive both."""
+async def test_compose_prompt_keeps_the_proposal_block_out_of_the_context(coordinator_with_mocks):
+    """A proposal is benched between two ticks; the cached prefix has to survive it."""
     from hyperloom.orchestrator.actions.executors._proposal_identity import controls_of, normalize_proposal
     from hyperloom.orchestrator.phases.machine_state import PHASE_FRAMEWORK_AGENT
 
@@ -326,12 +326,6 @@ async def test_compose_prompt_keeps_the_denial_and_proposal_blocks_out_of_the_co
         assert "=== Untested proposals (current cycle) ===" in first.turn
         assert tried["name"] in first.turn
 
-        c.shared_state.record_policy_denial(
-            action_name="explore",
-            rule="phase_gate",
-            hint="wait for the bench slot",
-            intent_type="DISPATCH_TASK",
-        )
         fields = normalize_proposal(tried)
         tested_row = {
             "extra_server_args": fields["extra_args"],
@@ -343,8 +337,6 @@ async def test_compose_prompt_keeps_the_denial_and_proposal_blocks_out_of_the_co
         second = await c.conversation.compose_prompt("orchestration")
 
         assert second.context == first.context
-        assert "=== Recent policy denials" in second.turn
-        assert "=== Recent policy denials" not in second.context
         assert "=== Untested proposals (current cycle) ===" not in second.context
         # The benched proposal left the queue; the prefix above it did not move.
         queue = second.turn.split("=== Untested proposals (current cycle) ===", 1)[1]

@@ -12,25 +12,24 @@ from pathlib import Path
 import pytest
 import yaml
 
-from hyperloom.inference_optimizer import gpu_types
+from hyperloom_common.gpu_card import SESSION_CARD_ENV, GpuCard
 from hyperloom.inference_optimizer.model_config_utils import _fp8_is_per_channel_per_token
 from hyperloom.orchestrator.actions.executors.workload._workload_envs import (
     materialize_config_with_envs,
     BenchmarkTarget,
     LaunchLayer,
 )
+from hyperloom.orchestrator.tests._fixtures import MI325X_CARD, MI355X_CARD, publish_card
 
 from .conftest import write_benchmark_yaml
 
-_AMD = "mi300x"
 _ENV = "SGLANG_USE_AITER_FP8_PER_TOKEN"
 
 
 @pytest.fixture(autouse=True)
 def _hermetic_env(monkeypatch):
-    """Neutralise host GPU autodetect + env so AMD-gating is deterministic."""
-    monkeypatch.delenv("GPU_TYPE", raising=False)
-    monkeypatch.setattr(gpu_types, "_autodetect_gpu_type", lambda: None)
+    """A gfx942 session card and no ambient workload env, so the arch gate is the one under test."""
+    publish_card(monkeypatch, MI325X_CARD)
     for key in (
         "CONC",
         "ISL",
@@ -190,7 +189,6 @@ def _materialize_envs(
     model: str,
     framework: str = "sglang",
     precision: str = "fp8",
-    gpu_type: str | None = _AMD,
     extra_envs: dict | None = None,
 ) -> dict:
     base = tmp_path / "base.yaml"
@@ -201,7 +199,7 @@ def _materialize_envs(
         base,
         out,
         launch=LaunchLayer(extra_envs=extra_envs),
-        target=BenchmarkTarget(model_path=model, gpu_type=gpu_type),
+        target=BenchmarkTarget(model_path=model),
     )
     return yaml.safe_load(materialized.read_text())["benchmark"]["envs"]
 
@@ -222,9 +220,16 @@ def test_materialize_noop_for_non_fp8_precision(tmp_path, fp8_dynamic_model):
     assert _ENV not in envs
 
 
-def test_materialize_noop_on_non_gfx942_gpu(tmp_path, fp8_dynamic_model):
-    # MI355X is gfx950 and ships a different kernel; do not inject.
-    envs = _materialize_envs(tmp_path, model=fp8_dynamic_model, gpu_type="mi355x")
+def test_materialize_noop_on_non_gfx942_gpu(tmp_path, fp8_dynamic_model, monkeypatch):
+    # gfx950 ships a different kernel; do not inject.
+    publish_card(monkeypatch, MI355X_CARD)
+    envs = _materialize_envs(tmp_path, model=fp8_dynamic_model)
+    assert _ENV not in envs
+
+
+def test_materialize_noop_without_a_session_card(tmp_path, fp8_dynamic_model, monkeypatch):
+    monkeypatch.delenv(SESSION_CARD_ENV)
+    envs = _materialize_envs(tmp_path, model=fp8_dynamic_model)
     assert _ENV not in envs
 
 
@@ -266,6 +271,7 @@ def test_materialize_does_not_clobber_operator_value(tmp_path, fp8_dynamic_model
     assert envs.get(_ENV) == "0"
 
 
-def test_materialize_injects_for_gfx942_sibling_mi325x(tmp_path, fp8_dynamic_model):
-    envs = _materialize_envs(tmp_path, model=fp8_dynamic_model, gpu_type="mi325x")
+def test_materialize_gates_on_the_arch_not_the_card_name(tmp_path, fp8_dynamic_model, monkeypatch):
+    publish_card(monkeypatch, GpuCard("AMD Instinct MI300X", "74a1", "gfx942", 304, 196592, 5300.0, 2100))
+    envs = _materialize_envs(tmp_path, model=fp8_dynamic_model)
     assert envs.get(_ENV) == "1"

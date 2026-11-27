@@ -16,6 +16,7 @@ from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
+from hyperloom_common import gpu_card
 from hyperloom_common.llm import llm_config
 from hyperloom_common.env import EnvValueError, env_bool
 from hyperloom.common import agent_isolation
@@ -40,11 +41,6 @@ from .model_gate import (
     _preflight_unsupported_model_arch,
     _start_model_gate,
 )
-from ..gpu_types import (
-    _autodetect_gpu_type,
-    _resolve_amd_gpu_type,
-    _resolve_gpu_type,
-)
 from .benchmark_config import bind_benchmark, configure_benchmark
 from .bootstrap import (
     _emit_launch_info,
@@ -59,14 +55,11 @@ from .bootstrap import (
     latency_budget_scope_error,
     LaunchInfo,
     measurement_state_is_stale,
-    open_plug_host,
     resolve_framework_version,
     resolve_launch_gpu_power,
     resolve_model_display_name,
-    resolve_plug_manifest,
     resolve_session_base,
     resume_gpu_power_settings,
-    running_plug_host,
     SettledLaunch,
     warn_without_target_gpu,
 )
@@ -80,7 +73,6 @@ from .credentials import (
 )
 from .multi_node import (
     _prepare_multi_node_state as _prepare_multi_node_state,
-    _resolve_mn_backend,
 )
 from .model_catalog import (
     _resolve_critic_choice,
@@ -137,7 +129,6 @@ from .parser import (
 )
 from .install_event import _mark_pending_install_event_failed, _persist_install_event
 from .preflight import (
-    _check_gfx_arch_resolvable,
     _preflight as _preflight,
 )
 from .session_resume import (
@@ -156,9 +147,11 @@ from .session_setup import (
     _enforce_expected_framework,
     _export_partition_shape,
     _publish_gpu_power_settings,
+    read_session_card,
     _registered_framework_or_exit,
     _require_custom_entrypoint,
     _restore_partition_shape_from_state,
+    _session_label,
     _SessionStart,
     PartitionRequest,
 )
@@ -448,23 +441,12 @@ def _start_experience_kb() -> None:
         log.warning("Experience KB cannot take this run's Experiences (%s); the run continues without them", exc)
 
 
-def _resolve_target_gpu(args: argparse.Namespace, framework: str) -> None:
-    """Settle ``args.gpu_type``, then refuse a board this session cannot serve."""
-    # Resolve real target GPU: probe > --gpu-type hint; probe wins to catch wrong-host typos that corrupt KB.
-    user_specified = _resolve_amd_gpu_type(args.gpu_type) or ""
-    if int(args.nodes) >= 2:
-        from ..multi_node._internal.gpu_probe import remote_autodetect_gpu_type
-
-        probed = remote_autodetect_gpu_type() or ""
-        if probed:
-            print(f"GPU probe       : {probed} (remote {_resolve_mn_backend(args)})")
-    else:
-        probed = _autodetect_gpu_type() or ""
-    gpu_type, gpu_warnings = _resolve_gpu_type(user_specified=user_specified, probed=probed)
-    for line in gpu_warnings:
-        print(line, file=sys.stderr)
-    if probed and not user_specified:
-        print(f"GPU type        : {gpu_type} (auto-detected)")
+def _resolve_target_gpu(args: argparse.Namespace, *, nodes: int) -> None:
+    """Read the session's card and publish it, then settle ``args.gpu_type`` and export it as ``GPU_TYPE``."""
+    card = read_session_card(nodes)
+    gpu_card.publish_session_card(card)
+    given = args.gpu_type or os.environ.get("TARGET_GPU_TYPE") or os.environ.get("GPU_TYPE") or ""
+    gpu_type = _session_label(given.strip().lower(), card)
     args.gpu_type = gpu_type or None
     if gpu_type:
         os.environ["TARGET_GPU_TYPE"] = os.environ["GPU_TYPE"] = gpu_type
@@ -473,11 +455,6 @@ def _resolve_target_gpu(args: argparse.Namespace, framework: str) -> None:
         os.environ.pop("TARGET_GPU_TYPE", None)
         os.environ.pop("GPU_TYPE", None)
         print("GPU type        : <unset>")
-    _require_custom_entrypoint(framework, gpu_type=gpu_type)
-
-    # Runs here, not in _preflight, because the question it asks -- will provenance be able to name the ISA? -- is
-    # unanswerable until args.gpu_type is final.
-    _check_gfx_arch_resolvable(args.gpu_type)
 
 
 def _create_fresh_session(args: argparse.Namespace, *, framework: str, nodes_resolved: int) -> _SessionStart:
@@ -513,13 +490,12 @@ def _create_fresh_session(args: argparse.Namespace, *, framework: str, nodes_res
     )
     _emit_launch_info(info, launch_info_file=getattr(args, "launch_info_file", None))
     # Placed here, not at the top of _run_optimize, because everything it weighs is resolved by now and none of it
-    # was then: the framework (whether anything fans out), args.gpu_type (the CU fallback), and args.model, which
-    # --quantize rewrites to the exported checkpoint -- sizing partitions against the source model would weigh the
-    # wrong weights.
+    # was then: the framework (whether anything fans out), the session card (the partition size), and args.model,
+    # which --quantize rewrites to the exported checkpoint -- sizing partitions against the source model would weigh
+    # the wrong weights.
     compute_partition = _export_partition_shape(
         PartitionRequest(getattr(args, "compute_partition_mode", None), getattr(args, "streams_per_partition", None)),
         framework=framework,
-        gpu_type=args.gpu_type,
         nodes=nodes_resolved,
         model=PartitionModel(str(args.model), getattr(args, "precision", None)),
     )
@@ -558,7 +534,6 @@ def _restore_platform_state(args: argparse.Namespace, state: SharedState, sessio
     state.compute_partition = _export_partition_shape(
         PartitionRequest(getattr(args, "compute_partition_mode", None), getattr(args, "streams_per_partition", None)),
         framework=state.framework or getattr(args, "framework", None),
-        gpu_type=os.environ.get("GPU_TYPE") or state.gpu_type,
         # A resume must re-pass --nodes, so the persisted count is the one that says whether this session was ever
         # multi-node.
         nodes=max(int(getattr(args, "nodes", 1) or 1), int(getattr(state, "nodes", 1) or 1)),
@@ -624,7 +599,7 @@ async def _resume_session(args: argparse.Namespace) -> _SessionStart:
         session_id=str(session.manifest.get("session_id") or ""),
         launch_shape=_OperatorLaunchShape(server_args=_resume_server_args, extra_env=_resume_extra_env),
     )
-    # After the re-export, not before: both read the GPU_TYPE and the framework it put back.
+    # After the re-export, not before: both read the card and the framework it put back.
     _restore_platform_state(args, state, session.session_lock)
     _restore_phase_toggles(args, state, session_dir)
     _open_next_leg(args, state, session)
@@ -646,6 +621,8 @@ async def _seed_fresh_session(args: argparse.Namespace, *, nodes_resolved: int) 
     from hyperloom.common.model_paths import resolve_serving_model_path
 
     os.environ["MODEL_PATH"] = resolve_serving_model_path(str(args.model)) or str(args.model)
+    # Before the quantization prelude, which offers a scheme only where the card's arch supports it.
+    _resolve_target_gpu(args, nodes=nodes_resolved)
 
     # Quantization prelude (one-shot, before any session/baseline work): if --quantize was passed, quantize the
     # source model now and rewrite args.model to the exported quantized model.
@@ -662,7 +639,7 @@ async def _seed_fresh_session(args: argparse.Namespace, *, nodes_resolved: int) 
     _apply_operator_supplied_paths(args, framework)
     if framework == "atom":
         _apply_atom_auto_tighten(args)
-    _resolve_target_gpu(args, framework)
+    _require_custom_entrypoint(framework, gpu_type=args.gpu_type)
 
     # ISL/OSL/CONC/TP/EP were settled and projected before _preflight; precision could not be, because it reads
     # the checkpoint and the model is only resolved above (issue #903).
@@ -917,7 +894,7 @@ async def _open_knowledge_plane(
 
     bind_state_file_to_session(session_dir)
     if nodes_resolved >= 2:
-        await asyncio.to_thread(_prepare_multi_node_state, args)
+        await asyncio.to_thread(_prepare_multi_node_state, args, session_dir)
     return knowledge_plane
 
 
@@ -1000,7 +977,6 @@ def _run_options(args: argparse.Namespace) -> RunOptions:
 
 async def _run_optimize(args: argparse.Namespace) -> int:
     """Run the ``optimize`` subcommand end to end."""
-    plug_manifest = resolve_plug_manifest(args)  # first: a refused flag must leave any session as it was
     nodes_resolved = _resolve_run_topology(args)
     _settle_custom_specialist_only(args)
     intent = await _prepare_run(args)
@@ -1015,7 +991,6 @@ async def _run_optimize(args: argparse.Namespace) -> int:
     session_dir = session.session_dir
     session_lock = session.session_lock
     manifest = session.manifest
-    plug_host = open_plug_host(plug_manifest, session_dir)
 
     # Recipe KB T0 anchor (after seed/restore for recipe_canonical_id, before Coordinator); skipped when --degraded-kb.
     recipe_kb_client = _bootstrap_recipe_kb(
@@ -1052,11 +1027,10 @@ async def _run_optimize(args: argparse.Namespace) -> int:
 
     stop_reason: str | None = None
     try:
-        with running_plug_host(plug_host):
-            stop_reason = await coordinator.run(
-                objective=objective,
-                options=_run_options(args),
-            )
+        stop_reason = await coordinator.run(
+            objective=objective,
+            options=_run_options(args),
+        )
     finally:
         await _close_optimize_run(coordinator, session_lock, session_dir, stop_reason)
 

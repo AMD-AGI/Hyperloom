@@ -47,7 +47,6 @@ from inference_suite.recipe.model import (
     VLLM_ENTRYPOINT,
     VLLM_RUNNER_OWNED,
     adaptive_verification_reason,
-    boards_interchangeable,
 )
 
 INFERENCEX_REPO = "https://github.com/SemiAnalysisAI/InferenceX"
@@ -527,17 +526,14 @@ def agentx_trace(bundle: RepoBundle, models: Sequence[str]) -> str:
     return _UNCAPPED_TRACE
 
 
-def _warnings(point: InferencexPoint, query: LaunchQuery, target: int) -> tuple[str, ...]:
-    warnings = []
-    if point.conc != target:
-        warnings.append(f"InferenceX has no point at concurrency {target} in {point.arm_key}; took {point.conc}")
-    if point.board != query.board:
-        warnings.append(f"InferenceX tuned {point.entry} on {point.board}, not {query.board}")
-    return tuple(warnings)
+def _warnings(point: InferencexPoint, target: int) -> tuple[str, ...]:
+    if point.conc == target:
+        return ()
+    return (f"InferenceX has no point at concurrency {target} in {point.arm_key}; took {point.conc}",)
 
 
 def _launch(
-    point: InferencexPoint, query: LaunchQuery, snapshot: InferencexSnapshot, target: int, arm_concs: tuple[int, ...]
+    point: InferencexPoint, snapshot: InferencexSnapshot, target: int, arm_concs: tuple[int, ...]
 ) -> SourceLaunch | str:
     """The launch ``point`` binds, carrying ``arm_concs``, the concurrencies of its arm, or why this source cannot
     reproduce it."""
@@ -583,18 +579,18 @@ def _launch(
         golden=_golden(point, selection, bundle, engine, command.args),
         kv_offloading=point.kv_offloading or UNSET,
         stripped=command.stripped,
-        warnings=_warnings(point, query, target),
+        warnings=_warnings(point, target),
         source_concs=arm_concs,
     )
 
 
 def _arm_launches(
-    points: Sequence[InferencexPoint], query: LaunchQuery, snapshot: InferencexSnapshot, concs: tuple[int, ...]
+    points: Sequence[InferencexPoint], snapshot: InferencexSnapshot, concs: tuple[int, ...]
 ) -> tuple[SourceLaunch, ...]:
     """The launch every point of an arm binds at its own concurrency, ascending, one per concurrency an arm lists more
     than once; a point InferenceX refused or this source cannot reproduce is left out."""
     by_conc = {point.conc: point for point in points}
-    launches = (_launch(by_conc[conc], query, snapshot, conc, concs) for conc in sorted(by_conc))
+    launches = (_launch(by_conc[conc], snapshot, conc, concs) for conc in sorted(by_conc))
     return tuple(launch for launch in launches if not isinstance(launch, str))
 
 
@@ -674,7 +670,7 @@ def org_models_named(name: str, masters: Sequence[Mapping[str, Any]]) -> list[st
 
 
 def served_points(query: LaunchQuery, bundle: RepoBundle) -> ServedPoints:
-    """The points of ``bundle`` that serve ``query``'s model with its framework on a board interchangeable with its own:
+    """The points of ``bundle`` that serve ``query``'s model with its framework on its board:
     every point a snapshot must record InferenceX's selection for to answer ``query``.
 
     Only the entries of that model and framework are read, so one InferenceX cannot place does not stop the others.
@@ -690,7 +686,7 @@ def served_points(query: LaunchQuery, bundle: RepoBundle) -> ServedPoints:
         except (RecipeSourceError, KeyError) as error:
             unread[name] = f"InferenceX's config does not place it: {error}"
             continue
-        points += [point for point in placed if boards_interchangeable(query.board, point.board)]
+        points += [point for point in placed if point.board == query.board]
     return ServedPoints(tuple(points), unread)
 
 
@@ -717,12 +713,12 @@ def inferencex_launches(query: LaunchQuery, snapshot: InferencexSnapshot) -> tup
         launch = (
             f"it has no point at concurrency {target} or above"
             if point is None
-            else _launch(point, query, snapshot, target, concs)
+            else _launch(point, snapshot, target, concs)
         )
         if isinstance(launch, str):
             reasons[arm_key] = launch
         else:
-            launches.append(replace(launch, source_launches=_arm_launches(points, query, snapshot, concs)))
+            launches.append(replace(launch, source_launches=_arm_launches(points, snapshot, concs)))
     if launches:
         return tuple(launches)
     return SourceMiss(SourceKind.INFERENCEX, "; ".join(f"{arm}: {reason}" for arm, reason in sorted(reasons.items())))

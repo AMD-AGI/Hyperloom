@@ -25,14 +25,17 @@ The session directory is created under `USER_DATA_PATH` and its path is printed 
 ## Environment
 
 Every variable below is checked before anything is created: a missing or malformed one fails the command with no
-session directory left behind. One step runs later, in the new session before PRELUDE: on a local session the publish
-of the inference_suite staging into the runner cache, which fails the command (exit 1) with the session directory left
-behind when that directory cannot be written.
+session directory left behind. Two steps run later, in the new session before PRELUDE: the read of
+the session's card (from the machine, or the recording `HYPERLOOM_RUNNER_GPU_CARD` names with `--measurement
+hosted`), which fails the command (exit 1) with the session directory left behind when the cards cannot be described
+or are not one kind; and on a local session the publish of the inference_suite staging into the runner cache, which
+fails it the same way when that directory cannot be written.
 
 | Variable | Required | Meaning |
 | --- | --- | --- |
 | `HYPERLOOM_RSI_ARCHIVE` | yes | Writable shared directory the session reads its predecessors from and archives its search tree in. No default. |
 | `HYPERLOOM_RUNNER_CACHE` | with `--measurement hosted` | This host's runner cache directory, which holds the inference_suite staging every test runs. Hosted: an absolute path on storage the measurement sandboxes mount, no default. Local: `/runner-cache` when unset, and it must be writable. |
+| `HYPERLOOM_RUNNER_GPU_CARD` | with `--measurement hosted` | A recording of `amd-smi static --json` on a node the measurement sandboxes run on, which the session takes its card from (see `--gpu-type` below and [Run hosted multi-branch on a new cluster](hosted-multibranch-new-cluster.md#app-host)). Read in the new session, as said above. A local session reads its own cards and ignores it. |
 | `INFERENCE_SUITE_TOOL_CACHE` | no | The tool cache `install.sh` staged the pinned InferenceX client in, which every test runs. Default `inference-suite-tools` under the dependency cache. Without a staging there that verifies, the command fails, naming `python -m inference_suite stage --tool-cache <dir>`. |
 | `KB_STORE_URL`, `KB_STORE_TOKEN` | no | Both set: PRELUDE reads warm-start leads from the Recipe KB and CLOSE writes the final recipe back. Neither set: no Recipe KB. Only one set is refused. |
 | `HYPERLOOM_KB_URL`, `HYPERLOOM_KB_TOKEN` | no | The Experience KB: the workspace's loopback service, whose URL and token `hyperloom-setup` writes into the workspace `.env`. Export them as the other variables here: `hyperloom-multibranch` reads no `.env`. Set: the briefs and the learnings tool recall past sessions' tests and learnings from it, and CLOSE writes this session's there; what the service does not take waits in the spool beside its data. A loopback service that is not serving is started before the session and left serving after it; one serving with other settings is not restarted. A service that cannot start, or a URL without its token, logs a warning and the session runs without it. Unset: no Experience KB. |
@@ -153,6 +156,13 @@ host has no token. The session logs one WARNING when its toolbox is built. Every
   `--boot-budget-sec` (see **Boot budget** below);
   `--inferencex-commit SHA` to resolve the session's base launch from InferenceX at that commit instead of `main`
   (see [Base launch](../reference/inference-suite.md#base-launch)).
+- **GPU type and card:** `--gpu-type` is the label the session files its results under (recipes, the Recipe KB, the
+  TraceLens arch spec the analyses read), in any case; any name is accepted. The facts come from the card itself: when
+  the session starts it reads the cards it measures on (`amd-smi`, else `rocm-smi`, else torch; in a hosted session,
+  the recording `HYPERLOOM_RUNNER_GPU_CARD` names) and every test's base launch, roofline and measurement sheet follow
+  that card's arch, compute units, memory and clocks. Cards of more than one kind, or cards no probe describes, refuse the
+  session before PRELUDE (exit 1), naming each kind. A `--gpu-type` other than the card's own label (`mi355x` for an
+  AMD Instinct MI355X) is kept and logged as a warning that names both.
 - **AgentX objective:** `--agentx-objective p50_interactivity|total_token_throughput` (default
   `p50_interactivity`) names the round metric an AgentX session keeps on: `e2e_norm_intvty_p50`, or
   `total_token_throughput` (per server; a session's TP is fixed, so it ranks changes as the per-GPU figure does). A
@@ -183,10 +193,7 @@ host has no token. The session logs one WARNING when its toolbox is built. Every
   `--max-branches` (default 4). A negative or non-finite limit is a usage error.
 - **Concurrency:** `--max-parallel-tests` (default: as many as fit at TP), `--max-k-per-branch` (default 2; a
   specialist's branch only, the integration branch's K is bounded by `--max-parallel-tests`),
-  `--dev-leases`, `--judge-interval-sec` (default 600, must be positive), `--measurement local|hosted`,
-  `--[no-]make-before-break` (hosted only, default on: where the grant fits at least three tests at TP, a finished
-  test's sandbox is kept until the next test's runs, so that the cluster does not give its node to another job, and one
-  test fewer runs at once; off runs every test the grant fits).
+  `--dev-leases`, `--judge-interval-sec` (default 600, must be positive), `--measurement local|hosted`.
 - **Concurrency sweep:** `--[no-]enable-conc-sweep` (on by default), `--conc-sweep-concs C1,C2,...` and
   `--conc-sweep-parallel N` (see [Concurrency sweep after CLOSE](#concurrency-sweep-after-close)).
 - **Directions:** `--specialist-prompt FILE` and `--reference NAME=DIR`, each repeatable.

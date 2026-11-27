@@ -15,7 +15,9 @@ from types import SimpleNamespace
 
 import pytest
 
+from hyperloom.inference_optimizer.protocol.action_surfaces import COORDINATOR_INTERNAL_ACTIONS
 from hyperloom.orchestrator.loop.dispatcher import DispatcherCollaborator
+from hyperloom.orchestrator.phases.machine_state import PHASE_NAMES
 from hyperloom.orchestrator.policy.denial import PolicyDenied
 from hyperloom.orchestrator.state.shared_state import SharedState
 
@@ -103,9 +105,21 @@ def test_enablement_keeps_its_baseline_for_the_coordinator():
     assert denied.hint == "ENABLEMENT proposes: target_analysis"
 
 
-@pytest.mark.parametrize("action", ["baseline", "explore", "specialist"])
-def test_no_phase_entered_yet_holds_nothing_to_a_contract(action: str):
-    """Before the phase machine enters PRELUDE there is no phase whose contract could apply."""
-    admission = _dispatcher("").admission_denial_for_action(action, params=_PARAMS_BEYOND_THE_PHASE.get(action))
+def test_no_phase_entered_yet_proposes_nothing():
+    """A session with no phase has no contract that offers an action."""
+    denied = _dispatcher("").admission_denial_for_action("baseline")
 
-    assert admission is None
+    assert denied is not None and denied.rule == "phase_incompatible"
+
+
+@pytest.mark.parametrize("phase", PHASE_NAMES)
+@pytest.mark.parametrize(
+    "action",
+    [*sorted(COORDINATOR_INTERNAL_ACTIONS), "gemm_tuning", "WebSearch", "mcp__pr_monitor__pr_list"],
+)
+def test_no_phase_offers_a_coordinator_run_action_or_a_tool_name(phase: str, action: str):
+    """The phase table is the one list of what an agent may propose or delegate: a Coordinator-managed action, the
+    GEMM tuning lane and a tool name are in none of its rows."""
+    denied = _dispatcher(phase).admission_denial_for_action(action)
+
+    assert denied is not None and denied.rule == "phase_incompatible"

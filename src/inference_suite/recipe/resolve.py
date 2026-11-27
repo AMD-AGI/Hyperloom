@@ -26,7 +26,6 @@ from typing import TypeVar
 
 from hyperloom_common.contract_fields import ContractFields
 from hyperloom_common.credential_names import is_credential_env_name
-from hyperloom_common.gpu_identity import AMD_GPU_BOARDS
 from inference_suite.argv import (
     SPECULATIVE_CONFIG_FLAG,
     SPECULATIVE_CONFIG_KEY_PREFIX,
@@ -55,7 +54,7 @@ from inference_suite.contracts.base_launch import (
 from inference_suite.golden import GOLDEN_OWNED_ENV_PREFIXES, GOLDEN_OWNED_SPEC_CONFIG_KEYS, is_golden_owned_flag
 from inference_suite.pins import INFERENCEX_CLIENT_COMMIT, INFERENCEX_TOOL
 from inference_suite.recipe.atom_catalog import atom_catalog_launches
-from inference_suite.recipe.defaults import TABLE_PATH, default_table
+from inference_suite.recipe.defaults import TABLE_PATH, DefaultRow, default_table
 from inference_suite.recipe.golden_curve import GoldenLength, GoldenTable, launch_draft, with_golden
 from inference_suite.recipe.image_version import NO_RECIPE_IMAGE, recipe_image_facts
 from inference_suite.recipe.inferencex import AGENTX_TRACE_ENV, agentx_trace, inferencex_launches
@@ -78,7 +77,6 @@ from inference_suite.recipe.model import (
     SourceGolden,
     SourceLaunch,
     SourceMiss,
-    boards_interchangeable,
 )
 from inference_suite.recipe.sglang_cookbook import sglang_cookbook_launches
 from inference_suite.recipe.user_file import UserFile
@@ -424,10 +422,17 @@ def _recipe_base(
     )
 
 
+def _same_card(first: LaunchQuery, second: LaunchQuery) -> bool:
+    """Whether both queries record the arch and memory size of their card, and they are the same."""
+    recorded = (first.gfx, first.memory_mib)
+    return None not in recorded and recorded == (second.gfx, second.memory_mib)
+
+
 def _rebound(query: LaunchQuery, frozen: BaseLaunch, location: str) -> str | None:
     """Why the base frozen in ``location`` cannot serve ``query``: it was resolved for another model, workload,
-    framework or a board not interchangeable with the query's. A base resolved for a checkpoint named by its directory
-    names the model by the id its sources were read by, and serves that directory, which its query keeps."""
+    framework, or another board unless both queries record the same arch and memory size. A base resolved for a
+    checkpoint named by its directory names the model by the id its sources were read by, and serves that directory,
+    which its query keeps."""
     for what, was, asked in (
         ("model", frozen.model.id, query.model_id),
         ("workload", frozen.query.workload.value, query.workload.value),
@@ -436,7 +441,7 @@ def _rebound(query: LaunchQuery, frozen: BaseLaunch, location: str) -> str | Non
     ):
         if what == "model" and asked == frozen.query.model_id:
             continue
-        if was != asked and not (what == "board" and boards_interchangeable(asked, was)):
+        if was != asked and not (what == "board" and _same_card(frozen.query, query)):
             return f"{location} was resolved for {what} {was!r}, but the session asks for {asked!r}"
     return None
 
@@ -486,11 +491,9 @@ def _user_file_base(query: LaunchQuery, snapshot: SourceSnapshot, user_file: Use
 
 def _default_base(query: LaunchQuery, snapshot: SourceSnapshot, misses: tuple[SourceMiss, ...]) -> BaseLaunch | Miss:
     """The default table's launch for a fixed ``query`` no recipe serves, or why the table has none."""
-    board = AMD_GPU_BOARDS.get(query.board)
-    row = None if board is None else default_table().row(query.framework, board.gfx)
-    if board is None or row is None:
-        named = query.board if board is None else f"{query.board} ({board.gfx})"
-        missing = SourceMiss(SourceKind.DEFAULT_TABLE, f"it has no {query.framework} row for {named}")
+    row = default_table().row(query.framework, query.gfx)
+    if row is None:
+        missing = SourceMiss(SourceKind.DEFAULT_TABLE, f"it has no {query.framework} row")
         return Miss((*misses, missing), snapshot.unread)
     topology = Topology(tp=query.tp or 1, ep=query.ep or 1)
     topology_args = _TOPOLOGY[query.framework].argv(topology)
@@ -512,10 +515,7 @@ def _default_base(query: LaunchQuery, snapshot: SourceSnapshot, misses: tuple[So
         client=_client({}),
         resolved_unix=snapshot.fetched_unix,
         runner_owned=_runner_owned(query.framework),
-        warnings=(
-            *_miss_warnings(misses),
-            f"{_why_default(query, snapshot)}; the default {query.framework} launch for {board.gfx} runs it",
-        ),
+        warnings=(*_miss_warnings(misses), f"{_why_default(query, snapshot)}; {_default_row_note(query, row)}"),
         upstream=_upstream(snapshot),
     )
 
@@ -535,6 +535,14 @@ def _fitted(
         return found
     oversized = SourceMiss(kind, f"its launch needs {found.cards} GPUs, more than the {gpus} here")
     return Miss((*misses, oversized), unread)
+
+
+def _default_row_note(query: LaunchQuery, row: DefaultRow) -> str:
+    if row.gfx:
+        return f"the default {query.framework} launch for {query.gfx} runs it"
+    if query.gfx is None:
+        return f"the GPU's architecture is unknown, so the {query.framework} fallback launch, tuned for none, runs it"
+    return f"the default table has no {query.framework} launch tuned for {query.gfx}, so its fallback launch runs it"
 
 
 def _why_default(query: LaunchQuery, snapshot: SourceSnapshot) -> str:

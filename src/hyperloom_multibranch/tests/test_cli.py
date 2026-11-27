@@ -42,7 +42,10 @@ from typing import NoReturn
 import pytest
 
 from hyperloom.common.benchmark_config import BENCHMARK_CONFIG_ENV
+from hyperloom.orchestrator.tests._fixtures import MI355X_CARD
 from hyperloom_common import bwrap as bwrap_module
+from hyperloom_common import gpu_card
+from hyperloom_common.gpu_card import SESSION_CARD_ENV
 from hyperloom_common.bwrap import BwrapProbe
 from hyperloom_common.shared_storage import current_umask
 from hyperloom.common import agent_isolation, visible_devices
@@ -229,37 +232,15 @@ def test_a_gpu_type_names_the_same_board_in_any_case() -> None:
     assert _settings("--gpu-type", "MI355X").workload.gpu_type == "mi355x"
 
 
-def test_a_session_runs_on_mi325x() -> None:
-    assert _settings("--gpu-type", "MI325X").workload.gpu_type == "mi325x"
+@pytest.mark.parametrize("given", ["MI325X", "MI308X", "R9700", "radeon8060s"])
+def test_a_session_runs_under_any_gpu_type_it_is_given(given: str) -> None:
+    assert _settings("--gpu-type", given).workload.gpu_type == given.lower()
 
 
 def test_a_llamacpp_session_runs_on_w7900d() -> None:
     workload = _settings("--gpu-type", "W7900D", "--framework", "llamacpp").workload
 
     assert (workload.gpu_type, workload.framework) == ("w7900d", "llamacpp")
-
-
-def test_an_unknown_gpu_type_is_refused_naming_the_types_a_session_runs_on(capsys: pytest.CaptureFixture[str]) -> None:
-    with pytest.raises(SystemExit) as exc:
-        cli.main(["run", *WORKLOAD_ARGS, "--gpu-type", "MI308X"])
-
-    assert exc.value.code == cli.EXIT_USAGE
-    err = capsys.readouterr().err
-    assert "invalid choice: 'mi308x'" in err
-    # argparse quotes the choices before Python 3.12.8 and lists them bare from it on.
-    assert "(choose from mi300x, mi325x, mi350x, mi355x, r9700, w7900d)" in err.replace("'", "")
-
-
-@pytest.mark.parametrize("board", ["r9700", "W7900D"])
-@pytest.mark.parametrize("framework", ["vllm", "sglang"])
-def test_a_board_of_llamacpp_alone_is_refused_for_another_framework(
-    board: str, framework: str, capsys: pytest.CaptureFixture[str]
-) -> None:
-    with pytest.raises(SystemExit) as exc:
-        cli.main(["run", *WORKLOAD_ARGS, "--gpu-type", board, "--framework", framework])
-
-    assert exc.value.code == cli.EXIT_USAGE
-    assert f"error: --gpu-type {board.lower()} is taken only with --framework llamacpp" in capsys.readouterr().err
 
 
 def test_an_agentx_run_has_no_sequence_lengths_and_is_graded_on_p50_interactivity_at_its_conc_alone() -> None:
@@ -420,8 +401,6 @@ def test_parallel_tests_default_fills_the_machine() -> None:
         ["run", *WORKLOAD_ARGS, "--agent-share-minutes", "inf"],
         ["run", *WORKLOAD_ARGS, "--conc", "many"],
         ["run", *WORKLOAD_ARGS[:-2]],
-        ["run", *WORKLOAD_ARGS, "--gpu-type", "h100"],
-        ["run", *WORKLOAD_ARGS, "--gpu-type", "mi308x"],
         ["run", *WORKLOAD_ARGS, "--kernel-optimizer", "triton"],
         ["run", *_without(WORKLOAD_ARGS, "--workload")],
         ["run", *WORKLOAD_ARGS, "--workload", "sharegpt"],
@@ -774,12 +753,6 @@ def test_an_agent_directions_map_without_an_agent_or_directions_is_a_usage_error
         _settings(*agents, "--agent-directions", str(path))
 
 
-def test_make_before_break_is_on_unless_the_command_line_turns_it_off() -> None:
-    assert _settings().make_before_break is True
-    assert _settings("--make-before-break").make_before_break is True
-    assert _settings("--no-make-before-break").make_before_break is False
-
-
 def test_dev_leases_lend_specialists_dev_sandboxes_and_default_to_none() -> None:
     assert _settings().dev_leases == 0
     assert _settings("--dev-leases", "2").dev_leases == 2
@@ -931,8 +904,11 @@ def test_a_benchmark_yaml_the_operator_names_exits_two(
 def ready_environment(monkeypatch: pytest.MonkeyPatch, tmp_path_factory: pytest.TempPathFactory) -> None:
     """No Experience KB, no Recipe KB, the launcher's image named, the InferenceX client staged in the application's
     tool cache, a model the price sheet lists, a writable RSI archive outside the test's workspace, the framework's
-    package installed in the image, and the workloads' checkpoints under ``HL_MODEL_BASE``."""
+    package installed in the image, the workloads' checkpoints under ``HL_MODEL_BASE``, and eight MI355Xs on this
+    machine, whose card the session publishes and leaves unpublished afterwards."""
 
+    monkeypatch.setattr(gpu_card, "read_cards", lambda: [MI355X_CARD] * 8)
+    monkeypatch.setenv(SESSION_CARD_ENV, "")
     for name in ("HYPERLOOM_KB_URL", "HYPERLOOM_KB_TOKEN"):
         monkeypatch.delenv(name, raising=False)
     for name, value in zip(IMAGE_VARS, IMAGE):
@@ -2087,7 +2063,7 @@ def _no_local_cards() -> tuple[int, ...]:
     raise AssertionError("a hosted run measures on the grant's cards, not this container's")
 
 
-@pytest.mark.parametrize(("max_sandboxes", "tests"), [(8, 3), (3, 2)])
+@pytest.mark.parametrize(("max_sandboxes", "tests"), [(8, 4), (3, 3)])
 @pytest.mark.usefixtures("ready_environment")
 def test_a_hosted_session_runs_as_many_tests_at_once_as_the_grant_has_cards_and_sandboxes_for(
     max_sandboxes: int, tests: int, host: Host, agent_cli: list[RunSettings], monkeypatch: pytest.MonkeyPatch
@@ -2099,30 +2075,7 @@ def test_a_hosted_session_runs_as_many_tests_at_once_as_the_grant_has_cards_and_
     assert cli.main(["hosted", "run"]) == 0
 
     [settings] = agent_cli
-    assert settings.caps.max_parallel_tests == tests, (
-        "TP=2 on 8 GPUs, at most one test per sandbox, and one test's room kept for the sandbox handed to the next test"
-    )
-
-
-@pytest.mark.parametrize(("given", "keep", "tests"), [({}, True, 3), ({"make_before_break": False}, False, 4)])
-@pytest.mark.usefixtures("ready_environment")
-def test_the_spec_turns_make_before_break_off_and_the_session_runs_every_test_the_grant_fits(
-    given: dict[str, bool],
-    keep: bool,
-    tests: int,
-    host: Host,
-    agent_cli: list[RunSettings],
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    monkeypatch.setattr(local_peers, "machine_cards", _no_local_cards)
-    monkeypatch.setenv("HYPERLOOM_GRANT_LIMITS", json.dumps({**GRANT, "max_gpus": 8, "max_sandboxes": 8}))
-    host.spec(placement={"profile": "hosted-gpu"}, multibranch={**SPEC["multibranch"], **given})
-
-    assert cli.main(["hosted", "run"]) == 0
-
-    [settings] = agent_cli
-    assert settings.make_before_break is keep
-    assert settings.caps.max_parallel_tests == tests, "TP=2 on 8 GPUs: four fit, one's room kept only when it is on"
+    assert settings.caps.max_parallel_tests == tests, "TP=2 on 8 GPUs, at most one test per sandbox"
 
 
 @pytest.mark.usefixtures("ready_environment")
@@ -3084,21 +3037,12 @@ def test_a_hosted_run_measures_in_the_sandboxes_of_the_grant_handed_to_it(handed
         None,
     )
     assert host.sandbox_keys.measurement.reveal() == HANDED["HYPERLOOM_SANDBOX_KEY_MEASUREMENT"]
-    assert settings.caps.max_parallel_tests == 2, "TP=2 on 8 GPUs and 3 sandboxes, one test's room kept for a handover"
-    on_two_tests = cli_options.settings_from(
-        cli_options.build_parser().parse_args(["run", *WORKLOAD_ARGS]), lambda tp: 2
+    assert settings.caps.max_parallel_tests == 3, "TP=2 on 8 GPUs and 3 sandboxes"
+    on_three_tests = cli_options.settings_from(
+        cli_options.build_parser().parse_args(["run", *WORKLOAD_ARGS]), lambda tp: 3
     )
-    assert settings == replace(on_two_tests, max_hours=settings.max_hours), "the flags give the workload"
+    assert settings == replace(on_three_tests, max_hours=settings.max_hours), "the flags give the workload"
     assert "HYPERLOOM_SANDBOX_KEY_MEASUREMENT" not in os.environ, "no child process inherits a grant key"
-
-
-@pytest.mark.usefixtures("ready_environment")
-def test_a_hosted_run_without_make_before_break_runs_every_test_the_handed_grant_fits(handed: Started) -> None:
-    assert cli.main(["run", *WORKLOAD_ARGS, "--measurement", "hosted", "--no-make-before-break"]) == 0
-
-    [(settings, _)] = handed.sessions
-    assert settings.make_before_break is False
-    assert settings.caps.max_parallel_tests == 3, "TP=2 on 8 GPUs and 3 sandboxes, no room kept"
 
 
 @pytest.mark.usefixtures("ready_environment")

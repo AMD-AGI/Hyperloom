@@ -17,14 +17,13 @@ log = logging.getLogger(__name__)
 def _scriptable_runner_type(bench: dict[str, Any], gpu_type: str | None) -> str:
     """Resolve the runner suffix a scriptable entrypoint is named after.
 
-    Framework-independent: the suffix names the machine, not the workload.
+    Framework-independent: the suffix names the machine, not the workload. Empty when nothing names the machine.
     """
     return (
         str(gpu_type or "").strip().lower()
         or str(bench.get("runner_type") or "").strip().lower()
         or os.environ.get("GPU_TYPE", "").strip().lower()
         or os.environ.get("RUNNER_TYPE", "").strip().lower()
-        or "mi355x"
     )
 
 

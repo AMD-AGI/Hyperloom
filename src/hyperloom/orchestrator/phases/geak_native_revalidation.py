@@ -189,7 +189,7 @@ def _finish(coord: Any, record: dict[str, Any], *, status: str, error: str = "",
 
 
 def finish_invalid_source(coord: Any, error: str) -> None:
-    """Settle an undeployable product without invoking GEAK's proxy harness."""
+    """Settle an undeployable product unmeasured."""
     _finish(coord, {}, status=REBENCH_FALLBACK_FAILED, error=error)
 
 

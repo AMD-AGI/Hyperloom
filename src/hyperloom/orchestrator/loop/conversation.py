@@ -241,12 +241,6 @@ def _format_inbox_event(m: "Message", *, max_variant_rows: int = 3) -> str:
 
     if topic == "delegated_result":
         return _format_delegated_result(head, payload, max_variant_rows)
-    if topic in ("policy_denial", "denial") or (topic == "observation" and payload.get("kind") == "policy_denial"):
-        return (
-            f"{head} action={payload.get('action_name')!r} "
-            f"rule={payload.get('rule')!r} "
-            f"hint={str(payload.get('hint') or '')[:140]!r}"
-        )
     if topic == "review_verdict":
         return _format_review_verdict(head, payload)
     if topic == "observation" and payload.get("kind") is not None:
@@ -595,16 +589,13 @@ class ConversationCollaborator(CoordinatorCollaborator):
         return _advisory_sections(self, _ADVISORY_BLOCKS)
 
     async def _orchestration_turn_sections(self) -> list[str]:
-        """The work in flight, denial summary, proposal queue and plateau pair: only the orchestration agent reads
+        """The work in flight, proposal queue and plateau pair: only the orchestration agent reads
         them, and each moves with the session, so they are rendered per tick.
         """
         from ..predictor.prompt import queue_block
         from ..predictor.rows import PROVENANCE
 
         sections: list[str] = [self._context_running_tasks_reader()]
-        denial_summary = self.shared_state.to_policy_denial_summary(top_k=6)
-        if denial_summary:
-            sections.append(denial_summary)
         if (self.shared_state.phase or "").strip().upper() == _phase_state.PHASE_FRAMEWORK_AGENT:
             # The predictor's rows lead the queue, so its block comes first, under the same section.
             in_grids = explore_grid_fingerprints(self.tasks)
@@ -709,7 +700,7 @@ class ConversationCollaborator(CoordinatorCollaborator):
         context.append(resource_pools_summary(self.shared_state))
         if agent_name == "orchestration":
             context.extend(self._orchestration_context_sections())
-            # A denial, a proposal leaving the queue or a plateau count lands between
+            # A task finishing, a proposal leaving the queue or a plateau count lands between
             # two ticks, so these blocks follow the ledger into the turn: the cached
             # prefix ends above them and holds for the session.
             turn.extend(await self._orchestration_turn_sections())

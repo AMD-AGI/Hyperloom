@@ -90,6 +90,7 @@ FAILED_STEP_ERROR_CLASSES: Mapping[FailedStep, str] = {
     FailedStep.CLIENT_FAILED: FailedStep.CLIENT_FAILED.value,
     FailedStep.CLIENT_OUTPUT_MISSING: BENCHMARK_REPORT_MISSING,
     FailedStep.EVAL_FAILED: FailedStep.EVAL_FAILED.value,
+    FailedStep.PROFILE_REFUSED: FailedStep.PROFILE_REFUSED.value,
     FailedStep.ROUND_TIMEOUT: FailedStep.ROUND_TIMEOUT.value,
     FailedStep.TEARDOWN_INCOMPLETE: FailedStep.TEARDOWN_INCOMPLETE.value,
 }

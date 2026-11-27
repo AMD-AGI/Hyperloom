@@ -55,7 +55,7 @@ purpose: `KernelPhase` awaits them directly. Both are Coordinator-owned lanes,
 and PolicyGate rejects an orchestration-issued REQUEST for either
 (`COORDINATOR_OWNED_KERNEL_REQUEST_KINDS` in
 `inference_optimizer/protocol/action_surfaces.py`, raised as
-`rule="phase_incompatible"`) because they run once at phase entry from a lane
+`rule="request_kind"`) because they run once at phase entry from a lane
 budget. PolicyGate validates the REQUEST payload from orchestration
 (path-sandbox) but never sees the RESPONSE.
 
