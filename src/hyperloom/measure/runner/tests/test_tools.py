@@ -698,3 +698,31 @@ def test_a_fresh_lock_held_past_the_wait_is_a_tool_error_and_left_in_place(upstr
         tools.fill_inferencex_store(cache, new)
 
     assert lock.exists(), "a lock another fill may still hold is never removed while it is fresh"
+
+
+@pytest.mark.parametrize(
+    "message",
+    [
+        "fatal: Unable to create '/s/shallow.lock': File exists.",
+        "Another git process seems to be running in this repository, or the lock file may be stale",
+        "may have crashed in this repository earlier:\nremove the file manually to continue.",
+    ],
+)
+def test_a_lock_already_released_when_the_fetch_failed_on_it_is_tried_again(upstream, tmp_path, monkeypatch, message):
+    repo, commit = upstream
+    monkeypatch.setenv("INFERENCEX_REPO", str(repo))
+    monkeypatch.setattr(tools, "_LOCK_PAUSE_SEC", 0.1)
+    real = tools._git
+    failed = []
+
+    def failing_once_on_a_lock(*args, **kwargs):
+        if "fetch" in args and not failed:
+            failed.append(args)
+            raise ToolError(f"git -c failed: {message}")
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(tools, "_git", failing_once_on_a_lock)
+
+    store = tools.fill_inferencex_store(tmp_path / "runner-cache", commit)
+
+    assert failed and _git(store, "rev-parse", f"refs/tools/{commit}") == commit

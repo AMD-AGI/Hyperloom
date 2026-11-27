@@ -65,8 +65,13 @@ _STORE_MODE = 0o2775
 _SHALLOW_FETCH = ("fetch", "-q", "--depth", "1")
 #: The lock file a shallow fetch into the store holds while it runs, so that one fill at a time fetches into it.
 _SHALLOW_LOCK = "shallow.lock"
-#: The end of git's message when a lock file it takes is there already: another fill holds it, or a killed one left it.
-_LOCK_HELD = "remove the file manually to continue"
+#: What git's message says when a lock file it takes is there already (another fill holds it, or a killed one left
+#: it), in the wordings of the git releases in use; the error keeps only the end of the message, so each is matched.
+_LOCK_HELD = (
+    ".lock': File exists",
+    "Another git process seems to be running in this repository",
+    "remove the file manually to continue",
+)
 #: How old a lock file of the store is before a fill takes it for one a killed fill left and removes it: a live fill's
 #: fetch holds it at most :data:`_FETCH_TIMEOUT_SEC`, and is killed then.
 _STALE_LOCK_SEC = _FETCH_TIMEOUT_SEC + 300
@@ -332,7 +337,9 @@ def _fetch_into_store(store: Path, commit: str, fetch: list[str], work: Path, en
         except ToolError as exc:
             if _holds(store, commit, env):
                 return  # a concurrent fill fetched it
-            held = _LOCK_HELD in str(exc) or any(lock.exists() for lock in _store_locks(store, commit))
+            held = any(words in str(exc) for words in _LOCK_HELD) or any(
+                lock.exists() for lock in _store_locks(store, commit)
+            )
             if not held:
                 raise
             if time.monotonic() >= deadline:
