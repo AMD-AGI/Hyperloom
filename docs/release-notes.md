@@ -61,6 +61,12 @@ it.
   refuses the run; they are still removed from the environment before any
   child process starts. Results are archived on the shared storage, as
   before: archiving to `s3://` was never implemented.
+- **A hosted run no longer reads `HYPERLOOM_SANDBOX_WORKSPACE`.** The hosted
+  toolbox no longer names a workspace on its sandbox creates: a Claw grant's
+  sandbox key names its own, and no host sets the variable. It is still
+  removed from the environment before any child process starts, and a
+  malformed value no longer refuses the run. See
+  [Environment variables](reference/environment-variables.md).
 - **The sandbox socket's `Role` is `measurement` or `dev`.** The `subrun`
   role is gone from `hyperloom.sandbox.socket.Role`, so a local template
   declared with it is refused. No Hyperloom code ever created a sub-run

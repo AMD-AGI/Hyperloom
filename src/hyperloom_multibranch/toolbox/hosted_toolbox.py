@@ -131,10 +131,6 @@ class HostedToolboxInputs:
             session keeps after its last test, which the session works out
             (:attr:`~hyperloom_multibranch.scheduling.hosted_run.GrantEnd.tests_end_by`). An infrastructure retry never
             waits past one typical test before it (:class:`~.toolbox.ToolboxTuning`). ``None``: no such time.
-        sandbox_workspace: The workspace every sandbox is created in (``HYPERLOOM_SANDBOX_WORKSPACE``), sent on each
-            create as ``agent-sandbox.io/workspace``. A SaFE key used directly needs it when its user is in more than
-            one workspace, and a ``system-admin`` key always does; a Claw grant's key names its own, so a Claw host
-            leaves it ``None`` and the creates are as they were.
 
     Raises:
         ValueError: When a text is empty, ``tp`` is below one, ``source_sha`` is not a full commit hash,
@@ -153,7 +149,6 @@ class HostedToolboxInputs:
     dev_key: str | None = field(default=None, repr=False)
     grant_limits: Mapping[str, float] | None = None
     runner_cache_manifest_sha256: str | None = None
-    sandbox_workspace: str | None = None
     session_id: str | None = None
     tests_end_by: float | None = None
 
@@ -163,8 +158,6 @@ class HostedToolboxInputs:
                 raise ValueError(f"{name} is empty")
         if self.dev_key is not None and not self.dev_key.strip():
             raise ValueError("dev_key is empty; leave it None for a session with no dev sandboxes")
-        if self.sandbox_workspace is not None and not self.sandbox_workspace.strip():
-            raise ValueError("sandbox_workspace is empty; leave it None for a key that names its own workspace")
         if self.tp < 1:
             raise ValueError("tp must be at least 1")
         if not _COMMIT.fullmatch(self.source_sha):
@@ -425,9 +418,7 @@ def _service_provider(inputs: HostedToolboxInputs, retry: RetryPolicy) -> E2BSan
     keys: dict[Role, str] = {MEASUREMENT_ROLE: inputs.measurement_key}
     if inputs.dev_key is not None:
         keys["dev"] = inputs.dev_key
-    return E2BSandboxProvider(
-        keys, api_url=inputs.api_url, sandbox_url=inputs.sandbox_url, retry=retry, workspace=inputs.sandbox_workspace
-    )
+    return E2BSandboxProvider(keys, api_url=inputs.api_url, sandbox_url=inputs.sandbox_url, retry=retry)
 
 
 def _leases(provider: SandboxProvider, inputs: HostedToolboxInputs, tuning: LeaseTuning) -> HostedBranchLeases | None:

@@ -1493,7 +1493,6 @@ bounds the session together with the spec's `budget.max_hours`; see
 | `E2B_API_URL`<br>`E2B_SANDBOX_URL` | When a sandbox is hosted | Control-plane and data-plane `http(s)` URLs of the sandbox service, without credentials, query or fragment. |
 | `HYPERLOOM_SANDBOX_KEY_MEASUREMENT`<br>`HYPERLOOM_SANDBOX_KEY_DEV` | Per hosted role | The sandbox API key of each role. Credentials. |
 | `HYPERLOOM_GRANT_LIMITS` | No | JSON object of the totals the host granted the run: `max_sandboxes`, `max_gpus`, `max_runtime_sec` (whole numbers) and `gpu_hours` (a number), each at least 0 and each optional; other keys are ignored. A multi-branch session needs all four totals or none, and one that lends dev sandboxes or runs autonomous agents needs them. Removed from the environment once read. |
-| `HYPERLOOM_SANDBOX_WORKSPACE` | When a SaFE key reaches the sandbox service directly and its user is in more than one workspace; always for a `system-admin` key | The workspace every sandbox is created in, sent on each create as the metadata `agent-sandbox.io/workspace`; a create whose own metadata names a workspace keeps its own. Without it the service refuses such a key's creates with `workspace_required`, reported as `SandboxDenied` naming this variable. A Claw grant's key names its own workspace, so a Claw host leaves it unset and the creates are unchanged. Checked on every hosted run when set: whitespace or a control character refuses the run. Not a credential; removed from the environment once read, like every host-only input here. |
 | `HYPERLOOM_SOURCE_REPO`<br>`HYPERLOOM_SOURCE_SHA` | When the run starts measurement sandboxes (the application bootstrap always needs them) | The repository (`OWNER/NAME` or a git URL, no whitespace) and the full lowercase 40-hex commit id of the version the run executes; the sandbox runners fetch the same version. Checked when set; removed from the environment once read (the bootstrap script has already used them). |
 | `NODE_NAME`<br>`CLAW_SESSION_ID` | No | Physical node name and session id. The host-input reader leaves them in the environment for the code that reads them. |
 
@@ -1503,7 +1502,8 @@ stay, because other code reads them. The sandbox keys are held in an object that
 `Secret(<redacted>)`, and are also on the credential list in `hyperloom.common.env_safety`. `HYPERLOOM_EVENTS_DIR`,
 `HYPERLOOM_MCP_HOST`, `HYPERLOOM_MCP_PORT` and `HYPERLOOM_MCP_TOKEN`, inputs of the retired single-session flow, and
 `HYPERLOOM_MCP_PUBLIC_URL`, `HYPERLOOM_SANDBOX_KEY_SUBRUN`, `HYPERLOOM_RESULT_ARCHIVE`, `AWS_ACCESS_KEY_ID`,
-`AWS_SECRET_ACCESS_KEY`, `AWS_SESSION_TOKEN`, `AWS_ENDPOINT_URL_S3` and `AWS_REGION`, which no hosted run uses, are no longer
+`AWS_SECRET_ACCESS_KEY`, `AWS_SESSION_TOKEN`, `AWS_ENDPOINT_URL_S3`, `AWS_REGION` and `HYPERLOOM_SANDBOX_WORKSPACE`, which no
+hosted run uses (a Claw grant's sandbox key names its own workspace), are no longer
 read or checked; a host that still sets them is harmless, since they are removed from the environment with the others and no
 child process inherits them.
 

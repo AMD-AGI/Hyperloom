@@ -65,7 +65,8 @@ def test_the_retired_events_and_mcp_inputs_are_not_read_but_still_taken_from_the
     env[Var.EVENTS_DIR] = "relative/events"
     env[Var.MCP_PORT] = "not a port"
     env[Var.MCP_TOKEN] = "short"
-    retired = (Var.EVENTS_DIR, Var.MCP_HOST, Var.MCP_PORT, Var.MCP_TOKEN)
+    env[Var.SANDBOX_WORKSPACE] = "top models"
+    retired = (Var.EVENTS_DIR, Var.MCP_HOST, Var.MCP_PORT, Var.MCP_TOKEN, Var.SANDBOX_WORKSPACE)
 
     info = take_host_info(env, require=_ALL_GROUPS)
 
@@ -147,7 +148,6 @@ def test_missing_and_malformed_inputs_are_reported_together(env):
         (Var.SOURCE_SHA, "0123abc", "40-hex"),
         (Var.SOURCE_SHA, "0123456789ABCDEF0123456789abcdef01234567", "40-hex"),
         (Var.SOURCE_REPO, "two words", "whitespace or control"),
-        (Var.SANDBOX_WORKSPACE, "top models", "whitespace or control"),
     ],
 )
 def test_a_malformed_input_is_refused_with_its_reason(env, name, value, reason):
@@ -299,18 +299,6 @@ def test_a_child_started_without_env_sees_none_of_the_removed_inputs_and_still_s
     seen = set(json.loads(out))
     assert not [name for name in host_info.HOST_ONLY_VARS if name in seen]
     assert {"NODE_NAME", "CLAW_SESSION_ID", "USER_DATA_PATH"} <= seen
-
-
-def test_the_sandbox_workspace_is_optional_read_when_set_and_removed_from_the_environment(env):
-    """A SaFE key used directly names the workspace its sandboxes are created in; a Claw host sets none."""
-    unset = {name: value for name, value in env.items() if name != Var.SANDBOX_WORKSPACE}
-    assert read_host_info(unset).sandbox_workspace is None
-    assert Var.SANDBOX_WORKSPACE in host_info.HOST_ONLY_VARS
-
-    for name in _RUN_ONLY:
-        del env[name]
-    assert take_host_info(env, require=_HANDED_GRANT, require_run=False).sandbox_workspace == "workspace-a"
-    assert Var.SANDBOX_WORKSPACE not in env
 
 
 # -- the granted totals ------------------------------------------------------------------------------------------
