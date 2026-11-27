@@ -25,6 +25,16 @@ rows:
       - triton
       - --disable-cuda-graph
     env: {SGLANG_USE_AITER: "0"}
+  - framework: sglang
+    gfx: [gfx1201]
+    args:
+      - --trust-remote-code
+      - --mem-fraction-static
+      - "0.9"
+      - --attention-backend
+      - triton
+      - --disable-radix-cache
+    env: {SGLANG_USE_AITER: "0"}
   - framework: vllm
     gfx: [gfx942, gfx950]
     args: [--trust-remote-code, --gpu-memory-utilization, "0.95"]

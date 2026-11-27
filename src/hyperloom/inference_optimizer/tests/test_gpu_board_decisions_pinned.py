@@ -41,12 +41,19 @@ def test_instinct_boards_leave_the_framework_unconstrained(product, framework):
     assert gpu_types._board_framework_error(product, framework) is None
 
 
-@pytest.mark.parametrize("framework", ["sglang", "atom", "xdit"])
-def test_r9700_is_validated_for_vllm_and_llamacpp_only(framework):
-    assert gpu_types._board_framework_error("R9700", "vllm") is None
-    assert gpu_types._board_framework_error("r9700", framework) == (
-        f"r9700 is currently validated only for llamacpp, vllm; framework {framework!r} has not been validated on it"
-    )
+@pytest.mark.parametrize(("board", "allowed"), [("r9700", "llamacpp, sglang, vllm"), ("r9600d", "sglang, vllm")])
+def test_gfx1201_board_frameworks(board, allowed):
+    for framework in allowed.split(", "):
+        gpu_types.require_board_framework(board.upper(), framework)
+    for framework in ("atom", "xdit"):
+        assert gpu_types._board_framework_error(board, framework) == (
+            f"{board} is currently validated only for {allowed}; framework {framework!r} has not been validated on it"
+        )
+
+
+@pytest.mark.parametrize("board", ["w7900", "w7900d"])
+def test_gfx1100_boards_still_refuse_sglang(board):
+    assert gpu_types._board_framework_error(board, "sglang") is not None
 
 
 def test_llamacpp_is_validated_on_r9700_and_w7900d_only():

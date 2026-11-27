@@ -622,6 +622,9 @@ _ROWS = [
     ("sglang", {"gfx1151"},
      "--trust-remote-code --mem-fraction-static 0.5 --attention-backend triton --disable-cuda-graph",
      {"SGLANG_USE_AITER": "0"}),
+    ("sglang", {"gfx1201"},
+     "--trust-remote-code --mem-fraction-static 0.9 --attention-backend triton --disable-radix-cache",
+     {"SGLANG_USE_AITER": "0"}),
     ("vllm", {"gfx942", "gfx950"}, "--trust-remote-code --gpu-memory-utilization 0.95",
      {"VLLM_ROCM_USE_AITER": "1"}),
     ("vllm", {"gfx1201"}, "--trust-remote-code --gpu-memory-utilization 0.9",
@@ -671,8 +674,8 @@ def test_a_fixed_query_no_recipe_at_a_pinned_inferencex_serves_is_a_miss_naming_
 
 
 def test_no_default_row_or_no_topology_is_a_miss():
-    no_row = _miss(_fixed("Qwen/Qwen3-8B", board="r9700", isl=1024, osl=1024))
-    assert no_row.reasons()[-1] == "default_table: it has no sglang row for r9700 (gfx1201)"
+    no_row = _miss(_fixed("Qwen/Qwen3-8B", board="w7900", isl=1024, osl=1024))
+    assert no_row.reasons()[-1] == "default_table: it has no sglang row for w7900 (gfx1100)"
 
     split_experts = _miss(_fixed("Qwen/Qwen3-8B", framework="vllm", isl=1024, osl=1024, tp=4, ep=2))
     assert "its experts span all 4 TP ranks, so it runs no ep 2" in split_experts.reasons()[-1]

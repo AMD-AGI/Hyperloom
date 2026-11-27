@@ -42,6 +42,8 @@ subtrees:
   entries:
   - file: how-to/optimize.md
     title: Run a Hyperloom optimization
+  - file: how-to/running-hyperloom-on-r9700.md
+    title: Run SGLang on Radeon AI PRO R9700 or R9600D
   - file: how-to/optimize-custom-workload.md
     title: Optimize your own workload
   - file: how-to/quantization-quark.md

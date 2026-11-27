@@ -357,10 +357,10 @@ def test_an_unreadable_operator_file_exits_2_before_any_source_is_read(tmp_path,
 
 
 def test_a_session_no_source_serves_exits_2_naming_every_miss(tmp_path, fetched, capsys):
-    err = _refused(tmp_path, _args(model="Kimi-K2.6", gpu_type="r9700", operator_tp=1), capsys)
+    err = _refused(tmp_path, _args(model="Kimi-K2.6", gpu_type="w7900", operator_tp=1), capsys)
 
     assert "no source serves" in err
-    assert "default_table: it has no sglang row for r9700 (gfx1201)" in err
+    assert "default_table: it has no sglang row for w7900 (gfx1100)" in err
 
 
 @pytest.mark.parametrize(
