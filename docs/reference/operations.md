@@ -250,7 +250,7 @@ ingest it whole on session end.
 ### Inspector
 
 The Inspector is a read-only web page for a live or finished session: run information, a harness graph, a
-timeline, every artifact with a viewer and diff, and replay. It only reads files, so it is safe
+timeline, every artifact with a viewer and diff, replay, and an LLM narrator. It only reads files, so it is safe
 next to a running optimizer:
 
 ```bash

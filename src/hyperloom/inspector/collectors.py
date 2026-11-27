@@ -208,6 +208,20 @@ def resolve_inside(session_dir: Path, rel: str) -> Path | None:
     return target
 
 
+def tail_file(path: Path, max_bytes: int = 64 * _KIB) -> str:
+    try:
+        size = path.stat().st_size
+        with path.open("rb") as fh:
+            fh.seek(max(0, size - max_bytes))
+            data = fh.read()
+    except (FileNotFoundError, IsADirectoryError, PermissionError):
+        return ""
+    text = data.decode(_ENCODING, errors=_DECODE_ERRORS)
+    if size > max_bytes:
+        text = text.split("\n", 1)[-1]
+    return text
+
+
 _EXCEPTION = re.compile(r"\b[A-Z][\w.]*(?:Error|Exception): \S.*")
 
 

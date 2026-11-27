@@ -2,9 +2,12 @@
 <!-- SPDX-License-Identifier: MIT -->
 <script lang="ts">
   import { onDestroy } from "svelte";
+  import ContextMenu from "./lib/ContextMenu.svelte";
   import Drawer from "./lib/drawer/Drawer.svelte";
   import { fmtArtifactCount } from "./lib/format";
   import Header from "./lib/Header.svelte";
+  import Narrator from "./lib/Narrator.svelte";
+  import { NarratorStore } from "./lib/narrator-store.svelte";
   import ReplayBar from "./lib/ReplayBar.svelte";
   import Graph from "./lib/graph/Graph.svelte";
   import Tabs from "./lib/tabs/Tabs.svelte";
@@ -15,6 +18,10 @@
 
   const store = new InspectorStore();
   const ui = new UiState();
+  // One narrator for the page: the drawer and the views explain items through it, and the answers land in its thread.
+  const narrator = new NarratorStore();
+  // Fetch its status once even while the panel is folded (it polls only when open): Explain needs to know it's there.
+  void narrator.refresh();
   void store.start();
   onDestroy(() => store.stop());
 
@@ -31,13 +38,15 @@
       {view.tasks.length} tasks · {store.streams.event.length} bus events · {store.streams.llm_call.length} LLM calls ·
       {fmtArtifactCount(store.artifacts.length, view.artifacts_cut_at)}
     </p>
+    <Narrator {store} {ui} {narrator} />
     <Graph {store} {ui} />
     <Timeline {store} {ui} />
     <UpliftPanel {store} {ui} />
     <Tabs {store} {ui} />
   {/if}
 </main>
-<Drawer {store} {ui} />
+<Drawer {store} {ui} {narrator} />
+<ContextMenu {store} {ui} {narrator} />
 
 <style>
   main {

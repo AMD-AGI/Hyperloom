@@ -10,7 +10,7 @@ import socket
 import sqlite3
 import time
 
-from hyperloom.inspector import artifacts, session_layout
+from hyperloom.inspector import artifacts, digest, session_layout
 from hyperloom.inspector.tests.conftest import FAKE_KEY, FAKE_SECRET, T0, iso
 from hyperloom.inspector.watcher import Clock, Stream, Watcher, WatchOptions
 
@@ -138,6 +138,8 @@ def test_replay_shows_the_run_state_of_the_clock_not_of_the_end(session_dir):
     assert s["baseline_tput"] is None
     assert snap["budget"]["used_sec"] == 305
     assert (s["tick"], s["crash_count"]) == (None, None)
+    assert "baseline null tok/s" in digest.build(snap)
+    assert "tick 42" not in digest.build(snap)
     assert _replay_at(session_dir, T0 + 2).snapshot()["summary"]["phase"] is None
     later = _replay_at(session_dir, T0 + 700).snapshot()
     assert later["summary"]["baseline_tput"] == 1685.16

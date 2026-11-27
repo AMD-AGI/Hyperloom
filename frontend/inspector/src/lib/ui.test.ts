@@ -37,3 +37,22 @@ describe("UiState selection", () => {
     expect(ui.selection).toEqual({ kind: "task", id: "t3" });
   });
 });
+
+describe("UiState context menu", () => {
+  it("opens one menu at the pointer instead of the browser's, replaces it on the next, and closes", () => {
+    const ui = new UiState();
+    let prevented = 0;
+    const click = (x: number, y: number) =>
+      ({ clientX: x, clientY: y, preventDefault: () => prevented++ }) as unknown as MouseEvent;
+    const open = () => ui.select({ kind: "task", id: "t1" });
+    ui.openMenu(click(10, 20), { kind: "task", id: "t1" }, open);
+    expect(ui.menu).toMatchObject({ x: 10, y: 20, ref: { kind: "task", id: "t1" } });
+    ui.openMenu(click(30, 40), null, open);
+    expect(ui.menu).toMatchObject({ x: 30, y: 40, ref: null });
+    expect(prevented).toBe(2);
+    ui.menu!.open();
+    expect(ui.selection).toEqual({ kind: "task", id: "t1" });
+    ui.closeMenu();
+    expect(ui.menu).toBeNull();
+  });
+});

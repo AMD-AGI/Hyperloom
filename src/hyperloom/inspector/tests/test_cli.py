@@ -90,3 +90,40 @@ def test_hyperloom_help_lists_the_inspect_command(capsys):
 
     assert main(["--help"]) == 0
     assert "  inspect " in capsys.readouterr().out
+
+
+@pytest.mark.parametrize(("flags", "narrate"), [([], False), (["--narrate"], True)])
+def test_the_narrator_is_on_only_with_narrate(tmp_path, monkeypatch, flags, narrate):
+    from hyperloom.inspector import server
+
+    (tmp_path / "state.json").write_text("{}")
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test")
+    seen = {}
+    monkeypatch.setattr(server, "serve", lambda session_dir, options: seen.update(options=options))
+    args = _build_parser().parse_args(["inspect", "--session-dir", str(tmp_path), "--no-history", *flags])
+    assert run_inspect(args) == 0
+    assert seen["options"].narrate is narrate
+
+
+def test_an_llm_env_file_is_read_only_with_narrate(tmp_path, monkeypatch):
+    from hyperloom.inspector import narrator, server
+
+    (tmp_path / "state.json").write_text("{}")
+    env_file = tmp_path / ".env"
+    env_file.write_text("ANTHROPIC_API_KEY=sk-test\n", encoding="utf-8")
+    monkeypatch.setattr(server, "serve", lambda *a, **kw: None)
+    monkeypatch.setattr(narrator, "load_llm_env", lambda *a, **kw: pytest.fail("read without --narrate"))
+    args = _build_parser().parse_args(
+        ["inspect", "--session-dir", str(tmp_path), "--no-history", "--llm-env-file", str(env_file)]
+    )
+    assert run_inspect(args) == 0
+
+
+def test_narrate_and_no_llm_contradict_each_other(tmp_path, monkeypatch, capsys):
+    from hyperloom.inspector import server
+
+    (tmp_path / "state.json").write_text("{}")
+    monkeypatch.setattr(server, "serve", lambda *a, **kw: pytest.fail("served"))
+    args = _build_parser().parse_args(["inspect", "--session-dir", str(tmp_path), "--narrate", "--no-llm"])
+    assert run_inspect(args) == 2
+    assert capsys.readouterr().err == "inspect: --narrate and --no-llm contradict each other: pass one\n"

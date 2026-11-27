@@ -15,12 +15,15 @@
     axis,
     baseline,
     onpick,
+    oncontext,
   }: {
     rows: StreamItem[];
     tput: (j: StreamItem) => number | null;
     axis: TputAxis;
     baseline: number | null | undefined;
     onpick: (j: StreamItem) => void;
+    /** A right-click on a point, for the page's context menu. */
+    oncontext?: (j: StreamItem, e: MouseEvent) => void;
   } = $props();
 
   const { H, LEFT, RIGHT } = CHART;
@@ -53,6 +56,7 @@
           role="button"
           tabindex="-1"
           onclick={() => onpick(j)}
+          oncontextmenu={oncontext && ((e) => oncontext(j, e))}
           onkeydown={() => {}}
         >
           <title>{j.change}: {fmtNum(Number(tput(j)))} tok/s ({j.outcome})</title>

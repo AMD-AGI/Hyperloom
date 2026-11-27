@@ -2,13 +2,15 @@
 // SPDX-License-Identifier: MIT
 
 import { describe, expect, it } from "vitest";
-import { ApiError, fetchArtifact, fetchArtifacts, fetchConversation, fetchSnapshot, postReplay } from "./api";
+import { ApiError, fetchArtifact, fetchArtifacts, fetchConversation, fetchSnapshot, postAsk, postReplay } from "./api";
 
-type Call = { url: string; method: string };
+type Call = { url: string; method: string; body?: unknown };
 
 function fake(status: number, body: unknown, calls: Call[] = []) {
   return (async (url: string, init?: RequestInit) => {
-    calls.push({ url, method: init?.method ?? "GET" });
+    const call: Call = { url, method: init?.method ?? "GET" };
+    if (init?.body) call.body = JSON.parse(init.body as string);
+    calls.push(call);
     return new Response(JSON.stringify(body), { status });
   }) as typeof fetch;
 }
@@ -47,5 +49,14 @@ describe("api", () => {
     const calls: Call[] = [];
     await postReplay({ t: 12.5, paused: true }, fake(200, { mode: "replay", now: 12.5 }, calls));
     expect(calls[0]).toEqual({ url: "api/replay?t=12.5&paused=1", method: "POST" });
+  });
+  it("sends the focus and the item of a question only when given", async () => {
+    const calls: Call[] = [];
+    await postAsk("why?", "", undefined, fake(200, {}, calls));
+    await postAsk("why?", "memory", { kind: "task", id: "t1" }, fake(200, {}, calls));
+    expect(calls.map((c) => c.body)).toEqual([
+      { question: "why?" },
+      { question: "why?", focus: "memory", item: { kind: "task", id: "t1" } },
+    ]);
   });
 });

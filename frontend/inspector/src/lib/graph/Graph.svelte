@@ -5,6 +5,7 @@
   import { Background, Controls, MarkerType, SvelteFlow } from "@xyflow/svelte";
   import type { EdgeTypes, NodeTypes } from "@xyflow/svelte";
   import { untrack } from "svelte";
+  import { refFor } from "../explain";
   import { ms } from "../motion";
   import type { InspectorStore } from "../store.svelte";
   import type { Layout, UiState } from "../ui.svelte";
@@ -196,6 +197,8 @@
       minZoom={0.3}
       maxZoom={2.5}
       onnodeclick={({ node }) => ui.pickNode(node.id)}
+      onnodecontextmenu={({ node, event }) =>
+        ui.openMenu(event, refFor({ kind: "node", id: node.id }), () => ui.pickNode(node.id))}
       onpaneclick={() => (ui.filter = null)}
     >
       <FitView key={fitKey} />

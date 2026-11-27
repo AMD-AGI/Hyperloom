@@ -1,6 +1,7 @@
 <!-- SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc. -->
 <!-- SPDX-License-Identifier: MIT -->
 <script lang="ts">
+  import { refFor } from "../explain";
   import { fmtTime } from "../format";
   import type { InspectorStore } from "../store.svelte";
   import type { Task } from "../types";
@@ -48,6 +49,10 @@
   {cols}
   key={(t) => t.task_id}
   onpick={(t) => ui.select({ kind: "task", id: t.task_id })}
+  oncontext={(t, e) => {
+    const sel = { kind: "task", id: t.task_id } as const;
+    ui.openMenu(e, refFor(sel), () => ui.select(sel));
+  }}
   selected={(t) => ui.selection?.kind === "task" && ui.selection.id === t.task_id}
 />
 {#if rounds.length}

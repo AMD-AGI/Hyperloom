@@ -34,6 +34,8 @@ VALID_COMPONENTS: frozenset[str] = frozenset(
         # Framework-side reasoning (agent ranker, audit refinement, KB synthesis) and the quantization agent.
         "framework",
         "quantization",
+        # The Inspector's narrator: it summarizes a session and answers questions about it, in its own process.
+        "inspector",
     }
 )
 

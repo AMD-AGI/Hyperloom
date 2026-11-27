@@ -4,6 +4,7 @@
   import { onDestroy, untrack } from "svelte";
   import { prefersReducedMotion, Spring } from "svelte/motion";
   import { slide } from "svelte/transition";
+  import { refFor } from "../explain";
   import { fmtDur, fmtTime } from "../format";
   import { ms } from "../motion";
   import { phaseColor } from "../phase";
@@ -144,6 +145,8 @@
     dragging = false;
   }
   const pick = (sel: Selection) => dragged || ui.select(sel);
+  // A right-click on a bar or marker opens the page's menu: Explain it, or Open it as a click does.
+  const menu = (e: MouseEvent, sel: Selection) => ui.openMenu(e, refFor(sel), () => ui.select(sel));
   // A click on the axis seeks the replay.
   function seek(e: MouseEvent) {
     if (!replay || dragged) return;
@@ -253,6 +256,7 @@
               data-testid="tl-bar"
               data-health={b.health}
               onclick={() => pick({ kind: "task", id: b.task_id })}
+              oncontextmenu={(e) => menu(e, { kind: "task", id: b.task_id })}
             >
               <title>{barTitle(b)}</title>
             </rect>
@@ -311,6 +315,7 @@
               fill="var(--muted)"
               data-testid="tl-event"
               onclick={() => pick({ kind: "event", item: e })}
+              oncontextmenu={(ev) => menu(ev, { kind: "event", item: e })}
             >
               <title>{e.topic}: {e.from_agent} → {e.to_agent}&#10;{fmtTime(t)}</title>
             </circle>
@@ -328,6 +333,7 @@
               fill={c.status === "ok" ? "var(--accent)" : "var(--crashed)"}
               data-testid="tl-call"
               onclick={() => pick({ kind: "call", item: c })}
+              oncontextmenu={(e) => menu(e, { kind: "call", item: c })}
             >
               <title
                 >LLM {c.component}

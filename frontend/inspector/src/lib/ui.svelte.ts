@@ -1,14 +1,15 @@
 // SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 // SPDX-License-Identifier: MIT
 
-// Page state shared between views: the node filter, the graph layout, the open tab and artifact, and the selected
-// record.
+// Page state shared between views: the node filter, the graph layout, the open tab and artifact, the selected
+// record and the open context menu.
 
 import { SvelteSet } from "svelte/reactivity";
+import type { MenuRequest } from "./contextmenu";
 import type { LatencyPick } from "./latency";
 import type { Gap, Range } from "./timeline/scale";
 import type { Group, Mode } from "./tokens";
-import type { StreamItem } from "./types";
+import type { ItemRef, StreamItem } from "./types";
 
 export type Layout = "layered" | "force";
 /** A record picked in a view, for the drawer to show. */
@@ -74,6 +75,8 @@ export class UiState {
   artToggled = new SvelteSet<string>();
   /** The latency the throughput tab's scatter plots against tok/s. */
   latency = $state<LatencyPick>({ kind: "ttft", stat: "mean" });
+  /** The right-click menu, at most one on the page; `ContextMenu` shows it. */
+  menu = $state.raw<MenuRequest | null>(null);
   /** The token chart: running totals or a rate, by token kind or by agent, and the series its legend hid. */
   tokenMode = $state<Mode>("cumulative");
   tokenGroup = $state<Group>("kind");
@@ -105,6 +108,19 @@ export class UiState {
     if (!this.trail.length) return;
     this.selection = this.trail[this.trail.length - 1];
     this.trail = this.trail.slice(0, -1);
+  }
+
+  /**
+   * A right-click on an item: replace the browser's menu with ours at the pointer. `ref` is what Explain explains
+   * (null when the item has none, which leaves only Open); `open` does what a left click on the item does.
+   */
+  openMenu(e: MouseEvent, ref: ItemRef | null, open: () => void): void {
+    e.preventDefault();
+    this.menu = { x: e.clientX, y: e.clientY, ref, open };
+  }
+
+  closeMenu(): void {
+    this.menu = null;
   }
 
   openArtifact(path: string, offset?: number): void {

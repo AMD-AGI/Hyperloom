@@ -269,3 +269,40 @@ export interface ArtifactPayload {
   truncated?: boolean;
   [key: string]: unknown;
 }
+
+/** A reference to one item for "Explain this" (POST /api/ask `item`); the server resolves it against its own records.
+ * Journal entries have no id, so their task, change and time name one; a variant is a task's grid entry by label. */
+export type ItemRef =
+  | { kind: "node"; id: string }
+  | { kind: "task"; id: string }
+  | { kind: "event"; seq: number }
+  | { kind: "call"; call_id?: string; task_id?: string; turn?: number }
+  | { kind: "journal"; task_id: string; change: string; ts: string }
+  | { kind: "variant"; task_id: string; label: string };
+
+/** A narration or an answer from the narrator; times are epoch seconds, `clock` the session time it describes. */
+export interface NarratorEntry {
+  id: string;
+  kind: "narration" | "answer";
+  clock: number;
+  written_at: number;
+  duration_sec: number;
+  model: string | null;
+  text: string;
+  focus?: string | null;
+  question?: string;
+  /** The item an answer explains, and the display name the server resolved for it. */
+  item?: ItemRef;
+  label?: string;
+}
+
+/** GET /api/narrator: whether an LLM is configured, and the entries at or before the clock. */
+export interface NarratorStatus {
+  available: boolean;
+  reason: string | null;
+  backend?: string;
+  model?: string | null;
+  busy: boolean;
+  clock?: number;
+  entries: NarratorEntry[];
+}

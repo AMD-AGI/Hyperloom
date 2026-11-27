@@ -16,6 +16,7 @@ import json
 import os
 import re
 import socket
+import threading
 from dataclasses import dataclass
 
 import pytest
@@ -428,3 +429,69 @@ def test_folding_the_uplift_panel_leaves_its_summary(page):
     page.click("[data-testid=uplift-toggle]")
     expect(page.locator("[data-testid=uplift-peek]")).to_be_visible()
     expect(strips).to_have_count(0)
+
+
+# ----- "Explain this"-------------------------------------------------------------------------------------------------
+
+
+@pytest.fixture
+def explained(browser, session_dir):
+    """The page on a server whose narrator is a canned client; yields (page, client)."""
+    from hyperloom.inspector.tests.test_narrator import FakeClient, _narrator, _watcher
+
+    client = FakeClient(reply="- canned explanation of the item")
+    watcher = _watcher(session_dir)
+    httpd = server_mod.InspectorServer(("127.0.0.1", 0), watcher, _narrator(watcher, client))
+    threading.Thread(target=httpd.serve_forever, kwargs={"poll_interval": 0.05}, daemon=True).start()
+    page = browser.new_page(viewport={"width": 1600, "height": 1200})
+    page.add_init_script(_CSP_PROBE)
+    # The narrator panel starts folded: Explain must still be offered (the panel polls only when open).
+    page.add_init_script(
+        'localStorage.setItem("hyperloom-inspector.narrator", JSON.stringify({open: false, auto: false, focus: ""}))'
+    )
+    problems: list[str] = []
+    page.on("pageerror", lambda e: problems.append(f"pageerror: {e}"))
+    page.on("console", lambda m: m.type == "error" and problems.append(f"console: {m.text}"))
+    page.goto(f"http://127.0.0.1:{httpd.server_address[1]}/")
+    page.wait_for_selector(UI.node, timeout=10_000)
+    yield page, client
+    problems += [f"CSP: {v}" for v in page.evaluate("window.__cspViolations")]
+    page.close()
+    httpd.closing = True
+    httpd.shutdown()
+    httpd.server_close()
+    assert problems == []
+
+
+def test_explain_is_hidden_without_a_narrator(page):
+    page.locator(UI.node).first.click()
+    expect(page.locator(UI.dr_title)).not_to_be_empty()
+    expect(page.locator("[data-testid=explain]")).to_have_count(0)
+    page.locator(UI.node).nth(1).click(button="right")
+    menu = page.get_by_role("menu")
+    expect(menu).to_be_visible()
+    expect(menu.get_by_role("menuitem", name="Explain")).to_have_count(0)
+    page.keyboard.press("Escape")
+    expect(menu).to_have_count(0)
+
+
+def test_explain_a_node_from_the_drawer_and_the_menu(explained):
+    page, client = explained
+    node = page.locator(UI.node).first
+    node_id = node.get_attribute("data-node")
+    node.click()
+    page.click("[data-testid=explain]")
+    head = page.locator("[data-testid=nar-explain-head]").first
+    expect(head).to_be_visible(timeout=10_000)
+    expect(page.locator("[data-testid=nar-thread]")).to_contain_text("canned explanation")
+    expect(page.locator("[data-testid=nar-followup]")).to_be_visible()
+    # The item travelled to the server, and its records reached the prompt.
+    assert any("## The item to explain" in user for _, user in client.prompts)
+    assert node_id and any(node_id in user for _, user in client.prompts)
+    # The same item again from the right-click menu reuses the answer: no second call.
+    calls = len(client.prompts)
+    page.click(UI.dr_close)
+    page.locator(f"{UI.node}[data-node='{node_id}']").click(button="right")
+    page.get_by_role("menu").get_by_role("menuitem", name="Explain").click()
+    page.wait_for_timeout(500)
+    assert len(client.prompts) == calls

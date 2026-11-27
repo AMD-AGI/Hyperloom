@@ -1,6 +1,7 @@
 <!-- SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc. -->
 <!-- SPDX-License-Identifier: MIT -->
 <script lang="ts">
+  import { refForJournal, refForVariant } from "../explain";
   import { fmtNum, fmtTime } from "../format";
   import { LATENCY_KINDS, LATENCY_STATS, latencyLabel, latencyOf } from "../latency";
   import type { InspectorStore } from "../store.svelte";
@@ -47,6 +48,8 @@
       ? ui.select({ kind: "task", id: String(j.task_id) })
       : ui.select({ kind: "raw", title, data: j });
   const pick = picker("Journal entry");
+  // A right-click on a journal row or chart point explains the change; Open is the left click.
+  const menu = (j: StreamItem, e: MouseEvent) => ui.openMenu(e, refForJournal(j), () => pick(j));
   const pickUnit = (u: Unit) => ui.select({ kind: "task", id: u.task_id });
   const num = (v: unknown) => fmtNum(v as number | null);
 
@@ -72,7 +75,7 @@
 </script>
 
 <div class="charts">
-  <JournalChart {rows} tput={tputOf} {axis} {baseline} onpick={pick} />
+  <JournalChart {rows} tput={tputOf} {axis} {baseline} onpick={pick} oncontext={menu} />
   <div>
     <BenchmarkScatter rows={runs} {outcomes} {axis} latency={ui.latency} onpick={picker("Benchmark run")} />
     <p class="muted">
@@ -89,10 +92,17 @@
   </div>
 </div>
 <p class="muted">{rows.length} journal entr{rows.length === 1 ? "y" : "ies"}, newest first</p>
-<DataTable testid="journal-table" rows={newest} {cols} onpick={pick} />
+<DataTable testid="journal-table" rows={newest} {cols} onpick={pick} oncontext={menu} />
 {#if units.length}
   <h4 class="muted">Variants measured ({units.length}), newest first</h4>
-  <DataTable testid="variants-table" rows={units} cols={unitCols} key={(u) => u.key} onpick={pickUnit} />
+  <DataTable
+    testid="variants-table"
+    rows={units}
+    cols={unitCols}
+    key={(u) => u.key}
+    onpick={pickUnit}
+    oncontext={(u, e) => ui.openMenu(e, refForVariant(u), () => pickUnit(u))}
+  />
 {/if}
 
 <style>
