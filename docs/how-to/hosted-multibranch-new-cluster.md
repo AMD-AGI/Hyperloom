@@ -4,7 +4,7 @@ myst:
         "description": "What to configure to run a hosted multi-branch Hyperloom session on a new cluster: every storage location, whether it is required, what it points at and which side reads it."
         "keywords": "Hyperloom, hosted, multi-branch, shared storage, runner cache, RSI archive, JIT cache, sandbox template, cluster"
 ---
-# Running hosted multi-branch on a new cluster: what to configure
+# Configure Hyperloom hosted multi-branch on a new cluster
 
 A hosted multi-branch session runs in two places:
 

@@ -4,7 +4,7 @@ myst:
     "description": "Optimizations Hyperloom found or produced on AMD Instinct GPUs that vLLM or SGLang has merged, each with the end-to-end measurement of the upstream PR, and the rule and check that keep the list current."
     "keywords": "Hyperloom, upstream, vLLM, SGLang, merged pull requests, AMD Instinct, MI300X, MI325X, MI355X, LLM inference, optimization results"
 ---
-# Upstream optimizations merged into vLLM and SGLang
+# Hyperloom upstream optimizations for vLLM and SGLang
 
 Optimizations Hyperloom found or produced in a real session on AMD Instinct GPUs that vLLM or SGLang
 has merged. The README carries the eight with the largest measured effect; this is the full list.
@@ -17,7 +17,7 @@ move it. No micro-benchmark figure is reported here as an end-to-end gain.
 ## What enters this list
 
 Every PR in `vllm-project/vllm` or `sgl-project/sglang` whose body credits Hyperloom (`Found by
-Hyperloom`, `Powered by Hyperloom`, or the older `Found and validated with ROCm Hyperloom`) **and**
+Hyperloom`, `Powered by Hyperloom`, or the older `Found and validated with ROCm Hyperloom`) and
 is merged. Attributed PRs that are still open, or that were closed without merging, are not listed:
 a change nobody upstream accepted is not evidence.
 

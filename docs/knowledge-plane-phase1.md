@@ -2,10 +2,12 @@
 myst:
     html_meta:
         "robots": "noindex"
+        "description": "Details about KnowledgePlane phase 1, integrating Recipe KB and KernelForge knowledge control-plane under a single Hyperloom KnowledgePlane."
+        "keywords": "Hyperloom, KnowledgePlane, Recipe KB, KernelForge, KB Store, knowledge control-plane"
 orphan: true
 ---
 
-# KnowledgePlane phase 1
+# Hyperloom KnowledgePlane phase 1
 
 Phase 1 puts Recipe KB and the KernelForge knowledge control-plane behind one
 Hyperloom `KnowledgePlane`. PR Monitor is co-hosted by KB Store: one

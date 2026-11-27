@@ -4,7 +4,7 @@ myst:
         "description": "Run a multi-branch Hyperloom session with hyperloom-multibranch run: the environment it needs, its options grouped by what they control, and its exit codes."
         "keywords": "Hyperloom, multi-branch, MB, hyperloom-multibranch, run, RSI archive, runner cache, Recipe KB"
 ---
-# Running a multi-branch session
+# Running a Hyperloom multi-branch session
 
 `hyperloom-multibranch` (also `python -m hyperloom_multibranch`) is installed with Hyperloom. `run` starts one
 session: PRELUDE, EXPLORE, FINAL and CLOSE; `run --resume SESSION_DIR` continues one that stopped before FINAL (see
@@ -65,7 +65,7 @@ throughput verdict.
 `HYPERLOOM_ACTIVE_IMAGE_REF` and `HYPERLOOM_ACTIVE_IMAGE_DIGEST` must name the image the session runs on, and the
 agent CLI the specialists run must be installed: on `PATH`, or, for `claude`, in `~/.local/bin`, where `install.sh`
 puts it (only a shell that sourced the kernel-agent env file has that on `PATH`). `--measurement hosted` also needs the grant variables its help lists
-(see [Hosted run inputs](../reference/environment-variables.md#hosted-run-inputs)).
+(see [Hosted run inputs](../reference/environment-variables/env-vars-hosted-inputs.md)).
 
 Before a test that carries patches is given a sandbox or cards, its toolbox byte-compiles every Python file the patch
 stack changes and imports each patched component on CPU, with no GPU visible (the merge smoke). A file that does not

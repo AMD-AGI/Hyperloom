@@ -21,11 +21,11 @@ These labels are used throughout this page to indicate urgency:
 
 * **Required**: Your run will fail or behave incorrectly until you do
   this.
-* **Recommended**: Your run will still work, but you'll get a
-  deprecation warning or sub-optimal behavior.
+* **Recommended**: Your run will still work, but you will get a
+  deprecation warning or suboptimal behavior.
 * **Optional**: Strictly improves UX or unlocks new features.
 
-Hyperloom doesn't mutate your `.env` on upgrade; all migrations
+Hyperloom does not mutate your `.env` on upgrade; all migrations
 below are explicit.
 
 ```{note}
@@ -214,6 +214,224 @@ from scripts, and read `reports/final.md` for the session's own summary and
 `HYPERLOOM_REPORT_LLM_BACKEND`, `HYPERLOOM_REPORT_MODEL` and
 `HYPERLOOM_REPORT_MAX_TOKENS` are no longer read and are silently ignored, so
 drop them.
+```{note}
+Steps for upgrading from 1.1.4, 1.1.3, 1.1.1, and 1.1.0 are in each version's
+[GitHub release](https://github.com/AMD-AGI/Hyperloom/releases) under the
+"Upgrade steps" heading, alongside the changelog for that release.
+```
+
+## Upgrading from 1.1.5
+
+Finish in-flight sessions under the build that started them. Every session's
+`storage/coordinator.db` now records schema version 8 and there are no
+in-place migrations, so `optimize --resume-from` on a session started by 1.1.5
+or earlier exits `2` before it touches the session, with
+`coordinator.db is at schema version 7, older than this build's 8: sessions created before this release cannot be resumed`.
+`kernelforge forge-loop --resume` likewise refuses a 1.1.5 checkpoint that has
+finished a round, with
+`run state round_costs.recent[0] missing fields: review_sec`.
+
+Recipe KB rows that 1.1.5 filed under a framework build with a local label,
+`v` prefix or `.dev` segment (for example `0.30.0+rocm723`) are no longer exact
+warm-start hits: identities now key on the release (`0.30.0`), and those rows
+are reached only through the `compatible_framework_version` tier (confidence
+0.72). Nothing migrates them; the next CLOSE writes the release row.
+
+### Removed options and module paths
+
+Options and module paths 1.1.5 accepted are removed or refused. The parsers
+are strict, so a command that still carries one exits with
+`unrecognized arguments` or `No module named` before it runs.
+
+| Removed | What to do |
+|---|---|
+| TraceLens kernel tool `--use-llm-orchestrator` or `--no-llm-orchestrator` | Use `--route agent` or `--route non-llm`. |
+| TraceLens kernel tool `--num-denoise-steps`, `--model-path`, `--precision` | Delete them; they fed the diffusion latency roofline, which is removed. |
+| `python -m hyperloom.orchestrator.trace_analysis.bypass_trace_analysis` | Use `tracelens_analysis --route non-llm`. |
+| `python -m hyperloom.inference_optimizer.framework_deps` | Nothing replaces it; its installer assets were already gone, so it did nothing. |
+| A `--benchmark-config` YAML whose `profiler.torch_profiler.num_profiles` is not `1` | Refused at launch: a profile round captures one window. Drop the key. |
+| Imports of `hyperloom.common.{aiter_jit_cache, checkpoint_quant, coerce, env, fs_utils, git_safety, gpu_identity, io, jsonio, pr_monitor_urls, proctree, timeutil, unified_diff}` and of `hyperloom.common.{llm_config, llm_headers, llm_attribution, llm_request_hooks, llm_stability_env, token_usage, reasoning_effort, claude_oneshot}` | Import them from `hyperloom_common` and `hyperloom_common.llm`; no aliases are kept. `kernelforge.tools.durable_io` is removed: use `hyperloom_common.io`. |
+| KernelForge modules under `kernelforge.loop`, `kernelforge.gemm_tune`, `kernelforge.fusion`, `kernelforge.orchestrator`, `kernelforge.assembly`, `kernelforge.llm`, `kernelforge.tracker`, `kernelforge.tools`, `kernelforge.kernel_rewrite_controller` and `kernelforge.rewrite_by_flydsl` | They move under `kernelforge.workflows`, `kernelforge.kernel_backends`, `kernelforge.agent_backends`, `kernelforge.utils` and `kernelforge.config`, with no compatibility modules. A hand-written MCP configuration that runs `python -m kernelforge.orchestrator.specialist_probe_server`, the path 1.1.5 named, needs `kernelforge.workflows.forge_loop.roles.specialist_probe_server`; `kernelforge.evaluation.benchmark.runner` and `kernelforge.knowledge.pr_knowledge.mcp_server` keep their paths. No `kernelforge` subcommand is removed. |
+
+### Removed and changed environment variables
+
+Environment variables fail differently: nothing refuses most of them, so a box
+that still exports one starts normally and behaves as though it were unset.
+Find them by reading launch scripts, `.env` and the kernel-agent env file. The
+settings that do stop the run are marked below.
+
+| Removed or changed variable | What to do |
+|---|---|
+| `MAGPIE_EVAL_LIMIT`, `MAGPIE_EVAL_TASKS`, `MAGPIE_EVAL_TOKENIZED_REQUESTS` | Rename them to `HYPERLOOM_EVAL_LIMIT`, `HYPERLOOM_EVAL_TASKS` and `HYPERLOOM_EVAL_TOKENIZED_REQUESTS`. The old names are ignored, so a smoke box that capped the eval with `MAGPIE_EVAL_LIMIT` now runs the full GSM8K. |
+| `MAGPIE_PATH`, `MAGPIE_REF`, `MAGPIE_REPO`, `MAGPIE_PACKAGE_SPEC`, `MAGPIE_INFERENCEX_PATH`, `MAGPIE_EVAL_FLAG_STRICT`, `PATCH_MAGPIE` and every other `MAGPIE_*` name | Delete them; Magpie is no longer installed or imported (see *Installation prerequisites*). |
+| `HYPERLOOM_BENCHMARK_BACKEND` | Delete it; every round runs through InferenceSuite. `--framework custom` no longer needs `HYPERLOOM_BENCHMARK_BACKEND=bypass`; `--benchmark-scripts-dir` (`HYPERLOOM_BYPASS_SCRIPTS_DIR`) still names the script directory. |
+| `INFERENCEX_REF`, `INFERENCEX_DEFAULT_DIR` | Delete them; no InferenceX checkout is configured any more. The client is staged at the commit `inference_suite.pins` pins, and the base launch is read from InferenceX `main` unless `--inferencex-commit` names one. `INFERENCEX_PATH` is optional and no longer set by `install.sh`; the research scout reads reference launch scripts under it. |
+| `HYPERLOOM_EVAL_DERIVE_STOP`, `HYPERLOOM_EVAL_STOP_STRINGS` | Delete them; nothing reads them. `HYPERLOOM_EVAL_MAX_TOKENS` is still read. |
+| `HYPERLOOM_TRACE_ANALYSIS_ROUTE=bypass`, or `analysis_route: bypass` in a `trace_analyze` request | Fails the request with `invalid_analysis_route`. Set `non-llm`, which needs a TraceLens checkout and writes `analysis.json` instead of `analysis.md`. `HYPERLOOM_BYPASS_STEADY_STATE`, `HYPERLOOM_BYPASS_CORR_WARN_PCT`, `HYPERLOOM_BYPASS_OTHERS_WARN_PCT`, `HYPERLOOM_TRACE_SHAPE_MANIFEST`, `HYPERLOOM_TRACE_SHAPE_MANIFEST_MAX_CAPTURES`, `HYPERLOOM_NUM_DENOISE_STEPS` and `KERNEL_AGENT_USE_LLM_ORCHESTRATOR` are ignored. |
+| `HYPERLOOM_SPECIALIST_PERMISSION_MODE` | Delete it; a Claude specialist always runs with `--permission-mode bypassPermissions`. |
+| `INFERENCE_OPTIMIZER_KERNEL_OPT_MAX_FAILURES`, `HYPERLOOM_ROCPROF_ROOFLINE_ENRICH`, `HYPERLOOM_ROCPROF_ROOFLINE_TIMEOUT_SEC` | Delete them; nothing reads them. |
+| `GEAK_TERM_GRACE_S` | Delete it; the KERNEL phase stops every process its GEAK run started, and `GEAK_FLUSH_GRACE_S` is the window GEAK gets to flush its result. |
+| `RAY_CLI_CLICK_MAX_VERSION` | Delete it; the Ray CLI is certified by its own `ray start` parser. `RAY_VERSION` is still honored. |
+| `HYPERLOOM_GPU_POWER_INTERVAL_S` | The default drops from 2 s to 1 s. A value above 1.5 s is refused: the round samples nothing, so a power budget refuses it as unmeasured. |
+| `KERNEL_AGENT_ENV` naming `$USER_DATA_PATH/runtime/kernel-agent.env.sh` (a 1.1.5 `.env` or shell) | Ignored and derived again; the file now lives at `${TMPDIR:-/tmp}/hyperloom-<uid>-<key>/kernel-agent.env.sh` on the container's own disk, and install removes the old copy. A value in a directory that the group or others can write **is refused** by `install.sh` and by preflight. |
+| `TRACELENS_ROOT` naming an earlier install's `TraceLens@<sha>` | Exits 2 at preflight (`is an earlier install's checkout`). Delete the line and rerun `install.sh`. |
+| A malformed numeric `HYPERLOOM_MN_*` setting (for example `HYPERLOOM_MN_HEALTH_POLL_S=10s`) | Fails the first multi-node restart (`invalid multi-node restart setting`) and makes a `hyperloom multi-node` subcommand exit 3, where 1.1.5 fell back to a default on some paths. |
+
+### Changed defaults and gates
+
+The same command behaves differently with these defaults and gates:
+
+- **The base launch comes from a recipe, not from Magpie's scripts.** Without
+  `--reference-script`, a new session resolves its server launch from InferenceX
+  `main`, then the framework's cookbook, then (for a fixed workload only) a
+  default table, and freezes it as `base_launch.json`. The sources are read from
+  GitHub at launch; a fixed session that cannot read one takes the default
+  table, and `--inferencex-commit SHA` pins the InferenceX read. An omitted
+  `--tp` or `--ep` (and no `$TP` or `$EP`) now follows the recipe. A native AgentX
+  session that no recipe serves, or a single-node base that needs more GPUs than
+  the host sees, exits `2`.
+- **`--reference-script` is the session's base launch.** It wins over every
+  recipe source and is now accepted under native AgentX. A script that sets a
+  flag from a shell variable (1.1.5 dropped it silently), carries a
+  `# hyperloom-launch-controls:` line, cannot be read or does not launch the
+  session's framework exits `2`, and a base whose server command is not the
+  framework's default entrypoint (for example a hand-written interpreter path)
+  is refused as `config_invalid` at its first round.
+- **Native AgentX accuracy is a GSM8K round.** The baseline, and each
+  candidate that clears the KEEP bar, runs GSM8K on a server of its own;
+  `--no-agentx-accuracy` turns it off. The request error rate no longer grades
+  accuracy, only the measurement's validity.
+- **AgentX keeps on a 2% P50 interactivity gain, not 3%.** The guards are P90
+  interactivity and total token throughput inside `HYPERLOOM_PERF_NOISE_PCT`;
+  an output-throughput drop alone no longer refuses, `output_regressed` is no
+  longer given and `total_regressed` is new.
+- **A `custom` workload's script is named after the board and its gate is
+  read on raw scores.** `GPU_TYPE` is exported as the board, so
+  `--benchmark-scripts-dir` is searched for `custom_mi308x.sh`,
+  `custom_mi325x.sh` or `custom_r9700.sh` where 1.1.5 looked for
+  `custom_mi300x.sh` or `custom_gfx12.sh`; keep the script the only `.sh` in
+  the directory or rename it. A baseline whose report carries no
+  `quality_gate` stops the run with `baseline_accuracy_failed`, and a gate
+  without `passed` is judged against the limits it names, else `lpips` 0.15,
+  `ssim` 0.85 and `mse` 0.006.
+- **Specialists run sandboxed where bubblewrap works.** With a usable,
+  non-setuid `bwrap` on `PATH`, every specialist runs in a bubblewrap sandbox,
+  with no switch to turn it off: it reaches only the LLM endpoints and MCP
+  servers its launch names, downloads no model or package (a Hugging Face model
+  must already be in the cache), and `codex` ignores
+  `HYPERLOOM_CODEX_SANDBOX_MODE`. A `claude` CLI whose login exists only in the
+  app's home cannot read it there: it runs unconfined with a WARNING until the
+  environment holds `ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN` or
+  `CLAUDE_CODE_OAUTH_TOKEN`, and is refused where isolation is required (a
+  hosted run, or `HYPERLOOM_SPECIALIST_USER` set). Claude specialists also stop
+  loading the operator's `~/.claude` settings (`--setting-sources=`).
+- **A session on part of an NPM-enabled node is refused.** With node power
+  management enabled, a launch or resume whose visible-device mask leaves out
+  any GPU on the node exits `2`; pass `--allow-shared-npm-node` on every launch
+  and resume to measure anyway.
+- **`ROCR_VISIBLE_DEVICES` must hold GPU indices.** A round names its GPUs by
+  index, so a UUID mask, which Magpie passed through, fails the baseline with
+  `the round's ROCR_VISIBLE_DEVICES is not a list of GPU indices`.
+- **A launch needs `install.sh` in its own container.** The kernel-agent env
+  file is container-local, so `optimize` in a new container that skipped
+  `install.sh` exits `2` at preflight. Source the kernel-agent env file with
+  the line given in the [Generic upgrade procedure](#generic-upgrade-procedure).
+- **A session that holds a credential keeps its database outside the session
+  directory.** When `--extra-env` or `--server-args` carry a credential, the
+  coordinator database lives below `${TMPDIR:-/tmp}/hyperloom-ledger-<uid>/`,
+  so resuming it in a new container is refused unless `HYPERLOOM_LEDGER_DIR`
+  names a persistent private directory that holds it.
+
+### Installation prerequisites
+
+- Magpie is no longer installed and no InferenceX checkout is configured. `install.sh`
+  stages the InferenceX client at the pinned commit, the GSM8K task and the
+  AgentX harness into `INFERENCE_SUITE_TOOL_CACHE` (default
+  `${HYPERLOOM_CACHE_DIR:-$REPO_ROOT/.cache}/inference-suite-tools`) and
+  installs `lm-eval` 0.4.13, hash-locked from PyPI, into `$PYTHON`; preflight
+  no longer installs `lm_eval`. A round fetches nothing and refuses with
+  `staging_missing` when the cache or `$PYTHON` lacks a pinned tool, and
+  `install.sh --check-only` fails with `behind the pinned revisions`. Rerun
+  `install.sh` after upgrading, on every node and container that runs rounds.
+- TraceLens is pinned to `bda57c6d97cb0ec6810d41f9eba8bb10a0315d52` (was
+  `614c597bc0c66cabf6a15152037324acc7386090`); rerun `install.sh`.
+- A GEAK run that selects an agent backend (`GEAK_AGENT_BACKEND`,
+  `GEAK_AGENT_PROFILE`, or the Codex backend an OpenAI-only configuration
+  implies) needs Node 20 or newer and that agent's CLI. `install.sh` reuses a
+  Node on `PATH` or fetches Node 22.23.3 from nodejs.org, and pins
+  `GEAK_NODE_BIN` and `GEAK_CODEX_BIN`; preflight exits `2` when a binary GEAK
+  will run is not runnable. Forge runs and `--no-kernel` skip the check.
+- The validated SGLang stack moves from 0.5.21 to 0.5.23 (`SGLANG_REF`
+  `297e54fd105e`): use `lmsysorg/sglang-rocm:v0.5.23-rocm10-mi30x-20261111` or
+  `-mi35x-20261111`. The 20261118 builds answer `/start_profile` with
+  `403 Forbidden` because Hyperloom starts SGLang without an admin API key, so
+  their sessions get no roofline profile.
+- The validated vLLM stack moves from 0.29.0 to 0.33.0: the image is
+  `vllm/vllm-openai-rocm:v0.33.0-rocm100` (was
+  `rocm/vllm:rocm10.0.0_ubuntu24.04_py3.14_pytorch_2.12.0_vllm_0.27.0`), and on
+  bare metal `VLLM_ROCM_VARIANT` defaults to `rocm72` (was `rocm723`) and
+  `VLLM_SOURCE_REF` to `4ba787ec9959`. An Ubuntu 22.04 host that pins
+  `VLLM_VERSION=0.27.1` must now also set `VLLM_ROCM_VARIANT=rocm723`.
+- `install.sh` commits the served state of each framework checkout an image
+  ships (SGLang, aiter), uncommitted and untracked files included, as
+  `Hyperloom image baseline` under `refs/hyperloom/image-baseline`, and stops
+  on a checkout with unmerged paths or more than 256 MiB of untracked files.
+- `install.sh` stops writing `TRACELENS_ROOT`, `GEAK_ROOT`, `GEAK_E2E_RUNNER`,
+  `KERNEL_AGENT_ENV`, `HYPERLOOM_RUNTIME_DIR` and `HYPERLOOM_ROOT` into `.env`,
+  removes the installer-written copies, and removes `INFERENCEX_PATH` even
+  when written by hand; export them in the shell to keep an override. On a checkout another account can write, it keeps the
+  Anthropic-side credentials out of `.env`, rebuilds the file (mode `0600`,
+  comments dropped) from the assignments such a file can lend, and leaves
+  `HYPERLOOM_DOTENV_CREDENTIALS=kernel-agent-env`; export credentials in the
+  shell that runs `install.sh`.
+- New optional extras: `deepseek`, `hosted`, `runner` and `inferasim`; `forge`
+  adds `pydantic>=2.0`. No console script is removed; `hyperloom-multibranch`
+  is new.
+
+### Session and report consumer changes
+
+- Each round directory is an InferenceSuite run directory with `report.json`,
+  `launch.json` and `power.json`; Magpie's result files are gone, `failed_step`
+  names the step `report.json` names, and grid results no longer carry
+  `benchmark_backend`. `power.json` replaces `gpu_power.json` and
+  `gpu_samples.csv`, `report.json` gains a `power` section, and
+  `gpu_power_avg_w` and `gpu_power_by_gpu_w` are `null` when `power_valid` is 0.
+- `session_breakdown.json` moves from v6.0 to v6.1: `throughput_tok_s_per_gpu`
+  in `outcome.baseline`, `outcome.final` and the `baseline` event's
+  `measurement` is renamed `output_throughput` (same value; the old key is not
+  written), and re-exporting a 6.0 session yields a null
+  `outcome.baseline.output_throughput`. Keys no producer populated, keys that
+  only carried a constant, and keys only the diffusion latency roofline or the
+  `bypass` route wrote are removed (read `ceiling_available` instead of
+  `close.roofline_progress.ceiling_kind`, and `selected_role` instead of the
+  trace certificate's `production_*` keys); `attributed_gain_pct`,
+  `unattributed_gain_pct` and run `empty` are `null` when unmeasured. A GEAK
+  candidate that got no rebench verdict now reports `gain_pct` `null` and
+  verdict `no_improvement` instead of GEAK's own figure. The full list is
+  under Versioning in
+  [`session_breakdown.json` integration](session-breakdown.md).
+- The workflow-evaluation contract moves from v2 to v3, so new sessions stamp
+  `e0d44b1ababa0febbcf0bf1b416b11f62dd52d4ff3a8877cfc8f8c709e774516`. Its stop
+  reasons drop `no_kernel_skipped` and gain `host_gpus_unavailable` and
+  `prelude_budget_exhausted`; `global` drops `baseline_tput`,
+  `cycle_reloop_min_remaining_sec`, `session_remaining_sec` and
+  `sweep_closeout_status`; predicate inputs drop `phase_budget_pct` and the
+  `skip_to_close` hint; `sweep_reloop` drops `max_cycles`; and ENABLEMENT's
+  `integrate_patch` and `specialist` move from LLM-proposable to
+  Coordinator-reserved.
+- `manifest.json` drops `dependencies.magpie`, `research_lane_capacity` and
+  `gpu_specialist_capacity`. `state.json` drops `benchmark_backend`,
+  `active_inferencex_path`, `reference_server_args`, `reference_envs`,
+  `reference_launch_controls`, `reference_model`, `agentx_epoch`,
+  `kernel_opt_task_attempts` and `last_kernel_opt`, among others, and gains
+  `base_launch_digest`, `measurement_epoch`, `agentx_accuracy`,
+  `baseline_accuracy_definition_digest` and `roofline_runtime_sec`.
+- `kernel_optimization_summary.json` moves to `schema_version` 3: `totals`
+  counts `claimed`, `adopted`, `rejected`, `failed`, `needs_review` and
+  `not_dispatched`, `rejection_breakdown` is replaced by
+  `failure_reason_breakdown`, and `by_kernel` has one row per candidate.
+- Failure records gain `engine_execute_timeout` and `engine_runtime_death`, so
+  a death after the server was ready is no longer filed as `engine_core_init`.
 
 ---
 
@@ -492,7 +710,7 @@ tolerated; see [Inference Optimizer Skill](https://github.com/AMD-AGI/Hyperloom/
 `dense`, `moe_mla`, `moe_swa`, `moe_mla_nsa`.
 
 If `--model-class` is omitted and inference cannot determine the family, the
-Coordinator falls back to a generic dense prior — likely sub-optimal for mixture of experts (MoE) /
+Coordinator falls back to a generic dense prior, likely suboptimal for mixture of experts (MoE) /
 multi-head latent attention (MLA) / native sparse attention (NSA) models.
 
 ### Required: pass `--compare-against-gpu` to opt into InferenceX reference fetching
@@ -510,7 +728,7 @@ the "vs B200" comparison number).
 ### Required: setup is no longer an in-loop action
 
 Earlier launchers might have waited for the Coordinator to emit a
-`setup` action. Move all setup work to **before** the
+`setup` action. Move all setup work to before the
 `python -m hyperloom optimize` call:
 
 ```diff
@@ -553,7 +771,7 @@ The `--compat-report-path` argument was removed.
 
 There is no `HYPERLOOM_ENABLE_PMC_ROOFLINE` environment variable. Roofline
 analysis (the composite `profile` + `trace_analyze` + `analysis.md` path) is
-controlled by the CLI flag `--enable-roofline`, which defaults **on**. Pass
+controlled by the CLI flag `--enable-roofline`, which defaults on. Pass
 `--no-enable-roofline` for a profile-only run. See
 [Environment variables](environment-variables.md).
 
@@ -596,7 +814,7 @@ need a downstream migration, as described in
 
 ## Upgrading from pre-0.5 (training and MLPerf-training)
 
-Hyperloom is **inference-only** since v0.4. If you are still on a
+Hyperloom is inference-only since v0.4. If you are still on a
 training-mode build:
 
 * The training-mode TraceLens CLI

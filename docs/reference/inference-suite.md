@@ -4,7 +4,7 @@ myst:
         "description": "Reference for InferenceSuite, the package that resolves a session's base launch and runs every Hyperloom benchmark round: recipe sources, framework checks, launch layers, server lifecycle, staging, the run directory and report.json."
         "keywords": "Hyperloom, InferenceSuite, inference_suite, base launch, recipe, InferenceX, SGLang cookbook, vLLM recipes, ATOM, AgentX, run_round, report.json, staging, lm-eval, GSM8K, AMD GPU, ROCm"
 ---
-# InferenceSuite reference
+# Hyperloom InferenceSuite reference
 
 InferenceSuite (`src/inference_suite/`) resolves a session's base launch and runs
 every benchmark round Hyperloom measures. It builds only on `hyperloom_common` and

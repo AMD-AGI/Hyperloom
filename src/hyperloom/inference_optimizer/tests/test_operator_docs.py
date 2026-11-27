@@ -33,7 +33,7 @@ def test_every_flag_the_agentx_workflow_names_is_an_optimize_flag() -> None:
 
 
 @pytest.mark.parametrize(
-    "doc", ["reference/environment-variables.md", "reference/authentication.md", "install/install.md"]
+    "doc", ["reference/environment-variables/env-vars-paths.md", "reference/authentication.md", "install/install.md"]
 )
 def test_the_tool_cache_variable_is_documented_under_its_code_name(doc: str) -> None:
     assert f"`{TOOL_CACHE_ENV}`" in (DOCS / doc).read_text(encoding="utf-8")
