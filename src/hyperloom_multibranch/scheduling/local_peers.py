@@ -407,7 +407,7 @@ def local_peers(host: MeasurementHost, sessions: SpecialistSessions, setup: Peer
     toolbox = _toolbox(host, setup, repo, _canonical(canonical_dir, workload, host, frozen.launch))
     reviews = _option_reviews(frozen.launch, toolbox, layout.toolbox)
     served = SpecialistToolOptions(
-        option_reviews=reviews, native_server=native_component(workload.framework) is not None
+        option_reviews=reviews, native_server=native_component(workload.framework) is not None, workload=workload.kind
     )
     gate_blackboard = LocalBlackboard(layout.blackboard, Writer(Role.GATE, GATE_WRITER))
     rule = workload_rule(workload, gate_blackboard)

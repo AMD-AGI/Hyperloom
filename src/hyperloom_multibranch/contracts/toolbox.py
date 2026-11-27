@@ -148,6 +148,20 @@ class BuildStatus:
 
 
 @dataclass(frozen=True)
+class BranchSlots:
+    """A branch's K, the slots of it its running tests leave and the test slots free now: a test of the branch
+    submitted now starts at once only while both are free (:attr:`start_now`)."""
+
+    k: int
+    free: int
+    free_tests: int
+
+    @property
+    def start_now(self) -> bool:
+        return self.free > 0 and self.free_tests > 0
+
+
+@dataclass(frozen=True)
 class QueueState:
     """What the scheduler and the dashboard read: queue lengths by priority, running tests by branch, cold start time.
 
@@ -172,6 +186,11 @@ class QueueState:
     k_by_branch: Mapping[str, int] = field(default_factory=dict)
     free_slots_by_branch: Mapping[str, int] = field(default_factory=dict)
     free_test_slots: int = 0
+
+    def slots_of(self, branch: str) -> BranchSlots:
+        return BranchSlots(
+            self.k_by_branch.get(branch, 0), self.free_slots_by_branch.get(branch, 0), self.free_test_slots
+        )
 
     @property
     def queued(self) -> int:
@@ -364,6 +383,7 @@ __all__ = [
     "BranchLease",
     "LeaseCharge",
     "BuildState",
+    "BranchSlots",
     "BuildStatus",
     "CancelOutcome",
     "MeasurementCapacity",

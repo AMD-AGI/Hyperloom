@@ -73,12 +73,14 @@ from hyperloom_multibranch.contracts.blackboard.interfaces import Blackboard, Bl
 from hyperloom_multibranch.contracts.blackboard.records import InboxItem
 from hyperloom_multibranch.contracts.toolbox import (
     SCOPE_SPECIALIST,
+    BranchSlots,
     SpecialistGrant,
     Backpressure,
     RequestRejected,
     TestProgress,
     Toolbox,
     ToolboxError,
+    WorkloadKind,
 )
 from hyperloom_multibranch.blackboard.tools import ERROR, blackboard_tools
 from hyperloom_multibranch.toolbox.analysis import CODE_NO_EXECUTOR, AnalysisStarter
@@ -229,6 +231,11 @@ _TEST_RESULT_READS_NATIVE = (
 _WAIT_TEST_READS = "How to wait for a test of this branch, or for any branch's profile test"
 _WAIT_TEST_READS_NATIVE = (
     "How to wait for a test of this branch, for any branch's profile test or for a baseline test of the session"
+)
+_WAIT_TEST_SLOTS = (
+    " Every reply gives this branch's K (branch_k), the slots of it no running test of the branch takes "
+    "(branch_free_slots) and the machine's test slots no test runs in or waits for (free_test_slots); the first call "
+    "on a test returns at once while both are free, for the next candidate to be submitted before waiting."
 )
 _TEST_RESULT_GUIDE = (
     " An AgentX test's "
@@ -697,22 +704,28 @@ def _waiting_document(request_id: str, waited: float, progress: TestProgress | N
     return document
 
 
+def _slot_fields(slots: BranchSlots) -> dict[str, Any]:
+    hint = (
+        f"{slots.free} free slot(s): prepare and submit your next candidate"
+        if slots.start_now
+        else "prepare your next candidate, a test submitted now only queues"
+    )
+    return {"branch_k": slots.k, "branch_free_slots": slots.free, "free_test_slots": slots.free_tests, "hint": hint}
+
+
 def _wait_test(
     toolbox: Toolbox, blackboards: BlackboardFor, home: asyncio.AbstractEventLoop | None, options: SpecialistToolOptions
 ) -> Callable[[dict[str, Any], CallContext], Any]:
     poll_seconds, baselines = options.wait_poll_seconds, options.native_server
-    # The first wait on a test returns at once while a test of its branch would start now (a free slot of its K and a
-    # free test slot), so that the slot is filled before the specialist waits; later waits on that test block, so a
-    # branch with nothing to submit does not spin on the call.
+    # In an AgentX session the first wait on a test returns at once while a test of its branch would start now, so
+    # that the slot is filled before the specialist waits; later waits on that test block, so a branch with nothing to
+    # submit does not spin on the call.
     waited_on: set[str] = set()
 
-    async def slots(branch: str) -> dict[str, int]:
-        state = await on_home_loop(home, toolbox.queue_state())
-        return {
-            "branch_k": state.k_by_branch.get(branch, 0),
-            "branch_free_slots": state.free_slots_by_branch.get(branch, 0),
-            "free_test_slots": state.free_test_slots,
-        }
+    async def slots(branch: str) -> BranchSlots | None:
+        if options.workload is not WorkloadKind.AGENTX:
+            return None
+        return (await on_home_loop(home, toolbox.queue_state())).slots_of(branch)
 
     async def handle(arguments: dict[str, Any], ctx: CallContext) -> dict[str, Any]:
         request_id, branch = arguments["request_id"], ctx.principal.branch
@@ -720,22 +733,18 @@ def _wait_test(
         record = await _own_record(blackboards, ctx, request_id, profiles_shared=True, baselines_shared=baselines)
         first, branch_slots = request_id not in waited_on, await slots(branch)
         waited_on.add(request_id)
-        if not (first and branch_slots["branch_free_slots"] and branch_slots["free_test_slots"]):
+        if not (first and branch_slots is not None and branch_slots.start_now):
             while not _is_over(record) and (left := budget - (time.monotonic() - started)) > 0:
                 await asyncio.sleep(min(poll_seconds, left))
                 record = await _own_record(
                     blackboards, ctx, request_id, profiles_shared=True, baselines_shared=baselines
                 )
             branch_slots = await slots(branch)
+        shown = {} if branch_slots is None else _slot_fields(branch_slots)
         if _is_over(record):
-            return _result_document(request_id, record) | branch_slots
+            return _result_document(request_id, record) | shown
         progress = await on_home_loop(home, toolbox.progress(request_id))
-        document = _waiting_document(request_id, time.monotonic() - started, progress) | branch_slots
-        if (free := branch_slots["branch_free_slots"]) and branch_slots["free_test_slots"]:
-            document["hint"] = f"{free} free slot(s): prepare and submit your next candidate"
-        else:
-            document["hint"] = "prepare your next candidate, a test submitted now only queues"
-        return document
+        return _waiting_document(request_id, time.monotonic() - started, progress) | shown
 
     return handle
 
@@ -930,7 +939,8 @@ class SpecialistToolOptions:
     unset; with it ``option_review`` is served, and without it (a session that laid no option inventory) it is not.
     ``native_server`` says the session's server is built from its framework's checkout: every branch then reads the
     session's baseline tests, whose results carry the server's timing lines, and ``test_result`` and ``wait_test``
-    say so.
+    say so. ``workload`` is the kind of the session's workload: an AgentX session's ``wait_test`` tells the branch's
+    free slots and returns early while a test of it would start now.
     """
 
     claim_ttl_seconds: float = 600.0
@@ -941,6 +951,7 @@ class SpecialistToolOptions:
     wait_poll_seconds: float = WAIT_POLL_SECONDS
     option_reviews: OptionReviews | None = None
     native_server: bool = False
+    workload: WorkloadKind = WorkloadKind.INFERENCEX
 
 
 def register_specialist_tools(
@@ -1009,10 +1020,7 @@ def _register_test_queries(
             f"{_WAIT_TEST_READS_NATIVE if options.native_server else _WAIT_TEST_READS}: returns as soon as its result "
             "lands, else after wait_seconds with the test's progress; call it again to keep waiting. A test in state "
             "pending_build is waiting for the native builds its change needs (progress.builds, each with its "
-            "eta_seconds), not stuck. Every reply gives this branch's K (branch_k) and the slots of it no running test of "
-            "the branch takes (branch_free_slots) and the machine's test slots no test runs in or waits for "
-            "(free_test_slots); the first call on a test returns at once while both are free, for the next candidate "
-            "to be submitted before waiting."
+            "eta_seconds), not stuck." + (_WAIT_TEST_SLOTS if options.workload is WorkloadKind.AGENTX else "")
         ),
         schema=_WAIT_TEST,
         handler=_wait_test(toolbox, blackboards, home, options),
