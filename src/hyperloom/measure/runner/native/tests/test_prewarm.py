@@ -393,6 +393,56 @@ def test_a_build_for_a_cards_cu_count_is_installed_only_when_it_covers_that_card
         )
 
 
+_A4W4 = "module_gemm_a4w4_blockscale"
+_A4W4_CK = "a4w4_blockscale_256x64x128x128_16x16_16x16_8x32x1_8x32x1_1x32x1x8_8_2x2_intrawave_v3"
+
+
+@pytest.mark.parametrize(("kernels", "installed"), [(_A4W4_CK, True), ("another_ck_kernel", False)])
+def test_an_a4w4_build_is_held_to_the_ck_kernels_of_the_narrow_n_overlay_not_its_triton_and_flydsl_ones(
+    tmp_path: Path, kernels: str, installed: bool
+) -> None:
+    """aiter's narrow-N overlay of the a4w4 table (``model_configs/narrow_n_a4w4_blockscale_tuned_gemm.csv``, no libtype
+    column) selects Triton and FlyDSL kernels that its CK codegen leaves out of the module, and the CK kernels they fall
+    back to, which it builds in: the module is installed when it holds those, whatever the overlay's own kernels."""
+    package = image(tmp_path / "image", missing=(standin.MODULE,))
+    config_file = package / "jit" / "optCompilerConfig.json"
+    config = json.loads(config_file.read_text(encoding="utf-8"))
+    entry = config.pop(standin.MODULE)
+    config[_A4W4] = {
+        **entry,
+        "blob_gen_cmd": standin.GENERATOR.replace(standin.TABLE_VARIABLE, "AITER_CONFIG_GEMM_A4W4"),
+    }
+    config_file.write_text(json.dumps(config), encoding="utf-8")
+    (package / "configs" / "a4w4_blockscale_tuned_gemm.csv").write_text(
+        "gfx,cu_num,M,N,K,kernelId,splitK,us,kernelName,tflops,bw,errRatio\n"
+        "gfx950,256,32,800,5120,21,0,9.9035,_ZN5aiter41f4gemm_bf16_per1x32Fp4_BpreShuffle_32x128E,26.47,220.24,0.0\n",
+        encoding="utf-8",
+    )
+    overlays = package / "configs" / "model_configs"
+    overlays.mkdir(exist_ok=True)
+    (overlays / "narrow_n_a4w4_blockscale_tuned_gemm.csv").write_text(
+        "gfx,cu_num,M,N,K,kernelId,splitK,us,kernelName,tflops,bw,errRatio,fallbackKernelName,fallbackSplitK\n"
+        "gfx950,256,96,512,7168,-1,0,7.3241,triton_preshuffle_bm32_bn128_bk256_ks8_w4_wpe2_s3_g1_mi16_cmcg,96.21,310.94,"
+        f"0.01,{_A4W4_CK},0\n"
+        "gfx950,256,32,256,4096,-1,0,5.1356,flydsl_mxpsh_32x32x256_F4_F4_B16_w4_x0_sk8,13.07,118.04,0.01,,0\n",
+        encoding="utf-8",
+    )
+
+    def builder(_package: Path, modules: frozenset[str], scratch: Path) -> Mapping[str, Path]:
+        (scratch / f"{_A4W4}.so").write_bytes(b"\x7fELF " + kernels.encode())
+        return {_A4W4: scratch / f"{_A4W4}.so"}
+
+    report = prewarm.prewarm(package, builder, gfx=GFX, cu_num=256, tables=["AITER_CONFIG_GEMM_A4W4"])
+
+    if installed:
+        assert report.built == (_A4W4,) and not report.failure
+    else:
+        assert report.built == () and not (package / "jit" / f"{_A4W4}.so").exists()
+        assert report.failure == (
+            "PrewarmError: the built modules lack kernels of gfx950/256 rows of narrow_n_a4w4_blockscale_tuned_gemm.csv"
+        )
+
+
 def test_the_command_builds_for_the_cards_cu_count_into_the_package_it_is_given(tmp_path, monkeypatch, capsys) -> None:
     package = _a8w8_image(tmp_path / "image", built_from="k")
     seen: dict[str, object] = {}

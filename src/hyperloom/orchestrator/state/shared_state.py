@@ -295,7 +295,7 @@ class SharedState(
     kernel_enabled: bool = True
     # KERNEL-phase backend, recorded once when the session is created: "geak" (default) or "forge".
     kernel_optimizer: str = "geak"
-    # Snapshot of the last GEAK e2e run (result.json + final_launch.sh / bench_e2e.sh handles).
+    # The last GEAK e2e run's result.json, with the verdict the rebench settled on it.
     geak_result: dict[str, Any] = field(default_factory=dict)
     # Terminal result of the phase-level KernelForge rewrite controller.
     kernel_rewrite_controller_result: dict[str, Any] = field(default_factory=dict)
@@ -609,9 +609,6 @@ class SharedState(
     explore_search: dict[str, Any] = field(default_factory=dict)
     # specialist sub-agent rolling state; one entry per config-arm round (round_id, tasks, proposals_total/kept/rejected/skipped, etc.).
     specialist_rounds: list[dict[str, Any]] = field(default_factory=list)
-    # Per-kb_anchor coverage counters: config-arm rounds since a specialist was dispatched / since a KEEP landed.
-    rounds_since_last_specialist: dict[str, int] = field(default_factory=dict)
-    rounds_since_last_keep: dict[str, int] = field(default_factory=dict)
     # Patch verdict ledger keyed by review subject (a specialist task_id, or a candidate id for a PR pre-screen); Critic must approve/advise before PolicyGate allows the integrate_patch delegate.
     specialist_patch_verdicts: dict[str, str] = field(default_factory=dict)
     # Intervention-mix ledger ({change_type∈{config,code_patch,config_attempt,code_patch_attempt}}); Robustness detects config-only loops.

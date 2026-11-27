@@ -113,9 +113,9 @@ def _settled_failure(rebench: dict[str, Any], action_path: list[Any]) -> bool:
     Returns:
         bool: True when the rebench carries a terminal failure and the
             candidate is absent from the final stack. The absence is read off
-            the stack rather than trusted to the status, because a 2b rebench
-            that failed stamps ``failed`` and nothing retracts it when the 2a
-            fallback then promotes the candidate for real.
+            the stack rather than trusted to the status, because a failed
+            rebench is retryable and nothing retracts its ``failed`` stamp
+            when a later one promotes the candidate.
     """
     if str(rebench.get("final_status") or "") not in REBENCH_FAILED_STATUSES:
         return False

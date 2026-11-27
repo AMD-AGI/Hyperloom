@@ -6,8 +6,10 @@
 A compile runs code the candidate controls (its sources, and the build's own scripts over them), so it must not share a
 process, a user or a network with the build service, which signs what the store holds. :class:`IsolatedBuilds` lays the
 tree in this process (nothing of the candidate runs then), hands it to a child process (:mod:`.child`) that runs under
-:class:`Isolation`, with none of this process's variables, and reads back only what the child staged: its record, as
-untrusted data, and its output files, which the store copies by hash. The service then signs (:func:`~hyperloom.measure.
+:class:`Isolation`, with none of this process's variables but ``PATH`` and the library search path ``LD_LIBRARY_PATH``
+(:data:`~hyperloom.measure.runner.native.recipes.CHILD_PASSED_ENV_NAMES`, whose absolute directories bubblewrap binds
+read-only), and reads back only what the child staged: its record, as untrusted data, and its output files, which the
+store copies by hash. The service then signs (:func:`~hyperloom.measure.
 runner.native.service.ensure_build`).
 
 :func:`local_isolation` is the minimal local isolation, the first of two tiers that works on this host:
@@ -73,6 +75,7 @@ from hyperloom.measure.jit.store import SnapshotInvalid, read_bounded
 from hyperloom.measure.runner.native.builder import LaidTree
 from hyperloom.measure.runner.native.planning import NativePlanner, PlannedBuild
 from hyperloom.measure.runner.native.process_group import run_in_group
+from hyperloom.measure.runner.native.recipes import CHILD_PASSED_ENV_NAMES
 from hyperloom.measure.runner.native.service import Build, Staged
 
 __all__ = [
@@ -458,8 +461,19 @@ def _give(work: Path, uid: int) -> None:
 
 
 def _child_environment(work: Path) -> dict[str, str]:
-    """The child's whole environment: no variable of this process (none of its credentials, proxies or key paths)."""
-    return {"PATH": os.environ.get("PATH", os.defpath), "HOME": str(work), "TMPDIR": str(work), "LC_ALL": "C.UTF-8"}
+    """The child's whole environment: ``PATH``, a home and temporary directory in ``work``, and this process's
+    :data:`~hyperloom.measure.runner.native.recipes.CHILD_PASSED_ENV_NAMES` where they are set; no other variable of this process (none of its credentials,
+    proxies, key paths or preloads).
+
+    The image's torch may load a library only that search path names (a ROCm SDK's ``libamd_smi.so`` beside the
+    image's packages): without it the child's preflight cannot import torch, nor can the compile."""
+    return {
+        "PATH": os.environ.get("PATH", os.defpath),
+        "HOME": str(work),
+        "TMPDIR": str(work),
+        "LC_ALL": "C.UTF-8",
+        **{name: os.environ[name] for name in CHILD_PASSED_ENV_NAMES if os.environ.get(name)},
+    }
 
 
 def _children_cpu_seconds() -> float:

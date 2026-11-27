@@ -1088,7 +1088,9 @@ aiter module build lays its farm in the work directory, and the image's aiter di
 read-only), it sees only `/sys/devices/system/cpu` of `/sys`, the base `/dev` nodes and no GPU, it has a network of
 its own (outside addresses give `ENETUNREACH`), and the signing key and trust file (registered as the app's private
 paths) are absent, also where a bound tree holds them (that tree is bound entry by entry without them); its environment
-is only `PATH`, `HOME`, `TMPDIR` and `LC_ALL`. The build record's `isolation` entry is `uid+netns`, `uid` or
+is only `PATH`, `HOME`, `TMPDIR`, `LC_ALL` and, where the service's own environment sets it, the service's
+`LD_LIBRARY_PATH` (the image's torch may load a library only that search path names), whose absolute directories are
+bound read-only under bubblewrap. The build record's `isolation` entry is `uid+netns`, `uid` or
 `bwrap+netns`. Where neither tier works, the toolbox refuses at start (`build_preflight`) and each build fails as the
 machine's, naming both reasons as its choice found them; a bubblewrap whose probe gives no answer in time is not
 refused but logged, and each build asks again.
@@ -1415,7 +1417,6 @@ See [Optimize an AgentX workload](../how-to/optimize.md#optimize-an-agentx-workl
 | `INFERENCE_OPTIMIZER_CYCLE_RELOOP_MIN_REMAINING_SEC` | Optional | `10800` | Absolute minimum remaining session seconds to justify opening a new macro-cycle. For bounded sessions the effective floor is `min(this, max_minutes * 60 * 0.15)` so shorter sessions are not unconditionally blocked. |
 | `INFERENCE_OPTIMIZER_KERNEL_IDLE_MAX_TICKS` | Optional | `3` | Consecutive no-work KERNEL_AGENT ticks before the phase winds down to CYCLE_END. Values below `1` are treated as `3`. A malformed value raises `EnvValueError`. |
 | `INFERENCE_OPTIMIZER_KERNEL_IDLE_MIN_SECONDS` | Optional | `600` | Wall-clock seconds a KERNEL idle streak must last before winding down to CYCLE_END. Values at or below `0` are treated as `600`. A malformed value raises `EnvValueError`. |
-| `SWEEP_VARIANT_TIMEOUT_SEC` | Optional | `2400` | Per-variant wall-clock timeout in seconds for GEAK-backed SWEEP runs. A malformed value raises `EnvValueError`. |
 
 ---
 

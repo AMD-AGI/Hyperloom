@@ -489,27 +489,20 @@ def test_a_hosted_run_with_no_account_and_a_real_layer_bubblewrap_measures_here_
     )
 
 
-@pytest.mark.parametrize(
-    ("given", "switches"),
-    [
-        ({}, []),  # run's default: on
-        ({"make_before_break": True}, ["--make-before-break"]),
-        ({"make_before_break": False}, ["--no-make-before-break"]),
-    ],
-)
-def test_the_operator_turns_make_before_break_on_or_off_in_the_spec(
-    given: dict[str, bool], switches: list[str]
+@pytest.mark.parametrize("given", [True, False])
+def test_a_spec_that_carries_make_before_break_is_accepted_and_the_key_ignored_with_one_warning(
+    given: bool, caplog: pytest.LogCaptureFixture
 ) -> None:
-    spec = dataclasses.replace(_spec("hosted"), multibranch={"workload": "inferencex", **given})
-    argv = run_argv(spec, 1.0, 8)
-    assert [arg for arg in argv if arg.endswith("make-before-break")] == switches
-
-
-@pytest.mark.parametrize("given", ["false", 0, 1])
-def test_a_make_before_break_that_is_not_true_or_false_is_refused(given: object) -> None:
-    spec = dataclasses.replace(_spec("hosted"), multibranch={"workload": "inferencex", "make_before_break": given})
-    with pytest.raises(HostedRefused, match="multibranch.make_before_break must be true or false"):
-        run_argv(spec, 1.0, 8)
+    """A hosted session restarts by parsing its spec again, so a spec written for a build that read the key must
+    still start."""
+    plain = dataclasses.replace(_spec("hosted"), multibranch={"workload": "inferencex"})
+    spec = dataclasses.replace(plain, multibranch={"workload": "inferencex", "make_before_break": given})
+    with caplog.at_level(logging.WARNING):
+        argv = run_argv(spec, 1.0, 8)
+    assert argv == run_argv(plain, 1.0, 8)
+    assert [record.getMessage() for record in caplog.records] == [
+        "multibranch.make_before_break is ignored: a test's sandbox is closed when the test ends"
+    ]
 
 
 def test_the_operator_asks_for_the_conc_sweep_and_its_points_in_the_spec() -> None:
