@@ -49,17 +49,21 @@ Hyperloom. This benchmark is a smoke check, not the session baseline.
 ## Start the session
 
 ```bash
-HYPERLOOM_EVAL_LIMIT=400 /opt/venv/bin/python3 -m hyperloom optimize \
+/opt/venv/bin/python3 -m hyperloom optimize \
   --model "$MODEL_PATH" --framework sglang --gpu-type r9700 \
   --tp 1 --conc 15 --isl 512 --osl 128 --precision bf16 --max-model-len 4096 \
   --max-hours 10 --server-args="--language-only --dtype bfloat16 --max-running-requests 64"
 ```
 
+For a quick check, prefix the command with `HYPERLOOM_EVAL_LIMIT=400` to cap
+the number of evaluation problems. Leave it unset to use the full task set
+when evaluating whether to keep an optimization.
+
 On R9600D change only `--gpu-type r9700` to `--gpu-type r9600d`. The server
 flags select Qwen's language weights and bound the number of concurrent
 requests for its Mamba cache. When no recipe serves the workload,
 `inference_suite` selects Triton attention, static memory fraction `0.9`,
-no radix cache and `SGLANG_USE_AITER=0`. No Magpie launcher is required.
+no radix cache and `SGLANG_USE_AITER=0`.
 
 The image above predates the Triton EAGLE/MTP verify-mask sizing fix. Before
 benchmarking speculative decoding, check that the serving build includes the
