@@ -255,10 +255,6 @@ async def test_a_patched_recipe_goes_through_the_planner_and_is_measured_on_the_
 PROFILE_TRACE = "*.trace.json.gz"  # SGLang writes <ts>-TP-<r>-<DECODE|EXTEND>.trace.json.gz and a merged one
 TRACELENS_JOB_SEC = 1800
 MIN_TOTAL_SHARE = 50.0  # percent of the GPU time the (at most 50) kept ops must add up to
-#: The per-op shares come from the ``ops_summary.csv`` TraceLens' perf report writes. The ``report`` route (the tool's
-#: default) runs that report with no agent; ``agent`` runs an agent runtime over it, which needs its credentials; the
-#: ``non-llm`` route writes none, so ``HL_GPU_ANALYSIS_ROUTE=non-llm`` shows empty shares.
-ANALYSIS_ROUTE = os.environ.get("HL_GPU_ANALYSIS_ROUTE", "report")
 
 
 def _tree_bytes(directory: Path) -> int:
@@ -309,9 +305,7 @@ async def test_a_profile_on_two_cards_is_analysed_by_the_real_tracelens_into_op_
         request = req(kind=TestKind.PROFILE, purpose=Purpose.PROFILE, change=RecipeDelta())
         request_id, result, _ = await _submit(toolbox, blackboard, request, root)
         traces = _assert_profile_landed(root / "session", result)
-        job = await toolbox.submit_analysis(
-            request.branch_id, "tracelens", {"analysis_route": ANALYSIS_ROUTE, "framework": "sglang"}, request_id
-        )
+        job = await toolbox.submit_analysis(request.branch_id, "tracelens", {"framework": "sglang"}, request_id)
         status = await asyncio.wait_for(toolbox._tools.wait(job), TRACELENS_JOB_SEC)  # type: ignore[union-attr]
         (pointer,) = [p for p in pointers.seen if p.job_id == job]
         _probe(
@@ -319,7 +313,6 @@ async def test_a_profile_on_two_cards_is_analysed_by_the_real_tracelens_into_op_
             request_id=request_id,
             traces=[trace.name for trace in traces],
             profile_location=result.profile_location,
-            route=ANALYSIS_ROUTE,
             job_status=str(status),
             summary=pointer.summary,
             top_op_shares=sorted(pointer.op_shares.items(), key=lambda item: -item[1])[:5],

@@ -1,16 +1,14 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""The ``report`` route of the ``tracelens`` tool: TraceLens' deterministic analysis of a serving trace, with no agent.
+"""The ``tracelens`` tool's analysis: TraceLens' deterministic report of a serving trace, with no agent.
 
-The agent route prepares the trace the same way before its model reads anything: it picks the rank trace that holds GPU
-kernels, cuts a steady-state window out of it with TraceLens' splitter, finds the graph-capture folder beside the trace
-and runs TraceLens' inference perf report on the window with that folder. The per-op table the op shares come from
-(``perf_report_csvs/ops_summary.csv``) is that report's output; the model only writes prose over it, which is the slow
-part. This route stops at the report: the same split, the same report command, and TraceLens' own graph-replay
-check on the result. A report the check marks graph-collapsed gets TraceLens' degraded fallback ``analysis.md`` and
-``analysis.json``, which is how :func:`~hyperloom_multibranch.toolbox.tools.op_shares.degraded_reason` knows to withhold
-its shares. Without a model it finishes far sooner.
+It picks the rank trace that holds GPU kernels, cuts a steady-state window out of it with TraceLens' splitter, finds the
+graph-capture folder beside the trace, runs TraceLens' inference perf report on the window with that folder, and runs
+TraceLens' own graph-replay check on the result. A report the check marks graph-collapsed gets TraceLens' degraded
+fallback ``analysis.md`` and ``analysis.json``, which is how
+:func:`~hyperloom_multibranch.toolbox.tools.op_shares.degraded_reason` knows to withhold its shares. Without a model it
+finishes far sooner.
 
 The splitter's workload hints (``--CONC``, ``--OSL``, ``--R``), the prompt length the op shares are weighted by (``ISL``) and
 the steady-state mode come from the request alone. A specialist's request gets the hints from the profile test's own point
@@ -36,8 +34,7 @@ A kernel name that several modules launch (the four FlyDSL GEMMs of a layer are 
 around it are in the window; a graph replay's are in the graph-capture folder beside the trace, which TraceLens also takes.
 A replay that cannot be paired with its capture keeps its plain names, and ``launcher_notes`` says why.
 
-It is for LLM serving traces (SGLang, vLLM, ATOM): the splitter reads their step annotations. Anything else asks for
-``analysis_route: agent``.
+It is for LLM serving traces (SGLang, vLLM, ATOM): the splitter reads their step annotations.
 """
 
 from __future__ import annotations
@@ -65,22 +62,8 @@ from hyperloom.orchestrator.actions.executors import RoundWatch, run_with_sessio
 from hyperloom.orchestrator.trace_analysis import count_gpu_kernel_events, discover_trace_inputs, is_capture_fragment
 from hyperloom.orchestrator.trace_analysis.tracelens_arch_benchmark import resolve_arch_json_path
 from hyperloom.orchestrator.trace_analysis.tracelens_skill_runner import discover_capture_folder
-from hyperloom_multibranch.toolbox.tools.kernel_launchers import Relabelled, read_launched_window
-from hyperloom_multibranch.toolbox.tools.kernel_shares import (
-    KERNEL_SHARES_FILE,
-    KernelTraceError,
-    KernelWindow,
-    kernel_window,
-    read_gpu_events,
-    write_kernel_table,
-)
-from hyperloom_multibranch.toolbox.tools.op_shares import (
-    EXCLUDED_CLAIMED_KEY,
-    EXCLUDED_EVENTS_KEY,
-    KERNEL_SHARES_KEY,
-    MODULE_SHARES_KEY,
-    OWN_DEGRADED_KEY,
-)
+from hyperloom_multibranch.toolbox.tools.kernel_shares import KERNEL_SHARES_FILE, KernelTraceError
+from hyperloom_multibranch.toolbox.tools.op_shares import MODULE_SHARES_KEY
 from hyperloom_multibranch.toolbox.tools.phase_mix import (
     MEASURED_LENGTH_KEYS,
     PHASE_MODES,
@@ -324,16 +307,6 @@ def _graph_replay_coverage(run: _Run) -> GraphReplayCoverage:
     return check_graph_replay_coverage(unified)
 
 
-def _kernel_window(chunk: Path, trace: Path, capture: Path | None) -> tuple[KernelWindow, Relabelled]:
-    """The kernel shares of the window's GPU events, the kernels of its graph replays named by the capture's launches; the
-    whole rank trace is read only to price excluded events."""
-    try:
-        launched = read_launched_window(chunk, capture)
-        return kernel_window(launched.events, lambda: read_gpu_events(trace)), launched
-    except KernelTraceError as exc:
-        raise _Refused("kernel_trace_unreadable", str(exc)) from None
-
-
 def _phase_windows(split_dir: Path, trace: Path, capture: Path | None) -> list[PhaseWindow]:
     """The prefill window and the decode window the splitter wrote, with their kernels (the whole rank trace is read once,
     and only to price excluded events)."""
@@ -356,57 +329,6 @@ def _write_degraded_report(run: _Run, coverage: GraphReplayCoverage) -> None:
     unified = run.csv_dir / "unified_perf_summary.csv"
     report.write_text(render_fallback_report(unified, coverage.graph_replay_fraction), encoding=_ENCODING)
     render_analysis_json(report)
-
-
-def _kernel_fields(kernels: KernelWindow, launched: Relabelled, table: Path) -> dict[str, Any]:
-    """What a result says of its window's kernel shares: where the table is (empty when degraded), the window's numbers."""
-    degraded = kernels.degraded_reason
-    return {
-        KERNEL_SHARES_KEY: "" if degraded else str(table),
-        "window_gpu_busy_percent": round(kernels.busy_percent, 2),
-        "window_kernel_ms": round(kernels.kernel_ms, _TIME_DIGITS),
-        EXCLUDED_EVENTS_KEY: kernels.excluded_events,
-        EXCLUDED_CLAIMED_KEY: round(kernels.excluded_claimed_ms, 2),
-        "excluded_estimated_ms": round(kernels.excluded_estimated_ms, _TIME_DIGITS),
-        "launcher_labelled_kernels": launched.launched,
-        "graph_kernels_renamed": launched.renamed,
-        "launcher_notes": list(launched.notes),
-        OWN_DEGRADED_KEY: degraded,
-    }
-
-
-def _analysed_window(result: Mapping[str, Any]) -> str:
-    """The steady-state window the orchestrator's analysis says it ran TraceLens on; empty when it names none."""
-    artifacts = result.get("artifact_paths")
-    fallback = artifacts.get("tracelens_steady_state_trace") if isinstance(artifacts, dict) else None
-    return str(result.get("steady_state_trace") or fallback or "").strip()
-
-
-def with_window_shares(result: Mapping[str, Any], trace_input: str, out_dir: Path) -> dict[str, Any]:
-    """``result`` of an analysis the orchestrator ran (the agent route, a roofline) with the kernel shares of the window it
-    analysed, which the op shares are then read from instead of the aten ops table of its perf report (the table whose
-    durations the ROCm profiler's misreport breaks).
-
-    The table is written to ``out_dir``. A result that names no window is returned as it is. One that names a window the
-    kernel shares cannot be read from carries no shares and says why: the ops table is not read in its place.
-    """
-    named = _analysed_window(result)
-    if not named or not trace_input:
-        return dict(result)
-    try:
-        origin = Path(trace_input).expanduser()
-        trace = _analysed_trace(origin)
-        kernels, launched = _kernel_window(Path(named), trace, discover_capture_folder(origin, [trace]))
-    except _Refused as exc:
-        return {
-            **result,
-            KERNEL_SHARES_KEY: "",
-            OWN_DEGRADED_KEY: f"the window {Path(named).name} cannot be read: {exc}",
-        }
-    table = out_dir / KERNEL_SHARES_FILE
-    if not kernels.degraded_reason:
-        write_kernel_table(kernels, table)
-    return {**result, **_kernel_fields(kernels, launched, table)}
 
 
 def _analyse(payload: Mapping[str, Any], session_dir: Path) -> dict[str, Any]:
@@ -526,5 +448,4 @@ __all__ = [
     "split_hint",
     "target_platform",
     "unusable_trace",
-    "with_window_shares",
 ]

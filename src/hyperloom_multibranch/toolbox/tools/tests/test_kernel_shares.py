@@ -32,7 +32,6 @@ from hyperloom_multibranch.toolbox.tools.kernel_shares import (
     read_gpu_events,
     split_in_order,
     stalled_collective,
-    write_kernel_table,
 )
 
 DATA = Path(__file__).parent / "data"
@@ -251,15 +250,6 @@ def test_every_kernel_of_the_fixture_windows_gets_a_short_label() -> None:
         for label in labels.values()
     )
     assert len(set(labels.values())) < len(names)  # template variants share a function
-
-
-def test_the_table_lists_every_kernel_largest_first_with_its_share_time_and_count(tmp_path: Path) -> None:
-    window = kernel_window(_trace("decode_window"), lambda: _trace("decode_rank_trace"))
-    path = tmp_path / "kernel_shares.csv"
-    write_kernel_table(window, path)
-    lines = path.read_text(encoding="utf-8").splitlines()
-    assert lines[0] == "name,Percentage (%),total_time_ms,count" and lines[1].startswith(f"{GEMM},35.31")
-    assert len(lines) == 1 + len(window.rows)
 
 
 @pytest.mark.parametrize(

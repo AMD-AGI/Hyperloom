@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""The ``tracelens`` tool's default route runs TraceLens' split and perf report with no agent; ``agent`` still runs one.
+"""The ``tracelens`` tool runs TraceLens' split and perf report with no agent.
 
 Its op shares are kernel shares of the raw GPU events of the trace's decode window and its prefill window, weighted by the
 time each takes in a wave of the point's workload (``data/*_gpu_events.json.gz``, synthetic windows: see
@@ -24,7 +24,7 @@ from typing import Any
 import pytest
 
 from hyperloom_multibranch.contracts.blackboard.records import ToolResultPointer
-from hyperloom_multibranch.toolbox.tools import JobStatus, ToolJobs, ToolRequest, roofline, tracelens_tool
+from hyperloom_multibranch.toolbox.tools import JobStatus, ToolJobs, ToolRequest, tracelens_tool
 from hyperloom_multibranch.toolbox.tools import tracelens_report as report
 from hyperloom_multibranch.toolbox.tools.op_shares import DEGRADED_NOTICE, KERNEL_SHARES_NOTICE
 from hyperloom_multibranch.toolbox.tools.tests import final_probe as probe
@@ -134,7 +134,6 @@ def _module(monkeypatch: pytest.MonkeyPatch, name: str, **attributes: Any) -> No
 class Rig:
     trace_input: Path
     shell: Shell
-    agent_calls: list[dict]
     trace: Path
 
 
@@ -147,20 +146,12 @@ def rig(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Rig:
     trace.write_bytes(gzip.compress(json.dumps({"traceEvents": [KERNEL_EVENT]}).encode()))
     (tmp_path / "TraceLens").mkdir()
     monkeypatch.setenv("TRACELENS_ROOT", str(tmp_path / "TraceLens"))
-    monkeypatch.delenv("HYPERLOOM_TRACE_ANALYSIS_ROUTE", raising=False)
     monkeypatch.setenv("GPU_TYPE", SESSION_LABEL)
     shell = Shell()
     monkeypatch.setattr(report, "run_with_session_kill", shell)
     monkeypatch.setattr(report, "resolve_arch_json_path", lambda platform: tmp_path / f"{platform}.json")
     _module(monkeypatch, "TraceLens.Agent.Analysis.utils", check_graph_replay_coverage=lambda csv: Coverage(False, 0.0))
-    agent_calls: list[dict] = []
-
-    async def agent(payload: dict, *, session_dir: Path) -> dict:
-        agent_calls.append(payload)
-        return {"status": "ok", "tool": "tracelens_analysis"}
-
-    monkeypatch.setattr(roofline, "trace_analyze_handler", agent)
-    return Rig(profile, shell, agent_calls, trace)
+    return Rig(profile, shell, trace)
 
 
 async def _run(tmp_path: Path, params: dict[str, Any], rig: Rig) -> tuple[JobStatus, ToolResultPointer, dict]:
@@ -180,7 +171,7 @@ async def test_by_default_no_agent_runs_and_the_pointer_carries_the_graded_waves
     prefill window's, weighted by the time a wave of the point's workload spends in each: paged attention leads."""
     probe.install_capture(rig.trace_input / "torch_trace" / "graph_capture_profile")
     status, pointer, record = await _run(tmp_path, probe.GRADED, rig)
-    assert status is JobStatus.SUCCEEDED and rig.agent_calls == []
+    assert status is JobStatus.SUCCEEDED
     assert max(pointer.op_shares, key=pointer.op_shares.get) == PAGED_ATTENTION and "aten::mm" not in pointer.op_shares
     assert pointer.op_shares[PAGED_ATTENTION] == pytest.approx(27.0, abs=0.01)
     assert pointer.op_shares[f"{CK_GEMM} [DecoderMLP.MergedColumnParallelLinear]"] == pytest.approx(16.5, abs=0.01)
@@ -331,27 +322,6 @@ async def test_a_hint_is_passed_as_the_splitter_takes_it(
     assert "--ISL" not in split
 
 
-@pytest.mark.parametrize(
-    ("params", "env"),
-    [
-        ({"analysis_route": "agent"}, None),
-        ({"analysis_route": "non-llm"}, None),
-        ({"analysis_route": "AGENT"}, None),
-        ({}, "agent"),
-        ({"framework": "xdit"}, None),
-    ],
-)
-async def test_the_orchestrators_own_routes_still_run_the_orchestrators_handler(
-    rig: Rig, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, params: dict, env: str | None
-) -> None:
-    if env:
-        monkeypatch.setenv("HYPERLOOM_TRACE_ANALYSIS_ROUTE", env)
-    status, _, record = await _run(tmp_path, params, rig)
-    assert status is JobStatus.SUCCEEDED and record["result"]["tool"] == "tracelens_analysis"
-    assert [call.get("analysis_route") for call in rig.agent_calls] == [params.get("analysis_route")]
-    assert rig.shell.commands == []
-
-
 _NAMED_ELSE_SESSIONS = pytest.mark.parametrize(
     ("named", "analysed"), [({}, SESSION_LABEL), ({"target_platform": "MI300X"}, "MI300X")], ids=["session", "named"]
 )
@@ -365,29 +335,6 @@ async def test_the_report_reads_the_arch_of_the_gpu_the_request_names_else_the_s
 
     _, perf = rig.shell.commands
     assert status is JobStatus.SUCCEEDED and perf[perf.index("--gpu_arch_json_path") + 1].endswith(f"{analysed}.json")
-
-
-@_NAMED_ELSE_SESSIONS
-async def test_the_orchestrators_routes_are_told_the_gpu_the_request_names_else_the_sessions(
-    rig: Rig, tmp_path: Path, named: dict[str, str], analysed: str
-) -> None:
-    """The orchestrator's handler would otherwise read the label of a Hyperloom session, which a toolbox is not."""
-    status, _, _ = await _run(tmp_path, {"analysis_route": "non-llm", **named}, rig)
-
-    assert status is JobStatus.SUCCEEDED and [call["target_platform"] for call in rig.agent_calls] == [analysed]
-
-
-@pytest.mark.parametrize(
-    ("params", "env"),
-    [({"analysis_route": "report"}, "agent"), ({"analysis_route": "report", "framework": "xdit"}, None)],
-)
-async def test_a_request_naming_the_report_route_gets_it_whatever_else_would_have_chosen(
-    rig: Rig, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, params: dict, env: str | None
-) -> None:
-    if env:
-        monkeypatch.setenv("HYPERLOOM_TRACE_ANALYSIS_ROUTE", env)
-    status, pointer, _ = await _run(tmp_path, {**probe.GRADED, **params}, rig)
-    assert status is JobStatus.SUCCEEDED and rig.agent_calls == [] and PAGED_ATTENTION in pointer.op_shares
 
 
 async def test_a_graph_collapsed_report_gets_the_degraded_fallback_and_keeps_the_windows_kernel_shares(
@@ -545,71 +492,6 @@ async def test_a_decode_window_without_its_graph_capture_keeps_one_gemm_entry_an
     assert len(decode["launcher_notes"]) == 1 and "left as recorded" in decode["launcher_notes"][0]
 
 
-def _analysed_window(rig: Rig, tmp_path: Path, *, capture: bool = True) -> tuple[Path, Path]:
-    """What an orchestrator analysis leaves: the decode window it ran on, and its report with the misreporting ops
-    table."""
-    folder = rig.trace_input / "torch_trace" / "graph_capture_profile"
-    if capture:
-        shutil.copy(DATA / "decode_capture_execution_details.json", folder / "execution_details.json")
-        shutil.copy(DATA / "decode_capture_bs64_launches.json.gz", folder / "DecodeCudaGraphRunner_bs_64_rank0.json.gz")
-    shutil.copy(DATA / "decode_rank_trace_gpu_events.json.gz", rig.trace)
-    window = tmp_path / "analysis" / "window.json.gz"
-    window.parent.mkdir()
-    shutil.copy(DATA / "decode_window_launch_events.json.gz", window)
-    table = window.parent / "perf_report_csvs" / "ops_summary.csv"
-    table.parent.mkdir()
-    table.write_text(OPS_SUMMARY, encoding="utf-8")
-    report = window.parent / "analysis.md"
-    report.write_text("# report\n", encoding="utf-8")
-    return window, report
-
-
-async def test_the_agent_routes_op_shares_are_the_kernel_shares_of_the_window_it_analysed_not_its_ops_table(
-    rig: Rig, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    window, report = _analysed_window(rig, tmp_path)
-
-    async def agent(payload: dict, *, session_dir: Path) -> dict:
-        artifacts = {"tracelens_steady_state_trace": str(window)}
-        return {"status": "ok", "trace_report_path": str(report), "artifact_paths": artifacts}
-
-    monkeypatch.setattr(roofline, "trace_analyze_handler", agent)
-    status, pointer, record = await _run(tmp_path, {"analysis_route": "agent"}, rig)
-    assert status is JobStatus.SUCCEEDED and "aten::mm" not in pointer.op_shares
-    assert pointer.op_shares["kernel_gemm_0 [DecoderMLP.MergedColumnParallelLinear]"] == pytest.approx(28.47, abs=0.01)
-    assert sum(pointer.op_shares.values()) == pytest.approx(100.0, abs=0.01)
-    result = record["result"]
-    assert result["graph_kernels_renamed"] == 30 and Path(result["kernel_shares_path"]).is_file()  # copied back
-
-
-async def test_an_agent_analysis_that_names_no_window_keeps_its_ops_table_as_before(
-    rig: Rig, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    _, report = _analysed_window(rig, tmp_path)
-
-    async def agent(payload: dict, *, session_dir: Path) -> dict:
-        return {"status": "ok", "trace_report_path": str(report)}
-
-    monkeypatch.setattr(roofline, "trace_analyze_handler", agent)
-    _, pointer, _ = await _run(tmp_path, {"analysis_route": "agent"}, rig)
-    assert pointer.op_shares["aten::mm"] == 24.5 and "kernel_shares_path" not in str(pointer.summary)
-
-
-async def test_an_agent_analysis_whose_window_cannot_be_read_carries_no_shares_not_its_ops_table(
-    rig: Rig, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    window, report = _analysed_window(rig, tmp_path)
-    window.unlink()
-
-    async def agent(payload: dict, *, session_dir: Path) -> dict:
-        return {"status": "ok", "trace_report_path": str(report), "steady_state_trace": str(window)}
-
-    monkeypatch.setattr(roofline, "trace_analyze_handler", agent)
-    status, pointer, _ = await _run(tmp_path, {"analysis_route": "agent"}, rig)
-    assert status is JobStatus.SUCCEEDED and not pointer.op_shares
-    assert DEGRADED_NOTICE in pointer.summary and "window.json.gz cannot be read" in pointer.summary
-
-
 async def test_excluded_events_of_a_kernel_the_trace_never_ran_clean_degrade_the_window_it_does_not_rank_a_guess(
     rig: Rig, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -675,7 +557,7 @@ async def test_a_step_that_fails_fails_the_job_with_its_reason(
 ) -> None:
     monkeypatch.setattr(report, "run_with_session_kill", shell)
     status, pointer, record = await _run(tmp_path, params, rig)
-    assert status is JobStatus.FAILED and not pointer.op_shares and rig.agent_calls == []
+    assert status is JobStatus.FAILED and not pointer.op_shares
     assert record["result"]["error_class"] == error_class and record["result"]["error"] in pointer.summary
 
 
