@@ -133,7 +133,7 @@ def test_provider_is_registered_with_the_capabilities_it_implements() -> None:
     """The registry advertises exactly what this backend can be asked to do."""
     provider = get_agent_provider("deepseek")
 
-    assert provider.default_model == "deepseek-v4-flash"
+    assert provider.default_model == "claude-sonnet-5-5"
     assert provider.capabilities.resumable
     assert provider.capabilities.workspace_guard
     assert provider.capabilities.session_env
