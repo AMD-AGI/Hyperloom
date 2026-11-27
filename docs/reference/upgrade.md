@@ -54,6 +54,10 @@ These flags are rejected with `unrecognized arguments`:
   nothing): drop them.
 * `hyperloom-multibranch run --make-before-break` and `--no-make-before-break`
   (a hosted test now closes its sandbox when it ends): drop them.
+* `python -m hyperloom.measure.runner.cache_build --python-version`,
+  `--implementation`, `--abi` and `--platform`: name the image's interpreter
+  and platform with `--wheel-target` instead, for example
+  `--wheel-target cp314-manylinux_2_28_x86_64`.
 
 A campaign spec may keep `multibranch.make_before_break`, which is ignored with a
 warning. Where the grant fits three or more tests, a hosted session now runs one more
@@ -199,6 +203,15 @@ header names the ladder `concs`, drops the budget keys, `was_skipped` and the
 report paths, and adds `partial`, `in_progress` and `cancelled` to `status`.
 Both lineages' shapes are in
 [`session_breakdown.json` integration in Hyperloom](session-breakdown.md).
+
+### Required: the hosted application image's `Dockerfile` and `build.sh` are removed
+
+`scripts/hosted_app_image/Dockerfile` and `scripts/hosted_app_image/build.sh`
+no longer exist. An application image built from them keeps working. To build a
+new deployment, run `scripts/hosted_app_image/build_layer.sh` and
+`Dockerfile.layer` (see the hosted entry in
+[Environment variables](environment-variables.md)): the layer starts a hosted
+run on any framework image as it is.
 
 ### Required: `hyperloom session report` is removed
 

@@ -20,6 +20,22 @@ Merged to `main` and not yet carried by a tagged release. Each entry moves
 into the [release](https://github.com/AMD-AGI/Hyperloom/releases) that ships
 it.
 
+- **The hosted application image's `Dockerfile` and `build.sh` are removed.**
+  `scripts/hosted_app_image/` keeps only the hosting layer (`build_layer.sh`
+  and `Dockerfile.layer`), which starts a hosted run on any framework image
+  unchanged. No CI job built or tested the application image. An image built
+  from the old files keeps working; build new deployments on the layer. See
+  [Upgrade](reference/upgrade.md).
+- **`python -m hyperloom.measure.runner.cache_build` takes the wheel target
+  only as `--wheel-target`.** `--python-version`, `--implementation`, `--abi`
+  and `--platform` are removed and rejected with `unrecognized arguments`;
+  `--wheel-target cpXY-manylinux_2_N_ARCH` names the same target with every
+  platform tag the image's glibc accepts. See [Upgrade](reference/upgrade.md).
+- **A result manifest states `runner.rule_pack` and `timing.phases`.** The
+  `measurement_result.v2` schema and the reader now require both, with
+  `timing.phases` an array (`[]` for none). Every runner that writes a v2
+  manifest has written both; a manifest without them is refused as invalid
+  instead of being read as one an older runner signed.
 - **`hyperloom session report` is removed.** The command rendered a
   `session_breakdown.json` as Markdown (`session_report.md`), optionally with
   an LLM-written summary. It ran only by hand: no session wrote
