@@ -236,7 +236,7 @@ def spec_document() -> dict[str, Any]:
         "request_id": REQUEST_ID,
         "kind": "test",
         "meta": {"purpose": "explore", "priority": 2, "branch_id": "b1", "parent_commit": "c0ffee", "retest_of": None},
-        "hardware": {"gpu_type": "MI355X", "gpu_count": 1, "power_cap_w": 1400, "partition_mode": "SPX/NPS1"},
+        "hardware": {"gpu_type": "MI355X", "gpu_count": 1, "power_cap_w": None, "partition_mode": None},
         "image": {"ref": "registry/fw:1", "digest": "sha256:" + "22" * 32},
         "config": [point_document(yaml_text)],
         "attachments": [{"id": "csv1", "kind": "file", "blob": "sha256:" + "33" * 32, "manifest_sha256": "44" * 32}],
@@ -263,7 +263,7 @@ def spec_document() -> dict[str, Any]:
             "runtime": None,
             "blob_root": "/shared/u1/sess-a/hosted/blobs",
         },
-        "model_hashes": {"config.json": "77" * 32},
+        "model_hashes": {},
         "procedure": {
             "prep": "grid",
             "rounds": {"warmup": 1, "measure": 3},

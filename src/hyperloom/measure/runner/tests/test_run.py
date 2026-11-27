@@ -146,16 +146,11 @@ def test_a_sheet_that_does_not_parse_is_spec_rejected(tmp_path, env):
     assert not (tmp_path / "out" / "manifest.json").exists()
 
 
-@pytest.mark.parametrize(
-    ("point", "hashes"),
-    [({"model": "/m"}, {}), ({"benchmark": {"framework": "sglang"}}, {"config.json": "ab" * 32})],
-    ids=["no benchmark block", "hashed model files with no model"],
-)
-def test_a_sheet_whose_point_names_no_model_to_hash_is_spec_rejected(tmp_path, env, point, hashes):
-    text = yaml.safe_dump(point)
+def test_a_sheet_whose_point_has_no_benchmark_block_is_spec_rejected(tmp_path, env):
+    text = yaml.safe_dump({"model": "/m"})
     config = [{"yaml": text, "sha256": hashlib.sha256(text.encode()).hexdigest()}]
 
-    assert _go(tmp_path, env, _sheet(config=config, model_hashes=hashes)) == 3
+    assert _go(tmp_path, env, _sheet(config=config)) == 3
     assert _status(tmp_path)["error_class"] == "spec_rejected"
 
 
@@ -769,7 +764,7 @@ def test_gpu_facts_that_cannot_be_read_are_not_compared_and_the_run_says_so(tmp_
 
     assert _go(tmp_path, env, _sheet()) == 0
 
-    assert "could not be read; they were not compared" in _status(tmp_path)["message"]
+    assert "could not be read; it was not compared" in _status(tmp_path)["message"]
 
 
 # --- what the runner refuses in the sheet before it runs anything --------------------------------------------------
@@ -858,39 +853,6 @@ def test_framework_files_compiled_against_another_version_are_refused_as_a_versi
     assert status["error_class"] == "framework_version_mismatch", status
     assert "PyYAML 0.0.1" in status["message"] and f"has PyYAML {installed}" in status["message"], status
     assert backend.calls == [] and not (tmp_path / "out" / "manifest.json").exists()
-
-
-def test_a_model_file_that_is_not_its_recorded_hash_is_spec_rejected(tmp_path, env, monkeypatch):
-    model = tmp_path / "model"
-    model.mkdir()
-    (model / "config.json").write_text('{"hidden": 1}')
-    point = yaml.safe_dump({"benchmark": {**POINT["benchmark"], "model": str(model)}})
-    sheet = _sheet(
-        config=[{"yaml": point, "sha256": hashlib.sha256(point.encode()).hexdigest()}],
-        model_hashes={"config.json": hashlib.sha256(b'{"hidden": 2}').hexdigest()},
-    )
-
-    _refused(tmp_path, env, monkeypatch, sheet, "model file config.json differs from the recorded hash")
-
-
-def test_a_model_file_that_is_its_recorded_hash_lets_the_test_run(tmp_path, env, monkeypatch):
-    model = tmp_path / "model"
-    model.mkdir()
-    (model / "config.json").write_text('{"hidden": 1}')
-    point = yaml.safe_dump({"benchmark": {**POINT["benchmark"], "model": str(model)}})
-    sheet = _sheet(
-        config=[{"yaml": point, "sha256": hashlib.sha256(point.encode()).hexdigest()}],
-        model_hashes={"config.json": hashlib.sha256(b'{"hidden": 1}').hexdigest()},
-    )
-    monkeypatch.setattr(runner, "LocalMeasurementBackend", _Backend(_ok))
-
-    assert _go(tmp_path, env, sheet) == 0
-
-
-def test_a_recorded_model_file_the_machine_does_not_have_is_spec_rejected(tmp_path, env, monkeypatch):
-    sheet = _sheet(model_hashes={"config.json": "77" * 32})
-
-    _refused(tmp_path, env, monkeypatch, sheet, "model file config.json unreadable")
 
 
 # --- the measurement surface the runner signs --------------------------------------------------------

@@ -174,7 +174,7 @@ def build_session(
     inherited = {name: value for name, value in around.environ.items() if name not in spec.unset_envs}
     environment = {**inherited, **sheet}
     servers = (environment, *({**inherited, **_sheet_environment(spec, _point(path))} for path in points[1:]))
-    machine = Machine(spec.image.digest, arch, spec.hardware.gpu_type, spec.hardware.partition_mode)
+    machine = Machine(spec.image.digest, arch, spec.hardware.gpu_type, None)
     python = server_python(config, default="python3")
     inputs = _Inputs(spec, machine, environment, sheet, farm, python, around, servers, _module_build(spec, around))
     plans, disabled = _plans(inputs)

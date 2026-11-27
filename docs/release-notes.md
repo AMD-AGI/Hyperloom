@@ -41,6 +41,14 @@ it.
   snapshot, and the runner no longer checks one: no producer, inside
   Hyperloom or out, ever wrote a non-null value. The key stays in every sheet
   as `null`, so spec fingerprints and JIT cache keys are unchanged.
+- **A measurement sheet's `hardware.power_cap_w` and `hardware.partition_mode`
+  must be null, and its `model_hashes` empty.** The `measurement_spec.v2`
+  schema and the reader refuse any other value, and the runner no longer
+  compares the GPUs' power cap or partition mode with the sheet, nor hashes
+  model files: no producer, inside Hyperloom or out, has written a value since
+  the consistency tool was removed. The keys stay in every sheet, so spec
+  fingerprints and JIT cache keys are unchanged; the result manifest still
+  records the power cap and partition mode the runner read.
 - **`HYPERLOOM_SANDBOX_TEMPLATES` no longer accepts `runner` for the
   `measurement` role.** A hosted run reads only `measurement` and `dev`; a
   list that gives only `runner` is refused as having no `measurement` role.

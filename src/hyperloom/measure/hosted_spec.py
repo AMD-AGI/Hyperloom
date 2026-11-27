@@ -275,8 +275,6 @@ def _hardware_section(ctx: SpecContext, gpus: int) -> dict[str, Any]:
     return {
         "gpu_type": ctx.gpu_type,
         "gpu_count": gpus,
-        "power_cap_w": None,
-        "partition_mode": None,
         "card": None if ctx.card is None else asdict(ctx.card),
     }
 
@@ -354,7 +352,6 @@ def build_spec(call: TestCall, *, request_id: str, ctx: SpecContext, deadline_un
         "unset_envs": list(_unset_envs(call)),
         "tools": _tools_section(call),
         "environment": _environment_document(call.environment, ctx),
-        "model_hashes": {},
         "procedure": _procedure_section(call, first, deadline_unix),
         "outputs": {"result_dir": split_result_dir(call)[0], **_max_bytes(ctx)},
     }

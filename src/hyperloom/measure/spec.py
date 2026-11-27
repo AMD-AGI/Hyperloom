@@ -166,18 +166,17 @@ class Hardware:
 
     gpu_type: str
     gpu_count: int
-    power_cap_w: float | None
-    partition_mode: str | None
     card: GpuCard | None
 
     @classmethod
     def parse(cls, value: Any, path: str) -> "Hardware":
         r = Reader(value, path)
+        for key in ("power_cap_w", "partition_mode"):
+            if r.optional(key) is not None:
+                raise DocumentError(f"{path}.{key}: must be null; no runner checks it")
         hardware = cls(
             gpu_type=r.text("gpu_type") or "",
             gpu_count=r.integer("gpu_count", minimum=1) or 1,
-            power_cap_w=r.number("power_cap_w", minimum=0, optional=True),
-            partition_mode=r.text("partition_mode", optional=True),
             card=_card(r.optional(_CARD), r.at(_CARD)),
         )
         r.done()
@@ -187,8 +186,8 @@ class Hardware:
         return {
             "gpu_type": self.gpu_type,
             "gpu_count": self.gpu_count,
-            "power_cap_w": self.power_cap_w,
-            "partition_mode": self.partition_mode,
+            "power_cap_w": None,
+            "partition_mode": None,
             _CARD: None if self.card is None else asdict(self.card),
         }
 
@@ -588,14 +587,6 @@ def _without_point_values(config: Any) -> dict[str, Any]:
     return {**config, "benchmark": benchmark}
 
 
-def _model_hashes(value: Any, path: str) -> dict[str, str]:
-    hashes = string_map(value, path, key_check=relative_path)
-    for key, digest in hashes.items():
-        if not SHA256_RE.fullmatch(digest):
-            raise DocumentError(f"{path}.{key}: not a sha256")
-    return hashes
-
-
 def _platform_env(value: Any, path: str) -> dict[str, str]:
     values = string_map(value, path)
     unknown = sorted(set(values) - set(PLATFORM_ENV_NAMES))
@@ -629,7 +620,6 @@ class MeasurementSpec:
     unset_envs: tuple[str, ...]
     tools: ToolCommits
     environment: Environment
-    model_hashes: Mapping[str, str]
     procedure: Procedure
     outputs: Outputs
 
@@ -638,6 +628,8 @@ class MeasurementSpec:
         r = Reader(document, "spec")
         if r.text("schema") != SPEC_SCHEMA:
             raise DocumentError(f"spec.schema: expected {SPEC_SCHEMA}")
+        if r.optional("model_hashes") not in (None, {}):
+            raise DocumentError("spec.model_hashes: must be empty; no runner checks model files")
         spec = cls(
             request_id=r.text("request_id") or "",
             kind=r.choice(_KIND, KINDS) or "",
@@ -651,7 +643,6 @@ class MeasurementSpec:
             unset_envs=_unset_envs(r.raw("unset_envs"), r.at("unset_envs")),
             tools=r.section("tools", ToolCommits.parse),
             environment=r.section("environment", Environment.parse),
-            model_hashes=_model_hashes(r.raw("model_hashes"), r.at("model_hashes")),
             procedure=r.section("procedure", Procedure.parse),
             outputs=r.section("outputs", Outputs.parse),
         )
@@ -683,7 +674,7 @@ class MeasurementSpec:
             "unset_envs": list(self.unset_envs),
             "tools": self.tools.to_document(),
             "environment": self.environment.to_document(),
-            "model_hashes": dict(self.model_hashes),
+            "model_hashes": {},
             "procedure": self.procedure.to_document(),
             "outputs": self.outputs.to_document(),
         }

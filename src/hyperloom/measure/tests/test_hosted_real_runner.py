@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import importlib.metadata
 import json
 import subprocess
@@ -219,15 +220,18 @@ def test_a_sheet_the_real_runner_refuses_is_a_refused_sheet_not_a_failed_candida
     r = request.getfixturevalue(fixture)()
     built = hosted.build_spec
 
-    def hashing_a_model_file(*args: Any, **kwargs: Any) -> MeasurementSpec:
-        """The sheet the backend writes names a model file the runner cannot match."""
+    def serving_nothing(*args: Any, **kwargs: Any) -> MeasurementSpec:
+        """The sheet the backend writes names a framework that serves nothing, which only the runner refuses."""
         document = built(*args, **kwargs).to_document()
-        return MeasurementSpec.from_document({**document, "model_hashes": {"config.json": "00" * 32}})
+        text = document["config"][0]["yaml"].replace("framework: sglang", "framework: custom")
+        assert "framework: custom" in text
+        document["config"] = [{"yaml": text, "sha256": hashlib.sha256(text.encode()).hexdigest()}]
+        return MeasurementSpec.from_document(document)
 
-    monkeypatch.setattr(hosted, "build_spec", hashing_a_model_file)
+    monkeypatch.setattr(hosted, "build_spec", serving_nothing)
     call = _call(tmp_path, point=_point(tmp_path), timeout_sec=120)
     outcome = r.backend.run_test(call)
     assert outcome.returncode == HOSTED_SPEC_REJECTED_RC
     assert outcome.failure_class is None
-    assert "spec_rejected" in outcome.stderr and "config.json" in outcome.stderr
+    assert "spec_rejected" in outcome.stderr and "serves nothing" in outcome.stderr
     assert r.provider.find({}, role="measurement") == [], "the sandbox is closed after the refusal"

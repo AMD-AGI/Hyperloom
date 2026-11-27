@@ -21,7 +21,7 @@ from typing import Any
 
 from hyperloom_common.amd_smi import AmdSmiError, gpu_rows, run_amd_smi
 from hyperloom_common.gpu_card import GpuCard, cards_of
-from hyperloom.common.gpu_power_settings import reading_matches, socket_power_cap_w
+from hyperloom.common.gpu_power_settings import socket_power_cap_w
 from hyperloom.common.rocm_smi import GpuVram, gpu_vram_usage, vram_busy
 
 log = logging.getLogger(__name__)
@@ -198,19 +198,13 @@ def check_hardware(
     *,
     card: GpuCard | None,
     gpu_count: int,
-    power_cap_w: float | None,
-    partition_mode: str | None,
 ) -> list[str]:
-    """What differs between the machine and the sheet's ``hardware``; a value either side did not give is not compared."""
+    """What differs between the machine and the sheet's ``hardware``: too few GPUs, or a card of another kind than the
+    sheet names. A card the sheet does not name is not compared."""
     problems = []
     if len(facts) < gpu_count:
         problems.append(f"{len(facts)} GPUs visible, {gpu_count} needed")
     for gpu in facts:
         if card is not None and not gpu.card.same_kind(card):
             problems.append(f"GPU {gpu.index} is {gpu.card.describe()}, not {card.describe()}")
-        cap = gpu.power_cap_w
-        if power_cap_w is not None and cap is not None and not reading_matches(cap, power_cap_w):
-            problems.append(f"GPU {gpu.index} power cap {cap} W, not {power_cap_w} W")
-        if partition_mode is not None and gpu.partition_mode is not None and gpu.partition_mode != partition_mode:
-            problems.append(f"GPU {gpu.index} partition {gpu.partition_mode}, not {partition_mode}")
     return problems
