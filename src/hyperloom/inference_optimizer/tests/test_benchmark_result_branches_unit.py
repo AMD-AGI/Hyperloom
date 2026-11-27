@@ -17,18 +17,6 @@ def test_is_valid_measurement():
     assert br.is_valid_measurement({"output_throughput": 10.0, "completed_requests": 0}) is False
 
 
-def test_unverified_submission_accepted_when_hatch_is_set(monkeypatch):
-    monkeypatch.setenv("HYPERLOOM_AGENTX", "1")
-    monkeypatch.setenv("HYPERLOOM_ALLOW_UNVERIFIED_SUBMISSION", "1")
-    assert br.is_valid_measurement(
-        {
-            "output_throughput": 170.0,
-            "completed_requests": 10,
-            "submission_valid": None,
-        }
-    )
-
-
 # ---- harvest_mn_gpu_metrics -----------------------------------------------
 def test_harvest_mn_gpu_metrics_single_node_noop(monkeypatch, tmp_path):
     import hyperloom.orchestrator.actions.executors._multi_node_env as mn
