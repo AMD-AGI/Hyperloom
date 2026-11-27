@@ -207,8 +207,7 @@ that measured better than its parent. This conversation lasts as long as your br
 arrives for your branch (results, judgements, briefs, the runtime's notices) wakes you with a new message. Keep your \
 branch log current all the same: a new conversation starts from it if this one is lost.
 
-Up to K of your tests may be running at once. K is a ceiling, not a target: submit only candidates that the profile \
-and your analysis say can clear the session's bar, never a test just to fill a slot.
+{{k_rule}}
 1. Read where your branch stands: your branch log (blackboard_branch_log), the startup brief, and what was tried and \
 learnt (blackboard_search, blackboard_learnings, blackboard_brief).
 2. Choose a direction from your branch head's own state, starting from where its GPU time goes: blackboard_brief lists \
@@ -276,12 +275,8 @@ or table in a commit your branch log or the brief names): one already on your he
 fingerprint your claim returned. The delta must carry the change you claimed: a server argument or environment \
 variable in its config, a patch in its components, a kernel in add_kernels; an empty delta tests nothing. Never submit purpose "confirm": the runtime retests a measured gain on another node \
 itself.
-5. After submit_test, keep working; do not end your turn because a test runs. While fewer than K of your tests run, \
-prepare and submit the next candidate the evidence supports. With all K running, read the analysis and the server \
-logs of finished tests, read the code on the top operator's path or profile it, and prepare the candidate for the \
-next free slot. End your turn only when nothing is left to read or prepare and every candidate the evidence \
-supports is running, K or fewer: every result wakes you. For a short wait, wait_test returns the result as soon as it lands (test_result reads \
-it again later), else within a minute with the test's progress. Never wait with sleep, a background shell or by \
+5. After submit_test, keep working; do not end your turn because a test runs. {{while_running}} Never wait with \
+sleep, a background shell or by \
 reading the test's files: such a wait sees no result and leaves your session hanging. poll_inbox lists what else \
 arrived, judgements and briefs. A test in state pending_build waits for a native build its change needs \
 (progress.builds, each with its eta_seconds, often an hour): it is not stuck and holds one of your K. A "build" item \
@@ -560,6 +555,43 @@ def _agentx_grading(objective: AgentXObjective) -> _Grading:
 
 
 @dataclass(frozen=True)
+class _Pace:
+    """How the role tells a specialist to pace its tests: the rule K sets, and what to do while its tests run."""
+
+    k_rule: str
+    while_running: str
+
+
+_INFERENCEX_PACE = _Pace(
+    k_rule="Up to K of your tests may be running at once. K is a ceiling, not a target: submit only candidates that "
+    "the profile and your analysis say can clear the session's bar, never a test just to fill a slot.",
+    while_running="While fewer than K of your tests run, prepare and submit the next candidate the evidence supports. "
+    "With all K running, read the analysis and the server logs of finished tests, read the code on the top operator's "
+    "path or profile it, and prepare the candidate for the next free slot. End your turn only when nothing is left to "
+    "read or prepare and every candidate the evidence supports is running, K or fewer: every result wakes you. For a "
+    "short wait, wait_test returns the result as soon as it lands (test_result reads it again later), else within a "
+    "minute with the test's progress.",
+)
+#: An AgentX test holds a test slot for its whole trace window, so a slot of K left free while the specialist waits
+#: on one test is measurement time lost.
+_AGENTX_PACE = _Pace(
+    k_rule="Up to K of your tests may be running at once, and your branch should keep that many running: a slot left "
+    "free while you wait on one test is measurement time lost. Submit only candidates that the profile and your "
+    "analysis say can clear the session's bar, never a candidate without evidence just to fill a slot.",
+    while_running="While fewer than K of your tests run, prepare and submit the next candidate the evidence supports: "
+    "one independent of your pending tests where you can, else the follow-ups of a pending test, one for each of its "
+    "outcomes, ready to submit as its result lands. With all K running, read the analysis and the server logs of "
+    "finished tests, read the code on the top operator's path or profile it, and prepare the candidate for the next "
+    "free slot. End your turn only when nothing is left to read or prepare and every candidate the evidence supports "
+    "is submitted or prepared: every result wakes you, so do not call wait_test over and over to wait for one. Every "
+    "wait_test reply gives your K (branch_k), the slots of it your running tests leave free (branch_free_slots) and "
+    "the machine's free test slots (free_test_slots); its first call on a test returns at once while both are free: "
+    "submit your next candidate then. Otherwise prepare it rather than queue it, and wait_test returns the result as "
+    "soon as it lands (test_result reads it again later), else within a minute with the test's progress.",
+)
+
+
+@dataclass(frozen=True)
 class RoleWorkload:
     """What a session optimizes, as its specialists' role tells it: the workload in words, and the objective of an
     AgentX session (none: an InferenceX one)."""
@@ -570,6 +602,10 @@ class RoleWorkload:
     @property
     def grading(self) -> _Grading:
         return _INFERENCEX_GRADING if self.agentx is None else _agentx_grading(self.agentx)
+
+    @property
+    def pace(self) -> _Pace:
+        return _INFERENCEX_PACE if self.agentx is None else _AGENTX_PACE
 
 
 @dataclass(frozen=True)
@@ -615,6 +651,7 @@ def role_prompt(
         first_idea=_FIRST_IDEA_CHECKOUT if server.checkouts else _FIRST_IDEA_INSTALLED,
         gpu_rule=gpu_rule,
         **asdict(workload.grading),
+        **asdict(workload.pace),
     )
     sections = (
         _native(native or {}),
@@ -884,8 +921,10 @@ def prompt_versions() -> dict[str, str]:
         first_idea=_FIRST_IDEA_INSTALLED,
         gpu_rule=_NO_GPU,
         **asdict(_INFERENCEX_GRADING),
+        **asdict(_INFERENCEX_PACE),
     )
     agentx = (text for objective in AgentXObjective for text in astuple(_agentx_grading(objective)))
+    agentx = (*agentx, *astuple(_AGENTX_PACE))
     checkout = (_CHECKOUT, _CHECKOUT_KERNELS, _CHECKOUT_KNOBS, _CHECKOUT_UPSTREAM, _CHECKOUT_REVIEW)
     checkout = (*checkout, _FIRST_IDEA_CHECKOUT, _UNPROFILED)
     discovery = (_CHECKOUT_CARRIED, _CHECKOUT_LOGS, *DISCOVERY_TEXTS, _direction_names(CHECKOUT_DIRECTIONS))

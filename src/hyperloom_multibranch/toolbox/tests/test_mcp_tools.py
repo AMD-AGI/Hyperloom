@@ -74,6 +74,7 @@ class FakeToolbox:
         self.cancelled: list[str] = []
         self.refuse: Exception | None = None
         self.progress_of: dict[str, TestProgress] = {}
+        self.state = QueueState(queued_by_priority={0: 1, 1: 2, 2: 0, 3: 0, 4: 0}, running_by_branch={"s1": 1})
 
     async def submit_test(self, request: TestRequest) -> str:
         if self.refuse is not None:
@@ -86,7 +87,7 @@ class FakeToolbox:
         return CancelOutcome.WITHDRAWN
 
     async def queue_state(self) -> QueueState:
-        return QueueState(queued_by_priority={0: 1, 1: 2, 2: 0, 3: 0, 4: 0}, running_by_branch={"s1": 1})
+        return self.state
 
     async def progress(self, request_id: str) -> TestProgress | None:
         return self.progress_of.get(request_id)
@@ -331,7 +332,8 @@ def test_wait_test_answers_a_measured_test_at_once_as_test_result_does(rig: Rig)
     started = time.monotonic()
     body = _wait(rig, request_id="r1")
     assert time.monotonic() - started < 5
-    assert body["state"] == "measured" and body == json.loads(rig.ok(rig.token("s1"), "test_result", request_id="r1"))
+    read = json.loads(rig.ok(rig.token("s1"), "test_result", request_id="r1"))
+    assert body["state"] == "measured" and body == read | {"branch_k": 0, "branch_free_slots": 0, "free_test_slots": 0}
 
 
 async def test_wait_test_returns_as_soon_as_the_result_lands(wait_rig: Rig, waiting: Writers) -> None:
@@ -448,7 +450,55 @@ def test_wait_test_reports_how_many_tests_are_queued_ahead_of_a_waiting_one(wait
     started = time.monotonic()
     body = _wait(wait_rig, request_id="r9", wait_seconds=1)
     assert time.monotonic() - started >= 1
-    assert body == {"request_id": "r9", "state": "queued", "waited_seconds": 1, "progress": {"queued_ahead": 2}}
+    assert body == {
+        "request_id": "r9",
+        "state": "queued",
+        "waited_seconds": 1,
+        "progress": {"queued_ahead": 2},
+        "branch_k": 0,
+        "branch_free_slots": 0,
+        "free_test_slots": 0,
+        "hint": "prepare your next candidate, a test submitted now only queues",
+    }
+
+
+def _slots(rig: Rig, free: int, free_test_slots: int = 1) -> None:
+    rig.toolbox.state = QueueState(
+        k_by_branch={"s1": 2, "s2": 4}, free_slots_by_branch={"s1": free, "s2": 4}, free_test_slots=free_test_slots
+    )
+
+
+def test_the_first_wait_on_a_test_returns_at_once_and_says_to_submit_while_a_test_would_start_now(
+    wait_rig: Rig,
+) -> None:
+    _slots(wait_rig, free=1)
+    wait_rig.toolbox.progress_of["r9"] = TestProgress("running", running_seconds=12.0)
+    started = time.monotonic()
+    body = _wait(wait_rig, request_id="r9", wait_seconds=5)
+    assert time.monotonic() - started < 1
+    assert (body["state"], body["branch_k"], body["branch_free_slots"], body["free_test_slots"]) == ("running", 2, 1, 1)
+    assert body["hint"] == "1 free slot(s): prepare and submit your next candidate"
+
+
+def test_a_later_wait_on_the_same_test_blocks_though_a_slot_is_free(wait_rig: Rig) -> None:
+    _slots(wait_rig, free=1)
+    _wait(wait_rig, request_id="r9", wait_seconds=5)
+    started = time.monotonic()
+    body = _wait(wait_rig, request_id="r9", wait_seconds=1)
+    assert time.monotonic() - started >= 1
+    assert (body["waited_seconds"], body["branch_free_slots"]) == (1, 1)
+
+
+@pytest.mark.parametrize(("free", "free_test_slots"), [(0, 1), (1, 0)])
+def test_a_wait_where_a_test_submitted_now_would_only_queue_blocks_and_says_to_prepare_the_next_candidate(
+    wait_rig: Rig, free: int, free_test_slots: int
+) -> None:
+    _slots(wait_rig, free, free_test_slots)
+    started = time.monotonic()
+    body = _wait(wait_rig, request_id="r9", wait_seconds=1)
+    assert time.monotonic() - started >= 1
+    assert (body["branch_free_slots"], body["free_test_slots"]) == (free, free_test_slots)
+    assert body["hint"] == "prepare your next candidate, a test submitted now only queues"
 
 
 def test_wait_test_reports_how_long_a_running_test_ran_and_what_it_wrote_last(wait_rig: Rig) -> None:
@@ -480,6 +530,10 @@ def test_wait_test_of_a_test_the_toolbox_no_longer_holds_is_in_flight_with_no_pr
         "request_id": "r9",
         "state": "in_flight",
         "waited_seconds": 1,
+        "branch_k": 0,
+        "branch_free_slots": 0,
+        "free_test_slots": 0,
+        "hint": "prepare your next candidate, a test submitted now only queues",
     }
 
 
@@ -610,6 +664,9 @@ def test_jsonable_turns_contract_objects_into_json_data() -> None:
         "builds": [
             {"key": "k1", "component": "sgl_kernel", "state": "building", "eta_seconds": 34.0, "build_seconds": 0.0}
         ],
+        "k_by_branch": {},
+        "free_slots_by_branch": {},
+        "free_test_slots": 0,
     }
 
 

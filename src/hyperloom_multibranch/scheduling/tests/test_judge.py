@@ -62,6 +62,10 @@ from hyperloom_multibranch.scheduling.judge import (
     system_prompt,
 )
 from hyperloom_multibranch.scheduling.judge_prompt import (
+    AGENTX_JUDGE_PROMPT_VERSION,
+    AGENTX_JUDGE_SYSTEM_PROMPT,
+    AGENTX_PLAYBOOK_JUDGE_PROMPT,
+    AGENTX_PLAYBOOK_JUDGE_PROMPT_VERSION,
     JUDGE_PROMPT_VERSION,
     JUDGE_SYSTEM_PROMPT,
     PLAYBOOK_JUDGE_PROMPT,
@@ -78,6 +82,7 @@ from hyperloom_multibranch.scheduling.roster import (
     StopCause,
     open_specialists,
 )
+from hyperloom_multibranch.scheduling.settings import InferenceXShape, KernelOptimizer, Workload
 from hyperloom_multibranch.scheduling.similarity import SimilarBranch
 from hyperloom_multibranch.scheduling.widening import WideningSignals
 from hyperloom_multibranch.toolbox.tests.fake import FakeToolbox, FakeWiring
@@ -120,6 +125,8 @@ CAPS = RosterCaps(max_branches=4, max_k_per_branch=2, max_parallel_tests=8)
 #: A session whose cards hold two tests at once, and one whose cards hold one.
 TWO_TESTS, ONE_TEST = replace(CAPS, max_parallel_tests=2), replace(CAPS, max_parallel_tests=1)
 WIDENING = WideningSignals(min_useful_seconds=1350.0, cold_start_seconds=90.0, toolbox_headroom=3)
+AGENTX = Workload("org/model", "sglang", 4, 10, "fp4", "mi355x", KernelOptimizer.FORGE, None)
+INFERENCEX = replace(AGENTX, inferencex=InferenceXShape(1024, 1024))
 
 
 def _view(
@@ -145,6 +152,7 @@ def _view(
     roofline_ceiling: dict[str, float] | None = None,
     focus: dict[str, str] | None = None,
     caps: RosterCaps = CAPS,
+    workload: Workload = INFERENCEX,
 ) -> JudgeView:
     return JudgeView(
         now=NOW,
@@ -190,6 +198,7 @@ def _view(
         queued=queued or {},
         focus=focus or {},
         building=building or {},
+        workload=workload,
     )
 
 
@@ -597,6 +606,14 @@ def test_the_prompt_version_is_derived_from_the_prompt_text() -> None:
     assert (
         PLAYBOOK_JUDGE_PROMPT_VERSION == hashlib.sha256(f"{PLAYBOOK_JUDGE_PROMPT}\n{reply}".encode()).hexdigest()[:12]
     )
+    assert (
+        AGENTX_JUDGE_PROMPT_VERSION
+        == hashlib.sha256(f"{AGENTX_JUDGE_SYSTEM_PROMPT}\n{reply}".encode()).hexdigest()[:12]
+    )
+    assert (
+        AGENTX_PLAYBOOK_JUDGE_PROMPT_VERSION
+        == hashlib.sha256(f"{AGENTX_PLAYBOOK_JUDGE_PROMPT}\n{reply}".encode()).hexdigest()[:12]
+    )
 
 
 def test_a_branch_row_names_what_its_expected_gain_rests_on() -> None:
@@ -921,6 +938,22 @@ def test_the_opening_k_is_read_and_clamped() -> None:
     assert cap_decision(parsed, view).open_k == 2
     assert parse_decision(_reply({"open": 2})) == JudgeDecision(open_count=2)
     assert parse_decision(_reply({"open": 2, "open_k": "two"})) is None
+
+
+def test_an_agentx_session_s_judge_gets_the_agentx_system_prompt() -> None:
+    agentx = _view(workload=AGENTX)
+
+    assert (system_prompt(agentx), system_prompt(replace(agentx, playbook=H0.render()))) == (
+        AGENTX_JUDGE_SYSTEM_PROMPT,
+        AGENTX_PLAYBOOK_JUDGE_PROMPT,
+    )
+
+
+def test_a_k_raise_holds_while_the_branches_k_already_sum_past_the_test_slots() -> None:
+    roster = (_entry(INTEGRATION_BRANCH, kind=BranchKind.INTEGRATION), _entry("b01"), _entry("b02"))
+    view = _view(roster=roster, caps=TWO_TESTS, workload=AGENTX)
+
+    assert cap_decision(JudgeDecision(k=(KOrder("b01", 2),)), view).k == (KOrder("b01", 2),)
 
 
 USER_ROSTER = (
