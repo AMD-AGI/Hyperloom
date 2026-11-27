@@ -747,14 +747,18 @@ network file system run at tens of MB/s per rank. With this switch on, the
 process that boots a measured server also reads the checkpoint into the page
 cache with 8 sequential streams from the spawn until the server is ready
 (`hyperloom_common.weight_prefetch`): only a checkpoint on a network or FUSE
-file system, the largest files first (a loader faults a very large file in one
-stream per rank, and often reads it last), only as much as the memory headroom
+file system, in the loader's order, only as much as the memory headroom
 allows (`memory.max - memory.current` less a tenth of the limit, at least
 16 GiB, looked at again before each 1 GiB it reads). Until the server is ready
-it samples every second how much of each chosen file is still cached, and when
-files it had cached lost at least half of their pages (a loader that drops the
-checkpoint's page cache, such as SGLang's engram host table), it reads them
-again at once, largest first, at most eight times. A
+it samples every second how much of the checkpoint is cached. When that total
+collapses, at least three quarters of the most it held in the last 10 s gone
+(a loader that drops the checkpoint's page cache, such as SGLang's engram host
+table), it ends the pass in progress, waits 5 s and reads the whole checkpoint
+again in the loader's order, at most twice. That pass is not bounded by the
+headroom: the server allocates most of its memory right after the drop, and
+the kernel reclaims the oldest pages, those the loader has consumed, first. A
+gradual loss, the kernel reclaiming pages when the server's memory and the
+reads meet the cgroup limit, is not read again. A
 checkpoint the round's account neither owns nor may write is read once and not
 refilled: Linux does not tell such an account which of its pages are cached, so
 each file is read whole by its size within the same headroom, and what the
