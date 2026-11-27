@@ -23,6 +23,7 @@ from hyperloom_common.weight_prefetch import (
     Memory,
     WeightPrefetch,
     checkpoint_files,
+    prefetch_order,
     start_weight_prefetch,
 )
 
@@ -65,21 +66,52 @@ class FakeHost:
         with self.lock:
             return list(self.uncached_spans[path.name])
 
+    def cached_share(self, path: Path, size: int) -> float | None:
+        if path.name in self.blind:
+            return None
+        with self.lock:
+            return 1.0 - sum(end - start for start, end in self.uncached_spans[path.name]) / size if size else 1.0
+
     def read(self, path: Path, span: tuple[int, int], stop: threading.Event) -> int:
         if path.name in self.fail_read:
             raise OSError(5, "Input/output error")
         with self.lock:
             self.reads.append((path.name, span))
-            self.uncached_spans[path.name] = [s for s in self.uncached_spans[path.name] if s != span]
+            self.uncached_spans[path.name] = _subtract(self.uncached_spans[path.name], span)
             self.used += (span[1] - span[0]) if self.charged else 0
         self.read_seen.set()
         return span[1] - span[0]
+
+    def cached(self, name: str) -> bool:
+        with self.lock:
+            return not self.uncached_spans[name]
+
+    def read_bytes(self) -> dict[str, int]:
+        """The bytes read of each file, in the order the files were first read."""
+        with self.lock:
+            totals: dict[str, int] = {}
+            for name, (start, end) in self.reads:
+                totals[name] = totals.get(name, 0) + end - start
+            return totals
 
     def drop_cache(self) -> None:
         with self.lock:
             for name, size in self.sizes.items():
                 self.used -= size - sum(end - start for start, end in self.uncached_spans[name])
                 self.uncached_spans[name] = [(0, size)]
+
+
+def _subtract(spans: list[tuple[int, int]], cut: tuple[int, int]) -> list[tuple[int, int]]:
+    kept = []
+    for start, end in spans:
+        if end <= cut[0] or start >= cut[1]:
+            kept.append((start, end))
+            continue
+        if start < cut[0]:
+            kept.append((start, cut[0]))
+        if end > cut[1]:
+            kept.append((cut[1], end))
+    return kept
 
 
 def _model(tmp_path: Path, sizes: dict[str, int], index: bool = True) -> Path:
@@ -98,24 +130,27 @@ def machine(monkeypatch):
     """Make ``host`` the machine every :class:`WeightPrefetch` built after it reads, as ``start_weight_prefetch`` builds
     it, with one stream and no refill unless the test says otherwise."""
 
-    def install(host, *, streams: int = 1, max_refills: int = 0, refill_interval_sec: float = 30.0) -> None:
+    def install(host, *, streams: int = 1, max_refills: int = 0, poll_interval_sec: float = 0.01) -> None:
         monkeypatch.setattr(wp, "LinuxHost", lambda: host)
         monkeypatch.setattr(wp, "_STREAMS", streams)
         monkeypatch.setattr(wp, "_MAX_REFILLS", max_refills)
-        monkeypatch.setattr(wp, "_REFILL_INTERVAL_SEC", refill_interval_sec)
+        monkeypatch.setattr(wp, "_POLL_INTERVAL_SEC", poll_interval_sec)
 
     return install
 
 
 @pytest.fixture
 def run(machine):
-    """Run a prefetch of ``model`` on ``host`` to its end."""
+    """Run a prefetch of ``model`` on ``host`` until it ends on its own or, while it only watches the cache, until
+    ``watch_sec`` later the server is ready and stops it."""
 
-    def run(model: Path, host, **tuning) -> WeightPrefetch:
+    def run(model: Path, host, *, watch_sec: float = 0.3, **tuning) -> WeightPrefetch:
         machine(host, **tuning)
         prefetch = WeightPrefetch(model)
         prefetch.start()
-        assert prefetch.join(10.0), "the prefetch ends on its own"
+        if not prefetch.join(watch_sec):
+            prefetch.stop()
+        assert prefetch.join(10.0), "the prefetch ends once stopped"
         return prefetch
 
     return run
@@ -148,14 +183,38 @@ def test_without_an_index_every_safetensors_file_is_read_in_name_order(tmp_path)
     assert [p.name for p in checkpoint_files(model)] == ["b-3.safetensors", "b-11.safetensors"]
 
 
-def test_it_reads_the_files_in_order_while_they_fit_the_headroom(tmp_path, run) -> None:
+def test_files_of_one_size_are_read_in_the_loaders_order_while_they_fit_the_headroom(tmp_path, run) -> None:
     sizes = _names(4)  # 4 x 60 GiB against 170 GiB of headroom: two fit
     host = FakeHost(sizes)
     prefetch = run(_model(tmp_path, sizes), host)
 
     names = list(sizes)
-    assert host.reads == [(names[0], (0, 60 * GIB)), (names[1], (0, 60 * GIB))]
+    assert host.read_bytes() == {names[0]: 60 * GIB, names[1]: 60 * GIB}
+    assert all(end - start <= GIB for _, (start, end) in host.reads), "in pieces several streams can share"
     assert prefetch.outcome.read_bytes == 120 * GIB and prefetch.outcome.passes == 1
+
+
+def test_the_largest_files_come_first_and_files_of_one_size_keep_the_loaders_order() -> None:
+    sized = [(Path(f"model-{n}.safetensors"), size) for n, size in enumerate([5, 7, 101, 5, 101, 2], start=1)]
+    assert [path.name for path, _ in prefetch_order(sized)] == [
+        "model-3.safetensors",
+        "model-5.safetensors",
+        "model-2.safetensors",
+        "model-1.safetensors",
+        "model-4.safetensors",
+        "model-6.safetensors",
+    ]
+
+
+def test_a_large_file_last_in_the_loaders_order_is_read_first_and_one_that_does_not_fit_is_left_out(
+    tmp_path, run
+) -> None:
+    sizes = {"model-1.safetensors": 30 * GIB, "model-2.safetensors": 200 * GIB, "model-3.safetensors": 120 * GIB}
+    host = FakeHost(sizes)  # 170 GiB of headroom: the 200 GiB file never fits, the 120 GiB one goes first
+    prefetch = run(_model(tmp_path, sizes), host)
+
+    assert host.read_bytes() == {"model-3.safetensors": 120 * GIB, "model-1.safetensors": 30 * GIB}
+    assert [item["name"] for item in prefetch.outcome.chosen] == ["model-3.safetensors", "model-1.safetensors"]
 
 
 def test_the_headroom_at_the_start_bounds_the_reads_even_when_use_does_not_grow(tmp_path, run) -> None:
@@ -164,7 +223,7 @@ def test_the_headroom_at_the_start_bounds_the_reads_even_when_use_does_not_grow(
     host.charged = False  # the pages are charged elsewhere, so the live headroom alone would let all four through
     run(_model(tmp_path, sizes), host)
 
-    assert [name for name, _ in host.reads] == list(sizes)[:2]
+    assert list(host.read_bytes()) == list(sizes)[:2]
 
 
 def test_only_what_is_not_cached_is_read(tmp_path, run) -> None:
@@ -216,10 +275,11 @@ def test_it_stops_when_the_server_takes_the_headroom_and_does_not_read_again(tmp
 
     host.read = read  # type: ignore[method-assign]
     with caplog.at_level(logging.INFO, logger=wp.__name__):
-        prefetch = run(_model(tmp_path, sizes), host, max_refills=3, refill_interval_sec=0.01)
+        prefetch = run(_model(tmp_path, sizes), host, max_refills=3)
 
-    assert [name for name, _ in host.reads] == [next(iter(sizes))]
-    assert prefetch.outcome.passes == 1, "no refill once the memory ran out"
+    assert list(host.read_bytes()) == [next(iter(sizes))]
+    assert prefetch.outcome.out_of_room
+    assert prefetch.outcome.passes == 1, "a cache nothing dropped is not read again"
     assert "headroom ran out" in caplog.text
 
 
@@ -227,30 +287,121 @@ def test_what_the_loader_drops_from_the_cache_is_read_again_a_bounded_number_of_
     sizes = _names(2, 4 * GIB)
     host = FakeHost(sizes)
     original = host.read
+    last = (list(sizes)[-1], (3 * GIB, 4 * GIB))
 
     def read(path, span, stop):
         got = original(path, span, stop)
-        if path.name == list(sizes)[-1]:
-            host.drop_cache()  # the loader drops the checkpoint's page cache after each pass
+        if (path.name, span) == last:
+            host.drop_cache()  # the loader drops the checkpoint's page cache right after each pass
         return got
 
     host.read = read  # type: ignore[method-assign]
-    prefetch = run(_model(tmp_path, sizes), host, max_refills=2, refill_interval_sec=0.01)
+    prefetch = run(_model(tmp_path, sizes), host, max_refills=2, watch_sec=10.0)
 
-    assert prefetch.outcome.passes == 3
-    assert [name for name, _ in host.reads] == list(sizes) * 3
+    assert prefetch.outcome.passes == 3, "it ends on its own once the refills are spent"
+    assert [name for name, _ in host.reads] == ([list(sizes)[0]] * 4 + [list(sizes)[1]] * 4) * 3
+
+
+def test_a_drop_seen_while_a_pass_reads_ends_it_and_reads_the_largest_file_again_first(tmp_path, run) -> None:
+    sizes = {"model-1.safetensors": 2 * GIB, "model-2.safetensors": 8 * GIB}
+    host = FakeHost(sizes)
+    original = host.read
+    interrupted = threading.Event()
+
+    def read(path, span, stop):
+        if path.name == "model-1.safetensors" and not interrupted.is_set():
+            stop.wait(0.2)  # long enough for a look at the cache to see the large file whole
+            host.drop_cache()  # the loader drops the cache while the small file is read
+            if stop.wait(10.0):
+                interrupted.set()
+            return 0
+        return original(path, span, stop)
+
+    host.read = read  # type: ignore[method-assign]
+    prefetch = run(_model(tmp_path, sizes), host, max_refills=1, watch_sec=3.0)
+
+    assert interrupted.is_set(), "the drop ended the read in progress"
+    assert prefetch.outcome.passes == 2
+    reads = [name for name, _ in host.reads]
+    assert reads == ["model-2.safetensors"] * 8 + ["model-2.safetensors"] * 8 + ["model-1.safetensors"] * 2
+    assert host.cached("model-1.safetensors") and host.cached("model-2.safetensors")
+
+
+def test_a_small_or_partial_loss_from_the_cache_is_not_a_drop(tmp_path, run) -> None:
+    sizes = _names(2, 4 * GIB)
+    host = FakeHost(sizes)
+    names = list(sizes)
+    original = host.read
+
+    def read(path, span, stop):
+        got = original(path, span, stop)
+        if path.name == names[1] and span[1] == 4 * GIB:
+            with host.lock:  # a third of one file reclaimed: under half of it, so not a drop
+                host.uncached_spans[names[0]] = [(0, GIB + GIB // 3)]
+        return got
+
+    host.read = read  # type: ignore[method-assign]
+    prefetch = run(_model(tmp_path, sizes), host, max_refills=3)
+    assert prefetch.outcome.passes == 1
+
+
+def test_after_the_servers_anonymous_memory_the_engram_tables_of_deepseek_v4_still_fit(tmp_path, run) -> None:
+    """DeepSeek V4.1 Flash on a 448 GiB sandbox: 46 shards of 286.1 GiB, then two engram embedding files of 101.54 GB
+    each. The loader drops the cache when it allocates ~200 GiB of anonymous memory for its host tables; the headroom
+    left, 448 - 200 - 44.8 = 203.2 GiB, holds both engram files (189.1 GiB), which the refill reads first."""
+    engram = 101_540_000_000
+    shards = {f"model-{n:05d}-of-00048.safetensors": int(286.1 * GIB) // 46 for n in range(1, 47)}
+    sizes = {**shards, "model-00047-of-00048.safetensors": engram, "model-00048-of-00048.safetensors": engram}
+    host = FakeHost(sizes, used=4 * GIB)
+    host.limit = 448 * GIB
+    anon = 200 * GIB
+    assert Memory(host.limit, anon).headroom() > 2 * engram > 189 * GIB
+    original = host.read
+    dropped, seen = threading.Event(), threading.Event()
+    started = iter(range(10**6))
+    refill_order: list[str] = []
+
+    def read(path, span, stop):
+        if stop.is_set():
+            return 0  # a read the drop interrupted
+        if seen.is_set():
+            refill_order.append(path.name)
+            return original(path, span, stop)
+        n = next(started)
+        if n < 250:  # the first pass is well on its way, the engram files read whole
+            return original(path, span, stop)
+        if n == 250:
+            stop.wait(0.2)  # a look at the cache sees them whole
+            host.drop_cache()  # the loader drops the cache and allocates its host tables
+            with host.lock:
+                host.used += anon
+            dropped.set()
+        if stop.wait(5.0):  # the first pass reads on, slowly, until the drop is seen
+            seen.set()
+        return 0
+
+    host.read = read  # type: ignore[method-assign]
+    prefetch = run(_model(tmp_path, sizes), host, streams=8, max_refills=3, watch_sec=2.0)
+
+    engram_files = list(sizes)[-2:]
+    assert dropped.is_set() and prefetch.outcome.passes >= 2
+    assert all(host.cached(name) for name in engram_files), "both engram files are whole in the cache"
+    first_refill = refill_order[: 2 * 95]
+    assert set(first_refill) == set(engram_files), "the refill reads the engram files before any shard"
+    assert prefetch.outcome.out_of_room, "the shards fill what is left"
+    assert host.used <= host.limit - 44.8 * GIB + 8 * GIB, "never past the margin (less the pieces in flight)"
 
 
 def test_a_cache_that_stays_warm_is_not_read_again(tmp_path, machine) -> None:
     sizes = _names(1, 4 * GIB)
     host = FakeHost(sizes)
-    machine(host, max_refills=3, refill_interval_sec=0.01)
+    machine(host, max_refills=3)
     prefetch = WeightPrefetch(_model(tmp_path, sizes))
     prefetch.start()
     assert not prefetch.join(0.2), "it keeps watching the cache until it is stopped"
     prefetch.stop()
     assert prefetch.join(5.0)
-    assert prefetch.outcome.passes == 1 and len(host.reads) == 1
+    assert prefetch.outcome.passes == 1 and host.read_bytes() == {next(iter(sizes)): 4 * GIB}
 
 
 def test_stop_ends_a_read_in_progress(tmp_path, machine) -> None:
@@ -316,10 +467,10 @@ def test_a_file_whose_residency_the_kernel_hides_is_read_whole_within_the_budget
         return got
 
     host.read = read  # type: ignore[method-assign]
-    prefetch = run(_model(tmp_path, sizes), host, max_refills=2, refill_interval_sec=0.01)
+    prefetch = run(_model(tmp_path, sizes), host, max_refills=2)
 
     names = list(sizes)
-    assert host.reads == [(names[0], (0, 60 * GIB)), (names[1], (0, 60 * GIB))], "by size, within 170 GiB"
+    assert host.read_bytes() == {names[0]: 60 * GIB, names[1]: 60 * GIB}, "by size, within 170 GiB"
     assert prefetch.outcome.passes == 1
     assert [item["residency_known"] for item in prefetch.outcome.chosen] == [False, False]
 
@@ -517,3 +668,19 @@ def test_an_evicted_file_is_found_uncached_and_read_back_into_the_cache(tmp_path
     assert prefetch.outcome.read_bytes == (size if not visible else sum(end - start for start, end in spans))
     monkeypatch.setattr(wp, "_residency_visible", lambda path, owner: True)
     assert host.uncached(path, size) == [], "the read left the file in the page cache"
+
+
+def test_a_pass_whose_streams_cannot_start_ends(tmp_path, run, monkeypatch) -> None:
+    sizes = _names(1, 4 * GIB)
+    host = FakeHost(sizes)
+
+    class NoStreams(threading.Thread):
+        def start(self) -> None:
+            if self.name.startswith("weight-prefetch-"):
+                raise RuntimeError("can't start new thread")
+            super().start()
+
+    monkeypatch.setattr(wp.threading, "Thread", NoStreams)
+    prefetch = run(_model(tmp_path, sizes), host, max_refills=1)
+
+    assert prefetch.outcome.ended and prefetch.outcome.passes == 1 and not host.reads
