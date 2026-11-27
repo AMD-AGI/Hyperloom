@@ -13,12 +13,12 @@ for the power-budget checks and the search.
 from __future__ import annotations
 
 import logging
-from typing import Any, Mapping
+from typing import Any
 
 from hyperloom_common.env import EnvValueError, env_float
 from hyperloom_common.gpu_telemetry import DEFAULT_INTERVAL_SEC, fast_interval
 from hyperloom.common.gpu_power_settings import gpu_power_sampling_unavailable
-from inference_suite.contracts import READABLE_REPORT_SCHEMAS, GpuTelemetry, PowerSummary
+from inference_suite.contracts import GpuTelemetry, PowerSummary
 
 log = logging.getLogger(__name__)
 
@@ -26,7 +26,6 @@ __all__ = [
     "POWER_FIELDS",
     "round_gpu_telemetry",
     "round_power_fields",
-    "round_power_summary",
 ]
 
 #: The measurement fields a round's power fills, each from the :class:`PowerSummary` figure it names (``None`` for
@@ -67,14 +66,6 @@ def round_gpu_telemetry() -> GpuTelemetry:
         log.warning("gpu_power: the sampling interval is unusable; this round samples nothing", exc_info=True)
         return GpuTelemetry(enabled=False, interval_sec=DEFAULT_INTERVAL_SEC)
     return GpuTelemetry(enabled=not gpu_power_sampling_unavailable(), interval_sec=interval_sec)
-
-
-def round_power_summary(report: Mapping[str, Any] | None) -> PowerSummary | None:
-    """The round's power: an inference_suite report's ``power`` section; ``None`` when no recorder ran for the round."""
-    if report and report.get("schema") in READABLE_REPORT_SCHEMAS:
-        section = report.get("power")
-        return None if section is None else PowerSummary.from_document(section)
-    return None
 
 
 def round_power_fields(summary: PowerSummary) -> dict[str, Any]:
