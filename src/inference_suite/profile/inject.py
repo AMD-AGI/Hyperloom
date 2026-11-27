@@ -14,9 +14,10 @@ tells a step trace from a sidecar by its directory.
 
 Every framework captures only between ``/start_profile`` and ``/stop_profile``; each load's window sends them through
 :func:`server_request` and records what it did as ``profile/capture.json`` (:class:`WindowCapture`). A newer SGLang
-refuses both with 403 unless its server holds an admin key, so a profile round gives its server a fresh key
-(:func:`admin_key`) and sends it with both requests; the key lives only in the server's environment and the window,
-never in ``launch.json``. An older SGLang ignores the variable and the header.
+refuses both with 403 unless its server holds an admin key, so a profile round sends the key its server holds
+(:func:`admin_key`) with both requests: the one its ``--admin-api-key`` names, else a fresh one the round gives it,
+which lives only in the server's environment and the window, never in ``launch.json``. An older SGLang ignores the
+variable and the header.
 
 A ``/start_profile`` the server answers with an error status ends the round at once (``profile_refused``): the
 window would capture nothing, however long the load ran on. One the server does not answer is only recorded, and the
@@ -34,10 +35,10 @@ from collections.abc import Mapping, Sequence
 from dataclasses import asdict, dataclass
 from pathlib import Path
 
-from inference_suite.argv import argv_flag_occurrences
+from inference_suite.argv import argv_flag_occurrences, last_alias_value
 from inference_suite.contracts.config import LaunchDelta, ProfileConfig, SuiteConfig
 from inference_suite.contracts.launch import LaunchError
-from inference_suite.contracts.layout import CAPTURE_TRACE_DIRS, RunLayout
+from inference_suite.contracts.layout import CAPTURE_TRACE_DIRS, RunLayout, answered_with_status
 from inference_suite.contracts.report import FailedStep
 from inference_suite.frameworks import Framework
 from inference_suite.runtime.watch import Stop
@@ -45,6 +46,7 @@ from inference_suite.runtime.watch import Stop
 SGLANG_PROFILER_DIR_ENV = "SGLANG_TORCH_PROFILER_DIR"
 #: Where SGLang's server reads its admin key from when ``--admin-api-key`` is not given.
 SGLANG_ADMIN_KEY_ENV = "SGLANG_ADMIN_API_KEY"
+_SGLANG_ADMIN_KEY_FLAG = frozenset({"admin-api-key"})
 #: SGLang refuses to start with an admin key beside its native gRPC listener, which bypasses HTTP auth; the listener is
 #: on when either is set.
 _SGLANG_GRPC_FLAG = "grpc-port"
@@ -103,11 +105,16 @@ def start_body(profile: ProfileConfig, framework: Framework) -> dict[str, object
 
 
 def admin_key(framework: Framework, argv: Sequence[str], env: Mapping[str, str]) -> str | None:
-    """A fresh admin key for a profile round's server launched with ``argv`` and ``env``; ``None`` for a server that
-    takes none: not SGLang, or SGLang with its gRPC listener on, whose profiler then stays refused."""
-    if framework is not Framework.SGLANG or _SGLANG_GRPC_ENV in env:
+    """The admin key of a profile round's server launched with ``argv`` and ``env``: the one its ``--admin-api-key``
+    names, which SGLang takes over the variable, else a fresh one; ``None`` for a server that takes none: not SGLang, or
+    SGLang with its gRPC listener on, whose profiler then stays refused."""
+    if framework is not Framework.SGLANG:
         return None
-    if any(name == _SGLANG_GRPC_FLAG for name, _ in argv_flag_occurrences(argv)):
+    occurrences = argv_flag_occurrences(argv)
+    given = last_alias_value(occurrences, _SGLANG_ADMIN_KEY_FLAG)
+    if given is not None:
+        return given
+    if _SGLANG_GRPC_ENV in env or any(name == _SGLANG_GRPC_FLAG for name, _ in occurrences):
         return None
     return secrets.token_urlsafe(32)
 
@@ -125,10 +132,11 @@ def server_request(url: str, body: Mapping[str, object] | None, key: str | None 
         return response.read()
 
 
-def start_refusal(error: str, exc: Exception) -> Stop | None:
-    """The stop a ``/start_profile`` that raised ``exc``, recorded as ``error``, makes: ``profile_refused`` when the
-    server answered it with an error status, none when the server did not answer."""
-    return Stop(FailedStep.PROFILE_REFUSED, error) if isinstance(exc, urllib.error.HTTPError) else None
+def start_refusal(error: str) -> Stop | None:
+    """The stop a ``/start_profile`` that failed, recorded as ``error``, makes: ``profile_refused`` when the server
+    answered it with an error status (:func:`~inference_suite.contracts.layout.answered_with_status`), none when the
+    server did not answer."""
+    return Stop(FailedStep.PROFILE_REFUSED, error) if answered_with_status(error) else None
 
 
 @dataclass(frozen=True)

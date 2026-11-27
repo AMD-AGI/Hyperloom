@@ -51,7 +51,7 @@ class FixedWindow:
             server_request(self._base_url + START_PROFILE_PATH, self._body, self._key)
         except SERVER_REQUEST_ERRORS as exc:
             self._error = f"{START_PROFILE_PATH}: {exc}"
-            return start_refusal(self._error, exc)
+            return start_refusal(self._error)
         self._opened = time.time()
         self._clock.mark(Phase.PROFILE_OPEN)
         return None

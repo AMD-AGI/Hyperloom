@@ -6,18 +6,27 @@ round's SGLang server takes, and the trace dirs."""
 
 from __future__ import annotations
 
+import urllib.error
 from dataclasses import replace
 from pathlib import Path
 
 import pytest
 
 from inference_suite.compose import compose
-from inference_suite.contracts import FixedWorkload, ProfileConfig, RunLayout, RunPaths, WorkloadKind
+from inference_suite.contracts import (
+    FixedWorkload,
+    ProfileConfig,
+    RunLayout,
+    RunPaths,
+    WorkloadKind,
+    answered_with_status,
+)
 from inference_suite.contracts.base_launch import Workload
 from inference_suite.contracts.launch import Launch, LaunchError, LayerSource
 from inference_suite.frameworks import Framework, framework_facts
 from inference_suite.profile.inject import (
     SGLANG_PROFILER_DIR_ENV,
+    START_PROFILE_PATH,
     admin_key,
     make_trace_dirs,
     profiler_layer,
@@ -126,12 +135,25 @@ def test_a_profile_rounds_sglang_server_gets_a_fresh_admin_key_and_the_others_no
     assert admin_key(Framework.ATOM, ("python3", "-m", "atom.entrypoints.openai_server"), {}) is None
 
 
+@pytest.mark.parametrize("args", [("--admin-api-key", "operator-key"), ("--admin_api_key=operator-key",)])
+def test_an_sglang_server_launched_with_an_admin_key_is_sent_that_key_since_the_flag_wins_over_the_variable(args):
+    assert admin_key(Framework.SGLANG, ("python3", "-m", "sglang.launch_server", *args), {}) == "operator-key"
+
+
 @pytest.mark.parametrize(
     ("args", "env"),
     [(("--grpc-port", "50051"), {}), (("--grpc_port=50051",), {}), ((), {"SGLANG_GRPC_PORT": "50051"})],
 )
 def test_an_sglang_server_with_its_grpc_listener_gets_no_admin_key_since_it_would_refuse_to_start(args, env):
     assert admin_key(Framework.SGLANG, ("python3", "-m", "sglang.launch_server", *args), env) is None
+
+
+def test_a_control_request_the_server_answered_with_an_error_status_is_told_from_one_it_never_answered():
+    refused = urllib.error.HTTPError(START_PROFILE_PATH, 403, "Forbidden", None, None)
+    unanswered = urllib.error.URLError(TimeoutError("timed out"))
+
+    assert answered_with_status(f"{START_PROFILE_PATH}: {refused}")
+    assert not answered_with_status(f"{START_PROFILE_PATH}: {unanswered}")
 
 
 def test_capture_sidecars_land_beside_torch_trace_not_flattened(tmp_path):

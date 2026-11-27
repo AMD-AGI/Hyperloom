@@ -101,8 +101,10 @@ _SERVER = textwrap.dedent(
                     trace.write("trace")
             known = self.path in ("/start_profile", "/stop_profile")
             status = 500 if os.environ.get("FAKE_PROFILE_REFUSED") == "1" else 200 if known else 404
-            # A newer SGLang's admin_force: 403 without an admin key, 401 without its bearer token.
-            key = os.environ.get("SGLANG_ADMIN_API_KEY")
+            # A newer SGLang's admin_force: 403 without an admin key, 401 without its bearer token. --admin-api-key wins
+            # over the variable.
+            flag = "--admin-api-key"
+            key = sys.argv[sys.argv.index(flag) + 1] if flag in sys.argv else os.environ.get("SGLANG_ADMIN_API_KEY")
             if known and os.environ.get("FAKE_PROFILE_ADMIN_FORCE") == "1":
                 status = 403 if not key else 401 if self.headers.get("Authorization") != "Bearer " + key else status
             self.send_response(status)
@@ -561,9 +563,14 @@ def test_a_fixed_profile_window_the_server_refuses_ends_the_round_before_the_mea
     assert capture["window_open_unix"] is None and capture["error"] == report.failure_detail
 
 
-def test_a_profile_round_opens_the_window_of_an_sglang_that_gates_its_profiler_behind_an_admin_key(rig, monkeypatch):
+@pytest.mark.parametrize("args", [(), ("--admin-api-key", "operator-key")])
+def test_a_profile_round_opens_the_window_of_an_sglang_that_gates_its_profiler_behind_an_admin_key(
+    rig, monkeypatch, args
+):
     """A newer SGLang answers /start_profile with 403 unless its server holds an admin key, and 401 without it."""
     config = _serving(rig.config("r1", profile=_FIXED_WINDOW), monkeypatch, FAKE_PROFILE_ADMIN_FORCE="1")
+    user = config.server.user
+    config = replace(config, server=replace(config.server, user=replace(user, args_add=(*user.args_add, *args))))
 
     result = run.run_round(config)
 
