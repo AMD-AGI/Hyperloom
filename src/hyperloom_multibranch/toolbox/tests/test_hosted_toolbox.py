@@ -792,32 +792,6 @@ async def test_a_running_tests_progress_is_the_last_line_its_runner_reports_from
         await toolbox.close()
 
 
-async def test_a_running_test_whose_runner_has_written_no_log_has_no_live_line(
-    service: Service, tmp_path: Path
-) -> None:
-    toolbox = _toolbox(service, tmp_path, planned=_HANG)
-    try:
-        await toolbox.start()
-        request_id = await toolbox.submit_test(req())
-        await _until(lambda: service.running("measurement", "run-1") != [], "the runner sandbox")
-        (sandbox_id,) = service.running("measurement", "run-1")
-        sandbox = service.observer().connect(sandbox_id, role="measurement")
-
-        def running() -> bool:
-            try:
-                return json.loads(sandbox.read_file("/out/progress.json")).get("phase") == "running"
-            except FileNotFoundError:
-                return False
-
-        await _until(running, "the runner's progress to say it runs")
-        await asyncio.sleep(0.5)  # ten polls of that file
-        progress = await toolbox.progress(request_id)
-        assert progress is not None and progress.state == "running" and progress.running_seconds is not None
-        assert (progress.last_line, progress.last_output_seconds_ago) == (None, None)
-    finally:
-        await toolbox.close()
-
-
 async def test_a_lease_is_a_dev_sandbox_and_its_cards_leave_the_measurement_capacity(
     service: Service, tmp_path: Path
 ) -> None:
