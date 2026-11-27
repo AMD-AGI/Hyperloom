@@ -9,7 +9,7 @@ export has its own schema version and its own sections:
 * ``metadata``: the session profile, the manifest fingerprint of each activity, and ``session``, the block Pulse reads
   for both flows (the session id, the source revision the session ran on, and the Claw session, framework image and
   node a hosted run is given). In a hosted run it also holds, as written, what the run leaves in the session directory:
-  ``plugs`` and ``hosted_measurement``, and the records ``measurement_sandboxes`` (one per test, keyed by
+  ``hosted_measurement``, and the records ``measurement_sandboxes`` (one per test, keyed by
   ``request_id`` as ``tests`` are). From the agent runner's samples it holds ``specialist_resources``, one record per
   specialist, and ``container_resources``, the container's last reading. ``base_launch`` is where the session's frozen
   base was resolved from, its image and its topology, from ``MB-toolbox/base_launch.json``, with the locations in
@@ -80,7 +80,6 @@ CLAW_SESSION_KEY = "claw_session_id"
 HOSTED_RECORDS = {"measurement_sandboxes": Path("hosted/measurement_sandboxes.jsonl")}
 #: The documents a hosted run writes in the session directory, by the ``metadata`` key the breakdown copies them under.
 HOSTED_DOCUMENTS = {
-    "plugs": Path("plugs.resolved.json"),
     "hosted_measurement": Path("hosted/measurement_stats.json"),
 }
 _ABSENT = object()

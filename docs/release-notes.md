@@ -45,6 +45,14 @@ it.
   child. `optimize --session-dir` stays. `options.conc_sweep` is no longer
   part of the spec (it is ignored like any unknown field); a multi-branch run
   takes its sweep switch from `multibranch.conc_sweep`.
+- **The plug kernel is removed.** `optimize` drops `--plug-profile`,
+  `--manifest`, `--plug` and `--plug-config` (each now exits 2 as an
+  unrecognized argument), no longer reads `HYPERLOOM_MANIFEST` or
+  `HYPERLOOM_MANIFEST_OVERRIDES`, and no longer writes or reads back
+  `plugs.resolved.json`. Its only filled sockets were the progress events,
+  whose hosted writer went with the single flow, and the native builds of a
+  checkout-built server, which `optimize` now opens directly. See
+  [Upgrade](reference/upgrade.md).
 - **forge-loop runs every round as lanes and has no planning stage.** Every
   iteration is one round: one lane per focus the Analysis Agent divides its
   evidence into (at most `--lanes`, and one lane with no focus when it divides
