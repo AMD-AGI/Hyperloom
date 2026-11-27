@@ -16,6 +16,7 @@ from types import SimpleNamespace
 import pytest
 
 from hyperloom.orchestrator.enablement.runtime.build_actions import TargetedBuildAction
+from hyperloom.orchestrator.enablement.runtime.build_utils import ABI_PROBE_MARKER
 from hyperloom.orchestrator.enablement.runtime.targeted_build import (
     _driver_main,
     _load_result_json,
@@ -131,7 +132,7 @@ def _make_aiter_run(
                 "python_version": "3.12.13",
                 "is_rocm": hip_ok,
             }
-            return _completed(stdout=json.dumps(data) + "\n")
+            return _completed(stdout=ABI_PROBE_MARKER + json.dumps(data) + "\n")
         if "which hipcc" in cmd:
             return _completed(stdout=toolchain_hipcc + "\n" if toolchain_hipcc else "")
         if "dirname" in cmd:
@@ -221,7 +222,8 @@ def _make_rocm_run(
             )
         if "is_rocm" in cmd:
             return _completed(
-                stdout=json.dumps(
+                stdout=ABI_PROBE_MARKER
+                + json.dumps(
                     {
                         "torch_version": torch_ver,
                         "hip_version": "7.2.53211",
@@ -775,6 +777,28 @@ def test_vllm_source_build_abi_mismatch_refuses_silently(monkeypatch, tmp_path):
     assert result.failure_class in ("abi_mismatch", "preflight_toolchain")
 
 
+def test_a_failed_torch_probe_names_its_stderr_in_the_preflight(monkeypatch, tmp_path):
+    """A probe that cannot import torch says why, instead of reporting an empty torch version."""
+    wt = tmp_path / "wt"
+    wt.mkdir()
+    venv = tmp_path / "venv"
+    (venv / "bin").mkdir(parents=True)
+    _patch_isolation(monkeypatch, wt, venv)
+    ok_run = _make_rocm_run()
+
+    def run(argv, *args, **kwargs):
+        if "is_rocm" in " ".join(str(a) for a in argv):
+            return _completed(returncode=1, stderr="ImportError: libamdhip64.so.10: cannot open shared object file\n")
+        return ok_run(argv, *args, **kwargs)
+
+    result = run_vllm_source_build(_vllm_action(), str(tmp_path / "attempt"), run=run, disk_preflight_fn=_noop_disk)
+    assert result.ok is False
+    assert result.failure_class == "preflight_toolchain"
+    assert "rc=1" in result.failure_summary
+    assert "libamdhip64.so.10: cannot open shared object file" in result.failure_summary
+    assert "torch=)" not in result.failure_summary
+
+
 def test_vllm_source_python_version_abi_guard(monkeypatch, tmp_path):
     """ABI mismatch on wrong Python version is advisory: build succeeds with runtime_python_exe set."""
     wt = tmp_path / "wt"
@@ -789,7 +813,8 @@ def test_vllm_source_python_version_abi_guard(monkeypatch, tmp_path):
         cmd = " ".join(str(a) for a in argv)
         if "is_rocm" in cmd:
             return _completed(
-                stdout=json.dumps(
+                stdout=ABI_PROBE_MARKER
+                + json.dumps(
                     {
                         "torch_version": "2.10.0",
                         "hip_version": "7.2",
