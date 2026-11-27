@@ -70,6 +70,7 @@ def _patch_member_list(raw: Any) -> list[Any]:
 
 
 def _existing_patch_paths(candidates: list[Any]) -> tuple[list[Path], list[str]]:
+    """The canonical path of every candidate that is a file, and the name of every one that is not."""
     resolved: list[Path] = []
     missing: list[str] = []
     seen: set[Path] = set()
@@ -204,8 +205,7 @@ class AgentKeepStagingMixin:
         patch_kb = PatchKB.open()
         if not patch_kb.active:
             return False
-        # The store refuses a symlink, so a source reached through one is staged by its target.
-        sources = [Path(str(path)).resolve() for path in (row.get("patch_sources") or [])]
+        sources = list(row.get("patch_sources") or [])
         refs: list[str] = []
         if sources:
             refs = patch_kb.stage_patches(sources, stack_index=stack_index)
@@ -246,17 +246,16 @@ class AgentKeepStagingMixin:
         # delivered patch rather than joining it -- staging both would apply the
         # same change twice. It is chosen here, not at drain, because drain only
         # ever sees the row.
-        realized = Path(str(result.get("source_realized_patch") or "").strip() or ".")
-        realized_supersedes = realized.is_file()
-        if realized_supersedes:
-            sources, missing = [realized], []
+        realized, _ = _existing_patch_paths([result.get("source_realized_patch")])
+        if realized:
+            sources, missing = realized, []
         row = {
             "id": f"{_PATCH_KEEP_OWNER}:{int(stack_index)}",
             "owner": _PATCH_KEEP_OWNER,
             "stack_index": int(stack_index),
             "patch_sources": [str(path) for path in sources],
             "missing_patch_sources": missing,
-            "provenance": _keep_origin_provenance(result, sources, realized=realized_supersedes),
+            "provenance": _keep_origin_provenance(result, sources, realized=bool(realized)),
         }
         outbox = list(self.shared_state.kb_stage_outbox or [])
         if not any(isinstance(existing, dict) and existing.get("id") == row["id"] for existing in outbox):

@@ -17,31 +17,23 @@ log = logging.getLogger(__name__)
 class DeadHolderAccountingMixin:
     """Accounting for the tasks whose holder process died before reporting a result."""
 
-    async def _account_dead_holder_failures(
-        self,
-        task_ids: list[str],
-        *,
-        reason: str,
-    ) -> None:
-        """Retry or charge a failure for each task reclaimed from a dead lease holder.
+    async def _account_dead_holder_failures(self, task_ids: list[str]) -> None:
+        """Retry or charge a failure for each task the reconciler reclaimed from a dead lease holder.
 
-        A holder killed from outside this process (its lease reaped by
-        ``reap_dead_holders``) never returns a result, so without this the
-        per-action streak counters never see the death and the streak-based
-        auto-terminate stays blind to the whole failure mode. A gap's
-        specialist first takes the bounded infra retry a crashed run gets.
+        A task whose holder process is gone never returns a result, so without
+        this the per-action streak counters never see the death and the
+        streak-based auto-terminate stays blind to the whole failure mode. A
+        gap's specialist first takes the bounded infra retry a crashed run gets.
 
         Args:
-            task_ids: Task ids just transitioned ``running -> failed`` by the
-                dead-holder reclaim.
-            reason: Reclaim reason label, echoed into the failure result.
+            task_ids: Task ids the reconciler transitioned ``running -> failed``.
         """
         for task_id in task_ids:
             try:
                 task = await self.tasks.get(task_id)
             except TaskNotFound:
                 continue
-            error = f"lease holder process died before reporting a result; task reclaimed by {reason}"
+            error = "lease holder process died before reporting a result; task reclaimed by the reconciler"
             died = SubAgentResult(task_id, "failed", {}, error=error, error_class=DEAD_HOLDER_ERROR_CLASS)
             settles_specialist = task.kind == "specialist"
             # A gapless discovery round settles instead: the FRAMEWORK pump keys its next round on that settle.

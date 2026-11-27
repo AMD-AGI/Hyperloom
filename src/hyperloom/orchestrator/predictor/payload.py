@@ -106,7 +106,7 @@ def _hot_kernels(trace: dict[str, Any], sites: Mapping[str, dict[str, Any]]) -> 
 def _evidence(state: SessionView, sites: Mapping[str, dict[str, Any]], sidecars: Mapping[str, Any]) -> dict[str, Any]:
     trace = state.last_trace_analyze
     # Hot kernels alone count: a trace whose quality gate withheld analysis.md still names where device time went.
-    if not (trace.get("analysis_md_text") or trace.get("hot_kernels_top15")):
+    if not (trace.get("has_analysis_md") or trace.get("hot_kernels_top15")):
         return {"profile_available": False}
     snapshot = state.roofline_snapshots[-1] if state.roofline_snapshots else {}
     block = {

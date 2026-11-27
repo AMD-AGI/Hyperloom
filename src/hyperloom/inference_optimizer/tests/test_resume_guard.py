@@ -21,6 +21,7 @@ import pytest
 from hyperloom.inference_optimizer.session.paths import db_path_for
 from hyperloom.inference_optimizer.session.resume_guard import ResumeBlocked, ensure_resume_safe
 from hyperloom.orchestrator.state.task_registry import TaskSpec
+from ._lease_helpers import lane_holders
 
 
 def test_real_coordinator_database_path_is_checked_before_resume(tmp_path):
@@ -294,7 +295,7 @@ async def test_matching_scope_dead_holder_reaches_existing_reaper(tmp_path, monk
         assert await tasks.reclaim_dead_running() == ["task-1"]
         assert await leases.reap_dead_holders()
         assert (await tasks.get("task-1")).state == "failed"
-        assert await leases.lane_holders() == {}
+        assert await lane_holders(leases) == {}
     finally:
         db.close()
 

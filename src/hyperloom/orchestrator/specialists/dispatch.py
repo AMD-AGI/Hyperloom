@@ -234,7 +234,7 @@ class SpecialistDispatchCollaborator(CoordinatorCollaborator):
         # analysis.md still names where device time goes.
         last_ta = getattr(state, "last_trace_analyze", None) or {}
         has_evidence = isinstance(last_ta, dict) and bool(
-            last_ta.get("analysis_md_text") or last_ta.get("hot_kernels_top15")
+            last_ta.get("has_analysis_md") or last_ta.get("hot_kernels_top15")
         )
         if has_evidence and "roofline_evidence" not in params:
             from hyperloom.inference_optimizer.roofline_snapshot import extract_workload_summary

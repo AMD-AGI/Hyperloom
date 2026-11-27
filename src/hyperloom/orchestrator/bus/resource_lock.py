@@ -580,11 +580,6 @@ class SqliteLeaseBackend:
         _report_unverifiable(stuck, db_path=str(getattr(self.db, "db_path", "") or ""))
         return stuck
 
-    async def lane_holders(self) -> dict[str, int]:
-        """Return ``{lane: holder_count}`` for every retained ownership row."""
-        rows = await self.db.fetchall("SELECT lane, COUNT(*) AS n FROM leases GROUP BY lane")
-        return {r["lane"]: int(r["n"]) for r in rows}
-
     def lanes_by_task_sync(self) -> dict[str, tuple[list[str], str]]:
         """Return ``{task_id: (lanes, soonest_expiry)}`` for every retained row.
 

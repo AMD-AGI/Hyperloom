@@ -660,7 +660,7 @@ class _RenderMixin:
     def _format_analysis_md_pointer(self) -> str:
         """Name the TraceLens report's file once a snapshot exists; before that, say the Coordinator owns the analysis."""
         cached = self.last_trace_analyze or {}
-        if not cached.get("analysis_md_text"):
+        if not cached.get("has_analysis_md"):
             return (
                 "(no TraceLens snapshot yet — analysis is auto-enqueued "
                 "by the Coordinator at the end of PRELUDE and on every "

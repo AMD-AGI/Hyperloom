@@ -31,6 +31,7 @@ from hyperloom.inference_optimizer.trace.task_progress import (
     progress_scope,
     report_progress,
 )
+from ._lease_helpers import lane_holders
 
 
 def _runner(tmp_path: Path, monkeypatch) -> SubAgentRunner:
@@ -204,7 +205,7 @@ async def test_worker_cleanup_precedes_lane_release(tmp_path, monkeypatch, confi
         return {"ok": True}
 
     async def cleanup():
-        assert (await sub.locks.lane_holders())["research_lane"] == 1
+        assert (await lane_holders(sub.locks))["research_lane"] == 1
         if not confirmed:
             raise OSError("release failed")
 
@@ -223,7 +224,7 @@ async def test_worker_cleanup_precedes_lane_release(tmp_path, monkeypatch, confi
             assert "executor failed" in row.history[-1]["evidence"]["error"]
         # Cleanup runs first and its answer lands on the row, but the row is
         # terminal either way, so the lane goes back either way.
-        assert not await sub.locks.lane_holders()
+        assert not await lane_holders(sub.locks)
         retained = await sub.tasks.db.fetchone("SELECT task_id FROM leases WHERE task_id=?", (task.task_id,))
         assert retained is None
     finally:
@@ -262,7 +263,7 @@ async def test_direct_cancel_during_cleanup_releases_capacity_and_warns(tmp_path
         # task is terminal, so the lane is returned and the warning is what
         # tells an operator a worker may be running without one.
         assert (await sub.tasks.get(task.task_id)).state == "succeeded"
-        assert not await sub.locks.lane_holders()
+        assert not await lane_holders(sub.locks)
         assert "cleanup cancelled" in caplog.text
     finally:
         finish.set()

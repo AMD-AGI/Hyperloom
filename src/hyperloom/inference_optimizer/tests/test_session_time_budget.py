@@ -52,6 +52,7 @@ from hyperloom.orchestrator.tests.mock_backend import MockBackend, ScriptedPlan
 from hyperloom.orchestrator.state.shared_state import SharedState, effective_closing_grace_sec
 from hyperloom.orchestrator.state.task_registry import Task, TaskSpec
 from hyperloom.orchestrator.loop.dispatcher import HeldLeases
+from ._lease_helpers import lane_holders
 
 
 # The costliest action the catalogue prices, so a short budget cannot fit it.
@@ -688,13 +689,13 @@ async def _cancel_then_let_finish(coord, task, atask: asyncio.Task, finish: asyn
         assert atask.cancelled()
         assert coord.dispatcher._inflight_actions[task.task_id].scope.cancelled
         assert (await coord.tasks.get(task.task_id)).state == "running"
-        assert (await coord.locks.lane_holders())[_CHEAP_ACTION_LANE] == 1
+        assert (await lane_holders(coord.locks))[_CHEAP_ACTION_LANE] == 1
     finally:
         executions = tuple(coord.dispatcher._executions)
         finish.set()
         await asyncio.gather(*executions)
     assert (await coord.tasks.get(task.task_id)).state == "succeeded"
-    assert not await coord.locks.lane_holders()
+    assert not await lane_holders(coord.locks)
 
 
 async def _done(payload: dict) -> dict:
@@ -736,9 +737,9 @@ class TestCancellingInflightActions:
     async def test_unconfirmed_cancellation_keeps_its_lane(self, coord: Coordinator):
         """Cancelling a coroutine cannot attest to worker cleanup."""
         await _start_action(coord, kind=_CHEAP_ACTION, key="c-lane")
-        assert (await coord.locks.lane_holders()).get(_CHEAP_ACTION_LANE, 0) == 1
+        assert (await lane_holders(coord.locks)).get(_CHEAP_ACTION_LANE, 0) == 1
         await coord.dispatcher.cancel_inflight_actions(reason="test")
-        assert (await coord.locks.lane_holders()).get(_CHEAP_ACTION_LANE, 0) == 1
+        assert (await lane_holders(coord.locks)).get(_CHEAP_ACTION_LANE, 0) == 1
 
 
 # Long enough that a round which ran to completion is unmistakable in the elapsed time, short enough that an abandoned
@@ -900,13 +901,13 @@ async def test_cancelled_thread_keeps_capacity_until_execution_cleanup(coord, mo
         await coord.dispatcher.cancel_inflight_actions(reason="test")
         assert action.cancelled()
         assert (await coord.tasks.get(task.task_id)).state == "running"
-        assert (await coord.locks.lane_holders())[_CHEAP_ACTION_LANE] == 1
+        assert (await lane_holders(coord.locks))[_CHEAP_ACTION_LANE] == 1
     finally:
         executions = tuple(coord.dispatcher._executions)
         stopped.set()
         await asyncio.gather(*executions)
     assert (await coord.tasks.get(task.task_id)).state == "succeeded"
-    assert not await coord.locks.lane_holders()
+    assert not await lane_holders(coord.locks)
 
 
 @pytest.mark.asyncio
@@ -956,7 +957,7 @@ async def test_stop_defers_db_close_until_pending_worker_cleanup(coord, monkeypa
         assert not stopping.done()
         assert not closed.is_set()
         assert (await coord.tasks.get(task.task_id)).state == "running"
-        assert (await coord.locks.lane_holders())[_CHEAP_ACTION_LANE] == 1
+        assert (await lane_holders(coord.locks))[_CHEAP_ACTION_LANE] == 1
     finally:
         finish.set()
         await asyncio.wait_for(stopping, 2)
@@ -1008,7 +1009,7 @@ async def test_a_specialist_s_gpu_capacity_returns_when_its_execution_ends(coord
 
     on_complete.assert_awaited_once()
     assert await coord.db.fetchone("SELECT 1 FROM gpu_leases") is None
-    assert not await coord.locks.lane_holders()
+    assert not await lane_holders(coord.locks)
 
 
 class TestTheRunnerRecordsACancellation:
@@ -1111,7 +1112,7 @@ class TestThePumpStopsWorkItCannotWaitFor:
             assert coord.dispatcher._inflight_actions[task.task_id] == handle
             assert executions and all(not execution.done() for execution in executions)
             assert (await coord.tasks.get(task.task_id)).state == "running"
-            assert (await coord.locks.lane_holders())[_CHEAP_ACTION_LANE] == 1
+            assert (await lane_holders(coord.locks))[_CHEAP_ACTION_LANE] == 1
 
             finish.set()
             await _settle(handle.atask)
@@ -1128,7 +1129,7 @@ class TestThePumpStopsWorkItCannotWaitFor:
 
         assert worker_done.is_set()
         assert (await coord.tasks.get(task.task_id)).state == "succeeded"
-        assert not await coord.locks.lane_holders()
+        assert not await lane_holders(coord.locks)
         assert coord.dispatcher._inflight_actions == {}
         assert not coord.dispatcher._executions
         await coord.dispatcher.pump_dispatcher_once()

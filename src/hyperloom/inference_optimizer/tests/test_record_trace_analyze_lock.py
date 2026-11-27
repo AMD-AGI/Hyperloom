@@ -39,7 +39,7 @@ def test_written_dict_has_seventeen_keys() -> None:
         "reusable_native_kernel_ids",
         "trace_health_warnings",
         "analysis_md_path",
-        "analysis_md_text",
+        "has_analysis_md",
         "fusion_findings",
         "system_findings",
         "roofline_snapshot_id",

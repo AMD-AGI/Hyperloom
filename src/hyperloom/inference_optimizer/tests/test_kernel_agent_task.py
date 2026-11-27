@@ -26,6 +26,7 @@ from hyperloom.orchestrator.state.shared_state import SharedState
 from hyperloom.orchestrator.state.task_registry import Task, TaskSpec
 from .conftest import make_idle_coordinator
 from ._dispatch_helpers import pump_until_settled
+from ._lease_helpers import lane_holders
 
 _KERNEL_AGENT_LANES = ("server_lifecycle", "workspace_mutation", "benchmark_lane")
 
@@ -431,7 +432,7 @@ async def test_a_spent_phase_budget_lets_the_running_kernel_agent_finish_before_
 
     assert st.phase == ps.PHASE_CYCLE_END
     assert (await c.tasks.get(task.task_id)).state == "succeeded"
-    assert not any((await c.locks.lane_holders()).values())
+    assert not any((await lane_holders(c.locks)).values())
 
 
 @pytest.mark.asyncio
@@ -474,7 +475,7 @@ async def test_a_terminal_stop_cancels_the_running_kernel_agent_on_the_way_to_cl
     assert (await c.tasks.get(task.task_id)).state == "cancelled"
     assert st.phase == ps.PHASE_CLOSE
     assert st.phase_history[-1]["reason"] == BACKEND_UNHEALTHY_STOP_REASON
-    assert not any((await c.locks.lane_holders()).values())
+    assert not any((await lane_holders(c.locks)).values())
 
 
 @pytest.mark.asyncio
@@ -536,7 +537,7 @@ async def test_a_spent_session_cancels_the_running_kernel_agent(coord):
     await _settle(c, task.task_id)
 
     assert (await c.tasks.get(task.task_id)).state == "cancelled"
-    assert not any((await c.locks.lane_holders()).values())
+    assert not any((await lane_holders(c.locks)).values())
 
 
 def test_the_time_budget_gate_admits_kernel_agent_while_one_baseline_round_fits(coord):
@@ -591,7 +592,7 @@ async def test_a_covered_step_runs_inside_the_lanes_its_caller_holds(coord):
     assert seen[0].lease is None
     assert seen[0].extra["shared_state"] is c.shared_state
     assert [t.task_id for t in await c.tasks.queued()] == [agent.task_id]
-    assert (await c.locks.lane_holders()).get("benchmark_lane") == 1
+    assert (await lane_holders(c.locks)).get("benchmark_lane") == 1
 
 
 @pytest.mark.asyncio

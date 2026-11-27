@@ -110,7 +110,7 @@ class ProfileRooflineMixin:
         # Prefer the executor's last_trace_analyze snapshot over the result dict.
         last_ta = self.shared_state.last_trace_analyze or {}
         self.shared_state.roofline_failure_streak = 0
-        if str(last_ta.get("analysis_md_text") or ""):
+        if last_ta.get("has_analysis_md"):
             anchor_tput = self._coord.phase_kernel.current_tput_from_validated_gain()
             if anchor_tput > 0:
                 self.shared_state.last_roofline_tput = float(anchor_tput)

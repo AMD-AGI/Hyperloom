@@ -993,7 +993,7 @@ def test_framework_isolation_helpers(tmp_path: Path, monkeypatch: pytest.MonkeyP
 # orchestrator.roles.base — retry / backoff
 
 
-def test_retry_policy_env_and_on_retry_error(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_retry_policy_from_env_and_delay(monkeypatch: pytest.MonkeyPatch) -> None:
     from hyperloom.orchestrator.roles import base
     from hyperloom.orchestrator.roles.base import RetryPolicy
     from hyperloom_common.env import EnvValueError

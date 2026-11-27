@@ -381,7 +381,9 @@ In `state.json`:
   whose server needs CUDA graphs off takes the flag in `extra_server_args`, as
   before.
 * A row of `kb_stage_outbox` or `kb_stage_dead_letter` no longer carries
-  `include_patches`; it was `true` on every row.
+  `include_patches`; it was `true` on every row. A row names a realized diff
+  by its canonical path, as it already named a delivered patch, and the
+  `host_origin.sources` of the staged provenance row carries the same path.
 * The audit rows (`last_roofline`, `last_profile`, `last_baseline` and their
   `*_attempts` lists) no longer use the decisions `skipped` (roofline,
   profile) or `discarded` (roofline, baseline), and a baseline row's
@@ -425,7 +427,9 @@ Five behaviours change at the edges:
   the reconciler at the start of the tick, as before; the dispatcher no longer
   repeats the same query later in that tick. If the reconciler's query fails
   on a database error, the reclaim is retried on the next tick instead of
-  later in the same one.
+  later in the same one. The failure charged for such a task (`error_class`
+  `dead_holder_reaped`) ends `task reclaimed by the reconciler`; 1.2.x ended
+  it `task reclaimed by dead_holder_pump`.
 * A delegate whose `idempotency_key` names a task another author created is
   answered like any other reused key: with `duplicate_idempotency_key` or
   `duplicate_idempotency_key_running`, or with a new task under
@@ -639,6 +643,13 @@ turn; no session state changes.
   their answers are unchanged.
 * `show_analysis_md` replaced each embedded base64 image of `analysis.md` with
   a placeholder. The file itself holds the images as TraceLens wrote them.
+* `last_trace_analyze` in `state.json` no longer has `analysis_md_text`, the
+  whole text of `analysis.md`, embedded images included, which only
+  `show_analysis_md` returned and every save rewrote. Read the file at
+  `last_trace_analyze.analysis_md_path`. The new
+  `last_trace_analyze.has_analysis_md` is `true` when that file held anything
+  at the time the roofline was recorded, and `false` for a report that was
+  missing or empty, which 1.2.x stored as an empty `analysis_md_text`.
 * In the session-state block, the `analysis_md=` line of a session with a
   TraceLens snapshot ends `Report file: <path>` where it named the tool.
   Before the first snapshot the line said that `roofline` and `profile` could
@@ -650,8 +661,9 @@ changes what the Coordinator admits or dispatches:
 
 * The `## 3. PIPELINE & TIME BUDGET` section is gone, and `## 3a. PHASE
   CONTRACT` is `## 3. PHASE CONTRACT`. The section summed a typical runtime per
-  action group against `--max-minutes` and advised skipping analysis or adding
-  an explore round before the report, both of which the Coordinator schedules.
+  action group against the session budget (`--max-hours`) and advised skipping
+  analysis or adding an explore round before the report, both of which the
+  Coordinator schedules.
   The Phase block of every turn carries the remaining budget, and each
   catalogue entry its own typical cost.
 * The catalogue entry of `roofline` shows no proposal template; it showed

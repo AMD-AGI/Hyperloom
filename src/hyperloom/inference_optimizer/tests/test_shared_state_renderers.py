@@ -175,7 +175,7 @@ def test_format_analysis_md_pointer():
     assert "no TraceLens snapshot" in before_a_snapshot
     assert "a proposal for either is denied" in before_a_snapshot
     st.last_trace_analyze = {
-        "analysis_md_text": "# Analysis\nbody",
+        "has_analysis_md": True,
         "analysis_md_path": "/s/analysis.md",
         "roofline_snapshot_id": 5,
         "roofline_baseline_gain_at_snapshot": 12.5,

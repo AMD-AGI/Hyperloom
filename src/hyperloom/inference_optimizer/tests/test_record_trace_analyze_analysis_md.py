@@ -1,12 +1,14 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""``record_trace_analyze`` caches TraceLens analysis.md (full text, monotonic snapshot id, point-in-time gain capture, silent read failures)."""
+"""``record_trace_analyze`` records the TraceLens report (its path, whether it held anything, monotonic snapshot id, point-in-time gain capture)."""
 
 from __future__ import annotations
 
 import json
 from pathlib import Path
+
+import pytest
 
 from hyperloom.orchestrator.state.shared_state import SharedState
 
@@ -23,8 +25,8 @@ def _result_with_report(analysis_md: Path) -> dict:
     }
 
 
-def test_caches_analysis_md_full_text(tmp_path: Path) -> None:
-    """Path provided → file content cached verbatim."""
+def test_records_the_report_path_and_that_the_report_held_text(tmp_path: Path) -> None:
+    """The report stays on disk: the state names it and says it was there, and holds none of its text."""
     analysis_md = tmp_path / "analysis.md"
     analysis_md.write_text(
         "# Executive Summary\nCompute 51.6%, Idle 48.3%\n## Top Operations\n| aten::mm | 25% |\n",
@@ -36,9 +38,8 @@ def test_caches_analysis_md_full_text(tmp_path: Path) -> None:
 
     cached = state.last_trace_analyze
     assert cached["analysis_md_path"] == str(analysis_md)
-    assert "Executive Summary" in cached["analysis_md_text"]
-    assert "Compute 51.6%" in cached["analysis_md_text"]
-    assert "Top Operations" in cached["analysis_md_text"]
+    assert cached["has_analysis_md"] is True
+    assert "Executive Summary" not in json.dumps(cached)
 
 
 def test_records_the_fusion_findings_of_the_json_beside_the_md(tmp_path: Path) -> None:
@@ -65,8 +66,7 @@ def test_records_the_fusion_findings_of_the_json_beside_the_md(tmp_path: Path) -
     ]
 
 
-def test_missing_trace_report_path_yields_empty_text() -> None:
-    """No ``trace_report_path`` field → ``analysis_md_text`` is ``""``."""
+def test_missing_trace_report_path_records_no_report() -> None:
     state = SharedState()
     state.record_trace_analyze(
         {"trace_input": "x"},
@@ -74,47 +74,28 @@ def test_missing_trace_report_path_yields_empty_text() -> None:
     )
     cached = state.last_trace_analyze
     assert cached["analysis_md_path"] == ""
-    assert cached["analysis_md_text"] == ""
+    assert cached["has_analysis_md"] is False
     assert cached["fusion_findings"] == []
 
 
-def test_unreadable_analysis_md_degrades_silently(tmp_path: Path) -> None:
-    """Path points at a nonexistent file → empty text, no exception."""
-    missing = tmp_path / "does_not_exist.md"
+@pytest.mark.parametrize("written", [None, ""], ids=["missing", "empty"])
+def test_a_report_path_with_nothing_behind_it_records_no_report(tmp_path: Path, written: str | None) -> None:
+    report = tmp_path / "analysis.md"
+    if written is not None:
+        report.write_text(written, encoding="utf-8")
 
     state = SharedState()
     state.record_trace_analyze(
         {"trace_input": "x"},
         {
             "hot_kernels": [],
-            "trace_report_path": str(missing),
+            "trace_report_path": str(report),
             "trace_health_warnings": [],
         },
     )
     cached = state.last_trace_analyze
-    assert cached["analysis_md_path"] == str(missing)
-    assert cached["analysis_md_text"] == ""
-
-
-def test_caches_large_analysis_md_without_truncation(tmp_path: Path) -> None:
-    """A 200 KB report round-trips intact (no truncation)."""
-    analysis_md = tmp_path / "big_analysis.md"
-    big_content = "# Analysis\n" + ("filler line\n" * 20000)
-    analysis_md.write_text(big_content, encoding="utf-8")
-
-    state = SharedState()
-    state.record_trace_analyze(
-        {"trace_input": "x"},
-        {
-            "hot_kernels": [],
-            "trace_report_path": str(analysis_md),
-            "trace_health_warnings": [],
-        },
-    )
-    cached_text = state.last_trace_analyze["analysis_md_text"]
-    assert len(cached_text) > 200_000
-    assert cached_text.startswith("# Analysis\n")
-    assert cached_text.endswith("filler line\n")
+    assert cached["analysis_md_path"] == str(report)
+    assert cached["has_analysis_md"] is False
 
 
 def test_snapshot_id_monotonically_increases(tmp_path: Path) -> None:
@@ -213,7 +194,7 @@ def test_existing_fields_still_populated(tmp_path: Path) -> None:
     assert len(cached["trace_health_warnings"]) == 1
     assert cached["trace_health_warnings"][0]["code"] == "high_gpu_idle_pct"
     assert cached["analysis_md_path"] == str(analysis_md)
-    assert cached["analysis_md_text"] == "# hi"
+    assert cached["has_analysis_md"] is True
     assert cached["roofline_snapshot_id"] == 1
     assert cached["roofline_baseline_gain_at_snapshot"] == 0.0
     assert cached["ts"]

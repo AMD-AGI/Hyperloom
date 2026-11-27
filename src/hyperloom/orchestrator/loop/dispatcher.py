@@ -371,7 +371,7 @@ class DispatcherCollaborator(AdmissionMixin, DeadHolderAccountingMixin, Coordina
         if not dead_tasks:
             return
         try:
-            await self._account_dead_holder_failures(dead_tasks, reason="dead_holder_pump")
+            await self._account_dead_holder_failures(dead_tasks)
         except (OSError, sqlite3.Error):
             log.exception("dispatcher: dead-holder failure accounting failed")
 

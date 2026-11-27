@@ -31,6 +31,7 @@ from hyperloom.orchestrator.state.task_registry import (
     TaskSpec,
 )
 from hyperloom.orchestrator.bus.storage.connection import SqliteConnection
+from ._lease_helpers import lane_holders
 
 
 @pytest.fixture
@@ -157,9 +158,9 @@ async def test_resource_lock_acquire_release(db):
         ttl_sec=60,
     )
     assert lease.lanes == ("workspace_mutation",)
-    assert (await locks.lane_holders()).get("workspace_mutation") == 1
+    assert (await lane_holders(locks)).get("workspace_mutation") == 1
     await locks.release(lease)
-    assert await locks.lane_holders() == {}
+    assert await lane_holders(locks) == {}
 
 
 @pytest.mark.asyncio
@@ -183,7 +184,7 @@ async def test_resource_lock_lane_busy_rolls_back(db):
         is None
     )
     # Original lease should still be intact (atomic rollback)
-    assert (await locks.lane_holders()).get("benchmark_lane") == 1
+    assert (await lane_holders(locks)).get("benchmark_lane") == 1
     await locks.release(a)
 
 
@@ -236,9 +237,9 @@ async def test_resource_lock_release_ignores_another_holder(db):
     )
     # Wrong holder release must not delete the row
     await locks.release(type(lease)(holder_id="other", lanes=lease.lanes))
-    assert (await locks.lane_holders()).get("profile_lane") == 1
+    assert (await lane_holders(locks)).get("profile_lane") == 1
     await locks.release(lease)
-    assert await locks.lane_holders() == {}
+    assert await lane_holders(locks) == {}
 
 
 @pytest.mark.asyncio
@@ -252,7 +253,7 @@ async def test_resource_lock_does_not_expire_a_live_owner(db):
         ttl_sec=0,  # expires immediately
     )
     assert await locks.reap_dead_holders() == []
-    assert (await locks.lane_holders())["workspace_mutation"] == 1
+    assert (await lane_holders(locks))["workspace_mutation"] == 1
 
 
 # task_registry

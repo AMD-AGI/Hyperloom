@@ -91,8 +91,9 @@ it.
   kind has no executor still fails with `no_executor`. After a restart the
   reconciler alone fails the tasks the previous process left running, so a
   database error in that pass is retried on the next tick instead of within
-  the same one. A delegate that reuses the `idempotency_key` of a task another
-  author created is now answered as a duplicate key instead of raising
+  the same one, and the failure charged for such a task ends `task reclaimed
+  by the reconciler`. A delegate that reuses the `idempotency_key` of a task
+  another author created is now answered as a duplicate key instead of raising
   `dispatch_class mismatch`. `get_inbox` shows Orchestration's own `alert`
   text as written. A baseline throughput reported as a numeric string anchors
   as that number instead of being recorded `discarded`. A `claude-agent-sdk`
@@ -172,6 +173,9 @@ it.
   state, Warm start and Intervention mix blocks that every turn's prompt
   already holds, and `show_analysis_md` returned TraceLens's `analysis.md`,
   whose path the `analysis_md=` line of the session-state block now names.
+  `state.json` drops `last_trace_analyze.analysis_md_text`, the copy of that
+  report only the tool read; `last_trace_analyze.has_analysis_md` records
+  whether the report was there.
   `agents/orchestration/mcp_setup.json` lists the eight context tools that
   remain. The system prompt loses its `PIPELINE & TIME BUDGET` section, which
   advised skipping analysis and adding an explore round before the report

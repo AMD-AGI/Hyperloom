@@ -13,6 +13,7 @@ from types import SimpleNamespace
 import pytest
 from hyperloom.orchestrator.loop.coordinator import RunOptions
 from hyperloom.orchestrator.state.task_registry import TaskSpec
+from ._lease_helpers import lane_holders
 
 
 class _Gated:
@@ -159,7 +160,7 @@ async def test_two_queued_tasks_that_want_one_lane_never_run_together(coord, sec
     assert [task.kind for task in await coord.tasks.queued()] == ["second_action"]
     leases = coord.locks.lanes_by_task_sync()
     assert list(leases) == first.calls
-    assert await coord.locks.lane_holders() == dict.fromkeys(leases[first.calls[0]][0], 1)
+    assert await lane_holders(coord.locks) == dict.fromkeys(leases[first.calls[0]][0], 1)
 
     first.gate.set()
     await _settle(coord)
@@ -167,6 +168,33 @@ async def test_two_queued_tasks_that_want_one_lane_never_run_together(coord, sec
     await asyncio.wait_for(second.entered.wait(), timeout=5)
     assert list(coord.locks.lanes_by_task_sync()) == second.calls
     second.gate.set()
+    await _settle(coord)
+
+
+async def test_a_queued_task_holding_a_row_on_a_lane_it_needs_is_dispatched_and_refreshes_it(coord):
+    """A holder's own row is a refresh to the lease store, so it never keeps its task queued."""
+    slow = _Gated()
+    coord.sub.register_executor("slow_action", slow)
+    task, _ = await coord.tasks.create_or_return_existing(
+        TaskSpec(kind="slow_action", params={}, idempotency_key="own-row", requires_lanes=["benchmark_lane"])
+    )
+    stale = "2000-01-01T00:00:00+00:00"
+    coord.db.raw.execute(
+        "INSERT INTO leases(lane, holder_id, task_id, action, pid, acquired_at, expires_at) VALUES (?,?,?,?,?,?,?)",
+        ("benchmark_lane", task.task_id, task.task_id, "slow_action", 0, stale, stale),
+    )
+    coord.db.raw.commit()
+
+    await asyncio.wait_for(coord.dispatcher.pump_dispatcher_once(), timeout=5)
+    await asyncio.wait_for(slow.entered.wait(), timeout=5)
+
+    assert slow.calls == [task.task_id]
+    lanes, soonest_expiry = coord.locks.lanes_by_task_sync()[task.task_id]
+    assert "benchmark_lane" in lanes
+    assert soonest_expiry > stale
+    assert (await lane_holders(coord.locks))["benchmark_lane"] == 1
+
+    slow.gate.set()
     await _settle(coord)
 
 

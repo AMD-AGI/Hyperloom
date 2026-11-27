@@ -96,7 +96,7 @@ def test_thin_envelope_recovers_hot_kernels_from_disk(tmp_path: Path) -> None:
     ]
     assert cached["hot_kernels_top15"][0]["gpu_pct"] == 40.0
     assert cached["analysis_md_path"] == str(analysis_md)
-    assert "Executive Summary" in cached["analysis_md_text"]
+    assert cached["has_analysis_md"] is True
     assert cached["candidates_path"] == str(tmp_path / "kernel_candidates.json")
 
 

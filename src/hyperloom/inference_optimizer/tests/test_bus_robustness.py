@@ -13,6 +13,7 @@ import pytest
 from hyperloom.orchestrator.bus.message_bus import Message, MessageBus
 from hyperloom.orchestrator.bus.resource_lock import SqliteLeaseBackend
 from hyperloom.orchestrator.bus.storage.connection import SqliteConnection, open_connection
+from ._lease_helpers import lane_holders
 
 
 def test_open_connection_closes_the_connection_when_setup_fails(tmp_path):
@@ -77,7 +78,7 @@ async def test_corrupt_expires_at_does_not_abort_acquire(tmp_path):
 
         assert [dict(row) for row in db.fetchall_sync("SELECT * FROM leases ORDER BY lane")] == retained
         await backend.release(held)
-        assert await backend.lane_holders() == {}
+        assert await lane_holders(backend) == {}
 
         lease = await backend.acquire_many(
             lanes=["benchmark_lane"],

@@ -124,7 +124,7 @@ async def test_happy_path_promotes_profile_and_caches_trace_analyze(tmp_path):
     cached = state.last_trace_analyze
     assert cached["analysis_md_path"] == str(md)
     assert cached["kernel_roofline_path"] == "/tmp/reports/kernel_roofline.json"
-    assert "Executive Summary" in cached["analysis_md_text"]
+    assert cached["has_analysis_md"] is True
     assert cached["roofline_snapshot_id"] == 1
     assert cached["roofline_baseline_gain_at_snapshot"] == 2.5
 
@@ -305,7 +305,7 @@ async def test_happy_path_increments_snapshot_id_on_re_run(tmp_path):
 async def test_profile_failed_does_not_mutate_shared_state(tmp_path):
     state = _state()
     state.last_profile_trace = "/old/trace.gz"
-    state.last_trace_analyze = {"analysis_md_text": "old", "roofline_snapshot_id": 5}
+    state.last_trace_analyze = {"has_analysis_md": True, "roofline_snapshot_id": 5}
     ctx = _ctx(tmp_path)
 
     profile_failed = {
@@ -641,7 +641,7 @@ def _seed_profile_record(state: SharedState) -> None:
     state.last_profile_launch_evidence_path = "/prev/launch_evidence.json"
     state.last_profile_status = "succeeded"
     state.record_profile_workload({"base_extra_args": "--prev"}, arm="baseline")
-    state.last_trace_analyze = {"trace_input": "/prev/trace.gz", "analysis_md_text": "prev", "roofline_snapshot_id": 3}
+    state.last_trace_analyze = {"trace_input": "/prev/trace.gz", "has_analysis_md": True, "roofline_snapshot_id": 3}
 
 
 def _profile_record(state: SharedState) -> dict:
@@ -891,7 +891,7 @@ async def test_promote_roofline_flips_changed_and_saves(session_dir):
     s.last_trace_analyze = {
         "trace_input": "/sessions/abc/runs/roofline/.../trace.json.gz",
         "analysis_md_path": "/sessions/abc/.../analysis.md",
-        "analysis_md_text": "# Executive Summary\nCompute 51%\n",
+        "has_analysis_md": True,
         "roofline_snapshot_id": 1,
         "roofline_baseline_gain_at_snapshot": 0.0,
     }
@@ -948,7 +948,7 @@ async def test_promote_roofline_does_not_remutate_state(session_dir):
     s = coord.shared_state
     s.last_profile_trace = "/before/trace.gz"
     s.last_trace_analyze = {
-        "analysis_md_text": "before report",
+        "has_analysis_md": True,
         "roofline_snapshot_id": 3,
     }
     s.last_profile_status = "succeeded"
@@ -959,7 +959,7 @@ async def test_promote_roofline_does_not_remutate_state(session_dir):
         task=_roofline_task(snapshot_id=3),
     )
     assert s.last_profile_trace == "/before/trace.gz"
-    assert s.last_trace_analyze["analysis_md_text"] == "before report"
+    assert s.last_trace_analyze["has_analysis_md"] is True
     assert s.last_trace_analyze["roofline_snapshot_id"] == 3
     assert s.last_profile_status == "succeeded"
 
@@ -969,7 +969,7 @@ def test_the_session_state_block_names_the_report_file_instead_of_inlining_it():
     s.last_trace_analyze = {
         "roofline_snapshot_id": 7,
         "roofline_baseline_gain_at_snapshot": 3.0,
-        "analysis_md_text": "# Report\nverbatim body text\n",
+        "has_analysis_md": True,
         "analysis_md_path": "/p/analysis.md",
     }
     [pointer] = [line for line in s.to_prompt_summary().splitlines() if line.startswith("analysis_md=")]

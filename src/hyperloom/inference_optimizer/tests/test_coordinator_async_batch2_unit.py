@@ -2153,7 +2153,7 @@ async def test_warm_specialist_params_rich_context(coord: Coordinator, monkeypat
     state.model_name = "llama"
     state.gpu_type = "mi300x"
     state.last_trace_analyze = {
-        "analysis_md_text": "roofline body",
+        "has_analysis_md": True,
         "analysis_md_path": "/tmp/a.md",
         "roofline_snapshot_id": "snap-1",
         "hot_kernels_top15": [{"name": "gemm"}],

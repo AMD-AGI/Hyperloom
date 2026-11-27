@@ -16,6 +16,7 @@ import pytest
 from hyperloom.orchestrator.enablement.runtime.build_actions import TargetedBuildAction
 from hyperloom.orchestrator.loop.build_lifecycle import _driver_command
 from hyperloom.orchestrator.state.task_registry import TaskSpec
+from ._lease_helpers import lane_holders
 
 
 def _action(**kw):
@@ -156,7 +157,7 @@ async def test_build_succeeds(build_coord, executor, tmp_path, monkeypatch):
     assert task.state == "succeeded"
     assert build_coord.shared_state.enablement.build_manifest
     assert build_coord.shared_state.pending_targeted_build == {}
-    holders = await build_coord.locks.lane_holders()
+    holders = await lane_holders(build_coord.locks)
     assert holders.get("build_lane", 0) == 0 or "build_lane" not in holders
 
 
@@ -177,7 +178,7 @@ async def test_timeout_kills_and_records_timeout(build_coord, tmp_path, monkeypa
     task, _ = await _enqueue_and_run(build_coord, tbe.TargetedBuildExecutor(), action=_action(), session_dir=tmp_path)
     assert task.state == "failed"
     assert build_coord.shared_state.enablement.last_build_failure["failure_class"] == "timeout"
-    holders = await build_coord.locks.lane_holders()
+    holders = await lane_holders(build_coord.locks)
     assert holders.get("build_lane", 0) == 0 or "build_lane" not in holders
 
 
@@ -511,7 +512,7 @@ async def test_spawn_failure_marks_row_failed(build_coord, tmp_path, monkeypatch
     await runner.run_task(task_obj, prebound_lease=lease)
     t = await build_coord.tasks.get(tid)
     assert t.state == "failed"
-    holders = await build_coord.locks.lane_holders()
+    holders = await lane_holders(build_coord.locks)
     assert holders.get("build_lane", 0) == 0 or "build_lane" not in holders
 
 

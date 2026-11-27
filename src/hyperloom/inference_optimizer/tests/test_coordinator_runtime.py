@@ -43,6 +43,7 @@ from hyperloom.inference_optimizer.session.session_paths import target_baseline_
 from hyperloom.orchestrator.bus.storage.connection import SqliteConnection
 from ._dispatch_helpers import pump_until_settled
 from hyperloom.orchestrator.phases import phase_predicates, phase_transitions
+from ._lease_helpers import lane_holders
 
 
 async def _immediately(payload: dict) -> dict:
@@ -401,7 +402,7 @@ async def test_sub_agent_runner_hands_its_lease_to_the_executor_and_gives_it_bac
 
     assert res.state == "succeeded"
     assert "benchmark_lane" in seen_lease["lanes"]
-    assert "benchmark_lane" not in await locks.lane_holders()
+    assert "benchmark_lane" not in await lane_holders(locks)
     db.close()
 
 
@@ -2307,7 +2308,7 @@ async def test_sub_agent_runner_hands_back_lanes_when_the_claim_is_rejected(
     with pytest.raises(IllegalTransition):
         await sub.run_task(task, prebound_lease=lease)
 
-    assert await locks.lane_holders() == {}
+    assert await lane_holders(locks) == {}
     db.close()
 
 

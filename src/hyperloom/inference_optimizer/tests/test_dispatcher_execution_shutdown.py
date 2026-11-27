@@ -29,6 +29,7 @@ from hyperloom.orchestrator.loop.sub_agent_runner import SubAgentRunner
 from hyperloom.orchestrator.state.task_registry import TaskRegistry, TaskSpec
 
 from ._dispatch_helpers import pump_until_settled, stub_gpu_pool
+from ._lease_helpers import lane_holders
 
 
 def _dispatcher(tmp_path):
@@ -153,7 +154,7 @@ def test_shutdown_requests_scope_and_keeps_unconfirmed_database_open(tmp_path, m
         await _close(dispatcher)
         assert scopes[0].cancelled
         assert (await dispatcher.tasks.get(task.task_id)).state == "running"
-        assert await dispatcher.locks.lane_holders()
+        assert await lane_holders(dispatcher.locks)
         finish.set()
         return action
 
@@ -221,7 +222,7 @@ def test_cancelled_shutdown_drain_retains_live_execution(tmp_path, monkeypatch):
         with pytest.raises(asyncio.CancelledError):
             await shutdown
         assert (await dispatcher.tasks.get(task.task_id)).state == "running"
-        assert await dispatcher.locks.lane_holders()
+        assert await lane_holders(dispatcher.locks)
         finish.set()
         await action
         await _close(dispatcher)
@@ -345,7 +346,7 @@ def test_cleanup_unconfirmed_preserves_outcome_without_completion(tmp_path, outc
         # The row is terminal, so the lane it was admitted on goes back -- the
         # unconfirmed cleanup is the evidence above and the raise, not a lane
         # held against a task that is over.
-        assert await dispatcher.locks.lane_holders() == {}
+        assert await lane_holders(dispatcher.locks) == {}
         assert not await dispatcher.bus.tail(topic="delegated_result")
         await _close(dispatcher)
         assert dispatcher.db.fetchone_sync("SELECT 1")[0] == 1
@@ -379,7 +380,7 @@ def test_executor_cleanup_unconfirmed_keeps_result_and_frees_lanes(tmp_path):
             await dispatcher.sub.run_task(task, prebound_lease=lease, release_resources=close)
         assert caught.value.result is result
         assert close.await_count == 0
-        assert await dispatcher.locks.lane_holders() == {}
+        assert await lane_holders(dispatcher.locks) == {}
         stored = await dispatcher.tasks.get(task.task_id)
         assert stored.history[-1]["evidence"]["outcome"] == asdict(result)
         assert stored.history[-1]["evidence"]["cleanup_confirmed"] is False
@@ -423,7 +424,7 @@ def test_an_unconfirmed_cleanup_records_the_group_for_the_operator(tmp_path, nam
         )
         with pytest.raises(ExecutionCleanupUnconfirmed):
             await dispatcher.sub.run_task(task, prebound_lease=lease, release_resources=AsyncMock(return_value=True))
-        assert await dispatcher.locks.lane_holders() == {}
+        assert await lane_holders(dispatcher.locks) == {}
         evidence = (await dispatcher.tasks.get(task.task_id)).history[-1]["evidence"]
         assert evidence["cleanup_confirmed"] is False
         assert evidence.get("cleanup_tree_pgid") == (4242 if named_tree else None)
@@ -457,7 +458,7 @@ def test_confirmed_cleanup_unregisters_even_when_completion_raises(tmp_path, out
         assert completed.await_count == 1
         assert completed.await_args.args[0].state == outcome
         assert not dispatcher._executions and not dispatcher._inflight_actions
-        assert not await dispatcher.locks.lane_holders()
+        assert not await lane_holders(dispatcher.locks)
         await _close(dispatcher)
         with pytest.raises(sqlite3.ProgrammingError):
             dispatcher.db.fetchone_sync("SELECT 1")
@@ -490,7 +491,7 @@ def test_confirmed_cancellation_records_once_without_promotion_or_retry(tmp_path
         assert dispatcher._coord.writeback.promote_to_shared_state.await_count == 0
         assert dispatcher._coord.recipe_journal.fact_write_hook.await_count == 0
         assert not dispatcher._executions and not dispatcher._inflight_actions
-        assert not await dispatcher.locks.lane_holders()
+        assert not await lane_holders(dispatcher.locks)
 
     try:
         asyncio.run(run())
@@ -577,7 +578,7 @@ def test_unknown_runner_exit_retains_execution_ownership(tmp_path, monkeypatch, 
             await dispatcher.run_task_registered(task, on_complete=completed)
         assert completed.await_count == 0
         assert len(dispatcher._executions) == len(dispatcher._inflight_actions) == 1
-        assert await dispatcher.locks.lane_holders() == {"research_lane": 1}
+        assert await lane_holders(dispatcher.locks) == {"research_lane": 1}
         await _close(dispatcher)
         assert dispatcher.db.fetchone_sync("SELECT 1")[0] == 1
 
@@ -612,7 +613,7 @@ def test_local_unknown_cleanup_cannot_use_empty_gpu_release_ack(tmp_path, monkey
             await dispatcher.run_task_registered(task, on_complete=completed)
         assert release.await_count == 0
         assert completed.await_count == 0
-        assert await dispatcher.locks.lane_holders() == {"research_lane": 1}
+        assert await lane_holders(dispatcher.locks) == {"research_lane": 1}
         assert len(dispatcher._executions) == 1
         await _close(dispatcher)
         assert dispatcher.db.fetchone_sync("SELECT 1")[0] == 1

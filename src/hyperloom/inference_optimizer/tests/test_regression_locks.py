@@ -24,6 +24,7 @@ from hyperloom.orchestrator.state.task_registry import Task
 from hyperloom.inference_optimizer.session.paths import make_session_dir
 
 from .conftest import silent_backends
+from ._lease_helpers import lane_holders
 
 
 @pytest.fixture
@@ -417,7 +418,7 @@ async def test_integrate_executes_and_releases_lanes_when_free(session_dir, monk
         lanes = list(ACTION_CATALOGUE["integrate"].requires_lanes)
 
         # Verify lanes are free before the request.
-        holders_before = await c.locks.lane_holders()
+        holders_before = await lane_holders(c.locks)
         for lane in lanes:
             assert int(holders_before.get(lane, 0)) == 0
 
@@ -436,7 +437,7 @@ async def test_integrate_executes_and_releases_lanes_when_free(session_dir, monk
         )
 
         # Lanes must be free after the handler returned.
-        holders_after = await c.locks.lane_holders()
+        holders_after = await lane_holders(c.locks)
         for lane in lanes:
             assert int(holders_after.get(lane, 0)) == 0, f"lane {lane!r} still held after integrate"
     finally:

@@ -94,6 +94,7 @@ async def test_pump_counts_lease_reaped_baseline_as_failure(session_dir):
         assert entry["action"] == "baseline"
         assert entry["task_id"] == task.task_id
         assert entry["error_class"] == "dead_holder_reaped"
+        assert entry["error_excerpt"].endswith("task reclaimed by the reconciler")
         assert c.shared_state.baseline_attempts[-1]["status"] == "failed"
     finally:
         await c.stop()

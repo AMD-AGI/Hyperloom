@@ -307,8 +307,6 @@ class _BenchmarkLaunchMixin:
             base = server_base.args
             if operator_args:
                 base = merge_server_args(base, operator_args) if base else operator_args
-            # Base on ``server_args`` (carries the one-shot cuda-graph eager-fallback flag when armed) so the MN
-            # per-round restart keeps that fallback too.
             # PD knobs auto-resolved by the helper from $PD_* env, falling back to state.json.
             await restart_server_for_round(
                 RoundServer.from_env(

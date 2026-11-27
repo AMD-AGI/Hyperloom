@@ -286,7 +286,7 @@ async def test_roofline_with_an_analysis_anchors_the_watermark(session_dir):
     s.last_trace_analyze = {
         "roofline_snapshot_id": 5,
         "analysis_md_path": "/tmp/a.md",
-        "analysis_md_text": "# roofline\nattention is 64.8% of GPU time\n",
+        "has_analysis_md": True,
     }
 
     await coord.writeback.promote_to_shared_state(
@@ -306,7 +306,7 @@ async def test_roofline_without_an_analysis_leaves_the_watermark_armed(session_d
     s.baseline_tput = 100.0
     s.cumulative_gain_validated = 75.0
     s.last_roofline_tput = 0.0
-    s.last_trace_analyze = {"roofline_snapshot_id": 5, "analysis_md_text": ""}
+    s.last_trace_analyze = {"roofline_snapshot_id": 5, "has_analysis_md": False}
 
     await coord.writeback.promote_to_shared_state(
         "roofline",
@@ -1109,6 +1109,43 @@ async def test_realized_diff_replaces_the_delivered_patch(session_dir, tmp_path,
     # from two trees stay distinguishable.
     assert row["host_origin"]["apply_roots"] == {ref: "/sglang"}
     assert row["host_origin"]["snapshot"] == str(realized.parent)
+    assert row["host_origin"]["sources"] == [str(realized)]
+
+
+@pytest.mark.asyncio
+async def test_a_realized_diff_named_through_a_symlink_is_staged_as_the_file_it_points_at(
+    session_dir, tmp_path, monkeypatch
+):
+    """The store refuses a symlink, so the outbox names every source by its canonical path."""
+    draft = tmp_path / "kb-draft"
+    monkeypatch.setenv("KB_DRAFT_DIR", str(draft))
+    monkeypatch.setenv("KNOWLEDGE_STORE_MODE", "remote")
+    realized = tmp_path.resolve() / "snapshot" / "realized.patch"
+    realized.parent.mkdir()
+    realized.write_bytes(b"as landed")
+    link = tmp_path / "latest.patch"
+    link.symlink_to(realized)
+    coord = _coord(session_dir)
+    coord.shared_state.baseline_tput = 100.0
+
+    await coord.writeback.promote_to_shared_state(
+        "integrate_patch",
+        {
+            "status": "kept",
+            "output_throughput": 130.0,
+            "specialist_task_id": "spec-realized-link",
+            "patches_applied": [],
+            "source_realized_patch": str(link),
+        },
+        task=_task("integrate_patch", params={"source_phase": "FRAMEWORK_AGENT"}),
+    )
+
+    staged = KnowledgeSections(draft).staged("patch")
+    ref = "patch/overlays/000000/00-realized.patch"
+    assert staged.knowledge["patches"] == [ref]
+    assert (draft / "files" / ref).read_bytes() == b"as landed"
+    row = staged.knowledge["provenance"][0]
+    assert row["realized"] is True
     assert row["host_origin"]["sources"] == [str(realized)]
 
 
