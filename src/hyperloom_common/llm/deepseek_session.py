@@ -238,6 +238,8 @@ class HarnessLaunch:
     #: order.
     profile: str = "sdk"
     patches: tuple[Path, ...] = ()
+    #: The ``compaction-basic`` rows the runtime boots with.
+    compaction: str = COMPACTION_PATCH
 
 
 def start_harness(sdk: Any, launch: HarnessLaunch) -> Any:
@@ -251,7 +253,7 @@ def start_harness(sdk: Any, launch: HarnessLaunch) -> Any:
     workspace = str(launch.cwd)
     launch.dsh_home.mkdir(parents=True, exist_ok=True)
     compaction_patch = launch.dsh_home / _COMPACTION_PATCH_NAME
-    compaction_patch.write_text(COMPACTION_PATCH, encoding="utf-8")
+    compaction_patch.write_text(launch.compaction, encoding="utf-8")
     gateway_patch = launch.dsh_home / _GATEWAY_PATCH_NAME
     gateway_patch.write_text(
         gateway_route_patch(launch.env[GATEWAY_BASE_URL_ENV], launch.model, max_tokens=max_tokens), encoding="utf-8"

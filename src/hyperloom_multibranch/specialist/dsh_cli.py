@@ -67,6 +67,7 @@ from hyperloom.orchestrator.specialists.agent_cli_config import SpecialistAgentU
 from hyperloom.orchestrator.specialists.dsh_launch import DshSessionHome, dsh_sdk_version, prepare_session_home
 from hyperloom_common.fs_utils import write_text_nofollow
 from hyperloom_common.llm.deepseek_session import (
+    COMPACTION_PATCH,
     GATEWAY_BASE_URL_ENV,
     DeepSeekSessionError,
     HarnessLaunch,
@@ -129,6 +130,17 @@ READING_PATCH = """\
       name: '@deepseek-ai/dsh-llm-pi-ai'
 """
 READING_PATCH_NAME = "reading_patch.yml"
+#: How a specialist's conversation compacts. It lasts the whole session, and its tool calls that start background
+#: jobs get their results many steps later; a cut is never made between a call and its result, so a retained tail of
+#: a fixed share of the window moved the cut back before the last summary, and each compaction summarized only that
+#: summary and rewrote the cached conversation. Nothing is retained, so a compaction summarizes everything after the
+#: system prompt.
+SESSION_COMPACTION_PATCH = """\
+- id: compaction-basic
+  config:
+    thresholdRatio: 0.6
+    retainTokens: 0
+"""
 #: The variable :data:`READING_PROFILE` reads its system prompt from.
 SYSTEM_PROMPT_ENV = "DSH_SYSTEM_PROMPT"
 #: How the runtime's file sandbox runs: a specialist writes its worktree as a Claude CLI that bypasses permissions
@@ -457,6 +469,7 @@ def _launch(options: Options, home: Path, cwd: Path) -> HarnessLaunch:
     """What the runtime of ``options`` boots with, its home written: a specialist's with its role, its MCP servers
     and its session log uncompressed; a reading run's with :data:`READING_PATCH`."""
     effort = harness_reasoning_effort(DEFAULT_REASONING_EFFORT)
+    compaction = COMPACTION_PATCH
     try:
         if options.reading:
             overrides = {SYSTEM_PROMPT_ENV: options.role} if options.role else {}
@@ -468,14 +481,27 @@ def _launch(options: Options, home: Path, cwd: Path) -> HarnessLaunch:
         else:
             env = child_environment(None, FULL_ACCESS)
             instructions = f"{options.role.rstrip()}\n\n{WAITING_NOTE}\n" if options.role else ""
-            request = DshSessionHome(home, options.model, instructions, options.mcp_config, UNATTENDED_OFF)
+            compaction = SESSION_COMPACTION_PATCH
+            request = DshSessionHome(
+                home, options.model, instructions, options.mcp_config, UNATTENDED_OFF, compaction=compaction
+            )
             boot = prepare_session_home(request, env)
             env.update(boot.env_additions)
             patch, profile = boot.patch, SESSION_PROFILE
     except (DeepSeekSessionError, SpecialistAgentUnavailableError, OSError) as error:
         raise Refused(str(error)) from error
     env = _runtime_env({**env, "DSH_TELEMETRY_MODE": "DISABLED"})
-    return HarnessLaunch(home, cwd, options.model, effort, env, REQUEST_TIMEOUT_S, profile=profile, patches=(patch,))
+    return HarnessLaunch(
+        home,
+        cwd,
+        options.model,
+        effort,
+        env,
+        REQUEST_TIMEOUT_S,
+        profile=profile,
+        patches=(patch,),
+        compaction=compaction,
+    )
 
 
 class Bridge:

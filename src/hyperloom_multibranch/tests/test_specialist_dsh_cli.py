@@ -408,6 +408,31 @@ def test_a_fresh_conversation_runs_each_message_as_a_turn_until_its_stdin_ends(
     assert [patch[row]["disabled"] for row in UNATTENDED_OFF] == [True] * len(UNATTENDED_OFF)
 
 
+def _compaction_config(path: str) -> dict:
+    [row] = [row for row in _patch_rows(Path(path).read_text(encoding="utf-8")) if row.get("id") == "compaction-basic"]
+    return row["config"]
+
+
+def test_a_conversation_compacts_at_sixty_percent_of_the_window_and_retains_nothing(
+    home: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture
+) -> None:
+    _run(monkeypatch, capsys, ["--model", MODEL, "--session-id", SID], _message("a"))
+
+    [harness] = _Harness.made
+    first, *_, last = harness.kwargs["patches"]
+    # The runtime boots with the compaction patch and the conversation's own patch, and both say the same.
+    assert _compaction_config(first) == _compaction_config(last) == {"thresholdRatio": 0.6, "retainTokens": 0}
+
+
+def test_a_reading_run_compacts_as_any_other_harness_runtime(
+    home: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture
+) -> None:
+    _run(monkeypatch, capsys, ["--print", "--read-only", "--model", MODEL], "Read the checkout.\n")
+
+    [harness] = _Harness.made
+    assert _compaction_config(harness.kwargs["patches"][0]) == {"thresholdRatio": 0.25}
+
+
 @pytest.mark.parametrize(("others", "kept"), [(["/opt/tools"], "/opt/tools"), ([], "")])
 def test_the_runtime_and_its_tools_do_not_import_from_where_the_bridge_was_pointed_at_the_app(
     home: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture, others: list[str], kept: str

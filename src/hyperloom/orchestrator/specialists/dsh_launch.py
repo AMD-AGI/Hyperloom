@@ -207,7 +207,13 @@ def _mcp_rows(config_path: str | None, *, source: Mapping[str, str], protected_e
 
 
 def _render_patch(
-    *, model: str, base_url: str, instruction_bytes: int, mcp_rows: list[str], max_tokens: int | None = None
+    *,
+    model: str,
+    base_url: str,
+    instruction_bytes: int,
+    mcp_rows: list[str],
+    max_tokens: int | None = None,
+    compaction: str = COMPACTION_PATCH,
 ) -> str:
     """The patch overlay a specialist's ``dsh`` runtime boots with."""
     lines = [
@@ -231,7 +237,7 @@ def _render_patch(
         "- id: agent-instructions",
         _PATCH_CONFIG,
         f"    maxBytes: {instruction_bytes + _DEFAULT_INSTRUCTION_BYTES}",
-        *COMPACTION_PATCH.splitlines(),
+        *compaction.splitlines(),
         *gateway_route_patch(base_url, model, max_tokens=max_tokens).splitlines(),
     ]
     if mcp_rows:
@@ -296,6 +302,7 @@ class DshSessionHome:
         instructions: Sent as the conversation's baseline instructions.
         mcp_config_path: Claude-style MCP config to translate, if any.
         disabled: Rows of the booted profile the conversation runs without.
+        compaction: The ``compaction-basic`` rows of its patch; the runtime must boot with the same rows.
     """
 
     home: Path
@@ -303,6 +310,7 @@ class DshSessionHome:
     instructions: str = ""
     mcp_config_path: str | None = None
     disabled: tuple[str, ...] = ()
+    compaction: str = COMPACTION_PATCH
 
 
 def prepare_session_home(request: DshSessionHome, env: Mapping[str, str]) -> DshSessionBoot:
@@ -329,6 +337,7 @@ def prepare_session_home(request: DshSessionHome, env: Mapping[str, str]) -> Dsh
         instruction_bytes=len(request.instructions.encode(_ENCODING)),
         mcp_rows=mcp.rows,
         max_tokens=max_tokens,
+        compaction=request.compaction,
     )
     patch += "".join(f"- id: {row}\n  disabled: true\n" for row in request.disabled)
     with _private_home(request.home):
