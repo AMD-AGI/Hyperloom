@@ -264,21 +264,41 @@ class WorkQueue:
             if item.state is State.RUNNING and item.branch == branch and not exempt_from_k(item.request)
         )
 
+    def _free_slots(self, branch: str) -> int:
+        """The slots of ``branch``'s K its running tests leave, those its queued tests start in."""
+
+        return max(0, self.policy.k_for(branch) - self._running_counted(branch))
+
+    def _idle_slots(self, parallel_limit: int | None) -> int:
+        cap = self.policy.global_concurrency
+        running = sum(1 for item in self._items.values() if item.state is State.RUNNING)
+        return (cap if parallel_limit is None else min(cap, parallel_limit)) - running
+
+    def _startable(self) -> int:
+        """How many queued tests would start given the slots: the exempt ones, and of each branch as many as its K
+        leaves room for beside its running tests."""
+
+        exempt, waiting = 0, dict[str, int]()
+        for item in self._items.values():
+            if item.state is State.QUEUED:
+                if exempt_from_k(item.request):
+                    exempt += 1
+                else:
+                    waiting[item.branch] = waiting.get(item.branch, 0) + 1
+        return exempt + sum(min(count, self._free_slots(branch)) for branch, count in waiting.items())
+
     def take(self, parallel_limit: int | None = None) -> QueuedTest | None:
         """Mark and return the next test to run, or ``None`` when none may start now.
 
         ``parallel_limit`` is what the toolbox's cards run at once; it lowers the policy's global concurrency.
         """
 
-        running = sum(1 for item in self._items.values() if item.state is State.RUNNING)
-        cap = self.policy.global_concurrency
-        if running >= (cap if parallel_limit is None else min(cap, parallel_limit)):
+        if self._idle_slots(parallel_limit) <= 0:
             return None
         ready = [
             item
             for item in self._items.values()
-            if item.state is State.QUEUED
-            and (exempt_from_k(item.request) or self._running_counted(item.branch) < self.policy.k_for(item.branch))
+            if item.state is State.QUEUED and (exempt_from_k(item.request) or self._free_slots(item.branch) > 0)
         ]
         if not ready:
             return None
@@ -309,7 +329,9 @@ class WorkQueue:
             if item.state in WAITING_STATES and item.request.priority is None:
                 item.priority = self.policy.priority_of(item.request)
 
-    def state(self) -> QueueState:
+    def state(self, parallel_limit: int | None = None) -> QueueState:
+        """The queue's counts; ``parallel_limit`` is as for :meth:`take`."""
+
         by_priority = dict.fromkeys(range(PRIORITY_HIGHEST, PRIORITY_LOWEST + 1), 0)
         counts: dict[State, dict[str, int]] = {state: {} for state in State}
         for item in self._items.values():
@@ -317,10 +339,16 @@ class WorkQueue:
                 by_priority[item.priority] += 1
             per_branch = counts[item.state]
             per_branch[item.branch] = per_branch.get(item.branch, 0) + 1
+        branches = sorted(
+            {*self.policy.branch_k, *(self.policy.open_branches or ()), *(item.branch for item in self.items())}
+        )
         return QueueState(
             by_priority,
             counts[State.RUNNING],
             counts[State.QUEUED],
             self.cold_start_seconds,
             pending_build_by_branch=counts[State.PENDING_BUILD],
+            k_by_branch={branch: self.policy.k_for(branch) for branch in branches},
+            free_slots_by_branch={branch: self._free_slots(branch) for branch in branches},
+            free_test_slots=max(0, self._idle_slots(parallel_limit) - self._startable()),
         )

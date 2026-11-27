@@ -2,7 +2,9 @@
 # SPDX-License-Identifier: MIT
 
 """The judge's system prompt: :data:`JUDGE_SYSTEM_PROMPT` in a session that plays no scheduling playbook, and
-:data:`PLAYBOOK_JUDGE_PROMPT` in one that plays one, where the stall evidence is the one stop rule for a stall.
+:data:`PLAYBOOK_JUDGE_PROMPT` in one that plays one, where the stall evidence is the one stop rule for a stall; an AgentX
+session's two (:data:`AGENTX_JUDGE_SYSTEM_PROMPT`, :data:`AGENTX_PLAYBOOK_JUDGE_PROMPT`) add how the sum of K reads
+against its test slots.
 
 The two differ in eight parts (:class:`PromptParts`). Each has a version in the session's manifest fingerprint, derived
 from its text and the reply format every user prompt ends with (:data:`REPLY_FORMAT`).
@@ -101,6 +103,12 @@ either: fill the free slots with branches left to the default focus while time i
 a branch out of ideas is one to stop, its slot refilled while an open area is left or no op is known,
 rather than stop the session""",
 )
+#: How an AgentX session's judge reads the sum of its branches' K against its test slots.
+_AGENTX_SLOTS = """
+This is an AgentX session: a test holds one of a few test slots for its whole trace window. The sum of the branches' K
+may exceed max_parallel_tests: the queue holds the tests beyond the slots, starts confirms and merge tests before any
+branch's explore tests, and starts the rest as slots free. So while toolbox_headroom is above 0 a test slot is free and
+that sum is no reason to refuse a K raise: raise the K of a branch whose expected gain is worth more of its tests."""
 
 
 #: The judge's system prompt, the parts that differ by session (:class:`PromptParts`) left to fill.
@@ -131,7 +139,7 @@ pending lists the shares a mapping branch asked for and the forks and repairs th
 slot: shares first, then forks and repairs oldest first, with how long each has
 waited: a slot your stops free goes to them first and only the slots left open your branches. You do not admit them; stop a branch that is worth less than a pending one to let it
 start.
-{{spend}}
+{{spend}}{{slots}}
 A branch's basis says what its expected gain rests on: its own trend, the floor of a direction still being observed,
 the floor of a branch too new to have a trend, or the roofline headroom that capped it; trust a measured trend over a
 floor. integration.headroom_pct is how far the integration head's recorded value lies below roofline_ceiling, the bound
@@ -241,9 +249,12 @@ REPLY_FORMAT = """Reply with one JSON object of this shape:
 List only the branches whose K should change. Branches not named keep their K and keep running."""
 
 #: The system prompt of a session that plays no scheduling playbook.
-JUDGE_SYSTEM_PROMPT = _TEMPLATE.format(**asdict(_WITHOUT_PLAYBOOK))
+JUDGE_SYSTEM_PROMPT = _TEMPLATE.format(**asdict(_WITHOUT_PLAYBOOK), slots="")
 #: The system prompt of a session that plays one: its stall evidence is the one stop rule for a stall.
-PLAYBOOK_JUDGE_PROMPT = _TEMPLATE.format(**asdict(_WITH_PLAYBOOK))
+PLAYBOOK_JUDGE_PROMPT = _TEMPLATE.format(**asdict(_WITH_PLAYBOOK), slots="")
+#: The two system prompts of an AgentX session, the first for one that plays no playbook.
+AGENTX_JUDGE_SYSTEM_PROMPT = _TEMPLATE.format(**asdict(_WITHOUT_PLAYBOOK), slots=_AGENTX_SLOTS)
+AGENTX_PLAYBOOK_JUDGE_PROMPT = _TEMPLATE.format(**asdict(_WITH_PLAYBOOK), slots=_AGENTX_SLOTS)
 
 
 def _version(system: str) -> str:
@@ -251,12 +262,18 @@ def _version(system: str) -> str:
 
 
 #: The judge prompt's version in the session's manifest fingerprint, derived from its text as the specialist prompts';
-#: the second is that of a session that plays a playbook.
+#: the second is that of a session that plays a playbook, the last two those of an AgentX session.
 JUDGE_PROMPT_VERSION = _version(JUDGE_SYSTEM_PROMPT)
 PLAYBOOK_JUDGE_PROMPT_VERSION = _version(PLAYBOOK_JUDGE_PROMPT)
+AGENTX_JUDGE_PROMPT_VERSION = _version(AGENTX_JUDGE_SYSTEM_PROMPT)
+AGENTX_PLAYBOOK_JUDGE_PROMPT_VERSION = _version(AGENTX_PLAYBOOK_JUDGE_PROMPT)
 
 
 __all__ = [
+    "AGENTX_JUDGE_PROMPT_VERSION",
+    "AGENTX_JUDGE_SYSTEM_PROMPT",
+    "AGENTX_PLAYBOOK_JUDGE_PROMPT",
+    "AGENTX_PLAYBOOK_JUDGE_PROMPT_VERSION",
     "JUDGE_PROMPT_VERSION",
     "JUDGE_SYSTEM_PROMPT",
     "PLAYBOOK_JUDGE_PROMPT",

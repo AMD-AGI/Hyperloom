@@ -148,6 +148,20 @@ class BuildStatus:
 
 
 @dataclass(frozen=True)
+class BranchSlots:
+    """A branch's K, the slots of it its running tests leave and the test slots free now: a test of the branch
+    submitted now starts at once only while both are free (:attr:`start_now`)."""
+
+    k: int
+    free: int
+    free_tests: int
+
+    @property
+    def start_now(self) -> bool:
+        return self.free > 0 and self.free_tests > 0
+
+
+@dataclass(frozen=True)
 class QueueState:
     """What the scheduler and the dashboard read: queue lengths by priority, running tests by branch, cold start time.
 
@@ -157,6 +171,10 @@ class QueueState:
     ``pending_build_by_branch`` counts each branch's tests that wait for native builds; they hold no card and are in
     neither ``queued`` nor ``running``, but they count against the branch's K for backpressure. ``builds`` is the
     session's ledger of the builds this toolbox ran: queued, building and done, each with its ``build_seconds``.
+    ``k_by_branch`` is the K of every branch the queue's policy names or holds a test of, and ``free_slots_by_branch``
+    the slots of that K its running tests leave (a purpose exempt from K takes none): the queue starts the branch's
+    queued tests in them. ``free_test_slots`` is how many more tests could start now: what the policy and the cards not
+    leased out run at once, less the tests running and the queued tests their branch's K does not hold back.
     """
 
     queued_by_priority: Mapping[int, int] = field(default_factory=lambda: dict.fromkeys(_PRIORITIES, 0))
@@ -165,6 +183,14 @@ class QueueState:
     cold_start_seconds: float | None = None
     pending_build_by_branch: Mapping[str, int] = field(default_factory=dict)
     builds: tuple[BuildStatus, ...] = ()
+    k_by_branch: Mapping[str, int] = field(default_factory=dict)
+    free_slots_by_branch: Mapping[str, int] = field(default_factory=dict)
+    free_test_slots: int = 0
+
+    def slots_of(self, branch: str) -> BranchSlots:
+        return BranchSlots(
+            self.k_by_branch.get(branch, 0), self.free_slots_by_branch.get(branch, 0), self.free_test_slots
+        )
 
     @property
     def queued(self) -> int:
@@ -357,6 +383,7 @@ __all__ = [
     "BranchLease",
     "LeaseCharge",
     "BuildState",
+    "BranchSlots",
     "BuildStatus",
     "CancelOutcome",
     "MeasurementCapacity",

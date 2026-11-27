@@ -111,7 +111,12 @@ from hyperloom_multibranch.scheduling.final import (
 from hyperloom_multibranch.scheduling.forks import ForkDesk
 from hyperloom_multibranch.scheduling.integrator import BundlingIntegrator, Integrator, LlmPatchResolver, MergeRecords
 from hyperloom_multibranch.scheduling.judge import GRACE_KEY, Judge, session_grace
-from hyperloom_multibranch.scheduling.judge_prompt import JUDGE_PROMPT_VERSION, PLAYBOOK_JUDGE_PROMPT_VERSION
+from hyperloom_multibranch.scheduling.judge_prompt import (
+    AGENTX_JUDGE_PROMPT_VERSION,
+    AGENTX_PLAYBOOK_JUDGE_PROMPT_VERSION,
+    JUDGE_PROMPT_VERSION,
+    PLAYBOOK_JUDGE_PROMPT_VERSION,
+)
 from hyperloom_multibranch.scheduling.launch_isolation import LaunchIsolation
 from hyperloom_multibranch.scheduling.llm import recorded
 from hyperloom_multibranch.scheduling.manifest import (
@@ -191,8 +196,16 @@ POLICY_VERSIONS = {
     "scheduling": policy_version(SCHEDULING_POLICY),
 }
 #: The ``policy_versions`` key of the judge prompt's version: :data:`PLAYBOOK_JUDGE_PROMPT_VERSION` in a session that
-#: plays a scheduling playbook, :data:`JUDGE_PROMPT_VERSION` in one that plays none.
+#: plays a scheduling playbook, :data:`JUDGE_PROMPT_VERSION` in one that plays none, and their AgentX versions in an
+#: AgentX session.
 JUDGE_PROMPT_KEY = "judge_prompt"
+#: The judge prompt's version by whether the session plays a playbook and by its workload's kind.
+_JUDGE_PROMPT_VERSIONS = {
+    (False, WorkloadKind.INFERENCEX): JUDGE_PROMPT_VERSION,
+    (True, WorkloadKind.INFERENCEX): PLAYBOOK_JUDGE_PROMPT_VERSION,
+    (False, WorkloadKind.AGENTX): AGENTX_JUDGE_PROMPT_VERSION,
+    (True, WorkloadKind.AGENTX): AGENTX_PLAYBOOK_JUDGE_PROMPT_VERSION,
+}
 #: The ``policy_versions`` key of the RSI lesson pool's digest as the specialists' recall read it, empty for no pool:
 #: two sessions of one build that were shown different past lessons differ here.
 LESSONS_KEY = "lessons"
@@ -955,7 +968,7 @@ class Session:
         learnings, play = self._briefs.learnings, self._play
         return {
             **POLICY_VERSIONS,
-            JUDGE_PROMPT_KEY: PLAYBOOK_JUDGE_PROMPT_VERSION if play is not None else JUDGE_PROMPT_VERSION,
+            JUDGE_PROMPT_KEY: _JUDGE_PROMPT_VERSIONS[play is not None, self._settings.workload.kind],
             GRACE_KEY: str(session_grace(play)),
             LESSONS_KEY: learnings.past_revision() if learnings is not None else "",
             **(play.versions() if play is not None else {}),
@@ -984,6 +997,7 @@ class Session:
             self._dev_leases,
             self._play,
             self._layout.manifest,
+            self._settings.workload,
         )
         return Explorer(self._context, self._branches, self._integrator, steering, self._stopper)
 

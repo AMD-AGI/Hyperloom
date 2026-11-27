@@ -122,6 +122,7 @@ async def test_a_lease_holds_cards_out_of_measurement_and_no_test_ever_runs_on_t
     (card,) = lease.gpu_ids
     assert await box.measurement_capacity() == MeasurementCapacity(2, 2, leased_cards=1)
     assert box.provider.pool.free_cards() == (1 - card,)
+    assert (await box.queue_state()).free_test_slots == 1, "the leased card runs no test"
     first, second = await box.submit_test(req("slow")), await box.submit_test(req("fast"))
     await _until(lambda: _running(box) == 1, "the first test on the one card left")
     state = await box.queue_state()

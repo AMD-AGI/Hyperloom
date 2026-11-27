@@ -42,7 +42,7 @@ from hyperloom_multibranch.contracts.lifecycle import SpecialistStatus
 from hyperloom_multibranch.contracts.blackboard import INTEGRATION_BRANCH
 from hyperloom_multibranch.contracts.intent import Intent
 from hyperloom_multibranch.contracts.blackboard.records import BranchProgress, PendingCandidate, TestRecord
-from hyperloom_multibranch.contracts.toolbox import BuildStatus
+from hyperloom_multibranch.contracts.toolbox import BuildStatus, WorkloadKind
 from hyperloom_multibranch.blackboard.rsi.frontier import (
     PROBATION_HOLD,
     SETTLED_TESTS,
@@ -55,7 +55,13 @@ from hyperloom_multibranch.scheduling.branches import REPAIR_PROTECTED_SECONDS
 from hyperloom_multibranch.scheduling.clock import Clock
 from hyperloom_multibranch.scheduling.events import SessionEvent
 from hyperloom_multibranch.scheduling.forks import PendingBranch
-from hyperloom_multibranch.scheduling.judge_prompt import JUDGE_SYSTEM_PROMPT, PLAYBOOK_JUDGE_PROMPT, REPLY_FORMAT
+from hyperloom_multibranch.scheduling.judge_prompt import (
+    AGENTX_JUDGE_SYSTEM_PROMPT,
+    AGENTX_PLAYBOOK_JUDGE_PROMPT,
+    JUDGE_SYSTEM_PROMPT,
+    PLAYBOOK_JUDGE_PROMPT,
+    REPLY_FORMAT,
+)
 from hyperloom_multibranch.contracts.llm import Completion, CompletionFailed
 from hyperloom_multibranch.scheduling.roster import (
     BranchEntry,
@@ -64,6 +70,7 @@ from hyperloom_multibranch.scheduling.roster import (
     RosterCaps,
     open_specialists,
 )
+from hyperloom_multibranch.scheduling.settings import Workload
 from hyperloom_multibranch.scheduling.similarity import SimilarBranch
 from hyperloom_multibranch.scheduling.widening import WideningSignals
 
@@ -141,6 +148,7 @@ class JudgeView:
     as :func:`~hyperloom_multibranch.scheduling.agent_map.render_map` gives it, empty for a session with none.
     ``undealt`` names the session's directions no branch has held yet that branches opened now with no focus would be
     dealt, none while the scheduler would open no such branch; :func:`coverage_floor` opens a branch for each.
+    ``workload`` is the session's workload, whose kind picks the system prompt (:func:`system_prompt`).
     """
 
     now: float
@@ -172,6 +180,7 @@ class JudgeView:
     queued: Mapping[str, tuple[QueuedIntent, ...]]
     building: Mapping[str, tuple[BuildStatus, ...]]
     focus: Mapping[str, str]
+    workload: Workload
     open_areas: str = ""
     playbook: str = ""
     agent_map: str = ""
@@ -453,8 +462,10 @@ def _cold_start(widening: WideningSignals) -> int | str:
 
 def system_prompt(view: JudgeView) -> str:
     """The system prompt for ``view``: :data:`PLAYBOOK_JUDGE_PROMPT` when its session plays a playbook, which the view
-    then shows, and :data:`JUDGE_SYSTEM_PROMPT` otherwise."""
+    then shows, and :data:`JUDGE_SYSTEM_PROMPT` otherwise; their AgentX versions in an AgentX session."""
 
+    if view.workload.kind is WorkloadKind.AGENTX:
+        return AGENTX_PLAYBOOK_JUDGE_PROMPT if view.playbook else AGENTX_JUDGE_SYSTEM_PROMPT
     return PLAYBOOK_JUDGE_PROMPT if view.playbook else JUDGE_SYSTEM_PROMPT
 
 

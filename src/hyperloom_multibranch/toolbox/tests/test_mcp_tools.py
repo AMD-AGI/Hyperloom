@@ -43,6 +43,7 @@ from hyperloom_multibranch.contracts.toolbox import (
     QueueState,
     RequestRejected,
     TestProgress,
+    WorkloadKind,
 )
 from hyperloom_multibranch.blackboard import LocalBlackboard
 from hyperloom_multibranch.blackboard.tests.factories import TTL, FakeClock, delta, intent, request, result
@@ -74,6 +75,7 @@ class FakeToolbox:
         self.cancelled: list[str] = []
         self.refuse: Exception | None = None
         self.progress_of: dict[str, TestProgress] = {}
+        self.state = QueueState(queued_by_priority={0: 1, 1: 2, 2: 0, 3: 0, 4: 0}, running_by_branch={"s1": 1})
 
     async def submit_test(self, request: TestRequest) -> str:
         if self.refuse is not None:
@@ -86,7 +88,7 @@ class FakeToolbox:
         return CancelOutcome.WITHDRAWN
 
     async def queue_state(self) -> QueueState:
-        return QueueState(queued_by_priority={0: 1, 1: 2, 2: 0, 3: 0, 4: 0}, running_by_branch={"s1": 1})
+        return self.state
 
     async def progress(self, request_id: str) -> TestProgress | None:
         return self.progress_of.get(request_id)
@@ -323,6 +325,12 @@ def wait_rig(seeded: tuple[Path, FakeClock], waiting: Writers) -> Iterator[Rig]:
     yield from _running(seeded, SpecialistToolOptions(claim_ttl_seconds=60.0, wait_poll_seconds=0.05))
 
 
+@pytest.fixture
+def agentx_wait_rig(seeded: tuple[Path, FakeClock], waiting: Writers) -> Iterator[Rig]:
+    options = SpecialistToolOptions(claim_ttl_seconds=60.0, wait_poll_seconds=0.05, workload=WorkloadKind.AGENTX)
+    yield from _running(seeded, options)
+
+
 def _wait(rig: Rig, branch: str = "s1", **arguments: Any) -> dict[str, Any]:
     return json.loads(rig.ok(rig.token(branch), "wait_test", **arguments))
 
@@ -449,6 +457,53 @@ def test_wait_test_reports_how_many_tests_are_queued_ahead_of_a_waiting_one(wait
     body = _wait(wait_rig, request_id="r9", wait_seconds=1)
     assert time.monotonic() - started >= 1
     assert body == {"request_id": "r9", "state": "queued", "waited_seconds": 1, "progress": {"queued_ahead": 2}}
+
+
+def _slots(rig: Rig, free: int, free_test_slots: int = 1) -> None:
+    rig.toolbox.state = QueueState(
+        k_by_branch={"s1": 2, "s2": 4}, free_slots_by_branch={"s1": free, "s2": 4}, free_test_slots=free_test_slots
+    )
+
+
+def test_the_first_wait_on_a_test_returns_at_once_and_says_to_submit_while_a_test_would_start_now(
+    agentx_wait_rig: Rig,
+) -> None:
+    _slots(agentx_wait_rig, free=1)
+    agentx_wait_rig.toolbox.progress_of["r9"] = TestProgress("running", running_seconds=12.0)
+    started = time.monotonic()
+    body = _wait(agentx_wait_rig, request_id="r9", wait_seconds=5)
+    assert time.monotonic() - started < 1
+    assert (body["state"], body["branch_k"], body["branch_free_slots"], body["free_test_slots"]) == ("running", 2, 1, 1)
+    assert body["hint"] == "1 free slot(s): prepare and submit your next candidate"
+
+
+def test_a_later_wait_on_the_same_test_blocks_though_a_slot_is_free(agentx_wait_rig: Rig) -> None:
+    _slots(agentx_wait_rig, free=1)
+    _wait(agentx_wait_rig, request_id="r9", wait_seconds=5)
+    started = time.monotonic()
+    body = _wait(agentx_wait_rig, request_id="r9", wait_seconds=1)
+    assert time.monotonic() - started >= 1
+    assert (body["waited_seconds"], body["branch_free_slots"]) == (1, 1)
+
+
+@pytest.mark.parametrize(("free", "free_test_slots"), [(0, 1), (1, 0)])
+def test_a_wait_where_a_test_submitted_now_would_only_queue_blocks_and_says_to_prepare_the_next_candidate(
+    agentx_wait_rig: Rig, free: int, free_test_slots: int
+) -> None:
+    _slots(agentx_wait_rig, free, free_test_slots)
+    started = time.monotonic()
+    body = _wait(agentx_wait_rig, request_id="r9", wait_seconds=1)
+    assert time.monotonic() - started >= 1
+    assert (body["branch_free_slots"], body["free_test_slots"]) == (free, free_test_slots)
+    assert body["hint"] == "prepare your next candidate, a test submitted now only queues"
+
+
+def test_an_inferencex_wait_blocks_and_tells_nothing_of_the_slots(wait_rig: Rig) -> None:
+    _slots(wait_rig, free=1)
+    started = time.monotonic()
+    body = _wait(wait_rig, request_id="r9", wait_seconds=1)
+    assert time.monotonic() - started >= 1
+    assert body == {"request_id": "r9", "state": "in_flight", "waited_seconds": 1}
 
 
 def test_wait_test_reports_how_long_a_running_test_ran_and_what_it_wrote_last(wait_rig: Rig) -> None:
@@ -610,6 +665,9 @@ def test_jsonable_turns_contract_objects_into_json_data() -> None:
         "builds": [
             {"key": "k1", "component": "sgl_kernel", "state": "building", "eta_seconds": 34.0, "build_seconds": 0.0}
         ],
+        "k_by_branch": {},
+        "free_slots_by_branch": {},
+        "free_test_slots": 0,
     }
 
 

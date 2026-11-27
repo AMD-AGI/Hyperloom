@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: MIT
 
 import json
-from dataclasses import replace
+from dataclasses import astuple, replace
 from pathlib import Path
 
 import pytest
@@ -98,6 +98,14 @@ def test_the_role_names_the_workload_every_step_s_tool_and_the_rules():
     assert prompt.index("blackboard_learn, citing the candidate") < prompt.index("then call decline_repair")
     with pytest.raises(ValueError, match="names the workload"):
         role_prompt(RoleWorkload(" \n"))
+
+
+def test_an_agentx_role_paces_its_tests_by_the_agentx_rules_and_an_inferencex_one_by_its_own():
+    agentx = RoleWorkload(NAMED, AgentXObjective.P50_INTERACTIVITY)
+
+    assert (agentx.pace, WORKLOAD.pace) == (prompts._AGENTX_PACE, prompts._INFERENCEX_PACE)
+    assert all(text in role_prompt(agentx) for text in astuple(agentx.pace))
+    assert all(text in role_prompt(WORKLOAD) for text in astuple(WORKLOAD.pace))
 
 
 def test_the_role_reads_the_briefs_two_direction_lists_before_claiming_and_chooses_as_before_without_them():

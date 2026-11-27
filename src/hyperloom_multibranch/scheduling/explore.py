@@ -108,6 +108,7 @@ from hyperloom_multibranch.scheduling.roster import (
     StopCause,
     specialist_open,
 )
+from hyperloom_multibranch.scheduling.settings import Workload
 from hyperloom_multibranch.scheduling.settle import failure_text, settled
 from hyperloom_multibranch.scheduling.similarity import BranchSimilarity
 from hyperloom_multibranch.scheduling.stops import SessionStopper, SessionStopReason
@@ -190,7 +191,7 @@ class Steering:
     each running branch's specialist, the toolbox the native builds each branch's tests wait for are read from, the
     session's dev sandboxes, whose line holds a waiting branch (``None`` when it lends none), and the scheduling
     playbook the session plays, ``None`` for a session that plays none, with the session's manifest a
-    fallback from it is recorded in."""
+    fallback from it is recorded in, and the session's workload, which the judge's view carries."""
 
     judge: Judge
     interval_seconds: float
@@ -204,6 +205,7 @@ class Steering:
     dev_leases: DevLeases | None
     play: PlaybookPlay | None
     manifest: Path
+    workload: Workload
 
 
 def spent_gpu_seconds(progress: Iterable[BranchProgress]) -> float:
@@ -265,6 +267,7 @@ class Explorer:
         self._dev_leases = steering.dev_leases
         self._play = steering.play
         self._manifest = steering.manifest
+        self._workload = steering.workload
         self._scored: tuple[BranchProgress, ...] = ()
         self._areas: OpenAreas | None = None
         self._areas_profile: OpShares | None = None
@@ -485,6 +488,7 @@ class Explorer:
             building=await waiting_builds(self._toolbox, snapshot.records),
             focus={node.branch: node.focus for node in snapshot.lineage.branches if node.focus},
             undealt=await self._specialists.undealt_directions(opens_on),
+            workload=self._workload,
         )
         view = self._with_playbook(view, snapshot)
         view = replace(view, agent_map=render_map(snapshot))
