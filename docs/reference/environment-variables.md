@@ -758,7 +758,15 @@ again in the loader's order, at most twice. That pass is not bounded by the
 headroom: the server allocates most of its memory right after the drop, and
 the kernel reclaims the oldest pages, those the loader has consumed, first. A
 gradual loss, the kernel reclaiming pages when the server's memory and the
-reads meet the cgroup limit, is not read again. A
+reads meet the cgroup limit, is not read again. Servers on one host share the
+page cache, so a drop takes only what the other servers have not mapped; after
+its first pass and before it has read again, it therefore also reads the whole
+checkpoint again once when the cached total is below half of the most it held
+while the cgroup still has at least 16 GiB of headroom (reclaim happens only at
+the limit). `weight_prefetch.json` records each pass (start, end, reason, bytes
+and files read, out of room), each drop found (time, rule, cache before and
+after), the most the cache held and, while no drop was found, a sample every
+10 s of the last 30 minutes. A
 checkpoint the round's account neither owns nor may write is read once and not
 refilled: Linux does not tell such an account which of its pages are cached, so
 each file is read whole by its size within the same headroom, and what the

@@ -21,6 +21,14 @@ A gradual loss is not a drop: the kernel reclaiming the oldest pages, when the s
 the cgroup limit, takes a few GB a second, never most of a checkpoint at once, and reading those pages again would only
 evict others.
 
+The page cache is the host's, so servers on one host share the checkpoint's: a drop by one server takes only what no
+other server has mapped, while the others' loaders and reads keep the rest, and the cached total of a later server then
+falls by less than ``_COLLAPSE_SHARE`` (measured: the third of three servers on one host never read again after its
+drop). So after its first pass, until it has read again once, it also reads again when the cached total has fallen
+below ``_LEVEL_SHARE`` of the most it ever held while this cgroup has at least ``_MIN_COLLAPSE`` of headroom left. The
+headroom tells the two losses apart: reclaim in this cgroup happens only at its limit, where no headroom is left, while
+a drop frees the pages this cgroup was charged for.
+
 The pass after a drop is not bounded by the headroom. The server allocates most of its memory right after the drop (the
 engram host tables, ~200 GiB of anonymous huge pages for DeepSeek V4), after which what is left does not hold the
 checkpoint; the loader then consumes it in this order, and the kernel reclaims the oldest pages first, those it has
@@ -100,6 +108,16 @@ _COLLAPSE_PAUSE_SEC = 5.0
 #: How many times the checkpoint is read again after a drop. SGLang's engram host table drops it once before it
 #: pre-faults its shard and once more in ``finish_load`` when the shard lacks huge pages.
 _MAX_REFILLS = 2
+#: A drop other servers on the host hide: the cached total below this share of the most it ever held, after the first
+#: pass and before any pass that read again, with at least ``_MIN_COLLAPSE`` of this cgroup's headroom free.
+_LEVEL_SHARE = 0.5
+#: What a pass was read for (the run_dir record names it): the first pass, or the rule that found the drop before it.
+_FIRST = "first"
+_COLLAPSE = "collapse"
+_LEVEL = "level"
+#: How often a sample of the cache is kept for the run_dir record, and how many of the last are kept (30 minutes).
+_HISTORY_EVERY_SEC = 10.0
+_HISTORY_SAMPLES = 180
 #: Bytes one stream reads of a file before it takes the next piece, so several streams share one large file.
 _PIECE = _GIB
 #: How many places of a file a sample looks at, and how many pages at each: a drop (``POSIX_FADV_DONTNEED``) or a reclaim
@@ -175,7 +193,14 @@ class Host(Protocol):
 class PrefetchOutcome:
     """What one prefetch did, as the round's run_dir records it: ``skipped`` says why nothing was read, ``chosen`` the
     files it read with their sizes (``residency_known`` false for a file read whole by size), ``unreadable`` how many
-    file reads failed, ``out_of_room`` whether the headroom ran out, ``error`` what ended it early."""
+    file reads failed, ``out_of_room`` whether the headroom ran out, ``error`` what ended it early.
+
+    ``pass_log`` has one entry per pass (at most ``1 + _MAX_REFILLS``): its UTC start and end, ``reason`` (``first``, or
+    the rule that found the drop before it: ``collapse`` or ``level``), the bytes and files it read, whether the
+    headroom ran out and whether a drop ended it. ``drops`` has one entry per drop found: when, by which rule, and the
+    sampled cache of the checkpoint before (the most of the window, or the most ever for ``level``) and after.
+    ``cache_peak_bytes`` is the most the sampled cache held and when; while no drop was found, ``cache_samples_gib``
+    keeps the last samples, one every ``_HISTORY_EVERY_SEC``, as ``[seconds since start, cached GiB, headroom GiB]``."""
 
     model_dir: str
     fs_type: str | None = None
@@ -192,6 +217,11 @@ class PrefetchOutcome:
     error: str | None = None
     elapsed_sec: float = 0.0
     ended: bool = False
+    pass_log: list[dict[str, object]] = field(default_factory=list)
+    drops: list[dict[str, object]] = field(default_factory=list)
+    cache_peak_bytes: int = 0
+    cache_peak_at: str | None = None
+    cache_samples_gib: list[list[float | None]] = field(default_factory=list)
 
 
 @dataclass(frozen=True)
@@ -231,6 +261,15 @@ def _pieces(spans: Iterable[Span]) -> Iterable[Span]:
             yield offset, min(offset + _PIECE, end)
 
 
+def _stamp() -> str:
+    """Now in UTC to the second, as the run_dir record spells times."""
+    return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+
+
+def _gib(value: int) -> float:
+    return round(value / _GIB, 1)
+
+
 def _is_network(fs_type: str | None) -> bool:
     return fs_type is not None and (fs_type in _NETWORK_FS or fs_type.startswith(_FUSE_PREFIX))
 
@@ -256,13 +295,18 @@ class _PassTally:
 
 class _Watch:
     """The sampled bytes of the watched files in the page cache, against the most seen in the last
-    ``_COLLAPSE_WINDOW_SEC``: a fall by ``_COLLAPSE_SHARE`` of that is a drop of the checkpoint's cache."""
+    ``_COLLAPSE_WINDOW_SEC``: a fall by ``_COLLAPSE_SHARE`` of that is a drop of the checkpoint's cache. It also keeps
+    the most ever seen (``peak``), the last sample (``last``) and a sample every ``_HISTORY_EVERY_SEC`` (``history``)."""
 
     def __init__(self, host: Host, watched: Sequence[_Chosen], clock: Callable[[], float] = time.monotonic) -> None:
         self._host = host
         self._watched = watched
         self._clock = clock
         self._recent: deque[tuple[float, int]] = deque()
+        self._started = self._next_history = clock()
+        self.peak = self.last = 0
+        self.peak_at: str | None = None
+        self.history: deque[list[float | None]] = deque(maxlen=_HISTORY_SAMPLES)
 
     def cached(self) -> int:
         """The watched files' bytes in the page cache now, sampled."""
@@ -276,6 +320,14 @@ class _Watch:
         """Sample the cache; the bytes a drop took, ``0`` when there was none. A drop found starts the window again,
         so the same drop is not found twice."""
         now, total = self._clock(), self.cached()
+        self.last = total
+        if total > self.peak:
+            self.peak, self.peak_at = total, _stamp()
+        if now >= self._next_history:
+            self._next_history = now + _HISTORY_EVERY_SEC
+            memory = self._host.memory()
+            headroom = None if memory is None else _gib(memory.headroom())
+            self.history.append([round(now - self._started), _gib(total), headroom])
         while self._recent and now - self._recent[0][0] > _COLLAPSE_WINDOW_SEC:
             self._recent.popleft()
         peak = max([total, *(cached for _, cached in self._recent)])
@@ -285,6 +337,12 @@ class _Watch:
             return 0
         self._recent.clear()
         return lost
+
+    def faded(self) -> int:
+        """The bytes the last sample is below the most ever seen, when it is below ``_LEVEL_SHARE`` of it; else ``0``."""
+        if self.peak < _MIN_COLLAPSE or self.last >= _LEVEL_SHARE * self.peak:
+            return 0
+        return self.peak - self.last
 
     def reset(self) -> None:
         self._recent.clear()
@@ -356,30 +414,50 @@ class WeightPrefetch:
             return
         watched = [item for item in self._files if item.residency_known]
         watch = _Watch(self._host, watched)
-        lost = self._read_pass(chosen, watch, bounded=True)
+        rule = self._read_pass(chosen, watch, bounded=True, reason=_FIRST)
         if not watched:
             return
         refills = 0
         while not self._stop.is_set():
-            if not lost:
+            if rule is None:
                 if self._stop.wait(_POLL_INTERVAL_SEC):
                     return
-                lost = watch.collapsed()
+                rule = self._look(watch, level=refills == 0)
                 continue
             if refills >= _MAX_REFILLS:
-                log.info("weight prefetch: %.1f GiB left the page cache at once again; no refill is left", lost / _GIB)
+                log.info("weight prefetch: the checkpoint's page cache was dropped again; no refill is left")
                 return
             refills += 1
-            log.info(
-                "weight prefetch: %.1f GiB of the checkpoint left the page cache at once; reading all of it again in "
-                "%.0f s",
-                lost / _GIB,
-                _COLLAPSE_PAUSE_SEC,
-            )
+            log.info("weight prefetch: reading the whole checkpoint again in %.0f s", _COLLAPSE_PAUSE_SEC)
             if self._stop.wait(_COLLAPSE_PAUSE_SEC):
                 return
             watch.reset()
-            lost = self._read_pass(self._files, watch, bounded=False)
+            rule = self._read_pass(self._files, watch, bounded=False, reason=rule)
+
+    def _look(self, watch: _Watch, *, level: bool) -> str | None:
+        """Sample the cache; the rule that found a drop (``collapse``, or ``level`` when ``level`` allows it), else
+        ``None``. A drop found is recorded in :attr:`outcome`, and logged."""
+        lost = watch.collapsed()
+        rule, before = (_COLLAPSE, watch.last + lost) if lost else (None, 0)
+        if rule is None and level and watch.faded():
+            memory = self._host.memory()
+            if memory is not None and memory.headroom() >= _MIN_COLLAPSE:
+                rule, before = _LEVEL, watch.peak
+        outcome = self.outcome
+        outcome.cache_peak_bytes, outcome.cache_peak_at = watch.peak, watch.peak_at
+        if rule is None:
+            if not outcome.drops:
+                outcome.cache_samples_gib = list(watch.history)
+            return None
+        outcome.drops.append({"at": _stamp(), "rule": rule, "cached_before": before, "cached_after": watch.last})
+        outcome.cache_samples_gib = []
+        log.info(
+            "weight prefetch: the checkpoint's sampled page cache fell from %.1f to %.1f GiB (%s): a drop",
+            before / _GIB,
+            watch.last / _GIB,
+            "at once" if rule == _COLLAPSE else "below half of the most it held, with headroom free",
+        )
+        return rule
 
     def _skip(self, reason: str) -> list[_Chosen]:
         self.outcome.skipped = reason
@@ -434,11 +512,14 @@ class WeightPrefetch:
         )
         return chosen
 
-    def _read_pass(self, chosen: Sequence[_Chosen], watch: _Watch, *, bounded: bool) -> int:
+    def _read_pass(self, chosen: Sequence[_Chosen], watch: _Watch, *, bounded: bool, reason: str) -> str | None:
         """Read what of ``chosen`` is not cached, in pieces in that order, ``streams`` pieces at a time (each within the
-        live headroom when ``bounded``), looking at the cache every ``_POLL_INTERVAL_SEC`` meanwhile; the bytes a drop
-        seen meanwhile took (the pass then ends early), else ``0``."""
+        live headroom when ``bounded``), looking at the cache every ``_POLL_INTERVAL_SEC`` meanwhile for a collapse;
+        the rule that found a drop meanwhile (the pass then ends early), else ``None``. ``reason`` is what the pass is
+        read for, as :attr:`outcome` records it."""
         self.outcome.passes += 1
+        record: dict[str, object] = {"pass": self.outcome.passes, "reason": reason, "start": _stamp()}
+        self.outcome.pass_log.append(record)
         self._interrupt.clear()
         if self._stop.is_set():
             self._interrupt.set()
@@ -464,13 +545,13 @@ class WeightPrefetch:
                     tally.running -= 1
                     if tally.running <= 0:
                         tally.done.set()
-        lost = 0
+        rule = None
         try:
             while not tally.done.wait(_POLL_INTERVAL_SEC):
                 if self._interrupt.is_set():
                     continue  # ending: no look at the cache while a read blocked on the storage returns
-                lost = watch.collapsed()
-                if lost:
+                rule = self._look(watch, level=False)
+                if rule:
                     self._interrupt.set()
         except BaseException:
             self._interrupt.set()  # a look at the cache that fails ends the reads with it
@@ -479,6 +560,13 @@ class WeightPrefetch:
         self.outcome.read_bytes += tally.read
         self.outcome.unreadable += tally.unreadable
         self.outcome.out_of_room = self.outcome.out_of_room or tally.out_of_room
+        record.update(
+            end=_stamp(),
+            read_bytes=tally.read,
+            files_read=len(tally.files),
+            out_of_room=tally.out_of_room,
+            ended_by_drop=rule is not None,
+        )
         log.info(
             "weight prefetch pass %d: read %.1f GiB from %d of %d files in %.1f s, %.0f MB/s, %d unreadable%s%s",
             self.outcome.passes,
@@ -489,9 +577,9 @@ class WeightPrefetch:
             tally.read / elapsed / 1e6,
             tally.unreadable,
             "; stopped: the memory headroom ran out" if tally.out_of_room else "",
-            "; ended early: the checkpoint's page cache was dropped" if lost else "",
+            "; ended early: the checkpoint's page cache was dropped" if rule else "",
         )
-        return lost
+        return rule
 
     def _stream(self, work: queue.SimpleQueue[tuple[_Chosen, Span]], tally: _PassTally) -> None:
         try:

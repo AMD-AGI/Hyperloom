@@ -296,6 +296,11 @@ def test_after_each_drop_the_whole_checkpoint_is_read_again_a_bounded_number_of_
 
     names = list(sizes)
     assert prefetch.outcome.passes == 3, "it ends on its own once the refills are spent"
+    assert [entry["reason"] for entry in prefetch.outcome.pass_log] == ["first", "collapse", "collapse"]
+    assert [entry["read_bytes"] for entry in prefetch.outcome.pass_log] == [120 * GIB, 240 * GIB, 240 * GIB]
+    assert [drop["rule"] for drop in prefetch.outcome.drops] == ["collapse"] * 3
+    assert all(drop["cached_after"] < drop["cached_before"] / 4 for drop in prefetch.outcome.drops)
+    assert prefetch.outcome.cache_samples_gib == [], "samples are kept only while no drop was found"
     assert [name for name, _ in host.reads] == [n for n in names[:2] for _ in range(60)] + [
         n for n in names for _ in range(60)
     ] * 2, "a refill reads every file in the loader's order, past the headroom the first pass kept to"
@@ -454,6 +459,123 @@ def test_only_a_collapse_of_the_cached_total_is_a_drop() -> None:
     assert look() == 0, "the same drop is not found twice"
 
 
+def _after_each_pass(tmp_path, machine, host: FakeHost, after_pass, *, passes: int) -> WeightPrefetch:
+    """Run a prefetch of DeepSeek V4 on ``host``; once each pass has ended and the warm cache was looked at,
+    ``after_pass`` changes the cache while the prefetch watches, up to ``passes`` times; the server is ready a moment
+    after the last."""
+    machine(host, streams=8, max_refills=2, min_collapse=16 * GIB)
+    prefetch = WeightPrefetch(_model(tmp_path, host.sizes))
+    prefetch.start()
+    done = 0
+    for _ in range(500):
+        log = prefetch.outcome.pass_log
+        if len(log) > done and "end" in log[done]:
+            threading.Event().wait(0.1)  # a few looks at the warm cache
+            after_pass(done)
+            done += 1
+        if done == passes or prefetch.join(0.02):
+            break
+    threading.Event().wait(0.3)
+    prefetch.stop()
+    assert prefetch.join(10.0)
+    return prefetch
+
+
+def _drop_unmapped(host: FakeHost, kept: float) -> None:
+    """A loader's drop on a host other servers share: of what the cache held of each file, only the share ``kept``
+    stays, the pages the other servers have mapped. Files here are read whole, so a file is cached whole or not at all."""
+    with host.lock:
+        for name, size in host.sizes.items():
+            cached = size - sum(end - start for start, end in host.uncached_spans[name])
+            gone = int(cached * (1 - kept))
+            if gone:
+                host.uncached_spans[name] = [(0, size - cached + gone)]
+                host.used -= gone
+
+
+def test_a_drop_other_servers_on_the_host_hide_is_read_again_once(tmp_path, machine) -> None:
+    """As measured with three servers on one host: the drop took only what the other servers had not mapped, under the
+    three quarters the collapse rule looks for, and the latest server never read again (main weights 1930 s). The
+    level rule reads once: the cache fell below half of the most it held, and this cgroup has its headroom back. A
+    second such fall after that pass is not read again: only a collapse may use the second refill."""
+
+    host = _deepseek_v4(used=GIB)
+    prefetch = _after_each_pass(tmp_path, machine, host, lambda n: _drop_unmapped(host, kept=0.45), passes=2)
+
+    outcome = prefetch.outcome
+    assert outcome.passes == 2, "one read after the hidden drop, none after the second"
+    assert [entry["reason"] for entry in outcome.pass_log] == ["first", "level"]
+    assert outcome.pass_log[1]["files_read"] == len(host.sizes), "the whole checkpoint"
+    assert [drop["rule"] for drop in outcome.drops] == ["level"]
+    drop = outcome.drops[0]
+    assert drop["cached_before"] == outcome.pass_log[0]["read_bytes"], "the most it held: what the first pass read"
+    assert drop["cached_before"] / 4 < drop["cached_after"] < drop["cached_before"] / 2, "not a collapse"
+    record = tmp_path / "weight_prefetch.json"
+    prefetch.write_outcome(record)
+    written = json.loads(record.read_text(encoding="utf-8"))
+    assert [entry["reason"] for entry in written["pass_log"]] == ["first", "level"]
+    assert record.stat().st_size < 16 * 1024
+
+
+def _look_at(machine, host: FakeHost) -> tuple[WeightPrefetch, list[float], wp._Watch]:
+    machine(host, min_collapse=16 * GIB)
+    prefetch = WeightPrefetch(Path("/nonexistent"))
+    items = [wp._Chosen(Path(name), size, True) for name, size in host.sizes.items()]
+    now = [0.0]
+    return prefetch, now, wp._Watch(host, items, clock=lambda: now[0])
+
+
+def test_reclaim_at_the_cgroup_limit_after_the_first_pass_is_no_drop(machine) -> None:
+    """The measured single-server timeline, with the first pass over before reclaim: the server's memory and the cache
+    meet the limit, reclaim takes the oldest pages a few GB a second until most of what was read is gone. No headroom
+    is left the whole time, so the level rule does not read again; the engram drop after it is a collapse."""
+    host = _deepseek_v4(used=GIB)
+    names = list(host.sizes)
+    prefetch, now, watch = _look_at(machine, host)
+
+    def look(level: bool = True) -> str | None:
+        now[0] += 1.0
+        return prefetch._look(watch, level=level)
+
+    for name in names[:40]:  # ~250 GiB read, the first pass bounded by the headroom
+        host.uncached_spans[name] = []
+        assert look(level=False) is None
+    host.used = host.limit - 40 * GIB  # out of room: under a GiB of headroom past the 44.8 GiB margin
+    assert prefetch._host.memory().headroom() < GIB
+    for name in names[:30]:  # reclaim at the limit, a shard a second: the server grows, the cache shrinks
+        host.uncached_spans[name] = [(0, host.sizes[name])]
+        assert look() is None
+    assert watch.last <= watch.peak / 4, "most of what was read is gone, gradually"
+    for name in names[:30]:
+        host.uncached_spans[name] = []
+    for _ in range(11):
+        assert look() is None
+    host.drop_cache()
+    host.used = 60 * GIB
+    assert look() == "collapse"
+    assert [drop["rule"] for drop in prefetch.outcome.drops] == ["collapse"]
+
+
+def test_a_fall_below_half_with_headroom_free_is_a_drop_only_when_the_level_rule_may_look(machine) -> None:
+    host = _deepseek_v4(used=GIB)
+    names = list(host.sizes)
+    prefetch, now, watch = _look_at(machine, host)
+    for name in names[:40]:
+        host.uncached_spans[name] = []
+    now[0] += 1.0
+    assert prefetch._look(watch, level=True) is None
+    for name in names[:24]:  # 60 % gone over 24 s: no collapse
+        host.uncached_spans[name] = [(0, host.sizes[name])]
+        now[0] += 1.0
+        assert prefetch._look(watch, level=False) is None
+    host.used = 100 * GIB
+    now[0] += 1.0
+    assert prefetch._look(watch, level=False) is None, "during a pass, or after a read again, only a collapse counts"
+    now[0] += 1.0
+    assert prefetch._look(watch, level=True) == "level"
+    assert prefetch.outcome.cache_peak_bytes == watch.peak and prefetch.outcome.cache_peak_at
+
+
 def test_a_small_cache_that_empties_is_not_a_drop() -> None:
     sizes = _names(2, 4 * GIB)
     host = FakeHost(sizes)
@@ -475,6 +597,10 @@ def test_a_cache_that_stays_warm_is_not_read_again(tmp_path, machine) -> None:
     prefetch.stop()
     assert prefetch.join(5.0)
     assert prefetch.outcome.passes == 1 and host.read_bytes() == {next(iter(sizes)): 4 * GIB}
+    outcome = prefetch.outcome
+    assert outcome.drops == [] and outcome.cache_peak_bytes == 4 * GIB
+    assert outcome.cache_samples_gib and outcome.cache_samples_gib[0][1:] == [4.0, 166.0]
+    assert outcome.pass_log[0]["reason"] == "first" and outcome.pass_log[0]["files_read"] == 1
 
 
 def test_stop_ends_a_read_in_progress(tmp_path, machine) -> None:
