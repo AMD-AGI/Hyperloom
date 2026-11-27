@@ -7,6 +7,7 @@ local session publishes the one this interpreter imports."""
 from __future__ import annotations
 
 import json
+import logging
 from pathlib import Path
 
 import pytest
@@ -131,7 +132,7 @@ def test_each_publish_fills_the_runner_caches_inferencex_store_with_the_stagings
     assert filled == [(cache, _PIN), (cache, _PIN)]
 
 
-def test_a_store_that_cannot_be_filled_fails_the_publish(tmp_path, monkeypatch):
+def test_a_store_that_cannot_be_filled_is_a_warning_and_the_publish_goes_on(tmp_path, monkeypatch, caplog):
     source = _commit_source(tmp_path)
     cache = tmp_path / "cache"
     _published_staging(cache, {"inferencex": _PIN})
@@ -141,8 +142,15 @@ def test_a_store_that_cannot_be_filled_fails_the_publish(tmp_path, monkeypatch):
 
     monkeypatch.setattr(suite_publish, "fill_inferencex_store", unreachable)
 
-    with pytest.raises(SuitePublishError, match=f"InferenceX store was not filled: InferenceX {_PIN} was not fetched"):
-        publish_inference_suite(source, cache)
+    with caplog.at_level(logging.WARNING, logger=suite_publish.__name__):
+        assert publish_inference_suite(source, cache) == cache / "inference-suite" / "k"
+
+    (record,) = caplog.records
+    assert record.levelno == logging.WARNING
+    assert "InferenceX store was not filled, so each test fetches InferenceX from INFERENCEX_REPO or upstream: " in (
+        record.getMessage()
+    )
+    assert f"InferenceX {_PIN} was not fetched" in record.getMessage()
 
 
 def test_a_staging_without_inferencex_fills_nothing(tmp_path, monkeypatch):

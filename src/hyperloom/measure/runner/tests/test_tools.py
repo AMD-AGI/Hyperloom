@@ -7,6 +7,9 @@ import logging
 import os
 import shutil
 import subprocess
+import sys
+import threading
+import time
 import zlib
 from dataclasses import replace
 
@@ -25,8 +28,15 @@ from inference_suite import CLIENT_FILE, StagingError, staging_key
 from inference_suite.contracts import PackageIdentity
 
 
+#: The git the tests set their repositories up with: the one on ``PATH`` at import, never the ownership-checking fake
+#: (:data:`_OWNERSHIP_CHECKING_GIT`), which only the code under test runs.
+_SETUP_GIT = shutil.which("git") or "git"
+
+
 def _git(path, *args):
-    return subprocess.run(["git", "-C", str(path), *args], check=True, capture_output=True, text=True).stdout.strip()
+    return subprocess.run(
+        [_SETUP_GIT, "-C", str(path), *args], check=True, capture_output=True, text=True
+    ).stdout.strip()
 
 
 @pytest.fixture
@@ -113,9 +123,20 @@ def test_an_unknown_commit_is_refused(upstream, tmp_path, monkeypatch):
 #: A git that refuses a fetch from a repository on this machine unless its global configuration (or the system's, which
 #: the test leaves alone) trusts it, as git before 2.38 does with one another account owns: ``-c`` and
 #: ``GIT_CONFIG_COUNT`` do not count there. Like git, it judges the repository where it resolves to, so a link
-#: trusted as itself is refused.
+#: trusted as itself is refused. The subcommand is the first argument after git's global options (``-c`` and ``-C`` take
+#: the next argument as their value), so a fetch the host runs with ``-c`` options before it is checked too.
 _OWNERSHIP_CHECKING_GIT = """#!/bin/sh
-if [ "$1" = fetch ]; then
+sub=
+value=
+for arg; do
+  if [ -n "$value" ]; then value=; continue; fi
+  case "$arg" in
+    -c|-C) value=1;;
+    -*) ;;
+    *) sub="$arg"; break;;
+  esac
+done
+if [ "$sub" = fetch ]; then
   for arg; do case "$arg" in /*|file://*) repo="${arg#file://}";; esac; done
   if [ -n "$repo" ]; then
     real=$(cd "$repo" && pwd -P) || exit 128
@@ -260,7 +281,7 @@ def test_a_published_staging_is_refused_when_this_interpreters_lm_eval_is_not_at
 
 
 def _filled_store(tmp_path, repo, commit):
-    """The runner cache's InferenceX store holding ``commit``, as the host (or an earlier runner) left it."""
+    """The runner cache's InferenceX store holding ``commit``, as the host's fill leaves it."""
     store = tmp_path / "runner-cache" / tools.TOOL_CHECKOUTS_DIR / tools.INFERENCEX_STORE
     store.mkdir(parents=True)
     _git(store, "init", "-q", "--bare")
@@ -515,3 +536,165 @@ def test_the_host_fetches_from_a_local_mirror_trusted_for_the_fill_alone(upstrea
 
     assert _git(store, "rev-parse", f"refs/tools/{commit}") == commit
     assert not (tmp_path / "home").exists(), "nothing is trusted beyond the fill"
+
+
+@pytest.mark.usefixtures("ownership_checking_git")
+def test_the_ownership_checking_git_checks_a_fetch_after_global_options(upstream, tmp_path):
+    repo, commit = upstream
+    store = tmp_path / "store.git"
+    subprocess.run(["git", "init", "-q", "--bare", str(store)], check=True)
+
+    done = subprocess.run(
+        [
+            "git",
+            "-c",
+            "core.hooksPath=/dev/null",
+            f"--git-dir={store}",
+            "fetch",
+            "-q",
+            "--depth",
+            "1",
+            str(repo),
+            commit,
+        ],
+        capture_output=True,
+        text=True,
+        env={**os.environ, "GIT_CONFIG_GLOBAL": str(tmp_path / "empty.gitconfig")},
+    )
+
+    assert done.returncode == 128 and "dubious ownership" in done.stderr
+
+
+def test_tools_is_made_group_shared_below_a_setgid_runner_cache(upstream, tmp_path, monkeypatch):
+    repo, commit = upstream
+    cache = tmp_path / "runner-cache"
+    cache.mkdir()
+    cache.chmod(0o2775)
+    monkeypatch.setenv("INFERENCEX_REPO", str(repo))
+    old = os.umask(0o022)
+    try:
+        store = tools.fill_inferencex_store(cache, commit)
+    finally:
+        os.umask(old)
+
+    assert store.parent.stat().st_mode & 0o7777 == 0o2775, "a builder of another account of the group writes it"
+
+
+#: Two fills of the store run as separate processes, each starting its fill at the same moment (``argv[3]``, once both
+#: have imported); the source pauses a second in the middle of each pack, while the receiving fetch holds the store's
+#: ``shallow.lock``, so the two fetches overlap as two fetches of a real InferenceX do.
+_FILL = "import sys, time; from pathlib import Path; from hyperloom.measure.runner import tools; " + (
+    "time.sleep(max(0.0, float(sys.argv[3]) - time.time())); tools.fill_inferencex_store(Path(sys.argv[1]), sys.argv[2])"
+)
+
+
+def _slow_source(tmp_path):
+    """The global git configuration of a fill whose source sends a pack in two parts a second apart: the host's own
+    configuration, which the fill includes, makes ``git upload-pack`` run ``git pack-objects`` through a hook that
+    passes its first bytes on at once and the rest a second later."""
+    config = tmp_path / "slow.gitconfig"
+    hook = "sh -c '\\\"$@\\\" | { dd bs=1 count=32 2>/dev/null; sleep 1; cat; }' hook"
+    config.write_text(f'[uploadpack]\n\tpackObjectsHook = "{hook}"\n')
+    return config
+
+
+def _fill_at_once(cache, commits, env):
+    import hyperloom
+    import inference_suite
+
+    paths = {os.path.dirname(os.path.dirname(module.__file__)) for module in (hyperloom, inference_suite)}
+    env = {**env, "PYTHONPATH": os.pathsep.join([*paths, env.get("PYTHONPATH", "")])}
+    start = str(time.time() + 3)
+    fills = [
+        subprocess.Popen(
+            [sys.executable, "-c", _FILL, str(cache), commit, start],
+            env=env,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+        for commit in commits
+    ]
+    return [(fill.wait(timeout=120), fill.stderr.read()) for fill in fills]
+
+
+def _second_commit(repo):
+    (repo / "benchmarks" / "benchmark_lib.sh").write_text("# lib 2\n")
+    _git(repo, "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qam", "two")
+    return _git(repo, "rev-parse", "HEAD")
+
+
+@pytest.mark.parametrize("case", ["one pin on an empty cache", "two pins on an empty cache", "a new pin beside an old"])
+def test_two_fills_at_once_both_succeed(upstream, tmp_path, monkeypatch, case):
+    repo, old = upstream
+    new = _second_commit(repo)
+    env = {**os.environ, "INFERENCEX_REPO": str(repo), "GIT_CONFIG_GLOBAL": str(_slow_source(tmp_path))}
+    commits = {"one pin on an empty cache": [old, old], "two pins on an empty cache": [old, new]}.get(case, [new, new])
+    for round_ in range(3):
+        cache = tmp_path / f"runner-cache-{round_}"
+        if case == "a new pin beside an old":
+            monkeypatch.setenv("INFERENCEX_REPO", str(repo))
+            tools.fill_inferencex_store(cache, old)
+
+        results = _fill_at_once(cache, commits, env)
+
+        assert [code for code, _ in results] == [0, 0], results
+        store = cache / tools.TOOL_CHECKOUTS_DIR / tools.INFERENCEX_STORE
+        for commit in {*commits}:
+            assert _git(store, "rev-parse", f"refs/tools/{commit}") == commit
+        assert not (store / "shallow.lock").exists()
+
+
+def test_a_lock_a_killed_fill_left_is_removed_once_stale_and_the_fill_succeeds(upstream, tmp_path, monkeypatch, caplog):
+    repo, old = upstream
+    cache = tmp_path / "runner-cache"
+    monkeypatch.setenv("INFERENCEX_REPO", str(repo))
+    store = tools.fill_inferencex_store(cache, old)
+    new = _second_commit(repo)
+    lock = store / "shallow.lock"
+    lock.write_text("")
+    stale = time.time() - tools._STALE_LOCK_SEC - 60
+    os.utime(lock, (stale, stale))
+
+    with caplog.at_level(logging.WARNING, logger=tools.__name__):
+        assert tools.fill_inferencex_store(cache, new) == store
+
+    assert _git(store, "rev-parse", f"refs/tools/{new}") == new
+    assert not lock.exists() and sorted(store.glob("shallow.lock.*")) == []
+    assert [record.getMessage() for record in caplog.records] == [f"removed {lock}, which a killed fill left"]
+
+
+def test_a_fresh_lock_is_waited_for_and_the_fill_succeeds_once_it_is_released(upstream, tmp_path, monkeypatch):
+    repo, old = upstream
+    cache = tmp_path / "runner-cache"
+    monkeypatch.setenv("INFERENCEX_REPO", str(repo))
+    store = tools.fill_inferencex_store(cache, old)
+    new = _second_commit(repo)
+    lock = store / "shallow.lock"
+    lock.write_text("")
+    monkeypatch.setattr(tools, "_LOCK_PAUSE_SEC", 0.2)
+    released = threading.Timer(1.0, lock.unlink)
+    released.start()
+    try:
+        assert tools.fill_inferencex_store(cache, new) == store
+    finally:
+        released.join()
+
+    assert _git(store, "rev-parse", f"refs/tools/{new}") == new
+
+
+def test_a_fresh_lock_held_past_the_wait_is_a_tool_error_and_left_in_place(upstream, tmp_path, monkeypatch):
+    repo, old = upstream
+    cache = tmp_path / "runner-cache"
+    monkeypatch.setenv("INFERENCEX_REPO", str(repo))
+    store = tools.fill_inferencex_store(cache, old)
+    new = _second_commit(repo)
+    lock = store / "shallow.lock"
+    lock.write_text("")
+    monkeypatch.setattr(tools, "_LOCK_WAIT_SEC", 1.0)
+    monkeypatch.setattr(tools, "_LOCK_PAUSE_SEC", 0.2)
+
+    with pytest.raises(ToolError, match="another fill held a lock of .* for 1.0 s"):
+        tools.fill_inferencex_store(cache, new)
+
+    assert lock.exists(), "a lock another fill may still hold is never removed while it is fresh"

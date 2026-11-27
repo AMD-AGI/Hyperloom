@@ -25,10 +25,12 @@ import re
 import shutil
 import subprocess
 import tempfile
+import time
 import urllib.parse
 from dataclasses import dataclass
 from pathlib import Path
 
+from hyperloom_common.shared_storage import make_shared_dirs
 from inference_suite import (
     CLIENT_FILE,
     NormalisedManifest,
@@ -61,6 +63,17 @@ _STORE_FETCH_TIMEOUT_SEC = 120
 #: The mode of a new store: the builders' group writes it, the sandbox's account reads it.
 _STORE_MODE = 0o2775
 _SHALLOW_FETCH = ("fetch", "-q", "--depth", "1")
+#: The lock file a shallow fetch into the store holds while it runs, so that one fill at a time fetches into it.
+_SHALLOW_LOCK = "shallow.lock"
+#: The end of git's message when a lock file it takes is there already: another fill holds it, or a killed one left it.
+_LOCK_HELD = "remove the file manually to continue"
+#: How old a lock file of the store is before a fill takes it for one a killed fill left and removes it: a live fill's
+#: fetch holds it at most :data:`_FETCH_TIMEOUT_SEC`, and is killed then.
+_STALE_LOCK_SEC = _FETCH_TIMEOUT_SEC + 300
+#: How long a fill waits, in all, for the other fills of the store before it gives up.
+_LOCK_WAIT_SEC = 2 * _STALE_LOCK_SEC
+#: The longest pause between two attempts of a fill that waits for another.
+_LOCK_PAUSE_SEC = 15.0
 _FILE_URL = "file://"
 #: The global git configuration a fetch from a repository on this machine runs with, in the new repository's ``.git``
 #: while it lasts (:func:`_trusting`).
@@ -246,8 +259,10 @@ def _bare_store(store: Path) -> None:
     """Make the bare repository ``store`` unless it is there: initialised in a new directory beside it and renamed into
     place, so a reader never finds a half-made repository, and a concurrent maker's repository is kept. Like the rest
     of the cache it is the builders' group's to write (each builder may fetch a new pin into it) and others' to read
-    (the sandbox's account)."""
-    store.parent.mkdir(parents=True, exist_ok=True)
+    (the sandbox's account); :data:`TOOL_CHECKOUTS_DIR` is made as ``inference-suite/`` is, ``2775`` below a setgid
+    runner cache (:func:`~hyperloom_common.shared_storage.make_shared_dirs`), so a builder of another account of the
+    group makes its temporary directory there as well."""
+    make_shared_dirs(store.parent)
     made = Path(tempfile.mkdtemp(prefix=f".{store.name}.", suffix=".tmp", dir=store.parent))
     try:
         _git("init", "-q", "--bare", "--shared=group", str(made))
@@ -263,14 +278,18 @@ def _bare_store(store: Path) -> None:
 
 def fill_inferencex_store(runner_cache: Path, commit: str) -> Path:
     """Make the runner cache's :data:`INFERENCEX_STORE` hold ``commit``, fetched from ``INFERENCEX_REPO`` or upstream;
-        the host runs it where the runner cache is built (``cache_build``), with network, and a sandbox never does. A store
-        that already holds the commit is left as it is, so it fetches nothing then. Only that commit is fetched, shallow,
-        and kept as ``refs/tools/<commit>``; git writes the objects before the ref, so a reader that finds the commit finds
-        all of it. The store may be another builder's of the group: the host's git commands in it trust it for that command
+    the host runs it where the runner cache is built (``cache_build``), with network, and a sandbox never does. A store
+    that already holds the commit is left as it is, so it fetches nothing then. Only that commit is fetched, shallow,
+    and kept as ``refs/tools/<commit>``; git writes the objects before the ref, so a reader that finds the commit finds
+    all of it. The store may be another builder's of the group: the host's git commands in it trust it for that command
     alone and run no hook or fsmonitor it names. Returns the store.
 
-        Raises:
-            ToolError: ``commit`` is no full commit hash, or it cannot be fetched.
+    Builders fill the store at the same time without a lock of their own (:func:`_fetch_into_store`): a shallow fetch
+    holds the store's ``shallow.lock``, so a fill that finds it held waits and tries again until the other fill is done,
+    and a lock older than :data:`_STALE_LOCK_SEC`, which only a killed fill leaves, is removed.
+
+    Raises:
+        ToolError: ``commit`` is no full commit hash, or it cannot be fetched.
     """
     if not _COMMIT.fullmatch(commit):
         raise ToolError(f"InferenceX: {commit!r} is not a full commit hash")
@@ -283,18 +302,67 @@ def fill_inferencex_store(runner_cache: Path, commit: str) -> Path:
         with tempfile.TemporaryDirectory(prefix="inferencex-fill.") as work:
             trusted = [os.path.realpath(store), *([resolved] if resolved is not None else [])]
             env = _host_config(Path(work) / _TRUST_CONFIG, trusted)
-            if _holds(store, commit, env):
-                return store
-            fetch = [*_store_git(store), *_SHALLOW_FETCH, resolved or repo, f"{commit}:refs/tools/{commit}"]
-            try:
-                _git(*fetch, cwd=Path(work), timeout=_FETCH_TIMEOUT_SEC, env=env)
-            except ToolError:
-                if _holds(store, commit, env):
-                    return store  # a concurrent fill fetched it
-                raise
+            if not _holds(store, commit, env):
+                fetch = [*_store_git(store), *_SHALLOW_FETCH, resolved or repo, f"{commit}:refs/tools/{commit}"]
+                _fetch_into_store(store, commit, fetch, Path(work), env)
     except (OSError, ToolError) as exc:
         raise ToolError(f"InferenceX {commit} was not fetched into {store}: {exc}") from exc
     return store
+
+
+def _store_locks(store: Path, commit: str) -> tuple[Path, ...]:
+    """The lock files a fill of ``commit`` takes in ``store``: the shallow file's and its ref's."""
+    return store / _SHALLOW_LOCK, store / "refs" / "tools" / f"{commit}.lock"
+
+
+def _fetch_into_store(store: Path, commit: str, fetch: list[str], work: Path, env: dict[str, str]) -> None:
+    """Run ``fetch`` until ``store`` holds ``commit``. A fetch that fails on a lock file another fill holds is tried
+    again after a pause, which doubles up to :data:`_LOCK_PAUSE_SEC`; one that fails because a concurrent fill fetched
+    the commit first is done. Before each attempt a lock file older than :data:`_STALE_LOCK_SEC` is removed
+    (:func:`_remove_stale_lock`). Any other failure, or waiting longer than :data:`_LOCK_WAIT_SEC` in all, raises.
+    """
+    deadline = time.monotonic() + _LOCK_WAIT_SEC
+    pause = 0.5
+    while True:
+        for lock in _store_locks(store, commit):
+            _remove_stale_lock(lock)
+        try:
+            _git(*fetch, cwd=work, timeout=_FETCH_TIMEOUT_SEC, env=env)
+            return
+        except ToolError as exc:
+            if _holds(store, commit, env):
+                return  # a concurrent fill fetched it
+            held = _LOCK_HELD in str(exc) or any(lock.exists() for lock in _store_locks(store, commit))
+            if not held:
+                raise
+            if time.monotonic() >= deadline:
+                raise ToolError(f"another fill held a lock of {store} for {_LOCK_WAIT_SEC} s: {exc}") from exc
+        log.info("a lock of %s is held by another fill; %s is fetched again in %.1f s", store, commit, pause)
+        time.sleep(pause)
+        pause = min(pause * 2, _LOCK_PAUSE_SEC)
+
+
+def _remove_stale_lock(lock: Path) -> None:
+    """Remove ``lock`` when it is older than :data:`_STALE_LOCK_SEC`, left by a fill killed while it held it. It is
+    first renamed aside, a name of this process's own, and judged there, so that of two fills that find it stale only
+    one removes it; a lock that is fresh once aside, which another fill took in the meantime, is linked back."""
+    try:
+        if time.time() - lock.stat().st_mtime < _STALE_LOCK_SEC:
+            return
+        aside = lock.with_name(f"{lock.name}.{os.getpid()}.stale")
+        os.rename(lock, aside)
+    except FileNotFoundError:
+        return
+    try:
+        if time.time() - aside.stat().st_mtime < _STALE_LOCK_SEC:
+            try:
+                os.link(aside, lock)
+            except FileExistsError:
+                pass
+        else:
+            log.warning("removed %s, which a killed fill left", lock)
+    finally:
+        aside.unlink(missing_ok=True)
 
 
 def _remove(path: Path) -> None:

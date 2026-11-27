@@ -71,7 +71,7 @@ template's values to the paths inside the sandbox.
 | `HYPERLOOM_SOURCE_SHA`, `HYPERLOOM_RUNNER_CACHE_MANIFEST_SHA256` | set by the hosted multi-branch entry | The hosted multi-branch entry passes both on every create; the template must list them in its accepted create environment. |
 | `HYPERLOOM_FRAMEWORK_SNAPSHOT`, `HYPERLOOM_FRAMEWORK_SESSION_SHA256` | set by the hosted multi-branch entry | When the app host has the image's aiter tables, the hosted multi-branch entry snapshots them below `<session_dir>/framework` and passes both on every create; the template must list them in its accepted create environment, and the sandbox must see the session directory at the same path. Without the snapshot, a test that adds tuned rows to a default table is refused as `spec_rejected`. |
 | `HYPERLOOM_BASE_BINS` | set by the hosted multi-branch entry | Only for a session whose framework's server is built from its pinned checkout (`--framework llamacpp`): the entry lays that base build below `<session_dir>` and passes the directories of its executables on every create, and the runner puts them first on its `PATH`, so a test that does not rebuild the framework runs that build. The template must list it in its accepted create environment, and the sandbox must see the session directory at the same path. |
-| `INFERENCEX_REPO` | no | Where the runner fetches InferenceX (default: upstream on GitHub). A sandbox without egress needs a mirror it can read, for example a bare repository on the shared storage. A path or `file://` URL may name a mirror another account owns: the runner fetches from its resolved path, and that fetch alone runs with a global git config of its own whose `safe.directory` names that path and its `.git`, so no system-wide `safe.directory` is needed. |
+| `INFERENCEX_REPO` | no | Where InferenceX is fetched from (default: upstream on GitHub): on the app host by `cache_build`, which fills `tools/InferenceX.git` from it (see `HYPERLOOM_RUNNER_CACHE` above), and in the sandbox by a test whose commit that repository lacks, as a fallback only. When the app host fills the repository, a sandbox without egress needs no mirror; set it on the host, to a mirror the host can read, where the host has no egress. A path or `file://` URL may name a mirror another account owns: the runner fetches from its resolved path, and that fetch alone runs with a global git config of its own whose `safe.directory` names that path and its `.git`, so no system-wide `safe.directory` is needed. |
 | `HYPERLOOM_JIT_CACHE` | no | A read-only directory of compiled kernels shared between tests. Unset: every test builds its kernels cold, which is slower but measures the same. A test that patches aiter's `csrc` or `hsa` is refused without it, because it needs its own JIT directory. |
 | `HYPERLOOM_WEIGHT_PREFETCH` | no | `1` reads the model's checkpoint into the page cache while each server boots, for a model on a network file system. Unset, it is off. With it on, the round that boots the server leaves `weight_prefetch.json` in its run_dir. See [Checkpoint prefetch](../reference/environment-variables.md#checkpoint-prefetch). |
 
@@ -138,8 +138,9 @@ are the archive the manifest records. It copies the wheels there, checking each 
 installs only those copies (`pip --no-index`), then runs the runner from the unpacked source; the scratch directory
 needs room for the unpacked source and the wheels. Nothing the runner or pip runs comes from the cache unchecked.
 The prompt sets a test reads (`<cache>/evalsets/<key>/`) are data, and they are read from the
-cache again after their check. The start-up makes no network access; the runner still fetches InferenceX
-(`INFERENCEX_REPO` above).
+cache again after their check. The start-up makes no network access. Each test then fetches its InferenceX commit from
+`tools/InferenceX.git`, reading only; only a commit that repository lacks is fetched from `INFERENCEX_REPO` (or
+upstream), with a warning.
 
 With the checked step, a sandbox that does not find the entry, finds one that does not match the pin, or has no pin
 fails its start with `runner_start_failed`. An entry built before entries had `source.tar` is refused where it is built:
@@ -283,7 +284,13 @@ interpreter and the InferenceX pin) is the one it built; one that differs is ref
 
 Then `cache_build` fetches the staging's InferenceX commit into `<HYPERLOOM_RUNNER_CACHE>/tools/InferenceX.git`, a bare
 repository it creates when it is missing, from `INFERENCEX_REPO` or upstream; a repository that already holds the commit
-is left as it is. The sandbox reads it, never writes it, so it may be mounted read-only.
+is left as it is. The sandbox reads it, never writes it, so it may be mounted read-only. A fill that fails is logged as
+a warning and the build goes on; the tests then fetch InferenceX from `INFERENCEX_REPO` (or upstream) themselves.
+Builders fill the repository at the same time without a lock of their own: git's `shallow.lock` in the repository lets
+one fetch run at a time, and a builder that finds it held waits and tries again. A build killed while it fetched leaves
+that lock behind; the next fill removes it once it is older than 20 minutes (longer than a fetch may run), so it delays
+a new commit by at most that long and needs no one to remove it. `tools/` is created `2775` in the cache's group, like
+`inference-suite/`.
 
 Every account that runs `cache_build` must be in the cache's group, and the cache root must be setgid in it
 (`chgrp <group> <cache> && chmod 2775 <cache>`); `inference-suite/` is then created `2775` in that group, so builders
