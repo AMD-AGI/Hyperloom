@@ -210,7 +210,7 @@ class RecordingLifecycle:
         self.running[branch] = start_commit
         self.briefs[branch] = task.brief
         self.repairs[branch] = task.repair
-        self.k[branch] = 1
+        self.k[branch] = task.k
 
     async def stop(self, branch: str, *, finish_tests: bool = False) -> None:
         del self.running[branch]

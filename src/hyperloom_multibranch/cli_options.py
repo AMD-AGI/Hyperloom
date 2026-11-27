@@ -45,7 +45,6 @@ from inference_suite.contracts import BaseLaunchError
 PROG = "hyperloom-multibranch"
 MAX_PORT = 65535
 DEFAULT_MAX_BRANCHES = 4
-DEFAULT_MAX_K_PER_BRANCH = 2
 DEFAULT_JUDGE_INTERVAL_SECONDS = 600.0
 ENCODING = "utf-8"
 FILE_METAVAR = "FILE"
@@ -240,7 +239,12 @@ def _add_concurrency_options(run: argparse.ArgumentParser) -> None:
         default=None,
         help="Tests running at once; default as many as the machine's cards, or the grant, run at TP.",
     )
-    run.add_argument("--max-k-per-branch", type=int, default=DEFAULT_MAX_K_PER_BRANCH, help="Highest specialist K.")
+    run.add_argument(
+        "--max-k-per-branch",
+        type=int,
+        default=None,
+        help="Highest specialist K, which a specialist's branch opens at; default --max-parallel-tests.",
+    )
     run.add_argument(
         "--dev-leases",
         type=int,
@@ -664,7 +668,7 @@ def settings_from(
         AgentXObjective(args.agentx_objective or DEFAULT_AGENTX_OBJECTIVE),
         args.boot_budget_sec,
     )
-    caps = RosterCaps(args.max_branches, args.max_k_per_branch, parallel)
+    caps = RosterCaps(args.max_branches, parallel if args.max_k_per_branch is None else args.max_k_per_branch, parallel)
     prompts, agents = args.specialist_prompts or [], args.agents or []
     return RunSettings(
         workload,

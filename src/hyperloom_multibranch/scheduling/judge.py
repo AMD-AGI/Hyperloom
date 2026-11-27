@@ -70,7 +70,6 @@ from hyperloom_multibranch.scheduling.widening import WideningSignals
 logger = logging.getLogger(__name__)
 
 _KEY_OPEN = "open"
-_KEY_OPEN_K = "open_k"
 _KEY_FOCUS = "focus"
 _KEY_BRANCHES = "branches"
 _KEY_STOP = "stop"
@@ -332,15 +331,13 @@ class HeldOrder:
 class JudgeDecision:
     """A non-empty ``session_stop`` is the reason the judge asks for a soft stop of the session.
 
-    ``open_k`` is the K of the branches opened now; a K order cannot name them before they exist. ``focus`` is the op
-    the judge names for each branch opened now, in the order they open; ``""`` and a branch past its end leave the
+    ``focus`` is the op the judge names for each branch opened now, in the order they open; ``""`` and a branch past its end leave the
     branch to the default focus. ``held`` names the branches whose stop or lower K was refused, once each.
     ``unfocused`` is how many of the branches opened now, the first ones, open with no focus for the directions no
     branch has held (:func:`coverage_floor`); ``focus`` is for the branches after them.
     """
 
     open_count: int = 0
-    open_k: int = 1
     unfocused: int = 0
     focus: tuple[str, ...] = ()
     k: tuple[KOrder, ...] = ()
@@ -400,6 +397,8 @@ def _branch_row(entry: BranchEntry, progress: BranchProgress | None, view: Judge
         "from_branch": entry.from_branch,
         "start_commit": entry.start_commit,
         "k": entry.k,
+        "tests_running": view.widening.running_by_branch.get(entry.branch, 0),
+        "tests_queued": view.widening.queued_by_branch.get(entry.branch, 0),
         "similar_to": [asdict(item) for item in view.similar_to.get(entry.branch, ())],
         "queued_intents": [_queued_row(item, view.now) for item in view.queued.get(entry.branch, ())],
         "waiting_builds": [_build_row(build) for build in view.building.get(entry.branch, ())],
@@ -470,7 +469,8 @@ def render_prompt(view: JudgeView) -> str:
         "explore_remaining_seconds": round(view.explore_remaining_seconds),
         "min_useful_seconds": round(view.widening.min_useful_seconds),
         "cold_start": _cold_start(view.widening),
-        "toolbox_headroom": view.widening.toolbox_headroom,
+        "idle_test_slots": view.widening.idle_test_slots,
+        "queued_tests": view.widening.queued_tests,
         "undealt_directions": list(view.undealt),
         "pending": [_pending_row(pending, view.now) for pending in view.pending],
         "session_remaining_seconds": round(view.session_remaining_seconds),
@@ -555,7 +555,6 @@ def parse_decision(reply: str) -> JudgeDecision | None:
     try:
         return JudgeDecision(
             open_count=_int_field(payload, _KEY_OPEN),
-            open_k=_int_field(payload, _KEY_OPEN_K) if _KEY_OPEN_K in payload else 1,
             focus=_focus(payload),
             k=tuple(
                 KOrder(_str_field(item, _KEY_BRANCH), _int_field(item, "k"))
@@ -610,7 +609,6 @@ def cap_decision(decision: JudgeDecision, view: JudgeView) -> JudgeDecision:
     opened = min(max(decision.open_count, floor, unfocused), view.caps.max_branches)
     return JudgeDecision(
         open_count=opened,
-        open_k=view.caps.clamp_k(decision.open_k, BranchKind.SPECIALIST),
         unfocused=unfocused,
         focus=decision.focus[: opened - unfocused],
         k=tuple(ks.values()),

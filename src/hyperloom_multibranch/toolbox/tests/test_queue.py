@@ -243,6 +243,19 @@ def test_the_queue_state_counts_by_priority_branch_and_running() -> None:
     assert dict(state.running_by_branch) == {"b1": 1} and dict(state.queued_by_branch) == {"b1": 1}
 
 
+@pytest.mark.parametrize(("parallel_limit", "limit"), [(None, 3), (5, 3), (2, 2)])
+def test_the_queue_state_reports_the_running_limit_the_queue_starts_tests_under(
+    parallel_limit: int | None, limit: int
+) -> None:
+    queue = _queue(per_branch_k=9, global_concurrency=3)
+    for name in "abcd":
+        queue.push(_item(name))
+    while queue.take(parallel_limit) is not None:
+        pass
+    state = queue.state(parallel_limit)
+    assert state.running == state.running_limit == limit
+
+
 def test_a_new_policy_reprioritises_only_queued_tests_without_an_explicit_priority() -> None:
     queue = _queue()
     queue.push(_item("default"))

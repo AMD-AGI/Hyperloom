@@ -197,6 +197,21 @@ async def test_a_started_branch_runs_its_specialist_with_the_k_it_is_given(sessi
         await runtime.set_k(BRANCH, 2)
 
 
+async def test_a_branch_starts_at_the_k_of_its_task_with_no_notice(session):
+    runs = _Runs()
+    runtime = session.runtime(runs)
+
+    await runtime.start(BRANCH, await session.repo.head(BRANCH), BranchTask(k=4))
+    await _until(lambda: _true(runs.started), "the specialist to start")
+
+    (run,) = runs.started
+    assert run.k == 4
+    assert not [
+        record for record in await session.reader.branch_log(BRANCH) if "tests running at once" in record.entry.content
+    ]
+    await runtime.stop(BRANCH)
+
+
 async def test_a_crashed_specialist_is_restarted_with_its_task_and_a_notice_each_time(session):
     runs = _Runs(crashes=2)
     runtime = session.runtime(runs)

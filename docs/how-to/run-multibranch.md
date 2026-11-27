@@ -191,8 +191,9 @@ host has no token. The session logs one WARNING when its toolbox is built. Every
   gives a launch file.
 - **Limits:** `--max-hours` (default 2, 0 for none), `--max-gpu-hours` and `--max-llm-usd` (0 for none),
   `--max-branches` (default 4). A negative or non-finite limit is a usage error.
-- **Concurrency:** `--max-parallel-tests` (default: as many as fit at TP), `--max-k-per-branch` (default 2; a
-  specialist's branch only, the integration branch's K is bounded by `--max-parallel-tests`),
+- **Concurrency:** `--max-parallel-tests` (default: as many as fit at TP), `--max-k-per-branch` (default:
+  `--max-parallel-tests`; the tests a specialist's branch runs at once when it opens, which the judge then lowers and
+  raises branch by branch; the integration branch's K is bounded by `--max-parallel-tests`),
   `--dev-leases`, `--judge-interval-sec` (default 600, must be positive), `--measurement local|hosted`.
 - **Concurrency sweep:** `--[no-]enable-conc-sweep` (on by default), `--conc-sweep-concs C1,C2,...` and
   `--conc-sweep-parallel N` (see [Concurrency sweep after CLOSE](#concurrency-sweep-after-close)).

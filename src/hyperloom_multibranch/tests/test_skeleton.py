@@ -339,7 +339,7 @@ def _reply(document: dict[str, object]) -> str:
 
 AUTHOR_MODEL = "author-model"
 RESOLVER_MODEL = "resolver-model"
-OPENING = _reply({"open": 2, "open_k": 9, "branches": [{"branch": INTEGRATION_BRANCH, "k": 2}], "stop": []})
+OPENING = _reply({"open": 2, "branches": [{"branch": INTEGRATION_BRANCH, "k": 2}], "stop": []})
 STEER = _reply({"open": 0, "branches": [{"branch": "b01", "k": 7}], "stop": [{"branch": "b02", "reason": STOP_REASON}]})
 
 
@@ -1901,7 +1901,7 @@ async def test_a_soft_stop_on_the_opening_call_opens_no_branch(tmp_path: Path) -
     assert stage.sessions.started == {} and outcome.final is not None
 
 
-async def test_a_failed_opening_judge_call_opens_one_branch_at_k_one(tmp_path: Path) -> None:
+async def test_a_failed_opening_judge_call_opens_one_branch(tmp_path: Path) -> None:
     stage = _stage(tmp_path)
     stage.judge = ScriptedCompletion(error=CompletionFailed("judge call failed: RuntimeError: status=529"))
 
@@ -1909,7 +1909,7 @@ async def test_a_failed_opening_judge_call_opens_one_branch_at_k_one(tmp_path: P
 
     assert (outcome.stop_reason, outcome.error) == (SessionStopReason.TIME_EXHAUSTED, "")
     assert stage.sessions.started == {"b01": await stage.root()}
-    assert stage.sessions.k == {"b01": 1}
+    assert stage.sessions.k == {"b01": SETTINGS.caps.max_k_per_branch}
     failed = [row["reason"] for row in _decisions(stage) if row["kind"] == "judge_failed"]
     assert failed and set(failed) == {"kept the status quo"}
     assert not [

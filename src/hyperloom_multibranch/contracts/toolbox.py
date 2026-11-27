@@ -157,6 +157,8 @@ class QueueState:
     ``pending_build_by_branch`` counts each branch's tests that wait for native builds; they hold no card and are in
     neither ``queued`` nor ``running``, but they count against the branch's K for backpressure. ``builds`` is the
     session's ledger of the builds this toolbox ran: queued, building and done, each with its ``build_seconds``.
+    ``running_limit`` is how many tests the queue lets run at once now: its global concurrency, lowered to what the
+    cards and sandboxes the leases leave run; 0 from a toolbox that reports no queue.
     """
 
     queued_by_priority: Mapping[int, int] = field(default_factory=lambda: dict.fromkeys(_PRIORITIES, 0))
@@ -165,6 +167,7 @@ class QueueState:
     cold_start_seconds: float | None = None
     pending_build_by_branch: Mapping[str, int] = field(default_factory=dict)
     builds: tuple[BuildStatus, ...] = ()
+    running_limit: int = 0
 
     @property
     def queued(self) -> int:

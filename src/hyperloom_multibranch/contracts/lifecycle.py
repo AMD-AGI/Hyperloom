@@ -53,6 +53,8 @@ class BranchTask:
     #: For a mapping branch, the component agents its map is split among: it runs the first one's dossier pass, and
     #: each share runs on a branch of its own. Empty for every other branch.
     map_for: tuple[str, ...] = ()
+    #: How many tests the branch may have running at once from its start, until ``set_k`` says otherwise.
+    k: int = 1
 
 
 class SpecialistLifecycle(Protocol):
@@ -68,7 +70,7 @@ class SpecialistLifecycle(Protocol):
     the runtime would deal it. Its ``agent`` names the third-party agent an autonomous branch runs, a git URL
     (``URL@ref`` for a ref) or a local path, and is empty for a specialist branch. Its ``deadline`` is the clock time (``time.time``) EXPLORE ends at, 0 when the branch has none:
     an agent that signals no keep has its workspace collected ahead of it. A started branch may
-    have one test running until ``set_k`` says otherwise, and shrinking a branch to nothing is ``stop``, not
+    have its task's ``k`` tests running until ``set_k`` says otherwise, and shrinking a branch to nothing is ``stop``, not
     ``set_k(branch, 0)``. Every process the runtime starts goes through the session's process registry, so the session
     stop kills it even when ``stop`` hangs.
     """

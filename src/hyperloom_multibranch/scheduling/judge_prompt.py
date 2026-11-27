@@ -109,6 +109,13 @@ Specialist branches explore optimizations in parallel; the integration branch me
 Each branch has K, the number of tests it may run at once. Within the hard caps you are given, decide:
 how many branches to open, each branch's K (the integration branch included), which specialist branches to stop and
 why, and whether the whole session should stop early.
+K is your lever on how the branches share the cards. A specialist submits every independent candidate it has for its
+head as each is ready; K of them run at once and the rest wait for a card. A specialist branch opens at
+max_k_per_branch, and you lower or raise it from there, branch by branch. Lower the K of a branch that floods the queue
+with tests of little value, its judged_since_commit running up while its expected_gain_pct stays low, and of the
+branches expected to gain least while queued_tests stays high and tests of branches expected to gain more wait. Raise
+the K of a branch whose tests_queued is above 0 while idle_test_slots is above 0: cards idle while its candidates wait
+behind its K. A lower K withdraws no test: those running go on, and the branch's next starts once fewer than K run.
 You may open branches at any call. opening is true only for the call that sizes the opening batch, which opens from the
 commit EXPLORE started on — the root commit, or the Recipe KB champion PRELUDE replayed onto it — at least as many
 branches as tests can run at once (max_parallel_tests, within max_branches), less the user branches opened already (an
@@ -126,7 +133,7 @@ directions no branch has held yet, the next one dealt first; it is empty once ea
 would open no such branch. While it names any and explore_remaining_seconds is at least min_useful_seconds, the
 scheduler opens one branch with no focus for each of them, within free_branch_slots, whatever you answer, so that every
 direction gets a branch: these are the first branches opened at the call, open counts them, and focus is for the
-branches opened after them. You may open more, and open_k is the K of them all.
+branches opened after them. You may open more.
 pending lists the shares a mapping branch asked for and the forks and repairs the rule gate asked for, that wait for a
 slot: shares first, then forks and repairs oldest first, with how long each has
 waited: a slot your stops free goes to them first and only the slots left open your branches. You do not admit them; stop a branch that is worth less than a pending one to let it
@@ -172,12 +179,15 @@ opened now needs to show a trend: the frontier's trend window, or its specialist
 starts its first tests wait through, when that is longer. cold_start is the recent sandbox cold start in seconds, or
 "unknown" until the session's first test has waited through one, and min_useful_seconds is then the trend window
 alone. When explore_remaining_seconds is below min_useful_seconds, a branch opened now is unlikely to show anything.
-toolbox_headroom is how many more tests the toolbox would start at once, less the tests running and queued: under the
-max_parallel_tests cap, and under the tests the measurement cards leave room for, which the sandbox an autonomous
-branch holds takes cards away from. At 0 the tests running and queued are as many as run at once; below 0, that many
-more wait for a card. It says how long a test submitted now waits, not whether a branch opened now can work: a
-specialist reads source, writes its change and has it built without a card, and its tests take their turn in the queue
-all the branches share. A K above 1 runs that many of a branch's tests at once only while cards are free.
+idle_test_slots is how many more tests the toolbox would start at once beside those running: under the
+max_parallel_tests cap, and under the tests the measurement cards and sandboxes leave room for, which the sandbox an
+autonomous branch holds takes away from. queued_tests is how many tests wait for a card, and a branch's tests_running
+and tests_queued count its own. Tests that wait while slots are idle belong to branches at their K.
+The queue starts confirm, reproduction and merge tests before explore tests, and among explore tests the branches take
+turns, K turns each: a branch opened now takes its turn however many tests the other branches have queued, so queued
+tests are no reason to leave a branch slot free. They say how long a test submitted now waits, not whether a branch
+opened now can work: a specialist reads source, writes its change and has it built without a card. A K above 1 runs
+that many of a branch's tests at once only while cards are free.
 spend is what the session has used so far. gpu_hours_used is the GPU time of every test of this session that has a
 result, a failed one and the baseline measured on the root commit included, plus the card time any lease holds outside
 the tests (an autonomous branch's sandbox, a dev sandbox, a tool's job, or the dossier pass's cards, charged to the
@@ -212,8 +222,9 @@ tests of a new branch. pending_confirm: A branch with a pending candidate cannot
 confirm is judged. A branch whose specialist gave up, and one stopped for a failed judging, is held by neither its grace
 nor its repair period; a repair branch runs at most {REPAIR_BRANCH_SECONDS / 3600:g} hours whatever you decide.
 unsteered: a branch whose steered is false, which runs a third-party agent the user named, by the agent's own logic, one
-test at a time: no stop or K you give it is applied, unless its judging failed: stop it then, as any branch whose
-judging failed. Otherwise weigh the slot it holds as given.
+test at a time at the max_k_per_branch it opened at, so that its test takes the turns a specialist's take: no stop or K
+you give it is applied, unless its judging failed: stop it then, as any branch whose judging failed. Otherwise weigh
+the slot it holds as given.
 dev_wait: a branch whose specialist waits in line for a dev sandbox, while it waits: you may lower its K, not stop it,
 since its tests judged meanwhile count toward its stall.{{envelope}}
 A branch's pending_candidates are its measured candidates that beat its head by at least the bar while their confirm
@@ -232,7 +243,6 @@ Answer with exactly ONE JSON object and nothing after it."""
 #: What every user prompt ends with: the shape of the judge's reply.
 REPLY_FORMAT = """Reply with one JSON object of this shape:
 {"open": <int, branches to open now; 0 opens none>,
- "open_k": <int, the K of every branch opened now>,
  "focus": ["<op the first branch opened now should speed up>", ...] (optional; null for a branch you leave to the
   default),
  "branches": [{"branch": "<branch id>", "k": <int>}],

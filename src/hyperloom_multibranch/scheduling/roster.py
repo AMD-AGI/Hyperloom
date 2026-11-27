@@ -25,9 +25,9 @@ from hyperloom_multibranch.contracts.blackboard.vocab import GAVE_UP_CAUSE, Bran
 from hyperloom_multibranch.scheduling.clock import Clock
 from hyperloom_multibranch.toolbox.queue import QueuePolicy
 
-#: Names how :meth:`Roster.quota_policy` hands out K and what a K gives a branch in the toolbox's queue; recorded in the
-#: manifest fingerprint.
-QUOTA_POLICY_VERSION = "quota-6"
+#: Names how K is handed out, the K a branch opens at and what a K gives a branch in the toolbox's queue; recorded in
+#: the manifest fingerprint.
+QUOTA_POLICY_VERSION = "quota-7"
 
 
 class BranchKind(str, Enum):

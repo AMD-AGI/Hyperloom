@@ -66,6 +66,7 @@ from hyperloom_multibranch.scheduling.judge_prompt import (
     JUDGE_SYSTEM_PROMPT,
     PLAYBOOK_JUDGE_PROMPT,
     PLAYBOOK_JUDGE_PROMPT_VERSION,
+    REPLY_FORMAT,
 )
 from hyperloom_multibranch.scheduling.forks import PendingBranch
 from hyperloom_multibranch.contracts.llm import CompletionFailed, CompletionReply
@@ -119,7 +120,14 @@ OPENING_ROSTER = (_entry(INTEGRATION_BRANCH, kind=BranchKind.INTEGRATION),)
 CAPS = RosterCaps(max_branches=4, max_k_per_branch=2, max_parallel_tests=8)
 #: A session whose cards hold two tests at once, and one whose cards hold one.
 TWO_TESTS, ONE_TEST = replace(CAPS, max_parallel_tests=2), replace(CAPS, max_parallel_tests=1)
-WIDENING = WideningSignals(min_useful_seconds=1350.0, cold_start_seconds=90.0, toolbox_headroom=3)
+WIDENING = WideningSignals(
+    min_useful_seconds=1350.0,
+    cold_start_seconds=90.0,
+    idle_test_slots=3,
+    queued_tests=4,
+    running_by_branch={"b01": 1},
+    queued_by_branch={"b01": 4},
+)
 
 
 def _view(
@@ -568,9 +576,31 @@ def _state(view: JudgeView) -> dict[str, object]:
 def test_prompt_shows_and_explains_whether_a_branch_opened_now_would_pay_off() -> None:
     state = _state(_view())
 
-    assert (state["min_useful_seconds"], state["cold_start"], state["toolbox_headroom"]) == (1350, 90, 3)
-    for field in ("min_useful_seconds", "cold_start", "toolbox_headroom"):
+    assert (state["min_useful_seconds"], state["cold_start"]) == (1350, 90)
+    for field in ("min_useful_seconds", "cold_start"):
         assert field in JUDGE_SYSTEM_PROMPT
+
+
+def test_prompt_shows_idle_slots_apart_from_queued_tests_and_each_branchs_own() -> None:
+    state = _state(_view())
+    rows = {row["branch"]: row for row in state["branches"]}
+
+    assert (state["idle_test_slots"], state["queued_tests"]) == (3, 4)
+    assert (rows["b01"]["tests_running"], rows["b01"]["tests_queued"]) == (1, 4)
+    assert (rows["b02"]["tests_running"], rows["b02"]["tests_queued"]) == (0, 0)
+    for field in ("idle_test_slots", "queued_tests", "tests_running", "tests_queued"):
+        assert field in JUDGE_SYSTEM_PROMPT and field in PLAYBOOK_JUDGE_PROMPT
+
+
+@pytest.mark.parametrize("system", [JUDGE_SYSTEM_PROMPT, PLAYBOOK_JUDGE_PROMPT])
+def test_prompt_names_k_as_the_judges_lever_and_when_to_raise_or_lower_a_branchs(system: str) -> None:
+    prose = " ".join(system.split())
+
+    assert "K is your lever on how the branches share the cards" in prose
+    assert "A specialist branch opens at max_k_per_branch, and you lower or raise it from there" in prose
+    assert "Raise the K of a branch whose tests_queued is above 0 while idle_test_slots is above 0" in prose
+    assert "Lower the K of a branch that floods the queue with tests of little value" in prose
+    assert "open_k" not in system and "open_k" not in REPLY_FORMAT
 
 
 def test_prompt_says_the_cold_start_is_unknown_before_the_first_one() -> None:
@@ -652,7 +682,7 @@ def test_parse_reads_the_last_decision_object() -> None:
                 "stop": [{"branch": "b02", "reason": STOP_REASON}],
                 "stop_session": None,
             },
-            JudgeDecision(open_count=1, open_k=2, k=(KOrder("b01", 2),), stop=(StopOrder("b02", STOP_REASON),)),
+            JudgeDecision(open_count=1, k=(KOrder("b01", 2),), stop=(StopOrder("b02", STOP_REASON),)),
         ),
         ({"open": 0}, JudgeDecision()),
     ],
@@ -910,17 +940,6 @@ async def test_an_unexpected_error_is_not_swallowed(tmp_path: Path) -> None:
 
     with pytest.raises(KeyError):
         await Judge(completion, tmp_path / "MB-judge.jsonl", Clock(now=lambda: NOW)).decide(_view())
-
-
-def test_the_opening_k_is_read_and_clamped() -> None:
-    view = _view(opening=True, roster=OPENING_ROSTER, free_slots=4)
-
-    parsed = parse_decision(_reply({"open": 2, "open_k": 9}))
-
-    assert parsed is not None and parsed.open_k == 9
-    assert cap_decision(parsed, view).open_k == 2
-    assert parse_decision(_reply({"open": 2})) == JudgeDecision(open_count=2)
-    assert parse_decision(_reply({"open": 2, "open_k": "two"})) is None
 
 
 USER_ROSTER = (

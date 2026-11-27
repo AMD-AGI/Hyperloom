@@ -155,7 +155,7 @@ class PlaybookJudge(ScriptedCompletion):
         self.calls.append((system, user))
         state = _judge_state(user)
         if state["opening"]:
-            return self._answer({"open": self.opening, "open_k": 2, "branches": [], "stop": []})
+            return self._answer({"open": self.opening, "branches": [], "stop": []})
         stops = [
             {"branch": row["branch"], "reason": STALLED if _candidate(row) else INSISTED}
             for row in state["branches"]
@@ -163,7 +163,7 @@ class PlaybookJudge(ScriptedCompletion):
             and "stopped" not in row
             and (_candidate(row) or row["branch"] in self.insist)
         ]
-        refill = {"open": self.refill, "open_k": 2, "focus": list(self.focus), "branches": [], "stop": stops}
+        refill = {"open": self.refill, "focus": list(self.focus), "branches": [], "stop": stops}
         return self._answer(refill)
 
     def _answer(self, document: dict[str, object]) -> CompletionReply:

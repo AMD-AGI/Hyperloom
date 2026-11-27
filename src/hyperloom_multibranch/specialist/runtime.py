@@ -260,7 +260,7 @@ class SpecialistRuntime:
             task = replace(task, direction=self._least_held(await self._open_on(start_commit)))
         if task.direction in self._directions:
             self._held[task.direction] += 1
-        state = _Branch(branch, start_commit, task, self._blackboard_for(branch))
+        state = _Branch(branch, start_commit, task, self._blackboard_for(branch), k=task.k)
         self._branches[branch] = state
         state.judge = BranchJudge(branch, state.blackboard, self._judging)
         state.tasks = [
