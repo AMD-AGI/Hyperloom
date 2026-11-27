@@ -438,8 +438,6 @@ omit = [
     "src/hyperloom/orchestrator/actions/executors/_subprocess_kill.py",
     "src/hyperloom/orchestrator/actions/executors/serving/_multi_node_server_lifecycle.py",
     "src/hyperloom/orchestrator/actions/executors/_multi_node_env.py",
-    # Breakdown LLM HTTP client.
-    "src/hyperloom/inference_optimizer/breakdown/reporters/llm_client.py",
     # Kernel tools that need real traces or a live framework install.
     "src/hyperloom/orchestrator/trace_analysis/tracelens_analysis.py",
     "src/hyperloom/orchestrator/trace_analysis/tracelens_skill_runner.py",
@@ -465,7 +463,7 @@ omit = [
     # TraceLens server patcher (git apply / patch --fuzz subprocess pipeline).
     "src/hyperloom/orchestrator/actions/executors/_server_patcher.py",
     "src/hyperloom/orchestrator/actions/executors/patching/_patch_laying.py",
-    # Breakdown collectors — exercised end-to-end by the reporter tests.
+    # Breakdown collectors — exercised end-to-end by the breakdown export tests.
     "src/hyperloom/inference_optimizer/breakdown/collectors/*",
     # Operator CLIs, not library code.
     "src/hyperloom/inference_optimizer/tools/*",

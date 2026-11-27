@@ -1222,48 +1222,6 @@ def test_amd_gpu_type_resolves_explicit_then_env_then_probe_and_rejects_unknown_
     assert gpu_types._resolve_amd_gpu_type() is None
 
 
-# Tests for breakdown.reporters
-
-
-def test_roofline_and_workload_render_minimal_inputs() -> None:
-    from hyperloom.inference_optimizer.breakdown.reporters._renderers import roofline, workload
-
-    roof = roofline.render(
-        {
-            "timeline": [
-                {
-                    "type": "roofline",
-                    "ext": {
-                        "actions": [
-                            {"outcome": {"snapshot": {"snapshot_id": 1, "top_kernel": {"name": "k1", "gpu_pct": 12.3}}}}
-                        ]
-                    },
-                }
-            ]
-        }
-    )
-    assert not roof.skipped
-    assert "k1" in roof.markdown_block
-
-    wk = workload.render({"metadata": {"task_config": {"model_name": "m", "framework_name": "sglang"}}})
-    assert not wk.skipped
-    assert "sglang" in wk.markdown_block
-
-
-def test_llm_prompt_parse_response_edges() -> None:
-    from hyperloom.inference_optimizer.breakdown.reporters.llm_prompt import parse_llm_response
-
-    fenced = """```json
-{"executive_summary": "  ok  ", "section_narratives": {"a": "  first  ", "2": "two"}}
-```"""
-    parsed = parse_llm_response(fenced)
-    assert parsed["executive_summary"] == "ok"
-    assert parsed["section_narratives"] == {"a": "first", "2": "two"}
-
-    assert parse_llm_response("not json") == {"executive_summary": "", "section_narratives": {}}
-    assert parse_llm_response("[]") == {"executive_summary": "", "section_narratives": {}}
-
-
 # orchestrator.specialists.profile
 
 
