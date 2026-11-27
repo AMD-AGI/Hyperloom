@@ -27,4 +27,3 @@ def test_active_image_from_environment() -> None:
 def test_active_image_refuses_missing_or_fake(env: dict[str, str], message: str) -> None:
     with pytest.raises(ImagePinError, match=message):
         active_image(env)
-

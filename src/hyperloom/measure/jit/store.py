@@ -39,8 +39,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from hyperloom_common.io import fsync_directory
 from hyperloom.measure import fsafe
-from hyperloom.measure.archive import fsync_dir
 from hyperloom.measure.docs import SHA256_RE, DocumentError, Reader, canonical_json, parse_json_object, relative_path
 from hyperloom.measure.jit.locations import MAX_LOCATED_BYTES, NotPortable, localised
 from hyperloom.measure.jit_kinds import KINDS, CacheKind, kind_named
@@ -395,7 +395,7 @@ class DirJitStore:
         except OSError:
             if not final.is_file():  # another publisher stored the same hash first: its bytes are these
                 raise
-        fsync_dir(final.parent)
+        fsync_directory(final.parent)
 
     def _store_snapshot(self, snapshot: Snapshot, name: str) -> bool:
         directory = self._root / SNAPSHOTS_DIR / snapshot.kind / snapshot.key
@@ -413,7 +413,7 @@ class DirJitStore:
             os.rename(pending, final)
         finally:
             pending.unlink(missing_ok=True)
-        fsync_dir(directory)
+        fsync_directory(directory)
         return False
 
 

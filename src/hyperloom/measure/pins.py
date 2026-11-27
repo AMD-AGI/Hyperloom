@@ -56,4 +56,3 @@ def active_image(env: Mapping[str, str] | None = None) -> ActiveImage:
     if missing:
         raise ImagePinError(f"cannot name the active image: {', '.join(missing)} not set")
     return _image(env[IMAGE_REF_VAR], env[IMAGE_DIGEST_VAR])
-

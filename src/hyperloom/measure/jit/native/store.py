@@ -30,8 +30,8 @@ import uuid
 from collections.abc import Iterator
 from pathlib import Path
 
+from hyperloom_common.io import fsync_directory
 from hyperloom.measure import fsafe
-from hyperloom.measure.archive import fsync_dir
 from hyperloom.measure.docs import DocumentError
 from hyperloom.measure.jit.native.key import BuildInputs
 from hyperloom.measure.jit.native.record import EXECUTABLE, LOG_NAME, READY, RECORD_FILES, BuildRecord
@@ -204,12 +204,12 @@ class BuildStore:
             _write(pending / LOG_NAME, log.encode("utf-8", errors="replace")[-MAX_LOG_BYTES:])
             _write(pending / signature_name, signer.sign(raw))
             _write(pending / record_name, raw)
-            fsync_dir(pending)
+            fsync_directory(pending)
             os.rename(pending, final)
         except BaseException:
             shutil.rmtree(pending, ignore_errors=True)
             raise
-        fsync_dir(final.parent)
+        fsync_directory(final.parent)
 
 
 def _write(path: Path, data: bytes) -> None:

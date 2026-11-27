@@ -12,14 +12,22 @@ import pytest
 
 from hyperloom.measure.compile import PatchApplyError
 from hyperloom.measure.runner.native import builder as builder_module
-from hyperloom.measure.runner.native.builder import BuildRequest, compile_tree, plan, tree_dir
+from hyperloom.measure.runner.native.builder import BuildRequest, plan, tree_dir
 from hyperloom.measure.jit.native.record import FAILED, LOG_NAME, READY, RECORD_FILES
 from hyperloom.measure.jit.native.store import BuildInfraError
 from hyperloom.measure.runner.native.isolated import IsolatedBuilds, Isolation
 from hyperloom.measure.runner.native.planning import Planned
 from hyperloom.measure.runner.native.recipes import CommitSource
 from hyperloom.measure.runner.native.tests import _native as native_bench
-from hyperloom.measure.runner.native.tests._native import COMPONENT, KERNEL, OUTPUT, Bench, compiled, stepped_recipe
+from hyperloom.measure.runner.native.tests._native import (
+    COMPONENT,
+    KERNEL,
+    OUTPUT,
+    Bench,
+    compile_tree,
+    compiled,
+    stepped_recipe,
+)
 
 PATCHED = "int kernel(void) { return 2; }\n"
 

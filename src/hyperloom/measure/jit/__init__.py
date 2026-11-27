@@ -4,5 +4,5 @@
 """The shared compiled-code cache: keys, store, build log, per-test session, notes and host publishing.
 
 The kinds of cache are ``hyperloom.measure.jit_kinds``, outside this package: the signed result manifest names their
-states, and the store reaches the manifest through ``hyperloom.measure.archive``, so the kinds must not sit above it.
+states, so the kinds must not sit above it.
 """
