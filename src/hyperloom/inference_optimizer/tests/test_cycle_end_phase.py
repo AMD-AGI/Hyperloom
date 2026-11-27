@@ -27,17 +27,15 @@ from hyperloom.orchestrator.state.shared_state import SharedState
 from .conftest import seed_kernel_keep
 
 
-@pytest.mark.asyncio
-async def test_drain_pending_keep_integrates_records_result_once(
-    tmp_path: Path,
-    monkeypatch,
-):
-    """CYCLE_END entry drain must record integrate results so the same KEEP is not retried until cap."""
+def _coordinator_with_a_pending_keep(tmp_path: Path, monkeypatch) -> tuple[Coordinator, list[str]]:
+    """A coordinator whose queue holds the KEEP ``k004``, and the kernel ids its stubbed integrate handler is asked for."""
     c = Coordinator.__new__(Coordinator)
     c.session_dir = tmp_path
+    c.backends = {}
     c.shared_state = SharedState(
         baseline_tput=100.0,
         current_best={"action": "baseline", "tput": 100.0},
+        macro_cycle=1,
     )
     seed_kernel_keep(c.shared_state, "k004", micro=4.21, source_file="/tmp/kernel.cu", artifact="/tmp/optimized.cu")
     calls: list[str] = []
@@ -64,6 +62,16 @@ async def test_drain_pending_keep_integrates_records_result_once(
         _fake_integrate_handler,
     )
     c.phase_kernel.maybe_enqueue_watermark_roofline = _noop_roofline
+    return c, calls
+
+
+@pytest.mark.asyncio
+async def test_drain_pending_keep_integrates_records_result_once(
+    tmp_path: Path,
+    monkeypatch,
+):
+    """CYCLE_END entry drain must record integrate results so the same KEEP is not retried until cap."""
+    c, calls = _coordinator_with_a_pending_keep(tmp_path, monkeypatch)
 
     await c.phase_kernel_stack.drain_pending_keep_integrates()
 
@@ -72,6 +80,21 @@ async def test_drain_pending_keep_integrates_records_result_once(
     assert kd.pending_keep_kernel_ids(c.shared_state) == []
     assert c.shared_state.current_best["action"] == "integrate"
     assert c.shared_state.current_best["variant_name"] == "k004"
+
+
+@pytest.mark.asyncio
+async def test_cycle_end_entry_integrates_the_pending_keep_and_settles_the_cycle(tmp_path: Path, monkeypatch):
+    """CYCLE_END entry lands the KEEP the KERNEL phase left queued, then records the cycle as settled."""
+    c, calls = _coordinator_with_a_pending_keep(tmp_path, monkeypatch)
+
+    await c.phase_cycle_end.on_enter_cycle_end(
+        Transition(from_phase="KERNEL_AGENT", to_phase="CYCLE_END", reason="test", evidence={})
+    )
+
+    assert calls == ["k004"]
+    assert c.shared_state.current_best["variant_name"] == "k004"
+    assert kd.pending_keep_kernel_ids(c.shared_state) == []
+    assert c.shared_state.cycle_end_settled_cycle == 1
 
 
 def test_pending_keep_kernel_ids_prioritize_trace_impact_over_micro():
@@ -156,53 +179,6 @@ async def test_drain_uses_current_best_tput_not_baseline(
     assert len(captured_payloads) == 1
     # use current_best.tput (110.0), not baseline (100.0)
     assert captured_payloads[0]["base_tput"] == 110.0
-
-
-@pytest.mark.asyncio
-async def test_cycle_end_entry_integrates_the_pending_keep_and_settles_the_cycle(tmp_path: Path, monkeypatch):
-    """CYCLE_END entry lands the KEEP the KERNEL phase left queued, then records the cycle as settled."""
-    c = Coordinator.__new__(Coordinator)
-    c.session_dir = tmp_path
-    c.backends = {}
-    c.shared_state = SharedState(
-        baseline_tput=100.0,
-        current_best={"action": "baseline", "tput": 100.0},
-        macro_cycle=1,
-    )
-    seed_kernel_keep(c.shared_state, "k004", micro=4.21, source_file="/tmp/kernel.cu", artifact="/tmp/optimized.cu")
-    calls: list[str] = []
-
-    async def _fake_integrate_handler(payload, *, session_dir):
-        calls.append(payload["kernel_id"])
-        return {
-            "status": "ok",
-            "decision": "KEEP",
-            "kernel_id": payload["kernel_id"],
-            "patch_path": "/tmp/optimized.cu",
-            "target_file": "/tmp/kernel.cu",
-            "base_tput": 100.0,
-            "new_tput": 102.0,
-            "gain_pct": 2.0,
-            "workspace": str(tmp_path / "integrate-k004"),
-        }
-
-    async def _noop_roofline(*, reason: str):
-        return None
-
-    monkeypatch.setattr(
-        "hyperloom.orchestrator.kernel.request_handlers.integrate_handler",
-        _fake_integrate_handler,
-    )
-    c.phase_kernel.maybe_enqueue_watermark_roofline = _noop_roofline
-
-    await c.phase_cycle_end.on_enter_cycle_end(
-        Transition(from_phase="KERNEL_AGENT", to_phase="CYCLE_END", reason="test", evidence={})
-    )
-
-    assert calls == ["k004"]
-    assert c.shared_state.current_best["variant_name"] == "k004"
-    assert kd.pending_keep_kernel_ids(c.shared_state) == []
-    assert c.shared_state.cycle_end_settled_cycle == 1
 
 
 # End-to-end via the real phase machine
