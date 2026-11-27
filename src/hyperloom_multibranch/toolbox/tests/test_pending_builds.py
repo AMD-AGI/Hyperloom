@@ -285,6 +285,51 @@ async def test_a_test_without_builds_is_admitted_while_no_test_of_its_kind_has_f
     assert box.results[request_id].validity is Validity.SUCCEEDED
 
 
+async def _queued_behind_a_running_test(seconds_to_deadline: float) -> tuple[FakeToolbox, MemoryBlackboard, str]:
+    """A test of b1 admitted with its deadline ``seconds_to_deadline`` away, queued behind a test of b2 that holds the
+    only card; a test takes 1800 s."""
+    box, _, blackboard = _rig(autorun=False, attempt_seconds=1800.0, max_parallel_tests=1)
+    box.executor.gate.set()
+    await box.submit_test(_request(branch="b2"))
+    await box.drain()
+    box.executor.gate.clear()
+    await box.submit_test(_request(branch="b2"))
+    await box.set_policy(_deadline(box, seconds_to_deadline))
+    request_id = await box.submit_test(_request())
+    assert (await box.progress(request_id)).state == "queued"  # type: ignore[union-attr]
+    return box, blackboard, request_id
+
+
+def _withdrawals(blackboard: MemoryBlackboard) -> dict[str, str]:
+    return {item.request_id: item.reason for kind, item in blackboard.log if kind == "withdrawal"}  # type: ignore[union-attr]
+
+
+async def test_a_test_queued_until_it_would_end_past_the_deadline_is_withdrawn_unstarted_and_the_next_runs() -> None:
+    box, blackboard, request_id = await _queued_behind_a_running_test(1900)
+    behind = await box.submit_test(_request(branch="b3"))
+    box.executor.gate.set()
+    await box.drain()
+    assert _withdrawals(blackboard)[request_id].startswith(f"{TEST_AFTER_DEADLINE}: one test (1800 s)")
+    assert request_id not in box.results
+    assert box.results[behind].validity is Validity.SUCCEEDED and box.now == START + 3 * 1800
+
+
+async def test_a_queued_test_whose_deadline_comes_forward_is_withdrawn_unstarted_when_it_no_longer_fits() -> None:
+    box, blackboard, request_id = await _queued_behind_a_running_test(10_000)
+    await box.set_policy(_deadline(box, 3000))
+    box.executor.gate.set()
+    await box.drain()
+    assert _withdrawals(blackboard)[request_id].startswith(TEST_AFTER_DEADLINE)
+    assert request_id not in box.results and box.now == START + 2 * 1800
+
+
+async def test_a_queued_test_that_still_fits_when_its_turn_comes_starts() -> None:
+    box, blackboard, request_id = await _queued_behind_a_running_test(3700)
+    box.executor.gate.set()
+    await box.drain()
+    assert box.results[request_id].validity is Validity.SUCCEEDED and _withdrawals(blackboard) == {}
+
+
 # --- a restart while a test waits for its build ------------------------------------------------------------------------
 
 

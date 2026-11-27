@@ -59,7 +59,8 @@ class QueuePolicy:
     ``branch_deadline`` is the Unix time (the toolbox clock's base) each branch's exploration ends, as scheduling gives
     ``BranchTask.deadline`` and brings forward when EXPLORE's end is pulled earlier; a test whose native builds, if any,
     and one run of its kind would end past it is refused as ``build_after_deadline``, or ``test_after_deadline`` when
-    it needs no build. No entry, or 0, means no check.
+    it needs no build; a queued test that one run would take past it when its turn comes is withdrawn unstarted as
+    ``test_after_deadline``. No entry, or 0, means no check.
 
     ``listed_branches_only`` makes ``branch_k`` the list of branches that may submit at all: a request of a branch
     not in it is refused as ``branch_stopped`` (the scheduler gives every running branch a K and takes it away when it

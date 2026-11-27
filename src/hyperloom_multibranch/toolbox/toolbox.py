@@ -694,8 +694,23 @@ class RealToolbox:
         if self._closed:
             return
         while (item := self._queue.take(self._parallel_limit())) is not None:
+            try:  # it waited for cards, or its deadline came forward, since it was admitted; its builds are ready
+                self._check_deadline(item.request, ())
+            except RequestRejected as late:
+                self._queue.remove(item.request_id)
+                self._builds.forget(item.request_id)
+                self._tasks[item.request_id] = asyncio.create_task(self._withdraw_unstarted(item.request_id, str(late)))
+                continue
             item.started_at = self._clock()
             self._tasks[item.request_id] = asyncio.create_task(self._run(item))
+
+    async def _withdraw_unstarted(self, request_id: str, reason: str) -> None:
+        try:
+            entry = self._log.get(request_id)
+            if entry is not None and entry.waiting:
+                await self._record_and_write(entry, {"withdrawal": reason})
+        finally:
+            self._tasks.pop(request_id, None)
 
     async def _run(self, item: QueuedTest) -> None:
         try:
