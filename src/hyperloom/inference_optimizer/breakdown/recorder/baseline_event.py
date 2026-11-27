@@ -102,7 +102,7 @@ _EVAL_FAILURE_WARNINGS = frozenset(
     }
 )
 
-# Warnings are prose an operator reads, and a round can accumulate one per harvested artifact.
+# Warnings are prose an operator reads; the event carries their count and the first few.
 _MAX_ROUND_WARNINGS = 12
 
 __all__ = [

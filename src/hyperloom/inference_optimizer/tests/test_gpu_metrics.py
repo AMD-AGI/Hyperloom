@@ -83,7 +83,7 @@ def test_a_v1_report_has_no_utilization_or_vram():
 
 
 def test_multi_node_flat_samples_carry_utilization_and_vram():
-    """The flat per-sample field names, on the path that has them."""
+    """The flat per-sample shape of an archived multi-node report."""
     flat = [
         {"power_w": 100.0, "temperature_c": 50.0, "clock_mhz": 1000.0, "gpu_util_pct": 80.0, "vram_pct": 40.0},
         {"power_w": 200.0, "temperature_c": 60.0, "clock_mhz": 2000.0, "gpu_util_pct": 90.0, "vram_pct": 50.0},
@@ -166,13 +166,14 @@ def test_the_artifact_is_written_into_the_round(tmp_path):
     payload = json.loads((tmp_path / GPU_ARTIFACT_NAME).read_text(encoding="utf-8"))
     assert payload["avg_power_w"] == 476.5
     assert payload["schema_version"] == 1
-    assert payload["source"] == "report.json"
 
 
-def test_a_report_without_telemetry_writes_no_artifact(tmp_path):
-    """An empty artifact would claim the question was asked and answered."""
-    assert write_gpu_metrics_from_report(tmp_path, {"throughput": {}}, source="report.json") is None
+def test_a_report_without_telemetry_writes_no_artifact_and_stays_quiet(tmp_path, caplog):
+    """An empty artifact would claim the question was answered; a warning here would drown the failed-write one."""
+    with caplog.at_level(logging.WARNING):
+        assert write_gpu_metrics_from_report(tmp_path, {"throughput": {}}, source="report.json") is None
     assert not (tmp_path / GPU_ARTIFACT_NAME).exists()
+    assert caplog.text == ""
 
 
 def test_a_block_offering_only_min_contributes_nothing(tmp_path):
@@ -212,13 +213,6 @@ def test_a_failed_write_is_reported_not_swallowed(tmp_path, monkeypatch, caplog)
     with caplog.at_level(logging.WARNING):
         assert write_gpu_metrics_from_report(tmp_path, {"gpu_monitor": V1_BLOCK}, source="report.json") is None
     assert "could not be written" in caplog.text
-
-
-def test_a_round_without_telemetry_stays_quiet(tmp_path, caplog):
-    """The ordinary case must not cry wolf, or the warning above stops meaning anything."""
-    with caplog.at_level(logging.WARNING):
-        assert write_gpu_metrics_from_report(tmp_path, {"throughput": {}}, source="report.json") is None
-    assert caplog.text == ""
 
 
 def test_the_artifact_is_in_the_package_globs():

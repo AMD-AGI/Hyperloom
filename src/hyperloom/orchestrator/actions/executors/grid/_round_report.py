@@ -6,7 +6,6 @@
 from __future__ import annotations
 
 import asyncio
-import csv
 import json
 import logging
 import time
@@ -50,10 +49,7 @@ async def _settled_measurement(
 
     A multi-node round's pod GPU samples are first merged into ``workspace`` as ``gpu_metrics.csv``.
     """
-    try:
-        harvest_mn_gpu_metrics(workspace, subprocess_started_unix=subprocess_started_unix)
-    except (OSError, ValueError, csv.Error) as exc:
-        log.warning("grid_runner: MN GPU-metrics harvest failed: %s", exc)
+    harvest_mn_gpu_metrics(workspace, subprocess_started_unix=subprocess_started_unix)
     if is_round_folder(workspace):
         RoundFolder.read(workspace).write_gpu_metrics(workspace.parent)
         settle_seconds = 0.0

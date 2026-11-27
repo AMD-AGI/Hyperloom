@@ -230,6 +230,9 @@ def _write_pod_gpu_csv(
                 rows = list(csv.reader(f))
         except OSError:
             continue
+        except csv.Error as exc:
+            log.warning("benchmark_result: MN GPU-metrics harvest failed on %s: %s", pod_csv, exc)
+            return {}
         if len(rows) < 2:
             continue
         role = role_of.get(host, "")
