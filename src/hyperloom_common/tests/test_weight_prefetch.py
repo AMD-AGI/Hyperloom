@@ -622,6 +622,37 @@ def test_stop_ends_a_read_in_progress(tmp_path, machine) -> None:
     assert prefetch.join(5.0)
 
 
+def test_a_pass_that_ends_after_a_stop_gave_up_waiting_leaves_the_written_entry_alone(
+    tmp_path, machine, monkeypatch
+) -> None:
+    """A read blocked on the storage outlives the stop's wait; the outcome is written while the pass is still open, and
+    the pass's end adds a new entry rather than changing the one that was being copied."""
+    sizes = _names(1, GIB)
+    host = FakeHost(sizes)
+    reading, release = threading.Event(), threading.Event()
+
+    def read(path, span, stop):
+        reading.set()
+        release.wait(30.0)  # blocked on the storage, deaf to the stop
+        return 0
+
+    host.read = read  # type: ignore[method-assign]
+    machine(host)
+    monkeypatch.setattr(wp, "_STOP_WAIT_SEC", 0.05)
+    prefetch = WeightPrefetch(_model(tmp_path, sizes))
+    prefetch.start()
+    assert reading.wait(10.0)
+    prefetch.stop()
+    open_entry = prefetch.outcome.pass_log[0]
+    record = tmp_path / "weight_prefetch.json"
+    prefetch.write_outcome(record)
+    assert "end" not in json.loads(record.read_text(encoding="utf-8"))["pass_log"][0]
+    release.set()
+    assert prefetch.join(10.0)
+    assert "end" not in open_entry, "the entry being written is never changed"
+    assert "end" in prefetch.outcome.pass_log[0]
+
+
 def test_a_file_that_cannot_be_read_does_not_stop_the_others_and_is_counted(tmp_path, caplog, run) -> None:
     sizes = _names(3, GIB)
     host = FakeHost(sizes)
