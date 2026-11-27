@@ -57,10 +57,7 @@ def test_a_complete_environment_reads_into_typed_fields(env, tmp_path):
     assert info.run_id == "run-1"
     assert info.run_created_at == datetime(2026, 10, 1, 12, 30, tzinfo=timezone.utc)
     assert info.sandbox_templates == {"measurement": {"1": "r1", "8": "r8"}, "dev": "d"}
-    assert (info.result_archive.bucket, info.result_archive.prefix) == ("results-bucket", "hl/runs")
-    assert info.sandbox_keys.subrun.reveal() == _SECRETS[Var.SANDBOX_KEY_SUBRUN]
-    assert info.archive_credentials.session_token.reveal() == _SECRETS[Var.AWS_SESSION_TOKEN]
-    assert (info.node_name, info.claw_session_id) == ("node-3", "sess-9")
+    assert info.sandbox_keys.dev.reveal() == _SECRETS[Var.SANDBOX_KEY_DEV]
     assert (info.source_repo, info.source_sha) == ("AMD-AGI/Hyperloom", "0123456789abcdef0123456789abcdef01234567")
 
 
@@ -108,53 +105,13 @@ def test_the_profile_decides_what_is_required(env):
     assert set(raised.value.missing) == set(host_info._GROUP_VARS[HostGroup.SANDBOX])
 
 
-def test_without_a_result_archive_the_results_stay_on_shared_storage_and_no_aws_key_is_required(env):
-    for name in (Var.RESULT_ARCHIVE, Var.AWS_ACCESS_KEY_ID, Var.AWS_SECRET_ACCESS_KEY, Var.AWS_SESSION_TOKEN):
-        del env[name]
-
-    info = read_host_info(env, require=_ALL_GROUPS)
-
-    assert info.result_archive is None
-    assert info.archive_credentials is None
-
-
-def test_an_s3_archive_requires_both_aws_keys_and_names_what_is_missing(env):
-    del env[Var.AWS_ACCESS_KEY_ID], env[Var.AWS_SECRET_ACCESS_KEY]
-
-    with pytest.raises(HostInfoError) as raised:
-        read_host_info(env)
-
-    assert set(raised.value.missing) == {Var.AWS_ACCESS_KEY_ID, Var.AWS_SECRET_ACCESS_KEY}
-
-
-@pytest.mark.parametrize("value", ["file:///x", "/x", "relative/dir"])
-def test_a_local_path_is_not_a_result_archive(env, value):
-    env[Var.RESULT_ARCHIVE] = value
-
-    with pytest.raises(HostInfoError) as raised:
-        read_host_info(env)
-
-    assert set(raised.value.invalid) == {Var.RESULT_ARCHIVE}
-    assert "only s3://<bucket>/<prefix> or unset" in raised.value.invalid[Var.RESULT_ARCHIVE]
-
-
-@pytest.mark.parametrize(
-    ("value", "prefix"),
-    [("s3://results-bucket", ""), ("s3://results-bucket/", ""), ("s3://results-bucket/hl/runs/", "hl/runs")],
-)
-def test_an_s3_archive_prefix_is_kept_as_written(env, value, prefix):
-    env[Var.RESULT_ARCHIVE] = value
-
-    assert read_host_info(env).result_archive.prefix == prefix
-
-
 def test_a_role_key_is_required_only_for_a_hosted_role(env):
-    del env[Var.SANDBOX_KEY_DEV]
+    del env[Var.SANDBOX_KEY_MEASUREMENT]
 
-    assert read_host_info(env, require=(HostGroup.MEASUREMENT_KEY,)).sandbox_keys.dev is None
+    assert read_host_info(env).sandbox_keys.measurement is None
     with pytest.raises(HostInfoError) as raised:
-        read_host_info(env, require=(HostGroup.DEV_KEY,))
-    assert raised.value.missing == (Var.SANDBOX_KEY_DEV,)
+        read_host_info(env, require=(HostGroup.MEASUREMENT_KEY,))
+    assert raised.value.missing == (Var.SANDBOX_KEY_MEASUREMENT,)
 
 
 def test_missing_and_malformed_inputs_are_reported_together(env):
@@ -176,23 +133,13 @@ def test_missing_and_malformed_inputs_are_reported_together(env):
         (Var.SANDBOX_TEMPLATES, "{}", "must be a non-empty JSON object"),
         (Var.SANDBOX_TEMPLATES, '{"measurement": 8}', "every entry must be a template name"),
         (Var.SANDBOX_TEMPLATES, '{"measurement": {"1": ""}}', "every entry must be a template name"),
-        (Var.RESULT_ARCHIVE, "https://b/p", "only s3://<bucket>/<prefix> or unset"),
-        (Var.RESULT_ARCHIVE, "s3://", "bucket is not a valid"),
-        (Var.RESULT_ARCHIVE, "s3://UPPER_bucket/p", "bucket is not a valid"),
-        (Var.RESULT_ARCHIVE, "s3://results-bucket/a/../b", "prefix must not contain"),
-        (Var.RESULT_ARCHIVE, "s3://results-bucket/a//b", "prefix must not contain"),
-        (Var.RESULT_ARCHIVE, "s3://results-bucket/a/./b", "prefix must not contain"),
-        (Var.RESULT_ARCHIVE, "s3://results-bucket/a/.", "prefix must not contain"),
-        (Var.RESULT_ARCHIVE, "s3://results-bucket//a", "prefix must not contain"),
-        (Var.RESULT_ARCHIVE, "s3://results-bucket/a//", "prefix must not contain"),
-        (Var.RESULT_ARCHIVE, "s3://results-bucket/p?x=1", "only s3://<bucket>/<prefix> or unset"),
         (Var.RUN_CREATED_AT, "yesterday", "ISO 8601"),
         (Var.RUN_CREATED_AT, "2026-10-01T12:30:00", "UTC offset"),
         (Var.E2B_API_URL, "ftp://x", "http or https URL"),
         (Var.E2B_API_URL, "https://user:pw@api.example.test", "must not carry credentials"),
         (Var.E2B_API_URL, "https://api.example.test/?token=abc", "must not carry credentials"),
         (Var.E2B_SANDBOX_URL, "https://sbx.example.test/#frag", "must not carry credentials"),
-        (Var.MCP_PUBLIC_URL, "https://host:notaport", "not a valid URL"),
+        (Var.E2B_SANDBOX_URL, "https://host:notaport", "not a valid URL"),
         (Var.INPUT_FILE, "relative.json", "absolute path"),
         (Var.INPUT_FILE, "/nonexistent/campaign.json", "not an existing file"),
         (Var.STATE_DIR, "/nonexistent/state", "not an existing directory"),
@@ -214,23 +161,8 @@ def test_a_malformed_input_is_refused_with_its_reason(env, name, value, reason):
     assert name in str(raised.value)
 
 
-def test_half_a_credential_pair_is_refused_even_without_an_s3_archive(env):
-    del env[Var.RESULT_ARCHIVE], env[Var.AWS_SECRET_ACCESS_KEY]
-
-    with pytest.raises(HostInfoError) as raised:
-        read_host_info(env)
-
-    assert raised.value.missing == (Var.AWS_SECRET_ACCESS_KEY,)
-
-
-def test_the_session_token_is_optional(env):
-    del env[Var.AWS_SESSION_TOKEN]
-
-    assert read_host_info(env, require=_ALL_GROUPS).archive_credentials.session_token is None
-
-
 def test_an_unrequired_input_that_is_set_is_still_checked(env):
-    env[Var.MCP_PUBLIC_URL] = "not a url"
+    env[Var.E2B_API_URL] = "not a url"
 
     with pytest.raises(HostInfoError):
         read_host_info(env)
@@ -306,7 +238,7 @@ def _surfaces(info):
     return {
         "repr": repr(info),
         "str": str(info),
-        "fstring": f"{info!r} {info} {info.sandbox_keys.dev} {info.sandbox_keys} {info.archive_credentials}",
+        "fstring": f"{info!r} {info} {info.sandbox_keys.dev} {info.sandbox_keys}",
         "asdict": repr(dataclasses.asdict(info)),
         "deepcopy": repr(copy.deepcopy(info)),
         "secret_format": format(info.sandbox_keys.dev, ">40"),
@@ -322,11 +254,10 @@ def test_no_secret_value_appears_in_any_rendering_of_the_host_info(env, surface)
 
 def test_no_secret_value_appears_in_an_error_message(env):
     del env[Var.RUN_ID]
-    env[Var.RESULT_ARCHIVE] = "bad"
     env[Var.E2B_API_URL] = "https://user:" + _SECRETS[Var.SANDBOX_KEY_DEV] + "@api.example.test"
     env[Var.RUN_CREATED_AT] = _SECRETS[Var.AWS_ACCESS_KEY_ID]
     env[Var.SANDBOX_TEMPLATES] = json.dumps({_SECRETS[Var.SANDBOX_KEY_SUBRUN]: 8})
-    env[Var.MCP_PUBLIC_URL] = "https://app.example.test/?token=" + _SECRETS[Var.AWS_SESSION_TOKEN]
+    env[Var.E2B_SANDBOX_URL] = "https://sbx.example.test/?token=" + _SECRETS[Var.AWS_SESSION_TOKEN]
 
     with pytest.raises(HostInfoError) as raised:
         read_host_info(env, require=_ALL_GROUPS)
@@ -368,15 +299,6 @@ def test_a_child_started_without_env_sees_none_of_the_removed_inputs_and_still_s
     seen = set(json.loads(out))
     assert not [name for name in host_info.HOST_ONLY_VARS if name in seen]
     assert {"NODE_NAME", "CLAW_SESSION_ID", "USER_DATA_PATH"} <= seen
-
-
-def test_the_archive_region_is_optional_read_when_set_and_removed_from_the_environment(env):
-    unset = {name: value for name, value in env.items() if name != Var.ARCHIVE_REGION}
-    assert read_host_info(unset).archive_region is None
-    assert Var.ARCHIVE_REGION in host_info.HOST_ONLY_VARS
-
-    assert take_host_info(env).archive_region == "us-east-1"
-    assert Var.ARCHIVE_REGION not in env
 
 
 def test_the_sandbox_workspace_is_optional_read_when_set_and_removed_from_the_environment(env):

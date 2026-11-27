@@ -45,6 +45,14 @@ it.
   `measurement` role.** A hosted run reads only `measurement` and `dev`; a
   list that gives only `runner` is refused as having no `measurement` role.
   No host sends `runner`. See [Upgrade](reference/upgrade.md).
+- **A hosted run no longer checks host inputs it never used.**
+  `HYPERLOOM_MCP_PUBLIC_URL`, `HYPERLOOM_SANDBOX_KEY_SUBRUN`,
+  `HYPERLOOM_RESULT_ARCHIVE` and the S3 archive's `AWS_ACCESS_KEY_ID`,
+  `AWS_SECRET_ACCESS_KEY`, `AWS_SESSION_TOKEN`, `AWS_ENDPOINT_URL_S3` and
+  `AWS_REGION` are no longer read or validated, so a malformed value no longer
+  refuses the run; they are still removed from the environment before any
+  child process starts. Results are archived on the shared storage, as
+  before: archiving to `s3://` was never implemented.
 - **`hyperloom session report` is removed.** The command rendered a
   `session_breakdown.json` as Markdown (`session_report.md`), optionally with
   an LLM-written summary. It ran only by hand: no session wrote
