@@ -67,6 +67,13 @@ it.
   removed from the environment before any child process starts, and a
   malformed value no longer refuses the run. See
   [Environment variables](reference/environment-variables.md).
+- **`E2BSandboxProvider` no longer takes `workspace=`, and
+  `hyperloom.sandbox.socket.WORKSPACE_KEY` is removed.** The provider no
+  longer adds `agent-sandbox.io/workspace` to a create's metadata, and a
+  `workspace_required` refusal is raised as the service's own `SandboxDenied`
+  instead of one naming `HYPERLOOM_SANDBOX_WORKSPACE`. A caller whose key
+  must name a workspace puts the metadata key on its creates itself; a Claw
+  grant's key names its own.
 - **The sandbox socket's `Role` is `measurement` or `dev`.** The `subrun`
   role is gone from `hyperloom.sandbox.socket.Role`, so a local template
   declared with it is refused. No Hyperloom code ever created a sub-run

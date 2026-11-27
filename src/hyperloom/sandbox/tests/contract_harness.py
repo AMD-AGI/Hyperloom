@@ -181,7 +181,6 @@ def claw_service_harness() -> Iterator[Harness]:
         keys,
         api_url=api_url,
         sandbox_url=os.environ.get(_SERVICE_SANDBOX_URL_ENV, api_url),
-        workspace=os.environ.get("HYPERLOOM_SANDBOX_WORKSPACE") or None,
     )
     sealed, dev = os.environ[_SERVICE_TEMPLATES_ENV].split(",")
     wait_sec = float(os.environ.get(_SERVICE_WAIT_ENV, _SERVICE_WAIT_SEC))

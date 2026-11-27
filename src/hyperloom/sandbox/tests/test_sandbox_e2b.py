@@ -30,7 +30,6 @@ from hyperloom.sandbox.e2b import E2BSandboxProvider, RetryPolicy, _E2BSandbox, 
 from hyperloom.sandbox.socket import (
     IDEMPOTENCY_KEY,
     PENDING_TIMEOUT_KEY,
-    WORKSPACE_KEY,
     SandboxCreateFailed,
     SandboxDenied,
     SandboxGone,
@@ -617,71 +616,6 @@ def test_a_blank_service_url_is_refused(blank: str) -> None:
     variable = "E2B_API_URL" if blank == "api_url" else "E2B_SANDBOX_URL"
     with pytest.raises(ValueError, match=f"^{variable} is not set"):
         E2BSandboxProvider({"dev": KEY_DEV}, **urls)
-
-
-#: The workspace a SaFE key used directly names, and the variable that sets it.
-WORKSPACE = "top-models"
-WORKSPACE_ENV = "HYPERLOOM_SANDBOX_WORKSPACE"
-
-
-def test_the_workspace_goes_with_every_create_and_a_workspace_the_caller_names_wins(service: _Service) -> None:
-    keys = {"dev": KEY_DEV, "measurement": KEY_MEASUREMENT}
-    provider = E2BSandboxProvider(keys, api_url=service.url, sandbox_url=service.url, retry=FAST, workspace=WORKSPACE)
-    service.reply("POST", "/v2/sandboxes", (201, SANDBOX))
-    given = {"a": "b"}
-    provider.create("dev", role="dev", timeout_sec=60, metadata=given)
-    provider.create("dev", role="measurement", timeout_sec=60, metadata={IDEMPOTENCY_KEY: "k-1"})
-    provider.create("dev", role="dev", timeout_sec=60, metadata={WORKSPACE_KEY: "other"})
-    assert [call.body["metadata"] for call in service.calls("POST", "/v2/sandboxes")] == [
-        {"a": "b", WORKSPACE_KEY: WORKSPACE, PENDING_TIMEOUT_KEY: "60"},
-        {IDEMPOTENCY_KEY: "k-1", WORKSPACE_KEY: WORKSPACE, PENDING_TIMEOUT_KEY: "60"},
-        {WORKSPACE_KEY: "other", PENDING_TIMEOUT_KEY: "60"},
-    ]
-    assert given == {"a": "b"}, "the caller's mapping is not changed"
-
-
-def test_a_blank_workspace_is_refused() -> None:
-    with pytest.raises(ValueError, match="workspace is blank"):
-        E2BSandboxProvider(
-            {"dev": KEY_DEV}, api_url=NOWHERE["E2B_API_URL"], sandbox_url=NOWHERE["E2B_SANDBOX_URL"], workspace="  "
-        )
-
-
-#: How the service refuses a create by a key whose user may create in several workspaces when it names none (a 400
-#: ``workspace_required``), in the E2B error body (the SDK requires its ``code`` and ``message``, and keeps only
-#: ``message``): the reason alone, or first, as the service words its other reasons.
-WORKSPACE_REQUIRED_BODIES = [
-    {"code": 400, "message": "workspace_required"},
-    {"code": 400, "reason": "workspace_required", "message": "workspace_required: the user is in 5 workspaces"},
-]
-
-
-@pytest.mark.parametrize("body", WORKSPACE_REQUIRED_BODIES, ids=["bare", "with_reason"])
-def test_a_create_refused_for_want_of_a_workspace_names_the_variable_and_is_not_replayed(
-    service: _Service, provider: E2BSandboxProvider, body: dict[str, Any]
-) -> None:
-    service.reply("POST", "/v2/sandboxes", (400, body), (201, SANDBOX))
-    with pytest.raises(SandboxDenied) as refused:
-        _create(provider, metadata={IDEMPOTENCY_KEY: "k-1"})
-    said = str(refused.value)
-    assert WORKSPACE_ENV in said and "'dev' key" in said and "named none" in said
-    assert "workspace_required" in said, "the service's own reason is kept"
-    assert KEY_DEV not in said
-    assert len(service.calls("POST", "/v2/sandboxes")) == 1
-
-
-def test_a_workspace_refused_although_one_was_sent_says_which_and_another_refusal_is_left_as_it_is(
-    service: _Service,
-) -> None:
-    keys = {"measurement": KEY_MEASUREMENT}
-    provider = E2BSandboxProvider(keys, api_url=service.url, sandbox_url=service.url, retry=FAST, workspace=WORKSPACE)
-    service.reply("POST", "/v2/sandboxes", (400, WORKSPACE_REQUIRED_BODIES[0]))
-    with pytest.raises(SandboxDenied, match=f"named '{WORKSPACE}': set {WORKSPACE_ENV}"):
-        provider.create("t", role="measurement", timeout_sec=60, metadata={})
-    service.reply("POST", "/v2/sandboxes", (400, {"code": 400, "message": "template_not_allowed"}))
-    with pytest.raises(SandboxDenied) as refused:
-        provider.create("t", role="measurement", timeout_sec=60, metadata={})
-    assert str(refused.value) == "400: template_not_allowed"
 
 
 class _Refusing:

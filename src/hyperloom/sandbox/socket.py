@@ -25,7 +25,6 @@ __all__ = [
     "PRIORITY_KEY",
     "SAME_NODE_KEY",
     "SIGNING_PUBLIC_KEY",
-    "WORKSPACE_KEY",
     "CommandResult",
     "DirEntry",
     "EntryKind",
@@ -48,9 +47,6 @@ Role = Literal["measurement", "dev"]
 IDEMPOTENCY_KEY = "agent-sandbox.io/idempotency-key"
 AVOID_NODES_KEY = "agent-sandbox.io/avoid-nodes"  # comma-separated node names
 PRIORITY_KEY = "agent-sandbox.io/priority"
-#: The workspace a sandbox is created in, which a key whose user may create in several must name (a SaFE key used
-#: directly); a Claw grant's key names its own.
-WORKSPACE_KEY = "agent-sandbox.io/workspace"
 #: How long, in whole seconds (1 to 86400), the service may keep the sandbox queued before it runs; a sandbox still not
 #: running then is deleted and its create answered ``pending_timeout``. Unset, the template's own limit applies.
 PENDING_TIMEOUT_KEY = "agent-sandbox.io/pending-timeout"
