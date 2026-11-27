@@ -6,7 +6,7 @@ import { claim, fromSnapshot, merge, outOfSync, type StreamState } from "./strea
 import type { Cursors, StreamItem } from "./types";
 
 const items = (...ts: number[]): StreamItem[] => ts.map((t) => ({ _t: t }));
-const times = (s: StreamState, name: "event" = "event") => s.items[name].map((i) => i._t);
+const times = (s: StreamState, name: "event" | "metrics" = "event") => s.items[name].map((i) => i._t);
 
 function merged(state: StreamState, starts: Cursors, batch: Record<string, StreamItem[]>): StreamState {
   const r = merge(state, starts, batch);
@@ -49,6 +49,13 @@ describe("stream cursors", () => {
     merged(s, { event: 1 }, { event: items(2) });
     expect(times(s)).toEqual([1]);
     expect(s.cursors.event).toBe(1);
+  });
+  it("trims capped streams from the head but keeps the cursor absolute", () => {
+    const many = items(...Array.from({ length: 4000 }, (_, i) => i));
+    const s = merged(fromSnapshot({ metrics: many }, { metrics: 4000 }), { metrics: 4000 }, { metrics: items(4000) });
+    expect(s.items.metrics.length).toBe(4000);
+    expect(s.items.metrics[0]._t).toBe(1);
+    expect(s.cursors.metrics).toBe(4001);
   });
   it("ignores unknown streams", () => {
     const batch = { future: items(1) } as Record<string, StreamItem[]>;

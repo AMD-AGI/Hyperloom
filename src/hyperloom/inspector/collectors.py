@@ -13,7 +13,9 @@ from __future__ import annotations
 import json
 import os
 import re
+import shutil
 import sqlite3
+import subprocess  # nosec B404 - runs amd-smi with a fixed argv only.
 import time
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -317,3 +319,56 @@ def newest_mtime(path: Path) -> float | None:
             except FileNotFoundError:
                 continue
     return newest
+
+
+def container_memory() -> dict:
+    """cgroup v2 (or v1) memory usage and limit of this container, in bytes."""
+    candidates = [
+        (Path("/sys/fs/cgroup/memory.current"), Path("/sys/fs/cgroup/memory.max")),
+        (Path("/sys/fs/cgroup/memory/memory.usage_in_bytes"), Path("/sys/fs/cgroup/memory/memory.limit_in_bytes")),
+    ]
+    for cur_p, max_p in candidates:
+        try:
+            current = int(cur_p.read_text().strip())
+            raw_max = max_p.read_text().strip()
+        except (OSError, ValueError):
+            continue
+        limit = None if raw_max == "max" else int(raw_max)
+        if limit is not None and limit > 1 << 60:
+            limit = None
+        return {"used_bytes": current, "limit_bytes": limit, "source": str(cur_p.parent)}
+    return {}
+
+
+def _metric_value(obj: Any) -> float | None:
+    if isinstance(obj, dict):
+        obj = obj.get("value")
+    return float(obj) if isinstance(obj, (int, float)) else None
+
+
+def gpu_metrics(timeout: float = 8.0) -> list[dict]:
+    """Per-GPU utilisation and VRAM from ``amd-smi metric --json``; empty when unavailable."""
+    exe = shutil.which("amd-smi") or ("/opt/rocm/bin/amd-smi" if Path("/opt/rocm/bin/amd-smi").exists() else None)
+    if not exe:
+        return []
+    try:
+        proc = subprocess.run(  # nosec B603 - fixed argv, no caller input.
+            [exe, "metric", "-u", "-m", "--json"], capture_output=True, text=True, timeout=timeout, check=False
+        )
+        data = json.loads(proc.stdout)
+    except (subprocess.SubprocessError, OSError, json.JSONDecodeError):
+        return []
+    gpus = data.get("gpu_data", data) if isinstance(data, dict) else data
+    out = []
+    for g in gpus if isinstance(gpus, list) else []:
+        usage, mem = g.get("usage") or {}, g.get("mem_usage") or {}
+        out.append(
+            {
+                "gpu": g.get("gpu"),
+                "gfx_pct": _metric_value(usage.get("gfx_activity")),
+                "umc_pct": _metric_value(usage.get("umc_activity")),
+                "vram_used_mb": _metric_value(mem.get("used_vram")),
+                "vram_total_mb": _metric_value(mem.get("total_vram")),
+            }
+        )
+    return out

@@ -82,9 +82,13 @@ def test_llm_summary_aggregates_per_component():
     assert out["orchestration"]["cache_read_tokens"] == 7
 
 
-def test_budget():
+def test_budget_and_staleness():
     assert derive.budget({"elapsed_charged_sec": 1800, "max_minutes": 120})["pct"] == 25.0
     assert derive.budget({})["pct"] is None
+    agents = derive.agent_staleness({"agent_last_active": {"a": 100, "b": 990, "c": "x"}}, 1000, 300)
+    assert {a["agent"]: a["stale"] for a in agents} == {"a": True, "b": False}
+    # Measured at a run's end, an agent active just after its last recorded activity was not quiet at all.
+    assert derive.agent_staleness({"agent_last_active": {"a": 1010}}, 1000, 300)[0]["age_sec"] == 0
 
 
 def test_state_summary_trims_and_keeps_best():
@@ -105,6 +109,17 @@ def test_throughput_series_reads_throughput_after():
     assert [e["variant_name"] for e in series] == [None, "v", None]
     assert "throughput_before" not in series[0]
     assert derive.throughput_series(None) == []
+
+
+def test_health_badges_order_and_thresholds():
+    tasks = [{"health": "crashed", "label": "scout"}, {"health": "stalled"}]
+    memory = {"used_bytes": 96, "limit_bytes": 100}
+    agents = [{"agent": "critic", "stale": True}]
+    badges = derive.health_badges({"crash_count": 1}, tasks, memory, agents)
+    assert badges[0] == {"level": "error", "text": "1 task(s) crashed but recorded as succeeded: scout"}
+    assert {"level": "error", "text": "container memory at 96% of limit (OOM risk)"} in badges
+    assert any(b["text"] == "agents idle: critic" for b in badges)
+    assert derive.health_badges({"stop_reason": "done"}, [], {}, agents) == []
 
 
 def test_best_throughput_falls_back_when_state_has_none():

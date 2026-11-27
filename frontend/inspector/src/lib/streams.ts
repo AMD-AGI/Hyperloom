@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: MIT
 
 // Client side of the stream cursors in watcher.py. Cursors are absolute item counts per stream, so they stay valid
-// after the server drops old items. The SSE connection keeps its own cursors, starting at the `hello`
+// after the server or the client drops old items. The SSE connection keeps its own cursors, starting at the `hello`
 // event's `released`; each `items` batch continues from there, which gives every batch an absolute start. A batch
 // that starts past the client's cursor means items were missed (the page must refetch the snapshot); one that starts
 // before it overlaps what the snapshot already held, and the overlap is skipped.
@@ -16,6 +16,9 @@ export interface StreamState {
   cursors: Record<StreamName, number>;
 }
 
+/** Most items kept per stream; older ones are dropped from the head (cursors stay absolute). */
+export const CAPS: Partial<Record<StreamName, number>> = { metrics: 4000 };
+
 export function emptyItems(): StreamItems {
   return Object.fromEntries(STREAM_NAMES.map((n) => [n, []])) as unknown as StreamItems;
 }
@@ -24,7 +27,7 @@ export function fromSnapshot(streams: Partial<StreamItems>, released: Cursors): 
   const items = emptyItems();
   const cursors = {} as Record<StreamName, number>;
   for (const n of STREAM_NAMES) {
-    items[n] = streams[n] ?? [];
+    items[n] = cap(n, streams[n] ?? []);
     cursors[n] = released[n] ?? items[n].length;
   }
   return { items, cursors };
@@ -53,7 +56,7 @@ export function merge(state: StreamState, starts: Cursors, batch: Partial<Stream
     if (start > cursors[name]) return { gap: name };
     const fresh = got.slice(cursors[name] - start);
     if (!fresh.length) continue;
-    items[name] = items[name].concat(fresh);
+    items[name] = cap(name, items[name].concat(fresh));
     cursors[name] += fresh.length;
   }
   return { state: { items, cursors } };
@@ -62,4 +65,9 @@ export function merge(state: StreamState, starts: Cursors, batch: Partial<Stream
 /** True when the server's cursors (from `hello`) differ from the client's, so the snapshot must be refetched. */
 export function outOfSync(server: Cursors, client: Record<StreamName, number>): boolean {
   return STREAM_NAMES.some((n) => (server[n] ?? 0) !== (client[n] ?? 0));
+}
+
+function cap(name: StreamName, items: StreamItem[]): StreamItem[] {
+  const keep = CAPS[name];
+  return keep != null && items.length > keep ? items.slice(items.length - keep) : items;
 }

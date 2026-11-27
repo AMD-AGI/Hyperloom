@@ -37,6 +37,7 @@ from typing import TYPE_CHECKING, Any
 from urllib.parse import parse_qs, urlsplit
 
 from hyperloom.inspector import artifacts
+from hyperloom.inspector.history import MetricsHistory, history_path
 from hyperloom.inspector.watcher import Watcher, WatchOptions
 
 if TYPE_CHECKING:
@@ -265,17 +266,25 @@ def _is_unspecified(host: str) -> bool:
 
 @dataclass(frozen=True)
 class ServeOptions:
-    """What :func:`serve` listens on (*host*, *port*), and how the watcher reads the session (*watch*)."""
+    """What :func:`serve` listens on (*host*, *port*), where it keeps resource samples (*history_dir*), and how the
+    watcher reads the session (*watch*). A directory left ``None`` is not written."""
 
     host: str = "127.0.0.1"
     port: int = 8765
+    history_dir: Path | None = None
     watch: WatchOptions = field(default_factory=WatchOptions)
 
 
 def serve(session_dir: Path, options: ServeOptions | None = None) -> None:
-    """Run the Inspector until interrupted."""
+    """Run the Inspector until interrupted; with *options.history_dir*, resource samples survive a restart."""
     options = options or ServeOptions()
-    watcher = Watcher(Path(session_dir), options.watch)
+    history = None
+    if options.history_dir is not None:
+        try:
+            history = MetricsHistory(history_path(Path(session_dir), options.history_dir))
+        except ValueError as exc:
+            print(f"inspect: no resource history: {exc}", file=sys.stderr, flush=True)
+    watcher = Watcher(Path(session_dir), options.watch, history=history)
     watcher.start()
     httpd = InspectorServer((options.host, options.port), watcher)
     shown = "localhost" if _is_unspecified(options.host) else options.host
@@ -283,6 +292,8 @@ def serve(session_dir: Path, options: ServeOptions | None = None) -> None:
     print(f"Hyperloom Inspector ({mode}): http://{shown}:{options.port}/ for {session_dir}", flush=True)
     if _modern_page() is None:
         print("Inspector UI: not in this install; / says how to get it", file=sys.stderr, flush=True)
+    if history is not None:
+        print(f"Resource history: {history.path}", flush=True)
     try:
         httpd.serve_forever(poll_interval=0.5)
     except KeyboardInterrupt:

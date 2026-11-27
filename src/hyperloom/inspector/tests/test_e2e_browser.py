@@ -45,6 +45,7 @@ class Ui:
 
     node: str
     edge: str
+    badges: str
     filter: str
     dr_title: str
     dr_close: str
@@ -63,6 +64,7 @@ class Ui:
 UI = Ui(
     node="[data-testid=graph-node]",
     edge="[data-testid=graph-edge]",
+    badges="[data-testid=badges]",
     filter="[data-testid=graph-filter]",
     dr_title="[data-testid=dr-title]",
     dr_close="[data-testid=dr-close]",
@@ -129,6 +131,7 @@ def page(browser, session_dir):
 def test_graph_and_node_drawer(page):
     assert page.locator(UI.node).count() >= 5
     assert page.locator(UI.edge).count() >= 1
+    expect(page.locator(UI.badges)).to_contain_text("crashed but recorded as succeeded")
     page.locator(UI.node).first.click()
     expect(page.locator(UI.dr_title)).not_to_be_empty()
     expect(page.locator(UI.filter)).to_contain_text("filter")

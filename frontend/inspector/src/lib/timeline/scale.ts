@@ -11,6 +11,7 @@ import type { Clock, GraphNode, RunInfo, StreamItem, Task, Timeline } from "../t
 
 export const LANE = 22;
 export const AXIS = 22;
+export const RES = 60;
 export const LABEL = 130;
 export const GAP_PX = 28;
 export const GAP_MIN = 300;

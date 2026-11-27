@@ -6,7 +6,7 @@
 Two kinds of data come out of here:
 
 * **Streams** are append-only and time-stamped (bus events, LLM calls, journal
-  entries, critic verdicts). Each is kept sorted by time; a
+  entries, critic verdicts, resource samples). Each is kept sorted by time; a
   client holds a per-stream count and receives the items released since then.
   In replay a stream releases an item once the virtual clock passes its time,
   so a backward scrub shrinks the released prefix and the client gets a reset.
@@ -38,25 +38,31 @@ from hyperloom.inspector.collectors import (
     ChangedFiles,
     CoordinatorDb,
     JsonlTail,
+    container_memory,
     first_exception,
+    gpu_metrics,
     newest_mtime,
     parse_ts,
     read_json,
     resolve_inside,
     specialist_turn,
 )
+from hyperloom.inspector.history import MetricsHistory
 from hyperloom.inspector.redact import redact
 from hyperloom.inspector.session_layout import STATE_FILE, coordinator_db, variant_dir_name
 
 log = logging.getLogger(__name__)
 
-STREAMS = ("event", "llm_call", "journal", "review")
+_METRICS_STREAM = "metrics"
+STREAMS = ("event", "llm_call", "journal", "review", _METRICS_STREAM)
 # Folders of a session directory and the task kind and state the watcher looks for.
 _REPORTS_DIR = "reports"
 _RUNS_DIR = "runs"
 _BASELINE_KIND = "baseline"
 _RUNNING_STATE = "running"
 _TS_KEYS = ("ts_unix", "ts", "recorded_unix", "completed_at", "started_at", "start_time", "created_at")
+_METRIC_SAMPLES = 4000
+_METRIC_EVERY_SEC = 5.0
 _INDEX_EVERY_SEC = 10.0
 _ACTIVE_SEC = 600.0
 
@@ -156,12 +162,13 @@ class Stream:
 class WatchOptions:
     """How a :class:`Watcher` reads the session: on the wall clock, or with *replay* on a virtual clock running at
     *speed*; it polls every *poll_sec* seconds, and a task whose log is older than *stall_after_sec* seconds is
-    stalled."""
+    stalled. *sample_metrics* says whether it samples resource use itself; ``None`` means yes live, no in replay."""
 
     replay: bool = False
     speed: float = 1.0
     poll_sec: float = 1.5
     stall_after_sec: float = 900.0
+    sample_metrics: bool | None = None
 
 
 class Watcher:
@@ -171,12 +178,14 @@ class Watcher:
         self,
         session_dir: Path,
         options: WatchOptions | None = None,
+        history: MetricsHistory | None = None,
     ) -> None:
         options = options or WatchOptions()
         self.session_dir = Path(session_dir)
         self.clock = Clock(replay=options.replay, speed=options.speed)
         self.poll_sec = options.poll_sec
         self.stall_after_sec = options.stall_after_sec
+        self.sample_metrics = (not options.replay) if options.sample_metrics is None else options.sample_metrics
         self.lock = threading.RLock()
         self.version = 0
         self.streams = {name: Stream() for name in STREAMS}
@@ -196,6 +205,11 @@ class Watcher:
         self.journal_seen = 0
         self.artifact_index = artifacts_mod.ArtifactIndex()
         self._last_index = 0.0
+        self._last_sample = 0.0
+        self.history = history
+        if history is not None:
+            for rec in history.load():
+                self.streams[_METRICS_STREAM].add({k: v for k, v in rec.items() if k != "t"}, rec["t"])
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
 
@@ -220,6 +234,8 @@ class Watcher:
         with self.lock:
             changed = self._poll_files()
             changed |= self._poll_db()
+            if self.sample_metrics:
+                changed |= self._sample_metrics()
             now = time.monotonic()
             if not self._last_index or (changed and now - self._last_index > _INDEX_EVERY_SEC):
                 self.artifact_index = artifacts_mod.index(self.session_dir, self.task_nodes())
@@ -283,16 +299,35 @@ class Watcher:
             self.tasks, changed = tasks, True
         return changed
 
+    def _sample_metrics(self) -> bool:
+        """Memory and GPU use of this machine, every few seconds; none while the optimizer is known to run on another
+        host, whose resources they would not be."""
+        now = time.time()
+        if now - self._last_sample < _METRIC_EVERY_SEC:
+            return False
+        self._last_sample = now
+        if self.optimizer_status().get("host"):
+            return False
+        sample = {"memory": container_memory(), "gpus": gpu_metrics()}
+        stream = self.streams[_METRICS_STREAM]
+        stream.add(sample, now)
+        stream.trim(_METRIC_SAMPLES)
+        if self.history is not None:
+            self.history.append({"t": now, **sample})
+        return True
+
     def _update_range(self) -> None:
-        times = [s.times[0] for s in self.streams.values() if s.times]
+        # Resource samples can come from the history file and outlive the run, so they don't set the range.
+        timed = [s for name, s in self.streams.items() if s.times and name != _METRICS_STREAM]
+        times = [s.times[0] for s in timed]
         times += [t for t in (parse_ts(x.get("created_at")) for x in self.tasks) if t is not None]
         start = parse_ts(self.state.get("start_ts")) or (min(times) if times else None)
         last = self._last_activity()
         self.clock.set_range(start, last if last is not None else start)
 
     def _last_activity(self) -> float | None:
-        """The run's last recorded activity: its streams, and its tasks' updates."""
-        ends = [s.times[-1] for s in self.streams.values() if s.times]
+        """The run's last recorded activity: its streams but resources, and its tasks' updates."""
+        ends = [s.times[-1] for name, s in self.streams.items() if s.times and name != _METRICS_STREAM]
         ends += [t for t in (parse_ts(x.get("updated_at")) for x in self.tasks) if t is not None]
         return max(ends, default=None)
 
@@ -382,7 +417,7 @@ class Watcher:
         owner = owner if isinstance(owner, dict) else last
         host, pid = owner.get("hostname"), owner.get("pid")
         if host and host != socket.gethostname():
-            return {"alive": None, "reason": f"owner host {host} is not this host", "pid": pid}
+            return {"alive": None, "reason": f"owner host {host} is not this host", "pid": pid, "host": host}
         alive = bool(pid) and os.path.exists(f"/proc/{pid}")
         return {"alive": alive, "pid": pid}
 
@@ -489,6 +524,10 @@ class Watcher:
             events = self.streams["event"].upto(released["event"])
             calls = self.streams["llm_call"].upto(released["llm_call"])
             artifacts = self._artifacts_at(clock)
+            memory = self._latest_memory(released[_METRICS_STREAM])
+            # A run that has ended shows how long each agent was quiet before it stopped, not until now.
+            end = self._run_end(clock)
+            agents = derive.agent_staleness(summary, clock if end is None else end, self.stall_after_sec)
             view = {
                 "version": self.version,
                 "clock": self.clock.info(),
@@ -499,7 +538,8 @@ class Watcher:
                 "graph": graph.build_graph(tasks, events, calls, artifacts),
                 "timeline": self.timeline_view(tasks, clock),
                 "llm": derive.llm_summary(calls),
-                "badges": self._db_badges(),
+                "badges": self._db_badges() + derive.health_badges(summary, tasks, memory, agents),
+                "agents": agents,
                 "artifact_count": len(artifacts),
                 "artifacts_cut_at": artifacts_mod.MAX_FILES if self.artifact_index.truncated else None,
                 "released": released,
@@ -546,6 +586,10 @@ class Watcher:
         if not self.clock.replay or (self.clock.end is not None and clock >= self.clock.end):
             return list(self.artifact_index)
         return [a for a in self.artifact_index if a["mtime"] <= clock]
+
+    def _latest_memory(self, released: int) -> dict:
+        items = self.streams[_METRICS_STREAM].upto(released)
+        return items[-1]["memory"] if items else {}
 
     def conversation(self, call_id: str = "", task_id: str = "", turn: str = "") -> dict | None:
         """The prompt/response record for one LLM call, redacted; scans conversations.jsonl.

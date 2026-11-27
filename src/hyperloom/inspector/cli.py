@@ -78,10 +78,20 @@ def add_inspect_arguments(insp: argparse.ArgumentParser) -> None:
         help="Replay the session on a virtual clock from its first record, with a scrubber in the page.",
     )
     insp.add_argument("--speed", type=float, default=1.0, help="Replay speed factor. Default: 1.0.")
+    insp.add_argument(
+        "--history-dir",
+        type=Path,
+        default=None,
+        help="Where resource samples (memory, GPU) are kept so a restarted Inspector can backfill its chart; "
+        "never inside the session. Default: $XDG_STATE_HOME/hyperloom-inspector or "
+        "~/.local/state/hyperloom-inspector.",
+    )
+    insp.add_argument("--no-history", action=SWITCH, help="Keep resource samples in memory only.")
 
 
 def run_inspect(args: argparse.Namespace) -> int:
     """Entry point for the ``inspect`` subcommand."""
+    from hyperloom.inspector.history import default_history_dir
     from hyperloom.inspector.server import ServeOptions, serve
     from hyperloom.inspector.watcher import WatchOptions
 
@@ -91,9 +101,11 @@ def run_inspect(args: argparse.Namespace) -> int:
         print(f"inspect: {exc}", file=sys.stderr)
         return 2
     try:
+        history_dir = None if args.no_history else (args.history_dir or default_history_dir())
         options = ServeOptions(
             host=args.host,
             port=args.port,
+            history_dir=history_dir,
             watch=WatchOptions(replay=args.replay, speed=args.speed),
         )
         serve(session_dir, options)
