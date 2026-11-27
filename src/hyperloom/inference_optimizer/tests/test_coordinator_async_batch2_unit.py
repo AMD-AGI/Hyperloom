@@ -25,7 +25,6 @@ from hyperloom.orchestrator.tests.mock_backend import MockBackend, ScriptedPlan
 from hyperloom.inference_optimizer.session.optimization_journal import Verdict
 from hyperloom.orchestrator.actions.executors.explore import STACK_REVALIDATE_SOURCE
 from hyperloom.orchestrator.loop.coordinator import Coordinator
-from hyperloom.orchestrator.loop.proposals import ProposedAction
 from hyperloom.orchestrator.loop.reactor_turn import trace_mcp_setup
 from hyperloom.inference_optimizer.breakdown.stop_reasons import PATCH_RECOVERY_INCOMPLETE_STOP_REASON
 from hyperloom.orchestrator.loop._promote_outcome import IntegrateRecoveryIncomplete
@@ -1908,35 +1907,6 @@ async def test_running_tasks_reader_sees_live_specialist(coord: Coordinator) -> 
     assert "serving_specialist" in out
 
 
-# -- fan_out_specialist_wave (valid entries) -------------------------------
-@pytest.mark.asyncio
-async def test_fan_out_wave_dispatches_valid_task(coord: Coordinator, monkeypatch) -> None:
-    seen: list[dict] = []
-
-    async def _fake_delegate(source, intent):
-        seen.append(dict(intent.payload.get("params") or {}))
-
-    monkeypatch.setattr(coord.router, "handle_delegate", _fake_delegate)
-    intent = Intent(
-        type=IntentType.DELEGATE,
-        payload={"idempotency_key": "wave", "action_name": "specialist"},
-    )
-    await coord.specialist_dispatch.fan_out_specialist_wave(
-        "orchestration",
-        intent,
-        {
-            "domain": "kernel_agent",
-            "tasks": [
-                {"task_description": "scout fused moe", "task_summary": "moe", "mode": "patch", "lane": "gpu"},
-            ],
-        },
-    )
-    assert len(seen) == 1
-    assert seen[0]["scope"] == "freeform"
-    assert seen[0]["task_description"] == "scout fused moe"
-    assert seen[0]["mode"] == "patch"
-
-
 # -- warm_specialist_params (rich state) -----------------------------------
 @pytest.mark.asyncio
 async def test_warm_specialist_params_rich_context(coord: Coordinator, monkeypatch) -> None:
@@ -2303,11 +2273,7 @@ async def test_a_phase_transition_clears_the_pending_hint_whether_or_not_the_hin
     assert json.loads((coord.session_dir / "state.json").read_text(encoding="utf-8"))["pending_escalate_hint"] == ""
 
 
-# -- materialize -----------------------------------------------------------
-def _proposed(action_name: str, payload: dict) -> ProposedAction:
-    return ProposedAction("orchestration", action_name, {"predicted_gain_pct": 3.0, **payload})
-
-
+# -- specialist ownership ----------------------------------------------------
 def test_specialist_owner_is_frozen_at_creation_outside_agent_phases(
     coord: Coordinator,
 ) -> None:
@@ -2321,9 +2287,9 @@ def test_specialist_owner_is_frozen_at_creation_outside_agent_phases(
         "gap_layer": "framework",
     }
 
-    assert coord.router._stamp_specialist_owner(explore_params) == "EXPLORE"
+    assert coord.specialist_dispatch.stamp_owner(explore_params) == "EXPLORE"
     assert explore_params["source_phase"] == "EXPLORE"
-    assert coord.router._stamp_specialist_owner(framework_params) == "FRAMEWORK_AGENT"
+    assert coord.specialist_dispatch.stamp_owner(framework_params) == "FRAMEWORK_AGENT"
     assert framework_params["source_phase"] == "FRAMEWORK_AGENT"
 
 
@@ -2337,7 +2303,7 @@ def test_a_patch_mode_specialist_is_owned_at_dispatch(coord: Coordinator, phase:
     coord.shared_state.phase = phase
     params = {"scope": "freeform", "mode": "patch", "task_description": "fix the scheduler crash"}
 
-    assert coord.router._stamp_specialist_owner(params) == "FRAMEWORK_AGENT"
+    assert coord.specialist_dispatch.stamp_owner(params) == "FRAMEWORK_AGENT"
     assert params["source_phase"] == "FRAMEWORK_AGENT"
 
 
@@ -2350,164 +2316,158 @@ def test_a_research_specialist_names_no_owner(coord: Coordinator) -> None:
     coord.shared_state.phase = "KERNEL_AGENT"
     params = {"scope": "freeform", "task_description": "find out why prefill blocks decode"}
 
-    assert coord.router._stamp_specialist_owner(params) == ""
+    assert coord.specialist_dispatch.stamp_owner(params) == ""
     assert "source_phase" not in params
 
 
-@pytest.mark.asyncio
-async def test_materialize_explore_proposal_id_does_not_break_content_dedup(
-    coord: Coordinator,
-    monkeypatch,
-) -> None:
-    coord.shared_state.baseline_tput = 800.0
-    monkeypatch.setattr(coord.proposals, "phase_framework", coord.phase_framework, raising=False)
-    await coord.proposals.materialize(_proposed("explore", {"params": {"grid": [{"name": "v0"}]}}))
-    await coord.proposals.materialize(_proposed("explore", {"params": {"grid": [{"name": "v0"}]}}))
-
-    queued = [task for task in await coord.tasks.queued() if task.kind == "explore"]
-    assert len(queued) == 1
-    assert queued[0].params["proposal_msg_id"]
+# -- the task a delegate becomes ---------------------------------------------
+# An explore is admitted on something to measure; the tests that are not about that grid delegate one admission
+# has no quarrel with.
+_DELEGATE_PARAMS = {"explore": {"grid": [{"name": "v1"}]}}
+_MEASURED_BASELINE = {"status": "ok", "output_throughput": 100.0, "completed_requests": 8}
+_FAILED_BASELINE = {"status": "failed", "error_class": "server_launch_failed", "error": "server exited 1"}
 
 
-@pytest.mark.asyncio
-async def test_materialize_explore_seeds_cumulative_env_base(coord: Coordinator, monkeypatch) -> None:
-    # Regression: explore must inherit current_best.extra_envs as its env base, else the accepted stack's envs
-    # collapse to the last variant's delta.
-    coord.shared_state.baseline_tput = 800.0
-    monkeypatch.setattr(coord.proposals, "phase_framework", coord.phase_framework, raising=False)
-    coord.shared_state.current_best = {
-        "tput": 900.0,
-        "extra_server_args": "--kv-cache-dtype fp8",
-        "extra_envs": {"VLLM_ROCM_USE_AITER_MHA": "1", "HIP_FORCE_DEV_KERNARG": "1"},
+def _delegate(action_name: str, params=None) -> Intent:
+    payload = {
+        "action_name": action_name,
+        "params": params if params is not None else dict(_DELEGATE_PARAMS.get(action_name, {})),
     }
-    await coord.proposals.materialize(_proposed("explore", {"params": {"grid": [{"name": "v0"}]}}))
-    task = await coord.tasks.get((await coord.tasks.queued())[0].task_id)
-    assert task.params["base_extra_args"] == "--kv-cache-dtype fp8"
-    assert task.params["base_extra_envs"] == {
-        "VLLM_ROCM_USE_AITER_MHA": "1",
-        "HIP_FORCE_DEV_KERNARG": "1",
-    }
+    return Intent(type=IntentType.DELEGATE, payload=payload)
 
 
-@pytest.mark.asyncio
-async def test_materialize_baseline_ignores_params_outside_fingerprint(coord: Coordinator) -> None:
-    await coord.proposals.materialize(_proposed("baseline", {"params": {}}))
-    await coord.proposals.materialize(_proposed("baseline", {"params": {"tag": "x"}}))
-    queued = [t for t in await coord.tasks.queued() if t.kind == "baseline"]
-    assert len(queued) == 1
-    tail = await coord.bus.tail(topic="observation", n=20)
-    assert any(m.payload.get("reason") == "duplicate_proposal_content" for m in tail)
+async def _baselines(coord: Coordinator) -> list:
+    rows = await coord.db.fetchall("SELECT task_id FROM tasks WHERE kind = 'baseline' ORDER BY created_at, rowid")
+    return [await coord.tasks.get(row["task_id"]) for row in rows]
 
 
-@pytest.mark.asyncio
-async def test_materialize_baseline_distinct_envs_queue_separately(coord: Coordinator) -> None:
-    await coord.proposals.materialize(_proposed("baseline", {"params": {}}))
-    await coord.proposals.materialize(
-        _proposed("baseline", {"params": {"extra_envs": {"VLLM_ROCM_USE_AITER_MOE": "0"}}})
-    )
-    queued = [t for t in await coord.tasks.queued() if t.kind == "baseline"]
-    assert len(queued) == 2
-
-
-@pytest.mark.asyncio
-async def test_materialize_requeues_same_content_after_terminal_twin(coord: Coordinator) -> None:
-    await coord.proposals.materialize(_proposed("baseline", {"params": {}}))
-    first = [t for t in await coord.tasks.queued() if t.kind == "baseline"][0]
-    await coord.tasks.transition(first.task_id, "running")
-    await coord.tasks.transition(first.task_id, "failed")
-    await coord.proposals.materialize(_proposed("baseline", {"params": {}}))
-    queued = [t for t in await coord.tasks.queued() if t.kind == "baseline"]
-    assert len(queued) == 1
-    assert queued[0].task_id != first.task_id
-
-
-@pytest.mark.asyncio
-async def test_materialize_carries_the_predicted_gain_onto_the_task(coord: Coordinator) -> None:
-    await coord.proposals.materialize(_proposed("baseline", {"params": {}}))
-
-    (task,) = [t for t in await coord.tasks.queued() if t.kind == "baseline"]
-    assert task.params["predicted_gain_pct"] == 3.0
-
-
-@pytest.mark.asyncio
-async def test_materialize_stops_requeueing_once_every_retry_key_is_spent(coord: Coordinator) -> None:
-    from hyperloom.orchestrator.state.task_registry import RETRY_KEY_ATTEMPTS
-
-    for _ in range(RETRY_KEY_ATTEMPTS):
-        await coord.proposals.materialize(_proposed("baseline", {"params": {}}))
-        (task,) = [t for t in await coord.tasks.queued() if t.kind == "baseline"]
-        await coord.tasks.transition(task.task_id, "running")
-        await coord.tasks.transition(task.task_id, "failed")
-
-    await coord.proposals.materialize(_proposed("baseline", {"params": {}}))
-
-    assert [t for t in await coord.tasks.queued() if t.kind == "baseline"] == []
-    tail = await coord.bus.tail(topic="observation", n=20)
-    skipped = [m.payload["reason"] for m in tail if m.payload.get("kind") == "proposal_materialize_skipped"]
-    assert skipped == ["idempotency_key_exhausted"]
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize(
-    ("result", "requeued_key"),
-    [
-        ({"status": "failed", "error_class": "server_launch_failed", "error": "server exited 1"}, "-retry1"),
-        ({"status": "ok", "output_throughput": 100.0, "completed_requests": 8}, None),
-    ],
-    ids=["failed-result", "measured-result"],
-)
-async def test_a_baseline_twin_answers_a_repeat_proposal_only_once_it_measured(
-    coord: Coordinator, result: dict, requeued_key: str | None
-) -> None:
-    """The runner books every returned result ``succeeded``; whether the twin measured is in the result itself."""
+async def _run_baseline(coord: Coordinator, task, result: dict) -> None:
+    """Run ``task`` to the end with ``result``; the runner books every returned result ``succeeded``."""
 
     async def _baseline(_ctx):
         return dict(result)
 
     coord.sub.register_executor("baseline", _baseline)
-    await coord.proposals.materialize(_proposed("baseline", {"params": {}}))
-    first = [t for t in await coord.tasks.queued() if t.kind == "baseline"][0]
     lease = await coord.locks.acquire_many(
-        list(first.requires_lanes), holder_id=first.task_id, task_id=first.task_id, action="baseline", ttl_sec=600
+        list(task.requires_lanes), holder_id=task.task_id, task_id=task.task_id, action="baseline", ttl_sec=600
     )
-    await coord.sub.run_task(first, prebound_lease=lease)
-    assert (await coord.tasks.get(first.task_id)).state == "succeeded"
+    await coord.sub.run_task(task, prebound_lease=lease)
+    assert (await coord.tasks.get(task.task_id)).state == "succeeded"
 
-    await coord.proposals.materialize(_proposed("baseline", {"params": {}}))
 
-    live = [t.idempotency_key for t in (*await coord.tasks.queued(), *await coord.tasks.running())]
-    tail = await coord.bus.tail(topic="observation", n=20)
-    skipped = [m.payload for m in tail if m.payload.get("kind") == "proposal_materialize_skipped"]
-    if requeued_key is None:
-        assert live == []
-        assert [(p["reason"], p["task_id"]) for p in skipped] == [("baseline_already_succeeded", first.task_id)]
-    else:
-        assert live == [f"{first.idempotency_key}{requeued_key}"]
-        assert skipped == []
+@pytest.mark.asyncio
+async def test_a_delegated_explore_is_seeded_with_the_stack_it_measures_on(coord: Coordinator) -> None:
+    # Regression: explore must inherit current_best.extra_envs as its env base, else the accepted stack's envs
+    # collapse to the last variant's delta.
+    coord.shared_state.phase = "FRAMEWORK_AGENT"
+    coord.shared_state.baseline_tput = 800.0
+    coord.shared_state.current_best = {
+        "tput": 900.0,
+        "extra_server_args": "--kv-cache-dtype fp8",
+        "extra_envs": {"VLLM_ROCM_USE_AITER_MHA": "1", "HIP_FORCE_DEV_KERNARG": "1"},
+    }
+
+    await coord.router.handle_intent("orchestration", _delegate("explore", {"grid": [{"name": "v0"}]}))
+
+    (task,) = await coord.tasks.queued()
+    assert task.params["base_extra_args"] == "--kv-cache-dtype fp8"
+    assert task.params["base_extra_envs"] == {
+        "VLLM_ROCM_USE_AITER_MHA": "1",
+        "HIP_FORCE_DEV_KERNARG": "1",
+    }
+    assert task.params["keep_threshold_pct"] == pytest.approx(resolve_keep_threshold(coord.shared_state))
+    assert task.params["proposal_msg_id"]
+
+
+@pytest.mark.asyncio
+async def test_a_repeated_baseline_delegate_is_answered_by_the_one_still_queued(coord: Coordinator) -> None:
+    """A baseline is its launch: a later tick, a key the agent wrote or a param outside the launch starts no second
+    bring-up."""
+    await coord.router.handle_intent("orchestration", _delegate("baseline", {"runs": 1}))
+    (first,) = await _baselines(coord)
+    coord.shared_state.tick = int(coord.shared_state.tick or 0) + 7
+
+    await coord.router.handle_intent("orchestration", _delegate("baseline", {"runs": 2, "tag": "again"}))
+    await coord.router.handle_intent(
+        "orchestration",
+        Intent(type=IntentType.DELEGATE, payload={"action_name": "baseline", "idempotency_key": "baseline-take-2"}),
+    )
+
+    assert [t.task_id for t in await _baselines(coord)] == [first.task_id]
+    assert await _observed(coord, "policy_denied", "rule") == ["duplicate_idempotency_key_running"] * 2
+
+
+@pytest.mark.asyncio
+async def test_baseline_delegates_with_different_launches_queue_separately(coord: Coordinator) -> None:
+    await coord.router.handle_intent("orchestration", _delegate("baseline", {}))
+    await coord.router.handle_intent(
+        "orchestration", _delegate("baseline", {"extra_envs": {"VLLM_ROCM_USE_AITER_MOE": "0"}})
+    )
+
+    assert len(await _baselines(coord)) == 2
+    assert await _observed(coord, "policy_denied", "rule") == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("result", "refusal", "keys_after"),
+    [
+        (_FAILED_BASELINE, [], ["{key}", "{key}-retry1"]),
+        (_MEASURED_BASELINE, ["duplicate_idempotency_key"], ["{key}"]),
+    ],
+    ids=["failed-result", "measured-result"],
+)
+async def test_a_baseline_twin_answers_a_repeat_delegate_only_once_it_measured(
+    coord: Coordinator, result: dict, refusal: list[str], keys_after: list[str]
+) -> None:
+    """Whether the twin measured is in its result: a failed one leaves a retry key, a measured one is the answer."""
+    await coord.router.handle_intent("orchestration", _delegate("baseline", {}))
+    (first,) = await _baselines(coord)
+    await _run_baseline(coord, first, result)
+
+    await coord.router.handle_intent("orchestration", _delegate("baseline", {}))
+
+    assert await _observed(coord, "policy_denied", "rule") == refusal
+    assert [t.idempotency_key for t in await _baselines(coord)] == [
+        key.format(key=first.idempotency_key) for key in keys_after
+    ]
+    denied = [
+        m.payload for m in await coord.bus.tail(topic="observation", n=50) if m.payload.get("kind") == "policy_denied"
+    ]
+    assert all(first.task_id in payload["hint"] for payload in denied)
+
+
+@pytest.mark.asyncio
+async def test_a_baseline_delegate_is_refused_once_every_retry_key_is_spent(coord: Coordinator) -> None:
+    from hyperloom.orchestrator.state.task_registry import RETRY_KEY_ATTEMPTS
+
+    for _ in range(RETRY_KEY_ATTEMPTS):
+        await coord.router.handle_intent("orchestration", _delegate("baseline", {}))
+        (task,) = [t for t in await coord.tasks.queued() if t.kind == "baseline"]
+        await coord.tasks.transition(task.task_id, "running")
+        await coord.tasks.transition(task.task_id, "failed")
+    assert await _observed(coord, "policy_denied", "rule") == []
+
+    await coord.router.handle_intent("orchestration", _delegate("baseline", {}))
+
+    assert len(await _baselines(coord)) == RETRY_KEY_ATTEMPTS
+    assert [t for t in await coord.tasks.queued() if t.kind == "baseline"] == []
+    assert await _observed(coord, "policy_denied", "rule") == ["duplicate_idempotency_key"]
+    assert await _observed(coord, "policy_denied", "reason") == [
+        f"delegate{{action_name='baseline'}} duplicate idempotency_key exhausted retries for "
+        f"{(await _baselines(coord))[0].idempotency_key!r}"
+    ]
 
 
 # -- handle_delegate branches ----------------------------------------------
-# An explore is admitted on something to measure; these tests are about the other delegate branches,
-# not that grid, so they delegate one admission has no quarrel with.
-_DELEGATE_PARAMS = {"explore": {"grid": [{"name": "v1"}]}}
-
-
-def _delegate(action_name: str, key: str, params=None) -> Intent:
-    payload = {
-        "action_name": action_name,
-        "params": params if params is not None else dict(_DELEGATE_PARAMS.get(action_name, {})),
-        "idempotency_key": key,
-    }
-    return Intent(type=IntentType.DELEGATE, payload=payload)
-
-
 @pytest.mark.asyncio
 async def test_handle_delegate_pruned_advisory(coord: Coordinator, monkeypatch) -> None:
     coord.shared_state.baseline_tput = 800.0
     coord.shared_state.phase = "FRAMEWORK_AGENT"
     monkeypatch.setattr(coord.shared_state, "is_pruned", lambda a: True)
-    await coord.router.handle_delegate("orchestration", _delegate("explore", "d-pruned"))
+    await coord.router.handle_delegate("orchestration", _delegate("explore"))
     assert await coord.tasks.queued()
+    assert await _observed(coord, "delegate_pruned_advisory", "action") == ["explore"]
 
 
 @pytest.mark.asyncio
@@ -2519,52 +2479,9 @@ async def test_handle_delegate_admission_denied(coord: Coordinator, monkeypatch)
         recorded.append(denied)
 
     monkeypatch.setattr(coord.router, "record_policy_denied", _rec)
-    await coord.router.handle_delegate("orchestration", _delegate("explore", "d-seq"))
+    await coord.router.handle_delegate("orchestration", _delegate("explore"))
     assert [d.rule for d in recorded] == ["phase_incompatible"]
     assert await coord.tasks.queued() == []
-
-
-@pytest.mark.asyncio
-async def test_handle_delegate_duplicate_running_denied(coord: Coordinator, monkeypatch) -> None:
-    await coord.router.handle_delegate("orchestration", _delegate("baseline", "d-same", {"runs": 1}))
-    recorded: list = []
-
-    async def _rec(source, intent, denied, action_name=None):
-        recorded.append(denied)
-
-    monkeypatch.setattr(coord.router, "record_policy_denied", _rec)
-    # Same key while the first task is still queued (non-terminal) -> denied.
-    await coord.router.handle_delegate("orchestration", _delegate("baseline", "d-same", {"runs": 2}))
-    assert [d.rule for d in recorded] == ["duplicate_idempotency_key_running"]
-
-
-@pytest.mark.asyncio
-async def test_a_delegate_reusing_the_key_of_a_measured_baseline_is_answered_by_it(
-    coord: Coordinator, monkeypatch
-) -> None:
-    """The twin rule a proposed baseline is held to holds on the delegate channel too."""
-
-    async def _baseline(_ctx):
-        return {"status": "ok", "output_throughput": 100.0, "completed_requests": 8}
-
-    coord.sub.register_executor("baseline", _baseline)
-    await coord.router.handle_delegate("orchestration", _delegate("baseline", "d-measured", {"runs": 1}))
-    (first,) = [t for t in await coord.tasks.queued() if t.kind == "baseline"]
-    lease = await coord.locks.acquire_many(
-        list(first.requires_lanes), holder_id=first.task_id, task_id=first.task_id, action="baseline", ttl_sec=600
-    )
-    await coord.sub.run_task(first, prebound_lease=lease)
-    recorded: list = []
-
-    async def _rec(source, intent, denied, action_name=None):
-        recorded.append(denied)
-
-    monkeypatch.setattr(coord.router, "record_policy_denied", _rec)
-
-    await coord.router.handle_delegate("orchestration", _delegate("baseline", "d-measured", {"runs": 1}))
-
-    assert [d.rule for d in recorded] == ["duplicate_idempotency_key"]
-    assert [t for t in await coord.tasks.queued() if t.kind == "baseline"] == []
 
 
 # -- one integrate_patch per specialist deliverable -------------------------
@@ -2641,38 +2558,30 @@ async def _end_specialist(coord: Coordinator, finish: asyncio.Event, *, booked: 
         await coord.dispatcher._drain_completions()
 
 
-def _integrate_request(channel: IntentType, params: dict | None = None) -> Intent:
+def _integrate_request(params: dict | None = None) -> Intent:
     payload = {"action_name": "integrate_patch", "params": params or {"specialist_task_id": "spec-a"}}
-    if channel is IntentType.PROPOSE_ACTION:
-        payload.update(predicted_gain_pct=2.0, rationale="land the patch")
-    return Intent(type=channel, payload=payload)
+    return Intent(type=IntentType.DELEGATE, payload=payload)
 
 
 async def _observed(coord: Coordinator, kind: str, field: str) -> list:
     return [m.payload[field] for m in await coord.bus.tail(topic="observation", n=50) if m.payload.get("kind") == kind]
 
 
-_CHANNELS = pytest.mark.parametrize(
-    "channel", [IntentType.DELEGATE, IntentType.PROPOSE_ACTION], ids=["delegate", "propose_action"]
-)
-
-
 @pytest.mark.asyncio
-@_CHANNELS
 @pytest.mark.parametrize("booked", [False, True], ids=["asked-before-its-result-is-booked", "asked-after"])
 async def test_an_agents_integrate_patch_waits_for_its_specialist_and_lands_the_deliverable_once(
-    coord: Coordinator, monkeypatch, channel: IntentType, booked: bool
+    coord: Coordinator, monkeypatch, booked: bool
 ) -> None:
     """Asked for while the specialist runs it is denied; asked for once it ended it is the task the Coordinator queues."""
     finish = await _dispatch_specialist(coord, monkeypatch, _PATCH_DELIVERABLE)
 
-    await coord.router.handle_intent("orchestration", _integrate_request(channel))
+    await coord.router.handle_intent("orchestration", _integrate_request())
 
     assert await _observed(coord, "policy_denied", "rule") == ["integrate_patch_specialist_unfinished"]
     assert await _integrate_tasks(coord) == []
 
     await _end_specialist(coord, finish, booked=booked)
-    await coord.router.handle_intent("orchestration", _integrate_request(channel))
+    await coord.router.handle_intent("orchestration", _integrate_request())
     await coord.dispatcher._drain_completions()
 
     (task,) = await _integrate_tasks(coord)
@@ -2683,24 +2592,18 @@ async def test_an_agents_integrate_patch_waits_for_its_specialist_and_lands_the_
 
 
 @pytest.mark.asyncio
-@_CHANNELS
-async def test_an_agent_cannot_integrate_a_specialist_that_left_nothing(
-    coord: Coordinator, monkeypatch, channel: IntentType
-) -> None:
+async def test_an_agent_cannot_integrate_a_specialist_that_left_nothing(coord: Coordinator, monkeypatch) -> None:
     finish = await _dispatch_specialist(coord, monkeypatch, {"patches_written": []})
     await _end_specialist(coord, finish)
 
-    await coord.router.handle_intent("orchestration", _integrate_request(channel))
+    await coord.router.handle_intent("orchestration", _integrate_request())
 
     assert await _observed(coord, "policy_denied", "rule") == ["integrate_patch_no_deliverable"]
     assert await _integrate_tasks(coord) == []
 
 
 @pytest.mark.asyncio
-@_CHANNELS
-async def test_an_agent_cannot_queue_the_integrate_patch_of_an_upstream_pr(
-    coord: Coordinator, channel: IntentType
-) -> None:
+async def test_an_agent_cannot_queue_the_integrate_patch_of_an_upstream_pr(coord: Coordinator) -> None:
     """Only the FRAMEWORK_AGENT pump lands a diff fetched from an upstream PR."""
     coord.shared_state.phase = "FRAMEWORK_AGENT"
     coord.shared_state.baseline_tput = 1000.0
@@ -2710,33 +2613,18 @@ async def test_an_agent_cannot_queue_the_integrate_patch_of_an_upstream_pr(
         "source_phase": "FRAMEWORK_AGENT",
     }
 
-    await coord.router.handle_intent("orchestration", _integrate_request(channel, params))
+    await coord.router.handle_intent("orchestration", _integrate_request(params))
 
     assert await _observed(coord, "policy_denied", "rule") == ["integrate_patch_upstream_pr"]
     assert await _integrate_tasks(coord) == []
 
 
 @pytest.mark.asyncio
-@_CHANNELS
 @pytest.mark.parametrize(
     ("ended_with", "refusal", "tasks_after"),
     [
-        (
-            None,
-            {
-                IntentType.DELEGATE: "duplicate_idempotency_key_running",
-                IntentType.PROPOSE_ACTION: "duplicate_proposal_content",
-            },
-            1,
-        ),
-        (
-            {"status": "reverted", "benched": True},
-            {
-                IntentType.DELEGATE: "duplicate_idempotency_key",
-                IntentType.PROPOSE_ACTION: "integrate_patch_already_measured",
-            },
-            1,
-        ),
+        (None, "duplicate_idempotency_key_running", 1),
+        ({"status": "reverted", "benched": True}, "duplicate_idempotency_key", 1),
         ({"status": "apply_failed"}, None, 2),
     ],
     ids=["still-queued", "benchmarked", "ended-unmeasured"],
@@ -2744,9 +2632,8 @@ async def test_an_agent_cannot_queue_the_integrate_patch_of_an_upstream_pr(
 async def test_an_agents_integrate_patch_meets_the_one_the_coordinator_queued(
     coord: Coordinator,
     monkeypatch,
-    channel: IntentType,
     ended_with: dict | None,
-    refusal: dict | None,
+    refusal: str | None,
     tasks_after: int,
 ) -> None:
     """Every route shares the deliverable's key, so it is benchmarked once; a retry is the same deliverable."""
@@ -2767,13 +2654,9 @@ async def test_an_agents_integrate_patch_meets_the_one_the_coordinator_queued(
         )
         await coord.sub.run_task(queued, prebound_lease=lease)
 
-    await coord.router.handle_intent("orchestration", _integrate_request(channel))
+    await coord.router.handle_intent("orchestration", _integrate_request())
 
-    refused = [
-        *await _observed(coord, "policy_denied", "rule"),
-        *await _observed(coord, "proposal_materialize_skipped", "reason"),
-    ]
-    assert refused == ([refusal[channel]] if refusal else [])
+    assert await _observed(coord, "policy_denied", "rule") == ([refusal] if refusal else [])
     tasks = await _integrate_tasks(coord)
     assert [task.idempotency_key for task in tasks] == ["integrate_patch:spec-a", "integrate_patch:spec-a-retry1"][
         :tasks_after
@@ -2793,13 +2676,9 @@ async def test_a_finished_deliverable_is_queued_for_integrate_patch_once(coord: 
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize(
-    "asked_through",
-    [None, IntentType.DELEGATE, IntentType.PROPOSE_ACTION],
-    ids=["queued-by-the-coordinator", "delegate", "propose_action"],
-)
+@pytest.mark.parametrize("delegated", [False, True], ids=["queued-by-the-coordinator", "delegate"])
 async def test_an_enablement_round_moves_onto_the_integrate_patch_of_its_config_deliverable(
-    coord: Coordinator, monkeypatch, asked_through: IntentType | None
+    coord: Coordinator, monkeypatch, delegated: bool
 ) -> None:
     """The round the specialist held is handed to the task that measures what it delivered, whoever queued it."""
 
@@ -2817,9 +2696,9 @@ async def test_an_enablement_round_moves_onto_the_integrate_patch_of_its_config_
     opened = await coord.rounds.open("round-spec-a", now_unix=1.0, holder_task_id="spec-a", lease_sec=600.0)
     assert opened.ok
 
-    await _end_specialist(coord, finish, booked=asked_through is None)
-    if asked_through is not None:
-        await coord.router.handle_intent("orchestration", _integrate_request(asked_through))
+    await _end_specialist(coord, finish, booked=not delegated)
+    if delegated:
+        await coord.router.handle_intent("orchestration", _integrate_request())
 
     (task,) = await _integrate_tasks(coord)
     assert (task.params["enablement"], task.params["extra_envs"]) == (True, {"X": "1"})

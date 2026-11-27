@@ -33,8 +33,6 @@ from hyperloom.orchestrator.state.shared_state import SharedState
 
 from .conftest import silent_backends
 
-_PROPOSE_CHANNELS = (IntentType.DELEGATE, IntentType.PROPOSE_ACTION)
-
 
 def _llm_gate(resources: ResourceFacts | None = None) -> PolicyGate:
     """A gate an orchestration agent emits into.
@@ -112,13 +110,12 @@ async def test_a_refused_request_kind_is_denied_and_leaves_no_failure_row(sessio
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("channel", _PROPOSE_CHANNELS, ids=lambda channel: channel.value)
-async def test_an_action_no_phase_offers_is_denied_and_leaves_no_failure_row(session_dir, channel: IntentType) -> None:
+async def test_an_action_no_phase_offers_is_denied_and_leaves_no_failure_row(session_dir) -> None:
     """Admission refuses the name before a task exists, so nothing reaches the failure ledger."""
     coordinator = Coordinator(session_dir, backends=silent_backends())
     try:
-        payload = {"action_name": "profile", "predicted_gain_pct": 1.0, "params": {}}
-        await coordinator.router.handle_intent("orchestration", Intent(type=channel, payload=payload))
+        payload = {"action_name": "profile", "params": {}}
+        await coordinator.router.handle_intent("orchestration", Intent(type=IntentType.DELEGATE, payload=payload))
 
         assert _denied_rules(coordinator) == ["phase_incompatible"]
         assert coordinator.shared_state.last_action_failures == []
@@ -154,13 +151,12 @@ def _round_in_flight() -> ResourceFacts:
     return ResourceFacts(excluding_round_id="round-1", excluding_round_holder="task-abc")
 
 
-def test_baseline_is_refused_on_both_agent_channels_while_a_round_holds_the_machine() -> None:
+def test_a_delegated_baseline_is_refused_while_a_round_holds_the_machine() -> None:
     """A second bring-up fights the first for the same cards and ports."""
     gate = _llm_gate(_round_in_flight())
-    for channel in _PROPOSE_CHANNELS:
-        with pytest.raises(PolicyDenied) as excinfo:
-            _emit(gate, channel, {"action_name": "baseline", "params": {}})
-        assert excinfo.value.rule == "enablement_round_in_flight", channel
+    with pytest.raises(PolicyDenied) as excinfo:
+        _emit(gate, IntentType.DELEGATE, {"action_name": "baseline", "params": {}})
+    assert excinfo.value.rule == "enablement_round_in_flight"
 
 
 def test_the_round_holders_own_bring_up_is_dispatched_and_no_other_row_is() -> None:

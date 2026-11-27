@@ -898,10 +898,7 @@ def test_policy_gate_phase_strict_allows_in_phase_action():
         at=phase_state.PhaseClock(ts="2026-05-19T00:00:00+00:00", ts_unix=1.0),
     )
     gate = PolicyGate(shared_state=state)
-    intent = Intent(
-        type=IntentType.PROPOSE_ACTION,
-        payload={"action_name": "baseline", "predicted_gain_pct": 0.0},
-    )
+    intent = Intent(type=IntentType.DELEGATE, payload={"action_name": "baseline"})
     gate.validate_intent("orchestration", intent)  # no exception
 
 

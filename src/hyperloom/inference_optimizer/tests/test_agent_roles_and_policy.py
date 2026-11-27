@@ -64,12 +64,6 @@ def test_legacy_watchdog_options_do_not_change_resumed_measurements():
 @pytest.mark.parametrize(
     ("agent", "intent_type", "payload"),
     [
-        pytest.param(
-            "orchestration",
-            IntentType.PROPOSE_ACTION,
-            {"action_name": "baseline", "predicted_gain_pct": 0.0},
-            id="orchestration-propose_action",
-        ),
         pytest.param("orchestration", IntentType.DELEGATE, {"action_name": "baseline"}, id="orchestration-delegate"),
         pytest.param(
             "orchestration",

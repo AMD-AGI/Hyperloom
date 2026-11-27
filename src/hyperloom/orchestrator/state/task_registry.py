@@ -247,10 +247,6 @@ class TaskNotFound(RuntimeError):
     """Raised when a task lookup by ``task_id`` finds no row."""
 
 
-class TerminalTaskReuse(RuntimeError):
-    """An idempotency key already names a task in a terminal state."""
-
-
 def _record_task_state(
     task_id: str,
     kind: str,
@@ -333,10 +329,12 @@ def _insert_queued_task(cur: Any, spec: TaskSpec) -> Task:
 
 
 def create_in_cursor(cur: Any, spec: TaskSpec) -> tuple[Task, bool]:
-    """Create (or adopt) a task row on a cursor the caller already owns.
+    """Create a task row on a cursor the caller already owns, or return the task its key already names.
 
-    Unlike :meth:`TaskRegistry.create_or_return_existing`, which opens its own
-    transaction, the row commits with the caller's work or not at all.
+    The look-up and the insert share the caller's write transaction, so the
+    row commits with the caller's work or not at all. An existing task is
+    returned in whatever state it is in; what an ended one means is the
+    caller's rule.
 
     Args:
         cur: Open cursor inside the caller's write transaction.
@@ -345,20 +343,12 @@ def create_in_cursor(cur: Any, spec: TaskSpec) -> tuple[Task, bool]:
 
     Returns:
         tuple[Task, bool]: ``(task, was_existing)``.
-
-    Raises:
-        TerminalTaskReuse: When the key already names a task in a terminal
-            state.
     """
     _validate_dispatch_class(spec.dispatch_class)
     cur.execute("SELECT * FROM tasks WHERE idempotency_key=?", (spec.idempotency_key,))
     existing = cur.fetchone()
     if existing is not None:
-        task = Task.from_row(existing)
-        if task.state in TERMINAL_STATES:
-            raise TerminalTaskReuse(f"idempotency key {spec.idempotency_key!r} already names a {task.state} task")
-        return task, True
-
+        return Task.from_row(existing), True
     return _insert_queued_task(cur, spec), False
 
 
@@ -434,11 +424,6 @@ class TaskRegistry:
 
     async def create_or_return_existing(self, spec: TaskSpec) -> tuple[Task, bool]:
         """Insert a new task row OR return the existing one keyed by idempotency_key. Returns ``(task, was_existing)``."""
-        _validate_dispatch_class(spec.dispatch_class)
-        existing = await self.db.fetchone("SELECT * FROM tasks WHERE idempotency_key=?", (spec.idempotency_key,))
-        if existing is not None:
-            return Task.from_row(existing), True
-
         if (
             spec.dispatch_class is not None
             and spec.dispatch_origin is None
@@ -446,8 +431,7 @@ class TaskRegistry:
         ):
             spec = replace(spec, dispatch_origin=self._dispatch_origin_provider())
         async with self.db.transaction() as cur:
-            task = _insert_queued_task(cur, spec)
-        return task, False
+            return create_in_cursor(cur, spec)
 
     async def get(self, task_id: str) -> Task:
         """Fetch a single task by id."""
@@ -724,7 +708,6 @@ __all__ = [
     "TaskOutcome",
     "TaskRegistry",
     "TaskSpec",
-    "TerminalTaskReuse",
     "confirmed_result",
     "create_in_cursor",
     "create_on_free_key",

@@ -263,7 +263,7 @@ def _section_phase_semantics(
             "",
             f"{', '.join(sorted(COORDINATOR_INTERNAL_ACTIONS))} are never in the",
             "sets above: the Coordinator dispatches them and PolicyGate denies",
-            "any attempt to propose them (`phase_incompatible`). Denial",
+            "any delegate that names them (`phase_incompatible`). Denial",
             "of any action lands in your inbox as a `policy_denied` event.",
             "",
             "Phase transitions are Coordinator-owned. The hard advance gates",
@@ -355,10 +355,9 @@ def _format_emit_hint(meta: ActionMetadata) -> str:
     """Build the per-action ``EMIT:`` hint showing the correct transport.
 
     Kernel-owned actions render a ``REQUEST{...}`` template; ``specialist`` /
-    ``integrate_patch`` render their closed ``delegate`` payload contracts;
-    ``report`` renders a fixed zero-gain propose_action; an action the
-    Coordinator dispatches itself renders no template; everything else renders
-    a ``propose_action`` template.
+    ``integrate_patch`` render their closed ``delegate`` payload contracts; an
+    action the Coordinator dispatches itself renders no template; everything
+    else renders a bare ``delegate`` template.
 
     Args:
         meta (ActionMetadata): The action to build an emit hint for.
@@ -376,9 +375,7 @@ def _format_emit_hint(meta: ActionMetadata) -> str:
             return f"(no emit — Coordinator dispatches `{kind_hint}` at KERNEL entry)"
         return f"REQUEST{{target_agent='kernel_agent', kind='{kind_hint}', params={{...}}}}"
     if meta.name in COORDINATOR_INTERNAL_ACTIONS:
-        return "(no emit — the Coordinator dispatches it; a proposal is denied as `phase_incompatible`)"
-    if meta.name == "report":
-        return "propose_action{action_name='report', predicted_gain_pct=0.0}"
+        return "(no emit — the Coordinator dispatches it; a delegate is denied as `phase_incompatible`)"
     if meta.name == "specialist":
         return (
             "delegate{action_name='specialist', params={"
@@ -397,7 +394,7 @@ def _format_emit_hint(meta: ActionMetadata) -> str:
             "keep_threshold_pct?=<raise only; floored at the session-cycle bar>, "
             "accuracy_baseline?=<float>}}"
         )
-    return f"propose_action{{action_name='{meta.name}', predicted_gain_pct=<your estimate>}}"
+    return f"delegate{{action_name='{meta.name}', params?={{...}}}}"
 
 
 def _format_grid_injection_hint(name: str) -> str | None:
@@ -492,8 +489,8 @@ def _stop_report_step(phase_key: str) -> str:
     from ..phases.machine_state import allowed_actions_for
 
     if not phase_key or "report" in allowed_actions_for(phase_key):
-        return "propose `report` once (if not already done)"
-    return "do not propose `report` (only CLOSE allows it, and the Coordinator routes the run there)"
+        return "delegate `report` once (if not already done)"
+    return "do not delegate `report` (only CLOSE allows it, and the Coordinator routes the run there)"
 
 
 #: Steps 5 and 6 of the DECISION FRAMEWORK and its never-stay-silent rule; the same in every phase.
@@ -561,17 +558,17 @@ def _section_decision_framework(*, phase: str = "", transport: str = "") -> list
     """
     from ..phases.machine_state import allowed_actions_for
 
-    # An empty phase renders every phase-scoped block, so it keeps the proposal form.
+    # An empty phase renders every phase-scoped block, so it keeps the delegate form.
     phase_key = (phase or "").strip().upper()
     if not phase_key or "baseline" in allowed_actions_for(phase_key):
         measure_lines = [
-            "2. **Measure**: if `baseline_tput == 0`, propose `baseline`. Wait for",
+            "2. **Measure**: if `baseline_tput == 0`, delegate `baseline`. Wait for",
             "   delegated_result; do NOT re-baseline on a positive result with warnings.",
         ]
     else:
         measure_lines = [
             "2. **Measure**: `baseline` is Coordinator-dispatched in this phase, so do",
-            "   not propose it; `baseline_tput` is set when that run promotes.",
+            "   not delegate it; `baseline_tput` is set when that run promotes.",
         ]
     lines = [
         "## 5. DECISION FRAMEWORK (heuristics + facts — the next action is your call)",
@@ -589,7 +586,7 @@ def _section_decision_framework(*, phase: str = "", transport: str = "") -> list
     lines.append(
         "4. **Analysis is auto-managed**. Roofline/profile is enqueued by "
         "the Coordinator at PRELUDE and at every +10% validated-gain "
-        "watermark crossing. Never propose ``profile`` or ``roofline`` "
+        "watermark crossing. Never delegate ``profile`` or ``roofline`` "
         "(see Hard rules).",
     )
     lines.extend(_PHASE_AWARE_SELECTION_LINES)
@@ -747,7 +744,7 @@ allowed action until the patch lands on `optimization_stack`:
   PARTIAL / REVERT → do NOT integrate; pick the next action normally.
 
   **Multi-KEEP queue:** `pending_keep_kernels` (sorted strongest-first)
-  lists queued KEEPs; integrate `[0]` each tick. Do NOT propose `report`
+  lists queued KEEPs; integrate `[0]` each tick. Do NOT delegate `report`
   while it is non-empty. `untried_hot_kernels` may list kernels the
   Coordinator's nomination pass declined; those are not yours to drain.
 

@@ -336,34 +336,32 @@ def _custom_key(cycle: int = 0, prompt: str = _PROMPT) -> str:
 
 @pytest.fixture
 def custom_coord(tmp_path: Path, monkeypatch):
-    """Coordinator stand-in with a configured custom specialist and a mocked router."""
-    from hyperloom.orchestrator.loop.coordinator import Coordinator
-
-    c = Coordinator.__new__(Coordinator)
-    c.session_dir = tmp_path
-    c.shared_state = SharedState(custom_specialist_prompt=_PROMPT, custom_specialist_description=_DESCRIPTION)
-    c.shared_state.phase = "FRAMEWORK_AGENT"
+    """A Coordinator with a configured custom specialist, a git framework tree and a warm-up that names the framework."""
+    state = SharedState(custom_specialist_prompt=_PROMPT, custom_specialist_description=_DESCRIPTION)
+    state.max_minutes = 600
     source_root = tmp_path / "framework"
     (source_root / ".git").mkdir(parents=True)
-    c.shared_state.framework_repo_path = str(source_root)
-    c.tasks = SimpleNamespace(find_by_idempotency_key=AsyncMock(return_value=None))
-    c.bus = SimpleNamespace(record_observation=AsyncMock())
+    state.framework_repo_path = str(source_root)
     monkeypatch.setattr(
         SpecialistDispatchCollaborator,
         "warm_specialist_params",
         AsyncMock(side_effect=lambda params: params.setdefault("framework", "sglang")),
     )
-    c.router.handle_delegate = AsyncMock()  # type: ignore[assignment]
-    c.router.handle_intent = AsyncMock()  # type: ignore[assignment]
-    return c
+    return _coordinator(tmp_path, state)
 
 
-def _dispatched(coord) -> tuple[dict[str, Any], str]:
-    coord.router.handle_delegate.assert_awaited_once()
-    coord.router.handle_intent.assert_not_awaited()
-    src, intent = coord.router.handle_delegate.call_args.args
-    assert src == "orchestration"
-    return intent.payload["params"], intent.payload["idempotency_key"]
+async def _dispatched(coord) -> tuple[dict[str, Any], str]:
+    """The params and key of the one task the dispatch queued, which the Coordinator created itself."""
+    from hyperloom.orchestrator.state.task_registry import task_dispatch_class
+
+    (task,) = await coord.tasks.queued()
+    assert (task.kind, task_dispatch_class(task)) == ("specialist", "coordinator")
+    return task.params, task.idempotency_key
+
+
+async def _custom_observations(coord) -> list[dict[str, Any]]:
+    tail = await coord.bus.tail(topic="observation", n=50)
+    return [m.payload for m in reversed(tail) if str(m.payload.get("kind") or "").startswith("custom_specialist")]
 
 
 _BASE_PARAMS = {
@@ -372,6 +370,8 @@ _BASE_PARAMS = {
     "source": "coordinator_internal",
     "reason": "custom_specialist",
     "framework": "sglang",
+    # The owner a specialist that names a domain is frozen with when its task is created.
+    "source_phase": "EXPLORE",
 }
 
 
@@ -382,16 +382,18 @@ async def test_dispatch_targets_the_most_actionable_gap(custom_coord):
 
     await custom_coord.specialist_dispatch.ensure_custom_specialist()
 
-    params, key = _dispatched(custom_coord)
+    params, key = await _dispatched(custom_coord)
     assert params == {**_BASE_PARAMS, "gap_canonical_id": "gap.high"}
     assert key == _custom_key()
-    custom_coord.bus.record_observation.assert_not_awaited()
+    assert await _custom_observations(custom_coord) == []
+    # Orchestration sent nothing, so nothing is announced to it or charged to it.
+    assert await custom_coord.bus.tail(topic="event") == []
 
 
 async def test_dispatch_without_gaps_uses_the_session_gap(custom_coord):
     await custom_coord.specialist_dispatch.ensure_custom_specialist()
 
-    params, _ = _dispatched(custom_coord)
+    params, _ = await _dispatched(custom_coord)
     assert params == {
         **_BASE_PARAMS,
         "gap_canonical_id": "gap.custom.session",
@@ -406,7 +408,7 @@ async def test_dispatch_key_names_the_cycle_and_the_definition(custom_coord):
 
     await custom_coord.specialist_dispatch.ensure_custom_specialist()
 
-    _, key = _dispatched(custom_coord)
+    _, key = await _dispatched(custom_coord)
     assert key == _custom_key(2, "other focus")
 
 
@@ -434,16 +436,14 @@ async def test_dispatch_falls_back_to_research_when_patches_are_impossible(custo
 
     await custom_coord.specialist_dispatch.ensure_custom_specialist()
 
-    params, _ = _dispatched(custom_coord)
+    params, _ = await _dispatched(custom_coord)
     assert params["mode"] == "research"
-    custom_coord.bus.record_observation.assert_awaited_once_with(
-        "coordinator",
-        "observation",
-        {"kind": "custom_specialist_research_only", "reason": NO_GIT_FRAMEWORK_SOURCE_ROOT},
-    )
+    assert await _custom_observations(custom_coord) == [
+        {"kind": "custom_specialist_research_only", "reason": NO_GIT_FRAMEWORK_SOURCE_ROOT}
+    ]
 
 
-async def test_dispatch_enqueues_one_task_per_cycle_through_the_real_router(tmp_path):
+async def test_dispatch_enqueues_one_task_per_cycle(tmp_path):
     state = SharedState(custom_specialist_prompt=_PROMPT, custom_specialist_description=_DESCRIPTION)
     state.max_minutes = 30
     state.framework = "sglang"
@@ -486,25 +486,21 @@ async def test_the_coordinator_custom_task_passes_the_dispatch_time_gate_and_run
     assert ran == ["custom_specialist"]
 
 
-async def test_a_refused_custom_dispatch_is_requested_once_per_cycle(tmp_path, monkeypatch):
+async def test_a_refused_custom_dispatch_is_recorded_once_per_cycle_and_not_as_orchestrations_denial(tmp_path):
     state = SharedState(custom_specialist_prompt=_PROMPT, custom_specialist_description=_DESCRIPTION)
     # Below the research-mode base, so admission refuses it.
     state.max_minutes = 5
     state.framework = "sglang"
     coord = _coordinator(tmp_path, state)
-    denials: list[tuple[int, str]] = []
-    record = coord.router.record_policy_denied
-
-    async def _record(source, intent, denied, **kwargs):
-        denials.append((coord.shared_state.macro_cycle, denied.rule))
-        await record(source, intent, denied, **kwargs)
-
-    monkeypatch.setattr(coord.router, "record_policy_denied", _record)
     for cycle in (0, 0, 0, 1, 1):
         coord.shared_state.macro_cycle = cycle
         await coord.specialist_dispatch.ensure_custom_specialist()
 
-    assert [cycle for cycle, _ in denials] == [0, 1]
+    refusals = [p for p in await _custom_observations(coord) if p["kind"] == "custom_specialist_refused"]
+    assert [p["rule"] for p in refusals] == ["time_budget", "time_budget"]
+    assert all("specialist" in p["reason"] for p in refusals)
+    tail = await coord.bus.tail(topic="observation", n=50)
+    assert [m.payload for m in tail if m.payload.get("kind") == "policy_denied"] == []
     assert await coord.tasks.queued() == []
     assert coord.specialist_dispatch.refused_custom_key == _custom_key(1)
 

@@ -721,8 +721,8 @@ what an earlier turn happened to remember.
 - **Write path**: All write actions flow through `emit_intent` → the
   Coordinator's intent handler, so the accuracy gate and PolicyGate's
   invariants (path sandbox, resource leases, data dependencies,
-  single-writer rules) apply to every turn. An admitted `propose_action`
-  or `delegate` is queued in the same step.
+  single-writer rules) apply to every turn. `delegate` is the one intent
+  that queues an action, and an admitted one is queued in the same step.
   Repetition is checked against state — the tested-variant ledger and
   the action-failure log — not against agent recall.
 

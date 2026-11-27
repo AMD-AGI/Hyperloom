@@ -92,16 +92,16 @@ async def coordinator(tmp_path, monkeypatch):
         await coord.stop()
 
 
-async def _delegate_specialist(coord: Any, params: dict[str, Any], key: str) -> None:
+async def _delegate_specialist(coord: Any, params: dict[str, Any]) -> None:
     from hyperloom.inference_optimizer.protocol.intent import Intent, IntentType
 
-    payload = {"action_name": "specialist", "idempotency_key": key, "params": params}
+    payload = {"action_name": "specialist", "params": params}
     await coord.router.handle_delegate("orchestration", Intent(type=IntentType.DELEGATE, payload=payload))
 
 
 async def test_a_mandate_delegate_queues_the_patch_specialist_and_withdraws_the_mandate(coordinator):
     params = {"primatune_mandate_id": MANDATE_ID, "task_description": "x", "domain": "serving_specialist"}
-    await _delegate_specialist(coordinator, params, "m1")
+    await _delegate_specialist(coordinator, params)
 
     (task,) = await coordinator.tasks.by_state("queued")
     assert task.params["task_description"] == "Fuse rmsnorm into the QKV GEMM in tuned_gemm.py"
@@ -112,7 +112,7 @@ async def test_a_mandate_delegate_queues_the_patch_specialist_and_withdraws_the_
 
 async def test_a_delegate_citing_no_known_mandate_is_refused_rather_than_run_on_its_placeholder(coordinator):
     params = {"primatune_mandate_id": "primatune-patch-c9-s9-r9", "task_description": "<one line>"}
-    await _delegate_specialist(coordinator, params, "m2")
+    await _delegate_specialist(coordinator, params)
 
     assert await coordinator.tasks.by_state("queued") == []
     denied = [

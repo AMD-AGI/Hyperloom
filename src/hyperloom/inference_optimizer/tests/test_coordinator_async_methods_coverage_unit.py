@@ -916,27 +916,6 @@ async def test_auto_retry_caps_attempts(coord: Coordinator, monkeypatch) -> None
     assert await coord.specialist_dispatch.maybe_auto_retry_specialist(task, res) is False
 
 
-# -- fan_out_specialist_wave (invalid entries) ---------------------------
-@pytest.mark.asyncio
-async def test_fan_out_wave_rejects_invalid_entries(coord: Coordinator, monkeypatch) -> None:
-    called = []
-    monkeypatch.setattr(
-        coord.router,
-        "handle_delegate",
-        lambda *a, **k: called.append(a),
-    )
-    intent = Intent(type=IntentType.DELEGATE, payload={"idempotency_key": "w", "action_name": "specialist"})
-    from hyperloom.orchestrator.policy.denial import PolicyDenied
-
-    with pytest.raises(PolicyDenied):
-        await coord.specialist_dispatch.fan_out_specialist_wave(
-            "orchestration",
-            intent,
-            {"tasks": ["not-a-dict", {}, {"task_description": "   "}]},
-        )
-    assert called == []
-
-
 # -- warm_specialist_params -----------------------------------------------
 @pytest.mark.asyncio
 async def test_warm_specialist_params_always_writes_the_unconditional_keys(coord: Coordinator) -> None:

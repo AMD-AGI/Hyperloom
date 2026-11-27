@@ -11,7 +11,6 @@ from hyperloom.orchestrator.policy.denial import PolicyDenied
 from hyperloom.orchestrator.policy.gate import PolicyGate
 from hyperloom.orchestrator.policy.validators import (
     SPECIALIST_FREEFORM_TASK_DESC_MAX_CHARS,
-    SPECIALIST_FREEFORM_WAVE_MAX,
 )
 from hyperloom.orchestrator.specialists.domains import KNOWLEDGE_DOMAIN_TAG_SET, SPECIALIST_DOMAINS
 from hyperloom.orchestrator.specialists.profile import (
@@ -183,20 +182,6 @@ def test_freeform_single_task_ok(gate):
     )
 
 
-def test_freeform_wave_ok(gate):
-    gate._validate_specialist_dispatch(
-        _dispatch(
-            {
-                "scope": "freeform",
-                "tasks": [
-                    {"task_description": "Investigate prefill batching."},
-                    {"task_description": "Audit KV-cache allocation."},
-                ],
-            }
-        ),
-    )
-
-
 def test_freeform_skips_tag_and_gap_requirements(gate):
     """Freeform carries no domain/tag/gap anchor — the tag/gap checks that a single-domain dispatch would trip must NOT fire here."""
     gate._validate_specialist_dispatch(
@@ -212,6 +197,14 @@ def test_freeform_skips_tag_and_gap_requirements(gate):
 def test_freeform_empty_description_rejected(gate, params):
     with pytest.raises(PolicyDenied) as exc:
         gate._validate_specialist_dispatch(_dispatch(params))
+    assert exc.value.rule == "specialist_freeform_empty_description"
+
+
+def test_a_freeform_dispatch_is_one_task_and_a_tasks_list_stands_in_for_no_description(gate):
+    """``params.tasks`` is not a fan-out: a delegate is one task, so a list of them leaves the description missing."""
+    tasks = [{"task_description": "Investigate prefill batching."}, {"task_description": "Audit KV-cache allocation."}]
+    with pytest.raises(PolicyDenied) as exc:
+        gate._validate_specialist_dispatch(_dispatch({"scope": "freeform", "tasks": tasks}))
     assert exc.value.rule == "specialist_freeform_empty_description"
 
 
@@ -252,47 +245,6 @@ def test_freeform_destructive_text_allowed(gate, desc):
     gate._validate_specialist_dispatch(
         _dispatch({"scope": "freeform", "task_description": desc}),
     )
-
-
-def test_freeform_empty_wave_falls_through_to_single_task(gate):
-    gate._validate_specialist_dispatch(
-        _dispatch({"scope": "freeform", "tasks": [], "task_description": "probe"}),
-    )
-
-
-def test_freeform_wave_too_large_rejected(gate):
-    tasks = [{"task_description": f"task {i}"} for i in range(SPECIALIST_FREEFORM_WAVE_MAX + 1)]
-    with pytest.raises(PolicyDenied) as exc:
-        gate._validate_specialist_dispatch(
-            _dispatch({"scope": "freeform", "tasks": tasks}),
-        )
-    assert exc.value.rule == "specialist_freeform_wave_too_large"
-
-
-def test_freeform_wave_non_dict_task_rejected(gate):
-    with pytest.raises(PolicyDenied) as exc:
-        gate._validate_specialist_dispatch(
-            _dispatch({"scope": "freeform", "tasks": ["not a dict"]}),
-        )
-    assert exc.value.rule == "specialist_freeform_wave_invalid_task"
-    assert "tasks[0]" in str(exc.value)
-
-
-def test_freeform_wave_empty_task_description_rejected(gate):
-    with pytest.raises(PolicyDenied) as exc:
-        gate._validate_specialist_dispatch(
-            _dispatch({"scope": "freeform", "tasks": [{"task_description": ""}]}),
-        )
-    assert exc.value.rule == "specialist_freeform_empty_description"
-    assert "tasks[0]" in str(exc.value)
-
-
-def test_freeform_wave_all_invalid_rejected(gate):
-    with pytest.raises(PolicyDenied) as exc:
-        gate._validate_specialist_dispatch(
-            _dispatch({"scope": "freeform", "tasks": ["bad", {"task_description": ""}]}),
-        )
-    assert exc.value.rule == "specialist_freeform_wave_invalid_task"
 
 
 # --------------------------------------------------------------------------- # Non-freeform scope gating still
@@ -531,42 +483,12 @@ def test_research_specialist_without_needs_gpu_is_not_gated():
     )
 
 
-def test_freeform_wave_mixed_valid_and_invalid_rejected(gate):
-    with pytest.raises(PolicyDenied) as exc:
-        gate._validate_specialist_dispatch(
-            _dispatch(
-                {
-                    "scope": "freeform",
-                    "tasks": [
-                        {"task_description": "valid task"},
-                        {"task_description": ""},
-                    ],
-                }
-            ),
-        )
-    assert exc.value.rule == "specialist_freeform_empty_description"
-    assert "tasks[1]" in str(exc.value)
-
-
 def test_freeform_negative_max_turns_rejected(gate):
     with pytest.raises(PolicyDenied) as exc:
         gate._validate_specialist_dispatch(
             _dispatch({"scope": "freeform", "task_description": "probe", "max_turns": -1}),
         )
     assert "max_turns" in str(exc.value)
-
-
-def test_freeform_wave_task_negative_max_turns_rejected(gate):
-    with pytest.raises(PolicyDenied) as exc:
-        gate._validate_specialist_dispatch(
-            _dispatch(
-                {
-                    "scope": "freeform",
-                    "tasks": [{"task_description": "probe", "max_turns": -1}],
-                }
-            ),
-        )
-    assert "tasks[0].max_turns" in str(exc.value)
 
 
 def test_freeform_max_turns_above_cap_rejected(gate):

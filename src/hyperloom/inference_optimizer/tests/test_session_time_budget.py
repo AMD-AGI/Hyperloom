@@ -443,14 +443,10 @@ class TestThePhaseBudgetGate:
         assert dropped.history[-1]["evidence"]["reason"] == "phase_time_budget"
 
 
-def _delegate(action_name: str, key: str) -> Intent:
+def _delegate(action_name: str) -> Intent:
     return Intent(
         type=IntentType.DELEGATE,
-        payload={
-            "action_name": action_name,
-            "params": _admission_params(action_name) or {},
-            "idempotency_key": key,
-        },
+        payload={"action_name": action_name, "params": _admission_params(action_name) or {}},
     )
 
 
@@ -470,7 +466,7 @@ class TestIntentPathsAreGated:
             recorded.append(denied)
 
         monkeypatch.setattr(proposing_coord.router, "record_policy_denied", _rec)
-        await proposing_coord.router.handle_delegate("orchestration", _delegate(_PROPOSABLE_ACTION, "d-budget"))
+        await proposing_coord.router.handle_delegate("orchestration", _delegate(_PROPOSABLE_ACTION))
         assert [d.rule for d in recorded] == ["time_budget"]
         assert [t for t in await proposing_coord.tasks.queued() if t.kind == _PROPOSABLE_ACTION] == []
 
@@ -482,29 +478,8 @@ class TestIntentPathsAreGated:
     ):
         _set_budget(proposing_coord, minutes=600)
         monkeypatch.setattr(proposing_coord.shared_state, "is_pruned", lambda a: False)
-        await proposing_coord.router.handle_delegate("orchestration", _delegate(_PROPOSABLE_ACTION, "d-ok"))
+        await proposing_coord.router.handle_delegate("orchestration", _delegate(_PROPOSABLE_ACTION))
         assert [t for t in await proposing_coord.tasks.queued() if t.kind == _PROPOSABLE_ACTION]
-
-    @pytest.mark.asyncio
-    async def test_proposing_an_over_budget_action_queues_nothing(
-        self,
-        proposing_coord: Coordinator,
-        monkeypatch,
-    ):
-        _set_budget(proposing_coord, minutes=5)
-        recorded: list[PolicyDenied] = []
-
-        async def _rec(source, intent, denied, action_name=None):
-            recorded.append(denied)
-
-        monkeypatch.setattr(proposing_coord.router, "record_policy_denied", _rec)
-        intent = Intent(
-            type=IntentType.PROPOSE_ACTION,
-            payload={"action_name": _PROPOSABLE_ACTION, "predicted_gain_pct": 5.0},
-        )
-        await proposing_coord.router._handle_propose_action("orchestration", intent)
-        assert [d.rule for d in recorded] == ["time_budget"]
-        assert [t for t in await proposing_coord.tasks.queued() if t.kind == _PROPOSABLE_ACTION] == []
 
 
 class TestPreDispatchBackstop:

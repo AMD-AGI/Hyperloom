@@ -996,12 +996,10 @@ async def test_prune_branch_on_a_catalogue_family_cancels_every_member_action(co
 
         await c.router.handle_intent(
             "orchestration",
-            Intent(
-                type=IntentType.PROPOSE_ACTION, payload={"action_name": "target_analysis", "predicted_gain_pct": 5.0}
-            ),
+            Intent(type=IntentType.DELEGATE, payload={"action_name": "target_analysis"}),
         )
         obs = await c.bus.tail(topic="observation")
-        assert any(m.payload.get("kind") == "proposal_pruned_advisory" for m in obs)
+        assert any(m.payload.get("kind") == "delegate_pruned_advisory" for m in obs)
     finally:
         await c.stop()
 

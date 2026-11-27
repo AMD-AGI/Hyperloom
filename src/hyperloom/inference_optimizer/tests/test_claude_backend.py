@@ -363,8 +363,8 @@ async def test_run_extracts_multiple_emit_intent_tool_uses(claude_sdk):
             ToolUseBlock(
                 name=EMIT_INTENT_TOOL_QUALIFIED,
                 input={
-                    "intent_type": "propose_action",
-                    "payload": {"action_name": "baseline", "predicted_gain_pct": 0.0},
+                    "intent_type": "delegate",
+                    "payload": {"action_name": "baseline"},
                 },
             ),
             ToolUseBlock(
@@ -380,7 +380,7 @@ async def test_run_extracts_multiple_emit_intent_tool_uses(claude_sdk):
     backend = ClaudeBackend()
     res = await backend.run("p")
     assert len(res.intents) == 2
-    assert res.intents[0].type == IntentType.PROPOSE_ACTION
+    assert res.intents[0].type == IntentType.DELEGATE
     assert res.intents[1].type == IntentType.REQUEST
 
 

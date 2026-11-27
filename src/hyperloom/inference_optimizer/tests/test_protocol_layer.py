@@ -62,9 +62,12 @@ def test_validate_envelope_unknown_intent_rejected():
         validate_envelope(envelope)
 
 
-def test_validate_envelope_propose_action_requires_predicted_gain():
-    envelope = {"intents": [{"intent_type": "propose_action", "payload": {"action_name": "baseline"}}]}
-    with pytest.raises(IntentValidationError, match="predicted_gain_pct"):
+def test_validate_envelope_refuses_the_retired_propose_action_type():
+    """``delegate`` queues every task; an agent that still sends the retired type is told so."""
+    envelope = {
+        "intents": [{"intent_type": "propose_action", "payload": {"action_name": "baseline", "predicted_gain_pct": 0}}]
+    }
+    with pytest.raises(IntentValidationError, match="'propose_action' not in allowed set"):
         validate_envelope(envelope)
 
 

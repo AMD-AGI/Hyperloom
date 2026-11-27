@@ -195,20 +195,17 @@ Critic was idle or healthy.
 
 What a proposal and a specialist deliverable now do:
 
-* A `propose_action` from Orchestration passes PolicyGate and the admission
-  chain, and its task is queued in the same step, announced by a `task_queued`
-  event as a `delegate` is. A repeat is answered by what already exists: a
-  task of the same content still queued or running, a `baseline` that already
-  measured, or an `integrate_patch` that already benchmarked that specialist's
-  deliverable. It is recorded as a `proposal_materialize_skipped` observation
-  with reason `duplicate_proposal_content`, `baseline_already_succeeded`,
-  `integrate_patch_already_measured` or `idempotency_key_exhausted`.
+* Nothing waits for a review. Orchestration queues every action with a
+  `delegate`, which passes PolicyGate and the admission chain and is queued in
+  the same step, announced by a `task_queued` event. The `propose_action`
+  intent, which 1.2.x held until the Critic ruled, is removed: see
+  [`propose_action` is removed](#required-propose_action-is-removed-and-delegate-queues-every-task).
 * When a specialist finishes with a patch or a routable artifact, or an
   ENABLEMENT round finishes with a config-only deliverable, the Coordinator
   queues the `integrate_patch` for that deliverable itself. A deliverable has
   one idempotency key, `integrate_patch:<specialist_task_id>`, whoever asks.
-* An `integrate_patch` that Orchestration asks for, by `delegate` or by
-  `propose_action`, is that same task: it carries the deliverable's own params
+* An `integrate_patch` that Orchestration asks for is that same task: it
+  carries the deliverable's own params
   (its patch name, companion flags and environment, ENABLEMENT round context
   and owner), with anything else Orchestration sent beside them. It is denied
   with `policy_denied` rule `integrate_patch_specialist_unfinished` while the
@@ -220,8 +217,8 @@ What a proposal and a specialist deliverable now do:
   `integrate_patch` already benchmarked the deliverable is denied with
   `duplicate_idempotency_key`; one whose earlier `integrate_patch` ended
   without a benchmark starts a new task. The same rule now answers every
-  `delegate`: one that reuses the key of a `baseline` that already measured is
-  denied with `duplicate_idempotency_key` where it started a second baseline.
+  `delegate`: one that repeats a `baseline` that already measured is denied
+  with `duplicate_idempotency_key` where it started a second baseline.
 * Orchestration cannot queue an `integrate_patch` with
   `patch_source=upstream_pr`: it is denied with rule
   `integrate_patch_upstream_pr`. Only the FRAMEWORK_AGENT phase lands the
@@ -271,9 +268,9 @@ of the keys that go:
   `materialized` counters and its `rows`, including each row's `critic_review`
   and `outcome`;
 * `critic_review` on the proposal rows of a `framework_agent` event, whose
-  `lifecycle` no longer has a `reviewed` step. A grid Orchestration sent as a
-  `propose_action` now has the lifecycle a delegated grid has, `proposed` then
-  `attempted`, without the `routed` step in between.
+  `lifecycle` no longer has a `reviewed` step. Every grid Orchestration sends
+  has the lifecycle a delegated grid had, `proposed` then `attempted`, without
+  the `routed` step a reviewed proposal had in between.
 
 A consumer reads the task a proposal became from the dispatch row in
 `ext.actions.rows[]` of the phase event, and a refused intent from a row in
@@ -429,8 +426,8 @@ Five behaviours change at the edges:
   later in the same one. The failure charged for such a task (`error_class`
   `dead_holder_reaped`) ends `task reclaimed by the reconciler`; 1.2.x ended
   it `task reclaimed by dead_holder_pump`.
-* A delegate whose `idempotency_key` names a task another author created is
-  answered like any other reused key: with `duplicate_idempotency_key` or
+* A delegate whose key names a task another author created is answered like
+  any other repeated key: with `duplicate_idempotency_key` or
   `duplicate_idempotency_key_running`, or with a new task under
   `<key>-retry<n>` when the earlier one ended unmeasured. 1.2.x raised
   `idempotent task dispatch_class mismatch`, recorded as a
@@ -603,8 +600,9 @@ that acts on it, and none of them is recorded as a failed action.
   tasks at the start of the tick, so it also refused a task that had started
   during the Orchestration turn; that extension is now granted.
   `extend_lease_bounds` is unchanged.
-* `propose_action` and `delegate` are never denied with rule
-  `execution_order`. The rule refused `explore`, `integrate` and `report`
+* A `delegate` is never denied with rule `execution_order`, which also
+  refused the removed `propose_action`. The rule refused `explore`,
+  `integrate` and `report`
   before a baseline, and the phase table already does (`phase_incompatible`):
   a session with no baseline is in PRELUDE or ENABLEMENT, which offer none of
   the three, or in CLOSE, where the rule did not apply. A kernel `request`
@@ -900,6 +898,122 @@ Four behaviours change on `--resume-from`:
 * An authored patch whose outcome was booked while its phase had moved on is
   recovered from the task rows of the booked results, not from the events'
   copies; the same rows are recovered.
+
+### Required: `propose_action` is removed and `delegate` queues every task
+
+Orchestration had two intents that queue an action. `propose_action` waited
+for the Critic in 1.2.x; with the Critic gone it created the same task as
+`delegate`, seeded and keyed a little differently, and for a `specialist` it
+skipped the specialist contract and took only `research_lane`, so a bench
+specialist sent that way could start beside a serving benchmark. `delegate` is
+now the only one, and a delegate names its task by the work it asks for.
+
+Do these first:
+
+* In an Orchestration prompt you pass with `--orch-prompt`, replace every
+  `propose_action{action_name=..., predicted_gain_pct=...}` with
+  `delegate{action_name=..., params={...}}`. A `propose_action` is refused in
+  the turn that sends it: the `emit_intent` tool answers
+  `emit_intent: unknown intent_type 'propose_action'`, a JSON envelope fails
+  with `intents[<i>].intent_type 'propose_action' not in allowed set`, and
+  the tool's schema no longer lists the type.
+* Drop the top-level `predicted_gain_pct`: no intent requires it and nothing
+  reads it there. An estimate written as `params.predicted_gain_pct` is still
+  recorded as the action's predicted gain in the recipe's journal.
+* Stop sending `idempotency_key`, at the top level or under `params`: both
+  are ignored, and the one under `params` is removed before the task is
+  created. To run identical work again, send it again after its task ended.
+* Stop sending a specialist wave (`params.tasks=[...]`). Send one `delegate`
+  per task; a turn carries as many intents as you emit. A `scope=freeform`
+  delegate that carries `tasks` and no `task_description` is denied with rule
+  `specialist_freeform_empty_description`; beside a `task_description` the
+  list is not read.
+
+The key of a task (`tasks.idempotency_key` in `storage/coordinator.db`, shown
+in the `=== Tasks in flight ===` block of the prompt) is now always derived by
+the Coordinator:
+
+| Delegate | Key | What it is taken over |
+|---|---|---|
+| `integrate_patch` naming a specialist | `integrate_patch:<specialist_task_id>` | The deliverable, as before. |
+| `baseline` | `baseline:<16 hex>` | The seven launch fields: `benchmark_script`, `result_dir`, `extra_server_args`, `extra_envs`, `model_path`, `gpu_type`, `config_path`. |
+| `explore` | `explore:<16 hex>` (1.2.x: `explore:<10 hex>`) | The grid with the stack, KEEP bar and round cursor the Coordinator seeds it with, as before. |
+| `specialist` | `specialist:<16 hex>` | The params as delegated, with its owner and a cited predictor mandate resolved, before the dispatch is warmed with session context. |
+| any other action | `<action>:<16 hex>` | Its `params`. |
+
+For a `delegate` other than an `explore`, 1.2.x took the `idempotency_key`
+Orchestration sent, and without one used
+`orchestration:<action>:t<tick>:<10 hex>`, which changed every tick. What
+that changes:
+
+* A `delegate` that repeats work whose task is still queued or running is
+  denied with rule `duplicate_idempotency_key_running`. In 1.2.x a `baseline`
+  delegated again on a later tick was a second bring-up, and a specialist
+  delegated again with the same params was a second task.
+* A `delegate` that repeats a `baseline` that measured, or an
+  `integrate_patch` that benchmarked its deliverable, is denied with rule
+  `duplicate_idempotency_key`; the hint names the task that holds the answer.
+* A `delegate` that repeats work whose task ended any other way starts a new
+  task under `<key>-retry<n>`, five times at most. The seventh identical
+  delegate of a session is denied with rule `duplicate_idempotency_key` and
+  the reason `idempotency_key exhausted retries`. That limit now also holds
+  for a `specialist` and a `target_analysis` delegated with unchanged params;
+  change the params to ask for different work.
+* Each of these refusals is a `policy_denied` observation in Orchestration's
+  inbox and a row in `ext.denials.rows[]` of the phase event in
+  `session_breakdown.json`.
+
+Update anything that matches on the following, which no longer occur:
+
+* The observation `proposal_materialize_skipped` and its reasons. A refused
+  repeat is a `policy_denied` observation instead:
+
+  | 1.2.x reason | Now, rule of the `policy_denied` |
+  |---|---|
+  | `duplicate_proposal_content` | `duplicate_idempotency_key_running` |
+  | `baseline_already_succeeded`, `integrate_patch_already_measured` | `duplicate_idempotency_key` |
+  | `idempotency_key_exhausted` | `duplicate_idempotency_key`, reason `... idempotency_key exhausted retries for '<key>'` |
+
+* The observations `proposal_pruned_advisory` and `proposal_rejected`; a
+  delegate in a pruned family or for a patch no phase owns is reported as
+  `delegate_pruned_advisory` and `delegate_rejected`, as it already was.
+* The outcome `submitted` of the `proposed` step in the `lifecycle` of a
+  `framework_agent` proposal row; a grid Orchestration sends has `delegated`.
+* The `policy_denied` rules `specialist_freeform_wave_too_large` and
+  `specialist_freeform_wave_invalid_task`, and task keys ending `-w<index>`.
+* An `intent` event whose `name` is `propose_action` in the trajectory
+  ledger.
+
+The operator-defined specialist (`--custom-specialist-prompt-file`) is no
+longer sent through Orchestration's intent path; the Coordinator creates its
+task itself. The task, its key, its lanes and its owner are what they were.
+What you can see change:
+
+* Its dispatch row in `ext.actions.rows[]` has `dispatch_class` `coordinator`;
+  1.2.x recorded `llm`.
+* No `task_queued` event and no `delegate_pruned_advisory` observation is
+  written for it.
+* When the admission chain refuses it, the log line
+  `custom specialist: dispatch <key> refused (<rule>); not retried this cycle`
+  names the rule and one `custom_specialist_refused` observation carries
+  `rule` and `reason`. 1.2.x recorded that refusal as a `policy_denied`
+  observation addressed to Orchestration, for an intent it had not sent, and
+  as a `denials` row of the phase event with actor `orchestration`; neither
+  is written now.
+
+Two smaller changes:
+
+* A patch-mode specialist refused because no git source tree backs it leaves
+  a row in `last_action_failures` whose `task_id` is empty. No task exists for
+  it; 1.2.x copied the `idempotency_key` Orchestration had sent into that
+  field.
+* The Orchestration prompt shows `EMIT: delegate{action_name='<action>',
+  params?={...}}` for `baseline`, `target_analysis`, `explore`, `report` and
+  `session_breakdown`, its free-form specialist example is one delegate with a
+  `task_description`, and its hard rules say that the Coordinator keys every
+  delegate. The hint of rule `specialist_freeform_empty_description` reads
+  `A freeform specialist needs a natural-language task_description (the whole
+  mandate).`
 
 ---
 

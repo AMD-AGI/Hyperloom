@@ -42,7 +42,6 @@ from .denial import PolicyDenied
 from ..specialists.profile import SCOPE_FREEFORM as SPECIALIST_SCOPE_FREEFORM
 from ..specialists.patch_safety import parse_patch_targets
 from .validators import (
-    SPECIALIST_FREEFORM_WAVE_MAX,
     check_freeform_task_description,
     log_specialist_dispatch_coherence,
     validate_gemm_tuning_request,
@@ -206,8 +205,6 @@ class PolicyGate:
         # Per-intent structural validators
         if intent.type == IntentType.DELEGATE:
             self._validate_delegate(payload)
-        elif intent.type == IntentType.PROPOSE_ACTION:
-            self._validate_propose_action(payload)
         elif intent.type == IntentType.REQUEST:
             self._validate_request(from_agent, payload)
         elif intent.type == IntentType.EXTEND_LEASE:
@@ -297,25 +294,6 @@ class PolicyGate:
         # round is admitted by its own id rather than by skipping the channel.
         self._validate_baseline_not_mid_round(action_name, task_id=task_id)
 
-    def _validate_propose_action(self, payload: dict[str, Any]) -> None:
-        """Validate a ``PROPOSE_ACTION`` intent.
-
-        Requires ``action_name``, then applies the bring-up round rule the
-        delegate channel applies. Which actions the phase lets an agent name is
-        the admission chain's rule, not this one's.
-
-        Args:
-            payload (dict[str, Any]): the propose_action payload, expected
-                to carry ``action_name`` and optional ``params``.
-
-        Raises:
-            PolicyDenied: if ``action_name`` is missing or that rule refuses it.
-        """
-        action_name = str(payload.get("action_name", "")).strip()
-        if not action_name:
-            raise PolicyDenied("propose_action missing action_name", rule="payload")
-        self._validate_baseline_not_mid_round(action_name)
-
     def _validate_baseline_not_mid_round(self, action_name: str, *, task_id: str = "") -> None:
         """Deny a baseline while a bring-up round holds the machine.
 
@@ -326,9 +304,9 @@ class PolicyGate:
         decides.
 
         Args:
-            action_name: The proposed, delegated or dispatched action name.
-            task_id: The dispatched row's id; empty on the agent channels,
-                where no row exists yet.
+            action_name: The delegated or dispatched action name.
+            task_id: The dispatched row's id; empty for an agent's delegate,
+                which has no row yet.
 
         Raises:
             PolicyDenied: When a round was holding the machine at the last
@@ -555,44 +533,22 @@ class PolicyGate:
     ) -> None:
         """Lightweight mechanical sanity gate for ``scope='freeform'``
         specialists. Free-form dispatches carry no domain/tag/gap anchor, so this
-        validates only structural shape: a single ``task_description`` or a
-        ``tasks=[...]`` wave (bounded by SPECIALIST_FREEFORM_WAVE_MAX), each
-        with a non-empty, length-bounded description.
+        validates only structural shape: one non-empty, length-bounded
+        ``task_description``.
 
         Args:
-            params (dict[str, Any]): the freeform dispatch ``params`` carrying a
-                single ``task_description`` or a ``tasks`` wave.
+            params (dict[str, Any]): the freeform dispatch ``params`` carrying
+                its ``task_description``.
 
         Raises:
-            PolicyDenied: when the GPU request fails, the wave is too large, or
-                a task description is empty / too long.
+            PolicyDenied: when the GPU request fails, or the task description
+                is empty / too long.
         """
         # Freeform applies the same max_turns contract as domain dispatches.
-        # Per-task overrides in a wave are checked per entry below.
         validate_specialist_max_turns_raw(params.get("max_turns"), where="params.max_turns")
         self._validate_specialist_gpu_request(params)
-        wave = params.get("tasks")
-        # A malformed or empty wave falls through to the single-task path in the
-        # fan-out, which re-checks shape per entry.
-        if isinstance(wave, list) and wave:
-            if len(wave) > SPECIALIST_FREEFORM_WAVE_MAX:
-                raise PolicyDenied(
-                    f"delegate{{action='specialist',scope='freeform'}}: wave "
-                    f"size={len(wave)} exceeds cap "
-                    f"{SPECIALIST_FREEFORM_WAVE_MAX}",
-                    rule="specialist_freeform_wave_too_large",
-                    hint=(f"Split the wave into batches of at most {SPECIALIST_FREEFORM_WAVE_MAX} tasks."),
-                )
-            for i, task in enumerate(wave):
-                validate_freeform_wave_task(task, index=i)
-                if isinstance(task, dict):
-                    validate_specialist_max_turns_raw(
-                        task.get("max_turns"),
-                        where=f"tasks[{i}].max_turns",
-                    )
-            return
         desc = str(params.get("task_description") or "").strip()
-        check_freeform_task_description(desc, where="params")
+        check_freeform_task_description(desc)
 
     def _validate_extend_lease(self, payload: dict[str, Any]) -> None:
         """Validate an ``EXTEND_LEASE`` intent.
@@ -883,36 +839,10 @@ def _warm_plan_entry_targets(entry: Any, index: int) -> list[str]:
     return raw_targets
 
 
-def validate_freeform_wave_task(task: Any, *, index: int) -> str:
-    """Validate one entry in a freeform specialist ``tasks`` wave.
-
-    Args:
-        task: One wave entry; must be a dict with a non-empty description.
-        index: Zero-based index used in error messages.
-
-    Returns:
-        The normalized task description.
-
-    Raises:
-        PolicyDenied: When the entry is malformed or the description is
-            empty / too long.
-    """
-    if not isinstance(task, dict):
-        raise PolicyDenied(
-            f"delegate{{action='specialist',scope='freeform'}}: tasks[{index}] must be a dict",
-            rule="specialist_freeform_wave_invalid_task",
-            hint="Each wave entry must be an object with task_description.",
-        )
-    desc = str(task.get("task_description") or task.get("task_summary") or "").strip()
-    check_freeform_task_description(desc, where=f"tasks[{index}]")
-    return desc
-
-
 __all__ = [
     "PATH_LIKE_FIELDS",
     "PolicyDenied",
     "PolicyGate",
-    "validate_freeform_wave_task",
     "TRACE_PATH_LIKE_FIELDS",
     "SOURCE_LIKE_FIELDS",
 ]

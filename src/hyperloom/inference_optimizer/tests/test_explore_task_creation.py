@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""The explore task a proposed or delegated grid becomes: its whole grid, seeded with the stack it measures on."""
+"""The explore task a delegated grid becomes: its whole grid, seeded with the stack it measures on."""
 
 from __future__ import annotations
 
@@ -14,7 +14,6 @@ import pytest
 
 from hyperloom.orchestrator.knowledge.knowledge_plane import KnowledgePlane
 from hyperloom.orchestrator.loop.coordinator import Coordinator
-from hyperloom.orchestrator.loop.proposals import ProposedAction
 from hyperloom.inference_optimizer.protocol.intent import Intent, IntentType
 
 
@@ -73,54 +72,6 @@ class _StubRecipeKB:
 
     def verify(self, **kwargs: Any) -> None:
         self.verify_calls.append(dict(kwargs))
-
-
-@pytest.mark.asyncio
-async def test_a_proposed_explore_materialises_its_whole_grid(tmp_path: Path):
-    coord = Coordinator.__new__(Coordinator)
-    coord.session_dir = tmp_path
-    coord.knowledge_plane = KnowledgePlane(recipe_kb=_StubRecipeKB())
-    coord.bus = _StubBus()
-    coord.bus.record_observation = AsyncMock()  # type: ignore[method-assign]
-    create_calls: list[dict[str, Any]] = []
-
-    class _StubTaskRegistry:
-        async def create_or_return_existing(self, spec):
-            create_calls.append(dict(vars(spec)))
-            from hyperloom.orchestrator.state.task_registry import Task
-
-            return (
-                Task(
-                    task_id="t-explore-full",
-                    kind=spec.kind,
-                    state="queued",
-                    params=spec.params,
-                    idempotency_key=spec.idempotency_key,
-                ),
-                False,
-            )
-
-    coord.tasks = _StubTaskRegistry()
-    grid = [{"name": name, "extra_args": f"--flag-{name}"} for name in ("v_a", "v_b", "v_c")]
-    proposal = ProposedAction(
-        "orchestration", "explore", {"action_name": "explore", "predicted_gain_pct": 1.0, "params": {"grid": grid}}
-    )
-
-    @dataclass
-    class _MoreState(_BareSharedState):
-        baseline_config_path: str = ""
-        baseline_tput: float = 1000.0
-        backends_search: dict = field(default_factory=dict)
-        params_search: dict = field(default_factory=dict)
-        current_best: dict = field(default_factory=dict)
-
-    coord.shared_state = _MoreState()
-    coord.dispatcher.registry_lanes_ttl = lambda _name: (set(), 0)  # type: ignore[method-assign]
-    coord.enablement_lane.handoff_enablement_round = AsyncMock()  # type: ignore[method-assign]
-    await coord.proposals.materialize(proposal)
-    grid = create_calls[0]["params"]["grid"]
-    names = [v["name"] for v in grid]
-    assert names == ["v_a", "v_b", "v_c"]
 
 
 def _delegate_coord(tmp_path: Path):
@@ -187,7 +138,6 @@ async def test_delegate_explore_with_grid_creates_task_directly(tmp_path: Path):
         payload={
             "action_name": "explore",
             "params": {"grid": grid},
-            "idempotency_key": "explore-round-1",
         },
     )
     await coord.router.handle_delegate("orchestration", intent)
@@ -236,7 +186,6 @@ async def test_delegate_explore_seeds_the_stack_with_the_anchor(tmp_path: Path):
         payload={
             "action_name": "explore",
             "params": {"grid": [{"name": "v_a", "extra_args": "--flag-a"}]},
-            "idempotency_key": "explore-round-4",
         },
     )
     await coord.router.handle_delegate("orchestration", intent)

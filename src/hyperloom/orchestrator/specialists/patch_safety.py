@@ -43,9 +43,9 @@ from hyperloom_common.unified_diff import strip_diff_path, strip_path_components
 # The ban is scoped to specialist-authored output by where it is applied, not
 # by what it lists: ``strip_forbidden_proposal_fields`` runs on the specialist
 # exit payload alone. ``predicted_gain_pct`` therefore belongs here even though
-# it is a *required* field of a ``propose_action`` intent -- there the number
-# is the Coordinator's estimate, in a specialist's ``proposal_set`` it is the
-# same self-reported claim as ``expected_gain_pct`` under a different name.
+# Orchestration may put one in a delegate's params -- there the number is the
+# delegator's estimate, in a specialist's ``proposal_set`` it is the same
+# self-reported claim as ``expected_gain_pct`` under a different name.
 FORBIDDEN_PROPOSAL_FIELDS: frozenset[str] = frozenset(
     {
         "expected_gain",

@@ -6,18 +6,12 @@
 from __future__ import annotations
 
 import asyncio
-import hashlib
-import json
 import sqlite3
 import time
 import uuid
-from collections.abc import Mapping
 from typing import Any, NamedTuple
 
-from hyperloom.orchestrator.lever import (
-    patch_lever_kind,
-    patch_owner_phase,
-)
+from hyperloom.orchestrator.lever import patch_owner_phase
 from hyperloom.inference_optimizer.protocol.intent import Intent, IntentType
 from hyperloom_common.timeutil import format_exc_brief
 from hyperloom_common.coerce import to_int, to_mapping, to_unix
@@ -28,14 +22,7 @@ from ..specialists.wall_budget import grant_wall_budget_extension
 from ..state.shared_state import inject_stack_base_params
 from ..state.analysis_failures import remember_trace_failure
 from ..state.experience_citations import merge_citations, normalize_citations, shown_ids
-from ..state.task_registry import (
-    TERMINAL_STATES,
-    IllegalTransition,
-    TaskNotFound,
-    TaskSpec,
-    confirmed_result,
-    create_on_free_key,
-)
+from ..state.task_registry import TERMINAL_STATES, IllegalTransition, TaskNotFound, confirmed_result
 from hyperloom.inference_optimizer.trace.trajectory_trace import (
     EVENT_INTENT,
     record_event,
@@ -51,7 +38,7 @@ from .kernel_request import (
 )
 from ._escalate_hint import escalate_hint_denial
 from .message_delivery import publish_send_message
-from .proposals import ProposedAction, integrate_patch_key, record_config_proposal, twin_answers
+from .proposals import record_config_proposal
 
 # ``Coordinator`` is intentionally NOT imported (avoids a module-level import cycle with coordinator.py); it is held
 # as a back-reference and the annotation below is a deferred string.
@@ -72,14 +59,6 @@ class DelegateRequest(NamedTuple):
     intent: Intent
     action_name: str
     params: dict[str, Any]
-
-
-def _is_specialist_wave(action_name: str, params: Mapping[str, Any]) -> bool:
-    """A specialist delegate carrying ``params.tasks`` fans out into one freeform specialist task per entry.
-
-    Each goes out through the normal SpecialistRunner + TaskRegistry + lease + reap path.
-    """
-    return action_name == "specialist" and isinstance(params.get("tasks"), list) and bool(params["tasks"])
 
 
 def _relayed_specialist_citations(state: Any) -> dict[str, list[dict[str, str]]]:
@@ -185,7 +164,7 @@ class IntentRouter(CoordinatorCollaborator):
             await self.record_policy_denied(source, intent, refused, action_name="specialist")
             return False
         # Capture proposal ownership at dispatch.
-        self._stamp_specialist_owner(params)
+        self._coord.specialist_dispatch.stamp_owner(params)
         return True
 
     def _consume_primatune_mandate(self, action_name: str, params: dict[str, Any], task_id: str) -> None:
@@ -195,34 +174,6 @@ class IntentRouter(CoordinatorCollaborator):
         from ..predictor.mandate import mark_mandate_consumed
 
         mark_mandate_consumed(self.shared_state, params.get("primatune_mandate_id"), task_id)
-
-    def _stamp_specialist_owner(self, params: dict[str, Any]) -> str:
-        """Freeze patch ownership when a specialist task is created."""
-        lever = patch_lever_kind(params)
-        if lever:
-            params["lever_kind"] = lever
-        owner = patch_owner_phase(params)
-        if not owner:
-            from ..specialists.profile import MODE_PATCH, resolve_specialist_profile
-
-            gap_layer = str(params.get("gap_layer") or "").strip().lower()
-            active_phase = str(self.shared_state.phase or "").strip().upper()
-            # Layer first, phase last: both lanes share one phase, so the live phase does not say which lever a
-            # specialist moves.
-            if gap_layer == "framework":
-                owner = "FRAMEWORK_AGENT"
-            elif gap_layer in {"explore", "perf_explore"} or params.get("domain"):
-                owner = "EXPLORE"
-            # A patch-mode dispatch with no layer names no phase of its own, and integrate_patch is
-            # booked to the framework agent, so that is the owner its patch would be attributed to.
-            elif resolve_specialist_profile(params).mode == MODE_PATCH or active_phase in {
-                "FRAMEWORK",
-                "FRAMEWORK_AGENT",
-            }:
-                owner = "FRAMEWORK_AGENT"
-        if owner:
-            params["source_phase"] = owner
-        return owner
 
     async def _resolve_deliverable(self, params: dict[str, Any]) -> PolicyDenied | None:
         """Put the deliverable of the specialist an agent's integrate_patch names onto ``params``.
@@ -270,9 +221,7 @@ class IntentRouter(CoordinatorCollaborator):
         params.update(deliverable.params)
         return None
 
-    async def _admit_integrate_patch(
-        self, source: str, intent: Intent, params: dict[str, Any], *, rejected_kind: str
-    ) -> bool:
+    async def _admit_integrate_patch(self, source: str, intent: Intent, params: dict[str, Any]) -> bool:
         """Resolve the deliverable an agent's integrate_patch lands and its owner; ``False`` once it is refused."""
         refused = await self._resolve_deliverable(params)
         if refused is not None:
@@ -280,7 +229,7 @@ class IntentRouter(CoordinatorCollaborator):
             return False
         owner = patch_owner_phase(params)
         if not owner:
-            await self._reject_missing_patch_owner(source, "integrate_patch", params, rejected_kind)
+            await self._reject_missing_patch_owner(source, params)
             return False
         params["source_phase"] = owner
         return True
@@ -305,7 +254,6 @@ class IntentRouter(CoordinatorCollaborator):
         """Run the handler for an admitted intent; a handler failure is recorded, never raised."""
         try:
             handlers: dict[IntentType, Any] = {
-                IntentType.PROPOSE_ACTION: self._handle_propose_action,
                 IntentType.DELEGATE: self.handle_delegate,
                 IntentType.REQUEST: self._handle_request,
                 IntentType.EXTEND_LEASE: self._handle_extend_lease,
@@ -346,13 +294,13 @@ class IntentRouter(CoordinatorCollaborator):
             meta is not None and self.shared_state.is_pruned(meta.family)
         )
 
-    async def _note_pruned_advisory(self, source: str, action_name: str, kind: str) -> None:
-        """Tell the proposer the action sits in a pruned family; the action is still admitted."""
+    async def _note_pruned_advisory(self, source: str, action_name: str) -> None:
+        """Tell the delegator the action sits in a pruned family; the action is still admitted."""
         await self.bus.record_observation(
             "coordinator",
             "observation",
             {
-                "kind": kind,
+                "kind": "delegate_pruned_advisory",
                 "from": source,
                 "action": action_name,
                 "hint": (
@@ -364,43 +312,22 @@ class IntentRouter(CoordinatorCollaborator):
             },
         )
 
-    async def _reject_missing_patch_owner(
-        self, source: str, action_name: str, params: dict[str, Any], kind: str
-    ) -> None:
-        """Record that an integrate_patch intent was rejected because no author phase owns its patch."""
+    async def _reject_missing_patch_owner(self, source: str, params: dict[str, Any]) -> None:
+        """Record that an integrate_patch delegate was rejected because no author phase owns its patch."""
         await self.bus.record_observation(
             "coordinator",
             "observation",
             {
-                "kind": kind,
+                "kind": "delegate_rejected",
                 "reason": "integrate_patch_owner_missing",
                 "from_agent": source,
-                "action_name": action_name,
+                "action_name": "integrate_patch",
                 "specialist_task_id": str(params.get("specialist_task_id") or ""),
             },
         )
 
-    async def _handle_propose_action(self, source: str, intent: Intent) -> None:
-        """Admit a proposed action and queue its task."""
-        action_name = intent.payload["action_name"]
-        # Pruned families are advisory: the proposal still queues, with an advisory note.
-        if self._is_pruned_action(action_name):
-            await self._note_pruned_advisory(source, action_name, "proposal_pruned_advisory")
-        denied = self._coord.dispatcher.admission_denial_for_action(action_name, params=intent.payload.get("params"))
-        if denied is not None:
-            await self.record_policy_denied(source, intent, denied)
-            return
-        payload = dict(intent.payload)
-        _stamp_kb_exposure(self, payload, source=source)
-        if action_name == "integrate_patch":
-            params = dict(payload.get("params") or {})
-            if not await self._admit_integrate_patch(source, intent, params, rejected_kind="proposal_rejected"):
-                return
-            payload["params"] = params
-        await self._coord.proposals.materialize(ProposedAction(source, action_name, payload))
-
     def _seed_grid_params(self, request: DelegateRequest) -> None:
-        """Seed an explore delegate with the params a proposed explore carries."""
+        """Seed an explore delegate with what its executor reads from the session."""
         if request.action_name != "explore":
             return
         # Baseline's materialized YAML, which the delegator may override.
@@ -410,7 +337,7 @@ class IntentRouter(CoordinatorCollaborator):
         self._coord.proposals.inject_explore_runtime_params(request.params)
         self._coord.proposals.credit_predictor_proposals(request.params)
 
-    async def _prepare_specialist_dispatch(self, request: DelegateRequest, nested_idempotency_key: Any) -> bool:
+    async def _prepare_specialist_dispatch(self, request: DelegateRequest) -> bool:
         """Warm a specialist delegate's params through the KnowledgePlane.
 
         False when it is a patch specialist with no git source tree to write into.
@@ -419,41 +346,22 @@ class IntentRouter(CoordinatorCollaborator):
             return True
         dispatch = self._coord.specialist_dispatch
         await dispatch.warm_specialist_params(request.params)
-        task_id = str(request.intent.payload.get("idempotency_key") or nested_idempotency_key or "")
-        return not dispatch.refuse_patch_without_source(request.params, task_id=task_id)
+        return not dispatch.refuse_patch_without_source(request.params)
 
-    async def _create_delegated_task(self, request: DelegateRequest, raw_key: Any) -> Any | None:
+    async def _create_delegated_task(self, request: DelegateRequest, key: str) -> Any | None:
         """Register the delegate as a task, stepping its idempotency key past ended twins that measured nothing.
 
         Returns None once a live twin, a twin that measured it, or an exhausted retry budget policy-denied the delegate.
         """
-        lanes, ttl = self._coord.dispatcher.registry_lanes_ttl(request.action_name)
-        if request.action_name == "specialist":
-            from ..specialists.profile import requires_gpu, specialist_lanes
-
-            lanes = tuple(specialist_lanes(request.params, list(lanes)))
-            if requires_gpu(request.params):
-                ttl = self._coord.dispatcher.gpu_lease_ttl_sec(int(ttl or 0), params=request.params)
-        created = await create_on_free_key(
-            self.tasks,
-            TaskSpec(
-                kind=request.action_name,
-                params=request.params,
-                idempotency_key=str(raw_key),
-                requires_lanes=lanes,
-                lease_ttl_sec=ttl,
-                dispatch_class="llm",
-            ),
-            spent=lambda twin: not twin_answers(request.action_name, twin),
-        )
+        created = await self._coord.proposals.create_task(request.action_name, request.params, key)
         if created is not None and not created[1]:
             return created[0]
         action = f"delegate{{action_name={request.action_name!r}}} duplicate"
         if created is None:
             denied = PolicyDenied(
-                f"{action} idempotency_key exhausted retries for {raw_key!r}",
+                f"{action} idempotency_key exhausted retries for {key!r}",
                 rule="duplicate_idempotency_key",
-                hint=f"every retry key of {raw_key!r} names a terminated task; send new content or a new key",
+                hint=f"every retry key of {key!r} names a terminated task; send new content",
             )
         elif created[0].state in TERMINAL_STATES:
             task = created[0]
@@ -495,34 +403,11 @@ class IntentRouter(CoordinatorCollaborator):
         await self.record_policy_denied(source, intent, covered, action_name="explore")
         return True
 
-    def _delegate_key(self, request: DelegateRequest, nested_idempotency_key: Any) -> str:
-        """The idempotency key of a delegate.
-
-        An explore round is the grid it measures and an integrate_patch the deliverable it lands, so each is keyed
-        by that alone. Other delegates take the top-level key, then the nested compat alias, then a tick-scoped
-        content key.
-        """
-        params = request.params
-        content_fp = hashlib.sha1(
-            json.dumps(params, sort_keys=True, default=str).encode(), usedforsecurity=False
-        ).hexdigest()[:10]
-        if request.action_name == "explore":
-            return f"explore:{content_fp}"
-        specialist_task_id = str(params.get("specialist_task_id") or "")
-        if request.action_name == "integrate_patch" and specialist_task_id:
-            return integrate_patch_key(specialist_task_id)
-        tick = int(self.shared_state.tick or 0)
-        return str(
-            request.intent.payload.get("idempotency_key")
-            or nested_idempotency_key
-            or f"{request.source}:{request.action_name}:t{tick}:{content_fp}"
-        )
-
     async def handle_delegate(self, source: str, intent: Intent) -> None:
         """Validate and enqueue a delegated action as a TaskRegistry task."""
         action_name = intent.payload["action_name"]
         if self._is_pruned_action(action_name):
-            await self._note_pruned_advisory(source, action_name, "delegate_pruned_advisory")
+            await self._note_pruned_advisory(source, action_name)
         denied = self._coord.dispatcher.admission_denial_for_action(action_name, params=intent.payload.get("params"))
         if denied is not None:
             await self.record_policy_denied(source, intent, denied, action_name=action_name)
@@ -530,30 +415,28 @@ class IntentRouter(CoordinatorCollaborator):
         payload = dict(intent.payload)
         _stamp_kb_exposure(self, payload, source=source)
         params = dict(payload.get("params") or {})
+        # The work names its task: a key the agent wrote is not part of the work.
+        params.pop("idempotency_key", None)
         request = DelegateRequest(source, intent, action_name, params)
         if action_name == "integrate_patch":
-            if not await self._admit_integrate_patch(source, intent, params, rejected_kind="delegate_rejected"):
+            if not await self._admit_integrate_patch(source, intent, params):
                 return
             self._coord.proposals.seed_integrate_patch_params(params)
         if action_name == "specialist" and not await self._admit_specialist(source, intent, params):
             return
-        # idempotency_key is top-level per schema; strip a nested compat alias.
-        nested_idempotency_key = params.pop("idempotency_key", None)
         self._seed_grid_params(request)
-        if _is_specialist_wave(action_name, params):
-            await self._coord.specialist_dispatch.fan_out_specialist_wave(source, intent, params)
+        # Read before a specialist is warmed with this dispatch's context and before a grid's join id goes in,
+        # so an identical re-emit lands on the task that already holds the work.
+        key = self._coord.proposals.action_key(action_name, params)
+        if not await self._prepare_specialist_dispatch(request):
             return
-        if not await self._prepare_specialist_dispatch(request, nested_idempotency_key):
-            return
-        raw_key = self._delegate_key(request, nested_idempotency_key)
         if await self._explore_grid_covered(action_name, source, intent, params):
             return
-        # The grid's attempts join its proposal row through this id, as a proposed grid's do. Added after the
-        # key is derived, so an identical re-emit still lands on the task already running.
+        # The grid's attempts join its proposal row through this id.
         proposal_id = uuid.uuid4().hex if action_name == "explore" else ""
         if proposal_id:
             params["proposal_msg_id"] = proposal_id
-        task = await self._create_delegated_task(request, raw_key)
+        task = await self._create_delegated_task(request, key)
         if task is None:
             return
         # Every task that takes over an open enablement round comes through the hand-off.

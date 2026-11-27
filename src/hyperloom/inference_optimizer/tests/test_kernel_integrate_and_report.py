@@ -1045,10 +1045,7 @@ async def test_report_executor_writes_md_and_json(session_dir, record_alert):
     try:
         await c.router.handle_intent(
             "orchestration",
-            Intent(
-                type=IntentType.PROPOSE_ACTION,
-                payload={"action_name": "baseline", "predicted_gain_pct": 0.0},
-            ),
+            Intent(type=IntentType.DELEGATE, payload={"action_name": "baseline"}),
         )
         # The real baseline action would have set this on completion, and PRELUDE would have handed over to
         # FRAMEWORK_AGENT, where explore is proposable.
@@ -1057,11 +1054,10 @@ async def test_report_executor_writes_md_and_json(session_dir, record_alert):
         await c.router.handle_intent(
             "orchestration",
             Intent(
-                type=IntentType.PROPOSE_ACTION,
+                type=IntentType.DELEGATE,
                 # Admission refuses an explore with nothing to measure.
                 payload={
                     "action_name": "explore",
-                    "predicted_gain_pct": 5.0,
                     "params": {
                         "grid": [{"name": "chunked_prefill", "extra_server_args": "--chunked-prefill-size 4096"}]
                     },

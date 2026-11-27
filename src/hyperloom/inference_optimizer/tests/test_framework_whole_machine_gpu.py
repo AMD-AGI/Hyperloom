@@ -304,6 +304,51 @@ async def test_bench_specialist_leases_whole_machine_when_serving_owns_node(tmp_
 
 
 @pytest.mark.asyncio
+async def test_a_delegated_bench_specialist_never_starts_beside_a_benchmark(tmp_path, monkeypatch):
+    """A specialist an agent queues holds the lanes its profile names, so a bench one waits for the benchmark lane."""
+    from hyperloom.inference_optimizer.protocol.intent import Intent, IntentType
+
+    coord = _build_coord(tmp_path, monkeypatch, gpu_specialist_capacity=4, tp=4)
+    source_root = tmp_path / "framework"
+    (source_root / ".git").mkdir(parents=True)
+    state = coord.shared_state
+    state.phase, state.framework, state.framework_repo_path = "FRAMEWORK_AGENT", "sglang", str(source_root)
+    state.baseline_tput, state.max_minutes = 100.0, 600
+    probe = _GpuProbe()
+    coord.sub.register_executor("specialist", probe)
+    benchmark = await coord.locks.acquire_many(
+        ["benchmark_lane"], holder_id="explore-1", task_id="explore-1", action="explore", ttl_sec=600
+    )
+    assert benchmark is not None
+
+    await coord.router.handle_intent(
+        "orchestration",
+        Intent(
+            type=IntentType.DELEGATE,
+            payload={
+                "action_name": "specialist",
+                "params": {
+                    "scope": "freeform",
+                    "task_description": "start a TP-sharded server and rebench a patch",
+                    "mode": "patch",
+                    "bench": True,
+                },
+            },
+        ),
+    )
+
+    (task,) = await coord.tasks.queued()
+    assert sorted(task.requires_lanes) == ["benchmark_lane", "gpu_research_lane"]
+    await coord.dispatcher.pump_dispatcher_once()
+    assert probe.entries == []
+    assert [t.task_id for t in await coord.tasks.queued()] == [task.task_id]
+
+    await coord.locks.release(benchmark)
+    await pump_until_settled(coord.dispatcher)
+    assert probe.entries == [task.task_id]
+
+
+@pytest.mark.asyncio
 async def test_non_bench_gpu_probe_still_uses_carved_pool(tmp_path, monkeypatch):
     """A non-bench GPU probe (bench=false) keeps the serving-disjoint pool — the whole-machine route must NOT leak to ordinary microbench/profiling probes."""
     # 8 visible cards, serving TP=4 → carved pool = cards [4..7].

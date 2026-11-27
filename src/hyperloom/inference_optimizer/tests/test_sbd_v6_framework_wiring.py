@@ -918,7 +918,7 @@ def test_local_explore_records_proposal_reasoning_before_dispatch(
 
 
 def _propose_grid(coord: Coordinator, grid: list[dict[str, Any]]) -> str:
-    """Propose one explore grid through the real intent seam, returning the id its row is keyed by."""
+    """Delegate one explore grid through the real intent seam, returning the id its proposal row is keyed by."""
     import asyncio
 
     from hyperloom.inference_optimizer.protocol.intent import Intent, IntentType
@@ -934,14 +934,14 @@ def _propose_grid(coord: Coordinator, grid: list[dict[str, Any]]) -> str:
 
     async def _propose() -> list[Any]:
         before = {task.task_id for task in await coord.tasks.queued()}
-        await coord.router._handle_propose_action(
+        await coord.router.handle_delegate(
             "orchestration",
-            Intent(type=IntentType.PROPOSE_ACTION, payload={"action_name": "explore", "params": {"grid": grid}}),
+            Intent(type=IntentType.DELEGATE, payload={"action_name": "explore", "params": {"grid": grid}}),
         )
         return [task for task in await coord.tasks.queued() if task.task_id not in before]
 
     queued = asyncio.run(_propose())
-    assert len(queued) == 1, "the propose seam did not queue exactly one task"
+    assert len(queued) == 1, "the delegate did not queue exactly one task"
     return queued[0].params["proposal_msg_id"]
 
 

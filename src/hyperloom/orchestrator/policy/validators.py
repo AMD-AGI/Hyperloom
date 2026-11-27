@@ -26,9 +26,7 @@ log = logging.getLogger(__name__)
 # The GEMM tuning action, refused as a REQUEST kind.
 GEMM_TUNING_ACTION_NAME: str = "gemm_tuning"
 
-# Free-form (``scope='freeform'``) sanity-gate limits; the real ceiling is the
-# research_lane capacity and the GPU specialist pool.
-SPECIALIST_FREEFORM_WAVE_MAX: int = 16
+# Free-form (``scope='freeform'``) sanity-gate limit.
 SPECIALIST_FREEFORM_TASK_DESC_MAX_CHARS: int = 8000
 
 
@@ -158,27 +156,25 @@ def log_specialist_dispatch_coherence(scope_raw: str, tags: list[str]) -> None:
         log.info("specialist dispatch scope='domain' with %d tags=%r", len(tags), tags)
 
 
-def check_freeform_task_description(desc: str, *, where: str) -> None:
-    """Per-task structural checks for a free-form ``task_description``: non-empty and length-bounded.
+def check_freeform_task_description(desc: str) -> None:
+    """Structural checks for a free-form ``params.task_description``: non-empty and length-bounded.
 
     Args:
         desc (str): the freeform task description to validate.
-        where (str): a label identifying the source location, used in error
-            messages.
 
     Raises:
         PolicyDenied: when ``desc`` is empty or exceeds the length cap.
     """
     if not desc:
         raise PolicyDenied(
-            f"delegate{{action='specialist',scope='freeform'}}: {where} task_description must be non-empty",
+            "delegate{action='specialist',scope='freeform'}: params task_description must be non-empty",
             rule="specialist_freeform_empty_description",
-            hint=("Each freeform task needs a natural-language task_description (the whole mandate)."),
+            hint=("A freeform specialist needs a natural-language task_description (the whole mandate)."),
         )
     if len(desc) > SPECIALIST_FREEFORM_TASK_DESC_MAX_CHARS:
         raise PolicyDenied(
             f"delegate{{action='specialist',scope='freeform'}}: "
-            f"{where} task_description is {len(desc)} chars > cap "
+            f"params task_description is {len(desc)} chars > cap "
             f"{SPECIALIST_FREEFORM_TASK_DESC_MAX_CHARS}",
             rule="specialist_freeform_description_too_long",
         )

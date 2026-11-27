@@ -9,11 +9,11 @@ Consult these SharedState surfaces in order before re-proposing:
    `error_excerpt` / `workspace` / `raw_result_path` /
    `extras.fingerprint`. The fingerprint is the canonical hash of the
    params fields that determine the action's behaviour, and Coordinator
-   keys task idempotency on that same fingerprint — so a proposal
-   matching a queued or running task is dropped before it ever reaches
-   the executor, and any key you add to `params` outside the
+   keys task idempotency on that same fingerprint — so a `baseline`
+   delegate matching a queued or running task is refused before it ever
+   reaches the executor, and any key you add to `params` outside the
    fingerprint (a tag, a note, a counter) is invisible to it and does
-   NOT make the proposal distinct.
+   NOT make the delegate distinct.
 2. **`last_action_failures`** (global rolling log capped at the last
    30 unpromotable results across ALL kinds, including kernel_agent-owned).
    This is where a failure of any other kind is recorded.
@@ -64,7 +64,7 @@ measurement, NOT a failure — do not retry it.
   session — do not re-propose a baseline whose params fingerprint
   matches a recent failure; it will fail the same way. Changing a
   field OUTSIDE the seven does not count and does not get you a new
-  attempt: the proposal is dropped as a duplicate and you have burned
+  attempt: the delegate is refused as a duplicate and you have burned
   a tick. Change the launch: `params.extra_server_args` or
   `params.extra_envs`.
 * **RULE F2 — repeated `error_class='subprocess_nonzero'` or `'client_failed'`
@@ -93,8 +93,7 @@ measurement, NOT a failure — do not retry it.
 
 ## Example (PRELUDE — baseline failed twice with `error_class='server_init_dead'`)
 
-    propose_action{action_name='baseline',
+    delegate{action_name='baseline',
         params={extra_server_args: '--mem-fraction-static 0.8'},
-        predicted_gain_pct: 0,
         notes: 'server_log_path shows an OOM during KV-cache allocation;
                 lower the static memory fraction'}

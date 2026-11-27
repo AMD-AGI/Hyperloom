@@ -177,7 +177,7 @@ def test_braces_in_the_prose_before_the_envelope_do_not_hide_it() -> None:
     """A live run lost most intents: prose like `delegate:{action_name}` was taken for the envelope."""
     envelope = _reply("alert", {"severity": "high", "summary": "explore lane stalled"})
     text = (
-        "The contract says delegate:{action_name} and propose_action:{action_name,predicted_gain_pct}; "
+        "The contract says delegate:{action_name} and request:{target_agent,kind}; "
         "an escalation is warranted.\n\n" + envelope
     )
     decoded = decode_intent_envelope(text)

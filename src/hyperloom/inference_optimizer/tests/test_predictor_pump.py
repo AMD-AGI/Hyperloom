@@ -287,7 +287,7 @@ async def _delegate_explore(coord: Any, grid: list[dict[str, Any]]) -> None:
 
     intent = Intent(
         type=IntentType.DELEGATE,
-        payload={"action_name": "explore", "idempotency_key": "e1", "params": {"grid": grid}},
+        payload={"action_name": "explore", "params": {"grid": grid}},
     )
     await coord.router.handle_delegate("orchestration", intent)
 

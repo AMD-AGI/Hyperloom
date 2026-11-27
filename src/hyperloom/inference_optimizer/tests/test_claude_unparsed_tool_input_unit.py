@@ -35,7 +35,7 @@ class ToolUseBlock(_FakeToolUse):
 @pytest.mark.usefixtures("claude_sdk")
 def test_parse_unparsed_wrapper_missing_required_payload_returns_none() -> None:
     b = ClaudeBackend()
-    raw = '{"intent_type": "propose_action", "payload": {"action_name": "baseline"}}'
+    raw = '{"intent_type": "delegate", "payload": {"params": {}}}'
     block = ToolUseBlock(
         name="emit_intent",
         input={"__unparsedToolInput": {"raw": raw, "len": len(raw)}},

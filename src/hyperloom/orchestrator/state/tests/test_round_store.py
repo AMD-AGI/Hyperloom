@@ -18,7 +18,7 @@ from hyperloom.orchestrator.state.round_store import (
     RoundResult,
     RoundStore,
 )
-from hyperloom.orchestrator.state.task_registry import TaskRegistry, TaskSpec, TerminalTaskReuse, create_in_cursor
+from hyperloom.orchestrator.state.task_registry import TERMINAL_STATES, TaskRegistry, TaskSpec, create_in_cursor
 
 _LEASE = 600.0
 
@@ -122,7 +122,7 @@ async def test_only_one_of_two_contending_acquires_wins_and_the_loser_is_told_wh
 
 
 @pytest.mark.asyncio
-async def test_the_holder_task_row_commits_with_the_acquire_and_never_adopts_a_finished_task(store, virtual_clock):
+async def test_the_holder_task_row_commits_with_the_acquire_and_a_join_that_refuses_undoes_it(store, virtual_clock):
     """The joined creation path shares the acquiring transaction."""
     clock = virtual_clock
     tasks = TaskRegistry(store.db)
@@ -155,20 +155,33 @@ async def test_the_holder_task_row_commits_with_the_acquire_and_never_adopts_a_f
     assert denied.ok is False
     assert await tasks.find_by_idempotency_key("round-b") is None
 
-    # And a retry under a key whose task already finished is refused rather
-    # than silently held by work that is over.
+    # A key whose task already finished comes back as that task. A join that will not have a round held by work
+    # that is over raises, and the acquire it would have joined is undone with it.
     await tasks.transition("t-1", "running")
     await tasks.transition("t-1", "succeeded")
     await store.settle(_claim("round-a", "t-1", 1), now_unix=clock.wall(), outcome=BOOTED)
     clock.advance(_LEASE + 1.0)
-    with pytest.raises(TerminalTaskReuse):
+
+    class _Finished(Exception):
+        pass
+
+    def _refuse_a_finished_task(cur):
+        task, existing = create_in_cursor(
+            cur, TaskSpec(kind="baseline", params={}, idempotency_key="round-a", task_id="t-9")
+        )
+        assert (existing, task.task_id) == (True, "t-1")
+        if task.state in TERMINAL_STATES:
+            raise _Finished
+
+    with pytest.raises(_Finished):
         await store.open(
             "round-c",
             now_unix=clock.wall(),
             holder_task_id="t-1",
             lease_sec=_LEASE,
-            join=_join,
+            join=_refuse_a_finished_task,
         )
+    assert await store.held() is None
 
 
 @pytest.mark.asyncio

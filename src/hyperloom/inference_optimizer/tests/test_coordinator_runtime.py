@@ -814,12 +814,11 @@ async def test_a_turn_with_an_intent_ends_the_no_intent_streak(session_dir, monk
 
 
 @pytest.mark.asyncio
-async def test_an_admitted_propose_action_queues_its_task_and_announces_it(session_dir):
+async def test_an_admitted_delegate_queues_its_task_and_announces_it(session_dir):
     c = Coordinator(session_dir, backends=_build_backends({}))
     try:
         await c.router.handle_intent(
-            "orchestration",
-            Intent(type=IntentType.PROPOSE_ACTION, payload={"action_name": "baseline", "predicted_gain_pct": 0.0}),
+            "orchestration", Intent(type=IntentType.DELEGATE, payload={"action_name": "baseline"})
         )
         (task,) = await c.tasks.by_state("queued")
         assert task.kind == "baseline"
@@ -838,7 +837,6 @@ async def test_coordinator_delegate_task_run_via_dispatcher(session_dir):
         payload={
             "action_name": "baseline",
             "params": {"runs": 1},
-            "idempotency_key": "k-deleg-1",
         },
     )
     plans = {"orchestration": ScriptedPlan(turns=[MockTurn(intents=[delegate])])}
@@ -856,8 +854,8 @@ async def test_coordinator_delegate_task_run_via_dispatcher(session_dir):
 
 
 @pytest.mark.asyncio
-async def test_delegate_accepts_nested_params_idempotency_key(session_dir):
-    """When idempotency_key is under params, Coordinator treats it as the delegate key and removes it from executor params."""
+async def test_a_delegate_key_under_params_names_nothing_and_never_reaches_the_executor(session_dir):
+    """An ``idempotency_key`` the agent wrote under params is neither the task's key nor one of its params."""
     delegate = Intent(
         type=IntentType.DELEGATE,
         payload={"action_name": "baseline", "params": {"runs": 1, "idempotency_key": "baseline-nested-1"}},
@@ -876,8 +874,8 @@ async def test_delegate_accepts_nested_params_idempotency_key(session_dir):
     try:
         await c.tick(1)
         await pump_until_settled(c.dispatcher)
-        assert captured["idempotency_key"] == "baseline-nested-1"
-        assert "idempotency_key" not in captured["params"]
+        assert str(captured["idempotency_key"]).startswith("baseline:")
+        assert captured["params"] == {"runs": 1}
         denied = await c.bus.tail(topic="observation")
         assert not any(m.payload.get("rule") == "duplicate_idempotency_key" for m in denied)
     finally:
@@ -949,14 +947,8 @@ async def test_coordinator_response_routes_back_to_requester(session_dir):
 @pytest.mark.asyncio
 async def test_explore_not_denied_before_profile(session_dir):
     """After baseline, ``explore`` is no longer blocked on empty ``last_profile_trace``."""
-    propose = Intent(
-        type=IntentType.PROPOSE_ACTION,
-        payload={
-            "action_name": "explore",
-            "predicted_gain_pct": 5.0,
-        },
-    )
-    plans = {"orchestration": ScriptedPlan(turns=[MockTurn(intents=[propose])])}
+    delegate = Intent(type=IntentType.DELEGATE, payload={"action_name": "explore"})
+    plans = {"orchestration": ScriptedPlan(turns=[MockTurn(intents=[delegate])])}
     c = Coordinator(session_dir, backends=_build_backends(plans))
     c.orch_prompt.set("orchestration", "SYSTEM PROMPT")
     try:
@@ -982,14 +974,8 @@ async def test_execution_order_does_not_deny_backends_when_trace_analyze_stale(
     session_dir,
 ):
     """Actions must NOT be denied when ``last_trace_analyze`` is stale (the action-layer ``trace_analyze`` hard-gate was removed)."""
-    propose = Intent(
-        type=IntentType.PROPOSE_ACTION,
-        payload={
-            "action_name": "explore",
-            "predicted_gain_pct": 3.0,
-        },
-    )
-    plans = {"orchestration": ScriptedPlan(turns=[MockTurn(intents=[propose])])}
+    delegate = Intent(type=IntentType.DELEGATE, payload={"action_name": "explore"})
+    plans = {"orchestration": ScriptedPlan(turns=[MockTurn(intents=[delegate])])}
     c = Coordinator(session_dir, backends=_build_backends(plans))
     c.orch_prompt.set("orchestration", "SYSTEM PROMPT")
     try:
@@ -1033,18 +1019,14 @@ async def test_coordinator_prune_branch_cancels_family_and_records_advisory(sess
         assert b_after.state == "cancelled"
         assert "baseline" in c.shared_state.pruned_families
 
-        # Future propose_action carries an advisory but is not dropped.
+        # A later delegate carries an advisory but is not dropped.
         await c.router.handle_intent(
-            "orchestration",
-            Intent(
-                type=IntentType.PROPOSE_ACTION,
-                payload={"action_name": "baseline", "predicted_gain_pct": 5.0},
-            ),
+            "orchestration", Intent(type=IntentType.DELEGATE, payload={"action_name": "baseline"})
         )
-        (proposed,) = await c.tasks.by_state("queued")
-        assert proposed.kind == "baseline"
+        (delegated,) = await c.tasks.by_state("queued")
+        assert delegated.kind == "baseline"
         obs = await c.bus.tail(topic="observation")
-        assert any(m.payload.get("kind") == "proposal_pruned_advisory" for m in obs)
+        assert any(m.payload.get("kind") == "delegate_pruned_advisory" for m in obs)
     finally:
         await c.stop()
 

@@ -61,10 +61,23 @@ def test_the_cycle_directive_replaces_the_default_arc(registry):
 
 # Phase-scoped modules render only where the behaviour exists
 def test_the_stop_step_asks_for_report_only_where_the_phase_admits_it(registry):
-    """Outside CLOSE a proposed ``report`` is refused at admission, so the prompt must not ask for one."""
+    """Outside CLOSE a delegated ``report`` is refused at admission, so the prompt must not ask for one."""
     for phase in _ps.PHASE_NAMES:
-        asks = "propose `report` once" in _build(registry, phase)
+        asks = "delegate `report` once" in _build(registry, phase)
         assert asks == ("report" in _ps.allowed_actions_for(phase)), phase
+
+
+def test_every_action_an_agent_queues_is_taught_as_a_delegate(registry):
+    """``delegate`` is the one verb that queues an action, so no phase's prompt may name another."""
+    from hyperloom.inference_optimizer.protocol.intent import IntentType
+
+    for phase in ("", *_ps.PHASE_NAMES):
+        prompt = _build(registry, phase)
+        assert "propose_action" not in prompt, phase
+        emits = [line.strip() for line in prompt.splitlines() if line.strip().startswith("EMIT:")]
+        assert "EMIT: delegate{action_name='baseline', params?={...}}" in emits, phase
+        assert all(emit.startswith(("EMIT: delegate{", "EMIT: REQUEST{", "EMIT: (no emit")) for emit in emits), phase
+    assert "propose_action" not in {intent_type.value for intent_type in IntentType}
 
 
 def test_the_report_catalogue_entry_names_the_only_phase_that_admits_it(registry):

@@ -46,8 +46,8 @@ it.
   part of the spec (it is ignored like any unknown field); a multi-branch run
   takes its sweep switch from `multibranch.conc_sweep`.
 - **`hyperloom optimize` has no Critic agent.** Orchestration is the only LLM
-  role that takes turns. A `propose_action` that passes PolicyGate and
-  admission is queued in the same step, and the Coordinator queues the
+  role that takes turns. A `delegate` that passes PolicyGate and admission is
+  queued in the same step, and the Coordinator queues the
   `integrate_patch` of a finished specialist's deliverable itself; KEEP or
   REVERT is decided as before, by the measurement gate. **Breaking:**
   `--critic-mock`, `--critic-agent`, `--critic-protocol` and `--critic-prompt`
@@ -92,7 +92,7 @@ it.
   reconciler alone fails the tasks the previous process left running, so a
   database error in that pass is retried on the next tick instead of within
   the same one, and the failure charged for such a task ends `task reclaimed
-  by the reconciler`. A delegate that reuses the `idempotency_key` of a task
+  by the reconciler`. A delegate whose key names a task
   another author created is now answered as a duplicate key instead of raising
   `dispatch_class mismatch`. `get_inbox` shows Orchestration's own `alert`
   text as written. A baseline throughput reported as a numeric string anchors
@@ -247,6 +247,36 @@ it.
   `last_profile=`, `last_explore=`, `attempts_history=` and the `rejected=N`
   count, and the Acceptance threshold block lists each measured variant once.
   See [Upgrade](reference/upgrade.md).
+- **`propose_action` is removed and `delegate` queues every task.
+  Breaking** for an Orchestration prompt passed with `--orch-prompt` and for
+  anything that matches on the names below. Orchestration had two intents
+  that queue an action; since the Critic was removed both created the same
+  task, and a `specialist` sent as a `propose_action` skipped the specialist
+  contract and held only `research_lane`, so a bench specialist could start
+  beside a serving benchmark. `delegate` is now the only one. A
+  `propose_action` is refused in the turn that sends it
+  (`unknown intent_type 'propose_action'`), `predicted_gain_pct` is no longer
+  a payload field, and an `idempotency_key` Orchestration sends is ignored:
+  the Coordinator keys every task by its work
+  (`integrate_patch:<specialist_task_id>`, a `baseline` by its seven launch
+  fields, anything else by its params). A `baseline` delegated again on a
+  later tick is therefore answered by the one queued, running or measured
+  instead of starting a second bring-up, an identical `specialist` delegate
+  is refused while its task is queued or running, and identical work whose
+  task ended may be sent five more times in a session. A refused repeat is a
+  `policy_denied` observation (`duplicate_idempotency_key_running` or
+  `duplicate_idempotency_key`) and a denial row of the phase event; the
+  `proposal_materialize_skipped`, `proposal_pruned_advisory` and
+  `proposal_rejected` observations and the `submitted` outcome of a proposal
+  row are no longer written. The specialist wave (`params.tasks`) is removed
+  with its rules `specialist_freeform_wave_too_large` and
+  `specialist_freeform_wave_invalid_task`: send one `delegate` per task. The
+  operator-defined specialist is created by the Coordinator itself, so its
+  dispatch row has `dispatch_class` `coordinator` instead of `llm`, it writes
+  no `task_queued` event, and a refused admission is a
+  `custom_specialist_refused` observation and a log line naming the rule
+  instead of a `policy_denied` addressed to Orchestration. See
+  [Upgrade](reference/upgrade.md).
 - **forge-loop runs every round as lanes and has no planning stage.** Every
   iteration is one round: one lane per focus the Analysis Agent divides its
   evidence into (at most `--lanes`, and one lane with no focus when it divides

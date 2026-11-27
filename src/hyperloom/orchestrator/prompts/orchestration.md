@@ -341,7 +341,7 @@ macro-cycle, or CLOSE.
 ### CLOSE — phase goal
 
 `report` / `session_breakdown`. The Coordinator auto-enqueues `report`
-when the session closes; you may also propose it in CLOSE for a richer
+when the session closes; you may also delegate it in CLOSE for a richer
 narrative.
 
 ### SESSION_DIR contract
@@ -370,17 +370,21 @@ the code actually is; SESSION CONTEXT names the tree this session optimises
 * InferenceX serving benchmarks use `--max-concurrency`; do NOT diagnose
   failures as `--concurrent-requests` unless that literal flag appears in
   the executed command or stderr.
-* An `explore` round is identified by its grid; the Coordinator keys it
-  and ignores any `idempotency_key` you send. A grid with a new launch is a
-  new round, even while another round is queued or running; check the
-  grids in `=== Tasks in flight ===` before composing one. Other delegates
-  are de-duped by `idempotency_key`, NOT by action name: re-sending a key
-  whose task is still queued or running is rejected as duplicate, NOT as a
-  "wait 3 ticks" violation. A key whose task has ended starts a new task,
-  except the key of a `baseline` that measured: it is refused as duplicate,
-  and that task's `delegated_result` is the answer. An `integrate_patch` is
-  identified by the specialist whose deliverable it lands, and the
-  Coordinator queues one itself as soon as that specialist finishes. A
+* A `delegate` is the one intent that queues an action as a task, and it is
+  identified by the work it asks for; the Coordinator keys it and ignores any
+  `idempotency_key` you send. An `explore` round is its grid: a grid with a
+  new launch is a new round, even while another round is queued or running;
+  check the grids in `=== Tasks in flight ===` before composing one. A
+  `baseline` is its launch (see the failure-recovery reference for the
+  fields). Any other delegate is its `params`. Re-sending work whose task is
+  still queued or running is refused (`duplicate_idempotency_key_running`):
+  wait for its `delegated_result`. Work whose task has ended starts a new
+  task, at most five more times in a session, except a `baseline` that
+  measured: it is refused (`duplicate_idempotency_key`), and that task's
+  `delegated_result` is the answer. To fan work out, send one `delegate` per
+  task in the same turn. An `integrate_patch` is identified by the specialist
+  whose deliverable it lands, and the Coordinator queues one itself as soon
+  as that specialist finishes. A
   delegate for the same `specialist_task_id` is therefore refused as
   duplicate while that task is queued or running, or once it has benchmarked
   the deliverable; it starts a new task, with the same deliverable, only
@@ -454,9 +458,9 @@ the code actually is; SESSION CONTEXT names the tree this session optimises
   `escalate_strategy_change` with a `skip_to_kernel` hint —
   and `prune_branch`; use `escalate_strategy_change` to advance
   FRAMEWORK_AGENT once its lever is exhausted (see "Phase awareness").
-* **Never propose `profile` or `roofline`.** Both are Coordinator-managed
+* **Never delegate `profile` or `roofline`.** Both are Coordinator-managed
   (PRELUDE bootstrap + every +10% watermark refresh) and never in the
-  per-phase proposable set; any proposal/delegate is denied as
+  per-phase proposable set; a delegate naming one is denied as
   `phase_incompatible`.
 * **Never propose or commission a tuned GEMM/BLAS table** —
   `AITER_CONFIG_GEMM_*` / `PYTORCH_TUNABLEOP_*` / `VLLM_TUNED_CONFIG_FOLDER`
@@ -613,21 +617,17 @@ payload: {action_name: "specialist", params: {
 }}
 ```
 
-**Free-form wave (fan out N tasks at once):**
+**Free-form example (one delegate per task; send several in one turn to fan out):**
 ```
 intent_type: "delegate"
 payload: {action_name: "specialist", params: {
   scope: "freeform",
-  tasks: [
-    {task_description: "Read sglang scheduler; find why prefill blocks decode; produce a patch.",
-     task_summary: "prefill-decode contention", mode: "patch"},
-    {task_description: "Search vllm/sglang PRs for chunked-prefill improvements last 3 months.",
-     task_summary: "chunked-prefill PR scan", mode: "research"},
-  ]
+  task_description: "Read sglang scheduler; find why prefill blocks decode; produce a patch.",
+  task_summary: "prefill-decode contention", mode: "patch"
 }}
 ```
-Each entry in `tasks` becomes an independent specialist task. Results surface
-as `delegated_result` outcomes on a later tick.
+Each delegate becomes an independent specialist task. Results surface as
+`delegated_result` outcomes on a later tick.
 
 **Operating posture.**
 
