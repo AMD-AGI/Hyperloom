@@ -19,7 +19,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from hyperloom_multibranch.contracts.llm_prices import TokenCounts, price_of
+from hyperloom_common.llm.llm_prices import TokenCounts, price_of
 
 #: The model of calls the log does not name (codex turns): the launch's own model.
 UNNAMED = ""

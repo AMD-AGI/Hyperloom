@@ -36,7 +36,7 @@ from hyperloom_multibranch.contracts.blackboard.peers import (
     Validity,
     Verdict,
 )
-from hyperloom_multibranch.contracts.llm_prices import TokenCounts
+from hyperloom_common.llm.llm_prices import TokenCounts
 from hyperloom_multibranch.contracts.repo import ResolvedPatch
 from hyperloom_multibranch.contracts.blackboard.records import (
     JudgementWrite,

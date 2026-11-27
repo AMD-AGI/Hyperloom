@@ -95,3 +95,25 @@ button.link {
   cursor: pointer;
   text-align: left;
 }
+/* The hover hint (lib/hint.ts): over everything, and never in the pointer's way. */
+.hint-tip {
+  position: fixed;
+  z-index: 1000;
+  max-width: 22rem;
+  padding: 0.35rem 0.55rem;
+  font-size: 12px;
+  line-height: 1.4;
+  color: var(--fg);
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  box-shadow: 0 4px 14px rgb(0 0 0 / 0.25);
+  pointer-events: none;
+}
+.hint-tip b {
+  display: block;
+  margin-bottom: 0.15rem;
+}
+.hint-tip div + div {
+  margin-top: 0.3rem;
+}

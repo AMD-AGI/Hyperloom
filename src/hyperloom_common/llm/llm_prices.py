@@ -75,15 +75,23 @@ class ModelPrice:
     cache_write: float | None = None
     cache_write_1h: float | None = None
 
+    @property
+    def write_rate(self) -> float:
+        """USD per million 5-minute cache-write tokens: the listed rate, else the input rate."""
+        return self.input if self.cache_write is None else self.cache_write
+
+    @property
+    def write_1h_rate(self) -> float:
+        """USD per million 1-hour cache-write tokens: the listed rate, else the 5-minute write rate."""
+        return self.write_rate if self.cache_write_1h is None else self.cache_write_1h
+
     def cost_usd(self, tokens: TokenCounts) -> float:
-        write = self.input if self.cache_write is None else self.cache_write
-        write_1h = write if self.cache_write_1h is None else self.cache_write_1h
         dollars = (
             tokens.input * self.input
             + tokens.output * self.output
             + tokens.cache_read * self.cache_read
-            + tokens.cache_write * write
-            + tokens.cache_write_1h * write_1h
+            + tokens.cache_write * self.write_rate
+            + tokens.cache_write_1h * self.write_1h_rate
         )
         return dollars / PER_TOKENS
 
@@ -95,7 +103,7 @@ def model_key(model: str) -> str:
 
 def price_of(model: str) -> ModelPrice | None:
     """The gateway's rates for ``model``, ``None`` for a model the sheet does not list."""
-    return _sheet().get(model_key(model))
+    return _models().get(model_key(model))
 
 
 def _count(usage: Mapping[str, object], key: str) -> int:
@@ -104,9 +112,26 @@ def _count(usage: Mapping[str, object], key: str) -> int:
 
 
 @cache
-def _sheet() -> dict[str, ModelPrice]:
-    models = json.loads(PRICE_SHEET.read_text(encoding="utf-8"))["models"]
-    return {name: ModelPrice(**rates) for name, rates in models.items()}
+def _document() -> dict:
+    return json.loads(PRICE_SHEET.read_text(encoding="utf-8"))
 
 
-__all__ = ["PER_TOKENS", "PRICE_SHEET", "ModelPrice", "TokenCounts", "model_key", "price_of"]
+@cache
+def _models() -> dict[str, ModelPrice]:
+    return {name: ModelPrice(**rates) for name, rates in _document()["models"].items()}
+
+
+def sheet_source() -> str:
+    """What the sheet says its rates come from."""
+    return _document()["source"]
+
+
+__all__ = [
+    "PER_TOKENS",
+    "PRICE_SHEET",
+    "ModelPrice",
+    "TokenCounts",
+    "model_key",
+    "price_of",
+    "sheet_source",
+]

@@ -5,7 +5,9 @@
 // record.
 
 import { SvelteSet } from "svelte/reactivity";
-import type { Range } from "./timeline/scale";
+import type { LatencyPick } from "./latency";
+import type { Gap, Range } from "./timeline/scale";
+import type { Group, Mode } from "./tokens";
 import type { StreamItem } from "./types";
 
 export type Layout = "layered" | "force";
@@ -17,13 +19,14 @@ export type Selection =
   | { kind: "call"; item: StreamItem }
   | { kind: "raw"; title: string; data: unknown };
 
-export const TABS = ["tasks", "artifacts", "bus", "llm", "journal"] as const;
+export const TABS = ["tasks", "artifacts", "bus", "llm", "tokens", "journal"] as const;
 export type Tab = (typeof TABS)[number];
 /** The artifact in the viewer: a file (with a JSONL page offset) or a diff of two. */
 export type ArtifactView = { kind: "file"; path: string; offset?: number } | { kind: "diff"; a: string; b: string };
 
 const LAYOUT_KEY = "hyperloom-inspector.layout";
 const TIMELINE_KEY = "hyperloom-inspector.timeline-open";
+const UPLIFT_KEY = "hyperloom-inspector.uplift-open";
 
 function savedLayout(): Layout {
   try {
@@ -54,7 +57,10 @@ export class UiState {
   filter = $state<string | null>(null);
   layout = $state<Layout>(savedLayout());
   timelineOpen = $state(savedOpen(TIMELINE_KEY));
-  /** The zoom and pan of the timeline, null for the whole run; `instant` skips the spring. */
+  upliftOpen = $state(savedOpen(UPLIFT_KEY));
+  /** The timeline's visible range and compressed gaps, so panels below it share its time axis. */
+  timeAxis = $state.raw<(Range & { gaps: Gap[] }) | null>(null);
+  /** The zoom and pan of the timeline and the panels on its axis, null for the whole run; `instant` skips the spring. */
   zoom = $state.raw<{ range: Range; instant: boolean } | null>(null);
   selection = $state.raw<Selection | null>(null);
   /** Selections the drawer followed links from, for its back button; a pick in a view starts a new trail. */
@@ -66,6 +72,12 @@ export class UiState {
   /** The artifact tree's search box and type filter, and the entries opened or closed against their default. */
   artQuery = $state({ q: "", type: "" });
   artToggled = new SvelteSet<string>();
+  /** The latency the throughput tab's scatter plots against tok/s. */
+  latency = $state<LatencyPick>({ kind: "ttft", stat: "mean" });
+  /** The token chart: running totals or a rate, by token kind or by agent, and the series its legend hid. */
+  tokenMode = $state<Mode>("cumulative");
+  tokenGroup = $state<Group>("kind");
+  tokenHidden = new SvelteSet<string>();
 
   toggleFilter(node: string): void {
     this.filter = this.filter === node ? null : node;
@@ -117,6 +129,11 @@ export class UiState {
   setTimelineOpen(open: boolean): void {
     this.timelineOpen = open;
     saveOpen(TIMELINE_KEY, open);
+  }
+
+  setUpliftOpen(open: boolean): void {
+    this.upliftOpen = open;
+    saveOpen(UPLIFT_KEY, open);
   }
 
   setZoom(range: Range | null, instant = false): void {

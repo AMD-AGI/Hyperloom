@@ -25,7 +25,7 @@ def default_history_dir() -> Path:
     return Path(base) / "hyperloom-inspector"
 
 
-def history_path(session_dir: Path, history_dir: Path) -> Path:
+def history_path(session_dir: Path, history_dir: Path, suffix: str = ".jsonl") -> Path:
     """One file per session: its name plus a hash of its absolute path, so equal names don't collide.
 
     Raises ``ValueError`` when *history_dir* is inside *session_dir*.
@@ -35,7 +35,7 @@ def history_path(session_dir: Path, history_dir: Path) -> Path:
     if target == session or session in target.parents:
         raise ValueError(f"history dir {target} is inside the session {session}; the session stays read-only")
     digest = hashlib.sha256(str(session).encode()).hexdigest()[:10]
-    return target / f"{session.name}-{digest}.jsonl"
+    return target / f"{session.name}-{digest}{suffix}"
 
 
 class MetricsHistory:

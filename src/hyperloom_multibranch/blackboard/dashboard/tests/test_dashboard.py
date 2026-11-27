@@ -11,7 +11,7 @@ from pathlib import Path
 
 import pytest
 
-from hyperloom_multibranch.contracts.llm_prices import TokenCounts
+from hyperloom_common.llm.llm_prices import TokenCounts
 from hyperloom_multibranch.contracts.blackboard import INTEGRATION_BRANCH, ClaimKey, Role, Writer
 from hyperloom_multibranch.contracts.blackboard.peers import BranchLogEntry, BranchLogType
 from hyperloom_multibranch.contracts.blackboard.records import (

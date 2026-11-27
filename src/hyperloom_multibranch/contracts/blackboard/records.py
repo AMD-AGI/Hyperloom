@@ -13,7 +13,7 @@ from dataclasses import dataclass, field
 
 from hyperloom.common.agentx_objective import AgentXObjective
 from hyperloom.contracts.recipe import KernelArtifact, RecipeDelta
-from hyperloom_multibranch.contracts.llm_prices import TokenCounts
+from hyperloom_common.llm.llm_prices import TokenCounts
 from hyperloom_multibranch.contracts.repo import ResolvedPatch
 from hyperloom_multibranch.contracts.blackboard.exhausted import Exhausted
 from hyperloom_multibranch.contracts.blackboard.peers import (

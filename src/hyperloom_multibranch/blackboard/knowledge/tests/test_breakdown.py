@@ -14,7 +14,7 @@ import pytest
 from hyperloom.contracts.measurement import BuildCharge, BuildPayment
 from hyperloom.contracts.recipe import LaunchConfig, Recipe
 from hyperloom.orchestrator.knowledge.remote_recipe.models import RemoteWriteResult
-from hyperloom_multibranch.contracts.llm_prices import TokenCounts
+from hyperloom_common.llm.llm_prices import TokenCounts
 from hyperloom_multibranch.contracts.blackboard import INTEGRATION_BRANCH
 from hyperloom_multibranch.contracts.blackboard.records import (
     CardHold,

@@ -3,7 +3,7 @@
 
 import json
 
-from hyperloom_multibranch.contracts.llm_prices import TokenCounts
+from hyperloom_common.llm.llm_prices import TokenCounts
 from hyperloom_multibranch.specialist.llm_usage import UNNAMED, launch_cost, launch_usage
 
 OPUS, HAIKU = "claude-opus-5-5", "claude-haiku-5-5"

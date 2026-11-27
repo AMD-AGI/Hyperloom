@@ -20,7 +20,7 @@ from hyperloom_common.shared_storage import setgid_warnings, writable_problems
 from hyperloom.common.perf_metric import agentx_enabled
 from hyperloom.measure.short_prompts.staging import CACHE_ENV as RUNNER_CACHE_ENV
 from hyperloom.orchestrator.knowledge.remote_recipe.client import RemoteRecipeClient, RemoteRecipeConfigurationError
-from hyperloom_multibranch.contracts.llm_prices import price_of
+from hyperloom_common.llm.llm_prices import price_of
 from hyperloom_multibranch.contracts.toolbox import WorkloadKind
 from hyperloom_multibranch.blackboard.rsi.archive import ARCHIVE_ENV
 from hyperloom_multibranch.scheduling.llm import default_model

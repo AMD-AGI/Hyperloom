@@ -72,7 +72,7 @@ def contract_message(producer: str, inspector_file: str, detail: str) -> str:
 
 
 def watch(session_dir: Path, *, replay: bool = False) -> Any:
-    """The Inspector's watcher over *session_dir*, polled once (no resource sampling)."""
+    """The Inspector's watcher over *session_dir*, polled once (no resource sampling, no token file)."""
     from hyperloom.inspector.watcher import Watcher, WatchOptions
 
     watcher = Watcher(session_dir, WatchOptions(replay=replay, sample_metrics=False))
@@ -247,6 +247,19 @@ def record_phase(state: Any, to_phase: str, reason: str, ts_unix: float) -> dict
     return machine.record_phase_transition(state, to_phase=to_phase, reason=reason, at=clock)
 
 
+def promote_baseline(state: Any, result: dict) -> None:
+    """A promoted baseline's run facts (its accuracy among them) recorded on *state* as the coordinator records them
+    when the baseline lands (``BaselinePromotionMixin._promote_anchor_run_facts``, which reads only ``shared_state``)."""
+    mixin = Upstream("hyperloom.orchestrator.loop._baseline_promotion").BaselinePromotionMixin
+    mixin._promote_anchor_run_facts(argparse.Namespace(shared_state=state), result, {})
+
+
+def accept_variant(state: Any, name: str, accuracy: float | None) -> None:
+    """A kept variant's ``explore_search.accepted`` row through ``SharedState.record_explore_accepted``, the variant
+    carrying the keys the explore executor's KEEP row gives it (a literal in ``explore.py``), stamped now."""
+    state.record_explore_accepted({"name": name, "fingerprint": f"fp-{name}", "accuracy": accuracy})
+
+
 def record_baseline(session_dir: Path, task_id: str, measured: dict) -> None:
     """The baseline's ``reports/sbd_v6/timeline`` event, through the recorder a dispatched baseline gets
     (``make_baseline_recorder`` and ``finish``), in a session bound as startup binds it."""
@@ -275,3 +288,37 @@ def producer_says_failed(runner_status: str, reason: str) -> bool:
     ftype, _retry = failure_class.classify_specialist_failure(runner_status, reason)
     kinds = failure_class.SpecialistFailureType
     return ftype in (kinds.TIMEOUT, kinds.STALE_HEARTBEAT, kinds.CRASH)
+
+
+def harvest_specialist_trace(process_log: Path, config_dir: Path) -> Any:
+    """What the dispatcher recovers from a Claude CLI specialist's *process_log* and the CLI's own session record
+    under *config_dir* (``trace_harvest.harvest_agent_trace``)."""
+    harvest = Upstream("hyperloom.orchestrator.specialists.trace_harvest").harvest_agent_trace
+    return harvest("claude", process_log.parent, process_log, {"CLAUDE_CONFIG_DIR": str(config_dir)})
+
+
+def specialist_turn_record(task_id: str, turn: int, usage: dict) -> Any:
+    """The ledger record the specialist runner makes for one turn of task *task_id*
+    (``SpecialistRunner._trace_specialist_llm_call``: an ``LLMCallSite`` and ``LLMCallRecord.from_metadata``)."""
+    site = _LLM_TRACE.LLMCallSite(session_id=SESSION_ID, component="specialist", task_id=task_id, turn=turn)
+    return _LLM_TRACE.LLMCallRecord.from_metadata(site, usage)
+
+
+def append_specialist_turns(session_dir: Path, task_id: str, usages: list) -> None:
+    """One ledger row per turn through ``append_llm_call``, as the specialist runner writes a recovered run."""
+    for turn, usage in enumerate(usages, start=1):
+        _LLM_TRACE.append_llm_call(session_dir=session_dir, record=specialist_turn_record(task_id, turn, dict(usage)))
+
+
+# ----- benchmark results ----------------------------------------------------------------------------------------
+
+
+def dataset_client_result() -> dict:
+    """A raw benchmark result as Hyperloom's dataset client saves it (``summarize`` keyed by ``_result``)."""
+    client = Upstream("inference_suite.load.dataset_client")
+    outputs = [
+        client.RequestOutput(success=True, latency=2.0, ttft=0.1, prompt_len=100, output_tokens=50) for _ in range(4)
+    ]
+    sent = client.Pass(outputs=outputs, duration=4.0, start_unix=1000.0, end_unix=1004.0)
+    metrics = client.summarize(outputs, sent.duration, [99.0])
+    return client._result(argparse.Namespace(num_prompts=4), sent, metrics, {"status": "passed"})

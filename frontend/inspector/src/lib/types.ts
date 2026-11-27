@@ -4,7 +4,7 @@
 // Shapes of the Inspector API (src/hyperloom/inspector/watcher.py). Only the fields the page reads are typed; the
 // server sends more, and every record is redacted server-side.
 
-export const STREAM_NAMES = ["event", "llm_call", "journal", "review", "metrics"] as const;
+export const STREAM_NAMES = ["event", "llm_call", "journal", "review", "metrics", "benchmark"] as const;
 export type StreamName = (typeof STREAM_NAMES)[number];
 
 /** A stream record; `_t` is its release time in epoch seconds. */
@@ -97,17 +97,116 @@ export interface RunInfo {
   optimizer?: { alive: boolean | null; reason?: string; host?: string };
 }
 
+/** The accuracy state.json records, as fractions: the baseline's, and each kept variant's with when it was measured. */
+export interface AccuracyView {
+  baseline: number | null;
+  variants: { variant: string; value: number; t: number | null }[];
+}
+
+/** Token sums of a rollup (tokens.py); `input` is uncached, so the five kinds add up to `total`. */
+export interface TokenTotals {
+  input: number;
+  cache_write: number;
+  cache_read: number;
+  output: number;
+  reasoning: number;
+  total: number;
+  calls: number;
+  errors: number;
+  web_searches?: number;
+  /** USD at `pricing`'s prices; null where none of the calls is priced. */
+  cost_usd?: number | null;
+  /** Calls left out of `cost_usd`, as a price they need is missing; by why: `no_model`, with no model recorded;
+   * `no_price`, of a model the price sheet has no price for; `no_search_price`, with web searches and no price per
+   * search. */
+  unpriced?: number;
+  no_model?: number;
+  no_price?: number;
+  no_search_price?: number;
+  /** Turns read from a specialist's log that the ledger has not got. */
+  live?: number;
+  /** Of those, a running specialist's, whose output is only known when it ends. */
+  output_pending?: number;
+  /** Of those, a specialist's that ended before reporting its output, which is unknown. */
+  output_unreported?: number;
+}
+
+/**
+ * Sparse buckets, `step` s from `start`: one `[bucket, node index, ...kinds, calls, ...kinds]` row per non-empty pair,
+ * tokens then USD.
+ */
+export interface TokenSeries {
+  start: number;
+  end: number;
+  step: number;
+  kinds: string[];
+  nodes: string[];
+  rows: number[][];
+}
+
+/** One model's entry on the price sheet, USD per 1M tokens. */
+export interface TokenPrice {
+  id: string;
+  input: number;
+  cache_write: number;
+  cache_read: number;
+  output: number;
+  /** "listed" on the sheet, or the input rate the sheet bills a cache write it lists none for at. */
+  cache_basis: string;
+  /** What this run's calls priced in full cost, by kind: the parts of the model's cost_usd. */
+  spent_usd: Record<"input" | "cache_write" | "cache_read" | "output" | "reasoning", number>;
+}
+
+export interface TokenPricing {
+  /** The built-in price sheet's file. */
+  source: string;
+  /** What the sheet says its rates come from. The sheet gives no price per search: a call that searches is unpriced. */
+  built_from?: string | null;
+  models: Record<string, TokenPrice>;
+  unpriced: Record<string, { calls: number; total: number }>;
+}
+
+/** A figure's name on the Tokens tab and what it means (tokens.py `TERMS`). */
+export interface TokenTerm {
+  group: string;
+  label: string;
+  definition: string;
+}
+
+/** `view.tokens`: token consumption up to the clock. */
+export interface TokenView {
+  totals: TokenTotals;
+  by_component: Record<string, TokenTotals>;
+  by_node: Record<string, TokenTotals>;
+  by_model: Record<string, TokenTotals>;
+  pending_tasks: string[];
+  /** Specialists that ended before reporting their output. */
+  unreported_tasks?: string[];
+  recent: { window_sec: number; total: number; calls: number; cost_usd?: number | null };
+  series: TokenSeries;
+  /** What the cost is priced by: the built-in price sheet. */
+  pricing: TokenPricing;
+  /** The Claude CLI's own cost of its finished specialists next to ours for them. */
+  check?: { tasks: number; claude_cli_usd: number; priced_usd: number | null } | null;
+  /** Names and definitions, keyed by field (`input`, `cache_read`, `total`, ...) or figure (`cache_hit`, ...). */
+  terms?: Record<string, TokenTerm>;
+  /** The token timeline file the Inspector keeps, or null when it keeps none. */
+  file: string | null;
+  saved_at: number | null;
+}
+
 /** `/api/snapshot` without streams, as the SSE `view` event sends it. */
 export interface View {
   version: number;
   clock: Clock;
   run: RunInfo;
-  summary: Record<string, unknown> & { phase?: string; session_id?: string };
+  summary: Record<string, unknown> & { phase?: string; session_id?: string; accuracy?: AccuracyView };
   budget: { used_sec: number; total_sec: number; pct: number } | null;
   tasks: Task[];
   graph: { nodes: GraphNode[]; edges: GraphEdge[] };
   timeline: Timeline;
   llm: Record<string, Record<string, unknown>>;
+  tokens: TokenView;
   badges: { level: string; text: string }[];
   agents: { agent: string; age_sec: number; stale: boolean }[];
   artifact_count: number;

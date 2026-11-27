@@ -21,6 +21,38 @@ export function fmtNum(n: number | null | undefined, digits = 1): string {
   return f.format(Number(n));
 }
 
+const compactFormat = new Intl.NumberFormat(undefined, { notation: "compact", maximumFractionDigits: 1 });
+
+/** Short counts for axes and cards: 6.9M, 657.5K. */
+export function fmtCompact(n: number | null | undefined): string {
+  return n == null || !isFinite(n) ? "–" : compactFormat.format(n);
+}
+
+const usdFormats = new Map<string, Intl.NumberFormat>();
+const usdFormat = (key: string, opts: Intl.NumberFormatOptions) => {
+  let f = usdFormats.get(key);
+  if (!f) {
+    f = new Intl.NumberFormat(undefined, {
+      style: "currency",
+      currency: "USD",
+      currencyDisplay: "narrowSymbol",
+      ...opts,
+    });
+    usdFormats.set(key, f);
+  }
+  return f;
+};
+
+/** US dollars: cents from a dollar up, more digits below one, compact from ten thousand; *short* drops zero cents. */
+export function fmtUsd(n: number | null | undefined, short = false): string {
+  if (n == null || !isFinite(n)) return "–";
+  const a = Math.abs(n);
+  if (a >= 10000) return usdFormat("compact", { notation: "compact", maximumFractionDigits: 1 }).format(n);
+  const max = a >= 1 || a === 0 ? 2 : a >= 0.01 ? 3 : 4;
+  const min = short ? 0 : 2;
+  return usdFormat(`${min}:${max}`, { minimumFractionDigits: min, maximumFractionDigits: max }).format(n);
+}
+
 /** `1,234 artifacts`; once the index stopped at its cap, `20,000+ artifacts (list cut at 20,000)`. */
 export function fmtArtifactCount(n: number, cutAt: number | null | undefined): string {
   const count = `${fmtNum(n, 0)}${cutAt != null && n >= cutAt ? "+" : ""} artifacts`;

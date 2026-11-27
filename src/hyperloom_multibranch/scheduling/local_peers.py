@@ -59,7 +59,7 @@ from hyperloom_common.llm.llm_config import (
 )
 from hyperloom.common.model_paths import resolve_serving_model_path
 from hyperloom.common.perf_metric import DATASET_PATH_ENV
-from hyperloom_multibranch.contracts.llm_prices import price_of
+from hyperloom_common.llm.llm_prices import price_of
 from hyperloom_multibranch.contracts.blackboard import Role, Writer
 from hyperloom_multibranch.contracts.blackboard.interfaces import BranchLogStore, CommitQuery
 from hyperloom_multibranch.contracts.repo import ExperimentRepo

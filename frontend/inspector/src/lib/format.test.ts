@@ -2,12 +2,34 @@
 // SPDX-License-Identifier: MIT
 
 import { describe, expect, it } from "vitest";
-import { fmtArtifactCount, fmtBytes, fmtDur, fmtNum, fmtTime, preview } from "./format";
+import { fmtArtifactCount, fmtBytes, fmtCompact, fmtDur, fmtNum, fmtTime, fmtUsd, preview } from "./format";
 
 describe("format", () => {
   it("formats numbers with a placeholder for missing values", () => {
     expect(fmtNum(null)).toBe("–");
     expect(fmtNum(1685.24)).toBe((1685.2).toLocaleString());
+  });
+  it("formats counts compactly", () => {
+    const compact = new Intl.NumberFormat(undefined, { notation: "compact", maximumFractionDigits: 1 });
+    expect([fmtCompact(null), fmtCompact(NaN)]).toEqual(["–", "–"]);
+    expect(fmtCompact(6888915)).toBe(compact.format(6888915));
+    expect(fmtCompact(950)).toBe(compact.format(950));
+  });
+  it("formats dollars with the digits small amounts need", () => {
+    const usd = (opts: Intl.NumberFormatOptions) =>
+      new Intl.NumberFormat(undefined, {
+        style: "currency",
+        currency: "USD",
+        currencyDisplay: "narrowSymbol",
+        ...opts,
+      });
+    expect([fmtUsd(null), fmtUsd(Infinity)]).toEqual(["–", "–"]);
+    expect(fmtUsd(10.717503)).toBe(usd({ minimumFractionDigits: 2, maximumFractionDigits: 2 }).format(10.72));
+    expect(fmtUsd(0)).toBe(usd({ minimumFractionDigits: 2, maximumFractionDigits: 2 }).format(0));
+    expect(fmtUsd(0.289475)).toBe(usd({ minimumFractionDigits: 2, maximumFractionDigits: 3 }).format(0.289));
+    expect(fmtUsd(0.0042)).toBe(usd({ minimumFractionDigits: 2, maximumFractionDigits: 4 }).format(0.0042));
+    expect(fmtUsd(5, true)).toBe(usd({ minimumFractionDigits: 0, maximumFractionDigits: 2 }).format(5));
+    expect(fmtUsd(123456)).toBe(usd({ notation: "compact", maximumFractionDigits: 1 }).format(123456));
   });
   it("says when the artifact list is cut", () => {
     const n = (v: number) => v.toLocaleString();

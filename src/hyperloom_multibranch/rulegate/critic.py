@@ -20,7 +20,7 @@ from typing import Protocol
 
 from hyperloom.contracts.recipe import RecipeDelta
 from hyperloom_multibranch.contracts.judgement import Judgement
-from hyperloom_multibranch.contracts.llm_prices import TokenCounts, price_of
+from hyperloom_common.llm.llm_prices import TokenCounts, price_of
 from hyperloom_multibranch.contracts.blackboard.interfaces import UsageSink
 from hyperloom_multibranch.contracts.llm import Completion, CompletionFailed, CompletionReply
 from hyperloom_multibranch.contracts.blackboard.records import LlmUsage

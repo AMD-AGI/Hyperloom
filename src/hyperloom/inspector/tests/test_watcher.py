@@ -86,14 +86,16 @@ def test_replay_chapters_cover_the_recording_past_the_clock(session_dir):
     assert "chapters" not in _live(session_dir).snapshot()["timeline"]
 
 
-def test_a_live_run_gone_quiet_ends_the_timeline_at_its_last_activity(session_dir, monkeypatch):
+def test_a_live_run_gone_quiet_ends_the_timeline_and_token_chart_at_its_last_activity(session_dir, monkeypatch):
     w = _live(session_dir)
     snap = w.snapshot()
     end = snap["timeline"]["end"]
     assert T0 < end < w.clock.now() - 600
+    assert snap["tokens"]["series"]["end"] == end
     monkeypatch.setattr(w, "optimizer_status", lambda: {"alive": True})
     snap = w.snapshot()
     assert snap["timeline"]["end"] is None
+    assert snap["tokens"]["series"]["end"] > w.clock.now() - 5
     assert _replay_at(session_dir, T0 + 305).snapshot()["timeline"]["end"] is None
 
 
@@ -164,6 +166,62 @@ def test_replay_delta_releases_items_and_resets_on_rewind(session_dir):
     assert [c["call_id"] for c in second["items"]["llm_call"]] == ["c1", "c2"]
     w.clock.seek(T0 + 100)
     assert w.delta(cursors)["reset"] is True
+
+
+def _bench_file(session_dir, rel, end, tput, ttft):
+    path = session_dir / "runs" / rel / "inferencex_result.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        json.dumps(
+            {"output_throughput": tput, "mean_ttft_ms": ttft, "p99_ttft_ms": ttft * 3, "benchmark_end_time_unix": end}
+        ),
+        encoding="utf-8",
+    )
+
+
+def test_measured_benchmark_runs_become_points_released_by_the_clock(session_dir):
+    _bench_file(session_dir, "explore/t-exp/v00_a/variant_00_a/benchmark_1", T0 + 200, 1000.0, 80.0)
+    _bench_file(session_dir, "explore/t-exp/v00_a/warmup_round/variant_00_a/benchmark_0", T0 + 100, 900.0, 95.0)
+    _bench_file(session_dir, "explore/t-exp/v01_b/variant_00_b/benchmark_2", T0 + 500, 1200.0, 70.0)
+    (session_dir / "runs" / "explore" / "t-exp" / "v01_b" / "stray.json").write_text("{}", encoding="utf-8")
+
+    live = _live(session_dir).snapshot()["streams"]["benchmark"]
+    assert [(p["variant"], p["output_throughput"], p["latency"]["ttft"]) for p in live] == [
+        ("a", 1000.0, {"mean": 80.0, "median": None, "p99": 240.0}),
+        ("b", 1200.0, {"mean": 70.0, "median": None, "p99": 210.0}),
+    ]
+    assert {p["task_id"] for p in live} == {"t-exp"}
+
+    early = _replay_at(session_dir, T0 + 250).snapshot()["streams"]["benchmark"]
+    assert [p["variant"] for p in early] == ["a"]
+
+
+def test_baseline_point_is_released_once_from_its_timeline_record_with_the_raw_file_percentiles(session_dir):
+    path = session_dir / "reports" / "sbd_v6" / "timeline" / "000001-baseline.json"
+    assert _live(session_dir).snapshot()["streams"]["benchmark"] == []
+
+    action = {
+        "task_id": "t-base",
+        "end_time": iso(T0 + 600),
+        "measurement": {"output_throughput": 1685.2, "ttft_mean_ms": 60.2},
+    }
+    path.write_text(json.dumps({"id": 1, "kind": "baseline", "ext": {"actions": [action]}}), encoding="utf-8")
+    raw = session_dir / "runs" / "baseline" / "t-base" / "measure_round" / "benchmark_1" / "inferencex_result.json"
+    raw.parent.mkdir(parents=True)
+    raw.write_text(json.dumps({"mean_ttft_ms": 60.2, "median_ttft_ms": 51.0, "p99_ttft_ms": 190.0}), encoding="utf-8")
+    w = _live(session_dir)
+    path.write_text(
+        json.dumps({"id": 1, "kind": "baseline", "ext": {"actions": [action], "again": 1}}), encoding="utf-8"
+    )
+    os.utime(path, (T0 + 900, T0 + 900))
+    w.poll()
+    points = w.snapshot()["streams"]["benchmark"]
+    assert [(p["kind"], p["task_id"], p["output_throughput"]) for p in points] == [("baseline", "t-base", 1685.2)]
+    assert points[0]["latency"]["ttft"] == {"mean": 60.2, "median": 51.0, "p99": 190.0}
+    assert points[0]["_t"] == T0 + 600
+
+    raw.unlink()
+    assert _live(session_dir).snapshot()["streams"]["benchmark"][0]["latency"]["ttft"]["median"] is None
 
 
 def test_clock_range_speed_and_pause():
@@ -241,6 +299,19 @@ def test_best_throughput_falls_back_to_results_when_state_has_none(session_dir):
     assert best["hot_tput"] == 1685.16 and best["source"] == "journal"
     assert _replay_at(session_dir, T0 + 599).snapshot()["summary"]["current_best"]["hot_tput"] is None
     assert _replay_at(session_dir, T0 + 601).snapshot()["summary"]["current_best"]["hot_tput"] == 1685.16
+
+
+def test_accuracy_from_state_appears_once_the_clock_passes_it(session_dir):
+    state = json.loads((session_dir / "state.json").read_text())
+    state["baseline_accuracy"] = 0.968
+    accepted = [{"name": "k7", "accuracy": 0.962, "ts": iso(T0 + 700)}, {"name": "ungated", "accuracy": None}]
+    state["explore_search"] = {"accepted": accepted}
+    (session_dir / "state.json").write_text(json.dumps(state))
+    live = _live(session_dir).snapshot()["summary"]["accuracy"]
+    assert live == {"baseline": 0.968, "variants": [{"variant": "k7", "value": 0.962, "t": T0 + 700}]}
+    assert _replay_at(session_dir, T0 + 699).snapshot()["summary"]["accuracy"]["variants"] == []
+    assert _replay_at(session_dir, T0 + 701).snapshot()["summary"]["accuracy"] == live
+    assert _replay_at(session_dir, T0 + 1).snapshot()["summary"]["accuracy"]["baseline"] is None
 
 
 def test_running_task_shows_its_step_and_failed_variants_their_root_cause(session_dir):

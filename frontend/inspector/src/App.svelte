@@ -9,6 +9,7 @@
   import Graph from "./lib/graph/Graph.svelte";
   import Tabs from "./lib/tabs/Tabs.svelte";
   import Timeline from "./lib/timeline/Timeline.svelte";
+  import UpliftPanel from "./lib/timeline/UpliftPanel.svelte";
   import { InspectorStore } from "./lib/store.svelte";
   import { UiState } from "./lib/ui.svelte";
 
@@ -32,6 +33,7 @@
     </p>
     <Graph {store} {ui} />
     <Timeline {store} {ui} />
+    <UpliftPanel {store} {ui} />
     <Tabs {store} {ui} />
   {/if}
 </main>

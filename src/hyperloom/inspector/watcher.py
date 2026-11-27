@@ -11,10 +11,13 @@ Two kinds of data come out of here:
   In replay a stream releases an item once the virtual clock passes its time,
   so a backward scrub shrinks the released prefix and the client gets a reset.
 * **Views** are recomputed at the clock on every request (run info, tasks with
-  health, the harness graph, timeline bars and phase bands, badges).
+  health, the harness graph, timeline bars and phase bands, badges, token
+  consumption).
 
 Nothing here writes into the session directory, and every payload is
-redacted before it leaves the process.
+redacted before it leaves the process. The token timeline file
+(:mod:`hyperloom.inspector.tokens`) is written outside it. Tokens are always
+counted and priced by the built-in price sheet (:mod:`hyperloom.inspector.price_sheet`).
 """
 
 from __future__ import annotations
@@ -50,11 +53,12 @@ from hyperloom.inspector.collectors import (
 from hyperloom.inspector.history import MetricsHistory
 from hyperloom.inspector.redact import redact
 from hyperloom.inspector.session_layout import STATE_FILE, coordinator_db, variant_dir_name
+from hyperloom.inspector.tokens import TokenTracker
 
 log = logging.getLogger(__name__)
 
 _METRICS_STREAM = "metrics"
-STREAMS = ("event", "llm_call", "journal", "review", _METRICS_STREAM)
+STREAMS = ("event", "llm_call", "journal", "review", _METRICS_STREAM, "benchmark")
 # Folders of a session directory and the task kind and state the watcher looks for.
 _REPORTS_DIR = "reports"
 _RUNS_DIR = "runs"
@@ -64,6 +68,7 @@ _TS_KEYS = ("ts_unix", "ts", "recorded_unix", "completed_at", "started_at", "sta
 _METRIC_SAMPLES = 4000
 _METRIC_EVERY_SEC = 5.0
 _INDEX_EVERY_SEC = 10.0
+_BENCH_EVERY_SEC = 10.0
 _ACTIVE_SEC = 600.0
 
 
@@ -179,9 +184,11 @@ class Watcher:
         session_dir: Path,
         options: WatchOptions | None = None,
         history: MetricsHistory | None = None,
+        tokens: TokenTracker | None = None,
     ) -> None:
         options = options or WatchOptions()
         self.session_dir = Path(session_dir)
+        self.tokens = tokens if tokens is not None else TokenTracker(self.session_dir)
         self.clock = Clock(replay=options.replay, speed=options.speed)
         self.poll_sec = options.poll_sec
         self.stall_after_sec = options.stall_after_sec
@@ -195,6 +202,7 @@ class Watcher:
         self._llm_tail = JsonlTail(reports / "trace" / "llm_calls.jsonl")
         self._timeline_files = ChangedFiles(reports / "sbd_v6" / "timeline", "*.json")
         self._reviews = ChangedFiles(self.session_dir / "critic-workdir", "*/review.json")
+        self._benchmarks = ChangedFiles(self.session_dir / _RUNS_DIR, "*/*/**/inferencex_result.json")
         self.state: dict = {}
         self.manifest: dict = {}
         self.pod_history: list[dict] = []
@@ -203,8 +211,10 @@ class Watcher:
         self.unit_errors: dict[tuple[str, str], str | None] = {}
         self.timeline: dict[str, dict] = {}
         self.journal_seen = 0
+        self._baselines: set[str] = set()
         self.artifact_index = artifacts_mod.ArtifactIndex()
         self._last_index = 0.0
+        self._last_bench = 0.0
         self._last_sample = 0.0
         self.history = history
         if history is not None:
@@ -222,6 +232,8 @@ class Watcher:
 
     def stop(self) -> None:
         self._stop.set()
+        with self.lock:
+            self.tokens.save(force=True)
 
     def _run(self) -> None:
         while not self._stop.wait(self.poll_sec):
@@ -234,6 +246,7 @@ class Watcher:
         with self.lock:
             changed = self._poll_files()
             changed |= self._poll_db()
+            changed |= self._poll_tokens()
             if self.sample_metrics:
                 changed |= self._sample_metrics()
             now = time.monotonic()
@@ -256,17 +269,45 @@ class Watcher:
             self.pod_history, changed = history, True
         for rec in self._llm_tail.read_new():
             self.streams["llm_call"].add(rec, item_time(rec))
+            self.tokens.add_ledger(rec)
             changed = True
         for path, rec in self._timeline_files.read_changed():
             if isinstance(rec, dict):
                 self.timeline[path.name] = rec
                 changed = True
+                point = derive.baseline_point(rec, parse_ts, self._baseline_raw)
+                if point is not None and point["task_id"] not in self._baselines:
+                    self._baselines.add(point["task_id"])
+                    self.streams["benchmark"].add(point, point["ts"])
         for path, rec in self._reviews.read_changed():
             for verdict in (rec or {}).get("review_verdicts") or []:
                 t = newest_mtime(path)
                 self.streams["review"].add({**verdict, "turn": path.parent.name}, t)
                 changed = True
         changed |= self._poll_journal()
+        changed |= self._poll_benchmarks()
+        return changed
+
+    def _baseline_raw(self, task_id: str) -> Any:
+        """The baseline's measured-round result file, which has the percentiles its timeline record lacks."""
+        if Path(task_id).name != task_id:
+            return None
+        runs = self.session_dir / _RUNS_DIR / _BASELINE_KIND / task_id
+        path = next(iter(sorted(runs.glob("measure_round/*/inferencex_result.json"))), None)
+        return read_json(path) if path else None
+
+    def _poll_benchmarks(self) -> bool:
+        """Benchmark result files under ``runs/``; the walk is throttled because that tree can be large."""
+        now = time.monotonic()
+        if self._last_bench and now - self._last_bench < _BENCH_EVERY_SEC:
+            return False
+        self._last_bench = now
+        changed = False
+        for path, raw in self._benchmarks.read_changed():
+            point = derive.benchmark_point(path.relative_to(self._benchmarks.root).parts, raw, newest_mtime(path))
+            if point is not None:
+                self.streams["benchmark"].add(point, point["ts"])
+                changed = True
         return changed
 
     def _poll_journal(self) -> bool:
@@ -299,6 +340,12 @@ class Watcher:
             self.tasks, changed = tasks, True
         return changed
 
+    def _poll_tokens(self) -> bool:
+        """Running specialists' new turns, then the timeline file (throttled)."""
+        changed = self.tokens.poll(self.tasks, self.state.get("phase_history"))
+        self.tokens.save()
+        return changed
+
     def _sample_metrics(self) -> bool:
         """Memory and GPU use of this machine, every few seconds; none while the optimizer is known to run on another
         host, whose resources they would not be."""
@@ -326,9 +373,11 @@ class Watcher:
         self.clock.set_range(start, last if last is not None else start)
 
     def _last_activity(self) -> float | None:
-        """The run's last recorded activity: its streams but resources, and its tasks' updates."""
+        """The run's last recorded activity: its streams but resources, its tasks' updates, and its token events,
+        as a specialist's log can go on after the coordinator stops."""
         ends = [s.times[-1] for name, s in self.streams.items() if s.times and name != _METRICS_STREAM]
         ends += [t for t in (parse_ts(x.get("updated_at")) for x in self.tasks) if t is not None]
+        ends += [e["t"] for e in self.tokens.events()[-1:]]
         return max(ends, default=None)
 
     # ----- views ---------------------------------------------------------------------------------------------
@@ -425,10 +474,12 @@ class Watcher:
         """state.json summary; in replay, rolled back to *clock*.
 
         state.json holds each field's last value only. In replay, phase, budget used and best throughput are
-        worked out for the clock; the baseline, the stop and the validated gain appear once the clock passes them;
+        worked out for the clock; the baseline (its accuracy too), the stop, the validated gain and each variant's
+        accuracy appear once the clock passes them;
         tick and crash count, which have no history, are left out.
         """
         summary = derive.state_summary(self.state)
+        summary["accuracy"] = derive.accuracy_results(self.state, parse_ts)
         if not self.clock.replay:
             summary["current_best"] = self._best_at(summary.get("current_best") or {}, None)
             return summary
@@ -443,8 +494,10 @@ class Watcher:
         start, used = parse_ts(summary.get("start_ts")), summary.get("elapsed_charged_sec")
         if start is not None and isinstance(used, (int, float)):
             summary["elapsed_charged_sec"] = max(0.0, min(float(used), clock - start))
+        accuracy = summary["accuracy"]
+        accuracy["variants"] = [v for v in accuracy["variants"] if v["t"] is not None and v["t"] <= clock]
         if not self._baseline_by(clock):
-            summary["baseline_tput"] = None
+            summary["baseline_tput"] = accuracy["baseline"] = None
         stop = parse_ts(summary.get("stop_ts"))
         if stop is None or stop > clock:
             summary["stop_ts"] = summary["stop_reason"] = summary["cumulative_gain_validated"] = None
@@ -538,6 +591,7 @@ class Watcher:
                 "graph": graph.build_graph(tasks, events, calls, artifacts),
                 "timeline": self.timeline_view(tasks, clock),
                 "llm": derive.llm_summary(calls),
+                "tokens": self.tokens.view(clock, *self._token_window(clock)),
                 "badges": self._db_badges() + derive.health_badges(summary, tasks, memory, agents),
                 "agents": agents,
                 "artifact_count": len(artifacts),
@@ -552,14 +606,27 @@ class Watcher:
         """An error badge when the session's tasks cannot be read (its database is in a private ledger elsewhere)."""
         return [{"level": "error", "text": self.db_problem}] if self.db_problem else []
 
+    def _token_window(self, clock: float) -> tuple[float | None, float | None, float | None]:
+        """(cut-off, chart start, chart end). Replay cuts at the clock. Live shows everything from the session
+        start, up to now while the run is active, else up to its last activity."""
+        if self.clock.replay:
+            return clock, self.clock.start, clock
+        end = self._run_end(clock)
+        return None, parse_ts(self.state.get("start_ts")), clock if end is None else end
+
     def _run_end(self, clock: float) -> float | None:
         """Live, the run's last activity once it has gone quiet (its optimizer not known to be alive, and nothing new
         for ``_ACTIVE_SEC``); None while it is active, and in replay."""
         if self.clock.replay:
             return None
-        last = self._last_activity()
+        last = max((t for t in (self._last_activity(), self.tokens.latest_write()) if t is not None), default=None)
         active = self.optimizer_status().get("alive") or last is None or clock - last < _ACTIVE_SEC
         return None if active else last
+
+    def token_document(self) -> dict:
+        """The token timeline document (as saved to the token file), up to the clock in replay; redacted."""
+        with self.lock:
+            return redact(self.tokens.document(self._token_window(self.clock.now())[0]))
 
     def delta(self, cursors: dict[str, int]) -> dict:
         """Stream items released since *cursors*; ``reset`` when the clock moved back past one."""

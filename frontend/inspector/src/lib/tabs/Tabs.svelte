@@ -11,6 +11,7 @@
   import JournalTab from "./JournalTab.svelte";
   import LlmTab from "./LlmTab.svelte";
   import TasksTab from "./TasksTab.svelte";
+  import TokensTab from "./TokensTab.svelte";
 
   let { store, ui }: { store: InspectorStore; ui: UiState } = $props();
 
@@ -19,6 +20,7 @@
     artifacts: "Artifacts",
     bus: "Bus",
     llm: "LLM",
+    tokens: "Tokens",
     journal: "Throughput",
   };
   const counts = $derived<Record<Tab, number>>({
@@ -26,6 +28,7 @@
     artifacts: store.artifacts.length,
     bus: store.streams.event.length,
     llm: store.streams.llm_call.length,
+    tokens: store.view?.tokens.totals.calls ?? 0,
     journal: store.streams.journal.length,
   });
 
@@ -68,6 +71,8 @@
         <BusTab {store} {ui} />
       {:else if ui.tab === "llm"}
         <LlmTab {store} {ui} />
+      {:else if ui.tab === "tokens"}
+        <TokensTab {store} {ui} />
       {:else}
         <JournalTab {store} {ui} />
       {/if}

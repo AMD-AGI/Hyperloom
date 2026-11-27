@@ -4,7 +4,7 @@
 import pytest
 
 from hyperloom_common.llm.llm_config import DEFAULT_CLAUDE_MODEL, DEFAULT_CODEX_MODEL
-from hyperloom_multibranch.contracts.llm_prices import ModelPrice, TokenCounts, model_key, price_of
+from hyperloom_common.llm.llm_prices import ModelPrice, TokenCounts, model_key, price_of
 
 
 @pytest.mark.parametrize(

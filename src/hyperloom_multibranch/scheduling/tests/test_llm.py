@@ -16,7 +16,7 @@ from claude_agent_sdk import ClaudeSDKError
 
 from hyperloom_common.llm.llm_config import AnthropicCompletionRequest, AnthropicMessageResult
 from hyperloom_multibranch.contracts.llm import CompletionFailed, CompletionReply
-from hyperloom_multibranch.contracts.llm_prices import TokenCounts, price_of
+from hyperloom_common.llm.llm_prices import TokenCounts, price_of
 from hyperloom_multibranch.contracts.blackboard.records import LlmUsage, LlmUsageRecord
 from hyperloom_multibranch.contracts.blackboard.vocab import UsageSource
 from hyperloom_multibranch.scheduling import llm

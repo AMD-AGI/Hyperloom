@@ -85,6 +85,9 @@
   const laneY = $derived(new Map(ids.map((id, i) => [id, AXIS + i * LANE])));
   const bottom = $derived(AXIS + ids.length * LANE);
   const H = $derived(bottom + 8 + RES + 16);
+  $effect(() => {
+    ui.timeAxis = { t0: r.t0, t1: r.t1, gaps: sc.gaps };
+  });
   const clampX = (t: number) => Math.max(LABEL, Math.min(W - 8, sc.X(t)));
   const inRange = (t: number) => t >= r.t0 && t <= r.t1;
   const faded = (id: string) => !!ui.filter && ui.filter !== id;

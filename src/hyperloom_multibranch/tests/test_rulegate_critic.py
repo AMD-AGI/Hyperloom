@@ -11,7 +11,7 @@ from hyperloom_common.llm import llm_config
 from hyperloom.contracts.measurement import NOT_REPRODUCED, REPRODUCED
 from hyperloom.contracts.recipe import ConfigDelta, RecipeDelta
 from hyperloom_multibranch.contracts.judgement import AccuracyVerdict, Judgement, Verdict
-from hyperloom_multibranch.contracts.llm_prices import TokenCounts, price_of
+from hyperloom_common.llm.llm_prices import TokenCounts, price_of
 from hyperloom_multibranch.contracts.blackboard.records import LlmUsage
 from hyperloom_multibranch.contracts.blackboard.vocab import UsageSource
 from hyperloom_multibranch.contracts.llm import CompletionFailed, CompletionReply

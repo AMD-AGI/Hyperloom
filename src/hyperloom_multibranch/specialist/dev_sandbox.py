@@ -55,7 +55,7 @@ from hyperloom_multibranch.contracts.branch_log import BranchLogEntry, BranchLog
 from hyperloom_multibranch.contracts.blackboard.interfaces import BlackboardError
 from hyperloom_multibranch.contracts.blackboard.records import BranchLogRecord, LlmUsage, LlmUsageRecord
 from hyperloom_multibranch.contracts.blackboard.vocab import LeaseKind, UsageSource
-from hyperloom_multibranch.contracts.llm_prices import TokenCounts
+from hyperloom_common.llm.llm_prices import TokenCounts
 from hyperloom_multibranch.contracts.toolbox import (
     SCOPE_SPECIALIST,
     BranchLease,

@@ -52,8 +52,16 @@ def test_parser_defaults_and_missing_session(tmp_path, capsys):
     args = _build_parser().parse_args(["inspect", "--session-dir", str(tmp_path)])
     assert (args.command, args.host, args.port, args.replay, args.speed) == ("inspect", "127.0.0.1", 8765, False, 1.0)
     assert (args.history_dir, args.no_history) == (None, False)
+    assert (args.token_dir, args.no_token_file) == (None, False)
     assert run_inspect(args) == 2
     assert "no session" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("flag", ["--prices", "--prices-header", "--prices-patch", "--price", "--prices-merge"])
+def test_inspect_takes_no_price_flags(tmp_path, capsys, flag):
+    with pytest.raises(SystemExit) as info:
+        _build_parser().parse_args(["inspect", "--session-dir", str(tmp_path), flag, "https://gw.example/"])
+    assert info.value.code == 2 and flag in capsys.readouterr().err
 
 
 def test_module_entry_point_shares_the_options(tmp_path, capsys):
