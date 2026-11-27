@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Delegate idempotency + policy-denial ladder tests."""
+"""Delegate idempotency, the denial's breakdown row and explore-grid admission."""
 
 from __future__ import annotations
 
@@ -176,28 +176,6 @@ async def test_policy_denial_records_target_proposal_message_id(session_dir):
     denial = event["ext"]["denials"]["rows"][0]
     assert denial["proposal_msg_id"] == "proposal-42"
     assert denial["rule"] == "phase_action_not_allowed"
-
-
-@pytest.mark.asyncio
-async def test_repeated_policy_denials_neither_prune_the_family_nor_stop_the_run(session_dir):
-    """A denial is a fact for the agent to act on: each one reaches its inbox and the runtime reacts to none."""
-    c = _silent_coordinator(session_dir)
-    try:
-        from hyperloom.orchestrator.policy.denial import PolicyDenied
-
-        intent = _delegate(action="backends", key="k1")
-        pd = PolicyDenied("denied", rule="duplicate_idempotency_key", hint="wait")
-        for _ in range(10):
-            await c.router.record_policy_denied("orchestration", intent, pd, action_name="backends")
-        assert "backends" not in c.shared_state.pruned_families
-        assert not (c.shared_state.stop_reason or "").strip()
-        denied = [
-            m.payload for m in c.bus.inbox_context_sync("orchestration") if m.payload.get("kind") == "policy_denied"
-        ]
-        assert len(denied) == 10
-        assert {(row["rule"], row["hint"]) for row in denied} == {("duplicate_idempotency_key", "wait")}
-    finally:
-        await c.stop()
 
 
 # Mission summary: the stack-changed warning

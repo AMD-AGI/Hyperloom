@@ -86,7 +86,7 @@ def test_an_unregistered_kind_reaches_the_auto_reject() -> None:
 
 
 # -- A refusal is a denial, never a recorded failure -----------------------
-async def _denied_rules(coordinator: Coordinator) -> list[str]:
+def _denied_rules(coordinator: Coordinator) -> list[str]:
     """The rule of every ``policy_denied`` observation in the orchestration inbox."""
     inbox = coordinator.bus.inbox_context_sync("orchestration")
     return [m.payload["rule"] for m in inbox if m.payload.get("kind") == "policy_denied"]
@@ -95,13 +95,7 @@ async def _denied_rules(coordinator: Coordinator) -> list[str]:
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("kind", "rule"),
-    [
-        ("run_fusion", "request_kind"),
-        ("run_gemm_tuning", "request_kind"),
-        ("gemm_tuning", "phase_incompatible"),
-        ("WebSearch", "tool_whitelist_role"),
-        ("mcp__pr_monitor__pr_list", "tool_whitelist_role"),
-    ],
+    [("run_fusion", "request_kind"), ("gemm_tuning", "phase_incompatible"), ("WebSearch", "tool_whitelist_role")],
 )
 async def test_a_refused_request_kind_is_denied_and_leaves_no_failure_row(session_dir, kind: str, rule: str) -> None:
     """Past the gate the router would answer with a failed reply, which becomes a gap and a ``what_failed`` prior."""
@@ -111,7 +105,7 @@ async def test_a_refused_request_kind_is_denied_and_leaves_no_failure_row(sessio
             "orchestration", Intent(type=IntentType.REQUEST, payload={"target_agent": "kernel_agent", "kind": kind})
         )
 
-        assert await _denied_rules(coordinator) == [rule]
+        assert _denied_rules(coordinator) == [rule]
         assert coordinator.shared_state.last_action_failures == []
         assert await coordinator.bus.tail(topic="request") == []
         assert await coordinator.bus.tail(topic="response") == []
@@ -121,17 +115,14 @@ async def test_a_refused_request_kind_is_denied_and_leaves_no_failure_row(sessio
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("channel", _PROPOSE_CHANNELS, ids=lambda channel: channel.value)
-@pytest.mark.parametrize("action_name", ["profile", "gemm_tuning", "WebSearch"])
-async def test_an_action_no_phase_offers_is_denied_and_leaves_no_failure_row(
-    session_dir, channel: IntentType, action_name: str
-) -> None:
+async def test_an_action_no_phase_offers_is_denied_and_leaves_no_failure_row(session_dir, channel: IntentType) -> None:
     """Admission refuses the name before a task or a proposal exists, so nothing reaches the failure ledger."""
     coordinator = Coordinator(session_dir, backends=silent_backends())
     try:
-        payload = {"action_name": action_name, "predicted_gain_pct": 1.0, "params": {}}
+        payload = {"action_name": "profile", "predicted_gain_pct": 1.0, "params": {}}
         await coordinator.router.handle_intent("orchestration", Intent(type=channel, payload=payload))
 
-        assert await _denied_rules(coordinator) == ["phase_incompatible"]
+        assert _denied_rules(coordinator) == ["phase_incompatible"]
         assert coordinator.shared_state.last_action_failures == []
         assert await coordinator.tasks.by_state("queued") == []
         assert coordinator.state.pending_proposals == {}

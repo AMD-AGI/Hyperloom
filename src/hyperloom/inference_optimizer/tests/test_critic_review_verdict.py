@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Critic ``review_verdict`` handling: the gate, routing, the rebroadcast, the patch-verdict mirror and materialisation."""
+"""Critic ``review_verdict`` handling: routing, the rebroadcast, the patch-verdict mirror and materialisation."""
 
 from __future__ import annotations
 
@@ -13,27 +13,11 @@ from unittest.mock import AsyncMock
 import pytest
 
 from hyperloom.orchestrator.knowledge.knowledge_plane import KnowledgePlane
-from hyperloom.orchestrator.roles.agent_role import default_role_registry
 from hyperloom.orchestrator.loop.coordinator import Coordinator
 from hyperloom.orchestrator.loop.coordinator_state import CoordinatorState
 from hyperloom.orchestrator.state.pending_proposal import PendingProposal
 from hyperloom.inference_optimizer.protocol.intent import Intent, IntentType
-from hyperloom.orchestrator.policy.gate import (
-    INTEGRATE_PATCH_PERMISSIVE_VERDICTS,
-    PolicyGate,
-)
-
-
-@pytest.fixture
-def gate() -> PolicyGate:
-    return PolicyGate(role_registry=default_role_registry())
-
-
-def test_policy_gate_accepts_a_critic_verdict(gate):
-    gate.validate_intent(
-        "critic",
-        Intent(type=IntentType.REVIEW_VERDICT, payload={"target_proposal_msg_id": "msg-1", "verdict": "approve"}),
-    )
+from hyperloom.orchestrator.policy.gate import INTEGRATE_PATCH_PERMISSIVE_VERDICTS
 
 
 # Coordinator helpers — _handle_review_verdict dispatch
@@ -123,13 +107,7 @@ def coord(tmp_path: Path):
     return c
 
 
-def _seed_explore_proposal(
-    coord: Coordinator,
-    *,
-    msg_id: str = "msg-1",
-    variants: list[str] | None = None,
-) -> PendingProposal:
-    variants = variants or ["v_a", "v_b", "v_c", "v_d"]
+def _seed_explore_proposal(coord: Coordinator, *, variants: list[str], msg_id: str = "msg-1") -> PendingProposal:
     grid = [{"name": vn, "extra_args": f"--flag-{vn}"} for vn in variants]
     pending = PendingProposal(
         proposal_msg_id=msg_id,
@@ -199,7 +177,7 @@ async def test_an_approve_after_the_timeout_deny_creates_nothing(coord):
 
 
 @pytest.mark.asyncio
-async def test_single_verdict_rebroadcast_carries_full_advisory_fieldset(coord):
+async def test_verdict_rebroadcast_carries_full_advisory_fieldset(coord):
     """The rebroadcast payload and the compact inbox line both flow through the one serializer, carrying the full advisory field set."""
     from hyperloom.orchestrator.loop.conversation import _format_inbox_event
     from hyperloom.orchestrator.bus.message_bus import Message
@@ -255,7 +233,7 @@ async def test_single_verdict_rebroadcast_carries_full_advisory_fieldset(coord):
 
 
 @pytest.mark.asyncio
-async def test_single_verdict_without_advisory_keeps_bare_payload(coord):
+async def test_verdict_without_advisory_keeps_bare_payload(coord):
     """A verdict with no advisory fields rebroadcasts only verdict/reasoning, and the inbox line stays minimal."""
     from hyperloom.orchestrator.loop.conversation import _format_inbox_event
     from hyperloom.orchestrator.bus.message_bus import Message

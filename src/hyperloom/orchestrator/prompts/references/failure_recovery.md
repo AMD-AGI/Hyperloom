@@ -80,14 +80,11 @@ measurement, NOT a failure — do not retry it.
   variants may be re-proposed, except one carrying a change the framework
   refused at start on a configuration error (`known_dead_change`); read the
   failure log first.
-* **RULE F3 — a `policy_denied` event is a pure fact, not a lock.** Each
-  denial lands in your inbox with the rule that refused the intent and a
-  hint. The system does not react to repeated denials — there is NO
-  auto-prune and NO `policy_loop` stop; the run continues until the
-  wall-clock deadline or another stop_reason fires. So a repeat is purely a
-  signal for YOU: the same params keep colliding with the same invariant, so
-  change something substantive — a new `params.grid` variant or a sibling
-  action family. Re-emitting the identical denied intent just wastes a tick.
+* **RULE F3 — a `policy_denied` event is a fact, not a lock.** Each denial
+  lands in your inbox with the rule that refused the intent and a hint;
+  nothing in the runtime reacts to a repeat. Change something substantive —
+  a new `params.grid` variant or a sibling action family; re-emitting the
+  identical intent wastes a tick.
 * **RULE F4 — `error_class='engine_execute_timeout'` is not a boot failure.**
   The server was serving when one vLLM model step outran
   `VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS` and the engine shut down

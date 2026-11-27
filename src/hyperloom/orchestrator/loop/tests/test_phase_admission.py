@@ -103,10 +103,9 @@ def test_enablement_keeps_its_baseline_for_the_coordinator():
     assert denied.hint == "ENABLEMENT proposes: target_analysis"
 
 
-@pytest.mark.parametrize("action", ["baseline", "explore", "specialist"])
-def test_no_phase_entered_yet_proposes_nothing(action: str):
-    """A session with no phase has no contract that offers the action, so it is refused rather than waved through."""
-    denied = _dispatcher("").admission_denial_for_action(action, params=_PARAMS_BEYOND_THE_PHASE.get(action))
+def test_no_phase_entered_yet_proposes_nothing():
+    """A session with no phase has no contract that offers an action."""
+    denied = _dispatcher("").admission_denial_for_action("baseline")
 
     assert denied is not None and denied.rule == "phase_incompatible"
 

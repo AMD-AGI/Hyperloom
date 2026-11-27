@@ -48,7 +48,7 @@ from .validators import (
     SPECIALIST_FREEFORM_WAVE_MAX,
     check_freeform_task_description,
     log_specialist_dispatch_coherence,
-    validate_gemm_tuning_action,
+    validate_gemm_tuning_request,
     validate_prune_branch,
     validate_review_verdict,
     validate_specialist_framework,
@@ -106,7 +106,7 @@ INTEGRATE_PATCH_PERMISSIVE_VERDICTS: frozenset[str] = frozenset(
 SPECIALIST_FROM_AGENT_PREFIX: str = "specialist:"
 
 
-# R5 — external tool names no gated role may invoke as an action name.
+# R5 — external tool names a REQUEST may not carry as its kind.
 
 #: PR Monitor *readonly* surfaces.
 PR_MONITOR_TOOL_NAMES: frozenset[str] = frozenset(
@@ -461,29 +461,27 @@ class PolicyGate:
                     "`integrate` the KEEPs it queues."
                 ),
             )
-        validate_gemm_tuning_action(kind, intent_kind="request")
-        # R5 — a REQUEST.kind cannot smuggle an external tool either.
+        validate_gemm_tuning_request(kind)
         self._validate_tool_whitelist_collision(role.name, kind)
 
     # R5 — tool_whitelist_role
-    def _validate_tool_whitelist_collision(self, role_name: str, action_name: str) -> None:
-        """Reject an action name that names an external tool; no gated role may invoke one as an action.
+    def _validate_tool_whitelist_collision(self, role_name: str, kind: str) -> None:
+        """Reject a REQUEST kind that names an external tool.
 
         Args:
             role_name (str): the name of the emitting role.
-            action_name (str): the action name (or REQUEST ``kind``) being
-                checked.
+            kind (str): the request kind being checked.
 
         Raises:
-            PolicyDenied: when the name is a PR Monitor or web tool.
+            PolicyDenied: when the kind is a PR Monitor or web tool.
         """
-        if action_name not in PR_MONITOR_TOOL_NAMES | WEB_TOOL_NAMES:
+        if kind not in PR_MONITOR_TOOL_NAMES | WEB_TOOL_NAMES:
             return
         raise PolicyDenied(
-            f"role={role_name!r} cannot invoke tool {action_name!r}",
+            f"role={role_name!r} cannot invoke tool {kind!r}",
             rule="tool_whitelist_role",
             hint=(
-                f"Tool {action_name!r} is restricted to "
+                f"Tool {kind!r} is restricted to "
                 f"specialist sub-agents as an action name. The "
                 f"primary agents (orchestration / critic) reach KB / PR Monitor through the "
                 f"Coordinator-mediated KnowledgePlane facade instead; "

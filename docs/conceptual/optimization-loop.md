@@ -709,7 +709,7 @@ what an earlier turn happened to remember.
 - **Context tools**: A read-only MCP surface lets the agent pull what the
   projection leaves out — finished outcomes (`get_recent_outcomes`),
   a mid-turn re-read of in-flight work (`get_running_tasks`), failure packets (`get_failure` /
-  `get_variant_failures`), reference docs (`read_reference`), the raw
+  `get_variant_failures`), reference docs (`read_reference`) and the raw
   `analysis.md` (`show_analysis_md`).
   Transports without MCP tools get the projection only.
 - **Resume**: On resume the projection is rebuilt from

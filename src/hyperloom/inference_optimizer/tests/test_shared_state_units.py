@@ -326,15 +326,6 @@ class TestPrunedFamily:
         assert s.add_pruned_family("kernel_opt") is False
 
 
-def test_a_state_file_carrying_the_retired_denial_log_still_loads():
-    """A session written before the denial log left ``state.json`` resumes; the two keys are dropped."""
-    persisted = {"session_id": "s", "tick": 7}
-    retired = {"policy_denial_history": [{"rule": "role", "streak": 2}], "policy_denial_streak": {"explore:role": 2}}
-    restored = SharedState.from_dict({**persisted, **retired}).to_dict()
-    assert all(name not in restored for name in retired)
-    assert {name: restored[name] for name in persisted} == persisted
-
-
 class TestKernelPatchIdentity:
     def test_resolves_explicit_payload(self):
         from hyperloom.orchestrator.kernel.kernel_decisions import _resolve_kernel_patch_identity

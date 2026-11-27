@@ -23,8 +23,7 @@ from ..specialists.profile import (
 log = logging.getLogger(__name__)
 
 
-# GEMM tuning action; the hook that guards it is called for every action, so it
-# needs its own name to answer only for itself.
+# The GEMM tuning action, refused as a REQUEST kind.
 GEMM_TUNING_ACTION_NAME: str = "gemm_tuning"
 
 # Free-form (``scope='freeform'``) sanity-gate limits; the real ceiling is the
@@ -44,33 +43,22 @@ PRUNE_BRANCH_ALLOWED_SCOPES: frozenset[str] = frozenset(
 )
 
 
-# GEMM tuning ownership
-def validate_gemm_tuning_action(
-    action_name: str,
-    *,
-    intent_kind: str,
-) -> None:
-    """Refuse a model-proposed GEMM tuning run; the Coordinator owns the lane.
+def validate_gemm_tuning_request(kind: str) -> None:
+    """Refuse the GEMM tuning action as a REQUEST kind; the Coordinator owns the lane.
 
-    Applicability is still not pre-filtered here -- the producer decides
-    internally whether tuning applies to the workload. What this now refuses
-    is the *channel*: the lane is dispatched once at phase entry from a lane
-    budget, so a per-tick re-issue would spend time the allocation never
-    granted. Mirrors how the fusion lane is already closed.
+    The lane is dispatched once at phase entry from a lane budget, so a
+    per-tick re-issue would spend time the allocation never granted.
 
     Args:
-        action_name (str): the action name being checked.
-        intent_kind (str): the channel the action arrived on, used in the
-            error hint.
+        kind (str): the request kind being checked.
 
     Raises:
-        PolicyDenied: When ``action_name`` is the GEMM tuning action.
+        PolicyDenied: When ``kind`` is the GEMM tuning action.
     """
-    # Called unconditionally for every action, so it answers only for its own.
-    if action_name != GEMM_TUNING_ACTION_NAME:
+    if kind != GEMM_TUNING_ACTION_NAME:
         return
     raise PolicyDenied(
-        f"{action_name!r} is a Coordinator-owned kernel lane and not model-requestable ({intent_kind})",
+        f"{kind!r} is a Coordinator-owned kernel lane and not model-requestable",
         rule="phase_incompatible",
         hint=(
             "GEMM tuning is dispatched by the Coordinator at KERNEL entry once its "

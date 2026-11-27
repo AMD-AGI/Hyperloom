@@ -700,7 +700,7 @@ class ConversationCollaborator(CoordinatorCollaborator):
         context.append(resource_pools_summary(self.shared_state))
         if agent_name == "orchestration":
             context.extend(self._orchestration_context_sections())
-            # A denial, a proposal leaving the queue or a plateau count lands between
+            # A task finishing, a proposal leaving the queue or a plateau count lands between
             # two ticks, so these blocks follow the ledger into the turn: the cached
             # prefix ends above them and holds for the session.
             turn.extend(await self._orchestration_turn_sections())

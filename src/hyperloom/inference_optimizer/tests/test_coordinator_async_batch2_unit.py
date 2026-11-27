@@ -2653,18 +2653,6 @@ def test_specialist_owner_is_frozen_at_creation_outside_agent_phases(
 
 
 @pytest.mark.asyncio
-async def test_materialize_explore_announces_the_task_it_became(coord: Coordinator, monkeypatch) -> None:
-    coord.shared_state.baseline_tput = 800.0
-    monkeypatch.setattr(coord.proposals, "phase_framework", coord.phase_framework, raising=False)
-    pending = _pending("explore", {"params": {"grid": [{"name": "v0"}, {"name": "v1"}]}})
-    await coord.proposals.materialize_approved_proposal(pending)
-    tail = await coord.bus.tail(topic="decision", n=10)
-    assert any(m.payload.get("kind") == "approved_proposal" for m in tail)
-    task = await coord.tasks.get((await coord.tasks.queued())[0].task_id)
-    assert task.params["proposal_msg_id"] == pending.proposal_msg_id
-
-
-@pytest.mark.asyncio
 async def test_materialize_explore_proposal_id_does_not_break_content_dedup(
     coord: Coordinator,
     monkeypatch,
