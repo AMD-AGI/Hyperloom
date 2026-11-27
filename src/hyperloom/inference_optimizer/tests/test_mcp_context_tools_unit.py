@@ -222,12 +222,20 @@ def test_get_failure_returns_the_last_packet_written_under_an_id(tmp_path):
     assert len(provider.get_variant_failures().splitlines()) == 1
 
 
-@pytest.mark.parametrize("failure_id", ["../state", "../../outside", "/etc/hostname", "nested/fail.t1.abc"])
-def test_get_failure_reads_no_file_outside_the_failure_store(tmp_path, failure_id):
-    (tmp_path / "reports").mkdir()
-    (tmp_path / "reports" / "state.json").write_text("{}")
-    (tmp_path / "outside.json").write_text("{}")
-    out = _provider(shared_state=_shared_state(), session_dir=tmp_path / "session").get_failure(failure_id)
+@pytest.mark.parametrize("named", ["../state", "../../outside", "{absolute}", "nested/fail.t1.abc"])
+def test_get_failure_reads_no_file_outside_the_failure_store(tmp_path, named):
+    """A ``failure_id`` is a file name in the store; one that names a path to a JSON file elsewhere reads nothing."""
+    session = tmp_path / "session"
+    store = session / "reports" / "failures"
+    absolute = tmp_path / "elsewhere"
+    for elsewhere in (session / "reports" / "state", session / "outside", absolute, store / "nested" / "fail.t1.abc"):
+        elsewhere.parent.mkdir(parents=True, exist_ok=True)
+        elsewhere.with_name(f"{elsewhere.name}.json").write_text('{"secret": true}')
+    failure_id = named.format(absolute=absolute)
+    assert (store / f"{failure_id}.json").is_file(), "the id does name a file"
+
+    out = _provider(shared_state=_shared_state(), session_dir=session).get_failure(failure_id)
+
     assert out.startswith("(get_failure: no failure evidence was written as ")
 
 
