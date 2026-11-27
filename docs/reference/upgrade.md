@@ -45,6 +45,32 @@ host the CLI defaults to `session/` under the current directory instead. Prefer
 
 ## Upgrading from 1.2.x
 
+### Required: finish in-flight sessions before upgrading
+
+A session is resumed by the build that wrote it. `hyperloom optimize
+--resume-from`, `hyperloom recover`, `hyperloom-multibranch run --resume` and
+`final-only`, a restart of a hosted run and `kernelforge forge-loop --resume`
+are not supported on a session an earlier release wrote: finish it under that
+release, or start a new one.
+
+Nothing checks for it. Most such resumes stop at the first field they misread.
+Three do not stop cleanly:
+
+* A session measured under other measurement semantics is admitted, and new
+  candidates are graded against the baseline and the KEEPs the earlier release
+  measured.
+* A session recorded at a phase this release does not have (`SWEEP`, for one)
+  is admitted and stays at that phase: no action is admitted for it, the
+  Orchestration agent takes a turn about every 15 minutes, and the session ends
+  `time_exhausted` at its deadline, which for an unbounded session is 14 days
+  away. Reaching its target does not end it.
+* A `storage/coordinator.db` an earlier release wrote, 1.2.0's included, is
+  admitted. The first task that takes a lane then fails its lease insert
+  (`NOT NULL constraint failed`), every tick after it fails the same way, and
+  the session stops `emergency` after 25 failed ticks. On a database from
+  1.1.5 or earlier a tick with a message waiting for the Orchestration agent
+  fails after spending an Orchestration turn.
+
 ### Required: removed flags
 
 These flags are rejected with `unrecognized arguments`:
@@ -110,7 +136,7 @@ ran the single-session flow; that default is gone.
   unknown argument, exit 2 with `unrecognized arguments`. Drop them.
   `HYPERLOOM_MANIFEST` and `HYPERLOOM_MANIFEST_OVERRIDES` are no longer read,
   and a session's `plugs.resolved.json` is no longer written or read back on
-  `--resume-from`; an old session that has one resumes and ignores it.
+  `--resume-from`.
 * `HYPERLOOM_EVENTS_DIR`, `HYPERLOOM_MCP_HOST`, `HYPERLOOM_MCP_PORT` and
   `HYPERLOOM_MCP_TOKEN` are no longer read or checked; a host may stop
   setting them (any value is accepted and removed from the environment of
@@ -148,8 +174,7 @@ empty list on every reviewed phase proposal. Consumers that read it should stop.
 `state.json` no longer carries `policy_denial_history` or
 `policy_denial_streak`, the Orchestration prompt no longer has a
 `=== Recent policy denials ===` block, and the `why_denied` context tool is
-removed. A session written by an earlier release still resumes: the two keys
-are dropped on load. A denial is still recorded where it was read from before:
+removed. A denial is still recorded where it was read from before:
 as a `policy_denied` observation in the denied agent's inbox, as a `denials`
 row on the phase event in `session_breakdown.json`, and as a
 `PolicyGate denied intent` warning in the log. Anything that read the two
@@ -186,8 +211,8 @@ and `hyperloom conc-sweep SESSION_DIR` runs it by hand. It writes the same files
 `conc_sweep_curve_png` keys of `final.json`, and packages the session again so
 the package carries them. The `conc_sweep` timeline event of
 `session_breakdown.json` and the sweep's result in `state.json` are gone. A
-session recorded in `SWEEP` does not resume: finish it under the build that
-started it.
+session recorded in `SWEEP` is not continued by this release: finish it under
+the build that started it.
 
 The sweep also adds its report to `session_breakdown.json` as the top-level
 `conc_sweep_summary`, rewritten after every point. A consumer that read the
@@ -299,20 +324,9 @@ the tool directly must pass the root its output lands under
 
 ### Required: sessions created before this release do not resume
 
-Every session's `storage/coordinator.db` now records schema version 8, and
-there are no in-place migrations. `optimize --resume-from` on a session whose
-database records an older version, which is every session started by 1.1.5 or
-earlier, exits 2 at resume admission, before `state.json` or the database is
-touched:
-
-```text
-ERROR: --resume-from coordinator.db is at schema version 7, older than this build's 8:
-sessions created before this release cannot be resumed. Finish the session under the
-build that started it, or start a new session.
-```
-
-Opening such a database through the coordinator storage raises the same
-message without writing to it. The legacy shapes the old migrations handled
+The layout of a session's `storage/coordinator.db` changed and there are no
+in-place migrations, so `optimize --resume-from` is not supported on a session
+started by 1.1.5 or earlier. The legacy shapes the old migrations handled
 (`events.priority`, a `leases` table without `owner_scope`, `state.json`
 without `elapsed_charged_sec` or `phase_elapsed_totals`, manifests without
 `workflow_contract_version`) are no longer read. Finish in-flight sessions
@@ -644,12 +658,9 @@ For any minor or patch upgrade:
    ```bash
    kernel_agent_env_file="$(. "$REPO_ROOT/hyperloom/inference_optimizer/assets/runtime_env.sh"; runtime_env_kernel_agent_env_path)" && . "$kernel_agent_env_file"
    ```
-4. To resume an ongoing session across the upgrade, first check the target
-   release's upgrade section: a release that raises the `coordinator.db`
-   schema version (1.1.x → this release does) refuses sessions started before
-   it, so finish those under the build that started them. Otherwise verify
-   `manifest.json`, `state.json` and `storage/coordinator.db` are intact, then run
-   `python -m hyperloom optimize --resume-from "$SESSION_DIR"`.
+4. Finish ongoing sessions before the upgrade: a session is resumed by the
+   build that wrote it, and resuming one an earlier release wrote is not
+   supported.
 
 Upgrades do not move storage or rewrite historical sessions.
 

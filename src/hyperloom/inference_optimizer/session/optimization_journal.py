@@ -357,7 +357,7 @@ def operation_kind_for(action: str, kind: str = "") -> str:
 def proposer_for(provenance: str) -> str:
     """Map an explore ``provenance`` label to a stable proposer/component name."""
     p = (provenance or "").strip()
-    if not p or p == "llm_direct" or p.startswith("legacy:"):
+    if not p or p == "llm_direct":
         return "orchestration"
     if p == "default_grid":
         return "grid"

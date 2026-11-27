@@ -140,8 +140,7 @@ exits 2 and names why each source missed. When `--tp` or `--ep`
 is omitted, the session runs at the
 topology the base chose. The base is frozen as `$SESSION_DIR/base_launch.json`
 and its warnings print in the startup banner; `--resume-from` reads that file
-and never refetches. A session whose state predates `base_launch.json` cannot
-be resumed: start a new one.
+and never refetches.
 
 `--reference-script` takes a shell launch script or a `base_launch.json` from
 an earlier session. A script must name the session's framework entrypoint and

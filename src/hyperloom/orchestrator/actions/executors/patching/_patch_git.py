@@ -571,11 +571,7 @@ def _take_candidate_out(
 def restore_pending_integrate(pending: dict[str, Any], *, keep: bool = False) -> dict[str, Any]:
     """Discharge one recorded integration's file and stash obligations, or retain them."""
     summary: dict[str, Any] = {"reversed": [], "artifacts_reverted": [], "failed": []}
-    recovery = pending.get("recovery")
-    if not isinstance(recovery, dict) or recovery.get("version") != 1:
-        if pending.get("patches") or pending.get("artifacts") or pending.get("attempt_venv_root"):
-            summary["failed"].append("pending integration has no complete recovery evidence")
-        return summary
+    recovery = pending["recovery"]
     phase = recovery.get("phase")
     if phase in ("restored", "accepted"):
         return summary

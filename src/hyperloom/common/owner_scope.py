@@ -42,15 +42,8 @@ def _start_ticks(stat: str) -> int:
 
 
 def same_environment(recorded: str, local: str) -> bool:
-    """Whether a recorded scope names this environment: equal to ``local``, or the two-part
-    scope earlier versions recorded for this boot and PID namespace.
-
-    A two-part match cannot tell this container from an earlier one that repeated its
-    namespace inode; a caller that releases on it first checks the holder process.
-    """
-    if not recorded or not local:
-        return False
-    return recorded == local or (recorded.count(":") == 1 and local.rsplit(":", 1)[0] == recorded)
+    """Whether a recorded scope names this environment; an unobservable scope names none."""
+    return bool(recorded) and recorded == local
 
 
 def process_started_at(pid: int, proc: Path = _PROC) -> datetime | None:

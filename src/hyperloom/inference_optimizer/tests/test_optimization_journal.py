@@ -498,7 +498,6 @@ def test_proposer_for_resolves_provenance():
     assert proposer_for("specialist:serving_specialist") == "specialist:serving_specialist"
     assert proposer_for("llm_direct") == "orchestration"
     assert proposer_for("default_grid") == "grid"
-    assert proposer_for("legacy:backends") == "orchestration"
     assert proposer_for("") == "orchestration"
 
 

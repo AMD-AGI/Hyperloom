@@ -100,11 +100,7 @@ class ResolveStageMixin:
                 ),
             }
         pending = getattr(shared_state, "pending_integrate", None)
-        if (
-            isinstance(pending, dict)
-            and pending
-            and (pending.get("recovery") or {}).get("phase") not in ("restored", "accepted")
-        ):
+        if isinstance(pending, dict) and pending and pending["recovery"].get("phase") not in ("restored", "accepted"):
             return {
                 "status": "failed",
                 "error_class": "integrate_restore_incomplete",

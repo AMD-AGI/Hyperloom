@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""A seeded session records the build's measurement epoch, and only a session that carries it resumes."""
+"""A seeded session records the workload it measures, and a resume that would measure another is refused."""
 
 from __future__ import annotations
 
@@ -35,9 +35,8 @@ def _seed_and_reload(tmp_path) -> SharedState:
     return SharedState.load_or_init(tmp_path)
 
 
-def test_a_synthetic_session_records_the_epoch_and_resumes(tmp_path):
+def test_a_synthetic_session_records_no_backend_and_resumes(tmp_path):
     state = _seed_and_reload(tmp_path)
-    assert state.measurement_epoch == cb.MEASUREMENT_EPOCH
     assert state.agentx_backend == ""
     assert cb.measurement_state_is_stale(state) == ""
 
@@ -45,7 +44,7 @@ def test_a_synthetic_session_records_the_epoch_and_resumes(tmp_path):
 def test_an_agentx_session_records_inferencex_and_resumes(tmp_path, monkeypatch, native_benchmark):
     monkeypatch.setenv("HYPERLOOM_BENCHMARK_CONFIG", str(native_benchmark))
     state = _seed_and_reload(tmp_path)
-    assert (state.measurement_epoch, state.agentx_backend) == (cb.MEASUREMENT_EPOCH, "inferencex")
+    assert state.agentx_backend == "inferencex"
     assert cb.measurement_state_is_stale(state) == ""
 
 
@@ -68,11 +67,6 @@ def test_an_agentx_session_records_no_prompt_dataset_its_rounds_do_not_send(tmp_
     assert (state.prompt_dataset, cb.measurement_state_is_stale(state)) == ("", "")
 
 
-def test_a_state_written_before_the_switch_is_refused(tmp_path):
-    (tmp_path / "state.json").write_text('{"benchmark_mode": "synthetic", "agentx_epoch": 1}', encoding="utf-8")
-    assert "epoch 0" in cb.measurement_state_is_stale(SharedState.load_or_init(tmp_path))
-
-
 def test_a_reset_session_still_resumes(tmp_path, monkeypatch, native_benchmark):
     monkeypatch.setenv("HYPERLOOM_BENCHMARK_CONFIG", str(native_benchmark))
     _reset_state_file(tmp_path, _seed_and_reload(tmp_path))
@@ -85,9 +79,3 @@ def test_a_reset_session_keeps_the_prompt_dataset_it_recorded(tmp_path, monkeypa
     monkeypatch.setenv("DATASET_PATH", "/data/prompts.jsonl")
     _reset_state_file(tmp_path, _seed_and_reload(tmp_path))
     assert SharedState.load_or_init(tmp_path).prompt_dataset == "/data/prompts.jsonl"
-
-
-def test_a_state_written_before_valid_measurement_judged_its_evidence_is_refused(tmp_path):
-    # Epoch 2 recorded benchmark_backend and benchmark_valid as constraint fields; epoch 3 records valid_measurement.
-    (tmp_path / "state.json").write_text('{"benchmark_mode": "agentx", "measurement_epoch": 2}', encoding="utf-8")
-    assert "epoch 2" in cb.measurement_state_is_stale(SharedState.load_or_init(tmp_path))

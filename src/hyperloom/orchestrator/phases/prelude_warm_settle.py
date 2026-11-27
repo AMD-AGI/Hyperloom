@@ -70,7 +70,7 @@ class _WarmReplaySettleMixin:
             # answers with a pre_sha and a snapshot manifest; a pip-installed framework -- the tree a KB recipe
             # is usually measured on -- answers with the backups nogit wrote as it applied. A tree this round
             # never wrote to owes neither, and promotion is reached only once every required overlay applied, so
-            # it already carries what is being promoted. Records predating the flag are read as written-to.
+            # it already carries what is being promoted. A row without the flag is read as written-to.
             backups = list(tree.get("nogit_backups") or [])
             snapshotted = bool(pre_sha) and isinstance(manifest, Mapping)
             mutated = bool(tree.get("mutated", True))

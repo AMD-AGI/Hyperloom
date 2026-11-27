@@ -7,8 +7,6 @@ from __future__ import annotations
 
 import sqlite3
 
-from hyperloom.inference_optimizer.session.coordinator_db import SCHEMA_VERSION, refuse_older_schema
-
 
 # Default lane capacities; ``--research-lane-capacity`` overrides research_lane at boot.
 DEFAULT_LANE_CAPACITIES: dict[str, int] = {
@@ -32,7 +30,6 @@ _DDL = [
         action        TEXT    NOT NULL,
         pid           INTEGER NOT NULL,
         owner_scope   TEXT    NOT NULL DEFAULT '',
-        acquired_at   TEXT    NOT NULL,
         expires_at    TEXT    NOT NULL,
         PRIMARY KEY (lane, holder_id)
     )
@@ -126,13 +123,6 @@ _DDL = [
     )
     """,
     "CREATE INDEX IF NOT EXISTS idx_round_events_round ON round_events(round_id, event_id)",
-    # schema_version — tracks future migrations
-    """
-    CREATE TABLE IF NOT EXISTS schema_version (
-        version    INTEGER PRIMARY KEY,
-        applied_at TEXT    NOT NULL
-    )
-    """,
 ]
 
 
@@ -168,18 +158,13 @@ def set_lane_capacity(
 
 
 def ensure_schema(conn: sqlite3.Connection) -> None:
-    """Idempotently create all tables, seed lane_capacity defaults, and record the schema version."""
+    """Idempotently create all tables and seed lane_capacity defaults."""
     cur = conn.cursor()
     try:
         cur.execute("BEGIN IMMEDIATE")
-        refuse_older_schema(cur)
         for stmt in _DDL:
             cur.execute(stmt)
         _seed_default_lane_capacity(cur)
-        cur.execute(
-            "INSERT OR IGNORE INTO schema_version(version, applied_at) VALUES (?, datetime('now'))",
-            (SCHEMA_VERSION,),
-        )
         conn.commit()
     except Exception:
         conn.rollback()

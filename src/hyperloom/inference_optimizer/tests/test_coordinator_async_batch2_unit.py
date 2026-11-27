@@ -953,26 +953,6 @@ async def test_failed_pending_restore_blocks_resume_before_followup_actions(coor
     assert coord.shared_state.pending_integrate["task_id"] == candidate.task.task_id
 
 
-@pytest.mark.asyncio
-async def test_pending_restore_rejects_legacy_artifact_without_backup_evidence(coord: Coordinator, tmp_path: Path):
-    target = tmp_path / "unknown-original.json"
-    target.write_text("possibly-kept-content", encoding="utf-8")
-    coord.shared_state.pending_integrate = {
-        "task_id": "legacy-artifact",
-        "artifacts": [{"target": str(target), "rel_target": target.name}],
-        "patches": [],
-        "workspace": str(tmp_path / "missing-backups"),
-    }
-    report = {"fixes": [], "warnings": []}
-
-    await coord.writeback._resume_recover_pending_integrate(report)
-
-    assert target.read_text(encoding="utf-8") == "possibly-kept-content"
-    assert coord.shared_state.pending_integrate.get("task_id") == "legacy-artifact"
-    assert report["warnings"]
-    assert report["fixes"] == []
-
-
 @pytest.fixture
 def crashed_integrate_window(coord: Coordinator, pending_candidate):
     """Crash a real integration at a chosen point between verdict and publish.
@@ -1287,9 +1267,8 @@ def ordinary_integrate_completion(coord: Coordinator, tmp_path: Path):
         pending = {
             "task_id": task.task_id if marker_task_id is None else marker_task_id,
             "workspace": str(backup.parent),
+            "recovery": {"phase": phase},
         }
-        if phase is not None:
-            pending["recovery"] = {"phase": phase}
         coord.shared_state.pending_integrate = pending
         coord.shared_state.save(coord.session_dir)
         result = {
@@ -1317,7 +1296,6 @@ def ordinary_integrate_completion(coord: Coordinator, tmp_path: Path):
         ("accepted", "reverted", ""),
         ("accepted", "applied_no_bench", ""),
         ("restored", "kept", ""),
-        (None, "apply_failed", "git_apply_failed"),
         ("accepted", "kept", "integrate_restore_incomplete"),
     ],
 )
@@ -1377,7 +1355,6 @@ async def test_ordinary_integrate_completion_restore_error_blocks_without_marker
         ("restored", "reverted", False),
         ("restored", "apply_failed", False),
         ("restored", "failed", False),
-        (None, "kept", True),
     ],
 )
 async def test_ordinary_integrate_completion_clears_only_confirmed_matching_marker(
@@ -1515,6 +1492,7 @@ async def test_resume_consistency_rolls_back_pending_integrate(coord: Coordinato
         "task_id": "ti-roll",
         "framework_source_root": "/tmp/framework",
         "patches": ["/tmp/p.diff"],
+        "recovery": {"phase": "ready"},
     }
     monkeypatch.setattr(
         coord.writeback,
@@ -1533,7 +1511,7 @@ async def test_resume_consistency_rolls_back_pending_integrate(coord: Coordinato
 @pytest.mark.asyncio
 async def test_resume_consistency_clears_stale_pending_integrate(coord: Coordinator) -> None:
     coord.writeback._resumed_from["is_resume"] = True
-    coord.shared_state.pending_integrate = {"task_id": "ti-stale"}
+    coord.shared_state.pending_integrate = {"task_id": "ti-stale", "recovery": {"phase": "restored"}}
 
     report = await coord.writeback._resume_consistency_pass()
 
@@ -1566,7 +1544,11 @@ async def test_resume_requeues_an_integrate_the_lost_environment_stopped(coord: 
             "outcome": {"task_id": task.task_id, "state": "cancelled", "result": {}},
         },
     )
-    coord.shared_state.pending_integrate = {"task_id": task.task_id, "patches": ["/tmp/p.diff"]}
+    coord.shared_state.pending_integrate = {
+        "task_id": task.task_id,
+        "patches": ["/tmp/p.diff"],
+        "recovery": {"phase": "ready"},
+    }
     monkeypatch.setattr(
         coord.writeback,
         "_resume_rollback_pending_integrate",
@@ -1631,7 +1613,7 @@ async def test_resume_settles_an_env_only_integrate_from_its_task_row(
         "artifacts": [],
         "config_changes": {},
         "extra_envs": {"ATTN_IMPL": "candidate"},
-        "recovery": {"version": 1, "phase": phase, "root": str(tmp_path / "recover"), "stash_oid": ""},
+        "recovery": {"phase": phase, "root": str(tmp_path / "recover"), "stash_oid": ""},
     }
 
     report = await coord.writeback._resume_consistency_pass()
@@ -1774,74 +1756,6 @@ async def test_resume_consistency_explore_orphan_alerts_not_replayed(coord: Coor
 
 
 @pytest.mark.asyncio
-async def test_resume_consistency_framework_keep_in_stack_is_not_orphaned(coord: Coordinator) -> None:
-    """A landed framework KEEP reconciles against its own stack entry."""
-    coord.writeback._resumed_from["is_resume"] = True
-    coord.shared_state.optimization_stack = [
-        {
-            "action": "framework",
-            "variant_name": "https://example.com/pull/7",
-            "candidate_extra_server_args": "",
-            "extra_envs": {},
-            "tput": 130.0,
-        }
-    ]
-    await coord.bus.append_and_seq(
-        Message.new(
-            "coordinator",
-            "*",
-            "delegated_result",
-            {
-                "task_id": "tf-landed",
-                "kind": "framework_agent",
-                "state": "succeeded",
-                "result": {
-                    "status": "kept",
-                    "candidate": {"pr_url": "https://example.com/pull/7", "ref": "PR:7"},
-                    "output_throughput": 130.0,
-                },
-            },
-        )
-    )
-
-    report = await coord.writeback._resume_consistency_pass()
-
-    assert not [
-        w for w in report["warnings"] if w.get("kind") == "orphaned_keep" and w.get("orphan_kind") == "framework_agent"
-    ]
-
-
-@pytest.mark.asyncio
-async def test_resume_consistency_framework_keep_absent_from_stack_still_alerts(coord: Coordinator) -> None:
-    """The reconciliation fix must not suppress a genuinely missing framework KEEP."""
-    coord.writeback._resumed_from["is_resume"] = True
-    await coord.bus.append_and_seq(
-        Message.new(
-            "coordinator",
-            "*",
-            "delegated_result",
-            {
-                "task_id": "tf-orphan",
-                "kind": "framework_agent",
-                "state": "succeeded",
-                "result": {
-                    "status": "kept",
-                    "candidate": {"pr_url": "https://example.com/pull/8", "ref": "PR:8"},
-                    "output_throughput": 140.0,
-                },
-            },
-        )
-    )
-
-    report = await coord.writeback._resume_consistency_pass()
-
-    orphan = next(
-        w for w in report["warnings"] if w.get("kind") == "orphaned_keep" and w.get("orphan_kind") == "framework_agent"
-    )
-    assert orphan["variant"] == "https://example.com/pull/8"
-
-
-@pytest.mark.asyncio
 async def test_resume_consistency_replays_pending_integrate_with_kept_result(coord: Coordinator) -> None:
     coord.writeback._resumed_from["is_resume"] = True
     coord.shared_state.baseline_tput = 100.0
@@ -1874,36 +1788,13 @@ async def test_resume_consistency_replays_pending_integrate_with_kept_result(coo
 
 
 @pytest.mark.asyncio
-async def test_resume_refuses_legacy_patch_without_task_evidence(coord: Coordinator, monkeypatch) -> None:
-    from hyperloom.orchestrator.actions.executors.patching import _patch_git as patch_git
-
-    reversed_calls: list[str] = []
-
-    def _fake_reverse(root, patch):
-        reversed_calls.append(str(patch))
-        return True, ""
-
-    monkeypatch.setattr(patch_git, "_git_apply_reverse", _fake_reverse)
-    coord.writeback._resumed_from["is_resume"] = True
-    coord.shared_state.pending_integrate = {
-        "task_id": "ti-crash",
-        "specialist_task_id": "spec-crash",
-        "framework_source_root": "/tmp/fw",
-        "patches": ["/tmp/fw/p1.diff"],
-    }
-
-    report = {"fixes": [], "warnings": []}
-    await coord.writeback._resume_recover_pending_integrate(report)
-
-    assert reversed_calls == []
-    assert coord.shared_state.pending_integrate["task_id"] == "ti-crash"
-    assert any(row["kind"] == "pending_integrate_outcome_unknown" for row in report["warnings"])
-
-
-@pytest.mark.asyncio
 async def test_resume_consistency_clears_stale_pending_integrate_with_specialist_id(coord: Coordinator) -> None:
     coord.writeback._resumed_from["is_resume"] = True
-    coord.shared_state.pending_integrate = {"task_id": "ti-stale", "specialist_task_id": "spec-stale"}
+    coord.shared_state.pending_integrate = {
+        "task_id": "ti-stale",
+        "specialist_task_id": "spec-stale",
+        "recovery": {"phase": "restored"},
+    }
 
     report = await coord.writeback._resume_consistency_pass()
 
@@ -1983,7 +1874,7 @@ async def test_resume_revalidate_failed_rebench_keeps_flag_set(coord: Coordinato
 @pytest.mark.asyncio
 async def test_integrate_patch_keep_promotes_stack_and_clears_pending(coord: Coordinator) -> None:
     coord.shared_state.baseline_tput = 100.0
-    coord.shared_state.pending_integrate = {"task_id": "ti-1"}
+    coord.shared_state.pending_integrate = {"task_id": "ti-1", "recovery": {"phase": "accepted"}}
     task = SimpleNamespace(task_id="ti-1", params={})
     await coord.writeback.promote_to_shared_state(
         "integrate_patch",

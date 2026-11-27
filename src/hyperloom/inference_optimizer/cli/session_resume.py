@@ -151,8 +151,7 @@ def _reexport_session_identity(args: argparse.Namespace, state, session_dir: Pat
         resume_model_path = str(state.model_path)
         os.environ["MODEL_PATH"] = resume_model_path
         print(f"  re-exported MODEL_PATH: {resume_model_path}")
-        # Backfill model_info for sessions created before the field existed (or whose config was unreadable at
-        # launch); fail-soft to {}.
+        # Backfill model_info when the config was unreadable at launch; fail-soft to {}.
         if not state.model_info:
             state.model_info = summarize_model_config(resume_model_path)
             if state.model_info:

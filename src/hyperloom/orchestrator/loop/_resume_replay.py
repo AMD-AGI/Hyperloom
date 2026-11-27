@@ -104,8 +104,7 @@ class ResumeReplayMixin:
         paths. Returns ``True`` only when a new stack entry was appended.
 
         Args:
-            kind: The originating action kind (``integrate_patch`` / ``explore``
-                / ``framework``).
+            kind: The originating action kind (``integrate_patch`` / ``explore``).
             result: The recorded delegated result payload for that KEEP.
 
         Returns:

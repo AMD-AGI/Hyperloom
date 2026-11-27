@@ -231,32 +231,13 @@ class Recorder:
 
         ``slug`` folds every character outside ``[A-Za-z0-9._-]`` to a dash,
         so ``a/b``, ``a:b`` and ``a b`` would all name one file; a digest of
-        the untouched key makes the name injective again. Pre-digest fragments
-        keep their old name so a resumed session goes on updating the file it
-        already wrote, but only when the key survived sanitizing untouched --
-        otherwise the legacy file could belong to any key that folds onto it.
+        the untouched key makes the name injective again.
         """
-        key_slug = slug(key)
-        prefix = f"{slug(section)}__{self._producer}__{key_slug}"
         digest = hashlib.sha256(key.encode("utf-8", errors="replace")).hexdigest()[:8]
-        filename = f"{prefix}-{digest}.json"
+        filename = f"{slug(section)}__{self._producer}__{slug(key)}-{digest}.json"
         if len(filename.encode("utf-8")) > 180:
             short_digest = hashlib.sha256(key.encode("utf-8", errors="replace")).hexdigest()[:16]
             return f"{slug(section)}__{self._producer}__id-{short_digest}.json"
-        legacy = self._dir / f"{prefix}.json"
-        if key_slug != key:
-            if legacy.exists():
-                log.warning(
-                    "breakdown recorder: not reusing %s for key %r -- the name is "
-                    "ambiguous after sanitizing; writing %s instead. The legacy "
-                    "fragment stays on disk and may hold a different key.",
-                    legacy.name,
-                    key,
-                    filename,
-                )
-            return filename
-        if not (self._dir / filename).exists() and legacy.exists():
-            return legacy.name
         return filename
 
     def record_upsert_item(

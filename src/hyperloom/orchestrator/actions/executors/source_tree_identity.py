@@ -77,7 +77,6 @@ def new_recovery_record(framework_root: Path | None, *, git_head: str, recovery_
     that predates the identifier.
     """
     record: dict[str, Any] = {
-        "version": 1,
         "phase": "before_stash",
         "git_head": git_head,
         "stash_oid": "",
@@ -183,9 +182,9 @@ def tree_replaced(pending: dict[str, Any], gone_scope: str | None) -> bool:
     merely dropped keeps its object and keeps the refusal. Anything unreadable
     answers no, which leaves the ordinary recovery to refuse.
     """
-    recovery = pending.get("recovery")
+    recovery = pending["recovery"]
     root_text = str(pending.get("framework_source_root") or "")
-    if not isinstance(recovery, dict) or recovery.get("phase") in _DISCHARGED_PHASES or not root_text:
+    if recovery.get("phase") in _DISCHARGED_PHASES or not root_text:
         return False
     root = Path(root_text)
     recorded = str(recovery.get("tree_instance") or "")

@@ -106,7 +106,7 @@ creates no session directory, so it cannot start one. It carries the stop reason
 also what its exit code says: a session that did not run its course stays a failed session however FINAL goes. A
 session that was killed with its machine wrote no report at all; it ends for ``killed``, and so fails too. The
 search tree the session's own CLOSE archived is left as it was. It is refused with exit code 2, having written
-nothing, when the directory is no session that ran, ran on another build than this one, committed no root, is still
+nothing, when the directory is no session that ran, committed no root, is still
 running -- any process ``MB-pids.jsonl`` records, the scheduler included, still alive in this environment -- already
 chose in FINAL, or has another ``final-only`` running over it.
 ``run --resume SESSION_DIR`` continues such a session on its manifest's settings and no option but ``-v``: no PRELUDE,

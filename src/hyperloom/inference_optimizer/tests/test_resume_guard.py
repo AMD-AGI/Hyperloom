@@ -258,8 +258,8 @@ def test_current_schema_round_holder_without_unknown_execution_is_allowed(tmp_pa
             "VALUES ('round-1', 'open', 'task-1', 1, 1, 2)"
         )
         db.execute(
-            "INSERT INTO leases (lane, holder_id, task_id, action, pid, acquired_at, expires_at) "
-            "VALUES ('bringup_round', 'round-1', 'task-1', 'bringup_round', 0, 'old', 'old')"
+            "INSERT INTO leases (lane, holder_id, task_id, action, pid, expires_at) "
+            "VALUES ('bringup_round', 'round-1', 'task-1', 'bringup_round', 0, 'old')"
         )
     before = path.read_bytes()
     ensure_resume_safe(tmp_path, owner_scope="local")
@@ -403,7 +403,7 @@ def test_wal_ownership_is_seen_without_changing_database_or_history(tmp_path):
 
 
 @pytest.mark.skipif(sys.platform == "win32", reason="CLI imports require POSIX fcntl")
-@pytest.mark.parametrize("residual", ["foreign", "cancelled", "matching", "older_schema"])
+@pytest.mark.parametrize("residual", ["foreign", "cancelled", "matching"])
 def test_cli_checks_ownership_before_state_changes_or_execution(tmp_path, monkeypatch, capsys, residual):
     import hyperloom.inference_optimizer.cli as cli
     from hyperloom.inference_optimizer.cli import session_resume
@@ -417,9 +417,6 @@ def test_cli_checks_ownership_before_state_changes_or_execution(tmp_path, monkey
     if residual == "cancelled":
         _task(path, state="cancelled", evidence={"reason": "cancelled_in_flight"})
         _execute(path, "INSERT INTO bringup_rounds VALUES ('round-1', 'open', 'task-1')")
-    elif residual == "older_schema":
-        _execute(path, "CREATE TABLE schema_version (version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL)")
-        _execute(path, "INSERT INTO schema_version VALUES (6, '2026-10-01 00:00:00')")
     else:
         _task(path)
         scope = "local" if residual == "matching" else "foreign"
@@ -461,15 +458,7 @@ def test_cli_checks_ownership_before_state_changes_or_execution(tmp_path, monkey
         assert exc.value.code == 2
         lock.release.assert_called_once()
         install.assert_not_called()
-        err = capsys.readouterr().err
-        if residual == "older_schema":
-            assert (
-                "ERROR: --resume-from coordinator.db is at schema version 6, older than this build's 8: sessions "
-                "created before this release cannot be resumed. Finish the session under the build that started "
-                "it, or start a new session."
-            ) in err.splitlines()
-        else:
-            assert "task-1" in err
+        assert "task-1" in capsys.readouterr().err
     coordinator.assert_not_called()
     resume_leg.assert_not_called()
     assert path.read_bytes() == before_db
@@ -942,17 +931,3 @@ def test_confirmation_cli_real_unscoped_ledger_then_normal_resume_admission(tmp_
     entry = json.loads(_rows(path, "tasks")[0]["history"])[-1]
     assert entry["evidence"]["operator"] == pwd.getpwuid(os.getuid()).pw_name
     assert datetime.fromisoformat(entry["ts"]).utcoffset() == timedelta(0)
-
-
-@pytest.mark.skipif(sys.platform == "win32", reason="Confirmation requires a real POSIX flock")
-def test_confirmation_public_refuses_older_schema_without_changes(tmp_path):
-    from hyperloom.inference_optimizer.session.resume_guard import CleanupConfirmationError, confirm_task_stopped
-
-    path = _database(tmp_path)
-    _task(path)
-    _execute(path, "CREATE TABLE schema_version (version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL)")
-    _execute(path, "INSERT INTO schema_version VALUES (6, '2026-10-01 00:00:00')")
-    before = path.read_bytes()
-    with pytest.raises(CleanupConfirmationError, match="schema version 6"):
-        confirm_task_stopped(tmp_path, task_id="task-1", reason=_CONFIRMATION_REASON)
-    assert path.read_bytes() == before

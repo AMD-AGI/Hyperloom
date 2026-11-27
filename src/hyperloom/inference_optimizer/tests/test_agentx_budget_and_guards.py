@@ -10,10 +10,7 @@ import argparse
 import pytest
 
 from hyperloom.inference_optimizer.cli import _preflight_agentx_backend, session_resume
-from hyperloom.inference_optimizer.cli.bootstrap import (
-    MEASUREMENT_EPOCH,
-    measurement_state_is_stale,
-)
+from hyperloom.inference_optimizer.cli.bootstrap import measurement_state_is_stale
 from hyperloom.inference_optimizer.cli.parser import DEFAULT_MAX_HOURS
 from hyperloom.inference_optimizer.cli.session_setup import _SessionStart, _apply_default_budget
 
@@ -132,9 +129,8 @@ def test_scriptable_guard_is_inert_without_agentx(monkeypatch):
 
 
 class _St:
-    def __init__(self, mode="", epoch=MEASUREMENT_EPOCH, backend="inferencex"):
+    def __init__(self, mode="", backend="inferencex"):
         self.benchmark_mode = mode
-        self.measurement_epoch = epoch
         self.agentx_backend = backend
 
 
@@ -172,31 +168,9 @@ def test_resume_rejects_a_missing_backend(native_benchmark, monkeypatch):
     assert "backend" in measurement_state_is_stale(_St("agentx", backend=""))
 
 
-@pytest.mark.parametrize("mode", ["agentx", "synthetic", ""])
-@pytest.mark.parametrize("epoch", [0, 1])
-def test_resume_refuses_every_session_measured_before_the_switch(native_benchmark, monkeypatch, mode, epoch):
-    """A session from before the move onto inference_suite cannot resume, whatever it measured."""
-    if mode == "agentx":
-        _on(monkeypatch, native_benchmark)
-    else:
-        _off(monkeypatch)
-    assert "epoch" in measurement_state_is_stale(_St(mode, epoch))
-
-
-def test_resume_refuses_a_state_without_the_epoch_field(monkeypatch):
-    _off(monkeypatch)
-    assert "epoch" in measurement_state_is_stale(object())
-
-
 def test_agentic_backend_names_inferencex_unless_mlperf_is_asked_for():
     from hyperloom.common.agentx_workload import agentic_backend
 
     assert agentic_backend({}) == "inferencex"
     assert agentic_backend({"HYPERLOOM_AGENTIC_BACKEND": "other"}) == "inferencex"
     assert agentic_backend({"HYPERLOOM_AGENTIC_BACKEND": "MLPerf"}) == "mlperf"
-
-
-def test_resume_tolerates_sessions_predating_the_mode_field(monkeypatch):
-    """An empty mode means "not asserted", not "mismatch"."""
-    _off(monkeypatch)
-    assert measurement_state_is_stale(_St("", backend="")) == ""

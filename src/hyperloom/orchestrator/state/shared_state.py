@@ -219,10 +219,6 @@ class ActionAttempt:
     extras: dict[str, Any] | None = None
 
 
-#: top-level state.json schema version, stamped on every save.
-LATEST_STATE_SCHEMA_VERSION: int = 6
-
-
 def effective_closing_grace_sec(
     max_minutes: float | None,
     closing_grace_sec: float | None,
@@ -256,8 +252,6 @@ class SharedState(
     _RooflineStateMixin,
     _BudgetStateMixin,
 ):
-    # versioned state.json schema; bumped by from_dict migration. Fresh sessions born at latest.
-    schema_version: int = LATEST_STATE_SCHEMA_VERSION
     session_id: str = ""
     # Primus-Claw session UUID (empty standalone); joins Hyperloom to claw sessions in manifest/breakdown.
     claw_session_id: str = ""
@@ -308,11 +302,8 @@ class SharedState(
     # runs, which need not be this host.
     # Compared on resume, and no store keyed on ISL/OSL files a session that records one.
     prompt_dataset: str = ""
-    # Generation of the measurement path this session was measured on; resume refuses one below the build's epoch.
-    measurement_epoch: int = 0
     # Which AgentX client measured this session: "inferencex" or "mlperf"; empty outside AgentX. Compared on resume so
-    # the two workloads cannot anchor each other without bumping the measurement epoch (which would invalidate
-    # unchanged sessions of the other client).
+    # the two workloads cannot anchor each other.
     agentx_backend: str = ""
     agentx_accuracy: bool = True  # Native AgentX GSM8K round; off only by ``--no-agentx-accuracy`` at seed.
     # The grading configuration this session was seeded with: {"objective": GRADED_INTVTY|GRADED_OUTPUT,
@@ -737,12 +728,6 @@ class SharedState(
         # The charge anchor belongs to a live leg, not to the file: only
         # ``begin_leg`` arms it, so ``elapsed_charged_sec`` alone survives a load.
         filtered["leg_anchor_unix"] = 0.0
-        if not isinstance(filtered.get("specialist_patch_verdicts"), dict):
-            filtered["specialist_patch_verdicts"] = {}
-        if not isinstance(filtered.get("pending_kernel_integrations"), dict):
-            filtered["pending_kernel_integrations"] = {}
-        if not isinstance(filtered.get("current_best"), dict):
-            filtered["current_best"] = {}
         # Normalize the unified ``explore_search`` ledger at load.
         filtered["explore_search"] = cls._build_explore_search(
             existing=filtered.get("explore_search"),
@@ -750,10 +735,6 @@ class SharedState(
 
         if isinstance(filtered.get("enablement"), dict):
             filtered["enablement"] = EnablementRound.from_dict(filtered["enablement"])
-        elif not isinstance(filtered.get("enablement"), EnablementRound):
-            filtered["enablement"] = EnablementRound()
-
-        filtered["schema_version"] = LATEST_STATE_SCHEMA_VERSION
 
         return cls(**filtered)
 

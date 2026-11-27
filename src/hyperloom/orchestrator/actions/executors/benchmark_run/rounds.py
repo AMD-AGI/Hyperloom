@@ -209,8 +209,8 @@ class _BenchmarkRoundsMixin:
             return self._save_warm_replay_pending(
                 shared_state,
                 status="preparing_required_recipe",
-                # The trees are the authority; the singular fields describe the primary one so a resumed legacy
-                # reader still finds it.
+                # The trees are the authority; the singular fields repeat the primary one, which
+                # ``warm_patch_trees`` falls back to when the list is empty.
                 recipe_patch_trees=tree_records,
                 recipe_patch_target=str(primary.get("root") or ""),
                 recipe_patch_pre_sha=str(primary.get("pre_sha") or ""),

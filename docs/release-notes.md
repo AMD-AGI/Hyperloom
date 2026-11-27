@@ -20,6 +20,13 @@ Merged to `main` and not yet carried by a tagged release. Each entry moves
 into the [release](https://github.com/AMD-AGI/Hyperloom/releases) that ships
 it.
 
+- **A session is resumed by the build that wrote it.** `optimize
+  --resume-from`, `recover`, `hyperloom-multibranch run --resume` and
+  `final-only`, a restart of a hosted run and `forge-loop --resume` are not
+  supported on a session an earlier release wrote: finish it under that
+  release or start a new one. Nothing checks for it, and three such resumes
+  do not stop cleanly (other measurement semantics, a retired phase, an
+  earlier release's `coordinator.db`); see [Upgrade](reference/upgrade.md).
 - **The multibranch `tracelens` tool runs only TraceLens' report.** It no
   longer takes `analysis_route`, a scriptable `framework` or
   `HYPERLOOM_TRACE_ANALYSIS_ROUTE` to start the orchestrator's `agent` or

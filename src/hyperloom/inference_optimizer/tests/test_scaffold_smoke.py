@@ -13,7 +13,7 @@ import pytest
 import hyperloom.inference_optimizer
 from hyperloom.inference_optimizer.session import paths
 from hyperloom.orchestrator.bus.storage.connection import SqliteConnection, open_connection
-from hyperloom.orchestrator.bus.storage.schema import SCHEMA_VERSION, ensure_schema
+from hyperloom.orchestrator.bus.storage.schema import DEFAULT_LANE_CAPACITIES, ensure_schema
 
 
 def test_package_version_matches_metadata():
@@ -66,10 +66,8 @@ def test_open_connection_applies_wal_and_schema(tmp_path):
         assert mode.lower() == "wal"
         cur = conn.execute("SELECT name FROM sqlite_master WHERE type='table' ORDER BY name")
         tables = {row["name"] for row in cur.fetchall()}
-        for required in ("leases", "events", "cursors", "tasks", "schema_version"):
+        for required in ("leases", "events", "cursors", "tasks"):
             assert required in tables, f"missing table: {required}"
-        (version,) = conn.execute("SELECT MAX(version) FROM schema_version").fetchone()
-        assert version == SCHEMA_VERSION
     finally:
         conn.close()
 
@@ -80,7 +78,8 @@ def test_ensure_schema_is_idempotent(tmp_path):
     try:
         ensure_schema(conn)
         ensure_schema(conn)
-        assert [row[0] for row in conn.execute("SELECT version FROM schema_version")] == [SCHEMA_VERSION]
+        (lanes,) = conn.execute("SELECT COUNT(*) FROM lane_capacity").fetchone()
+        assert lanes == len(DEFAULT_LANE_CAPACITIES)
     finally:
         conn.close()
 

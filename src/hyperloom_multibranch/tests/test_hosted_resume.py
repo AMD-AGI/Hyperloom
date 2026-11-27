@@ -26,7 +26,6 @@ from typing import Any
 
 import pytest
 
-from hyperloom.inference_optimizer.cli import bootstrap
 from hyperloom.measure.tests.bundle_factory import base_launch
 from hyperloom.orchestrator.state.base_launch import freeze_base
 from hyperloom_common.tests.shared_accounts import Accounts, other_accounts
@@ -145,23 +144,16 @@ def _changed_image(monkeypatch: pytest.MonkeyPatch) -> str:
     return "image_digest"
 
 
-def _changed_epoch(monkeypatch: pytest.MonkeyPatch) -> str:
-    monkeypatch.setattr(bootstrap, "MEASUREMENT_EPOCH", bootstrap.MEASUREMENT_EPOCH + 1)
-    return "measurement_epoch"
-
-
 @pytest.mark.usefixtures("ready_environment", "rescheduled")
-@pytest.mark.parametrize("change", [_changed_image, _changed_epoch], ids=["image", "epoch"])
-def test_a_restart_onto_another_image_or_epoch_finishes_the_session_with_one_warning_naming_it(
+def test_a_restart_onto_another_image_finishes_the_session_with_one_warning_naming_it(
     host: Host,
     agent_cli: list[RunSettings],
     tmp_path: Path,
     caplog: pytest.LogCaptureFixture,
     monkeypatch: pytest.MonkeyPatch,
-    change,  # type: ignore[no-untyped-def]
 ) -> None:
     layout, _ = _session_of(host, tmp_path)
-    field = change(monkeypatch)
+    field = _changed_image(monkeypatch)
 
     assert cli.main(["hosted", "run"]) == 0
 
@@ -189,7 +181,7 @@ def test_a_restart_past_the_first_starts_deadline_finishes_the_session_with_one_
 def test_a_restart_of_a_session_its_toolbox_recorded_nothing_for_finishes_it(
     host: Host, agent_cli: list[RunSettings], tmp_path: Path, caplog: pytest.LogCaptureFixture
 ) -> None:
-    """A session an older build began, before the toolbox recorded what its baseline was measured on."""
+    """A session whose toolbox left no record of what its baseline was measured on."""
     layout, _ = _session_of(host, tmp_path)
     (layout.toolbox / BASELINE_ENVIRONMENT_FILE).unlink()
 

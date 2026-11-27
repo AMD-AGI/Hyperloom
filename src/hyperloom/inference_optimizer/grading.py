@@ -29,8 +29,8 @@ def resolved_grading(state: Any) -> tuple[bool, float | None]:
 
     Prefers what the session recorded at seed over re-deriving it. The derivation reads the environment, and every
     later reader of it is somewhere the environment is not evidence: a resumed process, a re-baseline subprocess, an
-    export driven from CLOSE. Sessions seeded before ``SharedState.grading`` existed carry nothing and only those
-    derive, reporting a null band because the band they actually applied was never recorded.
+    export driven from CLOSE. A state that records none (the blank one ``--reset-state`` leaves) derives, reporting a
+    null band because the band it applied was never recorded.
     """
     recorded = recorded_grading(getattr(state, "grading", None))
     if recorded is not None:

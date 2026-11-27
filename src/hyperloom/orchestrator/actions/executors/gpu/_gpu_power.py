@@ -18,7 +18,7 @@ from typing import Any, Mapping
 from hyperloom_common.env import EnvValueError, env_float
 from hyperloom_common.gpu_telemetry import DEFAULT_INTERVAL_SEC, fast_interval
 from hyperloom.common.gpu_power_settings import gpu_power_sampling_unavailable
-from inference_suite.contracts import READABLE_REPORT_SCHEMAS, GpuTelemetry, PowerSummary
+from inference_suite.contracts import REPORT_SCHEMA, GpuTelemetry, PowerSummary
 
 log = logging.getLogger(__name__)
 
@@ -71,7 +71,7 @@ def round_gpu_telemetry() -> GpuTelemetry:
 
 def round_power_summary(report: Mapping[str, Any] | None) -> PowerSummary | None:
     """The round's power: an inference_suite report's ``power`` section; ``None`` when no recorder ran for the round."""
-    if report and report.get("schema") in READABLE_REPORT_SCHEMAS:
+    if report and report.get("schema") == REPORT_SCHEMA:
         section = report.get("power")
         return None if section is None else PowerSummary.from_document(section)
     return None

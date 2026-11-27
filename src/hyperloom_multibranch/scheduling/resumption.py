@@ -28,7 +28,7 @@ from hyperloom_multibranch.scheduling.close import ended_before_final
 from hyperloom_multibranch.scheduling.decisions import downtime_until
 from hyperloom_multibranch.scheduling.explore import spent_gpu_seconds
 from hyperloom_multibranch.scheduling.layout import SessionLayout
-from hyperloom_multibranch.scheduling.manifest import code_version, read_manifest
+from hyperloom_multibranch.scheduling.manifest import read_manifest
 from hyperloom_multibranch.scheduling.prelude import baseline_decision
 from hyperloom_multibranch.scheduling.settings import RunSettings
 from hyperloom_multibranch.scheduling.stops import SessionStopReason
@@ -61,21 +61,7 @@ async def recorded_baseline(blackboard: LocalBlackboard) -> BaselineRecord | Non
 def persisted_run(root: Path) -> PersistedRun:
     """The session in ``root``, read back from what the session manifest and CLOSE left there, or from what
     a session that was killed left without a CLOSE; raises ValueError naming what keeps FINAL from running over it.
-    Only the build it ran on may read back what it measured. Creates nothing. Blocks."""
-
-    persisted = persisted_session(root)
-    ran_on, here = read_manifest(persisted.layout.manifest).code_version, code_version()
-    if ran_on != here:
-        raise ValueError(
-            f"the session in {root} ran on {ran_on} and this build is {here}; FINAL and CLOSE read back what that "
-            "build persisted, so run them from it"
-        )
-    return persisted
-
-
-def persisted_session(root: Path) -> PersistedRun:
-    """:func:`persisted_run` on any build: for a session that recorded no baseline, which a restart only closes, so
-    nothing it measured is read back."""
+    Creates nothing. Blocks."""
 
     if not root.is_dir():
         raise ValueError(f"{root} is not a directory")
@@ -142,7 +128,6 @@ __all__ = [
     "ResumeRefused",
     "deadline_after_downtime",
     "persisted_run",
-    "persisted_session",
     "recorded_baseline",
     "require_resumable",
     "resumable_run",

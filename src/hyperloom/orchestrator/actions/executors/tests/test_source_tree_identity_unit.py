@@ -53,7 +53,7 @@ def test_a_fresh_clone_at_the_same_path_reads_as_replaced(tmp_path: Path) -> Non
 def test_every_undischarged_phase_reads_a_new_identity_as_replaced(tmp_path: Path, phase: str) -> None:
     root = tmp_path / "tree"
     init_git_repo(root)
-    recovery = {"version": 1, "phase": phase, "tree_instance": "recorded-elsewhere", "stash_oid": ""}
+    recovery = {"phase": phase, "tree_instance": "recorded-elsewhere", "stash_oid": ""}
 
     assert tree_replaced({"framework_source_root": str(root), "recovery": recovery}, None)
 
@@ -62,7 +62,7 @@ def test_every_undischarged_phase_reads_a_new_identity_as_replaced(tmp_path: Pat
 def test_a_discharged_window_never_reads_as_replaced(tmp_path: Path, phase: str) -> None:
     root = tmp_path / "tree"
     init_git_repo(root)
-    recovery = {"version": 1, "phase": phase, "tree_instance": "recorded-elsewhere", "stash_oid": ""}
+    recovery = {"phase": phase, "tree_instance": "recorded-elsewhere", "stash_oid": ""}
 
     assert not tree_replaced({"framework_source_root": str(root), "recovery": recovery}, "lost-container")
 
@@ -87,7 +87,7 @@ def test_a_linked_worktree_recreated_at_the_same_path_reads_as_replaced(tmp_path
 def test_an_unreadable_tree_is_not_called_replaced(tmp_path: Path) -> None:
     pending = {
         "framework_source_root": str(tmp_path / "missing"),
-        "recovery": {"version": 1, "phase": "ready", "tree_instance": "deadbeef", "stash_oid": "0" * 40},
+        "recovery": {"phase": "ready", "tree_instance": "deadbeef", "stash_oid": "0" * 40},
     }
 
     assert not tree_replaced(pending, "lost-container")
@@ -132,7 +132,6 @@ def test_a_replaced_tree_restores_only_targets_outside_it(tmp_path: Path) -> Non
         "framework_source_root": str(root),
         "artifacts": [{"target": str(outside)}, {"target": str(inside)}],
         "recovery": {
-            "version": 1,
             "phase": "ready",
             "root": str(recovery_root),
             "artifacts_prepared": True,
@@ -151,7 +150,7 @@ def test_a_replaced_tree_restores_only_targets_outside_it(tmp_path: Path) -> Non
 
 def _legacy_pending(root: Path, tmp_path: Path, **extra: object) -> dict:
     """A sentinel from before tree identities, whose stash object no tree here holds."""
-    recovery = {"version": 1, "phase": "ready", "stash_oid": "1" * 40, "root": str(tmp_path / "recovery"), **extra}
+    recovery = {"phase": "ready", "stash_oid": "1" * 40, "root": str(tmp_path / "recovery"), **extra}
     return {"framework_source_root": str(root), "recovery": recovery}
 
 

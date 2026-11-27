@@ -60,14 +60,13 @@ async def _running_task_with_dead_lease(
     task, _ = await coord.tasks.create_or_return_existing(TaskSpec(kind=kind, params=params or {}, idempotency_key=key))
     await coord.tasks.transition(task.task_id, "running")
     coord.db.raw.execute(
-        "INSERT INTO leases(lane, holder_id, task_id, action, pid, acquired_at, expires_at) VALUES (?,?,?,?,?,?,?)",
+        "INSERT INTO leases(lane, holder_id, task_id, action, pid, expires_at) VALUES (?,?,?,?,?,?)",
         (
             "benchmark_lane",
             task.task_id,
             task.task_id,
             kind,
             _DEAD_PID,
-            "2026-01-01T00:00:00+00:00",
             "2099-12-31T23:59:59+00:00",
         ),
     )

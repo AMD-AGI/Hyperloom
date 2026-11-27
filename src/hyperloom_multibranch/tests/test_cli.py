@@ -5,7 +5,7 @@
 
 ``final-only`` is the emergency recovery of a session that ended before FINAL, one killed with its machine included:
 it takes that session's directory and nothing else, refuses before building anything when the directory cannot
-support FINAL -- a session another build ran, and one still running, included -- and holds the directory against a
+support FINAL -- one still running included -- and holds the directory against a
 second recovery while it works.
 
 ``hosted run`` maps the campaign spec a host injected onto the options of ``run`` and builds the session's settings as
@@ -1398,13 +1398,12 @@ def _killed(layout: SessionLayout, scope: str) -> None:
     ("damage", "error"),
     [
         (lambda layout: layout.manifest.unlink(), "is no multi-branch session that ran"),
-        (lambda layout: _manifest(layout, code_version={"package": "0.0", "git_sha": "beef"}), "ran on CodeVersion"),
         (lambda layout: layout.root_recipe.unlink(), "committed no root"),
         (lambda layout: _killed(layout, local_owner_scope()), "is still running"),
         (lambda layout: _report(layout, final={"chosen": {"commit": "c9"}}), "already chose c9"),
         (lambda layout: _report(layout, stop_reason="prelude_baseline_failed"), "PRELUDE failed"),
     ],
-    ids=["no manifest", "another build", "no root", "still running", "final ran", "prelude failed"],
+    ids=["no manifest", "no root", "still running", "final ran", "prelude failed"],
 )
 @pytest.mark.usefixtures("ready_environment")
 def test_a_session_final_cannot_run_over_exits_two_and_changes_nothing(
@@ -1502,7 +1501,6 @@ def test_final_only_finishes_the_session_on_the_settings_its_manifest_holds(
     ("damage", "error"),
     [
         (lambda layout: layout.manifest.unlink(), "is no multi-branch session that ran"),
-        (lambda layout: _manifest(layout, code_version={"package": "0.0", "git_sha": "beef"}), "ran on CodeVersion"),
         (lambda layout: _killed(layout, local_owner_scope()), "is still running"),
         (lambda layout: _report(layout, final={"chosen": {"commit": "c9"}}), "already chose c9"),
         (lambda layout: _report(layout, stop_reason="prelude_baseline_failed"), "PRELUDE failed"),
@@ -1512,7 +1510,6 @@ def test_final_only_finishes_the_session_on_the_settings_its_manifest_holds(
     ],
     ids=[
         "no manifest",
-        "another build",
         "still running",
         "final ran",
         "prelude failed",
@@ -2552,20 +2549,6 @@ def test_a_restart_takes_over_the_final_only_lock_a_start_killed_while_closing_l
 
     assert held == [False], "the pid in the lock is a process of the start that died; it holds nothing"
     assert [kind for kind, _ in restart.calls] == (["final-only"] if baseline else ["final-only", "run"])
-
-
-@pytest.mark.usefixtures("ready_environment")
-def test_a_restart_onto_another_build_closes_the_session_before_its_baseline_and_starts_again(
-    host: Host, restart: Restart, tmp_path: Path
-) -> None:
-    layout = _killed_in_prelude(tmp_path / "MB-earlier-session")
-    _manifest(layout, code_version={"package": "0.0", "git_sha": "beef"})
-    (host.state_dir / "session.json").write_text(json.dumps({"session_dir": str(layout.root)}), encoding="utf-8")
-
-    assert cli.main(["hosted", "run"]) == 0
-
-    assert [kind for kind, _ in restart.calls] == ["final-only", "run"], "a fix rolled out reaches the run it is for"
-    assert host.exit_document() == {"final": True, "returncode": 0, "stop_reason": "time_exhausted"}
 
 
 #: The ``final-only`` a restart closes a session with, before a test puts a stand-in in its place.

@@ -205,12 +205,6 @@ def test_an_agentx_round_that_skipped_requests_as_a_context_overflow_says_how_ma
     assert measurement["valid_measurement"] is False
 
 
-def test_an_agentx_round_reported_before_overflow_was_counted_is_judged_as_it_was() -> None:
-    measurement = round_measurement(_agentx(_agentx_result(_counts(context_overflow=None))), None)
-    assert measurement["valid_measurement"] is True
-    assert measurement["nonfatal_warnings"] == []
-
-
 def test_an_error_rate_at_the_threshold_is_still_valid() -> None:
     at_threshold = _agentx_result(_counts(error_dropped=10, successful=90, dropped_total=24, records_total=114))
     measurement = round_measurement(_agentx(at_threshold), None)

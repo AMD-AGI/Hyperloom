@@ -948,18 +948,6 @@ def test_coordinator_init_writes_phase_prelude_for_fresh_session(coordinator_wit
     assert c.shared_state.phase_budget_pct == dict(phase_state.DEFAULT_PHASE_BUDGET_PCT)
 
 
-def test_a_session_recorded_at_an_unknown_phase_refuses_to_resume(coordinator_with_mocks):
-    """A phase this build does not have was written by a build whose machine differed."""
-    c = coordinator_with_mocks
-    c.shared_state.phase = "EXPLORE"
-
-    with pytest.raises(RuntimeError) as excinfo:
-        c.phase_machine.ensure_phase_initialised(None)
-
-    assert "EXPLORE" in str(excinfo.value)
-    assert c.shared_state.phase == "EXPLORE"
-
-
 def _fail_phase_init_save(monkeypatch, c, exc: BaseException) -> None:
     c.shared_state.phase = ""
     c.shared_state.phase_history = []

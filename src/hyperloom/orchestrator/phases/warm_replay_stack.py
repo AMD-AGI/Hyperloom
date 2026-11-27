@@ -50,7 +50,7 @@ def warm_patch_trees(result: Mapping[str, Any], pending: Mapping[str, Any]) -> l
         for tree in result.get("warm_patch_trees") or pending.get("recipe_patch_trees") or []
         if isinstance(tree, Mapping)
     ]
-    # A round that predates the list reports only its primary tree.
+    # A round that recorded no tree yields one row with no root: a restore skips it and a promotion refuses it.
     return trees or [
         {
             "root": result.get("warm_patch_target") or pending.get("recipe_patch_target"),
@@ -186,7 +186,7 @@ def restore_recipe_trees(result: Mapping[str, Any], pending: Mapping[str, Any]) 
         backups = list(tree.get("nogit_backups") or [])
         if not bool(tree.get("mutated", True)):
             # An overlay the tree already carried applies as a no-op, writing
-            # nothing and so owing nothing. A record predating the flag reads as
+            # nothing and so owing nothing. A row without the flag reads as
             # written-to, and still has to answer with a channel below.
             continue
         if not recipe_manifest and not backups:

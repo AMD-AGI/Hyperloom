@@ -183,7 +183,6 @@ def _pending_artifact_restore(target: Path, backup_root: Path) -> dict:
         "patches": [],
         "workspace": str(backup_root.parent),
         "recovery": {
-            "version": 1,
             "phase": "ready",
             "root": str(backup_root.parent),
             "artifacts_prepared": True,
@@ -338,7 +337,6 @@ def test_recovery_deletes_an_artifact_whose_target_the_patch_created(tmp_path):
         "artifacts": [{"target": str(target), "rel_target": "X.json"}],
         "framework_source_root": str(repo),
         "recovery": {
-            "version": 1,
             "phase": "ready",
             "root": str(recovery_root),
             "git_head": _git_head_sha(repo),
@@ -381,7 +379,6 @@ def test_recovery_restores_an_artifact_target_that_predates_the_attempt(tmp_path
         "artifacts": [{"target": str(target), "rel_target": "cfg.json"}],
         "framework_source_root": str(repo),
         "recovery": {
-            "version": 1,
             "phase": "ready",
             "root": str(recovery_root),
             "git_head": _git_head_sha(repo),
@@ -425,7 +422,7 @@ def test_recovery_reverts_the_patches_when_the_artifact_phase_never_started(tmp_
         "patches": ["001.patch", "002.patch"],
         "artifacts": [{"target": str(tmp_path / "tuned.json"), "rel_target": "tuned.json"}],
         "framework_source_root": str(tmp_path),
-        "recovery": {"version": 1, "phase": "ready", "root": str(recovery_root)},
+        "recovery": {"phase": "ready", "root": str(recovery_root)},
     }
     summary = ip.restore_pending_integrate(pending)
     assert summary["failed"] == []
@@ -551,7 +548,7 @@ def test_non_git_recovery_ignores_an_unproven_ledger_tail(tmp_path, checkpoint):
         "artifacts": [],
         "workspace": str(backup_root.parent),
         "framework_source_root": str(tmp_path),
-        "recovery": {"version": 1, "phase": "ready", "root": str(backup_root.parent)},
+        "recovery": {"phase": "ready", "root": str(backup_root.parent)},
     }
     assert ledger.load_prepared_records(backup_root) == []
     # Nothing committed means nothing to undo, and nothing is touched either.

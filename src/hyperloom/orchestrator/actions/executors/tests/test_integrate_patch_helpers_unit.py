@@ -485,7 +485,6 @@ def test_a_revert_pops_the_stash_back_after_the_candidate_staged_a_file_the_stas
         "patches": ["candidate.patch"],
         "artifacts": [],
         "recovery": {
-            "version": 1,
             "phase": "ready",
             "root": str(tmp_path / "recovery"),
             "git_head": base,
@@ -528,7 +527,6 @@ def test_accepted_attempt_reports_stash_failure_without_claiming_completion(tmp_
     pending = {
         "framework_source_root": str(tmp_path),
         "recovery": {
-            "version": 1,
             "phase": "ready",
             "root": str(tmp_path / "recovery"),
             "stash_oid": "oid",
@@ -616,7 +614,7 @@ def test_restore_uses_exact_attempt_git_base_or_refuses(tmp_path, monkeypatch, h
         "framework_source_root": str(tmp_path),
         "patches": ["a.patch", "b.patch"],
         "artifacts": [],
-        "recovery": {"version": 1, "phase": "ready", "root": str(tmp_path / "recovery"), "git_head": "base"},
+        "recovery": {"phase": "ready", "root": str(tmp_path / "recovery"), "git_head": "base"},
     }
     result = ip.restore_pending_integrate(pending)
     if head == "base" and checkout_ok:
@@ -643,7 +641,7 @@ def test_a_git_tree_that_lost_its_base_is_not_reported_as_restored(tmp_path):
         "workspace": str(workspace),
         "patches": [str(workspace / "p.diff")],
         "artifacts": [],
-        "recovery": {"version": 1, "phase": "ready", "root": str(workspace), "git_head": ""},
+        "recovery": {"phase": "ready", "root": str(workspace), "git_head": ""},
     }
 
     summary = ip.restore_pending_integrate(pending)

@@ -54,11 +54,7 @@ async def test_corrupt_expires_at_does_not_abort_acquire(tmp_path):
             action="bench",
             ttl_sec=60,
         )
-        stamp = "2026-01-01T00:00:00+00:00"
-        db.raw.execute(
-            "UPDATE leases SET acquired_at=?, expires_at=? WHERE holder_id=?",
-            (stamp, "NOT_A_DATE", held.holder_id),
-        )
+        db.raw.execute("UPDATE leases SET expires_at=? WHERE holder_id=?", ("NOT_A_DATE", held.holder_id))
         db.raw.commit()
         retained = [dict(row) for row in db.fetchall_sync("SELECT * FROM leases ORDER BY lane")]
         assert len(retained) == len(held.lanes)

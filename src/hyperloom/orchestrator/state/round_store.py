@@ -460,7 +460,6 @@ def _place_lane(cur: sqlite3.Cursor, after: Round) -> None:
             round_id=after.round_id,
             holder_task_id=after.holder_task_id,
             expires_unix=after.expires_unix,
-            now_unix=after.renewed_unix,
         )
     else:
         drop_round_lane(cur, round_id=after.round_id)

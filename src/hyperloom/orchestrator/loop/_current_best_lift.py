@@ -18,9 +18,8 @@ from hyperloom.inference_optimizer.grid_server_args import (
     strip_benchmark_harness_flags,
 )
 from hyperloom.inference_optimizer.session.optimization_journal import classify_change_kind, operation_kind_for
-from hyperloom.orchestrator.lever import FRAMEWORK_STACK_ACTION, lever_kind_for_task
+from hyperloom.orchestrator.lever import lever_kind_for_task
 
-from ..framework.artifacts import candidate_key
 from ..launch_controls import LAUNCH_CONTROL_KEYS, kept_launch_controls
 from ..measurement.runtime_findings import KEEP_REASON_CORRECTNESS_FIX
 from ..source_snapshot import report_missing_source_snapshot
@@ -230,9 +229,6 @@ def _stacked_keep_keys(stack: Any) -> set[_StackKey]:
 def _orphan_stack_key(kind: str, result: Mapping[str, Any]) -> _StackKey | None:
     if kind == "integrate_patch":
         return _StackKey(kind, str(result.get("specialist_task_id") or ""))
-    if kind == "framework_agent":
-        candidate = result.get("candidate")
-        return _StackKey(FRAMEWORK_STACK_ACTION, candidate_key(candidate if isinstance(candidate, dict) else None))
     if kind == "explore":
         best = result.get("best_variant") or {}
         return _StackKey(kind, str((best.get("name") if isinstance(best, dict) else "") or ""))

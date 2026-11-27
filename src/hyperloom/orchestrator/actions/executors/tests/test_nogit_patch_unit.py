@@ -310,25 +310,6 @@ def test_revert_restores_a_source_the_patch_moved_away(tmp_path):
     assert old_file.read_text() == "original_content\n"
 
 
-def test_ledger_written_by_an_older_build_still_restores(tmp_path):
-    """A resumed ledger record that names its copy ``backup_path`` still restores the target."""
-    target = tmp_path / "target.py"
-    bak = tmp_path / "backup.bak"
-    bak.write_text("original_content\n", encoding="utf-8")
-    record = {
-        "target": str(target),
-        "existed": True,
-        "backup_path": str(bak),
-        "revert_action": "restore_old",
-        "pre_image_sha256": ledger.file_digest(bak),
-    }
-
-    _reverted, errors = ledger.restore_records([record])
-
-    assert errors == []
-    assert target.read_text() == "original_content\n"
-
-
 def test_rename_is_recorded_even_though_it_has_no_hunks(tmp_path):
     """A 100%-similarity rename moves the file with no ``---``/``+++`` pair; an empty ledger makes revert a no-op."""
     (tmp_path / "old_name.py").write_text("moved_content\n", encoding="utf-8")

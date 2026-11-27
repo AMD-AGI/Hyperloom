@@ -102,15 +102,6 @@ def load_records(backup_root: Path | str) -> list[dict[str, Any]]:
     return out
 
 
-def _backup_of(record: Mapping[str, Any]) -> Any:
-    """The copy a record names.
-
-    ``backup_path`` is the legacy no-git key, read until no resumable backup ledger or warm-tree ``nogit_backups``
-    record can carry it.
-    """
-    return record.get("backup_path", record.get("backup"))
-
-
 def _names_absolute_path(value: Any) -> bool:
     """Whether *value* is a non-empty string naming an absolute path."""
     return isinstance(value, str) and bool(value) and Path(value).is_absolute()
@@ -137,7 +128,7 @@ def _validate_restore_record(record: Mapping[str, Any]) -> None:
     existed = record.get("existed")
     if not isinstance(existed, bool):
         raise ValueError(f"invalid backup existence: {target}")
-    backup = _backup_of(record)
+    backup = record.get("backup")
     if backup is not None and not _names_absolute_path(backup):
         raise ValueError(f"invalid backup path: {target}")
     mode = record.get("mode")
@@ -153,7 +144,7 @@ def mark_prepared(backup_root: Path | str) -> bool:
     try:
         data = target.read_bytes() if target.exists() else b""
         for record in load_records(backup_root):
-            backup = _backup_of(record)
+            backup = record.get("backup")
             if backup:
                 # Windows fsync needs write access; POSIX also accepts read-only backup descriptors.
                 with Path(backup).open("rb+" if os.name == "nt" else "rb") as stream:
@@ -237,7 +228,7 @@ def _restore_target(name: str, record: Mapping[str, Any]) -> None:
         return
     if target.is_symlink():
         raise ValueError(f"existing backup target became a symlink: {name}")
-    backup = _backup_of(record)
+    backup = record.get("backup")
     digest = record["pre_image_sha256"]
     if file_digest(target) != digest:
         if file_digest(Path(backup)) != digest:

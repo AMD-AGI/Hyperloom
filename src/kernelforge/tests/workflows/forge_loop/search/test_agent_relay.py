@@ -20,7 +20,6 @@ from kernelforge.workflows.forge_loop.search.agent_relay import (
     apply_relay_keep,
     apply_relay_search_outcome,
     apply_supervisor_fallback,
-    migrate_run_state_relay_fields,
     relay_blockage_reached,
     select_relay_intervention,
     select_replacement_for_unavailable,
@@ -265,25 +264,6 @@ def test_recheck_replaces_the_profile_and_its_provider_entry():
 def test_recheck_of_an_unknown_profile_is_refused():
     with pytest.raises(ValueError, match="unknown Agent profile"):
         apply_profile_recheck(_snapshot(), "missing", ProfileAvailability(provider="claude"))
-
-
-def test_legacy_migration_adds_both_relay_fields_atomically():
-    migrated = migrate_run_state_relay_fields({"campaign_id": "campaign"})
-
-    assert migrated["agent_relay"]["active_profile_id"] == ""
-    assert migrated["agent_availability_snapshot"]["profiles"] == {}
-
-
-def test_partial_relay_checkpoint_is_not_migrated():
-    payload = {
-        "agent_relay": {
-            "active_profile_id": "claude_opus",
-        }
-    }
-
-    migrated = migrate_run_state_relay_fields(payload)
-
-    assert "agent_availability_snapshot" not in migrated
 
 
 class _StateStore:

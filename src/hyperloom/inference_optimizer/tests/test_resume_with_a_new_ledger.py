@@ -91,6 +91,7 @@ async def _lost_with_an_integrate_window_open(session: Path) -> None:
         "task_id": "ti-roll",
         "framework_source_root": "/tmp/framework",
         "patches": ["/tmp/p.diff"],
+        "recovery": {"phase": "ready"},
     }
     coord.shared_state.save(session)
     coord.db.raw.close()
