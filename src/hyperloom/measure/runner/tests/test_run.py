@@ -25,7 +25,7 @@ import yaml
 from hyperloom.contracts.recipe import RecipeDelta
 from hyperloom.measure import signing
 from hyperloom.measure.bundle import BundleExpectation, verify_bundle
-from hyperloom.measure.compile import LocalBlobStore, PackageBase, compile_environment
+from hyperloom.measure.compile import EnvironmentCompiler, LocalBlobStore, PackageBase
 from hyperloom.measure.manifest import ResultManifest
 from hyperloom.measure.pins import IMAGE_DIGEST_VAR
 from hyperloom.measure.points import default_canonical, generate_points
@@ -957,13 +957,9 @@ def accepted(tmp_path, monkeypatch):
         tmp_path / "canonical", primary_concurrency=32, config_path=default_baseline_config(), model_path=str(model)
     )
     base = PackageBase("sglang", tmp_path, None, None)
-    environment = compile_environment(
-        recipe_with(),
-        RecipeDelta(),
-        blobs=LocalBlobStore(tmp_path / "blobs"),
-        active_image_digest=IMAGE,
-        locator=lambda _l: base,
-    )
+    environment = EnvironmentCompiler(
+        blobs=LocalBlobStore(tmp_path / "blobs"), active_image_digest=IMAGE, locator=lambda _l: base
+    ).compile(recipe_with(), RecipeDelta())
     (point,) = generate_points(environment, canonical, tmp_path / "points", concurrency=(8,))
     return canonical, point
 

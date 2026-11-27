@@ -18,7 +18,7 @@ import pytest
 
 from hyperloom.contracts.measurement import FailureClass, TestResult, Validity
 from hyperloom.contracts.recipe import RecipeDelta
-from hyperloom.measure.compile import CompiledEnvironment, LocalBlobStore, PackageBase, compile_environment
+from hyperloom.measure.compile import CompiledEnvironment, EnvironmentCompiler, LocalBlobStore, PackageBase
 from hyperloom.measure.jit.native.needs import EnvEntry, EnvRoot
 from hyperloom.measure.points import AcceptedMeasurement
 from hyperloom.measure.tests._recipes import IMAGE, PREFIX, git_patch, put_patch, recipe_with
@@ -90,8 +90,8 @@ def _environment(tmp_path: Path, framework: Framework, *stack: dict[str, tuple[s
         after = {f"{PREFIX}/{rel}": new for rel, (_, new) in changes.items()}
         refs.append(put_patch(blobs, f"{index}.patch", git_patch(tmp_path / f"patch-{index}", before, after)))
     base = PackageBase("sglang", framework.package, "sglang", "0.0.1")
-    return compile_environment(
-        recipe_with(tuple(refs)), RecipeDelta(), blobs=blobs, active_image_digest=IMAGE, locator=lambda _: base
+    return EnvironmentCompiler(blobs=blobs, active_image_digest=IMAGE, locator=lambda _: base).compile(
+        recipe_with(tuple(refs)), RecipeDelta()
     )
 
 

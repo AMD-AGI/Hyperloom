@@ -15,10 +15,10 @@ from hyperloom.contracts.recipe import RecipeDelta
 from hyperloom.measure.compile import (
     COMPONENT_LAYOUTS,
     ComponentLayout,
+    EnvironmentCompiler,
     LocalBlobStore,
     PatchApplyError,
     UnsupportedComponentError,
-    compile_environment,
     locate_installed_package,
     locate_source,
 )
@@ -89,6 +89,6 @@ def test_a_compile_without_native_builds_refuses_every_change_to_a_checkout(tmp_
     recipe = recipe_with((put_patch(blobs, "p.patch", patch),), component="llamacpp")
 
     with pytest.raises(PatchApplyError) as refused:
-        compile_environment(recipe, RecipeDelta(), blobs=blobs, active_image_digest=IMAGE)
+        EnvironmentCompiler(blobs=blobs, active_image_digest=IMAGE).compile(recipe, RecipeDelta())
 
     assert f"{path!r} {message}" in str(refused.value)

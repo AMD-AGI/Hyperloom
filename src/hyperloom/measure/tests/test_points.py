@@ -23,7 +23,6 @@ from hyperloom.measure.compile import (
     EnvironmentCompiler,
     LocalBlobStore,
     PackageBase,
-    compile_environment,
 )
 from hyperloom.inference_optimizer.session.paths import asset_root
 from hyperloom.measure import points
@@ -122,8 +121,8 @@ def agentx_source(path: Path, conc: int) -> Path:
 
 def environment(blobs, tmp_path, recipe=None, delta=None):
     base = PackageBase("sglang", tmp_path, None, None)
-    return compile_environment(
-        recipe or recipe_with(), delta or RecipeDelta(), blobs=blobs, active_image_digest=IMAGE, locator=lambda _l: base
+    return EnvironmentCompiler(blobs=blobs, active_image_digest=IMAGE, locator=lambda _l: base).compile(
+        recipe or recipe_with(), delta or RecipeDelta()
     )
 
 

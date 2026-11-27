@@ -1402,7 +1402,7 @@ def installed_framework(tmp_path):
 
 def _compile(tmp_path, installed_framework):
     from hyperloom.contracts.recipe import RecipeDelta
-    from hyperloom.measure.compile import ComponentLayout, LocalBlobStore, PackageBase, compile_environment
+    from hyperloom.measure.compile import ComponentLayout, EnvironmentCompiler, LocalBlobStore, PackageBase
     from hyperloom.measure.tests._recipes import IMAGE, PREFIX, git_patch, put_patch, recipe_with
 
     _, package = installed_framework
@@ -1414,7 +1414,7 @@ def _compile(tmp_path, installed_framework):
     def locate(layout: ComponentLayout) -> PackageBase:
         return base
 
-    return compile_environment(recipe, RecipeDelta(), blobs=blobs, active_image_digest=IMAGE, locator=locate)
+    return EnvironmentCompiler(blobs=blobs, active_image_digest=IMAGE, locator=locate).compile(recipe, RecipeDelta())
 
 
 def _point_with_python(tmp_path, python) -> Path:
@@ -1582,11 +1582,11 @@ def test_a_profile_whose_patch_cannot_be_laid_in_the_rebuilt_framework_runs_and_
 
 def test_a_test_on_the_image_as_it_is_runs_the_point_unchanged(grid, unheld, tmp_path, installed_framework):
     from hyperloom.contracts.recipe import RecipeDelta
-    from hyperloom.measure.compile import LocalBlobStore, compile_environment
+    from hyperloom.measure.compile import EnvironmentCompiler, LocalBlobStore
     from hyperloom.measure.tests._recipes import IMAGE, recipe_with
 
-    compiled = compile_environment(
-        recipe_with(), RecipeDelta(), blobs=LocalBlobStore(tmp_path / "blobs"), active_image_digest=IMAGE
+    compiled = EnvironmentCompiler(blobs=LocalBlobStore(tmp_path / "blobs"), active_image_digest=IMAGE).compile(
+        recipe_with(), RecipeDelta()
     )
     call = _call(tmp_path, environment=compiled)
 

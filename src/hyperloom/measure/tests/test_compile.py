@@ -30,7 +30,6 @@ from hyperloom.measure.compile import (
     PackageBase,
     PatchApplyError,
     UnsupportedComponentError,
-    compile_environment,
     locate_installed_package,
 )
 from hyperloom.measure.attachments import place_attachments, substitute
@@ -63,10 +62,8 @@ def locator_for(base: PackageBase, calls: list[ComponentLayout] | None = None):
     return locate
 
 
-def compile_with(recipe, delta, blobs, base, **kwargs):
-    return compile_environment(
-        recipe, delta, blobs=blobs, active_image_digest=IMAGE, locator=locator_for(base), **kwargs
-    )
+def compile_with(recipe, delta, blobs, base):
+    return EnvironmentCompiler(blobs=blobs, active_image_digest=IMAGE, locator=locator_for(base)).compile(recipe, delta)
 
 
 def patch_of(tmp_path: Path, name: str, before, after) -> bytes:
