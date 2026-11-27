@@ -25,7 +25,7 @@ from hyperloom.orchestrator.phases.geak_rebench import REVALIDATION_UNMEASURED
 from hyperloom.orchestrator.state.shared_state import SharedState
 from hyperloom.orchestrator.tests._helpers import init_git_repo, patch_integrate_patch_roots, variant_result
 
-from .conftest import make_mock_critic_coordinator
+from .conftest import make_idle_coordinator
 from .test_geak_revalidation_dispatch import coordinator as coordinator
 
 _PATCH = "\n".join(
@@ -181,9 +181,8 @@ def resume():
     opened = []
 
     async def _resume(session: Path) -> _Resumed:
-        coord = make_mock_critic_coordinator(session)
+        coord = make_idle_coordinator(session)
         opened.append(coord)
-        await coord.writeback.replay_for_resume()
         try:
             report = await coord.writeback._resume_consistency_pass()
         except IntegrateRecoveryIncomplete as exc:

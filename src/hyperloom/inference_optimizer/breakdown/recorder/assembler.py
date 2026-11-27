@@ -124,7 +124,6 @@ def assemble_parts(
         out[section] = recs[-1].get("payload")
 
     _compose_versions(out)
-    _compose_critic(out)
     _compose_close(out)
     if not keep_event_rows:
         _drop_event_rows(out)
@@ -223,22 +222,6 @@ def _compose_versions(out: dict[str, Any]) -> None:
         metadata["versions"] = versions
     existing = versions.get("tools")
     versions["tools"] = {**existing, **tools} if isinstance(existing, dict) else tools
-
-
-def _compose_critic(out: dict[str, Any]) -> None:
-    """Fold the ``critic_iteration`` substream into ``critic``, ordered as the
-    agent ran, mutating ``out`` and popping the raw substream."""
-    rows = out.pop("critic_iteration", None)
-    if not isinstance(rows, list):
-        return
-
-    # ``iter`` restarts with the process on resume, so only the timestamp orders
-    # the passes; rows without one keep their relative order after the rest.
-    iterations = sorted(
-        (r for r in rows if isinstance(r, dict)),
-        key=lambda r: (not r.get("ts"), str(r.get("ts") or "")),
-    )
-    out["critic"] = {"iterations": iterations}
 
 
 def event_parts(sections: tuple[str, ...], *, event: str = "") -> dict[str, list[dict[str, Any]]]:

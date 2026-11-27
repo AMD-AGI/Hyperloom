@@ -399,7 +399,7 @@ test -f "$SESSION_DIR/manifest.json" && echo "manifest_present=true session_dir=
 test -f "$SESSION_DIR/state.json" && echo "state_exists=true"
 ```
 
-If adding quantization, critic, or research-lane flags, append only
+If adding quantization or research-lane flags, append only
 real flags accepted by
 `python3 -m hyperloom optimize --help`; do not invent
 aliases.
@@ -453,7 +453,7 @@ and the stop reason. Never print API keys, tokens, or custom header values.
 1. Run the pre-launch runtime install above; startup preflight loads the generated
    runtime environment in process.
 2. Keep `PYTHONPATH="$REPO_ROOT:${PYTHONPATH:-}"` in the launch shell so
-   critic subprocesses can import `hyperloom.agents` after
+   the optimizer's subprocesses can import `hyperloom` after
    changing cwd.
 3. Run it detached the way the harness understands: if `$CLAW_SESSION_ID` is set and your bash tool takes a `run_in_background` parameter, hand the command to it with `run_in_background=true`; otherwise use `setsid nohup ... &`. See the Launch section of the packaged `hyperloom/inference_optimizer/SKILL.md` for why — a hand-detached run is invisible to Claw and its sandbox is reclaimed about fifteen minutes after the turn ends.
 4. Pass all required workload flags in the

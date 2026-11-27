@@ -25,7 +25,7 @@ def _backends() -> dict[str, Backend]:
         turns=[],
         default_intent=Intent(type=IntentType.SEND_MESSAGE, payload={"topic": "heartbeat", "body_md": "ok"}),
     )
-    return {name: MockBackend(idle, name=name) for name in ("orchestration", "critic")}
+    return {"orchestration": MockBackend(idle, name="orchestration")}
 
 
 @pytest.fixture

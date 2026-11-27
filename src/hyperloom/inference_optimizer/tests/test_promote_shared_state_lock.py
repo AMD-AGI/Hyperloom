@@ -25,7 +25,7 @@ from hyperloom.orchestrator.knowledge.remote_recipe.values import has_new_keep
 from hyperloom.inference_optimizer.session.paths import make_session_dir
 from hyperloom.orchestrator.state.task_registry import Task, TaskSpec
 
-from .conftest import heartbeat_orchestration_with_mock_critic
+from .conftest import silent_backends
 
 
 #: What the report mapper stamps on every AgentX round it accepts as evidence.
@@ -39,7 +39,7 @@ def session_dir(tmp_path, monkeypatch) -> Path:
 
 
 def _coord(session_dir: Path) -> Coordinator:
-    return Coordinator(session_dir, backends=heartbeat_orchestration_with_mock_critic())
+    return Coordinator(session_dir, backends=silent_backends())
 
 
 def _resume_pending(state) -> bool:
@@ -634,7 +634,6 @@ async def test_promote_integrate_patch_refuses_a_keep_below_the_anchor(session_d
         ("regression", 190.0, Verdict.REVERTED),
         ("kept_inert", 201.0, Verdict.RECORDED),
         ("apply_failed", None, Verdict.FAILED),
-        ("rejected_by_critic", None, Verdict.FAILED),
         ("no_patches", None, Verdict.FAILED),
         ("applied_no_bench", None, Verdict.FAILED),
         ("failed", None, Verdict.FAILED),

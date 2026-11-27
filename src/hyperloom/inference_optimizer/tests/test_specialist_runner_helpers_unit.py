@@ -318,8 +318,8 @@ def test_a_specialist_keeps_only_citations_of_experiences_its_dispatch_showed(tm
     assert written["experience_citations"] == [{**cite, "stance": "adapt"}]
 
 
-def test_finalize_strips_forbidden_fields_before_the_critic_can_see_them(tmp_path):
-    """A self-reported gain field never reaches review; the audit note records what was there."""
+def test_finalize_strips_forbidden_fields_before_the_payload_is_written(tmp_path):
+    """A self-reported gain field never reaches the Coordinator; the audit note records what was there."""
     result, written = _finalize(
         _runner(),
         tmp_path,

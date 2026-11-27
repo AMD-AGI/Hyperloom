@@ -10,12 +10,11 @@ import json
 import pytest
 
 from hyperloom.inference_optimizer.protocol.intent import Intent, IntentType
-from hyperloom.orchestrator.loop.coordinator import Coordinator, RunOptions
+from hyperloom.orchestrator.loop.coordinator import Coordinator
 from hyperloom.orchestrator.roles.claude_requests import ClaudeRequestTracker
 from hyperloom.orchestrator.tests.mock_backend import MockBackend, ScriptedPlan
 from hyperloom.inference_optimizer.trace import context_events as ce
 from hyperloom.inference_optimizer.trace import trajectory_trace as tt
-from .conftest import seed_pending_critic_proposal
 
 _PROMPT = "\n".join(
     [
@@ -63,7 +62,7 @@ def test_a_tail_change_keeps_the_prefix_and_names_the_section_that_broke_it():
     assert third["lcp_ratio"] == 1.0
     assert third["prefix_break"] is True
 
-    other = tracker.observe("critic", prompt=grown, system_prompt="sys v2", tools=None)
+    other = tracker.observe("kernel_agent", prompt=grown, system_prompt="sys v2", tools=None)
     assert other["first_prompt"] is True
     assert other["tools_count"] is None
 
@@ -83,17 +82,13 @@ def _heartbeat() -> Intent:
 @pytest.mark.asyncio
 async def test_each_reactor_call_records_its_prompt_snapshot_under_the_call(session_dir):
     silent = ScriptedPlan(turns=[], default_intent=_heartbeat())
-    # Advice on every Critic turn gives Orchestration something new to read on the next tick.
-    advising = ScriptedPlan(
-        turns=[], default_intent=Intent(type=IntentType.SEND_MESSAGE, payload={"topic": "advice", "body_md": "look"})
-    )
-    c = Coordinator(
-        session_dir,
-        backends={"orchestration": MockBackend(silent, name="o"), "critic": MockBackend(advising, name="c")},
-    )
+    c = Coordinator(session_dir, backends={"orchestration": MockBackend(silent, name="o")})
     try:
-        await seed_pending_critic_proposal(c)
-        assert await c.run(options=RunOptions(max_ticks=2)) == "max_ticks"
+        with tt.trajectory_scope(session_dir=session_dir, component="coordinator"):
+            await c.tick(1)
+            # A new inbox message gives Orchestration something to read on the next tick.
+            await c.bus.record_observation("coordinator", "observation", {"kind": "server_ready"})
+            await c.tick(1)
     finally:
         await c.stop()
 

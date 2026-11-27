@@ -124,13 +124,10 @@ _MIXED_EMIT = {**_NATIVE_EMIT, **_WRAPPER_EMIT}
 _WRAPPER_WITH_JUNK = {**_WRAPPER_EMIT, "junk": 1}
 
 _ORCHESTRATION_INTENTS = default_role_registry()["orchestration"].allowed_intents
-_CRITIC_INTENTS = default_role_registry()["critic"].allowed_intents
-_REVIEW_VERDICT_NATIVE = {
-    "intent_type": "review_verdict",
-    "payload": {"target_proposal_msg_id": "p1", "verdict": "approve"},
-}
-_REVIEW_VERDICT_RAW = json.dumps(_REVIEW_VERDICT_NATIVE)
-_REVIEW_VERDICT_WRAPPER = {"__unparsedToolInput": {"raw": _REVIEW_VERDICT_RAW, "len": len(_REVIEW_VERDICT_RAW)}}
+_MESSAGING_INTENTS = frozenset({IntentType.SEND_MESSAGE, IntentType.ALERT})
+_DELEGATE_NATIVE = {"intent_type": "delegate", "payload": {"action_name": "baseline"}}
+_DELEGATE_RAW = json.dumps(_DELEGATE_NATIVE)
+_DELEGATE_WRAPPER = {"__unparsedToolInput": {"raw": _DELEGATE_RAW, "len": len(_DELEGATE_RAW)}}
 
 
 def _registered_emit_intent_tool(allowed_intents: frozenset[IntentType] | None = None) -> Any:
@@ -157,9 +154,9 @@ def _registered_emit_intent_tool(allowed_intents: frozenset[IntentType] | None =
         (None, _MIXED_EMIT, True),
         (None, {"nonsense": 1}, False),
         (None, _WRAPPER_WITH_JUNK, False),
-        (_CRITIC_INTENTS, _REVIEW_VERDICT_NATIVE, True),
-        (_CRITIC_INTENTS, _REVIEW_VERDICT_WRAPPER, True),
-        (_ORCHESTRATION_INTENTS, _REVIEW_VERDICT_NATIVE, False),
+        (_ORCHESTRATION_INTENTS, _DELEGATE_NATIVE, True),
+        (_ORCHESTRATION_INTENTS, _DELEGATE_WRAPPER, True),
+        (_MESSAGING_INTENTS, _DELEGATE_NATIVE, False),
     ],
     ids=[
         "native",
@@ -167,9 +164,9 @@ def _registered_emit_intent_tool(allowed_intents: frozenset[IntentType] | None =
         "native-with-wrapper",
         "junk",
         "wrapper-with-junk",
-        "critic-native-in-role",
-        "critic-wrapper-in-role",
-        "orchestration-native-out-of-role",
+        "native-in-role",
+        "wrapper-in-role",
+        "native-out-of-role",
     ],
 )
 async def test_registered_schema_and_handler_agree(
@@ -189,34 +186,34 @@ async def test_registered_schema_and_handler_agree(
     assert ("is_error" not in result) is accepted
 
 
-def _assert_names_the_orchestration_intents(refusal: str) -> None:
-    assert "'review_verdict'" in refusal
-    for intent_type in _ORCHESTRATION_INTENTS:
+def _assert_names_the_messaging_intents(refusal: str) -> None:
+    assert "'delegate'" in refusal
+    for intent_type in _MESSAGING_INTENTS:
         assert intent_type.value in refusal
 
 
 def test_registered_schema_refuses_a_native_out_of_role_intent() -> None:
     """The SDK returns the schema validation message to the model before the handler runs, so the role's enum is what refuses a native call, naming the types the role may emit."""
     jsonschema = pytest.importorskip("jsonschema")
-    tool = _registered_emit_intent_tool(_ORCHESTRATION_INTENTS)
+    tool = _registered_emit_intent_tool(_MESSAGING_INTENTS)
 
     with pytest.raises(jsonschema.ValidationError) as exc:
-        jsonschema.validate(instance=_REVIEW_VERDICT_NATIVE, schema=tool.input_schema)
+        jsonschema.validate(instance=_DELEGATE_NATIVE, schema=tool.input_schema)
 
-    _assert_names_the_orchestration_intents(exc.value.message)
+    _assert_names_the_messaging_intents(exc.value.message)
 
 
 @pytest.mark.asyncio
 async def test_registered_handler_refuses_a_wrapped_out_of_role_intent() -> None:
     """The enum cannot see inside the parser wrapper, so the handler refuses that form in the same turn instead."""
     jsonschema = pytest.importorskip("jsonschema")
-    tool = _registered_emit_intent_tool(_ORCHESTRATION_INTENTS)
-    jsonschema.validate(instance=_REVIEW_VERDICT_WRAPPER, schema=tool.input_schema)
+    tool = _registered_emit_intent_tool(_MESSAGING_INTENTS)
+    jsonschema.validate(instance=_DELEGATE_WRAPPER, schema=tool.input_schema)
 
-    result = await tool.handler(_REVIEW_VERDICT_WRAPPER)
+    result = await tool.handler(_DELEGATE_WRAPPER)
 
     assert result["is_error"] is True
-    _assert_names_the_orchestration_intents(result["content"][0]["text"])
+    _assert_names_the_messaging_intents(result["content"][0]["text"])
 
 
 @pytest.mark.asyncio

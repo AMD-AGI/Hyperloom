@@ -47,7 +47,6 @@ async def _build_coord_with_capacity(
     idle_plan = ScriptedPlan(turns=[MockTurn(intents=[])])
     backends = {
         "orchestration": MockBackend(idle_plan),
-        "critic": MockBackend(idle_plan),
     }
     return Coordinator(
         session_dir=tmp_path,

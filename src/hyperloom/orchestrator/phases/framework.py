@@ -1,27 +1,26 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""FRAMEWORK_AGENT phase handler: authoring specialist dispatch, enablement repair, deliverable routing, and Critic-review submission/reauthor."""
+"""FRAMEWORK_AGENT phase handler: candidate routing, authoring specialist dispatch, enablement repair and deliverable routing."""
 
 from __future__ import annotations
 import logging as _logging
 import sqlite3
 from datetime import datetime, timezone
-from collections.abc import Collection, Mapping
+from collections.abc import Collection
 from typing import TYPE_CHECKING, Any
 
-from hyperloom_common.coerce import first_str, to_list, to_mapping
+from hyperloom_common.coerce import first_str, to_mapping
 from hyperloom.inference_optimizer.session.optimization_journal import Verdict
 
 from . import machine_state as _phase_state
-from ..state.task_registry import Task, TaskSpec
+from ..state.task_registry import TERMINAL_STATES, Task, TaskSpec
 from ..state.shared_state import resolve_grading_anchor_tput
 
 if TYPE_CHECKING:
     from ..predictor.payload import PhaseBudget
     from ..predictor.view import SessionView
     from .machine import Transition
-from ..state.pending_proposal import PendingProposal
 from ..actions.executors.integrate import _integrate_vocabulary
 from hyperloom.orchestrator.lever import LEVER_UPSTREAM_PR
 from .proposal_bench import ProposalBench
@@ -30,7 +29,6 @@ from .framework_records import (
     ProgressStamp,
     ProposalStep,
     _AuthoredOutcomeMixin,
-    _record_review_outcome,
     _record_run,
     _record_step,
     _recorder,
@@ -43,22 +41,6 @@ from .framework_proposals import _FrameworkProposalsMixin
 log = _logging.getLogger(__name__)
 
 
-def _critic_feedback_lines(critic_feedback: Mapping[str, Any] | None) -> list[str]:
-    """The prompt lines a re-author round seeds from the Critic's prior verdict."""
-    if not critic_feedback:
-        return []
-    required = [str(x).strip() for x in to_list(critic_feedback.get("required_evidence")) if str(x).strip()]
-    lines = ["", "PRIOR CRITIC FEEDBACK (re-author round — supply the evidence below this round):"]
-    lines.extend(f"  • required evidence: {ev}" for ev in required[:10])
-    advice = first_str(critic_feedback.get("advice_text")).strip()
-    if advice:
-        lines.append(f"- advice: {advice}")
-    risks = [str(r).strip() for r in to_list(critic_feedback.get("risks")) if str(r).strip()]
-    if risks:
-        lines.append("- risks: " + "; ".join(risks[:6]))
-    return lines
-
-
 def predictor_budget(state: SessionView) -> PhaseBudget:
     """The FRAMEWORK clock a predictor request is conditioned on, read when the request goes out."""
     from ..predictor.payload import PhaseBudget
@@ -69,6 +51,30 @@ def predictor_budget(state: SessionView) -> PhaseBudget:
         elapsed_sec=_phase_state.phase_elapsed_seconds(state),
         keep_threshold_pct=_phase_state.resolve_keep_threshold(state),
     )
+
+
+def _upstream_pr_integrate_params(state: Any, candidate: dict[str, Any], cand_id: str) -> dict[str, Any]:
+    """The params of the ``integrate_patch`` that lands an upstream-PR candidate's diff as it is."""
+    return {
+        "candidate": candidate,
+        "batch_id": candidate.get("batch_id") or "",
+        # One action lands every patch; this says where the diff comes from.
+        "patch_source": _integrate_vocabulary.PATCH_SOURCE_UPSTREAM_PR,
+        "lever_kind": LEVER_UPSTREAM_PR,
+        # The authored-outcome bridge, the candidate-processed dedup, the batch max-gain roll-up and phase
+        # attribution all key on these two markers.
+        "framework_agent_authoring": True,
+        "framework_agent_candidate_id": cand_id,
+        "framework_batch_id": str(candidate.get("batch_id") or ""),
+        "source_phase": "FRAMEWORK_AGENT",
+        "base_tput": resolve_grading_anchor_tput(state),
+        # Same decaying bar the explore and integrate_patch dispatch paths inject.
+        "keep_threshold_pct": _phase_state.resolve_keep_threshold(state),
+        "framework": str(candidate.get("framework") or state.framework or "").strip().lower(),
+        # Source patches require the accuracy gate for KEEP.
+        "require_accuracy_for_keep": True,
+        "accuracy_baseline": float(state.baseline_accuracy or 0.0),
+    }
 
 
 def _coordinator_specialist_spec(params: dict[str, Any], idem: str, *, lanes: list[str] | None, ttl: int) -> TaskSpec:
@@ -306,28 +312,17 @@ class FrameworkPhase(
         )
 
     def _authoring_inflight_candidate_ids(self, queued: list[Any], running: list[Any]) -> set[str]:
-        """Candidate ids with a live specialist / integrate_patch task or a review proposal awaiting its verdict."""
+        """Candidate ids with a live specialist / integrate_patch task."""
         in_flight = {
             str(t.params.get("framework_agent_candidate_id") or "")
             for t in (*queued, *running)
             if t.kind in ("specialist", "integrate_patch") and t.params
         }
-        for p in self.state.pending_proposals.values():
-            if p.action_name != "integrate_patch":
-                continue
-            payload = p.payload or {}
-            in_flight.add(
-                str(
-                    payload.get("framework_agent_candidate_id")
-                    or (payload.get("params") or {}).get("framework_agent_candidate_id")
-                    or ""
-                )
-            )
         in_flight.discard("")
         return in_flight
 
     async def _pump_framework_agent_phase(self) -> None:
-        """Drive the FRAMEWORK_AGENT phase: submit candidates for review in parallel.
+        """Drive the FRAMEWORK_AGENT phase: route candidates to their apply / author tracks in parallel.
 
         Up to ``research_lane_capacity`` candidates are in flight at once; landing still serialises on
         ``workspace_mutation``. The discovery → local-explore → phase-done fallback runs only once no candidate is
@@ -340,19 +335,15 @@ class FrameworkPhase(
         if bool(state.framework_agent_phase_done):
             return
         in_flight_ids = self._authoring_inflight_candidate_ids(await self.tasks.queued(), await self.tasks.running())
-        submitted = False
+        routed = False
         while len(in_flight_ids) < max(1, state.research_lane_capacity):
             candidate = self._select_next_framework_agent_candidate(exclude_ids=in_flight_ids)
             if candidate is None:
                 break
-            await self._submit_framework_agent_candidate_for_review(
-                candidate,
-                audit=dict(candidate.get("audit") or {}),
-                audit_step=str(candidate.get("route") or "author_via_specialist"),
-            )
+            await self._route_framework_agent_candidate(candidate)
             in_flight_ids.add(self._framework_candidate_key(candidate))
-            submitted = True
-        if submitted or in_flight_ids or await self._framework_agent_authoring_inflight():
+            routed = True
+        if routed or in_flight_ids or await self._framework_agent_authoring_inflight():
             return
         # Minimum supply: with the pool empty and no discovery in flight, ask for one.
         if await self._maybe_enqueue_candidate_discovery(reason="candidate_pool_empty"):
@@ -408,22 +399,6 @@ class FrameworkPhase(
                 continue
             if _cand_pins_pump(str(params.get("framework_agent_candidate_id") or "")):
                 return True
-        # An authored patch awaiting Critic review (or a candidate awaiting its pre-screen verdict) keeps the phase
-        # open, but only while the proposal targets a still-unprocessed candidate.
-        for p in self.state.pending_proposals.values():
-            if getattr(p, "action_name", "") != "integrate_patch":
-                continue
-            payload = getattr(p, "payload", None) or {}
-            # Both the candidate pre-screen and the authored patch are ``integrate_patch`` proposals now, so the
-            # candidate marker -- not the action name -- says which candidate is pinned.
-            iparams = payload.get("params") or {}
-            cand_id = str(
-                payload.get("framework_agent_candidate_id") or iparams.get("framework_agent_candidate_id") or ""
-            )
-            if not cand_id and not iparams.get("framework_agent_authoring"):
-                continue
-            if _cand_pins_pump(cand_id):
-                return True
         return False
 
     @staticmethod
@@ -448,8 +423,6 @@ class FrameworkPhase(
         self, spec_task: Any, *, cand_id: str, batch_id: str, label: str
     ) -> bool:
         """Whether the reused specialist already finished; recovers its outcome once when no row carries it yet."""
-        from ..state.task_registry import TERMINAL_STATES
-
         if str(getattr(spec_task, "state", "") or "") not in TERMINAL_STATES:
             return False
         already_rows = self._framework_processed_candidate_keys()
@@ -498,20 +471,16 @@ class FrameworkPhase(
         audit: dict[str, Any] | None = None,
         *,
         reauthor_attempt: int = 0,
-        critic_feedback: dict[str, Any] | None = None,
+        apply_failure_feedback: str = "",
     ) -> str:
-        """Dispatch a write-capable specialist seeded with ``candidate`` (flows through autosubmit → Critic → integrate_patch → bench → KEEP/REVERT)."""
+        """Dispatch a write-capable specialist seeded with ``candidate`` (its deliverable flows through integrate_patch → bench → KEEP/REVERT)."""
         state = self.shared_state
         cand_id = self._framework_candidate_key(candidate)
         batch_id = first_str(candidate.get("batch_id"))
         gap_cid = first_str(candidate.get("gap_canonical_id")).strip() or f"gap.framework.{cand_id}"
         title = first_str(candidate.get("title")).strip()
         pr_url = first_str(candidate.get("pr_url")).strip()
-        notes_lines = [
-            *self._framework_agent_audit_seed_lines(audit),
-            *_critic_feedback_lines(critic_feedback),
-        ]
-        notes = "\n".join(notes_lines).strip()
+        notes = "\n".join([*self._framework_agent_audit_seed_lines(audit), apply_failure_feedback]).strip()
         params: dict[str, Any] = {
             "domain": self._authoring_specialist_domain(),
             "gap_canonical_id": gap_cid,
@@ -665,35 +634,15 @@ class FrameworkPhase(
 
     async def _enqueue_framework_agent_task(self, candidate: dict[str, Any]) -> None:
         """Enqueue an ``integrate_patch`` task that lands ``candidate``'s diff."""
-        state = self.shared_state
         cand_id = self._framework_candidate_key(candidate)
-        params = {
-            "candidate": candidate,
-            "batch_id": candidate.get("batch_id") or "",
-            # One action lands every patch; this says where the diff comes from.
-            "patch_source": _integrate_vocabulary.PATCH_SOURCE_UPSTREAM_PR,
-            "lever_kind": LEVER_UPSTREAM_PR,
-            # The authored-outcome bridge, the candidate-processed dedup, the batch max-gain roll-up and phase
-            # attribution all key on these two markers.
-            "framework_agent_authoring": True,
-            "framework_agent_candidate_id": cand_id,
-            "framework_batch_id": str(candidate.get("batch_id") or ""),
-            "source_phase": "FRAMEWORK_AGENT",
-            "base_tput": resolve_grading_anchor_tput(state),
-            # Same decaying bar the explore and integrate_patch dispatch paths inject.
-            "keep_threshold_pct": _phase_state.resolve_keep_threshold(state),
-            "framework": str(candidate.get("framework") or state.framework or "").strip().lower(),
-            # Source patches require the accuracy gate for KEEP.
-            "require_accuracy_for_keep": True,
-            "accuracy_baseline": float(state.baseline_accuracy or 0.0),
-        }
+        params = _upstream_pr_integrate_params(self.shared_state, candidate, cand_id)
         idem = f"framework:{candidate.get('batch_id', '')}:{cand_id}"
         lanes, ttl = self._coord.dispatcher.registry_lanes_ttl("integrate_patch")
         try:
             # A framework candidate rebuilds and benchmarks, so it cannot share the GPU.
             if not lanes:
                 raise RuntimeError("integrate_patch resolved to no lanes; the task would run without GPU exclusivity.")
-            await self.tasks.create_or_return_existing(
+            task, was_existing = await self.tasks.create_or_return_existing(
                 TaskSpec(
                     kind="integrate_patch",
                     params=params,
@@ -708,6 +657,18 @@ class FrameworkPhase(
                 cand_id,
                 candidate.get("batch_id") or "",
             )
+            if was_existing and task.state in TERMINAL_STATES and not self._coord.dispatcher.owes_result(task.task_id):
+                # A row that ended with nothing to book, such as one cancelled while queued, stamps no row of its
+                # own, and the pump selects a candidate until it has one.
+                self._stamp_framework_progress(
+                    ProgressStamp(
+                        candidate_id=cand_id,
+                        batch_id=str(candidate.get("batch_id") or ""),
+                        status="no_result_failed",
+                        rationale=f"integrate_patch {task.task_id} ended {task.state} without a result",
+                        provenance="pump",
+                    )
+                )
         except (RuntimeError, sqlite3.Error, TypeError, ValueError) as exc:
             log.warning(
                 "FRAMEWORK: failed to enqueue candidate=%s: %r",
@@ -726,28 +687,22 @@ class FrameworkPhase(
                 )
             )
 
-    async def materialize_candidate(
-        self,
-        pending: "PendingProposal",
-    ) -> None:
-        """Route a Critic-approved FRAMEWORK candidate to the apply / author tracks."""
-        payload = pending.payload or {}
-        candidate = dict(payload.get("candidate") or {})
-        audit = payload.get("audit") if isinstance(payload.get("audit"), dict) else {}
-        audit_step = str(payload.get("audit_step") or "")
-        cand_id = str(payload.get("framework_agent_candidate_id") or self._framework_candidate_key(candidate))
-        batch_id = str(payload.get("batch_id") or candidate.get("batch_id") or "")
-        _record_review_outcome(self, cand_id, materialized=True)
-        want_raw = audit_step == "direct_framework"
-        want_author = audit_step == "author_via_specialist"
-        if audit_step not in ("direct_framework", "author_via_specialist"):
-            want_raw = True
-            want_author = True
+    async def _route_framework_agent_candidate(self, candidate: dict[str, Any]) -> None:
+        """Route a FRAMEWORK candidate to the apply / author tracks its discovery audit names."""
+        from hyperloom.inference_optimizer.breakdown.recorder.framework_event import STEP_ROUTED
+
+        audit = to_mapping(candidate.get("audit"))
+        audit_step = str(candidate.get("route") or "author_via_specialist")
+        cand_id = self._framework_candidate_key(candidate)
+        batch_id = str(candidate.get("batch_id") or "")
+        _record_step(self, cand_id, ProposalStep(step=STEP_ROUTED, outcome=audit_step))
+        want_raw = audit_step != "author_via_specialist"
+        want_author = audit_step != "direct_framework"
         log.info(
-            "FRAMEWORK: critic-approved candidate=%s batch=%s audit_step=%s raw=%s author=%s",
+            "FRAMEWORK: routing candidate=%s batch=%s audit_step=%s raw=%s author=%s",
             cand_id,
             batch_id,
-            audit_step or "<unknown>",
+            audit_step,
             want_raw,
             want_author,
         )
@@ -757,10 +712,7 @@ class FrameworkPhase(
             await self._enqueue_framework_agent_task(candidate)
         if want_author:
             try:
-                await self._enqueue_framework_agent_authoring_specialist(
-                    candidate,
-                    audit=audit if isinstance(audit, dict) else {},
-                )
+                await self._enqueue_framework_agent_authoring_specialist(candidate, audit=audit)
             except (sqlite3.Error, OSError) as exc:
                 log.warning(
                     "FRAMEWORK: authoring specialist dispatch failed: %r",
@@ -768,7 +720,7 @@ class FrameworkPhase(
                     exc_info=True,
                 )
                 # Author-only route (no raw track to own a terminal row): stamp materialize_failed so an
-                # approved-but-undispatchable candidate is not re-selected every tick.
+                # undispatchable candidate is not re-selected every tick.
                 if not want_raw:
                     self._stamp_framework_progress(
                         ProgressStamp(
@@ -806,7 +758,7 @@ class FrameworkPhase(
             "ts": datetime.now(timezone.utc).isoformat(),
             "cycle": int(state.macro_cycle or 0),
         }
-        # Merge caller-supplied extras (e.g. ``error`` / ``review_submissions``) onto the row too, without clobbering
+        # Merge caller-supplied extras (e.g. ``error``) onto the row too, without clobbering
         # the canonical fields above, so downstream consumers see the same detail the decision.json carries.
         if isinstance(stamp.extra, dict):
             for k, v in stamp.extra.items():

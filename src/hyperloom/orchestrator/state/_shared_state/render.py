@@ -533,7 +533,7 @@ class _RenderMixin:
         """Render each agent's last completed reactor pass as a relative age.
 
         Returns:
-            str: ``orchestration=2s ago, critic=45s ago``, or ``(none)`` when no
+            str: ``orchestration=2s ago``, or ``(none)`` when no
                 agent has run yet.
         """
         now = time.time()

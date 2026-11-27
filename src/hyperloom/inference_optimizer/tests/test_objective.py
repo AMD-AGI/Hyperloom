@@ -45,10 +45,7 @@ def _heartbeat() -> Intent:
 
 def _backends_silent() -> dict[str, object]:
     silent = ScriptedPlan(turns=[], default_intent=_heartbeat())
-    return {
-        "orchestration": MockBackend(silent, name="o"),
-        "critic": MockBackend(silent, name="c"),
-    }
+    return {"orchestration": MockBackend(silent, name="o")}
 
 
 # TargetGainObjective
@@ -342,11 +339,7 @@ async def test_run_closing_phase_skips_reactor(session_dir):
             return await super().run(prompt, **kwargs)
 
     spy = _SpyBackend(ScriptedPlan(turns=[], default_intent=_heartbeat()), name="o")
-    backends = {
-        "orchestration": spy,
-        "critic": MockBackend(ScriptedPlan(turns=[], default_intent=_heartbeat()), name="c"),
-    }
-    c = Coordinator(session_dir, backends=backends)
+    c = Coordinator(session_dir, backends={"orchestration": spy})
     c.sub.register_executor("report", report_executor)
     c.shared_state.baseline_tput = 50.0
     c.shared_state.save(session_dir)

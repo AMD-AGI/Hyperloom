@@ -1282,15 +1282,12 @@ def test_normalize_hip_visible_devices_keeps_hip_when_rocr_unset(monkeypatch):
 
 
 def _make_args(**overrides) -> argparse.Namespace:
-    """Build a minimal Namespace; translates legacy ``critic_mock`` into ``critic_backend``."""
+    """Build a minimal Namespace."""
     base = dict(
         claude_model="claude-opus-4-7",
         codex_model="gpt-5.4",
-        critic_backend="mock",
         no_kernel=False,
     )
-    if "critic_mock" in overrides:
-        base["critic_backend"] = "mock" if overrides.pop("critic_mock") else "agent"
     base.update(overrides)
     return argparse.Namespace(**base)
 
@@ -1975,7 +1972,7 @@ def test_smoke_test_codex_model_probes_openai_side(monkeypatch, capsys):
         return {"gpt-5.4"}
 
     monkeypatch.setattr(model_catalog, "_probe_llm_catalog", _capture)
-    args = _make_args(codex_model="gpt-5.4", critic_mock=False)
+    args = _make_args(codex_model="gpt-5.4")
     model_catalog._smoke_test_codex_model(args, ("https://api.anthropic.com", "https://api.openai.com/v1"))
     assert seen["base_url"] == "https://api.openai.com/v1"
 
@@ -1983,7 +1980,7 @@ def test_smoke_test_codex_model_probes_openai_side(monkeypatch, capsys):
 def test_smoke_test_codex_model_confirms_when_present(monkeypatch, capsys):
     """A listed model is kept without a warning even when the catalog also lists a higher rung."""
     monkeypatch.setattr(model_catalog, "_probe_llm_catalog", lambda **kw: {"gpt-5.6-sol", "gpt-5.4"})
-    args = _make_args(codex_model="gpt-5.4", critic_mock=False)
+    args = _make_args(codex_model="gpt-5.4")
     model_catalog._smoke_test_codex_model(args, ("https://anthropic", "https://openai/v1"))
 
     assert args.codex_model == "gpt-5.4"
@@ -1995,7 +1992,7 @@ def test_smoke_test_codex_model_confirms_when_present(monkeypatch, capsys):
 def test_smoke_test_codex_model_falls_back_to_next_rung(monkeypatch, capsys):
     """A gateway that predates the default Codex model degrades at preflight."""
     monkeypatch.setattr(model_catalog, "_probe_llm_catalog", lambda **kw: {"gpt-5.5", "gpt-5.4"})
-    args = _make_args(codex_model="gpt-5.6-sol", critic_mock=False)
+    args = _make_args(codex_model="gpt-5.6-sol")
     model_catalog._smoke_test_codex_model(args, ("https://anthropic", "https://openai/v1"))
 
     assert args.codex_model == "gpt-5.5"
@@ -2006,7 +2003,7 @@ def test_smoke_test_codex_model_falls_back_to_next_rung(monkeypatch, capsys):
 
 def test_smoke_test_codex_model_falls_back_from_the_default_to_the_previous_default(monkeypatch, capsys):
     monkeypatch.setattr(model_catalog, "_probe_llm_catalog", lambda **kw: {"gpt-5.6-sol", "gpt-5.5"})
-    args = _make_args(codex_model="gpt-6-astra", critic_mock=False)
+    args = _make_args(codex_model="gpt-6-astra")
     model_catalog._smoke_test_codex_model(args, ("https://anthropic", "https://openai/v1"))
 
     assert args.codex_model == "gpt-5.6-sol"
@@ -2014,7 +2011,7 @@ def test_smoke_test_codex_model_falls_back_from_the_default_to_the_previous_defa
 
 def test_smoke_test_codex_model_ladder_skips_missing_rungs(monkeypatch, capsys):
     monkeypatch.setattr(model_catalog, "_probe_llm_catalog", lambda **kw: {"gpt-5.4", "gpt-4.1"})
-    args = _make_args(codex_model="gpt-5.6-sol", critic_mock=False)
+    args = _make_args(codex_model="gpt-5.6-sol")
     model_catalog._smoke_test_codex_model(args, ("https://anthropic", "https://openai/v1"))
 
     assert args.codex_model == "gpt-5.4"
@@ -2023,7 +2020,7 @@ def test_smoke_test_codex_model_ladder_skips_missing_rungs(monkeypatch, capsys):
 def test_smoke_test_codex_model_leaves_custom_ids_alone(monkeypatch, capsys):
     """An operator-chosen id outside the ladder is reported, never rewritten."""
     monkeypatch.setattr(model_catalog, "_probe_llm_catalog", lambda **kw: {"gpt-5.5", "gpt-5.4"})
-    args = _make_args(codex_model="my-org/custom-gpt", critic_mock=False)
+    args = _make_args(codex_model="my-org/custom-gpt")
     model_catalog._smoke_test_codex_model(args, ("https://anthropic", "https://openai/v1"))
 
     assert args.codex_model == "my-org/custom-gpt"
@@ -2050,128 +2047,23 @@ def test_openai_only_deploy_walks_the_codex_ladder_before_deriving_claude(monkey
     monkeypatch.setattr(model_catalog, "_probe_llm_catalog", lambda **kw: {"gpt-5.5", "gpt-5.4"})
 
     assert cli.llm_config.is_openai_only() is True
-    args = _make_args(codex_model="gpt-5.6-sol", critic_mock=True)
+    args = _make_args(codex_model="gpt-5.6-sol")
     model_catalog._resolve_models_for_run(args, ("", ""), claude_follows_codex=True, codex_follows_claude=False)
 
     assert args.codex_model == "gpt-5.5"
     assert args.claude_model == "gpt-5.5"
 
 
-def test_openai_only_ladder_runs_even_with_a_mock_critic(monkeypatch, capsys):
-    """The ladder cannot be gated on the critic here: codex_model drives orchestration."""
-    monkeypatch.setenv("OPENAI_BASE_URL", "https://gw.example/v1")
-    monkeypatch.setenv("OPENAI_API_KEY", "openai-key")
-    for var in (
-        "ANTHROPIC_BASE_URL",
-        "ANTHROPIC_API_KEY",
-        "ANTHROPIC_AUTH_TOKEN",
-        "DEEPSEEK_BASE_URL",
-        "DEEPSEEK_API_KEY",
-    ):
-        monkeypatch.delenv(var, raising=False)
-    monkeypatch.setenv("INFERENCE_OPTIMIZER_CATALOG_PROBE_URL", "https://gw.example/v1")
-    monkeypatch.setattr(model_catalog, "_probe_llm_catalog", lambda **kw: {"gpt-5.4"})
-
-    args = _make_args(codex_model="gpt-5.6-sol", critic_mock=True)
-    model_catalog._resolve_models_for_run(args, ("", ""), claude_follows_codex=True, codex_follows_claude=False)
-
-    assert args.codex_model == "gpt-5.4"
-    assert args.claude_model == "gpt-5.4"
-
-
 def test_smoke_test_codex_model_warns_on_probe_failure(monkeypatch, capsys):
     """OpenAI-side catalog unreachable → WARN-only (does not block startup)."""
     monkeypatch.setattr(model_catalog, "_probe_llm_catalog", lambda **kw: None)
-    args = _make_args(codex_model="gpt-5.4", critic_mock=False)
+    args = _make_args(codex_model="gpt-5.4")
     model_catalog._smoke_test_codex_model(args, ("https://anthropic", "https://openai/v1"))
 
     assert args.codex_model == "gpt-5.4"
     out = capsys.readouterr().out
     assert "WARNING" in out
     assert "unreachable" in out
-
-
-def _record_critic_probes(monkeypatch, *, fail: bool = False) -> list[tuple[str, str]]:
-    """Stub both review transports and return the ``(protocol, model)`` each probe sent."""
-    sent: list[tuple[str, str]] = []
-
-    def _anthropic(**kw):
-        sent.append(("anthropic", kw["request"].model))
-        if fail:
-            raise RuntimeError("AuthenticationError")
-
-    def _chat(client, **kw):
-        sent.append(("openai", kw["model"]))
-        if fail:
-            raise RuntimeError("AuthenticationError")
-
-    monkeypatch.setattr(cli.llm_config, "anthropic_completion", _anthropic)
-    monkeypatch.setattr(cli.llm_config, "chat_completion", _chat)
-    monkeypatch.setattr(cli.llm_config, "get_openai_client", lambda **kw: object())
-    monkeypatch.setattr("time.sleep", lambda s: None)
-    return sent
-
-
-def test_critic_reviews_with_the_orchestration_model_by_default(monkeypatch, capsys):
-    """A launch that sets CODEX_MODEL still reviews with the Claude-side model orchestration runs on."""
-    sent = _record_critic_probes(monkeypatch)
-    monkeypatch.setattr(model_catalog, "critic_on_codex_side", lambda **kw: False)
-    args = _make_args(claude_model="glm-5-3", codex_model="gpt-5.4", critic_mock=False, critic_protocol="auto")
-
-    model_catalog._probe_critic_review_model(args, codex_follows_claude=False)
-
-    assert sent == [("anthropic", "glm-5-3")]
-    assert "critic model 'glm-5-3' answered" in capsys.readouterr().out
-
-
-def test_critic_follows_an_orchestration_that_runs_on_codex(monkeypatch):
-    sent = _record_critic_probes(monkeypatch)
-    monkeypatch.setattr(model_catalog, "critic_on_codex_side", lambda **kw: True)
-    args = _make_args(claude_model="gpt-5.5", codex_model="gpt-5.5", critic_mock=False, critic_protocol="auto")
-
-    model_catalog._probe_critic_review_model(args, codex_follows_claude=False)
-
-    assert sent == [("openai", "gpt-5.5")]
-
-
-def test_an_explicit_critic_protocol_reviews_with_that_sides_model(monkeypatch):
-    sent = _record_critic_probes(monkeypatch)
-    monkeypatch.setattr(model_catalog, "critic_on_codex_side", lambda **kw: False)
-    monkeypatch.setenv("OPENAI_BASE_URL", "https://gw.example/v1")
-    monkeypatch.setenv("OPENAI_API_KEY", "openai-key")
-    args = _make_args(claude_model="glm-5-3", codex_model="gpt-5.6-sol", critic_mock=False, critic_protocol="openai")
-
-    model_catalog._probe_critic_review_model(args, codex_follows_claude=False)
-
-    assert sent == [("openai", "gpt-5.6-sol")]
-
-
-def test_a_critic_model_that_cannot_answer_stops_the_launch_without_a_fallback(monkeypatch, capsys):
-    sent = _record_critic_probes(monkeypatch, fail=True)
-    monkeypatch.setattr(model_catalog, "critic_on_codex_side", lambda **kw: False)
-    args = _make_args(claude_model="glm-5-3", codex_model="gpt-5.4", critic_mock=False, critic_protocol="auto")
-
-    with pytest.raises(SystemExit) as exc_info:
-        model_catalog._probe_critic_review_model(args, codex_follows_claude=False)
-
-    assert exc_info.value.code == 2
-    # Transient errors get the catalog retries, but every attempt asks the one configured model.
-    assert set(sent) == {("anthropic", "glm-5-3")}
-    assert len(sent) == 1 + len(model_catalog._CATALOG_RETRY_DELAYS_SEC)
-    assert args.claude_model == "glm-5-3"
-    assert args.codex_model == "gpt-5.4"
-    err = capsys.readouterr().err
-    assert "no fallback model" in err
-    assert "Refusing to start" in err
-
-
-def test_a_mock_critic_sends_no_probe(monkeypatch):
-    sent = _record_critic_probes(monkeypatch)
-    args = _make_args(critic_mock=True, critic_protocol="auto")
-
-    model_catalog._probe_critic_review_model(args, codex_follows_claude=False)
-
-    assert sent == []
 
 
 def test_parser_anthropic_only_empty_codex_model_uses_claude_model(monkeypatch):

@@ -53,8 +53,6 @@ EVENT_LLM_CALL = "llm.call"
 EVENT_LLM_REQUEST = "llm.request"
 EVENT_PHASE = "phase"
 EVENT_INTENT = "intent"
-# span_id is the proposal's bus msg_id: queued at propose time, started when the Critic's verdict is applied.
-EVENT_PROPOSAL = "proposal"
 # span_id is the task_id: queued / started / terminal follow the TaskRegistry state machine.
 EVENT_TASK = "task"
 EVENT_TASK_RETRY = "task.retry"
@@ -68,7 +66,6 @@ VALID_EVENT_TYPES: frozenset[str] = frozenset(
         EVENT_LLM_REQUEST,
         EVENT_PHASE,
         EVENT_INTENT,
-        EVENT_PROPOSAL,
         EVENT_TASK,
         EVENT_TASK_RETRY,
         EVENT_TOOL,
@@ -415,7 +412,7 @@ TIMING_HTTP_STREAM = "http_stream"
 def record_gateway_request(record: LLMRequestRecord) -> None:
     """Put one ``llm_config`` HTTP request on the ledger as an ``llm.request`` under the ambient scope.
 
-    The call site's attribution ``component`` wins over the ambient one when it is a known component, so a critic
+    The call site's attribution ``component`` wins over the ambient one when it is a known component, so a specialist
     request made inside a coordinator scope is still attributed to its caller.
     """
     if _CONTEXT.get().session_dir is None:
@@ -460,7 +457,6 @@ __all__ = [
     "EVENT_LLM_REQUEST",
     "EVENT_PHASE",
     "EVENT_PROMPT_SNAPSHOT",
-    "EVENT_PROPOSAL",
     "EVENT_SESSION",
     "EVENT_TASK",
     "EVENT_TASK_RETRY",

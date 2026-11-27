@@ -915,10 +915,6 @@ PY
       env PYTHONPATH="${REPO_ROOT}${PYTHONPATH:+:${PYTHONPATH}}" \
         "$PYTHON" -m pip install --quiet "${PIP_EXTRA[@]}" \
         "hyperloom-inference_optimizer[llm,forge]"
-      # web extra only when critic web tools are enabled (off by default).
-      if [ "${CRITIC_WEB_TOOLS_ENABLED:-}" = "true" ] || [ "${CRITIC_WEB_TOOLS_ENABLED:-}" = "1" ]; then
-        "$PYTHON" -m pip install --quiet "${PIP_EXTRA[@]}" "markdownify>=0.11" "cachetools>=5.3"
-      fi
     fi
     if "$PYTHON" -c "import claude_agent_sdk" >/dev/null 2>&1; then
       log "claude_agent_sdk OK"

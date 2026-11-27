@@ -853,15 +853,7 @@ def _read_ko_summary_totals(path: Path) -> dict[str, int]:
 def _highlight(payload: dict, topic: str, from_agent: str) -> dict[str, Any]:
     """Pick the most useful 1-line summary out of an event's payload."""
     summary = ""
-    if topic == "proposal":
-        summary = f"action_name={payload.get('action_name')}"
-    elif topic == "review_verdict":
-        summary = f"verdict={payload.get('verdict')} reason={(payload.get('reasoning') or '')[:60]}"
-    elif topic == "decision":
-        summary = (
-            f"kind={payload.get('kind')} action={payload.get('action_name')} task={(payload.get('task_id') or '')[:8]}"
-        )
-    elif topic == "delegated_result":
+    if topic == "delegated_result":
         out_tput = (payload.get("result") or {}).get("output_throughput")
         decision = (payload.get("result") or {}).get("decision")
         summary = f"kind={payload.get('kind')} state={payload.get('state')} tput={out_tput} decision={decision}"
@@ -939,8 +931,6 @@ class ReportExecutor:
     """ActionRunner for the ``report`` action."""
 
     DEFAULT_HIGHLIGHT_TOPICS = (
-        "proposal",
-        "review_verdict",
         "decision",
         "delegated_result",
         "response",

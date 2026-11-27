@@ -343,21 +343,6 @@ def _resolve_framework_root(
     return tree.root if tree is not None else None
 
 
-def _scanned_patch_files(specialist_workspace: Path) -> list[str]:
-    """The ``*.patch`` then ``*.diff`` files of the workspace's worktree and own ``patches/`` dirs."""
-    found: list[str] = []
-    for base in (
-        specialist_workspace / "worktree" / "patches",
-        specialist_workspace / "patches",
-    ):
-        if base.is_dir():
-            for p in sorted(base.glob("*.patch")):
-                found.append(str(p))
-            for p in sorted(base.glob("*.diff")):
-                found.append(str(p))
-    return found
-
-
 def _resolve_patch_paths(
     *,
     specialist_workspace: Path,
@@ -366,8 +351,8 @@ def _resolve_patch_paths(
 ) -> list[Path]:
     """Resolve the list of patch files to apply.
 
-    Order: ``params.patches`` → ``specialist_done.patches_written`` →
-    filesystem scan of ``specialist_workspace/{worktree/,}patches/``.
+    ``params.patches`` when given, else ``specialist_done.patches_written``: a file the specialist left in its
+    workspace without naming it is not part of its deliverable.
     Entries normalised to absolute Paths; missing ones logged + dropped.
 
     Security: a resolved patch path must live inside the specialist workspace
@@ -375,8 +360,7 @@ def _resolve_patch_paths(
     Both sides are ``resolve()``-d first so a symlinked workspace still matches.
 
     Args:
-        specialist_workspace: The specialist task workspace to resolve
-            relative paths / scan for patches.
+        specialist_workspace: The specialist task workspace relative paths resolve against.
         explicit_patches: Explicit patch paths from params, or ``None``.
         done_payload: The parsed ``specialist_done.json`` payload, or ``None``.
 
@@ -388,8 +372,6 @@ def _resolve_patch_paths(
         candidates.extend(str(p) for p in explicit_patches)
     elif done_payload and isinstance(done_payload.get("patches_written"), list):
         candidates.extend(str(p) for p in done_payload["patches_written"] if p)
-    else:
-        candidates.extend(_scanned_patch_files(specialist_workspace))
 
     allowed_roots = [
         (specialist_workspace / "worktree").resolve(),

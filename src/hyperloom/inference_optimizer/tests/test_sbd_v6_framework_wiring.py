@@ -25,7 +25,6 @@ from hyperloom.orchestrator.phases.machine import Transition
 from hyperloom.orchestrator.roles.agent_role import default_role_registry
 from hyperloom.orchestrator.tests.mock_backend import MockBackend, MockTurn, ScriptedPlan
 from hyperloom.orchestrator.phases.framework_records import ProgressStamp
-from hyperloom.orchestrator.loop.verdicts import CriticRuling
 
 
 def _tr(reason: str) -> Transition:
@@ -43,10 +42,7 @@ def _coordinator(session_dir: Path) -> Coordinator:
     idle = ScriptedPlan(turns=[MockTurn(intents=[])])
     return Coordinator(
         session_dir=session_dir,
-        backends={
-            "orchestration": MockBackend(idle),
-            "critic": MockBackend(idle),
-        },
+        backends={"orchestration": MockBackend(idle)},
         role_registry=default_role_registry(),
         advisory=AdvisoryServices(knowledge_plane=None),
     )
@@ -349,31 +345,6 @@ def test_a_config_only_authoring_round_is_handed_to_explore_and_charged_to_its_l
         "handed_to_explore",
         False,
     )
-
-
-def test_critic_denial_records_the_review_and_the_drop(session_dir: Path):
-    import asyncio
-    from types import SimpleNamespace
-
-    coord = _coordinator(session_dir)
-    coord.shared_state.phase = "FRAMEWORK_AGENT"
-    coord.phase_framework._open_framework_timeline()
-
-    pending = SimpleNamespace(
-        payload={"framework_agent_candidate_id": "cand-9", "batch_id": "b1"},
-        action_name="integrate_patch",
-    )
-    asyncio.run(coord.phase_framework.record_critic_denial(pending, "touches the serving loop"))
-    coord.phase_framework.close_framework_timeline(_tr("optimize_no_more_leverage"))
-
-    proposal = _events(session_dir)[0]["ext"]["proposals"][0]
-    # The Critic's own word for it: a field spelled two ways cannot be selected on.
-    assert proposal["critic_review"]["verdict"] == "reject"
-    assert "serving loop" in proposal["critic_review"]["reason"]
-    assert proposal["critic_review"]["outcome"]["denied"] is True
-    assert proposal["terminal"]["disposition"] == "dropped"
-    assert proposal["terminal"]["reason"] == "critic_denied"
-    assert [step["step"] for step in proposal["lifecycle"]] == ["reviewed"]
 
 
 def test_config_attempts_record_the_pair_and_the_verbatim_outcome(session_dir: Path):
@@ -957,19 +928,21 @@ def _propose_grid(coord: Coordinator, grid: list[dict[str, Any]]) -> str:
         row if row.get("name") else {"name": row.get("variant_name") or f"variant-{i}", **row}
         for i, row in enumerate(grid)
     ]
-    # The execution-order gate holds ``explore`` until a baseline exists, or nothing mints.
+    # The execution-order gate holds ``explore`` until a baseline exists, or nothing is queued.
     if coord.shared_state.baseline_tput <= 0:
         coord.shared_state.baseline_tput = 100.0
-    before = set(coord.state.pending_proposals)
-    asyncio.run(
-        coord.router._handle_propose_action(
+
+    async def _propose() -> list[Any]:
+        before = {task.task_id for task in await coord.tasks.queued()}
+        await coord.router._handle_propose_action(
             "orchestration",
             Intent(type=IntentType.PROPOSE_ACTION, payload={"action_name": "explore", "params": {"grid": grid}}),
         )
-    )
-    minted = set(coord.state.pending_proposals) - before
-    assert len(minted) == 1, "the propose seam did not mint exactly one pending proposal"
-    return minted.pop()
+        return [task for task in await coord.tasks.queued() if task.task_id not in before]
+
+    queued = asyncio.run(_propose())
+    assert len(queued) == 1, "the propose seam did not queue exactly one task"
+    return queued[0].params["proposal_msg_id"]
 
 
 def test_a_proposed_grid_lands_with_its_producer(session_dir: Path):
@@ -1140,224 +1113,6 @@ def test_a_mixed_grid_is_the_assemblers(session_dir: Path):
     assert proposal["producer_ref"] == ""
 
 
-def test_a_rejected_grid_is_reviewed_and_dropped(session_dir: Path):
-    import asyncio
-
-    coord = _coordinator(session_dir)
-    coord.shared_state.phase = "FRAMEWORK_AGENT"
-    coord.phase_framework._open_framework_timeline()
-
-    msg_id = _propose_grid(coord, [{"provenance": "llm_direct"}])
-    asyncio.run(
-        coord.router._handle_single_verdict(
-            source="critic",
-            pending=coord.state.pending_proposals[msg_id],
-            ruling=CriticRuling(
-                verdict="reject",
-                reasoning="every variant raises the memory floor",
-                advisory=None,
-            ),
-        )
-    )
-    coord.phase_framework.close_framework_timeline(_tr("optimize_no_more_leverage"))
-
-    proposal = _events(session_dir)[0]["ext"]["proposals"][0]
-    assert proposal["critic_review"]["verdict"] == "reject"
-    assert "memory floor" in proposal["critic_review"]["reason"]
-    assert proposal["terminal"]["disposition"] == "dropped"
-    # A denial is a review plus a disposition; the drop is not a lifecycle step of its own.
-    assert [step["step"] for step in proposal["lifecycle"]] == ["proposed", "reviewed"]
-
-
-def test_a_grid_denied_on_the_review_timeout_is_dropped(session_dir: Path):
-    """The timeout deny bypasses the verdict handler, and must still settle what the event log calls rejected."""
-    import asyncio
-    import time
-
-    from hyperloom.orchestrator.bringup.reconcile import REVIEW_TTL_SEC
-
-    coord = _coordinator(session_dir)
-    coord.shared_state.phase = "FRAMEWORK_AGENT"
-    coord.phase_framework._open_framework_timeline()
-
-    msg_id = _propose_grid(coord, [{"provenance": "llm_direct"}])
-    asyncio.run(coord.reconciler.run(time.time() + REVIEW_TTL_SEC + 60.0))
-    coord.phase_framework.close_framework_timeline(_tr("optimize_no_more_leverage"))
-
-    assert msg_id not in coord.state.pending_proposals
-    proposal = _events(session_dir)[0]["ext"]["proposals"][0]
-    assert proposal["terminal"]["disposition"] == "dropped"
-    assert proposal["terminal"]["reason"] == "review_timeout"
-
-
-def _review(coord: Coordinator, msg_id: str, payload: dict[str, Any]) -> None:
-    """Rule on a pending proposal through the real review_verdict seam."""
-    import asyncio
-
-    from hyperloom.inference_optimizer.protocol.intent import Intent, IntentType
-
-    asyncio.run(
-        coord.router._handle_review_verdict(
-            "critic",
-            Intent(
-                type=IntentType.REVIEW_VERDICT,
-                payload={"target_proposal_msg_id": msg_id, **payload},
-            ),
-        )
-    )
-
-
-def test_a_review_records_the_grounds_the_critic_stated(session_dir: Path):
-    coord = _coordinator(session_dir)
-    coord.shared_state.phase = "FRAMEWORK_AGENT"
-    coord.phase_framework._open_framework_timeline()
-
-    msg_id = _propose_grid(coord, [{"provenance": "llm_direct"}])
-    _review(
-        coord,
-        msg_id,
-        {
-            "verdict": "advise",
-            "reasoning": "the batch size is untested at this sequence length",
-            "confidence": 0.4,
-            "required_evidence": ["a short run at conc=4"],
-            "risks": [{"severity": "medium", "risk": "may raise the memory floor"}],
-            "advice_text": "run the shortest variant first",
-            "alternative_action": "shrink the grid",
-        },
-    )
-    coord.phase_framework.close_framework_timeline(_tr("optimize_no_more_leverage"))
-
-    review = _events(session_dir)[0]["ext"]["proposals"][0]["critic_review"]
-    assert review["verdict"] == "advise"
-    assert review["reviewer"] == "critic"
-    assert review["confidence"] == 0.4
-    assert review["required_evidence"] == ["a short run at conc=4"]
-    assert review["risks"] == [{"severity": "medium", "risk": "may raise the memory floor"}]
-    assert review["advice_text"] == "run the shortest variant first"
-    assert review["alternative_action"] == "shrink the grid"
-    assert review["outcome"]["materialized"] is True
-    assert review["outcome"]["denied"] is False
-
-
-def test_a_ruling_the_critic_could_not_ground_says_so(session_dir: Path):
-    coord = _coordinator(session_dir)
-    coord.shared_state.phase = "FRAMEWORK_AGENT"
-    coord.phase_framework._open_framework_timeline()
-
-    msg_id = _propose_grid(coord, [{"provenance": "llm_direct"}])
-    _review(
-        coord,
-        msg_id,
-        {
-            "verdict": "needs_review",
-            "source": "critic_unavailable",
-            "reasoning": "required_context missing: model manifest",
-        },
-    )
-    coord.phase_framework.close_framework_timeline(_tr("optimize_no_more_leverage"))
-
-    review = _events(session_dir)[0]["ext"]["proposals"][0]["critic_review"]
-    assert review["reviewer"] == "critic_unavailable"
-    assert review["outcome"]["materialized"] is False
-    assert review["outcome"]["reauthored"] is True
-
-
-def test_a_patch_review_lands_on_the_candidate_it_judged(session_dir: Path):
-    import asyncio
-
-    from hyperloom.inference_optimizer.breakdown.recorder.framework_event import ARM_SOURCE, PRODUCER_SPECIALIST
-    from hyperloom.orchestrator.state.pending_proposal import PendingProposal
-
-    coord = _coordinator(session_dir)
-    coord.shared_state.phase = "FRAMEWORK_AGENT"
-    coord.phase_framework._open_framework_timeline()
-    coord.phase_framework.timeline().record_proposal(
-        "cand-42",
-        arm=ARM_SOURCE,
-        producer=PRODUCER_SPECIALIST,
-        source_ref="https://example.invalid/pr/1",
-    )
-
-    pending = PendingProposal(
-        proposal_msg_id="msg-1",
-        from_agent="orchestration",
-        action_name="integrate_patch",
-        predicted_gain_pct=0.0,
-        payload={"framework_agent_candidate_id": "cand-42", "params": {"task_id": "sp-7"}},
-    )
-    asyncio.run(
-        coord.router._handle_single_verdict(
-            source="critic",
-            pending=pending,
-            ruling=CriticRuling(
-                verdict="reject",
-                reasoning="touches the serving loop",
-                payload={"verdict": "reject"},
-            ),
-        )
-    )
-    coord.phase_framework.close_framework_timeline(_tr("optimize_no_more_leverage"))
-
-    proposals = _events(session_dir)[0]["ext"]["proposals"]
-    assert [row["proposal_id"] for row in proposals] == ["cand-42"]
-    review = proposals[0]["critic_review"]
-    assert review["verdict"] == "reject"
-    # Still the candidate's own row, with the facts recorded when it was raised.
-    assert proposals[0]["source_ref"] == "https://example.invalid/pr/1"
-    # The subject the patch gate will consult this ruling under.
-    assert review["outcome"]["patch_verdict_key"]
-
-
-def test_the_review_carries_what_it_was_grounded_in(session_dir: Path):
-    from hyperloom.inference_optimizer.breakdown.recorder.framework_event import record_review_evidence
-
-    coord = _coordinator(session_dir)
-    coord.shared_state.phase = "FRAMEWORK_AGENT"
-    coord.shared_state.macro_cycle = 0
-    coord.phase_framework._open_framework_timeline()
-
-    msg_id = _propose_grid(coord, [{"provenance": "llm_direct"}])
-    _review(coord, msg_id, {"verdict": "reject", "reasoning": "raises the memory floor"})
-    record_review_evidence(
-        macro_cycle=0,
-        proposal_id=msg_id,
-        artifacts={"review_path": "critic-workdir/3/review.json"},
-    )
-    coord.phase_framework.close_framework_timeline(_tr("optimize_no_more_leverage"))
-
-    review = _events(session_dir)[0]["ext"]["proposals"][0]["critic_review"]
-    # Merged onto the ruling the verdict seam already wrote, not beside it.
-    assert review["verdict"] == "reject"
-    assert review["artifacts"]["review_path"].endswith("review.json")
-
-
-def test_evidence_for_a_cycle_with_no_event_is_dropped_quietly(session_dir: Path):
-    from hyperloom.inference_optimizer.breakdown.recorder.framework_event import record_review_evidence
-
-    record_review_evidence(
-        macro_cycle=7,
-        proposal_id="msg-nobody",
-        artifacts={"review_path": "critic-workdir/1/review.json"},
-    )
-
-    assert _events(session_dir) == []
-
-
-def test_review_subjects_resolve_a_candidate_to_its_own_row():
-    from hyperloom.orchestrator.roles.critic_agent import _review_subjects
-
-    bundle = {
-        "proposals": [
-            {"msg_id": "msg-1", "payload": {"framework_agent_candidate_id": "cand-42"}},
-            {"msg_id": "msg-2", "payload": {"params": {"framework_agent_candidate_id": "cand-43"}}},
-            {"msg_id": "msg-3", "payload": {"params": {"grid": []}}},
-        ]
-    }
-    # A grid keeps its message id, so it is absent rather than mapped to itself.
-    assert _review_subjects(bundle) == {"msg-1": "cand-42", "msg-2": "cand-43"}
-
-
 def test_measured_variants_settle_their_grid(session_dir: Path):
     import asyncio
 
@@ -1366,11 +1121,7 @@ def test_measured_variants_settle_their_grid(session_dir: Path):
     coord.phase_framework._open_framework_timeline()
 
     msg_id = _propose_grid(coord, [{"provenance": "llm_direct"}])
-    pending = coord.state.pending_proposals[msg_id]
-    _review(coord, msg_id, {"verdict": "approve", "reasoning": "the grid is safe to measure"})
-    # The materialized task carries the proposal it came from, so the attempt keeps the join.
-    task = asyncio.run(coord.tasks.get(pending.task_id))
-    assert task.params["proposal_msg_id"] == msg_id
+    [task] = asyncio.run(coord.tasks.queued())
     asyncio.run(
         coord.recipe_journal.fact_write_hook(
             task=task,
@@ -1396,7 +1147,7 @@ def test_measured_variants_settle_their_grid(session_dir: Path):
     proposal = ext["proposals"][0]
     assert proposal["terminal"]["disposition"] == "attempted"
     assert proposal["attempt_refs"] == [ext["attempts"][0]["attempt_id"]]
-    assert [step["step"] for step in proposal["lifecycle"]] == ["proposed", "reviewed", "routed", "attempted"]
+    assert [step["step"] for step in proposal["lifecycle"]] == ["proposed", "attempted"]
 
 
 def test_a_measured_variant_keeps_the_name_a_reader_knows_it_by(session_dir: Path):

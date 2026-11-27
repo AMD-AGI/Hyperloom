@@ -63,7 +63,7 @@ def _booted_observation(session: Path) -> str:
 
 
 # ---------------------------------------------------------------------------
-# _stage_resolve: launch-only bypasses specialist/Critic checks
+# _stage_resolve: launch-only bypasses the specialist checks
 
 
 @pytest.mark.asyncio
@@ -91,8 +91,8 @@ async def test_launch_only_skips_missing_specialist_task_id(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_launch_only_skips_critic_gate(tmp_path, monkeypatch):
-    """Critic verdict is not consulted in launch-only mode."""
+async def test_a_kept_launch_only_round_saves_the_session_state(tmp_path, monkeypatch):
+    """A launch-only round handed the session's state persists it with its KEEP."""
     session = tmp_path / "s"
     session.mkdir()
     _write_minimal_config(session / "bench.yaml")
@@ -111,13 +111,9 @@ async def test_launch_only_skips_critic_gate(tmp_path, monkeypatch):
     }
     gate_evidence = {"enablement_accuracy": None, "timed_out": False}
 
-    with (
-        patch.object(ex, "_bench_patch", new=AsyncMock(return_value=(bench_result, gate_evidence))),
-        patch.object(state, "get_specialist_patch_verdict", return_value="reject") as critic,
-    ):
+    with patch.object(ex, "_bench_patch", new=AsyncMock(return_value=(bench_result, gate_evidence))):
         res = await ex(_make_ctx("probe-2", params, extra={"shared_state": state}))
 
-    critic.assert_not_called()
     assert res["status"] == "kept"
     assert (session / "state.json").is_file()
 

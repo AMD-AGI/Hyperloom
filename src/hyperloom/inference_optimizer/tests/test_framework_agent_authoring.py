@@ -66,35 +66,6 @@ class _TasksStub:
         return t, False
 
 
-def _make_intent(prompt: str, verdict: str):
-    import re
-
-    from hyperloom.inference_optimizer.protocol.intent import Intent, IntentType
-
-    m = re.search(r"msg_id=([a-f0-9]+)", prompt)
-    msg_id = m.group(1) if m else "x"
-    return Intent(
-        type=IntentType.REVIEW_VERDICT,
-        payload={
-            "target_proposal_msg_id": msg_id,
-            "verdict": verdict,
-            "reasoning": "ok",
-        },
-    )
-
-
-class _ApproveCritic:
-    def __init__(self) -> None:
-        self.call_count = 0
-
-    async def run(self, prompt: str, **_: Any) -> Any:
-        self.call_count += 1
-        return SimpleNamespace(
-            intents=[_make_intent(prompt, "approve")],
-            raw_text="(approve)",
-        )
-
-
 class _BusStub:
     record_observation = MessageBus.record_observation
 
@@ -116,7 +87,6 @@ def _stub(tmp_path: Path) -> Coordinator:
     coord = make_coordinator(tmp_path)
     coord.tasks = _TasksStub()
     coord.bus = _BusStub()
-    coord.backends = {"critic": _ApproveCritic()}
     return coord
 
 
@@ -139,62 +109,17 @@ def _pump(stub: Coordinator) -> None:
     asyncio.run(stub.phase_framework._pump_framework_agent_phase())
 
 
-def _pump_then_materialize(stub: Coordinator) -> None:
-    """Run the pump (resolves audit route + submits a candidate proposal) then materialise it."""
-    asyncio.run(stub.phase_framework._pump_framework_agent_phase())
-    pendings = [
-        p
-        for p in stub.state.pending_proposals.values()
-        if getattr(p, "action_name", "") == "integrate_patch" and not getattr(p, "decided", False)
-    ]
-    for p in pendings:
-        asyncio.run(stub.phase_framework.materialize_candidate(p))
-        p.decided = True
+def test_an_unknown_route_dispatches_both_tracks(
+    tmp_path: Path,
+):
+    """A candidate whose audit route is not one the pump knows runs the raw-diff + authoring tracks."""
+    stub = _stub(tmp_path)
 
-
-def _materialize(stub: Coordinator, *, audit_step: str = "") -> None:
-    from hyperloom.orchestrator.state.pending_proposal import PendingProposal
-
-    pending = PendingProposal(
-        proposal_msg_id="m-fpr",
-        from_agent="coordinator",
-        action_name="integrate_patch",
-        predicted_gain_pct=0.0,
-        payload={
-            "candidate": dict(_CANDIDATE),
-            "framework_agent_candidate_id": _CANDIDATE["pr_url"],
-            "batch_id": "b1",
-            "audit": {},
-            "audit_step": audit_step,
-        },
+    asyncio.run(
+        stub.phase_framework._route_framework_agent_candidate(
+            {**_CANDIDATE, "batch_id": "b1", "route": "audit_inconclusive"}
+        )
     )
-    asyncio.run(stub.phase_framework.materialize_candidate(pending))
-
-
-def test_pump_submits_candidate_proposal(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-):
-    """The pump submits the candidate as a ``framework_agent`` proposal; no task is created inline."""
-
-    stub = _stub(tmp_path)
-    _seed_batch(stub, _CANDIDATE)
-
-    _pump(stub)
-
-    assert stub.tasks.created == []
-    pendings = [p for p in stub.state.pending_proposals.values() if p.action_name == "integrate_patch"]
-    assert len(pendings) == 1
-    assert pendings[0].payload["framework_agent_candidate_id"] == _CANDIDATE["pr_url"]
-
-
-def test_materialize_unknown_route_dispatches_both_tracks(
-    tmp_path: Path,
-):
-    """An approved candidate with an unknown audit route runs the raw-diff + authoring tracks."""
-    stub = _stub(tmp_path)
-
-    _materialize(stub, audit_step="")
 
     kinds = [c["kind"] for c in stub.tasks.created]
     assert kinds.count("integrate_patch") == 1
@@ -212,6 +137,19 @@ def test_materialize_unknown_route_dispatches_both_tracks(
     assert _CANDIDATE["diff_url"] == pr_lead.get("diff_url") or _CANDIDATE["diff_url"] in params.get("notes", "")
     assert "needs_gpu" not in params
     assert spec["requires_lanes"] == ["research_lane"]
+
+
+def test_a_candidate_integrate_patch_rides_the_decaying_keep_curve(tmp_path: Path):
+    """An upstream-PR candidate grades against the same per-cycle bar as explore and integrate_patch."""
+    from hyperloom.orchestrator.phases.machine_state import decaying_keep_threshold_pct
+
+    stub = _stub(tmp_path)
+    stub.shared_state.macro_cycle = 2
+
+    asyncio.run(stub.phase_framework._enqueue_framework_agent_task(dict(_CANDIDATE)))
+
+    (created,) = [c for c in stub.tasks.created if c["kind"] == "integrate_patch"]
+    assert created["params"]["keep_threshold_pct"] == pytest.approx(decaying_keep_threshold_pct(2))
 
 
 def test_reauthor_attempt_propagates_into_specialist_and_integrate_params(tmp_path: Path):
@@ -263,12 +201,12 @@ def test_the_route_the_discovery_specialist_returns_picks_the_track(
     stub = _stub(tmp_path)
     _seed_batch(stub, dict(_CANDIDATE, route=route))
 
-    _pump_then_materialize(stub)
+    _pump(stub)
 
     assert sorted(c["kind"] for c in stub.tasks.created) == sorted(kinds)
 
 
-def test_authoring_inflight_detects_specialist_and_proposals(tmp_path: Path):
+def test_authoring_inflight_detects_specialist_and_integrate_tasks(tmp_path: Path):
     stub = _stub(tmp_path)
     # One unprocessed candidate so the signal has a valid target.
     _CAND_ID = "https://github.com/ROCm/vllm/pull/999"
@@ -308,36 +246,6 @@ def test_authoring_inflight_detects_specialist_and_proposals(tmp_path: Path):
     stub.tasks._queued.append(SimpleNamespace(kind="integrate_patch", task_id="k2", params={}))
     assert asyncio.run(stub.phase_framework._framework_agent_authoring_inflight()) is False
     stub.tasks._queued.clear()
-
-    # A pending framework_agent Critic proposal for the unprocessed candidate counts.
-    stub.state.pending_proposals = {
-        "m1": SimpleNamespace(
-            action_name="integrate_patch",
-            decided=False,
-            payload={"framework_agent_candidate_id": _CAND_ID},
-        ),
-    }
-    assert asyncio.run(stub.phase_framework._framework_agent_authoring_inflight()) is True
-
-    # A pending framework-owned integrate_patch proposal for the unprocessed candidate counts.
-    stub.state.pending_proposals = {
-        "m2": SimpleNamespace(
-            action_name="integrate_patch",
-            decided=False,
-            payload={"params": {"framework_agent_authoring": True, "framework_agent_candidate_id": _CAND_ID}},
-        ),
-    }
-    assert asyncio.run(stub.phase_framework._framework_agent_authoring_inflight()) is True
-
-    # A bare (kernel-style) integrate_patch proposal does NOT count.
-    stub.state.pending_proposals = {
-        "m3": SimpleNamespace(
-            action_name="integrate_patch",
-            decided=False,
-            payload={"params": {}},
-        ),
-    }
-    assert asyncio.run(stub.phase_framework._framework_agent_authoring_inflight()) is False
 
 
 def test_record_authored_outcome_writes_progress(
@@ -930,13 +838,21 @@ async def test_an_authored_patch_that_fails_to_apply_reauthors_its_pr_candidate(
     result = SubAgentResult(
         task_id=task.task_id,
         state="succeeded",
-        result={"status": "apply_failed", "lane": "perf_framework", "specialist_task_id": "spec-60076"},
+        result={
+            "status": "apply_failed",
+            "lane": "perf_framework",
+            "specialist_task_id": "spec-60076",
+            "retry_feedback": [{"patch": "moe.patch", "stderr": "error: patch failed: fused_moe.py:41"}],
+        },
     )
 
     await stub.phase_framework.on_integrate_patch_settled(task, result, Verdict.FAILED)
 
     assert stub.shared_state.apply_fail_reauthor_attempts == {pr_url: 1}
-    params = stub.tasks.created[-1]["params"]
+    retry = stub.tasks.created[-1]
+    assert retry["idempotency_key"].endswith(":reauthor:1")
+    params = retry["params"]
+    assert "error: patch failed: fused_moe.py:41" in params["notes"]
     assert params["framework_agent_candidate_id"] == pr_url
     assert params["framework_batch_id"] == "b1"
     assert params["pr_lead"]["diff_url"] == f"{pr_url}.diff"
@@ -947,7 +863,7 @@ async def test_an_authored_patch_that_fails_to_apply_reauthors_its_pr_candidate(
 
 @pytest.fixture
 def parallel_phase(tmp_path, monkeypatch):
-    """A FRAMEWORK phase with five PR candidates, capacity 3, and recorded review submissions."""
+    """A FRAMEWORK phase with five PR candidates, capacity 3, and recorded candidate routings."""
     from hyperloom.orchestrator.phases.framework import FrameworkPhase
 
     stub = _stub(tmp_path)
@@ -956,14 +872,14 @@ def parallel_phase(tmp_path, monkeypatch):
     stub.submitted = []
     stub.discoveries = []
 
-    async def _submit(_self, candidate, *, audit, audit_step):
+    async def _route(_self, candidate):
         stub.submitted.append(candidate["pr_url"])
 
     async def _discover(_self, *, reason):
         stub.discoveries.append(reason)
         return False
 
-    monkeypatch.setattr(FrameworkPhase, "_submit_framework_agent_candidate_for_review", _submit)
+    monkeypatch.setattr(FrameworkPhase, "_route_framework_agent_candidate", _route)
     monkeypatch.setattr(FrameworkPhase, "_maybe_enqueue_candidate_discovery", _discover)
     return stub
 

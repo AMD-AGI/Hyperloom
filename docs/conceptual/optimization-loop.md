@@ -56,8 +56,8 @@ must be able to:
 - Create or resume a session directory,
 - Write `manifest.json`, `state.json`, `storage/coordinator.db`, action
   run workspaces, reports, and `session_breakdown.json`,
-- Route intents through the Orchestration and Critic LLM roles,
-  and dispatch kernel work to programmatic Python handlers,
+- Route intents through the Orchestration LLM role, and dispatch kernel
+  work to programmatic Python handlers,
 - Produce a final report and a dashboard-consumable breakdown.
 
 Private helper names and internal prompt wording are not contracts. The
@@ -574,8 +574,14 @@ decided by the isolation its launch runs under: another account, a bubblewrap
 sandbox, or unconfined where neither works (see
 [Agent isolation](../reference/environment-variables.md#agent-isolation)).
 Whichever applies, the prompt rules send every patch through `integrate_patch`,
-never straight into a source tree, and PolicyGate admits an `integrate_patch`
-of a specialist's patch only on a Critic verdict of `approve` or `advise`.
+never straight into a source tree. When a specialist finishes with a patch, the
+Coordinator queues the `integrate_patch` for that deliverable itself; the
+executor applies only the patches the specialist's `specialist_done.json` (or
+the task's `params.patches`) names. A deliverable has one `integrate_patch`
+task at a time: a delegate naming a specialist whose `integrate_patch` is
+queued, running, or has already benchmarked the deliverable is refused as a
+duplicate, and one naming a specialist that has not ended with a result, or
+that left nothing to integrate, is denied.
 
 With a [PrimaTune](../reference/primatune-predictor.md) endpoint configured,
 the phase also asks that predictor for a launch recipe once per decision point:
@@ -714,15 +720,16 @@ what an earlier turn happened to remember.
   `orchestration_memory` plus the authoritative `SharedState` facts —
   not by replaying a non-deterministic transcript.
 - **Write path**: All write actions flow through `emit_intent` → the
-  Coordinator's intent handler, so Critic review, the accuracy gate,
-  and PolicyGate's invariants (path sandbox, resource leases,
-  data dependencies, single-writer rules) apply to every turn.
+  Coordinator's intent handler, so the accuracy gate and PolicyGate's
+  invariants (path sandbox, resource leases, data dependencies,
+  single-writer rules) apply to every turn. An admitted `propose_action`
+  or `delegate` is queued in the same step.
   Repetition is checked against state — the tested-variant ledger and
   the action-failure log — not against agent recall.
 
-Critic is reactive and stateless per review turn, admitted only while a proposal
-awaits its verdict; idle ticks do not run the Critic. Runtime RCA and automatic
-supervision are not roles in this loop. Stopped sessions require an explicit
+Orchestration is the only LLM role that takes turns in this loop; specialists
+and kernel backends run as tasks. Runtime RCA and automatic supervision are not
+roles in this loop. Stopped sessions require an explicit
 operator `--resume-from` decision; `recover` reconstructs artifacts offline
 or, with `--confirm-scope-gone` / `--confirm-stopped`, records the cleanup
 confirmation a refused resume asks for (see
@@ -735,7 +742,8 @@ The loop adapts through facts, not through retired score tables:
 - `SharedState` carries current best, stack entries, phase history,
   action attempts, kernel attempts, framework-agent progress, and warnings.
 - `RecipeKB` records durable lessons and pitfalls for future sessions.
-- Critic verdicts gate risky patches and framework candidates.
+- The measurement gate (apply, benchmark, accuracy) decides KEEP or REVERT
+  for every patch and framework candidate.
 - PolicyGate blocks unsafe paths, invalid envelopes, and actions whose
   structural requirements are not met before they mutate runtime state.
   Phase fit is enforced at admission: a proposal or delegate whose action

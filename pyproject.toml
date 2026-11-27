@@ -7,7 +7,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "hyperloom-inference_optimizer"
 version = "1.2.0"
-description = "Inference Optimizer — two-role (Orchestration/Critic) autonomous LLM inference optimization runtime for AMD GPU platforms. Kernel optimization is handled by programmatic Python handlers."
+description = "Inference Optimizer — autonomous LLM inference optimization runtime for AMD GPU platforms, driven by an Orchestration agent. Kernel optimization is handled by programmatic Python handlers."
 readme = "README.md"
 requires-python = ">=3.10"
 # PEP 639 SPDX expression. The former ``{ text = "MIT" }`` table is deprecated
@@ -27,7 +27,7 @@ Changelog = "https://github.com/AMD-AGI/Hyperloom/releases"
 Security = "https://github.com/AMD-AGI/Hyperloom/security/policy"
 
 [project.optional-dependencies]
-# LLM backend SDKs, lazy-imported by the Claude/Codex/critic roles.
+# LLM backend SDKs, lazy-imported by the Claude/Codex roles.
 # ``openai-codex`` is the agent runtime for the OpenAI side: Hyperloom makes no
 # bare LLM API calls, so an OpenAI-only deployment needs it to run at all.
 llm = [
@@ -42,11 +42,6 @@ llm = [
 deepseek = [
     "deepseek-harness-sdk>=0.1.5rc1",
 ]
-# Critic-agent web tools (web_search / web_fetch).
-web = [
-    "markdownify>=0.11",
-    "cachetools>=5.3",
-]
 # The Experience KB service on a PostgreSQL server (``HYPERLOOM_KB_DATABASE_URL``), as a global KB runs; a workspace's
 # service keeps its database in SQLite and needs none of this. The connection pool checks each connection it hands
 # out, which needs psycopg-pool 3.2.
@@ -58,7 +53,7 @@ kb-service = [
 # Full runtime dependency set installed by the packaged install.sh.
 runtime = [
     "PyYAML>=6.0",
-    "hyperloom-inference_optimizer[llm,web,forge]",
+    "hyperloom-inference_optimizer[llm,forge]",
 ]
 # Built-in kernel-opt agent (``kernelforge``). ``torch`` is deliberately absent:
 # the ROCm build is supplied by the container image and a bare specifier would
@@ -68,7 +63,7 @@ runtime = [
 # lazy-import ``claude_agent_sdk`` and ``openai_codex`` at the first agent turn,
 # so a ``[forge]``-only install imports cleanly and then fails minutes into a
 # campaign. It only looked self-contained because ``runtime`` happens to pull
-# ``[llm,web,forge]`` together.
+# ``[llm,forge]`` together.
 forge = [
     "click>=8.0",
     "PyYAML>=6.0",
@@ -310,12 +305,6 @@ hyperloom = [
     "assets/slurm/*.sh.in",
     "references/*.md",
 ]
-# Critic LLM skill assets, loaded into the Critic prompt preamble by CriticAgentBackend.
-"hyperloom.agents.critic" = [
-    "SKILL.md",
-    "README.md",
-    "actions/*.md",
-]
 "hyperloom.agents.quantization" = [
     "SKILL.md",
     "README.md",
@@ -470,7 +459,6 @@ omit = [
     "src/hyperloom/inference_optimizer/breakdown/collectors/*",
     # Operator CLIs, not library code.
     "src/hyperloom/inference_optimizer/tools/*",
-    "src/hyperloom/orchestrator/roles/critic_agent.py",
     # Subprocess-heavy benchmark drivers.
     "src/hyperloom/orchestrator/actions/executors/profile.py",
     "src/hyperloom/orchestrator/actions/executors/baseline.py",
@@ -731,7 +719,6 @@ ignorelist = ["aiter"]
 "src/hyperloom/orchestrator/specialists/runner.py" = ["E402"]
 "src/hyperloom/inference_optimizer/roofline_ceiling.py" = ["E402"]
 "src/hyperloom/orchestrator/prompts/specialist_prompt_builder.py" = ["E402"]
-"src/hyperloom/agents/critic/runtime/decision_reviewer.py" = ["E402"]
 # The import sits under the comment block explaining why the attribute name is
 # shared with kernelforge.agent_backends rather than redeclared here.
 "src/kernelforge/workflows/forge_fusion/llm_failure.py" = ["E402"]

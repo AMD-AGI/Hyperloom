@@ -7,6 +7,7 @@ KB T4 safety net)."""
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import os
@@ -24,6 +25,7 @@ from hyperloom.orchestrator.tests.mock_backend import MockBackend, ScriptedPlan
 from hyperloom.inference_optimizer.session.optimization_journal import Verdict
 from hyperloom.orchestrator.actions.executors.explore import STACK_REVALIDATE_SOURCE
 from hyperloom.orchestrator.loop.coordinator import Coordinator
+from hyperloom.orchestrator.loop.proposals import ProposedAction
 from hyperloom.orchestrator.loop.reactor_turn import trace_mcp_setup
 from hyperloom.orchestrator.bus.message_bus import Message
 from hyperloom.inference_optimizer.breakdown.stop_reasons import PATCH_RECOVERY_INCOMPLETE_STOP_REASON
@@ -32,8 +34,8 @@ from hyperloom.orchestrator.state.task_registry import Task, TaskSpec
 from hyperloom.inference_optimizer.protocol.intent import Intent, IntentType
 from hyperloom.orchestrator.actions.executors.patching import _patch_artifacts as patch_artifacts
 from hyperloom.orchestrator.actions.executors.patching import _patch_sources as patch_sources
-from hyperloom.orchestrator.loop.verdicts import CriticRuling
 from hyperloom.orchestrator.phases import phase_transitions
+from hyperloom.orchestrator.phases.machine_state import resolve_keep_threshold
 
 
 def _idle_intent() -> Intent:
@@ -45,7 +47,7 @@ def _silent_plan() -> ScriptedPlan:
 
 
 def _build_backends() -> dict[str, Backend]:
-    return {name: MockBackend(_silent_plan(), name=name) for name in ("orchestration", "critic")}
+    return {"orchestration": MockBackend(_silent_plan(), name="orchestration")}
 
 
 @pytest.mark.asyncio
@@ -732,7 +734,6 @@ def pending_candidate(coord: Coordinator, tmp_path: Path, monkeypatch):
             params["artifacts"] = [{"source": str(source), "target": str(root / "cfg.json")}]
             if two_artifacts:
                 params["artifacts"].append({"source": str(source), "target": str(root / "created.json")})
-        coord.shared_state.record_specialist_patch_verdict("spec-restore", "approve")
         task, _ = await coord.tasks.create_or_return_existing(
             TaskSpec(kind="integrate_patch", params=params, idempotency_key="pending-restore")
         )
@@ -913,7 +914,6 @@ async def test_reused_output_directory_never_reuses_prior_attempt_preimages(coor
         workspace.mkdir(parents=True)
         source = workspace / "cfg.json"
         source.write_text(content)
-        coord.shared_state.record_specialist_patch_verdict(sid, "approve")
         task, _ = await coord.tasks.create_or_return_existing(
             TaskSpec(
                 kind="integrate_patch",
@@ -1549,7 +1549,7 @@ async def test_resume_requeues_an_integrate_the_lost_environment_stopped(coord: 
         TaskSpec(
             kind="integrate_patch",
             params=params,
-            idempotency_key="approved:integrate_patch:abc",
+            idempotency_key="integrate_patch:abc",
             requires_lanes=["benchmark_lane", "server_lifecycle"],
             lease_ttl_sec=900,
             dispatch_class="llm",
@@ -1578,7 +1578,7 @@ async def test_resume_requeues_an_integrate_the_lost_environment_stopped(coord: 
 
     queued = await coord.tasks.queued()
     assert [(t.kind, t.idempotency_key, t.params, t.requires_lanes, t.lease_ttl_sec) for t in queued] == [
-        ("integrate_patch", "approved:integrate_patch:abc-retry1", params, ["benchmark_lane", "server_lifecycle"], 900)
+        ("integrate_patch", "integrate_patch:abc-retry1", params, ["benchmark_lane", "server_lifecycle"], 900)
     ]
     assert [f["kind"] for f in report["fixes"]] == ["rolled_back_pending_integrate", "requeued_pending_integrate"]
     assert report["fixes"][1] == {
@@ -2005,24 +2005,6 @@ async def test_integrate_patch_keep_promotes_stack_and_clears_pending(coord: Coo
     assert coord.shared_state.optimization_stack[-1]["variant_name"] == "spec-1"
     assert coord.shared_state.cumulative_gain_validated == pytest.approx(12.0)
     assert coord.shared_state.cumulative_gain_validated_stack_len == len(coord.shared_state.optimization_stack)
-
-
-# -- replay_for_resume ------------------------------------------------------
-@pytest.mark.asyncio
-async def test_replay_for_resume_rebuilds_undecided_proposals(coord: Coordinator) -> None:
-    p1 = Message.new("kernel_agent", "orchestration", "proposal", {"action_name": "explore", "predicted_gain_pct": 3.0})
-    await coord.bus.append_and_seq(p1)
-    p2 = Message.new(
-        "kernel_agent", "orchestration", "proposal", {"action_name": "baseline", "predicted_gain_pct": 1.0}
-    )
-    await coord.bus.append_and_seq(p2)
-    await coord.bus.append_and_seq(
-        Message.new(
-            "critic", "orchestration", "review_verdict", {"target_proposal_msg_id": p2.msg_id, "verdict": "approve"}
-        )
-    )
-    await coord.writeback.replay_for_resume()
-    assert list(coord.state.pending_proposals) == [p1.msg_id]
 
 
 # -- _context_analysis_reader fallback (path read) --------------------------
@@ -2581,56 +2563,9 @@ async def test_advance_phase_hint_consumed_when_it_drove_the_transition(coord: C
     assert coord.shared_state.last_discarded_escalate_hint == ""
 
 
-# -- materialize_approved_proposal -----------------------------------------
-def _pending(action_name: str, payload: dict, msg_id: str = "prop-1"):
-    from hyperloom.orchestrator.state.pending_proposal import PendingProposal
-
-    return PendingProposal(
-        proposal_msg_id=msg_id,
-        from_agent="orchestration",
-        action_name=action_name,
-        predicted_gain_pct=3.0,
-        payload=payload,
-    )
-
-
-@pytest.mark.asyncio
-async def test_direct_integrate_proposal_inherits_specialist_owner(
-    coord: Coordinator,
-    monkeypatch,
-) -> None:
-    specialist, _ = await coord.tasks.create_or_return_existing(
-        TaskSpec(
-            kind="specialist",
-            params={
-                "source_phase": "FRAMEWORK_AGENT",
-                "domain": "serving_specialist",
-                "gap_layer": "framework",
-            },
-            idempotency_key="owner-source",
-        ),
-    )
-    monkeypatch.setattr(
-        coord.dispatcher,
-        "admission_denial_for_action",
-        lambda _action, **_kw: None,
-    )
-    await coord.router._handle_propose_action(
-        "orchestration",
-        Intent(
-            type=IntentType.PROPOSE_ACTION,
-            payload={
-                "action_name": "integrate_patch",
-                "params": {"specialist_task_id": specialist.task_id},
-            },
-        ),
-    )
-
-    pending = next(iter(coord.state.pending_proposals.values()))
-    params = pending.payload["params"]
-    assert params["source_phase"] == "FRAMEWORK_AGENT"
-    assert params["domain"] == "serving_specialist"
-    assert params["gap_layer"] == "framework"
+# -- materialize -----------------------------------------------------------
+def _proposed(action_name: str, payload: dict) -> ProposedAction:
+    return ProposedAction("orchestration", action_name, {"predicted_gain_pct": 3.0, **payload})
 
 
 def test_specialist_owner_is_frozen_at_creation_outside_agent_phases(
@@ -2652,6 +2587,33 @@ def test_specialist_owner_is_frozen_at_creation_outside_agent_phases(
     assert framework_params["source_phase"] == "FRAMEWORK_AGENT"
 
 
+@pytest.mark.parametrize("phase", ["KERNEL_AGENT", "ENABLEMENT"])
+def test_a_patch_mode_specialist_is_owned_at_dispatch(coord: Coordinator, phase: str) -> None:
+    """A freeform dispatch names no domain, gap layer or authoring phase.
+
+    In patch mode it will still author a diff that lands through ``integrate_patch``, which the breakdown books to
+    the framework agent, so that is the owner the round is frozen with.
+    """
+    coord.shared_state.phase = phase
+    params = {"scope": "freeform", "mode": "patch", "task_description": "fix the scheduler crash"}
+
+    assert coord.router._stamp_specialist_owner(params) == "FRAMEWORK_AGENT"
+    assert params["source_phase"] == "FRAMEWORK_AGENT"
+
+
+def test_a_research_specialist_names_no_owner(coord: Coordinator) -> None:
+    """A freeform dispatch defaults to research, which authors no patch.
+
+    Owning that round would book a read-only investigation to the framework agent, so it keeps the gap the
+    attribution model reports.
+    """
+    coord.shared_state.phase = "KERNEL_AGENT"
+    params = {"scope": "freeform", "task_description": "find out why prefill blocks decode"}
+
+    assert coord.router._stamp_specialist_owner(params) == ""
+    assert "source_phase" not in params
+
+
 @pytest.mark.asyncio
 async def test_materialize_explore_proposal_id_does_not_break_content_dedup(
     coord: Coordinator,
@@ -2659,23 +2621,12 @@ async def test_materialize_explore_proposal_id_does_not_break_content_dedup(
 ) -> None:
     coord.shared_state.baseline_tput = 800.0
     monkeypatch.setattr(coord.proposals, "phase_framework", coord.phase_framework, raising=False)
-    first = _pending(
-        "explore",
-        {"params": {"grid": [{"name": "v0"}]}},
-        msg_id="prop-first",
-    )
-    duplicate = _pending(
-        "explore",
-        {"params": {"grid": [{"name": "v0"}]}},
-        msg_id="prop-duplicate",
-    )
-
-    await coord.proposals.materialize_approved_proposal(first)
-    await coord.proposals.materialize_approved_proposal(duplicate)
+    await coord.proposals.materialize(_proposed("explore", {"params": {"grid": [{"name": "v0"}]}}))
+    await coord.proposals.materialize(_proposed("explore", {"params": {"grid": [{"name": "v0"}]}}))
 
     queued = [task for task in await coord.tasks.queued() if task.kind == "explore"]
     assert len(queued) == 1
-    assert queued[0].params["proposal_msg_id"] == "prop-first"
+    assert queued[0].params["proposal_msg_id"]
 
 
 @pytest.mark.asyncio
@@ -2689,8 +2640,7 @@ async def test_materialize_explore_seeds_cumulative_env_base(coord: Coordinator,
         "extra_server_args": "--kv-cache-dtype fp8",
         "extra_envs": {"VLLM_ROCM_USE_AITER_MHA": "1", "HIP_FORCE_DEV_KERNARG": "1"},
     }
-    pending = _pending("explore", {"params": {"grid": [{"name": "v0"}]}}, msg_id="prop-env")
-    await coord.proposals.materialize_approved_proposal(pending)
+    await coord.proposals.materialize(_proposed("explore", {"params": {"grid": [{"name": "v0"}]}}))
     task = await coord.tasks.get((await coord.tasks.queued())[0].task_id)
     assert task.params["base_extra_args"] == "--kv-cache-dtype fp8"
     assert task.params["base_extra_envs"] == {
@@ -2701,10 +2651,8 @@ async def test_materialize_explore_seeds_cumulative_env_base(coord: Coordinator,
 
 @pytest.mark.asyncio
 async def test_materialize_baseline_ignores_params_outside_fingerprint(coord: Coordinator) -> None:
-    await coord.proposals.materialize_approved_proposal(_pending("baseline", {"params": {}}, msg_id="prop-b0"))
-    await coord.proposals.materialize_approved_proposal(
-        _pending("baseline", {"params": {"tag": "x"}}, msg_id="prop-b1"),
-    )
+    await coord.proposals.materialize(_proposed("baseline", {"params": {}}))
+    await coord.proposals.materialize(_proposed("baseline", {"params": {"tag": "x"}}))
     queued = [t for t in await coord.tasks.queued() if t.kind == "baseline"]
     assert len(queued) == 1
     tail = await coord.bus.tail(topic="observation", n=20)
@@ -2713,9 +2661,9 @@ async def test_materialize_baseline_ignores_params_outside_fingerprint(coord: Co
 
 @pytest.mark.asyncio
 async def test_materialize_baseline_distinct_envs_queue_separately(coord: Coordinator) -> None:
-    await coord.proposals.materialize_approved_proposal(_pending("baseline", {"params": {}}, msg_id="prop-e0"))
-    await coord.proposals.materialize_approved_proposal(
-        _pending("baseline", {"params": {"extra_envs": {"VLLM_ROCM_USE_AITER_MOE": "0"}}}, msg_id="prop-e1"),
+    await coord.proposals.materialize(_proposed("baseline", {"params": {}}))
+    await coord.proposals.materialize(
+        _proposed("baseline", {"params": {"extra_envs": {"VLLM_ROCM_USE_AITER_MOE": "0"}}})
     )
     queued = [t for t in await coord.tasks.queued() if t.kind == "baseline"]
     assert len(queued) == 2
@@ -2723,14 +2671,40 @@ async def test_materialize_baseline_distinct_envs_queue_separately(coord: Coordi
 
 @pytest.mark.asyncio
 async def test_materialize_requeues_same_content_after_terminal_twin(coord: Coordinator) -> None:
-    await coord.proposals.materialize_approved_proposal(_pending("baseline", {"params": {}}, msg_id="prop-t0"))
+    await coord.proposals.materialize(_proposed("baseline", {"params": {}}))
     first = [t for t in await coord.tasks.queued() if t.kind == "baseline"][0]
     await coord.tasks.transition(first.task_id, "running")
     await coord.tasks.transition(first.task_id, "failed")
-    await coord.proposals.materialize_approved_proposal(_pending("baseline", {"params": {}}, msg_id="prop-t1"))
+    await coord.proposals.materialize(_proposed("baseline", {"params": {}}))
     queued = [t for t in await coord.tasks.queued() if t.kind == "baseline"]
     assert len(queued) == 1
     assert queued[0].task_id != first.task_id
+
+
+@pytest.mark.asyncio
+async def test_materialize_carries_the_predicted_gain_onto_the_task(coord: Coordinator) -> None:
+    await coord.proposals.materialize(_proposed("baseline", {"params": {}}))
+
+    (task,) = [t for t in await coord.tasks.queued() if t.kind == "baseline"]
+    assert task.params["predicted_gain_pct"] == 3.0
+
+
+@pytest.mark.asyncio
+async def test_materialize_stops_requeueing_once_every_retry_key_is_spent(coord: Coordinator) -> None:
+    from hyperloom.orchestrator.state.task_registry import RETRY_KEY_ATTEMPTS
+
+    for _ in range(RETRY_KEY_ATTEMPTS):
+        await coord.proposals.materialize(_proposed("baseline", {"params": {}}))
+        (task,) = [t for t in await coord.tasks.queued() if t.kind == "baseline"]
+        await coord.tasks.transition(task.task_id, "running")
+        await coord.tasks.transition(task.task_id, "failed")
+
+    await coord.proposals.materialize(_proposed("baseline", {"params": {}}))
+
+    assert [t for t in await coord.tasks.queued() if t.kind == "baseline"] == []
+    tail = await coord.bus.tail(topic="observation", n=20)
+    skipped = [m.payload["reason"] for m in tail if m.payload.get("kind") == "proposal_materialize_skipped"]
+    assert skipped == ["idempotency_key_exhausted"]
 
 
 @pytest.mark.asyncio
@@ -2751,7 +2725,7 @@ async def test_a_baseline_twin_answers_a_repeat_proposal_only_once_it_measured(
         return dict(result)
 
     coord.sub.register_executor("baseline", _baseline)
-    await coord.proposals.materialize_approved_proposal(_pending("baseline", {"params": {}}, msg_id="prop-s0"))
+    await coord.proposals.materialize(_proposed("baseline", {"params": {}}))
     first = [t for t in await coord.tasks.queued() if t.kind == "baseline"][0]
     lease = await coord.locks.acquire_many(
         list(first.requires_lanes), holder_id=first.task_id, task_id=first.task_id, action="baseline", ttl_sec=600
@@ -2759,16 +2733,14 @@ async def test_a_baseline_twin_answers_a_repeat_proposal_only_once_it_measured(
     await coord.sub.run_task(first, prebound_lease=lease)
     assert (await coord.tasks.get(first.task_id)).state == "succeeded"
 
-    await coord.proposals.materialize_approved_proposal(_pending("baseline", {"params": {}}, msg_id="prop-s1"))
+    await coord.proposals.materialize(_proposed("baseline", {"params": {}}))
 
     live = [t.idempotency_key for t in (*await coord.tasks.queued(), *await coord.tasks.running())]
     tail = await coord.bus.tail(topic="observation", n=20)
     skipped = [m.payload for m in tail if m.payload.get("kind") == "proposal_materialize_skipped"]
     if requeued_key is None:
         assert live == []
-        assert [(p["reason"], p["proposal_msg_id"], p["task_id"]) for p in skipped] == [
-            ("baseline_already_succeeded", "prop-s1", first.task_id)
-        ]
+        assert [(p["reason"], p["task_id"]) for p in skipped] == [("baseline_already_succeeded", first.task_id)]
     else:
         assert live == [f"{first.idempotency_key}{requeued_key}"]
         assert skipped == []
@@ -2838,7 +2810,37 @@ async def test_handle_delegate_duplicate_running_denied(coord: Coordinator, monk
     assert [d.rule for d in recorded] == ["duplicate_idempotency_key_running"]
 
 
-# -- maybe_autosubmit_specialist_patches early returns ---------------------
+@pytest.mark.asyncio
+async def test_a_delegate_reusing_the_key_of_a_measured_baseline_is_answered_by_it(
+    coord: Coordinator, monkeypatch
+) -> None:
+    """The twin rule a proposed baseline is held to holds on the delegate channel too."""
+    monkeypatch.setattr(coord.dispatcher, "_sequence_denial_for_action", lambda a: None)
+
+    async def _baseline(_ctx):
+        return {"status": "ok", "output_throughput": 100.0, "completed_requests": 8}
+
+    coord.sub.register_executor("baseline", _baseline)
+    await coord.router.handle_delegate("orchestration", _delegate("baseline", "d-measured", {"runs": 1}))
+    (first,) = [t for t in await coord.tasks.queued() if t.kind == "baseline"]
+    lease = await coord.locks.acquire_many(
+        list(first.requires_lanes), holder_id=first.task_id, task_id=first.task_id, action="baseline", ttl_sec=600
+    )
+    await coord.sub.run_task(first, prebound_lease=lease)
+    recorded: list = []
+
+    async def _rec(source, intent, denied, action_name=None):
+        recorded.append(denied)
+
+    monkeypatch.setattr(coord.router, "record_policy_denied", _rec)
+
+    await coord.router.handle_delegate("orchestration", _delegate("baseline", "d-measured", {"runs": 1}))
+
+    assert [d.rule for d in recorded] == ["duplicate_idempotency_key"]
+    assert [t for t in await coord.tasks.queued() if t.kind == "baseline"] == []
+
+
+# -- one integrate_patch per specialist deliverable -------------------------
 def _make_real_patch(coord: Coordinator, sid: str) -> None:
     from hyperloom.inference_optimizer.session.session_paths import runs_dir
 
@@ -2847,43 +2849,257 @@ def _make_real_patch(coord: Coordinator, sid: str) -> None:
     (wt / "kernel.py").write_text("# patched\n", encoding="utf-8")
 
 
+async def _integrate_tasks(coord: Coordinator) -> list:
+    rows = await coord.db.fetchall("SELECT task_id FROM tasks WHERE kind = 'integrate_patch' ORDER BY created_at")
+    return [await coord.tasks.get(row["task_id"]) for row in rows]
+
+
+_AUTHORING_PARAMS = {
+    "source_phase": "FRAMEWORK_AGENT",
+    "domain": "serving_specialist",
+    "gap_canonical_id": "gap.framework.moe",
+    "gap_layer": "framework",
+    "framework_agent_authoring": True,
+    "framework_agent_candidate_id": "cand-1",
+}
+_PATCH_DELIVERABLE = {
+    "patches_written": ["kernel.py"],
+    "proposal_set": [{"name": "fused-moe", "atomic": True, "extra_envs": {"SGLANG_X": "1"}}],
+}
+# What the integrate_patch of that deliverable carries, whichever route queued it.
+_DELIVERABLE_PARAMS = {
+    "specialist_task_id": "spec-a",
+    "patch_name": "fused-moe",
+    "extra_envs": {"SGLANG_X": "1"},
+    "source_phase": "FRAMEWORK_AGENT",
+    "domain": "serving_specialist",
+    "gap_canonical_id": "gap.framework.moe",
+    "gap_layer": "framework",
+    "provenance": "specialist:serving_specialist",
+    "framework_agent_authoring": True,
+    "framework_agent_candidate_id": "cand-1",
+}
+
+
+async def _dispatch_specialist(
+    coord: Coordinator, monkeypatch, done: dict, params: dict | None = None
+) -> asyncio.Event:
+    """Dispatch specialist ``spec-a``; it runs until the returned event is set, then ends with ``done``."""
+    monkeypatch.setenv("INFERENCE_OPTIMIZER_SPECIALIST_AUTO_RETRY", "0")
+    coord.shared_state.phase = "FRAMEWORK_AGENT"
+    coord.shared_state.baseline_tput = 1000.0
+    _make_real_patch(coord, "spec-a")
+    started, finish = asyncio.Event(), asyncio.Event()
+
+    async def _specialist(_ctx):
+        started.set()
+        await finish.wait()
+        return {"status": "succeeded", "specialist_done": dict(done)}
+
+    coord.sub.register_executor("specialist", _specialist)
+    await coord.tasks.create_or_return_existing(
+        TaskSpec(
+            kind="specialist", params=dict(params or _AUTHORING_PARAMS), idempotency_key="spec-a", task_id="spec-a"
+        )
+    )
+    await coord.dispatcher.pump_dispatcher_once()
+    await asyncio.wait_for(started.wait(), timeout=5)
+    return finish
+
+
+async def _end_specialist(coord: Coordinator, finish: asyncio.Event, *, booked: bool = True) -> None:
+    finish.set()
+    await coord.dispatcher.wait_for_running_work(timeout=5)
+    if booked:
+        await coord.dispatcher._drain_completions()
+
+
+def _integrate_request(channel: IntentType, params: dict | None = None) -> Intent:
+    payload = {"action_name": "integrate_patch", "params": params or {"specialist_task_id": "spec-a"}}
+    if channel is IntentType.PROPOSE_ACTION:
+        payload.update(predicted_gain_pct=2.0, rationale="land the patch")
+    return Intent(type=channel, payload=payload)
+
+
+async def _observed(coord: Coordinator, kind: str, field: str) -> list:
+    return [m.payload[field] for m in await coord.bus.tail(topic="observation", n=50) if m.payload.get("kind") == kind]
+
+
+_CHANNELS = pytest.mark.parametrize(
+    "channel", [IntentType.DELEGATE, IntentType.PROPOSE_ACTION], ids=["delegate", "propose_action"]
+)
+
+
 @pytest.mark.asyncio
-async def test_autosubmit_returns_when_verdict_exists(coord: Coordinator, monkeypatch) -> None:
-    from hyperloom.orchestrator.state.task_registry import Task
+@_CHANNELS
+@pytest.mark.parametrize("booked", [False, True], ids=["asked-before-its-result-is-booked", "asked-after"])
+async def test_an_agents_integrate_patch_waits_for_its_specialist_and_lands_the_deliverable_once(
+    coord: Coordinator, monkeypatch, channel: IntentType, booked: bool
+) -> None:
+    """Asked for while the specialist runs it is denied; asked for once it ended it is the task the Coordinator queues."""
+    finish = await _dispatch_specialist(coord, monkeypatch, _PATCH_DELIVERABLE)
 
-    sid = "spec-verdict"
-    _make_real_patch(coord, sid)
-    monkeypatch.setattr(coord.shared_state, "get_specialist_patch_verdict", lambda s: {"verdict": "approve"})
-    task = Task(task_id=sid, kind="specialist", state="running", params={}, idempotency_key="kv1")
-    n_before = len(coord.state.pending_proposals)
-    await coord.phase_framework.maybe_autosubmit_specialist_patches(
-        task=task,
-        done_payload={"patches_written": ["kernel.py"]},
-    )
-    assert len(coord.state.pending_proposals) == n_before
+    await coord.router.handle_intent("orchestration", _integrate_request(channel))
+
+    assert await _observed(coord, "policy_denied", "rule") == ["integrate_patch_specialist_unfinished"]
+    assert await _integrate_tasks(coord) == []
+
+    await _end_specialist(coord, finish, booked=booked)
+    await coord.router.handle_intent("orchestration", _integrate_request(channel))
+    await coord.dispatcher._drain_completions()
+
+    (task,) = await _integrate_tasks(coord)
+    assert (task.state, task.idempotency_key) == ("queued", "integrate_patch:spec-a")
+    assert {key: task.params.get(key) for key in _DELIVERABLE_PARAMS} == _DELIVERABLE_PARAMS
+    assert task.params["keep_threshold_pct"] == pytest.approx(resolve_keep_threshold(coord.shared_state))
+    assert await _observed(coord, "specialist_patch_integrate_queued", "task_id") == ([task.task_id] if booked else [])
 
 
 @pytest.mark.asyncio
-async def test_autosubmit_returns_when_review_in_flight(coord: Coordinator) -> None:
-    from hyperloom.orchestrator.state.task_registry import Task
-    from hyperloom.orchestrator.state.pending_proposal import PendingProposal
+@_CHANNELS
+async def test_an_agent_cannot_integrate_a_specialist_that_left_nothing(
+    coord: Coordinator, monkeypatch, channel: IntentType
+) -> None:
+    finish = await _dispatch_specialist(coord, monkeypatch, {"patches_written": []})
+    await _end_specialist(coord, finish)
 
-    sid = "spec-inflight"
-    _make_real_patch(coord, sid)
-    coord.state.pending_proposals["existing"] = PendingProposal(
-        proposal_msg_id="existing",
-        from_agent="coordinator",
-        action_name="integrate_patch",
-        predicted_gain_pct=0.0,
-        payload={"params": {"specialist_task_id": sid}},
+    await coord.router.handle_intent("orchestration", _integrate_request(channel))
+
+    assert await _observed(coord, "policy_denied", "rule") == ["integrate_patch_no_deliverable"]
+    assert await _integrate_tasks(coord) == []
+
+
+@pytest.mark.asyncio
+@_CHANNELS
+async def test_an_agent_cannot_queue_the_integrate_patch_of_an_upstream_pr(
+    coord: Coordinator, channel: IntentType
+) -> None:
+    """Only the FRAMEWORK_AGENT pump lands a diff fetched from an upstream PR."""
+    coord.shared_state.phase = "FRAMEWORK_AGENT"
+    coord.shared_state.baseline_tput = 1000.0
+    params = {
+        "patch_source": "upstream_pr",
+        "candidate": {"repo": "vllm-project/vllm", "pr_number": 1015},
+        "source_phase": "FRAMEWORK_AGENT",
+    }
+
+    await coord.router.handle_intent("orchestration", _integrate_request(channel, params))
+
+    assert await _observed(coord, "policy_denied", "rule") == ["integrate_patch_upstream_pr"]
+    assert await _integrate_tasks(coord) == []
+
+
+@pytest.mark.asyncio
+@_CHANNELS
+@pytest.mark.parametrize(
+    ("ended_with", "refusal", "tasks_after"),
+    [
+        (
+            None,
+            {
+                IntentType.DELEGATE: "duplicate_idempotency_key_running",
+                IntentType.PROPOSE_ACTION: "duplicate_proposal_content",
+            },
+            1,
+        ),
+        (
+            {"status": "reverted", "benched": True},
+            {
+                IntentType.DELEGATE: "duplicate_idempotency_key",
+                IntentType.PROPOSE_ACTION: "integrate_patch_already_measured",
+            },
+            1,
+        ),
+        ({"status": "apply_failed"}, None, 2),
+    ],
+    ids=["still-queued", "benchmarked", "ended-unmeasured"],
+)
+async def test_an_agents_integrate_patch_meets_the_one_the_coordinator_queued(
+    coord: Coordinator,
+    monkeypatch,
+    channel: IntentType,
+    ended_with: dict | None,
+    refusal: dict | None,
+    tasks_after: int,
+) -> None:
+    """Every route shares the deliverable's key, so it is benchmarked once; a retry is the same deliverable."""
+    await _end_specialist(coord, await _dispatch_specialist(coord, monkeypatch, _PATCH_DELIVERABLE))
+    (queued,) = await _integrate_tasks(coord)
+    if ended_with is not None:
+
+        async def _integrate(_ctx):
+            return dict(ended_with)
+
+        coord.sub.register_executor("integrate_patch", _integrate)
+        lease = await coord.locks.acquire_many(
+            list(queued.requires_lanes),
+            holder_id=queued.task_id,
+            task_id=queued.task_id,
+            action="integrate_patch",
+            ttl_sec=600,
+        )
+        await coord.sub.run_task(queued, prebound_lease=lease)
+
+    await coord.router.handle_intent("orchestration", _integrate_request(channel))
+
+    refused = [
+        *await _observed(coord, "policy_denied", "rule"),
+        *await _observed(coord, "proposal_materialize_skipped", "reason"),
+    ]
+    assert refused == ([refusal[channel]] if refusal else [])
+    tasks = await _integrate_tasks(coord)
+    assert [task.idempotency_key for task in tasks] == ["integrate_patch:spec-a", "integrate_patch:spec-a-retry1"][
+        :tasks_after
+    ]
+    assert {key: tasks[-1].params.get(key) for key in _DELIVERABLE_PARAMS} == _DELIVERABLE_PARAMS
+
+
+@pytest.mark.asyncio
+async def test_a_finished_deliverable_is_queued_for_integrate_patch_once(coord: Coordinator, monkeypatch) -> None:
+    await _end_specialist(coord, await _dispatch_specialist(coord, monkeypatch, _PATCH_DELIVERABLE))
+    await coord.phase_framework.integrate_specialist_deliverable(
+        task=await coord.tasks.get("spec-a"), done_payload=dict(_PATCH_DELIVERABLE)
     )
-    task = Task(task_id=sid, kind="specialist", state="running", params={}, idempotency_key="kv2")
-    n_before = len(coord.state.pending_proposals)
-    await coord.phase_framework.maybe_autosubmit_specialist_patches(
-        task=task,
-        done_payload={"patches_written": ["kernel.py"]},
+
+    (task,) = await _integrate_tasks(coord)
+    assert (task.state, task.idempotency_key) == ("queued", "integrate_patch:spec-a")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "asked_through",
+    [None, IntentType.DELEGATE, IntentType.PROPOSE_ACTION],
+    ids=["queued-by-the-coordinator", "delegate", "propose_action"],
+)
+async def test_an_enablement_round_moves_onto_the_integrate_patch_of_its_config_deliverable(
+    coord: Coordinator, monkeypatch, asked_through: IntentType | None
+) -> None:
+    """The round the specialist held is handed to the task that measures what it delivered, whoever queued it."""
+    from hyperloom.orchestrator.state.round_store import RoundRequest
+
+    finish = await _dispatch_specialist(
+        coord,
+        monkeypatch,
+        {"proposal_set": [{"name": "enable", "extra_envs": {"X": "1"}}]},
+        params={
+            "enablement": True,
+            "source_phase": "ENABLEMENT",
+            "domain": "serving_specialist",
+            "gap_canonical_id": "gap.enablement.boot",
+        },
     )
-    assert len(coord.state.pending_proposals) == n_before
+    opened = await coord.rounds.open(
+        "round-spec-a", RoundRequest(now_unix=1.0, request_id="open"), holder_task_id="spec-a", lease_sec=600.0
+    )
+    assert opened.ok
+
+    await _end_specialist(coord, finish, booked=asked_through is None)
+    if asked_through is not None:
+        await coord.router.handle_intent("orchestration", _integrate_request(asked_through))
+
+    (task,) = await _integrate_tasks(coord)
+    assert (task.params["enablement"], task.params["extra_envs"]) == (True, {"X": "1"})
+    assert (await coord.rounds.held()).holder_task_id == task.task_id
 
 
 # -- promote_warm_replay branches ------------------------------------------
@@ -2942,8 +3158,8 @@ def _enter_framework(coord: Coordinator) -> None:
 
 
 @pytest.mark.asyncio
-async def test_pump_framework_agent_submits_candidate_proposal(coord: Coordinator, monkeypatch) -> None:
-    """The pump submits the candidate as a proposal instead of enqueuing inline."""
+async def test_pump_framework_agent_routes_a_candidate_to_its_integrate_patch(coord: Coordinator, monkeypatch) -> None:
+    """The pump queues a direct-route candidate's integrate_patch itself."""
     _enter_framework(coord)
     candidate = {
         "candidate_id": "c1",
@@ -2959,54 +3175,68 @@ async def test_pump_framework_agent_submits_candidate_proposal(coord: Coordinato
 
     await coord.phase_framework._pump_framework_agent_phase()
 
-    pendings = [p for p in coord.state.pending_proposals.values() if p.action_name == "integrate_patch"]
-    assert len(pendings) == 1
-    payload = pendings[0].payload
-    assert payload["framework_agent_candidate_id"] == "c1"
-    assert payload["audit_step"] == "direct_framework"
-    queued = await coord.tasks.queued()
-    assert not [t for t in queued if getattr(t, "kind", "") == "integrate_patch"]
+    (task,) = [t for t in await coord.tasks.queued() if t.kind == "integrate_patch"]
+    assert task.params["framework_agent_candidate_id"] == "c1"
+    assert task.params["patch_source"] == "upstream_pr"
 
 
-@pytest.mark.asyncio
-async def test_pump_framework_agent_dedup_does_not_resubmit(coord: Coordinator, monkeypatch) -> None:
-    """A candidate already awaiting its verdict is not re-submitted on the next tick."""
+_PR_CANDIDATE = {
+    "pr_url": "https://github.com/sgl-project/sglang/pull/42",
+    "diff_url": "https://github.com/sgl-project/sglang/pull/42.diff",
+    "repo": "sgl-project/sglang",
+    "ref": "perf/moe",
+    "title": "perf: fuse the MoE gate",
+    "framework": "sglang",
+    "route": "direct_framework",
+}
+
+
+async def _pump_discovered_candidate(coord: Coordinator, monkeypatch) -> list[str]:
+    """Pump FRAMEWORK_AGENT once over one discovered upstream PR; returns the discovery rounds later pumps ask for."""
     _enter_framework(coord)
+    coord.shared_state.framework_agent_batches = [{"batch_id": "b1", "candidates": [dict(_PR_CANDIDATE)]}]
+    discoveries: list[str] = []
 
-    candidate = {"candidate_id": "c1", "batch_id": "b1", "route": "direct_framework"}
-    monkeypatch.setattr(
-        coord.phase_framework,
-        "_select_next_framework_agent_candidate",
-        lambda exclude_ids=(): None if candidate["candidate_id"] in exclude_ids else candidate,
-    )
+    async def _discover(*, reason: str) -> bool:
+        discoveries.append(reason)
+        return True
 
+    monkeypatch.setattr(coord.phase_framework, "_maybe_enqueue_candidate_discovery", _discover)
     await coord.phase_framework._pump_framework_agent_phase()
-    await coord.phase_framework._pump_framework_agent_phase()
-    pendings = [p for p in coord.state.pending_proposals.values() if p.action_name == "integrate_patch"]
-    assert len(pendings) == 1
+    return discoveries
 
 
 @pytest.mark.asyncio
-async def test_framework_agent_reject_records_critic_denied(coord: Coordinator, monkeypatch) -> None:
-    """A reject verdict on a framework_agent candidate proposal writes a critic_denied progress row."""
-    monkeypatch.setattr(coord.router, "phase_framework", coord.phase_framework, raising=False)
-    from hyperloom.orchestrator.state.pending_proposal import PendingProposal
+async def test_pump_framework_agent_does_not_route_an_in_flight_candidate_again(
+    coord: Coordinator, monkeypatch
+) -> None:
+    """A candidate whose integrate_patch is queued is neither queued again nor passed over for discovery."""
+    discoveries = await _pump_discovered_candidate(coord, monkeypatch)
 
-    pending = PendingProposal(
-        proposal_msg_id="m1",
-        from_agent="coordinator",
-        action_name="integrate_patch",
-        predicted_gain_pct=0.0,
-        payload={"framework_agent_candidate_id": "c1", "batch_id": "b1"},
-    )
-    coord.state.pending_proposals["m1"] = pending
-    await coord.router._handle_single_verdict(
-        source="critic",
-        pending=pending,
-        ruling=CriticRuling(verdict="reject", reasoning="unsafe"),
-    )
-    prog = coord.shared_state.framework_agent_phase_progress
-    assert any(p.get("status") == "critic_denied" and p.get("candidate_id") == "c1" for p in prog)
+    await coord.phase_framework._pump_framework_agent_phase()
+
+    (task,) = await _integrate_tasks(coord)
+    assert (task.state, task.params["patch_source"]) == ("queued", "upstream_pr")
+    assert discoveries == []
+
+
+@pytest.mark.asyncio
+async def test_pump_framework_agent_moves_on_from_a_candidate_whose_integrate_patch_was_cancelled(
+    coord: Coordinator, monkeypatch
+) -> None:
+    """A row cancelled while queued books no result, so the pump gives its candidate the terminal row."""
+    discoveries = await _pump_discovered_candidate(coord, monkeypatch)
+    (task,) = await _integrate_tasks(coord)
+    await coord.tasks.transition(task.task_id, "cancelled", {"reason": "phase_budget"})
+
+    for _ in range(3):
+        await coord.phase_framework._pump_framework_agent_phase()
+
+    assert [task.task_id] == [t.task_id for t in await _integrate_tasks(coord)]
+    assert [(row["status"], row["provenance"]) for row in coord.shared_state.framework_agent_phase_progress] == [
+        ("no_result_failed", "pump")
+    ]
+    assert discoveries == ["candidate_pool_empty", "candidate_pool_empty"]
 
 
 # -- _session_integrated_kernel_patch (post-opt roofline gate) ---------------
@@ -3038,15 +3268,15 @@ def test_post_opt_roofline_gate_ignores_non_dict_entries(coord: Coordinator) -> 
 
 
 # -- atomic config levers ride with the patch they are inseparable from -----
-def _autosubmitted_integrate_params(coord: Coordinator) -> dict:
-    """Return the params of the integrate_patch proposal the bridge just queued."""
-    rows = [p for p in coord.state.pending_proposals.values() if getattr(p, "action_name", "") == "integrate_patch"]
-    assert rows, "the bridge queued no integrate_patch proposal"
-    return dict((getattr(rows[-1], "payload", {}) or {}).get("params") or {})
+async def _queued_integrate_params(coord: Coordinator) -> dict:
+    """Return the params of the integrate_patch task the bridge just queued."""
+    rows = [t for t in await coord.tasks.queued() if t.kind == "integrate_patch"]
+    assert rows, "the bridge queued no integrate_patch task"
+    return dict(rows[-1].params)
 
 
 @pytest.mark.asyncio
-async def test_autosubmit_patch_carries_atomic_config_lever(coord: Coordinator) -> None:
+async def test_integrate_patch_task_carries_atomic_config_lever(coord: Coordinator) -> None:
     """A lever the specialist marked ``atomic`` reaches integrate_patch with its patch.
 
     The patch clears a framework guard that the server then asserts on through the
@@ -3057,7 +3287,7 @@ async def test_autosubmit_patch_carries_atomic_config_lever(coord: Coordinator) 
     sid = "spec-atomic-lever"
     _make_real_patch(coord, sid)
     task = Task(task_id=sid, kind="specialist", state="running", params={}, idempotency_key="kv-atomic")
-    await coord.phase_framework.maybe_autosubmit_specialist_patches(
+    await coord.phase_framework.integrate_specialist_deliverable(
         task=task,
         done_payload={
             "patches_written": ["kernel.py"],
@@ -3071,27 +3301,27 @@ async def test_autosubmit_patch_carries_atomic_config_lever(coord: Coordinator) 
             ],
         },
     )
-    params = _autosubmitted_integrate_params(coord)
+    params = await _queued_integrate_params(coord)
     assert params["extra_server_args"] == "--kv-cache-dtype fp8"
     assert params["extra_envs"] == {"VLLM_MHC_TORCH_FALLBACK": "1"}
 
 
 @pytest.mark.asyncio
-async def test_autosubmit_patch_omits_non_atomic_config_lever(coord: Coordinator) -> None:
+async def test_integrate_patch_task_omits_non_atomic_config_lever(coord: Coordinator) -> None:
     """An ordinary companion lever stays the config bridge's business, not the patch's."""
     from hyperloom.orchestrator.state.task_registry import Task
 
     sid = "spec-plain-lever"
     _make_real_patch(coord, sid)
     task = Task(task_id=sid, kind="specialist", state="running", params={}, idempotency_key="kv-plain")
-    await coord.phase_framework.maybe_autosubmit_specialist_patches(
+    await coord.phase_framework.integrate_specialist_deliverable(
         task=task,
         done_payload={
             "patches_written": ["kernel.py"],
             "proposal_set": [{"name": "opt-only", "extra_args": "--speculative-num-steps 3"}],
         },
     )
-    params = _autosubmitted_integrate_params(coord)
+    params = await _queued_integrate_params(coord)
     assert "extra_server_args" not in params
     assert "extra_envs" not in params
 
@@ -3117,7 +3347,7 @@ async def test_enablement_patch_carries_its_companion_lever_even_when_not_atomic
         params={"enablement": True},
         idempotency_key="kv-enablement",
     )
-    await coord.phase_framework.maybe_autosubmit_specialist_patches(
+    await coord.phase_framework.integrate_specialist_deliverable(
         task=task,
         done_payload={
             "patches_written": ["kernel.py"],
@@ -3131,7 +3361,7 @@ async def test_enablement_patch_carries_its_companion_lever_even_when_not_atomic
             ],
         },
     )
-    params = _autosubmitted_integrate_params(coord)
+    params = await _queued_integrate_params(coord)
     assert params["extra_server_args"] == "--kv-cache-dtype fp8"
 
 
@@ -3143,14 +3373,14 @@ async def test_optimization_patch_still_omits_a_non_atomic_lever(coord: Coordina
     sid = "spec-opt-lever"
     _make_real_patch(coord, sid)
     task = Task(task_id=sid, kind="specialist", state="running", params={}, idempotency_key="kv-opt")
-    await coord.phase_framework.maybe_autosubmit_specialist_patches(
+    await coord.phase_framework.integrate_specialist_deliverable(
         task=task,
         done_payload={
             "patches_written": ["kernel.py"],
             "proposal_set": [{"name": "opt-only", "atomic": False, "extra_args": "--speculative-num-steps 3"}],
         },
     )
-    assert "extra_server_args" not in _autosubmitted_integrate_params(coord)
+    assert "extra_server_args" not in (await _queued_integrate_params(coord))
 
 
 @pytest.mark.asyncio
@@ -3178,7 +3408,7 @@ async def test_enablement_round_inherits_the_flags_earlier_rounds_established(co
         params={"enablement": True},
         idempotency_key="kv-inherit",
     )
-    await coord.phase_framework.maybe_autosubmit_specialist_patches(
+    await coord.phase_framework.integrate_specialist_deliverable(
         task=task,
         done_payload={
             "patches_written": ["kernel.py"],
@@ -3186,7 +3416,7 @@ async def test_enablement_round_inherits_the_flags_earlier_rounds_established(co
             "proposal_set": [{"name": "rocm-aiter-sparse-indexer", "atomic": False, "extra_args": ""}],
         },
     )
-    params = _autosubmitted_integrate_params(coord)
+    params = await _queued_integrate_params(coord)
     assert "--kv-cache-dtype fp8" in params["extra_server_args"]
     assert params["extra_envs"]["VLLM_ROCM_USE_AITER"] == "1"
 
@@ -3206,14 +3436,14 @@ async def test_this_round_overrides_an_inherited_flag(coord: Coordinator) -> Non
         params={"enablement": True},
         idempotency_key="kv-override",
     )
-    await coord.phase_framework.maybe_autosubmit_specialist_patches(
+    await coord.phase_framework.integrate_specialist_deliverable(
         task=task,
         done_payload={
             "patches_written": ["kernel.py"],
             "proposal_set": [{"name": "raise-seqs", "atomic": False, "extra_args": "--max-num-seqs 128"}],
         },
     )
-    args = _autosubmitted_integrate_params(coord)["extra_server_args"]
+    args = (await _queued_integrate_params(coord))["extra_server_args"]
     assert "--max-num-seqs 128" in args
     assert "64" not in args
 
@@ -3227,26 +3457,26 @@ async def test_optimization_rounds_inherit_nothing(coord: Coordinator) -> None:
     sid = "spec-no-inherit"
     _make_real_patch(coord, sid)
     task = Task(task_id=sid, kind="specialist", state="running", params={}, idempotency_key="kv-noinherit")
-    await coord.phase_framework.maybe_autosubmit_specialist_patches(
+    await coord.phase_framework.integrate_specialist_deliverable(
         task=task,
         done_payload={"patches_written": ["kernel.py"], "proposal_set": [{"name": "opt", "extra_args": ""}]},
     )
-    assert "extra_server_args" not in _autosubmitted_integrate_params(coord)
+    assert "extra_server_args" not in (await _queued_integrate_params(coord))
 
 
 @pytest.mark.asyncio
-async def test_autosubmit_patch_survives_a_non_dict_first_proposal(coord: Coordinator) -> None:
-    """A malformed proposal entry costs the review its patch name, not the review itself."""
+async def test_integrate_patch_task_survives_a_non_dict_first_proposal(coord: Coordinator) -> None:
+    """A malformed proposal entry costs the integrate_patch its patch name, not the task itself."""
     from hyperloom.orchestrator.state.task_registry import Task
 
     sid = "spec-bare-proposal"
     _make_real_patch(coord, sid)
     task = Task(task_id=sid, kind="specialist", state="running", params={}, idempotency_key="kv-bare")
-    await coord.phase_framework.maybe_autosubmit_specialist_patches(
+    await coord.phase_framework.integrate_specialist_deliverable(
         task=task,
         done_payload={"patches_written": ["kernel.py"], "proposal_set": ["fuse-moe"]},
     )
-    assert _autosubmitted_integrate_params(coord)["patch_name"] == ""
+    assert (await _queued_integrate_params(coord))["patch_name"] == ""
 
 
 @pytest.mark.asyncio

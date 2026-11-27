@@ -68,12 +68,6 @@ def validate_gemm_tuning_request(kind: str) -> None:
     )
 
 
-def validate_review_verdict(payload: dict[str, Any]) -> None:
-    """Refuse a ``REVIEW_VERDICT`` whose ``target_proposal_msg_id`` is blank."""
-    if not str(payload.get("target_proposal_msg_id", "")).strip():
-        raise PolicyDenied("review_verdict missing target_proposal_msg_id", rule="payload")
-
-
 def validate_prune_branch(payload: dict[str, Any]) -> None:
     """Validate the family and scope of an orchestration prune request."""
     family = str(payload.get("family", "")).strip()

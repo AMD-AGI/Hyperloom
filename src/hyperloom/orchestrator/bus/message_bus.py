@@ -18,7 +18,6 @@ from .storage.connection import SqliteConnection
 
 TOPIC_ALLOWLIST = frozenset(
     {
-        "proposal",
         "observation",
         "event",
         "decision",
@@ -26,14 +25,10 @@ TOPIC_ALLOWLIST = frozenset(
         "delegated_result",
         "request",
         "response",
-        "review_verdict",
-        "advice",
         "strategy_change",
     }
 )
 
-# The Critic's idle reply, the only observation the Critic sends. It says nothing, so no inbox shows it.
-_NOT_CRITIC_IDLE_SQL = "NOT (from_agent = 'critic' AND topic = 'observation')"
 # The ``source`` of the reply to a request deferred because the bench lanes are busy. The reply asks nothing of its
 # reader: the same request is deferred the same way until the lanes free.
 LANES_BUSY_SOURCE = "lanes_busy"
@@ -42,20 +37,12 @@ ROLE_SUBSCRIPTIONS: dict[str, frozenset[str]] = {
     "orchestration": frozenset(
         {
             "delegated_result",
-            "review_verdict",
             "observation",
             "event",
             "decision",
             "alert",
-            "advice",
             "strategy_change",
             "response",
-            "proposal",
-        }
-    ),
-    "critic": frozenset(
-        {
-            "proposal",
         }
     ),
 }
@@ -184,7 +171,7 @@ class MessageBus:
     def recent_outcomes_context_sync(self, *, limit: int) -> list[Message]:
         """Read the latest outcomes, newest first."""
         rows = self.db.fetchall_sync(
-            "SELECT * FROM events WHERE topic IN ('delegated_result', 'review_verdict') ORDER BY seq DESC LIMIT ?",
+            "SELECT * FROM events WHERE topic = 'delegated_result' ORDER BY seq DESC LIMIT ?",
             (limit,),
         )
         return [Message.from_row(row) for row in rows]
@@ -198,8 +185,7 @@ class MessageBus:
     ) -> list[Message]:
         """Inbox for one agent: subscribed topics only, never its own messages.
 
-        Raw-DB readers (``lookup_by_id``, ``tail``, ``inbox_context_sync``,
-        ``recent_outcomes_context_sync``) bypass both rules.
+        Raw-DB readers (``tail``, ``inbox_context_sync``, ``recent_outcomes_context_sync``) bypass both rules.
         """
         inbox = _inbox_filter(to_agent, after_seq)
         if inbox is None:
@@ -224,11 +210,6 @@ class MessageBus:
         )
         return bool(row and row["found"])
 
-    async def lookup_by_id(self, msg_id: str) -> Message | None:
-        """Look up a single message by its ``msg_id``."""
-        row = await self.db.fetchone("SELECT * FROM events WHERE msg_id = ?", (msg_id,))
-        return Message.from_row(row) if row else None
-
 
 def _inbox_filter(to_agent: str, after_seq: int) -> tuple[str, tuple[Any, ...]] | None:
     """The WHERE clause and its parameters selecting ``to_agent``'s inbox past ``after_seq``; None when it has none."""
@@ -236,10 +217,7 @@ def _inbox_filter(to_agent: str, after_seq: int) -> tuple[str, tuple[Any, ...]] 
     if not subscribed:
         return None
     placeholders = ",".join("?" * len(subscribed))
-    where = (
-        f"seq > ? AND (to_agent = ? OR to_agent = '*') AND from_agent != ? AND topic IN ({placeholders})"
-        f" AND {_NOT_CRITIC_IDLE_SQL}"
-    )
+    where = f"seq > ? AND (to_agent = ? OR to_agent = '*') AND from_agent != ? AND topic IN ({placeholders})"
     return where, (after_seq, to_agent, to_agent, *subscribed)
 
 

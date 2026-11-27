@@ -111,10 +111,6 @@ class CoordinatorCollaborator:
         return self._coord.backends
 
     @property
-    def state(self):
-        return self._coord.state
-
-    @property
     def orch_prompt(self) -> "OrchestrationPrompt":
         return cast("OrchestrationPrompt", self._coord.orch_prompt)
 

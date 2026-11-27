@@ -1039,9 +1039,9 @@ async def test_a_cancelled_initial_analysis_is_asked_for_again_until_its_keys_ru
     from hyperloom.orchestrator.state import task_registry
     from hyperloom.orchestrator.state.task_registry import TaskSpec
 
-    from .conftest import make_mock_critic_coordinator
+    from .conftest import make_idle_coordinator
 
-    c = make_mock_critic_coordinator(session_dir)
+    c = make_idle_coordinator(session_dir)
     state = c.shared_state
     now = datetime.now(timezone.utc)
     state.phase = ps.PHASE_PRELUDE

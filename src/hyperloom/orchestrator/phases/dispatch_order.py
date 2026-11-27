@@ -15,7 +15,7 @@ if TYPE_CHECKING:
 
 __all__ = ["PHASE_DISPATCH_FIRST", "in_dispatch_order", "is_operator_work"]
 
-# In FRAMEWORK_AGENT a reviewed patch and a configuration grid hold the same serving lanes for a whole round: a grid
+# In FRAMEWORK_AGENT a patch and a configuration grid hold the same serving lanes for a whole round: a grid
 # can be proposed again, but a patch still queued when the phase exits is cancelled unmeasured.
 PHASE_DISPATCH_FIRST: dict[str, frozenset[str]] = {
     PHASE_FRAMEWORK_AGENT: frozenset({"integrate_patch"}),

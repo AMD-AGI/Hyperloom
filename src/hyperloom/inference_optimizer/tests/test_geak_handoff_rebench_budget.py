@@ -31,14 +31,13 @@ SPARE = ONE_ROUND / 4
 @pytest.fixture
 def coordinator(session_dir, monkeypatch):
     from hyperloom.orchestrator.loop.coordinator import Coordinator
-    from hyperloom.orchestrator.roles import MockCriticBackend
     from hyperloom.orchestrator.state.shared_state import SharedState
     from hyperloom.orchestrator.tests.mock_backend import MockBackend, ScriptedPlan
 
     for name in ("HYPERLOOM_AGENTX", "GEAK_BUDGET_MARGIN_S", "GEAK_E2E_TIMEOUT_S"):
         monkeypatch.delenv(name, raising=False)
     orchestration = MockBackend(ScriptedPlan(turns=[]), name="orchestration")
-    coord = Coordinator(session_dir, backends={"orchestration": orchestration, "critic": MockCriticBackend()})
+    coord = Coordinator(session_dir, backends={"orchestration": orchestration})
     coord._run_deadline = SimpleNamespace(remaining=lambda: SESSION_LEFT)
     monkeypatch.setattr(SharedState, "closing_reserve_sec", lambda _self: CLOSING_RESERVE)
     monkeypatch.setattr(ps, "phase_budget_remaining_seconds", lambda _state, **_kw: PHASE_LEFT)

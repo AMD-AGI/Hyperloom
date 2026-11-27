@@ -40,7 +40,6 @@ _SESSION_SKELETON: tuple[str, ...] = (
     "storage",
     "reports",
     "agents/orchestration",
-    "agents/critic",
     "runs/baseline",
     "runs/profile",
     "runs/integrate",

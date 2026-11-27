@@ -108,36 +108,9 @@ async def test_append_rejects_a_non_string_recipient(conn):
     """
     bus = MessageBus(conn)
     with pytest.raises(ValueError, match="to_agent"):
-        await bus.append_and_seq(Message.new("orchestration", ["critic", "kernel_agent"], "observation", {"x": 1}))
+        await bus.append_and_seq(Message.new("orchestration", ["specialist", "kernel_agent"], "observation", {"x": 1}))
     rows = await conn.fetchall("SELECT COUNT(*) AS n FROM events")
     assert rows[0]["n"] == 0
-
-
-# pruning must not delete a still-pending proposal
-@pytest.mark.asyncio
-async def test_prune_events_protects_pending_proposal(conn):
-    """A pending proposal survives pruning; once a verdict targets it, it becomes prunable."""
-    bus = MessageBus(conn)
-    prop = Message.new("orchestration", "*", "proposal", {"action_name": "x"})
-    await bus.append_and_seq(prop)
-    for i in range(50):
-        await bus.append_and_seq(Message.new("orchestration", "*", "observation", {"i": i}))
-
-    await dbm.prune_events(conn, keep_recent=0)
-    rows = await conn.fetchall("SELECT msg_id FROM events WHERE topic='proposal'")
-    assert [r["msg_id"] for r in rows] == [prop.msg_id]
-
-    await bus.append_and_seq(
-        Message.new(
-            "critic",
-            "*",
-            "review_verdict",
-            {"target_proposal_msg_id": prop.msg_id, "verdict": "approve"},
-        )
-    )
-    await dbm.prune_events(conn, keep_recent=0)
-    rows = await conn.fetchall("SELECT msg_id FROM events WHERE topic='proposal'")
-    assert rows == []
 
 
 @pytest.mark.asyncio
@@ -269,7 +242,6 @@ async def test_coordinator_maintenance_reaps_leases_and_prunes(tmp_path, monkeyp
     monkeypatch.setenv("USER_DATA_PATH", str(tmp_path))
     from hyperloom.inference_optimizer.session.paths import make_session_dir
     from hyperloom.orchestrator.loop.coordinator import MAINTENANCE_INTERVAL_SEC, Coordinator
-    from hyperloom.orchestrator.roles import MockCriticBackend
     from hyperloom.orchestrator.tests.mock_backend import MockBackend, ScriptedPlan
     from .conftest import seed_target_analysis_marker
 
@@ -277,7 +249,6 @@ async def test_coordinator_maintenance_reaps_leases_and_prunes(tmp_path, monkeyp
     seed_target_analysis_marker(sd)
     backends = {
         "orchestration": MockBackend(ScriptedPlan(turns=[]), name="orchestration"),
-        "critic": MockCriticBackend(),
     }
     c = Coordinator(sd, backends=backends)
     try:

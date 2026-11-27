@@ -109,8 +109,8 @@ SPECIALIST_DOMAINS: tuple[SpecialistDomain, ...] = (
             "allowlisted repos for the live bottleneck, ranks what it finds "
             "against the stack and the already-tried ledger, and judges each "
             "candidate: already present, not applicable, or worth a bench and "
-            "by which route. Writes candidates to the ledger; Orchestration "
-            "then proposes integrate_patch for the ones it wants. A first-class "
+            "by which route. Writes candidates to the ledger; the Coordinator "
+            "then routes each one worth a bench. A first-class "
             "lever alongside configuration search, not an occasional top-up."
         ),
     ),

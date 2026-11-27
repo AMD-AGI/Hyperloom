@@ -665,40 +665,6 @@ class V6Failure(TypedDict, total=False):
     message: str
 
 
-class CriticIteration(TypedDict, total=False):
-    """One critic-agent review pass over a proposed change.
-
-    ``verdict`` reads the iteration's rulings as one line (``2 approve, 1
-    reject``) and ``verdict_counts`` carries the same distribution for callers
-    that need to count. A review turn that produced no ruling leaves both
-    empty."""
-
-    iteration_id: str
-    iter: int
-    ts: str
-    topic: str
-    verdict: str
-    verdict_counts: dict[str, int]
-    summary: str
-    request_path: str
-    judge_bundle_path: str
-    emit_path: str
-    review_path: str
-    phase: str
-    macro_cycle: int
-    framework_reviews: list[dict[str, Any]]
-
-
-class V6Critic(TypedDict, total=False):
-    """The critic agent's own run, outside the business timeline.
-
-    The per-proposal verdicts stay with the proposals they judge; this key
-    carries the agent's completed review turns -- what it reviewed and what
-    it concluded each time."""
-
-    iterations: list[CriticIteration]
-
-
 class V6FinalRecipe(TypedDict, total=False):
     """The configuration the session ended on, as the close-out settled it."""
 
@@ -756,19 +722,16 @@ class SessionBreakdown(TypedDict, total=False):
     outcome: V6Outcome
     timeline: list[V6TimelineEvent]
     close: V6Close
-    critic: V6Critic
     # The concurrency sweep's ``reports/conc_sweep_summary.json``, verbatim. Absent until a sweep runs, which is after
     # CLOSE (``--enable-conc-sweep`` or ``hyperloom conc-sweep``); the sweep adds it each time it rewrites its report.
     conc_sweep_summary: dict[str, Any]
 
 
 __all__ = [
-    "CriticIteration",
     "SessionBreakdown",
     "V6BaselineExt",
     "V6BaselineProgress",
     "V6Close",
-    "V6Critic",
     "V6Failure",
     "V6GeakCandidate",
     "V6GradedAxes",

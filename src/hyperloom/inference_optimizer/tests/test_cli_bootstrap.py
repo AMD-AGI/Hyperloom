@@ -399,11 +399,11 @@ def test_snapshot_skeleton_and_session_dir_helpers(
     monkeypatch,
     capsys,
 ) -> None:
-    cb._snapshot_system_prompts(tmp_path, prompts={"orch": "hello", "critic": ""}, macro_cycle=0)
+    cb._snapshot_system_prompts(tmp_path, prompts={"orch": "hello", "kernel_agent": ""}, macro_cycle=0)
     assert (tmp_path / "agents" / "orch" / "system_prompt.snapshot.md").read_text(
         encoding="utf-8",
     ) == "hello"
-    assert (tmp_path / "agents" / "critic" / "system_prompt.snapshot.md").read_text(
+    assert (tmp_path / "agents" / "kernel_agent" / "system_prompt.snapshot.md").read_text(
         encoding="utf-8",
     ) == "(empty)"
 

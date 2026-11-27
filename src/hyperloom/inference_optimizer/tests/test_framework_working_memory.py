@@ -37,7 +37,7 @@ def test_build_working_memory_aggregates_tried():
     st = coord.shared_state
     st.framework_agent_phase_progress = [
         {"candidate_id": "PR:723", "status": "reverted", "gain_pct": 0.0, "rationale": "throughput == baseline"},
-        {"candidate_id": "PR:1015", "status": "critic_denied", "rationale": "does not address mem-bw bottleneck"},
+        {"candidate_id": "PR:1015", "status": "no_patch", "rationale": "does not address mem-bw bottleneck"},
         {"candidate_id": "PR:900", "status": "kept", "gain_pct": 6.1},
     ]
     st.framework_agent_batches = [

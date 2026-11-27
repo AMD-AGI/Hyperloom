@@ -13,7 +13,6 @@ from hyperloom.orchestrator.lever import patch_owner_phase
 
 from ..state.shared_state import SharedState
 from ._integrate_promotion import _integrate_keep_variant
-from ..state.pending_proposal import PendingProposal
 
 log = logging.getLogger(__name__)
 
@@ -51,29 +50,8 @@ class ResumeReplayMixin:
         """Synchronously inspect persistence to determine if this is a resume (non-blocking)."""
         self._resumed_from = {
             "is_resume": self.bus.count_sync() > 0 or SharedState.state_path(self.session_dir).exists(),
-            "rebuilt": False,  # set by replay_for_resume()
+            "rebuilt": False,  # set by replay_resume_if_needed()
         }
-
-    async def replay_for_resume(self) -> None:
-        """Walk the event log to reconstruct ``CoordinatorState.pending_proposals``. Idempotent; a proposal is undecided when no review_verdict targets it."""
-        proposal_msgs = await self.bus.tail(topic="proposal", n=10_000)
-        verdicts = await self.bus.tail(topic="review_verdict", n=10_000)
-
-        decided_ids = {v.payload["target_proposal_msg_id"] for v in verdicts if v.payload.get("target_proposal_msg_id")}
-        self.state.pending_proposals.clear()
-        for p in proposal_msgs:
-            if p.msg_id in decided_ids:
-                continue
-            payload = p.payload or {}
-            self.state.pending_proposals[p.msg_id] = PendingProposal(
-                proposal_msg_id=p.msg_id,
-                from_agent=p.from_agent,
-                action_name=str(payload.get("action_name", "")),
-                predicted_gain_pct=float(payload.get("predicted_gain_pct", 0.0)),
-                payload=dict(payload),
-            )
-
-        self._resumed_from["rebuilt"] = True
 
     def _publish_recovered_keeps(self, report: dict[str, Any]) -> None:
         state = self.shared_state
@@ -146,10 +124,10 @@ class ResumeReplayMixin:
 
     # Bounded test interface
     async def replay_resume_if_needed(self) -> None:
-        """Rebuild in-memory state once for a resumed session (replay log + abandon orphan dispatches)."""
+        """Rebuild in-memory state once for a resumed session (abandon orphan dispatches, re-queue stranded work)."""
         if not (self._resumed_from["is_resume"] and not self._resumed_from["rebuilt"]):
             return
-        await self.replay_for_resume()
+        self._resumed_from["rebuilt"] = True
         await self._resume_consistency_pass()
         # The stopped leg's rows read running until a reconcile pass fails them; re-entry would reuse one as live.
         await self._coord.reconciler.run(time.time())

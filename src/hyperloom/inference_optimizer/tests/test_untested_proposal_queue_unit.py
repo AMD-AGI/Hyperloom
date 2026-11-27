@@ -30,7 +30,7 @@ def coord(session_dir) -> Coordinator:
         turns=[],
         default_intent=Intent(type=IntentType.SEND_MESSAGE, payload={"topic": "heartbeat", "body_md": "ok"}),
     )
-    backends: dict[str, Backend] = {name: MockBackend(plan, name=name) for name in ("orchestration", "critic")}
+    backends: dict[str, Backend] = {"orchestration": MockBackend(plan, name="orchestration")}
     return Coordinator(session_dir, backends=backends)
 
 

@@ -44,7 +44,6 @@ attempts. The Coordinator pod itself is small.
 | Component                          | CPU       | RAM       | GPU                                       | Disk                                                                                       |
 |------------------------------------|-----------|-----------|-------------------------------------------|--------------------------------------------------------------------------------------------|
 | Coordinator + Orchestration        | 4 cores   | 16 GiB    | none                                      | minimal                                                                                    |
-| Critic (subprocess)                | 1 core    | 2 GiB     | none                                      | <100 MB (knowledge base (KB) drafts)                                                       |
 | GEAK (kernel optimization)         | 4 cores   | 16 GiB    | none for the driver; attempts below       | varies                                                                                     |
 | GEAK attempt                       | 8 cores   | 32 GiB    | 1 × MI300X, MI325X, or MI355X             | ~10 GB per attempt for build artifacts                                                     |
 | Inference server (sglang or vllm)  | 16 cores  | 128 GiB   | 1–8 × MI300X, MI325X, or MI355X (matches TP)| weights + KV cache; depends on model                                                      |
@@ -106,7 +105,6 @@ self-hosters:
 namespace: hyperloom
 ├── Job: hyperloom-session-<session_id>   # short-lived, one per optimization run
 │   ├── Pod: coordinator                  # Python CLI
-│   ├── (subprocess) critic-agent
 │   └── (subprocess) GEAK (launched by the kernel GEAK dispatch phase)
 ├── PersistentVolumeClaim: user-data       # mounted at /workspace/hyperloom
 ├── PersistentVolumeClaim: tracelens-extension  # optional read-only private extension mount
@@ -237,7 +235,6 @@ is JSONL-on-disk + (optional) downstream collectors.
 |--------------------------------|----------------------------------------------------------------------------------|-----------------|
 | Per-tick Coordinator state     | `$SESSION_DIR/state.json`                                                        | JSON, snapshot  |
 | Session breakdown (final)      | `$SESSION_DIR/session_breakdown.json`                                            | JSON, snapshot  |
-| Critic verdicts                | `$SESSION_DIR/critic-workdir/<turn>/emit.json` (memory in `$SESSION_DIR/critic-session-memory/`) | JSON per call   |
 | Kernel-opt attempts            | `$SESSION_DIR/kernel-agent/runs/<session_id>/optimization_attempts.jsonl`        | JSONL, append   |
 | Inference server logs          | `$SESSION_DIR/runs/<action>/<task>/server.log`                                  | text            |
 

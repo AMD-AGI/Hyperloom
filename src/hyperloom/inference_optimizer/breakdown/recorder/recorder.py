@@ -39,9 +39,6 @@ SECTION_SHAPES: dict[str, SectionShape] = {
     # because assembly keeps only the newest singleton per producer and the
     # Coordinator's -- reissued on every state save -- would always win.
     "versions": "item",
-    # Keyed by content rather than by iteration number, which a resume reuses
-    # after workdir pruning.
-    "critic_iteration": "item",
     **dict.fromkeys(EVENT_SECTIONS, "item"),
     # ``close_step`` is composed into ``close.steps`` at assembly. The verdict
     # is recorded by the sequencer's last act rather than inferred at export

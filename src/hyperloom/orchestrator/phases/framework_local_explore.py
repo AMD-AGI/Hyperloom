@@ -200,7 +200,7 @@ class _LocalExploreMixin:
             "task_kind": "framework_local_explore",
             "prior_attempts": prior_attempts,
             "notes": notes,
-            # Same provenance markers as the PR-authoring track so the autosubmit -> integrate_patch ->
+            # Same provenance markers as the PR-authoring track so the integrate_patch ->
             # authored-outcome bridge applies.
             "framework_agent_authoring": True,
             "framework_agent_candidate_id": cand_id,

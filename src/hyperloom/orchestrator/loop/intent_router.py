@@ -14,15 +14,14 @@ import uuid
 from collections.abc import Mapping
 from typing import Any, NamedTuple
 
-from hyperloom.common.framework_arm import is_upstream_pr_prescreen, review_row_id
 from hyperloom.orchestrator.lever import (
     patch_lever_kind,
     patch_owner_phase,
 )
 from hyperloom.inference_optimizer.protocol.intent import Intent, IntentType
 from hyperloom_common.timeutil import format_exc_brief
-from .verdicts import CriticRuling, serialize_verdict_advisory
-from hyperloom_common.coerce import to_int, to_unix
+from hyperloom_common.coerce import to_int, to_mapping, to_unix
+from ..actions.executors.integrate._integrate_vocabulary import PATCH_SOURCE_UPSTREAM_PR, resolve_patch_source
 from ..bus.message_bus import Message
 from ..policy.denial import PolicyDenied
 from ..policy.validators import (
@@ -36,12 +35,8 @@ from ..state.experience_citations import merge_citations, normalize_citations, s
 from ..state.task_registry import TERMINAL_STATES, IllegalTransition, TaskNotFound, TaskSpec, create_on_free_key
 from hyperloom.inference_optimizer.trace.trajectory_trace import (
     EVENT_INTENT,
-    EVENT_PROPOSAL,
-    STATUS_CANCELLED,
-    STATUS_COMPLETED,
     record_event,
     trajectory_scope,
-    trajectory_span,
 )
 from ..kernel.request_handlers import KERNEL_REQUEST_HANDLERS
 from ..collaborator import CoordinatorCollaborator
@@ -52,8 +47,9 @@ from .kernel_request import (
     run_kernel_handler,
 )
 from ._escalate_hint import escalate_hint_denial
+from ._integrate_promotion import _confirmed_task_outcome
 from .message_delivery import publish_send_message
-from .intent_review import patch_verdict_subject, record_critic_review, record_review_outcome
+from .proposals import ProposedAction, integrate_patch_key, record_config_proposal, twin_answers
 
 # ``Coordinator`` is intentionally NOT imported (avoids a module-level import cycle with coordinator.py); it is held
 # as a back-reference and the annotation below is a deferred string.
@@ -137,16 +133,6 @@ def _stamp_kb_exposure(
 
 class IntentRouter(CoordinatorCollaborator):
     """Validates and dispatches agent-emitted intents on behalf of a Coordinator."""
-
-    def settle_dropped_proposal(self, pending: Any, reason: str) -> None:
-        """Settle a denied proposal as dropped on the framework timeline: it never reaches a bench."""
-        proposal_id = review_row_id(pending.payload or {}, fallback_msg_id=pending.proposal_msg_id)
-        recorder = self._coord.phase_framework.timeline()
-        if not proposal_id or recorder is None:
-            return
-        from hyperloom.inference_optimizer.breakdown.recorder.framework_event import DISPOSITION_DROPPED
-
-        recorder.settle_proposal(proposal_id, disposition=DISPOSITION_DROPPED, reason=reason)
 
     def _resolve_primatune_mandate(self, params: dict[str, Any]) -> PolicyDenied | None:
         """Swap a queued predictor mandate in for the ``primatune_mandate_id`` that cites it.
@@ -233,42 +219,66 @@ class IntentRouter(CoordinatorCollaborator):
             params["source_phase"] = owner
         return owner
 
-    async def _stamp_integrate_patch_owner(
-        self,
-        params: dict[str, Any],
-    ) -> str:
-        """Copy immutable author ownership from the originating specialist."""
-        owner = patch_owner_phase(params)
-        if owner:
-            params["source_phase"] = owner
-            return owner
+    async def _resolve_deliverable(self, params: dict[str, Any]) -> PolicyDenied | None:
+        """Put the deliverable of the specialist an agent's integrate_patch names onto ``params``.
+
+        The Coordinator queues a finished specialist's deliverable itself, so an agent's request for it is a repeat
+        or a retry, and is the same task: the deliverable's own params, with whatever else the agent sent beside
+        them. Refused for a specialist that has not ended with a result, or that left nothing to integrate.
+        """
+        if resolve_patch_source(params) == PATCH_SOURCE_UPSTREAM_PR:
+            return PolicyDenied(
+                "integrate_patch with patch_source='upstream_pr' fetches a diff no specialist wrote",
+                rule="integrate_patch_upstream_pr",
+                hint=(
+                    "The FRAMEWORK_AGENT phase lands the upstream PRs it discovers itself. Name the "
+                    "specialist_task_id of a finished specialist to land its deliverable."
+                ),
+            )
         specialist_task_id = str(params.get("specialist_task_id") or "").strip()
         if not specialist_task_id:
-            return ""
+            return None
+        unfinished = PolicyDenied(
+            f"integrate_patch: {specialist_task_id!r} is not a specialist that has ended with a result",
+            rule="integrate_patch_specialist_unfinished",
+            hint=(
+                "Wait for the specialist's delegated_result event. The Coordinator queues the integrate_patch "
+                "of what it delivers."
+            ),
+        )
         try:
             specialist = await self.tasks.get(specialist_task_id)
         except TaskNotFound:
-            return ""
-        specialist_params = dict(getattr(specialist, "params", None) or {})
-        owner = patch_owner_phase(specialist_params)
+            return unfinished
+        outcome = _confirmed_task_outcome(specialist) if specialist.state in TERMINAL_STATES else None
+        if outcome is None:
+            return unfinished
+        deliverable = self._coord.phase_framework.specialist_deliverable(
+            specialist, to_mapping(outcome.get("specialist_done"))
+        )
+        if deliverable is None:
+            return PolicyDenied(
+                f"integrate_patch: specialist {specialist_task_id!r} left nothing to integrate",
+                rule="integrate_patch_no_deliverable",
+                hint="Its specialist_done names no patch or artifact that exists in its workspace.",
+            )
+        params.update(deliverable.params)
+        return None
+
+    async def _admit_integrate_patch(
+        self, source: str, intent: Intent, params: dict[str, Any], *, rejected_kind: str
+    ) -> bool:
+        """Resolve the deliverable an agent's integrate_patch lands and its owner; ``False`` once it is refused."""
+        refused = await self._resolve_deliverable(params)
+        if refused is not None:
+            await self.record_policy_denied(source, intent, refused, action_name="integrate_patch")
+            return False
+        owner = patch_owner_phase(params)
         if not owner:
-            return ""
-        for key in (
-            "domain",
-            "provenance",
-            "gap_canonical_id",
-            "gap_layer",
-            "framework_agent_authoring",
-            "framework_agent_candidate_id",
-            # The lever the specialist was dispatched against; the patch that lands is the same lever, so it is copied
-            # rather than re-derived.
-            "lever_kind",
-        ):
-            value = specialist_params.get(key)
-            if value not in (None, "", [], {}):
-                params.setdefault(key, value)
+            await self._reject_missing_patch_owner(source, "integrate_patch", params, rejected_kind)
+            return False
         params["source_phase"] = owner
-        return owner
+        return True
 
     async def handle_intent(self, source: str, intent: Intent) -> None:
         """Validate an emitted intent through PolicyGate, then route it under its trajectory event."""
@@ -292,7 +302,6 @@ class IntentRouter(CoordinatorCollaborator):
             it = intent.type
             handlers: dict[IntentType, Any] = {
                 IntentType.PROPOSE_ACTION: self._handle_propose_action,
-                IntentType.REVIEW_VERDICT: self._handle_review_verdict,
                 IntentType.DELEGATE: self.handle_delegate,
                 IntentType.REQUEST: self._handle_request,
                 IntentType.EXTEND_LEASE: self._handle_extend_lease,
@@ -377,9 +386,9 @@ class IntentRouter(CoordinatorCollaborator):
         )
 
     async def _handle_propose_action(self, source: str, intent: Intent) -> None:
-        """Gate a proposed action and enqueue it for Critic Review."""
+        """Admit a proposed action and queue its task."""
         action_name = intent.payload["action_name"]
-        # Pruned families are advisory: proposal still queues with an advisory note.
+        # Pruned families are advisory: the proposal still queues, with an advisory note.
         if self._is_pruned_action(action_name):
             await self._note_pruned_advisory(source, action_name, "proposal_pruned_advisory")
         denied = self._coord.dispatcher.admission_denial_for_action(action_name, params=intent.payload.get("params"))
@@ -390,154 +399,13 @@ class IntentRouter(CoordinatorCollaborator):
         _stamp_kb_exposure(self, payload, source=source)
         if action_name == "integrate_patch":
             params = dict(payload.get("params") or {})
-            if not await self._stamp_integrate_patch_owner(params):
-                await self._reject_missing_patch_owner(source, action_name, params, "proposal_rejected")
+            if not await self._admit_integrate_patch(source, intent, params, rejected_kind="proposal_rejected"):
                 return
             payload["params"] = params
-        from .proposals import record_proposal
-
-        await record_proposal(
-            self._coord,
-            from_agent=source,
-            action_name=action_name,
-            predicted_gain_pct=float(intent.payload.get("predicted_gain_pct", 0.0)),
-            payload=payload,
-        )
-
-    async def _handle_review_verdict(self, source: str, intent: Intent) -> None:
-        """Apply a Critic ``review_verdict`` to its target proposal."""
-        target = intent.payload["target_proposal_msg_id"]
-        verdict = intent.payload["verdict"]
-        pending = self.state.pending_proposals.get(target)
-        if pending is None:
-            await self.bus.record_observation(
-                "coordinator",
-                "observation",
-                {"kind": "verdict_for_unknown_proposal", "target": target, "verdict": verdict},
-            )
-            return
-        await self._handle_single_verdict(
-            source=source,
-            pending=pending,
-            ruling=CriticRuling(
-                verdict=verdict,
-                reasoning=str(intent.payload.get("reasoning") or ""),
-                advisory=serialize_verdict_advisory(intent.payload),
-                payload=intent.payload,
-            ),
-        )
-
-    async def _handle_single_verdict(
-        self,
-        *,
-        source: str,
-        pending: Any,
-        ruling: CriticRuling,
-    ) -> None:
-        """Apply one verdict: approve/advise materialise, reject may rearm.
-
-        ``ruling.verdict`` is one of approve / advise / reject / needs_review.
-        """
-        verdict = ruling.verdict
-        self.state.pending_proposals.pop(pending.proposal_msg_id, None)
-        if is_upstream_pr_prescreen(pending.action_name, pending.payload):
-            await self.bus.record_observation(
-                "coordinator",
-                "observation",
-                {
-                    "kind": "framework_agent_verdict_received",
-                    "proposal_msg_id": pending.proposal_msg_id,
-                    "candidate_id": str((pending.payload or {}).get("framework_agent_candidate_id") or ""),
-                    "verdict": verdict,
-                },
-            )
-        await self._rebroadcast_verdict(source, pending, ruling)
-        # Mirror specialist / integrate_patch verdicts onto SharedState so PolicyGate's integrate_patch gate can
-        # consult them on the next tick.
-        try:
-            pa_params = pending.payload.get("params") or {}
-        except AttributeError:
-            pa_params = {}
-        sid_candidate = patch_verdict_subject(pending, pa_params)
-        if sid_candidate:
-            try:
-                self.shared_state.record_specialist_patch_verdict(
-                    sid_candidate,
-                    verdict,
-                )
-                self.shared_state.save(self.session_dir)
-            except OSError:
-                log.exception(
-                    "failed to mirror critic verdict for specialist task=%s",
-                    sid_candidate,
-                )
-        record_critic_review(self, pending, ruling)
-        record_review_outcome(
-            self,
-            pending,
-            materialized=verdict in ("approve", "advise"),
-            denied=verdict == "reject",
-            reauthored=verdict == "needs_review",
-            patch_verdict_key=sid_candidate,
-        )
-        with trajectory_span(
-            EVENT_PROPOSAL,
-            span_id=pending.proposal_msg_id,
-            attributes={"name": pending.action_name, "verdict": verdict},
-        ) as proposal_span:
-            await self._apply_verdict_outcome(
-                pending,
-                ruling=ruling,
-                pa_params=pa_params,
-                sid_candidate=sid_candidate,
-            )
-            proposal_span.finish(
-                STATUS_COMPLETED if verdict in ("approve", "advise") else STATUS_CANCELLED,
-                task_id=pending.task_id,
-            )
-
-    async def _rebroadcast_verdict(self, source: str, pending: Any, ruling: CriticRuling) -> None:
-        """Re-publish the verdict as a ``review_verdict`` reply to the proposal's author."""
-        rebroadcast_payload: dict[str, Any] = {
-            "target_proposal_msg_id": pending.proposal_msg_id,
-            "verdict": ruling.verdict,
-            "reasoning": ruling.reasoning,
-        }
-        if ruling.advisory:
-            rebroadcast_payload.update(ruling.advisory)
-        await self.bus.append_and_seq(
-            Message.new(
-                source,
-                pending.from_agent,
-                "review_verdict",
-                rebroadcast_payload,
-                in_reply_to=pending.proposal_msg_id,
-            )
-        )
-
-    async def _apply_verdict_outcome(
-        self,
-        pending: Any,
-        *,
-        ruling: CriticRuling,
-        pa_params: Mapping[str, Any],
-        sid_candidate: str,
-    ) -> None:
-        """Materialise, deny, or send back a proposal according to its verdict."""
-        verdict = ruling.verdict
-        if verdict in ("approve", "advise"):
-            await self._coord.proposals.materialize_approved_proposal(pending)
-        elif verdict == "reject" and is_upstream_pr_prescreen(pending.action_name, pending.payload):
-            await self._coord.phase_framework.record_critic_denial(pending, ruling.reasoning)
-        elif verdict == "reject" and pending.action_name == "integrate_patch" and bool(pa_params.get("enablement")):
-            await self._coord.enablement_lane.maybe_rearm_enablement(
-                {"enablement": True, "status": "reverted", "reason": "critic_rejected"}
-            )
-        elif verdict == "needs_review":
-            await self._coord.phase_framework.maybe_reauthor_from_critic_feedback(pending, ruling.advisory)
+        await self._coord.proposals.materialize(ProposedAction(source, action_name, payload))
 
     def _seed_grid_params(self, request: DelegateRequest) -> None:
-        """Seed an explore delegate with the params an approved proposal would have carried."""
+        """Seed an explore delegate with the params a proposed explore carries."""
         if request.action_name != "explore":
             return
         # Baseline's materialized YAML, which the delegator may override.
@@ -560,9 +428,9 @@ class IntentRouter(CoordinatorCollaborator):
         return not dispatch.refuse_patch_without_source(request.params, task_id=task_id)
 
     async def _create_delegated_task(self, request: DelegateRequest, raw_key: Any) -> Any | None:
-        """Register the delegate as a task, stepping its idempotency key past terminated twins.
+        """Register the delegate as a task, stepping its idempotency key past ended twins that measured nothing.
 
-        Returns None once a live twin, or an exhausted retry budget, policy-denied the delegate.
+        Returns None once a live twin, a twin that measured it, or an exhausted retry budget policy-denied the delegate.
         """
         lanes, ttl = self._coord.dispatcher.registry_lanes_ttl(request.action_name)
         if request.action_name == "specialist":
@@ -581,7 +449,7 @@ class IntentRouter(CoordinatorCollaborator):
                 lease_ttl_sec=ttl,
                 dispatch_class="llm",
             ),
-            spent=lambda twin: twin.state in TERMINAL_STATES,
+            spent=lambda twin: not twin_answers(request.action_name, twin),
         )
         if created is not None and not created[1]:
             return created[0]
@@ -591,6 +459,13 @@ class IntentRouter(CoordinatorCollaborator):
                 f"{action} idempotency_key exhausted retries for {raw_key!r}",
                 rule="duplicate_idempotency_key",
                 hint=f"every retry key of {raw_key!r} names a terminated task; send new content or a new key",
+            )
+        elif created[0].state in TERMINAL_STATES:
+            task = created[0]
+            denied = PolicyDenied(
+                f"{action} idempotency_key={task.idempotency_key!r}",
+                rule="duplicate_idempotency_key",
+                hint=f"task {task.task_id} already measured this; read its delegated_result event.",
             )
         else:
             task = created[0]
@@ -625,6 +500,29 @@ class IntentRouter(CoordinatorCollaborator):
         await self.record_policy_denied(source, intent, covered, action_name="explore")
         return True
 
+    def _delegate_key(self, request: DelegateRequest, nested_idempotency_key: Any) -> str:
+        """The idempotency key of a delegate.
+
+        An explore round is the grid it measures and an integrate_patch the deliverable it lands, so each is keyed
+        by that alone. Other delegates take the top-level key, then the nested compat alias, then a tick-scoped
+        content key.
+        """
+        params = request.params
+        content_fp = hashlib.sha1(
+            json.dumps(params, sort_keys=True, default=str).encode(), usedforsecurity=False
+        ).hexdigest()[:10]
+        if request.action_name == "explore":
+            return f"explore:{content_fp}"
+        specialist_task_id = str(params.get("specialist_task_id") or "")
+        if request.action_name == "integrate_patch" and specialist_task_id:
+            return integrate_patch_key(specialist_task_id)
+        tick = int(self.shared_state.tick or 0)
+        return str(
+            request.intent.payload.get("idempotency_key")
+            or nested_idempotency_key
+            or f"{request.source}:{request.action_name}:t{tick}:{content_fp}"
+        )
+
     async def handle_delegate(self, source: str, intent: Intent) -> None:
         """Validate and enqueue a delegated action as a TaskRegistry task."""
         action_name = intent.payload["action_name"]
@@ -634,16 +532,14 @@ class IntentRouter(CoordinatorCollaborator):
         if denied is not None:
             await self.record_policy_denied(source, intent, denied, action_name=action_name)
             return
-        # delegate explore runs variants directly (no Critic pre-review).
         payload = dict(intent.payload)
         _stamp_kb_exposure(self, payload, source=source)
         params = dict(payload.get("params") or {})
         request = DelegateRequest(source, intent, action_name, params)
         if action_name == "integrate_patch":
-            if not await self._stamp_integrate_patch_owner(params):
-                await self._reject_missing_patch_owner(source, action_name, params, "delegate_rejected")
+            if not await self._admit_integrate_patch(source, intent, params, rejected_kind="delegate_rejected"):
                 return
-            self._coord.proposals.floor_keep_threshold(params)
+            self._coord.proposals.seed_integrate_patch_params(params)
         if action_name == "specialist" and not await self._admit_specialist(source, intent, params):
             return
         # idempotency_key is top-level per schema; strip a nested compat alias.
@@ -654,21 +550,10 @@ class IntentRouter(CoordinatorCollaborator):
             return
         if not await self._prepare_specialist_dispatch(request, nested_idempotency_key):
             return
-        content_fp = hashlib.sha1(
-            json.dumps(params, sort_keys=True, default=str).encode(), usedforsecurity=False
-        ).hexdigest()[:10]
-        # An explore round is the grid it measures, so it is keyed by that alone. Other delegates take the top-level
-        # key, then the nested compat alias, then a tick-scoped content key.
-        raw_key = (
-            f"explore:{content_fp}"
-            if action_name == "explore"
-            else intent.payload.get("idempotency_key")
-            or nested_idempotency_key
-            or f"{source}:{action_name}:t{int(self.shared_state.tick or 0)}:{content_fp}"
-        )
+        raw_key = self._delegate_key(request, nested_idempotency_key)
         if await self._explore_grid_covered(action_name, source, intent, params):
             return
-        # The grid's attempts join its proposal row through this id, as an approved proposal's do. Added after the
+        # The grid's attempts join its proposal row through this id, as a proposed grid's do. Added after the
         # key is derived, so an identical re-emit still lands on the task already running.
         proposal_id = uuid.uuid4().hex if action_name == "explore" else ""
         if proposal_id:
@@ -676,10 +561,10 @@ class IntentRouter(CoordinatorCollaborator):
         task = await self._create_delegated_task(request, raw_key)
         if task is None:
             return
+        # Every task that takes over an open enablement round comes through the hand-off.
+        await self._coord.enablement_lane.handoff_enablement_round(task)
         # Only once a task exists, so a dispatch that bailed out above leaves the mandate on offer.
         self._consume_primatune_mandate(action_name, params, task.task_id)
-        from .proposals import record_config_proposal
-
         record_config_proposal(
             self._coord, proposal_id, action_name, {**payload, "params": params}, outcome="delegated"
         )
@@ -1014,15 +899,10 @@ class IntentRouter(CoordinatorCollaborator):
         from hyperloom.inference_optimizer.breakdown.recorder import phase_event
         from hyperloom.inference_optimizer.breakdown.recorder.phase_records import PhaseCycle, PhaseDenial
 
-        payload = intent.payload or {}
-        proposal_msg_id = (
-            payload.get("proposal_msg_id") or payload.get("target_proposal_msg_id") or payload.get("proposal_id")
-        )
         phase_event.record_denial(
             PhaseDenial(
                 at=PhaseCycle(str(self.shared_state.phase or ""), int(self.shared_state.macro_cycle or 0)),
                 actor=source,
-                proposal_msg_id=str(proposal_msg_id) if proposal_msg_id else None,
                 action=resolved_action,
                 rule=str(denied.rule or ""),
                 hint=str(denied.hint or ""),

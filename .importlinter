@@ -217,7 +217,6 @@ name = agent packages are independent
 type = independence
 # A new package under hyperloom/agents/ must be added here.
 modules =
-    hyperloom.agents.critic
     hyperloom.agents.framework
     hyperloom.agents.quantization
 ignore_imports =
@@ -421,7 +420,6 @@ ignore_imports =
     kernelforge.tests.** -> **
     hyperloom_multibranch.**.tests.** -> **
     hyperloom_common.llm.llm_config -> hyperloom_common.llm.claude_oneshot
-    hyperloom.inference_optimizer.breakdown.critic_reviews -> hyperloom.inference_optimizer.breakdown.collectors._common
     hyperloom.inference_optimizer.cli -> hyperloom.orchestrator.actions.executors._aiter_jit
     hyperloom.inference_optimizer.cli -> hyperloom.orchestrator.actions.executors._subprocess_kill
     hyperloom.inference_optimizer.cli -> hyperloom.orchestrator.collaborator

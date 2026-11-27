@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Lifecycle events on the trajectory ledger: phase, intent, proposal, task, and retry linkage."""
+"""Lifecycle events on the trajectory ledger: phase, intent, task, and retry linkage."""
 
 from __future__ import annotations
 
@@ -11,8 +11,7 @@ import pytest
 
 from hyperloom.inference_optimizer.protocol.intent import Intent, IntentType
 from hyperloom.orchestrator.bus.storage.connection import SqliteConnection
-from hyperloom.orchestrator.loop.coordinator import Coordinator, RunOptions
-from hyperloom.orchestrator.loop.coordinator_state import close_undecided_proposals
+from hyperloom.orchestrator.loop.coordinator import Coordinator
 from hyperloom.orchestrator.phases import machine_state
 from hyperloom.orchestrator.state.shared_state import SharedState
 from hyperloom.orchestrator.state.task_registry import TaskRegistry, TaskSpec
@@ -30,8 +29,7 @@ def _heartbeat() -> Intent:
 
 
 def _backends(orchestration: ScriptedPlan) -> dict[str, MockBackend]:
-    silent = ScriptedPlan(turns=[], default_intent=_heartbeat())
-    return {"orchestration": MockBackend(orchestration, name="o"), "critic": MockBackend(silent, name="c")}
+    return {"orchestration": MockBackend(orchestration, name="o")}
 
 
 def _propose(action_name: str) -> Intent:
@@ -112,24 +110,14 @@ def test_a_phase_transition_is_a_point_event_in_the_new_phase(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_an_approved_proposal_links_call_intent_proposal_and_task(session_dir):
+async def test_a_proposed_action_links_call_intent_and_task(session_dir):
     c = Coordinator(session_dir, backends=_backends(ScriptedPlan(turns=[MockTurn(intents=[_propose("baseline")])])))
     try:
         with tt.trajectory_scope(session_dir=session_dir, component="coordinator"):
             await c.tick(1)
-            proposal_id = next(iter(c.state.pending_proposals))
-            # The verdict pops the proposal from the registry, so hold the row the task id lands on.
-            pending = c.state.pending_proposals[proposal_id]
-            verdict = Intent(
-                type=IntentType.REVIEW_VERDICT,
-                payload={"target_proposal_msg_id": proposal_id, "verdict": "approve", "reasoning": "ok"},
-            )
-            await c.router.handle_intent("critic", verdict)
-        task_id = pending.task_id
     finally:
         await c.stop()
 
-    assert task_id
     (call,) = [
         r
         for r in _rows(session_dir, tt.EVENT_LLM_CALL)
@@ -141,83 +129,9 @@ async def test_an_approved_proposal_links_call_intent_proposal_and_task(session_
     assert propose_intent["call_id"] == call["call_id"]
     assert propose_intent["attributes"]["admitted"] is True
 
-    proposal = _rows(session_dir, tt.EVENT_PROPOSAL)
-    assert [r["status"] for r in proposal] == [tt.STATUS_QUEUED, tt.STATUS_STARTED, tt.STATUS_COMPLETED]
-    assert {r["span_id"] for r in proposal} == {proposal_id}
-    assert proposal[0]["parent_span_id"] == propose_intent["span_id"]
-    assert proposal[2]["attributes"] == {"task_id": task_id}
-
-    queued = [
-        r for r in _rows(session_dir, tt.EVENT_TASK) if r["span_id"] == task_id and r["status"] == tt.STATUS_QUEUED
-    ]
-    assert [r["parent_span_id"] for r in queued] == [proposal_id]
-
-    spec = trajmap.project_row(proposal[2], trajmap.span_openings(tt.load_events(session_dir)))
-    assert spec is not None
-    assert spec.metadata["parent_span_id"] == propose_intent["span_id"]
-    assert spec.metadata["attributes"]["verdict"] == "approve"
-
-
-@pytest.mark.asyncio
-async def test_a_rejected_proposal_closes_cancelled_without_a_task(session_dir):
-    c = Coordinator(session_dir, backends=_backends(ScriptedPlan(turns=[MockTurn(intents=[_propose("baseline")])])))
-    try:
-        with tt.trajectory_scope(session_dir=session_dir, component="coordinator"):
-            await c.tick(1)
-            proposal_id = next(iter(c.state.pending_proposals))
-            verdict = Intent(
-                type=IntentType.REVIEW_VERDICT,
-                payload={"target_proposal_msg_id": proposal_id, "verdict": "reject", "reasoning": "no"},
-            )
-            await c.router.handle_intent("critic", verdict)
-    finally:
-        await c.stop()
-
-    proposal = _rows(session_dir, tt.EVENT_PROPOSAL)
-    assert proposal[-1]["status"] == tt.STATUS_CANCELLED
-    assert proposal[-1]["attributes"] == {"task_id": None}
-    assert not _rows(session_dir, tt.EVENT_TASK)
-
-
-@pytest.mark.asyncio
-async def test_a_proposal_the_session_ends_without_a_verdict_on_closes_cancelled(session_dir):
-    c = Coordinator(session_dir, backends=_backends(ScriptedPlan(turns=[MockTurn(intents=[_propose("baseline")])])))
-    try:
-        assert await c.run(options=RunOptions(max_ticks=1)) == "max_ticks"
-        proposal_id = next(iter(c.state.pending_proposals))
-        # A resumed leg ending over the same proposal must not close it twice.
-        with tt.trajectory_scope(session_dir=session_dir, component="coordinator"):
-            close_undecided_proposals(c.session_dir, c.state.pending_proposals, "max_ticks")
-    finally:
-        await c.stop()
-
-    proposal = _rows(session_dir, tt.EVENT_PROPOSAL)
-    assert [r["status"] for r in proposal] == [tt.STATUS_QUEUED, tt.STATUS_CANCELLED]
-    assert {r["span_id"] for r in proposal} == {proposal_id}
-    closed = proposal[-1]
-    assert closed["attributes"]["reason"] == "session_ended_undecided"
-    assert closed["attributes"]["stop_reason"] == "max_ticks"
-    (session_end,) = [r for r in _rows(session_dir, tt.EVENT_SESSION) if r["status"] == tt.STATUS_COMPLETED]
-    assert closed["ts"] <= session_end["ts"]
-
-    spec = trajmap.project_row(closed, trajmap.span_openings(tt.load_events(session_dir)))
-    assert spec is not None
-    assert spec.name == "proposal:baseline"
-
-
-@pytest.mark.asyncio
-async def test_a_supervisor_restart_leaves_undecided_proposals_open(session_dir):
-    from hyperloom.inference_optimizer.breakdown.stop_reasons import SUPERVISOR_RESTART_REASON
-
-    c = Coordinator(session_dir, backends=_backends(ScriptedPlan(turns=[MockTurn(intents=[_propose("baseline")])])))
-    try:
-        with tt.trajectory_scope(session_dir=session_dir, component="coordinator"):
-            await c.tick(1)
-            close_undecided_proposals(c.session_dir, c.state.pending_proposals, SUPERVISOR_RESTART_REASON)
-    finally:
-        await c.stop()
-
-    assert [r["status"] for r in _rows(session_dir, tt.EVENT_PROPOSAL)] == [tt.STATUS_QUEUED]
+    (queued,) = [r for r in _rows(session_dir, tt.EVENT_TASK) if r["status"] == tt.STATUS_QUEUED]
+    assert queued["parent_span_id"] == propose_intent["span_id"]
+    assert queued["attributes"]["kind"] == "baseline"
 
 
 @pytest.mark.asyncio
@@ -283,4 +197,4 @@ async def test_a_denied_intent_is_recorded_as_not_admitted(session_dir):
     (row,) = _rows(session_dir, tt.EVENT_INTENT)
     assert row["attributes"]["admitted"] is False
     assert "nobody" in row["attributes"]["denied"]
-    assert not _rows(session_dir, tt.EVENT_PROPOSAL)
+    assert not _rows(session_dir, tt.EVENT_TASK)

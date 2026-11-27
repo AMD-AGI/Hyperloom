@@ -85,37 +85,6 @@ class V6FrameworkRun(TypedDict, total=False):
     produced_ids: list[str]
 
 
-class V6FrameworkCriticReviewOutcome(TypedDict, total=False):
-    """What the loop did with a ruling.
-
-    An ``advise`` that materialised and an ``advise`` held at the patch gate
-    are the same ruling with opposite outcomes. ``patch_verdict_key`` is the
-    subject the patch gate consults the ruling under, which connects a blocked
-    ``integrate_patch`` back to the review that blocked it."""
-
-    materialized: bool
-    denied: bool
-    reauthored: bool
-    patch_verdict_key: str
-
-
-class V6FrameworkCriticReview(TypedDict, total=False):
-    """The Critic's ruling on one proposal, inline on the proposal.
-
-    ``reviewer`` separates a ruling the Critic authored from one it never got
-    to make. The Critic's advisory keys are merged in as authored, so a
-    consumer may meet fields beyond the ones named here."""
-
-    verdict: str
-    reviewer: str
-    reason: str
-    confidence: float | None
-    concerns: list[str]
-    reviewed_at: str
-    outcome: V6FrameworkCriticReviewOutcome
-    artifacts: dict[str, Any]
-
-
 class V6FrameworkProposalTerminal(TypedDict, total=False):
     """Where a proposal ended up.
 
@@ -197,7 +166,6 @@ class V6FrameworkProposal(TypedDict, total=False):
     reasoning: str
     kb_read_id: str
     rendered_refs: list[V6FrameworkRenderedRef]
-    critic_review: V6FrameworkCriticReview
     terminal: V6FrameworkProposalTerminal
     lifecycle: list[V6FrameworkLifecycleStep]
     attempt_refs: list[str]
@@ -383,8 +351,6 @@ __all__ = [
     "V6FrameworkAttempt",
     "V6FrameworkAttemptFailure",
     "V6FrameworkConfigDelta",
-    "V6FrameworkCriticReview",
-    "V6FrameworkCriticReviewOutcome",
     "V6FrameworkExit",
     "V6FrameworkExt",
     "V6FrameworkGate",

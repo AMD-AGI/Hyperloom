@@ -41,10 +41,9 @@ AGENTX_PREFLIGHT_STOP_REASON: str = "agentx_client_unavailable"
 #: the same thing about a tree whose members are no longer identifiable.
 PATCH_RECOVERY_INCOMPLETE_STOP_REASON: str = "patch_recovery_incomplete"
 
-#: A reactor agent's LLM backend kept failing for an hour without one
+#: The Orchestration agent's LLM backend kept failing for an hour without one
 #: successful turn, or kept answering without ever emitting an intent.
-#: Without the Orchestration agent nothing is decided, and without the critic
-#: every proposal times out denied, so the rest of the budget would buy nothing.
+#: Without it nothing is decided, so the rest of the budget would buy nothing.
 BACKEND_UNHEALTHY_STOP_REASON: str = "backend_unhealthy"
 
 #: Terminals that mean the run optimized and closed normally.

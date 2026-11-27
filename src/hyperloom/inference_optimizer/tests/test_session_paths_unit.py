@@ -79,7 +79,6 @@ def test_trace_paths():
     assert sp.llm_calls_path(SD).name == "llm_calls.jsonl"
     assert sp.decision_trace_path(SD).name == "decision_trace.jsonl"
     assert sp.conversations_path(SD).name == "conversations.jsonl"
-    assert sp.proposal_task_map_path(SD).name == "proposal_task_map.jsonl"
 
 
 def test_enablement_paths():
@@ -101,8 +100,8 @@ def test_research_and_competitor_paths():
 
 
 def test_agent_paths():
-    assert sp.agent_dir(SD, "critic") == SD / "agents" / "critic"
-    assert sp.agent_prompt_snapshot(SD, "critic", macro_cycle=0).name == "system_prompt.snapshot.md"
+    assert sp.agent_dir(SD, "orchestration") == SD / "agents" / "orchestration"
+    assert sp.agent_prompt_snapshot(SD, "kernel_agent", macro_cycle=0).name == "system_prompt.snapshot.md"
     assert sp.agent_mcp_setup_path(SD, "orchestration").name == "mcp_setup.json"
 
 

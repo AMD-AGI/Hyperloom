@@ -26,7 +26,6 @@ from .kb import (
     _bootstrap_knowledge_plane,
 )
 from .backends import (
-    CriticSetup,
     ModelRouting,
     _build_backends,
     _orchestration_banner,
@@ -73,19 +72,11 @@ from .bootstrap import (
 from hyperloom.orchestrator.actions.executors._aiter_jit import clean_stale_aiter_locks
 from hyperloom.common.perf_metric import agentx_enabled as _agentx_enabled
 
-from .credentials import (
-    _CRITIC_AGENT_ROOT_ENV as _CRITIC_AGENT_ROOT_ENV,
-    _resolve_agent_root as _resolve_agent_root,
-    _validate_agent_runtime as _validate_agent_runtime,
-)
 from .multi_node import (
     _prepare_multi_node_state as _prepare_multi_node_state,
     _resolve_mn_backend,
 )
-from .model_catalog import (
-    _resolve_critic_choice,
-    _resolve_models_for_run,
-)
+from .model_catalog import _resolve_models_for_run
 from .launch_shape import (
     _export_operator_launch_shape,
     _launch_pins,
@@ -232,11 +223,6 @@ def _build_orchestration_prompt(
         cycle=PromptCycle(macro_cycle=int(macro_cycle), cycle_directive=cycle_directive, phase=phase),
         assets=PromptAssets(rules_fragment_path=_orchestration_rules_fragment_path()),
     )
-
-
-def _load_critic_prompt() -> str:
-    """Return the Critic system prompt sourced from ``orchestrator/prompts/critic.md``."""
-    return (asset_system_prompts_dir() / "critic.md").read_text(encoding="utf-8")
 
 
 def _reset_state_file(session_dir: Path, state: SharedState) -> None:
@@ -699,53 +685,18 @@ async def _seed_fresh_session(args: argparse.Namespace, *, nodes_resolved: int) 
 
 @dataclass(frozen=True)
 class _AgentLineup:
-    """Which phases and which critic this run brings, once the toggles are read."""
+    """Which phases this run brings, once the toggles are read."""
 
     no_kernel: bool
     no_framework_agent: bool
-    critic_choice: str
-    critic_agent_root: Path | None
 
 
 def _resolve_agent_lineup(args: argparse.Namespace) -> _AgentLineup:
-    """Read the phase toggles and settle the critic backend before any backend is built.
-
-    An unreachable ``--critic-agent`` runtime aborts here rather than at the
-    first critic call, so the run does not pay for bring-up to find out.
-    """
+    """Read the phase toggles and print their banners."""
     no_kernel = getattr(args, "no_kernel", False)
     no_framework_agent = bool(getattr(args, "no_framework_agent", False))
     print_lineup_banners(args, no_kernel=no_kernel, no_framework_agent=no_framework_agent)
-    # Resolve critic backend + runtime root before _build_backends; abort rc=2 if --critic-agent runtime unreachable.
-    critic_choice = _resolve_critic_choice(args)
-    if critic_choice == "mock" and args.critic_protocol != "auto":
-        # The mock critic issues no review inference, so there is no transport for the flag to select.
-        print(
-            f"WARNING: --critic-protocol={args.critic_protocol} is ignored with the mock critic, "
-            "which performs no review inference.",
-            file=sys.stderr,
-        )
-    critic_agent_root: Path | None = None
-    if critic_choice == "agent":
-        critic_agent_root = _resolve_agent_root()
-        if critic_agent_root is None:
-            print(
-                f"ERROR: --critic-agent selected but critic-agent runtime not "
-                f"found.\n"
-                f"  Set ${_CRITIC_AGENT_ROOT_ENV} to the directory containing "
-                f"runtime/cli.py, or check the "
-                f"src/hyperloom/agents/critic/ install.\n"
-                f"  Bypass with --critic-mock.",
-                file=sys.stderr,
-            )
-            sys.exit(2)
-        _validate_agent_runtime(critic_agent_root)
-    return _AgentLineup(
-        no_kernel=no_kernel,
-        no_framework_agent=no_framework_agent,
-        critic_choice=critic_choice,
-        critic_agent_root=critic_agent_root,
-    )
+    return _AgentLineup(no_kernel=no_kernel, no_framework_agent=no_framework_agent)
 
 
 def _install_system_prompts(
@@ -781,7 +732,6 @@ def _install_system_prompts(
         or _build_orchestration_prompt(
             prompt_context, macro_cycle=macro_cycle, cycle_directive=directive, phase=state.phase
         ),
-        "critic": args.critic_prompt or _load_critic_prompt(),
     }
     import functools as _functools
 
@@ -801,17 +751,7 @@ def _print_backend_banner(args: argparse.Namespace, backends: dict[str, Any], li
         codex_model=args.codex_model,
     )
     kernel_str = "DISABLED" if lineup.no_kernel else "programmatic"
-    if lineup.critic_choice == "mock":
-        critic_str = "mock"
-    else:  # "agent"
-        # Read off the backend rather than re-derived from the environment: --critic-protocol can override that
-        # derivation, and the banner would then report the model of a transport this run is not using.
-        _review_protocol = backends["critic"].protocol
-        _review_model = args.claude_model if _review_protocol == "anthropic" else args.codex_model
-        critic_str = (
-            f"critic-agent(protocol={_review_protocol}, model={_review_model}, root={lineup.critic_agent_root})"
-        )
-    print(f"Backends        : orchestration={orchestration_str}, kernel={kernel_str}, critic={critic_str}")
+    print(f"Backends        : orchestration={orchestration_str}, kernel={kernel_str}")
     print(f"Max ticks       : {args.max_ticks or 'unlimited'} (budget = {args.max_hours}h)")
     print(f"Tick interval   : {args.tick_interval_sec}s")
     print()
@@ -928,10 +868,8 @@ def _build_run_objective(args: argparse.Namespace) -> Objective:
     return objective
 
 
-def _build_run_backends(
-    args: argparse.Namespace, intent: _ProviderIntent, lineup: _AgentLineup, session_dir: Path
-) -> dict[str, Any]:
-    """Build the LLM backends for the run's model routing and critic."""
+def _build_run_backends(args: argparse.Namespace, intent: _ProviderIntent, session_dir: Path) -> dict[str, Any]:
+    """Build the LLM backends for the run's model routing."""
     return _build_backends(
         ModelRouting(
             claude_model=args.claude_model,
@@ -939,11 +877,6 @@ def _build_run_backends(
             codex_follows_claude=intent.codex_follows_claude,
             claude_follows_codex=intent.claude_follows_codex,
             deepseek_model=llm_config.resolve_forge_llm_model(llm_config.AGENT_BACKEND_DEEPSEEK),
-        ),
-        CriticSetup(
-            choice=lineup.critic_choice,
-            agent_root=lineup.critic_agent_root,
-            protocol=args.critic_protocol,
         ),
         session_dir=session_dir,
     )
@@ -1026,7 +959,7 @@ async def _run_optimize(args: argparse.Namespace) -> int:
     # T0 may have persisted warm-start state; preserve it before constructing the Coordinator.
     state = SharedState.load_or_init(session_dir)
 
-    backends = _build_run_backends(args, intent, lineup, session_dir)
+    backends = _build_run_backends(args, intent, session_dir)
     coordinator = _build_coordinator(args, state, backends, session_dir=session_dir, knowledge_plane=knowledge_plane)
     _initial_macro_cycle = int(getattr(coordinator.shared_state, "macro_cycle", 0) or 0)
     prompts = _install_system_prompts(coordinator, args, objective, lineup, macro_cycle=_initial_macro_cycle)
@@ -1109,11 +1042,9 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "optimize":
         dump_thread_stacks_on_sigusr1()
         agent_isolation.announce_agent_isolation()  # before any agent runs: the WARNING and the report's line
-        # Resolve any --*-prompt that point at a file.
-        for attr in ("orch_prompt", "critic_prompt"):
-            v = getattr(args, attr)
-            if v and Path(v).exists():
-                setattr(args, attr, Path(v).read_text(encoding="utf-8"))
+        # Resolve an --orch-prompt that points at a file.
+        if args.orch_prompt and Path(args.orch_prompt).exists():
+            args.orch_prompt = Path(args.orch_prompt).read_text(encoding="utf-8")
         try:
             configure_benchmark(args)
             _load_custom_specialist_args(args)

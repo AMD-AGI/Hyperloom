@@ -158,7 +158,6 @@ def _lane(session_dir: Path, **overrides: Any):
 
     fake = types.SimpleNamespace(
         shared_state=state,
-        state=types.SimpleNamespace(pending_proposals={}),
         tasks=_FakeTasks(),
         rounds=overrides.get("rounds") or _rounds(session_dir),
         session_dir=str(session_dir),

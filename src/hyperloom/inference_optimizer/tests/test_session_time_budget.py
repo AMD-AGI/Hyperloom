@@ -77,7 +77,7 @@ def _heartbeat() -> Intent:
 
 def _backends() -> dict[str, Backend]:
     silent = ScriptedPlan(turns=[], default_intent=_heartbeat())
-    return {name: MockBackend(silent, name=name) for name in ("orchestration", "critic")}
+    return {"orchestration": MockBackend(silent, name="orchestration")}
 
 
 @pytest.fixture
@@ -485,7 +485,7 @@ class TestIntentPathsAreGated:
         assert [t for t in await proposing_coord.tasks.queued() if t.kind == _PROPOSABLE_ACTION]
 
     @pytest.mark.asyncio
-    async def test_proposing_an_over_budget_action_never_reaches_the_critic(
+    async def test_proposing_an_over_budget_action_queues_nothing(
         self,
         proposing_coord: Coordinator,
         monkeypatch,
@@ -503,7 +503,7 @@ class TestIntentPathsAreGated:
         )
         await proposing_coord.router._handle_propose_action("orchestration", intent)
         assert [d.rule for d in recorded] == ["time_budget"]
-        assert not proposing_coord.state.pending_proposals
+        assert [t for t in await proposing_coord.tasks.queued() if t.kind == _PROPOSABLE_ACTION] == []
 
 
 class TestPreDispatchBackstop:
@@ -1309,8 +1309,7 @@ class TestATickCannotOutliveTheSessionBound:
         assert finished == [True]
 
     @pytest.mark.asyncio
-    @pytest.mark.parametrize("stage", ["reactor:orchestration", "reactor:critic"])
-    async def test_an_active_reactor_turn_is_cancelled_at_its_total_timeout(self, coord: Coordinator, stage: str):
+    async def test_an_active_reactor_turn_is_cancelled_at_its_total_timeout(self, coord: Coordinator):
         coord.reactor_turn_timeout_sec = 0.03
         coord._run_deadline = Deadline.after(60.0)
         activity: list[float] = []
@@ -1330,7 +1329,7 @@ class TestATickCannotOutliveTheSessionBound:
         await asyncio.wait_for(
             coord.await_within_session_bound(
                 _stay_active,
-                stage=stage,
+                stage="reactor:orchestration",
             ),
             timeout=5.0,
         )

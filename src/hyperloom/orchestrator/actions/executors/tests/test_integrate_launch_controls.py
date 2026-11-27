@@ -139,7 +139,6 @@ async def _removal_only_round(tmp_path: Path, monkeypatch, *, tput: float | None
         framework="vllm",
         benchmark_mode="synthetic",
         current_best={"tput": 100.0, "extra_server_args": _BASE_ARGS},
-        get_specialist_patch_verdict=lambda _sid: "approve",
         save=lambda _path: None,
     )
     return task, await IntegratePatchExecutor(session_dir=session_dir)(ctx), grids

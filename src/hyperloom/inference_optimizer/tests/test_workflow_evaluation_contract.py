@@ -88,7 +88,6 @@ def _writer_fixture(tmp_path, *, denied: bool) -> dict:
                 PhaseDenial(
                     at=PhaseCycle("PRELUDE", 0),
                     actor="framework-agent",
-                    proposal_msg_id=None,
                     action="profile",
                     rule="phase_action_not_allowed",
                     hint="use an allowed PRELUDE action",

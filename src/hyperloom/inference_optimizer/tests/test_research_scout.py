@@ -136,7 +136,6 @@ async def test_internal_research_scout_task_is_readonly(tmp_path: Path):
     idle = ScriptedPlan(turns=[MockTurn(intents=[])])
     backends = {
         "orchestration": MockBackend(idle),
-        "critic": MockBackend(idle),
     }
     coord = Coordinator(
         session_dir=tmp_path,

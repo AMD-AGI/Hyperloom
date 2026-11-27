@@ -215,7 +215,6 @@ def build(session_dir: Path | str) -> dict[str, Any]:
         ),
         warnings,
     )
-    v6_critic = collectors.collect_v6_critic(assembled.get("critic"))
     base_launch = _base_launch(sd, warnings)
     # Snapshot last: every collector above feeds this one list, and this is the
     # single place a collection failure surfaces.
@@ -233,7 +232,6 @@ def build(session_dir: Path | str) -> dict[str, Any]:
         "outcome": sections.outcome,
         "timeline": sections.timeline,
         "close": sections.close,
-        "critic": v6_critic,
     }
     if conc_sweep is not None:
         breakdown[CONC_SWEEP_SECTION] = conc_sweep
@@ -586,7 +584,7 @@ def write_minimal_final_report(session_dir: Path | str) -> Path:
         "",
         "## Structured detail",
         "",
-        f"See `{breakdown_link.name}` (sibling of session root) for the complete `timeline` / `critic` blocks.",
+        f"See `{breakdown_link.name}` (sibling of session root) for the complete `timeline` block.",
         "",
     ]
 

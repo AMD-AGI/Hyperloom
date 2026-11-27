@@ -26,7 +26,7 @@ from hyperloom.orchestrator.state.shared_state import ESCALATE_HINT_SKIP_TO_SWEE
 from hyperloom.orchestrator.state.tests._session_base import freeze_session_base
 from inference_suite import runner_owned
 
-from .conftest import make_mock_critic_coordinator
+from .conftest import make_idle_coordinator
 from ._geak_helpers import forbid_geak_launch, measured_in_suite_round, stop_geak_before_launch
 from hyperloom.orchestrator.state.task_registry import TaskSpec
 from hyperloom.orchestrator.actions.executors.workload._workload_envs import BenchmarkTarget, LaunchLayer
@@ -34,7 +34,7 @@ from hyperloom.orchestrator.actions.executors.workload._workload_envs import Ben
 
 @pytest.fixture
 def coordinator(session_dir):
-    return make_mock_critic_coordinator(session_dir)
+    return make_idle_coordinator(session_dir)
 
 
 def _geak_rebench_params(**extra: object) -> dict:

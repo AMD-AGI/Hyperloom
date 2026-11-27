@@ -33,21 +33,12 @@ _ORCHESTRATION_INTENTS: frozenset[IntentType] = _BASE_INTENTS | frozenset(
 )
 
 
-# Critic — review verdicts only.
-_CRITIC_INTENTS: frozenset[IntentType] = _BASE_INTENTS | frozenset(
-    {
-        IntentType.REVIEW_VERDICT,
-    }
-)
-
-
 @dataclass(frozen=True)
 class AgentRole:
     """Static role record. Backend instances are created elsewhere."""
 
     name: str
     allowed_intents: frozenset[IntentType]
-    no_tools: bool = False
 
     @property
     def system_prompt_path(self) -> Path:
@@ -60,16 +51,11 @@ class AgentRole:
 
 
 def default_role_registry() -> dict[str, AgentRole]:
-    """Return the canonical orchestration and critic role registry."""
+    """Return the canonical role registry: the orchestration role."""
     return {
         "orchestration": AgentRole(
             name="orchestration",
             allowed_intents=_ORCHESTRATION_INTENTS,
-        ),
-        "critic": AgentRole(
-            name="critic",
-            allowed_intents=_CRITIC_INTENTS,
-            no_tools=True,
         ),
     }
 

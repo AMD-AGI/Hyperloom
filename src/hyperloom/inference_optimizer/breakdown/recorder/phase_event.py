@@ -27,7 +27,7 @@ import logging
 from collections.abc import Mapping, Sequence
 from typing import Any
 
-from hyperloom_common.coerce import to_float as _float_or_none, to_int as _int_or_none, to_mapping as _as_dict
+from hyperloom_common.coerce import to_float as _float_or_none, to_int as _int_or_none
 from hyperloom.plugs import progress as _progress
 
 from .event_fields import now_iso_seconds as _now, text as _text
@@ -43,9 +43,6 @@ from .phase_records import (
     PhaseEntry,
     PhaseExit,
     PhaseMarker,
-    PhaseProposal,
-    ProposalOutcome,
-    ProposalReview,
     SpecialistRound,
 )
 
@@ -80,12 +77,7 @@ SECTION_ACTION = "phase_action"
 #: One row per non-transition ``phase_history`` marker, keyed by its position.
 SECTION_MARKER = "phase_marker"
 
-#: One row per proposal the phase raised, keyed by the bus message carrying it.
-#: A proposal the Critic refused is never dispatched, so it gets no action row,
-#: and the ruling would otherwise have no subject to be filed against.
-SECTION_PROPOSAL = "phase_proposal"
-
-#: One row per PolicyGate denial, including intents that never became proposals.
+#: One row per PolicyGate denial.
 SECTION_DENIAL = "phase_denial"
 
 STATUS_SUCCEEDED = "succeeded"
@@ -252,64 +244,6 @@ def record_denial(denial: PhaseDenial) -> None:
     sink.append(SECTION_DENIAL, denial.row())
 
 
-def record_proposal(proposal: PhaseProposal) -> None:
-    """Record a proposal against the phase that raised it. Never raises.
-
-    Written when the proposal is minted, not when it is acted on: one refused by
-    the Critic or left pending at the phase exit has no dispatch and so no other
-    row, and the ruling needs a subject to be filed against.
-    """
-    if not str(proposal.proposal_msg_id or ""):
-        return
-    event = phase_event_id(proposal.at.phase, proposal.at.macro_cycle)
-    sink = bound_sink(event, producer=PRODUCER)
-    if sink is None:
-        return
-    _open(event, phase=proposal.at.phase, macro_cycle=proposal.at.macro_cycle)
-    sink.record(
-        SECTION_PROPOSAL,
-        proposal.row(),
-        row_type="proposal",
-        natural_ids=str(proposal.proposal_msg_id),
-    )
-
-
-def record_proposal_review(review: ProposalReview) -> None:
-    """File the Critic's ruling on the proposal it ruled on. Never raises.
-
-    The row is located by reading back which phase event holds the proposal, not
-    from the phase in scope: the Critic runs on its own tick and routinely rules
-    after the raising phase has exited. A ruling for a proposal with no row is
-    dropped rather than minting one.
-    """
-    if not str(review.proposal_msg_id or ""):
-        return
-    event = _proposal_event(str(review.proposal_msg_id))
-    if event is None:
-        log.debug("phase event: no proposal row for %s to file a ruling on", review.proposal_msg_id)
-        return
-    sink = bound_sink(event, producer=PRODUCER)
-    if sink is None:
-        return
-    sink.record(SECTION_PROPOSAL, review.row(), row_type="proposal", natural_ids=str(review.proposal_msg_id))
-
-
-def record_proposal_outcome(outcome: ProposalOutcome) -> None:
-    """Record what the loop did with a proposal. Never raises.
-
-    ``task_id`` joins the proposal to the dispatch row it became, beside it on
-    this same event. Located and dropped the same way as the ruling."""
-    if not str(outcome.proposal_msg_id or ""):
-        return
-    event = _proposal_event(str(outcome.proposal_msg_id))
-    if event is None:
-        return
-    sink = bound_sink(event, producer=PRODUCER)
-    if sink is None:
-        return
-    sink.record(SECTION_PROPOSAL, outcome.row(), row_type="proposal", natural_ids=str(outcome.proposal_msg_id))
-
-
 def record_settle(settlement: ActionSettlement) -> None:
     """Settle a dispatched action's row with the verdict it got. Never raises.
 
@@ -421,11 +355,6 @@ def _action_event(task_id: str) -> str | None:
     return str(row["event_id"]) if row else None
 
 
-def _proposal_event(proposal_msg_id: str) -> str | None:
-    """The phase event holding ``proposal_msg_id``'s row, if it was recorded."""
-    return _event_holding(SECTION_PROPOSAL, "proposal_msg_id", proposal_msg_id)
-
-
 def assemble_phase_ext(
     parts: Mapping[str, list[dict[str, Any]]],
     *,
@@ -449,12 +378,8 @@ def assemble_phase_ext(
     markers = wire_rows(
         sort_rows(rows_for_event(parts[SECTION_MARKER], event), keys=("sequence", "ts")), drop=("event_id",)
     )
-    proposals = wire_rows(
-        sort_rows(rows_for_event(parts[SECTION_PROPOSAL], event), keys=("proposed_at", "proposal_msg_id")),
-        drop=("event_id",),
-    )
     denials = wire_rows(
-        sort_rows(rows_for_event(parts[SECTION_DENIAL], event), keys=("denied_at", "proposal_msg_id", "action")),
+        sort_rows(rows_for_event(parts[SECTION_DENIAL], event), keys=("denied_at", "action")),
         drop=("event_id",),
     )
     first, last = (segments[0], segments[-1]) if segments else ({}, {})
@@ -481,14 +406,6 @@ def assemble_phase_ext(
         },
         "markers": {"count": len(markers), "rows": markers},
         "denials": {"count": len(denials), "rows": denials},
-        "proposals": {
-            "count": len(proposals),
-            # The gap to ``count`` is the ones the Critic never reached, which
-            # is not the same as the ones it refused.
-            "reviewed": sum(1 for row in proposals if row.get("critic_review")),
-            "materialized": sum(1 for row in proposals if _as_dict(row.get("outcome")).get("materialized")),
-            "rows": proposals,
-        },
     }
     return ext, _status_for(segments, actions)
 

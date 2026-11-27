@@ -43,12 +43,10 @@ async def test_old_running_rows_without_death_evidence_are_retained(conn, ttl):
 @pytest.fixture
 def cyclic_coordinator(session_dir):
     from hyperloom.orchestrator.loop.coordinator import Coordinator
-    from hyperloom.orchestrator.roles import MockCriticBackend
     from hyperloom.orchestrator.tests.mock_backend import MockBackend, ScriptedPlan
 
     backends = {
         "orchestration": MockBackend(ScriptedPlan(turns=[]), name="orchestration"),
-        "critic": MockCriticBackend(),
     }
     return Coordinator(session_dir, backends=backends)
 
@@ -227,10 +225,7 @@ async def _build_minimal_coord(tmp_path: Path, monkeypatch):
     state.save(sd)
 
     idle_plan = ScriptedPlan(turns=[])
-    backends = {
-        "orchestration": MockBackend(idle_plan),
-        "critic": MockBackend(idle_plan),
-    }
+    backends = {"orchestration": MockBackend(idle_plan)}
     from hyperloom.orchestrator.roles.agent_role import default_role_registry
     from .conftest import seed_target_analysis_marker
 

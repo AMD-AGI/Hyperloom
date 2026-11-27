@@ -880,16 +880,7 @@ class SpecialistDispatchCollaborator(CoordinatorCollaborator):
                 task_id=str(task.task_id or ""),
                 payload=done_payload,
             )
-        # Push specialist-authored patches to the Critic so integrate_patch can pass.
-        await self._coord.phase_framework.maybe_autosubmit_specialist_patches(
-            task=task,
-            done_payload=done_payload,
-        )
-        # An enablement round with no source patch still reaches integrate_patch, which reports what its boot did.
-        await self._coord.phase_framework.maybe_autosubmit_enablement_config(
-            task=task,
-            done_payload=done_payload,
-        )
+        await self._coord.phase_framework.integrate_specialist_deliverable(task=task, done_payload=done_payload)
 
     def _aggregate_research_evidence(self, done_payload: dict[str, Any]) -> None:
         """Aggregate research evidence (PR ids / diffs / NVIDIA refs) into the

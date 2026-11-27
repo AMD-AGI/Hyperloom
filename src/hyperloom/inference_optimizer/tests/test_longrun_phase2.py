@@ -14,7 +14,7 @@ from hyperloom.orchestrator.phases import machine_state as ps
 from hyperloom.orchestrator.phases import phase_transitions
 from hyperloom.orchestrator.state.shared_state import SharedState
 
-from .conftest import make_mock_critic_coordinator
+from .conftest import make_idle_coordinator
 
 
 def _plateaued_explore_state(
@@ -67,7 +67,7 @@ def test_compute_next_phase_plateau_routes_optimize_to_kernel():
 # Coordinator stamps the bottleneck-switch handoff
 @pytest.fixture
 def cyclic_coordinator(session_dir):
-    c = make_mock_critic_coordinator(session_dir)
+    c = make_idle_coordinator(session_dir)
     yield c
 
 

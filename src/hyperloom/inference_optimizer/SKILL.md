@@ -27,8 +27,6 @@ The CLI starts a Python Coordinator that coordinates:
 
 - Orchestration: decides next actions (`baseline`, `explore`, `specialist`, `integrate_patch`, `sweep`, Kernel requests). In CLOSE, the Coordinator auto-enqueues `report` at session end; Orchestration may also propose it.
 - Kernel (programmatic, not LLM): the Coordinator dispatches `trace_analyze`, `integrate`, and related request kinds directly to Python handlers without an LLM turn. The `run_gemm_tuning` and `run_fusion` lanes are Coordinator-owned: they run inside the `kernel_agent` task at KERNEL entry and PolicyGate rejects an agent request for either.
-- Critic: proposal review (default `--critic-agent`; see
-  [Critic Backend Selection](#critic-backend-selection) for modes).
 
 State lives under a **session directory** (per optimization run).
 The **workspace root** is ``$USER_DATA_PATH`` (default
@@ -47,7 +45,7 @@ $USER_DATA_PATH/                          # workspace_root — set by operator /
         ├── manifest.json
         ├── state.json
         ├── storage/coordinator.db
-        ├── agents/{orchestration,kernel,critic}/
+        ├── agents/{orchestration,kernel}/
         ├── runs/{baseline,profile,roofline,explore,sweep,...}/<task_id>/
         ├── kernel-agent/runs/<session_id>/
         ├── kernel-agent-workspace/<kernel_id>/
@@ -376,8 +374,7 @@ brief:
   per-round breadth is bounded by the `research_lane` / GPU pool leases
   (the `research_lane` scales with the `2 × visible GPU count` ceiling).
   Specialists author patches into an isolated worktree; `integrate_patch`
-  does the actual `git apply` + throughput/accuracy gate after Critic
-  review.
+  does the actual `git apply` + throughput/accuracy gate.
   GPU specialists are **on by default at whole-machine capacity** (WS2):
   `--gpu-specialist-capacity` defaults to the visible GPU count on the launch
   host (`_default_gpu_specialist_capacity()`), so Orchestration may dispatch
@@ -405,7 +402,7 @@ brief:
   the phase end with no lease extension, the Coordinator's own discovery, scout,
   predictor and general bench are skipped, and the phase hints
   `skip_to_sweep` once the custom task (or its refused admission), its grid and
-  its patch reviews are done; the exit goes to KERNEL_AGENT when that phase is
+  its `integrate_patch` tasks are done; the exit goes to KERNEL_AGENT when that phase is
   enabled, else CYCLE_END, and later phases run as usual.
 - **PrimaTune predictor rows**: with `--primatune-endpoint` and
   `--primatune-mode active`, the predictor's proposals lead the untested-proposal
@@ -887,14 +884,13 @@ Quirks: with `set -u`, assign dependent vars on separate lines (chained
 aliases (LLM) from `OPENAI_API_KEY`,
 auto-`pip install` the SDKs, ROCm hygiene, `--gpu-type` auto-detect, and it emits the
 canonical `Preflight diagnostics:` block (paste verbatim into status
-reports). Two checks **abort** the run on failure: the model gate
+reports). One check **aborts** the run on failure: the model gate
 (probed against `<OPENAI_BASE_URL>/models`; the allowlist
 {`claude-opus-5-5` preferred, `claude-opus-5`, `claude-opus-4-8`,
 `claude-opus-4-7`, `claude-opus-4-6` fallback}
 binds only under `INFERENCE_OPTIMIZER_ALLOW_CUSTOM_ORCH_MODEL=0` — otherwise
 the catalog probe is the sole gate; see
-`## Failure Handling`) and, when `--critic-agent` is active, the
-critic-agent runtime probe (`## Critic Backend Selection`).
+`## Failure Handling`).
 
 Don't manually pip-install SDKs
 or `curl /v1/models` — `_preflight()` owns these. See `docs/reference/kernel-execution-path.md`
@@ -1085,59 +1081,6 @@ as `baseline_config.with_envs.yaml`, and forwards the path as
 benchmark the **same workload baseline ran** (without it they'd fall back to
 the YAML's fallback defaults `CONC=64`/`ISL=1024`/`OSL=1024`). Per-variant
 `extra_envs` still win (applied last).
-
-## Critic Backend Selection
-
-The Critic role has two backend modes. Default is `--critic-agent` (no
-flag needed).
-
-| Flag | Backend class | Behaviour |
-|---|---|---|
-| (none) / `--critic-agent` | `CriticAgentBackend` | Drives the `hyperloom.agents.critic` skill runtime via `python -m hyperloom.agents.critic.runtime.cli prepare-review` → Codex chat completion → `python -m hyperloom.agents.critic.runtime.cli commit-review`. Adds per-session memory + idempotent `reviewed_msg_ids` (no double-verdict), `judge_bundle.review_constraints` injected into the LLM prompt, and `needs_review` / `critic_unavailable` source when context is missing. |
-| `--critic-mock` | `MockCriticBackend` | Always-approve adapter. Use for offline / smoke tests when Codex creds aren't available. |
-
-Default is overridable per pod via
-`INFERENCE_OPTIMIZER_DEFAULT_CRITIC_BACKEND` (one of `mock` / `agent`).
-
-### Review transport: `--critic-protocol {auto,openai,anthropic}`
-
-Both transports run the full critic-agent runtime; only the review reasoning
-call differs. There is no degraded critic, so a transport whose credentials are
-missing fails at startup rather than silently changing the review quality.
-
-`auto` (the default) picks `anthropic` for an Anthropic-only config and `openai`
-otherwise. Force `anthropic` when both sides are configured but the Critic
-should run on a Claude subscription; `auto` would otherwise choose the OpenAI
-transport.
-
-Per-value behaviour and the exact credential each one accepts are in
-[references/critic.md](references/critic.md#review-transport---critic-protocol-autoopenaianthropic).
-That table lived here in duplicate and had already drifted from the code once,
-so it is kept in one place.
-
-### Required env when `--critic-agent` is active
-
-| Var | Purpose | Default |
-|---|---|---|
-| `CRITIC_AGENT_ROOT` | Path to the directory containing `runtime/cli.py`. | in-tree `$REPO_ROOT/src/hyperloom/agents/critic/` |
-| `CRITIC_SESSION_MEMORY_DIR` | Where the runtime persists per-session reviewed_msg_ids. | `$SESSION_DIR/critic-session-memory` (auto-set by the optimizer; co-located with the Coordinator session and cleaned up alongside it). |
-
-CLI startup checks that `CRITIC_AGENT_ROOT` resolves to a real directory
-with `runtime/cli.py`, then runs `python -m hyperloom.agents.critic.runtime.cli --help`
-(90s timeout, override via `CRITIC_AGENT_PROBE_TIMEOUT_SEC`) before the
-Coordinator boots. Missing or broken runtime aborts
-the run with a clear error pointing at `--critic-mock` as the offline
-bypass.
-
-### Per-turn artefacts (audit trail)
-
-Each Critic turn writes a 6-digit workdir under
-`$SESSION_DIR/critic-workdir/<turn_idx>/` (`request.json` /
-`judge_bundle.json` / `review.json` / `emit.json`) plus session memory
-under `$SESSION_DIR/critic-session-memory/<session_id>/`. The backend
-prunes to the latest 50 turn workdirs each tick. Inspect these when
-debugging critic verdicts (see `## Failure Handling`).
-
 
 ## Framework Selection
 
@@ -1428,10 +1371,6 @@ takes its shells down with it on SIGTERM, so a Hands restart ends the run where
 `setsid nohup` would have outlived it. A sandbox restart ends it either way, and
 being visible is worth more than surviving a restart nothing would have noticed.
 
-Critic defaults to `--critic-agent`. See
-[Critic Backend Selection](#critic-backend-selection) for `--critic-mock` and
-`INFERENCE_OPTIMIZER_DEFAULT_CRITIC_BACKEND` for a pod-level override.
-
 After launching, do a short health check:
 
 ```bash
@@ -1712,19 +1651,6 @@ only when you intentionally want the strict AMD Claude allowlist
 |---|---|
 | `--claude-model=... is not allowed` | You likely set `INFERENCE_OPTIMIZER_ALLOW_CUSTOM_ORCH_MODEL=0`; unset it or set it to `1`, then ensure the model appears in the gateway `/models` catalog. |
 | `gateway catalog unreachable after retries` (4 probes at 0/1/3/5s) | Reproduce: `curl -k -H "Authorization: Bearer $OPENAI_API_KEY" "$OPENAI_BASE_URL/models" \| jq '.data[].id'`. Gateway answers → proxy/SSL is wrong; gateway down → fix gateway. Fail-fast is intentional vs. 401 mid-baseline. |
-
-### Critic-agent runtime errors
-
-Inspect `$SESSION_DIR/critic-workdir/<latest>/{request,judge_bundle,review,emit}.json`.
-Bypass with `--critic-mock` for offline / smoke runs. See
-`## Critic Backend Selection`.
-
-| Symptom | Fix |
-|---|---|
-| `--critic-agent selected but critic-agent runtime not found` | `export CRITIC_AGENT_ROOT=/path/to/src/hyperloom/agents/critic`, or check the `src/hyperloom/agents/critic/` install. |
-| `hyperloom.agents.critic.runtime.cli prepare-review/commit-review exited rc=2` | Schema/validation bug (per `src/hyperloom/agents/critic/README.md` §Exit codes). Inspect workdir payload; retry with `--critic-mock` while fixing. |
-| `hyperloom.agents.critic.runtime.cli ... timed out after 30s` | Critic runtime is stuck. It does no remote I/O, so this is a bug: inspect the workdir payload; retry with `--critic-mock` while fixing. |
-| All verdicts `('needs_review','critic_unavailable')` + non-empty `required_context=[...]` | Static context load failed. Check `manifest.json` has non-empty `model_name`/`framework`; grep `logs/cli.log` for `critic_agent_backend static_context`. |
 
 ### Run-time signals
 

@@ -64,19 +64,6 @@ only when you intentionally want the strict AMD Claude allowlist
 | `--claude-model=... is not allowed` | You likely set `INFERENCE_OPTIMIZER_ALLOW_CUSTOM_ORCH_MODEL=0`; unset it or set it to `1`, then ensure the model appears in the gateway `/models` catalog. |
 | `gateway catalog unreachable after retries` (4 probes at 0/1/3/5s) | Reproduce: `curl -k -H "Authorization: Bearer $OPENAI_API_KEY" "$OPENAI_BASE_URL/models" \| jq '.data[].id'`. Gateway answers → proxy/SSL is wrong; gateway down → fix gateway. Fail-fast is intentional vs. 401 mid-baseline. |
 
-### Critic-agent runtime errors
-
-Inspect `$SESSION_DIR/critic-workdir/<latest>/{request,judge_bundle,review,emit}.json`.
-Bypass with `--critic-mock` for offline / smoke runs. See
-[critic.md](critic.md).
-
-| Symptom | Fix |
-|---|---|
-| `--critic-agent selected but critic-agent runtime not found` | `export CRITIC_AGENT_ROOT=/path/to/src/hyperloom/agents/critic`, or check the `src/hyperloom/agents/critic/` install. |
-| `hyperloom.agents.critic.runtime.cli prepare-review/commit-review exited rc=2` | Schema/validation bug (per `src/hyperloom/agents/critic/README.md` §Exit codes). Inspect workdir payload; retry with `--critic-mock` while fixing. |
-| `hyperloom.agents.critic.runtime.cli ... timed out after 30s` | Critic runtime is stuck. It does no remote I/O, so this is a bug: inspect the workdir payload; retry with `--critic-mock` while fixing. |
-| All verdicts `('needs_review','critic_unavailable')` + non-empty `required_context=[...]` | Static context load failed. Check `manifest.json` has non-empty `model_name`/`framework`; grep `logs/cli.log` for `critic_agent_backend static_context`. |
-
 ### Run-time signals
 
 - `No accelerator`: pin GPUs with `ROCR_VISIBLE_DEVICES`, not

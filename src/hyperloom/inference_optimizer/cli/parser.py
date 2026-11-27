@@ -16,7 +16,6 @@ from .optimize_args import (
     add_base_launch_arguments,
     add_cluster_arguments,
     add_conc_sweep_arguments,
-    add_critic_arguments,
     add_framework_agent_arguments,
     add_framework_arguments,
     add_gpu_partition_arguments,
@@ -25,6 +24,7 @@ from .optimize_args import (
     add_pd_topology_arguments,
     add_phase_budget_arguments,
     add_plateau_arguments,
+    add_prompt_arguments,
     add_recon_arguments,
     add_research_arguments,
     add_run_mode_arguments,
@@ -536,7 +536,7 @@ def _build_parser() -> argparse.ArgumentParser:
     _add_model_context_arguments(opt)
     add_run_mode_arguments(opt)
     add_framework_agent_arguments(opt)
-    add_critic_arguments(opt)
+    add_prompt_arguments(opt)
     _add_custom_specialist_args(opt)
     add_kb_arguments(opt)
     add_service_arguments(opt)

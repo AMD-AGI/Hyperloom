@@ -450,12 +450,6 @@ class SubAgentRunner:
         conflict with the lanes the caller already holds. The executor is told
         so through ``covered_step`` in its extras, which no registry row carries.
 
-        On its specialist lane ``integrate_patch`` skips its Critic-verdict
-        check for a covered step: that check refuses a registry row no verdict
-        approved, and a covered step is not a row. A caller that lands a patch
-        through here therefore decides itself whether the patch needs a verdict
-        first. The upstream-PR lane checks whoever runs it.
-
         Args:
             task: An unpersisted task naming the executor and its params.
 

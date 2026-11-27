@@ -21,7 +21,6 @@ __all__ = [
     "RendererFn",
     "REGISTRY",
     "close_of",
-    "critic_iterations_of",
     "events_of",
     "outcome_of",
     "register_renderer",
@@ -146,18 +145,6 @@ def close_of(breakdown: Any) -> dict[str, Any]:
         ``close``, or ``{}`` when absent.
     """
     return to_mapping(to_mapping(breakdown).get("close"))
-
-
-def critic_iterations_of(breakdown: Any) -> list[dict[str, Any]]:
-    """The critic agent's own review passes, in the order it ran them.
-
-    Args:
-        breakdown: The full ``session_breakdown.json`` dict.
-
-    Returns:
-        ``critic.iterations``, or ``[]`` when the critic never ran.
-    """
-    return dict_rows(to_mapping(to_mapping(breakdown).get("critic")).get("iterations"))
 
 
 def stop_reason_of(breakdown: Any) -> str:

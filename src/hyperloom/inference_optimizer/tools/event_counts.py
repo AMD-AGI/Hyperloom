@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Print action / proposal / kernel counts from a session's coordinator.db.
+"""Print action / kernel counts from a session's coordinator.db.
 
 Usage:
     event_counts.py [SESSION_DIR] [--all] [--limit N]
@@ -80,9 +80,7 @@ def main(argv: list[str] | None = None) -> int:
                 p = json.loads(payload)
             except ValueError:
                 continue
-            if topic == "proposal":
-                counts[f"proposal:{p.get('action_name')}"] += 1
-            elif topic == "delegated_result":
+            if topic == "delegated_result":
                 counts[f"delegated:{p.get('kind')}:{p.get('state')}"] += 1
             elif topic == "request" and ta == "kernel_agent":
                 counts[f"kernel_request:{p.get('kind')}"] += 1

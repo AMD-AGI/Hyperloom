@@ -133,10 +133,10 @@ async def test_cancellation_is_not_marked_as_an_llm_failure():
         ),
         pytest.param(
             {
-                "intent_type": "review_verdict",
-                "payload": {"target_proposal_msg_id": "abc", "verdict": "approve"},
+                "intent_type": "alert",
+                "payload": {"severity": "high", "summary": "server down"},
             },
-            id="review_verdict_full",
+            id="alert_full",
         ),
         pytest.param(
             {
@@ -181,9 +181,9 @@ def test_validate_emit_intent_input_accepts_well_formed(payload):
             id="unexpected_top_keys",
         ),
         pytest.param(
-            {"intent_type": "review_verdict", "payload": {"verdict": "approve"}},
-            "target_proposal_msg_id",
-            id="review_verdict_missing_target",
+            {"intent_type": "alert", "payload": {"severity": "high"}},
+            "summary",
+            id="alert_missing_summary",
         ),
     ],
 )
@@ -207,11 +207,8 @@ def test_build_emit_intent_server_returns_none_without_factories():
 
 
 _ORCHESTRATION_INTENTS = default_role_registry()["orchestration"].allowed_intents
-_CRITIC_INTENTS = default_role_registry()["critic"].allowed_intents
-_REVIEW_VERDICT_EMIT = {
-    "intent_type": "review_verdict",
-    "payload": {"target_proposal_msg_id": "p1", "verdict": "approve"},
-}
+_MESSAGING_INTENTS = frozenset({IntentType.SEND_MESSAGE, IntentType.ALERT})
+_DELEGATE_EMIT = {"intent_type": "delegate", "payload": {"action_name": "baseline"}}
 
 
 def _capturing_tool_factory(captured: dict[str, Any]):
@@ -245,14 +242,12 @@ def _offered_intent_types(schema: dict[str, Any]) -> set[str]:
 def test_emit_intent_schema_offers_only_the_roles_intents():
     """A role is offered only the intent types the PolicyGate lets it emit."""
     orchestration = _registered_emit_intent(allowed_intents=_ORCHESTRATION_INTENTS)["schema"]
-    critic = _registered_emit_intent(allowed_intents=_CRITIC_INTENTS)["schema"]
+    messaging = _registered_emit_intent(allowed_intents=_MESSAGING_INTENTS)["schema"]
 
     assert _offered_intent_types(orchestration) == {t.value for t in _ORCHESTRATION_INTENTS}
-    assert "review_verdict" not in _offered_intent_types(orchestration)
-    assert "review_verdict" not in orchestration["properties"]["payload"]["description"]
-    assert _offered_intent_types(critic) == {t.value for t in _CRITIC_INTENTS}
-    assert not _offered_intent_types(critic) & {t.value for t in _ORCHESTRATION_INTENTS - _CRITIC_INTENTS}
-    assert "delegate" not in critic["properties"]["payload"]["description"]
+    assert _offered_intent_types(messaging) == {t.value for t in _MESSAGING_INTENTS}
+    assert "delegate" in orchestration["properties"]["payload"]["description"]
+    assert "delegate" not in messaging["properties"]["payload"]["description"]
     assert "__unparsedToolInput" in orchestration["properties"]
 
 
@@ -271,28 +266,28 @@ async def test_the_emit_intent_handler_refuses_an_intent_outside_the_role(wrappe
     Under the real SDK only the wrapped form reaches the handler: the schema's enum refuses a native out-of-role
     call first (pinned in test_claude_unparsed_tool_input_unit). The native case pins the handler's own check.
     """
-    handler = _registered_emit_intent(allowed_intents=_ORCHESTRATION_INTENTS)["handler"]
-    arguments: dict[str, Any] = _REVIEW_VERDICT_EMIT
+    handler = _registered_emit_intent(allowed_intents=_MESSAGING_INTENTS)["handler"]
+    arguments: dict[str, Any] = _DELEGATE_EMIT
     if wrapped:
-        raw = json.dumps(_REVIEW_VERDICT_EMIT)
+        raw = json.dumps(_DELEGATE_EMIT)
         arguments = {"__unparsedToolInput": {"raw": raw, "len": len(raw)}}
 
     result = await handler(arguments)
 
     assert result["is_error"] is True
     text = result["content"][0]["text"]
-    assert "'review_verdict'" in text
-    for intent_type in _ORCHESTRATION_INTENTS:
+    assert "'delegate'" in text
+    for intent_type in _MESSAGING_INTENTS:
         assert intent_type.value in text
 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("wrapped", [False, True], ids=["native", "unparsed-wrapper"])
 async def test_the_emit_intent_tool_acks_an_intent_the_role_may_emit(wrapped):
-    handler = _registered_emit_intent(allowed_intents=_CRITIC_INTENTS)["handler"]
-    arguments: dict[str, Any] = _REVIEW_VERDICT_EMIT
+    handler = _registered_emit_intent(allowed_intents=_ORCHESTRATION_INTENTS)["handler"]
+    arguments: dict[str, Any] = _DELEGATE_EMIT
     if wrapped:
-        raw = json.dumps(_REVIEW_VERDICT_EMIT)
+        raw = json.dumps(_DELEGATE_EMIT)
         arguments = {"__unparsedToolInput": {"raw": raw, "len": len(raw)}}
 
     result = await handler(arguments)
@@ -566,9 +561,9 @@ def test_mcp_setup_diagnostic_hashes_the_role_scoped_schema():
     """The recorded schema hash identifies the schema this role registers, not the full intent contract."""
     import hashlib
 
-    backend = ClaudeBackend(mcp_server_factory=lambda *a, **k: None, allowed_intents=_ORCHESTRATION_INTENTS)
+    backend = ClaudeBackend(mcp_server_factory=lambda *a, **k: None, allowed_intents=_MESSAGING_INTENTS)
     expected = json.dumps(
-        build_emit_intent_tool_input_schema(_ORCHESTRATION_INTENTS), sort_keys=True, separators=(",", ":")
+        build_emit_intent_tool_input_schema(_MESSAGING_INTENTS), sort_keys=True, separators=(",", ":")
     )
 
     recorded = backend.get_mcp_setup_diagnostic()["emit_intent"]["schema_sha256"]

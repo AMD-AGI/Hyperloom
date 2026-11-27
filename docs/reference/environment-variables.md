@@ -33,7 +33,7 @@ provider-side combinations and what each one enables.
 | `ANTHROPIC_AUTH_TOKEN` | No       | —    | Claude CLI auth token alias, accepted in place of `ANTHROPIC_API_KEY`. Preflight never fills it; the e2e / forge-fusion env builders default it from the Anthropic-side key when they hand credentials to a subprocess.                                                                        |
 | `ANTHROPIC`<br>`_CUSTOM_HEADERS` | No | —    | Extra request headers for the Anthropic side, for gateways that authenticate on a header of their own (for example Azure API Management). Newline-delimited `Name: value` as in the Anthropic SDK; a JSON object is accepted too. `${VAR}` references are expanded from the same environment, so a gateway header can reuse `ANTHROPIC_API_KEY` instead of duplicating the secret. |
 | `CLAUDE_CODE`<br>`_OAUTH_TOKEN` | No | — | Claude Max/Pro subscription token from `claude setup-token`. Lowest-priority Anthropic credential: either API-key variable outranks it. On its own it implies `https://api.anthropic.com`. Passed to subprocesses verbatim and never copied into `ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN`, or `~/.claude/config.json`, which would switch the run to API-credits billing. |
-| `CLAUDE_CODE`<br>`_USE_BEDROCK` | No | — | Route the Claude runtime through AWS Bedrock, which carries the credential itself. Holds the Anthropic side for **agent backend selection only**, so a Bedrock box is not read as unconfigured and redirected to Codex. It names no key, so it does not satisfy `--critic-protocol=anthropic` or the credential preflight, and it never derives an `ANTHROPIC_BASE_URL`. |
+| `CLAUDE_CODE`<br>`_USE_BEDROCK` | No | — | Route the Claude runtime through AWS Bedrock, which carries the credential itself. Holds the Anthropic side for **agent backend selection only**, so a Bedrock box is not read as unconfigured and redirected to Codex. It names no key, so it does not satisfy the credential preflight, and it never derives an `ANTHROPIC_BASE_URL`. |
 | `CLAUDE_CODE`<br>`_USE_VERTEX` | No | — | Route the Claude runtime through Google Vertex AI. Holds the Anthropic side exactly as `CLAUDE_CODE_USE_BEDROCK` does, with the same limits. |
 | `OPENAI_BASE_URL`      | Conditional | —    | OpenAI-side endpoint. Required together with `OPENAI_API_KEY` to enable Codex. An OpenAI-only configuration drives Orchestration through the Codex backend; Claude and GEAK stay disabled.                                                                        |
 | `OPENAI_API_KEY`       | Conditional | —    | OpenAI-side key. Pairs with `OPENAI_BASE_URL`. Never borrowed from the Anthropic side.                                                                                                                               |
@@ -911,7 +911,7 @@ Only an agent launched through the chooser is isolated: every specialist (the di
 agent runner). Agents started elsewhere run as the app and can read what it can, in a hosted run too:
 
 - the orchestration role (`inference_optimizer/cli/backends.py`, `_build_orchestration_backend`), on whichever agent
-  CLI it runs: on Codex, the backend every non-critic role gets when the only credential is OpenAI's
+  CLI it runs: on Codex, the backend every role gets when the only credential is OpenAI's
   (`orchestrator/roles/codex.py`, `CodexBackend._session_for`), its shell commands run in Codex's own sandbox, which
   limits writes, not reads, and takes `bwrap` from `PATH`; on the DeepSeek Harness (`orchestrator/roles/deepseek.py`,
   named only by `INFERENCE_OPTIMIZER_AGENT_BACKEND=deepseek`) the harness's read-only mode likewise limits writes; on Claude it
@@ -926,7 +926,7 @@ agent runner). Agents started elsewhere run as the app and can read what it can,
 - the quantization agent (`agents/quantization/driver/runner.py`: Claude with `Bash`, or the DeepSeek Harness), which
   runs only with `--quantize` and `HYPERLOOM_QUANTIZE_ENABLED` set; no hosted spec field sets `--quantize`.
 
-The critic and the one-shot Claude calls start no agent with tools. `hyperloom hosted run` hands every run to
+The one-shot Claude calls start no agent with tools. `hyperloom hosted run` hands every run to
 `hyperloom-multibranch hosted run`, which makes the isolation check (below) at its start, with the layer bubblewrap, and
 also ends the run, naming which and why, when the agent runner would start its specialists unconfined or refuse them.
 
@@ -1117,9 +1117,9 @@ fail instead.
 
 ---
 
-## Critic / knowledge base (KB)
+## Knowledge base (KB)
 
-The following variables configure the Critic and knowledge base components.
+The following variables configure the knowledge base components.
 
 | Variable                              | Default                | Description                                                                                                                          |
 |---------------------------------------|------------------------|--------------------------------------------------------------------------------------------------------------------------------------|
@@ -1129,8 +1129,6 @@ The following variables configure the Critic and knowledge base components.
 | `KB_STORE_TOKEN`                      | Unset                  | KB Store bearer token. Required when `KNOWLEDGE_STORE_MODE=remote`; transport failures during the final write are non-fatal. |
 | `KB_DRAFT_DIR`                        | Runtime-generated      | Internal remote-mode handoff where each Recipe column (`config`, `patch`, `kernel`) stages its knowledge and files before CLOSE merges them. Hyperloom creates and exports it; operators must not set it. A Recipe cannot be built without it. |
 | `KB_WARM_START_DIR`                   | Runtime-generated      | Internal remote-mode handoff pointing agents at the downloaded `recipe.json + files/` selected Recipe View. Hyperloom creates and exports it; operators must not set it. |
-| `CRITIC_AGENT_ROOT`                   | Derived from `REPO_ROOT` | Override location of the critic-agent runtime.                                                                                    |
-| `CRITIC_AGENT_`<br>`MAX_COMPLETION_TOKENS` | `32000`           | Output-token cap for one critic review call. A reply cut off at the cap is retried once at twice this value and then fails the turn, so the cap is a ceiling rather than a budget: unused headroom is never billed, while a truncated reply bills the whole call and yields nothing. Lower it for a model whose own output limit is smaller. A non-positive or unparseable value logs a warning and falls back to the default. |
 
 ---
 
@@ -1154,7 +1152,7 @@ Primary switch (default **off**) for live Langfuse trace push.
 - **Live push**: when set to `1/true/yes/on` and the three `LANGFUSE_*` credentials are present, every in-process LLM call is mirrored into Langfuse while the run is live. A session-end flush backfills calls still missing their token or text half, the recipe-KB, specialist-intel, Forge-step, GEMM-tuning and trajectory logs, and KEEP/REVERT decision Scores.
 - **Local ledger**: `reports/trace/*.jsonl` is always written regardless of this flag. If the SDK is unavailable, live push degrades to a no-op.
 - **Correlation**: the Langfuse trace ID and `session_id` grouping are derived from `claw_session_id` (env `CLAW_SESSION_ID`), falling back to the internal session ID for standalone runs. Live push and the offline `backfill_langfuse` CLI collapse onto one trace per Primus-Claw session.
-- **Span layout**: `trace → phase span (PRELUDE/ENABLEMENT/FRAMEWORK_AGENT/KERNEL_AGENT/CYCLE_END/…) → agent span (component: orchestration/kernel/specialist/critic/geak/forge/…) → Generation`. Each KEEP/REVERT/`gain_pct` Score attaches to the agent span that produced the decision, with a trace-level fallback when no matching span exists.
+- **Span layout**: `trace → phase span (PRELUDE/ENABLEMENT/FRAMEWORK_AGENT/KERNEL_AGENT/CYCLE_END/…) → agent span (component: orchestration/kernel/specialist/geak/forge/…) → Generation`. Each KEEP/REVERT/`gain_pct` Score attaches to the agent span that produced the decision, with a trace-level fallback when no matching span exists.
 - **Recipe-KB spans**: under the `recipe_kb` agent span, local reads/writes and remote KB Store publish attempts are recorded from `runtime/recipe_snapshot/.audit.jsonl`. Read spans use `kb:recipe_snapshot:<method>`; write spans use `kb:recipe_write:<generator>`, where the generator distinguishes normal `close` from `t4_fallback`. Remote rows report `written`, `skipped`, or `error` without recording credentials or payload bodies.
 - **Receipt**: every session records a `langfuse` section in `session_breakdown.json` (and `reports/trace/langfuse_receipt.json`) noting:
   - Whether push was enabled (or the `disabled_reason`)
@@ -1251,7 +1249,7 @@ Each call then carries, on headers that gateway understands:
 |-------|-------|
 | `application` | Always `hyperloom`, to separate this product's spend on a shared gateway. |
 | `session` | `CLAW_SESSION_ID`, the same id `session_breakdown.json` records — this is what joins the two accounts. |
-| `component` | The producer, e.g. `orchestration`, `kernel`, `critic`, `specialist`. |
+| `component` | The producer, e.g. `orchestration`, `kernel`, `specialist`. |
 | `phase` | The phase the run had reached. |
 | `type` | The action executing inside that phase, e.g. `kernel_opt`. |
 | `operation` | What the individual call was for, e.g. `generate_candidate`. |

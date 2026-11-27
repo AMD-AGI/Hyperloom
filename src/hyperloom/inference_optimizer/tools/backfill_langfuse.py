@@ -18,7 +18,7 @@ Mapping (trace -> phase span -> agent span -> generation)::
     Trace                 = one session
       phase span          = PRELUDE / ENABLEMENT / FRAMEWORK_AGENT / KERNEL_AGENT / CYCLE_END / ...
         agent span        = component (orchestration / kernel_agent /
-                            specialist / critic / geak / forge / ...)
+                            specialist / geak / forge / ...)
           Generation      = one LLM call (llm_calls.jsonl; prompt/response
                             paired from conversations.jsonl when available)
       Score               = one decision (decision_trace.jsonl), attached to

@@ -78,8 +78,7 @@ class IntegratePatchExecutor(
         if early is not None:
             return early
 
-        # Provision an attempt-scoped runtime AFTER the Critic gate (in
-        # _stage_resolve) and BEFORE any patch apply / setup replay.
+        # Provision an attempt-scoped runtime AFTER _stage_resolve's guards and BEFORE any patch apply / setup replay.
         provision_early = await self._stage_provision_attempt_runtime(attempt, params, attempt.specialist_task_id)
         if provision_early is not None:
             return provision_early

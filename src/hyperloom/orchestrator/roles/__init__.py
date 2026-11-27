@@ -6,15 +6,11 @@
 from .base import Backend
 from .claude import ClaudeBackend
 from .codex import CodexBackend
-from .critic_agent import CriticAgentBackend
 from .deepseek import DeepSeekBackend
-from .mock_backend import MockCriticBackend
 
 __all__ = [
     "Backend",
     "ClaudeBackend",
     "CodexBackend",
-    "CriticAgentBackend",
     "DeepSeekBackend",
-    "MockCriticBackend",
 ]

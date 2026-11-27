@@ -13,7 +13,6 @@ from hyperloom.inference_optimizer.protocol.intent import Intent, IntentType
 from hyperloom.orchestrator.actions.executors.explore_prefilter.grid_payload import runnable_grid_variants
 from hyperloom.orchestrator.loop.coordinator import Coordinator
 from hyperloom.orchestrator.loop._explore_grid import EXPLORE_GRID_MISSING, explore_grid_denial
-from hyperloom.orchestrator.state.pending_proposal import PendingProposal
 from hyperloom.orchestrator.roles import Backend
 from hyperloom.orchestrator.tests.mock_backend import MockBackend, ScriptedPlan
 
@@ -30,7 +29,7 @@ def _heartbeat() -> Intent:
 
 def _backends() -> dict[str, Backend]:
     silent = ScriptedPlan(turns=[], default_intent=_heartbeat())
-    return {name: MockBackend(silent, name=name) for name in ("orchestration", "critic")}
+    return {"orchestration": MockBackend(silent, name="orchestration")}
 
 
 @pytest.fixture
@@ -52,16 +51,6 @@ def _admission(c: Coordinator, params: dict[str, Any] | None):
 async def _denials(c: Coordinator) -> list[str]:
     observed = await c.bus.tail(topic="observation")
     return [m.payload.get("rule") for m in observed if m.payload.get("kind") == "policy_denied"]
-
-
-async def _skipped(c: Coordinator) -> list[str]:
-    observed = await c.bus.tail(topic="observation")
-    return [m.payload["reason"] for m in observed if m.payload.get("kind") == "proposal_materialize_skipped"]
-
-
-def _approved_explore(msg_id: str, **params: Any) -> PendingProposal:
-    payload = {"action_name": "explore", "params": dict(params)}
-    return PendingProposal(msg_id, "orchestration", "explore", predicted_gain_pct=5.0, payload=payload)
 
 
 class TestWhatAdmissionAsksOfAnExplore:
@@ -164,7 +153,7 @@ class TestBothWaysAnExploreReachesTheRegistry:
         assert [t for t in await coord.tasks.queued() if t.kind == "explore"] == []
         assert await _denials(coord) == [EXPLORE_GRID_MISSING]
 
-    async def test_a_proposed_explore_with_no_grid_never_reaches_the_critic(self, coord: Coordinator):
+    async def test_a_proposed_explore_with_no_grid_is_refused_like_a_delegated_one(self, coord: Coordinator):
         intent = Intent(
             type=IntentType.PROPOSE_ACTION,
             payload={"action_name": "explore", "params": {}, "predicted_gain_pct": 5.0},
@@ -172,7 +161,7 @@ class TestBothWaysAnExploreReachesTheRegistry:
 
         await coord.router._handle_propose_action("orchestration", intent)
 
-        assert not coord.state.pending_proposals
+        assert [t for t in await coord.tasks.queued() if t.kind == "explore"] == []
         assert await _denials(coord) == [EXPLORE_GRID_MISSING]
 
     async def test_a_delegated_explore_carrying_a_grid_still_queues(self, coord: Coordinator, monkeypatch):
@@ -183,22 +172,17 @@ class TestBothWaysAnExploreReachesTheRegistry:
 
         assert [t for t in await coord.tasks.queued() if t.kind == "explore"]
 
-
-class TestTheApprovedProposalIsJudgedAgain:
-    """Admission judged the grid the proposal carried; the seed sources move under it."""
-
-    async def test_an_approved_explore_that_names_no_grid_is_not_materialized(self, coord: Coordinator):
-        await coord.proposals.materialize_approved_proposal(_approved_explore("p1"))
-
-        assert [t for t in await coord.tasks.queued() if t.kind == "explore"] == []
-        assert await _skipped(coord) == [EXPLORE_GRID_MISSING]
-
-    async def test_an_approved_explore_a_seed_source_still_covers_is_materialized(self, coord: Coordinator):
+    async def test_a_proposed_explore_a_seed_source_covers_queues_without_a_grid(self, coord: Coordinator):
         coord.shared_state.framework = "atom"
+        intent = Intent(
+            type=IntentType.PROPOSE_ACTION,
+            payload={"action_name": "explore", "params": {}, "predicted_gain_pct": 5.0},
+        )
 
-        await coord.proposals.materialize_approved_proposal(_approved_explore("p2"))
+        await coord.router._handle_propose_action("orchestration", intent)
 
-        assert await _skipped(coord) == []
+        assert [t for t in await coord.tasks.queued() if t.kind == "explore"]
+        assert await _denials(coord) == []
 
 
 def test_the_gate_answers_only_for_explore():

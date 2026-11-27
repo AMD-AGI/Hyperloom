@@ -5,7 +5,7 @@ Hyperloom's autonomous LLM inference optimization on AMD GPUs. It is
 the CLI/session layer — CLI, session paths, protocol surfaces,
 and breakdown export — that launches the Coordinator
 (a Python state machine) living in the sibling `hyperloom.orchestrator`
-package. The Coordinator drives Orchestration and Critic turns, specialists,
+package. The Coordinator drives Orchestration turns, specialists,
 and programmatic Kernel handlers through baseline measurement, profiling,
 parameter search, kernel optimization, and validated promotion. There is no
 runtime RCA agent or automatic supervision/resume loop.
@@ -64,7 +64,7 @@ Cursor and Claw.
 ```
 src/hyperloom/inference_optimizer/
 ├── SKILL.md                    # Agent instructions (Cursor / Claw entry point)
-├── references/                 # SKILL reference chapters (critic, troubleshooting, rewrite patterns)
+├── references/                 # SKILL reference chapters (troubleshooting, rewrite patterns)
 ├── cli/                        # `python -m hyperloom optimize` entry point
 │   ├── __init__.py             # main()/_run_optimize()
 │   ├── parser.py               # _build_parser()

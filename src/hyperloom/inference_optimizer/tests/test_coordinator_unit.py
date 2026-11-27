@@ -115,23 +115,6 @@ def test_format_inbox_policy_denied_observation_shows_the_rule_and_hint():
     assert "phase_incompatible" in line and "KERNEL_AGENT proposes: integrate" in line
 
 
-def test_format_inbox_review_verdict():
-    m = Message(
-        msg_id="r",
-        from_agent="critic",
-        to_agent="orch",
-        topic="review_verdict",
-        payload={
-            "target_proposal_msg_id": "pm1",
-            "verdict": "approve",
-            "reasoning": "ok" * 80,
-        },
-        seq=9,
-    )
-    line = _format_inbox_event(m)
-    assert "verdict='approve'" in line and "target='pm1'" in line
-
-
 def test_format_inbox_observation_generic():
     m = Message(
         msg_id="o",

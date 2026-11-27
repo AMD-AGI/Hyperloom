@@ -49,7 +49,7 @@ from .event_fields import (
 from .event_ids import event_id
 from .construct import event_header
 from .event_rows import blocking_gate, group_rows, rows_for_event, sort_rows, wire_rows
-from .event_sink import EventSink, bound_sink
+from .event_sink import EventSink
 from .event_timeline import EventHeader, finish_event, open_event
 from .sections import FRAMEWORK_EVENT_SECTIONS
 
@@ -108,22 +108,15 @@ PLATEAU_PATH_EXIT = "exit"
 #: The steps a proposal can move through. Recorded as they happen rather than
 #: derived from counters, so a candidate re-authored twice reads as two steps.
 STEP_PROPOSED = "proposed"
-STEP_REVIEWED = "reviewed"
 STEP_ROUTED = "routed"
 STEP_AUTHORED = "authored"
 STEP_REAUTHORED = "reauthored"
 STEP_ATTEMPTED = "attempted"
-STEP_DROPPED = "dropped"
 
 #: The dispositions a proposal settles on. ``dropped`` covers every way it
 #: never reached a measurement; the row's ``reason`` says which.
 DISPOSITION_ATTEMPTED = "attempted"
 DISPOSITION_DROPPED = "dropped"
-
-#: Who authored a review. A proposal blocked because the Critic had no manifest
-#: to read must not be reported as one the Critic examined and refused.
-REVIEWER_CRITIC = "critic"
-REVIEWER_CRITIC_UNAVAILABLE = "critic_unavailable"
 
 __all__ = [
     "ARM_CONFIG",
@@ -141,8 +134,6 @@ __all__ = [
     "PRODUCER_PRIMATUNE",
     "PRODUCER_SEED_GRID",
     "PRODUCER_SPECIALIST",
-    "REVIEWER_CRITIC",
-    "REVIEWER_CRITIC_UNAVAILABLE",
     "ROLE_AUTHORING",
     "ROLE_CONFIG",
     "ROLE_DISCOVERY",
@@ -155,17 +146,13 @@ __all__ = [
     "SECTION_RUN",
     "STEP_ATTEMPTED",
     "STEP_AUTHORED",
-    "STEP_DROPPED",
     "STEP_PROPOSED",
     "STEP_REAUTHORED",
-    "STEP_REVIEWED",
     "STEP_ROUTED",
-    "CriticReview",
     "FrameworkEventRecorder",
     "GateVerdict",
     "assemble_framework_ext",
     "framework_event_id",
-    "record_review_evidence",
     "make_framework_recorder",
     "producer_for_provenance",
 ]
@@ -296,17 +283,6 @@ class GateVerdict:
     reason: str = ""
     observed: Any = None
     threshold: Any = None
-
-
-@dataclass(frozen=True)
-class CriticReview:
-    """The Critic's ruling on one proposal."""
-
-    verdict: str
-    reviewer: str = REVIEWER_CRITIC
-    reason: str = ""
-    confidence: Any = None
-    advisory: Mapping[str, Any] | None = None
 
 
 class FrameworkEventRecorder:
@@ -495,72 +471,6 @@ class FrameworkEventRecorder:
         if "confidence" in fields:
             row["confidence"] = _float_or_none(fields.get("confidence"))
         self._sink.record(SECTION_PROPOSAL, row, row_type=ROW_PROPOSAL, natural_ids=_key(key))
-
-    def record_proposal_review(self, proposal_id: str, review: CriticReview) -> None:
-        """Record the Critic's ruling on one proposal, inline on its row.
-
-        The review lives on the proposal so that it follows the proposal
-        wherever it was raised.
-
-        ``review.advisory`` is recorded as given, since the vocabulary is the
-        Critic's own and a re-spelling here would drift from what it emitted.
-        """
-        key = str(proposal_id or "")
-        if not key:
-            return
-        ruling: dict[str, Any] = {
-            "verdict": review.verdict,
-            "reviewer": review.reviewer,
-            "reason": review.reason,
-            "confidence": _float_or_none(review.confidence),
-            "concerns": [],
-            "reviewed_at": _now(),
-        }
-        for name, value in _as_dict(review.advisory).items():
-            ruling.setdefault(name, value)
-        self._sink.record(
-            SECTION_PROPOSAL,
-            {"proposal_id": key, "critic_review": ruling},
-            row_type=ROW_PROPOSAL,
-            natural_ids=_key(key),
-        )
-
-    def record_proposal_review_outcome(
-        self,
-        proposal_id: str,
-        *,
-        materialized: Any = None,
-        denied: Any = None,
-        patch_verdict_key: str = "",
-        reauthored: Any = None,
-    ) -> None:
-        """Record what the loop did with a ruling, onto the ruling itself.
-
-        An ``advise`` that materialised and an ``advise`` held at the patch gate
-        are the same ruling with opposite outcomes. ``patch_verdict_key`` is the
-        subject the patch gate consults this ruling under, which connects a
-        blocked ``integrate_patch`` back to the review that blocked it.
-        """
-        key = str(proposal_id or "")
-        if not key:
-            return
-        outcome: dict[str, Any] = {}
-        if materialized is not None:
-            outcome["materialized"] = bool(materialized)
-        if denied is not None:
-            outcome["denied"] = bool(denied)
-        if reauthored is not None:
-            outcome["reauthored"] = bool(reauthored)
-        if str(patch_verdict_key or ""):
-            outcome["patch_verdict_key"] = str(patch_verdict_key)
-        if not outcome:
-            return
-        self._sink.record(
-            SECTION_PROPOSAL,
-            {"proposal_id": key, "critic_review": {"outcome": outcome}},
-            row_type=ROW_PROPOSAL,
-            natural_ids=_key(key),
-        )
 
     def record_proposal_step(
         self,
@@ -855,36 +765,6 @@ def _derived_status(
     if not runs:
         return "succeeded"
     return _worst_status(row.get("status") for row in runs)
-
-
-def record_review_evidence(
-    *,
-    macro_cycle: Any,
-    proposal_id: str,
-    artifacts: Mapping[str, Any] | None = None,
-) -> None:
-    """Attach what a ruling was grounded in, onto the ruling.
-
-    Called from the Critic's own turn rather than through the phase's recorder,
-    because that is where these facts exist: the artifacts are written by the
-    review runtime. Silent when there is no session or no such event, since the
-    Critic also runs on ticks in phases that record no framework event.
-    """
-    key = str(proposal_id or "")
-    evidence: dict[str, Any] = {}
-    if artifacts:
-        evidence["artifacts"] = dict(artifacts)
-    if not key or not evidence:
-        return
-    sink = bound_sink(framework_event_id(macro_cycle), producer=PRODUCER)
-    if sink is None:
-        return
-    sink.record(
-        SECTION_PROPOSAL,
-        {"proposal_id": key, "critic_review": evidence},
-        row_type=ROW_PROPOSAL,
-        natural_ids=_key(key),
-    )
 
 
 def make_framework_recorder(*, macro_cycle: Any = 0) -> FrameworkEventRecorder | None:

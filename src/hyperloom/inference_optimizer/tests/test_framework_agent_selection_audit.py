@@ -106,21 +106,6 @@ def test_config_levers_json_args_as_list_stay_unquoted() -> None:
 # _framework_agent_audit_skip_confident
 
 
-def test_collect_framework_agent_candidate_priors(coord: Coordinator) -> None:
-    coord.shared_state.framework_agent_phase_progress = [
-        "not-a-dict",  # skipped via the isinstance filter
-        {"candidate_id": "c1", "status": "kept", "gain_pct": 3.2},
-        {"candidate_id": "c2", "status": "in_flight"},  # non-terminal -> excluded
-        {"candidate_id": "c3", "status": "critic_denied", "rationale": "off the bottleneck"},
-    ]
-    priors = coord.phase_framework._collect_framework_agent_candidate_priors()
-    statuses = {o["status"] for o in priors["recent_outcomes"]}
-    assert statuses == {"kept", "critic_denied"}
-    # The denial reason has to reach the Critic, or the priors carry the verdict without the argument behind it.
-    denied = next(o for o in priors["recent_outcomes"] if o["status"] == "critic_denied")
-    assert denied["rationale"] == "off the bottleneck"
-
-
 def test_an_already_present_candidate_counts_as_tested() -> None:
     """It reached the apply stage, so the phase summary does not read it as a discovery that found nothing."""
     from hyperloom.orchestrator.framework.artifacts import summarize_candidate_outcomes
@@ -297,7 +282,16 @@ def test_dispatch_pause_budget_remaining(coord: Coordinator, monkeypatch) -> Non
     assert coord.dispatcher.dispatch_paused_for_phase_budget() is False
 
 
-# maybe_autosubmit_enablement_config
+# integrate_specialist_deliverable
+async def _observed(coord: Coordinator, kind: str, field: str) -> list:
+    return [m.payload[field] for m in await coord.bus.tail(topic="observation", n=20) if m.payload.get("kind") == kind]
+
+
+async def _integrate_params(coord: Coordinator) -> list[dict]:
+    """The params of every integrate_patch task queued so far."""
+    return [dict(task.params) for task in await coord.tasks.queued() if task.kind == "integrate_patch"]
+
+
 def _authoring_task(task_id: str = "spec-1") -> types.SimpleNamespace:
     return types.SimpleNamespace(
         task_id=task_id,
@@ -312,43 +306,41 @@ def _authoring_task(task_id: str = "spec-1") -> types.SimpleNamespace:
 @pytest.mark.asyncio
 async def test_a_framework_authoring_config_round_is_left_to_explore(coord: Coordinator) -> None:
     done = {"proposal_set": [{"name": "mtp-toggle", "extra_envs": {"VLLM_MTP": "1"}, "extra_args": "--speculative 4"}]}
-    await coord.phase_framework.maybe_autosubmit_enablement_config(task=_authoring_task(), done_payload=done)
-    assert not coord.state.pending_proposals
+    await coord.phase_framework.integrate_specialist_deliverable(task=_authoring_task(), done_payload=done)
+    assert await _integrate_params(coord) == []
 
 
 @pytest.mark.asyncio
-async def test_autosubmit_config_patch_deliverable_returns(coord: Coordinator) -> None:
-    await coord.phase_framework.maybe_autosubmit_enablement_config(
+async def test_enablement_config_patch_deliverable_returns(coord: Coordinator) -> None:
+    await coord.phase_framework.integrate_specialist_deliverable(
         task=_enablement_authoring_task(),
         done_payload={"patches_written": ["p.patch"]},
     )
-    assert not coord.state.pending_proposals
+    assert await _integrate_params(coord) == []
+    assert await _observed(coord, "specialist_patch_integrate_skipped_no_files", "claimed") == [["p.patch"]]
 
 
 @pytest.mark.asyncio
-async def test_autosubmit_config_routes_to_integrate_patch(coord: Coordinator) -> None:
+async def test_enablement_config_routes_to_integrate_patch(coord: Coordinator) -> None:
     done = {"proposal_set": [{"name": "mtp-toggle", "extra_envs": {"VLLM_MTP": "1"}, "extra_args": "--speculative 4"}]}
-    before = len(coord.state.pending_proposals)
-    await coord.phase_framework.maybe_autosubmit_enablement_config(task=_enablement_authoring_task(), done_payload=done)
-    assert len(coord.state.pending_proposals) == before + 1
-    prop = next(iter(coord.state.pending_proposals.values()))
-    assert prop.action_name == "integrate_patch"
-    params = (prop.payload or {}).get("params") or {}
+    await coord.phase_framework.integrate_specialist_deliverable(task=_enablement_authoring_task(), done_payload=done)
+    (params,) = await _integrate_params(coord)
     assert params["extra_server_args"] == "--speculative 4"
     assert params["extra_envs"] == {"VLLM_MTP": "1"}
     assert "config_changes" not in params
+    assert await _observed(coord, "enablement_config_integrate_queued", "extra_envs") == [{"VLLM_MTP": "1"}]
 
 
 @pytest.mark.asyncio
-async def test_autosubmit_config_names_the_round_after_the_lever_it_benches(coord: Coordinator) -> None:
+async def test_enablement_config_names_the_round_after_the_lever_it_benches(coord: Coordinator) -> None:
     done = {
         "proposal_set": [
             {"name": "research-notes"},
             {"name": "eagle-spec", "extra_args": "--speculative-algorithm EAGLE --speculative-num-steps 3"},
         ]
     }
-    await coord.phase_framework.maybe_autosubmit_enablement_config(task=_enablement_authoring_task(), done_payload=done)
-    params = (next(iter(coord.state.pending_proposals.values())).payload or {}).get("params") or {}
+    await coord.phase_framework.integrate_specialist_deliverable(task=_enablement_authoring_task(), done_payload=done)
+    (params,) = await _integrate_params(coord)
     assert (params["patch_name"], params["extra_server_args"]) == (
         "eagle-spec",
         "--speculative-algorithm EAGLE --speculative-num-steps 3",
@@ -363,51 +355,22 @@ async def test_autosubmit_config_names_the_round_after_the_lever_it_benches(coor
 )
 async def test_a_removal_only_lever_reaches_integrate(coord: Coordinator, removals) -> None:
     done = {"proposal_set": [{"name": "no-cuda-graph-off", "remove_args": removals}]}
-    await coord.phase_framework.maybe_autosubmit_enablement_config(task=_enablement_authoring_task(), done_payload=done)
-    (prop,) = coord.state.pending_proposals.values()
-    params = prop.payload["params"]
+    await coord.phase_framework.integrate_specialist_deliverable(task=_enablement_authoring_task(), done_payload=done)
+    (params,) = await _integrate_params(coord)
     assert (params["patch_name"], params["remove_args"]) == ("no-cuda-graph-off", removals)
 
 
 @pytest.mark.asyncio
-async def test_autosubmit_config_idempotent_on_existing_verdict(coord: Coordinator, monkeypatch) -> None:
-    monkeypatch.setattr(coord.shared_state, "get_specialist_patch_verdict", lambda _sid: "approve", raising=False)
+async def test_a_config_deliverable_is_queued_once_per_specialist(coord: Coordinator) -> None:
     done = {"proposal_set": [{"name": "n", "extra_envs": {"X": "1"}}]}
-    await coord.phase_framework.maybe_autosubmit_enablement_config(task=_enablement_authoring_task(), done_payload=done)
-    assert not coord.state.pending_proposals
-
-
-@pytest.mark.asyncio
-async def test_autosubmit_config_returns_when_review_in_flight(coord: Coordinator) -> None:
-    from hyperloom.orchestrator.state.pending_proposal import PendingProposal
-
-    coord.state.pending_proposals["existing"] = PendingProposal(
-        proposal_msg_id="existing",
-        from_agent="coordinator",
-        action_name="integrate_patch",
-        predicted_gain_pct=0.0,
-        payload={"params": {"specialist_task_id": "spec-enable-1"}},
-    )
-    done = {"proposal_set": [{"name": "n", "extra_envs": {"X": "1"}}]}
-    await coord.phase_framework.maybe_autosubmit_enablement_config(task=_enablement_authoring_task(), done_payload=done)
-    assert len(coord.state.pending_proposals) == 1
-
-
-@pytest.mark.asyncio
-async def test_autosubmit_config_proceeds_for_a_different_specialist(coord: Coordinator) -> None:
-    """The scan keys on the specialist task id, so another specialist's review does not block this one."""
-    from hyperloom.orchestrator.state.pending_proposal import PendingProposal
-
-    coord.state.pending_proposals["existing"] = PendingProposal(
-        proposal_msg_id="existing",
-        from_agent="coordinator",
-        action_name="integrate_patch",
-        predicted_gain_pct=0.0,
-        payload={"params": {"specialist_task_id": "spec-other"}},
-    )
-    done = {"proposal_set": [{"name": "n", "extra_envs": {"X": "1"}}]}
-    await coord.phase_framework.maybe_autosubmit_enablement_config(task=_enablement_authoring_task(), done_payload=done)
-    assert len(coord.state.pending_proposals) == 2
+    for task_id in ("spec-enable-1", "spec-enable-1", "spec-other"):
+        await coord.phase_framework.integrate_specialist_deliverable(
+            task=_enablement_authoring_task(task_id), done_payload=done
+        )
+    assert [params["specialist_task_id"] for params in await _integrate_params(coord)] == [
+        "spec-enable-1",
+        "spec-other",
+    ]
 
 
 def _enablement_authoring_task(task_id: str = "spec-enable-1") -> types.SimpleNamespace:
@@ -422,18 +385,15 @@ def _enablement_authoring_task(task_id: str = "spec-enable-1") -> types.SimpleNa
 
 
 @pytest.mark.asyncio
-async def test_autosubmit_config_enablement_propagates_marker_and_setup(coord: Coordinator) -> None:
+async def test_enablement_config_enablement_propagates_marker_and_setup(coord: Coordinator) -> None:
     """Regression: a config-lever ENABLEMENT deliverable must carry the ``enablement`` marker + setup commands into integrate_patch, otherwise the integrate result never gets ``enablement=True`` and ``maybe_rearm_enablement`` no-ops, the stall streak never advances, and the run spins until wall-clock."""
     done = {
         "proposal_set": [{"name": "v4-serve-flags", "extra_args": "--tokenizer-mode deepseek_v4"}],
         # NEW setup command proposed by the specialist in this deliverable.
         "setup_commands": ["pip install -U aiter"],
     }
-    before = len(coord.state.pending_proposals)
-    await coord.phase_framework.maybe_autosubmit_enablement_config(task=_enablement_authoring_task(), done_payload=done)
-    assert len(coord.state.pending_proposals) == before + 1
-    prop = next(iter(coord.state.pending_proposals.values()))
-    params = (prop.payload or {}).get("params") or {}
+    await coord.phase_framework.integrate_specialist_deliverable(task=_enablement_authoring_task(), done_payload=done)
+    (params,) = await _integrate_params(coord)
     assert params.get("enablement") is True
     assert params["framework_agent_authoring"] is True
     assert params["enablement_before_observation_path"] == "/s/reports/bringup/round-abc-000.json"
@@ -442,14 +402,11 @@ async def test_autosubmit_config_enablement_propagates_marker_and_setup(coord: C
 
 
 @pytest.mark.asyncio
-async def test_autosubmit_config_enablement_setup_only_still_routes(coord: Coordinator) -> None:
+async def test_enablement_config_enablement_setup_only_still_routes(coord: Coordinator) -> None:
     """An enablement deliverable with NO config levers (setup-only stack upgrade) must still reach integrate_patch so the stall accounting can advance."""
     done = {"proposal_set": [], "setup_commands": ["pip install -U vllm==0.21.0"]}
-    before = len(coord.state.pending_proposals)
-    await coord.phase_framework.maybe_autosubmit_enablement_config(task=_enablement_authoring_task(), done_payload=done)
-    assert len(coord.state.pending_proposals) == before + 1
-    prop = next(iter(coord.state.pending_proposals.values()))
-    params = (prop.payload or {}).get("params") or {}
+    await coord.phase_framework.integrate_specialist_deliverable(task=_enablement_authoring_task(), done_payload=done)
+    (params,) = await _integrate_params(coord)
     assert params.get("enablement") is True
     assert params.get("extra_server_args") == ""
     assert params.get("extra_envs") == {}
@@ -457,7 +414,7 @@ async def test_autosubmit_config_enablement_setup_only_still_routes(coord: Coord
 
 
 @pytest.mark.asyncio
-async def test_autosubmit_config_build_only_skips_integrate(coord: Coordinator) -> None:
+async def test_enablement_config_build_only_skips_integrate(coord: Coordinator) -> None:
     done = {
         "proposal_set": [{"name": "build-aiter"}],
         "needs_targeted_build": {
@@ -467,12 +424,12 @@ async def test_autosubmit_config_build_only_skips_integrate(coord: Coordinator) 
         },
     }
 
-    await coord.phase_framework.maybe_autosubmit_enablement_config(
+    await coord.phase_framework.integrate_specialist_deliverable(
         task=_enablement_authoring_task(),
         done_payload=done,
     )
 
-    assert not coord.state.pending_proposals
+    assert await _integrate_params(coord) == []
 
 
 # _record_framework_agent_authored_outcome

@@ -883,8 +883,6 @@ async def test_confirmation_leaves_round_fence_and_events_for_existing_reconcile
             SharedState(),
             links=ReconcileLinks(
                 resources=ResourceFacts(),
-                proposals=dict,
-                drop_proposal=lambda _pending, _reason: None,
                 session_dir=tmp_path,
                 result_pending=lambda _task_id: False,
             ),

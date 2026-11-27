@@ -540,14 +540,16 @@ def test_accepted_attempt_reports_stash_failure_without_claiming_completion(tmp_
 
 
 @pytest.mark.parametrize("patch_dir", ["patches", "worktree/patches"], ids=["workspace", "worktree"])
-def test_resolve_patch_paths_scan(tmp_path, patch_dir):
+@pytest.mark.parametrize("done_payload", [None, {"proposal_set": []}], ids=["no_payload", "payload_names_none"])
+def test_resolve_patch_paths_ignores_files_the_done_payload_does_not_name(tmp_path, patch_dir, done_payload):
     base = tmp_path / patch_dir
     base.mkdir(parents=True)
     (base / "a.patch").write_text("x", encoding="utf-8")
     (base / "b.diff").write_text("y", encoding="utf-8")
-    out = patch_sources._resolve_patch_paths(specialist_workspace=tmp_path, explicit_patches=None, done_payload=None)
-    names = sorted(p.name for p in out)
-    assert names == ["a.patch", "b.diff"]
+    out = patch_sources._resolve_patch_paths(
+        specialist_workspace=tmp_path, explicit_patches=None, done_payload=done_payload
+    )
+    assert out == []
 
 
 def test_resolve_patch_paths_missing_logged(tmp_path):
@@ -652,65 +654,6 @@ def test_a_git_tree_that_lost_its_base_is_not_reported_as_restored(tmp_path):
     assert summary["reversed"] == []
     assert pending["recovery"]["phase"] != "restored"
     assert (root / "cfg.txt").read_text(encoding="utf-8") == "PATCHED\n"
-
-
-class _Verdict:
-    def __init__(self, verdict: str):
-        self._v = verdict
-
-    def get_specialist_patch_verdict(self, tid: str) -> str:
-        return self._v
-
-
-def test_enforce_critic_gate_noop_when_no_shared_state():
-    assert integrate_refusals._enforce_critic_gate(None, "spec") is None
-
-
-def test_enforce_critic_gate_passes_on_permissive_verdict():
-    assert integrate_refusals._enforce_critic_gate(_Verdict("approve"), "spec") is None
-    assert integrate_refusals._enforce_critic_gate(_Verdict("advise"), "spec") is None
-
-
-def test_enforce_critic_gate_rejects_on_non_permissive_verdict():
-    out = integrate_refusals._enforce_critic_gate(_Verdict("reject"), "spec-1")
-    assert out is not None
-    assert out["status"] == "rejected_by_critic"
-    assert out["specialist_task_id"] == "spec-1"
-    assert out["patches_applied"] == []
-    assert "reject" in out["reason"]
-
-
-def test_enforce_critic_gate_rejects_when_no_verdict_on_record():
-    out = integrate_refusals._enforce_critic_gate(_Verdict(""), "spec-2")
-    assert out is not None
-    assert out["status"] == "rejected_by_critic"
-    assert "no Critic verdict on record" in out["reason"]
-
-
-def test_enforce_critic_gate_handles_state_without_verdict_method():
-    class _NoMethod:
-        pass
-
-    # AttributeError on get_specialist_patch_verdict is treated as "no verdict".
-    out = integrate_refusals._enforce_critic_gate(_NoMethod(), "spec-4")
-    assert out is not None
-    assert out["status"] == "rejected_by_critic"
-
-
-def test_upstream_pr_lane_refuses_an_unreviewed_candidate(tmp_path: Path) -> None:
-    """The lane fetches a diff from a remote and applies it to the live tree."""
-    ex = ip.IntegratePatchExecutor(session_dir=tmp_path)
-    attempt = ip.IntegrateAttempt(task_id="t-cand")
-    params = {
-        "candidate": {"repo": "vllm-project/vllm", "pr_number": 1015},
-        "framework_agent_candidate_id": "vllm-project/vllm#1015",
-    }
-
-    out = ex._stage_resolve_upstream_pr(attempt, params, _Verdict("reject"))
-
-    assert out is not None
-    assert out["status"] == "rejected_by_critic"
-    assert "patches" not in params
 
 
 def _git_tree(root: Path) -> None:

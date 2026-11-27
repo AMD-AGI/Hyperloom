@@ -73,8 +73,8 @@ def _merge_established_server_args(inherited_args: str, round_args: str) -> str:
     # The combined string carries a quoted value with embedded whitespace, which
     # the deduper cannot parse; it would hand back the concatenation with two
     # copies of every inherited flag, and a duplicate is what the server
-    # hard-errors on. Provenance cannot decide this either: only the autosubmit
-    # bridge pre-merges the inheritance, while this executor also serves rounds
+    # hard-errors on. Provenance cannot decide this either: only the specialist-patch
+    # route pre-merges the inheritance, while this executor also serves rounds
     # opened by the build probe, the framework-config bridge, an authored
     # proposal and a re-queued row, any of which may carry args of its own. So
     # add back only the inherited flags this round does not already name,

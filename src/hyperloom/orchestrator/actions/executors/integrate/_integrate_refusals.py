@@ -28,7 +28,6 @@ from hyperloom.orchestrator.measurement.runtime_findings import (
 )
 
 from ....enablement.lane import takes_enablement_round
-from ....policy.gate import INTEGRATE_PATCH_PERMISSIVE_VERDICTS
 from ....specialists.patch_safety import patch_targets_missing
 
 
@@ -168,35 +167,6 @@ def _fix_accuracy_refusals(accuracy_pass: bool | None) -> list[str]:
     if accuracy_pass is not True:
         return ["accuracy eval failed"]
     return []
-
-
-def _enforce_critic_gate(
-    shared_state: Any,
-    subject: str,
-) -> "dict[str, Any] | None":
-    """Enforce a permissive Critic verdict on ``subject`` before any side
-    effect; returns a ``rejected_by_critic`` dict on failure, else ``None``
-    when no SharedState is available or the verdict is permissive."""
-    if shared_state is None:
-        return None
-    try:
-        recorded = shared_state.get_specialist_patch_verdict(subject)
-    except AttributeError:
-        recorded = ""
-    if (recorded or "").lower() not in INTEGRATE_PATCH_PERMISSIVE_VERDICTS:
-        _detail = f"verdict {recorded!r}" if recorded else "no Critic verdict on record"
-        # No side effect has occurred yet; reject cleanly (nothing to revert).
-        return {
-            "status": "rejected_by_critic",
-            "specialist_task_id": subject,
-            "patches_applied": [],
-            "patches_reverted": [],
-            "reason": (
-                f"integrate_patch requires a permissive Critic verdict "
-                f"(approve/advise) for {subject!r}; {_detail}. Refusing to run."
-            ),
-        }
-    return None
 
 
 def _enablement_lane_closed_skip(params: Mapping[str, Any], shared_state: Any) -> "dict[str, Any] | None":

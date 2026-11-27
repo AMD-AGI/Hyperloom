@@ -5,18 +5,13 @@
 
 from __future__ import annotations
 
-import json
 import logging
 import sqlite3
-import uuid
-from collections.abc import Callable, Mapping
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any
 
-from hyperloom_common.timeutil import now_iso
-
-from ..bus.db_maintenance import DECIDED_PROPOSAL_IDS_SQL
 from ..bus.resource_lock import BRINGUP_ROUND_LANE, SqliteLeaseBackend
 from ..state.round_store import (
     EXPIRED_REAPED,
@@ -25,12 +20,6 @@ from ..state.round_store import (
     RoundStore,
 )
 from ..state.task_registry import TERMINAL_STATES, Task, TaskNotFound, TaskRegistry
-from hyperloom.inference_optimizer.trace.trajectory_trace import (
-    EVENT_PROPOSAL,
-    STATUS_CANCELLED,
-    EventSpan,
-    record_event,
-)
 from hyperloom.inference_optimizer.breakdown.recorder import enablement_event
 
 log = logging.getLogger(__name__)
@@ -40,35 +29,7 @@ log = logging.getLogger(__name__)
 #: by the tick after the one that finished the holder.
 TERMINAL_HOLDER_CAP_SEC: float = 300.0
 
-#: How long a proposal may sit undecided before the coordinator denies it.
-REVIEW_TTL_SEC: float = 1800.0
-
-#: The verdict a timeout writes.
-TIMEOUT_VERDICT = "reject"
-
-#: Proposals with no verdict against them.
-_UNDECIDED_PROPOSALS_SQL = f"""
-    SELECT msg_id, from_agent, ts FROM events
-    WHERE topic = 'proposal'
-      AND msg_id NOT IN ({DECIDED_PROPOSAL_IDS_SQL})
-    ORDER BY seq ASC
-"""  # nosec B608 - interpolates a constant SQL fragment only.
-
-#: The timeout deny, written only if no verdict targets the proposal at the
-#: instant of the write. The guard is in the statement rather than in a read
-#: before it, so a verdict arriving in between wins.
-_TIMEOUT_DENY_SQL = """
-    INSERT INTO events (msg_id, from_agent, to_agent, topic, in_reply_to, payload, ts)
-    SELECT ?, ?, ?, 'review_verdict', NULL, ?, ?
-    WHERE NOT EXISTS (
-        SELECT 1 FROM events
-        WHERE topic = 'review_verdict'
-          AND json_extract(payload, '$.target_proposal_msg_id') = ?
-    )
-"""
-
 __all__ = [
-    "TIMEOUT_VERDICT",
     "ReconcileLinks",
     "ReconcileReport",
     "ReconcileStores",
@@ -97,18 +58,12 @@ class ReconcileLinks:
 
     Attributes:
         resources: The gate's resource facts.
-        proposals: Returns the in-memory pending proposals, so a durable
-            timeout deny also reaches the copy the loop consults.
-        drop_proposal: Settles a timed-out pending proposal as dropped on the
-            framework timeline, as a Critic reject would.
         session_dir: Where SharedState is saved after a terminal is set.
         result_pending: Whether a terminal task's result is still to be
             booked by the dispatcher.
     """
 
     resources: Any
-    proposals: Callable[[], Mapping[str, Any]]
-    drop_proposal: Callable[[Any, str], None]
     session_dir: Any
     result_pending: Callable[[str], bool]
 
@@ -144,7 +99,7 @@ class ReconcileReport:
 
     @property
     def acted(self) -> bool:
-        """bool: Whether the pass changed a round, task or window; a review deny logs itself."""
+        """bool: Whether the pass changed a round, task or window."""
         return bool(self.settled or self.handed_off or self.failed_tasks or self.closed_windows)
 
 
@@ -180,8 +135,6 @@ class Reconciler:
         self._locks = stores.locks
         self._shared_state = shared_state
         self._resources = links.resources
-        self._proposals = links.proposals
-        self._drop_proposal = links.drop_proposal
         self._session_dir = links.session_dir
         self._result_pending = links.result_pending
         self.last_report = ReconcileReport()
@@ -209,7 +162,6 @@ class Reconciler:
         for rule in (
             self._fail_dead_tasks,
             self._reap_leases,
-            self._deny_timed_out_reviews,
             self._resolve_open_rounds,
             self._close_stale_validation_window,
             self._rebuild_projection,
@@ -234,59 +186,6 @@ class Reconciler:
     async def _fail_dead_tasks(self, now_unix: float, report: ReconcileReport) -> None:
         """Fail every running task whose process is provably gone."""
         report.failed_tasks.extend(await self._tasks.reclaim_dead_running(reason="reconciler_dead_holder"))
-
-    async def _deny_timed_out_reviews(self, now_unix: float, report: ReconcileReport) -> None:
-        """Deny every proposal that has waited longer than the review TTL."""
-        rows = await self._db.fetchall(_UNDECIDED_PROPOSALS_SQL, ())
-        for row in rows:
-            age = float(now_unix) - _unix_of(row["ts"])
-            if age < REVIEW_TTL_SEC:
-                continue
-            await self._author_timeout_deny(str(row["msg_id"]), str(row["from_agent"]), age=age, now_unix=now_unix)
-
-    async def _author_timeout_deny(self, msg_id: str, to_agent: str, *, age: float, now_unix: float) -> None:
-        """Write the coordinator's timeout deny, unless a verdict beat it there."""
-        payload = json.dumps(
-            {
-                "target_proposal_msg_id": msg_id,
-                "verdict": TIMEOUT_VERDICT,
-                "reasoning": (
-                    f"no review verdict arrived within {REVIEW_TTL_SEC:.0f}s "
-                    f"(waited {age:.0f}s); denied by the coordinator so the round "
-                    "it holds can end. A patch nobody reviewed is not an accepted layer."
-                ),
-                "authored_by": "coordinator_review_timeout",
-            },
-            sort_keys=True,
-        )
-        async with self._db.transaction() as cur:
-            cur.execute(
-                _TIMEOUT_DENY_SQL,
-                (uuid.uuid4().hex, "coordinator", to_agent, payload, now_iso(), msg_id),
-            )
-            applied = cur.rowcount == 1
-        if not applied:
-            return
-        log.warning("RECONCILE: review timeout denied proposal %s after %.0fs", msg_id, age)
-        pending = self._proposals().pop(msg_id, None)
-        self._record_timeout_terminal(msg_id, pending, age=age)
-        if pending is not None:
-            self._drop_proposal(pending, "review_timeout")
-
-    def _record_timeout_terminal(self, msg_id: str, pending: Any, *, age: float) -> None:
-        """Close the proposal's trajectory span: a timeout deny never passes through the verdict handler."""
-        action_name = str(getattr(pending, "action_name", "") or "") or None
-        record_event(
-            EVENT_PROPOSAL,
-            span=EventSpan(span_id=msg_id, status=STATUS_CANCELLED),
-            attributes={
-                "name": action_name,
-                "action_name": action_name,
-                "verdict": TIMEOUT_VERDICT,
-                "reason": "review_timeout",
-                "waited_sec": round(age, 1),
-            },
-        )
 
     async def _resolve_open_rounds(self, now_unix: float, report: ReconcileReport) -> None:
         """Advance completed owners without timing out active ownership."""
@@ -380,14 +279,12 @@ class Reconciler:
             if moved.ok:
                 report.handed_off.append(round_row.round_id)
             return
-        if self._review_owes_a_verdict(round_row.holder_task_id):
-            return
         if float(now_unix) - _unix_of(holder.updated_at) < TERMINAL_HOLDER_CAP_SEC:
             return
         await self._expire(round_row, now_unix, report, why="holder_terminal_without_result")
 
     async def _expire(self, round_row: Round, now_unix: float, report: ReconcileReport, *, why: str) -> None:
-        """Settle a completed owner after its successor/review window ends."""
+        """Settle a completed owner after its successor window ends."""
         outcome = EXPIRED_REAPED
         result = await self._rounds.settle(
             round_row,
@@ -432,14 +329,6 @@ class Reconciler:
             if str(task.params.get("specialist_task_id", "")) == holder_task_id:
                 return task
         return None
-
-    def _review_owes_a_verdict(self, holder_task_id: str) -> bool:
-        """Whether an undecided proposal still stands on the holder's work."""
-        for pending in self._proposals().values():
-            params = pending.payload.get("params", {})
-            if str(params.get("specialist_task_id", "")) == holder_task_id:
-                return True
-        return False
 
 
 def _terminal_by_observation(task: Task) -> bool:

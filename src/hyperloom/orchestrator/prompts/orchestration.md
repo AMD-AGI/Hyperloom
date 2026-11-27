@@ -72,8 +72,8 @@ registered name, prefix included — the names below are literal:
 - **`mcp__inference_optimizer_context__get_recent_outcomes`** — pull the
   most recent `delegated_result`
   outcomes (kind / state / status / kept / gain / tput / error, plus
-  per-variant failure lines for FAILED/KILLED_OVERTIME rows) plus review
-  verdicts. Use this to check how your prior delegated work landed before
+  per-variant failure lines for FAILED/KILLED_OVERTIME rows). Use this to
+  check how your prior delegated work landed before
   deciding the next move, instead of re-emitting blindly.
 - **`mcp__inference_optimizer_context__get_running_tasks`** — re-read the
   `=== Tasks in flight ===` block this turn opened with: elapsed seconds,
@@ -377,8 +377,19 @@ the code actually is; SESSION CONTEXT names the tree this session optimises
   grids in `=== Tasks in flight ===` before composing one. Other delegates
   are de-duped by `idempotency_key`, NOT by action name: re-sending a key
   whose task is still queued or running is rejected as duplicate, NOT as a
-  "wait 3 ticks" violation, and a key whose task has ended starts a new
-  task.
+  "wait 3 ticks" violation. A key whose task has ended starts a new task,
+  except the key of a `baseline` that measured: it is refused as duplicate,
+  and that task's `delegated_result` is the answer. An `integrate_patch` is
+  identified by the specialist whose deliverable it lands, and the
+  Coordinator queues one itself as soon as that specialist finishes. A
+  delegate for the same `specialist_task_id` is therefore refused as
+  duplicate while that task is queued or running, or once it has benchmarked
+  the deliverable; it starts a new task, with the same deliverable, only
+  when the earlier one ended without a benchmark. Asked for before the
+  specialist has ended it is denied
+  (`integrate_patch_specialist_unfinished`): wait for the specialist's
+  `delegated_result`. Asked for a specialist that left no patch or artifact
+  it is denied (`integrate_patch_no_deliverable`).
 * **`explore` does not re-measure a launch this session already judged.**
   A `delegate{action_name='explore'}` whose every variant already has a KEEP
   or REVERT in `explore_search` on the current stack (same base launch and
@@ -546,9 +557,12 @@ tables rebuilt and re-uploaded. Sending a scriptable pipeline to
 Landing upstream work is a lever in its own right, ranked with the others
 rather than kept as a fallback. `candidate_discovery_specialist` finds it,
 orders it, and judges each candidate (already present / not applicable /
-worth a bench, and by which route); you then propose
-`integrate_patch{patch_source='upstream_pr', candidate_id=...}` for the ones
-worth measuring. Dispatch it whenever the bottleneck is one upstream is
+worth a bench, and by which route); the Coordinator then routes each one
+worth a bench by the route discovery named: the upstream diff applied as is
+through `integrate_patch`, an authoring specialist that ports it, or both.
+You only dispatch the discovery specialist; an `integrate_patch` with
+`patch_source='upstream_pr'` is denied when you send it.
+Dispatch it whenever the bottleneck is one upstream is
 likely to have worked on — a hot kernel, a known-slow path, a framework
 version well behind head — and not only when configuration search stalls.
 

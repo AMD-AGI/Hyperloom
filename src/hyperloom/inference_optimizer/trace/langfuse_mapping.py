@@ -169,7 +169,6 @@ def generation_metadata(
         "component": row.get("component"),
         "has_text": has_text,
         "latency_ms": row.get("latency_ms"),
-        "reviewed_msg_ids": row.get("reviewed_msg_ids"),
         "status": row.get("status") or LLM_STATUS_OK,
         "error_type": row.get("error_type"),
     }

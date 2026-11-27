@@ -23,7 +23,6 @@ from hyperloom.inference_optimizer.framework_paths import (
     resolve_session_framework_root,
     resolved_within,
 )
-from hyperloom.common.framework_arm import verdict_subject
 from hyperloom.common.visible_devices import detect_gpu_count
 from hyperloom.inference_optimizer.protocol.intent import EXTEND_LEASE_MAX_SEC, Intent, IntentType
 from hyperloom.inference_optimizer.protocol.action_surfaces import (
@@ -50,7 +49,6 @@ from .validators import (
     log_specialist_dispatch_coherence,
     validate_gemm_tuning_request,
     validate_prune_branch,
-    validate_review_verdict,
     validate_specialist_framework,
     validate_specialist_max_turns_raw,
 )
@@ -64,9 +62,6 @@ log = logging.getLogger(__name__)
 
 # Specialist dispatch action name.
 SPECIALIST_ACTION_NAME: str = "specialist"
-
-# Orchestrator-side patch integration step (gated by a Critic verdict).
-INTEGRATE_PATCH_ACTION_NAME: str = "integrate_patch"
 
 # Reference measurement action; the bring-up round guard is called for every
 # action too, and answers only for this one.
@@ -89,15 +84,6 @@ def research_lane_ceiling() -> int:
     if gpus > 0:
         return 2 * gpus
     return RESEARCH_LANE_CEILING_FALLBACK
-
-
-# Verdicts that allow ``integrate_patch`` without an operator override (``advise`` = soft approval, ``approve`` = green light).
-INTEGRATE_PATCH_PERMISSIVE_VERDICTS: frozenset[str] = frozenset(
-    {
-        "approve",
-        "advise",
-    }
-)
 
 
 # Specialist task identity prefix: the dispatcher stamps ``specialist:<task_id>`` as the
@@ -245,8 +231,6 @@ class PolicyGate:
             deny_malformed_send_message(payload)
         elif intent.type == IntentType.REQUEST:
             self._validate_request(role, payload)
-        elif intent.type == IntentType.REVIEW_VERDICT:
-            validate_review_verdict(payload)
         elif intent.type == IntentType.EXTEND_LEASE:
             self._validate_extend_lease(payload)
         elif intent.type == IntentType.PRUNE_BRANCH:
@@ -314,13 +298,9 @@ class PolicyGate:
                 requested.
 
         Returns:
-            list[str]: the allowed tool names (empty for unknown or no-tool
-                roles).
+            list[str]: the allowed tool names (empty for an unknown role).
         """
-        role = self.role_registry.get(agent_name)
-        if role is None:
-            return []
-        if role.no_tools:
+        if agent_name not in self.role_registry:
             return []
         return agent_tool_grant(agent_name)
 
@@ -356,16 +336,13 @@ class PolicyGate:
                 deny_coordinator_dispatched_delegate(params)
             self._validate_specialist_dispatch(payload)
             return
-        # ``integrate_patch`` requires a non-reject Critic verdict.
-        if action_name == INTEGRATE_PATCH_ACTION_NAME:
-            self._validate_integrate_patch_critic_gate(payload)
         # Outside ``check_source``: a forged row is exactly the second bring-up
         # the round exists to keep off the machine, and the row that holds the
         # round is admitted by its own id rather than by skipping the channel.
         self._validate_baseline_not_mid_round(action_name, task_id=task_id)
 
     def _validate_propose_action(self, payload: dict[str, Any]) -> None:
-        """Validate a ``PROPOSE_ACTION`` intent (the advisory channel).
+        """Validate a ``PROPOSE_ACTION`` intent.
 
         Requires ``action_name``, then applies the custom-only and bring-up
         round rules the delegate channel applies. Which actions the phase lets
@@ -483,84 +460,12 @@ class PolicyGate:
             hint=(
                 f"Tool {kind!r} is restricted to "
                 f"specialist sub-agents as an action name. The "
-                f"primary agents (orchestration / critic) reach KB / PR Monitor through the "
-                f"Coordinator-mediated KnowledgePlane facade instead; "
-                f"orchestration additionally holds WebSearch / WebFetch "
+                f"orchestration agent reaches KB / PR Monitor through the "
+                f"Coordinator-mediated KnowledgePlane facade instead, and "
+                f"additionally holds WebSearch / WebFetch "
                 f"directly via allowed_tools_for_agent."
             ),
         )
-
-    def _validate_integrate_patch_critic_gate(
-        self,
-        payload: dict[str, Any],
-    ) -> None:
-        """Enforce a permissive Critic verdict on the patch's review subject.
-
-        Args:
-            payload (dict[str, Any]): the integrate_patch intent payload
-                carrying ``params``.
-
-        Raises:
-            PolicyDenied: when ``params`` is malformed, name no review
-                subject, no Critic verdict is on record for it, or the verdict
-                is not in :data:`INTEGRATE_PATCH_PERMISSIVE_VERDICTS`.
-        """
-        params = payload.get("params") or {}
-        if not isinstance(params, dict):
-            raise PolicyDenied(
-                "integrate_patch: params must be a dict",
-                rule="integrate_patch_requires_critic_verdict",
-                hint="pass params={specialist_task_id: <id>, ...}",
-            )
-        # Enablement build launch probe: an ``enablement_launch_only`` integrate
-        # runs the (already artifact-verified) built runtime through the runnable
-        # gate WITHOUT applying any patch. There is no specialist patch to
-        # attribute and nothing for the Critic to review, so the
-        # specialist_task_id + verdict requirement does not apply. Without this
-        # exemption the probe is denied ("specialist_task_id is required") and
-        # cancelled, so a successful from-source build never reaches KEEP.
-        if params.get("enablement_launch_only"):
-            return
-        sid = verdict_subject(params)
-        if not sid:
-            raise PolicyDenied(
-                "integrate_patch.params names no Critic review subject",
-                rule="integrate_patch_requires_critic_verdict",
-                hint=(
-                    "set params.specialist_task_id to the task_id of "
-                    "the completed specialist whose worktree carries "
-                    "the patches you want to apply, or "
-                    "params.framework_agent_candidate_id to the "
-                    "pre-screened upstream-PR candidate."
-                ),
-            )
-        ss = self.shared_state
-        verdict = ss.get_specialist_patch_verdict(sid) if ss is not None else ""
-        if not verdict:
-            raise PolicyDenied(
-                f"integrate_patch: no Critic verdict on record for subject={sid!r}",
-                rule="integrate_patch_requires_critic_verdict",
-                hint=(
-                    "Wait for the Critic to emit a "
-                    "review_verdict{target_proposal_msg_id=<patch "
-                    "proposal>, verdict=approve|reject|...} for this "
-                    "specialist. The Critic verdict "
-                    "is recorded on SharedState.specialist_patch_verdicts."
-                ),
-            )
-        if verdict.lower() not in INTEGRATE_PATCH_PERMISSIVE_VERDICTS:
-            raise PolicyDenied(
-                f"integrate_patch: Critic verdict for subject "
-                f"{sid!r} is {verdict!r}; integrate_patch only "
-                f"runs on "
-                f"{sorted(INTEGRATE_PATCH_PERMISSIVE_VERDICTS)!r}",
-                rule="integrate_patch_requires_critic_verdict",
-                hint=(
-                    "Either ask the Critic to re-review (next "
-                    "review_verdict overwrites this one), or drop the "
-                    "patch (specialist_done.patches_written=[])."
-                ),
-            )
 
     def _validate_specialist_dispatch(self, payload: dict[str, Any]) -> None:
         """Enforce the specialist-delegate contract (Inv-11.2): gap_canonical_id required, max_turns ≤ cap.
@@ -1063,7 +968,6 @@ def validate_freeform_wave_task(task: Any, *, index: int) -> str:
 
 
 __all__ = [
-    "INTEGRATE_PATCH_PERMISSIVE_VERDICTS",
     "PATH_LIKE_FIELDS",
     "PolicyDenied",
     "PolicyGate",

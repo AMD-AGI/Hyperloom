@@ -243,7 +243,7 @@ def test_round_level_confidence_is_not_a_per_proposal_gain_claim():
     assert payload["proposal_set"][0] == {}
 
 
-def test_forbidden_fields_are_stripped_so_the_critic_cannot_reject_on_format():
+def test_forbidden_fields_are_stripped_from_the_payload_and_every_proposal():
     payload = {
         "expected_gain": 9.0,
         "confidence": 0.6,

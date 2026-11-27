@@ -116,7 +116,7 @@ async def test_a_refused_request_kind_is_denied_and_leaves_no_failure_row(sessio
 @pytest.mark.asyncio
 @pytest.mark.parametrize("channel", _PROPOSE_CHANNELS, ids=lambda channel: channel.value)
 async def test_an_action_no_phase_offers_is_denied_and_leaves_no_failure_row(session_dir, channel: IntentType) -> None:
-    """Admission refuses the name before a task or a proposal exists, so nothing reaches the failure ledger."""
+    """Admission refuses the name before a task exists, so nothing reaches the failure ledger."""
     coordinator = Coordinator(session_dir, backends=silent_backends())
     try:
         payload = {"action_name": "profile", "predicted_gain_pct": 1.0, "params": {}}
@@ -125,7 +125,6 @@ async def test_an_action_no_phase_offers_is_denied_and_leaves_no_failure_row(ses
         assert _denied_rules(coordinator) == ["phase_incompatible"]
         assert coordinator.shared_state.last_action_failures == []
         assert await coordinator.tasks.by_state("queued") == []
-        assert coordinator.state.pending_proposals == {}
     finally:
         await coordinator.stop()
 
@@ -184,7 +183,7 @@ def test_the_round_rule_refuses_nothing_without_a_snapshot() -> None:
 # -- send_message recipient shape -----------------------------------------
 def test_send_message_to_a_single_recipient_is_admitted() -> None:
     """``to`` names one recipient; the inbox filter and the events row agree."""
-    _emit(_llm_gate(), IntentType.SEND_MESSAGE, {"to": "critic", "topic": "observation", "body_md": "x"})
+    _emit(_llm_gate(), IntentType.SEND_MESSAGE, {"to": "kernel_agent", "topic": "observation", "body_md": "x"})
 
 
 def test_send_message_without_to_broadcasts() -> None:
@@ -194,10 +193,10 @@ def test_send_message_without_to_broadcasts() -> None:
 
 def test_send_message_to_a_list_of_recipients_is_admitted() -> None:
     """A JSON array is how a model addresses several agents at once; each becomes its own events row."""
-    _emit(_llm_gate(), IntentType.SEND_MESSAGE, {"to": ["critic", "specialist:t1"], "topic": "observation"})
+    _emit(_llm_gate(), IntentType.SEND_MESSAGE, {"to": ["kernel_agent", "specialist:t1"], "topic": "observation"})
 
 
-@pytest.mark.parametrize("to", [[], ["critic", ""], ["critic", 3], 3, {"agent": "critic"}, ""])
+@pytest.mark.parametrize("to", [[], ["kernel_agent", ""], ["kernel_agent", 3], 3, {"agent": "kernel_agent"}, ""])
 def test_send_message_with_a_to_naming_no_recipient_is_denied(to) -> None:
     """A ``to`` that is not a name or a list of names is denied, not crashed on.
 

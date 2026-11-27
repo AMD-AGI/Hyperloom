@@ -6,13 +6,11 @@
 from __future__ import annotations
 
 import re
-import time
 from pathlib import Path
 
 import pytest
 
-from hyperloom.orchestrator.roles import MockCriticBackend
-from hyperloom.orchestrator.tests.mock_backend import MockBackend, MockTurn, ScriptedPlan
+from hyperloom.orchestrator.tests.mock_backend import MockBackend, ScriptedPlan
 from hyperloom.orchestrator.loop.coordinator import Coordinator
 from hyperloom.inference_optimizer.cli import preflight as cli_preflight
 from hyperloom.inference_optimizer.cli import preflight_env as cli_preflight_env
@@ -28,11 +26,7 @@ def _backends_full() -> dict[str, object]:
     silent = ScriptedPlan(turns=[], default_intent=_heartbeat())
     return {
         "orchestration": MockBackend(silent, name="orch"),
-        "critic": MockCriticBackend(),
     }
-
-
-_A_VARIANT = {"name": "chunked_prefill", "extra_server_args": "--chunked-prefill-size 4096"}
 
 
 @pytest.mark.asyncio
@@ -176,196 +170,8 @@ async def test_existing_events_triggers_resume(session_dir):
 
 
 @pytest.mark.asyncio
-async def test_replay_rebuilds_undecided_proposals(session_dir):
-    """One propose, no verdict → resume restores it as pending."""
-    propose = Intent(
-        type=IntentType.PROPOSE_ACTION,
-        payload={
-            "action_name": "baseline",
-            "predicted_gain_pct": 0.0,
-        },
-    )
-    silent = ScriptedPlan(turns=[], default_intent=_heartbeat())
-    backends_no_critic = {
-        "orchestration": MockBackend(
-            ScriptedPlan(turns=[MockTurn(intents=[propose])], default_intent=_heartbeat()), name="o"
-        ),
-        "critic": MockBackend(silent, name="c"),
-    }
-    c1 = Coordinator(session_dir, backends=backends_no_critic)
-    try:
-        await c1.tick(1)
-        assert len(c1.state.pending_proposals) == 1
-        original_id = next(iter(c1.state.pending_proposals.keys()))
-    finally:
-        await c1.stop()
-
-    c2 = Coordinator(session_dir, backends=_backends_full())
-    try:
-        await c2.writeback.replay_for_resume()
-        assert list(c2.state.pending_proposals) == [original_id]
-        restored = c2.state.pending_proposals[original_id]
-        assert restored.action_name == "baseline"
-        assert restored.from_agent == "orchestration"
-        assert await c2.conversation.admit_turn("critic", time.time())
-    finally:
-        await c2.stop()
-
-
-@pytest.mark.asyncio
-async def test_replay_skips_approved_proposals(session_dir):
-    """Approved proposal must not appear as pending after resume."""
-    propose = Intent(
-        type=IntentType.PROPOSE_ACTION,
-        payload={
-            "action_name": "baseline",
-            "predicted_gain_pct": 0.0,
-        },
-    )
-    backends = _backends_full()
-    backends["orchestration"] = MockBackend(
-        ScriptedPlan(turns=[MockTurn(intents=[propose])], default_intent=_heartbeat()),
-        name="orch",
-    )
-    c1 = Coordinator(session_dir, backends=backends)
-    try:
-        await c1.tick(1)
-        verdicts = await c1.bus.tail(topic="review_verdict", n=100)
-        assert any(v.payload.get("verdict") == "approve" for v in verdicts)
-    finally:
-        await c1.stop()
-
-    c2 = Coordinator(session_dir, backends=_backends_full())
-    try:
-        await c2.writeback.replay_for_resume()
-        assert c2.state.pending_proposals == {}
-        assert not await c2.conversation.admit_turn("critic", time.time())
-    finally:
-        await c2.stop()
-
-
-@pytest.mark.asyncio
-async def test_replay_skips_rejected_proposals(session_dir):
-    """Rejected proposal also counted as decided → not pending after resume."""
-    propose = Intent(
-        type=IntentType.PROPOSE_ACTION,
-        payload={
-            "action_name": "baseline",
-            "predicted_gain_pct": 0.0,
-        },
-    )
-    silent = ScriptedPlan(turns=[], default_intent=_heartbeat())
-    backends = {
-        "orchestration": MockBackend(
-            ScriptedPlan(turns=[MockTurn(intents=[propose])], default_intent=_heartbeat()),
-            name="o",
-        ),
-        "critic": MockBackend(silent, name="c"),
-    }
-    c1 = Coordinator(session_dir, backends=backends)
-    try:
-        await c1.tick(1)
-        proposal_id = next(iter(c1.state.pending_proposals.keys()))
-        await c1.router.handle_intent(
-            "critic",
-            Intent(
-                type=IntentType.REVIEW_VERDICT,
-                payload={
-                    "target_proposal_msg_id": proposal_id,
-                    "verdict": "reject",
-                    "reasoning": "violates kb-7",
-                    "kb_evidence": "kb-7",
-                },
-            ),
-        )
-    finally:
-        await c1.stop()
-
-    c2 = Coordinator(session_dir, backends=_backends_full())
-    try:
-        await c2.writeback.replay_for_resume()
-        assert c2.state.pending_proposals == {}
-    finally:
-        await c2.stop()
-
-
-@pytest.mark.asyncio
-async def test_replay_mixed_pending_and_decided(session_dir):
-    """3 proposals, 1 approved, 1 rejected, 1 undecided → 1 restored."""
-    silent = ScriptedPlan(turns=[], default_intent=_heartbeat())
-    backends = {
-        "orchestration": MockBackend(silent, name="o"),
-        "critic": MockBackend(silent, name="c"),
-    }
-    c1 = Coordinator(session_dir, backends=backends)
-    try:
-        # Seed prerequisites so arbitrary proposals are accepted.
-        c1.shared_state.last_profile_trace = "/tmp/profile.trace.json.gz"
-        c1.shared_state.last_trace_analyze = {
-            "trace_input": "/tmp/profile.trace.json.gz",
-            "analysis_md_text": "FAKE_REPORT",
-        }
-        c1.shared_state.save(session_dir)
-        proposal_ids = []
-        for action in ("baseline", "target_analysis", "explore"):
-            if action == "explore":
-                # Admission holds each proposal to its phase's actions; explore is FRAMEWORK_AGENT's.
-                c1.shared_state.phase = "FRAMEWORK_AGENT"
-            # Admission refuses an explore with nothing to measure.
-            extra = {"params": {"grid": [_A_VARIANT]}} if action == "explore" else {}
-            await c1.router.handle_intent(
-                "orchestration",
-                Intent(
-                    type=IntentType.PROPOSE_ACTION,
-                    payload={"action_name": action, "predicted_gain_pct": 0.0, **extra},
-                ),
-            )
-            tail = await c1.bus.tail(topic="proposal", n=1)
-            proposal_ids.append(tail[0].msg_id)
-            if action == "baseline":
-                # profile/explore require baseline_tput > 0 (execution_order); the real baseline action would have set
-                # this on completion.
-                c1.shared_state.baseline_tput = 100.0
-
-        await c1.router.handle_intent(
-            "critic",
-            Intent(
-                type=IntentType.REVIEW_VERDICT,
-                payload={"target_proposal_msg_id": proposal_ids[0], "verdict": "approve", "reasoning": "ok"},
-            ),
-        )
-        await c1.router.handle_intent(
-            "critic",
-            Intent(
-                type=IntentType.REVIEW_VERDICT,
-                payload={
-                    "target_proposal_msg_id": proposal_ids[1],
-                    "verdict": "reject",
-                    "reasoning": "no",
-                    "kb_evidence": "kb-x",
-                },
-            ),
-        )
-    finally:
-        await c1.stop()
-
-    c2 = Coordinator(session_dir, backends=_backends_full())
-    try:
-        await c2.writeback.replay_for_resume()
-        [restored] = c2.state.pending_proposals.values()
-        assert restored.action_name == "explore"
-    finally:
-        await c2.stop()
-
-
-@pytest.mark.asyncio
-async def test_resume_preserves_pruned_and_restores_pending(session_dir):
-    silent = ScriptedPlan(turns=[], default_intent=_heartbeat())
-    backends = {
-        "orchestration": MockBackend(silent, name="o"),
-        "critic": MockBackend(silent, name="c"),
-    }
-    c1 = Coordinator(session_dir, backends=backends)
+async def test_resume_preserves_pruned_families(session_dir):
+    c1 = Coordinator(session_dir, backends=_backends_full())
     try:
         await c1.router.handle_intent(
             "orchestration",
@@ -374,21 +180,12 @@ async def test_resume_preserves_pruned_and_restores_pending(session_dir):
                 payload={"family": "deep_kernel", "reason": "x"},
             ),
         )
-        await c1.router.handle_intent(
-            "orchestration",
-            Intent(
-                type=IntentType.PROPOSE_ACTION,
-                payload={"action_name": "baseline", "predicted_gain_pct": 0.0},
-            ),
-        )
     finally:
         await c1.stop()
 
     c2 = Coordinator(session_dir, backends=_backends_full())
     try:
-        await c2.writeback.replay_for_resume()
         assert c2.shared_state.is_pruned("deep_kernel")
-        assert len(c2.state.pending_proposals) == 1
     finally:
         await c2.stop()
 
@@ -396,34 +193,14 @@ async def test_resume_preserves_pruned_and_restores_pending(session_dir):
 @pytest.mark.asyncio
 async def test_tick_lazily_runs_replay_on_resume(session_dir):
     """The first tick() triggers replay so resume callers needn't call it manually."""
-    silent = ScriptedPlan(turns=[], default_intent=_heartbeat())
-    backends = {
-        "orchestration": MockBackend(silent, name="o"),
-        "critic": MockBackend(silent, name="c"),
-    }
-    c1 = Coordinator(session_dir, backends=backends)
-    try:
-        await c1.router.handle_intent(
-            "orchestration",
-            Intent(
-                type=IntentType.PROPOSE_ACTION,
-                payload={"action_name": "baseline", "predicted_gain_pct": 0.0},
-            ),
-        )
-    finally:
-        await c1.stop()
+    c1 = Coordinator(session_dir, backends=_backends_full())
+    await c1.stop()
 
-    # Use a silent critic so the restored proposal is not auto-approved during tick.
-    silent_backends = {
-        "orchestration": MockBackend(silent, name="o2"),
-        "critic": MockBackend(silent, name="c2"),
-    }
-    c2 = Coordinator(session_dir, backends=silent_backends)
+    c2 = Coordinator(session_dir, backends=_backends_full())
     try:
         assert c2.writeback.resumed_from["rebuilt"] is False
         await c2.tick(1)
         assert c2.writeback.resumed_from["rebuilt"] is True
-        assert len(c2.state.pending_proposals) == 1
     finally:
         await c2.stop()
 

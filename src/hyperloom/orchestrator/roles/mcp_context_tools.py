@@ -218,7 +218,7 @@ CONTEXT_TOOL_SPECS: tuple[tuple[str, str, dict[str, Any], str], ...] = (
         "get_recent_outcomes",
         "Return the most recent action outcomes — the async results of "
         "prior delegate/request work (delegated_result: kind / state / "
-        "status / kept / gain / tput / error) plus review verdicts — so "
+        "status / kept / gain / tput / error) — so "
         "you can close the act->observe loop within this turn instead of "
         "waiting for the next-tick delta. Pass top_k to widen the window.",
         _TOPK_SCHEMA,

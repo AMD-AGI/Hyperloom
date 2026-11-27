@@ -54,7 +54,7 @@ def _heartbeat() -> Intent:
 
 def _backends_silent() -> dict[str, object]:
     silent = ScriptedPlan(turns=[], default_intent=_heartbeat())
-    return {n: MockBackend(silent, name=n) for n in ("orchestration", "critic")}
+    return {"orchestration": MockBackend(silent, name="orchestration")}
 
 
 def _write_baseline_yaml(path: Path) -> None:
@@ -1107,7 +1107,7 @@ async def test_report_executor_writes_md_and_json(session_dir, record_alert):
     assert summary["baseline_tput"] == 800.0
     assert summary["cumulative_gain_validated"] == 12.5
     assert summary["stop_reason"] == "target_reached"
-    assert summary["event_counts_by_topic"].get("proposal", 0) == 2
+    assert summary["event_counts_by_topic"].get("event", 0) == 2
     assert summary["event_counts_by_topic"].get("alert", 0) == int(record_alert)
     alerts = [item for item in summary["highlights"] if item["topic"] == "alert"]
     assert len(alerts) == int(record_alert)

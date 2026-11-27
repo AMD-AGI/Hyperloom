@@ -11,7 +11,6 @@ from pathlib import Path
 import pytest
 
 from hyperloom.orchestrator.kernel import kernel_decisions as kd
-from hyperloom.orchestrator.roles import MockCriticBackend
 from hyperloom.orchestrator.tests.mock_backend import MockBackend, ScriptedPlan
 from hyperloom.orchestrator.loop.coordinator import Coordinator
 from hyperloom.inference_optimizer.protocol.intent import Intent, IntentType
@@ -39,7 +38,6 @@ def _backends_full() -> dict[str, object]:
     silent = ScriptedPlan(turns=[], default_intent=_silent_intent())
     return {
         "orchestration": MockBackend(silent, name="orch"),
-        "critic": MockCriticBackend(),
     }
 
 

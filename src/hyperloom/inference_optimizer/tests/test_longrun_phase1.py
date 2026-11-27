@@ -13,7 +13,7 @@ from hyperloom.orchestrator.phases import machine_state as ps
 from hyperloom.orchestrator.phases import phase_predicates, phase_transitions
 from hyperloom.orchestrator.state.shared_state import SharedState
 
-from .conftest import make_mock_critic_coordinator
+from .conftest import make_idle_coordinator
 
 
 @pytest.fixture(autouse=True)
@@ -320,7 +320,7 @@ def test_short_run_keeps_chargeback_budgeting_across_cycles():
 # Coordinator loopback application
 @pytest.fixture
 def cyclic_coordinator(session_dir):
-    c = make_mock_critic_coordinator(session_dir)
+    c = make_idle_coordinator(session_dir)
     yield c
 
 

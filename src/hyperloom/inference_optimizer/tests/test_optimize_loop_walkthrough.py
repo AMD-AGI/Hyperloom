@@ -22,7 +22,6 @@ from ._geak_helpers import stop_geak_before_launch
 
 def _coordinator(session_dir: Path):
     from hyperloom.orchestrator.loop.coordinator import Coordinator
-    from hyperloom.orchestrator.roles import MockCriticBackend
     from hyperloom.orchestrator.tests.mock_backend import MockBackend, ScriptedPlan
 
     # Orchestration says nothing: what the phases do on their own is the point.
@@ -37,7 +36,6 @@ def _coordinator(session_dir: Path):
         session_dir,
         backends={
             "orchestration": MockBackend(silent, name="orch"),
-            "critic": MockCriticBackend(),
         },
     )
     coord.sub.register_executor("kernel_agent", coord.phase_kernel.run_agent)

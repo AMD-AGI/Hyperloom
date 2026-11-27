@@ -4,8 +4,8 @@
 """The phase contract the admission gate holds an agent-proposed action to.
 
 An agent may propose or delegate only what its phase lists as proposable; the
-Critic approves on its own reading and the phase barrier only sweeps queued work
-at a transition, so anything admitted here runs.
+phase barrier only sweeps queued work at a transition, so anything admitted here
+runs.
 """
 
 from __future__ import annotations

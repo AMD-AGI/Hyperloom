@@ -325,7 +325,6 @@ async def _integrate(
         framework="vllm",
         benchmark_mode=benchmark_mode,
         current_best={"tput": _BASE_TPUT, "extra_server_args": stack_args},
-        get_specialist_patch_verdict=lambda _sid: "approve",
         save=lambda _path: None,
     )
     return await IntegratePatchExecutor(session_dir=session_dir)(ctx), benched

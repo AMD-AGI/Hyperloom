@@ -27,7 +27,7 @@ async def coord(tmp_path, monkeypatch):
     silent = ScriptedPlan(turns=[])
     c = Coordinator(
         make_session_dir(),
-        backends={"orchestration": MockBackend(silent, name="o"), "critic": MockBackend(silent, name="c")},
+        backends={"orchestration": MockBackend(silent, name="o")},
     )
     c.shared_state.phase = "FRAMEWORK_AGENT"
     yield c

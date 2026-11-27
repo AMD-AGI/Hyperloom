@@ -29,7 +29,7 @@ from __future__ import annotations
 
 import pytest
 
-from .conftest import make_mock_critic_coordinator
+from .conftest import make_idle_coordinator
 
 # The measured Kimi-K3 numbers, kept as the fixture so a regression reproduces
 # the real false claim rather than an invented one.
@@ -40,7 +40,7 @@ FALSE_GAIN_PCT = ((GEAK_SYNTHETIC_TOK_S - HL_AGENTIC_BASELINE_TOK_S) / HL_AGENTI
 
 @pytest.fixture
 def coordinator(session_dir):
-    return make_mock_critic_coordinator(session_dir)
+    return make_idle_coordinator(session_dir)
 
 
 def _record(

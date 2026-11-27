@@ -8,7 +8,7 @@ from __future__ import annotations
 import pytest
 
 from hyperloom.orchestrator.mcp_tool_names import qualified_context_tool_name
-from hyperloom.orchestrator.roles.agent_role import default_role_registry
+from hyperloom.orchestrator.roles.agent_role import AgentRole, default_role_registry
 from hyperloom.inference_optimizer.protocol.intent import (
     EXTEND_LEASE_MAX_SEC,
     Intent,
@@ -83,12 +83,6 @@ def test_gate_unknown_agent_rejected(gate):
             {"target_agent": "kernel_agent", "kind": "trace_analyze"},
             id="orchestration-request-to-kernel_agent",
         ),
-        pytest.param(
-            "critic",
-            IntentType.REVIEW_VERDICT,
-            {"target_proposal_msg_id": "p1", "verdict": "approve", "reasoning": "matches kb-7"},
-            id="critic-review_verdict",
-        ),
         # Orchestration forwards ``suggested_prunes`` advice to the Coordinator.
         pytest.param(
             "orchestration",
@@ -142,29 +136,24 @@ def test_gate_still_allows_the_model_to_drain_the_keep_queue(monkeypatch):
     )
 
 
-def test_gate_orchestration_request_to_critic_rejected(gate):
+def test_gate_request_to_a_target_that_answers_no_requests_rejected(gate):
     with pytest.raises(PolicyDenied) as exc:
         gate.validate_intent(
             "orchestration",
             Intent(
                 type=IntentType.REQUEST,
-                payload={"target_agent": "critic", "kind": "review"},
+                payload={"target_agent": "specialist", "kind": "trace_analyze"},
             ),
         )
     assert exc.value.rule == "request_target"
 
 
-def test_gate_orchestration_review_verdict_rejected(gate):
-    """Only Critic may emit review_verdict."""
-    with pytest.raises(PolicyDenied) as exc:
-        gate.validate_intent(
-            "orchestration",
-            Intent(
-                type=IntentType.REVIEW_VERDICT,
-                payload={"target_proposal_msg_id": "p1", "verdict": "approve"},
-            ),
-        )
-    assert exc.value.rule == "role"
+_MESSAGING_INTENTS = frozenset({IntentType.SEND_MESSAGE, IntentType.ALERT})
+
+
+@pytest.fixture
+def messaging_only_gate() -> PolicyGate:
+    return PolicyGate(role_registry={"notifier": AgentRole(name="notifier", allowed_intents=_MESSAGING_INTENTS)})
 
 
 @pytest.mark.parametrize(
@@ -172,10 +161,10 @@ def test_gate_orchestration_review_verdict_rejected(gate):
     [IntentType.DELEGATE, IntentType.REQUEST, IntentType.PROPOSE_ACTION],
     ids=lambda intent_type: intent_type.value,
 )
-def test_gate_critic_non_review_intent_rejected_by_role(gate, intent_type):
+def test_gate_intent_outside_the_role_set_rejected_by_role(messaging_only_gate, intent_type):
     with pytest.raises(PolicyDenied) as exc:
-        gate.validate_intent(
-            "critic",
+        messaging_only_gate.validate_intent(
+            "notifier",
             Intent(
                 type=intent_type,
                 payload={"action_name": "baseline"},
@@ -184,20 +173,17 @@ def test_gate_critic_non_review_intent_rejected_by_role(gate, intent_type):
     assert exc.value.rule == "role"
 
 
-def test_gate_role_denial_names_the_intents_the_role_may_emit(gate):
+def test_gate_role_denial_names_the_intents_the_role_may_emit(messaging_only_gate):
     with pytest.raises(PolicyDenied) as exc:
-        gate.validate_intent(
-            "orchestration",
-            Intent(
-                type=IntentType.REVIEW_VERDICT,
-                payload={"target_proposal_msg_id": "p1", "verdict": "approve"},
-            ),
+        messaging_only_gate.validate_intent(
+            "notifier",
+            Intent(type=IntentType.DELEGATE, payload={"action_name": "baseline"}),
         )
     assert exc.value.rule == "role"
     assert exc.value.hint
-    for intent_type in default_role_registry()["orchestration"].allowed_intents:
+    for intent_type in _MESSAGING_INTENTS:
         assert intent_type.value in exc.value.hint
-    assert "review_verdict" not in exc.value.hint
+    assert "delegate" not in exc.value.hint
 
 
 def test_gate_extend_lease_bounds_hint_states_the_step_cap(gate):
@@ -251,8 +237,3 @@ def test_allowed_tools_claude_returns_emit_intent(gate):
     assert "run_action_now" not in orch
     assert "WebSearch" in orch
     assert "WebFetch" in orch
-
-
-def test_allowed_tools_codex_returns_empty(gate):
-    """Critic = Codex no-tools (KB Bash exception lives in SubAgentRunner)."""
-    assert gate.allowed_tools_for_agent("critic") == []

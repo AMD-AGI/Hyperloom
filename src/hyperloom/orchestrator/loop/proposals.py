@@ -1,28 +1,26 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""The Critic-approved path: recording a proposal and materializing an approved one into a dispatched task."""
+"""Turning a proposed action or a specialist's deliverable into a queued task, and the framework record of a grid."""
 
 from __future__ import annotations
 import hashlib
 import json
+import uuid
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Mapping
 from hyperloom_common.coerce import to_float
-from hyperloom.common.framework_arm import is_upstream_pr_prescreen
 from hyperloom.orchestrator.lever import LEVER_CONFIG
-from hyperloom.inference_optimizer.trace.trajectory_trace import EVENT_PROPOSAL, STATUS_QUEUED, EventSpan, record_event
 from ..actions.executors.benchmark_result import is_valid_measurement
+from ..actions.executors.integrate._integrate_vocabulary import RESULT_BENCHED
 from ..phases import machine_state as _phase_state
 from ..bus.message_bus import Message
 from ..policy.gate import SPECIALIST_ACTION_NAME
-from ..policy.specialist_in_flight import specialist_in_flight_denial
 from ..specialists.domains import gap_backfilled_domain
 from ..state.shared_state import inject_stack_base_params
 from ..state.task_registry import TERMINAL_STATES, Task, TaskSpec, create_on_free_key
 from ..collaborator import CoordinatorCollaborator
-from ._explore_grid import explore_grid_denial
 from ._integrate_promotion import _confirmed_task_outcome
-from ..state.pending_proposal import PendingProposal
 
 if TYPE_CHECKING:
     from .coordinator import Coordinator
@@ -32,87 +30,13 @@ import logging as _logging
 log = _logging.getLogger(__name__)
 
 
-def integrate_review_in_flight(pending_proposals: Mapping[str, PendingProposal], specialist_task_id: str) -> bool:
-    """Whether a synthetic integrate_patch review for this specialist task awaits a ruling."""
-    return any(
-        proposal.action_name == "integrate_patch"
-        and (proposal.payload.get("params") or {}).get("specialist_task_id") == specialist_task_id
-        for proposal in pending_proposals.values()
-    )
+@dataclass(frozen=True)
+class ProposedAction:
+    """An admitted ``propose_action``: who proposed which action, and the payload it came in."""
 
-
-async def record_proposal(
-    coord: "Coordinator",
-    *,
-    from_agent: str,
-    action_name: str,
-    predicted_gain_pct: float,
-    payload: dict[str, Any],
-) -> PendingProposal:
-    """Create one PendingProposal, write it to the bus, and record it on the phase timeline.
-
-    This is the single path for both LLM-originated and coordinator-originated
-    proposals. Every proposal that goes through here gets a phase timeline row
-    so the Critic's ruling is always filed.
-
-    Returns the PendingProposal that was inserted into ``coord.state.pending_proposals``.
-    """
-    msg = Message.new(
-        from_agent,
-        "*",
-        "proposal",
-        {**payload, "needs_review": True},
-    )
-    await coord.bus.append_and_seq(msg)
-    pending = PendingProposal(
-        proposal_msg_id=msg.msg_id,
-        from_agent=from_agent,
-        action_name=action_name,
-        predicted_gain_pct=predicted_gain_pct,
-        payload=payload,
-    )
-    coord.state.pending_proposals[msg.msg_id] = pending
-    record_event(
-        EVENT_PROPOSAL,
-        span=EventSpan(span_id=msg.msg_id, status=STATUS_QUEUED),
-        attributes={
-            "name": action_name,
-            "action_name": action_name,
-            "from_agent": from_agent,
-            "predicted_gain_pct": pending.predicted_gain_pct,
-        },
-    )
-    _record_phase_proposal(coord, pending)
-    record_config_proposal(coord, pending.proposal_msg_id, pending.action_name, pending.payload)
-    return pending
-
-
-def _record_phase_proposal(coord: "Coordinator", pending: PendingProposal) -> None:
-    """Record one proposal against the phase that raised it.
-
-    Every proposal, not only the ones a framework arm claims: this is the row
-    the Critic's ruling is filed on.
-    """
-    from hyperloom.inference_optimizer.breakdown.recorder import phase_event
-    from hyperloom.inference_optimizer.breakdown.recorder.phase_records import PhaseCycle, PhaseProposal
-
-    state = coord.shared_state
-    if not pending.proposal_msg_id or not state.phase:
-        return
-    params = pending.payload.get("params") if isinstance(pending.payload.get("params"), dict) else {}
-    phase_event.record_proposal(
-        PhaseProposal(
-            at=PhaseCycle(state.phase, state.macro_cycle),
-            proposal_msg_id=pending.proposal_msg_id,
-            action=pending.action_name,
-            from_agent=pending.from_agent,
-            tick=state.tick,
-            predicted_gain_pct=pending.predicted_gain_pct,
-            candidate_id=pending.payload.get("framework_agent_candidate_id")
-            or params.get("framework_agent_candidate_id"),
-            variant_name=pending.payload.get("variant_name") or params.get("variant_name"),
-        )
-    )
+    source: str
+    action_name: str
+    payload: Mapping[str, Any]
 
 
 def record_config_proposal(
@@ -123,11 +47,9 @@ def record_config_proposal(
     *,
     outcome: str = "submitted",
 ) -> None:
-    """Record one config-arm grid on the framework event, as it is proposed or delegated.
+    """Record one config-arm grid on the framework event, as its task is queued.
 
-    Recorded at proposal time rather than at approval, so a grid the Critic
-    denies is still on record as a thing the phase pursued and dropped. One row
-    per grid, not per variant: the measured attempts point back at the grid
+    One row per grid, not per variant: the measured attempts point back at the grid
     through their ``proposal_ref``.
     """
     if not proposal_id:
@@ -172,103 +94,37 @@ def record_config_proposal(
     recorder.record_proposal_step(proposal_id, step=STEP_PROPOSED, outcome=outcome)
 
 
-def _framework_recorder(coll: Any, pending: Any) -> Any:
-    """The framework recorder to write one config-arm proposal's step onto.
-
-    ``None`` whenever the step is not a config-arm one to record: another
-    action, or a phase whose event is not open.
-    """
-    if str(getattr(pending, "action_name", "") or "") != "explore":
-        return None
-    if not str(getattr(pending, "proposal_msg_id", "") or ""):
-        return None
-    return coll._coord.phase_framework.timeline()
+def integrate_patch_key(specialist_task_id: str) -> str:
+    """The idempotency key of the ``integrate_patch`` that measures one specialist's deliverable, whoever asks for it."""
+    return f"integrate_patch:{specialist_task_id}"
 
 
-def _record_proposal_materialized(proposal_msg_id: str, task_id: str) -> None:
-    """Name the task a proposal became, on the proposal's own row.
-
-    This is what joins the two halves of one decision: the proposal row says
-    what was asked for and what the Critic said about it, the dispatch row
-    beside it on the same phase event says what was run. Without the task id
-    they sit on one event with nothing connecting them, and the join has to be
-    rebuilt from a sidecar map at export.
-    """
-    if not proposal_msg_id or not task_id:
-        return
-    from hyperloom.inference_optimizer.breakdown.recorder import phase_event
-    from hyperloom.inference_optimizer.breakdown.recorder.phase_records import ProposalOutcome
-
-    phase_event.record_proposal_outcome(
-        ProposalOutcome(
-            proposal_msg_id=str(proposal_msg_id),
-            materialized=True,
-            task_id=str(task_id),
-        )
-    )
-
-
-def _record_config_routed(coll: Any, pending: Any, *, task_id: str) -> None:
-    """Record that one config-arm grid reached a bench.
-
-    ``task_id`` is the task it became, which its attempts also carry.
-    """
-    recorder = _framework_recorder(coll, pending)
-    if recorder is None:
-        return
-    from hyperloom.inference_optimizer.breakdown.recorder.framework_event import STEP_ROUTED
-
-    recorder.record_proposal_step(
-        pending.proposal_msg_id,
-        step=STEP_ROUTED,
-        outcome="materialized",
-        reason=str(task_id or ""),
-    )
-
-
-def _record_config_dropped(coll: Any, pending: Any, *, reason: str) -> None:
-    """Settle one config-arm grid that never reached a bench.
-
-    The Critic approved the proposal and the grid then had nothing left to
-    measure, so the arm spent a review and benched nothing. Without a settled
-    row that reads as a proposal still under way.
-    """
-    recorder = _framework_recorder(coll, pending)
-    if recorder is None:
-        return
-    from hyperloom.inference_optimizer.breakdown.recorder.framework_event import (
-        DISPOSITION_DROPPED,
-        STEP_DROPPED,
-    )
-
-    recorder.record_proposal_step(pending.proposal_msg_id, step=STEP_DROPPED, reason=reason)
-    recorder.settle_proposal(
-        pending.proposal_msg_id,
-        disposition=DISPOSITION_DROPPED,
-        reason=reason,
-    )
-
-
-def _twin_answers(action_name: str, twin: Task) -> bool:
-    """Whether an existing task of a proposal's content answers it, rather than leaving a retry key to it."""
+def twin_answers(action_name: str, twin: Task) -> bool:
+    """Whether an existing task under an action's key answers a repeat of it, rather than leaving a retry key to it."""
     if twin.state not in TERMINAL_STATES:
         return True
-    # A baseline that measured answers a repeat of its content; the row state is ``succeeded`` for any result.
-    return action_name == "baseline" and is_valid_measurement(_confirmed_task_outcome(twin))
+    # A twin that measured answers a repeat; the row state is ``succeeded`` for any result.
+    outcome = _confirmed_task_outcome(twin)
+    if action_name == "baseline":
+        return is_valid_measurement(outcome)
+    return action_name == "integrate_patch" and bool((outcome or {}).get(RESULT_BENCHED))
 
 
 class ProposalsCollaborator(CoordinatorCollaborator):
-    """Turns approved proposals into queued tasks."""
+    """Queues the task a proposed action or a finished specialist's deliverable asks for."""
 
-    def _approved_idempotency_key(self, action_name: str, params: dict[str, Any]) -> str:
-        """Content-addressed idempotency key for an approved proposal."""
+    def _idempotency_key(self, action_name: str, params: dict[str, Any]) -> str:
+        """One key per piece of work: a specialist's deliverable, a baseline's launch, else the params themselves."""
+        specialist_task_id = str(params.get("specialist_task_id") or "")
+        if action_name == "integrate_patch" and specialist_task_id:
+            return integrate_patch_key(specialist_task_id)
         payload: Any = (
             self._coord.writeback.baseline_params_fingerprint(params) if action_name == "baseline" else params
         )
         digest = hashlib.sha1(
             json.dumps(payload, sort_keys=True, default=str).encode(), usedforsecurity=False
         ).hexdigest()[:16]
-        return f"approved:{action_name}:{digest}"
+        return f"{action_name}:{digest}"
 
     def credit_predictor_proposals(self, params: dict) -> None:
         """Credit the predictor for an orchestration grid's copies of its rows (see ``predictor.attribution``)."""
@@ -292,7 +148,7 @@ class ProposalsCollaborator(CoordinatorCollaborator):
         params["keep_threshold_pct"] = session_pct if proposed is None else max(proposed, session_pct)
 
     def inject_explore_runtime_params(self, params: dict) -> None:
-        """Inject explore-task operational knobs from SharedState into ``params`` (single source of truth for both propose/Critic and direct-delegate paths). setdefault preserves LLM overrides, except the KEEP bar, which an agent may only raise."""
+        """Inject explore-task operational knobs from SharedState into ``params`` (single source of truth for the propose and the delegate path). setdefault preserves LLM overrides, except the KEEP bar, which an agent may only raise."""
         br = float(self.shared_state.baseline_runtime_sec or 0.0)
         if br > 0:
             params.setdefault("baseline_runtime_sec", br)
@@ -309,131 +165,110 @@ class ProposalsCollaborator(CoordinatorCollaborator):
         cursor = int((self.shared_state.explore_search or {}).get("cursor") or 0)
         params.setdefault("explore_search_cursor", cursor)
 
-    async def materialize_approved_proposal(self, pending: PendingProposal) -> None:
-        """Promote an approved proposal into a TaskRegistry entry. Stack-aware actions get current_best's anchor and the base config it was measured on."""
-        if is_upstream_pr_prescreen(pending.action_name, pending.payload):
-            await self._coord.phase_framework.materialize_candidate(pending)
-            return
-        params = dict(pending.payload.get("params") or {})
+    async def materialize(self, proposal: ProposedAction) -> None:
+        """Queue the task an admitted ``propose_action`` asks for, unless a task of the same content holds or answers it.
+
+        Stack-aware actions get current_best's anchor and the base config it was measured on.
+        """
+        action = proposal.action_name
+        params = dict(proposal.payload.get("params") or {})
         # Carry the proposer's predicted gain onto the task for predicted-vs-realized calibration.
-        if pending.predicted_gain_pct:
-            params.setdefault(
-                "predicted_gain_pct",
-                float(pending.predicted_gain_pct),
-            )
-        if not await self._seed_materialized_params(pending, params):
-            return
-        lanes, ttl = self._coord.dispatcher.registry_lanes_ttl(pending.action_name)
-        # Content-addressed so a batch of proposals that would launch identical work collapses to one task; an
-        # ended twin gets a fresh key so a retry after failure is never locked out, unless it is a measured baseline.
-        raw_key = self._approved_idempotency_key(pending.action_name, params)
-        # Preserve the authoritative config-proposal join on the materialized task. Keep this out of the
-        # content-addressed idempotency key above so two proposals for identical grids still collapse to one task.
-        if pending.action_name == "explore" and pending.proposal_msg_id:
-            params["proposal_msg_id"] = str(pending.proposal_msg_id)
-        created = await create_on_free_key(
-            self.tasks,
-            TaskSpec(
-                kind=pending.action_name,
-                params=params,
-                idempotency_key=raw_key,
-                requires_lanes=lanes,
-                lease_ttl_sec=ttl,
-                dispatch_class="llm",
-            ),
-            spent=lambda twin: not _twin_answers(pending.action_name, twin),
-        )
+        predicted_gain_pct = float(proposal.payload.get("predicted_gain_pct") or 0.0)
+        if predicted_gain_pct:
+            params.setdefault("predicted_gain_pct", predicted_gain_pct)
+        self._seed_params(action, params)
+        # Read before the grid's join id goes in, so two proposals for identical grids still collapse to one task.
+        key = self._idempotency_key(action, params)
+        proposal_id = uuid.uuid4().hex if action == "explore" else ""
+        if proposal_id:
+            params["proposal_msg_id"] = proposal_id
+        created = await self._create_task(action, params, key)
         if created is None:
-            await self._record_materialize_skipped(pending, "idempotency_key_exhausted", idempotency_key=raw_key)
+            await self._record_materialize_skipped(proposal, "idempotency_key_exhausted", idempotency_key=key)
             return
         task, was_existing = created
         if was_existing:
-            reason = "duplicate_proposal_content" if task.state not in TERMINAL_STATES else "baseline_already_succeeded"
-            await self._record_materialize_skipped(pending, reason, task_id=task.task_id, task_state=task.state)
+            if task.state not in TERMINAL_STATES:
+                reason = "duplicate_proposal_content"
+            else:
+                reason = "baseline_already_succeeded" if action == "baseline" else "integrate_patch_already_measured"
+            await self._record_materialize_skipped(proposal, reason, task_id=task.task_id, task_state=task.state)
             return
         # The round the authoring specialist opened runs on under this task id.
         await self._coord.enablement_lane.handoff_enablement_round(task)
-        await self._announce_approved_proposal(pending, task)
-        # Trace attribution: record proposal_msg_id -> task_id for the decision-trace collector.
-        self._record_proposal_task_map(pending.proposal_msg_id, task.task_id)
-        pending.task_id = task.task_id
-        _record_proposal_materialized(pending.proposal_msg_id, task.task_id)
-        _record_config_routed(self, pending, task_id=task.task_id)
-
-    async def _announce_approved_proposal(self, pending: PendingProposal, task: Task) -> None:
-        """Publish the ``approved_proposal`` decision naming the task a proposal became."""
-        # proposal_msg_id is the resume contract for the deferred queue (see replay_for_resume).
+        record_config_proposal(self._coord, proposal_id, action, {**proposal.payload, "params": params})
         await self.bus.append_and_seq(
             Message.new(
                 "coordinator",
                 "*",
-                "decision",
-                {
-                    "kind": "approved_proposal",
-                    "task_id": task.task_id,
-                    "action_name": pending.action_name,
-                    "from_agent": pending.from_agent,
-                    "proposal_msg_id": pending.proposal_msg_id,
-                },
+                "event",
+                {"kind": "task_queued", "task_id": task.task_id, "source": proposal.source, "action": action},
             )
         )
 
-    async def _seed_materialized_params(self, pending: PendingProposal, params: dict[str, Any]) -> bool:
-        """Seed an approved proposal's params for its action; ``False`` (skip recorded) when it must not run."""
-        action = pending.action_name
-        if action == "explore":
-            if not await self._explore_grid_runnable(pending, params):
-                return False
+    async def enqueue_integrate_patch(self, params: dict[str, Any]) -> Task | None:
+        """Queue the ``integrate_patch`` that measures a finished specialist's deliverable.
+
+        ``None`` when a task under the deliverable's key already holds it or has measured it.
+        """
+        self.seed_integrate_patch_params(params)
+        created = await self._create_task("integrate_patch", params, integrate_patch_key(params["specialist_task_id"]))
+        if created is None or created[1]:
+            return None
+        task = created[0]
+        # The round the authoring specialist opened runs on under this task id.
+        await self._coord.enablement_lane.handoff_enablement_round(task)
+        return task
+
+    async def _create_task(self, action_name: str, params: dict[str, Any], key: str) -> tuple[Task, bool] | None:
+        """Create the task under ``key``, or return the twin that answers it.
+
+        A batch of proposals that would launch identical work collapses to one task. An ended twin leaves a fresh
+        key to a retry, unless it measured what is asked for; ``None`` once every retry key is spent.
+        """
+        lanes, ttl = self._coord.dispatcher.registry_lanes_ttl(action_name)
+        return await create_on_free_key(
+            self.tasks,
+            TaskSpec(
+                kind=action_name,
+                params=params,
+                idempotency_key=key,
+                requires_lanes=lanes,
+                lease_ttl_sec=ttl,
+                # One class for every route to a key: a key holds one class.
+                dispatch_class="llm",
+            ),
+            spent=lambda twin: not twin_answers(action_name, twin),
+        )
+
+    def _seed_params(self, action_name: str, params: dict[str, Any]) -> None:
+        """Seed a proposed action's params with what its executor reads from the session."""
+        if action_name == "explore":
             self.inject_explore_runtime_params(params)
             self.credit_predictor_proposals(params)
             inject_stack_base_params(params, self.shared_state, anchor=True)
-        if action == "integrate_patch":
-            self._seed_integrate_patch_params(params)
-        if action == SPECIALIST_ACTION_NAME:
-            return await self._specialist_domain_free(pending, params)
-        return True
+        elif action_name == "integrate_patch":
+            self.seed_integrate_patch_params(params)
+        elif action_name == SPECIALIST_ACTION_NAME:
+            if backfilled := gap_backfilled_domain(params, self.shared_state.find_gap):
+                params["domain"] = backfilled
 
-    async def _explore_grid_runnable(self, pending: PendingProposal, params: dict[str, Any]) -> bool:
-        """Re-judge an approved explore against what it still has to measure.
-
-        Admission judged the grid the proposal carried; the session's seed sources move underneath it
-        between proposal and approval.
-        """
-        denied = explore_grid_denial(pending.action_name, params, self.shared_state)
-        if denied is None:
-            return True
-        await self._record_materialize_skipped(pending, denied.rule, detail=str(denied))
-        _record_config_dropped(self, pending, reason=denied.rule)
-        return False
-
-    async def _specialist_domain_free(self, pending: PendingProposal, params: dict[str, Any]) -> bool:
-        """Re-judge an approved specialist against the domains held now: admission judged it when it was proposed."""
-        find_gap = self.shared_state.find_gap
-        if backfilled := gap_backfilled_domain(params, find_gap):
-            params["domain"] = backfilled
-        denied = specialist_in_flight_denial(pending.action_name, params, self.tasks, find_gap)
-        if denied is None:
-            return True
-        await self._record_materialize_skipped(pending, denied.rule, detail=str(denied))
-        return False
-
-    async def _record_materialize_skipped(self, pending: PendingProposal, reason: str, **fields: Any) -> None:
-        """Record that an approved proposal was not turned into a task, and why."""
+    async def _record_materialize_skipped(self, proposal: ProposedAction, reason: str, **fields: Any) -> None:
+        """Record that a proposed action was not turned into a task, and why."""
         await self.bus.record_observation(
             "coordinator",
             "observation",
             {
                 "kind": "proposal_materialize_skipped",
                 "reason": reason,
-                "proposal_msg_id": pending.proposal_msg_id,
                 **fields,
-                "action_name": pending.action_name,
-                "from_agent": pending.from_agent,
+                "action_name": proposal.action_name,
+                "from_agent": proposal.source,
             },
         )
 
-    def _seed_integrate_patch_params(self, params: dict[str, Any]) -> None:
-        """Default an approved integrate_patch's grading context and its patched-eval server."""
+    def seed_integrate_patch_params(self, params: dict[str, Any]) -> None:
+        """Default an integrate_patch's grading context and its patched-eval server."""
         # ``source_phase`` is stamped where the specialist is created and carried from there; a
         # second derivation here would be a second decision, and could write an empty owner.
         self.floor_keep_threshold(params)
@@ -442,27 +277,3 @@ class ProposalsCollaborator(CoordinatorCollaborator):
         inject_stack_base_params(params, self.shared_state, anchor=True)
         if self.shared_state.baseline_config_path:
             params.setdefault("config_path", self.shared_state.baseline_config_path)
-
-    def _record_proposal_task_map(self, proposal_msg_id: str, task_id: str) -> None:
-        """Append one ``{proposal_msg_id -> task_id}`` row to the trace map."""
-        if not proposal_msg_id or not task_id:
-            return
-        try:
-            from hyperloom_common.timeutil import now_iso
-            from hyperloom_common.io import JsonLineFormat, append_jsonl
-            from hyperloom.inference_optimizer.session.session_paths import proposal_task_map_path
-
-            path = proposal_task_map_path(self.session_dir)
-            row = {
-                "ts": now_iso(),
-                "proposal_msg_id": str(proposal_msg_id),
-                "task_id": str(task_id),
-            }
-            append_jsonl(path, row, make_parents=True, fmt=JsonLineFormat(sort_keys=True))
-        except OSError:
-            log.debug(
-                "full-trace: proposal_task_map append failed for msg_id=%s task_id=%s",
-                proposal_msg_id,
-                task_id,
-                exc_info=True,
-            )

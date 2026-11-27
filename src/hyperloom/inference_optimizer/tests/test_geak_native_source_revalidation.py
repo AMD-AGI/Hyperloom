@@ -88,9 +88,7 @@ def test_only_an_inferencex_agentx_session_takes_the_source_route(coordinator, t
 
 
 @pytest.mark.asyncio
-async def test_source_candidate_is_measured_as_a_covered_step_with_no_critic_proposal(
-    coordinator, tmp_path, monkeypatch
-):
+async def test_source_candidate_is_measured_as_a_covered_step_of_the_revalidation(coordinator, tmp_path, monkeypatch):
     _candidate(coordinator, tmp_path)
     measured = []
     adopted = []
@@ -117,10 +115,8 @@ async def test_source_candidate_is_measured_as_a_covered_step_with_no_critic_pro
     await coordinator.phase_kernel._revalidate_geak_candidate(reason="unit", handoff_cards=None)
     assert len(measured) == 1
     assert measured[0].task.kind == "integrate_patch"
-    # No registry row carries this marker; it is what lets the integration run with no Critic verdict on record.
+    # No registry row carries this marker: the integration runs under the revalidation's own lease.
     assert measured[0].extra["covered_step"] is True
-    assert await coordinator.bus.tail(topic="proposal") == []
-    assert not coordinator.state.pending_proposals
     assert adopted[0]["measured_tput"] == 120.0
     assert adopted[0]["overlay_loaded"] is False
     assert coordinator.shared_state.geak_result["revalidation_status"] == "validated"
@@ -500,7 +496,6 @@ async def test_cancelled_covered_run_reuses_its_task_identity(coordinator, tmp_p
     await coordinator.phase_kernel._revalidate_geak_candidate(reason="resume", handoff_cards=None)
     assert len(tasks) == 2
     assert tasks[0].task_id == tasks[1].task_id == saved["task_id"]
-    assert await coordinator.bus.tail(topic="proposal") == []
     assert coordinator.shared_state.geak_pending == {}
     assert not coordinator.shared_state.optimization_stack
 

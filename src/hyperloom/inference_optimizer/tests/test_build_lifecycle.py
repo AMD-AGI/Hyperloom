@@ -540,7 +540,7 @@ def _silent_plan():
 def _build_backends():
     from hyperloom.orchestrator.tests.mock_backend import MockBackend
 
-    return {name: MockBackend(_silent_plan(), name=name) for name in ("orchestration", "critic")}
+    return {"orchestration": MockBackend(_silent_plan(), name="orchestration")}
 
 
 @pytest.fixture
