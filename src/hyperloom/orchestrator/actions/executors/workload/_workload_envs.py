@@ -559,9 +559,9 @@ def _settle_merged_server_args(bench: dict[str, Any], framework_env: str) -> Non
     # An eager profile cannot capture a CUDA graph, so the profile YAML's
     # ``--enable-profile-cuda-graph`` is dead weight the server still sets up
     # for. The two flags reach the env from different layers -- the YAML
-    # template vs the eager fallback folded into ``extra_server_args`` -- and
-    # only meet here, after every merge above, so this is the first point that
-    # can see the contradiction.
+    # template vs the disable flag folded into the server args -- and only
+    # meet here, after every merge above, so this is the first point that can
+    # see the contradiction.
     if framework_env == "EXTRA_SGLANG_ARGS":
         _sg_tokens = str(envs.get(framework_env, "")).split()
         if _SGLANG_DISABLE_CUDA_GRAPH_FLAG in _sg_tokens and _SGLANG_PROFILE_CUDA_GRAPH_FLAG in _sg_tokens:

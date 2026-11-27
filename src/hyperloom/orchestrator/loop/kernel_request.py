@@ -131,8 +131,8 @@ def seed_integrate_base_tput(router: Any, request: KernelRequest) -> None:
 
 
 @asynccontextmanager
-async def kernel_step_heartbeat(router: Any, kind: str, started: float):
-    """Keep orchestration's bus timestamp moving through an inline step."""
+async def kernel_step_heartbeat(router: Any):
+    """Keep the inline step's liveness stamp fresh while the step runs."""
     # Imported here: ``phases`` reaches back into ``loop``, so taking it at module level would close an import cycle.
     from ..phases.machine_state import KERNEL_HEARTBEAT_SEC
 
@@ -145,18 +145,6 @@ async def kernel_step_heartbeat(router: Any, kind: str, started: float):
         while True:
             await asyncio.sleep(KERNEL_HEARTBEAT_SEC)
             _mark_running()
-            await router.bus.append_and_seq(
-                Message.new(
-                    "orchestration",
-                    "*",
-                    "observation",
-                    {
-                        "kind": "kernel_step_running",
-                        "step": kind,
-                        "elapsed_sec": round(time.monotonic() - started, 1),
-                    },
-                )
-            )
 
     _mark_running()
     task = asyncio.create_task(_beat())
@@ -225,7 +213,7 @@ async def run_kernel_handler(router: Any, request: KernelRequest, handler: Any) 
         artifacts=lifecycle_paths(request.payload),
     )
     try:
-        async with kernel_step_heartbeat(router, request.kind, started):
+        async with kernel_step_heartbeat(router):
             result = await handler(request.payload, session_dir=router.session_dir)
     except Exception as exc:
         log.exception(

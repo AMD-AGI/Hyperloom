@@ -40,7 +40,7 @@ from hyperloom.orchestrator.loop.dispatcher import DispatcherCollaborator
 from hyperloom.orchestrator.phases.machine_state import ENABLEMENT_MAX_ATTEMPTS, PHASE_ENABLEMENT
 from hyperloom.orchestrator.loop.writeback import WritebackCollaborator
 from hyperloom.orchestrator.state._shared_state.enablement_round import EnablementRound
-from hyperloom.orchestrator.state.round_store import FAILED, RoundRequest, RoundStore
+from hyperloom.orchestrator.state.round_store import FAILED, RoundStore
 from hyperloom.orchestrator.state.shared_state import SharedState
 
 from .conftest import make_coordinator
@@ -117,10 +117,8 @@ async def _seed_stalled(rounds: RoundStore, n: int) -> None:
     for i in range(n):
         rid = f"seed-stalled-{i:03d}"
         holder = f"holder-{i:03d}"
-        await rounds.open(rid, RoundRequest(now_unix=float(i), request_id=rid), holder_task_id=holder, lease_sec=3600.0)
-        await rounds.settle(
-            await rounds.get(rid), RoundRequest(now_unix=float(i) + 1.0, request_id=f"settle-{rid}"), outcome=FAILED
-        )
+        await rounds.open(rid, now_unix=float(i), holder_task_id=holder, lease_sec=3600.0)
+        await rounds.settle(await rounds.get(rid), now_unix=float(i) + 1.0, outcome=FAILED)
 
 
 def _lane(session_dir: Path, **overrides: Any):
@@ -460,7 +458,7 @@ async def test_a_snapshot_that_raised_leaves_the_row_silent(_bound_session, monk
     lane.shared_state.enablement.last_specialist_task_id = "spec-1"
     await lane.rounds.open(
         "enablement-spec-1",
-        RoundRequest(now_unix=0.0, request_id="seed-spec-1"),
+        now_unix=0.0,
         holder_task_id="spec-1",
         lease_sec=3600.0,
     )

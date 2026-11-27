@@ -5,11 +5,9 @@
 
 from __future__ import annotations
 
-import json
 import sqlite3
-from collections.abc import Callable, Mapping
-from dataclasses import dataclass, field, replace
-from types import MappingProxyType
+from collections.abc import Callable
+from dataclasses import dataclass, replace
 from typing import Any
 
 from hyperloom.orchestrator.bus.resource_lock import drop_round_lane, hold_round_lane
@@ -32,7 +30,7 @@ EXPIRED_REAPED = "expired_reaped"
 
 OUTCOMES = frozenset({BOOTED, FAILED, ABANDONED, ADVANCED, EXPIRED_REAPED})
 
-#: Rejection reasons, recorded on the outbox row.
+#: Rejection reasons, returned as :attr:`RoundResult.reason`.
 UNKNOWN_ROUND = "unknown_round"
 NOT_OWNER = "not_owner"
 STALE_FENCE = "stale_fence"
@@ -40,9 +38,6 @@ NOT_OPEN = "not_open"
 EXCLUDED = "excluded"
 ALREADY_EXISTS = "already_exists"
 ALREADY_SETTLED = "already_settled"
-
-#: Default for an attempt that records nothing beyond the operation itself.
-_NO_EVIDENCE: Mapping[str, Any] = MappingProxyType({})
 
 #: Ownership ends at explicit settlement, never at a budget timestamp.
 _LIVE_EXCLUSION = f"state = '{OPEN}'"
@@ -59,7 +54,6 @@ __all__ = [
     "SETTLED",
     "STALE_FENCE",
     "Round",
-    "RoundRequest",
     "RoundResult",
     "RoundStore",
 ]
@@ -117,21 +111,6 @@ class Round:
 
 
 @dataclass(frozen=True)
-class RoundRequest:
-    """The caller's stamp on one attempt against a round.
-
-    Attributes:
-        request_id: The caller's id for this attempt.
-        now_unix: Current wall time.
-        evidence: Recorded on the outbox row.
-    """
-
-    request_id: str
-    now_unix: float
-    evidence: Mapping[str, Any] = field(default_factory=lambda: _NO_EVIDENCE)
-
-
-@dataclass(frozen=True)
 class RoundResult:
     """What an operation did.
 
@@ -162,9 +141,9 @@ class RoundStore:
     async def open(
         self,
         round_id: str,
-        request: RoundRequest,
         *,
         holder_task_id: str,
+        now_unix: float,
         lease_sec: float,
         join: Callable[[sqlite3.Cursor], None] | None = None,
     ) -> RoundResult:
@@ -172,8 +151,8 @@ class RoundStore:
 
         Args:
             round_id: Identity of the round to acquire.
-            request: The caller's id, wall time and evidence for this attempt.
             holder_task_id: The task that will hold it.
+            now_unix: Current wall time.
             lease_sec: How long the acquire is good for without a renewal.
             join: Ran with the acquiring cursor once the insert succeeds; its
                 writes commit with the acquire or not at all.
@@ -182,17 +161,6 @@ class RoundStore:
             RoundResult: ``ok`` when the round was acquired; otherwise
             ``reason`` is :data:`EXCLUDED` or :data:`ALREADY_EXISTS`.
         """
-        attempt = _Attempt(
-            round_id=round_id,
-            request_id=request.request_id,
-            op="open",
-            actor_task_id=holder_task_id,
-            fence=0,
-            outcome="",
-            evidence=request.evidence,
-            now_unix=request.now_unix,
-        )
-        now_unix = request.now_unix
         opened = Round(
             round_id=round_id,
             state=OPEN,
@@ -227,81 +195,77 @@ class RoundStore:
             )
             if cur.rowcount != 1:
                 cur.execute("SELECT 1 FROM bringup_rounds WHERE round_id = ?", (round_id,))
-                return attempt.reject(cur, ALREADY_EXISTS if cur.fetchone() is not None else EXCLUDED)
+                return RoundResult(ok=False, reason=ALREADY_EXISTS if cur.fetchone() is not None else EXCLUDED)
             _place_lane(cur, opened)
             if join is not None:
                 join(cur)
-            return attempt.applied(cur, opened)
+            return RoundResult(ok=True)
 
     async def renew(
         self,
         held: Round,
-        request: RoundRequest,
         *,
+        now_unix: float,
         lease_sec: float,
     ) -> RoundResult:
         """Extend an open round's lease without changing who holds it.
 
         Args:
             held: The round as its holder last read it.
-            request: The caller's id, wall time and evidence for this attempt.
-            lease_sec: How much longer the lease is good for, from ``request.now_unix``.
+            now_unix: Current wall time.
+            lease_sec: How much longer the lease is good for, from ``now_unix``.
 
         Returns:
             RoundResult: ``ok`` when the lease moved; otherwise ``reason``.
         """
         return await self._swap(
             held,
-            "renew",
-            lambda current: replace(current, renewed_unix=request.now_unix, expires_unix=request.now_unix + lease_sec),
-            request,
+            lambda current: replace(current, renewed_unix=now_unix, expires_unix=now_unix + lease_sec),
         )
 
     async def handoff(
         self,
         held: Round,
-        request: RoundRequest,
         *,
         new_holder_task_id: str,
+        now_unix: float,
         lease_sec: float,
     ) -> RoundResult:
         """Move an open round to a new holder, advancing the fence.
 
         Args:
             held: The round as its current holder last read it.
-            request: The caller's id, wall time and evidence for this attempt.
             new_holder_task_id: The task taking it over.
-            lease_sec: The new holder's lease, from ``request.now_unix``.
+            now_unix: Current wall time.
+            lease_sec: The new holder's lease, from ``now_unix``.
 
         Returns:
             RoundResult: ``ok`` when the round moved; otherwise ``reason``.
         """
         return await self._swap(
             held,
-            "handoff",
             lambda current: replace(
                 current,
                 holder_task_id=new_holder_task_id,
                 fence=current.fence + 1,
-                renewed_unix=request.now_unix,
-                expires_unix=request.now_unix + lease_sec,
+                renewed_unix=now_unix,
+                expires_unix=now_unix + lease_sec,
             ),
-            request,
         )
 
     async def settle(
         self,
         held: Round,
-        request: RoundRequest,
         *,
         outcome: str,
+        now_unix: float,
     ) -> RoundResult:
         """End the round, releasing the machine.
 
         Args:
             held: The round as its holder last read it.
-            request: The caller's id, wall time and evidence for this attempt.
             outcome: One of :data:`OUTCOMES`.
+            now_unix: Current wall time.
 
         Returns:
             RoundResult: ``ok`` when the round settled or this settle had
@@ -314,50 +278,36 @@ class RoundStore:
             raise ValueError(f"unknown round outcome {outcome!r}; expected one of {sorted(OUTCOMES)}")
         return await self._swap(
             held,
-            "settle",
-            lambda current: replace(current, state=SETTLED, outcome=outcome, settled_unix=request.now_unix),
-            request,
-            outcome=outcome,
+            lambda current: replace(current, state=SETTLED, outcome=outcome, settled_unix=now_unix),
+            settles_as=outcome,
         )
 
     async def _swap(
         self,
         held: Round,
-        op: str,
         advance: Callable[[Round], Round],
-        request: RoundRequest,
         *,
-        outcome: str = "",
+        settles_as: str = "",
     ) -> RoundResult:
         """Replace the round with ``advance(current)`` while ``held`` still names its holder and fence.
 
-        Only a settle can replay: any other attempt on a settled round is :data:`NOT_OPEN`.
+        Only a settle (``settles_as`` names its outcome) can replay: any other attempt on a settled round is
+        :data:`NOT_OPEN`.
         """
-        attempt = _Attempt(
-            round_id=held.round_id,
-            request_id=request.request_id,
-            op=op,
-            actor_task_id=held.holder_task_id,
-            fence=held.fence,
-            outcome=outcome,
-            evidence=request.evidence,
-            now_unix=request.now_unix,
-        )
         async with self.db.transaction() as cur:
             current = _load(cur, held.round_id)
             if current is None:
-                return attempt.reject(cur, UNKNOWN_ROUND)
-            if op == "settle" and current.state == SETTLED:
-                if (
-                    current.outcome == outcome
+                return RoundResult(ok=False, reason=UNKNOWN_ROUND)
+            if settles_as and current.state == SETTLED:
+                replayed = (
+                    current.outcome == settles_as
                     and current.holder_task_id == held.holder_task_id
                     and current.fence == held.fence
-                ):
-                    return attempt.applied(cur, current, duplicate=True)
-                return attempt.reject(cur, ALREADY_SETTLED)
+                )
+                return RoundResult(ok=True) if replayed else RoundResult(ok=False, reason=ALREADY_SETTLED)
             reason = _cas_reason(current, held)
             if reason:
-                return attempt.reject(cur, reason)
+                return RoundResult(ok=False, reason=reason)
             after = advance(current)
             # The transaction is BEGIN IMMEDIATE, so the check above and this write are one step.
             cur.execute(
@@ -376,7 +326,7 @@ class RoundStore:
                 ),
             )
             _place_lane(cur, after)
-            return attempt.applied(cur, after)
+            return RoundResult(ok=True)
 
     async def held(self) -> Round | None:
         """Return the newest open round, or ``None``.
@@ -464,63 +414,3 @@ def _place_lane(cur: sqlite3.Cursor, after: Round) -> None:
         )
     else:
         drop_round_lane(cur, round_id=after.round_id)
-
-
-@dataclass(frozen=True, kw_only=True)
-class _Attempt:
-    """One caller request against a round, as the outbox records it."""
-
-    round_id: str
-    request_id: str
-    op: str
-    actor_task_id: str
-    fence: int
-    outcome: str
-    evidence: Mapping[str, Any]
-    now_unix: float
-
-    def applied(self, cur: sqlite3.Cursor, after: Round, *, duplicate: bool = False) -> RoundResult:
-        """Record this attempt as having left the round at ``after``; a ``duplicate`` replay is recorded as such.
-
-        The outbox row carries ``after``'s fence and holder, so an open or a handoff records the ones it put in place.
-        """
-        self._append(
-            cur,
-            result="duplicate" if duplicate else "applied",
-            fence=after.fence,
-            actor_task_id=after.holder_task_id,
-            reason="",
-        )
-        return RoundResult(ok=True)
-
-    def reject(self, cur: sqlite3.Cursor, reason: str) -> RoundResult:
-        """Record this attempt as refused with what it presented."""
-        self._append(
-            cur,
-            result="rejected",
-            fence=self.fence,
-            actor_task_id=self.actor_task_id,
-            reason=reason,
-        )
-        return RoundResult(ok=False, reason=reason)
-
-    def _append(self, cur: sqlite3.Cursor, *, result: str, fence: int, actor_task_id: str, reason: str) -> None:
-        """Append this attempt to the outbox."""
-        cur.execute(
-            "INSERT INTO round_events ("
-            "  round_id, request_id, op, result, outcome, fence,"
-            "  actor_task_id, reason, evidence, recorded_unix"
-            ") VALUES (?,?,?,?,?,?,?,?,?,?)",
-            (
-                self.round_id,
-                self.request_id,
-                self.op,
-                result,
-                self.outcome,
-                fence,
-                actor_task_id,
-                reason,
-                json.dumps(dict(self.evidence), sort_keys=True),
-                self.now_unix,
-            ),
-        )

@@ -12,7 +12,6 @@ from types import SimpleNamespace
 import pytest
 
 from hyperloom.orchestrator.roles import mcp_context_tools as mct
-from hyperloom.orchestrator.roles import mcp_sdk
 
 
 def _shared_state():
@@ -73,17 +72,6 @@ def test_runtime_findings_reads_current_best_slot(tmp_path):
 
     assert p.runtime_findings() == "runtime findings for /s/server.log [vllm]"
     assert "get_runtime_findings" in mct.CONTEXT_TOOL_NAMES
-
-
-# ---- sdk resolution ----
-
-
-def test_resolve_sdk_import_error(monkeypatch):
-    def boom(_name):
-        raise ImportError("no sdk")
-
-    monkeypatch.setattr(mcp_sdk.importlib, "import_module", boom)
-    assert mcp_sdk._resolve_sdk(None) is None
 
 
 # ---- _make_handler ----
@@ -149,31 +137,22 @@ async def test_read_projection_stays_on_the_calling_thread():
 # ---- build_context_tools_server ----
 
 
-def test_build_server_unavailable_without_factories():
-    p = _provider(shared_state=_shared_state())
-    assert mct.build_context_tools_server(p, sdk_module=object()) is None
-
-
-def test_build_server_with_fake_factories():
+def test_build_server_registers_every_context_tool_with_the_sdk():
     p = _provider(shared_state=_shared_state())
     created = {}
 
-    def tool_factory(name, desc, schema):
+    def tool(name, desc, schema):
         def decorator(handler):
             return (name, handler)
 
         return decorator
 
-    def server_factory(name, version, tools):
+    def create_sdk_mcp_server(name, version, tools):
         created["name"] = name
         created["tools"] = tools
         return "SERVER"
 
-    out = mct.build_context_tools_server(
-        p,
-        tool_factory=tool_factory,
-        server_factory=server_factory,
-    )
+    out = mct.build_context_tools_server(SimpleNamespace(tool=tool, create_sdk_mcp_server=create_sdk_mcp_server), p)
     assert out == "SERVER"
     assert created["name"] == mct.MCP_SERVER_NAME
     assert len(created["tools"]) == len(mct.CONTEXT_TOOL_SPECS)
@@ -193,9 +172,11 @@ def test_build_server_with_fake_factories():
 async def test_a_mounted_tool_returns_the_projection_it_names(tool_name, text):
     handlers = {}
     mct.build_context_tools_server(
+        SimpleNamespace(
+            tool=lambda name, _description, _schema: lambda handler: handlers.setdefault(name, handler),
+            create_sdk_mcp_server=lambda _name, _version, tools: tools,
+        ),
         _provider(shared_state=_shared_state(), analysis_reader=lambda: "md"),
-        tool_factory=lambda name, _description, _schema: lambda handler: handlers.setdefault(name, handler),
-        server_factory=lambda _name, _version, tools: tools,
     )
     out = await handlers[tool_name]({})
     assert out["content"][0]["text"] == text

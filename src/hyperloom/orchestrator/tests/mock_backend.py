@@ -47,7 +47,6 @@ class MockBackend:
         *,
         system_prompt: str | None = None,
         tools: list[str] | None = None,
-        max_turns: int = 1,
     ) -> BackendTurnResult:
         """Record the call and play back the next scripted turn."""
         self.calls.append(
@@ -55,7 +54,6 @@ class MockBackend:
                 "prompt": prompt,
                 "system_prompt": system_prompt,
                 "tools": list(tools or []),
-                "max_turns": max_turns,
             }
         )
         turn = self._next_turn()

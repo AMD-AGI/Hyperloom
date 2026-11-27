@@ -10,7 +10,7 @@ import re
 import pytest
 
 from hyperloom.orchestrator.loop.coordinator import Coordinator
-from hyperloom.orchestrator.state.task_registry import TaskSpec
+from hyperloom.orchestrator.state.task_registry import TaskSpec, task_dispatch_class
 from hyperloom.orchestrator.tests.mock_backend import MockBackend, ScriptedPlan
 from hyperloom.inference_optimizer.protocol.action_surfaces import FULL_ENABLED_ACTIONS
 from hyperloom.inference_optimizer.protocol.intent import Intent, IntentType
@@ -91,6 +91,31 @@ async def test_delegate_running_collision_denies_without_new_task(session_dir):
             if m.payload.get("kind") == "policy_denied" and m.payload.get("rule") == "duplicate_idempotency_key_running"
         ]
         assert denied
+    finally:
+        await c.stop()
+
+
+@pytest.mark.asyncio
+async def test_delegate_onto_a_live_coordinator_row_is_answered_as_a_duplicate(session_dir):
+    """A key that names a live task is a duplicate whichever author created the row, and the row keeps its class."""
+    c = _silent_coordinator(session_dir)
+    try:
+        held, _ = await c.tasks.create_or_return_existing(
+            TaskSpec(
+                kind="target_analysis",
+                params={"x": 1},
+                idempotency_key="dup-key-coordinator",
+                dispatch_class="coordinator",
+            ),
+        )
+        await c.router.handle_delegate("orchestration", _delegate(key="dup-key-coordinator"))
+
+        assert [t.task_id for t in await c.tasks.by_state("queued")] == [held.task_id]
+        assert task_dispatch_class(await c.tasks.get(held.task_id)) == "coordinator"
+        obs = await c.bus.tail(topic="observation")
+        assert [m.payload.get("rule") for m in obs if m.payload.get("kind") == "policy_denied"] == [
+            "duplicate_idempotency_key_running"
+        ]
     finally:
         await c.stop()
 

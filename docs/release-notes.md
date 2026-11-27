@@ -77,6 +77,28 @@ it.
   `unknown intent_type`. The hint of rule `tool_whitelist_role` now says
   Orchestration holds WebSearch and WebFetch `directly as tools`. See
   [Upgrade](reference/upgrade.md).
+- **Records that nothing produced or read are no longer written.**
+  `state.json` drops `baseline_eager_fallback` (a one-shot baseline retry with
+  CUDA graphs disabled, armed by an error class nothing returns any more) and
+  `include_patches` on the rows of `kb_stage_outbox`; the audit rows no longer
+  use the decisions `skipped` or `discarded` for a roofline, a profile or a
+  baseline, which could not be reached. `storage/coordinator.db` has no
+  `round_events` table and no `events.in_reply_to` column, a `response` event
+  carries no `in_reply_to` key, and an inline kernel step appends no
+  `kernel_step_running` observation, so a session with long kernel steps
+  counts fewer `observation` events. `mcp_setup.json` drops
+  `emit_intent.registered`. The `dispatch audit` warning is gone; a task whose
+  kind has no executor still fails with `no_executor`. After a restart the
+  reconciler alone fails the tasks the previous process left running, so a
+  database error in that pass is retried on the next tick instead of within
+  the same one. A delegate that reuses the `idempotency_key` of a task another
+  author created is now answered as a duplicate key instead of raising
+  `dispatch_class mismatch`. `get_inbox` shows Orchestration's own `alert`
+  text as written. A baseline throughput reported as a numeric string anchors
+  as that number instead of being recorded `discarded`. A `claude-agent-sdk`
+  without `tool` or `create_sdk_mcp_server` now fails at start-up instead of
+  running a session that has no `emit_intent` tool. See
+  [Upgrade](reference/upgrade.md).
 - **forge-loop runs every round as lanes and has no planning stage.** Every
   iteration is one round: one lane per focus the Analysis Agent divides its
   evidence into (at most `--lanes`, and one lane with no focus when it divides

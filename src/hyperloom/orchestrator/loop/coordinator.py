@@ -957,7 +957,6 @@ class Coordinator:
         turn = await self.conversation.compose_turn(backend)
         prompt = f"{turn.prompt}\n\n{request}" if request else turn.prompt
         tools = list(ORCHESTRATION_TOOL_GRANT)
-        # max_turns=0 → backend default.
         _t0 = time.perf_counter()
         call_id = new_call_id()
         try:
@@ -973,7 +972,7 @@ class Coordinator:
                 )
                 async with pump:
                     result: BackendTurnResult = await backend.run(
-                        prompt=prompt, system_prompt=turn.system_prompt, tools=tools, max_turns=0
+                        prompt=prompt, system_prompt=turn.system_prompt, tools=tools
                     )
                 call_span.finish(**llm_call_summary(result.metadata))
         except BackendError as exc:

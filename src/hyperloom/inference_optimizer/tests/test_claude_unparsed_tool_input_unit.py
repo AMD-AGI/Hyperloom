@@ -8,6 +8,7 @@ from __future__ import annotations
 import json
 import logging
 from dataclasses import dataclass
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -32,22 +33,6 @@ class ToolUseBlock(_FakeToolUse):
     pass
 
 
-def _backend() -> ClaudeBackend:
-    async def _q(*, prompt, options):  # pragma: no cover
-        if False:
-            yield None
-
-    class _Opts:
-        def __init__(self, **kwargs: Any) -> None:
-            self.kwargs = kwargs
-
-    return ClaudeBackend(
-        sdk_query_factory=_q,
-        sdk_options_cls=_Opts,
-        mcp_server_factory=lambda *a, **k: None,
-    )
-
-
 def test_is_unparsed_wrapper_false_for_native_and_junk() -> None:
     assert is_unparsed_tool_wrapper(None) is False
     assert is_unparsed_tool_wrapper({"intent_type": "send_message"}) is False
@@ -56,8 +41,9 @@ def test_is_unparsed_wrapper_false_for_native_and_junk() -> None:
     assert is_unparsed_tool_wrapper({"__unparsedToolInput": {"raw": '{"intent_type": "send_message"}'}}) is True
 
 
+@pytest.mark.usefixtures("claude_sdk")
 def test_parse_unparsed_wrapper_missing_required_payload_returns_none() -> None:
-    b = _backend()
+    b = ClaudeBackend()
     raw = '{"intent_type": "propose_action", "payload": {"action_name": "baseline"}}'
     block = ToolUseBlock(
         name="emit_intent",
@@ -66,9 +52,10 @@ def test_parse_unparsed_wrapper_missing_required_payload_returns_none() -> None:
     assert b._parse_tool_use_block(block) is None
 
 
+@pytest.mark.usefixtures("claude_sdk")
 def test_parse_tool_use_block_ignores_extra_native_keys() -> None:
     """Stream ingest stays lenient: extra native keys are not a reason to drop."""
-    b = _backend()
+    b = ClaudeBackend()
     block = ToolUseBlock(
         name="emit_intent",
         input={
@@ -83,8 +70,9 @@ def test_parse_tool_use_block_ignores_extra_native_keys() -> None:
     assert intent.payload["topic"] == "heartbeat"
 
 
+@pytest.mark.usefixtures("claude_sdk")
 def test_parse_tool_use_block_logs_malformed_wrapper_decode_error(caplog: pytest.LogCaptureFixture) -> None:
-    b = _backend()
+    b = ClaudeBackend()
     block = ToolUseBlock(
         name="emit_intent",
         input={"__unparsedToolInput": {"raw": "{not-json"}},
@@ -94,9 +82,10 @@ def test_parse_tool_use_block_logs_malformed_wrapper_decode_error(caplog: pytest
     assert any("__unparsedToolInput.raw is not valid JSON" in message for message in caplog.messages)
 
 
+@pytest.mark.usefixtures("claude_sdk")
 def test_parse_tool_use_block_prefers_native_intent_type() -> None:
     """Canonical input remains authoritative when a fallback is also present."""
-    b = _backend()
+    b = ClaudeBackend()
     block = ToolUseBlock(
         name="emit_intent",
         input={
@@ -138,7 +127,7 @@ def _registered_emit_intent_tool() -> Any:
     def capture(name: str, version: str, tools: list[Any]) -> None:
         captured.extend(tools)
 
-    build_emit_intent_server(sdk_module=sdk, server_factory=capture)
+    build_emit_intent_server(SimpleNamespace(tool=sdk.tool, create_sdk_mcp_server=capture))
     tool = next((t for t in captured if getattr(t, "name", None) == EMIT_INTENT_TOOL_NAME), None)
     if tool is None:
         pytest.skip("SDK did not register the emit_intent tool")

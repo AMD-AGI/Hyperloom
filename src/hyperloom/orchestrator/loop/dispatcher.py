@@ -17,9 +17,6 @@ from hyperloom.common.deadline import Deadline
 from hyperloom_common.env import is_truthy
 from hyperloom_common.llm.llm_attribution import current_action_scope
 from hyperloom_common.proctree import TERM_GRACE_SEC
-from hyperloom.inference_optimizer.protocol.action_surfaces import (
-    KERNEL_AGENT_OWNED_ACTIONS,
-)
 from hyperloom.inference_optimizer.session.optimization_journal import Verdict
 from hyperloom.inference_optimizer.trace.trajectory_trace import trajectory_scope
 from ..actions.cancel_channel import CancelScope, use_cancel_scope
@@ -101,9 +98,6 @@ class DispatcherCollaborator(AdmissionMixin, DeadHolderAccountingMixin, Coordina
         super().__init__(coordinator)
         # Re-derives :attr:`admission_frozen` once the pump has booked; unwired, the flag is left as set.
         self._refresh_admission_freeze = refresh_admission_freeze
-        # Task ids already charged a failure by the dead-holder reclaim path, so
-        # a late normal result for the same task cannot double-count it.
-        self._dead_holder_accounted: set[str] = set()
         # Handles on the actions currently running, ``task_id -> _InflightAction``:
         # the only reach into a dispatched action once the pump has returned.
         # Entries remove themselves in :meth:`run_task_registered`.
@@ -366,41 +360,20 @@ class DispatcherCollaborator(AdmissionMixin, DeadHolderAccountingMixin, Coordina
             )
         return False
 
-    async def _reclaim_stale_dispatch_state(self) -> None:
-        """Free rows and leases a previous tick left stuck, before scanning the queue.
+    async def _account_reconciled_failures(self) -> None:
+        """Charge, once each, the tasks the reconciler failed because their holder process is gone.
 
-        Runs every tick and is idempotent. Three independent claims a crashed or
-        vanished worker can leave behind, each reclaimed on its own so one
-        failure does not hide the next -- and every one of them absorbs its
-        store failures, because a self-heal that raises would stop the pump it
-        exists to keep running:
-
-        * a running row whose holder PID is dead, so its lanes free and the task
-          fails while it is still retry-eligible, this same tick;
-        * the failure that reclaim implies, charged once;
-        * the lane leases that holder still held.
+        The reconciler reclaims those rows and sweeps their leases before every tick's pump; what is left to the
+        pump is the failure each reclaim implies. The accounting absorbs its store failures, because a pump that
+        raised here would stop booking results.
         """
-        dead_tasks: list[str] = []
+        dead_tasks = self._coord.reconciler.take_failed_tasks()
+        if not dead_tasks:
+            return
         try:
-            dead_tasks = await self.tasks.reclaim_dead_running(reason="dead_holder_pump")
-            if dead_tasks:
-                log.warning(
-                    "dispatcher: reclaimed %d running task(s) with dead holders: %s",
-                    len(dead_tasks),
-                    ", ".join(t[:12] for t in dead_tasks),
-                )
-        except (sqlite3.Error, ValueError):
-            log.exception("dispatcher: dead-running task reclaim failed")
-        dead_tasks.extend(self._coord.reconciler.take_failed_tasks())
-        if dead_tasks:
-            try:
-                await self._account_dead_holder_failures(dead_tasks, reason="dead_holder_pump")
-            except (OSError, sqlite3.Error):
-                log.exception("dispatcher: dead-holder failure accounting failed")
-        try:
-            await self.locks.reap_dead_holders()
-        except sqlite3.Error:
-            log.exception("dispatcher: dead-holder lease reap failed")
+            await self._account_dead_holder_failures(dead_tasks, reason="dead_holder_pump")
+        except (OSError, sqlite3.Error):
+            log.exception("dispatcher: dead-holder failure accounting failed")
 
     async def pump_dispatcher_once(self) -> None:
         """Book finished executions and spawn the queued tasks that now fit; never waits on running work.
@@ -411,7 +384,7 @@ class DispatcherCollaborator(AdmissionMixin, DeadHolderAccountingMixin, Coordina
         while the phase budget is spent or :attr:`admission_frozen` is set, which
         is re-derived after a drain that booked so a hold that booking settled is not read stale.
         """
-        await self._reclaim_stale_dispatch_state()
+        await self._account_reconciled_failures()
         while True:
             booked = await self._drain_completions()
             if booked and self._refresh_admission_freeze is not None:
@@ -510,7 +483,6 @@ class DispatcherCollaborator(AdmissionMixin, DeadHolderAccountingMixin, Coordina
             return
         holders = await self.locks.lane_holders()
         capacities = await self.locks.lane_capacities()
-        execs = self.sub.executor_registry
         for task in queued:
             if task.task_id in self._inflight_actions:
                 continue
@@ -530,13 +502,6 @@ class DispatcherCollaborator(AdmissionMixin, DeadHolderAccountingMixin, Coordina
                     for lane in lease.lanes:
                         holders[lane] = max(0, holders.get(lane, 0) - 1)
                 continue
-            # Kernel-owned kinds are legitimately unregistered under ``--no-kernel``.
-            if execs and task.kind not in (*execs, "specialist", *KERNEL_AGENT_OWNED_ACTIONS):
-                log.warning(
-                    "dispatch audit: queued task_id=%s kind=%r has no registered executor (dispatch unchanged)",
-                    task.task_id,
-                    task.kind,
-                )
             cancel_scope = CancelScope()
             atask = asyncio.create_task(
                 self.run_task_registered(
@@ -939,11 +904,10 @@ class DispatcherCollaborator(AdmissionMixin, DeadHolderAccountingMixin, Coordina
             if promotable and writeback.is_promotable_result(task.kind, payload):
                 promoted = await writeback.promote_to_shared_state(task.kind, payload, task=task)
                 return promoted.verdict, promoted.adopted_variants
-            if task.task_id not in self._dead_holder_accounted:
-                unpromotable = dict(result.result)
-                if result.error_class and not unpromotable.get("error_class"):
-                    unpromotable["error_class"] = result.error_class
-                await writeback.handle_unpromotable_result(task, unpromotable)
+            unpromotable = dict(result.result)
+            if result.error_class and not unpromotable.get("error_class"):
+                unpromotable["error_class"] = result.error_class
+            await writeback.handle_unpromotable_result(task, unpromotable)
         except Exception as exc:  # isolation boundary: one settled task's promotion
             log.exception("dispatcher: promotion/unpromotable handling failed for task=%s", task.task_id)
             self._coord.record_exception(stage="dispatcher_promote", exc=exc)

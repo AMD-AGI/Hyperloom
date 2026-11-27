@@ -517,7 +517,6 @@ class _AlwaysFailingBackend(Backend):
         *,
         system_prompt: str | None = None,
         tools: list[str] | None = None,
-        max_turns: int = 1,
     ) -> "BackendTurnResult":  # noqa: F821 — protocol return type, raises before returning
         from hyperloom.orchestrator.roles.base import BackendError
 
@@ -538,7 +537,6 @@ class _LLMFailingBackend(Backend):
         *,
         system_prompt: str | None = None,
         tools: list[str] | None = None,
-        max_turns: int = 1,
     ) -> "BackendTurnResult":  # noqa: F821 — protocol return type, raises before returning
         from hyperloom.orchestrator.roles.base import LLMCallFailed
 
@@ -599,7 +597,6 @@ class _AlwaysCrashingBackend(Backend):
         *,
         system_prompt: str | None = None,
         tools: list[str] | None = None,
-        max_turns: int = 1,
     ) -> "BackendTurnResult":  # noqa: F821 — protocol return type, raises before returning
         self.calls += 1
         raise RuntimeError(f"simulated {self.name} unexpected crash #{self.calls}")
@@ -1945,97 +1942,6 @@ async def test_handle_unpromotable_kernel_action_records_global_only(
 
 
 @pytest.mark.asyncio
-async def test_handle_unpromotable_baseline_capture_failure_arms_eager_fallback(
-    session_dir,
-):
-    """cuda_graph_capture_failed (no baseline yet) must arm the one-shot eager fallback flag through the real coordinator failure handler."""
-    c = Coordinator(session_dir, backends=_silent_backends())
-    _mute_action_scoring(c)
-    try:
-        assert c.shared_state.baseline_eager_fallback is False
-        await c.writeback.handle_unpromotable_result(
-            _mk_task("baseline", "t-cg-1"),
-            {
-                "status": "failed",
-                "error_class": "cuda_graph_capture_failed",
-                "error": "operation not permitted when stream is capturing",
-            },
-        )
-        assert c.shared_state.baseline_eager_fallback is True
-        # One-shot: a second capture failure must not re-arm (already set).
-        await c.writeback.handle_unpromotable_result(
-            _mk_task("baseline", "t-cg-2"),
-            {
-                "status": "failed",
-                "error_class": "cuda_graph_capture_failed",
-                "error": "operation not permitted when stream is capturing",
-            },
-        )
-        assert c.shared_state.baseline_eager_fallback is True
-    finally:
-        await c.stop()
-
-
-@pytest.mark.asyncio
-async def test_baseline_eager_fallback_consume_updates_coordinator_live_state(
-    session_dir,
-):
-    """Executor consumption must clear Coordinator's live state too, or a later coordinator save re-persists stale True and makes the one-shot eager fallback sticky for all later baseline retries."""
-    from hyperloom.orchestrator.actions.executors.baseline import (
-        BaselineExecutor,
-    )
-    from hyperloom.orchestrator.state.shared_state import SharedState
-
-    c = Coordinator(session_dir, backends=_silent_backends())
-    _mute_action_scoring(c)
-    try:
-        await c.writeback.handle_unpromotable_result(
-            _mk_task("baseline", "t-cg-arm"),
-            {
-                "status": "failed",
-                "error_class": "cuda_graph_capture_failed",
-                "error": "operation not permitted when stream is capturing",
-            },
-        )
-        assert c.shared_state.baseline_eager_fallback is True
-
-        executor = BaselineExecutor(
-            session_dir=session_dir,
-            shared_state=c.shared_state,
-        )
-        assert executor._consume_eager_fallback() is True
-        assert c.shared_state.baseline_eager_fallback is False
-
-        # A later coordinator path flushing the live SharedState.
-        c.shared_state.save(session_dir)
-        assert SharedState.load_or_init(session_dir).baseline_eager_fallback is False
-    finally:
-        await c.stop()
-
-
-@pytest.mark.asyncio
-async def test_handle_unpromotable_capture_failure_no_arm_when_baseline_promoted(
-    session_dir,
-):
-    """Resume case: with an existing baseline (tput > 0) the coordinator must NOT arm the eager fallback on a later cuda-graph capture failure."""
-    c = Coordinator(session_dir, backends=_silent_backends())
-    _mute_action_scoring(c)
-    try:
-        c.shared_state.baseline_tput = 1234.0
-        await c.writeback.handle_unpromotable_result(
-            _mk_task("baseline", "t-cg-resume"),
-            {
-                "status": "failed",
-                "error_class": "cuda_graph_capture_failed",
-                "error": "operation not permitted when stream is capturing",
-            },
-        )
-        assert c.shared_state.baseline_eager_fallback is False
-    finally:
-        await c.stop()
-
-
-@pytest.mark.asyncio
 async def test_handle_unpromotable_roofline_increments_failure_streak(
     session_dir,
     caplog,
@@ -2629,28 +2535,21 @@ async def test_run_preserves_prior_stop_reason_when_loop_exits_without_new_reaso
 
 
 @pytest.mark.asyncio
-async def test_dispatch_audit_logs_task_without_executor(session_dir, caplog):
-    # Defensive audit (log-only): a queued task whose kind has no registered executor is flagged in the process log;
-    # dispatch itself is unchanged (the task still fails on the missing runner). Admission refuses such a kind from
-    # the orchestrator, so the task is queued directly, the way a Coordinator-internal producer would.
-    import logging
-
+async def test_a_queued_task_whose_kind_has_no_executor_fails_on_dispatch(session_dir):
+    # Admission refuses such a kind from the orchestrator, so the task is queued directly, the way a
+    # Coordinator-internal producer would.
     c = Coordinator(session_dir, backends=_build_backends({}))
 
     async def _noop_executor(ctx):
         return {}
 
-    # A fresh SubAgentRunner has an empty registry; the audit only fires once the registry is populated, so register
-    # one unrelated executor first.
     c.sub.register_executor("report", _noop_executor)
     try:
-        await c.tasks.create_or_return_existing(
-            TaskSpec(kind="long_running", params={}, idempotency_key="k-audit-dispatch-1")
+        task, _ = await c.tasks.create_or_return_existing(
+            TaskSpec(kind="long_running", params={}, idempotency_key="k-no-executor-1")
         )
-        with caplog.at_level(logging.WARNING, logger="hyperloom.orchestrator.loop.dispatcher"):
-            await pump_until_settled(c.dispatcher)
-        assert any("dispatch audit" in r.getMessage() and "long_running" in r.getMessage() for r in caplog.records)
-        assert await c.tasks.by_state("failed")
+        await pump_until_settled(c.dispatcher)
+        assert (await c.tasks.get(task.task_id)).state == "failed"
     finally:
         await c.stop()
 

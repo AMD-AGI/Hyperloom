@@ -351,8 +351,6 @@ class IntegratePromotionMixin:
             self._enqueue_agent_keep_outbox(
                 stack_index=len(self.shared_state.optimization_stack) - 1,
                 result=result,
-                task=task,
-                include_patches=True,
             )
         outcome.changed = changed
 

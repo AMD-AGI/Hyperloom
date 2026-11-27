@@ -80,9 +80,7 @@ def test_syncs_standard_roofline_fallback_into_live_coordinator_state(tmp_path):
         "roofline_snapshot_id": 3,
     }
     persisted.roofline_snapshots = [{"snapshot_id": 3}]
-    persisted.baseline_eager_fallback = False
     persisted.save(tmp_path)
-    coord.shared_state.baseline_eager_fallback = True
 
     coord.phase_kernel._sync_profile_state_after_gemm_roofline(
         {
@@ -97,7 +95,6 @@ def test_syncs_standard_roofline_fallback_into_live_coordinator_state(tmp_path):
     assert coord.shared_state.last_profile_workload == persisted.last_profile_workload
     assert coord.shared_state.last_trace_analyze == persisted.last_trace_analyze
     assert coord.shared_state.roofline_snapshot_id == 3
-    assert coord.shared_state.baseline_eager_fallback is False
 
 
 def test_sync_unions_lifecycle_instead_of_overwriting(tmp_path, monkeypatch):
@@ -177,10 +174,7 @@ async def test_gemm_roofline_refresh_survives_terminal_lifecycle_save(
             "steady_state_trace": selected_trace,
             "roofline_snapshot_id": 7,
         }
-        state.baseline_eager_fallback = False
         state.save(coord_session_dir)
-
-        coord.shared_state.baseline_eager_fallback = True
 
         result = {
             "status": "ok",
@@ -197,7 +191,6 @@ async def test_gemm_roofline_refresh_survives_terminal_lifecycle_save(
 
         assert coord.shared_state.last_trace_analyze.get("steady_state_trace") == selected_trace
         assert coord.shared_state.last_profile_status == "succeeded"
-        assert coord.shared_state.baseline_eager_fallback is False
         # It must also survive on disk so the next run can reuse the trace.
         reloaded = SharedState.load_or_init(coord_session_dir)
         assert reloaded.last_trace_analyze.get("steady_state_trace") == selected_trace

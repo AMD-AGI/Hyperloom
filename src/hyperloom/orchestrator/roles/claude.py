@@ -16,7 +16,7 @@ import tempfile
 import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Awaitable, Callable
+from typing import Any, Awaitable
 from urllib.parse import urlsplit
 
 from hyperloom.common.agent_cli import resolve_claude_executable
@@ -110,10 +110,6 @@ what changed. Match length to substance.
 ==== END OUTPUT FORMAT ====
 """.strip()
 
-
-# Floor applied by ``run()``: Claude Code counts the model's own text message as a turn, so a low max_turns trips
-# before any output.
-_MIN_MAX_TURNS: int = 8
 
 # Retried timeouts get a progressively larger idle budget so a genuinely slow gateway is not re-killed at the same
 # wall.
@@ -281,15 +277,20 @@ _EFFORT_ENV_ORCH: str = "INFERENCE_OPTIMIZER_CLAUDE_ORCHESTRATION_EFFORT"
 _THINKING_ENV: str = "INFERENCE_OPTIMIZER_CLAUDE_THINKING"
 
 
-def _import_sdk() -> tuple[Any, Any, Any]:
-    """Return ``(query, ClaudeAgentOptions, sdk_module)`` or raise."""
+#: What this backend calls on the SDK: the turn, its options, and the two halves of an in-process MCP server.
+_SDK_NAMES: tuple[str, ...] = ("query", "ClaudeAgentOptions", "tool", "create_sdk_mcp_server")
+
+
+def _import_sdk() -> Any:
+    """Return the ``claude_agent_sdk`` module, or raise when it is absent or lacks a name this backend calls."""
     try:
         sdk = importlib.import_module("claude_agent_sdk")
     except ImportError as exc:
         raise BackendError("claude-agent-sdk not installed; run `pip install claude-agent-sdk` (>= 0.1.65).") from exc
-    if not (hasattr(sdk, "query") and hasattr(sdk, "ClaudeAgentOptions")):
-        raise BackendError("claude_agent_sdk loaded but missing query / ClaudeAgentOptions")
-    return sdk.query, sdk.ClaudeAgentOptions, sdk
+    missing = [name for name in _SDK_NAMES if not hasattr(sdk, name)]
+    if missing:
+        raise BackendError(f"claude_agent_sdk loaded but missing {' / '.join(missing)}")
+    return sdk
 
 
 @dataclass
@@ -313,19 +314,14 @@ class ClaudeBackend:
     # Bounded transient-failure retry/backoff.
     retry_policy: RetryPolicy = field(default_factory=RetryPolicy.from_env)
 
-    # Test seams — set these to bypass SDK import / network calls.
-    sdk_query_factory: Callable[..., Any] | None = None
-    sdk_options_cls: Any | None = None
-    sdk_module: Any | None = None
-    mcp_server_factory: Callable[..., Any] | None = None
-    mcp_tool_factory: Callable[..., Any] | None = None
-
     name: str = "claude"
     # Which prompt modules describe a surface this backend actually has.
     transport = TRANSPORT_TOOLS
     # The system prompt is cached across turns, so the stable session context is sent in it.
     system_prompt_cached = True
-    mcp_server_config: Any | None = field(default=None, init=False)
+    # The imported ``claude_agent_sdk`` and the ``emit_intent`` MCP server config built with it.
+    _sdk: Any = field(init=False)
+    mcp_server_config: Any = field(init=False)
     # Read-only context-pull MCP server config, set via
     # ``set_context_provider`` and merged into the SDK options.
     _context_server_config: Any | None = field(default=None, init=False)
@@ -342,20 +338,9 @@ class ClaudeBackend:
     _system_prompt_dir: tempfile.TemporaryDirectory[str] | None = field(default=None, init=False)
 
     def __post_init__(self) -> None:
-        """Resolve the SDK and register the ``emit_intent`` tool."""
-        if self.sdk_query_factory is None or self.sdk_options_cls is None:
-            query, opts_cls, mod = _import_sdk()
-            if self.sdk_query_factory is None:
-                self.sdk_query_factory = query
-            if self.sdk_options_cls is None:
-                self.sdk_options_cls = opts_cls
-            if self.sdk_module is None:
-                self.sdk_module = mod
-        self.mcp_server_config = build_emit_intent_server(
-            sdk_module=self.sdk_module,
-            tool_factory=self.mcp_tool_factory,
-            server_factory=self.mcp_server_factory,
-        )
+        """Import the SDK and register the ``emit_intent`` tool."""
+        self._sdk = _import_sdk()
+        self.mcp_server_config = build_emit_intent_server(self._sdk)
 
     # Backend protocol
     async def run(
@@ -364,16 +349,13 @@ class ClaudeBackend:
         *,
         system_prompt: str | None = None,
         tools: list[str] | None = None,
-        max_turns: int = 1,
     ) -> BackendTurnResult:
         """Run a single backend turn against Claude and parse the result."""
         full_prompt = f"{prompt}\n\n{_build_output_instructions()}"
-        max_turns_use = max(max_turns or self.max_turns_default, _MIN_MAX_TURNS)
         turn_marker = uuid.uuid4().hex
         turn_stop = _TurnStop()
         options = self._build_options(
             tools=tools or [],
-            max_turns=max_turns_use,
             system_prompt=system_prompt,
             turn_marker=turn_marker,
         )
@@ -467,12 +449,7 @@ class ClaudeBackend:
         if provider is None:
             self._context_server_config = None
             return
-        self._context_server_config = build_context_tools_server(
-            provider,
-            sdk_module=self.sdk_module,
-            tool_factory=self.mcp_tool_factory,
-            server_factory=self.mcp_server_factory,
-        )
+        self._context_server_config = build_context_tools_server(self._sdk, provider)
 
     def get_mcp_setup_diagnostic(self) -> dict[str, Any]:
         """Return the current MCP setup snapshot: what Hyperloom configured and what the CLI offered the model."""
@@ -481,8 +458,8 @@ class ClaudeBackend:
         return {
             "backend": type(self).__name__,
             "model": self.model,
-            "sdk_name": getattr(self.sdk_module, "__name__", None),
-            "sdk_version": getattr(self.sdk_module, "__version__", None),
+            "sdk_name": getattr(self._sdk, "__name__", None),
+            "sdk_version": getattr(self._sdk, "__version__", None),
             "cli_version": self._cli_init.get("cli_version"),
             "gateway_endpoint": self._gateway_endpoint_identifier(),
             "mcp_servers": sorted(self._palette_kwargs.get("mcp_servers", {})),
@@ -490,7 +467,6 @@ class ClaudeBackend:
             "mcp_tools": mcp_tools,
             "emit_intent": {
                 "qualified_name": EMIT_INTENT_TOOL_QUALIFIED,
-                "registered": self.mcp_server_config is not None,
                 "offered": None if mcp_tools is None else EMIT_INTENT_TOOL_QUALIFIED in mcp_tools,
                 "schema_sha256": hashlib.sha256(schema.encode("utf-8")).hexdigest(),
             },
@@ -509,13 +485,11 @@ class ClaudeBackend:
         self,
         *,
         tools: list[str],
-        max_turns: int,
         system_prompt: str | None,
         turn_marker: str | None = None,
     ) -> Any:
         """Build the SDK options object for one turn; ``turn_marker`` tags the CLI's processes for cleanup."""
         kwargs = self._turn_option_kwargs(
-            max_turns=max_turns,
             system_prompt=system_prompt,
             turn_marker=turn_marker,
         )
@@ -528,13 +502,12 @@ class ClaudeBackend:
     def _turn_option_kwargs(
         self,
         *,
-        max_turns: int,
         system_prompt: str | None,
         turn_marker: str | None,
     ) -> dict[str, Any]:
         """The SDK options every turn carries, whatever it is allowed to do: model, CLI, prompt, environment, effort."""
         # Stream events are what time each model request inside the call (see ``claude_requests``).
-        kwargs: dict[str, Any] = {"max_turns": max_turns, "include_partial_messages": True}
+        kwargs: dict[str, Any] = {"max_turns": self.max_turns_default, "include_partial_messages": True}
         if self.model:
             kwargs["model"] = self.model
         cli_path = resolve_claude_executable()
@@ -562,25 +535,21 @@ class ClaudeBackend:
         """The options naming this turn's tool palette and the MCP servers that serve it."""
         # Drop the bare "emit_intent" name; the MCP-qualified form wires into the SDK tool registry.
         allowed = [t for t in tools if t != EMIT_INTENT_TOOL_NAME]
-        if self.mcp_server_config is not None and EMIT_INTENT_TOOL_QUALIFIED not in allowed:
+        if EMIT_INTENT_TOOL_QUALIFIED not in allowed:
             allowed.append(EMIT_INTENT_TOOL_QUALIFIED)
         # Allow-list the context-pull tools' qualified names.
         if self._context_server_config is not None:
             for qname in CONTEXT_TOOL_QUALIFIED_NAMES:
                 if qname not in allowed:
                     allowed.append(qname)
-        kwargs: dict[str, Any] = {}
-        if allowed:
-            kwargs["allowed_tools"] = allowed
-        kwargs["tools"] = [t for t in allowed if t not in CONTEXT_TOOL_NAMES and not t.startswith("mcp__")]
-        mcp_servers: dict[str, Any] = {}
-        if self.mcp_server_config is not None:
-            mcp_servers[MCP_SERVER_NAME] = self.mcp_server_config
+        mcp_servers: dict[str, Any] = {MCP_SERVER_NAME: self.mcp_server_config}
         if self._context_server_config is not None:
             mcp_servers[CONTEXT_MCP_SERVER_NAME] = self._context_server_config
-        if mcp_servers:
-            kwargs["mcp_servers"] = mcp_servers
-        return kwargs
+        return {
+            "allowed_tools": allowed,
+            "tools": [t for t in allowed if t not in CONTEXT_TOOL_NAMES and not t.startswith("mcp__")],
+            "mcp_servers": mcp_servers,
+        }
 
     def _apply_sdk_env_options(self, kwargs: dict[str, Any]) -> None:
         """Pin Claude Code subprocess auth to the current Hyperloom env."""
@@ -607,7 +576,7 @@ class ClaudeBackend:
 
     def _instantiate_options(self, kwargs: dict[str, Any]) -> Any:
         """Build the SDK options."""
-        return self.sdk_options_cls(**kwargs)
+        return self._sdk.ClaudeAgentOptions(**kwargs)
 
     def _stderr_sink(self, line: str) -> None:
         """Log one line of the CLI's stderr at debug level."""
@@ -703,7 +672,7 @@ class ClaudeBackend:
         """
         requests = ClaudeRequestTracker()
         collected = _StreamedTurn()
-        stream = self.sdk_query_factory(prompt=prompt, options=options)
+        stream = self._sdk.query(prompt=prompt, options=options)
         try:
             stream_iter = stream.__aiter__()
             while True:
@@ -837,12 +806,7 @@ class ClaudeBackend:
         """Keep what the CLI's init message says it offered the model; warn on the first one lacking emit_intent."""
         tools = data.get("tools")
         mcp_tools = sorted(tool for tool in tools if tool.startswith("mcp__")) if isinstance(tools, list) else None
-        if (
-            not self._cli_init
-            and self.mcp_server_config is not None
-            and mcp_tools is not None
-            and EMIT_INTENT_TOOL_QUALIFIED not in mcp_tools
-        ):
+        if not self._cli_init and mcp_tools is not None and EMIT_INTENT_TOOL_QUALIFIED not in mcp_tools:
             log.warning(
                 "Claude Code %s did not offer %s to the model; MCP tools offered: %s",
                 data.get("claude_code_version"),

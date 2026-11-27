@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import json
 import logging
-from typing import Any, Callable
+from typing import Any
 
 from hyperloom.inference_optimizer.protocol.intent import (
     EXTEND_LEASE_MAX_SEC,
@@ -255,22 +255,15 @@ async def _emit_intent_handler(args: dict[str, Any]) -> dict[str, Any]:
     return {"content": [{"type": "text", "text": "ok"}]}
 
 
-def build_emit_intent_server(
-    *,
-    sdk_module: Any | None = None,
-    tool_factory: Callable[..., Any] | None = None,
-    server_factory: Callable[..., Any] | None = None,
-) -> Any | None:
-    """Build the in-process MCP server config exposing ``emit_intent``."""
+def build_emit_intent_server(sdk: Any) -> Any:
+    """Build the in-process MCP server config exposing ``emit_intent`` with the imported ``claude_agent_sdk``."""
     tool = (
         EMIT_INTENT_TOOL_NAME,
         EMIT_INTENT_TOOL_DESCRIPTION,
         build_emit_intent_tool_input_schema(),
         _emit_intent_handler,
     )
-    return build_sdk_mcp_server(
-        MCP_SERVER_NAME, [tool], sdk_module=sdk_module, tool_factory=tool_factory, server_factory=server_factory
-    )
+    return build_sdk_mcp_server(sdk, MCP_SERVER_NAME, [tool])
 
 
 __all__ = [

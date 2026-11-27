@@ -350,8 +350,6 @@ class SharedState(
     # Combined backstop counting ANY baseline failure regardless of error_class, catching mixed classes that never
     # trip a per-class streak (anti time-exhaustion).
     baseline_total_failures: int = 0
-    # One-shot: a cuda-graph capture failure asks the next baseline to retry with cuda-graph capture disabled.
-    baseline_eager_fallback: bool = False
     # Admission for both enablement lanes, from ``--enablement``: ``launch``, ``eval``, ``all`` (default) or ``off`` —
     # with ``off`` a broken baseline fast-fails instead of opening an authoring loop.
     enablement_mode: str = "all"

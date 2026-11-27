@@ -1751,29 +1751,27 @@ async def test_prelude_initial_analysis_runs_when_the_budget_covers_it(tmp_path)
     assert coord.shared_state.auto_roofline_pending_task_id
 
 
-def test_prelude_bootstrap_runs_on_positive_baseline(tmp_path):
+def test_prelude_bootstrap_runs_after_a_promoted_baseline(tmp_path):
     coord = _make_coord(tmp_path)
-    assert coord.writeback._should_run_prelude_bootstrap(600.0) is True
+    assert coord.writeback._should_run_prelude_bootstrap() is True
 
 
 @pytest.mark.parametrize(
-    ("state", "tput"),
+    "state",
     [
-        pytest.param({}, 0.0, id="zero-throughput"),
-        pytest.param({}, None, id="no-throughput"),
-        pytest.param({"auto_roofline_pending_task_id": "task-roofline"}, 600.0, id="roofline-pending"),
-        pytest.param({"stop_reason": "baseline_accuracy_failed"}, 600.0, id="stop-pending"),
+        pytest.param({"auto_roofline_pending_task_id": "task-roofline"}, id="roofline-pending"),
+        pytest.param({"stop_reason": "baseline_accuracy_failed"}, id="stop-pending"),
     ],
 )
-def test_prelude_bootstrap_skipped(tmp_path, state, tput):
-    """No bootstrap without a positive throughput, while a roofline is pending, or once a stop is pending.
+def test_prelude_bootstrap_skipped(tmp_path, state):
+    """No bootstrap while a roofline is pending, or once a stop is pending.
 
     A baseline that halted the run must not enqueue/dispatch any post-baseline bootstrap work before the halt fires.
     """
     coord = _make_coord(tmp_path)
     for name, value in state.items():
         setattr(coord.shared_state, name, value)
-    assert coord.writeback._should_run_prelude_bootstrap(tput) is False
+    assert coord.writeback._should_run_prelude_bootstrap() is False
 
 
 def test_inject_warm_recipe_history_skips_when_no_recipe(tmp_path):

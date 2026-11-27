@@ -26,7 +26,6 @@ from hyperloom.orchestrator.state._shared_state.enablement_round import Enableme
 from hyperloom.orchestrator.state.round_store import (
     FAILED,
     SETTLED,
-    RoundRequest,
     RoundStore,
 )
 from hyperloom.orchestrator.state.task_registry import TaskRegistry
@@ -157,10 +156,8 @@ async def _seed_failed_rounds(rounds: RoundStore, n: int) -> None:
         rid = f"seed-failed-{i:03d}"
         holder = f"holder-{i:03d}"
         now = float(i)
-        await rounds.open(rid, RoundRequest(now_unix=now, request_id=rid), holder_task_id=holder, lease_sec=3600.0)
-        await rounds.settle(
-            await rounds.get(rid), RoundRequest(now_unix=now + 1.0, request_id=f"settle-{rid}"), outcome=FAILED
-        )
+        await rounds.open(rid, now_unix=now, holder_task_id=holder, lease_sec=3600.0)
+        await rounds.settle(await rounds.get(rid), now_unix=now + 1.0, outcome=FAILED)
 
 
 @pytest.mark.asyncio
@@ -249,7 +246,7 @@ async def test_a_round_settles_when_the_caller_has_no_reason_to_give(
     held = await rounds.held()
     assert held is not None
 
-    await lane.settle_enablement_round(FAILED, reason="")
+    await lane.settle_enablement_round(FAILED)
 
     assert await rounds.held() is None
     row = await rounds.get(held.round_id)

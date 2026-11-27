@@ -28,7 +28,6 @@ from ..state.failure_evidence import UNMEASURED_OUTCOMES, render_failure_line
 from ..state.shared_state import KbInjection
 from hyperloom_common.coerce import to_str_list, to_unix
 from hyperloom.common.env_safety import redact_secret_values
-from hyperloom.common.prompt_safety import defang_prompt_structure as _defang_prompt_structure
 from hyperloom.common.prompt_safety import flatten_for_prompt as _flatten_for_inbox
 
 from ..state.task_registry import Task
@@ -127,17 +126,6 @@ def _first_present(d: dict[str, Any], keys: tuple[str, ...]) -> Any | None:
     return None
 
 
-def _defang_alert_payload(value: Any) -> Any:
-    """Recursively defang string leaves of an alert payload (keys untouched)."""
-    if isinstance(value, str):
-        return _defang_prompt_structure(value)
-    if isinstance(value, dict):
-        return {k: _defang_alert_payload(v) for k, v in value.items()}
-    if isinstance(value, (list, tuple)):
-        return [_defang_alert_payload(v) for v in value]
-    return value
-
-
 def _variant_failure_rows(result: dict[str, Any], max_variant_rows: int) -> list[str]:
     """Indented rows for the unmeasured per-variant outcomes of a delegated result."""
     pvos = result.get("per_variant_outcomes")
@@ -221,11 +209,6 @@ def _format_inbox_event(m: "Message", *, max_variant_rows: int = 3) -> str:
         return _format_delegated_result(head, payload, max_variant_rows)
     if topic == "observation" and payload.get("kind") is not None:
         return f"{head} kind={payload.get('kind')!r} payload={payload}"
-    if topic == "alert":
-        # Alert payloads can embed attacker-influenceable server.log excerpts; defang string leaves so a log line
-        # can't inject prompt structure.
-        return f"{head} payload={_defang_alert_payload(payload)}"
-
     return f"{head} payload={payload}"
 
 

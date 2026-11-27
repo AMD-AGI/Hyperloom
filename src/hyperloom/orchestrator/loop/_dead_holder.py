@@ -37,16 +37,13 @@ class DeadHolderAccountingMixin:
             reason: Reclaim reason label, echoed into the failure result.
         """
         for task_id in task_ids:
-            if task_id in self._dead_holder_accounted:
-                continue
-            self._dead_holder_accounted.add(task_id)
             try:
                 task = await self.tasks.get(task_id)
             except TaskNotFound:
                 continue
             error = f"lease holder process died before reporting a result; task reclaimed by {reason}"
             died = SubAgentResult(task_id, "failed", {}, error=error, error_class=DEAD_HOLDER_ERROR_CLASS)
-            settles_specialist = task.kind == "specialist" and not self.owes_result(task_id)
+            settles_specialist = task.kind == "specialist"
             # A gapless discovery round settles instead: the FRAMEWORK pump keys its next round on that settle.
             if (
                 settles_specialist

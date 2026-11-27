@@ -2096,7 +2096,6 @@ class TestRunGemmTuningHandler:
             osl=512,
             max_model_len=4096,
             baseline_config_path=str(baseline_config),
-            baseline_eager_fallback=True,
             current_best={
                 "extra_server_args": "--enforce-eager --port 8888",
                 "extra_envs": {
@@ -2167,8 +2166,6 @@ class TestRunGemmTuningHandler:
         assert "DROP_ME" in task.params["unset_envs"]
         assert not [name for name in task.params["unset_envs"] if name.startswith("PYTORCH_TUNABLEOP_")]
         assert captured["init"]["shared_state"] is not state
-        assert captured["init"]["shared_state"].baseline_eager_fallback is False
-        assert state.baseline_eager_fallback is True
 
         import yaml
 

@@ -10,6 +10,7 @@ import math
 import pytest
 
 from hyperloom.orchestrator.roles.base import parse_call_timeout_env
+from hyperloom.orchestrator.roles.claude import ClaudeBackend
 
 
 CLAUDE_ENV = "INFERENCE_OPTIMIZER_CLAUDE_CALL_TIMEOUT_SEC"
@@ -73,20 +74,21 @@ class TestParseCallTimeoutEnv:
         assert any("not a positive finite" in rec.message for rec in caplog.records)
 
 
+@pytest.mark.usefixtures("claude_sdk")
 class TestClaudeBackendHonoursEnv:
     def test_default_when_env_unset(self, monkeypatch):
         monkeypatch.delenv(CLAUDE_ENV, raising=False)
-        backend = _new_claude_backend_with_seams()
+        backend = ClaudeBackend()
         assert backend.call_timeout_s == 120.0
 
     def test_env_override_picked_up_at_instantiation(self, monkeypatch):
         monkeypatch.setenv(CLAUDE_ENV, "300")
-        backend = _new_claude_backend_with_seams()
+        backend = ClaudeBackend()
         assert backend.call_timeout_s == 300.0
 
     def test_bad_env_falls_back_to_default(self, monkeypatch):
         monkeypatch.setenv(CLAUDE_ENV, "garbage")
-        backend = _new_claude_backend_with_seams()
+        backend = ClaudeBackend()
         assert backend.call_timeout_s == 120.0
 
 
@@ -102,17 +104,6 @@ class TestCodexBackendHonoursEnv:
     def test_bad_env_falls_back_to_default(self, monkeypatch, tmp_path):
         monkeypatch.setenv(CODEX_ENV, "negative-one")
         assert _new_codex_backend(tmp_path).call_timeout_s == 300.0
-
-
-def _new_claude_backend_with_seams():
-    """Build a ClaudeBackend that skips real SDK import + MCP server."""
-    from hyperloom.orchestrator.roles.claude import ClaudeBackend
-
-    return ClaudeBackend(
-        sdk_query_factory=lambda *a, **kw: iter(()),
-        sdk_options_cls=type("FakeOpts", (), {"__init__": lambda self, **kw: None}),
-        mcp_server_factory=lambda *a, **k: None,
-    )
 
 
 def _new_codex_backend(tmp_path):

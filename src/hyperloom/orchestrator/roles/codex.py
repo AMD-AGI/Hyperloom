@@ -138,7 +138,6 @@ class CodexBackend:
         *,
         system_prompt: str | None = None,
         tools: list[str] | None = None,
-        max_turns: int = 1,
     ) -> BackendTurnResult:
         """Run one Codex Agent SDK turn and parse its enforced intent envelope."""
         output_schema = build_intent_envelope_schema()

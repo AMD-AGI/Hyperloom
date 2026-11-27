@@ -3243,7 +3243,6 @@ async def test_coordinator_request_trace_analyze_uses_handler(session_dir):
             )
             req_msgs = await c.bus.tail(topic="request", to_agent="kernel_agent")
             assert req_msgs, "request must be mirrored to kernel inbox"
-            req_id = req_msgs[0].msg_id
 
             resp_msgs = await c.bus.tail(topic="response", to_agent="orchestration")
             assert resp_msgs, "handler must emit RESPONSE without LLM"
@@ -3252,7 +3251,6 @@ async def test_coordinator_request_trace_analyze_uses_handler(session_dir):
             assert r.payload["kind"] == "trace_analyze_done"
             assert r.payload["status"] == "ok"
             assert r.payload["result"]["hot_kernels"] == ["kernel_a", "kernel_b"]
-            assert r.payload["in_reply_to"] == req_id
             assert r.payload["source"] == "programmatic_handler"
 
             # And the handler did receive merged payload (params flattened in).
@@ -3294,8 +3292,6 @@ async def test_coordinator_auto_reject_answers_in_one_envelope(
         assert responses, "a refusal must answer the request"
         reply = responses[0]
         assert reply.from_agent == payload["target_agent"]
-        assert reply.in_reply_to == requests[-1].msg_id
-        assert reply.payload["in_reply_to"] == requests[-1].msg_id
         assert reply.payload["kind"] == f"{payload['kind']}_done"
         assert reply.payload["status"] == "failed"
         assert reply.payload["source"] == "coordinator_auto_reject"

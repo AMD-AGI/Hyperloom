@@ -629,13 +629,11 @@ class IntentRouter(CoordinatorCollaborator):
                 request_msg.from_agent,
                 "response",
                 {
-                    "in_reply_to": request_msg.msg_id,
                     "kind": f"{kind}_done",
                     "status": status,
                     "result": result,
                     "source": source,
                 },
-                in_reply_to=request_msg.msg_id,
             )
         )
         if status.lower() in ("failed", "error"):

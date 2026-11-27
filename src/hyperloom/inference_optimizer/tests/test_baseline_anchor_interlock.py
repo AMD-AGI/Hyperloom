@@ -75,6 +75,18 @@ async def test_a_higher_re_baseline_still_moves_an_anchor_no_gain_was_validated_
     assert coord.shared_state.baseline_tput == pytest.approx(HIGHER_REBASELINE)
 
 
+async def test_a_throughput_the_promotion_gate_accepts_as_text_anchors_as_a_number(coord: Coordinator):
+    """The gate that admits a baseline to promotion reads a numeric string as a measurement, so the anchor does too."""
+    result = {"output_throughput": str(ANCHOR), "completed_requests": 64}
+    assert coord.writeback.is_promotable_result("baseline", result)
+
+    await coord.writeback.promote_to_shared_state("baseline", result, task=_baseline_task("t-text"))
+
+    assert coord.shared_state.baseline_tput == pytest.approx(ANCHOR)
+    assert coord.shared_state.last_baseline["decision"] == "promoted"
+    assert coord.shared_state.last_baseline["extras"]["baseline_tput"] == pytest.approx(ANCHOR)
+
+
 async def test_the_first_anchor_lands(coord: Coordinator):
     await _promote_baseline(coord, ANCHOR, _baseline_task("t-first"))
 

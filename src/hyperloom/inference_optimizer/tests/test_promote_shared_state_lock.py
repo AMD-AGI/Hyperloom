@@ -339,33 +339,6 @@ async def test_promote_profile_with_trace_clears_last_trace_analyze(session_dir)
     assert s.last_trace_analyze == {}
 
 
-# GAP 4: profile "skipped" arm audits as skipped and clears the pending roofline task, without touching current_best /
-# last_profile_trace.
-@pytest.mark.asyncio
-async def test_promote_profile_skipped_audits_and_clears_pending(session_dir):
-    coord = _coord(session_dir)
-    s = coord.shared_state
-    s.baseline_tput = 100.0
-    s.auto_roofline_pending_task_id = "t1"
-
-    await coord.writeback.promote_to_shared_state(
-        "profile",
-        {
-            "status": "skipped",
-            "error_class": "no_profiler",
-            "error": "profiler disabled",
-        },
-        task=_task("profile", task_id="t1"),
-    )
-
-    # Pending roofline task cleared; audit row is a skipped verdict.
-    assert s.auto_roofline_pending_task_id == ""
-    assert s.last_profile["decision"] == "skipped"
-    assert s.last_profile["extras"]["error_class"] == "no_profiler"
-    # Skipped arm never promotes current_best.
-    assert not s.current_best or s.current_best.get("action") != "profile"
-
-
 # GAP 5: integrate_patch KEEP lifts current_best and clears pending_integrate; integrate_patch is NOT in
 # _AUDIT_ACTIONS so no last_integrate_patch is written.
 @pytest.mark.asyncio
@@ -1272,7 +1245,6 @@ def test_outbox_drain_acknowledges_only_confirmed_success(
         "id": "FRAMEWORK_AGENT:0",
         "owner": "FRAMEWORK_AGENT",
         "stack_index": 0,
-        "include_patches": True,
         "patch_sources": [str(patch)],
         "missing_patch_sources": [],
     }
@@ -1302,7 +1274,6 @@ def test_outbox_dead_letters_missing_patch_without_blocking_close(
         "id": "FRAMEWORK_AGENT:0",
         "owner": "FRAMEWORK_AGENT",
         "stack_index": 0,
-        "include_patches": True,
         "patch_sources": [str(session_dir / "gone.patch")],
         "missing_patch_sources": [],
     }
@@ -1344,7 +1315,6 @@ async def test_resume_settles_state_before_draining_kb_outbox(
             "id": "EXPLORE:0",
             "owner": "EXPLORE",
             "stack_index": 0,
-            "include_patches": False,
             "patch_sources": [],
             "missing_patch_sources": [],
         }
@@ -1423,37 +1393,6 @@ async def test_promote_replay_warm_recipe_routes_and_skips_tail(session_dir, mon
     assert warm_calls[0]["result"]["output_throughput"] == 120.0
     # replay_warm_recipe is not audited by the unified tail.
     assert all(c["action"] != "replay_warm_recipe" for c in calls)
-
-
-# GAP 8: roofline failure (status != succeeded/skipped) bumps the failure streak and audits as discarded (roofline IS
-# an audited action).
-@pytest.mark.asyncio
-async def test_promote_roofline_failed_bumps_streak_and_audits_discarded(session_dir):
-    coord = _coord(session_dir)
-    s = coord.shared_state
-    s.baseline_tput = 100.0
-    s.roofline_failure_streak = 2
-    s.auto_roofline_pending_task_id = "t1"
-
-    await coord.writeback.promote_to_shared_state(
-        "roofline",
-        {
-            "status": "failed",
-            "phase": "trace_analyze",
-            "error_class": "tracelens_error",
-            "error": "boom",
-        },
-        task=_task("roofline", task_id="t1"),
-    )
-
-    # Streak incremented; pending pointer cleared.
-    assert s.roofline_failure_streak == 3
-    assert s.auto_roofline_pending_task_id == ""
-    # Audit row: discarded, with the failure context in extras.
-    assert s.last_roofline["decision"] == "discarded"
-    assert s.last_roofline["status"] == "succeeded"  # record_action_attempt stamps the attempt status
-    assert s.last_roofline["extras"]["error_class"] == "tracelens_error"
-    assert s.last_roofline["extras"]["phase"] == "trace_analyze"
 
 
 # GAP 9: explore resume_stack_revalidate (native, non-GEAK) with a valid tput clears resume_pending_revalidation and

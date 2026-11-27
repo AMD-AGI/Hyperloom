@@ -24,10 +24,7 @@ from hyperloom.orchestrator.roles import ClaudeBackend
 from hyperloom.orchestrator.roles import claude as claude_mod
 from hyperloom.orchestrator.roles.base import LLMCallFailed, RetryPolicy
 
-
-class _Options:
-    def __init__(self, **kwargs: Any) -> None:
-        self.kwargs = kwargs
+from .conftest import SdkOptions
 
 
 class _ApiRetry:
@@ -50,11 +47,11 @@ class _StallingSdk:
         self.children: list[subprocess.Popen[bytes]] = []
         self.release_close = asyncio.Event()
 
-    def __call__(self, *, prompt: str, options: _Options):
+    def __call__(self, *, prompt: str, options: SdkOptions):
         self.started += 1
         return self._stream(options)
 
-    async def _stream(self, options: _Options):
+    async def _stream(self, options: SdkOptions):
         if self.child_cmd is not None:
             # A CLI the SDK failed to reap: its own process group, the turn's environment, and never killed here.
             env = {**os.environ, **options.kwargs.get("env", {})}
@@ -103,11 +100,11 @@ async def _guarded(turn: Any) -> Any:
     return task.result()
 
 
-def _backend(sdk: _StallingSdk, *, turn_timeout_s: float, call_timeout_s: float = 30.0) -> ClaudeBackend:
+def _backend(
+    claude_sdk: Any, sdk: _StallingSdk, *, turn_timeout_s: float, call_timeout_s: float = 30.0
+) -> ClaudeBackend:
+    claude_sdk.query = sdk
     return ClaudeBackend(
-        sdk_query_factory=sdk,
-        sdk_options_cls=_Options,
-        mcp_server_factory=lambda *a, **k: None,
         call_timeout_s=call_timeout_s,
         turn_timeout_s=turn_timeout_s,
         retry_policy=RetryPolicy(max_attempts=3, base_delay_s=0.0, jitter_s=0.0),
@@ -116,11 +113,13 @@ def _backend(sdk: _StallingSdk, *, turn_timeout_s: float, call_timeout_s: float 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("mode", ["retrying", "busy", "silent"])
-async def test_a_stalled_turn_ends_at_its_wall_clock_bound_and_closes_the_stream(mode: str, caplog, monkeypatch):
+async def test_a_stalled_turn_ends_at_its_wall_clock_bound_and_closes_the_stream(
+    claude_sdk, mode: str, caplog, monkeypatch
+):
     # A grace well inside the guard: a stop that is not taken shows as an abandoned close, not as a guard timeout.
     monkeypatch.setattr(claude_mod, "_TURN_CLEANUP_GRACE_SEC", 5.0)
     sdk = _StallingSdk(mode)
-    backend = _backend(sdk, turn_timeout_s=0.3)
+    backend = _backend(claude_sdk, sdk, turn_timeout_s=0.3)
 
     started = time.monotonic()
     with caplog.at_level("WARNING"), pytest.raises(LLMCallFailed) as raised:
@@ -137,9 +136,9 @@ async def test_a_stalled_turn_ends_at_its_wall_clock_bound_and_closes_the_stream
 
 
 @pytest.mark.asyncio
-async def test_the_cli_retry_frames_are_logged_while_they_hold_the_stream_open(caplog):
+async def test_the_cli_retry_frames_are_logged_while_they_hold_the_stream_open(claude_sdk, caplog):
     sdk = _StallingSdk("retrying")
-    backend = _backend(sdk, turn_timeout_s=0.2)
+    backend = _backend(claude_sdk, sdk, turn_timeout_s=0.2)
 
     with caplog.at_level("WARNING"), pytest.raises(LLMCallFailed):
         await _guarded(backend.run("hi"))
@@ -148,10 +147,10 @@ async def test_the_cli_retry_frames_are_logged_while_they_hold_the_stream_open(c
 
 
 @pytest.mark.asyncio
-async def test_a_close_that_never_finishes_is_abandoned_after_the_grace(monkeypatch):
+async def test_a_close_that_never_finishes_is_abandoned_after_the_grace(claude_sdk, monkeypatch):
     monkeypatch.setattr(claude_mod, "_TURN_CLEANUP_GRACE_SEC", 0.2)
     sdk = _StallingSdk("wedged_close")
-    backend = _backend(sdk, turn_timeout_s=0.2)
+    backend = _backend(claude_sdk, sdk, turn_timeout_s=0.2)
 
     started = time.monotonic()
     try:
@@ -175,10 +174,10 @@ async def test_a_close_that_never_finishes_is_abandoned_after_the_grace(monkeypa
 
 @pytest.mark.asyncio
 @pytest.mark.skipif(not sys.platform.startswith("linux"), reason="finds the turn's processes through /proc")
-async def test_the_cli_left_behind_by_a_timed_out_turn_is_killed_and_nothing_else_is():
+async def test_the_cli_left_behind_by_a_timed_out_turn_is_killed_and_nothing_else_is(claude_sdk):
     sleeper = [sys.executable, "-c", "import time; time.sleep(300)"]
     sdk = _StallingSdk("silent", child_cmd=sleeper)
-    backend = _backend(sdk, turn_timeout_s=0.5)
+    backend = _backend(claude_sdk, sdk, turn_timeout_s=0.5)
     bystander = subprocess.Popen(sleeper, start_new_session=True)
     try:
         with pytest.raises(LLMCallFailed) as raised:
@@ -199,11 +198,11 @@ async def test_the_cli_left_behind_by_a_timed_out_turn_is_killed_and_nothing_els
 
 @pytest.mark.asyncio
 @pytest.mark.skipif(not sys.platform.startswith("linux"), reason="finds the turn's processes through /proc")
-async def test_the_clis_left_behind_by_a_turn_that_fails_on_its_own_are_killed():
+async def test_the_clis_left_behind_by_a_turn_that_fails_on_its_own_are_killed(claude_sdk):
     sleeper = [sys.executable, "-c", "import time; time.sleep(300)"]
     sdk = _StallingSdk("silent", child_cmd=sleeper)
     # Every attempt ends on its idle timeout, well inside the wall-clock bound.
-    backend = _backend(sdk, turn_timeout_s=600.0, call_timeout_s=0.1)
+    backend = _backend(claude_sdk, sdk, turn_timeout_s=600.0, call_timeout_s=0.1)
     bystander = subprocess.Popen(sleeper, start_new_session=True)
     try:
         with pytest.raises(LLMCallFailed, match="stream idle"):
@@ -223,10 +222,10 @@ async def test_the_clis_left_behind_by_a_turn_that_fails_on_its_own_are_killed()
 
 @pytest.mark.asyncio
 @pytest.mark.skipif(not sys.platform.startswith("linux"), reason="finds the turn's processes through /proc")
-async def test_a_turn_cancelled_by_its_caller_still_kills_its_cli():
+async def test_a_turn_cancelled_by_its_caller_still_kills_its_cli(claude_sdk):
     sleeper = [sys.executable, "-c", "import time; time.sleep(300)"]
     sdk = _StallingSdk("silent", child_cmd=sleeper)
-    backend = _backend(sdk, turn_timeout_s=600.0)
+    backend = _backend(claude_sdk, sdk, turn_timeout_s=600.0)
     try:
         with pytest.raises(asyncio.TimeoutError):
             await asyncio.wait_for(backend.run("hi"), timeout=0.5)  # the caller's own bound
@@ -248,10 +247,10 @@ async def test_a_turn_cancelled_by_its_caller_still_kills_its_cli():
 
 
 @pytest.mark.asyncio
-async def test_a_turn_that_does_not_take_its_cancellation_starts_no_further_cli(monkeypatch):
+async def test_a_turn_that_does_not_take_its_cancellation_starts_no_further_cli(claude_sdk, monkeypatch):
     monkeypatch.setattr(claude_mod, "_TURN_CLEANUP_GRACE_SEC", 5.0)
     sdk = _StallingSdk("dies_on_cancel")
-    backend = _backend(sdk, turn_timeout_s=0.3)
+    backend = _backend(claude_sdk, sdk, turn_timeout_s=0.3)
 
     with pytest.raises(LLMCallFailed) as raised:
         await _guarded(backend.run("hi"))
@@ -264,11 +263,11 @@ async def test_a_turn_that_does_not_take_its_cancellation_starts_no_further_cli(
 
 @pytest.mark.asyncio
 @pytest.mark.skipif(not sys.platform.startswith("linux"), reason="finds the turn's processes through /proc")
-async def test_a_cancelled_caller_whose_close_never_finishes_still_gets_its_cli_killed(monkeypatch):
+async def test_a_cancelled_caller_whose_close_never_finishes_still_gets_its_cli_killed(claude_sdk, monkeypatch):
     monkeypatch.setattr(claude_mod, "_TURN_CLEANUP_GRACE_SEC", 0.5)
     sleeper = [sys.executable, "-c", "import time; time.sleep(300)"]
     sdk = _StallingSdk("wedged_close_silent", child_cmd=sleeper)
-    backend = _backend(sdk, turn_timeout_s=600.0)
+    backend = _backend(claude_sdk, sdk, turn_timeout_s=600.0)
     try:
         with pytest.raises(asyncio.TimeoutError):
             await asyncio.wait_for(backend.run("hi"), timeout=0.5)
@@ -292,19 +291,19 @@ async def test_a_cancelled_caller_whose_close_never_finishes_still_gets_its_cli_
     assert backend._turn_stoppers == set()
 
 
-def test_each_turn_tags_its_cli_with_its_own_marker():
-    backend = _backend(_StallingSdk("silent"), turn_timeout_s=1.0)
-    env_a = backend._build_options(tools=[], max_turns=8, system_prompt=None, turn_marker="a").kwargs["env"]
-    env_b = backend._build_options(tools=[], max_turns=8, system_prompt=None, turn_marker="b").kwargs["env"]
+def test_each_turn_tags_its_cli_with_its_own_marker(claude_sdk):
+    backend = _backend(claude_sdk, _StallingSdk("silent"), turn_timeout_s=1.0)
+    env_a = backend._build_options(tools=[], system_prompt=None, turn_marker="a").kwargs["env"]
+    env_b = backend._build_options(tools=[], system_prompt=None, turn_marker="b").kwargs["env"]
     assert env_a["HYPERLOOM_CLAUDE_TURN_ID"] == "a"
     assert env_b["HYPERLOOM_CLAUDE_TURN_ID"] == "b"
 
 
-def test_turn_bound_default_and_env_override(monkeypatch):
+def test_turn_bound_default_and_env_override(claude_sdk, monkeypatch):
     monkeypatch.delenv("INFERENCE_OPTIMIZER_CLAUDE_TURN_TIMEOUT_SEC", raising=False)
-    default = ClaudeBackend(sdk_query_factory=_StallingSdk("silent"), sdk_options_cls=_Options).turn_timeout_s
+    default = ClaudeBackend().turn_timeout_s
     monkeypatch.setenv("INFERENCE_OPTIMIZER_CLAUDE_TURN_TIMEOUT_SEC", "42.5")
-    configured = ClaudeBackend(sdk_query_factory=_StallingSdk("silent"), sdk_options_cls=_Options).turn_timeout_s
+    configured = ClaudeBackend().turn_timeout_s
     assert (default, configured) == (1500.0, 42.5)
     # The backend gives up, tears the CLI down and reports first, before the reactor stage bound cancels it.
     assert default + claude_mod._TURN_CLEANUP_GRACE_SEC < DEFAULT_REACTOR_TURN_TIMEOUT_SEC
@@ -312,11 +311,13 @@ def test_turn_bound_default_and_env_override(monkeypatch):
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("mode", ["retrying", "busy"])
-async def test_the_tick_loop_keeps_ticking_past_a_hung_orchestration_turn(mode: str, session_dir, monkeypatch):
+async def test_the_tick_loop_keeps_ticking_past_a_hung_orchestration_turn(
+    claude_sdk, mode: str, session_dir, monkeypatch
+):
     monkeypatch.setattr(claude_mod, "_TURN_CLEANUP_GRACE_SEC", 5.0)
     monkeypatch.setattr("hyperloom.orchestrator.loop.coordinator._BACKEND_RETRY_BASE_SEC", 0)
     sdk = _StallingSdk(mode)
-    orchestration = _backend(sdk, turn_timeout_s=0.3)
+    orchestration = _backend(claude_sdk, sdk, turn_timeout_s=0.3)
     coord = Coordinator(session_dir, backends={"orchestration": orchestration})
     coord.orch_prompt.set("orchestration", "SYSTEM PROMPT")
     coord.shared_state.baseline_tput = 800.0

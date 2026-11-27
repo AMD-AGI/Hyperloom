@@ -167,14 +167,14 @@ def test_trace_mcp_setup_persists_diagnostics(coord: Coordinator) -> None:
         model="claude-test",
         get_mcp_setup_diagnostic=lambda: {
             "sdk_name": "claude_agent_sdk",
-            "emit_intent": {"registered": True},
+            "emit_intent": {"offered": True},
         },
     )
 
     trace_mcp_setup(coord.session_dir, backend)
 
     setup = json.loads((coord.session_dir / "agents" / "orchestration" / "mcp_setup.json").read_text())
-    assert setup["emit_intent"]["registered"] is True
+    assert setup["emit_intent"]["offered"] is True
 
 
 @pytest.mark.asyncio
@@ -836,7 +836,7 @@ async def test_pending_restore_never_undoes_kept_patch_outside_tail_window(
     if newer_results:
         async with coord.db.transaction() as cur:
             cur.executemany(
-                "INSERT INTO events (msg_id, from_agent, to_agent, topic, in_reply_to, payload, ts) VALUES (?,?,?,?,?,?,?)",
+                "INSERT INTO events (msg_id, from_agent, to_agent, topic, payload, ts) VALUES (?,?,?,?,?,?)",
                 (
                     Message.new("coordinator", "*", "delegated_result", {"task_id": f"unrelated-{index}"}).to_db_row()
                     for index in range(newer_results)
@@ -3075,7 +3075,6 @@ async def test_an_enablement_round_moves_onto_the_integrate_patch_of_its_config_
     coord: Coordinator, monkeypatch, asked_through: IntentType | None
 ) -> None:
     """The round the specialist held is handed to the task that measures what it delivered, whoever queued it."""
-    from hyperloom.orchestrator.state.round_store import RoundRequest
 
     finish = await _dispatch_specialist(
         coord,
@@ -3088,9 +3087,7 @@ async def test_an_enablement_round_moves_onto_the_integrate_patch_of_its_config_
             "gap_canonical_id": "gap.enablement.boot",
         },
     )
-    opened = await coord.rounds.open(
-        "round-spec-a", RoundRequest(now_unix=1.0, request_id="open"), holder_task_id="spec-a", lease_sec=600.0
-    )
+    opened = await coord.rounds.open("round-spec-a", now_unix=1.0, holder_task_id="spec-a", lease_sec=600.0)
     assert opened.ok
 
     await _end_specialist(coord, finish, booked=asked_through is None)

@@ -52,7 +52,6 @@ _DDL = [
         from_agent    TEXT    NOT NULL,
         to_agent      TEXT    NOT NULL,
         topic         TEXT    NOT NULL,
-        in_reply_to   TEXT,
         payload       TEXT    NOT NULL,
         ts            TEXT    NOT NULL
     )
@@ -108,24 +107,6 @@ _DDL = [
     )
     """,
     "CREATE INDEX IF NOT EXISTS idx_bringup_rounds_state ON bringup_rounds(state, opened_unix)",
-    # round_events — append-only audit trail. Every attempt lands here with
-    # its outcome, evidence and request id, applied or rejected.
-    """
-    CREATE TABLE IF NOT EXISTS round_events (
-        event_id      INTEGER PRIMARY KEY AUTOINCREMENT,
-        round_id      TEXT    NOT NULL,
-        request_id    TEXT    NOT NULL,
-        op            TEXT    NOT NULL,
-        result        TEXT    NOT NULL CHECK (result IN ('applied','rejected','duplicate')),
-        outcome       TEXT    NOT NULL DEFAULT '',
-        fence         INTEGER NOT NULL DEFAULT 0,
-        actor_task_id TEXT    NOT NULL DEFAULT '',
-        reason        TEXT    NOT NULL DEFAULT '',
-        evidence      TEXT    NOT NULL DEFAULT '{}',
-        recorded_unix REAL    NOT NULL
-    )
-    """,
-    "CREATE INDEX IF NOT EXISTS idx_round_events_round ON round_events(round_id, event_id)",
     # schema_version — tracks future migrations
     """
     CREATE TABLE IF NOT EXISTS schema_version (

@@ -226,6 +226,7 @@ async def test_a_configuration_fault_is_not_retried(tmp_path: Path, monkeypatch:
     assert attempts["n"] == 1
 
 
+@pytest.mark.usefixtures("claude_sdk")
 def test_both_providers_read_the_same_retry_knobs(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """Parity means one policy, not a second set of env vars to discover."""
     from hyperloom.orchestrator.roles.claude import ClaudeBackend
@@ -233,7 +234,7 @@ def test_both_providers_read_the_same_retry_knobs(tmp_path: Path, monkeypatch: p
     monkeypatch.setenv("INFERENCE_OPTIMIZER_LLM_RETRY_ATTEMPTS", "5")
     monkeypatch.setenv("INFERENCE_OPTIMIZER_LLM_RETRY_BASE_S", "0.25")
     codex = CodexBackend(cwd=tmp_path / "codex")
-    claude = ClaudeBackend(sdk_query_factory=object(), sdk_options_cls=object, mcp_server_factory=lambda *a, **k: None)
+    claude = ClaudeBackend()
 
     assert codex.retry_policy == claude.retry_policy
     assert codex.retry_policy.max_attempts == 5

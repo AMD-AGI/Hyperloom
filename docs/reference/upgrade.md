@@ -366,6 +366,87 @@ An intent type outside the vocabulary is refused as before, by the tool schema
 and with `unknown intent_type`. The tool's schema, the output-format block and
 Orchestration's tool list do not change.
 
+### Recommended: stop reading the records that nothing produced or read
+
+`hyperloom optimize` no longer writes a set of fields, rows and log lines that
+had a writer and no reader, or a reader and no writer. A session behaves as it
+did; what changes is what is left behind for anything that inspects a session
+by hand.
+
+In `state.json`:
+
+* `baseline_eager_fallback` is gone. It armed a one-shot retry of the baseline
+  with CUDA graphs disabled after a `cuda_graph_capture_failed` baseline, and
+  nothing returns that error class, so the flag was always `false`. A baseline
+  whose server needs CUDA graphs off takes the flag in `extra_server_args`, as
+  before.
+* A row of `kb_stage_outbox` or `kb_stage_dead_letter` no longer carries
+  `include_patches`; it was `true` on every row.
+* The audit rows (`last_roofline`, `last_profile`, `last_baseline` and their
+  `*_attempts` lists) no longer use the decisions `skipped` (roofline,
+  profile) or `discarded` (roofline, baseline), and a baseline row's
+  `anchor_held.reason` is never `no_measurement`. None could be written: a
+  roofline settles `succeeded`, `recovered` or `failed`, a failed one is not
+  promoted, and a baseline is promoted only with a positive throughput. A
+  failed roofline is still counted in `roofline_failure_streak`.
+
+In `storage/coordinator.db`:
+
+* The `round_events` table and its index are gone. It recorded every open,
+  renew, handoff and settle of a bring-up round and nothing read it. A refused
+  attempt is still answered to its caller with the reason, and
+  `bringup_rounds` still holds each round's state and outcome.
+* `events` has no `in_reply_to` column, and the payload of a `response` event
+  has no `in_reply_to` key. Neither was read; a reply still names what it
+  answers in `kind` (`<request kind>_done`). Orchestration's inbox line for a
+  `response` is shorter by that key.
+* A kernel step that runs inline no longer appends a `kernel_step_running`
+  observation every 150 seconds, so `hyperloom session events` and the
+  `event_counts_by_topic` of the final report count fewer `observation` rows
+  for a session with long kernel steps. The step's liveness stamp is unchanged.
+
+A database written by 1.2.x keeps its `round_events` table and `in_reply_to`
+column; this release leaves both alone and writes neither.
+
+In `agents/orchestration/mcp_setup.json`, `emit_intent.registered` is gone.
+It was `false` only for a backend that had started without the tool's server,
+which now does not start (see below). `emit_intent.offered` still says whether
+Claude Code offered the tool to the model.
+
+In the log, three lines no longer appear: `dispatch audit: ... has no
+registered executor` (the task still ends `failed` with `no_executor`),
+`dispatcher: reclaimed N running task(s) with dead holders`, and `patch kb:
+KEEP at stack index N references missing patch members` (a KEEP whose patch
+files are gone is still dropped to `kb_stage_dead_letter` with a warning).
+
+Five behaviours change at the edges:
+
+* After a restart, the tasks the previous process left `running` are failed by
+  the reconciler at the start of the tick, as before; the dispatcher no longer
+  repeats the same query later in that tick. If the reconciler's query fails
+  on a database error, the reclaim is retried on the next tick instead of
+  later in the same one.
+* A delegate whose `idempotency_key` names a task another author created is
+  answered like any other reused key: with `duplicate_idempotency_key` or
+  `duplicate_idempotency_key_running`, or with a new task under
+  `<key>-retry<n>` when the earlier one ended unmeasured. 1.2.x raised
+  `idempotent task dispatch_class mismatch`, recorded as a
+  `handle_intent_exception` observation. The existing task keeps the dispatch
+  class it was created with.
+* `get_inbox` shows the text of Orchestration's own `alert` as it was written;
+  1.2.x rewrote prompt-structure markers in it. Orchestration is the only
+  author of an `alert`, and its own rows are not part of the inbox it is sent
+  each turn.
+* A baseline result whose `output_throughput` is a numeric string anchors as
+  the number it spells. 1.2.x admitted such a result to promotion and then
+  recorded it `discarded`, neither anchoring it nor counting a failure. The
+  optimizer's own executors report the throughput as a number.
+* A `claude-agent-sdk` that lacks `tool` or `create_sdk_mcp_server` ends
+  `hyperloom optimize` at start-up with `claude_agent_sdk loaded but missing
+  ...`. 1.2.x started the session without the `emit_intent` tool, and it ended
+  later on turns that emitted no intent. Every SDK the `llm` extra allows
+  (`>=0.2.110`) has both.
+
 ---
 
 ## Upgrading from 1.1.x

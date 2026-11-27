@@ -117,7 +117,6 @@ async def retry_with_backoff(
     policy: RetryPolicy,
     retry_on: tuple[type[BaseException], ...],
     sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
-    on_retry: Callable[[int, BaseException, float], None] | None = None,
 ) -> Any:
     """Await ``fn()`` with bounded exponential-backoff retry on ``retry_on``."""
     attempt = 0
@@ -129,8 +128,6 @@ async def retry_with_backoff(
             if attempt >= policy.max_attempts:
                 raise
             delay = policy.delay_for(attempt)
-            if on_retry is not None:
-                on_retry(attempt, exc, delay)
             log.warning(
                 "LLM call failed (attempt %d/%d: %r); retrying in %.2fs",
                 attempt,
@@ -160,7 +157,6 @@ class Backend(Protocol):
         *,
         system_prompt: str | None = None,
         tools: list[str] | None = None,
-        max_turns: int = 1,
     ) -> BackendTurnResult:
         """Run one logical turn for the given prompt and return its intents."""
 

@@ -205,29 +205,6 @@ async def test_retry_with_backoff_exhausts_and_raises():
         )
 
 
-@pytest.mark.asyncio
-async def test_retry_with_backoff_propagates_on_retry_callback_error() -> None:
-    from hyperloom.orchestrator.roles.base import RetryPolicy, retry_with_backoff
-
-    async def _flaky():
-        raise ConnectionError("transient")
-
-    async def _sleep(delay: float) -> None:
-        raise AssertionError("must not sleep after the callback raised")
-
-    def _bad_on_retry(*_args):
-        raise RuntimeError("telemetry failed")
-
-    with pytest.raises(RuntimeError, match="telemetry failed"):
-        await retry_with_backoff(
-            _flaky,
-            policy=RetryPolicy(max_attempts=2, base_delay_s=0.0, jitter_s=0.0),
-            retry_on=(ConnectionError,),
-            sleep=_sleep,
-            on_retry=_bad_on_retry,
-        )
-
-
 def test_retry_policy_from_env(monkeypatch):
     from hyperloom.orchestrator.roles.base import RetryPolicy
 
@@ -287,14 +264,8 @@ class _Msg:
     result: str = ""
 
 
-@dataclass
-class _Options:
-    def __init__(self, **kwargs):
-        self.kwargs = kwargs
-
-
 @pytest.mark.asyncio
-async def test_claude_backend_retries_transient_then_succeeds():
+async def test_claude_backend_retries_transient_then_succeeds(claude_sdk):
     from hyperloom.orchestrator.roles.claude import ClaudeBackend
     from hyperloom.orchestrator.roles.base import RetryPolicy
     from hyperloom.orchestrator.roles.mcp_emit_intent import (
@@ -318,10 +289,8 @@ async def test_claude_backend_retries_transient_then_succeeds():
 
         return _gen()
 
+    claude_sdk.query = _factory
     backend = ClaudeBackend(
-        sdk_query_factory=_factory,
-        sdk_options_cls=_Options,
-        mcp_server_factory=lambda *a, **k: None,
         retry_policy=RetryPolicy(max_attempts=3, base_delay_s=0.0, jitter_s=0.0),
     )
     # Fast timeout so the first attempt's wait_for path is exercised.

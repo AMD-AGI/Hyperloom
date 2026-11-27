@@ -614,7 +614,6 @@ class _GemmTuningMixin:
             "last_profile_workload_action",
             "last_trace_analyze",
             "roofline_snapshots",
-            "baseline_eager_fallback",
         ):
             setattr(
                 self.shared_state,

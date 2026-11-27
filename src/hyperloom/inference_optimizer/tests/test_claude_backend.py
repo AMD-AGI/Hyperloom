@@ -10,6 +10,7 @@ import json
 import logging
 from dataclasses import dataclass, field
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -71,16 +72,6 @@ class FakeSystemMessage:
     data: dict[str, Any] = field(default_factory=dict)
 
 
-@dataclass
-class FakeOptions:
-    """Stand-in for ClaudeAgentOptions — captures kwargs for assertions."""
-
-    kwargs: dict[str, Any] = field(default_factory=dict)
-
-    def __init__(self, **kwargs):
-        self.kwargs = kwargs
-
-
 def _make_query_factory(messages: list[Any]):
     async def _q(*, prompt, options):
         for m in messages:
@@ -98,12 +89,10 @@ def _make_raising_query_factory(exc: BaseException):
 
 
 @pytest.mark.asyncio
-async def test_stream_api_error_is_marked_as_llm_call_failed():
+async def test_stream_api_error_is_marked_as_llm_call_failed(claude_sdk):
     """A non-timeout gateway error must be countable, not just a timeout."""
+    claude_sdk.query = _make_raising_query_factory(RuntimeError("litellm.BadRequestError: AnthropicException"))
     backend = ClaudeBackend(
-        sdk_query_factory=_make_raising_query_factory(RuntimeError("litellm.BadRequestError: AnthropicException")),
-        sdk_options_cls=FakeOptions,
-        mcp_server_factory=lambda *a, **k: None,
         retry_policy=RetryPolicy(max_attempts=1),
     )
     with pytest.raises(LLMCallFailed, match="Claude backend call failed"):
@@ -111,12 +100,10 @@ async def test_stream_api_error_is_marked_as_llm_call_failed():
 
 
 @pytest.mark.asyncio
-async def test_cancellation_is_not_marked_as_an_llm_failure():
+async def test_cancellation_is_not_marked_as_an_llm_failure(claude_sdk):
     """Cancellation is a BaseException and must pass through untouched."""
+    claude_sdk.query = _make_raising_query_factory(asyncio.CancelledError())
     backend = ClaudeBackend(
-        sdk_query_factory=_make_raising_query_factory(asyncio.CancelledError()),
-        sdk_options_cls=FakeOptions,
-        mcp_server_factory=lambda *a, **k: None,
         retry_policy=RetryPolicy(max_attempts=1),
     )
     with pytest.raises(asyncio.CancelledError):
@@ -191,18 +178,13 @@ def test_validate_emit_intent_input_rejects_malformed(payload, error_match):
         validate_emit_intent_input(payload)
 
 
-def test_build_emit_intent_server_returns_none_without_factories():
-    """Empty SDK shim with no `tool` or `create_sdk_mcp_server` → None."""
+@pytest.mark.parametrize("absent", ["query", "ClaudeAgentOptions", "tool", "create_sdk_mcp_server"])
+def test_claude_backend_refuses_an_sdk_that_lacks_a_name_it_calls(claude_sdk, absent):
+    """An SDK that cannot serve ``emit_intent`` fails the backend at construction, naming what is missing."""
+    delattr(claude_sdk, absent)
 
-    class EmptySdk:
-        __name__ = "empty"
-
-    cfg = build_emit_intent_server(
-        sdk_module=EmptySdk(),
-        tool_factory=None,
-        server_factory=None,
-    )
-    assert cfg is None
+    with pytest.raises(BackendError, match=f"claude_agent_sdk loaded but missing {absent}"):
+        ClaudeBackend()
 
 
 _DELEGATE_EMIT = {"intent_type": "delegate", "payload": {"action_name": "baseline"}}
@@ -225,8 +207,10 @@ def _registered_emit_intent() -> dict[str, Any]:
     """The schema and handler ``build_emit_intent_server`` registers."""
     captured: dict[str, Any] = {}
     build_emit_intent_server(
-        tool_factory=_capturing_tool_factory(captured),
-        server_factory=lambda name, version, tools: {"server": name},
+        SimpleNamespace(
+            tool=_capturing_tool_factory(captured),
+            create_sdk_mcp_server=lambda name, version, tools: {"server": name},
+        )
     )
     return captured
 
@@ -280,20 +264,16 @@ async def test_the_emit_intent_tool_acks_a_valid_intent(wrapped):
     assert result["content"][0]["text"] == "ok"
 
 
-def test_claude_backend_registers_emit_intent_with_every_intent_type():
+def test_claude_backend_registers_emit_intent_with_every_intent_type(claude_sdk):
     captured: dict[str, Any] = {}
-    ClaudeBackend(
-        sdk_query_factory=_make_query_factory([]),
-        sdk_options_cls=FakeOptions,
-        mcp_tool_factory=_capturing_tool_factory(captured),
-        mcp_server_factory=lambda name, version, tools: {"server": name},
-    )
+    claude_sdk.tool = _capturing_tool_factory(captured)
+    ClaudeBackend()
 
     assert _offered_intent_types(captured["schema"]) == {t.value for t in IntentType}
 
 
-def test_claude_backend_raises_without_sdk_or_seams(monkeypatch):
-    """If neither real SDK nor test seams provided, BackendError fires."""
+def test_claude_backend_raises_without_the_sdk(monkeypatch):
+    """A missing SDK is a BackendError that names the package to install."""
     import importlib
 
     real_import = importlib.import_module
@@ -305,11 +285,7 @@ def test_claude_backend_raises_without_sdk_or_seams(monkeypatch):
 
     monkeypatch.setattr(importlib, "import_module", fake_import)
     with pytest.raises(BackendError, match="claude-agent-sdk"):
-        ClaudeBackend(
-            sdk_query_factory=None,
-            sdk_options_cls=None,
-            sdk_module=None,
-        )
+        ClaudeBackend()
 
 
 def _clear_effort_env(monkeypatch):
@@ -321,31 +297,31 @@ def _clear_effort_env(monkeypatch):
         monkeypatch.delenv(k, raising=False)
 
 
-def test_build_options_effort_defaults_to_medium(monkeypatch):
+def test_build_options_effort_defaults_to_medium(claude_sdk, monkeypatch):
     _clear_effort_env(monkeypatch)
-    backend = ClaudeBackend(model="m", sdk_query_factory=_make_query_factory([]), sdk_options_cls=FakeOptions)
-    o = backend._build_options(tools=[], max_turns=4, system_prompt="sp")
+    backend = ClaudeBackend(model="m")
+    o = backend._build_options(tools=[], system_prompt="sp")
     assert o.kwargs["effort"] == "medium"
     assert o.kwargs["thinking"] == {"type": "adaptive"}
 
 
-def test_build_options_runs_the_cli_the_subprocess_specialists_spawn(monkeypatch, tmp_path):
+def test_build_options_runs_the_cli_the_subprocess_specialists_spawn(claude_sdk, monkeypatch, tmp_path):
     """The in-process backend hands the SDK the same CLI ``resolve_claude_executable`` gives subprocesses."""
     recorded = tmp_path / "claude"
     recorded.write_text("#!/bin/sh\n", encoding="utf-8")
     recorded.chmod(0o755)
     monkeypatch.delenv("HYPERLOOM_CLAUDE_CLI_PATH", raising=False)
     monkeypatch.setenv("GEAK_CLAUDE_BIN", str(recorded))
-    backend = ClaudeBackend(model="m", sdk_query_factory=_make_query_factory([]), sdk_options_cls=FakeOptions)
-    assert backend._build_options(tools=[], max_turns=1, system_prompt=None).kwargs["cli_path"] == str(recorded)
+    backend = ClaudeBackend(model="m")
+    assert backend._build_options(tools=[], system_prompt=None).kwargs["cli_path"] == str(recorded)
 
 
-def test_build_options_effort_env_override_and_thinking_off(monkeypatch):
+def test_build_options_effort_env_override_and_thinking_off(claude_sdk, monkeypatch):
     _clear_effort_env(monkeypatch)
     monkeypatch.setenv("INFERENCE_OPTIMIZER_CLAUDE_ORCHESTRATION_EFFORT", "high")
     monkeypatch.setenv("INFERENCE_OPTIMIZER_CLAUDE_THINKING", "off")
-    b = ClaudeBackend(model="m", sdk_query_factory=_make_query_factory([]), sdk_options_cls=FakeOptions)
-    o = b._build_options(tools=[], max_turns=4, system_prompt="sp")
+    b = ClaudeBackend(model="m")
+    o = b._build_options(tools=[], system_prompt="sp")
     assert o.kwargs["effort"] == "high"
     assert "thinking" not in o.kwargs
 
@@ -353,19 +329,14 @@ def test_build_options_effort_env_override_and_thinking_off(monkeypatch):
 def test_real_sdk_options_accept_hyperloom_kwargs(monkeypatch):
     """SDK compat: the pinned SDK must accept the kwargs _build_options sends."""
     _clear_effort_env(monkeypatch)
-    sdk = pytest.importorskip("claude_agent_sdk")
-    b = ClaudeBackend(
-        model="m",
-        sdk_query_factory=_make_query_factory([]),
-        sdk_options_cls=sdk.ClaudeAgentOptions,
-        mcp_server_factory=lambda *a, **k: None,
-    )
-    # Must not raise: effort + thinking both accepted by ClaudeAgentOptions.
-    b._build_options(tools=[], max_turns=4, system_prompt="sp")
+    pytest.importorskip("claude_agent_sdk")
+    b = ClaudeBackend(model="m")
+    # Must not raise: effort, thinking and the emit_intent server are all accepted by ClaudeAgentOptions.
+    b._build_options(tools=[], system_prompt="sp")
 
 
 @pytest.mark.asyncio
-async def test_run_extracts_single_emit_intent_tool_use():
+async def test_run_extracts_single_emit_intent_tool_use(claude_sdk):
     msg = FakeAssistantMessage(
         content=[
             ToolUseBlock(
@@ -377,11 +348,8 @@ async def test_run_extracts_single_emit_intent_tool_use():
             ),
         ]
     )
-    backend = ClaudeBackend(
-        sdk_query_factory=_make_query_factory([msg]),
-        sdk_options_cls=FakeOptions,
-        mcp_server_factory=lambda *a, **k: None,
-    )
+    claude_sdk.query = _make_query_factory([msg])
+    backend = ClaudeBackend()
     res = await backend.run("hello", system_prompt="sys", tools=["Read"])
     assert len(res.intents) == 1
     assert res.intents[0].type == IntentType.SEND_MESSAGE
@@ -389,7 +357,7 @@ async def test_run_extracts_single_emit_intent_tool_use():
 
 
 @pytest.mark.asyncio
-async def test_run_extracts_multiple_emit_intent_tool_uses():
+async def test_run_extracts_multiple_emit_intent_tool_uses(claude_sdk):
     msg = FakeAssistantMessage(
         content=[
             ToolUseBlock(
@@ -408,11 +376,8 @@ async def test_run_extracts_multiple_emit_intent_tool_uses():
             ),
         ]
     )
-    backend = ClaudeBackend(
-        sdk_query_factory=_make_query_factory([msg]),
-        sdk_options_cls=FakeOptions,
-        mcp_server_factory=lambda *a, **k: None,
-    )
+    claude_sdk.query = _make_query_factory([msg])
+    backend = ClaudeBackend()
     res = await backend.run("p")
     assert len(res.intents) == 2
     assert res.intents[0].type == IntentType.PROPOSE_ACTION
@@ -420,7 +385,7 @@ async def test_run_extracts_multiple_emit_intent_tool_uses():
 
 
 @pytest.mark.asyncio
-async def test_run_accepts_short_tool_name_too():
+async def test_run_accepts_short_tool_name_too(claude_sdk):
     """SDK in-process tools sometimes show as plain `emit_intent` (no mcp__ prefix)."""
     msg = FakeAssistantMessage(
         content=[
@@ -433,17 +398,14 @@ async def test_run_accepts_short_tool_name_too():
             ),
         ]
     )
-    backend = ClaudeBackend(
-        sdk_query_factory=_make_query_factory([msg]),
-        sdk_options_cls=FakeOptions,
-        mcp_server_factory=lambda *a, **k: None,
-    )
+    claude_sdk.query = _make_query_factory([msg])
+    backend = ClaudeBackend()
     res = await backend.run("p")
     assert res.intents and res.intents[0].type == IntentType.ALERT
 
 
 @pytest.mark.asyncio
-async def test_run_ignores_other_tool_uses():
+async def test_run_ignores_other_tool_uses(claude_sdk):
     msg = FakeAssistantMessage(
         content=[
             ToolUseBlock(name="Read", input={"path": "/tmp/x"}),
@@ -456,17 +418,14 @@ async def test_run_ignores_other_tool_uses():
             ),
         ]
     )
-    backend = ClaudeBackend(
-        sdk_query_factory=_make_query_factory([msg]),
-        sdk_options_cls=FakeOptions,
-        mcp_server_factory=lambda *a, **k: None,
-    )
+    claude_sdk.query = _make_query_factory([msg])
+    backend = ClaudeBackend()
     res = await backend.run("p")
     assert len(res.intents) == 1
 
 
 @pytest.mark.asyncio
-async def test_run_text_blocks_collected_into_raw_text():
+async def test_run_text_blocks_collected_into_raw_text(claude_sdk):
     msg = FakeAssistantMessage(
         content=[
             TextBlock(text="thinking..."),
@@ -480,29 +439,23 @@ async def test_run_text_blocks_collected_into_raw_text():
             TextBlock(text=" done."),
         ]
     )
-    backend = ClaudeBackend(
-        sdk_query_factory=_make_query_factory([msg]),
-        sdk_options_cls=FakeOptions,
-        mcp_server_factory=lambda *a, **k: None,
-    )
+    claude_sdk.query = _make_query_factory([msg])
+    backend = ClaudeBackend()
     res = await backend.run("p")
     assert "thinking..." in res.raw_text
     assert " done." in res.raw_text
 
 
 @pytest.mark.asyncio
-async def test_run_without_an_emit_intent_call_returns_no_intents():
+async def test_run_without_an_emit_intent_call_returns_no_intents(claude_sdk):
     msg = FakeAssistantMessage(
         content=[
             TextBlock(text="just thinking, no tool call."),
             ToolUseBlock(name="Read", input={"path": "/tmp/x"}),
         ]
     )
-    backend = ClaudeBackend(
-        sdk_query_factory=_make_query_factory([msg]),
-        sdk_options_cls=FakeOptions,
-        mcp_server_factory=lambda *a, **k: None,
-    )
+    claude_sdk.query = _make_query_factory([msg])
+    backend = ClaudeBackend()
     result = await backend.run("p")
     assert result.intents == []
     assert "just thinking" in result.raw_text
@@ -516,7 +469,7 @@ async def test_run_without_an_emit_intent_call_returns_no_intents():
     ],
 )
 @pytest.mark.asyncio
-async def test_mcp_setup_diagnostic_reports_what_the_cli_offered(offered_tools, offered):
+async def test_mcp_setup_diagnostic_reports_what_the_cli_offered(claude_sdk, offered_tools, offered):
     """Registering emit_intent does not mean the CLI offered it, so the setup snapshot carries the CLI's own account."""
     init = FakeSystemMessage(
         subtype="init",
@@ -526,11 +479,8 @@ async def test_mcp_setup_diagnostic_reports_what_the_cli_offered(offered_tools, 
             "mcp_servers": [{"name": "inference_optimizer", "status": "connected"}],
         },
     )
-    backend = ClaudeBackend(
-        sdk_query_factory=_make_query_factory([init, FakeAssistantMessage(content=[TextBlock(text="hi")])]),
-        sdk_options_cls=FakeOptions,
-        mcp_server_factory=lambda *a, **k: None,
-    )
+    claude_sdk.query = _make_query_factory([init, FakeAssistantMessage(content=[TextBlock(text="hi")])])
+    backend = ClaudeBackend()
     assert backend.get_mcp_setup_diagnostic()["emit_intent"]["offered"] is None
     await backend.run("p")
     setup = backend.get_mcp_setup_diagnostic()
@@ -540,11 +490,11 @@ async def test_mcp_setup_diagnostic_reports_what_the_cli_offered(offered_tools, 
     assert setup["emit_intent"]["offered"] is offered
 
 
-def test_mcp_setup_diagnostic_hashes_the_registered_schema():
+def test_mcp_setup_diagnostic_hashes_the_registered_schema(claude_sdk):
     """The recorded schema hash identifies the schema the backend registers."""
     import hashlib
 
-    backend = ClaudeBackend(mcp_server_factory=lambda *a, **k: None)
+    backend = ClaudeBackend()
     expected = json.dumps(build_emit_intent_tool_input_schema(), sort_keys=True, separators=(",", ":"))
 
     recorded = backend.get_mcp_setup_diagnostic()["emit_intent"]["schema_sha256"]
@@ -553,7 +503,7 @@ def test_mcp_setup_diagnostic_hashes_the_registered_schema():
 
 
 @pytest.mark.asyncio
-async def test_run_invalid_tool_use_input_drops_block_silently():
+async def test_run_invalid_tool_use_input_drops_block_silently(claude_sdk):
     """Bad tool_use input shouldn't crash the run — just drop the bad block."""
     msg = FakeAssistantMessage(
         content=[
@@ -577,18 +527,15 @@ async def test_run_invalid_tool_use_input_drops_block_silently():
             ),
         ]
     )
-    backend = ClaudeBackend(
-        sdk_query_factory=_make_query_factory([msg]),
-        sdk_options_cls=FakeOptions,
-        mcp_server_factory=lambda *a, **k: None,
-    )
+    claude_sdk.query = _make_query_factory([msg])
+    backend = ClaudeBackend()
     res = await backend.run("p")
     assert len(res.intents) == 1
 
 
 @pytest.mark.parametrize("tool_name", [EMIT_INTENT_TOOL_QUALIFIED, EMIT_INTENT_TOOL_NAME])
 @pytest.mark.asyncio
-async def test_unparsed_tool_wrapper_retries_dedupe_to_one_intent(tool_name):
+async def test_unparsed_tool_wrapper_retries_dedupe_to_one_intent(claude_sdk, tool_name):
     """Claude Code retries the same wrapped JSON; keep one validated intent."""
     raw = '{"intent_type": "send_message", "payload": {"topic": "heartbeat", "body_md": "ok"}}'
     wrapped = {"__unparsedToolInput": {"raw": raw, "len": len(raw)}}
@@ -603,11 +550,8 @@ async def test_unparsed_tool_wrapper_retries_dedupe_to_one_intent(tool_name):
             ),
         ]
     )
-    backend = ClaudeBackend(
-        sdk_query_factory=_make_query_factory([msg]),
-        sdk_options_cls=FakeOptions,
-        mcp_server_factory=lambda *a, **k: None,
-    )
+    claude_sdk.query = _make_query_factory([msg])
+    backend = ClaudeBackend()
     res = await backend.run("p")
     assert len(res.intents) == 2
     assert [intent.payload["topic"] for intent in res.intents] == ["heartbeat", "status"]
@@ -615,7 +559,7 @@ async def test_unparsed_tool_wrapper_retries_dedupe_to_one_intent(tool_name):
 
 @pytest.mark.parametrize("tool_name", [EMIT_INTENT_TOOL_QUALIFIED, EMIT_INTENT_TOOL_NAME])
 @pytest.mark.asyncio
-async def test_string_wrapped_fallback_retries_dedupe_to_one_intent(tool_name):
+async def test_string_wrapped_fallback_retries_dedupe_to_one_intent(claude_sdk, tool_name):
     """A string-wrapped fallback dedupes exactly like the dict-wrapped one.
 
     Behind an OpenAI-compatible / litellm proxy the wrapper arrives inside a
@@ -634,11 +578,8 @@ async def test_string_wrapped_fallback_retries_dedupe_to_one_intent(tool_name):
             ToolUseBlock(name=tool_name, input=other),
         ]
     )
-    backend = ClaudeBackend(
-        sdk_query_factory=_make_query_factory([msg]),
-        sdk_options_cls=FakeOptions,
-        mcp_server_factory=lambda *a, **k: None,
-    )
+    claude_sdk.query = _make_query_factory([msg])
+    backend = ClaudeBackend()
     res = await backend.run("p")
     assert len(res.intents) == 2
     assert [intent.payload["topic"] for intent in res.intents] == ["heartbeat", "status"]
@@ -646,7 +587,7 @@ async def test_string_wrapped_fallback_retries_dedupe_to_one_intent(tool_name):
 
 @pytest.mark.parametrize("tool_name", [EMIT_INTENT_TOOL_QUALIFIED, EMIT_INTENT_TOOL_NAME])
 @pytest.mark.asyncio
-async def test_empty_string_tool_input_reports_decode_error(tool_name, caplog):
+async def test_empty_string_tool_input_reports_decode_error(claude_sdk, tool_name, caplog):
     """An empty-string input reports a decode error, not a missing intent_type.
 
     ``input or {}`` used to swallow ``""`` into ``{}``, which decoded cleanly
@@ -662,11 +603,8 @@ async def test_empty_string_tool_input_reports_decode_error(tool_name, caplog):
             ),
         ]
     )
-    backend = ClaudeBackend(
-        sdk_query_factory=_make_query_factory([msg]),
-        sdk_options_cls=FakeOptions,
-        mcp_server_factory=lambda *a, **k: None,
-    )
+    claude_sdk.query = _make_query_factory([msg])
+    backend = ClaudeBackend()
     with caplog.at_level(logging.INFO, logger=claude_module.log.name):
         res = await backend.run("p")
     # The empty-string block is dropped; the rest of the turn is unaffected.
@@ -676,7 +614,7 @@ async def test_empty_string_tool_input_reports_decode_error(tool_name, caplog):
 
 @pytest.mark.parametrize("tool_name", [EMIT_INTENT_TOOL_QUALIFIED, EMIT_INTENT_TOOL_NAME])
 @pytest.mark.asyncio
-async def test_identical_native_tool_inputs_are_not_deduped(tool_name):
+async def test_identical_native_tool_inputs_are_not_deduped(claude_sdk, tool_name):
     """Native Claude objects keep every emit_intent call, even duplicates."""
     native = {"intent_type": "send_message", "payload": {"topic": "heartbeat"}}
     msg = FakeAssistantMessage(
@@ -685,18 +623,15 @@ async def test_identical_native_tool_inputs_are_not_deduped(tool_name):
             ToolUseBlock(name=tool_name, input=dict(native)),
         ]
     )
-    backend = ClaudeBackend(
-        sdk_query_factory=_make_query_factory([msg]),
-        sdk_options_cls=FakeOptions,
-        mcp_server_factory=lambda *a, **k: None,
-    )
+    claude_sdk.query = _make_query_factory([msg])
+    backend = ClaudeBackend()
     res = await backend.run("p")
     assert len(res.intents) == 2
 
 
 @pytest.mark.parametrize("tool_name", [EMIT_INTENT_TOOL_QUALIFIED, EMIT_INTENT_TOOL_NAME])
 @pytest.mark.asyncio
-async def test_wrapper_then_native_same_intent_keeps_both(tool_name):
+async def test_wrapper_then_native_same_intent_keeps_both(claude_sdk, tool_name):
     """A wrapper block and a native block are two tool_use events."""
     raw = '{"intent_type": "send_message", "payload": {"topic": "heartbeat"}}'
     wrapped = {"__unparsedToolInput": {"raw": raw, "len": len(raw)}}
@@ -707,35 +642,29 @@ async def test_wrapper_then_native_same_intent_keeps_both(tool_name):
             ToolUseBlock(name=tool_name, input=dict(native)),
         ]
     )
-    backend = ClaudeBackend(
-        sdk_query_factory=_make_query_factory([msg]),
-        sdk_options_cls=FakeOptions,
-        mcp_server_factory=lambda *a, **k: None,
-    )
+    claude_sdk.query = _make_query_factory([msg])
+    backend = ClaudeBackend()
     res = await backend.run("p")
     assert len(res.intents) == 2
 
 
 @pytest.mark.asyncio
-async def test_raw_text_prefers_result_no_duplication():
+async def test_raw_text_prefers_result_no_duplication(claude_sdk):
     """The streamed TextBlock and ResultMessage.result share content; raw_text must not concatenate both."""
     text = '{"tool": "emit_proposal", "args": {}}'
     msgs = [
         FakeAssistantMessage(content=[TextBlock(text=text)]),
         FakeResultMessage(result=text),
     ]
-    backend = ClaudeBackend(
-        sdk_query_factory=_make_query_factory(msgs),
-        sdk_options_cls=FakeOptions,
-        mcp_server_factory=lambda *a, **k: None,
-    )
+    claude_sdk.query = _make_query_factory(msgs)
+    backend = ClaudeBackend()
     res = await backend.run("p")
     assert res.raw_text == text
     assert res.raw_text.count('"tool"') == 1
 
 
 @pytest.mark.asyncio
-async def test_options_includes_system_prompt_and_max_turns():
+async def test_options_include_the_system_prompt_and_the_backend_turn_cap(claude_sdk):
     captured: dict[str, Any] = {}
 
     async def q(*, prompt, options):
@@ -745,16 +674,11 @@ async def test_options_includes_system_prompt_and_max_turns():
         return
         yield  # make it a generator
 
-    backend = ClaudeBackend(
-        sdk_query_factory=q,
-        sdk_options_cls=FakeOptions,
-        mcp_server_factory=lambda *a, **k: None,
-        max_turns_default=7,
-    )
-    await backend.run("the prompt", system_prompt="sys", tools=["Read"], max_turns=3)
-    # max_turns is floored to _MIN_MAX_TURNS (8): Claude Code counts its own messages as
-    # turns, so a literal max_turns=3 would trip before the model can emit an intent.
-    assert captured["options_kwargs"]["max_turns"] == 8
+    claude_sdk.query = q
+    backend = ClaudeBackend()
+    await backend.run("the prompt", system_prompt="sys", tools=["Read"])
+    # Claude Code counts the model's own messages as turns, so the cap leaves room for a tool loop.
+    assert captured["options_kwargs"]["max_turns"] == backend.max_turns_default == 32
     assert captured["options_kwargs"]["system_prompt"]["type"] == "file"
     assert captured["system_prompt_text"] == "sys"
     assert "Read" in captured["options_kwargs"]["allowed_tools"]
@@ -764,7 +688,7 @@ async def test_options_includes_system_prompt_and_max_turns():
 
 
 @pytest.mark.asyncio
-async def test_options_includes_mcp_server_when_emit_intent_enabled():
+async def test_options_includes_mcp_server_when_emit_intent_enabled(claude_sdk):
     captured: dict[str, Any] = {}
 
     async def q(*, prompt, options):
@@ -781,12 +705,10 @@ async def test_options_includes_mcp_server_when_emit_intent_enabled():
     def fake_server(name, version, tools):
         return {"name": name}
 
-    backend = ClaudeBackend(
-        sdk_query_factory=q,
-        sdk_options_cls=FakeOptions,
-        mcp_tool_factory=fake_tool,
-        mcp_server_factory=fake_server,
-    )
+    claude_sdk.query = q
+    claude_sdk.tool = fake_tool
+    claude_sdk.create_sdk_mcp_server = fake_server
+    backend = ClaudeBackend()
     assert backend.mcp_server_config is not None
     assert backend.get_mcp_setup_diagnostic()["allowed_tools"] == []
     assert backend.get_mcp_setup_diagnostic()["mcp_servers"] == []

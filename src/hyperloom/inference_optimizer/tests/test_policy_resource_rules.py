@@ -27,7 +27,6 @@ from hyperloom.orchestrator.state.round_store import (
     BOOTED,
     EXCLUDED,
     EXPIRED_REAPED,
-    RoundRequest,
     RoundStore,
 )
 
@@ -70,7 +69,7 @@ async def test_the_gate_denies_while_the_exclusion_holds_and_not_after(store, cl
     gate = _gate(facts)
     opened = await store.open(
         "round-1",
-        RoundRequest(now_unix=clock.wall(), request_id="req-open"),
+        now_unix=clock.wall(),
         holder_task_id="baseline-1",
         lease_sec=_LEASE,
     )
@@ -83,9 +82,7 @@ async def test_the_gate_denies_while_the_exclusion_holds_and_not_after(store, cl
     assert "baseline-1" in str(denied.value)
 
     clock.advance(120.0)
-    settled = await store.settle(
-        await store.get("round-1"), RoundRequest(now_unix=clock.wall(), request_id="req-settle"), outcome=BOOTED
-    )
+    settled = await store.settle(await store.get("round-1"), now_unix=clock.wall(), outcome=BOOTED)
     assert settled.ok
 
     await _reread(store, facts)
@@ -99,14 +96,12 @@ async def test_an_expired_round_denies_nothing_once_settled(store, clock):
     gate = _gate(facts)
     await store.open(
         "round-1",
-        RoundRequest(now_unix=clock.wall(), request_id="req-open"),
+        now_unix=clock.wall(),
         holder_task_id="baseline-1",
         lease_sec=_LEASE,
     )
     clock.advance(_LEASE + 1.0)
-    await store.settle(
-        await store.get("round-1"), RoundRequest(now_unix=clock.wall(), request_id="req-settle"), outcome=EXPIRED_REAPED
-    )
+    await store.settle(await store.get("round-1"), now_unix=clock.wall(), outcome=EXPIRED_REAPED)
 
     await _reread(store, facts)
     gate.validate_intent("orchestration", _baseline())
@@ -114,7 +109,7 @@ async def test_an_expired_round_denies_nothing_once_settled(store, clock):
     # And the acquire agrees, which is the answer that counts.
     opened = await store.open(
         "round-next",
-        RoundRequest(now_unix=clock.wall(), request_id="req-open-2"),
+        now_unix=clock.wall(),
         holder_task_id="baseline-2",
         lease_sec=_LEASE,
     )
@@ -129,7 +124,7 @@ async def test_an_open_round_keeps_denying_after_lease_expiry_until_settled(stor
     gate = _gate(facts)
     opened = await store.open(
         "round-1",
-        RoundRequest(now_unix=clock.wall(), request_id="req-open"),
+        now_unix=clock.wall(),
         holder_task_id="baseline-1",
         lease_sec=_LEASE,
     )
@@ -148,23 +143,21 @@ async def test_an_open_round_keeps_denying_after_lease_expiry_until_settled(stor
 
     blocked = await store.open(
         "round-next",
-        RoundRequest(now_unix=clock.wall(), request_id="req-blocked"),
+        now_unix=clock.wall(),
         holder_task_id="baseline-2",
         lease_sec=_LEASE,
     )
     assert not blocked.ok
     assert blocked.reason == EXCLUDED
 
-    settled = await store.settle(
-        await store.get("round-1"), RoundRequest(now_unix=clock.wall(), request_id="req-settle"), outcome=BOOTED
-    )
+    settled = await store.settle(await store.get("round-1"), now_unix=clock.wall(), outcome=BOOTED)
     assert settled.ok
 
     await _reread(store, facts)
     gate.validate_intent("orchestration", _baseline())
     acquired = await store.open(
         "round-next",
-        RoundRequest(now_unix=clock.wall(), request_id="req-after-settle"),
+        now_unix=clock.wall(),
         holder_task_id="baseline-2",
         lease_sec=_LEASE,
     )
@@ -178,7 +171,7 @@ async def test_a_rule_that_denied_last_attempt_denies_this_one_too(store, clock)
     gate = _gate(facts)
     await store.open(
         "round-1",
-        RoundRequest(now_unix=clock.wall(), request_id="req-open"),
+        now_unix=clock.wall(),
         holder_task_id="baseline-1",
         lease_sec=_LEASE,
     )
@@ -197,7 +190,7 @@ async def test_across_ticks_nothing_reaches_open_while_the_round_is_held(store, 
     gate = _gate(facts)
     held = await store.open(
         "round-held",
-        RoundRequest(now_unix=clock.wall(), request_id="req-open"),
+        now_unix=clock.wall(),
         holder_task_id="baseline-holder",
         lease_sec=_LEASE * 100,
     )
@@ -212,7 +205,7 @@ async def test_across_ticks_nothing_reaches_open_while_the_round_is_held(store, 
         # And the acquire agrees, for the attempt the gate stopped short of.
         attempt = await store.open(
             f"round-{tick}",
-            RoundRequest(now_unix=clock.wall(), request_id=f"req-{tick}"),
+            now_unix=clock.wall(),
             holder_task_id=f"baseline-{tick}",
             lease_sec=_LEASE,
         )
@@ -231,7 +224,7 @@ async def test_the_round_holders_own_bring_up_is_admitted_tick_after_tick(store,
     gate = _gate(facts)
     opened = await store.open(
         "revalidation-1",
-        RoundRequest(now_unix=clock.wall(), request_id="req-open"),
+        now_unix=clock.wall(),
         holder_task_id="reval-1",
         lease_sec=_LEASE,
     )

@@ -46,7 +46,6 @@ class Message:
     to_agent: str
     topic: str
     payload: dict[str, Any]
-    in_reply_to: str | None = None
     ts: str = field(default_factory=now_iso)
     seq: int | None = None  # DB-assigned on insert
 
@@ -57,8 +56,6 @@ class Message:
         to_agent: str,
         topic: str,
         payload: dict[str, Any],
-        *,
-        in_reply_to: str | None = None,
     ) -> "Message":
         """Construct a new message with a fresh ``msg_id``."""
         return cls(
@@ -67,7 +64,6 @@ class Message:
             to_agent=to_agent,
             topic=topic,
             payload=payload,
-            in_reply_to=in_reply_to,
         )
 
     @classmethod
@@ -79,7 +75,6 @@ class Message:
             to_agent=row["to_agent"],
             topic=row["topic"],
             payload=json.loads(row["payload"]),
-            in_reply_to=row["in_reply_to"],
             ts=row["ts"],
             seq=row["seq"],
         )
@@ -91,7 +86,6 @@ class Message:
             self.from_agent,
             self.to_agent,
             self.topic,
-            self.in_reply_to,
             json.dumps(self.payload),
             self.ts,
         )
@@ -112,8 +106,7 @@ class MessageBus:
             raise ValueError(f"to_agent must be a string, got {type(msg.to_agent).__name__}")
         async with self.db.transaction() as cur:
             cur.execute(
-                "INSERT INTO events (msg_id, from_agent, to_agent, topic, "
-                "in_reply_to, payload, ts) VALUES (?,?,?,?,?,?,?)",
+                "INSERT INTO events (msg_id, from_agent, to_agent, topic, payload, ts) VALUES (?,?,?,?,?,?)",
                 msg.to_db_row(),
             )
             msg.seq = int(cur.lastrowid)

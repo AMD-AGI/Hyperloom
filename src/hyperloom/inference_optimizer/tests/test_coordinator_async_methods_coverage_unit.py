@@ -277,19 +277,13 @@ async def test_promote_profile_does_not_reuse_unready_merged_trace(coord: Coordi
 
 
 @pytest.mark.asyncio
-async def test_promote_roofline_succeeded_and_skipped_and_failed(coord: Coordinator) -> None:
+async def test_promote_roofline_clears_the_failure_streak(coord: Coordinator) -> None:
     coord.shared_state.baseline_tput = 800.0
-    await coord.writeback.promote_to_shared_state("roofline", {"status": "succeeded"})
-    await coord.writeback.promote_to_shared_state("roofline", {"status": "skipped"})
-    await coord.writeback.promote_to_shared_state(
-        "roofline",
-        {
-            "status": "failed",
-            "error_class": "boom",
-            "phase": "trace",
-        },
-    )
-    assert getattr(coord.shared_state, "roofline_failure_streak", 0) >= 1
+    coord.shared_state.roofline_failure_streak = 2
+    for status in ("succeeded", "recovered"):
+        await coord.writeback.promote_to_shared_state("roofline", {"status": status})
+        assert coord.shared_state.roofline_failure_streak == 0
+        assert coord.shared_state.last_roofline["decision"] == "promoted"
 
 
 @pytest.mark.asyncio

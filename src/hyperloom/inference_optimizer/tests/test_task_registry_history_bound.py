@@ -156,7 +156,7 @@ async def test_unknown_dispatch_class_fails_before_insert(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_idempotent_reuse_requires_the_same_dispatch_class(tmp_path):
+async def test_idempotent_reuse_returns_the_row_with_the_class_it_was_created_under(tmp_path):
     registry = TaskRegistry(SqliteConnection(tmp_path / "dispatch-reuse.db"))
     try:
         created, existing = await registry.create_or_return_existing(
@@ -176,25 +176,27 @@ async def test_idempotent_reuse_requires_the_same_dispatch_class(tmp_path):
                 dispatch_class="llm",
             ),
         )
-        with pytest.raises(ValueError, match="dispatch_class mismatch"):
-            await registry.create_or_return_existing(
-                TaskSpec(
-                    kind="baseline",
-                    params={},
-                    idempotency_key="same-key",
-                    dispatch_class="coordinator",
-                ),
-            )
+        other_class, other_was_existing = await registry.create_or_return_existing(
+            TaskSpec(
+                kind="baseline",
+                params={},
+                idempotency_key="same-key",
+                dispatch_class="coordinator",
+            ),
+        )
     finally:
         registry.db.close()
 
     assert existing is False
     assert was_existing is True
     assert reused.task_id == created.task_id
+    assert other_was_existing is True
+    assert other_class.task_id == created.task_id
+    assert task_dispatch_class(other_class) == "llm"
 
 
 @pytest.mark.asyncio
-async def test_cursor_reuse_validates_dispatch_class(tmp_path):
+async def test_cursor_reuse_returns_the_row_with_the_class_it_was_created_under(tmp_path):
     db = SqliteConnection(tmp_path / "cursor-dispatch-reuse.db")
     try:
         async with db.transaction() as cur:
@@ -212,17 +214,19 @@ async def test_cursor_reuse_validates_dispatch_class(tmp_path):
             reused, was_existing = create_in_cursor(
                 cur, TaskSpec(kind="specialist", params={}, idempotency_key="cursor-key", dispatch_class="coordinator")
             )
-        with pytest.raises(ValueError, match="dispatch_class mismatch"):
-            async with db.transaction() as cur:
-                create_in_cursor(
-                    cur, TaskSpec(kind="specialist", params={}, idempotency_key="cursor-key", dispatch_class="inline")
-                )
+        async with db.transaction() as cur:
+            other_class, other_was_existing = create_in_cursor(
+                cur, TaskSpec(kind="specialist", params={}, idempotency_key="cursor-key", dispatch_class="inline")
+            )
     finally:
         db.close()
 
     assert existing is False
     assert was_existing is True
     assert reused.task_id == created.task_id
+    assert other_was_existing is True
+    assert other_class.task_id == created.task_id
+    assert task_dispatch_class(other_class) == "coordinator"
 
 
 @pytest.mark.asyncio

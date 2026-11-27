@@ -311,23 +311,15 @@ def _make_handler(
     return _handler
 
 
-def build_context_tools_server(
-    provider: ContextProvider,
-    *,
-    sdk_module: Any | None = None,
-    tool_factory: Callable[..., Any] | None = None,
-    server_factory: Callable[..., Any] | None = None,
-) -> Any | None:
-    """Build the in-process MCP server exposing the read-only context tools."""
+def build_context_tools_server(sdk: Any, provider: ContextProvider) -> Any:
+    """Build the in-process MCP server exposing the read-only context tools with the imported ``claude_agent_sdk``."""
     return build_sdk_mcp_server(
+        sdk,
         MCP_SERVER_NAME,
         [
             (tool_name, description, schema, _make_handler(provider, method_name))
             for tool_name, description, schema, method_name in CONTEXT_TOOL_SPECS
         ],
-        sdk_module=sdk_module,
-        tool_factory=tool_factory,
-        server_factory=server_factory,
     )
 
 

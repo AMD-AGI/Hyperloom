@@ -193,17 +193,6 @@ def task_dispatch_class(task: Task) -> str | None:
     return evidence[0] if evidence is not None else None
 
 
-def _validate_dispatch_reuse(task: Task, requested: str | None) -> None:
-    _validate_dispatch_class(requested)
-    if requested is None:
-        return
-    existing = task_dispatch_class(task)
-    if existing is None:
-        return
-    if existing != requested:
-        raise ValueError(f"idempotent task dispatch_class mismatch: existing={existing!r}, requested={requested!r}")
-
-
 class IllegalTransition(RuntimeError):
     """Raised when a requested task state transition is not allowed."""
 
@@ -320,7 +309,6 @@ def create_in_cursor(cur: Any, spec: TaskSpec) -> tuple[Task, bool]:
     existing = cur.fetchone()
     if existing is not None:
         task = Task.from_row(existing)
-        _validate_dispatch_reuse(task, spec.dispatch_class)
         if task.state in TERMINAL_STATES:
             raise TerminalTaskReuse(f"idempotency key {spec.idempotency_key!r} already names a {task.state} task")
         return task, True
@@ -403,9 +391,7 @@ class TaskRegistry:
         _validate_dispatch_class(spec.dispatch_class)
         existing = await self.db.fetchone("SELECT * FROM tasks WHERE idempotency_key=?", (spec.idempotency_key,))
         if existing is not None:
-            task = Task.from_row(existing)
-            _validate_dispatch_reuse(task, spec.dispatch_class)
-            return task, True
+            return Task.from_row(existing), True
 
         if (
             spec.dispatch_class is not None

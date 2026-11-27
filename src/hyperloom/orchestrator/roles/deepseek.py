@@ -206,7 +206,6 @@ class DeepSeekBackend:
     retry_policy: RetryPolicy = field(default_factory=RetryPolicy.from_env)
 
     name: str = "deepseek"
-    calls: list[dict[str, Any]] = field(default_factory=list)
 
     # The harness mounts no MCP server a reactor role could hand tools through,
     # so intents come back in the reply body like they do on the Codex route.
@@ -230,11 +229,10 @@ class DeepSeekBackend:
         *,
         system_prompt: str | None = None,
         tools: list[str] | None = None,
-        max_turns: int = 1,
     ) -> BackendTurnResult:
         """Run one DeepSeek Harness turn and parse the intent envelope it replied with."""
-        # The harness owns its tool set and its own turn loop.
-        del tools, max_turns
+        # The harness owns its tool set.
+        del tools
         turn_prompt = f"{prompt}\n\n{_ENVELOPE_REMINDER} {self._legal_intent_types()}"
         # Each round's prompt carries the whole run state. The harness resends the full conversation on every
         # model step and compacts only near the model's window, so a conversation kept across rounds only grows
@@ -242,7 +240,7 @@ class DeepSeekBackend:
         if self._session is not None:
             self._session.reset_conversation()
 
-        sdk_result = await self._drive_turn(system_prompt, turn_prompt, prompt_chars=len(prompt))
+        sdk_result = await self._drive_turn(system_prompt, turn_prompt)
         usage = dict(sdk_result.usage or {})
         rejection: NoIntentEmitted | None = None
         intents: list[Any] = []
@@ -255,7 +253,7 @@ class DeepSeekBackend:
             correction = (
                 f"{_REJECTED_REPLY.format(error=rejection)}\n\n{_ENVELOPE_REMINDER} {self._legal_intent_types()}"
             )
-            sdk_result = await self._drive_turn(system_prompt, correction, prompt_chars=len(correction))
+            sdk_result = await self._drive_turn(system_prompt, correction)
             for key, value in (sdk_result.usage or {}).items():
                 if key == "context_tokens_peak":
                     usage[key] = max(to_int(usage.get(key), 0), to_int(value, 0))
@@ -289,41 +287,23 @@ class DeepSeekBackend:
             intents = self._parse(sdk_result.text)
         return BackendTurnResult(intents=intents, raw_text=sdk_result.text, metadata=metadata)
 
-    async def _drive_turn(self, system_prompt: str | None, turn_prompt: str, *, prompt_chars: int) -> Any:
-        """Run one harness turn under the transient-failure retry policy and log its usage."""
+    async def _drive_turn(self, system_prompt: str | None, turn_prompt: str) -> Any:
+        """Run one harness turn under the transient-failure retry policy."""
 
         async def _one_attempt() -> Any:
             session = await self._session_for(system_prompt)
             return await session.turn(turn_prompt, timeout_sec=self.call_timeout_s)
-
-        def _note_retry(attempt: int, exc: BaseException, delay: float) -> None:
-            self.calls.append(
-                {"warn": f"deepseek SDK transient failure (attempt {attempt}): {exc!r}; retrying in {delay:.2f}s"}
-            )
 
         try:
             sdk_result = await retry_with_backoff(
                 _one_attempt,
                 policy=self.retry_policy,
                 retry_on=(DeepSeekSessionError,),
-                on_retry=_note_retry,
             )
         except DeepSeekSessionError as exc:
             raise LLMCallFailed(f"DeepSeek Harness turn failed: {redact_secret_values(str(exc))}") from exc
         if sdk_result.error:
             raise LLMCallFailed("DeepSeek Harness turn failed: " + redact_secret_values(sdk_result.error))
-        usage = dict(sdk_result.usage or {})
-        self.calls.append(
-            {
-                "model": self.model,
-                "prompt_chars": prompt_chars,
-                "reply_chars": len(sdk_result.text),
-                "input_tokens": to_int(usage.get("input_tokens"), 0),
-                "output_tokens": to_int(usage.get("output_tokens"), 0),
-                "cache_read_input_tokens": to_int(usage.get("cache_read_input_tokens"), 0),
-                "session_id": sdk_result.session_id,
-            }
-        )
         return sdk_result
 
     @staticmethod

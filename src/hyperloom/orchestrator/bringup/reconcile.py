@@ -16,7 +16,6 @@ from ..bus.resource_lock import BRINGUP_ROUND_LANE, SqliteLeaseBackend
 from ..state.round_store import (
     EXPIRED_REAPED,
     Round,
-    RoundRequest,
     RoundStore,
 )
 from ..state.task_registry import TERMINAL_STATES, Task, TaskNotFound, TaskRegistry
@@ -267,12 +266,8 @@ class Reconciler:
         if successor is not None:
             moved = await self._rounds.handoff(
                 round_row,
-                RoundRequest(
-                    now_unix=now_unix,
-                    request_id=f"reconcile:handoff:{successor.task_id}",
-                    evidence={"reason": "holder_terminal_with_successor"},
-                ),
                 new_holder_task_id=successor.task_id,
+                now_unix=now_unix,
                 # A successor that declares no TTL inherits what the round has left.
                 lease_sec=float(successor.lease_ttl_sec) or (round_row.expires_unix - round_row.renewed_unix),
             )
@@ -281,20 +276,12 @@ class Reconciler:
             return
         if float(now_unix) - _unix_of(holder.updated_at) < TERMINAL_HOLDER_CAP_SEC:
             return
-        await self._expire(round_row, now_unix, report, why="holder_terminal_without_result")
+        await self._expire(round_row, now_unix, report)
 
-    async def _expire(self, round_row: Round, now_unix: float, report: ReconcileReport, *, why: str) -> None:
+    async def _expire(self, round_row: Round, now_unix: float, report: ReconcileReport) -> None:
         """Settle a completed owner after its successor window ends."""
         outcome = EXPIRED_REAPED
-        result = await self._rounds.settle(
-            round_row,
-            RoundRequest(
-                now_unix=now_unix,
-                request_id=f"reconcile:{why}:{round_row.round_id}:{round_row.fence}",
-                evidence={"reason": why, "cleanup": "holder_terminal_without_resources"},
-            ),
-            outcome=outcome,
-        )
+        result = await self._rounds.settle(round_row, outcome=outcome, now_unix=now_unix)
         if not result.ok:
             return
         report.settled.append((round_row.round_id, outcome))

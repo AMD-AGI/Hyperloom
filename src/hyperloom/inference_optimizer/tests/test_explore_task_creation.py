@@ -44,7 +44,6 @@ class _BusMessage:
     to_agent: str
     topic: str
     payload: dict[str, Any]
-    in_reply_to: str = ""
     msg_id: str = ""
 
 
@@ -60,7 +59,6 @@ class _StubBus:
             to_agent=getattr(msg, "to_agent", ""),
             topic=getattr(msg, "topic", ""),
             payload=dict(getattr(msg, "payload", {}) or {}),
-            in_reply_to=getattr(msg, "in_reply_to", "") or "",
             msg_id=getattr(msg, "msg_id", ""),
         )
         self.messages.append(bm)

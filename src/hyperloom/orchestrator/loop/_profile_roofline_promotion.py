@@ -71,22 +71,11 @@ class ProfileRooflineMixin:
         outcome: _PromoteOutcome,
     ) -> None:
         """Promote a profile result: trace path / status, optional current_best, roofline anchor."""
-        audit_decision: str | None = None
-        audit_extras: dict[str, Any] = {}
-        # Defensive skipped arm: audit as skipped + drop the gate.
-        if str(result.get("status") or "") == "skipped":
-            audit_decision = "skipped"
-            audit_extras = {
-                "error_class": result.get("error_class"),
-                "error": result.get("error"),
-            }
-        else:
-            audit_decision = "promoted"
-            audit_extras = {
-                "trace_path": None,
-                "profile_args": None,
-                "output_throughput": result.get("output_throughput"),
-            }
+        audit_extras: dict[str, Any] = {
+            "trace_path": None,
+            "profile_args": None,
+            "output_throughput": result.get("output_throughput"),
+        }
         trace_path = profile_trace_path(result)
         profile_status = str(result.get("status") or "")
         measurement_status = str(result.get("measurement_status") or profile_status)
@@ -114,7 +103,7 @@ class ProfileRooflineMixin:
                 self.shared_state.last_roofline_tput = float(anchor_tput)
         if task is not None and self.shared_state.auto_roofline_pending_task_id == task.task_id:
             self.shared_state.auto_roofline_pending_task_id = ""
-        outcome.audit_decision = audit_decision
+        outcome.audit_decision = "promoted"
         outcome.audit_extras = audit_extras
 
     def _anchor_watermark_on_roofline(self, result: dict, task: "Task | None") -> dict[str, Any]:
@@ -140,52 +129,21 @@ class ProfileRooflineMixin:
             "degraded": bool(result.get("degraded", False)),
         }
 
-    def _charge_roofline_failure(self, result: dict, task: "Task | None") -> dict[str, Any]:
-        self.shared_state.roofline_failure_streak += 1
-        log.warning(
-            "Auto-roofline %s failed (reason=%s phase=%s "
-            "error_class=%s); continuing in degraded mode "
-            "(specialists / explore proceed without a fresh "
-            "analysis_md). No retry, no fallback.",
-            task.task_id if task else "?",
-            str((task.params or {}).get("reason") or "") if task is not None else "",
-            result.get("phase"),
-            result.get("error_class"),
-        )
-        return {
-            "phase": result.get("phase"),
-            "error_class": result.get("error_class"),
-            "error": result.get("error"),
-        }
-
     async def _promote_roofline(
         self,
         result: dict,
         task: "Task | None",
         outcome: _PromoteOutcome,
     ) -> None:
-        """Promote a roofline result: audit + failure streak + roofline anchor (reads last_trace_analyze)."""
-        audit_decision: str | None = None
-        audit_extras: dict[str, Any] = {}
+        """Promote a roofline result: audit row, failure streak reset and roofline anchor (reads last_trace_analyze).
+
+        The roofline executor settles ``succeeded`` or ``recovered`` here; a ``failed`` roofline is never promoted and
+        is charged on the unpromotable path.
+        """
         # The composite roofline action runs profile + trace_analyze atomically;
         # its executor writes last_profile_* + last_trace_analyze, so here we just record the audit row.
-        status = str(result.get("status") or "")
-        if status == "skipped":
-            # Defensive arm: clean no-op, no streak/watermark touch.
-            audit_decision = "skipped"
-            audit_extras = {
-                "error_class": result.get("error_class"),
-                "error": result.get("error"),
-            }
-        elif status in {"succeeded", "recovered"}:
-            audit_decision = "promoted"
-            audit_extras = self._anchor_watermark_on_roofline(result, task)
-        else:
-            outcome.verdict = Verdict.FAILED
-            audit_decision = "discarded"
-            audit_extras = self._charge_roofline_failure(result, task)
+        outcome.audit_decision = "promoted"
+        outcome.audit_extras = self._anchor_watermark_on_roofline(result, task)
         # Clear the pending pointer (matched by task id).
         if task is not None and self.shared_state.auto_roofline_pending_task_id == task.task_id:
             self.shared_state.auto_roofline_pending_task_id = ""
-        outcome.audit_decision = audit_decision
-        outcome.audit_extras = audit_extras

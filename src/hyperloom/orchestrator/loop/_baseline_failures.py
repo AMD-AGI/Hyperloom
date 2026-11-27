@@ -180,7 +180,7 @@ class BaselineFailureMixin:
         state = self.shared_state
         state.enablement.revalidation_generation = int(state.enablement.revalidation_generation or 0) + 1
         state.enablement.revalidation_task_id = ""
-        await self._coord.enablement_lane.settle_enablement_round(ABANDONED, reason="revalidation_stopped_by_the_run")
+        await self._coord.enablement_lane.settle_enablement_round(ABANDONED)
 
     async def _record_revalidation_not_promoted(
         self,
@@ -212,7 +212,7 @@ class BaselineFailureMixin:
         else:
             state.enablement.revalidation_task_id = ""
             state.enablement.validation_pending = False
-            await self._coord.enablement_lane.settle_enablement_round(FAILED, reason=err_class or "revalidation_failed")
+            await self._coord.enablement_lane.settle_enablement_round(FAILED)
             enablement_event.record_revalidation_outcome(
                 enablement_event.RevalidationOutcome(
                     generation=generation,
@@ -306,7 +306,7 @@ class BaselineFailureMixin:
         # Only arm the streaks and stop gates while no baseline has succeeded yet.
         if task.kind == "baseline" and self._arms_baseline_failure_gates(err_class):
             baseline_event_payload = await self._charge_baseline_failure(task, result_payload, err_class)
-        # Mirror the promote-path roofline failure handling: bump streak, clear gate, warn.
+        # A failed roofline is charged here and nowhere else: bump streak, clear gate, warn.
         if task.kind == "roofline":
             self.shared_state.roofline_failure_streak += 1
             if self.shared_state.auto_roofline_pending_task_id == task.task_id:
@@ -388,7 +388,6 @@ class BaselineFailureMixin:
             and not retries_suppressed
         ):
             self.shared_state.set_stop_reason(_BASELINE_FAILED_STOP_REASON)
-        self._arm_eager_baseline_fallback(task, err_class)
         self._stash_enablement_launch_log(result_payload, err_class)
         return {
             "kind": "baseline_not_promoted",
@@ -437,16 +436,6 @@ class BaselineFailureMixin:
             self.shared_state.set_stop_reason(AGENTX_PREFLIGHT_STOP_REASON)
         elif self._generic_baseline_failure_stops(retries_suppressed=retries_suppressed):
             self.shared_state.set_stop_reason(_BASELINE_FAILED_STOP_REASON)
-
-    def _arm_eager_baseline_fallback(self, task: Task, err_class: str) -> None:
-        if err_class != "cuda_graph_capture_failed" or self.shared_state.baseline_eager_fallback:
-            return
-        self.shared_state.baseline_eager_fallback = True
-        log.warning(
-            "baseline %s hit cuda-graph capture failure; arming "
-            "disable-cuda-graph fallback for the next baseline retry",
-            task.task_id,
-        )
 
     def _stash_enablement_launch_log(self, result_payload: dict[str, Any], err_class: str) -> None:
         launch_log = _authorable_launch_log(result_payload, err_class=err_class)
