@@ -80,7 +80,7 @@ def test_topic_allowlist_v06_changes():
 
 
 def test_topic_allowlist_holds_only_topics_the_coordinator_writes():
-    """``decision`` was only ever an agent's own choice of topic, and an agent's message is an ``observation``."""
+    """No Coordinator literal writes ``decision``, and an agent's message is an ``observation`` whatever it names."""
     assert TOPIC_ALLOWLIST == {
         "observation",
         "event",

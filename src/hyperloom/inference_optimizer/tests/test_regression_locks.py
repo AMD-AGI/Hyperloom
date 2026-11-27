@@ -305,7 +305,7 @@ async def test_backend_error_turn_does_not_advance_cursor(session_dir):
 async def test_failing_backend_keeps_each_inbox_page_within_budget(session_dir, monkeypatch):
     """Each prompt renders one budgeted page of the unread inbox, and a failed turn adds nothing to it.
 
-    A turn that failed on its prompt's length used to be told so in its own inbox, which made the next prompt longer.
+    A row for a turn that failed on its prompt's length would make the next prompt longer.
     """
     monkeypatch.setattr(conversation, "_INBOX_PROMPT_CHARS", 1_000)
     failing = ScriptedPlan(turns=[MockTurn(raise_error=BackendError("Prompt is too long"))], loop_last=True)

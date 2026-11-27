@@ -55,7 +55,6 @@ def _dispatcher(tmp_path):
         gpu_specialist_pool=stub_gpu_pool(),
         _stop=stop,
         stop_requested=stop.is_set,
-        reconciler=SimpleNamespace(take_failed_tasks=list),
         writeback=writeback_ns,
         recipe_journal=SimpleNamespace(fact_write_hook=AsyncMock()),
         specialist_dispatch=SimpleNamespace(

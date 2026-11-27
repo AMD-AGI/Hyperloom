@@ -163,8 +163,8 @@ it.
   refused, by the phase (`phase_incompatible`). The `stale_stack_revalidation`
   and `current_best_drift` observations are no longer sent; a stale stack
   revalidation is still discarded. The Claude backend keeps every
-  `emit_intent` call of a turn and no longer drops a repeated one that
-  arrived in Claude Code's `__unparsedToolInput` wrapper. See
+  `emit_intent` call of a turn that was answered `ok` and no longer drops a
+  repeated one that arrived in Claude Code's `__unparsedToolInput` wrapper. See
   [Upgrade](reference/upgrade.md).
 - **Five Orchestration context tools are removed, and the prompt stops
   describing what a turn does not carry.** **Breaking** for an `--orch-prompt`
@@ -342,15 +342,17 @@ it.
   `backend_unhealthy` and `reactor_exception` observations, the
   `phase_transition` event and the `baseline_not_promoted` event are no
   longer written to `storage/coordinator.db`. Each restated something the
-  Coordinator already held, as an inbox line for the one agent, and the
-  first three woke that agent with the news that its own call had failed. A
+  Coordinator already held, as an inbox line that admitted a turn of the one
+  agent, and the first three told it that its own call had failed. A
   failed call is read from the `failed` `llm.call` rows of
   `reports/trace/trajectory/*.jsonl` (`error_message`) and, for a provider
   failure, the `status=error` rows of `reports/trace/llm_calls.jsonl`; the
   retry back-off and the `backend_unhealthy` stop after an hour are
   unchanged. The `entered` line of the `=== Phase ===` block carries
   `reason=<reason>` of the transition, and the session-state block carries a
-  failed baseline as before. `INFERENCE_OPTIMIZER_BACKEND_ERROR_STREAK_THRESHOLD`
+  failed baseline as before. A task the previous process left running is
+  charged its failure at the start of the tick, so the first turn after a
+  restart already reads it. `INFERENCE_OPTIMIZER_BACKEND_ERROR_STREAK_THRESHOLD`
   is no longer read. A `send_message` is always stored under the topic
   `observation` with the topic it named in its payload, so a message can no
   longer be read back as a `delegated_result` or a `response`; the bus has no
@@ -362,7 +364,9 @@ it.
   an intent is now routed only when its call was answered `ok`. A gateway
   that delivers every tool input as a string now gets no intent through and
   the session stops after 50 intent-less turns, where it used to run every
-  intent while reporting each as failed. See
+  intent while reporting each as failed. The tool's server is built per
+  attempt, so a fault in building it fails the turn as a provider call does
+  instead of the launch. See
   [Upgrade](reference/upgrade.md).
 - **forge-loop runs every round as lanes and has no planning stage.** Every
   iteration is one round: one lane per focus the Analysis Agent divides its

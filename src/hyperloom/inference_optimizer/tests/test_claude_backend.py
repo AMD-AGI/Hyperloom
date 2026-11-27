@@ -550,7 +550,7 @@ _HEARTBEAT = {"intent_type": "send_message", "payload": {"topic": "heartbeat"}}
 )
 @pytest.mark.asyncio
 async def test_a_call_the_tool_schema_refuses_is_not_routed(claude_sdk, refused):
-    """The model is told such a call failed, so it sends the intent again: keeping the refused copy ran it twice."""
+    """The model is told such a call failed, so it sends the intent again: a kept refused copy would run beside it."""
     msg = FakeAssistantMessage(
         content=[
             ToolUseBlock(name=EMIT_INTENT_TOOL_QUALIFIED, input=refused),

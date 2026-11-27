@@ -611,10 +611,11 @@ that acts on it, and none of them is recorded as a failed action.
   that measured an older recipe generation is still discarded, with the same
   `not validating` warning in the log. A current one still restamps
   `cumulative_gain_validated`, which is where a lower re-measurement shows.
-* The Claude backend keeps every `emit_intent` call of a turn. 1.2.x dropped
-  a call whose input arrived in Claude Code's `__unparsedToolInput` wrapper
-  when the turn had already carried the same intent, and logged `claude
-  fallback intent deduped`. Both forms of the wrapper are still decoded.
+* The Claude backend keeps every `emit_intent` call of a turn that was
+  answered `ok`. 1.2.x dropped a call whose input arrived in Claude Code's
+  `__unparsedToolInput` wrapper when the turn had already carried the same
+  intent, and logged `claude fallback intent deduped`. The wrapper is still
+  decoded.
 
 ### Required: five Orchestration context tools are removed
 
@@ -1291,7 +1292,14 @@ Rows that are no longer written:
 * `baseline_not_promoted`, an `event` row written after a failed baseline was
   charged. `baseline_failure_streak=`, `last_baseline=`,
   `last_action_failures=` and `stop_reason=` of the session-state block
-  carry the same facts on every turn, as before.
+  carry the same facts on every turn, as before. A baseline the previous
+  process left running books no result, so in 1.2.x this event was what
+  admitted a turn able to read its failure. The failure of a task the
+  previous process left running, of any kind, is now charged at the start of
+  the tick, before Orchestration's turn is composed: the first turn after a
+  restart already carries it, where 1.2.x charged it after that turn. It is
+  also charged on a tick that is already stopping, where 1.2.x did not
+  charge it at all.
 
 Rows that change:
 
@@ -1324,8 +1332,19 @@ Rows that change:
   tool input as a string therefore gets no intent through and stops after
   50 turns without one (`stop_reason=backend_unhealthy`, after a
   `no_intent_streak` observation), where 1.2.x ran each intent while telling
-  the model it had failed. Claude Code's `__unparsedToolInput` wrapper is
-  still accepted, as the tool schema says.
+  the model it had failed. Such a deployment needs an endpoint that returns
+  tool inputs as JSON objects before it upgrades. A tool-use block that
+  Claude Code streamed but did not run, one under the bare name `emit_intent`
+  among them, was read as an intent too and no longer is. Claude Code's
+  `__unparsedToolInput` wrapper is still accepted, as the tool schema says.
+* The tool's server is built for each attempt of a turn, not when the
+  backend is constructed. An SDK that lacks `tool` or `create_sdk_mcp_server`
+  still ends the launch, and so does one that cannot build an in-process
+  server at all, because the context tools' server is still built at
+  start-up. A fault only the `emit_intent` server hits no longer ends the
+  launch: every turn fails as a provider call does, with a `status=error`
+  row in `reports/trace/llm_calls.jsonl` and the back-off, and the session
+  stops with `stop_reason=backend_unhealthy` after an hour.
 * Intents are still routed after the turn has ended, and an attempt of a
   turn that fails still takes the intents it had acknowledged with it.
 * The log lines `context_tool pull:` and `context tool handler ... raised`

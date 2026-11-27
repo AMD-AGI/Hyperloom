@@ -357,12 +357,13 @@ class DispatcherCollaborator(AdmissionMixin, DeadHolderAccountingMixin, Coordina
             )
         return False
 
-    async def _account_reconciled_failures(self) -> None:
+    async def account_reconciled_failures(self) -> None:
         """Charge, once each, the tasks the reconciler failed because their holder process is gone.
 
-        The reconciler reclaims those rows and sweeps their leases before every tick's pump; what is left to the
-        pump is the failure each reclaim implies. The accounting absorbs its store failures, because a pump that
-        raised here would stop booking results.
+        The reconciler reclaims those rows and sweeps their leases; what is left is the failure each reclaim implies.
+        The tick charges it before it admits a turn: such a task books no result, so the turn its disappearance
+        admits is the only one sure to read the failure. The accounting absorbs its store failures, because a tick
+        that raised here would neither take that turn nor book results.
         """
         dead_tasks = self._coord.reconciler.take_failed_tasks()
         if not dead_tasks:
@@ -381,7 +382,6 @@ class DispatcherCollaborator(AdmissionMixin, DeadHolderAccountingMixin, Coordina
         while the phase budget is spent or :attr:`admission_frozen` is set, which
         is re-derived after a drain that booked so a hold that booking settled is not read stale.
         """
-        await self._account_reconciled_failures()
         while True:
             booked = await self._drain_completions()
             if booked and self._refresh_admission_freeze is not None:

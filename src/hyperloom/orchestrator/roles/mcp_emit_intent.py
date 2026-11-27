@@ -140,59 +140,37 @@ _UNPARSED_TOOL_INPUT_KEY = "__unparsedToolInput"
 _EMIT_INTENT_TOP_LEVEL_KEYS = {"intent_type", "payload", _UNPARSED_TOOL_INPUT_KEY}
 
 
-def decode_emit_intent_input(raw_input: Any) -> tuple[dict[str, Any], str | None]:
-    """Decode a parser fallback and report why decoding failed.
+def _unwrap_unparsed_tool_input(tool_input: dict[str, Any]) -> dict[str, Any]:
+    """Return the input Claude Code's ``__unparsedToolInput`` wrapper holds; one that names its intent type is returned as it is.
 
-    Accepts the three shapes ``emit_intent`` tool input arrives in:
-
-    1. a native object (direct Anthropic API);
-    2. Claude Code's ``__unparsedToolInput.raw`` wrapper;
-    3. a JSON *string* envelope, as emitted by OpenAI-compatible / litellm
-       style proxies, optionally with ``payload`` itself stringified.
-
-    A caller that can see shape 3 hands it through unchanged: a non-dict input replaced
-    with ``{}`` would decode "successfully" to an empty intent and stall the
-    orchestrator with no error.
+    Raises:
+        IntentValidationError: The wrapper does not hold one JSON object.
     """
-    if isinstance(raw_input, str):
-        try:
-            raw_input = json.loads(raw_input)
-        except (TypeError, ValueError):
-            return {}, "emit_intent tool input string is not valid JSON"
-        if not isinstance(raw_input, dict):
-            return {}, "emit_intent tool input string did not decode to a JSON object"
-    if not isinstance(raw_input, dict):
-        return {}, f"emit_intent tool input must be an object, got {type(raw_input).__name__}"
-    payload = raw_input.get("payload")
-    if isinstance(payload, str):
-        try:
-            decoded_payload = json.loads(payload)
-        except (TypeError, ValueError):
-            decoded_payload = None
-        if isinstance(decoded_payload, dict):
-            raw_input = {**raw_input, "payload": decoded_payload}
-    if "intent_type" in raw_input or _UNPARSED_TOOL_INPUT_KEY not in raw_input:
-        return raw_input, None
-    wrapped = raw_input.get(_UNPARSED_TOOL_INPUT_KEY)
+    if "intent_type" in tool_input or _UNPARSED_TOOL_INPUT_KEY not in tool_input:
+        return tool_input
+    wrapped = tool_input[_UNPARSED_TOOL_INPUT_KEY]
     if not isinstance(wrapped, dict):
-        return raw_input, f"{_UNPARSED_TOOL_INPUT_KEY} must be an object"
+        raise IntentValidationError(f"emit_intent: {_UNPARSED_TOOL_INPUT_KEY} must be an object")
     raw = wrapped.get("raw")
     if not isinstance(raw, str) or not raw.strip():
-        return raw_input, f"{_UNPARSED_TOOL_INPUT_KEY}.raw must be a non-empty JSON object string"
+        raise IntentValidationError(
+            f"emit_intent: {_UNPARSED_TOOL_INPUT_KEY}.raw must be a non-empty JSON object string"
+        )
     try:
         parsed = json.loads(raw)
-    except (TypeError, ValueError):
-        return raw_input, f"{_UNPARSED_TOOL_INPUT_KEY}.raw is not valid JSON"
+    except ValueError as exc:
+        raise IntentValidationError(f"emit_intent: {_UNPARSED_TOOL_INPUT_KEY}.raw is not valid JSON") from exc
     if not isinstance(parsed, dict):
-        return raw_input, f"{_UNPARSED_TOOL_INPUT_KEY}.raw must decode to a JSON object"
-    return parsed, None
+        raise IntentValidationError(f"emit_intent: {_UNPARSED_TOOL_INPUT_KEY}.raw must decode to a JSON object")
+    return parsed
 
 
 def validate_emit_intent_input(payload: dict[str, Any]) -> Intent:
     """Validate one ``emit_intent`` tool input and return the intent it asks for.
 
-    The intent is built by :func:`validate_envelope`, the rule every transport's intents pass, from the one-intent
-    envelope of this call.
+    The input is a native object or Claude Code's ``__unparsedToolInput`` wrapper around one, the two shapes the
+    tool schema admits. The intent is built by :func:`validate_envelope`, the rule every transport's intents pass,
+    from the one-intent envelope of this call.
 
     Raises:
         IntentValidationError: The input is not one well-formed intent.
@@ -202,9 +180,7 @@ def validate_emit_intent_input(payload: dict[str, Any]) -> Intent:
     original_extra = set(payload) - _EMIT_INTENT_TOP_LEVEL_KEYS
     if original_extra:
         raise IntentValidationError(f"emit_intent input has unexpected keys: {sorted(original_extra)!r}")
-    coerced, decode_error = decode_emit_intent_input(payload)
-    if decode_error is not None:
-        raise IntentValidationError(f"emit_intent: {decode_error}")
+    coerced = _unwrap_unparsed_tool_input(payload)
     extra = set(coerced) - _EMIT_INTENT_TOP_LEVEL_KEYS
     if extra:
         raise IntentValidationError(f"emit_intent input has unexpected keys: {sorted(extra)!r}")
@@ -265,7 +241,6 @@ __all__ = [
     "build_emit_intent_server",
     "build_emit_intent_tool_input_schema",
     "build_intent_envelope_schema",
-    "decode_emit_intent_input",
     "payload_contract",
     "validate_emit_intent_input",
 ]

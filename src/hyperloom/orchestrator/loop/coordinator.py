@@ -593,6 +593,7 @@ class Coordinator:
         # Repair before anything is admitted: a round nobody will settle, a task row with no process. Ungated,
         # because a stuck round closes every gate this could sit behind.
         await self.reconciler.run(time.time())
+        await self.dispatcher.account_reconciled_failures()
         # Bump the persistent tick counter — drives phase/plateau math.
         self.shared_state.increment_tick()
         # A phase-entry hook may have finished early (for example a GEAK no_gain run exits KERNEL immediately).
@@ -1016,8 +1017,8 @@ class Coordinator:
         """Extend the ``BackendError`` streak and back the next turn off.
 
         A streak that has lasted ``_BACKEND_UNHEALTHY_STOP_SEC`` stops the session unless something else already has.
-        The failed call is not told to the agent: its turn never settled, so what admitted it still does, and the
-        error is on the call's ``llm.call`` trajectory row.
+        The failed turn never settled, so what admitted it admits it again once the back-off has passed; the error
+        is on the call's ``llm.call`` trajectory row.
         """
         from hyperloom.inference_optimizer.breakdown.stop_reasons import BACKEND_UNHEALTHY_STOP_REASON
 

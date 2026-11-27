@@ -22,6 +22,7 @@ _NATIVE_EMIT = {"intent_type": "send_message", "payload": {"topic": "heartbeat"}
 _WRAPPER_RAW = '{"intent_type": "send_message", "payload": {"topic": "heartbeat"}}'
 _WRAPPER_EMIT = {"__unparsedToolInput": {"raw": _WRAPPER_RAW, "len": len(_WRAPPER_RAW)}}
 _MIXED_EMIT = {**_NATIVE_EMIT, **_WRAPPER_EMIT}
+_STRING_PAYLOAD_EMIT = {"intent_type": "send_message", "payload": json.dumps({"topic": "heartbeat"})}
 _WRAPPER_WITH_JUNK = {**_WRAPPER_EMIT, "junk": 1}
 
 _DELEGATE_NATIVE = {"intent_type": "delegate", "payload": {"action_name": "baseline"}}
@@ -61,6 +62,7 @@ def _registered_emit_intent_tool(accepted: list[Intent] | None = None) -> Any:
         (_DELEGATE_NATIVE, True),
         (_DELEGATE_WRAPPER, True),
         (_UNKNOWN_TYPE_NATIVE, False),
+        (_STRING_PAYLOAD_EMIT, False),
     ],
     ids=[
         "native",
@@ -71,6 +73,7 @@ def _registered_emit_intent_tool(accepted: list[Intent] | None = None) -> Any:
         "native-delegate",
         "wrapper-delegate",
         "native-outside-the-enum",
+        "payload-as-a-json-string",
     ],
 )
 async def test_registered_schema_and_handler_agree(arguments: dict[str, Any], accepted: bool) -> None:
