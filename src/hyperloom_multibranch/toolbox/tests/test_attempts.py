@@ -162,7 +162,7 @@ async def test_a_retry_after_a_failure_held_against_its_node_goes_at_once_elsewh
     assert executor.clock.waits == [], "the avoid set already moves the retry; a wait would only idle its slot"
     assert executor.started == [1000.0] * 4
     assert reported == ["n1", "n2", "n3", "n4"], "each node was held to its failure"
-    assert [job.avoid_nodes for job in executor.jobs][1:] == [("n1",), ("n1", "n2"), ("n1", "n2", "n3")]
+    assert [job.avoid_nodes for job in executor.jobs][1:] == [("n1",), ("n2",), ("n3",)], "the previous node only"
 
 
 async def test_in_a_mixed_run_only_the_retries_after_a_failure_that_is_not_the_node_s_wait() -> None:
@@ -171,7 +171,7 @@ async def test_in_a_mixed_run_only_the_retries_after_a_failure_that_is_not_the_n
     assert executor.clock.waits == [60.0, 120.0], "the waits count the waiting retries only"
     assert executor.started == [1000.0, 1060.0, 1060.0, 1180.0]
     assert "n1" not in reported and "n2" in reported and "n4" in reported
-    assert [job.avoid_nodes for job in executor.jobs] == [(), (), ("n2",), ("n2", "n3")], "busy cards do not avoid"
+    assert [job.avoid_nodes for job in executor.jobs] == [(), (), ("n2",), ("n3",)], "busy cards do not avoid"
 
 
 async def test_cards_a_process_outside_the_test_held_neither_avoid_nor_report_their_node() -> None:
@@ -211,10 +211,54 @@ async def test_a_retry_after_cards_a_process_outside_the_test_held_waits_and_car
     assert reported == [] and executor.clock.waits == [60.0]
 
 
-async def test_a_waited_failure_does_not_lift_the_avoid_a_node_held_failure_put_on_its_node() -> None:
+async def test_a_success_after_a_node_held_failure_ran_away_from_that_node() -> None:
+    executor = _SucceedsAfter((PORT_REASON,))
+    reported: list[str] = []
+
+    async def on_node_failure(node: str, _reason: str, _reproduced: bool) -> None:
+        reported.append(node)
+
+    runner = AttemptRunner(executor, avoid=frozenset, on_node_failure=on_node_failure, backoff=_backoff(executor.clock))
+    result = await runner.run(_job())
+    assert result.validity is Validity.SUCCEEDED and len(result.attempts) == 2
+    assert [job.avoid_nodes for job in executor.jobs] == [(), ("n1",)]
+    assert reported == ["n1"] and executor.clock.waits == []
+
+
+async def test_two_node_held_failures_in_a_row_avoid_only_the_second_node() -> None:
+    result, executor, reported = await _run((PORT_REASON, DISK_FULL_REASON, PORT_REASON))
+    assert [job.avoid_nodes for job in executor.jobs][2] == ("n2",), "n1 is not carried on to the third attempt"
+    assert reported[:2] == ["n1", "n2"], "both nodes are reported, so the quarantine keeps them out for the session"
+
+
+async def test_a_waited_failure_after_a_node_held_one_leaves_the_next_attempt_no_node_to_avoid() -> None:
+    """The attempt just before the third failed for a reason that is not its node's, so the third avoids nothing: the
+    first node's failure is not carried past the attempt right after it (its report quarantines it instead)."""
     result, executor, reported = await _run((PORT_REASON, FOREIGN_REASON, PORT_REASON, CAPACITY_REASON))
-    assert [job.avoid_nodes for job in executor.jobs] == [(), ("n1",), ("n1",), ("n1", "n3")]
+    assert [job.avoid_nodes for job in executor.jobs] == [(), ("n1",), (), ("n3",)]
     assert reported == ["n1", "n3", "n4"], "the busy cards of n2 do not report their node"
+
+
+async def test_the_runner_still_adds_the_quarantine_and_the_request_s_own_avoid_to_every_attempt() -> None:
+    executor = _ScriptedExecutor((PORT_REASON, DISK_FULL_REASON, PORT_REASON))
+    request = replace(_job().request, avoid_nodes=("confirmed-on",))
+
+    async def on_node_failure(_node: str, _reason: str, _reproduced: bool) -> None:
+        return None
+
+    runner = AttemptRunner(
+        executor,
+        avoid=lambda: frozenset({"quarantined"}),
+        on_node_failure=on_node_failure,
+        max_infra_retries=2,
+        backoff=_backoff(executor.clock),
+    )
+    await runner.run(replace(_job(), request=request))
+    assert [job.avoid_nodes for job in executor.jobs] == [
+        ("confirmed-on", "quarantined"),
+        ("confirmed-on", "n1", "quarantined"),
+        ("confirmed-on", "n2", "quarantined"),
+    ]
 
 
 @pytest.mark.parametrize(
@@ -234,7 +278,7 @@ async def test_a_failure_that_says_nothing_about_the_node_puts_no_node_in_the_av
 )
 async def test_a_lost_or_unstarted_runner_and_no_capacity_still_avoid_their_node(reason) -> None:
     _, executor, _ = await _run(reason)
-    assert [job.avoid_nodes for job in executor.jobs][1:] == [("n1",), ("n1", "n2"), ("n1", "n2", "n3")]
+    assert [job.avoid_nodes for job in executor.jobs][1:] == [("n1",), ("n2",), ("n3",)]
 
 
 class _PlacingExecutor(_ScriptedExecutor):
@@ -280,6 +324,70 @@ async def _place(failures: dict[str, list[str]]) -> tuple[TestResult, _PlacingEx
     return await runner.run(_job()), executor, reported
 
 
+class _UnclearOnExecutor(_PlacingExecutor):
+    """A :class:`_PlacingExecutor` whose ``unclear`` node fails every attempt it carries as an unclear failure."""
+
+    def __init__(self, nodes: tuple[str, ...], failures: dict[str, list[str]], unclear: str) -> None:
+        super().__init__(nodes, failures)
+        self.unclear = unclear
+
+    async def run(self, job: TestJob) -> TestResult:
+        node = next(node for node in self.nodes if node not in job.avoid_nodes)
+        if node != self.unclear:
+            return await super().run(job)
+        self.jobs.append(job)
+        self.started.append(self.clock())
+        return TestResult(
+            request_id="r1",
+            validity=Validity.CANDIDATE_FAILED,
+            failure_class=FailureClass.UNCLEAR,
+            failure_reason="server_stalled",
+            sandbox=SandboxFacts(sandbox_id=f"s{job.attempt}", node_name=node),
+        )
+
+
+@pytest.mark.parametrize(
+    "reason, third_avoids, node, reported",
+    [
+        (PORT_REASON, ("n1", "n2"), "n3", [("n2", True), ("n1", False)]),
+        (f"{RUNNER_LOST}: the sandbox is gone", ("n1", "n2"), "n3", [("n1", False)]),
+        (FOREIGN_REASON, ("n1",), "n2", [("n1", False)]),
+    ],
+    ids=["port_in_use", "runner_lost", "busy_cards"],
+)
+async def test_an_infrastructure_failure_of_an_unclear_rerun_does_not_send_the_retry_back_to_the_first_node(
+    reason, third_avoids, node, reported
+) -> None:
+    """n1 fails every test unclear, the rerun on n2 fails once for an infrastructure reason, n3 is healthy: the attempt
+    after the rerun still avoids n1, so a second unclear failure on n1 never charges the test to the candidate."""
+    executor = _UnclearOnExecutor(("n1", "n2", "n3"), {"n2": [reason]}, unclear="n1")
+    heard: list[tuple[str, bool]] = []
+
+    async def on_node_failure(failed: str, _reason: str, reproduced: bool) -> None:
+        heard.append((failed, reproduced))
+
+    runner = AttemptRunner(executor, avoid=frozenset, on_node_failure=on_node_failure, backoff=_backoff(executor.clock))
+    result = await runner.run(_job())
+    assert [job.avoid_nodes for job in executor.jobs] == [(), ("n1",), third_avoids]
+    assert result.validity is Validity.SUCCEEDED and result.sandbox.node_name == node
+    assert heard == reported
+    assert result.attempts[0].failure_class is FailureClass.INFRA, "the unclear failure did not reproduce"
+
+
+async def test_the_node_of_an_unclear_failure_stays_avoided_but_the_list_does_not_grow() -> None:
+    """After the unclear failure on n1, each later attempt avoids n1 and only the node just before it: the fourth avoids
+    n1 and n3, not n2, and runs on n2 again, whose one failure is spent."""
+    executor = _UnclearOnExecutor(("n1", "n2", "n3", "n4"), {"n2": [PORT_REASON], "n3": [PORT_REASON]}, unclear="n1")
+
+    async def on_node_failure(_node: str, _reason: str, _reproduced: bool) -> None:
+        return None
+
+    runner = AttemptRunner(executor, avoid=frozenset, on_node_failure=on_node_failure, backoff=_backoff(executor.clock))
+    result = await runner.run(_job())
+    assert [job.avoid_nodes for job in executor.jobs] == [(), ("n1",), ("n1", "n2"), ("n1", "n3")]
+    assert result.validity is Validity.SUCCEEDED and result.sandbox.node_name == "n2"
+
+
 @pytest.mark.parametrize(
     "reason",
     [f"{RUNNER_LOST}: the sandbox is gone", f"{RUNNER_START_FAILED}: exec format error"],
@@ -317,7 +425,7 @@ async def test_the_avoid_after_two_refusals_for_busy_cards_lasts_one_attempt() -
 async def test_a_runner_start_timeout_waits_and_still_puts_its_node_in_the_next_attempt_s_avoid_set() -> None:
     _, executor, _ = await _run(START_TIMEOUT_REASON)
     assert executor.clock.waits == [60.0, 120.0, 240.0]
-    assert [job.avoid_nodes for job in executor.jobs][1:] == [("n1",), ("n1", "n2"), ("n1", "n2", "n3")], (
+    assert [job.avoid_nodes for job in executor.jobs][1:] == [("n1",), ("n2",), ("n3",)], (
         "a slow or faulty node (an image pull, a GPU that does not come up) is one way a runner does not start in time"
     )
 
