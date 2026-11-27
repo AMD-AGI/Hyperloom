@@ -95,37 +95,24 @@ def test_format_inbox_delegated_result_with_error():
     assert "error=" in line
 
 
-def test_format_inbox_policy_denial_topics():
-    m1 = Message(
+def test_format_inbox_policy_denied_observation_shows_the_rule_and_hint():
+    denied = Message(
         msg_id="p",
-        from_agent="orch",
-        to_agent="k",
-        topic="policy_denial",
-        payload={"action_name": "act", "rule": "r1", "hint": "h" * 200},
+        from_agent="coordinator",
+        to_agent="orchestration",
+        topic="observation",
+        payload={
+            "kind": "policy_denied",
+            "intent_type": "delegate",
+            "rule": "phase_incompatible",
+            "hint": "KERNEL_AGENT proposes: integrate",
+            "reason": "action='explore' is not proposable while the phase is 'KERNEL_AGENT'",
+        },
         seq=3,
     )
-    assert "action='act'" in _format_inbox_event(m1)
-
-    m2 = Message(
-        msg_id="p2",
-        from_agent="o",
-        to_agent="k",
-        topic="denial",
-        payload={"action_name": "a2", "rule": "r2", "hint": ""},
-        seq=4,
-    )
-    assert "rule='r2'" in _format_inbox_event(m2)
-
-    m3 = Message(
-        msg_id="p3",
-        from_agent="o",
-        to_agent="k",
-        topic="observation",
-        payload={"kind": "policy_denial", "action_name": "x", "rule": "rx", "hint": "y"},
-        seq=5,
-    )
-    out = _format_inbox_event(m3)
-    assert "topic=observation" in out and "action='x'" in out and "rule='rx'" in out
+    line = _format_inbox_event(denied)
+    assert "topic=observation" in line and "kind='policy_denied'" in line
+    assert "phase_incompatible" in line and "KERNEL_AGENT proposes: integrate" in line
 
 
 def test_format_inbox_review_verdict():

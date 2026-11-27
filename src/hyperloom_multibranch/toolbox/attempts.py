@@ -6,7 +6,9 @@
 An :class:`Executor` runs ONE attempt in a fresh sandbox and returns a ``TestResult`` describing it. This module turns
 attempts into the request's single result:
 
-* ``infra`` failure: another sandbox, away from every node an earlier attempt failed on for a reason held against it,
+* ``infra`` failure: another sandbox, away from the node the attempt just before it failed on when that failure is held
+  against its node (:func:`_facts_nodes`: that one node only, not every node an earlier attempt failed on, plus the
+  node of an earlier unclear failure; the quarantine is what keeps a reported node out for the rest of the session),
   up to ``max_infra_retries`` retries, then ``measurement_failed``; the node is reported as an infrastructure failure.
   A retry after a failure that is not the node's (:data:`WAITED_INFRA_REASONS`: cards a process outside the test held,
   a platform short of sandboxes, a failure never held against its node) waits first, longer each time
@@ -27,7 +29,8 @@ attempts into the request's single result:
   for its rate limit, a result file whose download came back short) is retried like any other, and its node is not
   reported.
 * ``candidate`` failure (a known failure signature): ``candidate_failed`` at once.
-* ``unclear`` failure: one rerun away from the first node. A second failure is ``candidate_failed``; a success is the
+* ``unclear`` failure: one rerun away from the first node, which every later attempt of the request also avoids, so an
+  infrastructure retry of the rerun does not return to it. A second failure is ``candidate_failed``; a success is the
   result, and the first attempt is re-labelled an infrastructure failure of its node and reported as a failure that
   did not reproduce. A sweep that ran out of its time (:data:`TEST_TIMEOUT_REASON`) is not rerun: ``measurement_failed``
   at once (:func:`_outran`).
@@ -58,6 +61,7 @@ from hyperloom.measure.failures import (
     PROFILER_DIED,
     PROFILER_HUNG,
     PROFILER_SNAPSHOT_FAILED,
+    PROFILE_REFUSED,
     RESULT_DOWNLOAD_INCOMPLETE,
     RUNNER_START_TIMEOUT,
     SANDBOX_ACQUIRE_TIMEOUT,
@@ -92,10 +96,12 @@ INFRA_BACKOFF_SECONDS: tuple[float, ...] = (60.0, 120.0, 240.0)
 #: whose server died in the profiler's memory-snapshot dump (``PROFILER_SNAPSHOT_FAILED``) dies there in every sandbox of
 #: the image, and says nothing of the candidate. A profile whose server went silent with its profile window open
 #: (``PROFILER_HUNG``) hangs again at the same point on the same image; a retry only holds the cards for another silence
-#: limit, or meets them still held by the hung server's ranks. The failed profile tells the session its backend cannot
-#: profile, so it asks for none again. A sandbox whose framework is another version than the one the candidate's files
-#: were compiled against (``FRAMEWORK_VERSION_MISMATCH``) runs the same image as every other sandbox of the test. A test
-#: whose output is more than its result may carry (``OUTPUT_TOO_LARGE``) writes the same output in the next sandbox.
+#: limit, or meets them still held by the hung server's ranks. A profile whose server refused its ``/start_profile``
+#: (``PROFILE_REFUSED``) is refused again by every server of the image. The failed profile tells the session its
+#: backend cannot profile, so it asks for none again. A sandbox whose framework is another version than the one the
+#: candidate's files were compiled against (``FRAMEWORK_VERSION_MISMATCH``) runs the same image as every other sandbox
+#: of the test. A test whose output is more than its result may carry (``OUTPUT_TOO_LARGE``) writes the same output in
+#: the next sandbox.
 UNRETRIED_INFRA_REASONS: frozenset[str] = frozenset(
     {
         INERT_PATCH,
@@ -103,6 +109,7 @@ UNRETRIED_INFRA_REASONS: frozenset[str] = frozenset(
         HF_CACHE_PERMISSION,
         PROFILER_SNAPSHOT_FAILED,
         PROFILER_HUNG,
+        PROFILE_REFUSED,
         FRAMEWORK_VERSION_MISMATCH,
         OUTPUT_TOO_LARGE,
     }
@@ -304,12 +311,26 @@ def _mark_same_node(result: TestResult, avoided: set[str]) -> TestResult:
 
 
 def _facts_nodes(attempts: list[Attempt]) -> list[str]:
-    """The nodes the next attempt avoids: each earlier attempt's, less the ones whose infrastructure failure said nothing
-    about the node (:data:`UNAVOIDED_INFRA_REASONS`), whose retry may run on the same node; and the node a process
-    outside the test held cards on for the two attempts just before it (:func:`_held_foreign_node`)."""
-    nodes = [attempt.node for attempt in attempts if attempt.node and not _unavoided(attempt)]
-    held = _held_foreign_node(attempts)
-    return nodes if held is None or held in nodes else [*nodes, held]
+    """The nodes the next attempt avoids: the node of the attempt just before it, unless its infrastructure failure said
+    nothing about the node (:data:`UNAVOIDED_INFRA_REASONS`), whose retry may run on the same node; that node is still
+    avoided when a process outside the test held cards on it for the two attempts just before (:func:`_held_foreign_node`).
+    The node of an unclear failure stays in the list until the request ends, since its rerun must run away from it
+    (:func:`_unclear_node`; one node, as a request reruns once). Any other earlier attempt's node is not carried on: a
+    node a reported failure held against it stays out through the quarantine (``avoid``), and one that only this test
+    saw fail is free again for any attempt after the next one."""
+    nodes: list[str] = []
+    last = attempts[-1] if attempts else None
+    if last is not None and last.node and (not _unavoided(last) or _held_foreign_node(attempts) == last.node):
+        nodes.append(last.node)
+    unclear = _unclear_node(attempts)
+    if unclear is not None and unclear not in nodes:
+        nodes.append(unclear)
+    return nodes
+
+
+def _unclear_node(attempts: list[Attempt]) -> str | None:
+    """The node of the first attempt of ``attempts`` that failed unclear, or ``None``."""
+    return next((a.node for a in attempts if a.failure_class is FailureClass.UNCLEAR and a.node), None)
 
 
 def _held_foreign_node(attempts: list[Attempt]) -> str | None:
@@ -424,7 +445,7 @@ class AttemptRunner:
     async def _back_off(self, request: TestRequest, attempts: list[Attempt]) -> None:
         """Wait before the next infrastructure retry when the last attempt failed for a reason that is not its node's
         (:data:`WAITED_INFRA_REASONS`), the ``n``-th such wait of the request for the ``n``-th such failure; after any
-        other failure the retry goes at once, to a node the avoid set has not yet seen fail."""
+        other failure the retry goes at once, away from the node that failed."""
         waited = [a for a in attempts if _waited(a)]
         if not waited or waited[-1] is not attempts[-1]:
             return

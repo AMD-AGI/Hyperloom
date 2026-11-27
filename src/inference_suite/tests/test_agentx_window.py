@@ -1,7 +1,8 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Contract of the AgentX profile window: it counts from the measured mark and closes by the finished mark."""
+"""Contract of the AgentX profile window: it counts from the measured mark, closes by the finished mark, sends the
+server's admin key, and ends the round when the server refuses to open it."""
 
 from __future__ import annotations
 
@@ -13,10 +14,11 @@ from pathlib import Path
 
 import pytest
 
-from inference_suite.contracts import ProfileConfig, RunLayout
+from inference_suite.contracts import FailedStep, ProfileConfig, RunLayout
 from inference_suite.frameworks import Framework
 from inference_suite.profile.agentx_window import AgentxWindow
 from inference_suite.runtime.phases import Phase, PhaseClock
+from inference_suite.runtime.watch import Stop
 
 _START = 1_800_000_000.0
 _PROFILE = ProfileConfig(enabled=True, agentx_open_after_sec=30, agentx_duration_sec=60)
@@ -32,6 +34,7 @@ class _Server:
 
     def __init__(self, refuse: str | None) -> None:
         self.requests: list[tuple[str, object]] = []
+        self.authorization: dict[str, str | None] = {}
         self.refuse = refuse
 
     def handler(self) -> type[http.server.BaseHTTPRequestHandler]:
@@ -39,6 +42,7 @@ class _Server:
 
         class Handler(http.server.BaseHTTPRequestHandler):
             def _answer(self, body: bytes) -> None:
+                server.authorization[self.path] = self.headers.get("Authorization")
                 status = 500 if self.path == server.refuse else 200
                 self.send_response(status)
                 self.end_headers()
@@ -148,17 +152,36 @@ def test_a_replay_that_never_reaches_profiling_opens_no_window(engine, tmp_path)
 
 
 @pytest.mark.parametrize("engine", ["/start_profile"], indirect=True)
-def test_a_refused_start_is_recorded_and_never_retried(engine, tmp_path) -> None:
+def test_a_refused_start_ends_the_round_with_the_servers_answer_and_is_never_retried(engine, tmp_path) -> None:
     served, url = engine
     window = AgentxWindow(_PROFILE, Framework.SGLANG, url, _measured(PhaseClock()))
-    for offset in (30, 31, 120):
-        window.hear(_START + offset)
 
-    capture = window.finish(RunLayout(tmp_path))
+    stops = [window.hear(_START + offset) for offset in (30, 31, 120)]
 
+    refused = Stop(FailedStep.PROFILE_REFUSED, "/start_profile: HTTP Error 500: Internal Server Error")
+    assert stops == [refused, None, None]
     assert [path for path, _ in served.requests] == ["/start_profile"]
-    assert capture.window_open_unix is None
-    assert capture.error is not None and capture.error.startswith("/start_profile: HTTP Error 500")
+    capture = window.finish(RunLayout(tmp_path))
+    assert capture.window_open_unix is None and capture.error == refused.detail
+
+
+def test_an_unanswered_start_is_recorded_and_leaves_the_round_to_its_server_watch(tmp_path) -> None:
+    window = AgentxWindow(_PROFILE, Framework.SGLANG, "http://127.0.0.1:1", _measured(PhaseClock()))
+
+    assert window.hear(_START + 30) is None
+    capture = window.finish(RunLayout(tmp_path))
+    assert capture.window_open_unix is None and capture.error.startswith("/start_profile: <urlopen error")
+
+
+def test_the_window_sends_the_servers_admin_key_with_its_control_requests_only(engine) -> None:
+    served, url = engine
+    clock = _measured(PhaseClock())
+    window = AgentxWindow(_PROFILE, Framework.SGLANG, url, clock, "k3y")
+
+    window.hear(_START + 30)
+    window.hear(_START + 90)
+
+    assert served.authorization == {"/start_profile": "Bearer k3y", "/metrics": None, "/stop_profile": "Bearer k3y"}
 
 
 def test_sglang_carries_the_configured_start_body(engine) -> None:

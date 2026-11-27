@@ -11,7 +11,7 @@ and the section returns a best-effort partial.
 What is left here is what the export cannot be told at author time: the session
 and workload configuration it was launched with, the langfuse receipt another
 process wrote, and the projection of the recorder's own fragments and durable
-events into the shape the report reads.
+events into the shape the breakdown publishes.
 """
 
 from __future__ import annotations

@@ -19,6 +19,7 @@ from typing import Any
 import httpx
 
 from hyperloom_common.env import env_int
+from inference_suite.multinode import is_host_key_error
 
 from ._internal import ray_dashboard
 from ._internal import ssh_client, ssh_known_hosts
@@ -172,7 +173,7 @@ def _infera_ssh_with_host_key_retry(
         known_hosts=_infera_known_hosts_path(state),
     )
     cp = run(target)
-    if cp.returncode != 0 and ssh_known_hosts.is_host_key_error(cp.stderr):
+    if cp.returncode != 0 and is_host_key_error(cp.stderr or ""):
         warn(f"infera ssh {ip}:{target.port}: host key mismatch; refreshing known_hosts and retrying once")
         try:
             known_hosts = ssh_known_hosts.refresh_known_hosts([(ip, target.port)], target.known_hosts)

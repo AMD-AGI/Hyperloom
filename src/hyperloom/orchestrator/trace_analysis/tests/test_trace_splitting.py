@@ -210,6 +210,34 @@ class TestCollectSplitChunks:
                 [],
             )
 
+    def test_decode_only_or_generic_falls_back_to_the_generic_chunk(self, tmp_path):
+        split_dir = tmp_path / "split"
+        split_dir.mkdir()
+        self._write_dummy_chunk(split_dir, "steady_state_test.json.gz")
+        self._write_dummy_chunk(split_dir, "sglang_iteration_0-31.json.gz")
+
+        chunk, meta, _ = trace_split._collect_split_chunks(
+            split_dir, "decode_only_or_generic", tmp_path / "trace.json.gz", []
+        )
+        assert chunk.name == "steady_state_test.json.gz"
+        assert meta["selected_mode"] == "decode_only_or_generic"
+
+        self._write_dummy_chunk(split_dir, "decode_only_steady_state_test.json.gz")
+        chunk, _, _ = trace_split._collect_split_chunks(
+            split_dir, "decode_only_or_generic", tmp_path / "trace.json.gz", []
+        )
+        assert chunk.name == "decode_only_steady_state_test.json.gz"
+
+    def test_unsplit_trace_is_copied_into_the_split_dir(self, tmp_path):
+        raw = tmp_path / "1-TP-0-EXTEND.trace.json.gz"
+        raw.write_bytes(b"raw-trace")
+
+        copied = trace_split.copy_unsplit_trace(raw, tmp_path / "split")
+
+        assert copied == tmp_path / "split" / raw.name
+        assert copied.read_bytes() == b"raw-trace"
+        assert raw.read_bytes() == b"raw-trace"
+
     def test_missing_mode_raises(self, tmp_path):
         split_dir = tmp_path / "split"
         split_dir.mkdir()
@@ -243,7 +271,7 @@ _KNOWN_ANNOTATION_MANIFEST = {
 
 
 class TestSplitManifest:
-    """Verify _run_trace_split reads the splitter's split_manifest.json."""
+    """Verify run_trace_split reads the splitter's split_manifest.json."""
 
     @staticmethod
     def _split(tmp_path, monkeypatch, *, manifest, llm_inference, chunk_name):
@@ -265,7 +293,7 @@ class TestSplitManifest:
             budget_minutes=1,
         )
         warnings: list[dict] = []
-        _chunk, meta = trace_split._run_trace_split(
+        _chunk, meta = trace_split.run_trace_split(
             args, trace_split.TraceSplitJob(tmp_path / "trace.json.gz", split_dir, tmp_path), tmp_path / "log", warnings
         )
         return split_dir, meta, warnings
@@ -357,9 +385,9 @@ def _tracelens_importable() -> bool:
     reason="TraceLens not installed",
 )
 class TestSplitterE2E:
-    """Run _run_trace_split on synthetic traces to verify end-to-end splitting.
+    """Run run_trace_split on synthetic traces to verify end-to-end splitting.
 
-    Calls _run_trace_split() directly — the same function main() uses — with
+    Calls run_trace_split() directly — the same function main() uses — with
     synthetic traces and the same args the orchestrator would set. This tests
     the full chain: argparse flags -> _build_split_cmd -> TraceLens splitter
     subprocess -> _collect_split_chunks -> _validate_selected_chunk.
@@ -396,7 +424,7 @@ class TestSplitterE2E:
         )
         tl_root = Path(tla.__file__).resolve().parent.parent.parent.parent.parent
 
-        chunk, meta = trace_split._run_trace_split(
+        chunk, meta = trace_split.run_trace_split(
             args,
             trace_split.TraceSplitJob(trace_path, split_dir, tl_root),
             log_path,
@@ -421,7 +449,7 @@ class TestSplitterE2E:
         )
         tl_root = Path(tla.__file__).resolve().parent.parent.parent.parent.parent
 
-        chunk, meta = trace_split._run_trace_split(
+        chunk, meta = trace_split.run_trace_split(
             args,
             trace_split.TraceSplitJob(trace_path, split_dir, tl_root),
             log_path,

@@ -11,6 +11,7 @@ trace: no card and no model. The PR search runs against a GitHub that answers fr
 from __future__ import annotations
 
 import asyncio
+import dataclasses
 import gzip
 import json
 import logging
@@ -25,8 +26,8 @@ from typing import Any
 
 import pytest
 
-from hyperloom_common.gpu_identity import AMD_GPU_BOARDS
 from hyperloom.hosted.mcp_server import McpServer, McpServerConfig
+from hyperloom.orchestrator.tests._fixtures import MI355X_CARD, publish_card
 from hyperloom_multibranch.contracts.blackboard import Role, Writer
 from hyperloom_multibranch.contracts.toolbox import RequestRejected
 from hyperloom_multibranch.blackboard import LocalBlackboard
@@ -46,6 +47,8 @@ SGLANG = "https://github.com/sgl-project/sglang"
 GITHUB_API = "https://api.github.com/"
 _REAL_URLOPEN = urllib.request.urlopen
 HOST_TOKEN = "ghp_host_token_not_for_the_result"
+#: The GPU label the session exports as ``GPU_TYPE``.
+SESSION_LABEL = "mi355x"
 #: One serving step: TraceLens' perf report links a kernel (on the GPU's pid) to its op through the launch's correlation
 #: and ``External id``.
 STEP = [
@@ -158,8 +161,8 @@ def _pr(number: int, title: str) -> dict[str, Any]:
 
 @pytest.fixture(autouse=True)
 def _host(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-    """A TraceLens checkout that is only a directory with a ``.git`` (the non-llm analysis does not read it), and a host that
-    holds a GitHub token."""
+    """A TraceLens checkout that is only a directory with a ``.git`` (the non-llm analysis does not read it), a session
+    that exports its GPU label, and a host that holds a GitHub token."""
     (tmp_path / "TraceLens" / ".git").mkdir(parents=True)
     skill = (
         tmp_path / "TraceLens" / "TraceLens" / "Agent" / "Analysis" / "skills" / "analysis-orchestrator" / "SKILL.md"
@@ -168,6 +171,7 @@ def _host(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     skill.write_text("the agent route's skill; the non-llm route only checks it is there\n", encoding="utf-8")
     monkeypatch.setenv("TRACELENS_ROOT", str(tmp_path / "TraceLens"))
     monkeypatch.delenv("HYPERLOOM_TRACE_ANALYSIS_ROUTE", raising=False)
+    monkeypatch.setenv("GPU_TYPE", SESSION_LABEL)
     monkeypatch.setenv("GITHUB_TOKEN", HOST_TOKEN)
     monkeypatch.delenv("GH_TOKEN", raising=False)
 
@@ -281,17 +285,26 @@ async def _never(payload: dict, *, session_dir: Path) -> dict:
     raise AssertionError("the analysis must not start")
 
 
-async def test_a_specialist_gets_the_roofline_of_the_trace_its_profile_test_left(served: Local) -> None:
+@pytest.fixture
+def mi355x_session(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The session published an MI355X as its card."""
+    publish_card(monkeypatch, MI355X_CARD)
+
+
+@pytest.mark.usefixtures("mi355x_session")
+async def test_a_specialist_gets_the_roofline_of_the_trace_its_profile_test_left_for_the_sessions_gpu(
+    served: Local,
+) -> None:
     status, record = await _roofline(served, TRACE)
     result = record["result"]
     assert status is JobStatus.SUCCEEDED and record["summary"] == "roofline analysed"
-    assert (result["status"], result["analysis_meta"]["route"], _analysed_platform(result)) == (
+    assert (result["status"], result["analysis_meta"]["route"], _analysed_platform(result).upper()) == (
         "ok",
         "non-llm",
-        "MI355X",
+        SESSION_LABEL.upper(),
     )
-    # TraceLens bundles no MI355X: its report read Hyperloom's peaks for the board.
-    assert _arch_used(result)["mem_bw_gbps"] == AMD_GPU_BOARDS["mi355x"].hbm_bw_gbps
+    # TraceLens bundles no MI355X: its report read the vendor peaks of the session's card.
+    assert _arch_used(result)["mem_bw_gbps"] == MI355X_CARD.memory_bandwidth_gbps
     roofline = Path(result["kernel_roofline_path"])
     assert roofline.is_file() and roofline.is_relative_to(
         served.session / "tool-results"
@@ -306,13 +319,23 @@ async def test_the_platform_of_the_request_is_the_one_analysed_for(served: Local
     assert _arch_used(record["result"])["name"] == "MI300X"  # the arch TraceLens bundles
 
 
-async def test_a_gpu_no_one_has_peaks_for_fails_the_job_by_name_and_starts_no_analysis(
+async def test_a_gpu_tracelens_has_no_spec_for_in_a_session_without_a_card_fails_the_job_by_name_and_starts_no_analysis(
     served: Local, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setattr(roofline_module, "trace_analyze_handler", _never)
     status, record = await _roofline(served, TRACE, target_platform="MI999X")
     assert status is JobStatus.FAILED and record["result"]["error_class"] == "unknown_gpu_arch"
     assert "'MI999X'" in record["summary"]
+
+
+async def test_a_card_that_reports_no_memory_bandwidth_gives_no_vendor_peaks_so_the_job_fails_by_name(
+    served: Local, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    publish_card(monkeypatch, dataclasses.replace(MI355X_CARD, memory_bandwidth_gbps=None))
+    monkeypatch.setattr(roofline_module, "trace_analyze_handler", _never)
+    status, record = await _roofline(served, TRACE)
+    assert status is JobStatus.FAILED and record["result"]["error_class"] == "unknown_gpu_arch"
+    assert f"'{SESSION_LABEL}'" in record["summary"]
 
 
 async def test_the_roofline_needs_a_profile_test_it_does_not_profile_itself(served: Local) -> None:
@@ -330,6 +353,7 @@ async def test_a_route_other_than_non_llm_fails_the_job_by_name_and_starts_no_an
     assert record["result"]["error_class"] == "invalid_analysis_route"
 
 
+@pytest.mark.usefixtures("mi355x_session")
 async def test_the_route_the_host_environment_names_is_not_the_rooflines(
     served: Local, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -350,6 +374,7 @@ async def test_a_trace_with_no_kernel_or_no_trace_fails_the_job_instead_of_answe
     assert record["summary"].startswith(("none of the first", "trace_input does not exist", "no trace files"))
 
 
+@pytest.mark.usefixtures("mi355x_session")
 async def test_an_analysis_that_scanned_none_of_the_traces_kernels_fails_the_job_instead_of_answering_ok(
     served: Local, monkeypatch: pytest.MonkeyPatch
 ) -> None:

@@ -130,7 +130,8 @@ def _seeded(point: dict, base: BaseLaunch) -> dict:
 
 def _base(framework: str, board: str = "mi355x", tp: int = 2) -> BaseLaunch:
     snapshot = SourceSnapshot(None, 1_793_000_000, unread=UnreadSource("InferenceX", "offline"))
-    query = LaunchQuery(_MODEL_ID, framework, board, Workload.FIXED, (64,), isl=1024, osl=1024, tp=tp)
+    gfx = {"mi300x": "gfx942", "mi355x": "gfx950"}[board]
+    query = LaunchQuery(_MODEL_ID, framework, board, Workload.FIXED, (64,), isl=1024, osl=1024, tp=tp, gfx=gfx)
     base = resolve_base(query, snapshot, gpus=8)
     assert isinstance(base, BaseLaunch), base
     return base

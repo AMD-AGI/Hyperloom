@@ -337,7 +337,6 @@ class RemoteRecipeClient:
         *,
         scheme: str,
         match: dict[str, str],
-        hardware_in: list[str] | None = None,
         offset: int = 0,
         limit: int = 50,
     ) -> dict[str, Any]:
@@ -345,7 +344,6 @@ class RemoteRecipeClient:
         return self.store.search_identities(
             scheme=scheme,
             match=match,
-            hardware_in=hardware_in,
             offset=offset,
             limit=limit,
         )

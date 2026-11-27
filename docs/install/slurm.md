@@ -304,7 +304,6 @@ The following items address common Slurm job and cluster configuration problems.
 - `docker: ... no such host` when pulling the image: The private registry is unreachable from the node. Use a node-cached local image name, or `docker login` a reachable registry.
 - `CERTIFICATE_VERIFY_FAILED: unable to get local issuer` (huggingface/github): The CA bundle has only the internal cert. Use a combined CA bundle.
 - `ModuleNotFoundError: No module named '...cli'`: The source snapshot is incomplete or an old layout. Stage a complete src-layout checkout (`src/hyperloom/...`).
-- `--gpu-type: invalid choice: 'MI355X'`: The CLI is case-sensitive. Use lowercase (for example `mi355x`; `submit-vultr.sh` already does).
 - `--claude-model=... is not allowed`: The strict AMD allowlist is in force (`INFERENCE_OPTIMIZER_ALLOW_CUSTOM_ORCH_MODEL=0`). Use an allowlisted id (`claude-opus-5-5` first, then `claude-opus-5`) for orchestration, or unset the variable to validate against the gateway catalog instead.
 - `Invalid model name` / `401 missing subscription key`: The model name is not in the key catalog (often a suffixed variant). Use a name from `curl $OPENAI_BASE_URL/models`.
 - Server fails to start / OOM in shm: `/dev/shm` is too small. Raise `HL_SHM_SIZE` (default `64g`).
@@ -317,8 +316,7 @@ flowchart LR
     A[GPU gres] --> B[Image reachability]
     B --> C[Combined CA]
     C --> D[Complete source]
-    D --> E[GPU-type casing]
-    E --> F[Orchestration-model allowlist]
+    D --> F[Orchestration-model allowlist]
 ```
 
 ---

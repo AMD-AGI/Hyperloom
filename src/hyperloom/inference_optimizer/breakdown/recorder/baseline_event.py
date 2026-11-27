@@ -440,9 +440,8 @@ def anchoring_baseline_action(timeline: Sequence[Mapping[str, Any]]) -> QualityR
     """The quality-reference action the session's gains were read against, or ``None``.
 
     The latest one that produced a usable figure: a baseline re-measured after
-    an enablement fix re-anchors the session. ``outcome.baseline`` and the
-    report's baseline section both read this one choice, so they cannot name
-    different measurements.
+    an enablement fix re-anchors the session. ``outcome.baseline`` reads this
+    choice.
     """
     usable = [
         row

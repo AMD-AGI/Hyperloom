@@ -414,6 +414,7 @@ TRACEBACK_LOG = 'Traceback (most recent call last):\n  File "x.py", line 1\nRunt
         (FailedStep.GPUS_UNAVAILABLE, FailureClass.INFRA, "host_gpus_unavailable"),
         (FailedStep.SERVER_SILENT_BEFORE_READY, FailureClass.INFRA, "hung_before_ready"),
         (FailedStep.TEARDOWN_INCOMPLETE, FailureClass.INFRA, "teardown_incomplete"),
+        (FailedStep.PROFILE_REFUSED, FailureClass.INFRA, "profile_refused"),
         (FailedStep.SERVER_STALLED, FailureClass.UNCLEAR, "server_stalled"),
         (FailedStep.SERVER_BOOT_TIMEOUT, FailureClass.CANDIDATE, "server_boot_timeout"),
     ],

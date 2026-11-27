@@ -103,7 +103,6 @@ def test_native_and_fixed_profiles_share_patches_not_launch_controls(tmp_path, m
     assert (
         not {
             "SGLANG_PROFILE_WITH_STACK",
-            "SGLANG_PROFILE_RECORD_SHAPE",
             "SGLANG_PROFILE_RECORD_SHAPES",
             "SGLANG_GRAPH_BATCH_CAPTURE",
         }

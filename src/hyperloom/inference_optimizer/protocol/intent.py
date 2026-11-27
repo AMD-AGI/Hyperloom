@@ -54,8 +54,7 @@ PAYLOAD_REQUIRED: dict[IntentType, tuple[str, ...]] = {
     IntentType.PROPOSE_ACTION: ("action_name", "predicted_gain_pct"),
     IntentType.ALERT: ("severity", "summary"),
     IntentType.REQUEST: ("target_agent", "kind"),
-    # verdict/verdict_map mutual exclusion enforced by _validate_review_verdict_payload.
-    IntentType.REVIEW_VERDICT: ("target_proposal_msg_id",),
+    IntentType.REVIEW_VERDICT: ("target_proposal_msg_id", "verdict"),
     IntentType.EXTEND_LEASE: ("task_id", "extra_sec"),
     IntentType.PRUNE_BRANCH: ("family", "reason"),
     IntentType.ESCALATE_STRATEGY_CHANGE: ("reason", "next_action_hint"),
@@ -152,57 +151,13 @@ def _validate_extend_lease_payload(payload: dict[str, Any], *, index: int) -> No
         )
 
 
-def _validate_review_verdict_payload(
-    payload: dict[str, Any],
-    *,
-    index: int,
-) -> None:
-    """Enforce REVIEW_VERDICT shape: exactly one of ``verdict`` (single) or ``verdict_map`` (per-variant batch), each carrying a recognised verdict."""
-    has_single = "verdict" in payload
-    has_map = "verdict_map" in payload
-    if not has_single and not has_map:
+def _validate_review_verdict_payload(payload: dict[str, Any], *, index: int) -> None:
+    """Enforce REVIEW_VERDICT value constraints: a recognised ``verdict``."""
+    verdict = payload["verdict"]
+    if not isinstance(verdict, str) or verdict not in ALLOWED_VERDICTS:
         raise IntentValidationError(
-            f"intents[{index}] (type=review_verdict) must include either "
-            f"'verdict' (single) or 'verdict_map' (per-variant); both missing"
+            f"intents[{index}] (type=review_verdict).verdict must be one of {sorted(ALLOWED_VERDICTS)!r}, got {verdict!r}"
         )
-    if has_single and has_map:
-        raise IntentValidationError(
-            f"intents[{index}] (type=review_verdict): 'verdict' and 'verdict_map' are mutually exclusive"
-        )
-    if has_single:
-        v = payload["verdict"]
-        if not isinstance(v, str) or v not in ALLOWED_VERDICTS:
-            raise IntentValidationError(
-                f"intents[{index}] (type=review_verdict).verdict must be one of {sorted(ALLOWED_VERDICTS)!r}, got {v!r}"
-            )
-    if has_map:
-        vm = payload["verdict_map"]
-        if not isinstance(vm, dict) or not vm:
-            raise IntentValidationError(
-                f"intents[{index}] (type=review_verdict).verdict_map must be a non-empty object keyed by variant_name"
-            )
-        for vname, entry in vm.items():
-            if not isinstance(vname, str) or not vname.strip():
-                raise IntentValidationError(
-                    f"intents[{index}] (type=review_verdict).verdict_map "
-                    f"keys must be non-empty variant names, got {vname!r}"
-                )
-            if not isinstance(entry, dict):
-                raise IntentValidationError(
-                    f"intents[{index}] (type=review_verdict).verdict_map"
-                    f"[{vname!r}] must be an object with at least a "
-                    f"'verdict' key, got {type(entry).__name__}"
-                )
-            if "verdict" not in entry:
-                raise IntentValidationError(
-                    f"intents[{index}] (type=review_verdict).verdict_map[{vname!r}] missing required 'verdict' key"
-                )
-            ev = entry["verdict"]
-            if not isinstance(ev, str) or ev not in ALLOWED_VERDICTS:
-                raise IntentValidationError(
-                    f"intents[{index}] (type=review_verdict).verdict_map[{vname!r}].verdict "
-                    f"must be one of {sorted(ALLOWED_VERDICTS)!r}, got {ev!r}"
-                )
 
 
 __all__ = [

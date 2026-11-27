@@ -143,11 +143,7 @@ def probe_cpu_platform(*, root: Path = DEFAULT_ROOT) -> CpuPlatform | None:
     )
 
 
-def platform_fingerprint(
-    gpu_type: str | None = None,
-    *,
-    multi_node: bool | None = None,
-) -> dict[str, Any]:
+def platform_fingerprint(*, multi_node: bool | None = None) -> dict[str, Any]:
     """Full host record -- CPU tuning, GPUs and software stack -- for provenance."""
     try:
         plat = probe_cpu_platform()
@@ -165,9 +161,7 @@ def platform_fingerprint(
             # masking does not change this number, so it is named for the host to keep it from being read as the
             # run's device count.
             "host_count": amdgpu_device_count(),
-            # probe=False: gpu_type already answers this, and report generation runs in-process under unit tests
-            # that must not spawn rocminfo.
-            "gfx_arch": detect_gfx_arch(os.environ, gpu_type=gpu_type, probe=False) or "unknown",
+            "gfx_arch": detect_gfx_arch(os.environ) or "unknown",
             "amdgpu_driver": read_kernel_file("/sys/module/amdgpu/version") or "unknown",
         }
         # The card's compute-partition shape, when this session established one.

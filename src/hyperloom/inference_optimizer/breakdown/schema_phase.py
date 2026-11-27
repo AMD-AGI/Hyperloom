@@ -237,7 +237,6 @@ class V6PhaseProposalReview(TypedDict, total=False):
     risks: list[dict[str, Any]]
     advice_text: str | None
     alternative_action: str | None
-    variants: list[dict[str, Any]]
     reviewed_at: str
 
 

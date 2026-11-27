@@ -22,7 +22,7 @@ _PROMPT = "\n".join(
         "SESSION_DIR=/s",
         "=== Phase ===",
         "EXPLORE tick 3",
-        "=== Recent policy denials (newest last, total=2) ===",
+        "=== Tasks in flight (newest last, total=2) ===",
         "- a",
         "=== Inbox for orchestration (newest last) ===",
         "  m1",
@@ -36,9 +36,9 @@ def _rows(session_dir, event_type: str) -> list[dict]:
 
 def test_sections_split_at_headings_and_drop_per_render_detail():
     sections = ce.prompt_sections(_PROMPT)
-    assert [s.key for s in sections] == [ce.PREAMBLE, "Phase", "Recent policy denials", "Inbox for orchestration"]
+    assert [s.key for s in sections] == [ce.PREAMBLE, "Phase", "Tasks in flight", "Inbox for orchestration"]
     assert sum(s.chars for s in sections) == len(_PROMPT)
-    assert sections[2].title == "Recent policy denials (newest last, total=2)"
+    assert sections[2].title == "Tasks in flight (newest last, total=2)"
 
 
 def test_a_tail_change_keeps_the_prefix_and_names_the_section_that_broke_it():
@@ -51,8 +51,8 @@ def test_a_tail_change_keeps_the_prefix_and_names_the_section_that_broke_it():
     grown = _PROMPT.replace("total=2) ===\n- a", "total=3) ===\n- a\n- b") + "\n  m2"
     second = tracker.observe("orchestration", prompt=grown, system_prompt="sys", tools=["a", "b"])
     assert second["first_prompt"] is False
-    assert second["first_changed_section"] == "Recent policy denials"
-    assert second["changed_sections"] == ["Recent policy denials", "Inbox for orchestration"]
+    assert second["first_changed_section"] == "Tasks in flight"
+    assert second["changed_sections"] == ["Tasks in flight", "Inbox for orchestration"]
     assert (second["added_sections"], second["removed_sections"]) == ([], [])
     assert second["lcp_chars"] == _PROMPT.index("total=2") + len("total=")
     assert 0 < second["lcp_ratio"] < 1

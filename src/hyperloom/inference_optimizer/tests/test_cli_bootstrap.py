@@ -212,7 +212,7 @@ def test_seed_records_the_launch_verdict_for_the_partition_shape(
     """The verdict carries provenance the published env cannot express."""
     _neutralize_seed_io(monkeypatch)
 
-    verdict = {"mode": "CPX", "partitions": 8, "cu_per_partition": 32, "cu_probed": True}
+    verdict = {"mode": "CPX", "partitions": 8, "cu_per_partition": 32, "gib_per_partition": 36.0}
     state = cb._seed_shared_state(
         tmp_path,
         _args(),

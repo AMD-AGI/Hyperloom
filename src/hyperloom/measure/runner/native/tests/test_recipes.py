@@ -89,6 +89,16 @@ def test_the_vllm_compile_is_given_the_arch_and_the_rocm_root_as_the_single_line
     assert "SECRET_TOKEN" not in environment
 
 
+def test_the_compile_is_given_the_images_library_search_path_where_it_is_set(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("LD_LIBRARY_PATH", "/opt/venv/lib/python3.12/site-packages/_rocm_sdk_devel/lib")
+    assert vllm_recipe().environment("gfx950", tmp_path)["LD_LIBRARY_PATH"].endswith("_rocm_sdk_devel/lib")
+
+    monkeypatch.delenv("LD_LIBRARY_PATH")
+    assert "LD_LIBRARY_PATH" not in vllm_recipe().environment("gfx950", tmp_path)
+
+
 @pytest.mark.parametrize(
     ("environ", "root"),
     [

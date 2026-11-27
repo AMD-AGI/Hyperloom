@@ -40,6 +40,8 @@ OPS_SUMMARY = (
     "aten::mm,A,0.2,20.0\naten::mm,B,0.045,4.5\naten::copy_,C,0.19,19.0\naten::mul,D,0.1,10.0\n"
 )
 HINTS = {"split_conc": "4", "split_osl": "64", "split_r": "1", "split_isl": "256"}
+#: The GPU label the session exports as ``GPU_TYPE``.
+SESSION_LABEL = "mi355x"
 ANALYSIS_JSON = {"report_info": {"mode": "deterministic-fallback", "trace_quality": "poor", "warnings": ["collapsed"]}}
 #: What the fake splitter writes as the perf report's window: the root's prefill step, GEMM-led. The shares are
 #: never its own, whatever the mode that picks it.
@@ -146,6 +148,7 @@ def rig(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Rig:
     (tmp_path / "TraceLens").mkdir()
     monkeypatch.setenv("TRACELENS_ROOT", str(tmp_path / "TraceLens"))
     monkeypatch.delenv("HYPERLOOM_TRACE_ANALYSIS_ROUTE", raising=False)
+    monkeypatch.setenv("GPU_TYPE", SESSION_LABEL)
     shell = Shell()
     monkeypatch.setattr(report, "run_with_session_kill", shell)
     monkeypatch.setattr(report, "resolve_arch_json_path", lambda platform: tmp_path / f"{platform}.json")
@@ -191,7 +194,7 @@ async def test_by_default_no_agent_runs_and_the_pointer_carries_the_graded_waves
     assert "--ISL" not in split  # the splitter does not take it; only the weights do
     assert perf[perf.index("--profile_json_path") + 1].endswith(CHUNK)
     assert perf[perf.index("--capture_folder") + 1].endswith("torch_trace/graph_capture_profile")
-    assert perf[perf.index("--gpu_arch_json_path") + 1].endswith("MI355X.json")
+    assert perf[perf.index("--gpu_arch_json_path") + 1].endswith(f"{SESSION_LABEL}.json")
     assert {"--group_by_parent_module", "--enable_pseudo_ops", "--include_call_stack"} <= set(perf)
     result = record["result"]
     assert (result["route"], result["steady_state_mode"], result["graph_under_recorded"]) == ("report", "mixed", False)
@@ -347,6 +350,31 @@ async def test_the_orchestrators_own_routes_still_run_the_orchestrators_handler(
     assert status is JobStatus.SUCCEEDED and record["result"]["tool"] == "tracelens_analysis"
     assert [call.get("analysis_route") for call in rig.agent_calls] == [params.get("analysis_route")]
     assert rig.shell.commands == []
+
+
+_NAMED_ELSE_SESSIONS = pytest.mark.parametrize(
+    ("named", "analysed"), [({}, SESSION_LABEL), ({"target_platform": "MI300X"}, "MI300X")], ids=["session", "named"]
+)
+
+
+@_NAMED_ELSE_SESSIONS
+async def test_the_report_reads_the_arch_of_the_gpu_the_request_names_else_the_sessions(
+    rig: Rig, tmp_path: Path, named: dict[str, str], analysed: str
+) -> None:
+    status, _, _ = await _run(tmp_path, {**probe.GRADED, "analysis_route": "report", **named}, rig)
+
+    _, perf = rig.shell.commands
+    assert status is JobStatus.SUCCEEDED and perf[perf.index("--gpu_arch_json_path") + 1].endswith(f"{analysed}.json")
+
+
+@_NAMED_ELSE_SESSIONS
+async def test_the_orchestrators_routes_are_told_the_gpu_the_request_names_else_the_sessions(
+    rig: Rig, tmp_path: Path, named: dict[str, str], analysed: str
+) -> None:
+    """The orchestrator's handler would otherwise read the label of a Hyperloom session, which a toolbox is not."""
+    status, _, _ = await _run(tmp_path, {"analysis_route": "non-llm", **named}, rig)
+
+    assert status is JobStatus.SUCCEEDED and [call["target_platform"] for call in rig.agent_calls] == [analysed]
 
 
 @pytest.mark.parametrize(

@@ -423,6 +423,7 @@ def test_under_bubblewrap_the_compile_has_no_egress_no_key_a_dev_null_and_writes
     tmp_path: Path, outside_tmp: Path, bwrap_tier: Isolation, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setenv("HYPERLOOM_TEST_SERVICE_TOKEN", "SECRET token of the build service")
+    monkeypatch.delenv("LD_LIBRARY_PATH", raising=False)  # given to the child where set; this test names every variable
     registered = confinement.PRIVATE_PATHS  # this test's own (conftest)
     key = tmp_path / "service.key"
     tree = outside_tmp / "tree"  # it holds the key, so it is bound entry by entry

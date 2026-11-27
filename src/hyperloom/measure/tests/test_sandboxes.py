@@ -521,6 +521,31 @@ def test_close_closes_the_sandboxes_all_at_once() -> None:
     assert provider.live == {} and all(stray.killed == 1 for stray in strays)
 
 
+def test_a_pool_that_closes_while_a_create_waits_closes_the_sandbox_that_create_makes() -> None:
+    provider = _Provider()
+    pool = _pool(provider)
+    create = provider.create
+
+    def create_while_closing(*args, **kwargs):
+        pool.close()
+        return create(*args, **kwargs)
+
+    provider.create = create_while_closing  # type: ignore[method-assign]
+    with pytest.raises(PoolClosed):
+        _acquire(pool)
+    assert provider.live == {} and pool.active == 0
+
+
+def test_a_sweep_closes_the_runs_sandboxes_no_unfinished_attempt_names() -> None:
+    provider = _Provider()
+    named = provider.create("runner-1", role="measurement", timeout_sec=60, metadata=_THIS_RUN)
+    stray = provider.create("runner-1", role="measurement", timeout_sec=60, metadata=_THIS_RUN)
+    other = provider.create("runner-1", role="measurement", timeout_sec=60, metadata={RUN_ID_KEY: "run-2"})
+    pool = _pool(provider)
+    assert pool.sweep({named.sandbox_id}) == [stray.sandbox_id]
+    assert set(provider.live) == {named.sandbox_id, other.sandbox_id}, "another run's sandbox is never touched"
+
+
 def test_a_pool_neither_counts_nor_closes_the_sandboxes_of_another_run_that_its_key_sees() -> None:
     provider = _Provider()
     other = provider.create("runner-1", role="measurement", timeout_sec=10, metadata={RUN_ID_KEY: "run-2"})

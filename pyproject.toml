@@ -277,7 +277,6 @@ exclude = [
 
 [tool.setuptools.package-data]
 hyperloom = [
-    "plugs/profiles/*.json",
     "contracts/*.json",
     "hosted/*.sh",
     "orchestrator/prompts/*.md",
@@ -422,6 +421,9 @@ omit = [
     # tests do run (``scripts/tests`` is in ``testpaths``); it is the measured
     # denominator they stay out of, not the suite.
     "scripts/*",
+    # The host-side PD driver: sent over SSH and run by ``python3 -`` on each host, and it ptraces the server it
+    # replaces, so its tests run it in a subprocess the coverage run does not follow.
+    "src/inference_suite/multinode/remote_driver.py",
     # CLI drivers.
     "src/hyperloom/inference_optimizer/cli/__init__.py",
     "src/hyperloom/inference_optimizer/cli/session_resume.py",
@@ -436,8 +438,6 @@ omit = [
     "src/hyperloom/orchestrator/actions/executors/_subprocess_kill.py",
     "src/hyperloom/orchestrator/actions/executors/serving/_multi_node_server_lifecycle.py",
     "src/hyperloom/orchestrator/actions/executors/_multi_node_env.py",
-    # Breakdown LLM HTTP client.
-    "src/hyperloom/inference_optimizer/breakdown/reporters/llm_client.py",
     # Kernel tools that need real traces or a live framework install.
     "src/hyperloom/orchestrator/trace_analysis/tracelens_analysis.py",
     "src/hyperloom/orchestrator/trace_analysis/tracelens_skill_runner.py",
@@ -463,7 +463,7 @@ omit = [
     # TraceLens server patcher (git apply / patch --fuzz subprocess pipeline).
     "src/hyperloom/orchestrator/actions/executors/_server_patcher.py",
     "src/hyperloom/orchestrator/actions/executors/patching/_patch_laying.py",
-    # Breakdown collectors — exercised end-to-end by the reporter tests.
+    # Breakdown collectors — exercised end-to-end by the breakdown export tests.
     "src/hyperloom/inference_optimizer/breakdown/collectors/*",
     # Operator CLIs, not library code.
     "src/hyperloom/inference_optimizer/tools/*",
@@ -753,7 +753,6 @@ ignorelist = ["aiter"]
 # what an unconfigured process prints.
 "src/hyperloom/inference_optimizer/cli/model_gate.py" = ["LOG015"]
 "src/hyperloom/inference_optimizer/model_config_utils.py" = ["LOG015"]
-"src/hyperloom/orchestrator/actions/executors/_geak_sweep.py" = ["LOG015"]
 
 # Markdown formatting in Ruff is still preview/experimental; keep ``ruff format``
 # scoped to Python so CI ``ruff format --check`` does not rewrite docs/skills.

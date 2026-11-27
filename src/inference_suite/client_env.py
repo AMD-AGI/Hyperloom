@@ -49,6 +49,8 @@ CLIENT_PYTHON = f"{CLIENT_DIR}/bin/python3"
 BUILD_FILE = f"{CLIENT_DIR}/BUILD.json"
 STAGED_LOCK = f"{CLIENT_DIR}/{AGENTX_LOCK.name}"
 _SITE_PACKAGES = f"lib/python{'.'.join(AGENTX_PYTHON_BUILD.version.split('.')[:2])}/site-packages"
+#: The client environment's site-packages, below a staged root.
+CLIENT_SITE_PACKAGES = f"{CLIENT_DIR}/{_SITE_PACKAGES}"
 #: The client's files staging patches, below a staged root.
 PATCHED_FILES = tuple(f"{CLIENT_DIR}/{_SITE_PACKAGES}/{relative}" for relative in aiperf_patch.PATCHED_FILES)
 #: Inside an inputs directory: the interpreter build and the lock's wheels.
@@ -324,6 +326,7 @@ __all__ = [
     "BUILD_FILE",
     "CLIENT_DIR",
     "CLIENT_PYTHON",
+    "CLIENT_SITE_PACKAGES",
     "INPUT_ARCHIVE",
     "INPUT_WHEELS",
     "LOCK_PLATFORMS",

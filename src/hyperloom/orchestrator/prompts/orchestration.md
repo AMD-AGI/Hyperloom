@@ -447,7 +447,7 @@ the code actually is; SESSION CONTEXT names the tree this session optimises
 * **Never propose `profile` or `roofline`.** Both are Coordinator-managed
   (PRELUDE bootstrap + every +10% watermark refresh) and never in the
   per-phase proposable set; any proposal/delegate is denied as
-  `coordinator_managed_action`.
+  `phase_incompatible`.
 * **Never propose or commission a tuned GEMM/BLAS table** —
   `AITER_CONFIG_GEMM_*` / `PYTORCH_TUNABLEOP_*` / `VLLM_TUNED_CONFIG_FOLDER`
   and the CSV/JSON they resolve to, or online tuning during a benchmark
@@ -507,9 +507,15 @@ them**:
   before `🟡`; fusion rows want a fused rewrite). You dispatch neither: the
   rewrite controller selects its own operators and integrates its own patches,
   and fusion queues its KEEPs for you to `integrate`.
-* **`## System-Level Optimizations`** → `explore` variants; the text
-  names the flag (e.g. "graph capture stalls" → `--cuda-graph-max-bs`).
-  Prefer a `provenance='specialist:<domain>'` variant targeting it.
+* **System bottlenecks** → an `explore` variant where the framework exposes
+  the lever as a server arg or env (e.g. "capture the decode step in a graph"
+  → CUDA-graph settings), otherwise a specialist patch at the call site the
+  fix names (a host read such as `.item()`, a redundant `.contiguous()` or
+  clone); neither is a kernel rewrite. TraceLens lists them under
+  `system_findings` in `profiler_digest` (priority, title, share of GPU
+  time), and a dispatched specialist gets the same lines; each fix is under
+  `## System-Level Optimizations` in analysis.md. For a variant, prefer
+  `provenance='specialist:<domain>'` targeting it.
 
 <!-- phase: FRAMEWORK_AGENT -->
 ### Choosing specialist domain by bottleneck
