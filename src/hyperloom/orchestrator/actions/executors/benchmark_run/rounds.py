@@ -359,15 +359,17 @@ class _BenchmarkRoundsMixin:
         port: Any,
         **config: Any,
     ) -> dict[str, Any]:
+        run_eval = config.pop("run_eval")
         round_cfg = self._write_lifecycle_config(
             attempt.materialized_config_path,
             round_dir,
             cleanup=config.pop("cleanup"),
             port=port,
-            run_eval=config.pop("run_eval"),
+            run_eval=run_eval,
         )
         return await self._run_reported_round(
-            attempt,
+            # A round told to evaluate is read as one that did, whatever the attempt's own config says.
+            replace(attempt, run_eval_disabled=False) if run_eval else attempt,
             label=label,
             config_path=round_cfg,
             output_dir=round_dir,
@@ -405,6 +407,9 @@ class _BenchmarkRoundsMixin:
             run_eval=warmup_eval,
             warmup_round=True,
         )
+        # The round of this attempt that runs the eval: every result the pair returns takes its score. A deferred
+        # eval is handed over by its own accuracy round.
+        evaluated: Mapping[str, Any] = {} if defer_accuracy else warmup_result
         if warmup_result.get("status") != "succeeded":
             # Warmup failure almost certainly recurs, so skip the measured round.
             warmup_result.setdefault("nonfatal_warnings", []).append("baseline_warmup_round_failed")
@@ -425,7 +430,7 @@ class _BenchmarkRoundsMixin:
             runtime_sec=warmup_result.get("subprocess_runtime_sec"),
         )
         if not defer_accuracy and (cold := self._cold_anchor_when_hot_pass_unaffordable(warmup_result, attempt)):
-            return cold
+            return carry_eval_score(cold, evaluated)
         measure_dir = output_dir / _MEASURE_ROUND_DIR
         log.info(
             "baseline_executor: cold-start guard — measured baseline round in %s "
@@ -443,8 +448,8 @@ class _BenchmarkRoundsMixin:
                 return result
             # The gate before this pass admitted it and the run's clock took it anyway -- the pass overran what it
             # was priced at.
-            return _cold_anchor_after_reaped_measure(warmup_result, result)
-        result = self._finalize_stock_anchor(attempt, warmup_result, result)
+            return carry_eval_score(_cold_anchor_after_reaped_measure(warmup_result, result), evaluated)
+        result = carry_eval_score(self._finalize_stock_anchor(attempt, warmup_result, result), evaluated)
         if defer_accuracy:
             await self._settle_deferred_accuracy(attempt, output_dir, hot_round, result)
         return result
@@ -571,7 +576,7 @@ class _BenchmarkRoundsMixin:
             result["accuracy_stage"] = skipped
             return
         accuracy_result = await self._run_guarded_round(
-            replace(attempt, run_eval_disabled=False),
+            attempt,
             ROUND_ACCURACY,
             output_dir / _ACCURACY_ROUND_DIR,
             cleanup=True,

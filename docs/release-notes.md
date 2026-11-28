@@ -217,6 +217,20 @@ it.
   `PYTHONPATH`, which it did with the store unset whenever the session had
   recorded an image digest and an engine version. See
   [Upgrade](reference/upgrade.md).
+- **A warm-up and measured round pair hands its accuracy score to its
+  result.** A genuine baseline, a PRELUDE warm replay and the KERNEL stack
+  validation run a discarded warm-up round and a measured round on one server,
+  and one of the two runs the accuracy eval. The result the attempt returns
+  now carries that round's `accuracy`, `accuracy_task`, `accuracy_metric`,
+  `accuracy_source`, `accuracy_definition_digest` and `accuracy_eval_kind`;
+  the measured round's result used to carry none, and each reader searched
+  the attempt's directory for the warm-up's results file. Scores and verdicts
+  are unchanged. A warm replay's warm-up round is recorded as one that
+  evaluated even when its recipe sets `RUN_EVAL=false`. Measuring such a
+  baseline, when its score is usable, no longer writes the session's accuracy
+  reference; promoting it does, so a re-baseline that is not promoted
+  (`anchor_held`) leaves the reference with the anchor it was measured with.
+  See [Upgrade](reference/upgrade.md).
 - **A session reads its GPU from the machine; no board table is kept.** Every
   start and resume reads the visible cards and prints the one it runs on (`GPU
   card        : AMD Instinct MI325X (gfx942, 304 CUs, 262128 MiB, 2100 MHz)`).

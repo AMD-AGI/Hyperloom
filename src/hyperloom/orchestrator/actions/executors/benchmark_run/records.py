@@ -199,9 +199,10 @@ EVAL_SCORE_KEYS = (
 )
 
 
-def carry_eval_score(result: dict[str, Any], scored: Mapping[str, Any]) -> None:
-    """Copy the score ``record_eval_score`` wrote on ``scored`` into ``result``."""
+def carry_eval_score(result: dict[str, Any], scored: Mapping[str, Any]) -> dict[str, Any]:
+    """Hand ``result`` the score of ``scored``, the round of its attempt that ran the eval, and return ``result``."""
     result.update({key: scored[key] for key in EVAL_SCORE_KEYS if scored.get(key) is not None})
+    return result
 
 
 def record_eval_score(result: dict[str, Any], eval_data: Mapping[str, Any]) -> bool:

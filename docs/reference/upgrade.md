@@ -236,6 +236,36 @@ round, and that search is removed:
   multi-node it also no longer writes a merged `gpu_metrics.csv` at the top of
   those files; each round's run directory still gets its own.
 
+### Required: a baseline takes its accuracy from its own attempt
+
+A benchmark attempt that runs a discarded warm-up round and then a measured
+round on the same server (a genuine baseline, a PRELUDE warm replay, the KERNEL
+stack validation) runs the accuracy eval in one of its rounds. The attempt now
+hands that round's score to the result it returns. The result of the measured
+round used to carry no score, and each reader searched the attempt's directory
+for the warm-up's results file.
+
+* The result of such an attempt carries `accuracy`, `accuracy_task`,
+  `accuracy_metric`, `accuracy_source`, `accuracy_definition_digest` and
+  `accuracy_eval_kind` of the round that ran the eval, and so does the
+  `measurement` the session breakdown records for the action; for a warm
+  replay and a stack validation that `accuracy` was `null`.
+  `accuracy_eval_kind` did not appear on such a result before; it is `""` for
+  an `lm-eval` score. The score, and every verdict taken on it, is the one
+  the search found.
+* A warm replay evaluates in its warm-up round even when its recipe sets
+  `RUN_EVAL=false`. That round is now recorded as one that evaluated: its
+  round row has `run_eval_disabled: false` and its score, where it had `true`
+  and none.
+* A baseline of this kind whose score is usable no longer logs `cold-start
+  guard — reading accuracy=... from the warmup round`.
+* Measuring a baseline of this kind whose score is usable no longer writes the
+  session's accuracy reference (`baseline_accuracy` and its digest in
+  `state.json`); promoting it does, together with its throughput. A
+  re-baseline that scored but was not promoted (`anchor_held`) used to replace
+  the reference with its own score while the throughput anchor stayed; it now
+  leaves both as they were.
+
 ### Recommended: drop `INFERENCE_OPTIMIZER_RESCUE_PATHS` and `INFERENCE_OPTIMIZER_BASELINE_SERVER_READY_SEC`
 
 Both are no longer read and are silently ignored. Since 1.2.0 the first has
