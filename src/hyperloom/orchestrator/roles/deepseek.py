@@ -189,7 +189,6 @@ class DeepSeekBackend:
 
     model: str = DEFAULT_DEEPSEEK_HARNESS_MODEL
     cwd: Path = field(default_factory=Path.cwd)
-    dsh_home: Path | None = None
     reasoning_effort: str = ""
     permission_mode: str = "read-only"
     # An agent turn carries a tool loop, so it needs the orchestration budget,
@@ -200,7 +199,6 @@ class DeepSeekBackend:
             default=300.0,
         )
     )
-    env: dict[str, str] | None = None
     # Bounded transient-failure retry/backoff, on the same
     # INFERENCE_OPTIMIZER_LLM_RETRY_* knobs the Claude and Codex paths read.
     retry_policy: RetryPolicy = field(default_factory=RetryPolicy.from_env)
@@ -352,10 +350,8 @@ class DeepSeekBackend:
                 cwd=self.cwd,
                 model=self.model,
                 instructions=instructions,
-                dsh_home=self.dsh_home,
                 reasoning_effort=self.reasoning_effort,
                 permission_mode=self.permission_mode,
-                env=self.env,
                 request_timeout_sec=self.call_timeout_s,
             )
             try:

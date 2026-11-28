@@ -53,6 +53,7 @@ from hyperloom.orchestrator.knowledge.remote_recipe.values import (
     has_replay_material,
 )
 from hyperloom.orchestrator.knowledge.recipe_journal import RecipeJournalCollaborator
+from hyperloom.orchestrator.tests._fixtures import MI325X_CARD, publish_card
 from hyperloom.orchestrator.knowledge.remote_publish import remote_result_type
 from hyperloom.orchestrator.state.shared_state import SharedState
 from hyperloom.inference_optimizer.breakdown.recorder import close_out as _close_out
@@ -2819,7 +2820,7 @@ def test_remote_adapter_pages_history_then_materializes_l2_donor(
     assert patch_kb.read_patches() == [patch_ref]
 
 
-def test_remote_adapter_forwards_hardware_in(tmp_path: Path) -> None:
+def test_remote_adapter_search_translates_the_labels_it_is_given(tmp_path: Path) -> None:
     class _Remote:
         def __init__(self) -> None:
             self.kwargs = {}
@@ -2834,16 +2835,18 @@ def test_remote_adapter_forwards_hardware_in(tmp_path: Path) -> None:
         tmp_path / "unused",
     )
 
-    assert (
-        adapter.search(
-            label_match={"framework_name": "sglang"},
-            hardware_in=["mi300x", "mi325x"],
-        )
-        == []
-    )
-    assert remote.kwargs["hardware_in"] == ["mi300x", "mi325x"]
+    assert adapter.search(label_match={"framework_name": "sglang"}) == []
+    assert set(remote.kwargs) == {"scheme", "match", "offset", "limit"}
     assert remote.kwargs["match"] == {"framework_name": "sglang"}
     assert remote.kwargs["scheme"] == "inference"
+
+
+def test_build_remote_knowledge_records_the_session_cards_gfx_arch(tmp_path: Path, monkeypatch) -> None:
+    publish_card(monkeypatch, MI325X_CARD)
+    bundle = _build(_state(tmp_path), tmp_path / "files")
+
+    assert bundle.knowledge["gfx_arch"] == "gfx942"
+    assert knowledge_to_warm_recipe({"knowledge": bundle.knowledge})["gfx_arch"] == "gfx942"
 
 
 def test_remote_adapter_searches_agentx_identity_scheme(tmp_path: Path) -> None:

@@ -193,6 +193,17 @@ def test_switch_on_mlperf_backend_pins_client_and_port(tmp_path, monkeypatch):
     assert "--served-model-name kimi-k3" in bench["envs"]["EXTRA_SGLANG_ARGS"]
 
 
+def test_mlperf_hardware_names_the_session_label(tmp_path, monkeypatch):
+    _clear_env(monkeypatch)
+    monkeypatch.setenv("HYPERLOOM_AGENTX", "1")
+    monkeypatch.setenv("HYPERLOOM_AGENTIC_BACKEND", "mlperf")
+    monkeypatch.delenv("MLPERF_AGENTIC_HARDWARE", raising=False)
+    monkeypatch.setenv("GPU_TYPE", "mi325x")
+    src = _write(tmp_path / "base.yaml", framework="sglang")
+    bench = _materialize(src, tmp_path / "out", target=we.BenchmarkTarget(model_path="/m"))
+    assert bench["envs"]["MLPERF_AGENTIC_HARDWARE"] == "mi325x"
+
+
 def test_mlperf_concurrency_follows_the_round_not_the_baseline(tmp_path, monkeypatch):
     _clear_env(monkeypatch)
     monkeypatch.setenv("HYPERLOOM_AGENTX", "1")

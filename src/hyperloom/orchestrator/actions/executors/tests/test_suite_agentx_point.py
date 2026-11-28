@@ -256,17 +256,24 @@ def test_an_agentx_profile_point_opens_its_window_on_the_replays_measured_phase(
     assert config.workload is WorkloadKind.AGENTX
 
 
-_SGLANG_ANNOTATION_ENV = {
-    "SGLANG_PROFILE_WITH_STACK": "True",
-    "SGLANG_PROFILE_RECORD_SHAPES": "True",
-    "SGLANG_GRAPH_BATCH_CAPTURE": "True",
+#: What the shipped profile_sglang.yaml gives its server, which an SGLang AgentX profile runs with as well.
+_SGLANG_PROFILE_ENV = {
+    "SGLANG_PROFILE_WITH_STACK": "true",
+    "SGLANG_PROFILE_RECORD_SHAPES": "true",
+    "SGLANG_GRAPH_BATCH_CAPTURE": "1",
+    "TORCH_SYMBOLIZE_MODE": "dladdr",
+}
+_GRAPH_REPLAY_ENV = {
+    "DEBUG_CLR_GRAPH_PACKET_CAPTURE": "0",
+    "DEBUG_HIP_GRAPH_SEGMENT_SCHEDULING": "0",
+    "DEBUG_HIP_GRAPH_CLASSIC_PATH": "1",
 }
 
 
 def test_an_annotated_sglang_agentx_profile_records_shapes_stacks_and_graph_replays() -> None:
     user = suite_config(_profiled(), _base(), _settings()).server.user
 
-    assert _SGLANG_ANNOTATION_ENV.items() <= user.env_set.items()
+    assert _SGLANG_PROFILE_ENV.items() <= user.env_set.items()
     assert user.args_add[-1] == "--enable-profile-cuda-graph"
 
 
@@ -276,16 +283,22 @@ def test_an_eager_sglang_agentx_profile_profiles_no_graph_capture() -> None:
 
     user = suite_config(point, _base(), _settings()).server.user
 
-    assert _SGLANG_ANNOTATION_ENV.items() <= user.env_set.items()
+    assert _SGLANG_PROFILE_ENV.items() <= user.env_set.items()
     assert "--enable-profile-cuda-graph" not in user.args_add
 
 
-def test_an_unannotated_or_unprofiled_sglang_round_adds_no_instrumentation() -> None:
-    for point in (_profiled(detailed_annotations=False), _point()):
-        user = suite_config(point, _base(), _settings()).server.user
+def test_an_unannotated_sglang_agentx_profile_profiles_no_graph_capture() -> None:
+    user = suite_config(_profiled(detailed_annotations=False), _base(), _settings()).server.user
 
-        assert not _SGLANG_ANNOTATION_ENV.keys() & user.env_set.keys()
-        assert "--enable-profile-cuda-graph" not in user.args_add
+    assert _SGLANG_PROFILE_ENV.items() <= user.env_set.items()
+    assert "--enable-profile-cuda-graph" not in user.args_add
+
+
+def test_an_unprofiled_sglang_round_adds_no_instrumentation() -> None:
+    user = suite_config(_point(), _base(), _settings()).server.user
+
+    assert not (_SGLANG_PROFILE_ENV.keys() | _GRAPH_REPLAY_ENV.keys()) & user.env_set.keys()
+    assert "--enable-profile-cuda-graph" not in user.args_add
 
 
 def _atom_profiled(monkeypatch, **settings):
@@ -311,7 +324,7 @@ def test_an_annotated_atom_agentx_profile_annotates_kernels_and_records_shapes_a
     assert "--mark-trace" not in user.args_add
     assert "ATOM_PROFILER_MORE" not in user.env_set
     assert "--enable-profile-cuda-graph" not in user.args_add
-    assert not _SGLANG_ANNOTATION_ENV.keys() & user.env_set.keys()
+    assert not _SGLANG_PROFILE_ENV.keys() & user.env_set.keys()
 
 
 def test_an_unannotated_atom_agentx_profile_adds_no_trace_knobs(monkeypatch) -> None:
@@ -342,6 +355,39 @@ def test_a_vllm_agentx_profile_passes_the_profiler_fields_its_annotations_need()
     assert args[args.index("--profiler-config.torch_profiler_dump_cuda_time_total") + 1] == "False"
     assert config.profile.start_body is None
     assert config.profile.agentx_duration_sec == 600.0
+
+
+_ENTRYPOINTS = {"vllm": ("vllm", "serve"), "atom": ("python3", "-m", "atom.entrypoints.openai_server")}
+
+
+def _profiled_env(monkeypatch, framework: str, envs: dict | None = None, **settings) -> dict[str, str]:
+    """The server environment of an AgentX profile of ``framework`` whose point sets ``envs``."""
+    monkeypatch.setattr(
+        _profile_setup, "_atom_tracelens_caps", lambda: _profile_setup._AtomTracelensCaps(True, True, True)
+    )
+    base = _base()
+    point = _profiled(framework, **settings)
+    if framework != "sglang":
+        base = replace(base, framework=framework, query=replace(base.query, framework=framework))
+        base = replace(base, entrypoint=_ENTRYPOINTS[framework])
+        point["benchmark"]["agentx"]["launch_overrides"].update(append_args=list(base.args), env={})
+    point["benchmark"]["envs"].update(envs or {})
+    return dict(suite_config(point, base, _settings()).server.user.env_set)
+
+
+@pytest.mark.parametrize("annotated", [True, False])
+@pytest.mark.parametrize("framework", ["sglang", "vllm", "atom"])
+def test_an_agentx_profile_replays_graphs_node_by_node_as_the_fixed_sequence_profile_does(
+    monkeypatch, framework, annotated
+) -> None:
+    """Without the HIP runtime's switches the profiler records almost none of a graph replay's kernels."""
+    assert _GRAPH_REPLAY_ENV.items() <= _profiled_env(monkeypatch, framework, detailed_annotations=annotated).items()
+
+
+def test_the_points_own_environment_wins_over_the_shipped_profile_configuration(monkeypatch) -> None:
+    env = _profiled_env(monkeypatch, "vllm", envs={"DEBUG_CLR_GRAPH_PACKET_CAPTURE": "1"})
+
+    assert env["DEBUG_CLR_GRAPH_PACKET_CAPTURE"] == "1"
 
 
 @pytest.mark.parametrize(

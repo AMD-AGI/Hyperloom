@@ -45,7 +45,7 @@ from hyperloom.measure.phases import (
     TEARDOWN,
     WARMUP,
 )
-from inference_suite.contracts import FailedStep, RunLayout, SuiteConfig
+from inference_suite.contracts import FailedStep, RunLayout, SuiteConfig, answered_with_status
 
 __all__ = [
     "ROLE_BOOT",
@@ -79,8 +79,6 @@ _EVAL, _CLIENT_WARMUP, _CLIENT_MEASURED, _CLIENT_FINISHED = "eval", "warmup", "m
 _PROFILE_OPEN, _PROFILE_CLOSE = "profile_open", "profile_close"
 #: The control request that ends a profile window, as inference_suite's ``profile.inject`` names it.
 _STOP_PROFILE = "/stop_profile"
-#: How urllib words the error of a request the server answered with an error status.
-_ANSWERED_WITH_STATUS = "HTTP Error "
 _MIB = 1 << 20
 #: A boot is in the first bytes of a server's log, and a log of a long test is large.
 _LOG_HEAD_BYTES = 8 * _MIB
@@ -402,8 +400,7 @@ def _stop_unanswered(layout: RunLayout) -> bool:
     error = (_capture(layout) or {}).get("error")
     if not isinstance(error, str):
         return False
-    path, _, cause = error.partition(": ")
-    return path == _STOP_PROFILE and not cause.startswith(_ANSWERED_WITH_STATUS)
+    return error.partition(": ")[0] == _STOP_PROFILE and not answered_with_status(error)
 
 
 def _stop_answered(layout: RunLayout) -> bool:
@@ -419,8 +416,7 @@ def _stop_answered(layout: RunLayout) -> bool:
     error = capture.get("error")
     if error is None:
         return True
-    path, _, cause = error.partition(": ") if isinstance(error, str) else ("", "", "")
-    return path == _STOP_PROFILE and cause.startswith(_ANSWERED_WITH_STATUS)
+    return isinstance(error, str) and error.partition(": ")[0] == _STOP_PROFILE and answered_with_status(error)
 
 
 def profile_stall(run_dir: Path, step: FailedStep) -> str | None:

@@ -40,7 +40,7 @@ provider-side combinations and what each one enables.
 | `OPENAI`<br>`_CUSTOM_HEADERS` | No | —    | Extra request headers for the OpenAI side. Same shape as `ANTHROPIC_CUSTOM_HEADERS`; set it whenever you set `OPENAI_BASE_URL` against a gateway that authenticates on its own header. |
 | `CLAUDE_MODEL`         | No       | Derived from `ANTHROPIC_BASE_URL` | Orchestration model id on the Anthropic side. Falls back to the endpoint default, then the project-wide `DEFAULT_CLAUDE_MODEL`. `GEAK_CLAUDE_MODEL` inherits from it, and Forge reads it directly for its Claude backend.                                                                    |
 | `CODEX_MODEL`          | No       | Derived from `OPENAI_BASE_URL`    | Model id on the OpenAI side, used by the Codex backend, including Forge running on it. Model settings are never borrowed across providers.                                                                    |
-| `INFERENCE_OPTIMIZER`<br>`_AGENT_BACKEND` | No | Ranked by credentials | Names the agent CLI for the agentic roles: `claude`, `codex` or `deepseek`. An explicit `claude` or `codex` pins the role to that CLI instead of the credential-ranked choice. The choice applies to orchestration, specialists, Forge and TraceLens; quantization honours only `deepseek`. `deepseek` (the DeepSeek Harness) is never picked by the credential ranking: Hyperloom's roles reach it only through this variable, and Forge also takes `--agent-backend deepseek` / `FORGE_AGENT_BACKEND=deepseek`. It needs the `deepseek` extra, and uses the `OPENAI_BASE_URL` / `OPENAI_API_KEY` gateway. With `deepseek`, specialists run on the `dsh` CLI with `DSH_PERMISSION_MODE=danger-full-access`, so dsh applies no sandbox of its own, and a run with specialists enabled (`--research-lane-capacity` above 0) refuses to boot when no `dsh` is found. |
+| `INFERENCE_OPTIMIZER`<br>`_AGENT_BACKEND` | No | Ranked by credentials | Names the agent CLI for the agentic roles: `claude`, `codex` or `deepseek`. An explicit `claude` or `codex` pins the role to that CLI instead of the credential-ranked choice. The choice applies to orchestration, specialists, Forge and TraceLens; quantization honours only `deepseek`. `deepseek` (the DeepSeek Harness) is never picked by the credential ranking: Hyperloom's roles reach it only through this variable, and Forge also takes `--agent-backend deepseek` / `FORGE_AGENT_BACKEND=deepseek`. It needs the `deepseek` extra, and uses the `OPENAI_BASE_URL` / `OPENAI_API_KEY` gateway, which it speaks to over the Anthropic Messages protocol (`OPENAI_BASE_URL` without its `/v1`, plus `/v1/messages`). With `deepseek`, specialists run on the `dsh` CLI with `DSH_PERMISSION_MODE=danger-full-access`, so dsh applies no sandbox of its own, and a run with specialists enabled (`--research-lane-capacity` above 0) refuses to boot when no `dsh` is found. |
 | `DSH_MODEL`            | No       | `deepseek-v4-flash`               | Model id the DeepSeek Harness runs, for every role that selects it. |
 | `HYPERLOOM_DSH_MAX_TOKENS` | No   | Unset (128000)                    | Positive integer capping the output tokens of each model request the DeepSeek Harness makes, for every role that runs on it: orchestration, specialists, Forge, TraceLens and quantization. Unset leaves the `llm-pi-ai` default of 128000 output tokens per request; the harness's former `deepseek-official` route sent 256000. A value that is not a positive integer refuses the launch. |
 | `GEAK_API_KEY`         | No       | —    | Internal alias, never derived from either side. GEAK runs on the Anthropic side (`ANTHROPIC_*` + `GEAK_CLAUDE_MODEL`); set this only to point GEAK elsewhere.                                                                                                                              |
@@ -95,8 +95,10 @@ default** — so a value left over in the shell cannot displace the shape the
 session was measured at. `PRECISION` is not on that ladder: on both branches it
 is **`--precision`, then `$PRECISION`, then the session's recorded value, then
 the checkpoint's own dtype, then the default**, so on a resume a `$PRECISION`
-left in the shell still outranks the recorded value. `GPU_TYPE` is a fallback
-when `--gpu-type` is omitted.
+left in the shell still outranks the recorded value. The GPU type is the
+label of the card the session reads when the card names its model; otherwise
+`--gpu-type`, then `TARGET_GPU_TYPE`, then `GPU_TYPE`, name it (see
+[GPU card](#gpu-card)).
 
 - **Model / workload shape:** `--model`, `--model-class`, `--framework`,
   `--framework-version`, `--precision`, `--tp`, `--ep`, `--isl`, `--osl`,
@@ -450,6 +452,45 @@ immediately.
 
 ---
 
+## GPU card
+
+A session reads its GPUs once per process start, fresh launch and resume
+alike: the cards of this host the first set visible-device mask names (all of
+them without one), or, for `--nodes >= 2`, the cards of a remote node through
+the cluster hand-off. It asks, in turn, until one describes a card:
+
+1. `amd-smi static --json`: every fact.
+2. `rocm-smi --showproductname --showmeminfo vram --json`: name, arch and
+   memory. No compute-unit count, bandwidth or clock, so there is no vendor
+   peak or AITER CSV check.
+3. torch's device properties (`gcnArchName`): name, arch and memory, as
+   `rocm-smi`.
+
+When the visible cards are not one kind (same arch, compute units and memory
+size) the launch warns, listing each kind, and takes the first card. A device
+mask may name cards by ROCm number or UUID; one naming a card the machine does
+not have exits 2. When none of the three describes a card the session prints
+each one's reason and runs without a card:
+it uses no arch-specific launch row, opens no arch-specific gate and has no
+vendor peak. Nothing in Hyperloom keeps a list of boards; every hardware fact
+comes from the card.
+
+The GPU type is only the label results, recipes and scripts are filed under.
+It is the card's market name reduced to its model designation (`AMD Instinct
+MI355X` becomes `mi355x`); the card's own name wins over a given one, with a
+warning naming both, so that recipes and KB rows match the hardware. When the
+driver gives the card no model name, or no card was read, `--gpu-type`, then
+`TARGET_GPU_TYPE`, then `GPU_TYPE`, name it (any name is accepted); with none
+of them an unnamed card is filed under its arch (`gfx1201`). A multi-branch
+session is filed under the `--gpu-type` it is given, and warns when the card
+names itself otherwise.
+
+| Variable | Set by | Description |
+|----------|--------|-------------|
+| `HYPERLOOM_GPU_CARD` | The session | The card the session read, as JSON (`name`, `device_id`, `gfx`, `compute_units`, `memory_mib`, `memory_bandwidth_gbps`, `engine_clock_mhz`); unset when it read none. Every process the session starts on its own host inherits it, specialists included, and reads the card from it instead of probing the GPU again. Not an operator setting: each start and resume overwrites or clears it. The manifest archives the same card as `gpu_card`. |
+| `HYPERLOOM_GFX_ARCH` (or `GFX_ARCH`) | Operator | Overrides the arch recorded in provenance and the platform fingerprint (`gfx_arch`), which is otherwise the card's. A native build (the llama.cpp server a session compiles) and its knob sweep read it too; the launch row, the FP4 gate and every other arch decision follow the card. |
+| `HYPERLOOM_RUNNER_GPU_CARD` | Operator, on the app host | Path on the app host to a recording of `amd-smi static --json` taken on a node the measurement sandboxes run on. Required for a hosted multi-branch session whose tests run in measurement sandboxes: the app container holds none of their cards, so the session takes its card from this file and every runner checks its own cards against it before a test. A missing, unreadable or mixed recording stops the session before any test; see [Run hosted multi-branch on a new cluster](../how-to/hosted-multibranch-new-cluster.md). |
+
 ## Compute partitioning (AMD)
 
 An MI300-series card can be split into independent partitions (`SPX`, `DPX`,
@@ -706,9 +747,14 @@ network file system run at tens of MB/s per rank. With this switch on, the
 process that boots a measured server also reads the checkpoint into the page
 cache with 8 sequential streams from the spawn until the server is ready
 (`hyperloom_common.weight_prefetch`): only a checkpoint on a network or FUSE
-file system, only as much as the memory headroom allows
-(`memory.max - memory.current` less a tenth of the limit, at least 16 GiB),
-and again for what the loader drops from the cache, at most three times. A
+file system, the largest files first (a loader faults a very large file in one
+stream per rank, and often reads it last), only as much as the memory headroom
+allows (`memory.max - memory.current` less a tenth of the limit, at least
+16 GiB, looked at again before each 1 GiB it reads). Until the server is ready
+it samples every second how much of each chosen file is still cached, and when
+files it had cached lost at least half of their pages (a loader that drops the
+checkpoint's page cache, such as SGLang's engram host table), it reads them
+again at once, largest first, at most eight times. A
 checkpoint the round's account neither owns nor may write is read once and not
 refilled: Linux does not tell such an account which of its pages are cached, so
 each file is read whole by its size within the same headroom, and what the
@@ -783,8 +829,8 @@ Without it every projection fails, and the round is benchmarked untouched.
 | `HYPERLOOM_INFERASIM_ESTIMATOR` | `des` | `des` replays a closed-loop client at the round's concurrency (10 requests per client, between 64 and 4,000). `analytical` selects the closed form, which ranked held-out configurations far worse. Any other value is an error. |
 | `HYPERLOOM_INFERASIM_MODEL` | inferred | InferaSim model preset to project, for example `gpt_oss_120B`. By default it is inferred from the model path: the most specific match wins, and a distilled checkpoint uses its student. With no match and neither this nor `HYPERLOOM_INFERASIM_WORKLOAD` set, the round is benchmarked. |
 | `HYPERLOOM_INFERASIM_WORKLOAD` | bundled template | Full InferaSim workload YAML; takes precedence over `HYPERLOOM_INFERASIM_MODEL`. |
-| `HYPERLOOM_INFERASIM_GPU_ARCH` | `mi355x` | Part to price when the session's GPU type is unknown. When it is known, the session GPU always wins. |
-| `HYPERLOOM_INFERASIM_HBM_GB` | from the part | Per-GPU HBM capacity in GB. By default the part's entry in the shared hardware table (`roofline_ceiling.HW_SPECS`), e.g. 192 (MI300X / MI308X), 256 (MI325X) or 288 (MI355X). |
+| `HYPERLOOM_INFERASIM_GPU_ARCH` | unset | Part to price when the session has no GPU type. When it has one, the session's GPU type always wins. With neither, the projection is refused and the variant is benchmarked. |
+| `HYPERLOOM_INFERASIM_HBM_GB` | the session card's memory | Per-GPU HBM capacity in GB. By default the memory size of the session's card in GiB, rounded to 0.1 (256.0 on an MI325X, 288.0 on an MI355X); without a card, InferaSim is given no `--hbm-capacity-gb`. |
 | `HYPERLOOM_INFERASIM_SERVING_MODEL` | `continuous` | InferaSim serving model: `continuous` or `static` batching. |
 
 ### InferaSim anchors
@@ -869,7 +915,7 @@ optional; defaults are safe for standard single-node deployments.
 |---|---|---|
 | `HYPERLOOM_ENABLEMENT_DISABLE_TARGETED_BUILD` | Unset (`0`) | Set to `1` to completely disable Rung-5 auto-escalation.  When set, compiled-gap failures proceed to the stall gate without attempting a build.  Useful when the compile toolchain is unavailable or the session budget is too tight. |
 | `INFERENCE_`<br>`OPTIMIZER_`<br>`AITER_JIT_DIR` | Aiter default | Per-attempt override set automatically to `<attempt_root>/aiter_jit` by each targeted build.  Override manually only when you need the global JIT cache to point at a pre-built location; leaving it unset lets each build use its own isolated directory. |
-| `PYTORCH_ROCM_ARCH` | Detected | Explicit GPU target architecture (e.g. `gfx942`, `gfx950`) injected into each compile.  Set automatically from the session `--gpu-type`; operator-override applies to bare-metal installs outside the session.  **Compile target only — it does not participate in architecture detection.**  It names the archs a wheel is *built* for, not the installed device, so provenance ignores it entirely and resolves `gfx_arch` from `HYPERLOOM_GFX_ARCH`, then `--gpu-type`, then `rocminfo`. |
+| `PYTORCH_ROCM_ARCH` | Detected | Explicit GPU target architecture (e.g. `gfx942`, `gfx950`) injected into each compile.  Set automatically to the arch of the session's card; operator-override applies to bare-metal installs outside the session.  **Compile target only — it does not participate in architecture detection.**  It names the archs a wheel is *built* for, not the installed device, so provenance ignores it entirely and resolves `gfx_arch` from `HYPERLOOM_GFX_ARCH`, then the session's card (see [GPU card](#gpu-card)). |
 | `MAX_JOBS` | `8` | Parallelism cap for cmake/hipcc compile steps inside a targeted build.  Reduce on memory-constrained nodes (`MAX_JOBS=4` for a 64 GB compile node).  The default `8` is conservative enough for MI300X/MI355X nodes with 512 GB+. |
 | `HYPERLOOM_`<br>`FRAMEWORK_PYTHON` | Unset | Explicit interpreter that launches the server for a from-source build (the venv Python the artifact was compiled against).  Set automatically from `FrameworkRuntime.runtime_python_exe` through `apply_runtime_override` into the per-variant YAML `benchmark.envs`.  Both backends export that mapping to the server env; the bypass backend additionally uses this value as the `python -m` interpreter.  Operators normally do not set this by hand. |
 
@@ -1375,7 +1421,7 @@ harness requests, on the round's `PORT`, which the harness is given.
 | `MLPERF_TOKENIZER_DIR` | — (required) | Kimi-K3 fast-tokenizer directory the harness counts tokens with. Checked at preflight. |
 | `MLPERF_AGENTIC_FLOW` | `smoke_test` | `run_agentic.sh` flow: `smoke_test` (150 trajectories) or `full` (613). |
 | `AGENTIC_NUM_TRAJECTORIES` | Derived from the flow | Overrides the trajectory count. Sizes the benchmark timeout. |
-| `MLPERF_AGENTIC_HARDWARE` | `mi355x` | Hardware key passed to `run_agentic.sh`. |
+| `MLPERF_AGENTIC_HARDWARE` | The session's GPU type (`$GPU_TYPE`) | Hardware key passed to `run_agentic.sh`. With neither set, the point is refused in suite config. |
 
 Preflight also refuses a non-SGLang framework and a model path that is not
 Kimi. With `INFERENCE_OPTIMIZER_BENCHMARK_TIMEOUT_SEC` unset, the benchmark cap
@@ -1429,25 +1475,6 @@ See [Optimize an AgentX workload](../how-to/optimize.md#optimize-an-agentx-workl
 | `INFERENCE_OPTIMIZER_CYCLE_RELOOP_MIN_REMAINING_SEC` | Optional | `10800` | Absolute minimum remaining session seconds to justify opening a new macro-cycle. For bounded sessions the effective floor is `min(this, max_minutes * 60 * 0.15)` so shorter sessions are not unconditionally blocked. |
 | `INFERENCE_OPTIMIZER_KERNEL_IDLE_MAX_TICKS` | Optional | `3` | Consecutive no-work KERNEL_AGENT ticks before the phase winds down to CYCLE_END. Values below `1` are treated as `3`. A malformed value raises `EnvValueError`. |
 | `INFERENCE_OPTIMIZER_KERNEL_IDLE_MIN_SECONDS` | Optional | `600` | Wall-clock seconds a KERNEL idle streak must last before winding down to CYCLE_END. Values at or below `0` are treated as `600`. A malformed value raises `EnvValueError`. |
-
----
-
-## Plug selection
-
-Which implementation serves each plug socket (today `events`, progress reporting, and `native_builds`, the builds of a
-framework server that is built from its checkout) is chosen by layering, lowest
-first: the built-in `local` profile, the `plugs.resolved.json` of the session being resumed, `--plug-profile`,
-the manifest (`--manifest` or `HYPERLOOM_MANIFEST`), `HYPERLOOM_MANIFEST_OVERRIDES`, then `--plug` and `--plug-config`.
-With none of these set, a run uses the `local` profile, writes nothing to the session and prints nothing. See
-[Select plug implementations](../how-to/optimize.md#select-plug-implementations).
-
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `HYPERLOOM_MANIFEST` | Unset (the `local` profile) | Path of a JSON plug manifest (`"schema": "hyperloom.plugs/v1"`) laid over the profile. `--manifest` wins over it. An exported value changes which implementations every run in that shell uses, and a selection is recorded in the session and re-applied on resume. |
-| `HYPERLOOM_MANIFEST_OVERRIDES` | Unset (no overrides) | Path of a JSON file of the same shape laid over the manifest; only `--plug` and `--plug-config` win over it. Meant for a host that must adjust a run without editing the manifest. |
-
-A path that does not exist, a malformed file, an unknown socket or implementation, or a `${VAR}` that is unset and has no
-default stops the run with exit code 2 before any session is opened or changed.
 
 ---
 

@@ -21,7 +21,6 @@ from hyperloom.common.visible_devices import (
     mask_tokens,
     parse_device_list,
 )
-from hyperloom.inference_optimizer.gpu_types import geak_identity_pin
 from hyperloom.inference_optimizer.grid_server_args import server_arg_value
 
 log = logging.getLogger(__name__)
@@ -405,11 +404,6 @@ def _pin_renumbers_devices(pin: Mapping[str, Any] | None) -> bool:
     """
     pin = pin or {}
     return is_rocr_level(str(pin.get("var") or "")) and pin.get("source") == _PROCESS_ENV
-
-
-def _resolve_handoff_gpu_identity(gpu_type: str | None) -> dict[str, str]:
-    """The handoff's ``gpu_type``, plus GEAK's explicit product/ISA pin for a board that carries one."""
-    return {"gpu_type": str(gpu_type or ""), **geak_identity_pin(gpu_type or "")}
 
 
 def _resolve_handoff_gpu_ids_space(*, gpu_pin: Mapping[str, Any] | None) -> str:

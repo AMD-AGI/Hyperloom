@@ -354,6 +354,11 @@ def tracelens_root() -> Path:
     return resolve_dep_dir("TraceLens", "TRACELENS_ROOT")
 
 
+def tracelens_arch_json(tracelens_root: Path, platform: str) -> Path:
+    """The arch JSON a TraceLens checkout keeps for ``platform``, named by the upper-case GPU label."""
+    return tracelens_root / "TraceLens" / "Agent" / "Analysis" / "utils" / "arch" / f"{platform.strip().upper()}.json"
+
+
 def is_path_within(path: Path, root: Path) -> bool:
     """Whether ``path`` provably resolves to ``root`` or a location below it."""
     try:
@@ -402,5 +407,6 @@ __all__ = [
     "session_dir",
     "session_ledger_key",
     "shared_db_path_for",
+    "tracelens_arch_json",
     "workspace_root",
 ]

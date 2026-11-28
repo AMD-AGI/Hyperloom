@@ -268,9 +268,9 @@ class OutputActivity:
 @dataclass(frozen=True)
 class MeasuredWindow:
     """What runs around the measured pass alone: ``open`` once the warmup is over, ``close`` once the measured pass
-    has ended, however it ended."""
+    has ended, however it ended. ``open`` returns why the round has to end before the measured pass, if it has to."""
 
-    open: Callable[[], None]
+    open: Callable[[], Stop | None]
     close: Callable[[], None]
 
 
@@ -336,8 +336,9 @@ def run_fixed(fixed_round: FixedRound) -> FixedOutcome:
         if stop is not None:
             return FixedOutcome(invocation, returncode, None, stop)
     window = fixed_round.window
-    if window is not None:
-        window.open()
+    refused = None if window is None else window.open()
+    if refused is not None:
+        return FixedOutcome(invocation, None, None, refused)
     returncode, stop = _run_pass(fixed_round, measured_argv, Phase.MEASURED)
     fixed_round.clock.mark(Phase.FINISHED)
     if window is not None:

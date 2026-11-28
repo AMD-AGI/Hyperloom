@@ -12,7 +12,6 @@ from dataclasses import asdict
 from pathlib import Path
 from typing import Any
 from hyperloom_common.coerce import to_str_list
-from hyperloom.plugs import progress as _progress
 from ..retest_view import write_retest_view
 from ..state_file import write_state
 from .._shared_state.phase_state import _control_fields
@@ -116,7 +115,6 @@ class _PersistenceMixin:
         from hyperloom.inference_optimizer.breakdown.recorder import instrument
 
         instrument.snapshot_state_sections(session_dir, self)
-        _progress.emit_budget(self)
         # Derived artifact: the current best route as a current_setting.sh that --reference-script takes back.
         try:
             cb = self.current_best or {}

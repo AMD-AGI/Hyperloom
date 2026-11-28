@@ -1,7 +1,8 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""The run_dir layout: every file a round leaves, by name, and the ``server_ready_at`` stamp's format.
+"""The run_dir layout: every file a round leaves, by name, the ``server_ready_at`` stamp's format, and how
+``profile/capture.json`` tells a control request the server refused from one it never answered.
 
 One round writes one run_dir and leaves it unchanged once the round ends. Readers locate files through
 :class:`RunLayout` rather than spelling names or globbing. ``gpu_metrics.json`` is not in the run_dir: the host
@@ -46,6 +47,8 @@ CAPTURE_TRACE_DIRS = (CAPTURE_TRACES_DIR, GRAPH_CAPTURE_DIR)
 #: The profiler's trace subdirectories, kept apart rather than flattened so a reader tells a step from a sidecar.
 PROFILE_TRACE_DIRS = (TORCH_TRACE_DIR, *CAPTURE_TRACE_DIRS)
 _UTF8 = "utf-8"
+#: How urllib words the error of a request the server answered with an error status.
+_ANSWERED_WITH_STATUS = "HTTP Error "
 
 
 @dataclass(frozen=True)
@@ -82,6 +85,12 @@ def parse_ready_stamp(text: str) -> ReadyStamp | None:
         return ReadyStamp(float(fields[0]), float(fields[1]))
     except ValueError:
         return None
+
+
+def answered_with_status(error: str) -> bool:
+    """Whether ``error``, a profile control request's error as ``profile/capture.json`` records it
+    (``<path>: <cause>``), is the server's answer with an error status rather than no answer."""
+    return error.partition(": ")[2].startswith(_ANSWERED_WITH_STATUS)
 
 
 class RunDirError(ValueError):
@@ -288,6 +297,7 @@ __all__ = [
     "ReadyStamp",
     "RunDirError",
     "RunLayout",
+    "answered_with_status",
     "format_ready_stamp",
     "parse_ready_stamp",
 ]

@@ -9,8 +9,6 @@ from __future__ import annotations
 import argparse
 import os
 import sys
-from collections.abc import Iterator
-from contextlib import contextmanager
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -21,27 +19,11 @@ from hyperloom.inference_optimizer.cli import bootstrap
 from hyperloom.inference_optimizer.cli.bootstrap import _install_executors
 from hyperloom.inference_optimizer.native_builds import OptionCoverage
 from hyperloom.orchestrator.state.tests._session_base import freeze_session_base
-from hyperloom.plugs import Implementation, PlugHost, PlugRegistry, ResolvedManifest, Socket, activated
-from hyperloom.plugs.manifest import SocketSetting
-from hyperloom.plugs.native_builds import NATIVE_BUILDS_SOCKET
 
 _HELP = """\
 -c,    --ctx-size N                     size of the prompt context (default: 0)
 --keep N                                number of tokens to keep from the initial prompt
 """
-
-
-@contextmanager
-def _hosting(engine: object) -> Iterator[None]:
-    """A plug host whose ``native_builds`` socket ``engine`` fills, as the process's current one."""
-    registry = PlugRegistry()
-    registry.define(Socket(NATIVE_BUILDS_SOCKET, object))
-    registry.register(Implementation(NATIVE_BUILDS_SOCKET, "stand-in", lambda context: engine))
-    manifest = ResolvedManifest("test", {NATIVE_BUILDS_SOCKET: SocketSetting("stand-in", {}, "cli")})
-    host = PlugHost(manifest, registry, session_dir=None)
-    host.start()
-    with activated(host):
-        yield
 
 
 class _Sub:
@@ -87,7 +69,9 @@ def test_an_image_served_framework_builds_nothing_keeps_no_options_and_imports_n
     assert not engines & set(sys.modules)
 
 
-def test_the_builds_and_the_options_are_the_ones_the_current_plug_host_gives(tmp_path: Path) -> None:
+def test_the_builds_and_the_options_are_the_ones_the_engine_gives(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     builds, kept = SimpleNamespace(checkout=tmp_path), SimpleNamespace(file=tmp_path / "options.json")
     opened = {(tmp_path, "llamacpp"): builds}
     engine = SimpleNamespace(
@@ -96,12 +80,19 @@ def test_the_builds_and_the_options_are_the_ones_the_current_plug_host_gives(tmp
         options={tmp_path: kept}.get,
     )
 
-    with _hosting(engine):
-        assert native_builds.start_candidate_builds(tmp_path, "llamacpp") is builds
-        assert native_builds.start_candidate_builds(tmp_path, "sglang") is None
-        assert native_builds.record_server_options(tmp_path, "llamacpp") == kept.file
-        assert native_builds.record_server_options(tmp_path, "sglang") is None
-        assert native_builds.server_options(tmp_path, "llamacpp") is kept
+    monkeypatch.setattr(native_builds, "_engine", lambda: engine)
+
+    assert native_builds.start_candidate_builds(tmp_path, "llamacpp") is builds
+    assert native_builds.start_candidate_builds(tmp_path, "sglang") is None
+    assert native_builds.record_server_options(tmp_path, "llamacpp") == kept.file
+    assert native_builds.record_server_options(tmp_path, "sglang") is None
+    assert native_builds.server_options(tmp_path, "llamacpp") is kept
+
+
+def test_the_engine_entry_is_the_session_engine() -> None:
+    from hyperloom.measure.runner.native.session_engine import SessionNativeEngine
+
+    assert isinstance(native_builds._engine(), SessionNativeEngine)
 
 
 def _built_server(root: Path, monkeypatch: pytest.MonkeyPatch) -> SimpleNamespace:

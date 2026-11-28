@@ -791,7 +791,6 @@ class OneChampionKB:
         *,
         scheme: str,
         match: dict[str, str],
-        hardware_in: list[str] | None = None,
         offset: int = 0,
         limit: int = 50,
     ) -> dict[str, Any]:

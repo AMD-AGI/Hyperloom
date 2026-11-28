@@ -136,7 +136,8 @@ def _run_setup(
     runner = _write(
         tmp_path / "runner.sh",
         (f"{before}\n" if before else "") + f"source {shlex.quote(library.as_posix())}\n"
-        "rocm-smi() { printf 'test MI300X\\n'; }\n"
+        "rocm-smi() { :; }\n"
+        "amd-smi() { printf 'MARKET_NAME: AMD Instinct MI300X\\nTARGET_GRAPHICS_VERSION: gfx942\\n'; }\n"
         "rocminfo() { printf 'gfx942\\n'; }\n"
         "check_torch_rocm_shared_libs() { :; }\n"
         "check_rocm_toolchain_alignment() { :; }\n"

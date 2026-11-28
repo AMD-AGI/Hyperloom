@@ -38,6 +38,7 @@ from hyperloom.orchestrator.loop.sub_agent_runner import RunnerContext
 from hyperloom.orchestrator.rehearsal import boot_log_for
 from hyperloom.orchestrator.state.shared_state import EnablementRound
 from hyperloom.orchestrator.state.task_registry import Task
+from hyperloom.orchestrator.tests._fixtures import MI355X_CARD, publish_card
 from hyperloom.orchestrator.actions.executors.integrate import _integrate_bench as integrate_bench
 from hyperloom.orchestrator.actions.executors.integrate import _integrate_resolve as integrate_resolve
 from hyperloom.orchestrator.actions.executors.integrate import _integrate_apply as integrate_apply
@@ -843,6 +844,7 @@ async def test_executor_rejects_inapplicable_aiter_model_config(
     """A non-runnable model-config seed must never reach the E2E benchmark."""
     from hyperloom.orchestrator.state.shared_state import SharedState
 
+    publish_card(monkeypatch, MI355X_CARD)
     session_dir = tmp_path / "session"
     workspace = session_dir / "runs" / "specialist" / "t-spec-placeholder"
     workspace.mkdir(parents=True)
@@ -875,7 +877,7 @@ async def test_executor_rejects_inapplicable_aiter_model_config(
 
     executor = IntegratePatchExecutor(session_dir=session_dir)
     monkeypatch.setattr(executor, "_bench_patch", _should_not_benchmark)
-    state = SharedState(gpu_type="mi355x")
+    state = SharedState()
     task = Task(
         task_id="t-int-placeholder",
         kind="integrate_patch",
@@ -895,7 +897,8 @@ async def test_executor_rejects_inapplicable_aiter_model_config(
 
 
 @pytest.mark.asyncio
-async def test_executor_accepts_runtime_ready_aiter_model_config(tmp_path: Path):
+async def test_executor_accepts_runtime_ready_aiter_model_config(tmp_path: Path, monkeypatch):
+    publish_card(monkeypatch, MI355X_CARD)
     session_dir = tmp_path / "session"
     workspace = session_dir / "runs" / "specialist" / "t-spec-tuned"
     workspace.mkdir(parents=True)
@@ -929,7 +932,6 @@ async def test_executor_accepts_runtime_ready_aiter_model_config(tmp_path: Path)
             "t-int-tuned",
             {
                 "specialist_task_id": "t-spec-tuned",
-                "gpu_type": "mi355x",
                 "apply_only": True,
             },
         )
@@ -937,6 +939,21 @@ async def test_executor_accepts_runtime_ready_aiter_model_config(tmp_path: Path)
 
     assert result["status"] == "applied_no_bench"
     assert target.read_text(encoding="utf-8") == artifact.read_text(encoding="utf-8")
+
+
+def test_an_aiter_model_config_is_not_checked_without_a_session_card(tmp_path: Path):
+    from hyperloom.orchestrator.actions.executors.patching._patch_artifacts import (
+        _ArtifactSpec,
+        _validate_aiter_gemm_artifacts,
+    )
+
+    artifact = tmp_path / "a8w8_blockscale_tuned_gemm_qwen3_14b.csv"
+    artifact.write_text("gfx,cu_num,us,kernelName\ngfx942,304,0,placeholder\n", encoding="utf-8")
+    target = tmp_path / "fw" / "aiter" / "configs" / "model_configs" / artifact.name
+    spec = _ArtifactSpec(source=artifact, target=target, rel_target=artifact.name, root=tmp_path, kind="model_config")
+
+    assert _validate_aiter_gemm_artifacts([spec], card=None) == []
+    assert _validate_aiter_gemm_artifacts([spec], card=MI355X_CARD)[0]["error"] == "no_target_gpu_rows"
 
 
 @pytest.mark.asyncio

@@ -26,6 +26,13 @@ from hyperloom.orchestrator.roles import deepseek as deepseek_module
 from hyperloom.orchestrator.roles.base import LLMCallFailed
 from hyperloom.orchestrator.roles.deepseek import DeepSeekBackend, decode_intent_envelope
 
+
+@pytest.fixture(autouse=True)
+def _private_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Keep the harness home every session writes its patches into out of the real home."""
+    monkeypatch.setenv("HOME", str(tmp_path))
+
+
 _KERNEL_REQUEST_PAYLOAD = {
     "target_agent": "kernel_agent",
     "kind": "run_optimization",
@@ -197,29 +204,26 @@ def test_an_unserialized_payload_object_is_accepted() -> None:
     assert envelope["intents"][0]["payload"] == {"a": 1}
 
 
-def test_a_reply_with_no_json_object_is_reported_as_no_intent() -> None:
-    """Prose-only is the failure this route is most exposed to; it must be named."""
-    with pytest.raises(NoIntentEmitted, match="no JSON object"):
-        decode_intent_envelope("I think we should wait for the next profile.")
-
-
-def test_an_empty_intents_list_is_rejected() -> None:
-    """An empty list would otherwise read as a successful tick that did nothing."""
-    with pytest.raises(NoIntentEmitted, match="empty 'intents' list"):
-        decode_intent_envelope(json.dumps({"intents": []}))
-
-
-def test_a_json_reply_without_an_intents_list_is_rejected() -> None:
-    """Valid JSON is not yet an envelope."""
-    with pytest.raises(NoIntentEmitted, match="no 'intents' list"):
-        decode_intent_envelope(json.dumps({"decision": "wait"}))
-
-
-def test_an_undecodable_payload_string_is_rejected() -> None:
-    """A payload that is neither JSON nor an object cannot be validated."""
-    envelope = json.dumps({"intents": [{"intent_type": "request", "payload": "not json"}]})
-    with pytest.raises(NoIntentEmitted, match="not decodable JSON"):
-        decode_intent_envelope(envelope)
+@pytest.mark.parametrize(
+    ("reply", "named"),
+    [
+        # Prose-only is the failure this route is most exposed to; it must be named.
+        ("I think we should wait for the next profile.", "no JSON object"),
+        # An empty list would otherwise read as a successful tick that did nothing.
+        (json.dumps({"intents": []}), "empty 'intents' list"),
+        # Valid JSON is not yet an envelope.
+        (json.dumps({"decision": "wait"}), "no 'intents' list"),
+        # A payload that is neither JSON nor an object cannot be validated.
+        (json.dumps({"intents": [{"intent_type": "request", "payload": "not json"}]}), "not decodable JSON"),
+        (
+            json.dumps({"intents": [{"intent_type": "alert", "intent_payload": {"severity": "low"}}]}),
+            r"no 'payload' key \(keys: intent_payload, intent_type\)",
+        ),
+    ],
+)
+def test_a_reply_that_is_not_an_envelope_is_rejected_with_what_it_lacked(reply: str, named: str) -> None:
+    with pytest.raises(NoIntentEmitted, match=named):
+        decode_intent_envelope(reply)
 
 
 # What the harness is told, given it has no field for a system prompt.
@@ -247,12 +251,6 @@ async def test_instructions_and_every_turn_carry_the_whole_envelope_contract(
     assert deepseek_module._ENVELOPE_REMINDER in prompt
     assert '{"intents": [{"intent_type": "<type>", "payload": {<JSON object>}}]}' in prompt
     assert "not a string" in prompt
-
-
-def test_an_intent_without_a_payload_key_names_the_keys_it_carried() -> None:
-    envelope = json.dumps({"intents": [{"intent_type": "alert", "intent_payload": {"severity": "low"}}]})
-    with pytest.raises(NoIntentEmitted, match=r"no 'payload' key \(keys: intent_payload, intent_type\)"):
-        decode_intent_envelope(envelope)
 
 
 async def test_a_changed_system_prompt_reaches_the_next_round(
@@ -348,7 +346,7 @@ async def test_an_unset_effort_starts_the_runtime_at_a_level_it_accepts(
     """The harness refuses an empty effort at initialization, before any prompt runs."""
     _pin_gateway(monkeypatch)
     captured = _capture_harness_kwargs(monkeypatch)
-    await DeepSeekSession(cwd=tmp_path, model="deepseek-v4-flash", dsh_home=tmp_path / "home").start()
+    await DeepSeekSession(cwd=tmp_path, model="deepseek-v4-flash").start()
 
     assert captured["reasoning_effort"] in {"low", "high", "max"}
 
@@ -360,9 +358,7 @@ async def test_an_effort_the_harness_lacks_is_rounded_up_to_one_it_has(
     """``medium`` is not a harness level; asking for more deliberation must not yield less."""
     _pin_gateway(monkeypatch)
     captured = _capture_harness_kwargs(monkeypatch)
-    await DeepSeekSession(
-        cwd=tmp_path, model="deepseek-v4-flash", dsh_home=tmp_path / "home", reasoning_effort="medium"
-    ).start()
+    await DeepSeekSession(cwd=tmp_path, model="deepseek-v4-flash", reasoning_effort="medium").start()
 
     assert captured["reasoning_effort"] == "high"
 
@@ -380,7 +376,7 @@ async def test_the_runtime_compacts_at_a_quarter_of_the_model_window(
 
     _pin_gateway(monkeypatch)
     captured = _capture_harness_kwargs(monkeypatch)
-    await DeepSeekSession(cwd=tmp_path, model="deepseek-v4-flash", dsh_home=tmp_path / "home").start()
+    await DeepSeekSession(cwd=tmp_path, model="deepseek-v4-flash").start()
 
     patch = next(p for p in captured["patches"] if Path(p).name == "hyperloom-compaction.yml")
     rows = {row["id"]: row for row in yaml.safe_load(Path(patch).read_text(encoding="utf-8"))}
@@ -403,10 +399,10 @@ async def test_the_gateway_reaches_the_harness_as_the_credential_its_adapter_rea
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The adapter reads DEEPSEEK_*; the gateway is configured on the OpenAI-compatible line."""
+    """The runtime reads DEEPSEEK_*; the gateway is configured on the OpenAI-compatible line."""
     _pin_gateway(monkeypatch)
     captured = _capture_harness_kwargs(monkeypatch)
-    await DeepSeekSession(cwd=tmp_path, model="deepseek-v4-flash", dsh_home=tmp_path / "home").start()
+    await DeepSeekSession(cwd=tmp_path, model="deepseek-v4-flash").start()
 
     assert captured["env"]["DEEPSEEK_BASE_URL"] == "https://gateway.invalid/v1"
     assert captured["env"]["DEEPSEEK_API_KEY"] == "gateway-key"
@@ -421,7 +417,7 @@ async def test_an_unconfigured_gateway_fails_at_start_not_at_the_first_turn(
         monkeypatch.delenv(key, raising=False)
     _capture_harness_kwargs(monkeypatch)
     with pytest.raises(DeepSeekSessionUnavailableError, match="OPENAI_BASE_URL"):
-        await DeepSeekSession(cwd=tmp_path, model="deepseek-v4-flash", dsh_home=tmp_path / "home").start()
+        await DeepSeekSession(cwd=tmp_path, model="deepseek-v4-flash").start()
 
 
 class _RecordingHarness:
@@ -452,7 +448,7 @@ def _recording_harness(monkeypatch: pytest.MonkeyPatch, **behaviour: Any) -> lis
 
 
 def _session(tmp_path: Path) -> DeepSeekSession:
-    return DeepSeekSession(cwd=tmp_path, model="deepseek-v4-flash", dsh_home=tmp_path / "home")
+    return DeepSeekSession(cwd=tmp_path, model="deepseek-v4-flash")
 
 
 async def test_every_round_opens_a_fresh_conversation_on_the_same_runtime(

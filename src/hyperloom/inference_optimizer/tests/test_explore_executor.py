@@ -1010,7 +1010,7 @@ def test_unified_attn_filter_matches_aiter_dist_version_short_sha(tmp_path):
         serving=ServingStack(
             "sglang",
             str(model),
-            gpu_type="mi355x",
+            gfx="gfx950",
             stack_fingerprint={
                 "sglang": "0.5.20.dev20260920+gc610c40399",
                 # The dist version install_baremetal.sh falls back to; embeds the short sha of the pinned commit.

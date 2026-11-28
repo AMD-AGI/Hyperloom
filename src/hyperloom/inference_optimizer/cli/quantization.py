@@ -10,6 +10,7 @@ import os
 import sys
 from pathlib import Path
 
+from hyperloom_common import gpu_card
 from hyperloom_common.env import env_bool
 
 
@@ -26,10 +27,8 @@ async def _run_quantization_prelude(args: argparse.Namespace) -> None:
         )
 
         scheme = getattr(args, "quantize_scheme", None)
-        # Constrain the scheme by the target GPU via the --gpu-type / $GPU_TYPE hint (empty => no enforcement).
-        gpu_hint = (getattr(args, "gpu_type", None) or os.environ.get("GPU_TYPE", "")).strip().lower()
         try:
-            validate_scheme(scheme, gpu_hint)
+            validate_scheme(scheme, gpu_card.session_gfx())
         except SchemeNotSupportedError as exc:
             # Pre-flight config error: skip quantization and continue on the un-quantized model, made
             # machine-detectable via a stdout marker + env var.
@@ -37,8 +36,7 @@ async def _run_quantization_prelude(args: argparse.Namespace) -> None:
             os.environ["HYPERLOOM_QUANTIZATION_SKIPPED"] = reason
             print(
                 f"QUANTIZATION_SKIPPED: {reason}; continuing optimization on the "
-                "un-quantized model. Pick a scheme supported by this GPU TYPE "
-                "(or change GPU_TYPE) to actually quantize."
+                "un-quantized model. Pick a scheme this GPU supports to actually quantize."
             )
             print(f"ERROR: quantization skipped — {reason}", file=sys.stderr)
             return

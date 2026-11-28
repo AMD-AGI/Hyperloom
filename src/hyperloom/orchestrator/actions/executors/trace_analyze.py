@@ -27,7 +27,11 @@ from hyperloom.inference_optimizer.session import paths
 from hyperloom.inference_optimizer.trace.trajectory_trace import inherited_scope_fields
 from hyperloom.orchestrator.trace_analysis.analysis_route import AnalysisRoute
 
+
 log = logging.getLogger(__name__)
+
+#: The payload key that marks one PD engine role's trace: no LLM phase hints, same-stream overlaps clamped.
+PD_ROLE_TRACE_KEY = "pd_role_trace"
 
 #: Payload key: the physical cards the caller holds for the arch microbenchmark (``--arch-gpus``); an empty list lets it
 #: run on none. Absent, the analysis picks among the visible GPUs.
@@ -415,6 +419,8 @@ def _build_trace_analyze_cmd(
         # Pass the resolved root explicitly so the tool never relies on inherited env.
         "--tracelens-root",
         str(run.tracelens_root),
+        "--target-platform",
+        run.target_platform,
     ]
     # The tool's SDK run books its model requests onto this session's trajectory ledger.
     for key, value in inherited_scope_fields().items():
@@ -423,7 +429,6 @@ def _build_trace_analyze_cmd(
     cmd += _optional_flags(
         ("--model-name", run.model_name),
         ("--framework", run.framework),
-        ("--target-platform", run.target_platform),
     )
     arch_gpus = payload.get(ARCH_GPUS_PARAM)
     if arch_gpus is not None:
@@ -432,19 +437,23 @@ def _build_trace_analyze_cmd(
     capture_folder = (
         payload.get("capture_folder") or payload.get("graph_capture_path") or payload.get("capture_folder_path")
     )
+    pd_role_trace = bool(payload.get(PD_ROLE_TRACE_KEY))
     if scriptable:
         steady_state_mode = "generic"
     else:
-        cmd += _split_llm_flags(payload, workload)
         steady_state_mode = str(
             payload.get("steady_state_mode") or os.environ.get("INFERENCE_OPTIMIZER_STEADY_STATE_MODE", "")
         ).strip()
+        if not pd_role_trace:
+            cmd += _split_llm_flags(payload, workload)
     roofline_output_name = str(payload.get("roofline_output_name") or "").strip()
     cmd += _optional_flags(
         ("--capture-folder", capture_folder),
         ("--steady-state-mode", steady_state_mode),
         ("--roofline-output-name", roofline_output_name),
     )
+    if pd_role_trace:
+        cmd += ["--clamp-stream-overlaps"]
     if payload.get("dry_run"):
         cmd += ["--dry-run"]
     return cmd, steady_state_mode
@@ -690,6 +699,12 @@ async def trace_analyze_handler(
 
     framework, framework_warnings = _framework_for_analysis(payload, state)
     target_platform = first_text(payload.get("target_platform"), state.gpu_type)
+    if not target_platform:
+        return {
+            "status": "failed",
+            "error_class": "gpu_label_missing",
+            "error": "no GPU label: the payload names no target_platform and the session recorded no gpu_type",
+        }
     model_name = first_text(payload.get("model_name"), state.model_name, state.model_path)
 
     # Analysis route: default ``agent`` (TraceLens SDK/LLM); ``non-llm`` runs TraceLens alone,

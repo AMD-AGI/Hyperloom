@@ -183,12 +183,12 @@ def _explain_stop_reason(stop_reason) -> str:
     return STOP_REASON_EXPLANATIONS.get(str(stop_reason or "").strip(), "")
 
 
-def _platform_fingerprint(gpu_type: str | None = None) -> dict[str, Any]:
+def _platform_fingerprint() -> dict[str, Any]:
     """Platform record for the run report, scoped to this session's node count."""
     # Local import keeps this free of executor import order.
     from ._multi_node_env import is_multi_node
 
-    return platform_fingerprint(gpu_type, multi_node=is_multi_node())
+    return platform_fingerprint(multi_node=is_multi_node())
 
 
 def _format_composite_perf_section(summary: dict[str, Any]) -> list[str]:
@@ -298,7 +298,7 @@ def _build_summary_dict(
         "crash_count": state.crash_count,
         "server_boot_failures": _count_server_boot_failures(session_dir),
         "pruned_families": state.pruned_families,
-        "platform": _platform_fingerprint(getattr(state, "gpu_type", None)),
+        "platform": _platform_fingerprint(),
         "max_minutes": state.max_minutes,
         "report_generated_at": datetime.now(timezone.utc).isoformat(),
         "event_counts_by_topic": ev_counts,
@@ -527,10 +527,7 @@ def _format_compute_partition_section(summary: dict[str, Any]) -> list[str]:
     lines.append("")
     lines.append(f"- mode              : `{shape['mode']}` ({partitions} partitions)")
     if shape.get("cu_per_partition"):
-        # Absent is its own answer.
-        probed = shape.get("cu_probed")
-        origin = "" if probed is None else (" (from the device)" if probed else " (derived from the board table)")
-        lines.append(f"- CU per partition  : {shape['cu_per_partition']}{origin}")
+        lines.append(f"- CU per partition  : {shape['cu_per_partition']}")
     if shape.get("gib_per_partition"):
         lines.append(f"- HBM per partition : `{float(shape['gib_per_partition']):.1f}` GiB")
     # Omitted where nothing fans out: the number would describe a placement that never happened, directly above a

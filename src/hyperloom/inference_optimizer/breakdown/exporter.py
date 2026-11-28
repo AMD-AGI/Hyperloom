@@ -651,7 +651,7 @@ def write_minimal_final_json(session_dir: Path | str) -> Path:
         "optimization_stack_len": len(state.get("optimization_stack") or []),
         "report_generated_at": datetime.now(timezone.utc).isoformat(),
         # A run that died unattended is exactly when the host record is most useful, since nobody was watching.
-        "platform": platform_fingerprint(copied["gpu_type"]),
+        "platform": platform_fingerprint(),
     }
     atomic_write_json(target, summary)
     log.info("crash-safe final.json: wrote %s", target)
