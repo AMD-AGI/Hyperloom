@@ -34,8 +34,8 @@ its memory on the render node of every card of the server, while the kernel list
 of the test pairs with one holder across all the cards, and the lone holders of the other cards pair first; the holders
 of a card passed by a launcher's place keep the processes they pair with as well. A process of the test pairs only on
 the card where it is expected to hold memory of its own: where it reports its most, which is the one card of a process
-with memory on one card and the own card of a rank whose files say more there; the ranks of a server whose files say as
-much on every card of the server pair with one holder per card between them, as each is the rank of one card. Memory
+with memory on one card and the own card of a rank whose files say more there; the ranks of a server (the processes
+that report memory on the same several cards) pair with one holder per card between them, as each card is the own card of one. Memory
 alone leaves a window: while a process of the test is not paired with its own holder (the kernel does not list it yet, or
 lists it more than :data:`UNACCOUNTED_VRAM_TOLERANCE` from what its files say), one foreign holder within the tolerance
 of what that process reports on its expected card passes there, and only there: on its one card, on a rank's own card,
@@ -293,7 +293,7 @@ class CardReading:
         rank there vouches for no holder elsewhere.
 
         Each process of the test pairs only on a card where it is expected to hold memory of its own (:func:`_own_cards`),
-        and the ranks of a server expected on the same several cards pair with one holder per card between them. Memory
+        and the ranks of a server (processes that report memory on the same several cards) pair with one holder per card between them. Memory
         alone cannot tell a foreign holder from a process of the test that no holder pairs with: while one is not listed
         by the kernel, or listed more than the tolerance from what its files say, one foreign holder near what it reports
         on its expected card passes there, and on no other card: a single-card process's card, a rank's own card, or for
@@ -470,11 +470,12 @@ def _pairs(holders: Sequence[Holder], memory: Mapping[int, Mapping[int, int]]) -
     holds on each card, see :meth:`CardReading._own_memory`): a holder with a process that holds memory on its card within
     :data:`UNACCOUNTED_VRAM_TOLERANCE` of the holder's, on a card where that process is expected to hold its own
     (:func:`_own_cards`). Each process pairs with one holder across all cards, as the kernel lists a rank of a server with
-    several on its own card only while it reports its memory on every card of the server; and the processes expected on
-    the same several cards (the ranks of one server, none of which says which card is its own) pair with one holder per
-    card between them, as each of them is the rank of one card. So a process that no holder pairs with vouches for a
-    holder only on a card where it is expected: a process with memory on one card on that card, a rank on its own card, and
-    a rank whose files do not say which card is its own on the one card of the server none of the other ranks pairs on."""
+    several on its own card only while it reports its memory on every card of the server; and the processes that report
+    memory on the same several cards (the ranks of a server, whether or not their files say which card is their own) pair
+    with one holder per card between them, as each card is the own card of one rank only. So a process that no holder pairs with
+    vouches for a holder only on a card where it is expected: a process with memory on one card on that card, a rank on its
+    own card, and a rank whose files do not say which card is its own on a card of the server none of the other ranks pairs
+    on."""
     expected = {process: _own_cards(on) for process, on in memory.items()}
     residual: dict[tuple[object, ...], dict[tuple[object, ...], int]] = {}
 
@@ -490,10 +491,10 @@ def _pairs(holders: Sequence[Holder], memory: Mapping[int, Mapping[int, int]]) -
             cards = expected[process]
             if holder.card not in cards or abs(on[holder.card] - holder.vram) > UNACCOUNTED_VRAM_TOLERANCE:
                 continue
-            if len(cards) == 1:
+            if len(on) == 1:
                 edge(start, (process,))
                 continue
-            slot = (tuple(sorted(cards)), holder.card)
+            slot = (tuple(sorted(on)), holder.card)
             entry, exit_ = ("slot-in", *slot), ("slot-out", *slot)
             edge(start, entry)
             edge(entry, exit_)

@@ -36,7 +36,7 @@ say it holds there, such as a server and the processes it spawned, a rank of a s
 each process of the test pairing with one holder across all the cards (a rank reports its memory on every render node
 of its server), the holders of a card passed by a launcher's place keeping their processes too, memory being the only
 evidence, each process pairing only on the card where it is expected to hold memory (where it reports its most; the ranks
-of a server reporting as much on every card pair with one holder per card between them): while a process of the test is
+of a server pairing with one holder per card between them): while a process of the test is
 not listed, or listed more than 512 MiB from what its files say, a foreign holder within 512 MiB of what it reports on
 that card passes there and on no other card (a single-card process's card, a rank's own card, or the card of the server
 none of the other ranks pairs on); and no memory may be held that no process of this container accounts for): the result says so in its ``method``.

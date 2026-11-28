@@ -379,7 +379,12 @@ _SOLO_HOST, _SOLO_CHILD_HOST, _OTHER_HOST = 3600001, 3600002, 3700002
 
 
 def _kimi_round(
-    tree: KernelTree, *, loaded: bool = False, child: bool = True, unlisted: frozenset[int] = frozenset()
+    tree: KernelTree,
+    *,
+    loaded: bool = False,
+    child: bool = True,
+    unlisted: frozenset[int] = frozenset(),
+    loaded_ranks: frozenset[int] = frozenset(),
 ) -> OwnProcesses:
     """The production Kimi round: its runner, the server under it, the eight ranks the server spawned (1153 on card 0 to
     1160 on card 7) and the spawn child 1336. Each rank is listed by the kernel on its own card only and has a DRM file on
@@ -387,11 +392,14 @@ def _kimi_round(
     of its own. While loading (the record) every rank has 1.7 GiB, as rank 0 did; ``loaded``, every rank's files say the
     production figures and the kernel lists the rank with what its own card's file says (the kernel's figure for a loaded
     rank is not in the record). Without ``child`` the spawn child is not started. The kernel does not list the processes
-    of ``unlisted`` yet, while their files are there. The round owns what is under its runner."""
+    of ``unlisted`` yet, while their files are there; the ranks of ``loaded_ranks`` are loaded while the others load. The
+    round owns what is under its runner."""
     tree.process(_KIMI_RUNNER, command=("python3", "-m", "hyperloom.measure.runner"))
     tree.process(_KIMI_SERVER, parent=_KIMI_RUNNER, command=("python3", "-m", "sglang.launch_server", "--tp", "8"))
-    own_kib, peer_kib = (_RANK_OWN_KIB, _RANK_PEER_KIB) if loaded else (_RANK_LOADING_VRAM >> 10,) * 2
     for rank, host, card in zip(_KIMI_RANKS, _KIMI_RANK_HOSTS, _KIMI_CARDS):
+        own_kib, peer_kib = (
+            (_RANK_OWN_KIB, _RANK_PEER_KIB) if loaded or rank in loaded_ranks else (_RANK_LOADING_VRAM >> 10,) * 2
+        )
         tree.process(rank, parent=_KIMI_SERVER, command=_SPAWN_COMMAND)
         if rank not in unlisted:
             tree.holds(host, card, vram=own_kib << 10, queues=4)
@@ -549,6 +557,20 @@ def test_an_unlisted_process_of_the_test_vouches_for_a_holder_only_on_the_card_w
     own = _kimi_round(tree, loaded=loaded, unlisted=frozenset({unlisted}))
     if card is not None:
         tree.holds(_OTHER_HOST, card, vram=vram, queues=2)
+
+    assert [key for key in _keys(_read_kimi(tree), own) if key[0] == "crowded"] == [("crowded", c) for c in crowded]
+
+
+@pytest.mark.parametrize(("card", "crowded"), [(5, []), (_SPAWN_CARD, [_SPAWN_CARD]), (3, [3])])
+def test_a_rank_whose_files_say_its_own_card_still_takes_that_card_from_the_ranks_that_do_not(
+    tmp_path: Path, card: int, crowded: list[int]
+) -> None:
+    """Rank 0 has loaded, so its files say more on card 0 than on the others, while the other ranks still load and report
+    1.7 GiB on every card, and rank 5 is not listed yet. Card 0 is rank 0's own card, so rank 5 vouches for a foreign
+    1.7 GiB holder on card 5 only: beside rank 0 and the child on card 0, or beside rank 3, the holder crowds the card."""
+    tree = _pod(tmp_path)
+    own = _kimi_round(tree, unlisted=frozenset({_RANK_5}), loaded_ranks=frozenset({_KIMI_RANKS[0]}))
+    tree.holds(_OTHER_HOST, card, vram=_RANK_LOADING_VRAM, queues=2)
 
     assert [key for key in _keys(_read_kimi(tree), own) if key[0] == "crowded"] == [("crowded", c) for c in crowded]
 
