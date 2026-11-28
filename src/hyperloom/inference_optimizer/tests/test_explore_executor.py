@@ -1117,16 +1117,6 @@ def test_grid_variants_do_not_treat_provenance_as_reasoning():
     assert variant.reasoning_origin == ""
 
 
-def test_on_disk_stderr_tail_reads_benchmark_stderr_log(tmp_path):
-    from hyperloom.orchestrator.actions.executors.grid._round_report import _on_disk_stderr_tail
-
-    (tmp_path / "benchmark_stderr.log").write_text("bench_fps.py: error: unrecognized arguments: --use_cache teacache")
-    tail = _on_disk_stderr_tail(tmp_path)
-    assert "unrecognized arguments" in tail
-    # Empty dir → empty string (caller keeps its original blank error).
-    assert _on_disk_stderr_tail(tmp_path / "nope") == ""
-
-
 def test_measured_verdict_holds_only_for_the_same_workload_and_stack():
     from hyperloom.orchestrator.actions.executors.explore_prefilter.measured_variants import (
         MeasuredOn,

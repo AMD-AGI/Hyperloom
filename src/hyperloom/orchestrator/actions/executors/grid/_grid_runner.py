@@ -84,7 +84,6 @@ from ._capability_probe import unsupported_capability_reason
 from ._grid_inputs import _resolve_session_dir
 from ._round_report import (
     _existing_log_path,
-    _on_disk_stderr_tail,
     measurement_server_log_path,
     record_round,
 )
@@ -206,17 +205,9 @@ def stopped_by_the_run(returncode: int | None) -> StoppedByTheRun | None:
     return _STOPPED_BY_THE_RUN.get(int(returncode))
 
 
-def _invalid_measurement_error(
-    proc: SuiteRoundExit,
-    *,
-    death_excerpt: str,
-    workspace: Any,
-    slot: Any,
-) -> RoundError:
+def _invalid_measurement_error(proc: SuiteRoundExit, *, death_excerpt: str) -> RoundError:
     if proc.returncode != 0:
         error = death_excerpt or redact_secret_values(proc.detail[-2000:])
-        if not error.strip():
-            error = redact_secret_values(_on_disk_stderr_tail(workspace, slot))
         return RoundError(error, failure_evidence.ROUND_NONZERO_INVALID_MEASUREMENT)
     return RoundError(death_excerpt or "benchmark_report missing", failure_evidence.BENCHMARK_REPORT_MISSING)
 
@@ -683,10 +674,7 @@ def _abort_on_invalid_measurement(run: _GridRun, at: _VariantSlot, outcome: _Var
     workspace = outcome.measured.round.proc.run_dir
     server_log = at.path / "server.log"
     found = argv_refusal(measurement_server_log_path(server_log, workspace)) or _invalid_measurement_error(
-        outcome.measured.round.proc,
-        death_excerpt=death_excerpt(str(server_log)),
-        workspace=workspace,
-        slot=at.path,
+        outcome.measured.round.proc, death_excerpt=death_excerpt(str(server_log))
     )
     if (step_class := failed_step_class(outcome.measurement)) is not None:
         found = RoundError(failure_evidence.with_failure_hint(step_class, found.summary), step_class)

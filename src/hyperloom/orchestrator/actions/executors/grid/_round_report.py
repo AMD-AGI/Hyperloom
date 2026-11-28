@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Reading what a grid round left on disk: its measurement, its server log, its error tails."""
+"""Reading what a grid round left on disk: its measurement and its server log."""
 
 from __future__ import annotations
 
@@ -53,21 +53,3 @@ def measurement_server_log_path(
         return str(max(candidates, key=lambda path: path.stat().st_mtime))
     except OSError:
         return None
-
-
-def _on_disk_stderr_tail(*dirs: Path, limit: int = 2000) -> str:
-    """Return the tail of the first non-empty on-disk benchmark log."""
-    for d in dirs:
-        if not d:
-            continue
-        for name in ("benchmark_stderr.log", "benchmark_stdout.log"):
-            try:
-                p = d / name
-                if not p.is_file():
-                    continue
-                text = p.read_text(encoding="utf-8", errors="replace").strip()
-                if text:
-                    return f"[{name}] {text[-limit:]}"
-            except OSError:
-                continue
-    return ""
