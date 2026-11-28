@@ -16,13 +16,12 @@ import json
 from dataclasses import replace
 from pathlib import Path
 
-import pytest
 
 from hyperloom.contracts.measurement import TestResult, Validity
 from hyperloom.measure.manifest import ResultManifest
 from hyperloom.measure.tests import agentx_export as export
 from hyperloom.measure.tests.fake_runner import EXPORT_PATH
-from hyperloom.measure.tests.hosted_fixtures import Rig, make_rig, point_yaml
+from hyperloom.measure.tests.hosted_fixtures import Rig, point_yaml
 from hyperloom_multibranch.contracts.toolbox import WorkloadKind
 from hyperloom_multibranch.toolbox.hosted_executor import HostedExecutor
 from hyperloom_multibranch.toolbox.mcp_tools import jsonable
@@ -30,14 +29,6 @@ from hyperloom_multibranch.toolbox.tests.helpers import build
 from hyperloom_multibranch.toolbox.tests.test_hosted_executor import POLICY, PointPlanner, _run
 
 EXPORT_IN_BUNDLE = EXPORT_PATH
-
-
-@pytest.fixture
-def rig(tmp_path: Path):
-    made = make_rig(tmp_path)
-    yield made
-    made.backend.close()
-    made.provider.close()
 
 
 def _lines() -> list[str]:

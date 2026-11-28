@@ -14,7 +14,6 @@ import asyncio
 from dataclasses import replace
 from pathlib import Path
 
-import pytest
 
 from hyperloom.contracts.consistency import (
     SHORT_PROMPTS_COMPLETE,
@@ -24,7 +23,7 @@ from hyperloom.contracts.measurement import TestResult, Validity
 from hyperloom.measure.manifest import ResultManifest
 from hyperloom.measure.points import AcceptedMeasurement
 from hyperloom.measure.short_prompts.plan import ShortPromptPlan
-from hyperloom.measure.tests.hosted_fixtures import Rig, make_rig, point_yaml
+from hyperloom.measure.tests.hosted_fixtures import Rig, point_yaml
 from hyperloom_multibranch.toolbox.hosted_executor import HostedExecutor
 from hyperloom_multibranch.toolbox.mcp_tools import jsonable
 from hyperloom_multibranch.toolbox.short_prompt_pool import POOL_FILE, ShortPromptPool
@@ -32,14 +31,6 @@ from hyperloom_multibranch.toolbox.tests.helpers import build, req
 from hyperloom_multibranch.toolbox.tests.test_hosted_executor import POLICY, PointPlanner
 
 PLAN = ShortPromptPlan("short-prompts-test", "a" * 64, trigger=("purpose final",))
-
-
-@pytest.fixture
-def rig(tmp_path: Path):
-    made = make_rig(tmp_path)
-    yield made
-    made.backend.close()
-    made.provider.close()
 
 
 class _Planner(PointPlanner):

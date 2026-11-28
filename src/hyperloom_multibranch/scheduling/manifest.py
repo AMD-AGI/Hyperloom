@@ -18,7 +18,7 @@ from pathlib import Path
 from hyperloom_common.io import WriteOptions, atomic_write_json
 from hyperloom_common.jsonio import read_json_strict
 from hyperloom_multibranch.blackboard.codec import decode, encode
-from hyperloom_multibranch.contracts.build import MB_DISTRIBUTION, CodeVersion, code_version
+from hyperloom_multibranch.contracts.build import CodeVersion, code_version
 from hyperloom_multibranch.scheduling.launch_isolation import LaunchIsolation
 from hyperloom_multibranch.scheduling.settings import RunSettings
 
@@ -64,7 +64,6 @@ def read_manifest(path: Path) -> SessionManifest:
 
 
 __all__ = [
-    "MB_DISTRIBUTION",
     "CodeVersion",
     "SessionManifest",
     "code_version",

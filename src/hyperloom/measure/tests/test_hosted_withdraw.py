@@ -19,22 +19,12 @@ import pytest
 from hyperloom.measure.hosted import STOPPED_RETURNCODE
 from hyperloom.measure.hosted_log import STATE_FINISHED, STATE_SENT
 from hyperloom.measure.socket import TestOutcome
-from hyperloom.measure.tests.hosted_fixtures import Rig, make_call, make_rig, point_yaml
+from hyperloom.measure.tests.hosted_fixtures import Crash, Rig, make_call, point_yaml, rigs
 
 
 @pytest.fixture
 def rig(tmp_path: Path):
-    made: list[Rig] = []
-
-    def build(**kwargs) -> Rig:
-        built = make_rig(tmp_path, **kwargs)
-        made.append(built)
-        return built
-
-    yield build
-    for built in made:
-        built.backend.close()
-        built.provider.close()
+    yield from rigs(tmp_path)
 
 
 def _until(condition: Callable[[], bool], what: str, seconds: float = 15.0) -> None:
@@ -121,10 +111,6 @@ def test_a_test_waiting_for_a_slot_leaves_the_wait_when_it_is_withdrawn(rig, tmp
     _joined(holder)
 
 
-class _Crash(BaseException):
-    """What a killed application process looks like to the code under test: it unwinds without cleaning up."""
-
-
 def test_a_withdrawn_test_that_would_re_attach_closes_the_sandbox_an_earlier_process_left(rig, tmp_path) -> None:
     r = rig(gpus=1)
     call = make_call(tmp_path, point=point_yaml(tmp_path, fake_mode="hang"))
@@ -132,10 +118,10 @@ def test_a_withdrawn_test_that_would_re_attach_closes_the_sandbox_an_earlier_pro
     dying._pool.release = lambda runner: None  # a dead process closes nothing
 
     def die(attempt):
-        raise _Crash
+        raise Crash
 
     dying._wait = die  # type: ignore[method-assign]
-    with pytest.raises(_Crash):
+    with pytest.raises(Crash):
         dying.run_test(call)
     assert r.backend.journal.latest("req-1").state == STATE_SENT and r.provider.pool.free_cards() == ()
     restarted = r.another_backend()

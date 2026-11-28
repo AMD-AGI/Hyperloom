@@ -80,16 +80,6 @@ def test_a_check_on_the_held_server_writes_no_server_key_into_the_result(tmp_pat
     assert json.loads(_outputs_path(directory).read_text())["server"] == LONG_CONTEXT_HELD
 
 
-def test_outputs_and_results_written_before_the_field_read_as_held(tmp_path) -> None:
-    directory, plan = _landed(tmp_path, LONG_CONTEXT_HELD)
-    _edit(directory, server=None)
-
-    check = long_context_of(plan, directory)
-
-    assert (check.status, check.server) == (LONG_CONTEXT_COMPLETE, LONG_CONTEXT_HELD)
-    assert first_difference(check, rederive(check, directory)) is None
-
-
 def test_a_recorded_server_the_bundle_does_not_support_is_named(tmp_path) -> None:
     directory, plan = _landed(tmp_path, LONG_CONTEXT_HELD)
     recorded = replace(long_context_of(plan, directory), server=LONG_CONTEXT_REAL_ACCEPTANCE)

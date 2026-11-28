@@ -20,6 +20,82 @@ Merged to `main` and not yet carried by a tagged release. Each entry moves
 into the [release](https://github.com/AMD-AGI/Hyperloom/releases) that ships
 it.
 
+- **The hosted application image's `Dockerfile` and `build.sh` are removed.**
+  `scripts/hosted_app_image/` keeps only the hosting layer (`build_layer.sh`
+  and `Dockerfile.layer`), which starts a hosted run on any framework image
+  unchanged. No CI job built or tested the application image. An image built
+  from the old files keeps working; build new deployments on the layer. See
+  [Upgrade](reference/upgrade.md).
+- **`python -m hyperloom.measure.runner.cache_build` takes the wheel target
+  only as `--wheel-target`.** `--python-version`, `--implementation`, `--abi`
+  and `--platform` are removed and rejected with `unrecognized arguments`;
+  `--wheel-target cpXY-manylinux_2_N_ARCH` names the same target with every
+  platform tag the image's glibc accepts. See [Upgrade](reference/upgrade.md).
+- **A result manifest states `runner.rule_pack` and `timing.phases`.** The
+  `measurement_result.v2` schema and the reader now require both, with
+  `timing.phases` an array (`[]` for none). Every runner that writes a v2
+  manifest has written both; a manifest without them is refused as invalid
+  instead of being read as one an older runner signed. See
+  [Upgrade](reference/upgrade.md).
+- **A measurement sheet's `environment.runtime` must be null.** The
+  `measurement_spec.v2` schema and the reader no longer accept a runtime
+  snapshot, and the runner no longer checks one: no producer, inside
+  Hyperloom or out, ever wrote a non-null value. The key stays in every sheet
+  as `null`, so spec fingerprints and JIT cache keys are unchanged. See
+  [Upgrade](reference/upgrade.md).
+- **A measurement sheet's `hardware.power_cap_w` and `hardware.partition_mode`
+  must be null, and its `model_hashes` empty.** The `measurement_spec.v2`
+  schema and the reader refuse any other value, and the runner no longer
+  compares the GPUs' power cap or partition mode with the sheet, nor hashes
+  model files: no producer, inside Hyperloom or out, has written a value since
+  the consistency tool was removed. The keys stay in every sheet, so spec
+  fingerprints and JIT cache keys are unchanged; the result manifest still
+  records the power cap and partition mode the runner read. See
+  [Upgrade](reference/upgrade.md).
+- **`HYPERLOOM_SANDBOX_TEMPLATES` no longer accepts `runner` for the
+  `measurement` role.** A hosted run reads only `measurement` and `dev`; a
+  list that gives only `runner` is refused as having no `measurement` role.
+  No host sends `runner`. See [Upgrade](reference/upgrade.md).
+- **A hosted run no longer checks host inputs it never used.**
+  `HYPERLOOM_MCP_PUBLIC_URL`, `HYPERLOOM_SANDBOX_KEY_SUBRUN`,
+  `HYPERLOOM_RESULT_ARCHIVE` and the S3 archive's `AWS_ACCESS_KEY_ID`,
+  `AWS_SECRET_ACCESS_KEY`, `AWS_SESSION_TOKEN`, `AWS_ENDPOINT_URL_S3` and
+  `AWS_REGION` are no longer read or validated, so a malformed value no longer
+  refuses the run; they are still removed from the environment before any
+  child process starts. Results are archived on the shared storage, as
+  before: archiving to `s3://` was never implemented.
+- **A hosted run no longer reads `HYPERLOOM_SANDBOX_WORKSPACE`.** The hosted
+  toolbox no longer names a workspace on its sandbox creates: a Claw grant's
+  sandbox key names its own, and no host sets the variable. It is still
+  removed from the environment before any child process starts, and a
+  malformed value no longer refuses the run. A SaFE key that reaches the
+  sandbox service directly is not a supported hosted deployment. See
+  [Upgrade](reference/upgrade.md) and
+  [Environment variables](reference/environment-variables.md).
+- **`E2BSandboxProvider` no longer takes `workspace=`, and
+  `hyperloom.sandbox.socket.WORKSPACE_KEY` is removed.** The provider no
+  longer adds `agent-sandbox.io/workspace` to a create's metadata, and a
+  `workspace_required` refusal is raised as the service's own `SandboxDenied`
+  instead of one naming `HYPERLOOM_SANDBOX_WORKSPACE`. A caller whose key
+  must name a workspace puts the metadata key on its creates itself; a Claw
+  grant's key names its own. See [Upgrade](reference/upgrade.md).
+- **The sandbox socket's `Role` is `measurement` or `dev`.** The `subrun`
+  role is gone from `hyperloom.sandbox.socket.Role`, so a local template
+  declared with it is refused. No Hyperloom code ever created a sub-run
+  sandbox; a host may still list a `subrun` role in
+  `HYPERLOOM_SANDBOX_TEMPLATES`, which a hosted run ignores as before. See
+  [Upgrade](reference/upgrade.md).
+- **`campaign_spec.v1` drops fields nothing read.**
+  `objective.target_gain_pct`, `options.kernel`, `options.framework_agent`,
+  `options.enablement` and `placement.specialist_capacity` are gone from the
+  schema and the validator. A spec that still sets them parses as before,
+  since unknown fields are ignored, but a malformed value in one of them is no
+  longer refused. `options.eval` stays and still refuses `false`.
+- **`hyperloom hosted run` no longer checks `HYPERLOOM_LEDGER_DIR`.** A
+  hosted run hands the session to `hyperloom-multibranch`, which opens no
+  coordinator database, so a relative value no longer ends the run with
+  return code 2. `hyperloom optimize`, `recover` and `session events` still
+  refuse one.
 - **The multibranch `tracelens` tool runs only TraceLens' report.** It no
   longer takes `analysis_route`, a scriptable `framework` or
   `HYPERLOOM_TRACE_ANALYSIS_ROUTE` to start the orchestrator's `agent` or

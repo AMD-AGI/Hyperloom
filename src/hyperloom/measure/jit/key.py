@@ -257,19 +257,17 @@ def flydsl_environment(environment: Mapping[str, str]) -> dict[str, str]:
     }
 
 
-def tree_identity(
-    overlay: Iterable[tuple[str, ...]], runtime_manifest: str | None, framework: Iterable[tuple[str, ...]]
-) -> str:
+def tree_identity(overlay: Iterable[tuple[str, ...]], framework: Iterable[tuple[str, ...]]) -> str:
     """The identity of the aiter source tree the test builds from, beyond the image's own.
 
-    ``overlay`` is every entry the sheet lays over the aiter package (path, operation, blob, mode); ``runtime_manifest`` the
-    hash of a runtime snapshot (it carries the sources outside the package, so its presence is part of the identity);
-    ``framework`` the (package, path, blob) of each framework patch that touches the build surface.
+    ``overlay`` is every entry the sheet lays over the aiter package (path, operation, blob, mode); ``framework`` the
+    (package, path, blob) of each framework patch that touches the build surface. The hashed document keeps a null
+    ``runtime`` so that keys stay the ones earlier releases computed.
     """
     return _hash(
         {
             "overlay": sorted(list(entry) for entry in overlay),
-            "runtime": runtime_manifest,
+            "runtime": None,
             "framework": sorted(list(entry) for entry in framework),
         }
     )

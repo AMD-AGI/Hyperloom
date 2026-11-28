@@ -416,13 +416,6 @@ def test_the_report_of_an_unconfined_local_run_names_both_tiers(probe):
         f"running them as an account: {SANDBOX_ACCOUNT}",
     )
     assert report == IsolationReport("none", "none", False, None, reasons)
-    assert report.to_dict() == {
-        "specialists": "none",
-        "sandboxes": "none",
-        "required": False,
-        "bwrap": None,
-        "reasons": list(reasons),
-    }
     assert report.line() == "agent isolation: specialists none, sandboxes none: " + "; ".join(reasons)
 
 

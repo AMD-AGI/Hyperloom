@@ -18,7 +18,7 @@ import pytest
 from hyperloom_common.proctree import descendants, running
 from hyperloom.contracts.measurement import Purpose, TestKind, TestRequest
 from hyperloom.contracts.recipe import ConfigDelta, Recipe, RecipeDelta
-from hyperloom.hosted.mcp_server import MIN_TOKEN_LENGTH, McpServer, McpServerConfig
+from hyperloom.hosted.mcp_server import McpServer, McpServerConfig
 from hyperloom.measure.compile import LocalBlobStore
 from hyperloom.sandbox.reaper import ONE_REAP_SEC
 from hyperloom_multibranch.contracts.fork import AdmissionStatus, ForkRequest
@@ -173,7 +173,7 @@ class Stage:
             self.reserved,
         )
         self.branches = BranchControl(context, self.runtime, self.toolbox, self.repo, SessionBriefs(self.blackboard))
-        self.mcp = McpServer(McpServerConfig(host_token="t" * MIN_TOKEN_LENGTH), campaign="stops")
+        self.mcp = McpServer(McpServerConfig(), campaign="stops")
         self.stopper = SessionStopper(context, self.branches, self.toolbox, self.mcp)
 
     async def opened(self) -> Stage:

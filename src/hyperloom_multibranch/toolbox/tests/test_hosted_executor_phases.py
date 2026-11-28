@@ -16,7 +16,7 @@ from pathlib import Path
 import pytest
 
 from hyperloom.contracts.measurement import FailureClass, TestResult, Validity
-from hyperloom.measure.tests.hosted_fixtures import Rig, make_rig, point_yaml
+from hyperloom.measure.tests.hosted_fixtures import Rig, point_yaml
 from hyperloom_multibranch.contracts.toolbox import WorkloadKind
 from hyperloom_multibranch.toolbox.hosted_executor import HostedExecutor
 from hyperloom_multibranch.toolbox.mcp_tools import _result_document
@@ -25,14 +25,6 @@ from hyperloom_multibranch.toolbox.tests.test_hosted_executor import POLICY, Poi
 
 RUNNER_PHASES = [["bootstrap", 0.2], ["sheet_wait", 0.1], ["server_boot", 0.4], ["measured", 0.3]]
 HOST_AFTER = ["runner_handoff", "result_landing", "sandbox_release", "result_read"]
-
-
-@pytest.fixture
-def rig(tmp_path: Path):
-    made = make_rig(tmp_path)
-    yield made
-    made.backend.close()
-    made.provider.close()
 
 
 async def _attempt(tmp_path: Path, r: Rig, *, timeout_sec: int = 60, **fake: object):

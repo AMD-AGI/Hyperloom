@@ -9,14 +9,11 @@ It runs on a machine with egress, in the application that starts a campaign, bef
         [--wheel-target cp314-manylinux_2_28_x86_64]
 
 ``--out`` defaults to ``$HYPERLOOM_RUNNER_CACHE``; ``--wheel-target`` takes the tag ``$HYPERLOOM_RUNNER_WHEEL_TARGET``
-does (:func:`runner_wheel_target`) and stands for the separate options below. A build that fails fails the campaign: nothing falls back to
-installing over the network inside a sandbox. The wheels are downloaded for the interpreter and platform of the
-*framework image*, which is not the builder's own unless it is told: ``--python-version 3.10 --implementation cp
---abi cp310 --abi abi3 --abi none`` and one ``--platform`` for every platform tag the image accepts
-(``manylinux_2_28_x86_64``, ``manylinux_2_17_x86_64``, ``manylinux2014_x86_64`` and so on down to ``manylinux1_x86_64``)
-for a CPython 3.10 image on glibc 2.28, and ``--index-url`` (or ``--find-links`` with ``--no-index``) for where they come
-from. pip does not widen a ``--platform`` to the older tags it covers, so naming only the newest one turns every pin
-published as ``manylinux2014`` into a source build. The lock's hashes are those of the files the index serves. A pin that the index
+does (:func:`runner_wheel_target`). A build that fails fails the campaign: nothing falls back to installing over the
+network inside a sandbox. The wheels are downloaded for the interpreter and platform of the *framework image*, which is
+not the builder's own unless ``--wheel-target`` names it (with every platform tag that image's glibc accepts: pip does
+not widen a platform to the older tags it covers), and ``--index-url`` (or ``--find-links`` with ``--no-index``) says
+where they come from. The lock's hashes are those of the files the index serves. A pin that the index
 serves only as a source distribution is built here into a wheel (the sdist's hash must be one the lock lists; the entry
 keeps the sdist in ``sdists/`` and the manifest records it); that wheel must be pure Python, because a platform wheel
 built on the builder is not a wheel for the image, and the build is refused otherwise. Reading or building a source
@@ -109,9 +106,9 @@ After the entry, the command publishes the commit's inference_suite staging into
 key>/`` (:mod:`hyperloom.measure.runner.suite_publish`); a sandbox runs that staging offline and never builds one.
 
 The pins come from the lock of the target's Python (:func:`~hyperloom.measure.runner.cache_layout.lock_file`):
-``requirements/runner-cp314.lock`` for ``--python-version 3.14``, ``requirements/runner.lock`` for a version without a
-lock of its own or when no ``--python-version`` is given. A build for a Python that has its own lock must therefore name
-it (``--python-version``, or the ``cpXY`` of ``$HYPERLOOM_RUNNER_WHEEL_TARGET``).
+``requirements/runner-cp314.lock`` for CPython 3.14, ``requirements/runner.lock`` for a version without a lock of its own
+or when no ``--wheel-target`` is given. A build for a Python that has its own lock must therefore name it (the ``cpXY``
+of ``--wheel-target``).
 """
 
 from __future__ import annotations
@@ -1118,12 +1115,8 @@ def _arguments(argv: Sequence[str] | None) -> argparse.Namespace:
     parser.add_argument(
         "--wheel-target",
         help=f"the image's interpreter and platform as one tag, e.g. cp314-manylinux_2_28_x86_64, as ${RUNNER_TARGET_ENV} "
-        "names it; instead of --python-version, --implementation, --abi and --platform",
+        "names it",
     )
-    parser.add_argument("--python-version", help="the image's Python, e.g. 3.10")
-    parser.add_argument("--implementation", help="the image's implementation, e.g. cp")
-    _repeatable(parser, "--abi", "an ABI tag of the image, e.g. cp310")
-    _repeatable(parser, "--platform", "a platform tag, e.g. manylinux_2_28_x86_64")
     parser.add_argument("--index-url", help="the package index to download from")
     _repeatable(parser, _FIND_LINKS, "a directory or URL of wheels")
     parser.add_argument(_NO_INDEX, action="store_true", help=f"use only {_FIND_LINKS}")
@@ -1131,15 +1124,13 @@ def _arguments(argv: Sequence[str] | None) -> argparse.Namespace:
     args = parser.parse_args(argv)
     if args.out is None:
         parser.error(f"--out or ${CACHE_ENV} is required")
-    if args.wheel_target and (args.python_version or args.implementation or args.abi or args.platform):
-        parser.error("--wheel-target names the whole target: give it alone, or the separate options")
     return args
 
 
 def _target(args: argparse.Namespace) -> WheelTarget:
     if args.wheel_target:
         return runner_wheel_target({RUNNER_TARGET_ENV: args.wheel_target})
-    return WheelTarget(args.python_version, args.implementation, tuple(args.abi), tuple(args.platform))
+    return WheelTarget()
 
 
 def main(argv: Sequence[str] | None = None) -> int:

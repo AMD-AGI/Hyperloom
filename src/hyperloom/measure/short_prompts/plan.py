@@ -21,10 +21,12 @@ __all__ = [
     "DEFAULT_MAX_NEW_TOKENS",
     "DEFAULT_PHASE_CAP_SEC",
     "KEY_RE",
+    "MAX_TRIGGER_LINES",
     "OUTPUTS_FILE",
     "SHORT_PROMPTS_DIR",
     "ShortPromptPlan",
     "miss_probability",
+    "trigger_line",
 ]
 
 #: The directory, below a test's output directory, that holds the check's raw outputs; the signed bundle lists them.
@@ -34,7 +36,7 @@ DEFAULT_MAX_NEW_TOKENS = 32
 #: The check's own time limit: a server that stops answering ends the check as incomplete, not the test.
 DEFAULT_PHASE_CAP_SEC = 1200.0
 _MAX_NEW_TOKENS = 256
-_MAX_TRIGGER_LINES = 32
+MAX_TRIGGER_LINES = 32
 _MAX_TRIGGER_CHARS = 200
 KEY_RE = re.compile(r"[a-z0-9][a-z0-9._-]{0,63}")
 #: Keys a sheet written while the toolbox stored each check's outputs by recipe may carry; read and left out.
@@ -50,7 +52,8 @@ def miss_probability(processes: int) -> float:
     return (1 - _DEFECT_SHARE) ** processes
 
 
-def _trigger_line(value: Any, path: str) -> str:
+def trigger_line(value: Any, path: str) -> str:
+    """``value`` as one line of a check's trigger: a non-empty string of bounded length."""
     if not isinstance(value, str) or not value.strip() or len(value) > _MAX_TRIGGER_CHARS:
         raise DocumentError(f"{path}: expected a non-empty string of at most {_MAX_TRIGGER_CHARS} characters")
     return value
@@ -77,10 +80,10 @@ class ShortPromptPlan:
             raise DocumentError(f"short prompts: max_new_tokens must be 1 to {_MAX_NEW_TOKENS}")
         if not math.isfinite(self.phase_cap_sec) or self.phase_cap_sec < 1:  # what :meth:`parse` reads back
             raise DocumentError("short prompts: phase_cap_sec must be a number of at least 1")
-        if len(self.trigger) > _MAX_TRIGGER_LINES:
-            raise DocumentError(f"short prompts: at most {_MAX_TRIGGER_LINES} trigger lines")
+        if len(self.trigger) > MAX_TRIGGER_LINES:
+            raise DocumentError(f"short prompts: at most {MAX_TRIGGER_LINES} trigger lines")
         for index, line in enumerate(self.trigger):
-            _trigger_line(line, f"short prompts: trigger[{index}]")
+            trigger_line(line, f"short prompts: trigger[{index}]")
 
     def to_document(self) -> dict[str, Any]:
         return {
@@ -99,7 +102,7 @@ class ShortPromptPlan:
             prompts_sha256=r.text("prompts_sha256", pattern=SHA256_RE) or "",
             max_new_tokens=r.integer("max_new_tokens", minimum=1) or 1,
             phase_cap_sec=r.number("phase_cap_sec", minimum=1) or 1.0,
-            trigger=r.sequence("trigger", _trigger_line),
+            trigger=r.sequence("trigger", trigger_line),
         )
         for name in _FORMER_FIELDS:
             r.optional(name)

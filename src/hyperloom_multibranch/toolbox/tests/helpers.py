@@ -202,7 +202,6 @@ def build(
     policy: QueuePolicy | None = None,
     repo: FakeRepo | None = None,
     active_image: str | None = IMAGE,
-    with_claims: bool = True,
     clock: Callable[[], float] | None = None,
     wrap_sink: Callable[[LocalBlackboard], object] | None = None,
     planner: object | None = None,
@@ -232,7 +231,7 @@ def build(
         log=SubmissionLog(tmp_path / "toolbox" / "submissions.jsonl", "campaign-1"),
         sink=wrap_sink(blackboard) if wrap_sink else blackboard,  # type: ignore[arg-type]
         health=blackboard,
-        claims=blackboard if with_claims else None,
+        claims=blackboard,
         records=blackboard,
         builds=builds,
         short_prompt_pool=short_prompt_pool,

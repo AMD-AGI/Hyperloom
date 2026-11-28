@@ -6,7 +6,6 @@
 from __future__ import annotations
 
 import dataclasses
-import hashlib
 import importlib.metadata
 import logging
 import os
@@ -87,7 +86,6 @@ from hyperloom.measure.runner.platform_env import align_platform_env, take_topol
 from hyperloom.measure.runner.rewrite import Placement, rewrite_config
 from hyperloom.measure.runner.rounds import write_rounds
 from hyperloom.measure.runner.service import Progress, RunnerFailure, join_notes, wait_for_file, write_status
-from hyperloom.measure.runner.snapshot import SnapshotError, check_snapshot
 from hyperloom.measure.runner.cache_layout import CACHE_ENV, DEFAULT_CACHE_DIR
 from hyperloom.measure.runner.tools import (
     INFERENCEX_STORE,
@@ -195,22 +193,6 @@ def _parse(raw: bytes) -> MeasurementSpec:
         raise RunnerFailure(_SPEC_REJECTED, str(exc)) from exc
 
 
-def _check_model(yaml_text: str, hashes: dict[str, str]) -> None:
-    try:
-        model = BenchmarkPoint.from_document(yaml.safe_load(yaml_text), source="the sheet's point").model
-    except BenchmarkPointError as exc:
-        raise RunnerFailure(_SPEC_REJECTED, str(exc)) from exc
-    if hashes and not model:
-        raise RunnerFailure(_SPEC_REJECTED, "the sheet hashes model files but its point names no model")
-    for relative, wanted in hashes.items():
-        try:
-            actual = hashlib.sha256((Path(model) / relative).read_bytes()).hexdigest()
-        except OSError as exc:
-            raise RunnerFailure(_SPEC_REJECTED, f"model file {relative} unreadable: {exc}") from exc
-        if actual != wanted:
-            raise RunnerFailure(_SPEC_REJECTED, f"model file {relative} differs from the recorded hash")
-
-
 _SERVING = frozenset(item.value for item in Framework if framework_facts(item).kind is FrameworkKind.SERVING)
 
 
@@ -226,16 +208,6 @@ def _check_runs_on_inference_suite(spec: MeasurementSpec) -> None:
             raise RunnerFailure(
                 _SPEC_REJECTED, f"point {index}: {framework!r} serves nothing; a {SPEC_SCHEMA} sheet measures a server"
             )
-
-
-def _check_runtime(spec: MeasurementSpec) -> None:
-    runtime = spec.environment.runtime
-    if runtime is None:
-        return
-    try:
-        check_snapshot(Path(runtime.snapshot), runtime.manifest_sha256)
-    except SnapshotError as exc:
-        raise RunnerFailure(_SPEC_REJECTED, str(exc)) from exc
 
 
 def _check_cards_free(ctx: _Context, visible: list[int]) -> None:
@@ -276,16 +248,9 @@ def _preflight(ctx: _Context, spec: MeasurementSpec, visible: list[int]):
     facts = hardware.read_gpu_facts(visible)
     problems = _image_problems(ctx, spec.image.digest)
     if facts is None:
-        ctx.notes.append("the GPUs' card, power cap and partition mode could not be read; they were not compared")
+        ctx.notes.append("the GPUs' card could not be read; it was not compared")
     else:
-        h = spec.hardware
-        problems += hardware.check_hardware(
-            facts,
-            card=h.card,
-            gpu_count=h.gpu_count,
-            power_cap_w=h.power_cap_w,
-            partition_mode=h.partition_mode,
-        )
+        problems += hardware.check_hardware(facts, card=spec.hardware.card, gpu_count=spec.hardware.gpu_count)
     if problems:
         raise RunnerFailure("preflight_mismatch", "; ".join(problems))
     return facts
@@ -402,7 +367,7 @@ def _call(ctx: _Context, spec: MeasurementSpec, points: list[Path], inferencex: 
         on_output=progress.touch,
         env_overrides=dict(spec.process_env),
         unset_envs=spec.unset_envs,
-        session_facts=SessionFacts((), str(inferencex), ctx.staging, p.base_launch),
+        session_facts=SessionFacts(inferencex_path=str(inferencex), staging=ctx.staging, base_launch=p.base_launch),
         attachments=_case_attachments(spec),
         phases=ctx.phases,
         short_prompts=p.short_prompts,
@@ -646,9 +611,7 @@ def _run_sheet(ctx: _Context, spec_path: Path, key, progress: Progress) -> None:
     ctx.phases.begin(PREFLIGHT, at=received)
     spec = _parse(raw)
     visible = _visible(ctx.environ)
-    _check_model(spec.config[0].yaml, dict(spec.model_hashes))
     _check_runs_on_inference_suite(spec)
-    _check_runtime(spec)
     facts = _preflight(ctx, spec, visible)
     before = hardware.ecc_counts(visible)
     changed = align_platform_env(ctx.environ, spec.platform_env)

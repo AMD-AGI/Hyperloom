@@ -133,18 +133,10 @@
           "minimum": 1
         },
         "power_cap_w": {
-          "type": [
-            "number",
-            "null"
-          ],
-          "minimum": 0
+          "type": "null"
         },
         "partition_mode": {
-          "type": [
-            "string",
-            "null"
-          ],
-          "minLength": 1
+          "type": "null"
         },
         "card": {
           "type": [
@@ -512,29 +504,7 @@
           }
         },
         "runtime": {
-          "oneOf": [
-            {
-              "type": "null"
-            },
-            {
-              "type": "object",
-              "additionalProperties": false,
-              "required": [
-                "snapshot",
-                "manifest_sha256"
-              ],
-              "properties": {
-                "snapshot": {
-                  "type": "string",
-                  "minLength": 1
-                },
-                "manifest_sha256": {
-                  "type": "string",
-                  "pattern": "^[0-9a-f]{64}$"
-                }
-              }
-            }
-          ]
+          "type": "null"
         },
         "blob_root": {
           "type": "string",
@@ -572,15 +542,7 @@
     },
     "model_hashes": {
       "type": "object",
-      "propertyNames": {
-        "type": "string",
-        "minLength": 1,
-        "pattern": "^(?!/)(?!.*\\\\)(?!.*(^|/)(\\.|\\.\\.|)(/|$))[^\\x00]+$"
-      },
-      "additionalProperties": {
-        "type": "string",
-        "pattern": "^[0-9a-f]{64}$"
-      }
+      "maxProperties": 0
     },
     "procedure": {
       "type": "object",

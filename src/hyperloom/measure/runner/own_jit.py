@@ -18,6 +18,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from pathlib import Path
+from typing import Any
 
 import yaml
 
@@ -36,11 +37,10 @@ from hyperloom.measure.jit.session import link_prebuilt
 from hyperloom.measure.jit_kinds import AITER_JIT
 from hyperloom.measure.socket import TestCall
 
-__all__ = ["OWN_AITER_JIT_DIR", "own_aiter_jit", "point_configs", "server_environments"]
+__all__ = ["OWN_AITER_JIT_DIR", "own_aiter_jit", "point_configs", "server_environments", "stale_entries"]
 
 #: The directory below the test's compile directory, beside the cache's private root, not below it: seeding empties that.
 OWN_AITER_JIT_DIR = "aiter_jit"
-_TABLE_PREFIX = "AITER_CONFIG_"
 #: The directory of the aiter package that holds its prebuilt modules (aiter's ``get_user_jit_dir()`` by default).
 _JIT_DIR = "jit"
 _UTF8 = "utf-8"
@@ -96,42 +96,39 @@ def server_environments(call: TestCall, configs: list[dict], environ: Mapping[st
     ]
 
 
+def stale_entries(
+    package: Path, image: Path, servers: list[dict[str, str]], environ: Mapping[str, str], gfx_arch: str | None
+) -> tuple[dict[str, Any], frozenset[str]]:
+    """The module config of the aiter package at ``package``, and its entries that the servers' tuned tables (as that
+    package resolves them), or the build variables they set otherwise than ``environ`` (or than the prewarm built a
+    module of the image under), make stale; an empty config and nothing stale when it cannot be read."""
+    try:
+        config = read_config(config_path(package))
+    except (OSError, ValueError):
+        return {}, frozenset()
+    return config, (
+        stale_table_modules(config, image, package, servers)
+        | env_touched_entries(config, servers, environ, gfx_arch)
+        | unlike_prewarmed(image / _JIT_DIR, servers, gfx_arch)
+    )
+
+
 def _stale(
     image: Path, servers: list[dict[str, str]], environ: Mapping[str, str], gfx_arch: str | None
 ) -> frozenset[str]:
-    """The prebuilt modules the tables the servers name, or the build variables they set otherwise than ``environ`` (or
-    than the prewarm built a module under), make stale; none when neither does or the module config cannot be read (the
-    image's modules are then what the server would have loaded anyway)."""
-    try:
-        config = read_config(config_path(image))
-    except (OSError, ValueError):
-        return frozenset()
-    tables = any(
-        name.startswith(_TABLE_PREFIX) and value.strip() for server in servers for name, value in server.items()
-    )
-    stale = stale_table_modules(config, image, image, servers) if tables else frozenset()
-    stale |= env_touched_entries(config, servers, environ, gfx_arch) | unlike_prewarmed(
-        image / _JIT_DIR, servers, gfx_arch
-    )
+    """The image's prebuilt modules that :func:`stale_entries` makes stale; none when nothing is or the module config
+    cannot be read (the image's modules are then what the server would have loaded anyway)."""
+    config, stale = stale_entries(image, image, servers, environ, gfx_arch)
     return touched_entries(stale, config, prebuilt_names(image)).names if stale else frozenset()
 
 
 def _unlink_stale(
     package: Path, image: Path, servers: list[dict[str, str]], environ: Mapping[str, str], gfx_arch: str | None
 ) -> None:
-    """Take out of the farm's ``jit`` (links to the image's modules) the modules the farm's tuned tables, as the servers
-    resolve them, or the build variables the servers set otherwise than ``environ`` (or than the prewarm built a module
-    under) make stale: aiter builds a module only when its ``.so`` is missing, and the image's holds only the kernels the
-    image's tables name, built under the image's variables."""
-    try:
-        config = read_config(config_path(package))
-    except (OSError, ValueError):
-        return
-    stale = (
-        stale_table_modules(config, image, package, servers)
-        | env_touched_entries(config, servers, environ, gfx_arch)
-        | unlike_prewarmed(image / _JIT_DIR, servers, gfx_arch)
-    )
+    """Take out of the farm's ``jit`` (links to the image's modules) the modules :func:`stale_entries` makes stale, as
+    the farm's package resolves its tuned tables: aiter builds a module only when its ``.so`` is missing, and the image's
+    holds only the kernels the image's tables name, built under the image's variables."""
+    config, stale = stale_entries(package, image, servers, environ, gfx_arch)
     if not stale:
         return
     for name in touched_entries(stale, config, prebuilt_names(image)).names:

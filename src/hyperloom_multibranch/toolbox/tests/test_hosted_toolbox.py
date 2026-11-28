@@ -13,7 +13,6 @@ named by ``HYPERLOOM_E2B_ENVD``); the ones that only build the toolbox always ru
 from __future__ import annotations
 
 import asyncio
-import dataclasses
 import functools
 import json
 import os
@@ -23,9 +22,8 @@ from contextlib import ExitStack
 from dataclasses import dataclass, field
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any, NoReturn
+from typing import Any
 
-import e2b
 import pytest
 
 import hyperloom
@@ -45,9 +43,7 @@ from hyperloom.sandbox.e2b import E2BSandboxProvider, RetryPolicy
 from hyperloom.sandbox.socket import (
     IDEMPOTENCY_KEY,
     NODE_NAME_KEY,
-    PENDING_TIMEOUT_KEY,
     SIGNING_PUBLIC_KEY,
-    WORKSPACE_KEY,
     CreateOptions,
     Role,
     Sandbox,
@@ -298,7 +294,6 @@ def test_the_inputs_never_print_a_key_and_a_refusal_names_the_field_not_the_valu
     [
         ({"tp": 0}, "tp must be at least 1"),
         ({"grant_limits": {**_GRANT, "max_sandboxes": 0}}, "at least one sandbox"),
-        ({"sandbox_workspace": " "}, "sandbox_workspace is empty"),
     ],
 )
 def test_inputs_that_cannot_describe_a_session_are_refused(
@@ -306,54 +301,6 @@ def test_inputs_that_cannot_describe_a_session_are_refused(
 ) -> None:
     with pytest.raises(ValueError, match=message):
         _inputs(None, tmp_path, **changed)
-
-
-#: What the host entry builds the inputs from: a plain dict whose keys are these names (``HostedToolboxInputs(**d)``).
-#: Fields are only ever added, and only with a default, so the required names are fixed.
-_REQUIRED_FIELDS = (
-    "run_id",
-    "session_dir",
-    "api_url",
-    "sandbox_url",
-    "measurement_key",
-    "sandbox_templates",
-    "source_sha",
-)
-_OPTIONAL_FIELDS = (
-    "tp",
-    "dev_key",
-    "grant_limits",
-    "runner_cache_manifest_sha256",
-    "sandbox_workspace",
-    "session_id",
-    "tests_end_by",
-)
-
-
-def test_a_plain_dict_with_exactly_the_field_names_builds_the_inputs(tmp_path: Path) -> None:
-    plain: dict[str, Any] = {
-        "run_id": "run-1",
-        "session_dir": tmp_path,
-        "api_url": "http://service.invalid",
-        "sandbox_url": "http://sandboxes.invalid",
-        "measurement_key": "m-key",
-        "sandbox_templates": {"measurement": {"1": _RUNNERS[0]}, "dev": {"1": _DEVS[0]}},
-        "source_sha": _SOURCE_SHA,
-        "tp": 1,
-        "dev_key": "d-key",
-        "grant_limits": dict(_GRANT),
-        "runner_cache_manifest_sha256": _MANIFEST,
-        "sandbox_workspace": "workspace-a",
-        "session_id": "MB-session",
-        "tests_end_by": 1_800_000_000.0,
-    }
-    assert set(plain) == {*_REQUIRED_FIELDS, *_OPTIONAL_FIELDS}
-    inputs = HostedToolboxInputs(**plain)
-    assert {name: getattr(inputs, name) for name in plain} == plain
-    required = {f.name for f in dataclasses.fields(inputs) if f.default is f.default_factory is dataclasses.MISSING}
-    assert required == set(_REQUIRED_FIELDS) and {f.name for f in dataclasses.fields(inputs)} == set(plain)
-    only_required = {name: plain[name] for name in _REQUIRED_FIELDS}
-    assert HostedToolboxInputs(**only_required).dev_key is None
 
 
 @pytest.mark.parametrize("tests_end_by", [None, 1_800_000_000.0])
@@ -542,18 +489,11 @@ async def test_a_toolbox_that_lends_nothing_refuses_a_lease_as_unsupported(tmp_p
             r"templates serve \[1, 2\]",
         ),
         (
-            {"runner": {"8": "r8"}, "dev": _DEV_MAP},
-            1,
-            r"no 'measurement' template has the session's 1 cards; "
-            r"templates serve \[8\]",
-        ),
-        (
             {"measurement": _RUNNER_MAP, "dev": {"1": _DEVS[0]}},
             2,
             r"no dev template has the session's 2 cards; "
             r"templates serve \[1\]",
         ),
-        ({"measurement": _RUNNER_MAP, "runner": _RUNNER_MAP, "dev": _DEV_MAP}, 1, "both 'measurement' and its older"),
         ({"measurement": "opaque-name", "dev": _DEV_MAP}, 1, "'measurement' templates must map card counts to names"),
         ({"measurement": list(_RUNNERS), "dev": _DEV_MAP}, 1, "'measurement' templates must map card counts"),
         ({"measurement": _RUNNER_MAP, "dev": _DEVS[0]}, 1, "'dev' templates must map card counts to names"),
@@ -606,56 +546,6 @@ def test_the_hosts_template_variable_reaches_the_toolbox_unchanged(tmp_path: Pat
     given = hosted_toolbox_inputs(read_host_info(env, require=()), session_dir=tmp_path / "session", tp=8)
     assert given["sandbox_templates"] == templates
     assert hosted_toolbox._runner_template(HostedToolboxInputs(**given)) == "tpl-b"  # type: ignore[arg-type]
-
-
-class _Sent(Exception):
-    """Stops a create at the SDK, after it has shown what it would send."""
-
-
-@pytest.mark.parametrize(
-    ("named", "sent"),
-    [({}, {}), ({"HYPERLOOM_SANDBOX_WORKSPACE": "workspace-a"}, {WORKSPACE_KEY: "workspace-a"})],
-    ids=["claw_grant", "safe_key"],
-)
-def test_the_hosts_workspace_goes_with_every_create_of_the_toolbox(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, named: dict[str, str], sent: dict[str, str]
-) -> None:
-    """``HYPERLOOM_SANDBOX_WORKSPACE`` of a SaFE key used directly, read by the host entry, is the workspace of the
-    ``measurement`` and ``dev`` creates; a Claw host sets none and the creates carry their own metadata (and the
-    pending limit every create of the provider names, its wait)."""
-    env = {
-        "E2B_API_URL": "http://service.invalid",
-        "E2B_SANDBOX_URL": "http://sandboxes.invalid",
-        "HYPERLOOM_SANDBOX_KEY_MEASUREMENT": "m-key-000000000000",
-        "HYPERLOOM_SANDBOX_KEY_DEV": "d-key-000000000000",
-        "HYPERLOOM_SANDBOX_TEMPLATES": json.dumps({"measurement": _RUNNER_MAP, "dev": _DEV_MAP}),
-        "HYPERLOOM_GRANT_LIMITS": json.dumps(_GRANT),
-        "HYPERLOOM_RUN_CREATED_AT": "2026-01-01T00:00:00Z",
-        "HYPERLOOM_SOURCE_REPO": _SOURCE_REPO,
-        "HYPERLOOM_SOURCE_SHA": _SOURCE_SHA,
-        **named,
-    }
-    host = read_host_info(env, require=(), require_run=False)
-    given = {**hosted_toolbox_inputs(host, session_dir=tmp_path / "session", tp=1), "run_id": "run-1"}
-    seen: list[dict[str, str]] = []
-
-    def create(**kwargs: Any) -> NoReturn:
-        seen.append(kwargs["metadata"])
-        raise _Sent
-
-    monkeypatch.setattr(e2b.Sandbox, "create", create)
-    toolbox = _toolbox(None, tmp_path, **given)
-    assert toolbox.leases is not None
-    for role in ("measurement", "dev"):
-        with pytest.raises(_Sent):
-            toolbox.provider.create("t", role=role, timeout_sec=60, metadata={"k": "v"})
-    assert seen == [{"k": "v", **sent, PENDING_TIMEOUT_KEY: "60"}] * 2
-
-
-def test_runner_is_the_older_name_of_the_measurement_role(tmp_path: Path) -> None:
-    inputs = _inputs(None, tmp_path, sandbox_templates={"runner": {"1": "r1", "8": "r8"}, "dev": _DEV_MAP})
-    assert hosted_toolbox._runner_template(inputs) == "r1"
-    assert hosted_toolbox._runner_template(dataclasses.replace(inputs, tp=8)) == "r8"
 
 
 # -- through the stand-in ------------------------------------------------------------------------------------------

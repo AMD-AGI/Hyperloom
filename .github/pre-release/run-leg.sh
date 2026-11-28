@@ -11,8 +11,7 @@
 # waits for the optimizer's state.json to reach a terminal stop_reason.
 #
 # HYPERLOOM_RUN_MODE is always baremetal here: a `docker-*` leg means "the
-# framework image is the container", not docker-in-docker. The DinD prompts
-# (setup-docker-*.md) belong to bootstrap-pre-release.sh, not to this runner.
+# framework image is the container", not docker-in-docker.
 #
 # Usage:
 #   run-leg.sh <leg-id>              run the leg; exit 0 = pass, 1 = fail, 2 = bad input
@@ -50,7 +49,7 @@
 #   interpreter with no framework and the image's ROCm toolchain is not found),
 #   HF_TOKEN, ANTHROPIC_CUSTOM_HEADERS (a gateway that needs a header gets it from
 #   the caller; none is assumed),
-#   GEAK_CLAUDE_MODEL, FORGE_CLAUDE_MODEL, OPENAI_BASE_URL, OPENAI_API_KEY,
+#   GEAK_CLAUDE_MODEL, OPENAI_BASE_URL, OPENAI_API_KEY,
 #   CODEX_MODEL; timing knobs LEG_SETUP_DEADLINE_S, LEG_SETUP_STALL_S,
 #   LEG_SETUP_MAX_TURNS, LEG_TURN_GAP_S, LEG_WAIT_INTERVAL_S, LEG_STALL_GRACE_S,
 #   LEG_DEMO_REDRIVES, LEG_DEADLINE_S.
@@ -76,7 +75,7 @@ LEG_ID_RE='^(baremetal|docker)-(sglang|vllm|atom)(-forge)?-(3h|12h)$'
 # Mirrors SUCCESS_STOP_REASONS in hyperloom/inference_optimizer/breakdown/stop_reasons.py.
 CLEAN_STOP_REASONS="target_reached global_converged time_exhausted max_ticks cycle_end_done"
 # Keys copied from the caller's env into .env when set; secret ones are scrubbed on exit.
-PASSTHROUGH_KEYS="ANTHROPIC_CUSTOM_HEADERS GEAK_CLAUDE_MODEL FORGE_CLAUDE_MODEL OPENAI_BASE_URL OPENAI_API_KEY CODEX_MODEL"
+PASSTHROUGH_KEYS="ANTHROPIC_CUSTOM_HEADERS GEAK_CLAUDE_MODEL OPENAI_BASE_URL OPENAI_API_KEY CODEX_MODEL"
 SECRET_KEYS="ANTHROPIC_API_KEY ANTHROPIC_CUSTOM_HEADERS OPENAI_API_KEY"
 
 log() {

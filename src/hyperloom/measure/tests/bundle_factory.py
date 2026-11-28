@@ -76,6 +76,7 @@ def manifest_document(files: dict[str, bytes], public_pem: str, **overrides: Any
             "inferencex_commit": "f" * 40,
             "gpu_ids": [0, 1],
             "ecc_delta": {"correctable": 0, "uncorrectable": 0},
+            "rule_pack": {"version": "1-test", "digest": "sha256:" + "22" * 32},
         },
         "outcome": {
             "returncode": 0,
@@ -92,6 +93,7 @@ def manifest_document(files: dict[str, bytes], public_pem: str, **overrides: Any
             "spec_received_unix": 2.0,
             "server_ready_unix": 3.0,
             "finished_unix": 4.0,
+            "phases": [],
         },
         "files": [
             {"path": path, "size": len(data), "sha256": hashlib.sha256(data).hexdigest()}
@@ -234,7 +236,7 @@ def spec_document() -> dict[str, Any]:
         "request_id": REQUEST_ID,
         "kind": "test",
         "meta": {"purpose": "explore", "priority": 2, "branch_id": "b1", "parent_commit": "c0ffee", "retest_of": None},
-        "hardware": {"gpu_type": "MI355X", "gpu_count": 1, "power_cap_w": 1400, "partition_mode": "SPX/NPS1"},
+        "hardware": {"gpu_type": "MI355X", "gpu_count": 1, "power_cap_w": None, "partition_mode": None},
         "image": {"ref": "registry/fw:1", "digest": "sha256:" + "22" * 32},
         "config": [point_document(yaml_text)],
         "attachments": [{"id": "csv1", "kind": "file", "blob": "sha256:" + "33" * 32, "manifest_sha256": "44" * 32}],
@@ -258,10 +260,10 @@ def spec_document() -> dict[str, Any]:
                     ],
                 }
             ],
-            "runtime": {"snapshot": "/shared/u1/sess-a/hosted/runtimes/rt-1", "manifest_sha256": "66" * 32},
+            "runtime": None,
             "blob_root": "/shared/u1/sess-a/hosted/blobs",
         },
-        "model_hashes": {"config.json": "77" * 32},
+        "model_hashes": {},
         "procedure": {
             "prep": "grid",
             "rounds": {"warmup": 1, "measure": 3},

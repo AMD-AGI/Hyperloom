@@ -87,8 +87,6 @@ FRAMEWORK_VERSION_MISMATCH = "framework_version_mismatch"
 #: No sandbox started within the runner's start timeout (``hyperloom.measure.hosted``): the platform short of sandboxes,
 #: or on a local host every card held by a process outside the toolbox. Retried like any infrastructure failure.
 RUNNER_START_TIMEOUT = "runner_start_timeout"
-#: The platform had no room for the sandbox. Retried like any infrastructure failure.
-CAPACITY_UNAVAILABLE = "capacity_unavailable"
 
 #: A listed result file whose every copy out of the sandbox received another byte count than the signed manifest lists
 #: (``hyperloom.measure.hosted_copy``); the detail names the path and both sizes. The platform's file API ended the
@@ -182,8 +180,6 @@ INFRA_ERROR_CLASSES: frozenset[str] = frozenset(
         "node_fault",
         "no_spec",
         "sandbox_create_failed",
-        CAPACITY_UNAVAILABLE,
-        "image_pull_failed",
         "result_read_failed",
         RESULT_DOWNLOAD_INCOMPLETE,
         "archive_failed",

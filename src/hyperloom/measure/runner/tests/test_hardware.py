@@ -95,15 +95,6 @@ def test_the_power_cap_is_read_in_every_layout_amd_smi_reports_it(limit):
     assert facts.power_cap_w == 750.0
 
 
-def test_a_power_cap_within_the_rounding_of_amd_smi_matches_the_sheet():
-    facts = [GpuFacts(0, MI355X_CARD, 749.8, "SPX/NPS1")]
-
-    assert check_hardware(facts, card=MI355X_CARD, gpu_count=1, power_cap_w=750, partition_mode=None) == []
-    assert check_hardware(facts, card=MI355X_CARD, gpu_count=1, power_cap_w=749, partition_mode=None) == [
-        "GPU 0 power cap 749.8 W, not 749 W"
-    ]
-
-
 def test_an_amd_smi_that_fails_reads_as_none_instead_of_raising(monkeypatch):
     def run(cmd, **_kwargs):
         if cmd[1] == "missing":
@@ -141,26 +132,18 @@ def test_ecc_counts_need_every_visible_gpu():
 def test_hardware_mismatches_are_named():
     facts = [GpuFacts(0, MI355X_CARD, 1400.0, "SPX/NPS1")]
 
-    assert check_hardware(facts, card=MI355X_CARD, gpu_count=1, power_cap_w=1400, partition_mode="SPX/NPS1") == []
-    problems = check_hardware(facts, card=MI300X_CARD, gpu_count=2, power_cap_w=750, partition_mode="CPX/NPS4")
+    assert check_hardware(facts, card=MI355X_CARD, gpu_count=1) == []
+    problems = check_hardware(facts, card=MI300X_CARD, gpu_count=2)
     assert problems == [
         "1 GPUs visible, 2 needed",
         "GPU 0 is AMD Instinct MI355X (gfx950, 256 CUs, 294912 MiB, 2400 MHz), "
         "not AMD Instinct MI300X (gfx942, 304 CUs, 196592 MiB, 2100 MHz)",
-        "GPU 0 power cap 1400.0 W, not 750 W",
-        "GPU 0 partition SPX/NPS1, not CPX/NPS4",
     ]
-
-
-def test_a_value_the_machine_did_not_give_is_not_compared():
-    facts = [GpuFacts(0, MI355X_CARD, None, None)]
-
-    assert check_hardware(facts, card=MI355X_CARD, gpu_count=1, power_cap_w=1400, partition_mode="SPX/NPS1") == []
 
 
 def _kind_problems(card_on_the_machine, card_on_the_sheet):
     facts = [GpuFacts(0, card_on_the_machine, 1400.0, "SPX/NPS1")]
-    return check_hardware(facts, card=card_on_the_sheet, gpu_count=1, power_cap_w=None, partition_mode=None)
+    return check_hardware(facts, card=card_on_the_sheet, gpu_count=1)
 
 
 def test_a_card_of_the_same_kind_passes_whatever_its_name_says():

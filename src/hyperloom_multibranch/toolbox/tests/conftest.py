@@ -9,6 +9,7 @@ every test here reads an idle machine of its own (a test that lists holders inje
 that measures on real cards sets ``USES_REAL_GPUS = True`` and reads the host's list.
 """
 
+from collections.abc import Iterator
 from pathlib import Path
 
 import pytest
@@ -20,8 +21,11 @@ from hyperloom.measure.tests.gpu_free_host import (  # noqa: F401
     idle_card_list,
     machine_without_readable_gpus,
 )
-from hyperloom.measure.tests.hosted_fixtures import freeze_session_base
+from hyperloom.measure.long_context.build import build_entry
+from hyperloom.measure.long_context.tests.support import encode
+from hyperloom.measure.tests.hosted_fixtures import Rig, freeze_session_base, make_rig
 from hyperloom_multibranch.toolbox import hosted_executor
+from hyperloom_multibranch.toolbox import long_context as long_context_module
 from hyperloom_multibranch.toolbox.local_hosted import JIT_STORE_ENV
 from inference_suite import StagingError
 from inference_suite.contracts import NormalisedManifest
@@ -69,3 +73,25 @@ def own_private_paths(monkeypatch: pytest.MonkeyPatch) -> None:
     """The app's private paths of each test's own: a native build service registers its key and trust file there, and
     the next test's sandboxes must not mask them."""
     monkeypatch.setattr(confinement, "PRIVATE_PATHS", confinement.PrivatePaths())
+
+
+@pytest.fixture
+def rig(tmp_path: Path) -> Iterator[Rig]:
+    """A hosted measurement backend over a local sandbox provider, closed after the test."""
+    made = make_rig(tmp_path)
+    yield made
+    made.backend.close()
+    made.provider.close()
+
+
+@pytest.fixture
+def builds(monkeypatch: pytest.MonkeyPatch) -> list[int]:
+    """The lengths the toolbox staged a long-context set at, built with the test tokenizer in place of the model's."""
+    lengths: list[int] = []
+
+    def built(model_dir: Path, root: Path, *, length: int) -> object:
+        lengths.append(length)
+        return build_entry(model_dir, root, length=length, encode=encode)
+
+    monkeypatch.setattr(long_context_module, "build_entry", built)
+    return lengths

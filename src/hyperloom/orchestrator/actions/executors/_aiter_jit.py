@@ -25,6 +25,8 @@ from hyperloom_common.aiter_jit_cache import (
     resolve_package_root,
     resolve_serving_context,
 )
+from hyperloom_common.coerce import optional_positive_int
+from hyperloom_common.fs_utils import file_sha256
 
 log = logging.getLogger(__name__)
 
@@ -491,7 +493,7 @@ def aiter_build_targets(package_root: Path, environ: Mapping[str, str]) -> Build
     that cannot be told -- a named architecture with no count, no ``rocminfo``, cards that differ -- and every row counts.
     """
     archs = str(environ.get("GPU_ARCHS") or "").strip()
-    cu_num = _positive_int(environ.get("CU_NUM"))
+    cu_num = optional_positive_int(environ.get("CU_NUM"))
     if archs and archs.lower() != "native":
         defaults = _default_cu_nums(package_root)
         targets: set[tuple[str, int]] = set()
@@ -503,14 +505,6 @@ def aiter_build_targets(package_root: Path, environ: Mapping[str, str]) -> Build
         return frozenset(targets) or None
     card = card_target()
     return None if card is None else frozenset({(card[0], cu_num or card[1])})
-
-
-def _positive_int(value: object) -> int | None:
-    try:
-        number = int(str(value).strip())
-    except ValueError:
-        return None
-    return number if number > 0 else None
 
 
 def _default_cu_nums(package_root: Path) -> dict[str, int]:
@@ -736,15 +730,6 @@ def serving_modules_cover_rows(jit_dir: Path, modules: tuple[str, ...], rows: li
 AITER_PREWARM_MANIFEST = "hyperloom-prewarm.json"
 AITER_PREWARM_SCHEMA = "hyperloom.aiter_prewarm/1"
 _MODULE_CONFIG = "optCompilerConfig.json"
-_HASH_CHUNK_BYTES = 1024 * 1024
-
-
-def _file_sha256(path: Path) -> str:
-    digest = hashlib.sha256()
-    with path.open("rb") as handle:
-        while chunk := handle.read(_HASH_CHUNK_BYTES):
-            digest.update(chunk)
-    return digest.hexdigest()
 
 
 def tuned_tables_sha256(configs_dir: Path) -> str:
@@ -752,7 +737,7 @@ def tuned_tables_sha256(configs_dir: Path) -> str:
     files = sorted((p.relative_to(configs_dir).as_posix(), p) for p in configs_dir.rglob("*") if p.is_file())
     digest = hashlib.sha256()
     for relative, path in files:
-        digest.update(f"{relative}\t{_file_sha256(path)}\n".encode())
+        digest.update(f"{relative}\t{file_sha256(path)}\n".encode())
     return digest.hexdigest()
 
 
@@ -816,7 +801,7 @@ def _installed_for(entry: object, jit_dir: Path, overridden: set[str], targets: 
     if not name or name in overridden or not so_path.is_file() or not _built_for(entry, targets):
         return None
     try:
-        return name if _file_sha256(so_path) == entry.get("sha256") else None
+        return name if file_sha256(so_path) == entry.get("sha256") else None
     except OSError:
         return None
 

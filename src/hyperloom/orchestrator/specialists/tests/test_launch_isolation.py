@@ -294,14 +294,14 @@ def test_a_launch_by_a_uid_that_cannot_search_its_home_goes_on_without_what_lies
     assert not any(path.startswith(str(home)) for path in seen["read_only"])
 
 
-def test_the_apps_state_directory_is_masked_where_a_bind_would_show_it(tmp_path, monkeypatch):
+def test_the_build_store_is_masked_where_a_bind_would_show_it(tmp_path, monkeypatch):
     shared = tmp_path / "shared"
-    (shared / "state").mkdir(parents=True)
-    monkeypatch.setenv("HYPERLOOM_STATE_DIR", str(shared / "state"))
+    (shared / "builds").mkdir(parents=True)
+    monkeypatch.setenv("HYPERLOOM_BUILD_STORE", str(shared / "builds"))
 
     confinement = specialist_confinement(_place(tmp_path, readable=(shared,)), sys.executable, _env())
 
-    assert shared in confinement.readable and shared / "state" in confinement.masked
+    assert shared in confinement.readable and shared / "builds" in confinement.masked
 
 
 def test_a_sandbox_launch_with_no_policy_is_refused_never_run_unconfined(tmp_path):

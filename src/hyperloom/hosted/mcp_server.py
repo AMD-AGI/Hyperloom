@@ -19,10 +19,9 @@ A reply annotator (:meth:`McpServer.attach_reply_annotator`) adds one text block
 tokens. The service keeps one opaque cursor per token for it, starts it empty, and moves it only when the reply
 that carries the block has been written to the client.
 
-Authentication: ``X-Hyperloom-Token`` or ``Authorization: Bearer``. The host token is the one the caller
-passes in :class:`McpServerConfig`; every other token was issued by this server to one specialist and dies with
-:meth:`McpServer.revoke_specialist`. Issued tokens are kept as digests only, compared in constant time, and a token
-is never written to a log or an error message.
+Authentication: ``X-Hyperloom-Token`` or ``Authorization: Bearer``. Every token was issued by this server to one
+specialist and dies with :meth:`McpServer.revoke_specialist`. Issued tokens are kept as digests only, compared in
+constant time, and a token is never written to a log or an error message.
 """
 
 from __future__ import annotations
@@ -52,11 +51,9 @@ logger = logging.getLogger(__name__)
 
 JSONRPC_VERSION = "2.0"
 MCP_PATH = "/mcp"
-HOST_KIND = "host"
 SPECIALIST_KIND = "specialist"
-TOKEN_KINDS = frozenset({HOST_KIND, SPECIALIST_KIND})
+TOKEN_KINDS = frozenset({SPECIALIST_KIND})
 MAX_BODY_BYTES = 1 << 20
-MIN_TOKEN_LENGTH = 16
 SESSION_HEADER = "Mcp-Session-Id"
 
 _ERR_PARSE = -32700
@@ -78,7 +75,7 @@ class ToolError(Exception):
 
 @dataclass(frozen=True)
 class McpPrincipal:
-    """Who a token speaks for; ``subject`` and ``branch`` are empty for the host."""
+    """Who a token speaks for: the specialist (``subject``) and its branch."""
 
     kind: str
     subject: str = ""
@@ -137,7 +134,6 @@ class McpServerConfig:
 
     host: str = "127.0.0.1"
     port: int = 0
-    host_token: str = ""
 
 
 def _digest(token: str) -> bytes:
@@ -268,14 +264,11 @@ class McpServer:
         server_name: str = "hyperloom",
         heartbeat_seconds: float = 60.0,
     ) -> None:
-        if len(config.host_token) < MIN_TOKEN_LENGTH:
-            raise ValueError(f"the host token must be at least {MIN_TOKEN_LENGTH} characters")
         if not campaign:
             raise ValueError("a campaign name is required")
         self._config = config
         self._campaign = campaign
         self._server_name = server_name
-        self._host_digest = _digest(config.host_token)
         self._tokens = _TokenRegistry()
         self._beats: dict[str, Callable[[], None]] = {}
         self._beats_lock = threading.Lock()
@@ -305,12 +298,12 @@ class McpServer:
         self._tools[name] = RegisteredTool(name, description, dict(schema), handler, granted)
 
     def issue_token(self, specialist: str, branch: str, scopes: Iterable[str] = (SPECIALIST_KIND,)) -> str:
-        """A token for one specialist on one branch, carrying ``scopes``; host scope is never issued."""
+        """A token for one specialist on one branch, carrying ``scopes``."""
         granted = frozenset(scopes)
         if not specialist or not branch:
             raise ValueError("a specialist token needs a specialist id and a branch")
-        if not granted or not granted <= TOKEN_KINDS - {HOST_KIND}:
-            raise ValueError(f"issued scopes must be a non-empty subset of {sorted(TOKEN_KINDS - {HOST_KIND})}")
+        if not granted or not granted <= TOKEN_KINDS:
+            raise ValueError(f"issued scopes must be a non-empty subset of {sorted(TOKEN_KINDS)}")
         principal = McpPrincipal(
             SPECIALIST_KIND, subject=specialist, branch=branch, campaign=self._campaign, scopes=granted
         )
@@ -325,7 +318,7 @@ class McpServer:
             self._beats[specialist] = beat
 
     def attach_reply_annotator(self, annotator: ReplyAnnotator | None) -> None:
-        """Add the block ``annotator`` returns to every tool reply a specialist token gets; the host gets none.
+        """Add the block ``annotator`` returns to every tool reply a specialist token gets.
 
         The service holds one cursor per token and hands it to the annotator, which returns the text to add (empty
         for none) and the cursor to resume from. The cursor moves when the reply is written to the client, so a reply
@@ -346,19 +339,14 @@ class McpServer:
     def authenticate(self, token: str) -> McpPrincipal | None:
         if not token:
             return None
-        if hmac.compare_digest(self._host_digest, _digest(token)):
-            return McpPrincipal(HOST_KIND, campaign=self._campaign, scopes=frozenset({HOST_KIND}))
         principal = self._tokens.resolve(token)
         if principal is None or principal.campaign != self._campaign:
             return None
         return principal
 
     def scrub(self, text: str, presented: str = "") -> str:
-        """``text`` with the host token and the token of this request blanked out."""
-        for secret in (self._config.host_token, presented):
-            if secret:
-                text = text.replace(secret, "[redacted]")
-        return text
+        """``text`` with the token of this request blanked out."""
+        return text.replace(presented, "[redacted]") if presented else text
 
     # -- JSON-RPC ----------------------------------------------------------------------------------------------
 
@@ -456,7 +444,7 @@ class McpServer:
     def _call_heartbeat(self, principal: McpPrincipal) -> Iterator[None]:
         """While a request of a specialist token is being served, call its beat every interval."""
         with self._beats_lock:
-            hook = self._beats.get(principal.subject) if principal.kind != HOST_KIND else None
+            hook = self._beats.get(principal.subject)
         if hook is None:
             yield
             return
@@ -625,7 +613,6 @@ def _make_handler(server: McpServer) -> type[BaseHTTPRequestHandler]:
 
 
 __all__ = [
-    "HOST_KIND",
     "SPECIALIST_KIND",
     "CallContext",
     "InvalidParamsError",

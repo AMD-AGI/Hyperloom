@@ -15,7 +15,7 @@ from hyperloom.measure.points import AcceptedMeasurement
 from hyperloom.measure.socket import RoundOutcome, TestCall, TestOutcome
 from hyperloom.measure.tests.fake_runner import REPORT_PATH
 from hyperloom.measure.tests.run_dirs import write_run_dir
-from hyperloom.measure.tests.hosted_fixtures import Rig, make_rig, point_yaml
+from hyperloom.measure.tests.hosted_fixtures import Rig, point_yaml
 from hyperloom_multibranch.contracts.blackboard.records import TestRecord
 from hyperloom_multibranch.toolbox.attempts import MeasurementRefused, TestJob
 from hyperloom_multibranch.toolbox.hosted_executor import HostedExecutor, _round_values
@@ -24,14 +24,6 @@ from hyperloom_multibranch.toolbox.tests.helpers import build, req
 from hyperloom_multibranch.toolbox.tests.test_hosted_executor import PointPlanner
 
 FLEX = "exact_match,flexible-extract"
-
-
-@pytest.fixture
-def rig(tmp_path: Path):
-    made: Rig = make_rig(tmp_path)
-    yield made
-    made.backend.close()
-    made.provider.close()
 
 
 async def _run_accuracy(tmp_path: Path, r: Rig, **fake: object) -> tuple[TestResult, TestRecord]:

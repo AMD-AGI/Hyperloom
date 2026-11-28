@@ -111,7 +111,6 @@ NEGATIVES: dict[str, Callable[[dict[str, Any]], None]] = {
     "duplicate unset": lambda d: d.update(unset_envs=["A", "A"]),
     "bad attachment kind": lambda d: d["attachments"][0].update(kind="socket"),
     "bad attachment id": lambda d: d["attachments"][0].update(id="../x"),
-    "model hash not sha256": lambda d: d["model_hashes"].update({"config.json": "xyz"}),
     "absolute result_dir": lambda d: d["outputs"].update(result_dir="/tmp/out"),
     "zero measure rounds": lambda d: d["procedure"]["rounds"].update(measure=0),
     "unknown prep": lambda d: d["procedure"].update(prep="sweep"),
@@ -140,7 +139,6 @@ _KEY, _MANIFEST = "1" * 64, "2" * 64
 
 def _built(d: dict[str, Any]) -> None:
     d["environment"]["roots"][0]["kind"] = "runtime"
-    d["environment"]["runtime"] = None
     d["environment"]["builds"] = [
         {"root_id": d["environment"]["roots"][0]["id"], "key": _KEY, "manifest_sha256": _MANIFEST}
     ]
@@ -262,12 +260,41 @@ def test_the_fingerprint_is_sixteen_hex_digits_and_stable() -> None:
         lambda d: d["procedure"].update(deadline_unix=1.0),
         lambda d: _yaml(d, d["config"][0]["yaml"].replace("/shared/u1/sess-a/pids", "/shared/u2/sess-b/pids")),
         lambda d: d["environment"].update(blob_root="/shared/u2/other/blobs"),
-        lambda d: d["environment"]["runtime"].update(snapshot="/shared/u2/other/rt"),
     ],
-    ids=["request_id", "meta", "deadline", "yaml path field", "blob_root", "snapshot location"],
+    ids=["request_id", "meta", "deadline", "yaml path field", "blob_root"],
 )
 def test_the_fingerprint_ignores_what_is_not_measurement_content(change) -> None:
     assert _fp(_edit(change)) == _fp(spec_document())
+
+
+def test_a_sheet_naming_a_runtime_snapshot_is_refused_and_the_fingerprint_keeps_a_null_runtime() -> None:
+    document = _edit(lambda d: d["environment"].update(runtime={"snapshot": "/s", "manifest_sha256": "66" * 32}))
+    assert list(VALIDATOR.iter_errors(document)), "the schema allows only null"
+    with pytest.raises(DocumentError, match="runtime: must be null"):
+        MeasurementSpec.from_document(document)
+
+    canonical = spec_module.canonical_for_fingerprint(MeasurementSpec.from_document(spec_document()))
+    assert "runtime" in canonical["environment"] and canonical["environment"]["runtime"] is None
+
+
+@pytest.mark.parametrize(
+    ("change", "refusal"),
+    [
+        (lambda d: d["hardware"].update(power_cap_w=750), "power_cap_w: must be null"),
+        (lambda d: d["hardware"].update(partition_mode="CPX/NPS4"), "partition_mode: must be null"),
+        (lambda d: d["model_hashes"].update({"config.json": "bb" * 32}), "model_hashes: must be empty"),
+    ],
+    ids=["power cap", "partition mode", "model hashes"],
+)
+def test_a_sheet_asking_for_a_power_cap_partition_or_model_hashes_is_refused(change, refusal) -> None:
+    document = _edit(change)
+    assert list(VALIDATOR.iter_errors(document)), "the schema allows only null and an empty object"
+    with pytest.raises(DocumentError, match=refusal):
+        MeasurementSpec.from_document(document)
+
+    written = MeasurementSpec.from_document(spec_document()).to_document()
+    assert (written["hardware"]["power_cap_w"], written["hardware"]["partition_mode"]) == (None, None)
+    assert written["model_hashes"] == {}
 
 
 @pytest.mark.parametrize(
@@ -283,7 +310,6 @@ def test_the_fingerprint_ignores_what_is_not_measurement_content(change) -> None
         lambda d: d["procedure"].update(accuracy=True),
         lambda d: d["environment"]["roots"][0]["entries"][0].update(blob="sha256:" + "88" * 32),
         lambda d: d["attachments"][0].update(manifest_sha256="aa" * 32),
-        lambda d: d["model_hashes"].update({"config.json": "bb" * 32}),
         lambda d: _yaml(d, d["config"][0]["yaml"].replace("port: 8000", "port: 8001")),
     ],
     ids=[
@@ -297,7 +323,6 @@ def test_the_fingerprint_ignores_what_is_not_measurement_content(change) -> None
         "accuracy",
         "overlay blob",
         "attachment hash",
-        "model hash",
         "yaml value",
     ],
 )
@@ -309,20 +334,6 @@ def test_the_runner_version_is_part_of_the_fingerprint() -> None:
     assert _fp(spec_document(), version="1.1.4") != _fp(spec_document())
     with pytest.raises(DocumentError, match="version"):
         _fp(spec_document(), version="")
-
-
-def test_session_directory_prefixes_are_replaced_so_two_sessions_agree() -> None:
-    def with_session(root: str) -> dict[str, Any]:
-        def change(d: dict[str, Any]) -> None:
-            _yaml(d, point_yaml(conc=4) + f"extra_path: {root}/kernels\n")
-            d["process_env"]["PYTHONPATH"] = f"{root}/overlay:/opt/x"
-
-        return _edit(change)
-
-    one = _fp(with_session("/shared/u1/sess-a"), session_dir="/shared/u1/sess-a")
-    two = _fp(with_session("/shared/u2/sess-b"), session_dir="/shared/u2/sess-b")
-    assert one == two
-    assert one != _fp(with_session("/shared/u1/sess-a"))  # without the session directory the paths differ
 
 
 def test_the_canonical_form_keeps_blob_and_attachment_hashes_but_no_locations() -> None:

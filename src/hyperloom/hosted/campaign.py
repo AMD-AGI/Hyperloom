@@ -90,20 +90,15 @@ FIELDS: tuple[Field, ...] = (
     Field("workload.isl", "isl", Kind.INT, minimum=1),
     Field("workload.osl", "osl", Kind.INT, minimum=1),
     Field("workload.precision", "precision", Kind.STR),
-    Field("objective.target_gain_pct", "target_gain_pct", Kind.NUM, exclusive_minimum=0),
     Field("budget.max_hours", "max_hours", Kind.NUM, required=True, exclusive_minimum=0),
     Field("budget.max_gpu_hours", "max_gpu_hours", Kind.NUM, minimum=0),
     Field("budget.max_llm_usd", "max_llm_usd", Kind.NUM, minimum=0),
     Field("launch.server_args", "server_args", Kind.TEXT),
     Field("launch.extra_env", "extra_env", Kind.STR_MAP),
-    Field("options.kernel", "kernel", Kind.BOOL),
-    Field("options.framework_agent", "framework_agent", Kind.BOOL),
     Field("options.eval", "eval", Kind.ENUM, choices=(True,)),
-    Field("options.enablement", "enablement", Kind.ENUM, choices=("all", "launch", "eval", "off")),
     Field("placement.profile", "profile", Kind.ENUM, required=True, choices=(PROFILE_WITH_CARDS, "hosted-cpu")),
     Field("placement.measurement", "measurement", Kind.ENUM, choices=(MEASUREMENT_LOCAL, MEASUREMENT_HOSTED)),
     Field("placement.max_parallel_tests", "max_parallel_tests", Kind.INT, minimum=1),
-    Field("placement.specialist_capacity", "specialist_capacity", Kind.INT, minimum=0),
     Field("source.repo", "source_repo", Kind.STR),
     Field("source.sha", "source_sha", Kind.STR),
     Field("source.kind", "source_kind", Kind.ENUM, choices=("user", "ci")),
@@ -138,16 +133,11 @@ class CampaignSpec:
     isl: int | None = None
     osl: int | None = None
     precision: str | None = None
-    target_gain_pct: float | None = None
     max_gpu_hours: float | None = None
     max_llm_usd: float | None = None
     server_args: str | None = None
     extra_env: Mapping[str, str] | None = None
-    kernel: bool | None = None
-    framework_agent: bool | None = None
     eval: bool | None = None
-    enablement: str | None = None
-    specialist_capacity: int | None = None
     source_repo: str | None = None
     source_sha: str | None = None
     source_kind: str | None = None

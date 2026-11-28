@@ -14,7 +14,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
-from collections.abc import Callable, Sequence
+from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Protocol
@@ -67,18 +67,6 @@ class PassHost(Protocol):
         """Whether the run is being stopped, so the check is to end."""
 
 
-@dataclass(frozen=True)
-class _Budget:
-    """The check's time: when it must end on the clock :func:`answer_held` was given."""
-
-    deadline: float
-    clock: Callable[[], float]
-
-    def monotonic_deadline(self) -> float:
-        """The same instant on ``time.monotonic()``, which the requests are timed by."""
-        return time.monotonic() + (self.deadline - self.clock())
-
-
 def model_of(serving: Serving, deadline: float) -> str:
     try:
         return discover_model(serving.base_url, request_timeout(deadline))
@@ -88,35 +76,30 @@ def model_of(serving: Serving, deadline: float) -> str:
         raise
 
 
-async def _answer(plan: ShortPromptPlan, prompts: Sequence[Prompt], serving: Serving, budget: _Budget) -> dict:
-    deadline = budget.monotonic_deadline()
+async def _answer(plan: ShortPromptPlan, prompts: Sequence[Prompt], serving: Serving, deadline: float) -> dict:
     model = await asyncio.to_thread(model_of, serving, deadline)
     return await asyncio.to_thread(
         run_prompts, serving.base_url, model, prompts, max_new_tokens=plan.max_new_tokens, deadline=deadline
     )
 
 
-async def _one_process(
-    plan: ShortPromptPlan, prompts: Sequence[Prompt], host: PassHost, index: int, budget: _Budget
-) -> ProcessEntry:
-    clock = budget.clock
-    started = clock()
+async def _one_process(plan: ShortPromptPlan, prompts: Sequence[Prompt], host: PassHost) -> ProcessEntry:
+    started = time.monotonic()
+    deadline = started + plan.phase_cap_sec
     booted = started
     try:
-        serving = await host.start(index, budget.deadline)
-        booted = clock()
-        answers = await _answer(plan, prompts, serving, budget)
+        serving = await host.start(0, deadline)
+        booted = time.monotonic()
+        answers = await _answer(plan, prompts, serving, deadline)
     except (PassFailed, CompletionError) as exc:
-        return ProcessEntry(index, FAILED, str(exc), booted - started, clock() - booted, {})
+        return ProcessEntry(0, FAILED, str(exc), booted - started, time.monotonic() - booted, {})
     except Exception as exc:  # one process's unforeseen end is that process's failure, not the test's
-        log.warning(
-            "process %d of the short-prompt check ended on an unforeseen error; it failed", index, exc_info=True
-        )
+        log.warning("process 0 of the short-prompt check ended on an unforeseen error; it failed", exc_info=True)
         reason = f"{type(exc).__name__} while running the process"
-        return ProcessEntry(index, FAILED, reason, booted - started, clock() - booted, {})
+        return ProcessEntry(0, FAILED, reason, booted - started, time.monotonic() - booted, {})
     finally:
         await host.stop()
-    return ProcessEntry(index, OK, "", booted - started, clock() - booted, completions_to_outputs(answers))
+    return ProcessEntry(0, OK, "", booted - started, time.monotonic() - booted, completions_to_outputs(answers))
 
 
 @dataclass(frozen=True)
@@ -129,12 +112,10 @@ class Answered:
     entry: ProcessEntry
 
 
-async def answer_held(
-    plan: ShortPromptPlan, prompts: Sequence[Prompt], host: PassHost, *, clock: Callable[[], float] = time.monotonic
-) -> Answered:
+async def answer_held(plan: ShortPromptPlan, prompts: Sequence[Prompt], host: PassHost) -> Answered:
     """Process 0: ``host`` is the test's own server, still up after its measured rounds; it answers every prompt within the
     plan's ``phase_cap_sec``. A host that cannot give the server makes the process failed with its reason."""
-    entry = await _one_process(plan, prompts, host, 0, _Budget(clock() + plan.phase_cap_sec, clock))
+    entry = await _one_process(plan, prompts, host)
     return Answered(plan, prompts, entry)
 
 

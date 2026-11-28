@@ -57,6 +57,8 @@ from dataclasses import asdict, dataclass, replace
 from pathlib import Path
 from typing import Any
 
+from hyperloom_common.coerce import optional_positive_int
+
 from hyperloom.common.aiter_layout import image_aiter_meta
 from hyperloom.measure.compile import EnvRoot, LocalBlobStore
 from hyperloom.measure.farm import FarmError, locate_package
@@ -381,15 +383,6 @@ def _gfx(given: str | None) -> str:
     return gfx
 
 
-def _positive(value: str | None) -> int | None:
-    """``value`` as a CU count: a positive integer, else ``None``."""
-    try:
-        number = int(str(value).strip())
-    except ValueError:
-        return None
-    return number if number > 0 else None
-
-
 def main(argv: Sequence[str] | None = None) -> int:
     """``python -m hyperloom.measure.runner.native.prewarm --gfx <arch>``: prewarm the aiter ``--python`` imports (or
     ``--package``, which it must import) and print the report as JSON. Exits 0 when nothing could be installed too, so the
@@ -412,7 +405,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     except FarmError as exc:
         report = PrewarmReport(failure=f"the image's aiter cannot be found: {exc}")
     else:
-        cu_num = args.cu_num if args.cu_num is not None else _positive(os.environ.get(CU_NUM))
+        cu_num = args.cu_num if args.cu_num is not None else optional_positive_int(os.environ.get(CU_NUM))
         report = _prewarm_image(package, gfx, cu_num, args.tables, args.python)
     json.dump(asdict(report), sys.stdout, indent=2, sort_keys=True)
     sys.stdout.write("\n")

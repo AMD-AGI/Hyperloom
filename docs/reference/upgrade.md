@@ -54,6 +54,10 @@ These flags are rejected with `unrecognized arguments`:
   nothing): drop them.
 * `hyperloom-multibranch run --make-before-break` and `--no-make-before-break`
   (a hosted test now closes its sandbox when it ends): drop them.
+* `python -m hyperloom.measure.runner.cache_build --python-version`,
+  `--implementation`, `--abi` and `--platform`: name the image's interpreter
+  and platform with `--wheel-target` instead, for example
+  `--wheel-target cp314-manylinux_2_28_x86_64`.
 
 A campaign spec may keep `multibranch.make_before_break`, which is ignored with a
 warning. Where the grant fits three or more tests, a hosted session now runs one more
@@ -61,6 +65,13 @@ test at once than the default did, and each test's sandbox queues for a node.
 
 `INFERENCE_OPTIMIZER_PROPOSAL_SCORER_TIMEOUT_SEC` is no longer read and is
 silently ignored, so drop it.
+
+### Required: `HYPERLOOM_SANDBOX_TEMPLATES` names the `measurement` role
+
+A hosted run no longer reads `runner` as the older name of the `measurement`
+role. A template list that gives only `runner` is refused with "the template
+list has no 'measurement' role": rename the key to `measurement`. Hosts that
+build the list from the grant's roles already send `measurement`.
 
 ### Required: `session_breakdown.json` drops `ensemble_scores`
 
@@ -199,6 +210,62 @@ header names the ladder `concs`, drops the budget keys, `was_skipped` and the
 report paths, and adds `partial`, `in_progress` and `cancelled` to `status`.
 Both lineages' shapes are in
 [`session_breakdown.json` integration in Hyperloom](session-breakdown.md).
+
+### Required: the hosted application image's `Dockerfile` and `build.sh` are removed
+
+`scripts/hosted_app_image/Dockerfile` and `scripts/hosted_app_image/build.sh`
+no longer exist. An application image built from them keeps working. To build a
+new deployment, run `scripts/hosted_app_image/build_layer.sh` and
+`Dockerfile.layer` (see the hosted entry in
+[Environment variables](environment-variables.md)): the layer starts a hosted
+run on any framework image as it is.
+
+### Required: a hosted run no longer reads `HYPERLOOM_SANDBOX_WORKSPACE`
+
+The hosted toolbox no longer names a workspace on its sandbox creates, and
+`HYPERLOOM_SANDBOX_WORKSPACE` is no longer read (it is still removed from the
+environment before any child process starts). A Claw grant's sandbox key names
+its own workspace, so hosts that hand the run a grant need no change. Handing
+the run a SaFE key that reaches the sandbox service directly is not a supported
+hosted deployment: such a key's creates now fail with `workspace_required`.
+Hand the run a Claw grant instead, and drop the variable.
+
+### Required: `E2BSandboxProvider` drops `workspace=` and `socket.WORKSPACE_KEY`
+
+`hyperloom.sandbox.e2b.E2BSandboxProvider` no longer takes `workspace=`, and
+`hyperloom.sandbox.socket.WORKSPACE_KEY` no longer exists: passing the keyword
+fails with `TypeError`, and importing the name fails with `ImportError`. The
+provider no longer adds `agent-sandbox.io/workspace` to a create's metadata,
+and a `workspace_required` refusal is raised as the service's own
+`SandboxDenied`. A caller whose key must name a workspace puts
+`agent-sandbox.io/workspace` in its own create metadata.
+
+### Required: the sandbox socket's `Role` drops `subrun`
+
+`hyperloom.sandbox.socket.Role` is `measurement` or `dev`. A local template
+declared with the `subrun` role is refused: drop it, since no Hyperloom code
+ever created a sub-run sandbox. A host may still list `subrun` in
+`HYPERLOOM_SANDBOX_TEMPLATES`, which a hosted run ignores as before.
+
+### Required: `measurement_spec.v2` narrows the sheet fields nothing wrote
+
+The schema keeps its version, but `environment.runtime`,
+`hardware.power_cap_w` and `hardware.partition_mode` must be `null` and
+`model_hashes` an empty object. The reader and the packaged schema refuse any
+other value, and the runner no longer checks a runtime snapshot, compares the
+GPUs' power cap or partition mode with the sheet, or hashes model files. Every
+sheet Hyperloom writes already carries exactly these values, so spec
+fingerprints and JIT cache keys do not change. A tool outside Hyperloom that
+writes sheets must write these values, and must not rely on the runner to
+enforce them.
+
+### Required: `measurement_result.v2` requires `runner.rule_pack` and `timing.phases`
+
+The schema keeps its version, but a result manifest must state
+`runner.rule_pack` and `timing.phases`, the latter an array (`[]` for none).
+Every runner that writes a v2 manifest already writes both; a manifest without
+them is now refused as invalid instead of being read as one an older runner
+signed. A tool that writes result manifests must write both fields.
 
 ### Required: `hyperloom session report` is removed
 

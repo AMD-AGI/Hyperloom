@@ -16,11 +16,11 @@ from pathlib import Path
 
 from hyperloom.contracts.recipe import ComponentPatches, PatchRef
 from hyperloom.measure import signing
-from hyperloom.measure.compile import LocalBlobStore
-from hyperloom.measure.runner.native.builder import BuildMachine, BuildRequest, compile_tree, plan
+from hyperloom.measure.compile import BlobStore, EnvRoot, LocalBlobStore
+from hyperloom.measure.runner.native.builder import BuildMachine, BuildRequest, compile_laid, lay_tree, plan
 from hyperloom.measure.runner.native.preflight import Preflight
 from hyperloom.measure.runner.native.recipes import NativeRecipe
-from hyperloom.measure.runner.native.service import Ensured, ensure_build
+from hyperloom.measure.runner.native.service import Ensured, Staged, ensure_build
 from hyperloom.measure.jit.native.store import BuildStore
 from hyperloom.measure.jit.native.trust import Signer, Trust, TrustedKey
 from hyperloom.measure.tests._recipes import COMMIT, IMAGE, git_patch, put_patch, write_tree
@@ -194,3 +194,8 @@ class Bench:
         return ensure_build(
             self.store, inputs, lambda scratch: compile_tree(request, root, self.blobs, scratch), self.signer
         )
+
+
+def compile_tree(request: BuildRequest, root: EnvRoot, blobs: BlobStore, scratch: Path) -> Staged:
+    """Compile the upstream build directory with ``root`` laid over it in this process, and harvest its outputs."""
+    return compile_laid(lay_tree(request, root, blobs, scratch), scratch)

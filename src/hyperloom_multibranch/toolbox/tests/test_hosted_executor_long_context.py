@@ -14,7 +14,6 @@ import asyncio
 from dataclasses import replace
 from pathlib import Path
 
-import pytest
 
 from hyperloom.contracts.long_context import LONG_CONTEXT_COMPLETE, LONG_CONTEXT_INCOMPLETE
 from hyperloom.contracts.measurement import TestResult, Validity
@@ -22,21 +21,13 @@ from hyperloom.measure.long_context.plan import LongContextPlan
 from hyperloom.measure.long_context.tests.support import LENGTH, PROMPTS
 from hyperloom.measure.manifest import ResultManifest
 from hyperloom.measure.points import AcceptedMeasurement
-from hyperloom.measure.tests.hosted_fixtures import Rig, make_rig, point_yaml
+from hyperloom.measure.tests.hosted_fixtures import Rig, point_yaml
 from hyperloom_multibranch.toolbox.hosted_executor import HostedExecutor
 from hyperloom_multibranch.toolbox.mcp_tools import jsonable
 from hyperloom_multibranch.toolbox.tests.helpers import build, req
 from hyperloom_multibranch.toolbox.tests.test_hosted_executor import POLICY, PointPlanner
 
 PLAN = LongContextPlan("long-context-test", "a" * 64, LENGTH, trigger=("request long_context_check",))
-
-
-@pytest.fixture
-def rig(tmp_path: Path):
-    made = make_rig(tmp_path)
-    yield made
-    made.backend.close()
-    made.provider.close()
 
 
 class _Planner(PointPlanner):

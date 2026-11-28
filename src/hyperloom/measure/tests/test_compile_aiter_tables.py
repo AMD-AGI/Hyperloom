@@ -13,7 +13,7 @@ from pathlib import Path
 import pytest
 
 from hyperloom.contracts.recipe import LaunchConfig, RecipeDelta
-from hyperloom.measure.compile import LocalBlobStore, PackageBase, TooManyModulesError, compile_environment
+from hyperloom.measure.compile import EnvironmentCompiler, LocalBlobStore, PackageBase, TooManyModulesError
 from hyperloom.measure.tests._recipes import IMAGE, git_patch, put_patch, recipe_with, write_tree
 from hyperloom.measure.tests.test_compile_aiter_meta import LIMIT_MODULES, NEW, aiter_image, module_entry
 
@@ -48,7 +48,9 @@ def compile_stack(tmp_path: Path, base: PackageBase, files: dict[str, str], envs
     before = {path: (root / path).read_text() for path in files}
     patch = put_patch(blobs, "p.patch", git_patch(tmp_path / "up", before, files))
     recipe = recipe_with((patch,), component="aiter", launch=LaunchConfig(envs=envs or {}))
-    return compile_environment(recipe, RecipeDelta(), blobs=blobs, active_image_digest=IMAGE, locator=lambda _: base)
+    return EnvironmentCompiler(blobs=blobs, active_image_digest=IMAGE, locator=lambda _: base).compile(
+        recipe, RecipeDelta()
+    )
 
 
 def test_a_patch_to_a_table_that_too_many_modules_are_generated_from_is_refused_with_the_count(tmp_path) -> None:

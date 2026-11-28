@@ -17,6 +17,7 @@ from pathlib import Path
 
 import pytest
 
+from hyperloom_common.shared_storage import current_umask
 from hyperloom.common.outside_facts.rule_pack import rule_pack_identity
 from hyperloom_multibranch import cli
 from hyperloom_multibranch import cli_options
@@ -44,9 +45,7 @@ WORKLOAD_ARGS = [
 
 @pytest.fixture(autouse=True)
 def _a_umask_that_keeps_group_write_off() -> None:
-    with open("/proc/self/status", encoding="ascii") as status:
-        umask = next(int(line.split()[1], 8) for line in status if line.startswith("Umask:"))
-    assert umask & 0o020, "the test needs a umask that keeps group write off what a plain create makes"
+    assert current_umask() & 0o020, "the test needs a umask that keeps group write off what a plain create makes"
 
 
 def _mode(path: Path) -> int:

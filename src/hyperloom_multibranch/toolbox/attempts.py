@@ -51,7 +51,6 @@ from dataclasses import dataclass, field, replace
 from typing import NamedTuple, Protocol
 
 from hyperloom.measure.failures import (
-    CAPACITY_UNAVAILABLE,
     FRAMEWORK_VERSION_MISMATCH,
     HF_CACHE_PERMISSION,
     FOREIGN_PROCESS_ON_CARD,
@@ -165,12 +164,12 @@ _UNQUARANTINED_INFRA_REASONS: frozenset[str] = NODE_BLAMELESS_INFRA_REASONS | fr
 _UNREPORTED_INFRA_REASONS = ONCE_RETRIED_INFRA_REASONS | _UNQUARANTINED_INFRA_REASONS
 #: Infrastructure failures a retry waits out first (:class:`InfraBackoff`): the ones that are not the node's. Cards a
 #: process outside the test held (:data:`FOREIGN_PROCESS_ON_CARD`) or a platform with no sandbox to give
-#: (:data:`RUNNER_START_TIMEOUT`, :data:`CAPACITY_UNAVAILABLE`) may be free a minute later, and a failure never held
+#: (:data:`RUNNER_START_TIMEOUT`) may be free a minute later, and a failure never held
 #: against its node (:data:`NODE_BLAMELESS_INFRA_REASONS`) is not escaped by moving elsewhere. Any other infrastructure
 #: failure is held against its node, and the avoid set and the quarantine already send the retry to another one, so it
 #: goes at once: a wait would only keep the test's dispatch slot and its branch's K idle.
 WAITED_INFRA_REASONS: frozenset[str] = NODE_BLAMELESS_INFRA_REASONS | frozenset(
-    {FOREIGN_PROCESS_ON_CARD, RUNNER_START_TIMEOUT, CAPACITY_UNAVAILABLE}
+    {FOREIGN_PROCESS_ON_CARD, RUNNER_START_TIMEOUT}
 )
 #: Infrastructure failures that do not put their node in the next attempt's avoid set (:func:`_facts_nodes`), since
 #: they clearly say nothing about the node: cards a process outside the test held (:data:`FOREIGN_PROCESS_ON_CARD`),
@@ -179,7 +178,7 @@ WAITED_INFRA_REASONS: frozenset[str] = NODE_BLAMELESS_INFRA_REASONS | frozenset(
 #: a shared service's (:data:`NODE_BLAMELESS_INFRA_REASONS` less the two below). A runner that could not start
 #: (:data:`RUNNER_START_FAILED`) or was lost (:data:`RUNNER_LOST`) does not quarantine its node but still avoids it for
 #: the next attempt, since a lost runner cannot be told from a node that died; a runner that did not start in time
-#: (:data:`RUNNER_START_TIMEOUT`) and a platform with no capacity to give (:data:`CAPACITY_UNAVAILABLE`) avoid it too.
+#: (:data:`RUNNER_START_TIMEOUT`) avoids it too.
 UNAVOIDED_INFRA_REASONS: frozenset[str] = (
     NODE_BLAMELESS_INFRA_REASONS - frozenset({RUNNER_START_FAILED, RUNNER_LOST})
 ) | frozenset({FOREIGN_PROCESS_ON_CARD})

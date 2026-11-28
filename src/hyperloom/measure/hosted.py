@@ -158,17 +158,12 @@ class Reverified:
     point_yaml: tuple[str, ...]
 
 
-class _Events(Protocol):
-    def emit(self, type: str, data: Mapping[str, Any]) -> None:  # noqa: A002 - the events socket's name
-        """Hand over one event of ``type`` with ``data``."""
-
-
 @dataclass(frozen=True)
 class HostedConfig:
     """Configuration of the hosted backend, with its defaults.
 
-    ``allow_unsigned`` exists so the option is stated, but is refused when true: no result is ever accepted without a
-    signature that verified against the key the platform reported for its sandbox. ``rule_pack_digest`` is the digest
+    No result is ever accepted without a signature that verified against the key the platform reported for its
+    sandbox. ``rule_pack_digest`` is the digest
     of the rule pack the session reads: a result whose runner did not read a pack with that digest is rejected
     (``rule_pack_mismatch``); ``None`` accepts any pack. ``create_envs`` is the environment every authoritative sandbox is
     created with; the service's sealed runner template must accept those names (``accepted_envs``). ``jit_store`` is the
@@ -186,18 +181,12 @@ class HostedConfig:
     poll_interval_sec: float = 5.0
     pre_ready_silence_sec: float = PRE_READY_SILENCE_SEC
     max_parallel_tests: int = DEFAULT_MAX_PARALLEL_TESTS
-    allow_unsigned: bool = False
-    nodes: int = 1
-    runner_version: str | None = None
     rule_pack_digest: str | None = None
     create_envs: Mapping[str, str] = field(default_factory=dict)
     staging_root: Path | None = None
     jit_store: DirJitStore | None = None
-    should_stop: Callable[[], bool] = field(default=lambda: False, compare=False)
 
     def __post_init__(self) -> None:
-        if self.allow_unsigned:
-            raise ValueError("allow_unsigned is not supported: a result without a verified signature is never accepted")
         if self.poll_interval_sec <= 0:
             raise ValueError("poll_interval_sec must be positive")
 
@@ -314,14 +303,12 @@ class HostedMeasurementBackend:
         provider: SandboxProvider,
         config: HostedConfig,
         *,
-        events: _Events | None = None,
         clock: Callable[[], float] = time.time,
         sleep: Callable[[float], None] = time.sleep,
     ) -> None:
         self._config = config
         self._clock = clock
         self._sleep = sleep
-        self._events = events
         self._pool = SandboxPool(
             provider,
             config.runner_templates,
@@ -342,9 +329,7 @@ class HostedMeasurementBackend:
     # -- lifecycle ----------------------------------------------------------------------------------------------
 
     def start(self) -> None:
-        """Check what is known before any test (one node, runner templates, an archive); refuse on a miss."""
-        if self._config.nodes != 1:
-            raise HostedStartError(f"hosted measurement runs single-node activities, this one has {self._config.nodes}")
+        """Check what is known before any test (runner templates, an archive); refuse on a miss."""
         if not self._config.runner_templates:
             raise HostedStartError("no runner template list: set the host information or runner_templates")
         if self._config.archive is None:
@@ -469,18 +454,15 @@ class HostedMeasurementBackend:
             self._pool.release(runner)
 
     def _build(self, call: TestCall) -> MeasurementSpec:
-        remaining = None if call.session_deadline_sec is None else call.session_deadline_sec - time.monotonic()
-        window = call.timeout_sec + self._config.timeout_slack_sec if remaining is None else remaining
+        window = call.timeout_sec + self._config.timeout_slack_sec
         return build_spec(call, request_id=call.task_id, ctx=self._config.spec, deadline_unix=self._clock() + window)
 
     def _acquire(self, call: TestCall, gpus: int, number: int, stop: threading.Event) -> RunnerSandbox | TestOutcome:
-        remaining = None if call.session_deadline_sec is None else call.session_deadline_sec - time.monotonic()
         try:
             return self._pool.acquire(
                 gpus,
                 AttemptTag(call.task_id, number, tuple(call.avoid_nodes), _meta_of(call)),
                 timeout_sec=call.timeout_sec,
-                remaining_sec=remaining,
                 stop=stop,
             )
         except AcquireTimedOut as exc:  # before SandboxUnavailable, its base: no sandbox was made, so the line is safe
@@ -512,7 +494,6 @@ class HostedMeasurementBackend:
             attempt, STATE_SUBMITTED, {"submitted_unix": attempt.started_unix, "timeout_sec": call.timeout_sec}
         )
         self._send(attempt)
-        self._emit("hyperloom.measurement_started", attempt, {})
 
     def _send(self, attempt: _Attempt) -> None:
         """Blobs, then the sheet, then the marker; every write replaces what is there, so sending again is safe."""
@@ -628,7 +609,7 @@ class HostedMeasurementBackend:
                 return _infra(
                     call, HOSTED_INFRA_FAILURE_RC, RUNNER_EXITED, detail, facts=_facts_of(attempt.runner, None)
                 )
-            if config.should_stop() or attempt.stop.is_set():
+            if attempt.stop.is_set():
                 self._save_logs(handle, call)
                 return _refusal(call, STOPPED_RETURNCODE, STOPPED_REASON, "the run is stopping")
             silent = silence.silent_for(self._clock())
@@ -650,11 +631,7 @@ class HostedMeasurementBackend:
             self._sleep(config.poll_interval_sec)
 
     def _timed_out(self, attempt: _Attempt) -> bool:
-        call = attempt.call
-        if self._clock() - attempt.started_unix >= call.timeout_sec:
-            return True
-        deadline = call.session_deadline_sec
-        return deadline is not None and time.monotonic() >= deadline
+        return self._clock() - attempt.started_unix >= attempt.call.timeout_sec
 
     def _report_progress(self, handle: Sandbox, call: TestCall, last_output: float, silence: PreReadySilence) -> float:
         try:
@@ -716,7 +693,6 @@ class HostedMeasurementBackend:
             outcome = _refusal(call, HOSTED_RESULT_REJECTED_RC, "result_rejected", str(exc))
             extra = {"verdict": "result_rejected", "reject": exc.reason.value, "detail": bounded(exc.detail)}
             self._finish_record(attempt, outcome, extra)
-            self._emit("hyperloom.measurement_finished", attempt, {"accepted": False})
             return outcome
         except DownloadIncomplete as exc:
             # The platform's file API, not the result: a new attempt downloads it again (logs kept, nothing landed).
@@ -803,11 +779,10 @@ class HostedMeasurementBackend:
     def _expected_fingerprint(self, spec: MeasurementSpec, claimed_version: str) -> str:
         """The fingerprint the sheet must have in the manifest.
 
-        The runner's Hyperloom version only salts the fingerprint. When the run pins it (``runner_version``), the
-        pinned value is used and a runner of another version fails the comparison; when it does not, the version the
-        signed manifest names is used, and the content is still bound by the sheet's own bytes (``spec_sha256``).
+        The runner's Hyperloom version only salts the fingerprint: the version the signed manifest names is used, and
+        the content is still bound by the sheet's own bytes (``spec_sha256``).
         """
-        return fingerprint(spec, hyperloom_version=self._config.runner_version or claimed_version)
+        return fingerprint(spec, hyperloom_version=claimed_version)
 
     def _archive(self, attempt: _Attempt, verified: VerifiedBundle, staging: Path) -> str:
         return self._config.archive.put_bundle(attempt.request_id, verified.manifest_sha256, staging)
@@ -858,7 +833,6 @@ class HostedMeasurementBackend:
                 "archive": location,
             },
         )
-        self._emit("hyperloom.measurement_finished", attempt, {"accepted": True, "returncode": out.returncode})
         if out.timed_out:
             raise MeasurementTimeout(f"hosted test {call.task_id}", call.timeout_sec, phases=outcome.phases)
         return outcome
@@ -911,7 +885,7 @@ class HostedMeasurementBackend:
         sheet = self.journal.load_spec(record.request_id, record.attempt)
         return BundleExpectation(key, record.request_id, fingerprint, spec_sha256(sheet), record.sandbox_id)
 
-    # -- journal and events -------------------------------------------------------------------------------------
+    # -- journal ------------------------------------------------------------------------------------------------
 
     def _append(self, attempt: _Attempt, state: str, extra: Mapping[str, Any]) -> None:
         self.journal.append(
@@ -971,21 +945,6 @@ class HostedMeasurementBackend:
                 {"finished_unix": self._clock(), **extra},
             )
         )
-
-    def _emit(self, event: str, attempt: _Attempt, data: Mapping[str, Any]) -> None:
-        if self._events is None:
-            return
-        payload = {
-            "request_id": attempt.request_id,
-            "attempt": attempt.number,
-            "sandbox_id": attempt.runner.sandbox_id,
-            "node": attempt.runner.node_name,
-            **data,
-        }
-        try:
-            self._events.emit(event, payload)
-        except Exception:
-            log.exception("the events socket refused %s", event)
 
     def _save_logs(self, handle: Sandbox, call: TestCall) -> None:
         """Best effort: keep the last progress read and the runner's logs, so a failed or timed-out test can be

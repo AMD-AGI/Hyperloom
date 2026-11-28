@@ -31,7 +31,8 @@ from hyperloom.measure.jit.modules import read_config
 from hyperloom.measure.runner.native import aiter_modules
 from hyperloom.measure.runner.native.aiter_modules import AiterModules
 from hyperloom.contracts.recipe import ComponentPatches
-from hyperloom.measure.runner.native.builder import BuildMachine, BuildRequest, compile_tree, plan
+from hyperloom.measure.runner.native.builder import BuildMachine, BuildRequest, plan
+from hyperloom.measure.runner.native.tests._native import compile_tree
 from hyperloom.measure.runner.native.isolated import IsolatedBuilds, Isolation
 from hyperloom.measure.runner.native.planning import NativePlanner, NativeSite
 from hyperloom.measure.runner.native.service import ensure_build

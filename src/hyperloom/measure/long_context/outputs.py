@@ -13,15 +13,13 @@
 
 Every prompt of the set is listed, answered or not, with the references its answer is graded against, so the file alone is
 enough to grade the check again. ``stopped`` says why the whole check ended early (a launch that serves too little context,
-a server that did not come up, the phase cap). ``server`` is the server the check asked (``LONG_CONTEXT_SERVERS``); a file
-written before it was recorded has none, and was asked of the held server. The toolbox reads the file from the landed bundle, so every field is read
-strictly.
+a server that did not come up, the phase cap). ``server`` is the server the check asked (``LONG_CONTEXT_SERVERS``). The
+toolbox reads the file from the landed bundle, so every field is read strictly.
 """
 
 from __future__ import annotations
 
 import json
-import re
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
@@ -30,13 +28,13 @@ from typing import Any
 from hyperloom.contracts.long_context import LONG_CONTEXT_HELD, LONG_CONTEXT_SERVERS, PROMPT_OK, PROMPT_STATUSES
 from hyperloom.measure.docs import DocumentError, parse_json_object
 from hyperloom.measure.long_context.plan import LONG_CONTEXT_DIR, OUTPUTS_FILE, LongContextPlan
+from hyperloom.measure.short_prompts.outputs import clean_reason
 
 __all__ = [
     "OutputsError",
     "OutputsFile",
     "PromptEntry",
     "RunFacts",
-    "clean_reason",
     "parse_outputs",
     "read_outputs",
     "write_outputs",
@@ -44,16 +42,13 @@ __all__ = [
 
 _SCHEMA = 1
 _UTF8 = "utf-8"
-_REASON_CHARS = 300
-_CONTROL = re.compile(r"[\x00-\x1f\x7f]+")
 _MAX_BYTES = 8 << 20
 _TOP_KEYS = frozenset(
     (
         "schema prompt_set prompts_sha256 length max_new_tokens concurrency needed_context served_context stopped "
-        "boot_seconds query_seconds prompts"
+        "boot_seconds query_seconds prompts server"
     ).split()
 )
-_SERVER_KEY = "server"
 _PROMPT_KEYS = "id task references tokens status reason text finish_reason prompt_tokens seconds".split()
 
 
@@ -94,12 +89,7 @@ class OutputsFile:
     boot_seconds: float
     query_seconds: float
     prompts: tuple[PromptEntry, ...]
-    server: str = LONG_CONTEXT_HELD
-
-
-def clean_reason(text: str) -> str:
-    """``text`` on one bounded line, safe to put in a result."""
-    return _CONTROL.sub(" ", text).strip()[:_REASON_CHARS]
+    server: str
 
 
 @dataclass(frozen=True)
@@ -130,7 +120,7 @@ def write_outputs(output_dir: Path, plan: LongContextPlan, entries: Sequence[Pro
         "boot_seconds": round(facts.boot_seconds, 3),
         "query_seconds": round(facts.query_seconds, 3),
         "prompts": [entry.to_document() for entry in entries],
-        _SERVER_KEY: facts.server,
+        "server": facts.server,
     }
     directory = Path(output_dir) / LONG_CONTEXT_DIR
     directory.mkdir(parents=True, exist_ok=True)
@@ -168,15 +158,11 @@ def _prompt(value: Any, path: str) -> PromptEntry:
 
 
 def parse_outputs(document: Mapping[str, Any]) -> OutputsFile:
-    if (
-        set(document) - {_SERVER_KEY} != _TOP_KEYS
-        or document["schema"] != _SCHEMA
-        or not isinstance(document["prompts"], list)
-    ):
+    if set(document) != _TOP_KEYS or document["schema"] != _SCHEMA or not isinstance(document["prompts"], list):
         raise OutputsError(
             f"the outputs file holds the keys {sorted(document)}, not {sorted(_TOP_KEYS)} of schema {_SCHEMA}"
         )
-    server = document.get(_SERVER_KEY, LONG_CONTEXT_HELD)
+    server = document["server"]
     if server not in LONG_CONTEXT_SERVERS:
         raise OutputsError(f"the outputs file's server is one of {LONG_CONTEXT_SERVERS}, got {server!r}")
     ints = [document[k] for k in ("length", "max_new_tokens", "concurrency", "needed_context")]

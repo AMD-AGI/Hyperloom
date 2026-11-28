@@ -15,7 +15,7 @@ from pathlib import Path
 
 import pytest
 
-from hyperloom.contracts.measurement import AccuracyValue
+from hyperloom.contracts.measurement import AccuracyValue, AttachmentRef
 from hyperloom.measure import signing
 from hyperloom.measure.bundle import RejectReason, ResultRejected
 from hyperloom.measure.failures import RESULT_DOWNLOAD_INCOMPLETE, SANDBOX_ACQUIRE_TIMEOUT
@@ -34,10 +34,12 @@ from hyperloom.measure.tests.bundle_factory import DEFAULT_FILES, manifest_docum
 from hyperloom.measure.tests.fake_runner import REPORT_PATH, ROUND_DIR, ROUND_LINK, ROUND_TREE
 from hyperloom.measure.tests.hosted_fixtures import (
     HOSTNAME,
+    Crash,
     Rig,
     make_call,
     make_rig,
     point_yaml,
+    rigs,
     runner_template,
 )
 from hyperloom.sandbox.e2b import E2BSandboxProvider
@@ -58,17 +60,7 @@ REPORT_DIR = REPORT_PATH.split("/")[0]
 
 @pytest.fixture
 def rig(tmp_path: Path):
-    made: list[Rig] = []
-
-    def build(**kwargs) -> Rig:
-        built = make_rig(tmp_path, **kwargs)
-        made.append(built)
-        return built
-
-    yield build
-    for built in made:
-        built.backend.close()
-        built.provider.close()
+    yield from rigs(tmp_path)
 
 
 def _run(rig_: Rig, tmp: Path, task: str = "req-1", **fake):
@@ -191,22 +183,6 @@ def test_a_runner_that_reports_no_log_leaves_the_live_output_empty(rig, tmp_path
     finally:
         r.backend.withdraw("req-1")
         worker.join(30)
-
-
-def test_events_announce_start_and_finish(rig, tmp_path) -> None:
-    r = rig()
-    seen: list[tuple[str, dict]] = []
-
-    class Sink:
-        def emit(self, type, data):
-            seen.append((type, dict(data)))
-
-    backend = r.another_backend()
-    backend._events = Sink()
-    backend.run_test(make_call(tmp_path))
-    kinds = [kind for kind, _ in seen]
-    assert kinds == ["hyperloom.measurement_started", "hyperloom.measurement_finished"]
-    assert seen[1][1]["accepted"] is True and seen[0][1]["request_id"] == "req-1"
 
 
 def test_a_result_dir_outside_the_output_dir_is_copied_back_to_its_place(rig, tmp_path) -> None:
@@ -487,13 +463,6 @@ def test_a_signed_manifest_for_other_sheet_bytes_is_rejected(rig, tmp_path, monk
     assert "(spec_hash_mismatch)" in outcome.stderr
 
 
-def test_a_pinned_runner_version_that_the_runner_does_not_have_is_rejected(rig, tmp_path) -> None:
-    r = rig(runner_version="pinned-9")
-    _, outcome = _run(r, tmp_path)
-    assert outcome.returncode == HOSTED_RESULT_REJECTED_RC
-    assert "(spec_fingerprint_mismatch)" in outcome.stderr
-
-
 def test_a_missing_manifest_is_a_read_failure_not_an_accepted_result(rig, tmp_path) -> None:
     r = rig()
     call, outcome = _run(r, tmp_path, fake_mode="no_manifest")
@@ -523,11 +492,6 @@ def test_no_signing_key_means_no_measurement(rig, tmp_path) -> None:
     assert outcome.failure_reason == "no_signing_key"
     assert r.backend.journal.records() == [], "nothing was submitted to a sandbox that cannot sign"
     assert r.provider.find({}, role="measurement") == [], "and the sandbox was closed"
-
-
-def test_allow_unsigned_is_refused(rig, tmp_path) -> None:
-    with pytest.raises(ValueError, match="allow_unsigned is not supported"):
-        make_rig(tmp_path, allow_unsigned=True)
 
 
 # -- what stops a test --------------------------------------------------------------------------------------------
@@ -577,16 +541,6 @@ def test_a_test_the_host_ends_keeps_its_rounds_nested_logs_and_the_last_progress
     assert progress["phase"] == "running" and progress["server_ready"] is False
     assert progress["last_line"] == "Finished streaming dequant fp8 wo_a" and progress["last_log_age_sec"] >= 0
     assert seen["read_sec_ago"] >= 0
-
-
-def test_a_stopping_run_closes_the_sandbox_and_returns_the_stop_code(rig, tmp_path) -> None:
-    flag = threading.Event()
-    r = rig(should_stop=flag.is_set)
-    call = make_call(tmp_path, point=point_yaml(tmp_path, fake_mode="hang"))
-    threading.Timer(0.5, flag.set).start()
-    outcome = r.backend.run_test(call)
-    assert outcome.returncode == STOPPED_RETURNCODE and outcome.failure_class is None
-    assert r.provider.find({}, role="measurement") == []
 
 
 def test_a_sandbox_that_vanishes_is_a_lost_runner(rig, tmp_path) -> None:
@@ -701,19 +655,15 @@ def test_a_card_count_without_a_runner_template_is_a_refused_sheet(rig, tmp_path
 # -- resume ---------------------------------------------------------------------------------------------------------
 
 
-class _Crash(BaseException):
-    """What a killed application process looks like to the code under test: it unwinds without cleaning up."""
-
-
 def _crash_mid_wait(rig_: Rig, call):
     backend = rig_.another_backend()
     backend._pool.release = lambda runner: None  # a dead process closes nothing
 
     def die(attempt):
-        raise _Crash
+        raise Crash
 
     backend._wait = die
-    with pytest.raises(_Crash):
+    with pytest.raises(Crash):
         backend.run_test(call)
     return backend
 
@@ -806,10 +756,10 @@ def test_a_restart_before_the_sheet_was_sent_sends_it_to_the_sandbox_that_waits(
     dying._pool.release = lambda runner: None
 
     def die(handle, spec):
-        raise _Crash
+        raise Crash
 
     dying._upload_blobs = die
-    with pytest.raises(_Crash):
+    with pytest.raises(Crash):
         dying.run_test(call)
     assert r.backend.journal.latest("req-1").state == STATE_SUBMITTED
     created: list[str] = []
@@ -861,10 +811,10 @@ def test_a_resumed_landing_that_already_happened_is_not_a_conflict(rig, tmp_path
     real_decided = crashed._decided
 
     def die_after_landing(*args):
-        raise _Crash
+        raise Crash
 
     crashed._decided = die_after_landing
-    with pytest.raises(_Crash):
+    with pytest.raises(Crash):
         crashed.run_test(call)
     assert (call.output_dir / "server.log").exists(), "the files landed before the crash"
     assert real_decided is not None
@@ -911,35 +861,6 @@ def test_an_env_override_the_old_flow_refuses_refuses_the_sheet(rig, tmp_path, n
     assert r.backend.journal.records() == []
 
 
-def test_shared_storage_files_become_attachments_with_placeholders(rig, tmp_path) -> None:
-    shared = tmp_path / "shared"
-    (shared / "overlay").mkdir(parents=True)
-    (shared / "overlay" / "tuned.csv").write_text("m,n,k\n1,2,3\n")
-    (shared / "table.csv").write_text("a,b\n")
-    model = shared / "model"
-    model.mkdir()
-    r = rig(spec={"shared_roots": (shared,), "model_dir": model})
-    point = tmp_path / "p.yaml"
-    point.write_text(
-        "benchmark:\n  model: {model}\n  envs:\n    TP: '1'\n    RUN_EVAL: 'false'\n"
-        "    AITER_CONFIG_GEMM: {table}\n    PYTHONPATH: {overlay}:/usr/lib\n".format(
-            model=model, table=shared / "table.csv", overlay=shared / "overlay"
-        )
-    )
-    assert r.backend.run_test(make_call(tmp_path, point=point)).returncode == 0
-    spec = _spec_of(r, "req-1")
-    kinds = sorted(a.kind for a in spec.attachments)
-    assert kinds == ["dir", "file"]
-    by_kind = {a.kind: a for a in spec.attachments}
-    assert f"${{HL_ATTACH:{by_kind['file'].id}}}" in spec.config[0].yaml
-    assert f"${{HL_ATTACH:{by_kind['dir'].id}}}:/usr/lib" in spec.config[0].yaml
-    assert str(shared / "table.csv") not in spec.config[0].yaml and str(shared / "overlay") not in spec.config[0].yaml
-    assert f"model: {model}" in spec.config[0].yaml, "the model directory stays a path: it is mounted, not attached"
-    blob = by_kind["file"].blob.removeprefix("sha256:")
-    assert r.config.spec.blobs.get(blob) == b"a,b\n"
-    assert by_kind["file"].manifest_sha256 == blob
-
-
 def test_a_placeholder_nothing_provides_refuses_the_sheet(rig, tmp_path) -> None:
     r = rig()
     point = tmp_path / "p.yaml"
@@ -978,14 +899,8 @@ def test_a_call_without_a_point_is_refused(rig, tmp_path) -> None:
 
 
 def test_attachment_and_overlay_blobs_reach_the_sandbox_before_the_sheet(rig, tmp_path) -> None:
-    from hyperloom.measure.hosted_spec import SpecContext  # noqa: F401
-
-    shared = tmp_path / "shared"
-    shared.mkdir()
-    (shared / "table.csv").write_text("a,b\n")
-    r = rig(spec={"shared_roots": (shared,)})
-    point = tmp_path / "p.yaml"
-    point.write_text(f"benchmark:\n  envs:\n    TP: '1'\n    RUN_EVAL: 'false'\n    CSV: {shared / 'table.csv'}\n")
+    r = rig()
+    attachment = AttachmentRef("table", "file", r.config.spec.blobs.put(b"a,b\n"))
     writes: list[str] = []
     real_create = r.provider.create
 
@@ -996,18 +911,12 @@ def test_attachment_and_overlay_blobs_reach_the_sandbox_before_the_sheet(rig, tm
         return sandbox
 
     r.provider.create = spying_create
-    assert r.backend.run_test(make_call(tmp_path, point=point)).returncode == 0
-    attachment = _spec_of(r, "req-1").attachments[0]
-    sha = attachment.blob.removeprefix("sha256:")
+    assert r.backend.run_test(make_call(tmp_path, attachments=(attachment,))).returncode == 0
+    sha = _spec_of(r, "req-1").attachments[0].blob.removeprefix("sha256:")
     assert writes == [f"/in/blobs/{sha}", "/in/spec.json", "/in/READY"], "blobs, then the sheet, then the marker"
 
 
 # -- start checks ---------------------------------------------------------------------------------------------------
-
-
-def test_start_refuses_a_multi_node_activity(tmp_path) -> None:
-    with pytest.raises(HostedStartError, match="single-node"):
-        make_rig(tmp_path, nodes=2)
 
 
 def test_start_refuses_without_runner_templates(tmp_path) -> None:

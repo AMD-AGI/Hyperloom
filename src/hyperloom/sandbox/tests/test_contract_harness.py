@@ -23,7 +23,7 @@ def test_the_service_leg_reads_its_environment_and_ends_the_sandboxes_it_made(
 ) -> None:
     monkeypatch.setenv(SERVICE_URL_ENV, standin.api_url)
     monkeypatch.setenv("HYPERLOOM_E2B_CONTRACT_SANDBOX_URL", standin.sandbox_url)
-    monkeypatch.setenv("HYPERLOOM_E2B_CONTRACT_TEMPLATES", "sealed,dev,sub")
+    monkeypatch.setenv("HYPERLOOM_E2B_CONTRACT_TEMPLATES", "sealed,dev")
     for role, key in standin.keys.items():
         monkeypatch.setenv(f"HYPERLOOM_SANDBOX_KEY_{role.upper()}", key)
     bystander = E2BSandboxProvider(
@@ -31,11 +31,11 @@ def test_the_service_leg_reads_its_environment_and_ends_the_sandboxes_it_made(
     )
     other = bystander.create("dev", role="dev", timeout_sec=60, metadata={"owner": "someone else"})
     with claw_service_harness() as harness:
-        assert (harness.sealed_template, harness.dev_template, harness.subrun_template) == ("sealed", "dev", "sub")
+        assert (harness.sealed_template, harness.dev_template) == ("sealed", "dev")
         assert harness.claw_policy
         made = harness.provider.create("dev", role="dev", timeout_sec=60, metadata={"owner": "the suite"})
         assert made.run("echo up").stdout == "up\n"
         with pytest.raises(SandboxDenied):
-            harness.provider.create("sub", role="dev", timeout_sec=60, metadata={})
+            harness.provider.create("sealed", role="dev", timeout_sec=60, metadata={})
     assert [i.sandbox_id for i in bystander.find({}, role="dev")] == [other.sandbox_id]
     other.kill()

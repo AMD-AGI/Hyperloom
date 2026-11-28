@@ -35,7 +35,7 @@ from hyperloom.sandbox.tests.e2b_standin.service import ControlPlane, StandInTem
 
 __all__ = ["ENVD_ENV", "StandIn", "StandInTemplate", "interpreter_binds", "unavailable_reason", "without_network"]
 
-_ROLES: tuple[Role, ...] = ("measurement", "subrun", "dev")
+_ROLES: tuple[Role, ...] = ("measurement", "dev")
 
 
 class StandIn:

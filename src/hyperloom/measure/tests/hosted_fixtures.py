@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import sys
 import time
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Iterator, Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -117,3 +117,23 @@ def make_rig(
     backend = HostedMeasurementBackend(provider, hosted, clock=clock)
     backend.start()
     return Rig(provider, backend, hosted, archive, tmp)
+
+
+def rigs(tmp: Path) -> Iterator[Callable[..., Rig]]:
+    """A ``rig`` fixture's body: a builder of rigs below ``tmp`` (:func:`make_rig`'s keywords), every one closed after
+    the test."""
+    made: list[Rig] = []
+
+    def build(**kwargs: Any) -> Rig:
+        built = make_rig(tmp, **kwargs)
+        made.append(built)
+        return built
+
+    yield build
+    for built in made:
+        built.backend.close()
+        built.provider.close()
+
+
+class Crash(BaseException):
+    """What a killed application process looks like to the code under test: it unwinds without cleaning up."""

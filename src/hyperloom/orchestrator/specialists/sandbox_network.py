@@ -36,6 +36,7 @@ from pathlib import Path
 from typing import Any, Iterator, Mapping, Sequence
 from urllib.parse import unquote, urlsplit
 
+from hyperloom_common.env import is_truthy
 from hyperloom_common.fs_utils import read_bytes_nofollow
 
 log = logging.getLogger(__name__)
@@ -61,7 +62,6 @@ _AWS_REGION = re.compile(r"[a-z]{2}(?:-[a-z]+)+-\d+")
 #: and IAM Identity Center's portal and OIDC (an SSO profile); and the global STS endpoint.
 _AWS_REGIONAL_HOSTS = ("bedrock-runtime", "sts", "portal.sso", "oidc")
 _AWS_GLOBAL_STS = "https://sts.amazonaws.com"
-_TRUE = frozenset({"1", "true", "yes", "on"})
 #: Each provider's API host, reached when the launch names no base URL of its own for it.
 _DEFAULT_APIS = {"ANTHROPIC_BASE_URL": "https://api.anthropic.com", "OPENAI_BASE_URL": "https://api.openai.com"}
 _DEFAULT_PORTS = {"http": 80, "https": 443}
@@ -295,7 +295,7 @@ def _launch_urls(cmd: Sequence[str], env: Mapping[str, str], mcp_config: str | N
     for name, default in _DEFAULT_APIS.items():
         if not env.get(name):
             yield default
-    if (env.get(_BEDROCK) or "").strip().lower() in _TRUE:
+    if is_truthy(env.get(_BEDROCK)):
         yield from _bedrock_urls(env)
     yield from _mcp_urls(mcp_config)
     options = _options(cmd)

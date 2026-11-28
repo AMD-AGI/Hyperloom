@@ -23,7 +23,7 @@ from hyperloom.contracts.measurement import (
     Validity,
 )
 from hyperloom.contracts.recipe import ConfigDelta, RecipeDelta
-from hyperloom_multibranch.contracts.blackboard.records import QuarantineEvent, Withdrawal
+from hyperloom_multibranch.contracts.blackboard.records import Withdrawal
 from hyperloom_multibranch.contracts.blackboard.vocab import QuarantineAction
 from hyperloom_multibranch.contracts.toolbox import (
     Backpressure,
@@ -39,36 +39,11 @@ from hyperloom_multibranch.blackboard import LocalBlackboard
 from hyperloom_multibranch.blackboard.local.segments import EntryKind
 from hyperloom_multibranch.blackboard.tests.factories import TTL, FakeClock, intent
 from hyperloom_multibranch.toolbox.submission_log import SubmissionLog
-from hyperloom_multibranch.toolbox.tests.fake import FakeToolbox, FakeWiring
+from hyperloom_multibranch.toolbox.tests.fake import FakeToolbox, FakeWiring, MemoryBlackboard
 from hyperloom_multibranch.toolbox.tests.fake_model import Fate, FakeToolboxConfig, NoiseModel
 
 DELTA = RecipeDelta(config=ConfigDelta(server_args="--max-num-seqs 256"))
 QUIET = NoiseModel(node_bias_median=0.0, node_bias_p90=0.0, test_noise_sigma=0.0)
-
-
-class Blackboard:
-    """Records what the toolbox writes, in order."""
-
-    def __init__(self) -> None:
-        self.log: list[tuple[str, object]] = []
-
-    async def write_request(self, request: TestRequest) -> None:
-        self.log.append(("request", request))
-
-    async def write_result(self, result: TestResult) -> None:
-        self.log.append(("result", result))
-
-    async def write_withdrawal(self, withdrawal: Withdrawal) -> None:
-        self.log.append(("withdrawal", withdrawal))
-
-    async def record_quarantine(self, event: QuarantineEvent) -> None:
-        self.log.append(("quarantine", event))
-
-    async def quarantined(self) -> list[QuarantineEvent]:
-        return []
-
-    def of(self, kind: str) -> list:
-        return [item for name, item in self.log if name == kind]
 
 
 def _request(branch: str = "b1", **overrides: object) -> TestRequest:
@@ -82,7 +57,7 @@ def _request(branch: str = "b1", **overrides: object) -> TestRequest:
     return TestRequest(**{**fields, **overrides})
 
 
-def _toolbox(*, blackboard: Blackboard | None = None, autorun: bool = False, **config: object) -> FakeToolbox:
+def _toolbox(*, blackboard: MemoryBlackboard | None = None, autorun: bool = False, **config: object) -> FakeToolbox:
     return FakeToolbox(FakeToolboxConfig(**config), blackboard=blackboard, autorun=autorun)
 
 
@@ -96,7 +71,7 @@ async def _run_one(box: FakeToolbox, request: TestRequest | None = None) -> Test
 
 
 async def test_submit_returns_a_stable_uuid_and_writes_the_request_before_returning() -> None:
-    book = Blackboard()
+    book = MemoryBlackboard()
     box = _toolbox(blackboard=book)
     first = await box.submit_test(_request())
     assert book.of("request")[0].request_id == first
@@ -109,7 +84,7 @@ async def test_submit_returns_a_stable_uuid_and_writes_the_request_before_return
 
 
 async def test_a_rejection_raises_with_its_reason_and_writes_nothing() -> None:
-    book = Blackboard()
+    book = MemoryBlackboard()
     box = FakeToolbox(blackboard=book, autorun=False, wiring=FakeWiring(parent_exists=lambda commit: commit == "c0"))
     with pytest.raises(RequestRejected) as raised:
         await box.submit_test(_request(parent_commit="c9"))
@@ -193,7 +168,7 @@ def _attach():
 
 async def test_more_urgent_tests_run_first() -> None:
     order: list[str] = []
-    book = Blackboard()
+    book = MemoryBlackboard()
     box = FakeToolbox(FakeToolboxConfig(default_k=9, max_parallel_tests=1), blackboard=book, autorun=False)
     blocker = await box.submit_test(_request(priority=1))  # starts at once: a running test is not preempted
     slow = await box.submit_test(_request(priority=4))
@@ -251,7 +226,7 @@ async def test_the_global_limit_holds_across_branches() -> None:
 
 
 async def test_a_quiet_success_is_complete_and_written_to_the_blackboard() -> None:
-    book = Blackboard()
+    book = MemoryBlackboard()
     box = _toolbox(blackboard=book, noise=QUIET, default_effect=0.02)
     result = await _run_one(box)
     assert result.validity is Validity.SUCCEEDED and result.failure_class is None
@@ -272,7 +247,7 @@ async def test_a_profile_test_reports_where_the_profile_is() -> None:
 
 
 async def test_infra_failure_retries_on_another_node_and_the_submitter_gets_one_result() -> None:
-    book = Blackboard()
+    book = MemoryBlackboard()
     box = _toolbox(blackboard=book)
     box.script(lambda r: True, [Fate.INFRA, Fate.INFRA, Fate.OK])
     result = await _run_one(box)
@@ -298,7 +273,7 @@ async def test_infra_retries_run_out_as_measurement_failed_never_a_candidate_fai
 
 
 async def test_unclear_failure_reruns_once_and_the_rerun_wins() -> None:
-    book = Blackboard()
+    book = MemoryBlackboard()
     box = _toolbox(blackboard=book)
     box.script(lambda r: True, [Fate.UNCLEAR, Fate.OK])
     result = await _run_one(box)
@@ -320,7 +295,7 @@ async def _reran_clear(box: FakeToolbox, request: TestRequest | None = None) -> 
 
 
 async def test_a_second_unclear_failure_that_did_not_reproduce_on_one_node_quarantines_it() -> None:
-    book = Blackboard()
+    book = MemoryBlackboard()
     box = _toolbox(blackboard=book, nodes=("a", "b"))
     node = await _reran_clear(box)
     assert box.quarantined == set()
@@ -333,7 +308,7 @@ async def test_a_second_unclear_failure_that_did_not_reproduce_on_one_node_quara
 async def test_two_non_reproducing_failures_on_the_only_node_are_counted_and_do_not_quarantine_it(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
-    book = Blackboard()
+    book = MemoryBlackboard()
     box = _toolbox(blackboard=book, nodes=("a",))
     assert box.single_node
     with caplog.at_level("INFO", logger="hyperloom_multibranch.toolbox.toolbox"):
@@ -349,7 +324,7 @@ async def test_two_non_reproducing_failures_on_the_only_node_are_counted_and_do_
 
 
 async def test_an_infra_failure_on_the_only_node_does_not_quarantine_it() -> None:
-    book = Blackboard()
+    book = MemoryBlackboard()
     box = _toolbox(blackboard=book, nodes=("a",))
     box.script(lambda r: True, [Fate.INFRA, Fate.OK])
     result = await _run_one(box)
@@ -422,7 +397,7 @@ async def test_a_fleet_with_every_node_quarantined_ends_in_measurement_failed() 
 
 
 async def test_cancel_of_a_queued_test_withdraws_it_and_it_never_runs() -> None:
-    book = Blackboard()
+    book = MemoryBlackboard()
     box = _toolbox(blackboard=book)
     keep = await box.submit_test(_request())
     drop = await box.submit_test(_request())
@@ -436,7 +411,7 @@ async def test_cancel_of_a_queued_test_withdraws_it_and_it_never_runs() -> None:
 
 
 async def test_cancel_of_a_running_test_withdraws_it_and_writes_no_result() -> None:
-    book = Blackboard()
+    book = MemoryBlackboard()
     box = FakeToolbox(FakeToolboxConfig(run_delay_s=0.05), blackboard=book, autorun=True)
     request_id = await box.submit_test(_request())
     assert (await box.queue_state()).running == 1
@@ -447,7 +422,7 @@ async def test_cancel_of_a_running_test_withdraws_it_and_writes_no_result() -> N
 
 
 async def test_cancel_of_a_finished_test_changes_nothing_and_unknown_ids_raise() -> None:
-    book = Blackboard()
+    book = MemoryBlackboard()
     box = _toolbox(blackboard=book)
     result = await _run_one(box)
     assert await box.cancel(result.request_id) is CancelOutcome.FINISHED
@@ -456,7 +431,7 @@ async def test_cancel_of_a_finished_test_changes_nothing_and_unknown_ids_raise()
         await box.cancel("nope")
 
 
-class HeldWithdrawals(Blackboard):
+class HeldWithdrawals(MemoryBlackboard):
     """Holds each withdrawal write until ``release`` is set; ``holding`` is set once one waits."""
 
     def __init__(self) -> None:
@@ -498,7 +473,7 @@ async def test_a_result_that_lands_while_its_branch_is_withdrawn_is_kept_not_wit
 
 
 async def test_a_test_cancelled_while_its_branch_is_withdrawn_is_withdrawn_once() -> None:
-    book = Blackboard()
+    book = MemoryBlackboard()
     box = _toolbox(blackboard=book)
     request_id = await box.submit_test(_request())
     assert (await box.queue_state()).running == 1
@@ -510,7 +485,7 @@ async def test_a_test_cancelled_while_its_branch_is_withdrawn_is_withdrawn_once(
     assert [w.request_id for w in book.of("withdrawal")] == [request_id]
 
 
-class HeldResults(Blackboard):
+class HeldResults(MemoryBlackboard):
     """Holds each result write until ``release`` is set; ``holding`` is set once one waits."""
 
     def __init__(self) -> None:
@@ -547,7 +522,7 @@ class LostClaims:
         raise ClaimLost(f"the claim on {key.parent_commit} is another branch's")
 
 
-class UnwritableWithdrawals(Blackboard):
+class UnwritableWithdrawals(MemoryBlackboard):
     """Withdrawal writes fail until ``reachable`` is set."""
 
     def __init__(self) -> None:
@@ -577,7 +552,7 @@ async def test_housekeeping_that_fails_after_a_test_ended_is_logged_and_the_resu
 ) -> None:
     """The result is logged and written before the backend's housekeeping runs, so it stands; the error, which ended the
     test's task with nothing said, is logged."""
-    book = Blackboard()
+    book = MemoryBlackboard()
     box = Housekeeping(blackboard=book)
     box.failure = RuntimeError("the provider's lost cards could not be read")
     box.script(lambda request: True, [Fate.OK])
@@ -695,7 +670,7 @@ async def test_a_test_whose_claim_recovery_finds_lost_is_withdrawn_once_as_a_los
     outcome. Another one, "not recoverable", logged and written over it, would make the log and the blackboard say
     the test was withdrawn twice, for two reasons."""
     log_path = tmp_path / "submissions.jsonl"
-    book = Blackboard()
+    book = MemoryBlackboard()
     first = FakeToolbox(blackboard=book, autorun=False, wiring=FakeWiring(claims=HeldClaims(), log_path=log_path))  # type: ignore[arg-type]
     request_id = await first.submit_test(_request(intent_fingerprint="intent-1"))
     await first.close()  # the process dies with the test unfinished

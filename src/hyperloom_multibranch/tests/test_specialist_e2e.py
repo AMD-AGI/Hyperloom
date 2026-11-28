@@ -7,7 +7,6 @@ the measurement is the fake toolbox's."""
 
 import asyncio
 import os
-import secrets
 import sys
 
 import pytest
@@ -190,7 +189,7 @@ async def test_a_model_backed_specialist_lands_a_source_change_through_the_sessi
     def blackboard_for(branch: str) -> LocalBlackboard:
         return LocalBlackboard(blackboard_root, Writer(Role.SPECIALIST_RUNTIME, branch, branch))
 
-    server = McpServer(McpServerConfig(host_token=secrets.token_hex(16)), campaign="e2e")
+    server = McpServer(McpServerConfig(), campaign="e2e")
     cli = tmp_path / "stand-in-claude"
     cli.write_text(_STAND_IN.replace("@TARGET@", TARGET).replace("@MECHANISM@", MECHANISM))
     cli.chmod(0o755)

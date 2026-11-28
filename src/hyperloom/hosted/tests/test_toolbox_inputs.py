@@ -16,23 +16,8 @@ from hyperloom.hosted.toolbox_inputs import ToolboxInputsError, grant_limits_tot
 _SHA = "0123456789abcdef0123456789abcdef01234567"
 _MEASUREMENT = "sentinel-measurement-key-7731"
 _DEV = "sentinel-dev-key-9042"
-_TEMPLATES = {"runner": {"1": "ar-runner-g1", "8": "ar-runner-g8"}, "dev": "ar-dev-g1"}
+_TEMPLATES = {"measurement": {"1": "ar-runner-g1", "8": "ar-runner-g8"}, "dev": "ar-dev-g1"}
 _LIMITS = {"max_sandboxes": 4, "max_gpus": 16, "gpu_hours": 2.5, "max_runtime_sec": 3600}
-
-# Pinned literal: the field names of the multibranch toolbox's input (W137 signature).  Not derived from that package.
-_FIELDS = [
-    "run_id",
-    "session_dir",
-    "api_url",
-    "sandbox_url",
-    "measurement_key",
-    "sandbox_templates",
-    "source_sha",
-    "tp",
-    "dev_key",
-    "grant_limits",
-    "sandbox_workspace",
-]
 
 
 @pytest.fixture
@@ -52,16 +37,11 @@ def env(tmp_path):
         Var.GRANT_LIMITS: json.dumps(_LIMITS),
         Var.SOURCE_REPO: "AMD-AGI/Hyperloom",
         Var.SOURCE_SHA: _SHA,
-        Var.SANDBOX_WORKSPACE: "workspace-a",
     }
 
 
 def _inputs(env, tmp_path, tp=8):
     return hosted_toolbox_inputs(read_host_info(env), session_dir=tmp_path / "session", tp=tp)
-
-
-def test_the_key_set_is_exactly_the_toolbox_fields(env, tmp_path):
-    assert sorted(_inputs(env, tmp_path)) == sorted(_FIELDS)
 
 
 def test_every_value_is_mapped_from_its_host_input(env, tmp_path):
@@ -78,20 +58,18 @@ def test_every_value_is_mapped_from_its_host_input(env, tmp_path):
         "tp": 8,
         "dev_key": _DEV,
         "grant_limits": _LIMITS,
-        "sandbox_workspace": "workspace-a",
     }
     assert isinstance(got["session_dir"], Path)
     assert isinstance(got["measurement_key"], str)
 
 
-def test_dev_key_grant_limits_and_workspace_are_none_when_absent(env, tmp_path):
-    del env[Var.SANDBOX_KEY_DEV], env[Var.GRANT_LIMITS], env[Var.SANDBOX_WORKSPACE]
+def test_dev_key_and_grant_limits_are_none_when_absent(env, tmp_path):
+    del env[Var.SANDBOX_KEY_DEV], env[Var.GRANT_LIMITS]
 
     got = _inputs(env, tmp_path)
 
     assert got["dev_key"] is None
     assert got["grant_limits"] is None
-    assert got["sandbox_workspace"] is None
 
 
 def test_grant_limits_carry_all_four_keys(env, tmp_path):

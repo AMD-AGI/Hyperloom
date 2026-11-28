@@ -49,7 +49,7 @@ def run(tmp_path, monkeypatch):
         Var.RUN_CREATED_AT: "2026-10-23T08:30:05Z",
         Var.STATE_DIR: str(state),
         Var.GRANT_LIMITS: json.dumps({"max_gpus": 8, "gpu_hours": 12}),
-        Var.SANDBOX_TEMPLATES: json.dumps({"runner": {"1": "r1"}}),
+        Var.SANDBOX_TEMPLATES: json.dumps({"measurement": {"1": "r1"}}),
         Var.E2B_API_URL: "https://api.sandbox.example.test",
         HOST_LAYER_ENV: str(tmp_path / "layer"),
         "USER_DATA_PATH": str(work),
@@ -195,10 +195,6 @@ def test_a_command_that_cannot_start_is_final_with_return_code_2(run, monkeypatc
         (lambda r, m: m.delenv(Var.RUN_ID), Var.RUN_ID),
         (lambda r, m: m.setenv(Var.E2B_API_URL, "not a url"), Var.E2B_API_URL),
         (lambda r, m: m.setenv("USER_DATA_PATH", "relative"), "USER_DATA_PATH must be set to an absolute path"),
-        (
-            lambda r, m: m.setenv("HYPERLOOM_LEDGER_DIR", "relative/ledgers"),
-            "HYPERLOOM_LEDGER_DIR must be an absolute path",
-        ),
     ],
 )
 def test_a_refused_request_is_final_with_return_code_2_and_is_never_handed_over(run, monkeypatch, mutate, message):

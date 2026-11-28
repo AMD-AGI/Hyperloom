@@ -3,7 +3,7 @@
 # SPDX-License-Identifier: MIT
 
 # Build the hosting layer of a hosted Hyperloom run: a directory that any framework image runs as it is,
-# in place of an application image built for Hyperloom (see Dockerfile, which stays for those who want one).
+# with no application image built for Hyperloom.
 # Dockerfile.layer turns the directory into a small image an init container copies into the application pod.
 #
 #   scripts/hosted_app_image/build_layer.sh --out /path/to/hosted-layer [--claude-version V] [--ca-file PEM]
@@ -57,7 +57,7 @@ short_sha="$(git -C "$REPO_ROOT" rev-parse --short=8 HEAD)"
 work="$(mktemp -d)"
 trap 'rm -rf "$work"' EXIT
 
-# Claude Code's native installer, as install_kernel_tools.sh and the Dockerfile use it, into a scratch home.
+# Claude Code's native installer, as install_kernel_tools.sh uses it, into a scratch home.
 mkdir -p "$work/home"
 curl -fsSL --connect-timeout 20 https://claude.ai/install.sh | HOME="$work/home" bash -s -- "$CLAUDE_VERSION"
 installed="$(readlink -f "$work/home/.local/bin/claude")"

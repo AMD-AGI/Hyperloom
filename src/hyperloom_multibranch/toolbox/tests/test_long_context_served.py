@@ -20,14 +20,12 @@ import pytest
 from hyperloom.contracts.long_context import LONG_CONTEXT_COMPLETE, PROMPT_OK, LongContextResult
 from hyperloom.contracts.measurement import Purpose
 from hyperloom.measure.long_context import build as build_module
-from hyperloom.measure.long_context.build import build_entry
 from hyperloom.measure.long_context.plan import LongContextPlan
 from hyperloom.measure.long_context.rounds import CheckServer, run_long_context
 from hyperloom.measure.long_context.staging import load_prompt_set
-from hyperloom.measure.long_context.tests.support import FakeServer, encode
+from hyperloom.measure.long_context.tests.support import FakeServer
 from hyperloom.measure.points import AcceptedMeasurement
 from hyperloom_multibranch.contracts.toolbox import WorkloadKind
-from hyperloom_multibranch.toolbox import long_context as long_context_module
 from hyperloom_multibranch.toolbox.acceptance import Acceptance, AcceptanceSetup
 from hyperloom_multibranch.toolbox.long_context import (
     ServedLongContext,
@@ -48,19 +46,6 @@ HEADROOM = 128
 MILLION = 1 << 20
 BOUND = 131072
 PROMPTS = 16
-
-
-@pytest.fixture
-def builds(monkeypatch: pytest.MonkeyPatch) -> list[int]:
-    """The lengths the toolbox staged a set at, built with the test tokenizer in place of the model's."""
-    lengths: list[int] = []
-
-    def built(model_dir: Path, root: Path, *, length: int) -> object:
-        lengths.append(length)
-        return build_entry(model_dir, root, length=length, encode=encode)
-
-    monkeypatch.setattr(long_context_module, "build_entry", built)
-    return lengths
 
 
 def _model(tmp_path: Path, limit: int = MODEL_LIMIT) -> Path:

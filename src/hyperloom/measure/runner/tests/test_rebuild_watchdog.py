@@ -19,7 +19,7 @@ import yaml
 
 from hyperloom.measure.framework.tests.test_table_modules import BPRESHUFFLE, CONFIG, _package, _table
 from hyperloom.measure.jit.modules import CKTILE_MODULE_BUILD_LIMIT_SEC, MODULE_BUILD_LIMIT_SEC
-from hyperloom.measure.runner import rebuild_watchdog, run
+from hyperloom.measure.runner import own_jit, rebuild_watchdog, run
 from hyperloom.measure.runner.rebuild_watchdog import raise_rebuild_watchdog, rebuild_watchdog_sec
 from hyperloom.measure.socket import TestCall
 
@@ -96,7 +96,7 @@ def test_a_stale_cktile_module_raises_the_watchdog_by_its_own_time(
     image, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     stale = frozenset({"module_gemm_a8w8_bpreshuffle_cktile", "module_gemm_a8w8_bpreshuffle"})
-    monkeypatch.setattr(rebuild_watchdog, "stale_table_modules", lambda *args: stale)
+    monkeypatch.setattr(own_jit, "stale_table_modules", lambda *args: stale)
     point = _point(tmp_path, "point.yaml", args="--tp 1", **_tuned(tmp_path))
 
     note = raise_rebuild_watchdog(_call(tmp_path, point), None, {})
@@ -171,7 +171,7 @@ def test_a_present_watchdog_below_the_estimate_is_raised_to_it(
 ) -> None:
     """The AgentX default (1800 s) is shorter than rebuilding three modules (2100 s): the default must not cut the
     rebuild."""
-    monkeypatch.setattr(rebuild_watchdog, "stale_table_modules", lambda *args: frozenset({"m1", "m2", "m3"}))
+    monkeypatch.setattr(own_jit, "stale_table_modules", lambda *args: frozenset({"m1", "m2", "m3"}))
     point = _point(tmp_path, "point.yaml", agentx=agentx, args=f"--tp 4 {_FLAG}{sep}1800 --mem 0.8", **_tuned(tmp_path))
 
     note = raise_rebuild_watchdog(_call(tmp_path, point), None, {})

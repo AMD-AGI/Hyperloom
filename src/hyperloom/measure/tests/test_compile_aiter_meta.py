@@ -15,11 +15,11 @@ import pytest
 
 from hyperloom.contracts.recipe import RecipeDelta
 from hyperloom.measure.compile import (
+    EnvironmentCompiler,
     LocalBlobStore,
     PackageBase,
     PatchApplyError,
     TooManyModulesError,
-    compile_environment,
 )
 from hyperloom.measure.jit.modules import ESTIMATED_MODULE_SECONDS, MAX_REBUILD_SECONDS
 from hyperloom.measure.tests._recipes import IMAGE, git_patch, put_patch, recipe_with, write_tree
@@ -68,8 +68,8 @@ def compile_aiter_environment(tmp_path: Path, base: PackageBase, files: dict[str
     before = {path: (root / path).read_text() if (root / path).is_file() else OLD for path in files}
     patch = git_patch(tmp_path / "up", before, files)
     recipe = recipe_with((put_patch(blobs, "p.patch", patch),), component="aiter")
-    return compile_environment(
-        recipe, RecipeDelta(), blobs=blobs, active_image_digest=IMAGE, locator=lambda layout: base
+    return EnvironmentCompiler(blobs=blobs, active_image_digest=IMAGE, locator=lambda layout: base).compile(
+        recipe, RecipeDelta()
     )
 
 

@@ -38,6 +38,7 @@ from hyperloom_common.fs_utils import read_text_nofollow
 from hyperloom_common.shared_storage import (
     SHARED_CHILD_UMASK,
     SHARED_DIR_MODE,
+    _exists,
     current_umask,
     directory_is_shared,
     parent_is_shared,
@@ -182,7 +183,7 @@ def share_objects_and_refs(git_dir: Path) -> None:
             raise OSError(errno.EPERM, "only the account that made a repository lays it out", str(git_dir))
         os.fchmod(top, 0o3775)
         for name in _PROGRAM_STATE:
-            if not _present(top, name):
+            if not _exists(top, name):
                 os.mkdir(name, 0o755, dir_fd=top)
         for name in os.listdir(top):
             info = os.stat(name, dir_fd=top, follow_symlinks=False)
@@ -206,14 +207,6 @@ def _group_appends(mode: int) -> int:
 
 def _closed(mode: int) -> int:
     return mode & ~_OPEN_TO_OTHERS
-
-
-def _present(directory: int, name: str) -> bool:
-    try:
-        os.stat(name, dir_fd=directory, follow_symlinks=False)
-    except FileNotFoundError:
-        return False
-    return True
 
 
 def _walk_modes(

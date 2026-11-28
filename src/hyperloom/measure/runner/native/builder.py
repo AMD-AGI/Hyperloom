@@ -7,12 +7,12 @@ Front: the stack is applied with :func:`~hyperloom.measure.compile.apply_patch_s
 pinned upstream checkout (never in place, never into the image), which yields the changed files and so the key
 (:func:`plan`, which compiles nothing and runs no candidate code). Middle: a copy of that directory with the changed
 files laid over it is compiled by the recipe, in an environment of its own, within the recipe's budget. Back: the
-declared outputs are harvested into a staging directory (:func:`compile_tree`).
+declared outputs are harvested into a staging directory (:func:`lay_tree`, then :func:`compile_laid`).
 
-:func:`compile_tree` runs code the candidate controls, so it must run in the CPU build runner: a sandbox in the image's
+:func:`compile_laid` runs code the candidate controls, so it must run in the CPU build runner: a sandbox in the image's
 digest that holds no signing key and no credential and cannot read the build service's files. It never signs. The
 service (:func:`hyperloom.measure.runner.native.service.ensure_build`) holds the key, starts the runner for a key that is
-not stored, and signs what the runner staged. Nothing in this module starts that runner; calling :func:`compile_tree`
+not stored, and signs what the runner staged. Nothing in this module starts that runner; calling :func:`compile_laid`
 in the process that holds the key would let a candidate read the key and forge records.
 
 A compiler that exits non-zero, and outputs that are not what the recipe declares, are the candidate's ``compile_error``,
@@ -51,8 +51,8 @@ __all__ = [
     "BuildMachine",
     "BuildRequest",
     "LaidTree",
+    "children_cpu_seconds",
     "compile_laid",
-    "compile_tree",
     "lay_tree",
     "plan",
     "tree_dir",
@@ -121,7 +121,7 @@ def plan(request: BuildRequest, blobs: BlobStore) -> tuple[BuildInputs, EnvRoot]
 
 
 def tree_dir(scratch: Path) -> Path:
-    """Where :func:`compile_tree` builds below its scratch directory."""
+    """Where :func:`lay_tree` lays the tree that :func:`compile_laid` builds below its scratch directory."""
     return Path(scratch) / _TREE
 
 
@@ -157,18 +157,8 @@ def lay_tree(request: BuildRequest, root: EnvRoot, blobs: BlobStore, scratch: Pa
     )
 
 
-def compile_tree(
-    request: BuildRequest, root: EnvRoot, blobs: BlobStore, scratch: Path, *, against_image: bool = True
-) -> Staged:
-    """Compile the upstream build directory with ``root`` laid over it, and harvest its outputs (:func:`lay_tree`, then
-    :func:`compile_laid`)."""
-    return compile_laid(lay_tree(request, root, blobs, scratch), scratch, against_image=against_image)
-
-
-def compile_laid(laid: LaidTree, scratch: Path, *, against_image: bool = True) -> Staged:
+def compile_laid(laid: LaidTree, scratch: Path) -> Staged:
     """Compile the tree :func:`lay_tree` laid below ``scratch``, and harvest its outputs. This runs the candidate's code.
-
-    With ``against_image`` false every output is kept, not only those that differ from the image's.
 
     Raises:
         BuildInfraError: When the preflight fails, the compile times out or is killed by a signal.
@@ -178,10 +168,10 @@ def compile_laid(laid: LaidTree, scratch: Path, *, against_image: bool = True) -
     if checked.problem is not None:
         raise BuildInfraError(f"the builder failed its preflight: {checked.problem}")
     toolchain = {**checked.toolchain, "gfx": machine.gfx_arch, "max_jobs": str(recipe.max_jobs)}
-    started, cpu_before = time.monotonic(), _children_cpu_seconds()
+    started, cpu_before = time.monotonic(), children_cpu_seconds()
     errors: list[str] = []
     result = _run_steps(laid, Path(scratch), started, _keeping_errors(errors, f"{tree}{os.sep}"))
-    timing = (_children_cpu_seconds() - cpu_before, time.monotonic() - started)
+    timing = (children_cpu_seconds() - cpu_before, time.monotonic() - started)
     errors = [_named_for_the_source(error, tree, laid.tracked, set(laid.laid)) for error in errors]
     log = "\n".join([*errors, *result.tails])
     if result.returncode < 0:
@@ -189,7 +179,7 @@ def compile_laid(laid: LaidTree, scratch: Path, *, against_image: bool = True) -
     if result.returncode != 0:
         exited = f"{COMPILE_ERROR}: the compile exited {result.returncode}"
         return _failed(f"{exited}: {errors[0]}" if errors else exited, toolchain, timing, log, scratch)
-    image = laid.image_root if against_image and recipe.against_image else None
+    image = laid.image_root if recipe.against_image else None
     declared = (*recipe.outputs, *recipe.executables)
     try:
         outputs = harvest(tree / recipe.package_dir, declared, image, recipe.max_output_bytes, Path(scratch))
@@ -281,7 +271,8 @@ def _failed(failure: str, toolchain: dict[str, str], timing: tuple[float, float]
     return Staged(FAILED, (), toolchain, timing[0], timing[1], log, Path(scratch), failure=failure)
 
 
-def _children_cpu_seconds() -> float:
+def children_cpu_seconds() -> float:
+    """The CPU seconds, user and system, of every child process this one has waited for."""
     usage = resource.getrusage(resource.RUSAGE_CHILDREN)
     return usage.ru_utime + usage.ru_stime
 

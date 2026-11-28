@@ -207,10 +207,6 @@ class IsolationReport:
     bwrap: str | None
     reasons: tuple[str, ...]
 
-    def to_dict(self) -> dict[str, object]:
-        """The report as a JSON document."""
-        return {**dataclasses.asdict(self), "reasons": list(self.reasons)}
-
     def line(self) -> str:
         """The report as one line, for a session report."""
         text = f"agent isolation: specialists {self.specialists}, sandboxes {self.sandboxes}"

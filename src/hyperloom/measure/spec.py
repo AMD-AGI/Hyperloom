@@ -166,18 +166,17 @@ class Hardware:
 
     gpu_type: str
     gpu_count: int
-    power_cap_w: float | None
-    partition_mode: str | None
     card: GpuCard | None
 
     @classmethod
     def parse(cls, value: Any, path: str) -> "Hardware":
         r = Reader(value, path)
+        for key in ("power_cap_w", "partition_mode"):
+            if r.optional(key) is not None:
+                raise DocumentError(f"{path}.{key}: must be null; no runner checks it")
         hardware = cls(
             gpu_type=r.text("gpu_type") or "",
             gpu_count=r.integer("gpu_count", minimum=1) or 1,
-            power_cap_w=r.number("power_cap_w", minimum=0, optional=True),
-            partition_mode=r.text("partition_mode", optional=True),
             card=_card(r.optional(_CARD), r.at(_CARD)),
         )
         r.done()
@@ -187,8 +186,8 @@ class Hardware:
         return {
             "gpu_type": self.gpu_type,
             "gpu_count": self.gpu_count,
-            "power_cap_w": self.power_cap_w,
-            "partition_mode": self.partition_mode,
+            "power_cap_w": None,
+            "partition_mode": None,
             _CARD: None if self.card is None else asdict(self.card),
         }
 
@@ -376,24 +375,6 @@ class EnvRoot:
 
 
 @dataclass(frozen=True)
-class RuntimeSnapshot:
-    snapshot: str
-    manifest_sha256: str
-
-    @classmethod
-    def parse(cls, value: Any, path: str) -> "RuntimeSnapshot":
-        r = Reader(value, path)
-        runtime = cls(
-            snapshot=r.text("snapshot") or "", manifest_sha256=r.text(_MANIFEST_SHA256, pattern=SHA256_RE) or ""
-        )
-        r.done()
-        return runtime
-
-    def to_document(self) -> dict[str, Any]:
-        return {"snapshot": self.snapshot, _MANIFEST_SHA256: self.manifest_sha256}
-
-
-@dataclass(frozen=True)
 class BuildRef:
     """The ready native build a ``runtime`` root's outputs come from: its key in the build store and the SHA-256 of the
     signed manifest it was built to."""
@@ -424,18 +405,17 @@ class Environment:
     so a runner that does not know it reads every other sheet as before and refuses one that has builds."""
 
     roots: tuple[EnvRoot, ...] = ()
-    runtime: RuntimeSnapshot | None = None
     blob_root: str = ""
     builds: tuple[BuildRef, ...] = ()
 
     @classmethod
     def parse(cls, value: Any, path: str) -> "Environment":
         r = Reader(value, path)
-        runtime_raw = r.optional(_RUNTIME)
+        if r.optional(_RUNTIME) is not None:
+            raise DocumentError(f"{path}.runtime: must be null; no runtime snapshot is read")
         builds_raw = r.optional(_BUILDS)
         environment = cls(
             roots=r.sequence("roots", EnvRoot.parse),
-            runtime=None if runtime_raw is None else RuntimeSnapshot.parse(runtime_raw, r.at(_RUNTIME)),
             blob_root=r.text("blob_root") or "",
             builds=() if builds_raw is None else r.sequence(_BUILDS, BuildRef.parse),
         )
@@ -458,7 +438,7 @@ class Environment:
     def to_document(self) -> dict[str, Any]:
         document: dict[str, Any] = {
             "roots": [root.to_document() for root in self.roots],
-            _RUNTIME: None if self.runtime is None else self.runtime.to_document(),
+            _RUNTIME: None,
             "blob_root": self.blob_root,
         }
         if self.builds:
@@ -607,14 +587,6 @@ def _without_point_values(config: Any) -> dict[str, Any]:
     return {**config, "benchmark": benchmark}
 
 
-def _model_hashes(value: Any, path: str) -> dict[str, str]:
-    hashes = string_map(value, path, key_check=relative_path)
-    for key, digest in hashes.items():
-        if not SHA256_RE.fullmatch(digest):
-            raise DocumentError(f"{path}.{key}: not a sha256")
-    return hashes
-
-
 def _platform_env(value: Any, path: str) -> dict[str, str]:
     values = string_map(value, path)
     unknown = sorted(set(values) - set(PLATFORM_ENV_NAMES))
@@ -648,7 +620,6 @@ class MeasurementSpec:
     unset_envs: tuple[str, ...]
     tools: ToolCommits
     environment: Environment
-    model_hashes: Mapping[str, str]
     procedure: Procedure
     outputs: Outputs
 
@@ -657,6 +628,8 @@ class MeasurementSpec:
         r = Reader(document, "spec")
         if r.text("schema") != SPEC_SCHEMA:
             raise DocumentError(f"spec.schema: expected {SPEC_SCHEMA}")
+        if r.optional("model_hashes") not in (None, {}):
+            raise DocumentError("spec.model_hashes: must be empty; no runner checks model files")
         spec = cls(
             request_id=r.text("request_id") or "",
             kind=r.choice(_KIND, KINDS) or "",
@@ -670,7 +643,6 @@ class MeasurementSpec:
             unset_envs=_unset_envs(r.raw("unset_envs"), r.at("unset_envs")),
             tools=r.section("tools", ToolCommits.parse),
             environment=r.section("environment", Environment.parse),
-            model_hashes=_model_hashes(r.raw("model_hashes"), r.at("model_hashes")),
             procedure=r.section("procedure", Procedure.parse),
             outputs=r.section("outputs", Outputs.parse),
         )
@@ -702,7 +674,7 @@ class MeasurementSpec:
             "unset_envs": list(self.unset_envs),
             "tools": self.tools.to_document(),
             "environment": self.environment.to_document(),
-            "model_hashes": dict(self.model_hashes),
+            "model_hashes": {},
             "procedure": self.procedure.to_document(),
             "outputs": self.outputs.to_document(),
         }
@@ -731,20 +703,18 @@ def spec_sha256(raw: bytes) -> str:
     return hashlib.sha256(raw).hexdigest()
 
 
-def _replace_session_dir(value: Any, session_dir: str | None) -> Any:
-    """Walk a parsed YAML value: path-valued keys become placeholders, session-directory prefixes are replaced."""
+def _replace_paths(value: Any) -> Any:
+    """Walk a parsed YAML value: path-valued keys become placeholders."""
     if isinstance(value, Mapping):
         result = {}
         for key, item in value.items():
             if key in PATH_KEYS and isinstance(item, str):
                 result[key] = "${PATH}"
             else:
-                result[key] = _replace_session_dir(item, session_dir)
+                result[key] = _replace_paths(item)
         return result
     if isinstance(value, list):
-        return [_replace_session_dir(item, session_dir) for item in value]
-    if isinstance(value, str) and session_dir:
-        return value.replace(session_dir, "${SESSION_DIR}")
+        return [_replace_paths(item) for item in value]
     return value
 
 
@@ -809,13 +779,13 @@ def _refuse_deep(value: Any) -> None:
                 tallest[-1] = max(tallest[-1], heights[id(container)])
 
 
-def canonical_for_fingerprint(spec: MeasurementSpec, *, session_dir: str | None = None) -> dict[str, Any]:
+def canonical_for_fingerprint(spec: MeasurementSpec) -> dict[str, Any]:
     """The sheet with everything that is not measurement content removed or replaced.
 
     Removed: ``request_id``, ``meta``, ``procedure.deadline_unix``, ``config.sha256`` (it hashes paths), the session's
-    blob root and runtime snapshot location, and the staging's normalised manifest, which its sha256 stands for. Replaced: path-valued YAML fields and session-directory prefixes become
-    placeholders, and the carried base launch its digest, which leaves out where and when it was resolved. Blobs and
-    attachments keep only their hashes.
+    blob root, and the staging's normalised manifest, which its sha256 stands for. Replaced: path-valued YAML fields
+    become placeholders, and the carried base launch its digest, which leaves out where and when it was resolved. Blobs
+    and attachments keep only their hashes.
     """
     document = spec.to_document()
     for key in ("request_id", "meta"):
@@ -826,21 +796,18 @@ def canonical_for_fingerprint(spec: MeasurementSpec, *, session_dir: str | None 
     if spec.tools.staging is not None:
         del document["tools"][_INFERENCE_SUITE][_NORMALISED]
     del document["environment"]["blob_root"]
-    if document["environment"][_RUNTIME] is not None:
-        del document["environment"][_RUNTIME]["snapshot"]
-    session = session_dir.rstrip("/") if session_dir else None
-    document["config"] = [{"yaml": _replace_session_dir(_load_yaml(p.yaml), session)} for p in spec.config]
-    document["process_env"] = _replace_session_dir(document["process_env"], session)
+    document["config"] = [{"yaml": _replace_paths(_load_yaml(p.yaml))} for p in spec.config]
+    document["process_env"] = _replace_paths(document["process_env"])
     return document
 
 
-def fingerprint(spec: MeasurementSpec, *, hyperloom_version: str, session_dir: str | None = None) -> str:
+def fingerprint(spec: MeasurementSpec, *, hyperloom_version: str) -> str:
     """The first 16 hex digits of sha256(canonical sheet, runner Hyperloom version).
 
     The version is part of the identity: a measurement made by another runner version is not the same measurement.
     """
     if not hyperloom_version:
         raise DocumentError("the fingerprint needs the runner's Hyperloom version")
-    canonical = canonical_json(canonical_for_fingerprint(spec, session_dir=session_dir))
+    canonical = canonical_json(canonical_for_fingerprint(spec))
     digest = hashlib.sha256(canonical.encode() + b"\n" + hyperloom_version.encode())
     return digest.hexdigest()[:_FINGERPRINT_LEN]

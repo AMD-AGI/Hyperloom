@@ -34,6 +34,7 @@ __all__ = [
     "OutputsError",
     "OutputsFile",
     "ProcessEntry",
+    "clean_reason",
     "output_document",
     "parse_output",
     "parse_outputs",

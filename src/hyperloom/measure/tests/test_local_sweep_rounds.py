@@ -19,7 +19,7 @@ import yaml
 
 from hyperloom.contracts.recipe import KernelArtifact, KernelKind, RecipeDelta
 from hyperloom.measure import local
-from hyperloom.measure.compile import CompiledEnvironment, LocalBlobStore, PackageBase, compile_environment
+from hyperloom.measure.compile import CompiledEnvironment, EnvironmentCompiler, LocalBlobStore, PackageBase
 from hyperloom.measure.framework.base import framework_envs
 from hyperloom.measure.local import LocalMeasurementBackend
 from hyperloom.measure.points import default_canonical, generate_points
@@ -117,13 +117,11 @@ def rounds(monkeypatch, tmp_path) -> _Rounds:
 
 
 def _environment(tmp_path: Path, delta: RecipeDelta | None = None) -> CompiledEnvironment:
-    return compile_environment(
-        recipe_with(),
-        delta or RecipeDelta(),
+    return EnvironmentCompiler(
         blobs=LocalBlobStore(tmp_path / "blobs"),
         active_image_digest=IMAGE,
         locator=lambda _layout: PackageBase("sglang", tmp_path, None, None),
-    )
+    ).compile(recipe_with(), delta or RecipeDelta())
 
 
 def _points(

@@ -12,7 +12,6 @@ from __future__ import annotations
 
 import asyncio
 import json
-import secrets
 import urllib.request
 from collections.abc import AsyncIterator
 from dataclasses import dataclass, replace
@@ -331,7 +330,7 @@ async def stack(tmp_path: Path) -> AsyncIterator[Stack]:
     executor = gated()
     rig = build(tmp_path, executor=executor)
     await rig.toolbox.start()
-    server = McpServer(McpServerConfig(host_token=secrets.token_hex(16)), campaign="profile")
+    server = McpServer(McpServerConfig(), campaign="profile")
 
     def blackboards(branch: str) -> LocalBlackboard:
         return LocalBlackboard(tmp_path / "blackboard", Writer(Role.SPECIALIST_RUNTIME, branch, branch))

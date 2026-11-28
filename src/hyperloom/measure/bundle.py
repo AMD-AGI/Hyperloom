@@ -262,8 +262,6 @@ def _check_identity(manifest: ResultManifest, fingerprint: str, expected: Bundle
 
 def _check_rule_pack(manifest: ResultManifest, session_digest: str) -> None:
     stated = manifest.runner.rule_pack
-    if stated is None:
-        raise ResultRejected(RejectReason.RULE_PACK_MISMATCH, "the runner states no rule pack")
     if stated.digest != session_digest:
         raise ResultRejected(
             RejectReason.RULE_PACK_MISMATCH,

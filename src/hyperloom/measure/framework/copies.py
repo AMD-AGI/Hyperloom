@@ -346,9 +346,7 @@ class _TestBase:
         private_sha = files_digest(tree_files(private / _CONFIGS))
         patched = _lay_patch(call.tables_patch, private / _CONFIGS)
         redirect = self._redirect = _Redirect(snapshot, private, patched)
-        unset = frozenset(call.unset_envs) | frozenset(
-            call.session_facts.reference_unset_envs if call.session_facts else ()
-        )
+        unset = frozenset(call.unset_envs)
         values = redirect.process_env(call, unset)
         hook_env = self._install_merge_hook(redirect, private)
         points = tuple(redirect.point(point, index, unset) for index, point in enumerate(call.points))

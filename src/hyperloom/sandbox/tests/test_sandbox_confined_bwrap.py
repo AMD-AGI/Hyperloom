@@ -232,7 +232,6 @@ def test_a_test_s_server_reaches_its_own_tree_and_key_and_nothing_of_the_app_or_
     server.write_text(SERVER)
     monkeypatch.setenv("HF_HOME", str(hf))
     monkeypatch.setenv("HOME", str(app_home))
-    monkeypatch.setenv("HYPERLOOM_STATE_DIR", str(state))
     monkeypatch.setenv("HYPERLOOM_TEST_APP_VALUE", SECRET)
     base = Path(tempfile.mkdtemp(prefix="hl-test-sandboxes-", dir="/tmp")) if below_tmp else area / "sandboxes"
     template = LocalTemplate(

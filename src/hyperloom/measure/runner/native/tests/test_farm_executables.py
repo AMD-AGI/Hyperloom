@@ -19,7 +19,7 @@ from hyperloom.contracts.recipe import ComponentPatches
 from hyperloom.measure.farm import FarmError, build_farm, built_roots, place_farm, verify_farm
 from hyperloom.measure.jit.native.laying import NamedBuild, SheetBuilds, manifest_sha256
 from hyperloom.measure.jit.native.record import BuildRecord
-from hyperloom.measure.runner.native.builder import BuildMachine, BuildRequest, compile_tree, plan
+from hyperloom.measure.runner.native.builder import BuildMachine, BuildRequest, plan
 from hyperloom.measure.runner.native.recipes import NativeRecipe
 from hyperloom.measure.runner.native.service import ensure_build
 from hyperloom.measure.runner.native.tests._native import (
@@ -29,6 +29,7 @@ from hyperloom.measure.runner.native.tests._native import (
     Bench,
     OUTPUT,
     CountingPreflight,
+    compile_tree,
     compiled,
     executable_recipe,
     fake_recipe,

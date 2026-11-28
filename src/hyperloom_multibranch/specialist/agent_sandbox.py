@@ -86,7 +86,7 @@ from hyperloom_common.proctree import descendants, running
 from hyperloom.common.visible_devices import GPU_MASK_ENV_NAMES
 from hyperloom.measure.compile import COMPONENT_LAYOUTS, UnsupportedComponentError, locate_installed_package
 from hyperloom.measure.local_templates import image_env
-from hyperloom.sandbox.launcher import LAUNCHER_SOURCE, StatusPipe, launcher_argv
+from hyperloom.sandbox.launcher import LAUNCHER_SOURCE, StatusPipe, launcher_argv, runs_launcher
 from hyperloom.sandbox.local_sandbox import SGLANG_JIT_CACHE_ENV
 from hyperloom_common.bwrap import BwrapPolicy, BwrapPolicyError, Holder, Scratch
 from hyperloom_common.shared_storage import make_shared_dirs
@@ -173,8 +173,6 @@ BASIC_NAMES = frozenset(
     {"PATH", "PYTHONPATH", "LANG", "LANGUAGE", "TZ", "TERM", "HF_HOME", "HF_HUB_CACHE", "MODEL_PATH", "INFERENCEX_PATH"}
 )
 BASIC_PREFIXES = ("LC_",)
-#: The variable naming the app's state directory, which no bind of a sandbox may show.
-STATE_DIR_ENV = "HYPERLOOM_STATE_DIR"
 #: The registry that adopted each launcher still uncollected, told when it is collected (:func:`_collected`).
 _adopted: dict[subprocess.Popen[bytes], Processes] = {}
 GUARDED_NOTE = (
@@ -524,7 +522,7 @@ class LocalProcess:
         if self.returncode is None:
             return
         left = [pid for pid, _ in descendants(self.popen.pid) if running(pid)]
-        launchers = [pid for pid in left if _runs_launcher(pid)]
+        launchers = [pid for pid in left if runs_launcher(pid)]
         if len(launchers) < len(left):
             return
         for pid in launchers:
@@ -858,9 +856,9 @@ class LocalAgentSandbox:
         frameworks writable; the toolchain of :data:`AGENT_PROGRAMS`, its import path, the paths it names and the
         image's other installed frameworks read-only, but none in a tree it writes, which shows it already; the
         credential locations they show absent (a read-only tree bound entry by entry without them, so a login the app
-        replaces or makes while a command runs never shows, :meth:`Confinement.policy`); the cards' devices; the
-        app's state never bound. No command dies with the thread that started it: the session's watch ends what is
-        left of a sandbox, with its grace."""
+        replaces or makes while a command runs never shows, :meth:`Confinement.policy`); the cards' devices. No
+        command dies with the thread that started it: the session's watch ends what is left of a sandbox, with its
+        grace."""
         installed = installed_frameworks()
         writable = (self.root, home, *self.paths.writable, *installed.writable)
         trees = (*writable, Path(scratch.tmp), Path(scratch.shm))
@@ -868,14 +866,7 @@ class LocalAgentSandbox:
         named = (*toolchain, *self.python_path, *self.paths.readable, *installed.read_only)
         readable = tuple(path for path in dict.fromkeys(named) if not _within(path, writable))
         masked = credential_paths(env, allowed=(*readable, *writable), writable=trees)
-        state = os.environ.get(STATE_DIR_ENV, "")
-        confinement = Confinement(
-            writable=writable,
-            readable=readable,
-            masked=masked,
-            devices=GPU_DEVICES,
-            app_only=(Path(state),) if os.path.isabs(state) else (),
-        )
+        confinement = Confinement(writable=writable, readable=readable, masked=masked, devices=GPU_DEVICES)
         return dataclasses.replace(confinement.policy(scratch=scratch), die_with_parent=False)
 
     def _confined_popen(self, confined: _Confined, launch: _Launch) -> subprocess.Popen[bytes]:
@@ -1028,14 +1019,6 @@ def _within(path: Path, trees: tuple[Path, ...]) -> bool:
     given = Path(os.path.normpath(path))
     normalized = [Path(os.path.normpath(tree)) for tree in trees]
     return any(given == tree or tree in given.parents for tree in normalized)
-
-
-def _runs_launcher(pid: int) -> bool:
-    """Whether process ``pid`` runs a sandbox's launcher."""
-    try:
-        return LAUNCHER_SOURCE.encode() in Path(f"/proc/{pid}/cmdline").read_bytes().split(b"\0")
-    except OSError:
-        return False
 
 
 def _kill(pid: int) -> None:

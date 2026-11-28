@@ -29,8 +29,6 @@ from hyperloom.hosted.mcp_server import (
     ToolForbidden,
 )
 
-HOST_TOKEN = "host-token-0123456789abcdef"
-
 
 class Client:
     def __init__(self, server: McpServer) -> None:
@@ -60,13 +58,13 @@ class Client:
 
 
 def _make_server(campaign: str = "camp-a") -> McpServer:
-    server = McpServer(McpServerConfig(host_token=HOST_TOKEN), campaign=campaign)
+    server = McpServer(McpServerConfig(), campaign=campaign)
     server.register(
         "whoami",
         description="Who is calling",
         schema={"type": "object", "properties": {}},
         handler=lambda args, ctx: {"kind": ctx.principal.kind, "branch": ctx.principal.branch},
-        scopes={"host", "specialist"},
+        scopes={"specialist"},
     )
     server.register(
         "echo",
@@ -74,7 +72,6 @@ def _make_server(campaign: str = "camp-a") -> McpServer:
         handler=lambda args, ctx: {"text": args["text"]},
         scopes={"specialist"},
     )
-    server.register("stop", schema={"type": "object"}, handler=lambda args, ctx: {"ok": True}, scopes={"host"})
     return server
 
 
@@ -97,31 +94,19 @@ def test_valid_specialist_token_calls_a_specialist_tool(server: McpServer) -> No
     assert _text(reply) == {"kind": "specialist", "branch": "branch-7"}
 
 
-def test_valid_host_token_via_bearer_header(server: McpServer) -> None:
-    status, _, reply = Client(server).rpc(HOST_TOKEN, "tools/call", {"name": "stop"}, bearer=True)
-    assert status == 200 and _text(reply) == {"ok": True}
+def test_valid_token_via_bearer_header(server: McpServer) -> None:
+    token = server.issue_token("spec-1", "branch-7")
+    status, _, reply = Client(server).rpc(token, "tools/call", {"name": "whoami"}, bearer=True)
+    assert status == 200 and _text(reply) == {"kind": "specialist", "branch": "branch-7"}
 
 
 def test_missing_and_wrong_token_get_401(server: McpServer) -> None:
     client = Client(server)
-    for token in (None, "", "not-a-token-at-all-0000", HOST_TOKEN + "x"):
+    for token in (None, "", "not-a-token-at-all-0000", server.issue_token("s", "b") + "x"):
         status, headers, reply = client.call(token, "whoami")
         assert status == 401
         assert headers["www-authenticate"] == "Bearer"
         assert reply == {"error": "unauthorized"}
-
-
-def test_wrong_scope_is_refused_and_the_handler_never_runs(server: McpServer) -> None:
-    token = server.issue_token("spec-1", "b")
-    status, _, reply = Client(server).call(token, "stop")
-    assert status == 200
-    assert reply["error"]["code"] == -32001
-    assert "result" not in reply
-
-
-def test_host_cannot_call_a_specialist_only_tool(server: McpServer) -> None:
-    _, _, reply = Client(server).call(HOST_TOKEN, "echo", {"text": "x"})
-    assert reply["error"]["code"] == -32001
 
 
 def test_unknown_tool_is_invalid_params_not_forbidden(server: McpServer) -> None:
@@ -129,12 +114,9 @@ def test_unknown_tool_is_invalid_params_not_forbidden(server: McpServer) -> None
     assert reply["error"] == {"code": -32602, "message": "unknown tool"}
 
 
-def test_tools_list_shows_only_the_tools_of_the_token_kind(server: McpServer) -> None:
-    client = Client(server)
-    _, _, spec = client.rpc(server.issue_token("s", "b"), "tools/list")
-    _, _, host = client.rpc(HOST_TOKEN, "tools/list")
+def test_tools_list_shows_the_tools_of_the_token_kind(server: McpServer) -> None:
+    _, _, spec = Client(server).rpc(server.issue_token("s", "b"), "tools/list")
     assert sorted(t["name"] for t in spec["result"]["tools"]) == ["echo", "whoami"]
-    assert sorted(t["name"] for t in host["result"]["tools"]) == ["stop", "whoami"]
 
 
 def test_arguments_are_validated_against_the_schema(server: McpServer) -> None:
@@ -184,25 +166,27 @@ def test_get_is_405_and_other_paths_404(server: McpServer) -> None:
     client = Client(server)
     status, headers, _ = client.send("GET")
     assert status == 405 and headers["allow"] == "POST"
-    assert client.send("POST", path="/other", body={}, headers={"X-Hyperloom-Token": HOST_TOKEN})[0] == 404
+    headers = {"X-Hyperloom-Token": server.issue_token("s", "b")}
+    assert client.send("POST", path="/other", body={}, headers=headers)[0] == 404
 
 
 def test_initialize_returns_a_session_id_header(server: McpServer) -> None:
-    status, headers, reply = Client(server).rpc(HOST_TOKEN, "initialize", {"protocolVersion": "2025-03-26"})
+    token = server.issue_token("s", "b")
+    status, headers, reply = Client(server).rpc(token, "initialize", {"protocolVersion": "2025-03-26"})
     assert status == 200
     assert headers["mcp-session-id"]
     assert reply["result"]["protocolVersion"] == "2025-03-26"
-    assert "mcp-session-id" not in Client(server).rpc(HOST_TOKEN, "ping")[1]
+    assert "mcp-session-id" not in Client(server).rpc(token, "ping")[1]
 
 
 def test_session_id_is_not_enforced(server: McpServer) -> None:
     message = {"jsonrpc": "2.0", "id": 1, "method": "ping"}
-    headers = {"X-Hyperloom-Token": HOST_TOKEN, "Mcp-Session-Id": "bogus"}
+    headers = {"X-Hyperloom-Token": server.issue_token("s", "b"), "Mcp-Session-Id": "bogus"}
     assert Client(server).send("POST", body=message, headers=headers)[0] == 200
 
 
 def test_batch_and_notification(server: McpServer) -> None:
-    headers = {"X-Hyperloom-Token": HOST_TOKEN}
+    headers = {"X-Hyperloom-Token": server.issue_token("s", "b")}
     batch = [
         {"jsonrpc": "2.0", "id": 1, "method": "ping"},
         {"jsonrpc": "2.0", "method": "notifications/initialized"},
@@ -215,21 +199,22 @@ def test_batch_and_notification(server: McpServer) -> None:
 
 
 def test_malformed_bodies(server: McpServer) -> None:
-    client, headers = Client(server), {"X-Hyperloom-Token": HOST_TOKEN}
+    token = server.issue_token("s", "b")
+    client, headers = Client(server), {"X-Hyperloom-Token": token}
     status, _, reply = client.send("POST", body=b"{not json", headers=headers)
     assert status == 400 and reply["error"]["code"] == -32700
     _, _, reply = client.send("POST", body=[], headers=headers)
     assert reply["error"]["code"] == -32600
     _, _, reply = client.send("POST", body={"id": 1, "method": "ping"}, headers=headers)
     assert reply["error"]["code"] == -32600
-    _, _, reply = client.rpc(HOST_TOKEN, "no/such")
+    _, _, reply = client.rpc(token, "no/such")
     assert reply["error"]["code"] == -32601
 
 
 def test_oversized_body_is_413_before_it_is_read(server: McpServer) -> None:
     connection = http.client.HTTPConnection("127.0.0.1", server.port, timeout=10)
     connection.putrequest("POST", "/mcp")
-    connection.putheader("X-Hyperloom-Token", HOST_TOKEN)
+    connection.putheader("X-Hyperloom-Token", server.issue_token("s", "b"))
     connection.putheader("Content-Length", str((1 << 20) + 1))
     connection.endheaders()
     response = connection.getresponse()
@@ -255,15 +240,15 @@ async def _async_handler(args: dict[str, Any], ctx: CallContext) -> dict[str, An
 
 
 def test_async_handlers_are_awaited(server: McpServer) -> None:
-    server.register("later", schema={"type": "object"}, handler=_async_handler, scopes={"host"})
-    assert _text(Client(server).call(HOST_TOKEN, "later")[2]) == {"async": True}
+    server.register("later", schema={"type": "object"}, handler=_async_handler, scopes={"specialist"})
+    assert _text(Client(server).call(server.issue_token("s", "b"), "later")[2]) == {"async": True}
 
 
 def test_error_messages_and_logs_never_carry_a_token(server: McpServer, caplog: pytest.LogCaptureFixture) -> None:
-    token = server.issue_token("spec-1", "b")
+    token, other = server.issue_token("spec-1", "b"), server.issue_token("spec-2", "c")
 
     def leaky(args: dict[str, Any], ctx: CallContext) -> dict[str, Any]:
-        raise RuntimeError(f"upstream said {token} and {HOST_TOKEN}")
+        raise RuntimeError(f"upstream said {token}")
 
     server.register("leaky", schema={"type": "object"}, handler=leaky, scopes={"specialist"})
     with caplog.at_level(logging.DEBUG):
@@ -273,8 +258,8 @@ def test_error_messages_and_logs_never_carry_a_token(server: McpServer, caplog: 
         client.rpc(token, "tools/call", {"name": token})
     assert reply["result"]["isError"] is True
     wire = json.dumps(reply)
-    assert token not in wire and HOST_TOKEN not in wire and "[redacted]" in wire
-    assert token not in caplog.text and HOST_TOKEN not in caplog.text
+    assert token not in wire and "[redacted]" in wire
+    assert token not in caplog.text and other not in caplog.text
 
 
 def test_tokens_are_stored_as_digests_only(server: McpServer) -> None:
@@ -284,17 +269,15 @@ def test_tokens_are_stored_as_digests_only(server: McpServer) -> None:
 
 
 def test_config_validation() -> None:
-    with pytest.raises(ValueError, match="host token"):
-        McpServer(McpServerConfig(host_token="short"), campaign="c")
     with pytest.raises(ValueError, match="campaign"):
-        McpServer(McpServerConfig(host_token=HOST_TOKEN), campaign="")
+        McpServer(McpServerConfig(), campaign="")
 
 
 def test_register_rejects_bad_scope_and_duplicate(server: McpServer) -> None:
     with pytest.raises(ValueError, match="scopes"):
         server.register("x", schema={"type": "object"}, handler=lambda a, c: {}, scopes={"admin"})
     with pytest.raises(ValueError, match="already registered"):
-        server.register("echo", schema={"type": "object"}, handler=lambda a, c: {}, scopes={"host"})
+        server.register("echo", schema={"type": "object"}, handler=lambda a, c: {}, scopes={"specialist"})
 
 
 def test_string_results_pass_through_and_tool_errors_are_error_results(server: McpServer) -> None:
@@ -303,14 +286,14 @@ def test_string_results_pass_through_and_tool_errors_are_error_results(server: M
     def failing(args: dict[str, Any], ctx: CallContext) -> str:
         raise ToolError("refused: held by someone")
 
-    server.register("plain", schema={"type": "object"}, handler=lambda a, c: "hello", scopes={"host"})
-    server.register("bad", schema={"type": "object"}, handler=failing, scopes={"host"})
-    client = Client(server)
-    assert client.call(HOST_TOKEN, "plain")[2]["result"] == {
+    server.register("plain", schema={"type": "object"}, handler=lambda a, c: "hello", scopes={"specialist"})
+    server.register("bad", schema={"type": "object"}, handler=failing, scopes={"specialist"})
+    client, token = Client(server), server.issue_token("s", "b")
+    assert client.call(token, "plain")[2]["result"] == {
         "content": [{"type": "text", "text": "hello"}],
         "isError": False,
     }
-    assert client.call(HOST_TOKEN, "bad")[2]["result"] == {
+    assert client.call(token, "bad")[2]["result"] == {
         "content": [{"type": "text", "text": "refused: held by someone"}],
         "isError": True,
     }
@@ -324,9 +307,9 @@ def test_a_result_that_cannot_be_serialized_is_an_internal_error_with_its_stack(
         result["self"] = result
         return result
 
-    server.register("cyclic", schema={"type": "object"}, handler=cyclic, scopes={"host"})
+    server.register("cyclic", schema={"type": "object"}, handler=cyclic, scopes={"specialist"})
     with caplog.at_level(logging.WARNING, logger="hyperloom.hosted.mcp_server"):
-        status, _, reply = Client(server).call(HOST_TOKEN, "cyclic")
+        status, _, reply = Client(server).call(server.issue_token("s", "b"), "cyclic")
 
     assert (status, reply) == (
         200,
@@ -337,14 +320,14 @@ def test_a_result_that_cannot_be_serialized_is_an_internal_error_with_its_stack(
 
 
 def _server_with_beat(beats: list[str], seconds: float = 0.1) -> McpServer:
-    server = McpServer(McpServerConfig(host_token=HOST_TOKEN), campaign="camp", heartbeat_seconds=seconds)
+    server = McpServer(McpServerConfig(), campaign="camp", heartbeat_seconds=seconds)
 
     def slow(args: dict[str, Any], ctx: CallContext) -> dict[str, Any]:
         time.sleep(args.get("seconds", 0.0))
         return {"ok": True}
 
     schema = {"type": "object", "properties": {"seconds": {"type": "number"}}}
-    server.register("slow", schema=schema, handler=slow, scopes={"host", "specialist"})
+    server.register("slow", schema=schema, handler=slow, scopes={"specialist"})
     return server
 
 
@@ -364,7 +347,7 @@ def test_beat_fires_during_a_blocking_call_and_stops_after_it() -> None:
         server.stop()
 
 
-def test_beat_belongs_to_one_specialist_and_not_to_the_host() -> None:
+def test_beat_belongs_to_one_specialist() -> None:
     beats: list[str] = []
     server = _server_with_beat(beats)
     server.start()
@@ -372,7 +355,6 @@ def test_beat_belongs_to_one_specialist_and_not_to_the_host() -> None:
         server.attach_heartbeat("spec-1", lambda: beats.append("beat"))
         other = server.issue_token("spec-2", "b")
         assert Client(server).call(other, "slow", {"seconds": 0.5})[0] == 200
-        assert Client(server).call(HOST_TOKEN, "slow", {"seconds": 0.5})[0] == 200
         assert Client(server).call(server.issue_token("spec-1", "b"), "slow", {"seconds": 0.0})[0] == 200
         assert beats == []
     finally:
@@ -397,7 +379,7 @@ def test_a_failing_beat_does_not_break_the_call() -> None:
     def broken() -> None:
         raise RuntimeError("beat down")
 
-    server = McpServer(McpServerConfig(host_token=HOST_TOKEN), campaign="camp", heartbeat_seconds=0.05)
+    server = McpServer(McpServerConfig(), campaign="camp", heartbeat_seconds=0.05)
     server.register(
         "slow", schema={"type": "object"}, handler=lambda a, c: time.sleep(0.3) or {"ok": 1}, scopes={"specialist"}
     )
@@ -418,7 +400,7 @@ def test_a_beat_that_raises_once_keeps_beating() -> None:
         if len(beats) == 1:
             raise RuntimeError("beat down")
 
-    server = McpServer(McpServerConfig(host_token=HOST_TOKEN), campaign="camp", heartbeat_seconds=0.05)
+    server = McpServer(McpServerConfig(), campaign="camp", heartbeat_seconds=0.05)
     server.register(
         "slow", schema={"type": "object"}, handler=lambda a, c: time.sleep(0.4) or {"ok": 1}, scopes={"specialist"}
     )
@@ -433,7 +415,7 @@ def test_a_beat_that_raises_once_keeps_beating() -> None:
 
 def test_issued_scopes_decide_which_tools_open(server: McpServer) -> None:
     with pytest.raises(ValueError, match="issued scopes"):
-        server.issue_token("s", "b", scopes=("host",))
+        server.issue_token("s", "b", scopes=("admin",))
     with pytest.raises(ValueError, match="issued scopes"):
         server.issue_token("s", "b", scopes=())
 
@@ -497,15 +479,6 @@ def test_a_specialist_reply_carries_the_annotators_block_after_the_tools_own_con
     _, _, reply = Client(noted).call(token, "whoami")
     assert _blocks(reply) == ['{"kind": "specialist", "branch": "branch-7"}', "one\ntwo"]
     assert len(_blocks(Client(noted).call(token, "whoami")[2])) == 1
-
-
-def test_the_host_gets_no_annotation_and_the_annotator_is_never_asked(noted: McpServer, feed: Feed) -> None:
-    token = _primed(noted)
-    feed.items.append("one")
-    asked = list(feed.seen)
-    _, _, reply = Client(noted).call(HOST_TOKEN, "whoami")
-    assert _blocks(reply) == ['{"kind": "host", "branch": ""}'] and feed.seen == asked
-    assert _blocks(Client(noted).call(token, "whoami")[2])[1:] == ["one"]
 
 
 def test_a_tokens_first_call_asks_where_the_feed_ends_before_the_tool_runs_and_drops_the_text(

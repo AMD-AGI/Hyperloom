@@ -7,8 +7,8 @@ A host (the application launcher) hands a hosted run its configuration through
 environment variables.  This module is the only reader of them: it checks every
 variable the run needs, names *all* the ones that are missing or malformed in a
 single :class:`HostInfoError`, and returns a frozen :class:`HostInfo` with typed
-fields.  A run that would otherwise fail hours in, on its first sandbox create
-or its first archive upload, fails before it starts instead.
+fields.  A run that would otherwise fail hours in, on its first sandbox create,
+fails before it starts instead.
 
 Which variables a run needs depends on what it hosts, so :func:`read_host_info`
 takes the groups to require (:class:`HostGroup`).  The run, state and input
@@ -17,8 +17,7 @@ variables are required unless the reader is told the run has no host
 variable that is not required may still be set; it is then checked like a
 required one and read into its field.
 
-Credentials (sandbox keys, archive credentials) are held in
-:class:`Secret`, whose ``repr``, ``str`` and format output never contain the
+Sandbox keys are held in :class:`Secret`, whose ``repr``, ``str`` and format output never contain the
 value, and no error message here carries a value, only variable names and a
 reason.  :func:`take_host_info` also removes every host-only input from the
 environment it read, so a child process started without an explicit ``env=``
@@ -45,8 +44,8 @@ class Var:
     RUN_ID = "HYPERLOOM_RUN_ID"
     RUN_CREATED_AT = "HYPERLOOM_RUN_CREATED_AT"
     STATE_DIR = "HYPERLOOM_STATE_DIR"
-    # No longer read: the progress events and the MCP server of the retired single flow.  Named so that
-    # :data:`HOST_ONLY_VARS` still removes them from the environment a host may still set them in.
+    # No longer read: the progress events and the MCP server of the retired single flow, and the sub-run callback
+    # URL.  Named so that :data:`HOST_ONLY_VARS` still removes them from the environment a host may still set them in.
     EVENTS_DIR = "HYPERLOOM_EVENTS_DIR"
     MCP_HOST = "HYPERLOOM_MCP_HOST"
     MCP_PORT = "HYPERLOOM_MCP_PORT"
@@ -56,9 +55,10 @@ class Var:
     E2B_API_URL = "E2B_API_URL"
     E2B_SANDBOX_URL = "E2B_SANDBOX_URL"
     SANDBOX_KEY_MEASUREMENT = "HYPERLOOM_SANDBOX_KEY_MEASUREMENT"
-    SANDBOX_KEY_SUBRUN = "HYPERLOOM_SANDBOX_KEY_SUBRUN"
+    SANDBOX_KEY_SUBRUN = "HYPERLOOM_SANDBOX_KEY_SUBRUN"  # not read; still removed
     SANDBOX_KEY_DEV = "HYPERLOOM_SANDBOX_KEY_DEV"
-    SANDBOX_WORKSPACE = "HYPERLOOM_SANDBOX_WORKSPACE"
+    SANDBOX_WORKSPACE = "HYPERLOOM_SANDBOX_WORKSPACE"  # not read (a Claw grant's key names its own); still removed
+    # Not read (no result archive outside the shared storage was built); still removed.
     RESULT_ARCHIVE = "HYPERLOOM_RESULT_ARCHIVE"
     ARCHIVE_ENDPOINT_URL = "AWS_ENDPOINT_URL_S3"
     ARCHIVE_REGION = "AWS_REGION"
@@ -68,6 +68,7 @@ class Var:
     GRANT_LIMITS = "HYPERLOOM_GRANT_LIMITS"
     SOURCE_REPO = "HYPERLOOM_SOURCE_REPO"
     SOURCE_SHA = "HYPERLOOM_SOURCE_SHA"
+    # Read by other code from the environment, not here; left in place.
     NODE_NAME = "NODE_NAME"
     CLAW_SESSION_ID = "CLAW_SESSION_ID"
 
@@ -88,7 +89,8 @@ SECRET_VARS: tuple[str, ...] = (
 _KEPT_IN_ENVIRONMENT: frozenset[str] = frozenset({Var.NODE_NAME, Var.CLAW_SESSION_ID})
 
 #: Every host-only input: removed from the environment once read, so a child process started without an
-#: explicit ``env=`` does not inherit it.  The values live on :class:`HostInfo` from then on.
+#: explicit ``env=`` does not inherit it.  The values still read live on :class:`HostInfo` from then on; the retired
+#: ones are dropped.
 HOST_ONLY_VARS: tuple[str, ...] = tuple(
     value for name, value in vars(Var).items() if not name.startswith("_") and value not in _KEPT_IN_ENVIRONMENT
 )
@@ -97,11 +99,8 @@ HOST_ONLY_VARS: tuple[str, ...] = tuple(
 class HostGroup(str, Enum):
     """A set of inputs a run needs only when it hosts the part that reads them."""
 
-    MCP_PUBLIC_URL = "mcp-public-url"
     SANDBOX = "sandbox"
     MEASUREMENT_KEY = "measurement-key"
-    SUBRUN_KEY = "subrun-key"
-    DEV_KEY = "dev-key"
     GRANT = "grant"
     SOURCE = "source"
 
@@ -109,11 +108,8 @@ class HostGroup(str, Enum):
 _RUN_INPUTS: tuple[str, ...] = (Var.INPUT_FILE, Var.RUN_ID, Var.RUN_CREATED_AT, Var.STATE_DIR)
 
 _GROUP_VARS: Mapping[HostGroup, tuple[str, ...]] = {
-    HostGroup.MCP_PUBLIC_URL: (Var.MCP_PUBLIC_URL,),
     HostGroup.SANDBOX: (Var.SANDBOX_TEMPLATES, Var.E2B_API_URL, Var.E2B_SANDBOX_URL),
     HostGroup.MEASUREMENT_KEY: (Var.SANDBOX_KEY_MEASUREMENT,),
-    HostGroup.SUBRUN_KEY: (Var.SANDBOX_KEY_SUBRUN,),
-    HostGroup.DEV_KEY: (Var.SANDBOX_KEY_DEV,),
     # The grant's runtime counts from the run's creation, so its limits are of no use without that time.
     HostGroup.GRANT: (Var.GRANT_LIMITS, Var.RUN_CREATED_AT),
     HostGroup.SOURCE: (Var.SOURCE_REPO, Var.SOURCE_SHA),
@@ -122,7 +118,6 @@ _GROUP_VARS: Mapping[HostGroup, tuple[str, ...]] = {
 #: Required by default: no group, only the run, state and input variables.
 DEFAULT_REQUIRE: frozenset[HostGroup] = frozenset()
 
-_BUCKET_RE = re.compile(r"^[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]$")
 _COMMIT_SHA_RE = re.compile(r"^[0-9a-f]{40}$")
 _CONTROL_OR_SPACE_RE = re.compile(r"[\s\x00-\x1f\x7f]")
 
@@ -172,28 +167,10 @@ class Secret:
 
 
 @dataclass(frozen=True)
-class ArchiveLocation:
-    """Where results are archived: ``s3://<bucket>/<prefix>``."""
-
-    bucket: str
-    prefix: str
-
-
-@dataclass(frozen=True)
-class ArchiveCredentials:
-    """Static credentials for the archive store; the session token is present for temporary ones."""
-
-    access_key_id: Secret
-    secret_access_key: Secret
-    session_token: Secret | None
-
-
-@dataclass(frozen=True)
 class SandboxKeys:
     """One sandbox API key per role; a role the run does not host is ``None``."""
 
     measurement: Secret | None
-    subrun: Secret | None
     dev: Secret | None
 
 
@@ -216,21 +193,13 @@ class HostInfo:
     run_id: str
     run_created_at: datetime
     state_dir: Path
-    mcp_public_url: str | None
     sandbox_templates: dict[str, object] | None
     e2b_api_url: str | None
     e2b_sandbox_url: str | None
     sandbox_keys: SandboxKeys
-    result_archive: ArchiveLocation | None  # None: results are archived on the shared storage
-    archive_endpoint_url: str | None
-    archive_region: str | None
-    archive_credentials: ArchiveCredentials | None
-    node_name: str | None
-    claw_session_id: str | None
     grant_limits: GrantLimits | None = None
     source_repo: str | None = None  # what the runner sandbox's start-up script fetches
     source_sha: str | None = None  # full 40-hex commit id of the version this run executes
-    sandbox_workspace: str | None = None  # the workspace a SaFE key used directly creates sandboxes in; never on Claw
 
 
 class _Reader:
@@ -242,19 +211,16 @@ class _Reader:
         self.missing: list[str] = []
         self.invalid: dict[str, str] = {}
 
-    def raw(self, name: str, *, force: bool = False) -> str | None:
+    def raw(self, name: str) -> str | None:
         value = self._env.get(name, "")
         if value.strip():
             return value
-        if force or name in self._needed:
+        if name in self._needed:
             self.missing.append(name)
         return None
 
-    def present(self, name: str) -> bool:
-        return bool(self._env.get(name, "").strip())
-
-    def _parsed(self, name: str, parse, *, force: bool = False):
-        value = self.raw(name, force=force)
+    def _parsed(self, name: str, parse):
+        value = self.raw(name)
         if value is None:
             return None
         try:
@@ -281,17 +247,14 @@ class _Reader:
     def templates(self, name: str) -> dict[str, object] | None:
         return self._parsed(name, _templates)
 
-    def archive(self, name: str) -> ArchiveLocation | None:
-        return self._parsed(name, _archive_location)
-
     def grant_limits(self, name: str) -> GrantLimits | None:
         return self._parsed(name, _grant_limits)
 
     def commit_sha(self, name: str) -> str | None:
         return self._parsed(name, _commit_sha)
 
-    def secret(self, name: str, *, force: bool = False) -> Secret | None:
-        value = self._parsed(name, _plain_text, force=force)
+    def secret(self, name: str) -> Secret | None:
+        value = self._parsed(name, _plain_text)
         return None if value is None else Secret(value)
 
 
@@ -401,20 +364,6 @@ def _grant_limits(value: str) -> GrantLimits:
     return GrantLimits(**totals)  # type: ignore[arg-type]
 
 
-def _archive_location(value: str) -> ArchiveLocation:
-    parts = urlsplit(value)
-    if parts.scheme != "s3" or parts.query or parts.fragment:
-        raise ValueError("only s3://<bucket>/<prefix> or unset (shared storage) is accepted")
-    if not _BUCKET_RE.match(parts.netloc):
-        raise ValueError("bucket is not a valid S3 bucket name")
-    # Split the raw path: S3 keys are literal, so a path normaliser would accept a malformed prefix as another one.
-    raw = parts.path.removeprefix("/").removesuffix("/")
-    segments = raw.split("/") if raw else []
-    if any(segment in ("", ".", "..") for segment in segments):
-        raise ValueError("prefix must not contain empty, '.' or '..' segments")
-    return ArchiveLocation(bucket=parts.netloc, prefix=raw)
-
-
 def _needed_names(require: Collection[HostGroup], require_run: bool) -> frozenset[str]:
     names = set(_RUN_INPUTS if require_run else ())
     for group in require:
@@ -425,45 +374,23 @@ def _needed_names(require: Collection[HostGroup], require_run: bool) -> frozense
 def _sandbox_keys(reader: _Reader) -> SandboxKeys:
     return SandboxKeys(
         measurement=reader.secret(Var.SANDBOX_KEY_MEASUREMENT),
-        subrun=reader.secret(Var.SANDBOX_KEY_SUBRUN),
         dev=reader.secret(Var.SANDBOX_KEY_DEV),
     )
 
 
-def _archive_credentials(reader: _Reader, archive: ArchiveLocation | None) -> ArchiveCredentials | None:
-    # Required only for an s3:// archive.  Otherwise the pair is all or nothing: one half set means the host meant
-    # to give credentials and got them wrong.
-    pair = (Var.AWS_ACCESS_KEY_ID, Var.AWS_SECRET_ACCESS_KEY)
-    force = archive is not None or any(reader.present(name) for name in pair)
-    key_id, secret = (reader.secret(name, force=force) for name in pair)
-    token = reader.secret(Var.AWS_SESSION_TOKEN)
-    if key_id is None or secret is None:
-        return None
-    return ArchiveCredentials(access_key_id=key_id, secret_access_key=secret, session_token=token)
-
-
 def _build(reader: _Reader) -> HostInfo:
-    result_archive = reader.archive(Var.RESULT_ARCHIVE)
     return HostInfo(
         input_file=reader.existing_file(Var.INPUT_FILE),  # type: ignore[arg-type]
         run_id=reader.text(Var.RUN_ID),  # type: ignore[arg-type]
         run_created_at=reader.timestamp(Var.RUN_CREATED_AT),  # type: ignore[arg-type]
         state_dir=reader.existing_dir(Var.STATE_DIR),  # type: ignore[arg-type]
-        mcp_public_url=reader.url(Var.MCP_PUBLIC_URL),
         sandbox_templates=reader.templates(Var.SANDBOX_TEMPLATES),
         e2b_api_url=reader.url(Var.E2B_API_URL),
         e2b_sandbox_url=reader.url(Var.E2B_SANDBOX_URL),
         sandbox_keys=_sandbox_keys(reader),
-        result_archive=result_archive,
-        archive_endpoint_url=reader.url(Var.ARCHIVE_ENDPOINT_URL),
-        archive_region=reader.text(Var.ARCHIVE_REGION),
-        archive_credentials=_archive_credentials(reader, result_archive),
-        node_name=reader.text(Var.NODE_NAME),
-        claw_session_id=reader.text(Var.CLAW_SESSION_ID),
         grant_limits=reader.grant_limits(Var.GRANT_LIMITS),
         source_repo=reader.text(Var.SOURCE_REPO),
         source_sha=reader.commit_sha(Var.SOURCE_SHA),
-        sandbox_workspace=reader.text(Var.SANDBOX_WORKSPACE),
     )
 
 
@@ -473,9 +400,8 @@ def read_host_info(
     """Read and check the host-injected inputs from *env*.
 
     The run, state and input variables are required unless *require_run* is
-    false; *require* adds the groups the run hosts (sandbox variables when the
-    measurement or sandbox plug is hosted, the archive when results are
-    archived, and so on).  Every missing or malformed variable is reported in
+    false; *require* adds the groups the run hosts (the sandbox variables, the
+    measurement key, the grant and the source).  Every missing or malformed variable is reported in
     one :class:`HostInfoError`.  *env* is not modified.
     """
     reader = _Reader(env, _needed_names(require, require_run))

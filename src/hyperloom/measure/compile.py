@@ -860,19 +860,6 @@ class EnvironmentCompiler:
         return roots, () if built is None else (BuildNeed(component.component, built.inputs),)
 
 
-def compile_environment(
-    recipe: Recipe,
-    action: RecipeDelta,
-    *,
-    blobs: BlobStore,
-    active_image_digest: str,
-    locator: PackageLocator = locate_source,
-) -> CompiledEnvironment:
-    """The environment ``recipe`` plus ``action`` describes; raises :class:`CompileError` when it cannot be built."""
-
-    return EnvironmentCompiler(blobs, active_image_digest, locator).compile(recipe, action)
-
-
 __all__ = [
     "ATTACH_PLACEHOLDER",
     "COMPONENT_LAYOUTS",
@@ -895,7 +882,6 @@ __all__ = [
     "apply_patch_stack",
     "attachment_placeholder",
     "check_base_image",
-    "compile_environment",
     "kernel_attachments",
     "kernel_load_env",
     "kernel_rows_only",

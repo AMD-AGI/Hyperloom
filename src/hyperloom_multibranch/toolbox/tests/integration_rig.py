@@ -12,7 +12,6 @@ from __future__ import annotations
 
 import json
 import asyncio
-import secrets
 import sys
 import urllib.request
 from collections.abc import AsyncIterator, Callable, Mapping
@@ -96,9 +95,6 @@ class Stack:
     blobs: LocalBlobStore
     baseline_commit: str
 
-    def specialist_blackboard(self, branch: str) -> LocalBlackboard:
-        return LocalBlackboard(self.root / "blackboard", Writer(Role.SPECIALIST_RUNTIME, branch, branch))
-
 
 class Specialist:
     """One scripted specialist: calls the campaign's MCP service over HTTP with the token of its own branch."""
@@ -157,7 +153,7 @@ async def build_stack(root: Path, variant: Variant, baseline: Recipe, *, k: int 
             poll_interval_sec=variant.poll_interval_sec,
         ),
     )
-    server = McpServer(McpServerConfig(host_token=secrets.token_hex(16)), campaign="integration")
+    server = McpServer(McpServerConfig(), campaign="integration")
     register_specialist_tools(
         server,
         toolbox=toolbox,

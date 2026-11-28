@@ -5,14 +5,13 @@
 
 from __future__ import annotations
 
-import json
-import os
-import tempfile
 import threading
 import time
 from collections.abc import Callable, Sequence
 from pathlib import Path
 from typing import Any
+
+from hyperloom_common.io import JsonFormat, WriteOptions, atomic_write_json
 
 from hyperloom.measure.boot_watch import server_ready
 from hyperloom.measure.failures import FOREIGN_PROCESS_ON_CARD
@@ -25,7 +24,6 @@ __all__ = [
     "RunnerFailure",
     "join_notes",
     "wait_for_file",
-    "write_json_atomic",
     "write_status",
 ]
 
@@ -42,6 +40,9 @@ _REFRESH_SEC = 20.0
 #: ``status.json`` keeps this many characters of its message.
 _MESSAGE_LIMIT = 2000
 _ROOM_FOR_COUNT = 40
+#: The runner's files are read by the application while the runner writes them: whole, flushed, one line.
+_COMPACT = JsonFormat(indent=None)
+_DURABLE = WriteOptions(fsync=True)
 
 
 class RunnerFailure(Exception):
@@ -54,24 +55,6 @@ class RunnerFailure(Exception):
     @property
     def exit_code(self) -> int:
         return EXIT_CODES.get(self.error_class, 1)
-
-
-def write_json_atomic(path: Path, document: dict[str, Any]) -> None:
-    """Write ``path`` so a reader sees the old file or the new one, never half of one or none.
-
-    The content goes to a scratch file of its own in the same directory (two writers never share one), is flushed to
-    disk, and then replaces ``path`` in one step.
-    """
-    fd, scratch_name = tempfile.mkstemp(dir=path.parent, prefix=f".{path.name}.", suffix=".tmp")
-    try:
-        with os.fdopen(fd, "w", encoding="utf-8") as scratch:
-            scratch.write(json.dumps(document, sort_keys=True))
-            scratch.flush()
-            os.fsync(scratch.fileno())
-        os.replace(scratch_name, path)
-    except BaseException:
-        Path(scratch_name).unlink(missing_ok=True)
-        raise
 
 
 def join_notes(notes: Sequence[str]) -> str:
@@ -96,7 +79,7 @@ def join_notes(notes: Sequence[str]) -> str:
 def write_status(out_dir: Path, *, state: str, error_class: str | None = None, message: str = "") -> None:
     """Write ``status.json``; it is always the last file, so its presence says the runner has ended."""
     document = {"state": state, "error_class": error_class, "message": message[-_MESSAGE_LIMIT:]}
-    write_json_atomic(out_dir / "status.json", document)
+    atomic_write_json(out_dir / "status.json", document, fmt=_COMPACT, options=_DURABLE)
 
 
 def wait_for_file(
@@ -143,7 +126,7 @@ class Progress:
     def flush(self) -> None:
         with self._lock:
             document = {**self._state, "updated_unix": time.time()}
-        write_json_atomic(self._path, {**document, **self._live_log()})
+        atomic_write_json(self._path, {**document, **self._live_log()}, fmt=_COMPACT, options=_DURABLE)
 
     def _live_log(self) -> dict[str, Any]:
         if self._files_dir is None:

@@ -15,10 +15,10 @@ from hyperloom.contracts.recipe import RecipeDelta
 from hyperloom.measure.compile import (
     COMPONENT_LAYOUTS,
     ComponentLayout,
+    EnvironmentCompiler,
     LocalBlobStore,
     PackageBase,
     PatchApplyError,
-    compile_environment,
 )
 from hyperloom.measure.tests._recipes import IMAGE, git_patch, put_patch, recipe_with, write_tree
 
@@ -62,9 +62,11 @@ def compile_patch(tmp_path: Path, blobs: LocalBlobStore, component: str, files: 
     installed = write_tree(tmp_path / "image" / COMPONENT_LAYOUTS[component].import_name, IMAGE_FILES[component])
     base = PackageBase(installed.name, installed, installed.name, "1.0")
     recipe = recipe_with((put_patch(blobs, "p.patch", patch),), component=component)
-    return compile_environment(
-        recipe, RecipeDelta(), blobs=blobs, active_image_digest=IMAGE, locator=lambda layout: base
-    ).roots
+    return (
+        EnvironmentCompiler(blobs=blobs, active_image_digest=IMAGE, locator=lambda layout: base)
+        .compile(recipe, RecipeDelta())
+        .roots
+    )
 
 
 @pytest.mark.parametrize(

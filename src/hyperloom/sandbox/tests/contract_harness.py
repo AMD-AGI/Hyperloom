@@ -13,8 +13,8 @@ Every test of the suite runs once per implementation, chosen by the ``harness`` 
   honour that policy, so the tests marked ``claw_policy`` are skipped there. When ``HYPERLOOM_E2B_CONTRACT_API_URL`` is
   set the same suite runs against the real Claw sandbox service instead, ``claw_policy`` tests included; the service's
   data-plane router is ``HYPERLOOM_E2B_CONTRACT_SANDBOX_URL``, the keys are
-  ``HYPERLOOM_SANDBOX_KEY_{MEASUREMENT,SUBRUN,DEV}``, and ``HYPERLOOM_E2B_CONTRACT_TEMPLATES`` names its templates as
-  ``sealed,dev,subrun`` (the sealed one must run a runner that copies ``/in/spec.json`` to ``/out/status.json``). The
+  ``HYPERLOOM_SANDBOX_KEY_{MEASUREMENT,DEV}``, and ``HYPERLOOM_E2B_CONTRACT_TEMPLATES`` names its templates as
+  ``sealed,dev`` (the sealed one must run a runner that copies ``/in/spec.json`` to ``/out/status.json``). The
   keys must belong to an otherwise idle application run: a test lists everything its key can see.
 
 Another implementation joins by adding a builder here and a parameter to the fixture.
@@ -77,7 +77,6 @@ class Harness:
         sealed_template: A measurement-role sealed template that signs, and
             whose runner copies ``/in/spec.json`` to ``/out/status.json``.
         dev_template: An unsealed template for the ``dev`` role.
-        subrun_template: An unsealed template for the ``subrun`` role.
         claw_policy: Whether the implementation enforces the Claw sandbox service's own policy; the tests marked
             ``claw_policy`` need it.
     """
@@ -85,7 +84,6 @@ class Harness:
     provider: SandboxProvider
     sealed_template: str
     dev_template: str
-    subrun_template: str
     claw_policy: bool = True
 
 
@@ -139,10 +137,9 @@ def local_harness() -> Iterator[Harness]:
             "runner", "measurement", command=(sys.executable, "-c", FAKE_RUNNER), gpus=1, sealed=True, signing=True
         ),
         LocalTemplate("dev", "dev"),
-        LocalTemplate("sub", "subrun"),
     ]
     with LocalSandboxProvider(templates, gpus=[0, 1, 2, 3], hostname="node-a") as provider:
-        yield Harness(provider, "runner", "dev", "sub")
+        yield Harness(provider, "runner", "dev")
 
 
 @contextmanager
@@ -168,11 +165,10 @@ def standin_harness(workdir: Path, rig: Rig) -> Iterator[Harness]:
             envs=rig.sandbox_env(),
         ),
         StandInTemplate("dev", "dev"),
-        StandInTemplate("sub", "subrun"),
     ]
     with StandIn(Path(os.environ[ENVD_ENV]), workdir, templates) as standin:
         provider = E2BSandboxProvider(standin.keys, api_url=standin.api_url, sandbox_url=standin.sandbox_url)
-        yield Harness(provider, "runner", "dev", "sub", claw_policy=False)
+        yield Harness(provider, "runner", "dev", claw_policy=False)
 
 
 @contextmanager
@@ -185,12 +181,14 @@ def claw_service_harness() -> Iterator[Harness]:
         keys,
         api_url=api_url,
         sandbox_url=os.environ.get(_SERVICE_SANDBOX_URL_ENV, api_url),
-        workspace=os.environ.get("HYPERLOOM_SANDBOX_WORKSPACE") or None,
     )
-    sealed, dev, subrun = os.environ[_SERVICE_TEMPLATES_ENV].split(",")
+    names = os.environ[_SERVICE_TEMPLATES_ENV].split(",")
+    if len(names) != 2:
+        raise ValueError(f"{_SERVICE_TEMPLATES_ENV} names two templates, sealed,dev; got {len(names)}")
+    sealed, dev = names
     wait_sec = float(os.environ.get(_SERVICE_WAIT_ENV, _SERVICE_WAIT_SEC))
     provider = _KillsWhatItMade(service, min_wait_sec=wait_sec)
     try:
-        yield Harness(provider, sealed, dev, subrun)
+        yield Harness(provider, sealed, dev)
     finally:
         provider.kill_all()

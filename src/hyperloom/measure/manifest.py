@@ -79,7 +79,7 @@ class RulePackFacts:
 class CardOccupancyFacts:
     """What the runner says of who else used its cards: ``clean``, ``foreign`` with the process it saw (the guard only
     observed it) or ``unknown`` with the reason it could not look, how many looks read the list, and ``method``, how a
-    look told a holder from the test's own (absent from a manifest an older runner signed)."""
+    look told a holder from the test's own (``None`` when the runner states none)."""
 
     state: str
     reason: str | None
@@ -100,8 +100,8 @@ class CardOccupancyFacts:
 
 @dataclass(frozen=True)
 class RunnerFacts:
-    """What the runner states about itself. ``rule_pack`` and ``card_occupancy`` are absent from a manifest an older runner
-    signed, and ``card_occupancy`` from one a runner without a card signed."""
+    """What the runner states about itself. ``card_occupancy`` is absent from a manifest a runner without a card
+    signed."""
 
     sandbox_id: str
     signing_key_fingerprint: str
@@ -115,14 +115,13 @@ class RunnerFacts:
     inferencex_commit: str
     gpu_ids: tuple[int, ...]
     ecc_delta: EccDelta | None
-    rule_pack: RulePackFacts | None = None
+    rule_pack: RulePackFacts
     card_occupancy: CardOccupancyFacts | None = None
 
     @classmethod
     def parse(cls, value: Any, path: str) -> "RunnerFacts":
         r = Reader(value, path)
         ecc = r.optional("ecc_delta")
-        pack = r.optional("rule_pack")
         occupancy = r.optional("card_occupancy")
         facts = cls(
             sandbox_id=r.text("sandbox_id") or "",
@@ -137,7 +136,7 @@ class RunnerFacts:
             inferencex_commit=r.text("inferencex_commit") or "",
             gpu_ids=r.sequence("gpu_ids", _gpu_id),
             ecc_delta=None if ecc is None else EccDelta.parse(ecc, r.at("ecc_delta")),
-            rule_pack=None if pack is None else RulePackFacts.parse(pack, r.at("rule_pack")),
+            rule_pack=r.section("rule_pack", RulePackFacts.parse),
             card_occupancy=None if occupancy is None else CardOccupancyFacts.parse(occupancy, r.at("card_occupancy")),
         )
         r.done()
@@ -199,9 +198,7 @@ def _phase(value: Any, path: str) -> PhaseTiming:
 
 
 def _phases(value: Any, path: str) -> tuple[PhaseTiming, ...]:
-    """The runner's phases, lengths on its own clock; a manifest an older runner signed has none."""
-    if value is None:
-        return ()
+    """The runner's phases, lengths on its own clock."""
     if not isinstance(value, list):
         raise DocumentError(f"{path}: expected an array")
     if len(value) > MAX_PHASES:
@@ -218,9 +215,9 @@ class Timing:
     spec_received_unix: float
     server_ready_unix: float | None
     finished_unix: float
+    phases: tuple[PhaseTiming, ...]
     jit_compile_sec: float | None = None
     model_load_sec: float | None = None
-    phases: tuple[PhaseTiming, ...] = ()
 
     @classmethod
     def parse(cls, value: Any, path: str) -> "Timing":
@@ -232,7 +229,7 @@ class Timing:
             finished_unix=r.number("finished_unix", minimum=0) or 0.0,
             jit_compile_sec=r.number("jit_compile_sec", minimum=0, optional=True),
             model_load_sec=r.number("model_load_sec", minimum=0, optional=True),
-            phases=_phases(r.optional("phases"), r.at("phases")),
+            phases=_phases(r.raw("phases"), r.at("phases")),
         )
         r.done()
         return timing
@@ -348,7 +345,7 @@ class ResultManifest:
     files: tuple[ManifestFile, ...]
     jit_cache: JitCacheFacts | None = None
     #: What the runner noted of the test that the rest of the result does not say (a check it could not make, a CPU build
-    #: of aiter's modules it used or why not), in its order; none in a manifest an older runner signed.
+    #: of aiter's modules it used or why not), in its order; absent from a manifest when there is none.
     notes: tuple[str, ...] = ()
 
     @classmethod

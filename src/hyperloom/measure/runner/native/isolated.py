@@ -45,7 +45,6 @@ from __future__ import annotations
 
 import json
 import os
-import resource
 import shutil
 import stat
 import subprocess
@@ -72,7 +71,7 @@ from hyperloom.measure.jit.native.key import BuildInputs
 from hyperloom.measure.jit.native.record import COMPILE_ENV_PREFIX, FAILED, READY, OutputFile
 from hyperloom.measure.jit.native.store import BuildInfraError
 from hyperloom.measure.jit.store import SnapshotInvalid, read_bounded
-from hyperloom.measure.runner.native.builder import LaidTree
+from hyperloom.measure.runner.native.builder import LaidTree, children_cpu_seconds
 from hyperloom.measure.runner.native.planning import NativePlanner, PlannedBuild
 from hyperloom.measure.runner.native.process_group import run_in_group
 from hyperloom.measure.runner.native.recipes import CHILD_PASSED_ENV_NAMES
@@ -389,14 +388,14 @@ class IsolatedBuilds:
         laid = planned.lay(self._blobs, work)
         _write_job(work, job_document(laid, self._factories[laid.recipe.component]))
         command, env = self._command(isolation, work, laid)
-        started, cpu_before = time.monotonic(), _children_cpu_seconds()
+        started, cpu_before = time.monotonic(), children_cpu_seconds()
         try:
             done = run_in_group(
                 command, cwd=work, env=env, capture_output=True, text=True, timeout=laid.recipe.budget_sec + _MARGIN_SEC
             )
         except subprocess.TimeoutExpired:
             raise BuildInfraError(f"the build runner of {laid.recipe.component} did not end in time") from None
-        timing = (_children_cpu_seconds() - cpu_before, time.monotonic() - started)
+        timing = (children_cpu_seconds() - cpu_before, time.monotonic() - started)
         if done.returncode != 0:
             tail = done.stderr.strip()[-_STDERR_TAIL:]
             raise BuildInfraError(f"the build runner exited {done.returncode}: {tail}")
@@ -474,11 +473,6 @@ def _child_environment(work: Path) -> dict[str, str]:
         "LC_ALL": "C.UTF-8",
         **{name: os.environ[name] for name in CHILD_PASSED_ENV_NAMES if os.environ.get(name)},
     }
-
-
-def _children_cpu_seconds() -> float:
-    usage = resource.getrusage(resource.RUSAGE_CHILDREN)
-    return usage.ru_utime + usage.ru_stime
 
 
 def staged_record(work: Path, timing: tuple[float, float]) -> Staged:

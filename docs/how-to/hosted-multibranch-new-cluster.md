@@ -20,9 +20,7 @@ before anything is created, with a final `exit.json` (`"final": true`) whose `er
 Some lines below describe what the hosted multi-branch entry, `hyperloom-multibranch hosted run`, does: the checks that
 make an app-host variable required (all of them except `USER_DATA_PATH` and the source pair, which the host bootstrap
 checks) and every statement about what the session does (it builds the runner cache entry, passes the create variables
-and takes the framework snapshot). That entry lands with the multi-branch CLI. The sandbox side, the cache layout and the
-commands at the end of this page do not depend on it; until it is in place, build the cache entry by hand (see the
-example at the end).
+and takes the framework snapshot).
 
 ## App host
 

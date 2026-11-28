@@ -31,11 +31,9 @@ import yaml
 from hyperloom.common.benchmark_config import BenchmarkPoint
 from hyperloom.inference_optimizer.framework_registry import FRAMEWORKS
 from hyperloom.measure.farm import Farm, FarmError, locate_package, server_python
-from hyperloom.measure.framework.table_modules import stale_table_modules
 from hyperloom.measure.jit.key import AITER_PACKAGE
-from hyperloom.measure.jit.modules import config_path, env_touched_entries, module_build_limit_sec, read_config
-from hyperloom.measure.jit.prewarmed import unlike_prewarmed
-from hyperloom.measure.runner.own_jit import point_configs, server_environments
+from hyperloom.measure.jit.modules import module_build_limit_sec
+from hyperloom.measure.runner.own_jit import point_configs, server_environments, stale_entries
 from hyperloom.measure.socket import TestCall
 
 __all__ = ["WATCHDOG_MARGIN_SEC", "raise_rebuild_watchdog", "rebuild_watchdog_sec"]
@@ -102,15 +100,7 @@ def _stale_modules(
     except FarmError:
         return frozenset()
     package = farm.site / AITER_PACKAGE if farm is not None and AITER_PACKAGE in farm.packages else image
-    try:
-        config = read_config(config_path(package))
-    except (OSError, ValueError):
-        return frozenset()
-    return (
-        stale_table_modules(config, image, package, servers)
-        | env_touched_entries(config, servers, environ, gfx_arch)
-        | unlike_prewarmed(image / "jit", servers, gfx_arch)
-    )
+    return stale_entries(package, image, servers, environ, gfx_arch)[1]
 
 
 def _with_watchdog(config: dict[str, Any], seconds: int) -> bool:

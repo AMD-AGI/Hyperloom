@@ -263,8 +263,6 @@ def test_the_command_line_takes_the_target_as_one_tag_and_alone(
     assert [wheel.sha256 for wheel in manifest.wheels if wheel.name == "bin-pkg"] == [digests["cp314"]]
     assert cache_build.main([*common, "--wheel-target", "cp314"]) == 1
     assert "must name the runner's interpreter" in capsys.readouterr().err
-    with pytest.raises(SystemExit):
-        cache_build.main([*common, "--wheel-target", "cp314-manylinux_2_28_x86_64", "--python-version", "3.14"])
 
 
 @pytest.mark.parametrize(("pip", "flags"), [((23, 0), ["--ignore-requires-python"]), ((24, 2), []), ((26, 1), [])])

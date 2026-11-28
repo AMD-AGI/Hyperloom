@@ -81,8 +81,6 @@ GPU_DEVICES = (Path("/dev/kfd"), Path("/dev/dri"))
 #: Set inside only (``--setenv``): the sandbox's id, by which the reap, the tag sweep and the card guard find its
 #: processes.
 MARKS = (SANDBOX_TAG_ENV,)
-#: The variable naming the app's state directory, which no bind may show.
-STATE_DIR_ENV = "HYPERLOOM_STATE_DIR"
 #: The shell a sandbox's commands run under.
 SHELL = "/bin/sh"
 #: What is said once when the tests of this host run unconfined.
@@ -105,11 +103,10 @@ def _warn_once(message: str) -> None:
 class RunnerPlan:
     """What a confined test sandbox's processes read besides their toolchain, their own ``fs/`` and their own key:
     ``readable`` trees (the model, the Hugging Face cache, the runner cache, the compiled-code store, the framework
-    snapshot); ``app_only`` paths no bind may show, nor anything above them (the app's state directory and the
-    provider's directory of sandboxes, which holds every sandbox's key, are added); ``devices``, bound for a template
-    with cards. ``refused`` says why a tree its maker found it must read cannot be bound safely (one in a credential
-    location, whose credentials no mask would hide); a sandbox of a plan that says any runs as before, said at
-    WARNING, and a hosted run refuses it."""
+    snapshot); ``app_only`` paths no bind may show, nor anything above them (the provider's directory of sandboxes,
+    which holds every sandbox's key, is added); ``devices``, bound for a template with cards. ``refused`` says why a
+    tree its maker found it must read cannot be bound safely (one in a credential location, whose credentials no mask
+    would hide); a sandbox of a plan that says any runs as before, said at WARNING, and a hosted run refuses it."""
 
     readable: tuple[Path, ...] = ()
     app_only: tuple[Path, ...] = ()
@@ -268,9 +265,9 @@ class SandboxConfiner:
         """The policy of every launch of the sandbox, or why bubblewrap must not launch it: ``fs/`` writable, and a
         sealed sandbox's ``private/``; the toolchain and the plan's trees read-only, but none in a tree it writes,
         which shows it already, none of the plan's that is a credential location, and none of a plan that refused a
-        tree (:attr:`RunnerPlan.refused`); the credential locations they show masked; the devices; the app's state and
-        the provider's directory never bound. No launch dies with the thread that started it: the sandbox's kill and
-        timeout end it, with their grace."""
+        tree (:attr:`RunnerPlan.refused`); the credential locations they show masked; the devices; the provider's
+        directory never bound. No launch dies with the thread that started it: the sandbox's kill and timeout end it,
+        with their grace."""
         directory, env = sandbox.directory, sandbox.env
         writable = (directory / "fs", *((directory / "private",) if sandbox.sealed else ()))
         trees = (*writable, Path(scratch.tmp), Path(scratch.shm))
@@ -284,13 +281,12 @@ class SandboxConfiner:
         if exposed:
             return exposed
         masked = credential_paths(env, allowed=(*readable, *writable), writable=trees)
-        state = os.environ.get(STATE_DIR_ENV, "")
         confinement = Confinement(
             writable=writable,
             readable=readable,
             masked=masked,
             devices=self.plan.devices if sandbox.gpus else (),
-            app_only=(*self.plan.app_only, self.base, *((Path(state),) if os.path.isabs(state) else ())),
+            app_only=(*self.plan.app_only, self.base),
         )
         version = isolation.probe.version or (0, 0, 0)
         try:

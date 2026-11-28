@@ -25,8 +25,7 @@ import yaml
 from hyperloom.contracts.recipe import RecipeDelta
 from hyperloom.measure import signing
 from hyperloom.measure.bundle import BundleExpectation, verify_bundle
-from hyperloom.measure.compile import LocalBlobStore, PackageBase, compile_environment
-from hyperloom.measure.hosted_spec import dir_manifest_sha256
+from hyperloom.measure.compile import EnvironmentCompiler, LocalBlobStore, PackageBase
 from hyperloom.measure.manifest import ResultManifest
 from hyperloom.measure.pins import IMAGE_DIGEST_VAR
 from hyperloom.measure.points import default_canonical, generate_points
@@ -147,16 +146,11 @@ def test_a_sheet_that_does_not_parse_is_spec_rejected(tmp_path, env):
     assert not (tmp_path / "out" / "manifest.json").exists()
 
 
-@pytest.mark.parametrize(
-    ("point", "hashes"),
-    [({"model": "/m"}, {}), ({"benchmark": {"framework": "sglang"}}, {"config.json": "ab" * 32})],
-    ids=["no benchmark block", "hashed model files with no model"],
-)
-def test_a_sheet_whose_point_names_no_model_to_hash_is_spec_rejected(tmp_path, env, point, hashes):
-    text = yaml.safe_dump(point)
+def test_a_sheet_whose_point_has_no_benchmark_block_is_spec_rejected(tmp_path, env):
+    text = yaml.safe_dump({"model": "/m"})
     config = [{"yaml": text, "sha256": hashlib.sha256(text.encode()).hexdigest()}]
 
-    assert _go(tmp_path, env, _sheet(config=config, model_hashes=hashes)) == 3
+    assert _go(tmp_path, env, _sheet(config=config)) == 3
     assert _status(tmp_path)["error_class"] == "spec_rejected"
 
 
@@ -770,7 +764,7 @@ def test_gpu_facts_that_cannot_be_read_are_not_compared_and_the_run_says_so(tmp_
 
     assert _go(tmp_path, env, _sheet()) == 0
 
-    assert "could not be read; they were not compared" in _status(tmp_path)["message"]
+    assert "could not be read; it was not compared" in _status(tmp_path)["message"]
 
 
 # --- what the runner refuses in the sheet before it runs anything --------------------------------------------------
@@ -859,85 +853,6 @@ def test_framework_files_compiled_against_another_version_are_refused_as_a_versi
     assert status["error_class"] == "framework_version_mismatch", status
     assert "PyYAML 0.0.1" in status["message"] and f"has PyYAML {installed}" in status["message"], status
     assert backend.calls == [] and not (tmp_path / "out" / "manifest.json").exists()
-
-
-def _snapshot(tmp_path) -> tuple[str, str]:
-    """A snapshot directory of two files and the manifest hash a sheet would name for it."""
-    root = tmp_path / "snapshot"
-    (root / "lib").mkdir(parents=True)
-    (root / "lib" / "a.py").write_text("a = 1\n")
-    (root / "b.cfg").write_text("b\n")
-    entries = [
-        (rel, (root / rel).stat().st_size, hashlib.sha256((root / rel).read_bytes()).hexdigest())
-        for rel in ("b.cfg", "lib/a.py")
-    ]
-    return str(root), dir_manifest_sha256(entries)
-
-
-def _with_snapshot(snapshot: str, manifest: str) -> dict:
-    return _sheet(
-        environment={"roots": [], "runtime": {"snapshot": snapshot, "manifest_sha256": manifest}, "blob_root": "/b"}
-    )
-
-
-def test_a_runtime_snapshot_that_is_its_manifest_lets_the_test_run(tmp_path, env, monkeypatch):
-    backend = _Backend(_ok)
-    monkeypatch.setattr(runner, "LocalMeasurementBackend", backend)
-
-    assert _go(tmp_path, env, _with_snapshot(*_snapshot(tmp_path))) == 0
-
-    assert len(backend.calls) == 1
-
-
-@pytest.mark.parametrize(
-    ("damage", "message"),
-    [
-        (lambda root: (root / "lib" / "a.py").write_text("a = 2\n"), "does not match its manifest hash"),
-        (lambda root: (root / "extra.py").write_text("x\n"), "does not match its manifest hash"),
-        (lambda root: (root / "b.cfg").unlink(), "does not match its manifest hash"),
-        (lambda root: (root / "link").symlink_to("/etc/passwd"), "holds a symbolic link"),
-        (shutil.rmtree, "is not a directory"),
-    ],
-    ids=["changed", "added", "removed", "link", "gone"],
-)
-def test_a_runtime_snapshot_that_is_not_its_manifest_is_spec_rejected(tmp_path, env, monkeypatch, damage, message):
-    snapshot, manifest = _snapshot(tmp_path)
-    damage(tmp_path / "snapshot")
-
-    _refused(tmp_path, env, monkeypatch, _with_snapshot(snapshot, manifest), message)
-
-
-def test_a_model_file_that_is_not_its_recorded_hash_is_spec_rejected(tmp_path, env, monkeypatch):
-    model = tmp_path / "model"
-    model.mkdir()
-    (model / "config.json").write_text('{"hidden": 1}')
-    point = yaml.safe_dump({"benchmark": {**POINT["benchmark"], "model": str(model)}})
-    sheet = _sheet(
-        config=[{"yaml": point, "sha256": hashlib.sha256(point.encode()).hexdigest()}],
-        model_hashes={"config.json": hashlib.sha256(b'{"hidden": 2}').hexdigest()},
-    )
-
-    _refused(tmp_path, env, monkeypatch, sheet, "model file config.json differs from the recorded hash")
-
-
-def test_a_model_file_that_is_its_recorded_hash_lets_the_test_run(tmp_path, env, monkeypatch):
-    model = tmp_path / "model"
-    model.mkdir()
-    (model / "config.json").write_text('{"hidden": 1}')
-    point = yaml.safe_dump({"benchmark": {**POINT["benchmark"], "model": str(model)}})
-    sheet = _sheet(
-        config=[{"yaml": point, "sha256": hashlib.sha256(point.encode()).hexdigest()}],
-        model_hashes={"config.json": hashlib.sha256(b'{"hidden": 1}').hexdigest()},
-    )
-    monkeypatch.setattr(runner, "LocalMeasurementBackend", _Backend(_ok))
-
-    assert _go(tmp_path, env, sheet) == 0
-
-
-def test_a_recorded_model_file_the_machine_does_not_have_is_spec_rejected(tmp_path, env, monkeypatch):
-    sheet = _sheet(model_hashes={"config.json": "77" * 32})
-
-    _refused(tmp_path, env, monkeypatch, sheet, "model file config.json unreadable")
 
 
 # --- the measurement surface the runner signs --------------------------------------------------------
@@ -1042,13 +957,9 @@ def accepted(tmp_path, monkeypatch):
         tmp_path / "canonical", primary_concurrency=32, config_path=default_baseline_config(), model_path=str(model)
     )
     base = PackageBase("sglang", tmp_path, None, None)
-    environment = compile_environment(
-        recipe_with(),
-        RecipeDelta(),
-        blobs=LocalBlobStore(tmp_path / "blobs"),
-        active_image_digest=IMAGE,
-        locator=lambda _l: base,
-    )
+    environment = EnvironmentCompiler(
+        blobs=LocalBlobStore(tmp_path / "blobs"), active_image_digest=IMAGE, locator=lambda _l: base
+    ).compile(recipe_with(), RecipeDelta())
     (point,) = generate_points(environment, canonical, tmp_path / "points", concurrency=(8,))
     return canonical, point
 
