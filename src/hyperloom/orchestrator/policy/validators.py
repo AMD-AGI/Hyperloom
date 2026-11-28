@@ -101,11 +101,7 @@ def validate_specialist_max_turns_raw(max_turns_raw: Any) -> None:
         raise PolicyDenied(
             f"delegate{{action='specialist'}}: params.max_turns max_turns={max_turns} must be >= 0",
             rule="specialist_dispatch_source",
-            hint=(
-                "Use a non-negative integer. "
-                "0 = unbounded (bounded by the wall-clock budget); "
-                "omit max_turns to use the default turn cap."
-            ),
+            hint=("Use a non-negative integer; 0, like an omitted max_turns, uses the default turn cap."),
         )
 
 

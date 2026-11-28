@@ -100,7 +100,8 @@ def twin_answers(action_name: str, twin: Task) -> bool:
     # A twin that measured answers a repeat; the row state is ``succeeded`` for any result.
     outcome = confirmed_result(twin)
     if action_name == "baseline":
-        return is_valid_measurement(outcome)
+        # A baseline that dropped its measured round holds a cold figure PRELUDE does not anchor on.
+        return is_valid_measurement(outcome) and not (outcome or {}).get("measure_round_dropped")
     return action_name == "integrate_patch" and bool((outcome or {}).get(RESULT_BENCHED))
 
 

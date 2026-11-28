@@ -63,9 +63,9 @@ measurement, NOT a failure — do not retry it.
   persistent conversation you remember the attempts you already made this
   session — do not re-propose a baseline whose params fingerprint
   matches a recent failure; it will fail the same way. Changing a
-  field OUTSIDE the seven does not count and does not get you a new
-  attempt: the delegate is refused as a duplicate and you have burned
-  a tick. Change the launch: `params.extra_server_args` or
+  field OUTSIDE the seven does not count: the delegate is the same
+  baseline again, run under a retry key while retries remain, and it
+  fails the same way. Change the launch: `params.extra_server_args` or
   `params.extra_envs`.
 * **RULE F2 — repeated `error_class='subprocess_nonzero'` or `'client_failed'`
   on `baseline` ⇒ stop retrying baseline.** Each class means the benchmark

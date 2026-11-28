@@ -2467,14 +2467,16 @@ async def test_baseline_delegates_with_different_launches_queue_separately(coord
     ("result", "refusal", "keys_after"),
     [
         (_FAILED_BASELINE, [], ["{key}", "{key}-retry1"]),
+        ({**_MEASURED_BASELINE, "measure_round_dropped": True}, [], ["{key}", "{key}-retry1"]),
         (_MEASURED_BASELINE, ["duplicate_idempotency_key"], ["{key}"]),
     ],
-    ids=["failed-result", "measured-result"],
+    ids=["failed-result", "cold-figure-only", "measured-result"],
 )
 async def test_a_baseline_twin_answers_a_repeat_delegate_only_once_it_measured(
     coord: Coordinator, result: dict, refusal: list[str], keys_after: list[str]
 ) -> None:
-    """Whether the twin measured is in its result: a failed one leaves a retry key, a measured one is the answer."""
+    """Whether the twin measured is in its result: a failed one, or one that kept only its warm-up's cold figure,
+    leaves a retry key; one that measured its hot round is the answer."""
     await coord.router.handle_intent("orchestration", _delegate("baseline", {}))
     (first,) = await _baselines(coord)
     await _run_baseline(coord, first, result)
