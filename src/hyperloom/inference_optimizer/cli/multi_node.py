@@ -113,6 +113,8 @@ def freeze_pd_session_launch(
         _exit_refused(
             f"the handed-over cluster is {nodes.mode.value}, the session {pd_mode}; pass --pd-mode {nodes.mode.value}"
         )
+    if str(getattr(args, "server_args", "") or "").strip():
+        _exit_refused(PD_SERVER_ARGS_REFUSAL)
     try:
         launch = freeze_launch(session_dir, session, nodes, inferencex_commit)
     except PdSessionError as exc:
@@ -131,18 +133,41 @@ def _exit_refused(problem: str) -> NoReturn:
     sys.exit(2)
 
 
+PD_SERVER_ARGS_REFUSAL = (
+    "--server-args is not supported in a node-list PD session; pass --pd-prefill-extra-args / --pd-decode-extra-args"
+)
+
+
+def refuse_pd_resume_server_args(session_dir: Path, server_args: str) -> None:
+    """Exit 2 when a resumed node-list PD session would be given ``--server-args``, which its frozen launch lacks."""
+    from inference_suite.multinode import RECORD_NAME
+
+    if str(server_args or "").strip() and (session_dir / RECORD_NAME).exists():
+        _exit_refused(PD_SERVER_ARGS_REFUSAL)
+
+
 def _bind_pd_launch(ext_state: dict[str, Any], session_dir: Path) -> None:
-    """Record the session's frozen PD launch in ``ext_state``; exits 2 when it is missing or not the one frozen."""
+    """Record the session's frozen PD launch in ``ext_state`` and whether the engine hosts share the multi-node
+    profile trace root; exits 2 when the launch is missing or not the one frozen, and warns when the root is not
+    shared."""
     from inference_suite.multinode import RECORD_NAME
 
     from ..multi_node._internal.external_state import load_multi_node_state
     from ..multi_node.pd_session import PD_DIGEST_KEY, PdSessionError, bind_launch
+    from ..session.paths import mn_profile_trace_root, mn_provisioned_trace_dir
 
     frozen = str(load_multi_node_state().get(PD_DIGEST_KEY) or "")
+    root = mn_provisioned_trace_dir() or str(mn_profile_trace_root())
     try:
-        bind_launch(ext_state, session_dir / RECORD_NAME, frozen)
+        reason = bind_launch(ext_state, session_dir / RECORD_NAME, frozen, Path(root))
     except PdSessionError as exc:
         _exit_refused(str(exc))
+    if reason:
+        print(
+            f"WARNING: profile trace dir {root} is not shared with the engine hosts ({reason}); "
+            "profiling will be skipped for this session.",
+            file=sys.stderr,
+        )
 
 
 def _prepare_multi_node_state(args: argparse.Namespace, session_dir: Path) -> None:

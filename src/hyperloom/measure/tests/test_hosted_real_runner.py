@@ -166,8 +166,8 @@ def test_the_shipped_runner_flow_produces_a_result_the_backend_accepts(real, tmp
     inferencex = seen["benchmark"]["inferencex_path"]
     assert inferencex.endswith("InferenceX-" + _head(tmp_path / "inferencex"))
     assert not inferencex.startswith(str(tmp_path / "runner-cache")), "the test runs its own tree"
-    assert (tmp_path / "runner-cache" / TOOL_CHECKOUTS_DIR / INFERENCEX_STORE / "HEAD").is_file(), (
-        "later tests fetch it here"
+    assert not (tmp_path / "runner-cache" / TOOL_CHECKOUTS_DIR / INFERENCEX_STORE).exists(), (
+        "the sandbox never writes the runner cache"
     )
     assert [x.phase for x in outcome.rounds] == ["measure"]
     assert outcome.rounds[0].output_dir == call.output_dir / "suite_run_0"
