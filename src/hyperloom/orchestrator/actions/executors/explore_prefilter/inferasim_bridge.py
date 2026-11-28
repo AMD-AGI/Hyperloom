@@ -39,9 +39,6 @@ Design notes
   simulate mode otherwise; it never harvests. Benchmark mode fails closed: if
   no anchor can be found or harvested, the projection raises rather than
   quietly returning an analytical number.
-* The entry point (:func:`inferasim_anchors.project`), anchor selection,
-  harvesting and the measured anchors EXPLORE records live
-  in :mod:`inferasim_anchors`.
 * The projection is priced for the session's GPU (``ServingSpec.gpu``);
   ``HYPERLOOM_INFERASIM_GPU_ARCH`` only names the part when that is unknown.
 * Throughput and latency come from Infera's discrete-event replay of a
