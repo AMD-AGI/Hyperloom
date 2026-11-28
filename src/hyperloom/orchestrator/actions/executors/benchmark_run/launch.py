@@ -19,8 +19,8 @@ from hyperloom.common.perf_metric import agentx_active
 from hyperloom.common.env_safety import redact_secret_values
 from hyperloom.inference_optimizer.breakdown.recorder.baseline_event import BaselineInvocation
 from hyperloom.inference_optimizer.trace.task_progress import heartbeat_while_output_flows
-from inference_suite.contracts import FailedStep, LifecycleMode
-from ..grid._grid_inputs import sanitize_result_dir, sanitize_script_name
+from inference_suite.contracts import FailedStep, LifecycleMode, RunLayout
+from ..grid._grid_inputs import sanitize_script_name
 from ..workload._launch_evidence import RequestedLaunch, build_launch_evidence, persist_measurement_evidence
 from ..workload._workload_envs import (
     BenchmarkTarget,
@@ -35,7 +35,7 @@ from ..benchmark_result import (
 )
 from .._failed_step import failed_step_error_class
 from ....state.failure_evidence import with_failure_hint
-from .._round_folder import RoundFolder, round_report_path
+from .._round_folder import RoundFolder
 from .._suite.rounds import SuiteRound, SuiteRoundRefused, SuiteRoute, deadline_unix, round_lifecycle, run_suite_round
 from ..agentx_point import ServerArgvInvalidError
 from .bringup import open_bringup_attempt, read_bringup_log, server_child_elapsed_sec
@@ -184,7 +184,6 @@ def _suite_round_failure(
         error = with_failure_hint(error_class, detail or step)
     else:
         error_class, error = "invalid_measurement", "the round report holds no positive throughput and served requests"
-    report_path = round_report_path(finished.workspace)
     return {
         "status": "failed",
         "error_class": error_class,
@@ -193,7 +192,7 @@ def _suite_round_failure(
         "run_status": measurement.get("run_status"),
         "output_dir": str(round_.output_dir),
         "workspace": str(finished.workspace),
-        "report_path": str(report_path),
+        "report_path": str(RunLayout(finished.workspace).report),
         "subprocess_runtime_sec": round(finished.runtime_sec, 2),
         "boot_observation_path": finished.boot_observation_ref,
         "nonfatal_warnings": warnings,
@@ -212,10 +211,8 @@ class _BenchmarkLaunchMixin:
         fw, server_args = self._settle_attempt_server_args(params, shared_state)
         output_dir = self._resolve_workspace(ctx, "baseline")
         output_dir.mkdir(parents=True, exist_ok=True)
-        # Orchestration-supplied script + result_dir overrides.
         try:
             override_script = sanitize_script_name(params.get("benchmark_script"))
-            override_result_dir = sanitize_result_dir(params.get("result_dir"))
         except ValueError as exc:
             return _attempt_failure("bad_param", exc, output_dir)
         base_extra_envs = self._attempt_extra_envs(params)
@@ -258,10 +255,8 @@ class _BenchmarkLaunchMixin:
         return await self._run_attempt_rounds(
             BenchmarkAttempt(
                 timeout_sec=self._resolve_timeout(params),
-                override_result_dir=override_result_dir,
                 resolved_model=resolved_model,
                 materialized_config_path=config_path,
-                inferencex_path=os.environ.get("INFERENCEX_PATH", "").strip(),
                 effective_extra_server_args=server_args,
                 params=params,
                 ctx=ctx,
@@ -360,18 +355,16 @@ class _BenchmarkLaunchMixin:
                 self._observe_bringup, round_, attempt_index, layout.server_log, ran.report.failure_detail or ""
             )
         RoundFolder.read(layout.root).write_gpu_metrics(round_.output_dir)
-        measurement = extract_benchmark_measurement(None, workspace=layout.root, subprocess_started_unix=started_unix)
+        measurement = extract_benchmark_measurement(layout.root)
         finished = _BenchProcess(
             returncode=0 if ran.report.failed_step is None else 1,
-            stdout="",
-            stderr="",
             runtime_sec=max(0.0, time.time() - started_unix),
             started_unix=started_unix,
             boot_observation_ref=round_.capture_meta["boot_observation_path"],
             workspace=layout.root,
         )
-        # The run_dir is where this round's server log, ready stamp and eval results are.
-        ran_round = round_._replace(result_dir=layout.root, watchdog_server_log=str(layout.server_log))
+        # The run_dir is where this round's server log and ready stamp are.
+        ran_round = round_._replace(watchdog_server_log=str(layout.server_log))
         warnings = [*warnings, *(measurement.pop("nonfatal_warnings", []) or [])]
         if ran.report.failed_step is not None or not self._measurement_succeeded(measurement):
             return _suite_round_failure(ran_round, finished, measurement, warnings)
@@ -427,15 +420,13 @@ class _BenchmarkLaunchMixin:
         warnings: list[str],
     ) -> dict[str, Any]:
         """The result of a round that measured, with the launch evidence of the server it measured attached."""
-        report_path = round_report_path(finished.workspace)
         result = {
             "status": "succeeded",
             **measurement,
             "nonfatal_warnings": warnings,
             "returncode": finished.returncode,
             "output_dir": str(round_.output_dir),
-            "result_dir": str(round_.result_dir),
-            "report_path": str(report_path) if report_path.exists() else None,
+            "report_path": str(RunLayout(finished.workspace).report),
             "workspace": str(finished.workspace),
             # Materialized YAML for THIS baseline.
             "materialized_config": str(round_.materialized_config_path),

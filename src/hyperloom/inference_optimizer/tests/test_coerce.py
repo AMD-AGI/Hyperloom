@@ -11,7 +11,6 @@ import pytest
 from hyperloom_common.coerce import (
     dict_rows,
     first_float,
-    first_int,
     first_str,
     optional_positive_float,
     optional_positive_int,
@@ -130,12 +129,6 @@ class TestFirst:
 
     def test_first_float_default_when_none(self):
         assert first_float(None, "x", default=9.0) == 9.0
-
-    def test_first_int_returns_first_parseable(self):
-        assert first_int(None, "x", "7", 8) == 7
-
-    def test_first_int_default_when_none(self):
-        assert first_int("x", None, default=-1) == -1
 
     def test_bool_skipped(self):
         assert first_float(True, "2.0") == 2.0

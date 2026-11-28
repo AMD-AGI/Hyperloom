@@ -92,7 +92,7 @@ from .grid._explore_variants import (
     variant_with_eval_off,
 )
 from .grid._grid_inputs import SessionDirField, session_grid_bounds
-from .grid._grid_inputs import sanitize_result_dir, sanitize_script_name
+from .grid._grid_inputs import sanitize_script_name
 from .grid._grid_runner import (
     GridLaunch,
     GridRecipe,
@@ -203,9 +203,10 @@ def _anchor_the_params(params: dict[str, Any], ss: Any) -> None:
         params.update(stack_base_params(cb))
 
 
-def _sanitized_overrides(params: dict[str, Any]) -> tuple[str | None, str | None]:
+def _sanitized_script(params: dict[str, Any]) -> str | None:
+    """The ``benchmark_script`` override; a malformed one refuses the round."""
     try:
-        return sanitize_script_name(params.get("benchmark_script")), sanitize_result_dir(params.get("result_dir"))
+        return sanitize_script_name(params.get("benchmark_script"))
     except ValueError as exc:
         raise _RoundRefused("bad_param", str(exc)) from exc
 
@@ -223,7 +224,7 @@ class _ExploreRound:
         self.output_root = output_root
         self.ss = extra.get("shared_state")
         self.phase_deadline = extra.get("phase_deadline")
-        script, self.result_dir = _sanitized_overrides(params)
+        script = _sanitized_script(params)
         self.target = BenchmarkTarget(
             model_path=resolve_session_model_path(
                 params=params,
@@ -691,7 +692,6 @@ class _ExploreRound:
             output_root=slot,
             recipe=self._recipe(),
             launch=GridLaunch(
-                result_dir=self.result_dir,
                 server_lifecycle=lifecycle,
                 server_already_ready=self.use_warm_decision,
                 ready_server_log=warmup.server_log_path if warmup is not None else None,
@@ -711,11 +711,7 @@ class _ExploreRound:
             grid=[run_gv],
             output_root=warmup_slot,
             recipe=self._recipe(),
-            launch=GridLaunch(
-                result_dir=self.result_dir,
-                server_lifecycle=lifecycle,
-                warmup_round=True,
-            ),
+            launch=GridLaunch(server_lifecycle=lifecycle, warmup_round=True),
             stop=GridStop(
                 session_deadline_sec=self.session_deadline_sec, variant_expected_sec=self.warmup_expected_sec
             ),

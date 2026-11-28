@@ -68,10 +68,9 @@ def _build_session(sd: Path) -> None:
     _write(tl / "system_findings" / "cpu_idle_findings.md", "# c")
     _write(tl / "perf_report_csvs" / "GEMM.csv", "a,b\n1,2\n")
     # per-run reports (curated)
-    run = sd / "runs" / "baseline" / "abc" / "measure_round" / "benchmark_sglang_x"
-    _write(run / "benchmark_report.json", "{}")
-    _write(run / "summary.txt", "ok")
-    _write(run / "inferencex_result.json", "{}")
+    run = sd / "runs" / "baseline" / "abc" / "measure_round" / "suite_run_0"
+    _write(run / REPORT_FILE, "{}")
+    _write(run / "client" / "inferencex_result.json", "{}")
     _write(sd / "runs" / "gemm_tuning" / "k" / "logs" / "final_report.json", "{}")
     _write(sd / "runs" / "gemm_tuning" / "k" / "logs" / "best_results.json", "{}")
     _write(sd / "runs" / "specialist" / "s1" / "specialist_done.json", "{}")
@@ -128,9 +127,8 @@ def test_package_includes_curated_excludes_noise(tmp_path: Path, dest: Path) -> 
         "kernel-agent/runs/20260609T010022Z/20260609T012416Z_tl-abc/tracelens/category_findings/gemm_findings.md",
         "kernel-agent/runs/20260609T010022Z/20260609T012416Z_tl-abc/tracelens/system_findings/cpu_idle_findings.md",
         "kernel-agent/runs/20260609T010022Z/20260609T012416Z_tl-abc/tracelens/perf_report_csvs/GEMM.csv",
-        "runs/baseline/abc/measure_round/benchmark_sglang_x/benchmark_report.json",
-        "runs/baseline/abc/measure_round/benchmark_sglang_x/summary.txt",
-        "runs/baseline/abc/measure_round/benchmark_sglang_x/inferencex_result.json",
+        f"runs/baseline/abc/measure_round/suite_run_0/{REPORT_FILE}",
+        "runs/baseline/abc/measure_round/suite_run_0/client/inferencex_result.json",
         "runs/gemm_tuning/k/logs/final_report.json",
         "runs/gemm_tuning/k/logs/best_results.json",
         "runs/specialist/s1/specialist_done.json",
@@ -218,7 +216,7 @@ def test_loose_files_dropped_at_dest_root(tmp_path: Path, dest: Path) -> None:
         "reports/sbd_v6/timeline/000002-model_gate.json",
         "reports/trace/decision_trace.jsonl",
         "kernel-agent/runs/20260609T010022Z/20260609T012416Z_tl-abc/tracelens/analysis.md",
-        "runs/baseline/abc/measure_round/benchmark_sglang_x/benchmark_report.json",
+        f"runs/baseline/abc/measure_round/suite_run_0/{REPORT_FILE}",
     ):
         assert (dest / rel).is_file(), f"missing loose file: {rel}"
 
@@ -341,7 +339,7 @@ def test_symlink_out_of_the_session_is_not_bundled(tmp_path: Path, dest: Path) -
 def test_symlink_staying_inside_the_session_is_still_bundled(tmp_path: Path) -> None:
     sd = tmp_path / "session"
     _write(sd / "session_breakdown.json", "{}")
-    real = sd / "runs" / "b1" / "benchmark_report.json"
+    real = sd / "runs" / "b1" / REPORT_FILE
     _write(real, '{"tput":1}')
     (sd / "reports").mkdir(parents=True, exist_ok=True)
     (sd / "reports" / "final.json").symlink_to(real)
@@ -479,7 +477,7 @@ def _build_pressure_session(sd: Path) -> None:
     _write(sd / "reports" / "bringup" / "measure_round-abc123def456-000.json", "{}")
     # Low-priority bulk: the last entries in the glob order.
     for i in range(4):
-        _write(sd / "runs" / f"b{i}" / "summary.txt", _BLOB)
+        _write(sd / "runs" / f"b{i}" / "inferencex_result.json", _BLOB)
         _write(sd / "runs" / f"b{i}" / "attempts" / "000" / "server.log.gz", _BLOB)
 
 
@@ -590,15 +588,15 @@ def test_double_star_matches_zero_directories(tmp_path: Path) -> None:
     """``a/**/b`` must select ``a/b``, not only ``a/<dir>/b``."""
     sd = tmp_path / "session"
     _write(sd / "session_breakdown.json", "{}")
-    _write(sd / "runs" / "benchmark_report.json", "{}")
-    _write(sd / "runs" / "x" / "y" / "benchmark_report.json", "{}")
+    _write(sd / "runs" / REPORT_FILE, "{}")
+    _write(sd / "runs" / "x" / "y" / REPORT_FILE, "{}")
 
     out = package_session_artifacts(sd, session_id="sid-glob")
 
     assert out is not None
     names = _zip_names(out)
-    assert "runs/benchmark_report.json" in names
-    assert "runs/x/y/benchmark_report.json" in names
+    assert f"runs/{REPORT_FILE}" in names
+    assert f"runs/x/y/{REPORT_FILE}" in names
 
 
 def test_single_star_stays_within_one_segment(tmp_path: Path) -> None:

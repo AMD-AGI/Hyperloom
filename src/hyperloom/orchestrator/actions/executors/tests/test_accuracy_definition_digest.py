@@ -174,7 +174,7 @@ def test_an_integrate_patch_that_wins_on_throughput_is_not_kept_on_a_score_the_b
         accuracy_definition_digest=BASELINE_DIGEST,
     )
     gate_evidence: dict = {}
-    _grade_bench_accuracy({"status": "succeeded"}, bench_leg, str(slot), gate_evidence)
+    _grade_bench_accuracy({"status": "succeeded", "workspace": str(slot / "suite_run_0")}, bench_leg, gate_evidence)
     assert gate_evidence["accuracy_pass"] is accuracy_pass
     won = GradedComparison(objective="output_throughput", candidate=120.0, reference=100.0, verdict=VERDICT_KEEP)
     throughput = _ThroughputGrade(_GateBasis(100.0, 1.0), won, 20.0)

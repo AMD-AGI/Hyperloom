@@ -14,11 +14,11 @@ from typing import Any, NamedTuple, NoReturn
 
 from hyperloom.common.env_safety import redact_secret_values
 from hyperloom.common.perf_metric import GRADED_INTVTY_P50_CHECKPOINT, constraint_fields
+from inference_suite.contracts import RunLayout
 
 from ...stop_attribution import StoppedByTheRun
-from .._round_folder import round_report_path
 from ..benchmark_result import served_complete_protocol
-from ._grid_base import GridVariant, VariantResult
+from ._grid_base import GridVariant, SuiteRoundExit, VariantResult
 
 log = logging.getLogger(__name__)
 
@@ -41,14 +41,6 @@ class _VariantAborted(Exception):
         self.result = result
         self.halt = halt
         self.abandoned = abandoned
-
-
-class _RoundProcess(NamedTuple):
-    """What the benchmark subprocess of one grid round returned."""
-
-    returncode: Any
-    stdout: str
-    stderr: str
 
 
 class _VariantSlot(NamedTuple):
@@ -116,27 +108,23 @@ class _BenchmarkPass(NamedTuple):
     followed it; a pass whose servers the next round still needs leaves it empty.
     """
 
-    proc: _RoundProcess
+    proc: SuiteRoundExit
     started_unix: float
-    workspaces_before: Any
     server_survivors: tuple[int, ...] = ()
 
 
 class _MeasuredVariant(NamedTuple):
-    """One variant's measured round, the workspace and salvage it left on disk, and the warmup it discarded."""
+    """One variant's measured round and the warmup it discarded."""
 
     rounds: _VariantRounds
     round: _BenchmarkPass
-    workspace: Path
-    artifacts: list[Any]
     warmup_tput: float | None
 
 
 class _VariantOutcome(NamedTuple):
-    """A measured variant together with what its benchmark report turned out to say."""
+    """A measured variant together with what its round's report turned out to say."""
 
     measured: _MeasuredVariant
-    report: dict[str, Any] | None
     measurement: dict[str, Any]
     warnings: list[str]
 
@@ -217,8 +205,7 @@ def _kept_nonzero_exit(at: _VariantSlot, outcome: _VariantOutcome) -> str | None
     returncode = outcome.measured.round.proc.returncode
     if returncode == 0:
         return None
-    proc = outcome.measured.round.proc
-    nonzero_error = redact_secret_values((proc.stderr or proc.stdout)[-2000:])
+    nonzero_error = redact_secret_values(outcome.measured.round.proc.detail[-2000:])
     measurement = outcome.measurement
     if not served_complete_protocol(measurement):
         log.warning(
@@ -228,13 +215,12 @@ def _kept_nonzero_exit(at: _VariantSlot, outcome: _VariantOutcome) -> str | None
             measurement.get("completed_requests"),
             measurement.get("requested_requests"),
         )
-        workspace = outcome.measured.workspace
-        report_path = round_report_path(workspace)
+        workspace = outcome.measured.round.proc.run_dir
         _abort_variant(
             at,
             _VariantFailure("round_nonzero_after_valid_measurement", nonzero_error),
             workspace=str(workspace),
-            report_path=str(report_path) if report_path.exists() else None,
+            report_path=str(RunLayout(workspace).report),
             raw_result_path=measurement.get("raw_result_path"),
             reported_success=measurement.get("reported_success"),
             returncode=returncode,
@@ -260,8 +246,7 @@ def _kept_nonzero_exit(at: _VariantSlot, outcome: _VariantOutcome) -> str | None
 def _measured_row(at: _VariantSlot, outcome: _VariantOutcome) -> VariantResult:
     nonzero_kept_error = _kept_nonzero_exit(at, outcome)
     measurement = outcome.measurement
-    workspace = outcome.measured.workspace
-    report_path = round_report_path(workspace)
+    workspace = outcome.measured.round.proc.run_dir
     row = VariantResult(
         name=at.variant.name,
         extra_server_args=at.variant.extra_server_args,
@@ -282,7 +267,7 @@ def _measured_row(at: _VariantSlot, outcome: _VariantOutcome) -> VariantResult:
         intvty_p50_checkpoint=measurement.get(GRADED_INTVTY_P50_CHECKPOINT),
         request_error_rate=measurement.get("request_error_rate"),
         workspace=str(workspace),
-        report_path=str(report_path) if report_path.exists() else None,
+        report_path=str(RunLayout(workspace).report),
         raw_result_path=measurement.get("raw_result_path"),
         reported_success=measurement.get("reported_success"),
         returncode=outcome.measured.round.proc.returncode,

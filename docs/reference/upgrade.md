@@ -215,6 +215,76 @@ from scripts, and read `reports/final.md` for the session's own summary and
 `HYPERLOOM_REPORT_MAX_TOKENS` are no longer read and are silently ignored, so
 drop them.
 
+### Required: files outside a round's run directory are no longer copied into it
+
+Since 1.2.0 a round on InferenceSuite writes its server log, results and
+traces inside its own run directory. Hyperloom still looked for them elsewhere
+after every explore, integrate, rebench, concurrency-sweep and multi-branch
+round, and that search is removed:
+
+* `server.log`, `gpu_metrics.csv`, `profile_*.trace.json.gz`,
+  `inferencex_result*.json` and `results*.json` files written during the round
+  at the top of `/workspace`, `$INFERENCEX_PATH` and `$RESULT_DIR` are no
+  longer copied into the round's run directory, and a round's
+  `nonfatal_warnings` no longer carry `harvested_leaked_artifact:<path>`. A
+  file another process wrote under one of those names could replace the
+  round's own `server.log` or be read as its accuracy result.
+* `INFERENCE_OPTIMIZER_LEAK_ROOTS`, which named other directories to search, is
+  no longer read and is silently ignored, so drop it.
+* The multi-branch measurement runner no longer copies those names from the top
+  of its work directory into the files it signs. On a host that reports itself
+  multi-node it also no longer writes a merged `gpu_metrics.csv` at the top of
+  those files; each round's run directory still gets its own.
+
+### Recommended: drop `INFERENCE_OPTIMIZER_RESCUE_PATHS` and `INFERENCE_OPTIMIZER_BASELINE_SERVER_READY_SEC`
+
+Both are no longer read and are silently ignored. Since 1.2.0 the first has
+had no effect, because a round's results are read from its run directory
+alone, and an integer value of the second has had none, because every round
+already held its server boot to the round's own time limit. A value of the
+second that was not an integer raised `ValueError` when the configuration of a
+round that keeps its server across rounds was written, before that round ran;
+it is now ignored like any other. The readers that went with them could not
+run either, so the warnings
+`rescued_from_leaked_path:<path>`, `rescued_copy_into_workspace_failed`,
+`raw_inferencex_result_used` and `benchmark_report_success_false`, and the
+error classes `no_benchmark_workspace` and `benchmark_report_invalid_metric`,
+no longer occur.
+
+### Recommended: `result_dir` is no longer a task parameter
+
+`result_dir` told the benchmark script of the harness before 1.2.0 where to
+write. No round has been handed it since 1.2.0, and the `baseline`, `explore`
+and `integrate` tasks now ignore it, whatever its value:
+
+* `integrate` still read it: a task that carried `result_dir` had its bench's
+  accuracy searched in that directory, where no round writes, and its accuracy
+  round written below it. The accuracy of a bench is now always read from, and
+  its accuracy round always written into, the bench's own directory.
+* A `result_dir` with whitespace or a shell metacharacter failed a `baseline`
+  attempt and an `explore` round as `bad_param`; it no longer does.
+* A baseline result no longer carries `result_dir`. On a succeeded round it
+  repeated `workspace`, which still names the round's run directory.
+* The baseline fingerprint, which decides whether a proposed baseline repeats
+  one already queued or measured, is six parameters instead of seven. Two
+  proposals that differ only in `result_dir` are now the same baseline. In a
+  session resumed across the upgrade, a baseline proposed again is not matched
+  with one measured before the upgrade and runs once more.
+
+Custom workload scripts are not affected: a script is still run with
+`RESULT_DIR` in its environment and writes its result there.
+
+### Recommended: the session package no longer collects `benchmark_report.json` and `summary.txt`
+
+The package collected every `runs/**/benchmark_report.json` and
+`runs/**/summary.txt`, the report and summary of a round before 1.2.0. No
+round writes either. A 1.2.0 session that replayed a GEAK candidate on GEAK's
+own harness has a `benchmark_report.json` per replayed point under
+`runs/integrate/`; packaged again by this build, the package leaves those
+files out. They stay in the session directory. A round's `report.json`,
+`launch.json`, `config.yaml`, `phase_marks.json` and
+`inferencex_result.json` are collected as before.
+
 ---
 
 ## Upgrading from 1.1.x
@@ -526,19 +596,6 @@ Earlier launchers might have waited for the Coordinator to emit a
 
 Bare-metal installs now default `KERNEL_OPT_BACKEND_ORDER` to `geak`. If you
 had a custom order hard-coded, confirm it is still intentional.
-
-### Recommended: set `INFERENCE_OPTIMIZER_RESCUE_PATHS` if you use model-specific benchmark scripts
-
-When the session has a GPU type (`--gpu-type`, or the label of the card
-`amd-smi` reports), Hyperloom pins
-`benchmark_script=<framework>_<gpu_type>.sh` to stop InferenceX-native
-scripts from leaking `result.json` outside the session dir. If you
-intentionally use a model-specific script (for example, `dsr1_fp8_mi300x.sh`),
-keep passing `benchmark_script=` explicitly — operator overrides
-still win against the generic-script pin. You might additionally want
-to set `$INFERENCE_OPTIMIZER_RESCUE_PATHS` so the harvest step can
-recover any leaked `result.json` files written to hardcoded
-`--result-dir` locations.
 
 ### Recommended: stop expecting `standalone_analysis.md` or `tracelens_report.md`
 

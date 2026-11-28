@@ -28,9 +28,8 @@ from .._accuracy_gate import (
     parse_eval_results,
     read_eval_probe,
 )
-from ..grid._grid_inputs import sanitize_result_dir, sanitize_script_name
+from ..grid._grid_inputs import sanitize_script_name
 from ..grid._grid_runner import (
-    GridLaunch,
     GridRecipe,
     GridStop,
     GridVariant,
@@ -185,7 +184,6 @@ class BenchStageMixin:
         if not base_config.exists():
             raise RuntimeError(f"integrate_patch bench: config not found at {base_config}")
         target = _bench_target(bench_leg)
-        result_dir = sanitize_result_dir(params.get("result_dir"))
         base_extra_args = str(params.get("base_extra_args") or "").strip()
         args_mode = str(params.get("base_args_mode") or "append")
         base_remove = to_str_list(params.get("base_remove_args"))
@@ -214,7 +212,6 @@ class BenchStageMixin:
             grid=grid,
             output_root=bench_leg.output_root,
             recipe=recipe,
-            launch=GridLaunch(result_dir=result_dir),
             stop=GridStop(
                 session_deadline_sec=bench_leg.session_deadline_sec,
                 variant_expected_sec=bench_leg.variant_expected_sec,
@@ -228,7 +225,7 @@ class BenchStageMixin:
             bench = _bench_row(results[0], variant, base, config_path)
         # Classified here so the gate compares two observations produced by the same reader.
         bench["boot_observation_path"] = await asyncio.to_thread(self._observe_bench_boot, bench, bench_leg.output_root)
-        _grade_bench_accuracy(bench, bench_leg, result_dir, gate_evidence)
+        _grade_bench_accuracy(bench, bench_leg, gate_evidence)
         return bench, gate_evidence
 
     async def _run_patch_accuracy_round(
@@ -239,12 +236,11 @@ class BenchStageMixin:
         The round writes into the slot the accuracy gate reads, so the grade it is weighed on follows the round.
         """
         bench_leg = _PatchBench.for_attempt(attempt, params)
-        result_dir = sanitize_result_dir(params.get("result_dir"))
-        slot = Path(_eval_search_root(bench, result_dir))
+        slot = Path(_eval_search_root(bench))
         launch = variant_config_of(bench["workspace"])
         outcome = await run_candidate_accuracy_round(slot, launch, attempt.shared_state, session=self.session_dir)
         record_accuracy_round(bench, outcome)
-        _grade_bench_accuracy(bench, bench_leg, result_dir, gate_evidence)
+        _grade_bench_accuracy(bench, bench_leg, gate_evidence)
 
     def _observe_bench_boot(self, bench: dict[str, Any], output_root: Path) -> str:
         """Classify the server this bench ran against and persist the observation.
@@ -448,20 +444,16 @@ def _bench_row(result: VariantResult, variant: GridVariant, base: LaunchLayer, c
     }
 
 
-def _eval_search_root(bench: dict[str, Any], result_dir: str | None) -> str:
-    """Where a bench's accuracy is graded from: its ``result_dir`` override, else the grid slot of its workspace.
-
-    lm-eval writes to ``$EVAL_RESULT_DIR`` under the grid slot, not inside the ``benchmark_*`` workspace.
-    """
-    return result_dir or (str(Path(bench["workspace"]).parent) if bench.get("workspace") else "")
+def _eval_search_root(bench: dict[str, Any]) -> str:
+    """Where a bench's accuracy is graded from: the grid slot that holds its run_dir and its accuracy round; empty
+    for a bench that left no workspace."""
+    return str(Path(bench["workspace"]).parent) if bench.get("workspace") else ""
 
 
-def _grade_bench_accuracy(
-    bench: dict[str, Any], bench_leg: _PatchBench, result_dir: str | None, gate_evidence: dict[str, Any]
-) -> None:
+def _grade_bench_accuracy(bench: dict[str, Any], bench_leg: _PatchBench, gate_evidence: dict[str, Any]) -> None:
     """Fill ``gate_evidence`` with the eval probe and, for a succeeded bench, the accuracy verdict."""
     params = bench_leg.params
-    eval_search_root = _eval_search_root(bench, result_dir)
+    eval_search_root = _eval_search_root(bench)
     # Guarded: an empty root would send the recursive scan over the cwd.
     if eval_search_root:
         gate_evidence["eval_probe"] = read_eval_probe(eval_search_root)

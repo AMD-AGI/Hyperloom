@@ -36,7 +36,7 @@ from inference_suite.contracts import ProbeOutcome, ReportError, RunLayout
 from inference_suite.contracts.launch import Launch
 from inference_suite.contracts.layout import REPORT_FILE
 
-from ._round_folder import BENCHMARK_REPORT_FILE, RoundFolder, is_round_folder
+from ._round_folder import RoundFolder, is_round_folder
 
 log = logging.getLogger(__name__)
 
@@ -87,10 +87,8 @@ EVAL_KIND_GENERATION_PATHOLOGY = "eval_generation_pathology"
 # framework change can repair.
 EVAL_KIND_QUALITY_GATE_MISSING = "quality_gate_missing"
 
-# Sidecar the probe writes into ``$RESULT_DIR`` when it trips; inference_suite writes its ProbeOutcome there on every
-# eval, tripped or not.
+# The file in a run_dir's eval directory that holds the eval's ProbeOutcome, tripped or not.
 EVAL_PROBE_FILENAME = "hyperloom_eval_probe.json"
-_SUITE_SAMPLES_KEY = "samples_seen"
 
 # stop_reason recorded when the baseline could not produce an accuracy result even though the accuracy test was
 # expected to run.
@@ -240,27 +238,19 @@ def accuracy_keep_block(
     return False, "", True
 
 
-def _round_quality_gate(report: Path) -> object:
-    """The quality gate the report at ``report`` carries: an inference_suite round's, or a benchmark report's.
+def parse_quality_gate(workspace: Path | str) -> dict[str, Any]:
+    """Read a scriptable (server-less) quality gate from the newest round report under ``workspace``.
 
     Raises:
-        OSError, ValueError: When the report cannot be read; a round report off its contract raises too.
+        OSError, ValueError: When that report cannot be read or, once parsed, is off its contract.
     """
-    if report.name == REPORT_FILE:
-        return RoundFolder.read(report.parent).measurement()["quality_gate"]
-    return json.loads(report.read_text(encoding="utf-8")).get("quality_gate")
-
-
-def parse_quality_gate(workspace: Path | str) -> dict[str, Any]:
-    """Read a scriptable (server-less) quality gate from the newest round report under ``workspace``."""
     workspace = Path(workspace)
-    reports = [Path(f) for f in glob.glob(str(workspace / "**" / BENCHMARK_REPORT_FILE), recursive=True)]
-    reports += [path for path in workspace.glob(f"**/{REPORT_FILE}") if is_round_folder(path.parent)]
+    reports = [path for path in workspace.glob(f"**/{REPORT_FILE}") if is_round_folder(path.parent)]
     if not reports:
         return {"quality_gate": None, "error": f"no round report in {workspace}"}
     latest = max(reports, key=lambda p: p.stat().st_mtime)
     try:
-        qg = _round_quality_gate(latest)
+        qg = RoundFolder.read(latest.parent).measurement()["quality_gate"]
     except json.JSONDecodeError as exc:
         return {"quality_gate": None, "error": f"parse error: {exc}", "source_file": str(latest)}
     if not isinstance(qg, dict):
@@ -500,35 +490,25 @@ def read_eval_probe(workspace: Path | str) -> dict[str, Any] | None:
         record = json.loads(latest.read_text(encoding="utf-8"))
     except (json.JSONDecodeError, OSError):
         return None
-    if _SUITE_SAMPLES_KEY in record:
-        try:
-            tripped = ProbeOutcome.from_document(record).tripped
-        except ReportError:
-            return None
-        if not tripped:
-            return None
+    try:
+        tripped = ProbeOutcome.from_document(record).tripped
+    except ReportError:
+        return None
+    if not tripped:
+        return None
     record["kind"] = EVAL_KIND_GENERATION_PATHOLOGY
     record["source_file"] = str(latest)
     return record
-
-
-def _probe_evidence(probe: dict[str, Any]) -> str:
-    if _SUITE_SAMPLES_KEY in probe:
-        ratio = probe.get("length_ratio_observed") or 0.0
-        return f"{ratio:.0%} of {probe[_SUITE_SAMPLES_KEY]} sampled responses stopped at the length cap"
-    return (
-        f"{probe.get('cap_hits', 0)}/{probe.get('observed_samples', 0)} sampled responses stopped at the "
-        f"{probe.get('max_completion_tokens_seen', 0)}-token cap"
-    )
 
 
 def eval_probe_summary(probe: dict[str, Any] | None) -> str:
     """Render a one-line summary of a tripped probe for a log / journal reason."""
     if not probe:
         return ""
+    ratio = probe.get("length_ratio_observed") or 0.0
     return (
-        f"{EVAL_KIND_GENERATION_PATHOLOGY}: {_probe_evidence(probe)}; the model never emitted EOS, so the eval was "
-        "cut short and scored ~0"
+        f"{EVAL_KIND_GENERATION_PATHOLOGY}: {ratio:.0%} of {probe['samples_seen']} sampled responses stopped at the "
+        "length cap; the model never emitted EOS, so the eval was cut short and scored ~0"
     )
 
 
@@ -589,12 +569,12 @@ class AccuracyReference:
 
 
 def grade_accuracy(
-    result_dir: str,
+    search_root: str,
     reference: AccuracyReference,
     framework: str | None = None,
     benchmark_mode: str = "",
 ) -> bool | None:
-    """Grade a bench's accuracy against the baseline ``reference``.
+    """Grade the accuracy a bench left below ``search_root`` against the baseline ``reference``.
 
     With a recorded baseline the measured drop is enforced; without one, or without a score taken under the
     baseline's eval definition, there is no verdict (``None``), warned loudly. A score under another definition is
@@ -603,7 +583,7 @@ def grade_accuracy(
     a missing quality gate instead of falling back to GSM8K.
     """
     baseline_value = reference.score
-    eval_results = parse_eval_results(result_dir, framework=framework, benchmark_mode=benchmark_mode)
+    eval_results = parse_eval_results(search_root, framework=framework, benchmark_mode=benchmark_mode)
     new_accuracy = reference.comparable(eval_results)
     if new_accuracy is not None and baseline_value > 0:
         return accuracy_passed(baseline_value, new_accuracy)

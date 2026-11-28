@@ -192,7 +192,7 @@ def _variant(root: Path) -> Variant:
         spec,
         canonical,
         IMAGE,
-        runner_envs={"INFERENCEX_REPO": INFERENCEX, "INFERENCE_OPTIMIZER_BASELINE_SERVER_READY_SEC": "900"},
+        runner_envs={"INFERENCEX_REPO": INFERENCEX},
         timeout_sec=2400,
         poll_interval_sec=2.0,
     )

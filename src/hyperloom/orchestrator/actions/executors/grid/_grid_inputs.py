@@ -41,10 +41,9 @@ class SessionDirField:
         setattr(obj, self._slot, Path(value) if value else None)
 
 
-# Sanitization for LLM-supplied overrides (benchmark_script / result_dir): reject path separators / shell
-# metacharacters, raising ``ValueError`` instead of running an unsafe subprocess.
+# Sanitization for the LLM-supplied ``benchmark_script`` override: reject path separators / shell metacharacters,
+# raising ``ValueError`` instead of running an unsafe subprocess.
 _SCRIPT_NAME_RE = re.compile(r"^[A-Za-z0-9_.\-]+\.sh$")
-_RESULT_DIR_FORBID_RE = re.compile(r"[\s\"'`$;&|<>(){}\[\]\\*?!]")
 
 
 def sanitize_script_name(value: Any) -> str | None:
@@ -58,21 +57,6 @@ def sanitize_script_name(value: Any) -> str | None:
         raise ValueError(
             f"benchmark_script={text!r} rejected: must be a bare *.sh "
             "file name (no path separators, no shell metacharacters)"
-        )
-    return text
-
-
-def sanitize_result_dir(value: Any) -> str | None:
-    """Return ``value`` if it's a safe absolute (or workspace-relative) dir."""
-    if value is None:
-        return None
-    text = str(value).strip()
-    if not text:
-        return None
-    if _RESULT_DIR_FORBID_RE.search(text):
-        raise ValueError(
-            f"result_dir={text!r} rejected: contains whitespace or shell "
-            "metacharacters; pass an absolute or workspace-relative path"
         )
     return text
 

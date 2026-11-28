@@ -6,7 +6,6 @@
 from __future__ import annotations
 
 import json
-import time
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
@@ -15,7 +14,7 @@ import pytest
 import yaml
 
 from hyperloom.orchestrator.actions.executors.grid import _grid_runner
-from hyperloom.orchestrator.actions.executors.grid import _grid_inputs, _round_report, _variant_rows
+from hyperloom.orchestrator.actions.executors.grid import _grid_inputs, _variant_rows
 from hyperloom.inference_optimizer.grid_server_args import (
     compose_server_args,
     dedup_vllm_server_args,
@@ -379,25 +378,6 @@ class TestSanitizeScriptName:
             _grid_inputs.sanitize_script_name(raw)
 
 
-class TestSanitizeResultDir:
-    def test_accepts_relative_and_absolute(self):
-        assert _grid_inputs.sanitize_result_dir("runs/x") == "runs/x"
-        assert _grid_inputs.sanitize_result_dir("/workspace/out") == "/workspace/out"
-
-    def test_blank_returns_none(self):
-        assert _grid_inputs.sanitize_result_dir(None) is None
-        assert _grid_inputs.sanitize_result_dir("") is None
-        assert _grid_inputs.sanitize_result_dir("   ") is None
-
-    @pytest.mark.parametrize(
-        "raw",
-        ["/tmp/with space", "/tmp/leak`whoami`", "/tmp/leak;rm"],
-    )
-    def test_rejects_unsafe(self, raw):
-        with pytest.raises(ValueError):
-            _grid_inputs.sanitize_result_dir(raw)
-
-
 class TestGridVariantEnvSafety:
     """Lock the env-safety filter on LLM-supplied grid env overrides."""
 
@@ -424,14 +404,7 @@ class TestGridVariantEnvSafety:
         }
 
 
-# Section 3: per-variant mtime gating + param overrides
-
-
-@pytest.fixture(autouse=True)
-def _isolate_leak_root(request, tmp_path_factory, monkeypatch):
-    """Pin ``INFERENCE_OPTIMIZER_LEAK_ROOTS`` to an empty sandbox for the grid-runner subprocess tests."""
-    sandbox = tmp_path_factory.mktemp("isolated_leak_root")
-    monkeypatch.setenv("INFERENCE_OPTIMIZER_LEAK_ROOTS", str(sandbox))
+# Section 3: param overrides
 
 
 def _write_baseline_yaml_overrides(path: Path) -> None:
@@ -454,32 +427,6 @@ def _write_baseline_yaml_overrides(path: Path) -> None:
     }
     with path.open("w") as f:
         yaml.safe_dump(cfg, f)
-
-
-def _fake_workspace(slot: Path, *, tput: float = 800.0) -> Path:
-    workspace = slot / "benchmark_sglang_20260513_001122"
-    workspace.mkdir(parents=True)
-    (workspace / "benchmark_report.json").write_text(
-        json.dumps(
-            {
-                "success": True,
-                "framework": "sglang",
-                "model": "/path/models/Qwen-Qwen3-8B",
-                "throughput": {
-                    "request_throughput": tput / 256,
-                    "output_throughput": tput,
-                    "total_token_throughput": tput * 2,
-                    "completed_requests": 80,
-                    "duration_seconds": 25.0,
-                },
-                "latency": {
-                    "ttft": {"mean_ms": 140.0, "p99_ms": 160.0},
-                    "e2el": {"mean_ms": 2500.0, "p99_ms": 2800.0},
-                },
-            }
-        )
-    )
-    return workspace
 
 
 def test_apply_runtime_overrides_pins_the_explicit_benchmark_script():
@@ -887,87 +834,6 @@ def test_compose_preserves_json_for_every_args_mode():
     assert out.count("--compilation-config") == 1
     assert _blob(out, "--compilation-config") == json.loads(repl)
     assert _blob(out, "--speculative-config") == json.loads(sc)
-
-
-# benchmark_report settling (real-run race)
-
-
-@pytest.mark.asyncio
-async def test_report_read_waits_for_a_report_still_being_written(tmp_path):
-    """A report that lands a moment after the process exits must not abort the variant."""
-    workspace = tmp_path / "benchmark_ws"
-    workspace.mkdir()
-    report_path = workspace / "benchmark_report.json"
-    # First read sees a truncated file, exactly as a partial flush leaves it.
-    report_path.write_text('{"throughput": {"output_th', encoding="utf-8")
-
-    reads = {"n": 0}
-    real_parse = _round_report._parse_report
-
-    def _parse_then_complete(ws):
-        reads["n"] += 1
-        result = real_parse(ws)
-        if reads["n"] == 1:
-            report_path.write_text(
-                json.dumps({"throughput": {"output_throughput": 0.351, "completed_requests": 3}}),
-                encoding="utf-8",
-            )
-        return result
-
-    with patch.object(_round_report, "_parse_report", _parse_then_complete):
-        report, measurement = await _round_report._settled_measurement(
-            workspace,
-            subprocess_started_unix=None,
-            settle_seconds=5.0,
-            poll_seconds=0.01,
-        )
-
-    assert reads["n"] >= 2, "a truncated report must be re-read, not accepted as final"
-    assert measurement.get("valid_measurement") is True
-    assert report is not None
-
-
-@pytest.mark.asyncio
-async def test_report_read_gives_up_on_a_genuinely_invalid_report(tmp_path):
-    """Settling must be bounded: a report that never becomes valid still aborts."""
-    workspace = tmp_path / "benchmark_ws"
-    workspace.mkdir()
-    (workspace / "benchmark_report.json").write_text(
-        json.dumps({"throughput": {"output_throughput": 0.0, "completed_requests": 0}}),
-        encoding="utf-8",
-    )
-    started = time.monotonic()
-    _report, measurement = await _round_report._settled_measurement(
-        workspace,
-        subprocess_started_unix=None,
-        settle_seconds=0.05,
-        poll_seconds=0.01,
-    )
-    assert not measurement.get("valid_measurement")
-    assert time.monotonic() - started < 3.0, "a dead report must not stall the grid"
-
-
-@pytest.mark.asyncio
-async def test_report_read_does_not_wait_when_the_process_already_failed(tmp_path):
-    """With settling disabled the reader takes one look, so a crashed run fails fast."""
-    workspace = tmp_path / "benchmark_ws"
-    workspace.mkdir()
-    reads = {"n": 0}
-    real_parse = _round_report._parse_report
-
-    def _counting_parse(ws):
-        reads["n"] += 1
-        return real_parse(ws)
-
-    with patch.object(_round_report, "_parse_report", _counting_parse):
-        _report, measurement = await _round_report._settled_measurement(
-            workspace,
-            subprocess_started_unix=None,
-            settle_seconds=0.0,
-            poll_seconds=0.01,
-        )
-    assert reads["n"] == 1
-    assert not measurement.get("valid_measurement")
 
 
 # --- the JSON-preserving tokenizer is on the DEFAULT path, not just AgentX -----

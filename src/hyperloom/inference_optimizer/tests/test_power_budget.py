@@ -136,26 +136,6 @@ class TestVerdict:
 
 
 class TestMeasurementCarriesPower:
-    def test_the_rounds_gpu_monitor_power_lands_on_the_measurement(self):
-        from hyperloom.orchestrator.actions.executors.benchmark_result import extract_benchmark_measurement
-
-        report = {
-            "success": True,
-            "throughput": {"output_throughput": 1200.0},
-            "gpu_monitor": [
-                {"sample_count": 10, "power_watts": {"avg": 600.0, "max": 700.0}},
-                {"sample_count": 30, "power_watts": {"avg": 700.0, "max": 760.0}},
-            ],
-        }
-        measurement = extract_benchmark_measurement(report)
-        assert measurement["gpu_power_avg_w"] == pytest.approx(675.0)
-        assert measurement["gpu_power_by_gpu_w"] is None, "the report's mean does not say which card drew what"
-
-    def test_no_telemetry_is_absent_not_zero(self):
-        from hyperloom.orchestrator.actions.executors.benchmark_result import extract_benchmark_measurement
-
-        assert extract_benchmark_measurement({"success": True, "throughput": {}})["gpu_power_avg_w"] is None
-
     def test_variant_result_carries_it(self):
         v = VariantResult(
             name="v", extra_server_args="", extra_envs={}, status="succeeded", gpu_power_by_gpu_w={"4": 650.0}

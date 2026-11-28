@@ -61,12 +61,6 @@ def _make_ctx(params: dict) -> SimpleNamespace:
     return SimpleNamespace(task=task, extra={})
 
 
-@pytest.fixture(autouse=True)
-def _isolate_leak_root(tmp_path_factory, monkeypatch):
-    sandbox = tmp_path_factory.mktemp("isolated_leak_root")
-    monkeypatch.setenv("INFERENCE_OPTIMIZER_LEAK_ROOTS", str(sandbox))
-
-
 def _write_results_score(path: Path, score: float) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(

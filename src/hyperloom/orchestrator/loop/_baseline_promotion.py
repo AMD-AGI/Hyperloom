@@ -38,7 +38,6 @@ log = logging.getLogger(__name__)
 # task.params fields fingerprinted by the self-loop guard.
 _BASELINE_FINGERPRINT_KEYS: tuple[str, ...] = (
     "benchmark_script",
-    "result_dir",
     "extra_server_args",
     "extra_envs",
     "model_path",

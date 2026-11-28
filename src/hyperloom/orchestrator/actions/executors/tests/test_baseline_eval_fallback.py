@@ -23,12 +23,6 @@ from hyperloom.orchestrator.actions.executors.baseline import (
 _ACCURACY_LOGGER = "hyperloom.orchestrator.actions.executors.benchmark_run.accuracy"
 
 
-@pytest.fixture(autouse=True)
-def _isolate_leak_root(tmp_path_factory, monkeypatch):
-    sandbox = tmp_path_factory.mktemp("isolated_leak_root")
-    monkeypatch.setenv("INFERENCE_OPTIMIZER_LEAK_ROOTS", str(sandbox))
-
-
 def _make_ctx(params: dict, *, enablement_mode: str = "off") -> SimpleNamespace:
     task = SimpleNamespace(task_id="t-eval-1", params=params)
     return SimpleNamespace(task=task, extra={"shared_state": SharedState(enablement_mode=enablement_mode)})
@@ -457,9 +451,9 @@ def test_eval_enablement_probe_reports_generation_pathology(monkeypatch):
         "run_eval_disabled": False,
         "eval_probe": {
             "kind": EVAL_KIND_GENERATION_PATHOLOGY,
-            "observed_samples": 128,
-            "cap_hits": 128,
-            "max_completion_tokens_seen": 16384,
+            "tripped": True,
+            "samples_seen": 128,
+            "length_ratio_observed": 1.0,
         },
     }
     reason = _route(monkeypatch, "sglang", result)
@@ -467,8 +461,7 @@ def test_eval_enablement_probe_reports_generation_pathology(monkeypatch):
     assert result[BASELINE_EVAL_FAILURE_KIND_KEY] == EVAL_KIND_GENERATION_PATHOLOGY
     assert result[BASELINE_EVAL_OBSERVED_ACCURACY_KEY] == 0.0
     evidence = result[BASELINE_EVAL_EVIDENCE_KEY]
-    assert "128/128" in evidence
-    assert "16384" in evidence
+    assert "100% of 128 sampled responses" in evidence
 
 
 def test_eval_enablement_accuracy_at_floor_passes(monkeypatch):
@@ -510,14 +503,13 @@ def test_eval_enablement_quality_ref_exempt_not_routed(monkeypatch):
 
 def test_scriptable_baseline_without_a_quality_gate_stops_instead_of_enablement(tmp_path, caplog):
     """An operator script that writes no ``quality_gate`` is no capability gap a specialist can fix: stop at once."""
+    from hyperloom.measure.tests.run_dirs import write_scriptable_run_dir
     from hyperloom.orchestrator.actions.executors._accuracy_gate import parse_eval_results
-    from hyperloom.orchestrator.actions.executors._round_folder import BENCHMARK_REPORT_FILE
+    from inference_suite.contracts import RunLayout
     from hyperloom.orchestrator.actions.executors.benchmark_run.records import record_eval_score
 
     attempt = tmp_path / "runs" / "baseline" / "attempt"
-    attempt.mkdir(parents=True)
-    report = attempt / BENCHMARK_REPORT_FILE
-    report.write_text(json.dumps({"status": "success", "throughput": 22793.17}), encoding="utf-8")
+    report = RunLayout(write_scriptable_run_dir(attempt / "suite_run_0", None)).report
     result = {"status": "succeeded", "output_dir": str(attempt)}
     record_eval_score(result, parse_eval_results(attempt, framework="custom"))
 

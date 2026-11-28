@@ -1,79 +1,27 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Reading what a grid round left on disk: its benchmark report, its server log, its error tails."""
+"""Reading what a grid round left on disk: its measurement and its server log."""
 
 from __future__ import annotations
 
-import asyncio
-import json
-import logging
-import time
 from pathlib import Path
 from typing import Any
 
-from .._round_folder import RoundFolder, is_round_folder
-from ..benchmark_result import extract_benchmark_measurement, round_succeeded
-from ..gpu._gpu_metrics import write_gpu_metrics_from_report
+from .._round_folder import RoundFolder
+from ..benchmark_result import extract_benchmark_measurement, harvest_mn_gpu_metrics
 from ._grid_base import WARMUP_ROUND_DIR
 
-log = logging.getLogger(__name__)
 
+def record_round(run_dir: Path, *, started_unix: float) -> dict[str, Any]:
+    """Write what the host derives from the round in ``run_dir`` and return the round's measurement.
 
-def _parse_report(workspace: Path) -> dict[str, Any] | None:
-    """Load ``benchmark_report.json`` from a benchmark workspace."""
-    report = workspace / "benchmark_report.json"
-    if not report.exists():
-        return None
-    try:
-        with report.open(encoding="utf-8") as f:
-            data = json.load(f)
-    except (OSError, json.JSONDecodeError):
-        return None
-    return data if isinstance(data, dict) else None
-
-
-# How long to keep re-reading ``benchmark_report.json`` when the report does not yet parse into a valid measurement.
-REPORT_SETTLE_SECONDS = 30.0
-REPORT_SETTLE_POLL_SECONDS = 1.0
-
-
-async def _settled_measurement(
-    workspace: Path,
-    *,
-    subprocess_started_unix: float | None,
-    settle_seconds: float = REPORT_SETTLE_SECONDS,
-    poll_seconds: float = REPORT_SETTLE_POLL_SECONDS,
-) -> tuple[dict[str, Any] | None, dict[str, Any]]:
-    """Read the benchmark report, re-reading briefly while it is still settling; a finished run_dir never settles."""
-    if is_round_folder(workspace):
-        RoundFolder.read(workspace).write_gpu_metrics(workspace.parent)
-        settle_seconds = 0.0
-    deadline = time.monotonic() + max(0.0, float(settle_seconds))
-    attempts = 0
-    while True:
-        report = _parse_report(workspace)
-        measurement = extract_benchmark_measurement(
-            report,
-            workspace=workspace,
-            subprocess_started_unix=subprocess_started_unix,
-        )
-        attempts += 1
-        succeeded = round_succeeded(measurement)
-        if succeeded or time.monotonic() >= deadline:
-            if attempts > 1 and succeeded:
-                log.info(
-                    "grid_runner: benchmark_report became valid after %d read(s); "
-                    "the report was still being written when the subprocess was reaped",
-                    attempts,
-                )
-            # Harvest already tried this, but it runs before the report is guaranteed to exist: a report the round
-            # finishes writing after the subprocess is reaped would otherwise leave the round with no GPU artifact at
-            # all. Here the report is in hand, so write it from that rather than reading the file a second time.
-            if report is not None:
-                write_gpu_metrics_from_report(workspace, report, source="benchmark_report.json")
-            return report, measurement
-        await asyncio.sleep(max(0.01, float(poll_seconds)))
+    A multi-node round's pod GPU samples are merged into the run_dir as ``gpu_metrics.csv``; ``gpu_metrics.json`` goes
+    into the round directory holding the run_dir.
+    """
+    harvest_mn_gpu_metrics(run_dir, subprocess_started_unix=started_unix)
+    RoundFolder.read(run_dir).write_gpu_metrics(run_dir.parent)
+    return extract_benchmark_measurement(run_dir)
 
 
 def _existing_log_path(path: Path) -> str | None:
@@ -105,32 +53,3 @@ def measurement_server_log_path(
         return str(max(candidates, key=lambda path: path.stat().st_mtime))
     except OSError:
         return None
-
-
-def _report_errors_summary(report: dict[str, Any] | None, limit: int = 2000) -> str:
-    """Join ``benchmark_report.json`` ``errors`` into a single diagnostic."""
-    if not isinstance(report, dict):
-        return ""
-    errors = report.get("errors")
-    if not isinstance(errors, list):
-        return ""
-    text = "; ".join(str(item).strip() for item in errors if str(item).strip())
-    return text[-limit:] if text else ""
-
-
-def _on_disk_stderr_tail(*dirs: Path, limit: int = 2000) -> str:
-    """Return the tail of the first non-empty on-disk benchmark log."""
-    for d in dirs:
-        if not d:
-            continue
-        for name in ("benchmark_stderr.log", "benchmark_stdout.log"):
-            try:
-                p = d / name
-                if not p.is_file():
-                    continue
-                text = p.read_text(encoding="utf-8", errors="replace").strip()
-                if text:
-                    return f"[{name}] {text[-limit:]}"
-            except OSError:
-                continue
-    return ""

@@ -82,10 +82,8 @@ async def test_a_round_of_a_point_that_names_no_timeout_runs_under_the_executors
     executor.shared_state = SimpleNamespace()
     attempt = BenchmarkAttempt(
         timeout_sec=executor._resolve_timeout({}),
-        override_result_dir=None,
         resolved_model="m",
         materialized_config_path=config,
-        inferencex_path="",
         effective_extra_server_args="",
         params={},
         ctx=SimpleNamespace(extra={}),

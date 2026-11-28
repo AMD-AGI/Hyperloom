@@ -51,7 +51,6 @@ pytestmark = pytest.mark.skipif(
     reason="needs SGLang, HL_INTEGRATION_MODEL, HL_INTEGRATION_OUT and HL_INTEGRATION_INFERENCEX (a git checkout holding inference_suite.pins.INFERENCEX_CLIENT_COMMIT)",
 )
 EVAL_LIMIT = "60"
-SERVER_READY_SEC = "900"
 PRIMARY = 4
 
 
@@ -78,7 +77,7 @@ async def test_a_round_of_two_branches_with_real_measurements(monkeypatch: pytes
         spec,
         canonical,
         IMAGE,
-        runner_envs={"INFERENCEX_REPO": INFERENCEX, "INFERENCE_OPTIMIZER_BASELINE_SERVER_READY_SEC": SERVER_READY_SEC},
+        runner_envs={"INFERENCEX_REPO": INFERENCEX},
         timeout_sec=2400,
         poll_interval_sec=2.0,
     )

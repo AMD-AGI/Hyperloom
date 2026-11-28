@@ -73,7 +73,7 @@ def test_the_point_is_prepared_before_its_route_is_read(tmp_path, monkeypatch, u
         raise Routed
 
     monkeypatch.setattr(baseline, "suite_route", route)
-    attempt = BenchmarkAttempt(7200, None, "m", point, "", "", {}, SimpleNamespace(extra={}))
+    attempt = BenchmarkAttempt(7200, "m", point, "", {}, SimpleNamespace(extra={}))
 
     with pytest.raises(Routed):
         asyncio.run(profile.ProfileExecutor()._run_attempt_rounds(attempt, tmp_path))

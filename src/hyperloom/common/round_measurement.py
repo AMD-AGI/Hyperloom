@@ -4,8 +4,7 @@
 """Hyperloom's measurement of one inference_suite round, mapped from its report and launch.
 
 This is the one place a round report is judged (D2): which round is a valid measurement, which is diagnostic only,
-and which step a failed round stopped at. The measurement carries the keys a benchmark report normalises to,
-plus every fixed metric key, so a reader does not need to know which runner measured the round.
+and which step a failed round stopped at. The measurement carries every fixed metric key, whatever the round's kind.
 """
 
 from __future__ import annotations

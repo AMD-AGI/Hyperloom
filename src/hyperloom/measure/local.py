@@ -463,7 +463,6 @@ def _test_environment(call: TestCall) -> Iterator[list[str]]:
     session = Path(tempfile.mkdtemp(prefix="hl-session-"))
     settings = {
         "INFERENCE_OPTIMIZER_CURRENT_SESSION_DIR": str(session),
-        "INFERENCE_OPTIMIZER_LEAK_ROOTS": str(call.cwd),
         "INFERENCE_OPTIMIZER_BENCHMARK_TIMEOUT_SEC": str(int(call.timeout_sec)),
     }
     if call.silence_timeout_sec is not None:
@@ -568,7 +567,7 @@ async def _grid(run: Run, point: int, name: str, *, watch_boot: bool = True, **l
             grid=[GridVariant(name, unset_envs=run.unset_envs)],
             output_root=Path(call.output_dir),
             recipe=GridRecipe(call.points[point], base=LaunchLayer(extra_envs=envs)),
-            launch=GridLaunch(call.result_dir, **launch),
+            launch=GridLaunch(**launch),
             stop=GridStop(call.session_deadline_sec, checkpoint=call.checkpoint and call.checkpoint.on(name == _TEST)),
         )
         ended = time.time()

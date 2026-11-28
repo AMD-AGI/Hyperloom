@@ -69,7 +69,6 @@ from .benchmark_run.records import (
     _BenchmarkRound,
     _config_framework,
     _requested_framework,
-    _resolve_result_dir,
     _set_materialized_run_eval,
     _should_establish_quality_ref,
     _stopped_round_result,
@@ -385,7 +384,6 @@ class BenchmarkRunExecutor(_BaselineAccuracyMixin, _BenchmarkLaunchMixin, _Bench
             config_path=round_.config_path,
             output_dir=warm_dir,
             timeout_sec=int(round_.timeout_sec),
-            cwd=str(warm_dir),
             server_already_ready=True,
             session_deadline_sec=round_.session_deadline_sec,
             warmup=True,
@@ -422,15 +420,11 @@ class BenchmarkRunExecutor(_BaselineAccuracyMixin, _BenchmarkLaunchMixin, _Bench
         from .agentx_point import bind_source_evidence
 
         await asyncio.to_thread(bind_source_evidence, config_path, attempt.params.get("patches") or [])
-        result_dir = _resolve_result_dir(output_dir, attempt.override_result_dir)
         ctx_extra = getattr(attempt.ctx, "extra", None) or {}
         # The session's wall-clock budget, resolved per round rather than once per task: a baseline runs up to three
         # of them, and a warmup that overran has already spent budget the ones after it were counting on.
         session_deadline_sec, _ = session_grid_bounds(ctx_extra.get("shared_state") or self.shared_state)
-        silence_timeout_sec = None
-        timeout_sec = attempt.timeout_sec
-        if self.benchmark_watchdog:
-            silence_timeout_sec, timeout_sec = resolve_benchmark_timeouts()
+        timeout_sec = resolve_benchmark_timeouts()[1] if self.benchmark_watchdog else attempt.timeout_sec
         sync_benchmark_timeout(config_path, timeout_sec)
         # The materialized YAML is authoritative for the framework: params and $FRAMEWORK are both optional on a
         # baseline task.
@@ -441,8 +435,6 @@ class BenchmarkRunExecutor(_BaselineAccuracyMixin, _BenchmarkLaunchMixin, _Bench
             config_path=config_path,
             materialized_config_path=attempt.materialized_config_path,
             output_dir=output_dir,
-            result_dir=result_dir,
-            ctx=attempt.ctx,
             ctx_extra=ctx_extra,
             framework=framework,
             watchdog_server_log=_watchdog_server_log_path(output_dir, framework),
@@ -450,11 +442,9 @@ class BenchmarkRunExecutor(_BaselineAccuracyMixin, _BenchmarkLaunchMixin, _Bench
             # fingerprinted and re-run by enablement.
             capture_meta={
                 "materialized_config": str(attempt.materialized_config_path),
-                "result_dir": str(result_dir),
                 "run_eval_disabled": bool(attempt.run_eval_disabled),
             },
             timeout_sec=timeout_sec,
-            silence_timeout_sec=silence_timeout_sec,
             session_deadline_sec=session_deadline_sec,
             server_already_ready=server_already_ready,
             run_eval_disabled=attempt.run_eval_disabled,

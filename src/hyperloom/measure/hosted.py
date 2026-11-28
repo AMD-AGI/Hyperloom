@@ -64,7 +64,7 @@ from hyperloom.measure.hosted_log import (
     status_evidence,
     where,
 )
-from hyperloom.measure.hosted_spec import SpecContext, SpecRefused, build_spec, split_result_dir
+from hyperloom.measure.hosted_spec import SpecContext, SpecRefused, build_spec
 from hyperloom.measure.jit.prune import note_used
 from hyperloom.measure.jit.publish import PublishTally, publish_contributions
 from hyperloom.measure.jit.store import DirJitStore
@@ -820,9 +820,6 @@ class HostedMeasurementBackend:
         except MaterializeError:
             if not _already_landed(verified, output):
                 raise
-        relative, external = split_result_dir(attempt.call)
-        if external is not None and (output / relative).is_dir():
-            shutil.copytree(output / relative, external, dirs_exist_ok=True)
 
     def _decided(
         self, attempt: _Attempt, verified: VerifiedBundle, location: str, rounds: tuple[RoundOutcome, ...]

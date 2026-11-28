@@ -865,10 +865,6 @@ def _section_pd_disaggregation(inp: SpecialistPromptInputs) -> list[str]:
         "device selection affects decode start latency.",
         "- **Balance**: tune the prefill:decode node/TP ratio to the workload shape "
         + "— a saturated role caps end-to-end throughput.",
-        "",
-        "Per-role GPU telemetry is in the benchmark report's "
-        "`gpu_monitor_by_role` (prefill vs decode util / power / VRAM); use it to "
-        "confirm which role is the bottleneck BEFORE proposing changes.",
     ]
 
 

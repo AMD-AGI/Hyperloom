@@ -1134,20 +1134,23 @@ def test_coerce_bool_and_infer_scope() -> None:
 
 
 def test_parse_quality_gate_paths(tmp_path: Path) -> None:
+    from hyperloom.measure.tests.run_dirs import write_scriptable_run_dir
     from hyperloom.orchestrator.actions.executors import _accuracy_gate as ag
 
     assert ag.parse_quality_gate(tmp_path)["quality_gate"] is None
 
-    (tmp_path / "benchmark_report.json").write_text("{not valid json", encoding="utf-8")
+    run_dir = tmp_path / "suite_run_0"
+    run_dir.mkdir()
+    (run_dir / "report.json").write_text("{not valid json", encoding="utf-8")
     res = ag.parse_quality_gate(tmp_path)
     assert res["quality_gate"] is None
     assert "parse error" in res["error"]
 
-    (tmp_path / "benchmark_report.json").write_text(json.dumps({"throughput": {}}), encoding="utf-8")
+    write_scriptable_run_dir(run_dir, None)
     res2 = ag.parse_quality_gate(tmp_path)
     assert res2["quality_gate"] is None
 
-    (tmp_path / "benchmark_report.json").write_text(json.dumps({"quality_gate": {"passed": True}}), encoding="utf-8")
+    write_scriptable_run_dir(run_dir, {"passed": True})
     res3 = ag.parse_quality_gate(tmp_path)
     assert res3["quality_gate"] == {"passed": True}
 

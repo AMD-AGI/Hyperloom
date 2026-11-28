@@ -300,6 +300,36 @@ it.
 - **`hyperloom_common.gpu_identity` is removed**, with no alias. **Upgrade
   note:** read `hyperloom_common.gpu_card` instead: `session_card()`,
   `read_cards()`, `cards_of(document)`, `GpuCard` and `board_label(name)`.
+- **Files outside a round's run directory are no longer copied into it.**
+  After an explore, integrate, rebench, concurrency-sweep or multi-branch
+  round, Hyperloom copied any `server.log`, `gpu_metrics.csv`,
+  `profile_*.trace.json.gz`, `inferencex_result*.json` or `results*.json`
+  written during the round at the top of `/workspace`, `$INFERENCEX_PATH` and
+  `$RESULT_DIR` into the round's run directory, where it could replace the
+  round's own server log or be read as its accuracy result. A round on
+  InferenceSuite writes all of these inside its run directory, so the copy is
+  removed, with `INFERENCE_OPTIMIZER_LEAK_ROOTS` and the
+  `harvested_leaked_artifact:<path>` warning. See
+  [Upgrade](reference/upgrade.md).
+- **`INFERENCE_OPTIMIZER_RESCUE_PATHS` and
+  `INFERENCE_OPTIMIZER_BASELINE_SERVER_READY_SEC` are no longer read.** Since
+  1.2.0 the first has changed nothing, and neither has an integer value of the
+  second; a value of the second that was not an integer raised `ValueError`
+  before the round ran and is now ignored. The result readers written for the
+  harness 1.2.0 removed go with them. See [Upgrade](reference/upgrade.md).
+- **`result_dir` is no longer a task parameter.** It named where the benchmark
+  script of the harness 1.2.0 removed wrote its results. `baseline`, `explore`
+  and `integrate` ignore it: an `integrate` bench's accuracy is always read
+  from the bench's own directory (a task carrying `result_dir` had it searched
+  in a directory no round writes), a malformed value no longer fails a
+  baseline or an explore round as `bad_param`, a baseline result no longer
+  carries the key, and the baseline fingerprint is six parameters instead of
+  seven. See [Upgrade](reference/upgrade.md).
+- **The session package no longer collects `benchmark_report.json` and
+  `summary.txt`.** No round writes either file; a round's `report.json`,
+  `launch.json`, `config.yaml`, `phase_marks.json` and
+  `inferencex_result.json` are collected as before. See
+  [Upgrade](reference/upgrade.md).
 
 ## Hyperloom 1.2.0 release
 

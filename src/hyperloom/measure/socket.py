@@ -124,7 +124,6 @@ class TestCall:
     accuracy: bool = False
     meta: TestMeta = field(default_factory=TestMeta)
     server_log_path: str | None = None
-    result_dir: str | None = None
     silence_timeout_sec: float | None = None
     on_output: Callable[[], None] | None = None
     session_deadline_sec: float | None = None

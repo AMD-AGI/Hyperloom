@@ -77,7 +77,6 @@ def suite(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> SimpleNamespace:
     cache.mkdir()
     (cache / "staging_manifest.json").write_text("{}", encoding="utf-8")
     monkeypatch.setenv(TOOL_CACHE_ENV, str(cache))
-    monkeypatch.setenv("INFERENCE_OPTIMIZER_LEAK_ROOTS", str(tmp_path / "leaks"))
     monkeypatch.setattr(suite_rounds, "_resolve_probe_python", lambda framework: sys.executable)
     monkeypatch.setattr(suite_rounds, "client_only_server_url", lambda: None)
 
@@ -136,7 +135,6 @@ def test_each_round_leaves_its_run_dir_and_launch_below_its_round_directory(monk
 
     run_dir = suite.ws / "measure_round" / f"{RUN_DIR_PREFIX}0"
     assert result["workspace"] == str(run_dir)
-    assert result["result_dir"] == str(run_dir)
     assert result["report_path"] == str(RunLayout(run_dir).report)
     assert RunLayout(run_dir).launch.is_file()
     assert RunLayout(suite.ws / "warmup_round" / f"{RUN_DIR_PREFIX}0").report.is_file()

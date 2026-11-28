@@ -50,10 +50,10 @@ Consult these SharedState surfaces in order before re-proposing:
 
 ## Baseline fingerprint (PRELUDE)
 
-The `baseline` fingerprint is exactly seven params fields:
-`benchmark_script` / `result_dir` / `extra_server_args` /
+The `baseline` fingerprint is exactly six params fields:
+`benchmark_script` / `extra_server_args` /
 `extra_envs` / `model_path` / `gpu_type` / `config_path`.
-Those seven are the WHOLE fingerprint. A baseline
+Those six are the WHOLE fingerprint. A baseline
 may also come back `status='succeeded'` with `decision='no_promote'`
 and `extras.anchor_kept_tput`: it ran fine but measured below the
 established anchor, so the anchor was kept. That is a completed
@@ -62,11 +62,11 @@ measurement, NOT a failure — do not retry it.
 ## Decision rules
 
 * **RULE F1 — same fingerprint, twice failed → change at least one
-  of the seven fingerprint fields.** (PRELUDE only.) Because you run as a
+  of the six fingerprint fields.** (PRELUDE only.) Because you run as a
   persistent conversation you remember the attempts you already made this
   session — do not re-propose a baseline whose params fingerprint
   matches a recent failure; it will fail the same way. Changing a
-  field OUTSIDE the seven does not count and does not get you a new
+  field OUTSIDE the six does not count and does not get you a new
   attempt: the proposal is dropped as a duplicate and you have burned
   a tick. Change the launch: `params.extra_server_args` or
   `params.extra_envs`.

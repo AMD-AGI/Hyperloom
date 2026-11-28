@@ -69,8 +69,7 @@ _COMPARABLE_PHASE = "measured"
 #: may enter a comparison.
 PHASES = (_BOOT, "warmup", _COMPARABLE_PHASE, "finished", "eval")
 
-#: Row cap before stride downsampling, mirroring ``_MN_GPU_SAMPLE_CAP``. A three-hour round at the scrape interval below
-#: lands well over this.
+#: Row cap before stride downsampling. A three-hour round at the scrape interval below lands well over this.
 _MAX_STORED_ROWS = 5000
 #: Decimal places kept on recorded clock readings: millisecond resolution.
 _CLOCK_DIGITS = 3

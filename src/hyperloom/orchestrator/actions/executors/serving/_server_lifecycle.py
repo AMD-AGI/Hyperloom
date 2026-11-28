@@ -6,7 +6,6 @@
 from __future__ import annotations
 
 import logging
-import os
 import time
 from collections.abc import Sequence
 from pathlib import Path
@@ -31,9 +30,6 @@ _GPU_FREE_POLL_SECONDS = 5.0
 # The port ``resolve_lifecycle_params`` reports for a point it does not hold a server for. No round boots on it: a
 # point naming no ``PORT`` gets a free one where its round reads it (``_suite.rounds._round_point``).
 REUSE_PORT_DEFAULT = 8888
-
-# Server-boot budget for the persistent server phase.
-SERVER_READY_TIMEOUT_SEC = 7200
 
 
 def resolve_lifecycle_params(materialized_config_path: Path) -> dict[str, Any]:
@@ -86,18 +82,11 @@ def inject_lifecycle(
     port: int,
 ) -> None:
     """Mutate ``bench`` in place to enable the server_lifecycle protocol."""
-    ready_timeout = int(
-        os.environ.get(
-            "INFERENCE_OPTIMIZER_BASELINE_SERVER_READY_SEC",
-            SERVER_READY_TIMEOUT_SEC,
-        )
-    )
     bench["server_lifecycle"] = {
         "enabled": True,
         "cleanup": bool(cleanup),
         "force_reuse": False,
         "pid_dir": str(pid_dir),
-        "server_ready_timeout_s": ready_timeout,
     }
     # Pin PORT so every round of the lifecycle reaches the same server.
     envs = bench.setdefault("envs", {})

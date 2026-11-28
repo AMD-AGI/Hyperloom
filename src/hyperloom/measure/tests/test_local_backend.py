@@ -150,14 +150,14 @@ def _run(call: TestCall):
 
 
 def test_a_single_point_test_is_one_run_grid_call_with_one_variant(grid, unheld, tmp_path):
-    call = _call(tmp_path, result_dir="/res", session_deadline_sec=123.0)
+    call = _call(tmp_path, session_deadline_sec=123.0)
 
     outcome = _run(call)
 
     (kwargs,) = grid.calls
     assert [v.name for v in kwargs["grid"]] == ["test"]
     assert kwargs["output_root"] == tmp_path / "out"
-    assert (kwargs["launch"].result_dir, kwargs["stop"].session_deadline_sec) == ("/res", 123.0)
+    assert kwargs["stop"].session_deadline_sec == 123.0
     assert kwargs["launch"].server_lifecycle is None
     (config,) = grid.configs
     assert config == yaml.safe_load(call.points[0].read_text()), "the point is run as it is"
@@ -384,14 +384,14 @@ def test_the_rounds_file_of_a_graded_test_lists_its_rounds_in_the_order_they_ran
 
 def test_the_warmup_round_of_a_held_test_says_what_run_grid_says_of_a_discarded_one(grid, server, tmp_path):
     _graded_answers(grid)
-    grid.answers["warmup"].nonfatal_warnings.append("harvested_leaked_artifact:x")
+    grid.answers["warmup"].nonfatal_warnings.append("warmup_note")
     grid.answers["test"].nonfatal_warnings.append("served_slowly")
     grid.answers["eval"].nonfatal_warnings.append("eval_note")
 
     outcome = _run(_graded_call(tmp_path))
 
     assert [r.nonfatal_warnings for r in outcome.rounds] == [
-        ("run_grid_warmup_discarded_first", "warmup_round_tput:1111.0", "harvested_leaked_artifact:x"),
+        ("run_grid_warmup_discarded_first", "warmup_round_tput:1111.0", "warmup_note"),
         ("served_slowly",),
         ("eval_note",),
     ]
@@ -912,26 +912,18 @@ def test_the_test_session_holds_the_calls_frozen_base_and_never_the_applications
     assert not frozen.path.exists(), "the test session is removed with the test"
 
 
-def test_the_per_round_cap_and_the_leak_scope_come_from_the_call(grid, tmp_path, monkeypatch):
-    captured: dict[str, str | None] = {}
+def test_the_per_round_cap_comes_from_the_call(grid, tmp_path, monkeypatch):
+    captured: list[str | None] = []
 
     async def look(**kwargs):
-        captured.update(
-            {
-                k: os.environ.get(k)
-                for k in ("INFERENCE_OPTIMIZER_BENCHMARK_TIMEOUT_SEC", "INFERENCE_OPTIMIZER_LEAK_ROOTS")
-            }
-        )
+        captured.append(os.environ.get("INFERENCE_OPTIMIZER_BENCHMARK_TIMEOUT_SEC"))
         return [VariantResult(name="test", extra_server_args="", extra_envs={}, status="succeeded", returncode=0)]
 
     monkeypatch.setattr(local, "run_grid", look)
 
     _run(_call(tmp_path, timeout_sec=321))
 
-    assert captured == {
-        "INFERENCE_OPTIMIZER_BENCHMARK_TIMEOUT_SEC": "321",
-        "INFERENCE_OPTIMIZER_LEAK_ROOTS": str(tmp_path),
-    }
+    assert captured == ["321"]
 
 
 @pytest.mark.parametrize(("budget", "named"), [(None, None), (14400.0, "14400.0")])
@@ -1323,9 +1315,7 @@ def test_a_sweep_that_restarts_per_level_runs_every_level_from_its_own_point(mon
 @pytest.mark.parametrize("levels", [(8, 4, 2), (8,)], ids=["levels", "one-level"])
 def test_a_boot_that_fails_is_the_sweeps_failed_row_and_the_launch_is_not_booted_again(grid, server, tmp_path, levels):
     """A level's CONC never reaches the server's launch: a lower level, or a server per level, boots the same one."""
-    grid.answers["c8"] = grid.result(
-        "c8", status="failed", returncode=1, error_class="no_benchmark_workspace", error="oom"
-    )
+    grid.answers["c8"] = grid.result("c8", status="failed", returncode=1, error_class="server_init_dead", error="oom")
 
     outcome = _run(_sweep_call(tmp_path, *levels))
 

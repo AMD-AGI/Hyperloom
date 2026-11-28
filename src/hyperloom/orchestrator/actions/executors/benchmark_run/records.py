@@ -178,16 +178,6 @@ def _set_materialized_run_eval(config_path: Path, *, enabled: bool) -> None:
     )
 
 
-def _resolve_result_dir(output_dir: Path, override_result_dir: str | None) -> Path:
-    """Resolve the benchmark ``$RESULT_DIR`` exactly as the subprocess sees it."""
-    if not override_result_dir:
-        return output_dir
-    result_dir = Path(override_result_dir)
-    if result_dir.is_absolute():
-        return result_dir
-    return (output_dir / result_dir).resolve()
-
-
 def _should_establish_quality_ref(task_kind: str | None, params: dict[str, Any] | None = None) -> bool:
     """Only a genuine ``baseline`` task may establish/overwrite the quality reference."""
     if str(task_kind or "") != "baseline":
@@ -276,10 +266,8 @@ class BenchmarkAttempt:
     """What every benchmark round of one attempt runs with, and the recorder its rounds report to."""
 
     timeout_sec: int
-    override_result_dir: str | None
     resolved_model: str
     materialized_config_path: Path
-    inferencex_path: str
     effective_extra_server_args: str
     params: dict[str, Any]
     ctx: RunnerContext
@@ -293,14 +281,11 @@ class _BenchmarkRound(NamedTuple):
     config_path: Path
     materialized_config_path: Path
     output_dir: Path
-    result_dir: Path
-    ctx: RunnerContext
     ctx_extra: Mapping[str, Any]
     framework: str
     watchdog_server_log: str | None
     capture_meta: dict[str, Any]
     timeout_sec: int
-    silence_timeout_sec: Any
     session_deadline_sec: Any
     server_already_ready: bool
     run_eval_disabled: bool
@@ -308,11 +293,8 @@ class _BenchmarkRound(NamedTuple):
 
 class _BenchProcess(NamedTuple):
     returncode: Any
-    stdout: str
-    stderr: str
     runtime_sec: float
     started_unix: float
-    server_log_text: str = ""
     boot_observation_ref: Any = None
     workspace: Path | None = None
 

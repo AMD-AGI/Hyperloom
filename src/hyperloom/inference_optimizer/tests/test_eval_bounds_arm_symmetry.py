@@ -46,33 +46,6 @@ def _write_config(path: Path, **envs) -> Path:
     return path
 
 
-def _fake_workspace(slot: Path, *, tput: float = 1500.0) -> Path:
-    ws = slot / "benchmark_sglang_20260812_010101"
-    ws.mkdir(parents=True, exist_ok=True)
-    (ws / "benchmark_report.json").write_text(
-        yaml.safe_dump(
-            {
-                "success": True,
-                "framework": "sglang",
-                "model": "/path/models/Qwen-Qwen3-8B",
-                "throughput": {
-                    "request_throughput": tput / 256,
-                    "output_throughput": tput,
-                    "total_token_throughput": tput * 2,
-                    "completed_requests": 64,
-                    "duration_seconds": 25.0,
-                },
-                "latency": {
-                    "ttft": {"mean_ms": 100.0, "p99_ms": 120.0},
-                    "e2el": {"mean_ms": 2000.0, "p99_ms": 2300.0},
-                },
-            }
-        ),
-        encoding="utf-8",
-    )
-    return ws
-
-
 # Grid arm: assert the bounds landed, on the same terms as the baseline arm
 
 

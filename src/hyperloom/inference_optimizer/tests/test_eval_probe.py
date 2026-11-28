@@ -23,16 +23,17 @@ def test_read_eval_probe_prefers_the_newest_sidecar(tmp_path):
     """``integrate_patch`` searches the grid slot, where sibling variants each own a sidecar, and attempt dirs are hash-named — so path order says nothing about which eval ran last."""
     older = tmp_path / "zzz_first" / EVAL_PROBE_FILENAME
     newer = tmp_path / "aaa_second" / EVAL_PROBE_FILENAME
-    for path, hits in ((older, 11), (newer, 22)):
+    for path, samples in ((older, 11), (newer, 22)):
         path.parent.mkdir()
-        path.write_text(json.dumps({"cap_hits": hits}), encoding="utf-8")
+        outcome = ProbeOutcome(tripped=True, samples_seen=samples, length_ratio_observed=1.0)
+        path.write_text(json.dumps(outcome.to_document()), encoding="utf-8")
     os.utime(older, (1_000_000, 1_000_000))
     os.utime(newer, (2_000_000, 2_000_000))
 
     record = read_eval_probe(tmp_path)
 
     assert record is not None
-    assert record["cap_hits"] == 22
+    assert record["samples_seen"] == 22
 
 
 def test_read_eval_probe_is_none_without_a_sidecar(tmp_path):
@@ -75,11 +76,11 @@ def test_read_eval_probe_reports_a_tripped_suite_probe_with_its_counts(tmp_path)
 
     assert record is not None and record["kind"] == EVAL_KIND_GENERATION_PATHOLOGY
     summary = eval_probe_summary(record)
+    assert EVAL_KIND_GENERATION_PATHOLOGY in summary
     assert "128 sampled responses" in summary and "90%" in summary
 
 
-def test_eval_probe_summary_names_the_kind_and_the_evidence():
-    summary = eval_probe_summary({"observed_samples": 16, "cap_hits": 16, "max_completion_tokens_seen": 16384})
-    assert EVAL_KIND_GENERATION_PATHOLOGY in summary
-    assert "16/16" in summary
-    assert "16384" in summary
+def test_a_probe_file_that_is_no_probe_outcome_is_no_trip(tmp_path):
+    (tmp_path / EVAL_PROBE_FILENAME).write_text(json.dumps({"tripped": True}), encoding="utf-8")
+
+    assert read_eval_probe(tmp_path) is None
