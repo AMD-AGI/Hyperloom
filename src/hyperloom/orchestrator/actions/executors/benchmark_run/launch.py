@@ -20,7 +20,7 @@ from hyperloom.common.env_safety import redact_secret_values
 from hyperloom.inference_optimizer.breakdown.recorder.baseline_event import BaselineInvocation
 from hyperloom.inference_optimizer.trace.task_progress import heartbeat_while_output_flows
 from inference_suite.contracts import FailedStep, LifecycleMode, RunLayout
-from ..grid._grid_inputs import sanitize_result_dir, sanitize_script_name
+from ..grid._grid_inputs import sanitize_script_name
 from ..workload._launch_evidence import RequestedLaunch, build_launch_evidence, persist_measurement_evidence
 from ..workload._workload_envs import (
     BenchmarkTarget,
@@ -211,10 +211,8 @@ class _BenchmarkLaunchMixin:
         fw, server_args = self._settle_attempt_server_args(params, shared_state)
         output_dir = self._resolve_workspace(ctx, "baseline")
         output_dir.mkdir(parents=True, exist_ok=True)
-        # Orchestration-supplied script + result_dir overrides.
         try:
             override_script = sanitize_script_name(params.get("benchmark_script"))
-            override_result_dir = sanitize_result_dir(params.get("result_dir"))
         except ValueError as exc:
             return _attempt_failure("bad_param", exc, output_dir)
         base_extra_envs = self._attempt_extra_envs(params)
@@ -257,10 +255,8 @@ class _BenchmarkLaunchMixin:
         return await self._run_attempt_rounds(
             BenchmarkAttempt(
                 timeout_sec=self._resolve_timeout(params),
-                override_result_dir=override_result_dir,
                 resolved_model=resolved_model,
                 materialized_config_path=config_path,
-                inferencex_path=os.environ.get("INFERENCEX_PATH", "").strip(),
                 effective_extra_server_args=server_args,
                 params=params,
                 ctx=ctx,
@@ -362,15 +358,13 @@ class _BenchmarkLaunchMixin:
         measurement = extract_benchmark_measurement(layout.root)
         finished = _BenchProcess(
             returncode=0 if ran.report.failed_step is None else 1,
-            stdout="",
-            stderr="",
             runtime_sec=max(0.0, time.time() - started_unix),
             started_unix=started_unix,
             boot_observation_ref=round_.capture_meta["boot_observation_path"],
             workspace=layout.root,
         )
-        # The run_dir is where this round's server log, ready stamp and eval results are.
-        ran_round = round_._replace(result_dir=layout.root, watchdog_server_log=str(layout.server_log))
+        # The run_dir is where this round's server log and ready stamp are.
+        ran_round = round_._replace(watchdog_server_log=str(layout.server_log))
         warnings = [*warnings, *(measurement.pop("nonfatal_warnings", []) or [])]
         if ran.report.failed_step is not None or not self._measurement_succeeded(measurement):
             return _suite_round_failure(ran_round, finished, measurement, warnings)
@@ -432,7 +426,6 @@ class _BenchmarkLaunchMixin:
             "nonfatal_warnings": warnings,
             "returncode": finished.returncode,
             "output_dir": str(round_.output_dir),
-            "result_dir": str(round_.result_dir),
             "report_path": str(RunLayout(finished.workspace).report),
             "workspace": str(finished.workspace),
             # Materialized YAML for THIS baseline.

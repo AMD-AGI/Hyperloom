@@ -498,10 +498,8 @@ async def test_the_executor_records_the_rounds_it_actually_ran(tmp_path: Path) -
             await executor._run_reported_round(
                 BenchmarkAttempt(
                     timeout_sec=7800,
-                    override_result_dir=None,
                     resolved_model="",
                     materialized_config_path=Path("/cfg.yaml"),
-                    inferencex_path="",
                     effective_extra_server_args="",
                     params={},
                     ctx=ctx,

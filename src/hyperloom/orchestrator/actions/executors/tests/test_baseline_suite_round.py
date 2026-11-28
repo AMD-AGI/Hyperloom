@@ -135,7 +135,6 @@ def test_each_round_leaves_its_run_dir_and_launch_below_its_round_directory(monk
 
     run_dir = suite.ws / "measure_round" / f"{RUN_DIR_PREFIX}0"
     assert result["workspace"] == str(run_dir)
-    assert result["result_dir"] == str(run_dir)
     assert result["report_path"] == str(RunLayout(run_dir).report)
     assert RunLayout(run_dir).launch.is_file()
     assert RunLayout(suite.ws / "warmup_round" / f"{RUN_DIR_PREFIX}0").report.is_file()

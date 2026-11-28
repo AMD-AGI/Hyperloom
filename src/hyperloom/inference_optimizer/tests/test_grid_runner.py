@@ -378,25 +378,6 @@ class TestSanitizeScriptName:
             _grid_inputs.sanitize_script_name(raw)
 
 
-class TestSanitizeResultDir:
-    def test_accepts_relative_and_absolute(self):
-        assert _grid_inputs.sanitize_result_dir("runs/x") == "runs/x"
-        assert _grid_inputs.sanitize_result_dir("/workspace/out") == "/workspace/out"
-
-    def test_blank_returns_none(self):
-        assert _grid_inputs.sanitize_result_dir(None) is None
-        assert _grid_inputs.sanitize_result_dir("") is None
-        assert _grid_inputs.sanitize_result_dir("   ") is None
-
-    @pytest.mark.parametrize(
-        "raw",
-        ["/tmp/with space", "/tmp/leak`whoami`", "/tmp/leak;rm"],
-    )
-    def test_rejects_unsafe(self, raw):
-        with pytest.raises(ValueError):
-            _grid_inputs.sanitize_result_dir(raw)
-
-
 class TestGridVariantEnvSafety:
     """Lock the env-safety filter on LLM-supplied grid env overrides."""
 

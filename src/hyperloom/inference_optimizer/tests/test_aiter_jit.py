@@ -274,10 +274,8 @@ def baseline_launch(monkeypatch, tmp_path):
         return await executor._run_single_benchmark(
             BenchmarkAttempt(
                 timeout_sec=123,
-                override_result_dir=None,
                 resolved_model="fixture-model",
                 materialized_config_path=config,
-                inferencex_path="",
                 effective_extra_server_args="",
                 params={},
                 ctx=SimpleNamespace(extra=extra or {}),

@@ -13,10 +13,7 @@ from unittest.mock import patch
 import pytest
 import yaml
 
-from hyperloom.orchestrator.actions.executors.grid._grid_inputs import (
-    sanitize_result_dir,
-    sanitize_script_name,
-)
+from hyperloom.orchestrator.actions.executors.grid._grid_inputs import sanitize_script_name
 from hyperloom.orchestrator.actions.executors.workload._workload_envs import (
     materialize_config_with_envs,
     BenchmarkTarget,
@@ -65,36 +62,6 @@ def test_sanitize_script_name_empty_returns_none():
 def test_sanitize_script_name_rejects_unsafe(bad):
     with pytest.raises(ValueError):
         sanitize_script_name(bad)
-
-
-def test_sanitize_result_dir_accepts_paths():
-    assert sanitize_result_dir("/workspace/hyperloom/runs/baseline/t1") == ("/workspace/hyperloom/runs/baseline/t1")
-    assert sanitize_result_dir("runs/baseline/t1") == "runs/baseline/t1"
-    assert sanitize_result_dir(" /tmp/leak ") == "/tmp/leak"
-
-
-def test_sanitize_result_dir_empty_returns_none():
-    assert sanitize_result_dir(None) is None
-    assert sanitize_result_dir("") is None
-    assert sanitize_result_dir("   ") is None
-
-
-@pytest.mark.parametrize(
-    "bad",
-    [
-        "/tmp/with space",
-        "/tmp/leak;rm -rf /",
-        "/tmp/$(evil)",
-        "/tmp/leak`whoami`",
-        "/tmp/leak\nrm",
-        "/tmp/leak|rm",
-        "/tmp/leak&rm",
-        "/tmp/leak<other",
-    ],
-)
-def test_sanitize_result_dir_rejects_unsafe(bad):
-    with pytest.raises(ValueError):
-        sanitize_result_dir(bad)
 
 
 # materialize_config_with_envs honors benchmark_script after gpu_type pop

@@ -678,15 +678,15 @@ class _BenchmarkRoundsMixin:
                 "baseline_executor: RUN_EVAL disabled this run (serving); skipping accuracy parse (no lm-eval executed)"
             )
         else:
-            # Search from ``$RESULT_DIR`` so serving runs survive benchmark_lib.sh moving/cleaning
-            # ``$EVAL_RESULT_DIR`` and scriptable quality gates still resolve from the round reports.
-            eval_data = parse_eval_results(round_.result_dir, framework=eval_framework, benchmark_mode=benchmark_mode)
+            # The run_dir holds the round's eval results and, for a scriptable round, the report its gate is read from.
+            run_dir = Path(result["workspace"])
+            eval_data = parse_eval_results(run_dir, framework=eval_framework, benchmark_mode=benchmark_mode)
             if record_eval_score(result, eval_data):
                 log.info("baseline_executor: accuracy=%.4f (%s)", result["accuracy"], result["accuracy_task"])
             else:
                 log.warning("baseline_executor: accuracy eval not found: %s", eval_data.get("error", "unknown"))
             # Records why the score is ~0; the score itself is already correct.
-            if eval_probe := read_eval_probe(round_.result_dir):
+            if eval_probe := read_eval_probe(run_dir):
                 result["eval_probe"] = eval_probe
                 log.warning("baseline_executor: %s", eval_probe_summary(eval_probe))
         log.info(
