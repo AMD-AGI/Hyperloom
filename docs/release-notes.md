@@ -20,6 +20,24 @@ Merged to `main` and not yet carried by a tagged release. Each entry moves
 into the [release](https://github.com/AMD-AGI/Hyperloom/releases) that ships
 it.
 
+- **SGLang is given the run's `MAX_MODEL_LEN`, and a multi-branch InferenceX
+  session settles one.** A `MAX_MODEL_LEN` the run states, set by the operator
+  or settled by `hyperloom optimize`, is now SGLang's `--context-length`,
+  clamped to the model's native window, where it was only a ceiling on the
+  larger of ISL+OSL+2048 and 8192. A fixed-length `hyperloom optimize` run
+  with ISL+OSL above 4096 gets ISL+OSL+4096 (8192/1024: 11264 to 13312, the
+  `--max-model-len` vLLM was already given), and an explicit `MAX_MODEL_LEN`
+  above the old cap is served up to the native window (1024/1024 with
+  `MAX_MODEL_LEN=131072` on a model of 32768 positions: 8192 to 32768).
+  `hyperloom-multibranch run --workload inferencex` now settles the context as
+  optimize does and exports it to every test, where every test took the
+  benchmark configuration's 8192: an 8k/1k session no longer needs
+  `MAX_MODEL_LEN` set by hand; a session with `DATASET_PATH` serves the
+  model's native window; a session with ISL+OSL below 4096 serves less
+  (1024/1024: 6144, with a 2048-token completion budget for its accuracy
+  evaluation instead of 4096); and on ATOM the settled value replaces
+  `baseline_atom.yaml`'s 4096. A session resumed from a manifest an earlier
+  build wrote keeps the 8192.
 - **The multibranch `tracelens` tool runs only TraceLens' report.** It no
   longer takes `analysis_route`, a scriptable `framework` or
   `HYPERLOOM_TRACE_ANALYSIS_ROUTE` to start the orchestrator's `agent` or

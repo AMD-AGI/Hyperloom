@@ -250,8 +250,8 @@ def _finalize_framework_server_args(bench: dict[str, Any], window: _RequestWindo
 
     1. --context-length cap: sglang sizes max_total_tokens off the model's
        max_position_embeddings, so a huge native window balloons the aiter
-       workspace past GPU memory. Cap to ISL+OSL+headroom, clamped to the
-       native window AND to the run's MAX_MODEL_LEN.
+       workspace past GPU memory. Serve the run's MAX_MODEL_LEN, else
+       ISL+OSL+headroom, clamped to the native window.
     2. MI300X cold-compile guard: raise sglang's scheduler watchdog so the
        first-request aiter JIT compile survives (the 300s default fires
        SIGQUIT mid-warmup on a cold aiter cache).

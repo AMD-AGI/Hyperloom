@@ -195,10 +195,19 @@ def test_reference_help_says_which_name_briefs_inferencex_reference_launches(
     assert f"is given as --reference {INFERENCEX_REFERENCE}=DIR;" in words
 
 
-def test_run_defaults() -> None:
+def test_run_defaults(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("MAX_MODEL_LEN", raising=False)
+
     assert _settings() == RunSettings(
         Workload(
-            "/models/Llama-3-8B", "vllm", 2, 16, "fp8", "mi300x", KernelOptimizer.FORGE, InferenceXShape(1024, 512)
+            "/models/Llama-3-8B",
+            "vllm",
+            2,
+            16,
+            "fp8",
+            "mi300x",
+            KernelOptimizer.FORGE,
+            InferenceXShape(1024, 512, max_model_len=1024 + 512 + 4096),
         ),
         max_hours=MB_DEFAULT_MAX_HOURS,
         max_gpu_hours=0.0,
@@ -327,16 +336,49 @@ def test_a_run_records_the_prompt_dataset_exported_when_it_starts_and_an_agentx_
 ) -> None:
     monkeypatch.setenv("DATASET_PATH", " /data/prompts.jsonl ")
 
-    assert _settings().workload.inferencex == InferenceXShape(1024, 512, "/data/prompts.jsonl")
+    assert _settings().workload.inferencex.dataset == "/data/prompts.jsonl"
     assert _settings(workload=AGENTX_ARGS).workload.inferencex is None
 
 
-def test_a_manifest_written_before_the_prompt_dataset_was_recorded_reads_back_on_random_prompts(tmp_path: Path) -> None:
+def test_a_run_records_the_context_hyperloom_optimize_settles_for_the_model_its_servers_load(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    (tmp_path / "Llama-3-8B").mkdir()
+    (tmp_path / "Llama-3-8B" / "config.json").write_text(json.dumps({"max_position_embeddings": 32768}))
+    monkeypatch.setenv("HL_MODEL_BASE", str(tmp_path))
+    monkeypatch.delenv("MAX_MODEL_LEN", raising=False)
+    monkeypatch.delenv("DATASET_PATH", raising=False)
+
+    assert _settings().workload.inferencex.max_model_len == 1024 + 512 + 4096
+    monkeypatch.setenv("DATASET_PATH", "/data/prompts.jsonl")
+    assert _settings().workload.inferencex.max_model_len == 32768
+    monkeypatch.setenv("MAX_MODEL_LEN", "10240")
+    assert _settings().workload.inferencex.max_model_len == 10240
+    monkeypatch.setenv("MAX_MODEL_LEN", "ten")
+    with pytest.raises(ValueError, match="MAX_MODEL_LEN='ten' is invalid"):
+        _settings()
+
+
+def test_a_dataset_session_whose_model_is_not_on_disk_yet_says_its_context_is_a_planning_estimate(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    monkeypatch.setenv("HL_MODEL_BASE", str(tmp_path))
+    monkeypatch.delenv("MAX_MODEL_LEN", raising=False)
+    monkeypatch.setenv("DATASET_PATH", "/data/prompts.jsonl")
+
+    assert _settings().workload.inferencex.max_model_len == 1024 + 512 + 4096
+    assert "using a planning estimate" in capsys.readouterr().err
+
+
+def test_a_manifest_written_before_the_prompt_dataset_and_context_were_recorded_reads_back_on_neither(
+    tmp_path: Path,
+) -> None:
     settings = _settings()
     document = encode(
         SessionManifest(code_version(), dict(rule_pack_identity()), "MB-x", 0.0, 3600.0, settings, "", {})
     )
     del document["settings"]["workload"]["inferencex"]["dataset"]
+    del document["settings"]["workload"]["inferencex"]["max_model_len"]
     _write(tmp_path / "MB-manifest.json", document)
 
     assert read_manifest(tmp_path / "MB-manifest.json").settings.workload.inferencex == InferenceXShape(1024, 512)

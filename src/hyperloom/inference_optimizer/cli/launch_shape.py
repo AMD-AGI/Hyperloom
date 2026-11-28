@@ -40,38 +40,46 @@ def _resolve_run_max_model_len(args: argparse.Namespace) -> tuple[int, str]:
     """Resolve planning context; native AgentX serving context remains in its YAML."""
     if getattr(args, "max_model_len", None):
         return int(args.max_model_len), "--max-model-len"
+    try:
+        return resolve_run_max_model_len(
+            str(args.model or ""), args.isl, args.osl, lengths_from_data=request_lengths_from_data()
+        )
+    except ValueError as exc:
+        print(f"ERROR: {exc}", file=sys.stderr)
+        raise SystemExit(2)
+
+
+def resolve_run_max_model_len(model: str, isl: int, osl: int, *, lengths_from_data: bool) -> tuple[int, str]:
+    """The run's ``MAX_MODEL_LEN`` where no ``--max-model-len`` pins it, and where it came from: ``$MAX_MODEL_LEN``,
+    else the model's native context when ``lengths_from_data`` (an AgentX trace or a prompt dataset sets the requests'
+    lengths, not ISL/OSL), else ISL+OSL+headroom clamped to that context (``"auto"``, also where it cannot be read).
+    ``hyperloom optimize`` and ``hyperloom-multibranch run`` settle the context their servers are given and their
+    accuracy evaluation runs in here. When the requests' lengths come from data and the model's context cannot be read
+    (a model not on disk yet), a NOTE on stderr says the value is a planning estimate.
+
+    Raises:
+        ValueError: When ``$MAX_MODEL_LEN`` is not a positive integer.
+    """
     max_model_len_env = os.environ.get("MAX_MODEL_LEN", "").strip()
     if max_model_len_env:
         try:
             return _positive_int_arg(max_model_len_env), "$MAX_MODEL_LEN"
         except argparse.ArgumentTypeError as exc:
-            print(
-                f"ERROR: MAX_MODEL_LEN={max_model_len_env!r} is invalid: {exc}",
-                file=sys.stderr,
-            )
-            raise SystemExit(2)
+            raise ValueError(f"MAX_MODEL_LEN={max_model_len_env!r} is invalid: {exc}") from exc
     # AgentX replays real agentic traces whose lengths come from the corpus, so ISL/OSL are meaningless placeholders
     # here (they default to 1024/1024) and ``ISL+OSL+headroom`` would pin the server at ~6k against traces reaching
     # ~1M tokens -- the corpus would then be silently reduced to whatever fits. A prompt dataset is the same case.
-    if request_lengths_from_data():
-        native = _load_model_max_position_embeddings(str(args.model or ""))
+    if lengths_from_data:
+        native = _load_model_max_position_embeddings(model)
         if native:
             return int(native), "native-context"
-        # Model not on disk yet (uncached HF id).
         resolved_later = "The AgentX serving context is resolved from its workload configuration."
         print(
             "NOTE: Model context is unavailable locally; using a planning estimate. "
             + (resolved_later if _agentx_enabled() else _DATASET_ESTIMATE_NOTE),
             file=sys.stderr,
         )
-    return (
-        _resolve_max_model_len(
-            args.isl,
-            args.osl,
-            str(args.model or ""),
-        ),
-        "auto",
-    )
+    return _resolve_max_model_len(isl, osl, model), "auto"
 
 
 def _detect_checkpoint_precision(model_path: str | None) -> str:

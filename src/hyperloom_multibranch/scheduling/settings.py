@@ -69,11 +69,15 @@ class PlaybookMode(str, Enum):
 class InferenceXShape:
     """The requests an InferenceX workload sends: random prompts of ``isl`` tokens answered to ``osl``, or, when
     ``dataset`` names one, the prompts of that ``DATASET_PATH`` file, as given when the session started, answered to at
-    most ``osl``."""
+    most ``osl``. ``max_model_len`` is the context its servers are given and its accuracy evaluation runs in, settled
+    when the session started as ``hyperloom optimize`` settles it
+    (:func:`~hyperloom.inference_optimizer.cli.launch_shape.resolve_run_max_model_len`); ``None`` in a manifest an
+    earlier build wrote, whose servers took the benchmark configuration's."""
 
     isl: int
     osl: int
     dataset: str = ""
+    max_model_len: int | None = None
 
 
 @dataclass(frozen=True)

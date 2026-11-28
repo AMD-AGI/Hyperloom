@@ -529,7 +529,7 @@ def validate_warm_replay_context_length(
 
 @dataclass(frozen=True)
 class WorkloadTokenWindow:
-    """Tokens a workload needs from the server: ISL, OSL and the run's MAX_MODEL_LEN cap."""
+    """Tokens a workload needs from the server: ISL, OSL and the run's MAX_MODEL_LEN."""
 
     isl: int
     osl: int
@@ -553,18 +553,20 @@ def inject_sglang_context_length(
     max_pos = _load_model_max_position_embeddings(str(model_path or ""))
     if not max_pos:
         return args
-    # AgentX replays a fixed trace corpus, so ISL/OSL are placeholders here and the ISL+OSL+headroom ceiling (8192 at
-    # the 1024/1024 defaults) would pin sglang's window two orders of magnitude below what the corpus needs -- every
-    # oversized trace then 4xxs. A prompt dataset is the same case.
+    # The run's MAX_MODEL_LEN is the max_length its accuracy evaluation runs in, and a launch serving less answers
+    # that evaluation 400 (hyperloom.measure.eval_context refuses it), so it is served whole. AgentX replays a fixed
+    # trace corpus, so ISL/OSL are placeholders there and the ISL+OSL+headroom ceiling (8192 at the 1024/1024 defaults)
+    # would pin sglang's window two orders of magnitude below what the corpus needs -- every oversized trace then 4xxs.
+    # A prompt dataset is the same case.
     from hyperloom.common.perf_metric import request_lengths_from_data
 
-    if request_lengths_from_data():
+    max_model_len = optional_positive_int(window.max_model_len)
+    if max_model_len is not None:
+        context_length = min(int(max_pos), max_model_len)
+    elif request_lengths_from_data():
         context_length = int(max_pos)
     else:
         context_length = min(int(max_pos), resolve_sglang_context_cap(window.isl, window.osl))
-    max_model_len_int = optional_positive_int(window.max_model_len)
-    if max_model_len_int is not None:
-        context_length = min(context_length, max_model_len_int)
     return merge_server_args(
         args,
         f"{_SGLANG_CONTEXT_LENGTH_FLAG} {context_length}",

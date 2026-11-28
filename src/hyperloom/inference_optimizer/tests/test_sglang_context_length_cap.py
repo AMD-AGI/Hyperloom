@@ -194,12 +194,12 @@ def test_inject_clamps_to_max_model_len(tmp_path):
     assert _context_length_value(out) == 82000
 
 
-def test_inject_max_model_len_above_cap_is_noop(tmp_path):
-    """A max-model-len larger than the workload cap leaves the cap untouched."""
+def test_inject_serves_a_max_model_len_above_the_cap(tmp_path):
+    """The run's max-model-len is the window its accuracy evaluation runs in, so it is served whole above the cap."""
     model = _write_model(tmp_path, _HUGE_MAX_POS)
-    # cap = 4096 + 4096 + 2048 = 10240 < max_model_len -> cap wins.
-    out = inject_sglang_context_length("", "sglang", model, WorkloadTokenWindow(4096, 4096, max_model_len=131072))
-    assert _context_length_value(out) == 10240
+    # cap = 4096 + 4096 + 2048 = 10240 < max_model_len.
+    out = inject_sglang_context_length("", "sglang", model, WorkloadTokenWindow(4096, 4096, max_model_len=12288))
+    assert _context_length_value(out) == 12288
 
 
 def test_inject_native_window_still_wins_when_smallest(tmp_path):
