@@ -482,6 +482,17 @@ def test_the_guard_replaces_a_ready_timeout_any_layer_sets(layer):
     assert "VLLM_ENGINE_READY_TIMEOUT_S" not in runner_owned(_VLLM_BASE).env
 
 
+@pytest.mark.parametrize("candidate", [LaunchDelta(), LaunchDelta(env_set={"SGLANG_CUDA_COREDUMP_BEFORE_CRASH": "1"})])
+def test_the_guard_turns_off_the_core_dumps_sglang_waits_for_before_it_exits_a_crash(candidate):
+    """SGLang's crash handler asks its schedulers for GPU core dumps and waits 60 s for them before it exits; a round's
+    processes write no core dump, so the wait would only hold the cards of a server that already died."""
+    sources = {entry.name: entry for entry in _launch(candidate=candidate).env_sources}
+    entry = sources["SGLANG_CUDA_COREDUMP_BEFORE_CRASH"]
+
+    assert (entry.value, entry.source) == ("0", LayerSource.GUARD)
+    assert "SGLANG_CUDA_COREDUMP_BEFORE_CRASH" not in {entry.name for entry in _launch(_VLLM_BASE).env_sources}
+
+
 def _llamacpp_compose(model_path) -> Launch | Refusal:
     query = replace(_base().query, framework="llamacpp", workload=Workload.FIXED, tp=None, isl=1024, osl=512)
     base = _base(query=query, framework="llamacpp", entrypoint=("llama-server",), args=("-ngl", "99"), golden_al=None)

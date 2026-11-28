@@ -12,6 +12,7 @@ import shutil
 from pathlib import Path
 
 from hyperloom.measure import fsafe
+from hyperloom.measure.failures import OUTPUT_TOO_LARGE, UNSAFE_OUTPUT
 from hyperloom.measure.farm import Farm
 from hyperloom.measure.manifest import RESERVED_NAMES, ManifestFile
 
@@ -25,7 +26,6 @@ __all__ = [
 ]
 
 
-_UNSAFE = "unsafe_output"
 #: Where the replay client of an AgentX round is installed, inside the round's workspace: a Python environment
 #: with links and the wheels it downloaded. It is the tool's installation, not a result of the test.
 AGENTX_RUNTIME_DIR = ".agentx-runtime"
@@ -64,13 +64,13 @@ def inventory(files_dir: Path, *, max_total_bytes: int) -> tuple[ManifestFile, .
     try:
         root_fd = fsafe.open_root(files_dir)
     except (fsafe.UnsafeEntry, fsafe.MissingEntry) as exc:
-        raise OutputRejected(_UNSAFE, f"the output directory is not usable: {exc}") from exc
+        raise OutputRejected(UNSAFE_OUTPUT, f"the output directory is not usable: {exc}") from exc
     entries: list[ManifestFile] = []
     total = 0
     try:
         for relative in fsafe.walk_regular_files(root_fd):
             if relative in RESERVED_NAMES:
-                raise OutputRejected(_UNSAFE, f"{relative} is a name the bundle owns")
+                raise OutputRejected(UNSAFE_OUTPUT, f"{relative} is a name the bundle owns")
             fd = fsafe.open_beneath(root_fd, relative)
             try:
                 sha256, size = fsafe.sha256_and_size(fd)
@@ -78,10 +78,10 @@ def inventory(files_dir: Path, *, max_total_bytes: int) -> tuple[ManifestFile, .
                 os.close(fd)
             total += size
             if total > max_total_bytes:
-                raise OutputRejected("output_too_large", f"the output exceeds {max_total_bytes} bytes")
+                raise OutputRejected(OUTPUT_TOO_LARGE, f"the output exceeds {max_total_bytes} bytes")
             entries.append(ManifestFile(relative, size, sha256))
     except fsafe.UnsafeEntry as exc:
-        raise OutputRejected(_UNSAFE, str(exc)) from exc
+        raise OutputRejected(UNSAFE_OUTPUT, str(exc)) from exc
     finally:
         os.close(root_fd)
     return tuple(entries)

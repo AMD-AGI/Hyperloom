@@ -4,13 +4,13 @@
 """Compose a round's launch from its frozen base and the config's layers.
 
 The order is fixed: base, user removals, user additions, candidate removals, candidate additions, the golden layer (when
-the round applies it, or applies it less its acceptance simulation: ``real_acceptance``), the guard (the round's model path, address, GPU mask and the framework's own ready timeout), the runner's layer (with the
-framework's metrics flag when the round scrapes ``/metrics``), then the profiler layer of a profile round. A layer's
-flag beats every earlier group of the same flag; a later alias of it wins only because the engine applies the last
-one. Neither the user nor the candidate may set what the guard or the runner owns, nor, under a golden layer, what
+the round applies it, or applies it less its acceptance simulation: ``real_acceptance``), the guard (the round's model path, address, GPU mask, the framework's own ready timeout and its crash-dump switch), the runner's layer
+(with the framework's metrics flag when the round scrapes ``/metrics``), then the profiler layer of a profile round. A
+layer's flag beats every earlier group of the same flag; a later alias of it wins only because the engine applies the
+last one. Neither the user nor the candidate may set what the guard or the runner owns, nor, under a golden layer, what
 golden owns; such a layer is refused, not overridden, so the refusal names whose layer it was. The framework's own
-ready timeout is the exception: recipes raise it for a slow start, and a round's user layer re-states its base's
-environment, so the guard's value replaces whatever a layer below set.
+ready timeout and crash-dump switch are the exception: recipes raise the timeout for a slow start, and a round's user
+layer re-states its base's environment, so the guard's value replaces whatever a layer below set.
 
 The server runs as the framework's server module under ``server.framework_python``, the interpreter the version probe
 and the parser check run, never the base's entrypoint through ``PATH``; a native server (llama.cpp's) runs as its
@@ -26,7 +26,13 @@ import shlex
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field
 
-from inference_suite.argv import argv_flag_occurrences, canonical_flag_name, normalize_argv, parse_removal_specs
+from inference_suite.argv import (
+    argv_flag_occurrences,
+    canonical_flag_name,
+    is_flag,
+    normalize_argv,
+    parse_removal_specs,
+)
 from inference_suite.contracts.base_launch import BaseLaunch, EnvValue, RunnerOwned
 from inference_suite.contracts.config import GoldenUse, LaunchDelta, RunnerLayer, ServerConfig, SuiteConfig
 from inference_suite.contracts.launch import (
@@ -43,7 +49,14 @@ from inference_suite.contracts.launch import (
     VersionCheck,
 )
 from inference_suite.contracts.report import FailedStep
-from inference_suite.frameworks import Framework, ModelFileError, ServerCommand, ServerFlags, framework_facts
+from inference_suite.frameworks import (
+    Framework,
+    FrameworkFacts,
+    ModelFileError,
+    ServerCommand,
+    ServerFlags,
+    framework_facts,
+)
 from inference_suite.golden import (
     GOLDEN_OWNED_ENV_PREFIXES,
     golden_owned_settings,
@@ -161,7 +174,7 @@ def _groups(tokens: Iterable[str]) -> list[tuple[str, tuple[str, ...]]]:
     """``tokens`` as flag groups: each flag with the values that follow it."""
     groups: list[tuple[str, list[str]]] = []
     for token in tokens:
-        if argv_flag_occurrences([token]):
+        if is_flag(token):
             groups.append((token, []))
         elif groups:
             groups[-1][1].append(token)
@@ -263,7 +276,7 @@ def _guard(
     server: ServerConfig,
     server_flags: ServerFlags,
     model: str,
-    ready_timeout_env: str | None,
+    spec: FrameworkFacts,
     boot_budget_sec: float | None,
 ) -> tuple[tuple[str, ...], dict[str, EnvValue]]:
     args = [server_flags.model, model, server_flags.host, server.host, server_flags.port, str(server.port)]
@@ -273,8 +286,11 @@ def _guard(
         GPU_MASK_ENV: ",".join(map(str, server.gpus)),
         HIP_MASK_ENV: ",".join(map(str, range(len(server.gpus)))),
     }
-    if ready_timeout_env is not None:
-        env[ready_timeout_env] = str(ready_timeout_sec(boot_budget_sec))
+    if spec.ready_timeout_env is not None:
+        env[spec.ready_timeout_env] = str(ready_timeout_sec(boot_budget_sec))
+    if spec.crash_dump_env is not None:
+        # A round's processes write no core dump (``runtime.process``): the wait would only hold the round's cards.
+        env[spec.crash_dump_env] = "0"
     return tuple(args), env
 
 
@@ -337,7 +353,7 @@ def compose(config: SuiteConfig, base: BaseLaunch, facts: RoundFacts) -> Launch 
             server,
             server_flags,
             spec.served_model(server.model_path),
-            spec.ready_timeout_env,
+            spec,
             config.deadlines.boot_budget_sec,
         )
     except ModelFileError as error:

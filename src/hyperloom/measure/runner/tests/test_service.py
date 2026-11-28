@@ -3,9 +3,12 @@
 
 from __future__ import annotations
 
+import ast
 import json
 import time
+from pathlib import Path
 
+from hyperloom.measure import failures
 from hyperloom.measure.runner.service import (
     EXIT_CODES,
     Progress,
@@ -25,6 +28,65 @@ def test_status_is_written_atomically_with_its_fields(tmp_path):
         "message": "m",
     }
     assert [p.name for p in tmp_path.iterdir()] == ["status.json"]
+
+
+_RUNNER = Path(__file__).resolve().parents[1]
+_RAISES = frozenset({"RunnerFailure", "OutputRejected"})
+
+
+def _callee(call: ast.Call) -> str:
+    return getattr(call.func, "id", None) or getattr(call.func, "attr", "")
+
+
+def _class_expressions(node: ast.AST) -> list[ast.expr]:
+    """The expressions an error class is written from: what a runner failure is raised with, what ``status.json`` gets,
+    and what a local ``error_class`` is set to."""
+    if isinstance(node, ast.Call) and _callee(node) in _RAISES and node.args:
+        return [node.args[0]]
+    if isinstance(node, ast.Call) and _callee(node) == "write_status":
+        return [keyword.value for keyword in node.keywords if keyword.arg == "error_class"]
+    if isinstance(node, ast.Assign) and any(getattr(target, "id", None) == "error_class" for target in node.targets):
+        return [node.value]
+    return []
+
+
+def _strings(expr: ast.expr, constants: dict[str, str]) -> set[str]:
+    if isinstance(expr, ast.IfExp):
+        return _strings(expr.body, constants) | _strings(expr.orelse, constants)
+    if isinstance(expr, ast.Constant) and isinstance(expr.value, str):
+        return {expr.value}
+    if isinstance(expr, ast.Name):
+        value = constants.get(expr.id, getattr(failures, expr.id, None))
+        return {value} if isinstance(value, str) else set()
+    return set()
+
+
+def _written_error_classes() -> set[str]:
+    written: set[str] = set()
+    for path in _RUNNER.rglob("*.py"):
+        if "tests" in path.relative_to(_RUNNER).parts:
+            continue
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        constants = {
+            target.id: node.value.value
+            for node in tree.body
+            if isinstance(node, ast.Assign) and isinstance(node.value, ast.Constant)
+            for target in node.targets
+            if isinstance(target, ast.Name)
+        }
+        for node in ast.walk(tree):
+            for expr in _class_expressions(node):
+                written |= _strings(expr, constants)
+    return written
+
+
+def test_every_error_class_the_runner_writes_is_one_the_classifier_reads():
+    """The classifier takes a class it does not list for a framework defect (``unknown_error_class``), so every class a
+    runner module raises or writes to ``status.json`` is listed as infrastructure or as a program error."""
+    written = _written_error_classes()
+
+    assert {"no_spec", "spec_rejected", "unsafe_output", "output_too_large", "runner_error", "disk_full"} <= written
+    assert written - failures.INFRA_ERROR_CLASSES - failures.PROGRAM_ERROR_CLASSES == set()
 
 
 def test_notes_that_fit_are_joined_as_they_are():

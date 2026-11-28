@@ -416,3 +416,137 @@ def test_a_log_without_the_dump_has_no_snapshot_failure() -> None:
     log = "Memory Usage is saved to cuda_graph_runner_memory_usage.pickle\nRuntimeError: stoi\n"
 
     assert log_causes.profiler_snapshot_failure(log) is None
+
+
+# The four logs below are cut from servers that died on a candidate's patched code, their paths shortened: the files a
+# test's patch lays sit in its farm (``/work/farm/site``) beside links to every other file of the package, so only the
+# path below the import path tells a patched file from the rest.
+
+#: A vLLM server that died importing a patched module that names an undefined decorator (the frames above it are links).
+IMPORT_NAME_ERROR_SOURCE = "vllm/_aiter_ops.py"
+IMPORT_NAME_ERROR_LOG = (
+    "W1118 07:04:06.873385  280851 agent.cpp:157] Attempt to enable hip visibility for agent-6 which is not visible to "
+    "HSA (ROCR)\n"
+    "Traceback (most recent call last):\n"
+    '  File "<frozen runpy>", line 198, in _run_module_as_main\n'
+    '  File "/work/farm/site/vllm/entrypoints/cli/main.py", line 48, in main\n'
+    "    import vllm.entrypoints.cli.preload\n"
+    '  File "/work/farm/site/vllm/model_executor/layers/utils.py", line 13, in <module>\n'
+    "    from vllm._aiter_ops import rocm_aiter_ops\n"
+    '  File "/work/farm/site/vllm/_aiter_ops.py", line 1740, in <module>\n'
+    "    @_hl_triton.jit\n"
+    "     ^^^^^^^^^^\n"
+    "NameError: name '_hl_triton' is not defined\n"
+)
+#: A vLLM engine core whose patched attention backend launched a Triton kernel with a configuration its
+#: ``static_assert`` refuses, then the process that saw the engine core die.
+STATIC_ASSERT_SOURCE = "vllm/v1/attention/backends/rocm_aiter_unified_attn.py"
+_CORE = "(EngineCore pid=675062) ERROR 11-18 09:12:34 [core.py:1584]"
+STATIC_ASSERT_LOG = (
+    f"{_CORE} EngineCore failed to start.\n"
+    f"{_CORE} Traceback (most recent call last):\n"
+    f'{_CORE}   File "/work/farm/site/{STATIC_ASSERT_SOURCE}", line 527, in forward\n'
+    f"{_CORE}     self.unified_attention(\n"
+    f'{_CORE}   File "/usr/local/lib/python3.12/dist-packages/aiter/ops/triton/attention/unified_attention.py", '
+    "line 1068, in _unified_attention_gfx950\n"
+    f"{_CORE}     _unified_attention_kernel_gfx950[grid](\n"
+    f'{_CORE}   File "/usr/local/lib/python3.12/dist-packages/triton/compiler/compiler.py", line 307, in compile\n'
+    f"{_CORE}     module = src.make_ir(target, options, codegen_fns, module_map, context)\n"
+    f"{_CORE}              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n"
+    f"{_CORE} triton.compiler.errors.CompileTimeAssertionFailure: at 281:4:\n"
+    f"{_CORE}     gl.static_assert(\n"
+    f"{_CORE}     ^\n"
+    f"{_CORE} NUM_BUFFERS must be 1 or 2\n"
+    "Process EngineCore:\n"
+    "Traceback (most recent call last):\n"
+    '  File "/usr/lib/python3.12/multiprocessing/process.py", line 314, in _bootstrap\n'
+    "    self.run()\n"
+    '  File "/work/farm/site/vllm/v1/engine/utils.py", line 1473, in wait_for_engine_startup\n'
+    "    raise RuntimeError(\n"
+    "RuntimeError: Engine core initialization failed. See root cause above. Failed core proc(s): {}\n"
+)
+#: A vLLM engine core whose patched quantization layer logs inside the graph TorchDynamo compiles: Dynamo's own frames
+#: hold no patched file, its message lists the compiled code's frames.
+DYNAMO_SOURCE = "vllm/model_executor/layers/quantization/input_quant_fp8.py"
+_DYNAMO = "(EngineCore pid=671394) ERROR 11-19 14:34:59 [core.py:1584]"
+DYNAMO_LOG = (
+    f"{_DYNAMO} Traceback (most recent call last):\n"
+    f'{_DYNAMO}   File "/usr/local/lib/python3.12/dist-packages/torch/_dynamo/convert_frame.py", line 1493, in '
+    "_fullgraph_capture_frame\n"
+    f"{_DYNAMO}     raise e.with_traceback(None) from e.__cause__  # User compiler error\n"
+    f"{_DYNAMO} torch._dynamo.exc.Unsupported: logging.Logger method not supported for non-export cases\n"
+    f"{_DYNAMO}   Explanation: logging.Logger methods are not supported for non-export cases.\n"
+    f"{_DYNAMO}   Hint: Add the logging method to `torch._dynamo.config.ignore_logging_functions`.\n"
+    f"{_DYNAMO} \n"
+    f"{_DYNAMO} from user code:\n"
+    f'{_DYNAMO}    File "/work/farm/site/vllm/model_executor/models/qwen3.py", line 268, in forward\n'
+    f"{_DYNAMO}     hidden_states, residual = layer(positions, hidden_states, residual)\n"
+    f'{_DYNAMO}   File "/work/farm/site/{DYNAMO_SOURCE}", line 171, in forward_hip\n'
+    f'{_DYNAMO}     logger.info_once("b05: aiter group quant with transpose_scale (col-major As)")\n'
+    f"{_DYNAMO} \n"
+    f"{_DYNAMO} Set TORCHDYNAMO_VERBOSE=1 for the internal stack trace.\n"
+)
+#: A vLLM worker whose patched decode kernel builder fails its own assertion.
+ASSERTION_SOURCE = "vllm/models/deepseek_v41/amd/mono/layer.py"
+_WORKER = "(Worker_TP1 pid=76291) ERROR 11-19 08:07:52 [multiproc_executor.py:1189]"
+ASSERTION_LOG = (
+    f"{_WORKER} Traceback (most recent call last):\n"
+    f'{_WORKER}   File "/work/farm/site/vllm/models/deepseek_v41/amd/mono_decode.py", line 210, in forward\n'
+    f"{_WORKER}     k1, k2 = self.kernels(M, ratio, fold, index)\n"
+    f'{_WORKER}   File "/work/farm/site/{ASSERTION_SOURCE}", line 88, in kernels\n'
+    f"{_WORKER}     self._kernels[key] = (build_mono_k1(b), build_mono_k2(k2))\n"
+    f'{_WORKER}   File "/work/farm/site/{ASSERTION_SOURCE}", line 41, in build_mono_k1\n'
+    f"{_WORKER}     assert GATE0 + s <= BLOCKS\n"
+    f"{_WORKER}            ^^^^^^^^^^^^^^^^^^^\n"
+    f"{_WORKER} AssertionError\n"
+)
+
+
+def test_each_traceback_is_read_with_its_own_lines_when_another_process_writes_after_it() -> None:
+    engine_core, launcher = log_causes.python_tracebacks(STATIC_ASSERT_LOG)
+
+    assert engine_core.files[0] == f"/work/farm/site/{STATIC_ASSERT_SOURCE}" and len(engine_core.files) == 3
+    assert engine_core.exception == "CompileTimeAssertionFailure"
+    assert engine_core.line == "triton.compiler.errors.CompileTimeAssertionFailure: at 281:4:"
+    assert (launcher.exception, launcher.files[-1]) == ("RuntimeError", "/work/farm/site/vllm/v1/engine/utils.py")
+
+
+def test_the_code_dynamo_was_compiling_counts_among_the_frames() -> None:
+    (traceback,) = log_causes.python_tracebacks(DYNAMO_LOG)
+
+    assert traceback.exception == "Unsupported"
+    assert traceback.files[-1] == f"/work/farm/site/{DYNAMO_SOURCE}"
+
+
+def test_a_logged_traceback_whose_frames_follow_on_bare_lines_is_read() -> None:
+    (traceback,) = log_causes.python_tracebacks(ILLEGAL_ADDRESS_LOG)
+
+    assert traceback.files[0].endswith("/full_cuda_graph_backend.py")
+    assert traceback.exception == "AcceleratorError"
+
+
+def test_an_exception_with_no_message_and_chained_tracebacks_are_read_apart() -> None:
+    log = (
+        f"{ASSERTION_LOG}"
+        "\n"
+        "During handling of the above exception, another exception occurred:\n"
+        "\n"
+        "Traceback (most recent call last):\n"
+        '  File "/work/farm/site/vllm/v1/executor/multiproc_executor.py", line 1189, in worker_busy_loop\n'
+        "KeyError: 'k1'\n"
+    )
+
+    assert [(t.exception, t.line) for t in log_causes.python_tracebacks(log)] == [
+        ("AssertionError", "AssertionError"),
+        ("KeyError", "KeyError: 'k1'"),
+    ]
+
+
+def test_a_traceback_that_ends_on_no_exception_is_left_out() -> None:
+    log = (
+        "Traceback (most recent call last):\n"
+        f'  File "/work/farm/site/{ASSERTION_SOURCE}", line 41, in build_mono_k1\n'
+        "INFO 01-01 00:00:00 serving on port 8000\n"
+    )
+
+    assert log_causes.python_tracebacks(log) == []

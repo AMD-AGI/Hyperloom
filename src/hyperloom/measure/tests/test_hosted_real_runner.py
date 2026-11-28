@@ -17,13 +17,13 @@ from typing import Any
 import pytest
 
 from hyperloom.contracts.measurement import FailureClass
-from hyperloom.measure.failures import FRAMEWORK_VERSION_MISMATCH
+from hyperloom.measure.failures import FRAMEWORK_VERSION_MISMATCH, OUTPUT_TOO_LARGE
 from hyperloom.measure.hosted_log import STATE_FINISHED
 from hyperloom.measure.local_templates import image_env
 from hyperloom.measure.runner.cache_layout import CACHE_ENV
 from hyperloom.measure.runner.tools import INFERENCEX_STORE, TOOL_CHECKOUTS_DIR
 from hyperloom.measure.tests.bundle_factory import STAGING, base_launch, stage_into
-from hyperloom.measure.returncodes import HOSTED_SPEC_REJECTED_RC
+from hyperloom.measure.returncodes import HOSTED_INFRA_FAILURE_RC, HOSTED_SPEC_REJECTED_RC
 from hyperloom.measure.socket import SessionFacts
 from hyperloom.measure.tests.gpu_free_host import IDLE_CARDS_PYTHON
 from hyperloom.measure.tests.hosted_fixtures import Rig, make_call, make_rig
@@ -208,6 +208,18 @@ def test_files_compiled_against_another_framework_version_are_refused_as_infra_b
     assert (outcome.failure_class, outcome.failure_reason) == (FailureClass.INFRA, FRAMEWORK_VERSION_MISMATCH)
     assert "PyYAML 0.0.1" in outcome.stderr and f"PyYAML {PYYAML_VERSION}" in outcome.stderr, outcome.stderr
     assert not (call.output_dir / "point_seen.json").exists(), "no server is launched over the mixed framework"
+
+
+def test_an_output_larger_than_the_result_may_carry_is_an_infrastructure_failure_not_a_refused_result(
+    real, tmp_path
+) -> None:
+    """The test succeeded, so none of its files is left out to fit: the runner signs no result of it."""
+    r = real(max_total_bytes=1)
+    call = _call(tmp_path, point=_point(tmp_path), timeout_sec=120)
+    outcome = r.backend.run_test(call)
+    assert (outcome.failure_class, outcome.failure_reason) == (FailureClass.INFRA, OUTPUT_TOO_LARGE)
+    assert outcome.returncode == HOSTED_INFRA_FAILURE_RC
+    assert outcome.stderr.startswith(f"{OUTPUT_TOO_LARGE}: the output exceeds 1 bytes"), outcome.stderr
 
 
 @pytest.mark.parametrize("fixture", ["real", "real_cli"])

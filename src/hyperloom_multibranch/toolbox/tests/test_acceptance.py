@@ -46,6 +46,41 @@ async def test_a_delta_that_does_not_fit_the_parent_recipe_is_refused_before_com
     assert rig.planner.calls == []
 
 
+@pytest.mark.parametrize(
+    ("server_args", "malformed"),
+    [
+        ("--compilation-config.custom_ops+rotary_embedding", "--compilation-config.custom_ops+rotary_embedding"),
+        ("--max-num-seqs 256 --enable+fusion", "--enable+fusion"),
+        ("--max-num-seqs=256 --kv:cache=fp8", "--kv:cache"),
+    ],
+    ids=["glued_list_append", "after_a_good_flag", "assigned"],
+)
+async def test_a_flag_no_launch_can_carry_is_refused_before_a_card_is_taken(
+    tmp_path: Path, server_args: str, malformed: str
+) -> None:
+    rig = build(tmp_path)
+    with pytest.raises(RequestRejected) as refused:
+        await rig.toolbox.submit_test(req(server_args=server_args))
+    assert refused.value.code == "delta_not_applicable"
+    assert repr(malformed) in refused.value.reason
+    assert rig.planner.calls == [], "nothing is compiled, queued or measured for it"
+    assert rig.blackboard._state().requests == {}
+
+
+@pytest.mark.parametrize(
+    "server_args",
+    [
+        "--compilation-config.custom_ops=+rotary_embedding",
+        '--compilation-config {"custom_ops":["+rotary_embedding"]}',
+        "--speculative-config.num_speculative_tokens 3 -tp 8 --temperature -1",
+    ],
+    ids=["value_after_equals", "json_value", "dotted_short_and_negative"],
+)
+async def test_flags_a_launch_can_carry_are_accepted(tmp_path: Path, server_args: str) -> None:
+    rig = build(tmp_path)
+    assert await rig.toolbox.submit_test(req(server_args=server_args))
+
+
 async def test_a_surface_mismatch_is_refused(tmp_path: Path) -> None:
     rig = build(tmp_path)
     rig.planner.mismatch = "isl 2048 != 1024"

@@ -78,8 +78,8 @@ _POINT_ENV = {
     "ROCR_VISIBLE_DEVICES": "4,5",
     "HIP_VISIBLE_DEVICES": "0,1",
 }
-#: The guard's hold on each framework's own ready timeout; ATOM has none.
-_SGLANG_READY = {"SGLANG_WARMUP_TIMEOUT": str(READY_TIMEOUT_SEC)}
+#: The guard's hold on each framework's own ready timeout, and on SGLang's wait for core dumps; ATOM has neither.
+_SGLANG_READY = {"SGLANG_WARMUP_TIMEOUT": str(READY_TIMEOUT_SEC), "SGLANG_CUDA_COREDUMP_BEFORE_CRASH": "0"}
 _VLLM_READY = {"VLLM_ENGINE_READY_TIMEOUT_S": str(READY_TIMEOUT_SEC)}
 #: (server command under the framework python, argv after it, server environment) per framework and board.
 _LAUNCH = {

@@ -18,7 +18,9 @@ from __future__ import annotations
 
 import os
 import re
-from collections.abc import Iterable
+from collections.abc import Iterable, Iterator
+from dataclasses import dataclass
+from itertools import islice
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -107,6 +109,15 @@ _EXCEPTION_WITH_MESSAGE = re.compile(
 _EXCEPTION_ALONE = re.compile(r"^\s*(?:[A-Za-z_]\w*\.)*(?:[A-Z]\w*)?(?:Error|Exception)\s*$")
 #: A frame of the allocator's memory-snapshot dump SGLang's CUDA-graph profile runs after the capture.
 _SNAPSHOT_FRAME = re.compile(TORCH_MEMORY_SNAPSHOT_FRAME)
+#: The line a Python traceback opens with. What precedes it on its line (a worker's ``(EngineCore_DP0 pid=7)``, a
+#: logger's prefix) precedes every line of that traceback when it precedes the next line, which tells them from the
+#: lines another process wrote between; a logged exception whose frames follow on bare lines has none.
+_TRACEBACK_HEAD = "Traceback (most recent call last):"
+_FRAME = re.compile(r'\s+File "([^"]+)", line \d+')
+#: The line a traceback ends on: the exception's dotted name, then ``: <message>`` or nothing.
+_RAISED = re.compile(r"(?:[A-Za-z_]\w*\.)*([A-Za-z_]\w*)(?::\s|:?$)")
+#: Where TorchDynamo's message lists the frames of the code it was compiling when it gave up.
+_USER_CODE = "from user code:"
 
 
 def one_line(text: str) -> str:
@@ -175,6 +186,63 @@ def profiler_snapshot_failure(text: str) -> str | None:
                 found = one_line(after)
             break
     return found
+
+
+@dataclass(frozen=True)
+class PythonTraceback:
+    """One traceback of a log: the files of its frames, outermost first, then those of the code TorchDynamo was
+    compiling when the exception's message lists them (``from user code:``); the exception's name without its module
+    (``Unsupported`` for ``torch._dynamo.exc.Unsupported``); and the line it ended on."""
+
+    files: tuple[str, ...]
+    exception: str
+    line: str
+
+
+def python_tracebacks(text: str) -> list[PythonTraceback]:
+    """Every traceback of ``text`` that ends on an exception, in the order they were written. A traceback ends at the
+    first of its lines that is neither a frame nor indented under one; one that ends on anything else (``During handling
+    of the above exception``, a line of another process with no prefix to tell it apart) is left out."""
+    lines = text.splitlines()
+    found = []
+    for index, line in enumerate(lines):
+        prefix, head, _ = line.partition(_TRACEBACK_HEAD)
+        ended = _traceback_after(prefix, lines, index + 1) if head else None
+        if ended is not None:
+            found.append(ended)
+    return found
+
+
+def _traceback_after(prefix: str, lines: list[str], start: int) -> PythonTraceback | None:
+    if start < len(lines) and not lines[start].startswith(prefix):
+        prefix = ""
+    own = (line[len(prefix) :] for line in islice(lines, start, None) if line.startswith(prefix))
+    files: list[str] = []
+    for body in own:
+        frame = _FRAME.match(body)
+        if frame:
+            files.append(frame.group(1))
+        elif body.strip() and not body[:1].isspace():
+            raised = _RAISED.match(body)
+            if raised is None or not files:
+                return None
+            return PythonTraceback((*files, *_user_code_files(own)), raised.group(1), one_line(body))
+    return None
+
+
+def _user_code_files(message: Iterator[str]) -> tuple[str, ...]:
+    """The files of the frames an exception's indented message lists after ``from user code:``."""
+    listed = False
+    files = []
+    for body in message:
+        frame = _FRAME.match(body)
+        if listed and frame:
+            files.append(frame.group(1))
+        elif body.strip() == _USER_CODE:
+            listed = True
+        elif body.strip() and not body[:1].isspace():
+            break
+    return tuple(files)
 
 
 def git_fetch_timeout(text: str) -> str | None:

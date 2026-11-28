@@ -7,8 +7,9 @@ One function decides for the local backend, the hosted backend and the runner, s
 wherever it is read. The classes drive different follow-ups in the tool layer:
 
 * ``infra``: nothing about the candidate was learned; retry in a fresh sandbox, write no negative result;
-* ``candidate``: the log carries a known failure signature, the server or the suite refused its own command line, or
-  it did not become ready within its boot limit; record a negative result;
+* ``candidate``: the log carries a known failure signature or an error the candidate's own code raises on every run
+  (:data:`CANDIDATE_CODE_ERROR`), the server or the suite refused its own command line, or it did not become ready
+  within its boot limit; record a negative result;
 * ``unclear``: non-zero with no known signature, a stalled server, or a timeout; rerun once in a fresh sandbox. The
   reason still names what the log says (a refused evaluation request, a Python exception) when it says anything. A
   profile's server that stalled with its profile window open is no candidate's doing: :data:`PROFILER_HUNG`, ``infra``;
@@ -101,6 +102,17 @@ RESULT_DOWNLOAD_INCOMPLETE = "result_download_incomplete"
 #: instead of polling until the test's timeout. Retried like any infrastructure failure.
 RUNNER_EXITED = "runner_exited"
 
+#: The files a test that succeeded left add up to more than its result may carry (``hyperloom.measure.runner.inventory``;
+#: a failed test's largest files are left out instead, ``runner.trace_fit``), so the runner signs no result and nothing
+#: about the candidate was learned. A fresh sandbox runs the same test and writes the same output: an infrastructure
+#: failure that is not retried (``hyperloom_multibranch.toolbox.attempts``) and not held against the node.
+OUTPUT_TOO_LARGE = "output_too_large"
+#: The output holds a link, a special file or a name the result bundle owns (``hyperloom.measure.runner.inventory``),
+#: so the runner signs no result of it: a program error.
+UNSAFE_OUTPUT = "unsafe_output"
+#: The runner raised an error it has no class for; its message names where. A defect of the runner: a program error.
+RUNNER_ERROR = "runner_error"
+
 #: The server's scheduler watchdog fired while a rank was still building an aiter JIT module (a tuned table named
 #: kernel instances the image's prebuilt module lacks, so aiter rebuilt it at the first prefill). Nothing about the
 #: candidate's speed was learned, so it is an infrastructure failure, but a fresh sandbox rebuilds the same module: the
@@ -129,6 +141,28 @@ SANDBOX_ACQUIRE_TIMEOUT = "sandbox_acquire_timeout"
 #: before profiling; the reason is ``<this>: <the client's warmup abort line>``. The candidate served a shorter context
 #: than the corpus needs (a smaller ``--max-model-len``, say), and every rerun replays the same requests: decisive.
 AGENTX_CONTEXT_OVERFLOW = "agentx_context_overflow"
+
+#: A Python traceback through a file the test's patch laid (:attr:`FailureEvidence.patched_sources`) ended on an error
+#: that code raises on every run: a name, type or attribute it gets wrong, a syntax error, an assertion it fails, or
+#: code the compiler it is handed to refuses (TorchDynamo's ``Unsupported``, a Triton kernel that does not compile or
+#: fails its ``static_assert``). A fresh sandbox only repeats it, so it is the candidate's failure and is not rerun. The
+#: reason is ``<this>: <the exception's line>``. Any other exception, or one raised through no patched file, stays
+#: unclear.
+CANDIDATE_CODE_ERROR = "candidate_code_error"
+_CODE_ERRORS = frozenset(
+    {
+        "NameError",
+        "UnboundLocalError",
+        "TypeError",
+        "AttributeError",
+        "SyntaxError",
+        "IndentationError",
+        "AssertionError",
+        "Unsupported",
+        "CompilationError",
+        "CompileTimeAssertionFailure",
+    }
+)
 
 #: The AgentX checkpoint stopped the measured round for trailing its reference by more than the allowed drop
 #: (``measure.checkpoint``): a ruling on the candidate, never retried. The ruling itself is in the round's slot.
@@ -190,10 +224,13 @@ INFRA_ERROR_CLASSES: frozenset[str] = frozenset(
         # The test went silent before its server was ready (``boot_watch``): a hang a new sandbox does not repeat.
         HUNG_BEFORE_READY,
         RUNNER_EXITED,
+        OUTPUT_TOO_LARGE,
     }
 )
 #: ``error_class`` values that mean the framework or the result is wrong, not the measurement or the candidate.
-PROGRAM_ERROR_CLASSES: frozenset[str] = frozenset({"spec_rejected", "result_rejected", CARDS_UNOBSERVABLE})
+PROGRAM_ERROR_CLASSES: frozenset[str] = frozenset(
+    {"spec_rejected", "result_rejected", CARDS_UNOBSERVABLE, UNSAFE_OUTPUT, RUNNER_ERROR}
+)
 
 #: The test ran past its own timeout: unclear, since a hung server and a test longer than its timeout end alike.
 #: ``hyperloom_multibranch.toolbox.attempts`` does not rerun a sweep that ends so.
@@ -256,6 +293,7 @@ _DECISIVE_REASONS = frozenset(
         PYTHON_EXCEPTION_REASON,
         SERVER_BOOT_TIMEOUT_REASON,
         AGENTX_CONTEXT_OVERFLOW,
+        CANDIDATE_CODE_ERROR,
     }
 )
 _PORT_IN_USE = re.compile(r"address already in use|\[Errno 98\]", re.IGNORECASE)
@@ -333,7 +371,8 @@ class FailureEvidence:
     detail, which inference_suite records in place of the return code it exits with; ``unrun`` is ``<error_class>:
     <message>`` of a failed round refused before it ran, which left no log: the only account of it there is;
     ``framework_changed`` is whether the test put a rebuilt framework on its server's import path
-    (:attr:`~hyperloom.measure.socket.TestCall.framework_changed`).
+    (:attr:`~hyperloom.measure.socket.TestCall.framework_changed`); ``patched_sources`` are the Python files it laid
+    there (:attr:`~hyperloom.measure.socket.TestCall.patched_sources`).
     """
 
     logs: tuple[str, ...] = ()
@@ -342,6 +381,7 @@ class FailureEvidence:
     step_failure: StepFailure | None = None
     unrun: str = ""
     framework_changed: bool = False
+    patched_sources: frozenset[str] = frozenset()
 
 
 def classify_test_failure(
@@ -382,7 +422,7 @@ def classify_test_failure(
     overflow = log_causes.warmup_context_overflow(client_text)
     if overflow:
         return _candidate(f"{AGENTX_CONTEXT_OVERFLOW}: {overflow}")
-    named = _named_or_profiler_death(text, parts, reported)
+    named = _named_or_profiler_death(text, parts, reported, evidence.patched_sources)
     if named is not None:
         return named
     if returncode == SERVER_BOOT_TIMEOUT_RC or step is FailedStep.SERVER_BOOT_TIMEOUT:
@@ -441,12 +481,15 @@ def _framework_unimportable(detail: str, changed: bool) -> FailureClassification
     return _infra(f"{FRAMEWORK_UNIMPORTABLE_REASON}: {line}")
 
 
-def _named_by_logs(text: str, parts: list[str], *, eval_failed: bool = False) -> FailureClassification | None:
-    """The verdict a log gives by itself: a port taken, a known signature, a refused command line, a profile's snapshot
-    dump that failed; else ``None``.
+def _named_by_logs(
+    text: str, parts: list[str], patched: frozenset[str], *, eval_failed: bool = False
+) -> FailureClassification | None:
+    """The verdict a log gives by itself: a port taken, a known signature, a refused command line, an error of the
+    candidate's code, a profile's snapshot dump that failed; else ``None``.
 
-    ``text`` is the logs ``parts`` joined. ``eval_failed`` is a round report's ``eval_failed``, which states what the
-    ``run_eval failed`` line of the signature table states: the evaluation itself ended the test.
+    ``text`` is the logs ``parts`` joined. ``patched`` are the Python files the test's patch laid. ``eval_failed`` is a
+    round report's ``eval_failed``, which states what the ``run_eval failed`` line of the signature table states: the
+    evaluation itself ended the test.
     """
     if _PORT_IN_USE.search(text):
         return _infra(PORT_IN_USE_REASON)
@@ -483,6 +526,9 @@ def _named_by_logs(text: str, parts: list[str], *, eval_failed: bool = False) ->
     flag_error = log_causes.argparse_error(text)
     if flag_error:
         return _candidate(f"{SERVE_FLAG}: {flag_error}")
+    code_error = _candidate_code_error(parts, patched)
+    if code_error:
+        return _candidate(f"{CANDIDATE_CODE_ERROR}: {code_error}")
     # After the signatures: a failure a candidate is known to cause stays the candidate's even in a profile's log.
     snapshot = log_causes.profiler_snapshot_failure(text)
     if snapshot:
@@ -490,16 +536,36 @@ def _named_by_logs(text: str, parts: list[str], *, eval_failed: bool = False) ->
     return None
 
 
-def _named_or_profiler_death(text: str, parts: list[str], reported: StepFailure | None) -> FailureClassification | None:
+def _named_or_profiler_death(
+    text: str, parts: list[str], reported: StepFailure | None, patched: frozenset[str]
+) -> FailureClassification | None:
     """The verdict the logs give by themselves (:func:`_named_by_logs`); else :data:`PROFILER_DIED` for a round that died
     with its profile window open; else ``None``. The death comes after the signatures, as the snapshot dump does: a
     failure a candidate is known to cause stays the candidate's even when the profiler was running."""
     eval_failed = reported is not None and reported.step is FailedStep.EVAL_FAILED
-    named = _named_by_logs(text, parts, eval_failed=eval_failed)
+    named = _named_by_logs(text, parts, patched, eval_failed=eval_failed)
     if named is not None or reported is None or not reported.profile_death:
         return named
     detail = log_causes.one_line(reported.detail)
     return _infra(f"{PROFILER_DIED}: {detail}" if detail else PROFILER_DIED)
+
+
+def _candidate_code_error(parts: list[str], patched: frozenset[str]) -> str | None:
+    """The line of the last :data:`CANDIDATE_CODE_ERROR` in ``parts``, else ``None``. Every traceback counts, not only
+    a log's last: a worker's error is followed by the traceback of the process that saw the worker die."""
+    if not patched:
+        return None
+    found = None
+    for part in parts:
+        for traceback in log_causes.python_tracebacks(part):
+            if traceback.exception in _CODE_ERRORS and any(_laid_by(file, patched) for file in traceback.files):
+                found = traceback.line
+    return found
+
+
+def _laid_by(file: str, patched: frozenset[str]) -> bool:
+    """Whether a traceback's ``file`` is one of the ``patched`` files: their paths below the import path end it."""
+    return any(file.endswith(f"/{source}") for source in patched)
 
 
 def _hf_cache_refusal(parts: list[str]) -> str | None:

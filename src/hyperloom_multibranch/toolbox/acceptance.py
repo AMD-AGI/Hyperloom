@@ -6,10 +6,11 @@
 Steps: the request validates (done by its constructor, plus the toolbox's own: no preset ``request_id``, a
 ``retest_of`` that names an accepted request, a PROFILE that no live profile already covers); the parent recipe is read
 from the experiment repository, and an explore of a specialist branch names that branch's head; the delta applies,
-changes an explore's parent recipe, keeps the weight precision of the session's root recipe, and the environment
-compiles; the measurement surface matches the canonical one, and a test that carries the accuracy evaluation serves a
-context that evaluation can run in. Compile, points, surface and the evaluation's context come from hosted measurement
-(``hyperloom.measure``) through the one :class:`MeasurementPlanner` seam.
+changes an explore's parent recipe, keeps the weight precision of the session's root recipe, spells every flag as a
+launch can carry it, and the environment compiles; the measurement surface matches the canonical one, and a test that
+carries the accuracy evaluation serves a context that evaluation can run in. Compile, points, surface and the
+evaluation's context come from hosted measurement (``hyperloom.measure``) through the one :class:`MeasurementPlanner`
+seam.
 """
 
 from __future__ import annotations
@@ -47,6 +48,8 @@ from hyperloom_multibranch.toolbox.short_prompts import (
     no_patch_files,
 )
 from hyperloom_multibranch.toolbox.weight_precision import ambiguous_words, weight_precision_changes
+from inference_suite.argv import tokenize_server_args_preserving_json
+from inference_suite.contracts.launch import unlaunchable_flags
 
 
 #: PyTorch tunes a GEMM shape the first time a server runs it when TunableOp is switched on (the value ``1``, nothing else
@@ -132,6 +135,22 @@ def _check_online_tuning(candidate: Recipe) -> None:
     envs = candidate.launch.envs
     if envs.get(TUNABLEOP_ENABLED_ENV) == "1" and envs.get(TUNABLEOP_TUNING_ENV) != "0":
         raise RequestRejected(ONLINE_TUNING_REASON, ONLINE_TUNING_CODE)
+
+
+def _check_launch_flags(candidate: Recipe) -> None:
+    """Refuse a candidate whose server arguments hold a word the runner's launch cannot carry as a flag, which it would
+    refuse only after the test's cards were taken. Whether the framework's parser takes each flag is checked in the
+    sandbox, where the framework is installed."""
+    # ``LaunchConfig`` takes no server arguments this tokenizer cannot split.
+    _, argv = tokenize_server_args_preserving_json(candidate.launch.server_args)
+    malformed = unlaunchable_flags(argv)
+    if malformed:
+        raise RequestRejected(
+            f"the candidate's server arguments hold {', '.join(map(repr, malformed))}, which no launch can carry as a "
+            "flag: a flag is '-' or '--', a letter or digit, then letters, digits, '_', '.' and '-'; any other "
+            "character belongs in a value, such as the flag's JSON object",
+            DELTA_NOT_APPLICABLE_CODE,
+        )
 
 
 def _check_weight_precision(root_commit: str, root: LaunchConfig, candidate: Recipe) -> None:
@@ -350,6 +369,7 @@ class Acceptance:
             _check_explore_changes_the_parent(recipe, candidate, request)
             _check_online_tuning(candidate)
             _check_weight_precision(*await self._root_launch(), candidate)
+            _check_launch_flags(candidate)
         planned = self._plan(recipe, request)
         if not replay:
             _check_aiter_sources(planned, self._aiter_builds_missing)

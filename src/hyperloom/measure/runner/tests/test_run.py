@@ -507,6 +507,48 @@ def test_a_symlink_in_the_output_is_refused_and_nothing_is_signed(tmp_path, env,
     assert not (tmp_path / "out" / "manifest.json").exists()
 
 
+def test_a_failed_test_over_the_size_cap_is_signed_with_its_own_verdict_and_its_largest_files_left_out(
+    tmp_path, env, monkeypatch
+):
+    """A server that died after a GPU fault can leave more than the result may carry; the verdict it ended on stays."""
+    reason = "python_exception: RuntimeError: HSA_STATUS_ERROR_EXCEPTION"
+
+    def died(call):
+        (call.output_dir / "server.log").write_text("RuntimeError: HSA_STATUS_ERROR_EXCEPTION\n")
+        (call.output_dir / "corepipe.cuda.node.7").write_bytes(b"\0" * (1 << 20))
+        failure = {"failure_class": "unclear", "failure_reason": reason}
+        return TestOutcome(1, "[]", "", (), SandboxFacts(sandbox_id="x"), request_id=call.task_id, **failure)
+
+    monkeypatch.setattr(runner, "LocalMeasurementBackend", _Backend(died))
+    sheet = _sheet()
+    sheet["outputs"]["max_total_bytes"] = 1 << 16
+
+    assert _go(tmp_path, env, sheet) == 0
+
+    assert _status(tmp_path)["state"] == "succeeded"
+    manifest = ResultManifest.from_bytes((tmp_path / "out" / "manifest.json").read_bytes())
+    assert (manifest.outcome.failure_class, manifest.outcome.failure_reason) == ("unclear", reason)
+    assert "server.log" in {f.path for f in manifest.files}
+    assert not (tmp_path / "out" / "files" / "corepipe.cuda.node.7").exists()
+    assert any("corepipe.cuda.node.7" in note for note in manifest.notes), manifest.notes
+
+
+def test_a_succeeded_test_over_the_size_cap_is_refused_as_too_large(tmp_path, env, monkeypatch):
+    """A measurement's files are its result: none of them is left out to make it fit."""
+
+    def large(call):
+        (call.output_dir / "trace.bin").write_bytes(b"\0" * (1 << 20))
+        return _ok(call)
+
+    monkeypatch.setattr(runner, "LocalMeasurementBackend", _Backend(large))
+    sheet = _sheet()
+    sheet["outputs"]["max_total_bytes"] = 1 << 16
+
+    assert _go(tmp_path, env, sheet) == 1
+    assert _status(tmp_path)["error_class"] == "output_too_large"
+    assert not (tmp_path / "out" / "manifest.json").exists()
+
+
 def test_the_replay_clients_installation_in_an_agentx_workspace_is_not_part_of_the_signed_output(
     tmp_path, env, monkeypatch
 ):
@@ -1176,6 +1218,30 @@ def test_the_runner_tells_the_rounds_verdict_whether_its_farm_changed_the_framew
     call = TestCall(points=(), output_dir=tmp_path, timeout_sec=1, cwd=str(tmp_path), task_id="t")
 
     assert runner._own_directories(context, call, None, farm, None).framework_changed is laid
+
+
+def test_the_runner_tells_the_rounds_verdict_which_python_files_its_farm_laid(tmp_path, monkeypatch):
+    """A traceback through one of them is the patch's (``failures.CANDIDATE_CODE_ERROR``)."""
+    from types import SimpleNamespace
+
+    from hyperloom.measure.farm import Farm
+    from hyperloom.measure.spec import EnvEntry, EnvRoot
+
+    monkeypatch.setattr(runner, "own_aiter_jit", lambda *args: {})
+    monkeypatch.setattr(runner, "raise_rebuild_watchdog", lambda *args: None)
+    context = SimpleNamespace(environ={}, work=tmp_path, notes=[], compile=tmp_path / "compile")
+    entries = (
+        EnvEntry("srt/layers/rotary_embedding.py", "upsert", blob="a" * 64),
+        EnvEntry("srt/layers/gone.py", "delete"),
+        EnvEntry("srt/configs/table.json", "upsert", blob="b" * 64),
+    )
+    root = EnvRoot("sglang", "package", "sglang", "sglang", "0", entries)
+    farm = Farm(site=tmp_path / "farm" / "site", packages=("sglang",), roots=(root,))
+    call = TestCall(points=(), output_dir=tmp_path, timeout_sec=1, cwd=str(tmp_path), task_id="t")
+
+    laid = runner._own_directories(context, call, None, farm, None)
+
+    assert laid.patched_sources == {"sglang/srt/layers/rotary_embedding.py"}
 
 
 _LINKED = ("semianalysisai___cc-traces-weka-062126", "openai___gsm8k")
