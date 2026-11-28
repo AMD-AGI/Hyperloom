@@ -14,7 +14,7 @@ from hyperloom.sandbox.socket import SandboxUnavailable
 from hyperloom_multibranch.contracts.blackboard.vocab import LeaseKind
 from hyperloom_multibranch.contracts.toolbox import BranchLease, LeaseCharge, RequestRejected
 from hyperloom_multibranch.toolbox.tools.base import ToolRequest
-from hyperloom_multibranch.toolbox.tools.roofline import ARCH_GPUS_PARAM, roofline_tool, tracelens_tool
+from hyperloom_multibranch.toolbox.tools.roofline import ARCH_GPUS_PARAM, roofline_tool
 
 #: The card the measurement test holds, and the one the pool leases out beside it.
 _TEST_CARD = 0
@@ -97,21 +97,19 @@ async def test_a_board_with_an_arch_spec_takes_no_card(tmp_path: Path, monkeypat
     assert ARCH_GPUS_PARAM not in handler.payloads[0]
 
 
-@pytest.mark.parametrize("make_tool", [roofline_tool, tracelens_tool], ids=["roofline", "tracelens"])
 async def test_the_internal_extension_measures_nothing_so_takes_no_card(
-    make_tool, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     _without_arch_spec(monkeypatch)
     internal = tmp_path / "TraceLens-internal"
     internal.mkdir()
     monkeypatch.setenv(tab.INTERNAL_ROOT_ENV, str(internal))
     pool = PoolBesideATest()
-    tool = make_tool(pool)
+    tool = roofline_tool(pool)
     handler = RecordingHandler(pool)
     tool._handler = handler
 
-    params = {"trace_input": "/t", "target_platform": "MI355X", "analysis_route": "non-llm"}
-    await tool.run(ToolRequest(tool.name, "b1", params), tmp_path)
+    await tool.run(ToolRequest("roofline", "b1", {"trace_input": "/t", "target_platform": "MI355X"}), tmp_path)
 
     assert pool.leases == []
     assert ARCH_GPUS_PARAM not in handler.payloads[0]
@@ -164,31 +162,3 @@ async def test_the_caller_cannot_name_the_cards(tmp_path: Path, monkeypatch: pyt
     await tool.run(ToolRequest("roofline", "b1", {"trace_input": "/t", ARCH_GPUS_PARAM: [_TEST_CARD]}), tmp_path)
 
     assert handler.payloads[0][ARCH_GPUS_PARAM] == [_FREE_CARD]
-
-
-async def test_the_tracelens_report_route_takes_no_card(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    _without_arch_spec(monkeypatch)
-    pool = PoolBesideATest()
-    tool = tracelens_tool(pool)
-    handler = RecordingHandler(pool)
-    tool._handler = handler
-
-    await tool.run(ToolRequest("tracelens", "b1", {"trace_input": "/t", "analysis_route": "report"}), tmp_path)
-
-    assert pool.leases == []
-    assert ARCH_GPUS_PARAM not in handler.payloads[0]
-
-
-async def test_the_tracelens_orchestrator_route_measures_on_a_leased_card(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    _without_arch_spec(monkeypatch)
-    pool = PoolBesideATest()
-    tool = tracelens_tool(pool)
-    handler = RecordingHandler(pool)
-    tool._handler = handler
-
-    await tool.run(ToolRequest("tracelens", "b1", {"trace_input": "/t", "analysis_route": "non-llm"}), tmp_path)
-
-    assert handler.payloads[0][ARCH_GPUS_PARAM] == [_FREE_CARD]
-    assert pool.released == ["lease-1"]

@@ -12,6 +12,7 @@ from pathlib import Path
 import yaml
 
 from hyperloom.orchestrator.actions.executors import _pd_combined_report as combined
+from hyperloom.orchestrator.actions.executors import profile
 from hyperloom.orchestrator.actions.executors import trace_analyze
 from hyperloom.orchestrator.actions.executors._pd_role_trace import role_analysis_payload
 from hyperloom.orchestrator.trace_analysis import _trace_split as split_module
@@ -49,6 +50,17 @@ def test_role_requests_split_decode_without_llm_flags_and_leave_prefill_unsplit(
         {"trace_input": decode["trace_input"], "steady_state_mode": "unsplit"}, run, session_dir=Path("/s"), workload={}
     )
     assert "--clamp-stream-overlaps" not in plain
+
+
+def test_capture_health_check_finds_a_role_capture_folder(tmp_path: Path) -> None:
+    capture = tmp_path / "decode" / "graph_capture_profile"
+    capture.mkdir(parents=True)
+    (capture / "DecodeCudaGraphRunner_bs_1_rank0.json.gz").write_bytes(b"x")
+
+    found, files = profile._capture_trace_files(tmp_path)
+
+    assert found == capture
+    assert [f.name for f in files] == ["DecodeCudaGraphRunner_bs_1_rank0.json.gz"]
 
 
 def test_combined_report_splits_decode_per_node_copies_prefill_and_clamps_each_chunk(

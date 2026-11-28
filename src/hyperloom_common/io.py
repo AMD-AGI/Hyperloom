@@ -271,6 +271,14 @@ def safe_mtime(path: Path) -> float:
         return 0.0
 
 
+def safe_size(path: Path) -> int:
+    """Return ``path``'s size in bytes, or ``0`` when ``stat()`` fails."""
+    try:
+        return path.stat().st_size
+    except OSError:
+        return 0
+
+
 __all__ = [
     "DURABLE",
     "SHARED",
@@ -287,4 +295,5 @@ __all__ = [
     "fsync_tree_directories",
     "group_read_mode",
     "safe_mtime",
+    "safe_size",
 ]

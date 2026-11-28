@@ -16,6 +16,8 @@ import hyperloom_common
 from hyperloom_common import gpu_card
 from hyperloom_common.amd_smi import AmdSmiError
 from hyperloom.inference_optimizer.multi_node._internal import gpu_probe
+from hyperloom.inference_optimizer.multi_node.pd_session import SSH_BACKENDS
+from hyperloom.orchestrator.actions.executors import _multi_node_env
 from hyperloom.orchestrator.tests._fixtures import MI325X_CARD
 
 #: What ``amd-smi static --json`` printed on a four-card MI325X node.
@@ -224,3 +226,13 @@ def test_a_failing_state_build_propagates(monkeypatch):
     monkeypatch.setattr(gpu_probe, "build_external_state_from_env", _boom)
     with pytest.raises(RuntimeError, match="bad hand-off env"):
         gpu_probe.remote_cards(timeout_s=1)
+
+
+@pytest.mark.parametrize("backend", SSH_BACKENDS)
+def test_every_ssh_backend_is_probed_and_routed_over_ssh(monkeypatch, backend):
+    monkeypatch.setattr(gpu_probe, "build_external_state_from_env", lambda: {"backend": backend})
+    monkeypatch.setattr(gpu_probe, "_probe_via_infera_ssh", lambda state, timeout_s: _MI325X_STATIC)
+    assert gpu_probe.remote_cards() == [MI325X_CARD] * 4
+    state = {"backend": backend, "worker_pod_ips": ["w0"], "ssh_key_path": "/keys/id"}
+    monkeypatch.setattr(_multi_node_env, "_read_state", lambda: state)
+    assert _multi_node_env.infera_ssh_env_from_state()["MN_SSH_HOST"] == "w0"
