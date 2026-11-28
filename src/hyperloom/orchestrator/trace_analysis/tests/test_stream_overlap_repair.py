@@ -84,7 +84,15 @@ def test_steady_state_chunk_is_clamped_only_when_asked(tmp_path: Path, monkeypat
     summary = {"clamped_events": 0, "removed_ms": 0.0, "worst_event": "", "worst_removed_ms": 0.0}
     monkeypatch.setattr(_stream_overlap_repair, "clamp_stream_overlaps", lambda p: seen.append(p) or summary)
     args = tla._build_parser().parse_args(
-        ["--trace-input", str(tmp_path / "t.json.gz"), "--workspace-path", str(tmp_path / "ws"), *argv]
+        [
+            "--trace-input",
+            str(tmp_path / "t.json.gz"),
+            "--workspace-path",
+            str(tmp_path / "ws"),
+            "--target-platform",
+            "MI300X",
+            *argv,
+        ]
     )
     chunk = tmp_path / "chunk.json.gz"
 
