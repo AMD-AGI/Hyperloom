@@ -14,7 +14,6 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 
 from hyperloom.common.owner_scope import local_owner_scope, same_environment
-from hyperloom_common.timeutil import now_iso
 from hyperloom.orchestrator.state.task_states import TERMINAL_STATES
 
 from .storage.connection import SqliteConnection
@@ -96,14 +95,12 @@ def hold_round_lane(
     round_id: str,
     holder_task_id: str,
     expires_unix: float,
-    now_unix: float,
 ) -> None:
     """Write the lane row an open round holds, inside the caller's transaction.
 
     Keyed on ``(BRINGUP_ROUND_LANE, round_id)`` and idempotent, so the one call
     serves the acquire, every renewal, and a handoff that moves the round to a
-    new holder. ``acquired_at`` survives a renewal; only the holder and the
-    expiry move.
+    new holder: only the holder and the expiry move.
 
     Args:
         cur: Cursor of the transaction writing the round row, so the round and
@@ -111,12 +108,10 @@ def hold_round_lane(
         round_id: The round holding the lane; also the lease's holder id.
         holder_task_id: The task the round is held by right now.
         expires_unix: When the round's lease runs out.
-        now_unix: Current wall time.
     """
-    stamp = _lease_iso(now_unix)
     cur.execute(
         "INSERT INTO leases(lane, holder_id, task_id, action, pid,"
-        "  acquired_at, expires_at) VALUES (?,?,?,?,?,?,?)"
+        "  expires_at) VALUES (?,?,?,?,?,?)"
         " ON CONFLICT(lane, holder_id) DO UPDATE SET"
         "  task_id = excluded.task_id,"
         "  expires_at = excluded.expires_at",
@@ -126,7 +121,6 @@ def hold_round_lane(
             holder_task_id,
             _ROUND_LEASE_ACTION,
             ROUND_LEASE_PID,
-            stamp,
             _lease_iso(expires_unix),
         ),
     )
@@ -438,10 +432,7 @@ class SqliteLeaseBackend:
         if not lanes:
             raise ValueError("acquire_many called with no lanes")
         expanded = _expand_lanes(lanes)
-        now_ts = time.time()
-        stamp = now_iso()
-        expires_ts = now_ts + ttl_sec
-        expires_iso = _lease_iso(expires_ts)
+        expires_iso = _lease_iso(time.time() + ttl_sec)
 
         async with self.db.transaction() as cur:
             # Resolve capacity per lane (fallback for unseeded DBs).
@@ -478,16 +469,15 @@ class SqliteLeaseBackend:
                 # INSERT OR REPLACE lets the same holder refresh its row.
                 cur.execute(
                     "INSERT OR REPLACE INTO leases(lane, holder_id, "
-                    "task_id, action, pid, acquired_at, expires_at, "
+                    "task_id, action, pid, expires_at, "
                     "owner_scope) "
-                    "VALUES (?,?,?,?,?,?,?,?)",
+                    "VALUES (?,?,?,?,?,?,?)",
                     (
                         lane,
                         holder_id,
                         task_id,
                         action,
                         os.getpid(),
-                        stamp,
                         expires_iso,
                         local_owner_scope(),
                     ),

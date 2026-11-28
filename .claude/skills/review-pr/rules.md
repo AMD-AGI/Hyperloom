@@ -347,15 +347,15 @@ opened for stays live.
 **Evidence:** `$WORK/diff.txt` and `$WORK/files.txt` -- the new name against the documentation and launcher paths; `$WORK/body.txt` for the operator-facing versus internal declaration.
 **Report as:** `X5 <file>:<line> -- new knob <NAME> is absent from <docs/reference/environment-variables.md | .env.template | launcher argv>`
 
-### X6 -- A persisted schema change needs a version bump and a migration
+### X6 -- A persisted field changes in its writer and every reader together, and the description says older sessions do not resume
 
 **Severity:** blocking
 **Fires when:** a field is added, removed or retyped on a type carrying `SCHEMA_VERSION`, `from_dict`, `ensure_schema`, or `files.txt` touches `src/hyperloom/inference_optimizer/breakdown/**` or `src/hyperloom_common/io.py`, or the diff contains `CREATE TABLE`.
-**The rule:** Any added, removed or renamed field in a persisted record -- run state, session state, sqlite schema, SBD document -- comes with a schema-version bump and a migration step following the file's existing convention. The check is to load a payload written at the previous version: strict field-set validation in `from_dict` and `CREATE TABLE IF NOT EXISTS` both fail to save you, and the symptom is that every existing workspace dies at startup, `--resume` included.
-**Seen in:** PR #1497 -- `search_start_mean_case_speedup` was added to `RunState` with `SCHEMA_VERSION` left at 19 and no migration, killing every campaign with an existing workspace at startup.
-**Not a finding when:** the field is optional with a default and the loader tolerates unknown or missing keys on the old-version path -- verify by reading the loader, not by assuming `total=False` is enough.
-**Evidence:** `$WORK/diff.txt` -- the field change against the `SCHEMA_VERSION` literal and the migration block in the same file.
-**Report as:** `X6 <file>:<line> -- <field> changes the persisted schema; SCHEMA_VERSION unchanged and no migration`
+**The rule:** A session is resumed only by the build that wrote it, so an added, removed or renamed field in a record a session persists and reads back -- run state, session state, sqlite schema, the breakdown spool -- needs no migration and no version stamp. The check is that the writer and every reader in the same build agree on the field, and that the description says sessions started before the change cannot be resumed: strict field-set validation in `from_dict` and `CREATE TABLE IF NOT EXISTS` mean every existing workspace dies at startup, `--resume` included, and an operator learns that from the description or not at all.
+**Seen in:** PR #1497 -- `search_start_mean_case_speedup` was added to `RunState`; every campaign with an existing workspace then died at startup, which is the effect the description has to state.
+**Not a finding when:** every writer and reader of the field in the head tree agree and the description already says sessions started before the change cannot be resumed -- verify by reading the loader and the readers, not by assuming `total=False` is enough.
+**Evidence:** `$WORK/diff.txt` -- the field change against every writer and reader of the field in the head tree; `$WORK/body.txt` for the statement about sessions started before the change.
+**Report as:** `X6 <file>:<line> -- <field> changes the persisted record; <reader still reads the old shape | the description does not say older sessions cannot be resumed>`
 
 ### X7 -- An external-component pin moves in all four places at once
 

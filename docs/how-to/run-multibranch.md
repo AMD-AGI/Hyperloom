@@ -232,8 +232,8 @@ the profile and the root commit are the ones the first PRELUDE recorded.
   stays the one the first start set and the `resume` phase records it with the downtime. Such a resume is refused when
   the session recorded no baseline, was to stop once its map was made, already spent the GPU hours EXPLORE has under
   `--max-gpu-hours`, or is past that deadline; the restart then finishes it with `final-only`. It is refused too,
-  with one warning naming the field, when the baseline was measured on another build, `MEASUREMENT_EPOCH`, image,
-  base launch or runner template card count than the restart would measure on, as recorded in
+  with one warning naming the field, when the baseline was measured on another image, base launch or runner template
+  card count than the restart would measure on, as recorded in
   `MB-toolbox/baseline-environment.json` when the first baseline test was accepted. The application's node and account
   are not compared: a reschedule changes them by design, and the tests run in the grant. The restart ends the
   measurement sandboxes the earlier start left running in the grant before it measures anything, and EXPLORE ends by
@@ -243,7 +243,7 @@ the profile and the root commit are the ones the first PRELUDE recorded.
   `an earlier CLOSE of this session archived its search tree`. This holds for every later CLOSE of that session, a
   second `--resume` or a `final-only` included, and also when the earlier CLOSE's exports failed after it archived.
 - **Refusals (exit 2, nothing changed):** `SESSION_DIR` is not a directory or holds no session that ran; the session
-  ran on another build, is still running, already chose in FINAL, failed in PRELUDE or recorded no baseline, was
+  is still running, already chose in FINAL, failed in PRELUDE or recorded no baseline, was
   measured in a grant's sandboxes (`--measurement hosted`), was to stop once its map was made, or already spent the GPU
   hours EXPLORE has under `--max-gpu-hours` (all of it less FINAL's share), which would send it straight to FINAL; or
   any other `run` option is given beside `--resume`.

@@ -434,17 +434,11 @@ class KernelStackPhase(CoordinatorCollaborator):
     async def recover_interrupted_stack_validation(self) -> bool:
         """Settle a stack attempt a crash or halt left behind; return whether there was one.
 
-        The record, an apply row and a ledger row's in-flight guard each mean an attempt started. A guard alone is
-        what v1.1.2 left when it crashed before its first apply checkpoint; with no apply row there is nothing to
-        revert, so recovery only releases the members.
+        The record and an apply row each mean an attempt started.
         """
         state = self.shared_state
         pending = state.pending_stack_validation_result
-        guarded = any(
-            isinstance(entry, dict) and entry.get("stack_validation_in_progress")
-            for entry in (state.kernel_integrate_attempts or {}).values()
-        )
-        if not (pending or state.pending_stack_validation_apply_results or guarded):
+        if not (pending or state.pending_stack_validation_apply_results):
             return False
         try:
             if pending and not isinstance(pending, dict):

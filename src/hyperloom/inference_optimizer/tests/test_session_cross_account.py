@@ -338,8 +338,8 @@ def test_a_resume_by_an_account_that_cannot_read_an_owner_only_file_is_refused_n
     info = target.stat()
     assert str(raised.value) == (
         f"cannot read {target} (owner {info.st_uid}:{info.st_gid} 0600). A session that holds a credential keeps its "
-        "state, manifest and optimization journal where only the account that made it can read them, and a session an "
-        "earlier release made keeps its database so: resume it as that account, or start a new session."
+        "state, manifest and optimization journal where only the account that made it can read them: resume it as "
+        "that account, or start a new session."
     )
 
 

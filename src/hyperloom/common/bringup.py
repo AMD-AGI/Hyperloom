@@ -306,8 +306,7 @@ class BootObservation:
             progress_witness={str(k): str(v) for k, v in witness.items()} if witness is not None else None,
             terminal_frame=TerminalFrame.from_dict(frame) if frame is not None else None,
             matched_marker=str(raw["matched_marker"]),
-            # Absent from observations persisted before the field existed.
-            failure_text=str(raw.get("failure_text", "")),
+            failure_text=str(raw["failure_text"]),
             excerpt=Excerpt.from_dict(excerpt) if excerpt is not None else None,
             evidence_ref=str(raw["evidence_ref"]),
             server_elapsed_sec=float(raw["server_elapsed_sec"]),

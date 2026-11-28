@@ -24,7 +24,6 @@ from hyperloom.inference_optimizer.session.session_paths import (
     recipe_snapshot_audit_jsonl,
     specialist_intel_path,
     trace_dir,
-    trajectory_dir,
 )
 from . import langfuse_mapping as lfmap
 from . import trajectory_projection as trajmap
@@ -78,17 +77,6 @@ def _cursor_entries(persisted: Any) -> dict[str, int]:
             cursors[str(name)] = max(0, int(count))
         except (TypeError, ValueError):
             continue
-    return cursors
-
-
-def _persisted_rows_sent(session_dir: Path, receipt: dict[str, Any]) -> dict[str, int]:
-    """Return how many rows of each source log a previous process sent, keyed by its path under ``session_dir``.
-
-    v1.1.3 receipts carry the trajectory cursors as ``trajectory_rows_sent``, keyed by shard name.
-    """
-    prefix = trajectory_dir(session_dir).relative_to(session_dir).as_posix()
-    cursors = {f"{prefix}/{name}": rows for name, rows in _cursor_entries(receipt.get("trajectory_rows_sent")).items()}
-    cursors.update(_cursor_entries(receipt.get("rows_sent")))
     return cursors
 
 
@@ -329,7 +317,7 @@ class LangfuseEmitter:
         # What earlier legs already handed to the SDK. A resumed leg reports into the same trace, so it starts after
         # these. The SDK's flush does not report a failed export, so "handed to the SDK" is all they can record.
         persisted = read_receipt(self.session_dir) or {}
-        self._rows_sent: dict[str, int] = _persisted_rows_sent(self.session_dir, persisted)
+        self._rows_sent: dict[str, int] = _cursor_entries(persisted.get("rows_sent"))
         decisions_sent = persisted.get("decisions_sent")
         self._decisions_sent: set[str] = set(map(str, decisions_sent)) if isinstance(decisions_sent, list) else set()
         # Live-status mirror throttle: last pushed signature + monotonic ts, so a snapshot is sent only on-change or

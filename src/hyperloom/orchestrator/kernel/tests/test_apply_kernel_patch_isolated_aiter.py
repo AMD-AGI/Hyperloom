@@ -1580,7 +1580,7 @@ def test_manifest_revert_restores_every_clean_scope(tmp_path, monkeypatch, scope
     backups.mkdir()
     manifest = backups / "manifest.json"
     manifest.write_text(
-        json.dumps({"strategy": {"jit_build_dir": str(build)}, "jit_build_backup": record}), encoding="utf-8"
+        json.dumps({"strategy": {"jit_build_dirs": [str(build)]}, "jit_build_backup": record}), encoding="utf-8"
     )
 
     result = akp.revert_kernel_patch(manifest)

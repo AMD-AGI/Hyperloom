@@ -21,7 +21,6 @@ from hyperloom.orchestrator.bus.resource_lock import SqliteLeaseBackend
 from hyperloom.orchestrator.bus.storage.connection import SqliteConnection
 from hyperloom.orchestrator.bus.storage.schema import (
     DEFAULT_LANE_CAPACITIES,
-    SCHEMA_VERSION,
     ensure_schema,
     set_lane_capacity,
 )
@@ -43,10 +42,6 @@ def conn(db_path):
 @pytest.fixture
 def locks(conn):
     return SqliteLeaseBackend(conn)
-
-
-def test_schema_version_records_owner_provenance():
-    assert SCHEMA_VERSION == 8
 
 
 def test_fresh_db_has_composite_pk(conn):
@@ -83,14 +78,13 @@ def test_set_lane_capacity_upserts(conn):
 def test_v2_ensure_schema_is_idempotent(conn):
     """Calling ensure_schema twice on the same DB doesn't lose data."""
     conn.raw.execute(
-        "INSERT INTO leases(lane, holder_id, task_id, action, pid, acquired_at, expires_at) VALUES (?,?,?,?,?,?,?)",
+        "INSERT INTO leases(lane, holder_id, task_id, action, pid, expires_at) VALUES (?,?,?,?,?,?)",
         (
             "research_lane",
             "h1",
             "t1",
             "specialist",
             1,
-            "2026-05-19T18:00:00+00:00",
             "2099-12-31T23:59:59+00:00",
         ),
     )
@@ -328,26 +322,24 @@ async def test_old_rows_still_count_toward_lane_capacity(conn, locks):
     set_lane_capacity(conn.raw, "research_lane", 2)
     # Insert one expired and one live holder directly to bypass acquire_many's reap pass.
     conn.raw.execute(
-        "INSERT INTO leases(lane, holder_id, task_id, action, pid, acquired_at, expires_at) VALUES (?,?,?,?,?,?,?)",
+        "INSERT INTO leases(lane, holder_id, task_id, action, pid, expires_at) VALUES (?,?,?,?,?,?)",
         (
             "research_lane",
             "dead",
             "td",
             "specialist",
             1,
-            "2026-01-01T00:00:00+00:00",
             "2026-01-01T00:00:01+00:00",
         ),
     )
     conn.raw.execute(
-        "INSERT INTO leases(lane, holder_id, task_id, action, pid, acquired_at, expires_at) VALUES (?,?,?,?,?,?,?)",
+        "INSERT INTO leases(lane, holder_id, task_id, action, pid, expires_at) VALUES (?,?,?,?,?,?)",
         (
             "research_lane",
             "live",
             "tl",
             "specialist",
             1,
-            "2026-01-01T00:00:00+00:00",
             "2099-12-31T23:59:59+00:00",
         ),
     )
@@ -633,27 +625,25 @@ async def test_reap_dead_holders_releases_crashed_pid(conn, locks, monkeypatch, 
     set_lane_capacity(conn.raw, "benchmark_lane", 1)
     # Long-lived (not expired) lease held by a dead PID.
     conn.raw.execute(
-        "INSERT INTO leases(lane, holder_id, task_id, action, pid, acquired_at, expires_at) VALUES (?,?,?,?,?,?,?)",
+        "INSERT INTO leases(lane, holder_id, task_id, action, pid, expires_at) VALUES (?,?,?,?,?,?)",
         (
             "benchmark_lane",
             "zombie",
             "tz",
             "explore",
             dead_pid,
-            "2026-01-01T00:00:00+00:00",
             expires,
         ),
     )
     # A second lane held by a live PID (this process) must survive.
     conn.raw.execute(
-        "INSERT INTO leases(lane, holder_id, task_id, action, pid, acquired_at, expires_at) VALUES (?,?,?,?,?,?,?)",
+        "INSERT INTO leases(lane, holder_id, task_id, action, pid, expires_at) VALUES (?,?,?,?,?,?)",
         (
             "profile_lane",
             "alive",
             "ta",
             "profile",
             os.getpid(),
-            "2026-01-01T00:00:00+00:00",
             "2099-12-31T23:59:59+00:00",
         ),
     )
@@ -671,14 +661,13 @@ async def test_reap_dead_holders_releases_crashed_pid(conn, locks, monkeypatch, 
 async def test_reap_dead_holders_skips_null_pid(conn, locks):
     """A lease with a null/zero pid is never reaped (cannot prove dead)."""
     conn.raw.execute(
-        "INSERT INTO leases(lane, holder_id, task_id, action, pid, acquired_at, expires_at) VALUES (?,?,?,?,?,?,?)",
+        "INSERT INTO leases(lane, holder_id, task_id, action, pid, expires_at) VALUES (?,?,?,?,?,?)",
         (
             "benchmark_lane",
             "nopid",
             "tn",
             "explore",
             0,
-            "2026-01-01T00:00:00+00:00",
             "2099-12-31T23:59:59+00:00",
         ),
     )

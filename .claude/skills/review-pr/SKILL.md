@@ -170,9 +170,9 @@ naming nothing in the diff, is no answer.
 ## Step 6 — Free-form pass, then build-it-again
 
 Read the diff as someone who knows this system. Does the approach belong at this layer? Any correctness risk the
-rules missed — a phase entered twice, a resume landing on a state shape the new code cannot read, a destructive sweep
-scoped by pattern rather than by what this run owns, a number compared against another measurement system's? Most
-findings come from this step; the rule list prompts it and does not replace it.
+rules missed — a phase entered twice, a resume reading a state shape the same build's writer does not produce, a
+destructive sweep scoped by pattern rather than by what this run owns, a number compared against another measurement
+system's? Most findings come from this step; the rule list prompts it and does not replace it.
 
 Then append to `$WORK/answers.txt`:
 

@@ -19,13 +19,10 @@ from pathlib import Path
 import pytest
 
 from hyperloom.contracts.measurement import Purpose
-from hyperloom.inference_optimizer.cli import bootstrap
 from hyperloom.measure.pins import IMAGE_DIGEST_VAR, IMAGE_REF_VAR
 from hyperloom.measure.tests.bundle_factory import base_launch
 from hyperloom.orchestrator.state.base_launch import freeze_base
 from hyperloom_multibranch.contracts.blackboard import INTEGRATION_BRANCH
-from hyperloom_multibranch.contracts.build import CodeVersion, code_version
-from hyperloom_multibranch.toolbox import resume_guard
 from hyperloom_multibranch.toolbox.resume_guard import (
     BASELINE_ENVIRONMENT_FILE,
     BaselineNotReusable,
@@ -83,8 +80,6 @@ async def test_a_session_resumed_on_what_its_baseline_was_measured_on_reuses_it(
     assert check_hosted_baseline_reusable(tmp_path, len(CARDS)) is None
     recorded = json.loads((tmp_path / BASELINE_ENVIRONMENT_FILE).read_text())
     assert recorded == {
-        "build": dataclasses.asdict(code_version()),
-        "measurement_epoch": bootstrap.MEASUREMENT_EPOCH,
         "node": NODE,
         "image_digest": IMAGE,
         "cards": len(CARDS),
@@ -108,27 +103,6 @@ async def test_the_guard_writes_nothing_whether_it_passes_or_refuses(tmp_path: P
     _refusal(tmp_path)
 
     assert list(_tree(tmp_path)) == before and os.stat(tmp_path).st_mtime_ns == mtime
-
-
-async def test_another_build_is_refused(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    await _baselined(tmp_path)
-    ran = code_version()
-    monkeypatch.setattr(resume_guard, "code_version", lambda: CodeVersion(ran.package, "f" * 40))
-
-    assert _refusal(tmp_path) == (
-        f"the baseline was measured with build '{ran.package}@{ran.git_sha}' and this run has"
-        f" '{ran.package}@{'f' * 40}'"
-    )
-
-
-async def test_a_measurement_epoch_change_is_refused(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    await _baselined(tmp_path)
-    monkeypatch.setattr(bootstrap, "MEASUREMENT_EPOCH", bootstrap.MEASUREMENT_EPOCH + 1)
-
-    assert _refusal(tmp_path) == (
-        f"the baseline was measured with measurement_epoch {bootstrap.MEASUREMENT_EPOCH - 1} and this run has"
-        f" {bootstrap.MEASUREMENT_EPOCH}"
-    )
 
 
 async def test_another_image_is_refused(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -184,19 +158,14 @@ async def test_a_hosted_restart_on_another_node_reuses_the_baseline(
     assert list(_tree(tmp_path)) == before, "the guard writes nothing"
 
 
-@pytest.mark.parametrize("changed", ["build", "measurement_epoch", "image_digest", "cards", "base_launch_digest"])
+@pytest.mark.parametrize("changed", ["image_digest", "cards", "base_launch_digest"])
 async def test_a_hosted_restart_onto_anything_else_its_baseline_was_measured_on_is_refused_naming_it(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, changed: str
 ) -> None:
     await _baselined(tmp_path)
     monkeypatch.setenv("NODE_NAME", "node-b")
     cards = len(CARDS)
-    if changed == "build":
-        ran = code_version()
-        monkeypatch.setattr(resume_guard, "code_version", lambda: CodeVersion(ran.package, "f" * 40))
-    elif changed == "measurement_epoch":
-        monkeypatch.setattr(bootstrap, "MEASUREMENT_EPOCH", bootstrap.MEASUREMENT_EPOCH + 1)
-    elif changed == "image_digest":
+    if changed == "image_digest":
         monkeypatch.setenv(IMAGE_DIGEST_VAR, OTHER_IMAGE)
     elif changed == "cards":
         cards = 4
@@ -222,7 +191,7 @@ async def test_a_hosted_restart_that_may_not_read_the_frozen_base_launch_is_refu
 
 
 async def test_a_session_whose_toolbox_recorded_nothing_is_refused(tmp_path: Path) -> None:
-    """A session from before the record: its toolbox measured the baseline and recorded nothing."""
+    """A toolbox that was not told what its tests are measured on measures the baseline and records nothing."""
     freeze_base(tmp_path, base_launch())
     rig = build(tmp_path)
     await rig.toolbox.submit_test(req(INTEGRATION_BRANCH, purpose=Purpose.BASELINE))
@@ -231,20 +200,6 @@ async def test_a_session_whose_toolbox_recorded_nothing_is_refused(tmp_path: Pat
     reason = _refusal(tmp_path)
 
     assert reason.startswith(f"{tmp_path / BASELINE_ENVIRONMENT_FILE} does not exist: ")
-
-
-@pytest.mark.parametrize("dropped", [("node",), ("cards", "measurement_epoch")])
-async def test_a_record_an_older_build_wrote_without_a_field_is_refused_naming_it(
-    tmp_path: Path, dropped: tuple[str, ...]
-) -> None:
-    """The record as a build that recorded fewer fields wrote it: the toolbox's record less ``dropped``."""
-    await _baselined(tmp_path)
-    path = tmp_path / BASELINE_ENVIRONMENT_FILE
-    document = json.loads(path.read_text())
-    path.write_text(json.dumps({name: value for name, value in document.items() if name not in dropped}))
-
-    names = ", ".join(name for name in resume_guard.RECORDED_FIELDS if name in dropped)
-    assert _refusal(tmp_path) == f"{path} does not record {names}, so it cannot be compared"
 
 
 async def test_the_record_is_written_once_by_the_first_baseline_and_kept(tmp_path: Path) -> None:
@@ -273,5 +228,5 @@ async def test_a_record_that_cannot_be_written_leaves_the_baseline_test_accepted
     assert "cannot be recorded, so a resume will refuse" in caplog.text
     assert _refusal(tmp_path).endswith(
         "the session recorded nothing of what its baseline was measured on"
-        " (it predates the record, or its tests did not run on this machine's cards)"
+        " (its tests did not run on this machine's cards, or the record could not be written)"
     )

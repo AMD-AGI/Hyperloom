@@ -215,8 +215,7 @@ def build_manifest(
         "image": _prov["image"],
         # Snapshotted so resume-after-redeploy can detect drift.
         "stack_fingerprint": _prov.get("stack_fingerprint") or {},
-        # Workflow identity is stamped only on a fresh manifest. Resumed
-        # pre-contract sessions therefore remain honestly legacy.
+        # Workflow identity is stamped only on a fresh manifest.
         "workflow_contract_version": workflow_contract()["workflow_contract_version"],
         "workflow_contract_digest": workflow_contract_digest(),
         "workflow_flags": {

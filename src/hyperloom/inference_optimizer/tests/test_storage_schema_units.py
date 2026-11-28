@@ -16,30 +16,12 @@ def _conn() -> sqlite3.Connection:
     return sqlite3.connect(":memory:")
 
 
-def test_ensure_schema_creates_and_reports_version():
+def test_ensure_schema_seeds_each_lane_once():
     conn = _conn()
     schema.ensure_schema(conn)
     schema.ensure_schema(conn)
-    assert conn.execute("SELECT version FROM schema_version").fetchall() == [(schema.SCHEMA_VERSION,)]
-    conn.close()
-
-
-def test_ensure_schema_refuses_a_database_recorded_at_an_older_version(tmp_path):
-    path = tmp_path / "coordinator.db"
-    conn = sqlite3.connect(path)
-    for stmt in schema._DDL:
-        conn.execute(stmt)
-    conn.execute("INSERT INTO schema_version(version, applied_at) VALUES (5, '2026-09-16 00:00:00')")
-    conn.commit()
-    with pytest.raises(RuntimeError) as excinfo:
-        schema.ensure_schema(conn)
-    assert str(excinfo.value) == (
-        f"coordinator.db is at schema version 5, older than this build's {schema.SCHEMA_VERSION}: "
-        "sessions created before this release cannot be resumed. Finish the session under the build "
-        "that started it, or start a new session."
-    )
-    assert conn.execute("SELECT version FROM schema_version").fetchall() == [(5,)]
-    assert conn.execute("SELECT COUNT(*) FROM lane_capacity").fetchone() == (0,)
+    lanes = [row[0] for row in conn.execute("SELECT lane FROM lane_capacity")]
+    assert sorted(lanes) == sorted(schema.DEFAULT_LANE_CAPACITIES)
     conn.close()
 
 

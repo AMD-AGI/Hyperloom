@@ -15,14 +15,13 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-from hyperloom.common.owner_scope import process_started_at, same_environment
+from hyperloom.common.owner_scope import same_environment
 from hyperloom.common.session_files import pins_hold_credentials
 from hyperloom_common.shared_storage import open_shared_append, ownership
 from hyperloom_common.timeutil import now_iso
 
 from . import lock as session_lock
 from . import session_paths
-from .coordinator_db import OlderCoordinatorDB, refuse_older_schema
 from .optimization_journal import journal_path
 from .paths import ENV_LEDGER_DIR, SESSION_FILES, db_path_for, ledger_mark_path, private_db_exists, shared_db_path_for
 
@@ -193,8 +192,8 @@ def _require_readable(session_dir: Path) -> None:
 
     ``state.json`` and ``manifest.json`` are owner-only while the operator's ``--extra-env`` or ``--server-args`` hold a
     credential, and the optimization journal while a recorded decision does: another account of the group is refused
-    here, not handed it. The database is read too, since a session an earlier release made keeps it owner-only. A journal
-    that cannot be read is never replaced by a fresh one (that would lose its history).
+    here, not handed it. The database is read too. A journal that cannot be read is never replaced by a fresh one (that
+    would lose its history).
     """
     for path in (*(session_dir / name for name in SESSION_FILES), journal_path(session_dir), db_path_for(session_dir)):
         try:
@@ -205,8 +204,8 @@ def _require_readable(session_dir: Path) -> None:
         except PermissionError as exc:
             raise ResumeBlocked(
                 f"cannot read {path}{ownership(path)}. A session that holds a credential keeps its state, manifest "
-                "and optimization journal where only the account that made it can read them, and a session an earlier "
-                "release made keeps its database so: resume it as that account, or start a new session."
+                "and optimization journal where only the account that made it can read them: resume it as that "
+                "account, or start a new session."
             ) from exc
 
 
@@ -273,12 +272,9 @@ def ensure_resume_safe(session_dir: Path, *, owner_scope: str) -> None:
         with closing(sqlite3.connect(path.resolve().as_uri() + "?mode=ro", uri=True)) as db:
             db.row_factory = sqlite3.Row
             db.execute("BEGIN")
-            refuse_older_schema(db)
             diagnostics = _inspect(db, owner_scope)
             if diagnostics:
                 diagnostics += _other_scopes(db, owner_scope)
-    except OlderCoordinatorDB as exc:
-        raise ResumeBlocked(str(exc)) from exc
     except (OSError, sqlite3.Error, ValueError, TypeError) as exc:
         raise ResumeBlocked(
             "cannot inspect persisted execution ownership read-only; resume is blocked. "
@@ -527,29 +523,19 @@ def _lease_is_live(expires_at: object, now: datetime) -> bool:
     return expires > now
 
 
-def _confirm_scope_gone_in_transaction(
-    db: sqlite3.Connection, confirmation: _Confirmation, *, check_holders: bool = False
-) -> dict:
+def _confirm_scope_gone_in_transaction(db: sqlite3.Connection, confirmation: _Confirmation) -> dict:
     """Cancel and release every execution recorded under one vanished owner scope.
 
     Uses the caller's IMMEDIATE transaction. Refuses while any lease outside that
-    scope is unexpired: another execution environment may still be writing. With
-    ``check_holders`` (an older two-part scope of this boot and PID namespace, which an
-    earlier container may have left), refuses while a holder process that started before
-    its lease still runs here.
+    scope is unexpired: another execution environment may still be writing.
     """
     owner_scope = confirmation.owner_scope
     now = datetime.fromisoformat(confirmation.confirmed_at)
     target_tasks: set[str] = set()
-    for row in db.execute("SELECT lane, holder_id, task_id, pid, owner_scope, acquired_at, expires_at FROM leases"):
+    for row in db.execute("SELECT lane, holder_id, task_id, owner_scope, expires_at FROM leases"):
         if row["lane"] == "bringup_round":
             continue
         if row["owner_scope"] == owner_scope:
-            if check_holders and _holder_runs_here(row["pid"], row["acquired_at"]):
-                raise CleanupConfirmationError(
-                    f"lane={_label(row['lane'])} holder={_label(row['holder_id'])} pid={_label(row['pid'])} still "
-                    "runs in this execution environment; the named owner scope is not gone"
-                )
             target_tasks.add(row["task_id"])
         elif _lease_is_live(row["expires_at"], now):
             raise CleanupConfirmationError(
@@ -567,25 +553,6 @@ def _confirm_scope_gone_in_transaction(
         "released_leases": sum(task["released_leases"] for task in tasks),
         "released_gpu_leases": sum(task["released_gpu_leases"] for task in tasks),
     }
-
-
-def _holder_runs_here(pid: object, acquired_at: object) -> bool:
-    """Whether the lease's recorded holder runs here: its PID is live and started no later
-    than the lease was taken. A later start is a reused PID; an unreadable record counts as
-    running."""
-    try:
-        holder = int(pid or 0)
-        taken = datetime.fromisoformat(str(acquired_at))
-    except (TypeError, ValueError):
-        return True
-    if holder <= 0:
-        return False
-    started = process_started_at(holder)
-    if started is None:
-        return False
-    if taken.tzinfo is None:
-        return True
-    return (started - taken).total_seconds() <= 1.0
 
 
 def _in_locked_ledger(session_dir: Path, update: Callable[[sqlite3.Connection, str, str], dict]) -> dict:
@@ -606,14 +573,11 @@ def _in_locked_ledger(session_dir: Path, update: Callable[[sqlite3.Connection, s
 
                 db.row_factory = sqlite3.Row
                 db.execute("BEGIN IMMEDIATE")
-                refuse_older_schema(db)
                 return update(db, pwd.getpwuid(os.getuid()).pw_name, now_iso())
         finally:
             lock.release()
     except (session_lock.SessionAlreadyRunning, session_lock.SessionLockPathError) as exc:
         raise CleanupConfirmationError("cannot confirm cleanup while the session lock is unavailable") from exc
-    except OlderCoordinatorDB as exc:
-        raise CleanupConfirmationError(str(exc)) from exc
     except (OSError, sqlite3.Error, KeyError) as exc:
         raise CleanupConfirmationError(
             "cannot confirm cleanup in the existing ownership database; no changes committed"
@@ -656,14 +620,11 @@ def confirm_scope_gone(session_dir: Path, *, owner_scope: str, reason: str, curr
         raise CleanupConfirmationError("the current execution scope is unobservable; cannot tell it from the named one")
     if owner_scope == current_scope:
         raise CleanupConfirmationError("the named owner scope is the current execution environment")
-    here = same_environment(owner_scope, current_scope)
     result = _in_locked_ledger(
         session_dir,
         lambda db, operator, confirmed_at: {
             **_confirm_scope_gone_in_transaction(
-                db,
-                _Confirmation(reason=reason, operator=operator, confirmed_at=confirmed_at, owner_scope=owner_scope),
-                check_holders=here,
+                db, _Confirmation(reason=reason, operator=operator, confirmed_at=confirmed_at, owner_scope=owner_scope)
             ),
             "operator": operator,
             "confirmed_at": confirmed_at,

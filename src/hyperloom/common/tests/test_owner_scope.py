@@ -67,12 +67,9 @@ def test_the_real_proc_gives_three_parts() -> None:
     ("recorded", "local", "same"),
     [
         ("b:1:100", "b:1:100", True),
-        ("b:1", "b:1:100", True),
         ("b:1:99", "b:1:100", False),
-        ("b:2", "b:1:100", False),
-        ("c:1", "b:1:100", False),
         ("", "b:1:100", False),
-        ("b:1", "", False),
+        ("b:1:100", "", False),
     ],
 )
 def test_same_environment(recorded: str, local: str, same: bool) -> None:

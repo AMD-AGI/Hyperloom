@@ -428,32 +428,6 @@ def apply_profile_recheck(
     return snapshot
 
 
-def migrate_run_state_relay_fields(payload: object) -> dict[str, Any]:
-    """Add relay defaults only to checkpoints written before relay existed."""
-    if not isinstance(payload, dict):
-        raise ValueError("run state must be a JSON object")
-    migrated = dict(payload)
-    keys = {"agent_relay", "agent_availability_snapshot"}
-    present = keys & set(migrated)
-    if not present:
-        migrated["agent_relay"] = {
-            "active_profile_id": "",
-            "active_no_improvement_streak": 0,
-            "blockage_epoch": 0,
-            "intervention_kind": "",
-            "previous_profile_id": "",
-            "switch_iteration": 0,
-            "switch_reason": "",
-        }
-        migrated["agent_availability_snapshot"] = {
-            "checked_at": "",
-            "session_index": 0,
-            "providers": {},
-            "profiles": {},
-        }
-    return migrated
-
-
 def _validate_relay_membership(primary_profile_id: str, profiles: Sequence) -> None:
     if primary_profile_id not in _profile_mapping(profiles):
         raise ValueError("primary Agent profile is not configured")
@@ -523,7 +497,6 @@ __all__ = [
     "apply_relay_search_outcome",
     "apply_supervisor_fallback",
     "decision_counts_toward_blockage",
-    "migrate_run_state_relay_fields",
     "relay_blockage_reached",
     "select_relay_intervention",
     "select_replacement_for_unavailable",

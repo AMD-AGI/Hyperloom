@@ -299,37 +299,13 @@ def test_a_new_state_persists_no_reference_launch():
     assert not _REFERENCE_FIELDS.keys() & SharedState(session_id="t").to_dict().keys()
 
 
-def test_a_state_with_a_recorded_base_drops_its_reference_fields_on_resume():
+def test_a_key_the_state_does_not_declare_is_dropped_on_load():
     raw = {**SharedState(session_id="seeded", base_launch_digest="sha256:abc").to_dict(), **_REFERENCE_FIELDS}
 
     restored = SharedState.from_dict(raw)
 
     assert restored.base_launch_digest == "sha256:abc"
     assert not _REFERENCE_FIELDS.keys() & restored.to_dict().keys()
-
-
-@pytest.mark.parametrize("name", sorted(_REFERENCE_FIELDS))
-def test_a_session_whose_server_base_lived_in_state_is_refused_by_its_measurement_epoch(name):
-    from hyperloom.inference_optimizer.cli.bootstrap import measurement_state_is_stale
-
-    raw = SharedState(session_id="old").to_dict()
-    del raw["base_launch_digest"]
-    del raw["measurement_epoch"]
-    raw[name] = _REFERENCE_FIELDS[name]
-
-    restored = SharedState.from_dict(raw)
-
-    assert name not in restored.to_dict()
-    assert "epoch 0" in measurement_state_is_stale(restored)
-
-
-def test_a_state_written_before_base_launch_digest_without_a_reference_launch_resumes_with_none_recorded():
-    raw = {**SharedState(session_id="old").to_dict(), **dict.fromkeys(_REFERENCE_FIELDS, "")}
-    del raw["base_launch_digest"]
-
-    restored = SharedState.from_dict(raw)
-
-    assert restored.base_launch_digest == ""
 
 
 def test_save_renders_current_setting_sh(tmp_path, monkeypatch):

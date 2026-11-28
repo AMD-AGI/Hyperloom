@@ -88,13 +88,6 @@ def resolve_model_display_name(args: argparse.Namespace) -> str:
     return Path(str(getattr(args, "model", "") or "")).name
 
 
-# Bump when a change makes previously recorded measurements incomparable. Epoch 2 is the move of every round onto
-# inference_suite; epoch 3 judges AgentX evidence by the report mapper's ``valid_measurement`` constraint field. The
-# MLPerf client is a different AgentX workload, but it is opt-in: the backend name is what resume compares for it, so
-# a bump does not invalidate unchanged sessions of the other client.
-MEASUREMENT_EPOCH = 3
-
-
 def _requested_framework(args: Any) -> str:
     """--framework, else $FRAMEWORK, else ""."""
     return (getattr(args, "framework", None) or "").strip() or (os.environ.get("FRAMEWORK", "") or "").strip()
@@ -150,7 +143,6 @@ def seed_grading(framework: str, benchmark_mode: str) -> dict[str, Any]:
 def fresh_measurement_fields(state: Any) -> dict[str, Any]:
     """The fields ``measurement_state_is_stale`` reads, for a blank state that keeps measuring like *state*."""
     return {
-        "measurement_epoch": MEASUREMENT_EPOCH,
         "benchmark_mode": str(getattr(state, "benchmark_mode", "") or ""),
         "agentx_backend": str(getattr(state, "agentx_backend", "") or ""),
         "prompt_dataset": recorded_prompt_dataset(state),
@@ -159,16 +151,9 @@ def fresh_measurement_fields(state: Any) -> dict[str, Any]:
 
 def measurement_state_is_stale(state: Any) -> str:
     """Return why a resumed session's measurements cannot anchor this run, or ``\"\"``."""
-    had_epoch = int(getattr(state, "measurement_epoch", 0) or 0)
-    if had_epoch < MEASUREMENT_EPOCH:
-        return (
-            f"session carries measurement epoch {had_epoch}, this build measures "
-            f"epoch {MEASUREMENT_EPOCH}; the recorded results come from a different "
-            "measurement path and cannot anchor or be compared against"
-        )
     want_mode = _benchmark_mode()
     had_mode = str(getattr(state, "benchmark_mode", "") or "")
-    if had_mode and had_mode != want_mode:
+    if had_mode != want_mode:
         return (
             f"session was measured in benchmark_mode={had_mode!r} but this run is "
             f"{want_mode!r}; the KEEP ledger keys on server args only, so the two "
@@ -859,7 +844,6 @@ def _seed_shared_state(
         **_phase_toggle_fields(args),
         conc_sweep_enabled=args.enable_conc_sweep,
         benchmark_mode=benchmark_mode,
-        measurement_epoch=MEASUREMENT_EPOCH,
         agentx_backend=agentx_backend,
         agentx_accuracy=not getattr(args, "no_agentx_accuracy", False),
         grading=seed_grading(framework, benchmark_mode),

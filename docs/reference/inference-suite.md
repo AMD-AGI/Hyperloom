@@ -474,6 +474,5 @@ An AgentX round's counts are recounted from `profile_export.jsonl`, except
 `context_overflow`: the profiling requests aiperf skipped because the server
 refused them as longer than the context it serves. aiperf keeps those out of the
 export and every metric, so the count is read from its summary,
-`profile_export_aiperf.json`. A report of the previous schema,
-`inference-suite-report/1`, still reads, with `context_overflow` `null`.
+`profile_export_aiperf.json`.
 

@@ -78,7 +78,7 @@ def build_parser() -> argparse.ArgumentParser:
             "Emergency recovery: run FINAL and CLOSE over a session directory that ended before FINAL, a session"
             " killed with its machine included. It rewrites that session's report, dashboard, breakdown and"
             " manifest, and exits as that session did, so a session that did not run its course still fails."
-            " Refused if the session is still running, already chose in FINAL, or ran on another build than this one."
+            " Refused if the session is still running or already chose in FINAL."
         ),
     )
     final_only.add_argument("session_dir", type=Path, help="The session directory of the run to finish.")

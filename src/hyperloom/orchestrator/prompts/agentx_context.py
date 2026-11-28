@@ -66,11 +66,8 @@ def corpus_lines(shape: Mapping[str, Any] | None) -> list[str]:
 
 
 def grading_lines(grading: Mapping[str, Any] | None = None, backend: str = "") -> list[str]:
-    """Describe what an AgentX KEEP is decided on, from the session's recorded ``grading`` and ``agentx_backend``.
-
-    A session recorded before the backend field existed falls back to the process environment for it.
-    """
-    if is_mlperf_backend({BACKEND_ENV: backend} if backend else None):
+    """Describe what an AgentX KEEP is decided on, from the session's recorded ``grading`` and ``agentx_backend``."""
+    if is_mlperf_backend({BACKEND_ENV: backend}):
         return [
             "**Graded on output token throughput** — the MLPerf agentic harness replays a",
             "fixed trajectory set and publishes no per-request interactivity, so a KEEP is",

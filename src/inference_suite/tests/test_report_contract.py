@@ -17,7 +17,6 @@ from inference_suite.contracts import (
     AGENTX_CONTEXT_OVERFLOW,
     FIXED_METRIC_KEYS,
     GPU_METRIC_KEYS,
-    READABLE_REPORT_SCHEMAS,
     REPORT_KEYS,
     REPORT_SCHEMA,
     AgentxResult,
@@ -272,16 +271,6 @@ def _agentx_document(**counts: int | None) -> dict[str, object]:
         fast_mode=False,
     )
     return _document(_report(workload_kind=WorkloadKind.AGENTX, fixed=None, agentx=agentx))
-
-
-def test_a_report_of_the_first_schema_reads_with_its_overflow_count_unknown() -> None:
-    document = _agentx_document()
-    del document["agentx"]["counts"][AGENTX_CONTEXT_OVERFLOW]
-    document["schema"] = "inference-suite-report/1"
-
-    assert Report.from_document(document).agentx.counts[AGENTX_CONTEXT_OVERFLOW] is None
-    assert Report.from_document({**_document(_report()), "schema": "inference-suite-report/1"}) == _report()
-    assert "inference-suite-report/1" in READABLE_REPORT_SCHEMAS
 
 
 def test_a_report_of_the_current_schema_states_its_overflow_count() -> None:

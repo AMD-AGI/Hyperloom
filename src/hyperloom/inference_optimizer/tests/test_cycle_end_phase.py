@@ -1553,32 +1553,6 @@ async def test_a_cycle_end_entry_that_settles_an_owed_unwind_still_validates(tmp
     }
 
 
-@pytest.mark.asyncio
-async def test_a_guard_only_attempt_recovers_and_frees_its_members(tmp_path: Path, monkeypatch):
-    """A guard with no record and no apply row still names an interrupted attempt.
-
-    An attempt that cleared the record when it marked the rows leaves only the
-    guards behind if it crashes before its first apply checkpoint. Nothing
-    reached the tree, so recovery releases the members.
-    """
-    monkeypatch.setenv("HYPERLOOM_LANGFUSE_ENABLE", "0")
-    c = _stack_validation_coordinator(tmp_path)
-    for row in _ledger_rows(c, ["k001", "k004"]):
-        row["stack_validation_in_progress"] = True
-    c.shared_state.save(tmp_path)
-    c = _resumed_stack_coordinator(tmp_path)
-    report: dict[str, Any] = {"fixes": [], "warnings": []}
-
-    await c.writeback._resume_recover_interrupted_stack(report)
-
-    assert [f["kind"] for f in report["fixes"]] == ["interrupted_stack_validation_recovered"]
-    assert _stack_member_guards(SharedState.load_or_init(tmp_path)) == {"k001": False, "k004": False}
-    assert {entry["kernel_id"] for entry in c.phase_kernel_stack._positive_needs_review_integrates()} == {
-        "k001",
-        "k004",
-    }
-
-
 def _drop_attempt_evidence(state: SharedState) -> None:
     """Strip the member identities that bind the checkpoint to its ledger rows, keeping the apply rows."""
     del state.pending_stack_validation_result["stack_member_identities"]

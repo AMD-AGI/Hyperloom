@@ -31,7 +31,6 @@ from hyperloom_multibranch.blackboard.local.files import session_file_mode
 
 log = logging.getLogger(__name__)
 
-ENTRY_VERSION = 1
 SEGMENT_SUFFIX = ".jsonl"
 SUMMARY_LIMIT = 160
 _TAIL_READ = 1 << 16
@@ -106,7 +105,6 @@ class Entry:
 
     def to_dict(self) -> dict[str, object]:
         return {
-            "v": ENTRY_VERSION,
             "id": self.entry_id,
             "seq": self.seq,
             "at": self.at,
@@ -122,10 +120,8 @@ class Entry:
 
     @classmethod
     def from_dict(cls, row: Mapping[str, object]) -> Entry:
-        """Rebuild an entry; raises ``ValueError``, ``KeyError`` or ``TypeError`` on a row this version cannot read."""
+        """Rebuild an entry; raises ``ValueError``, ``KeyError`` or ``TypeError`` on a row that is not one."""
 
-        if row.get("v") != ENTRY_VERSION:
-            raise ValueError(f"unsupported entry version {row.get('v')!r}")
         detail = row["detail"]
         if not isinstance(detail, dict):
             raise TypeError("entry detail must be an object")
@@ -259,7 +255,6 @@ class SegmentReader:
 
 
 __all__ = [
-    "ENTRY_VERSION",
     "SEGMENT_SUFFIX",
     "SUMMARY_LIMIT",
     "Entry",

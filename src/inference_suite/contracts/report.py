@@ -21,12 +21,6 @@ from inference_suite.contracts.base_launch import DIGEST_PREFIX
 from inference_suite.contracts.config import ConfigError, EvalProbe, WorkloadKind
 
 REPORT_SCHEMA = "inference-suite-report/2"
-#: The schema before the AgentX counts carried ``context_overflow``; such a report reads with that count ``null``. Only
-#: a session started on main before ``/2`` holds one, and no release wrote it: retired once the next release, which
-#: resumes no session an earlier one started, ships.
-_REPORT_SCHEMA_V1 = "inference-suite-report/1"
-#: Every schema :meth:`Report.from_document` reads.
-READABLE_REPORT_SCHEMAS = (_REPORT_SCHEMA_V1, REPORT_SCHEMA)
 AGENTX_ERROR_RATE_DEFINITION = "inferencex-agentx/1"
 
 _DIGEST = re.compile(re.escape(DIGEST_PREFIX) + r"[0-9a-f]{64}")
@@ -448,12 +442,11 @@ AGENTX_COUNT_KEYS = (
 )
 #: The profiling requests the replay skipped because the server refused them as longer than the context it serves:
 #: aiperf ends such a trajectory, keeps the request out of the export and of every metric, and counts it only in its
-#: summary. ``None`` only in a report written before the count was (:data:`_REPORT_SCHEMA_V1`).
+#: summary.
 AGENTX_CONTEXT_OVERFLOW = "context_overflow"
 #: Summed over the successful profiling requests; ``None`` when one of them carries no length, so no partial sum is
 #: ever mistaken for the whole.
 _AGENTX_TOKEN_COUNTS = frozenset({"input_tokens", "output_tokens"})
-_AGENTX_UNCOUNTED = _AGENTX_TOKEN_COUNTS | {AGENTX_CONTEXT_OVERFLOW}
 AGENTX_THROUGHPUT_KEYS = (
     "request_throughput",
     "output_tokens_per_second",
@@ -482,7 +475,7 @@ class AgentxResult:
 
     def __post_init__(self) -> None:
         _measured(self.counts, AGENTX_COUNT_KEYS, frozenset(AGENTX_COUNT_KEYS), "the AgentX counts")
-        if any(value is None for key, value in self.counts.items() if key not in _AGENTX_UNCOUNTED):
+        if any(value is None for key, value in self.counts.items() if key not in _AGENTX_TOKEN_COUNTS):
             raise ReportError(f"the AgentX request counts are always counted, got {dict(self.counts)!r}")
         _measured(self.throughput, AGENTX_THROUGHPUT_KEYS, frozenset(), "the AgentX throughput")
         _measured(self.latency_seconds, AGENTX_LATENCY_KEYS, frozenset(), "the AgentX latency")
@@ -831,13 +824,6 @@ class ServerFacts:
         return cls(**{**{key: fields[key] for key in _SERVER_KEYS}, "log_range": log_range})
 
 
-def _agentx_v1(section: object) -> object:
-    """A ``/1`` report's AgentX section with the ``context_overflow`` count it did not keep, ``null``."""
-    if not isinstance(section, Mapping) or not isinstance(section.get("counts"), Mapping):
-        return section
-    return {**section, "counts": {**section["counts"], AGENTX_CONTEXT_OVERFLOW: None}}
-
-
 REPORT_KEYS = (
     "schema",
     "run_status",
@@ -975,10 +961,8 @@ class Report:
     @classmethod
     def from_document(cls, document: object) -> Report:
         fields = _complete(document, REPORT_KEYS, "a round report")
-        if fields["schema"] not in READABLE_REPORT_SCHEMAS:
+        if fields["schema"] != REPORT_SCHEMA:
             raise ReportError(f"round report schema {fields['schema']!r} is not {REPORT_SCHEMA}")
-        if fields["schema"] == _REPORT_SCHEMA_V1:
-            fields = {**fields, "agentx": _agentx_v1(fields["agentx"])}
         monitor = _FIELDS.items(fields["gpu_monitor"], "gpu_monitor")
         sections = {
             name: None if fields[name] is None else kind_type.from_document(fields[name])
@@ -1013,7 +997,6 @@ __all__ = [
     "FIXED_METRIC_KEYS",
     "GPU_METRIC_KEYS",
     "REPORT_KEYS",
-    "READABLE_REPORT_SCHEMAS",
     "REPORT_SCHEMA",
     "STEPS_BEFORE_SPAWN",
     "AgentxResult",

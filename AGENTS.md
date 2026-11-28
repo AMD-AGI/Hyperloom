@@ -127,7 +127,8 @@ doc is the authority on where that boundary lives.
   version control is the archive, and commented-out blocks and `# removed …` tombstones
   rot and mislead. A wrapper, an alias, dual-format parsing or a fallback route kept only
   to preserve an old *internal* shape is the replacement left unfinished. Compatibility is
-  owed to identified consumers — supported public APIs, CLI behaviour, persisted data,
+  owed to identified consumers — supported public APIs, CLI behaviour, persisted data
+  other than a session's own (a session is resumed only by the build that wrote it),
   plugins, anything deployed separately — so establish that boundary before deleting: a
   file's location in this repo and a text search that found nothing are not evidence that
   an entry point is unused. If the migration has to be staged, name the consumer still on

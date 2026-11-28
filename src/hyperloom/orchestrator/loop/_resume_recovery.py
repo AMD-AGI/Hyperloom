@@ -533,7 +533,7 @@ class ResumeRecoveryMixin:
         single-variant bench + accuracy gate passed and the patch was committed),
         so a kept-but-absent one is a crash before the append landed → replay it
         (idempotent), unless its run workspace is gone → discard + alert. ``explore``
-        / ``framework`` KEEPs are ambiguous (the stack they landed on is only
+        KEEPs are ambiguous (the stack they landed on is only
         known to the round that ran), so they are surfaced as a ``medium``
         alert rather than resurrected. Whatever the stack ends up as
         is re-validated by the Gap A full-stack rebench.

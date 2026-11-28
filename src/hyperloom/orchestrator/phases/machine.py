@@ -83,18 +83,9 @@ class MachinePhase(CoordinatorCollaborator):
                 kernel_enabled=state.kernel_enabled,
             )
         current = (state.phase or "").strip().upper()
-        # Only an unset phase means fresh; an unknown one would otherwise re-run PRELUDE over the earlier build's
-        # baseline and KEPT stack.
-        if current and current not in _phase_state.PHASE_NAMES:
-            raise RuntimeError(
-                f"session was recorded at phase {current!r}, which this build's phase machine "
-                f"does not have (known: {', '.join(_phase_state.PHASE_NAMES)}). "
-                f"Resume it with the version that wrote it, or start a new session."
-            )
         if current == _phase_state.PHASE_CLOSE:
             self._reopen_a_session_that_was_left_closed()
         elif not current:
-            # Fresh start; pre-phase-machine resume state is treated as fresh.
             _phase_state.record_phase_transition(
                 state,
                 to_phase=_phase_state.PHASE_PRELUDE,

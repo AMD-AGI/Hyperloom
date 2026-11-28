@@ -373,7 +373,7 @@ async def test_promote_integrate_patch_kept_lifts_and_clears_pending(session_dir
     coord = _coord(session_dir)
     s = coord.shared_state
     s.baseline_tput = 100.0
-    s.pending_integrate = {"task_id": "t1"}
+    s.pending_integrate = {"task_id": "t1", "recovery": {"phase": "accepted"}}
 
     await coord.writeback.promote_to_shared_state(
         "integrate_patch",
@@ -924,7 +924,7 @@ async def test_prebaseline_enablement_patch_is_config_only_not_gain(session_dir,
     s.framework = "sglang"
     s.benchmark_mode = benchmark_mode
     s.baseline_tput = 0.0
-    s.pending_integrate = {"task_id": "t-enable"}
+    s.pending_integrate = {"task_id": "t-enable", "recovery": {"phase": "accepted"}}
     validate = Mock()
     watermark = AsyncMock()
     monkeypatch.setattr(coord.writeback, "validate", validate)

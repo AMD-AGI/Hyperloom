@@ -442,15 +442,13 @@ async def test_running_tasks_reader_reports_held_resources(coordinator_with_mock
             ("gpu_research_lane", "h-soon", "2099-01-01T00:00:00+00:00"),
         ):
             c.bus.db.raw.execute(
-                "INSERT INTO leases(lane, holder_id, task_id, action, pid, "
-                "acquired_at, expires_at) VALUES (?,?,?,?,?,?,?)",
+                "INSERT INTO leases(lane, holder_id, task_id, action, pid, expires_at) VALUES (?,?,?,?,?,?)",
                 (
                     lane,
                     holder,
                     task.task_id,
                     "specialist",
                     1,
-                    "2026-05-19T18:00:00+00:00",
                     expires,
                 ),
             )

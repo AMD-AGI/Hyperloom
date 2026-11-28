@@ -151,7 +151,7 @@ def test_a_revert_that_leaves_a_patched_file_behind_is_named(tmp_path: Path) -> 
             "framework_source_root": str(root),
             "patches": ["candidate.patch"],
             "artifacts": [],
-            "recovery": {"version": 1, "phase": "applied", "root": str(recovery_root)},
+            "recovery": {"phase": "applied", "root": str(recovery_root)},
         }
 
     restored = pending()

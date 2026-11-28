@@ -56,35 +56,3 @@ def test_same_key_still_rewrites_one_fragment(tmp_path: Path) -> None:
 
     assert first == second
     assert len(list(tmp_path.glob("measurements__*.json"))) == 1
-
-
-def test_legacy_reuse_does_not_resurrect_the_collision(tmp_path: Path) -> None:
-    """A legacy filename only belongs to a key that sanitizing left untouched."""
-    rec = Recorder(tmp_path, producer="coordinator")
-    legacy = tmp_path / "measurements__coordinator__a-b.json"
-    legacy.write_text(
-        json.dumps({"section": "measurements", "kind": "item", "seq": 1, "payload": {"who": "a/b"}}),
-        encoding="utf-8",
-    )
-
-    written = rec.record_upsert_item("measurements", {"who": "a:b"}, key="a:b")
-
-    assert written != legacy, "a sanitized key must not claim an ambiguous legacy file"
-    assert json.loads(legacy.read_text(encoding="utf-8"))["payload"]["who"] == "a/b", "legacy left intact"
-    assert json.loads(written.read_text(encoding="utf-8"))["payload"]["who"] == "a:b"
-
-
-def test_fragment_written_under_the_old_name_keeps_that_name(tmp_path: Path) -> None:
-    """A resumed session must update its fragment, not fork a second one."""
-    rec = Recorder(tmp_path, producer="coordinator")
-    legacy = tmp_path / "measurements__coordinator__k1.json"
-    legacy.write_text(
-        json.dumps({"section": "measurements", "kind": "item", "seq": 1, "payload": {"value": 1}}),
-        encoding="utf-8",
-    )
-
-    written = rec.record_upsert_item("measurements", {"value": 2}, key="k1")
-
-    assert written == legacy
-    assert len(list(tmp_path.glob("measurements__*.json"))) == 1, "resume must not duplicate the fragment"
-    assert json.loads(written.read_text(encoding="utf-8"))["payload"]["value"] == 2

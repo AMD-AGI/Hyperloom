@@ -366,7 +366,7 @@ async def test_an_open_round_holds_the_lane_and_a_settled_one_does_not(store, vi
     # No pid: the holder is a task, and only the task registry can prove a
     # task's process dead, so the dead-holder sweep must skip this row.
     assert int(row["pid"]) == ROUND_LEASE_PID
-    acquired = row["acquired_at"]
+    expires = row["expires_at"]
 
     clock.advance(60.0)
     renewed_at = clock.wall()
@@ -375,8 +375,7 @@ async def test_an_open_round_holds_the_lane_and_a_settled_one_does_not(store, vi
     )
     assert renewed.ok
     row = await _lane_row(store, "r")
-    assert row["acquired_at"] == acquired, "a renewal moves the lease, not the acquire"
-    assert row["expires_at"] > acquired
+    assert row["expires_at"] > expires
 
     clock.advance(60.0)
     moved = await store.handoff(
@@ -542,7 +541,6 @@ async def test_every_path_writes_the_same_outbox_row_and_answer(store):
                     *lane_a,
                     "t-1",
                     *round_lease,
-                    "1970-01-01T00:16:40.000000+00:00",
                     "1970-01-01T00:26:50.000000+00:00",
                 )
             ]
@@ -556,7 +554,6 @@ async def test_every_path_writes_the_same_outbox_row_and_answer(store):
                     *lane_a,
                     "t-2",
                     *round_lease,
-                    "1970-01-01T00:16:40.000000+00:00",
                     "1970-01-01T00:22:00.000000+00:00",
                 )
             ]
@@ -575,7 +572,6 @@ async def test_every_path_writes_the_same_outbox_row_and_answer(store):
                     *lane_b,
                     "t-5",
                     *round_lease,
-                    "1970-01-01T00:17:31.000000+00:00",
                     "1970-01-01T00:27:31.000000+00:00",
                 )
             ]

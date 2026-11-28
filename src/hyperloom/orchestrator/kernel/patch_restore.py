@@ -262,12 +262,8 @@ def restore_jit_build_state(manifest: dict[str, Any], backup_root: Path) -> _Res
     jit_build_backup = manifest.get("jit_build_backup") or {}
     if jit_build_backup.get("status") not in {"ok", "clean"}:
         return _RestoreTally([], [], [], {})
-    strategy = manifest.get("strategy") or {}
-    # Singular key is retained for manifests created by earlier releases.
-    pinned = str(strategy.get("jit_build_dir") or "").strip()
-    snapshot_jit_dirs = list(strategy.get("jit_build_dirs") or [])
-    if not pinned and len(snapshot_jit_dirs) == 1:
-        pinned = str(snapshot_jit_dirs[0])
+    snapshot_jit_dirs = list((manifest.get("strategy") or {}).get("jit_build_dirs") or [])
+    pinned = str(snapshot_jit_dirs[0]) if len(snapshot_jit_dirs) == 1 else ""
     jit_build_restore = _restore_aiter_jit_build(
         jit_build_backup,
         expected_jit_build_dir=pinned or None,

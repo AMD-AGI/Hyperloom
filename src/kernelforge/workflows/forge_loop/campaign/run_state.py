@@ -20,7 +20,6 @@ from typing import TextIO
 from kernelforge.workflows.forge_loop.search.agent_relay import (
     AgentAvailabilitySnapshot,
     AgentRelayState,
-    migrate_run_state_relay_fields,
 )
 from kernelforge.workflows.forge_loop.campaign.experiments_layout import ARCHIVE_TIME_FORMAT, ExperimentsLayout
 from kernelforge.workflows.forge_loop.search.search_policy import (
@@ -503,7 +502,7 @@ def read_run_state(state_path: Path) -> RunState:
         payload = json.loads(state_path.read_text())
     except (OSError, json.JSONDecodeError) as error:
         raise ValueError(f"invalid run state checkpoint: {state_path}") from error
-    return RunState.from_dict(migrate_run_state_relay_fields(payload))
+    return RunState.from_dict(payload)
 
 
 class LoopStateStore:

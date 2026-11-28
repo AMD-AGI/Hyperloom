@@ -248,7 +248,6 @@ def test_resume_restores_pins_before_the_agentx_staleness_guard(tmp_path, monkey
     import pytest
 
     from hyperloom.inference_optimizer.cli import _build_parser, _run_optimize
-    from hyperloom.inference_optimizer.cli.bootstrap import MEASUREMENT_EPOCH
 
     cli_mod = "hyperloom.inference_optimizer.cli"
 
@@ -268,7 +267,6 @@ def test_resume_restores_pins_before_the_agentx_staleness_guard(tmp_path, monkey
         model_name=model.name,
         model_path=str(model),
         benchmark_mode="agentx",
-        measurement_epoch=MEASUREMENT_EPOCH,
         agentx_backend="mlperf",
         operator_extra_env={"HYPERLOOM_AGENTIC_BACKEND": "mlperf"},
     ).save(resume_dir)
@@ -317,7 +315,6 @@ def _resume_through_the_sandbox_gate(tmp_path, monkeypatch, request, *, env, per
 
     from hyperloom.common.codex_session import CODEX_SANDBOX_MODE_ENV
     from hyperloom.inference_optimizer.cli import _build_parser, _run_optimize, session_gates
-    from hyperloom.inference_optimizer.cli.bootstrap import MEASUREMENT_EPOCH
     from hyperloom_common.llm.llm_config import AGENT_BACKEND_ENV, ANTHROPIC_CREDENTIAL_ENV_ORDER
 
     cli_mod = "hyperloom.inference_optimizer.cli"
@@ -332,7 +329,6 @@ def _resume_through_the_sandbox_gate(tmp_path, monkeypatch, request, *, env, per
         session_id="resume-pinned-sandbox",
         model_name=model.name,
         model_path=str(model),
-        measurement_epoch=MEASUREMENT_EPOCH,
         operator_extra_env=persisted_pins,
     ).save(resume_dir)
     (resume_dir / "manifest.json").write_text(
@@ -420,7 +416,6 @@ def _prepare_resume_session(tmp_path, monkeypatch, request, *, name, operator_ex
 
     ``pd_record`` also writes a node-list PD record, so the resume takes the PD branch.
     """
-    from hyperloom.inference_optimizer.cli.bootstrap import MEASUREMENT_EPOCH
 
     cli_mod = "hyperloom.inference_optimizer.cli"
     saved_environ = dict(os.environ)
@@ -434,7 +429,7 @@ def _prepare_resume_session(tmp_path, monkeypatch, request, *, name, operator_ex
         session_id=f"resume-{name}",
         model_name=model.name,
         model_path=str(model),
-        measurement_epoch=MEASUREMENT_EPOCH,
+        benchmark_mode="synthetic",
         operator_extra_env=dict(operator_extra_env or {}),
     ).save(resume_dir)
     (resume_dir / "manifest.json").write_text(

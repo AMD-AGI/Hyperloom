@@ -103,7 +103,6 @@ from hyperloom_multibranch.scheduling.resumption import (
     PersistedRun,
     ResumeRefused,
     persisted_run,
-    persisted_session,
     recorded_baseline,
     require_resumable,
 )
@@ -653,8 +652,7 @@ def take_over_earlier_session(state_dir: Path) -> EarlierSession:
 
     The host starts a run again only once its earlier start has ended, so a ``final-only`` lock that start left in the
     session is that start's, whose pid names a process of a machine that is gone: it is removed, or the finish would be
-    refused for good. A session that is closed and started again holds no measurement this build has to read back, so
-    it may have run on another build: a restart onto a new build is how a fix reaches a run that is failing."""
+    refused for good."""
 
     previous = recorded_session(state_dir)
     if previous is None or not SessionLayout(previous).root_recipe.is_file():
@@ -668,7 +666,7 @@ def take_over_earlier_session(state_dir: Path) -> EarlierSession:
     reported = reported_stop_reason(previous)
     if reported not in (None, SessionStopReason.KILLED.value):
         return EarlierSession(closed=previous)
-    return EarlierSession(left=persisted_session(previous))
+    return EarlierSession(left=persisted_run(previous))
 
 
 def close_then_start(left: PersistedRun | None, close: Callable[[PersistedRun], int], start: Callable[[], int]) -> int:
@@ -712,9 +710,9 @@ def hosted_restart_leg(
     ``resume`` (``cli.resume``) with ``until`` bound to :func:`hosted_resume_deadline`'s, so its budget counts
     from the run's first start, and ``grant`` to the grant's end (:func:`grant_end`), when the
     session was measured in the grant's sandboxes and its baseline still measures what a test measured now would
-    (:func:`~hyperloom_multibranch.toolbox.resume_guard.check_hosted_baseline_reusable`: the same build,
-    ``MEASUREMENT_EPOCH``, image, base launch and runner template cards; not the node or the account, which a
-    reschedule changes by design), and the specialists' account can reach the session
+    (:func:`~hyperloom_multibranch.toolbox.resume_guard.check_hosted_baseline_reusable`: the same image, base launch
+    and runner template cards; not the node or the account, which a reschedule changes by design), and the
+    specialists' account can reach the session
     (:func:`~hyperloom_multibranch.scheduling.specialist_reach.require_specialist_reach`); else ``finish``
     (``cli.final_only``), whose FINAL and CLOSE start no specialist, and one warning names why. A file of the
     session this account cannot read (:data:`CANNOT_READ_SESSION`) is such a why: the finish then meets it and ends

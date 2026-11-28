@@ -107,11 +107,6 @@ def _agentx_counts_add_up(counts: Mapping[str, int]) -> bool:
     )
 
 
-def _agentx_overflowed(counts: Mapping[str, int | None]) -> int:
-    """The requests the replay skipped as a context overflow; 0 for a report written before they were counted."""
-    return counts[AGENTX_CONTEXT_OVERFLOW] or 0
-
-
 def _agentx_valid(result: AgentxResult, measurement: Mapping[str, Any]) -> bool:
     """A canonical replay the threshold did not stop, that skipped no request as a context overflow, whose counts add
     up and whose error rate is within InferenceX's."""
@@ -119,7 +114,7 @@ def _agentx_valid(result: AgentxResult, measurement: Mapping[str, Any]) -> bool:
     return (
         not result.stopped_by_threshold
         and not result.fast_mode
-        and not _agentx_overflowed(result.counts)
+        and not result.counts[AGENTX_CONTEXT_OVERFLOW]
         and _agentx_counts_add_up(result.counts)
         and _positive(measurement[_COMPLETED_REQUESTS])
         and rate is not None
@@ -145,7 +140,7 @@ def _agentx_warnings(result: AgentxResult) -> list[str]:
     errors = result.counts["error_dropped"]
     if errors and not result.counts["error_osl_exported"]:
         warnings.append(f"{AGENTX_ERROR_OSL_NOT_EXPORTED}:{errors}")
-    overflowed = _agentx_overflowed(result.counts)
+    overflowed = result.counts[AGENTX_CONTEXT_OVERFLOW]
     if overflowed:
         warnings.append(f"{AGENTX_CONTEXT_OVERFLOW_SKIPPED}:{overflowed}")
     return warnings

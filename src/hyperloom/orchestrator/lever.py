@@ -82,11 +82,6 @@ def patch_owner_phase(evidence: Mapping[str, Any] | None) -> str:
     return ""
 
 
-# Upstream-PR KEEPs are stacked under the ``framework`` attribution family
-# label rather than under their task kind, because that label is what
-# ``phase_breakdown`` and the action-family table publish.
-FRAMEWORK_STACK_ACTION = "framework"
-
 #: Task kind -> the lever it moves, for winners whose params carried no stamp.
 #: ``integrate_patch`` is absent: it lands every lever, so its stamp is the only
 #: evidence and a missing one is a real gap rather than something to guess at.
@@ -100,10 +95,6 @@ _LEVER_BY_TASK_KIND = {
     "gemm_tuning": LEVER_KERNEL,
     "fusion": LEVER_KERNEL,
     "integrate": LEVER_KERNEL,
-    # Reachable when a session recorded before the action was retired is
-    # resumed and its orphaned KEEPs are reconciled against the stack.
-    "framework_agent": LEVER_UPSTREAM_PR,
-    FRAMEWORK_STACK_ACTION: LEVER_UPSTREAM_PR,
 }
 
 
@@ -127,7 +118,6 @@ def lever_kind_for_task(task_kind: str, bv: Any) -> str:
 
 
 __all__ = [
-    "FRAMEWORK_STACK_ACTION",
     "LEVER_CONFIG",
     "LEVER_ENABLEMENT",
     "LEVER_KERNEL",

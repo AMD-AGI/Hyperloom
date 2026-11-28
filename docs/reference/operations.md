@@ -302,11 +302,8 @@ changed, when:
   environment may still be writing the session);
 * a task under the named scope also holds a lease recorded under a different
   scope;
-* the scope is an older two-part one recorded for this same boot and PID
-  namespace and one of its recorded holder processes still runs here;
 * the session lock is held (an optimizer is still running on the session), or
   POSIX session locking is unavailable;
-* the session's ownership database predates owner scopes; use `--confirm-stopped`;
 * `--confirmation-reason` is missing or empty, or the option is combined with
   `--confirm-stopped` or `--force`.
 
@@ -368,7 +365,8 @@ confirmation that lets a refused resume proceed.
 
 See [Upgrade Hyperloom version](upgrade.md) for per-version migration steps.
 The summary policy: `USER_DATA_PATH` is forward-compatible across
-patch releases; minor releases might add new fields to
+patch releases, except that a session is resumed only by the build that wrote
+it; minor releases might add new fields to
 `session_breakdown.json` (backwards-compatible) without bumping
 `schema_version`.
 

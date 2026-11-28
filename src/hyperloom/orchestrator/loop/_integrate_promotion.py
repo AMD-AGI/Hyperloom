@@ -82,8 +82,7 @@ class _IntegrateMarker(NamedTuple):
 
 
 def _integrate_marker_of(pending: Mapping[str, Any], task: Task | None) -> _IntegrateMarker:
-    recovery = pending.get("recovery")
-    phase = str(recovery.get("phase") or "") if isinstance(recovery, dict) else ""
+    phase = str(pending["recovery"].get("phase") or "")
     outcome = _confirmed_task_outcome(task) if task is not None else None
     verdict = _integrate_marker_verdict(str((outcome or {}).get("status") or ""), phase) if outcome else ""
     return _IntegrateMarker(phase=phase, outcome=outcome, verdict=verdict)
@@ -287,9 +286,7 @@ class IntegratePromotionMixin:
             new_tput, measurement, source="integrate_keep", watermark_reason="integrate_keep_watermark"
         )
 
-    def _confirmed_integrate_completion(
-        self, result: dict, task: "Task | None", *, kept_flag: bool
-    ) -> dict[str, Any] | None:
+    def _confirmed_integrate_completion(self, result: dict, task: "Task | None") -> dict[str, Any] | None:
         """Return the matching, completed marker without performing recovery."""
         pending = self.shared_state.pending_integrate
         task_id = str(getattr(task, "task_id", "") or "")
@@ -297,12 +294,9 @@ class IntegratePromotionMixin:
         failed = result.get("error_class") == "integrate_restore_incomplete" or bool(result.get("recovery_errors"))
         if not matches and not failed:
             return None
-        recovery = pending.get("recovery") if matches else None
-        phase = str(recovery.get("phase") or "") if isinstance(recovery, dict) else ""
+        phase = str(pending["recovery"].get("phase") or "") if matches else ""
         status = str(result.get("status") or "")
         if not failed:
-            if matches and "recovery" not in pending and kept_flag:
-                return pending
             verdict = _integrate_marker_verdict(status, phase)
             if verdict in ("retained", "settled"):
                 return pending
@@ -327,7 +321,7 @@ class IntegratePromotionMixin:
         measurement = result.get("bench_result") or result
         new_tput = measurement.get("output_throughput", result.get("output_throughput"))
         kept_flag = status == "kept" and isinstance(new_tput, (int, float)) and float(new_tput) > 0
-        completed_pending = self._confirmed_integrate_completion(result, task, kept_flag=kept_flag)
+        completed_pending = self._confirmed_integrate_completion(result, task)
         changed = self._record_authored_levers(result)
         task_params = (getattr(task, "params", None) or {}) if task is not None else {}
         enablement_landing = bool(result.get("enablement") or task_params.get("enablement"))
