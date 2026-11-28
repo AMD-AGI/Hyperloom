@@ -20,6 +20,13 @@ Merged to `main` and not yet carried by a tagged release. Each entry moves
 into the [release](https://github.com/AMD-AGI/Hyperloom/releases) that ships
 it.
 
+- **The multibranch `tracelens` tool runs only TraceLens' report.** It no
+  longer takes `analysis_route`, a scriptable `framework` or
+  `HYPERLOOM_TRACE_ANALYSIS_ROUTE` to start the orchestrator's `agent` or
+  `non-llm` analysis instead, and it no longer leases a card for an arch
+  microbenchmark. The report was already the route every request without
+  those keys got, and the one the scheduler asks for. The `roofline` tool is
+  unchanged.
 - **`hyperloom session report` is removed.** The command rendered a
   `session_breakdown.json` as Markdown (`session_report.md`), optionally with
   an LLM-written summary. It ran only by hand: no session wrote

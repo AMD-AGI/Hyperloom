@@ -210,7 +210,8 @@ What a proposal and a specialist deliverable now do:
   carries the deliverable's own params
   (its patch name, companion flags and environment, ENABLEMENT round context
   and owner), with anything else Orchestration sent beside them. It is denied
-  with `policy_denied` rule `integrate_patch_specialist_unfinished` while the
+  with `policy_denied` rule `integrate_patch_no_specialist` when it names no
+  specialist, with `integrate_patch_specialist_unfinished` while the
   specialist it names has not ended with a result (or is no task of the
   session), and with `integrate_patch_no_deliverable` when that specialist
   left no patch or artifact on disk and is not an ENABLEMENT round. A

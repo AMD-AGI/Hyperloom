@@ -67,6 +67,7 @@ from hyperloom.common.perf_metric import agentx_enabled as _agentx_enabled
 
 from .multi_node import (
     _prepare_multi_node_state as _prepare_multi_node_state,
+    refuse_pd_resume_server_args,
 )
 from .model_catalog import _resolve_models_for_run
 from .launch_shape import (
@@ -545,6 +546,7 @@ async def _resume_session(args: argparse.Namespace) -> _SessionStart:
     # session whose backend came from a pin would otherwise be refused as a workload mismatch. An explicit flag
     # on this resume wins, else the persisted value.
     _resume_server_args, _resume_extra_env = _launch_pins(args, state.operator_server_args, state.operator_extra_env)
+    refuse_pd_resume_server_args(session_dir, _resume_server_args)
     _export_operator_launch_shape(server_args=_resume_server_args, extra_env=_resume_extra_env)
     _stale = measurement_state_is_stale(state)
     if _stale:

@@ -81,6 +81,7 @@ from inference_suite.staging import (
     inferencex_root,
     manifest_sha256,
     normalised_manifest,
+    staged_inferencex_commit,
     staging_key,
     verified_manifest_sha256,
 )
@@ -131,6 +132,7 @@ __all__ = [
     "run_round",
     "runner_owned",
     "scriptable_base",
+    "staged_inferencex_commit",
     "staging_key",
     "stop",
     "verified_manifest_sha256",

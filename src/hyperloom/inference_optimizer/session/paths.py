@@ -376,6 +376,11 @@ def mn_profile_trace_root() -> Path:
     return workspace_root() / "profile-traces"
 
 
+def mn_provisioned_trace_dir() -> str:
+    """``$HYPERLOOM_MN_PROFILE_TRACE_DIR`` with environment variables expanded, or ``""`` when it is unset."""
+    return os.path.expandvars(os.environ.get("HYPERLOOM_MN_PROFILE_TRACE_DIR", "").strip())
+
+
 __all__ = [
     "ARCHIVE_DIRNAME",
     "AssetRootNotFound",
@@ -397,6 +402,7 @@ __all__ = [
     "is_path_within",
     "make_session_dir",
     "mn_profile_trace_root",
+    "mn_provisioned_trace_dir",
     "deps_cache_root",
     "ledger_mark_path",
     "named_ledger_dir",

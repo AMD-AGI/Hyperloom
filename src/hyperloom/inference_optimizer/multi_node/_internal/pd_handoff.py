@@ -25,6 +25,9 @@ SSH_BACKENDS = (INFERA, *PD_BACKENDS)
 NODE_LIST_KEY = "node_list"
 #: Every host of a node-list cluster's launch with the command it serves.
 PODS_KEY = "pods"
+#: The multi-node state keys recording whether the engine hosts share the profile trace root, and why not.
+TRACE_SHARED_KEY = "profile_trace_shared"
+TRACE_SHARE_ERROR_KEY = "profile_trace_share_error"
 
 _FRONTEND_BACKEND = {"atomesh": ATOMESH, "sglang-router": SGLANGROUTER, "infera": INFERA}
 _FRAMEWORK_BACKEND = {"atom": ATOMESH, "sglang": SGLANGROUTER}

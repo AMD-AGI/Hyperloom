@@ -392,7 +392,8 @@ the code actually is; SESSION CONTEXT names the tree this session optimises
   specialist has ended it is denied
   (`integrate_patch_specialist_unfinished`): wait for the specialist's
   `delegated_result`. Asked for a specialist that left no patch or artifact
-  it is denied (`integrate_patch_no_deliverable`).
+  it is denied (`integrate_patch_no_deliverable`). Asked for without a
+  `specialist_task_id` it is denied (`integrate_patch_no_specialist`).
 * **`explore` does not re-measure a launch this session already judged.**
   A `delegate{action_name='explore'}` whose every variant already has a KEEP
   or REVERT in `explore_search` on the current stack (same base launch and

@@ -12,7 +12,7 @@ from unittest.mock import patch
 import pytest
 
 from hyperloom.orchestrator.actions.executors import roofline as roofline_mod
-from hyperloom.orchestrator.actions.executors.profile import profile_trace_path
+from hyperloom.orchestrator.actions.executors.profile import PROFILE_TRACE_NOT_SHARED, profile_trace_path
 from hyperloom.orchestrator.actions.executors.roofline import (
     RooflineExecutor,
     _gpu_trace_unsupported_reason,
@@ -360,6 +360,24 @@ async def test_profile_failed_with_trace_continues_to_trace_analyze(tmp_path):
     assert state.last_profile_status == "recovered"
     assert state.profile_trace_usable()
     assert state.last_trace_analyze["analysis_md_path"] == str(md)
+
+
+@pytest.mark.asyncio
+async def test_unshared_trace_dir_stops_later_automatic_profiles(tmp_path):
+    state = _state()
+    unshared = {
+        "status": "failed",
+        "error_class": PROFILE_TRACE_NOT_SHARED,
+        "error": "multi-node profile trace dir /t is not shared with the engine pods: decode pod 10.0.0.2: ssh failed",
+    }
+
+    p1, p2 = _patch_subs(unshared, AssertionError("trace_analyze must not run without trace"))
+    executor = RooflineExecutor(shared_state=state)
+    with p1, p2:
+        result = await executor(_ctx(tmp_path))
+
+    assert result["status"] == "failed"
+    assert state.gpu_trace_unsupported_reason == unshared["error"]
 
 
 @pytest.mark.asyncio

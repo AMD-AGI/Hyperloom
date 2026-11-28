@@ -2657,6 +2657,19 @@ async def test_an_agent_cannot_integrate_a_specialist_that_left_nothing(coord: C
 
 
 @pytest.mark.asyncio
+async def test_an_agent_cannot_queue_an_integrate_patch_that_names_no_specialist(coord: Coordinator) -> None:
+    """Denied where it enters, so it never takes the landing lanes to fail in the executor."""
+    coord.shared_state.phase = "FRAMEWORK_AGENT"
+    coord.shared_state.baseline_tput = 1000.0
+
+    await coord.router.handle_intent("orchestration", _integrate_request({"source_phase": "FRAMEWORK_AGENT"}))
+
+    assert await _observed(coord, "policy_denied", "rule") == ["integrate_patch_no_specialist"]
+    assert await _integrate_tasks(coord) == []
+    assert coord.shared_state.last_action_failures == []
+
+
+@pytest.mark.asyncio
 async def test_an_agent_cannot_queue_the_integrate_patch_of_an_upstream_pr(coord: Coordinator) -> None:
     """Only the FRAMEWORK_AGENT pump lands a diff fetched from an upstream PR."""
     coord.shared_state.phase = "FRAMEWORK_AGENT"

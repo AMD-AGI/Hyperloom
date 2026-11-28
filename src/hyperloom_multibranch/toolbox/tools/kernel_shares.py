@@ -39,7 +39,6 @@ say which module launched each (:mod:`~.kernel_launchers`); an event without a k
 from __future__ import annotations
 
 import bisect
-import csv
 import gzip
 import json
 import math
@@ -51,8 +50,6 @@ from collections.abc import Callable, Iterable, Iterator
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
-
-from hyperloom_multibranch.toolbox.tools.op_shares import NAME_COLUMN, SHARE_COLUMN
 
 #: The ``cat`` of the trace events that run on the GPU.
 GPU_CATEGORIES = frozenset({"kernel", "gpu_memcpy", "gpu_memset"})
@@ -389,14 +386,6 @@ def kernel_window(window: list[GpuEvent], reference: Callable[[], Iterable[GpuEv
     )
 
 
-def write_kernel_table(window: KernelWindow, path: Path) -> None:
-    """The kernels of ``window`` with their shares, the table the op shares of the tool's pointer are read from."""
-    with path.open("w", encoding=_ENCODING, newline="") as handle:
-        writer = csv.writer(handle)
-        writer.writerow((NAME_COLUMN, SHARE_COLUMN, "total_time_ms", "count"))
-        writer.writerows((row.name, f"{row.percent:.6f}", f"{row.time_ms:.6f}", row.count) for row in window.rows)
-
-
 __all__ = [
     "COLLECTIVE",
     "JITTER_US",
@@ -417,5 +406,4 @@ __all__ = [
     "split_in_order",
     "stalled_collective",
     "trace_events",
-    "write_kernel_table",
 ]
