@@ -504,14 +504,13 @@ def test_eval_enablement_quality_ref_exempt_not_routed(monkeypatch):
 
 def test_scriptable_baseline_without_a_quality_gate_stops_instead_of_enablement(tmp_path, caplog):
     """An operator script that writes no ``quality_gate`` is no capability gap a specialist can fix: stop at once."""
+    from hyperloom.measure.tests.run_dirs import write_scriptable_run_dir
     from hyperloom.orchestrator.actions.executors._accuracy_gate import parse_eval_results
-    from hyperloom.orchestrator.actions.executors._round_folder import BENCHMARK_REPORT_FILE
+    from inference_suite.contracts import RunLayout
     from hyperloom.orchestrator.actions.executors.benchmark_run.records import record_eval_score
 
     attempt = tmp_path / "runs" / "baseline" / "attempt"
-    attempt.mkdir(parents=True)
-    report = attempt / BENCHMARK_REPORT_FILE
-    report.write_text(json.dumps({"status": "success", "throughput": 22793.17}), encoding="utf-8")
+    report = RunLayout(write_scriptable_run_dir(attempt / "suite_run_0", None)).report
     result = {"status": "succeeded", "output_dir": str(attempt)}
     record_eval_score(result, parse_eval_results(attempt, framework="custom"))
 

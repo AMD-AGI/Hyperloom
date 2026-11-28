@@ -11,6 +11,7 @@ import pytest
 
 from hyperloom.inference_optimizer import framework_registry as fr
 from hyperloom.inference_optimizer.roofline_ceiling import RooflineBreakdown
+from hyperloom.measure.tests.run_dirs import write_scriptable_run_dir
 from hyperloom.orchestrator.actions.executors import _accuracy_gate as ag
 from hyperloom.orchestrator.actions.executors import benchmark_result as br
 from hyperloom.orchestrator.actions.executors.grid import _grid_runner as gr
@@ -165,21 +166,19 @@ class TestQualityGate:
         assert ag.quality_gate_passed(bad) is False
 
     def test_parse_quality_gate(self, tmp_path):
-        report = tmp_path / "benchmark_report.json"
-        report.write_text(json.dumps({"quality_gate": {"passed": True, "ssim": 0.97}}), encoding="utf-8")
+        run_dir = write_scriptable_run_dir(tmp_path / "suite_run_0", {"passed": True, "ssim": 0.97})
         out = ag.parse_quality_gate(tmp_path)
         assert out["quality_gate"]["passed"] is True
+        assert out["source_file"] == str(run_dir / "report.json")
 
     def test_parse_eval_results_maps_quality_to_accuracy(self, tmp_path):
-        report = tmp_path / "benchmark_report.json"
-        report.write_text(json.dumps({"quality_gate": {"passed": False}}), encoding="utf-8")
+        write_scriptable_run_dir(tmp_path / "suite_run_0", {"passed": False})
         out = ag.parse_eval_results(tmp_path)
         assert out["accuracy"] == 0.0
         assert out["task"] == "quality_gate"
 
     def test_parse_eval_results_quality_pass(self, tmp_path):
-        report = tmp_path / "benchmark_report.json"
-        report.write_text(json.dumps({"quality_gate": {"passed": True}}), encoding="utf-8")
+        write_scriptable_run_dir(tmp_path / "suite_run_0", {"passed": True})
         out = ag.parse_eval_results(tmp_path)
         assert out["accuracy"] == 1.0
 
@@ -190,16 +189,8 @@ class TestQualityGate:
         assert out["task"] == "quality_gate"
         assert "error" in out
 
-    def test_parse_eval_results_scriptable_report_without_gate_fails_closed(self, tmp_path):
-        report = tmp_path / "benchmark_report.json"
-        report.write_text(json.dumps({"output_throughput": 0.42}), encoding="utf-8")
-        out = ag.parse_eval_results(tmp_path, framework="xdit")
-        assert out["accuracy"] == 0.0
-        assert out["task"] == "quality_gate"
-
     def test_parse_eval_results_scriptable_gate_without_limits_is_judged_by_hyperloom(self, tmp_path):
-        report = tmp_path / "benchmark_report.json"
-        report.write_text(json.dumps({"quality_gate": {"ssim": 0.5}}), encoding="utf-8")
+        write_scriptable_run_dir(tmp_path / "suite_run_0", {"ssim": 0.5})
         out = ag.parse_eval_results(tmp_path, framework="xdit")
         assert out["accuracy"] == 0.0
 
@@ -549,16 +540,9 @@ class TestQualityGateReportSelection:
     def test_mtime_preferred_over_name_sort(self, tmp_path):
         import time
 
-        sub_a = tmp_path / "aaa"
-        sub_a.mkdir()
-        sub_z = tmp_path / "zzz"
-        sub_z.mkdir()
-
-        report_a = sub_a / "benchmark_report.json"
-        report_a.write_text(json.dumps({"quality_gate": {"passed": False}}), encoding="utf-8")
+        write_scriptable_run_dir(tmp_path / "aaa", {"passed": False})
         time.sleep(0.05)
-        report_z = sub_z / "benchmark_report.json"
-        report_z.write_text(json.dumps({"quality_gate": {"passed": True}}), encoding="utf-8")
+        write_scriptable_run_dir(tmp_path / "zzz", {"passed": True})
 
         out = ag.parse_quality_gate(tmp_path)
         assert out["quality_gate"]["passed"] is True
@@ -570,17 +554,7 @@ class TestSuiteQualityGate:
 
     @staticmethod
     def _round(tmp_path, quality_gate):
-        from hyperloom.common.tests.test_round_measurement import _fixed
-        from inference_suite.contracts import RunLayout, ScriptableResult, WorkloadKind
-
-        result = {"output_throughput": 0.5, "completed": 4, "quality_gate": quality_gate}
-        report = _fixed(
-            workload_kind=WorkloadKind.SCRIPTABLE, fixed=None, scriptable=ScriptableResult("client/r.json", result)
-        )
-        layout = RunLayout(tmp_path / "round" / "suite_run_0")
-        layout.root.mkdir(parents=True)
-        layout.report.write_text(json.dumps(report.to_document()), encoding="utf-8")
-        return tmp_path / "round"
+        return write_scriptable_run_dir(tmp_path / "round" / "suite_run_0", quality_gate).parent
 
     @pytest.mark.parametrize(
         ("scores", "passed"),

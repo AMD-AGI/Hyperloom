@@ -18,6 +18,7 @@ from typing import Any, NamedTuple, NoReturn
 
 import yaml
 from inference_suite import stop
+from inference_suite.contracts import RunLayout
 from inference_suite.server_log import death_excerpt
 
 from hyperloom.common.deadline import Deadline
@@ -42,7 +43,6 @@ from .._subprocess_kill import (
     SESSION_TIME_EXHAUSTED_RETURNCODE,
 )
 from ..benchmark_result import round_succeeded
-from .._round_folder import round_report_path
 from .._suite.rounds import SuiteRoundRefused, suite_route
 from ..benchmark_config import composed_benchmark_timeout_sec
 from ..workload._launch_evidence import RequestedLaunch, build_launch_evidence, persist_measurement_evidence
@@ -532,7 +532,6 @@ def _warmup_throughput(run: _GridRun, at: _VariantSlot, pass_: _BenchmarkPass) -
         return warmup_tput
     teardown_variant_server(at.path)
     warmup_server_log = warmup_slot / "server.log"
-    report_path = round_report_path(workspace)
     found = argv_refusal(measurement_server_log_path(warmup_server_log, workspace)) or RoundError(
         death_excerpt(str(warmup_server_log)) or redact_secret_values(pass_.proc.detail[-2000:])
         if returncode != 0
@@ -550,7 +549,7 @@ def _warmup_throughput(run: _GridRun, at: _VariantSlot, pass_: _BenchmarkPass) -
         at,
         _VariantFailure(found.error_class, found.summary),
         workspace=str(workspace),
-        report_path=str(report_path) if report_path.exists() else None,
+        report_path=str(RunLayout(workspace).report),
         raw_result_path=measurement.get("raw_result_path"),
         reported_success=measurement.get("reported_success"),
         returncode=returncode,
@@ -682,7 +681,6 @@ def _round_warnings(measurement: dict[str, Any], measured: _MeasuredVariant) -> 
 def _abort_on_invalid_measurement(run: _GridRun, at: _VariantSlot, outcome: _VariantOutcome) -> NoReturn:
     returncode = outcome.measured.round.proc.returncode
     workspace = outcome.measured.round.proc.run_dir
-    report_path = round_report_path(workspace)
     server_log = at.path / "server.log"
     found = argv_refusal(measurement_server_log_path(server_log, workspace)) or _invalid_measurement_error(
         outcome.measured.round.proc,
@@ -707,7 +705,7 @@ def _abort_on_invalid_measurement(run: _GridRun, at: _VariantSlot, outcome: _Var
             halt=_Halt.ON_FAILURE if returncode != 0 else _Halt.CONTINUE,
         ),
         workspace=str(workspace),
-        report_path=str(report_path) if report_path.exists() else None,
+        report_path=str(RunLayout(workspace).report),
         raw_result_path=outcome.measurement.get("raw_result_path"),
         reported_success=outcome.measurement.get("reported_success"),
         returncode=returncode,
@@ -731,14 +729,13 @@ def _variant_row(run: _GridRun, at: _VariantSlot, measured: _MeasuredVariant) ->
 
 def _unmeasured_row(at: _VariantSlot, outcome: _VariantOutcome, launch: GridLaunch) -> VariantResult:
     workspace = outcome.measured.round.proc.run_dir
-    report_path = round_report_path(workspace)
     return VariantResult(
         name=at.variant.name,
         extra_server_args=at.variant.extra_server_args,
         extra_envs=dict(at.variant.extra_envs),
         status="succeeded",
         workspace=str(workspace),
-        report_path=str(report_path) if report_path.exists() else None,
+        report_path=str(RunLayout(workspace).report),
         returncode=outcome.measured.round.proc.returncode,
         nonfatal_warnings=outcome.warnings,
         note="evaluation_only" if launch.evaluation_only else "server_lifecycle_boot_only",

@@ -36,7 +36,7 @@ from inference_suite.contracts import ProbeOutcome, ReportError, RunLayout
 from inference_suite.contracts.launch import Launch
 from inference_suite.contracts.layout import REPORT_FILE
 
-from ._round_folder import BENCHMARK_REPORT_FILE, RoundFolder, is_round_folder
+from ._round_folder import RoundFolder, is_round_folder
 
 log = logging.getLogger(__name__)
 
@@ -240,27 +240,19 @@ def accuracy_keep_block(
     return False, "", True
 
 
-def _round_quality_gate(report: Path) -> object:
-    """The quality gate the report at ``report`` carries: an inference_suite round's, or a benchmark report's.
+def parse_quality_gate(workspace: Path | str) -> dict[str, Any]:
+    """Read a scriptable (server-less) quality gate from the newest round report under ``workspace``.
 
     Raises:
-        OSError, ValueError: When the report cannot be read; a round report off its contract raises too.
+        OSError, ValueError: When that report cannot be read or, once parsed, is off its contract.
     """
-    if report.name == REPORT_FILE:
-        return RoundFolder.read(report.parent).measurement()["quality_gate"]
-    return json.loads(report.read_text(encoding="utf-8")).get("quality_gate")
-
-
-def parse_quality_gate(workspace: Path | str) -> dict[str, Any]:
-    """Read a scriptable (server-less) quality gate from the newest round report under ``workspace``."""
     workspace = Path(workspace)
-    reports = [Path(f) for f in glob.glob(str(workspace / "**" / BENCHMARK_REPORT_FILE), recursive=True)]
-    reports += [path for path in workspace.glob(f"**/{REPORT_FILE}") if is_round_folder(path.parent)]
+    reports = [path for path in workspace.glob(f"**/{REPORT_FILE}") if is_round_folder(path.parent)]
     if not reports:
         return {"quality_gate": None, "error": f"no round report in {workspace}"}
     latest = max(reports, key=lambda p: p.stat().st_mtime)
     try:
-        qg = _round_quality_gate(latest)
+        qg = RoundFolder.read(latest.parent).measurement()["quality_gate"]
     except json.JSONDecodeError as exc:
         return {"quality_gate": None, "error": f"parse error: {exc}", "source_file": str(latest)}
     if not isinstance(qg, dict):

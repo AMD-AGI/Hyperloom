@@ -14,9 +14,9 @@ from typing import Any, NamedTuple, NoReturn
 
 from hyperloom.common.env_safety import redact_secret_values
 from hyperloom.common.perf_metric import GRADED_INTVTY_P50_CHECKPOINT, constraint_fields
+from inference_suite.contracts import RunLayout
 
 from ...stop_attribution import StoppedByTheRun
-from .._round_folder import round_report_path
 from ..benchmark_result import served_complete_protocol
 from ._grid_base import GridVariant, SuiteRoundExit, VariantResult
 
@@ -216,12 +216,11 @@ def _kept_nonzero_exit(at: _VariantSlot, outcome: _VariantOutcome) -> str | None
             measurement.get("requested_requests"),
         )
         workspace = outcome.measured.round.proc.run_dir
-        report_path = round_report_path(workspace)
         _abort_variant(
             at,
             _VariantFailure("round_nonzero_after_valid_measurement", nonzero_error),
             workspace=str(workspace),
-            report_path=str(report_path) if report_path.exists() else None,
+            report_path=str(RunLayout(workspace).report),
             raw_result_path=measurement.get("raw_result_path"),
             reported_success=measurement.get("reported_success"),
             returncode=returncode,
@@ -248,7 +247,6 @@ def _measured_row(at: _VariantSlot, outcome: _VariantOutcome) -> VariantResult:
     nonzero_kept_error = _kept_nonzero_exit(at, outcome)
     measurement = outcome.measurement
     workspace = outcome.measured.round.proc.run_dir
-    report_path = round_report_path(workspace)
     row = VariantResult(
         name=at.variant.name,
         extra_server_args=at.variant.extra_server_args,
@@ -269,7 +267,7 @@ def _measured_row(at: _VariantSlot, outcome: _VariantOutcome) -> VariantResult:
         intvty_p50_checkpoint=measurement.get(GRADED_INTVTY_P50_CHECKPOINT),
         request_error_rate=measurement.get("request_error_rate"),
         workspace=str(workspace),
-        report_path=str(report_path) if report_path.exists() else None,
+        report_path=str(RunLayout(workspace).report),
         raw_result_path=measurement.get("raw_result_path"),
         reported_success=measurement.get("reported_success"),
         returncode=outcome.measured.round.proc.returncode,

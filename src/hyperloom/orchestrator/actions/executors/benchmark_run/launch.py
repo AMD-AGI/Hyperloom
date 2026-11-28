@@ -19,7 +19,7 @@ from hyperloom.common.perf_metric import agentx_active
 from hyperloom.common.env_safety import redact_secret_values
 from hyperloom.inference_optimizer.breakdown.recorder.baseline_event import BaselineInvocation
 from hyperloom.inference_optimizer.trace.task_progress import heartbeat_while_output_flows
-from inference_suite.contracts import FailedStep, LifecycleMode
+from inference_suite.contracts import FailedStep, LifecycleMode, RunLayout
 from ..grid._grid_inputs import sanitize_result_dir, sanitize_script_name
 from ..workload._launch_evidence import RequestedLaunch, build_launch_evidence, persist_measurement_evidence
 from ..workload._workload_envs import (
@@ -35,7 +35,7 @@ from ..benchmark_result import (
 )
 from .._failed_step import failed_step_error_class
 from ....state.failure_evidence import with_failure_hint
-from .._round_folder import RoundFolder, round_report_path
+from .._round_folder import RoundFolder
 from .._suite.rounds import SuiteRound, SuiteRoundRefused, SuiteRoute, deadline_unix, round_lifecycle, run_suite_round
 from ..agentx_point import ServerArgvInvalidError
 from .bringup import open_bringup_attempt, read_bringup_log, server_child_elapsed_sec
@@ -184,7 +184,6 @@ def _suite_round_failure(
         error = with_failure_hint(error_class, detail or step)
     else:
         error_class, error = "invalid_measurement", "the round report holds no positive throughput and served requests"
-    report_path = round_report_path(finished.workspace)
     return {
         "status": "failed",
         "error_class": error_class,
@@ -193,7 +192,7 @@ def _suite_round_failure(
         "run_status": measurement.get("run_status"),
         "output_dir": str(round_.output_dir),
         "workspace": str(finished.workspace),
-        "report_path": str(report_path),
+        "report_path": str(RunLayout(finished.workspace).report),
         "subprocess_runtime_sec": round(finished.runtime_sec, 2),
         "boot_observation_path": finished.boot_observation_ref,
         "nonfatal_warnings": warnings,
@@ -427,7 +426,6 @@ class _BenchmarkLaunchMixin:
         warnings: list[str],
     ) -> dict[str, Any]:
         """The result of a round that measured, with the launch evidence of the server it measured attached."""
-        report_path = round_report_path(finished.workspace)
         result = {
             "status": "succeeded",
             **measurement,
@@ -435,7 +433,7 @@ class _BenchmarkLaunchMixin:
             "returncode": finished.returncode,
             "output_dir": str(round_.output_dir),
             "result_dir": str(round_.result_dir),
-            "report_path": str(report_path) if report_path.exists() else None,
+            "report_path": str(RunLayout(finished.workspace).report),
             "workspace": str(finished.workspace),
             # Materialized YAML for THIS baseline.
             "materialized_config": str(round_.materialized_config_path),

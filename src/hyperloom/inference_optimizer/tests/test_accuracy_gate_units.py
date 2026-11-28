@@ -16,6 +16,7 @@ from hyperloom.common.gain_math import (
     accuracy_meets_floor,
     accuracy_passed,
 )
+from hyperloom.measure.tests.run_dirs import write_scriptable_run_dir
 from hyperloom.orchestrator.actions.executors import _accuracy_gate as ag
 from hyperloom.orchestrator.kernel import integrate_accuracy as integrate_accuracy
 
@@ -294,9 +295,7 @@ class TestTheAgentXAccuracyGate:
         assert ag.parse_eval_results(tmp_path, framework="vllm", benchmark_mode="agentx")["accuracy"] is None
 
     def test_the_round_outranks_the_scriptable_quality_gate(self, tmp_path):
-        (tmp_path / "benchmark_report.json").write_text(
-            json.dumps({"quality_gate": {"passed": False}}), encoding="utf-8"
-        )
+        write_scriptable_run_dir(tmp_path / "suite_run_0", {"passed": False})
         _accuracy_round(tmp_path, 0.9)
         assert ag.parse_eval_results(tmp_path, framework="xdit", benchmark_mode="agentx")["accuracy"] == 0.9
 
