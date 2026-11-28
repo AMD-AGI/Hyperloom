@@ -1,7 +1,8 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Multi-node-only: the numeric settings a per-round server restart reads, resolved before it starts."""
+"""Multi-node-only: the numeric settings a per-round server restart reads, resolved before it starts, and the error
+a failed restart raises."""
 
 from __future__ import annotations
 
@@ -13,6 +14,19 @@ from hyperloom.inference_optimizer import multi_node
 
 # Default /health poll timeout; override per-run via HYPERLOOM_MN_HEALTH_WAIT_S.
 DEFAULT_HEALTH_TIMEOUT_S = 900  # 15 min.
+
+
+class ServerRestartFailed(RuntimeError):
+    """Raised when the per-round multi-node server restart did not succeed."""
+
+
+#: HTTP timeout of an engine profile start request.
+PROFILE_START_TIMEOUT_S = 30.0
+
+
+def profile_stop_timeout() -> float:
+    """HTTP timeout in seconds of an engine profile stop request, which returns after the trace export."""
+    return float(os.environ.get("HYPERLOOM_MN_STOP_PROFILE_TIMEOUT_S", "600") or 600)
 
 
 @dataclass(frozen=True)

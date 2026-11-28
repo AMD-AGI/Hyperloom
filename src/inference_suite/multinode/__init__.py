@@ -21,6 +21,7 @@ from inference_suite.multinode.launch import (
 from inference_suite.multinode.nodes import NODE_LIST_ENV, NodeList, NodeListError, read_node_list
 from inference_suite.multinode.recipe import PdResolveError
 from inference_suite.multinode.record import (
+    PD_ROLES,
     RAN_RECORD_NAME,
     RECORD_NAME,
     PdLaunch,
@@ -35,6 +36,7 @@ from inference_suite.multinode.ssh import SshClient, SshError, is_host_key_error
 
 __all__ = [
     "NODE_LIST_ENV",
+    "PD_ROLES",
     "RAN_RECORD_NAME",
     "RECORD_NAME",
     "Cluster",

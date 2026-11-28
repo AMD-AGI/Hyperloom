@@ -96,6 +96,15 @@ _XDIT_EXTRA_ARGS_ENV = framework_registry.extra_args_env("xdit")
 _SGLANG_PROFILE_CUDA_GRAPH_FLAG = "--enable-profile-cuda-graph"
 _SGLANG_DISABLE_CUDA_GRAPH_FLAG = "--disable-cuda-graph"
 
+
+def without_dead_cuda_graph_profile(tokens: list[str]) -> list[str]:
+    """SGLang server-arg ``tokens`` less ``--enable-profile-cuda-graph`` when ``--disable-cuda-graph`` leaves no
+    graph capture to profile."""
+    if _SGLANG_DISABLE_CUDA_GRAPH_FLAG not in tokens:
+        return tokens
+    return [token for token in tokens if token != _SGLANG_PROFILE_CUDA_GRAPH_FLAG]
+
+
 # Quality-reference env names, in resolution order. Every scriptable workload
 # needs this gate, so the contract is the framework-neutral ``HYPERLOOM_`` pair.
 # The ``XDIT_`` pair predates ``--framework custom`` and is still both read and
@@ -558,8 +567,9 @@ def _settle_merged_server_args(bench: dict[str, Any], framework_env: str) -> Non
     # can see the contradiction.
     if framework_env == "EXTRA_SGLANG_ARGS":
         _sg_tokens = str(envs.get(framework_env, "")).split()
-        if _SGLANG_DISABLE_CUDA_GRAPH_FLAG in _sg_tokens and _SGLANG_PROFILE_CUDA_GRAPH_FLAG in _sg_tokens:
-            envs[framework_env] = " ".join(t for t in _sg_tokens if t != _SGLANG_PROFILE_CUDA_GRAPH_FLAG)
+        _kept = without_dead_cuda_graph_profile(_sg_tokens)
+        if _kept != _sg_tokens:
+            envs[framework_env] = " ".join(_kept)
             log.info(
                 "Dropping %s: %s is set, so there is no graph capture to profile.",
                 _SGLANG_PROFILE_CUDA_GRAPH_FLAG,

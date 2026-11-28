@@ -17,7 +17,15 @@ from inference_suite.multinode import NODE_LIST_ENV
 
 from ..state_paths import resolve_state_file, state_file_safe_to_read
 from .infera_support import ssh_role_port_offset
-from .pd_handoff import NODE_LIST_KEY, PODS_KEY, handed_node_list, node_list_backend, pd_state
+from .pd_handoff import (
+    NODE_LIST_KEY,
+    PODS_KEY,
+    TRACE_SHARE_ERROR_KEY,
+    TRACE_SHARED_KEY,
+    handed_node_list,
+    node_list_backend,
+    pd_state,
+)
 from .ssh_client import DEFAULT_SSH_PORT
 from .topology_file import Lookup, handoff_lookup
 
@@ -34,6 +42,8 @@ _HANDOFF_CARRIED_KEYS = (
     "pd_decode_url",
     "pd_launch",
     "pd_launch_digest",
+    TRACE_SHARED_KEY,
+    TRACE_SHARE_ERROR_KEY,
 )
 
 # The fields that identify *which* cluster a state describes.

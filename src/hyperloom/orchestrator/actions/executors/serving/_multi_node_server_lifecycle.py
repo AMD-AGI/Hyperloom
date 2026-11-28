@@ -25,8 +25,8 @@ from hyperloom.inference_optimizer.multi_node._internal.server_args_safety impor
     ServerArgsRejected,
     validate_server_args,
 )
-from .._multi_node_env import _read_state, is_multi_node
-from ._multi_node_restart_settings import RestartSettings
+from .._multi_node_env import _read_state, is_multi_node, is_pd_session
+from ._multi_node_restart_settings import RestartSettings, ServerRestartFailed
 
 # Scoped env flag (set by the roofline compute-bound re-profile) that tells this restart to strip DP-attention /
 # dp-size from prefill+decode+shared server args, so the profiled server runs single-rank full-batch (compute-bound).
@@ -107,10 +107,6 @@ def _merge_sglang_defaults(extra_args: str) -> str:
             continue
         parts.append(default_token)
     return " ".join(p for p in parts if p)
-
-
-class ServerRestartFailed(RuntimeError):
-    """Raised when the per-round multi-node server restart did not succeed."""
 
 
 def _state_or_env(state: dict, state_key: str, env_key: str, default: str = "") -> str:
@@ -332,8 +328,13 @@ async def _apply_tracelens_patch_fanout(patch_set: str, torch_profiler_dir: str,
         )
 
 
-def _read_restart_settings() -> RestartSettings:
-    """The restart's settings; a malformed one fails the restart before it touches the cluster."""
+def _read_restart_settings(extra_server_args: str) -> RestartSettings:
+    """The restart's settings once ``extra_server_args`` pass the server-args safety check; a rejected arg or a
+    malformed setting fails the restart before it touches the cluster."""
+    try:
+        validate_server_args(extra_server_args, context="restart_server_for_round")
+    except ServerArgsRejected as exc:
+        raise ServerRestartFailed(str(exc)) from exc
     try:
         return RestartSettings.from_env()
     except EnvValueError as exc:
@@ -398,6 +399,20 @@ def _restart_namespace(
     )
 
 
+def _make_profiler_dir(torch_profiler_dir: str) -> None:
+    """Create the round's torch profiler dir when one is set.
+
+    Raises:
+        ServerRestartFailed: the dir cannot be created.
+    """
+    if not torch_profiler_dir:
+        return
+    try:
+        Path(torch_profiler_dir).mkdir(parents=True, exist_ok=True)
+    except OSError as exc:
+        raise ServerRestartFailed(f"cannot mkdir torch_profiler_dir {torch_profiler_dir!r}: {exc}") from exc
+
+
 async def restart_server_for_round(
     server: RoundServer,
     *,
@@ -421,6 +436,15 @@ async def restart_server_for_round(
         log.info(
             "restart_server_for_round: external service URL (benchmark-only, no SSH control); skipping server restart"
         )
+        return
+    if is_pd_session():
+        from ._pd_round_server import restart_pd_round
+
+        settings = _read_restart_settings(server.extra_server_args)
+        async with _get_restart_lock():
+            _make_profiler_dir(torch_profiler_dir)
+            with _restart_env_scope(extra_env, unset_env, torch_profiler_dir):
+                await restart_pd_round(server.extra_server_args, settings.poll_timeout_s)
         return
 
     round_args = _resolve_round_args(server)
@@ -451,18 +475,10 @@ async def restart_server_for_round(
             _COMPUTE_BOUND_PROFILE_ENV,
         )
 
-    try:
-        validate_server_args(extra_server_args, context="restart_server_for_round")
-    except ServerArgsRejected as exc:
-        raise ServerRestartFailed(str(exc)) from exc
-    settings = _read_restart_settings()
+    settings = _read_restart_settings(extra_server_args)
 
     async with _get_restart_lock():
-        if torch_profiler_dir:
-            try:
-                Path(torch_profiler_dir).mkdir(parents=True, exist_ok=True)
-            except OSError as exc:
-                raise ServerRestartFailed(f"cannot mkdir torch_profiler_dir {torch_profiler_dir!r}: {exc}") from exc
+        _make_profiler_dir(torch_profiler_dir)
         with _restart_env_scope(extra_env, unset_env, torch_profiler_dir):
             from .._server_patcher import resolve_sglang_patch_set
 
@@ -577,10 +593,7 @@ async def _restart_with_reclaim_retry(restart_and_wait: Callable[..., Awaitable[
 # Infera frontend profiling API (infera.server --enable-profiling).
 
 
-async def trigger_infera_engine_profile(
-    action: str,
-    body: dict | None = None,
-) -> None:
+async def trigger_infera_engine_profile(action: str, body: dict | None = None) -> None:
     """Drive torch profiling on every Infera worker via the frontend fan-out API."""
     if not is_multi_node():
         return
@@ -589,32 +602,20 @@ async def trigger_infera_engine_profile(
         return
     service_url = str(state.get("service_url") or "").strip().rstrip("/")
     if not service_url:
-        log.warning(
-            "trigger_infera_engine_profile(%s): no service_url in state",
-            action,
-        )
+        log.warning("trigger_infera_engine_profile(%s): no service_url in state", action)
         return
-    try:
-        import httpx as _httpx
-    except ImportError:  # pragma: no cover
-        log.warning("httpx unavailable; cannot trigger infera profiling")
-        return
+    import httpx as _httpx
+
+    from ._multi_node_restart_settings import PROFILE_START_TIMEOUT_S, profile_stop_timeout
+
     route = "start" if action == "start" else "stop"
     url = f"{service_url}/v1/admin/profile/{route}"
     payload = dict(body or {}) if action == "start" else {}
-    if action == "start":
-        client_timeout = 30.0
-    else:
-        client_timeout = float(os.environ.get("HYPERLOOM_MN_STOP_PROFILE_TIMEOUT_S", "600") or 600)
+    client_timeout = PROFILE_START_TIMEOUT_S if action == "start" else profile_stop_timeout()
     async with _httpx.AsyncClient(timeout=client_timeout) as client:
         try:
             resp = await client.post(url, json=payload)
-            log.info(
-                "infera profile %s -> %s HTTP %d",
-                route,
-                url,
-                resp.status_code,
-            )
+            log.info("infera profile %s -> %s HTTP %d", route, url, resp.status_code)
         except _httpx.HTTPError as exc:
             log.warning("infera profile %s -> %s failed (%s); continuing", route, url, exc)
 

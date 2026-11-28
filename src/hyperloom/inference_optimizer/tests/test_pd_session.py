@@ -6,24 +6,31 @@
 from __future__ import annotations
 
 import argparse
+import asyncio
 import dataclasses
 import json
 import subprocess
+import types
 from pathlib import Path
 
+import httpx
 import pytest
 
 from inference_suite import SGLANG_PROFILER_DIR_ENV
 from inference_suite.contracts.base_launch import LaunchQuery, Workload
 from inference_suite.multinode import RECORD_NAME, Cluster, PdMode, Role, SshClient, read_record, write_record
 from inference_suite.multinode.commands import CommandError
-from inference_suite.multinode.ssh import SshResult
+from inference_suite.multinode.ssh import SshError, SshResult
 from hyperloom.inference_optimizer.cli import bootstrap
 from hyperloom.inference_optimizer.cli import multi_node as cli_mn
 from hyperloom.inference_optimizer.multi_node import TopologyHandoffError
 from hyperloom.inference_optimizer.multi_node import cli as mn_cli
 from hyperloom.inference_optimizer.multi_node import pd_session
 from hyperloom.inference_optimizer.multi_node._internal import external_state as ext
+from hyperloom.orchestrator.actions.executors import _pd_profile_round, profile
+from hyperloom.orchestrator.actions.executors.benchmark_run.launch import _BenchmarkLaunchMixin
+from hyperloom.orchestrator.actions.executors.serving import _multi_node_server_lifecycle as lifecycle
+from hyperloom.orchestrator.actions.executors.serving import _pd_round_server as pd_round
 from hyperloom.inference_optimizer.session.base_launch import read_base_launch
 
 _NODES = {
@@ -67,6 +74,7 @@ def session(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Path:
     monkeypatch.setenv(pd_session.NODE_LIST_ENV, json.dumps(_NODES))
     monkeypatch.setenv("INFERENCE_OPTIMIZER_NODES", "2")
     monkeypatch.setenv("PD_MODE", "disaggregated")
+    monkeypatch.setenv("HYPERLOOM_MN_PROFILE_TRACE_DIR", str(tmp_path / "traces"))
     _ssh_through(monkeypatch, _run_here)
     directory = tmp_path / "session"
     directory.mkdir()
@@ -178,6 +186,53 @@ def test_round_overrides_share_the_round_and_keep_each_roles_own() -> None:
     assert pd_session._round_overrides("", "", "", mode=mode) == {}
 
 
+def _fake_restart(seen: dict):
+    from inference_suite.multinode.launch import with_overrides
+
+    def restart(launch, overrides, cluster, options):
+        seen.update(overrides=overrides, env=options.extra_env)
+        return with_overrides(launch, overrides)
+
+    return restart
+
+
+def test_a_round_restarts_over_the_frozen_launch_and_decode_keeps_its_mem_fraction(session: Path, monkeypatch) -> None:
+    _adopt(session)
+    seen: dict = {}
+    monkeypatch.setattr(pd_session, "restart", _fake_restart(seen))
+    asyncio.run(lifecycle.restart_server_for_round(lifecycle.RoundServer("--chunked-prefill-size 4096")))
+    ran = read_record(session / pd_session.RAN_RECORD_NAME)
+    assert seen["overrides"]["decode"] == ["--chunked-prefill-size", "4096"]
+    decode, prefill = ran.role(Role.DECODE).args, ran.role(Role.PREFILL).args
+    assert "0.85" in decode and "0.75" not in decode
+    assert "4096" in prefill and "0.7" in prefill
+    state = ext.load_multi_node_state()
+    assert read_record(session / RECORD_NAME).digest() == state[pd_session.PD_DIGEST_KEY]
+    pods = {pod["role"]: pod for pod in state["pods"]}
+    assert "--chunked-prefill-size 4096" in pods["decode"]["launch_command"]
+
+
+def test_a_round_drops_the_flags_the_launcher_owns(session: Path, monkeypatch) -> None:
+    _adopt(session)
+    seen: dict = {}
+    monkeypatch.setattr(pd_session, "restart", _fake_restart(seen))
+    round_args = "--context-length 11264 --watchdog-timeout 1800"
+    asyncio.run(lifecycle.restart_server_for_round(lifecycle.RoundServer(round_args)))
+    for role in ("prefill", "decode"):
+        assert seen["overrides"][role] == ["--watchdog-timeout", "1800"]
+
+
+def test_a_failed_restart_is_a_failed_round(session: Path, monkeypatch) -> None:
+    _adopt(session)
+
+    def refuse(*_args, **_kwargs):
+        raise pd_session.LaunchError("decode engine on d0 exited")
+
+    monkeypatch.setattr(pd_session, "restart", refuse)
+    with pytest.raises(lifecycle.ServerRestartFailed, match="d0 exited"):
+        asyncio.run(lifecycle.restart_server_for_round(lifecycle.RoundServer("")))
+
+
 def test_a_malformed_round_or_command_is_a_session_error(session: Path, monkeypatch) -> None:
     state = _adopt(session)
 
@@ -201,6 +256,75 @@ def test_kill_inference_stops_the_cluster(session: Path, monkeypatch) -> None:
     monkeypatch.setattr(pd_session, "stop", lambda launch, cluster: stopped.append(launch.role(Role.DECODE).hosts))
     assert mn_cli.cmd_kill_inference(argparse.Namespace(pid_file=None)) == 0
     assert stopped == [("d0",)]
+
+
+def test_a_gone_engine_is_named(session: Path, monkeypatch) -> None:
+    _adopt(session)
+    gone = [types.SimpleNamespace(role="decode", host="d0")]
+    monkeypatch.setattr(pd_session, "engines_gone", lambda launch, cluster: gone)
+    assert asyncio.run(_BenchmarkLaunchMixin._multi_node_engines_lost()) == "decode engine on d0 is gone"
+
+
+def test_an_engine_check_that_cannot_run_is_a_lost_engine(session: Path, monkeypatch) -> None:
+    _adopt(session)
+
+    def unreachable(launch, cluster):
+        raise SshError("d0: connection timed out")
+
+    monkeypatch.setattr(pd_session, "engines_gone", unreachable)
+    lost = asyncio.run(_BenchmarkLaunchMixin._multi_node_engines_lost())
+    assert "cannot be checked" in lost and "d0: connection timed out" in lost
+
+
+def test_a_launch_the_profile_round_cannot_place_fails_it(session: Path, monkeypatch) -> None:
+    _adopt(session)
+
+    def unplaceable(_state):
+        raise pd_session.PdSessionError("the frozen launch is not the one recorded")
+
+    monkeypatch.setattr(pd_session, "session_engine_urls", unplaceable)
+    monkeypatch.setattr(pd_session, "session_worker_hosts", unplaceable)
+    with pytest.raises(pd_session.PdSessionError):
+        asyncio.run(pd_round.trigger_pd_engine_profile("start"))
+    with pytest.raises(pd_session.PdSessionError):
+        pd_round.select_pd_node_traces(str(session), 0.0)
+
+
+def test_an_engine_trace_dir_that_cannot_be_made_fails_the_profile_start(
+    session: Path, tmp_path: Path, monkeypatch
+) -> None:
+    _adopt(session)
+    seen = _record_posts(monkeypatch)
+    blocker = tmp_path / "file"
+    blocker.write_text("x")
+    with pytest.raises(OSError):
+        asyncio.run(pd_round.trigger_pd_engine_profile("start", {"output_dir": str(blocker / "round")}))
+    assert seen == []
+
+
+def test_a_profile_round_without_its_trace_dir_or_profile_config_fails(session: Path, tmp_path: Path) -> None:
+    _adopt(session)
+    blocker = tmp_path / "file"
+    blocker.write_text("x")
+    with pytest.raises(OSError):
+        _pd_profile_round.trace_fs_round_start(str(blocker / "torch_trace"), 0.0)
+    with pytest.raises(OSError):
+        _pd_profile_round.graph_capture_round("", tmp_path / "missing.yaml")
+
+
+def test_an_engine_profile_call_that_fails_fails_the_window(monkeypatch) -> None:
+    async def refuse(action, body=None):
+        raise pd_session.PdSessionError("the PD engines cannot be placed")
+
+    monkeypatch.setattr(profile, "_trigger_engine_profiles", refuse)
+    monkeypatch.setenv("HYPERLOOM_MN_PROFILE_WARMUP_S", "0")
+
+    async def run_window() -> None:
+        async with profile._engine_profile_window(""):
+            await asyncio.sleep(0.05)
+
+    with pytest.raises(pd_session.PdSessionError):
+        asyncio.run(run_window())
 
 
 _INFERA_NODES = {
@@ -250,6 +374,14 @@ def test_the_session_mode_must_be_the_node_lists(infera_session: Path, monkeypat
     assert raised.value.code == 2
 
 
+def test_a_pd_session_refuses_server_args_before_it_freezes(session: Path) -> None:
+    args = argparse.Namespace(nodes=2, mn_backend=None, server_args="--mem-fraction-static 0.8")
+    with pytest.raises(SystemExit) as raised:
+        cli_mn.freeze_pd_session_launch(session, args, _SESSION)
+    assert raised.value.code == 2
+    assert not (session / RECORD_NAME).exists()
+
+
 def test_aggregated_rounds_override_the_workers() -> None:
     mode = PdMode.AGGREGATED
     assert pd_session._round_overrides("--chunked-prefill-size 4096", "--x", "", mode=mode) == {
@@ -258,12 +390,65 @@ def test_aggregated_rounds_override_the_workers() -> None:
     assert pd_session._round_overrides("", "", "", mode=mode) == {}
 
 
+def test_an_aggregated_round_restarts_the_workers(infera_session: Path, monkeypatch) -> None:
+    _adopt(infera_session)
+    seen: dict = {}
+    monkeypatch.setattr(pd_session, "restart", _fake_restart(seen))
+    asyncio.run(lifecycle.restart_server_for_round(lifecycle.RoundServer("--chunked-prefill-size 4096")))
+    assert seen["overrides"] == {"worker": ["--chunked-prefill-size", "4096"]}
+    ran = read_record(infera_session / pd_session.RAN_RECORD_NAME)
+    assert ran.role(Role.WORKER).args == ("--mem-fraction-static", "0.8", "--chunked-prefill-size", "4096")
+
+
 def test_kill_inference_stops_the_infera_workers(infera_session: Path, monkeypatch) -> None:
     _adopt(infera_session)
     stopped = []
     monkeypatch.setattr(pd_session, "stop", lambda launch, cluster: stopped.append(launch.mode.value))
     assert mn_cli.cmd_kill_inference(argparse.Namespace(pid_file=None)) == 0
     assert stopped == ["aggregated"]
+
+
+def test_adoption_records_that_the_engine_hosts_share_the_trace_root(session: Path, tmp_path: Path) -> None:
+    state = _adopt(session)
+    assert state[pd_session.TRACE_SHARED_KEY] is True
+    assert pd_session.TRACE_SHARE_ERROR_KEY not in state
+    assert list((tmp_path / "traces").iterdir()) == []
+
+
+def test_a_profile_round_writes_under_the_trace_root_adoption_probed(
+    session: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("HL_TRACE_BASE", str(tmp_path))
+    monkeypatch.setenv("HYPERLOOM_MN_PROFILE_TRACE_DIR", "$HL_TRACE_BASE/traces")
+    probed: list[Path] = []
+    real_probe = pd_session._record_trace_share
+    monkeypatch.setattr(
+        pd_session,
+        "_record_trace_share",
+        lambda state, cluster, root: probed.append(root) or real_probe(state, cluster, root),
+    )
+    _adopt(session)
+    assert probed == [tmp_path / "traces"]
+    assert profile._mn_round_trace_root() == str(tmp_path / "traces")
+
+
+@pytest.mark.parametrize(
+    "reply",
+    [
+        lambda _argv, _stdin, _timeout: SshResult(1, "", "cat: No such file or directory"),
+        lambda _argv, _stdin, _timeout: SshResult(0, "other-token\n", ""),
+        lambda _argv, _stdin, timeout: SshResult(124, "", f"timed out after {timeout}s"),
+    ],
+    ids=["missing", "different-file", "ssh-timeout"],
+)
+def test_adoption_records_why_the_trace_root_is_not_shared(
+    session: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, reply
+) -> None:
+    _ssh_through(monkeypatch, reply)
+    state = _adopt(session)
+    assert state[pd_session.TRACE_SHARED_KEY] is False
+    assert state[pd_session.TRACE_SHARE_ERROR_KEY].startswith("engine host p0:")
+    assert list((tmp_path / "traces").iterdir()) == []
 
 
 def test_a_profiling_round_gives_each_engine_role_its_own_profiler_dir() -> None:
@@ -297,3 +482,50 @@ def test_a_node_list_cluster_takes_the_ssh_patch_path(monkeypatch, command, infe
     monkeypatch.setattr(mn_cli, "_load_state", lambda: {"backend": backend, "node_list": True})
     monkeypatch.setattr(mn_cli, infera_command, lambda _args: 7)
     assert getattr(mn_cli, command)(argparse.Namespace()) == 7
+
+
+def _record_posts(monkeypatch: pytest.MonkeyPatch) -> list[tuple[str, dict]]:
+    """Answer every engine POST with 200 and return what was posted."""
+    seen: list[tuple[str, dict]] = []
+    real_client = httpx.AsyncClient
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append((str(request.url), json.loads(request.content or b"{}")))
+        return httpx.Response(200)
+
+    monkeypatch.setattr(httpx, "AsyncClient", lambda *a, **k: real_client(transport=httpx.MockTransport(handler)))
+    return seen
+
+
+def test_pd_engine_profile_reaches_every_engine_of_the_frozen_launch(
+    session: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _adopt(session)
+    nodes = {**_NODES, "prefill_url": "http://pre:8010", "decode_url": "http://dec:8020"}
+    monkeypatch.setenv(pd_session.NODE_LIST_ENV, json.dumps(nodes))
+    monkeypatch.delenv("HYPERLOOM_MN_PROFILE_WITH_STACK", raising=False)
+    seen = _record_posts(monkeypatch)
+    out = tmp_path / "round"
+
+    asyncio.run(pd_round.trigger_pd_engine_profile("start", {"output_dir": str(out)}))
+    asyncio.run(pd_round.trigger_pd_engine_profile("stop"))
+
+    assert seen == [
+        ("http://p0:8010/start_profile", {"output_dir": str(out / "prefill" / "0"), "with_stack": False}),
+        ("http://d0:8020/start_profile", {"output_dir": str(out / "decode" / "0"), "with_stack": False}),
+        ("http://p0:8010/stop_profile", {}),
+        ("http://d0:8020/stop_profile", {}),
+    ]
+    assert (out / "prefill" / "0").is_dir() and (out / "decode" / "0").is_dir()
+    assert pd_session.session_worker_hosts(ext.load_multi_node_state()) == {"prefill": [("p0",)], "decode": [("d0",)]}
+
+
+def test_pd_engine_profile_with_stack_follows_env(session: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    _adopt(session)
+    monkeypatch.setenv("HYPERLOOM_MN_PROFILE_WITH_STACK", "1")
+    seen = _record_posts(monkeypatch)
+    asyncio.run(pd_round.trigger_pd_engine_profile("start"))
+    assert seen == [
+        ("http://p0:8000/start_profile", {"with_stack": True}),
+        ("http://d0:8000/start_profile", {"with_stack": True}),
+    ]
