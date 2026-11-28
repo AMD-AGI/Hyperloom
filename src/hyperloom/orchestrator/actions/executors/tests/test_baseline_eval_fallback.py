@@ -518,3 +518,115 @@ def test_an_eval_that_never_reached_the_server_is_neither_stopped_nor_an_eval_fa
     assert "accuracy" not in result
     assert result["nonfatal_warnings"] == ["eval_failed_server_unreachable"]
     assert state.baseline_accuracy == 0.81
+
+
+# --- a bench that measured, then an eval that left no score ----------------
+def _bench_then_eval(error_class: str, error: str = "the eval exited with code 1") -> dict:
+    """The result of a pair whose measured bench stands and whose eval, run after it, stopped at ``error_class``."""
+    return {
+        "status": "succeeded",
+        "output_throughput": 4701.6,
+        "run_eval_disabled": False,
+        "nonfatal_warnings": ["post_measure_accuracy_failed"],
+        "accuracy_stage": {"status": "failed", "error_class": error_class, "error": error, "workspace": "/w/run"},
+    }
+
+
+def _ruled_after_its_pass(played: dict, *, enablement_mode: str, params: dict | None = None):
+    """Rule on ``played`` as ``_run_with_accuracy`` does once the attempt's rounds returned it."""
+    state = SharedState(enablement_mode=enablement_mode, baseline_accuracy=0.81)
+    executor = BaselineExecutor()
+
+    async def run_pass(ctx, *, recorder=None):
+        return played
+
+    executor._run_pass = run_pass
+    result = _run(executor._run_with_accuracy(_stop_ctx("vllm", state, params)))
+    assert result is played
+    assert (result["status"], result["output_throughput"]) == ("succeeded", 4701.6)
+    return result, state
+
+
+def test_a_failed_eval_after_the_bench_stops_a_genuine_baseline_and_keeps_its_bench():
+    result, state = _ruled_after_its_pass(_bench_then_eval("eval_failed"), enablement_mode="off")
+
+    assert state.stop_reason == "baseline_accuracy_failed"
+    assert result["accuracy_source"] == "eval_unavailable"
+    assert "eval_failed_no_fallback_baseline_requires_accuracy" in result["nonfatal_warnings"]
+    assert BASELINE_EVAL_FAILED_KEY not in result
+
+
+def test_a_failed_eval_after_the_bench_goes_to_enablement_as_a_runtime_failure_with_the_evals_own_error():
+    result, state = _ruled_after_its_pass(_bench_then_eval("eval_failed"), enablement_mode="eval")
+
+    assert state.stop_reason == ""
+    assert result[BASELINE_EVAL_FAILED_KEY] is True
+    assert result[BASELINE_EVAL_FAILURE_KIND_KEY] == "eval_runtime_failure"
+    assert result[BASELINE_EVAL_EVIDENCE_KEY] == "the eval exited with code 1"
+    assert result[BASELINE_EVAL_OBSERVED_ACCURACY_KEY] is None
+
+
+def test_a_failed_eval_after_the_bench_of_a_candidate_neither_stops_the_run_nor_opens_enablement():
+    """A kernel re-baseline, a stack validation: the caller's accuracy gate rules on the missing score."""
+    played = _bench_then_eval("eval_failed")
+    result, state = _ruled_after_its_pass(played, enablement_mode="eval", params={"quality_ref_exempt": True})
+
+    assert state.stop_reason == ""
+    assert BASELINE_EVAL_FAILED_KEY not in result
+    assert result["accuracy_source"] == "eval_unavailable"
+    assert "accuracy" not in result
+
+
+_STOPPED_EVAL_CLASSES = pytest.mark.parametrize(
+    "error_class", ["session_time_exhausted", "round_timeout", "server_died", "server_stalled"]
+)
+
+
+@_STOPPED_EVAL_CLASSES
+def test_an_eval_stopped_after_the_bench_stops_a_genuine_baseline_as_a_missing_score(error_class):
+    result, state = _ruled_after_its_pass(_bench_then_eval(error_class, "stopped"), enablement_mode="off")
+
+    assert state.stop_reason == "baseline_accuracy_failed"
+    assert result["nonfatal_warnings"] == ["post_measure_accuracy_failed"]
+    assert "accuracy_source" not in result
+
+
+@_STOPPED_EVAL_CLASSES
+def test_an_eval_stopped_after_the_bench_goes_to_enablement_as_an_unavailable_score(error_class):
+    result, state = _ruled_after_its_pass(_bench_then_eval(error_class, "stopped"), enablement_mode="eval")
+
+    assert state.stop_reason == ""
+    assert result[BASELINE_EVAL_FAILURE_KIND_KEY] == EVAL_KIND_ACCURACY_UNAVAILABLE
+    assert result[BASELINE_EVAL_OBSERVED_ACCURACY_KEY] is None
+
+
+@pytest.mark.parametrize(("enablement_mode", "stop_reason"), [("off", "baseline_accuracy_failed"), ("eval", "")])
+def test_an_eval_that_never_reached_the_server_after_the_bench_is_a_missing_score(enablement_mode, stop_reason):
+    """A refused connection is no verdict of the eval: the bench is ruled like any result without a score."""
+    refused = "aiohttp.client_exceptions.ClientConnectorError: Cannot connect to host 0.0.0.0:41099"
+    played = _bench_then_eval("eval_failed")
+    played["nonfatal_warnings"].append(refused)
+    result, state = _ruled_after_its_pass(played, enablement_mode=enablement_mode)
+
+    assert state.stop_reason == stop_reason
+    assert result["nonfatal_warnings"][-1] == "eval_failed_server_unreachable"
+    assert "eval_failed_no_fallback_baseline_requires_accuracy" not in result["nonfatal_warnings"]
+    assert result.get(BASELINE_EVAL_FAILURE_KIND_KEY) == (EVAL_KIND_ACCURACY_UNAVAILABLE if not stop_reason else None)
+
+
+@pytest.mark.parametrize("enablement_mode", ["off", "eval"])
+def test_a_baseline_standing_on_its_cold_warmup_is_not_ruled_on_accuracy(enablement_mode):
+    """The budget refused the round that evaluates, so the anchor has no score: that is no accuracy failure."""
+    cold = {
+        "status": "succeeded",
+        "output_throughput": 4701.6,
+        "run_eval_disabled": True,
+        "nonfatal_warnings": ["baseline_measure_round_dropped_low_budget"],
+        "measure_round_dropped": {"priced_by": "session_hot_pass", "expected_cost_sec": 400.0},
+    }
+    result, state = _ruled_after_its_pass(cold, enablement_mode=enablement_mode)
+
+    assert state.stop_reason == ""
+    assert BASELINE_EVAL_FAILED_KEY not in result
+    assert result["nonfatal_warnings"] == ["baseline_measure_round_dropped_low_budget"]
+    assert state.baseline_accuracy == 0.81

@@ -43,16 +43,14 @@ def _run_rounds(tmp_path: Path, *, warmup: float, measured: float, kind="baselin
                 "workspace": str(directory),
             }
         )
-        if slot == "warmup_round":
+        if slot == "measure_round":
             receipts[-1]["accuracy"] = 0.96
     rounds = _RoundSequence(receipts)
     attempt = SimpleNamespace(
         ctx=SimpleNamespace(task=SimpleNamespace(kind=kind)),
         params={"quality_ref_exempt": exempt},
     )
-    result = asyncio.run(
-        rounds._run_cold_start_guarded_rounds(attempt, tmp_path, {"port": 8888}, [], defer_accuracy=False)
-    )
+    result = asyncio.run(rounds._run_cold_start_guarded_rounds(attempt, tmp_path, {"port": 8888}, []))
     assert rounds.calls == 2
     return result, receipts
 

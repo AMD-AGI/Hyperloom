@@ -476,7 +476,10 @@ async def _prepare_variant_rounds(run: _GridRun, at: _VariantSlot) -> _VariantRo
 
 
 async def _run_warmup_round(run: _GridRun, at: _VariantSlot, rounds: _VariantRounds) -> float | None:
-    """Run and discard one benchmark pass so the measured round starts on a warm server."""
+    """Run and discard one benchmark pass so the measured round starts on a warm server.
+
+    The pass never evaluates: the measured round after it runs the eval, on a server no eval has loaded.
+    """
     warmup_slot = at.path / WARMUP_ROUND_DIR
     warmup_server_log = warmup_slot / "server.log"
     cfg_path = await _variant_yaml_or_abort(
@@ -497,6 +500,7 @@ async def _run_warmup_round(run: _GridRun, at: _VariantSlot, rounds: _VariantRou
             timeout_sec=rounds.benchmark_timeout_sec,
             session_deadline_sec=run.stop.session_deadline_sec,
             warmup=True,
+            evaluates=False,
         ),
     )
     stopped = stopped_by_the_run(proc.returncode)

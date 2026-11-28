@@ -217,16 +217,42 @@ it.
   `PYTHONPATH`, which it did with the store unset whenever the session had
   recorded an image digest and an engine version. See
   [Upgrade](reference/upgrade.md).
+- **The accuracy eval runs after the measured bench.** A single-node test of
+  a served fixed workload runs a discarded bench that boots the server and
+  then the measured bench on it; the eval now follows the measured bench, in
+  that round, for the baseline, a PRELUDE warm replay, the KERNEL stack
+  validation and integrate re-baseline, the FRAMEWORK integrate bench and an
+  EXPLORE variant. It used to run in the discarded round, before the measured
+  bench (twice in the integrate bench, and in a third round after a second
+  load in the KERNEL re-baseline), which left the server's KV pool filled for
+  the measured bench and graded a KERNEL candidate measured without an eval
+  against an anchor measured after one. **Breaking:** every throughput such a
+  session measures shifts once; a session started on an earlier build must
+  not be resumed, and sessions, reports and Recipe KB records from before and
+  after are not comparable. Multi-node sessions, AgentX, MLPerf, scriptable
+  and profiled rounds and concurrency sweeps run the rounds they ran. An eval
+  that fails or is stopped after the measured bench no longer fails the
+  attempt: the result keeps its throughput and carries `accuracy_stage`
+  (`status: failed`) and `post_measure_accuracy_failed`, and the missing score
+  takes the route a baseline without a score takes (an eval failure under
+  `--enablement eval` or `all`, else `baseline_accuracy_failed`). A baseline
+  that kept its cold warm-up figure carries no accuracy and is not ruled on
+  it. The KERNEL re-baseline evaluates every candidate, writes no
+  `accuracy_round/`, and no longer reads `defer_accuracy_until_after_measure`,
+  `post_measure_accuracy_min_tput` or `post_measure_accuracy_keep_policy`.
+  The baseline timeline has no `accuracy` round row, and `priced_by` reads
+  `warmup_post_ready` where it read `warmup_post_ready_less_eval`. See
+  [Upgrade](reference/upgrade.md).
 - **A baseline takes its accuracy from its own attempt.** A genuine baseline,
   a PRELUDE warm replay and the KERNEL stack validation run a discarded
-  warm-up round and a measured round on one server, and one of the two runs
-  the accuracy eval. The result the attempt returns now carries that round's
+  warm-up round and a measured round on one server, and the measured round
+  runs the accuracy eval. The result the attempt returns carries that round's
   `accuracy`, `accuracy_task`, `accuracy_metric`, `accuracy_source`,
   `accuracy_definition_digest` and `accuracy_eval_kind`; the measured round's
   result used to carry none, and each reader searched the attempt's directory
   for the warm-up's results file. An attempt whose score is usable is judged
-  as before. A warm replay's warm-up round is recorded as one that evaluated
-  even when its recipe sets `RUN_EVAL=false`, and the replay is judged on the
+  as before. The round of a warm replay that evaluates is recorded as one
+  that evaluated even when its recipe sets `RUN_EVAL=false`, and the replay is judged on the
   score its result carries: `eval_ran` in `warm_replay_outcome` is `true`
   exactly when there is one, and a replay without one is still admitted and
   marked, with `eval_error` reading `the replay's result carries no accuracy

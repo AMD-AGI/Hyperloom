@@ -63,8 +63,8 @@ def _measured(tmp_path: Path) -> dict:
     }
 
 
-async def _finished_revalidation(coord, tmp_path: Path):
-    """A revalidation whose row is terminal and whose result waits for the pump."""
+async def _finished_revalidation(coord, tmp_path: Path, **measured):
+    """A revalidation whose row is terminal and whose result, with ``measured`` laid over it, waits for the pump."""
     state = coord.shared_state
     state.phase = "ENABLEMENT"
     state.enablement.validation_pending = True
@@ -79,7 +79,7 @@ async def _finished_revalidation(coord, tmp_path: Path):
     state.enablement.revalidation_task_id = task.task_id
     await coord.tasks.transition(task.task_id, "running")
     await coord.tasks.transition(task.task_id, "succeeded")
-    result = SubAgentResult(task_id=task.task_id, state="succeeded", result=_measured(tmp_path))
+    result = SubAgentResult(task_id=task.task_id, state="succeeded", result={**_measured(tmp_path), **measured})
     coord.dispatcher._completion_queue.append((await coord.tasks.get(task.task_id), result))
     return task
 
@@ -100,6 +100,22 @@ async def test_the_tick_after_the_revalidation_ends_still_credits_it(coord, tmp_
     assert enablement.succeeded is True
     assert enablement.validation_pending is False
     assert enablement.revalidation_task_id == ""
+
+
+async def test_a_revalidation_that_kept_its_cold_warmup_leaves_the_window_open(coord, tmp_path):
+    """The budget refused the round that evaluates, so nothing was scored: no verdict on the KEEP, either way."""
+    await _finished_revalidation(
+        coord, tmp_path, accuracy=None, measure_round_dropped={"priced_by": "session_hot_pass"}
+    )
+    coord.shared_state.enablement.accuracy_floor = 0.5
+
+    await coord.dispatcher.pump_dispatcher_once()
+
+    enablement = coord.shared_state.enablement
+    assert enablement.validation_pending is True
+    assert enablement.succeeded is False
+    # The next enqueue takes a generation of its own, so its key cannot resolve to the spent row.
+    assert (enablement.revalidation_generation, enablement.revalidation_task_id) == (2, "")
 
 
 async def test_a_terminal_revalidation_nobody_will_book_is_still_closed(coord, tmp_path):

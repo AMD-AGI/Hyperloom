@@ -4,7 +4,8 @@
 """A grid whose session froze a base runs its rounds on inference_suite, played here by ``ScriptedRounds``.
 
 The contract: the warmup, the measured, a caller's boot and a caller's reuse round are each one round with its own
-run_dir; the server a variant booted for its own rounds is reaped with ``stop`` on its slot, a caller's last reuse
+run_dir; a variant's own warmup never evaluates and its measured round runs the eval after its bench; the server a
+variant booted for its own rounds is reaped with ``stop`` on its slot, a caller's last reuse
 round takes the caller's server down, a failed step and a refusal map to their error classes, a variant the session
 budget cannot admit is skipped unlaunched, and a session that froze no base runs nothing.
 """
@@ -115,6 +116,34 @@ def test_the_warmup_boots_the_server_the_measured_round_reuses_and_the_variant_r
     assert row.workspace == str(slot / f"{RUN_DIR_PREFIX}0")
     assert RunLayout(slot / "warmup_round" / f"{RUN_DIR_PREFIX}0").report.is_file()
     assert set(suite.stopped) == {slot}
+
+
+_SCORE = {"exact_match,strict-match": 0.9}
+_EVALUATING = {"RUN_EVAL": "true"}
+
+
+def _sequence(calls) -> list[tuple[LifecycleMode, int, bool]]:
+    return [(call.config.lifecycle.mode, call.config.fixed.seed, call.config.eval.enabled) for call in calls]
+
+
+def test_a_variants_own_pair_evaluates_once_after_its_measured_bench(monkeypatch, suite):
+    """The default launch, as the integrate bench runs it: the discarded bench leaves the server no eval to carry."""
+    monkeypatch.setenv("INFERENCE_OPTIMIZER_RUN_GRID_WARMUP", "1")
+    row, calls, slot = _play(
+        monkeypatch,
+        suite,
+        LaunchAttempt(outcome=READY, metrics=_COLD),
+        LaunchAttempt(outcome=READY, metrics=_HOT, eval_scores=_SCORE),
+        launch=GridLaunch(),
+        extra_envs=_EVALUATING,
+    )
+
+    assert row.status == "succeeded", row
+    assert _sequence(calls) == [
+        (LifecycleMode.BOOT, WARMUP_SEED, False),
+        (LifecycleMode.REUSE, MEASURED_SEED, True),
+    ]
+    assert [path.relative_to(slot).parts[0] for path in slot.rglob("results*.json")] == [f"{RUN_DIR_PREFIX}0"]
 
 
 @pytest.mark.parametrize("phase_sec", [None, 60.0], ids=["session-only", "phase-ends-first"])
@@ -330,18 +359,22 @@ def test_a_multi_node_variant_restarts_the_cluster_and_measures_it_externally_af
     row, calls, slot = _play(
         monkeypatch,
         suite,
-        LaunchAttempt(outcome=READY, metrics=_COLD),
-        LaunchAttempt(outcome=READY, metrics=_HOT),
-        launch=GridLaunch(warmup_before_measure=False),
+        LaunchAttempt(outcome=READY, metrics=_COLD, eval_scores=_SCORE),
+        LaunchAttempt(outcome=READY, metrics=_HOT, eval_scores=_SCORE),
+        launch=GridLaunch(warmup_before_measure=True),
+        extra_envs=_EVALUATING,
     )
 
     assert row.status == "succeeded", row
     assert row.output_throughput == pytest.approx(_HOT["output_throughput"])
     assert restarts == ["vA"]
+    # Both passes run the variant's own point, eval included: a multi-node variant has no pair of its own.
+    assert _sequence(calls) == [
+        (LifecycleMode.EXTERNAL, WARMUP_SEED, True),
+        (LifecycleMode.EXTERNAL, MEASURED_SEED, True),
+    ]
     warm, measured = (call.config for call in calls)
-    assert {warm.lifecycle.mode, measured.lifecycle.mode} == {LifecycleMode.EXTERNAL}
     assert (measured.server.host, measured.server.port) == ("10.0.0.2", 30000)
-    assert (warm.fixed.seed, measured.fixed.seed) == (WARMUP_SEED, MEASURED_SEED)
     assert Path(warm.paths.run_dir).parent == slot / "mn_warmup"
 
 

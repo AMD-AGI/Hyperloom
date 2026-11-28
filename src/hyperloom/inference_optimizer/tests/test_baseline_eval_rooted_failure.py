@@ -141,8 +141,8 @@ def test_only_a_genuine_baseline_may_establish_the_quality_reference():
     assert records_mod._should_establish_quality_ref(None) is False
 
 
-def test_measure_round_config_disables_eval(tmp_path):
-    """Round 2 must not re-measure accuracy."""
+def test_the_warmup_config_turns_the_eval_off_and_the_measured_one_keeps_the_points_or_forces_it(tmp_path):
+    """The measured round runs the eval after its bench; the warm-up before it never does."""
     import yaml
 
     base = tmp_path / "base.yaml"
@@ -152,14 +152,17 @@ def test_measure_round_config_disables_eval(tmp_path):
     )
     ex = _bare_executor()
 
-    warm = ex._write_lifecycle_config(base, tmp_path / "warmup", cleanup=False, port=41713)
-    meas = ex._write_lifecycle_config(base, tmp_path / "measure", cleanup=True, port=41713, run_eval=False)
+    warm = ex._write_lifecycle_config(base, tmp_path / "warmup", cleanup=False, port=41713, run_eval=False)
+    meas = ex._write_lifecycle_config(base, tmp_path / "measure", cleanup=True, port=41713)
 
     warm_envs = yaml.safe_load(warm.read_text())["benchmark"]["envs"]
     meas_envs = yaml.safe_load(meas.read_text())["benchmark"]["envs"]
 
-    # Round 1 stays the accuracy source; round 2 is throughput-only.
-    assert str(warm_envs["RUN_EVAL"]).lower() == "true"
-    assert str(meas_envs["RUN_EVAL"]).lower() == "false"
+    assert str(warm_envs["RUN_EVAL"]).lower() == "false"
+    assert str(meas_envs["RUN_EVAL"]).lower() == "true"
     # Everything else must survive the injection.
-    assert meas_envs["CONC"] == 64
+    assert warm_envs["CONC"] == 64
+
+    base.write_text(yaml.safe_dump({"benchmark": {"framework": "sglang", "envs": {"RUN_EVAL": "false"}}}))
+    forced = ex._write_lifecycle_config(base, tmp_path / "forced", cleanup=True, port=41713, run_eval=True)
+    assert str(yaml.safe_load(forced.read_text())["benchmark"]["envs"]["RUN_EVAL"]).lower() == "true"

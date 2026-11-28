@@ -125,7 +125,8 @@ class GridRound:
 
     ``server_already_ready`` is whether an earlier round left the round's server up. ``boot_only`` is whether the
     round only brings its server up for the rounds after it, which an inference_suite round does without a load.
-    ``checkpoint`` stops an AgentX round that trails its reference at the checkpoint.
+    ``checkpoint`` stops an AgentX round that trails its reference at the checkpoint. ``evaluates`` says whether the
+    round runs the accuracy eval; ``None`` leaves that to its point.
     """
 
     config_path: Path
@@ -136,6 +137,7 @@ class GridRound:
     warmup: bool = False
     boot_only: bool = False
     checkpoint: AgentxCheckpoint | None = None
+    evaluates: bool | None = None
 
 
 _FAILED_RETURNCODE = 1
@@ -178,6 +180,7 @@ def run_grid_suite_round(
         deadline_unix=deadline_unix(round_.session_deadline_sec),
         env_drop=env_drop,
         checkpoint=round_.checkpoint,
+        evaluates=round_.evaluates,
     )
     try:
         ran = run_suite_round(route, request, on_poll=on_poll)

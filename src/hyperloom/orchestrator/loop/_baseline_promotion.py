@@ -303,6 +303,13 @@ class BaselinePromotionMixin:
         accuracy = result.get("accuracy")
         floor = float(getattr(enablement, "accuracy_floor", 0.0) or 0.0)
         generation = int(getattr(enablement, "revalidation_generation", 0) or 0)
+        if result.get("measure_round_dropped"):
+            # The budget kept the round that evaluates from running, so nothing was scored: the window stays open.
+            await self._reopen_revalidation_window()
+            enablement_event.record_revalidation_stopped(
+                generation=generation, task_id=promoting_tid, accuracy_floor=floor
+            )
+            return
         if accuracy_meets_floor(accuracy, floor):
             await self._close_enablement_lane(generation, accuracy, floor, promoting_tid)
             return

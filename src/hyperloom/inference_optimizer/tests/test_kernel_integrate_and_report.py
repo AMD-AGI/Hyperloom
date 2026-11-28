@@ -152,13 +152,9 @@ def graded_integrate_case(native_benchmark, session_dir, tmp_path, monkeypatch):
 
     async def _measure(ctx):
         assert ctx.task.kind == "baseline"
-        assert ctx.task.params["defer_accuracy_until_after_measure"] is True
-        assert ctx.task.params["post_measure_accuracy_min_tput"] == 101.0
-        assert ctx.task.params["post_measure_accuracy_keep_policy"] == {
-            "base_tput": 100.0,
-            "keep_threshold_pct": 1.0,
-            "stack_incremental_keep_threshold_pct": 0.5,
-        }
+        # The re-baseline's measured round runs the eval: no parameter places or gates it.
+        assert ctx.task.params["quality_ref_exempt"] is True
+        assert not [name for name in ctx.task.params if "accuracy" in name]
         assert target.read_text(encoding="utf-8") == patch_file.read_text(encoding="utf-8")
         workspace = Path(ctx.task.params["output_dir"]) / "benchmark_sglang_e2e"
         workspace.mkdir(parents=True, exist_ok=True)

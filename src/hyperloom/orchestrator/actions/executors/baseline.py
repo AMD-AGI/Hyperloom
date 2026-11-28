@@ -19,7 +19,6 @@ from pathlib import Path
 from typing import Any, Mapping
 
 from hyperloom_common.coerce import optional_positive_float
-from hyperloom_common.env import is_truthy
 from hyperloom.common.perf_metric import agentx_active, with_output_per_gpu
 from hyperloom.inference_optimizer.breakdown.recorder.baseline_event import (
     ROUND_SINGLE,
@@ -69,7 +68,6 @@ from .benchmark_run.records import (
     _BenchmarkRound,
     _config_framework,
     _requested_framework,
-    _set_materialized_run_eval,
     _should_establish_quality_ref,
     _stopped_round_result,
     _unlaunched_round_result,
@@ -238,10 +236,6 @@ class BenchmarkRunExecutor(_BaselineAccuracyMixin, _BenchmarkLaunchMixin, _Bench
         lifecycle = _lifecycle.resolve_lifecycle_params(config_path)
         double_run_wanted = double_run_requested(params, config_path)
         double_run = double_run_wanted and lifecycle["eligible"]
-        defer_accuracy = is_truthy(params.get("defer_accuracy_until_after_measure"))
-        if defer_accuracy and double_run:
-            # Only the lifecycle path can reuse the hot server for a staged accuracy round.
-            _set_materialized_run_eval(config_path, enabled=False)
         # Whether THIS run actually executes lm-eval, read back from the materialized config the subprocess
         # consumes -- the single source of truth.
         attempt = replace(attempt, run_eval_disabled=materialized_run_eval_disabled(config_path))
@@ -253,8 +247,7 @@ class BenchmarkRunExecutor(_BaselineAccuracyMixin, _BenchmarkLaunchMixin, _Bench
             return self._roll_back_failed_patches(application, params, output_dir, shared_state)
         try:
             if double_run:
-                guarded = self._run_cold_start_guarded_rounds
-                return await guarded(attempt, output_dir, lifecycle, application, defer_accuracy=defer_accuracy)
+                return await self._run_cold_start_guarded_rounds(attempt, output_dir, lifecycle, application)
             if double_run_wanted:
                 log.info(
                     "baseline_executor: cold-start double-run not eligible (%s); running single round.",
@@ -331,10 +324,8 @@ class BenchmarkRunExecutor(_BaselineAccuracyMixin, _BenchmarkLaunchMixin, _Bench
             return True, evidence
         warmup_sec = optional_positive_float(warmup_result.get("subprocess_runtime_sec"))
         session_hot_sec = _phase_state.measured_seconds(state, "baseline_warm_runtime_sec")
-        priced_by = "warmup_post_ready_less_eval" if session_hot_sec is None else "session_hot_pass"
-        benchmark_sec = _phase_state.hot_pass_cost_sec(
-            session_hot_sec, warmup_result.get("post_ready_runtime_sec"), warmup_result.get("eval_runtime_sec")
-        )
+        priced_by = "warmup_post_ready" if session_hot_sec is None else "session_hot_pass"
+        benchmark_sec = _phase_state.hot_pass_cost_sec(session_hot_sec, warmup_result.get("post_ready_runtime_sec"))
         if benchmark_sec is None or warmup_sec is None:
             return True, {"reason": "no_measured_benchmark_to_predict_from", **evidence}
         use_sec = 0.0
@@ -421,8 +412,8 @@ class BenchmarkRunExecutor(_BaselineAccuracyMixin, _BenchmarkLaunchMixin, _Bench
 
         await asyncio.to_thread(bind_source_evidence, config_path, attempt.params.get("patches") or [])
         ctx_extra = getattr(attempt.ctx, "extra", None) or {}
-        # The session's wall-clock budget, resolved per round rather than once per task: a baseline runs up to three
-        # of them, and a warmup that overran has already spent budget the ones after it were counting on.
+        # The session's wall-clock budget, resolved per round rather than once per task: a baseline runs up to two
+        # of them, and a warmup that overran has already spent budget the one after it was counting on.
         session_deadline_sec, _ = session_grid_bounds(ctx_extra.get("shared_state") or self.shared_state)
         timeout_sec = resolve_benchmark_timeouts()[1] if self.benchmark_watchdog else attempt.timeout_sec
         sync_benchmark_timeout(config_path, timeout_sec)

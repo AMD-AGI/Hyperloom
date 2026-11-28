@@ -46,6 +46,7 @@ from .records import (
     _BenchProcess,
     _round_post_ready_sec,
     _should_establish_quality_ref,
+    record_failed_eval,
 )
 
 if TYPE_CHECKING:
@@ -173,21 +174,26 @@ def _attempt_options(ctx: RunnerContext, shared_state: Any) -> MaterializeOption
     )
 
 
+def _failed_step_error(measurement: dict[str, Any]) -> tuple[str, str]:
+    """The error class and message of the step the round's report names."""
+    step = measurement["failed_step"]
+    detail = measurement.get("failure_detail") or ""
+    error_class = failed_step_error_class(FailedStep(step), detail)
+    return error_class, redact_secret_values(with_failure_hint(error_class, detail or step))
+
+
 def _suite_round_failure(
     round_: _BenchmarkRound, finished: _BenchProcess, measurement: dict[str, Any], warnings: list[str]
 ) -> dict[str, Any]:
     """The failed result of an inference_suite round: the step it stopped at, or a load that measured nothing."""
-    step = measurement.get("failed_step")
-    if step is not None:
-        detail = measurement.get("failure_detail") or ""
-        error_class = failed_step_error_class(FailedStep(step), detail)
-        error = with_failure_hint(error_class, detail or step)
+    if measurement.get("failed_step") is not None:
+        error_class, error = _failed_step_error(measurement)
     else:
         error_class, error = "invalid_measurement", "the round report holds no positive throughput and served requests"
     return {
         "status": "failed",
         "error_class": error_class,
-        "error": redact_secret_values(error),
+        "error": error,
         "returncode": finished.returncode,
         "run_status": measurement.get("run_status"),
         "output_dir": str(round_.output_dir),
@@ -366,10 +372,19 @@ class _BenchmarkLaunchMixin:
         # The run_dir is where this round's server log and ready stamp are.
         ran_round = round_._replace(watchdog_server_log=str(layout.server_log))
         warnings = [*warnings, *(measurement.pop("nonfatal_warnings", []) or [])]
-        if ran.report.failed_step is not None or not self._measurement_succeeded(measurement):
+        step = ran.report.failed_step
+        # The measured round of a pair evaluates after its bench, so a step that failed after a bench that measured
+        # is the eval's and the bench stands. Every other round fails on any failed step.
+        if not self._measurement_succeeded(measurement) or (step is not None and not round_.server_already_ready):
             return _suite_round_failure(ran_round, finished, measurement, warnings)
         result = await self._succeeded_round_result(ran_round, finished, measurement, warnings)
-        self._stamp_round_quality(ran_round, result, measurement, warnings)
+        if step is None:
+            self._stamp_round_quality(ran_round, result, measurement, warnings)
+            return result
+        error_class, error = _failed_step_error(measurement)
+        log.warning("baseline_executor: the bench measured and the eval after it failed (%s); the bench stands", error)
+        stage = {"status": "failed", "error_class": error_class, "error": error, "workspace": str(layout.root)}
+        record_failed_eval(result, stage)
         return result
 
     def _record_argv_refusal(self, round_: _BenchmarkRound, attempt_index: int, detail: str) -> None:

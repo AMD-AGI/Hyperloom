@@ -169,7 +169,7 @@ async def _measure_applied_integration(
         "keep_threshold_pct": float(payload.get("keep_threshold_pct", 1.0)),
         "stack_incremental_keep_threshold_pct": STACK_INCREMENTAL_KEEP_THRESHOLD_PCT,
     }
-    rebaseline = _integrate_rebaseline(payload, state, session_dir=session_dir, performance_policy=performance_policy)
+    rebaseline = _integrate_rebaseline(payload, state, session_dir=session_dir)
     with _forced_cpp_itfs_rebuild(apply_result):
         restart_failure = await _multi_node_restart_failure(rebaseline, payload, apply_result)
         if restart_failure is not None:

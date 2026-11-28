@@ -125,7 +125,8 @@ class SuiteRound:
     ``warmup`` marks a discarded round, which draws its prompts with the warmup seed so it cannot prime the measured
     round's prefix cache. ``boot_only`` marks a round that only brings the server up, running the point as a
     ``HYPERLOOM_RUN_PHASE=server`` point: no load and no eval. ``env_drop`` names host variables the round's server and client do not inherit.
-    ``checkpoint`` stops an AgentX round that trails its reference; its ruling lands in ``round_dir``.
+    ``checkpoint`` stops an AgentX round that trails its reference; its ruling lands in ``round_dir``. ``evaluates``
+    says whether the round runs the accuracy eval after its load; ``None`` leaves that to the point's ``RUN_EVAL``.
     """
 
     config_path: Path
@@ -136,6 +137,7 @@ class SuiteRound:
     env_drop: frozenset[str] = frozenset()
     boot_only: bool = False
     checkpoint: AgentxCheckpoint | None = None
+    evaluates: bool | None = None
 
 
 @dataclass(frozen=True)
@@ -302,6 +304,8 @@ def run_suite_round(route: SuiteRoute, request: SuiteRound, *, on_poll: Callable
         if request.boot_only:
             point = _server_phase_point(point)
         config = suite_config(point, route.base, settings)
+        if request.evaluates is not None:
+            config = replace(config, eval=replace(config.eval, enabled=request.evaluates))
     except ConfigError as exc:
         raise _refused_at(FailedStep.CONFIG_INVALID, str(exc)) from exc
     if request.warmup and config.fixed is not None:

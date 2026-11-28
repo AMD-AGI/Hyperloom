@@ -81,8 +81,8 @@ def grade_integrate_accuracy(
 ) -> dict[str, Any]:
     """Grade a kernel re-baseline's accuracy against the session baseline ``reference``.
 
-    The staged re-baseline already ran the serving eval after hot throughput passed, so the score is read
-    back rather than re-measured.
+    The re-baseline's measured round ran the serving eval after its bench, so the score is read from its result
+    rather than re-measured.
     """
     from hyperloom.common.gain_math import accuracy_passed
 

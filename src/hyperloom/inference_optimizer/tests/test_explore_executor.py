@@ -919,6 +919,45 @@ async def test_explore_executor_still_launches_a_revalidation_or_an_overlay_that
 
 
 @pytest.mark.asyncio
+async def test_a_variant_warms_up_without_an_eval_and_evaluates_in_its_decision_round(
+    sub_agent_runner, tmp_path, monkeypatch
+):
+    """The discarded round turns the eval off; the decision round on its server runs the variant as authored."""
+    from hyperloom.orchestrator.actions.executors import explore as explore_mod
+    from hyperloom.orchestrator.actions.executors.grid._grid_base import VariantResult
+
+    sub, tr, _ = sub_agent_runner
+    base = tmp_path / "base.yaml"
+    write_benchmark_yaml(base)
+    rounds: list[tuple[str, bool, bool, dict]] = []
+
+    async def _capture_run_grid(**kwargs):
+        variant, launch = kwargs["grid"][0], kwargs["launch"]
+        rounds.append(
+            (kwargs["output_root"].name, launch.warmup_round, launch.server_already_ready, dict(variant.extra_envs))
+        )
+        status = "succeeded" if launch.warmup_round else "failed"
+        return [VariantResult(variant.name, "", {}, status, output_throughput=900.0, error_class="server_died")]
+
+    monkeypatch.setattr(explore_mod, "run_grid", _capture_run_grid)
+    grid = [{"name": "v01_knob_only", "extra_envs": {"HL_KNOB": "1"}}]
+    task, _ = await tr.create_or_return_existing(
+        TaskSpec(
+            kind="explore",
+            params={"config_path": str(base), "base_tput": 800.0, "grid": grid},
+            idempotency_key="ex-eval-after-the-decision-bench",
+        ),
+    )
+    sub.register_executor("explore", ExploreExecutor(session_dir=tmp_path))
+    await sub.run_task(task, extra_context={"shared_state": SharedState()})
+
+    warmup, decision = rounds
+    assert warmup == ("warmup_round", True, False, {"HL_KNOB": "1", "RUN_EVAL": "false"})
+    assert decision[1:] == (False, True, {"HL_KNOB": "1"})
+    assert decision[0] != "warmup_round"
+
+
+@pytest.mark.asyncio
 async def test_explore_executor_sglang_empty_grid_still_fails_with_empty_grid(
     sub_agent_runner,
     tmp_path,

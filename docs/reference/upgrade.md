@@ -236,16 +236,120 @@ round, and that search is removed:
   multi-node it also no longer writes a merged `gpu_metrics.csv` at the top of
   those files; each round's run directory still gets its own.
 
+### Required: the accuracy eval runs after the measured bench
+
+On a single node, `hyperloom optimize` tests a served fixed workload in two
+rounds on one server: a bench that boots the server and is discarded, then the
+measured bench. The accuracy eval now runs after the measured bench, in the
+measured round, and never in the discarded one. This holds for a genuine
+baseline and its retries, a PRELUDE warm replay, the KERNEL stack validation,
+the KERNEL integrate re-baseline, the FRAMEWORK integrate bench and an EXPLORE
+variant. In 1.2.x the eval ran in the discarded round, before the measured
+bench; the integrate bench ran it in both rounds, and the KERNEL re-baseline
+ran it in a third round after a second load. An eval before the measured bench
+left the server's KV pool filled, so the measured bench read lower, and a
+KERNEL candidate measured on a server no eval had touched was graded against
+an anchor measured after one.
+
+* **Throughput shifts once.** Every figure a single-node fixed-workload
+  session measures is now taken on a server no eval has loaded. A session's
+  anchor and its candidates move together. Do not resume a session started on
+  an earlier build: its anchor was measured after an eval, and the candidates
+  measured after the upgrade would be graded against it. Do not compare
+  sessions, reports or Recipe KB records taken before and after the upgrade.
+  Multi-node sessions do not move: their discarded pass still runs the eval
+  before the measured pass. AgentX, MLPerf and scriptable workloads, profiled
+  rounds and concurrency sweeps run the rounds they ran.
+* The integrate bench runs the eval once, in its measured round; it ran it
+  twice.
+* The KERNEL integrate re-baseline evaluates every candidate in its measured
+  round. It used to evaluate only a candidate whose throughput cleared the
+  KEEP gate, in a third round that repeated the load. Its task directory has
+  no `accuracy_round/`, and its result no longer carries `accuracy_stage` with
+  `status: succeeded` or `skipped`. The task parameters
+  `defer_accuracy_until_after_measure`, `post_measure_accuracy_min_tput` and
+  `post_measure_accuracy_keep_policy` are no longer read. The re-baseline is
+  now held to the budget check a baseline's measured round is: when the
+  session cannot pay for the measured round it keeps its cold warm-up figure
+  (`baseline_measure_round_dropped_low_budget`) without booting the round; it
+  used to run the round into the session clock, which left the same figure.
+* An EXPLORE variant's decision round evaluates; its warm-up round's
+  `config.yaml` sets `RUN_EVAL` to `false`. The eval's results file lies
+  under the decision round's run directory (`vNN_<name>/variant_00_<name>/`),
+  no longer under `vNN_<name>/warmup_round/`.
+* An eval that fails after the measured bench leaves the bench standing. The
+  attempt's result is `succeeded` with its throughput, carries
+  `accuracy_stage` (`status: failed`, the eval's `error_class` and `error`,
+  and the run directory as `workspace`) and `post_measure_accuracy_failed` in
+  `nonfatal_warnings`, and has no `accuracy`. In 1.2.x the eval failed the
+  warm-up round and the attempt with it (`baseline_warmup_round_failed`),
+  before any measured bench ran. What follows depends on the caller:
+  * A genuine baseline whose eval exited non-zero (`eval_failed`) is ruled as
+    an eval failure, as before: with `--enablement eval` or `all` on a single
+    node it is recorded with `baseline_eval_failure_kind:
+    eval_runtime_failure` and not promoted; otherwise the run stops with
+    `stop_reason: baseline_accuracy_failed`. In the second case the baseline
+    is now promoted with its throughput and no accuracy reference, where it
+    used to be a failed baseline.
+  * A genuine baseline whose eval was stopped by the session clock or the
+    round's cap, or whose server died during the eval, is ruled like any
+    baseline without a score: recorded as an eval failure of kind
+    `accuracy_unavailable` and not promoted, or the run stops with
+    `baseline_accuracy_failed`. `accuracy_stage.error_class` names the stop
+    (`session_time_exhausted`, `round_timeout`, a server-death class). In
+    1.2.x the same stop ended the warm-up round, and the attempt ended under
+    that class.
+  * A warm replay is admitted without an accuracy verdict and marked
+    (`eval_ran: false`), as a replay without a score always was. It used to
+    be a failed replay.
+  * A KERNEL re-baseline is graded on its throughput, and a KEEP-eligible
+    candidate ends `NEEDS_REVIEW` in a session that holds an accuracy
+    reference, as one whose third round failed did.
+  * An integrate bench or EXPLORE variant keeps its row
+    (`nonzero_rc_after_complete_protocol:1` in its warnings) and its accuracy
+    gate rules on the missing score (`accuracy_unavailable`). One whose eval
+    the session clock stopped is skipped and stays out of the ledger, as a
+    round the clock stops anywhere is.
+* A baseline that kept its cold warm-up figure
+  (`baseline_measure_round_dropped_low_budget`) carries no accuracy and has
+  `run_eval_disabled: true`: the round the budget refused is the one that
+  evaluates. It used to carry the warm-up's score. It is not ruled on
+  accuracy: it neither stops the run nor is recorded as an eval failure, and
+  an enablement revalidation that ends this way leaves its window open for
+  another revalidation (recorded as a window the run stopped). Once promoted
+  it leaves `baseline_accuracy: 0.0` in `state.json`. PRELUDE still retries a
+  cold anchor or closes on it (`baseline_anchor: cold`).
+* An eval the round refuses before it starts (`eval_context_too_short`, eval
+  tooling that is not staged) is reported by the measured round, after the
+  discarded bench ran. The warm-up used to report it before it booted.
+* The measured round's wall-clock, which `state.json` keeps as
+  `baseline_warm_runtime_sec` and which prices the next measured round, an
+  EXPLORE decision round and one more variant, now includes the eval. A
+  session's first measured round is priced at its warm-up's time after ready:
+  `priced_by` in `measure_round_dropped` reads `warmup_post_ready` (was
+  `warmup_post_ready_less_eval`), and `eval_runtime_sec` is no longer
+  subtracted anywhere.
+* In `session_breakdown.json`, a baseline action has no round row labelled
+  `accuracy`. Its `measure` row carries the eval's figures and
+  `run_eval_disabled: false`; its `warmup` row has `run_eval_disabled: true`
+  and no accuracy.
+* The error lines for an eval-rooted baseline failure read `the accuracy eval
+  failed on a genuine baseline, ...` and `the accuracy eval failed; the
+  attempt gets no throughput-only retry.` (they named `InferenceX run_eval`),
+  and the line for an eval that never reached its server ends `it is not
+  ruled on as an eval failure.`
+
 ### Required: a baseline takes its accuracy from its own attempt
 
 A benchmark attempt that runs a discarded warm-up round and then a measured
 round on the same server (a genuine baseline, a PRELUDE warm replay, the KERNEL
-stack validation) runs the accuracy eval in one of its rounds. The attempt now
-hands that round's score to the result it returns. The result of the measured
-round used to carry no score, and each reader searched the attempt's directory
-for the warm-up's results file. A baseline is no longer given a score found
-by searching the directory above its round: it is ruled on what its own
-attempt measured.
+stack validation) runs the accuracy eval after its measured bench (see the
+section above). The result the attempt returns carries that round's score. In
+1.2.x the eval ran in the warm-up round, the result of the measured round
+carried no score, and each reader searched the attempt's directory for the
+warm-up's results file. A baseline is no longer given a score found by
+searching the directory above its round: it is ruled on what its own attempt
+measured.
 
 * The result of such an attempt carries `accuracy`, `accuracy_task`,
   `accuracy_metric`, `accuracy_source`, `accuracy_definition_digest` and
@@ -255,10 +359,11 @@ attempt measured.
   `accuracy_eval_kind` did not appear on such a result before; it is `""` for
   an `lm-eval` score. The score, and every verdict taken on it, is the one
   the search found.
-* A warm replay evaluates in its warm-up round even when its recipe sets
-  `RUN_EVAL=false`. That round is now recorded as one that evaluated: its
-  round row has `run_eval_disabled: false` and its score, where it had `true`
-  and none.
+* A warm replay evaluates even when its recipe sets `RUN_EVAL=false`. The
+  round that runs the forced eval, now the measured round, is recorded as one
+  that evaluated: its round row has `run_eval_disabled: false` and its score.
+  In 1.2.x the forced eval ran in the warm-up round, whose row had `true` and
+  no score.
 * A warm replay is judged on the score its result carries; it no longer looks
   for an `lm-eval` results file under its task directory. `eval_ran` in
   `warm_replay_outcome` (`state.json`) and in the warm-replay `measurement` of

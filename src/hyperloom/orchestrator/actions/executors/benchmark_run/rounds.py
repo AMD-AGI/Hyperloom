@@ -18,18 +18,15 @@ from hyperloom.common.gain_math import incremental_gain_pct
 from hyperloom.common.perf_metric import is_agentx_mode
 from hyperloom_common.timeutil import now_iso
 from hyperloom.inference_optimizer.breakdown.recorder.baseline_event import (
-    ROUND_ACCURACY,
     ROUND_MEASURE,
     ROUND_WARMUP,
     BaselineRound,
 )
 from hyperloom.inference_optimizer.trace.task_progress import report_progress
-from ....measurement.integrate_performance import assess_integrate_performance
 from ...stop_attribution import SESSION_TIME_EXHAUSTED_CLASS, STOPPED_BY_THE_RUN
 from ..serving import _server_lifecycle as _lifecycle
 from .bringup import _disable_cuda_graph_flag, _with_cuda_graph_disabled
 from .records import (
-    _ACCURACY_ROUND_DIR,
     _BENCHMARK_MODE_ATTR,
     _MEASURE_ROUND_DIR,
     _WARMUP_ROUND_DIR,
@@ -68,19 +65,6 @@ def _cold_anchor_after_reaped_measure(warmup_result: dict[str, Any], result: dic
     )
     dropped = {"reason": "measure_round_reaped_by_the_run", "measure_round_error": result.get("error")}
     return _cold_anchor_from_warmup(warmup_result, dropped=dropped)
-
-
-def _record_accuracy_round(result: dict[str, Any], accuracy_result: dict[str, Any]) -> None:
-    """Fold the deferred accuracy round's outcome into the measured round's result."""
-    result["accuracy_stage"] = {
-        "status": accuracy_result.get("status"),
-        "error_class": accuracy_result.get("error_class"),
-        "workspace": accuracy_result.get("workspace"),
-    }
-    if accuracy_result.get("status") != "succeeded":
-        result.setdefault("nonfatal_warnings", []).append("post_measure_accuracy_failed")
-        return
-    carry_eval_score(result, accuracy_result)
 
 
 class _BenchmarkRoundsMixin:
@@ -368,8 +352,8 @@ class _BenchmarkRoundsMixin:
             run_eval=run_eval,
         )
         return await self._run_reported_round(
-            # A round told to evaluate is read as one that did, whatever the attempt's own config says.
-            replace(attempt, run_eval_disabled=False) if run_eval else attempt,
+            # A round told whether to evaluate is read as told, whatever the attempt's own config says.
+            attempt if run_eval is None else replace(attempt, run_eval_disabled=not run_eval),
             label=label,
             config_path=round_cfg,
             output_dir=round_dir,
@@ -382,21 +366,18 @@ class _BenchmarkRoundsMixin:
         output_dir: Path,
         lifecycle: Mapping[str, Any],
         application: list[dict[str, str]] | dict[str, Any],
-        *,
-        defer_accuracy: bool,
     ) -> dict[str, Any]:
+        """Run the discarded warm-up, then the measured round on its server, which the accuracy eval follows.
+
+        The warm-up never evaluates, so the measured bench starts on a server no eval has loaded. A result that
+        stands on the warm-up's figure because the measured round did not run to its end carries no score.
+        """
         params = attempt.params
         warmup_dir = output_dir / _WARMUP_ROUND_DIR
         log.info(
             "baseline_executor: cold-start guard — warmup round (discarded, boots persistent server) in %s",
             warmup_dir,
         )
-        # A replayed KB config is promoted onto ``current_best`` and becomes the reference every later measurement
-        # in the session is taken against, so it may not be adopted on throughput alone.
-        replayed = str(getattr(attempt.ctx.task, "kind", "") or "") == "replay_warm_recipe"
-        # A round that re-attaches to the server the warmup left up rather than booting one of its own.
-        hot_round = {"port": lifecycle["port"], "server_already_ready": True}
-        warmup_eval = True if replayed and not defer_accuracy else None
         # Each warmup starts a fresh benchmark cap; the session deadline never resets.
         warmup_result = await self._run_guarded_round(
             attempt,
@@ -404,12 +385,9 @@ class _BenchmarkRoundsMixin:
             warmup_dir,
             port=lifecycle["port"],
             cleanup=False,
-            run_eval=warmup_eval,
+            run_eval=False,
             warmup_round=True,
         )
-        # The round of this attempt that runs the eval: every result the pair returns takes its score. A deferred
-        # eval is handed over by its own accuracy round.
-        evaluated: Mapping[str, Any] = {} if defer_accuracy else warmup_result
         if warmup_result.get("status") != "succeeded":
             # Warmup failure almost certainly recurs, so skip the measured round.
             warmup_result.setdefault("nonfatal_warnings", []).append("baseline_warmup_round_failed")
@@ -429,8 +407,8 @@ class _BenchmarkRoundsMixin:
             output_throughput=warmup_tput,
             runtime_sec=warmup_result.get("subprocess_runtime_sec"),
         )
-        if not defer_accuracy and (cold := self._cold_anchor_when_hot_pass_unaffordable(warmup_result, attempt)):
-            return carry_eval_score(cold, evaluated)
+        if cold := self._cold_anchor_when_hot_pass_unaffordable(warmup_result, attempt):
+            return cold
         measure_dir = output_dir / _MEASURE_ROUND_DIR
         log.info(
             "baseline_executor: cold-start guard — measured baseline round in %s "
@@ -438,9 +416,18 @@ class _BenchmarkRoundsMixin:
             measure_dir,
             warmup_tput or 0.0,
         )
-        # Round 2 (measured): re-attach to the hot server (client only).
+        # A replayed KB config is promoted onto ``current_best`` and becomes the reference every later measurement
+        # in the session is taken against, so it may not be adopted on throughput alone.
+        replayed = str(getattr(attempt.ctx.task, "kind", "") or "") == "replay_warm_recipe"
+        # Round 2 (measured): re-attach to the hot server (client only), then the eval.
         result = await self._run_guarded_round(
-            attempt, ROUND_MEASURE, measure_dir, cleanup=not defer_accuracy, run_eval=False, **hot_round
+            attempt,
+            ROUND_MEASURE,
+            measure_dir,
+            port=lifecycle["port"],
+            cleanup=True,
+            run_eval=True if replayed else None,
+            server_already_ready=True,
         )
         _stamp_warm_patch_outcome(result, application, params)
         if result.get("status") != "succeeded":
@@ -448,11 +435,10 @@ class _BenchmarkRoundsMixin:
                 return result
             # The gate before this pass admitted it and the run's clock took it anyway -- the pass overran what it
             # was priced at.
-            return carry_eval_score(_cold_anchor_after_reaped_measure(warmup_result, result), evaluated)
-        result = carry_eval_score(self._finalize_stock_anchor(attempt, warmup_result, result), evaluated)
-        if defer_accuracy:
-            await self._settle_deferred_accuracy(attempt, output_dir, hot_round, result)
-        return result
+            return _cold_anchor_after_reaped_measure(warmup_result, result)
+        # The measured round is the round of this attempt that runs the eval: the result the pair returns takes
+        # its score.
+        return carry_eval_score(self._finalize_stock_anchor(attempt, warmup_result, result), result)
 
     def _cold_anchor_when_hot_pass_unaffordable(
         self,
@@ -514,7 +500,6 @@ class _BenchmarkRoundsMixin:
             # The split belongs to round 1 for the same reason its wall-clock does: round 2 re-attached, so it
             # has no boot to separate and its own reading says nothing about what booting this workload costs.
             result["post_ready_runtime_sec"] = warmup_result.get("post_ready_runtime_sec")
-            result["eval_runtime_sec"] = warmup_result.get("eval_runtime_sec")
         hot = result.get("output_throughput") or 0.0
         cold = warmup_tput or 0.0
         log.info(
@@ -525,65 +510,6 @@ class _BenchmarkRoundsMixin:
             cold,
             ((hot / cold - 1.0) * 100.0) if cold > 0 else 0.0,
         )
-
-    async def _settle_deferred_accuracy(
-        self,
-        attempt: BenchmarkAttempt,
-        output_dir: Path,
-        hot_round: Mapping[str, Any],
-        result: dict[str, Any],
-    ) -> None:
-        params = attempt.params
-        hot = float(result.get("output_throughput") or 0.0)
-        keep_policy = params.get("post_measure_accuracy_keep_policy")
-        if keep_policy is None:
-            try:
-                min_tput = float(params.get("post_measure_accuracy_min_tput", 0.0) or 0.0)
-            except (TypeError, ValueError):
-                min_tput = 0.0
-            run_accuracy = hot >= min_tput
-            skipped = {
-                "status": "skipped",
-                "reason": "throughput_below_threshold",
-                "minimum_tput": min_tput,
-                "observed_tput": hot,
-            }
-        else:
-            ctx_extra = getattr(attempt.ctx, "extra", None) or {}
-            performance = assess_integrate_performance(
-                ctx_extra.get("shared_state") or self.shared_state,
-                result,
-                **keep_policy,
-            )
-            graded = performance.graded
-            run_accuracy = performance.decision == "KEEP"
-            skipped = {
-                "status": "skipped",
-                "reason": (
-                    "intvty_regression"
-                    if graded.graded_on_intvty and graded.verdict == "REVERT"
-                    else "performance_keep_not_eligible"
-                ),
-                "graded_objective": graded.objective,
-                "candidate": graded.candidate,
-                "reference": graded.reference,
-                "base_tput": keep_policy["base_tput"],
-                "gain_pct": performance.gain_pct,
-                "stack_incremental_gain_pct": performance.stack_incremental_gain_pct,
-                "degrade_reason": graded.degrade_reason,
-            }
-        if not run_accuracy:
-            result["accuracy_stage"] = skipped
-            return
-        accuracy_result = await self._run_guarded_round(
-            attempt,
-            ROUND_ACCURACY,
-            output_dir / _ACCURACY_ROUND_DIR,
-            cleanup=True,
-            run_eval=True,
-            **hot_round,
-        )
-        _record_accuracy_round(result, accuracy_result)
 
     def _write_lifecycle_config(
         self,
@@ -677,7 +603,7 @@ class _BenchmarkRoundsMixin:
             and not framework_registry.is_scriptable(eval_framework)
             and not is_agentx_mode(benchmark_mode)
         ):
-            # Serving RUN_EVAL was off this run (a profile round or a staged warmup round), so lm-eval did not
+            # Serving RUN_EVAL was off this run (a profile round or a discarded warmup round), so lm-eval did not
             # execute and there is no fresh accuracy to read.
             log.info(
                 "baseline_executor: RUN_EVAL disabled this run (serving); skipping accuracy parse (no lm-eval executed)"

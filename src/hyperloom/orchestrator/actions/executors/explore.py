@@ -678,11 +678,9 @@ class _ExploreRound:
         if self.use_warm_decision and warmup is None:
             return None
         # The decision round is warm (it re-attaches to the warmup's hot server, client-only) when a warmup
-        # preceded it, and skips eval then: it is timed against a throughput-only anchor, and
-        # ``parse_eval_results`` falls back to the score the warmup took. Without a warmup there is nothing to
-        # fall back to, so a cold decision round keeps its own eval.
+        # preceded it. It runs the eval the variant asks for after its bench, as the baseline's measured round does.
         results = await run_grid(
-            grid=[variant_with_eval_off(run_gv) if self.use_warm_decision else run_gv],
+            grid=[run_gv],
             output_root=slot,
             recipe=self._recipe(),
             launch=GridLaunch(
@@ -702,7 +700,7 @@ class _ExploreRound:
         warmup_slot = slot / "warmup_round"
         warmup_slot.mkdir(parents=True, exist_ok=True)
         results = await run_grid(
-            grid=[run_gv],
+            grid=[variant_with_eval_off(run_gv)],
             output_root=warmup_slot,
             recipe=self._recipe(),
             launch=GridLaunch(server_lifecycle=lifecycle, warmup_round=True),

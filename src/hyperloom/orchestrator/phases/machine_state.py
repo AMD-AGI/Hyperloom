@@ -560,8 +560,9 @@ def baseline_round_cost_sec(state: Any, *, double_run: bool) -> float | None:
     first_pass_sec = measured_seconds(state, "baseline_runtime_sec")
     if first_pass_sec is None or not double_run:
         return first_pass_sec
-    fields = ("baseline_warm_runtime_sec", _POST_READY_FIELD, "baseline_eval_runtime_sec")
-    second_pass_sec = hot_pass_cost_sec(*(measured_seconds(state, field) for field in fields))
+    second_pass_sec = hot_pass_cost_sec(
+        measured_seconds(state, "baseline_warm_runtime_sec"), measured_seconds(state, _POST_READY_FIELD)
+    )
     return first_pass_sec if second_pass_sec is None else first_pass_sec + second_pass_sec
 
 

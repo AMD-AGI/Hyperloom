@@ -33,6 +33,7 @@ from .._subprocess_kill import resolve_benchmark_timeouts
 from .._suite.rounds import AccuracyRound, SuiteRoundRefused, deadline_unix, run_accuracy_suite_round, session_route
 from .records import (
     ACCURACY_EVAL_KIND_KEY,
+    ACCURACY_STAGE_KEY,
     _BENCHMARK_MODE_ATTR,
     _DOUBLE_RUN_ROUND_DIRS,
     _iter_log_tails,
@@ -219,51 +220,58 @@ class _BaselineAccuracyMixin:
         )
 
     async def _run_with_accuracy(self, ctx: RunnerContext, *, recorder: Any = None) -> dict[str, Any]:
-        """Run the baseline and its accuracy round; an eval-rooted failure fails the round."""
+        """Run the baseline and its accuracy round, and rule on the accuracy the attempt left."""
         result = await self._run_pass(ctx, recorder=recorder)
-        # An eval that never reached a verdict because the server was gone is a broken measurement, not a statement
-        # about accuracy or about a missing framework capability. Leaving it in the eval-rooted branch stamps it as an
-        # eval-failure contract and hands it to the enablement lane, which then spends rounds looking for a capability
-        # gap that the evidence does not support. It stays a failed baseline either way, and the accuracy gate is
-        # untouched, but it is counted as an ordinary baseline failure, so the existing
-        # ``_BASELINE_MAX_TOTAL_FAILURES`` backstop ends the run with the cause it actually had.
-        if result.get("status") != "succeeded" and self._is_eval_rooted_failure(result):
-            if self._is_server_unreachable_eval_failure(result):
-                log.warning(
-                    "baseline_executor: the accuracy eval failed because the server was unreachable, not because "
-                    "the eval reached a verdict; recording an ordinary baseline failure rather than an enablement "
-                    "gap."
-                )
-                result.setdefault("nonfatal_warnings", []).append("eval_failed_server_unreachable")
-            else:
-                _, evidence = self._eval_failure_evidence(result)
-                if self._eval_enablement_active(ctx):
-                    from .._accuracy_gate import EVAL_KIND_RUNTIME_FAILURE
-
-                    log.warning("baseline_executor: eval-rooted failure; routing to enablement (RUN_EVAL stays on).")
-                    self._stamp_eval_failure_contract(
-                        result, kind=EVAL_KIND_RUNTIME_FAILURE, observed_accuracy=None, evidence=evidence
-                    )
-                    return result
-                result.setdefault("nonfatal_warnings", [])
-                result["accuracy_source"] = "eval_unavailable"
-                if _should_establish_quality_ref(getattr(ctx.task, "kind", ""), ctx.task.params or {}):
-                    log.error(
-                        "baseline_executor: failure is eval-rooted (InferenceX run_eval aborted the benchmark) on a "
-                        "genuine baseline, whose whole purpose is to establish the accuracy reference. Stopping now "
-                        "-- fix the accuracy eval (see the benchmark stdout/stderr for the run_eval error)."
-                    )
-                    result["nonfatal_warnings"].append("eval_failed_no_fallback_baseline_requires_accuracy")
-                    self._request_eval_rooted_baseline_stop(ctx)
-                else:
-                    log.error(
-                        "baseline_executor: failure is eval-rooted (InferenceX run_eval aborted the benchmark); "
-                        "the round fails with no throughput-only retry."
-                    )
-                return result
+        if self._eval_failed(result) and self._ruled_on_failed_eval(ctx, result):
+            return result
         await self._run_baseline_accuracy_round(ctx, result)
         self._maybe_stop_on_missing_baseline_accuracy(ctx, result)
         return result
+
+    def _eval_failed(self, result: dict[str, Any]) -> bool:
+        """Whether the attempt's own eval failed: it failed the round, or it failed after a bench the result keeps."""
+        if result.get("status") != "succeeded":
+            return self._is_eval_rooted_failure(result)
+        return (result.get(ACCURACY_STAGE_KEY) or {}).get("error_class") == FailedStep.EVAL_FAILED.value
+
+    def _ruled_on_failed_eval(self, ctx: RunnerContext, result: dict[str, Any]) -> bool:
+        """Rule on an attempt whose eval failed; False for an eval that never reached the server.
+
+        An eval that never reached a verdict because the server was gone is a broken measurement, not a statement
+        about accuracy or about a missing framework capability. Ruling on it as an eval failure hands it to the
+        enablement lane, which then spends rounds looking for a capability gap the evidence does not support. A
+        failed round stays an ordinary baseline failure, so the ``_BASELINE_MAX_TOTAL_FAILURES`` backstop ends the
+        run with the cause it had; a bench that stands is ruled like any result without a score.
+        """
+        if self._is_server_unreachable_eval_failure(result):
+            log.warning(
+                "baseline_executor: the accuracy eval failed because the server was unreachable, not because "
+                "the eval reached a verdict; it is not ruled on as an eval failure."
+            )
+            result.setdefault("nonfatal_warnings", []).append("eval_failed_server_unreachable")
+            return False
+        if self._eval_enablement_active(ctx):
+            from .._accuracy_gate import EVAL_KIND_RUNTIME_FAILURE
+
+            log.warning("baseline_executor: eval-rooted failure; routing to enablement (RUN_EVAL stays on).")
+            evidence = (result.get(ACCURACY_STAGE_KEY) or {}).get("error") or self._eval_failure_evidence(result)[1]
+            self._stamp_eval_failure_contract(
+                result, kind=EVAL_KIND_RUNTIME_FAILURE, observed_accuracy=None, evidence=evidence
+            )
+            return True
+        result.setdefault("nonfatal_warnings", [])
+        result["accuracy_source"] = "eval_unavailable"
+        if _should_establish_quality_ref(getattr(ctx.task, "kind", ""), ctx.task.params or {}):
+            log.error(
+                "baseline_executor: the accuracy eval failed on a genuine baseline, whose whole purpose is to "
+                "establish the accuracy reference. Stopping now -- fix the accuracy eval (see the round's eval "
+                "output for the error)."
+            )
+            result["nonfatal_warnings"].append("eval_failed_no_fallback_baseline_requires_accuracy")
+            self._request_eval_rooted_baseline_stop(ctx)
+        else:
+            log.error("baseline_executor: the accuracy eval failed; the attempt gets no throughput-only retry.")
+        return True
 
     async def _run_baseline_accuracy_round(self, ctx: RunnerContext, result: dict[str, Any]) -> None:
         """Run the accuracy round of a genuine native AgentX baseline that succeeded, unless the session opted out.
@@ -374,11 +382,17 @@ class _BaselineAccuracyMixin:
         ctx: RunnerContext,
         result: dict[str, Any],
     ) -> None:
-        """Halt the run when a genuine baseline produced no accuracy result."""
+        """Halt the run when a genuine baseline produced no accuracy result.
+
+        A baseline standing on its cold warm-up is not ruled on: the budget kept the round that evaluates from
+        running, which says nothing about accuracy.
+        """
         params = ctx.task.params
         if result.get("status") != "succeeded" or not _should_establish_quality_ref(
             getattr(ctx.task, "kind", ""), params
         ):
+            return
+        if result.get("measure_round_dropped"):
             return
         shared_state = ctx.extra.get("shared_state") or self.shared_state
         # An AgentX session that opted out of the accuracy round has no reference by design; its gates skip accuracy.
