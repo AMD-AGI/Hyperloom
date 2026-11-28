@@ -103,3 +103,60 @@ def test_progress_without_a_files_directory_reports_no_line(tmp_path):
         progress.phase("running")
         document = json.loads((tmp_path / "progress.json").read_text())
     assert "last_line" not in document and "last_log_age_sec" not in document
+
+
+def test_two_writers_of_one_status_file_never_share_a_scratch_file(tmp_path, monkeypatch):
+    """A second write that happens between the first's write and its rename must not take the first's scratch away."""
+    from hyperloom_common import io
+
+    real_replace = io.os.replace
+    nested = []
+
+    def replace_after_a_second_writer_ran(source, destination):
+        if not nested:
+            nested.append(True)
+            write_status(tmp_path, state="second")
+        real_replace(source, destination)
+
+    monkeypatch.setattr(io.os, "replace", replace_after_a_second_writer_ran)
+
+    write_status(tmp_path, state="first")
+
+    assert json.loads((tmp_path / "status.json").read_text())["state"] == "first"
+    assert [p.name for p in tmp_path.iterdir()] == ["status.json"]
+
+
+def test_a_reader_polling_while_progress_writers_flush_always_gets_a_whole_document(tmp_path):
+    """The phase writers and the ``hl-progress`` thread flush at once while the application polls the file."""
+    import threading
+
+    stop = threading.Event()
+    errors: list[Exception] = []
+
+    def phase_writer(progress: Progress, tag: int) -> None:
+        count = 0
+        while not stop.is_set():
+            count += 1
+            try:
+                progress.phase(f"{tag}-{count}-" + "x" * 2000)
+            except Exception as exc:  # noqa: BLE001 - a failed write is as much a finding as a torn read
+                errors.append(exc)
+                return
+
+    with Progress(tmp_path, refresh_sec=0.001) as progress:
+        threads = [threading.Thread(target=phase_writer, args=(progress, i)) for i in range(4)]
+        for thread in threads:
+            thread.start()
+        try:
+            for _ in range(1500):
+                try:
+                    assert "phase" in json.loads((tmp_path / "progress.json").read_text())
+                except Exception as exc:  # noqa: BLE001 - every failure to read a whole document is the finding
+                    errors.append(exc)
+        finally:
+            stop.set()
+            for thread in threads:
+                thread.join()
+
+    assert errors == []
+    assert [p.name for p in tmp_path.iterdir()] == ["progress.json"]
