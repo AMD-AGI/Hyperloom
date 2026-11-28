@@ -2326,7 +2326,6 @@ def _mk_baseline_task(params: dict, *, task_id: str = "t-fp-1") -> Task:
 def test_fingerprint_keys_covers_recovery_surface():
     expected = {
         "benchmark_script",
-        "result_dir",
         "extra_server_args",
         "extra_envs",
         "model_path",
@@ -2346,7 +2345,6 @@ def test_fingerprint_normalizes_extra_envs_order():
 def test_fingerprint_missing_keys_become_none_or_empty():
     fp = WritebackCollaborator.baseline_params_fingerprint({"benchmark_script": "sglang_mi300x.sh"})
     assert fp["benchmark_script"] == "sglang_mi300x.sh"
-    assert fp["result_dir"] is None
     assert fp["extra_server_args"] is None
     assert fp["extra_envs"] == []
     assert fp["model_path"] is None
@@ -2373,7 +2371,7 @@ def test_fingerprint_stringifies_scalar_values():
 def test_fingerprint_different_overrides_produce_different_fingerprints():
     a = WritebackCollaborator.baseline_params_fingerprint({"benchmark_script": "sglang_mi300x.sh"})
     b = WritebackCollaborator.baseline_params_fingerprint({"benchmark_script": "dsr1_fp8_mi300x.sh"})
-    c = WritebackCollaborator.baseline_params_fingerprint({"result_dir": "/workspace"})
+    c = WritebackCollaborator.baseline_params_fingerprint({"model_path": "/path/models/DeepSeek-R1"})
     d = WritebackCollaborator.baseline_params_fingerprint({"extra_server_args": "--mem-fraction-static 0.9"})
     encoded = {json.dumps(x, sort_keys=True) for x in (a, b, c, d)}
     assert len(encoded) == 4
