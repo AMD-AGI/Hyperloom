@@ -20,6 +20,7 @@ from hyperloom_common.gpu_card import GpuCard
 
 from . import ray_dashboard, ssh_client, ssh_known_hosts
 from .external_state import build_external_state_from_env, external_service_url
+from .pd_handoff import SSH_BACKENDS
 
 #: The first probe that runs on the node answers.
 _PROBE_CMD = " || ".join(gpu_card.PROBES)
@@ -39,7 +40,7 @@ def remote_cards(*, timeout_s: int = 60) -> list[GpuCard]:
         raise AmdSmiError("no multi-node cluster was handed over to read the cards of")
     state = build_external_state_from_env()
     backend = str(state.get("backend") or "").lower()
-    probes = {"rayjob": _probe_via_ray_head, "infera": _probe_via_infera_ssh}
+    probes = {"rayjob": _probe_via_ray_head, **dict.fromkeys(SSH_BACKENDS, _probe_via_infera_ssh)}
     if backend not in probes:
         raise AmdSmiError(f"the multi-node backend {backend!r} has no remote card probe")
     try:

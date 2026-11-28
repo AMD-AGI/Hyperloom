@@ -17,18 +17,18 @@ from hyperloom_multibranch.toolbox.tools import (
     roofline_tool,
     tracelens_tool,
 )
-from hyperloom_multibranch.toolbox.tools.op_shares import OPS_SUMMARY
+from hyperloom_multibranch.toolbox.tools.op_shares import KERNEL_SHARES_KEY
 from hyperloom_multibranch.toolbox.tools.tests.sinks import RecordingSink
 
 
-def _report(tmp_path: Path, shares: dict[str, float]) -> Path:
-    """An analysis report with the ops summary TraceLens' perf report writes beside it."""
-    (tmp_path / OPS_SUMMARY).parent.mkdir(parents=True, exist_ok=True)
+def _report(tmp_path: Path, shares: dict[str, float]) -> dict[str, str]:
+    """What an analysis names: its report and the kernel table beside it."""
+    tmp_path.mkdir(parents=True, exist_ok=True)
     rows = "".join(f"{name},{share}\n" for name, share in shares.items())
-    (tmp_path / OPS_SUMMARY).write_text(f"name,Percentage (%)\n{rows}", encoding="utf-8")
+    (tmp_path / "kernel_shares.csv").write_text(f"name,Percentage (%)\n{rows}", encoding="utf-8")
     report = tmp_path / "analysis.md"
     report.write_text("# report\n", encoding="utf-8")
-    return report
+    return {"trace_report_path": str(report), KERNEL_SHARES_KEY: str(tmp_path / "kernel_shares.csv")}
 
 
 async def _tracelens_pointer(tmp_path: Path, result: dict, params: dict) -> Any:
@@ -49,7 +49,7 @@ _IDS = {"commit_id": "c9", "profile_request_id": "req-4"}
 
 async def test_tracelens_pointer_carries_the_shares_the_commit_and_the_profile_request(tmp_path: Path) -> None:
     report = _report(tmp_path, {"aiter::gemm": 40.0, "rccl::all_reduce": 12.5, "silu": 3.25})
-    pointer = await _tracelens_pointer(tmp_path, {"status": "completed", "trace_report_path": str(report)}, _IDS)
+    pointer = await _tracelens_pointer(tmp_path, {"status": "completed", **report}, _IDS)
     assert dict(pointer.op_shares) == {"aiter::gemm": 40.0, "rccl::all_reduce": 12.5, "silu": 3.25}
     assert (pointer.commit_id, pointer.profile_request_id) == ("c9", "req-4")
 
@@ -57,7 +57,7 @@ async def test_tracelens_pointer_carries_the_shares_the_commit_and_the_profile_r
 async def test_more_than_fifty_ops_keep_the_fifty_largest(tmp_path: Path) -> None:
     ops = {f"op{n:02d}": float(n) for n in range(1, 61)}
     report = _report(tmp_path, dict(reversed(ops.items())))
-    pointer = await _tracelens_pointer(tmp_path, {"status": "completed", "trace_report_path": str(report)}, _IDS)
+    pointer = await _tracelens_pointer(tmp_path, {"status": "completed", **report}, _IDS)
     kept = {f"op{n:02d}" for n in range(11, 61)}
     assert len(pointer.op_shares) == MAX_OP_SHARES
     assert set(pointer.op_shares) == kept
@@ -73,14 +73,14 @@ async def test_no_table_leaves_the_shares_empty_and_the_job_fine(tmp_path: Path)
 
 async def test_an_unknown_commit_leaves_the_shares_empty_instead_of_failing(tmp_path: Path) -> None:
     report = _report(tmp_path, {"silu": 5.0})
-    result = {"status": "completed", "trace_report_path": str(report)}
+    result = {"status": "completed", **report}
     pointer = await _tracelens_pointer(tmp_path, result, {"profile_request_id": "req-4"})
     assert pointer.op_shares == {} and pointer.commit_id == "" and pointer.profile_request_id == ""
 
 
 async def test_a_trace_that_did_not_come_from_a_profile_test_has_no_request_id(tmp_path: Path) -> None:
     report = _report(tmp_path, {"silu": 5.0})
-    result = {"status": "completed", "trace_report_path": str(report)}
+    result = {"status": "completed", **report}
     pointer = await _tracelens_pointer(tmp_path, result, {"commit_id": "c9"})
     assert pointer.op_shares == {"silu": 5.0} and pointer.profile_request_id == ""
 
@@ -89,7 +89,7 @@ async def test_another_tool_keeps_the_pointer_defaults_even_beside_a_table(tmp_p
     report = _report(tmp_path, {"silu": 5.0})
 
     async def handler(payload: dict, *, session_dir: Path) -> dict:
-        return {"status": "ok", "hot_kernels": ["silu"], "analysis_md_path": str(report)}
+        return {"status": "ok", "hot_kernels": ["silu"], **report}
 
     tool = roofline_tool()
     tool._handler = handler
@@ -110,11 +110,7 @@ async def test_tracelens_runs_on_local_disk_and_copies_back_only_what_is_read(tm
         out.mkdir()
         (out / "merged.trace_iteration_0:4.json.gz").write_text("x", encoding="utf-8")
         report = _report(out, {"gemm": 60.0})
-        return {
-            "status": "ok",
-            "trace_report_path": str(report),
-            "split": str(out / "merged.trace_iteration_0:4.json.gz"),
-        }
+        return {"status": "ok", **report, "split": str(out / "merged.trace_iteration_0:4.json.gz")}
 
     tool = tracelens_tool()
     tool._handler = handler
@@ -125,7 +121,7 @@ async def test_tracelens_runs_on_local_disk_and_copies_back_only_what_is_read(tm
     workdir = tmp_path / "jobs" / "j1"
     assert not seen["dir"].is_relative_to(tmp_path)
     assert not seen["dir"].exists()
-    assert (workdir / "run" / "analysis.md").is_file() and (workdir / "run" / OPS_SUMMARY).is_file()
+    assert (workdir / "run" / "analysis.md").is_file() and (workdir / "run" / "kernel_shares.csv").is_file()
     assert not [p for p in workdir.rglob("*") if ":" in p.name]
     pointer = sink.pointers[0]
     assert pointer.op_shares == {"gemm": 60.0}

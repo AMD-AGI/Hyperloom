@@ -278,9 +278,15 @@ listens on (`port_in_use`) and GPUs that `amd-smi` does not list or that another
 process holds (`gpus_unavailable`, naming each GPU, its amd-smi card and its holder; a
 round's GPU numbers are the machine's card numbers the server gets as
 `ROCR_VISIBLE_DEVICES`, matched to amd-smi cards through their KFD node; the server's
-`HIP_VISIBLE_DEVICES` numbers those cards from 0). A process holds a card when `amd-smi process` reports more than 1 GiB
-of VRAM for it there, or reports none at all: every ROCm process opens all cards and
-keeps up to a few MiB of page tables and runtime context on each, which does not count.
+`HIP_VISIBLE_DEVICES` numbers those cards from 0). A process holds a card when it has
+more than 1 GiB in `/sys/class/kfd/kfd/proc/<pid>/vram_<gpu_id>` for that GPU: every
+ROCm process opens all cards and keeps up to a few MiB of page tables and runtime
+context on each, which does not count. In a container, the GPU nodes whose `gpu_id`
+the kernel refuses are left out and the readable ones are numbered in order.
+`amd-smi process`'s figure, which for a process that opened several cards repeats one
+number on each, decides only when that kernel list cannot be read (the reason is
+logged): then a process holds a card when amd-smi reports more than 1 GiB of VRAM for
+it there, or reports none at all.
 Hyperloom stops
 the session on the first `gpus_unavailable` with `stop_reason=host_gpus_unavailable`.
 
@@ -364,7 +370,7 @@ One round writes one run directory and leaves it unchanged once the round ends.
 | `phase_marks.json` | The instants the round passed from one phase to the next. |
 | `kv_metrics.json`, `agentx_timeline.jsonl` | KV-cache samples and the AgentX request timeline. |
 | `power.json` | Every power reading the node gave over the whole round; see [Power](#power). |
-| `weight_prefetch.json` | What the checkpoint prefetch did while the server booted, only when `HYPERLOOM_WEIGHT_PREFETCH=1` turned it on: the chosen files, the skip reason, the totals, the bytes read and the unreadable file count. See [Checkpoint prefetch](environment-variables.md#checkpoint-prefetch). |
+| `weight_prefetch.json` | What the checkpoint prefetch did while the server booted, only when `HYPERLOOM_WEIGHT_PREFETCH=1` turned it on: the chosen files, the skip reason, the totals, the bytes read and the unreadable file count; one entry per pass (`pass_log`: why it was read, what it read, whether a drop ended it), one per drop found (`drops`: the rule, `collapse` or `level`, and the sampled cache before and after), the most the sampled cache held (`cache_peak_bytes`, `cache_peak_at`) and, while no drop was found, its recent samples (`cache_samples_gib`). See [Checkpoint prefetch](environment-variables.md#checkpoint-prefetch). |
 | `client/` | `stdout.log`, `stderr.log`, `agentx_client.log`, `inferencex_result.json`, `aiperf_artifacts/` (`profile_export.jsonl`, `profile_export_aiperf.json`, `logs/aiperf.log`) and, on an MLPerf round, `mlperf_artifacts/` (the harness's `result_summary.json` and `scores.json`). |
 | `eval/` | `stdout.log`, `stderr.log`, lm-eval's `results_<time>.json`, `hyperloom_eval_probe.json` and `definition.json`. |
 | `profile/` | `torch_trace/`, `capture_traces/`, `graph_capture_profile/` and `capture.json`. |

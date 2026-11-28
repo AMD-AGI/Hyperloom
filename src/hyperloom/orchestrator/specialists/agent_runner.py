@@ -42,7 +42,7 @@ import subprocess
 import tempfile
 import time
 from concurrent.futures import CancelledError as ScopeCancelled
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any, Awaitable, Callable, Literal, Mapping, Protocol
 
@@ -83,7 +83,7 @@ from .launch_env import (
 )
 from .mcp_config import SPECIALIST_MCP_CONFIG_FILENAME
 from .reap_watch import PROCESS_LOG_NAME, cli_alive, newest_activity
-from .resources import ContainerSnapshot, ProcessTreeSampler, dir_usage_bytes, read_container_cgroup
+from .resources import ProcessTreeSampler, dir_usage_bytes, read_container_cgroup
 from .subprocess_ import (
     ReapKillUnconfirmed,
     ReapWatch,
@@ -217,8 +217,6 @@ class AgentHandle:
 
 class AgentRunner(Protocol):
     """Launches, polls, cancels and collects agent CLI sessions."""
-
-    name: str
 
     def launch(self, spec: AgentLaunchSpec) -> Awaitable[AgentHandle]:
         """Start the CLI ``spec`` describes and return the handle of its session. A launch that fails once the CLI has
@@ -429,13 +427,12 @@ def _close_stdin(session: _Session) -> None:
 
 @dataclass(frozen=True)
 class RunnerHost:
-    """The clocks, the process launcher and the kernel file trees a runner reads; every field is a test seam."""
+    """The clocks, the process launcher and the cgroup tree a runner reads; every field is a test seam."""
 
     monotonic: Callable[[], float] = time.monotonic
     wall: Callable[[], float] = time.time
     popen: Callable[..., Any] = subprocess.Popen
     cgroup_root: Path = Path("/sys/fs/cgroup")
-    proc_root: Path = Path("/proc")
     sleep: Callable[[float], Awaitable[None]] = asyncio.sleep
 
 
@@ -481,8 +478,6 @@ def _refuse_stale_done_paths(spec: AgentLaunchSpec) -> None:
 class LocalAgentRunner:
     """Run agent CLIs as local subprocesses of this process (the default implementation)."""
 
-    name = "local"
-
     def __init__(
         self,
         *,
@@ -499,7 +494,6 @@ class LocalAgentRunner:
         self._wall = host.wall
         self._popen = host.popen
         self._cgroup_root = host.cgroup_root
-        self._proc_root = host.proc_root
         self._version_probe = version_probe
         self._dispatcher = SpecialistSubprocessDispatcher(
             SpecialistSubprocessConfig(
@@ -583,7 +577,7 @@ class LocalAgentRunner:
             backend=backend,
             proc=proc,
             env_tokens=spawned.tokens,
-            sampler=ProcessTreeSampler(proc.pid, proc_root=self._proc_root),
+            sampler=ProcessTreeSampler(proc.pid),
             started_mono=started_mono,
             started_unix=started_unix,
             deadline=Deadline.after(spec.deadline_unix - started_unix, now=started_mono),
@@ -938,10 +932,9 @@ class LocalAgentRunner:
         append_text_nofollow(self._session_dir, RESOURCES_RELATIVE_PATH.parts, line)
 
     def _container_record(self) -> dict[str, Any]:
-        snapshot: ContainerSnapshot = read_container_cgroup(self._cgroup_root)
         return {
             "kind": CONTAINER_RECORD_KIND,
-            **snapshot.as_fields(),
+            **asdict(read_container_cgroup(self._cgroup_root)),
             "max_concurrent_specialists": self._max_concurrent,
             "ts_unix": self._wall(),
         }

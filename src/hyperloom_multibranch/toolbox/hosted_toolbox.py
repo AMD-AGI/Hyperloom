@@ -18,7 +18,6 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
-import re
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -88,10 +87,6 @@ MEASUREMENT_TEMPLATES, DEV_TEMPLATES = "measurement", "dev"
 #: and ``MANIFEST_PIN_ENV`` (when the host has the manifest's digest) are the runner template's accepted create
 #: environment, passed on every ``measurement`` create.
 SOURCE_SHA_ENV = "HYPERLOOM_SOURCE_SHA"
-_COMMIT = re.compile(r"[0-9a-f]{40}|[0-9a-f]{64}")
-_MANIFEST_DIGEST = re.compile(r"[0-9a-f]{64}")
-_GRANT_KEYS = ("max_sandboxes", "max_gpus", "gpu_hours", "max_runtime_sec")
-_REQUIRED_TEXT = ("run_id", "api_url", "sandbox_url", "measurement_key")
 #: Where the base builds of the frameworks built from a pinned checkout are laid, below the session directory the runner
 #: sandboxes read at the same path.
 _BASE_BUILDS = "base-builds"
@@ -133,9 +128,8 @@ class HostedToolboxInputs:
             waits past one typical test before it (:class:`~.toolbox.ToolboxTuning`). ``None``: no such time.
 
     Raises:
-        ValueError: When a text is empty, ``tp`` is below one, ``source_sha`` is not a full commit hash,
-            ``runner_cache_manifest_sha256`` is not a SHA-256 or the limits are not a valid set; the message names the
-            field, never a value.
+        ValueError: When ``dev_key`` is empty, ``tp`` is below one or the limits are not a valid grant; the message
+            names the field, never a value.
     """
 
     run_id: str
@@ -153,21 +147,10 @@ class HostedToolboxInputs:
     tests_end_by: float | None = None
 
     def __post_init__(self) -> None:
-        for name in _REQUIRED_TEXT:
-            if not getattr(self, name).strip():
-                raise ValueError(f"{name} is empty")
         if self.dev_key is not None and not self.dev_key.strip():
             raise ValueError("dev_key is empty; leave it None for a session with no dev sandboxes")
         if self.tp < 1:
             raise ValueError("tp must be at least 1")
-        if not _COMMIT.fullmatch(self.source_sha):
-            raise ValueError("source_sha is not a full lowercase commit hash")
-        pin = self.runner_cache_manifest_sha256
-        if pin is not None and not _MANIFEST_DIGEST.fullmatch(pin):
-            raise ValueError(
-                "runner_cache_manifest_sha256 is not a 64-character lowercase hex SHA-256; leave it None to accept "
-                "the manifest of the cache entry itself"
-            )
         self.grant()
 
     def create_envs(self) -> dict[str, str]:
@@ -180,24 +163,7 @@ class HostedToolboxInputs:
 
     def grant(self) -> GrantLimits | None:
         """The limits as :class:`GrantLimits`, or ``None`` when the host gave none."""
-        limits = self.grant_limits
-        if limits is None:
-            return None
-        missing = [key for key in _GRANT_KEYS if key not in limits]
-        if missing:
-            raise ValueError(f"grant_limits has no {', '.join(missing)}")
-        return GrantLimits(
-            _whole(limits, "max_sandboxes"),
-            _whole(limits, "max_gpus"),
-            float(limits["gpu_hours"]),
-            _whole(limits, "max_runtime_sec"),
-        )
-
-
-def _whole(limits: Mapping[str, float], key: str) -> int:
-    if float(limits[key]) != int(limits[key]):
-        raise ValueError(f"grant_limits {key} is not a whole number")
-    return int(limits[key])
+        return None if self.grant_limits is None else GrantLimits(**self.grant_limits)  # type: ignore[arg-type]
 
 
 @dataclass(frozen=True)
