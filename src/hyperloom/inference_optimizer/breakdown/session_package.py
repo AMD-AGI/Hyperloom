@@ -127,11 +127,9 @@ PACKAGE_GLOBS: tuple[str, ...] = (
     "kernel-agent/runs/**/tracelens/category_findings/*.md",
     "kernel-agent/runs/**/tracelens/system_findings/*.md",
     "kernel-agent/runs/**/tracelens/perf_report_csvs/*.csv",
-    # ── per-run benchmark reports (small JSON/txt; NOT the trace blobs) ─
-    "runs/**/benchmark_report.json",
-    "runs/**/summary.txt",
+    # ── an inference_suite round's run_dir: its client result, its report, the launch and config it ran, its phase
+    # instants (small JSON; NOT the trace blobs) ─
     "runs/**/inferencex_result.json",
-    # ── an inference_suite round's run_dir: its report, the launch and config it ran, its phase instants ─
     f"runs/**/{REPORT_FILE}",
     f"runs/**/{LAUNCH_FILE}",
     f"runs/**/{CONFIG_FILE}",
