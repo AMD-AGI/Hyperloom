@@ -74,15 +74,20 @@ def test_a_coordinator_owned_request_kind_is_refused(kind: str) -> None:
     assert excinfo.value.rule == "request_kind"
 
 
-@pytest.mark.parametrize("kind", sorted(set(KERNEL_REQUEST_HANDLERS) - COORDINATOR_OWNED_KERNEL_REQUEST_KINDS))
-def test_the_llm_requestable_kinds_still_pass(kind: str) -> None:
-    """The narrowing refuses the owned lanes and nothing beside them."""
+@pytest.mark.parametrize("kind", sorted(KERNEL_REQUEST_HANDLERS))
+def test_a_kind_with_a_handler_passes(kind: str) -> None:
+    """The gate admits every kind the router can dispatch."""
     _emit(_llm_gate(), IntentType.REQUEST, {"target_agent": "kernel_agent", "kind": kind})
 
 
-def test_an_unregistered_kind_reaches_the_auto_reject() -> None:
-    """The handler lookup answers a typo with the valid-kind vocabulary."""
-    _emit(_llm_gate(), IntentType.REQUEST, {"target_agent": "kernel_agent", "kind": "no_such_kind"})
+@pytest.mark.parametrize("kind", ["trace_analyze", "run_optimization", "no_such_kind", " integrate "])
+def test_a_kind_with_no_handler_is_refused_with_the_kinds_that_have_one(kind: str) -> None:
+    """A retired kind, a typo and a padded kind are all kinds the router has no handler under."""
+    with pytest.raises(PolicyDenied) as excinfo:
+        _emit(_llm_gate(), IntentType.REQUEST, {"target_agent": "kernel_agent", "kind": kind})
+    assert excinfo.value.rule == "request_kind"
+    assert repr(kind) in str(excinfo.value)
+    assert excinfo.value.hint == "a kernel request's kind is exactly one of: apply_patch, integrate."
 
 
 # -- A refusal is a denial, never a recorded failure -----------------------
@@ -95,10 +100,16 @@ def _denied_rules(coordinator: Coordinator) -> list[str]:
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("kind", "rule"),
-    [("run_fusion", "request_kind"), ("gemm_tuning", "phase_incompatible"), ("WebSearch", "tool_whitelist_role")],
+    [
+        ("run_fusion", "request_kind"),
+        ("gemm_tuning", "phase_incompatible"),
+        ("WebSearch", "tool_whitelist_role"),
+        ("trace_analyze", "request_kind"),
+        ("no_such_kind", "request_kind"),
+    ],
 )
 async def test_a_refused_request_kind_is_denied_and_leaves_no_failure_row(session_dir, kind: str, rule: str) -> None:
-    """Past the gate the router would answer with a failed reply, which becomes a gap and a ``what_failed`` prior."""
+    """A failed reply would become a gap and a ``what_failed`` prior, so a refused kind is never answered."""
     coordinator = Coordinator(session_dir, backends=silent_backends())
     try:
         await coordinator.router.handle_intent(

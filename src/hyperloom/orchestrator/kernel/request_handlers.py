@@ -17,6 +17,8 @@ from pathlib import Path
 from dataclasses import dataclass
 from typing import Any, Awaitable, Callable
 
+from hyperloom.inference_optimizer.protocol.action_surfaces import AGENT_REQUESTABLE_KERNEL_REQUEST_KINDS
+
 from ..actions.executors._kernel_agent_tool import HandlerResult, _maybe_revert_kernel_patch
 from ._forge_fusion_run import run_fusion_handler
 from ._forge_gemm_tuning import _run_forge_gemm_tuning
@@ -311,6 +313,9 @@ KERNEL_REQUEST_HANDLERS: dict[str, HandlerFn] = {
     "integrate": integrate_handler,
     "apply_patch": integrate_handler,  # alias — same flow
 }
+
+# PolicyGate admits exactly the requestable kinds, so the router indexes this table without a miss.
+assert set(KERNEL_REQUEST_HANDLERS) == AGENT_REQUESTABLE_KERNEL_REQUEST_KINDS
 
 
 __all__ = [

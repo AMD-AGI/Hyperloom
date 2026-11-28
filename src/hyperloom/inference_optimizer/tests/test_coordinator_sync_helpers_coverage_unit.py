@@ -513,8 +513,6 @@ def test_admission_denial_for_request(coord: Coordinator) -> None:
     ss.baseline_tput = 0.0
     # non-kernel target -> not gated
     assert coord.dispatcher.admission_denial_for_request("orchestration", "anything") is None
-    # unknown handler kind -> not gated
-    assert coord.dispatcher.admission_denial_for_request("kernel_agent", "no_such_kind") is None
 
 
 def test_a_kernel_request_the_phase_cannot_fit_is_refused(coord: Coordinator, monkeypatch: pytest.MonkeyPatch) -> None:

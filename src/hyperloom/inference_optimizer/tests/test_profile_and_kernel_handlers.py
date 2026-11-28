@@ -3026,29 +3026,12 @@ async def test_coordinator_request_integrate_uses_handler(session_dir):
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize(
-    ("payload", "kernel_enabled", "error_class", "result_keys"),
-    [
-        ({"target_agent": "kernel_agent", "kind": "integrate"}, False, "agent_disabled", ()),
-        (
-            {"target_agent": "kernel_agent", "kind": "invent_brand_new_kind"},
-            True,
-            "unknown_kernel_kind",
-            ("valid_kinds",),
-        ),
-    ],
-)
-async def test_coordinator_auto_reject_answers_in_one_envelope(
-    session_dir,
-    payload,
-    kernel_enabled,
-    error_class,
-    result_keys,
-):
-    """Every refusal the coordinator makes before a handler runs answers the requester the same way."""
+async def test_coordinator_auto_reject_answers_in_one_envelope(session_dir):
+    """A request the coordinator refuses after recording it is answered in the envelope a handler's result is."""
+    payload = {"target_agent": "kernel_agent", "kind": "integrate"}
     c = Coordinator(session_dir, backends=_backends_silent())
     try:
-        c.shared_state.kernel_enabled = kernel_enabled
+        c.shared_state.kernel_enabled = False
         c.shared_state.baseline_tput = 1234.5
         await c.router.handle_intent("orchestration", Intent(type=IntentType.REQUEST, payload=dict(payload)))
 
@@ -3064,9 +3047,8 @@ async def test_coordinator_auto_reject_answers_in_one_envelope(
         assert reply.payload["status"] == "failed"
         assert reply.payload["source"] == "coordinator_auto_reject"
         assert reply.payload["result"]["status"] == "failed"
-        assert reply.payload["result"]["error_class"] == error_class
-        assert [k for k in result_keys if k not in reply.payload["result"]] == []
-        assert c.shared_state.last_action_failures[-1]["error_class"] == error_class
+        assert reply.payload["result"]["error_class"] == "agent_disabled"
+        assert c.shared_state.last_action_failures[-1]["error_class"] == "agent_disabled"
     finally:
         await c.stop()
 
@@ -3075,23 +3057,24 @@ async def test_coordinator_auto_reject_answers_in_one_envelope(
 async def test_a_padded_target_agent_reaches_its_handler(session_dir):
     """PolicyGate admits the stripped target, so the router has to route on the same name it admitted."""
     c = Coordinator(session_dir, backends=_backends_silent())
-    try:
-        c.shared_state.kernel_enabled = True
-        await c.router.handle_intent(
-            "orchestration",
-            Intent(
-                type=IntentType.REQUEST,
-                payload={"target_agent": "  kernel_agent  ", "kind": "invent_brand_new_kind"},
-            ),
-        )
+    c.shared_state.baseline_tput = 1234.5
 
-        responses = await c.bus.tail(topic="response", to_agent="orchestration")
-        assert responses, "the request must be answered"
-        # It reaches the kernel_agent arm, so it is refused for its kind rather than for its target.
-        assert responses[0].payload["result"]["error_class"] == "unknown_kernel_kind"
-        assert responses[0].from_agent == "kernel_agent"
-    finally:
-        await c.stop()
+    async def fake_handler(payload, *, session_dir):
+        return {"status": "ok", "decision": "NEEDS_REVIEW", "kernel_id": "k009"}
+
+    with patch.dict(krh.KERNEL_REQUEST_HANDLERS, {"integrate": fake_handler}):
+        try:
+            await c.router.handle_intent(
+                "orchestration",
+                Intent(type=IntentType.REQUEST, payload={"target_agent": "  kernel_agent  ", "kind": "integrate"}),
+            )
+
+            responses = await c.bus.tail(topic="response", to_agent="orchestration")
+            assert responses, "the request must be answered"
+            assert responses[0].payload["source"] == "programmatic_handler"
+            assert responses[0].from_agent == "kernel_agent"
+        finally:
+            await c.stop()
 
 
 @pytest.mark.asyncio

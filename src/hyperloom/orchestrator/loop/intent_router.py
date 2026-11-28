@@ -755,19 +755,7 @@ class IntentRouter(CoordinatorCollaborator):
                 source=_AUTO_REJECT,
             )
             return
-        handler = KERNEL_REQUEST_HANDLERS.get(kind)
-        if handler is None:
-            await self._reply(
-                request_msg,
-                {
-                    "status": "failed",
-                    "error_class": "unknown_kernel_kind",
-                    "error": f"no programmatic handler for kind={kind!r}",
-                    "valid_kinds": sorted(KERNEL_REQUEST_HANDLERS),
-                },
-                source=_AUTO_REJECT,
-            )
-            return
+        handler = KERNEL_REQUEST_HANDLERS[kind]
         params = intent.payload.get("params") or {}
         request = KernelRequest(request_msg, kind, {**intent.payload, **params})
         outcome = remembered_outcome(self, request)

@@ -218,8 +218,9 @@ drop them.
 ### Required: the `trace_analyze` kernel request is removed
 
 Orchestration can no longer ask the kernel agent to analyse a trace. A
-`request` with `kind: trace_analyze` is answered like any kind with no handler:
-a failed `unknown_kernel_kind` response and a `last_action_failures` row. The
+`request` with `kind: trace_analyze` is refused like any kind with no handler:
+PolicyGate denies it with `rule=request_kind` and a hint naming the kinds that
+have one, `apply_patch` and `integrate`. The
 analysis is produced only by the roofline executor: by the Coordinator's
 `roofline` action at PRELUDE, at each +10% watermark and on the KERNEL entry
 re-profile, and by the Forge GEMM lane's vLLM block-FP8 shape capture, which
@@ -239,6 +240,10 @@ runs the same executor inline whatever `--enable-roofline` says. Read it in
   the ones an earlier release wrote are ignored.
 * The `trace_analyze_done` response, its `cache_hit` lifecycle line and the
   failure class `trace_analysis_failure_remembered` no longer occur.
+* A request for any other kind with no handler, such as `run_optimization`, is
+  denied the same way. Before, it was answered with a failed
+  `unknown_kernel_kind` response, which left a `last_action_failures` row and
+  reached the recipe's `what_failed`; that error class no longer occurs.
 
 ---
 

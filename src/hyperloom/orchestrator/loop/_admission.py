@@ -9,7 +9,6 @@ import sqlite3
 from typing import Any
 from hyperloom.inference_optimizer.protocol.action_surfaces import REQUEST_KIND_TO_OWNED_ACTION
 from ..phases import machine_state as _phase_state
-from ..kernel.request_handlers import KERNEL_REQUEST_HANDLERS
 from ..policy.denial import PolicyDenied
 from ..policy.specialist_in_flight import specialist_in_flight_denial
 from ._explore_grid import explore_grid_denial
@@ -227,7 +226,7 @@ class AdmissionMixin:
         Args:
             target_agent: The request's target agent; only ``"kernel_agent"`` is
                 gated.
-            kind: The kernel request kind; unknown kinds are exempt.
+            kind: The kernel request kind.
 
         Returns:
             A :class:`PolicyDenied` when the kernel request must wait for
@@ -236,8 +235,6 @@ class AdmissionMixin:
         target = str(target_agent or "").strip()
         req_kind = str(kind or "").strip()
         if target != "kernel_agent" or self.shared_state.stop_reason:
-            return None
-        if req_kind not in KERNEL_REQUEST_HANDLERS:
             return None
         if self.shared_state.baseline_tput <= 0:
             return PolicyDenied(

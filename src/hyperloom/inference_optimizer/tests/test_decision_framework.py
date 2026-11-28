@@ -92,26 +92,6 @@ async def test_a_gemm_lane_the_phase_could_not_fund_is_no_attempt_and_stays_arme
 
 
 @pytest.mark.asyncio
-async def test_run_optimization_no_longer_gated_on_fp8_gemm_tuning(session_dir):
-    """The gemm-before-run_optimization sequence deny was removed; the request-layer pre-deny no longer fires."""
-    c = Coordinator(session_dir, backends=silent_backends())
-    try:
-        c.shared_state.kernel_optimizer = "native"
-        c.shared_state.precision = "fp8"
-        c.shared_state.framework = "sglang"
-        c.shared_state.baseline_tput = 800.0
-        c.shared_state.last_profile_trace = "/tmp/profile.trace.json.gz"
-        c.shared_state.last_trace_analyze = {
-            "trace_input": "/tmp/profile.trace.json.gz",
-            "candidates_path": "/tmp/candidates.json",
-        }
-
-        assert c.dispatcher.admission_denial_for_request("kernel_agent", "run_optimization") is None
-    finally:
-        await c.stop()
-
-
-@pytest.mark.asyncio
 async def test_kernel_entry_auto_runs_gemm_tuning_for_fp8_sglang(
     session_dir,
     monkeypatch,

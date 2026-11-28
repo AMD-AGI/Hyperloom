@@ -274,15 +274,17 @@ async def test_failed_kernel_request_recorded_in_last_action_failures(session_di
     """A failed kernel request lands in the log the FAILURE RECOVERY block reads."""
     c = Coordinator(session_dir, backends=silent_backends())
     try:
+        c.shared_state.kernel_enabled = False
+        c.shared_state.baseline_tput = 1234.5
         await c.router.handle_intent(
             "orchestration",
             Intent(
                 type=IntentType.REQUEST,
-                payload={"target_agent": "kernel_agent", "kind": "no_such_kind"},
+                payload={"target_agent": "kernel_agent", "kind": "integrate"},
             ),
         )
-        assert c.shared_state.last_action_failures[-1]["error_class"] == "unknown_kernel_kind"
-        assert "unknown_kernel_kind" in c.shared_state.to_prompt_summary()
+        assert c.shared_state.last_action_failures[-1]["error_class"] == "agent_disabled"
+        assert "agent_disabled" in c.shared_state.to_prompt_summary()
     finally:
         await c.stop()
 
