@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -17,6 +18,7 @@ from hyperloom.orchestrator.actions.executors.benchmark_run.records import (
     EVAL_SCORE_KEYS,
     MEASURE_ROUND_DROPPED_WARNING,
     BenchmarkAttempt,
+    _BenchmarkRound,
 )
 from hyperloom.orchestrator.actions.executors.benchmark_run.rounds import _BenchmarkRoundsMixin
 from hyperloom.orchestrator.actions.stop_attribution import SESSION_TIME_EXHAUSTED_CLASS
@@ -83,11 +85,11 @@ def _attempt(tmp_path: Path, *, kind: str = "baseline", params: dict | None = No
     )
 
 
-async def _rounds(pair: _StubbedPair, attempt: BenchmarkAttempt, slot: Path, *, defer_accuracy: bool = False):
+async def _rounds(pair: _BenchmarkRoundsMixin, attempt: BenchmarkAttempt, slot: Path, *, defer_accuracy: bool = False):
     return await pair._run_cold_start_guarded_rounds(attempt, slot, {"port": 8888}, [], defer_accuracy=defer_accuracy)
 
 
-def _play(pair: _StubbedPair, attempt: BenchmarkAttempt, slot: Path, *, defer_accuracy: bool = False):
+def _play(pair: _BenchmarkRoundsMixin, attempt: BenchmarkAttempt, slot: Path, *, defer_accuracy: bool = False):
     return asyncio.run(_rounds(pair, attempt, slot, defer_accuracy=defer_accuracy))
 
 
@@ -258,3 +260,60 @@ def test_a_round_told_to_evaluate_runs_as_one_whose_eval_is_on(tmp_path, attempt
 
     assert guarded.configured_run_eval is run_eval
     assert guarded.ran_with.run_eval_disabled is round_disabled
+
+
+class _EvaluatingRounds(_BenchmarkRoundsMixin):
+    """A pair played down to the benchmark, each round's result stamped from its own run directory as a real one is.
+
+    A round whose lifecycle config turns the eval on leaves a results file there.
+    """
+
+    shared_state = None
+
+    def __init__(self, score: float):
+        self.score = score
+        self.evaluates: dict[Path, bool | None] = {}
+
+    def _write_lifecycle_config(self, base_config_path, dest_dir, **lifecycle):
+        self.evaluates[dest_dir] = lifecycle["run_eval"]
+        return dest_dir / "baseline_lifecycle.yaml"
+
+    async def _run_single_benchmark(self, attempt, *, config_path, output_dir, **_reuse):
+        run_dir = output_dir / "run"
+        run_dir.mkdir(parents=True)
+        if self.evaluates[output_dir]:
+            results = {"results": {"gsm8k": {"exact_match,strict-match": self.score}}}
+            (run_dir / "results_2026-08-19T00-00-00.json").write_text(json.dumps(results), encoding="utf-8")
+        result = _round(output_dir, 544.0, e2el_mean_ms=12.0)
+        round_ = _BenchmarkRound(
+            config_path=config_path,
+            materialized_config_path=attempt.materialized_config_path,
+            output_dir=output_dir,
+            ctx_extra={},
+            framework="vllm",
+            watchdog_server_log=None,
+            capture_meta={},
+            timeout_sec=attempt.timeout_sec,
+            session_deadline_sec=None,
+            server_already_ready=False,
+            run_eval_disabled=attempt.run_eval_disabled,
+        )
+        self._stamp_round_quality(round_, result, {"framework": "vllm"}, [])
+        return result
+
+    def _measure_round_affordable(self, warmup_result, *, ctx_extra=None):
+        return True, {}
+
+
+def test_a_replay_whose_recipe_turns_the_eval_off_still_returns_its_forced_warmups_score(tmp_path):
+    slot = tmp_path / "slot"
+    pair = _EvaluatingRounds(score=0.89)
+    attempt = _attempt(tmp_path, kind="replay_warm_recipe", run_eval_disabled=True)
+
+    result = _play(pair, attempt, slot)
+
+    assert pair.evaluates == {slot / "warmup_round": True, slot / "measure_round": False}
+    assert Path(result["output_dir"]).name == "measure_round"
+    assert result["accuracy"] == pytest.approx(0.89)
+    assert result["accuracy_source"].startswith(str(slot / "warmup_round"))
+    assert not list((slot / "measure_round").rglob("results*.json"))

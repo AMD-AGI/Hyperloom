@@ -257,6 +257,20 @@ for the warm-up's results file.
   `RUN_EVAL=false`. That round is now recorded as one that evaluated: its
   round row has `run_eval_disabled: false` and its score, where it had `true`
   and none.
+* A warm replay is judged on the score its result carries; it no longer looks
+  for an `lm-eval` results file under its task directory. `eval_ran` in
+  `warm_replay_outcome` (`state.json`) and in the warm-replay `measurement` of
+  `session_breakdown.json` is `true` when the replay's result carries a score
+  and `false` otherwise. A results file that could not be decoded, or that held
+  no recognised metric, used to give `eval_ran: true` with no score; it now
+  gives `false`. For a replay without a score, `eval_error`, the reason on its
+  accuracy gate row and the log line `warm-replay admitted without an accuracy
+  verdict` read `the replay's result carries no accuracy score`, where they
+  quoted the results-file search (such as `no results*.json in <directory>`).
+  The verdict on a score is unchanged: a collapsed score rejects the replay,
+  and a score taken under another eval definition than the baseline's is no
+  verdict. A replay without a score is admitted and marked as before, now also
+  when a results file lies elsewhere under its task directory.
 * A baseline of this kind whose score is usable no longer logs `cold-start
   guard — reading accuracy=... from the warmup round`.
 * Measuring a baseline of this kind whose score is usable no longer writes the

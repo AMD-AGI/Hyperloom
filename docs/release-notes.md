@@ -226,11 +226,14 @@ it.
   the measured round's result used to carry none, and each reader searched
   the attempt's directory for the warm-up's results file. Scores and verdicts
   are unchanged. A warm replay's warm-up round is recorded as one that
-  evaluated even when its recipe sets `RUN_EVAL=false`. Measuring such a
-  baseline, when its score is usable, no longer writes the session's accuracy
-  reference; promoting it does, so a re-baseline that is not promoted
-  (`anchor_held`) leaves the reference with the anchor it was measured with.
-  See [Upgrade](reference/upgrade.md).
+  evaluated even when its recipe sets `RUN_EVAL=false`, and the replay is
+  judged on the score its result carries: `eval_ran` in `warm_replay_outcome`
+  is `true` exactly when there is one, and a replay without one is still
+  admitted and marked, with `eval_error` reading `the replay's result carries
+  no accuracy score`. Measuring such a baseline, when its score is usable, no
+  longer writes the session's accuracy reference; promoting it does, so a
+  re-baseline that is not promoted (`anchor_held`) leaves the reference with
+  the anchor it was measured with. See [Upgrade](reference/upgrade.md).
 - **A session reads its GPU from the machine; no board table is kept.** Every
   start and resume reads the visible cards and prints the one it runs on (`GPU
   card        : AMD Instinct MI325X (gfx942, 304 CUs, 262128 MiB, 2100 MHz)`).
