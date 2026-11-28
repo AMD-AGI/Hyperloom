@@ -569,12 +569,12 @@ class AccuracyReference:
 
 
 def grade_accuracy(
-    result_dir: str,
+    search_root: str,
     reference: AccuracyReference,
     framework: str | None = None,
     benchmark_mode: str = "",
 ) -> bool | None:
-    """Grade a bench's accuracy against the baseline ``reference``.
+    """Grade the accuracy a bench left below ``search_root`` against the baseline ``reference``.
 
     With a recorded baseline the measured drop is enforced; without one, or without a score taken under the
     baseline's eval definition, there is no verdict (``None``), warned loudly. A score under another definition is
@@ -583,7 +583,7 @@ def grade_accuracy(
     a missing quality gate instead of falling back to GSM8K.
     """
     baseline_value = reference.score
-    eval_results = parse_eval_results(result_dir, framework=framework, benchmark_mode=benchmark_mode)
+    eval_results = parse_eval_results(search_root, framework=framework, benchmark_mode=benchmark_mode)
     new_accuracy = reference.comparable(eval_results)
     if new_accuracy is not None and baseline_value > 0:
         return accuracy_passed(baseline_value, new_accuracy)

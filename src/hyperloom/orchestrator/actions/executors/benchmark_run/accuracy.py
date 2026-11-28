@@ -443,10 +443,10 @@ class _BaselineAccuracyMixin:
                 cause=self._quality_gate_missing_cause(result),
             )
             return
-        # Session-level salvage (complements #942): the cold-start guard and the coordinator's retries each run in
-        # their own ``runs/baseline/<attempt>`` dir. #942 keeps every attempt's eval output inside that attempt's
-        # ``$RESULT_DIR``, but the accuracy-stop decision runs on the *deciding* attempt -- whose dir can be empty
-        # when a prior sibling attempt already produced a valid ``results*.json``.
+        # Session-level salvage: the cold-start guard and the coordinator's retries each run in their own
+        # ``runs/baseline/<attempt>`` dir, and every attempt's eval output stays inside its own. The accuracy-stop
+        # decision runs on the *deciding* attempt -- whose dir can be empty when a prior sibling attempt already
+        # produced a valid ``results*.json``.
         salvaged = self._salvage_sibling_baseline_accuracy(result, framework)
         if salvaged is not None:
             acc_val = self._apply_salvaged_accuracy(
@@ -568,7 +568,7 @@ class _BaselineAccuracyMixin:
             )
         else:
             log.warning(
-                "baseline_executor: this attempt's RESULT_DIR had no accuracy, "
+                "baseline_executor: this attempt left no accuracy, "
                 "but salvaged a measured baseline accuracy=%.4f from a sibling "
                 "attempt (%s)",
                 acc_val,
