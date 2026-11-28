@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import csv
+import logging
 
 import pytest
 
@@ -127,13 +128,13 @@ def small_csv_fields():
 
 @pytest.mark.usefixtures("small_csv_fields")
 @pytest.mark.parametrize(
-    "pod_rows",
+    ("pod_rows", "warnings"),
     [
-        pytest.param("5,50,280\n", id="every row outside the round's window"),
-        pytest.param("1000," + "x" * 2_000 + "\n", id="a field the csv module refuses"),
+        pytest.param("5,50,280\n", 0, id="every row outside the round's window"),
+        pytest.param("1000," + "x" * 2_000 + "\n", 1, id="a field the csv module refuses"),
     ],
 )
-def test_harvest_mn_gpu_metrics_writes_nothing_without_usable_rows(monkeypatch, tmp_path, pod_rows):
+def test_harvest_mn_gpu_metrics_writes_nothing_without_usable_rows(monkeypatch, tmp_path, caplog, pod_rows, warnings):
     import hyperloom.orchestrator.actions.executors._multi_node_env as mn
 
     monkeypatch.setattr(mn, "is_multi_node", lambda: True)
@@ -141,8 +142,12 @@ def test_harvest_mn_gpu_metrics_writes_nothing_without_usable_rows(monkeypatch, 
     shared = tmp_path / "server_logs"
     shared.mkdir()
     monkeypatch.setenv("HYPERLOOM_MN_SERVER_LOG_DIR", str(shared))
-    (shared / "gpu_metrics_hostA.csv").write_text(f"timestamp,temp,power\n{pod_rows}", encoding="utf-8")
+    pod_csv = shared / "gpu_metrics_hostA.csv"
+    pod_csv.write_text(f"timestamp,temp,power\n{pod_rows}", encoding="utf-8")
 
     dest = tmp_path / "ws"
-    assert br.harvest_mn_gpu_metrics(dest, subprocess_started_unix=900.0) == {}
+    with caplog.at_level(logging.WARNING, logger=br.__name__):
+        assert br.harvest_mn_gpu_metrics(dest, subprocess_started_unix=900.0) == {}
     assert not (dest / "gpu_metrics.csv").exists()
+    assert len(caplog.messages) == warnings
+    assert all(str(pod_csv) in message for message in caplog.messages)
