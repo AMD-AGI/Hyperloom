@@ -6,8 +6,8 @@
 The coordinator database of such a session is kept outside the session directory, below the container's ``TMPDIR``,
 so a run resumed after a preemption finds none there. These tests resume the same session with the database kept (the
 same ``TMPDIR``, or a new ``TMPDIR`` and ``HYPERLOOM_LEDGER_DIR`` on a disk that outlives the container), and read what
-the resume recovers: the half-applied integrate window the stopped leg left, the KEEP it had recorded on the bus but not
-yet put on the stack, and the proposals nobody had judged. Without the database, and with the session having run, the
+the resume recovers: the half-applied integrate window the stopped leg left and the KEEP it had recorded on the bus but
+not yet put on the stack. Without the database, and with the session having run, the
 resume is refused, naming ``HYPERLOOM_LEDGER_DIR``: the leases and tasks of the earlier legs cannot be inspected, so
 work they left running would go unseen (fail closed, as the guard did on the shared database)."""
 
@@ -61,12 +61,12 @@ def _coordinator(session: Path) -> Coordinator:
     plan = ScriptedPlan(
         turns=[], default_intent=Intent(type=IntentType.SEND_MESSAGE, payload={"topic": "observation", "body_md": "ok"})
     )
-    return Coordinator(session, backends={name: MockBackend(plan, name=name) for name in ("orchestration", "critic")})
+    return Coordinator(session, backends={"orchestration": MockBackend(plan, name="orchestration")})
 
 
 async def _stopped_leg(session: Path) -> Coordinator:
-    """A leg with a credential in its pins that has a KEEP recorded but not on the stack and a proposal nobody had judged,
-    and is about to be lost (its coordinator is returned open)."""
+    """A leg with a credential in its pins that has a KEEP recorded but not on the stack, and is about to be lost (its
+    coordinator is returned open)."""
     state = SharedState()
     state.operator_extra_env = {"HF_TOKEN": _SECRET}
     state.save(session)
@@ -74,9 +74,6 @@ async def _stopped_leg(session: Path) -> Coordinator:
     coord.shared_state.tick = 3  # the leg ran: a tick was counted
     coord.shared_state.save(session)
     await coord.bus.append_and_seq(Message.new("coordinator", "*", "delegated_result", _KEPT))
-    await coord.bus.append_and_seq(
-        Message.new("orchestration", "*", "proposal", {"action_name": "explore", "predicted_gain_pct": 2.0})
-    )
     return coord
 
 
@@ -97,15 +94,13 @@ async def _lost_with_an_integrate_window_open(session: Path) -> None:
 
 
 async def _resumed_leg(session: Path, monkeypatch: pytest.MonkeyPatch) -> dict[str, object]:
-    """What the resume recovers: whether it was refused, the fixes it made, the stack and the proposals it rebuilt."""
+    """What the resume recovers: whether it was refused, the fixes it made and the stack it rebuilt."""
     coord = _coordinator(session)
     monkeypatch.setattr(
         coord.writeback,
         "_resume_rollback_pending_integrate",
         lambda pending, _gone_scope=None: {"reversed": list(pending["patches"]), "failed": []},
     )
-    await coord.writeback.replay_for_resume()
-    proposals = len(coord.state.pending_proposals)
     try:
         report = await coord.writeback._resume_consistency_pass()
     except IntegrateRecoveryIncomplete as exc:
@@ -113,13 +108,12 @@ async def _resumed_leg(session: Path, monkeypatch: pytest.MonkeyPatch) -> dict[s
     else:
         outcome = {"refused": None, "fixes": sorted(fix["kind"] for fix in report["fixes"])}
     coord.db.raw.close()
-    return {**outcome, "proposals": proposals, "stack": len(coord.shared_state.optimization_stack or [])}
+    return {**outcome, "stack": len(coord.shared_state.optimization_stack or [])}
 
 
 _KEEP_REPLAYED = {
     "refused": None,
     "fixes": ["queued_resume_stack_rebench", "replayed_orphaned_keep"],
-    "proposals": 1,
     "stack": 1,
 }
 

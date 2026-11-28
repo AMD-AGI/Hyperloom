@@ -24,7 +24,6 @@ from hyperloom.orchestrator.state.task_registry import Task, TaskSpec, create_in
 from hyperloom.orchestrator.actions.executors._subprocess_kill import AGENTX_PREFLIGHT_ERROR_CLASS
 from hyperloom.orchestrator.actions.stop_attribution import SESSION_TIME_EXHAUSTED_CLASS
 from hyperloom.orchestrator.loop.coordinator import Coordinator
-from hyperloom.orchestrator.state.pending_proposal import PendingProposal
 from hyperloom.orchestrator.loop._baseline_failures import _authorable_launch_log
 from hyperloom.orchestrator.enablement.params import EnablementParams
 
@@ -395,30 +394,9 @@ async def test_watchdog_does_not_fire_when_task_running(monkeypatch, tmp_path):
     assert await fake.enablement_lane._maybe_enqueue_enablement_specialist() == ""
 
 
-def _integrate_proposal(specialist_task_id: str):
-    return PendingProposal(
-        proposal_msg_id=f"m-{specialist_task_id}",
-        from_agent="coordinator",
-        action_name="integrate_patch",
-        predicted_gain_pct=0.0,
-        payload={"params": {"specialist_task_id": specialist_task_id, "enablement": True}},
-    )
-
-
-@pytest.mark.asyncio
-async def test_in_flight_defers_on_undecided_integrate_proposal(tmp_path):
-    """The specialist goes terminal a tick before the Critic sees the integrate
-    proposal; the round must still count as in flight."""
-    # No task row for the holder, so the lookup raises TaskNotFound (terminal).
-    fake = _enqueue_self(tmp_path)
-    await _hold_round(fake, "spec-done")
-    fake.state.pending_proposals["m-spec-done"] = _integrate_proposal("spec-done")
-    assert await fake.enablement_lane.enablement_in_flight() is True
-
-
 @pytest.mark.asyncio
 async def test_in_flight_defers_on_queued_integrate_task(tmp_path):
-    """An approved integrate_patch task for this specialist keeps the round open."""
+    """A queued integrate_patch task for this specialist keeps the round open."""
     fake = _enqueue_self(tmp_path)
     await _hold_round(fake, "spec-done")
     await _seed_task(fake, "ip-1", kind="integrate_patch", params={"specialist_task_id": "spec-done"})
@@ -434,14 +412,14 @@ async def test_in_flight_ignores_integrate_task_for_other_specialist(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_no_false_stall_while_integrate_proposal_pending(monkeypatch, tmp_path):
-    """Regression: a terminal specialist with an unreviewed integrate proposal must not bump the stall streak nor dispatch a second concurrent round."""
+async def test_no_false_stall_while_the_integrate_task_is_queued(monkeypatch, tmp_path):
+    """Regression: a terminal specialist whose integrate_patch is still queued must not bump the stall streak nor dispatch a second concurrent round."""
     from hyperloom.orchestrator.actions.executors import _multi_node_env as mne
 
     monkeypatch.setattr(mne, "is_multi_node", lambda: False)
     fake = _enqueue_self(tmp_path)
     await _hold_round(fake, "spec-done")
-    fake.state.pending_proposals["m-spec-done"] = _integrate_proposal("spec-done")
+    await _seed_task(fake, "ip-1", kind="integrate_patch", params={"specialist_task_id": "spec-done"})
     assert await fake.enablement_lane._maybe_enqueue_enablement_specialist() == ""
     held = await fake.rounds.held()
     assert held is not None and held.holder_task_id == "spec-done"
@@ -1277,7 +1255,7 @@ def _make_coord_with_phase(session_dir) -> "Coordinator":
         turns=[],
         default_intent=Intent(type=IntentType.SEND_MESSAGE, payload={"topic": "heartbeat", "body_md": "ok"}),
     )
-    backends = {name: MockBackend(plan, name=name) for name in ("orchestration", "critic")}
+    backends = {"orchestration": MockBackend(plan, name="orchestration")}
     return Coordinator(session_dir, backends=backends)
 
 

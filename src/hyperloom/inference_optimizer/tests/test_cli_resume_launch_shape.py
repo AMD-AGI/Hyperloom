@@ -295,7 +295,7 @@ def test_resume_restores_pins_before_the_agentx_staleness_guard(tmp_path, monkey
 
     # The first call after the guard: reaching it means the guard did not reject the session.
     monkeypatch.setattr(f"{cli_mod}.latency_budget_scope_error", past_the_guard)
-    args = _build_parser().parse_args(["optimize", "--resume-from", str(resume_dir), "--critic-mock"])
+    args = _build_parser().parse_args(["optimize", "--resume-from", str(resume_dir)])
 
     # A SystemExit instead means the guard compared the session's pinned backend against an unpinned environment.
     with pytest.raises(RuntimeError, match="resume cleared the staleness guard"):
@@ -365,7 +365,7 @@ def _resume_through_the_sandbox_gate(tmp_path, monkeypatch, request, *, env, per
         raise _PastTheSandboxGate
 
     monkeypatch.setattr(f"{cli_mod}._resolve_models_for_run", past_the_gate)
-    args = _build_parser().parse_args(["optimize", "--resume-from", str(resume_dir), "--critic-mock", *flags])
+    args = _build_parser().parse_args(["optimize", "--resume-from", str(resume_dir), *flags])
     asyncio.run(_run_optimize(args))
 
 
@@ -475,7 +475,7 @@ def test_the_resume_exports_its_pins_again_after_the_topology_step_rewrote_them(
 
     # The first call after the export in ``_resume_session``.
     monkeypatch.setattr(f"{cli_mod}.latency_budget_scope_error", past_the_export)
-    args = _build_parser().parse_args(["optimize", "--resume-from", str(resume_dir), "--critic-mock"])
+    args = _build_parser().parse_args(["optimize", "--resume-from", str(resume_dir)])
 
     with pytest.raises(RuntimeError, match="resume passed its pin export"):
         asyncio.run(_run_optimize(args))
@@ -498,7 +498,7 @@ def test_a_resumed_pd_session_refuses_server_args_before_it_persists(tmp_path, m
     # The first call after the refusal point in ``_resume_session``.
     monkeypatch.setattr(f"{cli_mod}.latency_budget_scope_error", past_the_refusal)
     args = _build_parser().parse_args(
-        ["optimize", "--resume-from", str(resume_dir), "--critic-mock", "--server-args=--mem-fraction-static 0.8"]
+        ["optimize", "--resume-from", str(resume_dir), "--server-args=--mem-fraction-static 0.8"]
     )
 
     with pytest.raises(SystemExit) as exc:

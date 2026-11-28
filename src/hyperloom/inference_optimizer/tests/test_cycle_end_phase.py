@@ -791,7 +791,7 @@ def _real_coordinator(tmp_path: Path) -> Coordinator:
     idle_plan = ScriptedPlan(turns=[MockTurn(intents=[])])
     return Coordinator(
         session_dir=session_dir,
-        backends={"orchestration": MockBackend(idle_plan), "critic": MockBackend(idle_plan)},
+        backends={"orchestration": MockBackend(idle_plan)},
         role_registry=default_role_registry(),
         advisory=AdvisoryServices(knowledge_plane=None),
     )

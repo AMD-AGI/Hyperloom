@@ -264,8 +264,8 @@ async def test_a_changed_system_prompt_reaches_the_next_round(
     backend = _backend(tmp_path)
     await backend.run("status?", system_prompt="You are the Coordinator.")
     assert "You are the Coordinator." in captured["instructions"]
-    await backend.run("status?", system_prompt="You are the Critic.")
-    assert "You are the Critic." in captured["instructions"]
+    await backend.run("status?", system_prompt="You are the Coordinator of a resumed session.")
+    assert "You are the Coordinator of a resumed session." in captured["instructions"]
     assert captured["resets"] == 1
 
 

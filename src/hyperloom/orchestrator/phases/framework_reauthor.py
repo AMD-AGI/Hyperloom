@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""FRAMEWORK_AGENT re-authoring: apply-failure retries, critic-feedback rewrites and the authored lane's re-arm."""
+"""FRAMEWORK_AGENT re-authoring: apply-failure retries and the authored lane's re-arm."""
 
 from __future__ import annotations
 
@@ -10,15 +10,13 @@ from collections.abc import Mapping
 from typing import Any, NamedTuple
 from hyperloom_common.coerce import first_str, to_list, to_mapping
 from ..state.task_registry import TaskNotFound, TaskSpec
-from ..state.pending_proposal import PendingProposal
 from hyperloom.orchestrator.lever import LEVER_SOURCE_PATCH
-from .framework_records import ProgressStamp, _record_review_outcome
-from .framework_proposals import FRAMEWORK_CRITIC_DENIED_STATUS
+from .framework_records import ProgressStamp
 
 log = _logging.getLogger(__name__)
 
 
-# Unified authored-lane max attempts (apply-failure retries + Critic reauthor).
+# Authored-lane max apply-failure retries.
 _AUTHORED_LANE_MAX_ATTEMPTS: int = 3
 
 
@@ -67,7 +65,7 @@ def _apply_failure_feedback_lines(retry: AuthoringRetry) -> list[str]:
 
 
 class _ReauthorMixin:
-    """Re-authors a framework candidate after an apply failure or a critic denial, within its budget."""
+    """Re-authors a framework candidate after an apply failure, within its budget."""
 
     async def _maybe_rearm_authored_lane(self, res: dict[str, Any] | None, params: Mapping[str, Any]) -> None:
         """Route an authored lane's result to the handler that rearms it: enablement settles, a perf apply-failure re-authors the candidate ``params`` name, under cap."""
@@ -162,7 +160,7 @@ class _ReauthorMixin:
     async def _reauthor_framework_candidate(
         self, retry: AuthoringRetry, candidate: dict[str, Any], feedback: str
     ) -> str:
-        """Re-dispatch the upstream-PR authoring specialist, seeding it with the apply failure as Critic feedback."""
+        """Re-dispatch the upstream-PR authoring specialist, seeding it with the apply failure."""
         cand_id = self._framework_candidate_key(candidate)
         if not cand_id:
             log.warning("_enqueue_author_specialist: perf_framework missing cand_id")
@@ -172,7 +170,7 @@ class _ReauthorMixin:
             candidate,
             audit=to_mapping(spec_params.get("framework_audit")),
             reauthor_attempt=retry.attempt,
-            critic_feedback={"advice_text": feedback} if feedback else None,
+            apply_failure_feedback=feedback,
         )
         log.info(
             "AUTHORED_LANE: dispatched perf_framework retry specialist cand=%s attempt=%d task=%s",
@@ -261,162 +259,3 @@ class _ReauthorMixin:
             state.save(self.session_dir)
         except OSError:
             log.debug("drain_apply_fail: save failed", exc_info=True)
-
-    async def record_critic_denial(
-        self,
-        pending: "PendingProposal",
-        reasoning: str,
-    ) -> None:
-        """Record a ``critic_denied`` FRAMEWORK row when the async gate rejects a candidate."""
-        payload = pending.payload or {}
-        cand_id = str(
-            payload.get("framework_agent_candidate_id")
-            or self._framework_candidate_key(
-                payload.get("candidate") if isinstance(payload.get("candidate"), dict) else None
-            )
-        )
-        batch_id = str(payload.get("batch_id") or "")
-        self._stamp_framework_progress(
-            ProgressStamp(
-                candidate_id=cand_id,
-                batch_id=batch_id,
-                status=FRAMEWORK_CRITIC_DENIED_STATUS,
-                rationale=str(reasoning or ""),
-                provenance="critic",
-            )
-        )
-        _record_review_outcome(
-            self,
-            cand_id,
-            verdict="reject",
-            reason=str(reasoning or ""),
-            denied=True,
-        )
-        log.info(
-            "FRAMEWORK: critic rejected candidate=%s batch=%s rationale=%r",
-            cand_id,
-            batch_id,
-            str(reasoning or "")[:200],
-        )
-
-    async def maybe_reauthor_from_critic_feedback(
-        self,
-        pending: "PendingProposal",
-        advisory: dict[str, Any] | None,
-    ) -> None:
-        """Re-author a framework_agent deliverable once, seeding the next authoring round with the Critic's ``required_evidence``."""
-        advisory = to_mapping(advisory)
-        if first_str(getattr(pending, "action_name", "")) != "integrate_patch":
-            return
-        # Resolve the candidate identity FIRST so the two dead-end returns below (no required_evidence / reauthor cap)
-        # can stamp a terminal progress row — a needs_review verdict that neither re-authors nor materializes would
-        # otherwise leave the candidate row-less and re-selected forever.
-        payload = to_mapping(getattr(pending, "payload", None))
-        authored = to_mapping(payload.get("params")) if not payload.get("framework_agent_candidate_id") else {}
-        old_sid = first_str(authored.get("specialist_task_id")).strip()
-        candidate, audit = await self._reauthor_target(payload)
-        cand_id = self._framework_candidate_key(candidate)
-        if not cand_id:
-            return
-        batch_id = first_str(candidate.get("batch_id"), payload.get("batch_id"))
-        required_evidence = [str(x).strip() for x in to_list(advisory.get("required_evidence")) if str(x).strip()]
-        if not required_evidence:
-            # needs_review with nothing to act on: no re-author is possible, so this is terminal for the candidate.
-            self._stamp_framework_progress(
-                ProgressStamp(
-                    candidate_id=cand_id,
-                    batch_id=batch_id,
-                    status="needs_review_no_evidence",
-                    rationale=first_str(advisory.get("advice_text"))[:500],
-                    provenance="critic",
-                )
-            )
-            return
-        if await self._candidate_is_materializing(cand_id):
-            return
-        attempts = to_mapping(self.shared_state.specialist_reauthor_attempts)
-        prior = int(attempts.get(cand_id, 0) or 0)
-        if prior >= _AUTHORED_LANE_MAX_ATTEMPTS:
-            await self._close_out_spent_reauthor_budget(pending, cand_id=cand_id, batch_id=batch_id, attempts=prior)
-            return
-        attempt = prior + 1
-        attempts[cand_id] = attempt
-        self.shared_state.specialist_reauthor_attempts = attempts
-        critic_feedback = {
-            "required_evidence": required_evidence,
-            "advice_text": first_str(advisory.get("advice_text")),
-            "risks": [str(r).strip() for r in to_list(advisory.get("risks")) if str(r).strip()],
-        }
-        new_task_id = await self._enqueue_framework_agent_authoring_specialist(
-            candidate, audit=audit, reauthor_attempt=attempt, critic_feedback=critic_feedback
-        )
-        try:
-            self.shared_state.save(self.session_dir)
-        except OSError:
-            log.exception("save after re-author dispatch failed candidate=%s", cand_id)
-        await self.bus.record_observation(
-            "coordinator",
-            "observation",
-            {
-                "kind": "specialist_reauthor_dispatched",
-                "candidate_id": cand_id,
-                "attempt": attempt,
-                "proposal_msg_id": first_str(getattr(pending, "proposal_msg_id", "")),
-                "old_specialist_task_id": old_sid,
-                "new_specialist_task_id": new_task_id,
-                "verdict": "needs_review",
-                "required_evidence": required_evidence[:6],
-            },
-        )
-
-    async def _reauthor_target(self, payload: Mapping[str, Any]) -> tuple[dict[str, Any], dict[str, Any]]:
-        """The candidate row and the audit a needs_review integrate_patch proposal re-authors from."""
-        if payload.get("framework_agent_candidate_id"):
-            return to_mapping(payload.get("candidate")), to_mapping(payload.get("audit"))
-        params = to_mapping(payload.get("params"))
-        if not params.get("framework_agent_authoring"):
-            return {}, {}
-        spec_params = await self._authoring_specialist_params(first_str(params.get("specialist_task_id")).strip())
-        candidate = {
-            "candidate_id": first_str(
-                params.get("framework_agent_candidate_id"), spec_params.get("framework_agent_candidate_id")
-            ),
-            "batch_id": first_str(params.get("framework_batch_id"), spec_params.get("framework_batch_id")),
-            "title": first_str(spec_params.get("gap_symptom")),
-            "framework": first_str(spec_params.get("framework")),
-            "gap_canonical_id": first_str(spec_params.get("gap_canonical_id")),
-        }
-        return candidate, to_mapping(spec_params.get("framework_audit"))
-
-    async def _candidate_is_materializing(self, cand_id: str) -> bool:
-        """True while an integrate_patch task for ``cand_id`` is already queued or running."""
-        return any(
-            first_str(to_mapping(t.params).get("framework_agent_candidate_id")) == cand_id
-            for t in (*await self.tasks.queued(), *await self.tasks.running())
-            if t.kind == "integrate_patch"
-        )
-
-    async def _close_out_spent_reauthor_budget(
-        self, pending: "PendingProposal", *, cand_id: str, batch_id: str, attempts: int
-    ) -> None:
-        """Settle a candidate whose re-author budget is spent: the cap is terminal for it."""
-        await self.bus.record_observation(
-            "coordinator",
-            "observation",
-            {
-                "kind": "reauthor_cap_reached",
-                "candidate_id": cand_id,
-                "attempts": attempts,
-                "proposal_msg_id": first_str(getattr(pending, "proposal_msg_id", "")),
-                "verdict": "needs_review",
-            },
-        )
-        self._stamp_framework_progress(
-            ProgressStamp(
-                candidate_id=cand_id,
-                batch_id=batch_id,
-                status="reauthor_cap",
-                rationale=f"reauthor attempts >= cap ({_AUTHORED_LANE_MAX_ATTEMPTS})",
-                provenance="pump",
-            )
-        )

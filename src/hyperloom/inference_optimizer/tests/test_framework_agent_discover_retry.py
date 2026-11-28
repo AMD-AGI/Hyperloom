@@ -99,7 +99,7 @@ class _TasksStub:
         self.calls.append(vars(spec))
         if self._fail:
             raise RuntimeError("simulated registry failure")
-        return SimpleNamespace(task_id="t-ok")
+        return SimpleNamespace(task_id="t-ok", state="queued"), False
 
 
 async def _call_enqueue(stub: _CoordinatorStub, cand: dict[str, Any]) -> None:

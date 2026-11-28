@@ -264,10 +264,7 @@ def _heartbeat() -> Intent:
 @pytest.mark.asyncio
 async def test_coordinator_run_is_one_session_span(session_dir):
     silent = ScriptedPlan(turns=[], default_intent=_heartbeat())
-    c = Coordinator(
-        session_dir,
-        backends={"orchestration": MockBackend(silent, name="o"), "critic": MockBackend(silent, name="c")},
-    )
+    c = Coordinator(session_dir, backends={"orchestration": MockBackend(silent, name="o")})
     try:
         assert await c.run(options=RunOptions(max_ticks=2)) == "max_ticks"
     finally:

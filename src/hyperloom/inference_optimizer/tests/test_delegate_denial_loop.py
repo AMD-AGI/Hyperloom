@@ -23,7 +23,6 @@ def _silent_coordinator(session_dir) -> Coordinator:
         session_dir,
         backends={
             "orchestration": MockBackend(silent, name="o"),
-            "critic": MockBackend(silent, name="c"),
         },
     )
 
@@ -137,7 +136,7 @@ async def test_delegate_fallback_key_uses_tick_and_content_fingerprint(session_d
 
 
 @pytest.mark.asyncio
-async def test_policy_denial_records_target_proposal_message_id(session_dir):
+async def test_a_policy_denial_is_a_row_of_the_open_phase_event(session_dir):
     from hyperloom.inference_optimizer.breakdown.exporter import build
     from hyperloom.inference_optimizer.breakdown.recorder import phase_event
     from hyperloom.inference_optimizer.breakdown.recorder.phase_records import PhaseCycle, PhaseEntry, PhaseExit
@@ -153,7 +152,7 @@ async def test_policy_denial_records_target_proposal_message_id(session_dir):
             phase_event.record_entry(PhaseEntry(at=PhaseCycle("PRELUDE", 0), sequence=1))
             intent = Intent(
                 type=IntentType.DELEGATE,
-                payload={"action_name": "baseline", "target_proposal_msg_id": "proposal-42"},
+                payload={"action_name": "baseline"},
             )
             await coordinator.router.record_policy_denied(
                 "orchestration",
@@ -174,8 +173,12 @@ async def test_policy_denial_records_target_proposal_message_id(session_dir):
 
     event = next(row for row in breakdown["timeline"] if row["type"] == "phase")
     denial = event["ext"]["denials"]["rows"][0]
-    assert denial["proposal_msg_id"] == "proposal-42"
-    assert denial["rule"] == "phase_action_not_allowed"
+    assert (denial["actor"], denial["action"], denial["rule"]) == (
+        "orchestration",
+        "baseline",
+        "phase_action_not_allowed",
+    )
+    assert denial["proposal_msg_id"] is None
 
 
 # Mission summary: the stack-changed warning

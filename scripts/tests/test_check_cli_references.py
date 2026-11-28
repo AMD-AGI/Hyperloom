@@ -16,8 +16,8 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 
 @pytest.fixture
 def root(tmp_path: Path) -> Path:
-    (tmp_path / "src" / "hyperloom" / "agents" / "critic" / "runtime").mkdir(parents=True)
-    (tmp_path / "src" / "hyperloom" / "agents" / "critic" / "runtime" / "cli.py").write_text(
+    (tmp_path / "src" / "hyperloom" / "agents" / "example" / "runtime").mkdir(parents=True)
+    (tmp_path / "src" / "hyperloom" / "agents" / "example" / "runtime" / "cli.py").write_text(
         'if __name__ == "__main__":\n    main()\n', encoding="utf-8"
     )
     (tmp_path / "src" / "hyperloom" / "tool.py").write_text("def main(): ...\n", encoding="utf-8")
@@ -38,7 +38,7 @@ def test_resolvable_references_pass(root: Path) -> None:
         "python3 -m hyperloom optimize --model m\n"
         'python -m hyperloom session events "$S"\n'
         '"$PYTHON" -m hyperloom check "$MODEL_PATH"\n'
-        "python -m hyperloom.agents.critic.runtime.cli prepare-review --request r\n"
+        "python -m hyperloom.agents.example.runtime.cli prepare --request r\n"
         '"$PYTHON" -m pip install x\n'
         "python3 -m hyperloom_kb --host 0.0.0.0 --port 8787\n"
         "python3 -m atom.entrypoints.openai_server --help\n"
@@ -57,8 +57,8 @@ def test_legacy_removed_module_reference_allowed(root: Path) -> None:
 def test_unresolvable_references_are_reported(root: Path) -> None:
     _skill(
         root,
-        "python -m runtime.cli prepare-review\n"
-        "python -m hyperloom.agents.critic.cli prepare-review\n"
+        "python -m runtime.cli prepare\n"
+        "python -m hyperloom.agents.example.cli prepare\n"
         "python -m hyperloom recover-session --session-dir s\n"
         "python -m hyperloom session dump\n"
         "python3 src/hyperloom/tools/gone.py\n"
@@ -66,7 +66,7 @@ def test_unresolvable_references_are_reported(root: Path) -> None:
     )
     assert check(root) == [
         "SKILL.md:1: module runtime.cli is not a hyperloom/kernelforge module",
-        "SKILL.md:2: module hyperloom.agents.critic.cli is not runnable with -m",
+        "SKILL.md:2: module hyperloom.agents.example.cli is not runnable with -m",
         "SKILL.md:3: `hyperloom recover-session` is not a hyperloom command",
         "SKILL.md:4: `hyperloom session dump` is not a session command",
         "SKILL.md:5: script src/hyperloom/tools/gone.py does not exist",

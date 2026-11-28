@@ -79,7 +79,7 @@ async def coordinator(tmp_path, monkeypatch):
     silent = ScriptedPlan(turns=[])
     coord = Coordinator(
         make_session_dir(),
-        backends={"orchestration": MockBackend(silent, name="o"), "critic": MockBackend(silent, name="c")},
+        backends={"orchestration": MockBackend(silent, name="o")},
     )
     try:
         (tmp_path / "fw").mkdir()

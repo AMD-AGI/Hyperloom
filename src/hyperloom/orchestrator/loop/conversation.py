@@ -31,7 +31,6 @@ from hyperloom.common.env_safety import redact_secret_values
 from hyperloom.common.prompt_safety import defang_prompt_structure as _defang_prompt_structure
 from hyperloom.common.prompt_safety import flatten_for_prompt as _flatten_for_inbox
 
-from .verdicts import serialize_verdict_advisory
 from ..state.task_registry import Task
 from hyperloom.inference_optimizer.session.session_paths import runs_dir
 from ..collaborator import CoordinatorCollaborator
@@ -210,27 +209,6 @@ def _format_delegated_result(head: str, payload: dict[str, Any], max_variant_row
     )
 
 
-def _format_review_verdict(head: str, payload: dict[str, Any]) -> str:
-    """Render a Critic verdict with the counts of the advisory it carries."""
-    parts = [
-        f"{head} target={payload.get('target_proposal_msg_id')!r} "
-        f"verdict={payload.get('verdict')!r} "
-        f"reasoning={str(payload.get('reasoning') or '')[:140]!r}"
-    ]
-    advisory = serialize_verdict_advisory(payload)
-    required_evidence = advisory.get("required_evidence")
-    if required_evidence:
-        shown = "; ".join(str(item) for item in required_evidence[:3])
-        parts.append(f"required_evidence[{len(required_evidence)}]={shown[:140]!r}")
-    risks = advisory.get("risks")
-    if risks:
-        parts.append(f"risks={len(risks)}")
-    advice_text = advisory.get("advice_text")
-    if advice_text:
-        parts.append(f"advice={advice_text[:140]!r}")
-    return " ".join(parts)
-
-
 def _format_inbox_event(m: "Message", *, max_variant_rows: int = 3) -> str:
     """Render one inbox ``Message`` as a compact, high-signal line."""
     topic = (m.topic or "").strip()
@@ -241,8 +219,6 @@ def _format_inbox_event(m: "Message", *, max_variant_rows: int = 3) -> str:
 
     if topic == "delegated_result":
         return _format_delegated_result(head, payload, max_variant_rows)
-    if topic == "review_verdict":
-        return _format_review_verdict(head, payload)
     if topic == "observation" and payload.get("kind") is not None:
         return f"{head} kind={payload.get('kind')!r} payload={payload}"
     if topic == "alert":
@@ -631,15 +607,8 @@ class ConversationCollaborator(CoordinatorCollaborator):
         """
         cursor = await self.cursors.load(agent_name)
         unread = await self.bus.replay_for(agent_name, after_seq=cursor.last_processed_seq)
-        rendered = await self._augment_critic_inbox_with_pending(unread) if agent_name == "critic" else unread
-        # Only Orchestration acts on variant-level failures; the reviewers do not.
-        variant_rows = 3 if agent_name == "orchestration" else 0
-        inbox_lines = _fit_to_budget(
-            [f"  {_format_inbox_event(m, max_variant_rows=variant_rows)}" for m in rendered],
-            _INBOX_PROMPT_CHARS,
-        )
-        unread_ids = {m.msg_id for m in unread}
-        read = [m for m in rendered[: len(inbox_lines)] if m.msg_id in unread_ids]
+        inbox_lines = _fit_to_budget([f"  {_format_inbox_event(m)}" for m in unread], _INBOX_PROMPT_CHARS)
+        read = unread[: len(inbox_lines)]
         last_seq = cursor.last_processed_seq
         if read:
             last_seq = int(read[-1].seq)
@@ -700,7 +669,7 @@ class ConversationCollaborator(CoordinatorCollaborator):
         context.append(resource_pools_summary(self.shared_state))
         if agent_name == "orchestration":
             context.extend(self._orchestration_context_sections())
-            # A task finishing, a proposal leaving the queue or a plateau count lands between
+            # A task finishing or a plateau count lands between
             # two ticks, so these blocks follow the ledger into the turn: the cached
             # prefix ends above them and holds for the session.
             turn.extend(await self._orchestration_turn_sections())
@@ -712,13 +681,10 @@ class ConversationCollaborator(CoordinatorCollaborator):
     async def admit_turn(self, agent_name: str, now_unix: float) -> bool:
         """Whether ``agent_name`` takes a turn this tick.
 
-        Critic runs only while a proposal awaits its verdict.
         Orchestration sits out custom-only FRAMEWORK_AGENT, where all it may emit is denied. Elsewhere it takes a turn
         when the phase or the queued and running tasks differ from what its last settled turn left, when its inbox holds
         a message that asks something of it, or once the heartbeat elapses.
         """
-        if agent_name == "critic":
-            return bool(self.state.pending_proposals)
         if agent_name != "orchestration":
             return True
         if custom_only_framework(self.shared_state):
@@ -749,27 +715,6 @@ class ConversationCollaborator(CoordinatorCollaborator):
         if agent_name == "orchestration":
             self._settled_view = await self._orchestration_view()
             self._settled_at = time.time()
-
-    async def _augment_critic_inbox_with_pending(self, rendered: list["Message"]) -> list["Message"]:
-        """Ensure every undecided proposal awaiting a Critic verdict is present."""
-        pending = list(self.state.pending_proposals.values())
-        if not pending:
-            return rendered
-        seen = {getattr(m, "msg_id", None) for m in rendered}
-        extra: list["Message"] = []
-        for p in pending:
-            pid = str(getattr(p, "proposal_msg_id", "") or "")
-            if not pid or pid in seen:
-                continue
-            pm = await self.bus.lookup_by_id(pid)
-            if pm is not None:
-                extra.append(pm)
-                seen.add(pid)
-        if not extra:
-            return rendered
-        merged = list(rendered) + extra
-        merged.sort(key=lambda m: int(getattr(m, "seq", 0) or 0))
-        return merged
 
     async def load_system_prompt(self, agent_name: str) -> str:
         """Load the system prompt for an agent, honoring overrides."""

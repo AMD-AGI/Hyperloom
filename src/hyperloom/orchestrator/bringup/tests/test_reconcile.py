@@ -15,7 +15,6 @@ import pytest
 
 from hyperloom.orchestrator.bringup import reconcile
 from hyperloom.orchestrator.bringup.reconcile import (
-    TIMEOUT_VERDICT,
     ReconcileLinks,
     Reconciler,
     ReconcileStores,
@@ -79,13 +78,6 @@ class _State:
         self.saved += 1
 
 
-class _Pending:
-    """A proposal the loop is still waiting on."""
-
-    def __init__(self, specialist: str) -> None:
-        self.payload = {"params": {"specialist_task_id": specialist}}
-
-
 @pytest.fixture
 def db(tmp_path):
     """A real session database."""
@@ -95,7 +87,7 @@ def db(tmp_path):
 
 
 def _build(
-    db, *, proposals=None, state=None, result_pending=None, resources=None
+    db, *, state=None, result_pending=None, resources=None
 ) -> tuple[Reconciler, RoundStore, TaskRegistry, _State]:
     """A reconciler over ``db``, with the pieces a test needs to inspect."""
     rounds = RoundStore(db)
@@ -106,8 +98,6 @@ def _build(
         shared,
         links=ReconcileLinks(
             resources=ResourceFacts() if resources is None else resources,
-            proposals=lambda: proposals if proposals is not None else {},
-            drop_proposal=lambda _pending, _reason: None,
             session_dir=db.db_path.parent,
             result_pending=result_pending or (lambda _task_id: False),
         ),
@@ -284,21 +274,6 @@ async def test_terminal_round_uses_latest_cleanup_outcome(db, state, appended, c
 
 
 @pytest.mark.asyncio
-async def test_an_undecided_review_holds_the_round_open_until_its_ttl(db):
-    """The gap between the specialist and the integrate is a proposal, not a task."""
-    pending = {"m1": _Pending("spec-1")}
-    rec, rounds, tasks, _ = _build(db, proposals=pending)
-    # A lease long enough that the deadline rule is not what answers here.
-    await _open_round(rounds, tasks, holder="spec-1", lease=100_000.0)
-    await tasks.transition("spec-1", "running")
-    await tasks.transition("spec-1", "succeeded")
-
-    await rec.run(_NOW + 10_000.0)
-
-    assert (await rounds.get("round-spec-1")).state == OPEN
-
-
-@pytest.mark.asyncio
 async def test_a_terminal_holder_with_nothing_following_it_expires_on_its_cap(db):
     """Not on the tick it went terminal -- the successor is created by a later one."""
     rec, rounds, tasks, _ = _build(db)
@@ -341,77 +316,6 @@ async def test_a_running_task_whose_process_is_gone_is_failed_and_one_unobservab
 
 
 @pytest.mark.asyncio
-async def test_an_unanswered_review_is_denied_and_a_verdict_that_arrived_is_not_overwritten(db):
-    """The timeout is a deny, and it is written compare-and-set."""
-    pending = {"m-late": _Pending("spec-1"), "m-answered": _Pending("spec-2")}
-    rec, _rounds, _tasks, _ = _build(db, proposals=pending)
-    async with db.transaction() as cur:
-        for msg_id in ("m-late", "m-answered"):
-            cur.execute(
-                "INSERT INTO events (msg_id, from_agent, to_agent, topic, in_reply_to, payload, ts)"
-                " VALUES (?, 'orchestration', '*', 'proposal', NULL, '{}', '2020-01-01T00:00:00+00:00')",
-                (msg_id,),
-            )
-        cur.execute(
-            "INSERT INTO events (msg_id, from_agent, to_agent, topic, in_reply_to, payload, ts)"
-            " VALUES ('v1', 'critic', '*', 'review_verdict', NULL, ?, '2020-01-01T00:01:00+00:00')",
-            (json.dumps({"target_proposal_msg_id": "m-answered", "verdict": "approve"}),),
-        )
-
-    await rec.run(_NOW)
-
-    verdicts = await db.fetchall("SELECT payload FROM events WHERE topic = 'review_verdict' ORDER BY seq")
-    decoded = [json.loads(row["payload"]) for row in verdicts]
-    assert [(d["target_proposal_msg_id"], d["verdict"]) for d in decoded] == [
-        ("m-answered", "approve"),
-        ("m-late", TIMEOUT_VERDICT),
-    ]
-    assert list(pending) == ["m-answered"]
-
-
-@pytest.mark.asyncio
-async def test_a_timeout_deny_closes_the_proposal_span_once(db, tmp_path):
-    """The deny bypasses the verdict handler, so the pass itself closes the proposal on the trajectory ledger."""
-    from hyperloom.inference_optimizer.trace import trajectory_trace as tt
-
-    pending = {"m-late": _Pending("spec-1")}
-    pending["m-late"].action_name = "integrate_patch"
-    rec, _rounds, _tasks, _ = _build(db, proposals=pending)
-    async with db.transaction() as cur:
-        cur.execute(
-            "INSERT INTO events (msg_id, from_agent, to_agent, topic, in_reply_to, payload, ts)"
-            " VALUES ('m-late', 'orchestration', '*', 'proposal', NULL, '{}', '2020-01-01T00:00:00+00:00')"
-        )
-
-    with tt.trajectory_scope(session_dir=tmp_path, component="coordinator"):
-        await rec.run(_NOW)
-        await rec.run(_NOW)
-
-    rows = [row for row in tt.load_events(tmp_path) if row["event_type"] == tt.EVENT_PROPOSAL]
-    assert [(row["span_id"], row["status"]) for row in rows] == [("m-late", tt.STATUS_CANCELLED)]
-    assert rows[0]["attributes"]["reason"] == "review_timeout"
-    assert rows[0]["attributes"]["verdict"] == TIMEOUT_VERDICT
-    assert rows[0]["attributes"]["name"] == "integrate_patch"
-
-
-@pytest.mark.asyncio
-async def test_a_second_pass_does_not_deny_a_proposal_twice(db):
-    """The compare-and-set is the guard, so the pass is safe to run every tick."""
-    rec, _rounds, _tasks, _ = _build(db)
-    async with db.transaction() as cur:
-        cur.execute(
-            "INSERT INTO events (msg_id, from_agent, to_agent, topic, in_reply_to, payload, ts)"
-            " VALUES ('m1', 'orchestration', '*', 'proposal', NULL, '{}', '2020-01-01T00:00:00+00:00')"
-        )
-
-    await rec.run(_NOW)
-    await rec.run(_NOW)
-
-    rows = await db.fetchall("SELECT 1 FROM events WHERE topic = 'review_verdict'")
-    assert len(rows) == 1
-
-
-@pytest.mark.asyncio
 async def test_the_resource_facts_are_reread_from_what_the_rules_left(db):
     """The facts the gate reads reflect the repair, not the state before it."""
     facts = ResourceFacts()
@@ -437,7 +341,7 @@ async def test_a_rule_that_raises_does_not_stop_the_rules_after_it(db):
     async def _boom(*_a, **_k):
         raise sqlite3.OperationalError("database is locked")
 
-    rec._deny_timed_out_reviews = _boom
+    rec._reap_leases = _boom
 
     report = await rec.run(_NOW + 10.0)
 
@@ -454,7 +358,7 @@ async def test_a_rule_that_raises_a_bug_fails_the_pass(db):
     async def _boom(*_a, **_k):
         raise RuntimeError("rule failed")
 
-    rec._deny_timed_out_reviews = _boom
+    rec._reap_leases = _boom
 
     with pytest.raises(RuntimeError, match="^rule failed$"):
         await rec.run(_NOW)

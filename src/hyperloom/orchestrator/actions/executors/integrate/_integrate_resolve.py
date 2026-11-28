@@ -17,7 +17,7 @@ from hyperloom.inference_optimizer.session.session_paths import enablement_stack
 
 from ....state.shared_state import inject_stack_base_params
 from .._integrate_attempt import IntegrateAttempt
-from ._integrate_refusals import _enablement_lane_closed_skip, _enforce_critic_gate
+from ._integrate_refusals import _enablement_lane_closed_skip
 from ..patching._patch_source_pr import _candidate_slug, materialize_candidate_patches
 from ._integrate_vocabulary import PATCH_SOURCE_UPSTREAM_PR, resolve_patch_source
 from ..patching._patch_sources import (
@@ -75,7 +75,7 @@ class ResolveStageMixin:
         params: dict[str, Any],
         extra: dict[str, Any],
     ) -> dict[str, Any] | None:
-        """Guards (multi-node, task-id, workspace, Critic) + param normalisation.
+        """Guards (multi-node, task-id, workspace) + param normalisation.
 
         Returns an early-exit result dict on failure, or None to continue.
         Resolved inputs belong to this attempt, not to the runner context.
@@ -117,12 +117,11 @@ class ResolveStageMixin:
             if base_acc > 0:
                 params["accuracy_baseline"] = base_acc
 
-        # Launch-only mode: pure bench of a pre-built runtime (no specialist, no Critic).
+        # Launch-only mode: pure bench of a pre-built runtime (no specialist).
         if params.get("enablement_launch_only"):
             return self._stage_resolve_launch_only(attempt, params, shared_state)
 
-        # Upstream-PR mode has no specialist to look up and no specialist
-        # verdict to enforce: the Critic verdict on this proposal is the gate.
+        # Upstream-PR mode has no specialist to look up.
         if resolve_patch_source(params) == PATCH_SOURCE_UPSTREAM_PR:
             return self._stage_resolve_upstream_pr(attempt, params, shared_state)
 
@@ -160,22 +159,6 @@ class ResolveStageMixin:
                 "specialist_task_id": specialist_task_id,
             }
 
-        # Critic-verdict gate — enforced BEFORE any side effect (setup replay,
-        # stash, patch/artifact apply, pod fan-out). Paths that bypass PolicyGate
-        # (notably a queued/resume-dispatched task) are not re-validated there, so
-        # a forged coordinator.db row with no genuine Critic verdict must be
-        # rejected here, all-or-nothing, before it can install packages or mutate
-        # the live framework tree. specialist_patch_verdicts is a Coordinator-only
-        # field an LLM/forged row cannot write, and a legitimate
-        # integrate_patch always has its verdict persisted before the queued task
-        # is created (see intent_router._handle_single_verdict), so a genuine
-        # task is unaffected. No-op when SharedState is absent.
-        # A covered step is run by Coordinator code and is never a registry row, so the forged row this gate
-        # refuses cannot be one; the bench it runs decides its KEEP.
-        critic_reject = None if attempt.covered_step else _enforce_critic_gate(shared_state, specialist_task_id)
-        if critic_reject is not None:
-            return critic_reject
-
         attempt.specialist_task_id = specialist_task_id
         attempt.shared_state = shared_state
         attempt.specialist_workspace = specialist_workspace
@@ -200,8 +183,7 @@ class ResolveStageMixin:
             shared_state: SharedState, or ``None``.
 
         Returns:
-            A terminal result when the candidate has no permissive Critic
-            verdict or could not be materialised, else ``None``.
+            A terminal result when the candidate could not be materialised, else ``None``.
         """
         candidate = params.get("candidate") or {}
         if not isinstance(candidate, dict) or not candidate:
@@ -216,15 +198,6 @@ class ResolveStageMixin:
             # Same rebind the specialist lane does: a task queued before a KEEP
             # landed must still measure against the real stack top.
             inject_stack_base_params(params, shared_state, anchor=True, overwrite=True)
-
-        # A queued or resume-dispatched task is not re-validated by PolicyGate,
-        # and this lane fetches a remote diff into the live framework tree.
-        critic_reject = _enforce_critic_gate(
-            shared_state,
-            str(params.get("framework_agent_candidate_id") or "").strip(),
-        )
-        if critic_reject is not None:
-            return critic_reject
 
         task_id = attempt.task_id
         scratch = runs_dir(self.session_dir, "integrate_patch", task_id)

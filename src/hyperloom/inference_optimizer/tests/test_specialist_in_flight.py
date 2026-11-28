@@ -13,7 +13,6 @@ import pytest
 from hyperloom.inference_optimizer.protocol.intent import Intent, IntentType
 from hyperloom.inference_optimizer.session.paths import make_session_dir
 from hyperloom.orchestrator.loop.coordinator import Coordinator
-from hyperloom.orchestrator.state.pending_proposal import PendingProposal
 from hyperloom.orchestrator.policy.specialist_in_flight import SPECIALIST_DOMAIN_IN_FLIGHT
 from hyperloom.orchestrator.tests.mock_backend import MockBackend, ScriptedPlan
 from hyperloom.orchestrator.specialists.in_flight import held_domain, in_flight_domains
@@ -29,7 +28,7 @@ async def coord(tmp_path, monkeypatch):
     silent = ScriptedPlan(turns=[])
     c = Coordinator(
         make_session_dir(),
-        backends={"orchestration": MockBackend(silent, name="o"), "critic": MockBackend(silent, name="c")},
+        backends={"orchestration": MockBackend(silent, name="o")},
     )
     c.shared_state.phase = "FRAMEWORK_AGENT"
     yield c
@@ -45,9 +44,9 @@ def _ledger_gap(c: Coordinator, *, domain_hint: str) -> None:
     c.shared_state.upsert_gap({"canonical_id": _IDLE_GAP, "symptom": "GPU 85% idle", "domain_hint": domain_hint})
 
 
-def _approved_specialist(msg_id: str, **params: Any) -> PendingProposal:
-    payload = {"action_name": "specialist", "params": {"mode": "research", **params}}
-    return PendingProposal(msg_id, "orchestration", "specialist", predicted_gain_pct=0.0, payload=payload)
+async def _propose(c: Coordinator, **params: Any) -> None:
+    payload = {"action_name": "specialist", "predicted_gain_pct": 0.0, "params": {"mode": "research", **params}}
+    await c.router.handle_intent("orchestration", Intent(type=IntentType.PROPOSE_ACTION, payload=payload))
 
 
 async def _queued_domains(c: Coordinator) -> list[str]:
@@ -139,17 +138,13 @@ async def test_a_scope_domain_dispatch_over_two_tags_holds_the_domain_it_is_anch
     assert await _in_flight_denials(coord) == 1
 
 
-async def test_an_approved_specialist_proposal_is_judged_like_a_delegate_when_it_materializes(coord):
+async def test_a_proposed_specialist_is_judged_like_a_delegate(coord):
     _ledger_gap(coord, domain_hint=_SYSTEM)
-    await coord.proposals.materialize_approved_proposal(_approved_specialist("p1", gap_canonical_id=_IDLE_GAP))
-    await coord.proposals.materialize_approved_proposal(
-        _approved_specialist("p2", domain=_SYSTEM, gap_canonical_id="b")
-    )
+    await _propose(coord, gap_canonical_id=_IDLE_GAP)
+    await _propose(coord, domain=_SYSTEM, gap_canonical_id="b")
 
     assert await _queued_domains(coord) == [_SYSTEM]
-    observed = await coord.bus.tail(topic="observation")
-    skipped = [m.payload["reason"] for m in observed if m.payload.get("kind") == "proposal_materialize_skipped"]
-    assert skipped == [SPECIALIST_DOMAIN_IN_FLIGHT]
+    assert await _in_flight_denials(coord) == 1
 
 
 async def test_a_queued_cross_domain_specialist_holds_none_of_its_domains(coord):

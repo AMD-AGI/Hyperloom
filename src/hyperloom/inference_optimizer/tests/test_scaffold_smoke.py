@@ -111,7 +111,7 @@ async def test_sqlite_connection_async_transaction_atomic(tmp_path):
         async with sc.transaction() as cur:
             cur.execute(
                 "INSERT INTO events(msg_id, from_agent, to_agent, topic, payload, ts) VALUES (?,?,?,?,?,?)",
-                ("m-tx", "Critic", "Orchestration", "review_verdict", "{}", "t"),
+                ("m-tx", "Coordinator", "Orchestration", "delegated_result", "{}", "t"),
             )
             cur.execute(
                 "INSERT INTO cursors(agent, last_processed_seq) VALUES (?,?)",

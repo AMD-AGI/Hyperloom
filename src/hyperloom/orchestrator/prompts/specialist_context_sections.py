@@ -162,7 +162,7 @@ def _section_kb_context(inp: SpecialistPromptInputs) -> list[str]:
                 "Structured KB context is empty for this (model, hardware, domain), but "
                 + "the research scout collected source-backed priors this "
                 + "session. Treat these as your advisory prior (co-equal with "
-                + "RecipeKB priors; the Critic still gates the final answer):",
+                + "RecipeKB priors; the benchmark still decides the final answer):",
                 "",
                 inp.research_hints,
                 "",

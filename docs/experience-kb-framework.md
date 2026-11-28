@@ -51,8 +51,8 @@ declared in `breakdown/schema_framework.py` (`V6FrameworkAttempt`, `V6FrameworkP
 
 Configuration variants preserve their authored action-time `reasoning` (and
 record which payload field supplied it in `reasoning_origin`) on the measured
-attempt. Every explore grid the orchestration agent emits, whether proposed
-for review or delegated to run directly, records one proposal, and its task
+attempt. Every explore grid the orchestration agent emits, whether sent as a
+`propose_action` or as a `delegate`, records one proposal, and its task
 carries that proposal's id so its attempts join it. Source candidates preserve discovery reasoning. Gap
 context and post-action result text are recorded when present but are not
 accepted as original decision reasoning, and a provenance label such as

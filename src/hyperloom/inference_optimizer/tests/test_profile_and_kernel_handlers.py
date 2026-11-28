@@ -87,7 +87,7 @@ def _heartbeat() -> Intent:
 
 def _backends_silent() -> dict[str, object]:
     silent = ScriptedPlan(turns=[], default_intent=_heartbeat())
-    return {n: MockBackend(silent, name=n) for n in ("orchestration", "critic")}
+    return {"orchestration": MockBackend(silent, name="orchestration")}
 
 
 def test_mi325x_session_records_the_real_gpu_type(tmp_path, monkeypatch):

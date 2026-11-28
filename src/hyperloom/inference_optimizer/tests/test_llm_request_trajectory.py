@@ -7,11 +7,10 @@ from __future__ import annotations
 
 import itertools
 import json
-from types import SimpleNamespace
 
 import pytest
 
-from hyperloom_common.llm.token_usage import openai_usage_counts, uncached_input_tokens
+from hyperloom_common.llm.token_usage import uncached_input_tokens
 from hyperloom.inference_optimizer.protocol.intent import Intent, IntentType
 from hyperloom.orchestrator.loop.coordinator import Coordinator, RunOptions
 from hyperloom.orchestrator.roles import claude as cl
@@ -20,11 +19,9 @@ from hyperloom.orchestrator.roles.claude_requests import (
     TIMING_STREAM,
     ClaudeRequestTracker,
 )
-from hyperloom.orchestrator.roles.critic_agent import _accumulate_usage
 from hyperloom.orchestrator.tests.mock_backend import MockBackend, ScriptedPlan
 from hyperloom.inference_optimizer.trace import parse_usage as pu
 from hyperloom.inference_optimizer.trace import trajectory_trace as tt
-from .conftest import seed_pending_critic_proposal
 
 sdk_types = pytest.importorskip("claude_agent_sdk.types")
 
@@ -181,10 +178,9 @@ async def test_each_reactor_turn_is_an_llm_call_span_under_the_session(session_d
     silent = ScriptedPlan(turns=[], default_intent=_heartbeat())
     c = Coordinator(
         session_dir,
-        backends={"orchestration": MockBackend(silent, name="o"), "critic": MockBackend(silent, name="c")},
+        backends={"orchestration": MockBackend(silent, name="o")},
     )
     try:
-        await seed_pending_critic_proposal(c)
         await c.run(options=RunOptions(max_ticks=1))
     finally:
         await c.stop()
@@ -193,7 +189,7 @@ async def test_each_reactor_turn_is_an_llm_call_span_under_the_session(session_d
     calls = [r for r in rows if r["event_type"] == tt.EVENT_LLM_CALL]
     started = [r for r in calls if r["status"] == tt.STATUS_STARTED]
     closed = [r for r in calls if r["status"] == tt.STATUS_COMPLETED]
-    assert {r["agent"] for r in started} == {"orchestration", "critic"}
+    assert {r["agent"] for r in started} == {"orchestration"}
     assert {r["parent_span_id"] for r in started} == {session["span_id"]}
     assert sorted(r["span_id"] for r in started) == sorted(r["span_id"] for r in closed)
     assert all(r["call_id"] for r in started)
@@ -204,21 +200,6 @@ def test_uncached_input_subtracts_the_cached_prefix():
     assert uncached_input_tokens(100, None) == 100
     assert uncached_input_tokens(10, 30) == 0
     assert uncached_input_tokens(None, 5) is None
-
-
-def test_critic_openai_usage_reports_cached_tokens_separately():
-    acc = {"input_tokens": 0, "output_tokens": 0}
-    usage = SimpleNamespace(
-        prompt_tokens=1000,
-        completion_tokens=50,
-        prompt_tokens_details=SimpleNamespace(cached_tokens=800),
-    )
-    second = SimpleNamespace(prompt_tokens=10, completion_tokens=5)
-    _accumulate_usage(acc, openai_usage_counts(usage), usage)
-    _accumulate_usage(acc, openai_usage_counts(second), second)
-    assert acc["input_tokens"] == 200 + 10
-    assert acc["cache_read_input_tokens"] == 800
-    assert acc["output_tokens"] == 55
 
 
 def test_claude_stream_json_usage_names_the_serving_model(tmp_path):

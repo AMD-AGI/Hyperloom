@@ -249,27 +249,6 @@ class _PhaseStateMixin:
         else:
             self.params_no_promote_streak += 1
 
-    def record_specialist_patch_verdict(
-        self,
-        subject: str,
-        verdict: str,
-    ) -> None:
-        """Record the Critic verdict for a patch's review subject; idempotent (later verdict overwrites)."""
-        sid = str(subject or "").strip()
-        if not sid:
-            return
-        self.specialist_patch_verdicts[sid] = str(verdict or "").strip().lower()
-
-    def get_specialist_patch_verdict(
-        self,
-        subject: str,
-    ) -> str:
-        """Return the patch verdict, or empty when no Critic decision exists."""
-        sid = str(subject or "").strip()
-        if not sid:
-            return ""
-        return self.specialist_patch_verdicts.get(sid, "") or ""
-
     def apply_explore_search_update(self, update: dict[str, Any], *, advance_round: bool = True) -> None:
         """Merge an ExploreExecutor search update into persistent state; :meth:`record_explore_accepted` is the single writer for the ``accepted`` bucket.
 

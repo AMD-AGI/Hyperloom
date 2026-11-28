@@ -55,15 +55,17 @@ def test_the_trajectory_observer_is_registered_on_import():
 async def test_a_chat_completion_is_one_request_under_the_ambient_call(tmp_path):
     client = _AsyncChatClient(_chat_response())
     with tt.trajectory_scope(session_dir=tmp_path, component="coordinator", call_id="c-1", parent_span_id="p-1"):
-        result = await llm_config.achat_completion(client, component="critic", operation="review", model="gpt-x")
+        result = await llm_config.achat_completion(
+            client, component="framework", operation="rank_candidates", model="gpt-x"
+        )
 
     assert result.text == "ok"
     (row,) = _requests(tmp_path)
     assert row["status"] == tt.STATUS_COMPLETED
-    assert (row["component"], row["call_id"], row["parent_span_id"]) == ("critic", "c-1", "p-1")
+    assert (row["component"], row["call_id"], row["parent_span_id"]) == ("framework", "c-1", "p-1")
     attributes = row["attributes"]
     assert attributes["message_id"] == "chatcmpl-abc"
-    assert attributes["operation"] == "review"
+    assert attributes["operation"] == "rank_candidates"
     assert attributes["protocol"] == hooks.PROTOCOL_OPENAI_CHAT
     assert attributes["timing_source"] == tt.TIMING_HTTP_RESPONSE
     assert (attributes["input_tokens"], attributes["cache_read_input_tokens"]) == (60, 40)
@@ -163,12 +165,12 @@ def test_an_observer_fault_never_reaches_the_request(tmp_path, monkeypatch):
     monkeypatch.setattr(hooks, "_OBSERVERS", [])
     hooks.add_llm_request_observer(broken)
     client = SimpleNamespace(chat=SimpleNamespace(completions=SimpleNamespace(create=lambda **_: _chat_response())))
-    assert llm_config.chat_completion(client, component="critic", model="m").text == "ok"
+    assert llm_config.chat_completion(client, component="framework", model="m").text == "ok"
 
 
 def test_requests_outside_a_session_write_nothing(tmp_path):
     client = SimpleNamespace(chat=SimpleNamespace(completions=SimpleNamespace(create=lambda **_: _chat_response())))
-    llm_config.chat_completion(client, component="critic", model="m")
+    llm_config.chat_completion(client, component="framework", model="m")
     assert not _requests(tmp_path)
 
 

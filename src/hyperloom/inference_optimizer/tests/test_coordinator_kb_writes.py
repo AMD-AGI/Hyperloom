@@ -43,7 +43,6 @@ def _make_coordinator(tmp_path: Path) -> Coordinator:
     idle = ScriptedPlan(turns=[MockTurn(intents=[])])
     backends = {
         "orchestration": MockBackend(idle),
-        "critic": MockBackend(idle),
     }
 
     kb = RecipeKB(local=LocalRecipeStore(root=tmp_path / "kb"))

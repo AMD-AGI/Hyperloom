@@ -14,7 +14,7 @@ log = logging.getLogger(__name__)
 
 
 def read_rules_fragment(path: Path | None) -> str:
-    """Read a rules fragment (orchestration.md / critic.md), tolerating absence."""
+    """Read a rules fragment (orchestration.md), tolerating absence."""
     if path is None:
         return ""
     try:

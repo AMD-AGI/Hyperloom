@@ -81,13 +81,9 @@ PROPOSAL_SET_RULES: tuple[str, ...] = (
         "confidence, drop anything contradicting ``pr_evidence``, and stop "
         "at 2. A 3rd or 4th must beat the median "
         "of the first two. Padding is a failure, not thoroughness: each "
-        "weak entry costs a Critic reject and a slot on the serial "
+        "weak entry costs a slot on the serial "
         "benchmark queue. One real proposal is a better round than two "
         "padded ones, and an empty ``proposal_set`` with a clear ``summary`` "
         "is better than one."
-    ),
-    (
-        "- The Critic reviews each surviving variant before benchmarking, "
-        "so a marginal-quality proposal costs you a reject."
     ),
 )

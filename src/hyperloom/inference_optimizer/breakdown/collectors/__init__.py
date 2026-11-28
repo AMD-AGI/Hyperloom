@@ -31,7 +31,6 @@ from .v6 import (
     collect_v6_timeline as collect_v6_timeline,
 )
 from .v6_close import collect_v6_close as collect_v6_close
-from .v6_critic import collect_v6_critic as collect_v6_critic
 
 __all__ = [
     "MetadataSources",
@@ -40,7 +39,6 @@ __all__ = [
     "collect_model_info",
     "collect_session",
     "collect_v6_close",
-    "collect_v6_critic",
     "collect_v6_metadata",
     "collect_v6_outcome",
     "collect_v6_timeline",

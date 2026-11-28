@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Phase scoping of the orchestration system prompt and the Critic judge bundle."""
+"""Phase scoping of the orchestration system prompt."""
 
 from __future__ import annotations
 
@@ -288,7 +288,7 @@ def test_boot_snapshot_records_the_phase_it_was_scoped_to(tmp_path):
 
     _snapshot_system_prompts(
         tmp_path,
-        prompts={"orchestration": "BOOT PROMPT", "critic": "CRITIC"},
+        prompts={"orchestration": "BOOT PROMPT"},
         orchestration_phase="PRELUDE",
         macro_cycle=0,
     )
@@ -298,8 +298,6 @@ def test_boot_snapshot_records_the_phase_it_was_scoped_to(tmp_path):
     assert (agents / "orchestration" / "system_prompt.c0.PRELUDE.snapshot.md").read_text(
         encoding="utf-8",
     ) == "BOOT PROMPT"
-    # Critic is not phase-scoped at the system-prompt level.
-    assert not (agents / "critic" / "system_prompt.c0.PRELUDE.snapshot.md").exists()
 
 
 def test_boot_snapshot_without_a_phase_keeps_the_legacy_layout(tmp_path):
@@ -310,40 +308,6 @@ def test_boot_snapshot_without_a_phase_keeps_the_legacy_layout(tmp_path):
     orch = tmp_path / "agents" / "orchestration"
     assert (orch / "system_prompt.c0.snapshot.md").read_text(encoding="utf-8") == "BOOT"
     assert list(orch.glob("system_prompt.c0.*.snapshot.md")) == []
-
-
-# Critic: phase is structurally deliverable and injected one phase at a time
-def test_judge_bundle_to_dict_carries_phase():
-    """The on-disk bundle records the phase, so audits are not misled."""
-    from hyperloom.agents.critic.runtime.decision_reviewer import JudgeBundle
-
-    bundle = JudgeBundle(session_id="s", phase="EXPLORE")
-    assert bundle.to_dict()["phase"] == "EXPLORE"
-
-
-def test_inject_phase_constraints_delivers_only_the_active_phase():
-    from hyperloom.orchestrator.roles._review_constraints import (
-        _PHASE_ORIENTATION,
-        _inject_phase_constraints,
-    )
-
-    bundle: dict = {"proposals": []}
-    _inject_phase_constraints(bundle, "kernel_agent")
-
-    assert bundle["phase"] == "KERNEL_AGENT"
-    rc = bundle["review_constraints"]
-    assert rc["phase"] == "KERNEL_AGENT"
-    assert rc["phase_orientation"] == _PHASE_ORIENTATION["KERNEL_AGENT"]
-
-
-def test_inject_phase_constraints_is_a_noop_without_a_phase():
-    """Never assert a phase that was not delivered."""
-    from hyperloom.orchestrator.roles._review_constraints import _inject_phase_constraints
-
-    bundle: dict = {"proposals": []}
-    _inject_phase_constraints(bundle, "")
-    assert "phase" not in bundle
-    assert "review_constraints" not in bundle
 
 
 # Reloop feasibility must reach the phases where the defer/advance call is made.

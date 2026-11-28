@@ -510,11 +510,6 @@ def test_read_ko_summary_totals_missing(tmp_path):
 
 # ---- _highlight ----
 def test_highlight_topics():
-    assert "action_name" in rp._highlight({"action_name": "x"}, "proposal", "a")["summary"]
-    assert "verdict" in rp._highlight({"verdict": "keep", "reasoning": "ok"}, "review_verdict", "a")["summary"]
-    assert (
-        "kind" in rp._highlight({"kind": "k", "action_name": "n", "task_id": "12345678abc"}, "decision", "a")["summary"]
-    )
     dr = rp._highlight(
         {"kind": "k", "state": "s", "result": {"output_throughput": 1, "decision": "keep"}}, "delegated_result", "a"
     )

@@ -35,8 +35,6 @@ from hyperloom.inference_optimizer.breakdown.recorder.framework_event import (
     STEP_AUTHORED,
     STEP_PROPOSED,
     STEP_REAUTHORED,
-    STEP_REVIEWED,
-    CriticReview,
     GateVerdict,
     make_framework_recorder,
     producer_for_provenance,
@@ -134,8 +132,6 @@ def test_authoring_run_is_both_a_step_and_a_run(_bound_session):
         source_ref="vllm#4821",
     )
     recorder.record_proposal_step("cand-7", step=STEP_PROPOSED)
-    recorder.record_proposal_review("cand-7", CriticReview(verdict="approved"))
-    recorder.record_proposal_step("cand-7", step=STEP_REVIEWED, outcome="approved")
     recorder.record_run("r-auth-1", role=ROLE_AUTHORING, arm=ARM_SOURCE, status="succeeded")
     recorder.record_proposal_step("cand-7", step=STEP_AUTHORED, run_ref="r-auth-1", outcome="patch_ready")
     recorder.finish(exit_reason="both_arms_plateaued")
@@ -143,8 +139,8 @@ def test_authoring_run_is_both_a_step_and_a_run(_bound_session):
     ext = _ext(_bound_session)
     assert [row["run_id"] for row in ext["runs"]] == ["r-auth-1", "r-disc-1"]
     proposal = ext["proposals"][0]
-    assert [step["step"] for step in proposal["lifecycle"]] == [STEP_PROPOSED, STEP_REVIEWED, STEP_AUTHORED]
-    assert proposal["lifecycle"][2]["run_ref"] == "r-auth-1"
+    assert [step["step"] for step in proposal["lifecycle"]] == [STEP_PROPOSED, STEP_AUTHORED]
+    assert proposal["lifecycle"][1]["run_ref"] == "r-auth-1"
     # The authoring run produced no proposal of its own, and says so by holding an empty list.
     produced = {row["run_id"]: row["produced_ids"] for row in ext["runs"]}
     assert produced == {"r-disc-1": ["cand-7"], "r-auth-1": []}
@@ -410,15 +406,13 @@ def test_attempt_refs_are_derived_from_the_attempts(_bound_session):
 def test_dropped_proposal_keeps_its_reason(_bound_session):
     recorder = make_framework_recorder(macro_cycle=0)
     recorder.record_proposal("cand-3", arm=ARM_SOURCE, producer=PRODUCER_SPECIALIST)
-    recorder.record_proposal_review("cand-3", CriticReview(verdict="denied", reason="touches the serving loop"))
-    recorder.settle_proposal("cand-3", disposition=DISPOSITION_DROPPED, reason="critic_denied")
+    recorder.settle_proposal("cand-3", disposition=DISPOSITION_DROPPED, reason="already_present")
     recorder.finish(exit_reason="both_arms_plateaued")
 
     proposal = _ext(_bound_session)["proposals"][0]
-    assert proposal["critic_review"]["verdict"] == "denied"
     assert proposal["terminal"] == {
         "disposition": DISPOSITION_DROPPED,
-        "reason": "critic_denied",
+        "reason": "already_present",
         "settled_at": proposal["terminal"]["settled_at"],
     }
     assert proposal["attempt_refs"] == []
@@ -525,23 +519,6 @@ def test_each_macro_cycle_gets_its_own_event(_bound_session):
 )
 def test_provenance_labels_map_onto_producers(label, producer, ref):
     assert producer_for_provenance(label) == (producer, ref)
-
-
-def test_a_proposal_review_carries_exactly_the_recorded_keys(_bound_session):
-    recorder = make_framework_recorder(macro_cycle=0)
-    recorder.record_proposal("cand-5", arm=ARM_SOURCE, producer=PRODUCER_SPECIALIST)
-    recorder.record_proposal_review("cand-5", CriticReview(verdict="approved"))
-    recorder.finish(exit_reason="budget")
-
-    review = _ext(_bound_session)["proposals"][0]["critic_review"]
-    assert set(review) == {
-        "verdict",
-        "reviewer",
-        "reason",
-        "confidence",
-        "concerns",
-        "reviewed_at",
-    }
 
 
 def test_run_empty_is_null_unless_provided(_bound_session):

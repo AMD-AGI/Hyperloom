@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""FRAMEWORK_AGENT candidate-discovery rounds and the autosubmit of specialist deliverables to Critic review."""
+"""FRAMEWORK_AGENT candidate-discovery rounds and the routing of specialist deliverables to integrate_patch."""
 
 from __future__ import annotations
 
@@ -17,6 +17,7 @@ from hyperloom.orchestrator.lever import LEVER_UPSTREAM_PR
 from ..actions.executors import controls_of, normalize_proposal
 from ..state.task_registry import TaskSpec
 from ..state.task_states import TERMINAL_STATES
+from .framework_proposals import Deliverable, _deliverable_integrate_params
 from .framework_records import (
     _framework_config_levers_from_done,
     _patches_on_disk,
@@ -35,7 +36,7 @@ DISCOVER_FAILURE_RETRY_LIMIT: int = 3
 
 
 def _config_lever_deliverable(config_levers: Mapping[str, Any]) -> dict[str, Any]:
-    """The integrate deliverable a config-lever round is reviewed with."""
+    """What an integrate_patch applies for a config-lever round."""
     deliverable: dict[str, Any] = {
         "extra_server_args": config_levers.get("extra_server_args", ""),
         "extra_envs": dict(config_levers.get("extra_envs", {})),
@@ -60,7 +61,7 @@ def _specialist_resolve_bases(session_dir: Any, sid: str) -> list[Path]:
 
 
 class _CandidateDiscoveryMixin:
-    """Dispatches and harvests candidate-discovery rounds and routes specialist deliverables to Critic review."""
+    """Dispatches and harvests candidate-discovery rounds and routes specialist deliverables to integrate_patch."""
 
     async def _maybe_enqueue_candidate_discovery(self, *, reason: str) -> bool:
         """Dispatch the next candidate-discovery round when the pool is empty; True while a round is queued or running."""
@@ -232,35 +233,19 @@ class _CandidateDiscoveryMixin:
             out.append(cand)
         return out
 
-    async def maybe_autosubmit_specialist_patches(
-        self,
-        *,
-        task: "Task",
-        done_payload: dict[str, Any],
-    ) -> None:
-        """Auto-surface a specialist's source patches to the Critic via a synthetic integrate_patch proposal; idempotent per specialist."""
+    def _patch_deliverable(self, task: "Task", done_payload: dict[str, Any]) -> Deliverable | None:
+        """The integrate_patch for the source patches or tuned artifacts a specialist left on disk, if any."""
         patches = to_list(done_payload.get("patches_written"))
-        claimed = [str(x) for x in patches][:8]
         sid = first_str(task.task_id).strip()
         if not sid:
-            return
-        # Resolve patches_written; submit only when >=1 real file exists.
+            return None
+        # Resolve patches_written; a deliverable needs >=1 real file.
         resolve_bases = _specialist_resolve_bases(self.session_dir, sid)
         existing_patches = [str(p) for p in patches if _patches_on_disk(Path(str(p)), resolve_bases)]
         # A non-diff tuned artifact is also a routable deliverable; route it like a patch.
         routable_artifacts = _resolvable_artifacts_from_done(done_payload, resolve_bases)
         if not existing_patches and not routable_artifacts:
-            if patches:
-                await self.bus.record_observation(
-                    "coordinator",
-                    "observation",
-                    {
-                        "kind": "specialist_patch_autosubmit_skipped_no_files",
-                        "specialist_task_id": sid,
-                        "claimed": claimed,
-                    },
-                )
-            return
+            return None
         spec_params = to_mapping(getattr(task, "params", None))
         # The lane, not the deliverable's own ``atomic`` flag, decides whether a companion lever rides with the patch.
         is_enablement_round = bool(spec_params.get("enablement"))
@@ -286,14 +271,11 @@ class _CandidateDiscoveryMixin:
             deliverable["extra_envs"] = round_envs
         if spec_params.get("framework_agent_authoring"):
             deliverable["framework_agent_authoring"] = True
-        await self._submit_integrate_review(
-            sid,
-            spec_params,
-            done_payload,
-            deliverable,
-            observation={
-                "kind": "specialist_patch_autosubmitted_for_review",
-                "patches": claimed,
+        return Deliverable(
+            _deliverable_integrate_params(sid, spec_params, done_payload, deliverable),
+            {
+                "kind": "specialist_patch_integrate_queued",
+                "patches": [str(x) for x in patches][:8],
                 # Artifact-only deliverables: record their install targets.
                 "artifacts_written": [
                     str((a or {}).get("target") or "")
@@ -303,30 +285,16 @@ class _CandidateDiscoveryMixin:
             },
         )
 
-    async def maybe_autosubmit_enablement_config(
-        self,
-        *,
-        task: "Task",
-        done_payload: dict[str, Any],
-    ) -> None:
-        """Route an ENABLEMENT round that wrote no source patch through integrate_patch.
+    def _config_deliverable(self, task: "Task", done_payload: dict[str, Any]) -> Deliverable | None:
+        """The integrate_patch an ENABLEMENT round that wrote no source patch still runs.
 
-        Companion to :meth:`maybe_autosubmit_specialist_patches`. The round routes with its config lever
-        (extra_args / extra_envs) or with none: a round that does not reach integrate_patch never reports what its
-        boot did. A FRAMEWORK authoring round's config proposals are benched by explore with every other specialist
-        proposal, so they never reach this. Idempotent per specialist.
-
-        Args:
-            task: The completed enablement specialist task.
-            done_payload: Its ``specialist_done`` payload.
+        The round routes with its config lever (extra_args / extra_envs) or with none: a round that does not reach
+        integrate_patch never reports what its boot did. A FRAMEWORK authoring round's config proposals are benched
+        by explore with every other specialist proposal, so they never reach this.
         """
-        spec_params = getattr(task, "params", None) or {}
-        if not spec_params.get("enablement"):
-            return
-        # A patch deliverable is handled by the patch autosubmit bridge.
-        patches = done_payload.get("patches_written") or []
-        if isinstance(patches, list) and patches:
-            return
+        spec_params = to_mapping(getattr(task, "params", None))
+        if not spec_params.get("enablement") or to_list(done_payload.get("patches_written")):
+            return None
         config_levers = _framework_config_levers_from_done(done_payload)
         build_request = done_payload.get("needs_targeted_build")
         if (
@@ -336,32 +304,46 @@ class _CandidateDiscoveryMixin:
             and not done_payload.get("setup_commands")
             and not done_payload.get("artifacts_written")
         ):
-            return
+            return None
         sid = first_text(task.task_id)
         if not sid:
-            return
-        # Empty, or the str args and dict envs config_lever_from_proposal builds.
-        extra_server_args = config_levers.get("extra_server_args", "")
-        extra_envs = dict(config_levers.get("extra_envs", {}))
-        candidate_id = str(spec_params.get("framework_agent_candidate_id") or "")
-        pending = await self._submit_integrate_review(
-            sid,
-            spec_params,
-            done_payload,
-            _config_lever_deliverable(config_levers),
-            observation={
-                "kind": "framework_config_autosubmitted_for_review",
-                "candidate_id": candidate_id,
-                "extra_server_args": extra_server_args,
-                "extra_envs": dict(extra_envs),
+            return None
+        return Deliverable(
+            _deliverable_integrate_params(sid, spec_params, done_payload, _config_lever_deliverable(config_levers)),
+            {
+                "kind": "enablement_config_integrate_queued",
+                "candidate_id": str(spec_params.get("framework_agent_candidate_id") or ""),
+                # Empty, or the str args and dict envs config_lever_from_proposal builds.
+                "extra_server_args": config_levers.get("extra_server_args", ""),
+                "extra_envs": dict(config_levers.get("extra_envs", {})),
             },
         )
-        if pending is not None:
-            log.info(
-                "ENABLEMENT: config deliverable routed to integrate_patch round=%s args=%s env_keys=%s",
-                candidate_id or sid,
-                extra_server_args,
-                sorted(extra_envs),
+
+    def specialist_deliverable(self, task: "Task", done_payload: dict[str, Any]) -> Deliverable | None:
+        """What an ended specialist left for integrate_patch to measure, or ``None`` when it left nothing.
+
+        Every route to a deliverable's integrate_patch reads its params here.
+
+        Args:
+            task: The ended specialist task.
+            done_payload: Its ``specialist_done`` payload; empty when it ended without one.
+        """
+        return self._patch_deliverable(task, done_payload) or self._config_deliverable(task, done_payload)
+
+    async def integrate_specialist_deliverable(self, *, task: "Task", done_payload: dict[str, Any]) -> None:
+        """Queue the integrate_patch that measures what a finished specialist delivered; idempotent per specialist."""
+        deliverable = self.specialist_deliverable(task, done_payload)
+        if deliverable is not None:
+            await self._enqueue_deliverable_integrate(deliverable)
+        elif patches := to_list(done_payload.get("patches_written")):
+            await self.bus.record_observation(
+                "coordinator",
+                "observation",
+                {
+                    "kind": "specialist_patch_integrate_skipped_no_files",
+                    "specialist_task_id": first_str(task.task_id).strip(),
+                    "claimed": [str(x) for x in patches][:8],
+                },
             )
 
     def _framework_known_candidate_ids(self) -> set[str]:

@@ -57,7 +57,6 @@ disposition `removed in 6.1, never populated`:
 - `framework_agent` `policy.force_exit_budget_pct`, `policy.variant_timeout_sec`
   and `policy.overtime_kill_ratio`
 - `kernel_agent` `trace_analyze_runs[].trace_validate_ref`
-- `critic_review.iteration` on framework proposals
 - `kernel_agent` `geak.product.cfg_hash` and `geak.product.final_overlay_digest`
 - `kernel_agent` `entry.budget_remaining_sec`
 - `roofline` event `ext.actions[].kernel_roofline.kernels[].rocprof_roofline`
@@ -112,19 +111,22 @@ The value `bypass` is no longer written either: `route` is `agent` or
 entry, a trace certificate's `usable_by` names only `tracelens`, and the
 warning code `bypass_graph_under_recorded` is now `graph_under_recorded`.
 
-The loop no longer holds a Critic verdict to an advisory rule, so the keys that
-recorded the hold are removed with the disposition
-`removed in 6.1, producer removed`: `critic_review.held_to_rule`,
-`critic_review.effective_verdict` and `critic_review.failure_reason_code` on
-phase and framework proposals and on each of their `critic_review.variants[]`
-rows, and `effective_verdict` and `failure_reason_code` on
-`critic.iterations[].framework_reviews[]`. Read `verdict`: it is the verdict
-the loop acted on.
+A proposal is queued as a task without a review step, so the keys that recorded
+one are removed with the disposition `removed in 6.1, producer removed`:
 
-A Critic ruling is one verdict on one proposal, so `critic_review.variants` on
-phase and framework proposals is removed with the same disposition: nothing
-produced a per-variant ruling, and the key was an empty list wherever it was
-written.
+- the top-level `critic` section, with `critic.iterations[]` and every key
+  under it. Nothing replaces it.
+- `timeline[type=phase].ext.proposals`, with its `count`, `reviewed` and
+  `materialized` counters and its `rows[]`, including each row's
+  `critic_review` and `outcome`. The task a proposal became is the dispatch
+  row in `ext.actions.rows[]` of the same phase event; a refused intent is a
+  row in `ext.denials.rows[]`.
+- `critic_review` on the `proposals[]` rows of a `framework_agent` event, with
+  every key under it, and the `reviewed` step of those rows' `lifecycle`.
+
+`timeline[type=phase].ext.denials.rows[].proposal_msg_id` is still written,
+because the packaged schema requires it; no intent type names a proposal any
+more, so it is `null`.
 
 Two figures are null instead of a fabricated default when they were not
 measured or not provided. `outcome.validation.attributed_gain_pct` and
@@ -242,25 +244,23 @@ The following JSON structure shows all top-level fields in `session_breakdown.js
   "outcome":            { /* terminal result — SaFE contract core */ },
   "timeline":           [ /* the run itself: one event per stage, in order */ ],
   "close":              { /* what the session settled at close */ },
-  "critic":             { /* the critic agent's own run, iteration by iteration */ },
 
   "conc_sweep_summary": { /* optional: the concurrency sweep run after CLOSE */ }
 }
 ```
 
-The first eight keys are always present; a section the run produced nothing for
+The first seven keys are always present; a section the run produced nothing for
 is `{}` or `[]` rather than absent. `conc_sweep_summary` is the exception: it
 is absent until a concurrency sweep has run after CLOSE, and then holds that
 sweep's report.
 
-Two things a reader of an older export will look for and not find. The flat
-per-topic sections (`baseline`, `final`, `phase_timeline`,
-`capability_summary`, `kernel_lifecycle`, `param_search`, `geak`,
-`telemetry`, `optimizations`, `source_files` and the optional tail) are gone:
+A reader of an older export will look for the flat per-topic sections
+(`baseline`, `final`, `phase_timeline`, `capability_summary`,
+`kernel_lifecycle`, `param_search`, `geak`, `telemetry`, `optimizations`,
+`source_files` and the optional tail) and not find them:
 each was a projection of the run rather than a fact of it, and they now come
 out of `timeline`, whose events carry the same facts attached to the stage
-that produced them. The old combined `critic_robustness` key is absent. Critic
-activity lives under `critic`.
+that produced them.
 
 How the export itself went is reported once, on `metadata.warnings`. An
 earlier shape also carried a top-level `warnings`, taken partway through the
@@ -508,34 +508,6 @@ the fields of each; they are typed and versioned with the export.
 
 ---
 
-## `critic`
-
-The critic agent's own run, iteration by iteration. The per-proposal verdicts
-are not here — those stay with the proposals they judge — so this key answers
-a different question: how often the agent was asked, about what, and how its
-rulings fell each time.
-
-| Field | Type | Meaning |
-|---|---|---|
-| `iterations` | list | One row per review pass, in the order the agent ran them |
-
-Each iteration carries `iter`, `ts`, `phase`, `macro_cycle`, the `topic` it
-spoke about and the `summary` it wrote, plus the four artifacts it left
-behind (`request_path`, `judge_bundle_path`, `emit_path`, `review_path`).
-
-An iteration rules on every proposal in front of it, so it has no single
-verdict. `verdict_counts` is the distribution of its rulings and `verdict`
-reads the same thing as one line (`2 approve, 1 reject`). A pass that only
-spoke — a heartbeat, a request for context — rules on nothing and leaves both
-empty; such a pass is still reported, because a session where the critic was
-asked forty times and ruled on nothing reads very differently from one where
-it was never asked.
-
-`framework_reviews` holds the framework-phase rulings of that pass, each with
-the `verdict` the Critic wrote.
-
----
-
 ## Worked example
 
 The following example shows a complete `session_breakdown.json` for a finished GLM-5 session.
@@ -711,7 +683,7 @@ The following example shows a complete `session_breakdown.json` for a finished G
       "start_time": "2026-05-17T12:10:00Z",
       "end_time": "2026-05-17T12:41:33Z",
       "status": "succeeded",
-      "ext": { "actions": [], "proposals": [] }
+      "ext": { "actions": { "count": 0, "rows": [] }, "denials": { "count": 0, "rows": [] } }
     }
   ],
 
@@ -722,34 +694,6 @@ The following example shows a complete `session_breakdown.json` for a finished G
     "end_time": "2026-05-17T13:58:42Z",
     "steps": [],
     "artifacts": {}
-  },
-
-  "critic": {
-    "iterations": [
-      {
-        "iteration_id": "critic-iteration:7:9f8e7d6c",
-        "iter": 7,
-        "ts": "2026-05-17T12:38:02Z",
-        "phase": "FRAMEWORK_AGENT",
-        "macro_cycle": 2,
-        "topic": "backends:nsa_decode_aiter",
-        "verdict": "2 approve, 1 reject",
-        "verdict_counts": { "approve": 2, "reject": 1 },
-        "summary": "the decode backend pays for itself; the allreduce change needs a measurement first",
-        "request_path": "critic-workdir/000007/request.json",
-        "judge_bundle_path": "critic-workdir/000007/judge_bundle.json",
-        "emit_path": "critic-workdir/000007/emit.json",
-        "review_path": "critic-workdir/000007/review.json",
-        "framework_reviews": [
-          {
-            "proposal_msg_id": "msg-4f21",
-            "arm": "config",
-            "verdict": "reject",
-            "reasoning": "no measurement backs the projected gain"
-          }
-        ]
-      }
-    ]
   }
 }
 ```

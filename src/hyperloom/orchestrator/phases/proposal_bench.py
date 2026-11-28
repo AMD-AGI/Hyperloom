@@ -151,8 +151,6 @@ class ProposalBench(CoordinatorCollaborator):
             return
         if any(t.kind == "integrate_patch" for t in (*await self.tasks.queued(), *await self.tasks.running())):
             return
-        if any(p.action_name == "integrate_patch" for p in self.state.pending_proposals.values()):
-            return
         if state.set_pending_escalate_hint(ESCALATE_HINT_SKIP_TO_SWEEP):
             log.info("custom-specialist-only: cycle %s done; leaving FRAMEWORK_AGENT", state.macro_cycle)
 

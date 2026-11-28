@@ -42,7 +42,6 @@ from hyperloom.orchestrator.loop.dispatcher import DispatcherCollaborator
 from hyperloom.inference_optimizer.session.session_paths import target_baseline_json
 from hyperloom.orchestrator.bus.storage.connection import SqliteConnection
 from ._dispatch_helpers import pump_until_settled
-from .conftest import seed_pending_critic_proposal
 from hyperloom.orchestrator.phases import phase_predicates, phase_transitions
 
 
@@ -61,10 +60,7 @@ def _silent_plan() -> ScriptedPlan:
 
 
 def _build_backends(scripts: dict[str, ScriptedPlan]) -> dict[str, Backend]:
-    backends: dict[str, Backend] = {}
-    for name in ("orchestration", "critic"):
-        backends[name] = MockBackend(scripts.get(name, _silent_plan()), name=name)
-    return backends
+    return {"orchestration": MockBackend(scripts.get("orchestration", _silent_plan()), name="orchestration")}
 
 
 def test_signal_stop_reason_comes_from_the_received_signal(session_dir):
@@ -155,7 +151,7 @@ async def _noop_finalize() -> None:
 
 
 @pytest.mark.asyncio
-async def test_a_failed_close_sequence_fails_the_run_after_releasing_it(session_dir, monkeypatch):
+async def test_a_failed_close_sequence_fails_the_run_after_releasing_it(session_dir):
     c = Coordinator(session_dir, backends=_build_backends({}))
     c._stop.set()
     finalize_calls = 0
@@ -167,19 +163,13 @@ async def test_a_failed_close_sequence_fails_the_run_after_releasing_it(session_
         nonlocal finalize_calls
         finalize_calls += 1
 
-    closed_proposals: list[str] = []
     c.phase_close.ensure_close_sequence = _close
     c._recipe_kb_t4_hook = _finalize
-    monkeypatch.setattr(
-        "hyperloom.orchestrator.loop.coordinator.close_undecided_proposals",
-        lambda _session_dir, _pending, stop_reason: closed_proposals.append(stop_reason),
-    )
     try:
         with pytest.raises(RuntimeError, match="^close sequence broke$"):
             await c.run(options=RunOptions(tick_interval_sec=0.0, max_ticks=1))
         state = json.loads((session_dir / "state.json").read_text(encoding="utf-8"))
         assert (finalize_calls, state["stop_reason"]) == (1, "signal")
-        assert closed_proposals == ["signal"]
     finally:
         await c.stop()
 
@@ -450,28 +440,24 @@ async def test_sub_agent_runner_refuses_a_lane_holding_task_with_no_lease(tmp_pa
 # Coordinator — bounded ticks
 @pytest.mark.asyncio
 async def test_coordinator_starts_with_silent_backends(session_dir):
-    backends = _build_backends({})
-    c = Coordinator(session_dir, backends=backends)
-    c.shared_state.agent_last_active["critic"] = 123.0
+    c = Coordinator(session_dir, backends=_build_backends({}))
     try:
         await c.tick(2)
         msgs = await c.bus.tail(n=20, topic="observation")
         assert len(msgs) == 1
         assert msgs[0].from_agent == "orchestration"
-        assert not backends["critic"].calls
-        assert c.shared_state.agent_last_active["critic"] == 123.0
     finally:
         await c.stop()
 
 
 @pytest.mark.asyncio
 async def test_a_tick_while_closing_runs_no_reactor_turn(session_dir):
-    backends = {name: _AlwaysFailingBackend(name) for name in ("orchestration", "critic")}
-    c = Coordinator(session_dir, backends=backends)
+    backend = _AlwaysFailingBackend("orchestration")
+    c = Coordinator(session_dir, backends={"orchestration": backend})
     try:
         c.shared_state.closing_phase = True
         await c.tick(1)
-        assert [b.calls for b in backends.values()] == [0, 0]
+        assert backend.calls == 0
     finally:
         await c.stop()
 
@@ -498,7 +484,7 @@ async def test_a_phase_advance_that_raises_is_recorded_at_the_session_tick(sessi
         await c.stop()
 
 
-# Backend-error streak (critic subprocess health)
+# Backend-error streak
 class _AlwaysFailingBackend(Backend):
     """Backend that always raises BackendError."""
 
@@ -554,11 +540,8 @@ def _llm_error_rows(session_dir: Path) -> list[dict]:
 @pytest.mark.asyncio
 async def test_plain_backend_error_records_no_llm_error_row(session_dir):
     """A deterministic local fault must not be counted as a provider failure."""
-    backends = _build_backends({})
-    backends["critic"] = _AlwaysFailingBackend("critic")
-    c = Coordinator(session_dir, backends=backends)
+    c = Coordinator(session_dir, backends={"orchestration": _AlwaysFailingBackend("orchestration")})
     try:
-        await seed_pending_critic_proposal(c)
         await c.tick(2)
         assert _llm_error_rows(session_dir) == []
     finally:
@@ -568,16 +551,13 @@ async def test_plain_backend_error_records_no_llm_error_row(session_dir):
 @pytest.mark.asyncio
 async def test_llm_call_failed_records_one_error_row_per_turn(session_dir, monkeypatch):
     monkeypatch.setattr("hyperloom.orchestrator.loop.coordinator._BACKEND_RETRY_BASE_SEC", 0)
-    backends = _build_backends({})
-    backends["critic"] = _LLMFailingBackend("critic")
-    c = Coordinator(session_dir, backends=backends)
+    c = Coordinator(session_dir, backends={"orchestration": _LLMFailingBackend("orchestration")})
     try:
-        await seed_pending_critic_proposal(c)
         await c.tick(2)
         rows = _llm_error_rows(session_dir)
         assert len(rows) == 2
         row = rows[0]
-        assert row["component"] == "critic"
+        assert row["component"] == "orchestration"
         assert row["error_type"] == "LLMCallFailed"
         assert "gateway 400" in row["error_message"]
         assert row["input_tokens"] is None and row["output_tokens"] is None
@@ -586,7 +566,7 @@ async def test_llm_call_failed_records_one_error_row_per_turn(session_dir, monke
 
 
 class _SelfTracingLLMFailingBackend(_LLMFailingBackend):
-    """A self-tracing backend (critic-shaped): writes its own row, then raises."""
+    """A self-tracing backend: writes its own row, then raises."""
 
     def __init__(self, name: str, session_dir: Path) -> None:
         super().__init__(name)
@@ -620,7 +600,7 @@ class _SelfTracingLLMFailingBackend(_LLMFailingBackend):
         append_llm_call(
             session_dir=self._session_dir,
             record=LLMCallRecord.for_failure(
-                LLMCallSite(session_id=self._session_dir.name, component="critic", role="critic"),
+                LLMCallSite(session_id=self._session_dir.name, component=self.name, role=self.name),
                 error,
                 model="claude-opus-4-7",
             ),
@@ -631,19 +611,17 @@ class _SelfTracingLLMFailingBackend(_LLMFailingBackend):
 @pytest.mark.asyncio
 async def test_self_tracing_backend_failure_is_recorded_exactly_once(session_dir):
     """One provider failure must produce one row, not one per writer."""
-    backends = _build_backends({})
-    backends["critic"] = _SelfTracingLLMFailingBackend("critic", session_dir)
-    c = Coordinator(session_dir, backends=backends)
+    backend = _SelfTracingLLMFailingBackend("orchestration", session_dir)
+    c = Coordinator(session_dir, backends={"orchestration": backend})
     try:
-        await seed_pending_critic_proposal(c)
         await c.tick(2)
         rows = _llm_error_rows(session_dir)
-        assert len(rows) == backends["critic"].calls
-        # The surviving row is the backend's richer one (real review model).
+        assert len(rows) == backend.calls
+        # The surviving row is the backend's richer one (it names the model).
         assert {r["model"] for r in rows} == {"claude-opus-4-7"}
-        assert {r["component"] for r in rows} == {"critic"}
-        assert backends["critic"].trace_contexts
-        assert all("macro_cycle" in context for context in backends["critic"].trace_contexts)
+        assert {r["component"] for r in rows} == {"orchestration"}
+        assert backend.trace_contexts
+        assert all("macro_cycle" in context for context in backend.trace_contexts)
     finally:
         await c.stop()
 
@@ -678,22 +656,20 @@ async def test_backend_error_streak_fires_backend_unhealthy_once_at_threshold(
         "3",
     )
     monkeypatch.setattr("hyperloom.orchestrator.loop.coordinator._BACKEND_RETRY_BASE_SEC", 0)
-    backends = _build_backends({})
-    backends["critic"] = _AlwaysFailingBackend("critic")
-    c = Coordinator(session_dir, backends=backends)
+    c = Coordinator(session_dir, backends={"orchestration": _AlwaysFailingBackend("orchestration")})
     try:
-        await seed_pending_critic_proposal(c)
         await c.tick(4)
         observations = await c.bus.tail(n=50, topic="observation")
         backend_errors = [
             o
             for o in observations
-            if (o.payload or {}).get("kind") == "backend_error" and (o.payload or {}).get("agent") == "critic"
+            if (o.payload or {}).get("kind") == "backend_error" and (o.payload or {}).get("agent") == "orchestration"
         ]
         backend_unhealthy = [
             o
             for o in observations
-            if (o.payload or {}).get("kind") == "backend_unhealthy" and (o.payload or {}).get("agent") == "critic"
+            if (o.payload or {}).get("kind") == "backend_unhealthy"
+            and (o.payload or {}).get("agent") == "orchestration"
         ]
         assert len(backend_errors) == 4
         assert len(backend_unhealthy) == 1
@@ -701,8 +677,8 @@ async def test_backend_error_streak_fires_backend_unhealthy_once_at_threshold(
         assert promoted["consecutive_errors"] == 3
         assert promoted["threshold"] == 3
         assert promoted["severity"] == "high"
-        assert promoted["agent"] == "critic"
-        assert "subprocess backend has failed" in promoted["hint"]
+        assert promoted["agent"] == "orchestration"
+        assert "backend has failed" in promoted["hint"]
     finally:
         await c.stop()
 
@@ -737,25 +713,23 @@ async def test_backend_error_streak_resets_after_successful_turn(
         "2",
     )
     monkeypatch.setattr("hyperloom.orchestrator.loop.coordinator._BACKEND_RETRY_BASE_SEC", 0)
-    backends = _build_backends({})
-    failing = _AlwaysFailingBackend("critic")
-    backends["critic"] = failing
-    c = Coordinator(session_dir, backends=backends)
+    # Orchestration takes a turn in every tick, as it does once its heartbeat elapses.
+    monkeypatch.setattr("hyperloom.orchestrator.loop.conversation._ORCHESTRATION_HEARTBEAT_SEC", 0)
+    failing = _AlwaysFailingBackend("orchestration")
+    c = Coordinator(session_dir, backends={"orchestration": failing})
     try:
-        await seed_pending_critic_proposal(c)
         await c.tick(2)
-        assert c._backend_error_streak["critic"] == 2
-        assert c._backend_error_alarm_armed["critic"] is False
+        assert c._backend_error_streak["orchestration"] == 2
+        assert c._backend_error_alarm_armed["orchestration"] is False
 
         # Healthy backend → reset.
-        backends_silent = _build_backends({})
-        c.backends["critic"] = backends_silent["critic"]
+        c.backends.update(_build_backends({}))
         await c.tick(1)
-        assert c._backend_error_streak["critic"] == 0
-        assert c._backend_error_alarm_armed["critic"] is True
+        assert c._backend_error_streak["orchestration"] == 0
+        assert c._backend_error_alarm_armed["orchestration"] is True
 
         # Re-arm: failing backend back in → alarm fires again.
-        c.backends["critic"] = failing
+        c.backends["orchestration"] = failing
         await c.tick(2)
         observations = await c.bus.tail(n=50, topic="observation")
         backend_unhealthy = [o for o in observations if (o.payload or {}).get("kind") == "backend_unhealthy"]
@@ -766,15 +740,12 @@ async def test_backend_error_streak_resets_after_successful_turn(
 
 
 @pytest.mark.asyncio
-async def test_run_does_not_call_a_failing_backend_before_its_retry(session_dir, monkeypatch):
+async def test_a_tick_does_not_call_a_failing_backend_before_its_retry(session_dir, monkeypatch):
     monkeypatch.setattr("hyperloom.orchestrator.loop.coordinator._BACKEND_RETRY_BASE_SEC", 3600)
-    backends = _build_backends({})
-    failing = _AlwaysFailingBackend("critic")
-    backends["critic"] = failing
-    c = Coordinator(session_dir, backends=backends)
+    failing = _AlwaysFailingBackend("orchestration")
+    c = Coordinator(session_dir, backends={"orchestration": failing})
     try:
-        await seed_pending_critic_proposal(c)
-        assert await c.run(options=RunOptions(tick_interval_sec=0.0, max_ticks=3)) == "max_ticks"
+        await c.tick(3)
         assert failing.calls == 1
     finally:
         await c.stop()
@@ -783,24 +754,52 @@ async def test_run_does_not_call_a_failing_backend_before_its_retry(session_dir,
 @pytest.mark.asyncio
 async def test_run_waits_for_a_retry_when_every_backend_is_failing(session_dir, monkeypatch):
     monkeypatch.setattr("hyperloom.orchestrator.loop.coordinator._BACKEND_RETRY_BASE_SEC", 0.2)
-    backends = {name: _AlwaysFailingBackend(name) for name in ("orchestration", "critic")}
-    c = Coordinator(session_dir, backends=backends)
+    failing = _AlwaysFailingBackend("orchestration")
+    c = Coordinator(session_dir, backends={"orchestration": failing})
     try:
-        await seed_pending_critic_proposal(c)
         assert await c.run(options=RunOptions(tick_interval_sec=0.0, max_ticks=3)) == "max_ticks"
-        assert backends["orchestration"].calls >= 2
+        assert failing.calls >= 2
     finally:
+        await c.stop()
+
+
+@pytest.mark.asyncio
+async def test_run_dispatches_and_books_a_task_before_a_failing_backend_is_retried(session_dir, monkeypatch):
+    """The wait for a retry is cut at the dispatcher's poll, so a queued task does not wait out the back-off."""
+    monkeypatch.setattr("hyperloom.orchestrator.loop.coordinator._BACKEND_RETRY_BASE_SEC", 3600)
+    failing = _AlwaysFailingBackend("orchestration")
+    c = Coordinator(session_dir, backends={"orchestration": failing})
+    c.dispatcher.poll_sec = 0.01
+
+    async def _profile(_ctx):
+        return {"status": "ok"}
+
+    c.sub.register_executor("profile", _profile)
+    lanes, ttl = c.dispatcher.registry_lanes_ttl("profile")
+    task, _ = await c.tasks.create_or_return_existing(
+        TaskSpec(kind="profile", params={}, idempotency_key="profile-1", requires_lanes=lanes, lease_ttl_sec=ttl)
+    )
+
+    async def _stop_once_booked() -> None:
+        while not await c.bus.tail(topic="delegated_result", n=1):
+            await asyncio.sleep(0.01)
+        c._stop.set()
+
+    watcher = asyncio.create_task(_stop_once_booked())
+    try:
+        await asyncio.wait_for(c.run(options=RunOptions(tick_interval_sec=0.0)), timeout=30)
+        assert [m.payload["task_id"] for m in await c.bus.tail(topic="delegated_result", n=5)] == [task.task_id]
+        assert failing.calls == 1
+    finally:
+        watcher.cancel()
         await c.stop()
 
 
 @pytest.mark.asyncio
 async def test_run_stops_once_a_backend_has_failed_for_the_unhealthy_window(session_dir, monkeypatch):
     monkeypatch.setattr("hyperloom.orchestrator.loop.coordinator._BACKEND_UNHEALTHY_STOP_SEC", 0.0)
-    backends = _build_backends({})
-    backends["critic"] = _AlwaysFailingBackend("critic")
-    c = Coordinator(session_dir, backends=backends)
+    c = Coordinator(session_dir, backends={"orchestration": _AlwaysFailingBackend("orchestration")})
     try:
-        await seed_pending_critic_proposal(c)
         assert await c.run(options=RunOptions(tick_interval_sec=0.0, max_ticks=5)) == "backend_unhealthy"
         assert c.shared_state.stop_reason == "backend_unhealthy"
     finally:
@@ -848,97 +847,19 @@ async def test_a_turn_with_an_intent_ends_the_no_intent_streak(session_dir, monk
 
 
 @pytest.mark.asyncio
-async def test_coordinator_propose_action_creates_pending(session_dir):
-    propose = Intent(
-        type=IntentType.PROPOSE_ACTION,
-        payload={
-            "action_name": "baseline",
-            "predicted_gain_pct": 0.0,
-        },
-    )
-    plans = {"orchestration": ScriptedPlan(turns=[MockTurn(intents=[propose])])}
-    c = Coordinator(session_dir, backends=_build_backends(plans))
+async def test_an_admitted_propose_action_queues_its_task_and_announces_it(session_dir):
+    c = Coordinator(session_dir, backends=_build_backends({}))
     try:
-        await c.tick(1)
-        assert len(c.state.pending_proposals) == 1
-        prop = next(iter(c.state.pending_proposals.values()))
-        assert prop.action_name == "baseline"
-        assert len(c.backends["critic"].calls) == 1
-        assert prop.proposal_msg_id in c.backends["critic"].calls[0]["prompt"]
-    finally:
-        await c.stop()
-
-
-@pytest.mark.asyncio
-async def test_coordinator_review_verdict_approve_creates_task(session_dir):
-    propose = Intent(
-        type=IntentType.PROPOSE_ACTION,
-        payload={
-            "action_name": "baseline",
-            "predicted_gain_pct": 0.0,
-        },
-    )
-    plans = {
-        "orchestration": ScriptedPlan(turns=[MockTurn(intents=[propose])]),
-    }
-    c = Coordinator(session_dir, backends=_build_backends(plans))
-    try:
-        await c.tick(1)
-        proposal_id = next(iter(c.state.pending_proposals.keys()))
-
-        verdict = Intent(
-            type=IntentType.REVIEW_VERDICT,
-            payload={
-                "target_proposal_msg_id": proposal_id,
-                "verdict": "approve",
-                "reasoning": "matches kb-1",
-            },
-        )
-        await c.router.handle_intent("critic", verdict)
-
-        # Decided proposals are removed from pending_proposals on verdict.
-        # Verify via the decision bus event instead.
-        decisions = await c.bus.tail(topic="decision")
-        assert any(m.payload.get("kind") == "approved_proposal" for m in decisions)
-    finally:
-        await c.stop()
-
-
-@pytest.mark.asyncio
-async def test_coordinator_review_verdict_reject_no_task(session_dir):
-    propose = Intent(
-        type=IntentType.PROPOSE_ACTION,
-        payload={
-            "action_name": "baseline",
-            "predicted_gain_pct": 0.0,
-        },
-    )
-    plans = {"orchestration": ScriptedPlan(turns=[MockTurn(intents=[propose])])}
-    c = Coordinator(session_dir, backends=_build_backends(plans))
-    try:
-        await c.tick(1)
-        proposal_id = next(iter(c.state.pending_proposals.keys()))
         await c.router.handle_intent(
-            "critic",
-            Intent(
-                type=IntentType.REVIEW_VERDICT,
-                payload={
-                    "target_proposal_msg_id": proposal_id,
-                    "verdict": "reject",
-                    "reasoning": "kb-2 says no",
-                    "kb_evidence": "kb-2",
-                },
-            ),
+            "orchestration",
+            Intent(type=IntentType.PROPOSE_ACTION, payload={"action_name": "baseline", "predicted_gain_pct": 0.0}),
         )
-        decisions = await c.bus.tail(topic="decision")
-        assert not any(m.payload.get("kind") == "approved_proposal" for m in decisions)
-        verdicts = await c.bus.tail(topic="review_verdict")
-        assert any(m.payload.get("verdict") == "reject" for m in verdicts)
-        assert not c.state.pending_proposals
-        last_active = c.shared_state.agent_last_active["critic"]
-        await c.tick(1)
-        assert len(c.backends["critic"].calls) == 1
-        assert c.shared_state.agent_last_active["critic"] == last_active
+        (task,) = await c.tasks.by_state("queued")
+        assert task.kind == "baseline"
+        events = await c.bus.tail(topic="event")
+        assert [m.payload for m in events if m.payload.get("kind") == "task_queued"] == [
+            {"kind": "task_queued", "task_id": task.task_id, "source": "orchestration", "action": "baseline"}
+        ]
     finally:
         await c.stop()
 
@@ -1121,8 +1042,7 @@ async def test_execution_order_does_not_deny_backends_when_trace_analyze_stale(
 async def test_coordinator_prune_branch_cancels_family_and_records_advisory(session_dir):
     c = Coordinator(session_dir, backends=_build_backends({}))
     try:
-        # ``baseline`` flows through the normal Critic/pending-proposal path; the prune-advisory mechanism under test
-        # is family-agnostic.
+        # The prune-advisory mechanism under test is family-agnostic.
         a, _ = await c.tasks.create_or_return_existing(TaskSpec(kind="baseline", params={}, idempotency_key="ka"))
         b, _ = await c.tasks.create_or_return_existing(TaskSpec(kind="baseline", params={}, idempotency_key="kb"))
 
@@ -1148,7 +1068,8 @@ async def test_coordinator_prune_branch_cancels_family_and_records_advisory(sess
                 payload={"action_name": "baseline", "predicted_gain_pct": 5.0},
             ),
         )
-        assert c.state.pending_proposals
+        (proposed,) = await c.tasks.by_state("queued")
+        assert proposed.kind == "baseline"
         obs = await c.bus.tail(topic="observation")
         assert any(m.payload.get("kind") == "proposal_pruned_advisory" for m in obs)
     finally:
@@ -1188,16 +1109,15 @@ async def test_coordinator_prune_branch_queued_scope_drains_without_retiring(ses
 
 @pytest.mark.asyncio
 async def test_coordinator_policy_denied_surfaces_as_observation(session_dir):
-    bad = Intent(type=IntentType.DELEGATE, payload={"action_name": "baseline"})
-    plans = {"critic": ScriptedPlan(turns=[MockTurn(intents=[bad])])}
+    bad = Intent(type=IntentType.DELEGATE, payload={"params": {"runs": 1}})
+    plans = {"orchestration": ScriptedPlan(turns=[MockTurn(intents=[bad])])}
     c = Coordinator(session_dir, backends=_build_backends(plans))
     try:
-        await seed_pending_critic_proposal(c)
         await c.tick(1)
         denied = await c.bus.tail(topic="observation")
         hits = [m for m in denied if m.payload.get("kind") == "policy_denied"]
         assert hits, "expected a policy_denied observation"
-        assert hits[0].payload["rule"] == "role"
+        assert hits[0].payload["rule"] == "payload"
     finally:
         await c.stop()
 
@@ -1205,10 +1125,7 @@ async def test_coordinator_policy_denied_surfaces_as_observation(session_dir):
 # Coordinator audit-trail wiring.
 def _silent_backends() -> dict[str, object]:
     silent = ScriptedPlan(turns=[], default_intent=_heartbeat())
-    return {
-        "orchestration": MockBackend(silent, name="o"),
-        "critic": MockBackend(silent, name="c"),
-    }
+    return {"orchestration": MockBackend(silent, name="o")}
 
 
 def _mute_action_scoring(coordinator: Coordinator) -> None:
@@ -2455,7 +2372,7 @@ def test_default_health_timeout_is_900s_not_1800s():
     assert _multi_node_restart_settings.DEFAULT_HEALTH_TIMEOUT_S == 900
 
 
-# Critic auto-approve archival actions + Coordinator silent-tick early-closing.
+# Coordinator silent-tick early-closing.
 def _write_marker_target_baseline(session_dir: Path) -> None:
     path = target_baseline_json(session_dir)
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -2481,18 +2398,6 @@ async def test_idle_run_reaches_max_ticks_without_closing(session_dir):
         assert c.shared_state.closing_phase is False
     finally:
         await c.stop()
-
-
-def test_critic_md_carves_out_archival_actions():
-    from hyperloom.inference_optimizer.session.paths import asset_system_prompts_dir
-
-    path = asset_system_prompts_dir() / "critic.md"
-    text = path.read_text(encoding="utf-8")
-    assert "archival actions" in text.lower()
-    assert "`report`" in text
-    assert "`session_breakdown`" in text
-    assert "`target_analysis`" in text
-    assert "Always `approve` archival actions" in text
 
 
 @pytest.mark.asyncio
@@ -2818,16 +2723,3 @@ async def test_target_reached_close_still_runs_the_post_opt_roofline(session_dir
         assert ran == ["False"], f"post-opt roofline saw closing_phase={ran}"
     finally:
         await c.stop()
-
-
-def test_a_failing_proposal_outcome_record_propagates(monkeypatch) -> None:
-    from hyperloom.inference_optimizer.breakdown.recorder import phase_event
-    from hyperloom.orchestrator.loop import proposals
-
-    def _boom(_outcome) -> None:
-        raise RuntimeError("proposal outcome bug")
-
-    monkeypatch.setattr(phase_event, "record_proposal_outcome", _boom)
-
-    with pytest.raises(RuntimeError, match="proposal outcome bug"):
-        proposals._record_proposal_materialized("m-1", "t-1")

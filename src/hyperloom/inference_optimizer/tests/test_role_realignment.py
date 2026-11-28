@@ -12,7 +12,6 @@ from pathlib import Path
 import pytest
 
 from hyperloom.inference_optimizer.protocol.action_surfaces import ACTION_CATALOGUE
-from hyperloom.orchestrator.phases.machine_state import PHASE_NAMES
 from hyperloom_common.coerce import to_unix
 from hyperloom.inference_optimizer.protocol.intent import Intent, IntentType
 from hyperloom.orchestrator.state.shared_state import SharedState
@@ -67,17 +66,6 @@ def test_orchestration_prompt_all_enabled_session_context_true(registry):
     assert "optimize_enabled : true" in text
     assert "kernel_enabled   : true" in text
     assert "(DISABLED:" not in text
-
-
-@pytest.mark.parametrize("phase", PHASE_NAMES)
-def test_every_phase_reaches_the_critic_with_its_orientation(phase):
-    """A phase missing from the orientation table would reach the Critic with no phase at all."""
-    from hyperloom.orchestrator.roles._review_constraints import apply_review_constraints
-
-    bundle: dict = {"proposals": []}
-    apply_review_constraints(bundle, phase=phase, action_verdict_policy={})
-    assert bundle["review_constraints"]["phase"] == phase
-    assert bundle["review_constraints"]["phase_orientation"]
 
 
 # SharedState renderers
@@ -256,14 +244,12 @@ def _silent_intent() -> Intent:
 
 @pytest.fixture
 def coordinator_with_mocks(session_dir):
-    from hyperloom.orchestrator.roles import MockCriticBackend
     from hyperloom.orchestrator.tests.mock_backend import MockBackend, ScriptedPlan
     from hyperloom.orchestrator.loop.coordinator import Coordinator
 
     silent = ScriptedPlan(turns=[], default_intent=_silent_intent())
     backends = {
         "orchestration": MockBackend(silent, name="orch"),
-        "critic": MockCriticBackend(),
     }
     return Coordinator(session_dir, backends=backends)
 
@@ -862,36 +848,6 @@ async def test_extend_lease_wall_budget_grant_failure_is_recorded_as_an_intent_e
 
 
 @pytest.mark.asyncio
-async def test_enablement_rearm_failure_on_critic_reject_reaches_the_router(coordinator_with_mocks, monkeypatch):
-    from hyperloom.orchestrator.state.pending_proposal import PendingProposal
-    from hyperloom.orchestrator.loop.verdicts import CriticRuling
-
-    c = coordinator_with_mocks
-    try:
-
-        async def _rearm_broke(_result):
-            raise RuntimeError("enablement lane unavailable")
-
-        monkeypatch.setattr(c.enablement_lane, "maybe_rearm_enablement", _rearm_broke)
-        pending = PendingProposal(
-            proposal_msg_id="m-reject",
-            from_agent="orchestration",
-            action_name="integrate_patch",
-            predicted_gain_pct=0.0,
-            payload={"params": {"enablement": True}},
-        )
-        with pytest.raises(RuntimeError, match="enablement lane unavailable"):
-            await c.router._apply_verdict_outcome(
-                pending,
-                ruling=CriticRuling(verdict="reject", reasoning="regresses accuracy"),
-                pa_params={"enablement": True},
-                sid_candidate="t-enable",
-            )
-    finally:
-        await c.stop()
-
-
-@pytest.mark.asyncio
 async def test_extend_lease_survives_unreadable_running_age(coordinator_with_mocks):
     """A failed age lookup must degrade to the full TTL, not abort the extension."""
     from hyperloom.inference_optimizer.protocol.intent import Intent, IntentType
@@ -1132,13 +1088,13 @@ async def test_send_message_to_a_list_writes_one_message_per_recipient(coordinat
             Intent(
                 type=IntentType.SEND_MESSAGE,
                 payload={
-                    "to": ["specialist:dup-a", "specialist:dup-b", "critic", "specialist:dup-a"],
+                    "to": ["specialist:dup-a", "specialist:dup-b", "kernel_agent", "specialist:dup-a"],
                     "topic": "observation",
                     "body_md": body,
                 },
             ),
         )
-        for name in ("specialist:dup-a", "specialist:dup-b", "critic"):
+        for name in ("specialist:dup-a", "specialist:dup-b", "kernel_agent"):
             mine = [
                 m for m in c.bus.inbox_context_sync(name) if m.to_agent == name and m.payload.get("body_md") == body
             ]
@@ -1161,7 +1117,7 @@ async def test_send_message_to_a_list_with_an_empty_name_is_denied_not_crashed(c
             "orchestration",
             Intent(
                 type=IntentType.SEND_MESSAGE,
-                payload={"to": ["critic", ""], "topic": "observation", "body_md": "one name is blank"},
+                payload={"to": ["kernel_agent", ""], "topic": "observation", "body_md": "one name is blank"},
             ),
         )
         denials = c.bus.inbox_context_sync("orchestration")

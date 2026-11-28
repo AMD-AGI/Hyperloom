@@ -9,8 +9,7 @@ myst:
 A consolidated symptom → cause → fix index for the most common Hyperloom failures. If a symptom isn't listed here, check the
 upstream SKILL file for the component you're touching:
 [`inference_optimizer/SKILL.md`](https://github.com/AMD-AGI/Hyperloom/blob/main/src/hyperloom/inference_optimizer/SKILL.md),
-[`kernel-execution-path.md`](https://github.com/AMD-AGI/Hyperloom/blob/main/docs/reference/kernel-execution-path.md),
-[`critic/SKILL.md`](https://github.com/AMD-AGI/Hyperloom/blob/main/src/hyperloom/agents/critic/SKILL.md).
+[`kernel-execution-path.md`](https://github.com/AMD-AGI/Hyperloom/blob/main/docs/reference/kernel-execution-path.md).
 
 ```{note}
 Shell paths on this page follow the recommended `pip install --target .` layout.

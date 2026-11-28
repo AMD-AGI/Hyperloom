@@ -14,7 +14,6 @@ import sys
 
 import pytest
 
-from hyperloom.orchestrator.roles import MockCriticBackend
 from hyperloom.orchestrator.tests.mock_backend import MockBackend, ScriptedPlan
 from hyperloom.orchestrator.loop.coordinator import Coordinator
 from hyperloom.inference_optimizer.protocol.intent import Intent, IntentType
@@ -36,7 +35,6 @@ def _backends_full() -> dict[str, object]:
     silent = ScriptedPlan(turns=[], default_intent=_heartbeat())
     return {
         "orchestration": MockBackend(silent, name="orch"),
-        "critic": MockCriticBackend(),
     }
 
 
@@ -272,7 +270,7 @@ async def test_pruned_family_survives_coordinator_restart(session_dir):
     c2 = Coordinator(session_dir, backends=_backends_full())
     try:
         assert c2.shared_state.is_pruned("target_analysis")
-        # Prune is advisory: a proposal the phase allows still reaches the pending queue.
+        # Prune is advisory: a proposal the phase allows still queues its task.
         await c2.router.handle_intent(
             "orchestration",
             Intent(
@@ -280,7 +278,7 @@ async def test_pruned_family_survives_coordinator_restart(session_dir):
                 payload={"action_name": "target_analysis", "predicted_gain_pct": 5.0},
             ),
         )
-        assert c2.state.pending_proposals
+        assert [t.kind for t in await c2.tasks.queued()] == ["target_analysis"]
         obs = await c2.bus.tail(topic="observation")
         assert any(m.payload.get("kind") == "proposal_pruned_advisory" for m in obs)
     finally:

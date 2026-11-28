@@ -16,12 +16,10 @@ def coordinator(tmp_path, monkeypatch):
     monkeypatch.setenv("USER_DATA_PATH", str(tmp_path))
     from hyperloom.inference_optimizer.session.paths import make_session_dir
     from hyperloom.orchestrator.loop.coordinator import Coordinator
-    from hyperloom.orchestrator.roles import MockCriticBackend
     from hyperloom.orchestrator.tests.mock_backend import MockBackend, ScriptedPlan
 
     backends = {
         "orchestration": MockBackend(ScriptedPlan(turns=[]), name="orchestration"),
-        "critic": MockCriticBackend(),
     }
     c = Coordinator(make_session_dir(), backends=backends)
     state = c.shared_state

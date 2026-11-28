@@ -195,7 +195,7 @@ def trace_dir(session_dir: Path) -> Path:
 
 
 def llm_calls_path(session_dir: Path) -> Path:
-    """``<sd>/reports/trace/llm_calls.jsonl`` — append-only ledger of every in-process LLM call; the ``component`` label is drawn from the closed set :data:`hyperloom.inference_optimizer.trace.llm_trace.VALID_COMPONENTS` (e.g. orchestration / kernel_agent / specialist / critic)."""
+    """``<sd>/reports/trace/llm_calls.jsonl`` — append-only ledger of every in-process LLM call; the ``component`` label is drawn from the closed set :data:`hyperloom.inference_optimizer.trace.llm_trace.VALID_COMPONENTS` (e.g. orchestration / kernel_agent / specialist)."""
     return trace_dir(session_dir) / "llm_calls.jsonl"
 
 
@@ -207,11 +207,6 @@ def trajectory_dir(session_dir: Path) -> Path:
 def decision_trace_path(session_dir: Path) -> Path:
     """``<sd>/reports/trace/decision_trace.jsonl`` — collector output joining every decision to its LLM token spend along the phase→tick timeline."""
     return trace_dir(session_dir) / "decision_trace.jsonl"
-
-
-def proposal_task_map_path(session_dir: Path) -> Path:
-    """``<sd>/reports/trace/proposal_task_map.jsonl`` — append-only map of ``{proposal_msg_id -> task_id}`` stamped when an approved proposal is materialized into a task."""
-    return trace_dir(session_dir) / "proposal_task_map.jsonl"
 
 
 def forge_steps_path(session_dir: Path) -> Path:
@@ -368,46 +363,6 @@ def recipe_snapshot_audit_jsonl(session_dir: Path) -> Path:
     return recipe_snapshot_dir(session_dir) / ".audit.jsonl"
 
 
-def _prune_old_workdirs(root: Path, *, keep: int) -> None:
-    """Delete all but the newest ``keep`` per-turn workdirs under *root*."""
-    try:
-        entries = sorted((p for p in root.iterdir() if p.is_dir()), key=lambda p: p.name)
-    except OSError:
-        return
-    if len(entries) <= keep:
-        return
-    for stale in entries[: len(entries) - keep]:
-        try:
-            _remove_workdir(stale)
-        except OSError:
-            continue
-
-
-def _remove_workdir(stale: Path) -> None:
-    """Remove one workdir tree: its files first, then its directories deepest first."""
-    for child in stale.rglob("*"):
-        if child.is_file():
-            child.unlink(missing_ok=True)
-    for child in sorted(stale.rglob("*"), key=lambda p: -len(p.parts)):
-        if child.is_dir():
-            try:
-                child.rmdir()
-            except OSError:
-                # Best-effort cleanup; the outer rmdir / next sweep retries.
-                pass
-    stale.rmdir()
-
-
-def allocate_turn_workdir(session_dir: Path, subdir: str, turn_idx: int, *, keep: int) -> Path:
-    """Allocate (and create) ``<sd>/<subdir>/<turn_idx:06d>/`` for a subprocess agent's per-turn scratch, pruning stale turn dirs down to the newest *keep*."""
-    root = Path(session_dir) / subdir
-    root.mkdir(parents=True, exist_ok=True)
-    _prune_old_workdirs(root, keep=keep)
-    wd = root / f"{turn_idx:06d}"
-    wd.mkdir(parents=True, exist_ok=True)
-    return wd
-
-
 def session_failures_dir(session_dir: Path) -> Path:
     """Compute ``<sd>/reports/failures/`` — durable failure evidence store."""
     return reports_dir(session_dir) / "failures"
@@ -424,7 +379,6 @@ __all__ = [
     "CONTAINER_RECORD_KIND",
     "RESOURCES_RELATIVE_PATH",
     "SPECIALIST_RECORD_KIND",
-    "allocate_turn_workdir",
     "agent_dir",
     "agent_mcp_setup_path",
     "agent_prompt_snapshot",
@@ -435,7 +389,6 @@ __all__ = [
     "recipe_kb_lessons_json",
     "recipe_kb_pitfalls_json",
     "decision_trace_path",
-    "proposal_task_map_path",
     "forge_steps_path",
     "gemm_tuning_steps_path",
     "llm_calls_path",

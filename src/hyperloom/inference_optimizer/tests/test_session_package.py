@@ -80,7 +80,6 @@ def _build_session(sd: Path) -> None:
     # NOISE — must be excluded
     _write(run / "torch_trace" / "x.trace.json.gz", "BLOB")
     _write(tl / "trace_split" / "y.trace.json.gz", "BLOB")
-    _write(sd / "critic-workdir" / "000001" / "request.json", "{}")
     _write(sd / "robustness-workdir" / "000001" / "request.json", "{}")
     _write(sd / "hands.log", "log")
     _write(sd / "runs" / "specialist" / "s1" / "prompt.md", "prompt")
@@ -142,7 +141,6 @@ def test_package_includes_curated_excludes_noise(tmp_path: Path, dest: Path) -> 
     for rel in (
         "runs/baseline/abc/measure_round/benchmark_sglang_x/torch_trace/x.trace.json.gz",
         "kernel-agent/runs/20260609T010022Z/20260609T012416Z_tl-abc/tracelens/trace_split/y.trace.json.gz",
-        "critic-workdir/000001/request.json",
         "robustness-workdir/000001/request.json",
         "hands.log",
         "runs/specialist/s1/prompt.md",
@@ -224,7 +222,7 @@ def test_loose_files_dropped_at_dest_root(tmp_path: Path, dest: Path) -> None:
 
     # noise stays out of the loose tree too
     assert not (dest / "hands.log").exists()
-    assert not (dest / "critic-workdir" / "000001" / "request.json").exists()
+    assert not (dest / "robustness-workdir" / "000001" / "request.json").exists()
 
     # manifest also written loose at the root
     assert (dest / MANIFEST_JSON_NAME).is_file()

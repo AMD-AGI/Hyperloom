@@ -18,13 +18,11 @@ from typing import Any
 
 import pytest
 
-from hyperloom.inference_optimizer.protocol.intent import Intent, IntentType
 from hyperloom.orchestrator.loop.coordinator import Coordinator, RunOptions
 from hyperloom.orchestrator.loop.reactor_turn import DEFAULT_REACTOR_TURN_TIMEOUT_SEC
 from hyperloom.orchestrator.roles import ClaudeBackend
 from hyperloom.orchestrator.roles import claude as claude_mod
 from hyperloom.orchestrator.roles.base import LLMCallFailed, RetryPolicy
-from hyperloom.orchestrator.tests.mock_backend import MockBackend, ScriptedPlan
 
 
 class _Options:
@@ -312,10 +310,6 @@ def test_turn_bound_default_and_env_override(monkeypatch):
     assert default + claude_mod._TURN_CLEANUP_GRACE_SEC < DEFAULT_REACTOR_TURN_TIMEOUT_SEC
 
 
-def _heartbeat() -> Intent:
-    return Intent(type=IntentType.SEND_MESSAGE, payload={"topic": "heartbeat", "body_md": "ok"})
-
-
 @pytest.mark.asyncio
 @pytest.mark.parametrize("mode", ["retrying", "busy"])
 async def test_the_tick_loop_keeps_ticking_past_a_hung_orchestration_turn(mode: str, session_dir, monkeypatch):
@@ -323,8 +317,7 @@ async def test_the_tick_loop_keeps_ticking_past_a_hung_orchestration_turn(mode: 
     monkeypatch.setattr("hyperloom.orchestrator.loop.coordinator._BACKEND_RETRY_BASE_SEC", 0)
     sdk = _StallingSdk(mode)
     orchestration = _backend(sdk, turn_timeout_s=0.3)
-    critic = MockBackend(ScriptedPlan(turns=[], default_intent=_heartbeat()), name="critic")
-    coord = Coordinator(session_dir, backends={"orchestration": orchestration, "critic": critic})
+    coord = Coordinator(session_dir, backends={"orchestration": orchestration})
     coord.shared_state.baseline_tput = 800.0
     # Only the backend's own bound may end the turn here.
     coord.reactor_turn_timeout_sec = 600.0

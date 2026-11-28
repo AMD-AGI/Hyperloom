@@ -26,7 +26,6 @@ def test_llm_call_record_from_metadata_coerces_and_appends(tmp_path: Path, monke
             "latency_ms": "99",
         },
     )
-    record.reviewed_msg_ids = [" a ", "", 7]
 
     llm_trace.append_llm_call(session_dir=tmp_path, record=record)
     row = json.loads((tmp_path / "reports" / "trace" / "llm_calls.jsonl").read_text())
@@ -36,7 +35,6 @@ def test_llm_call_record_from_metadata_coerces_and_appends(tmp_path: Path, monke
     assert row["output_tokens"] == 3
     assert row["cache_read_input_tokens"] == 4
     assert row["latency_ms"] == 99
-    assert row["reviewed_msg_ids"] == ["a", "7"]
 
 
 def test_from_metadata_carries_call_id_and_reasoning_tokens(tmp_path: Path, monkeypatch):
@@ -74,31 +72,15 @@ def test_llm_call_record_rejects_unknown_component(tmp_path: Path):
         )
 
 
-def test_llm_trace_handles_unusable_reviewed_ids_and_io_failure(tmp_path: Path, monkeypatch):
+def test_llm_trace_survives_a_ledger_io_failure(tmp_path: Path, monkeypatch):
     monkeypatch.setattr(_row_utils, "now_iso", lambda **_: "2026-01-01T00:00:00Z")
-    record = llm_trace.LLMCallRecord(
-        session_id="s2",
-        component="forge",
-        reviewed_msg_ids=object(),
-    )
-    row = record.to_row()
-    assert row["reviewed_msg_ids"] is None
+    record = llm_trace.LLMCallRecord(session_id="s2", component="forge")
 
     def _raise_mkdir(*_args, **_kwargs):
         raise OSError("disk full")
 
     monkeypatch.setattr(Path, "mkdir", _raise_mkdir)
     llm_trace.append_llm_call(session_dir=tmp_path, record=record)
-
-
-def test_coerce_optional_str_list_variants():
-    # Bare string is wrapped into a single-element list.
-    assert llm_trace._coerce_optional_str_list("abc") == ["abc"]
-    # None -> None; non-iterable -> None; all-empty -> None.
-    assert llm_trace._coerce_optional_str_list(None) is None
-    assert llm_trace._coerce_optional_str_list(123) is None
-    assert llm_trace._coerce_optional_str_list(["", "  "]) is None
-    assert llm_trace._coerce_optional_str_list(["x", "", " y "]) == ["x", "y"]
 
 
 def test_for_failure_records_error_without_token_counters(tmp_path: Path, monkeypatch):

@@ -1229,16 +1229,16 @@ def test_record_kb_span_nests_under_agent(tmp_path, monkeypatch):
     em = lfe.LangfuseEmitter(sd)
     em.record_kb_span(
         name="kb_assess:iter_2",
-        agent="critic",
-        output={"mode": "dry_run", "verdict_count": 1},
+        agent="specialist",
+        output={"mode": "dry_run", "hit_count": 1},
         metadata={"kind": "kb_assess", "iter": 2},
         ts="2026-06-09T15:14:54.100000+00:00",
     )
     span = client.span_named("kb_assess:iter_2")
     assert span is not None
-    assert span.kwargs["output"] == {"mode": "dry_run", "verdict_count": 1}
+    assert span.kwargs["output"] == {"mode": "dry_run", "hit_count": 1}
     assert span.kwargs["metadata"]["kind"] == "kb_assess"
-    assert client.span_named("agent:critic") is not None
+    assert client.span_named("agent:specialist") is not None
     assert span.ended is True
     assert em._counts["kb_spans_sent"] == 1
 
@@ -1739,7 +1739,7 @@ def test_pair_key_matches_token_and_text_halves_of_one_call():
     second => equal key.
     """
     token = {
-        "component": "critic",
+        "component": "specialist",
         "tick": 5,
         "role": "assistant",
         "turn": 2,
@@ -1753,9 +1753,9 @@ def test_pair_key_matches_token_and_text_halves_of_one_call():
 def test_pair_key_distinguishes_concurrent_models_same_second():
     """Concurrent models land in the same UTC second with identical keys except model -> must not collide (usage of model A pairing with model B's text)."""
     base = {
-        "component": "critic",
+        "component": "specialist",
         "tick": None,
-        "role": "critic",
+        "role": "specialist",
         "task_id": None,
         "turn": None,
         "ts": "2026-06-11T10:00:00.300Z",
@@ -1768,8 +1768,8 @@ def test_pair_key_distinguishes_concurrent_models_same_second():
 def test_pair_key_token_and_text_pair_when_roles_match():
     """A call's token row and conversation row must share role+model so their pair_key matches."""
     token = {
-        "component": "critic",
-        "role": "critic",
+        "component": "specialist",
+        "role": "specialist",
         "model": "qwen-32b",
         "ts": "2026-06-11T10:00:00.100Z",
     }

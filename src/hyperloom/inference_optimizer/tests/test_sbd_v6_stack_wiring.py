@@ -23,7 +23,7 @@ from hyperloom.inference_optimizer.session.paths import make_session_dir
 from hyperloom.inference_optimizer.session.session_binding import session_scope
 from hyperloom.orchestrator.loop.coordinator import Coordinator
 
-from .conftest import heartbeat_orchestration_with_mock_critic
+from .conftest import silent_backends
 
 
 @pytest.fixture
@@ -34,7 +34,7 @@ def session_dir(tmp_path, monkeypatch) -> Path:
 
 def _coord(session_dir: Path, *, baseline: float = 1000.0, anchor: float = 1000.0) -> Coordinator:
     """A coordinator anchored on a measured baseline, ready to be lifted."""
-    coord = Coordinator(session_dir, backends=heartbeat_orchestration_with_mock_critic())
+    coord = Coordinator(session_dir, backends=silent_backends())
     coord.shared_state.baseline_tput = baseline
     coord.shared_state.current_best = {
         "action": "baseline",

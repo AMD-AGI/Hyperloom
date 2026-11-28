@@ -59,7 +59,7 @@ from .specialist_context_sections import (
 
 
 # Per-task-kind brief appended by _section_mandate; only the per-dispatch dynamic
-# context (PR lead, critic feedback, apply errors, residual questions) lives in
+# context (PR lead, apply errors, residual questions) lives in
 # ``inp.notes``. Boilerplate that is the same for every dispatch of a given kind
 # lives here so it is maintained in one place.
 _TASK_KIND_BRIEFS: dict[str, str] = {

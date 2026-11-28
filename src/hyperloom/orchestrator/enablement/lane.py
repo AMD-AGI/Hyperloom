@@ -320,7 +320,7 @@ class EnablementLane(CoordinatorCollaborator):
             holder: The round's holder task id.
 
         Returns:
-            bool: Whether a task or an undecided proposal still owes a result.
+            bool: Whether a task still owes a result.
         """
         from ..state.task_registry import TaskNotFound
 
@@ -330,13 +330,6 @@ class EnablementLane(CoordinatorCollaborator):
             task = None
         if task is not None and task.state in ("queued", "running"):
             return True
-        # Undecided proposal keeps the round open; once ruled, approve lands the task matched below and reject rearms
-        # directly, so it cannot defer forever.
-        for p in self.state.pending_proposals.values():
-            if p.action_name != "integrate_patch":
-                continue
-            if (p.payload.get("params") or {}).get("specialist_task_id") == holder:
-                return True
         for t in (await self.tasks.queued()) + (await self.tasks.running()):
             if t.kind == "integrate_patch" and t.params.get("specialist_task_id") == holder:
                 return True

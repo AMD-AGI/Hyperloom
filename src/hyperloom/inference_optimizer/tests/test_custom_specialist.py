@@ -135,7 +135,7 @@ def _coordinator(session_dir: Path, state: SharedState):
     idle = ScriptedPlan(turns=[MockTurn(intents=[])])
     coord = Coordinator(
         session_dir=session_dir,
-        backends={name: MockBackend(idle) for name in ("orchestration", "critic")},
+        backends={"orchestration": MockBackend(idle)},
         role_registry=default_role_registry(),
         advisory=AdvisoryServices(knowledge_plane=None),
     )
@@ -600,7 +600,6 @@ def _framework(*, rounds, queued=(), running=(), phase_done=False):
         shared_state=state,
         tasks=_BenchTasks(queued, running),
         dispatcher=dispatcher,
-        state=SimpleNamespace(pending_proposals={}),
         specialist_dispatch=SimpleNamespace(refused_custom_key=""),
     )
     coord.phase_framework = FrameworkPhase(coord)
@@ -929,7 +928,7 @@ async def test_only_mode_benches_no_proposal_but_the_custom_ones():
     assert fp._coord.tasks.created == []
 
 
-def _only_cycle(*, custom_state, rounds=(), queued=(), pending=False, refused=""):
+def _only_cycle(*, custom_state, rounds=(), queued=(), refused=""):
     from hyperloom.orchestrator.specialists.domains import custom_specialist_key
 
     fp = _framework(rounds=rounds, queued=queued)
@@ -938,10 +937,6 @@ def _only_cycle(*, custom_state, rounds=(), queued=(), pending=False, refused=""
     if custom_state:
         fp._coord.tasks.known[custom_specialist_key(0, _PROMPT)] = SimpleNamespace(
             task_id="custom-task", state=custom_state
-        )
-    if pending:
-        fp._coord.state.pending_proposals["p1"] = SimpleNamespace(
-            action_name="integrate_patch", payload={"params": {"specialist_task_id": "custom-task"}}
         )
     return fp
 
@@ -968,7 +963,6 @@ _SILENT_CUSTOM_ROUND = {**_bench_round("custom-task", "custom_specialist"), "pro
             },
             "",
         ),
-        ({"custom_state": "succeeded", "rounds": [_SILENT_CUSTOM_ROUND], "pending": True}, ""),
     ],
 )
 async def test_only_mode_leaves_framework_once_the_custom_cycle_is_done(kw, hint):

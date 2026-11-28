@@ -177,7 +177,7 @@ def build_manifest(
         "conc": _env_digits("CONC"),
     }
     # An agentic replay takes its request shape from the corpus, so $ISL/$OSL
-    # are inert. The Critic reads this block, so it carries the distribution.
+    # are inert, and this block carries the distribution instead.
     from hyperloom.common.perf_metric import agentx_enabled
     from hyperloom.common.benchmark_config import benchmark_config_path
 

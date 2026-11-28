@@ -98,13 +98,12 @@ def test_kernel_cannot_emit_escalate_strategy_change(gate):
     assert exc.value.rule == "role"
 
 
-# Kernel / Critic — not in the PRUNE_BRANCH source allowlist either
-@pytest.mark.parametrize("role", ["kernel_agent", "critic"])
-def test_kernel_and_critic_cannot_emit_prune_branch(gate, role):
-    """Kernel is responder-only and critic is limited to review_verdict / send_message / alert."""
+# Kernel — not in the PRUNE_BRANCH source allowlist either
+def test_kernel_cannot_emit_prune_branch(gate):
+    """Kernel is responder-only."""
     with pytest.raises(PolicyDenied) as exc:
         gate.validate_intent(
-            role,
+            "kernel_agent",
             Intent(
                 type=IntentType.PRUNE_BRANCH,
                 payload={"family": "params", "reason": "x"},

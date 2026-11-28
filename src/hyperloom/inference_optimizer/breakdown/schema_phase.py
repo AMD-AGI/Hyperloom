@@ -226,59 +226,6 @@ class V6PhaseMarker(TypedDict, total=False):
     ts: str
 
 
-class V6PhaseProposalReview(TypedDict, total=False):
-    """The Critic's ruling on one proposal, filed on the proposal."""
-
-    verdict: str
-    source: str
-    reasoning: str
-    confidence: float | None
-    required_evidence: list[str]
-    risks: list[dict[str, Any]]
-    advice_text: str | None
-    alternative_action: str | None
-    reviewed_at: str
-
-
-class V6PhaseProposalOutcome(TypedDict, total=False):
-    """What the loop did with a proposal once it had a ruling."""
-
-    materialized: bool
-    denied: bool
-    reauthored: bool
-    task_id: str | None
-    patch_verdict_key: str | None
-    settled_at: str
-
-
-class V6PhaseProposal(TypedDict, total=False):
-    """One proposal the phase raised, with the ruling and the result on it.
-
-    Recorded when the proposal is minted rather than when it is acted on,
-    because most proposals are never acted on: one the Critic refused, or one
-    left pending when the phase exited, produces no dispatch and so has no
-    other row anywhere.
-
-    This is the only place a Critic ruling can be filed with the thing it ruled
-    on. ``framework_agent`` carries ``proposals[].critic_review`` too, but its
-    rows exist for two creation paths inside one phase; a ruling on a KERNEL
-    ``kernel_opt``, on a PRELUDE ``baseline``, or on an action no framework arm
-    maps to had no subject row anywhere, and was dropped without trace."""
-
-    proposal_msg_id: str
-    action: str
-    from_agent: str
-    phase: str
-    macro_cycle: int
-    tick: int
-    predicted_gain_pct: float | None
-    candidate_id: str | None
-    variant_name: str | None
-    proposed_at: str
-    critic_review: V6PhaseProposalReview
-    outcome: V6PhaseProposalOutcome
-
-
 class V6PhaseExt(TypedDict, total=False):
     """The ``phase`` timeline event's ``ext``: the run's time in one phase.
 
@@ -303,7 +250,6 @@ class V6PhaseExt(TypedDict, total=False):
     segments: list[V6PhaseSegment]
     actions: dict[str, Any]
     markers: dict[str, Any]
-    proposals: dict[str, Any]
     denials: dict[str, Any]
 
 
@@ -394,9 +340,6 @@ __all__ = [
     "V6PhaseAction",
     "V6PhaseExt",
     "V6PhaseMarker",
-    "V6PhaseProposal",
-    "V6PhaseProposalOutcome",
-    "V6PhaseProposalReview",
     "V6PhaseSegment",
     "V6StackAdoption",
     "V6StackExt",

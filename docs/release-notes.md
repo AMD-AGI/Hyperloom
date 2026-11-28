@@ -60,6 +60,22 @@ it.
   whose hosted writer went with the single flow, and the native builds of a
   checkout-built server, which `optimize` now opens directly. See
   [Upgrade](reference/upgrade.md).
+- **`hyperloom optimize` has no Critic agent.** Orchestration is the only LLM
+  role that takes turns. A `propose_action` that passes PolicyGate and
+  admission is queued in the same step, and the Coordinator queues the
+  `integrate_patch` of a finished specialist's deliverable itself; KEEP or
+  REVERT is decided as before, by the measurement gate. **Breaking:**
+  `--critic-mock`, `--critic-agent`, `--critic-protocol` and `--critic-prompt`
+  are rejected; `INFERENCE_OPTIMIZER_DEFAULT_CRITIC_BACKEND`,
+  `CRITIC_AGENT_ROOT`, `CRITIC_AGENT_PROBE_TIMEOUT_SEC`,
+  `CRITIC_AGENT_MAX_COMPLETION_TOKENS`, `CRITIC_AGENT_LLM_CONNECT_TIMEOUT_S`,
+  `CRITIC_AGENT_LLM_RW_TIMEOUT_S`, `CRITIC_SESSION_MEMORY_DIR` and
+  `CRITIC_WEB_TOOLS_ENABLED` are no longer read; the `web` packaging extra
+  and the `hyperloom.agents.critic` package are gone; the `review_verdict`
+  intent, the `proposal`, `review_verdict` and `advice` bus topics, the
+  `critic` section of `session_breakdown.json` and its `critic_review` rows
+  are no longer written; and resuming a session started before this change
+  is not supported. See [Upgrade](reference/upgrade.md).
 - **forge-loop runs every round as lanes and has no planning stage.** Every
   iteration is one round: one lane per focus the Analysis Agent divides its
   evidence into (at most `--lanes`, and one lane with no focus when it divides

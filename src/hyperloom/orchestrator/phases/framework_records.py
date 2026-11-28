@@ -192,31 +192,6 @@ def _record_step(coord: Any, proposal_id: str, step: ProposalStep) -> None:
     )
 
 
-def _record_review_outcome(
-    coord: Any,
-    proposal_id: str,
-    *,
-    verdict: str = "",
-    reason: str = "",
-    **outcome: Any,
-) -> None:
-    """Record what the phase did with the Critic's ruling on a candidate.
-
-    The consequence is recorded onto the ruling because on its own a routed
-    candidate does not say what let it through. ``verdict`` is only passed on
-    the deny path, which is the only one carrying the rationale.
-    """
-    recorder = _recorder(coord)
-    if recorder is None or not proposal_id:
-        return
-    from hyperloom.inference_optimizer.breakdown.recorder.framework_event import CriticReview
-
-    if verdict:
-        recorder.record_proposal_review(proposal_id, CriticReview(verdict=verdict, reason=reason))
-        recorder.record_proposal_step(proposal_id, step="reviewed", outcome=verdict, reason=reason)
-    recorder.record_proposal_review_outcome(proposal_id, **outcome)
-
-
 def _settle(coord: Any, proposal_id: str, *, disposition: str, reason: str = "") -> None:
     """Record where a candidate ended up: ``attempted`` or ``dropped``."""
     recorder = _recorder(coord)
@@ -789,7 +764,7 @@ class _AuthoredOutcomeMixin:
         log.info("FRAMEWORK: authoring round landed no patch: %s candidate=%s batch=%s", status, cand_id, batch_id)
 
     def _routed_to_integrate(self, inner: dict[str, Any], task_id: str) -> bool:
-        """Whether ``maybe_autosubmit_specialist_patches`` sent this deliverable to an integrate_patch, whose
+        """Whether ``integrate_specialist_deliverable`` sent this deliverable to an integrate_patch, whose
         authored-outcome bridge writes the terminal row: vetted ``patches_written``, or a non-diff tuned artifact."""
         patches = inner.get("patches_written") or []
         if isinstance(patches, list) and patches:

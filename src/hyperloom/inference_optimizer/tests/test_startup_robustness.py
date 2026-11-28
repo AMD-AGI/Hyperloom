@@ -291,27 +291,12 @@ def test_anthropic_only_makes_codex_follow_claude(clean_creds_env):
     assert llm_config.is_anthropic_only() is True
 
 
-def test_critic_agent_without_a_runtime_root_refuses_to_start(monkeypatch, capsys):
-    """No degraded critic: ``--critic-agent`` with no reachable runtime exits 2 before any backend is built."""
-    monkeypatch.setattr(cli, "_resolve_agent_root", lambda: None)
-    args = argparse.Namespace(
-        no_kernel=False,
-        no_framework_agent=False,
-        critic_backend="agent",
-        critic_protocol="auto",
-    )
-    with pytest.raises(SystemExit) as exc_info:
-        cli._resolve_agent_lineup(args)
-    assert exc_info.value.code == 2
-    assert "critic-agent runtime not found" in capsys.readouterr().err
-
-
-def test_build_backends_keeps_anthropic_critic_when_codex_follows_claude(
+def test_build_backends_keeps_orchestration_on_claude_when_codex_follows_claude(
     clean_creds_env,
     monkeypatch,
     tmp_path,
 ):
-    """Stale OpenAI env after preflight must not force critic-agent onto Codex."""
+    """Stale OpenAI env after preflight must not move orchestration onto Codex."""
     from hyperloom.inference_optimizer.cli import backends as cli_backends
 
     clean_creds_env.setenv("ANTHROPIC_BASE_URL", "https://api.anthropic.com")
@@ -327,26 +312,19 @@ def test_build_backends_keeps_anthropic_critic_when_codex_follows_claude(
         def __init__(self, **kwargs):
             self.kwargs = kwargs
 
-    class _FakeCriticAgent:
-        def __init__(self, **kwargs):
-            self.kwargs = kwargs
-
     monkeypatch.setattr(cli_backends, "ClaudeBackend", _FakeClaude)
     monkeypatch.setattr(cli_backends, "CodexBackend", _FakeCodex)
-    monkeypatch.setattr(cli_backends, "CriticAgentBackend", _FakeCriticAgent)
 
     built = cli_backends._build_backends(
         cli_backends.ModelRouting(
             claude_model="claude-opus-4-8", codex_model="stale-codex-model", codex_follows_claude=True
         ),
-        cli_backends.CriticSetup(choice="agent", agent_root=tmp_path),
         session_dir=tmp_path,
     )
 
-    critic = built["critic"]
-    assert isinstance(critic, _FakeCriticAgent)
-    assert critic.kwargs["protocol"] == "anthropic"
-    assert critic.kwargs["claude_model"] == "claude-opus-4-8"
+    orchestration = built["orchestration"]
+    assert isinstance(orchestration, _FakeClaude)
+    assert orchestration.kwargs["model"] == "claude-opus-4-8"
 
 
 # _validate_and_resolve_claude_model catalog candidates

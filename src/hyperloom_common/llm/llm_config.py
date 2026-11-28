@@ -134,7 +134,7 @@ HEADER_REF_ALLOWLIST = frozenset({"ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "
 def expand_custom_header_env_refs() -> None:
     """Resolve the credential ``${VAR}`` references in the ``*_CUSTOM_HEADERS`` settings in place.
 
-    Child processes (specialists, the Critic, GEAK) forward these verbatim, and an agent CLI sends them
+    Child processes (specialists, GEAK) forward these verbatim, and an agent CLI sends them
     verbatim, so an unexpanded ``${ANTHROPIC_API_KEY}`` reaches the gateway as literal text and is rejected.
     References resolve against the same view ``claude_sdk_env_options`` uses, so a key it would fill in from the
     other Anthropic credential is not erased here. A reference outside :data:`HEADER_REF_ALLOWLIST` is left as
@@ -320,7 +320,7 @@ def explicit_agent_backend(env: Mapping[str, str] | None = None, *, env_name: st
 
 
 def resolve_agent_backend(env: Mapping[str, str] | None = None) -> str:
-    """Return the harness backend every non-critic agent role should run.
+    """Return the harness backend every agent role should run.
 
     An explicit :data:`AGENT_BACKEND_ENV` wins over the credential-ranked rule
     between Claude and Codex. DeepSeek is reachable only through that explicit

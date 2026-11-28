@@ -25,7 +25,6 @@ def _make_coordinator(tmp_path: Path) -> Coordinator:
     idle = ScriptedPlan(turns=[MockTurn(intents=[])])
     backends = {
         "orchestration": MockBackend(idle),
-        "critic": MockBackend(idle),
     }
     from types import SimpleNamespace
 

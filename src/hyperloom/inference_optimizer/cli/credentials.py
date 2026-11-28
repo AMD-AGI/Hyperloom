@@ -7,7 +7,6 @@ from __future__ import annotations
 
 import os
 import re
-import subprocess
 import sys
 from pathlib import Path
 
@@ -44,59 +43,6 @@ _CODEX_FALLBACK_MODELS = (
 # Catalog probe retry delays: sleep N seconds before attempt i+1; the length is the retry count after the initial
 # attempt.
 _CATALOG_RETRY_DELAYS_SEC = (1.0, 3.0, 5.0)
-
-# Critic-agent skill root resolution. Env wins; else the in-tree package.
-_CRITIC_AGENT_ROOT_ENV = "CRITIC_AGENT_ROOT"
-
-
-def _resolve_agent_root() -> Path | None:
-    """Return the critic-agent skill root (``$CRITIC_AGENT_ROOT`` else the in-tree package), or ``None``."""
-    override = os.environ.get(_CRITIC_AGENT_ROOT_ENV, "").strip()
-    if override:
-        p = Path(override).expanduser()
-        return p if (p / "runtime" / "cli.py").is_file() else None
-    from ..session.paths import PACKAGE_ROOT
-
-    candidate = PACKAGE_ROOT.parent / "agents" / "critic"
-    return candidate if (candidate / "runtime" / "cli.py").is_file() else None
-
-
-def _validate_agent_runtime(root: Path) -> None:
-    """Fail fast (SystemExit) if ``python -m hyperloom.agents.critic.runtime.cli --help`` doesn't work."""
-    module = "hyperloom.agents.critic.runtime.cli"
-    cmd = [sys.executable, "-m", module, "--help"]
-    # Probe cost is import-bound and can spike on a loaded pod; allow an env override so a slow-but-healthy runtime is
-    # not misdiagnosed as broken.
-    try:
-        _probe_timeout = float(os.environ.get("CRITIC_AGENT_PROBE_TIMEOUT_SEC", "90"))
-    except (TypeError, ValueError):
-        _probe_timeout = 90.0
-    try:
-        proc = subprocess.run(
-            cmd,
-            cwd=str(root),
-            capture_output=True,
-            text=True,
-            timeout=_probe_timeout,
-        )
-    except (subprocess.TimeoutExpired, FileNotFoundError, OSError) as exc:
-        print(
-            f"ERROR: critic-agent runtime sanity check failed: {exc!r}\n"
-            f"  cwd={root}\n"
-            f"  cmd={' '.join(cmd)}\n"
-            f"Either fix {_CRITIC_AGENT_ROOT_ENV}, check the "
-            "src/hyperloom/agents/critic/ install, or pass --critic-mock to "
-            "bypass critic-agent.",
-            file=sys.stderr,
-        )
-        sys.exit(2)
-    if proc.returncode != 0:
-        print(
-            f"ERROR: {module} --help exited rc={proc.returncode}\n  cwd={root}\n  stderr={proc.stderr.strip()[:500]}",
-            file=sys.stderr,
-        )
-        sys.exit(2)
-
 
 # Matches the ``base_url:`` line in a legacy / explicitly supplied GEAK litellm yaml.
 _GEAK_BASE_URL_RE = re.compile(r"(?m)^([ \t]*base_url[ \t]*:[ \t]*).*$")

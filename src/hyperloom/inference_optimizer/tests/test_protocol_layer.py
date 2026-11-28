@@ -41,10 +41,6 @@ def db(tmp_path) -> SqliteConnection:
 
 
 # intent_parser
-def test_intent_type_v06_includes_review_verdict():
-    assert IntentType.REVIEW_VERDICT.value == "review_verdict"
-
-
 def test_intent_type_no_objection_or_vote():
     """Parliament intent types are removed entirely."""
     values = {t.value for t in IntentType}
@@ -57,30 +53,6 @@ def test_validate_envelope_minimal_ok():
     intents = validate_envelope(envelope)
     assert len(intents) == 1
     assert intents[0].type == IntentType.SEND_MESSAGE
-
-
-def test_validate_envelope_review_verdict_payload():
-    envelope = {
-        "intents": [
-            {
-                "intent_type": "review_verdict",
-                "payload": {
-                    "target_proposal_msg_id": "abc123",
-                    "verdict": "approve",
-                    "reasoning": "matches KB entry kb-7",
-                },
-            }
-        ]
-    }
-    intents = validate_envelope(envelope)
-    assert intents[0].type == IntentType.REVIEW_VERDICT
-    assert intents[0].payload["verdict"] == "approve"
-
-
-def test_validate_envelope_review_verdict_missing_required_rejected():
-    envelope = {"intents": [{"intent_type": "review_verdict", "payload": {"verdict": "approve"}}]}
-    with pytest.raises(IntentValidationError, match="target_proposal_msg_id"):
-        validate_envelope(envelope)
 
 
 def test_validate_envelope_unknown_intent_rejected():
@@ -97,9 +69,7 @@ def test_validate_envelope_propose_action_requires_predicted_gain():
 
 # message_bus
 def test_topic_allowlist_v06_changes():
-    """review_verdict is allowed while objection/vote/parliament topics are removed."""
-    assert "review_verdict" in TOPIC_ALLOWLIST
-    assert "advice" in TOPIC_ALLOWLIST
+    """objection/vote/parliament topics are removed."""
     assert "objection" not in TOPIC_ALLOWLIST
     assert "vote" not in TOPIC_ALLOWLIST
     assert "parliament_open" not in TOPIC_ALLOWLIST
@@ -125,18 +95,14 @@ async def test_message_bus_unknown_topic_rejected(db):
 @pytest.mark.asyncio
 async def test_message_bus_tail_filters_by_to_agent_with_broadcast(db):
     bus = MessageBus(db)
-    await bus.append_and_seq(
-        Message.new("Critic", "Orchestration", "review_verdict", {"target_proposal_msg_id": "p1", "verdict": "approve"})
-    )
+    await bus.append_and_seq(Message.new("Coordinator", "Orchestration", "decision", {"kind": "phase_advance"}))
     await bus.append_and_seq(Message.new("Robustness", "*", "alert", {"severity": "high", "summary": "stall"}))
-    await bus.append_and_seq(
-        Message.new("Critic", "Kernel", "review_verdict", {"target_proposal_msg_id": "p2", "verdict": "reject"})
-    )
+    await bus.append_and_seq(Message.new("Coordinator", "Kernel", "decision", {"kind": "phase_advance"}))
     msgs = await bus.tail(to_agent="Orchestration")
     topics = {(m.from_agent, m.to_agent) for m in msgs}
-    assert ("Critic", "Orchestration") in topics
+    assert ("Coordinator", "Orchestration") in topics
     assert ("Robustness", "*") in topics
-    assert ("Critic", "Kernel") not in topics
+    assert ("Coordinator", "Kernel") not in topics
 
 
 @pytest.mark.asyncio
@@ -347,15 +313,15 @@ async def test_cursor_store_empty_default(db):
 @pytest.mark.asyncio
 async def test_cursor_store_advance_forward(db):
     cs = CursorStore(db)
-    await cs.advance("Critic", seq=5)
-    assert (await cs.load("Critic")).last_processed_seq == 5
-    await cs.advance("Critic", seq=10)
-    assert (await cs.load("Critic")).last_processed_seq == 10
+    await cs.advance("Orchestration", seq=5)
+    assert (await cs.load("Orchestration")).last_processed_seq == 5
+    await cs.advance("Orchestration", seq=10)
+    assert (await cs.load("Orchestration")).last_processed_seq == 10
 
 
 @pytest.mark.asyncio
 async def test_cursor_store_never_moves_backwards(db):
     cs = CursorStore(db)
-    await cs.advance("Critic", seq=10)
-    await cs.advance("Critic", seq=3)
-    assert (await cs.load("Critic")).last_processed_seq == 10
+    await cs.advance("Orchestration", seq=10)
+    await cs.advance("Orchestration", seq=3)
+    assert (await cs.load("Orchestration")).last_processed_seq == 10

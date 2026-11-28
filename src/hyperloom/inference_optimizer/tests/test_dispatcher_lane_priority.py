@@ -26,7 +26,7 @@ def _build_coord(tmp_path: Path, phase: str):
     idle = ScriptedPlan(turns=[MockTurn(intents=[])])
     return Coordinator(
         session_dir=tmp_path,
-        backends={name: MockBackend(idle) for name in ("orchestration", "critic")},
+        backends={"orchestration": MockBackend(idle)},
         role_registry=default_role_registry(),
         advisory=AdvisoryServices(knowledge_plane=None),
     )
@@ -43,7 +43,6 @@ class _Recorder:
 
 
 async def _queue_approved_patch(coord) -> None:
-    coord.shared_state.record_specialist_patch_verdict("spec-1", "approve")
     await coord.tasks.create_or_return_existing(
         TaskSpec(
             kind="integrate_patch",

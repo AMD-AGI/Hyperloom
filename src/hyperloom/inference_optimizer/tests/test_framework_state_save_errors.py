@@ -14,7 +14,6 @@ from typing import Any
 import pytest
 
 from hyperloom.orchestrator.loop.coordinator import Coordinator
-from hyperloom.orchestrator.state.pending_proposal import PendingProposal
 from hyperloom.orchestrator.phases.framework_reauthor import _AUTHORED_LANE_MAX_ATTEMPTS
 from hyperloom.orchestrator.phases.framework_records import ProgressStamp
 
@@ -60,35 +59,6 @@ async def _stamp_progress(coord: Coordinator) -> None:
     coord.phase_framework._stamp_framework_progress(ProgressStamp(candidate_id=_CAND_ID, status="dropped"))
 
 
-async def _submit_for_review(coord: Coordinator) -> None:
-    await coord.phase_framework._submit_framework_agent_candidate_for_review(dict(_CAND), audit_step="author")
-
-
-async def _reauthor_from_critic(coord: Coordinator) -> None:
-    async def _enqueue(candidate: dict[str, Any], **kwargs: Any) -> str:
-        return "spec-2"
-
-    coord.phase_framework._enqueue_framework_agent_authoring_specialist = _enqueue  # type: ignore[method-assign]
-    pending = PendingProposal(
-        proposal_msg_id="m-1",
-        from_agent="coordinator",
-        action_name="integrate_patch",
-        predicted_gain_pct=0.0,
-        payload={"candidate": dict(_CAND), "framework_agent_candidate_id": _CAND_ID, "audit": {}},
-    )
-    await coord.phase_framework.maybe_reauthor_from_critic_feedback(pending, {"required_evidence": ["profile"]})
-
-
-async def _submit_integrate_review(coord: Coordinator) -> None:
-    await coord.phase_framework._submit_integrate_review(
-        "spec-1",
-        {},
-        {"proposal_set": [{"name": "p"}]},
-        {"extra_server_args": "--x"},
-        observation={"kind": "framework_config_autosubmitted_for_review"},
-    )
-
-
 # (driver, 1-based index of the save call the handler under test wraps)
 _SAVE_SITES: dict[str, tuple[Callable[[Coordinator], Awaitable[None]], int]] = {
     "map_authoring_specialist": (_map_authoring_specialist, 1),
@@ -96,9 +66,6 @@ _SAVE_SITES: dict[str, tuple[Callable[[Coordinator], Awaitable[None]], int]] = {
     "rearm_cap_stamp": (_rearm_at_cap, 2),
     "drain_apply_fail": (_drain_retry_pending, 1),
     "stamp_progress": (_stamp_progress, 1),
-    "submit_for_review": (_submit_for_review, 1),
-    "reauthor_from_critic": (_reauthor_from_critic, 1),
-    "submit_integrate_review": (_submit_integrate_review, 1),
 }
 
 

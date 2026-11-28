@@ -35,7 +35,6 @@ from hyperloom.inference_optimizer.session.optimization_journal import (
 from hyperloom.inference_optimizer.session.session_paths import (
     decision_trace_path,
     llm_calls_path,
-    proposal_task_map_path,
     state_path,
 )
 
@@ -75,46 +74,6 @@ def _load_llm_calls(
         for r in rows
         if isinstance(r, dict) and str(r.get("status") or LLM_STATUS_OK).strip().lower() == LLM_STATUS_OK
     ]
-
-
-def _load_proposal_task_map(
-    session_dir: Path,
-    warnings: list[str],
-) -> dict[str, str]:
-    """Read ``reports/trace/proposal_task_map.jsonl`` into ``{msg_id: task_id}``."""
-    rows = _load_jsonl_safe(proposal_task_map_path(session_dir), warnings)
-    out: dict[str, str] = {}
-    for r in rows:
-        if not isinstance(r, dict):
-            continue
-        mid = str(r.get("proposal_msg_id") or "").strip()
-        tid = str(r.get("task_id") or "").strip()
-        if mid and tid:
-            out[mid] = tid
-    return out
-
-
-def _attribute_critic_calls(
-    calls: list[dict[str, Any]],
-    msg_to_task: dict[str, str],
-) -> None:
-    """Backfill ``task_id`` on Critic review calls from the proposal->task map."""
-    if not msg_to_task:
-        return
-    for call in calls:
-        if str(call.get("component") or "") != "critic":
-            continue
-        if str(call.get("task_id") or "").strip():
-            continue  # already keyed; respect it
-        reviewed = call.get("reviewed_msg_ids")
-        if not isinstance(reviewed, list):
-            continue
-        reviewed_ids = {m for m in reviewed if isinstance(m, str) and m}
-        resolved = {msg_to_task[m] for m in reviewed_ids if m in msg_to_task}
-        # Single-target review only: a partial mapping (reviewed several, only one materialized) must NOT collapse the
-        # batch's cost onto that one.
-        if len(reviewed_ids) == 1 and len(resolved) == 1:
-            call["task_id"] = next(iter(resolved))
 
 
 def _build_phase_windows(
@@ -213,8 +172,6 @@ def write_decision_trace(
     """
     calls = _load_llm_calls(session_dir, warnings)
     phase_windows = _build_phase_windows(state)
-
-    _attribute_critic_calls(calls, _load_proposal_task_map(session_dir, warnings))
 
     # A call without a task_id anchors to no decision row, so it contributes nothing to the timeline.
     calls_by_key: dict[str, list[dict[str, Any]]] = {}

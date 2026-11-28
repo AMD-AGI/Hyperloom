@@ -1,31 +1,22 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""FRAMEWORK_AGENT proposals: candidates and integrate patches sent to Critic review, and untested custom proposals benched as a grid."""
+"""FRAMEWORK_AGENT proposals: the integrate_patch a finished specialist's deliverable is queued as, and untested custom proposals benched as a grid."""
 
 from __future__ import annotations
 
 import logging as _logging
 import uuid
 from collections.abc import Mapping
-from typing import Any
-from hyperloom_common.coerce import first_str, to_mapping
+from typing import Any, NamedTuple
 from . import machine_state as _phase_state
-from ..state.task_registry import TaskSpec
+from ..state.task_registry import Task, TaskSpec
 from ..state.shared_state import inject_stack_base_params
-from ..state.pending_proposal import PendingProposal
-from ..loop.proposals import integrate_review_in_flight, record_proposal
-from hyperloom.orchestrator.lever import LEVER_UPSTREAM_PR, patch_owner_phase
+from ..loop.proposals import record_config_proposal
+from hyperloom.orchestrator.lever import patch_owner_phase
 from .proposal_bench import CUSTOM_PROPOSAL_DOMAIN, kb_exposure_of, waiting_proposal_rows
-from .framework_records import ProgressStamp, ProposalStep, _record_step
 
 log = _logging.getLogger(__name__)
-
-
-#: Progress-row status for a candidate the Critic rejected. The gate writes it
-#: and the priors reader selects on it, so the ledger is the only record of a
-#: denial and both sites agree by construction.
-FRAMEWORK_CRITIC_DENIED_STATUS: str = "critic_denied"
 
 
 def _forward_enablement_carriers(src: dict[str, Any], dst: dict[str, Any]) -> None:
@@ -92,13 +83,21 @@ def _forward_integrate_source(
         dst["experience_citations"] = list(citations)
 
 
-def _integrate_review_params(
+class Deliverable(NamedTuple):
+    """The integrate_patch that measures what a finished specialist delivered."""
+
+    params: dict[str, Any]
+    #: Recorded when the Coordinator queues it.
+    observation: dict[str, Any]
+
+
+def _deliverable_integrate_params(
     sid: str,
     spec_params: dict[str, Any],
     done_payload: dict[str, Any],
     deliverable: dict[str, Any],
 ) -> dict[str, Any]:
-    """Build the synthetic integrate_patch params that review a specialist's deliverable."""
+    """Build the integrate_patch params that land a specialist's deliverable."""
     proposals = done_payload.get("proposal_set")
     first = proposals[0] if isinstance(proposals, list) and proposals else None
     params: dict[str, Any] = {
@@ -131,198 +130,31 @@ def _integrate_review_params(
 
 
 class _FrameworkProposalsMixin:
-    """Records the phase's proposals in the loop's proposal ledger and submits them for review or bench."""
+    """Queues the integrate_patch for a finished specialist's deliverable and benches the phase's untested proposals."""
 
-    # Tail of outcomes from the priors ledger to evaluate.
-    _CRITIC_PRIORS_OUTCOME_TAIL: int = 5
-
-    # Backstop: max Critic-review submissions for a single candidate before the pump force-stamps
-    # ``repeated_review_abort`` and stops re-selecting it.
-    _MAX_REPEATED_REVIEW_SUBMISSIONS: int = 3
-
-    def _collect_framework_agent_candidate_priors(self) -> dict[str, Any]:
-        """Return compact session-local priors for the Critic gate."""
-        raw_progress = self.shared_state.framework_agent_phase_progress or []
-        terminal = {
-            "kept",
-            "kept_inert",
-            "reverted",
-            "no_patch",
-            "enqueue_failed",
-            FRAMEWORK_CRITIC_DENIED_STATUS,
-        }
-        tail = [r for r in raw_progress if isinstance(r, dict) and str(r.get("status") or "") in terminal]
-        outcomes: list[dict[str, Any]] = []
-        for row in tail[-self._CRITIC_PRIORS_OUTCOME_TAIL :]:
-            entry: dict[str, Any] = {
-                "candidate_id": str(row.get("candidate_id") or ""),
-                "status": str(row.get("status") or ""),
-                "gain_pct": row.get("gain_pct"),
-            }
-            rationale = str(row.get("rationale") or "")[:200]
-            if rationale:
-                entry["rationale"] = rationale
-            outcomes.append(entry)
-        return {
-            "recent_outcomes": outcomes,
-        }
-
-    def _review_already_pending(self, cand_id: str) -> bool:
-        """True while ``cand_id`` is still awaiting the Critic's pre-screen verdict."""
-        return bool(cand_id) and any(
-            first_str(to_mapping(getattr(p, "payload", None)).get("framework_agent_candidate_id")) == cand_id
-            for p in self.state.pending_proposals.values()
-            if getattr(p, "action_name", "") == "integrate_patch"
-        )
-
-    def _charge_review_submission(self, cand_id: str, batch_id: str) -> bool:
-        """Count one review submission against ``cand_id``; False once the phase budget's cap is passed."""
-        if not cand_id:
-            return True
-        counts = to_mapping(self.shared_state.framework_agent_review_counts)
-        count = int(counts.get(cand_id, 0) or 0) + 1
-        counts[cand_id] = count
-        self.shared_state.framework_agent_review_counts = counts
-        if count <= self._MAX_REPEATED_REVIEW_SUBMISSIONS:
-            return True
-        log.warning(
-            "FRAMEWORK: candidate=%s submitted for review %d times (> cap %d); aborting to protect the phase budget",
-            cand_id,
-            count,
-            self._MAX_REPEATED_REVIEW_SUBMISSIONS,
-        )
-        self._stamp_framework_progress(
-            ProgressStamp(
-                candidate_id=cand_id,
-                batch_id=batch_id,
-                status="repeated_review_abort",
-                rationale=f"submitted for review {count} times (> cap {self._MAX_REPEATED_REVIEW_SUBMISSIONS})",
-                provenance="pump",
-                extra={"review_submissions": count},
-            )
-        )
-        return False
-
-    async def _submit_framework_agent_candidate_for_review(
-        self,
-        candidate: dict[str, Any],
-        *,
-        audit: dict[str, Any] | None = None,
-        audit_step: str = "",
-    ) -> None:
-        """Submit a FRAMEWORK candidate as a normal ``proposal`` for async Critic review."""
-        cand_id = self._framework_candidate_key(candidate)
-        batch_id = first_str(candidate.get("batch_id"))
-        if self._review_already_pending(cand_id) or not self._charge_review_submission(cand_id, batch_id):
-            return
-        propose_payload: dict[str, Any] = {
-            "action_name": "integrate_patch",
-            "provenance": LEVER_UPSTREAM_PR,
-            "predicted_gain_pct": 0.0,
-            "candidate": dict(candidate),
-            "batch_id": batch_id,
-            "framework_agent_candidate_id": cand_id,
-            "audit": to_mapping(audit),
-            "audit_step": first_str(audit_step),
-            "priors": self._collect_framework_agent_candidate_priors(),
-        }
-        pending = await record_proposal(
-            self._coord,
-            from_agent="coordinator",
-            action_name="integrate_patch",
-            predicted_gain_pct=0.0,
-            payload=dict(propose_payload),
-        )
-        # The review-bus message id is a field, not a second identity: the
-        # candidate is keyed by its own id throughout the phase.
-        _record_step(
-            self,
-            cand_id,
-            ProposalStep(
-                step="routed", outcome=str(audit_step or ""), reason=f"submitted_for_review:{pending.proposal_msg_id}"
-            ),
-        )
-        log.info(
-            "FRAMEWORK: candidate submitted for Critic review msg_id=%s candidate=%s batch=%s audit_step=%s",
-            pending.proposal_msg_id,
-            cand_id,
-            batch_id,
-            audit_step or "<unknown>",
-        )
-        await self.bus.record_observation(
-            "coordinator",
-            "observation",
-            {
-                "kind": "framework_agent_candidate_submitted_for_review",
-                "proposal_msg_id": pending.proposal_msg_id,
-                "candidate_id": cand_id,
-                "batch_id": batch_id,
-                "audit_step": str(audit_step or ""),
-            },
-        )
-        try:
-            self.shared_state.save(self.session_dir)
-        except OSError:
-            log.exception(
-                "save after framework_agent candidate submit failed for candidate=%s",
-                cand_id,
-            )
-
-    async def _submit_integrate_review(
-        self,
-        sid: str,
-        spec_params: dict[str, Any],
-        done_payload: dict[str, Any],
-        deliverable: dict[str, Any],
-        *,
-        observation: dict[str, Any],
-    ) -> PendingProposal | None:
-        """Propose a specialist deliverable to the Critic as a synthetic integrate_patch; idempotent per specialist.
-
-        Args:
-            sid: The specialist task id the review is keyed on.
-            spec_params: The specialist's dispatch params, whose provenance and
-                enablement context travel to integrate_patch.
-            done_payload: The specialist's ``specialist_done`` payload.
-            deliverable: The integrate_patch params that say what to apply.
-            observation: The bus observation recorded with the proposal.
+    async def _enqueue_deliverable_integrate(self, deliverable: Deliverable) -> Task | None:
+        """Queue the integrate_patch of a finished specialist's deliverable; idempotent per specialist.
 
         Returns:
-            The recorded proposal, or ``None`` when the Critic already ruled on
-            this specialist or its review is still pending.
+            The queued task, or ``None`` when a task already holds or has measured this deliverable.
         """
-        if self.shared_state.get_specialist_patch_verdict(sid) or integrate_review_in_flight(
-            self.state.pending_proposals, sid
-        ):
+        params = deliverable.params
+        task = await self._coord.proposals.enqueue_integrate_patch(params)
+        if task is None:
             return None
-        params = _integrate_review_params(sid, spec_params, done_payload, deliverable)
-        pending = await record_proposal(
-            self._coord,
-            from_agent="coordinator",
-            action_name="integrate_patch",
-            predicted_gain_pct=0.0,
-            payload={
-                "action_name": "integrate_patch",
-                "provenance": "specialist",
-                "predicted_gain_pct": 0.0,
-                "params": params,
-            },
-        )
+        sid = params["specialist_task_id"]
         await self.bus.record_observation(
             "coordinator",
             "observation",
             {
-                **observation,
+                **deliverable.observation,
                 "specialist_task_id": sid,
-                "proposal_msg_id": pending.proposal_msg_id,
+                "task_id": task.task_id,
                 "patch_name": params["patch_name"],
             },
         )
-        try:
-            self.shared_state.save(self.session_dir)
-        except OSError:
-            log.exception("save after integrate-review autosubmit failed for task=%s", sid)
-        return pending
+        log.info("specialist %s: deliverable queued as integrate_patch %s", sid, task.task_id)
+        return task
 
     async def _maybe_bench_untested_proposals(self) -> None:
         """Enqueue explore grids from ``waiting_proposal_rows``: the custom specialist's alone, ahead of every gate;
@@ -391,9 +223,11 @@ class _FrameworkProposalsMixin:
         if was_existing:
             return False
         log.info("auto_bench: enqueued explore task_id=%s (variants=%d)", etask.task_id, len(grid))
-        from ..loop.proposals import record_config_proposal
-
         record_config_proposal(
-            self._coord, proposal_id, "explore", {"params": params, **kb_exposure_of(rows)}, outcome="auto_bench"
+            self._coord.phase_framework.timeline(),
+            proposal_id,
+            "explore",
+            {"params": params, **kb_exposure_of(rows)},
+            outcome="auto_bench",
         )
         return True

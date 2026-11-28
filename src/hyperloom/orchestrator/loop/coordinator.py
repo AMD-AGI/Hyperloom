@@ -54,7 +54,6 @@ from ..state.shared_state import SharedState, effective_closing_grace_sec
 from ..state.state_file import database_target
 from .signals import SignalDrain
 from .intent_router import IntentRouter
-from .coordinator_state import CoordinatorState, close_undecided_proposals
 from .reactor_turn import (
     close_backends,
     resolve_reactor_turn_timeout_sec,
@@ -224,7 +223,6 @@ class Coordinator:
             self.shared_state.model_class = self._model_class_override or infer_model_class(
                 self.shared_state.model_path or os.environ.get("MODEL_PATH", "")
             )
-        self.state = CoordinatorState()
         self._stop = asyncio.Event()
         self._stop_classification = ""
 
@@ -251,9 +249,7 @@ class Coordinator:
         # Per-agent run of consecutive turns that emitted no intent; a turn with an intent ends it.
         self._no_intent_streak: dict[str, int] = {}
 
-        # Stable tick order from the live role_registry.
-        _CANONICAL_ORDER = ("orchestration", "critic")
-        self._tick_roles: tuple[str, ...] = tuple(r for r in _CANONICAL_ORDER if r in self.role_registry)
+        self._tick_roles: tuple[str, ...] = tuple(self.role_registry)
 
         # Wall-clock budget tracking for per-tick Time-budget prompt injection.
         self._run_deadline: Deadline | None = None
@@ -477,9 +473,6 @@ class Coordinator:
                 self.shared_state,
                 links=ReconcileLinks(
                     resources=self.policy.resources,
-                    # Callables, not snapshots: the resume replay rebuilds the pending proposals after this runs.
-                    proposals=lambda: self.state.pending_proposals,
-                    drop_proposal=lambda pending, reason: self.router.settle_dropped_proposal(pending, reason),
                     session_dir=self.session_dir,
                     # The window a revalidation holds is closed by the writeback when
                     # its result is booked; this pass only closes one nobody will.
@@ -632,8 +625,8 @@ class Coordinator:
 
     async def _tick_once(self) -> bool:
         """Run one tick of the loop body; returns whether the session is in its closing phase."""
-        # Repair before anything is admitted: a round nobody will settle, a task row with no process, a review nobody
-        # answered. Ungated, because a stuck round closes every gate this could sit behind.
+        # Repair before anything is admitted: a round nobody will settle, a task row with no process. Ungated,
+        # because a stuck round closes every gate this could sit behind.
         await self.reconciler.run(time.time())
         # Bump the persistent tick counter — drives phase/plateau math.
         self.shared_state.increment_tick()
@@ -814,12 +807,7 @@ class Coordinator:
             ),
             trajectory_span(EVENT_SESSION, attributes={"name": self.session_dir.name}) as span,
         ):
-            try:
-                stop_reason = await self._run_ticks(objective=objective, options=options)
-            except BaseException:
-                close_undecided_proposals(self.session_dir, self.state.pending_proposals, self.shared_state.stop_reason)
-                raise
-            close_undecided_proposals(self.session_dir, self.state.pending_proposals, stop_reason)
+            stop_reason = await self._run_ticks(objective=objective, options=options)
             span.finish(stop_reason=stop_reason)
             return stop_reason
 
@@ -945,11 +933,10 @@ class Coordinator:
                 stop_reason = self._budget_stop_reason(options, ticks=ticks)
                 if stop_reason:
                     break
-                wait_sec = (
-                    options.tick_interval_sec
-                    if in_closing
-                    else max(options.tick_interval_sec, self._backend_retry_wait_sec())
-                )
+                # A tick dispatches and books tasks whether or not an agent takes a turn in it, so a backend's
+                # back-off never holds the next tick off for longer than the dispatcher polls.
+                retry_wait_sec = 0.0 if in_closing else min(self._backend_retry_wait_sec(), self.dispatcher.poll_sec)
+                wait_sec = max(options.tick_interval_sec, retry_wait_sec)
                 if wait_sec > 0:
                     with contextlib.suppress(asyncio.TimeoutError):
                         await asyncio.wait_for(self._stop.wait(), timeout=wait_sec)
@@ -1132,12 +1119,7 @@ class Coordinator:
                     "threshold": threshold,
                     "latest_error": repr(exc)[:500],
                     "severity": "high",
-                    "hint": (
-                        "subprocess backend has failed >= threshold times "
-                        "consecutively; consider switching to a mock "
-                        "backend (e.g. --critic-mock) "
-                        "while the underlying transport is repaired"
-                    ),
+                    "hint": "the backend has failed >= threshold times consecutively; repair its transport",
                 },
             )
 

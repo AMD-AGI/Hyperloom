@@ -36,7 +36,6 @@ authoritative.
 | `outcome`           | Terminal status, stage reached, stop reason, the `baseline` and `final` measured results with the graded axes each reported, the `validation` that reconciles the stack's parts against its total on one axis, named by `graded_on`, and `variants`, the framework phase's bench runs counted by how each ended. |
 | `timeline`          | The run itself: one event per stage, oldest first, each carrying its span, status, and an `ext` block of what that kind of stage records. Startup source events live under `reports/sbd_v6/timeline/`. |
 | `close`             | What the session settled at close: the steps the sequencer ran and the artifacts it published. |
-| `critic`            | The critic agent's own run, iteration by iteration: what it was asked about, how its rulings fell (`verdict_counts`), and the four artifacts each pass left behind. Per-proposal verdicts stay with the proposals, on the timeline. |
 
 ## Who reads it
 
@@ -122,7 +121,6 @@ this reference is partial — `breakdown/exporter.py` is authoritative.
 | `outcome`   | The recorder's `close` and stack fragments, plus `state.{current_best, cumulative_gain_validated, optimization_stack}` for the sessions that predate them |
 | `timeline`  | The event fragments in the spool, closed and assembled per event; orphans left open by a killed phase are closed on first build |
 | `close`     | The CLOSE sequencer's own `close` / `close_step` fragments                                                        |
-| `critic`    | `critic-workdir/<NNN>/{request,judge_bundle,emit,review}.json`, recorded as each pass returns                     |
 
 ## What is NOT in scope
 

@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Coverage for Coordinator async/stateful methods invoked directly against a real (mock-backed) Coordinator: SharedState promotion across task kinds, prompt composition per agent, advisory blocks, research-scout harvest, the orchestration checkpoint guard, strategy-change escalation, specialist autosubmit routing and warm-up, and per-task/per-variant fact journaling."""
+"""Coverage for Coordinator async/stateful methods invoked directly against a real (mock-backed) Coordinator: SharedState promotion across task kinds, prompt composition per agent, advisory blocks, research-scout harvest, the orchestration checkpoint guard, strategy-change escalation, specialist deliverable routing and warm-up, and per-task/per-variant fact journaling."""
 
 from __future__ import annotations
 
@@ -363,15 +363,6 @@ async def test_compose_prompt_keeps_the_orchestration_advisory_order(coord: Coor
 
 
 @pytest.mark.asyncio
-async def test_compose_prompt_withholds_every_advisory_from_a_reviewer(coord: Coordinator, monkeypatch) -> None:
-    markers = _stub_advisories(coord, monkeypatch)
-
-    prompt = (await coord.conversation.compose_prompt("critic")).text
-
-    assert [marker for marker in markers if marker in prompt] == []
-
-
-@pytest.mark.asyncio
 async def test_compose_prompt_drops_the_heading_of_an_advisory_that_produced_nothing(
     coord: Coordinator,
     monkeypatch,
@@ -571,9 +562,16 @@ async def test_escalate_skip_to_kernel_outside_framework_agent_is_refused_to_its
     assert denials[0]["hint"] == f"No hint advances {phase}: the Coordinator exits it on the gate its phase goal names."
 
 
-# -- maybe_autosubmit_specialist_patches ----------------------------------
+# -- integrate_specialist_deliverable -----------------------------------
+async def _integrate_task(coord: Coordinator, specialist_task_id: str):
+    """The integrate_patch task queued for one specialist's deliverable, if any."""
+    from hyperloom.orchestrator.loop.proposals import integrate_patch_key
+
+    return await coord.tasks.find_by_idempotency_key(integrate_patch_key(specialist_task_id))
+
+
 @pytest.mark.asyncio
-async def test_autosubmit_creates_proposal_for_real_file(coord: Coordinator) -> None:
+async def test_integrate_is_queued_for_real_file(coord: Coordinator) -> None:
     from hyperloom.orchestrator.state.task_registry import Task
     from hyperloom.inference_optimizer.session.session_paths import runs_dir
 
@@ -596,17 +594,16 @@ async def test_autosubmit_creates_proposal_for_real_file(coord: Coordinator) -> 
         },
         idempotency_key="k3",
     )
-    n_before = len(coord.state.pending_proposals)
-    await coord.phase_framework.maybe_autosubmit_specialist_patches(
+    await coord.phase_framework.integrate_specialist_deliverable(
         task=task,
         done_payload={
             "patches_written": ["kernel.py"],
             "proposal_set": [{"name": "fuse-moe"}],
         },
     )
-    assert len(coord.state.pending_proposals) == n_before + 1
-    pending = list(coord.state.pending_proposals.values())[-1]
-    params = pending.payload["params"]
+    queued = await _integrate_task(coord, sid)
+    assert (queued.kind, queued.state) == ("integrate_patch", "queued")
+    params = queued.params
     assert params["source_phase"] == "FRAMEWORK_AGENT"
     assert params["domain"] == "serving_specialist"
     assert params["provenance"] == "specialist:serving_specialist"
@@ -615,8 +612,8 @@ async def test_autosubmit_creates_proposal_for_real_file(coord: Coordinator) -> 
 
 
 @pytest.mark.asyncio
-async def test_autosubmit_creates_proposal_for_artifacts_only(coord: Coordinator) -> None:
-    """A specialist with NO source patch but a non-diff tuned artifact (``artifacts_written`` with a real file in its worktree) is a routable deliverable: autosubmit must create an integrate_patch proposal so the artifact-install channel runs."""
+async def test_integrate_is_queued_for_artifacts_only(coord: Coordinator) -> None:
+    """A specialist with NO source patch but a non-diff tuned artifact (``artifacts_written`` with a real file in its worktree) is a routable deliverable: an integrate_patch must be queued so the artifact-install channel runs."""
     from hyperloom.orchestrator.state.task_registry import Task
     from hyperloom.inference_optimizer.session.session_paths import runs_dir
 
@@ -625,8 +622,7 @@ async def test_autosubmit_creates_proposal_for_artifacts_only(coord: Coordinator
     art_dir.mkdir(parents=True, exist_ok=True)
     (art_dir / "tuned_fmoe.csv").write_text("cu_num,token\n304,16\n", encoding="utf-8")
     task = Task(task_id=sid, kind="specialist", state="running", params={}, idempotency_key="ka1")
-    n_before = len(coord.state.pending_proposals)
-    await coord.phase_framework.maybe_autosubmit_specialist_patches(
+    await coord.phase_framework.integrate_specialist_deliverable(
         task=task,
         done_payload={
             "patches_written": [],
@@ -640,12 +636,12 @@ async def test_autosubmit_creates_proposal_for_artifacts_only(coord: Coordinator
             ],
         },
     )
-    assert len(coord.state.pending_proposals) == n_before + 1
+    assert (await _integrate_task(coord, sid)).state == "queued"
 
 
 @pytest.mark.asyncio
-async def test_autosubmit_skipped_when_artifact_source_outside_sandbox(coord: Coordinator, tmp_path) -> None:
-    """An ``artifacts_written`` entry whose ``source`` is an ABSOLUTE path OUTSIDE the specialist sandbox must NOT be routable: integrate_patch would reject it as ``source_outside_workspace``, so autosubmit must not create a proposal for it."""
+async def test_integrate_skipped_when_artifact_source_outside_sandbox(coord: Coordinator, tmp_path) -> None:
+    """An ``artifacts_written`` entry whose ``source`` is an ABSOLUTE path OUTSIDE the specialist sandbox must NOT be routable: integrate_patch would reject it as ``source_outside_workspace``, so none is queued for it."""
     from hyperloom.orchestrator.state.task_registry import Task
 
     outside = tmp_path / "outside.csv"
@@ -657,8 +653,7 @@ async def test_autosubmit_skipped_when_artifact_source_outside_sandbox(coord: Co
         params={},
         idempotency_key="ka2",
     )
-    n_before = len(coord.state.pending_proposals)
-    await coord.phase_framework.maybe_autosubmit_specialist_patches(
+    await coord.phase_framework.integrate_specialist_deliverable(
         task=task,
         done_payload={
             "patches_written": [],
@@ -672,14 +667,14 @@ async def test_autosubmit_skipped_when_artifact_source_outside_sandbox(coord: Co
             ],
         },
     )
-    assert len(coord.state.pending_proposals) == n_before
+    assert await _integrate_task(coord, task.task_id) is None
 
 
 @pytest.mark.asyncio
-async def test_autosubmit_skipped_when_artifact_source_relative_escapes_sandbox(
+async def test_integrate_skipped_when_artifact_source_relative_escapes_sandbox(
     coord: Coordinator,
 ) -> None:
-    """A RELATIVE artifact ``source`` that escapes the specialist sandbox via ``..`` must NOT be routable, even though it resolves to a real file: integrate_patch rejects it as ``source_outside_workspace``, so autosubmit must not route it."""
+    """A RELATIVE artifact ``source`` that escapes the specialist sandbox via ``..`` must NOT be routable, even though it resolves to a real file: integrate_patch rejects it as ``source_outside_workspace``, so none is queued for it."""
     import os
 
     from hyperloom.orchestrator.state.task_registry import Task
@@ -692,8 +687,7 @@ async def test_autosubmit_skipped_when_artifact_source_relative_escapes_sandbox(
     outside.write_text("x", encoding="utf-8")
     rel_escape = os.path.relpath(outside, worktree)
     task = Task(task_id=sid, kind="specialist", state="running", params={}, idempotency_key="ka3")
-    n_before = len(coord.state.pending_proposals)
-    await coord.phase_framework.maybe_autosubmit_specialist_patches(
+    await coord.phase_framework.integrate_specialist_deliverable(
         task=task,
         done_payload={
             "patches_written": [],
@@ -701,11 +695,11 @@ async def test_autosubmit_skipped_when_artifact_source_relative_escapes_sandbox(
             "artifacts_written": [{"source": rel_escape, "target": "configs/model_configs/x.csv", "kind": "k"}],
         },
     )
-    assert len(coord.state.pending_proposals) == n_before
+    assert await _integrate_task(coord, sid) is None
 
 
 @pytest.mark.asyncio
-async def test_autosubmit_routes_relative_source_in_workspace_parent(coord: Coordinator) -> None:
+async def test_integrate_routes_relative_source_in_workspace_parent(coord: Coordinator) -> None:
     """A relative artifact ``source`` that climbs out of ``worktree`` via ``..`` but lands INSIDE the workspace is still contained, so it MUST remain routable: the sandbox check must not reject a legitimate ``../file`` source that resolves within an allowed base."""
     from hyperloom.orchestrator.state.task_registry import Task
     from hyperloom.inference_optimizer.session.session_paths import runs_dir
@@ -715,8 +709,7 @@ async def test_autosubmit_routes_relative_source_in_workspace_parent(coord: Coor
     (spec_root / "worktree").mkdir(parents=True, exist_ok=True)
     (spec_root / "tuned.csv").write_text("cu_num\n304\n", encoding="utf-8")
     task = Task(task_id=sid, kind="specialist", state="running", params={}, idempotency_key="ka4")
-    n_before = len(coord.state.pending_proposals)
-    await coord.phase_framework.maybe_autosubmit_specialist_patches(
+    await coord.phase_framework.integrate_specialist_deliverable(
         task=task,
         done_payload={
             "patches_written": [],
@@ -724,7 +717,7 @@ async def test_autosubmit_routes_relative_source_in_workspace_parent(coord: Coor
             "artifacts_written": [{"source": "../tuned.csv", "target": "configs/model_configs/x.csv", "kind": "k"}],
         },
     )
-    assert len(coord.state.pending_proposals) == n_before + 1
+    assert (await _integrate_task(coord, sid)).state == "queued"
 
 
 # -- _record_fact_per_task -------------------------------------------------

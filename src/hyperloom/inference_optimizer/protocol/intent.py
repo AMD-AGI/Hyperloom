@@ -13,9 +13,6 @@ from hyperloom_common.coerce import to_int
 
 
 _ALERT_SEVERITIES: frozenset[str] = frozenset({"low", "medium", "high"})
-ALLOWED_VERDICTS: frozenset[str] = frozenset({"approve", "reject", "redirect", "advise", "needs_review"})
-# Body of the observation a critic turn emits when it has nothing to say.
-DEFAULT_IDLE_BODY = "ok (critic)"
 
 # Ceiling on a single extend_lease step; repeated extensions are allowed. The PolicyGate enforces it; it is declared
 # here so the payload contract each backend renders for the agents states the same number.
@@ -32,7 +29,6 @@ class IntentType(str, Enum):
     ALERT = "alert"
     # Agent-to-agent request; the handler answers inline on the ``response`` topic.
     REQUEST = "request"
-    REVIEW_VERDICT = "review_verdict"  # Critic-only
     EXTEND_LEASE = "extend_lease"  # refresh a live task's lease TTL
     # Orchestration scheduling and phase control.
     PRUNE_BRANCH = "prune_branch"
@@ -54,7 +50,6 @@ PAYLOAD_REQUIRED: dict[IntentType, tuple[str, ...]] = {
     IntentType.PROPOSE_ACTION: ("action_name", "predicted_gain_pct"),
     IntentType.ALERT: ("severity", "summary"),
     IntentType.REQUEST: ("target_agent", "kind"),
-    IntentType.REVIEW_VERDICT: ("target_proposal_msg_id", "verdict"),
     IntentType.EXTEND_LEASE: ("task_id", "extra_sec"),
     IntentType.PRUNE_BRANCH: ("family", "reason"),
     IntentType.ESCALATE_STRATEGY_CHANGE: ("reason", "next_action_hint"),
@@ -116,9 +111,7 @@ def validate_envelope(envelope: dict[str, Any]) -> list[Intent]:
                 raise IntentValidationError(
                     f"intents[{i}] (type={it.value}) missing required payload field: {required!r}"
                 )
-        if it is IntentType.REVIEW_VERDICT:
-            _validate_review_verdict_payload(payload, index=i)
-        elif it is IntentType.ALERT:
+        if it is IntentType.ALERT:
             _validate_alert_payload(payload, index=i)
         elif it is IntentType.EXTEND_LEASE:
             _validate_extend_lease_payload(payload, index=i)
@@ -151,18 +144,7 @@ def _validate_extend_lease_payload(payload: dict[str, Any], *, index: int) -> No
         )
 
 
-def _validate_review_verdict_payload(payload: dict[str, Any], *, index: int) -> None:
-    """Enforce REVIEW_VERDICT value constraints: a recognised ``verdict``."""
-    verdict = payload["verdict"]
-    if not isinstance(verdict, str) or verdict not in ALLOWED_VERDICTS:
-        raise IntentValidationError(
-            f"intents[{index}] (type=review_verdict).verdict must be one of {sorted(ALLOWED_VERDICTS)!r}, got {verdict!r}"
-        )
-
-
 __all__ = [
-    "ALLOWED_VERDICTS",
-    "DEFAULT_IDLE_BODY",
     "EXTEND_LEASE_MAX_SEC",
     "PAYLOAD_REQUIRED",
     "Intent",

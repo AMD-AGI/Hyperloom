@@ -24,7 +24,7 @@ from hyperloom.orchestrator.phases.controller_settlement import CONTROLLER_TERMI
 from hyperloom.orchestrator.phases import phase_predicates, phase_transitions
 from hyperloom.orchestrator.state.shared_state import SharedState
 from hyperloom.orchestrator.state.task_registry import Task, TaskSpec
-from .conftest import make_mock_critic_coordinator
+from .conftest import make_idle_coordinator
 from ._dispatch_helpers import pump_until_settled
 
 _KERNEL_AGENT_LANES = ("server_lifecycle", "workspace_mutation", "benchmark_lane")
@@ -32,7 +32,7 @@ _KERNEL_AGENT_LANES = ("server_lifecycle", "workspace_mutation", "benchmark_lane
 
 @pytest.fixture
 def coord(session_dir):
-    c = make_mock_critic_coordinator(session_dir)
+    c = make_idle_coordinator(session_dir)
 
     async def _noop(*_args, **_kwargs):
         return None
@@ -185,7 +185,6 @@ async def test_resumed_entry_reuses_a_live_task_and_replaces_a_settled_one(coord
 async def _next_leg(coord):
     """Stop ``coord`` and reopen its session the way a restarted run does."""
     from hyperloom.orchestrator.loop.coordinator import Coordinator
-    from hyperloom.orchestrator.roles import MockCriticBackend
     from hyperloom.orchestrator.tests.mock_backend import MockBackend, ScriptedPlan
 
     coord.shared_state.save(coord.session_dir)
@@ -194,7 +193,6 @@ async def _next_leg(coord):
         coord.session_dir,
         backends={
             "orchestration": MockBackend(ScriptedPlan(turns=[]), name="orchestration"),
-            "critic": MockCriticBackend(),
         },
     )
 

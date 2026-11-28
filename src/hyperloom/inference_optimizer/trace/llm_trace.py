@@ -26,7 +26,6 @@ VALID_COMPONENTS: frozenset[str] = frozenset(
         "orchestration",
         "kernel_agent",
         "specialist",
-        "critic",
         "geak",
         "forge",
         "tracelens",
@@ -97,8 +96,6 @@ class LLMCallRecord:
     # Wall-clock latency of the model call in ms, measured at the call site (None = not measured); the Langfuse
     # generation is placed at ``[ts - latency_ms, ts]``.
     latency_ms: int | None = None
-    # Proposal ``msg_id``s this call reviewed (critic only), so the call can be attributed to the decision it served.
-    reviewed_msg_ids: list[str] | None = None
     # An ``error`` row records a call that never produced a usable response, so its token counters stay ``None``;
     # spend rollups must exclude it.
     status: str = LLM_STATUS_OK
@@ -115,7 +112,6 @@ class LLMCallRecord:
             "cache_read_input_tokens": to_int(self.cache_read_input_tokens),
             "reasoning_output_tokens": to_int(self.reasoning_output_tokens),
             "latency_ms": to_int(self.latency_ms),
-            "reviewed_msg_ids": _coerce_optional_str_list(self.reviewed_msg_ids),
             "status": str(self.status),
             "error_type": text_or_none(self.error_type),
             "error_message": text_or_none(self.error_message),
@@ -177,21 +173,6 @@ class LLMCallRecord:
             error_type=type(error).__name__ if isinstance(error, BaseException) else None,
             error_message=str(error)[:_ERROR_MESSAGE_MAX],
         )
-
-
-def _coerce_optional_str_list(value: Any) -> list[str] | None:
-    """Coerce an iterable of ids to a list of non-empty strings, or ``None``."""
-    if value is None:
-        return None
-    if isinstance(value, (str, bytes)):
-        items = [value]
-    else:
-        try:
-            items = list(value)
-        except TypeError:
-            return None
-    out = [s for s in (str(v).strip() for v in items) if s]
-    return out or None
 
 
 def append_llm_call(

@@ -28,9 +28,6 @@ from hyperloom.inference_optimizer.breakdown.recorder.phase_records import (
     PhaseEntry,
     PhaseExit,
     PhaseMarker,
-    PhaseProposal,
-    ProposalOutcome,
-    ProposalReview,
 )
 from hyperloom.inference_optimizer.session.sbd_v6 import read_timeline_events
 from hyperloom.inference_optimizer.session.session_binding import session_scope
@@ -379,93 +376,6 @@ def test_the_phase_event_holds_no_copy_of_the_stage_detail(tmp_path):
     }
 
 
-def _propose(msg_id: str, *, phase: str = "KERNEL_AGENT", action: str = "kernel_opt", cycle: int = 0, **kw) -> None:
-    phase_event.record_proposal(
-        PhaseProposal(
-            at=PhaseCycle(phase, cycle),
-            proposal_msg_id=msg_id,
-            action=action,
-            from_agent="orchestration",
-            **kw,
-        )
-    )
-
-
-def test_a_proposal_is_on_record_before_anything_acts_on_it(tmp_path):
-    _enter("KERNEL_AGENT", sequence=1, at=10.0)
-    _propose("m-1", predicted_gain_pct=4.5)
-
-    proposals = _ext("KERNEL_AGENT")["proposals"]
-    assert proposals["count"] == 1
-    row = proposals["rows"][0]
-    assert row["proposal_msg_id"] == "m-1"
-    assert row["action"] == "kernel_opt"
-    assert row["from_agent"] == "orchestration"
-    assert row["predicted_gain_pct"] == 4.5
-
-
-def test_a_kernel_phase_ruling_is_filed_on_the_thing_it_ruled_on(tmp_path):
-    _enter("KERNEL_AGENT", sequence=1, at=10.0)
-    _propose("m-1")
-    phase_event.record_proposal_review(
-        ProposalReview(
-            proposal_msg_id="m-1",
-            verdict="reject",
-            reasoning="the kernel is already fused",
-            confidence=0.8,
-        ),
-    )
-
-    review = _ext("KERNEL_AGENT")["proposals"]["rows"][0]["critic_review"]
-    assert review["verdict"] == "reject"
-    assert review["confidence"] == 0.8
-
-
-def test_a_ruling_reaching_a_proposal_after_its_phase_exited_still_lands_on_it(tmp_path):
-    _enter("KERNEL_AGENT", sequence=1, at=10.0)
-    _propose("m-1")
-    _exit("KERNEL_AGENT", at=20.0, to_phase="FRAMEWORK_AGENT")
-    _enter("FRAMEWORK_AGENT", sequence=2, at=20.0)
-    phase_event.record_proposal_review(ProposalReview(proposal_msg_id="m-1", verdict="approve"))
-
-    assert _ext("KERNEL_AGENT")["proposals"]["rows"][0]["critic_review"]["verdict"] == "approve"
-    assert _ext("FRAMEWORK_AGENT")["proposals"]["count"] == 0
-
-
-def test_a_ruling_for_a_proposal_that_was_never_recorded_mints_nothing(tmp_path):
-    _enter("KERNEL_AGENT", sequence=1, at=10.0)
-    phase_event.record_proposal_review(ProposalReview(proposal_msg_id="ghost", verdict="approve"))
-
-    assert _ext("KERNEL_AGENT")["proposals"]["count"] == 0
-
-
-def test_the_task_a_proposal_became_joins_it_to_its_dispatch(tmp_path):
-    _enter("KERNEL_AGENT", sequence=1, at=10.0)
-    _propose("m-1")
-    phase_event.record_proposal_review(ProposalReview(proposal_msg_id="m-1", verdict="approve"))
-    phase_event.record_proposal_outcome(ProposalOutcome(proposal_msg_id="m-1", materialized=True, task_id="t-9"))
-    phase_event.record_dispatch(ActionDispatch(at=PhaseCycle("KERNEL_AGENT", 0), action="kernel_opt", task_id="t-9"))
-
-    ext = _ext("KERNEL_AGENT")
-    outcome = ext["proposals"]["rows"][0]["outcome"]
-    assert outcome["materialized"] is True
-    assert outcome["task_id"] == "t-9"
-    assert [row["task_id"] for row in ext["actions"]["rows"]] == ["t-9"]
-
-
-def test_a_proposal_the_critic_never_reached_is_not_a_refused_one(tmp_path):
-    _enter("KERNEL_AGENT", sequence=1, at=10.0)
-    _propose("m-1")
-    _propose("m-2")
-    phase_event.record_proposal_review(ProposalReview(proposal_msg_id="m-1", verdict="reject"))
-
-    proposals = _ext("KERNEL_AGENT")["proposals"]
-    assert proposals["count"] == 2
-    assert proposals["reviewed"] == 1
-    assert proposals["materialized"] == 0
-    assert "critic_review" not in proposals["rows"][1]
-
-
 def test_an_unreadable_spool_on_exit_does_not_raise(tmp_path, monkeypatch):
     """``record_exit`` must keep its Never-raises contract when the close-time
     read of the spool fails. ``_open_segment`` already goes through the guarded
@@ -499,14 +409,13 @@ def test_a_malformed_spool_event_id_does_not_raise_out_of_exit(tmp_path, monkeyp
     _exit("PRELUDE", at=20.0, to_phase="FRAMEWORK_AGENT")
 
 
-def test_repeated_denials_without_proposal_ids_are_not_collapsed(tmp_path):
+def test_repeated_denials_are_not_collapsed(tmp_path):
     _enter("PRELUDE", sequence=1, at=10.0)
     for _ in range(2):
         phase_event.record_denial(
             PhaseDenial(
                 at=PhaseCycle("PRELUDE", 0),
                 actor="orchestration",
-                proposal_msg_id=None,
                 action="profile",
                 rule="phase_action_not_allowed",
                 hint="use baseline",

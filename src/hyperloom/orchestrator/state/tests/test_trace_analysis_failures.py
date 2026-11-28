@@ -13,7 +13,6 @@ from hyperloom.inference_optimizer.protocol.intent import Intent, IntentType
 from hyperloom.orchestrator.kernel.request_handlers import KERNEL_REQUEST_HANDLERS
 from hyperloom.orchestrator.loop.coordinator import Coordinator
 from hyperloom.orchestrator.phases.kernel import KernelPhase
-from hyperloom.orchestrator.roles import MockCriticBackend
 from hyperloom.orchestrator.state.analysis_failures import remember_trace_failure, remembered_trace_failure
 from hyperloom.orchestrator.state.shared_state import SharedState
 from hyperloom.orchestrator.tests.mock_backend import MockBackend, ScriptedPlan
@@ -121,7 +120,7 @@ def _silent_backends() -> dict[str, object]:
     silent = ScriptedPlan(
         turns=[], default_intent=Intent(type=IntentType.SEND_MESSAGE, payload={"topic": "heartbeat", "body_md": "ok"})
     )
-    return {"orchestration": MockBackend(silent, name="orch"), "critic": MockCriticBackend()}
+    return {"orchestration": MockBackend(silent, name="orch")}
 
 
 @pytest.mark.asyncio

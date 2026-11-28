@@ -48,19 +48,3 @@ def test_extend_lease_rejects_empty_task_id() -> None:
 def test_extend_lease_accepts_valid_payload() -> None:
     intents = validate_envelope(_envelope("extend_lease", {"task_id": "t1", "extra_sec": 120}))
     assert intents[0].payload["extra_sec"] == 120
-
-
-@pytest.mark.parametrize("verdict", [12345, None, "APPROVE", "maybe"])
-def test_review_verdict_rejects_invalid_verdict(verdict) -> None:
-    with pytest.raises(IntentValidationError, match="verdict"):
-        validate_envelope(_envelope("review_verdict", {"target_proposal_msg_id": "m", "verdict": verdict}))
-
-
-def test_review_verdict_requires_a_verdict() -> None:
-    with pytest.raises(IntentValidationError, match="missing required payload field: 'verdict'"):
-        validate_envelope(_envelope("review_verdict", {"target_proposal_msg_id": "m"}))
-
-
-def test_review_verdict_accepts_valid_payload() -> None:
-    intents = validate_envelope(_envelope("review_verdict", {"target_proposal_msg_id": "m", "verdict": "approve"}))
-    assert intents[0].payload["verdict"] == "approve"

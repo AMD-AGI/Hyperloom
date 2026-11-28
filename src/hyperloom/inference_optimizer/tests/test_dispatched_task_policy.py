@@ -115,8 +115,8 @@ def _runner_with_policy(tmp_path: Path, monkeypatch, *, shared_state: object | N
 
 
 @pytest.mark.asyncio
-async def test_dispatched_integrate_patch_without_critic_verdict_is_cancelled(tmp_path, monkeypatch):
-    """Forged queued integrate_patch rows are cancelled by dispatch policy replay, never run."""
+async def test_a_queued_row_the_gate_refuses_at_dispatch_is_cancelled_and_never_runs(tmp_path, monkeypatch):
+    """A queued row is replayed through the gate before it runs: a baseline another round's machine denies is cancelled."""
     sub = _runner_with_policy(tmp_path, monkeypatch)
     executed = {"ran": False}
 
@@ -124,27 +124,23 @@ async def test_dispatched_integrate_patch_without_critic_verdict_is_cancelled(tm
         executed["ran"] = True
         return {"status": "ok"}
 
-    sub.register_executor("integrate_patch", _stub)
+    sub.register_executor("baseline", _stub)
     task, _ = await sub.tasks.create_or_return_existing(
-        TaskSpec(
-            kind="integrate_patch",
-            params={
-                "specialist_task_id": "evil0",
-                "apply_only": True,
-            },
-            idempotency_key="forged-integrate",
-        ),
+        TaskSpec(kind="baseline", params={}, idempotency_key="second-bring-up"),
     )
+    _project(sub.policy, excluding_round_id="round-7", excluding_round_holder="spec-abc")
+
     res = await sub.run_task(task)
+
     assert res.state == "cancelled"
-    assert res.error_class == "policy_integrate_patch_requires_critic_verdict"
-    assert "no Critic verdict on record" in (res.error or "")
+    assert res.error_class == "policy_enablement_round_in_flight"
+    assert "spec-abc" in (res.error or "")
     assert executed["ran"] is False
     updated = await sub.tasks.get(task.task_id)
     assert updated.state == "cancelled"
     terminal = updated.history[-1]["evidence"]
-    assert terminal["rule"] == "integrate_patch_requires_critic_verdict"
-    assert terminal["outcome"]["error_class"] == "policy_integrate_patch_requires_critic_verdict"
+    assert terminal["rule"] == "enablement_round_in_flight"
+    assert terminal["outcome"]["error_class"] == "policy_enablement_round_in_flight"
 
 
 @pytest.mark.asyncio
@@ -153,7 +149,7 @@ async def test_dispatch_denied_baseline_is_not_charged_to_baseline_failures(sess
     silent = ScriptedPlan(
         turns=[], default_intent=Intent(type=IntentType.SEND_MESSAGE, payload={"topic": "heartbeat", "body_md": "ok"})
     )
-    coord = Coordinator(session_dir, backends={n: MockBackend(silent, name=n) for n in ("orchestration", "critic")})
+    coord = Coordinator(session_dir, backends={"orchestration": MockBackend(silent, name="orchestration")})
     coord.shared_state.phase = "PRELUDE"
 
     def _deny(kind, params, *, task_id=""):
@@ -191,6 +187,9 @@ async def test_dispatch_denied_baseline_is_not_charged_to_baseline_failures(sess
         pytest.param(
             "framework_agent", {"candidate": {"repo": "x/y", "pr_number": 1}}, {}, id="internal_framework_agent"
         ),
+        pytest.param(
+            "integrate_patch", {"specialist_task_id": "spec-ok", "apply_only": True}, {}, id="integrate_patch"
+        ),
     ],
 )
 async def test_dispatched_admitted_row_passes_delegate_gates(tmp_path, monkeypatch, kind, params, state_fields):
@@ -211,13 +210,6 @@ async def test_dispatched_admitted_row_passes_delegate_gates(tmp_path, monkeypat
     res = await sub.run_task(task)
     assert res.state == "succeeded"
     assert executed["ran"] is True
-
-
-def test_validate_dispatched_task_rejects_missing_specialist_task_id(tmp_path, monkeypatch):
-    gate, _sd = _gate(tmp_path, monkeypatch)
-    with pytest.raises(PolicyDenied) as exc:
-        gate.validate_dispatched_task("integrate_patch", {"apply_only": True})
-    assert exc.value.rule == "integrate_patch_requires_critic_verdict"
 
 
 def test_validate_dispatched_task_internal_profile_skips_delegate_body(tmp_path, monkeypatch):
@@ -436,85 +428,6 @@ async def test_dispatched_revalidation_holding_its_own_round_runs(tmp_path, monk
 
     assert result.state == "succeeded"
     assert executed["ran"] is True
-
-
-@pytest.mark.asyncio
-async def test_dispatched_integrate_patch_with_verdict_passes(tmp_path, monkeypatch):
-    sub = _runner_with_policy(tmp_path, monkeypatch)
-    state = sub.shared_state
-    assert isinstance(state, SharedState)
-    state.record_specialist_patch_verdict("spec-ok", "advise")
-    executed = {"ran": False}
-
-    async def _stub(_ctx) -> dict:
-        executed["ran"] = True
-        return {"status": "ok"}
-
-    sub.register_executor("integrate_patch", _stub)
-    task, _ = await sub.tasks.create_or_return_existing(
-        TaskSpec(
-            kind="integrate_patch",
-            params={"specialist_task_id": "spec-ok", "apply_only": True},
-            idempotency_key="legit-integrate",
-        ),
-    )
-    res = await sub.run_task(task)
-    assert res.state == "succeeded"
-    assert executed["ran"] is True
-
-
-@pytest.mark.asyncio
-async def test_dispatched_integrate_patch_resume_with_persisted_verdict_passes(tmp_path, monkeypatch):
-    """Queued integrate_patch survives resume when Critic verdicts round-trip in state.json."""
-    monkeypatch.setenv(paths.ENV_USER_DATA_PATH, str(tmp_path))
-    sd = paths.make_session_dir()
-    db_path = tmp_path / "coord.db"
-
-    state = SharedState.load_or_init(sd)
-    state.record_specialist_patch_verdict("spec-resume", "approve")
-    state.save(sd)
-
-    db = SqliteConnection(db_path)
-    tasks = TaskRegistry(db)
-    task, _ = await tasks.create_or_return_existing(
-        TaskSpec(
-            kind="integrate_patch",
-            params={"specialist_task_id": "spec-resume", "apply_only": True},
-            idempotency_key="resume-integrate",
-        ),
-    )
-    assert task.state == "queued"
-    task_id = task.task_id
-
-    resumed_state = SharedState.load_or_init(sd)
-    assert resumed_state.get_specialist_patch_verdict("spec-resume") == "approve"
-
-    db2 = SqliteConnection(db_path)
-    locks2 = SqliteLeaseBackend(db2)
-    tasks2 = TaskRegistry(db2)
-    gate = PolicyGate(
-        role_registry=default_role_registry(),
-        session_dir=sd,
-        shared_state=resumed_state,
-    )
-    sub = SubAgentRunner(locks2, tasks2, session_dir=sd)
-    sub.shared_state = resumed_state
-    sub.policy = gate
-    executed = {"ran": False}
-
-    async def _stub(_ctx) -> dict:
-        executed["ran"] = True
-        return {"status": "ok"}
-
-    sub.register_executor("integrate_patch", _stub)
-    queued = await tasks2.get(task_id)
-    assert queued.state == "queued"
-
-    res = await sub.run_task(queued)
-    assert res.state == "succeeded"
-    assert executed["ran"] is True
-    updated = await tasks2.get(task_id)
-    assert updated.state == "succeeded"
 
 
 @pytest.mark.asyncio

@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Coverage for ``cli_backends``: per-role backend construction (mock/agent choices, kernel selection, validation errors)."""
+"""Coverage for ``cli_backends``: per-role backend construction (which agent CLI runs orchestration, validation errors)."""
 
 from __future__ import annotations
 
@@ -42,19 +42,12 @@ def _stub_backends(monkeypatch):
     monkeypatch.setattr(clib, "ClaudeBackend", lambda **kw: ("claude", kw))
     monkeypatch.setattr(clib, "CodexBackend", lambda **kw: ("codex", kw))
     monkeypatch.setattr(clib, "DeepSeekBackend", lambda **kw: ("deepseek", kw))
-    monkeypatch.setattr(clib, "MockCriticBackend", lambda: ("mock_critic",))
-    monkeypatch.setattr(
-        clib,
-        "CriticAgentBackend",
-        lambda **kw: ("critic_agent", kw),
-    )
 
 
 def _build(**over):
     kwargs = dict(
         claude_model="claude-x",
         codex_model="codex-y",
-        critic_choice="mock",
         session_dir=Path("/tmp/s"),
     )
     kwargs.update(over)
@@ -64,14 +57,9 @@ def _build(**over):
         codex_follows_claude=kwargs.pop("codex_follows_claude", False),
         claude_follows_codex=kwargs.pop("claude_follows_codex", False),
     )
-    critic = clib.CriticSetup(
-        choice=kwargs.pop("critic_choice"),
-        agent_root=kwargs.pop("critic_agent_root", None),
-        protocol=kwargs.pop("critic_protocol", "auto"),
-    )
     session_dir = kwargs.pop("session_dir")
     assert not kwargs, kwargs
-    return clib._build_backends(models, critic, session_dir=session_dir)
+    return clib._build_backends(models, session_dir=session_dir)
 
 
 @pytest.fixture(autouse=True)
@@ -87,154 +75,28 @@ def _isolated_provider_env(monkeypatch):
     monkeypatch.setattr(llm_config, "deepseek_harness_sdk_installed", lambda: True)
 
 
-def test_build_backends_mock_defaults() -> None:
+def test_build_backends_defaults_to_claude_orchestration() -> None:
     b = _build()
     assert b["orchestration"][0] == "claude"
-    assert b["critic"] == ("mock_critic",)
-    assert set(b) == {"orchestration", "critic"}
-    assert "kernel_agent" not in b
+    assert set(b) == {"orchestration"}
 
 
-def test_build_backends_critic_agent_with_root() -> None:
-    b = _build(critic_choice="agent", critic_agent_root=Path("/tmp/critic"))
-    assert b["critic"][0] == "critic_agent"
-
-
-def test_build_backends_anthropic_only_uses_native_critic_agent(monkeypatch) -> None:
+def test_build_backends_anthropic_only_uses_claude_for_orchestration(monkeypatch) -> None:
     _clear_provider_env(monkeypatch)
     monkeypatch.setenv("ANTHROPIC_BASE_URL", "https://api.anthropic.com")
     monkeypatch.setenv("ANTHROPIC_API_KEY", "test-anthropic-key")
-    b = _build(
-        critic_choice="agent",
-        critic_agent_root=Path("/tmp/critic"),
-    )
-    assert b["orchestration"][0] == "claude"
-    # Provider-only keeps the critic-agent on the native Anthropic protocol.
-    assert b["critic"][0] == "critic_agent"
-    assert b["critic"][1]["protocol"] == "anthropic"
-    assert b["critic"][1]["claude_model"] == "claude-x"
-    assert "kernel_agent" not in b
-
-
-def test_build_backends_oauth_only_uses_anthropic_critic_protocol(monkeypatch) -> None:
-    """A subscription token alone is enough to route the review over the CLI."""
-    _clear_provider_env(monkeypatch)
-    monkeypatch.setenv("_".join(("CLAUDE", "CODE", "OAUTH", "TOKEN")), "sk-ant-oat01-fake")
-    b = _build(critic_choice="agent", critic_agent_root=Path("/tmp/critic"))
-    assert b["critic"][0] == "critic_agent"
-    assert b["critic"][1]["protocol"] == "anthropic"
-
-
-def test_build_backends_forced_openai_protocol_wins_over_dual_config(monkeypatch) -> None:
-    """With both sides configured, auto follows the Claude orchestration; the flag must override it."""
-    _clear_provider_env(monkeypatch)
-    monkeypatch.setenv("ANTHROPIC_API_KEY", "test-anthropic-key")
-    monkeypatch.setenv("OPENAI_API_KEY", "test-openai-key")
-    auto = _build(critic_choice="agent", critic_agent_root=Path("/tmp/critic"))
-    assert auto["critic"][1]["protocol"] == "anthropic"
-    forced = _build(
-        critic_choice="agent",
-        critic_agent_root=Path("/tmp/critic"),
-        critic_protocol="openai",
-    )
-    assert forced["critic"][1]["protocol"] == "openai"
-
-
-def test_build_backends_forced_protocol_without_credential_fails(monkeypatch) -> None:
-    _clear_provider_env(monkeypatch)
-    monkeypatch.setenv("OPENAI_API_KEY", "test-openai-key")
-    with pytest.raises(ValueError, match="CLAUDE_CODE_OAUTH_TOKEN"):
-        _build(
-            critic_choice="agent",
-            critic_agent_root=Path("/tmp/critic"),
-            critic_protocol="anthropic",
-        )
-
-
-def test_build_backends_forced_openai_protocol_accepts_an_anthropic_gateway(monkeypatch) -> None:
-    """resolve_openai_client_config derives an OpenAI side from an Anthropic gateway -- one host, two protocols, one token."""
-    monkeypatch.setenv("ANTHROPIC_BASE_URL", "https://gw.example.com/anthropic")
-    monkeypatch.setenv("_".join(("ANTHROPIC", "AUTH", "TOKEN")), "gateway-bearer")
-    b = _build(
-        critic_choice="agent",
-        critic_agent_root=Path("/tmp/critic"),
-        critic_protocol="openai",
-    )
-    assert b["critic"][1]["protocol"] == "openai"
-
-
-def test_build_backends_forced_openai_protocol_without_any_key_fails(monkeypatch) -> None:
-    _clear_provider_env(monkeypatch)
-    monkeypatch.setenv("_".join(("CLAUDE", "CODE", "OAUTH", "TOKEN")), "sk-ant-oat01-fake")
-    with pytest.raises(ValueError, match="OPENAI_API_KEY"):
-        _build(
-            critic_choice="agent",
-            critic_agent_root=Path("/tmp/critic"),
-            critic_protocol="openai",
-        )
-
-
-def test_build_backends_forced_anthropic_protocol_accepts_a_subscription_token(monkeypatch) -> None:
-    """The Claude CLI authenticates from the token alone, so the flag must accept it instead of rejecting a config that would have run."""
-    _clear_provider_env(monkeypatch)
-    monkeypatch.setenv("CLAUDE_CODE_OAUTH_TOKEN", "sk-ant-oat01-token")
-    b = _build(
-        critic_choice="agent",
-        critic_agent_root=Path("/tmp/critic"),
-        critic_protocol="anthropic",
-    )
-    assert b["critic"][1]["protocol"] == "anthropic"
-
-
-def test_build_backends_forced_openai_protocol_rejects_a_bare_anthropic_bearer(monkeypatch) -> None:
-    """An Anthropic bearer without a resolvable base URL would be sent to official OpenAI."""
-    _clear_provider_env(monkeypatch)
-    monkeypatch.setenv("_".join(("ANTHROPIC", "API", "KEY")), "ak-anthropic-key")
-    with pytest.raises(ValueError, match="OPENAI_BASE_URL"):
-        _build(
-            critic_choice="agent",
-            critic_agent_root=Path("/tmp/critic"),
-            critic_protocol="openai",
-        )
-
-
-def test_build_backends_dual_protocol_gateway_uses_standard_critic_agent(monkeypatch) -> None:
-    """A dual-protocol gateway (e.g. DeepSeek) is just \"both sides configured\"."""
-    _clear_provider_env(monkeypatch)
-    _set_dual_protocol_gateway(monkeypatch)
-    b = _build(
-        critic_choice="agent",
-        critic_agent_root=Path("/tmp/critic"),
-    )
-    assert b["critic"][0] == "critic_agent"
-    # Orchestration runs on Claude here, so auto reviews with the same model over the same protocol rather than with
-    # the other side's model.
-    assert b["critic"][1]["protocol"] == "anthropic"
-    assert b["critic"][1]["claude_model"] == "claude-x"
-    assert "codex_client_factory" not in b["critic"][1]
-
-
-def test_build_backends_critic_follows_an_orchestration_on_codex(monkeypatch) -> None:
-    _clear_provider_env(monkeypatch)
-    _set_dual_protocol_gateway(monkeypatch)
-    monkeypatch.setattr(llm_config, "claude_agent_sdk_installed", lambda: False)
-    b = _build(critic_choice="agent", critic_agent_root=Path("/tmp/critic"))
-    assert b["orchestration"][0] == "codex"
-    assert b["critic"][1]["protocol"] == "openai"
-    assert b["critic"][1]["codex_model"] == "codex-y"
+    name, kwargs = _build()["orchestration"]
+    assert name == "claude"
+    assert kwargs["model"] == "claude-x"
 
 
 def test_build_backends_openai_only_uses_codex_for_orchestration(monkeypatch) -> None:
     _clear_provider_env(monkeypatch)
     monkeypatch.setenv("OPENAI_BASE_URL", "https://api.openai.com/v1")
     monkeypatch.setenv("OPENAI_API_KEY", "test-openai-key")
-    b = _build(
-        critic_choice="agent",
-        critic_agent_root=Path("/tmp/critic"),
-    )
-    assert b["orchestration"][0] == "codex"
-    assert b["critic"][0] == "critic_agent"
-    assert "kernel_agent" not in b
+    name, kwargs = _build()["orchestration"]
+    assert name == "codex"
+    assert kwargs["model"] == "codex-y"
 
 
 def test_build_backends_dual_config_keeps_claude_for_orchestration(monkeypatch) -> None:
@@ -257,15 +119,13 @@ def test_an_operator_override_outranks_the_credential_rule(monkeypatch) -> None:
     assert kwargs["permission_mode"] == "read-only"
 
 
-def test_an_explicit_codex_pins_both_orchestration_and_the_critic_side(monkeypatch) -> None:
-    """One resolver answers both: naming Codex must not leave the critic on the side the credentials rank first."""
+def test_an_explicit_codex_pins_orchestration_over_the_credential_ranking(monkeypatch) -> None:
+    """Both sides authenticate, which ranks Claude first; naming Codex must win."""
     _clear_provider_env(monkeypatch)
     _set_dual_protocol_gateway(monkeypatch)
     monkeypatch.setenv(llm_config.AGENT_BACKEND_ENV, "codex")
 
-    built = _build(critic_choice="agent", critic_agent_root=Path("/tmp/critic"))
-    assert built["orchestration"][0] == "codex"
-    assert built["critic"][1]["protocol"] == "openai"
+    assert _build()["orchestration"][0] == "codex"
 
 
 def test_the_harness_is_never_selected_by_credentials_alone(monkeypatch) -> None:

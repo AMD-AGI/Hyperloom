@@ -1201,10 +1201,7 @@ def test_chat_completion_does_not_request_a_stream():
 
 
 # ---- client-ownership guard ----
-_MIGRATED_CALL_SITES = (
-    "orchestrator/roles/codex.py",
-    "orchestrator/roles/critic_agent.py",
-)
+_MIGRATED_CALL_SITES = ("orchestrator/roles/codex.py",)
 
 # ``a.b.create`` attribute chains that only llm_config may call directly.
 _SANCTIONED_ONLY_ENDPOINTS = ("chat.completions.create", "responses.create")
@@ -1354,7 +1351,7 @@ def test_anthropic_transport_ready_skips_the_sdk_probe_on_the_http_transport(mon
 
 
 def test_ensure_available_rejects_a_missing_cli_binary(monkeypatch):
-    """The SDK only spawns `claude`; an importable package with no reachable binary still cannot serve a call, and failing here beats failing at the first review."""
+    """The SDK only spawns `claude`; an importable package with no reachable binary still cannot serve a call, and failing here beats failing at the first call."""
     from hyperloom_common.llm import claude_oneshot
 
     monkeypatch.setattr(claude_oneshot, "_load_sdk", lambda: types.SimpleNamespace(__file__=None))

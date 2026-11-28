@@ -60,7 +60,7 @@ async def test_a_promoted_baseline_carries_the_measured_corpus_shape_into_the_se
         turns=[],
         default_intent=Intent(type=IntentType.SEND_MESSAGE, payload={"topic": "heartbeat", "body_md": "ok"}),
     )
-    coord = Coordinator(session_dir, backends={n: MockBackend(idle, name=n) for n in ("orchestration", "critic")})
+    coord = Coordinator(session_dir, backends={"orchestration": MockBackend(idle, name="orchestration")})
     try:
         measured = _measure(_workspace(tmp_path, {"input_sequence_length": _ISL, "output_sequence_length": _OSL}))
         task = Task(task_id="t-base", kind="baseline", state="running", params={}, idempotency_key="idem-t-base")

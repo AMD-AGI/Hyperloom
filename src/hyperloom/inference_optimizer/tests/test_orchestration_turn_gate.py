@@ -9,13 +9,12 @@ import time
 
 import pytest
 
-from hyperloom.inference_optimizer.protocol.intent import DEFAULT_IDLE_BODY
 from hyperloom.orchestrator.bus.message_bus import LANES_BUSY_SOURCE, Message
 from hyperloom.orchestrator.loop.coordinator import Coordinator
 from hyperloom.orchestrator.phases import machine_state as ps
 from hyperloom.orchestrator.roles.base import BackendError
 from hyperloom.orchestrator.state.task_registry import TaskSpec
-from .conftest import seed_pending_critic_proposal, silent_backends
+from .conftest import silent_backends
 
 _HOLD_PHASES = (ps.PHASE_PRELUDE, ps.PHASE_FRAMEWORK_AGENT, ps.PHASE_KERNEL_AGENT, ps.PHASE_CYCLE_END)
 _ONE_TURN_THEN_HOLD = ["orchestration"]
@@ -59,17 +58,6 @@ async def test_a_tick_with_nothing_new_runs_no_orchestration_turn(ticking, phase
     assert turns == _ONE_TURN_THEN_HOLD
 
 
-@pytest.mark.parametrize("custom_only", [False, True])
-async def test_critic_admission_requires_pending_proposals(ticking, custom_only):
-    c, _turns = ticking
-    c.shared_state.phase = ps.PHASE_FRAMEWORK_AGENT
-    c.shared_state.custom_specialist_only = custom_only
-
-    assert not await c.conversation.admit_turn("critic", time.time())
-    await seed_pending_critic_proposal(c)
-    assert await c.conversation.admit_turn("critic", time.time())
-
-
 async def _enter_sweep(c: Coordinator) -> None:
     c.shared_state.phase = ps.PHASE_CYCLE_END
 
@@ -110,16 +98,11 @@ async def _defer_on_busy_lanes(c: Coordinator) -> None:
     await c.bus.append_and_seq(Message.new("kernel_agent", "orchestration", "response", payload))
 
 
-async def _critic_idles(c: Coordinator) -> None:
-    await c.bus.append_and_seq(Message.new("critic", "*", "observation", {"body_md": DEFAULT_IDLE_BODY}))
-
-
-@pytest.mark.parametrize("message", [_defer_on_busy_lanes, _critic_idles])
-async def test_a_message_that_asks_nothing_admits_no_orchestration_turn(ticking, message):
+async def test_a_message_that_asks_nothing_admits_no_orchestration_turn(ticking):
     c, turns = ticking
     await c.tick(1)
 
-    await message(c)
+    await _defer_on_busy_lanes(c)
     await c.tick(2)
 
     assert turns == _ONE_TURN_THEN_HOLD
@@ -134,20 +117,6 @@ async def test_the_heartbeat_admits_an_orchestration_turn_when_nothing_changed(t
 
     assert not await c.conversation.admit_turn("orchestration", now + 10.0)
     assert await c.conversation.admit_turn("orchestration", now + 901.0)
-
-
-async def test_the_turn_a_message_wakes_shows_it_and_no_critic_idle_reply(ticking):
-    c, _turns = ticking
-    await c.tick(1)
-    for _ in range(400):
-        await _critic_idles(c)
-    await _answer_a_request(c)
-
-    inbox = (await c.conversation.compose_prompt("orchestration")).turn.split("=== Inbox for orchestration", 1)[1]
-
-    assert "integrate_done" in inbox
-    assert DEFAULT_IDLE_BODY not in inbox
-    assert "held for the next turn" not in inbox
 
 
 async def test_a_turn_that_fails_is_taken_again_on_the_next_tick(ticking, monkeypatch):

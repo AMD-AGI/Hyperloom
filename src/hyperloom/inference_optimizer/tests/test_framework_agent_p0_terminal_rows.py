@@ -7,7 +7,6 @@ from __future__ import annotations
 
 import asyncio
 from pathlib import Path
-from typing import Any
 
 from hyperloom.orchestrator.framework.artifacts import candidate_key
 from hyperloom.orchestrator.state.task_registry import Task
@@ -36,7 +35,7 @@ def test_pr_url_only_candidate_dedups_against_progress_row(tmp_path: Path):
     ]
     assert len(phase._unprocessed_framework_agent_candidates()) == 2
     phase._stamp_framework_progress(
-        ProgressStamp(candidate_id=phase._framework_candidate_key(cand_pr_only), batch_id="b1", status="critic_denied")
+        ProgressStamp(candidate_id=phase._framework_candidate_key(cand_pr_only), batch_id="b1", status="enqueue_failed")
     )
     remaining = phase._unprocessed_framework_agent_candidates()
     assert [candidate_key(c) for c in remaining] == ["cid-2"]
@@ -49,7 +48,7 @@ def test_stamp_writes_row_and_is_idempotent(tmp_path: Path):
         ProgressStamp(
             candidate_id="cid-1",
             batch_id="b1",
-            status="reauthor_cap",
+            status="apply_fail_cap",
             rationale="cap reached",
             provenance="pump",
             extra={"error": "boom"},
@@ -61,7 +60,7 @@ def test_stamp_writes_row_and_is_idempotent(tmp_path: Path):
     row = rows[0]
     assert row["candidate_id"] == "cid-1"
     assert row["batch_id"] == "b1"
-    assert row["status"] == "reauthor_cap"
+    assert row["status"] == "apply_fail_cap"
     assert row["kept"] is False
     assert row["rationale"] == "cap reached"
     assert row["error"] == "boom"
@@ -71,7 +70,7 @@ def test_stamp_writes_row_and_is_idempotent(tmp_path: Path):
     )
     assert second is False
     assert len(coord.shared_state.framework_agent_phase_progress) == 1
-    assert coord.shared_state.framework_agent_phase_progress[0]["status"] == "reauthor_cap"
+    assert coord.shared_state.framework_agent_phase_progress[0]["status"] == "apply_fail_cap"
 
 
 def test_stamp_empty_key_is_noop(tmp_path: Path):
@@ -101,41 +100,3 @@ def test_failed_framework_task_stamps_no_result_failed(tmp_path: Path):
     assert rows[0]["candidate_id"] == "https://example.com/pr/7"
     assert rows[0]["status"] == "no_result_failed"
     assert rows[0]["kept"] is False
-
-
-def _submit(coord: Any, cand: dict[str, Any]) -> None:
-    asyncio.run(coord.phase_framework._submit_framework_agent_candidate_for_review(cand))
-
-
-def test_repeated_review_aborts_after_cap(tmp_path: Path):
-    coord = make_coordinator(tmp_path)
-    phase = coord.phase_framework
-    proposals: list[Any] = []
-
-    async def _append_and_seq(msg: Any) -> Any:
-        proposals.append(msg)
-        return msg
-
-    coord.bus.append_and_seq = _append_and_seq
-    cand = {"candidate_id": "cid-loop", "batch_id": "b1"}
-    cap = phase._MAX_REPEATED_REVIEW_SUBMISSIONS
-    # First ``cap`` submissions proceed (each drains its pending before the next).
-    for _ in range(cap):
-        coord.state.pending_proposals = {}
-        _submit(coord, cand)
-    assert coord.shared_state.framework_agent_review_counts["cid-loop"] == cap
-    assert coord.shared_state.framework_agent_phase_progress == []
-    # The (cap+1)-th submission trips the backstop: terminal row, no proposal.
-    coord.state.pending_proposals = {}
-    proposals_before = len(proposals)
-    _submit(coord, cand)
-    rows = coord.shared_state.framework_agent_phase_progress
-    assert len(rows) == 1
-    assert rows[0]["status"] == "repeated_review_abort"
-    assert rows[0]["candidate_id"] == "cid-loop"
-    assert len(proposals) == proposals_before
-    # Once stamped, the candidate is "processed" → never re-selected.
-    coord.shared_state.framework_agent_batches = [
-        {"batch_id": "b1", "candidates": [cand]},
-    ]
-    assert phase._select_next_framework_agent_candidate() is None

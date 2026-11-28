@@ -15,7 +15,7 @@ freeform). It provides:
 
 Pure / dependency-light: imports only stdlib, git via subprocess, and the
 stdlib-only ``hyperloom_common.unified_diff`` so it can be imported from the
-runner, the Critic backend, and tests without cycles.
+runner and tests without cycles.
 """
 
 from __future__ import annotations
@@ -523,7 +523,7 @@ def strip_forbidden_proposal_fields(payload: dict[str, Any]) -> list[str]:
     :data:`FORBIDDEN_PROPOSAL_FIELDS` on each ``proposal_set`` entry.
 
     Measured gain is the Coordinator's, so a self-reported gain, priority or
-    confidence field never reaches review or scheduling. The names returned are
+    confidence field never reaches scheduling. The names returned are
     what the caller's audit note records.
 
     Args:
@@ -712,7 +712,7 @@ def vet_patches(
     Structural rejects, task-owned work artifacts and grounded Python
     comment-only patches are dropped. Each survivor resolves its own root.
     Unresolved or ambiguous roots and stale-but-valid patches are kept with
-    their verdict recorded for integrate_patch and the Critic to adjudicate.
+    their verdict recorded for integrate_patch to adjudicate.
 
     Args:
         patch_paths: File paths of the candidate patches to vet.

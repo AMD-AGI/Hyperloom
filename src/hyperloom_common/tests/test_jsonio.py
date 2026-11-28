@@ -4,19 +4,15 @@
 from __future__ import annotations
 
 import json
-import re
 
 import pytest
 
 from hyperloom_common.jsonio import (
-    extract_last_json_matching,
     extract_last_json_with_key,
     read_json,
     read_jsonl,
     read_json_strict,
 )
-
-_BARE = re.compile(r"(\{.*\})", re.DOTALL)
 
 
 class TestReadJson:
@@ -86,36 +82,6 @@ class TestReadJsonl:
             {"ok": 2},
         ]
         assert len(errors) == 2
-
-
-class TestExtractLastJsonMatching:
-    def test_fenced_with_key(self):
-        text = 'blah ```json\n{"scores": [1]}\n``` end'
-        assert extract_last_json_matching(text, "scores", _BARE) == {"scores": [1]}
-
-    def test_bare_with_key(self):
-        text = 'prefix {"intents": []} trailing prose'
-        assert extract_last_json_matching(text, "intents", _BARE) == {"intents": []}
-
-    def test_missing_key_returns_none(self):
-        text = '{"other": 1}'
-        assert extract_last_json_matching(text, "scores", _BARE) is None
-
-    def test_last_object(self):
-        text = '```json\n{"k": 1}\n```\n```json\n{"k": 2}\n```'
-        assert extract_last_json_matching(text, "k", _BARE) == {"k": 2}
-
-    def test_invalid_fenced_json_is_skipped(self):
-        text = '```json\n{"k": 1}\n```\n```json\n{bad}\n```'
-        assert extract_last_json_matching(text, "k", re.compile(r"(?!)")) == {"k": 1}
-
-    def test_bare_candidate_trims_trailing_text(self):
-        bare_with_trailing = re.compile(r"(\{.*)", re.DOTALL)
-        text = 'prefix {"k": 3} trailing prose'
-        assert extract_last_json_matching(text, "k", bare_with_trailing) == {"k": 3}
-
-    def test_empty(self):
-        assert extract_last_json_matching("", "k", _BARE) is None
 
 
 class TestExtractLastJson:

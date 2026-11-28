@@ -52,7 +52,7 @@ def coord(tmp_path: Path):
     idle = ScriptedPlan(turns=[MockTurn(intents=[])])
     return Coordinator(
         session_dir=tmp_path,
-        backends={name: MockBackend(idle) for name in ("orchestration", "critic")},
+        backends={"orchestration": MockBackend(idle)},
         role_registry=default_role_registry(),
         advisory=AdvisoryServices(knowledge_plane=None),
     )

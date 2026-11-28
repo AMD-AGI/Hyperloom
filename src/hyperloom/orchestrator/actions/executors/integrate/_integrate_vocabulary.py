@@ -41,8 +41,7 @@ FILTERED_BEFORE_BENCH_CLASS = "filtered_before_bench"
 
 #: Where the patches this action applies came from. Every source lands through
 #: the same apply / vet / bench / KEEP-REVERT pipeline below; they differ only
-#: in how the diff is obtained and, for ``upstream_pr``, in which gate admitted
-#: it (see :meth:`IntegratePatchExecutor._stage_resolve`).
+#: in how the diff is obtained (see :meth:`IntegratePatchExecutor._stage_resolve`).
 PATCH_SOURCE_SPECIALIST = "specialist_authored"
 
 PATCH_SOURCE_UPSTREAM_PR = "upstream_pr"

@@ -121,9 +121,9 @@ def test_coordinator_intervention_hook_records_integrate_attempts():
         params={},
         idempotency_key="ip-2",
     )
-    for status in ("reverted", "apply_failed", "rejected_by_critic", "applied_no_bench", "no_patches"):
+    for status in ("reverted", "apply_failed", "applied_no_bench", "no_patches"):
         c.writeback.record_intervention_for_task(task, {"status": status}, Verdict.FAILED)
-    assert len(c.shared_state.intervention_mix) == 5
+    assert len(c.shared_state.intervention_mix) == 4
     assert {e["change_type"] for e in c.shared_state.intervention_mix} == {"code_patch_attempt"}
 
 

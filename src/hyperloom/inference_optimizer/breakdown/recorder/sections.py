@@ -99,15 +99,12 @@ ENABLEMENT_EVENT_SECTIONS: tuple[str, ...] = (
 )
 
 #: One event per (phase, macro_cycle), so a re-entry is another segment row
-#: rather than a second event. Proposals live here rather than on the framework
-#: event because a proposal exists in every phase, and a refused one is never
-#: dispatched and so never gets an action row.
+#: rather than a second event.
 PHASE_EVENT_SECTIONS: tuple[str, ...] = (
     "phase_event",
     "phase_segment",
     "phase_action",
     "phase_marker",
-    "phase_proposal",
     "phase_denial",
 )
 

@@ -182,7 +182,6 @@ Downstream tooling reads the side it belongs to:
   `OPENAI_API_KEY`.
 * Orchestration Claude uses the Anthropic-side base URL + key, including the
   generated `~/.claude/config.json` primary key.
-* Critic-agent uses the OpenAI side for KB summary / synthesis calls.
 
 There are no internal key slots in `.env` to fill: each side's credential
 travels under its own name. Preflight does **not** cross-fill the per-provider

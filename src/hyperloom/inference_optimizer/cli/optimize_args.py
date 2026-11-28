@@ -12,7 +12,6 @@ from hyperloom.common.concurrencies import parse_concurrencies
 from hyperloom.common.workload_defaults import DEFAULT_PRECISION
 
 from .. import framework_registry
-from .backends import CRITIC_PROTOCOL_CHOICES
 from .benchmark_config import add_benchmark_argument
 
 
@@ -435,46 +434,11 @@ def add_framework_agent_arguments(opt: argparse.ArgumentParser) -> None:
     )
 
 
-def add_critic_arguments(opt: argparse.ArgumentParser) -> None:
-    """Add the Critic backend, protocol and prompt-override flags of ``optimize``."""
-    # Critic backend selection; flags are aliases setting the same dest.
-    opt.add_argument(
-        "--critic-mock",
-        dest="critic_backend",
-        action="store_const",
-        const="mock",
-        default=None,
-        help="Force the always-approve mock Critic (offline / smoke tests).",
-    )
-    opt.add_argument(
-        "--critic-agent",
-        dest="critic_backend",
-        action="store_const",
-        const="agent",
-        help="Force the critic-agent runtime backend (KB + session memory + "
-        "review_constraints). Requires CRITIC_AGENT_ROOT or a sibling "
-        "$REPO_ROOT/critic-agent/ directory.",
-    )
-    opt.add_argument(
-        "--critic-protocol",
-        dest="critic_protocol",
-        choices=CRITIC_PROTOCOL_CHOICES,
-        default="auto",
-        help="Protocol for the Critic's review inference. 'openai' uses the "
-        "OpenAI SDK; 'anthropic' uses the Messages API, or the Claude CLI when a "
-        "CLAUDE_CODE_OAUTH_TOKEN subscription is the only credential. "
-        "'auto' (default) reviews with the orchestration model over the protocol "
-        "orchestration runs on; an explicit value reviews with that side's model "
-        "(CLAUDE_MODEL or CODEX_MODEL) and fails at startup when that side has no "
-        "credential. Preflight sends the review model one request and refuses to "
-        "start when it does not answer; there is no fallback model. "
-        "Ignored (with a warning) under --critic-mock, which runs no review "
-        "inference.",
-    )
+def add_prompt_arguments(opt: argparse.ArgumentParser) -> None:
+    """Add the Orchestration prompt-override flag of ``optimize``."""
     opt.add_argument(
         "--orch-prompt", type=str, default=None, help="Override Orchestration system prompt (file path or inline)"
     )
-    opt.add_argument("--critic-prompt", type=str, default=None, help="Override Critic system prompt")
 
 
 def add_kb_arguments(opt: argparse.ArgumentParser) -> None:

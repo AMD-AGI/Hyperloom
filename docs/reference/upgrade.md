@@ -52,6 +52,9 @@ These flags are rejected with `unrecognized arguments`:
 * `--proposal-scoring`, `--no-proposal-scoring` and `--proposal-scorer-models`
   (the advisory proposal scorer is removed; while it was off they changed
   nothing): drop them.
+* `--critic-mock`, `--critic-agent`, `--critic-protocol` and `--critic-prompt`
+  (the Critic agent is removed): drop them. See
+  [the Critic agent is removed](#required-the-critic-agent-is-removed).
 * `hyperloom-multibranch run --make-before-break` and `--no-make-before-break`
   (a hosted test now closes its sandbox when it ends): drop them.
 
@@ -154,6 +157,140 @@ as a `policy_denied` observation in the denied agent's inbox, as a `denials`
 row on the phase event in `session_breakdown.json`, and as a
 `PolicyGate denied intent` warning in the log. Anything that read the two
 `state.json` keys reads the `denials` rows instead.
+
+### Required: the Critic agent is removed
+
+`hyperloom optimize` no longer runs a Critic. Orchestration is the only LLM
+role that takes turns, and an admitted proposal is queued without a review.
+KEEP or REVERT is decided as before, by the measurement gate (apply, benchmark,
+accuracy) and the Coordinator's promotion.
+
+Do these first:
+
+* Drop `--critic-mock`, `--critic-agent`, `--critic-protocol` and
+  `--critic-prompt` from every launcher: each is rejected with
+  `unrecognized arguments` (exit 2). Nothing replaces `--critic-mock`: a
+  session without a reviewer is now the only kind. `--orch-prompt` stays.
+* Drop `INFERENCE_OPTIMIZER_DEFAULT_CRITIC_BACKEND`, `CRITIC_AGENT_ROOT`,
+  `CRITIC_AGENT_PROBE_TIMEOUT_SEC`, `CRITIC_AGENT_MAX_COMPLETION_TOKENS`,
+  `CRITIC_AGENT_LLM_CONNECT_TIMEOUT_S`, `CRITIC_AGENT_LLM_RW_TIMEOUT_S` and
+  `CRITIC_SESSION_MEMORY_DIR`: they are no longer read. `install.sh` no longer
+  reads `CRITIC_WEB_TOOLS_ENABLED`, and the `web` packaging extra
+  (`markdownify`, `cachetools`) is removed, so drop `web` from any install
+  command that names it.
+* Stop calling `python -m hyperloom.agents.critic.runtime.cli`: the
+  `hyperloom.agents.critic` package is deleted.
+* Finish in-flight sessions under the build that started them: resuming a
+  session started before this change is not supported.
+
+Preflight no longer sends the review model a probe request, so the exit 2
+ending `critic model ... did not answer ... Refusing to start` cannot occur,
+and it no longer runs the critic runtime `--help` check. The launch banner
+reads `Backends        : orchestration=<...>, kernel=<...>`. The stop reason
+`backend_unhealthy` now only comes from the Orchestration backend, and its hint
+no longer names `--critic-mock`. While the Orchestration backend is backing off
+after a failed call (2 s, doubling to 5 minutes), the run loop wakes at least
+every 10 s, the dispatcher's poll, so queued tasks are still dispatched and
+finished ones booked between retries. Before, the loop slept until the first
+retry when both LLM backends were failing, and ticked without a pause while the
+Critic was idle or healthy.
+
+What a proposal and a specialist deliverable now do:
+
+* A `propose_action` from Orchestration passes PolicyGate and the admission
+  chain, and its task is queued in the same step, announced by a `task_queued`
+  event as a `delegate` is. A repeat is answered by what already exists: a
+  task of the same content still queued or running, a `baseline` that already
+  measured, or an `integrate_patch` that already benchmarked that specialist's
+  deliverable. It is recorded as a `proposal_materialize_skipped` observation
+  with reason `duplicate_proposal_content`, `baseline_already_succeeded`,
+  `integrate_patch_already_measured` or `idempotency_key_exhausted`.
+* When a specialist finishes with a patch or a routable artifact, or an
+  ENABLEMENT round finishes with a config-only deliverable, the Coordinator
+  queues the `integrate_patch` for that deliverable itself. A deliverable has
+  one idempotency key, `integrate_patch:<specialist_task_id>`, whoever asks.
+* An `integrate_patch` that Orchestration asks for, by `delegate` or by
+  `propose_action`, is that same task: it carries the deliverable's own params
+  (its patch name, companion flags and environment, ENABLEMENT round context
+  and owner), with anything else Orchestration sent beside them. It is denied
+  with `policy_denied` rule `integrate_patch_no_specialist` when it names no
+  specialist, with `integrate_patch_specialist_unfinished` while the
+  specialist it names has not ended with a result (or is no task of the
+  session), and with `integrate_patch_no_deliverable` when that specialist
+  left no patch or artifact on disk and is not an ENABLEMENT round. A
+  `delegate` naming a deliverable whose `integrate_patch` is queued or running
+  is denied with rule `duplicate_idempotency_key_running`; one whose
+  `integrate_patch` already benchmarked the deliverable is denied with
+  `duplicate_idempotency_key`; one whose earlier `integrate_patch` ended
+  without a benchmark starts a new task. The same rule now answers every
+  `delegate`: one that reuses the key of a `baseline` that already measured is
+  denied with `duplicate_idempotency_key` where it started a second baseline.
+* Orchestration cannot queue an `integrate_patch` with
+  `patch_source=upstream_pr`: it is denied with rule
+  `integrate_patch_upstream_pr`. Only the FRAMEWORK_AGENT phase lands the
+  upstream PRs it discovered.
+* `integrate_patch` applies only the patches named by `params.patches` or by
+  `specialist_done.patches_written`, and no longer scans the specialist
+  workspace's `patches/` directories.
+* The Coordinator routes each upstream-PR candidate that
+  `candidate_discovery_specialist` found by the route discovery named, with no
+  pre-screen: the apply track (`integrate_patch` with
+  `patch_source=upstream_pr`), the author track (an authoring specialist), or
+  both.
+
+Update anything that matches on the following, which no longer occur:
+
+* The intent type `review_verdict`; the bus topics `proposal`,
+  `review_verdict` and `advice`; `critic:*` bus rows. The Orchestration inbox
+  carries no `review_verdict` or `advice` message, and the context tool
+  `get_recent_outcomes` returns `delegated_result` rows only.
+* The `policy_denied` rule `integrate_patch_requires_critic_verdict`, the
+  integrate result `status=rejected_by_critic`, and the 30-minute review
+  timeout with its coordinator-authored reject.
+* The `needs_review` re-author loop and its observations
+  `specialist_reauthor_dispatched` and `reauthor_cap_reached`, and the
+  framework candidate progress statuses `critic_denied`,
+  `needs_review_no_evidence`, `repeated_review_abort` and `reauthor_cap`.
+* The observations `framework_agent_candidate_submitted_for_review`,
+  `framework_agent_verdict_received` and `verdict_for_unknown_proposal`, and
+  the decision row `approved_proposal`: read the `task_queued` event instead.
+
+Three observations are renamed:
+
+| 1.2.x | Now |
+|---|---|
+| `specialist_patch_autosubmitted_for_review` | `specialist_patch_integrate_queued` |
+| `framework_config_autosubmitted_for_review` | `enablement_config_integrate_queued` |
+| `specialist_patch_autosubmit_skipped_no_files` | `specialist_patch_integrate_skipped_no_files` |
+
+`state.json` no longer carries `specialist_patch_verdicts`,
+`framework_agent_review_counts` or `specialist_reauthor_attempts`.
+
+`session_breakdown.json` keeps schema `v6.1`; the packaged schema required none
+of the keys that go:
+
+* the top-level `critic` section;
+* `timeline[type=phase].ext.proposals`, with its `count`, `reviewed` and
+  `materialized` counters and its `rows`, including each row's `critic_review`
+  and `outcome`;
+* `critic_review` on the proposal rows of a `framework_agent` event, whose
+  `lifecycle` no longer has a `reviewed` step. A grid Orchestration sent as a
+  `propose_action` now has the lifecycle a delegated grid has, `proposed` then
+  `attempted`, without the `routed` step in between.
+
+A consumer reads the task a proposal became from the dispatch row in
+`ext.actions.rows[]` of the phase event, and a refused intent from a row in
+`ext.denials.rows[]`. `ext.denials.rows[].proposal_msg_id` is still written,
+because the packaged schema requires it; no intent type names a proposal any
+more, so it is `null`. The two
+`session_breakdown.json` entries above name keys inside the removed sections,
+so a consumer that stops reading those sections has nothing left to do for
+them. `hyperloom session report` has no "Review" section.
+
+A session no longer writes `critic-workdir/`, `critic-session-memory/`,
+`agents/critic/` or `reports/trace/proposal_task_map.jsonl`.
+`reports/trace/llm_calls.jsonl` has no `component=critic` rows and no
+`reviewed_msg_ids` key, and the trajectory ledger has no `proposal` event type.
 
 ### Required: `SWEEP` is renamed `CYCLE_END` and runs no concurrency sweep
 
@@ -435,7 +572,6 @@ only the optimizer-family commands moved under `hyperloom`):
 | `hyperloom-kb-serve`, `hyperloom-kb-collect`, `python -m hyperloom_kb` | Experience KB service and collect CLI |
 | `hyperloom-kb` / `python -m hyperloom_kb.cli` | Operate an Experience KB service: health, labels, restore, exclusions, list, export |
 | `python -m hyperloom.inference_optimizer.experience_kb_service {init-env,ensure,...}` | Per-workspace Experience KB sidecar, with every `hyperloom-kb` command (setup skill, optimizer SKILL) |
-| `python -m hyperloom.agents.critic.runtime.cli {prepare-review,commit-review}` | Critic backend subprocess (not operator-facing) |
 | Kernel agent tool modules (`tracelens_analysis`, …) | Orchestrator subprocess scripts with their own `__main__` |
 | `multi_node/scripts/*.py` on remote pods | Payload scripts SSH'd by `hyperloom multi-node`, not local `-m` entry points |
 

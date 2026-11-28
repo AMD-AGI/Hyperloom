@@ -16,7 +16,6 @@ from hyperloom.inference_optimizer.session.paths import make_session_dir
 from hyperloom.orchestrator.loop.coordinator import Coordinator
 from hyperloom.orchestrator.loop.dispatcher import DispatcherCollaborator
 from hyperloom.orchestrator.loop.sub_agent_runner import SubAgentResult
-from hyperloom.orchestrator.roles import MockCriticBackend
 from hyperloom.orchestrator.state.task_registry import TaskSpec
 from hyperloom.orchestrator.tests.mock_backend import MockBackend, ScriptedPlan
 
@@ -45,7 +44,6 @@ def _silent_backends() -> dict[str, object]:
     return {
         "orchestration": MockBackend(silent, name="orch"),
         "kernel_agent": MockBackend(silent, name="kernel_agent"),
-        "critic": MockCriticBackend(),
     }
 
 

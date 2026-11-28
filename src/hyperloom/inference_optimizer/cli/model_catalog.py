@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Probe the gateway model catalog and resolve the orchestration, Codex and critic models before a session starts."""
+"""Probe the gateway model catalog and resolve the orchestration and Codex models before a session starts."""
 
 from __future__ import annotations
 
@@ -15,10 +15,6 @@ from hyperloom_common.llm import llm_config
 from hyperloom_common.env import env_bool
 from hyperloom_common.llm.llm_config import CLAUDE_OAUTH_TOKEN_ENV
 from hyperloom_common.llm.llm_headers import parse_custom_headers
-from .backends import (
-    critic_review_target,
-    critic_on_codex_side,
-)
 from .credentials import (
     _CLAUDE_ALLOWED_MODELS,
     _CODEX_FALLBACK_MODELS,
@@ -349,8 +345,7 @@ def _resolve_models_for_run(
 ) -> None:
     """Resolve both model ids against the gateway before any session work."""
     if claude_follows_codex:
-        # codex_model is about to become the orchestration model, so it needs the ladder whatever the critic backend
-        # is.
+        # codex_model is about to become the orchestration model, so it needs the ladder.
         _smoke_test_codex_model(args, resolved_urls)
         args.claude_model = args.codex_model
 
@@ -359,76 +354,6 @@ def _resolve_models_for_run(
 
     if codex_follows_claude:
         args.codex_model = args.claude_model
-
-    _probe_critic_review_model(
-        args, codex_follows_claude=codex_follows_claude, claude_follows_codex=claude_follows_codex
-    )
-
-
-_CRITIC_PROBE_TIMEOUT_SEC = 60.0
-
-
-def _probe_critic_review_model(
-    args: argparse.Namespace, *, codex_follows_claude: bool, claude_follows_codex: bool = False
-) -> None:
-    """Send the critic's model one real request before the session starts; exit rc=2 when it cannot answer.
-
-    A catalog listing only proves a gateway names a model, not that its upstream serves it, and the critic has no
-    fallback model: a review path that fails every call must stop the launch rather than run a session without a
-    critic.
-    """
-    if _resolve_critic_choice(args) != "agent":
-        return
-    try:
-        protocol, model = critic_review_target(
-            args.critic_protocol,
-            orchestration_on_codex=critic_on_codex_side(
-                codex_follows_claude=codex_follows_claude, claude_follows_codex=claude_follows_codex
-            ),
-            claude_model=args.claude_model,
-            codex_model=args.codex_model,
-        )
-    except ValueError as exc:
-        print(f"ERROR: {exc}", file=sys.stderr)
-        sys.exit(2)
-
-    messages = [{"role": "user", "content": "Reply with OK."}]
-    last_error: BaseException | None = None
-    for delay in (0.0, *_CATALOG_RETRY_DELAYS_SEC):
-        if delay:
-            time.sleep(delay)
-        try:
-            if protocol == "anthropic":
-                llm_config.anthropic_completion(
-                    request=llm_config.AnthropicCompletionRequest(
-                        model=model, messages=messages, max_tokens=16, timeout_s=_CRITIC_PROBE_TIMEOUT_SEC
-                    ),
-                    component="critic",
-                    operation="preflight",
-                )
-            else:
-                llm_config.chat_completion(
-                    llm_config.get_openai_client(timeout=_CRITIC_PROBE_TIMEOUT_SEC),
-                    component="critic",
-                    operation="preflight",
-                    model=model,
-                    messages=messages,
-                    max_completion_tokens=16,
-                )
-        except Exception as exc:  # any failure means the review path is unusable; exits 2 after the last retry
-            log.warning("critic model %r probe failed over the %s protocol: %s", model, protocol, exc, exc_info=True)
-            last_error = exc
-            continue
-        print(f"Preflight: critic model {model!r} answered over the {protocol} protocol")
-        return
-    print(
-        f"ERROR: critic model {model!r} did not answer over the {protocol} protocol: {last_error!r}\n"
-        f"  The critic reviews with the orchestration model unless --critic-protocol selects the other side "
-        f"(then CLAUDE_MODEL for anthropic, CODEX_MODEL for openai); there is no fallback model.\n"
-        f"  Fix that model or its credential, or pass --critic-mock to run without a critic. Refusing to start.",
-        file=sys.stderr,
-    )
-    sys.exit(2)
 
 
 def _smoke_test_codex_model(
@@ -479,26 +404,3 @@ def _smoke_test_codex_model(
         f"value in the catalog (known-good ids, newest first: "
         f"{list(_CODEX_FALLBACK_MODELS)})."
     )
-
-
-# Default critic backend; override via env or --critic-mock/--critic-agent.
-DEFAULT_CRITIC_BACKEND = os.environ.get(
-    "INFERENCE_OPTIMIZER_DEFAULT_CRITIC_BACKEND",
-    "agent",
-)
-_VALID_CRITIC_BACKENDS = ("mock", "agent")
-
-
-def _resolve_critic_choice(args: argparse.Namespace) -> str:
-    """Resolve the active critic backend choice (arg → DEFAULT_CRITIC_BACKEND); hard-fails on invalid."""
-    chosen = getattr(args, "critic_backend", None)
-    if chosen is None:
-        chosen = DEFAULT_CRITIC_BACKEND
-    if chosen not in _VALID_CRITIC_BACKENDS:
-        print(
-            f"ERROR: critic backend {chosen!r} not in {_VALID_CRITIC_BACKENDS!r} "
-            "(set by --critic-mock / --critic-agent or INFERENCE_OPTIMIZER_DEFAULT_CRITIC_BACKEND)",
-            file=sys.stderr,
-        )
-        sys.exit(2)
-    return chosen

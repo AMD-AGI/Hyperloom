@@ -35,7 +35,6 @@
 
 # Hyperloom Core
 /src/hyperloom/inference_optimizer/                             @AMD-AGI/SaFE
-/src/hyperloom/agents/critic/                                   @AMD-AGI/SaFE
 /src/hyperloom/orchestrator/trace_analysis/                     @AMD-AGI/SaFE
 /src/hyperloom/orchestrator/kernel/apply_kernel_patch.py        @AMD-AGI/SaFE
 /src/hyperloom/orchestrator/kernel/patch_restore.py             @AMD-AGI/SaFE

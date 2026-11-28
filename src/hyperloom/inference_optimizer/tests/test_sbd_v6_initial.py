@@ -14,7 +14,6 @@ import pytest
 
 from hyperloom.inference_optimizer.breakdown import exporter
 from hyperloom.inference_optimizer.breakdown.collectors.v6 import collect_v6_timeline
-from hyperloom.inference_optimizer.breakdown.critic_reviews import normalize_framework_reviews
 from hyperloom.inference_optimizer.session.sbd_v6 import (
     SCHEMA_VERSION_V6,
     read_timeline_events,
@@ -1148,37 +1147,6 @@ def test_fresh_model_gate_with_only_soft_skips_succeeds(tmp_path):
     assert event is not None
     assert event["status"] == "succeeded"
     assert event["ext"]["skip_reason"] is None
-
-
-def test_framework_review_does_not_parse_macro_cycle_from_prompt():
-    reviews = normalize_framework_reviews(
-        request={
-            "context": {"phase": "FRAMEWORK_AGENT"},
-            "raw_prompt": "=== Shared session state ===\nmacro_cycle=7\n",
-        },
-        judge_bundle={
-            "phase": "FRAMEWORK_AGENT",
-            "proposals": [
-                {
-                    "msg_id": "proposal-1",
-                    "action_name": "integrate_patch",
-                    "payload": {"framework_agent_candidate_id": "candidate-1"},
-                }
-            ],
-        },
-        review={
-            "review_verdicts": [
-                {
-                    "target_proposal_msg_id": "proposal-1",
-                    "verdict": "approve",
-                }
-            ]
-        },
-        emit={"intent_envelope": {"intents": []}},
-        review_path=None,
-    )
-
-    assert reviews[0]["macro_cycle"] is None
 
 
 def test_preflight_failure_session_dir_error_reaches_the_caller(monkeypatch, tmp_path):

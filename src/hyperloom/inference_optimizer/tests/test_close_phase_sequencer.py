@@ -974,10 +974,7 @@ async def test_phase_transition_into_close_runs_sequencer_e2e(tmp_path: Path):
     session_dir = tmp_path / "session"
     session_dir.mkdir()
     idle_plan = ScriptedPlan(turns=[MockTurn(intents=[])])
-    backends = {
-        "orchestration": MockBackend(idle_plan),
-        "critic": MockBackend(idle_plan),
-    }
+    backends = {"orchestration": MockBackend(idle_plan)}
     coord = Coordinator(
         session_dir=session_dir,
         backends=backends,
@@ -1032,7 +1029,7 @@ class TestEveryTerminalReachesAWrittenReport:
         idle = ScriptedPlan(turns=[MockTurn(intents=[])])
         return Coordinator(
             session_dir=session_dir,
-            backends={name: MockBackend(idle) for name in ("orchestration", "critic")},
+            backends={"orchestration": MockBackend(idle)},
             role_registry=default_role_registry(),
             advisory=AdvisoryServices(knowledge_plane=None),
         )
@@ -1265,10 +1262,7 @@ async def test_the_sequencer_delivers_the_finished_close_section_in_the_package(
     idle_plan = ScriptedPlan(turns=[MockTurn(intents=[])])
     coord = Coordinator(
         session_dir=session_dir,
-        backends={
-            "orchestration": MockBackend(idle_plan),
-            "critic": MockBackend(idle_plan),
-        },
+        backends={"orchestration": MockBackend(idle_plan)},
         role_registry=default_role_registry(),
         advisory=AdvisoryServices(knowledge_plane=None),
     )
@@ -1303,10 +1297,7 @@ async def test_recipe_kb_t4_hook_short_circuits_when_sequencer_done(tmp_path: Pa
     session_dir = tmp_path / "session"
     session_dir.mkdir()
     idle_plan = ScriptedPlan(turns=[MockTurn(intents=[])])
-    backends = {
-        "orchestration": MockBackend(idle_plan),
-        "critic": MockBackend(idle_plan),
-    }
+    backends = {"orchestration": MockBackend(idle_plan)}
     coord = Coordinator(
         session_dir=session_dir,
         backends=backends,
@@ -1327,10 +1318,7 @@ async def test_recipe_kb_t4_hook_still_runs_when_sequencer_not_done(tmp_path: Pa
     session_dir = tmp_path / "session"
     session_dir.mkdir()
     idle_plan = ScriptedPlan(turns=[MockTurn(intents=[])])
-    backends = {
-        "orchestration": MockBackend(idle_plan),
-        "critic": MockBackend(idle_plan),
-    }
+    backends = {"orchestration": MockBackend(idle_plan)}
     coord = Coordinator(
         session_dir=session_dir,
         backends=backends,
@@ -1381,10 +1369,7 @@ def _remote_t4_coordinator(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, save
     session_dir = tmp_path / "session"
     session_dir.mkdir()
     idle_plan = ScriptedPlan(turns=[MockTurn(intents=[])])
-    backends = {
-        "orchestration": MockBackend(idle_plan),
-        "critic": MockBackend(idle_plan),
-    }
+    backends = {"orchestration": MockBackend(idle_plan)}
     monkeypatch.setenv("KNOWLEDGE_STORE_MODE", "remote")
     monkeypatch.setenv("KB_STORE_URL", "https://kb-store.example.test")
     monkeypatch.setenv("KB_STORE_TOKEN", "test-token")
@@ -1451,10 +1436,7 @@ def _remote_knowledge_plane_coordinator(tmp_path: Path) -> Coordinator:
     session_dir = tmp_path / "session"
     session_dir.mkdir()
     idle_plan = ScriptedPlan(turns=[MockTurn(intents=[])])
-    backends = {
-        "orchestration": MockBackend(idle_plan),
-        "critic": MockBackend(idle_plan),
-    }
+    backends = {"orchestration": MockBackend(idle_plan)}
     config = KnowledgeConfig(
         mode=KnowledgeStoreMode.REMOTE,
         local_root=str(tmp_path / "knowledge"),
@@ -1525,10 +1507,7 @@ async def test_recipe_kb_t4_hook_local_skips_without_recipe_kb(
     session_dir = tmp_path / "session"
     session_dir.mkdir()
     idle_plan = ScriptedPlan(turns=[MockTurn(intents=[])])
-    backends = {
-        "orchestration": MockBackend(idle_plan),
-        "critic": MockBackend(idle_plan),
-    }
+    backends = {"orchestration": MockBackend(idle_plan)}
     config = KnowledgeConfig(
         mode=KnowledgeStoreMode.LOCAL,
         local_root=str(tmp_path / "knowledge"),

@@ -148,7 +148,7 @@ async def test_dispatch_tells_the_specialist_the_session_model(tmp_path, payload
     idle = ScriptedPlan(turns=[MockTurn(intents=[])])
     coord = Coordinator(
         session_dir=tmp_path,
-        backends={name: MockBackend(idle) for name in ("orchestration", "critic")},
+        backends={"orchestration": MockBackend(idle)},
         role_registry=default_role_registry(),
         advisory=AdvisoryServices(knowledge_plane=None),
     )

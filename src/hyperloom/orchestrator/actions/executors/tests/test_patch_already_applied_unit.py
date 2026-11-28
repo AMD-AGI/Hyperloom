@@ -238,13 +238,6 @@ def _make_ctx(task_id: str, params: dict, state: SharedState) -> RunnerContext:
     return RunnerContext(task=task, lease=None, extra={"shared_state": state})
 
 
-def _approved_state() -> SharedState:
-    """Session state carrying the Critic's approval of the test PR."""
-    state = SharedState()
-    state.record_specialist_patch_verdict(_PR_URL, "approve")
-    return state
-
-
 @pytest.fixture
 def executor_env(tmp_path, monkeypatch):
     """An executor over a fresh session dir whose benchmark fails the test if it is reached."""
@@ -322,7 +315,6 @@ async def test_executor_ends_an_all_noop_patch_set_as_already_present(tmp_path, 
     else:
         params, patches = _specialist_round(executor.session_dir, repo)
     state = SharedState()
-    state.record_specialist_patch_verdict(_PR_URL if lane == "upstream_pr" else params["specialist_task_id"], "approve")
 
     result = await executor(_make_ctx("t-present", params, state))
 
@@ -403,7 +395,7 @@ async def test_executor_ends_a_merged_pr_fetched_by_diff_url_as_already_present(
     repo, head = _repo_with_merged_pr_head(tmp_path, revert=False)
     params = _pr_head_round(repo, head, diff_url="https://example.invalid/pr.diff", prefer_checkout=True)
 
-    result = await executor(_make_ctx("t-merged-url", params, _approved_state()))
+    result = await executor(_make_ctx("t-merged-url", params, SharedState()))
 
     assert result["status"] == "already_present"
     assert [row["check"] for row in result["already_present"]] == ["git_reverse_apply_check"]
@@ -418,7 +410,7 @@ async def test_executor_benchmarks_a_reverted_pr_head(tmp_path, executor_env, mo
     repo, head = _repo_with_merged_pr_head(tmp_path, revert=True)
     params = _pr_head_round(repo, head, diff_url="https://example.invalid/pr.diff", prefer_checkout=True)
 
-    result = await executor(_make_ctx("t-reverted", params, _approved_state()))
+    result = await executor(_make_ctx("t-reverted", params, SharedState()))
 
     assert reached == ["t-reverted"]
     assert result["status"] != "already_present"
@@ -433,7 +425,7 @@ async def test_executor_benchmarks_an_all_noop_set_that_changes_server_args(tmp_
     params, _patches = _upstream_round(executor.session_dir, "t-args", repo)
     params["extra_server_args"] = "--max-num-seqs 64"
 
-    result = await executor(_make_ctx("t-args", params, _approved_state()))
+    result = await executor(_make_ctx("t-args", params, SharedState()))
 
     assert reached == ["t-args"]
     assert result["status"] != "already_present"
@@ -449,7 +441,7 @@ async def test_executor_lands_a_set_whose_noop_rides_with_a_real_change(tmp_path
     params, patches = _upstream_round(executor.session_dir, "t-mixed", repo)
     params["apply_only"] = True
 
-    result = await executor(_make_ctx("t-mixed", params, _approved_state()))
+    result = await executor(_make_ctx("t-mixed", params, SharedState()))
 
     assert result["status"] == "applied_no_bench"
     assert result["patches_applied"] == [str(p) for p in patches]

@@ -24,7 +24,7 @@ from hyperloom.common.codex_session import (
 from hyperloom.inference_optimizer.protocol.intent import IntentType, NoIntentEmitted
 from hyperloom.orchestrator.roles import codex as codex_module
 from hyperloom.orchestrator.roles.agent_role import (
-    _CRITIC_INTENTS,
+    _BASE_INTENTS,
     _ORCHESTRATION_INTENTS,
     default_role_registry,
 )
@@ -70,7 +70,6 @@ def test_request_is_reachable_from_the_orchestration_schema() -> None:
     ("role_name", "expected"),
     [
         ("orchestration", _ORCHESTRATION_INTENTS),
-        ("critic", _CRITIC_INTENTS),
     ],
 )
 def test_every_role_schema_matches_its_registry_record(role_name: str, expected: frozenset[IntentType]) -> None:
@@ -124,14 +123,6 @@ def test_schema_is_json_serializable() -> None:
 # No cross-role contamination in the shared transport text.
 
 
-def test_orchestration_transport_contract_carries_no_critic_text() -> None:
-    """The Critic's review contract leaked into all 256 Coordinator turns."""
-    instructions = codex_module.build_output_instructions(_ORCHESTRATION_INTENTS)
-    blob = f"{instructions}\n{json.dumps(build_intent_envelope_schema(_ORCHESTRATION_INTENTS))}".lower()
-    for token in ("critic", "review_verdict", "target_proposal_msg_id", "needs_review"):
-        assert token not in blob
-
-
 def test_transport_contract_names_every_allowed_intent() -> None:
     """The model needs the vocabulary in prose as well as in the enforced schema."""
     instructions = codex_module.build_output_instructions(_ORCHESTRATION_INTENTS)
@@ -139,11 +130,12 @@ def test_transport_contract_names_every_allowed_intent() -> None:
         assert intent_type.value in instructions
 
 
-def test_critic_transport_contract_carries_no_orchestration_text() -> None:
-    """Role scoping has to hold in both directions."""
-    instructions = codex_module.build_output_instructions(_CRITIC_INTENTS).lower()
-    for token in ("delegate", "propose_action", "prune_branch"):
-        assert token not in instructions
+def test_transport_contract_carries_no_text_about_an_intent_outside_the_set() -> None:
+    """One role's payload contract must not leak into the turns of a role that cannot emit it."""
+    instructions = codex_module.build_output_instructions(_BASE_INTENTS).lower()
+    blob = f"{instructions}\n{json.dumps(build_intent_envelope_schema(_BASE_INTENTS))}".lower()
+    for token in ("delegate", "propose_action", "prune_branch", "extend_lease", "extra_sec"):
+        assert token not in blob
 
 
 # End-to-end round trip through the backend with a mocked Codex SDK.
@@ -271,7 +263,9 @@ async def test_payload_missing_a_required_field_raises_no_intent(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Payload checking stays shared with the Claude path's validate_envelope."""
-    _stub_turn(monkeypatch, CodexSessionResult(text=_schema_enforced_reply("request", {"target_agent": "critic"})))
+    _stub_turn(
+        monkeypatch, CodexSessionResult(text=_schema_enforced_reply("request", {"target_agent": "kernel_agent"}))
+    )
     with pytest.raises(NoIntentEmitted, match="kind"):
         await _backend(tmp_path).run("p")
 

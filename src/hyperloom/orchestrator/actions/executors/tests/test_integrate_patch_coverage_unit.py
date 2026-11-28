@@ -19,9 +19,7 @@ from hyperloom.orchestrator.tests._helpers import patch_integrate_patch_roots
 
 from hyperloom.orchestrator.actions.executors import _accuracy_gate
 from hyperloom.orchestrator.actions.executors.integrate import _integrate_apply as integrate_apply
-from hyperloom.orchestrator.actions.executors.integrate import _integrate_resolve as integrate_resolve
 from hyperloom.orchestrator.actions.executors.patching import _patch_sources as patch_sources
-from hyperloom.orchestrator.actions.executors import _setup_replay
 from hyperloom.orchestrator.actions.executors import integrate_patch as ip
 from hyperloom.orchestrator.actions.executors.patching import _patch_artifacts as patch_artifacts
 from hyperloom.orchestrator.actions.executors.integrate import _integrate_results as integrate_results
@@ -126,66 +124,8 @@ async def test_no_framework_agent_root(tmp_path, monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_rejected_by_critic(tmp_path):
-    session = tmp_path / "s"
-    session.mkdir()
-    repo = tmp_path / "fw"
-    _init_git_repo(repo)
-    _write_workspace(session, "spec")
-
-    class _SS:
-        phase = "FRAMEWORK_AGENT"
-        enablement = EnablementRound()
-
-        def get_specialist_patch_verdict(self, tid):
-            return "reject"
-
-    ex = IntegratePatchExecutor(session_dir=session)
-    res = await ex(
-        _make_ctx(
-            "t",
-            {"specialist_task_id": "spec", "framework_source_root": str(repo)},
-            extra={"shared_state": _SS()},
-        )
-    )
-    assert res["status"] == "rejected_by_critic"
-    assert (repo / "src.py").read_text().endswith("return 1\n")
-
-
-@pytest.mark.asyncio
-async def test_forged_task_without_critic_verdict_is_rejected(tmp_path):
-    # Dispatch replays PolicyGate before queued→running (see test_dispatched_task_policy).
-    # This case still covers the executor-layer critic gate: with SharedState present
-    # but no recorded verdict, integrate_patch must refuse to apply the patch.
-    session = tmp_path / "s"
-    session.mkdir()
-    repo = tmp_path / "fw"
-    _init_git_repo(repo)
-    _write_workspace(session, "spec")
-
-    class _SS:
-        phase = "FRAMEWORK_AGENT"
-        enablement = EnablementRound()
-
-        def get_specialist_patch_verdict(self, tid):
-            return ""  # no verdict on record
-
-    ex = IntegratePatchExecutor(session_dir=session)
-    res = await ex(
-        _make_ctx(
-            "t",
-            {"specialist_task_id": "spec", "framework_source_root": str(repo)},
-            extra={"shared_state": _SS()},
-        )
-    )
-    assert res["status"] == "rejected_by_critic"
-    # patch not applied: the source file is untouched.
-    assert (repo / "src.py").read_text().endswith("return 1\n")
-
-
-@pytest.mark.asyncio
-async def test_covered_step_integrates_without_a_critic_verdict(tmp_path, monkeypatch):
-    """A step the Coordinator runs itself is never a registry row, so its bench decides, not a recorded verdict."""
+async def test_covered_step_integrates_and_its_bench_decides(tmp_path, monkeypatch):
+    """A step the Coordinator runs itself is never a registry row; it lands and is graded like any other."""
     session = tmp_path / "s"
     session.mkdir()
     repo = tmp_path / "fw"
@@ -195,9 +135,6 @@ async def test_covered_step_integrates_without_a_critic_verdict(tmp_path, monkey
     class _SS:
         phase = "KERNEL_AGENT"
         enablement = EnablementRound()
-
-        def get_specialist_patch_verdict(self, tid):
-            return ""  # no verdict on record
 
         def grid_session_deadline_sec(self, **_kwargs):
             return None
@@ -220,86 +157,6 @@ async def test_covered_step_integrates_without_a_critic_verdict(tmp_path, monkey
 
     assert res["status"] == "kept"
     assert (repo / "src.py").read_text().endswith("return 2\n")
-
-
-@pytest.mark.asyncio
-async def test_covered_step_on_the_upstream_pr_lane_still_needs_a_critic_verdict(tmp_path, monkeypatch):
-    """The upstream-PR lane fetches a remote diff into the live tree, so running as a covered step does not admit it."""
-    session = tmp_path / "s"
-    session.mkdir()
-    repo = tmp_path / "fw"
-    _init_git_repo(repo)
-
-    class _SS:
-        phase = "FRAMEWORK_AGENT"
-        enablement = EnablementRound()
-
-        def get_specialist_patch_verdict(self, tid):
-            return ""  # no verdict on record
-
-    def fetch(**_kwargs):
-        raise AssertionError("an unreviewed candidate must not be fetched")
-
-    monkeypatch.setattr(integrate_resolve, "materialize_candidate_patches", fetch)
-    res = await IntegratePatchExecutor(session_dir=session)(
-        _make_ctx(
-            "t",
-            {
-                "patch_source": "upstream_pr",
-                "candidate": {"repo": "vllm-project/vllm", "pr_number": 1015},
-                "framework_agent_candidate_id": "vllm-project/vllm#1015",
-                "framework_source_root": str(repo),
-            },
-            extra={"shared_state": _SS(), "covered_step": True},
-        )
-    )
-
-    assert res["status"] == "rejected_by_critic"
-    assert "no Critic verdict on record" in res["reason"]
-
-
-@pytest.mark.asyncio
-async def test_forged_task_rejected_before_any_side_effect(tmp_path, monkeypatch):
-    # SWSPLAT-42420 (all-or-nothing): the Critic gate must fire BEFORE setup
-    # replay / patch apply, so a forged enablement task never runs its
-    # setup_commands (no pip install / live-tree mutation) before being refused.
-    session = tmp_path / "s"
-    session.mkdir()
-    repo = tmp_path / "fw"
-    _init_git_repo(repo)
-    _write_workspace(session, "spec")
-
-    called = {"setup": False}
-
-    def _spy_setup(*args, **kwargs):
-        called["setup"] = True
-        return []
-
-    monkeypatch.setattr(_setup_replay, "run_setup_commands", _spy_setup)
-
-    class _SS:
-        phase = "ENABLEMENT"
-        enablement = EnablementRound()
-
-        def get_specialist_patch_verdict(self, tid):
-            return ""  # no verdict -> must reject before setup
-
-    ex = IntegratePatchExecutor(session_dir=session)
-    res = await ex(
-        _make_ctx(
-            "t",
-            {
-                "specialist_task_id": "spec",
-                "framework_source_root": str(repo),
-                "enablement": True,
-                "setup_commands": ["pip install evil"],
-            },
-            extra={"shared_state": _SS()},
-        )
-    )
-    assert res["status"] == "rejected_by_critic"
-    assert called["setup"] is False, "setup_commands ran before the Critic gate"
-    assert (repo / "src.py").read_text().endswith("return 1\n")
 
 
 def _capture_bench(captured: dict, result: dict, gate: dict):
@@ -331,9 +188,6 @@ async def test_bench_is_bounded_by_the_session_budget(tmp_path, monkeypatch):
         enablement = EnablementRound()
 
         baseline_runtime_sec = 600.0
-
-        def get_specialist_patch_verdict(self, tid):
-            return "approve"
 
         def grid_session_deadline_sec(self, **_kwargs):
             return 4242.0
@@ -1021,7 +875,6 @@ async def test_cancel_preserves_cancellation_when_recovery_save_fails(tmp_path, 
         phase="FRAMEWORK_AGENT",
         enablement=EnablementRound(),
         current_best={},
-        get_specialist_patch_verdict=lambda _sid: "approve",
         save=lambda _path: None,
     )
 
@@ -1063,7 +916,6 @@ async def _apply_only_with_failing_first_save(tmp_path, error):
         phase="FRAMEWORK_AGENT",
         enablement=EnablementRound(),
         current_best={},
-        get_specialist_patch_verdict=lambda _sid: "approve",
         save=save,
     )
     params = {"specialist_task_id": "spec", "framework_source_root": str(repo), "apply_only": True}
@@ -1097,7 +949,6 @@ async def test_apply_only_restores_user_stash_but_resume_refuses_unproven_user_m
         phase="FRAMEWORK_AGENT",
         enablement=EnablementRound(),
         current_best={},
-        get_specialist_patch_verdict=lambda _sid: "approve",
         save=lambda _path: None,
     )
     result = await IntegratePatchExecutor(session_dir=session)(

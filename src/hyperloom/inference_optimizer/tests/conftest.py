@@ -210,7 +210,6 @@ def make_coordinator(session_dir: Path, *, shared_state_overrides: dict[str, Any
 
     backends = coord_kwargs.pop("backends", None) or {
         "orchestration": MockBackend(_idle_plan(), name="orchestration"),
-        "critic": MockBackend(_idle_plan(), name="critic"),
     }
     coord = Coordinator(
         session_dir=session_dir,
@@ -628,57 +627,23 @@ def write_benchmark_yaml(
         yaml.safe_dump({"benchmark": benchmark}, f)
 
 
-def make_mock_critic_coordinator(session_dir: Path):
-    """A real Coordinator whose orchestration plan is empty and whose critic is the mock critic."""
+def make_idle_coordinator(session_dir: Path):
+    """A real Coordinator whose orchestration plan is empty."""
     from hyperloom.orchestrator.loop.coordinator import Coordinator
-    from hyperloom.orchestrator.roles import MockCriticBackend
     from hyperloom.orchestrator.tests.mock_backend import MockBackend, ScriptedPlan
 
     backends = {
         "orchestration": MockBackend(ScriptedPlan(turns=[]), name="orchestration"),
-        "critic": MockCriticBackend(),
     }
     return Coordinator(session_dir, backends=backends)
 
 
-async def seed_pending_critic_proposal(coordinator):
-    """Give a test a real proposal that keeps the Critic eligible to run."""
-    from hyperloom.orchestrator.loop.proposals import record_proposal
-
-    return await record_proposal(
-        coordinator,
-        from_agent="orchestration",
-        action_name="baseline",
-        predicted_gain_pct=0.0,
-        payload={"action_name": "baseline", "params": {}},
-    )
-
-
 def silent_backends() -> dict[str, object]:
-    """Orchestration and critic mock backends sharing one plan that only sends heartbeats."""
+    """An orchestration mock backend whose plan only sends heartbeats."""
     from hyperloom.inference_optimizer.protocol.intent import Intent, IntentType
     from hyperloom.orchestrator.tests.mock_backend import MockBackend, ScriptedPlan
 
     silent = ScriptedPlan(
         turns=[], default_intent=Intent(type=IntentType.SEND_MESSAGE, payload={"topic": "heartbeat", "body_md": "ok"})
     )
-    return {
-        "orchestration": MockBackend(silent, name="o"),
-        "critic": MockBackend(silent, name="c"),
-    }
-
-
-def heartbeat_orchestration_with_mock_critic() -> dict[str, object]:
-    """A heartbeat-only orchestration backend beside the default mock critic."""
-    from hyperloom.inference_optimizer.protocol.intent import Intent, IntentType
-    from hyperloom.orchestrator.roles import MockCriticBackend
-    from hyperloom.orchestrator.tests.mock_backend import MockBackend, ScriptedPlan
-
-    silent = ScriptedPlan(
-        turns=[],
-        default_intent=Intent(type=IntentType.SEND_MESSAGE, payload={"topic": "heartbeat", "body_md": "ok"}),
-    )
-    return {
-        "orchestration": MockBackend(silent, name="orch"),
-        "critic": MockCriticBackend(),
-    }
+    return {"orchestration": MockBackend(silent, name="o")}

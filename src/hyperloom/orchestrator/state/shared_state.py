@@ -549,15 +549,6 @@ class SharedState(
     framework_agent_specialist_candidate_map: dict[str, str] = field(
         default_factory=dict,
     )
-    # Re-author rounds per candidate id (capped); needs_review verdicts increment.
-    specialist_reauthor_attempts: dict[str, int] = field(
-        default_factory=dict,
-    )
-    # Backstop: per-candidate-key count of Critic-review submissions; past the abort threshold the pump force-stamps
-    # ``repeated_review_abort`` and stops re-selecting it, bounding one candidate's share of the phase budget.
-    framework_agent_review_counts: dict[str, int] = field(
-        default_factory=dict,
-    )
     # Apply-failure re-author attempts per candidate id, capped by ``_AUTHORED_LANE_MAX_ATTEMPTS``.
     apply_fail_reauthor_attempts: dict[str, int] = field(
         default_factory=dict,
@@ -607,8 +598,6 @@ class SharedState(
     explore_search: dict[str, Any] = field(default_factory=dict)
     # specialist sub-agent rolling state; one entry per config-arm round (round_id, tasks, proposals_total/kept/rejected/skipped, etc.).
     specialist_rounds: list[dict[str, Any]] = field(default_factory=list)
-    # Patch verdict ledger keyed by review subject (a specialist task_id, or a candidate id for a PR pre-screen); Critic must approve/advise before PolicyGate allows the integrate_patch delegate.
-    specialist_patch_verdicts: dict[str, str] = field(default_factory=dict)
     # Intervention-mix ledger ({change_type∈{config,code_patch,config_attempt,code_patch_attempt}}); Robustness detects config-only loops.
     intervention_mix: list[dict[str, Any]] = field(default_factory=list)
     # Research scout bookkeeping; master switch ``--no-research-scout``; seen_pr_ids shared with FRAMEWORK to avoid re-mining.
@@ -737,8 +726,6 @@ class SharedState(
         # The charge anchor belongs to a live leg, not to the file: only
         # ``begin_leg`` arms it, so ``elapsed_charged_sec`` alone survives a load.
         filtered["leg_anchor_unix"] = 0.0
-        if not isinstance(filtered.get("specialist_patch_verdicts"), dict):
-            filtered["specialist_patch_verdicts"] = {}
         if not isinstance(filtered.get("pending_kernel_integrations"), dict):
             filtered["pending_kernel_integrations"] = {}
         if not isinstance(filtered.get("current_best"), dict):

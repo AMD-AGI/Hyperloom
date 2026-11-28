@@ -87,19 +87,20 @@ contracts, enablement ladder, and phase allowlists.
 
 ### Multi-agent harness
 
-The Coordinator runs Orchestration and Critic turns and dispatches specialists
-when needed. Each turn is grounded in persisted session state rather than an
+The Coordinator runs Orchestration turns and dispatches specialists when
+needed. Each turn is grounded in persisted session state rather than an
 automatic supervision or recovery loop:
 
 | Role | When it runs | How it keeps the run on-goal |
 |------|----------------|------------------------------|
 | **Orchestration** | Every tick; in KERNEL_AGENT only when kernel progress changes, or after 15 minutes without a turn | Continuous planner; mission and progress are re-seeded from the state file, not from the transcript |
-| **Critic** | Every keep-or-revert | Rules on whether a change served the mission; the learning record is written from that verdict |
-| **Specialist** | Authoring only | Ephemeral. Returns a reviewed diff, not a decision |
+| **Specialist** | Authoring only | Ephemeral. Returns a diff, not a decision |
 
+Orchestration decides what to try; the measurement gate decides what stays.
 Risky source edits go through an isolated worktree, a unified-diff gate, a
-policy check, a Critic sign-off, and a coordinator benchmark. A rejection names
-the rule it broke so the next attempt is a fix, not a repeat.
+policy check, and a coordinator benchmark, and the KEEP or REVERT is read from
+that measurement. A refused action names the rule it broke so the next attempt
+is a fix, not a repeat.
 
 ### Recipe knowledge base
 

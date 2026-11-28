@@ -14,12 +14,12 @@ from hyperloom.orchestrator.phases import phase_predicates
 from hyperloom.orchestrator.state.shared_state import SharedState
 from hyperloom.orchestrator.state.task_registry import TaskSpec
 
-from .conftest import make_mock_critic_coordinator
+from .conftest import make_idle_coordinator
 
 
 @pytest.fixture
 def kernel_coordinator(session_dir):
-    c = make_mock_critic_coordinator(session_dir)
+    c = make_idle_coordinator(session_dir)
 
     async def _noop(*_args, **_kwargs):
         return None

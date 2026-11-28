@@ -514,7 +514,6 @@ async def test_same_executor_second_early_return_does_not_reuse_runtime(tmp_path
         phase="ENABLEMENT",
         current_best={},
         enablement=EnablementRound(),
-        get_specialist_patch_verdict=lambda _subject: "approve",
         save=lambda _path: saved.append(json.loads(json.dumps(state.pending_integrate))),
     )
     ctx = _make_ctx(
@@ -560,7 +559,6 @@ async def test_upstream_resolve_threads_attempt_and_preserves_fetch_failure(tmp_
 
     captured = []
     state = SharedState(current_best={"tput": 200.0, "extra_server_args": "--live"})
-    state.record_specialist_patch_verdict("candidate", "approve")
     root = tmp_path / "framework"
     root.mkdir()
 
@@ -880,7 +878,6 @@ async def test_executor_rejects_inapplicable_aiter_model_config(
     executor = IntegratePatchExecutor(session_dir=session_dir)
     monkeypatch.setattr(executor, "_bench_patch", _should_not_benchmark)
     state = SharedState()
-    state.record_specialist_patch_verdict("t-spec-placeholder", "approve")
     task = Task(
         task_id="t-int-placeholder",
         kind="integrate_patch",
@@ -1707,7 +1704,6 @@ async def _round_exiting_after_setup(tmp_path: Path, monkeypatch, *, arrange, pa
         phase="ENABLEMENT",
         enablement=EnablementRound(setup_executions=list(ledger or [])),
         save=lambda _dir: None,
-        get_specialist_patch_verdict=lambda _subject: "approve",
     )
     task = Task(
         task_id="t-int-ledger",
@@ -1838,7 +1834,6 @@ async def test_base_sha_is_captured_before_the_setup_commands_run(tmp_path: Path
         phase="ENABLEMENT",
         enablement=EnablementRound(),
         save=lambda _dir: None,
-        get_specialist_patch_verdict=lambda _subject: "approve",
     )
     task = Task(
         task_id="t-int-order",
@@ -1898,7 +1893,6 @@ async def test_base_sha_of_an_explicit_root_predates_the_setup_commands(tmp_path
         phase="ENABLEMENT",
         enablement=EnablementRound(),
         save=lambda _dir: None,
-        get_specialist_patch_verdict=lambda _subject: "approve",
     )
     task = Task(
         task_id="t-int-explicit",
@@ -2242,7 +2236,6 @@ async def test_executor_grades_real_patch_bench(
             "workload_identity": "agentx-workload",
         },
         baseline_accuracy=0.9,
-        get_specialist_patch_verdict=lambda _sid: "approve",
         save=lambda _path: None,
     )
     if missing:
@@ -2334,8 +2327,6 @@ async def test_executor_rebinds_base_from_live_current_best(tmp_path: Path, monk
         },
         baseline_tput=1083.0,
         baseline_accuracy=0.95,
-        specialist_patch_verdicts={"t-spec-toctou": "approve"},
-        get_specialist_patch_verdict=lambda sid: "approve",
         save=lambda _path: None,
     )
 
@@ -2601,7 +2592,6 @@ async def test_mlperf_integrate_patch_is_gated_on_inline_accuracy(tmp_path: Path
         agentx_backend="mlperf",
         current_best={"tput": 100.0, "duration_seconds": 3500.0, "request_error_rate": 0.0},
         baseline_accuracy=0.72,
-        get_specialist_patch_verdict=lambda _sid: "approve",
         save=lambda _path: None,
     )
     executor = IntegratePatchExecutor(session_dir=session_dir)
@@ -2641,7 +2631,6 @@ async def test_unreadable_head_refuses_before_the_operator_work_is_stashed(tmp_p
     # that the stash survives reaches this path; the read alone is stubbed.
     monkeypatch.setattr(integrate_apply, "_git_head_sha", lambda _root: "")
     state = SharedState()
-    state.record_specialist_patch_verdict("t-spec-head", "approve")
     ctx = _make_ctx(
         "t-int-head",
         {"specialist_task_id": "t-spec-head", "framework_source_root": str(repo), "apply_only": True},
@@ -2708,7 +2697,6 @@ async def test_a_scriptable_source_patch_over_the_latency_budget_is_reverted(
         latency_budget_ms=250.0,
         current_best={"tput": 100.0},
         baseline_accuracy=0.0,
-        get_specialist_patch_verdict=lambda _sid: "approve",
         save=lambda _path: None,
     )
     executor = IntegratePatchExecutor(session_dir=session_dir)
@@ -2760,7 +2748,6 @@ async def test_the_closure_baseline_is_read_before_the_first_setup_command(tmp_p
         phase="ENABLEMENT",
         enablement=EnablementRound(setup_executions=list(prior_ledger)),
         save=lambda _dir: None,
-        get_specialist_patch_verdict=lambda _subject: "approve",
     )
     params = {
         "specialist_task_id": "t-spec-base",
@@ -2836,7 +2823,6 @@ async def test_a_source_patch_over_the_power_budget_is_reverted(
         power_budget_w=700.0,
         current_best={"tput": 100.0},
         baseline_accuracy=0.0,
-        get_specialist_patch_verdict=lambda _sid: "approve",
         save=lambda _path: None,
     )
     executor = IntegratePatchExecutor(session_dir=session_dir)
