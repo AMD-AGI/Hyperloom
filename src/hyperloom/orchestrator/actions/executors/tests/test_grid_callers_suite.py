@@ -12,8 +12,7 @@ step's class and not measured, and an AgentX variant is one round that boots in 
 before the variant's accuracy round boots one; explore launches one server once per round, starts no variant its
 session or phase budget cannot fit, and launches none that only restates the argv or environment of the session's
 base; an explore round the ledger answers whole succeeds without a launch, and
-one left with nothing to run fails and reports its grid exhausted; a specialist rebench is one round that owns its
-server on the port it reports.
+one left with nothing to run fails and reports its grid exhausted.
 """
 
 from __future__ import annotations
@@ -45,7 +44,6 @@ from hyperloom.orchestrator.actions.executors.tests.test_suite_config import _ba
 from hyperloom.orchestrator.rehearsal import READY, STAGE_FAILED, LaunchAttempt, LaunchScenario, ScriptedRounds
 from hyperloom.orchestrator.rehearsal import VirtualClock, installed_clock
 from hyperloom.orchestrator.rehearsal.scenario import ScenarioError
-from hyperloom.orchestrator.specialists.rebench import RebenchBenchmark, RebenchServer, run_specialist_rebench
 from hyperloom.orchestrator.state.shared_state import SharedState
 from hyperloom.orchestrator.state.tests._session_base import freeze_base, session_base
 from inference_suite.contracts import FailedStep, LifecycleMode, Workload, WorkloadKind
@@ -165,24 +163,6 @@ def test_an_explore_variants_server_is_reaped_through_its_slot(monkeypatch, suit
 
     slot = tmp_path / "explore" / "v00_v0"
     assert suite.stopped == [slot]
-
-
-def test_a_specialist_rebench_runs_one_round_that_owns_its_server_on_the_port_it_reports(monkeypatch, suite, tmp_path):
-    rounds = _rounds(monkeypatch, 1)
-
-    result = asyncio.run(
-        run_specialist_rebench(
-            output_dir=tmp_path / "rebench",
-            benchmark=RebenchBenchmark(config_path=suite.point),
-            server=RebenchServer(extra_envs={"RUN_EVAL": "false"}, port=_PORT),
-        )
-    )
-
-    assert result["ok"] is True, result
-    assert result["output_throughput"] == pytest.approx(_HOT["output_throughput"])
-    (config,) = (call.config for call in rounds.calls)
-    assert config.lifecycle.mode is LifecycleMode.OWN
-    assert config.server.port == result["port"] == _PORT
 
 
 def _explore(

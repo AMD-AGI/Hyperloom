@@ -130,8 +130,8 @@ class GridRound:
     nothing. Without it the round holds its server as its point's ``server_lifecycle`` block says:
     ``server_already_ready`` is whether an earlier round left the round's server up, ``warmup`` whether the round is a
     discarded one, and ``boot_only`` whether it only brings its server up for the rounds after it, which an
-    inference_suite round does without a load. ``checkpoint`` stops an AgentX round that trails its reference at the
-    checkpoint.
+    inference_suite round does without a load, and ``port`` is the port that server answers on, whatever the point
+    names. ``checkpoint`` stops an AgentX round that trails its reference at the checkpoint.
     """
 
     config_path: Path
@@ -143,6 +143,7 @@ class GridRound:
     boot_only: bool = False
     checkpoint: AgentxCheckpoint | None = None
     held: HeldPass | None = None
+    port: int | None = None
 
 
 _FAILED_RETURNCODE = 1
@@ -213,6 +214,7 @@ def _run_on_point_server(
         deadline_unix=deadline_unix(round_.session_deadline_sec),
         env_drop=env_drop,
         checkpoint=round_.checkpoint,
+        port=round_.port,
     )
     try:
         return run_suite_round(route, request, on_poll=on_poll)

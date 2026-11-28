@@ -110,13 +110,6 @@ async def run_specialist_rebench(
         note="specialist_rebench",
     )
 
-    # run_grid's server lifecycle tears down the server it started on exit.
-    server_lifecycle = {
-        "cleanup": True,
-        "pid_dir": str(out_root / "server"),
-        "port": resolved_port,
-    }
-
     gpu_ids = _current_leased_cards()
     try:
         results = await run_grid(
@@ -127,7 +120,7 @@ async def run_specialist_rebench(
                 base=LaunchLayer(extra_server_args=(server.base_extra_args or "").strip()),
                 target=target,
             ),
-            launch=GridLaunch(server_lifecycle=server_lifecycle),
+            launch=GridLaunch(port=resolved_port),
             stop=GridStop(keep_going_on_failure=False),
         )
     except Exception as exc:  # outermost CLI command: the failure is printed as an ok=false result

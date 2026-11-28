@@ -129,7 +129,9 @@ class GridLaunch:
 
     Without ``server_lifecycle`` and ``held`` the grid holds each variant's server: a variant whose point warms up
     (:func:`._suite.held_test.warms_up`) is tested on one server, a discarded bench and then the measured one, and any
-    other variant in one round on a server of its own. With ``server_lifecycle`` the caller holds the server, and each
+    other variant in one round on a server of its own. ``port`` is the port a server the grid holds answers on,
+    whatever the variant's point names; without it a variant's test takes a free port, and a variant measured in one
+    round the port its point names or a free one. With ``server_lifecycle`` the caller holds the server, and each
     variant is the one round the other fields describe. With ``held`` the caller holds a test, and the grid's one
     variant is that round of it: the test says how the round holds the server, which seed its load draws and whether
     it evaluates, the caller stops the server, and ``server_already_ready`` only tells the row's launch evidence that
@@ -145,6 +147,7 @@ class GridLaunch:
     warmup_round: bool = False
     evaluation_only: bool = False  # the round only evaluates (its caller sets EVAL_ONLY): a clean exit is its success
     held: HeldPass | None = None
+    port: int | None = None
 
     @property
     def caller_holds_server(self) -> bool:
@@ -600,6 +603,7 @@ async def _run_measured_round(
                 boot_only=run.launch.lifecycle_boot_only,
                 checkpoint=run.stop.checkpoint,
                 held=held,
+                port=run.launch.port,
             ),
         )
     finally:
@@ -718,7 +722,7 @@ async def _measure_variant(run: _GridRun, at: _VariantSlot) -> VariantResult:
     warm_run = run._replace(stop=run.stop.for_warmup())
     with contextlib.ExitStack() as server:
         # A variant that warms up is tested on one server, which leaving this block stops however its rounds ended.
-        test = server.enter_context(HeldTest(at.path)) if rounds.warms_up else None
+        test = server.enter_context(HeldTest(at.path, port=run.launch.port)) if rounds.warms_up else None
         warmup_tput = None if test is None else await _run_warmup_round(warm_run, at, rounds, test)
         _log_variant_banner(run, at)
         await _restart_multi_node_server(run, at, rounds)

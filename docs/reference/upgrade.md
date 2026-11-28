@@ -664,6 +664,44 @@ rounds run from.
   AgentX accuracy round. Server pids that outlive the stop are logged once,
   as `held test: pids ... outlived SIGKILL` (was `explore: pids ...`).
 
+### Recommended: allow a specialist's rebench two benches
+
+The optional rebench a GPU specialist can run on its leased cards
+(`python -m hyperloom.orchestrator.specialists.rebench`) now measures the way
+the integrate bench does. On a single node, for a served fixed workload that
+is not profiled, it boots one server on `--port`, runs a bench it discards,
+then the measured bench and the eval the point asks for, and stops the
+server. In 1.2.x it ran one bench on a server booted for it, while the
+integrate bench its figure is compared with was measured on a warmed server.
+The flags and the keys of the JSON result are unchanged, and `port` still
+reports the port the server answered on.
+
+* `output_throughput` and the latency figures are the second bench's. Do not
+  compare a rebench result from before the upgrade with one from after.
+* A rebench takes about two benches of wall time: one boot, as before, and
+  one more load. The specialist prompt says so.
+* `warnings` of a rebench that measured carries
+  `run_grid_warmup_discarded_first` and `warmup_round_tput:<value>`. A rebench
+  whose discarded bench failed is `ok: false` with `status: failed`, carries
+  `run_grid_warmup_round_failed` beside `rebench_failed:<error>` in
+  `warnings`, and names the discarded bench's run directory as `workspace`;
+  its `abort_reason.json` has `error_class: warmup_round_failed`.
+* The discarded bench writes its run directory under
+  `<output>/variant_00_specialist-rebench/warmup_round/`. The variant's
+  `config.yaml` no longer carries a `server_lifecycle` block or `--port` as
+  `PORT` (it keeps a `PORT` the point itself names, which the rounds do not
+  run on); read `config.yaml` in a round's run directory for the port and for
+  which round evaluates. `launch_evidence.json` follows the file: its
+  `requested_server_env` no longer lists that `PORT`, and its `recipe_digest`
+  is the digest of the file without the block.
+* A rebench of a point that is measured in one round runs the rounds it ran:
+  one round on a server of its own on `--port` for an AgentX or profiled
+  point, and on a multi-node host the cluster's restart, its discarded pass
+  and its measured pass. The `config.yaml` and `launch_evidence.json` changes
+  above apply there too. On a single node where `BENCHMARK_BASE_URL` is
+  exported, the rebench sends both benches to that server, as the integrate
+  bench does.
+
 ---
 
 ## Upgrading from 1.1.x

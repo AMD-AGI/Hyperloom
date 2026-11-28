@@ -294,13 +294,15 @@ def _gpu_autonomy_block(inp: SpecialistPromptInputs) -> list[str]:
         + "not a requirement.",
         "",
         "Optional helper: a ``rebench`` convenience runs the gate's own "
-        + "inference_suite round on your leased cards, so you can get numbers "
-        + "directly comparable to the ``integrate_patch`` gate in one call:",
+        + "inference_suite rounds on your leased cards, so you can get numbers "
+        + "directly comparable to the ``integrate_patch`` gate in one call. As "
+        + "the gate does, it discards a first bench and reports the second, "
+        + "measured on the same server:",
         "    python -m hyperloom.orchestrator.specialists.rebench \\",
         "        [--config <point.yaml>] --output ./scratch/rebench " + "[--extra-args '<server args>']",
-        "  It prints a JSON result with ``output_throughput``. It is OPTIONAL "
-        + "— you may instead write your own bench/autotune script. Throughput "
-        + "does NOT have to come from rebench.",
+        "  It prints a JSON result with ``output_throughput`` and takes about "
+        + "two benchmark passes. It is OPTIONAL — you may instead write your own "
+        + "bench/autotune script. Throughput does NOT have to come from rebench.",
     ]
 
 

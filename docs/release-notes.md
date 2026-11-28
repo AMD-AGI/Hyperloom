@@ -441,6 +441,18 @@ it.
   `launch_evidence` of ledger rows follow. An `explore` task's
   `baseline_double_run` parameter, which Hyperloom never set, is no longer
   read. See [Upgrade](reference/upgrade.md).
+- **A specialist's rebench measures the way the integrate bench does.** On a
+  single node, for a served fixed workload that is not profiled,
+  `python -m hyperloom.orchestrator.specialists.rebench` boots one server on
+  `--port`, runs a bench it discards, then the measured bench and its eval; it
+  ran one bench on a cold server, so its figure was not comparable with the
+  gate's. It takes about two benches of wall time, `output_throughput` is the
+  second bench's, and `warnings` gains `run_grid_warmup_discarded_first` and
+  `warmup_round_tput:<value>` (`run_grid_warmup_round_failed` when the
+  discarded bench failed). Flags and result keys are unchanged. The variant's
+  `config.yaml` carries no `server_lifecycle` block or `--port` as `PORT`.
+  Multi-node, AgentX and profiled points run the rounds they ran. See
+  [Upgrade](reference/upgrade.md).
 
 ## Hyperloom 1.2.0 release
 
