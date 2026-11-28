@@ -4,10 +4,11 @@
 """Shared value types and helpers for the ``explore`` executor's grid runs.
 
 A grid round of a session that froze a base launch (:func:`._suite.rounds.suite_route`) runs through
-:func:`run_grid_suite_round`, which holds the server as the point's ``server_lifecycle`` block says
-(:func:`._suite.rounds.point_server`) and hands the round back the way the grid reads a finished benchmark process: a
-round the session deadline or a cancel stopped exits with the sentinel the grid reads as the run's own stop, any other
-failed step exits ``1``, and the grid records it under that step's error class (:func:`failed_step_class`).
+:func:`run_grid_suite_round`: as a round of the held test it names (:class:`._suite.held_test.HeldPass`), or else on a
+server held as the point's ``server_lifecycle`` block says (:func:`._suite.rounds.point_server`). Either way the round
+is handed back the way the grid reads a finished benchmark process: a round the session deadline or a cancel stopped
+exits with the sentinel the grid reads as the run's own stop, any other failed step exits ``1``, and the grid records
+it under that step's error class (:func:`failed_step_class`).
 """
 
 from __future__ import annotations
@@ -36,7 +37,7 @@ from hyperloom.inference_optimizer.grid_server_args import (
     remove_moe_runner_backend_arg,
 )
 
-from inference_suite import stop
+from inference_suite import RoundResult, stop
 from inference_suite.contracts import FailedStep
 
 from ..workload._agentx_checkpoint import AgentxCheckpoint, read_checkpoint
@@ -47,6 +48,7 @@ from .._subprocess_kill import (
     SESSION_TIME_EXHAUSTED_RETURNCODE,
     sync_agentx_phase_wait,
 )
+from .._suite.held_test import HeldPass, HeldRound
 from .._suite.rounds import RUN_DIR_PREFIX, SuiteRound, SuiteRoute, deadline_unix, point_server
 from .._suite.rounds import run_suite_round
 
@@ -123,10 +125,13 @@ def sync_benchmark_timeout(config_path: Path, timeout_sec: float) -> None:
 class GridRound:
     """One benchmark round of a grid: the config and directories it runs with, and its stop gates.
 
-    ``server_already_ready`` is whether an earlier round left the round's server up. ``boot_only`` is whether the
-    round only brings its server up for the rounds after it, which an inference_suite round does without a load.
-    ``checkpoint`` stops an AgentX round that trails its reference at the checkpoint. ``evaluates`` says whether the
-    round runs the accuracy eval; ``None`` leaves that to its point.
+    ``held`` is the round of a held test this round runs as: the test then says how the round holds the server, which
+    seed its load draws and whether it evaluates, and ``server_already_ready``, ``warmup`` and ``boot_only`` say
+    nothing. Without it the round holds its server as its point's ``server_lifecycle`` block says:
+    ``server_already_ready`` is whether an earlier round left the round's server up, ``warmup`` whether the round is a
+    discarded one, and ``boot_only`` whether it only brings its server up for the rounds after it, which an
+    inference_suite round does without a load. ``checkpoint`` stops an AgentX round that trails its reference at the
+    checkpoint.
     """
 
     config_path: Path
@@ -137,7 +142,7 @@ class GridRound:
     warmup: bool = False
     boot_only: bool = False
     checkpoint: AgentxCheckpoint | None = None
-    evaluates: bool | None = None
+    held: HeldPass | None = None
 
 
 _FAILED_RETURNCODE = 1
@@ -170,6 +175,34 @@ def run_grid_suite_round(
         SuiteRoundRefused: When the round is refused before it runs.
     """
     sync_benchmark_timeout(round_.config_path, round_.timeout_sec)
+    if round_.held is None:
+        ran = _run_on_point_server(route, round_, env_drop, on_poll)
+    else:
+        ran = round_.held.run(route, _held_round(round_, env_drop), on_poll=on_poll)
+    report, run_dir = ran.report, ran.layout.root
+    if report.failed_step is None:
+        return SuiteRoundExit(0, run_dir)
+    detail = report.failure_detail or report.failed_step.value
+    if _stopped_by_checkpoint(round_):
+        return SuiteRoundExit(AGENTX_EARLY_STOP_RETURNCODE, run_dir, detail)
+    return SuiteRoundExit(_STOPPED_BY_THE_RUN.get(report.failed_step, _FAILED_RETURNCODE), run_dir, detail)
+
+
+def _held_round(round_: GridRound, env_drop: frozenset[str]) -> HeldRound:
+    """What ``round_`` says to the held test it runs on; the test's owner stops the server."""
+    return HeldRound(
+        config_path=round_.config_path,
+        round_dir=round_.output_dir,
+        deadline_unix=deadline_unix(round_.session_deadline_sec),
+        env_drop=env_drop,
+        checkpoint=round_.checkpoint,
+    )
+
+
+def _run_on_point_server(
+    route: SuiteRoute, round_: GridRound, env_drop: frozenset[str], on_poll: Callable[[], None]
+) -> RoundResult:
+    """Run ``round_`` on a server held as its point's ``server_lifecycle`` block says, stopped after when it says so."""
     server = point_server(round_.config_path, finds_server=round_.server_already_ready)
     request = SuiteRound(
         config_path=round_.config_path,
@@ -180,20 +213,12 @@ def run_grid_suite_round(
         deadline_unix=deadline_unix(round_.session_deadline_sec),
         env_drop=env_drop,
         checkpoint=round_.checkpoint,
-        evaluates=round_.evaluates,
     )
     try:
-        ran = run_suite_round(route, request, on_poll=on_poll)
+        return run_suite_round(route, request, on_poll=on_poll)
     finally:
         if server.stop_after is not None and (survivors := stop(server.stop_after).survivors):
             log.error("grid: pids %s outlived SIGKILL; %s keeps their record", survivors, server.stop_after)
-    report, run_dir = ran.report, ran.layout.root
-    if report.failed_step is None:
-        return SuiteRoundExit(0, run_dir)
-    detail = report.failure_detail or report.failed_step.value
-    if _stopped_by_checkpoint(round_):
-        return SuiteRoundExit(AGENTX_EARLY_STOP_RETURNCODE, run_dir, detail)
-    return SuiteRoundExit(_STOPPED_BY_THE_RUN.get(report.failed_step, _FAILED_RETURNCODE), run_dir, detail)
 
 
 def _stopped_by_checkpoint(round_: GridRound) -> bool:

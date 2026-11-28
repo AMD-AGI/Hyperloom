@@ -39,7 +39,7 @@ import yaml
 from inference_suite.contracts import FailedStep
 
 from hyperloom.common.benchmark_config import BenchmarkPoint, BenchmarkPointError, read_benchmark_point
-from hyperloom_common.env import is_truthy
+from hyperloom_common.env import env_flag, is_truthy
 from hyperloom.common.env_safety import filter_untrusted_env_mapping, is_allowed_variant_env_key
 from hyperloom.common.outside_facts import (
     ENV_CONC,
@@ -121,7 +121,6 @@ from hyperloom.orchestrator.actions.executors import (
     grid_run_dirs,
     resolve_lifecycle_params,
     run_grid,
-    run_grid_warmup_enabled,
     teardown_variant_server,
 )
 from hyperloom.orchestrator.actions.cancel_channel import CancelScope, current_cancel_scope, use_cancel_scope
@@ -604,11 +603,14 @@ async def _single(run: Run) -> None:
     if lifecycle.eligible:
         await _held_rounds(run, lifecycle, _warms(warmup))
     else:
-        run.add(0, await _grid(run, 0, _TEST, warmup_before_measure=None if warmup is None else bool(warmup)))
+        run.add(0, await _grid(run, 0, _TEST))
 
 
 def _warms(warmup: int | None) -> bool:
-    return run_grid_warmup_enabled() if warmup is None else bool(warmup)
+    """Whether a held test discards a warmup bench first: as its call plans, else as the host's switch says."""
+    if warmup is None:
+        return env_flag("INFERENCE_OPTIMIZER_RUN_GRID_WARMUP", default=not os.environ.get("PYTEST_CURRENT_TEST"))
+    return bool(warmup)
 
 
 def _checks_held(call: TestCall) -> bool:
@@ -649,7 +651,6 @@ async def _held_rounds(run: Run, lifecycle: _Lifecycle, warm: bool) -> None:
             server_lifecycle=lifecycle.settings(cleanup=not (run.call.accuracy or _stays_up(run.call))),
             server_already_ready=warm,
             base_extra_envs=bench_envs,
-            warmup_before_measure=False,
         )
         run.add(0, measured)
         await _evaluate(run, lifecycle, 0)
@@ -662,7 +663,7 @@ async def _held_rounds(run: Run, lifecycle: _Lifecycle, warm: bool) -> None:
 async def _warmup_round(run: Run, lifecycle: _Lifecycle, envs: dict[str, str] | None) -> bool:
     """The warmup bench on the server it leaves up; whether the measured round follows."""
     held = lifecycle.settings(cleanup=False)
-    warmup = await _grid(run, 0, _WARMUP, server_lifecycle=held, base_extra_envs=envs, warmup_before_measure=False)
+    warmup = await _grid(run, 0, _WARMUP, server_lifecycle=held, base_extra_envs=envs)
     run.warmup = warmup
     return run.add(0, warmup) and not is_failure(warmup) and not decides_test(ended(run).verdict)
 
@@ -672,7 +673,7 @@ async def _evaluate(run: Run, lifecycle: _Lifecycle, point: int) -> None:
     none after a failed bench or a stop. One that fails fails the test's accuracy, never a bench's reading."""
     if run.call.accuracy and run.stopped_rc is None and not test_failed(run):
         held = lifecycle.settings(cleanup=not _stays_up(run.call))
-        launch = {"server_already_ready": True, "warmup_before_measure": False, "evaluation_only": True}
+        launch = {"server_already_ready": True, "evaluation_only": True}
         run.evaluation = await _grid(run, point, _EVAL, server_lifecycle=held, base_extra_envs=_EVAL_ENVS, **launch)
         run.add(point, run.evaluation)
 
@@ -718,7 +719,6 @@ async def _agentx_long_context(run: Run, lifecycle: _Lifecycle) -> None:
         watch_boot=False,
         server_lifecycle=lifecycle.settings(cleanup=False),
         base_extra_envs=dict(CHECK_SERVER_ENVS),
-        warmup_before_measure=False,
         lifecycle_boot_only=True,
     )
     if is_failure(boot):
@@ -822,7 +822,6 @@ async def _boot_server(run: Run, lifecycle: _Lifecycle, point: int, name: str) -
         name,
         server_lifecycle=lifecycle.settings(cleanup=False),
         base_extra_envs=_boot_envs(run.call.points[point]),
-        warmup_before_measure=False,
         lifecycle_boot_only=True,
     )
 
@@ -848,7 +847,6 @@ async def _reuse(run: Run, lifecycle: _Lifecycle, order: list[int]) -> None:
             server_lifecycle=lifecycle.settings(cleanup=position == len(order) - 1 and not stays_up),
             server_already_ready=True,
             base_extra_envs=_BENCH_ENVS if graded else None,  # an explore's point does not evaluate
-            warmup_before_measure=False,
         )
         if not run.add(point, result):
             return
@@ -857,7 +855,7 @@ async def _reuse(run: Run, lifecycle: _Lifecycle, order: list[int]) -> None:
 async def _sweep_by_restart(run: Run, order: list[int]) -> None:
     """One server per level, booted and torn down by the level's own round."""
     for point in order:
-        result = await _grid(run, point, f"c{_levels(run.call.points)[point]}", warmup_before_measure=False)
+        result = await _grid(run, point, f"c{_levels(run.call.points)[point]}")
         if not run.add(point, result):
             return
 

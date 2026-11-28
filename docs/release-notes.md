@@ -418,6 +418,19 @@ it.
   `PYTHONUNBUFFERED`, as a single-round attempt's did, so its
   `launch_evidence.json` lists that variable. The rounds themselves are
   unchanged. See [Upgrade](reference/upgrade.md).
+- **The integrate bench discards a first bench exactly where a baseline
+  does.** On a single node, for a served fixed workload that is not profiled,
+  the FRAMEWORK integrate bench boots one server, runs a discarded bench, then
+  the measured bench and its eval. `hyperloom optimize` no longer reads
+  `INFERENCE_OPTIMIZER_RUN_GRID_WARMUP`, which set to `0` made the bench one
+  round on a cold server; `hyperloom-multibranch` still reads it as the
+  default of a test that names no warm-up count. Both rounds run from the
+  variant's one `config.yaml`: `warmup_round/config.yaml` is no longer
+  written, the variant's `config.yaml` carries no `server_lifecycle` block or
+  picked `PORT` (each round's `config.yaml` in its run directory records
+  them), its `launch_evidence.json` follows, and the error class
+  `warmup_yaml_build_error` no longer occurs. See
+  [Upgrade](reference/upgrade.md).
 
 ## Hyperloom 1.2.0 release
 

@@ -46,7 +46,8 @@ Phase = Literal["warmup", "measure", "accuracy"]
 class RoundPlan:
     """How many warmup rounds a test runs; the measured round count is one, as in ``run_grid``.
 
-    ``warmup_rounds`` of ``None`` leaves the choice to ``run_grid``'s own default (its environment switch).
+    ``warmup_rounds`` of ``None`` leaves the choice to the backend's environment switch
+    (``INFERENCE_OPTIMIZER_RUN_GRID_WARMUP``).
     """
 
     warmup_rounds: int | None = None
@@ -64,7 +65,7 @@ class RoundPlan:
 
     @classmethod
     def from_env(cls) -> RoundPlan:
-        """The plan ``run_grid`` applies when nobody states one."""
+        """The plan of a call that states none."""
         return cls()
 
 

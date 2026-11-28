@@ -481,9 +481,7 @@ async def _run_held_arm(sweep: _Sweep, arm: Arm, lifecycle: Mapping[str, Any]) -
                 booted = False
             last = idx == len(concs) - 1 or layers[idx + 1] != layers[idx]
             lifecycle_settings = {"cleanup": booted and last, "pid_dir": str(pid_dir), "port": port}
-            launch = GridLaunch(
-                server_lifecycle=lifecycle_settings, server_already_ready=booted, warmup_before_measure=False
-            )
+            launch = GridLaunch(server_lifecycle=lifecycle_settings, server_already_ready=booted)
             result = await _run_rung(sweep, arm, conc, launch)
             if not booted:
                 booted = result.status == _SUCCEEDED

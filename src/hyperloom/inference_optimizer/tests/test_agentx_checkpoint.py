@@ -211,6 +211,8 @@ async def test_grid_records_a_stopped_round_and_moves_on(tmp_path, monkeypatch):
 
     monkeypatch.setattr(gr, "suite_route", lambda session_dir: object())
     monkeypatch.setattr(gr, "run_grid_suite_round", _stopped_at_checkpoint)
+    # A checkpoint judges an AgentX round, and an AgentX point is measured once: no discarded bench precedes it.
+    monkeypatch.setattr(gr, "warms_up", lambda config_path: False)
     results = await run_grid(
         grid=[GridVariant("vA"), GridVariant("vB")],
         output_root=tmp_path / "out",

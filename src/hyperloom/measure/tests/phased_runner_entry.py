@@ -26,7 +26,6 @@ def main() -> int:
     root = Path(os.environ["HYPERLOOM_SANDBOX_ROOT"])
     rounds = Rounds(RealClock(), float(os.environ["HL_PHASE_SCALE"]))
     local.run_grid = StagedGrid(getattr(rounds, os.environ["HL_PHASE_SCENARIO"])())  # type: ignore[assignment]
-    local.run_grid_warmup_enabled = lambda: True  # type: ignore[assignment]
     local.resolve_lifecycle_params = lambda path: {"eligible": True, "port": 8123, "framework": "sglang"}  # type: ignore[assignment]
 
     def stop_server(slot: Path) -> list[int]:

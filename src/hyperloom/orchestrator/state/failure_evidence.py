@@ -125,7 +125,6 @@ _HARNESS_ERROR_CLASSES = frozenset(
         "round_nonzero_after_valid_measurement",
         ROUND_NONZERO_INVALID_MEASUREMENT,
         "warmup_round_failed",
-        "warmup_yaml_build_error",
         YAML_BUILD_ERROR,
         FailedStep.BASE_DIGEST_MISMATCH.value,
         FailedStep.CLIENT_FAILED.value,

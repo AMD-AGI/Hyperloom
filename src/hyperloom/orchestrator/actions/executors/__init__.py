@@ -20,7 +20,6 @@ from .workload._workload_envs import (
 from .grid._grid_base import GridVariant, VariantResult, grid_run_dirs, variant_slot
 from ._profile_setup import VLLM_PATCH_PROFILER_FIELDS
 from ._server_patcher import ensure_vllm_patched_for_tracelens
-from .grid._grid_runner import _run_grid_warmup_enabled as run_grid_warmup_enabled
 from .grid._grid_runner import GridLaunch, GridRecipe, GridStop, run_grid, teardown_variant_server
 from .serving._server_lifecycle import resolve_lifecycle_params
 from ._subprocess_kill import (
@@ -109,7 +108,6 @@ __all__ = [
     "report_executor",
     "resolve_lifecycle_params",
     "run_grid",
-    "run_grid_warmup_enabled",
     "run_with_session_kill",
     "session_breakdown_executor",
     "staged_tool_cache",

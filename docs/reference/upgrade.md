@@ -584,6 +584,48 @@ set on the round, and the rounds they produce are the ones they produced.
   The info line `cold-start double-run not eligible (...)` is no longer
   logged.
 
+### Recommended: drop `INFERENCE_OPTIMIZER_RUN_GRID_WARMUP` from `hyperloom optimize` launches
+
+The FRAMEWORK integrate bench discards a first bench exactly where a baseline
+does: on a single node, for a served fixed workload that is not profiled.
+There it boots one server, runs the discarded bench, then the measured bench
+and its eval, and stops the server. `hyperloom optimize` no longer reads
+`INFERENCE_OPTIMIZER_RUN_GRID_WARMUP`: set to `0` it used to make the bench a
+single round on a server booted for it, while the baseline the bench is
+graded against was measured on a warmed one.
+
+* Remove the variable from `hyperloom optimize` launches. A launch that set it
+  to `0` now runs the discarded bench: the integrate bench takes one more
+  load, and its row carries `run_grid_warmup_discarded_first` and
+  `warmup_round_tput:<value>` in `nonfatal_warnings`. A launch that left it
+  unset runs the rounds it ran.
+* `hyperloom-multibranch` still reads the variable, as the default of a test
+  whose request names no warm-up count.
+* A variant's two rounds run from its one config,
+  `variant_NN_<name>/config.yaml`. `variant_NN_<name>/warmup_round/config.yaml`
+  is no longer written, and the variant's `config.yaml` no longer carries a
+  `server_lifecycle` block or the port picked for the pair (it keeps a `PORT`
+  the point itself names, which the pair does not run on). Read
+  `config.yaml` in a round's run directory
+  (`variant_NN_<name>/warmup_round/suite_run_<n>/`,
+  `variant_NN_<name>/suite_run_<n>/`) for what the round ran, its port
+  included. The variant's `launch_evidence.json` follows the file: its
+  `requested_server_env` no longer lists the picked `PORT`, and its
+  `recipe_digest` is the digest of the file without the block.
+* A variant whose discarded bench failed (`warmup_round_failed`) leaves a
+  `config.yaml` that carries the round's cap as `timeout_seconds` and
+  `PYTHONUNBUFFERED: '1'`, as one whose measured bench ran always did.
+* The error class `warmup_yaml_build_error` no longer occurs: the variant's
+  config is built once, and a build that fails is `yaml_build_error` or the
+  refusal's own class, as before.
+* The info line `warmup-before-measure not eligible (...)` is no longer
+  logged. Server pids that outlive the stop of the pair's server are logged
+  as `held test: pids ... outlived SIGKILL` (was `grid: pids ...`).
+* On a multi-node host, and for a profiled or scriptable point, a launch
+  that set the variable to `0` runs the rounds it ran, but an integrate bench
+  or an EXPLORE variant there must now have session time for one more round
+  before it starts, as on a launch that left the variable unset.
+
 ---
 
 ## Upgrading from 1.1.x
