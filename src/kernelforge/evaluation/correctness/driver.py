@@ -8,11 +8,11 @@ from __future__ import annotations
 import asyncio
 import os
 import re
-import sys
 from collections.abc import Mapping
 
-from kernelforge.utils.process_group import kill_process_group
 from kernelforge.evaluation.scoring import DEFAULT_SNR_THRESHOLD_DB
+from kernelforge.utils.interpreter import driver_python
+from kernelforge.utils.process_group import kill_process_group
 
 
 async def test_correctness(
@@ -25,9 +25,10 @@ async def test_correctness(
     """Run a kernel test driver and extract its SNR pre-filter verdict.
 
     ``env`` is laid over this process's environment for the driver, for a caller measuring a workspace that keeps
-    its own build caches.
+    its own build caches. ``driver_python`` names the interpreter the driver runs under: the vLLM venv's where a host
+    keeps the framework's torch there, this process's own otherwise.
     """
-    cmd = [sys.executable, driver_script] + (driver_args or [])
+    cmd = [driver_python(), driver_script] + (driver_args or [])
 
     proc = await asyncio.create_subprocess_exec(
         *cmd,
