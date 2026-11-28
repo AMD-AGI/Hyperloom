@@ -63,7 +63,7 @@ def make_spec(
 def make_runner(session_dir: Path, **kwargs: Any) -> LocalAgentRunner:
     kwargs.setdefault("poll_interval_seconds", 0.05)
     kwargs.setdefault("version_probe", lambda argv0, env: "test-1.0")
-    host_keys = ("monotonic", "wall", "popen", "cgroup_root", "proc_root", "sleep")
+    host_keys = ("monotonic", "wall", "popen", "cgroup_root", "sleep")
     host = {key: kwargs.pop(key) for key in host_keys if key in kwargs}
     host.setdefault("cgroup_root", session_dir / "no-cgroup")
     kwargs["host"] = RunnerHost(**host)

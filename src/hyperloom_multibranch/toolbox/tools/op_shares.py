@@ -1,23 +1,18 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""The per-op shares of a TraceLens analysis, for the tools that run one (``tracelens``, ``roofline``).
+"""The per-op shares of a TraceLens analysis, for the ``tracelens`` tool.
 
-The shares come from a table of every op's share of the total GPU time. The ``report`` route of ``tracelens`` names its own
-(``kernel_shares_path``: the kernels of a graded wave, the decode and prefill windows weighted by the time each takes,
-:mod:`~.phase_mix`): TraceLens' per-op durations are wrong on a decode window after a graph replay. The agent route and the
-roofline name the kernels of the one window they ran on
-(:func:`~.tracelens_report.with_window_shares`). An analysis that names none has TraceLens' ``ops_summary.csv`` (the
-``perf_report_csvs`` folder beside the report), the complete per-op table its perf report writes deterministically from the
-trace. Neither is the
-``analysis.json`` task list, which holds only the few optimisation tasks the report recommends (a few percent of the time)
-and would hide GEMM and attention from the Amdahl ceiling. A tool that produced no table, or whose request does not name the
-commit the profile ran on, reports no shares: they are never guessed. A report TraceLens marked degraded (its deterministic
-fallback, or a poor trace) gives no shares from ``ops_summary.csv``: the decomposition behind them failed, so the one row
-it keeps is a kernel name, not an op. The report route's kernel table does not rest on that decomposition, so it still
-gives its kernel shares, and the summary says the op decomposition is degraded: for a model that spends most of its time
-in graph replays, kernel names and their share of the time are the best ranking there is. No shares come from a table
-the report route itself found hollow (``window_degraded_reason``).
+The shares come from the table the report names (``kernel_shares_path``: the kernels of a graded wave, the decode and
+prefill windows weighted by the time each takes, :mod:`~.phase_mix`), not from TraceLens' ``ops_summary.csv``: TraceLens'
+per-op durations are wrong on a decode window after a graph replay. Nor is it the ``analysis.json`` task list, which holds
+only the few optimisation tasks the report recommends (a few percent of the time) and would hide GEMM and attention from
+the Amdahl ceiling. A tool that produced no table, or whose request does not name the commit the profile ran on, reports
+no shares: they are never guessed. The kernel table does not rest on TraceLens' op decomposition, so a report TraceLens
+marked degraded (its deterministic fallback, or a poor trace) still gives its kernel shares, and the summary says the op
+decomposition is degraded: for a model that spends most of its time in graph replays, kernel names and their share of
+the time are the best ranking there is. No shares come from a table the report itself found hollow
+(``window_degraded_reason``).
 """
 
 from __future__ import annotations
@@ -68,12 +63,9 @@ def _report_dir(result: Mapping[str, Any]) -> Path | None:
 
 
 def degraded_reason(result: Mapping[str, Any]) -> str:
-    """Why the shares of the analysis ``result`` cannot be taken: the report route's own finding about its kernel table,
-    or, for TraceLens' ops summary, its ``report_info``; empty if they can."""
-    own = str(result.get(OWN_DEGRADED_KEY) or "").strip()
-    if KERNEL_SHARES_KEY in result:
-        return own
-    return _tracelens_reason(result) or own
+    """Why the shares of the analysis ``result`` cannot be taken: the report's own finding about its kernel table; empty
+    if they can."""
+    return str(result.get(OWN_DEGRADED_KEY) or "").strip()
 
 
 def _tracelens_reason(result: Mapping[str, Any]) -> str:
@@ -108,12 +100,9 @@ def _table_rows(path: Path) -> list[dict[str, str]]:
 
 
 def _share_table(result: Mapping[str, Any]) -> Path | None:
-    """The table the shares are read from: the one the report route names (even when it names none), else the ops summary."""
-    if KERNEL_SHARES_KEY in result:
-        text = str(result[KERNEL_SHARES_KEY] or "").strip()
-        return Path(text) if text else None
-    directory = _report_dir(result)
-    return directory / OPS_SUMMARY if directory is not None else None
+    """The table the shares are read from: the one the report names; ``None`` when it names none."""
+    text = str(result.get(KERNEL_SHARES_KEY) or "").strip()
+    return Path(text) if text else None
 
 
 def read_op_shares(result: Mapping[str, Any], limit: int = MAX_OP_SHARES) -> dict[str, float]:

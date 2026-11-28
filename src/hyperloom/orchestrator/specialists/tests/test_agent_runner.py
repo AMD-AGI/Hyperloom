@@ -37,7 +37,7 @@ from hyperloom.orchestrator.specialists.tests._agent_fixtures import (
     make_spec,
     wait_finished,
 )
-from hyperloom.orchestrator.specialists.tests.test_resource_sampling import add_proc, write_cgroup
+from hyperloom.orchestrator.specialists.tests.test_resource_sampling import write_cgroup
 
 HOUR = 3600.0
 
@@ -491,13 +491,14 @@ async def test_a_hung_session_with_no_call_in_flight_is_still_lost(tmp_path: Pat
     await runner.collect(handle)
 
 
-async def test_cpu_work_in_the_process_tree_keeps_a_long_shell_command_alive(tmp_path: Path, clock: FakeClock) -> None:
+async def test_cpu_work_in_the_process_tree_keeps_a_long_shell_command_alive(
+    tmp_path: Path, clock: FakeClock, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """A command the CLI started after its last output keeps the reaper off, and its CPU work keeps ``poll`` on."""
-    proc_root = tmp_path / "proc"
     code = "import subprocess, time; subprocess.Popen(['sleep', '60']); time.sleep(60)"
     spec = make_spec(tmp_path / "w", code=code, deadline_unix=clock.wall + 6 * HOUR)
     clock.keep_alive = False
-    runner = clocked_runner(tmp_path, clock, proc_root=proc_root)
+    runner = clocked_runner(tmp_path, clock)
     handle = await runner.launch(spec)
     until = real_time.time() + 20
     while not descendants(handle.pid):  # blocking: virtual time must not pass before the command starts
@@ -507,8 +508,8 @@ async def test_cpu_work_in_the_process_tree_keeps_a_long_shell_command_alive(tmp
 
     def burn_cpu() -> None:  # the command burning one CPU second per virtual second, as the sampler sees it
         ticks["n"] += 5
-        add_proc(proc_root, handle.pid, 1, rss_kb=1000, utime=ticks["n"] * 100)
 
+    monkeypatch.setattr(resources, "cpu_ticks", lambda pid, start_time: ticks["n"] * 100)
     clock.on_tick.append(burn_cpu)
     await run_fake_time(clock, handle, 1000.0)
     status = await runner.poll(handle)
@@ -517,14 +518,15 @@ async def test_cpu_work_in_the_process_tree_keeps_a_long_shell_command_alive(tmp
     await stop_and_collect(runner, handle)
 
 
-async def test_a_tree_that_burns_no_cpu_is_lost_even_though_a_process_exists(tmp_path: Path, clock: FakeClock) -> None:
-    proc_root = tmp_path / "proc"
+async def test_a_tree_that_burns_no_cpu_is_lost_even_though_a_process_exists(
+    tmp_path: Path, clock: FakeClock, monkeypatch: pytest.MonkeyPatch
+) -> None:
     spec = make_spec(tmp_path / "w", deadline_unix=clock.wall + 6 * HOUR)
     spec.heartbeat_path.write_text("{}")
     clock.keep_alive = False
-    runner = clocked_runner(tmp_path, clock, proc_root=proc_root)
+    runner = clocked_runner(tmp_path, clock)
+    monkeypatch.setattr(resources, "cpu_ticks", lambda pid, start_time: 500)  # alive, but idle
     handle = await runner.launch(spec)
-    add_proc(proc_root, handle.pid, 1, rss_kb=1000, utime=500)  # alive, but idle
     await run_fake_time(clock, handle, 1000.0)
     status = await runner.poll(handle)
     assert status.state == "lost"

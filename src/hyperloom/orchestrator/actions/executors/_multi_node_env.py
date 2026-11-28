@@ -53,6 +53,13 @@ def is_multi_node() -> bool:
     return env_n >= 2
 
 
+def is_pd_session() -> bool:
+    """Whether this multi-node session serves a node-list cluster the suite launches."""
+    from hyperloom.inference_optimizer.multi_node.pd_session import is_pd_state
+
+    return is_multi_node() and is_pd_state(_read_state())
+
+
 def round_server_env(variant_envs: Mapping[str, Any] | None = None, unset_envs: Iterable[str] = ()) -> dict[str, str]:
     """The env a multi-node restart forwards to every rank, layered as a single-node round's ``benchmark.envs`` is.
 
@@ -186,9 +193,10 @@ def pd_topology_from_state() -> dict[str, Any]:
 def infera_ssh_env_from_state() -> dict[str, str]:
     """Env that routes kernel-agent GEAK GPU work to a Infera pod over SSH."""
     from hyperloom.inference_optimizer.multi_node._internal import infera_support
+    from hyperloom.inference_optimizer.multi_node.pd_session import SSH_BACKENDS
 
     state = _read_state()
-    if state.get("backend") != "infera":
+    if state.get("backend") not in SSH_BACKENDS:
         return {}
     targets = infera_support.gpu_ssh_targets_from_state(state)
     key = str(state.get("ssh_key_path") or "").strip()

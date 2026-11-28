@@ -39,6 +39,7 @@ __all__ = [
     "boot_unix",
     "Tree",
     "collect_tree",
+    "cpu_ticks",
     "descendants",
     "group_members",
     "kill_tree",
@@ -46,6 +47,7 @@ __all__ = [
     "proc_identity",
     "process_uids",
     "reap_exited_children",
+    "rss_bytes",
     "running",
     "signal_group",
     "signal_processes",
@@ -86,7 +88,7 @@ def proc_identity(pid: int) -> tuple[int, int] | None:
         return None
 
 
-def _cpu_ticks(pid: int, start_time: int | None) -> int | None:
+def cpu_ticks(pid: int, start_time: int | None) -> int | None:
     """The clock ticks ``pid`` has run in user and system mode, its own and those of the children it has waited for;
     ``None`` when it is gone, unreadable, or (given ``start_time``) another incarnation."""
     try:
@@ -111,8 +113,8 @@ def tree_cpu_sec(root_pid: int) -> float | None:
         below = descendants(root_pid)
     except OSError:
         return None
-    ticks = sum(_cpu_ticks(pid, start_time) or 0 for pid, start_time in below)
-    root = _cpu_ticks(root_pid, None)
+    ticks = sum(cpu_ticks(pid, start_time) or 0 for pid, start_time in below)
+    root = cpu_ticks(root_pid, None)
     if root is None:
         return None
     return (root + ticks) / os.sysconf("SC_CLK_TCK")
@@ -122,7 +124,7 @@ def tree_cpu_sec(root_pid: int) -> float | None:
 TreeReadings = dict[ProcessId, int]
 
 
-def _rss_bytes(pid: int) -> int | None:
+def rss_bytes(pid: int) -> int | None:
     """``VmRSS`` of ``pid`` in bytes; ``None`` when it is gone, unreadable, or has no memory of its own (a zombie)."""
     try:
         line = next(line for line in _status_text(pid).splitlines() if line.startswith("VmRSS:"))
@@ -171,7 +173,7 @@ def tree_rss_bytes(root_pid: int) -> TreeReadings | None:
     boot that pre-faults a checkpoint mapped from a network filesystem shows its progress only in this reading.
     ``None`` when ``root_pid`` or ``/proc`` cannot be read.
     """
-    return _tree_readings(root_pid, _rss_bytes)
+    return _tree_readings(root_pid, rss_bytes)
 
 
 def tree_io_bytes(root_pid: int) -> TreeReadings | None:
