@@ -517,6 +517,40 @@ def test_a_drop_other_servers_on_the_host_hide_is_read_again_once(tmp_path, mach
     assert record.stat().st_size < 16 * 1024
 
 
+def test_a_fall_below_half_during_the_first_pass_does_not_end_it(tmp_path, run) -> None:
+    """The level rule looks only outside a pass: while the first pass reads its last file, two thirds of what it read
+    leave the cache at once with headroom free, below half but short of a collapse. The pass reads on to its end (12 of
+    the 30 GiB it once held cached); the level rule finds the fall only after it, and the whole checkpoint is read once
+    more."""
+    sizes = {**_names(3, 10 * GIB), "model-00004-of-00004.safetensors": 2 * GIB}
+    host = FakeHost(sizes)
+    names = list(sizes)
+    original = host.read
+    fallen = threading.Event()
+
+    def read(path, span, stop):
+        if path.name == names[3] and span[0] == 0 and not fallen.is_set():
+            stop.wait(0.2)  # long enough for a look at the cache to see the first three files whole
+            with host.lock:  # 20 of the 30 GiB cached so far gone: below half, under three quarters
+                for name in names[:2]:
+                    host.uncached_spans[name] = [(0, sizes[name])]
+                host.used -= 20 * GIB
+            fallen.set()
+            stop.wait(0.3)  # many looks at the cache while the pass still reads
+        return original(path, span, stop)
+
+    host.read = read  # type: ignore[method-assign]
+    prefetch = run(_model(tmp_path, sizes), host, max_refills=1, watch_sec=3.0)
+
+    assert fallen.is_set()
+    outcome = prefetch.outcome
+    first = outcome.pass_log[0]
+    assert first["ended_by_drop"] is False, "a fall below half during a pass does not end it"
+    assert first["read_bytes"] == 32 * GIB and first["files_read"] == 4
+    assert [entry["reason"] for entry in outcome.pass_log] == ["first", "level"]
+    assert [drop["rule"] for drop in outcome.drops] == ["level"]
+
+
 def _look_at(machine, host: FakeHost) -> tuple[WeightPrefetch, list[float], wp._Watch]:
     machine(host, min_collapse=16 * GIB)
     prefetch = WeightPrefetch(Path("/nonexistent"))
