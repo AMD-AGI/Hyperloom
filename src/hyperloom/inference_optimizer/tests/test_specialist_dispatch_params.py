@@ -752,3 +752,38 @@ def test_patch_capable_domains_default_to_patch():
         assert domain.default_mode == "patch"
         profile = resolve_specialist_profile({"domain": key}, domain=domain)
         assert profile.mode == MODE_PATCH
+
+
+# --------------------------------------------------------------------------- # --no-source-changes: a patch it would
+# skip is never written --------------------------------------------------------------------------- #
+@pytest.mark.parametrize(
+    "params",
+    [
+        pytest.param({"domain": "compiler_specialist"}, id="anchored_default"),
+        pytest.param({"domain": "serving_specialist", "mode": "patch"}, id="explicit_patch"),
+    ],
+)
+def test_a_patch_dispatch_without_bench_runs_as_research_under_no_source_changes(params):
+    prof = resolve_specialist_profile({**params, "no_source_changes": True})
+    assert prof.mode == MODE_RESEARCH
+    assert prof.bench is False
+    assert wall_budget_base_min({**params, "no_source_changes": True}) == 10.0
+
+
+def test_a_benching_patch_dispatch_keeps_patch_mode_under_no_source_changes():
+    """Its GPU measure-edit-measure loop is how it finds configuration."""
+    prof = resolve_specialist_profile({"domain": "serving_specialist", "bench": True, "no_source_changes": True})
+    assert (prof.mode, prof.bench) == (MODE_PATCH, True)
+
+
+@pytest.mark.parametrize(
+    "authoring",
+    [pytest.param({"enablement": True}, id="enablement"), pytest.param({"framework_agent_authoring": True}, id="fw")],
+)
+def test_an_authoring_round_keeps_patch_mode_under_no_source_changes(authoring):
+    prof = resolve_specialist_profile({"domain": "serving_specialist", "no_source_changes": True, **authoring})
+    assert prof.mode == MODE_PATCH
+
+
+def test_without_no_source_changes_an_anchored_dispatch_still_patches():
+    assert resolve_specialist_profile({"domain": "compiler_specialist", "no_source_changes": False}).mode == MODE_PATCH

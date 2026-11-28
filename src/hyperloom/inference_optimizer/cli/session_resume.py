@@ -100,6 +100,13 @@ def _restore_budget_and_objective(args: Any, state: SharedState, manifest: Mappi
     return lines
 
 
+def _keep_launch_config_only(state) -> None:
+    """Record ``--no-source-changes`` on *state*: the flag, and the kernel phase and the warm replay it turns off."""
+    state.no_source_changes = True
+    state.kernel_enabled = False
+    state.warm_replay_enabled = False
+
+
 def _restore_phase_toggles(args: argparse.Namespace, state, session_dir: Path) -> None:
     """Honour the phase and gate decisions the original run persisted.
 
@@ -117,6 +124,13 @@ def _restore_phase_toggles(args: argparse.Namespace, state, session_dir: Path) -
     if not state.kernel_enabled:
         args.no_kernel = True
         print("  Kernel-agent          : DISABLED (persisted from original run)")
+    if state.no_source_changes:
+        args.no_source_changes = True
+        print("  source changes        : SKIPPED (persisted from original run)")
+    elif args.no_source_changes:
+        _keep_launch_config_only(state)
+        state.save(session_dir)
+        print("  source changes        : SKIPPED from this resume on, with the kernel phase and the warm replay off")
     # Same persistence contract for the FRAMEWORK_AGENT phase toggle.
     if not bool(getattr(state, "framework_agent_phase_enabled", True)):
         args.no_framework_agent = True

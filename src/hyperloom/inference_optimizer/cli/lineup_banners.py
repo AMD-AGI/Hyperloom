@@ -22,6 +22,12 @@ def print_lineup_banners(args: argparse.Namespace, *, no_kernel: bool, no_framew
         )
     else:
         print("Optimize phase  : ENABLED")
+    if bool(getattr(args, "no_source_changes", False)):
+        print(
+            "Source changes  : SKIPPED (--no-source-changes); a round that carries more than "
+            "server arguments and environment variables is not kept, and the kernel phase "
+            "and the warm replay are off"
+        )
     if no_framework_agent and no_kernel:
         print(
             "WARNING: --no-framework-agent and --no-kernel are both set; the "

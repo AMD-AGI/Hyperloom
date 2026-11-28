@@ -21,6 +21,27 @@ IDENTITY_MANDATE_LINES: tuple[str, ...] = (
 )
 
 
+#: Section 0 row for a patch-mode dispatch in a ``--no-source-changes`` session.
+KEPT_LAUNCH_CONFIG_ONLY_ROW = (
+    "- kept: only server arguments and environment variables. This session skips any patch, tuned file, "
+    "install or other runtime you deliver (`--no-source-changes`), and any setting whose value names a file you "
+    "wrote; deliver configuration proposals."
+)
+
+#: Closing block of the enablement playbook in a ``--no-source-changes`` session: which rung is kept, and what the
+#: session does with a fix above it.
+ENABLEMENT_LAUNCH_CONFIG_ONLY_LINES: tuple[str, ...] = (
+    "",
+    "### Launch configuration only (`--no-source-changes`)",
+    "This session keeps a Rung 1 fix only: serve flags and environment variables, delivered in `proposal_set`. "
+    "Every rung above it is refused: a source patch, a setup command, a `needs_runtime` or a "
+    "`needs_targeted_build` request.",
+    "Exhaust Rung 1 first. If the gap cannot be cleared there, deliver the smallest higher-rung change once, as "
+    "this playbook describes. The session does not apply it and the run stops on it "
+    "(`enablement_blocked_by_no_source_changes`), with your deliverable as the record of what this model needs.",
+)
+
+
 #: Section 8 field contract of what a patch-authoring round ships.
 PATCH_FIELD_LINES: tuple[str, ...] = (
     "- ``deliverable`` declares what the round produced and is",

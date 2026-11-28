@@ -22,6 +22,8 @@ from hyperloom.orchestrator.state.shared_state import SharedState
         ("", "aborted"),
         ("baseline_failed", "failed"),
         ("enablement_attempts_exhausted", "failed"),
+        # The flag decided it, not the host: the combo needs a change the session refuses.
+        (sr.SOURCE_CHANGE_REFUSED_STOP_REASON, "failed"),
         # A verdict about the model reached before the loop started is still a
         # verdict, so it stays on the failure side.
         ("unsupported_model_arch", "failed"),

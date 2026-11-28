@@ -755,6 +755,7 @@ def _phase_toggle_fields(args: argparse.Namespace) -> dict[str, Any]:
         "framework_agent_phase_enabled": not bool(getattr(args, "no_framework_agent", False)),
         # FRAMEWORK local-exploration arm; --no-framework-local-explore opts out.
         "framework_local_explore_enabled": not bool(getattr(args, "no_framework_local_explore", False)),
+        "no_source_changes": bool(getattr(args, "no_source_changes", False)),
         # Enablement self-heal lanes; --enablement off opts out.
         "enablement_mode": str(getattr(args, "enablement", "all")),
         "research_scout_enabled": bool(getattr(args, "research_scout", True)),

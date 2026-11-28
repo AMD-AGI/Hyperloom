@@ -1139,3 +1139,53 @@ async def test_unpromotable_baseline_failures_in_prelude_with_enablement_admitte
         await coord.writeback.handle_unpromotable_result(_baseline_task(f"bl-pre-{i}"), result)
     assert coord.shared_state.baseline_failure_streak == 3
     assert coord.shared_state.stop_reason != "baseline_failed"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("session", "caller", "expected"),
+    [(True, False, True), (True, None, True), (False, True, None), (False, None, None)],
+)
+async def test_the_session_not_the_caller_decides_no_source_changes(
+    coord: Coordinator, session: bool, caller: bool | None, expected: bool | None
+) -> None:
+    """A delegate cannot opt a specialist out of the session's policy, nor into one the session does not hold."""
+    coord.shared_state.no_source_changes = session
+    params: dict = {"domain": "serving_specialist"}
+    if caller is not None:
+        params["no_source_changes"] = caller
+
+    await coord.specialist_dispatch.warm_specialist_params(params)
+
+    assert params.get("no_source_changes") is expected
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("no_source_changes", [True, False])
+async def test_a_delegated_patch_specialist_is_admitted_at_its_research_price_under_no_source_changes(
+    coord: Coordinator, tmp_path, no_source_changes: bool
+) -> None:
+    """With 35 minutes left a 60-minute patch dispatch is refused, but under the flag it runs as 10-minute research."""
+    state = coord.shared_state
+    state.phase = "FRAMEWORK_AGENT"
+    state.baseline_tput = 1000.0
+    state.no_source_changes = no_source_changes
+    source_root = tmp_path / "framework"
+    (source_root / ".git").mkdir(parents=True)
+    state.framework_repo_path = str(source_root)
+    state.upsert_gap({"canonical_id": "gap.serving", "domain_hint": "serving_specialist", "severity": "high"})
+    state.max_minutes = 60
+    state.elapsed_minutes = lambda **_kw: 25.0  # type: ignore[method-assign]
+    intent = Intent(
+        type=IntentType.DELEGATE,
+        payload={
+            "action_name": "specialist",
+            "params": {"domain": "serving_specialist", "gap_canonical_id": "gap.serving"},
+            "idempotency_key": "spec-budget",
+        },
+    )
+
+    await coord.router.handle_delegate("orchestration", intent)
+
+    queued = [t for t in await coord.tasks.queued() if t.kind == "specialist"]
+    assert len(queued) == (1 if no_source_changes else 0)

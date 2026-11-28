@@ -114,6 +114,8 @@ class SessionContext:
     Attributes:
         framework: ``sglang`` / ``vllm`` -- printed in SESSION CONTEXT.
         framework_agent_phase_enabled: When False (``--no-framework-agent``) the FRAMEWORK_AGENT phase is skipped.
+        no_source_changes: ``--no-source-changes``: integrate_patch keeps only server arguments and environment
+            variables, so the phase contract says not to ask for patches.
         objective_kind: Objective kind string, printed verbatim.
         objective_value: Objective target value, printed verbatim.
         max_minutes: Wall-clock budget for the run, in minutes.
@@ -130,6 +132,7 @@ class SessionContext:
 
     framework: str = "sglang"
     framework_agent_phase_enabled: bool = True
+    no_source_changes: bool = False
     objective_kind: str = "time_only"
     objective_value: float | str | None = None
     max_minutes: int = 0
@@ -218,10 +221,26 @@ def _section_session_context(session: SessionContext, *, kernel_enabled: bool) -
     return lines
 
 
+_NO_SOURCE_CHANGES_CONTRACT: tuple[str, ...] = (
+    "LAUNCH CONFIGURATION ONLY (--no-source-changes): this run keeps nothing but",
+    "server arguments and environment variables. `integrate_patch` skips any",
+    "round that carries a patch, an upstream PR, a tuned artifact, a rewrite",
+    "switch, setup commands or another runtime (`skipped_reason=no_source_changes`).",
+    "A setting whose value names a file under the session directory is such a",
+    "change: that round is skipped, and an `explore` with such a variant is denied.",
+    "Dispatch specialists for configuration proposals and research, never with",
+    "`mode='patch'` to author a source change. This overrides the **Config vs",
+    "source patch** guidance below: after config-only rounds, search the",
+    "configuration space further instead of switching to patches.",
+    "",
+)
+
+
 def _section_phase_semantics(
     *,
     kernel_enabled: bool,
     framework_agent_phase_enabled: bool = True,
+    no_source_changes: bool = False,
 ) -> list[str]:
     """Render the per-phase LLM-proposable action contract (current phase
     injected dynamically by the Coordinator).
@@ -234,6 +253,7 @@ def _section_phase_semantics(
     Args:
         kernel_enabled: Whether kernel_agent-owned actions are enabled.
         framework_agent_phase_enabled: Whether the FRAMEWORK_AGENT phase is enabled.
+        no_source_changes: Whether ``--no-source-changes`` keeps the run to launch configuration.
 
     Returns:
         Markdown lines for the phase-contract section.
@@ -259,6 +279,8 @@ def _section_phase_semantics(
         skipped = ", ".join(f"{ph} ({flag})" for ph, flag in disabled_suffix.items())
         lines.append(f"Phases SKIPPED this run (never entered): {skipped}.")
         lines.append("")
+    if no_source_changes:
+        lines.extend(_NO_SOURCE_CHANGES_CONTRACT)
     lines.extend(
         render_phase_action_bullets(
             disabled_suffix=disabled_suffix,
@@ -1042,6 +1064,7 @@ def build_orchestration_prompt(
         _section_phase_semantics(
             kernel_enabled=kernel_enabled,
             framework_agent_phase_enabled=session.framework_agent_phase_enabled,
+            no_source_changes=session.no_source_changes,
         ),
         _section_action_catalogue(actions),
         _section_decision_framework(phase=phase_norm, transport=transport),

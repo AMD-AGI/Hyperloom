@@ -12,6 +12,7 @@ from hyperloom.orchestrator.specialists.prompt_inputs import SpecialistPromptInp
 from hyperloom.orchestrator.prompts.specialist_prompt_builder import build_specialist_prompts
 from hyperloom.orchestrator.prompts.specialist_context_sections import _render_measured_impact, _format_version_note
 from hyperloom.orchestrator.specialists.domains import SPECIALIST_DOMAINS, get_domain
+from hyperloom.orchestrator.specialists.patch_safety import patch_work_artifact_targets
 
 
 # Derived, not copied: a hand-maintained list goes stale silently when a domain is added, and fails en masse when one
@@ -186,6 +187,16 @@ def test_no_gpu_iron_rule_retains_serving_port_boundary():
     inp = _rich_inputs(allocated_gpu_ids=())
     sys_p, _ = build_specialist_prompts(inp)
     assert "port 8888" in sys_p
+
+
+def test_the_write_rule_names_the_work_folder_that_is_never_delivered():
+    sys_p, _ = build_specialist_prompts(_rich_inputs())
+    assert "under ``scratch/`` there: that folder is never part of what you deliver." in sys_p
+    probe = (
+        "diff --git a/scratch/probe.py b/scratch/probe.py\nnew file mode 100644\n"
+        "--- /dev/null\n+++ b/scratch/probe.py\n@@ -0,0 +1 @@\n+print('probe')\n"
+    )
+    assert patch_work_artifact_targets(probe) == ("scratch/probe.py",)
 
 
 def test_render_measured_impact_variants():

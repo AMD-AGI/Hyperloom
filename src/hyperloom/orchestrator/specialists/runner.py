@@ -494,6 +494,7 @@ class SpecialistRunner:
             gap_symptom=_param(params, "gap_symptom", str),
             gap_layer=_param(params, "gap_layer", str),
             gap_evidence=_param(params, "gap_evidence", dict),
+            no_source_changes=bool(params.get("no_source_changes")),
             experience_kb_block=_param(params, "experience_kb_block", str),
             # Coordinator-populated roofline pre-fetch; empty when not warmed.
             roofline_evidence=_param(params, "roofline_evidence", dict),

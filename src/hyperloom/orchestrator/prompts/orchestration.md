@@ -210,7 +210,8 @@ an enablement patch — that gate does not exist yet.
 The phase terminates normally when the revalidation baseline promotes
 (`baseline_tput > 0`, `validation_pending` cleared, and all in-flight
 enablement work drained). It exits terminally on `server_argv_invalid`,
-`environment_fault`, or `enablement_attempts_exhausted`.
+`environment_fault`, `enablement_attempts_exhausted`, or, under
+`--no-source-changes`, `enablement_blocked_by_no_source_changes`.
 
 <!-- phase: FRAMEWORK_AGENT -->
 ### OPTIMIZE — phase goal
