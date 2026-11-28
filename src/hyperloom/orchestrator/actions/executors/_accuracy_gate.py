@@ -87,10 +87,8 @@ EVAL_KIND_GENERATION_PATHOLOGY = "eval_generation_pathology"
 # framework change can repair.
 EVAL_KIND_QUALITY_GATE_MISSING = "quality_gate_missing"
 
-# Sidecar the probe writes into ``$RESULT_DIR`` when it trips; inference_suite writes its ProbeOutcome there on every
-# eval, tripped or not.
+# The file in a run_dir's eval directory that holds the eval's ProbeOutcome, tripped or not.
 EVAL_PROBE_FILENAME = "hyperloom_eval_probe.json"
-_SUITE_SAMPLES_KEY = "samples_seen"
 
 # stop_reason recorded when the baseline could not produce an accuracy result even though the accuracy test was
 # expected to run.
@@ -492,35 +490,25 @@ def read_eval_probe(workspace: Path | str) -> dict[str, Any] | None:
         record = json.loads(latest.read_text(encoding="utf-8"))
     except (json.JSONDecodeError, OSError):
         return None
-    if _SUITE_SAMPLES_KEY in record:
-        try:
-            tripped = ProbeOutcome.from_document(record).tripped
-        except ReportError:
-            return None
-        if not tripped:
-            return None
+    try:
+        tripped = ProbeOutcome.from_document(record).tripped
+    except ReportError:
+        return None
+    if not tripped:
+        return None
     record["kind"] = EVAL_KIND_GENERATION_PATHOLOGY
     record["source_file"] = str(latest)
     return record
-
-
-def _probe_evidence(probe: dict[str, Any]) -> str:
-    if _SUITE_SAMPLES_KEY in probe:
-        ratio = probe.get("length_ratio_observed") or 0.0
-        return f"{ratio:.0%} of {probe[_SUITE_SAMPLES_KEY]} sampled responses stopped at the length cap"
-    return (
-        f"{probe.get('cap_hits', 0)}/{probe.get('observed_samples', 0)} sampled responses stopped at the "
-        f"{probe.get('max_completion_tokens_seen', 0)}-token cap"
-    )
 
 
 def eval_probe_summary(probe: dict[str, Any] | None) -> str:
     """Render a one-line summary of a tripped probe for a log / journal reason."""
     if not probe:
         return ""
+    ratio = probe.get("length_ratio_observed") or 0.0
     return (
-        f"{EVAL_KIND_GENERATION_PATHOLOGY}: {_probe_evidence(probe)}; the model never emitted EOS, so the eval was "
-        "cut short and scored ~0"
+        f"{EVAL_KIND_GENERATION_PATHOLOGY}: {ratio:.0%} of {probe['samples_seen']} sampled responses stopped at the "
+        "length cap; the model never emitted EOS, so the eval was cut short and scored ~0"
     )
 
 

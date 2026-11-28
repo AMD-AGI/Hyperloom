@@ -451,9 +451,9 @@ def test_eval_enablement_probe_reports_generation_pathology(monkeypatch):
         "run_eval_disabled": False,
         "eval_probe": {
             "kind": EVAL_KIND_GENERATION_PATHOLOGY,
-            "observed_samples": 128,
-            "cap_hits": 128,
-            "max_completion_tokens_seen": 16384,
+            "tripped": True,
+            "samples_seen": 128,
+            "length_ratio_observed": 1.0,
         },
     }
     reason = _route(monkeypatch, "sglang", result)
@@ -461,8 +461,7 @@ def test_eval_enablement_probe_reports_generation_pathology(monkeypatch):
     assert result[BASELINE_EVAL_FAILURE_KIND_KEY] == EVAL_KIND_GENERATION_PATHOLOGY
     assert result[BASELINE_EVAL_OBSERVED_ACCURACY_KEY] == 0.0
     evidence = result[BASELINE_EVAL_EVIDENCE_KEY]
-    assert "128/128" in evidence
-    assert "16384" in evidence
+    assert "100% of 128 sampled responses" in evidence
 
 
 def test_eval_enablement_accuracy_at_floor_passes(monkeypatch):
