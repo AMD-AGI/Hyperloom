@@ -182,7 +182,10 @@ def claw_service_harness() -> Iterator[Harness]:
         api_url=api_url,
         sandbox_url=os.environ.get(_SERVICE_SANDBOX_URL_ENV, api_url),
     )
-    sealed, dev = os.environ[_SERVICE_TEMPLATES_ENV].split(",")
+    names = os.environ[_SERVICE_TEMPLATES_ENV].split(",")
+    if len(names) != 2:
+        raise ValueError(f"{_SERVICE_TEMPLATES_ENV} names two templates, sealed,dev; got {len(names)}")
+    sealed, dev = names
     wait_sec = float(os.environ.get(_SERVICE_WAIT_ENV, _SERVICE_WAIT_SEC))
     provider = _KillsWhatItMade(service, min_wait_sec=wait_sec)
     try:

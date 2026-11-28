@@ -89,7 +89,8 @@ SECRET_VARS: tuple[str, ...] = (
 _KEPT_IN_ENVIRONMENT: frozenset[str] = frozenset({Var.NODE_NAME, Var.CLAW_SESSION_ID})
 
 #: Every host-only input: removed from the environment once read, so a child process started without an
-#: explicit ``env=`` does not inherit it.  The values live on :class:`HostInfo` from then on.
+#: explicit ``env=`` does not inherit it.  The values still read live on :class:`HostInfo` from then on; the retired
+#: ones are dropped.
 HOST_ONLY_VARS: tuple[str, ...] = tuple(
     value for name, value in vars(Var).items() if not name.startswith("_") and value not in _KEPT_IN_ENVIRONMENT
 )
