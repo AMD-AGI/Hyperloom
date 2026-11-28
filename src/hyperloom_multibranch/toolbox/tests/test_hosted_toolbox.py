@@ -303,8 +303,6 @@ def test_inputs_that_cannot_describe_a_session_are_refused(
         _inputs(None, tmp_path, **changed)
 
 
-
-
 @pytest.mark.parametrize("tests_end_by", [None, 1_800_000_000.0])
 def test_the_toolbox_s_retries_wait_no_later_than_the_time_its_tests_must_end_by(
     tmp_path: Path, tests_end_by: float | None
