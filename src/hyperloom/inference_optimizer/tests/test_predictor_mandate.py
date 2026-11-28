@@ -115,7 +115,10 @@ async def test_a_delegate_citing_no_known_mandate_is_refused_rather_than_run_on_
     await _delegate_specialist(coordinator, params, "m2")
 
     assert await coordinator.tasks.by_state("queued") == []
-    assert coordinator.shared_state.policy_denial_streak == {"specialist:unknown_primatune_mandate": 1}
+    denied = [
+        m.payload for m in await coordinator.bus.tail(topic="observation") if m.payload.get("kind") == "policy_denied"
+    ]
+    assert [row["rule"] for row in denied] == ["unknown_primatune_mandate"]
     assert "mandate_consumed_by" not in coordinator.shared_state.specialist_rounds[0]
 
 

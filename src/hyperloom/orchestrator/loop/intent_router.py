@@ -21,11 +21,7 @@ from hyperloom.orchestrator.lever import (
 )
 from hyperloom.inference_optimizer.protocol.intent import Intent, IntentType
 from hyperloom_common.timeutil import format_exc_brief
-from .verdicts import (
-    CriticRuling,
-    collapse_verdict_map,
-    serialize_verdict_advisory,
-)
+from .verdicts import CriticRuling, serialize_verdict_advisory
 from hyperloom_common.coerce import to_int, to_unix
 from ..bus.message_bus import Message
 from ..policy.denial import PolicyDenied
@@ -57,7 +53,7 @@ from .kernel_request import (
 )
 from ._escalate_hint import escalate_hint_denial
 from .message_delivery import publish_send_message
-from .intent_review import patch_verdict_subject, record_critic_review, record_review_outcome, variant_review_rows
+from .intent_review import patch_verdict_subject, record_critic_review, record_review_outcome
 
 # ``Coordinator`` is intentionally NOT imported (avoids a module-level import cycle with coordinator.py); it is held
 # as a back-reference and the annotation below is a deferred string.
@@ -411,29 +407,15 @@ class IntentRouter(CoordinatorCollaborator):
     async def _handle_review_verdict(self, source: str, intent: Intent) -> None:
         """Apply a Critic ``review_verdict`` to its target proposal."""
         target = intent.payload["target_proposal_msg_id"]
+        verdict = intent.payload["verdict"]
         pending = self.state.pending_proposals.get(target)
-        verdict_map = intent.payload.get("verdict_map")
-        single_verdict = intent.payload.get("verdict")
         if pending is None:
             await self.bus.record_observation(
                 "coordinator",
                 "observation",
-                {
-                    "kind": "verdict_for_unknown_proposal",
-                    "target": target,
-                    "verdict": single_verdict or "",
-                    "verdict_map": bool(verdict_map),
-                },
+                {"kind": "verdict_for_unknown_proposal", "target": target, "verdict": verdict},
             )
             return
-        verdict = str(single_verdict or "").strip()
-        approved_variant_names: set[str] | None = None
-        if not verdict and isinstance(verdict_map, dict) and verdict_map:
-            verdict_by_name = {
-                str(name): str((entry or {}).get("verdict") or "").strip() for name, entry in verdict_map.items()
-            }
-            verdict, approved_variant_names = collapse_verdict_map(verdict_by_name)
-            self._log_mixed_verdict_map_collapse(target, verdict, verdict_by_name)
         await self._handle_single_verdict(
             source=source,
             pending=pending,
@@ -441,27 +423,9 @@ class IntentRouter(CoordinatorCollaborator):
                 verdict=verdict,
                 reasoning=str(intent.payload.get("reasoning") or ""),
                 advisory=serialize_verdict_advisory(intent.payload),
-                approved_variant_names=approved_variant_names,
                 payload=intent.payload,
-                variant_verdicts=variant_review_rows(intent.payload),
             ),
         )
-
-    def _log_mixed_verdict_map_collapse(
-        self,
-        target: str,
-        verdict: str,
-        verdict_by_name: dict[str, str],
-    ) -> None:
-        """Log when a mixed map still proceeds, for traceability."""
-        sub_verdicts = list(verdict_by_name.values())
-        if verdict in ("approve", "advise") and any(sv in ("reject", "needs_review") for sv in sub_verdicts):
-            log.warning(
-                "review_verdict collapse: target=%s collapsed to %r (sub_verdicts=%r)",
-                target,
-                verdict,
-                sub_verdicts,
-            )
 
     async def _handle_single_verdict(
         self,
@@ -470,11 +434,9 @@ class IntentRouter(CoordinatorCollaborator):
         pending: Any,
         ruling: CriticRuling,
     ) -> None:
-        """Apply one collapsed verdict: approve/advise materialise, reject may rearm.
+        """Apply one verdict: approve/advise materialise, reject may rearm.
 
         ``ruling.verdict`` is one of approve / advise / reject / needs_review.
-        ``ruling.approved_variant_names`` restricts an explore grid to the named
-        variants; ``None`` keeps the full proposal.
         """
         verdict = ruling.verdict
         self.state.pending_proposals.pop(pending.proposal_msg_id, None)
@@ -497,7 +459,7 @@ class IntentRouter(CoordinatorCollaborator):
         except AttributeError:
             pa_params = {}
         sid_candidate = patch_verdict_subject(pending, pa_params)
-        if sid_candidate and verdict:
+        if sid_candidate:
             try:
                 self.shared_state.record_specialist_patch_verdict(
                     sid_candidate,
@@ -516,7 +478,7 @@ class IntentRouter(CoordinatorCollaborator):
             materialized=verdict in ("approve", "advise"),
             denied=verdict == "reject",
             reauthored=verdict == "needs_review",
-            patch_verdict_key=sid_candidate if verdict else "",
+            patch_verdict_key=sid_candidate,
         )
         with trajectory_span(
             EVENT_PROPOSAL,
@@ -535,7 +497,7 @@ class IntentRouter(CoordinatorCollaborator):
             )
 
     async def _rebroadcast_verdict(self, source: str, pending: Any, ruling: CriticRuling) -> None:
-        """Re-publish the collapsed verdict as a ``review_verdict`` reply to the proposal's author."""
+        """Re-publish the verdict as a ``review_verdict`` reply to the proposal's author."""
         rebroadcast_payload: dict[str, Any] = {
             "target_proposal_msg_id": pending.proposal_msg_id,
             "verdict": ruling.verdict,
@@ -561,13 +523,10 @@ class IntentRouter(CoordinatorCollaborator):
         pa_params: Mapping[str, Any],
         sid_candidate: str,
     ) -> None:
-        """Materialise, deny, or send back a proposal according to its collapsed verdict."""
+        """Materialise, deny, or send back a proposal according to its verdict."""
         verdict = ruling.verdict
         if verdict in ("approve", "advise"):
-            await self._coord.proposals.materialize_approved_proposal(
-                pending,
-                approved_variant_names=ruling.approved_variant_names,
-            )
+            await self._coord.proposals.materialize_approved_proposal(pending)
         elif verdict == "reject" and is_upstream_pr_prescreen(pending.action_name, pending.payload):
             await self._coord.phase_framework.record_critic_denial(pending, ruling.reasoning)
         elif verdict == "reject" and pending.action_name == "integrate_patch" and bool(pa_params.get("enablement")):
@@ -717,7 +676,6 @@ class IntentRouter(CoordinatorCollaborator):
         task = await self._create_delegated_task(request, raw_key)
         if task is None:
             return
-        self.shared_state.reset_policy_denial_streak(action_name)
         # Only once a task exists, so a dispatch that bailed out above leaves the mandate on offer.
         self._consume_primatune_mandate(action_name, params, task.task_id)
         from .proposals import record_config_proposal
@@ -1019,9 +977,8 @@ class IntentRouter(CoordinatorCollaborator):
     ) -> None:
         """Record a PolicyGate denial.
 
-        Publishes a ``policy_denied`` observation and records the denial streak.
-        The streak is a fact for LLM self-correction only: there is no
-        auto-prune and no ``policy_loop`` stop triggered from it.
+        Logs it, publishes a ``policy_denied`` observation to the denied agent
+        and files a denial row on the open phase event.
 
         Args:
             source (str): The agent whose intent was denied.
@@ -1054,14 +1011,6 @@ class IntentRouter(CoordinatorCollaborator):
             )
         )
         resolved_action = action_name or str((intent.payload or {}).get("action_name") or "")
-        # Streak counter is a fact for LLM self-correction only; the system does not auto-prune or stop on it.
-        self.shared_state.record_policy_denial(
-            action_name=resolved_action,
-            rule=str(denied.rule or ""),
-            hint=str(denied.hint or ""),
-            intent_type=intent.type.value,
-            intent_payload=intent.payload,
-        )
         from hyperloom.inference_optimizer.breakdown.recorder import phase_event
         from hyperloom.inference_optimizer.breakdown.recorder.phase_records import PhaseCycle, PhaseDenial
 

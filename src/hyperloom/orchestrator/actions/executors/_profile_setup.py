@@ -34,7 +34,7 @@ from ._benchmark_interpreter import _resolve_probe_python
 
 log = logging.getLogger(__name__)
 
-#: How vLLM's ``--profiler-config`` fields and SGLang's profile variables spell true.
+#: How vLLM's ``--profiler-config`` fields spell true.
 _TRUE = "True"
 
 # Profile-phase capture defaults. Trace size scales with captured decode steps;
@@ -637,11 +637,6 @@ _AGENTX_CAPTURE_SEC = 300.0
 #: 30 s keeps that well inside the 5% of a 900 s replay the AgentX client lets go uncovered; a point that sets
 #: ``capture_timeout_seconds`` gets the window it names.
 _ATOM_AGENTX_CAPTURE_SEC = 30.0
-#: What an annotated SGLang AgentX capture sets: shapes and stacks
-#: in the trace, and the CUDA-graph replays profiled unless the server runs eager.
-_SGLANG_ANNOTATION_ENV = MappingProxyType(
-    dict.fromkeys(("SGLANG_PROFILE_WITH_STACK", "SGLANG_PROFILE_RECORD_SHAPES", "SGLANG_GRAPH_BATCH_CAPTURE"), _TRUE)
-)
 _SGLANG_GRAPH_PROFILE_FLAG = "--enable-profile-cuda-graph"
 _SGLANG_EAGER_FLAG = "--disable-cuda-graph"
 
@@ -685,7 +680,7 @@ def _graph_disabled(user: LaunchDelta, base: BaseLaunch) -> bool:
 
 def _sglang_annotation(user: LaunchDelta, base: BaseLaunch) -> LaunchDelta:
     graph = () if _graph_disabled(user, base) else (_SGLANG_GRAPH_PROFILE_FLAG,)
-    return LaunchDelta(args_add=graph, env_set=_SGLANG_ANNOTATION_ENV)
+    return LaunchDelta(args_add=graph)
 
 
 def _vllm_profiler_config(patched: bool) -> LaunchDelta:

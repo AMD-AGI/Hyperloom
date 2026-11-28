@@ -11,18 +11,20 @@ a test and is published to is proved by the measure package's own tests, and on 
 
 from __future__ import annotations
 
-import json
+import contextlib
+import logging
 import os
 import re
 import stat
 import tempfile
+from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
 
 import pytest
 
 from hyperloom.measure.runner.jit import JIT_CACHE_ENV
-from hyperloom_multibranch.toolbox.jit_store import JIT_STORE_NOTE, REFUSED_LOCAL
+from hyperloom_multibranch.toolbox.jit_store import REFUSED_LOCAL
 from hyperloom_multibranch.toolbox.local_hosted import (
     DEFAULT_JIT_STORE,
     JIT_STORE_ENV,
@@ -165,17 +167,37 @@ def _another_accounts(directory: Path, monkeypatch: pytest.MonkeyPatch) -> None:
 async def _refused_build(tmp_path: Path, **extra: Any) -> str:
     """Why the store of a toolbox built with ``extra`` options was refused. The toolbox is built all the same, inside a
     session a hosted run would start again into the same refusal had it raised: it publishes nothing, its runners are
-    not told the store, even where the runner environment names one, and the session records why."""
+    not told the store, even where the runner environment names one, and the session logs why, once."""
     runner_envs = {JIT_CACHE_ENV: str(tmp_path / "named-by-the-runner-environment")}
-    toolbox, branch_env = await _closing_build(tmp_path, runner_envs=runner_envs, **extra)
+    with _jit_warnings() as warnings:
+        toolbox, branch_env = await _closing_build(tmp_path, runner_envs=runner_envs, **extra)
     assert toolbox.backend._config.jit_store is None, "nothing is published"
     assert JIT_CACHE_ENV not in _runner_env(toolbox) and JIT_CACHE_ENV not in branch_env, "nor read"
-    note = json.loads((tmp_path / "session" / JIT_STORE_NOTE).read_text())
-    assert note["published"] is False
-    assert (
-        note["without"] == REFUSED_LOCAL and "candidates that patch aiter's csrc or hsa are refused" in note["without"]
-    )
-    return str(note["reason"])
+    (warning,) = warnings
+    assert REFUSED_LOCAL in warning and "candidates that patch aiter's csrc or hsa are refused" in warning
+    return warning
+
+
+class _Collect(logging.Handler):
+    def __init__(self) -> None:
+        super().__init__(logging.WARNING)
+        self.messages: list[str] = []
+
+    def emit(self, record: logging.LogRecord) -> None:
+        if "jit cache" in record.getMessage():
+            self.messages.append(record.getMessage())
+
+
+@contextlib.contextmanager
+def _jit_warnings() -> Iterator[list[str]]:
+    """The jit-cache warnings the store check logs while the block runs."""
+    logger = logging.getLogger("hyperloom_multibranch.toolbox.jit_store")
+    handler = _Collect()
+    logger.addHandler(handler)
+    try:
+        yield handler.messages
+    finally:
+        logger.removeHandler(handler)
 
 
 async def test_a_store_that_cannot_be_made_is_refused_and_the_session_refuses_candidates_that_patch_aiters_sources(
@@ -186,12 +208,12 @@ async def test_a_store_that_cannot_be_made_is_refused_and_the_session_refuses_ca
     blocker = tmp_path / "a-file"
     blocker.write_text("not a directory")
 
-    toolbox, _ = await _closing_build(tmp_path, jit_store=blocker / "store")
+    with _jit_warnings() as warnings:
+        toolbox, _ = await _closing_build(tmp_path, jit_store=blocker / "store")
 
     assert toolbox.backend._config.jit_store is None, "nothing is published"
-    note = json.loads((tmp_path / "session" / JIT_STORE_NOTE).read_text())
-    assert f"{blocker / 'store'} cannot be made or checked (NotADirectoryError" in note["reason"]
-    assert note["without"] == REFUSED_LOCAL
+    (warning,) = warnings
+    assert f"{blocker / 'store'} cannot be made or checked (NotADirectoryError" in warning and REFUSED_LOCAL in warning
     assert toolbox._acceptance._aiter_builds_missing == aiter_builds_missing({})
 
 

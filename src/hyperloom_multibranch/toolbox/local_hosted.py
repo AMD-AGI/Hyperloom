@@ -779,7 +779,7 @@ def build_local_toolbox(
 
     directory, cards, tp = Path(session.session_dir), tuple(session.cards), session.tp
     parallel = max_parallel_tests(len(cards), tp)
-    jit_store = session_jit_store(jit_store_root(options), directory, REFUSED_LOCAL)
+    jit_store = session_jit_store(jit_store_root(options), REFUSED_LOCAL)
     jit_root = None if jit_store is None else jit_store.root
     acceptance = _acceptance_with_prompts(acceptance, options, os.environ, spec.model_dir)
     native = native_builds(os.environ, spec.blobs, acceptance.active_image_digest or spec.image_digest)

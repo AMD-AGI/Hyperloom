@@ -18,7 +18,7 @@ import stat
 import subprocess
 import sys
 import zlib
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -33,9 +33,10 @@ from hyperloom.measure.runner.cache_layout import manifest_from_json
 from hyperloom.measure.runner.cache_layout import MANIFEST_NAME, SOURCE_DIR
 from hyperloom.measure.runner.suite_publish import SuitePublishError
 from hyperloom.measure.runner.tests.bootstrap_rig import Rig, make_rig
-from hyperloom.measure.sandboxes import Handover
+from hyperloom.orchestrator.tests._fixtures import MI325X_CARD
 from hyperloom_multibranch.scheduling import hosted_peers
 from hyperloom_multibranch.scheduling.hosted_peers import (
+    RUNNER_CARD_ENV,
     HostedSandboxes,
     PinnedToolboxInputs,
     load_hosted_peers,
@@ -44,10 +45,11 @@ from hyperloom_multibranch.scheduling.hosted_peers import (
 )
 from hyperloom_multibranch.scheduling.budget import MB_CLOSE_GRACE_CAP_SECONDS
 from hyperloom_multibranch.scheduling.layout import SessionLayout
-from hyperloom_multibranch.scheduling.peers import PeerSetup, PeersUnavailable
-from hyperloom_multibranch.scheduling.settings import InferenceXShape, KernelOptimizer, RunSettings, Workload
+from hyperloom_multibranch.scheduling.peers import PeersUnavailable
+from hyperloom_multibranch.scheduling.settings import InferenceXShape, KernelOptimizer, Workload
+from hyperloom_multibranch.scheduling.tests.conftest import RECORDED_MI325X
 from hyperloom_multibranch.toolbox import hosted_toolbox
-from hyperloom_multibranch.toolbox.tests.test_hosted_toolbox import _GRANT, _toolbox
+from hyperloom_multibranch.toolbox.tests.test_hosted_toolbox import _toolbox
 
 WORKLOAD = Workload(
     "/models/Llama-3-8B", "sglang", 2, 16, "bf16", "mi355x", KernelOptimizer.FORGE, InferenceXShape(1024, 512)
@@ -172,6 +174,53 @@ def test_hosted_peers_nobody_names_the_image_of_are_refused_before_anything_is_b
 
     with pytest.raises(PeersUnavailable, match="HYPERLOOM_ACTIVE_IMAGE_REF"):
         load_hosted_peers(WORKLOAD, inputs)  # type: ignore[arg-type]
+
+
+def _no_inputs(layout: object, tp: int) -> object:
+    raise AssertionError("the card is read before any toolbox input")
+
+
+def test_the_runners_card_is_the_one_the_recording_the_app_host_is_given_describes() -> None:
+    assert HostedSandboxes(_no_inputs).card() == MI325X_CARD  # type: ignore[arg-type]
+
+
+def test_an_app_host_given_no_recording_refuses_the_peers_naming_the_variable(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv(RUNNER_CARD_ENV)
+
+    with pytest.raises(PeersUnavailable, match=f"{RUNNER_CARD_ENV} names no recording of `amd-smi static --json`"):
+        HostedSandboxes(_no_inputs).card()  # type: ignore[arg-type]
+
+
+def _recording(tmp_path: Path, text: str) -> str:
+    path = tmp_path / "runner-card.json"
+    path.write_text(text, encoding="utf-8")
+    return str(path)
+
+
+@pytest.mark.parametrize(
+    ("recorded", "said"),
+    [
+        (lambda tmp_path: str(tmp_path / "missing.json"), "No such file"),
+        (lambda tmp_path: _recording(tmp_path, '[{"gpu": 0, "asic": {}}]'), "card 0 reports no arch"),
+        (lambda tmp_path: _recording(tmp_path, json.dumps(_two_kinds())), "the GPUs are not one kind of card"),
+    ],
+    ids=["missing", "incomplete", "two-kinds"],
+)
+def test_a_recording_that_describes_no_one_kind_of_card_refuses_the_peers_saying_why(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, recorded: Callable[[Path], str], said: str
+) -> None:
+    path = recorded(tmp_path)
+    monkeypatch.setenv(RUNNER_CARD_ENV, path)
+
+    with pytest.raises(PeersUnavailable, match=f"{RUNNER_CARD_ENV}={path} describes no one kind of card: .*{said}"):
+        HostedSandboxes(_no_inputs).card()  # type: ignore[arg-type]
+
+
+def _two_kinds() -> dict[str, list[dict[str, object]]]:
+    """The recorded node with its second card's compute units halved, as a partitioned card reports them."""
+    rows = json.loads(RECORDED_MI325X.read_text(encoding="utf-8"))["gpu_data"][:2]
+    rows[1]["asic"]["num_compute_units"] = 152
+    return {"gpu_data": rows}
 
 
 def _origin(path: Path) -> str:
@@ -325,24 +374,41 @@ def test_a_runner_cache_without_the_commit_fails_the_session_before_it_measures(
     assert not (tmp_path / "runner-cache" / ("f" * 40)).exists()
 
 
+@pytest.mark.usefixtures("wheelhouse_index")
+def test_a_later_run_of_other_code_clones_its_own_commit_beside_the_sessions_earlier_clone(
+    rig: Rig, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A sweep run on a closed session executes newer code than the run that measured it."""
+    monkeypatch.setenv(RUNNER_TARGET_ENV, RUNNER_TAG)
+    layout = SessionLayout(tmp_path / "MB-session")
+    earlier = layout.runner_source / ("0" * 40)
+    earlier.mkdir(parents=True)
+
+    inputs = PinnedToolboxInputs(_host(tmp_path, rig.repo, rig.cache.sha), tmp_path / "runner-cache")(layout, 2)
+
+    assert inputs.source_sha == rig.cache.sha
+    assert sorted(path.name for path in layout.runner_source.iterdir()) == sorted([earlier.name, rig.cache.sha])
+
+
 def test_a_clone_put_in_place_by_another_account_starts_no_program_of_its_config(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setenv(RUNNER_TARGET_ENV, RUNNER_TAG)
     layout = SessionLayout(tmp_path / "MB-session")
-    layout.root.mkdir()
-    sha = _origin(layout.runner_source)
+    layout.runner_source.mkdir(parents=True)
+    sha = _origin(tmp_path / "planted")
+    clone = (tmp_path / "planted").rename(layout.runner_source / sha)
     ran, transport = tmp_path / "ran", tmp_path / "transport"
     transport.write_text(f"#!/bin/sh\necho ran >> {ran}\nexit 1\n")
     transport.chmod(0o755)
     # A partial clone whose promisor remote's transport is a program, missing the commit, so the first read fetches.
-    with (layout.runner_source / ".git" / "config").open("a") as config:
+    with (clone / ".git" / "config").open("a") as config:
         config.write(
             f"[core]\n\trepositoryformatversion = 1\n\tsshCommand = {transport}\n"
             '[extensions]\n\tpartialClone = promisor\n[remote "promisor"]\n\turl = ssh://example.invalid/r\n'
             "\tpromisor = true\n"
         )
-    (layout.runner_source / ".git" / "objects" / sha[:2] / sha[2:]).unlink()
+    (clone / ".git" / "objects" / sha[:2] / sha[2:]).unlink()
 
     with pytest.raises(CacheBuildError, match=sha):
         PinnedToolboxInputs(_host(tmp_path, tmp_path / "origin", sha), tmp_path / "runner-cache")(layout, 2)
@@ -358,16 +424,17 @@ def test_an_object_planted_in_the_clone_under_the_id_of_one_of_the_commits_fails
     layout = SessionLayout(tmp_path / "MB-session")
     layout.root.mkdir()
     sha = rig.cache.sha
-    runner_source(layout.runner_source, str(rig.repo), sha)
+    layout.runner_source.mkdir()
+    clone = runner_source(layout.runner_source / sha, str(rig.repo), sha)
     # Another account of the group rewrites the runner's entry point in the clone under the id git named it by.
     shown = subprocess.run(
-        ["git", "-C", str(layout.runner_source), "rev-parse", f"{sha}:src/hyperloom/measure/runner/__main__.py"],
+        ["git", "-C", str(clone), "rev-parse", f"{sha}:src/hyperloom/measure/runner/__main__.py"],
         check=True,
         capture_output=True,
         text=True,
     )
     blob = shown.stdout.strip()
-    loose = layout.runner_source / ".git" / "objects" / blob[:2] / blob[2:]
+    loose = clone / ".git" / "objects" / blob[:2] / blob[2:]
     assert loose.is_file(), "the clone keeps the commit's objects loose"
     planted = b"import os\nos.system('echo planted')\n"
     loose.chmod(0o644)
@@ -461,38 +528,6 @@ def test_a_grant_without_a_run_id_names_its_sandboxes_by_the_session(
     assert inputs.session_id == "MB-session", "a session the run starts again does not reuse a closed one's ids"
 
 
-@pytest.mark.parametrize(("keep", "handover", "parallel"), [(True, Handover(3, 3), 2), (False, None, 3)])
-def test_the_sessions_make_before_break_is_what_the_hosted_toolbox_is_built_with(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, keep: bool, handover: Handover | None, parallel: int
-) -> None:
-    """The operator's switch (``multibranch.make_before_break``, ``RunSettings`` and ``PeerSetup``) is the one the
-    hosted toolbox reads: off, a grant that fits three tests of the session's TP runs three and keeps no sandbox."""
-    given: list[hosted_toolbox.HostedOptions] = []
-
-    def build(inputs: object, blackboard: object, acceptance: object, spec: object, *, options):  # type: ignore[no-untyped-def]
-        given.append(options)
-        # The test's own inputs and grant, and no tables: the options are the session's.
-        built = dataclasses.replace(options, framework_configs="")
-        return _toolbox(None, tmp_path, options=built, grant_limits={**_GRANT, "max_sandboxes": 3, "max_gpus": 3})
-
-    monkeypatch.setattr(hosted_toolbox, "build_hosted_toolbox", build)
-    setup = SimpleNamespace(
-        layout=None,
-        workload=dataclasses.replace(WORKLOAD, tp=1),
-        make_before_break=keep,
-        dev_leases=0,
-        agents=(),
-        test_points=1,
-    )
-
-    toolbox = HostedSandboxes(lambda layout, tp: None).toolbox(setup, None, None, None)  # type: ignore[arg-type]
-
-    [options] = given
-    assert options.make_before_break is keep
-    assert toolbox.backend._config.handover == handover
-    assert toolbox.backend._config.max_parallel_tests == parallel
-
-
 @pytest.mark.parametrize(
     ("dev_leases", "agents", "lends"), [(0, (), False), (1, (), True), (0, ("/agents/a",), True), (2, ("/a",), True)]
 )
@@ -511,7 +546,7 @@ def test_a_session_builds_dev_leases_only_when_it_lends_dev_sandboxes(
 
     monkeypatch.setattr(hosted_toolbox, "build_hosted_toolbox", build)
     setup = SimpleNamespace(
-        layout=None, workload=dataclasses.replace(WORKLOAD, tp=2), make_before_break=True, dev_leases=dev_leases,
+        layout=None, workload=dataclasses.replace(WORKLOAD, tp=2), dev_leases=dev_leases,
         agents=agents, test_points=1,
     )  # fmt: skip
     sandboxes = HostedSandboxes(lambda layout, tp: None)
@@ -531,10 +566,5 @@ def test_a_session_builds_dev_leases_only_when_it_lends_dev_sandboxes(
         assert toolbox.leases is None
 
 
-def test_make_before_break_is_on_unless_the_operator_turns_it_off() -> None:
-    fields = {field.name: field.default for field in dataclasses.fields(RunSettings)}
-    assert fields["make_before_break"] is True
-    assert {field.name: field.default for field in dataclasses.fields(PeerSetup)}["make_before_break"] is True
-    assert hosted_toolbox.HostedOptions().make_before_break is True
-    assert hosted_toolbox.HostedOptions().dev_leases is True, "a toolbox built by hand lends as before"
-    assert not hasattr(hosted_toolbox.HostedOptions(), "handover_timeout_sec"), "no option without a reader"
+def test_a_toolbox_built_by_hand_lends_dev_sandboxes() -> None:
+    assert hosted_toolbox.HostedOptions().dev_leases is True

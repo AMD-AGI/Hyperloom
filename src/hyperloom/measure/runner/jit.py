@@ -16,8 +16,6 @@ local toolbox); a hosted ``measurement`` template must not set it. Without eithe
 
 from __future__ import annotations
 
-import hashlib
-import logging
 import os
 import shutil
 from collections.abc import Callable, Iterable, Mapping
@@ -28,9 +26,7 @@ from pathlib import Path, PurePosixPath
 import yaml
 
 from hyperloom.common.aiter_layout import image_aiter_meta
-from hyperloom_common.gpu_identity import gfx_arch_for_gpu_type
 from hyperloom.common.outside_facts import AITER_META_DIR_ENV, AITER_META_WHEEL_DIR
-from hyperloom.measure.docs import canonical_json
 from hyperloom.measure.farm import (
     Farm,
     FarmError,
@@ -43,7 +39,6 @@ from hyperloom.measure.jit.builds import BuildLog, scan_builds, server_logs
 from hyperloom.measure.jit.key import (
     AITER_PACKAGE,
     REBUILD_VARIABLE,
-    BuildSurface,
     Machine,
     aiter_key,
     build_surface,
@@ -85,7 +80,6 @@ from hyperloom.orchestrator.actions.executors import is_kernel_shape_tool, is_pa
 __all__ = [
     "FRAMEWORK_PYTHON_ENV",
     "JIT_CACHE_ENV",
-    "KEY_INPUTS_NOTE",
     "STAGING_DIR",
     "ColdStart",
     "Surroundings",
@@ -95,12 +89,7 @@ __all__ = [
     "interpreter_identity",
 ]
 
-log = logging.getLogger(__name__)
-
 JIT_CACHE_ENV = "HYPERLOOM_JIT_CACHE"
-_SHORT = 12
-#: How the note of what the aiter key is made of starts: it is for the manifest and the log, not the status message.
-KEY_INPUTS_NOTE = "jit cache: aiter key "
 STAGING_DIR = "jit-cache"
 _TABLE_PREFIX = "AITER_CONFIG_"
 FRAMEWORK_PYTHON_ENV = "HYPERLOOM_FRAMEWORK_PYTHON"
@@ -160,8 +149,10 @@ class _ModuleBuild:
 
 
 def card_arch(spec: MeasurementSpec, gpu: GpuFacts | None) -> str | None:
-    """The architecture of the card the test runs on: the one the card reports, else the sheet's GPU type's."""
-    return (gpu.gfx_arch if gpu else None) or gfx_arch_for_gpu_type(spec.hardware.gpu_type)
+    """The architecture of the card the test runs on: the one the card reports, else that of the sheet's card."""
+    if gpu is not None:
+        return gpu.card.gfx
+    return spec.hardware.card.gfx if spec.hardware.card is not None else None
 
 
 def build_session(
@@ -347,7 +338,6 @@ def _aiter_plans(inputs: _Inputs, kinds: list[CacheKind]) -> list[KindPlan] | st
         return f"{REBUILD_VARIABLE} is set, so the test rebuilds what the cache would give"
     tree = _tree(inputs, names)
     key = aiter_key(inputs.machine, tree.identity, surface)
-    _record_key_inputs(inputs, key, tree, surface)
     uncovered = tree.uncovered or _directory_attachments(inputs.spec)
     read_only = "the test carries patched code that the key of aiter's caches does not cover" if uncovered else None
     touched = _touched(inputs, base, effective)
@@ -496,28 +486,6 @@ class _Tree:
 
     identity: str
     uncovered: list[str]
-    #: The parts the identity is made of, short: the overlay's digest and size, the runtime manifest, each framework patch.
-    parts: str = ""
-
-
-def _short(value: str) -> str:
-    """``value`` as the first characters of its sha256: comparable between tests, and never the value itself."""
-    return hashlib.sha256(value.encode(_UTF8, errors="replace")).hexdigest()[:_SHORT]
-
-
-def _record_key_inputs(inputs: _Inputs, key: str, tree: _Tree, surface: BuildSurface) -> None:
-    """Leave what the aiter key is made of in the notes and the runner's log, one line, so the keys of two tests that should
-    match can be told apart. A variable or a table is given as its name and the short hash of its value, never the value."""
-    machine = inputs.machine
-    tables = ",".join(f"{name}={_short(value)}" for name, value in sorted(surface.tables.items()))
-    env = ",".join(f"{name}={_short(value)}" for name, value in sorted(surface.environment.items()))
-    line = (
-        f"{KEY_INPUTS_NOTE}{key[:_SHORT]} inputs: machine=image:{machine.image_digest},gfx:{machine.gfx_arch},"
-        f"gpu_type:{machine.gpu_type},partition:{machine.partition_mode} tree={tree.identity[:_SHORT]}({tree.parts}) "
-        f"tables={{{tables}}} env={{{env}}}"
-    )
-    inputs.around.notes.append(line)
-    log.warning("%s", line)
 
 
 def _tree(inputs: _Inputs, names: frozenset[str]) -> _Tree:
@@ -529,10 +497,7 @@ def _tree(inputs: _Inputs, names: frozenset[str]) -> _Tree:
     runtime = environment.runtime.manifest_sha256 if environment.runtime is not None else None
     others = [root for root in environment.roots if root.import_name not in (AITER_PACKAGE, AITER_META_WHEEL_DIR)]
     touching, uncovered = _framework_patches(others, names, inputs.around.read_blob)
-    patches = ",".join(sorted(f"{package}/{path}@{blob[:_SHORT]}" for package, path, blob in touching))
-    overlaid = _short(canonical_json(sorted(list(entry) for entry in overlay)))
-    parts = f"overlay:{overlaid}/{len(overlay)},runtime:{(runtime or '-')[:_SHORT]},framework:[{patches}]"
-    return _Tree(tree_identity(overlay, runtime, touching), uncovered, parts)
+    return _Tree(tree_identity(overlay, runtime, touching), uncovered)
 
 
 def _framework_patches(

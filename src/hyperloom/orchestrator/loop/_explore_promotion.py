@@ -165,10 +165,6 @@ class ExplorePromotionMixin:
             accepted.setdefault("accepted_at_round", round_id)
             accepted.setdefault("provenance", winner.get("provenance") or "llm_direct")
             self.shared_state.record_explore_accepted(accepted)
-            # A specialist-provenance KEEP zeroes that domain's rounds_since_last_keep counter.
-            provenance = str(accepted.get("provenance") or "")
-            if provenance.startswith("specialist:"):
-                self.shared_state.note_domain_keep(provenance.split(":", 1)[1].strip())
 
     def _accept_explore_winners(
         self,

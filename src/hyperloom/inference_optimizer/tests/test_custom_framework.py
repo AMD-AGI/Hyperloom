@@ -98,6 +98,21 @@ class TestEntrypointAndCheckout:
         fr.apply_scriptable_runtime_defaults(bench, envs, gpu_type="mi355x", explicit_benchmark_script=False)
         assert "benchmark_script" not in bench
 
+    def test_a_machine_nothing_names_picks_no_board_suffixed_script(self, tmp_path, monkeypatch):
+        from hyperloom.orchestrator.actions.executors.workload import _framework_runtime as fr
+
+        scripts = tmp_path / "scripts"
+        scripts.mkdir()
+        (scripts / "custom_mi355x.sh").write_text("#!/bin/sh\n")
+        (scripts / "other.sh").write_text("#!/bin/sh\n")
+        monkeypatch.setenv("HYPERLOOM_BYPASS_SCRIPTS_DIR", str(scripts))
+        monkeypatch.delenv("GPU_TYPE", raising=False)
+        monkeypatch.delenv("RUNNER_TYPE", raising=False)
+
+        bench, envs = self._bench(), {}
+        fr.apply_scriptable_runtime_defaults(bench, envs, gpu_type=None, explicit_benchmark_script=False)
+        assert "benchmark_script" not in bench
+
     def test_an_explicit_script_is_never_overwritten(self, tmp_path, monkeypatch):
         from hyperloom.orchestrator.actions.executors.workload import _framework_runtime as fr
 

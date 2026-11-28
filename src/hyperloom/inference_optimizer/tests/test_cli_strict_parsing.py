@@ -105,3 +105,9 @@ def test_rejection_message_keeps_a_typo_readable(capsys):
 def test_redaction_helper_is_shared_with_the_parser():
     """The parser reuses the same helper the CLI logs with, not a second copy."""
     assert _redact_unknown_args(["--api-key", "sk-live"]) == "--api-key ***"
+
+
+def test_the_profile_abbreviation_resolves_to_profile_osl():
+    """No flag is spelled ``--profile``, so argparse reads it as the prefix of ``--profile-osl``."""
+    assert _parse("--profile", "1024").profile_osl == 1024
+    assert _parse("--profile-osl", "128").profile_osl == 128

@@ -99,9 +99,15 @@ _SERVER = textwrap.dedent(
                 trace_dir = os.environ["SGLANG_TORCH_PROFILER_DIR"]
                 with open(os.path.join(trace_dir, "rank0.trace.json.gz"), "w") as trace:
                     trace.write("trace")
-            refused = os.environ.get("FAKE_PROFILE_REFUSED") == "1"
             known = self.path in ("/start_profile", "/stop_profile")
-            self.send_response(500 if refused else 200 if known else 404)
+            status = 500 if os.environ.get("FAKE_PROFILE_REFUSED") == "1" else 200 if known else 404
+            # A newer SGLang's admin_force: 403 without an admin key, 401 without its bearer token. --admin-api-key wins
+            # over the variable.
+            flag = "--admin-api-key"
+            key = sys.argv[sys.argv.index(flag) + 1] if flag in sys.argv else os.environ.get("SGLANG_ADMIN_API_KEY")
+            if known and os.environ.get("FAKE_PROFILE_ADMIN_FORCE") == "1":
+                status = 403 if not key else 401 if self.headers.get("Authorization") != "Bearer " + key else status
+            self.send_response(status)
             self.end_headers()
 
         def log_message(self, *args):
@@ -535,26 +541,45 @@ def test_a_fixed_profile_round_opens_its_window_after_the_warmup_and_closes_it_a
     assert capture["error"] is None and profile.running_requests_in_window is None
 
 
-def test_a_fixed_profile_window_the_server_refuses_leaves_no_trace_and_the_round_completes(rig, monkeypatch):
-    monkeypatch.setenv("FAKE_PROFILE_REFUSED", "1")
-    config = rig.config("r1", profile=_FIXED_WINDOW)
-    config = replace(
-        config, server=replace(config.server, env_inherit=(*config.server.env_inherit, "FAKE_PROFILE_REFUSED"))
-    )
+def _serving(config: SuiteConfig, monkeypatch: pytest.MonkeyPatch, **env: str) -> SuiteConfig:
+    """``config`` with its server seeing ``env``."""
+    for name, value in env.items():
+        monkeypatch.setenv(name, value)
+    return replace(config, server=replace(config.server, env_inherit=(*config.server.env_inherit, *env)))
+
+
+def test_a_fixed_profile_window_the_server_refuses_ends_the_round_before_the_measured_pass(rig, monkeypatch):
+    config = _serving(rig.config("r1", profile=_FIXED_WINDOW), monkeypatch, FAKE_PROFILE_REFUSED="1")
+
+    result = run.run_round(config)
+
+    report, layout = result.report, result.layout
+    assert (report.run_status, report.failed_step) == (RunStatus.FAILED, FailedStep.PROFILE_REFUSED)
+    assert report.failure_detail == "/start_profile: HTTP Error 500: Internal Server Error"
+    assert [json.loads(line).get("path") for line in rig.calls.read_text().splitlines()] == [None, "/start_profile"]
+    assert Phase.PROFILE_OPEN.value not in _marks(layout)
+    assert report.profile is not None and not report.profile.has_step_traces and report.profile.trace_dirs == ()
+    capture = json.loads(layout.profile_capture.read_text())
+    assert capture["window_open_unix"] is None and capture["error"] == report.failure_detail
+
+
+@pytest.mark.parametrize("args", [(), ("--admin-api-key", "operator-key")])
+def test_a_profile_round_opens_the_window_of_an_sglang_that_gates_its_profiler_behind_an_admin_key(
+    rig, monkeypatch, args
+):
+    """A newer SGLang answers /start_profile with 403 unless its server holds an admin key, and 401 without it."""
+    config = _serving(rig.config("r1", profile=_FIXED_WINDOW), monkeypatch, FAKE_PROFILE_ADMIN_FORCE="1")
+    user = config.server.user
+    config = replace(config, server=replace(config.server, user=replace(user, args_add=(*user.args_add, *args))))
 
     result = run.run_round(config)
 
     report, layout = result.report, result.layout
     assert report.run_status is RunStatus.COMPLETED, report.failure_detail
-    assert [json.loads(line).get("path") for line in rig.calls.read_text().splitlines()] == [
-        None,
-        "/start_profile",
-        None,
-    ]
-    assert Phase.PROFILE_OPEN.value not in _marks(layout)
-    assert report.profile is not None and not report.profile.has_step_traces and report.profile.trace_dirs == ()
-    capture = json.loads(layout.profile_capture.read_text())
-    assert capture["window_open_unix"] is None and "/start_profile" in capture["error"]
+    assert report.profile is not None and report.profile.has_step_traces
+    assert json.loads(layout.profile_capture.read_text())["error"] is None
+    for record in (layout.launch, layout.config, layout.report):
+        assert "SGLANG_ADMIN_API_KEY" not in record.read_text()
 
 
 def _agentx_config(rig, run_id: str, workload: AgentxWorkload, profile: ProfileConfig) -> SuiteConfig:
@@ -594,6 +619,22 @@ def test_an_agentx_profile_round_replays_and_opens_its_window_from_the_first_pro
     profile = report.profile
     assert profile is not None and profile.has_step_traces and profile.running_requests_in_window == 8
     assert profile.window_open_unix == capture["window_open_unix"]
+
+
+def test_an_agentx_profile_window_the_server_refuses_ends_the_replay_at_once(rig, monkeypatch):
+    window = ProfileConfig(enabled=True, agentx_open_after_sec=0.2, agentx_duration_sec=0.4)
+    config = _agentx_config(rig, "r1", replace(_AGENTX, warmup_seed=_AGENTX.seed), window)
+    config = _serving(config, monkeypatch, FAKE_PROFILE_REFUSED="1")
+
+    result = run.run_round(config)
+
+    report, layout = result.report, result.layout
+    assert (report.run_status, report.failed_step) == (RunStatus.FAILED, FailedStep.PROFILE_REFUSED)
+    assert report.failure_detail == "/start_profile: HTTP Error 500: Internal Server Error"
+    calls = [json.loads(line) for line in rig.calls.read_text().splitlines()]
+    assert [call["path"] for call in calls if isinstance(call, dict)] == ["/start_profile"]
+    assert report.agentx is None
+    assert not layout.aiperf_request_export.exists(), "the replay was stopped, not run out"
 
 
 def test_an_agentx_window_longer_than_the_replay_closes_when_the_profiling_requests_end(rig):

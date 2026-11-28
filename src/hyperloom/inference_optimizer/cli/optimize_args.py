@@ -8,8 +8,8 @@ from __future__ import annotations
 import argparse
 
 from hyperloom.common import predictor_config
+from hyperloom.common.concurrencies import parse_concurrencies
 from hyperloom.common.workload_defaults import DEFAULT_PRECISION
-from hyperloom_common.gpu_identity import AMD_GPU_BOARDS
 
 from .. import framework_registry
 from .backends import CRITIC_PROTOCOL_CHOICES
@@ -21,15 +21,10 @@ def add_gpu_partition_arguments(opt: argparse.ArgumentParser) -> None:
     opt.add_argument(
         "--gpu-type",
         type=str.lower,
-        # Sorted for a stable --help listing, and derived so a board added to the board table is accepted here
-        # without a second edit.
-        choices=sorted(AMD_GPU_BOARDS),
         default=None,
-        help="Hint for the real target GPU. The rocm-smi probe always "
-        "wins when both are present and disagree; a WARN is "
-        "emitted to stderr so the operator sees the typo. Used "
-        "verbatim only when the probe fails (CPU sandbox / no "
-        "rocm-smi).",
+        help="The name this session's results are filed under (recipes, KB rows, reports), e.g. mi355x, for a "
+        "card that reports no model name or cannot be read. A card that names its model is filed under that "
+        "name, and a WARN is printed when the two differ.",
     )
     opt.add_argument(
         "--compute-partition-mode",
@@ -123,6 +118,8 @@ def add_framework_arguments(opt: argparse.ArgumentParser) -> None:
 
 def add_cluster_arguments(opt: argparse.ArgumentParser) -> None:
     """Add the node-count and multi-node backend flags of ``optimize``."""
+    from ..multi_node.pd_session import SSH_BACKENDS
+
     opt.add_argument(
         "--nodes",
         type=int,
@@ -137,12 +134,14 @@ def add_cluster_arguments(opt: argparse.ArgumentParser) -> None:
     )
     opt.add_argument(
         "--mn-backend",
-        choices=("rayjob", "infera"),
+        choices=("rayjob", *SSH_BACKENDS),
         default=None,
         help="Multi-node backend when --nodes>=2: 'rayjob' (default, Ray "
-        "head+workers) or 'infera' (idle InferaDeployment + SSH control "
-        "plane). Defaults to rayjob when omitted. Single-node runs ignore "
-        "this flag.",
+        "head+workers), 'infera' (idle InferaDeployment + SSH control "
+        "plane), or 'atomesh' / 'sglangrouter' (a PD-disaggregated cluster "
+        "handed over as $HYPERLOOM_MN_NODE_LIST, launched over SSH). Defaults "
+        "to the node list's frontend, else rayjob, when omitted. Single-node "
+        "runs ignore this flag.",
     )
     opt.add_argument(
         "--gpus-per-node",
@@ -648,19 +647,11 @@ def add_conc_sweep_arguments(opt: argparse.ArgumentParser) -> None:
     opt.add_argument(
         "--conc-sweep-concs",
         dest="conc_sweep_concs",
-        type=_concurrencies,
+        type=parse_concurrencies,
         default=(),
-        help="Comma-separated concurrencies of the conc sweep for a base no InferenceX recipe gave "
-        "(a --reference-script); ignored for one that did. The session's --conc is always among them.",
+        help="Comma-separated concurrencies of the conc sweep, in place of those the base's InferenceX recipe "
+        "publishes; needed for a base no recipe gave (a --reference-script). The session's --conc is always among them.",
     )
-
-
-def _concurrencies(value: str) -> tuple[int, ...]:
-    """``C1,C2,...`` as the distinct concurrencies it names, ascending; each must be positive."""
-    concs = tuple(sorted({int(item) for item in value.split(",")}))
-    if concs[0] < 1:
-        raise argparse.ArgumentTypeError(f"concurrencies must be positive, got {value}")
-    return concs
 
 
 def add_plateau_arguments(opt: argparse.ArgumentParser) -> None:

@@ -10,8 +10,7 @@ prunes it (:mod:`hyperloom.measure.jit.prune`) as the session starts.
 
 A store the check refuses, or one that cannot be made or checked, does not stop the session (both toolboxes are built
 inside it, where a hosted run that raises is started again into the same refusal): it runs without publishing, logs one
-warning naming the store, why, and what it does without it (:data:`REFUSED_HOSTED`, :data:`REFUSED_LOCAL`), and records
-the same in :data:`JIT_STORE_NOTE` of the session directory.
+warning naming the store, why, and what it does without it (:data:`REFUSED_HOSTED`, :data:`REFUSED_LOCAL`).
 """
 
 from __future__ import annotations
@@ -25,12 +24,10 @@ from pathlib import Path
 from hyperloom.measure.jit.prune import prune_logged
 from hyperloom.measure.jit.store import DirJitStore
 from hyperloom_common.fs_utils import is_private_dir
-from hyperloom_common.io import SHARED, atomic_write_json
 from hyperloom_multibranch.toolbox.build_preflight import changeable_by_others
 
 __all__ = [
     "JIT_STORE_ENV",
-    "JIT_STORE_NOTE",
     "REFUSED_HOSTED",
     "REFUSED_LOCAL",
     "JitStoreNotPrivate",
@@ -41,15 +38,13 @@ __all__ = [
 
 #: The host environment variable that names the shared compiled-code cache when the toolbox's options do not.
 JIT_STORE_ENV = "HYPERLOOM_JIT_STORE"
-#: The file of the session directory that says the compiled-code cache was refused, and why.
-JIT_STORE_NOTE = "jit_store.json"
 
-#: What a hosted session does without a refused store, said in its warning and note.
+#: What a hosted session does without a refused store, said in its warning.
 REFUSED_HOSTED = (
     "this host neither serves it to the runners nor publishes to it: every test builds cold, and a candidate that "
     "patches aiter's csrc or hsa is refused by its runner"
 )
-#: What a local session does without a refused store, said in its warning and note.
+#: What a local session does without a refused store, said in its warning.
 REFUSED_LOCAL = (
     "the runners are not told it and nothing is published, so no patched aiter source can be built: candidates that "
     "patch aiter's csrc or hsa are refused for the whole session"
@@ -100,14 +95,13 @@ def private_jit_store(root: Path) -> Path:
     return root
 
 
-def session_jit_store(root: Path, session_dir: Path, without: str) -> DirJitStore | None:
+def session_jit_store(root: Path, without: str) -> DirJitStore | None:
     """The store at ``root`` a session publishes to, checked (:func:`private_jit_store`) and pruned of what no test has
     used for long; a prune that fails is logged and the session goes on.
 
     ``None`` when the check refuses it or it cannot be made or checked (an :class:`OSError`): the session runs without
-    publishing, and says so once in the log and in :data:`JIT_STORE_NOTE` of ``session_dir``, with ``without``, what
-    this session does without it (:data:`REFUSED_HOSTED`, :data:`REFUSED_LOCAL`; see the module). Nothing was pruned
-    then.
+    publishing, and says so once in the log, with ``without``, what this session does without it
+    (:data:`REFUSED_HOSTED`, :data:`REFUSED_LOCAL`; see the module). Nothing was pruned then.
     """
     try:
         store = DirJitStore(private_jit_store(root))
@@ -121,13 +115,4 @@ def session_jit_store(root: Path, session_dir: Path, without: str) -> DirJitStor
         prune_logged(store)
         return store
     log.warning("jit cache: the session runs without the compiled-code cache %s (%s): %s", root, without, reason)
-    _note_refused(root, session_dir, reason, without)
     return None
-
-
-def _note_refused(root: Path, session_dir: Path, reason: str, without: str) -> None:
-    note = {"store": str(root), "published": False, "reason": reason, "without": without}
-    try:
-        atomic_write_json(session_dir / JIT_STORE_NOTE, note, options=SHARED)
-    except OSError as exc:
-        log.warning("jit cache: %s was not written (%s)", session_dir / JIT_STORE_NOTE, type(exc).__name__)

@@ -470,9 +470,7 @@ record counts as unmeasured. So does a round whose energy is not valid, such as
 one in which a configured card had no power reading (a 0 W or negative socket
 power, which no working sensor reports, reads as none): such cards are listed as
 `unread_gpus`, since a card missing from the readings would drop out of the
-total and escape its own limit. A GEAK replay boots its own server once per
-replica, so its phases are read from the server logs the replay writes, with
-the same markers, and each new log counts as a fresh boot.
+total and escape its own limit.
 
 The budgets are on average draw at the deployed cap, the shape of a
 power-provisioned rack where cards keep their full cap for headroom: the total
@@ -648,8 +646,8 @@ are:
 - `roofline`
 - `profile`
 
-`kernel_agent` is Coordinator-internal; PolicyGate rejects it with
-`rule="coordinator_managed_action"` if an LLM proposes it.
+`kernel_agent` is Coordinator-internal; admission rejects it with
+`rule="phase_incompatible"` if an LLM proposes it.
 
 Within the kernel-agent request channel, the handler dispatches request kinds
 such as `trace_analyze` and `integrate`
@@ -709,8 +707,8 @@ what an earlier turn happened to remember.
 - **Context tools**: A read-only MCP surface lets the agent pull what the
   projection leaves out — finished outcomes (`get_recent_outcomes`),
   a mid-turn re-read of in-flight work (`get_running_tasks`), failure packets (`get_failure` /
-  `get_variant_failures`), reference docs (`read_reference`), the raw
-  `analysis.md` (`show_analysis_md`), denial history (`why_denied`) — plus
+  `get_variant_failures`), reference docs (`read_reference`) and the raw
+  `analysis.md` (`show_analysis_md`).
   Transports without MCP tools get the projection only.
 - **Resume**: On resume the projection is rebuilt from
   `orchestration_memory` plus the authoritative `SharedState` facts —

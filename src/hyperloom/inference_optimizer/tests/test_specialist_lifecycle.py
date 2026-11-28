@@ -15,7 +15,6 @@ import pytest
 
 from hyperloom.orchestrator.knowledge.knowledge_plane import KnowledgePlane
 from hyperloom.orchestrator.policy.gate import SPECIALIST_FROM_AGENT_PREFIX
-from hyperloom.orchestrator.specialists.dispatch import SpecialistDispatchCollaborator
 from hyperloom.orchestrator.state.shared_state import SharedState
 from ._dispatch_helpers import pump_until_settled
 from .conftest import use_fake_specialist_cli
@@ -375,227 +374,13 @@ async def test_dispatcher_hook_calls_bookkeeping_on_specialist_task(
     assert any(workspace.iterdir()), "specialist workspace should be non-empty"
 
 
-# 7. Point 2 — stalled-domain hard-trigger
-@pytest.fixture
-def force_coord(tmp_path: Path, monkeypatch):
-    """Coordinator stand-in with a real SharedState + mocked handle_intent."""
-    from hyperloom.orchestrator.loop.coordinator import Coordinator
-    from hyperloom.orchestrator.state.shared_state import SharedState
-
-    c = Coordinator.__new__(Coordinator)
-    c.session_dir = tmp_path
-    c.shared_state = SharedState()
-    c.shared_state.phase = "FRAMEWORK_AGENT"
-    source_root = tmp_path / "framework"
-    (source_root / ".git").mkdir(parents=True)
-    c.shared_state.framework_repo_path = str(source_root)
-    c.tasks = SimpleNamespace(
-        find_by_idempotency_key=AsyncMock(return_value=None),
-        queued=AsyncMock(return_value=[]),
-        running=AsyncMock(return_value=[]),
-    )
-    # The real warmup stamps the session's framework onto every dispatch.
-    monkeypatch.setattr(
-        SpecialistDispatchCollaborator,
-        "warm_specialist_params",
-        AsyncMock(side_effect=lambda params: params.setdefault("framework", "sglang")),
-    )
-    # The stand-in admits; the admission gates are driven in test_stalled_domain_force_admission.py.
-    c.dispatcher.admission_denial_for_action = lambda *_args, **_kwargs: None  # type: ignore[method-assign]
-    c.router.handle_intent = AsyncMock()  # type: ignore[assignment]
-    return c
-
-
-@pytest.mark.asyncio
-async def test_force_stalled_domain_dispatches_when_gap_pending(force_coord):
-    state = force_coord.shared_state
-    # serving_specialist (anchor=framework) idles past threshold.
-    for _ in range(10):
-        state.bump_domain_round_counters()
-    state.upsert_gap(
-        {
-            "canonical_id": "gap.framework.scheduler.s1",
-            "domain_hint": "serving_specialist",
-            "severity": "high",
-        }
-    )
-
-    await force_coord.specialist_dispatch.maybe_force_stalled_domain_specialist()
-
-    force_coord.router.handle_intent.assert_awaited_once()
-    src, intent = force_coord.router.handle_intent.call_args.args
-    assert src == "orchestration"
-    params = intent.payload["params"]
-    assert params["domain"] == "serving_specialist"
-    assert params["gap_canonical_id"] == "gap.framework.scheduler.s1"
-    assert params["scope"] == "domain"
-    assert "forced-stalled-framework" in intent.payload["idempotency_key"]
-    # Cycle 0 → no cycle suffix.
-    assert not intent.payload["idempotency_key"].endswith("-c0")
-
-
-@pytest.mark.asyncio
-async def test_force_stalled_idempotency_key_is_cycle_scoped(force_coord):
-    # In a later macro-cycle the forced-specialist key carries the cycle suffix so it does not dedup-match the prior
-    # cycle's task.
-    state = force_coord.shared_state
-    state.macro_cycle = 2
-    for _ in range(10):
-        state.bump_domain_round_counters()
-    state.upsert_gap(
-        {
-            "canonical_id": "gap.framework.scheduler.s1",
-            "domain_hint": "serving_specialist",
-            "severity": "high",
-        }
-    )
-
-    await force_coord.specialist_dispatch.maybe_force_stalled_domain_specialist()
-
-    _, intent = force_coord.router.handle_intent.call_args.args
-    assert intent.payload["idempotency_key"].endswith("-c2")
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize("task_state", ["queued", "running", "failed", "succeeded", "cancelled"])
-async def test_force_stalled_domain_does_not_resubmit_existing_round(force_coord, task_state):
-    state = force_coord.shared_state
-    for _ in range(10):
-        state.bump_domain_round_counters()
-    state.upsert_gap(
-        {
-            "canonical_id": "gap.framework.scheduler.s1",
-            "domain_hint": "serving_specialist",
-            "severity": "high",
-        }
-    )
-    force_coord.tasks.find_by_idempotency_key.return_value = SimpleNamespace(state=task_state)
-
-    await force_coord.specialist_dispatch.maybe_force_stalled_domain_specialist()
-
-    force_coord.router.handle_intent.assert_not_awaited()
-    force_coord.tasks.find_by_idempotency_key.assert_awaited_once_with("forced-stalled-framework-round0")
-
-
-@pytest.mark.asyncio
-async def test_force_stalled_source_patch_without_git_root_is_refused_and_recorded_once(force_coord):
-    state = force_coord.shared_state
-    state.framework_repo_path = ""
-    for _ in range(10):
-        state.bump_domain_round_counters()
-    state.upsert_gap(
-        {
-            "canonical_id": "gap.framework.scheduler.s1",
-            "domain_hint": "serving_specialist",
-            "severity": "high",
-        }
-    )
-
-    await force_coord.specialist_dispatch.maybe_force_stalled_domain_specialist()
-    await force_coord.specialist_dispatch.maybe_force_stalled_domain_specialist()
-
-    force_coord.router.handle_intent.assert_not_awaited()
-    failures = [
-        (row["action"], row["task_id"], row["error_class"], row["error_excerpt"]) for row in state.last_action_failures
-    ]
-    assert failures == [
-        (
-            "specialist",
-            "forced-stalled-framework-round0",
-            "no_git_framework_source_root",
-            "no_git_framework_source_root",
-        )
-    ]
-
-
-async def test_force_stalled_skips_a_domain_with_a_specialist_in_flight(force_coord):
-    state = force_coord.shared_state
-    for _ in range(10):
-        state.bump_domain_round_counters()
-    state.upsert_gap(
-        {"canonical_id": "gap.framework.scheduler.s1", "domain_hint": "serving_specialist", "severity": "high"}
-    )
-    force_coord.tasks.running.return_value = [
-        SimpleNamespace(kind="specialist", params={"domain": "serving_specialist"})
-    ]
-
-    await force_coord.specialist_dispatch.maybe_force_stalled_domain_specialist()
-
-    force_coord.router.handle_intent.assert_not_awaited()
-
-
-@pytest.mark.asyncio
-async def test_force_stalled_research_specialist_needs_no_source_root(force_coord):
-    state = force_coord.shared_state
-    state.framework_repo_path = ""
-    state.stalled_domains = lambda **_kwargs: ["pr_intelligence"]
-    state.best_gap_for_anchor = lambda _anchor: "gap.framework.discovery.s1"
-
-    await force_coord.specialist_dispatch.maybe_force_stalled_domain_specialist()
-
-    force_coord.router.handle_intent.assert_awaited_once()
-    _, intent = force_coord.router.handle_intent.call_args.args
-    assert intent.payload["params"]["domain"] == "candidate_discovery_specialist"
-
-
-@pytest.mark.asyncio
-async def test_force_stalled_domain_noop_without_pending_gap(force_coord):
-    state = force_coord.shared_state
-    for _ in range(10):
-        state.bump_domain_round_counters()
-    # No gap in the ledger -> nothing to force even though counters are high.
-    await force_coord.specialist_dispatch.maybe_force_stalled_domain_specialist()
-    force_coord.router.handle_intent.assert_not_awaited()
-
-
-@pytest.mark.asyncio
-async def test_force_stalled_domain_noop_outside_explore(force_coord):
-    state = force_coord.shared_state
-    state.phase = "KERNEL"
-    for _ in range(10):
-        state.bump_domain_round_counters()
-    state.upsert_gap(
-        {
-            "canonical_id": "gap.x",
-            "domain_hint": "serving_specialist",
-            "severity": "high",
-        }
-    )
-    await force_coord.specialist_dispatch.maybe_force_stalled_domain_specialist()
-    force_coord.router.handle_intent.assert_not_awaited()
-
-
 # 8. SharedState.save failures around the specialist bookkeeping
-def _stall_serving_domain(state) -> None:
-    for _ in range(10):
-        state.bump_domain_round_counters()
-    state.upsert_gap(
-        {"canonical_id": "gap.framework.scheduler.s1", "domain_hint": "serving_specialist", "severity": "high"}
-    )
-
-
-def _record_result_site(coord, _force_coord):
+async def _record_task_result(coord) -> None:
     task = _StubTask(task_id="task-1", params={})
     coord.tasks.register(task)
-
-    def run():
-        return coord.specialist_dispatch.record_specialist_result(
-            task=task, done_payload=_done_payload(), source=f"{SPECIALIST_FROM_AGENT_PREFIX}task-1"
-        )
-
-    return coord.shared_state, run, lambda: [r["round_id"] for r in coord.shared_state.specialist_rounds] == ["task-1"]
-
-
-def _force_dispatch_site(_coord, force_coord):
-    _stall_serving_domain(force_coord.shared_state)
-    run = force_coord.specialist_dispatch.maybe_force_stalled_domain_specialist
-    return force_coord.shared_state, run, lambda: force_coord.router.handle_intent.await_count == 1
-
-
-_SAVE_SITES = {
-    "record_result": _record_result_site,
-    "force_dispatch": _force_dispatch_site,
-}
+    await coord.specialist_dispatch.record_specialist_result(
+        task=task, done_payload=_done_payload(), source=f"{SPECIALIST_FROM_AGENT_PREFIX}task-1"
+    )
 
 
 def _save_raising(exc: Exception):
@@ -606,24 +391,20 @@ def _save_raising(exc: Exception):
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("site", _SAVE_SITES)
-async def test_save_os_error_is_logged_and_the_bookkeeping_stays(coord, force_coord, caplog, site):
-    state, run, kept = _SAVE_SITES[site](coord, force_coord)
+async def test_save_os_error_is_logged_and_the_bookkeeping_stays(coord, caplog):
     err = OSError("no space left on device")
-    state.save = _save_raising(err)
+    coord.shared_state.save = _save_raising(err)
 
     with caplog.at_level("ERROR"):
-        await run()
+        await _record_task_result(coord)
 
-    assert kept()
+    assert [r["round_id"] for r in coord.shared_state.specialist_rounds] == ["task-1"]
     assert [r.exc_info[1] for r in caplog.records if r.exc_info] == [err]
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("site", _SAVE_SITES)
-async def test_save_serialization_defect_propagates(coord, force_coord, site):
-    state, run, _kept = _SAVE_SITES[site](coord, force_coord)
-    state.save = _save_raising(TypeError("Object of type set is not JSON serializable"))
+async def test_save_serialization_defect_propagates(coord):
+    coord.shared_state.save = _save_raising(TypeError("Object of type set is not JSON serializable"))
 
     with pytest.raises(TypeError, match="not JSON serializable"):
-        await run()
+        await _record_task_result(coord)

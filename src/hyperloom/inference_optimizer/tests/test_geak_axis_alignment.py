@@ -17,24 +17,12 @@ Failure modes these cover:
   cache it is ~99% input tokens that were never computed.
 * Keying "graded on interactivity" on one percentile's label, which silently
   answers no the next time the recorded objective moves within that family.
-* Reading the measurement back out of ``bench_summary.json`` by its output-named
-  field. GEAK nulls ``output_throughput_tok_s_median`` off the output axis --
-  deliberately, so nobody reads another axis under an "output" name -- which
-  would make every rung of an agentic sweep report "no throughput".
-* Trusting a summary recorded on a basis nobody requested. A GEAK build that
-  cannot measure the axis may fall back to output, and that number would then
-  rank the sweep's rungs.
 
 Synthetic runs must come out byte-identical, so each case here has its
 fixed-ISL/OSL twin.
 """
 
 from __future__ import annotations
-
-import json
-import subprocess
-from pathlib import Path
-from typing import Any
 
 import pytest
 
@@ -45,8 +33,6 @@ from hyperloom.common.perf_metric import (
     GRADED_OUTPUT,
     INTVTY_V1,
 )
-from hyperloom.orchestrator.actions.executors import _geak_sweep
-from hyperloom.orchestrator.actions.executors._geak_sweep import GeakSweepSpec, sweep_via_geak
 from hyperloom.orchestrator.actions.executors.workload._agentx_switch import (
     GEAK_METRIC_INTVTY,
     GEAK_METRIC_OUTPUT,
@@ -54,8 +40,6 @@ from hyperloom.orchestrator.actions.executors.workload._agentx_switch import (
     geak_acceptance,
     geak_metric_axis,
 )
-
-from ._geak_helpers import replay_env_spec
 
 
 def _clear_axis_env(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -148,167 +132,3 @@ def test_the_workload_spec_publishes_the_rule_with_the_sessions_own_band(backend
         assert spec["acceptance"] == geak_acceptance(spec["metric_basis"], 7.5)
     else:
         assert "acceptance" not in spec
-
-
-def _sweep_with_summary(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    summary: dict[str, Any],
-    *,
-    metric_axis: tuple[str, str] = GEAK_METRIC_OUTPUT,
-):
-    """Drive ``sweep_via_geak`` against a stubbed GEAK that writes *summary*.
-
-    The replay env each point was launched with is appended to the returned list.
-    """
-    launched: list[dict[str, str]] = []
-
-    def _fake_run(_cmd: list[str], **kwargs: Any) -> subprocess.CompletedProcess:
-        launched.append(dict(kwargs["env"]))
-        out = Path(kwargs["env"]["OUT_DIR"])
-        (out / "bench_summary.json").write_text(json.dumps(summary), encoding="utf-8")
-        return subprocess.CompletedProcess(_cmd, 0, "", "")
-
-    monkeypatch.setattr(_geak_sweep.subprocess, "run", _fake_run)
-    bench = tmp_path / "bench_e2e.sh"
-    bench.write_text("#!/usr/bin/env bash\nexit 0\n", encoding="utf-8")
-
-    async def _go():
-        return await sweep_via_geak(
-            result={
-                "bench_script": str(bench),
-                "output_dir": str(tmp_path),
-                "validated_regimes": [{"num_warmups": 1, "seed": 1, "num_prompts": 8}],
-                "accepted_config": {"flags": "", "env": ""},
-            },
-            spec=GeakSweepSpec(
-                conc_values=[1], isl_osl_configs=["16:16"], variant_timeout_sec=30, repeats=1, metric_axis=metric_axis
-            ),
-            output_root=tmp_path / "sweep",
-            env_spec=replay_env_spec(tmp_path / "round"),
-        )
-
-    return _go, launched
-
-
-def _benchmark_report(tmp_path: Path) -> dict[str, Any]:
-    report = tmp_path / "sweep" / "variant_0_conc1_isl16_osl16" / "benchmark_report.json"
-    return json.loads(report.read_text(encoding="utf-8"))
-
-
-@pytest.mark.asyncio
-async def test_an_intvty_summary_is_ranked_on_its_axis_not_published_as_output_throughput(tmp_path, monkeypatch):
-    """The interactivity median is a per-request rate, not a throughput.
-
-    ``output_throughput`` is ``GRADED_OUTPUT``, which the perf snapshot reads, so
-    publishing an interactivity score there would record it as the session's
-    output throughput; the breakdown's ``benchmark_report.json`` has the same
-    output-named field. The rung must still rank, or an agentic sweep reports
-    nothing again.
-    """
-    go, launched = _sweep_with_summary(
-        tmp_path,
-        monkeypatch,
-        {
-            "throughput_tok_s_median": 151.85,
-            "output_throughput_tok_s_median": None,
-            "metric_basis": "e2e_norm_intvty_p50",
-            "ttft_ms_median": 10.0,
-            "tpot_ms_median": 3.0,
-        },
-        metric_axis=GEAK_METRIC_INTVTY,
-    )
-    result = await go()
-    assert [env["E2E_METRIC"] for env in launched] == ["e2e_norm_intvty_p50"]
-    assert result["status"] == "succeeded"
-    point = result["points"][0]
-    assert point["measured_value"] == pytest.approx(151.85)
-    assert point["metric_basis"] == "e2e_norm_intvty_p50"
-    assert "output_throughput" not in point
-    assert result["promotion_measurement"]["measured_value"] == pytest.approx(151.85)
-    report = _benchmark_report(tmp_path)
-    assert report["success"] is True
-    assert report["output_throughput_tok_s"] is None
-
-
-@pytest.mark.parametrize(
-    ("metric_axis", "recorded_basis"),
-    [
-        # A GEAK that cannot measure the median and falls back to output.
-        (GEAK_METRIC_INTVTY, "aggregate_output_tok_s"),
-        # The tail guard: a different interactivity axis, not a different name for this one.
-        (GEAK_METRIC_INTVTY, "e2e_norm_intvty_p90"),
-        # A replay that measured total under a synthetic session's output request.
-        (GEAK_METRIC_OUTPUT, "aggregate_total_token_tok_s"),
-    ],
-)
-@pytest.mark.asyncio
-async def test_a_summary_on_a_basis_nobody_requested_is_refused(tmp_path, monkeypatch, metric_axis, recorded_basis):
-    """A number on the wrong axis must not rank the rungs, however plausible it looks."""
-    go, _ = _sweep_with_summary(
-        tmp_path,
-        monkeypatch,
-        {
-            "throughput_tok_s_median": 445.7,
-            "output_throughput_tok_s_median": None,
-            "metric_basis": recorded_basis,
-            "ttft_ms_median": 10.0,
-            "tpot_ms_median": 3.0,
-        },
-        metric_axis=metric_axis,
-    )
-    result = await go()
-    assert result["status"] == "failed"
-    point = result["points"][0]
-    assert point["status"] == "failed"
-    assert point["metric_basis"] == recorded_basis
-    assert f"not the requested {metric_axis[1]}" in point["error"]
-    assert "measured_value" not in point
-    assert result["promotion_measurement"] == {}
-    assert _benchmark_report(tmp_path)["success"] is False
-
-
-@pytest.mark.asyncio
-async def test_an_output_mode_summary_reads_the_same_number_as_before(tmp_path, monkeypatch):
-    """Synthetic parity: in output mode both fields carry the same median.
-
-    Confirmed against a real run's ``bench_summary.json``, where
-    ``throughput_tok_s_median`` and ``output_throughput_tok_s_median`` were both
-    167.259, so preferring the neutral field changes nothing here.
-    """
-    go, launched = _sweep_with_summary(
-        tmp_path,
-        monkeypatch,
-        {
-            "throughput_tok_s_median": 167.259,
-            "output_throughput_tok_s_median": 167.259,
-            "metric_basis": "aggregate_output_tok_s",
-            "ttft_ms_median": 10.0,
-            "tpot_ms_median": 3.0,
-        },
-    )
-    result = await go()
-    assert [env["E2E_METRIC"] for env in launched] == ["output"]
-    assert result["status"] == "succeeded"
-    point = result["points"][0]
-    assert point["output_throughput"] == pytest.approx(167.259)
-    assert point["measured_value"] == pytest.approx(167.259)
-    assert _benchmark_report(tmp_path)["output_throughput_tok_s"] == pytest.approx(167.259)
-
-
-@pytest.mark.asyncio
-async def test_a_legacy_summary_without_the_neutral_field_still_reads(tmp_path, monkeypatch):
-    """Summaries written before ``throughput_tok_s_median`` or ``metric_basis`` existed must still work."""
-    go, _ = _sweep_with_summary(
-        tmp_path,
-        monkeypatch,
-        {
-            "output_throughput_tok_s_median": 200.0,
-            "ttft_ms_median": 10.0,
-            "tpot_ms_median": 3.0,
-        },
-    )
-    result = await go()
-    assert result["status"] == "succeeded"
-    assert result["points"][0]["output_throughput"] == pytest.approx(200.0)
-    assert result["points"][0]["metric_basis"] == "aggregate_output_tok_s"

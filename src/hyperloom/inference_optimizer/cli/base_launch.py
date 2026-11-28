@@ -24,6 +24,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import NoReturn
 
+from hyperloom_common import gpu_card
 from hyperloom.common.agentx_workload import is_mlperf_backend
 from hyperloom.common.env_safety import BLOCKED_EXTERNAL_ENV_NAMES, is_credential_name
 from hyperloom.common.launch_credentials import credentials_in_the_clear, redact_credential_env
@@ -108,7 +109,8 @@ class SessionLaunch:
         return hf_repo_id(model) or Path(model).name or model
 
     def query(self) -> LaunchQuery:
-        """The session's query; raises :class:`BaseLaunchError` when it is malformed."""
+        """The session's query, with its card's facts; raises :class:`BaseLaunchError` when it is malformed."""
+        card = gpu_card.session_card()
         return LaunchQuery(
             model_id=self.model_id,
             framework=self.framework,
@@ -119,6 +121,8 @@ class SessionLaunch:
             ep=self.ep,
             isl=self.isl,
             osl=self.osl,
+            gfx=card.gfx if card else None,
+            memory_mib=card.memory_mib if card else None,
         )
 
 
@@ -132,7 +136,10 @@ def _session_launch(
     """The command line's session; an AgentX trace replay and a script name no sequence shape."""
     board = (getattr(args, "gpu_type", None) or "").strip()
     if not board:
-        _refuse("the base launch is resolved for the target GPU board, and none was detected; pass --gpu-type")
+        _refuse(
+            "the base launch is resolved for a GPU label, and the session has none because no card was read; "
+            "pass --gpu-type"
+        )
     fixed = workload is Workload.FIXED
     return SessionLaunch(
         model=str(getattr(args, "model", "") or ""),
@@ -230,6 +237,26 @@ def resolve_server_base(launch: SessionLaunch) -> BaseLaunch:
     return _frozen_form(dataclasses.replace(found, model=dataclasses.replace(found.model, path=launch.model_path)))
 
 
+def server_session(
+    args: argparse.Namespace, *, framework: str, benchmark_mode: str, concurrencies: Sequence[int]
+) -> SessionLaunch:
+    """The command line's server session: an AgentX trace replay, else a fixed workload."""
+    replay = is_agentx_mode(benchmark_mode) and not is_mlperf_backend()
+    workload = Workload.AGENTX if replay else Workload.FIXED
+    return _session_launch(args, framework=framework, workload=workload, concurrencies=concurrencies)
+
+
+def server_session_query(
+    args: argparse.Namespace, *, framework: str, benchmark_mode: str, concurrencies: Sequence[int]
+) -> tuple[LaunchQuery, str]:
+    """The command line's server-session query and the InferenceX commit it reads; exits 2 when it is malformed."""
+    launch = server_session(args, framework=framework, benchmark_mode=benchmark_mode, concurrencies=concurrencies)
+    try:
+        return launch.query(), launch.inferencex_commit
+    except BaseLaunchError as exc:
+        _refuse(f"the session's query is malformed: {exc}")
+
+
 def resolve_base_launch(
     args: argparse.Namespace,
     session_dir: Path,
@@ -254,9 +281,7 @@ def resolve_base_launch(
         except BaseLaunchError as exc:
             _refuse(f"the scriptable base could not be frozen: {exc}")
         return _freeze(args, session_dir, script_base)
-    replay = is_agentx_mode(benchmark_mode) and not is_mlperf_backend()
-    workload = Workload.AGENTX if replay else Workload.FIXED
-    launch = _session_launch(args, framework=framework, workload=workload, concurrencies=concurrencies)
+    launch = server_session(args, framework=framework, benchmark_mode=benchmark_mode, concurrencies=concurrencies)
     try:
         base = resolve_server_base(launch)
     except BaseLaunchUnresolved as exc:
@@ -290,4 +315,10 @@ def _freeze(args: argparse.Namespace, session_dir: Path, base: BaseLaunch) -> Ba
     return base
 
 
-__all__ = ["BaseLaunchUnresolved", "SessionLaunch", "resolve_base_launch", "resolve_server_base"]
+__all__ = [
+    "BaseLaunchUnresolved",
+    "SessionLaunch",
+    "resolve_base_launch",
+    "resolve_server_base",
+    "server_session_query",
+]

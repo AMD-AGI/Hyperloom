@@ -21,6 +21,7 @@ from .._internal.log import info, warn, err
 from .._internal.server_args_safety import ServerArgsRejected, validate_server_args
 from .._internal.ssh_client import RemoteScript
 from .. import cluster_access as _mn_cli
+from .._internal.pd_handoff import is_ssh_backed
 from ..pod_entrypoints import KERNEL_NODE_OPS_DEPS, LAUNCHER_DEPS, SHAPE_GATE_DEPS, extract_pod_json
 from ..pod_entrypoints import read_bundled_pod_python_script, read_pod_script
 
@@ -37,9 +38,9 @@ def _infera_target_for_host(state: dict[str, Any], ip: str) -> dict[str, Any]:
 def _infera_require_state() -> dict[str, Any]:
     """Load infera state; require an ssh key + at least one GPU pod IP."""
     state = _mn_cli._load_state()
-    if state.get("backend") != "infera":
+    if not is_ssh_backed(state):
         raise _mn_cli.ConfigurationError(
-            "state backend is not 'infera'; the platform selects the backend, check "
+            "state backend is not 'infera' or a node-list cluster; the platform selects the backend, check "
             "INFERENCE_OPTIMIZER_MN_BACKEND and the HYPERLOOM_MN_EXT_* hand-off"
         )
     has_gpu_pods = bool(infera_support.gpu_ssh_targets_from_state(state))

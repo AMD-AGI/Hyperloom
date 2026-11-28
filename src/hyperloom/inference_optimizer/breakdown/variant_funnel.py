@@ -5,10 +5,8 @@
 
 Every configuration variant and source patch the phase measured is an
 ``attempts`` row on a ``framework_agent`` timeline event. The export writes the
-count as ``outcome.variants`` and the report reads it from there, counting a
-breakdown exported before the block existed by this same rule, so the two
-cannot disagree. Kernel candidates are not counted: the kernel lane reports its
-own funnel.
+count as ``outcome.variants``. Kernel candidates are not counted: the kernel
+lane reports its own funnel.
 
 A row is read by the facts its recorder settled on it rather than by its
 ``outcome``, which each arm's executor spells in its own vocabulary: ``benched``
@@ -24,10 +22,7 @@ from typing import Any
 
 from .recorder.framework_event import EVENT_TYPE as FRAMEWORK_EVENT_TYPE
 
-__all__ = ["VARIANT_COUNTS", "variants_from_timeline"]
-
-#: The counts an ``outcome.variants`` block carries beside ``keep_rate_pct``.
-VARIANT_COUNTS = ("bench_runs", "distinct", "kept", "reverted", "failed")
+__all__ = ["variants_from_timeline"]
 
 
 def variants_from_timeline(timeline: Iterable[Mapping[str, Any]]) -> dict[str, Any]:

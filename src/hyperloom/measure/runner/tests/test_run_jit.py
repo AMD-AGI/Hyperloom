@@ -17,7 +17,6 @@ import dataclasses
 import hashlib
 import io
 import json
-import logging
 import os
 import shutil
 import sys
@@ -42,7 +41,10 @@ from hyperloom.measure.returncodes import HOSTED_INFRA_FAILURE_RC
 from hyperloom.measure.runner import jit as runner_jit
 from hyperloom.measure.runner import own_jit
 from hyperloom.measure.runner import run as run_module
+from hyperloom.measure.runner.hardware import GpuFacts
 from hyperloom.measure.runner.jit import JIT_CACHE_ENV
+from hyperloom.measure.spec import MeasurementSpec
+from hyperloom.orchestrator.tests._fixtures import MI355X_CARD
 from hyperloom.measure.runner.tests.test_run import (  # noqa: F401 - fixtures
     POINT,
     _blob,
@@ -547,24 +549,6 @@ def test_a_variable_the_build_reads_changes_the_key_and_one_it_never_reads_does_
     assert _keys(build)["aiter_jit"] != _keys(base)["aiter_jit"] and _keys(build)["triton"] == _keys(base)["triton"]
 
 
-def test_the_aiter_keys_inputs_are_noted_and_logged_by_name_and_short_hash_never_by_value(
-    rig, caplog, tmp_path
-) -> None:
-    secret = "do-not-print-0"
-    table = tmp_path / "table.csv"
-    table.write_text("M,N,K\n1,2,3\n")
-    with caplog.at_level(logging.WARNING, logger="hyperloom.measure.runner.jit"):
-        manifest, status, _ = rig.run("noted", _arm(rig, envs={"ENABLE_CK": secret, TABLE_VARIABLE: str(table)}))
-
-    [note] = [note for note in manifest.notes if note.startswith("jit cache: aiter key ")]
-    short = hashlib.sha256(secret.encode()).hexdigest()[:12]
-    assert note.startswith(f"jit cache: aiter key {_keys(manifest)['aiter_jit'][:12]} inputs: machine=image:")
-    assert f"ENABLE_CK={short}" in note and f"{TABLE_VARIABLE}=" in note and "tree=" in note and "overlay:" in note
-    assert secret not in note and str(table) not in note
-    assert note in caplog.messages, "the runner's log carries the same line"
-    assert secret not in caplog.text and secret not in status["message"]
-
-
 def test_a_framework_patch_that_can_change_the_build_from_inside_the_server_is_part_of_the_key(rig) -> None:
     base, _, _ = rig.run("base", _arm(rig))
     sneaky = b"import os\nos.environ['ENABLE_CK'] = '0'\n"
@@ -726,3 +710,13 @@ def test_without_the_cache_variable_a_test_builds_cold_even_when_the_store_holds
     assert rig.grid.triton_found == [False], f"{JIT_CACHE_ENV} unset: Triton compiled the kernel itself"
     assert BUILD_LOG in (second_run / "out" / "files" / "variant_0" / "server.log").read_text(encoding="utf-8")
     assert second.jit_cache is None and status["message"] == "", "no cache, no note: a cold build is not a failure"
+
+
+def test_the_cache_is_keyed_by_the_arch_the_card_reports_else_by_that_of_the_sheet_s_card() -> None:
+    sheet = MeasurementSpec.from_document(_sheet())
+    machine_card = dataclasses.replace(MI355X_CARD, gfx="gfx942")
+    without_card = MeasurementSpec.from_document(_sheet(hardware={**_sheet()["hardware"], "card": None}))
+
+    assert runner_jit.card_arch(sheet, GpuFacts(0, machine_card, None, None)) == "gfx942"
+    assert runner_jit.card_arch(sheet, None) == MI355X_CARD.gfx
+    assert runner_jit.card_arch(without_card, None) is None

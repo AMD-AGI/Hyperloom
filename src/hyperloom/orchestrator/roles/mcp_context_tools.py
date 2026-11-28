@@ -58,10 +58,6 @@ class ContextProvider:
         """Return the intervention-mix summary projection."""
         return self._safe(self.shared_state.to_intervention_mix_summary, "intervention_mix")
 
-    def why_denied(self, top_k: int = 6) -> str:
-        """Return a summary of recent policy denials."""
-        return self._safe(lambda: self.shared_state.to_policy_denial_summary(top_k=top_k), "why_denied")
-
     def analysis_md(self) -> str:
         """Return the current ``analysis.md`` contents."""
         return self._safe(self.analysis_reader, "analysis_md")
@@ -195,13 +191,6 @@ CONTEXT_TOOL_SPECS: tuple[tuple[str, str, dict[str, Any], str], ...] = (
         "(how many config keeps vs source-patch keeps so far).",
         _NO_ARGS_SCHEMA,
         "intervention_mix",
-    ),
-    (
-        "why_denied",
-        "Return the most recent PolicyGate denials (action / rule / hint) "
-        "so you can see why a proposed intent was rejected and self-correct.",
-        _TOPK_SCHEMA,
-        "why_denied",
     ),
     (
         "show_analysis_md",

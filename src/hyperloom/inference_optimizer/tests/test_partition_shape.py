@@ -9,8 +9,10 @@ from types import SimpleNamespace
 
 import pytest
 
-from hyperloom.common.gpu_partition import PartitionLayout, PartitionModel, layout_for
+from hyperloom.common import gpu_partition as gp
+from hyperloom.common.gpu_partition import PartitionModel, layout_for
 from hyperloom.orchestrator.actions.executors.gpu import _partition_shape as ps
+from hyperloom.orchestrator.tests._fixtures import MI355X_CARD, publish_card
 
 
 @pytest.fixture(autouse=True)
@@ -31,23 +33,13 @@ def card(monkeypatch):
     """Present a card in a given shape, or none at all."""
 
     def present(layout):
-        monkeypatch.setattr(ps, "observe_partition", lambda gpu_id, gpu_type=None: layout)
+        monkeypatch.setattr(ps, "observe_partition", lambda gpu_id: layout)
 
     return present
 
 
-def _layout(mode, cu, gib=None, probed=True):
-    """Build a layout directly, so a table-derived one can be posed as such."""
-    if probed:
-        return layout_for(mode, cu_per_partition=cu, gib_per_partition=gib)
-    derived = layout_for(mode, cu_per_partition=cu, gib_per_partition=gib)
-    return PartitionLayout(
-        mode=derived.mode,
-        partitions=derived.partitions,
-        cu_per_partition=derived.cu_per_partition,
-        gib_per_partition=derived.gib_per_partition,
-        probed=False,
-    )
+def _layout(mode, cu, gib=None):
+    return layout_for(mode, cu_per_partition=cu, gib_per_partition=gib)
 
 
 def _measured(gib):
@@ -57,6 +49,23 @@ def _measured(gib):
 
 CPX_36 = _layout("CPX", 32, 36.0)
 SPX_288 = _layout("SPX", 256, 288.0)
+
+
+def test_the_shape_is_sized_by_the_partitioned_gpu_not_by_the_session_card(monkeypatch):
+    """GPU 3 is in CPX while the session's card is a whole MI355X."""
+    publish_card(monkeypatch, MI355X_CARD)
+    monkeypatch.setenv(ps.PARTITION_GPU_ENV, "3")
+    device = {"gpu": 3, "asic": {"target_graphics_version": "gfx950", "num_compute_units": 32}, "vram": {"size": 36862}}
+    answers = {
+        "partition": {"current_partition": [{"gpu_id": 3, "accelerator_type": "CPX"}]},
+        "static": {"gpu_data": [device]},
+    }
+    monkeypatch.setattr(gp, "_amd_smi_json", lambda args: answers[args[0]])
+
+    layout = ps.validate_session_shape().layout
+
+    assert layout is not None and (layout.mode, layout.cu_per_partition) == ("CPX", 32)
+    assert layout.gib_per_partition == pytest.approx(36.0, abs=0.1)
 
 
 class TestUnreadableCard:
@@ -232,15 +241,8 @@ class TestFitCheckNeedsAFanOut:
         assert ps.validate_session_shape(fanout_expected=False).ok is True
 
 
-class TestTableFallbackIsSurfaced:
-    def test_a_derived_cu_count_warns_because_selection_matches_on_it(self, card):
-        card(_layout("DPX", 152, 144.0, probed=False))
-        verdict = ps.validate_session_shape(model=_measured(4.0))
-
-        assert verdict.ok is True
-        assert any("built-in board table" in w for w in verdict.warnings)
-
-    def test_a_probed_count_warns_about_nothing(self, card):
+class TestASizedShape:
+    def test_a_fitting_workload_warns_about_nothing(self, card):
         card(CPX_36)
         verdict = ps.validate_session_shape(model=_measured(4.0))
         assert verdict.warnings == ()
@@ -319,15 +321,10 @@ class TestSessionShapeSummary:
             "cu_per_partition",
             "gib_per_partition",
             "streams_per_partition",
-            "cu_probed",
             "fanout_expected",
         }
         assert set(ps.session_shape_summary(SPX_288, 2)) == expected
         assert set(ps.session_shape_summary(CPX_36, 1, fanout_expected=False)) == expected
-
-    def test_it_records_whether_the_cu_count_was_probed(self):
-        assert ps.session_shape_summary(CPX_36, 2)["cu_probed"] is True
-        assert ps.session_shape_summary(_layout("DPX", 152, probed=False), 2)["cu_probed"] is False
 
     def test_it_is_json_safe(self):
         import json
@@ -340,7 +337,7 @@ class TestSessionShapeSummary:
 
 
 class TestReportedProvenance:
-    """What the report says about where the CU count came from."""
+    """What the report says about the partition shape."""
 
     @staticmethod
     def _render(shape):
@@ -350,20 +347,8 @@ class TestReportedProvenance:
 
         return "\n".join(_format_compute_partition_section({"compute_partition": shape}))
 
-    def test_a_probed_count_is_reported_as_probed(self):
-        assert "32 (from the device)" in self._render(ps.session_shape_summary(CPX_36, 2))
-
-    def test_a_derived_count_is_reported_as_derived(self):
-        shape = ps.session_shape_summary(_layout("CPX", 32, 36.0, probed=False), 2)
-        assert "32 (derived from the board table)" in self._render(shape)
-
-    def test_an_unknown_provenance_claims_neither(self):
-        """A shape recovered from the published env knows the count, not its origin."""
-        rendered = self._render({"mode": "CPX", "partitions": 8, "cu_per_partition": 32})
-
-        assert "CU per partition  : 32" in rendered
-        assert "board table" not in rendered
-        assert "from the device" not in rendered
+    def test_the_cu_count_is_reported(self):
+        assert "CU per partition  : 32\n" in self._render(ps.session_shape_summary(CPX_36, 2)) + "\n"
 
     def test_a_session_that_cannot_fan_out_is_told_the_figure_is_one_device(self):
         shape = ps.session_shape_summary(CPX_36, 2, fanout_expected=False)
@@ -387,7 +372,7 @@ class TestRecordedShapeIsProvenanceNotADecision:
         verdict = ps.session_shape_summary(CPX_36, 2)
         from_env = published_shape(ps.runtime_env(CPX_36, 2)) or {}
 
-        assert set(verdict) - set(from_env) == {"cu_probed", "gib_per_partition", "fanout_expected"}
+        assert set(verdict) - set(from_env) == {"gib_per_partition", "fanout_expected"}
 
 
 class TestEnvReaders:
@@ -596,7 +581,6 @@ class TestCliExport:
     def test_the_summary_carries_what_the_env_cannot(self, export):
         """The published variables are a lossy subset: no provenance, no memory."""
         shape = export(framework="xdit")
-        assert shape["cu_probed"] is True
         assert shape["gib_per_partition"] == 36.0
 
     def test_a_multi_node_session_records_no_shape(self, export):
