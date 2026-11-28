@@ -12,7 +12,6 @@ from typing import Any
 from hyperloom.inference_optimizer.protocol.intent import (
     EXTEND_LEASE_MAX_SEC,
     PAYLOAD_REQUIRED,
-    Intent,
     IntentType,
     IntentValidationError,
     validate_envelope,
@@ -140,47 +139,71 @@ _UNPARSED_TOOL_INPUT_KEY = "__unparsedToolInput"
 _EMIT_INTENT_TOP_LEVEL_KEYS = {"intent_type", "payload", _UNPARSED_TOOL_INPUT_KEY}
 
 
-def _unwrap_unparsed_tool_input(tool_input: dict[str, Any]) -> dict[str, Any]:
-    """Return the input Claude Code's ``__unparsedToolInput`` wrapper holds; one that names its intent type is returned as it is.
+def decode_emit_intent_input(raw_input: Any) -> tuple[dict[str, Any], str | None]:
+    """Decode a parser fallback and report why decoding failed.
 
-    Raises:
-        IntentValidationError: The wrapper does not hold one JSON object.
+    Accepts the three shapes ``emit_intent`` tool input arrives in:
+
+    1. a native object (direct Anthropic API);
+    2. Claude Code's ``__unparsedToolInput.raw`` wrapper;
+    3. a JSON *string* envelope, as emitted by OpenAI-compatible / litellm
+       style proxies, optionally with ``payload`` itself stringified.
+
+    A caller that can see shape 3 hands it through unchanged: a non-dict input replaced
+    with ``{}`` would decode "successfully" to an empty intent and stall the
+    orchestrator with no error.
     """
-    if "intent_type" in tool_input or _UNPARSED_TOOL_INPUT_KEY not in tool_input:
-        return tool_input
-    wrapped = tool_input[_UNPARSED_TOOL_INPUT_KEY]
+    if isinstance(raw_input, str):
+        try:
+            raw_input = json.loads(raw_input)
+        except (TypeError, ValueError):
+            return {}, "emit_intent tool input string is not valid JSON"
+        if not isinstance(raw_input, dict):
+            return {}, "emit_intent tool input string did not decode to a JSON object"
+    if not isinstance(raw_input, dict):
+        return {}, f"emit_intent tool input must be an object, got {type(raw_input).__name__}"
+    payload = raw_input.get("payload")
+    if isinstance(payload, str):
+        try:
+            decoded_payload = json.loads(payload)
+        except (TypeError, ValueError):
+            decoded_payload = None
+        if isinstance(decoded_payload, dict):
+            raw_input = {**raw_input, "payload": decoded_payload}
+    if "intent_type" in raw_input or _UNPARSED_TOOL_INPUT_KEY not in raw_input:
+        return raw_input, None
+    wrapped = raw_input.get(_UNPARSED_TOOL_INPUT_KEY)
     if not isinstance(wrapped, dict):
-        raise IntentValidationError(f"emit_intent: {_UNPARSED_TOOL_INPUT_KEY} must be an object")
+        return raw_input, f"{_UNPARSED_TOOL_INPUT_KEY} must be an object"
     raw = wrapped.get("raw")
     if not isinstance(raw, str) or not raw.strip():
-        raise IntentValidationError(
-            f"emit_intent: {_UNPARSED_TOOL_INPUT_KEY}.raw must be a non-empty JSON object string"
-        )
+        return raw_input, f"{_UNPARSED_TOOL_INPUT_KEY}.raw must be a non-empty JSON object string"
     try:
         parsed = json.loads(raw)
-    except ValueError as exc:
-        raise IntentValidationError(f"emit_intent: {_UNPARSED_TOOL_INPUT_KEY}.raw is not valid JSON") from exc
+    except (TypeError, ValueError):
+        return raw_input, f"{_UNPARSED_TOOL_INPUT_KEY}.raw is not valid JSON"
     if not isinstance(parsed, dict):
-        raise IntentValidationError(f"emit_intent: {_UNPARSED_TOOL_INPUT_KEY}.raw must decode to a JSON object")
-    return parsed
+        return raw_input, f"{_UNPARSED_TOOL_INPUT_KEY}.raw must decode to a JSON object"
+    return parsed, None
 
 
-def validate_emit_intent_input(payload: dict[str, Any]) -> Intent:
-    """Validate one ``emit_intent`` tool input and return the intent it asks for.
+def validate_emit_intent_input(payload: dict[str, Any]) -> None:
+    """Eager single-intent validation, by the same rule the harvest will apply.
 
-    The input is a native object or Claude Code's ``__unparsedToolInput`` wrapper around one, the two shapes the
-    tool schema admits. The intent is built by :func:`validate_envelope`, the rule every transport's intents pass,
-    from the one-intent envelope of this call.
-
-    Raises:
-        IntentValidationError: The input is not one well-formed intent.
+    The eager path decides only the tool ack; :func:`validate_envelope` decides
+    whether the intent survives. A rule written twice here drifts — a null
+    required field was acked ``ok`` and then dropped by the harvest, leaving the
+    agent told it succeeded with nothing to retry on — so the eager path builds
+    the one-intent envelope and defers to that function.
     """
     if not isinstance(payload, dict):
         raise IntentValidationError(f"emit_intent input must be an object, got {type(payload).__name__}")
     original_extra = set(payload) - _EMIT_INTENT_TOP_LEVEL_KEYS
     if original_extra:
         raise IntentValidationError(f"emit_intent input has unexpected keys: {sorted(original_extra)!r}")
-    coerced = _unwrap_unparsed_tool_input(payload)
+    coerced, decode_error = decode_emit_intent_input(payload)
+    if decode_error is not None:
+        raise IntentValidationError(f"emit_intent: {decode_error}")
     extra = set(coerced) - _EMIT_INTENT_TOP_LEVEL_KEYS
     if extra:
         raise IntentValidationError(f"emit_intent input has unexpected keys: {sorted(extra)!r}")
@@ -194,41 +217,29 @@ def validate_emit_intent_input(payload: dict[str, Any]) -> Intent:
         raise IntentValidationError(
             f"emit_intent: 'payload' must be an object, got {type(coerced['payload']).__name__}"
         )
-    return validate_envelope({"intents": [{"intent_type": coerced["intent_type"], "payload": coerced["payload"]}]})[0]
+    validate_envelope({"intents": [{"intent_type": coerced["intent_type"], "payload": coerced["payload"]}]})
 
 
-def build_emit_intent_server(sdk: Any, accepted: list[Intent]) -> Any:
-    """Build the in-process MCP server exposing ``emit_intent`` for one attempt of a turn.
+async def _emit_intent_handler(args: dict[str, Any]) -> dict[str, Any]:
+    """Default handler — validate then ack; errors return is_error=True."""
+    try:
+        validate_emit_intent_input(args)
+    except IntentValidationError as exc:
+        log.info("emit_intent rejected: %s", exc)
+        return {
+            "content": [{"type": "text", "text": f"validation_error: {exc}"}],
+            "is_error": True,
+        }
+    return {"content": [{"type": "text", "text": "ok"}]}
 
-    The tool's answer and the intent's fate are one decision: a call answered ``ok`` has appended its intent to
-    ``accepted``, and a call answered with an error has appended nothing. The Coordinator routes ``accepted`` once
-    the turn has ended.
 
-    Args:
-        sdk: The imported ``claude_agent_sdk`` module.
-        accepted: The attempt's intents, in the order the calls were answered.
-
-    Returns:
-        The SDK's server config, for ``ClaudeAgentOptions.mcp_servers``.
-    """
-
-    async def _emit_intent(args: dict[str, Any]) -> dict[str, Any]:
-        try:
-            intent = validate_emit_intent_input(args)
-        except IntentValidationError as exc:
-            log.info("emit_intent rejected: %s", exc)
-            return {
-                "content": [{"type": "text", "text": f"validation_error: {exc}"}],
-                "is_error": True,
-            }
-        accepted.append(intent)
-        return {"content": [{"type": "text", "text": "ok"}]}
-
+def build_emit_intent_server(sdk: Any) -> Any:
+    """Build the in-process MCP server config exposing ``emit_intent`` with the imported ``claude_agent_sdk``."""
     tool = (
         EMIT_INTENT_TOOL_NAME,
         EMIT_INTENT_TOOL_DESCRIPTION,
         build_emit_intent_tool_input_schema(),
-        _emit_intent,
+        _emit_intent_handler,
     )
     return build_sdk_mcp_server(sdk, MCP_SERVER_NAME, [tool])
 
@@ -241,6 +252,7 @@ __all__ = [
     "build_emit_intent_server",
     "build_emit_intent_tool_input_schema",
     "build_intent_envelope_schema",
+    "decode_emit_intent_input",
     "payload_contract",
     "validate_emit_intent_input",
 ]

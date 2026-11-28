@@ -144,7 +144,7 @@ async def test_a_failed_analysis_requested_again_is_answered_without_rerunning_i
     try:
         await coordinator.router.handle_intent("orchestration", request)
         await coordinator.router.handle_intent("orchestration", request)
-        latest = (await coordinator.bus.tail(1, to_agent="orchestration", topic="response"))[0]
+        latest = (await coordinator.bus.tail(1, topic="response"))[0]
     finally:
         await coordinator.stop()
 

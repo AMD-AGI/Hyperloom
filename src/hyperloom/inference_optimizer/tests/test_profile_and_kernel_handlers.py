@@ -3208,7 +3208,7 @@ async def test_coordinator_answers_trace_analyze_with_the_registered_handler(ses
                 },
             ),
         )
-        (reply,) = await c.bus.tail(topic="response", to_agent="orchestration")
+        (reply,) = await c.bus.tail(topic="response")
         assert reply.payload["source"] == "programmatic_handler"
         assert reply.payload["kind"] == "trace_analyze_done"
         assert reply.payload["result"]["hot_kernels"] == ["kernel_a"]
@@ -3242,10 +3242,10 @@ async def test_coordinator_request_trace_analyze_uses_handler(session_dir):
                     },
                 ),
             )
-            req_msgs = await c.bus.tail(topic="request", to_agent="kernel_agent")
+            req_msgs = await c.bus.tail(topic="request")
             assert req_msgs, "request must be mirrored to kernel inbox"
 
-            resp_msgs = await c.bus.tail(topic="response", to_agent="orchestration")
+            resp_msgs = await c.bus.tail(topic="response")
             assert resp_msgs, "handler must emit RESPONSE without LLM"
             r = resp_msgs[0]
             assert r.from_agent == "kernel_agent"
@@ -3287,8 +3287,8 @@ async def test_coordinator_auto_reject_answers_in_one_envelope(
         c.shared_state.kernel_enabled = kernel_enabled
         await c.router.handle_intent("orchestration", Intent(type=IntentType.REQUEST, payload=dict(payload)))
 
-        requests = await c.bus.tail(topic="request", to_agent=payload["target_agent"])
-        responses = await c.bus.tail(topic="response", to_agent="orchestration")
+        requests = [m for m in await c.bus.tail(topic="request") if m.to_agent == payload["target_agent"]]
+        responses = await c.bus.tail(topic="response")
         assert requests, "the request must be recorded on the bus before it is refused"
         assert responses, "a refusal must answer the request"
         reply = responses[0]
@@ -3318,7 +3318,7 @@ async def test_a_padded_target_agent_reaches_its_handler(session_dir):
             ),
         )
 
-        responses = await c.bus.tail(topic="response", to_agent="orchestration")
+        responses = await c.bus.tail(topic="response")
         assert responses, "the request must be answered"
         # It reaches the kernel_agent arm, so it is refused for its kind rather than for its target.
         assert responses[0].payload["result"]["error_class"] == "unknown_kernel_kind"
@@ -3344,7 +3344,7 @@ async def test_coordinator_request_handler_exception_recorded(session_dir):
                     payload={"target_agent": "kernel_agent", "kind": "trace_analyze"},
                 ),
             )
-            resp_msgs = await c.bus.tail(topic="response", to_agent="orchestration")
+            resp_msgs = await c.bus.tail(topic="response")
             assert resp_msgs
             r = resp_msgs[0]
             assert r.payload["status"] == "failed"

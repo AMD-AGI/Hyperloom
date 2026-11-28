@@ -16,9 +16,7 @@ from types import SimpleNamespace
 import pytest
 
 from hyperloom.orchestrator.roles import claude as cl
-from hyperloom.orchestrator.roles.base import BackendError, LLMCallFailed, RetryPolicy
-
-from .conftest import call_emit_intent
+from hyperloom.orchestrator.roles.base import BackendError
 
 
 # ---- SDK fakes ------------------------------------------------------------
@@ -41,16 +39,9 @@ class _Msg:
     session_id: str | None = None
 
 
-_EMIT_INPUT = {"intent_type": "send_message", "payload": {"topic": "t", "body_md": "ok"}}
-
-
 def _query(messages, *, raise_exc=None):
-    """A ``query`` that streams ``messages``, making the ``emit_intent`` call of each one that carries its block."""
-
     async def _q(*, prompt, options):
         for m in messages:
-            if any(isinstance(block, ToolUseBlock) for block in m.content):
-                await call_emit_intent(options, _EMIT_INPUT)
             yield m
         if raise_exc is not None:
             raise raise_exc
@@ -65,7 +56,10 @@ def _backend(claude_sdk, messages=None, **over):
 
 
 def _emit_tool_block():
-    return ToolUseBlock(name=cl.EMIT_INTENT_TOOL_QUALIFIED, input=_EMIT_INPUT)
+    return ToolUseBlock(
+        name=cl.EMIT_INTENT_TOOL_QUALIFIED,
+        input={"intent_type": "send_message", "payload": {"topic": "t", "body_md": "ok"}},
+    )
 
 
 # ---- _import_sdk ----------------------------------------------------------
@@ -90,7 +84,6 @@ async def test_backend_runs_the_turn_on_the_sdk_it_imports(claude_sdk):
 
     async def _recording_query(*, prompt, options):
         seen.append((prompt, options))
-        await call_emit_intent(options, _EMIT_INPUT)
         yield _Msg(content=[_emit_tool_block()])
 
     claude_sdk.query = _recording_query
@@ -99,18 +92,14 @@ async def test_backend_runs_the_turn_on_the_sdk_it_imports(claude_sdk):
 
     assert len(result.intents) == 1
     assert [type(options) for _prompt, options in seen] == [claude_sdk.ClaudeAgentOptions]
-    server = seen[0][1].kwargs["mcp_servers"][cl.MCP_SERVER_NAME]
-    assert server["name"] == cl.MCP_SERVER_NAME
-    assert [tool.name for tool in server["tools"]] == [cl.EMIT_INTENT_TOOL_NAME]
+    assert b.mcp_server_config["name"] == cl.MCP_SERVER_NAME
+    assert [tool.name for tool in b.mcp_server_config["tools"]] == [cl.EMIT_INTENT_TOOL_NAME]
 
 
-async def test_an_emit_intent_server_that_cannot_be_built_fails_the_turn(claude_sdk, monkeypatch):
-    monkeypatch.setattr(
-        cl, "build_emit_intent_server", lambda sdk, accepted: (_ for _ in ()).throw(RuntimeError("boom"))
-    )
-    b = _backend(claude_sdk, retry_policy=RetryPolicy(max_attempts=1))
-    with pytest.raises(LLMCallFailed, match="boom"):
-        await b.run("hi")
+def test_post_init_emit_intent_setup_failure_fails_construction(claude_sdk, monkeypatch):
+    monkeypatch.setattr(cl, "build_emit_intent_server", lambda sdk: (_ for _ in ()).throw(RuntimeError("boom")))
+    with pytest.raises(RuntimeError, match="^boom$"):
+        _backend(claude_sdk)
 
 
 # ---- set_context_provider -------------------------------------------------
@@ -125,7 +114,7 @@ def test_set_context_provider_failure_raises(claude_sdk, monkeypatch):
 # ---- _build_options -------------------------------------------------------
 def test_build_options_model_and_system_prompt(claude_sdk):
     b = _backend(claude_sdk, model="claude-x")
-    opts = b._build_options(b._option_kwargs(tools=["Read"], system_prompt="sys"), [])
+    opts = b._build_options(tools=["Read"], system_prompt="sys")
     assert opts.kwargs["model"] == "claude-x"
     assert Path(opts.kwargs["system_prompt"]["path"]).read_text(encoding="utf-8") == "sys"
     assert "resume" not in opts.kwargs
@@ -135,7 +124,7 @@ def test_build_options_with_context_tools(claude_sdk, monkeypatch):
     monkeypatch.setattr(cl, "build_context_tools_server", lambda sdk, provider: SimpleNamespace(name="ctx"))
     b = _backend(claude_sdk)
     b.set_context_provider(SimpleNamespace())
-    opts = b._build_options(b._option_kwargs(tools=[], system_prompt=None), [])
+    opts = b._build_options(tools=[], system_prompt=None)
     allowed = opts.kwargs.get("allowed_tools", [])
     for qn in cl.CONTEXT_TOOL_QUALIFIED_NAMES:
         assert qn in allowed
@@ -183,7 +172,6 @@ async def test_run_idle_timeout_allows_slow_but_live_stream(claude_sdk):
             # Per-message gap stays under the idle budget while cumulative time exceeds it, proving the guard is
             # idle-based, not a total wall-clock cap.
             await asyncio.sleep(0.03)
-            await call_emit_intent(options, _EMIT_INPUT)
             yield _Msg(content=[_emit_tool_block()])
 
     b = _backend(claude_sdk)
@@ -354,10 +342,7 @@ def test_validate_emit_intent_input_rejects(tool_input, error_match):
 
 
 @pytest.mark.asyncio
-async def test_emit_intent_handler_validation_error_returns_is_error(claude_sdk):
-    accepted: list = []
-    server = mei.build_emit_intent_server(claude_sdk, accepted)
-    res = await server["tools"][0].handler({"intent_type": "bogus", "payload": {}})
+async def test_emit_intent_handler_validation_error_returns_is_error():
+    res = await mei._emit_intent_handler({"intent_type": "bogus", "payload": {}})
     assert res["is_error"] is True
     assert "validation_error" in res["content"][0]["text"]
-    assert accepted == []

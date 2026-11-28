@@ -194,7 +194,6 @@ def _state(tmp_path: Path) -> SimpleNamespace:
                 "tput": 130.0,
             },
         ],
-        gemm_tuning_attempts=[{"status": "failed", "decision": "REVERT", "error": "must not be persisted"}],
         last_gemm_tuning={"status": "ok", "decision": "KEEP", "tuned_file": str(tuned)},
         last_fusion={
             "status": "ok",
@@ -244,7 +243,6 @@ def test_build_remote_knowledge_publishes_config_and_kernel_from_state(tmp_path:
     assert not any(item.path.startswith("files/") for item in bundle.artifacts)
     assert isinstance(value["kernel"]["gemm"], dict)
     assert len(value["kernel"]["gemm"]["optimizations"]) == 1
-    assert "must not be persisted" not in json.dumps(value["kernel"]["gemm"])
     assert isinstance(value["kernel"]["fusion"], dict)
     assert len(value["kernel"]["fusion"]["items"]) == 1
     assert isinstance(value["kernel"]["rewrite"], dict)

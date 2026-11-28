@@ -6,7 +6,8 @@
 from __future__ import annotations
 
 import sqlite3
-from typing import Any, NamedTuple
+from dataclasses import dataclass
+from typing import Any
 from hyperloom_common.coerce import to_int
 from hyperloom_common.env import is_truthy
 from hyperloom.inference_optimizer.protocol.action_surfaces import REQUEST_KIND_TO_OWNED_ACTION
@@ -35,7 +36,8 @@ log = _logging.getLogger(__name__)
 SPECIALIST_GPU_REQUEST_EXCEEDS_CAPACITY = "specialist_gpu_request_exceeds_capacity"
 
 
-class GpuRequest(NamedTuple):
+@dataclass(frozen=True)
+class GpuRequest:
     """The cards a GPU specialist leases.
 
     Attributes:

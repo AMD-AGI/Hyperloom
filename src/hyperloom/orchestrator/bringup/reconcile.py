@@ -179,7 +179,7 @@ class Reconciler:
 
     async def _fail_dead_tasks(self, now_unix: float, report: ReconcileReport) -> None:
         """Fail every running task whose process is provably gone."""
-        report.failed_tasks.extend(await self._tasks.reclaim_dead_running(reason="reconciler_dead_holder"))
+        report.failed_tasks.extend(await self._tasks.reclaim_dead_running())
 
     async def _resolve_open_rounds(self, now_unix: float, report: ReconcileReport) -> None:
         """Advance completed owners without timing out active ownership."""

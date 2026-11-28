@@ -638,7 +638,7 @@ class _RenderMixin:
                 "+10% validated-gain crossing; wait for the pending "
                 "task to land, or continue with specialist / explore "
                 "work that does not need analysis.md. `roofline` and "
-                "`profile` are Coordinator-managed; a proposal for either "
+                "`profile` are Coordinator-managed; a delegate for either "
                 "is denied.)"
             )
         snap = cached.get("roofline_snapshot_id", "?")

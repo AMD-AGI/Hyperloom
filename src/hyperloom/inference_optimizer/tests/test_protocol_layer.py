@@ -62,15 +62,6 @@ def test_validate_envelope_unknown_intent_rejected():
         validate_envelope(envelope)
 
 
-def test_validate_envelope_refuses_the_retired_propose_action_type():
-    """``delegate`` queues every task; an agent that still sends the retired type is told so."""
-    envelope = {
-        "intents": [{"intent_type": "propose_action", "payload": {"action_name": "baseline", "predicted_gain_pct": 0}}]
-    }
-    with pytest.raises(IntentValidationError, match="'propose_action' not in allowed set"):
-        validate_envelope(envelope)
-
-
 # message_bus
 def test_topic_allowlist_v06_changes():
     """objection/vote/parliament topics are removed."""
@@ -107,19 +98,6 @@ async def test_message_bus_unknown_topic_rejected(db):
     msg = Message.new("Orchestration", "Kernel", "not_a_real_topic", {})
     with pytest.raises(ValueError, match="unknown topic"):
         await bus.append_and_seq(msg)
-
-
-@pytest.mark.asyncio
-async def test_message_bus_tail_filters_by_to_agent_with_broadcast(db):
-    bus = MessageBus(db)
-    await bus.append_and_seq(Message.new("Coordinator", "Orchestration", "event", {"kind": "phase_advance"}))
-    await bus.append_and_seq(Message.new("Robustness", "*", "alert", {"severity": "high", "summary": "stall"}))
-    await bus.append_and_seq(Message.new("Coordinator", "Kernel", "event", {"kind": "phase_advance"}))
-    msgs = await bus.tail(to_agent="Orchestration")
-    topics = {(m.from_agent, m.to_agent) for m in msgs}
-    assert ("Coordinator", "Orchestration") in topics
-    assert ("Robustness", "*") in topics
-    assert ("Coordinator", "Kernel") not in topics
 
 
 @pytest.mark.asyncio

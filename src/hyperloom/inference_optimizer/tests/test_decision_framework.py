@@ -58,13 +58,11 @@ async def test_run_gemm_tuning_response_records_to_shared_state(
             }
         )
 
-        # The E2E validator rewrites the stored result to its measured outcome, and the history keeps exactly one row
-        # for the one dispatch.
+        # The E2E validator rewrites the stored result to its measured outcome.
         last = c.shared_state.last_gemm_tuning
         assert last["status"] == "complete"
         assert last["best_speedup"] == 1.2
         assert last["e2e_validated"] is True
-        assert c.shared_state.gemm_tuning_attempts == [last]
         assert "last_gemm_tuning=" in c.shared_state.to_prompt_summary()
         # State persisted across reload.
         reloaded = SharedState.load_or_init(session_dir)
@@ -85,7 +83,6 @@ async def test_a_gemm_lane_the_phase_could_not_fund_is_no_attempt_and_stays_arme
         await c.phase_kernel._handle_gemm_tuning_result(forge_lane_budget._unfunded_lane_skip(LANE_GEMM))
 
         assert c.shared_state.last_gemm_tuning == {}
-        assert c.shared_state.gemm_tuning_attempts == []
         assert c.phase_kernel._gemm_tuning_required_before_kernel_opt()
     finally:
         await c.stop()
@@ -174,7 +171,7 @@ async def test_kernel_entry_auto_runs_gemm_tuning_for_fp8_sglang(
         await c.phase_kernel.run_agent(SimpleNamespace(task=SimpleNamespace(params={"from_phase": "FRAMEWORK_AGENT"})))
 
         assert calls
-        assert c.shared_state.gemm_tuning_attempts
+        assert c.shared_state.last_gemm_tuning
         assert c.shared_state.current_best["action"] == "gemm_tuning"
         # The measured rebench, not baseline_tput * best_speedup (1024.0).
         assert c.shared_state.current_best["tput"] == 900.0

@@ -16,12 +16,10 @@ from types import ModuleType, SimpleNamespace
 from typing import Any
 from unittest import mock
 
-import jsonschema
 import pytest
 import yaml
 
 from hyperloom.inference_optimizer.session.paths import make_session_dir
-from hyperloom.orchestrator.mcp_tool_names import EMIT_INTENT_TOOL_QUALIFIED, MCP_SERVER_NAME
 from hyperloom.orchestrator.tests._helpers import git_commit_all, init_git_repo  # noqa: F401
 from hyperloom.orchestrator.tests._fixtures import (  # noqa: F401
     NoLaunchBackendInstalled,
@@ -228,33 +226,6 @@ def _sdk_tool(name: str, description: str, input_schema: dict[str, Any]):
     return lambda handler: SimpleNamespace(
         name=name, description=description, input_schema=input_schema, handler=handler
     )
-
-
-async def call_emit_intent(options: Any, tool_input: Any) -> dict[str, Any]:
-    """Call the ``emit_intent`` tool ``options`` registers the way the SDK does: its input schema first, then its handler."""
-    tool = options.kwargs["mcp_servers"][MCP_SERVER_NAME]["tools"][0]
-    try:
-        jsonschema.validate(instance=tool_input, schema=tool.input_schema)
-    except jsonschema.ValidationError as exc:
-        return {"content": [{"type": "text", "text": f"Input validation error: {exc.message}"}], "is_error": True}
-    return await tool.handler(tool_input)
-
-
-def sdk_messages(messages: list[Any]):
-    """A ``claude_agent_sdk.query`` that streams ``messages`` and makes each ``emit_intent`` call they carry.
-
-    Claude Code runs a tool call when the assistant message that carries it is complete, so the call is made before
-    the message is streamed on.
-    """
-
-    async def _query(*, prompt: Any, options: Any):
-        for message in messages:
-            for block in getattr(message, "content", None) or ():
-                if getattr(block, "name", None) == EMIT_INTENT_TOOL_QUALIFIED:
-                    await call_emit_intent(options, block.input)
-            yield message
-
-    return _query
 
 
 @pytest.fixture

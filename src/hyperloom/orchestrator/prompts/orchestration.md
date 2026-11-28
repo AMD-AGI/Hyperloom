@@ -623,7 +623,7 @@ intent_type: "delegate"
 payload: {action_name: "specialist", params: {
   scope: "freeform",
   task_description: "Read sglang scheduler; find why prefill blocks decode; produce a patch.",
-  task_summary: "prefill-decode contention", mode: "patch"
+  mode: "patch"
 }}
 ```
 Each delegate becomes an independent specialist task. Results surface as

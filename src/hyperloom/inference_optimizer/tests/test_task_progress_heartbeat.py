@@ -178,11 +178,11 @@ async def test_dead_task_requires_local_owner_evidence(tmp_path, monkeypatch, ow
     )
     async with sub.tasks.db.transaction() as cur:
         cur.execute("UPDATE leases SET owner_scope=?, pid=12345", (owner_scope,))
-    reclaimed = await sub.tasks.reclaim_dead_running(reason="test_dead")
+    reclaimed = await sub.tasks.reclaim_dead_running()
     if owner_scope == "test-node" and dead:
         assert reclaimed == [task.task_id]
         row = await sub.tasks.get(task.task_id)
-        assert row.history[-1]["evidence"] == {"reason": "test_dead", "dead_pid": 12345}
+        assert row.history[-1]["evidence"] == {"reason": "reconciler_dead_holder", "dead_pid": 12345}
     else:
         assert reclaimed == []
         assert (await sub.tasks.get(task.task_id)).state == "running"

@@ -1030,17 +1030,15 @@ class TestHandleGemmTuningResult:
             }
         )
 
-        attempts = coord.shared_state.gemm_tuning_attempts
-        assert len(attempts) == 1
-        assert attempts[0]["engine"] == "forge"
-        assert attempts[0]["e2e_validated"] is True
-        assert attempts[0]["decision"] == "REVERT"
-        assert attempts[0]["best_speedup"] == 1.5
-        assert coord.shared_state.last_gemm_tuning["decision"] == "REVERT"
+        last = coord.shared_state.last_gemm_tuning
+        assert last["engine"] == "forge"
+        assert last["e2e_validated"] is True
+        assert last["decision"] == "REVERT"
+        assert last["best_speedup"] == 1.5
 
     @pytest.mark.asyncio
     async def test_forge_e2e_keep_names_the_artifact_the_stack_recorded(self, tmp_path, monkeypatch):
-        """The history row and the stack entry must name the same artifact."""
+        """The recorded result and the stack entry must name the same artifact."""
         coord = _coord(tmp_path, baseline_tput=100.0, framework="sglang")
         fake = _make_integrate([{"decision": "KEEP", "new_tput": 130.0, "gain_pct": 30.0}])
         monkeypatch.setattr(krh_mod, "integrate_handler", fake)
@@ -1062,10 +1060,10 @@ class TestHandleGemmTuningResult:
         stack = coord.shared_state.optimization_stack
         assert stack, "a KEEP must land on the stack"
         assert stack[-1]["action"] == "gemm_tuning"
-        attempts = coord.shared_state.gemm_tuning_attempts
-        assert attempts[0]["decision"] == "KEEP"
-        assert attempts[0]["tuned_file"], "history row must name the artifact"
-        assert attempts[0]["tuned_file"] == stack[-1]["tuned_file"]
+        last = coord.shared_state.last_gemm_tuning
+        assert last["decision"] == "KEEP"
+        assert last["tuned_file"], "the recorded result must name the artifact"
+        assert last["tuned_file"] == stack[-1]["tuned_file"]
 
     @pytest.mark.asyncio
     async def test_a_second_round_claims_its_own_artifact(self, tmp_path, monkeypatch):
@@ -1099,7 +1097,7 @@ class TestHandleGemmTuningResult:
         )
         await coord.phase_kernel._handle_gemm_tuning_result(_result("/round1.json"))
 
-        first_file = coord.shared_state.gemm_tuning_attempts[-1]["tuned_file"]
+        first_file = coord.shared_state.last_gemm_tuning["tuned_file"]
         assert first_file, "round one must name its artifact"
         stack_len = len(coord.shared_state.optimization_stack)
 
@@ -1112,7 +1110,7 @@ class TestHandleGemmTuningResult:
 
         # Same (action, variant_name): the append is skipped by design.
         assert len(coord.shared_state.optimization_stack) == stack_len
-        second_file = coord.shared_state.gemm_tuning_attempts[-1]["tuned_file"]
+        second_file = coord.shared_state.last_gemm_tuning["tuned_file"]
         assert second_file and second_file != first_file
 
     @pytest.mark.asyncio
@@ -1136,7 +1134,7 @@ class TestHandleGemmTuningResult:
         )
 
         assert coord.shared_state.optimization_stack == []
-        assert not coord.shared_state.gemm_tuning_attempts[0].get("tuned_file")
+        assert not coord.shared_state.last_gemm_tuning.get("tuned_file")
 
     @pytest.mark.asyncio
     async def test_promotes_on_the_measured_tput_not_the_micro_speedup(self, tmp_path, monkeypatch):

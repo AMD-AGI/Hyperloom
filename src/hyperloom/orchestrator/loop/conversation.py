@@ -16,7 +16,6 @@ from ..phases import dispatch_order
 from ..phases import machine_state as _phase_state
 from ..phases import phase_transitions
 from ..phases.proposal_bench import carried_fingerprints, explore_grid_fingerprints, waiting_proposal_rows
-from ..policy.custom_specialist import custom_only_framework
 from ..policy.projection import resource_pools_summary
 from ..specialists.in_flight import in_flight_domains
 from ..specialists.reap_watch import newest_activity, specialist_activity_paths
@@ -646,7 +645,8 @@ class ConversationCollaborator(CoordinatorCollaborator):
         takes a turn when the phase or the queued and running tasks differ from what its last settled turn left, when
         its inbox holds a message that asks something of it, or once the heartbeat elapses.
         """
-        if custom_only_framework(self.shared_state):
+        state = self.shared_state
+        if state.custom_specialist_only and (state.phase or "").upper() == _phase_state.PHASE_FRAMEWORK_AGENT:
             return False
         if now_unix - self._settled_at >= _ORCHESTRATION_HEARTBEAT_SEC:
             return True

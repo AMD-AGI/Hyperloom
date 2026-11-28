@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Rules keeping Coordinator-dispatched specialists Coordinator-owned, and the scope of the custom-only mode."""
+"""The rule keeping Coordinator-dispatched specialists Coordinator-owned."""
 
 from __future__ import annotations
 
@@ -10,13 +10,7 @@ from typing import Any
 from ..specialists.domains import authoring_domain_for_framework, get_domain, is_custom_specialist_dispatch
 from .denial import PolicyDenied
 
-__all__ = [
-    "custom_only_framework",
-    "deny_coordinator_dispatched_delegate",
-]
-
-# Mirrors ``machine_state.PHASE_FRAMEWORK_AGENT``: the policy package may not import the phase machine.
-_FRAMEWORK_AGENT_PHASE: str = "FRAMEWORK_AGENT"
+__all__ = ["deny_coordinator_dispatched_delegate"]
 
 
 def deny_coordinator_dispatched_delegate(params: dict[str, Any]) -> None:
@@ -34,10 +28,3 @@ def deny_coordinator_dispatched_delegate(params: dict[str, Any]) -> None:
             rule="specialist_domain_coordinator_dispatched",
             hint=f"To author a fix alongside it, dispatch domain={authoring_domain_for_framework(params.get('framework'))!r}.",
         )
-
-
-def custom_only_framework(shared_state: Any) -> bool:
-    """Whether the session is in FRAMEWORK_AGENT in custom-specialist-only mode, where only the custom work runs."""
-    if not getattr(shared_state, "custom_specialist_only", False):
-        return False
-    return str(shared_state.phase or "").strip().upper() == _FRAMEWORK_AGENT_PHASE

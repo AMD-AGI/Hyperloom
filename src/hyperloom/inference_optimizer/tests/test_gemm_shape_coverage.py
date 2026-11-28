@@ -530,7 +530,6 @@ class TestE2EValidationFailsOpen:
         state = SimpleNamespace(
             save=saved.append,
             macro_cycle=0,
-            gemm_tuning_attempts=[],
             last_gemm_tuning=None,
         )
         phase = SimpleNamespace(
@@ -564,7 +563,7 @@ class TestE2EValidationFailsOpen:
 
         await KernelPhase._handle_gemm_tuning_result(phase, result)
 
-        assert [attempt["backend"] for attempt in state.gemm_tuning_attempts] == ["forge"]
+        assert state.last_gemm_tuning["backend"] == "forge"
         fault = result["e2e_results"]["faults"][0]
         assert fault["error_class"] == "e2e_validation_exception"
         assert "RuntimeError: e2e exploded" in fault["error"]
@@ -629,5 +628,5 @@ class TestE2EValidationFailsOpen:
 
         await KernelPhase._handle_gemm_tuning_result(phase, result)
 
-        assert [attempt["backend"] for attempt in state.gemm_tuning_attempts] == ["forge"]
+        assert state.last_gemm_tuning["backend"] == "forge"
         assert "e2e_results" not in result

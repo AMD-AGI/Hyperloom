@@ -106,6 +106,17 @@ async def test_the_pool_is_read_when_the_intent_is_judged(coord):
     assert len(await coord.tasks.by_state("queued")) == 1
 
 
+async def test_an_unfundable_request_is_what_a_specialist_is_told_in_a_phase_that_offers_none(coord):
+    """PRELUDE offers no specialist, and the request is the refusal no later phase lifts."""
+    coord.shared_state.phase = "PRELUDE"
+    _pools(coord, serving_disjoint=1)
+
+    await _delegate(coord, needs_gpu=True, gpu_count=2)
+
+    denied = [m.payload for m in await coord.bus.tail(topic="observation") if m.payload.get("kind") == "policy_denied"]
+    assert [d["rule"] for d in denied] == [SPECIALIST_GPU_REQUEST_EXCEEDS_CAPACITY]
+
+
 _FREEFORM = {"scope": "freeform", "task_description": "micro-bench the decode attention kernel"}
 _DOMAIN = {"domain": "serving_specialist", "gap_canonical_id": "gap.framework.x.session-1"}
 _BENCH = {**_FREEFORM, "mode": "patch", "bench": True}

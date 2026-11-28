@@ -10,6 +10,7 @@ from unittest import mock
 
 import pytest
 
+from hyperloom.orchestrator.bus import message_bus
 from hyperloom.orchestrator.bus.message_bus import Message, MessageBus
 from hyperloom.orchestrator.bus.resource_lock import SqliteLeaseBackend
 from hyperloom.orchestrator.bus.storage.connection import SqliteConnection, open_connection
@@ -96,7 +97,7 @@ async def test_corrupt_expires_at_does_not_abort_acquire(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_replay_for_respects_limit(tmp_path):
+async def test_replay_for_reads_the_oldest_rows_up_to_the_replay_limit(tmp_path, monkeypatch):
     db = SqliteConnection(tmp_path / "bus.db")
     bus = MessageBus(db)
     for i in range(20):
@@ -104,6 +105,7 @@ async def test_replay_for_respects_limit(tmp_path):
             Message.new(from_agent="coord", to_agent="orchestration", topic="observation", payload={"n": i})
         )
 
-    assert len(await bus.replay_for("orchestration", after_seq=0, limit=5)) == 5
-    assert len(await bus.replay_for("orchestration", after_seq=0, limit=100)) == 20
+    assert len(await bus.replay_for("orchestration", after_seq=0)) == 20
+    monkeypatch.setattr(message_bus, "_REPLAY_LIMIT", 5)
+    assert [m.payload["n"] for m in await bus.replay_for("orchestration", after_seq=0)] == [0, 1, 2, 3, 4]
     db.close()

@@ -63,9 +63,10 @@ it.
   is not supported. See [Upgrade](reference/upgrade.md).
 - **Two policy denials that could not fire are removed.** With Orchestration
   the only agent that takes turns, the optimizer no longer keeps a registry of
-  agent roles or narrows the intent vocabulary to one. What Orchestration is
-  offered is unchanged: the `emit_intent` schema, the output-format block and
-  its tool list are what they were, because its set was every intent type. A
+  agent roles or narrows the intent vocabulary to one. This removal changes
+  none of what Orchestration is offered (the `emit_intent` schema, the
+  output-format block, its tool list), because its set was every intent type;
+  the entries below on `propose_action` and the context tools do. A
   `policy_denied` observation no longer carries rule `role` (an unknown
   agent, or an intent type outside the agent's set) or rule
   `custom_specialist_only` (a `specialist`, `explore` or `integrate_patch`
@@ -80,9 +81,11 @@ it.
 - **Records that nothing produced or read are no longer written.**
   `state.json` drops `baseline_eager_fallback` (a one-shot baseline retry with
   CUDA graphs disabled, armed by an error class nothing returns any more) and
-  `include_patches` on the rows of `kb_stage_outbox`; the audit rows no longer
-  use the decisions `skipped` or `discarded` for a roofline, a profile or a
-  baseline, which could not be reached. `storage/coordinator.db` has no
+  `include_patches` on the rows of `kb_stage_outbox`; `last_baseline` never
+  has the decision `discarded`, which could not be reached (the roofline and
+  profile rows that could not be `skipped` or `discarded` either are removed
+  altogether, see the entry on a task's result below). `storage/coordinator.db`
+  has no
   `round_events` table and no `events.in_reply_to` column, a `response` event
   carries no `in_reply_to` key, and an inline kernel step appends no
   `kernel_step_running` observation, so a session with long kernel steps
@@ -163,8 +166,8 @@ it.
   refused, by the phase (`phase_incompatible`). The `stale_stack_revalidation`
   and `current_best_drift` observations are no longer sent; a stale stack
   revalidation is still discarded. The Claude backend keeps every
-  `emit_intent` call of a turn that was answered `ok` and no longer drops a
-  repeated one that arrived in Claude Code's `__unparsedToolInput` wrapper. See
+  `emit_intent` call of a turn and no longer drops a repeated one that
+  arrived in Claude Code's `__unparsedToolInput` wrapper. See
   [Upgrade](reference/upgrade.md).
 - **Five Orchestration context tools are removed, and the prompt stops
   describing what a turn does not carry.** **Breaking** for an `--orch-prompt`
@@ -224,7 +227,8 @@ it.
   `state.json` keys, which are removed: `baseline_attempts`,
   `profile_attempts`, `explore_attempts`, `roofline_attempts`, `last_profile`,
   `last_explore`, `last_roofline`, `explore_search.rejected`,
-  `warm_history_injected` and `failures`. `last_baseline` stays as the record
+  `gemm_tuning_attempts`, `warm_history_injected` and `failures`.
+  `last_baseline` stays as the record
   of the latest baseline and the decision on it (`anchor_held` included), and
   so do `last_action_failures` and `explore_search.last_round`. Failure
   packets live only in `reports/failures/<failure_id>.json`: `get_failure` and
@@ -236,7 +240,8 @@ it.
   `--resume-from`, an integrate KEEP whose promotion a crash cut off is
   adopted from the task row and the `pending_integrate` sentinel alone; the
   two searches of the event log for `kept` results are gone, and with them
-  the `orphaned_keep*` reports and the retry on every start of a KEEP the
+  the `orphaned_keep*` reports, the `pending_integrate_scan_failed` warning
+  and the retry on every start of a KEEP the
   promotion gate had refused. A `--reset-state` no longer adopts the
   discarded state's kept patches again: they stay applied to the framework
   tree with no stack row, so the next baseline is measured with them and the
@@ -276,12 +281,15 @@ it.
   with its rules `specialist_freeform_wave_too_large` and
   `specialist_freeform_wave_invalid_task`: send one `delegate` per task; a
   `tasks` list beside a `task_description`, or beside a `domain` and a
-  `gap_canonical_id`, is not read. The
+  `gap_canonical_id`, is not read, and neither is `task_summary`, which the
+  prompt's free-form example no longer sends. The
   operator-defined specialist is created by the Coordinator itself, so its
   dispatch row has `dispatch_class` `coordinator` instead of `llm`, it writes
   no `task_queued` event, and a refused admission is a
   `custom_specialist_refused` observation and a log line naming the rule
-  instead of a `policy_denied` addressed to Orchestration. See
+  instead of a `policy_denied` addressed to Orchestration. The prompt's
+  `analysis_md=` line before the first TraceLens snapshot says a `delegate`
+  of `roofline` or `profile` is denied, where it said a proposal. See
   [Upgrade](reference/upgrade.md).
 - **PolicyGate keeps no copy of the session's resources and is not run a
   second time at dispatch.** The bring-up round rule
@@ -337,8 +345,8 @@ it.
   research scout that returns more than 50 hints no longer pushes the gaps
   that carry explore and specialist outcomes off the 50-row ledger. See
   [Upgrade](reference/upgrade.md).
-- **The Coordinator stops writing bus rows for its own agent to read back,
-  and an `emit_intent` call is decided once.** The `backend_error`,
+- **The Coordinator stops writing bus rows for its own agent to read
+  back.** The `backend_error`,
   `backend_unhealthy` and `reactor_exception` observations, the
   `phase_transition` event and the `baseline_not_promoted` event are no
   longer written to `storage/coordinator.db`. Each restated something the
@@ -357,16 +365,7 @@ it.
   `observation` with the topic it named in its payload, so a message can no
   longer be read back as a `delegated_result` or a `response`; the bus has no
   `decision` topic, and `event_counts_by_topic` and `highlights` in
-  `reports/final.json` follow. Inbox lines no longer print `msg_id=`.
-  **Fixed:** on the Claude backend an `emit_intent` call that was answered
-  with an error (a `payload` or a whole input sent as a JSON string, or an
-  extra top-level key) was routed anyway, so the re-sent intent ran twice;
-  an intent is now routed only when its call was answered `ok`. A gateway
-  that delivers every tool input as a string now gets no intent through and
-  the session stops after 50 intent-less turns, where it used to run every
-  intent while reporting each as failed. The tool's server is built per
-  attempt, so a fault in building it fails the turn as a provider call does
-  instead of the launch. See
+  `reports/final.json` follow. Inbox lines no longer print `msg_id=`. See
   [Upgrade](reference/upgrade.md).
 - **forge-loop runs every round as lanes and has no planning stage.** Every
   iteration is one round: one lane per focus the Analysis Agent divides its

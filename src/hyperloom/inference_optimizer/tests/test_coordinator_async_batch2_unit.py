@@ -2208,6 +2208,30 @@ async def test_handle_intent_broadcasts_an_alert(coord: Coordinator) -> None:
     assert [(m.to_agent, m.payload) for m in await coord.bus.tail(topic="alert")] == [("*", alert)]
 
 
+_ROUTABLE_PAYLOADS = {
+    IntentType.DELEGATE: {"action_name": "baseline", "params": {}},
+    IntentType.REQUEST: {"target_agent": "kernel_agent", "kind": "trace_analyze"},
+    IntentType.EXTEND_LEASE: {"task_id": "no-such-task", "extra_sec": 60},
+    IntentType.PRUNE_BRANCH: {"family": "explore", "reason": "plateau"},
+    IntentType.ESCALATE_STRATEGY_CHANGE: {"reason": "stalled", "next_action_hint": "baseline"},
+    IntentType.SEND_MESSAGE: {"topic": "status", "body_md": "ok"},
+    IntentType.ALERT: {"severity": "high", "summary": "server wedged"},
+}
+
+
+@pytest.mark.parametrize("intent_type", list(IntentType), ids=lambda intent_type: intent_type.value)
+@pytest.mark.asyncio
+async def test_every_intent_type_is_routed_to_a_handler(coord: Coordinator, intent_type: IntentType) -> None:
+    """A type the vocabulary holds and the router cannot route would end every such intent as a handler exception."""
+    coord.shared_state.phase = "PRELUDE"
+
+    await coord.router.handle_intent("orchestration", Intent(type=intent_type, payload=_ROUTABLE_PAYLOADS[intent_type]))
+
+    observed = [m.payload.get("kind") for m in await coord.bus.tail(topic="observation")]
+    assert "handle_intent_exception" not in observed
+    assert coord.shared_state.crash_count == 0
+
+
 # -- advance_phase_if_needed -----------------------------------------------
 @pytest.mark.asyncio
 async def test_advance_phase_escalation_transition(coord: Coordinator, monkeypatch) -> None:
@@ -2333,6 +2357,37 @@ def _delegate(action_name: str, params=None) -> Intent:
         "params": params if params is not None else dict(_DELEGATE_PARAMS.get(action_name, {})),
     }
     return Intent(type=IntentType.DELEGATE, payload=payload)
+
+
+@pytest.mark.parametrize(
+    ("named", "stamped"),
+    [
+        pytest.param({}, {"source_phase": "FRAMEWORK_AGENT", "lever_kind": None}, id="no-lever-named"),
+        pytest.param(
+            {"pr_url": "https://example.com/pull/1"},
+            {"source_phase": "FRAMEWORK_AGENT", "lever_kind": "upstream_pr"},
+            id="an-upstream-pr",
+        ),
+    ],
+)
+@pytest.mark.asyncio
+async def test_a_delegated_patch_specialist_is_queued_with_its_owner(
+    coord: Coordinator, tmp_path, monkeypatch, named: dict, stamped: dict
+) -> None:
+    """The task is where the owner is frozen: the integrate_patch of what the specialist delivers reads it there."""
+    import hyperloom.orchestrator.specialists.runner as runner_mod
+
+    # The session's own git tree is the source; a framework installed on the host must not answer for it.
+    monkeypatch.setattr(runner_mod, "resolve_framework_tree", lambda _framework: "")
+    (tmp_path / "framework" / ".git").mkdir(parents=True)
+    coord.shared_state.framework_repo_path = str(tmp_path / "framework")
+    coord.shared_state.phase = "FRAMEWORK_AGENT"
+    params = {"scope": "freeform", "mode": "patch", "task_description": "fix the scheduler crash", **named}
+
+    await coord.router.handle_intent("orchestration", _delegate("specialist", params))
+
+    (task,) = await coord.tasks.queued()
+    assert {key: task.params.get(key) for key in ("source_phase", "lever_kind")} == stamped
 
 
 async def _baselines(coord: Coordinator) -> list:

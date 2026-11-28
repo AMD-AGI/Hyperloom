@@ -255,6 +255,17 @@ async def test_a_delegated_baseline_is_denied_while_a_round_holds_the_machine(co
 
 
 @pytest.mark.asyncio
+async def test_the_round_is_what_a_baseline_is_told_in_a_phase_that_offers_none(coord):
+    """ENABLEMENT offers no baseline, and the round is the refusal that holds wherever one is offered."""
+    coord.shared_state.phase = "ENABLEMENT"
+    await _open_round(coord.rounds, holder_task_id="spec-abc")
+
+    await coord.router.handle_intent("orchestration", _baseline_delegate())
+
+    assert await _denied_rules(coord) == [_ROUND_RULE]
+
+
+@pytest.mark.asyncio
 async def test_a_round_opened_after_the_ticks_repair_pass_denies_in_the_same_tick(coord):
     """The pass at the top of the tick is not where the rule gets its answer: the round store is."""
     await coord.reconciler.run(time.time())

@@ -360,8 +360,9 @@ rule ids can drop them; every other rule id is unchanged.
 
 The `emit_intent` tool no longer refuses a call with `this role cannot emit`.
 An intent type outside the vocabulary is refused as before, by the tool schema
-and with `unknown intent_type`. The tool's schema, the output-format block and
-Orchestration's tool list do not change.
+and with `unknown intent_type`. Removing the role registry changes none of the
+tool's schema, the output-format block and Orchestration's tool list; the
+sections below on `propose_action` and on the context tools do.
 
 ### Recommended: stop reading the records that nothing produced or read
 
@@ -611,11 +612,10 @@ that acts on it, and none of them is recorded as a failed action.
   that measured an older recipe generation is still discarded, with the same
   `not validating` warning in the log. A current one still restamps
   `cumulative_gain_validated`, which is where a lower re-measurement shows.
-* The Claude backend keeps every `emit_intent` call of a turn that was
-  answered `ok`. 1.2.x dropped a call whose input arrived in Claude Code's
-  `__unparsedToolInput` wrapper when the turn had already carried the same
-  intent, and logged `claude fallback intent deduped`. The wrapper is still
-  decoded.
+* The Claude backend keeps every `emit_intent` call of a turn. 1.2.x dropped
+  a call whose input arrived in Claude Code's `__unparsedToolInput` wrapper
+  when the turn had already carried the same intent, and logged `claude
+  fallback intent deduped`. Both forms of the wrapper are still decoded.
 
 ### Required: five Orchestration context tools are removed
 
@@ -790,14 +790,15 @@ In `state.json`:
 | `last_roofline`, `roofline_attempts` | `last_trace_analyze` and `roofline_snapshots` for what each roofline produced, `roofline_failure_streak` for failures in a row; the `roofline` rows of `tasks`. |
 | `last_explore`, `explore_attempts` | `explore_search.last_round` and `explore_search.tested` for what the rounds measured; the `explore` rows of `tasks`. |
 | `explore_search.rejected` | The rows of `explore_search.tested` whose `outcome` is not `KEEP`. Each rejected row was a shorter copy of its `tested` row. |
+| `gemm_tuning_attempts` | `last_gemm_tuning` for the latest GEMM tuning result and its end-to-end verdict; the `result.json` in the workspace of each earlier tuning run. Nothing read the list. |
 | `warm_history_injected` | Nothing read it but the copy below. |
 | `failures` | The files `reports/failures/<failure_id>.json`, one per failed explore variant, which were written beside it. |
 
 `last_baseline` stays as it was, `extras.anchor_held` included: a result is
 announced before the write-back decides on it, so this is the only record of a
 re-baseline that measured and did not move the anchor. `last_action_failures`,
-`explore_search.last_round`, `gain_per_stack_entry`, `last_gemm_tuning` and
-`gemm_tuning_attempts` stay too.
+`explore_search.last_round`, `gain_per_stack_entry` and `last_gemm_tuning`
+stay too.
 
 The rows of a warm recipe's `what_failed` are no longer copied into
 `explore_search.rejected` after the first baseline. They are still in
@@ -871,7 +872,10 @@ Four behaviours change on `--resume-from`:
   the `pending_integrate` sentinel alone. This is where 1.2.x looked second;
   it first searched every `delegated_result` event for a `kept` result. The
   row is written before the event and holds the same result, so the same
-  KEEPs are adopted, and one whose event was never written is too.
+  KEEPs are adopted, and one whose event was never written is too. The
+  `resume_consistency` warning `pending_integrate_scan_failed`, which
+  reported that the event search could not read the log and left the
+  sentinel for the next start, is no longer written.
 * The resume no longer searches the events for a `kept` result that is not on
   `optimization_stack`. That search re-tried on every start a KEEP the
   promotion gate had refused, and after `--reset-state` replayed the KEEPs of
@@ -939,7 +943,9 @@ Do these first:
   list is not read. A delegate that names a `domain` and a
   `gap_canonical_id` and carries `tasks` was a wave of freeform tasks in
   1.2.x too: it is now one specialist of that domain on that gap, the list
-  is not read, and nothing is denied.
+  is not read, and nothing is denied. `task_summary` is not read on any
+  delegate: only the wave read it, and the prompt's free-form example no
+  longer sends it.
 
 The key of a task (`tasks.idempotency_key` in `storage/coordinator.db`, shown
 in the `=== Tasks in flight ===` block of the prompt) is now always derived by
@@ -1027,7 +1033,9 @@ Two smaller changes:
   `task_description`, and its hard rules say that the Coordinator keys every
   delegate. The hint of rule `specialist_freeform_empty_description` reads
   `A freeform specialist needs a natural-language task_description (the whole
-  mandate).`
+  mandate).` Before the first TraceLens snapshot, the `analysis_md=` line of
+  the session-state block ends `a delegate for either is denied` where it
+  said `a proposal`.
 
 ### Required: the gap ledger holds no row derived from the objective, the failure log or the research hints
 
@@ -1255,12 +1263,12 @@ Smaller changes:
   gpu_count=... not an integer` is no longer logged; such a value takes the
   default count.
 
-### Recommended: stop reading the bus rows the Coordinator wrote for its own agent; a refused `emit_intent` call is not routed
+### Recommended: stop reading the bus rows the Coordinator wrote for its own agent
 
 The Coordinator told Orchestration several things it already held as state by
 writing a row to the `events` table of `storage/coordinator.db`, which the
 next turn's inbox rendered: a failed LLM call, a phase boundary, a failed
-baseline. Those rows are gone, and an `emit_intent` call is decided once.
+baseline. Those rows are gone.
 
 Rows that are no longer written:
 
@@ -1319,36 +1327,10 @@ Rows that change:
   printed `msg_id=<32 hex>` after `seq`, an id nothing Orchestration can send
   refers to.
 
-`emit_intent` on the Claude backend:
+Log lines that change:
 
-* An intent is routed when, and only when, its `emit_intent` call was
-  answered `ok`. 1.2.x answered the call from the tool's handler and then
-  read the intent a second time out of the message stream with a looser
-  rule, so three inputs were answered with an error and routed anyway: a
-  `payload` sent as a JSON string, a whole input sent as a JSON string, and
-  an input with a key beside `intent_type` and `payload`. Orchestration,
-  told the call had failed, sent the intent again and both copies ran. Such
-  a call now leaves no intent. A deployment whose gateway delivers every
-  tool input as a string therefore gets no intent through and stops after
-  50 turns without one (`stop_reason=backend_unhealthy`, after a
-  `no_intent_streak` observation), where 1.2.x ran each intent while telling
-  the model it had failed. Such a deployment needs an endpoint that returns
-  tool inputs as JSON objects before it upgrades. A tool-use block that
-  Claude Code streamed but did not run, one under the bare name `emit_intent`
-  among them, was read as an intent too and no longer is. Claude Code's
-  `__unparsedToolInput` wrapper is still accepted, as the tool schema says.
-* The tool's server is built for each attempt of a turn, not when the
-  backend is constructed. An SDK that lacks `tool` or `create_sdk_mcp_server`
-  still ends the launch, and so does one that cannot build an in-process
-  server at all, because the context tools' server is still built at
-  start-up. A fault only the `emit_intent` server hits no longer ends the
-  launch: every turn fails as a provider call does, with a `status=error`
-  row in `reports/trace/llm_calls.jsonl` and the back-off, and the session
-  stops with `stop_reason=backend_unhealthy` after an hour.
-* Intents are still routed after the turn has ended, and an attempt of a
-  turn that fails still takes the intents it had acknowledged with it.
-* The log lines `context_tool pull:` and `context tool handler ... raised`
-  name the tool (`get_inbox`) where they named an internal method (`inbox`).
+* `context_tool pull:` and `context tool handler ... raised` name the tool
+  (`get_inbox`) where they named an internal method (`inbox`).
 
 ---
 

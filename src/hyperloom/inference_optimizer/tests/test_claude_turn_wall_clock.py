@@ -295,8 +295,8 @@ async def test_a_cancelled_caller_whose_close_never_finishes_still_gets_its_cli_
 
 def test_each_turn_tags_its_cli_with_its_own_marker(claude_sdk):
     backend = _backend(claude_sdk, _StallingSdk("silent"), turn_timeout_s=1.0)
-    env_a = backend._option_kwargs(tools=[], system_prompt=None, turn_marker="a")["env"]
-    env_b = backend._option_kwargs(tools=[], system_prompt=None, turn_marker="b")["env"]
+    env_a = backend._build_options(tools=[], system_prompt=None, turn_marker="a").kwargs["env"]
+    env_b = backend._build_options(tools=[], system_prompt=None, turn_marker="b").kwargs["env"]
     assert env_a["HYPERLOOM_CLAUDE_TURN_ID"] == "a"
     assert env_b["HYPERLOOM_CLAUDE_TURN_ID"] == "b"
 

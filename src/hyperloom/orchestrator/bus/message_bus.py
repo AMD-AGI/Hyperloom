@@ -115,29 +115,15 @@ class MessageBus:
         return msg.seq
 
     async def record_observation(self, source: str, topic: str, payload: dict) -> None:
-        """Broadcast one ``source`` message under ``topic`` to every agent."""
+        """Append one ``source`` message under ``topic``, addressed to ``*``."""
         await self.append_and_seq(Message.new(source, "*", topic, payload))
 
-    async def tail(
-        self,
-        n: int = 200,
-        *,
-        to_agent: str | None = None,
-        topic: str | None = None,
-    ) -> list[Message]:
-        """Return the most recent messages matching the given filters."""
-        clauses: list[str] = []
-        params: list[Any] = []
-        if to_agent is not None:
-            clauses.append("(to_agent = ? OR to_agent = '*')")
-            params.append(to_agent)
-        if topic is not None:
-            clauses.append("topic = ?")
-            params.append(topic)
-        where = f" WHERE {' AND '.join(clauses)}" if clauses else ""
-        sql = f"SELECT * FROM events{where} ORDER BY seq DESC LIMIT ?"  # nosec B608 - clauses are selected from fixed templates.
-        params.append(n)
-        rows = await self.db.fetchall(sql, params)
+    async def tail(self, n: int = 200, *, topic: str | None = None) -> list[Message]:
+        """Return the ``n`` most recent messages, newest first; ``topic`` keeps only that topic's."""
+        if topic is None:
+            rows = await self.db.fetchall("SELECT * FROM events ORDER BY seq DESC LIMIT ?", (n,))
+        else:
+            rows = await self.db.fetchall("SELECT * FROM events WHERE topic = ? ORDER BY seq DESC LIMIT ?", (topic, n))
         return [Message.from_row(r) for r in rows]
 
     def count_sync(self) -> int:
@@ -160,20 +146,14 @@ class MessageBus:
         )
         return [Message.from_row(row) for row in rows]
 
-    async def replay_for(
-        self,
-        agent: str,
-        *,
-        after_seq: int,
-        limit: int = _REPLAY_LIMIT,
-    ) -> list[Message]:
-        """Inbox for ``agent``: every message past ``after_seq`` it did not send itself.
+    async def replay_for(self, agent: str, *, after_seq: int) -> list[Message]:
+        """Inbox for ``agent``: the oldest messages past ``after_seq`` it did not send itself, at most the replay limit.
 
         Raw-DB readers (``tail``, ``inbox_context_sync``, ``recent_outcomes_context_sync``) show its own rows too.
         """
         rows = await self.db.fetchall(
             f"SELECT * FROM events WHERE {_INBOX_WHERE} ORDER BY seq ASC LIMIT ?",  # nosec B608 - fixed template.
-            (after_seq, agent, limit),
+            (after_seq, agent, _REPLAY_LIMIT),
         )
         return [Message.from_row(r) for r in rows]
 

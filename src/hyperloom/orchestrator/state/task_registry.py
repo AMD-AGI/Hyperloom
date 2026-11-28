@@ -610,12 +610,9 @@ class TaskRegistry:
         rows = await self.db.fetchall("SELECT * FROM tasks WHERE state=? ORDER BY updated_at ASC", (state,))
         return [Task.from_row(r) for r in rows]
 
-    async def reclaim_dead_running(
-        self,
-        *,
-        reason: str = "dead_holder",
-    ) -> list[str]:
+    async def reclaim_dead_running(self) -> list[str]:
         """Fail running tasks whose lease-holder process is provably dead."""
+        reason = "reconciler_dead_holder"
         reclaimed: list[str] = []
         reclaimed_rows: list[tuple[str, str, int]] = []
         async with self.db.transaction() as cur:

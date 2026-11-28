@@ -26,7 +26,6 @@ from .patch_landing import (
 )
 from hyperloom_common.timeutil import now_iso as _now_iso
 from ..state.kernel_decision_settings import (
-    _DEFAULT_ATTEMPTS_HISTORY,
     _DEFAULT_HOT_KERNEL_GATE_TOP_N,
     _MAX_INTEGRATE_E2E_ATTEMPTS,
     _MAX_INTEGRATE_FAULT_ATTEMPTS,
@@ -462,9 +461,6 @@ def record_gemm_tuning(state, result: dict[str, Any]) -> None:
     entry = dict(result)
     entry.setdefault("ts", _now_iso())
     state.last_gemm_tuning = entry
-    attempts = list(state.gemm_tuning_attempts or [])
-    attempts.append(entry)
-    state.gemm_tuning_attempts = attempts[-_DEFAULT_ATTEMPTS_HISTORY:]
 
 
 def _canonical_kernel_recipe_operator(kernel_id: str) -> str:

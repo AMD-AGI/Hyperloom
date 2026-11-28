@@ -553,7 +553,6 @@ class SharedState(
     last_baseline: dict[str, Any] = field(default_factory=dict)
     # GEAK FP8 GEMM tuning snapshot (kernel_agent-owned): aiter A8W8 tuned CSV + SGLang dispatch patch before kernel_opt.
     last_gemm_tuning: dict[str, Any] = field(default_factory=dict)
-    gemm_tuning_attempts: list[dict[str, Any]] = field(default_factory=list)
     # Global rolling log of unpromotable task results (cap _DEFAULT_LAST_FAILURES); rich failure context for self-correction. Covers every task kind.
     last_action_failures: list[dict[str, Any]] = field(default_factory=list)
     # Immutable KEEP snapshots awaiting E2E integration, keyed by integration_id.

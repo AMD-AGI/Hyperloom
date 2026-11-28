@@ -22,7 +22,11 @@ from urllib.parse import urlsplit
 from hyperloom.common.agent_cli import resolve_claude_executable
 from hyperloom_common.llm.llm_config import claude_sdk_env_options
 from hyperloom_common.llm.reasoning_effort import REASONING_EFFORT_RANK
-from hyperloom.inference_optimizer.protocol.intent import Intent
+from hyperloom.inference_optimizer.protocol.intent import (
+    Intent,
+    IntentValidationError,
+    validate_envelope,
+)
 from ..prompts.transport import TRANSPORT_TOOLS
 from hyperloom.inference_optimizer.trace.llm_trace import new_call_id
 from hyperloom.inference_optimizer.trace.trajectory_trace import current_context
@@ -51,6 +55,7 @@ from .mcp_emit_intent import (
     build_emit_intent_server,
     build_emit_intent_tool_input_schema,
     constraints_sentence,
+    decode_emit_intent_input,
     payload_contract,
 )
 
@@ -199,11 +204,10 @@ def _is_sdk_boundary_error(exc: Exception) -> bool:
 
 @dataclass
 class _StreamedTurn:
-    """What one attempt of a turn produced: its intents and text, and the telemetry the call reported alongside them.
+    """What one SDK stream produced: the turn's intents and text, and the telemetry the call reported alongside them.
 
-    ``intents`` is filled by the attempt's ``emit_intent`` server as it acknowledges each call; everything else is
-    read off the SDK stream. ``usages`` holds every usage dict the stream reported, in order: the last is cumulative
-    over the call, the ones before it describe single requests.
+    ``usages`` holds every usage dict the stream reported, in order: the last is cumulative over the call, the ones
+    before it describe single requests.
     """
 
     intents: list[Intent] = field(default_factory=list)
@@ -302,8 +306,9 @@ class ClaudeBackend:
     transport = TRANSPORT_TOOLS
     # The system prompt is cached across turns, so the stable session context is sent in it.
     system_prompt_cached = True
-    # The imported ``claude_agent_sdk``.
+    # The imported ``claude_agent_sdk`` and the ``emit_intent`` MCP server config built with it.
     _sdk: Any = field(init=False)
+    mcp_server_config: Any = field(init=False)
     # Read-only context-pull MCP server config, set via
     # ``set_context_provider`` and merged into the SDK options.
     _context_server_config: Any | None = field(default=None, init=False)
@@ -320,8 +325,9 @@ class ClaudeBackend:
     _system_prompt_dir: tempfile.TemporaryDirectory[str] | None = field(default=None, init=False)
 
     def __post_init__(self) -> None:
-        """Import the SDK."""
+        """Import the SDK and register the ``emit_intent`` tool."""
         self._sdk = _import_sdk()
+        self.mcp_server_config = build_emit_intent_server(self._sdk)
 
     # Backend protocol
     async def run(
@@ -335,7 +341,7 @@ class ClaudeBackend:
         full_prompt = f"{prompt}\n\n{_build_output_instructions()}"
         turn_marker = uuid.uuid4().hex
         turn_stop = _TurnStop()
-        turn_kwargs = self._option_kwargs(
+        options = self._build_options(
             tools=tools or [],
             system_prompt=system_prompt,
             turn_marker=turn_marker,
@@ -353,7 +359,7 @@ class ClaudeBackend:
             idle_timeout_s = self.call_timeout_s * (_RETRY_IDLE_TIMEOUT_MULTIPLIER ** (attempt_state["n"] - 1))
             return await self._invoke_and_collect(
                 full_prompt,
-                turn_kwargs,
+                options,
                 idle_timeout_s=idle_timeout_s,
                 attempt=attempt_state["n"],
                 turn_stop=turn_stop,
@@ -462,32 +468,23 @@ class ClaudeBackend:
         # hostname, not netloc: netloc carries any ``user:secret@`` userinfo.
         return parts.hostname or "configured"
 
-    def _option_kwargs(
+    def _build_options(
         self,
         *,
         tools: list[str],
         system_prompt: str | None,
         turn_marker: str | None = None,
-    ) -> dict[str, Any]:
-        """The SDK option values every attempt of one turn shares; ``turn_marker`` tags the CLI's processes for cleanup."""
+    ) -> Any:
+        """Build the SDK options object for one turn; ``turn_marker`` tags the CLI's processes for cleanup."""
         kwargs = self._turn_option_kwargs(
             system_prompt=system_prompt,
             turn_marker=turn_marker,
         )
-        kwargs.update(self._tool_palette_option_kwargs(tools))
+        self._palette_kwargs = self._tool_palette_option_kwargs(tools)
+        kwargs.update(self._palette_kwargs)
         # A stderr callback makes the SDK pipe the CLI's stderr instead of letting it reach the operator console.
         kwargs["stderr"] = self._stderr_sink
-        return kwargs
-
-    def _build_options(self, turn_kwargs: dict[str, Any], intents: list[Intent]) -> Any:
-        """Build the SDK options object for one attempt of a turn.
-
-        The ``emit_intent`` server is the attempt's own and fills ``intents``: an attempt that fails takes the
-        intents it acknowledged with it, and a late call from an abandoned CLI cannot reach a later attempt.
-        """
-        mcp_servers = {MCP_SERVER_NAME: build_emit_intent_server(self._sdk, intents), **turn_kwargs["mcp_servers"]}
-        self._palette_kwargs = {"allowed_tools": turn_kwargs["allowed_tools"], "mcp_servers": mcp_servers}
-        return self._instantiate_options({**turn_kwargs, "mcp_servers": mcp_servers})
+        return self._instantiate_options(kwargs)
 
     def _turn_option_kwargs(
         self,
@@ -522,7 +519,7 @@ class ClaudeBackend:
         return {"type": "file", "path": str(path)}
 
     def _tool_palette_option_kwargs(self, tools: list[str]) -> dict[str, Any]:
-        """The options naming this turn's tool palette and the context server; each attempt adds its ``emit_intent`` server."""
+        """The options naming this turn's tool palette and the MCP servers that serve it."""
         # Drop the bare "emit_intent" name; the MCP-qualified form wires into the SDK tool registry.
         allowed = [t for t in tools if t != EMIT_INTENT_TOOL_NAME]
         if EMIT_INTENT_TOOL_QUALIFIED not in allowed:
@@ -532,7 +529,7 @@ class ClaudeBackend:
             for qname in CONTEXT_TOOL_QUALIFIED_NAMES:
                 if qname not in allowed:
                     allowed.append(qname)
-        mcp_servers: dict[str, Any] = {}
+        mcp_servers: dict[str, Any] = {MCP_SERVER_NAME: self.mcp_server_config}
         if self._context_server_config is not None:
             mcp_servers[CONTEXT_MCP_SERVER_NAME] = self._context_server_config
         return {
@@ -649,7 +646,7 @@ class ClaudeBackend:
     async def _invoke_and_collect(
         self,
         prompt: str,
-        turn_kwargs: dict[str, Any],
+        options: Any,
         *,
         idle_timeout_s: float,
         attempt: int,
@@ -662,7 +659,7 @@ class ClaudeBackend:
         """
         requests = ClaudeRequestTracker()
         collected = _StreamedTurn()
-        stream = self._sdk.query(prompt=prompt, options=self._build_options(turn_kwargs, collected.intents))
+        stream = self._sdk.query(prompt=prompt, options=options)
         try:
             stream_iter = stream.__aiter__()
             while True:
@@ -676,7 +673,7 @@ class ClaudeBackend:
                 turn_stop.raise_if_requested()
                 requests.observe(message)
                 self._record_cli_status(message)
-                self._collect_text(message, collected)
+                self._collect_message_blocks(message, collected)
                 collected.absorb(message)
         except Exception as exc:
             if not _is_sdk_boundary_error(exc):
@@ -703,12 +700,17 @@ class ClaudeBackend:
                 retry.get("error"),
             )
 
-    def _collect_text(self, message: Any, collected: _StreamedTurn) -> None:
-        """Add the text of one message's content blocks to the turn."""
+    def _collect_message_blocks(self, message: Any, collected: _StreamedTurn) -> None:
+        """Add one message's content blocks to the turn: emit_intent calls as intents, everything else as text."""
         for block in self._iter_blocks(message):
-            text = self._extract_text(block)
-            if text:
-                collected.text_chunks.append(text)
+            if not self._is_tool_use_for_emit_intent(block):
+                txt = self._extract_text(block)
+                if txt:
+                    collected.text_chunks.append(txt)
+                continue
+            intent = self._parse_tool_use_block(block)
+            if intent is not None:
+                collected.intents.append(intent)
 
     def _record_sdk_boundary_error(self, exc: Exception, collected: _StreamedTurn) -> None:
         """Log that the SDK ended the stream by raising, and what survived it."""
@@ -740,6 +742,42 @@ class ClaudeBackend:
     def _iter_blocks(message: Any):
         """Return the content blocks of an SDK message as a list."""
         return list(getattr(message, "content", None) or [])
+
+    def _is_tool_use_for_emit_intent(self, block: Any) -> bool:
+        """Whether a content block is an ``emit_intent`` tool-use call."""
+        cls_name = type(block).__name__
+        if cls_name not in ("ToolUseBlock", "ServerToolUseBlock"):
+            return False
+        name = getattr(block, "name", "")
+        return name in (EMIT_INTENT_TOOL_NAME, EMIT_INTENT_TOOL_QUALIFIED)
+
+    def _parse_tool_use_block(self, block: Any) -> Intent | None:
+        """Validate one ``emit_intent`` tool-use block into an :class:`Intent`."""
+        # Hand the raw block input to the decoder: it accepts a native object,
+        # Claude Code's __unparsedToolInput wrapper, and the JSON-string
+        # envelope that OpenAI-compatible / litellm proxies emit. Passing the
+        # value through untouched matters — coercing a non-dict (or an empty
+        # string, which ``or {}`` would swallow) to {} decodes to an empty
+        # intent with no error, and the real cause surfaces later and wrongly
+        # as "intent_type None not in allowed set".
+        raw_input, decode_error = decode_emit_intent_input(getattr(block, "input", None))
+        if decode_error is not None:
+            log.info("claude tool_use decode failed: %s", decode_error)
+            return None
+        try:
+            envelope = {
+                "intents": [
+                    {
+                        "intent_type": raw_input.get("intent_type"),
+                        "payload": raw_input.get("payload") or {},
+                    }
+                ]
+            }
+            validated = validate_envelope(envelope)
+        except IntentValidationError as exc:
+            log.info("claude tool_use validation failed: %s", exc)
+            return None
+        return validated[0] if validated else None
 
     def _record_cli_init(self, data: dict[str, Any]) -> None:
         """Keep what the CLI's init message says it offered the model; warn on the first one lacking emit_intent."""

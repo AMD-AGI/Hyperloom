@@ -356,8 +356,8 @@ which of them apply.
 Globally, on every backend including the default `geak`:
 
 - **`kernel_opt` and `gemm_tuning` are no longer model-issued.** Orchestration
-  can neither propose either action nor request `run_optimization` /
-  `run_gemm_tuning` of the kernel agent: a proposal of either action is refused
+  can neither delegate either action nor request `run_optimization` /
+  `run_gemm_tuning` of the kernel agent: a delegate of either action is refused
   as `phase_incompatible`, a request for `run_gemm_tuning` as `request_kind`,
   and `run_optimization` has no handler, so a request for it is answered with a
   failed `unknown_kernel_kind` response. The Coordinator dispatches each lane

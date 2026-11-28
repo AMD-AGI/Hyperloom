@@ -890,7 +890,7 @@ async def test_coordinator_request_routes_to_kernel(session_dir):
         c.shared_state.last_profile_trace = "/tmp/trace.json.gz"
         c.shared_state.save(session_dir)
         await c.tick(1)
-        kernel_inbox = await c.bus.tail(to_agent="kernel_agent", topic="request")
+        kernel_inbox = await c.bus.tail(topic="request")
         assert any(m.payload.get("kind") == "trace_analyze" for m in kernel_inbox)
     finally:
         await c.stop()
@@ -924,9 +924,9 @@ async def test_coordinator_response_routes_back_to_requester(session_dir):
             c.shared_state.kernel_enabled = True
             c.shared_state.save(session_dir)
             await c.tick(1)
-            kernel_inbox = await c.bus.tail(to_agent="kernel_agent", topic="request")
+            kernel_inbox = await c.bus.tail(topic="request")
             assert kernel_inbox, "no request mirrored to kernel"
-            responses = await c.bus.tail(topic="response", to_agent="orchestration")
+            responses = await c.bus.tail(topic="response")
             assert responses
             assert responses[0].payload["status"] == "ok"
             assert responses[0].payload["source"] == "programmatic_handler"
@@ -948,7 +948,7 @@ async def test_explore_not_denied_before_profile(session_dir):
 
         await c.tick(1)
 
-        obs = await c.bus.tail(to_agent="orchestration", topic="observation")
+        obs = await c.bus.tail(topic="observation")
         for m in obs:
             if m.payload.get("kind") != "policy_denied":
                 continue
@@ -976,7 +976,7 @@ async def test_execution_order_does_not_deny_backends_when_trace_analyze_stale(
 
         await c.tick(1)
 
-        obs = await c.bus.tail(to_agent="orchestration", topic="observation")
+        obs = await c.bus.tail(topic="observation")
         for m in obs:
             if m.payload.get("kind") != "policy_denied":
                 continue
