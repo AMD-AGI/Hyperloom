@@ -61,6 +61,18 @@ def test_a_peak_is_compute_units_times_top_clock_times_the_arch_rate():
     assert [_MI355X.peak_tflops(p) for p in ("bf16", "fp8", "fp4", "fp32")] == [2516.6, 5033.2, 10066.3, 157.3]
 
 
+def test_the_cuda_arch_rates_reproduce_the_published_rates_at_the_documented_boost():
+    card = dataclasses.replace(_MI325X, gfx="sm_121", compute_units=48, engine_clock_mhz=2400)
+
+    assert [card.peak_tflops(p) for p in ("bf16", "fp16", "fp8", "fp4", "fp32")] == [
+        125.0,
+        125.0,
+        250.0,
+        500.0,
+        31.0,
+    ]
+
+
 def test_a_card_without_a_clock_or_on_an_arch_without_rates_has_no_peak():
     assert dataclasses.replace(_MI325X, engine_clock_mhz=None).peak_tflops("bf16") is None
     assert dataclasses.replace(_MI325X, gfx="gfx1250").peak_tflops("bf16") is None
@@ -79,6 +91,9 @@ def test_a_card_without_a_clock_or_on_an_arch_without_rates_has_no_peak():
         ("AMD Radeon PRO W7900 Dual Slot", "w7900"),
         ("AMD Radeon PRO W7900D", "w7900d"),
         ("Radeon 8060S Graphics", "radeon8060s"),
+        ("NVIDIA RTX Spark N1X (6144-core Blackwell RTX GPU)", "sparkn1x"),
+        ("NVIDIA RTX Spark N1X", "sparkn1x"),
+        ("(6144-core Blackwell RTX GPU)", ""),
         ("AMD Radeon Graphics", ""),
         ("", ""),
     ],
@@ -248,6 +263,7 @@ def _probes_answer(monkeypatch, answers):
 
     monkeypatch.setattr(amd_smi, "read_amd_smi_json", unreadable)
     monkeypatch.setattr(gpu_card, "_probe_output", output)
+    monkeypatch.setattr(gpu_card.shutil, "which", lambda _tool: None)
 
 
 def test_a_machine_amd_smi_cannot_describe_is_asked_through_rocm_smi_then_torch(monkeypatch):
@@ -265,3 +281,84 @@ def test_a_machine_no_probe_describes_cannot_be_read_and_gives_each_reason(monke
         AmdSmiError, match="amd-smi static could not run; rocm-smi could not run; python3 could not run"
     ):
         read_cards()
+
+
+_GB10_ROW = "0, NVIDIA RTX Spark N1X (6144-core Blackwell RTX GPU), 12.1, 31232, 3003"
+_GB10 = GpuCard("NVIDIA RTX Spark N1X (6144-core Blackwell RTX GPU)", "", "sm_121", None, 31232, None, 3003)
+
+
+def _nvidia_host(monkeypatch, output: str, returncode: int = 0) -> None:
+    """A host with ``nvidia-smi`` and no ``amd-smi``, whose every query prints ``output``."""
+
+    def unreadable(*_args):
+        raise AmdSmiError("amd-smi static could not run")
+
+    class Done:
+        def __init__(self, argv):
+            self.returncode = returncode
+            self.stdout = output
+            self.stderr = "No devices were found" if returncode else ""
+
+    def run(argv, **_kwargs):
+        assert argv[:2] == ["nvidia-smi", "--query-gpu=index,name,compute_cap,memory.total,clocks.max.sm"]
+        return Done(argv)
+
+    monkeypatch.setattr(amd_smi, "read_amd_smi_json", unreadable)
+    monkeypatch.setattr(gpu_card.shutil, "which", lambda tool: f"/usr/bin/{tool}" if tool == "nvidia-smi" else None)
+    monkeypatch.setattr(gpu_card.subprocess, "run", run)
+    monkeypatch.setattr(gpu_card, "_probe_output", lambda probe: _unreachable(probe))
+
+
+def _unreachable(probe: str) -> str:
+    raise AmdSmiError(f"{probe.split()[0]} could not run")
+
+
+def test_a_host_with_no_amd_smi_reads_its_cards_through_nvidia_smi(monkeypatch):
+    _nvidia_host(monkeypatch, _GB10_ROW + "\n")
+
+    assert read_cards() == [_GB10]
+    assert _GB10.peak_tflops("bf16") is None
+    assert _GB10.describe() == "NVIDIA RTX Spark N1X (6144-core Blackwell RTX GPU) (sm_121, 31232 MiB, 3003 MHz)"
+
+
+def test_a_card_nvidia_smi_reports_no_clock_for_has_no_engine_clock(monkeypatch):
+    _nvidia_host(monkeypatch, "0, NVIDIA RTX Spark N1X, 12.1, 31232, [N/A]\n")
+
+    assert read_cards() == [dataclasses.replace(_GB10, name="NVIDIA RTX Spark N1X", engine_clock_mhz=None)]
+
+
+@pytest.mark.parametrize(
+    ("row", "missing"),
+    [
+        ("0, NVIDIA RTX Spark N1X, [N/A], 31232, 3003", "no compute capability"),
+        ("0, NVIDIA RTX Spark N1X, 12.1, [N/A], 3003", "no memory size"),
+    ],
+)
+def test_a_card_nvidia_smi_cannot_describe_is_refused_by_index_and_fact(monkeypatch, row, missing):
+    _nvidia_host(monkeypatch, row + "\n")
+
+    with pytest.raises(AmdSmiError, match=rf"nvidia-smi: card 0 reports {missing}"):
+        read_cards()
+
+
+def test_a_query_nvidia_smi_answers_with_nothing_or_an_error_is_refused(monkeypatch):
+    _nvidia_host(monkeypatch, "")
+    with pytest.raises(AmdSmiError, match="nvidia-smi reports no GPU"):
+        read_cards()
+
+    _nvidia_host(monkeypatch, "", returncode=9)
+    with pytest.raises(AmdSmiError, match="nvidia-smi exited 9: No devices were found"):
+        read_cards()
+
+
+def test_nvidia_smi_is_not_read_on_a_host_that_has_amd_smi(monkeypatch):
+    """The platform's own SMI wins, even where both are installed."""
+    _nvidia_host(monkeypatch, _GB10_ROW + "\n")
+    monkeypatch.setattr(gpu_card.shutil, "which", lambda tool: f"/opt/rocm/bin/{tool}" if tool == "amd-smi" else None)
+    monkeypatch.setattr(gpu_card, "_probe_output", lambda probe: _probe_answer(probe))
+
+    assert [card.gfx for card in read_cards()] == ["gfx950", "gfx942"]
+
+
+def _probe_answer(probe: str) -> str:
+    return json.dumps(_TORCH if probe.startswith("python3") else _ROCM_SMI)

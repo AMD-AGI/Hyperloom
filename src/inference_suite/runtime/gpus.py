@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Whether the GPUs a round starts its server on are visible to ``amd-smi`` and free of other processes.
+"""Whether the GPUs a round starts its server on are visible to the host's SMI and free of other processes.
 
 A round's GPUs are the server's ``ROCR_VISIBLE_DEVICES`` numbers, which ROCm assigns in KFD node order while
 ``amd-smi process`` indexes cards in PCI order, so each is translated to its amd-smi card before its row is read. A GPU
@@ -26,11 +26,17 @@ before, including its rule that an entry reporting no memory holds the GPU.
 
 A GPU that is only held is read again until its holder exits or the release window passes, since the holder is most
 likely the previous round's server still exiting; a GPU no wait can free refuses at once.
+
+A host with no ``amd-smi`` on it is not an AMD host: its cards are ``nvidia-smi``'s, numbered the way it numbers them.
+There the same 1 GiB is read from the compute processes' own figure rather than from a card's whole VRAM, so a desktop
+client drawing on the card is not mistaken for a holder; a driver that reports no such figure reads as holding nothing.
 """
 
 from __future__ import annotations
 
 import logging
+import shutil
+import subprocess
 import time
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
@@ -212,10 +218,77 @@ def _refusal(
     return None
 
 
+#: The same threshold in the unit ``nvidia-smi`` reports per-process memory in.
+_OPENED_ONLY_VRAM_MIB = _OPENED_ONLY_VRAM_BYTES >> 20
+
+
+def _nvidia_query(columns: str) -> list[list[str]]:
+    """One ``nvidia-smi --query-*`` reading, as rows of trimmed fields."""
+    done = subprocess.run(
+        ["nvidia-smi", f"--query-{columns}", "--format=csv,noheader,nounits"],
+        capture_output=True,
+        text=True,
+        timeout=20,
+        check=False,
+    )
+    if done.returncode != 0:
+        raise OSError(done.stderr.strip() or f"nvidia-smi exited {done.returncode}")
+    return [[field.strip() for field in line.split(",")] for line in done.stdout.splitlines() if line.strip()]
+
+
+def _nvidia_refusals(gpus: Sequence[int]) -> list[_Refusal]:
+    """``_refusals`` for a host ``amd-smi`` does not report: an NVIDIA board, where ``nvidia-smi`` names the cards.
+
+    A card is held when the compute processes on it account for more than the same 1 GiB, read from the processes
+    themselves rather than from the card's whole VRAM: a graphics client (a desktop compositor, an overlay) draws on
+    the card without holding a compute context a server would collide with, and on a desktop it is always there. A
+    driver that reports no per-process figure -- Windows' WDDM model, and the unified-memory parts that answer
+    ``[N/A]`` -- cannot show a holder, and reads as holding nothing: the alternative is to read every graphics
+    client as one and never start a round.
+    """
+    try:
+        cards = _nvidia_query("gpu=index,uuid")
+        apps = _nvidia_query("compute-apps=gpu_uuid,used_memory")
+    except (OSError, subprocess.SubprocessError, ValueError) as exc:
+        return [_Refusal(f"GPUs {', '.join(map(str, gpus))} cannot be checked: {exc}", held=False)]
+    uuid_of = {int(row[0]): row[1].lower() for row in cards}
+    card_of = {uuid: card for card, uuid in uuid_of.items()}
+    used: dict[int, int] = dict.fromkeys(uuid_of, 0)
+    for app in apps:
+        card = card_of.get(app[0].lower())
+        if card is not None and app[1].isdigit():
+            used[card] += int(app[1])
+    refusals: list[_Refusal] = []
+    for gpu in gpus:
+        if gpu not in uuid_of:
+            refusals.append(_Refusal(f"GPU {gpu}: not visible (the host has GPUs 0-{len(uuid_of) - 1})", held=False))
+        elif used[gpu] > _OPENED_ONLY_VRAM_MIB:
+            refusals.append(_Refusal(f"GPU {gpu} (nvidia-smi card {gpu}): held by a compute process", held=True))
+    return refusals
+
+
+def _smi_tool() -> str:
+    """The tool that reports this host's cards: the platform's own, else the one a non-AMD board ships.
+
+    ``amd-smi`` wins whenever it is on the host, so an AMD machine reads exactly what it read before. A host without
+    it is not an AMD host, and ``nvidia-smi`` is read instead when that is there. With neither, the name comes back
+    as ``amd-smi`` so the failure below still reads the way it always has.
+    """
+    if shutil.which("amd-smi") is not None:
+        return "amd-smi"
+    if shutil.which("nvidia-smi") is not None:
+        return "nvidia-smi"
+    return "amd-smi"
+
+
 def _refusals(gpus: Sequence[int], fallbacks: set[str]) -> list[_Refusal]:
-    """One reading of why each of ``gpus`` cannot take a new server; empty when all are free. The kernel's per-GPU
-    figure decides who holds a GPU; amd-smi's only when the kernel's list cannot be read, which is logged once per
-    reason in ``fallbacks`` (the reasons already logged for this check)."""
+    """One reading of why each of ``gpus`` cannot take a new server; empty when all are free.
+
+    On an AMD host the kernel's per-GPU figure decides who holds a GPU; amd-smi's only when the kernel's list cannot be
+    read, which is logged once per reason in ``fallbacks`` (the reasons already logged for this check). A host with no
+    ``amd-smi`` is read through ``nvidia-smi`` instead, where the processes' own figure is the only one there is."""
+    if _smi_tool() == "nvidia-smi":
+        return _nvidia_refusals(gpus)
     try:
         rocm_order = gpus_in_rocm_order()
         rows = {row["gpu"]: row for row in gpu_rows(read_amd_smi_json("process"))}

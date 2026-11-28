@@ -28,6 +28,7 @@ of its own (an agent's). :mod:`.rounds` runs the configs built here.
 from __future__ import annotations
 
 import json
+import os
 import urllib.parse
 from collections.abc import Mapping
 from dataclasses import dataclass, replace
@@ -410,16 +411,48 @@ def _fixed(point: _Point) -> FixedWorkload:
     )
 
 
+#: Operator opt-out for the serving accuracy evaluation. lm-eval fetches the GSM8K corpus from the HF hub, which an
+#: air-gapped host -- or one whose name resolves to an address family it has no route for -- cannot reach, and a
+#: round whose evaluation cannot run fails the whole benchmark. Turned on, a round measures throughput only and its
+#: report states no accuracy: a gain can be read but not yet certified as accuracy-preserving.
+SKIP_ACCURACY_EVAL_ENV = "HYPERLOOM_SKIP_ACCURACY_EVAL"
+
+
+def _accuracy_skipped() -> bool:
+    """Whether the operator turned the serving accuracy evaluation off for this process."""
+    return is_truthy(os.environ.get(SKIP_ACCURACY_EVAL_ENV, ""))
+
+
+#: Operator override for how many questions a round evaluates. Absent, the task's whole test split runs (GSM8K: 1319),
+#: which a cold-start double-run pays twice; bounding it keeps a bring-up session's baseline from eating its budget.
+EVAL_LIMIT_ENV = "HYPERLOOM_EVAL_LIMIT"
+
+
+def _eval_limit_override() -> int | None:
+    """The question count ``HYPERLOOM_EVAL_LIMIT`` names, or ``None`` when it is unset."""
+    raw = os.environ.get(EVAL_LIMIT_ENV, "").strip()
+    if not raw:
+        return None
+    try:
+        value = int(raw)
+    except ValueError as exc:
+        raise ConfigError(f"{EVAL_LIMIT_ENV}={raw!r} is not an integer") from exc
+    if value < 1:
+        raise ConfigError(f"{EVAL_LIMIT_ENV}={raw!r} must be at least 1")
+    return value
+
+
 def _eval(point: _Point, enabled: bool) -> EvalConfig:
     task = point.text(ENV_EVAL_TASKS) or EvalTask.GSM8K.value
     if task != EvalTask.GSM8K.value:
         raise ConfigError(f"the point evaluates {task!r}; a round evaluates {EvalTask.GSM8K.value} only")
-    limit = point.text(ENV_EVAL_LIMIT)
+    stated = point.text(ENV_EVAL_LIMIT)
+    limit = point.integer(ENV_EVAL_LIMIT) if stated is not None else _eval_limit_override()
     return EvalConfig(
-        enabled=enabled,
+        enabled=enabled and not _accuracy_skipped(),
         num_fewshot=_GSM8K_FEWSHOT,
         concurrency=point.integer(ENV_CONC),
-        limit=None if limit is None else point.integer(ENV_EVAL_LIMIT),
+        limit=limit,
         max_tokens_cap=point.integer(_EVAL_MAX_TOKENS_ENV, DEFAULT_MAX_TOKENS_CAP),
         probe=EvalProbe(
             enabled=point.flag(_PROBE_ENV, default=True),
