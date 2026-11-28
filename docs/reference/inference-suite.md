@@ -278,9 +278,15 @@ listens on (`port_in_use`) and GPUs that `amd-smi` does not list or that another
 process holds (`gpus_unavailable`, naming each GPU, its amd-smi card and its holder; a
 round's GPU numbers are the machine's card numbers the server gets as
 `ROCR_VISIBLE_DEVICES`, matched to amd-smi cards through their KFD node; the server's
-`HIP_VISIBLE_DEVICES` numbers those cards from 0). A process holds a card when `amd-smi process` reports more than 1 GiB
-of VRAM for it there, or reports none at all: every ROCm process opens all cards and
-keeps up to a few MiB of page tables and runtime context on each, which does not count.
+`HIP_VISIBLE_DEVICES` numbers those cards from 0). A process holds a card when it has
+more than 1 GiB in `/sys/class/kfd/kfd/proc/<pid>/vram_<gpu_id>` for that GPU: every
+ROCm process opens all cards and keeps up to a few MiB of page tables and runtime
+context on each, which does not count. In a container, the GPU nodes whose `gpu_id`
+the kernel refuses are left out and the readable ones are numbered in order.
+`amd-smi process`'s figure, which for a process that opened several cards repeats one
+number on each, decides only when that kernel list cannot be read (the reason is
+logged): then a process holds a card when amd-smi reports more than 1 GiB of VRAM for
+it there, or reports none at all.
 Hyperloom stops
 the session on the first `gpus_unavailable` with `stop_reason=host_gpus_unavailable`.
 
