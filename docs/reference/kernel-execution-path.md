@@ -17,7 +17,8 @@ Orchestration emits a `request{target_agent: "kernel_agent", kind: "<kind>"}` in
 PolicyGate admits it only when `kind` is a registered request kind (see
 [Registered request kinds](#registered-request-kinds)); any other kind is
 policy-denied with `rule="request_kind"` and a hint naming the registered
-kinds, with no bus record and no `last_action_failures` row.
+kinds: one `policy_denied` observation, no request or response on the bus
+and no `last_action_failures` row.
 `IntentRouter._handle_request` (`orchestrator/loop/intent_router.py`) intercepts
 an admitted request before any agent backend runs:
 

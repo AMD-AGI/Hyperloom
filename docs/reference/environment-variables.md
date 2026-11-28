@@ -863,7 +863,7 @@ recorded do not contradict the candidate's.
 
 | Variable | Default | Description |
 |---|---|---|
-| `HYPERLOOM_TRACE_ANALYSIS_ROUTE` | `agent` | `agent` runs the TraceLens skill under a model. `non-llm` runs TraceLens without a model and writes `analysis.json` from the TraceLens report; it shares the gates, candidates and reports with `agent` but adds no collective candidates and writes no prose, and the report's trace-quality warnings appear in `trace_health_warnings`. A caller of the analysis that names `analysis_route` in its payload, as the multi-branch `tracelens` tool can, overrides it. Any other value fails the analysis with `invalid_analysis_route`. |
+| `HYPERLOOM_TRACE_ANALYSIS_ROUTE` | `agent` | `agent` runs the TraceLens skill under a model. `non-llm` runs TraceLens without a model and writes `analysis.json` from the TraceLens report; it shares the gates, candidates and reports with `agent` but adds no collective candidates and writes no prose, and the report's trace-quality warnings appear in `trace_health_warnings`. A caller of the analysis that names `analysis_route` in its payload overrides it: the multi-branch `roofline` tool and the per-role analysis of a node-list PD trace both pass `non-llm`. Any other value fails the analysis with `invalid_analysis_route`. |
 
 ## TraceLens analysis budgets
 
