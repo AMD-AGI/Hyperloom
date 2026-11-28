@@ -92,7 +92,7 @@ from .grid._explore_variants import (
     variant_with_eval_off,
 )
 from .grid._grid_inputs import SessionDirField, session_grid_bounds
-from .grid._grid_inputs import sanitize_result_dir, sanitize_script_name
+from .grid._grid_inputs import sanitize_script_name
 from .grid._grid_runner import (
     GridLaunch,
     GridRecipe,
@@ -204,13 +204,11 @@ def _anchor_the_params(params: dict[str, Any], ss: Any) -> None:
 
 
 def _sanitized_script(params: dict[str, Any]) -> str | None:
-    """The ``benchmark_script`` override; a malformed one, or a malformed ``result_dir``, refuses the round."""
+    """The ``benchmark_script`` override; a malformed one refuses the round."""
     try:
-        script = sanitize_script_name(params.get("benchmark_script"))
-        sanitize_result_dir(params.get("result_dir"))
+        return sanitize_script_name(params.get("benchmark_script"))
     except ValueError as exc:
         raise _RoundRefused("bad_param", str(exc)) from exc
-    return script
 
 
 class _ExploreRound:

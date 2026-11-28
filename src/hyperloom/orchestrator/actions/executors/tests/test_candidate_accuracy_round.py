@@ -110,7 +110,7 @@ async def _integrate_gate(tmp_path, monkeypatch, *, tput: float, regraded_pass: 
         calls.append((slot, launch, session))
         return AccuracyRoundOutcome(slot / ACCURACY_DIR, "")
 
-    def regrade(bench, bench_leg, result_dir, gate_evidence):
+    def regrade(bench, bench_leg, gate_evidence):
         gate_evidence["accuracy_pass"] = regraded_pass
 
     monkeypatch.setattr(_integrate_perf_gate, "accuracy_round_due", lambda state: True)
