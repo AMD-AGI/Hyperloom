@@ -152,7 +152,7 @@ _ISSUE_REF_RE = _re.compile(r"^issues?:(\d+)$", _re.IGNORECASE)
 
 
 def resolve_build_ref(candidate: str, default_repo_url: str) -> tuple[str, str, str]:
-    """Resolve a discovered candidate string to ``(repo_url, ref, source_pr_url)``."""
+    """Resolve the ref or PR URL a build names to ``(repo_url, ref, source_pr_url)``."""
     s = candidate.strip()
     if not s:
         return ("", "", "")

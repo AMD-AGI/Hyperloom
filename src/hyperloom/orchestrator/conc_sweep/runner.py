@@ -3,8 +3,8 @@
 
 """The concurrency sweep of a finished session: its baseline and its optimized launch over the recipe's concurrencies.
 
-The points are the concurrencies the InferenceX arm of the session's base publishes, or the operator's
-``--conc-sweep-concs`` for a base no InferenceX arm gave, with the session's own CONC among them. Each arm runs its
+The points are the operator's ``--conc-sweep-concs``, else the concurrencies the InferenceX arm of the session's base
+publishes, with the session's own CONC among them. Each arm runs its
 points serially, the session's CONC first and then low to high; an arm keeps one server across its points unless the
 workload is an AgentX replay, whose points each boot their own (``BenchmarkPoint.sweeps_on_cold_servers``). The report
 is rewritten after every point, and a later run measures only the points not yet measured.
@@ -14,17 +14,21 @@ from __future__ import annotations
 
 import logging
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
-from typing import Any, Mapping
+from typing import Any, Mapping, Sequence
 
 from hyperloom.common.gain_math import conc_pair_comparison
 from hyperloom.common.model_paths import resolve_session_model_path
 from hyperloom.common.overlay import is_safe_path_entry, overlay_is_loadable
 from hyperloom.common.perf_metric import GRADED_INTVTY, GRADED_OUTPUT, agentx_replay_session, is_agentx_mode
 from hyperloom.inference_optimizer.framework_registry import is_scriptable, native_component
+from hyperloom.inference_optimizer.grid_server_args import (
+    merge_server_args,
+    server_args_delta,
+)
 from hyperloom.inference_optimizer.grading import resolved_grading
-from hyperloom.inference_optimizer.session.session_paths import reports_dir, runs_root
+from hyperloom.inference_optimizer.session.session_paths import BREAKDOWN_FILENAME, reports_dir, runs_root
 from hyperloom.orchestrator.actions.cancel_channel import current_cancel_scope
 from hyperloom.orchestrator.actions.executors._proposal_identity import controls_of, is_executable, normalize_proposal
 from hyperloom.orchestrator.actions.executors.grid._grid_runner import (
@@ -46,13 +50,26 @@ from hyperloom.orchestrator.actions.executors.workload._workload_envs import (
     round_num_prompts,
 )
 from hyperloom.orchestrator.actions.stop_attribution import ORCHESTRATOR_CANCELLED_CLASS
-from hyperloom.orchestrator.state.base_launch import frozen_base
+from hyperloom.orchestrator.state.base_launch import frozen_base, launch_change, server_base, server_base_at
 from hyperloom.orchestrator.state.shared_state import SharedState
+from hyperloom_common.coerce import to_str_list
 from hyperloom_common.timeutil import utc_now_compact
+from inference_suite.argv import argv_flag_occurrences, canonical_flag_name, remove_server_args
+from inference_suite.contracts import BaseLaunch
 
 from .plot import ConcCurveOptions
-from .points import SCHEMA_VERSION, SweepPoints, ladder, sweep_points
-from .report import ArmCurves, build_roofline_ceiling, point_from_variant, publish_curve, read_summary, write_report
+from .points import SCHEMA_VERSION, SweepPoints, ladder, launches_missing, sweep_points
+from .report import (
+    ArmCurves,
+    build_roofline_ceiling,
+    point_from_variant,
+    publish_curve,
+    keep_measured_summary,
+    point_final_at,
+    take_earlier_summary,
+    run_facts,
+    write_report,
+)
 
 log = logging.getLogger(__name__)
 
@@ -95,6 +112,74 @@ def decline_reason(state: SharedState) -> str | None:
     if is_agentx_mode(state.benchmark_mode) and not agentx_replay_session(state):
         return "mlperf_backend"
     return None
+
+
+@dataclass(frozen=True)
+class _Layer:
+    """A change to the session's composed baseline launch: args set, envs set, args removed and envs unset; ``replace``
+    when ``args`` is the server's whole argv rather than an addition to the baseline's."""
+
+    args: str = ""
+    envs: Mapping[str, str] = field(default_factory=dict)
+    remove_args: tuple[str, ...] = ()
+    unset_envs: tuple[str, ...] = ()
+    replace: bool = False
+
+
+def _arm_layer(arm: Arm) -> _Layer:
+    return _Layer(
+        arm.args,
+        dict(arm.envs),
+        tuple(to_str_list(arm.controls.get("remove_args"))),
+        tuple(to_str_list(arm.controls.get("unset_envs"))),
+    )
+
+
+def _appended(arm: Arm, frozen: BaseLaunch | None) -> _Layer:
+    """``arm``'s appended change as what it changes of the base's own launch: a flag or variable it sets to the value
+    that launch already has is left to the source's launch at each concurrency."""
+    layer = _arm_layer(arm)
+    if frozen is None:
+        return layer
+    change = launch_change(frozen, layer.args, layer.envs, layer.remove_args)
+    return replace(layer, args=change.args, envs=dict(change.env))
+
+
+def _replacing(arm: Arm, frozen: BaseLaunch | None, conc: int, official: _Layer) -> _Layer:
+    """``arm``'s replacing argv moved to ``conc``: what it changes of the base's own launch, applied to the source's
+    launch at ``conc``, so a flag it leaves as the base had it takes the value the recipe gives ``conc``."""
+    layer = _arm_layer(arm)
+    argv = remove_server_args(arm.args, list(layer.remove_args))
+    if frozen is not None:
+        delta = server_args_delta(server_base(frozen).args, argv)
+        argv = merge_server_args(remove_server_args(server_base_at(frozen, conc).args, list(delta.remove)), delta.add)
+    envs = _stacked(official, replace(layer, args="", remove_args=()))
+    return _Layer(argv, envs.envs, layer.remove_args, envs.unset_envs, replace=True)
+
+
+def _conc_layer(frozen: BaseLaunch | None, conc: int) -> _Layer:
+    """What the source's own launch at ``conc`` changes of the base, which is its launch at the session's CONC."""
+    if frozen is None:
+        return _Layer()
+    primary, seed = server_base(frozen), server_base_at(frozen, conc)
+    delta = server_args_delta(primary.args, seed.args)
+    envs = {name: value for name, value in seed.env.items() if primary.env.get(name) != value}
+    return _Layer(delta.add, envs, delta.remove, tuple(name for name in primary.env if name not in seed.env))
+
+
+def _stacked(lower: _Layer, upper: _Layer) -> _Layer:
+    """``upper`` over ``lower``: what ``upper`` removes or unsets goes even where ``lower`` sets it, and what ``upper``
+    sets stays even where ``lower`` removes or unsets it."""
+    args = merge_server_args(remove_server_args(lower.args, list(upper.remove_args)), upper.args)
+    envs = {name: value for name, value in lower.envs.items() if name not in upper.unset_envs} | dict(upper.envs)
+    unset = [name for name in lower.unset_envs if name not in upper.envs] + list(upper.unset_envs)
+    upper_flags = {name for name, _value in argv_flag_occurrences(upper.args.split())}
+    removed = [spec for spec in lower.remove_args if _flag_name(spec) not in upper_flags] + list(upper.remove_args)
+    return _Layer(args, envs, tuple(dict.fromkeys(removed)), tuple(dict.fromkeys(unset)))
+
+
+def _flag_name(removal: str) -> str:
+    return canonical_flag_name(removal.split()[0].partition("=")[0])
 
 
 @dataclass(frozen=True)
@@ -150,7 +235,8 @@ class _Sweep:
     setup: _Setup
     points: SweepPoints
     optimized: Arm
-    estimated_sec: float
+    frozen: BaseLaunch | None = None
+    estimated_sec: float = 0.0
     started_at: float = field(default_factory=time.time)
     measured: dict[str, dict[int, dict[str, Any]]] = field(default_factory=lambda: {"baseline": {}, "optimized": {}})
     cancel_reason: str = ""
@@ -173,10 +259,18 @@ class _Sweep:
             self.cancel_reason = ORCHESTRATOR_CANCELLED_CLASS
         return bool(self.cancel_reason)
 
+    def layer(self, arm: Arm, conc: int) -> _Layer:
+        """What ``arm``'s point at ``conc`` runs over the baseline: the source's launch there, then ``arm``'s change."""
+        official = _conc_layer(self.frozen, conc)
+        if arm.controls.get("args_mode") == "replace":
+            return _replacing(arm, self.frozen, conc, official)
+        return _stacked(official, _appended(arm, self.frozen))
+
     def variant(self, arm: Arm, conc: int) -> GridVariant:
         state = self.state
+        layer = self.layer(arm, conc)
         envs = {
-            **arm.envs,
+            **layer.envs,
             "CONC": str(conc),
             "ISL": str(state.isl),
             "OSL": str(state.osl),
@@ -185,10 +279,12 @@ class _Sweep:
         }
         variant = GridVariant(
             name=f"{arm.name}_conc{conc}",
-            extra_server_args=arm.args,
+            extra_server_args=layer.args,
             extra_envs=envs,
             note=f"arm={arm.name} conc={conc}",
-            **arm.controls,
+            remove_args=list(layer.remove_args) or None,
+            unset_envs=list(layer.unset_envs) or None,
+            args_mode="replace" if layer.replace else "append",
         )
         variant.overlay_pythonpath = arm.overlay
         return variant
@@ -196,7 +292,7 @@ class _Sweep:
     def record(self, arm: Arm, result: VariantResult) -> None:
         point = point_from_variant(result, arm=arm.name)
         self.measured[arm.name][point["conc"]] = point
-        write_report(self.payload(), reports_dir(self.session_dir))
+        _write(self.session_dir, self.payload())
 
     def payload(self, *, final: bool = False) -> dict[str, Any]:
         state = self.state
@@ -240,14 +336,25 @@ class _Sweep:
         return "partial" if summary["successful_pairs"] else "failed"
 
 
+def _write(session_dir: Path, payload: dict[str, Any]) -> None:
+    """Write the report into the session's ``reports/`` and carry it in the session's breakdown."""
+    write_report(payload, reports_dir(session_dir), breakdown=session_dir / BREAKDOWN_FILENAME)
+
+
 def _header(state: SharedState, session_dir: Path) -> dict[str, Any]:
     return {
         "schema_version": SCHEMA_VERSION,
         "session_id": state.session_id or session_dir.name,
         "benchmark_mode": state.benchmark_mode,
+        "framework": state.framework,
+        "precision": state.precision,
+        "gpu_type": state.gpu_type,
+        "gpu_count": state.tp,
         "isl": state.isl,
         "osl": state.osl,
         "tp": state.tp,
+        "ep": state.ep,
+        **run_facts(session_dir),
     }
 
 
@@ -262,7 +369,9 @@ def _skipped(state: SharedState, session_dir: Path, reason: str, **detail: Any) 
         "optimized": {"points": []},
         "summary": {},
     }
-    write_report(payload, reports_dir(session_dir))
+    keep_measured_summary(reports_dir(session_dir))
+    _write(session_dir, payload)
+    point_final_at(payload, session_dir)
     log.info("conc_sweep: skipped (%s)", reason)
     return payload
 
@@ -270,8 +379,8 @@ def _skipped(state: SharedState, session_dir: Path, reason: str, **detail: Any) 
 def _resume(sweep: _Sweep) -> None:
     """Keep the points an earlier run of the same sweep measured on the same launch of each arm, so only the rest
     are run."""
-    earlier = read_summary(reports_dir(sweep.session_dir))
-    if not earlier or earlier.get("concs") != list(sweep.points.concs):
+    earlier = take_earlier_summary(reports_dir(sweep.session_dir))
+    if not earlier:
         return
     for arm in sweep.arms:
         section = earlier[arm.name]
@@ -284,7 +393,7 @@ def _resume(sweep: _Sweep) -> None:
         if launch != (arm.args, arm.envs, arm.overlay, dict(arm.controls)):
             continue
         for point in section["points"]:
-            if point["status"] == _SUCCEEDED:
+            if point["status"] == _SUCCEEDED and point["conc"] in sweep.points.concs:
                 sweep.measured[arm.name][point["conc"]] = point
 
 
@@ -323,29 +432,60 @@ async def _run_rung(sweep: _Sweep, arm: Arm, conc: int, launch: GridLaunch) -> V
     return result
 
 
-async def _run_arm(sweep: _Sweep, arm: Arm) -> None:
-    """Run ``arm``'s pending points, on one held server unless each point needs a cold one."""
-    concs = sweep.pending(arm)
+async def _run_points(sweep: _Sweep) -> None:
+    """Run both arms' pending points: arm by arm on held servers, else each point on its own server, a concurrency's
+    two arms one after the other, so a stop leaves pairs measured rather than an arm."""
     lifecycle = resolve_lifecycle_params(sweep.setup.base_yaml_path)
-    held = bool(lifecycle.get("eligible")) and not agentx_replay_session(sweep.state)
+    if not lifecycle.get("eligible") or agentx_replay_session(sweep.state):
+        await _run_cold(sweep)
+        return
+    for arm in sweep.arms:
+        if sweep.observe_cancel():
+            return
+        await _run_held_arm(sweep, arm, lifecycle)
+
+
+async def _run_cold(sweep: _Sweep) -> None:
+    order = ladder(sweep.points.concs, sweep.state.conc)
+    queue = [(conc, arm) for conc in order for arm in sweep.arms if conc in sweep.pending(arm)]
+    for conc, arm in queue:
+        if sweep.observe_cancel():
+            return
+        result = await _run_rung(sweep, arm, conc, GridLaunch())
+        sweep.record(arm, result)
+        if sweep.observe_cancel(result):
+            return
+
+
+async def _run_held_arm(sweep: _Sweep, arm: Arm, lifecycle: Mapping[str, Any]) -> None:
+    """Run ``arm``'s pending points, a run of points that launch alike on one held server: the points of one launch
+    run together, the launch of the first pending point first, each in ladder order."""
+    ladder_order = sweep.pending(arm)
+    by_conc = {conc: sweep.layer(arm, conc) for conc in ladder_order}
+    launches: list[_Layer] = []
+    for conc in ladder_order:
+        if by_conc[conc] not in launches:
+            launches.append(by_conc[conc])
+    concs = sorted(ladder_order, key=lambda conc: launches.index(by_conc[conc]))
     pid_dir = sweep.setup.workspace / f"server_{arm.name}"
     pid_dir.mkdir(parents=True, exist_ok=True)
     port = int(lifecycle.get("port") or 8888)
     booted = False
+    layers = [by_conc[conc] for conc in concs]
     try:
         for idx, conc in enumerate(concs):
             if sweep.observe_cancel():
                 return
-            if not held:
-                launch = GridLaunch()
-            else:
-                last = idx == len(concs) - 1
-                lifecycle_settings = {"cleanup": booted and last, "pid_dir": str(pid_dir), "port": port}
-                launch = GridLaunch(
-                    server_lifecycle=lifecycle_settings, server_already_ready=booted, warmup_before_measure=False
-                )
+            if booted and layers[idx] != layers[idx - 1]:
+                teardown_variant_server(pid_dir)
+                booted = False
+            last = idx == len(concs) - 1 or layers[idx + 1] != layers[idx]
+            lifecycle_settings = {"cleanup": booted and last, "pid_dir": str(pid_dir), "port": port}
+            launch = GridLaunch(
+                server_lifecycle=lifecycle_settings, server_already_ready=booted, warmup_before_measure=False
+            )
             result = await _run_rung(sweep, arm, conc, launch)
-            if held and not booted:
+            if not booted:
                 booted = result.status == _SUCCEEDED
                 if not booted:
                     teardown_variant_server(pid_dir)
@@ -353,12 +493,13 @@ async def _run_arm(sweep: _Sweep, arm: Arm) -> None:
             if sweep.observe_cancel(result):
                 return
     finally:
-        if held and (survivors := teardown_variant_server(pid_dir)):
+        if survivors := teardown_variant_server(pid_dir):
             log.error("conc_sweep: arm=%s pids %s outlived SIGKILL; %s keeps them", arm.name, survivors, pid_dir)
 
 
-async def run_conc_sweep(session_dir: Path) -> dict[str, Any]:
-    """Sweep the finished session in ``session_dir`` and return the report it wrote to ``reports/``."""
+async def run_conc_sweep(session_dir: Path, *, concs: Sequence[int] = ()) -> dict[str, Any]:
+    """Sweep the finished session in ``session_dir`` over ``concs`` when given, and return the report it wrote to
+    ``reports/``."""
     state = SharedState.load_or_init(session_dir)
     reason = decline_reason(state)
     if reason is not None:
@@ -369,21 +510,21 @@ async def run_conc_sweep(session_dir: Path) -> dict[str, Any]:
     if optimized.overlay and not (is_safe_path_entry(optimized.overlay) and overlay_is_loadable(optimized.overlay)):
         return _skipped(state, session_dir, "optimized_overlay_unavailable")
     frozen = frozen_base(session_dir)
-    points = sweep_points(None if frozen is None else frozen.launch, state.conc, state.conc_sweep_concs)
+    base = None if frozen is None else frozen.launch
+    if (missing := launches_missing(base)) is not None:
+        return _skipped(state, session_dir, missing)
+    points = sweep_points(base, state.conc, concs or state.conc_sweep_concs)
     if points is None:
         return _skipped(state, session_dir, "no_sweep_points")
     setup = _prepare(state, session_dir)
     if isinstance(setup, str):
         return _skipped(state, session_dir, setup)
     per_point_sec = state.baseline_runtime_sec
-    sweep = _Sweep(state, session_dir, setup, points, optimized, estimated_sec=0.0)
+    sweep = _Sweep(state, session_dir, setup, points, optimized, base)
     _resume(sweep)
     sweep.estimated_sec = per_point_sec * sum(len(sweep.pending(arm)) for arm in sweep.arms)
     _log_plan(sweep, per_point_sec)
-    for arm in sweep.arms:
-        if sweep.observe_cancel():
-            break
-        await _run_arm(sweep, arm)
+    await _run_points(sweep)
     payload = sweep.payload(final=True)
     ceiling = build_roofline_ceiling(
         state,
@@ -394,7 +535,7 @@ async def run_conc_sweep(session_dir: Path) -> dict[str, Any]:
     )
     if ceiling is not None:
         payload["roofline_ceiling"] = ceiling
-    write_report(payload, reports_dir(session_dir))
+    _write(session_dir, payload)
     curve = ConcCurveOptions(state.model_name, state.gpu_type, state.tp, state.isl, state.osl)
     publish_curve(payload, session_dir, curve)
     log.info(

@@ -54,6 +54,7 @@ from hyperloom.orchestrator.actions.executors.tests.test_suite_accuracy_round im
 from hyperloom.orchestrator.actions.executors.tests.test_suite_config import _settings
 from hyperloom.orchestrator.state.base_launch import server_base
 from hyperloom.orchestrator.state.tests._session_base import freeze_base
+from inference_suite.contracts import SourcePointLaunch
 
 SERVER_ARGS = "--max-running-requests 77 --enable-dp-attention"
 #: The recipe's launch as a point runs it: with the engine seed pinned, since neither the recipe nor the base names one.
@@ -468,6 +469,36 @@ def test_an_inferencex_point_is_seeded_with_the_server_base_it_is_rendered_with(
     args = load(point)["benchmark"]["envs"]["EXTRA_SGLANG_ARGS"].split()
     assert args[:4] == ["--tp", "2", "--mem-fraction-static", "0.71"]
     assert "--max-running-requests" in args
+
+
+@pytest.mark.parametrize(
+    "server_args",
+    ["--enable-torch-compile", "--cuda-graph-max-bs 32 --enable-torch-compile"],
+    ids=["a change", "a change and the session's own value restated"],
+)
+def test_each_point_is_seeded_with_the_source_launch_at_its_own_concurrency(tmp_path, model, blobs, server_args):
+    """A value the recipe restates from the session's launch (32, at 32) leaves each point the source's own there."""
+    by_conc = {4: ("--tp", "2", "--cuda-graph-max-bs", "4"), 32: ("--tp", "2", "--cuda-graph-max-bs", "32")}
+    launches = tuple(SourcePointLaunch(conc, args, {}) for conc, args in by_conc.items())
+    base = _agentx_base()
+    base = replace(base, args=by_conc[32], point=replace(base.point, source_concs=(4, 32), source_launches=launches))
+    canonical = default_canonical(
+        tmp_path / "canonical",
+        primary_concurrency=32,
+        config_path=default_baseline_config(),
+        model_path=str(model),
+        frozen_base=base,
+    )
+    delta = RecipeDelta(config=ConfigDelta(server_args=server_args))
+
+    points = generate_points(
+        environment(blobs, tmp_path, delta=delta), canonical, tmp_path / "points", concurrency=(4, 32)
+    )
+
+    for point, graphs in zip(points, ("4", "32"), strict=True):
+        args = load(point)["benchmark"]["envs"]["EXTRA_SGLANG_ARGS"].split()
+        assert [args[i + 1] for i, token in enumerate(args) if token == "--cuda-graph-max-bs"] == [graphs]
+        assert "--enable-torch-compile" in args
 
 
 def test_an_agentx_point_runs_on_the_sessions_frozen_base_as_the_main_flow_composes_it(

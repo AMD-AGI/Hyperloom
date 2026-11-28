@@ -9,6 +9,7 @@ import pytest
 
 from hyperloom.inference_optimizer import roofline_ceiling as rc
 from hyperloom.inference_optimizer import roofline_model_meta as rmm
+from hyperloom.orchestrator.tests._fixtures import MI355X_CARD
 
 
 def _split(cfg: dict, layers: int, experts: int) -> tuple[int, int]:
@@ -101,7 +102,7 @@ def _flash_meta(**over) -> rmm.ModelMeta:
 def _breakdown(meta):
     return rc.compute_roofline_from_perfmodel(
         meta=meta,
-        target=rc.ComputeTarget(gpu_type="mi355x", num_gpus=1, precision_tag="bf16"),
+        target=rc.ComputeTarget(card=MI355X_CARD, platform="mi355x", num_gpus=1, precision_tag="bf16"),
         shape=rc.DecodeShape(isl=1024, osl=128, concurrency=8),
     )
 

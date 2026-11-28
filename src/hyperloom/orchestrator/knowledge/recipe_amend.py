@@ -7,12 +7,9 @@ from __future__ import annotations
 
 from copy import copy
 from types import MappingProxyType
-from typing import TYPE_CHECKING, Any, Mapping
+from typing import Any, Mapping
 
-from hyperloom_common.coerce import recorded_float, to_str_list
-
-if TYPE_CHECKING:
-    from ..state.task_registry import Task
+from hyperloom_common.coerce import recorded_float
 
 
 #: Recipe fields an amend carries forward when the caller does not override
@@ -52,10 +49,6 @@ _RECIPE_OWNED_KEYS: frozenset[str] = frozenset(PRESERVED_RECIPE_FIELDS) | frozen
         "provenance",
     }
 )
-
-
-def _extra_server_args(payload: Mapping[str, Any]) -> str:
-    return " ".join(to_str_list(payload.get("extra_server_args")))
 
 
 def rows_not_superseded(live_rows: Any, superseding: Any, *keys: str) -> list[dict[str, Any]]:
@@ -102,60 +95,14 @@ def amended_recipe_extras(live: Mapping[str, Any], overrides: Mapping[str, Any],
     return extras
 
 
-def extract_kept_best_config(
-    *,
-    task: Task,
-    variant_attrs: dict[str, Any] | None = None,
-    result_dict: dict[str, Any] | None = None,
-) -> dict[str, Any]:
-    """Build a replayable ``best_config`` from a KEEP'd task or explore variant."""
-    params = task.params if isinstance(getattr(task, "params", None), dict) else {}
-    attrs = variant_attrs if isinstance(variant_attrs, dict) else {}
-
-    args = _extra_server_args(attrs)
-    if not args.strip():
-        args = _extra_server_args(params)
-    if not args.strip() and isinstance(result_dict, dict):
-        args = _extra_server_args(result_dict)
-
-    envs_raw = attrs.get("extra_envs") or params.get("extra_envs") or {}
-    if not envs_raw and isinstance(result_dict, dict):
-        envs_raw = result_dict.get("extra_envs") or {}
-    envs = {str(k): str(v) for k, v in envs_raw.items()} if isinstance(envs_raw, dict) else {}
-
-    if not args.strip() and not envs:
-        return {}
-
-    best_config: dict[str, Any] = {}
-    if args.strip():
-        best_config["extra_server_args"] = args.strip()
-    if envs:
-        best_config["extra_envs"] = envs
-    return best_config
-
-
 def kb_best_config_overrides_for_keep(
     *,
     live: Mapping[str, Any],
-    best_config_candidate: Mapping[str, Any],
-    throughput_after: float | None,
+    best_config: Mapping[str, Any],
 ) -> dict[str, Any]:
-    """Decide whether a KEEP amend should also stamp ``best_config`` on the recipe row."""
-    if not best_config_candidate:
-        return {}
-
-    live_bc = live.get("best_config") if isinstance(live.get("best_config"), Mapping) else {}
-    live_has_config = bool(
-        _extra_server_args(live_bc).strip()
-        or (isinstance(live_bc.get("extra_envs"), Mapping) and live_bc.get("extra_envs"))
-    )
+    """Decide whether a KEEP amend should also stamp the session ``best_config`` on the recipe row."""
     live_tput = recorded_float(live.get("best_throughput"))
-    new_tput = recorded_float(throughput_after)
-    if not live_has_config or (new_tput > 0.0 and new_tput >= live_tput):
-        overrides: dict[str, Any] = {
-            "best_config": dict(best_config_candidate),
-        }
-        if new_tput > 0.0:
-            overrides["best_throughput"] = new_tput
-        return overrides
+    new_tput = recorded_float(best_config.get("tput"))
+    if new_tput > 0.0 and new_tput >= live_tput:
+        return {"best_config": dict(best_config), "best_throughput": new_tput}
     return {}

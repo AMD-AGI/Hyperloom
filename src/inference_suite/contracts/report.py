@@ -89,6 +89,8 @@ class FailedStep(str, Enum):
     CLIENT_OUTPUT_MISSING = "client_output_missing"
     #: ``eval_returncode``, ``lm_eval_http_400``.
     EVAL_FAILED = "eval_failed"
+    #: A profile round's server answered its ``/start_profile`` with an error status; the round ends there.
+    PROFILE_REFUSED = "profile_refused"
     ROUND_TIMEOUT = "round_timeout"
     #: -915.
     DEADLINE_EXHAUSTED = "deadline_exhausted"

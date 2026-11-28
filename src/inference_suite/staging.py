@@ -269,6 +269,27 @@ def verified_manifest_sha256(tool_cache: Path) -> str | None:
     return digest
 
 
+def staged_inferencex_commit(tool_cache: Path) -> str | None:
+    """The InferenceX commit the manifest ``tool_cache`` holds records; ``None`` with no manifest, or one that stages
+    no InferenceX.
+
+    Raises:
+        StagingError: the manifest cannot be read or does not parse.
+    """
+    path = tool_cache / MANIFEST_FILE
+    try:
+        data = path.read_bytes()
+    except FileNotFoundError:
+        return None
+    except OSError as exc:
+        raise StagingError(f"the staging manifest at {path} cannot be read: {exc}") from exc
+    manifest = _parse_manifest(path, data)
+    if isinstance(manifest, str):
+        raise StagingError(f"no {manifest}")
+    tool = manifest.tools.get(INFERENCEX_TOOL)
+    return tool.commit if tool is not None else None
+
+
 def _parse_manifest(path: Path, data: bytes) -> StagingManifest | str:
     """The manifest in ``data``, or what to report when it does not parse."""
     try:

@@ -13,11 +13,13 @@ from pathlib import Path
 import pytest
 
 from hyperloom.sandbox import SandboxGone
+from hyperloom.sandbox.local_sandbox import SGLANG_JIT_CACHE_ENV
 from hyperloom_multibranch.specialist.agent_sandbox import TIMED_OUT
 from hyperloom_multibranch.specialist.agent_watch import MARKER, marked_pids
 from hyperloom_multibranch.specialist.remote_sandbox import (
     LOST,
     PROCESS_MARKER,
+    SANDBOX_TMP,
     RemoteAgentSandbox,
     claude_config_dir,
     forwarded_env,
@@ -65,6 +67,14 @@ async def test_a_command_runs_on_the_sandboxs_environment_with_only_what_is_forw
     assert "HIP_VISIBLE_DEVICES=0,1" in lines and "ROCR_VISIBLE_DEVICES=6,7" in lines
     assert f"{MARKER}={remote.root}" in lines and f"{PROCESS_MARKER}={remote.root}/1" in lines
     assert not any(line.startswith("HL_") for line in lines)
+
+
+def test_sglangs_jit_cache_is_on_the_sandboxs_own_disk_not_the_shared_storage(tmp_path):
+    """The shared storage refuses SGLang's rename of a staging directory that holds an open file."""
+    remote = _remote(tmp_path)
+
+    assert remote.env({})[SGLANG_JIT_CACHE_ENV] == f"{SANDBOX_TMP}/sglang-jit"
+    assert remote.env({SGLANG_JIT_CACHE_ENV: "/own"})[SGLANG_JIT_CACHE_ENV] == "/own"
 
 
 async def test_a_command_commits_with_the_agent_identity_from_the_sandbox_s_home(tmp_path):

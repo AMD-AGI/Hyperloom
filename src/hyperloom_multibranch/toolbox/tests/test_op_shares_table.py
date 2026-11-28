@@ -5,7 +5,7 @@
 
 ``data/tracelens_ops_summary.csv`` is a synthetic table with the columns and rows of a TraceLens perf report's
 ``ops_summary.csv`` (an SGLang server at TP2, one steady-state window), its times made up so that the shares are round.
-The report route names a kernel table of its own, which is read instead of it.
+The shares are read from the kernel table the report names (here a copy of it), never from the ops summary.
 """
 
 from __future__ import annotations
@@ -35,9 +35,10 @@ FIXTURE = Path(__file__).parent / "data" / "tracelens_ops_summary.csv"
 def _report(directory: Path, table: Path = FIXTURE, info: dict[str, Any] | None = None) -> dict[str, str]:
     (directory / OPS_SUMMARY).parent.mkdir(parents=True, exist_ok=True)
     shutil.copy(table, directory / OPS_SUMMARY)
+    shutil.copy(table, directory / "kernel_shares.csv")
     (directory / ANALYSIS_JSON).write_text(json.dumps({"report_info": info or {"mode": "agentic"}}))
     (directory / "analysis.md").write_text("report")
-    return {"analysis_md_path": str(directory / "analysis.md")}
+    return {"analysis_md_path": str(directory / "analysis.md"), KERNEL_SHARES_KEY: str(directory / "kernel_shares.csv")}
 
 
 def test_the_full_table_sums_to_the_whole_gpu_time_with_gemm_and_attention_present(tmp_path: Path) -> None:
@@ -74,7 +75,7 @@ def test_an_op_listed_twice_has_its_rows_summed_and_unreadable_rows_are_skipped(
 
 def test_a_report_without_the_table_gives_no_shares(tmp_path: Path) -> None:
     result = _report(tmp_path)
-    (tmp_path / OPS_SUMMARY).unlink()
+    (tmp_path / "kernel_shares.csv").unlink()
     assert read_op_shares(result) == {}
 
 

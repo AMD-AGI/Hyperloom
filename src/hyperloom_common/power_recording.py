@@ -68,7 +68,6 @@ class RecorderScope:
     external_server: bool = False
     nnodes: int = 1
     node_rank: int = 0
-    window_source: str = "phase_marks"
 
 
 @dataclass(frozen=True)
@@ -123,7 +122,7 @@ class PowerRecording:
         if not intervals:
             return None
         start, end = intervals[0][0] + self.unix_offset, intervals[-1][1] + self.unix_offset
-        return Window(MEASURED, intervals, start, end, self.scope.window_source, self.reported_duration_s)
+        return Window(MEASURED, intervals, start, end, "phase_marks", self.reported_duration_s)
 
     def _column(self, gpu: int, column: str, intervals: Sequence[tuple[float, float]]) -> list[tuple[float, Any]]:
         index = _FAST[column]

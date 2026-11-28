@@ -23,6 +23,7 @@ from hyperloom.contracts.measurement import Purpose, TestKind, TestResult
 from hyperloom.inference_optimizer.roofline_ceiling import compute_roofline_breakdown_from_state
 from hyperloom.contracts.recipe import PATCH_ROOT, LaunchConfig, PatchRef, RecipeDelta
 from hyperloom.measure.compile import LocalBlobStore
+from hyperloom.orchestrator.tests._fixtures import MI355X_CARD, publish_card
 from hyperloom_multibranch.contracts.blackboard import INTEGRATION_BRANCH, Role, Writer
 from hyperloom_multibranch.contracts.blackboard.interfaces import NotRecorded
 from hyperloom_multibranch.contracts.blackboard.records import ToolResultPointer
@@ -59,6 +60,7 @@ from hyperloom_multibranch.scheduling.prelude import (
     PreludeServices,
     ReplayChampion,
     WarmStartSource,
+    roofline_ceiling,
 )
 from hyperloom_multibranch.scheduling.prelude_reader import MB_FRAMEWORK_REPO_ENV, MB_FRAMEWORK_VERSION_ENV
 from hyperloom_multibranch.scheduling.processes import ProcessRegistry
@@ -360,7 +362,17 @@ def _main_flow_ceiling(tmp_path: Path, workload: Workload) -> float:
     return compute_roofline_breakdown_from_state(state, arm="baseline").peak_tok_per_sec
 
 
-async def test_the_session_profile_bounds_output_throughput_by_the_main_flows_decode_ceiling(tmp_path: Path) -> None:
+@pytest.fixture
+def no_measured_peaks(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A TraceLens checkout with no arch spec, so a ceiling rests on the session's card alone, not on this host's."""
+    monkeypatch.setenv("TRACELENS_ROOT", str(tmp_path / "TraceLens"))
+
+
+@pytest.mark.usefixtures("no_measured_peaks")
+async def test_the_session_profile_bounds_output_throughput_by_the_main_flows_decode_ceiling(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    publish_card(monkeypatch, MI355X_CARD)
     workload = replace(WORKLOAD, model=str(model_checkout(tmp_path)))
     layout = _layout(tmp_path)
 
@@ -370,6 +382,11 @@ async def test_the_session_profile_bounds_output_throughput_by_the_main_flows_de
     assert ceiling > 0
     assert dict(result.profile.roofline_ceiling) == {GRADED_OUTPUT: pytest.approx(ceiling)}
     assert await _blackboard(layout).session_profile() == result.profile
+
+
+@pytest.mark.usefixtures("no_measured_peaks")
+def test_a_session_that_published_no_card_has_no_ceiling(tmp_path: Path) -> None:
+    assert roofline_ceiling(replace(WORKLOAD, model=str(model_checkout(tmp_path)))) == {}
 
 
 async def test_an_agentx_session_profile_names_its_objective_and_has_no_roofline_ceiling(tmp_path: Path) -> None:

@@ -34,7 +34,10 @@ from hyperloom.common.env_safety import SPECIALIST_USER_ENV
 from hyperloom.contracts.measurement import AttachmentRef, Purpose, TestKind, TestRequest
 from hyperloom.contracts.recipe import Recipe, RecipeDelta
 from hyperloom_common import bwrap as bwrap_module
+from hyperloom_common import gpu_card
+from hyperloom_common.amd_smi import AmdSmiError
 from hyperloom_common.bwrap import BwrapProbe
+from hyperloom_common.gpu_card import GpuCard, session_card
 from hyperloom_common.env import forge_explicitly_enabled
 from hyperloom.common.perf_metric import agentx_enabled
 from hyperloom.common import visible_devices
@@ -157,6 +160,7 @@ from hyperloom.measure.tests.bundle_factory import base_launch
 from hyperloom.orchestrator.specialists.launch_env import LaunchPlace, specialist_confinement
 from hyperloom.orchestrator.specialists.tests.test_model_dirs import shown
 from hyperloom.orchestrator.state.base_launch import ServerBase, freeze_base, frozen_base, server_base
+from hyperloom.orchestrator.tests._fixtures import MI325X_CARD, MI355X_CARD
 from hyperloom_common.proctree import REAP_MARK_ENV
 from inference_suite import SourceSnapshot
 from inference_suite.recipe.resolve import UnreadSource
@@ -639,6 +643,23 @@ def test_a_machine_that_shows_no_card_fits_no_test(monkeypatch: pytest.MonkeyPat
     monkeypatch.setenv("ROCR_VISIBLE_DEVICES", "")
     with pytest.raises(ValueError, match="0 cards"):
         machine_parallel_tests(1)
+
+
+def test_local_cards_of_two_kinds_refuse_the_peers_naming_each_kind(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(gpu_card, "read_cards", lambda: [MI325X_CARD, MI355X_CARD])
+
+    with pytest.raises(PeersUnavailable, match=r"cards \[0, 1\].*1x AMD Instinct MI325X.*1x AMD Instinct MI355X"):
+        LocalCards((0, 1)).card()
+
+
+def test_cards_amd_smi_cannot_read_refuse_the_peers_saying_why(monkeypatch: pytest.MonkeyPatch) -> None:
+    def unreadable() -> list[GpuCard]:
+        raise AmdSmiError("amd-smi static --json exited 1 and printed nothing")
+
+    monkeypatch.setattr(gpu_card, "read_cards", unreadable)
+
+    with pytest.raises(PeersUnavailable, match="cannot be described: amd-smi static --json exited 1"):
+        LOCAL.card()
 
 
 @dataclass(frozen=True)
@@ -1325,6 +1346,42 @@ async def test_a_hosted_session_measures_in_the_services_sandboxes_under_its_too
         assert toolbox.trace_root == layout.toolbox and toolbox.blobs is built.setup.blobs
         assert built.peers.base_image_digest == IMAGE.digest
         assert (layout.toolbox / "canonical" / "canonical.yaml").is_file()
+        assert session_card() == MI325X_CARD, "the session's card is the recording of the runners' node"
+
+
+async def test_the_session_publishes_the_card_its_tests_run_on_and_every_instruction_sheet_names_it(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    specs: list[SpecContext] = []
+    build = local_hosted.build_local_toolbox
+
+    def signed(*args: object, **options: object) -> LocalHostedToolbox:
+        specs.append(args[-1])
+        return build(*args, **options)
+
+    monkeypatch.setattr(local_hosted, "build_local_toolbox", signed)
+    monkeypatch.delenv("HL_MODEL_BASE", raising=False)
+
+    with caplog.at_level(logging.WARNING, logger=local_peers_module.__name__):
+        async with _peers(tmp_path, monkeypatch, WORKLOAD):
+            assert session_card() == MI355X_CARD
+            assert [spec.card for spec in specs] == [MI355X_CARD]
+
+    assert "call themselves" not in caplog.text, "the GPU type is the card's own label"
+
+
+async def test_a_gpu_type_other_than_the_cards_own_label_stays_the_sessions_and_both_are_said(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    monkeypatch.delenv("HL_MODEL_BASE", raising=False)
+    workload = replace(WORKLOAD, gpu_type="mi350x")
+
+    with caplog.at_level(logging.WARNING, logger=local_peers_module.__name__):
+        async with _peers(tmp_path, monkeypatch, workload):
+            assert os.environ["GPU_TYPE"] == "mi350x" and session_card() == MI355X_CARD
+
+    said = "the GPU type is given as 'mi350x', but the cards are 'mi355x' (AMD Instinct MI355X (gfx950"
+    assert said in caplog.text and "looked up under 'mi350x'" in caplog.text
 
 
 @pytest.mark.parametrize(

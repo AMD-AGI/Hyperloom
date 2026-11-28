@@ -126,7 +126,7 @@ Example: 30min budget, 2 tuners at 15+20 min = 35 min → second tuner may be sk
 
 | Parameter | Default | Description |
 |---|---|---|
-| `--gpu-type` | `mi300x` | `mi300x` or `mi355x` |
+| `--gpu-type` | `auto` | `auto` (detect via `rocminfo`), a gfx id such as `gfx942`, or one of the labels `mi300x`, `mi355x`, `w7900`, `radeon8060s` |
 | `--tp` | 1 | Tensor parallel degree |
 | `--conc` | 64 | Target serving concurrency (affects token coverage) |
 | `--tokens` | (empty) | Explicit comma-separated token sizes (overrides auto) |

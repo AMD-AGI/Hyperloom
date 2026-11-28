@@ -91,8 +91,9 @@ _ACCOUNTING = {
 #: The report's token counts, by the aiperf per-request metric each sums.
 _TOKEN_METRICS = {"input_tokens": "input_sequence_length", "output_tokens": "output_sequence_length"}
 
-#: Hears the replay at the monotonic instant of every poll, and once after the client exits.
-ReplayListener = Callable[[float], None]
+#: Hears the replay at the monotonic instant of every poll, and once after the client exits; returns why the round has
+#: to end, if it has to.
+ReplayListener = Callable[[float], "Stop | None"]
 
 
 @dataclass(frozen=True)
@@ -400,16 +401,16 @@ def _replay(
     follower = ProgressFollower(progress, agentx_round.clock)
     activity = OutputActivity(agentx_round.server, layout.agentx_client_log)
 
-    def hear(now: float) -> None:
-        for listener in agentx_round.listeners:
-            listener(now)
+    def hear(now: float) -> Stop | None:
+        stops = [listener(now) for listener in agentx_round.listeners]
+        return next((stop for stop in stops if stop is not None), None)
 
     def live(now: float) -> Stop | None:
         follower.check()
         # The follower's read can mark FINISHED after ``now``; a window closed at ``now`` would end before it.
-        hear(time.monotonic())
+        stop = hear(time.monotonic())
         # A listener can block for minutes (/stop_profile answers once the trace is written): date output after it.
-        return activity.check(time.monotonic())
+        return stop or activity.check(time.monotonic())
 
     child = spawn(invocation.argv, env, layout.agentx_client_log)
     ended = wait_child(child, agentx_round.gate, live)

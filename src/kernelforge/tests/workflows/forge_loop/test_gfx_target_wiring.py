@@ -27,7 +27,6 @@ _RDNA4_NOTE = "## Target architecture: gfx1201 (RDNA 4"
         (True, "gfx1100", False, True),
         (True, "gfx1201", False, True),
         (True, "gfx1201:sramecc-:xnack-", False, True),
-        (True, "r9700", False, True),
         (False, "gfx950", False, False),
         (False, "gfx1100", False, False),
         (False, "gfx1201", False, False),

@@ -78,7 +78,6 @@ from hyperloom_multibranch.toolbox.hosted_toolbox import (
     HostedToolbox,
     HostedToolboxInputs,
     build_hosted_toolbox,
-    handover_for,
     parallel_tests_for,
 )
 from hyperloom_multibranch.toolbox.queue import QueuePolicy
@@ -289,32 +288,15 @@ async def _result_of(toolbox: HostedToolbox, request_id: str) -> TestResult:
 def test_the_inputs_never_print_a_key_and_a_refusal_names_the_field_not_the_value(tmp_path: Path) -> None:
     inputs = _inputs(None, tmp_path)
     assert "m-key" not in repr(inputs) and "d-key" not in repr(inputs)
-    for changed, field_name in (({"measurement_key": " "}, "measurement_key"), ({"run_id": ""}, "run_id")):
-        with pytest.raises(ValueError, match=f"{field_name} is empty"):
-            _inputs(None, tmp_path, **changed)
     with pytest.raises(ValueError, match="dev_key is empty") as refused:
         _inputs(None, tmp_path, dev_key="  ")
     assert "m-key" not in str(refused.value)
-
-
-_NOT_A_DIGEST = "runner_cache_manifest_sha256 is not a 64-character lowercase hex SHA-256"
 
 
 @pytest.mark.parametrize(
     ("changed", "message"),
     [
         ({"tp": 0}, "tp must be at least 1"),
-        ({"source_sha": "main"}, "source_sha is not a full lowercase commit hash"),
-        ({"source_sha": "AB" * 20}, "source_sha is not a full lowercase commit hash"),
-        ({"source_sha": "ab" * 19}, "source_sha is not a full lowercase commit hash"),
-        ({"runner_cache_manifest_sha256": ""}, _NOT_A_DIGEST),
-        ({"runner_cache_manifest_sha256": "CD" * 32}, _NOT_A_DIGEST),
-        ({"runner_cache_manifest_sha256": "cd" * 31}, _NOT_A_DIGEST),
-        ({"runner_cache_manifest_sha256": "cd" * 33}, _NOT_A_DIGEST),
-        ({"runner_cache_manifest_sha256": "cg" * 32}, _NOT_A_DIGEST),
-        ({"runner_cache_manifest_sha256": _MANIFEST + "\n"}, _NOT_A_DIGEST),
-        ({"grant_limits": {"max_sandboxes": 8, "max_gpus": 8}}, "grant_limits has no gpu_hours, max_runtime_sec"),
-        ({"grant_limits": {**_GRANT, "max_gpus": 7.5}}, "max_gpus is not a whole number"),
         ({"grant_limits": {**_GRANT, "max_sandboxes": 0}}, "at least one sandbox"),
         ({"sandbox_workspace": " "}, "sandbox_workspace is empty"),
     ],
@@ -374,24 +356,6 @@ def test_a_plain_dict_with_exactly_the_field_names_builds_the_inputs(tmp_path: P
     assert HostedToolboxInputs(**only_required).dev_key is None
 
 
-@pytest.mark.parametrize(
-    "left_out",
-    [
-        ("runner_cache_manifest_sha256",),  # a host that predates the manifest pin
-        _OPTIONAL_FIELDS,
-    ],
-)
-def test_a_plain_dict_without_the_newer_keys_still_builds_the_inputs(tmp_path: Path, left_out: tuple[str, ...]) -> None:
-    plain = {**vars(_inputs(None, tmp_path)), "runner_cache_manifest_sha256": _MANIFEST}
-    fewer = {name: value for name, value in plain.items() if name not in left_out}
-    assert set(left_out) < set(plain) and set(fewer) >= set(_REQUIRED_FIELDS)
-    inputs = HostedToolboxInputs(**fewer)
-    for name in left_out:
-        assert getattr(inputs, name) == {"tp": 1}.get(name), f"{name} falls back to its default"
-    pinned = {} if "runner_cache_manifest_sha256" in left_out else {MANIFEST_PIN_ENV: _MANIFEST}
-    assert inputs.create_envs() == {SOURCE_SHA_ENV: _SOURCE_SHA, **pinned}
-
-
 @pytest.mark.parametrize("tests_end_by", [None, 1_800_000_000.0])
 def test_the_toolbox_s_retries_wait_no_later_than_the_time_its_tests_must_end_by(
     tmp_path: Path, tests_end_by: float | None
@@ -399,27 +363,6 @@ def test_the_toolbox_s_retries_wait_no_later_than_the_time_its_tests_must_end_by
     toolbox = _toolbox(None, tmp_path, tests_end_by=tests_end_by)
 
     assert toolbox._tests_end_by == tests_end_by
-
-
-def test_a_refused_manifest_digest_is_never_in_the_message(tmp_path: Path) -> None:
-    secret_looking = "XY" * 32
-    with pytest.raises(ValueError, match=_NOT_A_DIGEST) as refused:
-        _inputs(None, tmp_path, runner_cache_manifest_sha256=secret_looking)
-    assert secret_looking not in str(refused.value)
-
-
-def test_a_dict_with_one_key_more_or_one_required_key_less_is_refused(tmp_path: Path) -> None:
-    plain = vars(_inputs(None, tmp_path)).copy()
-    with pytest.raises(TypeError, match="unexpected keyword argument 'extra_field'"):
-        HostedToolboxInputs(**plain, extra_field=1)
-    for name in _REQUIRED_FIELDS:
-        fewer = {key: value for key, value in plain.items() if key != name}
-        with pytest.raises(TypeError, match=rf"missing 1 required positional argument: '{name}'"):
-            HostedToolboxInputs(**fewer)
-
-
-def test_the_source_of_a_sha256_repository_is_a_commit_hash_too(tmp_path: Path) -> None:
-    assert _inputs(None, tmp_path, source_sha="cd" * 32).source_sha == "cd" * 32
 
 
 # -- what is built from them ---------------------------------------------------------------------------------------
@@ -465,9 +408,7 @@ async def test_the_toolbox_is_built_from_the_inputs(tmp_path: Path) -> None:
     assert toolbox.backend._config.create_envs == {SOURCE_SHA_ENV: _SOURCE_SHA}, "no repository, no manifest pin"
     assert toolbox.backend.pool.template_for(2) == _RUNNERS[1]
     assert (await toolbox.measurement_capacity()) == MeasurementCapacity(8, 8)
-    assert toolbox._parallel_limit() == 3 and toolbox._queue.policy.global_concurrency == 3, (
-        "8 GPUs, TP=2: four tests fit, one test's room is kept for the sandbox handed to the next test"
-    )
+    assert toolbox._parallel_limit() == 4 and toolbox._queue.policy.global_concurrency == 4, "8 GPUs, TP=2"
     assert toolbox.analysis_tools == (TRACELENS_TOOL,), "kernel_tune and roofline are the local toolbox's"
     assert not toolbox.single_node
 
@@ -515,9 +456,7 @@ def test_the_runner_cache_manifest_digest_is_a_create_environment_of_every_runne
 
 def test_the_grants_sandboxes_and_gpus_bound_the_tests_at_once(tmp_path: Path) -> None:
     toolbox = _toolbox(None, tmp_path, grant_limits={**_GRANT, "max_sandboxes": 3})
-    assert toolbox._parallel_limit() == 2 and toolbox._queue.policy.global_concurrency == 2, (
-        "three sandboxes: two tests and the one kept for the next test"
-    )
+    assert toolbox._parallel_limit() == 3 and toolbox._queue.policy.global_concurrency == 3
     with pytest.raises(ValueError, match="a grant of 2 GPUs cannot run a test of TP=4"):
         _toolbox(
             None, tmp_path, tp=4, grant_limits={**_GRANT, "max_gpus": 2}, sandbox_templates={"measurement": {"4": "r"}}
@@ -541,11 +480,6 @@ def test_the_parallel_tests_rule_is_the_lesser_of_whole_tests_and_sandboxes(
     grant = GrantLimits(max_sandboxes=sandboxes, max_gpus=gpus, gpu_hours=1.0, max_runtime_sec=60)
     assert parallel_tests_for(grant, tp) == expected
     assert "parallel_tests_for" in hosted_toolbox.__all__
-    handover = handover_for(grant, tp)
-    assert (handover is None) == (expected < 3), "a sandbox is kept only where the grant fits three tests"
-    assert parallel_tests_for(grant, tp, handover) == (expected - 1 if expected >= 3 else expected), (
-        "and then one test's room is held for it; where two fit, both run"
-    )
 
 
 def test_the_parallel_tests_rule_without_a_grant_is_the_pools_default_and_refuses_a_grant_too_small() -> None:
@@ -858,32 +792,6 @@ async def test_a_running_tests_progress_is_the_last_line_its_runner_reports_from
         await toolbox.close()
 
 
-async def test_a_running_test_whose_runner_has_written_no_log_has_no_live_line(
-    service: Service, tmp_path: Path
-) -> None:
-    toolbox = _toolbox(service, tmp_path, planned=_HANG)
-    try:
-        await toolbox.start()
-        request_id = await toolbox.submit_test(req())
-        await _until(lambda: service.running("measurement", "run-1") != [], "the runner sandbox")
-        (sandbox_id,) = service.running("measurement", "run-1")
-        sandbox = service.observer().connect(sandbox_id, role="measurement")
-
-        def running() -> bool:
-            try:
-                return json.loads(sandbox.read_file("/out/progress.json")).get("phase") == "running"
-            except FileNotFoundError:
-                return False
-
-        await _until(running, "the runner's progress to say it runs")
-        await asyncio.sleep(0.5)  # ten polls of that file
-        progress = await toolbox.progress(request_id)
-        assert progress is not None and progress.state == "running" and progress.running_seconds is not None
-        assert (progress.last_line, progress.last_output_seconds_ago) == (None, None)
-    finally:
-        await toolbox.close()
-
-
 async def test_a_lease_is_a_dev_sandbox_and_its_cards_leave_the_measurement_capacity(
     service: Service, tmp_path: Path
 ) -> None:
@@ -894,12 +802,12 @@ async def test_a_lease_is_a_dev_sandbox_and_its_cards_leave_the_measurement_capa
         assert lease.template == _DEVS[1] and lease.sandbox.run("echo hi").stdout == "hi\n"  # type: ignore[attr-defined]
         assert lease.lifetime_sec == 600 + LIFETIME_MARGIN_SEC  # type: ignore[attr-defined]
         assert (await toolbox.measurement_capacity()) == MeasurementCapacity(8, 8, leased_cards=2)
-        assert lease.remaining_cards == 6 and toolbox._parallel_limit() == 2, "three tests fit, one's room is kept"
+        assert lease.remaining_cards == 6 and toolbox._parallel_limit() == 3
         (created,) = [c for c in service.creates if c.role == "dev"]
         assert created.metadata[PURPOSE_KEY] == LEASE_PURPOSE and created.metadata[BRANCH_ID_KEY] == "b1"
         assert created.metadata[RUN_ID_KEY] == "run-1" and not created.options.envs, "a dev sandbox is given no source"
         await toolbox.release_branch_sandbox(lease.lease_id)
-        assert (await toolbox.measurement_capacity()) == MeasurementCapacity(8, 8) and toolbox._parallel_limit() == 3
+        assert (await toolbox.measurement_capacity()) == MeasurementCapacity(8, 8) and toolbox._parallel_limit() == 4
         assert service.running("dev") == []
     finally:
         await toolbox.close()
@@ -987,6 +895,20 @@ async def test_start_ends_the_lease_sandboxes_an_earlier_process_of_the_run_left
         await toolbox.start()
         assert service.running("dev") == [elsewhere.sandbox_id], "this run's leftover is ended, run-2's is not"
         assert left.sandbox_id not in service.running("dev")
+    finally:
+        await toolbox.close()
+
+
+async def test_a_start_ends_the_leftovers_of_the_leases_and_of_measurement_before_any_test(tmp_path: Path) -> None:
+    toolbox = _toolbox(None, tmp_path, grant_limits=_GRANT)
+    assert toolbox.leases is not None
+    ended: list[str] = []
+    toolbox.leases.end_leftovers = lambda: ended.append("leases")  # type: ignore[method-assign]
+    toolbox.backend.end_leftovers = lambda: ended.append("measurement") or []  # type: ignore[method-assign]
+    toolbox.backend.close = lambda: None  # type: ignore[method-assign]  # no service to ask
+    await toolbox.start()
+    try:
+        assert ended == ["leases", "measurement"]
     finally:
         await toolbox.close()
 

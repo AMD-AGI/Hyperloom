@@ -20,6 +20,14 @@ import pytest
 from hyperloom.common.benchmark_config import BenchmarkPoint
 from hyperloom.orchestrator.actions.executors.explore_prefilter import inferasim_anchors as ia
 from hyperloom.orchestrator.actions.executors.explore_prefilter import inferasim_bridge as ib
+from hyperloom.orchestrator.tests._fixtures import MI325X_CARD, MI355X_CARD, publish_card
+
+
+@pytest.fixture(autouse=True)
+def _a_part_to_price(monkeypatch):
+    """A projection is priced for a named part; a test about the session GPU unsets this one."""
+    monkeypatch.setenv(ib.ENV_GPU_ARCH, "mi355x")
+    monkeypatch.delenv(ib.ENV_HBM_GB, raising=False)
 
 
 def _point_spec(bench: dict, **kwargs) -> ib.ServingSpec:
@@ -724,28 +732,41 @@ def test_a_measured_anchor_from_another_image_conflicts(tmp_path):
 
 
 def test_gpu_arch_is_canonical(monkeypatch):
-    monkeypatch.delenv(ib.ENV_GPU_ARCH, raising=False)
-    assert ib.gpu_arch() == "mi355x"
+    monkeypatch.delenv(ib.ENV_GPU_ARCH)
+    assert ib.gpu_arch() == ""
     assert ib.gpu_arch("AMD Instinct MI300X") == "mi300x"
-    assert ib.recipe_from_spec(_spec())["gpu_arch"] == "mi355x"
+    assert ib.recipe_from_spec(_spec())["gpu_arch"] == ""
+
+
+def test_a_projection_with_no_part_to_price_is_refused(monkeypatch):
+    monkeypatch.delenv(ib.ENV_GPU_ARCH)
+    with pytest.raises(ib.InferasimBridgeError, match=ib.ENV_GPU_ARCH):
+        ib._build_argv(_spec(), "w.yaml", mode=ib.MODE_SIMULATE, estimator_name=ib.ESTIMATOR_ANALYTICAL)
 
 
 def test_the_projection_is_priced_for_the_session_gpu(monkeypatch):
-    monkeypatch.delenv(ib.ENV_GPU_ARCH, raising=False)
-    monkeypatch.delenv(ib.ENV_HBM_GB, raising=False)
-    spec = _spec(gpu="MI300X")
-    assert ib.recipe_from_spec(spec)["gpu_arch"] == "mi300x"
+    monkeypatch.delenv(ib.ENV_GPU_ARCH)
+    publish_card(monkeypatch, MI325X_CARD)
+    spec = _spec(gpu="MI325X")
+    assert ib.recipe_from_spec(spec)["gpu_arch"] == "mi325x"
     argv = ib._build_argv(spec, "w.yaml", mode=ib.MODE_SIMULATE, estimator_name=ib.ESTIMATOR_ANALYTICAL)
-    assert argv[argv.index("--gpu-arch") + 1] == "mi300x"
-    assert argv[argv.index("--hbm-capacity-gb") + 1] == "192.0"
+    assert argv[argv.index("--gpu-arch") + 1] == "mi325x"
+    assert argv[argv.index("--hbm-capacity-gb") + 1] == "256.0"
 
 
-def test_hbm_comes_from_the_shared_hardware_table(monkeypatch):
-    from hyperloom.inference_optimizer.roofline_ceiling import HW_SPECS
+@pytest.mark.parametrize(("card", "hbm_gb"), [(MI355X_CARD, "288.0"), (None, None)])
+def test_hbm_is_the_session_cards_memory(monkeypatch, card, hbm_gb):
+    if card is not None:
+        publish_card(monkeypatch, card)
+    argv = ib._build_argv(_spec(), "w.yaml", mode=ib.MODE_SIMULATE, estimator_name=ib.ESTIMATOR_ANALYTICAL)
+    assert (argv[argv.index("--hbm-capacity-gb") + 1] if "--hbm-capacity-gb" in argv else None) == hbm_gb
 
-    monkeypatch.delenv(ib.ENV_HBM_GB, raising=False)
-    argv = ib._build_argv(_spec(gpu="MI308X"), "w.yaml", mode=ib.MODE_SIMULATE, estimator_name=ib.ESTIMATOR_ANALYTICAL)
-    assert argv[argv.index("--hbm-capacity-gb") + 1] == str(HW_SPECS["mi308x"]["hbm_gb"])
+
+def test_an_operator_hbm_capacity_outranks_the_card(monkeypatch):
+    publish_card(monkeypatch, MI355X_CARD)
+    monkeypatch.setenv(ib.ENV_HBM_GB, "192")
+    argv = ib._build_argv(_spec(), "w.yaml", mode=ib.MODE_SIMULATE, estimator_name=ib.ESTIMATOR_ANALYTICAL)
+    assert argv[argv.index("--hbm-capacity-gb") + 1] == "192"
 
 
 def test_the_arch_override_only_names_an_unknown_session_gpu(monkeypatch):

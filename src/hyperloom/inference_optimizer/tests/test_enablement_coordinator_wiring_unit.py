@@ -12,7 +12,6 @@ from pathlib import Path
 
 import pytest
 
-from hyperloom.agents.framework.sources.pr_monitor import PRMonitorError
 from hyperloom.common.bringup import BootObservation, Excerpt, LadderStage, TerminalFrame
 from hyperloom.common.failure_signature import FailureSignature
 from hyperloom.inference_optimizer.breakdown.stop_reasons import HOST_GPUS_UNAVAILABLE
@@ -88,46 +87,7 @@ def _fake_self(tmp_path, **state_kw):
     return _enqueue_self(tmp_path, **state_kw)
 
 
-def _stub_enumerate(monkeypatch, cands):
-    """Patch ``sources.enumerate_candidates`` to return ``cands`` (or raise)."""
-    import hyperloom.agents.framework.sources as src
-
-    def _fake_enum(_req):
-        if isinstance(cands, Exception):
-            raise cands
-        return list(cands)
-
-    monkeypatch.setattr(src, "enumerate_candidates", _fake_enum)
-
-
-@pytest.mark.parametrize(
-    ("enabled", "expected_modes"),
-    [
-        (True, ("pr_monitor", "github")),
-        (False, ("github",)),
-    ],
-)
-def test_enablement_discovery_honors_pr_monitor_gate(
-    monkeypatch,
-    enabled,
-    expected_modes,
-    tmp_path,
-):
-    import hyperloom.agents.framework.sources as sources
-
-    seen = []
-    monkeypatch.setenv("KB_STORE_URL", "https://kb.example/knowledge-base")
-    monkeypatch.setattr(sources, "enumerate_candidates", lambda request: seen.append(request) or [])
-    fake = _enqueue_self(tmp_path)
-    fake.knowledge_plane = types.SimpleNamespace(pr_monitor_enabled=enabled)
-
-    fake.enablement_params.build_enablement_specialist_params(_MISSING_ARCH_LOG)
-
-    assert {request.search_modes for request in seen} == {expected_modes}
-
-
-def test_build_params_actionable_failure_tags_enablement(monkeypatch, tmp_path):
-    _stub_enumerate(monkeypatch, [])
+def test_build_params_actionable_failure_tags_enablement(tmp_path):
     fake = _enqueue_self(tmp_path)
     fake.shared_state.enablement.launch_observation_path = "/s/reports/bringup/round-abc-000.json"
     params = fake.enablement_params.build_enablement_specialist_params(_MISSING_ARCH_LOG)
@@ -148,8 +108,7 @@ def test_build_params_actionable_failure_tags_enablement(monkeypatch, tmp_path):
     assert "enablement_origin" not in params
 
 
-def test_build_params_threads_eval_origin_carriers(monkeypatch, tmp_path):
-    _stub_enumerate(monkeypatch, [])
+def test_build_params_threads_eval_origin_carriers(tmp_path):
     fake = _enqueue_self(tmp_path)
     fake.shared_state.enablement.origin = "eval"
     fake.shared_state.enablement.accuracy_floor = 0.3
@@ -170,9 +129,8 @@ _TRANSFORMERS_UNRECOGNIZED_LOG = (
 )
 
 
-def test_build_params_seeds_no_deterministic_shared_venv_mutation(monkeypatch, tmp_path):
+def test_build_params_seeds_no_deterministic_shared_venv_mutation(tmp_path):
     """An arch-miss round must NOT auto-seed ANY shared-venv mutation."""
-    _stub_enumerate(monkeypatch, [])
     fake = _enqueue_self(tmp_path, model_name="deepseek-ai/DeepSeek-V4-Flash")
     params = fake.enablement_params.build_enablement_specialist_params(_TRANSFORMERS_UNRECOGNIZED_LOG)
     assert params is not None
@@ -183,37 +141,8 @@ def test_build_params_seeds_no_deterministic_shared_venv_mutation(monkeypatch, t
     assert not any("transformers" in c for c in setup)
 
 
-def test_build_params_feeds_ranked_candidate_refs_into_mandate(monkeypatch, tmp_path):
-    from hyperloom.agents.framework.models import Candidate
-
-    cands = [
-        Candidate(ref="PR:1", title="minor perf tweak", html_url="http://x/1"),
-        Candidate(
-            ref="PR:2",
-            title="Add support to enable GLM architecture on ROCm",
-            html_url="http://x/2",
-        ),
-    ]
-    _stub_enumerate(monkeypatch, cands)
-    fake = _enqueue_self(tmp_path)
-    params = fake.enablement_params.build_enablement_specialist_params(_MISSING_ARCH_LOG)
-    assert params is not None
-    # Enablement-intent PR ranks first and its html_url is threaded through.
-    assert params["enablement_candidate_refs"][0] == "http://x/2"
-
-
-def test_build_params_degrades_gracefully_when_discovery_raises(monkeypatch, tmp_path):
-    _stub_enumerate(monkeypatch, PRMonitorError("network down"))
-    fake = _enqueue_self(tmp_path)
-    params = fake.enablement_params.build_enablement_specialist_params(_MISSING_ARCH_LOG)
-    assert params is not None
-    # Discovery failure -> repos-only mandate, no candidate refs.
-    assert params["enablement_candidate_refs"] == []
-
-
-def test_build_params_dispatches_even_for_unknown_failure(monkeypatch, tmp_path):
+def test_build_params_dispatches_even_for_unknown_failure(tmp_path):
     """Q1: a non-blank UNKNOWN log still dispatches (kind is advisory, not a gate)."""
-    _stub_enumerate(monkeypatch, [])
     fake = _enqueue_self(tmp_path)
     params = fake.enablement_params.build_enablement_specialist_params(
         "some brand-new failure the rule table has never seen xyz"
@@ -335,7 +264,6 @@ async def test_enqueue_dispatches_when_baseline_unrunnable(monkeypatch, tmp_path
     from hyperloom.orchestrator.actions.executors import _multi_node_env as mne
 
     monkeypatch.setattr(mne, "is_multi_node", lambda: False)
-    _stub_enumerate(monkeypatch, [])
     fake = _enqueue_self(tmp_path)
     tid = await fake.enablement_lane._maybe_enqueue_enablement_specialist()
     assert tid
@@ -366,7 +294,6 @@ async def test_enqueue_admission_follows_mode_and_origin(monkeypatch, mode, orig
     from hyperloom.orchestrator.actions.executors import _multi_node_env as mne
 
     monkeypatch.setattr(mne, "is_multi_node", lambda: False)
-    _stub_enumerate(monkeypatch, [])
     fake = _enqueue_self(tmp_path, enablement_mode=mode, enablement_origin=origin)
     tid = await fake.enablement_lane._maybe_enqueue_enablement_specialist()
     assert bool(tid) is dispatched
@@ -389,7 +316,6 @@ async def test_enqueue_noop_when_run_deadline_passed(monkeypatch, tmp_path):
     from hyperloom.orchestrator.actions.executors import _multi_node_env as mne
 
     monkeypatch.setattr(mne, "is_multi_node", lambda: False)
-    _stub_enumerate(monkeypatch, [])
     # Deadline already in the past -> no new enablement work is opened.
     fake = _enqueue_self(tmp_path, run_deadline=Deadline.after(-1.0))
     assert await fake.enablement_lane._maybe_enqueue_enablement_specialist() == ""
@@ -398,15 +324,9 @@ async def test_enqueue_noop_when_run_deadline_passed(monkeypatch, tmp_path):
 
 @pytest.mark.asyncio
 async def test_enqueue_retries_with_next_attempt_after_revert(monkeypatch, tmp_path):
-    from hyperloom.agents.framework.models import Candidate
     from hyperloom.orchestrator.actions.executors import _multi_node_env as mne
 
     monkeypatch.setattr(mne, "is_multi_node", lambda: False)
-    cands = [
-        Candidate(ref="PR:1", title="enable GLM arch on ROCm", html_url="http://x/1"),
-        Candidate(ref="PR:2", title="add GLM support fix", html_url="http://x/2"),
-    ]
-    _stub_enumerate(monkeypatch, cands)
     fake = _enqueue_self(tmp_path)
     # First dispatch.
     tid1 = await fake.enablement_lane._maybe_enqueue_enablement_specialist()
@@ -436,7 +356,6 @@ async def test_the_lane_leaves_a_silently_finished_round_to_the_repair_pass(monk
     from hyperloom.orchestrator.actions.executors import _multi_node_env as mne
 
     monkeypatch.setattr(mne, "is_multi_node", lambda: False)
-    _stub_enumerate(monkeypatch, [])
     fake = _enqueue_self(tmp_path)
     await _hold_round(fake, "spec-stuck", holder_state="succeeded")
 
@@ -455,7 +374,6 @@ async def test_the_repair_pass_ends_a_round_whose_holder_finished_silently(monke
     from hyperloom.orchestrator.actions.executors import _multi_node_env as mne
 
     monkeypatch.setattr(mne, "is_multi_node", lambda: False)
-    _stub_enumerate(monkeypatch, [])
     fake = _enqueue_self(tmp_path)
     await _hold_round(fake, "spec-stuck", holder_state="succeeded")
 
@@ -472,7 +390,6 @@ async def test_watchdog_does_not_fire_when_task_running(monkeypatch, tmp_path):
     from hyperloom.orchestrator.actions.executors import _multi_node_env as mne
 
     monkeypatch.setattr(mne, "is_multi_node", lambda: False)
-    _stub_enumerate(monkeypatch, [])
     fake = _enqueue_self(tmp_path)
     await _hold_round(fake, "spec-running", holder_state="running")
     assert await fake.enablement_lane._maybe_enqueue_enablement_specialist() == ""
@@ -522,7 +439,6 @@ async def test_no_false_stall_while_integrate_proposal_pending(monkeypatch, tmp_
     from hyperloom.orchestrator.actions.executors import _multi_node_env as mne
 
     monkeypatch.setattr(mne, "is_multi_node", lambda: False)
-    _stub_enumerate(monkeypatch, [])
     fake = _enqueue_self(tmp_path)
     await _hold_round(fake, "spec-done")
     fake.state.pending_proposals["m-spec-done"] = _integrate_proposal("spec-done")
@@ -991,7 +907,6 @@ async def test_an_anchor_reached_by_another_route_ends_a_boot_lane(monkeypatch, 
     from hyperloom.orchestrator.actions.executors import _multi_node_env as mne
 
     monkeypatch.setattr(mne, "is_multi_node", lambda: False)
-    _stub_enumerate(monkeypatch, [])
     fake = _enqueue_self(tmp_path, enablement_origin=origin)
     assert await fake.enablement_lane._maybe_enqueue_enablement_specialist()
 
@@ -1097,9 +1012,8 @@ async def test_rearm_kept_stacks_setup_commands(monkeypatch, tmp_path):
     ]
 
 
-def test_build_params_threads_base_setup_commands_when_stacked(monkeypatch, tmp_path):
+def test_build_params_threads_base_setup_commands_when_stacked(tmp_path):
     """Q3: stacked base setup commands are passed to the next round + noted."""
-    _stub_enumerate(monkeypatch, [])
     fake = _enqueue_self(tmp_path)
     fake.shared_state.enablement.setup_commands = ["pip install -U transformers"]
     params = fake.enablement_params.build_enablement_specialist_params(_MISSING_ARCH_LOG)
@@ -1109,9 +1023,8 @@ def test_build_params_threads_base_setup_commands_when_stacked(monkeypatch, tmp_
     assert "setup command" in params["notes"]
 
 
-def test_build_params_tells_the_next_round_which_setup_commands_were_refused(monkeypatch, tmp_path):
+def test_build_params_tells_the_next_round_which_setup_commands_were_refused(tmp_path):
     """A refusal the author cannot see is re-authored until the budget runs out."""
-    _stub_enumerate(monkeypatch, [])
     fake = _enqueue_self(tmp_path)
     fake.shared_state.enablement.last_setup_refusals = ["ln -sf /a /b"]
     params = fake.enablement_params.build_enablement_specialist_params(_MISSING_ARCH_LOG)
@@ -1120,9 +1033,8 @@ def test_build_params_tells_the_next_round_which_setup_commands_were_refused(mon
     assert "ln -sf /a /b" in params["notes"]
 
 
-def test_build_params_hands_the_next_round_the_env_reads_of_the_inert_one(monkeypatch, tmp_path):
+def test_build_params_hands_the_next_round_the_env_reads_of_the_inert_one(tmp_path):
     """Without the names the next round repeats the patch and hits the same wall."""
-    _stub_enumerate(monkeypatch, [])
     fake = _enqueue_self(tmp_path)
     fake.shared_state.enablement.last_inert_round_env_reads = ["HL_FUSE_RMSNORM"]
     params = fake.enablement_params.build_enablement_specialist_params(_MISSING_ARCH_LOG)
@@ -1132,14 +1044,13 @@ def test_build_params_hands_the_next_round_the_env_reads_of_the_inert_one(monkey
     assert "not a finding" in params["notes"]
 
 
-def test_the_inert_lead_claims_only_what_the_gate_observed(monkeypatch, tmp_path):
+def test_the_inert_lead_claims_only_what_the_gate_observed(tmp_path):
     """The gate never measures a throughput for a boot that did not serve.
 
     The note carries the gate's own observation -- no serving, the same wall as
     the boot before it -- so the next round is not sent after a measurement
     that was never taken.
     """
-    _stub_enumerate(monkeypatch, [])
     fake = _enqueue_self(tmp_path)
     fake.shared_state.enablement.last_inert_round_env_reads = ["HL_FUSE_RMSNORM"]
     params = fake.enablement_params.build_enablement_specialist_params(_MISSING_ARCH_LOG)
@@ -1148,9 +1059,8 @@ def test_the_inert_lead_claims_only_what_the_gate_observed(monkeypatch, tmp_path
     assert "same wall with the same failure" in params["notes"]
 
 
-def test_build_params_notes_prior_patches_for_mandate(monkeypatch, tmp_path):
+def test_build_params_notes_prior_patches_for_mandate(tmp_path):
     """Stacked kept-patches appear in the specialist mandate note."""
-    _stub_enumerate(monkeypatch, [])
     fake = _enqueue_self(tmp_path)
     fake.shared_state.enablement.kept_patches = [
         "/s/runs/specialist/t1/patches/001_qk_rope.patch",
@@ -1167,7 +1077,6 @@ async def test_enqueue_dispatches_for_unknown_nonblank_log(monkeypatch, tmp_path
     from hyperloom.orchestrator.actions.executors import _multi_node_env as mne
 
     monkeypatch.setattr(mne, "is_multi_node", lambda: False)
-    _stub_enumerate(monkeypatch, [])
     fake = _enqueue_self(tmp_path, enablement_launch_log="some totally unrelated noise line")
     tid = await fake.enablement_lane._maybe_enqueue_enablement_specialist()
     assert tid

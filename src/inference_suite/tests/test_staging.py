@@ -1021,3 +1021,14 @@ def test_the_publish_command_prints_the_published_directory_or_refuses_with_stag
     (inferencex_root(stagings / staging.staging_key()) / GSM8K_TASK).unlink()
     assert cli.main(["publish", "--stagings", str(stagings), "--source", str(repo)]) == cli.EXIT_REFUSED
     assert capsys.readouterr().err.startswith(f"{FailedStep.STAGING_MISSING.value}: ")
+
+
+def test_the_staged_inferencex_commit_is_read_from_the_manifest(tmp_path):
+    assert staging.staged_inferencex_commit(tmp_path) is None, "no manifest"
+    commit = "c" * 40
+    manifest = staging.StagingManifest({staging.INFERENCEX_TOOL: staging.StagedTool(commit, {"f": "0" * 64})})
+    (tmp_path / staging.MANIFEST_FILE).write_bytes(manifest.to_bytes())
+    assert staging.staged_inferencex_commit(tmp_path) == commit
+    (tmp_path / staging.MANIFEST_FILE).write_text("{")
+    with pytest.raises(staging.StagingError, match="readable staging manifest"):
+        staging.staged_inferencex_commit(tmp_path)

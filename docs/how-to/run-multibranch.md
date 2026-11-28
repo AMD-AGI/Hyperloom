@@ -25,14 +25,17 @@ The session directory is created under `USER_DATA_PATH` and its path is printed 
 ## Environment
 
 Every variable below is checked before anything is created: a missing or malformed one fails the command with no
-session directory left behind. One step runs later, in the new session before PRELUDE: on a local session the publish
-of the inference_suite staging into the runner cache, which fails the command (exit 1) with the session directory left
-behind when that directory cannot be written.
+session directory left behind. Two steps run later, in the new session before PRELUDE: the read of
+the session's card (from the machine, or the recording `HYPERLOOM_RUNNER_GPU_CARD` names with `--measurement
+hosted`), which fails the command (exit 1) with the session directory left behind when the cards cannot be described
+or are not one kind; and on a local session the publish of the inference_suite staging into the runner cache, which
+fails it the same way when that directory cannot be written.
 
 | Variable | Required | Meaning |
 | --- | --- | --- |
 | `HYPERLOOM_RSI_ARCHIVE` | yes | Writable shared directory the session reads its predecessors from and archives its search tree in. No default. |
 | `HYPERLOOM_RUNNER_CACHE` | with `--measurement hosted` | This host's runner cache directory, which holds the inference_suite staging every test runs. Hosted: an absolute path on storage the measurement sandboxes mount, no default. Local: `/runner-cache` when unset, and it must be writable. |
+| `HYPERLOOM_RUNNER_GPU_CARD` | with `--measurement hosted` | A recording of `amd-smi static --json` on a node the measurement sandboxes run on, which the session takes its card from (see `--gpu-type` below and [Run hosted multi-branch on a new cluster](hosted-multibranch-new-cluster.md#app-host)). Read in the new session, as said above. A local session reads its own cards and ignores it. |
 | `INFERENCE_SUITE_TOOL_CACHE` | no | The tool cache `install.sh` staged the pinned InferenceX client in, which every test runs. Default `inference-suite-tools` under the dependency cache. Without a staging there that verifies, the command fails, naming `python -m inference_suite stage --tool-cache <dir>`. |
 | `KB_STORE_URL`, `KB_STORE_TOKEN` | no | Both set: PRELUDE reads warm-start leads from the Recipe KB and CLOSE writes the final recipe back. Neither set: no Recipe KB. Only one set is refused. |
 | `HYPERLOOM_KB_URL`, `HYPERLOOM_KB_TOKEN` | no | The Experience KB: the workspace's loopback service, whose URL and token `hyperloom-setup` writes into the workspace `.env`. Export them as the other variables here: `hyperloom-multibranch` reads no `.env`. Set: the briefs and the learnings tool recall past sessions' tests and learnings from it, and CLOSE writes this session's there; what the service does not take waits in the spool beside its data. A loopback service that is not serving is started before the session and left serving after it; one serving with other settings is not restarted. A service that cannot start, or a URL without its token, logs a warning and the session runs without it. Unset: no Experience KB. |
@@ -153,6 +156,13 @@ host has no token. The session logs one WARNING when its toolbox is built. Every
   `--boot-budget-sec` (see **Boot budget** below);
   `--inferencex-commit SHA` to resolve the session's base launch from InferenceX at that commit instead of `main`
   (see [Base launch](../reference/inference-suite.md#base-launch)).
+- **GPU type and card:** `--gpu-type` is the label the session files its results under (recipes, the Recipe KB, the
+  TraceLens arch spec the analyses read), in any case; any name is accepted. The facts come from the card itself: when
+  the session starts it reads the cards it measures on (`amd-smi`, else `rocm-smi`, else torch; in a hosted session,
+  the recording `HYPERLOOM_RUNNER_GPU_CARD` names) and every test's base launch, roofline and measurement sheet follow
+  that card's arch, compute units, memory and clocks. Cards of more than one kind, or cards no probe describes, refuse the
+  session before PRELUDE (exit 1), naming each kind. A `--gpu-type` other than the card's own label (`mi355x` for an
+  AMD Instinct MI355X) is kept and logged as a warning that names both.
 - **AgentX objective:** `--agentx-objective p50_interactivity|total_token_throughput` (default
   `p50_interactivity`) names the round metric an AgentX session keeps on: `e2e_norm_intvty_p50`, or
   `total_token_throughput` (per server; a session's TP is fixed, so it ranks changes as the per-GPU figure does). A
@@ -183,12 +193,9 @@ host has no token. The session logs one WARNING when its toolbox is built. Every
   `--max-branches` (default 4). A negative or non-finite limit is a usage error.
 - **Concurrency:** `--max-parallel-tests` (default: as many as fit at TP), `--max-k-per-branch` (default 2; a
   specialist's branch only, the integration branch's K is bounded by `--max-parallel-tests`),
-  `--dev-leases`, `--judge-interval-sec` (default 600, must be positive), `--measurement local|hosted`,
-  `--[no-]make-before-break` (hosted only, default on: where the grant fits at least three tests at TP, a finished
-  test's sandbox is kept until the next test's runs, so that the cluster does not give its node to another job, and one
-  test fewer runs at once; off runs every test the grant fits).
-- **Concurrency sweep:** `--[no-]enable-conc-sweep` (on by default) and `--conc-sweep-concs C1,C2,...` (see
-  [Concurrency sweep after CLOSE](#concurrency-sweep-after-close)).
+  `--dev-leases`, `--judge-interval-sec` (default 600, must be positive), `--measurement local|hosted`.
+- **Concurrency sweep:** `--[no-]enable-conc-sweep` (on by default), `--conc-sweep-concs C1,C2,...` and
+  `--conc-sweep-parallel N` (see [Concurrency sweep after CLOSE](#concurrency-sweep-after-close)).
 - **Directions:** `--specialist-prompt FILE` and `--reference NAME=DIR`, each repeatable.
 - **Third-party agents:** `--autonomous-agent SOURCE` (repeatable; a URL carrying credentials is refused),
   `--agent-directions`, `--agent-dossier-minutes`, `--agent-share-minutes`, `--agent-pack`, `--agent-launch`,
@@ -247,19 +254,38 @@ A session that cannot be resumed but stopped before FINAL can still be finished 
 
 `run` (on by default; `--no-enable-conc-sweep`, hosted `multibranch.conc_sweep: false`, turns it off) sweeps the closed session's root and the commit
 FINAL chose once CLOSE has run, apart from `--max-hours` and `--max-gpu-hours`; `conc-sweep SESSION_DIR` runs the same
-sweep by hand, measured on this machine. It runs only when FINAL chose a commit other than the root whose reproduction
-gained over the baseline. The points are every concurrency the InferenceX recipe of the frozen base publishes for the
-workload, with `--conc` among them; a `--reference-script` base takes them from `--conc-sweep-concs C1,C2,...`
-(hosted: `multibranch.conc_sweep_concs`). Both arms are submitted at once and run side by side where the session runs
-two tests at once (`--max-parallel-tests`), else one after the other. An AgentX point is a test of its own; an
-InferenceX arm is one sweep test over all its points, whose timeout scales with them. The tests are session
-measurements of the commits as they are: no accuracy and no checks.
+sweep by hand, measured on this machine, and takes `--conc-sweep-concs` and `--conc-sweep-parallel` in place of the
+session's own. It runs only when FINAL chose a commit other than the root whose reproduction gained over the baseline.
+The points are `--conc-sweep-concs C1,C2,...` when given (hosted: `multibranch.conc_sweep_concs`), else every
+concurrency the InferenceX recipe of the frozen base publishes for the workload, with `--conc` among them; a
+`--reference-script` base needs them given. Each point is seeded with the recipe's own launch at its concurrency
+(the nearest higher one the recipe publishes, else its highest), under what the commit changes of the session's
+launch, its request cap
+included even below its concurrency, as InferenceX measures it. The tests run a concurrency's baseline and commit point together, `--conc-sweep-parallel N` of them at
+once (hosted: `multibranch.conc_sweep_parallel`; 2 by default, 1 for one at a time), within `--max-parallel-tests`.
+An AgentX point is a test of its own; an InferenceX arm is one sweep test over the points that launch alike, whose
+timeout scales with them. The tests are session measurements of the commits as they are: no accuracy and no checks.
 
-The sweep logs its estimated length (each point priced as the session's longest root test) and, hosted, what is
-left of the grant. It writes `MB-reports/conc_sweep_summary.json`, `conc_sweep_raw.csv` and `conc_sweep_curve.png`,
-the summary after every test, with `status` `succeeded`, `partial`, `failed`, `skipped` or `cancelled` (a stop
-signal; the measured points stay). A later run measures only the points not yet measured, and a hosted restart of a
-session that closed before its sweep finished sweeps it again before it writes `exit.json`.
+The sweep logs its estimated length (each point priced as the session's longest root test) and, hosted, how long it
+has: a point that would end past the grant's tests' end is not started and reads `skipped_budget`. It writes
+`MB-reports/conc_sweep_summary.json`, `conc_sweep_raw.csv` and `conc_sweep_curve.png`, the summary after every test,
+with `status` `succeeded`, `partial`, `failed`, `skipped` or `cancelled` (a stop signal; the measured points stay), and
+carries the summary each time as `conc_sweep_summary` in `MB-reports/session_breakdown.json`; its header adds the image the tests ran (`run_image`) beside the base's. A base frozen before it recorded its per-concurrency
+launches is skipped (`no_source_launches`) until they are backfilled (see the single-lineage
+[optimize guide](optimize.md#sweep-concurrency-after-the-session)). A
+later run measures only the points not yet measured, and a hosted restart of a session that closed before its sweep
+finished sweeps it again before it writes `exit.json`.
+
+A hosted run sweeps a closed session with a campaign spec of `flow: "conc_sweep"`: `conc_sweep.session_dir` names the
+session (an absolute path that resolves below the run's `USER_DATA_PATH`, read and written as the directory it resolves
+to; the report is written back into it), `conc_sweep.concs` its points in place of the recipe's and
+`conc_sweep.parallel` its tests at once. `hardware.tp`, `hardware.gpu_type` and `framework.name` must be the
+session's; `placement.measurement` says where the tests run, as for flow `multibranch`. The run optimizes nothing and
+ends `final: true` however the sweep ends, with `stop_reason` `conc_sweep_<status>` (`conc_sweep_skipped:<reason>` for
+a skipped sweep); a frozen base that no longer loads ends it `final: true` too. To finish a `partial` or `cancelled`
+sweep, start another such run on the same session, which measures only the points not yet measured; a restart of the
+same run takes over the lock its earlier start left in the session. The runner source is cloned per commit
+(`MB-runner-source/<sha>`), so a run of newer code than the session's measures with its own.
 
 ## Exit codes
 

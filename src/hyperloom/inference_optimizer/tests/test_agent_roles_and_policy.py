@@ -167,18 +167,6 @@ def test_gate_orchestration_review_verdict_rejected(gate):
     assert exc.value.rule == "role"
 
 
-def test_gate_critic_review_verdict_unknown_verdict_rejected(gate):
-    with pytest.raises(PolicyDenied) as exc:
-        gate.validate_intent(
-            "critic",
-            Intent(
-                type=IntentType.REVIEW_VERDICT,
-                payload={"target_proposal_msg_id": "p1", "verdict": "objection"},
-            ),
-        )
-    assert exc.value.rule == "payload"
-
-
 @pytest.mark.parametrize(
     "intent_type",
     [IntentType.DELEGATE, IntentType.REQUEST, IntentType.PROPOSE_ACTION],

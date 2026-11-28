@@ -34,7 +34,6 @@ CONTEXT_TOOL_NAMES: tuple[str, ...] = (
     "get_gaps",
     "get_warm_start",
     "get_intervention_mix",
-    "why_denied",
     "show_analysis_md",
     "get_runtime_findings",
     "get_inbox",

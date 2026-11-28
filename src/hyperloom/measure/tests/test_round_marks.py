@@ -14,7 +14,6 @@ from __future__ import annotations
 
 import json
 import os
-import urllib.error
 from pathlib import Path
 
 import pytest
@@ -520,13 +519,9 @@ def test_the_window_marks_read_are_the_ones_the_suite_writes() -> None:
     )
 
 
-def test_the_window_request_read_is_the_one_the_suite_sends_and_words() -> None:
-    """The path is literal here (``measure`` may not import the suite's profile package), and so is how urllib words a
-    request the server answered with an error status."""
-    refused = urllib.error.HTTPError(STOP_PROFILE_PATH, 400, "Bad Request", None, None)
-
+def test_the_window_request_read_is_the_one_the_suite_sends() -> None:
+    """The path is literal here: ``measure`` may not import the suite's profile package."""
     assert round_marks._STOP_PROFILE == STOP_PROFILE_PATH
-    assert str(refused).startswith(round_marks._ANSWERED_WITH_STATUS)
 
 
 def _agentx_round(directory: Path, capture: str) -> Path:

@@ -15,7 +15,7 @@ from typing import Any
 
 from hyperloom_common.coerce import dict_rows, first_str
 from hyperloom_common.jsonio import read_json
-from hyperloom.common.tracelens_report import member_name
+from hyperloom.common.tracelens_report import member_name, system_finding_summary
 from hyperloom.inference_optimizer import framework_registry
 from hyperloom.inference_optimizer.roofline_ceiling import (
     ComputeTarget,
@@ -222,15 +222,20 @@ def attach_perfmodel_breakdown(snapshot: dict[str, Any], state: Any, *, arm: str
         return
     rt = resolve_runtime_dtype(state, meta, arm=arm)
     meta = apply_runtime_dtype(meta, rt)
-    compute_precision_tag = rt.compute_precision_tag or runtime.precision or "bf16"
+    target = ComputeTarget(
+        card=runtime.card,
+        platform=runtime.gpu_type,
+        num_gpus=runtime.tp,
+        precision_tag=rt.compute_precision_tag or runtime.precision or "bf16",
+    )
     pm_bd = compute_roofline_from_perfmodel(
         meta=meta,
-        target=ComputeTarget(gpu_type=runtime.gpu_type, num_gpus=runtime.tp, precision_tag=compute_precision_tag),
+        target=target,
         shape=DecodeShape(isl=runtime.isl, osl=runtime.osl, concurrency=runtime.concurrency),
     )
     snapshot["roofline_provenance"] = {
         "formula": "perfmodel" if pm_bd is not None else "legacy",
-        **resolve_compute_peak_provenance(runtime.gpu_type, compute_precision_tag),
+        **resolve_compute_peak_provenance(target),
         "runtime_weight_dtype": rt.weight_dtype_tag,
         "runtime_weight_dtype_bytes": rt.weight_dtype_bytes,
         "runtime_activation_dtype_bytes": rt.activation_dtype_bytes,
@@ -645,6 +650,12 @@ def direction_saturation(snapshot: dict[str, Any] | None) -> dict[str, Any]:
     }
 
 
+def _system_findings_lines(trace_analyze: dict[str, Any]) -> list[str]:
+    """The digest's ``system_findings`` block; empty when TraceLens reported none."""
+    rows = [f"  {system_finding_summary(f)}" for f in trace_analyze.get("system_findings") or []]
+    return ["system_findings:", *rows] if rows else []
+
+
 def build_profiler_digest(
     snapshots: list[dict[str, Any]] | None,
     trace_analyze: dict[str, Any] | None,
@@ -693,6 +704,8 @@ def build_profiler_digest(
     lever = BOTTLENECK_DOMAIN_HINTS.get(direction)
     if lever:
         lines.append(f"suggested_lever (dominant={direction}): {lever[0]}")
+
+    lines.extend(_system_findings_lines(ta))
 
     reusable = ta.get("reusable_native_kernel_ids")
     if reusable:

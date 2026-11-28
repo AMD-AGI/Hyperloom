@@ -59,6 +59,37 @@ def validate_server_args_shell_safe(server_args: str | None) -> str:
     return args
 
 
+def server_arg_groups(server_args: str | None) -> dict[str, list[str]]:
+    """Each flag ``server_args`` names, by canonical name, as its tokens: the flag and the values after it; a later
+    copy of a flag replaces an earlier one, as the engine's parser lets it."""
+    groups: dict[str, list[str]] = {}
+    current: list[str] | None = None
+    for token in _argv_tokens(server_args):
+        if _argv.is_flag(token):
+            current = [token]
+            groups[_argv.canonical_flag_name(token.partition("=")[0])] = current
+        elif current is not None:
+            current.append(token)
+    return groups
+
+
+@dataclass(frozen=True)
+class ServerArgsDelta:
+    """What takes one argv to another: the flags to set, each with its values, and the flags to remove."""
+
+    add: str = ""
+    remove: tuple[str, ...] = ()
+
+
+def server_args_delta(before: str | None, after: str | None) -> ServerArgsDelta:
+    """The change from ``before`` to ``after``: every flag ``after`` sets differently or ``before`` lacks, and every flag
+    ``before`` names that ``after`` does not."""
+    old, new = server_arg_groups(before), server_arg_groups(after)
+    add = [" ".join(tokens) for name, tokens in new.items() if old.get(name) != tokens]
+    remove = tuple(tokens[0].partition("=")[0] for name, tokens in old.items() if name not in new)
+    return ServerArgsDelta(" ".join(add), remove)
+
+
 def merge_server_args(*parts: str | None) -> str:
     """Merge server arg strings preserving left-to-right override semantics."""
     return " ".join(str(p).strip() for p in parts if str(p or "").strip())

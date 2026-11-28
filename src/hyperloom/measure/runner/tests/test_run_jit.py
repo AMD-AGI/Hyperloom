@@ -39,7 +39,10 @@ from hyperloom.measure.returncodes import HOSTED_INFRA_FAILURE_RC
 from hyperloom.measure.runner import jit as runner_jit
 from hyperloom.measure.runner import own_jit
 from hyperloom.measure.runner import run as run_module
+from hyperloom.measure.runner.hardware import GpuFacts
 from hyperloom.measure.runner.jit import JIT_CACHE_ENV
+from hyperloom.measure.spec import MeasurementSpec
+from hyperloom.orchestrator.tests._fixtures import MI355X_CARD
 from hyperloom.measure.runner.tests.test_run import (  # noqa: F401 - fixtures
     POINT,
     _blob,
@@ -679,3 +682,13 @@ def test_without_the_cache_variable_a_test_builds_cold_even_when_the_store_holds
     assert rig.grid.triton_found == [False], f"{JIT_CACHE_ENV} unset: Triton compiled the kernel itself"
     assert BUILD_LOG in (second_run / "out" / "files" / "variant_0" / "server.log").read_text(encoding="utf-8")
     assert second.jit_cache is None and status["message"] == "", "no cache, no note: a cold build is not a failure"
+
+
+def test_the_cache_is_keyed_by_the_arch_the_card_reports_else_by_that_of_the_sheet_s_card() -> None:
+    sheet = MeasurementSpec.from_document(_sheet())
+    machine_card = dataclasses.replace(MI355X_CARD, gfx="gfx942")
+    without_card = MeasurementSpec.from_document(_sheet(hardware={**_sheet()["hardware"], "card": None}))
+
+    assert runner_jit.card_arch(sheet, GpuFacts(0, machine_card, None, None)) == "gfx942"
+    assert runner_jit.card_arch(sheet, None) == MI355X_CARD.gfx
+    assert runner_jit.card_arch(without_card, None) is None

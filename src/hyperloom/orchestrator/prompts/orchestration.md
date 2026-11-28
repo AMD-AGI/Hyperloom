@@ -390,6 +390,19 @@ the code actually is; SESSION CONTEXT names the tree this session optimises
   stands only while its gain is below the current KEEP bar, so a variant
   that missed an earlier cycle's higher bar may be proposed again; an
   accuracy or tail-latency REVERT stands regardless.
+* **`explore` does not relaunch a change the framework refused at start.**
+  Once a variant's server exits before ready on its own change and its log
+  names a configuration error (a `ValueError`, `NotImplementedError`,
+  `AssertionError`, `TypeError` or `ValidationError`; a capacity,
+  out-of-memory or free-device-memory shortfall, or a fault whose log names
+  the host, does not count, while another host fault raised under one of
+  these names, such as missing weights or a full disk, does), any later
+  variant this session carrying that change whole is skipped as
+  `known_dead_change`, on any stack, unless the stack already runs it; the
+  delegated result's `skipped:` line names the dead variant and its cause.
+  A grid made only of such variants is denied as
+  `explore_grid_already_covered`. Adding a fix on top does not lift it:
+  change or drop the dead setting itself.
 * **`explore` validates its own KEEPs.**
   An `explore` KEEP is measured on the full `optimization_stack` and
   advances `cumulative_gain_validated` as a side effect; there is no
@@ -434,7 +447,7 @@ the code actually is; SESSION CONTEXT names the tree this session optimises
 * **Never propose `profile` or `roofline`.** Both are Coordinator-managed
   (PRELUDE bootstrap + every +10% watermark refresh) and never in the
   per-phase proposable set; any proposal/delegate is denied as
-  `coordinator_managed_action`.
+  `phase_incompatible`.
 * **Never propose or commission a tuned GEMM/BLAS table** —
   `AITER_CONFIG_GEMM_*` / `PYTORCH_TUNABLEOP_*` / `VLLM_TUNED_CONFIG_FOLDER`
   and the CSV/JSON they resolve to, or online tuning during a benchmark
@@ -494,9 +507,15 @@ them**:
   before `🟡`; fusion rows want a fused rewrite). You dispatch neither: the
   rewrite controller selects its own operators and integrates its own patches,
   and fusion queues its KEEPs for you to `integrate`.
-* **`## System-Level Optimizations`** → `explore` variants; the text
-  names the flag (e.g. "graph capture stalls" → `--cuda-graph-max-bs`).
-  Prefer a `provenance='specialist:<domain>'` variant targeting it.
+* **System bottlenecks** → an `explore` variant where the framework exposes
+  the lever as a server arg or env (e.g. "capture the decode step in a graph"
+  → CUDA-graph settings), otherwise a specialist patch at the call site the
+  fix names (a host read such as `.item()`, a redundant `.contiguous()` or
+  clone); neither is a kernel rewrite. TraceLens lists them under
+  `system_findings` in `profiler_digest` (priority, title, share of GPU
+  time), and a dispatched specialist gets the same lines; each fix is under
+  `## System-Level Optimizations` in analysis.md. For a variant, prefer
+  `provenance='specialist:<domain>'` targeting it.
 
 <!-- phase: FRAMEWORK_AGENT -->
 ### Choosing specialist domain by bottleneck

@@ -38,6 +38,7 @@ from hyperloom.orchestrator.loop.sub_agent_runner import RunnerContext
 from hyperloom.orchestrator.rehearsal import boot_log_for
 from hyperloom.orchestrator.state.shared_state import EnablementRound
 from hyperloom.orchestrator.state.task_registry import Task
+from hyperloom.orchestrator.tests._fixtures import MI355X_CARD, publish_card
 from hyperloom.orchestrator.actions.executors.integrate import _integrate_bench as integrate_bench
 from hyperloom.orchestrator.actions.executors.integrate import _integrate_resolve as integrate_resolve
 from hyperloom.orchestrator.actions.executors.integrate import _integrate_apply as integrate_apply
@@ -129,7 +130,6 @@ def _integrate_patch_test_framework_roots(monkeypatch, tmp_path):
 def _stub_external_integrate_operations(monkeypatch):
     from types import SimpleNamespace
 
-    from hyperloom.agents.framework.sources import github
     from hyperloom.orchestrator.actions.executors import _multi_node_env
     from hyperloom.orchestrator.enablement.recipe import keep_probe
     from hyperloom.orchestrator.enablement.runtime import adapters
@@ -140,7 +140,6 @@ def _stub_external_integrate_operations(monkeypatch):
     monkeypatch.setattr(_multi_node_env, "is_multi_node", lambda: False)
     monkeypatch.setattr(integrate_bench, "run_grid", forbidden)
     monkeypatch.setattr(integrate_resolve, "materialize_candidate_patches", forbidden)
-    monkeypatch.setattr(github, "pr_patches", forbidden)
     monkeypatch.setattr(
         adapters,
         "get_adapter",
@@ -468,7 +467,6 @@ async def test_same_executor_second_early_return_does_not_reuse_runtime(tmp_path
 
     from hyperloom.agents.framework import isolation
     from hyperloom.orchestrator.enablement.runtime import adapters
-    from hyperloom.common.failure_signature import classify_failure
     from hyperloom.orchestrator.enablement.runtime.stack_actions import (
         EnablementStackAction,
         FrameworkRuntime,
@@ -499,7 +497,6 @@ async def test_same_executor_second_early_return_does_not_reuse_runtime(tmp_path
         "get_adapter",
         lambda _framework: SimpleNamespace(
             build_stack_action=lambda _request: EnablementStackAction(
-                kind="runtime_candidate",
                 framework="vllm",
                 gap_id="gap.enablement.missing_model_arch",
                 capability="missing_model_arch",
@@ -525,9 +522,6 @@ async def test_same_executor_second_early_return_does_not_reuse_runtime(tmp_path
         {
             "specialist_task_id": "spec-first",
             "enablement": True,
-            "enablement_failure_signature": classify_failure(
-                "ValueError: Model architectures ['DeepseekV4ForCausalLM'] are not supported for now."
-            ).to_dict(),
             "extra_envs": {"VLLM_USE_AITER": "1"},
             "apply_only": True,
         },
@@ -852,6 +846,7 @@ async def test_executor_rejects_inapplicable_aiter_model_config(
     """A non-runnable model-config seed must never reach the E2E benchmark."""
     from hyperloom.orchestrator.state.shared_state import SharedState
 
+    publish_card(monkeypatch, MI355X_CARD)
     session_dir = tmp_path / "session"
     workspace = session_dir / "runs" / "specialist" / "t-spec-placeholder"
     workspace.mkdir(parents=True)
@@ -884,7 +879,7 @@ async def test_executor_rejects_inapplicable_aiter_model_config(
 
     executor = IntegratePatchExecutor(session_dir=session_dir)
     monkeypatch.setattr(executor, "_bench_patch", _should_not_benchmark)
-    state = SharedState(gpu_type="mi355x")
+    state = SharedState()
     state.record_specialist_patch_verdict("t-spec-placeholder", "approve")
     task = Task(
         task_id="t-int-placeholder",
@@ -905,7 +900,8 @@ async def test_executor_rejects_inapplicable_aiter_model_config(
 
 
 @pytest.mark.asyncio
-async def test_executor_accepts_runtime_ready_aiter_model_config(tmp_path: Path):
+async def test_executor_accepts_runtime_ready_aiter_model_config(tmp_path: Path, monkeypatch):
+    publish_card(monkeypatch, MI355X_CARD)
     session_dir = tmp_path / "session"
     workspace = session_dir / "runs" / "specialist" / "t-spec-tuned"
     workspace.mkdir(parents=True)
@@ -939,7 +935,6 @@ async def test_executor_accepts_runtime_ready_aiter_model_config(tmp_path: Path)
             "t-int-tuned",
             {
                 "specialist_task_id": "t-spec-tuned",
-                "gpu_type": "mi355x",
                 "apply_only": True,
             },
         )
@@ -947,6 +942,21 @@ async def test_executor_accepts_runtime_ready_aiter_model_config(tmp_path: Path)
 
     assert result["status"] == "applied_no_bench"
     assert target.read_text(encoding="utf-8") == artifact.read_text(encoding="utf-8")
+
+
+def test_an_aiter_model_config_is_not_checked_without_a_session_card(tmp_path: Path):
+    from hyperloom.orchestrator.actions.executors.patching._patch_artifacts import (
+        _ArtifactSpec,
+        _validate_aiter_gemm_artifacts,
+    )
+
+    artifact = tmp_path / "a8w8_blockscale_tuned_gemm_qwen3_14b.csv"
+    artifact.write_text("gfx,cu_num,us,kernelName\ngfx942,304,0,placeholder\n", encoding="utf-8")
+    target = tmp_path / "fw" / "aiter" / "configs" / "model_configs" / artifact.name
+    spec = _ArtifactSpec(source=artifact, target=target, rel_target=artifact.name, root=tmp_path, kind="model_config")
+
+    assert _validate_aiter_gemm_artifacts([spec], card=None) == []
+    assert _validate_aiter_gemm_artifacts([spec], card=MI355X_CARD)[0]["error"] == "no_target_gpu_rows"
 
 
 @pytest.mark.asyncio

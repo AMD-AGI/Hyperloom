@@ -32,8 +32,9 @@ with the workload's CONC among them. It runs only when that commit is not the ro
 the baseline. Both arms are submitted at once, so they run side by side where the session runs two tests at once. An
 AgentX point is a test of its own, booted cold as every AgentX level is; an InferenceX arm is one sweep test over all
 its points on one server, whose attempt timeout scales with them (:meth:`SweepPlan.test_points`). The report
-(``MB-reports/conc_sweep_summary.json``) is rewritten after every test; a later run measures only the points not yet
-measured. These tests are session measurements with no accuracy and no checks.
+(``MB-reports/conc_sweep_summary.json``) is rewritten after every test, and carried each time as ``conc_sweep_summary``
+in ``MB-reports/session_breakdown.json``; a later run measures only the points not yet measured. These tests are
+session measurements with no accuracy and no checks.
 """
 
 from __future__ import annotations
@@ -46,13 +47,22 @@ from collections import defaultdict
 from collections.abc import Awaitable, Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from functools import partial
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from hyperloom.common.gain_math import conc_pair_comparison, gain_pct
 from hyperloom.contracts.measurement import Purpose, TestKind, TestResult, Validity
 from hyperloom.orchestrator.conc_sweep.plot import ConcCurveOptions
-from hyperloom.orchestrator.conc_sweep.points import SCHEMA_VERSION, SweepPoints, ladder, sweep_points
-from hyperloom.orchestrator.conc_sweep.report import SETTLED, read_summary, write_curve, write_report
+from hyperloom.measure.pins import ImagePinError, active_image
+from hyperloom.orchestrator.conc_sweep.points import SCHEMA_VERSION, SweepPoints, ladder, launches_missing, sweep_points
+from hyperloom.orchestrator.conc_sweep.report import (
+    SETTLED,
+    keep_measured_summary,
+    read_summary,
+    run_facts,
+    take_earlier_summary,
+    write_curve,
+    write_report,
+)
 from hyperloom_common.jsonio import read_json_strict
 from hyperloom_multibranch.contracts.gate import NotMeasured
 from hyperloom_multibranch.contracts.blackboard import INTEGRATION_BRANCH, Blackboard
@@ -61,12 +71,16 @@ from hyperloom_multibranch.contracts.repo import ExperimentRepo
 from hyperloom_multibranch.contracts.toolbox import RequestRejected, TestWithdrawn
 from hyperloom_multibranch.blackboard.changes import same_recipe
 from hyperloom_multibranch.blackboard.codec import decode
+from hyperloom_multibranch.blackboard.knowledge.breakdown import FILENAME as BREAKDOWN_FILENAME
 from hyperloom_multibranch.scheduling.budget import FinalWork
 from hyperloom_multibranch.scheduling.explore import integration_row
 from hyperloom_multibranch.scheduling.integrator import defects_beyond_gain
 from hyperloom_multibranch.scheduling.layout import SessionLayout
 from hyperloom_multibranch.scheduling.requests import SessionChecks, SessionTests, integration_test_request, together
 from hyperloom_multibranch.scheduling.settings import RunSettings, Workload
+
+if TYPE_CHECKING:
+    from inference_suite.contracts import BaseLaunch
 
 logger = logging.getLogger(__name__)
 
@@ -457,19 +471,30 @@ class FinalSelector:
 BASELINE, OPTIMIZED = "baseline", "optimized"
 NO_OPTIMIZATION = "no_optimization"
 NO_SWEEP_POINTS = "no_sweep_points"
+SKIPPED_BUDGET = "skipped_budget"
 _SUCCEEDED = "succeeded"
 
 
 @dataclass(frozen=True)
 class SweepPlan:
-    """The commit FINAL chose and the points both arms run."""
+    """The commit FINAL chose and the points both arms run. ``groups`` partitions the points by the source launch they
+    are seeded with, ascending; empty when every point launches alike."""
 
     chosen: str
     points: SweepPoints
+    groups: tuple[tuple[int, ...], ...] = ()
+
+    def launch_groups(self) -> tuple[tuple[int, ...], ...]:
+        return self.groups or (self.points.concs,)
 
     def test_points(self, workload: Workload) -> int:
-        """How many points one test of the sweep measures: one in an AgentX test, every point in an InferenceX one."""
-        return 1 if workload.inferencex is None else len(self.points.concs)
+        """How many points one test of the sweep measures: one in an AgentX test, a launch group's in an InferenceX one,
+        whose points share a server."""
+        return 1 if workload.inferencex is None else max(map(len, self.launch_groups()))
+
+
+class FrozenBaseUnusable(ValueError):
+    """The closed session's frozen base no longer loads; a sweep started again would meet the same file."""
 
 
 def sweep_plan(layout: SessionLayout, settings: RunSettings) -> SweepPlan | str:
@@ -482,12 +507,40 @@ def sweep_plan(layout: SessionLayout, settings: RunSettings) -> SweepPlan | str:
     check = next(check for check in choice.checks if check.candidate == chosen)
     if not (check.gain_pct or 0.0) > 0:
         return NO_OPTIMIZATION
-    from hyperloom.orchestrator.state.base_launch import frozen_base
+    from hyperloom.orchestrator.state.base_launch import BaseLaunchMismatch, frozen_base
+    from inference_suite.contracts import BaseLaunchError
 
-    frozen = frozen_base(layout.toolbox)
+    try:
+        frozen = frozen_base(layout.toolbox)
+    except (BaseLaunchMismatch, BaseLaunchError) as exc:
+        raise FrozenBaseUnusable(f"the session's frozen base cannot be read: {exc}") from exc
     workload = settings.workload
-    points = sweep_points(None if frozen is None else frozen.launch, workload.conc, settings.conc_sweep_concs)
-    return NO_SWEEP_POINTS if points is None else SweepPlan(chosen.commit, points)
+    base = None if frozen is None else frozen.launch
+    if (missing := launches_missing(base)) is not None:
+        return missing
+    points = sweep_points(base, workload.conc, settings.conc_sweep_concs)
+    if points is None:
+        return NO_SWEEP_POINTS
+    if frozen is None:
+        return SweepPlan(chosen.commit, points)
+    return _seeded_plan(chosen.commit, points, frozen.launch)
+
+
+def _seeded_plan(chosen: str, points: SweepPoints, base: BaseLaunch) -> SweepPlan:
+    """``points`` grouped by the source launch each is seeded with."""
+    from hyperloom.orchestrator.state.base_launch import server_base_at
+
+    by_launch: dict[tuple[str, tuple[tuple[str, str], ...]], list[int]] = {}
+    for conc in points.concs:
+        seed = server_base_at(base, conc)
+        by_launch.setdefault((seed.args, tuple(sorted(seed.env.items()))), []).append(conc)
+    groups = tuple(tuple(group) for group in by_launch.values()) if len(by_launch) > 1 else ()
+    return SweepPlan(chosen, points, groups)
+
+
+def sweep_tests_at_once(settings: RunSettings) -> int:
+    """How many of the sweep's tests run at once: ``--conc-sweep-parallel``, within ``--max-parallel-tests``."""
+    return min(settings.conc_sweep_parallel, settings.caps.max_parallel_tests)
 
 
 def sweep_unfinished(layout: SessionLayout, settings: RunSettings) -> bool:
@@ -507,10 +560,31 @@ def _header(layout: SessionLayout, workload: Workload) -> dict[str, Any]:
         "schema_version": SCHEMA_VERSION,
         "session_id": layout.session_id,
         "benchmark_mode": "agentx" if shape is None else "synthetic",
+        "framework": workload.framework,
+        "precision": workload.precision,
+        "gpu_type": workload.gpu_type,
+        "gpu_count": workload.tp,
         "isl": None if shape is None else shape.isl,
         "osl": None if shape is None else shape.osl,
         "tp": workload.tp,
+        "ep": workload.ep,
+        **run_facts(layout.toolbox),
+        "run_image": _run_image(),
     }
+
+
+def _run_image() -> str | None:
+    """The image the measurement pins name, which the sweep's tests run; ``None`` where they are not set."""
+    try:
+        image = active_image()
+    except ImagePinError:
+        return None
+    return f"{image.ref}@{image.digest}"
+
+
+def _write(layout: SessionLayout, payload: dict[str, Any]) -> None:
+    """Write the report into ``MB-reports/`` and carry it in the session breakdown beside it."""
+    write_report(payload, layout.reports, breakdown=layout.reports / BREAKDOWN_FILENAME)
 
 
 def write_skipped(layout: SessionLayout, workload: Workload, reason: str) -> dict[str, Any]:
@@ -523,7 +597,8 @@ def write_skipped(layout: SessionLayout, workload: Workload, reason: str) -> dic
         "optimized": {"points": []},
         "summary": {},
     }
-    write_report(payload, layout.reports)
+    keep_measured_summary(layout.reports)
+    _write(layout, payload)
     logger.info("conc_sweep: skipped (%s)", reason)
     return payload
 
@@ -557,6 +632,7 @@ class ConcSweep:
     tests: SessionTests
     parallel: int
     per_point_sec: float
+    deadline_unix: float | None = None
     estimated_sec: float = 0.0
     started_at: float = field(default_factory=time.time)
     measured: dict[str, dict[int, dict[str, Any]]] = field(default_factory=lambda: {BASELINE: {}, OPTIMIZED: {}})
@@ -567,13 +643,16 @@ class ConcSweep:
         order = ladder(self.plan.points.concs, self.workload.conc)
         return [conc for conc in order if done.get(conc, {}).get("status") != _SUCCEEDED]
 
-    async def run(self, stop: Awaitable[int], grant_end_unix: float | None = None) -> dict[str, Any]:
-        """Run both arms until they end or ``stop`` returns a signal, which takes their tests back."""
+    async def run(self, stop: Awaitable[int]) -> dict[str, Any]:
+        """Run both arms' tests, ``parallel`` at a time, until they end or ``stop`` returns a signal, which takes their
+        tests back."""
         self._resume()
-        per_arm = [self.per_point_sec * len(self.pending(arm)) for arm in (BASELINE, OPTIMIZED)]
-        self.estimated_sec = max(per_arm) if self.parallel > 1 else sum(per_arm)
-        self._log_plan(grant_end_unix)
-        arms = asyncio.gather(self._arm(BASELINE, self.root), self._arm(OPTIMIZED, self.plan.chosen))
+        tests = self._tests()
+        points = sum(len(concs) for _, _, concs in tests)
+        self.estimated_sec = self.per_point_sec * points / max(1, min(self.parallel, len(tests)))
+        self._log_plan()
+        slots = asyncio.Semaphore(self.parallel)
+        arms = asyncio.gather(*(self._test(arm, commit, concs, slots) for arm, commit, concs in tests))
         stopped = asyncio.ensure_future(stop)
         await asyncio.wait({arms, stopped}, return_when=asyncio.FIRST_COMPLETED)
         if stopped.done():
@@ -583,7 +662,7 @@ class ConcSweep:
         else:
             stopped.cancel()
         payload = self.payload(final=True)
-        write_report(payload, self.layout.reports)
+        _write(self.layout, payload)
         shape = self.workload.inferencex
         options = ConcCurveOptions(
             self.workload.model_basename,
@@ -598,10 +677,36 @@ class ConcSweep:
         )
         return payload
 
-    async def _arm(self, arm: str, commit: str) -> None:
-        pending = self.pending(arm)
-        groups = [(conc,) for conc in pending] if self.workload.inferencex is None else [tuple(sorted(pending))]
-        for concs in (group for group in groups if group):
+    def _tests(self) -> list[tuple[str, str, tuple[int, ...]]]:
+        """The tests left to run as ``(arm, commit, concs)``: one per AgentX point, the two arms' interleaved in ladder
+        order so a concurrency's pair runs together; for an InferenceX workload one per arm and launch group, whose
+        points share a server, the group holding the session's CONC first."""
+        arms = ((BASELINE, self.root), (OPTIMIZED, self.plan.chosen))
+        order = ladder(self.plan.points.concs, self.workload.conc)
+        if self.workload.inferencex is not None:
+            groups = sorted(self.plan.launch_groups(), key=lambda group: min(map(order.index, group)))
+            return [
+                (arm, commit, concs)
+                for group in groups
+                for arm, commit in arms
+                if (concs := tuple(conc for conc in group if conc in self.pending(arm)))
+            ]
+        return [(arm, commit, (conc,)) for conc in order for arm, commit in arms if conc in self.pending(arm)]
+
+    async def _test(self, arm: str, commit: str, concs: tuple[int, ...], slots: asyncio.Semaphore) -> None:
+        async with slots:
+            if self.cancel_reason:
+                return
+            concs = tuple(ladder(concs, self.workload.conc))
+            fit = self._points_that_fit(len(concs))
+            if fit < len(concs):
+                self._record([{"arm": arm, "conc": conc, "status": SKIPPED_BUDGET} for conc in concs[fit:]])
+                logger.warning(
+                    "conc_sweep: arm=%s concs %s skipped: they would end past the deadline", arm, concs[fit:]
+                )
+                concs = concs[:fit]
+            if not concs:
+                return
             request = integration_test_request(TestKind.SWEEP, Purpose.HEALTH, commit, concurrency=concs)
             try:
                 result = await self.tests.result(request)
@@ -612,41 +717,49 @@ class ConcSweep:
                 return
             self._record(points_of(arm, concs, result))
 
+    def _points_that_fit(self, wanted: int) -> int:
+        """How many of ``wanted`` points, each priced at the session's longest root test, end before the deadline."""
+        if self.deadline_unix is None or self.per_point_sec <= 0:
+            return wanted
+        return max(0, min(wanted, int((self.deadline_unix - time.time()) // self.per_point_sec)))
+
     def _record(self, rows: list[dict[str, Any]]) -> None:
         for row in rows:
             self.measured[row["arm"]][row["conc"]] = row
-        write_report(self.payload(), self.layout.reports)
+        _write(self.layout, self.payload())
 
     def _resume(self) -> None:
         """Keep the points an earlier run of the same sweep measured on the same commit of each arm, so only the rest
         are run."""
-        earlier = read_summary(self.layout.reports)
-        if not earlier or earlier.get("concs") != list(self.plan.points.concs):
+        earlier = take_earlier_summary(self.layout.reports)
+        if not earlier:
             return
         for arm, commit in ((BASELINE, self.root), (OPTIMIZED, self.plan.chosen)):
             if earlier[arm].get("commit") != commit:
                 continue
             for point in earlier[arm]["points"]:
-                if point["status"] == _SUCCEEDED:
+                if point["status"] == _SUCCEEDED and point["conc"] in self.plan.points.concs:
                     self.measured[arm][point["conc"]] = point
 
-    def _log_plan(self, grant_end_unix: float | None) -> None:
+    def _log_plan(self) -> None:
         logger.info(
-            "conc_sweep: plan source=%s concs=%s arms=baseline,optimized %s pending_points=%d estimated=%.1fh "
-            "(each point priced as the session's longest root test of %.0fs)",
+            "conc_sweep: plan source=%s concs=%s arms=baseline,optimized tests_at_once=%d pending_points=%d "
+            "estimated=%.1fh (each point priced as the session's longest root test of %.0fs)",
             self.plan.points.source,
             list(self.plan.points.concs),
-            "side by side" if self.parallel > 1 else "one after the other",
+            self.parallel,
             len(self.pending(BASELINE)) + len(self.pending(OPTIMIZED)),
             self.estimated_sec / 3600.0,
             self.per_point_sec,
         )
-        if grant_end_unix is None:
+        if self.deadline_unix is None:
             return
-        left = grant_end_unix - time.time()
-        logger.info("conc_sweep: the run's grant has %.1fh left", left / 3600.0)
+        left = self.deadline_unix - time.time()
+        logger.info("conc_sweep: the sweep must end within %.1fh", left / 3600.0)
         if self.estimated_sec > left:
-            logger.warning("conc_sweep: the estimate outlasts the run's grant; the platform may end the sweep early")
+            logger.warning(
+                "conc_sweep: the estimate outlasts the deadline; the points that would end past it are skipped"
+            )
 
     def payload(self, *, final: bool = False) -> dict[str, Any]:
         sections = {
@@ -679,6 +792,7 @@ class ConcSweep:
 
 
 __all__ = [
+    "FrozenBaseUnusable",
     "BASELINE",
     "BELOW_REPRODUCTION_TOLERANCE",
     "MB_REPRODUCTION_TOLERANCE_PCT",
@@ -687,6 +801,7 @@ __all__ = [
     "NO_OPTIMIZATION",
     "NO_SWEEP_POINTS",
     "OPTIMIZED",
+    "SKIPPED_BUDGET",
     "PRIMARY_POINT_ONLY",
     "REPRODUCTION_POINT_ONLY",
     "CandidateCheck",
@@ -702,6 +817,7 @@ __all__ = [
     "session_candidates",
     "sweep_curve",
     "sweep_plan",
+    "sweep_tests_at_once",
     "sweep_unfinished",
     "write_skipped",
 ]

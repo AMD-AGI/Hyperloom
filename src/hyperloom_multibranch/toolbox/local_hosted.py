@@ -705,8 +705,7 @@ def _local_tools(
     the native builds pin a component with a kernel knob compiled for their GPU architecture, the knob sweep (its builds
     laid below ``directory``); the last
     two are served only where a card can be spared for them. The first three read a trace that is already there, or
-    ask GitHub from this process; TraceLens and the roofline lease a card from ``leases`` only to measure a board's
-    arch spec."""
+    ask GitHub from this process; the roofline leases a card from ``leases`` only to measure a board's arch spec."""
     if options.tools is not None:
         return options.tools
     tuners: list[AsyncTool] = []
@@ -722,7 +721,7 @@ def _local_tools(
             "environment, so it asks GitHub anonymously, which allows this address few requests "
             '(docs/how-to/run-multibranch.md, "Upstream pull-request search")'
         )
-    return (tracelens_tool(leases), roofline_tool(leases), UpstreamPrSearch(), *tuners)
+    return (tracelens_tool(), roofline_tool(leases), UpstreamPrSearch(), *tuners)
 
 
 def _accepting_local_kinds(acceptance: AcceptanceSetup) -> AcceptanceSetup:

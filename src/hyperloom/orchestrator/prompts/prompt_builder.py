@@ -209,9 +209,8 @@ def _section_session_context(session: SessionContext, *, kernel_enabled: bool) -
         "",
         "The Coordinator supplies the session context (resource pools,",
         "constraints, advisories) first, then the per-tick blocks (Phase,",
-        "Mission progress, Time budget, Tick, Shared session state, recent",
-        "policy denials, Untested proposals, KB hints, Plateau advisory,",
-        "inbox tail) every tick.",
+        "Mission progress, Time budget, Tick, Shared session state,",
+        "Untested proposals, KB hints, Plateau advisory, inbox tail) every tick.",
         "The Time-budget block carries `remaining=X.Xmin`.",
         "See PHASE CONTRACT below for the phase chain, per-phase allowed",
         "actions, and phase-transition rules.",
@@ -270,7 +269,7 @@ def _section_phase_semantics(
             "",
             f"{', '.join(sorted(COORDINATOR_INTERNAL_ACTIONS))} are never in the",
             "sets above: the Coordinator dispatches them and PolicyGate denies",
-            "any attempt to propose them (`coordinator_managed_action`). Denial",
+            "any attempt to propose them (`phase_incompatible`). Denial",
             "of any action lands in your inbox as a `policy_denied` event.",
             "",
             "Phase transitions are Coordinator-owned. The hard advance gates",
@@ -472,7 +471,8 @@ def _format_grid_injection_hint(name: str) -> str | None:
             "Variants run serially; a KEEP is graded on its decision "
             "round. A row that starts the stack's own server (see "
             "`current_launch_flags`) is skipped, and rows starting the same server "
-            "are benched once; any prior fingerprint may be re-proposed. "
+            "are benched once; any prior fingerprint may be re-proposed, except one carrying a change the "
+            "framework refused at start on a configuration error (skipped as `known_dead_change`). "
             "Use remove_args/unset_envs to ablate harmful base flags; "
             "args_mode='replace' to drop inherited server args. "
             "Every variant requires action-time reasoning that names the "
@@ -701,8 +701,9 @@ def _failure_recovery_lines(*, phase: str, transport: str = "") -> list[str]:
             "* **RULE F2** — repeated `error_class='subprocess_nonzero'` or `'client_failed'`"
             " on `baseline` → stop retrying baseline;"
             " send observation 'blocked: …' quoting the failure excerpt."
-            " Explore variants may be re-proposed; read the failure log first.",
-            "* **RULE F3** — `policy_denial_streak` is information only."
+            " Explore variants may be re-proposed, except one carrying a change the framework refused at start"
+            " on a configuration error (`known_dead_change`); read the failure log first.",
+            "* **RULE F3** — a `policy_denied` event names the rule that refused the intent."
             " Change something substantive; re-emitting the identical intent wastes a tick.",
         ]
     )
@@ -732,7 +733,9 @@ def _idea_generation_lines() -> list[str]:
         "3. **Re-examine rejects** — per `explore_search.rejected` variant, judge",
         "   whether the failure is stale, fixable, or ruled out; re-propose the",
         "   same config to revalidate or change the value (a `-2%` reject is a",
-        "   dead flag; `-0.3%` may clear the bar once patched).",
+        "   dead flag; `-0.3%` may clear the bar once patched). A config the",
+        "   framework refused at start on a configuration error is skipped as",
+        "   `known_dead_change`: change the dead setting instead of re-proposing it.",
         "4. **Ablate harmful base config** — when a user/base flag or env may",
         "   be slowing the workload, emit a variant with `remove_args` and/or",
         "   `unset_envs` instead of only adding more knobs.",

@@ -305,6 +305,30 @@ def test_template_envs_and_create_envs_reach_commands(make) -> None:
     )
 
 
+def test_sglangs_jit_cache_is_kept_off_the_sandbox_directory_and_goes_with_the_sandbox(make) -> None:
+    """The sandbox directory lies in the session directory, which may be NFS, where SGLang's rename of a staging
+    directory that holds an open file is refused and every test's server fails at its first JIT build."""
+    sb = _create(make([LocalTemplate("dev", "dev")]), "dev", "dev")
+    cache = Path(f"{local_sandbox.SGLANG_JIT_CACHE_PREFIX}{sb.sandbox_id}")
+
+    shown = sb.run(
+        f'mkdir -p "${local_sandbox.SGLANG_JIT_CACHE_ENV}/m" && echo "${local_sandbox.SGLANG_JIT_CACHE_ENV}"'
+    )
+
+    assert shown.stdout == f"{cache}\n"
+    assert (cache / "m").is_dir()
+    sb.kill()
+    assert not cache.exists()
+
+
+def test_a_template_that_names_sglangs_jit_cache_keeps_its_own(make) -> None:
+    sb = _create(
+        make([LocalTemplate("dev", "dev", envs={local_sandbox.SGLANG_JIT_CACHE_ENV: "/cache/jit"})]), "dev", "dev"
+    )
+
+    assert sb.run(f'echo "${local_sandbox.SGLANG_JIT_CACHE_ENV}"').stdout == "/cache/jit\n"
+
+
 # -- GPU pool ---------------------------------------------------------------------
 
 

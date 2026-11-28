@@ -478,19 +478,16 @@ check_rocm_toolchain_alignment() {
   return 0
 }
 
-# Human GPU label from arch, refined by rocm-smi product name when available.
+# The first GPU as amd-smi names it, e.g. "AMD Instinct MI325X (gfx942)"; "unknown" when amd-smi names none.
 detect_gpu_label() {
-  local gfx="$1" product=""
-  if command -v rocm-smi >/dev/null 2>&1; then
-    product="$(rocm-smi --showproductname 2>/dev/null | grep -oiE 'MI[0-9]{3}[A-Z]?' | head -1)"
-  fi
-  if [ -n "$product" ]; then echo "$product"; return 0; fi
-  case "$gfx" in
-    gfx942) echo "MI300X" ;;
-    gfx950) echo "MI355X" ;;
-    "") echo "unknown" ;;
-    *) echo "$gfx" ;;
-  esac
+  local asic="" name="" gfx=""
+  command -v amd-smi >/dev/null 2>&1 && asic="$(amd-smi static --asic 2>/dev/null)"
+  name="$(printf '%s\n' "$asic" | sed -n 's/^[[:space:]]*MARKET_NAME:[[:space:]]*//p' | head -1)"
+  gfx="$(printf '%s\n' "$asic" | sed -n 's/^[[:space:]]*TARGET_GRAPHICS_VERSION:[[:space:]]*//p' | head -1)"
+  [ "$name" = "N/A" ] && name=""
+  [ "$gfx" = "N/A" ] && gfx=""
+  if [ -z "${name}${gfx}" ]; then echo "unknown"; return 0; fi
+  echo "${name:-unnamed GPU}${gfx:+ (${gfx})}"
 }
 
 DETECTED_GPU="unknown"
@@ -511,15 +508,12 @@ base_preflight() {
     warn "ROCm: rocm-smi not found. ${IMAGE_HINT}"; rc=1
   fi
 
-  local gfx=""
-  command -v rocminfo >/dev/null 2>&1 && gfx="$(rocminfo 2>/dev/null | grep -oE 'gfx[0-9a-f]+' | head -1)"
-  DETECTED_GPU="$(detect_gpu_label "$gfx")"
-  case "$gfx" in
-    gfx942) log "GPU: ${DETECTED_GPU} (${gfx})" ;;
-    gfx950) log "GPU: ${DETECTED_GPU} (${gfx})" ;;
-    "")     warn "GPU arch: not detected via rocminfo" ;;
-    *)      warn "GPU arch ${gfx} untested (supported: gfx942/gfx950)" ;;
-  esac
+  DETECTED_GPU="$(detect_gpu_label)"
+  if [ "$DETECTED_GPU" = "unknown" ]; then
+    warn "GPU: not described by amd-smi"
+  else
+    log "GPU: ${DETECTED_GPU}"
+  fi
 
   local py
   if ! py="$(resolve_python)"; then die "no usable Python found (set PYTHON or provide /opt/venv). ${IMAGE_HINT}"; fi
@@ -2890,7 +2884,7 @@ _default_workspace_root() {
 
   if [ "$SKIP_BASE_CHECK" -eq 1 ]; then
     warn "skipping Phase 1 base preflight (--skip-base-check)"
-    DETECTED_GPU="$(detect_gpu_label "$(command -v rocminfo >/dev/null 2>&1 && rocminfo 2>/dev/null | grep -oE 'gfx[0-9a-f]+' | head -1)")"
+    DETECTED_GPU="$(detect_gpu_label)"
   else
     base_preflight
   fi

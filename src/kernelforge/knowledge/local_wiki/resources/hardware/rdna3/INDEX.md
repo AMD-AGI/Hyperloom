@@ -3,7 +3,7 @@ title: Radeon PRO W7900 (RDNA 3, gfx1100) hardware — knowledge map
 kind: index
 scope: hardware
 gens: [gfx1100]
-updated: 2026-11-16
+updated: 2026-11-27
 ---
 
 # Radeon PRO W7900 (RDNA 3, gfx1100) hardware — knowledge map
@@ -14,7 +14,7 @@ what the numbers are, and what each subsystem does to a kernel.
 > **Convention (KernelForge standard):** a knowledge folder that contains an `INDEX.md` is navigated
 > **through this file** — load it whole.
 
-## Scope: gfx1100 only
+## Scope: gfx1100; gfx1151 reads it for the ISA only
 
 Target parts are the **Radeon PRO W7900** and **W7900D** (Navi 31, RDNA 3, ISA **gfx1100**). The W7900D is the
 same silicon at a lower boost clock, so every count and size here holds for it; only its peaks are lower
@@ -22,6 +22,11 @@ same silicon at a lower boost clock, so every count and size here holds for it; 
 other Navi 3x chips (gfx1101, gfx1102) have a smaller register file and fewer CUs, so their occupancy numbers
 differ. The MI350 cards in the parent `hardware/` folder are **wrong for this chip** — open them only for the
 contrast, never for a number.
+
+A **gfx1151** (RDNA 3.5, Radeon 8060S) campaign also loads this folder, for the ISA it shares with gfx1100: WMMA,
+wave32 and the VGPR file (`rdna3_execution.md`, `rdna3_wmma.md`). The memory, CU, peak and roofline-ridge figures
+here are the W7900's and do not apply to it, and `rdna3_measure.md` is gfx1100's profiling story: rocprof-compute
+supports gfx1151. Its own figures are in the gfx1151 profile's prompt note.
 
 ## Layout
 

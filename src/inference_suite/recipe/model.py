@@ -23,7 +23,6 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from hyperloom_common.contract_fields import ContractFields
-from hyperloom_common.gpu_identity import AMD_GPU_BOARDS
 from inference_suite.argv import argv_flag_occurrences, canonical_flag_name, last_alias_value
 from inference_suite.contracts.base_launch import GoldenCurve, LaunchSource, SourceApi, SourceKind, Topology
 from inference_suite.frameworks import Framework, framework_facts
@@ -53,19 +52,18 @@ class TopologySpelling:
     ep_switch: tuple[str, ...] = ()
     dp: tuple[str, ...] = ()
 
+    def value(self, args: Sequence[str], spellings: tuple[str, ...]) -> str | None:
+        """The value ``args`` give the last of ``spellings``, ``None`` when they give none."""
+        return last_alias_value(argv_flag_occurrences(args), frozenset(map(canonical_flag_name, spellings)))
+
     def read(self, args: Sequence[str]) -> Topology:
         """The topology ``args`` run, an unset size being 1."""
-        occurrences = argv_flag_occurrences(args)
-
-        def value(spellings: tuple[str, ...]) -> str | None:
-            return last_alias_value(occurrences, frozenset(map(canonical_flag_name, spellings)))
-
-        tp = _size(value(self.tp), "tp")
+        tp = _size(self.value(args, self.tp), "tp")
         if self.ep:
-            return Topology(tp=tp, ep=_size(value(self.ep), "ep"))
-        if value(self.ep_switch) is None:
+            return Topology(tp=tp, ep=_size(self.value(args, self.ep), "ep"))
+        if self.value(args, self.ep_switch) is None:
             return Topology(tp=tp)
-        return Topology(tp=tp, ep=tp * _size(value(self.dp), "dp"))
+        return Topology(tp=tp, ep=tp * _size(self.value(args, self.dp), "dp"))
 
     def argv(self, topology: Topology) -> tuple[str, ...] | str:
         """The flags that run ``topology`` on one replica, or why the framework cannot."""
@@ -122,14 +120,6 @@ LLAMACPP_ENTRYPOINT = _entrypoint(Framework.LLAMACPP)
 LLAMACPP_RUNNER_OWNED = _runner_owned(Framework.LLAMACPP)
 #: llama-server spreads one replica's layers over every card it sees and has no TP size, so every launch reads tp 1.
 LLAMACPP_TOPOLOGY = TopologySpelling(tp=())
-
-
-def boards_interchangeable(board: str, other: str) -> bool:
-    """Whether a launch tuned on ``other`` runs as tuned on ``board``: the same architecture and HBM capacity."""
-    first, second = AMD_GPU_BOARDS.get(board), AMD_GPU_BOARDS.get(other)
-    if first is None or second is None:
-        return board == other
-    return (first.gfx, first.hbm_gb) == (second.gfx, second.hbm_gb)
 
 
 @dataclass(frozen=True)
@@ -315,6 +305,8 @@ class SourceLaunch:
     and ``env`` carry no runner-owned keys; ``stripped`` names what was taken out for that reason. ``client_env`` is
     the load generator's environment the source pairs with the launch, the point's own workload settings left out.
     ``source_concs`` are the concurrencies, ascending, the source publishes for the launch's arm; empty for none.
+    ``source_launches`` are the launches the source binds at those concurrencies, each as this one is bound, one per
+    concurrency the source could reproduce; empty for a source that publishes no arm.
     """
 
     source: LaunchSource
@@ -332,6 +324,7 @@ class SourceLaunch:
     stripped: tuple[str, ...] = ()
     warnings: tuple[str, ...] = ()
     source_concs: tuple[int, ...] = ()
+    source_launches: tuple[SourceLaunch, ...] = ()
 
     @property
     def cards(self) -> int:
@@ -380,5 +373,4 @@ __all__ = [
     "VLLM_RUNNER_OWNED",
     "VLLM_TOPOLOGY",
     "adaptive_verification_reason",
-    "boards_interchangeable",
 ]

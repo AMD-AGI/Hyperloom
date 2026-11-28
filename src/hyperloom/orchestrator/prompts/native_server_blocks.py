@@ -60,7 +60,7 @@ def _knob_tune_block(inp: SpecialistPromptInputs) -> list[str]:
         return []
     if agent_isolation_report().specialists != NONE:
         return []
-    gfx = detect_gfx_arch(os.environ, gpu_type=inp.gpu_type or None, probe=False)
+    gfx = detect_gfx_arch(os.environ)
     declared = any(knob.component == component and gfx in knob.archs for knob in kernel_knobs().values())
     if not declared or not inp.allocated_gpu_ids or inp.mode != MODE_PATCH or not inp.worktree_base:
         return []

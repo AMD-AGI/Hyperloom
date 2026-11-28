@@ -16,6 +16,8 @@ import json
 from functools import cache
 from pathlib import Path
 
+import pytest
+
 from inference_suite.argv import argv_flag_occurrences
 from inference_suite.contracts import LaunchQuery, SourceKind, Topology, Workload
 from inference_suite.recipe.model import RepoBundle, SourceLaunch, SourceMiss
@@ -83,15 +85,17 @@ def test_fixed_glm53_takes_the_balanced_cell_with_its_image():
     assert any("overlay options ['pdMode', 'parsers']" in warning for warning in launch.warnings)
 
 
-def test_a_like_board_takes_the_cell_tuned_on_its_twin_and_says_so():
-    (launch,) = _launches(_fixed("zai-org/GLM-5.3", board="mi350x"))
+def test_a_cell_serves_only_the_board_it_names():
+    assert _miss(_fixed("zai-org/GLM-5.3", board="mi350x")) == (
+        "no deployment cell serves it here; no page launch block serves it here"
+    )
+    assert "no AgentX launch serves it here" in _miss(_agentx(_KIMI, concurrencies=(8,), board="mi350x"))
+    (mi325x,) = _launches(_fixed("zai-org/GLM-5.3", board="mi325x"))
+    assert mi325x.image.endswith("mi30x-20260920")
+    assert not any("tuned" in warning for warning in mi325x.warnings)
 
-    assert launch.source.locator == "cells[28]"
-    assert any("on mi355x, not mi350x" in warning for warning in launch.warnings)
-    assert _launches(_fixed("zai-org/GLM-5.3", board="mi325x"))[0].image.endswith("mi30x-20260920")
 
-
-def test_without_a_balanced_cell_the_first_listed_strategy_serves_and_the_exact_board_wins():
+def test_without_a_balanced_cell_the_first_listed_strategy_serves():
     (launch,) = _launches(_fixed(_KIMI, concurrencies=(4,)))
 
     assert (launch.source.path, launch.source.locator, launch.source.strategy) == (
@@ -227,6 +231,48 @@ def test_a_page_block_for_another_board_is_skipped_not_given_as_the_reason():
         assert _miss(_agentx(_GLM53_MXFP4, concurrencies=(16,), board=board)) == (
             "no AgentX launch serves it here; no page launch block serves it here"
         )
+
+
+def _with_page(*headings: str) -> RepoBundle:
+    """The snapshot with a page holding one fixed-workload launch block of ``org/model`` under ``headings``."""
+    block = "```bash Serve\npython -m sglang.launch_server --model-path org/model --tp 8\n```"
+    return _bundle({**_main().files, "docs/cookbook/org/Model.mdx": "\n\n".join((*headings, block)) + "\n"})
+
+
+@pytest.mark.parametrize(
+    ("headings", "board"),
+    [
+        (("## MI355X",), "mi355x"),
+        (("## mi355x launch",), "mi355x"),
+        (("## R9700",), "r9700"),
+        (("## MI355X", "### MI300X and MI355X compared"), "mi355x"),
+    ],
+)
+def test_a_page_block_serves_the_one_board_its_nearest_naming_heading_names(headings, board):
+    (launch,) = _launches(_fixed("org/model", board=board), _with_page(*headings))
+
+    assert launch.source.path == "docs/cookbook/org/Model.mdx"
+
+
+@pytest.mark.parametrize(
+    ("headings", "board"),
+    [
+        (("## MI355X",), "mi300x"),
+        (("## B300",), "mi355x"),
+        (("## MI355X", "### MI300X and MI355X compared"), "mi300x"),
+    ],
+)
+def test_a_page_block_under_a_heading_naming_a_cookbook_board_serves_no_other(headings, board):
+    reason = _miss(_fixed("org/model", board=board), _with_page(*headings))
+
+    assert reason == "no deployment cell serves it here; no page launch block serves it here"
+
+
+@pytest.mark.parametrize("headings", [("## MI300XL",), ("## Serving",), ("## MI300X and MI355X",)])
+def test_a_page_block_under_no_heading_naming_one_board_is_refused(headings):
+    reason = _miss(_fixed("org/model", board="mi300x"), _with_page(*headings))
+
+    assert reason.endswith("Model.mdx:3: no heading above it names one board")
 
 
 def test_a_page_block_using_shell_variables_is_refused():

@@ -7,13 +7,16 @@ local session publishes the one this interpreter imports."""
 from __future__ import annotations
 
 import json
+import logging
 from pathlib import Path
 
 import pytest
 
 import inference_suite
-from hyperloom.measure.runner import cache_build
+from inference_suite.staging import MANIFEST_FILE, StagedTool, StagingManifest
+from hyperloom.measure.runner import cache_build, suite_publish
 from hyperloom.measure.runner.cache_build import CacheEntry
+from hyperloom.measure.runner.tools import ToolError
 from hyperloom.measure.runner.suite_publish import (
     SuitePublishError,
     publish_inference_suite,
@@ -102,3 +105,58 @@ def test_the_cache_build_command_fails_when_the_staging_cannot_be_published(tmp_
 
     assert cache_build.main(_entry(monkeypatch, tmp_path, publish)) == 1
     assert "runner cache not built: publishing the inference_suite staging" in capsys.readouterr().err
+
+
+_PIN = "c" * 40
+
+
+def _published_staging(cache: Path, tools: dict[str, str]) -> None:
+    """The staging the fake publish names, as a real publish leaves it: with its manifest."""
+    staging = cache / "inference-suite" / "k"
+    staging.mkdir(parents=True)
+    manifest = StagingManifest({name: StagedTool(commit, {"f": "0" * 64}) for name, commit in tools.items()})
+    (staging / MANIFEST_FILE).write_bytes(manifest.to_bytes())
+
+
+def test_each_publish_fills_the_runner_caches_inferencex_store_with_the_stagings_commit(tmp_path, monkeypatch):
+    source = _commit_source(tmp_path)
+    cache = tmp_path / "cache"
+    _published_staging(cache, {"inferencex": _PIN})
+    filled = []
+    monkeypatch.setattr(suite_publish, "fill_inferencex_store", lambda root, commit: filled.append((root, commit)))
+
+    publish_inference_suite(source, cache)
+    monkeypatch.setattr(inference_suite, "__file__", str(source / "src" / "inference_suite" / "__init__.py"))
+    publish_own_inference_suite(cache)
+
+    assert filled == [(cache, _PIN), (cache, _PIN)]
+
+
+def test_a_store_that_cannot_be_filled_is_a_warning_and_the_publish_goes_on(tmp_path, monkeypatch, caplog):
+    source = _commit_source(tmp_path)
+    cache = tmp_path / "cache"
+    _published_staging(cache, {"inferencex": _PIN})
+
+    def unreachable(root, commit):
+        raise ToolError(f"InferenceX {commit} was not fetched")
+
+    monkeypatch.setattr(suite_publish, "fill_inferencex_store", unreachable)
+
+    with caplog.at_level(logging.WARNING, logger=suite_publish.__name__):
+        assert publish_inference_suite(source, cache) == cache / "inference-suite" / "k"
+
+    (record,) = caplog.records
+    assert record.levelno == logging.WARNING
+    assert "InferenceX store was not filled, so each test fetches InferenceX from INFERENCEX_REPO or upstream: " in (
+        record.getMessage()
+    )
+    assert f"InferenceX {_PIN} was not fetched" in record.getMessage()
+
+
+def test_a_staging_without_inferencex_fills_nothing(tmp_path, monkeypatch):
+    source = _commit_source(tmp_path)
+    cache = tmp_path / "cache"
+    _published_staging(cache, {"other": _PIN})
+    monkeypatch.setattr(suite_publish, "fill_inferencex_store", lambda root, commit: pytest.fail("filled"))
+
+    assert publish_inference_suite(source, cache) == cache / "inference-suite" / "k"

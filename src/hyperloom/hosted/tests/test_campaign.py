@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import copy
 import json
+import re
 from importlib import resources
 
 import jsonschema
@@ -62,6 +63,13 @@ _DELETE = object()
 #: A multibranch spec measured on the application container's own cards.
 LOCAL_MULTIBRANCH = _with(MINIMAL, "placement.measurement", "local")
 
+_SWEEP_REFUSALS = [
+    ({**MINIMAL, "flow": "conc_sweep"}, "conc_sweep.session_dir is required for flow 'conc_sweep'"),
+    ({**MINIMAL, "flow": "conc_sweep", "conc_sweep": {"session_dir": "s"}}, "must be an absolute path"),
+    ({**MINIMAL, "conc_sweep": {"session_dir": "/nfs/s"}}, "conc_sweep is read only for flow 'conc_sweep'"),
+    ({**MINIMAL, "flow": "conc_sweep", "conc_sweep": {"session_dir": "/s", "concs": [0]}}, "conc_sweep.concs must be"),
+]
+
 # (document, the message the refusal must carry)
 REFUSALS = [
     ("not an object", "the spec must be a JSON object"),
@@ -97,7 +105,7 @@ REFUSALS = [
     (_with(MINIMAL, "placement.profile", _DELETE), "placement.profile is required"),
     (_with(MINIMAL, "placement.profile", "local"), "placement.profile must be one of 'hosted-gpu', 'hosted-cpu'"),
     (_with(MINIMAL, "placement.max_parallel_tests", 0), "placement.max_parallel_tests must be an integer >= 1"),
-    (_with(MINIMAL, "flow", "mesh"), "flow must be one of 'multibranch', got 'mesh'"),
+    (_with(MINIMAL, "flow", "mesh"), "flow must be one of 'multibranch', 'conc_sweep', got 'mesh'"),
     (_with(MINIMAL, "flow", "single"), "flow 'single' is retired; leave flow out or set it to 'multibranch'"),
     (_with(MINIMAL, "multibranch", _DELETE), campaign.RETIRED_DEFAULT),
     (
@@ -222,6 +230,7 @@ _JSON_TYPE = {
     Kind.BOOL: "boolean",
     Kind.STR_MAP: "object",
     Kind.ENUM: "enum",  # the schema spells these with enum or const and no type
+    Kind.INT_LIST: "array",
 }
 
 
@@ -273,6 +282,8 @@ def test_the_table_and_the_schema_name_the_same_fields_with_the_same_bounds():
         {**MINIMAL, "flow": "multibranch", "placement": {"profile": "hosted-gpu", "measurement": "hosted"}},
         {**MINIMAL, "flow": "multibranch", "placement": {"profile": "hosted-gpu", "measurement": "local"}},
         {**MINIMAL, "flow": "multibranch", "placement": {"profile": "hosted-cpu", "measurement": "local"}},
+        *(doc for doc, _ in _SWEEP_REFUSALS),
+        {**MINIMAL, "flow": "conc_sweep", "conc_sweep": {"session_dir": "/nfs/s", "concs": [8, 2], "parallel": 4}},
     ],
 )
 def test_the_schema_and_the_validator_agree_on_accepting_and_refusing(doc):
@@ -284,6 +295,24 @@ def test_the_schema_and_the_validator_agree_on_accepting_and_refusing(doc):
         validator_says = False
     # The cross-field rule (measurement against profile) is not expressed in the schema; the one allowed gap.
     cross_field = (
-        isinstance(doc, dict) and doc.get("flow") in ("multibranch", None) and not validator_says and schema_says
+        isinstance(doc, dict)
+        and doc.get("flow") in ("multibranch", "conc_sweep", None)
+        and not validator_says
+        and schema_says
     )
     assert schema_says == validator_says or cross_field
+
+
+def test_a_sweep_spec_names_the_closed_session_its_points_and_how_many_tests_run_at_once():
+    doc = {**MINIMAL, "flow": "conc_sweep", "conc_sweep": {"session_dir": "/nfs/s", "concs": [8, 2, 8], "parallel": 4}}
+
+    spec = parse_campaign(doc)
+
+    assert (spec.flow, spec.measurement) == ("conc_sweep", "hosted")
+    assert (spec.sweep_session_dir, spec.sweep_concs, spec.sweep_parallel) == ("/nfs/s", (2, 8), 4)
+
+
+@pytest.mark.parametrize(("doc", "problem"), _SWEEP_REFUSALS)
+def test_a_sweep_spec_is_refused_for(doc, problem):
+    with pytest.raises(CampaignError, match=re.escape(problem)):
+        parse_campaign(doc)

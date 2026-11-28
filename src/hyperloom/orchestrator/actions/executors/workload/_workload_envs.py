@@ -36,7 +36,7 @@ from hyperloom.common.session_files import shared_options
 from hyperloom_common.coerce import to_str_list
 from hyperloom_common.io import atomic_write_text
 from hyperloom.inference_optimizer.runtime_environment import prepend_launch_path
-from hyperloom_common.gpu_identity import AMD_GPU_BOARDS
+from hyperloom_common import gpu_card
 from hyperloom.common.perf_metric import DATASET_PATH_ENV, agentx_enabled
 from hyperloom.common.env_safety import (
     BENCHMARK_SECRET_ENV_NAMES,
@@ -89,18 +89,21 @@ log = logging.getLogger(__name__)
 
 _XDIT_EXTRA_ARGS_ENV = framework_registry.extra_args_env("xdit")
 
-# The aiter CK gemm_a8w8_bpreshuffle kernel ships for gfx942 / CDNA3 only; gfx950
-# has no such kernel. The gate is the arch, so the board list is read off the
-# board table rather than typed out beside it.
-_GFX942_GPU_TYPES = frozenset(product for product, board in AMD_GPU_BOARDS.items() if board.gfx == "gfx942")
-
-
 # SGLang graph-capture profiling flag shipped by the profile YAML, and the
 # eager flag that makes it a no-op. Literals rather than an import from
 # ``baseline``: that module imports this one, so the dependency only goes one
 # way.
 _SGLANG_PROFILE_CUDA_GRAPH_FLAG = "--enable-profile-cuda-graph"
 _SGLANG_DISABLE_CUDA_GRAPH_FLAG = "--disable-cuda-graph"
+
+
+def without_dead_cuda_graph_profile(tokens: list[str]) -> list[str]:
+    """SGLang server-arg ``tokens`` less ``--enable-profile-cuda-graph`` when ``--disable-cuda-graph`` leaves no
+    graph capture to profile."""
+    if _SGLANG_DISABLE_CUDA_GRAPH_FLAG not in tokens:
+        return tokens
+    return [token for token in tokens if token != _SGLANG_PROFILE_CUDA_GRAPH_FLAG]
+
 
 # Quality-reference env names, in resolution order. Every scriptable workload
 # needs this gate, so the contract is the framework-neutral ``HYPERLOOM_`` pair.
@@ -564,8 +567,9 @@ def _settle_merged_server_args(bench: dict[str, Any], framework_env: str) -> Non
     # can see the contradiction.
     if framework_env == "EXTRA_SGLANG_ARGS":
         _sg_tokens = str(envs.get(framework_env, "")).split()
-        if _SGLANG_DISABLE_CUDA_GRAPH_FLAG in _sg_tokens and _SGLANG_PROFILE_CUDA_GRAPH_FLAG in _sg_tokens:
-            envs[framework_env] = " ".join(t for t in _sg_tokens if t != _SGLANG_PROFILE_CUDA_GRAPH_FLAG)
+        _kept = without_dead_cuda_graph_profile(_sg_tokens)
+        if _kept != _sg_tokens:
+            envs[framework_env] = " ".join(_kept)
             log.info(
                 "Dropping %s: %s is set, so there is no graph capture to profile.",
                 _SGLANG_PROFILE_CUDA_GRAPH_FLAG,
@@ -738,9 +742,7 @@ def _pin_accuracy_eval_envs(envs: dict[str, Any]) -> None:
         envs[ENV_EVAL_TOKENIZED_REQUESTS] = _eval_tok_env
 
 
-def _pin_runtime_build_envs(
-    bench: dict[str, Any], model_path: str | None, gpu_type: str | None, flydsl_source_dirs: bool
-) -> None:
+def _pin_runtime_build_envs(bench: dict[str, Any], model_path: str | None, flydsl_source_dirs: bool) -> None:
     envs = bench["envs"]
     # FlyDSL folds only same-directory helpers into its JIT cache key, so a patched
     # helper one directory over is served from a stale binary. Naming the roots
@@ -754,14 +756,15 @@ def _pin_runtime_build_envs(
     # unless SGLANG_USE_AITER_FP8_PER_TOKEN=1 flips use_per_token_if_dynamic on
     # and routes the GEMM to aiter's CK gemm_a8w8_bpreshuffle. Inject it from
     # Hyperloom, strictly scoped to sglang + fp8 + gfx942 + that exact quant
-    # scheme so per-tensor and block-scale FP8 are never touched. setdefault so
-    # an operator-set value (YAML / extra_envs) always wins.
-    from hyperloom.inference_optimizer.gpu_types import _resolve_amd_gpu_type
-
+    # scheme so per-tensor and block-scale FP8 are never touched: that CK kernel
+    # ships for gfx942 only. setdefault so an operator-set value (YAML /
+    # extra_envs) always wins.
+    card = gpu_card.session_card()
     if (
         "sglang" in str(bench.get("framework") or "").lower()
         and str(bench.get("precision") or "").strip().lower() == "fp8"
-        and _resolve_amd_gpu_type(gpu_type) in _GFX942_GPU_TYPES
+        and card is not None
+        and card.gfx == "gfx942"
         and _fp8_is_per_channel_per_token(str(model_path or os.environ.get("MODEL_PATH", "")))
     ):
         envs.setdefault("SGLANG_USE_AITER_FP8_PER_TOKEN", "1")
@@ -1017,7 +1020,7 @@ def materialize_config_with_envs(
     _finalize_framework_server_args(bench, window)
     _pin_client_model_access(bench, target.model_path, model_basename)
     _pin_accuracy_eval_envs(envs)
-    _pin_runtime_build_envs(bench, target.model_path, target.gpu_type, options.flydsl_source_dirs)
+    _pin_runtime_build_envs(bench, target.model_path, options.flydsl_source_dirs)
     _apply_caller_removals(envs, framework_env, launch.remove_args, launch.unset_envs)
     _restate_profile_capture(envs, framework_env, window, replace_args)
     _apply_vllm_source_runtime(bench, envs)

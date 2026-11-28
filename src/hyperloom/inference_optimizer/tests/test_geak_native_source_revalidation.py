@@ -151,7 +151,7 @@ async def test_unkept_measurement_settles_no_promote_without_promotion(coordinat
     assert state.geak_result["revalidation_status"] == "no_promote"
     assert state.geak_result["revalidation_error"] == "canonical replay did not improve"
     assert not state.optimization_stack
-    assert geak_candidate_is_adjudicated(state.geak_result, reported, harness_can_replay=False)
+    assert geak_candidate_is_adjudicated(state.geak_result, reported)
 
 
 @pytest.mark.asyncio
@@ -187,7 +187,7 @@ async def test_unmeasured_integration_settles_failed_and_stays_open(coordinator,
     assert state.geak_pending == {}
     assert state.current_best == _INCUMBENT
     assert not state.optimization_stack
-    assert not geak_candidate_is_adjudicated(state.geak_result, reported, harness_can_replay=False)
+    assert not geak_candidate_is_adjudicated(state.geak_result, reported)
 
 
 def _framework_tree(tmp_path, monkeypatch):
@@ -283,7 +283,7 @@ async def test_bench_that_graded_nothing_settles_failed_and_stays_open(
     assert state.current_best["tput"] == _INCUMBENT["tput"]
     assert not state.optimization_stack
     assert (repo / "kernel.py").read_text() == "old\n"
-    assert not geak_candidate_is_adjudicated(state.geak_result, reported, harness_can_replay=False)
+    assert not geak_candidate_is_adjudicated(state.geak_result, reported)
 
 
 async def _next_kernel_entry(coordinator, reported) -> bool:
@@ -292,7 +292,7 @@ async def _next_kernel_entry(coordinator, reported) -> bool:
     geak_dir.mkdir(exist_ok=True)
     (geak_dir / "result.json").write_text(json.dumps(reported), encoding="utf-8")
     coordinator.phase_kernel._record_geak_kernel_journey = lambda _result: None
-    return await coordinator.phase_kernel._promote_crashed_geak_result({}, agentx=True, cards=None)
+    return await coordinator.phase_kernel._promote_crashed_geak_result({}, cards=None)
 
 
 def _given_up(state) -> bool:
@@ -339,7 +339,7 @@ async def test_candidate_that_keeps_ending_unmeasured_is_given_up_and_not_measur
         ("failed", REBENCH_UNMEASURED_GIVEN_UP)
     ]
     assert "No space left on device" in timeline.conclusions[0]["final_error"]
-    assert geak_candidate_is_adjudicated(state.geak_result, reported, harness_can_replay=False)
+    assert geak_candidate_is_adjudicated(state.geak_result, reported)
     assert not await _next_kernel_entry(coordinator, reported), "a candidate given up is left alone"
     assert len(benches) == 2
     assert state.current_best["tput"] == _INCUMBENT["tput"]
@@ -356,7 +356,7 @@ async def test_verdict_on_a_candidate_that_once_ended_unmeasured_settles_it(coor
     assert await _next_kernel_entry(coordinator, reported)
     assert state.geak_result["revalidation_status"] == "no_promote"
     assert not _given_up(state)
-    assert geak_candidate_is_adjudicated(state.geak_result, reported, harness_can_replay=False)
+    assert geak_candidate_is_adjudicated(state.geak_result, reported)
 
 
 @pytest.mark.asyncio
@@ -384,9 +384,7 @@ async def test_unmeasured_count_follows_a_product_the_geak_runner_hands_back(coo
     def handed_back(product):
         result_path.write_text(json.dumps(product), encoding="utf-8")
         exited = subprocess.CompletedProcess(args=["geak"], returncode=1, stdout="", stderr="")
-        return coordinator.phase_kernel._settle_geak_runner_exit(
-            exited, handoff={}, agentx=True, facts=GeakRunnerFacts()
-        )
+        return coordinator.phase_kernel._settle_geak_runner_exit(exited, handoff={}, facts=GeakRunnerFacts())
 
     assert handed_back(reported)[REVALIDATION_UNMEASURED] == 1
     another_product = {**reported, "final_throughput_tok_s": reported["final_throughput_tok_s"] + 1.0}
@@ -402,7 +400,7 @@ async def test_failed_round_in_a_session_graded_on_output_throughput_stays_open(
     state = coordinator.shared_state
     assert state.geak_result["revalidation_status"] == "failed"
     assert (repo / "kernel.py").read_text() == "old\n"
-    assert not geak_candidate_is_adjudicated(state.geak_result, reported, harness_can_replay=False)
+    assert not geak_candidate_is_adjudicated(state.geak_result, reported)
 
 
 @pytest.mark.asyncio
@@ -415,7 +413,7 @@ async def test_graded_bench_below_the_keep_bar_settles_no_promote(coordinator, t
     assert "did not clear the interactivity KEEP gate" in state.geak_result["revalidation_error"]
     assert not state.optimization_stack
     assert (repo / "kernel.py").read_text() == "old\n"
-    assert geak_candidate_is_adjudicated(state.geak_result, reported, harness_can_replay=False)
+    assert geak_candidate_is_adjudicated(state.geak_result, reported)
 
 
 @pytest.mark.asyncio
@@ -438,7 +436,7 @@ async def test_cleared_candidate_whose_keep_cannot_be_committed_stays_open(coord
     assert state.geak_result["revalidation_error"] == "git commit failed"
     assert not state.optimization_stack
     assert (repo / "kernel.py").read_text() == "old\n"
-    assert not geak_candidate_is_adjudicated(state.geak_result, reported, harness_can_replay=False)
+    assert not geak_candidate_is_adjudicated(state.geak_result, reported)
 
 
 @pytest.mark.asyncio
@@ -508,14 +506,9 @@ async def test_cancelled_covered_run_reuses_its_task_identity(coordinator, tmp_p
 
 
 @pytest.mark.asyncio
-async def test_missing_declared_patch_fails_without_proxy_harness(coordinator, tmp_path, monkeypatch):
+async def test_missing_declared_patch_settles_unmeasured(coordinator, tmp_path):
     patch = _candidate(coordinator, tmp_path)
     patch.unlink()
-
-    async def forbidden(**kwargs):
-        raise AssertionError("native source failure must not use GEAK proxy harness")
-
-    monkeypatch.setattr(coordinator.phase_kernel, "_revalidate_on_geak_harness", forbidden)
     await coordinator.phase_kernel._revalidate_geak_candidate(reason="unit", handoff_cards=None)
     assert coordinator.shared_state.geak_pending == {}
     assert coordinator.shared_state.geak_result["revalidation_status"] == "fallback_failed"
@@ -623,6 +616,6 @@ def test_adjudicated_source_result_reopens_only_when_artifact_changes(coordinato
         "native_source_revalidation": {"params": params, "status": "validated"},
         "canonical_revalidation": {"output_throughput": 120.0},
     }
-    assert geak_candidate_is_adjudicated(settled, raw, harness_can_replay=False)
+    assert geak_candidate_is_adjudicated(settled, raw)
     patch.write_text(patch.read_text().replace("+new", "+changed"))
-    assert not geak_candidate_is_adjudicated(settled, raw, harness_can_replay=False)
+    assert not geak_candidate_is_adjudicated(settled, raw)

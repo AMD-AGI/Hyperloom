@@ -8,6 +8,7 @@ from __future__ import annotations
 import asyncio
 import gzip
 import json
+from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -58,6 +59,30 @@ def test_a_fixed_profile_point_arms_the_host_probe_and_states_its_instrumentatio
     assert armed == [point]
     assert executor._host_probe_dir == "/probe"
     assert executor._instrumentation_preflight is not None
+
+
+def test_a_multi_node_profile_point_measures_the_external_server_while_the_engines_capture(
+    tmp_path, monkeypatch
+) -> None:
+    from hyperloom.orchestrator.actions.executors import _multi_node_env
+    from hyperloom.orchestrator.actions.executors._suite.config import suite_config
+    from hyperloom.orchestrator.actions.executors.tests.test_suite_config import _base, _point, _settings
+    from inference_suite.contracts import LifecycleMode
+
+    document = _point("sglang", PROFILE="1", PROFILE_EXTRA_BODY='{"start_step": 40, "num_steps": 16}')
+    document["benchmark"]["profiler"]["torch_profiler"]["enabled"] = True
+    point = _write(tmp_path / "point.yaml", document["benchmark"])
+    executor = profile.ProfileExecutor()
+    monkeypatch.setattr(executor, "_inject_host_probe", lambda path, out: "")
+    monkeypatch.setattr(_multi_node_env, "is_multi_node", lambda: True)
+    monkeypatch.setattr(_multi_node_env, "_read_state", lambda: {"backend": "sglangrouter", "node_list": True})
+
+    executor._prepare_point(point, tmp_path)
+    settings = replace(_settings(LifecycleMode.BOOT), server_url="http://router:8000")
+    config = suite_config(yaml.safe_load(point.read_text()), _base("sglang"), settings)
+
+    assert config.lifecycle.mode is LifecycleMode.EXTERNAL
+    assert not config.profile.enabled
 
 
 def test_the_point_is_prepared_before_its_route_is_read(tmp_path, monkeypatch, unpatched) -> None:

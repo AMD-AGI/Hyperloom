@@ -6,7 +6,8 @@
 The sweep holds the session's lock, so it refuses a session another process is running, and SIGINT or SIGTERM cancel
 it: the points already measured stay in the report, which then reads ``cancelled``. It pins the session as the
 process's current one, which every round resolves its frozen base from, and packages the session again once its report
-is written.
+is written. Run on its own, it publishes the card the session archived, which the rounds and the roofline ceiling
+read.
 """
 
 from __future__ import annotations
@@ -17,13 +18,18 @@ import logging
 import os
 import signal
 import sys
-from collections.abc import Iterator
+from collections.abc import Iterator, Sequence
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
 
+from hyperloom.common.concurrencies import parse_concurrencies
+from hyperloom_common import gpu_card
+from hyperloom_common.gpu_card import GpuCard
 from hyperloom.inference_optimizer.breakdown import package_session_artifacts
+from hyperloom.inference_optimizer.cli.session_setup import read_session_card
 from hyperloom.inference_optimizer.session.lock import SessionAlreadyRunning, SessionLock
+from hyperloom.inference_optimizer.session.manifest import load_manifest
 from hyperloom.inference_optimizer.session.paths import ENV_CURRENT_SESSION_DIR
 from hyperloom.orchestrator.actions.cancel_channel import CancelScope, use_cancel_scope
 from hyperloom.orchestrator.state.shared_state import SharedState
@@ -49,16 +55,26 @@ def _cancelled_by_signals(scope: CancelScope) -> Iterator[None]:
             signal.signal(signum, handler if handler is not None else signal.SIG_DFL)
 
 
-async def sweep_session(session_dir: Path) -> dict[str, Any]:
-    """Run the sweep of the session in ``session_dir`` under its lock, then package the session so the package carries
-    the report; raises ``SessionAlreadyRunning``."""
+async def sweep_session(session_dir: Path, *, concs: Sequence[int] = ()) -> dict[str, Any]:
+    """Run the sweep of the session in ``session_dir`` under its lock, over ``concs`` when given, then package the
+    session so the package carries the report; raises ``SessionAlreadyRunning``."""
     session_dir = session_dir.resolve()
     os.environ[ENV_CURRENT_SESSION_DIR] = str(session_dir)
     scope = CancelScope()
     with SessionLock(session_dir), use_cancel_scope(scope), _cancelled_by_signals(scope):
-        payload = await run_conc_sweep(session_dir)
+        payload = await run_conc_sweep(session_dir, concs=concs)
     _package(session_dir)
     return payload
+
+
+def _publish_session_card(session_dir: Path) -> None:
+    """Publish the card the sweep's rounds read: the one the session's manifest archived, since a sweep is comparable
+    with its session only on the same hardware; this machine's for a session that archived none."""
+    archived = load_manifest(session_dir).get("gpu_card")
+    if archived:
+        gpu_card.publish_session_card(GpuCard(**archived))
+    else:
+        gpu_card.publish_session_card(read_session_card(SharedState.load_or_init(session_dir).nodes or 1))
 
 
 def _package(session_dir: Path) -> None:
@@ -78,10 +94,18 @@ def main(argv: list[str] | None = None) -> int:
         description="Sweep a finished session's baseline and optimized launch over its recipe's concurrencies.",
     )
     parser.add_argument("session_dir", type=Path, help="The session directory of a finished optimize run.")
+    parser.add_argument(
+        "--conc-sweep-concs",
+        dest="concs",
+        type=parse_concurrencies,
+        default=(),
+        help="Comma-separated concurrencies to sweep, in place of the recipe's; the session's CONC is always among them.",
+    )
     args = parser.parse_args(argv)
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
+    _publish_session_card(args.session_dir)
     try:
-        payload = asyncio.run(sweep_session(args.session_dir))
+        payload = asyncio.run(sweep_session(args.session_dir, concs=args.concs))
     except SessionAlreadyRunning as exc:
         print(f"ERROR: {exc}", file=sys.stderr)
         return 2

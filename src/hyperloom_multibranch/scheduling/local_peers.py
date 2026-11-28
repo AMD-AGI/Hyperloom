@@ -60,6 +60,9 @@ from hyperloom_common.llm.llm_config import (
 from hyperloom.common.model_paths import resolve_serving_model_path
 from hyperloom.common.outside_facts import ENV_MAX_MODEL_LEN
 from hyperloom.common.perf_metric import DATASET_PATH_ENV
+from hyperloom_common import gpu_card
+from hyperloom_common.amd_smi import AmdSmiError
+from hyperloom_common.gpu_card import GpuCard
 from hyperloom_multibranch.contracts.llm_prices import price_of
 from hyperloom_multibranch.contracts.blackboard import Role, Writer
 from hyperloom_multibranch.contracts.blackboard.interfaces import BranchLogStore, CommitQuery
@@ -203,14 +206,18 @@ class InferenceXCheckout:
 
 class ToolboxBackend(Protocol):
     """Where a session's tests run: it builds the session's toolbox on the blackboard handle, the acceptance setup and
-    the instruction sheet's context that every backend shares; ``on_this_machine`` says whether they run on this
-    machine's cards."""
+    the instruction sheet's context that every backend shares, and describes the card its tests run on;
+    ``on_this_machine`` says whether they run on this machine's cards."""
 
     on_this_machine: ClassVar[bool]
 
     def toolbox(
         self, setup: PeerSetup, blackboard: LocalBlackboard, acceptance: AcceptanceSetup, spec: SpecContext
     ) -> RealToolbox: ...
+
+    def card(self) -> GpuCard:
+        """The card every test runs on; raises :class:`PeersUnavailable` when it cannot be described."""
+        ...
 
 
 @dataclass(frozen=True)
@@ -252,6 +259,15 @@ class LocalCards:
             tests_end_by=self.tests_end_by,
         )
         return build_local_toolbox(session, blackboard, acceptance, spec, options=options)
+
+    def card(self) -> GpuCard:
+        """The card ``amd-smi`` describes for :attr:`cards`; raises :class:`PeersUnavailable` when it describes none or
+        more than one kind."""
+        try:
+            machine = gpu_card.read_cards()
+            return gpu_card.one_kind(machine[index] for index in self.cards)
+        except (AmdSmiError, ValueError) as exc:
+            raise PeersUnavailable(f"the session's cards {list(self.cards)} cannot be described: {exc}") from exc
 
 
 @dataclass(frozen=True)
@@ -349,11 +365,11 @@ def workload_rule(workload: Workload, blackboard: CommitQuery) -> Rule:
     return InferenceXRule(blackboard, workload.conc)
 
 
-def _canonical(out_dir: Path, workload: Workload, host: MeasurementHost, base: ServerBase) -> CanonicalMeasurement:
+def _canonical(out_dir: Path, workload: Workload, host: MeasurementHost, frozen: BaseLaunch) -> CanonicalMeasurement:
     """The canonical measurement every point of the session is rendered from. The renderer takes the model and the
     runner type only as arguments, so a point never falls back to the shipped YAML's model, and the server half of the
-    session's frozen ``base`` too: this process is no Hyperloom session, so an AgentX point is seeded with no base it
-    would find. Raises :class:`PeersUnavailable` when it cannot be rendered."""
+    session's ``frozen`` base too, at each point's level: this process is no Hyperloom session, so an AgentX point is
+    seeded with no base it would find. Raises :class:`PeersUnavailable` when it cannot be rendered."""
 
     from hyperloom.measure.points import PointError, default_canonical
 
@@ -364,7 +380,7 @@ def _canonical(out_dir: Path, workload: Workload, host: MeasurementHost, base: S
             model_path=resolve_serving_model_path(workload.model),
             gpu_type=workload.gpu_type,
             inferencex_path=host.inferencex.path,
-            server_base=base,
+            frozen_base=frozen,
         )
     except PointError as exc:
         raise PeersUnavailable(f"the canonical measurement cannot be taken: {exc}") from exc
@@ -379,11 +395,11 @@ def specialist_recall(reports: Path, learnings: ExperienceReader | None = None) 
 
 
 def local_peers(host: MeasurementHost, sessions: SpecialistSessions, setup: PeerSetup) -> Peers:
-    """The session's peers on this machine; exports the workload into this process (:func:`_export_workload`) and
-    freezes the base launch every test runs on in ``MB-toolbox`` unless the session froze one
-    (:func:`~hyperloom_multibranch.scheduling.session_base.freeze_session_base`), which its component agents are served
-    unless the operator gave them a launch file. Raises :class:`PeersUnavailable`
-    when no base launch can be frozen or the session's canonical measurement cannot be taken.
+    """The session's peers on this machine; exports the workload (:func:`_export_workload`) and the card the tests run
+    on (:func:`_publish_session_card`) into this process and freezes the base launch every test runs on in ``MB-toolbox``
+    unless the session froze one (:func:`~hyperloom_multibranch.scheduling.session_base.freeze_session_base`), which
+    its component agents are served unless the operator gave them a launch file. Raises :class:`PeersUnavailable` when
+    the backend cannot describe its card, no base launch can be frozen or the canonical measurement cannot be taken.
 
     Called on the event loop the session runs on. The toolbox is built, not started: the session starts it, and its
     close releases the backend and the sandboxes. The MCP service is started; the session stop stops it. How the
@@ -400,13 +416,13 @@ def local_peers(host: MeasurementHost, sessions: SpecialistSessions, setup: Peer
 
     layout, workload = setup.layout, setup.workload
     _export_workload(workload, layout.toolbox, host.image.ref)
+    card = _publish_session_card(host.backend, workload)
     frozen = freeze_session_base(layout.toolbox, workload, setup.reference_script, setup.inferencex_commit)
-    served = served_launch(frozen, setup.agent_launch)
-    base, setup = server_base(frozen.launch), replace(setup, agent_launch=served)
+    base, setup = server_base(frozen.launch), replace(setup, agent_launch=served_launch(frozen, setup.agent_launch))
     native = native_trees(os.environ)
     repo = GitExperimentRepo(layout.repo, setup.blobs, native=native)
     canonical_dir = layout.toolbox / CANONICAL_DIR
-    toolbox = _toolbox(host, setup, repo, _canonical(canonical_dir, workload, host, base))
+    toolbox = _toolbox(host, setup, repo, _canonical(canonical_dir, workload, host, frozen.launch), card)
     reviews = _option_reviews(frozen.launch, toolbox, layout.toolbox)
     served = SpecialistToolOptions(
         option_reviews=reviews, native_server=native_component(workload.framework) is not None
@@ -510,12 +526,32 @@ def _option_reviews(base: BaseLaunch, toolbox: RealToolbox, directory: Path) -> 
     return OptionReviews(directory, inventory)
 
 
+def _publish_session_card(backend: ToolboxBackend, workload: Workload) -> GpuCard:
+    """Publish the card ``backend``'s tests run on as the session's and return it; warns when its own label is not the
+    workload's GPU type, which stays the session's."""
+
+    card = backend.card()
+    gpu_card.publish_session_card(card)
+    named = gpu_card.board_label(card.name)
+    if named and named != workload.gpu_type:
+        logger.warning(
+            "the GPU type is given as %r, but the cards are %r (%s); recipes, KB rows and TraceLens specs are looked "
+            "up under %r",
+            workload.gpu_type,
+            named,
+            card.describe(),
+            workload.gpu_type,
+        )
+    return card
+
+
 def _toolbox(
-    host: MeasurementHost, setup: PeerSetup, repo: ExperimentRepo, canonical: CanonicalMeasurement
+    host: MeasurementHost, setup: PeerSetup, repo: ExperimentRepo, canonical: CanonicalMeasurement, card: GpuCard
 ) -> RealToolbox:
     """The session's toolbox on ``host``'s backend, every test's points rendered from ``canonical``, the session's
-    canonical measurement, and compiled from the session's blob store. A plain explore runs no accuracy evaluation:
-    the rule gate judges it on throughput, and the confirm that follows a candidate runs the evaluation."""
+    canonical measurement, and compiled from the session's blob store; every instruction sheet names ``card``. A plain
+    explore runs no accuracy evaluation: the rule gate judges it on throughput, and the confirm that follows a
+    candidate runs the evaluation."""
 
     from hyperloom.measure.compile import EnvironmentCompiler
     from hyperloom.measure.hosted_spec import SpecContext
@@ -531,6 +567,7 @@ def _toolbox(
         gpu_type=workload.gpu_type,
         blobs=setup.blobs,
         blob_root=str(setup.blobs.root),
+        card=card,
     )
     planner = HostedPlanner(compiler, canonical, layout.toolbox / POINTS_DIR)
     blackboard = LocalBlackboard(layout.blackboard, Writer(Role.TOOLBOX, TOOLBOX_WRITER))

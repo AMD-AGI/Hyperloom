@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Which AMD GPU a run targets: the one mapping between product names and gfx targets, and the local probe."""
+"""Which AMD GPU a run targets: the gfx targets the stored GPU labels stand for, and the local probe."""
 
 from __future__ import annotations
 
@@ -10,61 +10,48 @@ import subprocess
 from dataclasses import dataclass
 from enum import Enum
 
-from hyperloom_common.gpu_identity import AMD_GPU_BOARDS, board_named_in
-
 
 def _spelling(value: str) -> str:
     """``value`` lowercase with spaces and dashes as underscores, the one spelling names are compared in."""
     return re.sub(r"[\s-]+", "_", str(value or "").strip().lower())
 
 
-# Product names fold onto their gfx target so a caller reporting ``MI355X`` and a probe reporting ``gfx950`` agree.
-_ARCH_BY_GPU_TYPE = {
-    _spelling(name): board.gfx for board in AMD_GPU_BOARDS.values() for name in (board.product, *board.aliases)
-}
-# Established product aliases; gfx1201 stays an ISA because it names more than one board.
+# The labels KB records are stored under; changing one strands the records filed under it. gfx1201 stays an ISA
+# because it names more than one board.
 _GPU_TYPE_BY_ARCH = {
     "gfx942": "mi300x",
     "gfx950": "mi355x",
     "gfx1100": "w7900",
     "gfx1151": "radeon8060s",
 }
+_ARCH_BY_GPU_TYPE = {gpu_type: arch for arch, gpu_type in _GPU_TYPE_BY_ARCH.items()}
 # A concrete target only: rocminfo also lists generic ISAs such as ``gfx12-generic`` beside the chip's own.
 _GFX_RE = re.compile(r"\bgfx[0-9a-f]+\b(?!-)", re.IGNORECASE)
 
 
 def canon_arch(value: str) -> str:
-    """The canonical lowercase gfx target ``value`` names, product name or gfx alike; ``""`` when it names none.
+    """The canonical lowercase gfx target ``value`` names; ``""`` when it names none.
 
-    Lenient: a spelling that contains a gfx target, or names a board as a whole word the way
-    :func:`hyperloom_common.gpu_identity.board_named_in` reads probe output, folds onto it (``mi300x_vf`` is
-    ``gfx942``; ``R9700S`` and ``MI300XL`` are other products and name none). Use it to pick a target, not to key
-    stored records; :func:`canonical_gpu_type` does that.
+    A spelling that contains a gfx target names it (``gfx942:sramecc+`` is ``gfx942``), and a stored label names its
+    target; any other value names none. Use it to pick a target, not to key stored records;
+    :func:`canonical_gpu_type` does that.
     """
     raw = str(value or "").strip().lower()
-    if not raw:
-        return ""
     match = _GFX_RE.search(raw)
     if match:
-        return match.group(0).lower()
-    board = board_named_in(re.sub(r"[_-]+", " ", raw))
-    return board.gfx if board else ""
+        return match.group(0)
+    return _ARCH_BY_GPU_TYPE.get(raw, "")
 
 
 def canonical_gpu_type(value: str) -> str:
-    """The product name a known chip is recorded under; any other value keeps its own normalized spelling.
+    """The label a stored gfx target's records are filed under; any other value keeps its own normalized spelling.
 
-    Exact, because the result keys KB records: only a known product name or gfx target maps, so a spelling that
-    merely contains one (``mi300x_vf``, ``gfx942:sramecc+``) keeps the records it was stored under.
+    Exact, because the result keys KB records: only the gfx target itself maps, so a spelling that merely contains
+    one (``gfx942:sramecc+``) or names another board on the same target (``mi325x``) keeps the records it was stored
+    under.
     """
     normalized = _spelling(value)
-    arch = _ARCH_BY_GPU_TYPE.get(normalized, normalized)
-    return _GPU_TYPE_BY_ARCH.get(arch, normalized)
-
-
-def product_arch(value: str) -> str:
-    """The gfx target of ``value`` when it is spelled exactly as a known product name; ``""`` otherwise."""
-    return _ARCH_BY_GPU_TYPE.get(str(value or "").strip().lower(), "")
+    return _GPU_TYPE_BY_ARCH.get(normalized, normalized)
 
 
 @dataclass(frozen=True)
@@ -147,7 +134,7 @@ The backend guidance and the knowledge cards are mostly written for Instinct (CD
 Every concrete number for this chip is in `hardware/rdna3/`. Where another card cites `hardware/mi350_*.md`, read the
 RDNA 3 card for that topic instead (the map in `hardware/rdna3/INDEX.md` pairs them); the MI350 numbers are wrong here."""
 
-#: gfx1100/gfx1201 static wave32: 1536 VGPRs per SIMD, allocation granule 24 and at most 16 waves; LLVM's
+#: gfx1100/gfx1151/gfx1201 static wave32: 1536 VGPRs per SIMD, allocation granule 24 and at most 16 waves; LLVM's
 #: Feature1536VGPRs owns that rule. LDS is 128 KiB per WGP with a 64 KiB work-group cap.
 _RDNA_WAVE32_OCCUPANCY = OccupancyRule(
     vgpr_limit=96,
@@ -157,6 +144,27 @@ _RDNA_WAVE32_OCCUPANCY = OccupancyRule(
     lds_within="fits the 64 KiB work-group cap; 128 KiB per WGP",
     lds_beyond="over the 64 KiB work-group cap: will not launch",
 )
+
+_RDNA35_PROMPT_NOTE = """\
+## Target architecture: gfx1151 (RDNA 3.5, Radeon 8060S, Strix Halo APU) — overrides any Instinct fact in this prompt
+
+The backend guidance and the knowledge cards are mostly written for Instinct (CDNA) GPUs. On this target:
+- Matrix instructions are **WMMA** (`v_wmma_*`, 16x16x16), not MFMA, and there are **no AGPRs**: accumulators live
+  in ordinary VGPRs. HIP and Triton compile it for **wave32**.
+- **No FP8/FP4** matrix path: FP16, BF16, INT8 and INT4 are the WMMA input types.
+- It is an **APU**: the Radeon 8060S's 40 CUs (32 on the 8050S, 16 on the 8040S, also gfx1151) share LPDDR5X-8000 on
+  a 256-bit bus (about 256 GB/s) with the CPU, behind a 2 MB L2 and a 32 MB MALL. There is no dedicated VRAM, and
+  bandwidth is a fraction of a discrete GPU's, so decode is bandwidth-bound early.
+- rocprof-compute supports gfx1151 (from 3.6.0), so profiling runs as on Instinct: the profiled Analysis tier and
+  the implementer's rocprof-compute Self-profiling section.
+- The kernel backends that build here are {kernel_backends}. In the ROCm 10.0 vLLM 0.27 image, CK does not build for
+  gfx1151 and FlyDSL reports a capability mismatch; HipKittens and the `gl.amd.cdna3`/`cdna4` Gluon ops are CDNA
+  only.
+- Benchmarks are noisy on this board: prefer changes with a large expected gain, and benchmark cases long enough to
+  time reliably.
+The RDNA 3 cards under `hardware/rdna3/` hold for the ISA (WMMA, wave32, 1536 VGPRs per SIMD); their memory, CU, peak
+and roofline-ridge figures are the W7900's and do not apply here. On the 8060S the FP16 matrix peak is about 60
+TFLOPS against about 256 GB/s, a ridge near 234 FLOP/byte."""
 
 _RDNA4_PROMPT_NOTE = """\
 ## Target architecture: gfx1201 (RDNA 4, Radeon AI PRO R9700) — overrides any Instinct fact in this prompt
@@ -180,6 +188,13 @@ _ARCH_PROFILES: dict[str, ArchProfile] = {
         kernel_backends=frozenset({"triton", "hip", "hipblaslt", "ck"}),
         occupancy=_RDNA_WAVE32_OCCUPANCY,
         prompt_note=_RDNA3_PROMPT_NOTE,
+    ),
+    "gfx1151": ArchProfile(
+        family="RDNA3.5",
+        hardware_knowledge="hardware/rdna3",
+        kernel_backends=frozenset({"triton", "hip", "hipblaslt"}),
+        occupancy=_RDNA_WAVE32_OCCUPANCY,
+        prompt_note=_RDNA35_PROMPT_NOTE,
     ),
     "gfx1201": ArchProfile(
         family="RDNA4",
@@ -218,5 +233,4 @@ __all__ = [
     "canon_arch",
     "canonical_gpu_type",
     "detect_arch",
-    "product_arch",
 ]

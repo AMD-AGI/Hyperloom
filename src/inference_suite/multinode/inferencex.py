@@ -1,13 +1,12 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""PD launches from InferenceX main: its master multi-node disaggregated entries, and its recipe tree by directory.
+"""PD launches from InferenceX main: its master multi-node disaggregated entries.
 
 A master entry (``multinode: true, disagg: true``) names a srt-slurm recipe per ``search-space`` row as
-``srt-recipe: <file>:<variant>``; the row states the topology and concurrencies InferenceX benchmarks it at. A recipe
-no master entry names is found by its directory, ``<model-prefix>/<engine>/<board>-<precision>/<workload>/``, and
-matched on the topology its own roles state. Variants expand as srtctl expands them: ``base`` deep-merged with an
-``override_*`` block, or with one slice of a ``zip_override_*`` block.
+``srt-recipe: <file>:<variant>``; the row states the topology and concurrencies InferenceX benchmarks it at. Variants
+expand as srtctl expands them: ``base`` deep-merged with an ``override_*`` block, or with one slice of a
+``zip_override_*`` block.
 """
 
 from __future__ import annotations
@@ -25,7 +24,8 @@ from inference_suite.contracts.base_launch import Workload
 from inference_suite.argv import canonical_flag_name
 from inference_suite.frameworks import Framework
 from inference_suite.multinode.query import PdQuery, RoleAsk
-from inference_suite.multinode.record import PD_ROLES, PdSourceKind, Role
+from inference_suite.multinode.render import DP_ATTENTION, TOPOLOGY_SPELLING
+from inference_suite.multinode.record import PD_ROLES, Role
 from inference_suite.recipe.inferencex import (
     MASTER,
     PROJECT,
@@ -37,26 +37,13 @@ from inference_suite.recipe.inferencex import (
     org_models_named,
     runner_board,
 )
-from inference_suite.recipe.model import (
-    ATOM_TOPOLOGY,
-    SGLANG_TOPOLOGY,
-    RecipeSourceError,
-    TopologySpelling,
-    boards_interchangeable,
-)
+from inference_suite.recipe.model import RecipeSourceError
 from inference_suite.recipe.sources import Checkout
 
 MULTI_NODE_RECIPES = f"{PROJECT}/benchmarks/multi_node/srt-slurm-recipes"
-NVIDIA_MASTER = f"{PROJECT}/configs/nvidia-master.yaml"
 #: What a PD resolution checks out of InferenceX.
 CHECKOUT_DIRECTORIES = (f"{PROJECT}/configs", MULTI_NODE_RECIPES)
-_AGENTX_SHAPE = "agentx"
 _ZIP_SELECTOR = re.compile(r"(zip_override_[\w-]+)\[(\d+)\]")
-#: The topology spellings of the frameworks a PD session runs.
-_TOPOLOGY_SPELLING: dict[Framework, TopologySpelling] = {
-    Framework.SGLANG: SGLANG_TOPOLOGY,
-    Framework.ATOM: ATOM_TOPOLOGY,
-}
 
 
 @dataclass(frozen=True)
@@ -73,21 +60,16 @@ class RoleFit:
 @dataclass(frozen=True)
 class Candidate:
     """One InferenceX recipe variant that serves a query: where it is, the merged recipe, both roles' topology, the
-    entry's KV transfer backend and benchmarked concurrency (none for a lookup) and the warnings it carries."""
+    entry's KV transfer backend and benchmarked concurrency and the warnings it carries."""
 
-    kind: PdSourceKind
     entry: str
     path: str
     locator: str
     recipe: Mapping[str, Any]
     fits: Mapping[Role, RoleFit]
+    conc: int
     transfer_backend: str = ""
-    conc: int | None = None
     warnings: tuple[str, ...] = ()
-
-    @property
-    def name(self) -> str:
-        return f"{self.path}:{self.locator}" if self.locator else self.path
 
 
 @dataclass(frozen=True)
@@ -265,13 +247,13 @@ def recipe_fit(role: Mapping[str, Any], framework: Framework) -> RoleFit:
     """The topology a recipe role states: its workers and GPUs, and TP, EP and DP attention from its args."""
     args = role.get("args") or {}
     gpus = int(role.get("gpus") or 0)
-    spelling = _TOPOLOGY_SPELLING[framework]
+    spelling = TOPOLOGY_SPELLING[framework]
     tp = int(_arg(args, _spellings(spelling.tp)) or gpus)
     if spelling.ep_switch:
         ep = tp if _arg(args, _spellings(spelling.ep_switch)) else 1
     else:
         ep = int(_arg(args, _spellings(spelling.ep)) or 1)
-    return RoleFit(int(role.get("workers") or 1), tp, ep, bool(_arg(args, ("enable-dp-attention",))), gpus or tp)
+    return RoleFit(int(role.get("workers") or 1), tp, ep, bool(_arg(args, (DP_ATTENTION,))), gpus or tp)
 
 
 def _row_fits(row: Mapping[str, Any]) -> dict[Role, RoleFit]:
@@ -339,7 +321,6 @@ def _row_candidate(query: PdQuery, checkout: Checkout, master_row: _MasterRow) -
     if unported is not None:
         return unported
     return Candidate(
-        kind=PdSourceKind.INFERENCEX_MASTER,
         entry=master_row.arm,
         path=path,
         locator=selector,
@@ -352,7 +333,7 @@ def _row_candidate(query: PdQuery, checkout: Checkout, master_row: _MasterRow) -
 
 
 def master_candidates(query: PdQuery, checkout: Checkout) -> Candidates:
-    """The master rows that serve ``query``, in entry then row order, on a board interchangeable with its own."""
+    """The master rows that serve ``query``, in entry then row order, on its board."""
     master = _yaml(checkout, MASTER)
     labels = _yaml(checkout, RUNNERS).get("labels") or {}
     _, note = _master_model(query.model_id, [master])
@@ -372,7 +353,7 @@ def master_candidates(query: PdQuery, checkout: Checkout) -> Candidates:
         except RecipeSourceError as error:
             misses.append(f"{arm}: {error}")
             continue
-        if not boards_interchangeable(query.board, board):
+        if board != query.board:
             misses.append(f"{arm}: it runs on {board}, not {query.board}")
             continue
         try:
@@ -385,8 +366,6 @@ def master_candidates(query: PdQuery, checkout: Checkout) -> Candidates:
         if isinstance(candidate, str):
             misses.append(f"{arm}: {candidate}")
             continue
-        if board != query.board:
-            candidate = _with_warning(candidate, f"InferenceX tuned {arm} on {board}, not {query.board}")
         found.append(_with_warning(candidate, note) if note else candidate)
     return Candidates(tuple(found), tuple(misses))
 
@@ -398,7 +377,6 @@ def _with_warning(candidate: Candidate, warning: str) -> Candidate:
 __all__ = [
     "CHECKOUT_DIRECTORIES",
     "MULTI_NODE_RECIPES",
-    "NVIDIA_MASTER",
     "Candidate",
     "Candidates",
     "RoleFit",

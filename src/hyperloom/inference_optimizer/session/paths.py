@@ -355,6 +355,11 @@ def tracelens_root() -> Path:
     return resolve_dep_dir("TraceLens", "TRACELENS_ROOT")
 
 
+def tracelens_arch_json(tracelens_root: Path, platform: str) -> Path:
+    """The arch JSON a TraceLens checkout keeps for ``platform``, named by the upper-case GPU label."""
+    return tracelens_root / "TraceLens" / "Agent" / "Analysis" / "utils" / "arch" / f"{platform.strip().upper()}.json"
+
+
 def is_path_within(path: Path, root: Path) -> bool:
     """Whether ``path`` provably resolves to ``root`` or a location below it."""
     try:
@@ -370,6 +375,11 @@ def mn_profile_trace_root() -> Path:
     A profile run without ``$HYPERLOOM_MN_PROFILE_TRACE_DIR`` writes its traces to ``default-<pid>/torch_trace/`` below it.
     """
     return workspace_root() / "profile-traces"
+
+
+def mn_provisioned_trace_dir() -> str:
+    """``$HYPERLOOM_MN_PROFILE_TRACE_DIR`` with environment variables expanded, or ``""`` when it is unset."""
+    return os.path.expandvars(os.environ.get("HYPERLOOM_MN_PROFILE_TRACE_DIR", "").strip())
 
 
 __all__ = [
@@ -393,6 +403,7 @@ __all__ = [
     "is_path_within",
     "make_session_dir",
     "mn_profile_trace_root",
+    "mn_provisioned_trace_dir",
     "deps_cache_root",
     "ledger_mark_path",
     "named_ledger_dir",
@@ -403,5 +414,6 @@ __all__ = [
     "session_dir",
     "session_ledger_key",
     "shared_db_path_for",
+    "tracelens_arch_json",
     "workspace_root",
 ]

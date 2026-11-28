@@ -12,7 +12,7 @@ from unittest.mock import patch
 import pytest
 
 from hyperloom.orchestrator.actions.executors import roofline as roofline_mod
-from hyperloom.orchestrator.actions.executors.profile import profile_trace_path
+from hyperloom.orchestrator.actions.executors.profile import PROFILE_TRACE_NOT_SHARED, profile_trace_path
 from hyperloom.orchestrator.actions.executors.roofline import (
     RooflineExecutor,
     _gpu_trace_unsupported_reason,
@@ -360,6 +360,24 @@ async def test_profile_failed_with_trace_continues_to_trace_analyze(tmp_path):
     assert state.last_profile_status == "recovered"
     assert state.profile_trace_usable()
     assert state.last_trace_analyze["analysis_md_path"] == str(md)
+
+
+@pytest.mark.asyncio
+async def test_unshared_trace_dir_stops_later_automatic_profiles(tmp_path):
+    state = _state()
+    unshared = {
+        "status": "failed",
+        "error_class": PROFILE_TRACE_NOT_SHARED,
+        "error": "multi-node profile trace dir /t is not shared with the engine pods: decode pod 10.0.0.2: ssh failed",
+    }
+
+    p1, p2 = _patch_subs(unshared, AssertionError("trace_analyze must not run without trace"))
+    executor = RooflineExecutor(shared_state=state)
+    with p1, p2:
+        result = await executor(_ctx(tmp_path))
+
+    assert result["status"] == "failed"
+    assert state.gpu_trace_unsupported_reason == unshared["error"]
 
 
 @pytest.mark.asyncio
@@ -1536,6 +1554,26 @@ async def test_the_compute_bound_reprofile_reports_both_of_its_steps(tmp_path, m
         "profile_compute_bound",
         "trace_analyze_compute_bound",
     ]
+
+
+@pytest.mark.asyncio
+async def test_a_pd_session_skips_the_compute_bound_reprofile_it_cannot_apply(tmp_path, monkeypatch):
+    """A node-list PD session keeps its frozen DP attention, so a host-bound trace is not re-profiled there."""
+    md = tmp_path / "analysis.md"
+    md.write_text("# Executive Summary\n", encoding="utf-8")
+    host_bound = _ta_ok(report_md=md)
+    host_bound["trace_health_warnings"] = [{"code": "high_gpu_idle_pct", "severity": "warning"}]
+    profile = _profile_ok("/tmp/decode.gz")
+    profile["role_traces"] = {"decode": "/tmp/decode.gz"}
+    p1, p2, calls = _n26_patch_subs(profile, [host_bound])
+    monkeypatch.setattr(roofline_mod, "is_multi_node", lambda: True)
+
+    executor = RooflineExecutor(shared_state=_state())
+    with p1, p2, progress_scope(_progress_sink([])):
+        result = await executor(_n26_ctx(tmp_path))
+
+    assert result["status"] == "succeeded"
+    assert len(calls["payloads"]) == 1
 
 
 @pytest.mark.asyncio

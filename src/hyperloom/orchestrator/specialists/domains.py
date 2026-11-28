@@ -158,8 +158,8 @@ SPECIALIST_DOMAINS: tuple[SpecialistDomain, ...] = (
             "its accuracy eval, *run correctly*. Given a "
             "structured failure signature (missing model arch, unsupported "
             "dtype, missing HIP kernel, import/build error, shape mismatch, "
-            "not-implemented, accuracy below floor, eval runtime failure) and "
-            "ranked bridging PRs, it authors a bridging "
+            "not-implemented, accuracy below floor, eval runtime failure), "
+            "it authors a bridging "
             "patch into an isolated worktree — editing the framework source, "
             "and, when the framework layer cannot bridge it, /opt/rocm / HIP / "
             "aiter source. Gated on RUNNABILITY (server boots + minimal "
@@ -208,7 +208,6 @@ def _derive_knowledge_domain_tags() -> tuple[str, ...]:
     """Collect the distinct knowledge-domain tags from the catalogue."""
     seen: dict[str, None] = {}
     for d in SPECIALIST_DOMAINS:
-        # Operator-defined domains are per session, so they get no round counters.
         if d.layer == OPERATOR_DEFINED_LAYER:
             continue
         anchor = d.kb_anchor.strip()

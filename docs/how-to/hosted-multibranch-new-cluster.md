@@ -34,6 +34,7 @@ These are set in the app container's environment.
 | `HYPERLOOM_USER_DATA_PATH` | no | A shared data root that replaces `USER_DATA_PATH` for the run, for a host that reserves `USER_DATA_PATH` to itself and points it at the submitting user's directory. The host bootstrap exports it as `USER_DATA_PATH` before its checks, so everything said about `USER_DATA_PATH` here applies to it: sessions go to `<root>/<model basename>/MB-<time>-<id>`, every account of the run must be able to write it, make it `chmod 2775` for the deployment's group, and the dev template must mount its storage at the same path. A restarted run finds its session through `session.json` in the state directory, so changing it moves only new sessions. |
 | `HYPERLOOM_RUNNER_CACHE` | yes, for the hosted multi-branch entry | Absolute, writable directory on shared storage that the measurement sandboxes also mount. The hosted multi-branch entry builds the runner cache entry of the commit it runs here (`<cache>/<commit>/`) before the first test. When the legs of a run may be different host accounts of one group, make it a directory of that group with the setgid bit (`chmod 2775`): every builder then takes the `.<commit>.flock` lock (mode `0664`). An entry is built in a new temporary directory of the builder's own (`$TMPDIR`, which needs room for one entry and its build environment), never in this directory, and copied in writable by its builder alone; a `.<commit>.tmp-*` directory that a builder killed while copying leaves is removed only by a later builder of the same account, and others build beside it. This is the path *on the app host*; the sandboxes may mount the same storage elsewhere (see the template's `HYPERLOOM_RUNNER_CACHE` below). |
 | `HYPERLOOM_RUNNER_WHEEL_TARGET` | yes, for the hosted multi-branch entry | The measurement image's interpreter and platform, for example `cp310-manylinux_2_28_x86_64`, or `cp314-manylinux_2_28_x86_64` for the Python 3.14 `rocm/vllm` images. The hosted multi-branch entry reads it and builds the runner cache's wheels for it, not for the app container, from the lock of that Python: `requirements/runner-cp314.lock` for `cp314`, `requirements/runner.lock` for the others. An entry holds the wheels of one Python, so deployments whose images run different Pythons need different `HYPERLOOM_RUNNER_CACHE` directories; a sandbox whose interpreter is not the entry's fails its start with `runner_start_failed`. A build by hand passes the tag as `--wheel-target` (see the example at the end). |
+| `HYPERLOOM_RUNNER_GPU_CARD` | yes, when the tests run in the grant's sandboxes | Path, on the app host, to a recording of `amd-smi static --json` taken on a node the measurement sandboxes run on: run `amd-smi static --json > runner-gpu-card.json` there once, inside a sandbox or on the node itself, and put the file anywhere the app host reads, for example beside the runner cache on shared storage. The app container holds none of the runners' cards, so the session takes its card from this file: the base launch is chosen for the card's arch, the roofline and TraceLens' vendor peaks come from its compute units, clock and bandwidth, and every measurement sheet carries it. Every card it describes must be one kind (arch, compute units, memory, top engine clock). When the variable is unset, the file is missing or unreadable, or it describes no card or more than one kind, the session does not start and the error names the variable. A runner whose own cards are another kind than the file's fails every test at preflight (`preflight_mismatch`, `GPU 0 is <its card>, not <the file's card>`), so record the file again when the grant moves to other cards. A run measured on the app container's own cards (below) reads those and ignores this variable. |
 | `HYPERLOOM_SOURCE_REPO` | yes | Where the run's Hyperloom source is fetched from: `OWNER/NAME` on GitHub, any git URL, or a local path (for example a mirror on shared storage when the app host has no GitHub egress). |
 | `HYPERLOOM_SOURCE_SHA` | yes | The full 40-hex commit the run executes. |
 | `HYPERLOOM_RSI_ARCHIVE` | yes, for the hosted multi-branch entry | Writable directory where sessions archive their search trees for later sessions to learn from. Point every session of a deployment at the same directory to share what they learn; a private directory keeps a session's tree out of the shared archive. There is no default. When the sessions may be different host accounts of one group, make it a directory of that group with the setgid bit (`chmod 2775`). |
@@ -68,27 +69,23 @@ template's values to the paths inside the sandbox.
 
 | Variable | Required | What it points at |
 | --- | --- | --- |
-| `HYPERLOOM_RUNNER_CACHE` | no | Where the template mounts the runner cache. Default `/runner-cache`. For a v2 sheet the runner uses the inference_suite staging `cache_build` published in `inference-suite/<staging key>/` (see [The inference_suite staging](#the-inference_suite-staging)) offline and builds none, so the whole cache can be read-only. A read-only cache keeps no InferenceX commit in `tools/InferenceX.git`: every test then logs a warning and fetches InferenceX from `INFERENCEX_REPO` (or upstream) again, so leave `tools/` writable where that fetch is slow or can fail. It must hold the same directory the app host's `HYPERLOOM_RUNNER_CACHE` names. How the sandbox starts from it is described below the table. |
+| `HYPERLOOM_RUNNER_CACHE` | no | Where the template mounts the runner cache. Default `/runner-cache`. For a v2 sheet the runner uses the inference_suite staging `cache_build` published in `inference-suite/<staging key>/` (see [The inference_suite staging](#the-inference_suite-staging)) offline and builds none, so the whole cache can be read-only. The sandbox never writes the cache: each test fetches its InferenceX commit into its own scratch from `tools/InferenceX.git`, reading only. The app host fills that repository: where it builds the runner cache (`cache_build`, which the hosted multi-branch entry runs for each run's commit) it fetches the InferenceX commit of the staging it publishes, from `INFERENCEX_REPO` or upstream, so no mirror is needed for the sandbox. A test whose commit the repository lacks fetches it from `INFERENCEX_REPO` (or upstream) instead, with a warning. It must hold the same directory the app host's `HYPERLOOM_RUNNER_CACHE` names. How the sandbox starts from it is described below the table. |
 | `HYPERLOOM_SOURCE_SHA`, `HYPERLOOM_RUNNER_CACHE_MANIFEST_SHA256` | set by the hosted multi-branch entry | The hosted multi-branch entry passes both on every create; the template must list them in its accepted create environment. |
 | `HYPERLOOM_FRAMEWORK_SNAPSHOT`, `HYPERLOOM_FRAMEWORK_SESSION_SHA256` | set by the hosted multi-branch entry | When the app host has the image's aiter tables, the hosted multi-branch entry snapshots them below `<session_dir>/framework` and passes both on every create; the template must list them in its accepted create environment, and the sandbox must see the session directory at the same path. Without the snapshot, a test that adds tuned rows to a default table is refused as `spec_rejected`. |
 | `HYPERLOOM_BASE_BINS` | set by the hosted multi-branch entry | Only for a session whose framework's server is built from its pinned checkout (`--framework llamacpp`): the entry lays that base build below `<session_dir>` and passes the directories of its executables on every create, and the runner puts them first on its `PATH`, so a test that does not rebuild the framework runs that build. The template must list it in its accepted create environment, and the sandbox must see the session directory at the same path. |
-| `INFERENCEX_REPO` | no | Where the runner fetches InferenceX (default: upstream on GitHub). A sandbox without egress needs a mirror it can read, for example a bare repository on the shared storage. A path or `file://` URL may name a mirror another account owns: the runner fetches from its resolved path, and that fetch alone runs with a global git config of its own whose `safe.directory` names that path and its `.git`, so no system-wide `safe.directory` is needed. |
+| `INFERENCEX_REPO` | no | Where InferenceX is fetched from (default: upstream on GitHub): on the app host by `cache_build`, which fills `tools/InferenceX.git` from it (see `HYPERLOOM_RUNNER_CACHE` above), and in the sandbox by a test whose commit that repository lacks, as a fallback only. When the app host fills the repository, a sandbox without egress needs no mirror; set it on the host, to a mirror the host can read, where the host has no egress. A path or `file://` URL may name a mirror another account owns: the runner fetches from its resolved path, and that fetch alone runs with a global git config of its own whose `safe.directory` names that path and its `.git`, so no system-wide `safe.directory` is needed. |
 | `HYPERLOOM_JIT_CACHE` | no | Leave it unset in the `measurement` template, and mount no directory of the app's `HYPERLOOM_JIT_STORE` there: code a candidate runs could put snapshots into a store a sandbox can reach that later tests load. Runners in the grant's sandboxes have no compiled-code cache yet, so every test there builds its kernels cold (slower, measures the same), and a test that patches aiter's `csrc` or `hsa` is refused because it needs its own JIT directory. The variable is for a runner on the store's own machine (the local toolbox sets it for its own runners, as in a run with `placement.measurement: local`). |
 | `HYPERLOOM_WEIGHT_PREFETCH` | no | `1` reads the model's checkpoint into the page cache while each server boots, for a model on a network file system. Unset, it is off. With it on, the round that boots the server leaves `weight_prefetch.json` in its run_dir. See [Checkpoint prefetch](../reference/environment-variables.md#checkpoint-prefetch). |
 
 The sandbox serves the model at the path the campaign spec names, so the template must mount the model storage at
 that same path.
 
-### Keeping a sandbox for the next test
+### One sandbox per test
 
-On a cluster that queues sandboxes, a measurement sandbox that ends gives its node back to the queue, and the next
-test's sandbox asks again behind every other job of its priority. By default the session therefore keeps a finished
-test's sandbox until the next test's sandbox runs (make-before-break), for at most 1800 s. The grant charges the kept
-sandbox like any other, so the session runs one test fewer at once to leave it room, and it does so only where the grant
-fits at least three tests at the session's TP; a grant that fits one or two, such as 3 sandboxes and 2 GPUs, keeps no
-sandbox and runs every test it fits. A dev sandbox a branch is promised takes the kept sandbox's room first. Set
-`multibranch.make_before_break: false` in the campaign spec (`--no-make-before-break` on `run --measurement hosted`) to
-run every test the grant fits and close each sandbox when its test ends.
+Every test runs in a measurement sandbox of its own, closed when the test ends, and the session runs as many tests at
+once as the grant fits at the session's TP: `min(max_gpus // tp, max_sandboxes)`. On a cluster that queues sandboxes,
+each test's sandbox therefore queues for a node. `multibranch.make_before_break` in a campaign spec is accepted and
+ignored, with a warning in the log.
 
 ### AgentX window and boot budget
 
@@ -139,8 +136,9 @@ are the archive the manifest records. It copies the wheels there, checking each 
 installs only those copies (`pip --no-index`), then runs the runner from the unpacked source; the scratch directory
 needs room for the unpacked source and the wheels. Nothing the runner or pip runs comes from the cache unchecked.
 The prompt sets a test reads (`<cache>/evalsets/<key>/`) are data, and they are read from the
-cache again after their check. The start-up makes no network access; the runner still fetches InferenceX
-(`INFERENCEX_REPO` above).
+cache again after their check. The start-up makes no network access. Each test then fetches its InferenceX commit from
+`tools/InferenceX.git`, reading only; only a commit that repository lacks is fetched from `INFERENCEX_REPO` (or
+upstream), with a warning.
 
 With the checked step, a sandbox that does not find the entry, finds one that does not match the pin, or has no pin
 fails its start with `runner_start_failed`. An entry built before entries had `source.tar` is refused where it is built:
@@ -222,6 +220,8 @@ run in the app container, so the run needs no measurement or `dev` template, no 
 - Without a visible-device mask, the cards are as many as `rocm-smi` shows, and a container that holds fewer render
   nodes (`/dev/dri/renderD*`) than that is refused, naming both counts: set `ROCR_VISIBLE_DEVICES` to the cards it was
   given.
+- The session's card is read on this container (`amd-smi`, else `rocm-smi`, else torch), not from
+  `HYPERLOOM_RUNNER_GPU_CARD`: the cards it uses must be one kind, or the run does not start.
 
 ## Example: clusters with an NFS share
 
@@ -236,11 +236,11 @@ HYPERLOOM_RUNNER_CACHE=/mnt/shared/hyperloom/runner-cache
 HYPERLOOM_RUNNER_WHEEL_TARGET=cp310-manylinux_2_28_x86_64
 HYPERLOOM_SOURCE_REPO=https://github.com/AMD-AGI/Hyperloom.git
 HYPERLOOM_RSI_ARCHIVE=/mnt/shared/hyperloom/rsi-archive/
+HYPERLOOM_RUNNER_GPU_CARD=/mnt/shared/hyperloom/runner-gpu-card.json  # amd-smi static --json on a sandbox's node
 # campaign spec: "model": {"path": "/mnt/shared/models/<model>"}
 
 # Measurement template
 HYPERLOOM_RUNNER_CACHE=/mnt/shared/hyperloom/runner-cache
-INFERENCEX_REPO=/mnt/shared/hyperloom/mirrors/InferenceX.git
 ```
 
 For a measurement image on CPython 3.14 (the current `rocm/vllm` tags), set
@@ -287,6 +287,17 @@ change to any of them publishes a new directory beside the old one. Builders sha
 and uses the winner once the winner's normalised manifest (each package's name, version and wheel sha256, the
 interpreter and the InferenceX pin) is the one it built; one that differs is refused, naming the packages. A
 `.staging-*` directory left by a builder that died can be removed once no build is running.
+
+Then `cache_build` fetches the staging's InferenceX commit into `<HYPERLOOM_RUNNER_CACHE>/tools/InferenceX.git`, a bare
+repository it creates when it is missing, from `INFERENCEX_REPO` or upstream; a repository that already holds the commit
+is left as it is. The sandbox reads it, never writes it, so it may be mounted read-only. A fill that fails is logged as
+a warning and the build goes on; the tests then fetch InferenceX from `INFERENCEX_REPO` (or upstream) themselves.
+Builders fill the repository at the same time without a lock of their own: git's `shallow.lock` in the repository lets
+one fetch run at a time, and a builder that finds it held waits and tries again. A fetch still running after 15 minutes
+is stopped, removes the lock it took, and its fill fails with a warning. A build killed outright while it fetched leaves
+that lock behind; the next fill removes it once it is older than 20 minutes (longer than a fetch may run), so it delays
+a new commit by at most that long and needs no one to remove it. `tools/` is created `2775` in the cache's group, like
+`inference-suite/`.
 
 Every account that runs `cache_build` must be in the cache's group, and the cache root must be setgid in it
 (`chgrp <group> <cache> && chmod 2775 <cache>`); `inference-suite/` is then created `2775` in that group, so builders
