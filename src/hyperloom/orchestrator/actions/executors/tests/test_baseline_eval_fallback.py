@@ -577,9 +577,7 @@ def test_a_failed_eval_after_the_bench_of_a_candidate_neither_stops_the_run_nor_
     assert "accuracy" not in result
 
 
-_STOPPED_EVAL_CLASSES = pytest.mark.parametrize(
-    "error_class", ["session_time_exhausted", "round_timeout", "server_died", "server_stalled"]
-)
+_STOPPED_EVAL_CLASSES = pytest.mark.parametrize("error_class", ["round_timeout", "server_died", "server_stalled"])
 
 
 @_STOPPED_EVAL_CLASSES
@@ -598,6 +596,18 @@ def test_an_eval_stopped_after_the_bench_goes_to_enablement_as_an_unavailable_sc
     assert state.stop_reason == ""
     assert result[BASELINE_EVAL_FAILURE_KIND_KEY] == EVAL_KIND_ACCURACY_UNAVAILABLE
     assert result[BASELINE_EVAL_OBSERVED_ACCURACY_KEY] is None
+
+
+@pytest.mark.parametrize("enablement_mode", ["off", "eval"])
+def test_an_eval_the_run_itself_stopped_after_the_bench_is_not_ruled_on_accuracy(enablement_mode):
+    """The session's clock kept the eval from finishing, which is no verdict on the baseline's accuracy."""
+    played = _bench_then_eval("session_time_exhausted", "stopped")
+    result, state = _ruled_after_its_pass(played, enablement_mode=enablement_mode)
+
+    assert state.stop_reason == ""
+    assert BASELINE_EVAL_FAILED_KEY not in result
+    assert result["nonfatal_warnings"] == ["post_measure_accuracy_failed"]
+    assert state.baseline_accuracy == 0.81
 
 
 @pytest.mark.parametrize(("enablement_mode", "stop_reason"), [("off", "baseline_accuracy_failed"), ("eval", "")])

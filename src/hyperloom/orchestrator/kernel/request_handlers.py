@@ -186,7 +186,7 @@ async def _measure_applied_integration(
             return _integrate_failure(
                 payload, apply_result, _FailureVerdict("rebaseline_exception", repr(exc), "REVERT")
             )
-    if not is_valid_measurement(bench_result):
+    if not is_valid_measurement(bench_result) or bench_result.get("measure_round_dropped"):
         return _unmeasured_integration_failure(payload, apply_result=apply_result, bench_result=bench_result)
 
     rebuild_check = _cpp_itfs_rebuild_check(apply_result)

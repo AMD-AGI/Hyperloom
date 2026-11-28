@@ -548,7 +548,7 @@ def measured_seconds(state: Any, field: str) -> float | None:
 
 def boot_cost_sec(state: Any) -> float | None:
     """What bringing this workload's server up costs, or ``None`` when unmeasured."""
-    total_sec = measured_seconds(state, "baseline_runtime_sec")
+    total_sec = measured_seconds(state, _COLD_ROUND_FIELD)
     post_ready_sec = measured_seconds(state, _POST_READY_FIELD)
     if total_sec is None or post_ready_sec is None:
         return None
@@ -557,19 +557,31 @@ def boot_cost_sec(state: Any) -> float | None:
 
 def baseline_round_cost_sec(state: Any, *, double_run: bool) -> float | None:
     """What a baseline round costs, or ``None`` when unmeasured."""
-    first_pass_sec = measured_seconds(state, "baseline_runtime_sec")
+    first_pass_sec = measured_seconds(state, _COLD_ROUND_FIELD)
     if first_pass_sec is None or not double_run:
         return first_pass_sec
     second_pass_sec = hot_pass_cost_sec(
-        measured_seconds(state, "baseline_warm_runtime_sec"), measured_seconds(state, _POST_READY_FIELD)
+        measured_seconds(state, _HOT_PASS_FIELD), measured_seconds(state, _POST_READY_FIELD)
     )
     return first_pass_sec if second_pass_sec is None else first_pass_sec + second_pass_sec
+
+
+def session_test_cost_sec(state: Any) -> float | None:
+    """What one test of the session's point cost its baseline, or ``None`` when unmeasured.
+
+    That is the round that booted the server and, for a point whose test discards that round's bench, the measured
+    round after it with its eval.
+    """
+    cold_sec = measured_seconds(state, _COLD_ROUND_FIELD)
+    if cold_sec is None:
+        return None
+    return cold_sec + (measured_seconds(state, _HOT_PASS_FIELD) or 0.0)
 
 
 def one_more_measurement_sec(state: Any) -> float | None:
     """A boot plus one benchmark pass (the warm runtime once measured, else the cold post-ready time), or ``None``."""
     boot_sec = boot_cost_sec(state)
-    warm_sec = measured_seconds(state, "baseline_warm_runtime_sec")
+    warm_sec = measured_seconds(state, _HOT_PASS_FIELD)
     benchmark_sec = warm_sec or measured_seconds(state, _POST_READY_FIELD)
     return None if boot_sec is None or benchmark_sec is None else boot_sec + benchmark_sec
 
@@ -767,6 +779,8 @@ def per_lever_dryness(state: Any) -> tuple[bool, dict[str, Any]]:
     return (plateau.config_dry and plateau.source_dry), plateau.arms
 
 
+_COLD_ROUND_FIELD = "baseline_runtime_sec"
+_HOT_PASS_FIELD = "baseline_warm_runtime_sec"
 _POST_READY_FIELD = "baseline_post_ready_runtime_sec"
 
 
@@ -1010,6 +1024,7 @@ __all__ = [
     "boot_cost_sec",
     "measured_seconds",
     "one_more_measurement_sec",
+    "session_test_cost_sec",
     "prelude_affordable_seconds",
     "prelude_can_afford",
     "render_phase_action_bullets",

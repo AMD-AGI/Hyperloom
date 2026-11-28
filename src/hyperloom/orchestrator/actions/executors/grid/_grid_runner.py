@@ -134,8 +134,7 @@ class GridLaunch:
     round the port its point names or a free one. With ``server_lifecycle`` the caller holds the server, and each
     variant is the one round the other fields describe. With ``held`` the caller holds a test, and the grid's one
     variant is that round of it: the test says how the round holds the server, which seed its load draws and whether
-    it evaluates, the caller stops the server, and ``server_already_ready`` only tells the row's launch evidence that
-    an earlier round of the test left the server up.
+    it evaluates, and whether the row's launch evidence records a reused server; the caller stops the server.
     """
 
     server_lifecycle: dict[str, Any] | None = None
@@ -788,12 +787,13 @@ async def run_grid(
                 break
         else:
             await _report_finished_variant(grid, results, i)
+    held_reuses_server = launch.held is not None and launch.held.reuses_server
     await asyncio.to_thread(
         _attach_grid_launch_evidence,
         results,
         grid=grid,
         output_root=output_root,
-        caller_reused_ready_server=launch.server_already_ready,
+        caller_reused_ready_server=launch.server_already_ready or held_reuses_server,
         ready_server_log=launch.ready_server_log,
     )
     return results

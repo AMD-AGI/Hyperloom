@@ -114,14 +114,14 @@ def phase_deadline(shared_state: SharedState) -> Deadline | None:
 def specialist_admission_minutes(shared_state: SharedState, params: dict[str, Any] | None) -> float:
     """The shortest run worth starting a specialist for.
 
-    That is its mode's base budget and, for one that benches, room for one measured benchmark round after startup.
-    Admission asks only for this minimum; a dispatched specialist runs to its full wall budget, tightened to the
-    session and phase ends.
+    That is its mode's base budget and, for one that benches, room for one test of the session's point after
+    startup, which is what its rebench runs. Admission asks only for this minimum; a dispatched specialist runs to its
+    full wall budget, tightened to the session and phase ends.
     """
     floor_min = wall_budget_base_min(params)
     if resolve_specialist_profile(params).reserves_benchmark_lane:
-        round_min = measured_baseline_runtime_sec(shared_state) / _SECONDS_PER_MINUTE
-        floor_min = max(floor_min, round_min + _BENCH_SPECIALIST_STARTUP_MIN)
+        test_min = (_phase_state.session_test_cost_sec(shared_state) or 0.0) / _SECONDS_PER_MINUTE
+        floor_min = max(floor_min, test_min + _BENCH_SPECIALIST_STARTUP_MIN)
     return floor_min
 
 

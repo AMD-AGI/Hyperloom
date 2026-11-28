@@ -375,8 +375,10 @@ class _BenchmarkLaunchMixin:
         warnings = [*warnings, *(measurement.pop("nonfatal_warnings", []) or [])]
         step = ran.report.failed_step
         # The measured round of a held test evaluates after its bench, so a step that failed after a bench that
-        # measured is the eval's and the bench stands. Every other round fails on any failed step.
-        bench_stands = round_.held is not None and round_.held.purpose is RoundPurpose.MEASURE
+        # measured is the eval's and the bench stands, unless the test must evaluate. Every other round fails on
+        # any failed step.
+        held = round_.held
+        bench_stands = held is not None and held.purpose is RoundPurpose.MEASURE and not held.test.must_evaluate
         if not self._measurement_succeeded(measurement) or (step is not None and not bench_stands):
             return _suite_round_failure(ran_round, finished, measurement, warnings)
         result = await self._succeeded_round_result(ran_round, finished, measurement, warnings)

@@ -28,6 +28,7 @@ import yaml
 from hyperloom_common.cpu_list import cpu_list
 from hyperloom_common.env import env_flag
 from hyperloom.common.env_safety import scrub_benchmark_process_env
+from hyperloom.common.outside_facts import ENV_RUN_EVAL
 from hyperloom.common.ports import pick_server_port
 from hyperloom.inference_optimizer.session.paths import resolve_dep_dir
 from hyperloom.orchestrator.state.base_launch import frozen_base
@@ -127,6 +128,7 @@ class SuiteRound:
     ``HYPERLOOM_RUN_PHASE=server`` point: no load and no eval. ``env_drop`` names host variables the round's server and client do not inherit.
     ``checkpoint`` stops an AgentX round that trails its reference; its ruling lands in ``round_dir``. ``evaluates``
     says whether the round runs the accuracy eval after its load; ``None`` leaves that to the point's ``RUN_EVAL``.
+    A round told to evaluate a point whose round runs no eval is refused, as that point setting ``RUN_EVAL`` is.
     ``port`` is the port the round's server answers on, whatever the point names; ``None`` leaves it to the point.
     """
 
@@ -154,7 +156,9 @@ def _read_point(config_path: Path) -> Mapping[str, object]:
     return yaml.safe_load(config_path.read_text(encoding=_UTF8)) or {}
 
 
-def _round_point(config_path: Path, cards: int, port: int | None = None) -> Mapping[str, object]:
+def _round_point(
+    config_path: Path, cards: int, port: int | None = None, *, evaluates: bool = False
+) -> Mapping[str, object]:
     """The point a round runs: on the session's cards when it names no GPU mask, and on a free port when it names none.
 
     A local server drops the masks it inherits and runs on its GPU ids as absolute cards, so a point without a mask (an
@@ -163,6 +167,9 @@ def _round_point(config_path: Path, cards: int, port: int | None = None) -> Mapp
     A point naming no ``PORT`` would boot on the launcher's default, which another round on this machine, or a
     co-tenant on a shared host, may already hold. A round whose server outlives it runs on ``port``, the one its held
     test gives every round, or names the port ``inject_lifecycle`` pinned, and keeps it.
+
+    ``evaluates`` sets the point's ``RUN_EVAL``, so the composer rules on an eval the round is told to run as it
+    rules on one the point asks for.
     """
     document = _read_point(config_path)
     bench = _bench(document)
@@ -174,6 +181,8 @@ def _round_point(config_path: Path, cards: int, port: int | None = None) -> Mapp
         filled[_PORT_ENV] = str(pick_server_port())
     if not envs.get(_GPU_MASK_ENV, "").strip():
         filled[_GPU_MASK_ENV] = ",".join(session_cards_mask(cards))
+    if evaluates:
+        filled[ENV_RUN_EVAL] = "true"
     return {**document, "benchmark": {**bench, "envs": filled}}
 
 
@@ -299,12 +308,13 @@ def run_suite_round(route: SuiteRoute, request: SuiteRound, *, on_poll: Callable
     run_dir = _next_run_dir(request.round_dir)
     settings = _settings(route, run_dir, request.lifecycle, request.deadline_unix, request.env_drop)
     try:
-        point = _round_point(request.config_path, route.base.cards, request.port)
+        point = _round_point(request.config_path, route.base.cards, request.port, evaluates=request.evaluates is True)
         if request.boot_only:
             point = _server_phase_point(point)
         config = suite_config(point, route.base, settings)
-        if request.evaluates is not None:
-            config = replace(config, eval=replace(config.eval, enabled=request.evaluates))
+        # Composed as its point says, so a point the composer refuses is refused on the round that runs no eval too.
+        if request.evaluates is False:
+            config = replace(config, eval=replace(config.eval, enabled=False))
     except ConfigError as exc:
         raise _refused_at(FailedStep.CONFIG_INVALID, str(exc)) from exc
     if request.warmup and config.fixed is not None:

@@ -177,9 +177,9 @@ class ClosePhase(CoordinatorCollaborator):
         )
 
     def _close_stack_revalidation_timeout_sec(self) -> float:
-        """How long CLOSE waits for its full-stack revalidation to settle."""
-        runtime_sec = float(self.shared_state.baseline_runtime_sec or 0.0)
-        return max(float(self.CLOSE_STACK_REVALIDATION_TIMEOUT_SEC), 2.0 * runtime_sec)
+        """How long CLOSE waits for its full-stack revalidation to settle: twice what one test of the point cost."""
+        test_sec = _phase_state.session_test_cost_sec(self.shared_state) or 0.0
+        return max(float(self.CLOSE_STACK_REVALIDATION_TIMEOUT_SEC), 2.0 * test_sec)
 
     async def _abandon_close_task(self, task: Task, *, reason: str) -> None:
         """Settle a close-owned task CLOSE stopped waiting for, so nothing dispatches or promotes it later."""

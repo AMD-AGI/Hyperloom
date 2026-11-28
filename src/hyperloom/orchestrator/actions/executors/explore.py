@@ -691,7 +691,7 @@ class _ExploreRound:
         warmup = await self._warmup(gv, run_gv, idx, test)
         if warmup is None:
             return None
-        return GridLaunch(held=decision, server_already_ready=True, ready_server_log=warmup.server_log_path)
+        return GridLaunch(held=decision, ready_server_log=warmup.server_log_path)
 
     async def _warmup(self, gv: GridVariant, run_gv: GridVariant, idx: int, test: HeldTest) -> Any:
         warmup_slot = test.slot / "warmup_round"

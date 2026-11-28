@@ -6,8 +6,8 @@
 The contract: each round writes its own run_dir with ``launch.json`` below the round's directory, the cold-start pair
 boots one server the measured round reuses and its test stops it once in the attempt's slot, a lone round owns its
 server, the pair's accuracy eval follows its measured bench and never its warm-up, an eval that fails there leaves
-the bench standing, a failed step maps to its error class, and a round the budget cannot pay for -- or a PRELUDE
-retry past the optimization reserve -- boots nothing.
+the bench standing, a warm replay has no result without its score, a failed step maps to its error class, and a
+round the budget cannot pay for -- or a PRELUDE retry past the optimization reserve -- boots nothing.
 """
 
 from __future__ import annotations
@@ -16,6 +16,7 @@ import asyncio
 import contextlib
 import json
 import sys
+from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -28,7 +29,7 @@ from hyperloom.orchestrator.actions.executors._suite import rounds as suite_roun
 from hyperloom.orchestrator.actions.executors._suite.config import MEASURED_SEED, WARMUP_SEED
 from hyperloom.orchestrator.actions.executors._suite.rounds import RUN_DIR_PREFIX, TOOL_CACHE_ENV
 from hyperloom.orchestrator.actions.executors.baseline import BaselineExecutor
-from hyperloom.orchestrator.actions.executors.tests.test_suite_config import _MODEL, _base
+from hyperloom.orchestrator.actions.executors.tests.test_suite_config import _MODEL, _base, _mlperf_point
 from hyperloom.orchestrator.actions.executors._accuracy_gate import (
     BASELINE_ACCURACY_STOP_REASON,
     BASELINE_EVAL_EVIDENCE_KEY,
@@ -38,6 +39,7 @@ from hyperloom.orchestrator.actions.executors._accuracy_gate import (
     EVAL_KIND_RUNTIME_FAILURE,
 )
 from hyperloom.orchestrator.kernel._integrate_rebaseline import _integrate_rebaseline
+from hyperloom.orchestrator.kernel.request_handlers import integrate_handler
 from hyperloom.orchestrator.rehearsal import READY, STAGE_FAILED, LaunchAttempt, LaunchScenario, ScriptedRounds
 from hyperloom.orchestrator.rehearsal import VirtualClock, installed_clock
 from hyperloom.orchestrator.rehearsal.scenario import ScenarioError
@@ -46,7 +48,8 @@ from hyperloom.orchestrator.phases.machine_state import RETRY_PAST_THE_RESERVE
 from hyperloom.orchestrator.state.failure_evidence import ARGV_INVALID, ENGINE_CAPACITY, SERVER_INIT_DEAD
 from hyperloom.orchestrator.state.shared_state import SharedState
 from inference_suite.runtime.process import Reaped
-from inference_suite.contracts import FailedStep, LifecycleMode, Report, RunLayout, RunStatus, WorkloadKind
+from inference_suite.contracts import FailedStep, FixedWorkload, LifecycleMode, Report, RunLayout, RunStatus
+from inference_suite.contracts import WorkloadKind
 from inference_suite.tests.test_compose import _launch
 
 _COLD = {"output_throughput": 270.9, "completed_requests": 64}
@@ -296,25 +299,27 @@ def _stopped_in_its_eval(step: FailedStep, detail: str):
     return run_round
 
 
-@pytest.mark.parametrize(
-    ("step", "error_class"),
-    [(FailedStep.DEADLINE_EXHAUSTED, SESSION_TIME_EXHAUSTED_CLASS), (FailedStep.ROUND_TIMEOUT, "round_timeout")],
-)
-@pytest.mark.parametrize("enablement_mode", ["off", "eval"])
-def test_a_measured_bench_whose_eval_the_run_stopped_stands_and_is_ruled_as_a_missing_score(
-    monkeypatch, suite, step, error_class, enablement_mode
-):
-    """The bench is not the cold anchor a stop in its load leaves: it measured, and only the score is missing."""
+def _stopped_eval_after_the_bench(monkeypatch, suite, state: SharedState, step: FailedStep, kind: str = "baseline"):
     measured = LaunchAttempt(outcome=READY, metrics=_HOT, eval_scores=_SCORE)
     rounds = _scripted(monkeypatch, _WARMUP, measured, run_round=_stopped_in_its_eval(step, "stopped in the eval"))
+    result = _run_baseline(suite, rounds, state, kind)
+    assert _sequence(rounds) == _BENCH_THEN_EVAL
+    return result
+
+
+@pytest.mark.parametrize("enablement_mode", ["off", "eval"])
+def test_a_measured_bench_whose_eval_hit_the_rounds_cap_stands_and_is_ruled_as_a_missing_score(
+    monkeypatch, suite, enablement_mode
+):
+    """The bench is not the cold anchor a stop in its load leaves: it measured, and only the score is missing."""
     state = SharedState(enablement_mode=enablement_mode)
 
-    result = _run_baseline(suite, rounds, state)
+    result = _stopped_eval_after_the_bench(monkeypatch, suite, state, FailedStep.ROUND_TIMEOUT)
 
     assert result["status"] == "succeeded", result
     assert result["output_throughput"] == pytest.approx(_HOT["output_throughput"])
     assert "measure_round_dropped" not in result
-    assert result["accuracy_stage"]["error_class"] == error_class
+    assert result["accuracy_stage"]["error_class"] == "round_timeout"
     assert "accuracy" not in result
     assert "eval_failed_no_fallback_baseline_requires_accuracy" not in result["nonfatal_warnings"]
     if enablement_mode == "off":
@@ -324,10 +329,95 @@ def test_a_measured_bench_whose_eval_the_run_stopped_stands_and_is_ruled_as_a_mi
         assert result[BASELINE_EVAL_FAILURE_KIND_KEY] == EVAL_KIND_ACCURACY_UNAVAILABLE
 
 
+@pytest.mark.parametrize("enablement_mode", ["off", "eval"])
+def test_a_measured_bench_whose_eval_the_session_clock_stopped_stands_and_is_not_ruled_on_accuracy(
+    monkeypatch, suite, enablement_mode
+):
+    """The run stopped the eval, which says nothing about accuracy: no stop for it, and no eval failure on record."""
+    state = SharedState(enablement_mode=enablement_mode)
+
+    result = _stopped_eval_after_the_bench(monkeypatch, suite, state, FailedStep.DEADLINE_EXHAUSTED)
+
+    assert result["status"] == "succeeded", result
+    assert result["output_throughput"] == pytest.approx(_HOT["output_throughput"])
+    assert "measure_round_dropped" not in result
+    assert result["accuracy_stage"]["error_class"] == SESSION_TIME_EXHAUSTED_CLASS
+    assert "accuracy" not in result
+    assert state.stop_reason == ""
+    assert BASELINE_EVAL_FAILED_KEY not in result
+
+
+def test_a_warm_replay_whose_forced_eval_failed_after_its_bench_is_a_failed_replay(monkeypatch, suite):
+    """A replayed config may not be adopted on throughput alone: without its score the replay has no result."""
+    rounds = _scripted(monkeypatch, _WARMUP, LaunchAttempt(outcome=READY, metrics=_HOT, eval_failed=True))
+
+    result = _run_baseline(suite, rounds, SharedState(), "replay_warm_recipe", extra_envs=_EVAL_OFF)
+
+    assert _sequence(rounds) == _BENCH_THEN_EVAL
+    assert (result["status"], result["error_class"]) == ("failed", FailedStep.EVAL_FAILED.value)
+    assert "output_throughput" not in result
+    assert "accuracy_stage" not in result
+    assert suite.stopped == [suite.ws]
+
+
+def test_a_warm_replay_whose_forced_eval_the_session_clock_stopped_ends_as_that_stop(monkeypatch, suite):
+    state = SharedState()
+
+    result = _stopped_eval_after_the_bench(
+        monkeypatch, suite, state, FailedStep.DEADLINE_EXHAUSTED, kind="replay_warm_recipe"
+    )
+
+    assert (result["status"], result["error_class"]) == ("failed", SESSION_TIME_EXHAUSTED_CLASS)
+    assert "output_throughput" not in result
+    assert "measure_round_dropped" not in result
+    assert state.stop_reason == ""
+
+
+def test_a_warm_replay_whose_measured_round_the_budget_cannot_pay_ends_as_that_stop_not_on_its_warmup(
+    monkeypatch, suite
+):
+    """The round the budget refused is the one that evaluates, so the replay keeps no cold figure to be adopted on."""
+    rounds = _scripted(monkeypatch, _WARMUP, LaunchAttempt(outcome=READY, metrics=_HOT, eval_scores=_SCORE))
+    state = SharedState(baseline_warm_runtime_sec=400.0)
+    monkeypatch.setattr(state, "session_budget_usable_sec", lambda **_reserve: 100.0)
+
+    result = _run_baseline(suite, rounds, state, "replay_warm_recipe")
+
+    assert _sequence(rounds) == _BENCH_THEN_EVAL[:1]
+    assert (result["status"], result["error_class"]) == ("failed", SESSION_TIME_EXHAUSTED_CLASS)
+    assert "output_throughput" not in result
+    assert "measure_round_dropped" not in result
+    shortfall = result["budget_shortfall"]
+    assert (shortfall["priced_by"], shortfall["measure_round_sec"]) == ("session_hot_pass", 400.0)
+    assert result["output_dir"] == str(suite.ws / "measure_round")
+    assert suite.stopped == [suite.ws]
+
+
+def test_a_warm_replay_of_an_mlperf_point_is_refused_the_eval_its_measured_round_is_told_to_run(monkeypatch, suite):
+    """The harness scores an MLPerf point inline, so the forced eval is refused as that point setting RUN_EVAL is."""
+    suite.point.write_text(yaml.safe_dump(_mlperf_point()), encoding="utf-8")
+    composed = []
+
+    def as_a_fixed_load(rounds: ScriptedRounds, config, cancel):  # ScriptedRounds plays no MLPerf harness
+        composed.append((config.workload, config.lifecycle.mode, config.eval.enabled))
+        load = FixedWorkload(8, 256, 256, 1.0, 64, 2, MEASURED_SEED, WARMUP_SEED, "auto", False)
+        return rounds.run_round(replace(config, workload=WorkloadKind.FIXED, fixed=load, mlperf=None), cancel=cancel)
+
+    rounds = _scripted(monkeypatch, _WARMUP, LaunchAttempt(outcome=READY, metrics=_HOT), run_round=as_a_fixed_load)
+
+    result = _run_baseline(suite, rounds, SharedState(), "replay_warm_recipe", extra_envs=_EVAL_OFF)
+
+    assert composed == [(WorkloadKind.MLPERF, LifecycleMode.BOOT, False)]
+    assert (result["status"], result["error_class"]) == ("failed", "yaml_build_error")
+    assert "RUN_EVAL" in result["error"]
+    assert "accuracy" not in result
+    assert suite.stopped == [suite.ws]
+
+
 @pytest.mark.parametrize(
     ("params", "enablement_mode"),
     [({}, "off"), ({}, "eval"), ({"quality_ref_exempt": True}, "off")],
-    ids=["genuine_baseline", "genuine_baseline_with_eval_enablement", "kernel_re_baseline"],
+    ids=["genuine_baseline", "genuine_baseline_with_eval_enablement", "stack_validation"],
 )
 def test_a_pair_whose_hot_pass_the_budget_cannot_pay_keeps_its_cold_warmup_and_is_not_ruled_on_accuracy(
     monkeypatch, suite, params, enablement_mode
@@ -348,6 +438,34 @@ def test_a_pair_whose_hot_pass_the_budget_cannot_pay_keeps_its_cold_warmup_and_i
     assert result["run_eval_disabled"] is True
     assert state.stop_reason == ""
     assert BASELINE_EVAL_FAILED_KEY not in result
+
+
+def test_a_kernel_candidate_whose_measured_round_the_budget_cannot_pay_gets_no_verdict(monkeypatch, suite):
+    """Its re-baseline stands on the discarded bench, which is no measurement of the patch: that is the run's stop."""
+    monkeypatch.setenv("GPU_TYPE", "mi300x")
+    rounds = _scripted(monkeypatch, _WARMUP, LaunchAttempt(outcome=READY, metrics=_HOT, eval_scores=_SCORE))
+    # The discarded bench reads above this anchor, so grading it would KEEP a patch no measured bench ran for.
+    anchor = _COLD["output_throughput"] / 2
+    state = SharedState.load_or_init(suite.session)
+    state.baseline_tput, state.baseline_warm_runtime_sec = anchor, 400.0
+    state.save(suite.session)
+    monkeypatch.setattr(SharedState, "session_budget_usable_sec", lambda self, **_reserve: 100.0)
+    payload = {
+        "kernel_id": "k1",
+        "mode": "env_only",
+        "extra_envs": {"HL_KNOB": "1"},
+        "config_path": str(suite.point),
+        "base_tput": anchor,
+    }
+
+    with installed_clock(rounds.clock):
+        result = asyncio.run(integrate_handler(payload, session_dir=suite.session))
+
+    assert _sequence(rounds) == _BENCH_THEN_EVAL[:1]
+    assert (result["status"], result["decision"]) == ("failed", "NEEDS_REVIEW")
+    assert result["error_class"] == SESSION_TIME_EXHAUSTED_CLASS
+    assert result["rebaseline_detail"]["measure_round_dropped"]["priced_by"] == "session_hot_pass"
+    assert "new_tput" not in result
 
 
 def test_a_sessions_first_hot_pass_is_priced_at_the_warmups_benchmark(monkeypatch):

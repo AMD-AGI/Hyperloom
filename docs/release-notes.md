@@ -230,19 +230,31 @@ it.
   session measures shifts once; a session started on an earlier build must
   not be resumed, and sessions, reports and Recipe KB records from before and
   after are not comparable. Multi-node sessions, AgentX, MLPerf, scriptable
-  and profiled rounds and concurrency sweeps run the rounds they ran. An eval
-  that fails or is stopped after the measured bench no longer fails the
-  attempt: the result keeps its throughput and carries `accuracy_stage`
+  and profiled rounds and concurrency sweeps run the rounds they ran, except
+  that a warm replay of an MLPerf point is refused after its discarded bench
+  instead of before it. An eval that fails or is stopped after the measured
+  bench no longer fails a baseline, a stack validation or a KERNEL
+  re-baseline: the result keeps its throughput and carries `accuracy_stage`
   (`status: failed`) and `post_measure_accuracy_failed`, and the missing score
   takes the route a baseline without a score takes (an eval failure under
-  `--enablement eval` or `all`, else `baseline_accuracy_failed`). A baseline
-  that kept its cold warm-up figure carries no accuracy and is not ruled on
-  it. The KERNEL re-baseline evaluates every candidate, writes no
-  `accuracy_round/`, and no longer reads `defer_accuracy_until_after_measure`,
-  `post_measure_accuracy_min_tput` or `post_measure_accuracy_keep_policy`.
-  The baseline timeline has no `accuracy` round row, and `priced_by` reads
-  `warmup_post_ready` where it read `warmup_post_ready_less_eval`. See
-  [Upgrade](reference/upgrade.md).
+  `--enablement eval` or `all`, else `baseline_accuracy_failed`), unless the
+  session clock stopped the eval, which is not ruled on accuracy. A warm
+  replay has no result without its score: it fails and is rolled back when
+  its eval fails, and when the budget or the clock keeps its measured round
+  from finishing. A baseline that kept its cold warm-up figure carries no
+  accuracy and is not ruled on it. The KERNEL re-baseline evaluates every
+  candidate, so each costs one more eval; it writes no `accuracy_round/`, no
+  longer reads `defer_accuracy_until_after_measure`,
+  `post_measure_accuracy_min_tput` or `post_measure_accuracy_keep_policy`,
+  and a candidate whose measured round the budget refused or the clock
+  stopped ends `NEEDS_REVIEW` with `session_time_exhausted` instead of being
+  graded on its discarded bench. In `state.json`, `baseline_runtime_sec` and
+  `baseline_post_ready_runtime_sec` no longer include the eval and
+  `baseline_warm_runtime_sec` now does; CLOSE's wait for its stack
+  revalidation and a benching specialist's admission floor are sized on the
+  two together. The baseline timeline has no `accuracy` round row, and
+  `priced_by` reads `warmup_post_ready` where it read
+  `warmup_post_ready_less_eval`. See [Upgrade](reference/upgrade.md).
 - **A baseline takes its accuracy from its own attempt.** A genuine baseline,
   a PRELUDE warm replay and the KERNEL stack validation run a discarded
   warm-up round and a measured round on one server, and the measured round
@@ -451,7 +463,8 @@ it.
   `warmup_round_tput:<value>` (`run_grid_warmup_round_failed` when the
   discarded bench failed). Flags and result keys are unchanged. The variant's
   `config.yaml` carries no `server_lifecycle` block or `--port` as `PORT`.
-  Multi-node, AgentX and profiled points run the rounds they ran. See
+  An MLPerf point is tested in two harness runs, as at the integrate bench;
+  multi-node, AgentX and profiled points run the rounds they ran. See
   [Upgrade](reference/upgrade.md).
 
 ## Hyperloom 1.2.0 release

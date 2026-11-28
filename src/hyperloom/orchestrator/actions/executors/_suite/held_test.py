@@ -8,6 +8,9 @@ the measured bench on that server, which the accuracy eval follows inside the sa
 the measured bench, so the bench starts on a server no eval has loaded. A point that does not warm up is measured in
 one round, on a server the test boots.
 
+A test that must evaluate has no result without its score: its caller keeps neither a measured bench whose eval
+failed nor the discarded bench of a test whose measured round did not run.
+
 :class:`HeldTest` is the one place a round's purpose becomes how the round holds the server, which seed its load
 draws and whether it evaluates. It gives every round the test's port, refuses a round out of that order before it
 runs, and stops the server once, however the test ends.
@@ -23,8 +26,9 @@ from pathlib import Path
 
 from hyperloom.common.benchmark_config import read_benchmark_point
 from hyperloom.common.ports import pick_server_port
+from hyperloom.common.round_measurement import load_measured
 from inference_suite import RoundResult, stop
-from inference_suite.contracts import FailedStep, Lifecycle, LifecycleMode
+from inference_suite.contracts import Lifecycle, LifecycleMode
 
 from ..serving import _server_lifecycle
 from ..workload._agentx_checkpoint import AgentxCheckpoint
@@ -77,16 +81,16 @@ class HeldTest:
     """One test's server, held in ``slot`` from the round that boots it until :meth:`stop`.
 
     ``port`` is the port the server answers on; without one the test takes a free port at its first round.
-    ``must_evaluate`` makes the measured round of a point that warms up evaluate whatever the point's ``RUN_EVAL``
-    says. Leaving the ``with`` block stops the server.
+    ``must_evaluate`` makes the measured round evaluate whatever the point's ``RUN_EVAL`` says; a point whose round
+    runs no eval is then refused. Leaving the ``with`` block stops the server.
     """
 
     def __init__(self, slot: Path, *, port: int | None = None, must_evaluate: bool = False) -> None:
         self.slot = Path(slot)
+        self.must_evaluate = must_evaluate
         self._port = port
-        self._must_evaluate = must_evaluate
-        #: The step each round that ran failed at, ``None`` for a round that failed at none.
-        self._ran: dict[RoundPurpose, FailedStep | None] = {}
+        #: Whether the load of each round that ran measured.
+        self._ran: dict[RoundPurpose, bool] = {}
         self._survivors: tuple[int, ...] | None = None
 
     def __enter__(self) -> HeldTest:
@@ -96,14 +100,16 @@ class HeldTest:
         if survivors := self.stop():
             log.error("held test: pids %s outlived SIGKILL; %s keeps their record", survivors, self.slot)
 
-    def evaluates(self, purpose: RoundPurpose) -> bool | None:
-        """Whether the ``purpose`` round of a point that warms up runs the eval after its load.
+    @property
+    def warmed(self) -> bool:
+        """Whether the test's warm-up has run."""
+        return RoundPurpose.WARMUP in self._ran
 
-        ``None`` leaves it to the point's ``RUN_EVAL``, as the one round of a point that does not warm up is left.
-        """
+    def evaluates(self, purpose: RoundPurpose) -> bool | None:
+        """Whether the ``purpose`` round runs the eval after its load; ``None`` leaves it to the point's ``RUN_EVAL``."""
         if purpose is RoundPurpose.WARMUP:
             return False
-        return True if self._must_evaluate else None
+        return True if self.must_evaluate else None
 
     def run(
         self, purpose: RoundPurpose, route: SuiteRoute, round_: HeldRound, *, on_poll: Callable[[], None]
@@ -114,8 +120,7 @@ class HeldTest:
             HeldTestOrderError: When the test's order has no such round now; nothing ran.
             SuiteRoundRefused: When the round is refused before it runs.
         """
-        warms = warms_up(round_.config_path)
-        boots = self._boots(purpose, warms)
+        boots = self._boots(purpose, warms_up(round_.config_path))
         if self._port is None:
             self._port = pick_server_port()
         request = SuiteRound(
@@ -126,18 +131,19 @@ class HeldTest:
             deadline_unix=round_.deadline_unix,
             env_drop=round_.env_drop,
             checkpoint=round_.checkpoint,
-            evaluates=self.evaluates(purpose) if warms else None,
+            evaluates=self.evaluates(purpose),
             port=self._port,
         )
         ran = run_suite_round(route, request, on_poll=on_poll)
-        self._ran[purpose] = ran.report.failed_step
+        self._ran[purpose] = load_measured(ran.report)
         return ran
 
     def _boots(self, purpose: RoundPurpose, warms: bool) -> bool:
         """Whether the ``purpose`` round boots the test's server, on a point that ``warms`` up or does not.
 
         The warm-up is the first round of a point that warms up, and boots. The measured round runs once: on the
-        server a warm-up that failed at no step left up, or, on a point that does not warm up, alone on one it boots.
+        server a warm-up whose load measured left up, or, on a point that does not warm up, alone on one it boots.
+        What a step that failed after the warm-up's load means is its caller's to rule on.
         """
         if self._survivors is not None:
             raise HeldTestOrderError(f"the test in {self.slot} has stopped its server")
@@ -153,8 +159,8 @@ class HeldTest:
             return True
         if RoundPurpose.WARMUP not in self._ran:
             raise HeldTestOrderError(f"the measured round of the test in {self.slot} follows its warm-up")
-        if (failed := self._ran[RoundPurpose.WARMUP]) is not None:
-            raise HeldTestOrderError(f"the warm-up of the test in {self.slot} failed at {failed.value}")
+        if not self._ran[RoundPurpose.WARMUP]:
+            raise HeldTestOrderError(f"the warm-up of the test in {self.slot} measured no load")
         return False
 
     def stop(self) -> tuple[int, ...]:
@@ -173,8 +179,13 @@ class HeldPass:
 
     @property
     def evaluates(self) -> bool | None:
-        """Whether the round, of a point that warms up, is told to evaluate (:meth:`HeldTest.evaluates`)."""
+        """Whether the round is told to evaluate (:meth:`HeldTest.evaluates`)."""
         return self.test.evaluates(self.purpose)
+
+    @property
+    def reuses_server(self) -> bool:
+        """Whether the round runs on the server its test's warm-up left up."""
+        return self.purpose is RoundPurpose.MEASURE and self.test.warmed
 
     def run(self, route: SuiteRoute, round_: HeldRound, *, on_poll: Callable[[], None]) -> RoundResult:
         """Run ``round_`` as this round of its test (:meth:`HeldTest.run`)."""

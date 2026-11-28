@@ -5,13 +5,15 @@
 
 The contract: a point that warms up runs a discarded bench that boots the server in the test's slot (warm-up seed,
 never an eval) and then, once, the measured bench that reuses it and evaluates as the point says or as the test
-forces; a point that does not warm up runs its measured bench alone on a server the test boots; every round runs on
-the test's one port; a round out of that order is refused before it runs; the server is stopped once however the test
-ends; and a round the host refuses is refused as it would be outside a test.
+forces; a point that does not warm up runs its measured bench alone on a server the test boots; a test that must
+evaluate is refused a point whose round runs no eval; every round runs on the test's one port; a round out of that
+order is refused before it runs; the server is stopped once however the test ends; and a round the host refuses is
+refused as it would be outside a test.
 """
 
 from __future__ import annotations
 
+import json
 import logging
 from dataclasses import replace
 from pathlib import Path
@@ -45,7 +47,7 @@ from hyperloom.orchestrator.rehearsal import READY, STAGE_FAILED, LaunchAttempt,
 from hyperloom.orchestrator.rehearsal import VirtualClock
 from hyperloom.orchestrator.rehearsal.scenario import ScenarioError
 from hyperloom.orchestrator.state.tests._session_base import freeze_base
-from inference_suite.contracts import FailedStep, LifecycleMode, WorkloadKind
+from inference_suite.contracts import FailedStep, LifecycleMode, Report, RunStatus, WorkloadKind
 from inference_suite.runtime.process import Reaped
 
 WARMUP, MEASURE = RoundPurpose.WARMUP, RoundPurpose.MEASURE
@@ -224,10 +226,32 @@ def test_the_measured_round_is_refused_after_a_warmup_that_failed(held):
     with HeldTest(held.slot) as test:
         warmup = held.run(test, WARMUP, point)
         assert warmup.report.failed_step is not None
-        with pytest.raises(HeldTestOrderError, match=f"failed at {warmup.report.failed_step.value}"):
+        with pytest.raises(HeldTestOrderError, match="measured no load"):
             held.run(test, MEASURE, point)
 
     assert len(rounds.calls) == 1
+
+
+def test_the_measured_round_follows_a_warmup_whose_load_measured_whatever_failed_after_it(held):
+    """What a step that failed after the warm-up's load means is the caller's to rule on, not the order's."""
+    point = held.point()
+    rounds = held.scripted(_BOOTED, LaunchAttempt(outcome=READY))
+
+    def run_round(config, *, cancel=None):
+        ran = rounds.run_round(config, cancel=cancel)
+        if config.lifecycle.mode is not LifecycleMode.BOOT:
+            return ran
+        document = json.loads(ran.layout.report.read_text(encoding="utf-8"))
+        document.update(run_status=RunStatus.PARTIAL.value, failed_step=FailedStep.TEARDOWN_INCOMPLETE.value)
+        return type(ran)(Report.from_document(document), ran.layout)
+
+    held.monkeypatch.setattr(suite_rounds, "run_round", run_round)
+
+    with HeldTest(held.slot) as test:
+        assert held.run(test, WARMUP, point).report.failed_step is FailedStep.TEARDOWN_INCOMPLETE
+        held.run(test, MEASURE, point)
+
+    assert [call.config.lifecycle.mode for call in rounds.calls] == [LifecycleMode.BOOT, LifecycleMode.REUSE]
 
 
 def test_a_test_that_has_stopped_its_server_runs_no_further_round(held):
@@ -246,16 +270,19 @@ def test_a_test_that_has_stopped_its_server_runs_no_further_round(held):
     assert held.stopped == [held.slot], "the server is stopped once, whoever asks again"
 
 
-@pytest.mark.parametrize(("run_eval", "evaluated"), [("true", True), ("false", False)])
+@pytest.mark.parametrize(
+    ("run_eval", "must_evaluate", "evaluated"), [("true", False, True), ("false", False, False), ("false", True, True)]
+)
 def test_a_point_that_does_not_warm_up_is_measured_once_on_a_server_the_test_boots(
-    held, monkeypatch, run_eval, evaluated
+    held, monkeypatch, run_eval, must_evaluate, evaluated
 ):
-    """Its one round evaluates as the point says: the eval a test can force is the one after a warmed-up bench."""
+    """Its one round evaluates as the point says, or as the test forces."""
     monkeypatch.setattr(held_test, "warms_up", lambda config_path: False)
     point = held.point(RUN_EVAL=run_eval)
     rounds = held.scripted(LaunchAttempt(outcome=READY, eval_scores=_SCORE), LaunchAttempt(outcome=READY))
 
-    with HeldTest(held.slot, must_evaluate=True) as test:
+    with HeldTest(held.slot, must_evaluate=must_evaluate) as test:
+        assert HeldPass(test, MEASURE).evaluates is (True if must_evaluate else None)
         with pytest.raises(HeldTestOrderError, match="measured without a warm-up"):
             held.run(test, WARMUP, point)
         held.run(test, MEASURE, point)
@@ -290,7 +317,7 @@ def test_an_agentx_point_boots_its_one_round_in_the_slot_and_is_stopped_when_the
 
     monkeypatch.setattr(suite_rounds, "run_round", run_round)
 
-    with pytest.raises(ScenarioError), HeldTest(held.slot, must_evaluate=True) as test:
+    with pytest.raises(ScenarioError), HeldTest(held.slot) as test:
         held.run(test, MEASURE, point)
 
     (config,) = played
@@ -301,6 +328,20 @@ def test_an_agentx_point_boots_its_one_round_in_the_slot_and_is_stopped_when_the
     )
     assert not config.eval.enabled
     assert config.server.port == 23001
+    assert held.stopped == [held.slot]
+
+
+def test_a_test_that_must_evaluate_is_refused_a_point_whose_round_runs_no_eval(held):
+    """The round's eval reaches the composer as the point's ``RUN_EVAL``, so the composer's refusals hold for it."""
+    point = held.agentx_point()
+    rounds = held.scripted(LaunchAttempt(outcome=READY))
+
+    with HeldTest(held.slot, must_evaluate=True) as test, pytest.raises(SuiteRoundRefused) as refused:
+        held.run(test, MEASURE, point)
+
+    assert refused.value.error_class == failed_step_error_class(FailedStep.CONFIG_INVALID)
+    assert "RUN_EVAL" in refused.value.detail
+    assert rounds.calls == []
     assert held.stopped == [held.slot]
 
 

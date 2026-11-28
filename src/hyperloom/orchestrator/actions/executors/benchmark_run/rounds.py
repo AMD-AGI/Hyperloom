@@ -54,6 +54,23 @@ _COLD_START_DELTA_WARN_PCT = 25.0
 _BASELINE_DOWNWARD_DRIFT_LIMIT_PCT = 25.0
 
 
+def _budget_refused_round(
+    attempt: BenchmarkAttempt, round_label: str, output_dir: Path, shortfall: dict[str, Any]
+) -> dict[str, Any]:
+    """The result of an attempt whose ``round_label`` the session's budget refused before it launched."""
+    stopped_result = _unlaunched_round_result(
+        STOPPED_BY_THE_RUN[SESSION_TIME_EXHAUSTED_CLASS],
+        round_label=round_label,
+        output_dir=output_dir,
+        capture_meta={
+            "materialized_config": str(attempt.materialized_config_path),
+            "run_eval_disabled": bool(attempt.run_eval_disabled),
+        },
+    )
+    stopped_result["budget_shortfall"] = shortfall
+    return stopped_result
+
+
 def _cold_anchor_after_reaped_measure(warmup_result: dict[str, Any], result: dict[str, Any]) -> dict[str, Any]:
     """Keep the warmup as the baseline when the run's clock stopped the measured round mid-flight."""
     log.warning(
@@ -118,6 +135,8 @@ class _BenchmarkRoundsMixin:
         anchor = dict(warmup_result)
         anchor["nonfatal_warnings"] = [*warmup_result.get("nonfatal_warnings", []), "baseline_downward_drift_anchor"]
         anchor["warmup_round_tput"] = warm
+        # The rejected round ran to its end, so its wall-clock still prices the session's next measured round.
+        anchor["measure_round_runtime_sec"] = measured_result.get("subprocess_runtime_sec")
         anchor["measure_round_rejected"] = {
             "reason": "downward_drift",
             "output_throughput": measured,
@@ -289,16 +308,7 @@ class _BenchmarkRoundsMixin:
         ignitable, evidence = self._round_affordable_before_ignition(double_run=double_run, ctx_extra=ctx_extra)
         if ignitable:
             return None
-        stopped_result = _unlaunched_round_result(
-            STOPPED_BY_THE_RUN[SESSION_TIME_EXHAUSTED_CLASS],
-            round_label="baseline round",
-            output_dir=output_dir,
-            capture_meta={
-                "materialized_config": str(attempt.materialized_config_path),
-                "run_eval_disabled": bool(attempt.run_eval_disabled),
-            },
-        )
-        stopped_result["budget_shortfall"] = evidence
+        stopped_result = _budget_refused_round(attempt, "baseline round", output_dir, evidence)
         if evidence.get("baseline_failures_this_leg"):
             log.warning(
                 "baseline_executor: the baseline has failed %d time(s) this leg and PRELUDE has spent "
@@ -357,7 +367,8 @@ class _BenchmarkRoundsMixin:
         """
         params = attempt.params
         # A replayed KB config is promoted onto ``current_best`` and becomes the reference every later measurement
-        # in the session is taken against, so it may not be adopted on throughput alone.
+        # in the session is taken against, so it may not be adopted on throughput alone: its test must evaluate,
+        # and a replay the run's clock kept from its measured round ends as that stop, not on its warm-up.
         replayed = str(getattr(attempt.ctx.task, "kind", "") or "") == "replay_warm_recipe"
         with HeldTest(output_dir, must_evaluate=replayed) as test:
             warmup_dir = output_dir / _WARMUP_ROUND_DIR
@@ -388,9 +399,13 @@ class _BenchmarkRoundsMixin:
                 output_throughput=warmup_tput,
                 runtime_sec=warmup_result.get("subprocess_runtime_sec"),
             )
-            if cold := self._cold_anchor_when_hot_pass_unaffordable(warmup_result, attempt):
-                return cold
             measure_dir = output_dir / _MEASURE_ROUND_DIR
+            if (shortfall := self._hot_pass_shortfall(attempt, warmup_result)) is not None:
+                if not test.must_evaluate:
+                    return self._cold_anchor_without_hot_pass(warmup_result, shortfall)
+                unmeasured = _budget_refused_round(attempt, "measured round", measure_dir, shortfall)
+                _stamp_warm_patch_outcome(unmeasured, application, params)
+                return unmeasured
             log.info(
                 "baseline_executor: cold-start guard — measured baseline round in %s "
                 "(warmup tput=%.1f tok/s discarded, reusing hot server)",
@@ -402,7 +417,7 @@ class _BenchmarkRoundsMixin:
             )
         _stamp_warm_patch_outcome(result, application, params)
         if result.get("status") != "succeeded":
-            if result.get("error_class") != SESSION_TIME_EXHAUSTED_CLASS:
+            if test.must_evaluate or result.get("error_class") != SESSION_TIME_EXHAUSTED_CLASS:
                 return result
             # The gate before this pass admitted it and the run's clock took it anyway -- the pass overran what it
             # was priced at.
@@ -411,16 +426,15 @@ class _BenchmarkRoundsMixin:
         # its score.
         return carry_eval_score(self._finalize_stock_anchor(attempt, warmup_result, result), result)
 
-    def _cold_anchor_when_hot_pass_unaffordable(
-        self,
-        warmup_result: dict[str, Any],
-        attempt: BenchmarkAttempt,
-    ) -> dict[str, Any] | None:
+    def _hot_pass_shortfall(self, attempt: BenchmarkAttempt, warmup_result: dict[str, Any]) -> dict[str, Any] | None:
+        """The budget evidence that the measured round after ``warmup_result`` does not fit; ``None`` when it does."""
         affordable, evidence = self._measure_round_affordable(
             warmup_result, ctx_extra=getattr(attempt.ctx, "extra", None) or {}
         )
-        if affordable:
-            return None
+        return None if affordable else evidence
+
+    @staticmethod
+    def _cold_anchor_without_hot_pass(warmup_result: dict[str, Any], evidence: dict[str, Any]) -> dict[str, Any]:
         if evidence.get("one_more_measurement_sec"):
             why = "a hot pass (%.0fs) and one variant to read against it (%.0fs) need %.0fs" % (
                 evidence.get("measure_round_sec", 0.0),

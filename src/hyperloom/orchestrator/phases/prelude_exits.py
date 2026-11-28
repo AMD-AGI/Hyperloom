@@ -11,7 +11,8 @@ from hyperloom_common.coerce import optional_positive_float, to_float
 
 
 def hot_pass_cost_sec(warm_sec: Any, post_ready_sec: Any) -> float | None:
-    """A hot pass's warm runtime, else the cold round's post-ready time, which is its benchmark alone."""
+    """A hot pass's warm runtime, else the cold round's time after ready: a warm-up's bench, or the bench and the
+    eval of a round that ran alone."""
     return optional_positive_float(warm_sec) or optional_positive_float(post_ready_sec)
 
 

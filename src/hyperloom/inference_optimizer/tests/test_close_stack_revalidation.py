@@ -178,6 +178,28 @@ async def test_busy_lanes_cancel_the_rebench_instead_of_leaving_it_queued(coordi
     assert _steps(c)[-1]["detail"] == "lanes_busy"
 
 
+def test_the_wait_covers_the_pair_a_revalidation_of_a_point_that_warms_up_runs(coordinator) -> None:
+    """The discarded bench no longer holds the eval, so twice its wall-clock can be less than one revalidation."""
+    from hyperloom.orchestrator.actions.executors.benchmark_run.rounds import _BenchmarkRoundsMixin
+
+    c = coordinator
+    warmup = {"output_throughput": 900.0, "subprocess_runtime_sec": 747.0, "post_ready_runtime_sec": 398.0}
+    measured = {"status": "succeeded", "output_throughput": 1000.0, "subprocess_runtime_sec": 2073.0}
+    _BenchmarkRoundsMixin()._record_measured_against_warmup(measured, warmup)
+    c.writeback._promote_anchor_run_facts(measured, {})
+
+    revalidation_sec = 747.0 + 2073.0
+    assert c.phase_close._close_stack_revalidation_timeout_sec() == 2.0 * revalidation_sec
+
+
+def test_the_wait_for_a_point_measured_in_one_round_is_twice_that_round(coordinator) -> None:
+    c = coordinator
+    one_round = {"output_throughput": 1000.0, "subprocess_runtime_sec": 900.0, "post_ready_runtime_sec": 500.0}
+    c.writeback._promote_anchor_run_facts(one_round, {})
+
+    assert c.phase_close._close_stack_revalidation_timeout_sec() == 1800.0
+
+
 @pytest.mark.asyncio
 async def test_a_rebench_that_outlives_its_bound_is_abandoned(coordinator) -> None:
     c = coordinator

@@ -7,14 +7,15 @@ The contract: a rebench measures the way the integrate gate does. Where its poin
 server on the port it was given and reports -- a discarded bench that boots the server and never evaluates, then the
 measured bench with the eval the point asks for -- and stops that server once; a discarded bench that failed is the
 rebench's failure and nothing is measured; a point that does not warm up is one round that owns its server on that
-port; on a multi-node host it is the cluster's restart, one discarded pass and the measured pass, both against the
-cluster's own address.
+port; an MLPerf point warms up too, in two harness runs without an eval; on a multi-node host it is the cluster's
+restart, one discarded pass and the measured pass, both against the cluster's own address.
 """
 
 from __future__ import annotations
 
 import asyncio
 import json
+from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -29,9 +30,10 @@ from hyperloom.orchestrator.actions.executors._suite.rounds import RUN_DIR_PREFI
 from hyperloom.orchestrator.actions.executors.grid import _grid_runner
 from hyperloom.orchestrator.actions.executors.grid._grid_base import VariantResult
 from hyperloom.orchestrator.actions.executors.tests.test_grid_suite_round import _COLD, _HOT, suite, unheld  # noqa: F401
+from hyperloom.orchestrator.actions.executors.tests.test_suite_config import _mlperf_point
 from hyperloom.orchestrator.rehearsal import READY, LaunchAttempt, LaunchScenario, ScriptedRounds, VirtualClock
 from hyperloom.orchestrator.specialists import rebench as sr
-from inference_suite.contracts import LifecycleMode
+from inference_suite.contracts import FixedWorkload, LifecycleMode, WorkloadKind
 from inference_suite.tests.test_compose import _launch
 
 _PORT = 30123
@@ -275,6 +277,43 @@ def test_a_rebench_of_a_point_that_does_not_warm_up_is_one_round_that_owns_its_s
     assert result["ok"] is True, result
     assert result["output_throughput"] == pytest.approx(_HOT["output_throughput"])
     assert result["warnings"] == []
+    assert suite.stopped == [slot]
+
+
+def test_a_rebench_of_an_mlperf_point_runs_the_gates_pair_without_an_eval(monkeypatch, suite, tmp_path):
+    """An MLPerf point warms up, as at the integrate gate; its harness takes no seed and scores accuracy inline."""
+    suite.point.write_text(yaml.safe_dump(_mlperf_point()), encoding="utf-8")
+    rounds = ScriptedRounds(
+        scenario=LaunchScenario(
+            attempts=(LaunchAttempt(outcome=READY, metrics=_COLD), LaunchAttempt(outcome=READY, metrics=_HOT))
+        ),
+        clock=VirtualClock(),
+        launch=_launch(),
+    )
+    composed = []
+
+    def as_a_fixed_load(config, *, cancel=None):  # ScriptedRounds plays no MLPerf harness
+        composed.append((config.workload, config.lifecycle.mode, config.lifecycle.pid_dir, config.eval.enabled))
+        load = FixedWorkload(8, 256, 256, 1.0, 64, 2, MEASURED_SEED, WARMUP_SEED, "auto", False)
+        return rounds.run_round(replace(config, workload=WorkloadKind.FIXED, fixed=load, mlperf=None), cancel=cancel)
+
+    monkeypatch.setattr(suite_rounds, "run_round", as_a_fixed_load)
+
+    result = asyncio.run(
+        sr.run_specialist_rebench(
+            output_dir=tmp_path / "rebench",
+            benchmark=sr.RebenchBenchmark(config_path=suite.point),
+            server=sr.RebenchServer(extra_envs={"RUN_EVAL": "false"}, port=_PORT),
+        )
+    )
+
+    slot = tmp_path / "rebench" / "variant_00_specialist-rebench"
+    assert composed == [
+        (WorkloadKind.MLPERF, LifecycleMode.BOOT, str(slot), False),
+        (WorkloadKind.MLPERF, LifecycleMode.REUSE, str(slot), False),
+    ]
+    assert result["ok"] is True, result
+    assert result["output_throughput"] == pytest.approx(_HOT["output_throughput"])
     assert suite.stopped == [slot]
 
 

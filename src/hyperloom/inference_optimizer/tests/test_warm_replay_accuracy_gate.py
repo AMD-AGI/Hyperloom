@@ -151,8 +151,23 @@ class TestEveryReplayIsJudged:
         assert _promoted(coord) is True
 
 
+class TestAReplayWhoseOwnEvalLeftNoScoreIsNotAdopted:
+    """Its attempt ends failed, under the eval's class or the run's stop, and the settle rolls it back."""
+
+    @pytest.mark.parametrize("error_class", ["eval_failed", "session_time_exhausted"])
+    def test_the_failed_attempt_is_rolled_back_under_its_class(self, tmp_path, error_class):
+        coord = _coord_with_baseline(tmp_path, BASELINE_ACC)
+        coord.phase_prelude.promote_warm_replay(
+            {"status": "failed", "error_class": error_class, "error": "no score"},
+            task=_risky_task(),
+        )
+        assert _promoted(coord) is False
+        outcome = coord.shared_state.warm_replay_outcome
+        assert (outcome["status"], outcome["error_class"]) == ("failed", error_class)
+
+
 class TestAbsentEvidenceDoesNotBlock:
-    """A failed measurement never stops the run."""
+    """A replay whose rounds ran no eval is admitted, and marked as not judged."""
 
     def test_a_missing_verdict_still_promotes_and_is_marked(self, tmp_path):
         coord = _coord_with_baseline(tmp_path, BASELINE_ACC)

@@ -12,7 +12,8 @@ step's class and not measured, and an AgentX variant is one round that boots in 
 before the variant's accuracy round boots one; explore launches one server once per round, starts no variant its
 session or phase budget cannot fit, and launches none that only restates the argv or environment of the session's
 base; an explore round the ledger answers whole succeeds without a launch, and
-one left with nothing to run fails and reports its grid exhausted.
+one left with nothing to run fails and reports its grid exhausted; an integrate bench is a discarded bench that never
+evaluates and then the measured bench with its eval, on one server.
 """
 
 from __future__ import annotations
@@ -39,12 +40,15 @@ from hyperloom.orchestrator.actions.executors._suite import rounds as suite_roun
 from hyperloom.orchestrator.actions.executors._suite.config import MEASURED_SEED, WARMUP_SEED
 from hyperloom.orchestrator.actions.executors import explore as explore_module
 from hyperloom.orchestrator.actions.executors.explore import ALREADY_MEASURED, BASELINE_NOOP, ExploreExecutor
+from hyperloom.orchestrator.actions.executors.integrate_patch import IntegratePatchExecutor
 from hyperloom.orchestrator.actions.executors.tests.test_grid_suite_round import _COLD, _HOT, suite  # noqa: F401
 from hyperloom.orchestrator.actions.executors.tests.test_suite_config import _base
 from hyperloom.orchestrator.rehearsal import READY, STAGE_FAILED, LaunchAttempt, LaunchScenario, ScriptedRounds
 from hyperloom.orchestrator.rehearsal import VirtualClock, installed_clock
 from hyperloom.orchestrator.rehearsal.scenario import ScenarioError
+from hyperloom.orchestrator.loop.sub_agent_runner import RunnerContext
 from hyperloom.orchestrator.state.shared_state import SharedState
+from hyperloom.orchestrator.state.task_registry import Task
 from hyperloom.orchestrator.state.tests._session_base import freeze_base, session_base
 from inference_suite.contracts import FailedStep, LifecycleMode, Workload, WorkloadKind
 from inference_suite.tests.test_compose import _launch
@@ -455,7 +459,7 @@ def test_an_agentx_variants_server_is_stopped_once_and_before_its_accuracy_round
 
     slot = tmp_path / "explore" / "v00_changes-recipe-arg"
     (launch,) = launches
-    assert (launch.held.purpose, launch.held.test.slot, launch.server_already_ready) == (
+    assert (launch.held.purpose, launch.held.test.slot, launch.held.reuses_server) == (
         RoundPurpose.MEASURE,
         slot,
         False,
@@ -480,3 +484,34 @@ def test_an_explore_grid_of_nothing_but_restatements_of_the_base_fails_as_exhaus
     assert calls == []
     assert [row["reason"] for row in result["skipped_dup"]] == [BASELINE_NOOP, BASELINE_NOOP]
     assert (result["status"], result["explore_grid_exhausted"]) == ("failed", True)
+
+
+def test_an_integrate_bench_discards_a_bench_then_measures_and_evaluates_once_on_one_server(monkeypatch, suite):
+    """Played through the executor on a bench-only request, which runs the bench every integrate request runs."""
+    measured = LaunchAttempt(outcome=READY, metrics=_HOT, eval_scores={"exact_match,strict-match": 0.9})
+    rounds = _scripted(monkeypatch, LaunchAttempt(outcome=READY, metrics=_COLD), measured)
+    state = SharedState.load_or_init(_session(suite))
+    state.phase = "ENABLEMENT"
+    params = {
+        "enablement": True,
+        "enablement_launch_only": True,
+        "config_path": str(suite.point),
+        "source": "coordinator_internal",
+    }
+    task = Task(task_id="bench-1", kind="integrate_patch", state="queued", params=params, idempotency_key="bench-1")
+
+    with installed_clock(rounds.clock):
+        result = asyncio.run(
+            IntegratePatchExecutor(session_dir=_session(suite))(
+                RunnerContext(task=task, lease=None, extra={"shared_state": state})
+            )
+        )
+
+    warmup, bench = (call.config for call in rounds.calls)
+    assert (warmup.lifecycle.mode, warmup.fixed.seed, warmup.eval.enabled) == (LifecycleMode.BOOT, WARMUP_SEED, False)
+    assert (bench.lifecycle.mode, bench.fixed.seed, bench.eval.enabled) == (LifecycleMode.REUSE, MEASURED_SEED, True)
+    assert warmup.lifecycle.pid_dir == bench.lifecycle.pid_dir
+    assert warmup.server.port == bench.server.port
+    assert suite.stopped == [Path(bench.lifecycle.pid_dir)]
+    assert result["output_throughput"] == pytest.approx(_HOT["output_throughput"])
+    assert result["enablement_observed_accuracy"] == 0.9

@@ -259,7 +259,12 @@ an anchor measured after one.
   sessions, reports or Recipe KB records taken before and after the upgrade.
   Multi-node sessions do not move: their discarded pass still runs the eval
   before the measured pass. AgentX, MLPerf and scriptable workloads, profiled
-  rounds and concurrency sweeps run the rounds they ran.
+  rounds and concurrency sweeps run the rounds they ran, with two exceptions
+  for an MLPerf point: a specialist's rebench of it (see *allow a specialist's
+  rebench two benches* below), and a warm replay of it, which is still refused
+  (`yaml_build_error`: the harness scores an MLPerf point inline, so the eval
+  a replay forces has no round to run in) but now by its measured round,
+  after the discarded bench ran; it used to be refused before any round.
 * The integrate bench runs the eval once, in its measured round; it ran it
   twice.
 * The KERNEL integrate re-baseline evaluates every candidate in its measured
@@ -268,11 +273,22 @@ an anchor measured after one.
   no `accuracy_round/`, and its result no longer carries `accuracy_stage` with
   `status: succeeded` or `skipped`. The task parameters
   `defer_accuracy_until_after_measure`, `post_measure_accuracy_min_tput` and
-  `post_measure_accuracy_keep_policy` are no longer read. The re-baseline is
-  now held to the budget check a baseline's measured round is: when the
-  session cannot pay for the measured round it keeps its cold warm-up figure
-  (`baseline_measure_round_dropped_low_budget`) without booting the round; it
-  used to run the round into the session clock, which left the same figure.
+  `post_measure_accuracy_keep_policy` are no longer read. Every candidate
+  now pays for an eval: a re-baseline is a boot, two loads and an eval,
+  where a candidate below the KEEP gate cost a boot and two loads, so fewer
+  candidates fit a KERNEL budget when the eval is long.
+* A KERNEL candidate whose measured round did not run to its end gets no
+  verdict. The re-baseline is now held to the budget check a baseline's
+  measured round is, at the price of the session's last measured round with
+  its eval. When the session cannot pay for the round, or its clock stops
+  the round, the integrate request fails with `decision: NEEDS_REVIEW` and
+  `error_class: session_time_exhausted`, the patch is reverted, and
+  `rebaseline_detail` carries the re-baseline's result with
+  `measure_round_dropped`. In 1.2.x the round was not checked against the
+  budget: it ran into the session clock, and a candidate the clock stopped
+  there was graded on its discarded bench, which usually read as a REVERT.
+  A candidate the session has time to measure but not to evaluate is no
+  longer measured.
 * An EXPLORE variant's decision round evaluates and its warm-up round does
   not (`eval.enabled: false` in the `config.yaml` of the warm-up's run
   directory). The eval's results file lies under the decision round's run
@@ -292,17 +308,24 @@ an anchor measured after one.
     `stop_reason: baseline_accuracy_failed`. In the second case the baseline
     is now promoted with its throughput and no accuracy reference, where it
     used to be a failed baseline.
-  * A genuine baseline whose eval was stopped by the session clock or the
-    round's cap, or whose server died during the eval, is ruled like any
-    baseline without a score: recorded as an eval failure of kind
-    `accuracy_unavailable` and not promoted, or the run stops with
-    `baseline_accuracy_failed`. `accuracy_stage.error_class` names the stop
-    (`session_time_exhausted`, `round_timeout`, a server-death class). In
-    1.2.x the same stop ended the warm-up round, and the attempt ended under
-    that class.
-  * A warm replay is admitted without an accuracy verdict and marked
-    (`eval_ran: false`), as a replay without a score always was. It used to
-    be a failed replay.
+  * A genuine baseline whose eval was stopped by the round's cap, or whose
+    server died during the eval, is ruled like any baseline without a score:
+    recorded as an eval failure of kind `accuracy_unavailable` and not
+    promoted, or the run stops with `baseline_accuracy_failed`.
+    `accuracy_stage.error_class` names the stop (`round_timeout`, a
+    server-death class). In 1.2.x the same stop ended the warm-up round, and
+    the attempt ended under that class.
+  * A genuine baseline whose eval the session clock stopped
+    (`accuracy_stage.error_class: session_time_exhausted`) is not ruled on
+    accuracy: the run's own stop is neither an eval failure nor a reason for
+    `baseline_accuracy_failed`. The baseline is promoted with its throughput
+    and leaves `baseline_accuracy: 0.0` in `state.json`. In 1.2.x the clock
+    stopped the warm-up round and the attempt ended as
+    `session_time_exhausted` with no baseline.
+  * A warm replay has no result without its score, so its bench does not
+    stand: the replay fails under the eval's class (`eval_failed`, or
+    `session_time_exhausted` when the session clock stopped the eval) and is
+    rolled back, as a replay whose eval failed was in 1.2.x.
   * A KERNEL re-baseline is graded on its throughput, and a KEEP-eligible
     candidate ends `NEEDS_REVIEW` in a session that holds an accuracy
     reference, as one whose third round failed did.
@@ -320,23 +343,52 @@ an anchor measured after one.
   another revalidation (recorded as a window the run stopped). Once promoted
   it leaves `baseline_accuracy: 0.0` in `state.json`. PRELUDE still retries a
   cold anchor or closes on it (`baseline_anchor: cold`).
+* A warm replay keeps no cold warm-up figure. When the budget refuses its
+  measured round, or the session clock stops that round, the replay ends
+  `failed` with `error_class: session_time_exhausted` (and the gate's
+  evidence as `budget_shortfall` when the round was refused) and is rolled
+  back. In 1.2.x it kept the warm-up's figure with the warm-up's score and
+  was judged on them.
 * An eval the round refuses before it starts (`eval_context_too_short`, eval
   tooling that is not staged) is reported by the measured round, after the
   discarded bench ran. The warm-up used to report it before it booted.
 * The measured round's wall-clock, which `state.json` keeps as
   `baseline_warm_runtime_sec` and which prices the next measured round, an
-  EXPLORE decision round and one more variant, now includes the eval. A
-  session's first measured round is priced at its warm-up's time after ready:
-  `priced_by` in `measure_round_dropped` reads `warmup_post_ready` (was
+  EXPLORE decision round and one more variant, now includes the eval. The
+  warm-up's wall-clock no longer does: `baseline_runtime_sec` and
+  `baseline_post_ready_runtime_sec` in `state.json`, and `runtime_sec` and
+  `post_ready_runtime_sec` in the PRELUDE inputs of
+  `session_breakdown.json`, are a boot and a load, and a load. For a
+  workload whose eval is long these drop by most of their value while
+  `baseline_warm_runtime_sec` and `warm_runtime_sec` grow by the same
+  amount; one test of the point costs what it did. Do not compare these
+  fields across the upgrade. A session's first measured round is priced at
+  its warm-up's time after ready, which holds no eval, so that one round can
+  be admitted with less time left than its eval needs: `priced_by` in
+  `measure_round_dropped` reads `warmup_post_ready` (was
   `warmup_post_ready_less_eval`), and `eval_runtime_sec` is no longer
   subtracted anywhere.
+* A baseline that kept its warm-up's figure because the measured bench fell
+  more than 25% below it (`baseline_downward_drift_anchor`) now carries the
+  rejected round's wall-clock as `measure_round_runtime_sec`, so
+  `baseline_warm_runtime_sec` is set after such an anchor too. It was `0`,
+  which priced every later measured round at the warm-up's time after ready.
+* CLOSE waits for its full-stack revalidation twice what one test of the
+  point cost the baseline (`baseline_runtime_sec` plus
+  `baseline_warm_runtime_sec`), no less than 600 s. It waited twice
+  `baseline_runtime_sec`, which no longer covers a revalidation whose eval
+  outlasts its boot. A point measured in one round keeps the old wait.
+* A specialist that benches is admitted only when one test of the point and
+  ten minutes of startup fit (`baseline_runtime_sec` plus
+  `baseline_warm_runtime_sec`, plus 10 min), since its rebench runs that
+  test. The floor was `baseline_runtime_sec` plus 10 min.
 * In `session_breakdown.json`, a baseline action has no round row labelled
   `accuracy`. Its `measure` row carries the eval's figures and
   `run_eval_disabled: false`; its `warmup` row has `run_eval_disabled: true`
   and no accuracy.
 * The error lines for an eval-rooted baseline failure read `the accuracy eval
   failed on a genuine baseline, ...` and `the accuracy eval failed; the
-  attempt gets no throughput-only retry.` (they named `InferenceX run_eval`),
+  attempt is not run again without it.` (they named `InferenceX run_eval`),
   and the line for an eval that never reached its server ends `it is not
   ruled on as an eval failure.`
 
@@ -694,6 +746,10 @@ reports the port the server answered on.
   which round evaluates. `launch_evidence.json` follows the file: its
   `requested_server_env` no longer lists that `PORT`, and its `recipe_digest`
   is the digest of the file without the block.
+* A rebench of an MLPerf point is two harness runs on one server too, as
+  the integrate bench of an MLPerf point is; it was one. The harness takes
+  no warm-up seed, so the discarded run sends the trajectories the measured
+  run sends, and neither runs the eval.
 * A rebench of a point that is measured in one round runs the rounds it ran:
   one round on a server of its own on `--port` for an AgentX or profiled
   point, and on a multi-node host the cluster's restart, its discarded pass

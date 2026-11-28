@@ -305,13 +305,13 @@ def test_a_launch_that_holds_a_test_runs_one_round_of_it_and_leaves_the_server_t
     slot = tmp_path / "test_slot"
     stops_during_the_rounds = []
 
-    def one_round(purpose: RoundPurpose, output_root: Path, **launch):
+    def one_round(purpose: RoundPurpose, output_root: Path):
         (row,) = asyncio.run(
             run_grid(
                 grid=[GridVariant("vA", extra_envs={"RUN_EVAL": "true"})],
                 output_root=output_root,
                 recipe=GridRecipe(suite.point),
-                launch=GridLaunch(held=HeldPass(test, purpose), **launch),
+                launch=GridLaunch(held=HeldPass(test, purpose)),
             )
         )
         stops_during_the_rounds.extend(suite.stopped)
@@ -319,7 +319,7 @@ def test_a_launch_that_holds_a_test_runs_one_round_of_it_and_leaves_the_server_t
 
     with HeldTest(slot) as test:
         warmup_row = one_round(RoundPurpose.WARMUP, slot / "warmup_round")
-        row = one_round(RoundPurpose.MEASURE, slot, server_already_ready=True)
+        row = one_round(RoundPurpose.MEASURE, slot)
 
     assert (warmup_row.status, warmup_row.output_throughput) == ("succeeded", pytest.approx(_COLD["output_throughput"]))
     assert (row.status, row.output_throughput) == ("succeeded", pytest.approx(_HOT["output_throughput"]))

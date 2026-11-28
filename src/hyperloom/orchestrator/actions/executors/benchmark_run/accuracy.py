@@ -22,6 +22,7 @@ from hyperloom.common.perf_metric import agentx_active
 from hyperloom.inference_optimizer.trace.task_progress import heartbeat_while_output_flows
 from inference_suite.contracts import FailedStep
 from inference_suite.server_log import death_excerpt
+from ...stop_attribution import stopped_by_the_run_class
 from .._accuracy_gate import (
     ACCURACY_DEFINITION_DIGEST_KEY,
     EVAL_KIND_QUALITY_GATE_MISSING,
@@ -270,7 +271,7 @@ class _BaselineAccuracyMixin:
             result["nonfatal_warnings"].append("eval_failed_no_fallback_baseline_requires_accuracy")
             self._request_eval_rooted_baseline_stop(ctx)
         else:
-            log.error("baseline_executor: the accuracy eval failed; the attempt gets no throughput-only retry.")
+            log.error("baseline_executor: the accuracy eval failed; the attempt is not run again without it.")
         return True
 
     async def _run_baseline_accuracy_round(self, ctx: RunnerContext, result: dict[str, Any]) -> None:
@@ -384,15 +385,16 @@ class _BaselineAccuracyMixin:
     ) -> None:
         """Halt the run when a genuine baseline produced no accuracy result.
 
-        A baseline standing on its cold warm-up is not ruled on: the budget kept the round that evaluates from
-        running, which says nothing about accuracy.
+        A baseline standing on its cold warm-up is not ruled on, nor one whose eval the run itself stopped: the run
+        kept the eval from finishing, which says nothing about accuracy.
         """
         params = ctx.task.params
         if result.get("status") != "succeeded" or not _should_establish_quality_ref(
             getattr(ctx.task, "kind", ""), params
         ):
             return
-        if result.get("measure_round_dropped"):
+        eval_stop_class = (result.get(ACCURACY_STAGE_KEY) or {}).get("error_class")
+        if result.get("measure_round_dropped") or stopped_by_the_run_class(eval_stop_class) is not None:
             return
         shared_state = ctx.extra.get("shared_state") or self.shared_state
         # An AgentX session that opted out of the accuracy round has no reference by design; its gates skip accuracy.
