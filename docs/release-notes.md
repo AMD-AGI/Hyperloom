@@ -35,12 +35,14 @@ it.
   `measurement_result.v2` schema and the reader now require both, with
   `timing.phases` an array (`[]` for none). Every runner that writes a v2
   manifest has written both; a manifest without them is refused as invalid
-  instead of being read as one an older runner signed.
+  instead of being read as one an older runner signed. See
+  [Upgrade](reference/upgrade.md).
 - **A measurement sheet's `environment.runtime` must be null.** The
   `measurement_spec.v2` schema and the reader no longer accept a runtime
   snapshot, and the runner no longer checks one: no producer, inside
   Hyperloom or out, ever wrote a non-null value. The key stays in every sheet
-  as `null`, so spec fingerprints and JIT cache keys are unchanged.
+  as `null`, so spec fingerprints and JIT cache keys are unchanged. See
+  [Upgrade](reference/upgrade.md).
 - **A measurement sheet's `hardware.power_cap_w` and `hardware.partition_mode`
   must be null, and its `model_hashes` empty.** The `measurement_spec.v2`
   schema and the reader refuse any other value, and the runner no longer
@@ -48,7 +50,8 @@ it.
   model files: no producer, inside Hyperloom or out, has written a value since
   the consistency tool was removed. The keys stay in every sheet, so spec
   fingerprints and JIT cache keys are unchanged; the result manifest still
-  records the power cap and partition mode the runner read.
+  records the power cap and partition mode the runner read. See
+  [Upgrade](reference/upgrade.md).
 - **`HYPERLOOM_SANDBOX_TEMPLATES` no longer accepts `runner` for the
   `measurement` role.** A hosted run reads only `measurement` and `dev`; a
   list that gives only `runner` is refused as having no `measurement` role.
@@ -65,7 +68,9 @@ it.
   toolbox no longer names a workspace on its sandbox creates: a Claw grant's
   sandbox key names its own, and no host sets the variable. It is still
   removed from the environment before any child process starts, and a
-  malformed value no longer refuses the run. See
+  malformed value no longer refuses the run. A SaFE key that reaches the
+  sandbox service directly is not a supported hosted deployment. See
+  [Upgrade](reference/upgrade.md) and
   [Environment variables](reference/environment-variables.md).
 - **`E2BSandboxProvider` no longer takes `workspace=`, and
   `hyperloom.sandbox.socket.WORKSPACE_KEY` is removed.** The provider no
@@ -73,12 +78,13 @@ it.
   `workspace_required` refusal is raised as the service's own `SandboxDenied`
   instead of one naming `HYPERLOOM_SANDBOX_WORKSPACE`. A caller whose key
   must name a workspace puts the metadata key on its creates itself; a Claw
-  grant's key names its own.
+  grant's key names its own. See [Upgrade](reference/upgrade.md).
 - **The sandbox socket's `Role` is `measurement` or `dev`.** The `subrun`
   role is gone from `hyperloom.sandbox.socket.Role`, so a local template
   declared with it is refused. No Hyperloom code ever created a sub-run
   sandbox; a host may still list a `subrun` role in
-  `HYPERLOOM_SANDBOX_TEMPLATES`, which a hosted run ignores as before.
+  `HYPERLOOM_SANDBOX_TEMPLATES`, which a hosted run ignores as before. See
+  [Upgrade](reference/upgrade.md).
 - **`campaign_spec.v1` drops fields nothing read.**
   `objective.target_gain_pct`, `options.kernel`, `options.framework_agent`,
   `options.enablement` and `placement.specialist_capacity` are gone from the
