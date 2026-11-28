@@ -102,7 +102,8 @@ class LaunchQuery:
     """What a session asked for; ``tp`` and ``ep`` are set only when the operator gave them.
 
     A fixed workload names its sequence shape (``isl``, ``osl``); an AgentX workload replays a trace and a scriptable
-    one runs a script, so neither names one.
+    one runs a script, so neither names one. ``board`` is the session's GPU label; ``gfx`` and ``memory_mib`` are what
+    its card reported, ``None`` when the session read no card.
     """
 
     model_id: str
@@ -114,6 +115,8 @@ class LaunchQuery:
     ep: int | None = None
     isl: int | None = None
     osl: int | None = None
+    gfx: str | None = None
+    memory_mib: int | None = None
 
     def __post_init__(self) -> None:
         _FIELDS.text(self.model_id, "the query's model id")
@@ -128,6 +131,8 @@ class LaunchQuery:
         _FIELDS.optional_integer(self.ep, "the query's ep", minimum=1)
         _FIELDS.optional_integer(self.isl, "the query's isl", minimum=1)
         _FIELDS.optional_integer(self.osl, "the query's osl", minimum=1)
+        _FIELDS.optional_text(self.gfx, "the query's gfx")
+        _FIELDS.optional_integer(self.memory_mib, "the query's memory_mib", minimum=1)
         fixed = self.workload is Workload.FIXED
         if (self.isl is not None, self.osl is not None) != (fixed, fixed):
             raise BaseLaunchError(
@@ -146,6 +151,8 @@ class LaunchQuery:
             "ep": self.ep,
             "isl": self.isl,
             "osl": self.osl,
+            "gfx": self.gfx,
+            "memory_mib": self.memory_mib,
         }
 
     @classmethod
@@ -161,6 +168,8 @@ class LaunchQuery:
             ep=fields.get("ep"),
             isl=fields.get("isl"),
             osl=fields.get("osl"),
+            gfx=fields.get("gfx"),
+            memory_mib=fields.get("memory_mib"),
         )
 
 

@@ -93,6 +93,14 @@ def test_build_specialist_env_forwards_hub_settings_but_not_the_hub_token(monkey
     assert "HF_TOKEN" not in env
 
 
+def test_build_specialist_env_forwards_the_session_card(monkeypatch):
+    from hyperloom_common import gpu_card
+    from hyperloom.orchestrator.tests._fixtures import MI325X_CARD, publish_card
+
+    publish_card(monkeypatch, MI325X_CARD)
+    assert gpu_card.session_card(_build_specialist_env()) == MI325X_CARD
+
+
 def test_build_specialist_env_forwards_the_claude_config_dir(monkeypatch):
     monkeypatch.setenv("CLAUDE_CONFIG_DIR", "/tmp/claude-config")
     assert _build_specialist_env()["CLAUDE_CONFIG_DIR"] == "/tmp/claude-config"

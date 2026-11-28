@@ -56,6 +56,21 @@ def _kfd_nodes_in_pci_order(monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def _no_readable_cards(monkeypatch):
+    """No test reaches a real ``amd-smi static``: the machine reads as one whose cards cannot be read.
+
+    A test of a session that has a card patches ``gpu_card.read_cards`` again, or publishes one with ``publish_card``.
+    """
+    from hyperloom_common import gpu_card
+    from hyperloom_common.amd_smi import AmdSmiError
+
+    def _unreadable():
+        raise AmdSmiError("amd-smi static could not run (test)")
+
+    monkeypatch.setattr(gpu_card, "read_cards", _unreadable)
+
+
+@pytest.fixture(autouse=True)
 def _no_node_power_management(monkeypatch):
     """No test reaches a real ``amd-smi node``: the node reads as an amd-smi without the command, which records nothing.
 

@@ -185,6 +185,7 @@ def test_failed_step_is_a_closed_list() -> None:
         "client_failed",
         "client_output_missing",
         "eval_failed",
+        "profile_refused",
         "round_timeout",
         "deadline_exhausted",
         "cancelled",

@@ -644,7 +644,7 @@ def test_the_platform_fingerprint_records_the_settings(monkeypatch):
     from hyperloom.common.platform_probe import GPU_POWER_SETTINGS_ENV, platform_fingerprint
 
     monkeypatch.setenv(GPU_POWER_SETTINGS_ENV, json.dumps({"observed": {"0": {"power_cap_w": 1000.0}}}))
-    record = platform_fingerprint("mi355x")
+    record = platform_fingerprint()
     if record.get("status") != "ok":
         pytest.skip("no host sysfs")
     assert record["gpu"]["power_settings"]["observed"]["0"]["power_cap_w"] == 1000.0

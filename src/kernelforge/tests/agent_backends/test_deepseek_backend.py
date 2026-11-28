@@ -492,33 +492,33 @@ def test_a_session_scoped_gateway_reaches_the_runtime_environment(tmp_path: Path
     assert env["DEEPSEEK_API_KEY"] == "scoped"
 
 
-def test_the_output_cap_reaches_the_forge_runtime(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """Forge starts its own runtimes, so the cap ``HYPERLOOM_DSH_MAX_TOKENS`` sets must ride on those too."""
-    monkeypatch.setenv("HYPERLOOM_DSH_MAX_TOKENS", "64000")
-    repo, kernel = _make_repo(tmp_path)
-
-    asyncio.run(_backend().run(_spec(repo, kernel)))
-
-    assert _FakeHarness.instances[-1].kwargs["max_tokens"] == 64000
-
-
-def test_a_session_scoped_output_cap_reaches_the_forge_runtime(tmp_path: Path) -> None:
-    repo, kernel = _make_repo(tmp_path)
-
-    asyncio.run(_backend().run(_spec(repo, kernel, env={"HYPERLOOM_DSH_MAX_TOKENS": "32000"})))
-
-    assert _FakeHarness.instances[-1].kwargs["max_tokens"] == 32000
-
-
-def test_no_output_cap_leaves_the_forge_runtime_at_the_harness_default(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+@pytest.mark.parametrize(
+    ("process_cap", "session_env", "cap"),
+    [("64000", {}, 64000), (None, {"HYPERLOOM_DSH_MAX_TOKENS": "32000"}, 32000), (None, {}, None)],
+)
+def test_the_output_cap_reaches_the_forge_runtime(
+    process_cap: str | None,
+    session_env: dict[str, str],
+    cap: int | None,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.delenv("HYPERLOOM_DSH_MAX_TOKENS", raising=False)
+    """Forge starts its own runtimes, so the cap ``HYPERLOOM_DSH_MAX_TOKENS`` sets must ride on those too."""
+    import yaml
+
+    if process_cap is None:
+        monkeypatch.delenv("HYPERLOOM_DSH_MAX_TOKENS", raising=False)
+    else:
+        monkeypatch.setenv("HYPERLOOM_DSH_MAX_TOKENS", process_cap)
     repo, kernel = _make_repo(tmp_path)
 
-    asyncio.run(_backend().run(_spec(repo, kernel)))
+    asyncio.run(_backend(options={"home": str(tmp_path / "home")}).run(_spec(repo, kernel, env=session_env)))
 
-    assert _FakeHarness.instances[-1].kwargs["max_tokens"] is None
+    patches = _FakeHarness.instances[-1].kwargs["patches"]
+    route = next(Path(str(p)) for p in patches if Path(str(p)).name == "hyperloom-gateway-route.yml")
+    (row,) = yaml.safe_load(route.read_text(encoding="utf-8"))
+    (model,) = row["config"]["providers"][GATEWAY_PROVIDER_ROUTE]["models"]
+    assert model.get("maxTokens") == cap
 
 
 def test_an_unusable_output_cap_is_refused_before_the_runtime_starts(

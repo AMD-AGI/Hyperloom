@@ -158,16 +158,19 @@ def test_find_config_donor_skips_self_cid() -> None:
 
 
 def test_find_config_donor_uses_framework_version_fallback() -> None:
-    compatible = _donor(
-        hardware="mi325x",
-        framework_version="1.2.4",
-        gain=20.0,
-    )
+    compatible = {
+        **_donor(
+            hardware="mi325x",
+            framework_version="1.2.4",
+            gain=20.0,
+        ),
+        "gfx_arch": "gfx942",
+    }
     kb = _BatchKB([[], [], [compatible]])
 
     donor, tier, conf = _find_config_donor(
         kb,
-        _find_identity(hardware="mi300x", framework_version="1.2.5"),
+        _find_identity(hardware="mi300x", framework_version="1.2.5", gfx_arch="gfx942"),
         _TARGET_SHAPE,
     )
 

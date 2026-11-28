@@ -204,6 +204,8 @@ def test_a_hand_written_base_with_a_model_path_and_a_client_command_reads_and_ro
             "ep": None,
             "isl": None,
             "osl": None,
+            "gfx": None,
+            "memory_mib": None,
         },
         "source": {**written["source"], "api": None, "path": None, "locator": None, "strategy": None, "tools": {}},
         "point": {"conc": 12, "exact": True, "alternatives": [], "source_concs": [], "source_launches": []},
@@ -486,6 +488,23 @@ def test_a_scriptable_base_runs_its_script_alone(changes, message):
 def test_a_serving_base_runs_a_client():
     with pytest.raises(BaseLaunchError, match="runs no client"):
         _base(client=None)
+
+
+def test_a_query_records_the_card_it_was_asked_on_and_one_written_before_reads_none():
+    query = replace(_base().query, gfx="gfx942", memory_mib=262128)
+    document = json.loads(json.dumps(query.to_document()))
+
+    assert (document["gfx"], document["memory_mib"]) == ("gfx942", 262128)
+    assert LaunchQuery.from_document(document) == query
+    del document["gfx"], document["memory_mib"]
+    assert LaunchQuery.from_document(document) == replace(query, gfx=None, memory_mib=None)
+    assert _base(query=query).digest() == _base().digest()
+
+
+@pytest.mark.parametrize(("field", "value"), [("gfx", ""), ("gfx", " gfx942"), ("memory_mib", 0), ("memory_mib", "1")])
+def test_a_query_refuses_a_card_fact_of_the_wrong_shape(field, value):
+    with pytest.raises(BaseLaunchError, match=f"the query's {field}"):
+        replace(_base().query, **{field: value})
 
 
 def test_a_scriptable_query_names_no_sequence_shape():

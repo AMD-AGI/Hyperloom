@@ -24,7 +24,6 @@ from pathlib import Path, PurePosixPath
 import yaml
 
 from hyperloom.common.aiter_layout import image_aiter_meta
-from hyperloom_common.gpu_identity import gfx_arch_for_gpu_type
 from hyperloom.common.outside_facts import AITER_META_DIR_ENV, AITER_META_WHEEL_DIR
 from hyperloom.measure.farm import (
     Farm,
@@ -146,8 +145,10 @@ class _ModuleBuild:
 
 
 def card_arch(spec: MeasurementSpec, gpu: GpuFacts | None) -> str | None:
-    """The architecture of the card the test runs on: the one the card reports, else the sheet's GPU type's."""
-    return (gpu.gfx_arch if gpu else None) or gfx_arch_for_gpu_type(spec.hardware.gpu_type)
+    """The architecture of the card the test runs on: the one the card reports, else that of the sheet's card."""
+    if gpu is not None:
+        return gpu.card.gfx
+    return spec.hardware.card.gfx if spec.hardware.card is not None else None
 
 
 def build_session(

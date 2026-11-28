@@ -55,6 +55,7 @@ from hyperloom.contracts.recipe import Recipe, RecipeDelta
 from hyperloom.hosted.mcp_server import MIN_TOKEN_LENGTH, McpServer, McpServerConfig
 from hyperloom.measure.runner.native.server_options import OptionInventory, ServerOption, write_inventory
 from hyperloom.measure.versions import socket_versions
+from hyperloom.orchestrator.tests._fixtures import MI355X_CARD, publish_card
 from hyperloom_multibranch.contracts.fork import AdmissionStatus, ForkAdmission, ForkRequest, RepairRequest
 from hyperloom_multibranch.contracts.gate import RegressionOutcome
 from hyperloom_multibranch.contracts.intent import Intent, IntentLayer
@@ -900,7 +901,12 @@ async def test_a_session_scores_its_frontier_with_the_defaults_for_its_budget(tm
     assert all(line["window_seconds"] >= defaults.window_seconds for line in lines)
 
 
-async def test_the_judge_reads_the_headroom_to_the_ceiling_prelude_modelled_for_the_workload(tmp_path: Path) -> None:
+async def test_the_judge_reads_the_headroom_to_the_ceiling_prelude_modelled_for_the_workload(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The ceiling rests on the session's card alone: no arch spec TraceLens measured on this host.
+    publish_card(monkeypatch, MI355X_CARD)
+    monkeypatch.setenv("TRACELENS_ROOT", str(tmp_path / "TraceLens"))
     stage = _stage(tmp_path)
     workload = replace(WORKLOAD, model=str(model_checkout(tmp_path)))
     stage.settings = replace(SETTINGS, workload=workload)

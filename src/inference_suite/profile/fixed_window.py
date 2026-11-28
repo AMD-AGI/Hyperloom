@@ -8,7 +8,7 @@ The window sits where InferenceX's ``--profile`` put it: ``/start_profile`` righ
 ``num_steps`` in the body, vLLM's ``--profiler-config`` iterations), and the server counts only steps that run requests,
 so the measured client's setup before its first request moves nothing. The answer to ``/stop_profile`` is not read, as
 InferenceX did not read it: SGLang refuses to stop a window its ``num_steps`` already closed, and the trace dirs say
-whether anything was captured.
+whether anything was captured. A ``/start_profile`` the server refused ends the round before the measured pass.
 """
 
 from __future__ import annotations
@@ -25,29 +25,36 @@ from inference_suite.profile.inject import (
     WindowCapture,
     server_request,
     start_body,
+    start_refusal,
 )
 from inference_suite.runtime.phases import Phase, PhaseClock
+from inference_suite.runtime.watch import Stop
 
 
 class FixedWindow:
     """Sends the server's profiler its start and stop around the measured pass, and records when it did."""
 
-    def __init__(self, profile: ProfileConfig, framework: Framework, base_url: str, clock: PhaseClock) -> None:
+    def __init__(
+        self, profile: ProfileConfig, framework: Framework, base_url: str, clock: PhaseClock, key: str | None = None
+    ) -> None:
         self._body = start_body(profile, framework)
         self._base_url = base_url.rstrip("/")
         self._clock = clock
+        self._key = key
         self._opened: float | None = None
         self._closed: float | None = None
         self._error: str | None = None
 
-    def open(self) -> None:
+    def open(self) -> Stop | None:
+        """Open the window; returns why the round has to end, if the server refused to open it."""
         try:
-            server_request(self._base_url + START_PROFILE_PATH, self._body)
+            server_request(self._base_url + START_PROFILE_PATH, self._body, self._key)
         except SERVER_REQUEST_ERRORS as exc:
             self._error = f"{START_PROFILE_PATH}: {exc}"
-            return
+            return start_refusal(self._error)
         self._opened = time.time()
         self._clock.mark(Phase.PROFILE_OPEN)
+        return None
 
     def close(self) -> None:
         if self._opened is None or self._closed is not None:
@@ -55,7 +62,7 @@ class FixedWindow:
         self._closed = time.time()
         self._clock.mark(Phase.PROFILE_CLOSE)
         try:
-            server_request(self._base_url + STOP_PROFILE_PATH, {})
+            server_request(self._base_url + STOP_PROFILE_PATH, {}, self._key)
         except SERVER_REQUEST_ERRORS:  # see the module docstring: the trace dirs, not this answer, are the verdict
             pass
 

@@ -751,11 +751,7 @@ def _preflight_model_config_compat(
     """Fail fast when the model config is statically known to be incompatible."""
     model = str(getattr(args, "model", "") or "")
     framework = (str(getattr(args, "framework", "") or "") or os.environ.get("FRAMEWORK", "")).strip().lower() or None
-    detail = _detect_incompatible_model_config(
-        model,
-        str(getattr(args, "gpu_type", "") or "") or None,
-        framework=framework,
-    )
+    detail = _detect_incompatible_model_config(model, framework=framework)
     if detail is None:
         model_dir = resolve_local_model_dir(model) or Path(model)
         config_path = model_dir / "config.json"

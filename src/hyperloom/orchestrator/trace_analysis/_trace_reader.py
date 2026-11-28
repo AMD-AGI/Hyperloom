@@ -265,6 +265,19 @@ def stream_events(
         stream.errors.append(str(exc))
 
 
+def _stream_overruns(events: list[tuple[float, float, Any]]) -> Iterator[tuple[int, float]]:
+    """``(index, overrun_us)`` of each ``(ts, end, _)`` event of one time-sorted stream that ends past the next event's
+    start by more than the epsilon; identical timestamps cannot contradict each other."""
+    for i in range(len(events) - 1):
+        ts, end, _ = events[i]
+        nxt_ts = events[i + 1][0]
+        if nxt_ts == ts:
+            continue
+        over = end - nxt_ts
+        if over > _STREAM_OVERLAP_EPS_US:
+            yield i, over
+
+
 def _stream_overlap_health(stream_events: dict[Any, list[tuple[float, float, str]]]) -> dict[str, Any]:
     """Report device streams whose event durations physically cannot hold."""
     worst: dict[str, Any] = {}
@@ -280,19 +293,11 @@ def _stream_overlap_health(stream_events: dict[Any, list[tuple[float, float, str
         overlapping = 0
         worst_name = ""
         worst_over = 0.0
-        for i in range(len(events) - 1):
-            ts, end, name = events[i]
-            nxt_ts = events[i + 1][0]
-            # Identical timestamps cannot contradict each other.
-            if nxt_ts == ts:
-                continue
-            over = end - nxt_ts
-            if over <= _STREAM_OVERLAP_EPS_US:
-                continue
+        for i, over in _stream_overruns(events):
             excess_us += over
             overlapping += 1
             if over > worst_over:
-                worst_name, worst_over = name, over
+                worst_name, worst_over = events[i][2], over
         if overlapping == 0 or worst_over < _STREAM_OVERLAP_MIN_WORST_US:
             continue
         share = excess_us / device_us

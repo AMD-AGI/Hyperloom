@@ -209,8 +209,8 @@ AGENT_BACKEND_CHOICES: tuple[str, ...] = (AGENT_BACKEND_CLAUDE, AGENT_BACKEND_CO
 # every model ladder in both packages, so it lives beside the backend names it is keyed by.
 DEFAULT_CLAUDE_MODEL = "claude-opus-5-5"
 DEFAULT_CODEX_MODEL = "gpt-6-astra"
-# The harness route mounts DeepSeek's own models only, so this names one of
-# those rather than a gateway deployment.
+# The harness reaches whatever model the gateway serves under this id;
+# ``DSH_MODEL`` names another.
 DEFAULT_DEEPSEEK_HARNESS_MODEL = "deepseek-v4-flash"
 
 

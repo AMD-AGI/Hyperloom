@@ -119,12 +119,10 @@ def test_a_hosted_run_adds_the_session_block_and_its_records_under_the_names_the
         "HYPERLOOM_IMAGE": "rocm/sglang:x",
     }
     sandbox = {"request_id": "r1", "sandbox_id": "sb-1", "node_name": "node-1", "same_node": True}
-    plugs = {"profile": "default", "fingerprint": "sha256:p", "sockets": {"measure": {"impl": "hosted"}}}
     (tmp_path / "hosted").mkdir()
     (tmp_path / "hosted" / "measurement_sandboxes.jsonl").write_text(
         json.dumps(sandbox) + '\n{"request_id": "r', "utf-8"
     )
-    (tmp_path / "plugs.resolved.json").write_text(json.dumps(plugs), "utf-8")
 
     for name in SESSION_VARIABLES.values():
         monkeypatch.delenv(name, raising=False)
@@ -140,7 +138,7 @@ def test_a_hosted_run_adds_the_session_block_and_its_records_under_the_names_the
         "image": "rocm/sglang:x",
         "node_name": None,
     }
-    assert (metadata["measurement_sandboxes"], metadata["plugs"]) == ([sandbox], plugs)
+    assert metadata["measurement_sandboxes"] == [sandbox]
     assert not {"specialist_resources", "container_resources", "hosted_measurement"} & set(metadata)
     assert local["session"]["claw_session_id"] is None and "measurement_sandboxes" not in local
 
