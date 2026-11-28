@@ -12,8 +12,6 @@ from dataclasses import replace
 from pathlib import Path
 from typing import Any, Mapping
 
-import yaml
-
 from hyperloom.common.gain_math import incremental_gain_pct
 from hyperloom.common.perf_metric import is_agentx_mode
 from hyperloom_common.timeutil import now_iso
@@ -24,7 +22,7 @@ from hyperloom.inference_optimizer.breakdown.recorder.baseline_event import (
 )
 from hyperloom.inference_optimizer.trace.task_progress import report_progress
 from ...stop_attribution import SESSION_TIME_EXHAUSTED_CLASS, STOPPED_BY_THE_RUN
-from ..serving import _server_lifecycle as _lifecycle
+from .._suite.held_test import HeldPass, HeldTest, RoundPurpose
 from .bringup import _disable_cuda_graph_flag, _with_cuda_graph_disabled
 from .records import (
     _BENCHMARK_MODE_ATTR,
@@ -335,36 +333,21 @@ class _BenchmarkRoundsMixin:
         return stopped_result
 
     async def _run_guarded_round(
-        self,
-        attempt: BenchmarkAttempt,
-        label: str,
-        round_dir: Path,
-        *,
-        port: Any,
-        **config: Any,
+        self, attempt: BenchmarkAttempt, label: str, round_dir: Path, held: HeldPass
     ) -> dict[str, Any]:
-        run_eval = config.pop("run_eval")
-        round_cfg = self._write_lifecycle_config(
-            attempt.materialized_config_path,
-            round_dir,
-            cleanup=config.pop("cleanup"),
-            port=port,
-            run_eval=run_eval,
-        )
+        evaluates = held.evaluates
         return await self._run_reported_round(
             # A round told whether to evaluate is read as told, whatever the attempt's own config says.
-            attempt if run_eval is None else replace(attempt, run_eval_disabled=not run_eval),
+            attempt if evaluates is None else replace(attempt, run_eval_disabled=not evaluates),
             label=label,
-            config_path=round_cfg,
             output_dir=round_dir,
-            **config,
+            held=held,
         )
 
     async def _run_cold_start_guarded_rounds(
         self,
         attempt: BenchmarkAttempt,
         output_dir: Path,
-        lifecycle: Mapping[str, Any],
         application: list[dict[str, str]] | dict[str, Any],
     ) -> dict[str, Any]:
         """Run the discarded warm-up, then the measured round on its server, which the accuracy eval follows.
@@ -373,62 +356,50 @@ class _BenchmarkRoundsMixin:
         stands on the warm-up's figure because the measured round did not run to its end carries no score.
         """
         params = attempt.params
-        warmup_dir = output_dir / _WARMUP_ROUND_DIR
-        log.info(
-            "baseline_executor: cold-start guard — warmup round (discarded, boots persistent server) in %s",
-            warmup_dir,
-        )
-        # Each warmup starts a fresh benchmark cap; the session deadline never resets.
-        warmup_result = await self._run_guarded_round(
-            attempt,
-            ROUND_WARMUP,
-            warmup_dir,
-            port=lifecycle["port"],
-            cleanup=False,
-            run_eval=False,
-            warmup_round=True,
-        )
-        if warmup_result.get("status") != "succeeded":
-            # Warmup failure almost certainly recurs, so skip the measured round.
-            warmup_result.setdefault("nonfatal_warnings", []).append("baseline_warmup_round_failed")
-            log.warning(
-                "baseline_executor: warmup round failed (error_class=%s); skipping measured round",
-                warmup_result.get("error_class"),
-            )
-            _stamp_warm_patch_outcome(warmup_result, application, params)
-            return warmup_result
-        warmup_tput = warmup_result.get("output_throughput")
-        await report_progress(
-            unit="baseline_round",
-            label="warmup",
-            index=1,
-            total=2,
-            status="succeeded",
-            output_throughput=warmup_tput,
-            runtime_sec=warmup_result.get("subprocess_runtime_sec"),
-        )
-        if cold := self._cold_anchor_when_hot_pass_unaffordable(warmup_result, attempt):
-            return cold
-        measure_dir = output_dir / _MEASURE_ROUND_DIR
-        log.info(
-            "baseline_executor: cold-start guard — measured baseline round in %s "
-            "(warmup tput=%.1f tok/s discarded, reusing hot server)",
-            measure_dir,
-            warmup_tput or 0.0,
-        )
         # A replayed KB config is promoted onto ``current_best`` and becomes the reference every later measurement
         # in the session is taken against, so it may not be adopted on throughput alone.
         replayed = str(getattr(attempt.ctx.task, "kind", "") or "") == "replay_warm_recipe"
-        # Round 2 (measured): re-attach to the hot server (client only), then the eval.
-        result = await self._run_guarded_round(
-            attempt,
-            ROUND_MEASURE,
-            measure_dir,
-            port=lifecycle["port"],
-            cleanup=True,
-            run_eval=True if replayed else None,
-            server_already_ready=True,
-        )
+        with HeldTest(output_dir, must_evaluate=replayed) as test:
+            warmup_dir = output_dir / _WARMUP_ROUND_DIR
+            log.info(
+                "baseline_executor: cold-start guard — warmup round (discarded, boots persistent server) in %s",
+                warmup_dir,
+            )
+            # Each warmup starts a fresh benchmark cap; the session deadline never resets.
+            warmup_result = await self._run_guarded_round(
+                attempt, ROUND_WARMUP, warmup_dir, HeldPass(test, RoundPurpose.WARMUP)
+            )
+            if warmup_result.get("status") != "succeeded":
+                # Warmup failure almost certainly recurs, so skip the measured round.
+                warmup_result.setdefault("nonfatal_warnings", []).append("baseline_warmup_round_failed")
+                log.warning(
+                    "baseline_executor: warmup round failed (error_class=%s); skipping measured round",
+                    warmup_result.get("error_class"),
+                )
+                _stamp_warm_patch_outcome(warmup_result, application, params)
+                return warmup_result
+            warmup_tput = warmup_result.get("output_throughput")
+            await report_progress(
+                unit="baseline_round",
+                label="warmup",
+                index=1,
+                total=2,
+                status="succeeded",
+                output_throughput=warmup_tput,
+                runtime_sec=warmup_result.get("subprocess_runtime_sec"),
+            )
+            if cold := self._cold_anchor_when_hot_pass_unaffordable(warmup_result, attempt):
+                return cold
+            measure_dir = output_dir / _MEASURE_ROUND_DIR
+            log.info(
+                "baseline_executor: cold-start guard — measured baseline round in %s "
+                "(warmup tput=%.1f tok/s discarded, reusing hot server)",
+                measure_dir,
+                warmup_tput or 0.0,
+            )
+            result = await self._run_guarded_round(
+                attempt, ROUND_MEASURE, measure_dir, HeldPass(test, RoundPurpose.MEASURE)
+            )
         _stamp_warm_patch_outcome(result, application, params)
         if result.get("status") != "succeeded":
             if result.get("error_class") != SESSION_TIME_EXHAUSTED_CLASS:
@@ -511,42 +482,13 @@ class _BenchmarkRoundsMixin:
             ((hot / cold - 1.0) * 100.0) if cold > 0 else 0.0,
         )
 
-    def _write_lifecycle_config(
-        self,
-        base_config_path: Path,
-        dest_dir: Path,
-        *,
-        cleanup: bool,
-        port: int,
-        run_eval: bool | None = None,
-    ) -> Path:
-        """Render a per-round YAML injecting ``benchmark.server_lifecycle``."""
-        with Path(base_config_path).open(encoding="utf-8") as f:
-            cfg = yaml.safe_load(f) or {}
-        bench = cfg.setdefault("benchmark", {})
-        # The rounds of one attempt share the server's pid files in the slot above their own dirs.
-        _lifecycle.inject_lifecycle(
-            bench,
-            cleanup=cleanup,
-            pid_dir=dest_dir.parent,
-            port=port,
-        )
-        if run_eval is not None:
-            bench.setdefault("envs", {})["RUN_EVAL"] = "true" if run_eval else "false"
-        dest_dir.mkdir(parents=True, exist_ok=True)
-        out = Path(dest_dir) / "baseline_lifecycle.yaml"
-        with out.open("w", encoding="utf-8") as f:
-            yaml.safe_dump(cfg, f, sort_keys=False)
-        return out
-
     async def _run_reported_round(
         self,
         attempt: BenchmarkAttempt,
         *,
         label: str,
-        config_path: Path,
         output_dir: Path,
-        **overrides: Any,
+        held: HeldPass | None = None,
     ) -> dict[str, Any]:
         """Announce a benchmark round before it blocks, run it, and record it."""
         recorder = attempt.recorder
@@ -568,12 +510,7 @@ class _BenchmarkRoundsMixin:
             )
 
         try:
-            result = await self._run_single_benchmark(
-                attempt,
-                config_path=config_path,
-                output_dir=output_dir,
-                **overrides,
-            )
+            result = await self._run_single_benchmark(attempt, output_dir=output_dir, held=held)
         except BaseException as exc:
             # A round that raised still happened, and its row is the only place the timeline can say which round the
             # action died in.

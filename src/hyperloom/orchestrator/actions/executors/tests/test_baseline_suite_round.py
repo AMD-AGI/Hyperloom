@@ -4,10 +4,10 @@
 """A baseline whose session froze a base runs its rounds on inference_suite, played here by ``ScriptedRounds``.
 
 The contract: each round writes its own run_dir with ``launch.json`` below the round's directory, the cold-start pair
-boots one server the measured round reuses and the attempt reaps it with ``stop`` on its slot, the pair's accuracy
-eval follows its measured bench and never its warm-up, an eval that fails there leaves the bench standing, a failed
-step maps to its error class, and a round the budget cannot pay for -- or a PRELUDE retry past the optimization
-reserve -- boots nothing.
+boots one server the measured round reuses and its test stops it once in the attempt's slot, a lone round owns its
+server, the pair's accuracy eval follows its measured bench and never its warm-up, an eval that fails there leaves
+the bench standing, a failed step maps to its error class, and a round the budget cannot pay for -- or a PRELUDE
+retry past the optimization reserve -- boots nothing.
 """
 
 from __future__ import annotations
@@ -23,7 +23,7 @@ import pytest
 import yaml
 
 from hyperloom.orchestrator.state.tests._session_base import freeze_base
-from hyperloom.orchestrator.actions.executors import baseline
+from hyperloom.orchestrator.actions.executors._suite import held_test
 from hyperloom.orchestrator.actions.executors._suite import rounds as suite_rounds
 from hyperloom.orchestrator.actions.executors._suite.config import MEASURED_SEED, WARMUP_SEED
 from hyperloom.orchestrator.actions.executors._suite.rounds import RUN_DIR_PREFIX, TOOL_CACHE_ENV
@@ -93,7 +93,7 @@ def suite(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> SimpleNamespace:
     monkeypatch.setattr(suite_rounds, "client_only_server_url", lambda: None)
 
     stopped: list[Path] = []
-    monkeypatch.setattr(baseline, "stop", lambda pid_dir: stopped.append(Path(pid_dir)) or Reaped((), ()))
+    monkeypatch.setattr(held_test, "stop", lambda pid_dir: stopped.append(Path(pid_dir)) or Reaped((), ()))
     return SimpleNamespace(session=session, point=_point(tmp_path / "point.yaml"), ws=tmp_path / "ws", stopped=stopped)
 
 
@@ -135,7 +135,15 @@ def test_the_cold_start_pair_boots_one_server_the_measured_round_reuses_and_the_
     assert (measured.lifecycle.mode, measured.lifecycle.pid_dir) == (LifecycleMode.REUSE, str(suite.ws))
     assert (warmup.fixed.seed, measured.fixed.seed) == (WARMUP_SEED, MEASURED_SEED)
     assert not warmup.eval.enabled and not measured.eval.enabled
+    assert warmup.server.port == measured.server.port
     assert suite.stopped == [suite.ws]
+    # Both rounds run the attempt's one config: what each round is goes into the round, not into a file of its own.
+    assert sorted(str(path.relative_to(suite.ws)) for path in suite.ws.rglob("*.yaml")) == [
+        "baseline_config.with_envs.yaml",
+        f"measure_round/{RUN_DIR_PREFIX}0/config.yaml",
+        f"warmup_round/{RUN_DIR_PREFIX}0/config.yaml",
+    ]
+    assert result["materialized_config"] == str(suite.ws / "baseline_config.with_envs.yaml")
 
 
 _SCORE = {"exact_match,strict-match": 0.9}
@@ -376,6 +384,7 @@ def test_a_lone_round_owns_its_server(monkeypatch, suite):
     (config,) = (call.config for call in rounds.calls)
     assert config.lifecycle.mode is LifecycleMode.OWN
     assert result["workspace"] == str(suite.ws / f"{RUN_DIR_PREFIX}0")
+    assert suite.stopped == []
 
 
 @pytest.mark.parametrize(("flag", "kv"), [(None, True), ("0", False)])
@@ -398,7 +407,6 @@ def test_a_round_that_stopped_at_a_step_fails_under_that_steps_error_class(monke
     assert result["error_class"] == error_class
     assert result["run_status"] == "failed"
     assert Path(result["report_path"]).is_file()
-    assert suite.stopped == [suite.ws]
 
 
 def test_a_server_that_exits_on_a_capacity_error_fails_as_engine_capacity(monkeypatch, suite):

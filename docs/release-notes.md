@@ -410,6 +410,14 @@ it.
   `launch.json`, `config.yaml`, `phase_marks.json` and
   `inferencex_result.json` are collected as before. See
   [Upgrade](reference/upgrade.md).
+- **A baseline's warm-up and measured rounds run from one config.** The
+  attempt no longer writes `warmup_round/baseline_lifecycle.yaml` and
+  `measure_round/baseline_lifecycle.yaml`; each round's `config.yaml` in its
+  run directory still records what it ran. The attempt's
+  `baseline_config.with_envs.yaml` now carries the round's cap and
+  `PYTHONUNBUFFERED`, as a single-round attempt's did, so its
+  `launch_evidence.json` lists that variable. The rounds themselves are
+  unchanged. See [Upgrade](reference/upgrade.md).
 
 ## Hyperloom 1.2.0 release
 

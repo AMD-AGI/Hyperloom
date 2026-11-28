@@ -17,7 +17,6 @@ except ModuleNotFoundError:  # optional runtime dependency
 
 from hyperloom.orchestrator.actions.executors import _aiter_jit
 from hyperloom.orchestrator.actions.executors import baseline
-from hyperloom.orchestrator.actions.executors.benchmark_run.records import BenchmarkAttempt
 from hyperloom.orchestrator.kernel import _integrate_rebaseline as integrate_rebaseline
 
 
@@ -244,45 +243,3 @@ def test_benchmark_timeout_does_not_probe_or_expand_for_jit(monkeypatch):
     monkeypatch.setenv("INFERENCE_OPTIMIZER_BENCHMARK_TIMEOUT_SEC", "7800")
     exe = baseline.BaselineExecutor()
     assert exe._resolve_timeout({}) == 7800
-
-
-@pytest.fixture
-def baseline_launch(monkeypatch, tmp_path):
-    from hyperloom.orchestrator.actions.executors.serving import _multi_node_server_lifecycle
-    from hyperloom.orchestrator.actions.executors.profile import ProfileExecutor
-
-    config = tmp_path / "baseline.yaml"
-    config.write_text("benchmark:\n  framework: sglang\n", encoding="utf-8")
-    jit_dir = tmp_path / "jit"
-    jit_dir.mkdir()
-    monkeypatch.setattr(_aiter_jit, "_resolve_lock_sweep_dirs", lambda *_args: [jit_dir])
-    monkeypatch.setattr(baseline, "build_benchmark_command", lambda **kwargs: ["fake-benchmark"])
-
-    async def no_restart(_server, **kwargs):
-        return None
-
-    monkeypatch.setattr(_multi_node_server_lifecycle, "restart_server_for_round", no_restart)
-    monkeypatch.setenv("INFERENCE_OPTIMIZER_BENCHMARK_TIMEOUT_SEC", "7800")
-    monkeypatch.setenv("INFERENCE_OPTIMIZER_SILENCE_TIMEOUT_SEC", "600")
-    state = SimpleNamespace()
-    baseline_executor = baseline.BaselineExecutor(session_dir=tmp_path, shared_state=state)
-    profile_executor = ProfileExecutor(session_dir=tmp_path)
-    profile_executor.shared_state = state
-
-    async def launch(*, profile=False, ready=False, extra=None):
-        executor = profile_executor if profile else baseline_executor
-        return await executor._run_single_benchmark(
-            BenchmarkAttempt(
-                timeout_sec=123,
-                resolved_model="fixture-model",
-                materialized_config_path=config,
-                effective_extra_server_args="",
-                params={},
-                ctx=SimpleNamespace(extra=extra or {}),
-            ),
-            config_path=config,
-            output_dir=tmp_path / "round",
-            server_already_ready=ready,
-        )
-
-    return launch, jit_dir

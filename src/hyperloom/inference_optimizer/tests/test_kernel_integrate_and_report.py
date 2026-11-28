@@ -178,9 +178,7 @@ def graded_integrate_case(native_benchmark, session_dir, tmp_path, monkeypatch):
 def integrate_recipe_case(session_dir, tmp_path, monkeypatch):
     from hyperloom.orchestrator.actions.executors.baseline import BaselineExecutor
 
-    monkeypatch.setattr(
-        "hyperloom.orchestrator.actions.executors.baseline.double_run_requested", lambda params, config_path: False
-    )
+    monkeypatch.setattr("hyperloom.orchestrator.actions.executors.baseline.warms_up", lambda config_path: False)
     monkeypatch.delenv("HYPERLOOM_BENCHMARK_CONFIG", raising=False)
     monkeypatch.delenv("HYPERLOOM_PERF_METRIC", raising=False)
     monkeypatch.delenv("INFERENCEX_PATH", raising=False)
@@ -231,8 +229,8 @@ def integrate_recipe_case(session_dir, tmp_path, monkeypatch):
     state.save(session_dir)
     benchmarks = []
 
-    async def _measure(executor, _attempt, *, config_path, output_dir, **_kwargs):
-        benchmark = yaml.safe_load(config_path.read_text(encoding="utf-8"))["benchmark"]
+    async def _measure(executor, attempt, *, output_dir, **_kwargs):
+        benchmark = yaml.safe_load(attempt.materialized_config_path.read_text(encoding="utf-8"))["benchmark"]
         benchmarks.append(benchmark)
         tput = 100.0 if benchmark["envs"].get("LEG") == "A" else 110.0
         return {

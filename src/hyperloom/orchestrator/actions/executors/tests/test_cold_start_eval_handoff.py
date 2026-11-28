@@ -14,6 +14,7 @@ from typing import Any
 
 import pytest
 
+from hyperloom.orchestrator.actions.executors._suite.held_test import HeldPass, HeldTest, RoundPurpose
 from hyperloom.orchestrator.actions.executors.baseline import BaselineExecutor
 from hyperloom.orchestrator.actions.executors.benchmark_run.records import (
     ACCURACY_STAGE_KEY,
@@ -49,8 +50,8 @@ class _StubbedPair(_BenchmarkRoundsMixin):
         self.hot_pass_affordable = hot_pass_affordable
         self.asked: list[tuple[str, bool | None]] = []
 
-    async def _run_guarded_round(self, attempt, label, round_dir, **config):
-        self.asked.append((label, config["run_eval"]))
+    async def _run_guarded_round(self, attempt, label, round_dir, held):
+        self.asked.append((label, held.evaluates))
         return self.results[len(self.asked) - 1]
 
     def _measure_round_affordable(self, warmup_result, *, ctx_extra=None):
@@ -83,7 +84,7 @@ def _attempt(tmp_path: Path, *, kind: str = "baseline", params: dict | None = No
 
 
 async def _rounds(pair: _BenchmarkRoundsMixin, attempt: BenchmarkAttempt, slot: Path):
-    return await pair._run_cold_start_guarded_rounds(attempt, slot, {"port": 8888}, [])
+    return await pair._run_cold_start_guarded_rounds(attempt, slot, [])
 
 
 def _play(pair: _BenchmarkRoundsMixin, attempt: BenchmarkAttempt, slot: Path):
@@ -208,49 +209,47 @@ def test_a_drift_anchor_takes_the_failed_eval_of_the_measured_round_it_replaces(
 
 
 class _RecordedRound(_BenchmarkRoundsMixin):
-    """A guarded round that records what it was configured and run with instead of launching."""
-
-    def _write_lifecycle_config(self, base_config_path, dest_dir, **lifecycle):
-        self.configured_run_eval = lifecycle["run_eval"]
-        return dest_dir / "baseline_lifecycle.yaml"
+    """A guarded round that records what it was run with instead of launching."""
 
     async def _run_reported_round(self, attempt, **round_):
         self.ran_with = attempt
+        self.ran_as = round_["held"]
         return {"status": "succeeded"}
 
 
 @pytest.mark.parametrize(
-    ("attempt_disabled", "run_eval", "round_disabled"),
+    ("attempt_disabled", "purpose", "must_evaluate", "round_disabled"),
     [
-        # A round the sequencer tells to evaluate is read as evaluating although the attempt's config has the eval off.
-        (True, True, False),
-        (False, True, False),
-        # A round told not to evaluate is read as one that did not, although the attempt's config has the eval on.
-        (True, False, True),
-        (False, False, True),
-        # A round left to the config keeps the attempt's own flag.
-        (True, None, True),
-        (False, None, False),
+        # A measured round the test forces to evaluate is read as evaluating although the attempt's config has the
+        # eval off.
+        (True, RoundPurpose.MEASURE, True, False),
+        (False, RoundPurpose.MEASURE, True, False),
+        # The warm-up never evaluates, and is read as a round that did not although the attempt's config has the
+        # eval on.
+        (True, RoundPurpose.WARMUP, False, True),
+        (False, RoundPurpose.WARMUP, False, True),
+        # A measured round left to the config keeps the attempt's own flag.
+        (True, RoundPurpose.MEASURE, False, True),
+        (False, RoundPurpose.MEASURE, False, False),
     ],
 )
-def test_a_round_told_whether_to_evaluate_runs_as_told(tmp_path, attempt_disabled, run_eval, round_disabled):
+def test_a_round_is_read_as_evaluating_when_its_test_says_so(
+    tmp_path, attempt_disabled, purpose, must_evaluate, round_disabled
+):
     guarded = _RecordedRound()
     attempt = _attempt(tmp_path, run_eval_disabled=attempt_disabled)
+    held = HeldPass(HeldTest(tmp_path, must_evaluate=must_evaluate), purpose)
 
-    asyncio.run(
-        guarded._run_guarded_round(
-            attempt, "warmup", tmp_path / "warmup_round", port=8888, cleanup=False, run_eval=run_eval
-        )
-    )
+    asyncio.run(guarded._run_guarded_round(attempt, purpose.value, tmp_path / "round", held))
 
-    assert guarded.configured_run_eval is run_eval
+    assert guarded.ran_as is held
     assert guarded.ran_with.run_eval_disabled is round_disabled
 
 
 class _EvaluatingRounds(_BenchmarkRoundsMixin):
     """A pair played down to the benchmark, each round's result stamped from its own run directory as a real one is.
 
-    A round whose lifecycle config turns the eval on leaves a results file there.
+    A round its test tells to evaluate leaves a results file there.
     """
 
     shared_state = None
@@ -259,11 +258,8 @@ class _EvaluatingRounds(_BenchmarkRoundsMixin):
         self.score = score
         self.evaluates: dict[Path, bool | None] = {}
 
-    def _write_lifecycle_config(self, base_config_path, dest_dir, **lifecycle):
-        self.evaluates[dest_dir] = lifecycle["run_eval"]
-        return dest_dir / "baseline_lifecycle.yaml"
-
-    async def _run_single_benchmark(self, attempt, *, config_path, output_dir, **_reuse):
+    async def _run_single_benchmark(self, attempt, *, output_dir, held):
+        self.evaluates[output_dir] = held.evaluates
         run_dir = output_dir / "run"
         run_dir.mkdir(parents=True)
         if self.evaluates[output_dir]:
@@ -271,8 +267,7 @@ class _EvaluatingRounds(_BenchmarkRoundsMixin):
             (run_dir / "results_2026-08-19T00-00-00.json").write_text(json.dumps(results), encoding="utf-8")
         result = _round(output_dir, 544.0, e2el_mean_ms=12.0)
         round_ = _BenchmarkRound(
-            config_path=config_path,
-            materialized_config_path=attempt.materialized_config_path,
+            config_path=attempt.materialized_config_path,
             output_dir=output_dir,
             ctx_extra={},
             framework="vllm",
@@ -280,7 +275,7 @@ class _EvaluatingRounds(_BenchmarkRoundsMixin):
             capture_meta={},
             timeout_sec=attempt.timeout_sec,
             session_deadline_sec=None,
-            server_already_ready=False,
+            held=held,
             run_eval_disabled=attempt.run_eval_disabled,
         )
         self._stamp_round_quality(round_, result, {"framework": "vllm"}, [])

@@ -127,6 +127,7 @@ class SuiteRound:
     ``HYPERLOOM_RUN_PHASE=server`` point: no load and no eval. ``env_drop`` names host variables the round's server and client do not inherit.
     ``checkpoint`` stops an AgentX round that trails its reference; its ruling lands in ``round_dir``. ``evaluates``
     says whether the round runs the accuracy eval after its load; ``None`` leaves that to the point's ``RUN_EVAL``.
+    ``port`` is the port the round's server answers on, whatever the point names; ``None`` leaves it to the point.
     """
 
     config_path: Path
@@ -138,6 +139,7 @@ class SuiteRound:
     boot_only: bool = False
     checkpoint: AgentxCheckpoint | None = None
     evaluates: bool | None = None
+    port: int | None = None
 
 
 @dataclass(frozen=True)
@@ -152,21 +154,23 @@ def _read_point(config_path: Path) -> Mapping[str, object]:
     return yaml.safe_load(config_path.read_text(encoding=_UTF8)) or {}
 
 
-def _round_point(config_path: Path, cards: int) -> Mapping[str, object]:
+def _round_point(config_path: Path, cards: int, port: int | None = None) -> Mapping[str, object]:
     """The point a round runs: on the session's cards when it names no GPU mask, and on a free port when it names none.
 
     A local server drops the masks it inherits and runs on its GPU ids as absolute cards, so a point without a mask (an
     AgentX point never carries one) runs on the front of the session's mask rather than on ``0..cards-1``.
 
     A point naming no ``PORT`` would boot on the launcher's default, which another round on this machine, or a
-    co-tenant on a shared host, may already hold. A round whose server outlives it -- the server lifecycle's -- names
-    the port ``inject_lifecycle`` pinned, and keeps it.
+    co-tenant on a shared host, may already hold. A round whose server outlives it runs on ``port``, the one its held
+    test gives every round, or names the port ``inject_lifecycle`` pinned, and keeps it.
     """
     document = _read_point(config_path)
     bench = _bench(document)
     envs = _envs(bench)
     filled = dict(bench.get("envs") or {})
-    if not envs.get(_PORT_ENV, "").strip():
+    if port is not None:
+        filled[_PORT_ENV] = str(port)
+    elif not envs.get(_PORT_ENV, "").strip():
         filled[_PORT_ENV] = str(pick_server_port())
     if not envs.get(_GPU_MASK_ENV, "").strip():
         filled[_GPU_MASK_ENV] = ",".join(session_cards_mask(cards))
@@ -229,11 +233,6 @@ def point_server(config_path: Path, *, finds_server: bool) -> PointServer:
     if finds_server:
         return PointServer(Lifecycle(LifecycleMode.REUSE, pid_dir), Path(pid_dir) if cleanup else None)
     return PointServer(Lifecycle(LifecycleMode.OWN) if cleanup else Lifecycle(LifecycleMode.BOOT, pid_dir))
-
-
-def round_lifecycle(round_dir: Path, mode: LifecycleMode) -> Lifecycle:
-    """How the round in ``round_dir`` holds its server; a cold-start pair shares one through the slot above it."""
-    return Lifecycle(mode, str(round_dir.parent) if mode in (LifecycleMode.BOOT, LifecycleMode.REUSE) else None)
 
 
 def deadline_unix(session_deadline_sec: float | None) -> int | None:
@@ -300,7 +299,7 @@ def run_suite_round(route: SuiteRoute, request: SuiteRound, *, on_poll: Callable
     run_dir = _next_run_dir(request.round_dir)
     settings = _settings(route, run_dir, request.lifecycle, request.deadline_unix, request.env_drop)
     try:
-        point = _round_point(request.config_path, route.base.cards)
+        point = _round_point(request.config_path, route.base.cards, request.port)
         if request.boot_only:
             point = _server_phase_point(point)
         config = suite_config(point, route.base, settings)
@@ -408,7 +407,6 @@ __all__ = [
     "external_agentx_config",
     "inherited_env_names",
     "point_server",
-    "round_lifecycle",
     "run_accuracy_suite_round",
     "run_suite_round",
     "staged_tool_cache",

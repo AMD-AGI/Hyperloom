@@ -557,6 +557,33 @@ Two packaging changes come with it:
 
 The multi-node `infera` backend is a different thing and is unchanged.
 
+### Recommended: read a baseline round's config from its run directory
+
+A benchmark attempt that runs a discarded warm-up round and a measured round
+on one server (a genuine baseline, a PRELUDE warm replay, the KERNEL stack
+validation and the KERNEL integrate re-baseline) used to write a copy of its
+config for each round, `warmup_round/baseline_lifecycle.yaml` and
+`measure_round/baseline_lifecycle.yaml`, with a `server_lifecycle` block, a
+pinned `PORT` and that round's `RUN_EVAL`. Neither file is written. Both
+rounds run the attempt's one config, `baseline_config.with_envs.yaml`; which
+round boots the server, the port it answers on and which round evaluates are
+set on the round, and the rounds they produce are the ones they produced.
+
+* If you read `baseline_lifecycle.yaml`, read `config.yaml` in the round's
+  run directory (`warmup_round/suite_run_<n>/`, `measure_round/suite_run_<n>/`)
+  instead: it holds what the round ran, its port and its eval switch included.
+* `baseline_config.with_envs.yaml` of such an attempt now carries the round's
+  cap as `timeout_seconds` and `PYTHONUNBUFFERED: '1'` under `envs`, as the
+  config of a single-round attempt (multi-node, AgentX, a profiled round)
+  already did. The server was started with that variable before; the
+  attempt's `launch_evidence.json` now also lists it in
+  `requested_server_env`, and its `recipe_digest` is the digest of the file
+  with those two values.
+* A single-round attempt no longer looks for a server record in its task
+  directory when it ends; its round stops the server it started, as before.
+  The info line `cold-start double-run not eligible (...)` is no longer
+  logged.
+
 ---
 
 ## Upgrading from 1.1.x

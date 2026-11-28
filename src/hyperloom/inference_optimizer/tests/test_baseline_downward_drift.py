@@ -50,7 +50,7 @@ def _run_rounds(tmp_path: Path, *, warmup: float, measured: float, kind="baselin
         ctx=SimpleNamespace(task=SimpleNamespace(kind=kind)),
         params={"quality_ref_exempt": exempt},
     )
-    result = asyncio.run(rounds._run_cold_start_guarded_rounds(attempt, tmp_path, {"port": 8888}, []))
+    result = asyncio.run(rounds._run_cold_start_guarded_rounds(attempt, tmp_path, []))
     assert rounds.calls == 2
     return result, receipts
 

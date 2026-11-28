@@ -505,7 +505,6 @@ async def test_the_executor_records_the_rounds_it_actually_ran(tmp_path: Path) -
                     recorder=recorder,
                 ),
                 label=label,
-                config_path=Path("/cfg.yaml"),
                 output_dir=tmp_path / label,
             )
         return _measured()

@@ -15,6 +15,7 @@ from ...stop_attribution import StoppedByTheRun
 from .._accuracy_gate import ACCURACY_DEFINITION_DIGEST_KEY, EVAL_DEFINITION_DIGEST_KEY
 from ..grid._grid_runner import stopped_by_the_run
 from ..serving._server_argv import ConfigUnreadable, config_point
+from .._suite.held_test import HeldPass
 from .._suite.rounds import SuiteRoute
 from inference_suite.contracts import RunLayout
 
@@ -270,8 +271,8 @@ class BenchmarkAttempt:
 
 
 class _BenchmarkRound(NamedTuple):
+    #: The attempt's materialized config, which every round of the attempt runs.
     config_path: Path
-    materialized_config_path: Path
     output_dir: Path
     ctx_extra: Mapping[str, Any]
     framework: str
@@ -279,7 +280,8 @@ class _BenchmarkRound(NamedTuple):
     capture_meta: dict[str, Any]
     timeout_sec: int
     session_deadline_sec: Any
-    server_already_ready: bool
+    #: The round's place in the test that holds its server; ``None`` for a round that owns its own.
+    held: HeldPass | None
     run_eval_disabled: bool
 
 

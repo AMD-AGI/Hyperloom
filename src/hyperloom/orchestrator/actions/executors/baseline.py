@@ -19,6 +19,7 @@ from pathlib import Path
 from typing import Any, Mapping
 
 from hyperloom_common.coerce import optional_positive_float
+from hyperloom_common.env import is_truthy
 from hyperloom.common.perf_metric import agentx_active, with_output_per_gpu
 from hyperloom.inference_optimizer.breakdown.recorder.baseline_event import (
     ROUND_SINGLE,
@@ -34,11 +35,10 @@ from ..stop_attribution import (
     SESSION_TIME_EXHAUSTED_CLASS,
     STOPPED_BY_THE_RUN,
 )
-from inference_suite import stop
 from inference_suite.contracts import FailedStep
 
-from .serving import _server_lifecycle as _lifecycle
 from .grid._grid_base import GridRound, run_grid_suite_round
+from ._suite.held_test import HeldPass, warms_up
 from ._suite.rounds import SuiteRoundRefused, SuiteRoute, suite_route
 
 # The grid module is the namespace the helpers both benching arms share ended up in: how a sentinel returncode reads
@@ -57,9 +57,6 @@ from .workload._workload_envs import (
 )
 from .workload._agentx_prefix_cache import refuse_cacheless_agentx_baseline
 from .benchmark_config import prepare_agentx_runtime
-from .benchmark_result import (
-    double_run_requested,
-)
 from .benchmark_run.accuracy import _EVAL_FAILURE_MARKERS, _BaselineAccuracyMixin
 from .benchmark_run.launch import _BenchmarkLaunchMixin
 from .benchmark_run.records import (
@@ -232,10 +229,11 @@ class BenchmarkRunExecutor(_BaselineAccuracyMixin, _BenchmarkLaunchMixin, _Bench
         if (refusal := await self._attempt_refusal(attempt, output_dir, shared_state)) is not None:
             return refusal
         # Cold-start "warmup artifact" guard: the freshly-booted server's first benchmark window pays one-time cold
-        # costs that inflate later gains into fictitious "improvements".
-        lifecycle = _lifecycle.resolve_lifecycle_params(config_path)
-        double_run_wanted = double_run_requested(params, config_path)
-        double_run = double_run_wanted and lifecycle["eligible"]
+        # costs that inflate later gains into fictitious "improvements". A shape capture records one round and turns
+        # the guard off.
+        double_run = warms_up(config_path) and (
+            "baseline_double_run" not in params or is_truthy(params["baseline_double_run"])
+        )
         # Whether THIS run actually executes lm-eval, read back from the materialized config the subprocess
         # consumes -- the single source of truth.
         attempt = replace(attempt, run_eval_disabled=materialized_run_eval_disabled(config_path))
@@ -247,33 +245,16 @@ class BenchmarkRunExecutor(_BaselineAccuracyMixin, _BenchmarkLaunchMixin, _Bench
             return self._roll_back_failed_patches(application, params, output_dir, shared_state)
         try:
             if double_run:
-                return await self._run_cold_start_guarded_rounds(attempt, output_dir, lifecycle, application)
-            if double_run_wanted:
-                log.info(
-                    "baseline_executor: cold-start double-run not eligible (%s); running single round.",
-                    lifecycle["reason"],
-                )
-            result = await self._run_reported_round(
-                attempt, label=ROUND_SINGLE, config_path=config_path, output_dir=output_dir
-            )
+                return await self._run_cold_start_guarded_rounds(attempt, output_dir, application)
+            result = await self._run_reported_round(attempt, label=ROUND_SINGLE, output_dir=output_dir)
             _stamp_warm_patch_outcome(result, application, params)
             return result
         finally:
-            self._release_attempt(output_dir)
             # Revert warm-replay patches to prevent state leakage into subsequent tasks that reuse the same
             # InferenceX checkout. A required timeline's tree is promoted by prelude after this returns, so it must
             # stay patched; reverting it here handed prelude a clean tree and silently lost the replay.
             if application and not isinstance(application, Mapping):
                 _revert_legacy_warm_patch_trees(params)
-
-    @staticmethod
-    def _release_attempt(output_dir: Path) -> None:
-        """Reap the server the attempt's rounds left in ``output_dir``, their slot, so none leaks into the next."""
-        reaped = stop(output_dir)
-        if reaped.survivors:
-            log.error(
-                "baseline_executor: pids %s outlived SIGKILL; %s keeps their record", reaped.survivors, output_dir
-            )
 
     def _round_affordable_before_ignition(
         self,
@@ -398,18 +379,16 @@ class BenchmarkRunExecutor(_BaselineAccuracyMixin, _BenchmarkLaunchMixin, _Bench
         return ended.returncode
 
     async def _run_single_benchmark(
-        self,
-        attempt: BenchmarkAttempt,
-        *,
-        config_path: Path,
-        output_dir: Path,
-        server_already_ready: bool = False,
-        warmup_round: bool = False,
+        self, attempt: BenchmarkAttempt, *, output_dir: Path, held: HeldPass | None = None
     ) -> dict[str, Any]:
-        """Run one benchmark round and parse its result; ``warmup_round`` marks a discarded round."""
+        """Run one benchmark round of the attempt's config and parse its result.
+
+        ``held`` is the round's place in the test that holds its server; without one the round owns its server.
+        """
         from ._multi_node_env import is_multi_node, log_mn_banner, mn_bench_warmup_enabled
         from .agentx_point import bind_source_evidence
 
+        config_path = attempt.materialized_config_path
         await asyncio.to_thread(bind_source_evidence, config_path, attempt.params.get("patches") or [])
         ctx_extra = getattr(attempt.ctx, "extra", None) or {}
         # The session's wall-clock budget, resolved per round rather than once per task: a baseline runs up to two
@@ -419,12 +398,9 @@ class BenchmarkRunExecutor(_BaselineAccuracyMixin, _BenchmarkLaunchMixin, _Bench
         sync_benchmark_timeout(config_path, timeout_sec)
         # The materialized YAML is authoritative for the framework: params and $FRAMEWORK are both optional on a
         # baseline task.
-        framework = (
-            _config_framework(attempt.materialized_config_path) or (_requested_framework(attempt.params) or "").lower()
-        )
+        framework = _config_framework(config_path) or (_requested_framework(attempt.params) or "").lower()
         round_ = _BenchmarkRound(
             config_path=config_path,
-            materialized_config_path=attempt.materialized_config_path,
             output_dir=output_dir,
             ctx_extra=ctx_extra,
             framework=framework,
@@ -432,12 +408,12 @@ class BenchmarkRunExecutor(_BaselineAccuracyMixin, _BenchmarkLaunchMixin, _Bench
             # Config/eval-contract facts echoed onto every failure result so an eval-rooted failure can be
             # fingerprinted and re-run by enablement.
             capture_meta={
-                "materialized_config": str(attempt.materialized_config_path),
+                "materialized_config": str(config_path),
                 "run_eval_disabled": bool(attempt.run_eval_disabled),
             },
             timeout_sec=timeout_sec,
             session_deadline_sec=session_deadline_sec,
-            server_already_ready=server_already_ready,
+            held=held,
             run_eval_disabled=attempt.run_eval_disabled,
         )
         # Multi-node only: restart sglang/vllm per round for a fresh server.
@@ -452,7 +428,7 @@ class BenchmarkRunExecutor(_BaselineAccuracyMixin, _BenchmarkLaunchMixin, _Bench
             warmup = await self._mn_warmup_pass(round_, round_warnings, attempt.suite)
             if warmup is not None:
                 return warmup
-        return await self._suite_round_result(round_, attempt.suite, warmup=warmup_round, warnings=round_warnings)
+        return await self._suite_round_result(round_, attempt.suite, warnings=round_warnings)
 
 
 class BaselineExecutor(BenchmarkRunExecutor):
