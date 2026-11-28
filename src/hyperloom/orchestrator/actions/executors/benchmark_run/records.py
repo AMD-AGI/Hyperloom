@@ -224,18 +224,6 @@ def _requested_framework(params: dict[str, Any]) -> str | None:
     return str(params.get("framework") or "").strip() or os.environ.get("FRAMEWORK", "").strip() or None
 
 
-def _is_double_run_accuracy_handoff(
-    result: dict[str, Any],
-    salvaged: dict[str, Any] | None,
-) -> bool:
-    """Whether accuracy came from the warmup round because that is the design."""
-    out_dir = str((result or {}).get("output_dir") or "")
-    if not out_dir or Path(out_dir).name != _MEASURE_ROUND_DIR:
-        return False
-    source = str((salvaged or {}).get("source_file") or "")
-    return _WARMUP_ROUND_DIR in Path(source).parts
-
-
 _LOG_NAMES = ("benchmark_stderr.log", "benchmark_stdout.log", "server.log")
 
 

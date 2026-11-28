@@ -29,32 +29,29 @@ def _point(path: Path, *, agentx: bool) -> Path:
     return path
 
 
-def _baseline(
-    tmp_path,
-    monkeypatch,
-    *,
-    agentx_accuracy=True,
-    agentx=True,
-    status="succeeded",
-    kind="baseline",
-    ended="",
-    score: float | None = None,
+def _write_score(slot: Path, score: float) -> None:
+    """Leave the results file the accuracy round of ``slot`` writes for ``score``."""
+    eval_dir = slot / ACCURACY_DIR / "eval" / "model"
+    eval_dir.mkdir(parents=True)
+    (eval_dir / "results_gsm8k.json").write_text(
+        json.dumps({"results": {"gsm8k": {"exact_match,strict-match": score}}})
+    )
+
+
+def _executor(
+    tmp_path, monkeypatch, *, agentx=True, status="succeeded", ended="", score: float | None = None, round_dir=""
 ):
-    """Run a baseline whose pass returns ``status``, and the accuracy rounds it asked for, each ending ``ended`` with
-    ``score`` written when one is given."""
+    """A baseline executor whose pass returns ``status`` from ``round_dir`` of its slot, and the accuracy rounds it
+    asks for, each ending ``ended`` with ``score`` written when one is given."""
     slot = tmp_path / "runs" / "baseline" / "t1"
     config = _point(slot / "point.yaml", agentx=agentx)
-    result = {"status": status, "output_dir": str(slot / "measure_round"), "materialized_config": str(config)}
+    result = {"status": status, "output_dir": str(slot / round_dir), "materialized_config": str(config)}
     calls = []
 
     async def run_accuracy_round(request, *, session):
         calls.append((request.slot, request.config_path))
         if score is not None:
-            eval_dir = request.slot / ACCURACY_DIR / "eval" / "model"
-            eval_dir.mkdir(parents=True)
-            (eval_dir / "results_gsm8k.json").write_text(
-                json.dumps({"results": {"gsm8k": {"exact_match,strict-match": score}}})
-            )
+            _write_score(request.slot, score)
         return AccuracyRoundOutcome(request.slot / ACCURACY_DIR, ended)
 
     monkeypatch.setattr(accuracy, "run_accuracy_round", run_accuracy_round)
@@ -67,6 +64,12 @@ def _baseline(
         return dict(result)
 
     monkeypatch.setattr(executor, "_run_pass", run_pass)
+    return executor, calls, slot
+
+
+def _baseline(tmp_path, monkeypatch, *, agentx_accuracy=True, agentx=True, kind="baseline", **played):
+    """Run the baseline ``played`` describes with the accuracy ruling left out, and the accuracy rounds it asked for."""
+    executor, calls, slot = _executor(tmp_path, monkeypatch, agentx=agentx, round_dir="measure_round", **played)
     monkeypatch.setattr(executor, "_maybe_stop_on_missing_baseline_accuracy", lambda ctx, result: None)
     state = SharedState(agentx_accuracy=agentx_accuracy, benchmark_mode="agentx" if agentx else "")
     ctx = SimpleNamespace(task=SimpleNamespace(task_id="t1", kind=kind, params={}), extra={"shared_state": state})
@@ -134,9 +137,23 @@ def test_only_a_baseline_that_owed_an_accuracy_round_stops_without_a_score(tmp_p
     monkeypatch.delenv("HYPERLOOM_AGENTX", raising=False)
     state = SharedState(agentx_accuracy=switch, benchmark_mode="agentx", enablement_mode="off")
     executor = BaselineExecutor(session_dir=tmp_path, shared_state=None)
-    monkeypatch.setattr(executor, "_salvage_sibling_baseline_accuracy", lambda result, framework: None)
     ctx = SimpleNamespace(task=SimpleNamespace(task_id="t1", kind="baseline", params={}), extra={"shared_state": state})
 
     executor._maybe_stop_on_missing_baseline_accuracy(ctx, {"status": "succeeded"})
 
     assert (state.stop_reason == BASELINE_ACCURACY_STOP_REASON) is stops
+
+
+def test_a_baseline_whose_accuracy_round_left_no_score_stops_whatever_an_earlier_attempt_scored(tmp_path, monkeypatch):
+    _write_score(tmp_path / "runs" / "baseline" / "t0", 0.93)
+    executor, calls, slot = _executor(tmp_path, monkeypatch, ended="eval_failed")
+    state = SharedState(agentx_accuracy=True, benchmark_mode="agentx", enablement_mode="off", baseline_accuracy=0.81)
+    ctx = SimpleNamespace(task=SimpleNamespace(task_id="t1", kind="baseline", params={}), extra={"shared_state": state})
+
+    result = asyncio.run(executor._run_with_accuracy(ctx))
+
+    assert calls == [(slot, slot / "point.yaml")]
+    assert state.stop_reason == BASELINE_ACCURACY_STOP_REASON
+    assert "accuracy" not in result
+    assert result["nonfatal_warnings"] == ["agentx_accuracy_round_failed"]
+    assert state.baseline_accuracy == 0.81

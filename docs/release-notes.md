@@ -217,28 +217,34 @@ it.
   `PYTHONPATH`, which it did with the store unset whenever the session had
   recorded an image digest and an engine version. See
   [Upgrade](reference/upgrade.md).
-- **A warm-up and measured round pair hands its accuracy score to its
-  result.** A genuine baseline, a PRELUDE warm replay and the KERNEL stack
-  validation run a discarded warm-up round and a measured round on one server,
-  and one of the two runs the accuracy eval. The result the attempt returns
-  now carries that round's `accuracy`, `accuracy_task`, `accuracy_metric`,
-  `accuracy_source`, `accuracy_definition_digest` and `accuracy_eval_kind`;
-  the measured round's result used to carry none, and each reader searched
-  the attempt's directory for the warm-up's results file. Scores and verdicts
-  are unchanged. A warm replay's warm-up round is recorded as one that
-  evaluated even when its recipe sets `RUN_EVAL=false`, and the replay is
-  judged on the score its result carries: `eval_ran` in `warm_replay_outcome`
-  is `true` exactly when there is one, and a replay without one is still
-  admitted and marked, with `eval_error` reading `the replay's result carries
-  no accuracy score`. Measuring such a baseline, when its score is usable, no
-  longer writes the session's accuracy reference; promoting it does, so a
-  re-baseline that is not promoted (`anchor_held`) leaves the reference with
-  the anchor it was measured with. A promoted baseline that scored nothing
-  leaves no accuracy reference (`baseline_accuracy: 0.0`, empty digest), where
-  the score of the anchor it replaced used to stay under the new throughput;
-  a session resumed after such a re-baseline stopped the run with
-  `baseline_accuracy_failed` grades candidates on throughput alone. See
-  [Upgrade](reference/upgrade.md).
+- **A baseline takes its accuracy from its own attempt.** A genuine baseline,
+  a PRELUDE warm replay and the KERNEL stack validation run a discarded
+  warm-up round and a measured round on one server, and one of the two runs
+  the accuracy eval. The result the attempt returns now carries that round's
+  `accuracy`, `accuracy_task`, `accuracy_metric`, `accuracy_source`,
+  `accuracy_definition_digest` and `accuracy_eval_kind`; the measured round's
+  result used to carry none, and each reader searched the attempt's directory
+  for the warm-up's results file. An attempt whose score is usable is judged
+  as before. A warm replay's warm-up round is recorded as one that evaluated
+  even when its recipe sets `RUN_EVAL=false`, and the replay is judged on the
+  score its result carries: `eval_ran` in `warm_replay_outcome` is `true`
+  exactly when there is one, and a replay without one is still admitted and
+  marked, with `eval_error` reading `the replay's result carries no accuracy
+  score`. A genuine baseline whose own attempt left no usable score no longer
+  continues on a score found under another attempt of the session, and a score
+  it measured as zero or below the enablement floor is no longer replaced by
+  one: with `--enablement eval` or `all` on a single node it is recorded as an
+  eval failure and not promoted, otherwise the run stops with
+  `baseline_accuracy_failed`. The warning
+  `baseline_accuracy_salvaged_from_sibling_attempt` is gone. Measuring a
+  baseline no longer writes the session's accuracy reference; promoting it
+  does, so a baseline that is not promoted (`anchor_held`, an eval failure, a
+  failed attempt) leaves the reference with the anchor it was measured with. A
+  promoted baseline that scored nothing leaves no accuracy reference
+  (`baseline_accuracy: 0.0`, empty digest), where the score of the anchor it
+  replaced used to stay under the new throughput; a session resumed after such
+  a re-baseline stopped the run with `baseline_accuracy_failed` grades
+  candidates on throughput alone. See [Upgrade](reference/upgrade.md).
 - **A session reads its GPU from the machine; no board table is kept.** Every
   start and resume reads the visible cards and prints the one it runs on (`GPU
   card        : AMD Instinct MI325X (gfx942, 304 CUs, 262128 MiB, 2100 MHz)`).

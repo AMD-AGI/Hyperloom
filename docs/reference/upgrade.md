@@ -243,7 +243,9 @@ round on the same server (a genuine baseline, a PRELUDE warm replay, the KERNEL
 stack validation) runs the accuracy eval in one of its rounds. The attempt now
 hands that round's score to the result it returns. The result of the measured
 round used to carry no score, and each reader searched the attempt's directory
-for the warm-up's results file.
+for the warm-up's results file. A baseline is no longer given a score found
+by searching the directory above its round: it is ruled on what its own
+attempt measured.
 
 * The result of such an attempt carries `accuracy`, `accuracy_task`,
   `accuracy_metric`, `accuracy_source`, `accuracy_definition_digest` and
@@ -271,14 +273,36 @@ for the warm-up's results file.
   and a score taken under another eval definition than the baseline's is no
   verdict. A replay without a score is admitted and marked as before, now also
   when a results file lies elsewhere under its task directory.
-* A baseline of this kind whose score is usable no longer logs `cold-start
-  guard — reading accuracy=... from the warmup round`.
-* Measuring a baseline of this kind whose score is usable no longer writes the
-  session's accuracy reference (`baseline_accuracy` and its digest in
-  `state.json`); promoting it does, together with its throughput. A
-  re-baseline that scored but was not promoted (`anchor_held`) used to replace
-  the reference with its own score while the throughput anchor stayed; it now
+* A genuine baseline whose own attempt left no usable score no longer
+  continues on a score found in the directory above its round. For an attempt
+  of one round (a multi-node, AgentX or scriptable baseline) that directory is
+  `runs/baseline`, so the score could come from any other attempt of the
+  session, and nothing tied it to this attempt's launch. The search also
+  replaced a score the attempt itself measured as zero or below the
+  enablement floor; the baseline is now ruled on the score it measured.
+  Such a baseline takes the route a first baseline without a usable score
+  always took. With `--enablement eval` or `all` on a single node it is
+  recorded as an eval failure and not promoted: a first baseline opens the
+  enablement lane, a re-baseline leaves the anchor and its reference as they
+  were. Otherwise, and in a multi-node session, the run stops with
+  `stop_reason: baseline_accuracy_failed`; so does a genuine baseline whose
+  eval aborted its round, which another attempt's score used to keep
+  running. The stop line and the round's eval output name the failure to fix.
+  A run that used to continue on another attempt's score now takes one of
+  these two routes.
+* The session's accuracy reference (`baseline_accuracy` and its digest in
+  `state.json`) is written only when a baseline is promoted, together with
+  its throughput. Measuring a baseline used to write the score the search
+  found into the session state while the baseline was still running, so a
+  baseline that was not promoted (`anchor_held`, an eval failure, a failed
+  attempt) replaced the reference while the throughput anchor stayed; it now
   leaves both as they were.
+* `baseline_accuracy_salvaged_from_sibling_attempt` no longer appears in a
+  result's `nonfatal_warnings`. The log lines `cold-start guard — reading
+  accuracy=... from the warmup round` and `salvaged a measured baseline
+  accuracy=... from a sibling attempt` are gone, and the warning for an eval
+  failure that goes to enablement reads `eval-rooted failure; routing to
+  enablement (RUN_EVAL stays on).`
 * A promoted baseline that scored nothing leaves the session without an
   accuracy reference: `baseline_accuracy` is `0.0` and
   `baseline_accuracy_definition_digest` is empty in `state.json`. The score

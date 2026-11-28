@@ -14,7 +14,7 @@ import pytest
 
 from hyperloom.orchestrator.actions.executors import _accuracy_gate as ag
 from hyperloom.orchestrator.actions.executors.benchmark_run.accuracy import ACCURACY_ROUND_KEY, _BaselineAccuracyMixin
-from hyperloom.orchestrator.actions.executors.benchmark_run.records import record_eval_score
+from hyperloom.orchestrator.actions.executors.benchmark_run.records import carry_eval_score, record_eval_score
 from hyperloom.orchestrator.actions.executors.benchmark_run.rounds import _record_accuracy_round
 from hyperloom.orchestrator.kernel.integrate_accuracy import _integrate_eval_score
 from hyperloom.orchestrator.loop._baseline_promotion import BaselinePromotionMixin, _adopt_eval_trigger
@@ -93,13 +93,11 @@ def test_a_baseline_promoted_without_a_score_leaves_no_reference_for_a_resume_to
     assert ag.AccuracyReference.of_baseline(resumed) == ag.AccuracyReference(0.0, "")
 
 
-def test_a_salvaged_sibling_score_publishes_its_digest_with_it(tmp_path):
-    state = SharedState()
-    salvaged = ag.parse_eval_results(suite_eval(tmp_path / "sibling", 0.93, BASELINE_DIGEST), framework="vllm")
-    result: dict = {}
-    _BaselineAccuracyMixin._apply_salvaged_accuracy(SimpleNamespace(), result, salvaged, state)
-    assert result[ag.ACCURACY_DEFINITION_DIGEST_KEY] == BASELINE_DIGEST
-    assert (state.baseline_accuracy, state.baseline_accuracy_definition_digest) == (0.93, BASELINE_DIGEST)
+def test_a_score_handed_to_another_rounds_result_keeps_its_digest(tmp_path):
+    evaluated: dict = {}
+    record_eval_score(evaluated, ag.parse_eval_results(suite_eval(tmp_path / "run", 0.93, BASELINE_DIGEST), "vllm"))
+    measured = carry_eval_score({"output_throughput": 1000.0}, evaluated)
+    assert (measured["accuracy"], measured[ag.ACCURACY_DEFINITION_DIGEST_KEY]) == (0.93, BASELINE_DIGEST)
 
 
 def test_the_digest_survives_a_resume():

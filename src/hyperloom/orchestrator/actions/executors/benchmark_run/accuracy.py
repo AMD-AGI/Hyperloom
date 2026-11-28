@@ -24,7 +24,6 @@ from inference_suite.contracts import FailedStep
 from inference_suite.server_log import death_excerpt
 from .._accuracy_gate import (
     ACCURACY_DEFINITION_DIGEST_KEY,
-    EVAL_DEFINITION_DIGEST_KEY,
     EVAL_KIND_QUALITY_GATE_MISSING,
     parse_eval_results,
 )
@@ -36,7 +35,6 @@ from .records import (
     ACCURACY_EVAL_KIND_KEY,
     _BENCHMARK_MODE_ATTR,
     _DOUBLE_RUN_ROUND_DIRS,
-    _is_double_run_accuracy_handoff,
     _iter_log_tails,
     _requested_framework,
     _should_establish_quality_ref,
@@ -226,8 +224,8 @@ class _BaselineAccuracyMixin:
         # An eval that never reached a verdict because the server was gone is a broken measurement, not a statement
         # about accuracy or about a missing framework capability. Leaving it in the eval-rooted branch stamps it as an
         # eval-failure contract and hands it to the enablement lane, which then spends rounds looking for a capability
-        # gap that the evidence does not support. It stays a failed baseline either way -- nothing is salvaged and the
-        # accuracy gate is untouched -- but it is counted as an ordinary baseline failure, so the existing
+        # gap that the evidence does not support. It stays a failed baseline either way, and the accuracy gate is
+        # untouched, but it is counted as an ordinary baseline failure, so the existing
         # ``_BASELINE_MAX_TOTAL_FAILURES`` backstop ends the run with the cause it actually had.
         if result.get("status") != "succeeded" and self._is_eval_rooted_failure(result):
             if self._is_server_unreachable_eval_failure(result):
@@ -242,10 +240,7 @@ class _BaselineAccuracyMixin:
                 if self._eval_enablement_active(ctx):
                     from .._accuracy_gate import EVAL_KIND_RUNTIME_FAILURE
 
-                    log.warning(
-                        "baseline_executor: eval-rooted failure; routing to "
-                        "enablement instead of salvaging (RUN_EVAL stays on)."
-                    )
+                    log.warning("baseline_executor: eval-rooted failure; routing to enablement (RUN_EVAL stays on).")
                     self._stamp_eval_failure_contract(
                         result, kind=EVAL_KIND_RUNTIME_FAILURE, observed_accuracy=None, evidence=evidence
                     )
@@ -259,7 +254,7 @@ class _BaselineAccuracyMixin:
                         "-- fix the accuracy eval (see the benchmark stdout/stderr for the run_eval error)."
                     )
                     result["nonfatal_warnings"].append("eval_failed_no_fallback_baseline_requires_accuracy")
-                    self._request_eval_rooted_baseline_stop(ctx, result)
+                    self._request_eval_rooted_baseline_stop(ctx)
                 else:
                     log.error(
                         "baseline_executor: failure is eval-rooted (InferenceX run_eval aborted the benchmark); "
@@ -363,44 +358,14 @@ class _BaselineAccuracyMixin:
         result["eval_origin"] = "eval"
         return result
 
-    def _request_eval_rooted_baseline_stop(
-        self,
-        ctx: RunnerContext,
-        result: dict[str, Any],
-    ) -> None:
+    def _request_eval_rooted_baseline_stop(self, ctx: RunnerContext) -> None:
         """Halt the run for an eval-rooted baseline failure, fail-fast path."""
-        from hyperloom.common.gain_math import accuracy_meets_floor
-
         from .._accuracy_gate import request_baseline_accuracy_stop
 
-        params = ctx.task.params or {}
-        framework = _requested_framework(params)
+        framework = _requested_framework(ctx.task.params or {})
         extra = getattr(ctx, "extra", None) or {}
-        shared_state = extra.get("shared_state") or self.shared_state
-        salvaged = self._salvage_sibling_baseline_accuracy(result, framework)
-        if salvaged is not None:
-            acc_val = self._apply_salvaged_accuracy(result, salvaged, shared_state)
-            # ``accuracy_meets_floor`` already means "finite, strictly positive and >= floor", so floor 0.0 is the
-            # legacy "any usable accuracy".
-            if accuracy_meets_floor(acc_val, 0.0):
-                log.warning(
-                    "baseline_executor: eval-rooted baseline failure, but salvaged "
-                    "a valid baseline accuracy=%.4f from a sibling attempt (%s); "
-                    "not stopping the run",
-                    acc_val,
-                    salvaged.get("source_file", ""),
-                )
-                return
-            # A measured zero is a broken baseline, not a usable reference: it must still reach the stop below, now
-            # with the score on record.
-            log.warning(
-                "baseline_executor: eval-rooted baseline failure and the sibling "
-                "attempt measured accuracy=%.4f (%s); stopping the run",
-                acc_val,
-                salvaged.get("source_file", ""),
-            )
         request_baseline_accuracy_stop(
-            shared_state,
+            extra.get("shared_state") or self.shared_state,
             context=f"baseline:{framework or 'unknown'}:eval_aborted",
         )
 
@@ -411,10 +376,9 @@ class _BaselineAccuracyMixin:
     ) -> None:
         """Halt the run when a genuine baseline produced no accuracy result."""
         params = ctx.task.params
-        if not _should_establish_quality_ref(getattr(ctx.task, "kind", ""), params):
-            return
-        # A failed status must NOT skip straight past the salvage below.
-        if result.get("status") != "succeeded" and not self._is_eval_rooted_failure(result):
+        if result.get("status") != "succeeded" or not _should_establish_quality_ref(
+            getattr(ctx.task, "kind", ""), params
+        ):
             return
         shared_state = ctx.extra.get("shared_state") or self.shared_state
         # An AgentX session that opted out of the accuracy round has no reference by design; its gates skip accuracy.
@@ -434,8 +398,7 @@ class _BaselineAccuracyMixin:
             return
         framework = _requested_framework(params)
         context = f"baseline:{framework or 'unknown'}"
-        # The operator's script broke the scriptable contract: no specialist can repair it, and a sibling attempt ran
-        # the same script.
+        # The operator's script broke the scriptable contract: no specialist can repair it.
         if result.get(ACCURACY_EVAL_KIND_KEY) == EVAL_KIND_QUALITY_GATE_MISSING:
             request_baseline_accuracy_stop(
                 shared_state,
@@ -443,44 +406,14 @@ class _BaselineAccuracyMixin:
                 cause=self._quality_gate_missing_cause(result),
             )
             return
-        # Session-level salvage: the cold-start guard and the coordinator's retries each run in their own
-        # ``runs/baseline/<attempt>`` dir, and every attempt's eval output stays inside its own. The accuracy-stop
-        # decision runs on the *deciding* attempt -- whose dir can be empty when a prior sibling attempt already
-        # produced a valid ``results*.json``.
-        salvaged = self._salvage_sibling_baseline_accuracy(result, framework)
-        if salvaged is not None:
-            acc_val = self._apply_salvaged_accuracy(
-                result,
-                salvaged,
-                shared_state,
-                expected_handoff=_is_double_run_accuracy_handoff(result, salvaged),
-            )
-            if accuracy_meets_floor(acc_val, usable_floor):
-                return
-            # Salvaged, but unusable (zero or still under the floor): that is a real quality signal, so fall through
-            # with the observed value rather than reporting it as a missing measurement.
-            acc = acc_val
-
-        # An eval that never reached a verdict because the server was unreachable produced no accuracy signal, so
-        # neither the stop below nor the enablement routing has anything to act on; stamping either would put an
-        # accuracy-flavoured verdict on evidence that says only that the measurement broke. But when the salvage
-        # above did find a measured accuracy, there IS a signal -- a real one, from a round that reached a verdict --
-        # and returning here would throw it away, leaving a genuinely under-floor model anchoring nothing.
-        if (
-            salvaged is None
-            and result.get("status") != "succeeded"
-            and self._is_server_unreachable_eval_failure(result)
-        ):
-            return
-
         # Route into enablement instead of stopping: the throughput baseline stays for diagnostics but is blocked from
         # anchoring.
         if eval_enablement:
             self._route_baseline_accuracy_to_enablement(ctx, result, acc, floor)
             return
-        # Only a *missing* reference can be explained by a dead server. A measured zero -- including one salvaged
-        # from a sibling attempt -- means the eval did run and did write its results, so blaming the death here would
-        # state the opposite of what the artifacts show, however dead the server later became.
+        # Only a *missing* reference can be explained by a dead server. A measured zero means the eval did run and
+        # did write its results, so blaming the death here would state the opposite of what the artifacts show,
+        # however dead the server later became.
         cause = ""
         if acc is None and (death := self._accuracy_stop_death_evidence(result)):
             log.error(
@@ -540,65 +473,3 @@ class _BaselineAccuracyMixin:
             floor,
             kind,
         )
-
-    def _apply_salvaged_accuracy(
-        self,
-        result: dict[str, Any],
-        salvaged: dict[str, Any],
-        shared_state: Any,
-        *,
-        expected_handoff: bool = False,
-    ) -> float:
-        """Record a salvaged sibling accuracy, publishing it as the gate reference only when it can serve as one."""
-        from hyperloom.common.gain_math import accuracy_meets_floor
-
-        acc_val = float(salvaged["accuracy"])
-        result["accuracy"] = acc_val
-        result["accuracy_task"] = salvaged.get("task", "gsm8k")
-        result["accuracy_metric"] = salvaged.get("metric", "")
-        result["accuracy_source"] = salvaged.get("source_file", "")
-        definition_digest = salvaged.get(EVAL_DEFINITION_DIGEST_KEY, "")
-        result[ACCURACY_DEFINITION_DIGEST_KEY] = definition_digest
-        if expected_handoff:
-            log.info(
-                "baseline_executor: cold-start guard — reading accuracy=%.4f from "
-                "the warmup round (%s), the only round that measures it",
-                acc_val,
-                salvaged.get("source_file", ""),
-            )
-        else:
-            log.warning(
-                "baseline_executor: this attempt left no accuracy, "
-                "but salvaged a measured baseline accuracy=%.4f from a sibling "
-                "attempt (%s)",
-                acc_val,
-                salvaged.get("source_file", ""),
-            )
-            result.setdefault("nonfatal_warnings", []).append("baseline_accuracy_salvaged_from_sibling_attempt")
-        if shared_state is not None and accuracy_meets_floor(acc_val, 0.0):
-            shared_state.baseline_accuracy = acc_val
-            shared_state.baseline_accuracy_definition_digest = definition_digest
-        return acc_val
-
-    def _salvage_sibling_baseline_accuracy(
-        self,
-        result: dict[str, Any],
-        framework: str | None,
-    ) -> dict[str, Any] | None:
-        """Return a measured accuracy from a sibling baseline attempt, if any."""
-        out = result.get("output_dir")
-        if not out:
-            return None
-        runs_root = Path(out).parent  # .../runs/baseline
-        if not runs_root.exists():
-            return None
-        try:
-            from hyperloom.common.gain_math import finite_score
-
-            eval_data = parse_eval_results(runs_root, framework=framework)
-        except (OSError, ValueError, AttributeError, TypeError):
-            log.debug("baseline_executor: sibling-accuracy salvage scan failed", exc_info=True)
-            return None
-        if finite_score(eval_data.get("accuracy")) is None:
-            return None
-        return eval_data
