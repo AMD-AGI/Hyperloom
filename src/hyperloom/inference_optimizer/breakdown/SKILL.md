@@ -145,7 +145,6 @@ this reference is partial — `breakdown/exporter.py` is authoritative.
 | `optimizations.available = false`                   | No operations were recorded, or the projection failed                                            | Read `unavailable_reason`. The empty arrays mean unknown, not none; a `warnings` entry says whether `state.json` knew of adopted work the recorder missed. |
 | `optimizations.validation.unclaimed_integration_count > 0` | A change recorded as integrated has no adoption crediting it                              | The adoption write was lost. `unattributed_gain_pct` is overstated by whatever those steps earned. |
 | `optimizations.entries[].gain_method = local_gain_projected` | The step recorded no finishing throughput                                              | Its gain is projected from the executor's own percentage, not measured against the chain. |
-| `kernel_lifecycle.detected = []`                    | `profile` action never ran or its `benchmark_report.json` had no `kernel_summary`                | Re-run profile, or fall back to `recommended` from `state.last_trace_analyze`.            |
 | Large `warnings[]`                                   | Multiple JSON parse failures on `optimization_attempts.jsonl`                                    | Inspect `kernel-agent-workspace/.../logs/` for the corresponding kernel-agent CLI logs.    |
 
 ## Versioning policy

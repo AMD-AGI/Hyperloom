@@ -35,7 +35,7 @@ __all__ = [
     "write_gpu_metrics_from_report",
 ]
 
-#: Artifact written into the round's workspace, beside ``benchmark_report.json``.
+#: Artifact written into the round directory that holds the round's run_dir.
 GPU_ARTIFACT_NAME = "gpu_metrics.json"
 
 # ``gpu_monitor`` metric aliases, current producer name first. The single-node monitor emits ``power_watts`` / ``temperature_c`` /
