@@ -20,6 +20,21 @@ Merged to `main` and not yet carried by a tagged release. Each entry moves
 into the [release](https://github.com/AMD-AGI/Hyperloom/releases) that ships
 it.
 
+- **The trace analysis drops the outputs of the retired per-kernel dispatch,
+  and `trace_analyze` is no longer a kernel request.** `kernel_candidates.json`
+  and `tracelens_report.json` lose the harness, GEAK prompt and invocation
+  fields that only Hyperloom's own per-kernel selection and dispatch read, the
+  trace certificate loses its step annotations, and `state.json` loses the
+  matching `last_trace_analyze` keys; earlier sessions still resume. mori EP
+  dispatch and combine kernels are classified by the source the trace resolved
+  for them and no longer hold the KERNEL phase open. Only the roofline executor
+  analyses a trace, so a session run with `--no-enable-roofline` gets no
+  analysis unless the block-FP8 GEMM shape capture runs one. A kernel request
+  for `trace_analyze`, or for any other kind with no handler, is denied by
+  PolicyGate (`rule=request_kind`) and leaves no failure row, where an unknown
+  kind was answered with a failed `unknown_kernel_kind` response.
+  `HYPERLOOM_MODELS_ROOT` is no longer read, and the wheel no longer ships
+  `vendor_operator_playbooks.json`. See [Upgrade](reference/upgrade.md).
 - **The multibranch `tracelens` tool runs only TraceLens' report.** It no
   longer takes `analysis_route`, a scriptable `framework` or
   `HYPERLOOM_TRACE_ANALYSIS_ROUTE` to start the orchestrator's `agent` or
@@ -270,7 +285,7 @@ it.
   checkout you maintain, delete any `<LABEL>.json` an earlier Hyperloom wrote
   with vendor peaks; it is now read as measured.
 - **Nothing defaults to MI355X.** `tracelens_analysis --target-platform` is
-  required, and a `trace_analyze` request with no GPU type fails with
+  required, and a trace analysis with no GPU type fails with
   `gpu_label_missing`. A custom workload no longer looks for `custom_mi355x.sh`
   when nothing names the machine. `MLPERF_AGENTIC_HARDWARE` defaults to the
   session's GPU type. An InferaSim projection with no GPU to price is refused,
