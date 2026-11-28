@@ -7,7 +7,6 @@ from __future__ import annotations
 
 from copy import deepcopy
 import json
-import subprocess
 import types
 from pathlib import Path
 from types import SimpleNamespace
@@ -77,38 +76,6 @@ def _write_baseline_yaml(path: Path) -> None:
     }
     with path.open("w") as f:
         yaml.safe_dump(cfg, f)
-
-
-def _fake_workspace(slot: Path, *, tput: float = 800.0, accuracy: float | None = None) -> Path:
-    workspace = slot / "benchmark_sglang_smoke"
-    workspace.mkdir(parents=True, exist_ok=True)
-    if accuracy is not None:
-        # Mimic the lm-eval output the serving GSM8K run leaves behind.
-        (workspace / "results_gsm8k.json").write_text(
-            json.dumps({"results": {"gsm8k": {"exact_match,strict-match": accuracy}}}),
-            encoding="utf-8",
-        )
-    (workspace / "benchmark_report.json").write_text(
-        json.dumps(
-            {
-                "success": True,
-                "framework": "sglang",
-                "model": "/path/models/Qwen-Qwen3-8B",
-                "throughput": {
-                    "request_throughput": tput / 256,
-                    "output_throughput": tput,
-                    "total_token_throughput": tput * 2,
-                    "completed_requests": 80,
-                    "duration_seconds": 25.0,
-                },
-                "latency": {
-                    "ttft": {"mean_ms": 140, "p99_ms": 158},
-                    "e2el": {"mean_ms": 2500, "p99_ms": 2580},
-                },
-            }
-        )
-    )
-    return workspace
 
 
 def _write_patch_pair(
@@ -198,7 +165,7 @@ def graded_integrate_case(native_benchmark, session_dir, tmp_path, monkeypatch):
         if "input_throughput" in measurement and "total_token_throughput" in measurement:
             measurement["input_throughput"] = measurement["total_token_throughput"] - measurement["output_throughput"]
         measurement["workspace"] = str(workspace)
-        measurement["report_path"] = str(workspace / "benchmark_report.json")
+        measurement["report_path"] = str(workspace / "report.json")
         Path(measurement["report_path"]).write_text(json.dumps(measurement), encoding="utf-8")
         return measurement
 
@@ -910,15 +877,6 @@ def test_resolve_integrate_payload_fills_source_when_patch_path_present(
 
 
 # integrate_handler accuracy gate
-
-
-def _runner(*, tput: float, accuracy: float | None):
-    def _fake_run(cmd, *args, **kwargs):
-        out_idx = cmd.index("--output-dir")
-        _fake_workspace(Path(cmd[out_idx + 1]), tput=tput, accuracy=accuracy)
-        return subprocess.CompletedProcess(args=cmd, returncode=0, stdout="ok", stderr="")
-
-    return _fake_run
 
 
 @pytest.mark.asyncio
