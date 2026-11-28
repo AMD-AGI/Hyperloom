@@ -146,15 +146,6 @@ def _last(objects: Iterator[dict[str, Any]]) -> dict[str, Any] | None:
     return tail[0] if tail else None
 
 
-def extract_last_json_matching(text: str, required_key: str, bare_re: re.Pattern[str]) -> dict[str, Any] | None:
-    """Return the last JSON object carrying ``required_key`` among *text*'s fenced blocks, then its ``bare_re`` matches."""
-    if not text:
-        return None
-    fenced = (m.group(1) for m in _FENCED_BLOCK_RE.finditer(text))
-    bare = (m.group(1) for m in bare_re.finditer(text))
-    return _last(_qualifying(chain(fenced, bare), required_key))
-
-
 def extract_last_json_with_key(text: str, required_key: str) -> dict[str, Any] | None:
     """Return the last JSON object in *text* (by start offset) that qualifies."""
     if not text:
@@ -164,7 +155,6 @@ def extract_last_json_with_key(text: str, required_key: str) -> dict[str, Any] |
 
 
 __all__ = [
-    "extract_last_json_matching",
     "extract_last_json_with_key",
     "read_json",
     "read_json_strict",

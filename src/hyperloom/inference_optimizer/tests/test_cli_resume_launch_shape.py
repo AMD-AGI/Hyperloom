@@ -498,7 +498,7 @@ def test_a_resumed_pd_session_refuses_server_args_before_it_persists(tmp_path, m
     # The first call after the refusal point in ``_resume_session``.
     monkeypatch.setattr(f"{cli_mod}.latency_budget_scope_error", past_the_refusal)
     args = _build_parser().parse_args(
-        ["optimize", "--resume-from", str(resume_dir), "--critic-mock", "--server-args=--mem-fraction-static 0.8"]
+        ["optimize", "--resume-from", str(resume_dir), "--server-args=--mem-fraction-static 0.8"]
     )
 
     with pytest.raises(SystemExit) as exc:

@@ -224,7 +224,8 @@ class IntentRouter(CoordinatorCollaborator):
 
         The Coordinator queues a finished specialist's deliverable itself, so an agent's request for it is a repeat
         or a retry, and is the same task: the deliverable's own params, with whatever else the agent sent beside
-        them. Refused for a specialist that has not ended with a result, or that left nothing to integrate.
+        them. Refused when it names no specialist, a specialist that has not ended with a result, or one that left
+        nothing to integrate.
         """
         if resolve_patch_source(params) == PATCH_SOURCE_UPSTREAM_PR:
             return PolicyDenied(
@@ -237,7 +238,13 @@ class IntentRouter(CoordinatorCollaborator):
             )
         specialist_task_id = str(params.get("specialist_task_id") or "").strip()
         if not specialist_task_id:
-            return None
+            if params.get("enablement_launch_only"):
+                return None
+            return PolicyDenied(
+                "integrate_patch names no specialist",
+                rule="integrate_patch_no_specialist",
+                hint="Set params.specialist_task_id to the task_id of the finished specialist whose deliverable to land.",
+            )
         unfinished = PolicyDenied(
             f"integrate_patch: {specialist_task_id!r} is not a specialist that has ended with a result",
             rule="integrate_patch_specialist_unfinished",

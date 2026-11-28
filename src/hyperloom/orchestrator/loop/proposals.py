@@ -47,8 +47,9 @@ def record_config_proposal(
     *,
     outcome: str = "submitted",
 ) -> None:
-    """Record one config-arm grid on the framework event ``recorder`` writes, as its task is queued; ``None`` when no
-    FRAMEWORK entry is open.
+    """Record one config-arm grid on the framework event ``recorder`` writes, as its task is queued.
+
+    ``recorder`` is ``None`` when no FRAMEWORK entry is open, and nothing is recorded then.
 
     One row per grid, not per variant: the measured attempts point back at the grid
     through their ``proposal_ref``.
