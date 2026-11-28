@@ -431,6 +431,16 @@ it.
   them), its `launch_evidence.json` follows, and the error class
   `warmup_yaml_build_error` no longer occurs. See
   [Upgrade](reference/upgrade.md).
+- **An EXPLORE variant's rounds run on one held test.** The variant's
+  warm-up and decision rounds are the rounds they were, on a port picked for
+  the variant instead of one port for the whole EXPLORE round. The two
+  `config.yaml` files the rounds run from carry no `server_lifecycle` block
+  or picked `PORT`, and the warm-up's carries the variant's own `RUN_EVAL`
+  (each round's `config.yaml` in its run directory records the port and that
+  the warm-up does not evaluate); `launch_evidence.json` and the
+  `launch_evidence` of ledger rows follow. An `explore` task's
+  `baseline_double_run` parameter, which Hyperloom never set, is no longer
+  read. See [Upgrade](reference/upgrade.md).
 
 ## Hyperloom 1.2.0 release
 

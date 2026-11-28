@@ -273,10 +273,11 @@ an anchor measured after one.
   session cannot pay for the measured round it keeps its cold warm-up figure
   (`baseline_measure_round_dropped_low_budget`) without booting the round; it
   used to run the round into the session clock, which left the same figure.
-* An EXPLORE variant's decision round evaluates; its warm-up round's
-  `config.yaml` sets `RUN_EVAL` to `false`. The eval's results file lies
-  under the decision round's run directory (`vNN_<name>/variant_00_<name>/`),
-  no longer under `vNN_<name>/warmup_round/`.
+* An EXPLORE variant's decision round evaluates and its warm-up round does
+  not (`eval.enabled: false` in the `config.yaml` of the warm-up's run
+  directory). The eval's results file lies under the decision round's run
+  directory (`vNN_<name>/variant_00_<name>/`), no longer under
+  `vNN_<name>/warmup_round/`.
 * An eval that fails after the measured bench leaves the bench standing. The
   attempt's result is `succeeded` with its throughput, carries
   `accuracy_stage` (`status: failed`, the eval's `error_class` and `error`,
@@ -625,6 +626,43 @@ graded against was measured on a warmed one.
   that set the variable to `0` runs the rounds it ran, but an integrate bench
   or an EXPLORE variant there must now have session time for one more round
   before it starts, as on a launch that left the variable unset.
+
+### Recommended: read an EXPLORE variant's round config from its run directory
+
+An EXPLORE variant whose server can be held (a single node, a served workload
+that is not profiled) runs the rounds it ran: for a fixed workload a
+discarded warm-up bench and then the decision bench with its eval, on one
+server in the variant's directory `vNN_<name>/`; for AgentX one round. Which
+round boots the server, the port it answers on and which round evaluates are
+now set on the round. They are no longer written into the two configs the
+rounds run from.
+
+* `vNN_<name>/warmup_round/variant_00_<name>/config.yaml` and
+  `vNN_<name>/variant_00_<name>/config.yaml` no longer carry a
+  `server_lifecycle` block or the port picked for the variant (each keeps a
+  `PORT` the point itself names, which the rounds do not run on), and the
+  warm-up's file carries the variant's own `RUN_EVAL`, where it used to say
+  `false`. Read `config.yaml` in a round's run directory
+  (`.../warmup_round/variant_00_<name>/suite_run_<n>/`,
+  `.../variant_00_<name>/suite_run_<n>/`) for what the round ran: its
+  `lifecycle`, its `server.port` and `eval.enabled`, which is `false` for
+  the warm-up whatever the variant asks.
+* The `launch_evidence.json` beside each of the two configs follows its file,
+  and so does the `launch_evidence` of the variant's ledger row and of a
+  KEEP: `requested_server_env` no longer lists the picked `PORT`,
+  `recipe_digest` is the digest of the file without the block, and the
+  evidence of a variant whose warm-up failed lists the variant's own
+  `RUN_EVAL`.
+* Every variant is tested on a port of its own. The variants of one EXPLORE
+  round used to share one port, one after the other.
+* An `explore` task's `baseline_double_run` parameter is no longer read.
+  Hyperloom never set it on an `explore` task; a task that carried `false`
+  ran the variant's decision bench on a freshly booted server, without the
+  warm-up the baseline it is graded against had. A variant of a fixed
+  workload whose server can be held now always runs both rounds.
+* A variant's server is stopped once, when the variant ends or before its
+  AgentX accuracy round. Server pids that outlive the stop are logged once,
+  as `held test: pids ... outlived SIGKILL` (was `explore: pids ...`).
 
 ---
 

@@ -5,11 +5,15 @@
 
 The contract: a conc sweep arm boots one server on its first rung, measures that rung on it, reuses it for every rung
 after, and every rung serves the same launch; the arm's server and an explore variant's server are reaped with
-``stop`` on the directory their rounds shared it through, however the rounds ended; explore launches one server once
-per round, starts no variant its session or phase budget cannot fit, and launches none that only restates the argv or
-environment of the session's base; an explore round the ledger answers whole succeeds without a launch, and one left
-with nothing to run fails and reports its grid exhausted; a specialist rebench is one round that owns its server on
-the port it reports.
+``stop`` on the directory their rounds shared it through, however the rounds ended; an explore variant whose server
+can be held is tested on one server on a port of its own, a discarded bench that never evaluates and then the
+measured bench with the eval the variant asks for, a variant whose discarded bench failed is recorded with the failed
+step's class and not measured, and an AgentX variant is one round that boots in its slot, whose server is stopped
+before the variant's accuracy round boots one; explore launches one server once per round, starts no variant its
+session or phase budget cannot fit, and launches none that only restates the argv or environment of the session's
+base; an explore round the ledger answers whole succeeds without a launch, and
+one left with nothing to run fails and reports its grid exhausted; a specialist rebench is one round that owns its
+server on the port it reports.
 """
 
 from __future__ import annotations
@@ -28,16 +32,23 @@ from hyperloom.orchestrator.conc_sweep import runner as conc_sweep
 from hyperloom.inference_optimizer.session.paths import ENV_CURRENT_SESSION_DIR
 from hyperloom.orchestrator.actions.executors.serving import _server_lifecycle
 from hyperloom.orchestrator.actions.executors.grid._grid_base import TS_SKIPPED_DEDUP, VariantResult
+from hyperloom.orchestrator.actions.executors._failed_step import failed_step_error_class
+from hyperloom.orchestrator.actions.executors._suite import held_test
+from hyperloom.orchestrator.actions.executors._suite.held_test import RoundPurpose
+from hyperloom.orchestrator.actions.executors.benchmark_run.accuracy import AccuracyRoundOutcome
 from hyperloom.orchestrator.actions.executors._suite import rounds as suite_rounds
+from hyperloom.orchestrator.actions.executors._suite.config import MEASURED_SEED, WARMUP_SEED
 from hyperloom.orchestrator.actions.executors import explore as explore_module
 from hyperloom.orchestrator.actions.executors.explore import ALREADY_MEASURED, BASELINE_NOOP, ExploreExecutor
-from hyperloom.orchestrator.actions.executors.tests.test_grid_suite_round import _HOT, suite  # noqa: F401
-from hyperloom.orchestrator.rehearsal import READY, LaunchAttempt, LaunchScenario, ScriptedRounds, VirtualClock
-from hyperloom.orchestrator.rehearsal import installed_clock
+from hyperloom.orchestrator.actions.executors.tests.test_grid_suite_round import _COLD, _HOT, suite  # noqa: F401
+from hyperloom.orchestrator.actions.executors.tests.test_suite_config import _base
+from hyperloom.orchestrator.rehearsal import READY, STAGE_FAILED, LaunchAttempt, LaunchScenario, ScriptedRounds
+from hyperloom.orchestrator.rehearsal import VirtualClock, installed_clock
+from hyperloom.orchestrator.rehearsal.scenario import ScenarioError
 from hyperloom.orchestrator.specialists.rebench import RebenchBenchmark, RebenchServer, run_specialist_rebench
 from hyperloom.orchestrator.state.shared_state import SharedState
 from hyperloom.orchestrator.state.tests._session_base import freeze_base, session_base
-from inference_suite.contracts import LifecycleMode, Workload, WorkloadKind
+from inference_suite.contracts import FailedStep, LifecycleMode, Workload, WorkloadKind
 from inference_suite.tests.test_compose import _launch
 
 _PORT = 30123
@@ -52,7 +63,10 @@ def eligible(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 def _rounds(monkeypatch: pytest.MonkeyPatch, count: int) -> ScriptedRounds:
-    attempts = tuple(LaunchAttempt(outcome=READY, metrics=_HOT) for _ in range(count))
+    return _scripted(monkeypatch, *(LaunchAttempt(outcome=READY, metrics=_HOT) for _ in range(count)))
+
+
+def _scripted(monkeypatch: pytest.MonkeyPatch, *attempts: LaunchAttempt) -> ScriptedRounds:
     rounds = ScriptedRounds(scenario=LaunchScenario(attempts=attempts), clock=VirtualClock(), launch=_launch())
     monkeypatch.setattr(suite_rounds, "run_round", rounds.run_round)
     return rounds
@@ -182,7 +196,11 @@ def _explore(
     phase_deadline: Deadline | None = None,
     **params,
 ):
-    """Run explore over ``rows`` on played rounds, which play no eval; return its result and the rounds launched."""
+    """Run explore over ``rows`` on played rounds; return its result and the rounds launched.
+
+    A row that names no environment switches its eval off; without ``rounds`` every row is played a warmup and a
+    decision round that measure alike.
+    """
     rounds = rounds or _rounds(monkeypatch, 2 * len(rows))
     task = SimpleNamespace(
         task_id="explore-1",
@@ -191,7 +209,6 @@ def _explore(
             "output_dir": str(tmp_path / "explore"),
             "base_tput": 800.0,
             "keep_threshold_pct": 1.0,
-            "baseline_double_run": False,
             "grid": [{"extra_envs": {"RUN_EVAL": "false"}, **row} for row in rows],
             **params,
         },
@@ -214,8 +231,116 @@ def test_explore_benches_two_rows_that_launch_one_server_once(monkeypatch, suite
 
     result, calls = _explore(monkeypatch, suite, tmp_path, rows, state, base_tput=_HOT["output_throughput"])
 
-    assert len(calls) == 1, result
+    assert [call.config.lifecycle.mode for call in calls] == [LifecycleMode.BOOT, LifecycleMode.REUSE], result
     assert [(row["name"], row["reason"]) for row in result["skipped_dup"]] == [("v_b", "round_dup")]
+
+
+def _round_shape(config) -> tuple:
+    return (config.lifecycle.mode, config.lifecycle.pid_dir, config.fixed.seed, config.eval.enabled)
+
+
+@pytest.mark.parametrize("run_eval", ["true", "false"])
+def test_an_explore_variant_discards_a_bench_then_measures_and_evaluates_as_it_asks_on_one_server(
+    monkeypatch, suite, tmp_path, run_eval
+):
+    state = SharedState.load_or_init(_session(suite))
+    state.baseline_tput = 800.0
+    measured = LaunchAttempt(outcome=READY, metrics=_HOT, eval_scores={"exact_match,strict-match": 0.9})
+    rounds = _scripted(monkeypatch, LaunchAttempt(outcome=READY, metrics=_COLD), measured)
+    rows = [{"name": "v_knob", "extra_envs": {"HL_KNOB": "1", "RUN_EVAL": run_eval}}]
+
+    result, calls = _explore(monkeypatch, suite, tmp_path, rows, state, rounds=rounds)
+
+    slot = tmp_path / "explore" / "v00_v_knob"
+    warmup, decision = (call.config for call in calls)
+    assert _round_shape(warmup) == (LifecycleMode.BOOT, str(slot), WARMUP_SEED, False)
+    assert _round_shape(decision) == (LifecycleMode.REUSE, str(slot), MEASURED_SEED, run_eval == "true")
+    assert warmup.server.port == decision.server.port
+    assert Path(warmup.paths.run_dir).parent == slot / "warmup_round" / "variant_00_v_knob"
+    assert Path(decision.paths.run_dir).parent == slot / "variant_00_v_knob"
+    assert suite.stopped == [slot]
+    (winner,) = result["winners"]
+    assert winner["tput"] == pytest.approx(_HOT["output_throughput"])
+    reuse = winner["launch_evidence"]["warm_reuse"]
+    assert (reuse["reused_ready_server"], reuse["provenance"]) == (True, "caller_ready_server")
+    for config_file in (slot / "warmup_round" / "variant_00_v_knob", slot / "variant_00_v_knob"):
+        bench = yaml.safe_load((config_file / "config.yaml").read_text(encoding="utf-8"))["benchmark"]
+        assert "server_lifecycle" not in bench and "PORT" not in bench["envs"]
+        assert bench["envs"]["RUN_EVAL"] == run_eval
+
+
+def test_each_explore_variant_is_tested_on_a_server_of_its_own_on_its_own_port(monkeypatch, suite, tmp_path):
+    ports = iter(range(23001, 23010))
+    monkeypatch.setattr(held_test, "pick_server_port", lambda: next(ports))
+    state = SharedState.load_or_init(_session(suite))
+    state.baseline_tput = 800.0
+    rows = [
+        {"name": "v_a", "extra_args": "--max-running-requests 64"},
+        {"name": "v_b", "extra_args": "--max-running-requests 32"},
+    ]
+
+    _, calls = _explore(monkeypatch, suite, tmp_path, rows, state)
+
+    slots = [tmp_path / "explore" / "v00_v_a", tmp_path / "explore" / "v01_v_b"]
+    assert [(call.config.lifecycle.mode, call.config.lifecycle.pid_dir, call.config.server.port) for call in calls] == [
+        (LifecycleMode.BOOT, str(slots[0]), 23001),
+        (LifecycleMode.REUSE, str(slots[0]), 23001),
+        (LifecycleMode.BOOT, str(slots[1]), 23002),
+        (LifecycleMode.REUSE, str(slots[1]), 23002),
+    ]
+    assert suite.stopped == slots
+
+
+def test_an_explore_variant_whose_discarded_bench_failed_is_recorded_with_the_steps_class_and_not_measured(
+    monkeypatch, suite, tmp_path
+):
+    state = SharedState.load_or_init(_session(suite))
+    state.baseline_tput = 800.0
+    rounds = _scripted(monkeypatch, LaunchAttempt(outcome=STAGE_FAILED, stage="engine_init"))
+    rows = [{"name": "v_dies", "extra_args": "--max-running-requests 64"}]
+
+    result, calls = _explore(monkeypatch, suite, tmp_path, rows, state, rounds=rounds)
+
+    slot = tmp_path / "explore" / "v00_v_dies"
+    assert [call.config.lifecycle.mode for call in calls] == [LifecycleMode.BOOT]
+    (row,) = result["explore_search_update"]["tested"].values()
+    assert (row["outcome"], row["reason"], row["stage"]) == ("FAILED", "warmup_failed", "warmup")
+    assert row["error_class"] == failed_step_error_class(FailedStep.SERVER_EXITED_BEFORE_READY)
+    assert row["workspace"] == str(slot / "warmup_round" / "variant_00_v_dies" / "suite_run_0")
+    assert suite.stopped == [slot]
+    assert result["status"] == "failed"
+
+
+def test_an_explore_variant_of_an_agentx_point_is_one_round_that_boots_in_its_slot(monkeypatch, suite, tmp_path):
+    document = yaml.safe_load(suite.point.read_text(encoding="utf-8"))
+    launch = {"replace_args": True, "append_args": list(_base("sglang").args)}
+    document["benchmark"]["agentx"] = {"enabled": True, "launch_overrides": launch}
+    document["benchmark"]["envs"]["WEKA_LOADER_OVERRIDE"] = "/traces"
+    suite.point.write_text(yaml.safe_dump(document), encoding="utf-8")
+    rounds = _rounds(monkeypatch, 1)
+    played = []
+
+    def run_round(config, *, cancel=None):  # ScriptedRounds plays no AgentX load: the round's shape is the contract
+        played.append(config)
+        raise ScenarioError("the round is not played")
+
+    monkeypatch.setattr(suite_rounds, "run_round", run_round)
+    state = SharedState.load_or_init(_session(suite))
+    state.baseline_tput = 800.0
+    rows = [{"name": "v_knob", "extra_envs": {"HL_KNOB": "1"}}]
+
+    with pytest.raises(ScenarioError):
+        _explore(monkeypatch, suite, tmp_path, rows, state, rounds=rounds)
+
+    slot = tmp_path / "explore" / "v00_v_knob"
+    (config,) = played
+    assert (config.workload, config.lifecycle.mode, config.lifecycle.pid_dir) == (
+        WorkloadKind.AGENTX,
+        LifecycleMode.BOOT,
+        str(slot),
+    )
+    assert not config.eval.enabled
+    assert suite.stopped == [slot]
 
 
 @pytest.mark.parametrize(
@@ -226,7 +351,8 @@ def test_explore_benches_two_rows_that_launch_one_server_once(monkeypatch, suite
 def test_explore_starts_no_variant_the_budget_cannot_fit(
     monkeypatch, suite, tmp_path, session_minutes, phase_sec, error_class
 ):
-    """A variant expected to take 600s starts neither with about 60s of the session left nor with 10s of the phase."""
+    """A variant whose two rounds are expected to take 600s each starts neither with about 60s of the session left nor
+    with 10s of the phase."""
     state = SharedState.load_or_init(_session(suite))
     state.baseline_tput = 800.0
     state.max_minutes = session_minutes
@@ -251,8 +377,7 @@ def test_explore_succeeds_without_a_launch_when_the_ledger_already_measured_its_
     state = SharedState.load_or_init(_session(suite))
     state.baseline_tput = 800.0
     slower = LaunchAttempt(outcome=READY, metrics={"output_throughput": 700.0, "completed_requests": 64})
-    rounds = ScriptedRounds(scenario=LaunchScenario(attempts=(slower,)), clock=VirtualClock(), launch=_launch())
-    monkeypatch.setattr(suite_rounds, "run_round", rounds.run_round)
+    rounds = _scripted(monkeypatch, LaunchAttempt(outcome=READY, metrics=_COLD), slower)
     rows = [{"name": "v_slow", "extra_args": "--max-running-requests 64"}]
     first, _ = _explore(monkeypatch, suite, tmp_path, rows, state, rounds=rounds)
     assert [row["outcome"] for row in first["explore_search_update"]["tested"].values()] == ["REVERT"]
@@ -260,7 +385,7 @@ def test_explore_succeeds_without_a_launch_when_the_ledger_already_measured_its_
 
     result, calls = _explore(monkeypatch, suite, tmp_path, rows, state, rounds=rounds)
 
-    assert len(calls) == 1, result
+    assert len(calls) == 2, result
     assert [(row["name"], row["reason"]) for row in result["skipped_dup"]] == [("v_slow", ALREADY_MEASURED)]
     assert (result["status"], result["explore_grid_exhausted"]) == ("succeeded", False)
 
@@ -319,6 +444,45 @@ def test_explore_launches_no_variant_that_only_restates_the_recipe_base(
     ledger = {row["name"]: row for row in result["explore_search_update"]["tested"].values()}
     for name in ("restates-recipe-env", "restates-recipe-args"):
         assert (ledger[name]["outcome"], ledger[name]["reason"]) == (TS_SKIPPED_DEDUP, BASELINE_NOOP)
+
+
+def test_an_agentx_variants_server_is_stopped_once_and_before_its_accuracy_round_boots_another(
+    monkeypatch, suite, tmp_path
+):
+    _serve_the_recipe_base(suite, monkeypatch, Workload.AGENTX)
+    launches = []
+    stopped_before_the_round: list[list[Path]] = []
+
+    async def run_grid(*, grid, output_root, launch, **_kw):
+        (variant,) = grid
+        launches.append(launch)
+        workspace = output_root / "variant_00_x" / "suite_run_0"
+        row = VariantResult(variant.name, variant.extra_server_args, dict(variant.extra_envs), status="succeeded")
+        return [replace(row, output_throughput=900.0, workspace=str(workspace))]
+
+    async def accuracy_round(slot, launch, state, *, session):
+        stopped_before_the_round.append(list(suite.stopped))
+        return AccuracyRoundOutcome(slot / "accuracy", "")
+
+    monkeypatch.setattr(explore_module, "run_grid", run_grid)
+    monkeypatch.setattr(explore_module, "accuracy_round_due", lambda state: True)
+    monkeypatch.setattr(explore_module, "run_candidate_accuracy_round", accuracy_round)
+    state = SharedState.load_or_init(_session(suite))
+    state.baseline_tput = 800.0
+    rows = [{"name": "changes-recipe-arg", "extra_args": "--chunked-prefill-size 8192", "extra_envs": {}}]
+
+    result, _ = _explore(monkeypatch, suite, tmp_path, rows, state)
+
+    slot = tmp_path / "explore" / "v00_changes-recipe-arg"
+    (launch,) = launches
+    assert (launch.held.purpose, launch.held.test.slot, launch.server_already_ready) == (
+        RoundPurpose.MEASURE,
+        slot,
+        False,
+    )
+    assert stopped_before_the_round == [[slot]]
+    assert suite.stopped == [slot]
+    assert [winner["name"] for winner in result["winners"]] == ["changes-recipe-arg"]
 
 
 def test_an_explore_grid_of_nothing_but_restatements_of_the_base_fails_as_exhausted(monkeypatch, suite, tmp_path):

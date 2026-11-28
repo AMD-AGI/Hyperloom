@@ -150,7 +150,7 @@ def _isolate(monkeypatch):
     monkeypatch.delenv("HYPERLOOM_PERF_METRIC", raising=False)
     monkeypatch.delenv("HYPERLOOM_PERF_NOISE_PCT", raising=False)
     monkeypatch.setattr(
-        "hyperloom.orchestrator.actions.executors.explore.resolve_lifecycle_params",
+        "hyperloom.orchestrator.actions.executors.serving._server_lifecycle.resolve_lifecycle_params",
         lambda _config_path: {"eligible": False, "framework": "vllm", "port": 30000, "reason": "test"},
     )
 

@@ -127,10 +127,13 @@ class GridRecipe:
 class GridLaunch:
     """How each round of a grid is launched: the server it runs on, and what the round is for.
 
-    Without ``server_lifecycle`` the grid holds each variant's server: a variant whose point warms up
+    Without ``server_lifecycle`` and ``held`` the grid holds each variant's server: a variant whose point warms up
     (:func:`._suite.held_test.warms_up`) is tested on one server, a discarded bench and then the measured one, and any
-    other variant in one round on a server of its own. With it the caller holds the server, and each variant is the one
-    round the other fields describe.
+    other variant in one round on a server of its own. With ``server_lifecycle`` the caller holds the server, and each
+    variant is the one round the other fields describe. With ``held`` the caller holds a test, and the grid's one
+    variant is that round of it: the test says how the round holds the server, which seed its load draws and whether
+    it evaluates, the caller stops the server, and ``server_already_ready`` only tells the row's launch evidence that
+    an earlier round of the test left the server up.
     """
 
     server_lifecycle: dict[str, Any] | None = None
@@ -141,6 +144,12 @@ class GridLaunch:
     # measured round that follows it on the same server.
     warmup_round: bool = False
     evaluation_only: bool = False  # the round only evaluates (its caller sets EVAL_ONLY): a clean exit is its success
+    held: HeldPass | None = None
+
+    @property
+    def caller_holds_server(self) -> bool:
+        """Whether the grid's caller, not the grid, holds and stops the server its rounds run on."""
+        return self.server_lifecycle is not None or self.held is not None
 
 
 @dataclass(frozen=True)
@@ -429,7 +438,7 @@ async def _prepare_variant_rounds(run: _GridRun, at: _VariantSlot) -> _VariantRo
     cfg_path = await _variant_yaml_or_abort(run, at)
     return _VariantRounds(
         cfg_path,
-        run.launch.server_lifecycle is None and warms_up(cfg_path),
+        not run.launch.caller_holds_server and warms_up(cfg_path),
         _resolve_mn_effective_server_args(cfg_path),
         _variant_cap_or_abort(run, at, cfg_path),
     )
@@ -566,12 +575,15 @@ async def _run_multi_node_warmup(run: _GridRun, at: _VariantSlot, rounds: _Varia
 async def _run_measured_round(
     run: _GridRun, at: _VariantSlot, rounds: _VariantRounds, test: HeldTest | None
 ) -> _BenchmarkPass:
-    """Run the variant's measured round: on ``test``'s server when the variant warmed one up, else as its launch says.
+    """Run the variant's measured round: as the round of the test its launch holds, on ``test``'s server when the
+    variant warmed one up, else as its launch says.
 
-    Either way the server the round leaves in the variant's slot is stopped.
+    The server the round leaves in the variant's slot is stopped; the server of a test the launch holds is left to
+    the launch's caller.
     """
     from .._multi_node_env import is_multi_node
 
+    held = run.launch.held or (None if test is None else HeldPass(test, RoundPurpose.MEASURE))
     started_unix = time.time()
     try:
         proc = await _reported_round(
@@ -587,12 +599,19 @@ async def _run_measured_round(
                 warmup=run.launch.warmup_round,
                 boot_only=run.launch.lifecycle_boot_only,
                 checkpoint=run.stop.checkpoint,
-                held=None if test is None else HeldPass(test, RoundPurpose.MEASURE),
+                held=held,
             ),
         )
     finally:
-        round_survivors = tuple(teardown_variant_server(at.path)) if test is None else test.stop()
+        round_survivors = _stop_variant_server(run, at, test)
     return _BenchmarkPass(proc, started_unix, round_survivors)
+
+
+def _stop_variant_server(run: _GridRun, at: _VariantSlot, test: HeldTest | None) -> tuple[int, ...]:
+    """Stop the server the variant's rounds left up, unless its launch's caller holds it; the pids that survived."""
+    if run.launch.held is not None:
+        return ()
+    return tuple(teardown_variant_server(at.path)) if test is None else test.stop()
 
 
 def _abort_on_early_stop(at: _VariantSlot, round_: _BenchmarkPass) -> NoReturn:
@@ -728,7 +747,7 @@ async def run_grid(
     """
     # Admission precedes a variant's config, which is what says whether this host can hold its server for a
     # discarded bench: a default launch of a point not measured once is admitted for that bench too.
-    admits_warmup = launch.server_lifecycle is None and not read_benchmark_point(recipe.base_yaml_path).measured_once
+    admits_warmup = not launch.caller_holds_server and not read_benchmark_point(recipe.base_yaml_path).measured_once
     # This function names the working directory, so it creates it: callers and the per-variant config writer both
     # happen to create it first today, and neither is a contract.
     output_root.mkdir(parents=True, exist_ok=True)

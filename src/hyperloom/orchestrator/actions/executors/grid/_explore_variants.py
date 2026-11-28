@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""The copies of a grid variant an EXPLORE round launches and the rows it records for them."""
+"""The copy of a grid variant an EXPLORE round launches and the rows it records for the variant."""
 
 from __future__ import annotations
 
@@ -38,28 +38,6 @@ def decision_fields(gv: Any) -> dict[str, Any]:
         "reasoning_origin": str(getattr(gv, "reasoning_origin", "") or ""),
         "experience_citations": list(getattr(gv, "experience_citations", []) or []),
     }
-
-
-def variant_with_eval_off(gv: Any) -> Any:
-    """Return a copy of ``gv`` with ``RUN_EVAL`` forced off.
-
-    The variant layer is the last one :func:`run_grid` applies over the
-    accumulated stack, so forcing the key here holds whatever the stack carries.
-    """
-    envs = dict(gv.extra_envs)
-    envs["RUN_EVAL"] = "false"
-    return carry_variant_metadata(
-        gv,
-        GridVariant(
-            name=gv.name,
-            extra_server_args=gv.extra_server_args,
-            extra_envs=envs,
-            note=gv.note,
-            remove_args=to_str_list(getattr(gv, "remove_args", [])),
-            unset_envs=to_str_list(getattr(gv, "unset_envs", [])),
-            args_mode=str(getattr(gv, "args_mode", "append") or "append"),
-        ),
-    )
 
 
 def carry_variant_metadata(src: Any, dst: Any) -> Any:

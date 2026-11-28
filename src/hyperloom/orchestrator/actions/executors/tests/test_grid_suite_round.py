@@ -29,6 +29,7 @@ from hyperloom.orchestrator.state.tests._session_base import freeze_base
 from hyperloom.orchestrator.actions.executors.grid import _grid_base, _grid_runner
 from hyperloom.orchestrator.actions.executors.serving import _server_lifecycle
 from hyperloom.orchestrator.actions.executors._suite import held_test
+from hyperloom.orchestrator.actions.executors._suite.held_test import HeldPass, HeldTest, RoundPurpose
 from hyperloom.orchestrator.actions.executors._suite import rounds as suite_rounds
 from hyperloom.orchestrator.actions.executors._failed_step import failed_step_error_class
 from hyperloom.orchestrator.actions.executors.tests.test_baseline_suite_round import _CAPACITY_SERVER_LOG
@@ -285,6 +286,65 @@ def test_a_callers_reuse_round_reuses_its_server_and_the_last_one_takes_it_down(
     assert (pid_dir in suite.stopped) is stops_caller
 
 
+def test_a_launch_that_holds_a_test_runs_one_round_of_it_and_leaves_the_server_to_its_caller(
+    monkeypatch, suite, tmp_path
+):
+    """The test says which round boots, which seed each draws and that the warmup never evaluates; the grid stops no
+    server, and each row is built as a grid round's is."""
+    rounds = ScriptedRounds(
+        scenario=LaunchScenario(
+            attempts=(
+                LaunchAttempt(outcome=READY, metrics=_COLD),
+                LaunchAttempt(outcome=READY, metrics=_HOT, eval_scores={"exact_match,strict-match": 0.9}),
+            )
+        ),
+        clock=VirtualClock(),
+        launch=_launch(),
+    )
+    monkeypatch.setattr(suite_rounds, "run_round", rounds.run_round)
+    slot = tmp_path / "test_slot"
+    stops_during_the_rounds = []
+
+    def one_round(purpose: RoundPurpose, output_root: Path, **launch):
+        (row,) = asyncio.run(
+            run_grid(
+                grid=[GridVariant("vA", extra_envs={"RUN_EVAL": "true"})],
+                output_root=output_root,
+                recipe=GridRecipe(suite.point),
+                launch=GridLaunch(held=HeldPass(test, purpose), **launch),
+            )
+        )
+        stops_during_the_rounds.extend(suite.stopped)
+        return row
+
+    with HeldTest(slot) as test:
+        warmup_row = one_round(RoundPurpose.WARMUP, slot / "warmup_round")
+        row = one_round(RoundPurpose.MEASURE, slot, server_already_ready=True)
+
+    assert (warmup_row.status, warmup_row.output_throughput) == ("succeeded", pytest.approx(_COLD["output_throughput"]))
+    assert (row.status, row.output_throughput) == ("succeeded", pytest.approx(_HOT["output_throughput"]))
+    assert row.nonfatal_warnings == []
+    warmup, measured = (call.config for call in rounds.calls)
+    assert (warmup.lifecycle.mode, warmup.lifecycle.pid_dir) == (LifecycleMode.BOOT, str(slot))
+    assert (measured.lifecycle.mode, measured.lifecycle.pid_dir) == (LifecycleMode.REUSE, str(slot))
+    assert (warmup.fixed.seed, measured.fixed.seed) == (WARMUP_SEED, MEASURED_SEED)
+    assert (warmup.eval.enabled, measured.eval.enabled) == (False, True)
+    assert warmup.server.port == measured.server.port
+    assert row.workspace == str(slot / "variant_00_vA" / f"{RUN_DIR_PREFIX}0")
+    assert warmup_row.workspace == str(slot / "warmup_round" / "variant_00_vA" / f"{RUN_DIR_PREFIX}0")
+    assert (
+        warmup_row.launch_evidence["warm_reuse"]["provenance"],
+        row.launch_evidence["warm_reuse"]["provenance"],
+    ) == (
+        "fresh_or_unobserved",
+        "caller_ready_server",
+    )
+    bench = yaml.safe_load((slot / "variant_00_vA" / "config.yaml").read_text(encoding="utf-8"))["benchmark"]
+    assert "server_lifecycle" not in bench and "PORT" not in bench["envs"]
+    assert stops_during_the_rounds == []
+    assert suite.stopped == [slot]
+
+
 def test_a_round_stopped_at_a_step_fails_the_variant_under_that_steps_class(monkeypatch, suite, unheld):
     row, _, slot = _play(monkeypatch, suite, LaunchAttempt(outcome=STAGE_FAILED, stage="argv_parse"))
 
@@ -423,12 +483,13 @@ def test_a_multi_node_variant_restarts_the_cluster_and_measures_it_externally_af
 
 
 _CALLER_HELD = GridLaunch(server_lifecycle={"cleanup": True, "pid_dir": "/held", "port": 30001})
+_CALLER_HELD_TEST = GridLaunch(held=HeldPass(HeldTest(Path("/held")), RoundPurpose.MEASURE))
 
 
 @pytest.mark.parametrize(
     ("agentx", "launch", "rounds"),
-    [(False, GridLaunch(), 2), (True, GridLaunch(), 1), (False, _CALLER_HELD, 1)],
-    ids=["inferencex", "agentx", "caller-held"],
+    [(False, GridLaunch(), 2), (True, GridLaunch(), 1), (False, _CALLER_HELD, 1), (False, _CALLER_HELD_TEST, 1)],
+    ids=["inferencex", "agentx", "caller-held", "caller-held-test"],
 )
 def test_a_grid_left_its_servers_admits_a_variant_for_a_warmup_unless_its_point_is_measured_once(
     monkeypatch, suite, agentx, launch, rounds

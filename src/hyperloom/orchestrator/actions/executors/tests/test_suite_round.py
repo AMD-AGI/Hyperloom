@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import json
 from collections.abc import Callable
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -15,7 +16,9 @@ import yaml
 from hyperloom.orchestrator.state.tests._session_base import freeze_base
 from hyperloom.orchestrator.actions.cancel_channel import CancelScope, use_cancel_scope
 from hyperloom.orchestrator.actions.executors.workload import _agentx_checkpoint
+from hyperloom.orchestrator.actions.executors._suite import held_test
 from hyperloom.orchestrator.actions.executors._suite import rounds as suite_rounds
+from hyperloom.orchestrator.actions.executors._suite.held_test import HeldPass, HeldTest, RoundPurpose
 from hyperloom.orchestrator.actions.executors.workload._agentx_checkpoint import (
     CHECKPOINT_ARTIFACT_NAME,
     AgentxCheckpoint,
@@ -366,19 +369,20 @@ def due_checkpoint(monkeypatch: pytest.MonkeyPatch) -> Callable[[float], None]:
     return reads
 
 
+@pytest.mark.parametrize("held", [False, True], ids=["own-server", "held-test"])
 def test_a_round_trailing_its_checkpoint_is_stopped_and_exits_as_an_early_stop(
-    session, tmp_path, monkeypatch, due_checkpoint
+    session, tmp_path, monkeypatch, due_checkpoint, held
 ) -> None:
     monkeypatch.setattr(suite_rounds, "run_round", _rounds().run_round)
     due_checkpoint(90.0)
     point = _write_point(tmp_path / "slot" / "point.yaml")
+    round_ = _grid_round(point, AgentxCheckpoint(100.0, enforce=True))
+    if held:
+        # The one round of a held test of a point measured once, which the AgentX point a checkpoint judges is.
+        monkeypatch.setattr(held_test, "warms_up", lambda config_path: False)
+        round_ = replace(round_, held=HeldPass(HeldTest(point.parent), RoundPurpose.MEASURE))
 
-    ended = run_grid_suite_round(
-        suite_route(session),
-        _grid_round(point, AgentxCheckpoint(100.0, enforce=True)),
-        env_drop=frozenset(),
-        on_poll=lambda: None,
-    )
+    ended = run_grid_suite_round(suite_route(session), round_, env_drop=frozenset(), on_poll=lambda: None)
 
     ruling = read_checkpoint(point.parent)
     assert ended.returncode == AGENTX_EARLY_STOP_RETURNCODE

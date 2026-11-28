@@ -60,14 +60,17 @@ class HeldTestOrderError(RuntimeError):
     """A round was asked of a held test out of the order a test runs its rounds in; the round did not run."""
 
 
+def can_hold(config_path: Path) -> bool:
+    """Whether this host can hold the server of the point at ``config_path`` from one round of a test to the next."""
+    return bool(_server_lifecycle.resolve_lifecycle_params(config_path)["eligible"])
+
+
 def warms_up(config_path: Path) -> bool:
     """Whether a test of the point at ``config_path`` discards a first bench before it measures.
 
-    It does when this host can hold the point's server across two rounds and the point is not measured once.
+    It does when this host can hold the point's server (:func:`can_hold`) and the point is not measured once.
     """
-    if not _server_lifecycle.resolve_lifecycle_params(config_path)["eligible"]:
-        return False
-    return not read_benchmark_point(config_path).measured_once
+    return can_hold(config_path) and not read_benchmark_point(config_path).measured_once
 
 
 class HeldTest:
@@ -184,5 +187,6 @@ __all__ = [
     "HeldTest",
     "HeldTestOrderError",
     "RoundPurpose",
+    "can_hold",
     "warms_up",
 ]

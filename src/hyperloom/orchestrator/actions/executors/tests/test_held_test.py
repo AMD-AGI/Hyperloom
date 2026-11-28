@@ -30,6 +30,7 @@ from hyperloom.orchestrator.actions.executors._suite.held_test import (
     HeldTest,
     HeldTestOrderError,
     RoundPurpose,
+    can_hold,
     warms_up,
 )
 from hyperloom.orchestrator.actions.executors._suite.rounds import (
@@ -341,20 +342,21 @@ def test_a_round_the_host_refuses_passes_through_and_leaves_the_order_where_it_w
 
 
 def test_a_served_unprofiled_fixed_point_on_one_node_warms_up_and_no_other_does(held, monkeypatch):
+    """An AgentX point's server can be held too, for its one round; no other point's can."""
     fixed = held.point()
-    assert warms_up(fixed) is True
+    assert (can_hold(fixed), warms_up(fixed)) == (True, True)
 
-    assert warms_up(held.agentx_point()) is False
+    assert (can_hold(held.agentx_point()), warms_up(held.agentx_point())) == (True, False)
 
     profiled = yaml.safe_load(fixed.read_text(encoding="utf-8"))
     profiled["benchmark"].pop("agentx")
     profiled["benchmark"]["profiler"] = {"torch_profiler": {"enabled": True}}
     fixed.write_text(yaml.safe_dump(profiled), encoding="utf-8")
-    assert warms_up(fixed) is False
+    assert (can_hold(fixed), warms_up(fixed)) == (False, False)
 
     scriptable = held.slot / "scriptable.yaml"
     scriptable.write_text(yaml.safe_dump({"benchmark": {"framework": "xdit"}}), encoding="utf-8")
-    assert warms_up(scriptable) is False
+    assert (can_hold(scriptable), warms_up(scriptable)) == (False, False)
 
     monkeypatch.setattr(_multi_node_env, "is_multi_node", lambda: True)
-    assert warms_up(held.point()) is False
+    assert (can_hold(held.point()), warms_up(held.point())) == (False, False)
