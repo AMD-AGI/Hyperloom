@@ -200,8 +200,10 @@ it.
   two opt-in pre-filters that 1.2.0 added behind `HYPERLOOM_MEASUREMENT_STORE`
   and `HYPERLOOM_EXPLORE_PROJECTION=1` are gone, and with them the recording of
   measured anchors into `HYPERLOOM_INFERASIM_ANCHOR_STORE`, the anchor harvest
-  that booted a server in benchmark mode, and the `inferasim` extra. Their 21
-  `HYPERLOOM_MEASUREMENT_*`, `HYPERLOOM_EXPLORE_PROJECTION*` and
+  that booted a server in benchmark mode, the `inferasim` extra, and the
+  workload template the wheel shipped as
+  `hyperloom/inference_optimizer/assets/inferasim/inferasim_workload.yaml`.
+  Their 21 `HYPERLOOM_MEASUREMENT_*`, `HYPERLOOM_EXPLORE_PROJECTION*` and
   `HYPERLOOM_INFERASIM_*` settings are no longer read. Every variant of a round
   is benchmarked: none is skipped as `measured_revert_before`,
   `projection_decisively_slower` or `projection_outranked`, and a launch that

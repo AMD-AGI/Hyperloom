@@ -328,8 +328,13 @@ A session that had set one of the switches now sees this:
   (`HYPERLOOM_INFERASIM_MODE=benchmark` booted one when the store had no anchor
   for the regime).
 
-The `inferasim` extra is removed: drop it from install commands. The multi-node
-`infera` backend is a different thing and is unchanged.
+Two packaging changes come with it:
+
+* The `inferasim` extra is removed: drop it from install commands.
+* The wheel no longer ships the projection's workload template,
+  `hyperloom/inference_optimizer/assets/inferasim/inferasim_workload.yaml`.
+
+The multi-node `infera` backend is a different thing and is unchanged.
 
 ---
 
