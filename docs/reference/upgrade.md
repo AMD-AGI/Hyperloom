@@ -238,10 +238,14 @@ round, and that search is removed:
 
 ### Recommended: drop `INFERENCE_OPTIMIZER_RESCUE_PATHS` and `INFERENCE_OPTIMIZER_BASELINE_SERVER_READY_SEC`
 
-Both are no longer read and are silently ignored. Neither has had an effect since 1.2.0:
-a round's results are read from its run directory alone, and every round
-already held its server boot to the round's own time limit. The readers that
-went with them could not run either, so the warnings
+Both are no longer read and are silently ignored. Since 1.2.0 the first has
+had no effect, because a round's results are read from its run directory
+alone, and an integer value of the second has had none, because every round
+already held its server boot to the round's own time limit. A value of the
+second that was not an integer raised `ValueError` when the configuration of a
+round that keeps its server across rounds was written, before that round ran;
+it is now ignored like any other. The readers that went with them could not
+run either, so the warnings
 `rescued_from_leaked_path:<path>`, `rescued_copy_into_workspace_failed`,
 `raw_inferencex_result_used` and `benchmark_report_success_false`, and the
 error classes `no_benchmark_workspace` and `benchmark_report_invalid_metric`,

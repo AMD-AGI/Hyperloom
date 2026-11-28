@@ -312,8 +312,10 @@ it.
   `harvested_leaked_artifact:<path>` warning. See
   [Upgrade](reference/upgrade.md).
 - **`INFERENCE_OPTIMIZER_RESCUE_PATHS` and
-  `INFERENCE_OPTIMIZER_BASELINE_SERVER_READY_SEC` are no longer read.** Neither
-  has changed anything since 1.2.0, and the result readers written for the
+  `INFERENCE_OPTIMIZER_BASELINE_SERVER_READY_SEC` are no longer read.** Since
+  1.2.0 the first has changed nothing, and neither has an integer value of the
+  second; a value of the second that was not an integer raised `ValueError`
+  before the round ran and is now ignored. The result readers written for the
   harness 1.2.0 removed go with them. See [Upgrade](reference/upgrade.md).
 
 ## Hyperloom 1.2.0 release
