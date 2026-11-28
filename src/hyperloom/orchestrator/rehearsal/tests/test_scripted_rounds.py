@@ -14,6 +14,7 @@ import pytest
 
 import inference_suite
 from hyperloom.common.bringup import LadderStage
+from hyperloom.orchestrator.actions.executors._accuracy_gate import parse_eval_results, read_eval_probe
 from hyperloom.orchestrator.bringup import observe_bringup
 from hyperloom.orchestrator.rehearsal import (
     DIED_SILENTLY,
@@ -31,9 +32,11 @@ from hyperloom.orchestrator.rehearsal import (
 from inference_suite import RunDirError
 from inference_suite.contracts import (
     Deadlines,
+    EvalProbe,
     FailedStep,
     Lifecycle,
     LifecycleMode,
+    ProbeOutcome,
     ProfileConfig,
     Report,
     RunPaths,
@@ -47,6 +50,7 @@ from inference_suite.tests.test_config_contract import _FIXED, _SHA, _config, _e
 
 _HARD_TIMEOUT = 1800.0
 _METRICS = {"output_throughput": 1234.5, "completed_requests": 640}
+_SCORES = {"exact_match,strict-match": 0.62, "exact_match,flexible-extract": 0.71}
 
 
 def _fixed_config(run_dir: Path, **changes: object) -> SuiteConfig:
@@ -320,10 +324,9 @@ def test_one_round_past_the_end_of_the_scenario_is_an_error_not_a_repeat(tmp_pat
     "changes",
     [
         {"workload": WorkloadKind.AGENTX, "fixed": None, "agentx": _config().agentx},
-        {"eval": _eval()},
         {"profile": ProfileConfig(True, num_prompts=8, delay_iters=2, max_iters=4)},
     ],
-    ids=["agentx", "eval", "profile"],
+    ids=["agentx", "profile"],
 )
 def test_a_round_the_double_does_not_script_is_refused_before_it_plays(tmp_path, changes):
     rounds = _rounds(LaunchAttempt(outcome=READY))
@@ -332,6 +335,119 @@ def test_a_round_the_double_does_not_script_is_refused_before_it_plays(tmp_path,
         rounds.run_round(_fixed_config(tmp_path / "run", **changes))
 
     assert not rounds.calls
+
+
+def test_an_evaluating_round_scores_after_its_load_and_leaves_the_eval_output_its_readers_find(tmp_path):
+    rounds = _rounds(LaunchAttempt(outcome=READY, metrics=_METRICS, eval_scores=_SCORES), launch=_launch())
+
+    result = rounds.run_round(_fixed_config(tmp_path / "run", eval=_eval()))
+
+    layout, report = result.layout, result.report
+    assert report == Report.from_document(json.loads(layout.report.read_text(encoding="utf-8")))
+    assert report.run_status is RunStatus.COMPLETED
+    assert report.fixed is not None and report.fixed.values["output_throughput"] == 1234.5
+    assert (report.codes.client, report.codes.eval) == (0, 0)
+    assert report.eval is not None and report.eval.scores == _SCORES
+    results_file = layout.root / report.eval.results_file
+    assert sorted(layout.eval_dir.rglob("results_*.json")) == [results_file]
+    assert json.loads(results_file.read_text(encoding="utf-8"))["results"][report.eval.task] == _SCORES
+    assert ProbeOutcome.from_document(json.loads(layout.eval_probe.read_text(encoding="utf-8"))) == report.eval.probe
+    read = parse_eval_results(layout.root)
+    assert (read["accuracy"], read["source_file"]) == (0.62, str(results_file))
+    assert read["definition_digest"] == report.eval.definition_digest
+    assert read_eval_probe(layout.root) is None
+
+
+def test_two_scripted_evals_compare_exactly_when_their_settings_match(tmp_path):
+    attempt = LaunchAttempt(outcome=READY, metrics=_METRICS, eval_scores=_SCORES)
+    rounds = _rounds(attempt, attempt, attempt)
+    other_probe = EvalProbe(enabled=True, min_samples=5, length_ratio=0.9)
+
+    digests = [
+        rounds.run_round(_fixed_config(tmp_path / name, eval=settings)).report.eval.definition_digest
+        for name, settings in (("a", _eval()), ("b", _eval()), ("c", _eval(probe=other_probe)))
+    ]
+
+    assert digests[0] == digests[1] != digests[2]
+
+
+def test_a_failed_eval_ends_the_round_eval_failed_and_keeps_the_load_it_measured(tmp_path):
+    attempt = LaunchAttempt(outcome=READY, metrics=_METRICS, eval_scores=_SCORES, eval_failed=True)
+
+    result = _rounds(attempt).run_round(_fixed_config(tmp_path / "run", eval=_eval()))
+
+    report = result.report
+    assert (report.run_status, report.failed_step) == (RunStatus.PARTIAL, FailedStep.EVAL_FAILED)
+    assert report.fixed is not None and report.fixed.values["output_throughput"] == 1234.5
+    assert (report.codes.client, report.codes.eval) == (0, 1)
+    assert report.eval is None and not result.layout.eval_dir.exists()
+    assert parse_eval_results(result.layout.root)["accuracy"] is None
+
+
+def test_an_evaluating_round_whose_attempt_scripts_no_eval_is_refused_before_it_plays(tmp_path):
+    rounds = _rounds(LaunchAttempt(outcome=READY, metrics=_METRICS))
+
+    with pytest.raises(ScenarioError, match="eval"):
+        rounds.run_round(_fixed_config(tmp_path / "run", eval=_eval()))
+
+    assert not rounds.calls and not (tmp_path / "run").exists()
+
+
+def test_a_round_not_asked_to_evaluate_ignores_the_eval_its_attempt_scripts(tmp_path):
+    attempt = LaunchAttempt(outcome=READY, metrics=_METRICS, eval_scores=_SCORES, eval_failed=True)
+
+    result = _rounds(attempt, launch=_launch()).run_round(_fixed_config(tmp_path / "run"))
+
+    assert result.report.run_status is RunStatus.COMPLETED
+    assert result.report.eval is None and result.report.codes.eval is None
+    assert not result.layout.eval_dir.exists()
+    assert result.report.launch_digest == _launch().digest()
+
+
+@pytest.mark.parametrize(
+    ("attempt", "step"),
+    [
+        (LaunchAttempt(outcome=STAGE_FAILED, stage="engine_init"), FailedStep.SERVER_EXITED_BEFORE_READY),
+        (LaunchAttempt(outcome=READY, returncode=2), FailedStep.CLIENT_FAILED),
+        (LaunchAttempt(outcome=HANG, duration_sec=10.0), FailedStep.ROUND_TIMEOUT),
+    ],
+    ids=["boot-wall", "client-failed", "hang"],
+)
+def test_a_round_stopped_before_its_eval_needs_none_scripted_and_runs_none(tmp_path, attempt, step):
+    result = _rounds(attempt).run_round(_fixed_config(tmp_path / "run", eval=_eval()))
+
+    assert result.report.failed_step is step
+    assert result.report.eval is None and result.report.codes.eval is None
+    assert not result.layout.eval_dir.exists()
+
+
+def test_the_session_deadline_cuts_an_evaluating_round_before_its_eval(tmp_path):
+    rounds = _rounds(LaunchAttempt(outcome=READY, duration_sec=600.0, metrics=_METRICS, eval_scores=_SCORES))
+
+    with installed_clock(rounds.clock):
+        deadlines = replace(_deadlines(), deadline_unix=int(rounds.clock.wall()) + 60)
+        result = rounds.run_round(_fixed_config(tmp_path / "run", eval=_eval(), deadlines=deadlines))
+
+    assert result.report.failed_step is FailedStep.DEADLINE_EXHAUSTED
+    assert result.report.eval is None and result.report.codes.eval is None
+    assert not result.layout.eval_dir.exists()
+
+
+@pytest.mark.parametrize(
+    ("attempt", "status", "step", "scores"),
+    [
+        (LaunchAttempt(outcome=READY, eval_scores=_SCORES), RunStatus.COMPLETED, None, _SCORES),
+        (LaunchAttempt(outcome=READY, eval_failed=True), RunStatus.FAILED, FailedStep.EVAL_FAILED, None),
+    ],
+    ids=["scored", "eval-failed"],
+)
+def test_a_round_with_no_load_evaluates_on_the_server_it_booted(tmp_path, attempt, status, step, scores):
+    config = _fixed_config(tmp_path / "run", workload=WorkloadKind.NONE, fixed=None, eval=_eval())
+
+    report = _rounds(attempt).run_round(config).report
+
+    assert (report.run_status, report.failed_step) == (status, step)
+    assert (None if report.eval is None else report.eval.scores) == scores
 
 
 def test_the_virtual_clock_moves_only_when_something_charges_it():

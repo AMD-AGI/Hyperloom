@@ -9,10 +9,11 @@ config's run_dir and answers with the report a real round would write.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import time
 from collections.abc import Mapping
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Callable
 
@@ -32,11 +33,14 @@ from hyperloom.orchestrator.rehearsal.scenario import (
 from hyperloom_common.io import atomic_write_json
 from inference_suite import RoundResult
 from inference_suite.contracts import (
+    EvalDefinition,
+    EvalResult,
     ExitCodes,
     FailedStep,
     FixedMetrics,
     LifecycleMode,
     LogRange,
+    ProbeOutcome,
     ReadyStamp,
     Report,
     RunLayout,
@@ -46,7 +50,8 @@ from inference_suite.contracts import (
     SuiteConfig,
     WorkloadKind,
 )
-from inference_suite.contracts.launch import Launch
+from inference_suite.contracts.base_launch import DIGEST_PREFIX
+from inference_suite.contracts.launch import EvalInvocation, Launch
 from inference_suite.server_log import death_excerpt
 
 __all__ = ["RecordedRound", "ScenarioExhausted", "ScriptedRounds"]
@@ -56,6 +61,15 @@ _FAILED_RETURNCODE = 1
 
 #: How many liveness callbacks an attempt makes, spread across its duration.
 _OUTPUT_TICKS = 4
+
+#: lm-eval names its results file ``results_<time>.json``; a scripted eval's carries no time, so replays match.
+_EVAL_RESULTS_FILE = "results_scripted.json"
+#: What stands in, in a scripted eval's definition, for the task file and the model class a staged eval hashes.
+_UNSTAGED_SHA256 = "0" * 64
+_SCRIPTED_LM_EVAL = "scripted"
+#: The context every scripted server serves its eval in.
+_SERVED_CONTEXT = 32768
+_EVAL_ARGV = ("scripted-eval",)
 
 _UTF8 = "utf-8"
 
@@ -106,7 +120,8 @@ class _Course:
     """What an attempt does to one round before the session deadline and cancel cut it short.
 
     ``ready_sec`` is when the server reported ready, ``None`` when it never did or the round watches none;
-    ``prelaunch`` marks a round refused before it composed a launch.
+    ``prelaunch`` marks a round refused before it composed a launch. ``eval`` is what the eval that follows the load
+    does, its scores or the stop it fails with, and ``None`` for a round that reaches none.
     """
 
     end_sec: float
@@ -116,6 +131,7 @@ class _Course:
     load_measured: bool = False
     codes: ExitCodes = field(default_factory=ExitCodes)
     prelaunch: bool = False
+    eval: Mapping[str, float] | _Stop | None = None
 
 
 def _serves(config: SuiteConfig) -> bool:
@@ -144,6 +160,15 @@ def _client_failed(returncode: int) -> _Stop:
     return _Stop(FailedStep.CLIENT_FAILED, f"the client exited with code {returncode}")
 
 
+def _scripted_eval(attempt: LaunchAttempt) -> Mapping[str, float] | _Stop:
+    """What the attempt's eval does: the scores it writes, or the stop a failed one ends its round with."""
+    if attempt.eval_failed:
+        return _Stop(FailedStep.EVAL_FAILED, f"the eval exited with code {_FAILED_RETURNCODE}")
+    if attempt.eval_scores is None:
+        raise ScenarioError("the round runs an eval, and its attempt scripts neither eval_scores nor eval_failed")
+    return attempt.eval_scores
+
+
 def _ready_course(attempt: LaunchAttempt, config: SuiteConfig) -> _Course:
     returncode = _returncode(attempt)
     loads = config.workload in _MEASURED_LOADS
@@ -154,6 +179,7 @@ def _ready_course(attempt: LaunchAttempt, config: SuiteConfig) -> _Course:
         log=_watched_log(attempt, config),
         load_measured=loads and returncode == 0,
         codes=ExitCodes(client=returncode) if loads else ExitCodes(),
+        eval=_scripted_eval(attempt) if config.eval.enabled and returncode == 0 else None,
     )
 
 
@@ -222,12 +248,12 @@ _COURSES: Mapping[str, Callable[[LaunchAttempt, SuiteConfig], _Course]] = {
 
 
 def _refuse_unscripted(config: SuiteConfig) -> None:
-    """The fixed, scriptable and boot-only rounds are scripted; AgentX, eval and profile rounds are not yet."""
+    """The fixed, scriptable and load-free rounds are scripted, with the eval one asks for; AgentX and profile rounds
+    are not yet."""
     unscripted = [
         name
         for name, asked in (
             ("AgentX load", config.workload is WorkloadKind.AGENTX),
-            ("eval", config.eval.enabled),
             ("profile", config.profile.enabled),
         )
         if asked
@@ -247,6 +273,49 @@ def _load_section(attempt: LaunchAttempt, config: SuiteConfig, layout: RunLayout
     return {WorkloadKind.SCRIPTABLE.value: ScriptableResult(result_file, dict(attempt.metrics))}
 
 
+def _eval_definition(config: SuiteConfig) -> EvalDefinition:
+    """The definition a scripted eval scores under: the config's settings, and stand-ins for what staging fixes."""
+    settings = config.eval
+    return EvalDefinition(
+        task_yaml_sha256=_UNSTAGED_SHA256,
+        lm_eval_version=_SCRIPTED_LM_EVAL,
+        model_class_sha256=_UNSTAGED_SHA256,
+        chat_template_sha256=None,
+        concurrency=settings.concurrency,
+        max_length=_SERVED_CONTEXT,
+        max_tokens_cap=settings.max_tokens_cap,
+        limit=settings.limit,
+        num_fewshot=settings.num_fewshot,
+        golden_applied=False,
+        probe=settings.probe,
+    )
+
+
+def _definition_digest(config: SuiteConfig) -> str:
+    """The identity of the round's eval definition: two scripted scores compare exactly when their settings match."""
+    document = json.dumps(_eval_definition(config).to_document(), sort_keys=True)
+    return DIGEST_PREFIX + hashlib.sha256(document.encode()).hexdigest()
+
+
+def _eval_result(scores: Mapping[str, float], config: SuiteConfig, layout: RunLayout) -> EvalResult:
+    """Write what a scored eval leaves below the run_dir, lm-eval's results file and the probe's counts, and answer
+    with its report section."""
+    task = config.eval.task.value
+    results = layout.eval_dir / _EVAL_RESULTS_FILE
+    atomic_write_json(results, {"results": {task: dict(scores)}})
+    probe = ProbeOutcome(tripped=False, samples_seen=0, length_ratio_observed=None)
+    atomic_write_json(layout.eval_probe, probe.to_document())
+    return EvalResult(
+        task=task,
+        scores=dict(scores),
+        task_version=None,
+        definition=_eval_definition(config),
+        definition_digest=_definition_digest(config),
+        results_file=results.relative_to(layout.root).as_posix(),
+        probe=probe,
+    )
+
+
 @dataclass
 class ScriptedRounds:
     """Stands in for ``inference_suite.run_round``: serves one scenario attempt per round, in order.
@@ -255,7 +324,9 @@ class ScriptedRounds:
     log it keeps, the ready stamp, ``launch.json`` when ``launch`` is given, the attempt's artifacts and
     ``report.json`` last. An attempt's ``duration_sec`` is when its server reported ready, or when it stopped; a hang
     runs until the first of the round's gates trips. The session deadline (``deadlines.deadline_unix``) and
-    ``cancel`` cut any round short, as they do a real one.
+    ``cancel`` cut any round short, as they do a real one. A round asked to evaluate runs its attempt's eval once
+    its load went on, at no cost to the clock: a scored one leaves lm-eval's results file and the probe's counts
+    below the run_dir's eval directory, a failed one ends the round ``eval_failed`` with its load kept.
 
     Attributes:
         scenario: The rounds to play.
@@ -282,8 +353,9 @@ class ScriptedRounds:
         Raises:
             RunDirError: The run_dir already holds something.
             ScenarioExhausted: The scenario has no attempt left.
-            ScenarioError: The round is one this double does not script, its attempt cannot happen in it, or it
-                names a session deadline while this double's clock is not the one ``time.time`` reads.
+            ScenarioError: The round is one this double does not script, its attempt cannot happen in it or scripts
+                no eval for a round that reaches one, or it names a session deadline while this double's clock is
+                not the one ``time.time`` reads.
         """
         _refuse_unscripted(config)
         budget_left = self._budget_left(config.deadlines.deadline_unix)
@@ -339,7 +411,16 @@ class ScriptedRounds:
         _write_artifacts(attempt, layout.root)
         stop = played.cut or _excerpted(course.stop, layout)
         load_measured = course.load_measured and played.cut is None
-        launch = None if course.prelaunch or not _serves(config) else self.launch
+        sections = _load_section(attempt, config, layout) if load_measured else {}
+        codes = course.codes
+        scripted_eval = None if stop is not None else course.eval
+        if isinstance(scripted_eval, _Stop):
+            stop = scripted_eval
+            codes = replace(codes, eval=_FAILED_RETURNCODE)
+        elif scripted_eval is not None:
+            sections["eval"] = _eval_result(scripted_eval, config, layout)
+            codes = replace(codes, eval=0)
+        launch = self._recorded_launch(config, course)
         if launch is not None:
             atomic_write_json(layout.launch, launch.to_document())
         workload = getattr(config, config.workload.value, None)
@@ -348,15 +429,23 @@ class ScriptedRounds:
             workload_kind=config.workload,
             started_unix=round(played.started, 3),
             ended_unix=round(self.clock.wall(), 3),
-            codes=course.codes,
+            codes=codes,
             failed_step=None if stop is None else stop.step,
             failure_detail=None if stop is None else stop.detail,
             base_digest=config.server.base.digest,
             launch_digest=None if launch is None else launch.digest(),
             concurrency=getattr(workload, "concurrency", None),
             server=None if course.prelaunch else _server_facts(config, layout),
-            **(_load_section(attempt, config, layout) if load_measured else {}),  # type: ignore[arg-type]
+            **sections,  # type: ignore[arg-type]
         )
+
+    def _recorded_launch(self, config: SuiteConfig, course: _Course) -> Launch | None:
+        """The launch the round composed, naming the eval it planned as a real round's ``launch.json`` does."""
+        if self.launch is None or course.prelaunch or not _serves(config):
+            return None
+        if not config.eval.enabled:
+            return self.launch
+        return replace(self.launch, eval=EvalInvocation(_EVAL_ARGV, _definition_digest(config)))
 
 
 @dataclass(frozen=True)

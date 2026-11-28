@@ -89,7 +89,7 @@ def suite(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> SimpleNamespace:
 
 
 class _ThroughputOnly(BaselineExecutor):
-    """``ScriptedRounds`` plays no eval, so the rounds run their load alone."""
+    """These attempts script no eval, so the rounds run their load alone."""
 
     runs_accuracy_eval = False
 
